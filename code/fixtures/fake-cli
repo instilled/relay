@@ -1,0 +1,18 @@
+#!/bin/sh
+# A stand-in for an agent CLI, for tests that run without a model.
+# Prints a banner, then answers lines on stdin:
+#   size        -> the terminal size (or "no tty")
+#   sleep N     -> sleeps N seconds, then "slept"
+#   exit [N]    -> exits with N (default 0)
+#   anything    -> "echo: <line>"
+echo "fake-cli ready"
+while IFS= read -r line; do
+  case "$line" in
+    size) stty size 2>/dev/null || echo "no tty" ;;
+    sleep\ *) sleep "${line#sleep }"; echo "slept" ;;
+    exit) echo "bye"; exit 0 ;;
+    exit\ *) echo "bye"; exit "${line#exit }" ;;
+    *) echo "echo: $line" ;;
+  esac
+done
+exit 0
