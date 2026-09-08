@@ -1,0 +1,30 @@
+[workspace]
+resolver = "3"
+members = [
+  "code/rl-cli",
+  "code/rl-daemon",
+  "code/shared-core",
+  "code/shared-proto",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/instilled/relay"
+
+[workspace.dependencies]
+relay-core = { path = "code/shared-core" }
+relay-proto = { path = "code/shared-proto" }
+rl-daemon = { path = "code/rl-daemon" }
+
+anyhow = "1"
+clap = { version = "4.5", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-util = "0.7"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tempfile = "3"

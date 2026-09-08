@@ -1,0 +1,25 @@
+[package]
+name = "rl-daemon"
+description = "Relay daemon: run supervisor, scheduler, event ledger, presence, plugin broker"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "rld"
+path = "src/main.rs"
+
+[dependencies]
+relay-core.workspace = true
+relay-proto.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
