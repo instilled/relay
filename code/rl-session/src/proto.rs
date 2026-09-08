@@ -28,9 +28,11 @@ const T_EXIT: u8 = 0x84;
 pub enum Frame {
     // client → holder
     /// Must be the first frame on a connection. `replay` asks for the ring
-    /// buffer before live output.
+    /// buffer before live output; `from` is the byte offset (in the child's
+    /// total output) to replay from — `0` means everything the ring still has.
     Attach {
         replay: bool,
+        from: u64,
     },
     Input(Vec<u8>),
     Resize {
@@ -65,12 +67,23 @@ pub struct Hello {
     /// Set when the child already exited before this attach.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exit: Option<Exit>,
+    /// Bytes the child has produced so far; live output continues here.
+    #[serde(default)]
+    pub total: u64,
+    /// Offset the replay starts at. A client that asked for an earlier
+    /// `from` lost `replay_from - from` bytes to the ring's capacity.
+    #[serde(default)]
+    pub replay_from: u64,
 }
 
 impl Frame {
     pub fn encode(&self) -> Vec<u8> {
         let (tag, payload): (u8, Vec<u8>) = match self {
-            Frame::Attach { replay } => (T_ATTACH, vec![*replay as u8]),
+            Frame::Attach { replay, from } => {
+                let mut p = vec![*replay as u8];
+                p.extend_from_slice(&from.to_be_bytes());
+                (T_ATTACH, p)
+            }
             Frame::Input(b) => (T_INPUT, b.clone()),
             Frame::Resize { cols, rows } => {
                 let mut p = cols.to_be_bytes().to_vec();
@@ -94,8 +107,13 @@ impl Frame {
     fn decode(tag: u8, p: Vec<u8>) -> io::Result<Frame> {
         let bad = |what: &str| io::Error::new(io::ErrorKind::InvalidData, format!("bad {what} frame"));
         Ok(match tag {
+            // A 1-byte payload is an older client: replay from the start.
             T_ATTACH => Frame::Attach {
                 replay: p.first().copied().unwrap_or(0) != 0,
+                from: p
+                    .get(1..9)
+                    .map(|b| u64::from_be_bytes(b.try_into().unwrap()))
+                    .unwrap_or(0),
             },
             T_INPUT => Frame::Input(p),
             T_RESIZE => {
@@ -160,8 +178,11 @@ mod tests {
     #[tokio::test]
     async fn every_frame_roundtrips() {
         let frames = vec![
-            Frame::Attach { replay: true },
-            Frame::Attach { replay: false },
+            Frame::Attach { replay: true, from: 0 },
+            Frame::Attach {
+                replay: false,
+                from: 12_345_678_901,
+            },
             Frame::Input(b"hello\n".to_vec()),
             Frame::Resize { cols: 220, rows: 51 },
             Frame::Signal(15),
@@ -175,6 +196,8 @@ mod tests {
                 tty: true,
                 started_at: Timestamp::UNIX_EPOCH,
                 exit: None,
+                total: 99,
+                replay_from: 10,
             }),
             Frame::Output(vec![0, 1, 2, 255]),
             Frame::ReplayEnd,

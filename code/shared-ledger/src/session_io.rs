@@ -9,6 +9,9 @@ use rusqlite::{Connection, params};
 pub enum Direction {
     Out,
     In,
+    /// A remark by Relay itself (e.g. "output lost while the daemon was
+    /// down"); never part of the child's byte stream.
+    Note,
 }
 
 impl Direction {
@@ -16,6 +19,14 @@ impl Direction {
         match self {
             Self::Out => "out",
             Self::In => "in",
+            Self::Note => "note",
+        }
+    }
+    fn parse(s: &str) -> Self {
+        match s {
+            "in" => Self::In,
+            "note" => Self::Note,
+            _ => Self::Out,
         }
     }
 }
@@ -50,7 +61,7 @@ pub fn read(conn: &Connection, run: &str, after_seq: i64, limit: u32) -> Result<
         let dir: String = row.get(1)?;
         Ok(IoChunk {
             seq: row.get(0)?,
-            direction: if dir == "in" { Direction::In } else { Direction::Out },
+            direction: Direction::parse(&dir),
             data: row.get(2)?,
             ts: from_millis(row.get(3)?).map_err(|e| crate::conv(3, e))?,
         })
@@ -77,6 +88,16 @@ pub fn tail(conn: &Connection, run: &str, max_bytes: usize) -> Result<Vec<u8>> {
         out.drain(..out.len() - max_bytes);
     }
     Ok(out)
+}
+
+/// Total child output bytes journaled — the offset to resume a replay from.
+pub fn out_bytes(conn: &Connection, run: &str) -> Result<u64> {
+    let n: i64 = conn.query_row(
+        "SELECT COALESCE(SUM(length(data)), 0) FROM session_io WHERE run = ?1 AND direction = 'out'",
+        params![run],
+        |r| r.get(0),
+    )?;
+    Ok(n.max(0) as u64)
 }
 
 pub fn last_seq(conn: &Connection, run: &str) -> Result<i64> {
