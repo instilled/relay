@@ -1,0 +1,61 @@
+#!/bin/sh
+# Dev shim for `rl` and `rld`: build if anything changed, then run the debug
+# binary. `scripts/rl` and `scripts/rld` are symlinks to this file; the name
+# it is called by picks the binary.
+#
+# Install once, from the repo root:
+#   ln -sf "$PWD/scripts/rl" "$PWD/scripts/rld" ~/.local/bin/
+#
+# Knobs:
+#   RELAY_DEV_NOBUILD=1        skip the build check (just run)
+#   RELAY_DEV_PROFILE=release  use target/release instead of target/debug
+#
+# The real binaries find each other as siblings in target/<profile>/, so
+# `rl daemon start` spawns the freshly built `rld`, which spawns the freshly
+# built `rl-session`. A rebuilt `rld` only takes effect after
+# `rl daemon restart`; the shim says so when that is the case.
+set -e
+
+# Resolve symlinks to find the repo this shim belongs to.
+self=$0
+while [ -L "$self" ]; do
+  target=$(readlink "$self")
+  case $target in
+    /*) self=$target ;;
+    *) self=$(dirname "$self")/$target ;;
+  esac
+done
+root=$(cd "$(dirname "$self")/.." && pwd)
+name=$(basename "$0")
+case $name in
+  rl|rld) ;;
+  *) echo "relay-dev: call me as rl or rld (symlink), not $name" >&2; exit 2 ;;
+esac
+
+profile=${RELAY_DEV_PROFILE:-debug}
+bindir="$root/target/$profile"
+bin="$bindir/$name"
+
+if [ -z "$RELAY_DEV_NOBUILD" ]; then
+  stale=1
+  if [ -x "$bin" ] && [ -x "$bindir/rl-session" ]; then
+    newer=$(find "$root/code" "$root/detect" "$root/Cargo.toml" "$root/Cargo.lock" \
+      -type f -newer "$bin" 2>/dev/null | head -n 1)
+    [ -z "$newer" ] && stale=0
+  fi
+  if [ "$stale" = 1 ]; then
+    flag=""
+    [ "$profile" = release ] && flag="--release"
+    echo "[relay dev] building $profile binaries…" >&2
+    (cd "$root" && cargo build -q --workspace --bins $flag)
+  fi
+fi
+
+# A daemon started before the last rld build is running old code.
+home=${RELAY_HOME:-$HOME/.relay}
+if [ "$name" = rl ] && [ "$1" != daemon ] && [ "$1" != hook ] \
+  && [ -f "$home/run/rld.pid" ] && [ "$bindir/rld" -nt "$home/run/rld.pid" ]; then
+  echo "[relay dev] rld was rebuilt after the running daemon started: \`rl daemon restart\` to pick it up" >&2
+fi
+
+exec "$bin" "$@"
