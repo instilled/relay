@@ -247,6 +247,35 @@ async fn close_hangs_up_a_live_child() {
 }
 
 #[tokio::test]
+async fn replay_from_an_offset() {
+    let h = start(false, 60); // pipes: byte-exact output
+    let (hello, mut s) = attach(&h, true).await;
+    assert_eq!((hello.total, hello.replay_from), (0, 0));
+    read_until(&mut s, "fake-cli ready").await;
+    s.input("hi\n").await.unwrap();
+    read_until(&mut s, "echo: hi").await;
+    drop(s);
+
+    // Everything after the banner, and nothing of it.
+    let banner = "fake-cli ready\n".len() as u64;
+    let (hello2, mut s) = Session::attach_from(&h.socket, Some(banner)).await.unwrap();
+    assert_eq!(hello2.replay_from, banner);
+    assert_eq!(hello2.total, banner + "echo: hi\n".len() as u64);
+    let replayed = read_until(&mut s, "echo: hi").await;
+    assert!(!replayed.contains("ready"), "{replayed:?}");
+
+    // Past the end: nothing to replay, and the offset says so.
+    let (hello3, mut w) = Session::attach_from(&h.socket, Some(u64::MAX)).await.unwrap();
+    assert_eq!(hello3.replay_from, hello3.total);
+    s.input("exit\n").await.unwrap();
+    assert_eq!(read_exit(&mut s).await.code, 0);
+    let last = read_exit(&mut w).await;
+    assert_eq!(last.code, 0);
+    s.close().await.unwrap();
+    wait_gone(&h.socket, hello.holder_pid).await;
+}
+
+#[tokio::test]
 async fn refuses_to_start_a_missing_command() {
     let tmp = tempfile::tempdir().unwrap();
     let out = Command::new(env!("CARGO_BIN_EXE_rl-session"))

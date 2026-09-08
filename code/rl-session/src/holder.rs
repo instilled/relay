@@ -61,6 +61,8 @@ impl Shared {
             tty: self.tty,
             started_at: self.started_at,
             exit: self.exit.clone(),
+            total: self.ring.total(),
+            replay_from: self.ring.total(),
         }
     }
 }
@@ -226,16 +228,27 @@ async fn client_loop(ctx: &Ctx, stream: UnixStream) -> std::io::Result<()> {
     let (rd, mut wr) = stream.into_split();
     let mut rd = BufReader::new(rd);
 
-    let replay = match read_frame(&mut rd).await? {
-        Some(Frame::Attach { replay }) => replay,
+    let (replay, from) = match read_frame(&mut rd).await? {
+        Some(Frame::Attach { replay, from }) => (replay, from),
         _ => return Ok(()),
     };
 
     // Subscribe first, then snapshot under the lock: see pump_output.
+    // The replay starts at `from`, or at the oldest byte the ring still has.
     let mut exit_rx = ctx.exit.subscribe();
     let (mut out_rx, snapshot, hello) = {
         let s = ctx.shared.lock().unwrap();
-        (ctx.out.subscribe(), s.ring.snapshot(), s.hello())
+        let total = s.ring.total();
+        let oldest = total - s.ring.len() as u64;
+        let start = from.clamp(oldest, total);
+        let mut hello = s.hello();
+        let snapshot = if replay {
+            hello.replay_from = start;
+            s.ring.snapshot().split_off((start - oldest) as usize)
+        } else {
+            Vec::new()
+        };
+        (ctx.out.subscribe(), snapshot, hello)
     };
     let mut exit_sent = hello.exit.is_some();
     write_frame(&mut wr, &Frame::Hello(hello.clone())).await?;

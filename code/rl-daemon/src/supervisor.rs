@@ -2,7 +2,9 @@
 //! output, and turns its exit into a terminal state and an event.
 //!
 //! `rld` never owns a child directly — every run lives under `rl-session`, so
-//! this module is a client of those holders, nothing more.
+//! this module is a client of those holders, nothing more. That is what makes
+//! [`Supervisor::reconcile`] possible: a new daemon finds the sessions the old
+//! one left in the ledger and picks up where the journal stops.
 
 use crate::ansi;
 use crate::git;
@@ -16,17 +18,19 @@ use relay_ledger::sessions::SessionRow;
 use relay_ledger::{Ledger, events, runs, session_io, sessions};
 use relay_proto::methods::RunSpec;
 use relay_proto::types::{Confidence, Run, RunKind, RunState, Source, event_kind};
-use rl_session::client::{Session, SessionWriter};
+use rl_session::client::{Session, SessionReader, SessionWriter};
 use rl_session::exit::{Exit, read_exit_file};
 use rl_session::proto::{Frame, Hello};
 use serde_json::json;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::broadcast;
+use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
 use tracing::{debug, info, warn};
 
 /// Env var naming the `rl-session` binary; defaults to a sibling of `rld`.
@@ -40,6 +44,10 @@ const JOURNAL_FLUSH: Duration = Duration::from_millis(100);
 const JOURNAL_BATCH_BYTES: usize = 16 * 1024;
 /// Chunks a watcher may fall behind before it is dropped.
 const OUTPUT_BROADCAST: usize = 1024;
+/// How long reconcile waits for one holder to answer.
+const REATTACH_TIMEOUT: Duration = Duration::from_secs(2);
+/// How long shutdown waits for follow tasks to flush.
+const DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// A run whose holder we are attached to right now.
 pub struct Live {
@@ -57,15 +65,32 @@ pub struct Supervisor {
     ledger: Ledger,
     session_bin: PathBuf,
     live: Mutex<HashMap<String, Arc<Live>>>,
+    /// Cancelled when the daemon is going away: follow tasks flush and detach,
+    /// leaving every run exactly as it is.
+    shutdown: CancellationToken,
+    tasks: TaskTracker,
+}
+
+/// What [`Supervisor::reconcile`] found.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Reconciled {
+    /// Holders still alive; we are attached again.
+    pub reattached: usize,
+    /// Runs that ended while no daemon was watching; closed from the sidecar.
+    pub ended: usize,
+    /// Holders gone with no exit recorded; closed as failed.
+    pub lost: usize,
 }
 
 impl Supervisor {
-    pub fn new(home: Home, ledger: Ledger, session_bin: PathBuf) -> Self {
+    pub fn new(home: Home, ledger: Ledger, session_bin: PathBuf, shutdown: CancellationToken) -> Self {
         Self {
             home,
             ledger,
             session_bin,
             live: Mutex::new(HashMap::new()),
+            shutdown,
+            tasks: TaskTracker::new(),
         }
     }
 
@@ -148,19 +173,95 @@ impl Supervisor {
             })
             .await?;
         info!(id = %id, pid = hello.pid, title = %run.title, "run started");
-
-        let (rd, wr) = session.split();
-        let (out_tx, _) = broadcast::channel(OUTPUT_BROADCAST);
-        let live = Arc::new(Live {
-            id: id.clone(),
-            hello,
-            writer: tokio::sync::Mutex::new(wr),
-            output: out_tx,
-            stopping: AtomicBool::new(false),
-        });
-        self.live.lock().unwrap().insert(id.clone(), live.clone());
-        tokio::spawn(self.clone().attached(run.clone(), live, rd, exit_file));
+        self.follow(run.clone(), hello, session, exit_file);
         Ok(run)
+    }
+
+    /// Picks up every session the previous daemon left open: re-attach where
+    /// the holder is alive, resuming the journal from exactly where it stopped;
+    /// otherwise close the run from its exit sidecar, or as lost.
+    pub async fn reconcile(self: &Arc<Self>) -> Result<Reconciled> {
+        let open = self.ledger.call(|c| sessions::list_open(c)).await?;
+        let mut report = Reconciled::default();
+        for row in open {
+            let id = row.run.clone();
+            let run = self
+                .ledger
+                .call({
+                    let id = id.clone();
+                    move |c| runs::get(c, &id)
+                })
+                .await?;
+            let run = match run {
+                Some(r) if !r.state.is_terminal() => r,
+                _ => {
+                    // Already ended (or never recorded): the session row is stale.
+                    let now = Timestamp::now();
+                    self.ledger
+                        .call({
+                            let id = id.clone();
+                            move |c| sessions::set_closed(c, &id, now)
+                        })
+                        .await?;
+                    continue;
+                }
+            };
+            let journaled = self
+                .ledger
+                .call({
+                    let id = id.clone();
+                    move |c| session_io::out_bytes(c, &id)
+                })
+                .await?;
+
+            match tokio::time::timeout(REATTACH_TIMEOUT, Session::attach_from(&row.socket, Some(journaled))).await {
+                Ok(Ok((hello, session))) => {
+                    let gap = hello.replay_from.saturating_sub(journaled);
+                    let now = Timestamp::now();
+                    self.ledger
+                        .call({
+                            let id = id.clone();
+                            move |c| {
+                                if gap > 0 {
+                                    let note =
+                                        format!("[relay] {gap} bytes of output were lost while the daemon was down");
+                                    session_io::append(c, &id, Direction::Note, note.as_bytes(), now)?;
+                                }
+                                sessions::set_attached(c, &id, now)
+                            }
+                        })
+                        .await?;
+                    if gap > 0 {
+                        warn!(id, gap, "output lost while away");
+                    }
+                    info!(
+                        id,
+                        pid = hello.pid,
+                        journaled,
+                        resume_at = hello.replay_from,
+                        "re-attached"
+                    );
+                    self.follow(run, hello, session, row.exit_file.clone());
+                    report.reattached += 1;
+                }
+                other => {
+                    let why = match other {
+                        Ok(Err(e)) => format!("{e:#}"),
+                        _ => "timed out".to_string(),
+                    };
+                    let exit = read_exit_file(&row.exit_file).ok().flatten();
+                    if exit.is_some() {
+                        report.ended += 1;
+                        info!(id, %why, "holder gone; closing from exit sidecar");
+                    } else {
+                        report.lost += 1;
+                        warn!(id, %why, "holder gone and no exit recorded");
+                    }
+                    self.finish(&run, false, None, exit).await;
+                }
+            }
+        }
+        Ok(report)
     }
 
     /// Asks the child to stop. Returns the run as of now; the terminal state
@@ -185,14 +286,22 @@ impl Supervisor {
             .ok_or_else(|| anyhow!("run {id} vanished"))
     }
 
+    /// Waits for follow tasks to flush after `shutdown` was cancelled.
+    pub async fn drain(&self) {
+        self.tasks.close();
+        if tokio::time::timeout(DRAIN_TIMEOUT, self.tasks.wait()).await.is_err() {
+            warn!("some follow tasks did not flush in time");
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn spawn_holder(
         &self,
         id: &str,
-        socket: &PathBuf,
-        exit_file: &PathBuf,
-        log: &PathBuf,
-        cwd: &PathBuf,
+        socket: &Path,
+        exit_file: &Path,
+        log: &Path,
+        cwd: &Path,
         cols: u16,
         rows: u16,
         tty: bool,
@@ -235,15 +344,25 @@ impl Supervisor {
         Ok(())
     }
 
+    /// Registers the run as live and starts following its holder.
+    fn follow(self: &Arc<Self>, run: Run, hello: Hello, session: Session, exit_file: PathBuf) {
+        let (rd, wr) = session.split();
+        let (out_tx, _) = broadcast::channel(OUTPUT_BROADCAST);
+        let live = Arc::new(Live {
+            id: run.id.clone(),
+            hello,
+            writer: tokio::sync::Mutex::new(wr),
+            output: out_tx,
+            stopping: AtomicBool::new(false),
+        });
+        self.live.lock().unwrap().insert(run.id.clone(), live.clone());
+        self.tasks.spawn(self.clone().attached(run, live, rd, exit_file));
+    }
+
     /// Follows one holder until its child exits: journal output, keep the
-    /// fleet row's last line fresh, then close the run.
-    async fn attached(
-        self: Arc<Self>,
-        run: Run,
-        live: Arc<Live>,
-        mut rd: rl_session::client::SessionReader,
-        exit_file: PathBuf,
-    ) {
+    /// fleet row's last line fresh, then close the run. On daemon shutdown it
+    /// flushes and detaches instead — the run is somebody else's now.
+    async fn attached(self: Arc<Self>, run: Run, live: Arc<Live>, mut rd: SessionReader, exit_file: PathBuf) {
         let id = run.id.clone();
         let mut batch: Vec<u8> = Vec::new();
         let mut recent = String::new();
@@ -251,8 +370,9 @@ impl Supervisor {
         let mut flush = tokio::time::interval(JOURNAL_FLUSH);
         flush.tick().await;
 
-        loop {
+        let detached = loop {
             tokio::select! {
+                _ = self.shutdown.cancelled() => break true,
                 frame = rd.recv() => match frame {
                     Ok(Some(Frame::Output(bytes))) => {
                         let _ = live.output.send(Arc::from(bytes.as_slice()));
@@ -261,22 +381,27 @@ impl Supervisor {
                             self.flush(&id, &mut batch, &mut recent).await;
                         }
                     }
-                    Ok(Some(Frame::Exit(e))) => { exit = Some(e); break; }
+                    Ok(Some(Frame::Exit(e))) => { exit = Some(e); break false; }
                     Ok(Some(_)) => {}
-                    Ok(None) => { warn!(id, "holder closed the connection"); break; }
-                    Err(e) => { warn!(id, error = %e, "holder connection failed"); break; }
+                    Ok(None) => { warn!(id, "holder closed the connection"); break false; }
+                    Err(e) => { warn!(id, error = %e, "holder connection failed"); break false; }
                 },
                 _ = flush.tick(), if !batch.is_empty() => {
                     self.flush(&id, &mut batch, &mut recent).await;
                 }
             }
-        }
+        };
         self.flush(&id, &mut batch, &mut recent).await;
+        self.live.lock().unwrap().remove(&id);
+        if detached {
+            info!(id, "detached; run keeps going under its holder");
+            return;
+        }
 
         // No Exit frame: the holder went away. The sidecar may still tell us.
         let exit = exit.or_else(|| read_exit_file(&exit_file).ok().flatten());
-        self.live.lock().unwrap().remove(&id);
-        self.finish(&run, &live, exit).await;
+        let stopping = live.stopping.load(Ordering::SeqCst);
+        self.finish(&run, stopping, Some(&live), exit).await;
     }
 
     async fn flush(&self, id: &str, batch: &mut Vec<u8>, recent: &mut String) {
@@ -308,9 +433,9 @@ impl Supervisor {
         }
     }
 
-    async fn finish(&self, run: &Run, live: &Live, exit: Option<Exit>) {
+    /// Records the end of a run and, if we are still attached, releases the holder.
+    async fn finish(&self, run: &Run, stopping: bool, live: Option<&Live>, exit: Option<Exit>) {
         let now = Timestamp::now();
-        let stopping = live.stopping.load(Ordering::SeqCst);
         let (state, kind, summary, data) = match &exit {
             Some(e) => {
                 let dur = fmt_duration(e.at.duration_since(run.started_at));
@@ -318,7 +443,11 @@ impl Supervisor {
                     Some(s) => s.to_string(),
                     None => format!("exit {}", e.code),
                 };
-                let data = json!({ "exit_code": e.code, "signal": e.signal, "duration_secs": e.at.duration_since(run.started_at).as_secs() });
+                let data = json!({
+                    "exit_code": e.code,
+                    "signal": e.signal,
+                    "duration_secs": e.at.duration_since(run.started_at).as_secs(),
+                });
                 if stopping {
                     (
                         RunState::Stopped,
@@ -367,7 +496,9 @@ impl Supervisor {
         }
         info!(id = %run.id, state = %state, %summary, "run ended");
         // Everything is journaled; the holder can go.
-        if let Err(e) = live.writer.lock().await.close().await {
+        if let Some(live) = live
+            && let Err(e) = live.writer.lock().await.close().await
+        {
             debug!(error = %e, "closing holder");
         }
     }

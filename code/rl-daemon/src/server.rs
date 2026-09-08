@@ -50,7 +50,21 @@ pub async fn serve_with(home: Home, shutdown: CancellationToken, opts: ServeOpti
     let session_bin = opts.session_bin.unwrap_or_else(supervisor::locate_session_bin);
     info!(socket = %sock_path.display(), pid = std::process::id(), session_bin = %session_bin.display(), "rld listening");
 
-    let supervisor = Arc::new(Supervisor::new(home.clone(), ledger.clone(), session_bin));
+    let supervisor = Arc::new(Supervisor::new(
+        home.clone(),
+        ledger.clone(),
+        session_bin,
+        shutdown.child_token(),
+    ));
+    match supervisor.reconcile().await {
+        Ok(r) => info!(
+            reattached = r.reattached,
+            ended = r.ended,
+            lost = r.lost,
+            "sessions reconciled"
+        ),
+        Err(e) => warn!(error = %e, "reconciling sessions"),
+    }
     let daemon = Arc::new(Daemon {
         home: home.clone(),
         ledger,
@@ -76,11 +90,13 @@ pub async fn serve_with(home: Home, shutdown: CancellationToken, opts: ServeOpti
         }
     }
 
-    // Let in-flight replies (notably the shutdown ack) drain.
+    // Let in-flight replies (notably the shutdown ack) drain, and let follow
+    // tasks flush their journals. Runs themselves are left exactly as they are.
     let _ = tokio::time::timeout(Duration::from_secs(2), async {
         while conns.join_next().await.is_some() {}
     })
     .await;
+    daemon.supervisor.drain().await;
 
     let _ = std::fs::remove_file(&sock_path);
     let _ = std::fs::remove_file(home.daemon_pid());

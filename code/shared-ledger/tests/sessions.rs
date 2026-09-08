@@ -99,4 +99,16 @@ fn session_io_sequences_and_tail() {
         l.call_blocking(|c| session_io::tail(c, "aaaaaaaa", 4)).unwrap(),
         b"rld\n"
     );
+
+    // Notes are neither output bytes nor part of the tail.
+    l.call_blocking(move |c| session_io::append(c, "aaaaaaaa", Direction::Note, b"[relay] gap", t))
+        .unwrap();
+    assert_eq!(l.call_blocking(|c| session_io::out_bytes(c, "aaaaaaaa")).unwrap(), 12);
+    assert_eq!(l.call_blocking(|c| session_io::out_bytes(c, "nope")).unwrap(), 0);
+    assert_eq!(
+        l.call_blocking(|c| session_io::tail(c, "aaaaaaaa", 1024)).unwrap(),
+        b"hello world\n"
+    );
+    let notes = l.call_blocking(|c| session_io::read(c, "aaaaaaaa", 3, 10)).unwrap();
+    assert_eq!(notes[0].direction, Direction::Note);
 }
