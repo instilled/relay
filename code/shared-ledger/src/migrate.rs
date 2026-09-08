@@ -5,7 +5,10 @@ use anyhow::{Context, Result};
 use rusqlite::Connection;
 use tracing::info;
 
-const MIGRATIONS: &[(i32, &str, &str)] = &[(1, "0001_init", include_str!("../migrations/0001_init.sql"))];
+const MIGRATIONS: &[(i32, &str, &str)] = &[
+    (1, "0001_init", include_str!("../migrations/0001_init.sql")),
+    (2, "0002_sessions", include_str!("../migrations/0002_sessions.sql")),
+];
 
 pub fn run(conn: &mut Connection) -> Result<()> {
     let current: i32 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
@@ -49,6 +52,6 @@ mod tests {
             .unwrap()
             .collect::<Result<_, _>>()
             .unwrap();
-        assert_eq!(tables, ["events", "presence", "runs"]);
+        assert_eq!(tables, ["events", "presence", "runs", "session_io", "sessions"]);
     }
 }

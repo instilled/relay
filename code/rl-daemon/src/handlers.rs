@@ -42,6 +42,21 @@ pub fn register(r: &mut Router<Daemon>) {
             .map_err(RpcError::internal)?;
         found.ok_or_else(|| RpcError::not_found("run", &id))
     });
+    r.register::<RunStart, _, _>(|d, spec| async move {
+        d.supervisor
+            .start(spec)
+            .await
+            .map_err(|e| RpcError::internal(format!("{e:#}")))
+    });
+    r.register::<RunStop, _, _>(|d, RunStopParams { id, force }| async move {
+        if d.supervisor.live(&id).is_none() {
+            return Err(RpcError::not_found("live run", &id));
+        }
+        d.supervisor
+            .stop(&id, force)
+            .await
+            .map_err(|e| RpcError::internal(format!("{e:#}")))
+    });
 
     r.register::<EventList, _, _>(|d, filter| async move {
         d.ledger
