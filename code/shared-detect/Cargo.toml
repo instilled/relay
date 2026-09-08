@@ -1,0 +1,20 @@
+[package]
+name = "relay-detect"
+description = "Relay run-state detection: CLI registry, PTY heuristics, hook ingestion, the state machine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+relay-core.workspace = true
+relay-proto.workspace = true
+anyhow.workspace = true
+jiff.workspace = true
+regex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_norway.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

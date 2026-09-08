@@ -48,6 +48,14 @@ impl Home {
     pub fn plugins_dir(&self) -> PathBuf {
         self.0.join("plugins")
     }
+    /// User overrides for the detection registry (`<cli>.yaml`).
+    pub fn detect_dir(&self) -> PathBuf {
+        self.0.join("detect")
+    }
+    /// Settings files `rld` writes so CLIs report back (`claude.json`).
+    pub fn hooks_dir(&self) -> PathBuf {
+        self.0.join("hooks")
+    }
     /// Where sockets live. Normally `run/`, but `sockaddr_un` caps paths at
     /// ~104 bytes on macOS (108 on Linux), so a long `RELAY_HOME` gets a short
     /// deterministic directory under the temp dir instead. Both sides derive
@@ -91,6 +99,8 @@ impl Home {
             self.run_dir(),
             self.log_dir(),
             self.plugins_dir(),
+            self.detect_dir(),
+            self.hooks_dir(),
             self.socket_dir(),
         ] {
             std::fs::create_dir_all(&d).with_context(|| format!("creating {}", d.display()))?;

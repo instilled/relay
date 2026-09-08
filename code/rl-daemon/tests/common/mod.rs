@@ -4,6 +4,7 @@
 #![allow(dead_code)]
 
 use relay_core::Home;
+use relay_detect::Registry;
 use relay_ledger::{Ledger, session_io};
 use relay_proto::codec::{read_message, write_message};
 use relay_proto::rpc::{Id, Request, Response};
@@ -12,6 +13,7 @@ use rl_daemon::ServeOptions;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::BufReader;
 use tokio::net::UnixStream;
@@ -100,13 +102,35 @@ pub struct Harness {
 impl Harness {
     /// Starts a daemon on `home`. `None` when `rl-session` is not built.
     pub fn on(home: Home) -> Option<Self> {
+        Self::with_registry(home, None)
+    }
+
+    /// Same, with a detection registry of the test's choosing (short timers).
+    pub fn with_registry(home: Home, registry: Option<Registry>) -> Option<Self> {
         let session_bin = session_bin()?;
         let token = CancellationToken::new();
         let opts = ServeOptions {
             session_bin: Some(session_bin),
+            rl_bin: Some(PathBuf::from("/usr/local/bin/rl")),
+            registry: registry.map(Arc::new),
         };
         let server = tokio::spawn(rl_daemon::serve_with(home.clone(), token.clone(), opts));
         Some(Self { home, token, server })
+    }
+
+    /// The built-in registry with `generic` timers short enough for tests
+    /// (idle after 300ms, stale after 1s), written as a user override so the
+    /// override path is exercised too.
+    pub fn quick_registry(home: &Home) -> Registry {
+        let dir = home.detect_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("generic.yaml"),
+            "timing:\n  idle_after: 300ms\n  stale_after: 1s\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("sh.yaml"), "timing:\n  idle_after: 300ms\n").unwrap();
+        Registry::load(home).unwrap()
     }
 
     /// Graceful stop, as `rl daemon stop` does it: follow tasks flush and

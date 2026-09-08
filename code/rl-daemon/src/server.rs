@@ -7,6 +7,7 @@ use crate::supervisor::{self, Supervisor};
 use anyhow::{Context, Result, bail};
 use jiff::Timestamp;
 use relay_core::Home;
+use relay_detect::Registry;
 use relay_ledger::Ledger;
 use relay_proto::codec::{read_message, write_message};
 use relay_proto::rpc::{Id, Request, Response, RpcError};
@@ -29,10 +30,15 @@ pub struct Daemon {
     pub shutdown: CancellationToken,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct ServeOptions {
     /// Where `rl-session` is; defaults to `$RELAY_SESSION_BIN` or a sibling of `rld`.
     pub session_bin: Option<PathBuf>,
+    /// Where `rl` is, for the hook commands CLIs call back with; defaults to
+    /// `$RELAY_RL_BIN` or a sibling of `rld`.
+    pub rl_bin: Option<PathBuf>,
+    /// Detection registry; defaults to the built-ins merged with `$RELAY_HOME/detect/`.
+    pub registry: Option<Arc<Registry>>,
 }
 
 pub async fn serve(home: Home, shutdown: CancellationToken) -> Result<()> {
@@ -48,12 +54,29 @@ pub async fn serve_with(home: Home, shutdown: CancellationToken, opts: ServeOpti
     let listener = bind(&sock_path)?;
     std::fs::write(home.daemon_pid(), std::process::id().to_string())?;
     let session_bin = opts.session_bin.unwrap_or_else(supervisor::locate_session_bin);
+    let rl_bin = opts.rl_bin.unwrap_or_else(supervisor::locate_rl_bin);
     info!(socket = %sock_path.display(), pid = std::process::id(), session_bin = %session_bin.display(), "rld listening");
+
+    let registry = match opts.registry {
+        Some(r) => r,
+        None => match Registry::load(&home) {
+            Ok(r) => Arc::new(r),
+            Err(e) => {
+                warn!(error = %format!("{e:#}"), "detection overrides ignored; using built-in registry");
+                Arc::new(Registry::builtin())
+            }
+        },
+    };
+    match relay_detect::claude::write_settings(&home, &rl_bin) {
+        Ok(p) => debug!(path = %p.display(), "claude hooks settings ready"),
+        Err(e) => warn!(error = %e, "claude hooks settings not written; claude runs get heuristics only"),
+    }
 
     let supervisor = Arc::new(Supervisor::new(
         home.clone(),
         ledger.clone(),
         session_bin,
+        registry,
         shutdown.child_token(),
     ));
     match supervisor.reconcile().await {

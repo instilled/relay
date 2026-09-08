@@ -1,9 +1,10 @@
 //! Typed method definitions. One struct per method; the name, params and
 //! result live together so client and server cannot drift.
 
-use crate::types::{Event, Run, RunKind, RunState};
+use crate::types::{Event, Mark, Run, RunKind, RunState};
 use jiff::Timestamp;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde_json::Value;
 use std::path::PathBuf;
 
 pub trait Method {
@@ -138,6 +139,47 @@ pub struct RunStopParams {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunId {
     pub id: String,
+}
+
+/// A CLI's own signal about a run, as delivered by `rl hook <event>`. The
+/// payload is the hook's JSON, passed through. Returns the run afterwards;
+/// events that say nothing about state leave it untouched.
+pub struct RunHook;
+impl Method for RunHook {
+    const NAME: &'static str = "run.hook";
+    type Params = RunHookParams;
+    type Result = Run;
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunHookParams {
+    pub id: String,
+    /// Which CLI's vocabulary `event` and `payload` use. Only `claude` today.
+    #[serde(default = "default_dialect")]
+    pub dialect: String,
+    pub event: String,
+    #[serde(default)]
+    pub payload: Value,
+}
+
+fn default_dialect() -> String {
+    "claude".into()
+}
+
+/// A human's word on a run's state, for CLIs with no signals at all.
+pub struct RunMark;
+impl Method for RunMark {
+    const NAME: &'static str = "run.mark";
+    type Params = RunMarkParams;
+    type Result = Run;
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunMarkParams {
+    pub id: String,
+    pub mark: Mark,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 // ---- event.* ----------------------------------------------------------------

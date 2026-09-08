@@ -1,0 +1,18 @@
+# Claude Code. Exact state comes from its hooks: rld passes an extra settings
+# file (--settings) so every run under Relay reports back without touching
+# the project's own .claude/settings.json. The patterns are only the fallback.
+kind: agent
+bins: [claude]
+hooks:
+  dialect: claude
+  args: ["--settings", "{hooks_file}"]
+patterns:
+  needs_input:
+    - '(?i)do you want to'
+    - '(?i)allow .* for this session'
+    - '(?i)esc to cancel'
+    - '(?i)\(esc\)\s*$'
+    - '^\s*❯?\s*\d+\.\s+(Yes|No)\b'
+  idle:
+    - '^\s*[│┃]\s*>\s*$'
+    - '(?i)^\s*\? for shortcuts'

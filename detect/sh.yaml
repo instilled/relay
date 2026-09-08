@@ -1,0 +1,10 @@
+# Interactive shells. `sh -c '…'` and `bash script.sh` are commands, not
+# shells, and are tracked as such (no idle prompt reading, stale after silence).
+kind: shell
+bins: [sh, bash, zsh, fish, dash, ksh]
+interactive_only: true
+patterns:
+  idle:
+    - '[$%#❯➜»]\s*$'
+timing:
+  idle_after: 2s

@@ -1,0 +1,7 @@
+# Cursor's agent CLI. PTY heuristics only.
+kind: agent
+bins: [cursor-agent]
+patterns:
+  needs_input:
+    - '(?i)approve'
+    - '(?i)run this command\?'

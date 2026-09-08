@@ -1,5 +1,7 @@
-//! Just enough terminal-output cleanup to pick a "last meaningful line" for a
-//! fleet row. Not a terminal emulator.
+//! Just enough terminal-output cleanup to read the last few lines of a run.
+//! Not a terminal emulator: a full-screen TUI's bottom line is not always the
+//! last thing it wrote, which is why heuristics built on this stay `likely`
+//! at best.
 
 /// Strips CSI/OSC/other escape sequences and resolves `\r` within a line.
 pub fn strip(bytes: &[u8]) -> String {
@@ -57,6 +59,16 @@ pub fn last_line(text: &str, max: usize) -> Option<String> {
     Some(line.chars().take(max).collect())
 }
 
+/// The last `n` non-blank lines, newest first, trimmed.
+pub fn last_lines(text: &str, n: usize) -> Vec<&str> {
+    text.lines()
+        .rev()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .take(n)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -80,5 +92,6 @@ mod tests {
         assert_eq!(last_line(&t, 80).as_deref(), Some("two"));
         assert_eq!(last_line("", 80), None);
         assert_eq!(last_line("abcdef", 3).as_deref(), Some("abc"));
+        assert_eq!(last_lines("a\n\nb\nc\n", 2), ["c", "b"]);
     }
 }
