@@ -200,6 +200,7 @@ where
 
     let (mut hrd, mut hwr) = holder.split();
     let mut notes_open = true;
+    let mut size = (a.info.cols, a.info.rows);
     let result: io::Result<()> = async {
         loop {
             tokio::select! {
@@ -225,6 +226,7 @@ where
                     }
                     Some(Frame::Resize { cols, rows }) => {
                         if a.joiner && live.is_joiner(&a.client) {
+                            size = (cols, rows);
                             hwr.resize(cols, rows).await?;
                             let id = id.clone();
                             let _ = d.ledger.call(move |c| sessions::set_size(c, &id, cols, rows)).await;
@@ -234,7 +236,17 @@ where
                 },
                 frame = hrd.recv() => match frame {
                     Ok(Some(Frame::Output(b))) => write_frame(wr, &Frame::Output(b)).await?,
-                    Ok(Some(Frame::ReplayEnd)) => write_frame(wr, &Frame::ReplayEnd).await?,
+                    Ok(Some(Frame::ReplayEnd)) => {
+                        write_frame(wr, &Frame::ReplayEnd).await?;
+                        // Replayed bytes were drawn for a screen that is not this
+                        // one: a full-screen app paints at stale cursor positions
+                        // until it repaints. Nudge the pty size so it does now.
+                        if a.info.tty {
+                            let (cols, rows) = size;
+                            hwr.resize(cols.saturating_sub(1).max(1), rows).await?;
+                            hwr.resize(cols, rows).await?;
+                        }
+                    }
                     Ok(Some(Frame::Exit(e))) => {
                         write_frame(wr, &Frame::Exit(e)).await?;
                         return Ok(());
