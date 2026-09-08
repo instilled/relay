@@ -57,6 +57,27 @@ pub enum Confidence {
     Exact,
 }
 
+/// What `rl mark` may say. `done` is "nothing more for me here": the run
+/// goes `idle`, not to a terminal state — the process is still alive and its
+/// exit will be recorded when it comes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Mark {
+    Done,
+    Blocked,
+    Working,
+}
+
+impl Mark {
+    pub fn state(self) -> RunState {
+        match self {
+            Mark::Done => RunState::Idle,
+            Mark::Blocked => RunState::Blocked,
+            Mark::Working => RunState::Working,
+        }
+    }
+}
+
 macro_rules! str_enum {
     ($t:ty { $($v:ident => $s:literal),+ $(,)? }) => {
         impl $t {
@@ -83,6 +104,7 @@ str_enum!(RunState {
 });
 str_enum!(Source { Hook => "hook", Transcript => "transcript", Git => "git", Pty => "pty", Manual => "manual" });
 str_enum!(Confidence { Guess => "guess", Likely => "likely", Exact => "exact" });
+str_enum!(Mark { Done => "done", Blocked => "blocked", Working => "working" });
 
 /// The one noun. Everything `rld` starts and owns.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

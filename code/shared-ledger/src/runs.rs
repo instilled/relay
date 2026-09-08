@@ -83,7 +83,9 @@ pub fn list(conn: &Connection, f: &RunFilter) -> Result<Vec<Run>> {
     Ok(rows.collect::<Result<_, _>>()?)
 }
 
-/// Records a transition. Returns `false` if the run does not exist.
+/// Records a transition. `state_at` only moves when the state itself does,
+/// so a confidence upgrade does not reset "age in state". Returns `false` if
+/// the run does not exist.
 pub fn set_state(
     conn: &Connection,
     id: &str,
@@ -93,7 +95,8 @@ pub fn set_state(
     at: Timestamp,
 ) -> Result<bool> {
     let n = conn.execute(
-        "UPDATE runs SET state = ?2, source = ?3, confidence = ?4, state_at = ?5 WHERE id = ?1",
+        "UPDATE runs SET state_at = CASE WHEN state = ?2 THEN state_at ELSE ?5 END, \
+         state = ?2, source = ?3, confidence = ?4 WHERE id = ?1",
         params![id, state.as_str(), source.as_str(), confidence.as_str(), to_millis(at)],
     )?;
     Ok(n == 1)

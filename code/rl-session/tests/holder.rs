@@ -260,7 +260,7 @@ async fn replay_from_an_offset() {
     let banner = "fake-cli ready\n".len() as u64;
     let (hello2, mut s) = Session::attach_from(&h.socket, Some(banner)).await.unwrap();
     assert_eq!(hello2.replay_from, banner);
-    assert_eq!(hello2.total, banner + "echo: hi\n".len() as u64);
+    assert_eq!(hello2.total, banner + "> echo: hi\n> ".len() as u64);
     let replayed = read_until(&mut s, "echo: hi").await;
     assert!(!replayed.contains("ready"), "{replayed:?}");
 

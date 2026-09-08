@@ -1,0 +1,20 @@
+# The floor every run gets. Named profiles add to these patterns and may
+# override the timing; a file of the same name in $RELAY_HOME/detect/ merges
+# over the built-in one field by field.
+patterns:
+  # A line that looks like a question aimed at a human → needs_input~
+  needs_input:
+    - '\[[yY]/[nN]\]\s*$'
+    - '\([yY]/[nN]\)\s*$'
+    - '(?i)do you want to (proceed|continue|allow|make this edit)'
+    - '(?i)press (enter|any key|return) to continue'
+    - '(?i)^\s*(password|passphrase)( for [^:]+)?:\s*$'
+    - '(?i)\?\s*\(y(es)?/no?\)'
+  # A bare prompt with nothing after it → idle~
+  idle:
+    - '^\s*[│┃]?\s*[>$%#❯➜»]\s*$'
+timing:
+  # Silence before the last lines are read for a prompt (agents and shells).
+  idle_after: 3s
+  # Silence while `working` before the run is called stale (every kind).
+  stale_after: 10m
