@@ -58,7 +58,16 @@ pub async fn attach(home: &Home, o: Opts) -> Result<i32> {
             banner.push_str(&format!(" · joined by {j}"));
         }
     }
-    out.write_all(dim(&banner).as_bytes()).await?;
+    // On a terminal the banner is one ordinary line above the session and
+    // the window title carries the status from then on; nothing of ours is
+    // ever drawn over the run's own screen. Piped, it is all plain lines.
+    let status = format!("relay · {} {}", o.mode, info.run.id);
+    if interactive {
+        out.write_all(format!("\x1b[2m{banner}\x1b[0m\n{}", title(&status)).as_bytes())
+            .await?;
+    } else {
+        out.write_all(dim(&banner).as_bytes()).await?;
+    }
     out.flush().await?;
 
     let _raw = if interactive {
@@ -99,7 +108,11 @@ pub async fn attach(home: &Home, o: Opts) -> Result<i32> {
                     out.flush().await?;
                 }
                 Some(Frame::Note(s)) => {
-                    out.write_all(dim(&format!("[relay] {s}")).as_bytes()).await?;
+                    if interactive {
+                        out.write_all(title(&format!("{status} · {s}")).as_bytes()).await?;
+                    } else {
+                        out.write_all(dim(&format!("[relay] {s}")).as_bytes()).await?;
+                    }
                     out.flush().await?;
                 }
                 Some(Frame::Exit(e)) => {
@@ -108,12 +121,14 @@ pub async fn attach(home: &Home, o: Opts) -> Result<i32> {
                         None => format!("exit {}", e.code),
                     };
                     out.write_all(dim(&format!("[relay] run {} ended ({how})", info.run.id)).as_bytes()).await?;
+                    out.write_all(title("").as_bytes()).await?;
                     out.flush().await?;
                     return Ok(e.code);
                 }
                 Some(_) => {}
                 None => {
                     out.write_all(dim("[relay] connection closed").as_bytes()).await?;
+                    out.write_all(title("").as_bytes()).await?;
                     out.flush().await?;
                     return Ok(0);
                 }
@@ -133,12 +148,14 @@ pub async fn attach(home: &Home, o: Opts) -> Result<i32> {
                                 write_frame(&mut wr, &Frame::Input(bytes[..at].to_vec())).await?;
                             }
                             out.write_all(dim("[relay] detached; the run keeps going").as_bytes()).await?;
+                            out.write_all(title("").as_bytes()).await?;
                             out.flush().await?;
                             return Ok(0);
                         }
                         write_frame(&mut wr, &Frame::Input(bytes)).await?;
                     } else if bytes.iter().any(|&b| b == b'q' || b == CTRL_C || b == DETACH) {
                         out.write_all(dim("[relay] left").as_bytes()).await?;
+                        out.write_all(title("").as_bytes()).await?;
                         out.flush().await?;
                         return Ok(0);
                     }
@@ -163,6 +180,12 @@ pub fn client_name() -> String {
         .unwrap_or_else(|_| "localhost".into());
     let host = host.split('.').next().unwrap_or(&host).to_string();
     format!("{user}@{host}")
+}
+
+/// The terminal's window title: status without touching the screen. Empty
+/// hands the title back to the terminal.
+fn title(s: &str) -> String {
+    format!("\x1b]0;{s}\x07")
 }
 
 /// A line of our own, distinguishable from the run's output. Starts on a

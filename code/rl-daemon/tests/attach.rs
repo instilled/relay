@@ -132,6 +132,9 @@ async fn watchers_and_one_joiner() {
     joiner.until("fake-cli ready").await;
     let frames = watcher.until("fake-cli ready").await;
     let _ = frames;
+    // The post-replay repaint nudge leaves the pty exactly as big as it was.
+    joiner.input("size\n").await;
+    joiner.until("30 100").await;
     joiner.input("hello\n").await;
     let seen_by_joiner = joiner.until("echo: hello").await;
     let _ = seen_by_joiner;
@@ -149,7 +152,7 @@ async fn watchers_and_one_joiner() {
         .filter(|c| c.direction == Direction::In)
         .map(|c| c.data)
         .collect();
-    assert_eq!(ins, [b"hello\n".to_vec()]);
+    assert_eq!(ins, [b"size\n".to_vec(), b"hello\n".to_vec()]);
     assert!(
         ledger
             .call_blocking(|db| presence::get(db, "bob@desk"))
