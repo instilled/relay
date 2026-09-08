@@ -1,0 +1,20 @@
+[package]
+name = "relay-ledger"
+description = "Relay's SQLite ledger: schema, migrations, writers and queries"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+relay-core.workspace = true
+relay-proto.workspace = true
+anyhow.workspace = true
+jiff.workspace = true
+rusqlite.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

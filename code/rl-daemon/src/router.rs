@@ -42,9 +42,7 @@ impl<C: Send + Sync + 'static> Router<C> {
                 // `()` params accept a missing field; everything else must be present.
                 let params: M::Params = match raw {
                     Some(v) => serde_json::from_value(v).map_err(RpcError::invalid_params)?,
-                    None => {
-                        serde_json::from_value(Value::Null).map_err(RpcError::invalid_params)?
-                    }
+                    None => serde_json::from_value(Value::Null).map_err(RpcError::invalid_params)?,
                 };
                 let out = f(ctx, params).await?;
                 serde_json::to_value(out).map_err(RpcError::internal)
@@ -54,12 +52,7 @@ impl<C: Send + Sync + 'static> Router<C> {
         self
     }
 
-    pub async fn dispatch(
-        &self,
-        ctx: Arc<C>,
-        method: &str,
-        params: Option<Value>,
-    ) -> Result<Value, RpcError> {
+    pub async fn dispatch(&self, ctx: Arc<C>, method: &str, params: Option<Value>) -> Result<Value, RpcError> {
         match self.handlers.get(method) {
             Some(h) => h(ctx, params).await,
             None => Err(RpcError::method_not_found(method)),
