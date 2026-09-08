@@ -23,11 +23,13 @@ pub fn parse_since(s: &str, now: Timestamp) -> Result<Timestamp> {
         .with_context(|| format!("`{s}` is not a duration (8h), date (2026-09-08) or RFC 3339 instant"))
 }
 
-fn parse_duration(s: &str) -> Option<SignedDuration> {
-    let mut total = 0i64;
+/// `500ms`, `30m`, `8h`, `2d`, `1h30m`. `None` for anything else.
+pub fn parse_duration(s: &str) -> Option<SignedDuration> {
+    let mut total_ms = 0i64;
     let mut num = 0i64;
     let mut seen_digit = false;
-    for c in s.chars() {
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
         if let Some(d) = c.to_digit(10) {
             num = num.checked_mul(10)?.checked_add(d as i64)?;
             seen_digit = true;
@@ -36,22 +38,26 @@ fn parse_duration(s: &str) -> Option<SignedDuration> {
         if !seen_digit {
             return None;
         }
-        let mult = match c {
-            's' => 1,
-            'm' => 60,
-            'h' => 3600,
-            'd' => 86_400,
-            'w' => 7 * 86_400,
+        let mult_ms = match c {
+            'm' if chars.peek() == Some(&'s') => {
+                chars.next();
+                1
+            }
+            's' => 1_000,
+            'm' => 60_000,
+            'h' => 3_600_000,
+            'd' => 86_400_000,
+            'w' => 7 * 86_400_000,
             _ => return None,
         };
-        total = total.checked_add(num.checked_mul(mult)?)?;
+        total_ms = total_ms.checked_add(num.checked_mul(mult_ms)?)?;
         num = 0;
         seen_digit = false;
     }
-    if seen_digit || total == 0 {
+    if seen_digit || total_ms == 0 {
         return None;
     }
-    Some(SignedDuration::from_secs(total))
+    Some(SignedDuration::from_millis(total_ms))
 }
 
 /// Compact age for tables: `12s`, `4m`, `3h`, `2d`.
@@ -101,6 +107,8 @@ mod tests {
             "2026-09-08T10:30:00Z".parse().unwrap()
         );
         assert_eq!(parse_since("2d", now).unwrap(), "2026-09-06T12:00:00Z".parse().unwrap());
+        assert_eq!(parse_duration("500ms"), Some(SignedDuration::from_millis(500)));
+        assert_eq!(parse_duration("1m500ms"), Some(SignedDuration::from_millis(60_500)));
         assert!(parse_since("m", now).is_err());
         assert!(parse_since("5x", now).is_err());
         assert!(parse_since("garbage", now).is_err());

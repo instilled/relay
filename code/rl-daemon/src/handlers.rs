@@ -58,6 +58,30 @@ pub fn register(r: &mut Router<Daemon>) {
             .map_err(|e| RpcError::internal(format!("{e:#}")))
     });
 
+    r.register::<RunHook, _, _>(|d, p| async move {
+        if p.dialect != relay_detect::claude::DIALECT {
+            return Err(RpcError::invalid_params(format!(
+                "unknown hook dialect `{}`",
+                p.dialect
+            )));
+        }
+        if let Some(sig) = relay_detect::claude::signal(&p.event, &p.payload) {
+            d.supervisor
+                .apply(&p.id, sig)
+                .await
+                .map_err(|e| RpcError::internal(format!("{e:#}")))?;
+        }
+        get_run(&d, &p.id).await
+    });
+    r.register::<RunMark, _, _>(|d, RunMarkParams { id, mark, note }| async move {
+        let detail = note.or_else(|| Some(format!("marked {mark}")));
+        d.supervisor
+            .apply(&id, relay_detect::Signal::manual(mark.state(), detail))
+            .await
+            .map_err(|e| RpcError::internal(format!("{e:#}")))?;
+        get_run(&d, &id).await
+    });
+
     r.register::<EventList, _, _>(|d, filter| async move {
         d.ledger
             .call(move |c| events::list(c, &filter))
@@ -80,4 +104,16 @@ pub fn register(r: &mut Router<Daemon>) {
             last_seen_at: previous,
         })
     });
+}
+
+async fn get_run(d: &Daemon, id: &str) -> Result<relay_proto::types::Run, RpcError> {
+    let found = d
+        .ledger
+        .call({
+            let id = id.to_string();
+            move |c| runs::get(c, &id)
+        })
+        .await
+        .map_err(RpcError::internal)?;
+    found.ok_or_else(|| RpcError::not_found("run", id))
 }

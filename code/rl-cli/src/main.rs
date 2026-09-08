@@ -3,14 +3,19 @@ use clap::{Args, Parser, Subcommand};
 use relay_core::time::{now, parse_since};
 use relay_core::{Home, display_path};
 use relay_proto::methods::{
-    DaemonInfo, EventFilter, EventList, RunFilter, RunList, RunSpec, RunStart, RunStop, RunStopParams,
+    DaemonInfo, EventFilter, EventList, RunFilter, RunHook, RunHookParams, RunList, RunMark, RunMarkParams, RunSpec,
+    RunStart, RunStop, RunStopParams,
 };
-use relay_proto::types::{RunKind, RunState};
+use relay_proto::types::{Mark, RunKind, RunState};
 use rl_cli::client::Client;
 use rl_cli::daemon;
 use rl_cli::render;
 use serde_json::json;
 use std::path::PathBuf;
+use std::time::Duration;
+
+/// How long `rl hook` gives the daemon before letting the CLI carry on.
+const HOOK_TIMEOUT: Duration = Duration::from_millis(1500);
 
 #[derive(Parser)]
 #[command(
@@ -41,6 +46,31 @@ enum Cmd {
     Ls(LsArgs),
     /// List ledger events.
     Events(EventsArgs),
+    /// Say what a run is doing when its CLI cannot: done, blocked or working.
+    Mark(MarkArgs),
+    /// Called by a CLI's hooks (Claude Code) with the hook's JSON on stdin. Never fails the CLI.
+    #[command(hide = true)]
+    Hook(HookArgs),
+}
+
+#[derive(Args)]
+struct MarkArgs {
+    /// Run id.
+    id: String,
+    /// done (nothing more for you here → idle), blocked, or working.
+    mark: Mark,
+    /// Why, shown as the event summary.
+    #[arg(long)]
+    note: Option<String>,
+}
+
+#[derive(Args)]
+struct HookArgs {
+    /// The hook event name, e.g. Notification or Stop.
+    event: String,
+    /// The CLI's hook vocabulary (default: claude).
+    #[arg(long, default_value = "claude")]
+    dialect: String,
 }
 
 #[derive(Subcommand)]
@@ -141,7 +171,54 @@ async fn main() -> Result<()> {
         Cmd::Stop(a) => stop(&home, a, cli.json).await,
         Cmd::Ls(a) => ls(&home, a, cli.json).await,
         Cmd::Events(a) => events(&home, a, cli.json).await,
+        Cmd::Mark(a) => mark(&home, a, cli.json).await,
+        Cmd::Hook(a) => hook(&home, a).await,
     }
+}
+
+async fn mark(home: &Home, a: MarkArgs, json: bool) -> Result<()> {
+    let run = Client::connect(home)
+        .await?
+        .call::<RunMark>(RunMarkParams {
+            id: a.id,
+            mark: a.mark,
+            note: a.note,
+        })
+        .await?;
+    if json {
+        println!("{}", serde_json::to_string(&run)?);
+    } else {
+        println!("{} · {}", run.id, render::state_label(run.state, run.confidence));
+    }
+    Ok(())
+}
+
+/// A hook must never slow down or break the CLI that called it: no run id
+/// means we are not under Relay, and any daemon trouble is swallowed. Nothing
+/// is printed — some CLIs feed hook stdout back to the model.
+async fn hook(home: &Home, a: HookArgs) -> Result<()> {
+    let Some(id) = std::env::var("RELAY_RUN").ok().filter(|s| !s.is_empty()) else {
+        return Ok(());
+    };
+    // The CLI writes the payload and closes the pipe; reading it is quick.
+    let raw = std::io::read_to_string(std::io::stdin()).unwrap_or_default();
+    let payload = serde_json::from_str(&raw).unwrap_or(serde_json::Value::Null);
+    let params = RunHookParams {
+        id,
+        dialect: a.dialect,
+        event: a.event,
+        payload,
+    };
+    let post = async {
+        Client::connect(home).await?.call::<RunHook>(params).await?;
+        anyhow::Ok(())
+    };
+    if let Ok(Err(e)) = tokio::time::timeout(HOOK_TIMEOUT, post).await
+        && std::env::var_os("RELAY_HOOK_DEBUG").is_some()
+    {
+        eprintln!("rl hook: {e:#}");
+    }
+    Ok(())
 }
 
 async fn run(home: &Home, a: RunArgs, json: bool) -> Result<()> {

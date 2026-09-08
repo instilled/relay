@@ -258,12 +258,12 @@ Each job: **situation → want → so that**, then the herdr / old-ax baseline, 
 **Baseline.** herdr: 21 CLIs auto-detected. Old ax: Claude only, via container bootstrap.
 
 **Work to be done.**
-- Detection registry (`detect/*.toml`, user-overridable): binary names, argv patterns, per-CLI signal sources (hooks available? transcript path? prompt regexes for idle/blocked?).
+- Detection registry (`detect/*.yaml`, user-overridable): binary names, argv patterns, per-CLI signal sources (hooks available? transcript path? prompt regexes for idle/blocked?).
 - Generic PTY heuristics as the floor: output-idle timers, prompt-line patterns, "waiting for input" patterns, exit.
 - Exact signals where offered: Claude Code hooks (`Stop`, `Notification`, `PreToolUse`, `SessionEnd`) seeded into the project `.claude/settings.json`, posting to the rld socket; transcript tailing for Claude; Codex equivalents as they exist.
 - `RELAY_REF` / `RELAY_TAGS` exported into every run's environment so sub-runs inherit their group.
 
-**Done when.** Starting `claude`, `codex` and `bash` under Relay shows three runs with correct, differently-sourced states; adding a new CLI is one TOML file.
+**Done when.** Starting `claude`, `codex` and `bash` under Relay shows three runs with correct, differently-sourced states; adding a new CLI is one YAML file.
 
 ### Trusting
 
@@ -277,7 +277,7 @@ Each job: **situation → want → so that**, then the herdr / old-ax baseline, 
 - Every state transition carries `source: hook|transcript|git|pty|manual` and `confidence: exact|likely|guess`.
 - TUI renders guesses distinctly (e.g. dim `idle?`); digest ranks exact signals above guesses.
 - `stale` state when a "working" run has produced nothing for N minutes.
-- Manual override: `rl run mark <id> done|blocked` for CLIs with no signals at all.
+- Manual override: `rl mark <id> done|blocked|working` for CLIs with no signals at all.
 
 **Done when.** A CLI with only PTY heuristics shows `idle?`; Claude with hooks shows `blocked` with the question text; the difference is obvious without reading docs.
 
@@ -406,13 +406,13 @@ crates/
   relay-proto   the JSON-RPC protocol (requests, events, versioning) — the public API
   rl-session     session holder binary (PTY / pipes), attach protocol, ring buffer
   relay-ledger  SQLite schema, migrations, writers, queries
-  relay-detect  CLI registry (TOML), PTY heuristics, hook + transcript ingestion
+  relay-detect  CLI registry (YAML), PTY heuristics, hook + transcript ingestion
 plugins/
   host/         rl-plugin-host (Bun): RPC shim, relay.d.ts, SDK
   ref/          reference plugins: notify-macos, notify-ntfy, summarise, pr-open, notion-sync
 skills/
   relay-plugin/ bundled skill for agents writing plugins
-detect/         *.toml per CLI
+detect/         *.yaml per CLI
 ```
 
 **Ledger schema sketch.**
@@ -490,7 +490,7 @@ Each item states the question, the proposed answer, and what would change our mi
    *Would change it:* if per-item seen state turns out to be noisy in practice, fall back to a 20-minute gap rule.
 
 2. **Cost for CLIs with no transcript?**
-   *Proposed:* show `n/a`, never estimate. Facts are facts (principle 4); duration and command count are shown instead. If a CLI later exposes usage, its `detect/*.toml` declares the source.
+   *Proposed:* show `n/a`, never estimate. Facts are facts (principle 4); duration and command count are shown instead. If a CLI later exposes usage, its `detect/*.yaml` declares the source.
 
 3. **P0 test harness?**
    *Proposed:* a recorded-transcript player, not the old stub agent (a container-era artefact). Fixtures are Claude `stream-json` recordings for hook/transcript ingestion, plus a tiny `fake-cli` script (prints prompts, sleeps, exits) for PTY-heuristic and holder tests. Both run in CI without a model.

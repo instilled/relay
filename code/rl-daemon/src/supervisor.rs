@@ -1,23 +1,29 @@
 //! The run supervisor: spawns a holder per run, attaches to it, journals its
-//! output, and turns its exit into a terminal state and an event.
+//! output, keeps its state honest, and turns its exit into a terminal state
+//! and an event.
 //!
 //! `rld` never owns a child directly — every run lives under `rl-session`, so
 //! this module is a client of those holders, nothing more. That is what makes
 //! [`Supervisor::reconcile`] possible: a new daemon finds the sessions the old
 //! one left in the ledger and picks up where the journal stops.
+//!
+//! State changes all go through [`Supervisor::apply`]: PTY heuristics from the
+//! follow task, hooks via `run.hook`, humans via `run.mark`. The ledger row is
+//! the truth; [`relay_detect::step`] decides against it, on the ledger thread.
 
-use crate::ansi;
 use crate::git;
 use anyhow::{Context, Result, anyhow, bail};
 use jiff::Timestamp;
 use relay_core::time::fmt_duration;
 use relay_core::{Home, id::new_id};
+use relay_detect::pty::Heuristics;
+use relay_detect::{Current, Registry, Signal, Transition, claude, step};
 use relay_ledger::events::NewEvent;
 use relay_ledger::session_io::Direction;
 use relay_ledger::sessions::SessionRow;
 use relay_ledger::{Ledger, events, runs, session_io, sessions};
 use relay_proto::methods::RunSpec;
-use relay_proto::types::{Confidence, Run, RunKind, RunState, Source, event_kind};
+use relay_proto::types::{Confidence, Run, RunState, Source, event_kind};
 use rl_session::client::{Session, SessionReader, SessionWriter};
 use rl_session::exit::{Exit, read_exit_file};
 use rl_session::proto::{Frame, Hello};
@@ -35,6 +41,8 @@ use tracing::{debug, info, warn};
 
 /// Env var naming the `rl-session` binary; defaults to a sibling of `rld`.
 pub const SESSION_BIN_ENV: &str = "RELAY_SESSION_BIN";
+/// Env var naming the `rl` binary hooks call back with; defaults to a sibling of `rld`.
+pub const RL_BIN_ENV: &str = "RELAY_RL_BIN";
 const DEFAULT_COLS: u16 = 120;
 const DEFAULT_ROWS: u16 = 40;
 const TITLE_MAX: usize = 80;
@@ -42,6 +50,8 @@ const LAST_LINE_MAX: usize = 120;
 /// Output is journaled in batches: whichever of these comes first.
 const JOURNAL_FLUSH: Duration = Duration::from_millis(100);
 const JOURNAL_BATCH_BYTES: usize = 16 * 1024;
+/// How often the PTY heuristics get to look at the clock.
+const DETECT_TICK: Duration = Duration::from_millis(250);
 /// Chunks a watcher may fall behind before it is dropped.
 const OUTPUT_BROADCAST: usize = 1024;
 /// How long reconcile waits for one holder to answer.
@@ -58,12 +68,22 @@ pub struct Live {
     pub output: broadcast::Sender<Arc<[u8]>>,
     /// Set by `stop`, so the exit maps to `stopped` rather than `failed`.
     pub stopping: AtomicBool,
+    /// Mirror of the ledger's state, so the follow task can skip signals
+    /// that would change nothing without a round trip.
+    current: Mutex<Current>,
+}
+
+impl Live {
+    pub fn current(&self) -> Current {
+        *self.current.lock().unwrap()
+    }
 }
 
 pub struct Supervisor {
     home: Home,
     ledger: Ledger,
     session_bin: PathBuf,
+    registry: Arc<Registry>,
     live: Mutex<HashMap<String, Arc<Live>>>,
     /// Cancelled when the daemon is going away: follow tasks flush and detach,
     /// leaving every run exactly as it is.
@@ -83,11 +103,18 @@ pub struct Reconciled {
 }
 
 impl Supervisor {
-    pub fn new(home: Home, ledger: Ledger, session_bin: PathBuf, shutdown: CancellationToken) -> Self {
+    pub fn new(
+        home: Home,
+        ledger: Ledger,
+        session_bin: PathBuf,
+        registry: Arc<Registry>,
+        shutdown: CancellationToken,
+    ) -> Self {
         Self {
             home,
             ledger,
             session_bin,
+            registry,
             live: Mutex::new(HashMap::new()),
             shutdown,
             tasks: TaskTracker::new(),
@@ -96,6 +123,10 @@ impl Supervisor {
 
     pub fn live(&self, id: &str) -> Option<Arc<Live>> {
         self.live.lock().unwrap().get(id).cloned()
+    }
+
+    pub fn registry(&self) -> &Registry {
+        &self.registry
     }
 
     /// Spawns the holder, records the run, attaches. Returns once the run is
@@ -111,20 +142,43 @@ impl Supervisor {
         let workspace = place.toplevel.clone().unwrap_or_else(|| cwd.clone());
         let title = spec.title.clone().unwrap_or_else(|| default_title(&spec.argv));
 
-        let mut run = Run::new(&id, spec.kind, title, spec.argv.clone(), cwd.clone(), workspace, now);
+        // What is this? A known CLI gets its kind, its name, and — where it
+        // offers exact signals — the arguments that switch them on.
+        let resolved = self.registry.resolve(spec.kind, &spec.argv);
+        let mut argv = spec.argv.clone();
+        if let Some(hooks) = &resolved.profile.hooks
+            && hooks.dialect == claude::DIALECT
+        {
+            let file = claude::settings_path(&self.home);
+            if file.is_file() {
+                let extra = hooks
+                    .args
+                    .iter()
+                    .map(|a| a.replace("{hooks_file}", &file.to_string_lossy()));
+                argv.splice(1..1, extra);
+            } else {
+                warn!(id, "claude hooks settings missing; heuristics only");
+            }
+        }
+        let mut run = Run::new(&id, resolved.kind, title, argv.clone(), cwd.clone(), workspace, now);
+        run.cli = resolved.cli.clone();
         run.branch = place.branch;
         run.ref_ = spec.ref_.clone();
         run.tags = spec.tags.clone();
-        if spec.kind == RunKind::Agent {
-            run.cli = spec.argv[0].rsplit('/').next().map(String::from);
-        }
 
         let (cols, rows) = (spec.cols.unwrap_or(DEFAULT_COLS), spec.rows.unwrap_or(DEFAULT_ROWS));
         let socket = self.home.session_socket(&id);
         let exit_file = self.home.session_exit_file(&id);
         let log = self.home.session_log(&id);
 
-        let mut env = vec![("RELAY_RUN".to_string(), id.clone())];
+        // Hooks and sub-runs find their way back with these.
+        let mut env = vec![
+            ("RELAY_RUN".to_string(), id.clone()),
+            (
+                relay_core::HOME_ENV.to_string(),
+                self.home.path().to_string_lossy().into_owned(),
+            ),
+        ];
         if let Some(r) = &run.ref_ {
             env.push(("RELAY_REF".into(), r.clone()));
         }
@@ -133,10 +187,8 @@ impl Supervisor {
         }
         env.extend(spec.env.iter().cloned());
 
-        self.spawn_holder(
-            &id, &socket, &exit_file, &log, &cwd, cols, rows, spec.tty, &env, &spec.argv,
-        )
-        .await?;
+        self.spawn_holder(&id, &socket, &exit_file, &log, &cwd, cols, rows, spec.tty, &env, &argv)
+            .await?;
 
         let (hello, session) = Session::attach(&socket, true)
             .await
@@ -160,7 +212,7 @@ impl Supervisor {
             closed_at: None,
         };
         let started = NewEvent::for_run(&run, now, event_kind::RUN_STARTED, format!("started `{}`", run.title))
-            .with_data(json!({ "argv": run.argv, "cwd": run.cwd, "tty": hello.tty, "pid": hello.pid }));
+            .with_data(json!({ "argv": run.argv, "cwd": run.cwd, "tty": hello.tty, "pid": hello.pid, "cli": run.cli }));
         self.ledger
             .call({
                 let run = run.clone();
@@ -172,7 +224,7 @@ impl Supervisor {
                 }
             })
             .await?;
-        info!(id = %id, pid = hello.pid, title = %run.title, "run started");
+        info!(id = %id, pid = hello.pid, kind = %run.kind, cli = run.cli.as_deref().unwrap_or("-"), title = %run.title, "run started");
         self.follow(run.clone(), hello, session, exit_file);
         Ok(run)
     }
@@ -286,6 +338,45 @@ impl Supervisor {
             .ok_or_else(|| anyhow!("run {id} vanished"))
     }
 
+    /// Offers a signal about a run. Decided against the ledger row, on the
+    /// ledger thread, so concurrent sources cannot interleave. Returns what
+    /// changed, if anything.
+    pub async fn apply(&self, id: &str, sig: Signal) -> Result<Option<Transition>> {
+        let now = Timestamp::now();
+        let t = self
+            .ledger
+            .call({
+                let id = id.to_string();
+                move |c| {
+                    let run = runs::get(c, &id)?.ok_or_else(|| anyhow!("run {id} not found"))?;
+                    let Some(t) = step(Current::from(&run), &sig) else {
+                        return Ok(None);
+                    };
+                    runs::set_state(c, &id, t.state, t.source, t.confidence, now)?;
+                    if let Some(kind) = t.event_kind() {
+                        events::append(c, &NewEvent::for_run(&run, now, kind, t.summary()).with_data(t.data()))?;
+                    }
+                    Ok(Some(t))
+                }
+            })
+            .await?;
+        if let Some(t) = &t {
+            if let Some(live) = self.live(id) {
+                *live.current.lock().unwrap() = Current {
+                    state: t.state,
+                    source: t.source,
+                    confidence: t.confidence,
+                };
+            }
+            if t.changed() {
+                info!(id, from = %t.from, state = %t.state, source = %t.source, confidence = %t.confidence, detail = t.detail.as_deref().unwrap_or(""), "state");
+            } else {
+                debug!(id, state = %t.state, source = %t.source, confidence = %t.confidence, "confidence upgraded");
+            }
+        }
+        Ok(t)
+    }
+
     /// Waits for follow tasks to flush after `shutdown` was cancelled.
     pub async fn drain(&self) {
         self.tasks.close();
@@ -354,21 +445,26 @@ impl Supervisor {
             writer: tokio::sync::Mutex::new(wr),
             output: out_tx,
             stopping: AtomicBool::new(false),
+            current: Mutex::new(Current::from(&run)),
         });
         self.live.lock().unwrap().insert(run.id.clone(), live.clone());
         self.tasks.spawn(self.clone().attached(run, live, rd, exit_file));
     }
 
     /// Follows one holder until its child exits: journal output, keep the
-    /// fleet row's last line fresh, then close the run. On daemon shutdown it
-    /// flushes and detaches instead — the run is somebody else's now.
+    /// fleet row's last line fresh, let the heuristics read the stream, then
+    /// close the run. On daemon shutdown it flushes and detaches instead —
+    /// the run is somebody else's now.
     async fn attached(self: Arc<Self>, run: Run, live: Arc<Live>, mut rd: SessionReader, exit_file: PathBuf) {
         let id = run.id.clone();
+        let profile = self.registry.resolve(run.kind, &run.argv).profile;
+        let mut heur = Heuristics::new(profile, run.kind, Timestamp::now());
         let mut batch: Vec<u8> = Vec::new();
-        let mut recent = String::new();
         let mut exit: Option<Exit> = None;
         let mut flush = tokio::time::interval(JOURNAL_FLUSH);
         flush.tick().await;
+        let mut tick = tokio::time::interval(DETECT_TICK);
+        tick.tick().await;
 
         let detached = loop {
             tokio::select! {
@@ -377,8 +473,10 @@ impl Supervisor {
                     Ok(Some(Frame::Output(bytes))) => {
                         let _ = live.output.send(Arc::from(bytes.as_slice()));
                         batch.extend_from_slice(&bytes);
+                        let sig = heur.output(&bytes, Timestamp::now());
+                        self.consider(&live, sig).await;
                         if batch.len() >= JOURNAL_BATCH_BYTES {
-                            self.flush(&id, &mut batch, &mut recent).await;
+                            self.flush(&id, &mut batch, heur.last_line(LAST_LINE_MAX)).await;
                         }
                     }
                     Ok(Some(Frame::Exit(e))) => { exit = Some(e); break false; }
@@ -387,11 +485,16 @@ impl Supervisor {
                     Err(e) => { warn!(id, error = %e, "holder connection failed"); break false; }
                 },
                 _ = flush.tick(), if !batch.is_empty() => {
-                    self.flush(&id, &mut batch, &mut recent).await;
+                    self.flush(&id, &mut batch, heur.last_line(LAST_LINE_MAX)).await;
+                }
+                _ = tick.tick() => {
+                    if let Some(sig) = heur.tick(Timestamp::now()) {
+                        self.consider(&live, sig).await;
+                    }
                 }
             }
         };
-        self.flush(&id, &mut batch, &mut recent).await;
+        self.flush(&id, &mut batch, heur.last_line(LAST_LINE_MAX)).await;
         self.live.lock().unwrap().remove(&id);
         if detached {
             info!(id, "detached; run keeps going under its holder");
@@ -404,18 +507,22 @@ impl Supervisor {
         self.finish(&run, stopping, Some(&live), exit).await;
     }
 
-    async fn flush(&self, id: &str, batch: &mut Vec<u8>, recent: &mut String) {
+    /// A PTY signal from the follow task: skipped cheaply when the mirror
+    /// says it would change nothing.
+    async fn consider(&self, live: &Live, sig: Signal) {
+        if step(live.current(), &sig).is_none() {
+            return;
+        }
+        if let Err(e) = self.apply(&live.id, sig).await {
+            warn!(id = %live.id, error = %format!("{e:#}"), "applying pty signal");
+        }
+    }
+
+    async fn flush(&self, id: &str, batch: &mut Vec<u8>, last: Option<String>) {
         if batch.is_empty() {
             return;
         }
         let data = std::mem::take(batch);
-        recent.push_str(&ansi::strip(&data));
-        if recent.len() > 4096 {
-            let cut = recent.len() - 4096;
-            let cut = recent.char_indices().map(|(i, _)| i).find(|&i| i >= cut).unwrap_or(0);
-            recent.drain(..cut);
-        }
-        let last = ansi::last_line(recent, LAST_LINE_MAX);
         let id = id.to_string();
         let now = Timestamp::now();
         if let Err(e) = self
@@ -516,4 +623,8 @@ fn default_title(argv: &[String]) -> String {
 
 pub fn locate_session_bin() -> PathBuf {
     relay_core::locate_bin("rl-session", SESSION_BIN_ENV)
+}
+
+pub fn locate_rl_bin() -> PathBuf {
+    relay_core::locate_bin("rl", RL_BIN_ENV)
 }
