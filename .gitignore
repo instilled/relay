@@ -1,3 +1,15 @@
+# build
 /target
+
+# git worktrees and per-user Claude settings live under .claude/
+/.claude/worktrees/
+/.claude/settings.local.json
+
+# runtime state, in case RELAY_HOME points into the repo
 *.log
+*.db
+*.db-wal
+*.db-shm
+*.sock
+
 .DS_Store
