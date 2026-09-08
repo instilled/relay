@@ -3,6 +3,7 @@
 //! connections so the `daemon.shutdown` reply gets out.
 
 use crate::router::Router;
+use crate::supervisor::{self, Supervisor};
 use anyhow::{Context, Result, bail};
 use jiff::Timestamp;
 use relay_core::Home;
@@ -10,6 +11,7 @@ use relay_ledger::Ledger;
 use relay_proto::codec::{read_message, write_message};
 use relay_proto::rpc::{Id, Request, Response, RpcError};
 use std::io::ErrorKind;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::BufReader;
@@ -22,23 +24,37 @@ use tracing::{debug, info, warn};
 pub struct Daemon {
     pub home: Home,
     pub ledger: Ledger,
+    pub supervisor: Arc<Supervisor>,
     pub started_at: Timestamp,
     pub shutdown: CancellationToken,
 }
 
-/// Runs until `daemon.shutdown` or `shutdown` is cancelled externally.
-/// Removes the socket and pid file on the way out.
+#[derive(Debug, Clone, Default)]
+pub struct ServeOptions {
+    /// Where `rl-session` is; defaults to `$RELAY_SESSION_BIN` or a sibling of `rld`.
+    pub session_bin: Option<PathBuf>,
+}
+
 pub async fn serve(home: Home, shutdown: CancellationToken) -> Result<()> {
+    serve_with(home, shutdown, ServeOptions::default()).await
+}
+
+/// Runs until `daemon.shutdown` or `shutdown` is cancelled externally.
+/// Removes the socket and pid file on the way out. Sessions are untouched.
+pub async fn serve_with(home: Home, shutdown: CancellationToken, opts: ServeOptions) -> Result<()> {
     home.ensure_dirs()?;
     let ledger = Ledger::open(&home.ledger())?;
     let sock_path = home.daemon_socket();
     let listener = bind(&sock_path)?;
     std::fs::write(home.daemon_pid(), std::process::id().to_string())?;
-    info!(socket = %sock_path.display(), pid = std::process::id(), "rld listening");
+    let session_bin = opts.session_bin.unwrap_or_else(supervisor::locate_session_bin);
+    info!(socket = %sock_path.display(), pid = std::process::id(), session_bin = %session_bin.display(), "rld listening");
 
+    let supervisor = Arc::new(Supervisor::new(home.clone(), ledger.clone(), session_bin));
     let daemon = Arc::new(Daemon {
         home: home.clone(),
         ledger,
+        supervisor,
         started_at: Timestamp::now(),
         shutdown: shutdown.clone(),
     });

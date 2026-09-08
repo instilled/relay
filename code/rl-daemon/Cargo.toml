@@ -14,6 +14,7 @@ path = "src/main.rs"
 relay-core.workspace = true
 relay-ledger.workspace = true
 relay-proto.workspace = true
+rl-session.workspace = true
 anyhow.workspace = true
 jiff.workspace = true
 serde.workspace = true

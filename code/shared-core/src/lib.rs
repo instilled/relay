@@ -74,6 +74,15 @@ impl Home {
     pub fn ledger(&self) -> PathBuf {
         self.0.join("ledger.db")
     }
+    pub fn session_socket(&self, run: &str) -> PathBuf {
+        self.socket_dir().join(format!("session-{run}.sock"))
+    }
+    pub fn session_exit_file(&self, run: &str) -> PathBuf {
+        self.run_dir().join(format!("session-{run}.exit"))
+    }
+    pub fn session_log(&self, run: &str) -> PathBuf {
+        self.log_dir().join(format!("session-{run}.log"))
+    }
 
     /// Creates the directory tree. Idempotent. `run/` is 0700 since it holds sockets.
     pub fn ensure_dirs(&self) -> Result<()> {
@@ -95,6 +104,21 @@ impl Home {
         }
         Ok(())
     }
+}
+
+/// Finds a sibling Relay binary: `$<env_var>`, else next to this executable,
+/// else bare `name` for `PATH` lookup.
+pub fn locate_bin(name: &str, env_var: &str) -> PathBuf {
+    if let Some(p) = std::env::var_os(env_var) {
+        return PathBuf::from(p);
+    }
+    if let Ok(me) = std::env::current_exe() {
+        let sibling = me.with_file_name(name);
+        if sibling.is_file() {
+            return sibling;
+        }
+    }
+    PathBuf::from(name)
 }
 
 /// Renders a path with `$HOME` collapsed to `~`, for humans.

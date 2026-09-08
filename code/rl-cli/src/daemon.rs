@@ -87,14 +87,5 @@ pub async fn restart(home: &Home) -> Result<DaemonInfo> {
 
 /// `$RELAY_RLD_BIN`, else `rld` next to this executable, else `rld` on PATH.
 fn locate_rld() -> Result<PathBuf> {
-    if let Some(p) = std::env::var_os(RLD_BIN_ENV) {
-        return Ok(PathBuf::from(p));
-    }
-    if let Ok(me) = std::env::current_exe() {
-        let sibling = me.with_file_name("rld");
-        if sibling.is_file() {
-            return Ok(sibling);
-        }
-    }
-    Ok(PathBuf::from("rld"))
+    Ok(relay_core::locate_bin("rld", RLD_BIN_ENV))
 }

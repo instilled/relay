@@ -12,7 +12,7 @@ It is a mashup: herdr's persistence and any-CLI ergonomics, old ax's daemon, jou
 
 ## 0. Name
 
-**Relay**, command **`rl`**, daemon **`rld`**. You hand the baton off, the machine runs the leg, it hands back with the result — both directions, which is the point. `rl` keeps the two-letter command that made `ax` pleasant; directories use the full word (`.relay/`, `~/.relay/`), binaries the short one (`rl`, `rld`, `rl-holder`, `rl-plugin-host`), crates and env vars the full one (`relay-proto`, `RELAY_REF`).
+**Relay**, command **`rl`**, daemon **`rld`**. You hand the baton off, the machine runs the leg, it hands back with the result — both directions, which is the point. `rl` keeps the two-letter command that made `ax` pleasant; directories use the full word (`.relay/`, `~/.relay/`), binaries the short one (`rl`, `rld`, `rl-session`, `rl-plugin-host`), crates and env vars the full one (`relay-proto`, `RELAY_REF`).
 
 Collisions accepted: Facebook's Relay (GraphQL) owns `relay` on npm and most search results, so the repo is `relay-dev` (or similar) and crates are `relay-*`; a small `rl` ("randomize lines") utility exists in Debian/Homebrew; "RL" reads as reinforcement learning for a beat. `rl` is not a typo-neighbour of `rm` (`l` and `m` are on different rows and fingers) and Relay never deletes files, so the worst case in either direction is a usage error.
 
@@ -24,7 +24,7 @@ Collisions accepted: Facebook's Relay (GraphQL) owns `relay` on npm and most sea
   plugins/           user plugins
   schedules.yaml     user schedules
   ledger.db          SQLite ledger (runs, events, sessions, …)
-  run/               rld.sock, holder sockets, pids
+  run/               rld.sock, session sockets, pids, exit sidecars
   log/               rld and plugin-host logs
 ```
 
@@ -121,7 +121,7 @@ Each job: **situation → want → so that**, then the herdr / old-ax baseline, 
 **Baseline.** herdr: holds PTYs in-process, checkpoints to survive restarts. Old ax: `axd` owned PTYs; a restart killed sessions.
 
 **Work to be done.**
-- `rl-holder`: a tiny detached process (double-fork, `setsid`) that holds the PTY master for one session and exposes a two-message socket protocol (`attach`, `resize`) plus an output ring buffer. `rld` is a client that attaches on start and re-attaches on restart.
+- `rl-session`: a tiny detached process (double-fork, `setsid`) that holds the PTY master for one session and exposes a two-message socket protocol (`attach`, `resize`) plus an output ring buffer. `rld` is a client that attaches on start and re-attaches on restart.
 - Scrollback replay on attach from journaled `session_io`.
 - `rl daemon restart` / upgrade never touches holder sockets.
 - Command runs (non-PTY) use the same holder with pipes, so a scheduled `cargo test` survives too.
@@ -404,7 +404,7 @@ crates/
   rld           daemon: run supervisor, scheduler, event ledger, presence, detection,
                 plugin broker, digest and facts queries
   relay-proto   the JSON-RPC protocol (requests, events, versioning) — the public API
-  rl-holder     session holder binary (PTY / pipes), attach protocol, ring buffer
+  rl-session     session holder binary (PTY / pipes), attach protocol, ring buffer
   relay-ledger  SQLite schema, migrations, writers, queries
   relay-detect  CLI registry (TOML), PTY heuristics, hook + transcript ingestion
 plugins/
@@ -502,7 +502,7 @@ Each item states the question, the proposed answer, and what would change our mi
    *Proposed:* no. Same flow as plugins: `rl up` shows the schedules the repo declares, you approve, Relay records the file's hash; a changed file requires re-approval. Nothing declared by a repo ever fires on its own.
 
 6. **Holder binary name and entry points?**
-   *Proposed:* `rl-holder`, internal only, spawned by `rld`; users never call it. `rl run` is the single entry point for every kind of run; there is no `rl wrap` (see J2).
+   *Proposed:* `rl-session`, internal only, spawned by `rld`; users never call it. `rl run` is the single entry point for every kind of run; there is no `rl wrap` (see J2).
 
 7. **`ref` schemes: registered or conventional?**
    *Proposed:* conventional. A plugin *may* declare `refs: ["notion:"]` in its manifest so the TUI can offer it as the detail tab for matching groups, but Relay never validates a scheme.

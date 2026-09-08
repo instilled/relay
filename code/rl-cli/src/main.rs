@@ -1,13 +1,16 @@
-use anyhow::Result;
+use anyhow::{Result, bail};
 use clap::{Args, Parser, Subcommand};
 use relay_core::time::{now, parse_since};
 use relay_core::{Home, display_path};
-use relay_proto::methods::{DaemonInfo, EventFilter, EventList, RunFilter, RunList};
-use relay_proto::types::RunState;
+use relay_proto::methods::{
+    DaemonInfo, EventFilter, EventList, RunFilter, RunList, RunSpec, RunStart, RunStop, RunStopParams,
+};
+use relay_proto::types::{RunKind, RunState};
 use rl_cli::client::Client;
 use rl_cli::daemon;
 use rl_cli::render;
 use serde_json::json;
+use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(
@@ -30,6 +33,10 @@ enum Cmd {
         #[command(subcommand)]
         cmd: DaemonCmd,
     },
+    /// Start a run: a command, or an agent CLI with --agent. Returns immediately with the run id.
+    Run(RunArgs),
+    /// Stop a run (SIGTERM; --force for SIGKILL).
+    Stop(StopArgs),
     /// List runs (active by default).
     Ls(LsArgs),
     /// List ledger events.
@@ -46,6 +53,44 @@ enum DaemonCmd {
     Status,
     /// Stop then start. Running sessions are untouched.
     Restart,
+}
+
+#[derive(Args)]
+#[command(override_usage = "rl run [OPTIONS] -- <COMMAND>...\n       rl run --agent <CLI> [OPTIONS] [PROMPT]...")]
+struct RunArgs {
+    /// Run an agent CLI (claude, codex, …) instead of a plain command; the rest is its prompt/args.
+    #[arg(long, value_name = "CLI")]
+    agent: Option<String>,
+    /// Title shown in lists (default: the command line).
+    #[arg(long)]
+    title: Option<String>,
+    /// What this run is part of, e.g. notion:FL-123 or gh:42 (default: $RELAY_REF).
+    #[arg(long, value_name = "ID")]
+    r#ref: Option<String>,
+    /// Label for filtering; key:value allowed (repeatable; default: $RELAY_TAGS).
+    #[arg(long = "tag", value_name = "TAG")]
+    tags: Vec<String>,
+    /// Working directory (default: current).
+    #[arg(long, value_name = "DIR")]
+    cwd: Option<PathBuf>,
+    /// Pipes instead of a pty, for headless runs.
+    #[arg(long)]
+    no_tty: bool,
+    /// Extra environment for the run, KEY=VALUE (repeatable).
+    #[arg(long = "env", value_name = "KEY=VALUE")]
+    env: Vec<String>,
+    /// The command (or, with --agent, the prompt and arguments).
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+    args: Vec<String>,
+}
+
+#[derive(Args)]
+struct StopArgs {
+    /// Run id.
+    id: String,
+    /// SIGKILL instead of SIGTERM.
+    #[arg(long)]
+    force: bool,
 }
 
 #[derive(Args)]
@@ -92,9 +137,122 @@ async fn main() -> Result<()> {
     let home = Home::resolve()?;
     match cli.cmd {
         Cmd::Daemon { cmd } => run_daemon(&home, cmd, cli.json).await,
+        Cmd::Run(a) => run(&home, a, cli.json).await,
+        Cmd::Stop(a) => stop(&home, a, cli.json).await,
         Cmd::Ls(a) => ls(&home, a, cli.json).await,
         Cmd::Events(a) => events(&home, a, cli.json).await,
     }
+}
+
+async fn run(home: &Home, a: RunArgs, json: bool) -> Result<()> {
+    let (kind, argv) = match a.agent {
+        Some(cli) => {
+            let mut argv = vec![cli];
+            argv.extend(a.args);
+            (RunKind::Agent, argv)
+        }
+        None => {
+            if a.args.is_empty() {
+                bail!("nothing to run: `rl run -- <command>` or `rl run --agent <cli> [prompt]`");
+            }
+            (RunKind::Command, a.args)
+        }
+    };
+    let env = a
+        .env
+        .iter()
+        .map(|kv| kv.split_once('=').map(|(k, v)| (k.to_string(), v.to_string())))
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(|| anyhow::anyhow!("--env expects KEY=VALUE"))?;
+    // Sub-runs started by agents or plugins inherit their group from the environment.
+    let ref_ = a
+        .r#ref
+        .or_else(|| std::env::var("RELAY_REF").ok().filter(|s| !s.is_empty()));
+    let tags = if a.tags.is_empty() {
+        std::env::var("RELAY_TAGS")
+            .ok()
+            .map(|s| s.split(',').filter(|t| !t.is_empty()).map(String::from).collect())
+            .unwrap_or_default()
+    } else {
+        a.tags
+    };
+    let cwd = match a.cwd {
+        Some(d) => d,
+        None => std::env::current_dir()?,
+    };
+    let (cols, rows) = terminal_size();
+    let spec = RunSpec {
+        argv,
+        kind,
+        cwd,
+        title: a.title,
+        ref_,
+        tags,
+        tty: !a.no_tty,
+        cols,
+        rows,
+        env,
+    };
+    let run = Client::connect(home).await?.call::<RunStart>(spec).await?;
+    if json {
+        println!("{}", serde_json::to_string(&run)?);
+    } else {
+        println!("{}", run.id);
+    }
+    Ok(())
+}
+
+async fn stop(home: &Home, a: StopArgs, json: bool) -> Result<()> {
+    let run = Client::connect(home)
+        .await?
+        .call::<RunStop>(RunStopParams {
+            id: a.id,
+            force: a.force,
+        })
+        .await?;
+    if json {
+        println!("{}", serde_json::to_string(&run)?);
+    } else {
+        println!(
+            "{} · stop requested ({})",
+            run.id,
+            if a.force { "SIGKILL" } else { "SIGTERM" }
+        );
+    }
+    Ok(())
+}
+
+/// The caller's terminal size, so a pty run starts at a sensible width.
+fn terminal_size() -> (Option<u16>, Option<u16>) {
+    let mut ws: libc_winsize = libc_winsize {
+        ws_row: 0,
+        ws_col: 0,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    // TIOCGWINSZ on stdout; fall back to nothing when not a tty.
+    let ok = unsafe { ioctl(1, TIOCGWINSZ, &mut ws) } == 0;
+    if ok && ws.ws_col > 0 && ws.ws_row > 0 {
+        (Some(ws.ws_col), Some(ws.ws_row))
+    } else {
+        (None, None)
+    }
+}
+
+#[repr(C)]
+#[allow(non_camel_case_types)]
+struct libc_winsize {
+    ws_row: u16,
+    ws_col: u16,
+    ws_xpixel: u16,
+    ws_ypixel: u16,
+}
+#[cfg(target_os = "macos")]
+const TIOCGWINSZ: u64 = 0x40087468;
+#[cfg(target_os = "linux")]
+const TIOCGWINSZ: u64 = 0x5413;
+unsafe extern "C" {
+    fn ioctl(fd: i32, request: u64, ...) -> i32;
 }
 
 async fn ls(home: &Home, a: LsArgs, json: bool) -> Result<()> {
