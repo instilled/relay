@@ -20,6 +20,13 @@ impl Session {
     /// Connects and attaches. With `replay`, the first `Output` frames replay
     /// the ring buffer up to `ReplayEnd`.
     pub async fn attach(socket: &Path, replay: bool) -> Result<(Hello, Self)> {
+        Self::attach_from(socket, if replay { Some(0) } else { None }).await
+    }
+
+    /// Attaches and replays from byte offset `from` of the child's output
+    /// (`None`: no replay). `hello.replay_from` says where the replay really
+    /// starts if the ring no longer reaches back that far.
+    pub async fn attach_from(socket: &Path, from: Option<u64>) -> Result<(Hello, Self)> {
         let stream = UnixStream::connect(socket)
             .await
             .with_context(|| format!("connecting to {}", socket.display()))?;
@@ -28,7 +35,11 @@ impl Session {
             rd: SessionReader(BufReader::new(rd)),
             wr: SessionWriter(wr),
         };
-        s.wr.send(&Frame::Attach { replay }).await?;
+        s.wr.send(&Frame::Attach {
+            replay: from.is_some(),
+            from: from.unwrap_or(0),
+        })
+        .await?;
         match s.rd.recv().await? {
             Some(Frame::Hello(h)) => Ok((h, s)),
             other => bail!("expected hello, got {other:?}"),

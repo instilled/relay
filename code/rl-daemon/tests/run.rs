@@ -2,122 +2,30 @@
 //! `rl-session` binary, with the outcome read back through the socket and
 //! the ledger.
 
+mod common;
+
+use common::{Conn, Harness, fake_cli, journal};
 use relay_core::Home;
-use relay_ledger::{Ledger, session_io, sessions};
-use relay_proto::codec::{read_message, write_message};
-use relay_proto::rpc::{Id, Request, Response, RpcError};
+use relay_ledger::{Ledger, sessions};
+use relay_proto::rpc::RpcError;
 use relay_proto::types::{Event, Run, RunState};
-use rl_daemon::ServeOptions;
-use serde::de::DeserializeOwned;
-use serde_json::{Value, json};
-use std::path::PathBuf;
-use std::time::{Duration, Instant};
-use tokio::io::BufReader;
-use tokio::net::UnixStream;
-use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
-use tokio_util::sync::CancellationToken;
+use serde_json::json;
+use std::time::Duration;
 
-fn session_bin() -> Option<PathBuf> {
-    let p = PathBuf::from(env!("CARGO_BIN_EXE_rld")).with_file_name("rl-session");
-    p.is_file().then_some(p)
-}
-
-fn fake_cli() -> String {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../fixtures/fake-cli")
-        .to_string_lossy()
-        .into_owned()
-}
-
-struct Conn {
-    rd: BufReader<OwnedReadHalf>,
-    wr: OwnedWriteHalf,
-    n: u64,
-}
-
-impl Conn {
-    async fn open(home: &Home) -> Self {
-        for _ in 0..100 {
-            if let Ok(s) = UnixStream::connect(home.daemon_socket()).await {
-                let (rd, wr) = s.into_split();
-                return Self {
-                    rd: BufReader::new(rd),
-                    wr,
-                    n: 0,
-                };
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-        panic!("daemon never came up");
-    }
-    async fn call(&mut self, method: &str, params: Value) -> Response {
-        self.n += 1;
-        write_message(&mut self.wr, &Request::new(Id::Num(self.n), method, Some(params)))
-            .await
-            .unwrap();
-        read_message(&mut self.rd).await.unwrap().unwrap()
-    }
-    async fn ok<T: DeserializeOwned>(&mut self, method: &str, params: Value) -> T {
-        let res = self.call(method, params).await;
-        assert!(res.error.is_none(), "{method}: {:?}", res.error);
-        serde_json::from_value(res.result.unwrap()).unwrap()
-    }
-    async fn wait_terminal(&mut self, id: &str) -> Run {
-        let deadline = Instant::now() + Duration::from_secs(15);
-        loop {
-            let run: Run = self.ok("run.get", json!({ "id": id })).await;
-            if run.state.is_terminal() {
-                return run;
-            }
-            assert!(Instant::now() < deadline, "run {id} never ended: {run:?}");
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    }
-}
-
-struct Harness {
-    home: Home,
-    token: CancellationToken,
-    server: tokio::task::JoinHandle<anyhow::Result<()>>,
-    _tmp: tempfile::TempDir,
-}
-
-async fn harness() -> Option<Harness> {
-    let session_bin = session_bin()?;
+fn start() -> Option<(tempfile::TempDir, Harness)> {
     let tmp = tempfile::tempdir().unwrap();
-    let home = Home::at(tmp.path());
-    let token = CancellationToken::new();
-    let opts = ServeOptions {
-        session_bin: Some(session_bin),
-    };
-    let server = tokio::spawn(rl_daemon::serve_with(home.clone(), token.clone(), opts));
-    Some(Harness {
-        home,
-        token,
-        server,
-        _tmp: tmp,
-    })
-}
-
-impl Harness {
-    async fn stop(self) {
-        self.token.cancel();
-        tokio::time::timeout(Duration::from_secs(3), self.server)
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
-    }
+    let h = Harness::on(Home::at(tmp.path()))?;
+    Some((tmp, h))
 }
 
 #[tokio::test]
 async fn command_run_records_output_exit_and_events() {
-    let Some(h) = harness().await else {
+    let Some((tmp, h)) = start() else {
         eprintln!("skipping: rl-session not built (run `cargo test --workspace`)");
         return;
     };
     let mut c = Conn::open(&h.home).await;
-    let cwd = h.home.path().to_string_lossy().into_owned();
+    let cwd = tmp.path().to_string_lossy().into_owned();
 
     let run: Run = c
         .ok(
@@ -144,10 +52,8 @@ async fn command_run_records_output_exit_and_events() {
     assert_eq!(evs[1].data.as_ref().unwrap()["exit_code"], 3);
     assert_eq!(evs[1].group_key, "gh:1");
 
+    assert!(journal(&h.home, &run.id).contains("hello from the run"));
     let ledger = Ledger::open(&h.home.ledger()).unwrap();
-    let id = run.id.clone();
-    let out = ledger.call_blocking(move |db| session_io::tail(db, &id, 4096)).unwrap();
-    assert!(String::from_utf8_lossy(&out).contains("hello from the run"));
     let id = run.id.clone();
     let sess = ledger.call_blocking(move |db| sessions::get(db, &id)).unwrap().unwrap();
     assert!(sess.closed_at.is_some(), "session should be closed once the run ended");
@@ -174,11 +80,11 @@ async fn command_run_records_output_exit_and_events() {
 
 #[tokio::test]
 async fn stop_ends_in_stopped() {
-    let Some(h) = harness().await else {
+    let Some((tmp, h)) = start() else {
         return;
     };
     let mut c = Conn::open(&h.home).await;
-    let cwd = h.home.path().to_string_lossy().into_owned();
+    let cwd = tmp.path().to_string_lossy().into_owned();
     let run: Run = c
         .ok(
             "run.start",
@@ -209,11 +115,11 @@ async fn stop_ends_in_stopped() {
 
 #[tokio::test]
 async fn no_tty_run_captures_both_streams() {
-    let Some(h) = harness().await else {
+    let Some((tmp, h)) = start() else {
         return;
     };
     let mut c = Conn::open(&h.home).await;
-    let cwd = h.home.path().to_string_lossy().into_owned();
+    let cwd = tmp.path().to_string_lossy().into_owned();
     let run: Run = c
         .ok(
             "run.start",
@@ -223,10 +129,7 @@ async fn no_tty_run_captures_both_streams() {
     assert_eq!(run.title, "both");
     let done = c.wait_terminal(&run.id).await;
     assert_eq!((done.state, done.exit_code), (RunState::Finished, Some(0)));
-    let ledger = Ledger::open(&h.home.ledger()).unwrap();
-    let id = run.id.clone();
-    let out =
-        String::from_utf8_lossy(&ledger.call_blocking(move |db| session_io::tail(db, &id, 4096)).unwrap()).into_owned();
+    let out = journal(&h.home, &run.id);
     assert!(out.contains("out") && out.contains("err"), "{out:?}");
     h.stop().await;
 }

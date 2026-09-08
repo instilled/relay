@@ -1,0 +1,208 @@
+//! J1: nothing dies when the daemon does. A second daemon on the same home
+//! picks up the sessions the first one left, resuming the journal at the exact
+//! byte it stopped at, or closes runs that ended while nobody was watching.
+
+mod common;
+
+use common::{Conn, Harness, fake_cli, journal, wait_journal};
+use nix::sys::signal::{Signal, kill};
+use nix::unistd::Pid;
+use relay_core::Home;
+use relay_ledger::session_io::{self, Direction};
+use relay_ledger::{Ledger, sessions};
+use relay_proto::types::{Event, Run, RunState};
+use serde_json::json;
+use std::time::Duration;
+
+fn session_row(home: &Home, id: &str) -> sessions::SessionRow {
+    let ledger = Ledger::open(&home.ledger()).unwrap();
+    let id = id.to_string();
+    ledger.call_blocking(move |db| sessions::get(db, &id)).unwrap().unwrap()
+}
+
+fn notes(home: &Home, id: &str) -> Vec<String> {
+    let ledger = Ledger::open(&home.ledger()).unwrap();
+    let id = id.to_string();
+    ledger
+        .call_blocking(move |db| session_io::read(db, &id, 0, 10_000))
+        .unwrap()
+        .into_iter()
+        .filter(|c| c.direction == Direction::Note)
+        .map(|c| String::from_utf8_lossy(&c.data).into_owned())
+        .collect()
+}
+
+async fn wait_gone(pid: u32) {
+    for _ in 0..100 {
+        if kill(Pid::from_raw(pid as i32), None).is_err() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("pid {pid} still alive");
+}
+
+#[tokio::test]
+async fn restart_resumes_the_journal_without_gaps_or_duplicates() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = Home::at(tmp.path());
+    let Some(h) = Harness::on(home.clone()) else {
+        eprintln!("skipping: rl-session not built (run `cargo test --workspace`)");
+        return;
+    };
+    let mut c = Conn::open(&home).await;
+    let cwd = tmp.path().to_string_lossy().into_owned();
+    let script = "echo one; sleep 1; echo two; sleep 1; echo three";
+    let run: Run = c
+        .ok(
+            "run.start",
+            json!({ "argv": ["sh", "-c", script], "cwd": cwd, "tty": false }),
+        )
+        .await;
+    wait_journal(&home, &run.id, "one").await;
+
+    // Daemon goes away; the run does not notice.
+    drop(c);
+    h.stop().await;
+    let pid = session_row(&home, &run.id).pid;
+    assert!(
+        kill(Pid::from_raw(pid as i32), None).is_ok(),
+        "child must survive the daemon"
+    );
+    tokio::time::sleep(Duration::from_millis(1300)).await; // "two" happens while nobody watches
+    assert_eq!(
+        journal(&home, &run.id),
+        "one\n",
+        "nothing journals while the daemon is down"
+    );
+
+    // A new daemon re-attaches from the journal's offset.
+    let h = Harness::on(home.clone()).unwrap();
+    let mut c = Conn::open(&home).await;
+    let done = c.wait_terminal(&run.id).await;
+    assert_eq!((done.state, done.exit_code), (RunState::Finished, Some(0)));
+    assert_eq!(journal(&home, &run.id), "one\ntwo\nthree\n");
+    assert_eq!(done.last_line.as_deref(), Some("three"));
+    assert!(notes(&home, &run.id).is_empty(), "no gap expected");
+
+    let evs: Vec<Event> = c.ok("event.list", json!({ "run": run.id })).await;
+    let kinds: Vec<&str> = evs.iter().map(|e| e.kind.as_str()).collect();
+    assert_eq!(kinds, ["run.started", "run.finished"]);
+    assert!(session_row(&home, &run.id).closed_at.is_some());
+    h.stop().await;
+}
+
+#[tokio::test]
+async fn output_beyond_the_ring_is_noted_as_a_gap() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = Home::at(tmp.path());
+    let Some(h) = Harness::on(home.clone()) else {
+        return;
+    };
+    let mut c = Conn::open(&home).await;
+    let cwd = tmp.path().to_string_lossy().into_owned();
+    // 2 MiB of x's while the daemon is down: more than the 1 MiB ring keeps.
+    let script = "echo one; sleep 0.5; head -c 2097152 /dev/zero | tr '\\0' x; echo; echo end";
+    let run: Run = c
+        .ok(
+            "run.start",
+            json!({ "argv": ["sh", "-c", script], "cwd": cwd, "tty": false }),
+        )
+        .await;
+    wait_journal(&home, &run.id, "one").await;
+    drop(c);
+    h.stop().await;
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+
+    let h = Harness::on(home.clone()).unwrap();
+    let mut c = Conn::open(&home).await;
+    let done = c.wait_terminal(&run.id).await;
+    assert_eq!(done.state, RunState::Finished);
+    let text = journal(&home, &run.id);
+    assert!(
+        text.starts_with("one\n") && text.ends_with("\nend\n"),
+        "{}…{}",
+        &text[..8],
+        &text[text.len() - 8..]
+    );
+    let notes = notes(&home, &run.id);
+    assert_eq!(notes.len(), 1, "{notes:?}");
+    assert!(notes[0].contains("bytes of output were lost"), "{}", notes[0]);
+    h.stop().await;
+}
+
+#[tokio::test]
+async fn exit_while_away_is_closed_from_the_sidecar() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = Home::at(tmp.path());
+    let Some(h) = Harness::on(home.clone()) else {
+        return;
+    };
+    let mut c = Conn::open(&home).await;
+    let cwd = tmp.path().to_string_lossy().into_owned();
+    let run: Run = c
+        .ok(
+            "run.start",
+            json!({ "argv": ["sh", "-c", "sleep 0.5; echo bye; exit 4"], "cwd": cwd, "tty": false }),
+        )
+        .await;
+    drop(c);
+    h.stop().await;
+
+    // The run ends with nobody watching; then the holder itself goes away
+    // (a reboot, or its linger expired) — only the sidecar is left.
+    let row = session_row(&home, &run.id);
+    for _ in 0..100 {
+        if row.exit_file.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(row.exit_file.exists(), "holder should have written the exit sidecar");
+    kill(Pid::from_raw(row.holder_pid as i32), Signal::SIGTERM).unwrap();
+    wait_gone(row.holder_pid).await;
+
+    let h = Harness::on(home.clone()).unwrap();
+    let mut c = Conn::open(&home).await;
+    let done = c.get(&run.id).await;
+    assert_eq!((done.state, done.exit_code), (RunState::Failed, Some(4)), "{done:?}");
+    let evs: Vec<Event> = c
+        .ok("event.list", json!({ "run": run.id, "kinds": ["run.failed"] }))
+        .await;
+    assert_eq!(evs.len(), 1);
+    assert!(evs[0].summary.contains("exit 4"), "{}", evs[0].summary);
+    assert!(session_row(&home, &run.id).closed_at.is_some());
+    h.stop().await;
+}
+
+#[tokio::test]
+async fn holder_lost_without_exit_is_failed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = Home::at(tmp.path());
+    let Some(h) = Harness::on(home.clone()) else {
+        return;
+    };
+    let mut c = Conn::open(&home).await;
+    let cwd = tmp.path().to_string_lossy().into_owned();
+    let run: Run = c.ok("run.start", json!({ "argv": [fake_cli()], "cwd": cwd })).await;
+    drop(c);
+    h.stop().await;
+
+    let row = session_row(&home, &run.id);
+    kill(Pid::from_raw(row.holder_pid as i32), Signal::SIGKILL).unwrap();
+    wait_gone(row.holder_pid).await;
+    let _ = kill(Pid::from_raw(row.pid as i32), Signal::SIGKILL); // orphaned child; tidy up
+
+    let h = Harness::on(home.clone()).unwrap();
+    let mut c = Conn::open(&home).await;
+    let done = c.get(&run.id).await;
+    assert_eq!(done.state, RunState::Failed);
+    assert_eq!(done.exit_code, None);
+    let evs: Vec<Event> = c
+        .ok("event.list", json!({ "run": run.id, "kinds": ["run.failed"] }))
+        .await;
+    assert!(evs[0].summary.contains("went away"), "{}", evs[0].summary);
+    let active: Vec<Run> = c.ok("run.list", json!({ "active_only": true })).await;
+    assert!(active.is_empty());
+    h.stop().await;
+}
