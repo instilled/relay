@@ -43,12 +43,9 @@ async fn ping_then_shutdown_removes_socket() {
     assert_eq!(info.pid, std::process::id());
     assert_eq!(info.home, tmp.path());
 
-    write_message(
-        &mut wr,
-        &Request::new(Id::Num(2), "nope.nothing", Some(json!({}))),
-    )
-    .await
-    .unwrap();
+    write_message(&mut wr, &Request::new(Id::Num(2), "nope.nothing", Some(json!({}))))
+        .await
+        .unwrap();
     let res: Response = read_message(&mut rd).await.unwrap().unwrap();
     assert_eq!(res.error.unwrap().code, RpcError::METHOD_NOT_FOUND);
 

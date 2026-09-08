@@ -1,6 +1,9 @@
 //! `~/.relay/` — one place for everything user-level. `RELAY_HOME` overrides
 //! it, which is also how tests stay out of the real one.
 
+pub mod id;
+pub mod time;
+
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
@@ -57,10 +60,7 @@ impl Home {
         let mut h = std::hash::DefaultHasher::new();
         std::hash::Hash::hash(&self.0, &mut h);
         let uid = unsafe { libc_getuid() };
-        std::env::temp_dir().join(format!(
-            "rl-{uid}-{:08x}",
-            std::hash::Hasher::finish(&h) as u32
-        ))
+        std::env::temp_dir().join(format!("rl-{uid}-{:08x}", std::hash::Hasher::finish(&h) as u32))
     }
     pub fn daemon_socket(&self) -> PathBuf {
         self.socket_dir().join("rld.sock")
@@ -129,20 +129,9 @@ mod tests {
         assert!(sock.as_os_str().len() < SUN_PATH_MAX, "{}", sock.display());
         assert!(!sock.starts_with(&long));
         home.ensure_dirs().unwrap();
-        assert!(
-            sock.parent().unwrap().is_dir(),
-            "socket dir must be created"
-        );
+        assert!(sock.parent().unwrap().is_dir(), "socket dir must be created");
         let _ = std::fs::remove_dir(sock.parent().unwrap());
-        assert_eq!(
-            sock,
-            Home::at(&long).daemon_socket(),
-            "must be deterministic"
-        );
-        assert_ne!(
-            sock,
-            Home::at(long.join("y")).daemon_socket(),
-            "must differ per home"
-        );
+        assert_eq!(sock, Home::at(&long).daemon_socket(), "must be deterministic");
+        assert_ne!(sock, Home::at(long.join("y")).daemon_socket(), "must differ per home");
     }
 }
