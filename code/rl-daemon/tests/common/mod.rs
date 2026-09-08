@@ -66,6 +66,10 @@ impl Conn {
         assert!(res.error.is_none(), "{method}: {:?}", res.error);
         serde_json::from_value(res.result.unwrap()).unwrap()
     }
+    /// The raw halves, once `run.attach` has upgraded the connection.
+    pub fn into_parts(self) -> (BufReader<OwnedReadHalf>, OwnedWriteHalf) {
+        (self.rd, self.wr)
+    }
     pub async fn get(&mut self, id: &str) -> Run {
         self.ok("run.get", json!({ "id": id })).await
     }

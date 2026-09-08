@@ -46,6 +46,12 @@ impl Client {
         })
     }
 
+    /// The raw halves, for a connection that has been upgraded by
+    /// `run.attach` and no longer speaks JSON-RPC.
+    pub fn into_parts(self) -> (BufReader<OwnedReadHalf>, OwnedWriteHalf) {
+        (self.rd, self.wr)
+    }
+
     pub async fn call<M: Method>(&mut self, params: M::Params) -> Result<M::Result> {
         let id = Id::Num(self.next_id);
         self.next_id += 1;
