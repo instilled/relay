@@ -6,7 +6,7 @@ use relay_proto::methods::{
     DaemonInfo, EventFilter, EventList, RunFilter, RunHook, RunHookParams, RunList, RunMark, RunMarkParams, RunSpec,
     RunStart, RunStop, RunStopParams,
 };
-use relay_proto::types::{Mark, RunKind, RunState};
+use relay_proto::types::{AttachMode, Mark, RunKind, RunState};
 use rl_cli::client::Client;
 use rl_cli::daemon;
 use rl_cli::render;
@@ -46,11 +46,27 @@ enum Cmd {
     Ls(LsArgs),
     /// List ledger events.
     Events(EventsArgs),
+    /// See a run's terminal live, read-only. q to leave.
+    Watch(AttachArgs),
+    /// Be in a run's terminal: keyboard, resize, the lot. ctrl-\ to detach; the run keeps going.
+    Join(AttachArgs),
     /// Say what a run is doing when its CLI cannot: done, blocked or working.
     Mark(MarkArgs),
     /// Called by a CLI's hooks (Claude Code) with the hook's JSON on stdin. Never fails the CLI.
     #[command(hide = true)]
     Hook(HookArgs),
+}
+
+#[derive(Args)]
+struct AttachArgs {
+    /// Run id.
+    id: String,
+    /// Join even if someone else has; they become a watcher.
+    #[arg(long)]
+    take: bool,
+    /// KiB of scrollback to replay first.
+    #[arg(long, default_value_t = 256, value_name = "KIB")]
+    scrollback: u64,
 }
 
 #[derive(Args)]
@@ -171,9 +187,25 @@ async fn main() -> Result<()> {
         Cmd::Stop(a) => stop(&home, a, cli.json).await,
         Cmd::Ls(a) => ls(&home, a, cli.json).await,
         Cmd::Events(a) => events(&home, a, cli.json).await,
+        Cmd::Watch(a) => attach(&home, a, AttachMode::Watch).await,
+        Cmd::Join(a) => attach(&home, a, AttachMode::Join).await,
         Cmd::Mark(a) => mark(&home, a, cli.json).await,
         Cmd::Hook(a) => hook(&home, a).await,
     }
+}
+
+async fn attach(home: &Home, a: AttachArgs, mode: AttachMode) -> Result<()> {
+    let code = rl_cli::attach::attach(
+        home,
+        rl_cli::attach::Opts {
+            id: a.id,
+            mode,
+            take: a.take,
+            scrollback: a.scrollback * 1024,
+        },
+    )
+    .await?;
+    std::process::exit(code)
 }
 
 async fn mark(home: &Home, a: MarkArgs, json: bool) -> Result<()> {

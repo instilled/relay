@@ -54,6 +54,8 @@ const JOURNAL_BATCH_BYTES: usize = 16 * 1024;
 const DETECT_TICK: Duration = Duration::from_millis(250);
 /// Chunks a watcher may fall behind before it is dropped.
 const OUTPUT_BROADCAST: usize = 1024;
+/// Viewer notes kept for a slow viewer.
+const NOTES_BROADCAST: usize = 64;
 /// How long reconcile waits for one holder to answer.
 const REATTACH_TIMEOUT: Duration = Duration::from_secs(2);
 /// How long shutdown waits for follow tasks to flush.
@@ -71,11 +73,51 @@ pub struct Live {
     /// Mirror of the ledger's state, so the follow task can skip signals
     /// that would change nothing without a round trip.
     current: Mutex<Current>,
+    /// The holder's socket, for viewers to open their own connection.
+    pub socket: PathBuf,
+    /// Who owns the keyboard. Several may watch; one joins.
+    joiner: Mutex<Option<String>>,
+    /// Remarks for every attached viewer: joined, left, took over.
+    pub notes: broadcast::Sender<String>,
 }
 
 impl Live {
     pub fn current(&self) -> Current {
         *self.current.lock().unwrap()
+    }
+
+    pub fn joiner(&self) -> Option<String> {
+        self.joiner.lock().unwrap().clone()
+    }
+
+    pub fn is_joiner(&self, client: &str) -> bool {
+        self.joiner.lock().unwrap().as_deref() == Some(client)
+    }
+
+    /// Claims the keyboard. `Err(current)` when someone else has it and
+    /// `take` is false; `Ok(Some(previous))` when taken over.
+    pub fn join(&self, client: &str, take: bool) -> Result<Option<String>, String> {
+        let mut j = self.joiner.lock().unwrap();
+        match j.as_deref() {
+            Some(cur) if cur == client => Ok(None),
+            Some(cur) if !take => Err(cur.to_string()),
+            prev => {
+                let prev = prev.map(String::from);
+                *j = Some(client.to_string());
+                Ok(prev)
+            }
+        }
+    }
+
+    /// Releases the keyboard if `client` holds it.
+    pub fn leave(&self, client: &str) -> bool {
+        let mut j = self.joiner.lock().unwrap();
+        if j.as_deref() == Some(client) {
+            *j = None;
+            true
+        } else {
+            false
+        }
     }
 }
 
@@ -225,7 +267,7 @@ impl Supervisor {
             })
             .await?;
         info!(id = %id, pid = hello.pid, kind = %run.kind, cli = run.cli.as_deref().unwrap_or("-"), title = %run.title, "run started");
-        self.follow(run.clone(), hello, session, exit_file);
+        self.follow(run.clone(), hello, session, socket, exit_file);
         Ok(run)
     }
 
@@ -293,7 +335,7 @@ impl Supervisor {
                         resume_at = hello.replay_from,
                         "re-attached"
                     );
-                    self.follow(run, hello, session, row.exit_file.clone());
+                    self.follow(run, hello, session, row.socket.clone(), row.exit_file.clone());
                     report.reattached += 1;
                 }
                 other => {
@@ -436,9 +478,10 @@ impl Supervisor {
     }
 
     /// Registers the run as live and starts following its holder.
-    fn follow(self: &Arc<Self>, run: Run, hello: Hello, session: Session, exit_file: PathBuf) {
+    fn follow(self: &Arc<Self>, run: Run, hello: Hello, session: Session, socket: PathBuf, exit_file: PathBuf) {
         let (rd, wr) = session.split();
         let (out_tx, _) = broadcast::channel(OUTPUT_BROADCAST);
+        let (notes, _) = broadcast::channel(NOTES_BROADCAST);
         let live = Arc::new(Live {
             id: run.id.clone(),
             hello,
@@ -446,6 +489,9 @@ impl Supervisor {
             output: out_tx,
             stopping: AtomicBool::new(false),
             current: Mutex::new(Current::from(&run)),
+            socket,
+            joiner: Mutex::new(None),
+            notes,
         });
         self.live.lock().unwrap().insert(run.id.clone(), live.clone());
         self.tasks.spawn(self.clone().attached(run, live, rd, exit_file));
