@@ -1,0 +1,105 @@
+//! `events` table. Append-only; every writer in `rld` that changes anything
+//! also appends here, which is what the digest reads.
+
+use crate::conv;
+use anyhow::Result;
+use jiff::Timestamp;
+use relay_core::time::{from_millis, to_millis};
+use relay_proto::methods::EventFilter;
+use relay_proto::types::{Event, Run};
+use rusqlite::{Connection, Row, params, params_from_iter, types::Value};
+use std::path::PathBuf;
+
+const COLS: &str = "id, at, workspace, run, group_key, kind, summary, data_json";
+const DEFAULT_LIMIT: u32 = 500;
+
+#[derive(Debug, Clone)]
+pub struct NewEvent {
+    pub at: Timestamp,
+    pub workspace: PathBuf,
+    pub run: Option<String>,
+    pub group_key: String,
+    pub kind: String,
+    pub summary: String,
+    pub data: Option<serde_json::Value>,
+}
+
+impl NewEvent {
+    /// An event about a run, grouped the way the run is.
+    pub fn for_run(run: &Run, at: Timestamp, kind: &str, summary: impl Into<String>) -> Self {
+        Self {
+            at,
+            workspace: run.workspace.clone(),
+            run: Some(run.id.clone()),
+            group_key: run.group_key(),
+            kind: kind.to_string(),
+            summary: summary.into(),
+            data: None,
+        }
+    }
+
+    pub fn with_data(mut self, data: serde_json::Value) -> Self {
+        self.data = Some(data);
+        self
+    }
+}
+
+pub fn append(conn: &Connection, e: &NewEvent) -> Result<i64> {
+    conn.execute(
+        "INSERT INTO events (at, workspace, run, group_key, kind, summary, data_json) VALUES (?1,?2,?3,?4,?5,?6,?7)",
+        params![
+            to_millis(e.at),
+            e.workspace.to_string_lossy(),
+            e.run,
+            e.group_key,
+            e.kind,
+            e.summary,
+            e.data.as_ref().map(serde_json::to_string).transpose()?,
+        ],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+pub fn list(conn: &Connection, f: &EventFilter) -> Result<Vec<Event>> {
+    let mut sql = format!("SELECT {COLS} FROM events WHERE 1=1");
+    let mut args: Vec<Value> = Vec::new();
+    if let Some(since) = f.since {
+        sql.push_str(" AND at >= ?");
+        args.push(Value::from(to_millis(since)));
+    }
+    if let Some(run) = &f.run {
+        sql.push_str(" AND run = ?");
+        args.push(Value::from(run.clone()));
+    }
+    if let Some(g) = &f.group {
+        sql.push_str(" AND group_key = ?");
+        args.push(Value::from(g.clone()));
+    }
+    if !f.kinds.is_empty() {
+        let marks = std::iter::repeat_n("?", f.kinds.len()).collect::<Vec<_>>().join(",");
+        sql.push_str(&format!(" AND kind IN ({marks})"));
+        args.extend(f.kinds.iter().map(|k| Value::from(k.clone())));
+    }
+    sql.push_str(" ORDER BY at ASC, id ASC LIMIT ?");
+    args.push(Value::from(f.limit.unwrap_or(DEFAULT_LIMIT) as i64));
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params_from_iter(args), from_row)?;
+    Ok(rows.collect::<Result<_, _>>()?)
+}
+
+fn from_row(row: &Row<'_>) -> rusqlite::Result<Event> {
+    let data: Option<String> = row.get(7)?;
+    Ok(Event {
+        id: row.get(0)?,
+        at: from_millis(row.get(1)?).map_err(|e| conv(1, e))?,
+        workspace: PathBuf::from(row.get::<_, String>(2)?),
+        run: row.get(3)?,
+        group_key: row.get(4)?,
+        kind: row.get(5)?,
+        summary: row.get(6)?,
+        data: data
+            .map(|s| serde_json::from_str(&s))
+            .transpose()
+            .map_err(|e| conv(7, e))?,
+    })
+}
