@@ -17,11 +17,14 @@ rl-session.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 crossterm.workspace = true
+futures.workspace = true
 jiff.workspace = true
 nix.workspace = true
+ratatui.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
+vt100.workspace = true
 
 [dev-dependencies]
 relay-ledger.workspace = true

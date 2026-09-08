@@ -171,6 +171,16 @@ impl Supervisor {
         &self.registry
     }
 
+    /// Who holds the keyboard of which run right now.
+    pub fn joiners(&self) -> HashMap<String, String> {
+        self.live
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|(id, l)| l.joiner().map(|j| (id.clone(), j)))
+            .collect()
+    }
+
     /// Spawns the holder, records the run, attaches. Returns once the run is
     /// in the ledger with its holder ready.
     pub async fn start(self: &Arc<Self>, spec: RunSpec) -> Result<Run> {

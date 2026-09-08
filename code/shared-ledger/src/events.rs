@@ -87,6 +87,16 @@ pub fn list(conn: &Connection, f: &EventFilter) -> Result<Vec<Event>> {
     Ok(rows.collect::<Result<_, _>>()?)
 }
 
+/// The newest event of a run other than `run.started` (that one if it is
+/// all there is).
+pub fn latest_for_run(conn: &Connection, run: &str) -> Result<Option<Event>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {COLS} FROM events WHERE run = ?1 ORDER BY (kind = 'run.started') ASC, at DESC, id DESC LIMIT 1"
+    ))?;
+    let mut rows = stmt.query_map(params![run], from_row)?;
+    Ok(rows.next().transpose()?)
+}
+
 fn from_row(row: &Row<'_>) -> rusqlite::Result<Event> {
     let data: Option<String> = row.get(7)?;
     Ok(Event {

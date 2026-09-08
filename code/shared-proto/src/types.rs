@@ -157,6 +157,9 @@ pub struct Run {
     /// Last meaningful output line, for fleet rows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_line: Option<String>,
+    /// When the user last looked at this run's news (`run.seen`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seen_at: Option<Timestamp>,
 }
 
 impl Run {
@@ -194,6 +197,7 @@ impl Run {
             plugin: None,
             parent_run: None,
             last_line: None,
+            seen_at: None,
         }
     }
 
