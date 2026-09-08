@@ -10,6 +10,7 @@ use relay_core::Home;
 use relay_detect::Registry;
 use relay_ledger::Ledger;
 use relay_proto::codec::{read_message, write_message};
+use relay_proto::methods::{AttachParams, Method, RunAttach};
 use relay_proto::rpc::{Id, Request, Response, RpcError};
 use std::io::ErrorKind;
 use std::path::PathBuf;
@@ -179,6 +180,33 @@ async fn handle_conn(stream: UnixStream, daemon: Arc<Daemon>, router: Arc<Router
             }
         };
         debug!(method = %req.method, "request");
+        if req.method == RunAttach::NAME {
+            // The one method that takes the connection over: after `ok`, the
+            // stream speaks holder frames until the viewer hangs up.
+            let params: Result<AttachParams, _> = serde_json::from_value(req.params.unwrap_or(serde_json::Value::Null));
+            let attached = match params {
+                Ok(p) => crate::attach::attach(&daemon, p).await,
+                Err(e) => Err(RpcError::invalid_params(e)),
+            };
+            match attached {
+                Ok(a) => {
+                    let info = serde_json::to_value(a.info()).unwrap_or_default();
+                    if write_message(&mut wr, &Response::ok(req.id, info)).await.is_err() {
+                        return;
+                    }
+                    if let Err(e) = crate::attach::stream(&daemon, a, &mut rd, &mut wr).await {
+                        debug!(error = %e, "viewer stream ended");
+                    }
+                    return;
+                }
+                Err(e) => {
+                    if write_message(&mut wr, &Response::err(req.id, e)).await.is_err() {
+                        return;
+                    }
+                    continue;
+                }
+            }
+        }
         let res = match router.dispatch(daemon.clone(), &req.method, req.params).await {
             Ok(v) => Response::ok(req.id, v),
             Err(e) => Response::err(req.id, e),

@@ -23,6 +23,7 @@ const T_HELLO: u8 = 0x81;
 const T_OUTPUT: u8 = 0x82;
 const T_REPLAY_END: u8 = 0x83;
 const T_EXIT: u8 = 0x84;
+const T_NOTE: u8 = 0x85;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Frame {
@@ -51,6 +52,10 @@ pub enum Frame {
     ReplayEnd,
     /// The child has exited. Sent once per connection, after any output.
     Exit(Exit),
+    /// A remark from whoever is relaying the stream (`rld` to a viewer:
+    /// "x joined", "n bytes missing"). Never part of the child's output;
+    /// the holder itself does not send these.
+    Note(String),
 }
 
 /// What the holder knows about its session, sent on attach.
@@ -96,6 +101,7 @@ impl Frame {
             Frame::Output(b) => (T_OUTPUT, b.clone()),
             Frame::ReplayEnd => (T_REPLAY_END, Vec::new()),
             Frame::Exit(e) => (T_EXIT, serde_json::to_vec(e).expect("exit serialises")),
+            Frame::Note(s) => (T_NOTE, s.as_bytes().to_vec()),
         };
         let mut out = Vec::with_capacity(5 + payload.len());
         out.push(tag);
@@ -136,6 +142,7 @@ impl Frame {
             T_OUTPUT => Frame::Output(p),
             T_REPLAY_END => Frame::ReplayEnd,
             T_EXIT => Frame::Exit(serde_json::from_slice(&p).map_err(|_| bad("exit"))?),
+            T_NOTE => Frame::Note(String::from_utf8_lossy(&p).into_owned()),
             other => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -206,6 +213,7 @@ mod tests {
                 signal: Some("SIGTERM".into()),
                 at: Timestamp::UNIX_EPOCH,
             }),
+            Frame::Note("instilled@mac joined".into()),
         ];
         let (mut a, mut b) = tokio::io::duplex(1 << 16);
         for f in &frames {
