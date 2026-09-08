@@ -3,6 +3,7 @@ resolver = "3"
 members = [
   "code/rl-cli",
   "code/rl-daemon",
+  "code/rl-session",
   "code/shared-core",
   "code/shared-ledger",
   "code/shared-proto",
@@ -19,9 +20,12 @@ relay-core = { path = "code/shared-core" }
 relay-ledger = { path = "code/shared-ledger" }
 relay-proto = { path = "code/shared-proto" }
 rl-daemon = { path = "code/rl-daemon" }
+rl-session = { path = "code/rl-session" }
 
 anyhow = "1"
 jiff = { version = "0.2", features = ["serde"] }
+nix = { version = "0.31", features = ["process", "signal", "fs"] }
+portable-pty = "0.9"
 rusqlite = { version = "0.40", features = ["bundled"] }
 clap = { version = "4.5", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
