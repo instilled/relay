@@ -46,9 +46,7 @@ pub async fn start(home: &Home) -> Result<(DaemonInfo, bool)> {
         use std::os::unix::process::CommandExt;
         cmd.process_group(0);
     }
-    let child = cmd
-        .spawn()
-        .with_context(|| format!("spawning {}", bin.display()))?;
+    let child = cmd.spawn().with_context(|| format!("spawning {}", bin.display()))?;
     // Not waited on: rld is meant to outlive us. Reaping is the init's job.
     std::mem::forget(child);
 
@@ -58,10 +56,7 @@ pub async fn start(home: &Home) -> Result<(DaemonInfo, bool)> {
             return Ok((info, true));
         }
         if Instant::now() > deadline {
-            bail!(
-                "rld did not come up within 5s; see {}",
-                home.daemon_log().display()
-            );
+            bail!("rld did not come up within 5s; see {}", home.daemon_log().display());
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }

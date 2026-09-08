@@ -93,6 +93,8 @@ impl RpcError {
     pub const METHOD_NOT_FOUND: i64 = -32601;
     pub const INVALID_PARAMS: i64 = -32602;
     pub const INTERNAL: i64 = -32603;
+    /// Server-defined: the named run/schedule/plugin does not exist.
+    pub const NOT_FOUND: i64 = -32004;
 
     pub fn new(code: i64, message: impl Into<String>) -> Self {
         Self {
@@ -102,16 +104,16 @@ impl RpcError {
         }
     }
     pub fn method_not_found(method: &str) -> Self {
-        Self::new(
-            Self::METHOD_NOT_FOUND,
-            format!("method not found: {method}"),
-        )
+        Self::new(Self::METHOD_NOT_FOUND, format!("method not found: {method}"))
     }
     pub fn invalid_params(msg: impl std::fmt::Display) -> Self {
         Self::new(Self::INVALID_PARAMS, format!("invalid params: {msg}"))
     }
     pub fn internal(msg: impl std::fmt::Display) -> Self {
         Self::new(Self::INTERNAL, msg.to_string())
+    }
+    pub fn not_found(what: &str, id: &str) -> Self {
+        Self::new(Self::NOT_FOUND, format!("no such {what}: {id}"))
     }
 }
 

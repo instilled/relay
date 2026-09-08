@@ -15,11 +15,13 @@ relay-core.workspace = true
 relay-proto.workspace = true
 anyhow.workspace = true
 clap.workspace = true
+jiff.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
+relay-ledger.workspace = true
 rl-daemon.workspace = true
 tokio-util.workspace = true
 tempfile.workspace = true
