@@ -1,7 +1,7 @@
 //! Typed method definitions. One struct per method; the name, params and
 //! result live together so client and server cannot drift.
 
-use crate::types::{Event, Run, RunState};
+use crate::types::{Event, Run, RunKind, RunState};
 use jiff::Timestamp;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::path::PathBuf;
@@ -72,6 +72,67 @@ impl Method for RunGet {
     const NAME: &'static str = "run.get";
     type Params = RunId;
     type Result = Run;
+}
+
+/// Starts a run under a fresh session holder. Returns once the holder is
+/// ready and the run is in the ledger.
+pub struct RunStart;
+impl Method for RunStart {
+    const NAME: &'static str = "run.start";
+    type Params = RunSpec;
+    type Result = Run;
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunSpec {
+    pub argv: Vec<String>,
+    /// `command` unless the caller says otherwise (`--agent` → `agent`).
+    #[serde(default = "RunKind::default_command")]
+    pub kind: RunKind,
+    pub cwd: PathBuf,
+    /// Defaults to the argv joined.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, rename = "ref", skip_serializing_if = "Option::is_none")]
+    pub ref_: Option<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    /// A pty (default) or plain pipes.
+    #[serde(default = "default_true")]
+    pub tty: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cols: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rows: Option<u16>,
+    /// Extra environment for the child.
+    #[serde(default)]
+    pub env: Vec<(String, String)>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl RunKind {
+    fn default_command() -> Self {
+        RunKind::Command
+    }
+}
+
+/// Asks a live run to stop: SIGTERM, or SIGKILL with `force`. The run ends in
+/// `stopped`. Returns the run as it is right after the signal is sent.
+pub struct RunStop;
+impl Method for RunStop {
+    const NAME: &'static str = "run.stop";
+    type Params = RunStopParams;
+    type Result = Run;
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunStopParams {
+    pub id: String,
+    #[serde(default)]
+    pub force: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

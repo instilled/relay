@@ -10,6 +10,8 @@ pub mod events;
 pub mod migrate;
 pub mod presence;
 pub mod runs;
+pub mod session_io;
+pub mod sessions;
 
 use anyhow::{Context, Result, anyhow};
 use rusqlite::Connection;
