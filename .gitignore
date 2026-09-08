@@ -12,4 +12,13 @@
 *.db-shm
 *.sock
 
+# editors
+/.idea/
+*.iml
+/.vscode/
+/.zed/
+/.fleet/
+*.swp
+*~
+
 .DS_Store
