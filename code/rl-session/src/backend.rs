@@ -23,6 +23,8 @@ pub struct Spec {
     pub argv: Vec<String>,
     pub cwd: PathBuf,
     pub env: Vec<(String, String)>,
+    /// Start from the holder's environment (true) or from nothing but `env`.
+    pub inherit_env: bool,
     pub cols: u16,
     pub rows: u16,
     pub tty: bool,
@@ -55,11 +57,14 @@ fn spawn_pty(spec: &Spec) -> Result<Spawned> {
     let mut cmd = CommandBuilder::new(&spec.argv[0]);
     cmd.args(&spec.argv[1..]);
     cmd.cwd(&spec.cwd);
-    if cmd.get_env("TERM").is_none() {
-        cmd.env("TERM", "xterm-256color");
+    if !spec.inherit_env {
+        cmd.env_clear();
     }
     for (k, v) in &spec.env {
         cmd.env(k, v);
+    }
+    if cmd.get_env("TERM").is_none() {
+        cmd.env("TERM", "xterm-256color");
     }
     let mut child = pair
         .slave
@@ -169,6 +174,9 @@ fn spawn_pipes(spec: &Spec) -> Result<Spawned> {
     use std::process::{Command, Stdio};
 
     let mut cmd = Command::new(&spec.argv[0]);
+    if !spec.inherit_env {
+        cmd.env_clear();
+    }
     cmd.args(&spec.argv[1..])
         .current_dir(&spec.cwd)
         .envs(spec.env.iter().map(|(k, v)| (k, v)))

@@ -223,24 +223,34 @@ impl Supervisor {
         let exit_file = self.home.session_exit_file(&id);
         let log = self.home.session_log(&id);
 
-        // Hooks and sub-runs find their way back with these.
-        let mut env = vec![
-            ("RELAY_RUN".to_string(), id.clone()),
-            (
-                relay_core::HOME_ENV.to_string(),
-                self.home.path().to_string_lossy().into_owned(),
-            ),
-        ];
+        // The caller's environment, then what hooks and sub-runs need to find
+        // their way back. Relay's own names win over anything the caller sent.
+        let mut env = spec.env.clone();
+        let mut set = |k: &str, v: String| {
+            env.retain(|(e, _)| e != k);
+            env.push((k.to_string(), v));
+        };
+        set("RELAY_RUN", id.clone());
+        set(relay_core::HOME_ENV, self.home.path().to_string_lossy().into_owned());
         if let Some(r) = &run.ref_ {
-            env.push(("RELAY_REF".into(), r.clone()));
+            set("RELAY_REF", r.clone());
         }
         if !run.tags.is_empty() {
-            env.push(("RELAY_TAGS".into(), run.tags.join(",")));
+            set("RELAY_TAGS", run.tags.join(","));
         }
-        env.extend(spec.env.iter().cloned());
-
-        self.spawn_holder(&id, &socket, &exit_file, &log, &cwd, cols, rows, spec.tty, &env, &argv)
-            .await?;
+        // A whole environment travels by file, not by argv: it may hold secrets
+        // and `ps` shows arguments.
+        let env_file = (!spec.inherit_env).then(|| self.home.session_env_file(&id));
+        if let Some(f) = &env_file {
+            write_private(f, &serde_json::to_vec(&env)?)?;
+        }
+        let holder = self
+            .spawn_holder(&id, &socket, &exit_file, &log, &cwd, cols, rows, spec.tty, &env, env_file.as_deref(), &argv)
+            .await;
+        if let Some(f) = &env_file {
+            let _ = std::fs::remove_file(f);
+        }
+        holder?;
 
         let (hello, session) = Session::attach(&socket, true)
             .await
@@ -449,6 +459,7 @@ impl Supervisor {
         rows: u16,
         tty: bool,
         env: &[(String, String)],
+        env_file: Option<&Path>,
         argv: &[String],
     ) -> Result<()> {
         let log_file = std::fs::OpenOptions::new().create(true).append(true).open(log)?;
@@ -468,8 +479,15 @@ impl Supervisor {
         if !tty {
             cmd.arg("--no-tty");
         }
-        for (k, v) in env {
-            cmd.arg("--env").arg(format!("{k}={v}"));
+        match env_file {
+            Some(f) => {
+                cmd.arg("--env-file").arg(f);
+            }
+            None => {
+                for (k, v) in env {
+                    cmd.arg("--env").arg(format!("{k}={v}"));
+                }
+            }
         }
         cmd.arg("--").args(argv);
         cmd.stdin(Stdio::null())
@@ -486,7 +504,24 @@ impl Supervisor {
         }
         Ok(())
     }
+}
 
+/// Writes `bytes` to `path`, readable by the owner only.
+fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)
+        .with_context(|| format!("writing {}", path.display()))?;
+    f.write_all(bytes)?;
+    Ok(())
+}
+
+impl Supervisor {
     /// Registers the run as live and starts following its holder.
     fn follow(self: &Arc<Self>, run: Run, hello: Hello, session: Session, socket: PathBuf, exit_file: PathBuf) {
         let (rd, wr) = session.split();
