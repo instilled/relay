@@ -137,14 +137,14 @@ async fn a_missed_firing_follows_its_policy_on_start() {
     );
     // As the previous daemon left them: due ten minutes ago.
     let path = home.schedules_file();
-    let (loaded, errors) = rl_daemon::schedule::load_file(&path).unwrap();
+    let (loaded, errors) = rl_daemon::schedule::load_file(&path, false).unwrap();
     assert!(errors.is_empty(), "{errors:?}");
     let ledger = Ledger::open(&home.ledger()).unwrap();
     let now = Timestamp::now();
     let due = now - jiff::SignedDuration::from_mins(10);
     ledger
         .call_blocking(move |c| {
-            schedules::sync(c, "global", &path, &loaded, now)?;
+            schedules::sync(c, "global", &path, &loaded, true, now)?;
             schedules::set_next(c, "global", "late-skip", Some(due))?;
             schedules::set_next(c, "global", "late-catch", Some(due))
         })

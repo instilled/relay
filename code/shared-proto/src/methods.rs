@@ -358,6 +358,9 @@ pub struct ScheduleFilter {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScheduleName {
     pub name: String,
+    /// `global` or a workspace path; needed when the name is in several.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
 }
 
 pub struct ScheduleList;
@@ -395,4 +398,42 @@ impl Method for ScheduleReload {
     const NAME: &'static str = "schedule.reload";
     type Params = ();
     type Result = crate::schedule::ReloadReport;
+}
+
+// ---- workspace.* ------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspaceUpParams {
+    pub path: PathBuf,
+    /// Approve every pending schedule version in it.
+    #[serde(default)]
+    pub approve: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspacePath {
+    pub path: PathBuf,
+}
+
+/// Registers a folder and loads its `.relay/`.
+pub struct WorkspaceUp;
+impl Method for WorkspaceUp {
+    const NAME: &'static str = "workspace.up";
+    type Params = WorkspaceUpParams;
+    type Result = crate::schedule::UpReport;
+}
+
+pub struct WorkspaceList;
+impl Method for WorkspaceList {
+    const NAME: &'static str = "workspace.list";
+    type Params = ();
+    type Result = Vec<crate::schedule::Workspace>;
+}
+
+/// Unregisters a folder; its schedules stop.
+pub struct WorkspaceRemove;
+impl Method for WorkspaceRemove {
+    const NAME: &'static str = "workspace.remove";
+    type Params = WorkspacePath;
+    type Result = bool;
 }

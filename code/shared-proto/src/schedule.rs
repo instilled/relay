@@ -102,9 +102,52 @@ pub struct Schedule {
     /// Gone from its file; kept so old trails still resolve.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub removed_at: Option<Timestamp>,
+    /// The version the user said yes to. The user's own file approves as
+    /// it loads; a workspace's waits for `rl up`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approved_hash: Option<String>,
+}
+
+impl Schedule {
+    /// The current version may fire.
+    pub fn approved(&self) -> bool {
+        self.approved_hash.as_deref() == Some(self.hash.as_str())
+    }
+
+    /// `global`, or the workspace folder's name.
+    pub fn scope_label(&self) -> String {
+        if self.scope == GLOBAL_SCOPE {
+            return GLOBAL_SCOPE.to_string();
+        }
+        std::path::Path::new(&self.scope)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| self.scope.clone())
+    }
 }
 
 pub const GLOBAL_SCOPE: &str = "global";
+/// A workspace keeps its Relay files here.
+pub const WORKSPACE_DIR: &str = ".relay";
+
+/// A folder registered with `rl up`: the trust boundary for its `.relay/`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Workspace {
+    pub path: PathBuf,
+    pub name: String,
+    pub registered_at: Timestamp,
+}
+
+/// What `rl up` found and did.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UpReport {
+    pub workspace: Workspace,
+    pub report: ReloadReport,
+    /// The workspace's live schedules after the load.
+    pub schedules: Vec<Schedule>,
+    /// Names approved by this call.
+    pub approved: Vec<String>,
+}
 
 /// What a reload found.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
