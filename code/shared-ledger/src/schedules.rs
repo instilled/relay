@@ -1,7 +1,7 @@
 //! Schedules: the YAML is the interface, these tables remember what it
 //! cannot. `schedule_specs` is every version ever loaded, by hash;
-//! `schedules` is the identity (scope + name) with its current version and
-//! runtime state.
+//! `schedules` is the identity (scope + name) with its current version,
+//! the version the user approved, and runtime state.
 
 use crate::conv;
 use anyhow::Result;
@@ -12,7 +12,7 @@ use rusqlite::{Connection, OptionalExtension, Row, params};
 use std::path::{Path, PathBuf};
 
 const COLS: &str = "s.scope, s.name, s.hash, s.source, p.spec_json, s.paused, s.last_fired_at, s.last_run, s.next_at, \
-    s.removed_at";
+    s.removed_at, s.approved_hash";
 const FROM: &str = "FROM schedules s JOIN schedule_specs p ON p.hash = s.hash";
 
 /// A spec as loaded from a file: name, spec, and its hash.
@@ -26,8 +26,16 @@ pub struct Loaded {
 /// Brings the rows of one scope in line with what its file says. New names
 /// are added, changed hashes replace the version (and clear `next_at` so it
 /// is recomputed), names gone from the file are marked removed, names back
-/// again are revived.
-pub fn sync(conn: &Connection, scope: &str, source: &Path, loaded: &[Loaded], now: Timestamp) -> Result<ReloadReport> {
+/// again are revived. A `trusted` scope (the user's own file) approves every
+/// version as it loads; a workspace's versions wait for [`approve`].
+pub fn sync(
+    conn: &Connection,
+    scope: &str,
+    source: &Path,
+    loaded: &[Loaded],
+    trusted: bool,
+    now: Timestamp,
+) -> Result<ReloadReport> {
     let mut report = ReloadReport {
         loaded: loaded.len(),
         ..Default::default()
@@ -38,6 +46,7 @@ pub fn sync(conn: &Connection, scope: &str, source: &Path, loaded: &[Loaded], no
             "INSERT OR IGNORE INTO schedule_specs (hash, spec_json, first_seen_at) VALUES (?1, ?2, ?3)",
             params![l.hash, serde_json::to_string(&l.spec)?, to_millis(now)],
         )?;
+        let approved = trusted.then(|| l.hash.clone());
         let existing: Option<(String, Option<i64>)> = conn
             .query_row(
                 "SELECT hash, removed_at FROM schedules WHERE scope = ?1 AND name = ?2",
@@ -48,16 +57,16 @@ pub fn sync(conn: &Connection, scope: &str, source: &Path, loaded: &[Loaded], no
         match existing {
             None => {
                 conn.execute(
-                    "INSERT INTO schedules (scope, name, hash, source) VALUES (?1, ?2, ?3, ?4)",
-                    params![scope, l.name, l.hash, src],
+                    "INSERT INTO schedules (scope, name, hash, source, approved_hash) VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![scope, l.name, l.hash, src, approved],
                 )?;
                 report.added.push(l.name.clone());
             }
             Some((hash, removed)) if hash != l.hash || removed.is_some() => {
                 conn.execute(
-                    "UPDATE schedules SET hash = ?3, source = ?4, next_at = NULL, removed_at = NULL \
-                     WHERE scope = ?1 AND name = ?2",
-                    params![scope, l.name, l.hash, src],
+                    "UPDATE schedules SET hash = ?3, source = ?4, next_at = NULL, removed_at = NULL, \
+                     approved_hash = COALESCE(?5, approved_hash) WHERE scope = ?1 AND name = ?2",
+                    params![scope, l.name, l.hash, src, approved],
                 )?;
                 if removed.is_some() {
                     report.added.push(l.name.clone());
@@ -85,6 +94,35 @@ pub fn sync(conn: &Connection, scope: &str, source: &Path, loaded: &[Loaded], no
     Ok(report)
 }
 
+/// Approves the current version of every listed schedule in `scope` (all
+/// of them when `names` is empty). Returns the names approved.
+pub fn approve(conn: &Connection, scope: &str, names: &[String]) -> Result<Vec<String>> {
+    let mut done = Vec::new();
+    for s in list_scope(conn, scope)? {
+        if s.removed_at.is_some() || s.approved_hash.as_deref() == Some(&s.hash) {
+            continue;
+        }
+        if !names.is_empty() && !names.contains(&s.name) {
+            continue;
+        }
+        conn.execute(
+            "UPDATE schedules SET approved_hash = hash, next_at = NULL WHERE scope = ?1 AND name = ?2",
+            params![scope, s.name],
+        )?;
+        done.push(s.name);
+    }
+    Ok(done)
+}
+
+/// Marks every schedule of a scope removed, as when its workspace is
+/// unregistered.
+pub fn remove_scope(conn: &Connection, scope: &str, now: Timestamp) -> Result<usize> {
+    Ok(conn.execute(
+        "UPDATE schedules SET removed_at = ?2, next_at = NULL WHERE scope = ?1 AND removed_at IS NULL",
+        params![scope, to_millis(now)],
+    )?)
+}
+
 pub fn get(conn: &Connection, scope: &str, name: &str) -> Result<Option<Schedule>> {
     Ok(conn
         .query_row(
@@ -104,6 +142,22 @@ pub fn list(conn: &Connection, include_removed: bool) -> Result<Vec<Schedule>> {
     };
     let mut stmt = conn.prepare(&format!("SELECT {COLS} {FROM} {filter} ORDER BY s.scope, s.name"))?;
     let rows = stmt.query_map([], from_row)?;
+    Ok(rows.collect::<std::result::Result<_, _>>()?)
+}
+
+/// One scope's schedules, removed ones included.
+pub fn list_scope(conn: &Connection, scope: &str) -> Result<Vec<Schedule>> {
+    let mut stmt = conn.prepare(&format!("SELECT {COLS} {FROM} WHERE s.scope = ?1 ORDER BY s.name"))?;
+    let rows = stmt.query_map(params![scope], from_row)?;
+    Ok(rows.collect::<std::result::Result<_, _>>()?)
+}
+
+/// Schedules named `name` in any scope, live ones only.
+pub fn find(conn: &Connection, name: &str) -> Result<Vec<Schedule>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {COLS} {FROM} WHERE s.name = ?1 AND s.removed_at IS NULL ORDER BY s.scope"
+    ))?;
+    let rows = stmt.query_map(params![name], from_row)?;
     Ok(rows.collect::<std::result::Result<_, _>>()?)
 }
 
@@ -150,6 +204,7 @@ fn from_row(row: &Row) -> rusqlite::Result<Schedule> {
         last_run: row.get(7)?,
         next_at: millis(8)?,
         removed_at: millis(9)?,
+        approved_hash: row.get(10)?,
     })
 }
 
@@ -180,11 +235,18 @@ mod tests {
         let now: Timestamp = "2026-09-09T10:00:00Z".parse().unwrap();
         let src = Path::new("/home/u/.relay/schedules.yaml");
         let r = ledger
-            .call_blocking(move |c| sync(c, "global", src, &[loaded("a", "1h"), loaded("b", "2h")], now))
+            .call_blocking(move |c| sync(c, "global", src, &[loaded("a", "1h"), loaded("b", "2h")], true, now))
             .unwrap();
         assert_eq!(
             (r.loaded, r.added.len(), r.changed.len(), r.removed.len()),
             (2, 2, 0, 0)
+        );
+        assert!(
+            ledger
+                .call_blocking(|c| get(c, "global", "a"))
+                .unwrap()
+                .unwrap()
+                .approved()
         );
 
         // Pause survives an edit; the version and next_at do not.
@@ -195,7 +257,7 @@ mod tests {
             })
             .unwrap();
         let r = ledger
-            .call_blocking(move |c| sync(c, "global", src, &[loaded("a", "30m")], now))
+            .call_blocking(move |c| sync(c, "global", src, &[loaded("a", "30m")], true, now))
             .unwrap();
         assert_eq!(r.changed, ["a"]);
         assert_eq!(r.removed, ["b"]);
@@ -209,7 +271,7 @@ mod tests {
 
         // Back in the file: revived, counted as added.
         let r = ledger
-            .call_blocking(move |c| sync(c, "global", src, &[loaded("a", "30m"), loaded("b", "2h")], now))
+            .call_blocking(move |c| sync(c, "global", src, &[loaded("a", "30m"), loaded("b", "2h")], true, now))
             .unwrap();
         assert_eq!(r.added, ["b"]);
         assert!(
@@ -220,5 +282,34 @@ mod tests {
                 .removed_at
                 .is_none()
         );
+    }
+
+    #[test]
+    fn a_workspace_version_waits_for_approval() {
+        let ledger = Ledger::open_in_memory().unwrap();
+        let now: Timestamp = "2026-09-09T10:00:00Z".parse().unwrap();
+        let src = Path::new("/w/.relay/schedules.yaml");
+        ledger
+            .call_blocking(move |c| sync(c, "/w", src, &[loaded("a", "1h"), loaded("b", "1h")], false, now))
+            .unwrap();
+        let a = ledger.call_blocking(|c| get(c, "/w", "a")).unwrap().unwrap();
+        assert!(!a.approved());
+        let done = ledger.call_blocking(|c| approve(c, "/w", &["a".to_string()])).unwrap();
+        assert_eq!(done, ["a"]);
+        assert!(ledger.call_blocking(|c| get(c, "/w", "a")).unwrap().unwrap().approved());
+        assert!(!ledger.call_blocking(|c| get(c, "/w", "b")).unwrap().unwrap().approved());
+
+        // An edit needs approving again; the old approval is remembered.
+        ledger
+            .call_blocking(move |c| sync(c, "/w", src, &[loaded("a", "2h"), loaded("b", "1h")], false, now))
+            .unwrap();
+        let a = ledger.call_blocking(|c| get(c, "/w", "a")).unwrap().unwrap();
+        assert!(!a.approved());
+        assert_eq!(a.approved_hash.as_deref(), Some("h-1h"));
+        let done = ledger.call_blocking(|c| approve(c, "/w", &[])).unwrap();
+        assert_eq!(done, ["a", "b"]);
+        assert_eq!(ledger.call_blocking(|c| find(c, "a")).unwrap().len(), 1);
+        assert_eq!(ledger.call_blocking(move |c| remove_scope(c, "/w", now)).unwrap(), 2);
+        assert!(ledger.call_blocking(|c| find(c, "a")).unwrap().is_empty());
     }
 }

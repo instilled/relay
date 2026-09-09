@@ -50,19 +50,37 @@ pub fn register(r: &mut Router<Daemon>) {
     });
     r.register::<relay_proto::methods::ScheduleRun, _, _>(|d, p| async move {
         d.scheduler
-            .run_now(&p.name)
+            .run_now(&p.name, p.scope.as_deref())
             .await
             .map_err(|e| RpcError::internal(format!("{e:#}")))
     });
     r.register::<relay_proto::methods::SchedulePause, _, _>(|d, p| async move {
         d.scheduler
-            .set_paused(&p.name, true)
+            .set_paused(&p.name, p.scope.as_deref(), true)
             .await
             .map_err(|e| RpcError::internal(format!("{e:#}")))
     });
     r.register::<relay_proto::methods::ScheduleResume, _, _>(|d, p| async move {
         d.scheduler
-            .set_paused(&p.name, false)
+            .set_paused(&p.name, p.scope.as_deref(), false)
+            .await
+            .map_err(|e| RpcError::internal(format!("{e:#}")))
+    });
+    r.register::<relay_proto::methods::WorkspaceUp, _, _>(|d, p| async move {
+        d.scheduler
+            .up(&p.path, p.approve)
+            .await
+            .map_err(|e| RpcError::internal(format!("{e:#}")))
+    });
+    r.register::<relay_proto::methods::WorkspaceList, _, _>(|d, ()| async move {
+        d.scheduler
+            .workspaces()
+            .await
+            .map_err(|e| RpcError::internal(format!("{e:#}")))
+    });
+    r.register::<relay_proto::methods::WorkspaceRemove, _, _>(|d, p| async move {
+        d.scheduler
+            .remove_workspace(&p.path)
             .await
             .map_err(|e| RpcError::internal(format!("{e:#}")))
     });

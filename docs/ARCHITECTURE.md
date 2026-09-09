@@ -17,7 +17,7 @@ Three kinds of process and two socket protocols. Nothing else talks to anything.
 flowchart TB
     subgraph cli["rl — CLI + control panel (rl-cli)"]
         tui["TUI: since-you-left · fleet · detail · terminal"]
-        cmds["run · stop · ls · since · events · watch · join · mark · schedule"]
+        cmds["run · stop · ls · since · events · watch · join · mark · schedule · up · workspace"]
         hookcmd["rl hook &lt;Event&gt; — hidden, called by the agent's hooks"]
     end
 
@@ -38,7 +38,7 @@ flowchart TB
     end
 
     detect["relay-detect<br/>registry (detect/*.yaml) · PTY heuristics<br/>Claude hooks · state machine"]
-    db[("~/.relay/ledger.db — relay-ledger<br/>runs · events · sessions · session_io · presence<br/>schedules · schedule_specs")]
+    db[("~/.relay/ledger.db — relay-ledger<br/>runs · events · sessions · session_io · presence<br/>schedules · schedule_specs · workspaces")]
 
     cli -->|"JSON-RPC, one line per message<br/>~/.relay/run/rld.sock — relay-proto"| rld
     child -->|"hooks fire<br/>RELAY_RUN in the env"| hookcmd
@@ -239,6 +239,10 @@ each event row at write time so the digest groups without a join.
   ledger.db                   SQLite: runs, events, sessions, session_io, presence, schedules
   schedules.yaml              user-level schedules; the file is the interface, the ledger keeps
                               versions (by sha256), pause state, last/next firing
+
+<workspace>/.relay/           per folder registered with `rl up` — the trust boundary
+  schedules.yaml              versioned with the folder; a version fires only once approved
+                              (approved_hash == hash); an edit asks again
   run/                        0700 — rld.sock, rld.pid, <run>.sock, <run>.exit
   log/                        rld.log, <run>.log
   hooks/claude.json           written at daemon start; passed to claude as --settings
@@ -259,8 +263,8 @@ limit, so both sides fall back to the same short hashed directory under the temp
 Named here so the diagrams above are not read as the whole plan — see §7 of the brief for
 phasing.
 
-- **Workspaces** — `rl up`, `.relay/schedules.yaml` per folder with per-definition approval by
-  hash. Today only the `global` scope exists.
+- **Workspace files beyond schedules** — `reactions.yaml`, `workflows/`; `rl up` loads only
+  `schedules.yaml` today.
 - **Decisions, reactions, workflows** — the rest of the flow model: `Run.cause` and `Run.flow`
   are in place (`manual` / `schedule:<name>` today; `decision:`, `reaction:`, `workflow:` reserved).
 - **Plugins** — `rl-plugin-host` (Bun), the broker, `relay.d.ts`, the manifest/approval flow,
