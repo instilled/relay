@@ -5,6 +5,7 @@ pub mod digest;
 pub mod git;
 pub mod handlers;
 pub mod router;
+pub mod schedule;
 pub mod server;
 pub mod supervisor;
 

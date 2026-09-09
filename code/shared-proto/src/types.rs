@@ -115,6 +115,73 @@ str_enum!(Confidence { Guess => "guess", Likely => "likely", Exact => "exact" })
 str_enum!(Mark { Done => "done", Blocked => "blocked", Working => "working" });
 str_enum!(AttachMode { Watch => "watch", Join => "join" });
 
+/// Why a run started. Serialised as one string: `manual`,
+/// `schedule:<name>`, `decision:<id>`, `workflow:<name>/<step>`,
+/// `reaction:<name>`.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum Cause {
+    #[default]
+    Manual,
+    Schedule(String),
+    Decision(String),
+    Workflow {
+        name: String,
+        step: String,
+    },
+    Reaction(String),
+}
+
+impl std::fmt::Display for Cause {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Cause::Manual => write!(f, "manual"),
+            Cause::Schedule(n) => write!(f, "schedule:{n}"),
+            Cause::Decision(id) => write!(f, "decision:{id}"),
+            Cause::Workflow { name, step } => write!(f, "workflow:{name}/{step}"),
+            Cause::Reaction(n) => write!(f, "reaction:{n}"),
+        }
+    }
+}
+
+impl std::str::FromStr for Cause {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, String> {
+        if s == "manual" {
+            return Ok(Cause::Manual);
+        }
+        let (kind, rest) = s.split_once(':').ok_or_else(|| format!("bad cause `{s}`"))?;
+        if rest.is_empty() {
+            return Err(format!("bad cause `{s}`"));
+        }
+        Ok(match kind {
+            "schedule" => Cause::Schedule(rest.into()),
+            "decision" => Cause::Decision(rest.into()),
+            "reaction" => Cause::Reaction(rest.into()),
+            "workflow" => {
+                let (name, step) = rest.split_once('/').ok_or_else(|| format!("bad cause `{s}`"))?;
+                Cause::Workflow {
+                    name: name.into(),
+                    step: step.into(),
+                }
+            }
+            _ => return Err(format!("bad cause `{s}`")),
+        })
+    }
+}
+
+impl Serialize for Cause {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.collect_str(self)
+    }
+}
+
+impl<'de> Deserialize<'de> for Cause {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(d)?;
+        s.parse().map_err(serde::de::Error::custom)
+    }
+}
+
 /// The one noun. Everything `rld` starts and owns.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Run {
@@ -148,10 +215,12 @@ pub struct Run {
     pub exit_code: Option<i32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost: Option<Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub schedule_run: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub plugin: Option<String>,
+    /// Why it started.
+    #[serde(default)]
+    pub cause: Cause,
+    /// The chain it belongs to: its own id when it started one.
+    #[serde(default)]
+    pub flow: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_run: Option<String>,
     /// What an exact source last said it was doing (`tool: Bash`, a mark's
@@ -177,8 +246,10 @@ impl Run {
         workspace: impl Into<PathBuf>,
         now: Timestamp,
     ) -> Self {
+        let id: String = id.into();
         Self {
-            id: id.into(),
+            flow: id.clone(),
+            id,
             workspace: workspace.into(),
             kind,
             title: title.into(),
@@ -197,8 +268,7 @@ impl Run {
             ended_at: None,
             exit_code: None,
             cost: None,
-            schedule_run: None,
-            plugin: None,
+            cause: Cause::Manual,
             parent_run: None,
             detail: None,
             last_line: None,
@@ -244,6 +314,7 @@ pub mod event_kind {
     pub const COMMIT_LANDED: &str = "commit.landed";
     pub const BRANCH_DONE: &str = "branch.done";
     pub const SCHEDULE_FIRED: &str = "schedule.fired";
+    pub const SCHEDULE_SKIPPED: &str = "schedule.skipped";
     pub const PLUGIN_INVOKED: &str = "plugin.invoked";
 }
 

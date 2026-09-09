@@ -3,6 +3,7 @@
 //! connections so the `daemon.shutdown` reply gets out.
 
 use crate::router::Router;
+use crate::schedule::Scheduler;
 use crate::supervisor::{self, Supervisor};
 use anyhow::{Context, Result, bail};
 use jiff::Timestamp;
@@ -27,6 +28,7 @@ pub struct Daemon {
     pub home: Home,
     pub ledger: Ledger,
     pub supervisor: Arc<Supervisor>,
+    pub scheduler: Arc<Scheduler>,
     pub started_at: Timestamp,
     pub shutdown: CancellationToken,
 }
@@ -77,7 +79,7 @@ pub async fn serve_with(home: Home, shutdown: CancellationToken, opts: ServeOpti
         home.clone(),
         ledger.clone(),
         session_bin,
-        registry,
+        registry.clone(),
         shutdown.child_token(),
     ));
     match supervisor.reconcile().await {
@@ -89,10 +91,29 @@ pub async fn serve_with(home: Home, shutdown: CancellationToken, opts: ServeOpti
         ),
         Err(e) => warn!(error = %e, "reconciling sessions"),
     }
+    let scheduler = Arc::new(Scheduler::new(
+        home.clone(),
+        ledger.clone(),
+        supervisor.clone(),
+        registry,
+        shutdown.child_token(),
+    ));
+    // Loaded before the socket answers, so `rl schedule ls` right after
+    // `rl daemon start` already knows when things fire.
+    match scheduler.reload().await {
+        Ok(r) => {
+            for e in &r.errors {
+                warn!(schedule = %e, "schedule not loaded");
+            }
+        }
+        Err(e) => warn!(error = %format!("{e:#}"), "schedules not loaded"),
+    }
+    tokio::spawn(scheduler.clone().serve());
     let daemon = Arc::new(Daemon {
         home: home.clone(),
         ledger,
         supervisor,
+        scheduler,
         started_at: Timestamp::now(),
         shutdown: shutdown.clone(),
     });

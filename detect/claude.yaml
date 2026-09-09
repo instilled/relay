@@ -6,6 +6,7 @@ bins: [claude]
 hooks:
   dialect: claude
   args: ["--settings", "{hooks_file}"]
+headless: ["-p"]
 patterns:
   needs_input:
     - '(?i)do you want to'

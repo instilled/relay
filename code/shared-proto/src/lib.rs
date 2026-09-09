@@ -8,6 +8,7 @@
 pub mod codec;
 pub mod methods;
 pub mod rpc;
+pub mod schedule;
 pub mod types;
 
 /// Bumped when a message changes shape incompatibly. Reported by `daemon.ping`.

@@ -26,7 +26,7 @@ use relay_proto::methods::{
     Digest, DigestGet, DigestItem, DigestParams, EventFilter, EventList, PresenceClient, PresenceTouch, RunIds,
     RunMark, RunMarkParams, RunSeen, RunStop, RunStopParams,
 };
-use relay_proto::types::{Event as LedgerEvent, Mark, RunState};
+use relay_proto::types::{Cause, Event as LedgerEvent, Mark, RunState};
 use std::time::{Duration, Instant};
 use term::TermView;
 
@@ -659,6 +659,13 @@ impl App {
         }
         lines.push(fact("cwd", cwd));
         lines.push(fact("argv", r.argv.join(" ")));
+        if r.cause != Cause::Manual {
+            let mut cause = r.cause.to_string();
+            if r.flow != r.id {
+                cause.push_str(&format!("      flow  {}", r.flow));
+            }
+            lines.push(fact("cause", cause));
+        }
         let mut started = format!("{} ({} ago)", fmt_clock(r.started_at, now), fmt_age(r.started_at, now));
         if let Some(j) = &item.joined_by {
             started.push_str(&format!("      joined  {j}"));
