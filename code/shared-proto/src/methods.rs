@@ -234,6 +234,57 @@ pub struct AttachInfo {
     pub replay_from: u64,
 }
 
+/// The user has looked at these runs: their current news stops being news.
+pub struct RunSeen;
+impl Method for RunSeen {
+    const NAME: &'static str = "run.seen";
+    type Params = RunIds;
+    type Result = usize;
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunIds {
+    pub ids: Vec<String>,
+}
+
+// ---- digest.* ---------------------------------------------------------------
+
+/// Every run that had an event at or after `since` (default: everything),
+/// plus every run still waiting on a human, each with a one-line summary of
+/// where it stands, whether that is news, and who is joined. The fleet and
+/// `rl since` are two views of this.
+pub struct DigestGet;
+impl Method for DigestGet {
+    const NAME: &'static str = "digest.get";
+    type Params = DigestParams;
+    type Result = Digest;
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DigestParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since: Option<Timestamp>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Digest {
+    pub since: Timestamp,
+    pub items: Vec<DigestItem>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DigestItem {
+    pub run: Run,
+    /// Where it stands, in one line: the question, the exit, the last thing said.
+    pub summary: String,
+    /// When that last happened.
+    pub at: Timestamp,
+    /// News the user has not looked at (attention states and finishes only).
+    pub unseen: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub joined_by: Option<String>,
+}
+
 // ---- event.* ----------------------------------------------------------------
 
 pub struct EventList;

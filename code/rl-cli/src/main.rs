@@ -3,8 +3,8 @@ use clap::{Args, Parser, Subcommand};
 use relay_core::time::{now, parse_since};
 use relay_core::{Home, display_path};
 use relay_proto::methods::{
-    DaemonInfo, EventFilter, EventList, RunFilter, RunHook, RunHookParams, RunList, RunMark, RunMarkParams, RunSpec,
-    RunStart, RunStop, RunStopParams,
+    DaemonInfo, DigestGet, DigestParams, EventFilter, EventList, PresenceClient, PresenceTouch, RunFilter, RunHook,
+    RunHookParams, RunList, RunMark, RunMarkParams, RunSpec, RunStart, RunStop, RunStopParams,
 };
 use relay_proto::types::{AttachMode, Mark, RunKind, RunState};
 use rl_cli::client::Client;
@@ -27,8 +27,9 @@ struct Cli {
     /// Machine-readable output on every command.
     #[arg(long, global = true)]
     json: bool,
+    /// With no command: the control panel (fleet, detail, terminal).
     #[command(subcommand)]
-    cmd: Cmd,
+    cmd: Option<Cmd>,
 }
 
 #[derive(Subcommand)]
@@ -44,6 +45,8 @@ enum Cmd {
     Stop(StopArgs),
     /// List runs (active by default).
     Ls(LsArgs),
+    /// What happened while you were away: runs that need you, finished, or moved, grouped.
+    Since(SinceArgs),
     /// List ledger events.
     Events(EventsArgs),
     /// See a run's terminal live, read-only. q to leave.
@@ -159,6 +162,12 @@ struct LsArgs {
 }
 
 #[derive(Args)]
+struct SinceArgs {
+    /// The boundary: a duration (8h), a date, or an instant. Default: when you last looked.
+    since: Option<String>,
+}
+
+#[derive(Args)]
 struct EventsArgs {
     /// Only events after this point: a duration (8h), a date (2026-09-08) or an RFC 3339 instant.
     #[arg(long)]
@@ -181,11 +190,18 @@ struct EventsArgs {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     let home = Home::resolve()?;
-    match cli.cmd {
+    let Some(cmd) = cli.cmd else {
+        if !std::io::IsTerminal::is_terminal(&std::io::stdout()) {
+            bail!("rl with no command is the control panel and needs a terminal; try `rl ls` or `rl --help`");
+        }
+        return rl_cli::tui::run(&home).await;
+    };
+    match cmd {
         Cmd::Daemon { cmd } => run_daemon(&home, cmd, cli.json).await,
         Cmd::Run(a) => run(&home, a, cli.json).await,
         Cmd::Stop(a) => stop(&home, a, cli.json).await,
         Cmd::Ls(a) => ls(&home, a, cli.json).await,
+        Cmd::Since(a) => since(&home, a, cli.json).await,
         Cmd::Events(a) => events(&home, a, cli.json).await,
         Cmd::Watch(a) => attach(&home, a, AttachMode::Watch).await,
         Cmd::Join(a) => attach(&home, a, AttachMode::Join).await,
@@ -383,6 +399,29 @@ async fn ls(home: &Home, a: LsArgs, json: bool) -> Result<()> {
             "{}",
             render::table(&render::RUN_HEADERS, &render::run_rows(&runs, now()))
         );
+    }
+    Ok(())
+}
+
+async fn since(home: &Home, a: SinceArgs, json: bool) -> Result<()> {
+    let n = now();
+    let mut c = Client::connect(home).await?;
+    let boundary = match a.since.as_deref() {
+        Some(s) => parse_since(s, n)?,
+        None => {
+            // Looking now; the boundary is the last time we did.
+            let me = rl_cli::attach::client_name();
+            c.call::<PresenceTouch>(PresenceClient { client: me })
+                .await?
+                .last_seen_at
+                .unwrap_or(n - jiff::SignedDuration::from_hours(24))
+        }
+    };
+    let d = c.call::<DigestGet>(DigestParams { since: Some(boundary) }).await?;
+    if json {
+        println!("{}", serde_json::to_string(&d)?);
+    } else {
+        print!("{}", rl_cli::digest::text(&d, n));
     }
     Ok(())
 }

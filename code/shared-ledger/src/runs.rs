@@ -11,13 +11,13 @@ use std::path::PathBuf;
 
 const COLS: &str = "id, workspace, kind, title, cli, argv_json, cwd, branch, worktree, \"ref\", tags_json, \
     state, source, confidence, state_at, started_at, ended_at, exit_code, cost_json, \
-    schedule_run, plugin, parent_run, last_line";
+    schedule_run, plugin, parent_run, last_line, seen_at";
 
 const DEFAULT_LIMIT: u32 = 200;
 
 pub fn insert(conn: &Connection, r: &Run) -> Result<()> {
     conn.execute(
-        &format!("INSERT INTO runs ({COLS}) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23)"),
+        &format!("INSERT INTO runs ({COLS}) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24)"),
         params![
             r.id,
             path_str(&r.workspace),
@@ -42,6 +42,7 @@ pub fn insert(conn: &Connection, r: &Run) -> Result<()> {
             r.plugin,
             r.parent_run,
             r.last_line,
+            r.seen_at.map(to_millis),
         ],
     )?;
     Ok(())
@@ -171,7 +172,32 @@ fn from_row(row: &Row<'_>) -> rusqlite::Result<Run> {
         plugin: row.get(20)?,
         parent_run: row.get(21)?,
         last_line: row.get(22)?,
+        seen_at: row
+            .get::<_, Option<i64>>(23)?
+            .map(from_millis)
+            .transpose()
+            .map_err(|e| conv(23, e))?,
     })
+}
+
+/// The digest's candidates: runs with an event at or after `since`, plus
+/// every run still waiting on a human whatever its age.
+pub fn list_for_digest(conn: &Connection, since: Timestamp) -> Result<Vec<Run>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {COLS} FROM runs WHERE id IN (SELECT DISTINCT run FROM events WHERE at >= ?1 AND run IS NOT NULL) \
+         OR state IN ('needs_input','blocked','failed','stale') ORDER BY started_at DESC, id DESC LIMIT 1000"
+    ))?;
+    let rows = stmt.query_map(params![to_millis(since)], from_row)?;
+    Ok(rows.collect::<Result<_, _>>()?)
+}
+
+/// The user has looked: these runs' current news is no longer news.
+pub fn set_seen(conn: &Connection, ids: &[String], at: Timestamp) -> Result<usize> {
+    let mut n = 0;
+    for id in ids {
+        n += conn.execute("UPDATE runs SET seen_at = ?2 WHERE id = ?1", params![id, to_millis(at)])?;
+    }
+    Ok(n)
 }
 
 fn path_str(p: &std::path::Path) -> String {
