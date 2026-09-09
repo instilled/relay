@@ -455,7 +455,9 @@ impl App {
             self.screen = self.from;
             return Ok(());
         };
-        let back = k.code == KeyCode::Char('\\') && k.modifiers.contains(KeyModifiers::CONTROL);
+        // ctrl-\ is byte 0x1c, which a plain terminal reports as ctrl-4.
+        let back =
+            matches!(k.code, KeyCode::Char('\\') | KeyCode::Char('4')) && k.modifiers.contains(KeyModifiers::CONTROL);
         if back || t.ended.is_some() || (!t.joined() && k.code == KeyCode::Esc) {
             self.leave_term();
             return Ok(());
@@ -666,6 +668,9 @@ impl App {
             let d = fmt_duration(e.duration_since(r.started_at));
             let code = r.exit_code.map(|c| format!(", exit {c}")).unwrap_or_default();
             lines.push(fact("ended", format!("{} (after {d}{code})", fmt_clock(e, now))));
+        }
+        if let Some(d) = &r.detail {
+            lines.push(fact("doing", d.clone()));
         }
         if let Some(l) = &r.last_line {
             lines.push(fact("last line", l.clone()));

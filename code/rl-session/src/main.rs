@@ -37,6 +37,10 @@ struct Args {
     /// Extra environment for the child, KEY=VALUE (repeatable).
     #[arg(long = "env", value_name = "KEY=VALUE")]
     env: Vec<String>,
+    /// The child's whole environment, a JSON array of [KEY, VALUE] pairs; the
+    /// holder's own is not inherited. `--env` still adds to it.
+    #[arg(long, value_name = "FILE")]
+    env_file: Option<PathBuf>,
     /// Pipes instead of a pty (headless/scheduled runs).
     #[arg(long)]
     no_tty: bool,
@@ -54,15 +58,19 @@ struct Args {
 fn main() -> Result<()> {
     let args = Args::parse();
     let cwd = std::fs::canonicalize(&args.cwd).with_context(|| format!("cwd {}", args.cwd.display()))?;
-    let env = args
-        .env
-        .iter()
-        .map(|kv| {
-            kv.split_once('=')
-                .map(|(k, v)| (k.to_string(), v.to_string()))
-                .with_context(|| format!("--env {kv}: expected KEY=VALUE"))
-        })
-        .collect::<Result<Vec<_>>>()?;
+    let mut env: Vec<(String, String)> = match &args.env_file {
+        Some(f) => {
+            let bytes = std::fs::read(f).with_context(|| format!("reading {}", f.display()))?;
+            serde_json::from_slice(&bytes).with_context(|| format!("{}: expected [[key, value], …]", f.display()))?
+        }
+        None => Vec::new(),
+    };
+    for kv in &args.env {
+        let (k, v) = kv
+            .split_once('=')
+            .with_context(|| format!("--env {kv}: expected KEY=VALUE"))?;
+        env.push((k.to_string(), v.to_string()));
+    }
     let cfg = Config {
         id: args.id,
         socket: args.socket,
@@ -71,6 +79,7 @@ fn main() -> Result<()> {
             argv: args.argv,
             cwd,
             env,
+            inherit_env: args.env_file.is_none(),
             cols: args.cols,
             rows: args.rows,
             tty: !args.no_tty,

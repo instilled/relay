@@ -23,6 +23,8 @@ pub struct Spec {
     pub argv: Vec<String>,
     pub cwd: PathBuf,
     pub env: Vec<(String, String)>,
+    /// Start from the holder's environment (true) or from nothing but `env`.
+    pub inherit_env: bool,
     pub cols: u16,
     pub rows: u16,
     pub tty: bool,
@@ -55,11 +57,14 @@ fn spawn_pty(spec: &Spec) -> Result<Spawned> {
     let mut cmd = CommandBuilder::new(&spec.argv[0]);
     cmd.args(&spec.argv[1..]);
     cmd.cwd(&spec.cwd);
-    if cmd.get_env("TERM").is_none() {
-        cmd.env("TERM", "xterm-256color");
+    if !spec.inherit_env {
+        cmd.env_clear();
     }
     for (k, v) in &spec.env {
         cmd.env(k, v);
+    }
+    if cmd.get_env("TERM").is_none() {
+        cmd.env("TERM", "xterm-256color");
     }
     let mut child = pair
         .slave
@@ -158,17 +163,35 @@ fn spawn_pty(spec: &Spec) -> Result<Spawned> {
     })
 }
 
-/// `"Terminated: 15"` → `15`.
+/// portable-pty reports a signal as `strsignal` text: `"Terminated: 15"` on
+/// macOS, `"Terminated"` on glibc. Ask `strsignal` which number says that;
+/// failing that, take a trailing number (`"Signal 15"`).
 fn pty_signal_number(s: &str) -> Option<i32> {
-    s.rsplit(|c: char| !c.is_ascii_digit())
-        .next()
-        .and_then(|n| n.parse().ok())
+    fn head(s: &str) -> &str {
+        s.split(':').next().unwrap_or(s).trim()
+    }
+    let want = head(s);
+    (1..32)
+        .find(|&n| {
+            // Safe: strsignal returns a string owned by libc; it is copied out
+            // before anything else could call strsignal.
+            let p = unsafe { nix::libc::strsignal(n) };
+            !p.is_null() && unsafe { std::ffi::CStr::from_ptr(p) }.to_str().map(head) == Ok(want)
+        })
+        .or_else(|| {
+            s.rsplit(|c: char| !c.is_ascii_digit())
+                .next()
+                .and_then(|n| n.parse().ok())
+        })
 }
 
 fn spawn_pipes(spec: &Spec) -> Result<Spawned> {
     use std::process::{Command, Stdio};
 
     let mut cmd = Command::new(&spec.argv[0]);
+    if !spec.inherit_env {
+        cmd.env_clear();
+    }
     cmd.args(&spec.argv[1..])
         .current_dir(&spec.cwd)
         .envs(spec.env.iter().map(|(k, v)| (k, v)))
@@ -252,4 +275,19 @@ fn spawn_pipes(spec: &Spec) -> Result<Spawned> {
         exit: exit_rx,
         resize,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn signal_text_from_either_libc_maps_to_its_number() {
+        assert_eq!(pty_signal_number("Terminated: 15"), Some(15));
+        assert_eq!(pty_signal_number("Terminated"), Some(15));
+        assert_eq!(pty_signal_number("Killed: 9"), Some(9));
+        assert_eq!(pty_signal_number("Killed"), Some(9));
+        assert_eq!(pty_signal_number("Signal 27"), Some(27));
+        assert_eq!(pty_signal_number("nonsense"), None);
+    }
 }

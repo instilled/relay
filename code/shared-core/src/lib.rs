@@ -91,6 +91,11 @@ impl Home {
     pub fn session_log(&self, run: &str) -> PathBuf {
         self.log_dir().join(format!("session-{run}.log"))
     }
+    /// The child's environment, handed to the holder at start and removed once
+    /// it has read it.
+    pub fn session_env_file(&self, run: &str) -> PathBuf {
+        self.run_dir().join(format!("session-{run}.env"))
+    }
 
     /// Creates the directory tree. Idempotent. `run/` is 0700 since it holds sockets.
     pub fn ensure_dirs(&self) -> Result<()> {

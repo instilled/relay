@@ -42,6 +42,8 @@ pub struct Heuristics {
     last_output: Timestamp,
     idle_pending: bool,
     stale_pending: bool,
+    /// Bytes of a character cut off by a read boundary.
+    pending: Vec<u8>,
 }
 
 impl Heuristics {
@@ -54,6 +56,7 @@ impl Heuristics {
             last_output: now,
             idle_pending: false,
             stale_pending: true,
+            pending: Vec::new(),
         }
     }
 
@@ -61,7 +64,15 @@ impl Heuristics {
     /// anything that sits at a prompt (spinners and clocks redraw), likely
     /// for a plain command.
     pub fn output(&mut self, raw: &[u8], now: Timestamp) -> Signal {
-        self.tail.push_str(&ansi::strip(raw));
+        // A read can end mid-character; hold those bytes for the next one.
+        let mut bytes = std::mem::take(&mut self.pending);
+        bytes.extend_from_slice(raw);
+        let cut = match std::str::from_utf8(&bytes) {
+            Err(e) if e.error_len().is_none() => e.valid_up_to(),
+            _ => bytes.len(),
+        };
+        self.pending = bytes[cut..].to_vec();
+        self.tail.push_str(&ansi::strip(&bytes[..cut]));
         if self.tail.len() > TAIL_MAX {
             let cut = self.tail.len() - TAIL_MAX;
             let cut = self
