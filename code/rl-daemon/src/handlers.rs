@@ -82,6 +82,40 @@ pub fn register(r: &mut Router<Daemon>) {
         get_run(&d, &id).await
     });
 
+    r.register::<RunSeen, _, _>(|d, RunIds { ids }| async move {
+        let now = time::now();
+        d.ledger
+            .call(move |c| runs::set_seen(c, &ids, now))
+            .await
+            .map_err(RpcError::internal)
+    });
+
+    r.register::<DigestGet, _, _>(|d, DigestParams { since }| async move {
+        let since = since.unwrap_or(jiff::Timestamp::UNIX_EPOCH);
+        let found = d
+            .ledger
+            .call(move |c| {
+                runs::list_for_digest(c, since)?
+                    .into_iter()
+                    .map(|r| {
+                        let e = events::latest_for_run(c, &r.id)?;
+                        Ok((r, e))
+                    })
+                    .collect::<anyhow::Result<Vec<_>>>()
+            })
+            .await
+            .map_err(RpcError::internal)?;
+        let joiners = d.supervisor.joiners();
+        let items = found
+            .into_iter()
+            .map(|(run, e)| {
+                let joined_by = joiners.get(&run.id).cloned();
+                crate::digest::item(run, e, joined_by)
+            })
+            .collect();
+        Ok(Digest { since, items })
+    });
+
     r.register::<EventList, _, _>(|d, filter| async move {
         d.ledger
             .call(move |c| events::list(c, &filter))

@@ -8,6 +8,7 @@ use tracing::info;
 const MIGRATIONS: &[(i32, &str, &str)] = &[
     (1, "0001_init", include_str!("../migrations/0001_init.sql")),
     (2, "0002_sessions", include_str!("../migrations/0002_sessions.sql")),
+    (3, "0003_seen", include_str!("../migrations/0003_seen.sql")),
 ];
 
 pub fn run(conn: &mut Connection) -> Result<()> {
