@@ -11,13 +11,13 @@ use std::path::PathBuf;
 
 const COLS: &str = "id, workspace, kind, title, cli, argv_json, cwd, branch, worktree, \"ref\", tags_json, \
     state, source, confidence, state_at, started_at, ended_at, exit_code, cost_json, \
-    schedule_run, plugin, parent_run, last_line, seen_at";
+    schedule_run, plugin, parent_run, last_line, seen_at, detail";
 
 const DEFAULT_LIMIT: u32 = 200;
 
 pub fn insert(conn: &Connection, r: &Run) -> Result<()> {
     conn.execute(
-        &format!("INSERT INTO runs ({COLS}) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24)"),
+        &format!("INSERT INTO runs ({COLS}) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25)"),
         params![
             r.id,
             path_str(&r.workspace),
@@ -43,6 +43,7 @@ pub fn insert(conn: &Connection, r: &Run) -> Result<()> {
             r.parent_run,
             r.last_line,
             r.seen_at.map(to_millis),
+            r.detail,
         ],
     )?;
     Ok(())
@@ -120,6 +121,11 @@ pub fn finish(
     Ok(n == 1)
 }
 
+pub fn set_detail(conn: &Connection, id: &str, detail: &str) -> Result<()> {
+    conn.execute("UPDATE runs SET detail = ?2 WHERE id = ?1", params![id, detail])?;
+    Ok(())
+}
+
 pub fn set_last_line(conn: &Connection, id: &str, line: &str) -> Result<()> {
     conn.execute("UPDATE runs SET last_line = ?2 WHERE id = ?1", params![id, line])?;
     Ok(())
@@ -177,6 +183,7 @@ fn from_row(row: &Row<'_>) -> rusqlite::Result<Run> {
             .map(from_millis)
             .transpose()
             .map_err(|e| conv(23, e))?,
+        detail: row.get(24)?,
     })
 }
 

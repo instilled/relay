@@ -105,9 +105,13 @@ pub struct RunSpec {
     pub cols: Option<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rows: Option<u16>,
-    /// Extra environment for the child.
+    /// The child's environment: extras on top of the daemon's own when
+    /// `inherit_env` is true, the whole environment when it is false. `rl run`
+    /// sends its shell's environment, so the run sees what the shell saw.
     #[serde(default)]
     pub env: Vec<(String, String)>,
+    #[serde(default = "default_true")]
+    pub inherit_env: bool,
 }
 
 fn default_true() -> bool {

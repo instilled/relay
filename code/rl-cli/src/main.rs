@@ -283,12 +283,7 @@ async fn run(home: &Home, a: RunArgs, json: bool) -> Result<()> {
             (RunKind::Command, a.args)
         }
     };
-    let env = a
-        .env
-        .iter()
-        .map(|kv| kv.split_once('=').map(|(k, v)| (k.to_string(), v.to_string())))
-        .collect::<Option<Vec<_>>>()
-        .ok_or_else(|| anyhow::anyhow!("--env expects KEY=VALUE"))?;
+    let env = child_env(&a.env)?;
     // Sub-runs started by agents or plugins inherit their group from the environment.
     let ref_ = a
         .r#ref
@@ -317,6 +312,7 @@ async fn run(home: &Home, a: RunArgs, json: bool) -> Result<()> {
         cols,
         rows,
         env,
+        inherit_env: false,
     };
     let run = Client::connect(home).await?.call::<RunStart>(spec).await?;
     if json {
@@ -325,6 +321,24 @@ async fn run(home: &Home, a: RunArgs, json: bool) -> Result<()> {
         println!("{}", run.id);
     }
     Ok(())
+}
+
+/// The run gets this shell's environment, as `nohup` would give it: PATH,
+/// HOME, the keys and settings the CLI expects. `--env` overrides. `RELAY_RUN`
+/// is dropped so a run started from inside another is not mistaken for it.
+fn child_env(extra: &[String]) -> Result<Vec<(String, String)>> {
+    let mut env: Vec<(String, String)> = std::env::vars_os()
+        .filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?)))
+        .filter(|(k, _)| k != "RELAY_RUN")
+        .collect();
+    for kv in extra {
+        let (k, v) = kv
+            .split_once('=')
+            .ok_or_else(|| anyhow::anyhow!("--env expects KEY=VALUE"))?;
+        env.retain(|(e, _)| e != k);
+        env.push((k.to_string(), v.to_string()));
+    }
+    Ok(env)
 }
 
 async fn stop(home: &Home, a: StopArgs, json: bool) -> Result<()> {

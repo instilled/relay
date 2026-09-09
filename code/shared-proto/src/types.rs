@@ -154,6 +154,10 @@ pub struct Run {
     pub plugin: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_run: Option<String>,
+    /// What an exact source last said it was doing (`tool: Bash`, a mark's
+    /// note); refreshed by every such signal, not only by state changes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
     /// Last meaningful output line, for fleet rows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_line: Option<String>,
@@ -196,6 +200,7 @@ impl Run {
             schedule_run: None,
             plugin: None,
             parent_run: None,
+            detail: None,
             last_line: None,
             seen_at: None,
         }

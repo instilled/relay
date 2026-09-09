@@ -55,8 +55,18 @@ pub fn strip(bytes: &[u8]) -> String {
 
 /// Last non-blank line of `text`, trimmed and capped at `max` chars.
 pub fn last_line(text: &str, max: usize) -> Option<String> {
-    let line = text.lines().rev().map(str::trim).find(|l| !l.is_empty())?;
+    let line = text
+        .lines()
+        .rev()
+        .map(|l| l.trim_matches(|c: char| c.is_whitespace() || is_rule(c)))
+        .find(|l| !l.is_empty())?;
     Some(line.chars().take(max).collect())
+}
+
+/// Box-drawing and block characters: the rules and borders TUIs draw around
+/// their status lines.
+fn is_rule(c: char) -> bool {
+    ('\u{2500}'..='\u{259F}').contains(&c)
 }
 
 /// The last `n` non-blank lines, newest first, trimmed.
@@ -72,6 +82,15 @@ pub fn last_lines(text: &str, n: usize) -> Vec<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn last_line_skips_rules_and_borders() {
+        assert_eq!(
+            last_line("hello\n──────⏵⏵ auto mode on ──\n────────\n", 80).as_deref(),
+            Some("⏵⏵ auto mode on")
+        );
+        assert_eq!(last_line("│ > │\n", 80).as_deref(), Some(">"));
+    }
 
     #[test]
     fn strips_colour_and_cursor_codes() {

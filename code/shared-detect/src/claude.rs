@@ -9,7 +9,7 @@
 use crate::Signal;
 use anyhow::{Context, Result};
 use relay_core::Home;
-use relay_proto::types::RunState;
+use relay_proto::types::{Confidence, RunState, Source};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 
@@ -71,7 +71,14 @@ pub fn write_settings(home: &Home, rl_bin: &Path) -> Result<PathBuf> {
 pub fn signal(event: &str, payload: &Value) -> Option<Signal> {
     let s = |k: &str| payload.get(k).and_then(Value::as_str).map(|v| clip(v.trim()));
     Some(match event {
-        "SessionStart" => Signal::hook(RunState::Working, Some("session started".into())),
+        // Up, but a session without a prompt waits at its input box; whether
+        // it is working is for UserPromptSubmit to say, or the PTY to guess.
+        "SessionStart" => Signal {
+            state: RunState::Working,
+            source: Source::Hook,
+            confidence: Confidence::Guess,
+            detail: Some("session started".into()),
+        },
         "UserPromptSubmit" => Signal::hook(RunState::Working, s("prompt").map(|p| format!("prompt: {p}"))),
         "PreToolUse" => Signal::hook(RunState::Working, s("tool_name").map(|t| format!("tool: {t}"))),
         "PostToolUse" => Signal::hook(RunState::Working, s("tool_name").map(|t| format!("tool: {t} done"))),
