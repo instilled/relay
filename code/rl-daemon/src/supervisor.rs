@@ -245,7 +245,19 @@ impl Supervisor {
             write_private(f, &serde_json::to_vec(&env)?)?;
         }
         let holder = self
-            .spawn_holder(&id, &socket, &exit_file, &log, &cwd, cols, rows, spec.tty, &env, env_file.as_deref(), &argv)
+            .spawn_holder(
+                &id,
+                &socket,
+                &exit_file,
+                &log,
+                &cwd,
+                cols,
+                rows,
+                spec.tty,
+                &env,
+                env_file.as_deref(),
+                &argv,
+            )
             .await;
         if let Some(f) = &env_file {
             let _ = std::fs::remove_file(f);
@@ -411,10 +423,27 @@ impl Supervisor {
                 let id = id.to_string();
                 move |c| {
                     let run = runs::get(c, &id)?.ok_or_else(|| anyhow!("run {id} not found"))?;
+                    // What an exact source says it is doing is kept even when
+                    // the state does not move (a Claude turn is many tool
+                    // calls, all `working`). The PTY's word is `last_line`.
+                    let says = sig
+                        .detail
+                        .as_deref()
+                        .filter(|d| !d.is_empty() && sig.source != Source::Pty);
                     let Some(t) = step(Current::from(&run), &sig) else {
+                        if let Some(d) = says
+                            && !run.state.is_terminal()
+                            && sig.state == run.state
+                            && sig.confidence >= run.confidence
+                        {
+                            runs::set_detail(c, &id, d)?;
+                        }
                         return Ok(None);
                     };
                     runs::set_state(c, &id, t.state, t.source, t.confidence, now)?;
+                    if let Some(d) = says {
+                        runs::set_detail(c, &id, d)?;
+                    }
                     if let Some(kind) = t.event_kind() {
                         events::append(c, &NewEvent::for_run(&run, now, kind, t.summary()).with_data(t.data()))?;
                     }

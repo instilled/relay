@@ -33,7 +33,10 @@ fn the_run_sees_the_shell_environment() {
     };
 
     // The daemon's environment carries a name the shell will not have.
-    let out = base(&["daemon", "start"]).env("ONLY_THE_DAEMON", "leak").output().unwrap();
+    let out = base(&["daemon", "start"])
+        .env("ONLY_THE_DAEMON", "leak")
+        .output()
+        .unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
 
     let report = tmp.path().join("env.txt");

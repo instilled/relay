@@ -45,7 +45,10 @@ pub fn summarise(run: &Run, last: Option<&Event>) -> String {
             }
         }
         RunState::NeedsInput | RunState::Blocked | RunState::Stale => detail.unwrap_or_else(|| run.state.to_string()),
-        _ => detail
+        _ => run
+            .detail
+            .clone()
+            .or(detail)
             .or_else(|| run.last_line.clone())
             .unwrap_or_else(|| run.state.to_string()),
     }
@@ -110,6 +113,17 @@ mod tests {
             "tool: Edit"
         );
         assert_eq!(summarise(&run(RunState::Idle), None), "idle");
+        let mut busy = run(RunState::Working);
+        busy.detail = Some("tool: Bash".into());
+        busy.last_line = Some("$ cargo test".into());
+        assert_eq!(
+            summarise(
+                &busy,
+                Some(&ev("run.state", "working: session started", Some("session started")))
+            ),
+            "tool: Bash",
+            "the run's own word beats the last event's"
+        );
     }
 
     #[test]
