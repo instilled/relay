@@ -235,22 +235,28 @@ each event row at write time so the digest groups without a join.
 ## 6. On disk
 
 ```text
-~/.relay/                     ($RELAY_HOME overrides; tests point it elsewhere)
-  ledger.db                   SQLite: runs, events, sessions, session_io, presence, schedules
+~/.relay/                     ($RELAY_HOME overrides; tests and scripts/live point it elsewhere)
+  ledger.db                   SQLite: runs, events, sessions, session_io, presence, schedules,
+                              workspaces
   schedules.yaml              user-level schedules; the file is the interface, the ledger keeps
                               versions (by sha256), pause state, last/next firing
-
-<workspace>/.relay/           per folder registered with `rl up` — the trust boundary
-  schedules.yaml              versioned with the folder; a version fires only once approved
-                              (approved_hash == hash); an edit asks again
   run/                        0700 — rld.sock, rld.pid, <run>.sock, <run>.exit
   log/                        rld.log, <run>.log
   hooks/claude.json           written at daemon start; passed to claude as --settings
   detect/*.yaml               user overrides, merged field by field over the built-ins
   plugins/                    (empty — see below)
 
+<workspace>/.relay/           per folder registered with `rl up` — the trust boundary
+  schedules.yaml              versioned with the folder; a version fires only once approved
+                              (approved_hash == hash); an edit asks again
+
 detect/*.yaml                 in-tree, compiled in: generic, claude, codex, cursor, sh
 scripts/{rl,rld,relay-dev}    dev shims: build if needed, run the debug binaries
+scripts/live                  a live Relay to poke at: its home is live/home, seeded from
+                              live/seed by `scripts/live reset`; `scripts/live <rl args>` talks
+                              to it, and the recorded claude player is first on its PATH
+live/seed/                    what reset copies: global schedules.yaml and a ws/ workspace
+                              (everything else under live/ is gitignored throwaway)
 ```
 
 Sockets normally live in `run/`; a long `$RELAY_HOME` would blow the ~104-byte `sockaddr_un`

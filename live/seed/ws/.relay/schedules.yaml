@@ -1,0 +1,14 @@
+# A workspace's schedules. Nothing here fires until `rl up` approves this
+# version; edit the file and it waits for approval again.
+schedules:
+  tick:
+    every: 45s
+    run: [sh, -c, 'echo "tick in $(pwd)"; ls']
+    tags: [live]
+
+  standup:
+    every: 5m
+    agent: claude
+    prompt_file: standup.md
+    title: standup
+    tags: [live, agent]
