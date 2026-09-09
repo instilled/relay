@@ -6,7 +6,11 @@ use relay_proto::methods::{
     DaemonInfo, DigestGet, DigestParams, EventFilter, EventList, PresenceClient, PresenceTouch, RunFilter, RunHook,
     RunHookParams, RunList, RunMark, RunMarkParams, RunSpec, RunStart, RunStop, RunStopParams,
 };
-use relay_proto::types::{AttachMode, Mark, RunKind, RunState};
+use relay_proto::methods::{
+    ScheduleFilter, ScheduleList, ScheduleName, SchedulePause, ScheduleReload, ScheduleResume, ScheduleRun,
+};
+use relay_proto::schedule::Schedule;
+use relay_proto::types::{AttachMode, Cause, Mark, RunKind, RunState};
 use rl_cli::client::Client;
 use rl_cli::daemon;
 use rl_cli::render;
@@ -49,6 +53,11 @@ enum Cmd {
     Since(SinceArgs),
     /// List ledger events.
     Events(EventsArgs),
+    /// Runs that start on their own: what schedules.yaml says, and when.
+    Schedule {
+        #[command(subcommand)]
+        cmd: ScheduleCmd,
+    },
     /// See a run's terminal live, read-only. q to leave.
     Watch(AttachArgs),
     /// Be in a run's terminal: keyboard, resize, the lot. ctrl-\ to detach; the run keeps going.
@@ -90,6 +99,24 @@ struct HookArgs {
     /// The CLI's hook vocabulary (default: claude).
     #[arg(long, default_value = "claude")]
     dialect: String,
+}
+
+#[derive(Subcommand)]
+enum ScheduleCmd {
+    /// List schedules: when they fire next, what they did last.
+    Ls {
+        /// Include schedules removed from the file.
+        #[arg(short, long)]
+        all: bool,
+    },
+    /// Fire a schedule now, whatever the clock or its policies say.
+    Run { name: String },
+    /// Stop a schedule from firing until resumed.
+    Pause { name: String },
+    /// Resume a paused schedule; it plans afresh from now.
+    Resume { name: String },
+    /// Re-read schedules.yaml (rld does it on start too).
+    Reload,
 }
 
 #[derive(Subcommand)]
@@ -156,6 +183,9 @@ struct LsArgs {
     /// Only runs carrying this tag.
     #[arg(long)]
     tag: Option<String>,
+    /// Only runs with this cause, e.g. schedule:nightly.
+    #[arg(long, value_name = "CAUSE")]
+    cause: Option<String>,
     /// Newest N.
     #[arg(short = 'n', long, default_value_t = 200)]
     limit: u32,
@@ -203,6 +233,7 @@ async fn main() -> Result<()> {
         Cmd::Ls(a) => ls(&home, a, cli.json).await,
         Cmd::Since(a) => since(&home, a, cli.json).await,
         Cmd::Events(a) => events(&home, a, cli.json).await,
+        Cmd::Schedule { cmd } => schedule(&home, cmd, cli.json).await,
         Cmd::Watch(a) => attach(&home, a, AttachMode::Watch).await,
         Cmd::Join(a) => attach(&home, a, AttachMode::Join).await,
         Cmd::Mark(a) => mark(&home, a, cli.json).await,
@@ -313,6 +344,8 @@ async fn run(home: &Home, a: RunArgs, json: bool) -> Result<()> {
         rows,
         env,
         inherit_env: false,
+        cause: Cause::Manual,
+        flow: None,
     };
     let run = Client::connect(home).await?.call::<RunStart>(spec).await?;
     if json {
@@ -339,6 +372,89 @@ fn child_env(extra: &[String]) -> Result<Vec<(String, String)>> {
         env.push((k.to_string(), v.to_string()));
     }
     Ok(env)
+}
+
+async fn schedule(home: &Home, cmd: ScheduleCmd, json: bool) -> Result<()> {
+    let mut rpc = Client::connect(home).await?;
+    let name = |n: &str| ScheduleName { name: n.to_string() };
+    let one = |s: Schedule, json: bool| -> Result<()> {
+        if json {
+            println!("{}", serde_json::to_string(&s)?);
+        } else {
+            println!("{}", render::table(SCHEDULE_HEADERS, &[schedule_row(&s, now())]));
+        }
+        Ok(())
+    };
+    match cmd {
+        ScheduleCmd::Ls { all } => {
+            let list = rpc.call::<ScheduleList>(ScheduleFilter { all }).await?;
+            if json {
+                println!("{}", serde_json::to_string(&list)?);
+            } else if list.is_empty() {
+                println!("no schedules ({})", display_path(&home.schedules_file()));
+            } else {
+                let now = now();
+                let rows: Vec<Vec<String>> = list.iter().map(|s| schedule_row(s, now)).collect();
+                println!("{}", render::table(SCHEDULE_HEADERS, &rows));
+            }
+        }
+        ScheduleCmd::Run { name: n } => {
+            let run = rpc.call::<ScheduleRun>(name(&n)).await?;
+            if json {
+                println!("{}", serde_json::to_string(&run)?);
+            } else {
+                println!("{}", run.id);
+            }
+        }
+        ScheduleCmd::Pause { name: n } => one(rpc.call::<SchedulePause>(name(&n)).await?, json)?,
+        ScheduleCmd::Resume { name: n } => one(rpc.call::<ScheduleResume>(name(&n)).await?, json)?,
+        ScheduleCmd::Reload => {
+            let r = rpc.call::<ScheduleReload>(()).await?;
+            if json {
+                println!("{}", serde_json::to_string(&r)?);
+            } else {
+                println!(
+                    "{} loaded · {} added · {} changed · {} removed",
+                    r.loaded,
+                    r.added.len(),
+                    r.changed.len(),
+                    r.removed.len()
+                );
+                for e in &r.errors {
+                    eprintln!("not loaded: {e}");
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+const SCHEDULE_HEADERS: &[&str] = &["NAME", "WHEN", "NEXT", "LAST", "STATE", "ACTION"];
+
+fn schedule_row(s: &Schedule, now: jiff::Timestamp) -> Vec<String> {
+    let next = match (s.paused, s.removed_at, s.next_at) {
+        (true, _, _) | (_, Some(_), _) => "—".to_string(),
+        (_, _, Some(t)) if t > now => format!("in {}", relay_core::time::fmt_duration(t.duration_since(now))),
+        (_, _, Some(_)) => "due".to_string(),
+        (_, _, None) => "—".to_string(),
+    };
+    let last = match (s.last_fired_at, &s.last_run) {
+        (Some(t), Some(id)) => format!("{} ago · {id}", relay_core::time::fmt_age(t, now)),
+        _ => "never".to_string(),
+    };
+    let state = if s.removed_at.is_some() {
+        "removed"
+    } else if s.paused {
+        "paused"
+    } else {
+        "on"
+    };
+    let action = match &s.spec.agent {
+        Some(a) => format!("{a} · {}", s.spec.prompt.as_deref().unwrap_or("(prompt file)")),
+        None => s.spec.run.join(" "),
+    };
+    let action: String = action.chars().take(48).collect();
+    vec![s.name.clone(), s.spec.when(), next, last, state.to_string(), action]
 }
 
 async fn stop(home: &Home, a: StopArgs, json: bool) -> Result<()> {
@@ -401,6 +517,7 @@ async fn ls(home: &Home, a: LsArgs, json: bool) -> Result<()> {
         workspace: None,
         group: a.group,
         tag: a.tag,
+        cause: a.cause,
         limit: Some(a.limit),
     };
     let runs = Client::connect(home).await?.call::<RunList>(filter).await?;

@@ -42,6 +42,36 @@ pub fn register(r: &mut Router<Daemon>) {
             .map_err(RpcError::internal)?;
         found.ok_or_else(|| RpcError::not_found("run", &id))
     });
+    r.register::<relay_proto::methods::ScheduleList, _, _>(|d, f| async move {
+        d.scheduler
+            .list(f.all)
+            .await
+            .map_err(|e| RpcError::internal(format!("{e:#}")))
+    });
+    r.register::<relay_proto::methods::ScheduleRun, _, _>(|d, p| async move {
+        d.scheduler
+            .run_now(&p.name)
+            .await
+            .map_err(|e| RpcError::internal(format!("{e:#}")))
+    });
+    r.register::<relay_proto::methods::SchedulePause, _, _>(|d, p| async move {
+        d.scheduler
+            .set_paused(&p.name, true)
+            .await
+            .map_err(|e| RpcError::internal(format!("{e:#}")))
+    });
+    r.register::<relay_proto::methods::ScheduleResume, _, _>(|d, p| async move {
+        d.scheduler
+            .set_paused(&p.name, false)
+            .await
+            .map_err(|e| RpcError::internal(format!("{e:#}")))
+    });
+    r.register::<relay_proto::methods::ScheduleReload, _, _>(|d, ()| async move {
+        d.scheduler
+            .reload()
+            .await
+            .map_err(|e| RpcError::internal(format!("{e:#}")))
+    });
     r.register::<RunStart, _, _>(|d, spec| async move {
         d.supervisor
             .start(spec)

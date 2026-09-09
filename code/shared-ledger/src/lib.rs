@@ -10,6 +10,7 @@ pub mod events;
 pub mod migrate;
 pub mod presence;
 pub mod runs;
+pub mod schedules;
 pub mod session_io;
 pub mod sessions;
 

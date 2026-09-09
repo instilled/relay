@@ -63,6 +63,9 @@ pub struct RunFilter {
     pub group: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tag: Option<String>,
+    /// Only runs with this cause, e.g. `schedule:nightly`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cause: Option<String>,
     /// Newest first; default 200.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<u32>,
@@ -112,6 +115,12 @@ pub struct RunSpec {
     pub env: Vec<(String, String)>,
     #[serde(default = "default_true")]
     pub inherit_env: bool,
+    /// Why this run starts; `manual` unless the daemon's own machinery says.
+    #[serde(default)]
+    pub cause: crate::types::Cause,
+    /// The chain to join; a new one when unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flow: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -335,4 +344,55 @@ pub struct PresenceInfo {
     pub client: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_seen_at: Option<Timestamp>,
+}
+
+// ---- schedule.* -------------------------------------------------------------
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ScheduleFilter {
+    /// Include schedules removed from their file.
+    #[serde(default)]
+    pub all: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScheduleName {
+    pub name: String,
+}
+
+pub struct ScheduleList;
+impl Method for ScheduleList {
+    const NAME: &'static str = "schedule.list";
+    type Params = ScheduleFilter;
+    type Result = Vec<crate::schedule::Schedule>;
+}
+
+/// Fires a schedule now, whatever the clock or its policies say.
+pub struct ScheduleRun;
+impl Method for ScheduleRun {
+    const NAME: &'static str = "schedule.run";
+    type Params = ScheduleName;
+    type Result = crate::types::Run;
+}
+
+pub struct SchedulePause;
+impl Method for SchedulePause {
+    const NAME: &'static str = "schedule.pause";
+    type Params = ScheduleName;
+    type Result = crate::schedule::Schedule;
+}
+
+pub struct ScheduleResume;
+impl Method for ScheduleResume {
+    const NAME: &'static str = "schedule.resume";
+    type Params = ScheduleName;
+    type Result = crate::schedule::Schedule;
+}
+
+/// Re-reads `schedules.yaml`.
+pub struct ScheduleReload;
+impl Method for ScheduleReload {
+    const NAME: &'static str = "schedule.reload";
+    type Params = ();
+    type Result = crate::schedule::ReloadReport;
 }

@@ -1,6 +1,6 @@
 # Relay — architecture
 
-**Status:** as built · **Date:** 2026-09-09 · **Tree:** `0610d31`
+**Status:** as built · **Date:** 2026-09-09 · **Tree:** `schedules` branch
 
 [PRODUCT.md](PRODUCT.md) says what Relay is for and where it is going. This file says how the
 tree that exists is wired: which processes there are, who owns what, and what crosses which
@@ -17,7 +17,7 @@ Three kinds of process and two socket protocols. Nothing else talks to anything.
 flowchart TB
     subgraph cli["rl — CLI + control panel (rl-cli)"]
         tui["TUI: since-you-left · fleet · detail · terminal"]
-        cmds["run · stop · ls · since · events · watch · join · mark"]
+        cmds["run · stop · ls · since · events · watch · join · mark · schedule"]
         hookcmd["rl hook &lt;Event&gt; — hidden, called by the agent's hooks"]
     end
 
@@ -26,6 +26,7 @@ flowchart TB
         router["router — method name → typed handler"]
         handlers["handlers — every method in one place"]
         sup["supervisor — start · follow · apply · reconcile"]
+        sched["scheduler — schedules.yaml → runs, on time"]
         attach["attach — scrollback → replay → live"]
         digest["digest — one line per run, and whether it is news"]
         gitm["git — read-only placement: workspace, branch"]
@@ -37,13 +38,14 @@ flowchart TB
     end
 
     detect["relay-detect<br/>registry (detect/*.yaml) · PTY heuristics<br/>Claude hooks · state machine"]
-    db[("~/.relay/ledger.db — relay-ledger<br/>runs · events · sessions · session_io · presence")]
+    db[("~/.relay/ledger.db — relay-ledger<br/>runs · events · sessions · session_io · presence<br/>schedules · schedule_specs")]
 
     cli -->|"JSON-RPC, one line per message<br/>~/.relay/run/rld.sock — relay-proto"| rld
     child -->|"hooks fire<br/>RELAY_RUN in the env"| hookcmd
 
     sup -->|"spawn, wait for the readiness line"| h
     sup <-->|"framed holder protocol on the run's socket<br/>Output · Input · Resize · Signal · Exit"| h
+    sched -->|"run.start with cause: schedule:&lt;name&gt;"| sup
     attach -.->|"one holder connection per viewer"| h
     h --> child
 
@@ -234,7 +236,9 @@ each event row at write time so the digest groups without a join.
 
 ```text
 ~/.relay/                     ($RELAY_HOME overrides; tests point it elsewhere)
-  ledger.db                   SQLite: runs, events, sessions, session_io, presence
+  ledger.db                   SQLite: runs, events, sessions, session_io, presence, schedules
+  schedules.yaml              user-level schedules; the file is the interface, the ledger keeps
+                              versions (by sha256), pause state, last/next firing
   run/                        0700 — rld.sock, rld.pid, <run>.sock, <run>.exit
   log/                        rld.log, <run>.log
   hooks/claude.json           written at daemon start; passed to claude as --settings
@@ -255,9 +259,12 @@ limit, so both sides fall back to the same short hashed directory under the temp
 Named here so the diagrams above are not read as the whole plan — see §7 of the brief for
 phasing.
 
-- **Scheduler** — `schedules`, `schedule_runs`, cron → run spec. `Run.schedule_run` exists, unused.
+- **Workspaces** — `rl up`, `.relay/schedules.yaml` per folder with per-definition approval by
+  hash. Today only the `global` scope exists.
+- **Decisions, reactions, workflows** — the rest of the flow model: `Run.cause` and `Run.flow`
+  are in place (`manual` / `schedule:<name>` today; `decision:`, `reaction:`, `workflow:` reserved).
 - **Plugins** — `rl-plugin-host` (Bun), the broker, `relay.d.ts`, the manifest/approval flow,
-  action keys and the detail tab. `Run.plugin` and `~/.relay/plugins/` exist, unused.
+  action keys and the detail tab. `~/.relay/plugins/` exists, unused.
 - **Facts and summaries** — the collector, transcript ingestion, cached narrative, cost. No
   `facts` or `summaries` tables yet; `Run.cost` is carried but never set.
 - **Worktrees and ref rules** — `--worktree`, branch-naming, `.relay/config.yaml` ref derivation.
