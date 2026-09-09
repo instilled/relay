@@ -66,11 +66,11 @@ fn a_recorded_claude_session_reports_through_its_hooks() {
     let (ok, out, err) = run(&["run", "--agent", "claude", "Run echo and say done"]);
     assert!(ok, "{err}");
     let chat = out.trim().to_string();
-    let row = wait(&chat, &|r| r["state"] == "idle");
+    // The Stop hook lands before the `>` is printed and flushed; wait for both.
+    let row = wait(&chat, &|r| r["state"] == "idle" && r["last_line"] == ">");
     assert_eq!(row["source"], "hook");
     assert_eq!(row["confidence"], "exact");
     assert_eq!(row["detail"], "finished responding", "the last thing the hooks said");
-    assert_eq!(row["last_line"], ">", "the pty's word");
     assert!(run(&["stop", &chat]).0);
     wait(&chat, &|r| r["state"] == "stopped");
 

@@ -250,7 +250,9 @@ async fn close_hangs_up_a_live_child() {
 async fn replay_from_an_offset() {
     let h = start(false, 60); // pipes: byte-exact output
     let (hello, mut s) = attach(&h, true).await;
-    assert_eq!((hello.total, hello.replay_from), (0, 0));
+    // The child may have printed its banner before we attached; from 0 we
+    // get all of it either way.
+    assert_eq!(hello.replay_from, 0);
     read_until(&mut s, "fake-cli ready").await;
     s.input("hi\n").await.unwrap();
     read_until(&mut s, "echo: hi").await;
