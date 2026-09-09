@@ -22,3 +22,7 @@
 *~
 
 .DS_Store
+
+# the live test home: throwaway, except its seed
+/live/*
+!/live/seed/
