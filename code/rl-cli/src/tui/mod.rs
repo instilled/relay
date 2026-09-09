@@ -456,8 +456,8 @@ impl App {
             return Ok(());
         };
         // ctrl-\ is byte 0x1c, which a plain terminal reports as ctrl-4.
-        let back = matches!(k.code, KeyCode::Char('\\') | KeyCode::Char('4'))
-            && k.modifiers.contains(KeyModifiers::CONTROL);
+        let back =
+            matches!(k.code, KeyCode::Char('\\') | KeyCode::Char('4')) && k.modifiers.contains(KeyModifiers::CONTROL);
         if back || t.ended.is_some() || (!t.joined() && k.code == KeyCode::Esc) {
             self.leave_term();
             return Ok(());
