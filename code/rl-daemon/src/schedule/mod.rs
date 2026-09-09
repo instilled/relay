@@ -1,9 +1,12 @@
-//! The scheduler: `schedules.yaml` → rows in the ledger → runs, on time.
+//! The scheduler: schedule files → rows in the ledger → runs, on time.
 //!
-//! The file is the interface; a reload diffs it against the `schedules`
-//! table (identity by name, version by hash). The loop sleeps until the
-//! earliest `next_at`, fires what is due as ordinary runs with
-//! `cause: schedule:<name>`, and applies the missed and overlap policies.
+//! Two kinds of file: the user's own `~/.relay/schedules.yaml` (the `global`
+//! scope, trusted as it loads) and one `.relay/schedules.yaml` per registered
+//! workspace (scope = the folder; a version fires only once approved). A
+//! reload diffs each file against the `schedules` table (identity by name,
+//! version by hash). The loop sleeps until the earliest `next_at`, fires
+//! what is due as ordinary runs with `cause: schedule:<name>`, and applies
+//! the missed and overlap policies.
 
 pub mod cron;
 
@@ -15,9 +18,11 @@ use relay_core::Home;
 use relay_core::time::parse_duration;
 use relay_detect::Registry;
 use relay_ledger::schedules::{self, Loaded};
-use relay_ledger::{Ledger, events, events::NewEvent, runs};
+use relay_ledger::{Ledger, events, events::NewEvent, runs, workspaces};
 use relay_proto::methods::{RunFilter, RunSpec};
-use relay_proto::schedule::{GLOBAL_SCOPE, Missed, Overlap, ReloadReport, Schedule, ScheduleSpec};
+use relay_proto::schedule::{
+    GLOBAL_SCOPE, Missed, Overlap, ReloadReport, Schedule, ScheduleSpec, UpReport, WORKSPACE_DIR, Workspace,
+};
 use relay_proto::types::{Cause, Run, RunKind, event_kind};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -48,8 +53,9 @@ struct File {
 }
 
 /// Reads and validates a schedules file. A missing file is an empty one.
-/// Entries that fail validation are reported, the rest load.
-pub fn load_file(path: &Path) -> Result<(Vec<Loaded>, Vec<String>)> {
+/// Entries that fail validation are reported, the rest load. `in_workspace`
+/// lets `cwd` default to the folder.
+pub fn load_file(path: &Path, in_workspace: bool) -> Result<(Vec<Loaded>, Vec<String>)> {
     if !path.is_file() {
         return Ok((Vec::new(), Vec::new()));
     }
@@ -58,7 +64,7 @@ pub fn load_file(path: &Path) -> Result<(Vec<Loaded>, Vec<String>)> {
     let mut loaded = Vec::new();
     let mut errors = Vec::new();
     for (name, spec) in file.schedules {
-        match validate(&name, &spec) {
+        match validate(&name, &spec, in_workspace) {
             Ok(()) => loaded.push(Loaded {
                 hash: hash(&spec),
                 name,
@@ -70,7 +76,7 @@ pub fn load_file(path: &Path) -> Result<(Vec<Loaded>, Vec<String>)> {
     Ok((loaded, errors))
 }
 
-fn validate(name: &str, spec: &ScheduleSpec) -> Result<()> {
+fn validate(name: &str, spec: &ScheduleSpec, in_workspace: bool) -> Result<()> {
     if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || "._-".contains(c)) {
         bail!("names are letters, digits, `.`, `_` and `-`");
     }
@@ -101,7 +107,7 @@ fn validate(name: &str, spec: &ScheduleSpec) -> Result<()> {
         (false, Some(_)) => bail!("`run` or `agent`, not both"),
         (true, None) => bail!("needs `run` or `agent`"),
     }
-    if spec.cwd.is_none() {
+    if spec.cwd.is_none() && !in_workspace {
         bail!("needs `cwd`");
     }
     Ok(())
@@ -155,8 +161,15 @@ fn expand_home(p: &Path) -> PathBuf {
 }
 
 /// The run a schedule starts. An agent runs headless: the profile's
-/// `headless` arguments, then `args`, then the prompt.
-pub fn run_spec(name: &str, spec: &ScheduleSpec, source_dir: &Path, registry: &Registry) -> Result<RunSpec> {
+/// `headless` arguments, then `args`, then the prompt. In a workspace,
+/// `cwd` defaults to the folder and a relative one is inside it.
+pub fn run_spec(
+    name: &str,
+    spec: &ScheduleSpec,
+    source_dir: &Path,
+    workspace: Option<&Path>,
+    registry: &Registry,
+) -> Result<RunSpec> {
     let (kind, argv) = match &spec.agent {
         Some(cli) => {
             let prompt = match (&spec.prompt, &spec.prompt_file) {
@@ -176,7 +189,12 @@ pub fn run_spec(name: &str, spec: &ScheduleSpec, source_dir: &Path, registry: &R
         }
         None => (RunKind::Command, spec.run.clone()),
     };
-    let cwd = expand_home(spec.cwd.as_deref().ok_or_else(|| anyhow!("needs cwd"))?);
+    let cwd = match (spec.cwd.as_deref().map(expand_home), workspace) {
+        (Some(c), Some(w)) if c.is_relative() => w.join(c),
+        (Some(c), _) => c,
+        (None, Some(w)) => w.to_path_buf(),
+        (None, None) => bail!("needs cwd"),
+    };
     Ok(RunSpec {
         argv,
         kind,
@@ -192,6 +210,11 @@ pub fn run_spec(name: &str, spec: &ScheduleSpec, source_dir: &Path, registry: &R
         cause: Cause::Schedule(name.to_string()),
         flow: None,
     })
+}
+
+/// Where a workspace keeps its schedules.
+pub fn workspace_file(workspace: &Path) -> PathBuf {
+    workspace.join(WORKSPACE_DIR).join("schedules.yaml")
 }
 
 // ---- the loop ----------------------------------------------------------------
@@ -223,25 +246,32 @@ impl Scheduler {
         }
     }
 
-    /// Re-reads the file, diffs it into the ledger, gives every schedule
-    /// without a `next_at` one, and wakes the loop.
+    /// Re-reads every file (the user's, then each workspace's), diffs them
+    /// into the ledger, plans what is approved, and wakes the loop.
     pub async fn reload(&self) -> Result<ReloadReport> {
-        let path = self.home.schedules_file();
-        let (loaded, errors) = load_file(&path)?;
-        let now = Timestamp::now();
-        let mut report = self
-            .ledger
-            .call({
-                let path = path.clone();
-                move |c| schedules::sync(c, GLOBAL_SCOPE, &path, &loaded, now)
-            })
-            .await?;
-        report.errors = errors;
-        for s in self.list(false).await? {
-            if s.next_at.is_none() && !s.paused {
-                self.plan(&s, now, s.last_fired_at).await?;
+        let mut report = self.load_scope(GLOBAL_SCOPE, &self.home.schedules_file(), true).await?;
+        for w in self.workspaces().await? {
+            let scope = w.path.to_string_lossy().into_owned();
+            match self.load_scope(&scope, &workspace_file(&w.path), false).await {
+                Ok(r) => {
+                    report.loaded += r.loaded;
+                    report
+                        .added
+                        .extend(r.added.into_iter().map(|n| format!("{}:{n}", w.name)));
+                    report
+                        .changed
+                        .extend(r.changed.into_iter().map(|n| format!("{}:{n}", w.name)));
+                    report
+                        .removed
+                        .extend(r.removed.into_iter().map(|n| format!("{}:{n}", w.name)));
+                    report
+                        .errors
+                        .extend(r.errors.into_iter().map(|e| format!("{}:{e}", w.name)));
+                }
+                Err(e) => report.errors.push(format!("{}: {e:#}", w.name)),
             }
         }
+        self.plan_all().await?;
         info!(
             loaded = report.loaded,
             added = report.added.len(),
@@ -254,46 +284,176 @@ impl Scheduler {
         Ok(report)
     }
 
+    /// One file into one scope. Errors in entries are reported, not fatal;
+    /// a file that does not parse is.
+    async fn load_scope(&self, scope: &str, path: &Path, trusted: bool) -> Result<ReloadReport> {
+        let (loaded, errors) = load_file(path, !trusted)?;
+        let now = Timestamp::now();
+        let (scope, path) = (scope.to_string(), path.to_path_buf());
+        let mut report = self
+            .ledger
+            .call(move |c| schedules::sync(c, &scope, &path, &loaded, trusted, now))
+            .await?;
+        report.errors = errors;
+        Ok(report)
+    }
+
+    /// Gives every approved, unpaused schedule without a `next_at` one.
+    async fn plan_all(&self) -> Result<()> {
+        let now = Timestamp::now();
+        for s in self.list(false).await? {
+            if s.next_at.is_none() && !s.paused && s.approved() {
+                self.plan(&s, now, s.last_fired_at).await?;
+            }
+        }
+        Ok(())
+    }
+
     pub async fn list(&self, include_removed: bool) -> Result<Vec<Schedule>> {
         self.ledger.call(move |c| schedules::list(c, include_removed)).await
     }
 
-    pub async fn get(&self, name: &str) -> Result<Schedule> {
-        let name = name.to_string();
-        self.ledger
-            .call({
-                let name = name.clone();
-                move |c| schedules::get(c, GLOBAL_SCOPE, &name)
-            })
+    /// A schedule by name; `scope` settles it when the name exists in more
+    /// than one.
+    pub async fn get(&self, name: &str, scope: Option<&str>) -> Result<Schedule> {
+        let n = name.to_string();
+        if let Some(scope) = scope {
+            let scope = self.scope_of(scope).await?;
+            let s = scope.clone();
+            return self
+                .ledger
+                .call(move |c| schedules::get(c, &s, &n))
+                .await?
+                .ok_or_else(|| anyhow!("no schedule named `{name}` in {scope}"));
+        }
+        let found = self.ledger.call(move |c| schedules::find(c, &n)).await?;
+        match found.len() {
+            0 => bail!("no schedule named `{name}`"),
+            1 => Ok(found.into_iter().next().unwrap()),
+            _ => {
+                let scopes: Vec<String> = found.iter().map(|s| s.scope_label()).collect();
+                bail!("`{name}` exists in {}; say which with --in", scopes.join(" and "))
+            }
+        }
+    }
+
+    /// `global`, or a workspace path (any spelling of it) as registered.
+    async fn scope_of(&self, scope: &str) -> Result<String> {
+        if scope == GLOBAL_SCOPE {
+            return Ok(scope.to_string());
+        }
+        let path = std::fs::canonicalize(scope).with_context(|| format!("workspace {scope}"))?;
+        let w = self
+            .ledger
+            .call(move |c| workspaces::get(c, &path))
             .await?
-            .ok_or_else(|| anyhow!("no schedule named `{name}`"))
+            .ok_or_else(|| anyhow!("{scope} is not a registered workspace; `rl up` there first"))?;
+        Ok(w.path.to_string_lossy().into_owned())
     }
 
     /// Pausing keeps `next_at`; resuming plans afresh from now, so nothing
     /// missed while paused is made up.
-    pub async fn set_paused(&self, name: &str, paused: bool) -> Result<Schedule> {
-        let s = self.get(name).await?;
-        let n = name.to_string();
+    pub async fn set_paused(&self, name: &str, scope: Option<&str>, paused: bool) -> Result<Schedule> {
+        let s = self.get(name, scope).await?;
+        let (sc, n) = (s.scope.clone(), s.name.clone());
         self.ledger
-            .call(move |c| schedules::set_paused(c, GLOBAL_SCOPE, &n, paused))
+            .call(move |c| schedules::set_paused(c, &sc, &n, paused))
             .await?;
-        if !paused {
+        if !paused && s.approved() {
             self.plan(&s, Timestamp::now(), None).await?;
         }
         self.wake.notify_one();
-        self.get(name).await
+        self.get(&s.name, Some(&s.scope)).await
     }
 
-    /// Fires now, whatever the clock or the policies say.
-    pub async fn run_now(&self, name: &str) -> Result<Run> {
-        let s = self.get(name).await?;
+    /// Fires now, whatever the clock or the policies say. Approval still
+    /// counts: a version nobody said yes to does not run.
+    pub async fn run_now(&self, name: &str, scope: Option<&str>) -> Result<Run> {
+        let s = self.get(name, scope).await?;
         if s.removed_at.is_some() {
             bail!("`{name}` is no longer in {}", s.source.display());
+        }
+        if !s.approved() {
+            bail!(
+                "`{name}` in {} is not approved; `rl up {}` first",
+                s.scope_label(),
+                s.scope
+            );
         }
         self.fire(&s, Timestamp::now()).await
     }
 
-    /// Runs until shutdown. The caller has loaded the file.
+    // ---- workspaces ----------------------------------------------------------
+
+    pub async fn workspaces(&self) -> Result<Vec<Workspace>> {
+        self.ledger.call(|c| workspaces::list(c)).await
+    }
+
+    /// Registers a folder (idempotent), loads its `.relay/schedules.yaml`,
+    /// and approves every pending version when asked.
+    pub async fn up(&self, path: &Path, approve: bool) -> Result<UpReport> {
+        let path = std::fs::canonicalize(path).with_context(|| format!("workspace {}", path.display()))?;
+        if !path.is_dir() {
+            bail!("{} is not a directory", path.display());
+        }
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.to_string_lossy().into_owned());
+        let now = Timestamp::now();
+        let workspace = self
+            .ledger
+            .call({
+                let path = path.clone();
+                move |c| workspaces::register(c, &path, &name, now)
+            })
+            .await?;
+        let scope = path.to_string_lossy().into_owned();
+        let report = self.load_scope(&scope, &workspace_file(&path), false).await?;
+        let approved = if approve {
+            let sc = scope.clone();
+            self.ledger.call(move |c| schedules::approve(c, &sc, &[])).await?
+        } else {
+            Vec::new()
+        };
+        self.plan_all().await?;
+        self.wake.notify_one();
+        let sc = scope.clone();
+        let schedules = self
+            .ledger
+            .call(move |c| schedules::list_scope(c, &sc))
+            .await?
+            .into_iter()
+            .filter(|s| s.removed_at.is_none())
+            .collect();
+        info!(workspace = %path.display(), approved = approved.len(), "workspace up");
+        Ok(UpReport {
+            workspace,
+            report,
+            schedules,
+            approved,
+        })
+    }
+
+    /// Unregisters a folder; its schedules stop and are marked removed.
+    pub async fn remove_workspace(&self, path: &Path) -> Result<bool> {
+        let scope = self.scope_of(&path.to_string_lossy()).await?;
+        let now = Timestamp::now();
+        let path = PathBuf::from(&scope);
+        let gone = self
+            .ledger
+            .call(move |c| {
+                schedules::remove_scope(c, &scope, now)?;
+                workspaces::remove(c, &path)
+            })
+            .await?;
+        self.wake.notify_one();
+        Ok(gone)
+    }
+
+    // ---- the loop --------------------------------------------------------------
+
+    /// Runs until shutdown. The caller has loaded the files.
     pub async fn serve(self: Arc<Self>) {
         loop {
             let nap = match self.tick().await {
@@ -316,7 +476,7 @@ impl Scheduler {
         let now = Timestamp::now();
         let mut busy = false;
         for s in self.list(false).await? {
-            if s.paused {
+            if s.paused || !s.approved() {
                 continue;
             }
             match s.next_at {
@@ -329,7 +489,7 @@ impl Scheduler {
         let now = Timestamp::now();
         let mut nap = if busy { BUSY_TICK } else { TICK };
         for s in self.list(false).await? {
-            if let (false, Some(next)) = (s.paused, s.next_at) {
+            if let (false, true, Some(next)) = (s.paused, s.approved(), s.next_at) {
                 let wait = next.duration_since(now).unsigned_abs();
                 nap = nap.min(wait);
             }
@@ -387,9 +547,10 @@ impl Scheduler {
 
     async fn fire(&self, s: &Schedule, now: Timestamp) -> Result<Run> {
         let dir = s.source.parent().map(Path::to_path_buf).unwrap_or_default();
-        let spec = run_spec(&s.name, &s.spec, &dir, &self.registry)?;
+        let workspace = (s.scope != GLOBAL_SCOPE).then(|| PathBuf::from(&s.scope));
+        let spec = run_spec(&s.name, &s.spec, &dir, workspace.as_deref(), &self.registry)?;
         let run = self.supervisor.start(spec).await?;
-        info!(schedule = %s.name, run = %run.id, "schedule fired");
+        info!(schedule = %s.name, scope = %s.scope_label(), run = %run.id, "schedule fired");
         let (scope, name, hash, id) = (s.scope.clone(), s.name.clone(), s.hash.clone(), run.id.clone());
         let run_for_event = run.clone();
         self.ledger
@@ -403,7 +564,7 @@ impl Scheduler {
                         event_kind::SCHEDULE_FIRED,
                         format!("schedule `{name}` fired"),
                     )
-                    .with_data(json!({ "schedule": name, "hash": hash, "run": id })),
+                    .with_data(json!({ "schedule": name, "scope": scope, "hash": hash, "run": id })),
                 )
             })
             .await?;
@@ -413,7 +574,12 @@ impl Scheduler {
 
     async fn skipped(&self, s: &Schedule, now: Timestamp, reason: &str, due: Option<Timestamp>) -> Result<()> {
         info!(schedule = %s.name, reason, "schedule skipped");
-        let cwd = s.spec.cwd.as_deref().map(expand_home).unwrap_or_default();
+        let cwd = match (s.spec.cwd.as_deref().map(expand_home), s.scope.as_str()) {
+            (Some(c), _) if c.is_absolute() => c,
+            (Some(c), scope) if scope != GLOBAL_SCOPE => Path::new(scope).join(c),
+            (_, scope) if scope != GLOBAL_SCOPE => PathBuf::from(scope),
+            _ => PathBuf::new(),
+        };
         let ev = NewEvent {
             at: now,
             workspace: cwd.clone(),
@@ -425,7 +591,7 @@ impl Scheduler {
                 .unwrap_or_else(|| cwd.to_string_lossy().into_owned()),
             kind: event_kind::SCHEDULE_SKIPPED.into(),
             summary: format!("schedule `{}` skipped: {reason}", s.name),
-            data: Some(json!({ "schedule": s.name, "hash": s.hash, "reason": reason, "due": due })),
+            data: Some(json!({ "schedule": s.name, "scope": s.scope, "hash": s.hash, "reason": reason, "due": due })),
         };
         self.ledger.call(move |c| events::append(c, &ev).map(|_| ())).await
     }
@@ -459,7 +625,7 @@ mod tests {
 
     #[test]
     fn validation_says_what_is_wrong() {
-        let err = |y: &str| validate("x", &spec(y)).unwrap_err().to_string();
+        let err = |y: &str| validate("x", &spec(y), false).unwrap_err().to_string();
         assert!(err("run: [true]\ncwd: /tmp").contains("cron"));
         assert!(err("every: 1h\ncwd: /tmp").contains("run"));
         assert!(err("every: 1h\nrun: [true]").contains("cwd"));
@@ -467,8 +633,12 @@ mod tests {
         assert!(err("cron: '* * *'\nrun: [true]\ncwd: /tmp").contains("cron"));
         assert!(err("every: 1h\nagent: claude\ncwd: /tmp").contains("prompt"));
         assert!(err("every: 1h\nrun: [x]\nagent: claude\nprompt: p\ncwd: /tmp").contains("not both"));
-        assert!(validate("bad name", &spec("every: 1h\nrun: [true]\ncwd: /tmp")).is_err());
-        assert!(validate("ok-1", &spec("every: 1h\nrun: [true]\ncwd: /tmp")).is_ok());
+        assert!(validate("bad name", &spec("every: 1h\nrun: [true]\ncwd: /tmp"), false).is_err());
+        assert!(validate("ok-1", &spec("every: 1h\nrun: [true]\ncwd: /tmp"), false).is_ok());
+        assert!(
+            validate("ws", &spec("every: 1h\nrun: [true]"), true).is_ok(),
+            "a workspace has a cwd"
+        );
     }
 
     #[test]
@@ -489,15 +659,30 @@ mod tests {
         let s = spec(
             "every: 1h\nagent: claude\nprompt: 'look at the logs'\nargs: [--model, haiku]\ncwd: ~/ops\ntags: [ops]",
         );
-        let r = run_spec("logs", &s, Path::new("/x"), &reg).unwrap();
+        let r = run_spec("logs", &s, Path::new("/x"), None, &reg).unwrap();
         assert_eq!(r.argv, ["claude", "-p", "--model", "haiku", "look at the logs"]);
         assert_eq!(r.kind, RunKind::Agent);
         assert_eq!(r.title.as_deref(), Some("logs"));
         assert_eq!(r.cause, Cause::Schedule("logs".into()));
         assert!(r.cwd.ends_with("ops") && !r.cwd.starts_with("~"));
         let c = spec("every: 1h\nrun: [cargo, test]\ncwd: /tmp");
-        let r = run_spec("t", &c, Path::new("/x"), &reg).unwrap();
+        let r = run_spec("t", &c, Path::new("/x"), None, &reg).unwrap();
         assert_eq!(r.argv, ["cargo", "test"]);
         assert_eq!(r.kind, RunKind::Command);
+    }
+
+    #[test]
+    fn a_workspace_schedule_runs_in_its_folder() {
+        let reg = Registry::builtin();
+        let w = Path::new("/w/repo");
+        let s = spec("every: 1h\nrun: [make]");
+        assert_eq!(run_spec("m", &s, w, Some(w), &reg).unwrap().cwd, w);
+        let s = spec("every: 1h\nrun: [make]\ncwd: sub/dir");
+        assert_eq!(run_spec("m", &s, w, Some(w), &reg).unwrap().cwd, w.join("sub/dir"));
+        let s = spec("every: 1h\nrun: [make]\ncwd: /elsewhere");
+        assert_eq!(
+            run_spec("m", &s, w, Some(w), &reg).unwrap().cwd,
+            Path::new("/elsewhere")
+        );
     }
 }

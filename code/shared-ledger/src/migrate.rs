@@ -11,6 +11,7 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
     (3, "0003_seen", include_str!("../migrations/0003_seen.sql")),
     (4, "0004_detail", include_str!("../migrations/0004_detail.sql")),
     (5, "0005_schedules", include_str!("../migrations/0005_schedules.sql")),
+    (6, "0006_workspaces", include_str!("../migrations/0006_workspaces.sql")),
 ];
 
 pub fn run(conn: &mut Connection) -> Result<()> {
@@ -64,7 +65,8 @@ mod tests {
                 "schedule_specs",
                 "schedules",
                 "session_io",
-                "sessions"
+                "sessions",
+                "workspaces"
             ]
         );
     }

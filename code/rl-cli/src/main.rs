@@ -8,8 +8,9 @@ use relay_proto::methods::{
 };
 use relay_proto::methods::{
     ScheduleFilter, ScheduleList, ScheduleName, SchedulePause, ScheduleReload, ScheduleResume, ScheduleRun,
+    WorkspaceList, WorkspacePath, WorkspaceRemove, WorkspaceUp, WorkspaceUpParams,
 };
-use relay_proto::schedule::Schedule;
+use relay_proto::schedule::{Schedule, UpReport};
 use relay_proto::types::{AttachMode, Cause, Mark, RunKind, RunState};
 use rl_cli::client::Client;
 use rl_cli::daemon;
@@ -57,6 +58,13 @@ enum Cmd {
     Schedule {
         #[command(subcommand)]
         cmd: ScheduleCmd,
+    },
+    /// Register this folder as a workspace and load its .relay/: schedules fire once approved.
+    Up(UpArgs),
+    /// Registered folders (see `rl up`).
+    Workspace {
+        #[command(subcommand)]
+        cmd: WorkspaceCmd,
     },
     /// See a run's terminal live, read-only. q to leave.
     Watch(AttachArgs),
@@ -110,13 +118,38 @@ enum ScheduleCmd {
         all: bool,
     },
     /// Fire a schedule now, whatever the clock or its policies say.
-    Run { name: String },
+    Run(ScheduleRef),
     /// Stop a schedule from firing until resumed.
-    Pause { name: String },
+    Pause(ScheduleRef),
     /// Resume a paused schedule; it plans afresh from now.
-    Resume { name: String },
-    /// Re-read schedules.yaml (rld does it on start too).
+    Resume(ScheduleRef),
+    /// Re-read every schedules file (rld does it on start too).
     Reload,
+}
+
+#[derive(Args)]
+struct ScheduleRef {
+    name: String,
+    /// Which one, when the name exists in several: `global` or a workspace folder.
+    #[arg(long = "in", value_name = "SCOPE")]
+    scope: Option<String>,
+}
+
+#[derive(Args)]
+struct UpArgs {
+    /// The folder (default: current).
+    dir: Option<PathBuf>,
+    /// Approve every pending schedule without asking.
+    #[arg(short, long)]
+    yes: bool,
+}
+
+#[derive(Subcommand)]
+enum WorkspaceCmd {
+    /// List registered folders.
+    Ls,
+    /// Unregister a folder; its schedules stop.
+    Rm { dir: PathBuf },
 }
 
 #[derive(Subcommand)]
@@ -234,6 +267,8 @@ async fn main() -> Result<()> {
         Cmd::Since(a) => since(&home, a, cli.json).await,
         Cmd::Events(a) => events(&home, a, cli.json).await,
         Cmd::Schedule { cmd } => schedule(&home, cmd, cli.json).await,
+        Cmd::Up(a) => up(&home, a, cli.json).await,
+        Cmd::Workspace { cmd } => workspace(&home, cmd, cli.json).await,
         Cmd::Watch(a) => attach(&home, a, AttachMode::Watch).await,
         Cmd::Join(a) => attach(&home, a, AttachMode::Join).await,
         Cmd::Mark(a) => mark(&home, a, cli.json).await,
@@ -376,7 +411,10 @@ fn child_env(extra: &[String]) -> Result<Vec<(String, String)>> {
 
 async fn schedule(home: &Home, cmd: ScheduleCmd, json: bool) -> Result<()> {
     let mut rpc = Client::connect(home).await?;
-    let name = |n: &str| ScheduleName { name: n.to_string() };
+    let name = |r: &ScheduleRef| ScheduleName {
+        name: r.name.clone(),
+        scope: r.scope.clone(),
+    };
     let one = |s: Schedule, json: bool| -> Result<()> {
         if json {
             println!("{}", serde_json::to_string(&s)?);
@@ -398,16 +436,16 @@ async fn schedule(home: &Home, cmd: ScheduleCmd, json: bool) -> Result<()> {
                 println!("{}", render::table(SCHEDULE_HEADERS, &rows));
             }
         }
-        ScheduleCmd::Run { name: n } => {
-            let run = rpc.call::<ScheduleRun>(name(&n)).await?;
+        ScheduleCmd::Run(r) => {
+            let run = rpc.call::<ScheduleRun>(name(&r)).await?;
             if json {
                 println!("{}", serde_json::to_string(&run)?);
             } else {
                 println!("{}", run.id);
             }
         }
-        ScheduleCmd::Pause { name: n } => one(rpc.call::<SchedulePause>(name(&n)).await?, json)?,
-        ScheduleCmd::Resume { name: n } => one(rpc.call::<ScheduleResume>(name(&n)).await?, json)?,
+        ScheduleCmd::Pause(r) => one(rpc.call::<SchedulePause>(name(&r)).await?, json)?,
+        ScheduleCmd::Resume(r) => one(rpc.call::<ScheduleResume>(name(&r)).await?, json)?,
         ScheduleCmd::Reload => {
             let r = rpc.call::<ScheduleReload>(()).await?;
             if json {
@@ -429,10 +467,107 @@ async fn schedule(home: &Home, cmd: ScheduleCmd, json: bool) -> Result<()> {
     Ok(())
 }
 
-const SCHEDULE_HEADERS: &[&str] = &["NAME", "WHEN", "NEXT", "LAST", "STATE", "ACTION"];
+const SCHEDULE_HEADERS: &[&str] = &["SCOPE", "NAME", "WHEN", "NEXT", "LAST", "STATE", "ACTION"];
+
+async fn up(home: &Home, a: UpArgs, json: bool) -> Result<()> {
+    let path = match a.dir {
+        Some(d) => d,
+        None => std::env::current_dir()?,
+    };
+    let mut rpc = Client::connect(home).await?;
+    let mut r = rpc
+        .call::<WorkspaceUp>(WorkspaceUpParams {
+            path: path.clone(),
+            approve: a.yes,
+        })
+        .await?;
+    let pending: Vec<String> = r
+        .schedules
+        .iter()
+        .filter(|s| !s.approved())
+        .map(|s| s.name.clone())
+        .collect();
+    if !pending.is_empty() && !json && std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+        print_up(&r);
+        eprint!("approve {} ({})? [y/N] ", pending.len(), pending.join(", "));
+        let mut line = String::new();
+        std::io::stdin().read_line(&mut line)?;
+        if line.trim().eq_ignore_ascii_case("y") {
+            r = rpc
+                .call::<WorkspaceUp>(WorkspaceUpParams {
+                    path: path.clone(),
+                    approve: true,
+                })
+                .await?;
+        }
+    }
+    if json {
+        println!("{}", serde_json::to_string(&r)?);
+        return Ok(());
+    }
+    print_up(&r);
+    if !r.approved.is_empty() {
+        println!("approved: {}", r.approved.join(", "));
+    } else if r.schedules.iter().any(|s| !s.approved()) {
+        println!("not approved; nothing fires until `rl up --yes`");
+    }
+    for e in &r.report.errors {
+        eprintln!("not loaded: {e}");
+    }
+    Ok(())
+}
+
+fn print_up(r: &UpReport) {
+    println!("workspace {} ({})", r.workspace.name, display_path(&r.workspace.path));
+    if r.schedules.is_empty() {
+        println!("no schedules in .relay/schedules.yaml");
+    } else {
+        let now = now();
+        let rows: Vec<Vec<String>> = r.schedules.iter().map(|s| schedule_row(s, now)).collect();
+        println!("{}", render::table(SCHEDULE_HEADERS, &rows));
+    }
+}
+
+async fn workspace(home: &Home, cmd: WorkspaceCmd, json: bool) -> Result<()> {
+    let mut rpc = Client::connect(home).await?;
+    match cmd {
+        WorkspaceCmd::Ls => {
+            let list = rpc.call::<WorkspaceList>(()).await?;
+            if json {
+                println!("{}", serde_json::to_string(&list)?);
+            } else if list.is_empty() {
+                println!("no workspaces; `rl up` in a folder registers it");
+            } else {
+                let now = now();
+                let rows: Vec<Vec<String>> = list
+                    .iter()
+                    .map(|w| {
+                        vec![
+                            w.name.clone(),
+                            display_path(&w.path),
+                            format!("{} ago", relay_core::time::fmt_age(w.registered_at, now)),
+                        ]
+                    })
+                    .collect();
+                println!("{}", render::table(&["NAME", "PATH", "REGISTERED"], &rows));
+            }
+        }
+        WorkspaceCmd::Rm { dir } => {
+            let gone = rpc.call::<WorkspaceRemove>(WorkspacePath { path: dir.clone() }).await?;
+            if json {
+                println!("{}", json!({ "removed": gone }));
+            } else if gone {
+                println!("{} unregistered; its schedules stop", display_path(&dir));
+            } else {
+                println!("{} was not registered", display_path(&dir));
+            }
+        }
+    }
+    Ok(())
+}
 
 fn schedule_row(s: &Schedule, now: jiff::Timestamp) -> Vec<String> {
-    let next = match (s.paused, s.removed_at, s.next_at) {
+    let next = match (s.paused || !s.approved(), s.removed_at, s.next_at) {
         (true, _, _) | (_, Some(_), _) => "—".to_string(),
         (_, _, Some(t)) if t > now => format!("in {}", relay_core::time::fmt_duration(t.duration_since(now))),
         (_, _, Some(_)) => "due".to_string(),
@@ -444,6 +579,8 @@ fn schedule_row(s: &Schedule, now: jiff::Timestamp) -> Vec<String> {
     };
     let state = if s.removed_at.is_some() {
         "removed"
+    } else if !s.approved() {
+        "needs approval"
     } else if s.paused {
         "paused"
     } else {
@@ -454,7 +591,15 @@ fn schedule_row(s: &Schedule, now: jiff::Timestamp) -> Vec<String> {
         None => s.spec.run.join(" "),
     };
     let action: String = action.chars().take(48).collect();
-    vec![s.name.clone(), s.spec.when(), next, last, state.to_string(), action]
+    vec![
+        s.scope_label(),
+        s.name.clone(),
+        s.spec.when(),
+        next,
+        last,
+        state.to_string(),
+        action,
+    ]
 }
 
 async fn stop(home: &Home, a: StopArgs, json: bool) -> Result<()> {

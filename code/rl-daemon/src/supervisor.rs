@@ -191,7 +191,18 @@ impl Supervisor {
         let now = Timestamp::now();
         let id = new_id();
         let place = git::placement(&cwd).await;
-        let workspace = place.toplevel.clone().unwrap_or_else(|| cwd.clone());
+        // A registered workspace containing cwd wins; then the git root; then cwd.
+        let registered = self
+            .ledger
+            .call({
+                let cwd = cwd.clone();
+                move |c| relay_ledger::workspaces::containing(c, &cwd)
+            })
+            .await?
+            .map(|w| w.path);
+        let workspace = registered
+            .or_else(|| place.toplevel.clone())
+            .unwrap_or_else(|| cwd.clone());
         let title = spec.title.clone().unwrap_or_else(|| default_title(&spec.argv));
 
         // What is this? A known CLI gets its kind, its name, and — where it
