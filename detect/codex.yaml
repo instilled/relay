@@ -1,6 +1,7 @@
 # OpenAI Codex CLI. No hook API yet; PTY heuristics only.
 kind: agent
 bins: [codex]
+headless: [exec]
 patterns:
   needs_input:
     - '(?i)allow command\?'

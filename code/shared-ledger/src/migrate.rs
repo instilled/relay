@@ -10,6 +10,7 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
     (2, "0002_sessions", include_str!("../migrations/0002_sessions.sql")),
     (3, "0003_seen", include_str!("../migrations/0003_seen.sql")),
     (4, "0004_detail", include_str!("../migrations/0004_detail.sql")),
+    (5, "0005_schedules", include_str!("../migrations/0005_schedules.sql")),
 ];
 
 pub fn run(conn: &mut Connection) -> Result<()> {
@@ -54,6 +55,17 @@ mod tests {
             .unwrap()
             .collect::<Result<_, _>>()
             .unwrap();
-        assert_eq!(tables, ["events", "presence", "runs", "session_io", "sessions"]);
+        assert_eq!(
+            tables,
+            [
+                "events",
+                "presence",
+                "runs",
+                "schedule_specs",
+                "schedules",
+                "session_io",
+                "sessions"
+            ]
+        );
     }
 }

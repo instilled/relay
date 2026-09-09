@@ -32,6 +32,7 @@ struct ProfileFile {
     bins: Option<Vec<String>>,
     interactive_only: Option<bool>,
     hooks: Option<HooksFile>,
+    headless: Option<Vec<String>>,
     patterns: Option<PatternsFile>,
     timing: Option<TimingFile>,
 }
@@ -71,6 +72,9 @@ impl ProfileFile {
         }
         if over.hooks.is_some() {
             self.hooks = over.hooks;
+        }
+        if over.headless.is_some() {
+            self.headless = over.headless;
         }
         if let Some(p) = over.patterns {
             let mine = self.patterns.get_or_insert_with(Default::default);
@@ -112,6 +116,9 @@ pub struct Profile {
     /// script). Shells.
     pub interactive_only: bool,
     pub hooks: Option<Hooks>,
+    /// Arguments that make the CLI run one prompt and exit (`-p`), for
+    /// scheduled runs.
+    pub headless: Vec<String>,
     /// Generic patterns first, then the profile's own.
     pub patterns: Patterns,
     pub timing: Timing,
@@ -203,6 +210,7 @@ impl Registry {
                         dialect: h.dialect,
                         args: h.args,
                     }),
+                    headless: file.headless.unwrap_or_default(),
                     patterns,
                     timing,
                     name,

@@ -11,7 +11,7 @@ use std::path::PathBuf;
 
 const COLS: &str = "id, workspace, kind, title, cli, argv_json, cwd, branch, worktree, \"ref\", tags_json, \
     state, source, confidence, state_at, started_at, ended_at, exit_code, cost_json, \
-    schedule_run, plugin, parent_run, last_line, seen_at, detail";
+    cause, flow, parent_run, last_line, seen_at, detail";
 
 const DEFAULT_LIMIT: u32 = 200;
 
@@ -38,8 +38,8 @@ pub fn insert(conn: &Connection, r: &Run) -> Result<()> {
             r.ended_at.map(to_millis),
             r.exit_code,
             r.cost.as_ref().map(serde_json::to_string).transpose()?,
-            r.schedule_run,
-            r.plugin,
+            r.cause.to_string(),
+            r.flow,
             r.parent_run,
             r.last_line,
             r.seen_at.map(to_millis),
@@ -58,6 +58,10 @@ pub fn get(conn: &Connection, id: &str) -> Result<Option<Run>> {
 pub fn list(conn: &Connection, f: &RunFilter) -> Result<Vec<Run>> {
     let mut sql = format!("SELECT {COLS} FROM runs WHERE 1=1");
     let mut args: Vec<Value> = Vec::new();
+    if let Some(c) = &f.cause {
+        sql.push_str(" AND cause = ?");
+        args.push(Value::from(c.clone()));
+    }
     if !f.states.is_empty() {
         let marks = std::iter::repeat_n("?", f.states.len()).collect::<Vec<_>>().join(",");
         sql.push_str(&format!(" AND state IN ({marks})"));
@@ -174,8 +178,8 @@ fn from_row(row: &Row<'_>) -> rusqlite::Result<Run> {
             .map(|s| serde_json::from_str(&s))
             .transpose()
             .map_err(|e| conv(18, e))?,
-        schedule_run: row.get(19)?,
-        plugin: row.get(20)?,
+        cause: row.get::<_, String>(19)?.parse().map_err(|e| conv_str(19, e))?,
+        flow: row.get(20)?,
         parent_run: row.get(21)?,
         last_line: row.get(22)?,
         seen_at: row

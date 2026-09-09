@@ -82,6 +82,10 @@ impl Home {
     pub fn ledger(&self) -> PathBuf {
         self.0.join("ledger.db")
     }
+    /// User-level schedules, human-edited.
+    pub fn schedules_file(&self) -> PathBuf {
+        self.0.join("schedules.yaml")
+    }
     pub fn session_socket(&self, run: &str) -> PathBuf {
         self.socket_dir().join(format!("session-{run}.sock"))
     }
