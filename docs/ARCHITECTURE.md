@@ -1,6 +1,6 @@
 # Relay — architecture
 
-**Status:** as built · **Date:** 2026-09-09 · **Tree:** `grammar` branch
+**Status:** as built · **Date:** 2026-09-09 · **Tree:** `reactions` branch
 
 [PRODUCT.md](PRODUCT.md) says what Relay is for and where it is going. This file says how the
 tree that exists is wired: which processes there are, who owns what, and what crosses which
@@ -17,7 +17,7 @@ Three kinds of process and two socket protocols. Nothing else talks to anything.
 flowchart TB
     subgraph cli["rl — CLI + control panel (rl-cli)"]
         tui["TUI: since-you-left · fleet · detail · terminal"]
-        cmds["run · stop · ls · since · events · watch · join · mark<br/>schedule · up · workspace · ask · decisions · decide"]
+        cmds["run · stop · ls · since · events · watch · join · mark<br/>schedule · up · workspace · ask · decisions · decide · on · react"]
         hookcmd["rl hook &lt;Event&gt; — hidden, called by the agent's hooks"]
     end
 
@@ -28,6 +28,7 @@ flowchart TB
         sup["supervisor — start · follow · apply · reconcile"]
         sched["scheduler — schedules.yaml → runs, on time"]
         dec["decisions — questions waiting on a human → runs"]
+        react["reactor — events → actions, and questions"]
         attach["attach — scrollback → replay → live"]
         digest["digest — one line per run, and whether it is news"]
         gitm["git — read-only placement: workspace, branch"]
@@ -39,7 +40,7 @@ flowchart TB
     end
 
     detect["relay-detect<br/>registry (detect/*.yaml) · PTY heuristics<br/>Claude hooks · state machine"]
-    db[("~/.relay/ledger.db — relay-ledger<br/>runs · events · sessions · session_io · presence<br/>schedules · schedule_specs · workspaces · decisions")]
+    db[("~/.relay/ledger.db — relay-ledger<br/>runs · events · sessions · session_io · presence<br/>schedules · reactions (+ specs) · workspaces · decisions · meta")]
 
     cli -->|"JSON-RPC, one line per message<br/>~/.relay/run/rld.sock — relay-proto"| rld
     child -->|"hooks fire<br/>RELAY_RUN in the env"| hookcmd
@@ -48,6 +49,9 @@ flowchart TB
     sup <-->|"framed holder protocol on the run's socket<br/>Output · Input · Resize · Signal · Exit"| h
     sched -->|"run.start with cause: schedule:&lt;name&gt;"| sup
     dec -->|"the chosen option, cause: decision:&lt;id&gt;"| sup
+    db -.->|"new event rows, by id"| react
+    react -->|"cause: reaction:&lt;name&gt;"| sup
+    react -->|"or a question"| dec
     attach -.->|"one holder connection per viewer"| h
     h --> child
 
@@ -251,6 +255,12 @@ flowchart LR
     q -.->|"expires with a default"| run2
     q -.->|"expires with none"| gone(["expired"])
 
+    run1 -.->|"run.failed"| ev{{"events"}}
+    q -.->|"decision.raised"| ev
+    ev --> rules["reactions.yaml"]
+    rules -->|"cause: reaction:&lt;name&gt;"| run3["run — notify me"]
+    rules -.->|"or ask:"| q
+
     classDef q fill:#3e2f10,stroke:#d9a441,color:#f5e6c8
     class q,gone q
 ```
@@ -286,8 +296,25 @@ leaves one line rather than thirty. An `expires` either takes the option marked 
 moves the question to `expired`; the sweeper sleeps until the earliest deadline and does
 nothing when there is none.
 
-Relay still talks to no one. A question surfaces in `rl decisions`, in `rl since`, and at the
-top of the since-you-left screen; delivery to Slack or mail waits for reactions.
+**Reactions** are the other direction: every event the ledger records is offered to the rules in
+`reactions.yaml`, and a rule either runs something or asks a question. A rule says which kinds
+it wants (`run.failed`, `run.*`, `*`), may narrow by `where` (the run's tag, cause, cli, or the
+event's group), and fills `{summary}`, `{title}`, `{run}`, `{data.x}` and the rest into whatever
+it runs. The whole event is in the child's environment as `RELAY_EVENT`.
+
+Three things keep a rule from running away with itself. A run it starts carries `cause:
+reaction:<name>` and a question it asks remembers the same, so no rule ever answers its own
+doing. A throttle, ten seconds by default, collapses a burst. And the loop reads the event table
+by id from a cursor kept in `meta`, ignoring anything older than five minutes, so a daemon that
+was down does not come back and fire a day of history.
+
+`rl on run.failed -- notify "{summary}"` appends a rule to your own file and reloads; the file
+stays yours, comments and all. `rl react test <event>` replays one real event through every rule
+and prints what each would do, and why it would not.
+
+Relay still talks to no one itself. A question surfaces in `rl decisions`, in `rl since` and at
+the top of the since-you-left screen; getting it to Slack or mail is a reaction on
+`decision.raised` running your own command.
 
 ---
 
@@ -299,6 +326,8 @@ top of the since-you-left screen; delivery to Slack or mail waits for reactions.
                               workspaces
   schedules.yaml              user-level schedules; the file is the interface, the ledger keeps
                               versions (by sha256), pause state, last/next firing
+  reactions.yaml              user-level rules: events → actions, or questions; same file-first
+                              deal, same versioning (`rl on` appends to it)
   run/                        0700 — rld.sock, rld.pid, <run>.sock, <run>.exit
   log/                        rld.log, <run>.log
   hooks/claude.json           written at daemon start; passed to claude as --settings
@@ -308,14 +337,15 @@ top of the since-you-left screen; delivery to Slack or mail waits for reactions.
 <workspace>/.relay/           per folder registered with `rl up` — the trust boundary
   schedules.yaml              versioned with the folder; a version fires only once approved
                               (approved_hash == hash); an edit asks again
+  reactions.yaml              the same, for rules; `rl up` loads and approves both
 
 detect/*.yaml                 in-tree, compiled in: generic, claude, codex, cursor, sh
 scripts/{rl,rld,relay-dev}    dev shims: build if needed, run the debug binaries
 scripts/live                  a live Relay to poke at: its home is live/home, seeded from
                               live/seed by `scripts/live reset`; `scripts/live <rl args>` talks
                               to it, and the recorded claude player is first on its PATH
-live/seed/                    what reset copies: global schedules.yaml and a ws/ workspace
-                              (everything else under live/ is gitignored throwaway)
+live/seed/                    what reset copies: global schedules.yaml + reactions.yaml and a
+                              ws/ workspace (everything else under live/ is throwaway)
 ```
 
 Sockets normally live in `run/`; a long `$RELAY_HOME` would blow the ~104-byte `sockaddr_un`
@@ -328,12 +358,11 @@ limit, so both sides fall back to the same short hashed directory under the temp
 Named here so the diagrams above are not read as the whole plan — see §7 of the brief for
 phasing.
 
-- **Workspace files beyond schedules** — `reactions.yaml`, `workflows/`; `rl up` loads only
-  `schedules.yaml` today.
-- **Reactions and workflows** — the rest of the flow model: events → reactions, and
-  `workflows/<name>.yaml` as declarative sugar over the same engine. `Run.cause` and `Run.flow`
-  carry `manual`, `schedule:<name>` and `decision:<id>` today; `reaction:` and `workflow:` are
-  reserved.
+- **Workflows** — `workflows/<name>.yaml`, steps with `after`/`when` and decision steps, as
+  declarative sugar over the engine that reactions and decisions already are. `Run.cause` and
+  `Run.flow` carry `manual`, `schedule:<name>`, `decision:<id>` and `reaction:<name>` today;
+  `workflow:` is reserved. `rl up` loads a folder's `schedules.yaml` and `reactions.yaml`;
+  `workflows/` is not read yet.
 - **Plugins** — `rl-plugin-host` (Bun), the broker, `relay.d.ts`, the manifest/approval flow,
   action keys and the detail tab. `~/.relay/plugins/` exists, unused.
 - **Facts and summaries** — the collector, transcript ingestion, cached narrative, cost. No

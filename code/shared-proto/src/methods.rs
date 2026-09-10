@@ -544,3 +544,59 @@ pub struct DecisionNote {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
 }
+
+// ---- reaction.* -------------------------------------------------------------
+
+pub struct ReactionList;
+impl Method for ReactionList {
+    const NAME: &'static str = "reaction.list";
+    type Params = ScheduleFilter;
+    type Result = Vec<crate::reaction::Reaction>;
+}
+
+pub struct ReactionPause;
+impl Method for ReactionPause {
+    const NAME: &'static str = "reaction.pause";
+    type Params = ScheduleName;
+    type Result = crate::reaction::Reaction;
+}
+
+pub struct ReactionResume;
+impl Method for ReactionResume {
+    const NAME: &'static str = "reaction.resume";
+    type Params = ScheduleName;
+    type Result = crate::reaction::Reaction;
+}
+
+/// Re-reads every `reactions.yaml`.
+pub struct ReactionReload;
+impl Method for ReactionReload {
+    const NAME: &'static str = "reaction.reload";
+    type Params = ();
+    type Result = crate::schedule::ReloadReport;
+}
+
+/// What every rule would do with one event, without doing any of it.
+pub struct ReactionTest;
+impl Method for ReactionTest {
+    const NAME: &'static str = "reaction.test";
+    type Params = EventId;
+    type Result = Vec<ReactionTrial>;
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EventId {
+    pub event: i64,
+}
+
+/// One rule against one event: whether it fires, and why not when it does not.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReactionTrial {
+    pub reaction: String,
+    pub scope: String,
+    pub fires: bool,
+    pub why: String,
+    /// What it would run, or the question it would ask.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<String>,
+}

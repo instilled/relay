@@ -30,6 +30,7 @@ pub struct Daemon {
     pub supervisor: Arc<Supervisor>,
     pub scheduler: Arc<Scheduler>,
     pub decisions: Arc<crate::decisions::Decisions>,
+    pub reactor: Arc<crate::reactions::Reactor>,
     pub started_at: Timestamp,
     pub shutdown: CancellationToken,
 }
@@ -93,6 +94,7 @@ pub async fn serve_with(home: Home, shutdown: CancellationToken, opts: ServeOpti
         Err(e) => warn!(error = %e, "reconciling sessions"),
     }
     let registry2 = registry.clone();
+    let registry3 = registry.clone();
     let scheduler = Arc::new(Scheduler::new(
         home.clone(),
         ledger.clone(),
@@ -118,12 +120,31 @@ pub async fn serve_with(home: Home, shutdown: CancellationToken, opts: ServeOpti
         shutdown.child_token(),
     ));
     tokio::spawn(decisions.clone().serve());
+    let reactor = Arc::new(crate::reactions::Reactor::new(
+        home.clone(),
+        ledger.clone(),
+        supervisor.clone(),
+        decisions.clone(),
+        registry3,
+        shutdown.child_token(),
+    ));
+    // Read before the socket answers, so a rule is live as soon as `rld` is.
+    match reactor.reload().await {
+        Ok(r) => {
+            for e in &r.errors {
+                warn!(reaction = %e, "reaction not loaded");
+            }
+        }
+        Err(e) => warn!(error = %format!("{e:#}"), "reactions not loaded"),
+    }
+    tokio::spawn(reactor.clone().serve());
     let daemon = Arc::new(Daemon {
         home: home.clone(),
         ledger,
         supervisor,
         scheduler,
         decisions,
+        reactor,
         started_at: Timestamp::now(),
         shutdown: shutdown.clone(),
     });

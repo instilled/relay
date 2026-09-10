@@ -6,6 +6,7 @@ pub mod decisions;
 pub mod digest;
 pub mod git;
 pub mod handlers;
+pub mod reactions;
 pub mod router;
 pub mod schedule;
 pub mod server;

@@ -7,7 +7,7 @@ use jiff::Timestamp;
 use relay_core::time::{from_millis, to_millis};
 use relay_proto::methods::EventFilter;
 use relay_proto::types::{Event, Run};
-use rusqlite::{Connection, Row, params, params_from_iter, types::Value};
+use rusqlite::{Connection, OptionalExtension, Row, params, params_from_iter, types::Value};
 use std::path::PathBuf;
 
 const COLS: &str = "id, at, workspace, run, group_key, kind, summary, data_json";
@@ -89,6 +89,29 @@ pub fn list(conn: &Connection, f: &EventFilter) -> Result<Vec<Event>> {
 
 /// The newest event of a run other than `run.started` (that one if it is
 /// all there is).
+/// One event by id.
+pub fn get(conn: &Connection, id: i64) -> Result<Option<Event>> {
+    Ok(conn
+        .query_row(
+            &format!("SELECT {COLS} FROM events WHERE id = ?1"),
+            params![id],
+            from_row,
+        )
+        .optional()?)
+}
+
+/// Events after `id`, oldest first: how the reactor reads the stream.
+pub fn after(conn: &Connection, id: i64, limit: u32) -> Result<Vec<Event>> {
+    let mut stmt = conn.prepare(&format!("SELECT {COLS} FROM events WHERE id > ?1 ORDER BY id LIMIT ?2"))?;
+    let rows = stmt.query_map(params![id, limit], from_row)?;
+    Ok(rows.collect::<std::result::Result<_, _>>()?)
+}
+
+/// The newest event's id, or 0 when there are none.
+pub fn last_id(conn: &Connection) -> Result<i64> {
+    Ok(conn.query_row("SELECT COALESCE(MAX(id), 0) FROM events", [], |r| r.get(0))?)
+}
+
 pub fn latest_for_run(conn: &Connection, run: &str) -> Result<Option<Event>> {
     let mut stmt = conn.prepare(&format!(
         "SELECT {COLS} FROM events WHERE run = ?1 ORDER BY (kind = 'run.started') ASC, at DESC, id DESC LIMIT 1"
