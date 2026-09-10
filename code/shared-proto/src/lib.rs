@@ -9,6 +9,7 @@ pub mod action;
 pub mod codec;
 pub mod decision;
 pub mod methods;
+pub mod reaction;
 pub mod rpc;
 pub mod schedule;
 pub mod types;

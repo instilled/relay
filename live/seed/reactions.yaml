@@ -1,0 +1,16 @@
+# The global reactions of the live test home (~/.relay/reactions.yaml).
+# `scripts/live reset` copies this to live/home/ and replaces @LIVE@ with the
+# path of live/. Yours are trusted: they answer events as soon as they load.
+reactions:
+  # Every failure leaves a line you can tail.
+  note-failures:
+    on: run.failed
+    run: 'echo "$(date +%T) {title}: {summary}" >> failures.log'
+    cwd: "@LIVE@/ws"
+
+  # A question raised anywhere becomes a desktop notification. This is how
+  # decisions reach you: Relay never talks to a service itself.
+  tell-me-when-asked:
+    on: decision.raised
+    run: 'echo "$(date +%T) ASK {summary}" >> asked.log'
+    cwd: "@LIVE@/ws"

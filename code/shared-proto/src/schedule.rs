@@ -121,14 +121,19 @@ impl Schedule {
 
     /// `global`, or the workspace folder's name.
     pub fn scope_label(&self) -> String {
-        if self.scope == GLOBAL_SCOPE {
-            return GLOBAL_SCOPE.to_string();
-        }
-        std::path::Path::new(&self.scope)
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| self.scope.clone())
+        scope_label(&self.scope)
     }
+}
+
+/// `global`, or the folder's own name: what a scope is called in a list.
+pub fn scope_label(scope: &str) -> String {
+    if scope == GLOBAL_SCOPE {
+        return GLOBAL_SCOPE.to_string();
+    }
+    std::path::Path::new(scope)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| scope.to_string())
 }
 
 pub const GLOBAL_SCOPE: &str = "global";
@@ -147,11 +152,21 @@ pub struct Workspace {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UpReport {
     pub workspace: Workspace,
+    /// What reading the folder's `schedules.yaml` changed.
     pub report: ReloadReport,
-    /// The workspace's live schedules after the load.
+    /// Its schedules as they now stand.
     pub schedules: Vec<Schedule>,
-    /// Names approved by this call.
+    /// Schedules approved by this call.
     pub approved: Vec<String>,
+    /// What reading its `reactions.yaml` changed.
+    #[serde(default)]
+    pub reaction_report: ReloadReport,
+    /// Its reactions as they now stand.
+    #[serde(default)]
+    pub reactions: Vec<crate::reaction::Reaction>,
+    /// Reactions approved by this call.
+    #[serde(default)]
+    pub approved_reactions: Vec<String>,
 }
 
 /// What a reload found.

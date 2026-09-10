@@ -12,9 +12,13 @@ use relay_proto::methods::{
     DecisionTake, DecisionTakeParams,
 };
 use relay_proto::methods::{
+    EventId, ReactionList, ReactionPause, ReactionReload, ReactionResume, ReactionTest, ReactionTrial,
+};
+use relay_proto::methods::{
     ScheduleFilter, ScheduleList, ScheduleName, SchedulePause, ScheduleReload, ScheduleResume, ScheduleRun,
     WorkspaceList, WorkspacePath, WorkspaceRemove, WorkspaceUp, WorkspaceUpParams,
 };
+use relay_proto::reaction::Reaction;
 use relay_proto::schedule::{Schedule, UpReport};
 use relay_proto::types::{AttachMode, Cause, Mark, RunKind, RunState};
 use rl_cli::client::Client;
@@ -64,6 +68,13 @@ enum Cmd {
         #[command(subcommand)]
         cmd: ScheduleCmd,
     },
+    /// Rules that answer events: what reactions.yaml says, and whether they fire.
+    React {
+        #[command(subcommand)]
+        cmd: ReactCmd,
+    },
+    /// Write a rule into your reactions.yaml: `rl on run.failed -- notify "{summary}"`.
+    On(OnArgs),
     /// Ask a human something and carry on: the question waits until answered.
     Ask(AskArgs),
     /// Questions waiting on you (and, with --all, the answered ones).
@@ -144,6 +155,49 @@ struct ScheduleRef {
     /// Which one, when the name exists in several: `global` or a workspace folder.
     #[arg(long = "in", value_name = "SCOPE")]
     scope: Option<String>,
+}
+
+#[derive(Subcommand)]
+enum ReactCmd {
+    /// List the rules: what they watch for, and what they do.
+    Ls {
+        /// Include rules removed from the file.
+        #[arg(short, long)]
+        all: bool,
+    },
+    /// What every rule would do with one event, without doing any of it.
+    Test {
+        /// Event id, from `rl events`.
+        event: i64,
+    },
+    /// Stop a rule from firing until resumed.
+    Pause(ScheduleRef),
+    /// Let it fire again.
+    Resume(ScheduleRef),
+    /// Re-read every reactions file (rld does it on start too).
+    Reload,
+}
+
+#[derive(Args)]
+struct OnArgs {
+    /// The event kind, or a family: `run.failed`, `run.*`, `decision.raised`.
+    kind: String,
+    /// What to run. Everything after `--`; `{summary}`, `{title}`, `{run}` and
+    /// the rest are filled in from the event.
+    #[arg(last = true, required = true)]
+    argv: Vec<String>,
+    /// What to call it (default: from the kind).
+    #[arg(long)]
+    name: Option<String>,
+    /// Only for runs carrying this tag.
+    #[arg(long)]
+    tag: Option<String>,
+    /// Where it runs (default: here).
+    #[arg(long)]
+    cwd: Option<PathBuf>,
+    /// Not again within this long (default: 10s).
+    #[arg(long)]
+    throttle: Option<String>,
 }
 
 #[derive(Args)]
@@ -337,6 +391,8 @@ async fn main() -> Result<()> {
         Cmd::Since(a) => since(&home, a, cli.json).await,
         Cmd::Events(a) => events(&home, a, cli.json).await,
         Cmd::Schedule { cmd } => schedule(&home, cmd, cli.json).await,
+        Cmd::React { cmd } => react(&home, cmd, cli.json).await,
+        Cmd::On(a) => on(&home, a, cli.json).await,
         Cmd::Ask(a) => ask(&home, a, cli.json).await,
         Cmd::Decisions(a) => decisions(&home, a, cli.json).await,
         Cmd::Decide(a) => decide(&home, a, cli.json).await,
@@ -1027,7 +1083,7 @@ fn decision_text(d: &Decision, now: jiff::Timestamp) -> String {
     }
     out.push('\n');
     for o in &d.options {
-        let action = o.action.label();
+        let action = o.action().label();
         let mark = if o.default { "*" } else { " " };
         out.push_str(&format!("  {mark}{:<10} {}\n", o.key, o.text()));
         if !action.is_empty() {
@@ -1060,6 +1116,194 @@ fn until(t: jiff::Timestamp, now: jiff::Timestamp) -> String {
     }
 }
 
+const REACTION_HEADERS: &[&str] = &["SCOPE", "NAME", "ON", "LAST", "STATE", "DOES"];
+
+fn reaction_row(r: &Reaction, now: jiff::Timestamp) -> Vec<String> {
+    let last = match (r.last_fired_at, &r.last_run) {
+        (Some(t), Some(id)) => format!("{} ago · {id}", relay_core::time::fmt_age(t, now)),
+        (Some(t), None) => format!("{} ago", relay_core::time::fmt_age(t, now)),
+        _ => "never".to_string(),
+    };
+    let state = if r.removed_at.is_some() {
+        "removed"
+    } else if !r.approved() {
+        "needs approval"
+    } else if r.paused {
+        "paused"
+    } else {
+        "on"
+    };
+    let does = match &r.spec.ask {
+        Some(ask) => format!("asks: {}", ask.title),
+        None => r.spec.action().label(),
+    };
+    let does: String = does.chars().take(48).collect();
+    vec![
+        r.scope_label(),
+        r.name.clone(),
+        r.spec.when(),
+        last,
+        state.to_string(),
+        does,
+    ]
+}
+
+async fn react(home: &Home, cmd: ReactCmd, json: bool) -> Result<()> {
+    let mut rpc = Client::connect(home).await?;
+    let one = |r: Reaction, json: bool| -> Result<()> {
+        if json {
+            println!("{}", serde_json::to_string(&r)?);
+        } else {
+            println!("{}", render::table(REACTION_HEADERS, &[reaction_row(&r, now())]));
+        }
+        Ok(())
+    };
+    match cmd {
+        ReactCmd::Ls { all } => {
+            let list = rpc.call::<ReactionList>(ScheduleFilter { all }).await?;
+            if json {
+                println!("{}", serde_json::to_string(&list)?);
+            } else if list.is_empty() {
+                println!("no reactions ({})", display_path(&home.reactions_file()));
+            } else {
+                let now = now();
+                let rows: Vec<Vec<String>> = list.iter().map(|r| reaction_row(r, now)).collect();
+                println!("{}", render::table(REACTION_HEADERS, &rows));
+            }
+        }
+        ReactCmd::Test { event } => {
+            let trials = rpc.call::<ReactionTest>(EventId { event }).await?;
+            if json {
+                println!("{}", serde_json::to_string(&trials)?);
+            } else if trials.is_empty() {
+                println!("no reactions");
+            } else {
+                println!("{}", render::table(TRIAL_HEADERS, &trial_rows(&trials)));
+            }
+        }
+        ReactCmd::Pause(r) => one(
+            rpc.call::<ReactionPause>(ScheduleName {
+                name: r.name,
+                scope: r.scope,
+            })
+            .await?,
+            json,
+        )?,
+        ReactCmd::Resume(r) => one(
+            rpc.call::<ReactionResume>(ScheduleName {
+                name: r.name,
+                scope: r.scope,
+            })
+            .await?,
+            json,
+        )?,
+        ReactCmd::Reload => {
+            let r = rpc.call::<ReactionReload>(()).await?;
+            if json {
+                println!("{}", serde_json::to_string(&r)?);
+            } else {
+                println!(
+                    "{} loaded · {} added · {} changed · {} removed",
+                    r.loaded,
+                    r.added.len(),
+                    r.changed.len(),
+                    r.removed.len()
+                );
+                for e in &r.errors {
+                    eprintln!("not loaded: {e}");
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+const TRIAL_HEADERS: &[&str] = &["SCOPE", "NAME", "FIRES", "WHY", "WOULD"];
+
+fn trial_rows(trials: &[ReactionTrial]) -> Vec<Vec<String>> {
+    trials
+        .iter()
+        .map(|t| {
+            vec![
+                t.scope.clone(),
+                t.reaction.clone(),
+                if t.fires { "yes" } else { "no" }.to_string(),
+                t.why.clone(),
+                t.action.clone().unwrap_or_default().chars().take(48).collect(),
+            ]
+        })
+        .collect()
+}
+
+/// `rl on`: append a rule to the user's own reactions.yaml. The file stays
+/// yours — this only adds to the end of it, comments and all.
+async fn on(home: &Home, a: OnArgs, json: bool) -> Result<()> {
+    let name = match a.name {
+        Some(n) => n,
+        None => {
+            let base: String = a
+                .kind
+                .chars()
+                .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+                .collect();
+            format!("on-{}", base.trim_matches('-'))
+        }
+    };
+    if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || "._-".contains(c)) {
+        bail!("a name is letters, digits, `.`, `_` and `-`");
+    }
+    let cwd = match a.cwd {
+        Some(c) => c,
+        None => std::env::current_dir()?,
+    };
+    let file = home.reactions_file();
+    let existing = std::fs::read_to_string(&file).unwrap_or_default();
+    if existing.contains(&format!("\n  {name}:")) || existing.starts_with(&format!("  {name}:")) {
+        bail!("`{name}` is already in {}; edit it there", display_path(&file));
+    }
+
+    let mut block = String::new();
+    if !existing.lines().any(|l| l.trim_start().starts_with("reactions:")) {
+        block.push_str("reactions:\n");
+    } else if !existing.ends_with('\n') {
+        block.push('\n');
+    }
+    block.push_str(&format!("  {name}:\n    on: {}\n", yaml_scalar(&a.kind)));
+    if let Some(tag) = &a.tag {
+        block.push_str(&format!("    where: {{ tag: {} }}\n", yaml_scalar(tag)));
+    }
+    let argv: Vec<String> = a.argv.iter().map(|w| yaml_scalar(w)).collect();
+    block.push_str(&format!("    run: [{}]\n", argv.join(", ")));
+    block.push_str(&format!("    cwd: {}\n", yaml_scalar(&cwd.to_string_lossy())));
+    if let Some(t) = &a.throttle {
+        block.push_str(&format!("    throttle: {}\n", yaml_scalar(t)));
+    }
+
+    std::fs::write(&file, format!("{existing}{block}"))?;
+    let report = Client::connect(home).await?.call::<ReactionReload>(()).await?;
+    if json {
+        println!("{}", serde_json::to_string(&report)?);
+    } else {
+        print!("{block}");
+        println!("→ {}", display_path(&file));
+        for e in &report.errors {
+            eprintln!("not loaded: {e}");
+        }
+    }
+    Ok(())
+}
+
+/// A YAML scalar that survives whatever the shell handed us.
+fn yaml_scalar(s: &str) -> String {
+    let plain =
+        !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || "._-/".contains(c)) && !s.starts_with('-');
+    if plain {
+        s.to_string()
+    } else {
+        format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1085,14 +1329,14 @@ mod tests {
         assert_eq!(spec.group.as_deref(), Some("nightly/errors"));
         assert_eq!(spec.expires.as_deref(), Some("4h"));
         assert_eq!(spec.options.len(), 2);
-        assert_eq!(spec.options[0].action.label(), "claude · fix the NPE in checkout");
+        assert_eq!(spec.options[0].action().label(), "claude · fix the NPE in checkout");
         assert!(spec.options[1].default);
-        assert!(spec.options[1].action.is_empty());
+        assert!(spec.options[1].action().is_empty());
     }
 
     #[test]
     fn an_option_can_carry_a_command() {
         let spec = spec_from_yaml("title: ship?\noptions:\n  - key: ship\n    run: [git, push]\n").unwrap();
-        assert_eq!(spec.options[0].action.label(), "git push");
+        assert_eq!(spec.options[0].action().label(), "git push");
     }
 }

@@ -18,7 +18,8 @@ use jiff::Timestamp;
 use relay_core::Home;
 use relay_core::time::parse_duration;
 use relay_detect::Registry;
-use relay_ledger::schedules::{self, Loaded};
+use relay_ledger::entries::Loaded;
+use relay_ledger::schedules;
 use relay_ledger::{Ledger, events, events::NewEvent, runs, workspaces};
 use relay_proto::methods::{RunFilter, RunSpec};
 use relay_proto::schedule::{
@@ -68,8 +69,8 @@ pub fn load_file(path: &Path, in_workspace: bool) -> Result<(Vec<Loaded>, Vec<St
         match validate(&name, &spec, in_workspace) {
             Ok(()) => loaded.push(Loaded {
                 hash: hash(&spec),
+                spec_json: serde_json::to_string(&spec)?,
                 name,
-                spec,
             }),
             Err(e) => errors.push(format!("{name}: {e:#}")),
         }
@@ -103,8 +104,9 @@ fn validate(name: &str, spec: &ScheduleSpec, in_workspace: bool) -> Result<()> {
     Ok(())
 }
 
-/// sha256 over the spec with keys sorted: the version of a schedule.
-pub fn hash(spec: &ScheduleSpec) -> String {
+/// sha256 over a spec with keys sorted: the version of a schedule, a
+/// reaction, or anything else a file writes down.
+pub fn hash<T: serde::Serialize>(spec: &T) -> String {
     let v = serde_json::to_value(spec).expect("spec serialises");
     let mut h = Sha256::new();
     h.update(canonical(&v));
@@ -381,6 +383,9 @@ impl Scheduler {
             report,
             schedules,
             approved,
+            reaction_report: ReloadReport::default(),
+            reactions: Vec::new(),
+            approved_reactions: Vec::new(),
         })
     }
 
