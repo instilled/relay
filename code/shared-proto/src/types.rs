@@ -315,6 +315,10 @@ pub mod event_kind {
     pub const BRANCH_DONE: &str = "branch.done";
     pub const SCHEDULE_FIRED: &str = "schedule.fired";
     pub const SCHEDULE_SKIPPED: &str = "schedule.skipped";
+    pub const DECISION_RAISED: &str = "decision.raised";
+    pub const DECISION_TAKEN: &str = "decision.taken";
+    pub const DECISION_DISMISSED: &str = "decision.dismissed";
+    pub const DECISION_EXPIRED: &str = "decision.expired";
     pub const PLUGIN_INVOKED: &str = "plugin.invoked";
 }
 

@@ -1,6 +1,7 @@
 //! Typed method definitions. One struct per method; the name, params and
 //! result live together so client and server cannot drift.
 
+use crate::decision::{Decision, DecisionOption};
 use crate::types::{AttachMode, Event, Mark, Run, RunKind, RunState};
 use jiff::Timestamp;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -283,6 +284,9 @@ pub struct DigestParams {
 pub struct Digest {
     pub since: Timestamp,
     pub items: Vec<DigestItem>,
+    /// Everything still waiting on an answer, newest first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub decisions: Vec<Decision>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -436,4 +440,107 @@ impl Method for WorkspaceRemove {
     const NAME: &'static str = "workspace.remove";
     type Params = WorkspacePath;
     type Result = bool;
+}
+
+// ---- decision.* -------------------------------------------------------------
+
+/// Raises a question and returns it. With a `group`, an open decision with
+/// that key is replaced in place — the same id, the new wording — so a
+/// schedule that asks nightly leaves one line, not thirty.
+pub struct DecisionRaise;
+impl Method for DecisionRaise {
+    const NAME: &'static str = "decision.raise";
+    type Params = DecisionSpec;
+    type Result = Decision;
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DecisionSpec {
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    #[serde(default)]
+    pub options: Vec<DecisionOption>,
+    /// Several options may be chosen at once.
+    #[serde(default)]
+    pub multi: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
+    /// The run asking; `RELAY_RUN` when `rl ask` runs inside one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run: Option<String>,
+    /// Where its options run, when no run says.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<PathBuf>,
+    /// How long it stands (`4h`, `2d`). Then the default option is taken, or
+    /// it expires unanswered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires: Option<String>,
+}
+
+pub struct DecisionList;
+impl Method for DecisionList {
+    const NAME: &'static str = "decision.list";
+    type Params = DecisionFilter;
+    type Result = Vec<Decision>;
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DecisionFilter {
+    /// Include the ones already answered.
+    #[serde(default)]
+    pub all: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flow: Option<String>,
+    /// Newest first; default 100.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+}
+
+pub struct DecisionGet;
+impl Method for DecisionGet {
+    const NAME: &'static str = "decision.get";
+    type Params = DecisionId;
+    type Result = Decision;
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DecisionId {
+    pub id: String,
+}
+
+/// Chooses. Every chosen option that carries an action starts a run
+/// (`cause = decision:<id>`, the decision's flow); the ids come back on the
+/// decision. Answering twice is refused.
+pub struct DecisionTake;
+impl Method for DecisionTake {
+    const NAME: &'static str = "decision.take";
+    type Params = DecisionTakeParams;
+    type Result = Decision;
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DecisionTakeParams {
+    pub id: String,
+    /// Option keys. More than one only when the decision is `multi`.
+    pub options: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+/// Answers "not this": nothing runs, the question stops waiting.
+pub struct DecisionDismiss;
+impl Method for DecisionDismiss {
+    const NAME: &'static str = "decision.dismiss";
+    type Params = DecisionNote;
+    type Result = Decision;
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DecisionNote {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }

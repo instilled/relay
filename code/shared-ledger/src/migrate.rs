@@ -12,6 +12,7 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
     (4, "0004_detail", include_str!("../migrations/0004_detail.sql")),
     (5, "0005_schedules", include_str!("../migrations/0005_schedules.sql")),
     (6, "0006_workspaces", include_str!("../migrations/0006_workspaces.sql")),
+    (7, "0007_decisions", include_str!("../migrations/0007_decisions.sql")),
 ];
 
 pub fn run(conn: &mut Connection) -> Result<()> {
@@ -59,6 +60,7 @@ mod tests {
         assert_eq!(
             tables,
             [
+                "decisions",
                 "events",
                 "presence",
                 "runs",

@@ -29,6 +29,7 @@ pub struct Daemon {
     pub ledger: Ledger,
     pub supervisor: Arc<Supervisor>,
     pub scheduler: Arc<Scheduler>,
+    pub decisions: Arc<crate::decisions::Decisions>,
     pub started_at: Timestamp,
     pub shutdown: CancellationToken,
 }
@@ -91,6 +92,7 @@ pub async fn serve_with(home: Home, shutdown: CancellationToken, opts: ServeOpti
         ),
         Err(e) => warn!(error = %e, "reconciling sessions"),
     }
+    let registry2 = registry.clone();
     let scheduler = Arc::new(Scheduler::new(
         home.clone(),
         ledger.clone(),
@@ -109,11 +111,19 @@ pub async fn serve_with(home: Home, shutdown: CancellationToken, opts: ServeOpti
         Err(e) => warn!(error = %format!("{e:#}"), "schedules not loaded"),
     }
     tokio::spawn(scheduler.clone().serve());
+    let decisions = Arc::new(crate::decisions::Decisions::new(
+        ledger.clone(),
+        supervisor.clone(),
+        registry2,
+        shutdown.child_token(),
+    ));
+    tokio::spawn(decisions.clone().serve());
     let daemon = Arc::new(Daemon {
         home: home.clone(),
         ledger,
         supervisor,
         scheduler,
+        decisions,
         started_at: Timestamp::now(),
         shutdown: shutdown.clone(),
     });
