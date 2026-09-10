@@ -1,47 +1,64 @@
-//! The control panel: since-you-left → fleet → detail → terminal.
-//! Monochrome; colour only for attention states; the footer is the only
-//! chrome (J8). Everything on screen comes from one `digest.get`.
+//! The control panel: one list, one pane, one keystroke to anything.
+//!
+//! Left, everything ranked by attention — questions, then runs that need
+//! you, then what is working and what finished — grouped by what it belongs
+//! to. Right, the selected thing: its facts, or with `enter` its terminal,
+//! watched, and with `enter` again, joined. Monochrome; colour only for
+//! attention states; the footer is the only chrome (J8). Nothing on screen
+//! is an id.
 
 mod keys;
+mod pane;
+mod rows;
 mod screen;
 mod term;
 
 use crate::attach::client_name;
 use crate::client::Client;
-use crate::digest;
-use crate::rank;
-use crate::render::{fmt_clock, state_label};
+use crate::render::state_label;
 use anyhow::Result;
 use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use futures::StreamExt;
-use jiff::{SignedDuration, Timestamp};
+use jiff::Timestamp;
+use pane::state_style;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style, Stylize};
+use ratatui::style::{Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Paragraph, Row, Table, TableState, Wrap};
+use ratatui::widgets::{Paragraph, Wrap};
 use relay_core::Home;
-use relay_core::time::{fmt_age, fmt_duration};
+use relay_core::time::fmt_age;
+use relay_proto::decision::Decision;
 use relay_proto::methods::{
-    Digest, DigestGet, DigestItem, DigestParams, EventFilter, EventList, PresenceClient, PresenceTouch, RunIds,
-    RunMark, RunMarkParams, RunSeen, RunStop, RunStopParams,
+    DecisionDismiss, DecisionNote, DecisionTake, DecisionTakeParams, Digest, DigestGet, DigestItem, DigestParams,
+    EventFilter, EventList, PresenceClient, PresenceTouch, RunIds, RunMark, RunMarkParams, RunSeen, RunStop,
+    RunStopParams, WorkspaceList,
 };
-use relay_proto::types::{Cause, Event as LedgerEvent, Mark, RunState};
+use relay_proto::types::{Event as LedgerEvent, Mark, Run};
+use rows::{Names, Row};
 use std::time::{Duration, Instant};
 use term::TermView;
 
 const REFRESH: Duration = Duration::from_secs(1);
-/// Ended runs stay on the fleet this long.
-const RECENT: SignedDuration = SignedDuration::from_hours(24);
 /// Footer messages fade after this.
 const FLASH: Duration = Duration::from_secs(4);
+/// Narrower than this, the list and the pane take turns instead of sharing.
+const SPLIT_AT: u16 = 100;
+/// The list's share of a split screen, in percent.
+const LIST_SHARE: u16 = 42;
 
+/// What the right pane shows for a run.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Screen {
-    Since,
-    Fleet,
-    Detail,
+enum Pane {
+    Facts,
     Term,
+}
+
+/// Which side a narrow screen shows.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Focus {
+    List,
+    Pane,
 }
 
 enum Mode {
@@ -50,7 +67,9 @@ enum Mode {
     Stop(String),
     /// `m` pressed: pick what to say about this run.
     Mark(String),
-    /// `/` pressed: typing a fleet filter.
+    /// `n` pressed: `y` dismisses this question.
+    Dismiss(String),
+    /// `/` pressed: typing a filter.
     Filter(String),
 }
 
@@ -58,62 +77,100 @@ struct App {
     home: Home,
     rpc: Client,
     me: String,
-    /// The since-you-left boundary: when this client last looked.
-    since: Timestamp,
     digest: Digest,
+    names: Names,
     filter: String,
-    screen: Screen,
-    /// Where detail/terminal return to.
-    from: Screen,
-    mode: Mode,
-    since_sel: usize,
-    fleet_sel: usize,
-    events: Vec<LedgerEvent>,
+    /// The selected row's key (`r:<id>` or `q:<id>`); the cursor follows it
+    /// across re-ranks.
+    sel: Option<String>,
+    pane: Pane,
+    focus: Focus,
+    /// The pane alone, full width.
+    wide: bool,
     term: Option<TermView>,
+    /// Size the terminal was last told about.
+    term_size: (u16, u16),
+    /// The selected run's recent events.
+    events: Vec<LedgerEvent>,
+    /// Options marked so far on a multi-choice question.
+    picked: Vec<usize>,
+    mode: Mode,
     flash: Option<(String, Instant)>,
     quit: bool,
+}
+
+/// Where things go on screen.
+struct Areas {
+    head: Rect,
+    list: Option<Rect>,
+    pane: Option<Rect>,
+    footer: Rect,
+}
+
+fn areas(area: Rect, wide: bool, focus: Focus) -> Areas {
+    let [head, body, footer] =
+        Layout::vertical([Constraint::Length(1), Constraint::Fill(1), Constraint::Length(1)]).areas(area);
+    let (list, pane) = if wide {
+        (None, Some(body))
+    } else if area.width < SPLIT_AT {
+        match focus {
+            Focus::List => (Some(body), None),
+            Focus::Pane => (None, Some(body)),
+        }
+    } else {
+        let [l, _, r] = Layout::horizontal([
+            Constraint::Percentage(LIST_SHARE),
+            Constraint::Length(1),
+            Constraint::Fill(1),
+        ])
+        .areas(body);
+        (Some(l), Some(r))
+    };
+    Areas {
+        head,
+        list,
+        pane,
+        footer,
+    }
 }
 
 pub async fn run(home: &Home) -> Result<()> {
     let me = client_name();
     let mut rpc = Client::connect(home).await?;
-    let now = Timestamp::now();
-    let since = rpc
-        .call::<PresenceTouch>(PresenceClient { client: me.clone() })
-        .await
-        .ok()
-        .and_then(|p| p.last_seen_at)
-        .unwrap_or(now - RECENT);
+    let _ = rpc.call::<PresenceTouch>(PresenceClient { client: me.clone() }).await;
     let mut app = App {
         home: home.clone(),
         rpc,
         me,
-        since,
         digest: Digest {
-            since,
+            since: Timestamp::now(),
             items: Vec::new(),
             decisions: Vec::new(),
         },
+        names: Names::default(),
         filter: String::new(),
-        screen: Screen::Fleet,
-        from: Screen::Fleet,
-        mode: Mode::Normal,
-        since_sel: 0,
-        fleet_sel: 0,
-        events: Vec::new(),
+        sel: None,
+        pane: Pane::Facts,
+        focus: Focus::List,
+        wide: false,
         term: None,
+        term_size: (0, 0),
+        events: Vec::new(),
+        picked: Vec::new(),
+        mode: Mode::Normal,
         flash: None,
         quit: false,
     };
     app.refresh().await;
-    // The digest comes first when there is news; otherwise the fleet.
-    if digest::since_items(&app.digest).iter().any(|i| i.unseen) {
-        app.screen = Screen::Since;
-    }
 
     let mut terminal = ratatui::init();
     let result = app.main_loop(&mut terminal).await;
     ratatui::restore();
+    // Leaving is looking: `rl since` starts from here next time.
+    let _ = app
+        .rpc
+        .call::<PresenceTouch>(PresenceClient { client: app.me.clone() })
+        .await;
     result
 }
 
@@ -123,15 +180,16 @@ impl App {
         let mut tick = tokio::time::interval(REFRESH);
         while !self.quit {
             terminal.draw(|f| self.draw(f))?;
-            let pane = term_pane(terminal.size()?.into());
+            let size = self.pane_size(terminal.size()?.into());
+            if self.term.is_some() && size != self.term_size {
+                self.term_size = size;
+                if let Some(t) = &mut self.term {
+                    t.resized(size).await?;
+                }
+            }
             tokio::select! {
                 ev = input.next() => match ev {
-                    Some(Ok(Event::Key(k))) if k.kind != KeyEventKind::Release => self.key(k, pane).await?,
-                    Some(Ok(Event::Resize(_, _))) => {
-                        if let Some(t) = &mut self.term {
-                            t.resized(pane).await?;
-                        }
-                    }
+                    Some(Ok(Event::Key(k))) if k.kind != KeyEventKind::Release => self.key(k, size).await?,
                     Some(Ok(_)) => {}
                     Some(Err(e)) => return Err(e.into()),
                     None => self.quit = true,
@@ -144,8 +202,8 @@ impl App {
                     }
                 } => match more {
                     Ok(true) => {}
-                    Ok(false) => { self.say("connection closed"); self.leave_term(); }
-                    Err(e) => { self.say(format!("stream: {e}")); self.leave_term(); }
+                    Ok(false) => { self.say("connection closed"); self.close_term(); }
+                    Err(e) => { self.say(format!("stream: {e}")); self.close_term(); }
                 },
             }
         }
@@ -156,20 +214,27 @@ impl App {
         self.flash = Some((s.into(), Instant::now()));
     }
 
+    /// The area the terminal draws into.
+    fn pane_size(&self, size: Rect) -> (u16, u16) {
+        let a = areas(size, self.wide, Focus::Pane);
+        let r = a.pane.unwrap_or(size);
+        (r.width.max(1), r.height.max(1))
+    }
+
     async fn refresh(&mut self) {
+        if let Ok(ws) = self.rpc.call::<WorkspaceList>(()).await {
+            self.names = Names::new(ws.into_iter().map(|w| (w.path, w.name)));
+        }
         match self.rpc.call::<DigestGet>(DigestParams::default()).await {
-            Ok(mut d) => {
-                d.since = self.since;
-                self.digest = d;
-                self.clamp_selection();
-            }
+            Ok(d) => self.digest = d,
             Err(e) => self.say(format!("daemon: {e:#}")),
         }
-        if self.screen == Screen::Detail
-            && let Some(id) = self.selected_id()
+        self.settle();
+        if self.pane == Pane::Facts
+            && let Some(Row::Run(i)) = self.selected()
         {
             let filter = EventFilter {
-                run: Some(id),
+                run: Some(i.run.id.clone()),
                 limit: Some(200),
                 ..Default::default()
             };
@@ -179,96 +244,74 @@ impl App {
         }
     }
 
-    // ---- lists -------------------------------------------------------------
+    // ---- the list ----------------------------------------------------------
 
-    /// The fleet: alive, or ended within `RECENT`, matching the filter, ranked.
-    fn fleet_items(&self) -> Vec<&DigestItem> {
-        let now = Timestamp::now();
-        let f = self.filter.to_lowercase();
-        let mut items: Vec<&DigestItem> = self
-            .digest
-            .items
-            .iter()
-            .filter(|i| {
-                let r = &i.run;
-                !r.state.is_terminal() || r.ended_at.is_some_and(|t| now.duration_since(t) <= RECENT)
-            })
-            .filter(|i| {
-                f.is_empty()
-                    || [
-                        i.run.id.as_str(),
-                        i.run.title.as_str(),
-                        &i.run.group_key(),
-                        i.run.cli.as_deref().unwrap_or(""),
-                    ]
-                    .iter()
-                    .any(|s| s.to_lowercase().contains(&f))
-            })
-            .collect();
-        items.sort_by(|a, b| {
-            rank::score(&a.run)
-                .cmp(&rank::score(&b.run))
-                .then_with(|| a.run.group_key().cmp(&b.run.group_key()))
-                .then_with(|| b.run.state_at.cmp(&a.run.state_at))
-        });
-        items
+    fn rows(&self) -> Vec<Row<'_>> {
+        rows::build(&self.digest, &self.names, &self.filter, Timestamp::now())
     }
 
-    /// The since screen's items, in group order (what the rows show).
-    fn since_items(&self) -> Vec<&DigestItem> {
-        digest::group(digest::since_items(&self.digest))
-            .into_iter()
-            .flat_map(|g| g.items)
-            .collect()
+    /// Keys of the selectable rows, in order.
+    fn keys(&self) -> Vec<String> {
+        self.rows().into_iter().filter_map(|r| r.key()).collect()
     }
 
-    fn list(&self) -> Vec<&DigestItem> {
-        match self.list_screen() {
-            Screen::Since => self.since_items(),
-            _ => self.fleet_items(),
+    /// Keeps the selection on something that exists.
+    fn settle(&mut self) {
+        let keys = self.keys();
+        if self.sel.as_ref().is_none_or(|k| !keys.contains(k)) {
+            self.select(keys.first().cloned());
         }
     }
 
-    /// Which list the selection belongs to.
-    fn list_screen(&self) -> Screen {
-        match self.screen {
-            Screen::Since => Screen::Since,
-            Screen::Fleet => Screen::Fleet,
-            _ => self.from,
+    fn select(&mut self, key: Option<String>) {
+        if key != self.sel {
+            self.sel = key;
+            self.picked.clear();
+            self.events.clear();
+            self.close_term();
         }
     }
 
-    fn sel(&self) -> usize {
-        match self.list_screen() {
-            Screen::Since => self.since_sel,
-            _ => self.fleet_sel,
+    fn selected(&self) -> Option<Row<'_>> {
+        let key = self.sel.as_ref()?;
+        self.rows().into_iter().find(|r| r.key().as_ref() == Some(key))
+    }
+
+    fn selected_run(&self) -> Option<&DigestItem> {
+        match self.selected() {
+            Some(Row::Run(i)) => Some(i),
+            _ => None,
         }
     }
 
-    fn set_sel(&mut self, i: usize) {
-        match self.list_screen() {
-            Screen::Since => self.since_sel = i,
-            _ => self.fleet_sel = i,
+    fn selected_question(&self) -> Option<&Decision> {
+        match self.selected() {
+            Some(Row::Question(d)) => Some(d),
+            _ => None,
         }
     }
 
-    fn clamp_selection(&mut self) {
-        let n = self.list().len();
-        let s = self.sel().min(n.saturating_sub(1));
-        self.set_sel(s);
+    fn run_by_id(&self, id: &str) -> Option<&Run> {
+        self.digest.items.iter().map(|i| &i.run).find(|r| r.id == id)
     }
 
-    fn selected(&self) -> Option<&DigestItem> {
-        self.list().get(self.sel()).copied()
+    fn step(&mut self, by: isize) {
+        let keys = self.keys();
+        if keys.is_empty() {
+            return;
+        }
+        let cur = self
+            .sel
+            .as_ref()
+            .and_then(|k| keys.iter().position(|x| x == k))
+            .unwrap_or(0) as isize;
+        let next = (cur + by).clamp(0, keys.len() as isize - 1) as usize;
+        self.select(Some(keys[next].clone()));
     }
 
-    fn selected_id(&self) -> Option<String> {
-        self.selected().map(|i| i.run.id.clone())
-    }
-
-    fn leave_term(&mut self) {
+    fn close_term(&mut self) {
         self.term = None;
-        self.screen = self.from;
+        self.pane = Pane::Facts;
     }
 
     async fn seen(&mut self, ids: Vec<String>) {
@@ -276,27 +319,116 @@ impl App {
             return;
         }
         let _ = self.rpc.call::<RunSeen>(RunIds { ids }).await;
+    }
+
+    // ---- doing things ------------------------------------------------------
+
+    async fn open_term(&mut self, size: (u16, u16)) {
+        let Some(id) = self.selected_run().map(|i| i.run.id.clone()) else {
+            return;
+        };
+        self.seen(vec![id.clone()]).await;
+        match TermView::open(&self.home, &id, size).await {
+            Ok(t) => {
+                self.term = Some(t);
+                self.term_size = size;
+                self.pane = Pane::Term;
+                self.focus = Focus::Pane;
+            }
+            Err(e) => self.say(format!("attach: {e:#}")),
+        }
+    }
+
+    async fn answer(&mut self, id: String, options: Vec<String>) {
+        let what = options.join(", ");
+        match self
+            .rpc
+            .call::<DecisionTake>(DecisionTakeParams {
+                id,
+                options,
+                note: None,
+            })
+            .await
+        {
+            Ok(d) => {
+                self.picked.clear();
+                self.refresh().await;
+                match d.outcome_runs.first() {
+                    Some(r) => {
+                        let title = self.run_by_id(r).map(|r| r.title.clone()).unwrap_or_default();
+                        self.say(format!("{what} → started {title}"));
+                        self.select(Some(format!("r:{r}")));
+                    }
+                    None => self.say(format!("answered {what}")),
+                }
+            }
+            Err(e) => self.say(format!("answer: {e:#}")),
+        }
+    }
+
+    async fn dismiss(&mut self, id: String) {
+        match self.rpc.call::<DecisionDismiss>(DecisionNote { id, note: None }).await {
+            Ok(_) => {
+                self.say("dismissed");
+                self.refresh().await;
+            }
+            Err(e) => self.say(format!("dismiss: {e:#}")),
+        }
+    }
+
+    async fn stop(&mut self, id: String) {
+        match self
+            .rpc
+            .call::<RunStop>(RunStopParams {
+                id: id.clone(),
+                force: false,
+            })
+            .await
+        {
+            Ok(_) => self.say("stop requested"),
+            Err(e) => self.say(format!("stop: {e:#}")),
+        }
+    }
+
+    async fn mark(&mut self, id: String, mark: Mark) {
+        match self.rpc.call::<RunMark>(RunMarkParams { id, mark, note: None }).await {
+            Ok(r) => {
+                self.say(format!("marked {}", state_label(r.state, r.confidence)));
+                self.refresh().await;
+            }
+            Err(e) => self.say(format!("mark: {e:#}")),
+        }
+    }
+
+    /// Everything on the list has been looked at.
+    async fn clear_news(&mut self) {
+        let ids: Vec<String> = self
+            .digest
+            .items
+            .iter()
+            .filter(|i| i.unseen)
+            .map(|i| i.run.id.clone())
+            .collect();
+        let n = ids.len();
+        self.seen(ids).await;
         self.refresh().await;
+        self.say(format!("{n} cleared"));
     }
 
     // ---- keys --------------------------------------------------------------
 
-    async fn key(&mut self, k: KeyEvent, pane: (u16, u16)) -> Result<()> {
+    async fn key(&mut self, k: KeyEvent, size: (u16, u16)) -> Result<()> {
         self.flash = None;
         match std::mem::replace(&mut self.mode, Mode::Normal) {
             Mode::Stop(id) => {
                 if k.code == KeyCode::Char('y') {
-                    match self
-                        .rpc
-                        .call::<RunStop>(RunStopParams {
-                            id: id.clone(),
-                            force: false,
-                        })
-                        .await
-                    {
-                        Ok(_) => self.say(format!("{id}: stop requested")),
-                        Err(e) => self.say(format!("stop: {e:#}")),
-                    }
+                    self.stop(id).await;
+                }
+                return Ok(());
+            }
+            Mode::Dismiss(id) => {
+                if k.code == KeyCode::Char('y') {
+                    self.dismiss(id).await;
                 }
                 return Ok(());
             }
@@ -308,32 +440,14 @@ impl App {
                     _ => None,
                 };
                 if let Some(mark) = mark {
-                    match self
-                        .rpc
-                        .call::<RunMark>(RunMarkParams {
-                            id: id.clone(),
-                            mark,
-                            note: None,
-                        })
-                        .await
-                    {
-                        Ok(r) => {
-                            self.say(format!("{id}: {}", state_label(r.state, r.confidence)));
-                            self.refresh().await;
-                        }
-                        Err(e) => self.say(format!("mark: {e:#}")),
-                    }
+                    self.mark(id, mark).await;
                 }
                 return Ok(());
             }
             Mode::Filter(mut buf) => {
                 match k.code {
-                    KeyCode::Esc => {
-                        self.filter.clear();
-                    }
-                    KeyCode::Enter => {
-                        self.filter = buf;
-                    }
+                    KeyCode::Esc => self.filter.clear(),
+                    KeyCode::Enter => self.filter = buf,
                     KeyCode::Backspace => {
                         buf.pop();
                         self.filter = buf.clone();
@@ -346,133 +460,129 @@ impl App {
                     }
                     _ => self.mode = Mode::Filter(buf),
                 }
-                self.clamp_selection();
+                self.settle();
                 return Ok(());
             }
             Mode::Normal => {}
         }
-        match self.screen {
-            Screen::Term => self.key_term(k).await,
-            _ => self.key_list(k, pane).await,
+        if self.pane == Pane::Term && self.term.is_some() {
+            return self.key_term(k).await;
         }
+        self.key_list(k, size).await
     }
 
-    async fn key_list(&mut self, k: KeyEvent, pane: (u16, u16)) -> Result<()> {
-        let n = self.list().len();
-        let cur = self.sel();
+    async fn key_list(&mut self, k: KeyEvent, size: (u16, u16)) -> Result<()> {
         match (k.code, k.modifiers) {
             (KeyCode::Char('c'), KeyModifiers::CONTROL) | (KeyCode::Char('q'), _) => self.quit = true,
             (KeyCode::Esc, _) => {
-                if self.screen == Screen::Detail {
-                    self.screen = self.from;
+                if self.wide {
+                    self.wide = false;
+                } else if self.focus == Focus::Pane {
+                    self.focus = Focus::List;
+                } else if !self.filter.is_empty() {
+                    self.filter.clear();
+                    self.settle();
                 }
             }
-            (KeyCode::Char('a'), _) => {
-                self.screen = if self.list_screen() == Screen::Since {
-                    Screen::Fleet
-                } else {
-                    Screen::Since
-                };
-                self.clamp_selection();
+            (KeyCode::Down, _) | (KeyCode::Char('j'), _) => {
+                self.step(1);
+                self.refresh().await;
             }
-            (KeyCode::Down, _) | (KeyCode::Char('j'), _) if n > 0 => {
-                self.set_sel((cur + 1).min(n - 1));
-                self.refresh_detail().await;
+            (KeyCode::Up, _) | (KeyCode::Char('k'), _) => {
+                self.step(-1);
+                self.refresh().await;
             }
-            (KeyCode::Up, _) | (KeyCode::Char('k'), _) if n > 0 => {
-                self.set_sel(cur.saturating_sub(1));
-                self.refresh_detail().await;
-            }
-            (KeyCode::Home, _) | (KeyCode::Char('g'), _) if n > 0 => self.set_sel(0),
-            (KeyCode::End, _) | (KeyCode::Char('G'), _) if n > 0 => self.set_sel(n - 1),
+            (KeyCode::Home, _) | (KeyCode::Char('g'), _) => self.step(isize::MIN / 2),
+            (KeyCode::End, _) | (KeyCode::Char('G'), _) => self.step(isize::MAX / 2),
             (KeyCode::Enter, _) => {
-                if let Some(id) = self.selected_id() {
-                    self.seen(vec![id.clone()]).await;
-                    match TermView::open(&self.home, &id, pane).await {
-                        Ok(t) => {
-                            self.term = Some(t);
-                            self.from = self.list_screen();
-                            self.screen = Screen::Term;
-                        }
-                        Err(e) => self.say(format!("attach: {e:#}")),
+                if let Some(q) = self.selected_question() {
+                    if q.multi && !self.picked.is_empty() {
+                        let id = q.id.clone();
+                        let opts: Vec<String> = self.picked.iter().map(|&i| q.options[i].key.clone()).collect();
+                        self.answer(id, opts).await;
+                    } else {
+                        let n = q.options.len().min(pane::MAX_KEYS);
+                        self.say(format!("press 1-{n} to answer"));
                     }
+                } else {
+                    self.open_term(size).await;
+                }
+            }
+            (KeyCode::Char(c @ '1'..='9'), _) => {
+                if let Some(q) = self.selected_question() {
+                    let i = (c as u8 - b'1') as usize;
+                    if i < q.options.len() {
+                        if q.multi {
+                            match self.picked.iter().position(|&p| p == i) {
+                                Some(at) => {
+                                    self.picked.remove(at);
+                                }
+                                None => self.picked.push(i),
+                            }
+                        } else {
+                            let (id, key) = (q.id.clone(), q.options[i].key.clone());
+                            self.answer(id, vec![key]).await;
+                        }
+                    }
+                }
+            }
+            (KeyCode::Char('n'), _) => {
+                if let Some(q) = self.selected_question() {
+                    self.mode = Mode::Dismiss(q.id.clone());
                 }
             }
             (KeyCode::Char('i'), _) | (KeyCode::Char(' '), _) => {
-                if let Some(id) = self.selected_id() {
-                    if self.screen != Screen::Detail {
-                        self.from = self.list_screen();
-                    }
-                    self.screen = Screen::Detail;
-                    self.seen(vec![id]).await;
+                if self.sel.is_some() {
+                    self.focus = Focus::Pane;
                 }
             }
+            (KeyCode::Char('f'), _) => self.wide = !self.wide,
             (KeyCode::Char('x'), _) => {
-                if let Some(i) = self.selected()
+                if let Some(i) = self.selected_run()
                     && !i.run.state.is_terminal()
                 {
                     self.mode = Mode::Stop(i.run.id.clone());
                 }
             }
             (KeyCode::Char('m'), _) => {
-                if let Some(i) = self.selected()
+                if let Some(i) = self.selected_run()
                     && !i.run.state.is_terminal()
                 {
                     self.mode = Mode::Mark(i.run.id.clone());
                 }
             }
-            (KeyCode::Char('/'), _) if self.list_screen() == Screen::Fleet => {
-                self.mode = Mode::Filter(self.filter.clone());
-            }
-            (KeyCode::Char('d'), _) if self.screen == Screen::Since => {
-                let ids: Vec<String> = self.since_items().iter().map(|i| i.run.id.clone()).collect();
-                let n = ids.len();
-                self.seen(ids).await;
-                let _ = self
-                    .rpc
-                    .call::<PresenceTouch>(PresenceClient {
-                        client: self.me.clone(),
-                    })
-                    .await;
-                self.since = Timestamp::now();
-                self.digest.since = self.since;
-                self.say(format!("{n} dismissed"));
-                self.screen = Screen::Fleet;
-            }
-            (KeyCode::Char('r'), _) => self.refresh().await,
+            (KeyCode::Char('/'), _) => self.mode = Mode::Filter(self.filter.clone()),
+            (KeyCode::Char('d'), _) => self.clear_news().await,
             _ => {}
         }
         Ok(())
     }
 
-    async fn refresh_detail(&mut self) {
-        if self.screen == Screen::Detail {
-            self.refresh().await;
-        }
-    }
-
     async fn key_term(&mut self, k: KeyEvent) -> Result<()> {
         let Some(t) = &mut self.term else {
-            self.screen = self.from;
+            self.close_term();
             return Ok(());
         };
         // ctrl-\ is byte 0x1c, which a plain terminal reports as ctrl-4.
         let back =
             matches!(k.code, KeyCode::Char('\\') | KeyCode::Char('4')) && k.modifiers.contains(KeyModifiers::CONTROL);
         if back || t.ended.is_some() || (!t.joined() && k.code == KeyCode::Esc) {
-            self.leave_term();
+            self.close_term();
             return Ok(());
         }
         if !t.joined() {
-            // Watching: only `enter` joins (or takes over, once refused).
-            if k.code != KeyCode::Enter {
-                return Ok(());
-            }
-            let take = t.busy_with.is_some();
-            let home = self.home.clone();
-            match t.join(&home, take).await {
-                Ok(_) => {}
-                Err(e) => self.say(format!("join: {e:#}")),
+            // Watching: `enter` joins (or takes over, once refused); `f` widens.
+            match k.code {
+                KeyCode::Enter => {
+                    let take = t.busy_with.is_some();
+                    let home = self.home.clone();
+                    if let Err(e) = t.join(&home, take).await {
+                        self.say(format!("join: {e:#}"));
+                    }
+                }
+                KeyCode::Char('f') => self.wide = !self.wide,
+                KeyCode::Char('q') => self.quit = true,
+                _ => {}
             }
             return Ok(());
         }
@@ -485,254 +595,121 @@ impl App {
     // ---- drawing -----------------------------------------------------------
 
     fn draw(&mut self, f: &mut Frame) {
-        let area = f.area();
-        let [body, footer] = Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(area);
-        match self.screen {
-            Screen::Since => self.draw_since(f, body),
-            Screen::Fleet => self.draw_fleet(f, body),
-            Screen::Detail => self.draw_detail(f, body),
-            Screen::Term => self.draw_term(f, body),
-        }
-        f.render_widget(Paragraph::new(format!(" {}", self.footer())).dim(), footer);
-    }
-
-    fn header(&self, f: &mut Frame, area: Rect, left: String) {
+        let a = areas(f.area(), self.wide, self.focus);
+        let rows = self.rows();
+        let news = self.digest.items.iter().filter(|i| i.unseen).count();
+        let title = rows::headline(&rows, news, &self.filter);
         let [l, r] =
-            Layout::horizontal([Constraint::Fill(1), Constraint::Length(self.me.len() as u16 + 1)]).areas(area);
-        f.render_widget(Paragraph::new(left).bold(), l);
+            Layout::horizontal([Constraint::Fill(1), Constraint::Length(self.me.len() as u16 + 1)]).areas(a.head);
+        f.render_widget(Paragraph::new(title).bold(), l);
         f.render_widget(Paragraph::new(self.me.clone()).dim().right_aligned(), r);
+        if let Some(list) = a.list {
+            self.draw_list(f, list, &rows);
+            if a.pane.is_some() {
+                let x = list.x + list.width;
+                let bar = Rect::new(x, list.y, 1, list.height);
+                f.render_widget(Paragraph::new("│\n".repeat(list.height as usize)).dim(), bar);
+            }
+        }
+        if let Some(pane) = a.pane {
+            self.draw_pane(f, pane);
+        }
+        f.render_widget(Paragraph::new(format!(" {}", self.footer())).dim(), a.footer);
     }
 
-    fn draw_since(&mut self, f: &mut Frame, area: Rect) {
-        let now = Timestamp::now();
-        let [head, rule, list, legend] = Layout::vertical([
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Fill(1),
-            Constraint::Length(1),
-        ])
-        .areas(area);
-        let items = digest::since_items(&self.digest);
-        let (need, fin) = digest::counts(items.iter().copied());
-        let asked = self.digest.decisions.len();
-        self.header(
-            f,
-            head,
-            format!("relay · {}", digest::headline_with(self.since, need, fin, asked, now)),
-        );
-        f.render_widget(Paragraph::new("─".repeat(area.width as usize)).dim(), rule);
-        if items.is_empty() && self.digest.decisions.is_empty() {
-            f.render_widget(Paragraph::new(" nothing since then").dim(), list);
-            return;
-        }
-        let mut lines: Vec<Line> = Vec::new();
-        // Questions first: nothing here moves until you answer them.
-        if !self.digest.decisions.is_empty() {
-            lines.push(Line::from(vec![Span::raw(" "), Span::raw("to decide").bold()]));
-            for q in &self.digest.decisions {
-                lines.push(Line::from(vec![
-                    Span::raw(format!(" ? {}  ", q.id)).yellow(),
-                    Span::raw(format!("{:>4}  ", fmt_age(q.created_at, now))),
-                    Span::raw(q.title.clone()),
-                    Span::raw(format!("  [{}]", q.keys())).dim(),
-                ]));
-            }
-            lines.push(Line::from(Span::raw("   rl decide <id> <option>").dim()));
-        }
-        let mut idx = 0usize;
-        let sel = self.since_sel;
-        let mut sel_line = 0usize;
-        for g in digest::group(items) {
-            if !lines.is_empty() {
-                lines.push(Line::raw(""));
-            }
-            lines.push(Line::from(vec![Span::raw(" "), Span::raw(g.key).bold()]));
-            for i in g.items {
-                let mark = if i.unseen { "▸" } else { " " };
-                let mut spans = vec![
-                    Span::raw(format!(" {mark} {}  ", i.run.id)),
-                    Span::styled(
-                        format!("{:<12}", state_label(i.run.state, i.run.confidence)),
-                        state_style(i.run.state),
-                    ),
-                    Span::raw(format!(" {:>4}  ", fmt_age(i.at, now))),
-                    Span::raw(i.summary.clone()),
-                ];
-                if let Some(j) = &i.joined_by {
-                    spans.push(Span::raw(format!("  ● {j}")).dim());
-                }
-                let mut line = Line::from(spans);
-                if idx == sel {
-                    line = line.style(Style::default().add_modifier(Modifier::REVERSED));
-                    sel_line = lines.len();
-                }
-                lines.push(line);
-                idx += 1;
-            }
-        }
-        let offset = sel_line.saturating_sub(list.height.saturating_sub(1) as usize);
-        f.render_widget(Paragraph::new(lines).scroll((offset as u16, 0)), list);
-        f.render_widget(
-            Paragraph::new(" ▸ = unseen · opening a run marks it seen").dim(),
-            legend,
-        );
-    }
-
-    fn draw_fleet(&mut self, f: &mut Frame, area: Rect) {
-        let now = Timestamp::now();
-        let [head, list] = Layout::vertical([Constraint::Length(1), Constraint::Fill(1)]).areas(area);
-        let items = self.fleet_items();
-        let need = items.iter().filter(|i| i.run.state.needs_attention()).count();
-        let mut title = format!("relay · {} run{}", items.len(), if items.len() == 1 { "" } else { "s" });
-        if need > 0 {
-            title.push_str(&format!(" · {need} need{} you", if need == 1 { "s" } else { "" }));
-        }
-        if !self.filter.is_empty() {
-            title.push_str(&format!(" · /{}", self.filter));
-        }
-        self.header(f, head, title);
-        if items.is_empty() {
+    fn draw_list(&self, f: &mut Frame, area: Rect, rows: &[Row]) {
+        if rows.is_empty() {
             let msg = if self.filter.is_empty() {
-                " no runs · start one with `rl run -- <command>`"
+                " nothing running · rl run -- <command>"
             } else {
-                " nothing matches the filter"
+                " nothing matches"
             };
-            f.render_widget(Paragraph::new(msg).dim(), list);
+            f.render_widget(Paragraph::new(msg).dim(), area);
             return;
         }
-        let header = Row::new(["ID", "STATE", "AGE", "CLI", "GROUP", "TITLE", "LAST", ""]).dim();
-        let rows = items.iter().map(|i| {
-            let r = &i.run;
-            Row::new(vec![
-                Span::raw(r.id.clone()),
-                Span::styled(state_label(r.state, r.confidence), state_style(r.state)),
-                Span::raw(fmt_age(r.state_at, now)),
-                Span::raw(r.cli.clone().unwrap_or_else(|| r.kind.to_string())),
-                Span::raw(short_group(&r.group_key())),
-                Span::raw(r.title.clone()),
-                Span::raw(i.summary.clone()).dim(),
-                Span::raw(i.joined_by.as_ref().map(|j| format!("● {j}")).unwrap_or_default()).dim(),
-            ])
-        });
-        let joined_w = items
-            .iter()
-            .filter_map(|i| i.joined_by.as_ref().map(|j| j.len() as u16 + 2))
-            .max()
-            .unwrap_or(0);
-        let table = Table::new(
-            rows,
-            [
-                Constraint::Length(8),
-                Constraint::Length(12),
-                Constraint::Length(4),
-                Constraint::Length(7),
-                Constraint::Max(16),
-                Constraint::Fill(3),
-                Constraint::Fill(3),
-                Constraint::Length(joined_w),
-            ],
-        )
-        .header(header)
-        .row_highlight_style(Style::default().add_modifier(Modifier::REVERSED))
-        .column_spacing(2);
-        let mut state = TableState::default().with_selected(self.fleet_sel);
-        f.render_stateful_widget(table, list, &mut state);
+        let now = Timestamp::now();
+        let mut lines: Vec<Line> = Vec::with_capacity(rows.len());
+        let mut sel_line = 0usize;
+        for (n, row) in rows.iter().enumerate() {
+            let selected = row.key().is_some() && row.key() == self.sel;
+            let mut line = match row {
+                Row::Group(g) => {
+                    let mut l = vec![];
+                    if n > 0 {
+                        lines.push(Line::raw(""));
+                    }
+                    l.push(Span::raw(format!(" {g}")).bold());
+                    Line::from(l)
+                }
+                Row::Question(q) => Line::from(vec![
+                    Span::raw(" ? ").yellow().bold(),
+                    Span::raw(format!("{:<8}", "to decide")).yellow(),
+                    Span::raw(format!(" {:>4}  ", fmt_age(q.created_at, now))),
+                    Span::raw(q.title.clone()),
+                ]),
+                Row::Run(i) => {
+                    let r = &i.run;
+                    let mark = if i.unseen { "•" } else { " " };
+                    let mut spans = vec![
+                        Span::raw(format!(" {mark} ")),
+                        Span::styled(
+                            format!("{:<8}", state_label(r.state, r.confidence)),
+                            state_style(r.state),
+                        ),
+                        Span::raw(format!(" {:>4}  ", fmt_age(i.at, now))),
+                        Span::raw(r.title.clone()),
+                    ];
+                    if let Some(j) = &i.joined_by {
+                        spans.push(Span::raw(format!("  ● {j}")).dim());
+                    }
+                    spans.push(Span::raw(format!("  {}", i.summary)).dim());
+                    Line::from(spans)
+                }
+            };
+            if selected {
+                line = line.style(Style::default().add_modifier(Modifier::REVERSED));
+                sel_line = lines.len();
+            }
+            lines.push(line);
+        }
+        let offset = sel_line.saturating_sub(area.height.saturating_sub(1) as usize);
+        f.render_widget(Paragraph::new(lines).scroll((offset as u16, 0)), area);
     }
 
-    fn draw_detail(&mut self, f: &mut Frame, area: Rect) {
-        let Some(item) = self.selected() else {
-            f.render_widget(Paragraph::new(" nothing selected").dim(), area);
+    fn draw_pane(&mut self, f: &mut Frame, area: Rect) {
+        if self.pane == Pane::Term
+            && let Some(t) = &self.term
+        {
+            screen::draw(t.screen(), area, f.buffer_mut());
             return;
-        };
-        let r = &item.run;
+        }
         let now = Timestamp::now();
-        let fact = |k: &str, v: String| Line::from(vec![Span::raw(format!(" {k:<10} ")).dim(), Span::raw(v)]);
-        let mut lines: Vec<Line> = vec![Line::from(vec![
-            Span::raw(r.id.clone()).bold(),
-            Span::raw("  "),
-            Span::styled(state_label(r.state, r.confidence), state_style(r.state)),
-            Span::raw(format!("  via {} · {} in state", r.source, fmt_age(r.state_at, now))).dim(),
-            Span::raw(format!(
-                "    {} · {}",
-                r.cli.clone().unwrap_or_else(|| "-".into()),
-                r.kind
-            ))
-            .dim(),
-        ])];
-        lines.push(fact("title", r.title.clone()));
-        let mut group = r.group_key();
-        if r.ref_.is_some() {
-            group.push_str("  (ref)");
-        }
-        if let Some(b) = &r.branch {
-            group.push_str(&format!("      branch  {b}"));
-        }
-        lines.push(fact("group", group));
-        let mut cwd = r.cwd.display().to_string();
-        if !r.tags.is_empty() {
-            cwd.push_str(&format!("      tags  {}", r.tags.join(", ")));
-        }
-        lines.push(fact("cwd", cwd));
-        lines.push(fact("argv", r.argv.join(" ")));
-        if r.cause != Cause::Manual {
-            let mut cause = r.cause.to_string();
-            if r.flow != r.id {
-                cause.push_str(&format!("      flow  {}", r.flow));
+        let lines = match self.selected() {
+            Some(Row::Run(i)) => pane::run_lines(i, &self.events, &self.names, now),
+            Some(Row::Question(q)) => {
+                let asker = q.run.as_deref().and_then(|id| self.run_by_id(id));
+                pane::question_lines(q, asker, &self.picked, now)
             }
-            lines.push(fact("cause", cause));
-        }
-        let mut started = format!("{} ({} ago)", fmt_clock(r.started_at, now), fmt_age(r.started_at, now));
-        if let Some(j) = &item.joined_by {
-            started.push_str(&format!("      joined  {j}"));
-        }
-        lines.push(fact("started", started));
-        if let Some(e) = r.ended_at {
-            let d = fmt_duration(e.duration_since(r.started_at));
-            let code = r.exit_code.map(|c| format!(", exit {c}")).unwrap_or_default();
-            lines.push(fact("ended", format!("{} (after {d}{code})", fmt_clock(e, now))));
-        }
-        if let Some(d) = &r.detail {
-            lines.push(fact("doing", d.clone()));
-        }
-        if let Some(l) = &r.last_line {
-            lines.push(fact("last line", l.clone()));
-        }
-        lines.push(Line::raw(""));
-        lines.push(Line::raw(" events").dim());
-        if self.events.is_empty() {
-            lines.push(Line::raw("   (none yet)").dim());
-        }
-        for e in self.events.iter().rev() {
-            lines.push(Line::from(vec![
-                Span::raw(format!(" {}  ", fmt_clock(e.at, now))).dim(),
-                Span::raw(format!("{:<16} ", e.kind)),
-                Span::raw(e.summary.clone()),
-            ]));
-        }
-        lines.push(Line::raw(""));
-        lines.push(Line::raw(" facts (P1): commits · files · commands · questions · cost — n/a").dim());
+            _ => vec![Line::from(Span::raw(" nothing selected").dim())],
+        };
         f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
     }
 
-    fn draw_term(&mut self, f: &mut Frame, area: Rect) {
-        if let Some(t) = &self.term {
-            screen::draw(t.screen(), area, f.buffer_mut());
-        }
-    }
-
     fn footer(&self) -> String {
+        let title_of = |id: &str| self.run_by_id(id).map(|r| r.title.clone()).unwrap_or_default();
         match &self.mode {
-            Mode::Stop(id) => {
-                let title = self
+            Mode::Stop(id) => return format!("stop {}? y / any key", title_of(id)),
+            Mode::Dismiss(id) => {
+                let t = self
                     .digest
-                    .items
+                    .decisions
                     .iter()
-                    .find(|i| &i.run.id == id)
-                    .map(|i| i.run.title.clone())
+                    .find(|d| &d.id == id)
+                    .map(|d| d.title.clone())
                     .unwrap_or_default();
-                return format!("stop {id} ({title})? y / any key");
+                return format!("dismiss {t}? y / any key");
             }
-            Mode::Mark(id) => return format!("mark {id}: d done · b blocked · w working · esc"),
+            Mode::Mark(id) => return format!("mark {}: d done · b blocked · w working · esc", title_of(id)),
             Mode::Filter(buf) => return format!("/{buf}▏  enter apply · esc clear"),
             Mode::Normal => {}
         }
@@ -741,55 +718,39 @@ impl App {
         {
             return m.clone();
         }
-        match self.screen {
-            Screen::Since => "enter terminal · i detail · x stop · d dismiss all · a fleet · q quit".into(),
-            Screen::Fleet => "enter terminal · i detail · x stop · m mark · / filter · a since · q quit".into(),
-            Screen::Detail => "enter terminal · x stop · m mark · esc back".into(),
-            Screen::Term => {
-                let Some(t) = &self.term else { return String::new() };
-                let mut s = format!("{} · ", t.id);
-                if t.ended.is_some() {
-                    s.push_str("ended · any key back");
-                } else if t.joined() {
-                    s.push_str("joined · ctrl-\\ back");
-                } else if let Some(who) = &t.busy_with {
-                    s.push_str(&format!("watching · {who} is joined · enter to take over · esc back"));
-                } else if let Some(who) = &t.info.joiner {
-                    s.push_str(&format!("watching · {who} is joined · enter to join · esc back"));
-                } else {
-                    s.push_str("watching · enter to join · esc back");
-                }
-                if let Some((n, at)) = &t.note
-                    && at.elapsed() < FLASH
-                {
-                    s.push_str(&format!(" · {n}"));
-                }
-                s
+        if self.pane == Pane::Term
+            && let Some(t) = &self.term
+        {
+            let mut s = String::new();
+            if t.ended.is_some() {
+                s.push_str("ended · any key back");
+            } else if t.joined() {
+                s.push_str("joined · ctrl-\\ back");
+            } else if let Some(who) = &t.busy_with {
+                s.push_str(&format!("watching · {who} is joined · enter to take over · esc back"));
+            } else if let Some(who) = &t.info.joiner {
+                s.push_str(&format!("watching · {who} is joined · enter to join · esc back"));
+            } else {
+                s.push_str("watching · enter to join · f wide · esc back");
             }
+            if let Some((n, at)) = &t.note
+                && at.elapsed() < FLASH
+            {
+                s.push_str(&format!(" · {n}"));
+            }
+            return s;
         }
-    }
-}
-
-/// The area the terminal screen draws into: everything but the footer.
-fn term_pane(size: Rect) -> (u16, u16) {
-    (size.width.max(1), size.height.saturating_sub(1).max(1))
-}
-
-fn state_style(s: RunState) -> Style {
-    match s {
-        RunState::NeedsInput | RunState::Blocked => Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
-        RunState::Failed => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-        RunState::Stale => Style::default().fg(Color::Magenta),
-        RunState::Finished | RunState::Stopped | RunState::Idle => Style::default().add_modifier(Modifier::DIM),
-        _ => Style::default(),
-    }
-}
-
-/// A workspace path as a group reads better as its last component.
-fn short_group(g: &str) -> String {
-    if g.starts_with('/') {
-        g.rsplit('/').next().unwrap_or(g).to_string()
-    } else {
-        g.to_string()
+        match self.selected() {
+            Some(Row::Question(q)) => {
+                let n = q.options.len().min(pane::MAX_KEYS);
+                let how = if q.multi { "pick · enter answer" } else { "answer" };
+                format!("1-{n} {how} · n not this · ↑↓ · / filter · q quit")
+            }
+            Some(Row::Run(i)) if i.run.state.is_terminal() => {
+                "enter output · f wide · / filter · d clear news · q quit".into()
+            }
+            Some(Row::Run(_)) => "enter terminal · x stop · m mark · f wide · / filter · d clear news · q quit".into(),
+            _ => "/ filter · q quit".into(),
+        }
     }
 }
