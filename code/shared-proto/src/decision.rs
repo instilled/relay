@@ -154,11 +154,11 @@ mod tests {
         let json = serde_json::json!({
             "key": "fix",
             "label": "Open a PR",
-            "run": ["sh", "-c", "echo hi"],
+            "run": "echo hi",
         });
         let o: DecisionOption = serde_json::from_value(json).unwrap();
         assert_eq!(o.key, "fix");
-        assert_eq!(o.action.run, ["sh", "-c", "echo hi"]);
+        assert_eq!(o.action.run, Some(crate::action::Task::Shell("echo hi".into())));
         assert!(!o.action.is_empty());
         assert!(DecisionOption::new("ignore", "Ignore").action.is_empty());
     }

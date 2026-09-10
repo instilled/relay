@@ -1,36 +1,28 @@
 //! Schedules: time → an action. The spec is what `schedules.yaml` holds; the
 //! row is what the daemon tracks about it.
 
+use crate::action::{Action, Task};
 use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-/// One entry of `schedules.yaml`, as written. Exactly one of `cron` / `every`
-/// and exactly one of `run` / `agent`.
+/// One entry of `schedules.yaml`, as written: when it fires, what it runs,
+/// and what to do about firings that clash or are missed.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ScheduleSpec {
-    /// Five-field cron expression, local time.
+    /// Five-field cron expression, local time. `cron` or `every`, not both.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cron: Option<String>,
     /// An interval (`30m`, `4h`), counted from the last firing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub every: Option<String>,
-    /// A command, argv.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub run: Vec<String>,
-    /// An agent CLI, run headless with `prompt` (or `prompt_file`) and `args`.
+    /// What runs: a shell line, argv, or an agent. See [`Task`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub prompt: Option<String>,
-    /// Relative to the file the schedule came from.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub prompt_file: Option<PathBuf>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub args: Vec<String>,
-    /// Required for global schedules; a workspace schedule defaults to it.
+    pub run: Option<Task>,
+    /// Required for global schedules; a workspace schedule defaults to the
+    /// folder, and a relative one is inside it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -53,13 +45,9 @@ pub struct ScheduleSpec {
 
 impl ScheduleSpec {
     /// What it starts, as the shape decisions and workflows use too.
-    pub fn action(&self) -> crate::action::Action {
-        crate::action::Action {
+    pub fn action(&self) -> Action {
+        Action {
             run: self.run.clone(),
-            agent: self.agent.clone(),
-            prompt: self.prompt.clone(),
-            prompt_file: self.prompt_file.clone(),
-            args: self.args.clone(),
             cwd: self.cwd.clone(),
             env: self.env.clone(),
             tags: self.tags.clone(),

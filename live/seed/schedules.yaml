@@ -4,14 +4,14 @@
 schedules:
   pulse:
     every: 30s
-    run: [sh, -c, 'date +%T | tee -a pulse.log']
+    run: "date +%T | tee -a pulse.log"
     cwd: "@LIVE@/ws"
     title: pulse
     tags: [live]
 
   slow:
     every: 3m
-    run: [sh, -c, 'for i in 1 2 3 4 5 6; do echo "step $i of 6"; sleep 5; done']
+    run: 'for i in 1 2 3 4 5 6; do echo "step $i of 6"; sleep 5; done'
     cwd: "@LIVE@/ws"
     title: six slow steps
     tags: [live, long]
