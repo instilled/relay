@@ -496,6 +496,18 @@ impl Reactor {
         self.get(&r.name, Some(&r.scope)).await
     }
 
+    /// Says yes to the current version of one reaction.
+    pub async fn approve(&self, name: &str, scope: Option<&str>) -> Result<Reaction> {
+        let r = self.get(name, scope).await?;
+        if r.removed_at.is_some() {
+            bail!("`{name}` is no longer in {}", r.source.display());
+        }
+        let (sc, n) = (r.scope.clone(), vec![r.name.clone()]);
+        self.ledger.call(move |c| reactions::approve(c, &sc, &n)).await?;
+        self.wake.notify_one();
+        self.get(&r.name, Some(&r.scope)).await
+    }
+
     /// What every rule would do with one event, without doing any of it.
     pub async fn test(&self, event_id: i64) -> Result<Vec<Trial>> {
         let event = self

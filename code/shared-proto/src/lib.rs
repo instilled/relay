@@ -11,6 +11,7 @@ pub mod decision;
 pub mod methods;
 pub mod reaction;
 pub mod rpc;
+pub mod rule;
 pub mod schedule;
 pub mod types;
 
