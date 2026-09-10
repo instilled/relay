@@ -217,7 +217,7 @@ fn from_row(row: &Row) -> rusqlite::Result<Decision> {
 mod tests {
     use super::*;
     use crate::Ledger;
-    use relay_proto::action::Action;
+    use relay_proto::action::{Action, Task};
 
     fn decision(id: &str, group: Option<&str>) -> Decision {
         Decision {
@@ -234,7 +234,7 @@ mod tests {
                     label: "Open a PR".into(),
                     default: false,
                     action: Action {
-                        run: vec!["true".into()],
+                        run: Some(Task::Argv(vec!["true".into()])),
                         ..Default::default()
                     },
                 },
@@ -256,7 +256,7 @@ mod tests {
     fn round_trips_and_answers_once() {
         let ledger = Ledger::open_in_memory().unwrap();
         let stored = ledger.call_blocking(|c| insert(c, &decision("d1", None))).unwrap();
-        assert_eq!(stored.options[0].action.run, ["true"]);
+        assert_eq!(stored.options[0].action.label(), "true");
         assert!(stored.status.is_open());
 
         let open = ledger.call_blocking(|c| list(c, &DecisionFilter::default())).unwrap();

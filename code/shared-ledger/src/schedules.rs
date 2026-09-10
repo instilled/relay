@@ -212,11 +212,12 @@ fn from_row(row: &Row) -> rusqlite::Result<Schedule> {
 mod tests {
     use super::*;
     use crate::Ledger;
+    use relay_proto::action::Task;
 
     fn spec(every: &str) -> ScheduleSpec {
         ScheduleSpec {
             every: Some(every.into()),
-            run: vec!["true".into()],
+            run: Some(Task::Argv(vec!["true".into()])),
             cwd: Some("/tmp".into()),
             ..Default::default()
         }

@@ -1,6 +1,6 @@
 # Relay — architecture
 
-**Status:** as built · **Date:** 2026-09-09 · **Tree:** `decisions` branch
+**Status:** as built · **Date:** 2026-09-09 · **Tree:** `grammar` branch
 
 [PRODUCT.md](PRODUCT.md) says what Relay is for and where it is going. This file says how the
 tree that exists is wired: which processes there are, who owns what, and what crosses which
@@ -255,10 +255,27 @@ flowchart LR
     class q,gone q
 ```
 
-**Actions.** A schedule's entry and a decision's option are the same shape — `run:` argv, or
-`agent:` with `prompt`/`prompt_file` and `args`, plus `cwd`, `env`, `tags`, `title`, `no_tty` —
-and one function turns that shape into a `RunSpec`. Adding workflow steps later adds no third
-dialect.
+**Actions.** A schedule's entry and a decision's option are the same shape, and one function
+turns that shape into a `RunSpec`. Adding workflow steps later adds no third dialect. What runs
+is written under one key, in whichever of the three forms fits:
+
+```yaml
+run: "date +%T >> pulse.log"     # a string goes through sh -c
+run: [grep, -c, ERROR, app.log]  # a list is argv, no shell
+run:                             # a map is an agent, run headless:
+  agent: claude                  #   the profile's headless args, then args, then the prompt
+  prompt_file: standup.md
+  args: [--model, opus]
+cwd: ~/work/api                  # and these decorate it, whichever form
+env: { CI: "1" }
+tags: [nightly]
+ref: gh:1
+title: nightly checks
+no_tty: false
+```
+
+The parser for those three forms is hand-written, so a mistake says which form it could not
+read rather than that nothing matched.
 
 **Decisions** are the human node, and they never block. `rl ask` writes the question and
 returns; the run that asked can finish, and the question waits in the ledger with its options.

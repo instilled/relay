@@ -13,6 +13,11 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
     (5, "0005_schedules", include_str!("../migrations/0005_schedules.sql")),
     (6, "0006_workspaces", include_str!("../migrations/0006_workspaces.sql")),
     (7, "0007_decisions", include_str!("../migrations/0007_decisions.sql")),
+    (
+        8,
+        "0008_run_grammar",
+        include_str!("../migrations/0008_run_grammar.sql"),
+    ),
 ];
 
 pub fn run(conn: &mut Connection) -> Result<()> {

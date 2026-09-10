@@ -94,19 +94,8 @@ fn validate(name: &str, spec: &ScheduleSpec, in_workspace: bool) -> Result<()> {
         (Some(_), Some(_)) => bail!("`cron` or `every`, not both"),
         (None, None) => bail!("needs `cron` or `every`"),
     }
-    match (spec.run.is_empty(), &spec.agent) {
-        (false, None) => {
-            if spec.prompt.is_some() || spec.prompt_file.is_some() {
-                bail!("`prompt` needs `agent`");
-            }
-        }
-        (true, Some(_)) => {
-            if spec.prompt.is_some() == spec.prompt_file.is_some() {
-                bail!("an agent needs `prompt` or `prompt_file`, not both");
-            }
-        }
-        (false, Some(_)) => bail!("`run` or `agent`, not both"),
-        (true, None) => bail!("needs `run` or `agent`"),
+    if spec.run.is_none() {
+        bail!("needs `run`");
     }
     if spec.cwd.is_none() && !in_workspace {
         bail!("needs `cwd`");
@@ -592,14 +581,21 @@ mod tests {
         assert!(err("every: 1h\nrun: [true]").contains("cwd"));
         assert!(err("every: 0s\nrun: [true]\ncwd: /tmp").contains("every"));
         assert!(err("cron: '* * *'\nrun: [true]\ncwd: /tmp").contains("cron"));
-        assert!(err("every: 1h\nagent: claude\ncwd: /tmp").contains("prompt"));
-        assert!(err("every: 1h\nrun: [x]\nagent: claude\nprompt: p\ncwd: /tmp").contains("not both"));
         assert!(validate("bad name", &spec("every: 1h\nrun: [true]\ncwd: /tmp"), false).is_err());
         assert!(validate("ok-1", &spec("every: 1h\nrun: [true]\ncwd: /tmp"), false).is_ok());
         assert!(
             validate("ws", &spec("every: 1h\nrun: [true]"), true).is_ok(),
             "a workspace has a cwd"
         );
+    }
+
+    /// What `run` takes is the parser's business, and it says so itself.
+    #[test]
+    fn a_bad_run_is_refused_where_it_is_read() {
+        let err = |y: &str| serde_norway::from_str::<ScheduleSpec>(y).unwrap_err().to_string();
+        assert!(err("every: 1h\nagent: claude\ncwd: /tmp").contains("unknown field"));
+        assert!(err("every: 1h\nrun:\n  agent: claude\ncwd: /tmp").contains("needs `prompt`"));
+        assert!(err("every: 1h\nrun:\n  shell: ls\ncwd: /tmp").contains("no `shell`"));
     }
 
     #[test]
@@ -617,18 +613,30 @@ mod tests {
     #[test]
     fn agents_run_headless_with_the_profile_arguments() {
         let reg = Registry::builtin();
-        let s = spec(
-            "every: 1h\nagent: claude\nprompt: 'look at the logs'\nargs: [--model, haiku]\ncwd: ~/ops\ntags: [ops]",
-        );
+        let s = spec(concat!(
+            "every: 1h\n",
+            "run:\n",
+            "  agent: claude\n",
+            "  prompt: look at the logs\n",
+            "  args: [--model, haiku]\n",
+            "cwd: ~/ops\n",
+            "tags: [ops]\n",
+        ));
         let r = run_spec("logs", &s, Path::new("/x"), None, &reg).unwrap();
         assert_eq!(r.argv, ["claude", "-p", "--model", "haiku", "look at the logs"]);
         assert_eq!(r.kind, RunKind::Agent);
         assert_eq!(r.title.as_deref(), Some("logs"));
         assert_eq!(r.cause, Cause::Schedule("logs".into()));
         assert!(r.cwd.ends_with("ops") && !r.cwd.starts_with("~"));
+
+        // A list is argv; a string is a shell line.
         let c = spec("every: 1h\nrun: [cargo, test]\ncwd: /tmp");
         let r = run_spec("t", &c, Path::new("/x"), None, &reg).unwrap();
         assert_eq!(r.argv, ["cargo", "test"]);
+        assert_eq!(r.kind, RunKind::Command);
+        let c = spec("every: 1h\nrun: cargo test | tee out.txt\ncwd: /tmp");
+        let r = run_spec("t", &c, Path::new("/x"), None, &reg).unwrap();
+        assert_eq!(r.argv, ["sh", "-c", "cargo test | tee out.txt"]);
         assert_eq!(r.kind, RunKind::Command);
     }
 
