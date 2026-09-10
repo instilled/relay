@@ -1,10 +1,15 @@
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
 use relay_core::time::{now, parse_since};
 use relay_core::{Home, display_path};
+use relay_proto::decision::{Decision, DecisionOption, DecisionStatus};
 use relay_proto::methods::{
     DaemonInfo, DigestGet, DigestParams, EventFilter, EventList, PresenceClient, PresenceTouch, RunFilter, RunHook,
     RunHookParams, RunList, RunMark, RunMarkParams, RunSpec, RunStart, RunStop, RunStopParams,
+};
+use relay_proto::methods::{
+    DecisionDismiss, DecisionFilter, DecisionGet, DecisionId, DecisionList, DecisionNote, DecisionRaise, DecisionSpec,
+    DecisionTake, DecisionTakeParams,
 };
 use relay_proto::methods::{
     ScheduleFilter, ScheduleList, ScheduleName, SchedulePause, ScheduleReload, ScheduleResume, ScheduleRun,
@@ -59,6 +64,12 @@ enum Cmd {
         #[command(subcommand)]
         cmd: ScheduleCmd,
     },
+    /// Ask a human something and carry on: the question waits until answered.
+    Ask(AskArgs),
+    /// Questions waiting on you (and, with --all, the answered ones).
+    Decisions(DecisionsArgs),
+    /// Answer one: choose an option, or dismiss it.
+    Decide(DecideArgs),
     /// Register this folder as a workspace and load its .relay/: schedules fire once approved.
     Up(UpArgs),
     /// Registered folders (see `rl up`).
@@ -133,6 +144,65 @@ struct ScheduleRef {
     /// Which one, when the name exists in several: `global` or a workspace folder.
     #[arg(long = "in", value_name = "SCOPE")]
     scope: Option<String>,
+}
+
+#[derive(Args)]
+struct AskArgs {
+    /// The question, in one line. Left out, the whole thing is read as YAML
+    /// (or JSON) on stdin: title, summary, options with actions.
+    title: Option<String>,
+    /// An option: `key`, or `key:Label`. Repeatable. An option written this
+    /// way is an answer, not a next step; give it an action through stdin.
+    #[arg(short = 'o', long = "option", value_name = "KEY[:LABEL]")]
+    options: Vec<String>,
+    /// The longer story, for whoever reads the question.
+    #[arg(short, long)]
+    summary: Option<String>,
+    /// Several options may be chosen at once.
+    #[arg(long)]
+    multi: bool,
+    /// Asking the same thing again replaces the open question with this key.
+    #[arg(short, long)]
+    group: Option<String>,
+    /// How long it stands (`4h`, `2d`) before the default is taken or it expires.
+    #[arg(short = 'e', long, value_name = "DURATION")]
+    expires: Option<String>,
+    /// Which option is taken if it expires.
+    #[arg(long = "default", value_name = "KEY")]
+    default_option: Option<String>,
+    /// The run asking (default: $RELAY_RUN, when there is one).
+    #[arg(long, value_name = "ID")]
+    run: Option<String>,
+    /// Where its options run, when no run says (default: here).
+    #[arg(long)]
+    cwd: Option<PathBuf>,
+}
+
+#[derive(Args)]
+struct DecisionsArgs {
+    /// Include the ones already answered.
+    #[arg(short, long)]
+    all: bool,
+    /// Only the ones a run asked.
+    #[arg(long, value_name = "ID")]
+    run: Option<String>,
+    /// At most N, newest first.
+    #[arg(short = 'n', long, default_value_t = 50)]
+    limit: u32,
+}
+
+#[derive(Args)]
+struct DecideArgs {
+    /// Decision id.
+    id: String,
+    /// Option keys. More than one only when the question said `multi`.
+    options: Vec<String>,
+    /// Answer "not this": nothing runs.
+    #[arg(short, long)]
+    dismiss: bool,
+    /// Why, kept with the answer.
+    #[arg(long)]
+    note: Option<String>,
 }
 
 #[derive(Args)]
@@ -267,6 +337,9 @@ async fn main() -> Result<()> {
         Cmd::Since(a) => since(&home, a, cli.json).await,
         Cmd::Events(a) => events(&home, a, cli.json).await,
         Cmd::Schedule { cmd } => schedule(&home, cmd, cli.json).await,
+        Cmd::Ask(a) => ask(&home, a, cli.json).await,
+        Cmd::Decisions(a) => decisions(&home, a, cli.json).await,
+        Cmd::Decide(a) => decide(&home, a, cli.json).await,
         Cmd::Up(a) => up(&home, a, cli.json).await,
         Cmd::Workspace { cmd } => workspace(&home, cmd, cli.json).await,
         Cmd::Watch(a) => attach(&home, a, AttachMode::Watch).await,
@@ -786,4 +859,242 @@ fn describe(i: &DaemonInfo) -> String {
         i.started_at,
         display_path(&i.home)
     )
+}
+
+/// `rl ask`: raise a question. With a title on the command line the flags say
+/// it all; without one, the whole spec is YAML (or JSON) on stdin, which is
+/// how an agent hands over options that carry actions.
+async fn ask(home: &Home, a: AskArgs, json: bool) -> Result<()> {
+    let mut spec = match &a.title {
+        Some(t) => DecisionSpec {
+            title: t.clone(),
+            options: a
+                .options
+                .iter()
+                .map(|o| match o.split_once(':') {
+                    Some((k, l)) => DecisionOption::new(k.trim(), l.trim()),
+                    None => DecisionOption::new(o.trim(), ""),
+                })
+                .collect(),
+            ..Default::default()
+        },
+        None => {
+            let text = std::io::read_to_string(std::io::stdin())?;
+            if text.trim().is_empty() {
+                bail!("say the question, or send its YAML on stdin");
+            }
+            spec_from_yaml(&text).context("reading the decision from stdin")?
+        }
+    };
+    if let Some(s) = a.summary {
+        spec.summary = Some(s);
+    }
+    if a.multi {
+        spec.multi = true;
+    }
+    if a.group.is_some() {
+        spec.group = a.group;
+    }
+    if a.expires.is_some() {
+        spec.expires = a.expires;
+    }
+    if a.cwd.is_some() {
+        spec.cwd = a.cwd;
+    }
+    if let Some(key) = &a.default_option {
+        let mut found = false;
+        for o in &mut spec.options {
+            o.default = &o.key == key;
+            found |= o.default;
+        }
+        if !found {
+            bail!("--default {key}: no such option");
+        }
+    }
+    // Inside a run, the question belongs to that run's chain.
+    spec.run = a
+        .run
+        .or(spec.run)
+        .or_else(|| std::env::var("RELAY_RUN").ok().filter(|s| !s.is_empty()));
+    if spec.cwd.is_none() && spec.run.is_none() {
+        spec.cwd = Some(std::env::current_dir()?);
+    }
+
+    let d = Client::connect(home).await?.call::<DecisionRaise>(spec).await?;
+    if json {
+        println!("{}", serde_json::to_string(&d)?);
+    } else {
+        println!("{}", d.id);
+    }
+    Ok(())
+}
+
+async fn decisions(home: &Home, a: DecisionsArgs, json: bool) -> Result<()> {
+    let list = Client::connect(home)
+        .await?
+        .call::<DecisionList>(DecisionFilter {
+            all: a.all,
+            run: a.run,
+            flow: None,
+            limit: Some(a.limit),
+        })
+        .await?;
+    if json {
+        println!("{}", serde_json::to_string(&list)?);
+    } else if list.is_empty() {
+        println!("nothing waiting on you");
+    } else {
+        let now = now();
+        let rows: Vec<Vec<String>> = list.iter().map(|d| decision_row(d, now)).collect();
+        println!("{}", render::table(DECISION_HEADERS, &rows));
+    }
+    Ok(())
+}
+
+const DECISION_HEADERS: &[&str] = &["ID", "AGE", "STATE", "TITLE", "OPTIONS"];
+
+fn decision_row(d: &Decision, now: jiff::Timestamp) -> Vec<String> {
+    let state = match d.status {
+        DecisionStatus::Open => match d.expires_at {
+            Some(e) => format!("open · {}", until(e, now)),
+            None => "open".into(),
+        },
+        other => other.to_string(),
+    };
+    let options = if d.status.is_open() {
+        d.options
+            .iter()
+            .map(|o| {
+                if o.default {
+                    format!("{}*", o.key)
+                } else {
+                    o.key.clone()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    } else if d.chosen.is_empty() {
+        String::new()
+    } else {
+        format!("→ {}", d.chosen.join(", "))
+    };
+    vec![
+        d.id.clone(),
+        relay_core::time::fmt_age(d.created_at, now),
+        state,
+        d.title.clone(),
+        options,
+    ]
+}
+
+async fn decide(home: &Home, a: DecideArgs, json: bool) -> Result<()> {
+    let mut rpc = Client::connect(home).await?;
+    let d = if a.dismiss {
+        if !a.options.is_empty() {
+            bail!("--dismiss takes no options");
+        }
+        rpc.call::<DecisionDismiss>(DecisionNote { id: a.id, note: a.note })
+            .await?
+    } else {
+        if a.options.is_empty() {
+            // Nothing said: show the question and its options rather than guess.
+            let d = rpc.call::<DecisionGet>(DecisionId { id: a.id }).await?;
+            print!("{}", decision_text(&d, now()));
+            return Ok(());
+        }
+        rpc.call::<DecisionTake>(DecisionTakeParams {
+            id: a.id,
+            options: a.options,
+            note: a.note,
+        })
+        .await?
+    };
+    if json {
+        println!("{}", serde_json::to_string(&d)?);
+    } else {
+        println!("{}", render::table(DECISION_HEADERS, &[decision_row(&d, now())]));
+        for r in &d.outcome_runs {
+            println!("started {r}");
+        }
+    }
+    Ok(())
+}
+
+/// One question in full: what it asks, and what each option would do.
+fn decision_text(d: &Decision, now: jiff::Timestamp) -> String {
+    let mut out = format!("{}  {}\n", d.id, d.title);
+    if let Some(s) = &d.summary {
+        for line in s.lines() {
+            out.push_str(&format!("  {line}\n"));
+        }
+    }
+    out.push('\n');
+    for o in &d.options {
+        let action = o.action.label();
+        let mark = if o.default { "*" } else { " " };
+        out.push_str(&format!("  {mark}{:<10} {}\n", o.key, o.text()));
+        if !action.is_empty() {
+            out.push_str(&format!("   {:<10} → {action}\n", ""));
+        }
+    }
+    out.push_str(&format!("\nasked {} ago", relay_core::time::fmt_age(d.created_at, now)));
+    match d.expires_at {
+        Some(e) => out.push_str(&format!(" · expires {}\n", until(e, now))),
+        None => out.push('\n'),
+    }
+    out.push_str(&format!("rl decide {} <option>\n", d.id));
+    out
+}
+
+/// YAML (or JSON) → a decision. It goes through JSON on the way because
+/// serde's `flatten` — what lets an option carry its action inline — only
+/// reads sequences correctly from JSON.
+fn spec_from_yaml(text: &str) -> Result<DecisionSpec> {
+    let yaml: serde_norway::Value = serde_norway::from_str(text)?;
+    Ok(serde_json::from_value(serde_json::to_value(yaml)?)?)
+}
+
+/// `in 3h12m`, or `due` for a moment already gone.
+fn until(t: jiff::Timestamp, now: jiff::Timestamp) -> String {
+    if t > now {
+        format!("in {}", relay_core::time::fmt_duration(t.duration_since(now)))
+    } else {
+        "due".to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_question_can_be_written_as_yaml() {
+        let yaml = concat!(
+            "title: 3 errors in prod\n",
+            "group: nightly/errors\n",
+            "expires: 4h\n",
+            "options:\n",
+            "  - key: fix\n",
+            "    label: Open a PR\n",
+            "    agent: claude\n",
+            "    prompt: fix the NPE in checkout\n",
+            "  - key: ignore\n",
+            "    label: Ignore\n",
+            "    default: true\n",
+        );
+        let spec = spec_from_yaml(yaml).unwrap();
+        assert_eq!(spec.title, "3 errors in prod");
+        assert_eq!(spec.group.as_deref(), Some("nightly/errors"));
+        assert_eq!(spec.expires.as_deref(), Some("4h"));
+        assert_eq!(spec.options.len(), 2);
+        assert_eq!(spec.options[0].action.agent.as_deref(), Some("claude"));
+        assert!(spec.options[1].default);
+        assert!(spec.options[1].action.is_empty());
+    }
+
+    #[test]
+    fn an_option_can_carry_a_command() {
+        let spec = spec_from_yaml("title: ship?\noptions:\n  - key: ship\n    run: [sh, -c, \"echo go\"]\n").unwrap();
+        assert_eq!(spec.options[0].action.run, ["sh", "-c", "echo go"]);
+    }
 }

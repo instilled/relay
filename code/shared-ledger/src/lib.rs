@@ -6,6 +6,7 @@
 //! a `call` that returns has been applied. Table families are plain functions
 //! over `&Connection` in their own modules so they unit-test without the thread.
 
+pub mod decisions;
 pub mod events;
 pub mod migrate;
 pub mod presence;

@@ -10,6 +10,7 @@
 
 pub mod cron;
 
+use crate::action::expand_home;
 use crate::supervisor::Supervisor;
 use anyhow::{Context, Result, anyhow, bail};
 use cron::Cron;
@@ -23,7 +24,7 @@ use relay_proto::methods::{RunFilter, RunSpec};
 use relay_proto::schedule::{
     GLOBAL_SCOPE, Missed, Overlap, ReloadReport, Schedule, ScheduleSpec, UpReport, WORKSPACE_DIR, Workspace,
 };
-use relay_proto::types::{Cause, Run, RunKind, event_kind};
+use relay_proto::types::{Cause, Run, event_kind};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -150,16 +151,6 @@ pub fn next_fire(spec: &ScheduleSpec, after: Timestamp, last_fired: Option<Times
     }
 }
 
-fn expand_home(p: &Path) -> PathBuf {
-    match p.strip_prefix("~") {
-        Ok(rest) => match std::env::var_os("HOME") {
-            Some(h) => PathBuf::from(h).join(rest),
-            None => p.to_path_buf(),
-        },
-        Err(_) => p.to_path_buf(),
-    }
-}
-
 /// The run a schedule starts. An agent runs headless: the profile's
 /// `headless` arguments, then `args`, then the prompt. In a workspace,
 /// `cwd` defaults to the folder and a relative one is inside it.
@@ -170,46 +161,15 @@ pub fn run_spec(
     workspace: Option<&Path>,
     registry: &Registry,
 ) -> Result<RunSpec> {
-    let (kind, argv) = match &spec.agent {
-        Some(cli) => {
-            let prompt = match (&spec.prompt, &spec.prompt_file) {
-                (Some(p), _) => p.clone(),
-                (None, Some(f)) => {
-                    let path = if f.is_absolute() { f.clone() } else { source_dir.join(f) };
-                    std::fs::read_to_string(&path).with_context(|| format!("prompt_file {}", path.display()))?
-                }
-                (None, None) => bail!("an agent needs a prompt"),
-            };
-            let profile = registry.resolve(RunKind::Agent, std::slice::from_ref(cli)).profile;
-            let mut argv = vec![cli.clone()];
-            argv.extend(profile.headless.iter().cloned());
-            argv.extend(spec.args.iter().cloned());
-            argv.push(prompt);
-            (RunKind::Agent, argv)
-        }
-        None => (RunKind::Command, spec.run.clone()),
-    };
-    let cwd = match (spec.cwd.as_deref().map(expand_home), workspace) {
-        (Some(c), Some(w)) if c.is_relative() => w.join(c),
-        (Some(c), _) => c,
-        (None, Some(w)) => w.to_path_buf(),
-        (None, None) => bail!("needs cwd"),
-    };
-    Ok(RunSpec {
-        argv,
-        kind,
-        cwd,
-        title: Some(spec.title.clone().unwrap_or_else(|| name.to_string())),
-        ref_: spec.ref_.clone(),
-        tags: spec.tags.clone(),
-        tty: !spec.no_tty,
-        cols: None,
-        rows: None,
-        env: spec.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
-        inherit_env: true,
-        cause: Cause::Schedule(name.to_string()),
-        flow: None,
-    })
+    crate::action::run_spec(
+        &spec.action(),
+        name,
+        source_dir,
+        workspace,
+        registry,
+        Cause::Schedule(name.to_string()),
+        None,
+    )
 }
 
 /// Where a workspace keeps its schedules.
@@ -609,6 +569,7 @@ impl Scheduler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use relay_proto::types::RunKind;
 
     fn spec(yaml: &str) -> ScheduleSpec {
         serde_norway::from_str(yaml).unwrap()

@@ -90,6 +90,33 @@ pub fn register(r: &mut Router<Daemon>) {
             .await
             .map_err(|e| RpcError::internal(format!("{e:#}")))
     });
+    r.register::<DecisionRaise, _, _>(|d, spec| async move {
+        d.decisions
+            .raise(spec)
+            .await
+            .map_err(|e| RpcError::invalid_params(format!("{e:#}")))
+    });
+    r.register::<DecisionList, _, _>(|d, f| async move { d.decisions.list(f).await.map_err(RpcError::internal) });
+    r.register::<DecisionGet, _, _>(|d, DecisionId { id }| async move {
+        d.decisions
+            .get(&id)
+            .await
+            .map_err(RpcError::internal)?
+            .ok_or_else(|| RpcError::not_found("decision", &id))
+    });
+    r.register::<DecisionTake, _, _>(|d, p: DecisionTakeParams| async move {
+        d.decisions
+            .take(&p.id, &p.options, p.note)
+            .await
+            .map_err(|e| RpcError::invalid_params(format!("{e:#}")))
+    });
+    r.register::<DecisionDismiss, _, _>(|d, p: DecisionNote| async move {
+        d.decisions
+            .dismiss(&p.id, p.note)
+            .await
+            .map_err(|e| RpcError::invalid_params(format!("{e:#}")))
+    });
+
     r.register::<RunStart, _, _>(|d, spec| async move {
         d.supervisor
             .start(spec)
@@ -161,7 +188,16 @@ pub fn register(r: &mut Router<Daemon>) {
                 crate::digest::item(run, e, joined_by)
             })
             .collect();
-        Ok(Digest { since, items })
+        let decisions = d
+            .decisions
+            .list(DecisionFilter::default())
+            .await
+            .map_err(RpcError::internal)?;
+        Ok(Digest {
+            since,
+            items,
+            decisions,
+        })
     });
 
     r.register::<EventList, _, _>(|d, filter| async move {

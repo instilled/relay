@@ -52,6 +52,23 @@ pub struct ScheduleSpec {
 }
 
 impl ScheduleSpec {
+    /// What it starts, as the shape decisions and workflows use too.
+    pub fn action(&self) -> crate::action::Action {
+        crate::action::Action {
+            run: self.run.clone(),
+            agent: self.agent.clone(),
+            prompt: self.prompt.clone(),
+            prompt_file: self.prompt_file.clone(),
+            args: self.args.clone(),
+            cwd: self.cwd.clone(),
+            env: self.env.clone(),
+            tags: self.tags.clone(),
+            ref_: self.ref_.clone(),
+            title: self.title.clone(),
+            no_tty: self.no_tty,
+        }
+    }
+
     /// `cron "0 2 * * *"` or `every 4h`, for lists.
     pub fn when(&self) -> String {
         match (&self.cron, &self.every) {

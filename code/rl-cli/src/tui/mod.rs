@@ -92,6 +92,7 @@ pub async fn run(home: &Home) -> Result<()> {
         digest: Digest {
             since,
             items: Vec::new(),
+            decisions: Vec::new(),
         },
         filter: String::new(),
         screen: Screen::Fleet,
@@ -513,17 +514,31 @@ impl App {
         .areas(area);
         let items = digest::since_items(&self.digest);
         let (need, fin) = digest::counts(items.iter().copied());
+        let asked = self.digest.decisions.len();
         self.header(
             f,
             head,
-            format!("relay · {}", digest::headline(self.since, need, fin, now)),
+            format!("relay · {}", digest::headline_with(self.since, need, fin, asked, now)),
         );
         f.render_widget(Paragraph::new("─".repeat(area.width as usize)).dim(), rule);
-        if items.is_empty() {
+        if items.is_empty() && self.digest.decisions.is_empty() {
             f.render_widget(Paragraph::new(" nothing since then").dim(), list);
             return;
         }
         let mut lines: Vec<Line> = Vec::new();
+        // Questions first: nothing here moves until you answer them.
+        if !self.digest.decisions.is_empty() {
+            lines.push(Line::from(vec![Span::raw(" "), Span::raw("to decide").bold()]));
+            for q in &self.digest.decisions {
+                lines.push(Line::from(vec![
+                    Span::raw(format!(" ? {}  ", q.id)).yellow(),
+                    Span::raw(format!("{:>4}  ", fmt_age(q.created_at, now))),
+                    Span::raw(q.title.clone()),
+                    Span::raw(format!("  [{}]", q.keys())).dim(),
+                ]));
+            }
+            lines.push(Line::from(Span::raw("   rl decide <id> <option>").dim()));
+        }
         let mut idx = 0usize;
         let sel = self.since_sel;
         let mut sel_line = 0usize;
