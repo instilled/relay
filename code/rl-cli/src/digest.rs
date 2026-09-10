@@ -56,7 +56,15 @@ pub fn counts<'a>(items: impl IntoIterator<Item = &'a DigestItem>) -> (usize, us
 }
 
 pub fn headline(since: Timestamp, need: usize, fin: usize, now: Timestamp) -> String {
+    headline_with(since, need, fin, 0, now)
+}
+
+/// The same line, plus how many questions are waiting.
+pub fn headline_with(since: Timestamp, need: usize, fin: usize, asked: usize, now: Timestamp) -> String {
     let mut s = format!("since {} ({} ago)", fmt_clock(since, now), fmt_age(since, now));
+    if asked > 0 {
+        s.push_str(&format!(" · {asked} to decide"));
+    }
     if need > 0 {
         s.push_str(&format!(" · {need} need{} you", if need == 1 { "s" } else { "" }));
     }
@@ -69,7 +77,7 @@ pub fn headline(since: Timestamp, need: usize, fin: usize, now: Timestamp) -> St
 /// `rl since` output.
 pub fn text(d: &Digest, now: Timestamp) -> String {
     let items = since_items(d);
-    if items.is_empty() {
+    if items.is_empty() && d.decisions.is_empty() {
         return format!(
             "nothing since {} ({} ago)\n",
             fmt_clock(d.since, now),
@@ -77,8 +85,21 @@ pub fn text(d: &Digest, now: Timestamp) -> String {
         );
     }
     let (need, fin) = counts(items.iter().copied());
-    let mut out = headline(d.since, need, fin, now);
+    let mut out = headline_with(d.since, need, fin, d.decisions.len(), now);
     out.push('\n');
+    // Questions first: they are the only thing that cannot move without you.
+    if !d.decisions.is_empty() {
+        out.push_str("\nto decide\n");
+        for q in &d.decisions {
+            out.push_str(&format!(
+                "  ? {}  {:>4}  {}  [{}]\n",
+                q.id,
+                fmt_age(q.created_at, now),
+                q.title,
+                q.keys()
+            ));
+        }
+    }
     for g in group(items) {
         out.push('\n');
         out.push_str(&g.key);
@@ -121,6 +142,7 @@ mod tests {
     fn groups_rank_and_render() {
         let d = Digest {
             since: "2026-09-08T09:12:00Z".parse().unwrap(),
+            decisions: Vec::new(),
             items: vec![
                 item(
                     "done1",

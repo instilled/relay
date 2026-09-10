@@ -1,6 +1,6 @@
 # Relay — architecture
 
-**Status:** as built · **Date:** 2026-09-09 · **Tree:** `schedules` branch
+**Status:** as built · **Date:** 2026-09-09 · **Tree:** `decisions` branch
 
 [PRODUCT.md](PRODUCT.md) says what Relay is for and where it is going. This file says how the
 tree that exists is wired: which processes there are, who owns what, and what crosses which
@@ -17,7 +17,7 @@ Three kinds of process and two socket protocols. Nothing else talks to anything.
 flowchart TB
     subgraph cli["rl — CLI + control panel (rl-cli)"]
         tui["TUI: since-you-left · fleet · detail · terminal"]
-        cmds["run · stop · ls · since · events · watch · join · mark · schedule · up · workspace"]
+        cmds["run · stop · ls · since · events · watch · join · mark<br/>schedule · up · workspace · ask · decisions · decide"]
         hookcmd["rl hook &lt;Event&gt; — hidden, called by the agent's hooks"]
     end
 
@@ -27,6 +27,7 @@ flowchart TB
         handlers["handlers — every method in one place"]
         sup["supervisor — start · follow · apply · reconcile"]
         sched["scheduler — schedules.yaml → runs, on time"]
+        dec["decisions — questions waiting on a human → runs"]
         attach["attach — scrollback → replay → live"]
         digest["digest — one line per run, and whether it is news"]
         gitm["git — read-only placement: workspace, branch"]
@@ -38,7 +39,7 @@ flowchart TB
     end
 
     detect["relay-detect<br/>registry (detect/*.yaml) · PTY heuristics<br/>Claude hooks · state machine"]
-    db[("~/.relay/ledger.db — relay-ledger<br/>runs · events · sessions · session_io · presence<br/>schedules · schedule_specs · workspaces")]
+    db[("~/.relay/ledger.db — relay-ledger<br/>runs · events · sessions · session_io · presence<br/>schedules · schedule_specs · workspaces · decisions")]
 
     cli -->|"JSON-RPC, one line per message<br/>~/.relay/run/rld.sock — relay-proto"| rld
     child -->|"hooks fire<br/>RELAY_RUN in the env"| hookcmd
@@ -46,6 +47,7 @@ flowchart TB
     sup -->|"spawn, wait for the readiness line"| h
     sup <-->|"framed holder protocol on the run's socket<br/>Output · Input · Resize · Signal · Exit"| h
     sched -->|"run.start with cause: schedule:&lt;name&gt;"| sup
+    dec -->|"the chosen option, cause: decision:&lt;id&gt;"| sup
     attach -.->|"one holder connection per viewer"| h
     h --> child
 
@@ -232,7 +234,47 @@ each event row at write time so the digest groups without a join.
 
 ---
 
-## 6. On disk
+## 6. What starts a run
+
+Every run says why it is there. `Run.cause` is one string — `manual`, `schedule:<name>`,
+`decision:<id>`, and later `reaction:<name>` and `workflow:<name>/<step>` — and `Run.flow` is
+the chain it belongs to: its own id when it starts one, the flow it was handed otherwise. A
+nightly schedule that asks a question whose answer opens a pull request is three rows and one
+flow.
+
+```mermaid
+flowchart LR
+    file["schedules.yaml<br/>(global, or a workspace's)"] --> sched["scheduler"]
+    sched -->|"cause: schedule:nightly"| run1["run — analyse the logs"]
+    run1 -->|"rl ask, then it ends"| q(["decision — open<br/>fix · ignore"])
+    q -->|"rl decide &lt;id&gt; fix"| run2["run — claude, open a PR"]
+    q -.->|"expires with a default"| run2
+    q -.->|"expires with none"| gone(["expired"])
+
+    classDef q fill:#3e2f10,stroke:#d9a441,color:#f5e6c8
+    class q,gone q
+```
+
+**Actions.** A schedule's entry and a decision's option are the same shape — `run:` argv, or
+`agent:` with `prompt`/`prompt_file` and `args`, plus `cwd`, `env`, `tags`, `title`, `no_tty` —
+and one function turns that shape into a `RunSpec`. Adding workflow steps later adds no third
+dialect.
+
+**Decisions** are the human node, and they never block. `rl ask` writes the question and
+returns; the run that asked can finish, and the question waits in the ledger with its options.
+Answering is the only thing that starts the follow-up runs, and the row moves to `taken` before
+they start, so two `rl decide` racing cannot both fire. A `group` key is unique among open
+questions: asking the same thing again restates the open one, keeping its id, so a nightly job
+leaves one line rather than thirty. An `expires` either takes the option marked `default` or
+moves the question to `expired`; the sweeper sleeps until the earliest deadline and does
+nothing when there is none.
+
+Relay still talks to no one. A question surfaces in `rl decisions`, in `rl since`, and at the
+top of the since-you-left screen; delivery to Slack or mail waits for reactions.
+
+---
+
+## 7. On disk
 
 ```text
 ~/.relay/                     ($RELAY_HOME overrides; tests and scripts/live point it elsewhere)
@@ -264,15 +306,17 @@ limit, so both sides fall back to the same short hashed directory under the temp
 
 ---
 
-## 7. Not built yet
+## 8. Not built yet
 
 Named here so the diagrams above are not read as the whole plan — see §7 of the brief for
 phasing.
 
 - **Workspace files beyond schedules** — `reactions.yaml`, `workflows/`; `rl up` loads only
   `schedules.yaml` today.
-- **Decisions, reactions, workflows** — the rest of the flow model: `Run.cause` and `Run.flow`
-  are in place (`manual` / `schedule:<name>` today; `decision:`, `reaction:`, `workflow:` reserved).
+- **Reactions and workflows** — the rest of the flow model: events → reactions, and
+  `workflows/<name>.yaml` as declarative sugar over the same engine. `Run.cause` and `Run.flow`
+  carry `manual`, `schedule:<name>` and `decision:<id>` today; `reaction:` and `workflow:` are
+  reserved.
 - **Plugins** — `rl-plugin-host` (Bun), the broker, `relay.d.ts`, the manifest/approval flow,
   action keys and the detail tab. `~/.relay/plugins/` exists, unused.
 - **Facts and summaries** — the collector, transcript ingestion, cached narrative, cost. No

@@ -5,7 +5,9 @@
 //! daemon's Unix socket. This crate is the public API; nothing here depends on
 //! the daemon.
 
+pub mod action;
 pub mod codec;
+pub mod decision;
 pub mod methods;
 pub mod rpc;
 pub mod schedule;

@@ -1565,6 +1565,7 @@ dependencies = [
  "rl-session",
  "serde",
  "serde_json",
+ "serde_norway",
  "tempfile",
  "tokio",
  "tokio-util",
