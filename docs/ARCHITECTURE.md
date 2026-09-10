@@ -16,7 +16,7 @@ Three kinds of process and two socket protocols. Nothing else talks to anything.
 ```mermaid
 flowchart TB
     subgraph cli["rl — CLI + control panel (rl-cli)"]
-        tui["TUI: since-you-left · fleet · detail · terminal"]
+        tui["TUI: one list · the selected thing · its terminal"]
         cmds["run · stop · ls · since · events · watch · join · mark<br/>schedule · up · workspace · ask · decisions · decide · on · react"]
         hookcmd["rl hook &lt;Event&gt; — hidden, called by the agent's hooks"]
     end
@@ -188,6 +188,16 @@ Several watchers, one joiner; a second `join` is refused unless `take` turns the
 into a watcher. Each viewer gets its own holder connection, and the supervisor's follow
 connection journals regardless — so a viewer leaving costs nothing and the run never notices.
 
+The panel (`rl` with no command, `rl-cli/src/tui`) is the same two calls behind one screen. The
+left is one list built from `digest.get` (`tui/rows.rs`): questions first, then runs by attention,
+grouped by what they belong to, and named — a workspace by the name it was registered under, a
+cause as "schedule nightly" or "rule tests-failed", never an id. The right is the selected thing
+(`tui/pane.rs`): a run's facts and recent events, or a question with its options numbered;
+pressing the number is `decision.take`, and the run it starts becomes the selection. `enter` on a
+run turns the pane into its terminal, watched; `enter` again joins, `ctrl-\` lets go, `esc` is
+facts again. Nothing is remembered between openings except presence: leaving the panel is what
+`rl since` counts from.
+
 ---
 
 ## 5. How a run's state is decided
@@ -231,7 +241,7 @@ stateDiagram-v2
 ```
 
 `needs_input`, `blocked` and `failed` are the attention states: they sort to the top of the
-fleet and are what `rl since` leads with. Confidence rides along in the UI, always visible.
+panel's list and are what `rl since` leads with. Confidence rides along in the UI, always visible.
 
 Grouping is derived, never a table: `group_key = ref → branch → workspace`, materialised onto
 each event row at write time so the digest groups without a join.
@@ -313,7 +323,7 @@ stays yours, comments and all. `rl react test <event>` replays one real event th
 and prints what each would do, and why it would not.
 
 Relay still talks to no one itself. A question surfaces in `rl decisions`, in `rl since` and at
-the top of the since-you-left screen; getting it to Slack or mail is a reaction on
+the top of the panel, where a number key answers it; getting it to Slack or mail is a reaction on
 `decision.raised` running your own command.
 
 ---

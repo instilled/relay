@@ -41,7 +41,8 @@ struct Cli {
     /// Machine-readable output on every command.
     #[arg(long, global = true)]
     json: bool,
-    /// With no command: the control panel (fleet, detail, terminal).
+    /// With no command: the control panel — everything ranked by attention
+    /// on the left, the selected thing on the right, its terminal on enter.
     #[command(subcommand)]
     cmd: Option<Cmd>,
 }
