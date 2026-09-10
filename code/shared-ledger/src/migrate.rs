@@ -18,6 +18,7 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         "0008_run_grammar",
         include_str!("../migrations/0008_run_grammar.sql"),
     ),
+    (9, "0009_reactions", include_str!("../migrations/0009_reactions.sql")),
 ];
 
 pub fn run(conn: &mut Connection) -> Result<()> {
@@ -67,7 +68,10 @@ mod tests {
             [
                 "decisions",
                 "events",
+                "meta",
                 "presence",
+                "reaction_specs",
+                "reactions",
                 "runs",
                 "schedule_specs",
                 "schedules",

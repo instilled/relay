@@ -161,6 +161,22 @@ pub fn resolve(
     get(conn, id)?.ok_or_else(|| anyhow::anyhow!("decision {id} vanished"))
 }
 
+/// Which reaction raised this question, if one did.
+pub fn by_reaction(conn: &Connection, id: &str) -> Result<Option<String>> {
+    Ok(conn
+        .query_row("SELECT by_reaction FROM decisions WHERE id = ?1", params![id], |r| {
+            r.get(0)
+        })
+        .optional()?
+        .flatten())
+}
+
+/// Records that a reaction is behind a question.
+pub fn set_by_reaction(conn: &Connection, id: &str, name: &str) -> Result<()> {
+    conn.execute("UPDATE decisions SET by_reaction = ?2 WHERE id = ?1", params![id, name])?;
+    Ok(())
+}
+
 /// Records the runs an answer started, once they are up.
 pub fn set_outcomes(conn: &Connection, id: &str, outcomes: &[String]) -> Result<()> {
     conn.execute(
@@ -217,7 +233,7 @@ fn from_row(row: &Row) -> rusqlite::Result<Decision> {
 mod tests {
     use super::*;
     use crate::Ledger;
-    use relay_proto::action::{Action, Task};
+    use relay_proto::action::Task;
 
     fn decision(id: &str, group: Option<&str>) -> Decision {
         Decision {
@@ -233,10 +249,8 @@ mod tests {
                     key: "fix".into(),
                     label: "Open a PR".into(),
                     default: false,
-                    action: Action {
-                        run: Some(Task::Argv(vec!["true".into()])),
-                        ..Default::default()
-                    },
+                    run: Some(Task::Argv(vec!["true".into()])),
+                    ..Default::default()
                 },
                 DecisionOption::new("ignore", "Ignore"),
             ],
@@ -256,7 +270,7 @@ mod tests {
     fn round_trips_and_answers_once() {
         let ledger = Ledger::open_in_memory().unwrap();
         let stored = ledger.call_blocking(|c| insert(c, &decision("d1", None))).unwrap();
-        assert_eq!(stored.options[0].action.label(), "true");
+        assert_eq!(stored.options[0].action().label(), "true");
         assert!(stored.status.is_open());
 
         let open = ledger.call_blocking(|c| list(c, &DecisionFilter::default())).unwrap();

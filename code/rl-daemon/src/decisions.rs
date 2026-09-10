@@ -55,6 +55,12 @@ impl Decisions {
     /// Raises a question. With a `group`, an open question with that key is
     /// restated rather than duplicated, keeping its id.
     pub async fn raise(&self, spec: DecisionSpec) -> Result<Decision> {
+        self.raise_by(spec, None).await
+    }
+
+    /// The same, remembering the reaction behind it so that rule never
+    /// answers, or reacts to, its own question.
+    pub async fn raise_by(&self, spec: DecisionSpec, by_reaction: Option<&str>) -> Result<Decision> {
         if spec.title.trim().is_empty() {
             bail!("a decision needs a title");
         }
@@ -140,6 +146,12 @@ impl Decisions {
                 self.ledger.call(move |c| decisions::insert(c, &d2)).await?
             }
         };
+        if let Some(name) = by_reaction {
+            let (id, name) = (stored.id.clone(), name.to_string());
+            self.ledger
+                .call(move |c| decisions::set_by_reaction(c, &id, &name))
+                .await?;
+        }
         self.append(
             &stored,
             event_kind::DECISION_RAISED,
@@ -211,13 +223,14 @@ impl Decisions {
         let mut started = Vec::new();
         for key in keys {
             let Some(opt) = d.option(key) else { continue };
-            if opt.action.is_empty() {
+            let action = opt.action();
+            if action.is_empty() {
                 continue;
             }
             let name = format!("{} · {}", d.title, opt.text());
             let base = d.workspace.clone();
             match crate::action::run_spec(
-                &opt.action,
+                &action,
                 &name,
                 &base,
                 Some(&base),

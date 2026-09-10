@@ -67,10 +67,21 @@ pub fn register(r: &mut Router<Daemon>) {
             .map_err(|e| RpcError::internal(format!("{e:#}")))
     });
     r.register::<relay_proto::methods::WorkspaceUp, _, _>(|d, p| async move {
-        d.scheduler
+        let mut up = d
+            .scheduler
             .up(&p.path, p.approve)
             .await
-            .map_err(|e| RpcError::internal(format!("{e:#}")))
+            .map_err(|e| RpcError::internal(format!("{e:#}")))?;
+        // The folder's reactions are part of the same yes.
+        let (report, reactions, approved) = d
+            .reactor
+            .up(&up.workspace.path, p.approve)
+            .await
+            .map_err(|e| RpcError::internal(format!("{e:#}")))?;
+        up.reaction_report = report;
+        up.reactions = reactions;
+        up.approved_reactions = approved;
+        Ok(up)
     });
     r.register::<relay_proto::methods::WorkspaceList, _, _>(|d, ()| async move {
         d.scheduler
@@ -79,6 +90,9 @@ pub fn register(r: &mut Router<Daemon>) {
             .map_err(|e| RpcError::internal(format!("{e:#}")))
     });
     r.register::<relay_proto::methods::WorkspaceRemove, _, _>(|d, p| async move {
+        if let Ok(path) = std::fs::canonicalize(&p.path) {
+            let _ = d.reactor.remove_scope(&path).await;
+        }
         d.scheduler
             .remove_workspace(&p.path)
             .await
@@ -90,6 +104,48 @@ pub fn register(r: &mut Router<Daemon>) {
             .await
             .map_err(|e| RpcError::internal(format!("{e:#}")))
     });
+    r.register::<ReactionList, _, _>(|d, f| async move {
+        d.reactor
+            .list(f.all)
+            .await
+            .map_err(|e| RpcError::internal(format!("{e:#}")))
+    });
+    r.register::<ReactionPause, _, _>(|d, p| async move {
+        d.reactor
+            .set_paused(&p.name, p.scope.as_deref(), true)
+            .await
+            .map_err(|e| RpcError::internal(format!("{e:#}")))
+    });
+    r.register::<ReactionResume, _, _>(|d, p| async move {
+        d.reactor
+            .set_paused(&p.name, p.scope.as_deref(), false)
+            .await
+            .map_err(|e| RpcError::internal(format!("{e:#}")))
+    });
+    r.register::<ReactionReload, _, _>(|d, ()| async move {
+        d.reactor
+            .reload()
+            .await
+            .map_err(|e| RpcError::internal(format!("{e:#}")))
+    });
+    r.register::<ReactionTest, _, _>(|d, p: EventId| async move {
+        let trials = d
+            .reactor
+            .test(p.event)
+            .await
+            .map_err(|e| RpcError::invalid_params(format!("{e:#}")))?;
+        Ok(trials
+            .into_iter()
+            .map(|t| ReactionTrial {
+                reaction: t.reaction,
+                scope: t.scope,
+                fires: t.fires,
+                why: t.why,
+                action: t.action,
+            })
+            .collect::<Vec<_>>())
+    });
+
     r.register::<DecisionRaise, _, _>(|d, spec| async move {
         d.decisions
             .raise(spec)

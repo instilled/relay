@@ -58,11 +58,14 @@ case ${1:-} in
     cp -R "$seed/ws" "$live/ws"
     # Its own repo, so it has its own branch instead of inheriting relay's.
     git -C "$live/ws" init -q -b demo 2>/dev/null || true
-    sed "s|@LIVE@|$live|g" "$seed/schedules.yaml" > "$live/home/schedules.yaml"
+    for f in schedules reactions; do
+      sed "s|@LIVE@|$live|g" "$seed/$f.yaml" > "$live/home/$f.yaml"
+    done
     echo "live: home $live/home, workspace $live/ws"
     "$rl" daemon start
     "$rl" up --yes "$live/ws"
     "$rl" schedule ls
+    "$rl" react ls
     echo
     echo "live: now try \`scripts/live\` (the control panel), \`scripts/live ls --all\`,"
     echo "      or \`eval \"\$(scripts/live env)\"\` to use plain \`rl\` in this shell."
