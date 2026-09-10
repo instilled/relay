@@ -3,12 +3,13 @@
 schedules:
   tick:
     every: 45s
-    run: [sh, -c, 'echo "tick in $(pwd)"; ls']
+    run: 'echo "tick in $(pwd)"; ls'
     tags: [live]
 
   standup:
     every: 5m
-    agent: claude
-    prompt_file: standup.md
+    run:
+      agent: claude
+      prompt_file: standup.md
     title: standup
     tags: [live, agent]

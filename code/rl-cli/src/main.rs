@@ -659,10 +659,7 @@ fn schedule_row(s: &Schedule, now: jiff::Timestamp) -> Vec<String> {
     } else {
         "on"
     };
-    let action = match &s.spec.agent {
-        Some(a) => format!("{a} · {}", s.spec.prompt.as_deref().unwrap_or("(prompt file)")),
-        None => s.spec.run.join(" "),
-    };
+    let action = s.spec.action().label();
     let action: String = action.chars().take(48).collect();
     vec![
         s.scope_label(),
@@ -1076,8 +1073,9 @@ mod tests {
             "options:\n",
             "  - key: fix\n",
             "    label: Open a PR\n",
-            "    agent: claude\n",
-            "    prompt: fix the NPE in checkout\n",
+            "    run:\n",
+            "      agent: claude\n",
+            "      prompt: fix the NPE in checkout\n",
             "  - key: ignore\n",
             "    label: Ignore\n",
             "    default: true\n",
@@ -1087,14 +1085,14 @@ mod tests {
         assert_eq!(spec.group.as_deref(), Some("nightly/errors"));
         assert_eq!(spec.expires.as_deref(), Some("4h"));
         assert_eq!(spec.options.len(), 2);
-        assert_eq!(spec.options[0].action.agent.as_deref(), Some("claude"));
+        assert_eq!(spec.options[0].action.label(), "claude · fix the NPE in checkout");
         assert!(spec.options[1].default);
         assert!(spec.options[1].action.is_empty());
     }
 
     #[test]
     fn an_option_can_carry_a_command() {
-        let spec = spec_from_yaml("title: ship?\noptions:\n  - key: ship\n    run: [sh, -c, \"echo go\"]\n").unwrap();
-        assert_eq!(spec.options[0].action.run, ["sh", "-c", "echo go"]);
+        let spec = spec_from_yaml("title: ship?\noptions:\n  - key: ship\n    run: [git, push]\n").unwrap();
+        assert_eq!(spec.options[0].action.label(), "git push");
     }
 }

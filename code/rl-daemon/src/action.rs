@@ -5,7 +5,7 @@
 
 use anyhow::{Context, Result, bail};
 use relay_detect::Registry;
-use relay_proto::action::Action;
+use relay_proto::action::{Action, Task};
 use relay_proto::methods::RunSpec;
 use relay_proto::types::{Cause, RunKind};
 use std::path::{Path, PathBuf};
@@ -22,9 +22,19 @@ pub fn run_spec(
     cause: Cause,
     flow: Option<String>,
 ) -> Result<RunSpec> {
-    let (kind, argv) = match &action.agent {
-        Some(cli) => {
-            let prompt = match (&action.prompt, &action.prompt_file) {
+    let Some(task) = &action.run else {
+        bail!("nothing to run");
+    };
+    let (kind, argv) = match task {
+        Task::Shell(line) => (RunKind::Command, vec!["sh".into(), "-c".into(), line.clone()]),
+        Task::Argv(argv) => (RunKind::Command, argv.clone()),
+        Task::Agent {
+            agent,
+            prompt,
+            prompt_file,
+            args,
+        } => {
+            let prompt = match (prompt, prompt_file) {
                 (Some(p), _) => p.clone(),
                 (None, Some(f)) => {
                     let path = if f.is_absolute() { f.clone() } else { source_dir.join(f) };
@@ -32,15 +42,13 @@ pub fn run_spec(
                 }
                 (None, None) => bail!("an agent needs a prompt"),
             };
-            let profile = registry.resolve(RunKind::Agent, std::slice::from_ref(cli)).profile;
-            let mut argv = vec![cli.clone()];
+            let profile = registry.resolve(RunKind::Agent, std::slice::from_ref(agent)).profile;
+            let mut argv = vec![agent.clone()];
             argv.extend(profile.headless.iter().cloned());
-            argv.extend(action.args.iter().cloned());
+            argv.extend(args.iter().cloned());
             argv.push(prompt);
             (RunKind::Agent, argv)
         }
-        None if action.run.is_empty() => bail!("nothing to run"),
-        None => (RunKind::Command, action.run.clone()),
     };
     let cwd = match (action.cwd.as_deref().map(expand_home), base) {
         (Some(c), Some(b)) if c.is_relative() => b.join(c),
