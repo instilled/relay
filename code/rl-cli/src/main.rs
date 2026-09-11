@@ -3,7 +3,9 @@ use clap::{Args, Parser, Subcommand};
 use relay_core::time::{now, parse_since};
 use relay_core::{Home, display_path};
 use relay_proto::decision::{Decision, DecisionOption, DecisionStatus};
-use relay_proto::methods::{AgentList, ConfigGet, RuleApprove, RuleList, RuleRef, RunArchive, RunArchiveParams};
+use relay_proto::methods::{
+    AgentList, ConfigGet, GcParams, GcRun, RuleApprove, RuleList, RuleRef, RunArchive, RunArchiveParams,
+};
 use relay_proto::methods::{
     DaemonInfo, DigestGet, DigestParams, EventFilter, EventList, PresenceClient, PresenceTouch, RunFilter, RunHook,
     RunHookParams, RunList, RunMark, RunMarkParams, RunSpec, RunStart, RunStop, RunStopParams,
@@ -39,7 +41,7 @@ const HOOK_TIMEOUT: Duration = Duration::from_millis(1500);
     name = "rl",
     version,
     about = "Relay — keeps your agents and long-running work alive",
-    after_help = "Every command starts rld if it is not running, and says so when the one running is another release.\nNothing is deleted: `rl done` puts a run away, `rl ls --all` still has it.\n\nFor agents:\n  rl context    what Relay is, its events and rules, and the answer it wants — read this first\n  rl agents     the agent CLIs on this machine\n  rl --json …   every command, machine-readable"
+    after_help = "Every command starts rld if it is not running, and says so when the one running is another release.\nNothing is deleted on its own: `rl done` puts a run away, `rl ls --all` still has it. `retention: 30d` in config.yaml lets the journal of old runs go (`rl gc`); runs and events stay.\n\nFor agents:\n  rl context    what Relay is, its events and rules, and the answer it wants — read this first\n  rl agents     the agent CLIs on this machine\n  rl --json …   every command, machine-readable"
 )]
 struct Cli {
     /// Machine-readable output on every command.
@@ -92,6 +94,8 @@ enum Cmd {
     Agents,
     /// What Relay tells an agent: the words, events, rule definitions, what is here, and the answer it wants.
     Context(ContextArgs),
+    /// Let the journal of old runs go, as `retention:` in config.yaml says (or --older-than). Runs and events stay.
+    Gc(GcArgs),
     /// Ask a human something and carry on: the question waits until answered.
     Ask(AskArgs),
     /// Questions waiting on you (and, with --all, the answered ones).
@@ -285,6 +289,16 @@ struct EveryArgs {
     /// Rewrite a rule of that name instead of refusing.
     #[arg(long)]
     replace: bool,
+}
+
+#[derive(Args)]
+struct GcArgs {
+    /// Runs ended longer ago than this (default: the config's retention).
+    #[arg(long, value_name = "DURATION")]
+    older_than: Option<String>,
+    /// Only say what would go.
+    #[arg(long)]
+    dry_run: bool,
 }
 
 #[derive(Args)]
@@ -514,6 +528,7 @@ async fn main() -> Result<()> {
         Cmd::Config(a) => config(&home, a, cli.json).await,
         Cmd::Agents => agents(&home, cli.json).await,
         Cmd::Context(a) => context(&home, a).await,
+        Cmd::Gc(a) => gc(&home, a, cli.json).await,
         Cmd::Ask(a) => ask(&home, a, cli.json).await,
         Cmd::Decisions(a) => decisions(&home, a, cli.json).await,
         Cmd::Decide(a) => decide(&home, a, cli.json).await,
@@ -1705,6 +1720,10 @@ async fn config(home: &Home, a: ConfigArgs, json: bool) -> Result<()> {
             ),
             None => println!("assistants.interpret  —  (no agent on this machine; see `rl agents`)"),
         }
+        match r.config.retention.as_ref().and_then(|x| x.journal.as_deref()) {
+            Some(d) => println!("retention.journal     {d}  (config; `rl gc` runs it now, rld daily)"),
+            None => println!("retention.journal     —  (unset: nothing is ever deleted)"),
+        }
         for e in &r.errors {
             eprintln!("not usable: {e}");
         }
@@ -1713,6 +1732,54 @@ async fn config(home: &Home, a: ConfigArgs, json: bool) -> Result<()> {
         Ok(())
     } else {
         std::process::exit(1)
+    }
+}
+
+/// `rl gc`: retention, now.
+async fn gc(home: &Home, a: GcArgs, json: bool) -> Result<()> {
+    let r = daemon::ensure(home, !json)
+        .await?
+        .call::<GcRun>(GcParams {
+            older_than: a.older_than,
+            dry_run: a.dry_run,
+        })
+        .await?;
+    if json {
+        println!("{}", serde_json::to_string(&r)?);
+        return Ok(());
+    }
+    let size = rl_daemon_bytes(r.bytes);
+    if r.runs == 0 {
+        println!("nothing with a journal ended more than {} ago", r.older_than);
+    } else if r.dry_run {
+        println!(
+            "would drop the journal of {} run{} ended more than {} ago · {size} · {} file{}",
+            r.runs,
+            if r.runs == 1 { "" } else { "s" },
+            r.older_than,
+            r.files,
+            if r.files == 1 { "" } else { "s" }
+        );
+    } else {
+        println!(
+            "dropped the journal of {} run{} ended more than {} ago · {size} · {} file{} · the runs and their events stay",
+            r.runs,
+            if r.runs == 1 { "" } else { "s" },
+            r.older_than,
+            r.files,
+            if r.files == 1 { "" } else { "s" }
+        );
+    }
+    Ok(())
+}
+
+/// `4.1 MB`, `312 kB`, `88 B`.
+fn rl_daemon_bytes(n: u64) -> String {
+    match n {
+        n if n >= 1 << 30 => format!("{:.1} GB", n as f64 / (1u64 << 30) as f64),
+        n if n >= 1 << 20 => format!("{:.1} MB", n as f64 / (1u64 << 20) as f64),
+        n if n >= 1 << 10 => format!("{} kB", n >> 10),
+        n => format!("{n} B"),
     }
 }
 

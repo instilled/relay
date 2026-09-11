@@ -214,7 +214,7 @@ header says which folder it is in. Moving the cursor onto a row is looking at it
 digest leaves it out, `rl ls --all` and the ledger keep it — and `D` is done with everything
 ended that has been looked at. Ended runs also leave on their own after a day; `d` is for the
 impatient. On the line: `rl done <id>…`, `rl done --all`. Nothing is ever deleted here; that is
-retention, not yet built. `enter` on a run is its terminal, full screen and joined — the
+retention (§7). `enter` on a run is its terminal, full screen and joined — the
 keyboard is the run's, as it would be in a tab of your own — and `ctrl-\` lets go; `w` only
 watches, and `esc` is the list again. `i` opens a pane of facts beside the list (`tui/pane.rs`):
 a run's facts and recent events, a job's tally, a question with its options numbered; pressing
@@ -394,7 +394,7 @@ arguments; the prompt goes last. Unset, it is the first available agent; a name 
 does not know, or a `model` for a profile without `model_flag`, is an error, never a guess.
 `rl config` prints the resolved assistant and where it came from; `rl config edit` opens the
 file, and `rld` seeds it, all comments, when there is none. Later assistants (`summarise`,
-`triage`, `answer`) will be keys in the same map.
+`triage`, `answer`) will be keys in the same map. The second key is `retention` (§7).
 
 **What an assistant is told** is the context pack (`rl-cli/src/context.rs`, `rl context
 [--in <folder>]`), built from the code so it cannot drift: the words (run, folder, `yours`,
@@ -415,13 +415,25 @@ the top of the panel, where a number key answers it; getting it to Slack or mail
 
 ## 7. On disk
 
+**Retention is the one delete, and only when told.** Relay is a memory: runs and events are
+never removed, `rl done` only puts a run away. What does grow without bound is the journal — a
+run's terminal bytes in `session_io`, its `log/<run>.log` and `run/<run>.exit|.env` sidecars —
+and `retention: 30d` in `config.yaml` (or `retention: { journal: 30d }`) lets that go for runs
+ended longer ago than that (`rl-daemon/src/gc.rs`, `gc.run`). The run and its events stay, and
+a `run.journal_dropped` event on the run says how many bytes went; attaching to such a run shows
+nothing, honestly. `rl gc` does it now (`--older-than 12h` for once, `--dry-run` to count), `rld`
+does it once a day when the key is set (`meta.gc.last_at`); unset, nothing is ever deleted.
+Facts (`retention.runs`) are deliberately not a key yet.
+
+
 ```text
 ~/.relay/                     ($RELAY_HOME overrides; tests and scripts/live point it elsewhere)
   ledger.db                   SQLite: runs, events, sessions, session_io, presence, schedules,
                               workspaces
   schedules.yaml              user-level schedules; the file is the interface, the ledger keeps
                               versions (by sha256), pause state, last/next firing
-  config.yaml                 your defaults (`assistants:`); absent means defaults, unknown keys refused
+  config.yaml                 your defaults (`assistants:`, `retention:`); absent means defaults,
+                              unknown keys refused
   reactions.yaml              user-level rules: events → actions, or questions; same file-first
                               deal, same versioning (`rl on` appends to it)
   run/                        0700 — rld.sock, rld.pid, <run>.sock, <run>.exit

@@ -5,6 +5,7 @@ pub mod attach;
 pub mod config;
 pub mod decisions;
 pub mod digest;
+pub mod gc;
 pub mod git;
 pub mod handlers;
 pub mod reactions;

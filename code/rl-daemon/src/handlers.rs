@@ -100,6 +100,25 @@ pub fn register(r: &mut Router<Daemon>) {
             .map_err(|e| RpcError::internal(format!("{e:#}")))
     });
     r.register::<AgentList, _, _>(|d, ()| async move { Ok(crate::config::agents(&d.registry)) });
+    r.register::<GcRun, _, _>(|d, p: GcParams| async move {
+        let retention = d
+            .config
+            .read()
+            .unwrap()
+            .config
+            .retention
+            .as_ref()
+            .and_then(|r| r.journal.clone());
+        crate::gc::run(
+            &d.home,
+            &d.ledger,
+            retention.as_deref(),
+            p.older_than.as_deref(),
+            p.dry_run,
+        )
+        .await
+        .map_err(|e| RpcError::invalid_params(format!("{e:#}")))
+    });
     r.register::<ConfigGet, _, _>(|d, ()| async move {
         let loaded = crate::config::load(&d.home);
         let report = crate::config::report(&loaded, &d.registry);

@@ -29,7 +29,8 @@ pub struct Daemon {
     pub ledger: Ledger,
     pub registry: Arc<Registry>,
     /// `config.yaml` as last read; `config.get` and a rules reload re-read it.
-    pub config: std::sync::RwLock<crate::config::Loaded>,
+    /// Shared with the daily sweep (`gc`).
+    pub config: Arc<std::sync::RwLock<crate::config::Loaded>>,
     pub supervisor: Arc<Supervisor>,
     pub scheduler: Arc<Scheduler>,
     pub decisions: Arc<crate::decisions::Decisions>,
@@ -110,6 +111,13 @@ pub async fn serve_with(home: Home, shutdown: CancellationToken, opts: ServeOpti
         None if config.present => info!(file = %config.file.display(), "config read"),
         None => {}
     }
+    let config = Arc::new(std::sync::RwLock::new(config));
+    tokio::spawn(crate::gc::daily(
+        home.clone(),
+        ledger.clone(),
+        config.clone(),
+        shutdown.child_token(),
+    ));
     let scheduler = Arc::new(Scheduler::new(
         home.clone(),
         ledger.clone(),
@@ -157,7 +165,7 @@ pub async fn serve_with(home: Home, shutdown: CancellationToken, opts: ServeOpti
         home: home.clone(),
         ledger,
         registry: registry4,
-        config: std::sync::RwLock::new(config),
+        config: config.clone(),
         supervisor,
         scheduler,
         decisions,

@@ -717,3 +717,38 @@ impl Method for ConfigGet {
     type Params = ();
     type Result = ConfigReport;
 }
+
+// ---- gc.* ------------------------------------------------------------------
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct GcParams {
+    /// A duration; the config's `retention.journal` when left out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub older_than: Option<String>,
+    /// Only count.
+    #[serde(default)]
+    pub dry_run: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GcReport {
+    /// The duration used.
+    pub older_than: String,
+    /// `asked` or `config`.
+    pub from: String,
+    pub dry_run: bool,
+    /// Runs whose journal went (or would).
+    pub runs: usize,
+    /// Journal bytes and file bytes, together.
+    pub bytes: u64,
+    /// Log and sidecar files removed (or that would be).
+    pub files: usize,
+}
+
+/// Drops the journal of runs ended longer ago than retention says.
+pub struct GcRun;
+impl Method for GcRun {
+    const NAME: &'static str = "gc.run";
+    type Params = GcParams;
+    type Result = GcReport;
+}

@@ -107,3 +107,64 @@ pub fn last_seq(conn: &Connection, run: &str) -> Result<i64> {
         |r| r.get(0),
     )?)
 }
+
+/// The journal of every run that ended before `before`: gone, unless
+/// `dry_run`, which only counts. Per run, the bytes it was.
+pub fn drop_ended_before(conn: &Connection, before: Timestamp, dry_run: bool) -> Result<Vec<(String, u64)>> {
+    let mut stmt = conn.prepare(
+        "SELECT s.run, SUM(length(s.data)) FROM session_io s JOIN runs r ON r.id = s.run \
+         WHERE r.ended_at IS NOT NULL AND r.ended_at < ?1 GROUP BY s.run ORDER BY r.ended_at",
+    )?;
+    let rows = stmt
+        .query_map(params![to_millis(before)], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    if !dry_run {
+        for (run, _) in &rows {
+            conn.execute("DELETE FROM session_io WHERE run = ?1", params![run])?;
+        }
+    }
+    Ok(rows.into_iter().map(|(r, b)| (r, b.max(0) as u64)).collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::runs;
+    use jiff::SignedDuration;
+    use relay_proto::types::{Run, RunKind, RunState, Source};
+
+    #[test]
+    fn only_journals_of_runs_ended_before_go() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        crate::migrate::run(&mut conn).unwrap();
+        let now = Timestamp::now();
+        let mk = |id: &str, ended: Option<Timestamp>| {
+            let r = Run::new(id, RunKind::Command, id, vec![], "/w", "/w", now);
+            runs::insert(&conn, &r).unwrap();
+            if let Some(t) = ended {
+                runs::finish(&conn, id, RunState::Finished, Source::Pty, Some(0), t).unwrap();
+            }
+            append(&conn, id, Direction::Out, b"hello", now).unwrap();
+            append(&conn, id, Direction::In, b"x", now).unwrap();
+        };
+        mk("old00001", Some(now - SignedDuration::from_hours(48)));
+        mk("new00001", Some(now - SignedDuration::from_hours(1)));
+        mk("live0001", None);
+        let cut = now - SignedDuration::from_hours(24);
+        let dry = drop_ended_before(&conn, cut, true).unwrap();
+        assert_eq!(dry, vec![("old00001".to_string(), 6)]);
+        assert_eq!(out_bytes(&conn, "old00001").unwrap(), 5, "a dry run keeps it");
+        let gone = drop_ended_before(&conn, cut, false).unwrap();
+        assert_eq!(gone, dry);
+        assert_eq!(out_bytes(&conn, "old00001").unwrap(), 0);
+        assert_eq!(out_bytes(&conn, "new00001").unwrap(), 5);
+        assert_eq!(
+            out_bytes(&conn, "live0001").unwrap(),
+            5,
+            "a run still going is never touched"
+        );
+        assert!(drop_ended_before(&conn, cut, false).unwrap().is_empty());
+    }
+}
