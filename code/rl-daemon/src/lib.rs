@@ -2,6 +2,7 @@
 
 pub mod action;
 pub mod attach;
+pub mod config;
 pub mod decisions;
 pub mod digest;
 pub mod git;

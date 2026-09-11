@@ -7,6 +7,7 @@ hooks:
   dialect: claude
   args: ["--settings", "{hooks_file}"]
 headless: ["-p"]
+model_flag: ["--model"]
 patterns:
   needs_input:
     - '(?i)do you want to'

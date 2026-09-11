@@ -82,6 +82,10 @@ impl Home {
     pub fn ledger(&self) -> PathBuf {
         self.0.join("ledger.db")
     }
+    /// Your defaults, human-edited; absent means all defaults.
+    pub fn config_file(&self) -> PathBuf {
+        self.0.join("config.yaml")
+    }
     /// User-level schedules, human-edited.
     pub fn schedules_file(&self) -> PathBuf {
         self.0.join("schedules.yaml")

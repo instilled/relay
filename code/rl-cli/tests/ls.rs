@@ -34,15 +34,21 @@ fn ls_and_events() {
         )
     };
 
-    let (ok, _, err) = run(&["ls"]);
-    assert!(
-        !ok && err.contains("rl daemon start"),
-        "ls without daemon should say how to start it: {err}"
-    );
-
-    assert!(run(&["daemon", "start"]).0);
-    let (ok, out, _) = run(&["ls"]);
-    assert!(ok);
+    // No daemon yet: the first command starts it and says so.
+    let (ok, out, err) = run(&["ls"]);
+    assert!(ok && err.contains("rld started"), "ls starts the daemon: {err}");
+    // A failing assertion must not leave it behind.
+    struct Stop(PathBuf, PathBuf);
+    impl Drop for Stop {
+        fn drop(&mut self) {
+            let _ = Command::new(env!("CARGO_BIN_EXE_rl"))
+                .args(["daemon", "stop"])
+                .env("RELAY_HOME", &self.0)
+                .env("RELAY_RLD_BIN", &self.1)
+                .output();
+        }
+    }
+    let _stop = Stop(tmp.path().to_path_buf(), rld.clone());
     assert_eq!(out.trim(), "no runs");
     let (ok, out, _) = run(&["ls", "--json"]);
     assert!(ok);

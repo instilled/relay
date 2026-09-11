@@ -2,6 +2,7 @@
 
 pub mod attach;
 pub mod client;
+pub mod context;
 pub mod daemon;
 pub mod digest;
 pub mod env;

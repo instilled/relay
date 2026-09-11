@@ -3,6 +3,7 @@ use clap::{Args, Parser, Subcommand};
 use relay_core::time::{now, parse_since};
 use relay_core::{Home, display_path};
 use relay_proto::decision::{Decision, DecisionOption, DecisionStatus};
+use relay_proto::methods::{AgentList, ConfigGet, RuleApprove, RuleList, RuleRef, RunArchive, RunArchiveParams};
 use relay_proto::methods::{
     DaemonInfo, DigestGet, DigestParams, EventFilter, EventList, PresenceClient, PresenceTouch, RunFilter, RunHook,
     RunHookParams, RunList, RunMark, RunMarkParams, RunSpec, RunStart, RunStop, RunStopParams,
@@ -14,7 +15,6 @@ use relay_proto::methods::{
 use relay_proto::methods::{
     EventId, ReactionList, ReactionPause, ReactionReload, ReactionResume, ReactionTest, ReactionTrial,
 };
-use relay_proto::methods::{RuleApprove, RuleList, RuleRef, RunArchive, RunArchiveParams};
 use relay_proto::methods::{
     ScheduleFilter, ScheduleList, ScheduleName, SchedulePause, ScheduleReload, ScheduleResume, ScheduleRun,
     WorkspaceList, WorkspacePath, WorkspaceRemove, WorkspaceUp, WorkspaceUpParams,
@@ -38,7 +38,8 @@ const HOOK_TIMEOUT: Duration = Duration::from_millis(1500);
 #[command(
     name = "rl",
     version,
-    about = "Relay — keeps your agents and long-running work alive"
+    about = "Relay — keeps your agents and long-running work alive",
+    after_help = "Every command starts rld if it is not running, and says so when the one running is another release.\nNothing is deleted: `rl done` puts a run away, `rl ls --all` still has it.\n\nFor agents:\n  rl context    what Relay is, its events and rules, and the answer it wants — read this first\n  rl agents     the agent CLIs on this machine\n  rl --json …   every command, machine-readable"
 )]
 struct Cli {
     /// Machine-readable output on every command.
@@ -85,6 +86,12 @@ enum Cmd {
     On(OnArgs),
     /// Write a schedule into this folder's schedules.yaml and switch it on: `rl every 30m -- make test`.
     Every(EveryArgs),
+    /// Your defaults (~/.relay/config.yaml) as they stand, each assistant resolved; `edit` opens the file.
+    Config(ConfigArgs),
+    /// The agent CLIs Relay knows, and which are on this machine.
+    Agents,
+    /// What Relay tells an agent: the words, events, rule definitions, what is here, and the answer it wants.
+    Context(ContextArgs),
     /// Ask a human something and carry on: the question waits until answered.
     Ask(AskArgs),
     /// Questions waiting on you (and, with --all, the answered ones).
@@ -278,6 +285,25 @@ struct EveryArgs {
     /// Rewrite a rule of that name instead of refusing.
     #[arg(long)]
     replace: bool,
+}
+
+#[derive(Args)]
+struct ContextArgs {
+    /// The folder the words would be typed in (default: here).
+    #[arg(long = "in", value_name = "FOLDER")]
+    folder: Option<PathBuf>,
+}
+
+#[derive(Args)]
+struct ConfigArgs {
+    #[command(subcommand)]
+    cmd: Option<ConfigCmd>,
+}
+
+#[derive(Subcommand)]
+enum ConfigCmd {
+    /// Open config.yaml in $VISUAL / $EDITOR, then show it as the daemon reads it.
+    Edit,
 }
 
 #[derive(Args)]
@@ -485,6 +511,9 @@ async fn main() -> Result<()> {
         Cmd::Rules(a) => rules(&home, a, cli.json).await,
         Cmd::On(a) => on(&home, a, cli.json).await,
         Cmd::Every(a) => every(&home, a, cli.json).await,
+        Cmd::Config(a) => config(&home, a, cli.json).await,
+        Cmd::Agents => agents(&home, cli.json).await,
+        Cmd::Context(a) => context(&home, a).await,
         Cmd::Ask(a) => ask(&home, a, cli.json).await,
         Cmd::Decisions(a) => decisions(&home, a, cli.json).await,
         Cmd::Decide(a) => decide(&home, a, cli.json).await,
@@ -512,7 +541,7 @@ async fn attach(home: &Home, a: AttachArgs, mode: AttachMode) -> Result<()> {
 }
 
 async fn mark(home: &Home, a: MarkArgs, json: bool) -> Result<()> {
-    let run = Client::connect(home)
+    let run = daemon::ensure(home, !json)
         .await?
         .call::<RunMark>(RunMarkParams {
             id: a.id,
@@ -603,7 +632,7 @@ async fn run(home: &Home, a: RunArgs, json: bool) -> Result<()> {
         cause: Cause::Manual,
         flow: None,
     };
-    let run = Client::connect(home).await?.call::<RunStart>(spec).await?;
+    let run = daemon::ensure(home, !json).await?.call::<RunStart>(spec).await?;
     if json {
         println!("{}", serde_json::to_string(&run)?);
     } else {
@@ -613,7 +642,7 @@ async fn run(home: &Home, a: RunArgs, json: bool) -> Result<()> {
 }
 
 async fn schedule(home: &Home, cmd: ScheduleCmd, json: bool) -> Result<()> {
-    let mut rpc = Client::connect(home).await?;
+    let mut rpc = daemon::ensure(home, !json).await?;
     let name = |r: &ScheduleRef| ScheduleName {
         name: r.name.clone(),
         scope: r.scope.clone(),
@@ -677,7 +706,7 @@ async fn up(home: &Home, a: UpArgs, json: bool) -> Result<()> {
         Some(d) => d,
         None => std::env::current_dir()?,
     };
-    let mut rpc = Client::connect(home).await?;
+    let mut rpc = daemon::ensure(home, !json).await?;
     let mut r = rpc
         .call::<WorkspaceUp>(WorkspaceUpParams {
             path: path.clone(),
@@ -732,7 +761,7 @@ fn print_up(r: &UpReport) {
 }
 
 async fn workspace(home: &Home, cmd: WorkspaceCmd, json: bool) -> Result<()> {
-    let mut rpc = Client::connect(home).await?;
+    let mut rpc = daemon::ensure(home, !json).await?;
     match cmd {
         WorkspaceCmd::Ls => {
             let list = rpc.call::<WorkspaceList>(()).await?;
@@ -803,7 +832,7 @@ fn schedule_row(s: &Schedule, now: jiff::Timestamp) -> Vec<String> {
 }
 
 async fn stop(home: &Home, a: StopArgs, json: bool) -> Result<()> {
-    let run = Client::connect(home)
+    let run = daemon::ensure(home, !json)
         .await?
         .call::<RunStop>(RunStopParams {
             id: a.id,
@@ -866,7 +895,7 @@ async fn ls(home: &Home, a: LsArgs, json: bool) -> Result<()> {
         cause: a.cause,
         limit: Some(a.limit),
     };
-    let runs = Client::connect(home).await?.call::<RunList>(filter).await?;
+    let runs = daemon::ensure(home, !json).await?.call::<RunList>(filter).await?;
     if json {
         println!("{}", serde_json::to_string(&runs)?);
     } else if runs.is_empty() {
@@ -884,7 +913,7 @@ async fn done(home: &Home, a: DoneArgs, json: bool) -> Result<()> {
     if a.ids.is_empty() && !a.all {
         bail!("say which: `rl done <id>…`, or `rl done --all` for everything ended and seen");
     }
-    let n = Client::connect(home)
+    let n = daemon::ensure(home, !json)
         .await?
         .call::<RunArchive>(RunArchiveParams {
             ids: a.ids.clone(),
@@ -903,7 +932,7 @@ async fn done(home: &Home, a: DoneArgs, json: bool) -> Result<()> {
 
 async fn since(home: &Home, a: SinceArgs, json: bool) -> Result<()> {
     let n = now();
-    let mut c = Client::connect(home).await?;
+    let mut c = daemon::ensure(home, !json).await?;
     let boundary = match a.since.as_deref() {
         Some(s) => parse_since(s, n)?,
         None => {
@@ -934,7 +963,7 @@ async fn events(home: &Home, a: EventsArgs, json: bool) -> Result<()> {
         kinds: a.kinds,
         limit: Some(a.limit),
     };
-    let evs = Client::connect(home).await?.call::<EventList>(filter).await?;
+    let evs = daemon::ensure(home, !json).await?.call::<EventList>(filter).await?;
     if json {
         println!("{}", serde_json::to_string(&evs)?);
     } else if evs.is_empty() {
@@ -1069,7 +1098,7 @@ async fn ask(home: &Home, a: AskArgs, json: bool) -> Result<()> {
         spec.cwd = Some(std::env::current_dir()?);
     }
 
-    let d = Client::connect(home).await?.call::<DecisionRaise>(spec).await?;
+    let d = daemon::ensure(home, !json).await?.call::<DecisionRaise>(spec).await?;
     if json {
         println!("{}", serde_json::to_string(&d)?);
     } else {
@@ -1079,7 +1108,7 @@ async fn ask(home: &Home, a: AskArgs, json: bool) -> Result<()> {
 }
 
 async fn decisions(home: &Home, a: DecisionsArgs, json: bool) -> Result<()> {
-    let list = Client::connect(home)
+    let list = daemon::ensure(home, !json)
         .await?
         .call::<DecisionList>(DecisionFilter {
             all: a.all,
@@ -1137,7 +1166,7 @@ fn decision_row(d: &Decision, now: jiff::Timestamp) -> Vec<String> {
 }
 
 async fn decide(home: &Home, a: DecideArgs, json: bool) -> Result<()> {
-    let mut rpc = Client::connect(home).await?;
+    let mut rpc = daemon::ensure(home, !json).await?;
     let d = if a.dismiss {
         if !a.options.is_empty() {
             bail!("--dismiss takes no options");
@@ -1264,7 +1293,7 @@ async fn rule_kind(rpc: &mut Client, a: &RuleArg) -> Result<RuleKind> {
 }
 
 async fn rules(home: &Home, a: RulesArgs, json: bool) -> Result<()> {
-    let mut rpc = Client::connect(home).await?;
+    let mut rpc = daemon::ensure(home, !json).await?;
     let one = |r: Rule, json: bool| -> Result<()> {
         if json {
             println!("{}", serde_json::to_string(&r)?);
@@ -1399,7 +1428,7 @@ fn reaction_row(r: &Reaction, now: jiff::Timestamp) -> Vec<String> {
 }
 
 async fn react(home: &Home, cmd: ReactCmd, json: bool) -> Result<()> {
-    let mut rpc = Client::connect(home).await?;
+    let mut rpc = daemon::ensure(home, !json).await?;
     let one = |r: Reaction, json: bool| -> Result<()> {
         if json {
             println!("{}", serde_json::to_string(&r)?);
@@ -1530,7 +1559,7 @@ async fn on(home: &Home, a: OnArgs, json: bool) -> Result<()> {
     }
 
     std::fs::write(&file, format!("{existing}{block}"))?;
-    let report = Client::connect(home).await?.call::<ReactionReload>(()).await?;
+    let report = daemon::ensure(home, !json).await?.call::<ReactionReload>(()).await?;
     if json {
         println!("{}", serde_json::to_string(&report)?);
     } else {
@@ -1621,7 +1650,7 @@ async fn every(home: &Home, a: EveryArgs, json: bool) -> Result<()> {
             display_path(&file)
         );
     }
-    let mut rpc = Client::connect(home).await?;
+    let mut rpc = daemon::ensure(home, !json).await?;
     let registered = match &d.folder {
         Some(f) => rpc.call::<WorkspaceList>(()).await?.iter().any(|w| &w.path == f),
         None => true,
@@ -1643,6 +1672,145 @@ async fn every(home: &Home, a: EveryArgs, json: bool) -> Result<()> {
         }
         println!("→ {} · {}", display_path(&file), rule.status());
     }
+    Ok(())
+}
+
+/// `rl config`: the file as the daemon reads it, each assistant resolved to
+/// what would run; `rl config edit` opens it first. A file that cannot be
+/// used says why and exits 1.
+async fn config(home: &Home, a: ConfigArgs, json: bool) -> Result<()> {
+    if let Some(ConfigCmd::Edit) = a.cmd {
+        let file = home.config_file();
+        if !file.exists() {
+            std::fs::write(
+                &file,
+                "# Your defaults. Keys are added as Relay grows; one it does not know is refused.\n\
+                 # assistants:\n#   interpret: claude   # or { agent: claude, model: …, args: [...] }\n",
+            )?;
+        }
+        rl_cli::env::open_in_editor(&file, 1)?;
+    }
+    let r = daemon::ensure(home, !json).await?.call::<ConfigGet>(()).await?;
+    if json {
+        println!("{}", serde_json::to_string(&r)?);
+    } else {
+        let file = display_path(&r.file);
+        println!("{file}{}", if r.present { "" } else { "  (absent: all defaults)" });
+        match &r.interpret {
+            Some(x) => println!(
+                "assistants.interpret  {}  ({}{})",
+                x.argv.join(" "),
+                x.source,
+                if x.available { "" } else { ", not on this machine" }
+            ),
+            None => println!("assistants.interpret  —  (no agent on this machine; see `rl agents`)"),
+        }
+        for e in &r.errors {
+            eprintln!("not usable: {e}");
+        }
+    }
+    if r.errors.is_empty() {
+        Ok(())
+    } else {
+        std::process::exit(1)
+    }
+}
+
+/// `rl context`: the pack, with `rl --help` and the help of the commands a
+/// draft becomes, rendered from this very binary, and what the daemon knows
+/// about here.
+async fn context(home: &Home, a: ContextArgs) -> Result<()> {
+    let folder = match a.folder {
+        Some(f) => f,
+        None => std::env::current_dir()?,
+    };
+    let folder = std::fs::canonicalize(&folder).unwrap_or(folder);
+    let mut rpc = daemon::ensure(home, true).await?;
+    let workspaces = rpc.call::<WorkspaceList>(()).await?;
+    let rules = rpc.call::<RuleList>(ScheduleFilter { all: false }).await?;
+    let agents = rpc.call::<AgentList>(()).await?;
+    let name = workspaces.iter().find(|w| w.path == folder).map(|w| w.name.clone());
+    let scope_word = |r: &Rule| -> String {
+        if r.is_global() {
+            "yours".into()
+        } else {
+            workspaces
+                .iter()
+                .find(|w| w.path.as_os_str() == r.scope())
+                .map(|w| w.name.clone())
+                .unwrap_or_else(|| display_path(std::path::Path::new(r.scope())))
+        }
+    };
+    let here = rl_cli::context::Here {
+        folder: display_path(&folder),
+        name,
+        folders: workspaces
+            .iter()
+            .map(|w| (display_path(&w.path), w.name.clone()))
+            .collect(),
+        rules: rules
+            .iter()
+            .filter(|r| r.is_global() || std::path::Path::new(r.scope()) == folder)
+            .map(|r| {
+                (
+                    scope_word(r),
+                    r.kind().to_string(),
+                    r.name().to_string(),
+                    r.when(),
+                    r.does(),
+                )
+            })
+            .collect(),
+        agents: agents
+            .iter()
+            .filter(|a| a.available())
+            .map(|a| a.name.clone())
+            .collect(),
+    };
+    // The command list, and the help of the commands a draft would become.
+    // Every command's long help is ten times the rest of the pack, and an
+    // interpreter drafts things, it does not drive the CLI.
+    let mut help = String::new();
+    let mut root = <Cli as clap::CommandFactory>::command();
+    help.push_str(&root.render_long_help().to_string());
+    for sub in root.get_subcommands_mut() {
+        if matches!(sub.get_name(), "run" | "every" | "on" | "ask") {
+            help.push_str("\n---\n");
+            help.push_str(&sub.render_help().to_string());
+        }
+    }
+    print!("{}", rl_cli::context::render(&help, &here));
+    Ok(())
+}
+
+const AGENT_HEADERS: &[&str] = &["AGENT", "BIN", "HEADLESS", "MODEL"];
+
+/// `rl agents`: what the registry knows, and what is here.
+async fn agents(home: &Home, json: bool) -> Result<()> {
+    let list = daemon::ensure(home, !json).await?.call::<AgentList>(()).await?;
+    if json {
+        println!("{}", serde_json::to_string(&list)?);
+        return Ok(());
+    }
+    let rows: Vec<Vec<String>> = list
+        .iter()
+        .map(|a| {
+            vec![
+                a.name.clone(),
+                a.bin
+                    .as_ref()
+                    .map(|p| display_path(p))
+                    .unwrap_or_else(|| format!("— ({})", a.bins.join(", "))),
+                a.headless.join(" "),
+                if a.model_flag.is_empty() {
+                    "—".into()
+                } else {
+                    format!("{} <model>", a.model_flag.join(" "))
+                },
+            ]
+        })
+        .collect();
+    print!("{}", render::table(AGENT_HEADERS, &rows));
     Ok(())
 }
 

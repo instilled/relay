@@ -156,6 +156,15 @@ After a daemon restart, `reconcile` walks `sessions` where `closed_at IS NULL`: 
 the holder still answers (resuming the journal, with a `note` line if bytes were lost while the
 daemon was down), otherwise close the run from its exit sidecar — or as lost.
 
+Starting the daemon is nobody's job. Every `rl` command that needs it goes through
+`daemon::ensure`: `rld` is spawned when the socket is not there (one line on stderr, `rld
+started`), and the running one is compared with this `rl` — the same release, nothing to say;
+another release with the same wire protocol, `rl` offers `rl daemon restart` on a terminal and
+only notes it otherwise; another protocol, `rl` refuses, since messages could be misread. A
+restart costs nothing running, which is what makes the offer cheap. `rl daemon start|stop|
+status|restart` remain for saying it explicitly; a hook from inside a run (`rl hook`) never
+starts a daemon.
+
 ---
 
 ## 4. Watching and joining
@@ -363,6 +372,41 @@ what needs a yes on top, narrowed to the folder of the row it was pressed on unt
 `y` approves, `p` pauses, `enter` fires a schedule now. The two YAML
 files, the two ledger tables and `rl schedule` / `rl react` are unchanged underneath.
 
+**Your defaults, and the agents Relay itself uses.** `~/.relay/config.yaml` is the one place for
+defaults (`relay_proto::config`, read by `rld` at start, on `config.get` and on a rules reload —
+`rl-daemon/src/config.rs`). Absent means all defaults; a key it does not know is refused with the
+line, so a typo cannot silently do nothing, and a file that does not parse is reported by
+`rl config` (exit 1) while the daemon runs on defaults. Keys arrive one at a time, when a need
+does. The first is `assistants`: the agents Relay hands its own jobs to, keyed by job, each a
+name or a map:
+
+```yaml
+assistants:
+  interpret: claude     # what you type at n / e / rl "…" in plain words → a draft for your enter
+  # interpret: { agent: claude, model: claude-haiku-4-5-20251001, args: ["--max-turns", "1"] }
+```
+
+Which CLIs are agents is not configured: the detection registry says (`detect/*.yaml`,
+`kind: agent`, `bins`, `headless`, and now `model_flag`, the flag that names a model), and `rld`
+looks for each on `PATH` when asked — `agent.list`, `rl agents`. An assistant resolves to an
+argv: the binary, the headless arguments, the model through the profile's flag, the extra
+arguments; the prompt goes last. Unset, it is the first available agent; a name the registry
+does not know, or a `model` for a profile without `model_flag`, is an error, never a guess.
+`rl config` prints the resolved assistant and where it came from; `rl config edit` opens the
+file, and `rld` seeds it, all comments, when there is none. Later assistants (`summarise`,
+`triage`, `answer`) will be keys in the same map.
+
+**What an assistant is told** is the context pack (`rl-cli/src/context.rs`, `rl context
+[--in <folder>]`), built from the code so it cannot drift: the words (run, folder, `yours`,
+rule, job, question, agent, `when`), one line per event kind in `event_kind::ALL` (a kind
+without words fails a test), the fields of a schedule and a reaction (every serde field of
+the specs must be explained, or a test fails), the placeholders a reaction can use, `rl
+--help` plus the help of `run`, `every`, `on` and `ask`, what is here (the folder and its
+name, the folders Relay knows, this folder's and the person's rules, the agents on this
+machine), and the answer contract: exactly one YAML document, `kind: run | schedule |
+reaction` then the form's fields. The interpreter, next, hands this and the typed words to
+`assistants.interpret` and shows what comes back in the form.
+
 Relay still talks to no one itself. A question surfaces in `rl decisions`, in `rl since` and at
 the top of the panel, where a number key answers it; getting it to Slack or mail is a reaction on
 `decision.raised` running your own command.
@@ -377,6 +421,7 @@ the top of the panel, where a number key answers it; getting it to Slack or mail
                               workspaces
   schedules.yaml              user-level schedules; the file is the interface, the ledger keeps
                               versions (by sha256), pause state, last/next firing
+  config.yaml                 your defaults (`assistants:`); absent means defaults, unknown keys refused
   reactions.yaml              user-level rules: events → actions, or questions; same file-first
                               deal, same versioning (`rl on` appends to it)
   run/                        0700 — rld.sock, rld.pid, <run>.sock, <run>.exit

@@ -7,6 +7,7 @@
 
 pub mod action;
 pub mod codec;
+pub mod config;
 pub mod decision;
 pub mod methods;
 pub mod reaction;

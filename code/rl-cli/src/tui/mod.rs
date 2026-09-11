@@ -227,41 +227,11 @@ fn areas(area: Rect, wide: bool, show_pane: bool, form_h: u16) -> Areas {
     }
 }
 
-/// `$VISUAL` or `$EDITOR` (else `vi`) on `file` at `line`, on this screen.
-fn edit_in_editor(file: &Path, line: usize) -> Result<()> {
-    let editor = std::env::var("VISUAL")
-        .or_else(|_| std::env::var("EDITOR"))
-        .ok()
-        .filter(|e| !e.trim().is_empty())
-        .unwrap_or_else(|| "vi".into());
-    let mut words = editor.split_whitespace();
-    let bin = words.next().unwrap_or("vi");
-    let mut cmd = std::process::Command::new(bin);
-    cmd.args(words);
-    let base = Path::new(bin).file_name().map(|s| s.to_string_lossy().into_owned());
-    match base.as_deref() {
-        Some("code" | "codium" | "cursor") => {
-            cmd.arg("--wait")
-                .arg("--goto")
-                .arg(format!("{}:{line}", file.display()));
-        }
-        Some("hx" | "subl" | "zed") => {
-            cmd.arg(format!("{}:{line}", file.display()));
-        }
-        _ => {
-            cmd.arg(format!("+{line}")).arg(file);
-        }
-    }
-    let status = cmd.status().map_err(|e| anyhow::anyhow!("{editor}: {e}"))?;
-    if !status.success() {
-        anyhow::bail!("{editor} ended with {status}");
-    }
-    Ok(())
-}
-
 pub async fn run(home: &Home) -> Result<()> {
     let me = client_name();
-    let mut rpc = Client::connect(home).await?;
+    // Before the screen is taken: the daemon is started or, if it is another
+    // release, a restart is offered on the plain terminal.
+    let mut rpc = crate::daemon::ensure(home, true).await?;
     let _ = rpc.call::<PresenceTouch>(PresenceClient { client: me.clone() }).await;
     let mut app = App {
         home: home.clone(),
@@ -329,7 +299,7 @@ impl App {
                             // The editor gets the terminal; our reader lets go of stdin first.
                             drop(input);
                             ratatui::restore();
-                            let outcome = edit_in_editor(&file, line);
+                            let outcome = crate::env::open_in_editor(&file, line);
                             *terminal = ratatui::init();
                             input = EventStream::new();
                             match outcome {
