@@ -4,7 +4,8 @@ use relay_core::time::{now, parse_since};
 use relay_core::{Home, display_path};
 use relay_proto::decision::{Decision, DecisionOption, DecisionStatus};
 use relay_proto::methods::{
-    AgentList, ConfigGet, GcParams, GcRun, RuleApprove, RuleList, RuleRef, RunArchive, RunArchiveParams,
+    AgentList, ConfigGet, GcParams, GcRun, RuleApprove, RuleList, RuleRef, RunArchive, RunArchiveParams, RunId,
+    SummaryGet, SummaryMake, SummaryParams,
 };
 use relay_proto::methods::{
     DaemonInfo, DigestGet, DigestParams, EventFilter, EventList, PresenceClient, PresenceTouch, RunFilter, RunHook,
@@ -96,6 +97,8 @@ enum Cmd {
     Context(ContextArgs),
     /// Plain words to `assistants.interpret`: a run or a rule, drafted; `--go` does it.
     Interpret(InterpretArgs),
+    /// What an ended run did, by `assistants.summarise`: kept by the run, made when there is none.
+    Summarise(SummariseArgs),
     /// Let the journal of old runs go, as `retention:` in config.yaml says (or --older-than). Runs and events stay.
     Gc(GcArgs),
     /// Ask a human something and carry on: the question waits until answered.
@@ -314,6 +317,15 @@ struct InterpretArgs {
     /// Do what the draft says, without showing the form.
     #[arg(long)]
     go: bool,
+}
+
+#[derive(Args)]
+struct SummariseArgs {
+    /// The run.
+    run: String,
+    /// Ask again, even when there is a summary kept.
+    #[arg(long)]
+    again: bool,
 }
 
 #[derive(Args)]
@@ -545,6 +557,7 @@ async fn main() -> Result<()> {
         Cmd::Agents => agents(&home, cli.json).await,
         Cmd::Context(a) => context(&home, a).await,
         Cmd::Interpret(a) => interpret(&home, a, cli.json).await,
+        Cmd::Summarise(a) => summarise(&home, a, cli.json).await,
         Cmd::Gc(a) => gc(&home, a, cli.json).await,
         Cmd::Ask(a) => ask(&home, a, cli.json).await,
         Cmd::Decisions(a) => decisions(&home, a, cli.json).await,
@@ -1717,7 +1730,8 @@ async fn config(home: &Home, a: ConfigArgs, json: bool) -> Result<()> {
             std::fs::write(
                 &file,
                 "# Your defaults. Keys are added as Relay grows; one it does not know is refused.\n\
-                 # assistants:\n#   interpret: claude   # or { agent: claude, model: …, args: [...] }\n",
+                 # assistants:\n#   interpret: claude   # or { agent: claude, model: …, args: [...] }\n\
+                 #   summarise: claude\n",
             )?;
         }
         rl_cli::env::open_in_editor(&file, 1)?;
@@ -1728,14 +1742,16 @@ async fn config(home: &Home, a: ConfigArgs, json: bool) -> Result<()> {
     } else {
         let file = display_path(&r.file);
         println!("{file}{}", if r.present { "" } else { "  (absent: all defaults)" });
-        match &r.interpret {
-            Some(x) => println!(
-                "assistants.interpret  {}  ({}{})",
-                x.argv.join(" "),
-                x.source,
-                if x.available { "" } else { ", not on this machine" }
-            ),
-            None => println!("assistants.interpret  —  (no agent on this machine; see `rl agents`)"),
+        for (job, x) in [("interpret", &r.interpret), ("summarise", &r.summarise)] {
+            match x {
+                Some(x) => println!(
+                    "assistants.{job:<10} {}  ({}{})",
+                    x.argv.join(" "),
+                    x.source,
+                    if x.available { "" } else { ", not on this machine" }
+                ),
+                None => println!("assistants.{job:<10} —  (no agent on this machine; see `rl agents`)"),
+            }
         }
         match r.config.retention.as_ref().and_then(|x| x.journal.as_deref()) {
             Some(d) => println!("retention.journal     {d}  (config; `rl gc` runs it now, rld daily)"),
@@ -1874,6 +1890,33 @@ async fn interpret(home: &Home, a: InterpretArgs, json: bool) -> Result<()> {
         }
     } else if !json {
         println!("# --go does it; or n / a in the panel");
+    }
+    Ok(())
+}
+
+async fn summarise(home: &Home, a: SummariseArgs, json: bool) -> Result<()> {
+    let mut rpc = daemon::ensure(home, !json).await?;
+    let kept = rpc.call::<SummaryGet>(RunId { id: a.run.clone() }).await?;
+    if !json && (a.again || kept.is_none()) {
+        eprintln!("summarising…");
+    }
+    let s = rpc
+        .call::<SummaryMake>(SummaryParams {
+            run: a.run,
+            again: a.again,
+            timeout: None,
+        })
+        .await?;
+    if json {
+        println!("{}", serde_json::to_string(&s)?);
+    } else {
+        println!("{}", s.text);
+        println!(
+            "# by {} · {} ago · its run {} · --again asks anew",
+            s.agent,
+            relay_core::time::fmt_age(s.at, now()),
+            s.by
+        );
     }
     Ok(())
 }

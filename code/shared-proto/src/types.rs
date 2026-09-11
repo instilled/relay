@@ -310,6 +310,19 @@ pub struct Event {
     pub data: Option<Value>,
 }
 
+/// What an assistant said about an ended run, kept by the run; `s` in the
+/// panel and `rl summarise` make one, the pane shows it under the facts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Summary {
+    pub run: String,
+    /// Who wrote it.
+    pub agent: String,
+    /// The assistant run that wrote it.
+    pub by: String,
+    pub at: Timestamp,
+    pub text: String,
+}
+
 /// Event kinds emitted by `rld` itself. Plugins add `plugin.<name>.*`.
 pub mod event_kind {
     pub const RUN_STARTED: &str = "run.started";
@@ -331,6 +344,8 @@ pub mod event_kind {
     pub const PLUGIN_INVOKED: &str = "plugin.invoked";
     /// Retention took a run's journal; the run and its events stay.
     pub const RUN_JOURNAL_DROPPED: &str = "run.journal_dropped";
+    /// An assistant wrote a summary of an ended run (`summaries`).
+    pub const RUN_SUMMARISED: &str = "run.summarised";
 
     /// Every kind above, for anything that lists them.
     pub const ALL: &[&str] = &[
@@ -352,6 +367,7 @@ pub mod event_kind {
         DECISION_EXPIRED,
         PLUGIN_INVOKED,
         RUN_JOURNAL_DROPPED,
+        RUN_SUMMARISED,
     ];
 }
 

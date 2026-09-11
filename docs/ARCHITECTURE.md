@@ -40,7 +40,7 @@ flowchart TB
     end
 
     detect["relay-detect<br/>registry (detect/*.yaml) · PTY heuristics<br/>Claude hooks · state machine"]
-    db[("~/.relay/ledger.db — relay-ledger<br/>runs · events · sessions · session_io · presence<br/>schedules · reactions (+ specs) · workspaces · decisions · meta")]
+    db[("~/.relay/ledger.db — relay-ledger<br/>runs · events · sessions · session_io · presence<br/>schedules · reactions (+ specs) · workspaces · decisions · summaries · meta")]
 
     cli -->|"JSON-RPC, one line per message<br/>~/.relay/run/rld.sock — relay-proto"| rld
     child -->|"hooks fire<br/>RELAY_RUN in the env"| hookcmd
@@ -218,7 +218,10 @@ retention (§7). `enter` on a run is its terminal, full screen and joined — th
 keyboard is the run's, as it would be in a tab of your own — and `ctrl-\` lets go; `w` only
 watches, and `esc` is the list again. `i` opens a pane of facts beside the list (`tui/pane.rs`):
 a run's facts and recent events, a job's tally, a question with its options numbered; pressing
-the number is `decision.take`, and the run it starts becomes the selection. `n` is a form at the
+the number is `decision.take`, and the run it starts becomes the selection. `s` on an ended run
+asks `assistants.summarise` what it did (§6): the asking is a run in the list, and the answer
+lands in the pane under the facts as `claude said, 2m ago`, always marked as the assistant's;
+`s` again asks anew. `n` is a form at the
 foot of the screen (`tui/form.rs`): for a run, the folder, a line and a title — a line starting
 with an agent's name (`claude fix the build`) is that agent with the rest as its prompt, anything
 else is a shell line — and `enter` is `run.start`, sized to this screen, an agent's terminal joined
@@ -389,6 +392,7 @@ name or a map:
 ```yaml
 assistants:
   interpret: claude     # what you type at a / rl interpret "…" in plain words → a draft for your enter
+  summarise: claude     # what an ended run did, in three sentences (s, rl summarise)
   # interpret: { agent: claude, model: claude-haiku-4-5-20251001, args: ["--max-turns", "1"] }
 ```
 
@@ -398,9 +402,9 @@ looks for each on `PATH` when asked — `agent.list`, `rl agents`. An assistant 
 argv: the binary, the headless arguments, the model through the profile's flag, the extra
 arguments; the prompt goes last. Unset, it is the first available agent; a name the registry
 does not know, or a `model` for a profile without `model_flag`, is an error, never a guess.
-`rl config` prints the resolved assistant and where it came from; `rl config edit` opens the
-file, and `rld` seeds it, all comments, when there is none. Later assistants (`summarise`,
-`triage`, `answer`) will be keys in the same map. The second key is `retention` (§7).
+`rl config` prints each resolved assistant and where it came from; `rl config edit` opens the
+file, and `rld` seeds it, all comments, when there is none. Later assistants (`triage`,
+`answer`) will be keys in the same map. The second key is `retention` (§7).
 
 **What an assistant is told** is the context pack (`rl-cli/src/context.rs`, `rl context
 [--in <folder>]`), built from the code so it cannot drift: the words (run, folder, `yours`,
@@ -430,6 +434,27 @@ is an error that quotes what the agent said. Interpretation is a run, so it is i
 `rl ls --all`, in the journal, and under retention like everything else; nothing about it is
 special except its cause.
 
+**The summariser** is the same machinery pointed at an ended run. `s` in the panel and
+`rl summarise <id> [--again]` call `summary.make`; `rld` (`rl-daemon/src/summarise.rs`) puts
+together what it knows — the run's row (title, command, folder, cause, when, how long, exit),
+its events, the last 64 KB of its output — asks for three sentences of prose, and runs
+`assistants.summarise` as an assistant run (`cause: assistant:summarise`, titled `summarise:
+<the run's title>`). The answer is kept in `summaries`, one per run with the agent, the time
+and the assistant run that wrote it, and said as a `run.summarised` event; `summary.get` reads
+it without asking, and `summary.make` returns the kept one unless `again`. Facts come first
+and the narrative is always marked as the agent's, in the pane and on the line (`# by claude ·
+2m ago`). No git or transcript facts go in yet: that is the facts collector (§8). Two things
+are never summarised: a run still going, and an assistant's own run — so a rule like
+
+```yaml
+summarise-what-ends:
+  on: run.finished
+  run: rl summarise {run}
+```
+
+summarises every run that ends well and cannot feed itself. Nothing seeds that rule; on demand
+is the default.
+
 Relay still talks to no one itself. A question surfaces in `rl decisions`, in `rl since` and at
 the top of the panel, where a number key answers it; getting it to Slack or mail is a reaction on
 `decision.raised` running your own command.
@@ -452,7 +477,7 @@ Facts (`retention.runs`) are deliberately not a key yet.
 ```text
 ~/.relay/                     ($RELAY_HOME overrides; tests and scripts/live point it elsewhere)
   ledger.db                   SQLite: runs, events, sessions, session_io, presence, schedules,
-                              workspaces
+                              workspaces, decisions, summaries
   schedules.yaml              user-level schedules; the file is the interface, the ledger keeps
                               versions (by sha256), pause state, last/next firing
   config.yaml                 your defaults (`assistants:`, `retention:`); absent means defaults,
@@ -496,8 +521,9 @@ phasing.
   `workflows/` is not read yet.
 - **Plugins** — `rl-plugin-host` (Bun), the broker, `relay.d.ts`, the manifest/approval flow,
   action keys and the detail tab. `~/.relay/plugins/` exists, unused.
-- **Facts and summaries** — the collector, transcript ingestion, cached narrative, cost. No
-  `facts` or `summaries` tables yet; `Run.cost` is carried but never set.
+- **Facts** — the collector, transcript ingestion, cost: commits and diffs on the branch,
+  commands with exit codes, tokens. No `facts` table yet; `Run.cost` is carried but never set.
+  The summariser (§6) works from the run's row, events and output until then.
 - **Worktrees and ref rules** — `--worktree`, branch-naming, `.relay/config.yaml` ref derivation.
   `Run.worktree` and `Run.parent_run` are carried, never set.
 - **Notifications** — the notify reference plugins.
