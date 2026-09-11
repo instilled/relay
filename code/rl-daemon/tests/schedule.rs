@@ -118,6 +118,10 @@ async fn overlap_skip_keeps_one_run_and_says_so() {
     assert!(!skipped.is_empty(), "no skipped event");
     assert_eq!(skipped[0].data.as_ref().unwrap()["reason"], "overlap");
     assert_eq!(skipped[0].group_key, tmp.path().to_string_lossy());
+    // Pause first: `long` still fires every second, and a fresh `sleep 30`
+    // started between here and `h.stop()` would outlive it — a holder is
+    // never the daemon's to kill, only the run it was told to run.
+    c.ok::<Schedule>("schedule.pause", json!({ "name": "long" })).await;
     c.ok::<Run>("run.stop", json!({ "id": runs[0].id })).await;
     c.wait_terminal(&runs[0].id).await;
     h.stop().await;
