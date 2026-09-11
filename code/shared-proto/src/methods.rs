@@ -706,6 +706,8 @@ pub struct ConfigReport {
     pub config: crate::config::Config,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub interpret: Option<ResolvedAssistant>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summarise: Option<ResolvedAssistant>,
     /// Why the file, or an assistant in it, cannot be used as written.
     #[serde(default)]
     pub errors: Vec<String>,
@@ -759,7 +761,7 @@ impl Method for GcRun {
 /// argument, waited for, its output handed back.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AssistantParams {
-    /// `interpret`, today.
+    /// `interpret` or `summarise`.
     pub job: String,
     pub prompt: String,
     pub cwd: PathBuf,
@@ -787,4 +789,35 @@ impl Method for AssistantRun {
     const NAME: &'static str = "assistant.run";
     type Params = AssistantParams;
     type Result = AssistantOutput;
+}
+
+// ---- summary.* --------------------------------------------------------------
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SummaryParams {
+    pub run: String,
+    /// Ask again even when there is a summary kept.
+    #[serde(default)]
+    pub again: bool,
+    /// A duration; a minute when left out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout: Option<String>,
+}
+
+/// The summary of an ended run: the one kept, or a new one from
+/// `assistants.summarise` (an ordinary assistant run) when there is none or
+/// `again`. Refused for a run still going, and for an assistant's own run.
+pub struct SummaryMake;
+impl Method for SummaryMake {
+    const NAME: &'static str = "summary.make";
+    type Params = SummaryParams;
+    type Result = crate::types::Summary;
+}
+
+/// The summary kept for a run, if any. Never asks.
+pub struct SummaryGet;
+impl Method for SummaryGet {
+    const NAME: &'static str = "summary.get";
+    type Params = RunId;
+    type Result = Option<crate::types::Summary>;
 }

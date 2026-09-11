@@ -12,7 +12,7 @@ use relay_core::time::{fmt_age, fmt_duration};
 use relay_proto::decision::Decision;
 use relay_proto::methods::DigestItem;
 use relay_proto::rule::Rule;
-use relay_proto::types::{Event, Run, RunState};
+use relay_proto::types::{Event, Run, RunState, Summary};
 
 /// How many events a run's pane lists.
 const EVENTS: usize = 12;
@@ -52,8 +52,15 @@ fn shown_argv(argv: &[String]) -> String {
     out.join(" ")
 }
 
-/// A run: what it is, why it is, where it stands, what happened lately.
-pub fn run_lines(item: &DigestItem, events: &[Event], names: &Names, now: Timestamp) -> Vec<Line<'static>> {
+/// A run: what it is, why it is, where it stands, what an assistant said
+/// about it if asked, what happened lately.
+pub fn run_lines(
+    item: &DigestItem,
+    events: &[Event],
+    summary: Option<&Summary>,
+    names: &Names,
+    now: Timestamp,
+) -> Vec<Line<'static>> {
     let r = &item.run;
     let mut lines = vec![Line::from(Span::raw(format!(" {}", r.title)).bold())];
     let mut state = vec![
@@ -103,6 +110,18 @@ pub fn run_lines(item: &DigestItem, events: &[Event], names: &Names, now: Timest
     }
     if let Some(l) = &r.last_line {
         lines.push(fact("last", l.clone()));
+    }
+    if let Some(s) = summary {
+        lines.push(Line::raw(""));
+        lines.push(Line::from(
+            Span::raw(format!(" {} said, {} ago · s asks again", s.agent, fmt_age(s.at, now))).dim(),
+        ));
+        for l in s.text.lines() {
+            lines.push(Line::raw(format!(" {l}")));
+        }
+    } else if r.state.is_terminal() && !matches!(r.cause, relay_proto::types::Cause::Assistant(_)) {
+        lines.push(Line::raw(""));
+        lines.push(Line::from(Span::raw(" s asks the assistant what it did").dim()));
     }
     lines.push(Line::raw(""));
     lines.push(Line::from(Span::raw(" lately").dim()));
@@ -290,15 +309,31 @@ mod tests {
             joined_by: None,
         };
         let names = Names::new([("/home/f/relay".into(), "relay".to_string())]);
-        let s = text(&run_lines(&item, &[], &names, now));
+        let s = text(&run_lines(&item, &[], None, &names, now));
         assert!(s.starts_with(" nightly tests\n failed  1h · via"), "{s}");
         assert!(s.contains(" why      schedule nightly-tests · started"), "{s}");
         assert!(s.contains(" where    relay\n"), "{s}");
         assert!(s.contains(" runs     ./test.sh\n"), "{s}");
         assert!(s.contains(" tags     nightly\n"), "{s}");
         assert!(s.contains("· after 0s · exit 1"), "{s}");
+        assert!(s.contains("\n s asks the assistant what it did\n"), "{s}");
         assert!(s.ends_with(" lately\n   nothing yet"), "{s}");
         assert!(!s.contains("k7x2m9qa"), "no id on screen: {s}");
+
+        // Summarised: the assistant's words, marked as its, under the facts.
+        let summary = Summary {
+            run: "k7x2m9qa".into(),
+            agent: "claude".into(),
+            by: "a1".into(),
+            at: "2026-09-10T11:58:00Z".parse().unwrap(),
+            text: "The parser test failed on an empty file.\nNothing was changed.".into(),
+        };
+        let s = text(&run_lines(&item, &[], Some(&summary), &names, now));
+        assert!(
+            s.contains("\n claude said, 2m ago · s asks again\n The parser test failed on an empty file.\n Nothing was changed.\n\n lately"),
+            "{s}"
+        );
+        assert!(!s.contains("s asks the assistant"), "{s}");
     }
 
     #[test]

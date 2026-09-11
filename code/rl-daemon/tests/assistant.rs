@@ -90,10 +90,11 @@ async fn the_assistant_is_a_run_and_answers() {
     let r: Response = c
         .call(
             "assistant.run",
-            json!({ "job": "summarise", "prompt": "p", "cwd": cwd, "title": "t" }),
+            json!({ "job": "poem", "prompt": "p", "cwd": cwd, "title": "t" }),
         )
         .await;
-    assert!(r.error.unwrap().message.contains("summarise"));
+    let msg = r.error.unwrap().message;
+    assert!(msg.contains("poem") && msg.contains("interpret, summarise"), "{msg}");
     std::fs::write(home.config_file(), "assistants:\n  interpret: cursor\n").unwrap();
     let _: serde_json::Value = c.ok("config.get", json!(null)).await;
     let r: Response = c

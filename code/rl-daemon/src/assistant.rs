@@ -18,12 +18,19 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
 const OUTPUT_MAX: usize = 1 << 20;
 
 pub async fn run(d: &Daemon, p: AssistantParams) -> Result<AssistantOutput> {
-    if p.job != "interpret" {
-        bail!("`{}` is not a job Relay hands to an assistant (interpret)", p.job);
-    }
-    let named = d.config.read().unwrap().config.assistants.interpret.clone();
+    let named = {
+        let cfg = d.config.read().unwrap();
+        match cfg.config.assistants.for_job(&p.job) {
+            Some(a) => a.cloned(),
+            None => bail!(
+                "`{}` is not a job Relay hands to an assistant ({})",
+                p.job,
+                relay_proto::config::Assistants::JOBS.join(", ")
+            ),
+        }
+    };
     let agents = crate::config::agents(&d.registry);
-    let resolved = match crate::config::resolve(named.as_ref(), &agents) {
+    let resolved = match crate::config::resolve(&p.job, named.as_ref(), &agents) {
         Ok(Some(r)) => r,
         Ok(None) => bail!("no agent on this machine to ask; `rl agents` says which Relay knows"),
         Err(e) => bail!("{e}"),

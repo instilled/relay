@@ -38,12 +38,12 @@ use relay_proto::decision::Decision;
 use relay_proto::methods::{
     DecisionDismiss, DecisionNote, DecisionTake, DecisionTakeParams, Digest, DigestGet, DigestItem, DigestParams,
     EventFilter, EventList, PresenceClient, PresenceTouch, ReactionPause, ReactionReload, ReactionResume, RuleApprove,
-    RuleList, RuleRef, RunArchive, RunArchiveParams, RunIds, RunMark, RunMarkParams, RunSeen, RunSpec, RunStart,
+    RuleList, RuleRef, RunArchive, RunArchiveParams, RunId, RunIds, RunMark, RunMarkParams, RunSeen, RunSpec, RunStart,
     RunStop, RunStopParams, ScheduleFilter, ScheduleName, SchedulePause, ScheduleReload, ScheduleResume, ScheduleRun,
-    WorkspaceList,
+    SummaryGet, SummaryMake, SummaryParams, WorkspaceList,
 };
 use relay_proto::rule::{Rule, RuleKind, RuleStatus};
-use relay_proto::types::{Cause, Event as LedgerEvent, Mark, Run, RunKind, RunState};
+use relay_proto::types::{Cause, Event as LedgerEvent, Mark, Run, RunKind, RunState, Summary};
 use rows::{Names, Row, fit, short_path};
 use rules::RuleRow;
 use std::collections::HashSet;
@@ -99,6 +99,13 @@ struct Asking {
     task: tokio::task::JoinHandle<Result<(crate::interpret::Draft, relay_proto::methods::AssistantOutput)>>,
 }
 
+/// A run being summarised, until the assistant answers.
+struct Summarising {
+    run: String,
+    title: String,
+    task: tokio::task::JoinHandle<Result<Summary>>,
+}
+
 struct App {
     home: Home,
     rpc: Client,
@@ -132,6 +139,10 @@ struct App {
     term_size: (u16, u16),
     /// The selected run's recent events.
     events: Vec<LedgerEvent>,
+    /// The selected run's summary, when there is one kept.
+    summary: Option<Summary>,
+    /// The assistant at work on a run's summary (`s`).
+    summarising: Option<Summarising>,
     /// `E` pressed: the file and line to open in the editor once the
     /// screen is given back.
     editor: Option<(PathBuf, usize)>,
@@ -274,6 +285,8 @@ pub async fn run(home: &Home) -> Result<()> {
         events: Vec::new(),
         editor: None,
         asking: None,
+        summary: None,
+        summarising: None,
         picked: Vec::new(),
         mode: Mode::Normal,
         flash: None,
@@ -334,6 +347,12 @@ impl App {
                         None => std::future::pending().await,
                     }
                 } => self.answered(answer).await,
+                done = async {
+                    match &mut self.summarising {
+                        Some(s) => (&mut s.task).await,
+                        None => std::future::pending().await,
+                    }
+                } => self.summarised(done).await,
                 more = async {
                     match &mut self.term {
                         Some(t) => t.pump().await,
@@ -374,15 +393,18 @@ impl App {
         }
         self.settle();
         if self.pane == Pane::Facts
-            && let Some(i) = self.selected_run()
+            && let Some(id) = self.selected_run().map(|i| i.run.id.clone())
         {
             let filter = EventFilter {
-                run: Some(i.run.id.clone()),
+                run: Some(id.clone()),
                 limit: Some(200),
                 ..Default::default()
             };
             if let Ok(evs) = self.rpc.call::<EventList>(filter).await {
                 self.events = evs;
+            }
+            if let Ok(s) = self.rpc.call::<SummaryGet>(RunId { id }).await {
+                self.summary = s;
             }
         }
     }
@@ -881,6 +903,56 @@ impl App {
         self.refresh().await;
     }
 
+    // ---- summarising -------------------------------------------------------
+
+    /// `s` on an ended run: the assistant is asked what it did, as a run; the
+    /// answer lands in the pane through the main loop.
+    fn summarise(&mut self) {
+        if let Some(s) = &self.summarising {
+            self.say(format!("still summarising `{}`; x on its run stops it", s.title));
+            return;
+        }
+        let Some(i) = self.selected_run() else { return };
+        let run = &i.run;
+        if !run.state.is_terminal() {
+            self.say(format!("`{}` is still going; s when it has ended", run.title));
+            return;
+        }
+        if matches!(run.cause, Cause::Assistant(_)) {
+            self.say("an assistant's own run; nothing to summarise");
+            return;
+        }
+        let (id, title) = (run.id.clone(), run.title.clone());
+        let again = self.summary.as_ref().is_some_and(|s| s.run == id);
+        let home = self.home.clone();
+        let params = SummaryParams {
+            run: id.clone(),
+            again,
+            timeout: None,
+        };
+        let task = tokio::spawn(async move {
+            let mut rpc = Client::connect(&home).await?;
+            rpc.call::<SummaryMake>(params).await
+        });
+        self.show_pane = true;
+        self.summarising = Some(Summarising { run: id, title, task });
+    }
+
+    async fn summarised(&mut self, done: std::result::Result<Result<Summary>, tokio::task::JoinError>) {
+        let Some(s) = self.summarising.take() else { return };
+        match done {
+            Ok(Ok(summary)) => {
+                self.say(format!("{} summarised `{}`", summary.agent, s.title));
+                if self.selected_run().is_some_and(|i| i.run.id == s.run) {
+                    self.summary = Some(summary);
+                }
+            }
+            Ok(Err(e)) => self.say(format!("{e:#}")),
+            Err(e) => self.say(format!("summarising: {e}")),
+        }
+        self.refresh().await;
+    }
+
     // ---- keys --------------------------------------------------------------
 
     async fn key(&mut self, k: KeyEvent, area: Rect) -> Result<()> {
@@ -1094,6 +1166,7 @@ impl App {
             }
             (KeyCode::Char('e'), _) => self.edit_rule_form(),
             (KeyCode::Char('E'), _) => self.edit_rule_file(),
+            (KeyCode::Char('s'), _) if self.view == View::Work => self.summarise(),
             (KeyCode::Char('i'), _) => self.show_pane = !self.show_pane,
             (KeyCode::Char('f'), _) => {
                 self.wide = !self.wide;
@@ -1477,7 +1550,13 @@ impl App {
             return;
         }
         let lines = match self.selected() {
-            Some(Row::Run(i)) | Some(Row::Fold(i)) => pane::run_lines(i, &self.events, &self.names, now),
+            Some(Row::Run(i)) | Some(Row::Fold(i)) => pane::run_lines(
+                i,
+                &self.events,
+                self.summary.as_ref().filter(|s| s.run == i.run.id),
+                &self.names,
+                now,
+            ),
             Some(Row::Job(j)) => pane::job_lines(&j, self.rule_of_job(&j), &self.names, now),
             Some(Row::Question(q)) => {
                 let asker = q.run.as_deref().and_then(|id| self.run_by_id(id));
@@ -1537,6 +1616,9 @@ impl App {
                 a.words
             );
         }
+        if let Some(s) = &self.summarising {
+            return format!("summarising `{}`… · its run is in the list · x there stops it", s.title);
+        }
         if self.pane == Pane::Term
             && let Some(t) = &self.term
         {
@@ -1593,7 +1675,9 @@ impl App {
                 format!("enter output · {pane} · d done · esc fold · r rules here · / filter · q quit")
             }
             Some(Row::Run(i)) if i.run.state.is_terminal() => {
-                format!("enter output · {pane} · d done · D done with all seen · r rules here · / filter · q quit")
+                format!(
+                    "enter output · {pane} · s summarise · d done · D done with all seen · r rules here · / filter · q quit"
+                )
             }
             Some(Row::Run(_)) => {
                 format!(

@@ -145,6 +145,7 @@ fn event_words(kind: &str) -> Option<&'static str> {
         event_kind::DECISION_EXPIRED => "a question expired, its default taken if it had one",
         event_kind::PLUGIN_INVOKED => "a plugin was run",
         event_kind::RUN_JOURNAL_DROPPED => "retention let a run's terminal bytes go; the run and its events stay",
+        event_kind::RUN_SUMMARISED => "an assistant wrote a summary of an ended run (s in the panel, rl summarise)",
         _ => return None,
     })
 }

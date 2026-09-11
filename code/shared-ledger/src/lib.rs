@@ -17,6 +17,7 @@ pub mod runs;
 pub mod schedules;
 pub mod session_io;
 pub mod sessions;
+pub mod summaries;
 pub mod workspaces;
 
 use anyhow::{Context, Result, anyhow};

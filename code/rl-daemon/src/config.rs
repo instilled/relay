@@ -28,6 +28,7 @@ pub const SEED: &str = "\
 #
 # assistants:            # the agents Relay itself calls on, by job
 #   interpret: claude    # what you type at a / rl interpret in plain words -> a draft for your enter
+#   summarise: claude    # what an ended run did, in three sentences (s in the panel, rl summarise)
 #   # or, with a model and extra arguments:
 #   # interpret: { agent: claude, model: claude-haiku-4-5-20251001, args: [\"--max-turns\", \"1\"] }
 #
@@ -97,7 +98,11 @@ pub fn agents(registry: &Registry) -> Vec<AgentInfo> {
 
 /// An assistant as it would be invoked: the one the config names, else the
 /// first available agent. An error says why it cannot be used as written.
-pub fn resolve(named: Option<&Assistant>, agents: &[AgentInfo]) -> Result<Option<ResolvedAssistant>, String> {
+pub fn resolve(
+    job: &str,
+    named: Option<&Assistant>,
+    agents: &[AgentInfo],
+) -> Result<Option<ResolvedAssistant>, String> {
     let (a, source) = match named {
         Some(a) => (a.clone(), "config"),
         None => match agents.iter().find(|x| x.available()) {
@@ -115,7 +120,7 @@ pub fn resolve(named: Option<&Assistant>, agents: &[AgentInfo]) -> Result<Option
     let Some(info) = agents.iter().find(|x| x.name == a.agent) else {
         let known: Vec<&str> = agents.iter().map(|x| x.name.as_str()).collect();
         return Err(format!(
-            "assistants.interpret: `{}` is not an agent the registry knows ({}); a detect/{}.yaml would make it one",
+            "assistants.{job}: `{}` is not an agent the registry knows ({}); a detect/{}.yaml would make it one",
             a.agent,
             known.join(", "),
             a.agent
@@ -131,7 +136,7 @@ pub fn resolve(named: Option<&Assistant>, agents: &[AgentInfo]) -> Result<Option
     if let Some(m) = &a.model {
         if info.model_flag.is_empty() {
             return Err(format!(
-                "assistants.interpret: `{}` has no model_flag in its profile, so `model: {m}` cannot be passed",
+                "assistants.{job}: `{}` has no model_flag in its profile, so `model: {m}` cannot be passed",
                 a.agent
             ));
         }
@@ -159,18 +164,21 @@ pub fn report(loaded: &Loaded, registry: &Registry) -> ConfigReport {
     {
         errors.push(format!("retention: `{j}` is not a duration (30d, 12h)"));
     }
-    let interpret = match resolve(loaded.config.assistants.interpret.as_ref(), &agents) {
+    let mut each = |job: &str| match resolve(job, loaded.config.assistants.for_job(job).flatten(), &agents) {
         Ok(r) => r,
         Err(e) => {
             errors.push(e);
             None
         }
     };
+    let interpret = each("interpret");
+    let summarise = each("summarise");
     ConfigReport {
         file: loaded.file.clone(),
         present: loaded.present,
         config: loaded.config.clone(),
         interpret,
+        summarise,
         errors,
     }
 }
@@ -196,7 +204,7 @@ mod tests {
             agent("codex", None, &["-m"]),
             agent("cursor", Some("/usr/bin/cursor"), &[]),
         ];
-        let r = resolve(None, &agents).unwrap().unwrap();
+        let r = resolve("interpret", None, &agents).unwrap().unwrap();
         assert_eq!(
             (r.agent.as_str(), r.source.as_str(), r.available),
             ("claude", "default", true)
@@ -208,7 +216,7 @@ mod tests {
             model: Some("o3".into()),
             args: vec!["--full-auto".into()],
         };
-        let r = resolve(Some(&named), &agents).unwrap().unwrap();
+        let r = resolve("interpret", Some(&named), &agents).unwrap().unwrap();
         assert_eq!(
             (r.source.as_str(), r.available),
             ("config", false),
@@ -217,6 +225,7 @@ mod tests {
         assert_eq!(r.argv, ["codex", "-p", "-m", "o3", "--full-auto"]);
 
         let e = resolve(
+            "interpret",
             Some(&Assistant {
                 agent: "cursor".into(),
                 model: Some("x".into()),
@@ -227,6 +236,7 @@ mod tests {
         .unwrap_err();
         assert!(e.contains("no model_flag"), "{e}");
         let e = resolve(
+            "interpret",
             Some(&Assistant {
                 agent: "gemini".into(),
                 model: None,
@@ -240,7 +250,7 @@ mod tests {
             "{e}"
         );
         assert_eq!(
-            resolve(None, &[agent("codex", None, &[])]).unwrap(),
+            resolve("interpret", None, &[agent("codex", None, &[])]).unwrap(),
             None,
             "nothing installed: no default"
         );
