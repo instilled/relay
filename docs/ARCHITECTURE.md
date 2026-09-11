@@ -188,25 +188,29 @@ Several watchers, one joiner; a second `join` is refused unless `take` turns the
 into a watcher. Each viewer gets its own holder connection, and the supervisor's follow
 connection journals regardless — so a viewer leaving costs nothing and the run never notices.
 
-The panel (`rl` with no command, `rl-cli/src/tui`) is the same two calls behind one screen. The
-left is one list built from `digest.get` (`tui/rows.rs`): questions first, then runs by attention,
-grouped by what they belong to, and named — a workspace by the name it was registered under, a
-cause as "schedule nightly" or "rule tests-failed", never an id. Runs a schedule or a rule
+The panel (`rl` with no command, `rl-cli/src/tui`) is the same two calls behind one screen. It
+is one list, the width of the screen, built from `digest.get` (`tui/rows.rs`): questions first,
+then runs by attention, grouped by the folder they belong to, and named — a workspace by the
+name it was registered under, a cause as "schedule nightly" or "rule tests-failed", never an id.
+A row is a mark (`✱` needs you, `·` going, `•` ended, `▸` a job), the title, the state as a word,
+the summary to the edge, and the ref and the age at the right. A group's header is the folder,
+its name, and at the right the rules that live there — `↻ nightly 4h · ⚡ tests-failed`, in
+yellow when one waits for a yes; your own rules get a line only then. Runs a schedule or a rule
 started fold, once ended, into one line per job — name, cadence, how many went well, the last
 outcome — so a job firing every thirty seconds is a row, not a screen; a run still going or
 waiting on you is never folded, and `enter` on a job opens it to its last twenty. When the list
 is taller than the screen, its first and last lines say how much is above and below. A group's
-header names it and says which folder it is in. Moving the cursor onto a row is looking at it;
+header says which folder it is in. Moving the cursor onto a row is looking at it;
 `d` on an ended run (or a job) is being done with it — `run.archive` sets `runs.archived_at`, the
 digest leaves it out, `rl ls --all` and the ledger keep it — and `D` is done with everything
 ended that has been looked at. Ended runs also leave on their own after a day; `d` is for the
 impatient. On the line: `rl done <id>…`, `rl done --all`. Nothing is ever deleted here; that is
-retention, not yet built. The right is the selected thing
-(`tui/pane.rs`): a run's facts and recent events, or a question with its options numbered;
-pressing the number is `decision.take`, and the run it starts becomes the selection. `enter` on a
-run turns the pane into its terminal, watched; `enter` again joins, `ctrl-\` lets go, `esc` is
-facts again. Nothing is remembered between openings except presence: leaving the panel is what
-`rl since` counts from.
+retention, not yet built. `enter` on a run is its terminal, full screen and joined — the
+keyboard is the run's, as it would be in a tab of your own — and `ctrl-\` lets go; `w` only
+watches, and `esc` is the list again. `i` opens a pane of facts beside the list (`tui/pane.rs`):
+a run's facts and recent events, a job's tally, a question with its options numbered; pressing
+the number is `decision.take`, and the run it starts becomes the selection. Nothing is remembered
+between openings except presence: leaving the panel is what `rl since` counts from.
 
 ---
 
@@ -338,7 +342,8 @@ and prints what each would do, and why it would not.
 per-folder `rl up --yes` never allowed. `rl rules` is the table; `rl rules approve|pause|resume|run
 <name>` act on one, finding its kind by name (`--kind` when a schedule and a reaction share it,
 `--in` when two folders do). In the panel, `r` flips the list to rules — grouped by whose file,
-what needs a yes on top — and `y` approves, `p` pauses, `enter` fires a schedule now. The two YAML
+what needs a yes on top, narrowed to the folder of the row it was pressed on until `esc` — and
+`y` approves, `p` pauses, `enter` fires a schedule now. The two YAML
 files, the two ledger tables and `rl schedule` / `rl react` are unchanged underneath.
 
 Relay still talks to no one itself. A question surfaces in `rl decisions`, in `rl since` and at

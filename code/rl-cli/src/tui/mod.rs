@@ -1,11 +1,12 @@
-//! The control panel: one list, one pane, one keystroke to anything.
+//! The control panel: one list, one keystroke to anything.
 //!
-//! Left, everything ranked by attention — questions, then runs that need
-//! you, then what is working and what finished — grouped by what it belongs
-//! to. Right, the selected thing: its facts, or with `enter` its terminal,
-//! watched, and with `enter` again, joined. Monochrome; colour only for
-//! attention states; the footer is the only chrome (J8). Nothing on screen
-//! is an id.
+//! Everything ranked by attention — questions, then runs that need you,
+//! then what is working and what finished — grouped by the folder it belongs
+//! to, whose rules ride the group's header. `enter` is the run's terminal,
+//! full screen and joined, the way you would have it in a tab of your own;
+//! `w` watches it; `i` opens a pane of facts beside the list. Monochrome;
+//! colour only for attention states; the footer is the only chrome (J8).
+//! Nothing on screen is an id.
 
 mod keys;
 mod pane;
@@ -16,7 +17,6 @@ mod term;
 
 use crate::attach::client_name;
 use crate::client::Client;
-use crate::render::state_label;
 use anyhow::Result;
 use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use futures::StreamExt;
@@ -38,32 +38,26 @@ use relay_proto::methods::{
 };
 use relay_proto::rule::{Rule, RuleKind, RuleStatus};
 use relay_proto::types::{Event as LedgerEvent, Mark, Run, RunState};
-use rows::{Names, Row};
+use rows::{Names, Row, fit};
 use rules::RuleRow;
 use std::collections::HashSet;
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use term::TermView;
 
 const REFRESH: Duration = Duration::from_secs(1);
 /// Footer messages fade after this.
 const FLASH: Duration = Duration::from_secs(4);
-/// Narrower than this, the list and the pane take turns instead of sharing.
+/// Narrower than this, the pane takes the screen instead of sharing it.
 const SPLIT_AT: u16 = 100;
 /// The list's share of a split screen, in percent.
-const LIST_SHARE: u16 = 42;
+const LIST_SHARE: u16 = 50;
 
 /// What the right pane shows for a run.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Pane {
     Facts,
     Term,
-}
-
-/// Which side a narrow screen shows.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Focus {
-    List,
-    Pane,
 }
 
 /// Which list the left side shows.
@@ -99,6 +93,8 @@ struct App {
     rules: Vec<Rule>,
     /// The other view's selection, kept for when you come back.
     other_sel: Option<String>,
+    /// The rules view, narrowed to one folder's rules (`r` on its row).
+    rules_scope: Option<PathBuf>,
     /// Jobs opened to their runs.
     opened: HashSet<String>,
     /// First list line on screen, and how many fit: the scroll map. Cells,
@@ -109,8 +105,9 @@ struct App {
     /// across re-ranks.
     sel: Option<String>,
     pane: Pane,
-    focus: Focus,
-    /// The pane alone, full width.
+    /// The pane beside the list (`i`); off, the list has the width.
+    show_pane: bool,
+    /// The pane alone, full width: a terminal, unless `f` says otherwise.
     wide: bool,
     term: Option<TermView>,
     /// Size the terminal was last told about.
@@ -148,6 +145,35 @@ fn viewport(n: usize, h: usize, sel: usize, prev: usize) -> usize {
     top
 }
 
+/// One row of the list, to the width: mark, title, state, the summary
+/// filling the middle, who is joined, then the ref and the age at the right.
+#[allow(clippy::too_many_arguments)]
+fn list_line(
+    w: usize,
+    tw: usize,
+    mark: Span<'static>,
+    title: Span<'static>,
+    word: Span<'static>,
+    summary: &str,
+    joined: Option<&str>,
+    ref_: Option<&str>,
+    age: String,
+) -> Line<'static> {
+    let right = match ref_ {
+        Some(r) => format!("{r}  {age:>4}"),
+        None => format!("{age:>4}"),
+    };
+    let joined = joined.map(|j| format!("● {j}  ")).unwrap_or_default();
+    let fixed = 3 + tw + 1 + 10 + 1 + joined.chars().count() + right.chars().count() + 1;
+    let mut spans = vec![mark, title, Span::raw(" "), word, Span::raw(" ")];
+    if !joined.is_empty() {
+        spans.push(Span::raw(joined).dim());
+    }
+    spans.push(Span::raw(fit(summary, w.saturating_sub(fixed))).dim());
+    spans.push(Span::raw(format!(" {right}")).dim());
+    Line::from(spans)
+}
+
 /// Where things go on screen.
 struct Areas {
     head: Rect,
@@ -156,16 +182,15 @@ struct Areas {
     footer: Rect,
 }
 
-fn areas(area: Rect, wide: bool, focus: Focus) -> Areas {
+fn areas(area: Rect, wide: bool, show_pane: bool) -> Areas {
     let [head, body, footer] =
         Layout::vertical([Constraint::Length(1), Constraint::Fill(1), Constraint::Length(1)]).areas(area);
     let (list, pane) = if wide {
         (None, Some(body))
+    } else if !show_pane {
+        (Some(body), None)
     } else if area.width < SPLIT_AT {
-        match focus {
-            Focus::List => (Some(body), None),
-            Focus::Pane => (None, Some(body)),
-        }
+        (None, Some(body))
     } else {
         let [l, _, r] = Layout::horizontal([
             Constraint::Percentage(LIST_SHARE),
@@ -201,12 +226,13 @@ pub async fn run(home: &Home) -> Result<()> {
         view: View::Work,
         rules: Vec::new(),
         other_sel: None,
+        rules_scope: None,
         opened: HashSet::new(),
         scroll: std::cell::Cell::new(0),
         list_h: std::cell::Cell::new(0),
         sel: None,
         pane: Pane::Facts,
-        focus: Focus::List,
+        show_pane: false,
         wide: false,
         term: None,
         term_size: (0, 0),
@@ -235,7 +261,8 @@ impl App {
         let mut tick = tokio::time::interval(REFRESH);
         while !self.quit {
             terminal.draw(|f| self.draw(f))?;
-            let size = self.pane_size(terminal.size()?.into());
+            let area: Rect = terminal.size()?.into();
+            let size = self.pane_size(area);
             if self.term.is_some() && size != self.term_size {
                 self.term_size = size;
                 if let Some(t) = &mut self.term {
@@ -244,7 +271,7 @@ impl App {
             }
             tokio::select! {
                 ev = input.next() => match ev {
-                    Some(Ok(Event::Key(k))) if k.kind != KeyEventKind::Release => self.key(k, size).await?,
+                    Some(Ok(Event::Key(k))) if k.kind != KeyEventKind::Release => self.key(k, area).await?,
                     Some(Ok(_)) => {}
                     Some(Err(e)) => return Err(e.into()),
                     None => self.quit = true,
@@ -271,7 +298,7 @@ impl App {
 
     /// The area the terminal draws into.
     fn pane_size(&self, size: Rect) -> (u16, u16) {
-        let a = areas(size, self.wide, Focus::Pane);
+        let a = areas(size, self.wide, true);
         let r = a.pane.unwrap_or(size);
         (r.width.max(1), r.height.max(1))
     }
@@ -319,7 +346,17 @@ impl App {
     }
 
     fn rule_rows(&self) -> Vec<RuleRow<'_>> {
-        rules::build(&self.rules, &self.names, &self.filter)
+        rules::build(&self.rules, &self.names, &self.filter, self.rules_scope.as_deref())
+    }
+
+    /// The folder the selected row's work is in.
+    fn selected_folder(&self) -> Option<PathBuf> {
+        match self.selected()? {
+            Row::Run(i) | Row::Fold(i) => Some(i.run.workspace.clone()),
+            Row::Job(j) => Some(j.last().run.workspace.clone()),
+            Row::Question(q) => Some(q.workspace.clone()),
+            Row::Group(_) => None,
+        }
     }
 
     /// Keys of the selectable rows of the view that is up, in order.
@@ -411,6 +448,9 @@ impl App {
     }
 
     fn close_term(&mut self) {
+        if self.term.is_some() {
+            self.wide = false;
+        }
         self.term = None;
         self.pane = Pane::Facts;
     }
@@ -424,17 +464,24 @@ impl App {
 
     // ---- doing things ------------------------------------------------------
 
-    async fn open_term(&mut self, size: (u16, u16)) {
+    /// The selected run's terminal, full screen: joined, or only watched.
+    async fn open_term(&mut self, area: Rect, join: bool) {
         let Some(id) = self.selected_run().map(|i| i.run.id.clone()) else {
             return;
         };
         self.seen(vec![id.clone()]).await;
+        let a = areas(area, true, true);
+        let r = a.pane.unwrap_or(area);
+        let size = (r.width.max(1), r.height.max(1));
         match TermView::open(&self.home, &id, size).await {
-            Ok(t) => {
+            Ok(mut t) => {
+                if join && let Err(e) = t.join(&self.home, false).await {
+                    self.say(format!("join: {e:#}"));
+                }
                 self.term = Some(t);
                 self.term_size = size;
                 self.pane = Pane::Term;
-                self.focus = Focus::Pane;
+                self.wide = true;
             }
             Err(e) => self.say(format!("attach: {e:#}")),
         }
@@ -494,7 +541,7 @@ impl App {
     async fn mark(&mut self, id: String, mark: Mark) {
         match self.rpc.call::<RunMark>(RunMarkParams { id, mark, note: None }).await {
             Ok(r) => {
-                self.say(format!("marked {}", state_label(r.state, r.confidence)));
+                self.say(format!("marked {}", rows::state_words(r.state, r.confidence)));
                 self.refresh().await;
             }
             Err(e) => self.say(format!("mark: {e:#}")),
@@ -546,7 +593,6 @@ impl App {
         self.picked.clear();
         self.events.clear();
         self.close_term();
-        self.focus = Focus::List;
         self.refresh().await;
     }
 
@@ -609,7 +655,7 @@ impl App {
 
     // ---- keys --------------------------------------------------------------
 
-    async fn key(&mut self, k: KeyEvent, size: (u16, u16)) -> Result<()> {
+    async fn key(&mut self, k: KeyEvent, area: Rect) -> Result<()> {
         self.flash = None;
         match std::mem::replace(&mut self.mode, Mode::Normal) {
             Mode::Stop(id) => {
@@ -666,17 +712,20 @@ impl App {
         if self.pane == Pane::Term && self.term.is_some() {
             return self.key_term(k).await;
         }
-        self.key_list(k, size).await
+        self.key_list(k, area).await
     }
 
-    async fn key_list(&mut self, k: KeyEvent, size: (u16, u16)) -> Result<()> {
+    async fn key_list(&mut self, k: KeyEvent, area: Rect) -> Result<()> {
         match (k.code, k.modifiers) {
             (KeyCode::Char('c'), KeyModifiers::CONTROL) | (KeyCode::Char('q'), _) => self.quit = true,
             (KeyCode::Esc, _) => {
                 if self.wide {
                     self.wide = false;
-                } else if self.focus == Focus::Pane {
-                    self.focus = Focus::List;
+                } else if self.show_pane && area.width < SPLIT_AT {
+                    self.show_pane = false;
+                } else if self.view == View::Rules && self.rules_scope.is_some() {
+                    self.rules_scope = None;
+                    self.settle();
                 } else if let Some(key) = self.selected_job().map(|j| j.key.clone())
                     && self.opened.remove(&key)
                 {
@@ -753,7 +802,12 @@ impl App {
                         self.say(format!("press 1-{n} to answer"));
                     }
                 } else {
-                    self.open_term(size).await;
+                    self.open_term(area, true).await;
+                }
+            }
+            (KeyCode::Char('w'), _) if self.view == View::Work => {
+                if self.selected_run().is_some() {
+                    self.open_term(area, false).await;
                 }
             }
             (KeyCode::Char(c @ '1'..='9'), _) => {
@@ -779,12 +833,13 @@ impl App {
                     self.mode = Mode::Dismiss(q.id.clone());
                 }
             }
-            (KeyCode::Char('i'), _) | (KeyCode::Char(' '), _) => {
-                if self.sel.is_some() {
-                    self.focus = Focus::Pane;
+            (KeyCode::Char('i'), _) => self.show_pane = !self.show_pane,
+            (KeyCode::Char('f'), _) => {
+                self.wide = !self.wide;
+                if self.wide {
+                    self.show_pane = true;
                 }
             }
-            (KeyCode::Char('f'), _) => self.wide = !self.wide,
             (KeyCode::Char('x'), _) => {
                 if let Some(i) = self.selected_run()
                     && !i.run.state.is_terminal()
@@ -815,7 +870,13 @@ impl App {
                 }
             }
             (KeyCode::Char('D'), _) if self.view == View::Work => self.archive_seen().await,
-            (KeyCode::Char('r'), _) => self.toggle_view().await,
+            (KeyCode::Char('r'), _) => {
+                self.rules_scope = match self.view {
+                    View::Work => self.selected_folder(),
+                    View::Rules => None,
+                };
+                self.toggle_view().await;
+            }
             (KeyCode::Char('R'), _) if self.view == View::Rules => self.reload_rules().await,
             (KeyCode::Char('y'), _) => {
                 if let Some(r) = self.selected_rule()
@@ -859,7 +920,10 @@ impl App {
                         self.say(format!("join: {e:#}"));
                     }
                 }
-                KeyCode::Char('f') => self.wide = !self.wide,
+                KeyCode::Char('f') => {
+                    self.wide = !self.wide;
+                    self.show_pane = true;
+                }
                 KeyCode::Char('q') => self.quit = true,
                 _ => {}
             }
@@ -874,7 +938,7 @@ impl App {
     // ---- drawing -----------------------------------------------------------
 
     fn draw(&mut self, f: &mut Frame) {
-        let a = areas(f.area(), self.wide, self.focus);
+        let a = areas(f.area(), self.wide, self.show_pane);
         let rows = self.rows();
         let rule_rows = self.rule_rows();
         // News is counted the way it is shown: a job with unseen runs is one.
@@ -886,10 +950,15 @@ impl App {
                 _ => false,
             })
             .count();
-        let title = match self.view {
+        let mut title = match self.view {
             View::Work => rows::headline(&rows, news, &self.filter),
             View::Rules => rules::headline(&rule_rows, &self.filter),
         };
+        if self.view == View::Rules
+            && let Some(p) = &self.rules_scope
+        {
+            title.push_str(&format!(" · in {} · esc all", self.names.workspace(p)));
+        }
         let [l, r] =
             Layout::horizontal([Constraint::Fill(1), Constraint::Length(self.me.len() as u16 + 1)]).areas(a.head);
         f.render_widget(Paragraph::new(title).bold(), l);
@@ -923,64 +992,127 @@ impl App {
             return;
         }
         let now = Timestamp::now();
+        let w = area.width as usize;
+        // Columns: mark, title, state, the summary to the edge, ref and age
+        // at the right — the title column is the screen's share, bounded.
+        let tw = (w * 35 / 100).clamp(14, 44);
         let mut lines: Vec<Line> = Vec::with_capacity(rows.len());
         let mut sel_line = 0usize;
         for (n, row) in rows.iter().enumerate() {
             let selected = row.key().is_some() && row.key() == self.sel;
             let mut line = match row {
-                Row::Group(g, place) => {
-                    let mut l = vec![];
+                Row::Group(h) => {
                     if n > 0 {
                         lines.push(Line::raw(""));
                     }
-                    l.push(Span::raw(format!(" {g}")).bold());
-                    if let Some(p) = place {
-                        l.push(Span::raw(format!("  {p}")).dim());
+                    let mut l = vec![Span::raw(" ")];
+                    let mut used = 1;
+                    match &h.place {
+                        Some(p) => {
+                            l.push(Span::raw(p.clone()).bold());
+                            l.push(Span::raw(format!("  {}", h.name)).dim());
+                            used += p.chars().count() + 2 + h.name.chars().count();
+                        }
+                        None => {
+                            l.push(Span::raw(h.name.clone()).bold());
+                            used += h.name.chars().count();
+                        }
+                    }
+                    // The folder's rules at the right, yellow when one waits
+                    // for a yes; as many as fit, what needs you first.
+                    let mut texts: Vec<String> = h.rules.iter().map(rows::Chip::text).collect();
+                    let width = |t: &[String]| {
+                        t.iter().map(|x| x.chars().count()).sum::<usize>() + 3 * t.len().saturating_sub(1)
+                    };
+                    while !texts.is_empty() && used + 3 + width(&texts) > w {
+                        texts.pop();
+                    }
+                    if !texts.is_empty() {
+                        let pad = w.saturating_sub(used + width(&texts) + 1).max(2);
+                        l.push(Span::raw(" ".repeat(pad)));
+                        for (i, (c, t)) in h.rules.iter().zip(texts).enumerate() {
+                            if i > 0 {
+                                l.push(Span::raw(" · ").dim());
+                            }
+                            l.push(match c.status {
+                                RuleStatus::NeedsApproval => Span::raw(t).yellow().bold(),
+                                RuleStatus::Paused => Span::raw(t).dim(),
+                                _ => Span::raw(t),
+                            });
+                        }
                     }
                     Line::from(l)
                 }
-                Row::Question(q) => Line::from(vec![
-                    Span::raw(" ? ").yellow().bold(),
-                    Span::raw(format!("{:<8}", "to decide")).yellow(),
-                    Span::raw(format!(" {:>4}  ", fmt_age(q.created_at, now))),
-                    Span::raw(q.title.clone()),
-                ]),
+                Row::Question(q) => {
+                    let summary = q.summary.clone().unwrap_or_else(|| {
+                        q.options
+                            .iter()
+                            .map(|o| o.label.as_str())
+                            .collect::<Vec<_>>()
+                            .join(" / ")
+                    });
+                    list_line(
+                        w,
+                        tw,
+                        Span::raw(" ✱ ").yellow().bold(),
+                        Span::raw(fit(&q.title, tw)).bold(),
+                        Span::raw(fit("to decide", 10)).yellow(),
+                        &summary,
+                        None,
+                        None,
+                        fmt_age(q.created_at, now),
+                    )
+                }
                 Row::Run(i) | Row::Fold(i) => {
                     let r = &i.run;
                     let under = matches!(row, Row::Fold(_));
-                    let mark = if i.unseen { "•" } else { " " };
-                    let mut spans = vec![
-                        Span::raw(format!(" {mark} {}", if under { "  " } else { "" })),
-                        Span::styled(
-                            format!("{:<8}", state_label(r.state, r.confidence)),
-                            state_style(r.state),
-                        ),
-                        Span::raw(format!(" {:>4}  ", fmt_age(i.at, now))),
-                        Span::raw(if under { String::new() } else { r.title.clone() }),
-                    ];
-                    if let Some(j) = &i.joined_by {
-                        spans.push(Span::raw(format!("  ● {j}")).dim());
-                    }
-                    let sep = if under { "" } else { "  " };
-                    spans.push(Span::raw(format!("{sep}{}", i.summary)).dim());
-                    Line::from(spans)
+                    let style = state_style(r.state);
+                    let title = if under {
+                        format!("  {}", r.title)
+                    } else {
+                        r.title.clone()
+                    };
+                    let title = Span::raw(fit(&title, tw));
+                    let title = if under {
+                        title.dim()
+                    } else if i.unseen {
+                        title.bold()
+                    } else {
+                        title
+                    };
+                    list_line(
+                        w,
+                        tw,
+                        Span::styled(format!(" {} ", rows::glyph(r.state)), style),
+                        title,
+                        Span::styled(fit(&rows::state_words(r.state, r.confidence), 10), style),
+                        &i.summary,
+                        i.joined_by.as_deref(),
+                        r.ref_.as_deref(),
+                        fmt_age(i.at, now),
+                    )
                 }
                 Row::Job(j) => {
                     let last = j.last();
-                    let mark = if j.unseen() { "•" } else { " " };
                     let open = if self.opened.contains(&j.key) { "▾" } else { "▸" };
                     let word = match last.run.state {
                         RunState::Failed => "failed",
                         RunState::Stopped => "stopped",
                         _ => "ok",
                     };
-                    Line::from(vec![
-                        Span::raw(format!(" {mark} ")),
-                        Span::styled(format!("{open} {word:<6}"), state_style(last.run.state)),
-                        Span::raw(format!(" {:>4}  ", fmt_age(last.at, now))),
-                        Span::raw(j.name.clone()),
-                        Span::raw(format!("  {}", j.summary())).dim(),
-                    ])
+                    let title = Span::raw(fit(&j.name, tw));
+                    let title = if j.unseen() { title.bold() } else { title };
+                    list_line(
+                        w,
+                        tw,
+                        Span::raw(format!(" {open} ")),
+                        title,
+                        Span::styled(fit(word, 10), state_style(last.run.state)),
+                        &j.summary(),
+                        None,
+                        None,
+                        fmt_age(last.at, now),
+                    )
                 }
             };
             if selected {
@@ -1128,7 +1260,7 @@ impl App {
             } else if let Some(who) = &t.info.joiner {
                 s.push_str(&format!("watching · {who} is joined · enter to join · esc back"));
             } else {
-                s.push_str("watching · enter to join · f wide · esc back");
+                s.push_str("watching · enter to join · f beside the list · esc back");
             }
             if let Some((n, at)) = &t.note
                 && at.elapsed() < FLASH
@@ -1152,11 +1284,12 @@ impl App {
         if self.view == View::Rules {
             return "R reload · r work · / filter · q quit".into();
         }
+        let pane = if self.show_pane { "i hide details" } else { "i details" };
         match self.selected() {
             Some(Row::Question(q)) => {
                 let n = q.options.len().min(pane::MAX_KEYS);
                 let how = if q.multi { "pick · enter answer" } else { "answer" };
-                format!("1-{n} {how} · n not this · ↑↓ · r rules · / filter · q quit")
+                format!("1-{n} {how} · n not this · {pane} · r rules here · / filter · q quit")
             }
             Some(Row::Job(j)) => {
                 let open = if self.opened.contains(&j.key) {
@@ -1164,14 +1297,18 @@ impl App {
                 } else {
                     "enter open"
                 };
-                format!("{open} · d done with its runs · D done with all seen · r rules · / filter · q quit")
+                format!(
+                    "{open} · {pane} · d done with its runs · D done with all seen · r rules here · / filter · q quit"
+                )
             }
-            Some(Row::Fold(_)) => "enter output · d done · esc fold · f wide · r rules · / filter · q quit".into(),
+            Some(Row::Fold(_)) => {
+                format!("enter output · {pane} · d done · esc fold · r rules here · / filter · q quit")
+            }
             Some(Row::Run(i)) if i.run.state.is_terminal() => {
-                "enter output · d done · D done with all seen · f wide · r rules · / filter · q quit".into()
+                format!("enter output · {pane} · d done · D done with all seen · r rules here · / filter · q quit")
             }
             Some(Row::Run(_)) => {
-                "enter terminal · x stop · m mark · f wide · r rules · / filter · D done with all seen · q quit".into()
+                format!("enter join · w watch · {pane} · x stop · m mark · r rules here · / filter · q quit")
             }
             _ => "r rules · / filter · q quit".into(),
         }
