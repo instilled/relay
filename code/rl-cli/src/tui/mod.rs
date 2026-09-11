@@ -5,11 +5,12 @@
 //! to, whose rules ride the group's header. `enter` is the run's terminal,
 //! full screen and joined, the way you would have it in a tab of your own;
 //! `w` watches it; `i` opens a pane of facts beside the list; `n` is a
-//! form at the foot for a run to start or a rule to write down. Monochrome;
+//! form at the foot for a run to start or a rule to write down; `a` is the
+//! same form drafted by an assistant from plain words. Monochrome;
 //! colour only for attention states; the footer is the only chrome (J8).
 //! Nothing on screen is an id.
 
-mod form;
+pub mod form;
 mod keys;
 mod pane;
 mod rows;
@@ -86,6 +87,16 @@ enum Mode {
     Filter(String),
     /// `n` or `e` pressed: a run or a rule being written down.
     Form(Box<Form>),
+    /// `a` pressed: plain words for the assistant, being typed.
+    Ask(String),
+}
+
+/// Words handed to the assistant, until it answers.
+struct Asking {
+    words: String,
+    folder: PathBuf,
+    editing: Option<Rule>,
+    task: tokio::task::JoinHandle<Result<(crate::interpret::Draft, relay_proto::methods::AssistantOutput)>>,
 }
 
 struct App {
@@ -124,6 +135,9 @@ struct App {
     /// `E` pressed: the file and line to open in the editor once the
     /// screen is given back.
     editor: Option<(PathBuf, usize)>,
+    /// The assistant at work on some words: what was asked, the rule it is
+    /// about if any, and the task waiting for the answer.
+    asking: Option<Asking>,
     /// Options marked so far on a multi-choice question.
     picked: Vec<usize>,
     mode: Mode,
@@ -259,6 +273,7 @@ pub async fn run(home: &Home) -> Result<()> {
         term_size: (0, 0),
         events: Vec::new(),
         editor: None,
+        asking: None,
         picked: Vec::new(),
         mode: Mode::Normal,
         flash: None,
@@ -313,6 +328,12 @@ impl App {
                     None => self.quit = true,
                 },
                 _ = tick.tick() => self.refresh().await,
+                answer = async {
+                    match &mut self.asking {
+                        Some(a) => (&mut a.task).await,
+                        None => std::future::pending().await,
+                    }
+                } => self.answered(answer).await,
                 more = async {
                     match &mut self.term {
                         Some(t) => t.pump().await,
@@ -812,6 +833,54 @@ impl App {
         Ok(())
     }
 
+    // ---- asking ------------------------------------------------------------
+
+    /// `enter` on the ask line: the words go to the assistant as a run; the
+    /// panel stays live and the answer comes back through the main loop.
+    fn ask(&mut self, words: String) {
+        if words.trim().is_empty() {
+            return;
+        }
+        let editing = self.rule_here().cloned();
+        let folder = match &editing {
+            Some(r) if !r.is_global() => PathBuf::from(r.scope()),
+            _ => self.folder_here(),
+        };
+        let home = self.home.clone();
+        let (w, f, e) = (words.clone(), folder.clone(), editing.clone());
+        let task = tokio::spawn(async move { crate::interpret::ask(&home, &f, &w, e.as_ref()).await });
+        self.asking = Some(Asking {
+            words,
+            folder,
+            editing,
+            task,
+        });
+    }
+
+    async fn answered(
+        &mut self,
+        answer: std::result::Result<
+            Result<(crate::interpret::Draft, relay_proto::methods::AssistantOutput)>,
+            tokio::task::JoinError,
+        >,
+    ) {
+        let Some(asking) = self.asking.take() else { return };
+        match answer {
+            Ok(Ok((draft, out))) => {
+                let form = crate::interpret::form_of(&draft, &asking.folder, asking.editing.as_ref())
+                    .with_folders(&self.names.paths());
+                self.mode = Mode::Form(Box::new(form));
+                self.say(format!(
+                    "{} drafted this from \"{}\" · enter does it · esc does not",
+                    out.agent, asking.words
+                ));
+            }
+            Ok(Err(e)) => self.say(format!("{e:#}")),
+            Err(e) => self.say(format!("asking: {e}")),
+        }
+        self.refresh().await;
+    }
+
     // ---- keys --------------------------------------------------------------
 
     async fn key(&mut self, k: KeyEvent, area: Rect) -> Result<()> {
@@ -844,6 +913,22 @@ impl App {
                 };
                 if let Some(mark) = mark {
                     self.mark(id, mark).await;
+                }
+                return Ok(());
+            }
+            Mode::Ask(mut buf) => {
+                match k.code {
+                    KeyCode::Esc => {}
+                    KeyCode::Enter => self.ask(buf),
+                    KeyCode::Backspace => {
+                        buf.pop();
+                        self.mode = Mode::Ask(buf);
+                    }
+                    KeyCode::Char(c) if !k.modifiers.contains(KeyModifiers::CONTROL) => {
+                        buf.push(c);
+                        self.mode = Mode::Ask(buf);
+                    }
+                    _ => self.mode = Mode::Ask(buf),
                 }
                 return Ok(());
             }
@@ -1000,6 +1085,13 @@ impl App {
                 View::Rules => self.new_rule_form(),
             },
             (KeyCode::Char('N'), _) => self.new_rule_form(),
+            (KeyCode::Char('a'), _) => {
+                if self.asking.is_some() {
+                    self.say("still asking; x on its run stops it");
+                } else {
+                    self.mode = Mode::Ask(String::new());
+                }
+            }
             (KeyCode::Char('e'), _) => self.edit_rule_form(),
             (KeyCode::Char('E'), _) => self.edit_rule_file(),
             (KeyCode::Char('i'), _) => self.show_pane = !self.show_pane,
@@ -1413,6 +1505,13 @@ impl App {
             Mode::Fire(n) => return format!("run {} now? y / any key", n.name),
             Mode::Mark(id) => return format!("mark {}: d done · b blocked · w working · esc", title_of(id)),
             Mode::Filter(buf) => return format!("/{buf}▏  enter apply · esc clear"),
+            Mode::Ask(buf) => {
+                let about = match self.rule_here() {
+                    Some(r) => format!("about {} · ", r.name()),
+                    None => String::new(),
+                };
+                return format!("ask › {buf}▏  {about}enter asks · esc");
+            }
             Mode::Form(f) => {
                 if let Some((m, at)) = &self.flash
                     && at.elapsed() < FLASH
@@ -1431,6 +1530,12 @@ impl App {
             && at.elapsed() < FLASH
         {
             return m.clone();
+        }
+        if let Some(a) = &self.asking {
+            return format!(
+                "asking about \"{}\"… · its run is in the list · x there stops it",
+                a.words
+            );
         }
         if self.pane == Pane::Term
             && let Some(t) = &self.term
@@ -1463,11 +1568,11 @@ impl App {
             if r.kind() == RuleKind::Schedule {
                 s.push_str(" · enter run now");
             }
-            s.push_str(" · e edit · E in editor · n new · R reload · r work · / filter · q quit");
+            s.push_str(" · e edit · a ask · E in editor · n new · R reload · r work · / filter · q quit");
             return s;
         }
         if self.view == View::Rules {
-            return "n new rule · R reload · r work · / filter · q quit".into();
+            return "n new rule · a ask · R reload · r work · / filter · q quit".into();
         }
         let pane = if self.show_pane { "i hide details" } else { "i details" };
         match self.selected() {
@@ -1491,9 +1596,11 @@ impl App {
                 format!("enter output · {pane} · d done · D done with all seen · r rules here · / filter · q quit")
             }
             Some(Row::Run(_)) => {
-                format!("enter join · w watch · {pane} · x stop · m mark · n new · r rules here · / filter · q quit")
+                format!(
+                    "enter join · w watch · {pane} · x stop · m mark · n new · a ask · r rules here · / filter · q quit"
+                )
             }
-            _ => "n new run · N new rule · r rules · / filter · q quit".into(),
+            _ => "n new run · a ask · N new rule · r rules · / filter · q quit".into(),
         }
     }
 }

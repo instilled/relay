@@ -6,6 +6,7 @@ pub mod context;
 pub mod daemon;
 pub mod digest;
 pub mod env;
+pub mod interpret;
 pub mod rank;
 pub mod render;
 pub mod rulefile;

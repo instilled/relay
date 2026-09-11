@@ -38,7 +38,7 @@ pub struct Field {
 }
 
 impl Field {
-    fn new(key: &'static str, hint: &'static str, value: impl Into<String>) -> Self {
+    pub fn new(key: &'static str, hint: &'static str, value: impl Into<String>) -> Self {
         let value = value.into();
         let at = value.chars().count();
         Self { key, hint, value, at }
@@ -175,6 +175,13 @@ impl Form {
         }
         f.editing = Some(Editing { rule: r.clone() });
         f
+    }
+
+    /// Sets a field, cursor at the end; a key the form lacks is ignored.
+    pub fn set(&mut self, key: &str, value: &str) {
+        if let Some(f) = self.fields.iter_mut().find(|f| f.key == key) {
+            *f = Field::new(f.key, f.hint, value.to_string());
+        }
     }
 
     pub fn get(&self, key: &str) -> &str {
