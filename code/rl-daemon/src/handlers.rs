@@ -280,6 +280,20 @@ pub fn register(r: &mut Router<Daemon>) {
             .map_err(RpcError::internal)
     });
 
+    r.register::<RunArchive, _, _>(|d, p: RunArchiveParams| async move {
+        let now = time::now();
+        d.ledger
+            .call(move |c| {
+                if p.all_seen {
+                    runs::archive_seen(c, now)
+                } else {
+                    runs::archive(c, &p.ids, now)
+                }
+            })
+            .await
+            .map_err(RpcError::internal)
+    });
+
     r.register::<DigestGet, _, _>(|d, DigestParams { since }| async move {
         let since = since.unwrap_or(jiff::Timestamp::UNIX_EPOCH);
         let found = d

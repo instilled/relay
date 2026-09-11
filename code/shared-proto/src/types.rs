@@ -233,6 +233,10 @@ pub struct Run {
     /// When the user last looked at this run's news (`run.seen`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seen_at: Option<Timestamp>,
+    /// When the user was done with it (`run.archive`): out of the panel and
+    /// `rl since`, kept in the ledger.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archived_at: Option<Timestamp>,
 }
 
 impl Run {
@@ -273,6 +277,7 @@ impl Run {
             detail: None,
             last_line: None,
             seen_at: None,
+            archived_at: None,
         }
     }
 

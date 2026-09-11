@@ -144,14 +144,7 @@ fn fact(k: &str, v: impl Into<String>) -> Line<'static> {
 
 /// A path by the name it is registered under, else with `~` for home.
 fn place(p: &Path, names: &Names) -> String {
-    let path = p.to_string_lossy();
-    if let Some(name) = names.registered(p) {
-        return name;
-    }
-    match std::env::var("HOME") {
-        Ok(h) if !h.is_empty() && path.starts_with(&h) => format!("~{}", &path[h.len()..]),
-        _ => path.into_owned(),
-    }
+    names.registered(p).unwrap_or_else(|| super::rows::short_path(p))
 }
 
 /// A rule in words: when, what, where, and where it stands.
