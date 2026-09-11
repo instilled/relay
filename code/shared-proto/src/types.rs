@@ -325,6 +325,8 @@ pub mod event_kind {
     pub const DECISION_DISMISSED: &str = "decision.dismissed";
     pub const DECISION_EXPIRED: &str = "decision.expired";
     pub const PLUGIN_INVOKED: &str = "plugin.invoked";
+    /// Retention took a run's journal; the run and its events stay.
+    pub const RUN_JOURNAL_DROPPED: &str = "run.journal_dropped";
 
     /// Every kind above, for anything that lists them.
     pub const ALL: &[&str] = &[
@@ -345,6 +347,7 @@ pub mod event_kind {
         DECISION_DISMISSED,
         DECISION_EXPIRED,
         PLUGIN_INVOKED,
+        RUN_JOURNAL_DROPPED,
     ];
 }
 
