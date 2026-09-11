@@ -83,6 +83,8 @@ enum Cmd {
     Rules(RulesArgs),
     /// Write a rule into your reactions.yaml: `rl on run.failed -- notify "{summary}"`.
     On(OnArgs),
+    /// Write a schedule into this folder's schedules.yaml and switch it on: `rl every 30m -- make test`.
+    Every(EveryArgs),
     /// Ask a human something and carry on: the question waits until answered.
     Ask(AskArgs),
     /// Questions waiting on you (and, with --all, the answered ones).
@@ -240,6 +242,42 @@ struct OnArgs {
     /// Not again within this long (default: 10s).
     #[arg(long)]
     throttle: Option<String>,
+}
+
+#[derive(Args)]
+#[command(
+    override_usage = "rl every <WHEN> [OPTIONS] -- <COMMAND>...\n       rl every <WHEN> --agent <CLI> [OPTIONS] -- <PROMPT>..."
+)]
+struct EveryArgs {
+    /// How often: a duration (`30m`, `4h`) or a cron line (`"0 2 * * *"`).
+    when: String,
+    /// What to run. One word is a shell line; several are argv; with --agent, the prompt.
+    #[arg(last = true, required = true)]
+    argv: Vec<String>,
+    /// Run an agent CLI (claude, codex, …) with the rest as its prompt.
+    #[arg(long)]
+    agent: Option<String>,
+    /// What to call it (default: the command's first word).
+    #[arg(long)]
+    name: Option<String>,
+    /// Which folder's rule it is (default: here).
+    #[arg(long = "in", value_name = "FOLDER")]
+    folder: Option<PathBuf>,
+    /// One of yours, in the home's schedules.yaml, instead of a folder's.
+    #[arg(long, conflicts_with = "folder")]
+    global: bool,
+    /// Where it runs (default: the folder; for --global, here).
+    #[arg(long)]
+    cwd: Option<PathBuf>,
+    /// Title of the runs it starts.
+    #[arg(long)]
+    title: Option<String>,
+    /// A tag on its runs. Repeatable.
+    #[arg(long = "tag")]
+    tags: Vec<String>,
+    /// Rewrite a rule of that name instead of refusing.
+    #[arg(long)]
+    replace: bool,
 }
 
 #[derive(Args)]
@@ -446,6 +484,7 @@ async fn main() -> Result<()> {
         Cmd::React { cmd } => react(&home, cmd, cli.json).await,
         Cmd::Rules(a) => rules(&home, a, cli.json).await,
         Cmd::On(a) => on(&home, a, cli.json).await,
+        Cmd::Every(a) => every(&home, a, cli.json).await,
         Cmd::Ask(a) => ask(&home, a, cli.json).await,
         Cmd::Decisions(a) => decisions(&home, a, cli.json).await,
         Cmd::Decide(a) => decide(&home, a, cli.json).await,
@@ -1500,6 +1539,109 @@ async fn on(home: &Home, a: OnArgs, json: bool) -> Result<()> {
         for e in &report.errors {
             eprintln!("not loaded: {e}");
         }
+    }
+    Ok(())
+}
+
+/// `rl every`: a schedule into this folder's (or your own) schedules.yaml,
+/// loaded and on — the command line is the yes. The file's comments and
+/// other rules stay as they were.
+async fn every(home: &Home, a: EveryArgs, json: bool) -> Result<()> {
+    use relay_proto::action::Task;
+    use relay_proto::schedule::ScheduleSpec;
+    let mut spec = ScheduleSpec::default();
+    let when = a.when.trim();
+    if relay_core::time::parse_duration(when).is_some() {
+        spec.every = Some(when.to_string());
+    } else if when.split_whitespace().count() == 5 {
+        spec.cron = Some(when.to_string());
+    } else {
+        bail!("`{when}` is neither a duration (30m, 4h) nor a cron line (\"0 2 * * *\")");
+    }
+    spec.run = Some(match a.agent {
+        Some(agent) => Task::Agent {
+            agent,
+            prompt: Some(a.argv.join(" ")),
+            prompt_file: None,
+            args: vec![],
+        },
+        None if a.argv.len() == 1 => Task::Shell(a.argv[0].clone()),
+        None => Task::Argv(a.argv.clone()),
+    });
+    let here = std::env::current_dir()?;
+    let folder = if a.global {
+        None
+    } else {
+        let f = a.folder.unwrap_or_else(|| here.clone());
+        Some(std::fs::canonicalize(&f).with_context(|| format!("{}: not a folder", f.display()))?)
+    };
+    spec.cwd = match (a.cwd, &folder) {
+        (Some(c), _) => Some(c),
+        (None, None) => Some(here),
+        (None, Some(_)) => None,
+    };
+    spec.title = a.title;
+    spec.tags = a.tags;
+    let name = match a.name {
+        Some(n) => n,
+        None => {
+            let first = match spec.run.as_ref().unwrap() {
+                Task::Agent { agent, .. } => agent.clone(),
+                Task::Shell(line) => line.split_whitespace().next().unwrap_or_default().to_string(),
+                Task::Argv(v) => v[0].clone(),
+            };
+            let base = std::path::Path::new(&first)
+                .file_name()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or(first);
+            base.chars()
+                .map(|c| {
+                    if c.is_ascii_alphanumeric() || "._-".contains(c) {
+                        c
+                    } else {
+                        '-'
+                    }
+                })
+                .collect()
+        }
+    };
+    rl_cli::rulefile::check_name(&name)?;
+    let d = rl_cli::rulefile::RuleDraft {
+        kind: RuleKind::Schedule,
+        folder,
+        name,
+        body: rl_cli::rulefile::body(&spec, &ScheduleSpec::default())?,
+    };
+    let file = rl_cli::rulefile::file(home, d.kind, d.folder.as_deref());
+    let text = std::fs::read_to_string(&file).unwrap_or_default();
+    if !a.replace && rl_cli::rulefile::line_of(&text, "schedules", &d.name).is_some() {
+        bail!(
+            "`{}` is already in {}; --replace to rewrite it, or --name for another",
+            d.name,
+            display_path(&file)
+        );
+    }
+    let mut rpc = Client::connect(home).await?;
+    let registered = match &d.folder {
+        Some(f) => rpc.call::<WorkspaceList>(()).await?.iter().any(|w| &w.path == f),
+        None => true,
+    };
+    let file = rl_cli::rulefile::install(home, &mut rpc, &d, None, registered).await?;
+    let rule = rpc
+        .call::<RuleApprove>(RuleRef {
+            name: d.name.clone(),
+            scope: Some(d.scope()),
+            kind: Some(RuleKind::Schedule),
+        })
+        .await?;
+    if json {
+        println!("{}", serde_json::to_string(&rule)?);
+    } else {
+        println!("  {}:", d.name);
+        for l in &d.body {
+            println!("    {l}");
+        }
+        println!("→ {} · {}", display_path(&file), rule.status());
     }
     Ok(())
 }
