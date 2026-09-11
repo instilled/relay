@@ -14,10 +14,11 @@
 
 use crate::rank;
 use jiff::{SignedDuration, Timestamp};
+use relay_core::time::fmt_age;
 use relay_proto::decision::Decision;
 use relay_proto::methods::{Digest, DigestItem};
-use relay_proto::rule::{Rule, RuleKind};
-use relay_proto::types::{Cause, Run, RunState};
+use relay_proto::rule::{Rule, RuleKind, RuleStatus};
+use relay_proto::types::{Cause, Confidence, Run, RunState};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
@@ -28,8 +29,8 @@ pub const RECENT: SignedDuration = SignedDuration::from_hours(24);
 pub const OPENED: usize = 20;
 
 pub enum Row<'a> {
-    /// A group's name and, when it is a folder, where that is.
-    Group(String, Option<String>),
+    /// A group: where it is, what it is called, and the rules that live there.
+    Group(Head),
     Question(&'a Decision),
     Run(&'a DigestItem),
     /// A schedule's or rule's ended runs, as one line.
@@ -55,6 +56,113 @@ impl<'a> Row<'a> {
             Row::Run(i) | Row::Fold(i) => Some(i),
             _ => None,
         }
+    }
+}
+
+/// A group's header line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Head {
+    /// The folder, with `~` for home; none on the line of your own rules.
+    pub place: Option<String>,
+    /// A ref, a branch, or a folder's registered name.
+    pub name: String,
+    /// The rules of that folder, needing a yes first, then by name.
+    pub rules: Vec<Chip>,
+}
+
+/// A rule on a group's header: `↻ nightly 4h`, `⚡ tests-failed`, `! deploy`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Chip {
+    pub name: String,
+    pub kind: RuleKind,
+    pub status: RuleStatus,
+    /// A schedule that is on: how long until it fires.
+    pub due: Option<String>,
+}
+
+impl Chip {
+    pub fn needs_yes(&self) -> bool {
+        self.status == RuleStatus::NeedsApproval
+    }
+
+    pub fn text(&self) -> String {
+        let glyph = match self.kind {
+            RuleKind::Schedule => "↻",
+            RuleKind::Reaction => "⚡",
+        };
+        match (&self.status, &self.due) {
+            (RuleStatus::NeedsApproval, _) => format!("! {}", self.name),
+            (RuleStatus::Paused, _) => format!("{glyph} {} paused", self.name),
+            (_, Some(d)) => format!("{glyph} {} {d}", self.name),
+            (_, None) => format!("{glyph} {}", self.name),
+        }
+    }
+}
+
+/// The rules of one folder (`None`: yours) as chips.
+pub fn chips(rules: &[Rule], scope: Option<&Path>, now: Timestamp) -> Vec<Chip> {
+    let mut out: Vec<Chip> = rules
+        .iter()
+        .filter(|r| r.removed_at().is_none())
+        .filter(|r| match scope {
+            Some(p) => !r.is_global() && Path::new(r.scope()) == p,
+            None => r.is_global(),
+        })
+        .map(|r| Chip {
+            name: r.name().to_string(),
+            kind: r.kind(),
+            status: r.status(),
+            due: match (r.kind(), r.status(), r.next_at()) {
+                (RuleKind::Schedule, RuleStatus::On, Some(t)) if t > now => Some(fmt_age(now, t)),
+                (RuleKind::Schedule, RuleStatus::On, Some(_)) => Some("due".into()),
+                _ => None,
+            },
+        })
+        .collect();
+    out.sort_by(|a, b| b.needs_yes().cmp(&a.needs_yes()).then_with(|| a.name.cmp(&b.name)));
+    out
+}
+
+/// A run's state as a word on its row, with `~` or `?` when it is a guess.
+pub fn state_words(state: RunState, confidence: Confidence) -> String {
+    let word = match state {
+        RunState::Starting => "starting",
+        RunState::Working => "working",
+        RunState::Idle => "idle",
+        RunState::NeedsInput => "needs you",
+        RunState::Blocked => "blocked",
+        RunState::Stale => "stale",
+        RunState::Finished => "done",
+        RunState::Failed => "failed",
+        RunState::Stopped => "stopped",
+    };
+    match confidence {
+        Confidence::Exact => word.to_string(),
+        Confidence::Likely => format!("{word}~"),
+        Confidence::Guess => format!("{word}?"),
+    }
+}
+
+/// The mark at the left of a run's row: `✱` needs you, `·` going, `•` ended.
+pub fn glyph(state: RunState) -> &'static str {
+    match state {
+        RunState::NeedsInput | RunState::Blocked | RunState::Failed => "✱",
+        RunState::Finished | RunState::Stopped => "•",
+        _ => "·",
+    }
+}
+
+/// `s` in exactly `w` columns: padded, or cut with `…`.
+pub fn fit(s: &str, w: usize) -> String {
+    let n = s.chars().count();
+    if n <= w {
+        format!("{s:<w$}")
+    } else if w == 0 {
+        String::new()
+    } else {
+        let mut t: String = s.chars().take(w - 1).collect();
+        t.push('…');
+        t
     }
 }
 
@@ -355,8 +463,21 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
     }
     groups.sort_by(|a, b| a.score().cmp(&b.score()).then_with(|| b.latest().cmp(&a.latest())));
     let mut rows = Vec::new();
+    // Your own rules get a line of their own only when one waits for a yes.
+    let yours = chips(cx.rules, None, now);
+    if yours.iter().any(Chip::needs_yes) {
+        rows.push(Row::Group(Head {
+            place: None,
+            name: "yours".into(),
+            rules: yours,
+        }));
+    }
     for g in groups {
-        rows.push(Row::Group(names.group(&g.key), Some(names.place(&g.key, &g.workspace))));
+        rows.push(Row::Group(Head {
+            place: Some(names.place(&g.key, &g.workspace)),
+            name: names.group(&g.key),
+            rules: chips(cx.rules, Some(&g.workspace), now),
+        }));
         rows.extend(g.questions.into_iter().map(Row::Question));
         // Runs and jobs share one order: attention first, newest first.
         let mut mixed: Vec<(u8, Timestamp, Row<'a>)> = g
@@ -494,7 +615,7 @@ mod tests {
     fn keys(rows: &[Row]) -> Vec<String> {
         rows.iter()
             .map(|r| match r {
-                Row::Group(g, _) => format!("[{g}]"),
+                Row::Group(h) => format!("[{}]", h.name),
                 Row::Fold(i) => format!("  r:{}", i.run.id),
                 other => other.key().unwrap(),
             })
@@ -549,7 +670,7 @@ mod tests {
         );
         assert_eq!(counts(&rows), (1, 2, 1, 1, 0));
         match &rows[0] {
-            Row::Group(name, place) => assert_eq!((name.as_str(), place.as_deref()), ("relay", Some("/home/f/relay"))),
+            Row::Group(h) => assert_eq!((h.name.as_str(), h.place.as_deref()), ("relay", Some("/home/f/relay"))),
             _ => panic!("first row is the group"),
         }
         assert_eq!(
@@ -679,5 +800,133 @@ mod tests {
         let mut plain = q.clone();
         plain.group = None;
         assert_eq!(asked_by(&plain, None), "you");
+    }
+
+    fn schedule(scope: &str, name: &str, approved: bool, next: Option<&str>) -> Rule {
+        use relay_proto::action::Task;
+        use relay_proto::schedule::{Schedule, ScheduleSpec};
+        Rule::Schedule(Schedule {
+            scope: scope.into(),
+            name: name.into(),
+            hash: "h".into(),
+            source: "/h/schedules.yaml".into(),
+            spec: ScheduleSpec {
+                every: Some("4h".into()),
+                run: Some(Task::Shell("make test".into())),
+                ..Default::default()
+            },
+            paused: false,
+            last_fired_at: None,
+            last_run: None,
+            next_at: next.map(|t| t.parse().unwrap()),
+            removed_at: None,
+            approved_hash: approved.then(|| "h".into()),
+        })
+    }
+
+    fn reaction(scope: &str, name: &str) -> Rule {
+        use relay_proto::action::Task;
+        use relay_proto::reaction::{Reaction, ReactionSpec};
+        Rule::Reaction(Reaction {
+            scope: scope.into(),
+            name: name.into(),
+            hash: "h".into(),
+            source: "/h/reactions.yaml".into(),
+            spec: ReactionSpec {
+                on: vec!["run.failed".into()],
+                run: Some(Task::Shell("say no".into())),
+                ..Default::default()
+            },
+            paused: false,
+            last_fired_at: None,
+            last_run: None,
+            removed_at: None,
+            approved_hash: Some("h".into()),
+        })
+    }
+
+    #[test]
+    fn a_groups_header_carries_its_folders_rules() {
+        let now: Timestamp = "2026-09-10T12:00:00Z".parse().unwrap();
+        let rules = vec![
+            schedule("/home/f/relay", "nightly", true, Some("2026-09-10T16:00:00Z")),
+            reaction("/home/f/relay", "tests-failed"),
+            schedule("/home/f/relay", "deploy", false, None),
+            reaction("/home/f/api", "elsewhere"),
+            schedule("global", "pulse", true, Some("2026-09-10T12:00:30Z")),
+        ];
+        let texts = |c: &[Chip]| c.iter().map(Chip::text).collect::<Vec<_>>();
+        assert_eq!(
+            texts(&chips(&rules, Some(Path::new("/home/f/relay")), now)),
+            ["! deploy", "↻ nightly 4h", "⚡ tests-failed"],
+            "what needs a yes first, then by name; api's rule stays out"
+        );
+        assert_eq!(texts(&chips(&rules, None, now)), ["↻ pulse 30s"]);
+
+        // On the list: the folder's rules ride its header; your own rules get
+        // a line only when one of them waits for a yes.
+        let d = Digest {
+            since: now,
+            items: vec![item(
+                "work1",
+                RunState::Working,
+                "/home/f/relay",
+                "2026-09-10T11:59:00Z",
+                false,
+            )],
+            decisions: vec![],
+        };
+        let names = Names::new([("/home/f/relay".into(), "relay".to_string())]);
+        let build_rules = |rules: &[Rule]| {
+            let rows = build(
+                &d,
+                &Context {
+                    names: &names,
+                    rules,
+                    opened: &HashSet::new(),
+                    filter: "",
+                    now,
+                },
+            );
+            rows.iter()
+                .map(|r| match r {
+                    Row::Group(h) => format!(
+                        "[{}{}] {}",
+                        h.name,
+                        if h.place.is_none() { "*" } else { "" },
+                        texts(&h.rules).join(" · ")
+                    ),
+                    other => other.key().unwrap(),
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            build_rules(&rules),
+            ["[relay] ! deploy · ↻ nightly 4h · ⚡ tests-failed", "r:work1"]
+        );
+        let mut with_yes = rules.clone();
+        with_yes.push(schedule("global", "backup", false, None));
+        assert_eq!(
+            build_rules(&with_yes),
+            [
+                "[yours*] ! backup · ↻ pulse 30s",
+                "[relay] ! deploy · ↻ nightly 4h · ⚡ tests-failed",
+                "r:work1"
+            ]
+        );
+    }
+
+    #[test]
+    fn words_and_columns() {
+        assert_eq!(state_words(RunState::NeedsInput, Confidence::Exact), "needs you");
+        assert_eq!(state_words(RunState::Working, Confidence::Likely), "working~");
+        assert_eq!(state_words(RunState::Finished, Confidence::Guess), "done?");
+        assert_eq!(glyph(RunState::Blocked), "✱");
+        assert_eq!(glyph(RunState::Working), "·");
+        assert_eq!(glyph(RunState::Stopped), "•");
+        assert_eq!(fit("abc", 5), "abc  ");
+        assert_eq!(fit("abcdef", 5), "abcd…");
+        assert_eq!(fit("abcdef", 0), "");
+        assert_eq!(fit("héllo wörld", 6), "héllo…");
     }
 }

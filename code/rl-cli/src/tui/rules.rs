@@ -49,11 +49,15 @@ fn rank(r: &Rule) -> u8 {
 
 /// Groups with something waiting for a yes first, then your own file, then
 /// workspaces by name. Inside a group: needs-yes, on, paused; by name.
-pub fn build<'a>(rules: &'a [Rule], names: &Names, filter: &str) -> Vec<RuleRow<'a>> {
+pub fn build<'a>(rules: &'a [Rule], names: &Names, filter: &str, scope: Option<&Path>) -> Vec<RuleRow<'a>> {
     let f = filter.to_lowercase();
     let mut groups: Vec<(String, String, Vec<&Rule>)> = Vec::new();
     for r in rules {
         if r.removed_at().is_some() {
+            continue;
+        }
+        // Narrowed to one folder: its rules only.
+        if scope.is_some_and(|p| r.is_global() || Path::new(r.scope()) != p) {
             continue;
         }
         let label = owner(r.scope(), names);
@@ -323,7 +327,7 @@ mod tests {
             schedule("/home/f/relay", "backup", true, false),
         ];
         let names = Names::new([("/home/f/relay".into(), "relay".to_string())]);
-        let rows = build(&rules, &names, "");
+        let rows = build(&rules, &names, "", None);
         assert_eq!(
             keys(&rows),
             ["[relay]", "nightly", "backup", "[yours]", "notify", "[api]", "deploy"]
@@ -333,7 +337,7 @@ mod tests {
         assert_eq!(status_word(&rules[3], now), "in 4h00m");
         assert_eq!(status_word(&rules[1], now), "paused");
         assert_eq!(status_word(&rules[0], now), "fired 1h ago");
-        assert_eq!(keys(&build(&rules, &names, "notif")), ["[yours]", "notify"]);
+        assert_eq!(keys(&build(&rules, &names, "notif", None)), ["[yours]", "notify"]);
     }
 
     #[test]
