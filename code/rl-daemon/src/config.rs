@@ -30,6 +30,9 @@ pub const SEED: &str = "\
 #   interpret: claude    # what you type at n / e in plain words -> a draft for your enter
 #   # or, with a model and extra arguments:
 #   # interpret: { agent: claude, model: claude-haiku-4-5-20251001, args: [\"--max-turns\", \"1\"] }
+#
+# retention: 30d         # the only thing Relay deletes: a run's terminal bytes and log, once it
+#                        # ended this long ago. The run and its events stay. Unset: nothing goes.
 ";
 
 /// Writes the seed when there is no file yet. Never touches one that exists.
@@ -149,6 +152,12 @@ pub fn report(loaded: &Loaded, registry: &Registry) -> ConfigReport {
     let mut errors = Vec::new();
     if let Some(e) = &loaded.error {
         errors.push(e.clone());
+    }
+    if let Some(r) = &loaded.config.retention
+        && let Some(j) = &r.journal
+        && relay_core::time::parse_duration(j).is_none()
+    {
+        errors.push(format!("retention: `{j}` is not a duration (30d, 12h)"));
     }
     let interpret = match resolve(loaded.config.assistants.interpret.as_ref(), &agents) {
         Ok(r) => r,

@@ -6,6 +6,7 @@
 //! assistants:
 //!   interpret: claude            # or, with a model and extra arguments:
 //!   interpret: { agent: claude, model: claude-haiku-4-5-20251001, args: ["--max-turns", "1"] }
+//! retention: 30d                 # the journal of a run ended this long ago goes; or { journal: 30d }
 //! ```
 
 use serde::{Deserialize, Serialize};
@@ -16,6 +17,38 @@ pub struct Config {
     /// The agents Relay itself calls on, by job.
     #[serde(default, skip_serializing_if = "Assistants::is_empty")]
     pub assistants: Assistants,
+    /// The one thing Relay deletes, and only when told: unset, nothing ever goes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retention: Option<Retention>,
+}
+
+/// What goes, and after how long. Written as one duration (the journal), or
+/// as a map.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Retention {
+    /// A run's terminal bytes, log and sidecar files, once it has ended this
+    /// long ago. The run and its events stay.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub journal: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for Retention {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Map {
+            #[serde(default)]
+            journal: Option<String>,
+        }
+        let v = serde_json::Value::deserialize(d)?;
+        match v {
+            serde_json::Value::String(s) => Ok(Retention { journal: Some(s) }),
+            other => {
+                let m = Map::deserialize(&other).map_err(serde::de::Error::custom)?;
+                Ok(Retention { journal: m.journal })
+            }
+        }
+    }
 }
 
 /// Each job Relay hands to an agent, and who does it. Unset means the
@@ -125,6 +158,16 @@ mod tests {
             serde_json::to_string(&c).unwrap(),
             r#"{"assistants":{"interpret":{"agent":"claude"}}}"#
         );
+    }
+
+    #[test]
+    fn retention_is_a_duration_or_a_map() {
+        let c: Config = serde_json::from_str(r#"{"retention":"30d"}"#).unwrap();
+        assert_eq!(c.retention.unwrap().journal.as_deref(), Some("30d"));
+        let c: Config = serde_json::from_str(r#"{"retention":{"journal":"7d"}}"#).unwrap();
+        assert_eq!(c.retention.unwrap().journal.as_deref(), Some("7d"));
+        let e = serde_json::from_str::<Config>(r#"{"retention":{"runs":"1y"}}"#).unwrap_err();
+        assert!(e.to_string().contains("unknown field `runs`"), "{e}");
     }
 
     #[test]

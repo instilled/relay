@@ -1,0 +1,97 @@
+//! `gc.run`: the journal of runs ended longer ago than retention says goes —
+//! bytes, log and sidecars — the run and its events stay, and an event says
+//! so. A recent run is untouched. Without retention or `older_than`, refused.
+
+mod common;
+
+use common::{Conn, Harness, wait_journal};
+use jiff::{SignedDuration, Timestamp};
+use relay_core::Home;
+use relay_ledger::{Ledger, runs, session_io};
+use relay_proto::methods::GcReport;
+use relay_proto::rpc::Response;
+use relay_proto::types::{Event, Run, RunState, Source};
+use serde_json::json;
+
+#[tokio::test]
+async fn old_journals_go_and_the_facts_stay() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = Home::at(tmp.path());
+    let Some(h) = Harness::on(home.clone()) else {
+        eprintln!("skipping: rl-session not built");
+        return;
+    };
+    let mut c = Conn::open(&home).await;
+    let cwd = tmp.path().to_string_lossy().into_owned();
+    let old: Run = c
+        .ok(
+            "run.start",
+            json!({ "argv": ["sh", "-c", "echo old words; exit 0"], "cwd": cwd }),
+        )
+        .await;
+    let fresh: Run = c
+        .ok(
+            "run.start",
+            json!({ "argv": ["sh", "-c", "echo fresh words; exit 0"], "cwd": cwd }),
+        )
+        .await;
+    c.wait_terminal(&old.id).await;
+    c.wait_terminal(&fresh.id).await;
+    wait_journal(&home, &old.id, "old words").await;
+    wait_journal(&home, &fresh.id, "fresh words").await;
+
+    // `old` ended forty days ago, as far as the ledger knows.
+    let ledger = Ledger::open(&home.ledger()).unwrap();
+    let ago = Timestamp::now() - SignedDuration::from_hours(40 * 24);
+    let id = old.id.clone();
+    ledger
+        .call_blocking(move |db| runs::finish(db, &id, RunState::Finished, Source::Pty, Some(0), ago))
+        .unwrap();
+    let log = home.session_log(&old.id);
+    assert!(log.exists(), "the holder's log is there before");
+
+    // No retention set and nothing asked: refused, nothing touched.
+    let r: Response = c.call("gc.run", json!({})).await;
+    assert!(r.error.unwrap().message.contains("no retention"));
+
+    // Asked for 30d, dry: one run would go, with its bytes and files.
+    let r: GcReport = c.ok("gc.run", json!({ "older_than": "30d", "dry_run": true })).await;
+    assert_eq!((r.runs, r.dry_run, r.from.as_str()), (1, true, "asked"), "{r:?}");
+    assert!(r.bytes > 0 && r.files >= 1, "{r:?}");
+    let id = old.id.clone();
+    let still = ledger.call_blocking(move |db| session_io::out_bytes(db, &id)).unwrap();
+    assert!(still > 0, "dry run keeps the journal");
+
+    // For real, through the config.
+    std::fs::write(home.config_file(), "retention: 30d\n").unwrap();
+    let _: serde_json::Value = c.ok("config.get", json!(null)).await;
+    let r: GcReport = c.ok("gc.run", json!({})).await;
+    assert_eq!(
+        (r.runs, r.dry_run, r.from.as_str(), r.older_than.as_str()),
+        (1, false, "config", "30d"),
+        "{r:?}"
+    );
+    let id = old.id.clone();
+    let gone = ledger.call_blocking(move |db| session_io::out_bytes(db, &id)).unwrap();
+    assert_eq!(gone, 0, "the old journal went");
+    assert!(!log.exists(), "and its log");
+    let id = fresh.id.clone();
+    let kept = ledger.call_blocking(move |db| session_io::out_bytes(db, &id)).unwrap();
+    assert!(kept > 0, "the fresh one stays");
+    assert!(home.session_log(&fresh.id).exists());
+
+    // The run and its events stay, and one more event says what happened.
+    let run = c.get(&old.id).await;
+    assert_eq!(run.state, RunState::Finished);
+    let evs: Vec<Event> = c.ok("event.list", json!({ "run": old.id })).await;
+    let dropped = evs.iter().find(|e| e.kind == "run.journal_dropped").expect("the event");
+    assert!(dropped.summary.starts_with("journal dropped · "), "{}", dropped.summary);
+    assert!(dropped.data.as_ref().unwrap()["bytes"].as_u64().unwrap() > 0);
+    assert!(evs.iter().any(|e| e.kind == "run.started"), "older events stay");
+
+    // Nothing left to drop.
+    let r: GcReport = c.ok("gc.run", json!({})).await;
+    assert_eq!(r.runs, 0);
+
+    h.stop().await;
+}
