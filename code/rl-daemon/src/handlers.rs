@@ -99,7 +99,16 @@ pub fn register(r: &mut Router<Daemon>) {
             .await
             .map_err(|e| RpcError::internal(format!("{e:#}")))
     });
+    r.register::<AgentList, _, _>(|d, ()| async move { Ok(crate::config::agents(&d.registry)) });
+    r.register::<ConfigGet, _, _>(|d, ()| async move {
+        let loaded = crate::config::load(&d.home);
+        let report = crate::config::report(&loaded, &d.registry);
+        *d.config.write().unwrap() = loaded;
+        Ok(report)
+    });
     r.register::<relay_proto::methods::ScheduleReload, _, _>(|d, ()| async move {
+        // A rules reload re-reads the config too: one `R` for everything on disk.
+        *d.config.write().unwrap() = crate::config::load(&d.home);
         d.scheduler
             .reload()
             .await

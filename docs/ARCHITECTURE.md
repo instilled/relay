@@ -363,6 +363,29 @@ what needs a yes on top, narrowed to the folder of the row it was pressed on unt
 `y` approves, `p` pauses, `enter` fires a schedule now. The two YAML
 files, the two ledger tables and `rl schedule` / `rl react` are unchanged underneath.
 
+**Your defaults, and the agents Relay itself uses.** `~/.relay/config.yaml` is the one place for
+defaults (`relay_proto::config`, read by `rld` at start, on `config.get` and on a rules reload —
+`rl-daemon/src/config.rs`). Absent means all defaults; a key it does not know is refused with the
+line, so a typo cannot silently do nothing, and a file that does not parse is reported by
+`rl config` (exit 1) while the daemon runs on defaults. Keys arrive one at a time, when a need
+does. The first is `assistants`: the agents Relay hands its own jobs to, keyed by job, each a
+name or a map:
+
+```yaml
+assistants:
+  interpret: claude     # what you type at n / e / rl "…" in plain words → a draft for your enter
+  # interpret: { agent: claude, model: claude-haiku-4-5-20251001, args: ["--max-turns", "1"] }
+```
+
+Which CLIs are agents is not configured: the detection registry says (`detect/*.yaml`,
+`kind: agent`, `bins`, `headless`, and now `model_flag`, the flag that names a model), and `rld`
+looks for each on `PATH` when asked — `agent.list`, `rl agents`. An assistant resolves to an
+argv: the binary, the headless arguments, the model through the profile's flag, the extra
+arguments; the prompt goes last. Unset, it is the first available agent; a name the registry
+does not know, or a `model` for a profile without `model_flag`, is an error, never a guess.
+`rl config` prints the resolved assistant and where it came from; `rl config edit` opens the
+file. Later assistants (`summarise`, `triage`, `answer`) will be keys in the same map.
+
 Relay still talks to no one itself. A question surfaces in `rl decisions`, in `rl since` and at
 the top of the panel, where a number key answers it; getting it to Slack or mail is a reaction on
 `decision.raised` running your own command.
@@ -377,6 +400,7 @@ the top of the panel, where a number key answers it; getting it to Slack or mail
                               workspaces
   schedules.yaml              user-level schedules; the file is the interface, the ledger keeps
                               versions (by sha256), pause state, last/next firing
+  config.yaml                 your defaults (`assistants:`); absent means defaults, unknown keys refused
   reactions.yaml              user-level rules: events → actions, or questions; same file-first
                               deal, same versioning (`rl on` appends to it)
   run/                        0700 — rld.sock, rld.pid, <run>.sock, <run>.exit

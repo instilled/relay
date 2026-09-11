@@ -27,6 +27,9 @@ use tracing::{debug, info, warn};
 pub struct Daemon {
     pub home: Home,
     pub ledger: Ledger,
+    pub registry: Arc<Registry>,
+    /// `config.yaml` as last read; `config.get` and a rules reload re-read it.
+    pub config: std::sync::RwLock<crate::config::Loaded>,
     pub supervisor: Arc<Supervisor>,
     pub scheduler: Arc<Scheduler>,
     pub decisions: Arc<crate::decisions::Decisions>,
@@ -95,6 +98,13 @@ pub async fn serve_with(home: Home, shutdown: CancellationToken, opts: ServeOpti
     }
     let registry2 = registry.clone();
     let registry3 = registry.clone();
+    let registry4 = registry.clone();
+    let config = crate::config::load(&home);
+    match &config.error {
+        Some(e) => warn!(error = %e, "config.yaml not usable; running on defaults"),
+        None if config.present => info!(file = %config.file.display(), "config read"),
+        None => {}
+    }
     let scheduler = Arc::new(Scheduler::new(
         home.clone(),
         ledger.clone(),
@@ -141,6 +151,8 @@ pub async fn serve_with(home: Home, shutdown: CancellationToken, opts: ServeOpti
     let daemon = Arc::new(Daemon {
         home: home.clone(),
         ledger,
+        registry: registry4,
+        config: std::sync::RwLock::new(config),
         supervisor,
         scheduler,
         decisions,

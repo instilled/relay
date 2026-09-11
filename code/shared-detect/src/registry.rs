@@ -33,6 +33,7 @@ struct ProfileFile {
     interactive_only: Option<bool>,
     hooks: Option<HooksFile>,
     headless: Option<Vec<String>>,
+    model_flag: Option<Vec<String>>,
     patterns: Option<PatternsFile>,
     timing: Option<TimingFile>,
 }
@@ -75,6 +76,9 @@ impl ProfileFile {
         }
         if over.headless.is_some() {
             self.headless = over.headless;
+        }
+        if over.model_flag.is_some() {
+            self.model_flag = over.model_flag;
         }
         if let Some(p) = over.patterns {
             let mine = self.patterns.get_or_insert_with(Default::default);
@@ -119,6 +123,8 @@ pub struct Profile {
     /// Arguments that make the CLI run one prompt and exit (`-p`), for
     /// scheduled runs.
     pub headless: Vec<String>,
+    /// The flag that names a model (`--model`); empty when the CLI has none.
+    pub model_flag: Vec<String>,
     /// Generic patterns first, then the profile's own.
     pub patterns: Patterns,
     pub timing: Timing,
@@ -211,6 +217,7 @@ impl Registry {
                         args: h.args,
                     }),
                     headless: file.headless.unwrap_or_default(),
+                    model_flag: file.model_flag.unwrap_or_default(),
                     patterns,
                     timing,
                     name,
@@ -230,6 +237,13 @@ impl Registry {
 
     pub fn names(&self) -> impl Iterator<Item = &str> {
         self.profiles.keys().map(String::as_str)
+    }
+
+    /// The profiles that are agents, in name order.
+    pub fn agents(&self) -> impl Iterator<Item = &Profile> {
+        self.profiles
+            .values()
+            .filter(|p| p.kind == RunKind::Agent && p.name != GENERIC)
     }
 
     /// Which known CLI `argv` starts, if any.
@@ -303,6 +317,27 @@ fn compile_timing(name: &str, base: Timing, file: Option<&TimingFile>) -> Result
         out.stale_after = d;
     }
     Ok(out)
+}
+
+/// The first of `bins` on `PATH` (an absolute one is taken as it is).
+pub fn find_bin(bins: &[String]) -> Option<std::path::PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    for b in bins {
+        let p = Path::new(b);
+        if p.is_absolute() {
+            if p.is_file() {
+                return Some(p.to_path_buf());
+            }
+            continue;
+        }
+        for dir in std::env::split_paths(&path) {
+            let cand = dir.join(b);
+            if cand.is_file() {
+                return Some(cand);
+            }
+        }
+    }
+    None
 }
 
 #[cfg(test)]

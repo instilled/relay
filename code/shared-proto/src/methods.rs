@@ -650,3 +650,70 @@ pub struct ReactionTrial {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub action: Option<String>,
 }
+
+// ---- agent.* / config.* ------------------------------------------------------
+
+/// An agent CLI the registry knows, and whether it is on this machine.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentInfo {
+    pub name: String,
+    /// The binaries the profile names.
+    pub bins: Vec<String>,
+    /// The first of them found on `PATH`, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bin: Option<PathBuf>,
+    /// Arguments that make it run one prompt and exit.
+    #[serde(default)]
+    pub headless: Vec<String>,
+    /// How to name a model, if the profile says.
+    #[serde(default)]
+    pub model_flag: Vec<String>,
+}
+
+impl AgentInfo {
+    pub fn available(&self) -> bool {
+        self.bin.is_some()
+    }
+}
+
+/// Every agent the registry knows, with what is available: detected, not
+/// configured.
+pub struct AgentList;
+impl Method for AgentList {
+    const NAME: &'static str = "agent.list";
+    type Params = ();
+    type Result = Vec<AgentInfo>;
+}
+
+/// An assistant as it would be invoked.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedAssistant {
+    pub agent: String,
+    /// `config` when the file names it, `default` for the first available agent.
+    pub source: String,
+    /// The binary, headless arguments, the model flag and the extra
+    /// arguments, in that order; the prompt goes last.
+    pub argv: Vec<String>,
+    pub available: bool,
+}
+
+/// `config.yaml` as it stands, re-read from disk, with each assistant resolved
+/// against the registry and what is on this machine.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConfigReport {
+    pub file: PathBuf,
+    pub present: bool,
+    pub config: crate::config::Config,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interpret: Option<ResolvedAssistant>,
+    /// Why the file, or an assistant in it, cannot be used as written.
+    #[serde(default)]
+    pub errors: Vec<String>,
+}
+
+pub struct ConfigGet;
+impl Method for ConfigGet {
+    const NAME: &'static str = "config.get";
+    type Params = ();
+    type Result = ConfigReport;
+}

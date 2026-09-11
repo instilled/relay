@@ -3,6 +3,7 @@ use clap::{Args, Parser, Subcommand};
 use relay_core::time::{now, parse_since};
 use relay_core::{Home, display_path};
 use relay_proto::decision::{Decision, DecisionOption, DecisionStatus};
+use relay_proto::methods::{AgentList, ConfigGet, RuleApprove, RuleList, RuleRef, RunArchive, RunArchiveParams};
 use relay_proto::methods::{
     DaemonInfo, DigestGet, DigestParams, EventFilter, EventList, PresenceClient, PresenceTouch, RunFilter, RunHook,
     RunHookParams, RunList, RunMark, RunMarkParams, RunSpec, RunStart, RunStop, RunStopParams,
@@ -14,7 +15,6 @@ use relay_proto::methods::{
 use relay_proto::methods::{
     EventId, ReactionList, ReactionPause, ReactionReload, ReactionResume, ReactionTest, ReactionTrial,
 };
-use relay_proto::methods::{RuleApprove, RuleList, RuleRef, RunArchive, RunArchiveParams};
 use relay_proto::methods::{
     ScheduleFilter, ScheduleList, ScheduleName, SchedulePause, ScheduleReload, ScheduleResume, ScheduleRun,
     WorkspaceList, WorkspacePath, WorkspaceRemove, WorkspaceUp, WorkspaceUpParams,
@@ -85,6 +85,10 @@ enum Cmd {
     On(OnArgs),
     /// Write a schedule into this folder's schedules.yaml and switch it on: `rl every 30m -- make test`.
     Every(EveryArgs),
+    /// Your defaults (~/.relay/config.yaml) as they stand, each assistant resolved; `edit` opens the file.
+    Config(ConfigArgs),
+    /// The agent CLIs Relay knows, and which are on this machine.
+    Agents,
     /// Ask a human something and carry on: the question waits until answered.
     Ask(AskArgs),
     /// Questions waiting on you (and, with --all, the answered ones).
@@ -278,6 +282,18 @@ struct EveryArgs {
     /// Rewrite a rule of that name instead of refusing.
     #[arg(long)]
     replace: bool,
+}
+
+#[derive(Args)]
+struct ConfigArgs {
+    #[command(subcommand)]
+    cmd: Option<ConfigCmd>,
+}
+
+#[derive(Subcommand)]
+enum ConfigCmd {
+    /// Open config.yaml in $VISUAL / $EDITOR, then show it as the daemon reads it.
+    Edit,
 }
 
 #[derive(Args)]
@@ -485,6 +501,8 @@ async fn main() -> Result<()> {
         Cmd::Rules(a) => rules(&home, a, cli.json).await,
         Cmd::On(a) => on(&home, a, cli.json).await,
         Cmd::Every(a) => every(&home, a, cli.json).await,
+        Cmd::Config(a) => config(&home, a, cli.json).await,
+        Cmd::Agents => agents(&home, cli.json).await,
         Cmd::Ask(a) => ask(&home, a, cli.json).await,
         Cmd::Decisions(a) => decisions(&home, a, cli.json).await,
         Cmd::Decide(a) => decide(&home, a, cli.json).await,
@@ -1643,6 +1661,78 @@ async fn every(home: &Home, a: EveryArgs, json: bool) -> Result<()> {
         }
         println!("→ {} · {}", display_path(&file), rule.status());
     }
+    Ok(())
+}
+
+/// `rl config`: the file as the daemon reads it, each assistant resolved to
+/// what would run; `rl config edit` opens it first. A file that cannot be
+/// used says why and exits 1.
+async fn config(home: &Home, a: ConfigArgs, json: bool) -> Result<()> {
+    if let Some(ConfigCmd::Edit) = a.cmd {
+        let file = home.config_file();
+        if !file.exists() {
+            std::fs::write(
+                &file,
+                "# Your defaults. Keys are added as Relay grows; one it does not know is refused.\n\
+                 # assistants:\n#   interpret: claude   # or { agent: claude, model: …, args: [...] }\n",
+            )?;
+        }
+        rl_cli::env::open_in_editor(&file, 1)?;
+    }
+    let r = Client::connect(home).await?.call::<ConfigGet>(()).await?;
+    if json {
+        println!("{}", serde_json::to_string(&r)?);
+    } else {
+        let file = display_path(&r.file);
+        println!("{file}{}", if r.present { "" } else { "  (absent: all defaults)" });
+        match &r.interpret {
+            Some(x) => println!(
+                "assistants.interpret  {}  ({}{})",
+                x.argv.join(" "),
+                x.source,
+                if x.available { "" } else { ", not on this machine" }
+            ),
+            None => println!("assistants.interpret  —  (no agent on this machine; see `rl agents`)"),
+        }
+        for e in &r.errors {
+            eprintln!("not usable: {e}");
+        }
+    }
+    if r.errors.is_empty() {
+        Ok(())
+    } else {
+        std::process::exit(1)
+    }
+}
+
+const AGENT_HEADERS: &[&str] = &["AGENT", "BIN", "HEADLESS", "MODEL"];
+
+/// `rl agents`: what the registry knows, and what is here.
+async fn agents(home: &Home, json: bool) -> Result<()> {
+    let list = Client::connect(home).await?.call::<AgentList>(()).await?;
+    if json {
+        println!("{}", serde_json::to_string(&list)?);
+        return Ok(());
+    }
+    let rows: Vec<Vec<String>> = list
+        .iter()
+        .map(|a| {
+            vec![
+                a.name.clone(),
+                a.bin
+                    .as_ref()
+                    .map(|p| display_path(p))
+                    .unwrap_or_else(|| format!("— ({})", a.bins.join(", "))),
+                a.headless.join(" "),
+                if a.model_flag.is_empty() {
+                    "—".into()
+                } else {
+                    format!("{} <model>", a.model_flag.join(" "))
+                },
+            ]
+        })
+        .collect();
+    print!("{}", render::table(AGENT_HEADERS, &rows));
     Ok(())
 }
 
