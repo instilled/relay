@@ -94,6 +94,8 @@ enum Cmd {
     Agents,
     /// What Relay tells an agent: the words, events, rule definitions, what is here, and the answer it wants.
     Context(ContextArgs),
+    /// Plain words to `assistants.interpret`: a run or a rule, drafted; `--go` does it.
+    Interpret(InterpretArgs),
     /// Let the journal of old runs go, as `retention:` in config.yaml says (or --older-than). Runs and events stay.
     Gc(GcArgs),
     /// Ask a human something and carry on: the question waits until answered.
@@ -302,6 +304,19 @@ struct GcArgs {
 }
 
 #[derive(Args)]
+struct InterpretArgs {
+    /// What you want, in plain words.
+    #[arg(required = true)]
+    words: Vec<String>,
+    /// The folder the words are about (default: here).
+    #[arg(long = "in", value_name = "FOLDER")]
+    folder: Option<PathBuf>,
+    /// Do what the draft says, without showing the form.
+    #[arg(long)]
+    go: bool,
+}
+
+#[derive(Args)]
 struct ContextArgs {
     /// The folder the words would be typed in (default: here).
     #[arg(long = "in", value_name = "FOLDER")]
@@ -506,6 +521,7 @@ struct EventsArgs {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     let home = Home::resolve()?;
+    rl_cli::context::set_help(help_for_the_pack());
     let Some(cmd) = cli.cmd else {
         if !std::io::IsTerminal::is_terminal(&std::io::stdout()) {
             bail!("rl with no command is the control panel and needs a terminal; try `rl ls` or `rl --help`");
@@ -528,6 +544,7 @@ async fn main() -> Result<()> {
         Cmd::Config(a) => config(&home, a, cli.json).await,
         Cmd::Agents => agents(&home, cli.json).await,
         Cmd::Context(a) => context(&home, a).await,
+        Cmd::Interpret(a) => interpret(&home, a, cli.json).await,
         Cmd::Gc(a) => gc(&home, a, cli.json).await,
         Cmd::Ask(a) => ask(&home, a, cli.json).await,
         Cmd::Decisions(a) => decisions(&home, a, cli.json).await,
@@ -1793,50 +1810,15 @@ async fn context(home: &Home, a: ContextArgs) -> Result<()> {
     };
     let folder = std::fs::canonicalize(&folder).unwrap_or(folder);
     let mut rpc = daemon::ensure(home, true).await?;
-    let workspaces = rpc.call::<WorkspaceList>(()).await?;
-    let rules = rpc.call::<RuleList>(ScheduleFilter { all: false }).await?;
-    let agents = rpc.call::<AgentList>(()).await?;
-    let name = workspaces.iter().find(|w| w.path == folder).map(|w| w.name.clone());
-    let scope_word = |r: &Rule| -> String {
-        if r.is_global() {
-            "yours".into()
-        } else {
-            workspaces
-                .iter()
-                .find(|w| w.path.as_os_str() == r.scope())
-                .map(|w| w.name.clone())
-                .unwrap_or_else(|| display_path(std::path::Path::new(r.scope())))
-        }
-    };
-    let here = rl_cli::context::Here {
-        folder: display_path(&folder),
-        name,
-        folders: workspaces
-            .iter()
-            .map(|w| (display_path(&w.path), w.name.clone()))
-            .collect(),
-        rules: rules
-            .iter()
-            .filter(|r| r.is_global() || std::path::Path::new(r.scope()) == folder)
-            .map(|r| {
-                (
-                    scope_word(r),
-                    r.kind().to_string(),
-                    r.name().to_string(),
-                    r.when(),
-                    r.does(),
-                )
-            })
-            .collect(),
-        agents: agents
-            .iter()
-            .filter(|a| a.available())
-            .map(|a| a.name.clone())
-            .collect(),
-    };
-    // The command list, and the help of the commands a draft would become.
-    // Every command's long help is ten times the rest of the pack, and an
-    // interpreter drafts things, it does not drive the CLI.
+    let here = rl_cli::context::gather(&mut rpc, &folder).await?;
+    print!("{}", rl_cli::context::render(rl_cli::context::help(), &here));
+    Ok(())
+}
+
+/// The command list, and the help of the commands a draft would become,
+/// for the context pack. Every command's long help is ten times the rest
+/// of the pack, and an interpreter drafts things, it does not drive the CLI.
+fn help_for_the_pack() -> String {
     let mut help = String::new();
     let mut root = <Cli as clap::CommandFactory>::command();
     help.push_str(&root.render_long_help().to_string());
@@ -1846,7 +1828,53 @@ async fn context(home: &Home, a: ContextArgs) -> Result<()> {
             help.push_str(&sub.render_help().to_string());
         }
     }
-    print!("{}", rl_cli::context::render(&help, &here));
+    help
+}
+
+/// `rl interpret "…"`: the words to `assistants.interpret`, the draft
+/// printed as YAML; `--go` does what it says, as `enter` in the panel would.
+async fn interpret(home: &Home, a: InterpretArgs, json: bool) -> Result<()> {
+    let folder = match a.folder {
+        Some(f) => f,
+        None => std::env::current_dir()?,
+    };
+    let folder = std::fs::canonicalize(&folder).unwrap_or(folder);
+    let words = a.words.join(" ");
+    if words.trim().is_empty() {
+        bail!("say what: rl interpret \"run the tests every night\"");
+    }
+    daemon::ensure(home, !json).await?;
+    if !json {
+        eprintln!("asking…");
+    }
+    let (draft, out) = rl_cli::interpret::ask(home, &folder, &words, None).await?;
+    let form = rl_cli::interpret::form_of(&draft, &folder, None);
+    if json {
+        println!(
+            "{}",
+            json!({ "draft": draft.fields, "kind": draft.lines()[0].trim_start_matches("kind: "), "run": out.run, "agent": out.agent })
+        );
+    } else {
+        for l in draft.lines() {
+            println!("{l}");
+        }
+        println!("# by {} · run {}", out.agent, out.run);
+    }
+    if a.go {
+        let known: Vec<PathBuf> = daemon::ensure(home, !json)
+            .await?
+            .call::<WorkspaceList>(())
+            .await?
+            .into_iter()
+            .map(|w| w.path)
+            .collect();
+        let done = rl_cli::interpret::apply(home, &form, |p| known.iter().any(|k| k == p)).await?;
+        if !json {
+            println!("{done}");
+        }
+    } else if !json {
+        println!("# --go does it; or n / a in the panel");
+    }
     Ok(())
 }
 

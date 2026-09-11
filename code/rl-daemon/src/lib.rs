@@ -1,6 +1,7 @@
 //! `rld` as a library so tests (and `rl-cli`'s tests) can run a daemon in-process.
 
 pub mod action;
+pub mod assistant;
 pub mod attach;
 pub mod config;
 pub mod decisions;

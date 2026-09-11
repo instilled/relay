@@ -752,3 +752,39 @@ impl Method for GcRun {
     type Params = GcParams;
     type Result = GcReport;
 }
+
+// ---- assistant.* -------------------------------------------------------------
+
+/// A job for `assistants.<job>`: run headless with `prompt` as its last
+/// argument, waited for, its output handed back.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AssistantParams {
+    /// `interpret`, today.
+    pub job: String,
+    pub prompt: String,
+    pub cwd: PathBuf,
+    /// The run's title in the list.
+    pub title: String,
+    /// A duration; a minute when left out. Past it the run is stopped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AssistantOutput {
+    /// The run that answered; in the list and the ledger like any other.
+    pub run: String,
+    pub agent: String,
+    pub output: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit: Option<i32>,
+    #[serde(default)]
+    pub timed_out: bool,
+}
+
+pub struct AssistantRun;
+impl Method for AssistantRun {
+    const NAME: &'static str = "assistant.run";
+    type Params = AssistantParams;
+    type Result = AssistantOutput;
+}
