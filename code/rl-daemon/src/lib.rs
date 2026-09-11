@@ -13,6 +13,7 @@ pub mod reactions;
 pub mod router;
 pub mod schedule;
 pub mod server;
+pub mod summarise;
 pub mod supervisor;
 
 pub use server::{Daemon, ServeOptions, serve, serve_with};

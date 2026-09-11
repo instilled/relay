@@ -6,6 +6,7 @@
 //! assistants:
 //!   interpret: claude            # or, with a model and extra arguments:
 //!   interpret: { agent: claude, model: claude-haiku-4-5-20251001, args: ["--max-turns", "1"] }
+//!   summarise: claude            # what an ended run did, in three sentences (s, rl summarise)
 //! retention: 30d                 # the journal of a run ended this long ago goes; or { journal: 30d }
 //! ```
 
@@ -56,16 +57,31 @@ impl<'de> Deserialize<'de> for Retention {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Assistants {
-    /// What you type at `n` / `e` / `rl "…"` in plain words → a run or a
+    /// What you type at `a` / `rl interpret` in plain words → a run or a
     /// rule, drafted for your enter.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub interpret: Option<Assistant>,
+    /// What an ended run did, in a few sentences (`s`, `rl summarise`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summarise: Option<Assistant>,
 }
 
 impl Assistants {
     pub fn is_empty(&self) -> bool {
-        self.interpret.is_none()
+        self.interpret.is_none() && self.summarise.is_none()
     }
+
+    /// The assistant for a job, by its name in the file.
+    pub fn for_job(&self, job: &str) -> Option<Option<&Assistant>> {
+        match job {
+            "interpret" => Some(self.interpret.as_ref()),
+            "summarise" => Some(self.summarise.as_ref()),
+            _ => None,
+        }
+    }
+
+    /// The jobs there are, in the order `rl config` lists them.
+    pub const JOBS: &[&str] = &["interpret", "summarise"];
 }
 
 /// An agent doing a job for Relay: written as its name, or as a map when
@@ -174,8 +190,8 @@ mod tests {
     fn a_key_that_is_not_known_is_refused() {
         let e = serde_json::from_str::<Config>(r#"{"assistant":{"interpret":"claude"}}"#).unwrap_err();
         assert!(e.to_string().contains("unknown field `assistant`"), "{e}");
-        let e = serde_json::from_str::<Config>(r#"{"assistants":{"summarise":"claude"}}"#).unwrap_err();
-        assert!(e.to_string().contains("unknown field `summarise`"), "{e}");
+        let e = serde_json::from_str::<Config>(r#"{"assistants":{"triage":"claude"}}"#).unwrap_err();
+        assert!(e.to_string().contains("unknown field `triage`"), "{e}");
         let e = serde_json::from_str::<Config>(r#"{"assistants":{"interpret":{"agent":"claude","modle":"x"}}}"#)
             .unwrap_err();
         assert!(e.to_string().contains("unknown field `modle`"), "{e}");
