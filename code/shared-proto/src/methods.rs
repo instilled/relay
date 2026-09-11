@@ -58,6 +58,9 @@ pub struct RunFilter {
     /// Drop finished/failed/stopped runs.
     #[serde(default)]
     pub active_only: bool,
+    /// Include runs the user is done with (`run.archive`).
+    #[serde(default)]
+    pub archived: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -259,6 +262,24 @@ impl Method for RunSeen {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunIds {
     pub ids: Vec<String>,
+}
+
+/// Done with these runs: out of the panel and `rl since`, kept in the
+/// ledger. Only ended runs are; the result is how many were.
+pub struct RunArchive;
+impl Method for RunArchive {
+    const NAME: &'static str = "run.archive";
+    type Params = RunArchiveParams;
+    type Result = usize;
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RunArchiveParams {
+    #[serde(default)]
+    pub ids: Vec<String>,
+    /// Instead: everything ended that has been looked at.
+    #[serde(default)]
+    pub all_seen: bool,
 }
 
 // ---- digest.* ---------------------------------------------------------------

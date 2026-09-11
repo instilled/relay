@@ -195,7 +195,13 @@ cause as "schedule nightly" or "rule tests-failed", never an id. Runs a schedule
 started fold, once ended, into one line per job — name, cadence, how many went well, the last
 outcome — so a job firing every thirty seconds is a row, not a screen; a run still going or
 waiting on you is never folded, and `enter` on a job opens it to its last twenty. When the list
-is taller than the screen, its first and last lines say how much is above and below. The right is the selected thing
+is taller than the screen, its first and last lines say how much is above and below. A group's
+header names it and says which folder it is in. Moving the cursor onto a row is looking at it;
+`d` on an ended run (or a job) is being done with it — `run.archive` sets `runs.archived_at`, the
+digest leaves it out, `rl ls --all` and the ledger keep it — and `D` is done with everything
+ended that has been looked at. Ended runs also leave on their own after a day; `d` is for the
+impatient. On the line: `rl done <id>…`, `rl done --all`. Nothing is ever deleted here; that is
+retention, not yet built. The right is the selected thing
 (`tui/pane.rs`): a run's facts and recent events, or a question with its options numbered;
 pressing the number is `decision.take`, and the run it starts becomes the selection. `enter` on a
 run turns the pane into its terminal, watched; `enter` again joins, `ctrl-\` lets go, `esc` is

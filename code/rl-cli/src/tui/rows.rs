@@ -28,7 +28,8 @@ pub const RECENT: SignedDuration = SignedDuration::from_hours(24);
 pub const OPENED: usize = 20;
 
 pub enum Row<'a> {
-    Group(String),
+    /// A group's name and, when it is a folder, where that is.
+    Group(String, Option<String>),
     Question(&'a Decision),
     Run(&'a DigestItem),
     /// A schedule's or rule's ended runs, as one line.
@@ -41,7 +42,7 @@ impl<'a> Row<'a> {
     /// Selectable rows carry a stable key, so the cursor survives a re-rank.
     pub fn key(&self) -> Option<String> {
         match self {
-            Row::Group(_) => None,
+            Row::Group(..) => None,
             Row::Question(d) => Some(format!("q:{}", d.id)),
             Row::Run(i) | Row::Fold(i) => Some(format!("r:{}", i.run.id)),
             Row::Job(j) => Some(j.key.clone()),
@@ -156,13 +157,28 @@ impl Names {
         self.0.get(p).cloned()
     }
 
-    /// A workspace by its registered name, else its last path component.
+    /// A workspace by its registered name, else its last path component —
+    /// except your home folder, which is `home`, not your login.
     pub fn workspace(&self, p: &Path) -> String {
-        self.0.get(p).cloned().unwrap_or_else(|| {
-            p.file_name()
-                .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_default()
-        })
+        if let Some(n) = self.0.get(p) {
+            return n.clone();
+        }
+        if std::env::var_os("HOME").is_some_and(|h| Path::new(&h) == p) {
+            return "home".into();
+        }
+        p.file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    }
+
+    /// Where a group's work is: the folder, with `~` for home. A group named
+    /// for a ref or a branch still says which folder that was in.
+    pub fn place(&self, key: &str, workspace: &Path) -> String {
+        if key.starts_with('/') {
+            short_path(Path::new(key))
+        } else {
+            short_path(workspace)
+        }
     }
 
     /// A group key in words: a ref or branch as it is, a path by name.
@@ -172,6 +188,15 @@ impl Names {
         } else {
             key.to_string()
         }
+    }
+}
+
+/// A path with `~` for home.
+pub fn short_path(p: &Path) -> String {
+    let path = p.to_string_lossy();
+    match std::env::var("HOME") {
+        Ok(h) if !h.is_empty() && path.starts_with(&h) => format!("~{}", &path[h.len()..]),
+        _ => path.into_owned(),
     }
 }
 
@@ -199,6 +224,8 @@ pub fn asked_by(d: &Decision, run: Option<&Run>) -> String {
 
 struct Group<'a> {
     key: String,
+    /// The folder of whatever came first; a group's members share one.
+    workspace: PathBuf,
     questions: Vec<&'a Decision>,
     runs: Vec<&'a DigestItem>,
     jobs: Vec<Job<'a>>,
@@ -247,12 +274,13 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
     let f = cx.filter.to_lowercase();
     let hit = |parts: &[&str]| f.is_empty() || parts.iter().any(|s| s.to_lowercase().contains(&f));
     let mut groups: Vec<Group<'a>> = Vec::new();
-    let group_of = |key: String, groups: &mut Vec<Group<'a>>| -> usize {
+    let group_of = |key: String, workspace: &Path, groups: &mut Vec<Group<'a>>| -> usize {
         match groups.iter().position(|g| g.key == key) {
             Some(i) => i,
             None => {
                 groups.push(Group {
                     key,
+                    workspace: workspace.to_path_buf(),
                     questions: Vec::new(),
                     runs: Vec::new(),
                     jobs: Vec::new(),
@@ -277,7 +305,7 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
         if !hit(&[&q.title, &name, q.summary.as_deref().unwrap_or("")]) {
             continue;
         }
-        let g = group_of(key, &mut groups);
+        let g = group_of(key, &q.workspace, &mut groups);
         groups[g].questions.push(q);
     }
     for i in &d.items {
@@ -292,7 +320,7 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
             if !hit(&[job, &name, &r.title, &i.summary]) {
                 continue;
             }
-            let g = group_of(key.clone(), &mut groups);
+            let g = group_of(key.clone(), &r.workspace, &mut groups);
             let jkey = job_key(kind, job, &key);
             match groups[g].jobs.iter_mut().find(|j| j.key == jkey) {
                 Some(j) => j.runs.push(i),
@@ -309,7 +337,7 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
         if !hit(&[&r.title, &name, r.cli.as_deref().unwrap_or(""), &i.summary]) {
             continue;
         }
-        let g = group_of(key, &mut groups);
+        let g = group_of(key, &r.workspace, &mut groups);
         groups[g].runs.push(i);
     }
     for g in &mut groups {
@@ -328,7 +356,7 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
     groups.sort_by(|a, b| a.score().cmp(&b.score()).then_with(|| b.latest().cmp(&a.latest())));
     let mut rows = Vec::new();
     for g in groups {
-        rows.push(Row::Group(names.group(&g.key)));
+        rows.push(Row::Group(names.group(&g.key), Some(names.place(&g.key, &g.workspace))));
         rows.extend(g.questions.into_iter().map(Row::Question));
         // Runs and jobs share one order: attention first, newest first.
         let mut mixed: Vec<(u8, Timestamp, Row<'a>)> = g
@@ -356,7 +384,7 @@ pub fn counts(rows: &[Row]) -> (usize, usize, usize, usize, usize) {
     let mut c = (0, 0, 0, 0, 0);
     for r in rows {
         match r {
-            Row::Group(_) | Row::Fold(_) => {}
+            Row::Group(..) | Row::Fold(_) => {}
             Row::Question(_) => c.0 += 1,
             Row::Run(i) => {
                 use relay_proto::types::RunState::*;
@@ -466,7 +494,7 @@ mod tests {
     fn keys(rows: &[Row]) -> Vec<String> {
         rows.iter()
             .map(|r| match r {
-                Row::Group(g) => format!("[{g}]"),
+                Row::Group(g, _) => format!("[{g}]"),
                 Row::Fold(i) => format!("  r:{}", i.run.id),
                 other => other.key().unwrap(),
             })
@@ -520,6 +548,10 @@ mod tests {
             "the question puts relay first; api is named by its folder; old01 is gone"
         );
         assert_eq!(counts(&rows), (1, 2, 1, 1, 0));
+        match &rows[0] {
+            Row::Group(name, place) => assert_eq!((name.as_str(), place.as_deref()), ("relay", Some("/home/f/relay"))),
+            _ => panic!("first row is the group"),
+        }
         assert_eq!(
             headline(&rows, 2, ""),
             "relay · 1 to decide · 2 need you · 1 working · 1 finished · 2 new"
