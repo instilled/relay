@@ -1,7 +1,7 @@
 //! The context pack: what an assistant is told before it drafts a run or a
 //! rule from plain words. Built from the code — the event kinds, the specs'
 //! fields, `rl --help` — so it cannot drift from what Relay does; the prose
-//! around it is here, in one place. `rl ai context` prints it.
+//! around it is here, in one place. `rl context` prints it.
 
 use relay_proto::types::event_kind;
 use std::fmt::Write;

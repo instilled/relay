@@ -38,7 +38,8 @@ const HOOK_TIMEOUT: Duration = Duration::from_millis(1500);
 #[command(
     name = "rl",
     version,
-    about = "Relay — keeps your agents and long-running work alive"
+    about = "Relay — keeps your agents and long-running work alive",
+    after_help = "For agents:\n  rl context    what Relay is, its events and rules, and the answer it wants — read this first\n  rl agents     the agent CLIs on this machine\n  rl --json …   every command, machine-readable"
 )]
 struct Cli {
     /// Machine-readable output on every command.
@@ -89,8 +90,8 @@ enum Cmd {
     Config(ConfigArgs),
     /// The agent CLIs Relay knows, and which are on this machine.
     Agents,
-    /// What Relay tells an assistant: `rl ai context` prints the pack an interpreter reads.
-    Ai(AiArgs),
+    /// What Relay tells an agent: the words, events, rule definitions, what is here, and the answer it wants.
+    Context(ContextArgs),
     /// Ask a human something and carry on: the question waits until answered.
     Ask(AskArgs),
     /// Questions waiting on you (and, with --all, the answered ones).
@@ -287,20 +288,10 @@ struct EveryArgs {
 }
 
 #[derive(Args)]
-struct AiArgs {
-    #[command(subcommand)]
-    cmd: AiCmd,
-}
-
-#[derive(Subcommand)]
-enum AiCmd {
-    /// The context pack, as an assistant would read it: words, events, the rule definitions,
-    /// placeholders, this command line, what is here, and the answer it must give.
-    Context {
-        /// The folder the words would be typed in (default: here).
-        #[arg(long = "in", value_name = "FOLDER")]
-        folder: Option<PathBuf>,
-    },
+struct ContextArgs {
+    /// The folder the words would be typed in (default: here).
+    #[arg(long = "in", value_name = "FOLDER")]
+    folder: Option<PathBuf>,
 }
 
 #[derive(Args)]
@@ -522,7 +513,7 @@ async fn main() -> Result<()> {
         Cmd::Every(a) => every(&home, a, cli.json).await,
         Cmd::Config(a) => config(&home, a, cli.json).await,
         Cmd::Agents => agents(&home, cli.json).await,
-        Cmd::Ai(a) => ai(&home, a).await,
+        Cmd::Context(a) => context(&home, a).await,
         Cmd::Ask(a) => ask(&home, a, cli.json).await,
         Cmd::Decisions(a) => decisions(&home, a, cli.json).await,
         Cmd::Decide(a) => decide(&home, a, cli.json).await,
@@ -1725,11 +1716,11 @@ async fn config(home: &Home, a: ConfigArgs, json: bool) -> Result<()> {
     }
 }
 
-/// `rl ai context`: the pack, with `rl --help` and every subcommand's help
-/// rendered from this very binary, and what the daemon knows about here.
-async fn ai(home: &Home, a: AiArgs) -> Result<()> {
-    let AiCmd::Context { folder } = a.cmd;
-    let folder = match folder {
+/// `rl context`: the pack, with `rl --help` and the help of the commands a
+/// draft becomes, rendered from this very binary, and what the daemon knows
+/// about here.
+async fn context(home: &Home, a: ContextArgs) -> Result<()> {
+    let folder = match a.folder {
         Some(f) => f,
         None => std::env::current_dir()?,
     };

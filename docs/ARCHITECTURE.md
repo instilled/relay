@@ -387,7 +387,7 @@ does not know, or a `model` for a profile without `model_flag`, is an error, nev
 file, and `rld` seeds it, all comments, when there is none. Later assistants (`summarise`,
 `triage`, `answer`) will be keys in the same map.
 
-**What an assistant is told** is the context pack (`rl-cli/src/context.rs`, `rl ai context
+**What an assistant is told** is the context pack (`rl-cli/src/context.rs`, `rl context
 [--in <folder>]`), built from the code so it cannot drift: the words (run, folder, `yours`,
 rule, job, question, agent, `when`), one line per event kind in `event_kind::ALL` (a kind
 without words fails a test), the fields of a schedule and a reaction (every serde field of
