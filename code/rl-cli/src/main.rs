@@ -14,11 +14,13 @@ use relay_proto::methods::{
 use relay_proto::methods::{
     EventId, ReactionList, ReactionPause, ReactionReload, ReactionResume, ReactionTest, ReactionTrial,
 };
+use relay_proto::methods::{RuleApprove, RuleList, RuleRef};
 use relay_proto::methods::{
     ScheduleFilter, ScheduleList, ScheduleName, SchedulePause, ScheduleReload, ScheduleResume, ScheduleRun,
     WorkspaceList, WorkspacePath, WorkspaceRemove, WorkspaceUp, WorkspaceUpParams,
 };
 use relay_proto::reaction::Reaction;
+use relay_proto::rule::{Rule, RuleKind, RuleStatus};
 use relay_proto::schedule::{Schedule, UpReport};
 use relay_proto::types::{AttachMode, Cause, Mark, RunKind, RunState};
 use rl_cli::client::Client;
@@ -74,6 +76,8 @@ enum Cmd {
         #[command(subcommand)]
         cmd: ReactCmd,
     },
+    /// What starts work without you: every schedule and reaction, one list. Approve, pause, run.
+    Rules(RulesArgs),
     /// Write a rule into your reactions.yaml: `rl on run.failed -- notify "{summary}"`.
     On(OnArgs),
     /// Ask a human something and carry on: the question waits until answered.
@@ -177,6 +181,40 @@ enum ReactCmd {
     Resume(ScheduleRef),
     /// Re-read every reactions file (rld does it on start too).
     Reload,
+}
+
+#[derive(Args)]
+struct RulesArgs {
+    /// Include rules removed from their files.
+    #[arg(short, long)]
+    all: bool,
+    #[command(subcommand)]
+    cmd: Option<RulesCmd>,
+}
+
+#[derive(Subcommand)]
+enum RulesCmd {
+    /// Say yes to a rule's current version; it may fire from now on.
+    Approve(RuleArg),
+    /// Stop a rule from firing until resumed.
+    Pause(RuleArg),
+    /// Let it fire again.
+    Resume(RuleArg),
+    /// Fire a schedule now, whatever the clock says.
+    Run(RuleArg),
+    /// Re-read every schedules and reactions file.
+    Reload,
+}
+
+#[derive(Args)]
+struct RuleArg {
+    name: String,
+    /// Which one, when the name exists in several: `global` or a workspace folder.
+    #[arg(long = "in", value_name = "SCOPE")]
+    scope: Option<String>,
+    /// `schedule` or `reaction`, when both share the name.
+    #[arg(long)]
+    kind: Option<RuleKind>,
 }
 
 #[derive(Args)]
@@ -393,6 +431,7 @@ async fn main() -> Result<()> {
         Cmd::Events(a) => events(&home, a, cli.json).await,
         Cmd::Schedule { cmd } => schedule(&home, cmd, cli.json).await,
         Cmd::React { cmd } => react(&home, cmd, cli.json).await,
+        Cmd::Rules(a) => rules(&home, a, cli.json).await,
         Cmd::On(a) => on(&home, a, cli.json).await,
         Cmd::Ask(a) => ask(&home, a, cli.json).await,
         Cmd::Decisions(a) => decisions(&home, a, cli.json).await,
@@ -1115,6 +1154,160 @@ fn until(t: jiff::Timestamp, now: jiff::Timestamp) -> String {
     } else {
         "due".to_string()
     }
+}
+
+const RULE_HEADERS: &[&str] = &["SCOPE", "NAME", "WHEN", "STATUS", "NEXT", "LAST", "DOES"];
+
+fn rule_row(r: &Rule, now: jiff::Timestamp) -> Vec<String> {
+    let next = match (r.status(), r.next_at()) {
+        (RuleStatus::On, Some(t)) if t > now => format!("in {}", relay_core::time::fmt_duration(t.duration_since(now))),
+        (RuleStatus::On, Some(_)) => "due".to_string(),
+        _ => "—".to_string(),
+    };
+    let last = match r.last_fired_at() {
+        Some(t) => format!("{} ago", relay_core::time::fmt_age(t, now)),
+        None => "never".to_string(),
+    };
+    let does: String = r.does().chars().take(48).collect();
+    vec![
+        r.scope_label(),
+        r.name().to_string(),
+        r.when(),
+        r.status().to_string(),
+        next,
+        last,
+        does,
+    ]
+}
+
+/// Which kind a name is, when the caller did not say: the one that has it.
+async fn rule_kind(rpc: &mut Client, a: &RuleArg) -> Result<RuleKind> {
+    if let Some(k) = a.kind {
+        return Ok(k);
+    }
+    let all = rpc.call::<RuleList>(ScheduleFilter { all: false }).await?;
+    let scope_ok = |r: &Rule| match &a.scope {
+        None => true,
+        Some(s) => {
+            r.scope() == s
+                || r.scope_label() == *s
+                || std::fs::canonicalize(s).is_ok_and(|p| p.to_string_lossy() == r.scope())
+        }
+    };
+    let mut kinds: Vec<RuleKind> = all
+        .iter()
+        .filter(|r| r.name() == a.name && scope_ok(r))
+        .map(Rule::kind)
+        .collect();
+    kinds.dedup();
+    match kinds.as_slice() {
+        [k] => Ok(*k),
+        [] => bail!("no rule named `{}`", a.name),
+        _ => bail!("`{}` is both a schedule and a reaction; say which with --kind", a.name),
+    }
+}
+
+async fn rules(home: &Home, a: RulesArgs, json: bool) -> Result<()> {
+    let mut rpc = Client::connect(home).await?;
+    let one = |r: Rule, json: bool| -> Result<()> {
+        if json {
+            println!("{}", serde_json::to_string(&r)?);
+        } else {
+            println!("{}", render::table(RULE_HEADERS, &[rule_row(&r, now())]));
+        }
+        Ok(())
+    };
+    let name = |x: &RuleArg| ScheduleName {
+        name: x.name.clone(),
+        scope: x.scope.clone(),
+    };
+    match a.cmd {
+        None => {
+            let mut list = rpc.call::<RuleList>(ScheduleFilter { all: a.all }).await?;
+            list.sort_by(|x, y| {
+                x.is_global()
+                    .cmp(&y.is_global())
+                    .reverse()
+                    .then_with(|| x.scope_label().cmp(&y.scope_label()))
+                    .then_with(|| x.name().cmp(y.name()))
+            });
+            if json {
+                println!("{}", serde_json::to_string(&list)?);
+            } else if list.is_empty() {
+                println!(
+                    "no rules; `rl on` writes one, `rl up` loads a folder's ({}, {})",
+                    display_path(&home.schedules_file()),
+                    display_path(&home.reactions_file())
+                );
+            } else {
+                let now = now();
+                let rows: Vec<Vec<String>> = list.iter().map(|r| rule_row(r, now)).collect();
+                print!("{}", render::table(RULE_HEADERS, &rows));
+                let pending = list.iter().filter(|r| r.status() == RuleStatus::NeedsApproval).count();
+                if pending > 0 {
+                    println!(
+                        "\n{pending} need{} your yes: `rl rules approve <name>`",
+                        if pending == 1 { "s" } else { "" }
+                    );
+                }
+            }
+        }
+        Some(RulesCmd::Approve(x)) => {
+            let r = rpc
+                .call::<RuleApprove>(RuleRef {
+                    name: x.name,
+                    scope: x.scope,
+                    kind: x.kind,
+                })
+                .await?;
+            one(r, json)?;
+        }
+        Some(cmd @ (RulesCmd::Pause(_) | RulesCmd::Resume(_))) => {
+            let pause = matches!(cmd, RulesCmd::Pause(_));
+            let (RulesCmd::Pause(x) | RulesCmd::Resume(x)) = cmd else {
+                unreachable!()
+            };
+            let r = match (rule_kind(&mut rpc, &x).await?, pause) {
+                (RuleKind::Schedule, true) => Rule::Schedule(rpc.call::<SchedulePause>(name(&x)).await?),
+                (RuleKind::Schedule, false) => Rule::Schedule(rpc.call::<ScheduleResume>(name(&x)).await?),
+                (RuleKind::Reaction, true) => Rule::Reaction(rpc.call::<ReactionPause>(name(&x)).await?),
+                (RuleKind::Reaction, false) => Rule::Reaction(rpc.call::<ReactionResume>(name(&x)).await?),
+            };
+            one(r, json)?;
+        }
+        Some(RulesCmd::Run(x)) => {
+            let run = rpc.call::<ScheduleRun>(name(&x)).await?;
+            if json {
+                println!("{}", serde_json::to_string(&run)?);
+            } else {
+                println!("started {} · {}", run.id, run.title);
+            }
+        }
+        Some(RulesCmd::Reload) => {
+            let s = rpc.call::<ScheduleReload>(()).await?;
+            let r = rpc.call::<ReactionReload>(()).await?;
+            if json {
+                println!("{}", json!({ "schedules": s, "reactions": r }));
+            } else {
+                println!("schedules: {}", reload_line(&s));
+                println!("reactions: {}", reload_line(&r));
+                for e in s.errors.iter().chain(r.errors.iter()) {
+                    eprintln!("not loaded: {e}");
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn reload_line(r: &relay_proto::schedule::ReloadReport) -> String {
+    format!(
+        "{} loaded · {} added · {} changed · {} removed",
+        r.loaded,
+        r.added.len(),
+        r.changed.len(),
+        r.removed.len()
+    )
 }
 
 const REACTION_HEADERS: &[&str] = &["SCOPE", "NAME", "ON", "LAST", "STATE", "DOES"];

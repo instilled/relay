@@ -317,6 +317,19 @@ impl Scheduler {
         self.get(&s.name, Some(&s.scope)).await
     }
 
+    /// Says yes to the current version of one schedule, and plans it.
+    pub async fn approve(&self, name: &str, scope: Option<&str>) -> Result<Schedule> {
+        let s = self.get(name, scope).await?;
+        if s.removed_at.is_some() {
+            bail!("`{name}` is no longer in {}", s.source.display());
+        }
+        let (sc, n) = (s.scope.clone(), vec![s.name.clone()]);
+        self.ledger.call(move |c| schedules::approve(c, &sc, &n)).await?;
+        self.plan_all().await?;
+        self.wake.notify_one();
+        self.get(&s.name, Some(&s.scope)).await
+    }
+
     /// Fires now, whatever the clock or the policies say. Approval still
     /// counts: a version nobody said yes to does not run.
     pub async fn run_now(&self, name: &str, scope: Option<&str>) -> Result<Run> {

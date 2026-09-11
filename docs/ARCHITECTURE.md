@@ -322,6 +322,15 @@ was down does not come back and fire a day of history.
 stays yours, comments and all. `rl react test <event>` replays one real event through every rule
 and prints what each would do, and why it would not.
 
+**Rules** is how both are shown: `rule.list` returns every schedule and reaction as one
+`Rule` (`relay-proto/src/rule.rs`, a tagged enum over the two rows with one set of accessors —
+`when()`, `does()`, `status()`), and `rule.approve` says yes to one of them by name, which the
+per-folder `rl up --yes` never allowed. `rl rules` is the table; `rl rules approve|pause|resume|run
+<name>` act on one, finding its kind by name (`--kind` when a schedule and a reaction share it,
+`--in` when two folders do). In the panel, `r` flips the list to rules — grouped by whose file,
+what needs a yes on top — and `y` approves, `p` pauses, `enter` fires a schedule now. The two YAML
+files, the two ledger tables and `rl schedule` / `rl react` are unchanged underneath.
+
 Relay still talks to no one itself. A question surfaces in `rl decisions`, in `rl since` and at
 the top of the panel, where a number key answers it; getting it to Slack or mail is a reaction on
 `decision.raised` running your own command.
