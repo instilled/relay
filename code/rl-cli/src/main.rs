@@ -14,7 +14,7 @@ use relay_proto::methods::{
 use relay_proto::methods::{
     EventId, ReactionList, ReactionPause, ReactionReload, ReactionResume, ReactionTest, ReactionTrial,
 };
-use relay_proto::methods::{RuleApprove, RuleList, RuleRef};
+use relay_proto::methods::{RuleApprove, RuleList, RuleRef, RunArchive, RunArchiveParams};
 use relay_proto::methods::{
     ScheduleFilter, ScheduleList, ScheduleName, SchedulePause, ScheduleReload, ScheduleResume, ScheduleRun,
     WorkspaceList, WorkspacePath, WorkspaceRemove, WorkspaceUp, WorkspaceUpParams,
@@ -62,6 +62,8 @@ enum Cmd {
     Stop(StopArgs),
     /// List runs (active by default).
     Ls(LsArgs),
+    /// Done with a run: out of the panel and `rl since`, kept in the ledger. Ended runs only.
+    Done(DoneArgs),
     /// What happened while you were away: runs that need you, finished, or moved, grouped.
     Since(SinceArgs),
     /// List ledger events.
@@ -367,7 +369,7 @@ struct StopArgs {
 
 #[derive(Args)]
 struct LsArgs {
-    /// Include finished, failed and stopped runs.
+    /// Include finished, failed and stopped runs, and those you are done with.
     #[arg(short, long)]
     all: bool,
     /// Only runs in this state (repeatable).
@@ -385,6 +387,15 @@ struct LsArgs {
     /// Newest N.
     #[arg(short = 'n', long, default_value_t = 200)]
     limit: u32,
+}
+
+#[derive(Args)]
+struct DoneArgs {
+    /// Run ids.
+    ids: Vec<String>,
+    /// Instead: everything that has ended and been looked at.
+    #[arg(long, conflicts_with = "ids")]
+    all: bool,
 }
 
 #[derive(Args)]
@@ -427,6 +438,7 @@ async fn main() -> Result<()> {
         Cmd::Run(a) => run(&home, a, cli.json).await,
         Cmd::Stop(a) => stop(&home, a, cli.json).await,
         Cmd::Ls(a) => ls(&home, a, cli.json).await,
+        Cmd::Done(a) => done(&home, a, cli.json).await,
         Cmd::Since(a) => since(&home, a, cli.json).await,
         Cmd::Events(a) => events(&home, a, cli.json).await,
         Cmd::Schedule { cmd } => schedule(&home, cmd, cli.json).await,
@@ -825,6 +837,7 @@ async fn ls(home: &Home, a: LsArgs, json: bool) -> Result<()> {
     let filter = RunFilter {
         states: a.states,
         active_only: !a.all,
+        archived: a.all,
         workspace: None,
         group: a.group,
         tag: a.tag,
@@ -841,6 +854,27 @@ async fn ls(home: &Home, a: LsArgs, json: bool) -> Result<()> {
             "{}",
             render::table(&render::RUN_HEADERS, &render::run_rows(&runs, now()))
         );
+    }
+    Ok(())
+}
+
+async fn done(home: &Home, a: DoneArgs, json: bool) -> Result<()> {
+    if a.ids.is_empty() && !a.all {
+        bail!("say which: `rl done <id>…`, or `rl done --all` for everything ended and seen");
+    }
+    let n = Client::connect(home)
+        .await?
+        .call::<RunArchive>(RunArchiveParams {
+            ids: a.ids.clone(),
+            all_seen: a.all,
+        })
+        .await?;
+    if json {
+        println!("{}", json!({ "archived": n }));
+    } else if n == 0 && !a.all {
+        bail!("nothing archived: not found, still running, or already done");
+    } else {
+        println!("{n} done");
     }
     Ok(())
 }

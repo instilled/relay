@@ -33,8 +33,8 @@ use relay_proto::decision::Decision;
 use relay_proto::methods::{
     DecisionDismiss, DecisionNote, DecisionTake, DecisionTakeParams, Digest, DigestGet, DigestItem, DigestParams,
     EventFilter, EventList, PresenceClient, PresenceTouch, ReactionPause, ReactionReload, ReactionResume, RuleApprove,
-    RuleList, RuleRef, RunIds, RunMark, RunMarkParams, RunSeen, RunStop, RunStopParams, ScheduleFilter, ScheduleName,
-    SchedulePause, ScheduleReload, ScheduleResume, ScheduleRun, WorkspaceList,
+    RuleList, RuleRef, RunArchive, RunArchiveParams, RunIds, RunMark, RunMarkParams, RunSeen, RunStop, RunStopParams,
+    ScheduleFilter, ScheduleName, SchedulePause, ScheduleReload, ScheduleResume, ScheduleRun, WorkspaceList,
 };
 use relay_proto::rule::{Rule, RuleKind, RuleStatus};
 use relay_proto::types::{Event as LedgerEvent, Mark, Run, RunState};
@@ -385,6 +385,17 @@ impl App {
         self.digest.items.iter().map(|i| &i.run).find(|r| r.id == id)
     }
 
+    /// The cursor is on it: that is looking. A job's runs count as looked at
+    /// when the job is.
+    async fn saw_selected(&mut self) {
+        let ids: Vec<String> = match self.selected() {
+            Some(Row::Run(i)) | Some(Row::Fold(i)) if i.unseen => vec![i.run.id.clone()],
+            Some(Row::Job(j)) => j.runs.iter().filter(|i| i.unseen).map(|i| i.run.id.clone()).collect(),
+            _ => vec![],
+        };
+        self.seen(ids).await;
+    }
+
     fn step(&mut self, by: isize) {
         let keys = self.keys();
         if keys.is_empty() {
@@ -490,19 +501,38 @@ impl App {
         }
     }
 
-    /// Everything on the list has been looked at.
-    async fn clear_news(&mut self) {
-        let ids: Vec<String> = self
-            .digest
-            .items
-            .iter()
-            .filter(|i| i.unseen)
-            .map(|i| i.run.id.clone())
-            .collect();
-        let n = ids.len();
-        self.seen(ids).await;
-        self.refresh().await;
-        self.say(format!("{n} cleared"));
+    /// Done with these ended runs: out of the list, kept in the ledger.
+    async fn archive(&mut self, ids: Vec<String>, what: &str) {
+        match self
+            .rpc
+            .call::<RunArchive>(RunArchiveParams { ids, all_seen: false })
+            .await
+        {
+            Ok(0) => self.say("nothing to be done with: still going"),
+            Ok(_) => {
+                self.say(format!("done with {what}"));
+                self.refresh().await;
+            }
+            Err(e) => self.say(format!("done: {e:#}")),
+        }
+    }
+
+    /// Done with everything ended that has been looked at.
+    async fn archive_seen(&mut self) {
+        match self
+            .rpc
+            .call::<RunArchive>(RunArchiveParams {
+                ids: vec![],
+                all_seen: true,
+            })
+            .await
+        {
+            Ok(n) => {
+                self.say(format!("done with {n}"));
+                self.refresh().await;
+            }
+            Err(e) => self.say(format!("done: {e:#}")),
+        }
     }
 
     // ---- rules -------------------------------------------------------------
@@ -669,20 +699,32 @@ impl App {
             }
             (KeyCode::Down, _) | (KeyCode::Char('j'), _) => {
                 self.step(1);
+                self.saw_selected().await;
                 self.refresh().await;
             }
             (KeyCode::Up, _) | (KeyCode::Char('k'), _) => {
                 self.step(-1);
+                self.saw_selected().await;
                 self.refresh().await;
             }
-            (KeyCode::Home, _) | (KeyCode::Char('g'), _) => self.step(isize::MIN / 2),
-            (KeyCode::End, _) | (KeyCode::Char('G'), _) => self.step(isize::MAX / 2),
+            (KeyCode::Home, _) | (KeyCode::Char('g'), _) => {
+                self.step(isize::MIN / 2);
+                self.saw_selected().await;
+                self.refresh().await;
+            }
+            (KeyCode::End, _) | (KeyCode::Char('G'), _) => {
+                self.step(isize::MAX / 2);
+                self.saw_selected().await;
+                self.refresh().await;
+            }
             (KeyCode::PageDown, _) | (KeyCode::Char('d'), KeyModifiers::CONTROL) => {
                 self.step(self.list_h.get().saturating_sub(2).max(1) as isize);
+                self.saw_selected().await;
                 self.refresh().await;
             }
             (KeyCode::PageUp, _) | (KeyCode::Char('u'), KeyModifiers::CONTROL) => {
                 self.step(-(self.list_h.get().saturating_sub(2).max(1) as isize));
+                self.saw_selected().await;
                 self.refresh().await;
             }
             (KeyCode::Enter, _) => {
@@ -758,7 +800,21 @@ impl App {
                 }
             }
             (KeyCode::Char('/'), _) => self.mode = Mode::Filter(self.filter.clone()),
-            (KeyCode::Char('d'), _) if self.view == View::Work => self.clear_news().await,
+            (KeyCode::Char('d'), _) if self.view == View::Work => {
+                if let Some(j) = self.selected_job() {
+                    let ids: Vec<String> = j.runs.iter().map(|i| i.run.id.clone()).collect();
+                    let what = format!("{} · {} runs", j.name, ids.len());
+                    self.archive(ids, &what).await;
+                } else if let Some(i) = self.selected_run() {
+                    if i.run.state.is_terminal() {
+                        let (id, title) = (i.run.id.clone(), i.run.title.clone());
+                        self.archive(vec![id], &title).await;
+                    } else {
+                        self.say("still going: x stops it");
+                    }
+                }
+            }
+            (KeyCode::Char('D'), _) if self.view == View::Work => self.archive_seen().await,
             (KeyCode::Char('r'), _) => self.toggle_view().await,
             (KeyCode::Char('R'), _) if self.view == View::Rules => self.reload_rules().await,
             (KeyCode::Char('y'), _) => {
@@ -872,12 +928,15 @@ impl App {
         for (n, row) in rows.iter().enumerate() {
             let selected = row.key().is_some() && row.key() == self.sel;
             let mut line = match row {
-                Row::Group(g) => {
+                Row::Group(g, place) => {
                     let mut l = vec![];
                     if n > 0 {
                         lines.push(Line::raw(""));
                     }
                     l.push(Span::raw(format!(" {g}")).bold());
+                    if let Some(p) = place {
+                        l.push(Span::raw(format!("  {p}")).dim());
+                    }
                     Line::from(l)
                 }
                 Row::Question(q) => Line::from(vec![
@@ -1105,14 +1164,14 @@ impl App {
                 } else {
                     "enter open"
                 };
-                format!("{open} · r rules · / filter · d clear news · q quit")
+                format!("{open} · d done with its runs · D done with all seen · r rules · / filter · q quit")
             }
-            Some(Row::Fold(_)) => "enter output · esc fold · f wide · r rules · / filter · q quit".into(),
+            Some(Row::Fold(_)) => "enter output · d done · esc fold · f wide · r rules · / filter · q quit".into(),
             Some(Row::Run(i)) if i.run.state.is_terminal() => {
-                "enter output · f wide · r rules · / filter · d clear news · q quit".into()
+                "enter output · d done · D done with all seen · f wide · r rules · / filter · q quit".into()
             }
             Some(Row::Run(_)) => {
-                "enter terminal · x stop · m mark · f wide · r rules · / filter · d clear news · q quit".into()
+                "enter terminal · x stop · m mark · f wide · r rules · / filter · D done with all seen · q quit".into()
             }
             _ => "r rules · / filter · q quit".into(),
         }

@@ -19,6 +19,7 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         include_str!("../migrations/0008_run_grammar.sql"),
     ),
     (9, "0009_reactions", include_str!("../migrations/0009_reactions.sql")),
+    (10, "0010_archive", include_str!("../migrations/0010_archive.sql")),
 ];
 
 pub fn run(conn: &mut Connection) -> Result<()> {
