@@ -209,8 +209,21 @@ retention, not yet built. `enter` on a run is its terminal, full screen and join
 keyboard is the run's, as it would be in a tab of your own — and `ctrl-\` lets go; `w` only
 watches, and `esc` is the list again. `i` opens a pane of facts beside the list (`tui/pane.rs`):
 a run's facts and recent events, a job's tally, a question with its options numbered; pressing
-the number is `decision.take`, and the run it starts becomes the selection. Nothing is remembered
-between openings except presence: leaving the panel is what `rl since` counts from.
+the number is `decision.take`, and the run it starts becomes the selection. `n` is a form at the
+foot of the screen (`tui/form.rs`): for a run, the folder, a line and a title — a line starting
+with an agent's name (`claude fix the build`) is that agent with the rest as its prompt, anything
+else is a shell line — and `enter` is `run.start`, sized to this screen, an agent's terminal joined
+at once. `N` (or `n` in the rules view) is the same form for a rule: `in` (a folder, or `yours`),
+`name`, `when` (`every 30m`, a cron line, or `on run.failed` — which decides between
+`schedules.yaml` and `reactions.yaml`), `run`, `title`, `tags`, `cwd`. `enter` writes the block
+into the file (`rulefile.rs`: the block of that name replaced in place or added at the end of the
+mapping, comments and the other rules untouched, the result checked to parse), reloads, and
+approves it — your keystroke is the yes; a folder new to Relay is registered on the way. `e` on a
+rule, or on a job row, is the same form filled in; saving rewrites only that block and keeps what
+the form does not show (`env`, `where`, `ask`), and a rename or a move takes the old block out.
+`E` opens the file in `$EDITOR` at the rule's line and reloads on return — an edit made there is
+a file change, so it waits for `y` like any other. Nothing is remembered between openings except
+presence: leaving the panel is what `rl since` counts from.
 
 ---
 
