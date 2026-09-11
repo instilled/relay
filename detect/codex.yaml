@@ -2,6 +2,7 @@
 kind: agent
 bins: [codex]
 headless: [exec]
+model_flag: ["-m"]
 patterns:
   needs_input:
     - '(?i)allow command\?'
