@@ -3,6 +3,8 @@
 //! is nothing. Pure: what is typed, and what it means.
 
 use super::rows::short_path;
+pub use crate::rulefile::RuleDraft;
+use crate::rulefile::Was;
 use anyhow::{Result, bail};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::style::Stylize;
@@ -50,16 +52,26 @@ pub struct Form {
     /// The folder the form was opened from: where a rule of yours runs
     /// unless `cwd` says otherwise.
     pub origin: PathBuf,
+    /// Folders `in` cycles through with ↑/↓: the known ones, and where
+    /// the form was opened. Any other path can still be typed.
+    pub folders: Vec<String>,
     /// The rule being edited — kind, scope, name — so a rename or a move
     /// takes the old block out, and what the form does not show survives.
     pub editing: Option<Editing>,
 }
 
 pub struct Editing {
-    pub kind: RuleKind,
-    pub scope: String,
-    pub name: String,
     pub rule: Rule,
+}
+
+impl Editing {
+    pub fn was(&self) -> Was {
+        Was {
+            kind: self.rule.kind(),
+            scope: self.rule.scope().to_string(),
+            name: self.rule.name().to_string(),
+        }
+    }
 }
 
 /// What a keystroke did.
@@ -82,8 +94,24 @@ impl Form {
             ],
             cur: 1,
             origin: folder.to_path_buf(),
+            folders: vec![],
             editing: None,
         }
+    }
+
+    /// The folders `in` cycles through; the one it holds now comes first.
+    pub fn with_folders(mut self, known: &[PathBuf]) -> Self {
+        let mut v: Vec<String> = vec![self.get("in").to_string()];
+        if self.kind == Kind::Rule {
+            v.push(YOURS.into());
+        }
+        v.push(short_path(&self.origin));
+        v.extend(known.iter().map(|p| short_path(p)));
+        v.dedup();
+        let mut seen = std::collections::HashSet::new();
+        v.retain(|f| !f.is_empty() && seen.insert(f.clone()));
+        self.folders = v;
+        self
     }
 
     /// A rule in `folder`, or yours; `origin` is where a rule of yours runs
@@ -103,6 +131,7 @@ impl Form {
             ],
             cur: 1,
             origin: origin.to_path_buf(),
+            folders: vec![],
             editing: None,
         }
     }
@@ -144,12 +173,7 @@ impl Form {
             };
             *field = Field::new(field.key, field.hint, v);
         }
-        f.editing = Some(Editing {
-            kind: r.kind(),
-            scope: r.scope().to_string(),
-            name: r.name().to_string(),
-            rule: r.clone(),
-        });
+        f.editing = Some(Editing { rule: r.clone() });
         f
     }
 
@@ -169,14 +193,33 @@ impl Form {
     pub fn title(&self) -> String {
         match (self.kind, &self.editing) {
             (Kind::Run, _) => "new run".into(),
-            (Kind::Rule, Some(e)) => format!("edit {}", e.name),
+            (Kind::Rule, Some(e)) => format!("edit {}", e.rule.name()),
             (Kind::Rule, None) => "new rule".into(),
         }
+    }
+
+    /// Whether the cursor is on `in` with folders to walk through.
+    pub fn on_folders(&self) -> bool {
+        self.fields[self.cur].key == "in" && self.folders.len() > 1
+    }
+
+    /// On `in`: the next (or previous) known folder.
+    fn cycle_folder(&mut self, by: isize) {
+        let n = self.folders.len() as isize;
+        let cur = self.folders.iter().position(|x| x == self.get("in")).unwrap_or(0) as isize;
+        let next = ((cur + by) % n + n) % n;
+        let value = self.folders[next as usize].clone();
+        let f = &mut self.fields[self.cur];
+        *f = Field::new(f.key, f.hint, value);
     }
 
     pub fn key(&mut self, k: &KeyEvent) -> Act {
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         let n = self.fields.len();
+        if self.on_folders() && matches!(k.code, KeyCode::Up | KeyCode::Down) {
+            self.cycle_folder(if k.code == KeyCode::Down { 1 } else { -1 });
+            return Act::Typing;
+        }
         let f = &mut self.fields[self.cur];
         match k.code {
             KeyCode::Esc => return Act::Cancel,
@@ -322,25 +365,6 @@ pub fn run_draft(f: &Form) -> Result<RunDraft> {
         argv,
         title: (!title.is_empty()).then(|| title.to_string()),
     })
-}
-
-/// The rule the form describes: which file, and its block.
-#[derive(Debug)]
-pub struct RuleDraft {
-    pub kind: RuleKind,
-    /// The folder whose `.relay/` it goes in; none for yours.
-    pub folder: Option<PathBuf>,
-    pub name: String,
-    pub body: Vec<String>,
-}
-
-impl RuleDraft {
-    pub fn scope(&self) -> String {
-        match &self.folder {
-            Some(f) => f.to_string_lossy().into_owned(),
-            None => GLOBAL_SCOPE.into(),
-        }
-    }
 }
 
 /// `every 30m`, `30m`, `0 2 * * *`, `cron …`, or `on <event>…`.
@@ -495,6 +519,33 @@ mod tests {
 
         let f = Form::run(dir.path());
         assert!(run_draft(&f).unwrap_err().to_string().starts_with("run:"));
+    }
+
+    #[test]
+    fn the_in_field_walks_the_known_folders() {
+        let known = vec![PathBuf::from("/w/api"), PathBuf::from("/w/relay")];
+        let mut f = Form::run(Path::new("/w/relay")).with_folders(&known);
+        assert_eq!(
+            f.folders,
+            ["/w/relay", "/w/api"],
+            "where it opened first, then the others, once"
+        );
+        f.key(&KeyEvent::from(KeyCode::BackTab));
+        assert!(f.on_folders());
+        f.key(&KeyEvent::from(KeyCode::Down));
+        assert_eq!(f.get("in"), "/w/api");
+        f.key(&KeyEvent::from(KeyCode::Down));
+        assert_eq!(f.get("in"), "/w/relay", "round the end");
+        f.key(&KeyEvent::from(KeyCode::Up));
+        assert_eq!(f.get("in"), "/w/api");
+        // A path of its own is typed like anything else.
+        f.key(&KeyEvent::from(KeyCode::Char('/')));
+        assert_eq!(f.get("in"), "/w/api/");
+        f.key(&KeyEvent::from(KeyCode::Tab));
+        assert!(!f.on_folders());
+        // A rule's `in` offers yours too.
+        let f = Form::rule(Some(Path::new("/w/relay")), Path::new("/w/relay")).with_folders(&known);
+        assert_eq!(f.folders, ["/w/relay", "yours", "/w/api"]);
     }
 
     #[test]

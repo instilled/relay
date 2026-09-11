@@ -260,6 +260,13 @@ impl Names {
         Self(ws.into_iter().collect())
     }
 
+    /// Every registered folder, by path.
+    pub fn paths(&self) -> Vec<PathBuf> {
+        let mut v: Vec<PathBuf> = self.0.keys().cloned().collect();
+        v.sort();
+        v
+    }
+
     /// The name a folder was registered under, if it was.
     pub fn registered(&self, p: &Path) -> Option<String> {
         self.0.get(p).cloned()

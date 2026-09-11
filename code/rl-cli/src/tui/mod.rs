@@ -39,10 +39,9 @@ use relay_proto::methods::{
     EventFilter, EventList, PresenceClient, PresenceTouch, ReactionPause, ReactionReload, ReactionResume, RuleApprove,
     RuleList, RuleRef, RunArchive, RunArchiveParams, RunIds, RunMark, RunMarkParams, RunSeen, RunSpec, RunStart,
     RunStop, RunStopParams, ScheduleFilter, ScheduleName, SchedulePause, ScheduleReload, ScheduleResume, ScheduleRun,
-    WorkspaceList, WorkspaceUp, WorkspaceUpParams,
+    WorkspaceList,
 };
 use relay_proto::rule::{Rule, RuleKind, RuleStatus};
-use relay_proto::schedule::GLOBAL_SCOPE;
 use relay_proto::types::{Cause, Event as LedgerEvent, Mark, Run, RunKind, RunState};
 use rows::{Names, Row, fit, short_path};
 use rules::RuleRow;
@@ -751,19 +750,21 @@ impl App {
     }
 
     fn new_run_form(&mut self) {
-        self.mode = Mode::Form(Box::new(Form::run(&self.folder_here())));
+        let form = Form::run(&self.folder_here()).with_folders(&self.names.paths());
+        self.mode = Mode::Form(Box::new(form));
     }
 
     fn new_rule_form(&mut self) {
         let folder = self.folder_here();
         let yours =
             self.view == View::Rules && self.rules_scope.is_none() && self.rule_here().is_none_or(Rule::is_global);
-        self.mode = Mode::Form(Box::new(Form::rule((!yours).then_some(folder.as_path()), &folder)));
+        let form = Form::rule((!yours).then_some(folder.as_path()), &folder).with_folders(&self.names.paths());
+        self.mode = Mode::Form(Box::new(form));
     }
 
     fn edit_rule_form(&mut self) {
         if let Some(r) = self.rule_here() {
-            self.mode = Mode::Form(Box::new(Form::edit(r)));
+            self.mode = Mode::Form(Box::new(Form::edit(r).with_folders(&self.names.paths())));
         }
     }
 
@@ -830,53 +831,13 @@ impl App {
     /// A rule from the form into its file, then loaded and, since this is
     /// your keystroke, on. A folder new to Relay is registered on the way.
     async fn save_rule(&mut self, d: form::RuleDraft, was: Option<&form::Editing>) -> Result<()> {
-        let file = rulefile::file(&self.home, d.kind, d.folder.as_deref());
-        let text = std::fs::read_to_string(&file).unwrap_or_default();
-        let new = rulefile::upsert(&text, rulefile::top(d.kind), &d.name, &d.body)?;
-        if let Some(dir) = file.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
-        std::fs::write(&file, new)?;
-        // Renamed, moved, or a schedule made a reaction: the old block goes.
-        let scope = d.scope();
-        if let Some(e) = was
-            && (e.kind, e.scope.as_str(), e.name.as_str()) != (d.kind, scope.as_str(), d.name.as_str())
-        {
-            let folder = (e.scope != GLOBAL_SCOPE).then(|| PathBuf::from(&e.scope));
-            let old = rulefile::file(&self.home, e.kind, folder.as_deref());
-            if let Ok(t) = std::fs::read_to_string(&old)
-                && let Some(t) = rulefile::remove(&t, rulefile::top(e.kind), &e.name)
-            {
-                std::fs::write(&old, t)?;
-            }
-        }
-        let known = d.folder.as_deref().is_none_or(|f| self.names.registered(f).is_some());
-        if !known {
-            let path = d.folder.clone().unwrap_or_default();
-            self.rpc
-                .call::<WorkspaceUp>(WorkspaceUpParams { path, approve: true })
-                .await?;
-        } else {
-            match d.kind {
-                RuleKind::Schedule => {
-                    self.rpc.call::<ScheduleReload>(()).await?;
-                }
-                RuleKind::Reaction => {
-                    self.rpc.call::<ReactionReload>(()).await?;
-                }
-            }
-            self.rpc
-                .call::<RuleApprove>(RuleRef {
-                    name: d.name.clone(),
-                    scope: Some(scope.clone()),
-                    kind: Some(d.kind),
-                })
-                .await?;
-        }
+        let registered = d.folder.as_deref().is_none_or(|f| self.names.registered(f).is_some());
+        let was = was.map(form::Editing::was);
+        let file = rulefile::install(&self.home, &mut self.rpc, &d, was.as_ref(), registered).await?;
         self.say(format!("{} on · {}", d.name, short_path(&file)));
         self.refresh().await;
         if self.view == View::Rules {
-            self.select(Some(format!("{}:{}/{}", d.kind, scope, d.name)));
+            self.select(Some(format!("{}:{}/{}", d.kind, d.scope(), d.name)));
         }
         Ok(())
     }
@@ -1482,13 +1443,17 @@ impl App {
             Mode::Fire(n) => return format!("run {} now? y / any key", n.name),
             Mode::Mark(id) => return format!("mark {}: d done · b blocked · w working · esc", title_of(id)),
             Mode::Filter(buf) => return format!("/{buf}▏  enter apply · esc clear"),
-            Mode::Form(_) => {
+            Mode::Form(f) => {
                 if let Some((m, at)) = &self.flash
                     && at.elapsed() < FLASH
                 {
                     return m.clone();
                 }
-                return "enter save · tab next field · esc cancel".into();
+                return if f.on_folders() {
+                    "↑↓ another folder · type a new one · tab next field · enter save · esc cancel".into()
+                } else {
+                    "enter save · tab next field · esc cancel".into()
+                };
             }
             Mode::Normal => {}
         }
