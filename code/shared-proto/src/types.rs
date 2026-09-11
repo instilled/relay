@@ -129,6 +129,8 @@ pub enum Cause {
         step: String,
     },
     Reaction(String),
+    /// A job Relay handed to an agent (`assistant:interpret`).
+    Assistant(String),
 }
 
 impl std::fmt::Display for Cause {
@@ -139,6 +141,7 @@ impl std::fmt::Display for Cause {
             Cause::Decision(id) => write!(f, "decision:{id}"),
             Cause::Workflow { name, step } => write!(f, "workflow:{name}/{step}"),
             Cause::Reaction(n) => write!(f, "reaction:{n}"),
+            Cause::Assistant(job) => write!(f, "assistant:{job}"),
         }
     }
 }
@@ -157,6 +160,7 @@ impl std::str::FromStr for Cause {
             "schedule" => Cause::Schedule(rest.into()),
             "decision" => Cause::Decision(rest.into()),
             "reaction" => Cause::Reaction(rest.into()),
+            "assistant" => Cause::Assistant(rest.into()),
             "workflow" => {
                 let (name, step) = rest.split_once('/').ok_or_else(|| format!("bad cause `{s}`"))?;
                 Cause::Workflow {

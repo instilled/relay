@@ -27,7 +27,7 @@ pub const SEED: &str = "\
 # `rl config` shows what this resolves to; `rl config edit` opens this file.
 #
 # assistants:            # the agents Relay itself calls on, by job
-#   interpret: claude    # what you type at n / e in plain words -> a draft for your enter
+#   interpret: claude    # what you type at a / rl interpret in plain words -> a draft for your enter
 #   # or, with a model and extra arguments:
 #   # interpret: { agent: claude, model: claude-haiku-4-5-20251001, args: [\"--max-turns\", \"1\"] }
 #

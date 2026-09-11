@@ -1,0 +1,20 @@
+#!/bin/sh
+# A stand-in for an agent CLI in tests: `fake-agent --headless <prompt>`
+# answers with a draft, the way an interpreter would.
+#
+#   FAKE_AGENT_ANSWER   a file whose contents are the answer (default: a run
+#                       in the current folder that echoes "drafted")
+#   FAKE_AGENT_PROMPT   a file the prompt (the last argument) is written to
+#   FAKE_AGENT_SLEEP    seconds to dawdle first (for the timeout)
+for last; do :; done
+if [ -n "$FAKE_AGENT_PROMPT" ]; then
+  printf '%s\n' "$last" > "$FAKE_AGENT_PROMPT"
+fi
+if [ -n "$FAKE_AGENT_SLEEP" ]; then
+  sleep "$FAKE_AGENT_SLEEP"
+fi
+if [ -n "$FAKE_AGENT_ANSWER" ] && [ -f "$FAKE_AGENT_ANSWER" ]; then
+  cat "$FAKE_AGENT_ANSWER"
+else
+  printf 'Here is a draft:\n```yaml\nkind: run\nin: %s\nrun: echo drafted\ntitle: drafted\n```\n' "$PWD"
+fi

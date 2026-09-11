@@ -100,6 +100,11 @@ pub fn register(r: &mut Router<Daemon>) {
             .map_err(|e| RpcError::internal(format!("{e:#}")))
     });
     r.register::<AgentList, _, _>(|d, ()| async move { Ok(crate::config::agents(&d.registry)) });
+    r.register::<AssistantRun, _, _>(|d, p: AssistantParams| async move {
+        crate::assistant::run(&d, p)
+            .await
+            .map_err(|e| RpcError::invalid_params(format!("{e:#}")))
+    });
     r.register::<GcRun, _, _>(|d, p: GcParams| async move {
         let retention = d
             .config

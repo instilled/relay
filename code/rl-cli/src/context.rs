@@ -3,8 +3,89 @@
 //! fields, `rl --help` — so it cannot drift from what Relay does; the prose
 //! around it is here, in one place. `rl context` prints it.
 
+use crate::client::Client;
+use anyhow::Result;
+use relay_core::display_path;
+use relay_proto::methods::{AgentList, RuleList, ScheduleFilter, WorkspaceList};
+use relay_proto::rule::Rule;
 use relay_proto::types::event_kind;
 use std::fmt::Write;
+use std::path::Path;
+use std::sync::OnceLock;
+
+/// `rl --help` and the help of the commands a draft becomes, rendered by the
+/// binary at start (only `main` has the clap definitions).
+static HELP: OnceLock<String> = OnceLock::new();
+
+pub fn set_help(text: String) {
+    let _ = HELP.set(text);
+}
+
+pub fn help() -> &'static str {
+    HELP.get().map(String::as_str).unwrap_or("rl --help")
+}
+
+/// What is true in `folder`, from the daemon: its name, the folders Relay
+/// knows, its rules and the person's own, the agents on this machine.
+pub async fn gather(rpc: &mut Client, folder: &Path) -> Result<Here> {
+    let workspaces = rpc.call::<WorkspaceList>(()).await?;
+    let rules = rpc.call::<RuleList>(ScheduleFilter { all: false }).await?;
+    let agents = rpc.call::<AgentList>(()).await?;
+    let name = workspaces.iter().find(|w| w.path == folder).map(|w| w.name.clone());
+    let scope_word = |r: &Rule| -> String {
+        if r.is_global() {
+            "yours".into()
+        } else {
+            workspaces
+                .iter()
+                .find(|w| w.path.as_os_str() == r.scope())
+                .map(|w| w.name.clone())
+                .unwrap_or_else(|| display_path(Path::new(r.scope())))
+        }
+    };
+    Ok(Here {
+        folder: display_path(folder),
+        name,
+        folders: workspaces
+            .iter()
+            .map(|w| (display_path(&w.path), w.name.clone()))
+            .collect(),
+        rules: rules
+            .iter()
+            .filter(|r| r.is_global() || Path::new(r.scope()) == folder)
+            .map(|r| {
+                (
+                    scope_word(r),
+                    r.kind().to_string(),
+                    r.name().to_string(),
+                    r.when(),
+                    r.does(),
+                )
+            })
+            .collect(),
+        agents: agents
+            .iter()
+            .filter(|a| a.available())
+            .map(|a| a.name.clone())
+            .collect(),
+    })
+}
+
+/// The pack, then what is being asked: the rule being edited, as it is,
+/// when there is one; then the words. `editing` is (kind, whose).
+pub fn ask(pack: &str, words: &str, editing: Option<&(String, String)>, yaml: Option<&str>) -> String {
+    let mut s = String::from(pack);
+    if let (Some((kind, whose)), Some(yaml)) = (editing, yaml) {
+        let _ = write!(
+            s,
+            "\n## Editing\n\nThe words are about this {kind} ({whose}), as it stands. Answer with the whole \
+{kind} as it should be afterwards — every field, changed or not — with `kind: {kind}` first and \
+`in` as it is.\n\n```yaml\n{yaml}\n```\n"
+        );
+    }
+    let _ = write!(s, "\n## The words\n\n{words}\n");
+    s
+}
 
 /// What is true where the words were typed.
 #[derive(Debug, Clone, Default)]

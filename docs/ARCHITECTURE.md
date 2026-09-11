@@ -231,8 +231,14 @@ approves it — your keystroke is the yes; a folder new to Relay is registered o
 rule, or on a job row, is the same form filled in; saving rewrites only that block and keeps what
 the form does not show (`env`, `where`, `ask`), and a rename or a move takes the old block out.
 `E` opens the file in `$EDITOR` at the rule's line and reloads on return — an edit made there is
-a file change, so it waits for `y` like any other. Nothing is remembered between openings except
-presence: leaving the panel is what `rl since` counts from.
+a file change, so it waits for `y` like any other. `a` is the same form, drafted for you: a line
+for plain words (`run the tests every night and tell me if they fail`), and `enter` hands them
+with the context pack to `assistants.interpret` (§6) as a run of its own — it appears in the list
+like any other, `x` there stops it — while the panel stays yours. What comes back fills the form
+(`new run`, `new rule`, or the rule you were on when you pressed `a` in the rules view, with what
+the words changed), and your `enter` is what does it; the assistant never starts anything.
+Nothing is remembered between openings except presence: leaving the panel is what `rl since`
+counts from.
 
 ---
 
@@ -287,7 +293,7 @@ each event row at write time so the digest groups without a join.
 ## 6. What starts a run
 
 Every run says why it is there. `Run.cause` is one string — `manual`, `schedule:<name>`,
-`decision:<id>`, and later `reaction:<name>` and `workflow:<name>/<step>` — and `Run.flow` is
+`decision:<id>`, `reaction:<name>`, `assistant:<job>`, and later `workflow:<name>/<step>` — and `Run.flow` is
 the chain it belongs to: its own id when it starts one, the flow it was handed otherwise. A
 nightly schedule that asks a question whose answer opens a pull request is three rows and one
 flow.
@@ -382,7 +388,7 @@ name or a map:
 
 ```yaml
 assistants:
-  interpret: claude     # what you type at n / e / rl "…" in plain words → a draft for your enter
+  interpret: claude     # what you type at a / rl interpret "…" in plain words → a draft for your enter
   # interpret: { agent: claude, model: claude-haiku-4-5-20251001, args: ["--max-turns", "1"] }
 ```
 
@@ -404,8 +410,25 @@ the specs must be explained, or a test fails), the placeholders a reaction can u
 --help` plus the help of `run`, `every`, `on` and `ask`, what is here (the folder and its
 name, the folders Relay knows, this folder's and the person's rules, the agents on this
 machine), and the answer contract: exactly one YAML document, `kind: run | schedule |
-reaction` then the form's fields. The interpreter, next, hands this and the typed words to
-`assistants.interpret` and shows what comes back in the form.
+reaction` then the form's fields.
+
+**The interpreter** is that pack, the typed words and an ordinary run. `a` in the panel and
+`rl interpret <words…> [--in <folder>] [--go]` build the pack on the client (it needs clap's
+help, which only `rl` has) and call `assistant.run`; `rld` resolves `assistants.interpret`,
+starts the agent headless with the prompt as its last argument (`rl-daemon/src/assistant.rs`:
+`cause: assistant:interpret`, tag `relay:assistant`, cwd the folder asked about, no tty), waits
+for it to end — 60 s, then it is stopped and the caller told so — and returns the run's id and
+what it wrote. The client reads the last `kind:` block out of that by hand (`rl-cli/src/
+interpret.rs`: fences and prose around it dropped, `key: value` lines, block and flow lists; not
+a YAML parser, because an agent writes `run: claude fix it: now` and means it) and fills the
+form. In the panel that is the form of `n`/`N`/`e` with the assistant's answer in it and a line
+saying who drafted it; `rl interpret` prints the draft with `# by <agent> · run <id>` and does
+nothing, or with `--go` starts the run or writes the rule on the line, `cause: manual`, since the
+go was yours. When the words are about a rule (`a` on it in the rules view), the prompt carries
+the rule as it stands and asks for the whole rule as it should be. An answer without a `kind:`
+is an error that quotes what the agent said. Interpretation is a run, so it is in the list, in
+`rl ls --all`, in the journal, and under retention like everything else; nothing about it is
+special except its cause.
 
 Relay still talks to no one itself. A question surfaces in `rl decisions`, in `rl since` and at
 the top of the panel, where a number key answers it; getting it to Slack or mail is a reaction on
@@ -468,7 +491,7 @@ phasing.
 
 - **Workflows** — `workflows/<name>.yaml`, steps with `after`/`when` and decision steps, as
   declarative sugar over the engine that reactions and decisions already are. `Run.cause` and
-  `Run.flow` carry `manual`, `schedule:<name>`, `decision:<id>` and `reaction:<name>` today;
+  `Run.flow` carry `manual`, `schedule:<name>`, `decision:<id>`, `reaction:<name>` and `assistant:<job>` today;
   `workflow:` is reserved. `rl up` loads a folder's `schedules.yaml` and `reactions.yaml`;
   `workflows/` is not read yet.
 - **Plugins** — `rl-plugin-host` (Bun), the broker, `relay.d.ts`, the manifest/approval flow,
