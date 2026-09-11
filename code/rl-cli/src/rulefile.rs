@@ -1,0 +1,324 @@
+//! Writing one rule into a `schedules.yaml` or `reactions.yaml` without
+//! touching the rest of it. The file is the user's: comments, order and
+//! spacing around other rules stay as they were. A rule is a block under the
+//! top key (`schedules:` or `reactions:`), found by its name; putting one in
+//! replaces the block of that name or adds one at the end of the mapping.
+
+use anyhow::{Context, Result, bail};
+use relay_proto::rule::RuleKind;
+use std::path::Path;
+
+/// The top key a kind's rules live under.
+pub fn top(kind: RuleKind) -> &'static str {
+    match kind {
+        RuleKind::Schedule => "schedules",
+        RuleKind::Reaction => "reactions",
+    }
+}
+
+/// The file a kind's rules are in: yours in the home, a folder's in `.relay/`.
+pub fn file(home: &relay_core::Home, kind: RuleKind, folder: Option<&Path>) -> std::path::PathBuf {
+    let name = format!("{}.yaml", top(kind));
+    match folder {
+        Some(f) => f.join(relay_proto::schedule::WORKSPACE_DIR).join(name),
+        None => home.path().join(name),
+    }
+}
+
+/// A rule name: letters, digits, `.`, `_` and `-`.
+pub fn check_name(name: &str) -> Result<()> {
+    if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || "._-".contains(c)) {
+        bail!("a name is letters, digits, `.`, `_` and `-`");
+    }
+    Ok(())
+}
+
+/// A rule's body as lines, from its spec: what differs from the default,
+/// in the order the fields are declared, the way `serde` writes YAML.
+pub fn body<T: serde::Serialize>(spec: &T, default: &T) -> Result<Vec<String>> {
+    let mut v = serde_norway::to_value(spec)?;
+    let d = serde_norway::to_value(default)?;
+    if let (serde_norway::Value::Mapping(m), serde_norway::Value::Mapping(dm)) = (&mut v, &d) {
+        m.retain(|k, val| dm.get(k) != Some(val));
+    }
+    let text = serde_norway::to_string(&v)?;
+    Ok(text.lines().map(str::to_string).collect())
+}
+
+/// Puts `name` with `body` (lines, unindented) into `text` under `top`:
+/// replacing the block of that name, or adding one at the end of the mapping.
+/// Everything else in the file stays as it was. The result is checked to
+/// parse and to carry the rule.
+pub fn upsert(text: &str, top: &str, name: &str, body: &[String]) -> Result<String> {
+    let lines: Vec<&str> = text.lines().collect();
+    let map = mapping(&lines, top);
+    let indent = map
+        .as_ref()
+        .and_then(|m| m.indent.clone())
+        .unwrap_or_else(|| "  ".to_string());
+    let block = |indent: &str| -> Vec<String> {
+        let mut b = vec![format!("{indent}{name}:")];
+        b.extend(body.iter().map(|l| format!("{indent}{indent}{l}")));
+        b
+    };
+    let mut out: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
+    match map {
+        None => {
+            // No mapping yet: one at the end of the file.
+            if out.iter().any(|l| !l.trim().is_empty()) {
+                out.push(String::new());
+            }
+            out.push(format!("{top}:"));
+            out.extend(block("  "));
+        }
+        Some(m) if m.empty => {
+            out.splice(
+                m.start..m.start + 1,
+                std::iter::once(format!("{top}:")).chain(block("  ")),
+            );
+        }
+        Some(m) => match m.block(name) {
+            Some((from, to)) => {
+                out.splice(from..to, block(&indent));
+            }
+            None => {
+                // After the last line of the mapping that says something.
+                let at = (m.start + 1..m.end)
+                    .rev()
+                    .find(|&i| !lines[i].trim().is_empty() && !lines[i].trim_start().starts_with('#'))
+                    .map(|i| i + 1)
+                    .unwrap_or(m.start + 1);
+                out.splice(at..at, block(&indent));
+            }
+        },
+    }
+    let mut result = out.join("\n");
+    result.push('\n');
+    let v: serde_norway::Value = serde_norway::from_str(&result).context("the file would not parse")?;
+    if v.get(top).and_then(|m| m.get(name)).is_none() {
+        bail!("`{name}` did not land under `{top}:`");
+    }
+    Ok(result)
+}
+
+/// Takes `name` out from under `top`; nothing else changes. Ok(None) when it
+/// was not there.
+pub fn remove(text: &str, top: &str, name: &str) -> Option<String> {
+    let lines: Vec<&str> = text.lines().collect();
+    let (from, to) = mapping(&lines, top)?.block(name)?;
+    let mut out: Vec<&str> = lines[..from].to_vec();
+    out.extend_from_slice(&lines[to..]);
+    let mut s = out.join("\n");
+    s.push('\n');
+    Some(s)
+}
+
+/// The line (1-based) `name` is written on, for an editor.
+pub fn line_of(text: &str, top: &str, name: &str) -> Option<usize> {
+    let lines: Vec<&str> = text.lines().collect();
+    mapping(&lines, top)?.block(name).map(|(from, _)| from + 1)
+}
+
+/// The lines of the `top:` mapping, from its key line to the next thing at
+/// column zero.
+struct Mapping<'a> {
+    lines: &'a [&'a str],
+    /// The `top:` line.
+    start: usize,
+    /// One past the last line of the mapping.
+    end: usize,
+    /// `top: {}`.
+    empty: bool,
+    /// The indent its keys use, when it has any.
+    indent: Option<String>,
+}
+
+fn mapping<'a>(lines: &'a [&'a str], top: &str) -> Option<Mapping<'a>> {
+    let start = lines.iter().position(|l| {
+        let l = l.trim_end();
+        l == format!("{top}:") || l.starts_with(&format!("{top}: ")) || l.starts_with(&format!("{top}:#"))
+    })?;
+    let rest = lines[start].trim_end()[top.len() + 1..].trim();
+    let empty = rest.starts_with("{}");
+    let end = (start + 1..lines.len())
+        .find(|&i| {
+            let l = lines[i];
+            !l.is_empty() && !l.starts_with([' ', '\t', '#'])
+        })
+        .unwrap_or(lines.len());
+    let indent = (start + 1..end)
+        .map(|i| lines[i])
+        .find(|l| !l.trim().is_empty() && !l.trim_start().starts_with('#'))
+        .map(|l| l[..l.len() - l.trim_start().len()].to_string());
+    Some(Mapping {
+        lines,
+        start,
+        end,
+        empty,
+        indent,
+    })
+}
+
+impl Mapping<'_> {
+    /// The lines `[from, to)` of the block named `name`.
+    fn block(&self, name: &str) -> Option<(usize, usize)> {
+        let indent = self.indent.as_deref()?;
+        let key = format!("{indent}{name}:");
+        let from = (self.start + 1..self.end).find(|&i| {
+            let l = self.lines[i].trim_end();
+            l == key || l.starts_with(&format!("{key} ")) || l.starts_with(&format!("{key}#"))
+        })?;
+        let to = (from + 1..self.end)
+            .find(|&i| {
+                let l = self.lines[i];
+                let lead = l.len() - l.trim_start().len();
+                !l.trim().is_empty() && !l.trim_start().starts_with('#') && lead <= indent.len()
+            })
+            .unwrap_or(self.end);
+        // Blank lines and comments right before the next key belong to it.
+        let to = (from + 1..to)
+            .rev()
+            .find(|&i| !self.lines[i].trim().is_empty() && !self.lines[i].trim_start().starts_with('#'))
+            .map(|i| i + 1)
+            .unwrap_or(from + 1);
+        Some((from, to))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const FILE: &str = "\
+# my rules
+schedules:
+  # the nightly one
+  nightly:
+    every: 4h
+    run: make test
+
+  backup:
+    cron: \"0 2 * * *\"
+    run: ./backup.sh
+";
+
+    #[test]
+    fn a_rule_goes_in_after_the_others_and_comments_stay() {
+        let body = vec!["every: 30m".to_string(), "run: make lint".to_string()];
+        let out = upsert(FILE, "schedules", "lint", &body).unwrap();
+        assert_eq!(
+            out,
+            "\
+# my rules
+schedules:
+  # the nightly one
+  nightly:
+    every: 4h
+    run: make test
+
+  backup:
+    cron: \"0 2 * * *\"
+    run: ./backup.sh
+  lint:
+    every: 30m
+    run: make lint
+"
+        );
+        assert_eq!(line_of(&out, "schedules", "lint"), Some(11));
+        assert_eq!(line_of(&out, "schedules", "nightly"), Some(4));
+    }
+
+    #[test]
+    fn a_rule_of_the_same_name_is_replaced_in_place() {
+        let body = vec![
+            "every: 6h".to_string(),
+            "run: make test".to_string(),
+            "title: nightly".to_string(),
+        ];
+        let out = upsert(FILE, "schedules", "nightly", &body).unwrap();
+        assert_eq!(
+            out,
+            "\
+# my rules
+schedules:
+  # the nightly one
+  nightly:
+    every: 6h
+    run: make test
+    title: nightly
+
+  backup:
+    cron: \"0 2 * * *\"
+    run: ./backup.sh
+"
+        );
+        let gone = remove(&out, "schedules", "nightly").unwrap();
+        assert!(!gone.contains("nightly:") && gone.contains("backup:"), "{gone}");
+        assert!(remove(&out, "schedules", "nope").is_none());
+    }
+
+    #[test]
+    fn an_empty_or_missing_file_gets_the_mapping() {
+        let body = vec!["on: run.failed".to_string(), "run: say no".to_string()];
+        assert_eq!(
+            upsert("", "reactions", "notify", &body).unwrap(),
+            "reactions:\n  notify:\n    on: run.failed\n    run: say no\n"
+        );
+        assert_eq!(
+            upsert("# nothing yet\nreactions: {}\n", "reactions", "notify", &body).unwrap(),
+            "# nothing yet\nreactions:\n  notify:\n    on: run.failed\n    run: say no\n"
+        );
+        // Another top key already there: the mapping goes after it.
+        let out = upsert("other: 1\n", "reactions", "notify", &body).unwrap();
+        assert_eq!(
+            out,
+            "other: 1\n\nreactions:\n  notify:\n    on: run.failed\n    run: say no\n"
+        );
+    }
+
+    #[test]
+    fn the_files_own_indent_is_kept() {
+        let text = "schedules:\n    wide:\n        every: 1h\n        run: a\n";
+        let body = vec!["every: 2h".to_string(), "run: b".to_string()];
+        let out = upsert(text, "schedules", "two", &body).unwrap();
+        assert_eq!(
+            out,
+            "schedules:\n    wide:\n        every: 1h\n        run: a\n    two:\n        every: 2h\n        run: b\n"
+        );
+    }
+
+    #[test]
+    fn a_body_says_only_what_differs_and_reads_back() {
+        use relay_proto::action::Task;
+        use relay_proto::schedule::ScheduleSpec;
+        let spec = ScheduleSpec {
+            cron: Some("0 2 * * *".into()),
+            run: Some(Task::Agent {
+                agent: "claude".into(),
+                prompt: Some("fix the build: it's red".into()),
+                prompt_file: None,
+                args: vec![],
+            }),
+            tags: vec!["nightly".into()],
+            title: Some("night".into()),
+            ..Default::default()
+        };
+        let body = body(&spec, &ScheduleSpec::default()).unwrap();
+        assert_eq!(
+            body,
+            [
+                "cron: 0 2 * * *",
+                "run:",
+                "  agent: claude",
+                "  prompt: 'fix the build: it''s red'",
+                "tags:",
+                "- nightly",
+                "title: night"
+            ]
+        );
+        let out = upsert("", "schedules", "night", &body).unwrap();
+        let v: serde_norway::Value = serde_norway::from_str(&out).unwrap();
+        let back: ScheduleSpec = serde_norway::from_value(v["schedules"]["night"].clone()).unwrap();
+        assert_eq!(back, spec);
+    }
+}
