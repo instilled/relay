@@ -2,7 +2,8 @@
 //! and the keys that answer it. Pure — takes what the daemon said, gives
 //! lines.
 
-use super::rows::{Names, asked_by, cause_words};
+use super::rows::{Job, Names, asked_by, cause_words};
+use super::rules;
 use crate::render::{fmt_clock, state_label};
 use jiff::Timestamp;
 use ratatui::style::{Color, Modifier, Style, Stylize};
@@ -10,6 +11,7 @@ use ratatui::text::{Line, Span};
 use relay_core::time::{fmt_age, fmt_duration};
 use relay_proto::decision::Decision;
 use relay_proto::methods::DigestItem;
+use relay_proto::rule::Rule;
 use relay_proto::types::{Event, Run, RunState};
 
 /// How many events a run's pane lists.
@@ -113,6 +115,76 @@ pub fn run_lines(item: &DigestItem, events: &[Event], names: &Names, now: Timest
             Span::raw(format!("{:<14} ", e.kind.trim_start_matches("run."))),
             Span::raw(e.summary.clone()),
         ]));
+    }
+    lines
+}
+
+/// How many of a job's runs the pane lists, and how many marks it draws.
+const JOB_RUNS: usize = 10;
+const JOB_MARKS: usize = 40;
+
+/// A job: the rule behind it when known, then how it has been going.
+pub fn job_lines(j: &Job, rule: Option<&Rule>, names: &Names, now: Timestamp) -> Vec<Line<'static>> {
+    let mut lines = match rule {
+        Some(r) => {
+            let mut l = rules::lines(r, names, now, Some(&j.last().run.title));
+            l.push(Line::raw(""));
+            l
+        }
+        None => vec![
+            Line::from(vec![
+                Span::raw(format!(" {}", j.name)).bold(),
+                Span::raw(format!("  {} · not in any file now", j.kind)).dim(),
+            ]),
+            Line::raw(""),
+        ],
+    };
+    let (ok, failed, stopped) = (j.ok(), j.failed(), j.stopped());
+    let mut tally = vec![format!(
+        "{} run{}",
+        j.runs.len(),
+        if j.runs.len() == 1 { "" } else { "s" }
+    )];
+    if ok > 0 {
+        tally.push(format!("{ok} ok"));
+    }
+    if failed > 0 {
+        tally.push(format!("{failed} failed"));
+    }
+    if stopped > 0 {
+        tally.push(format!("{stopped} stopped"));
+    }
+    lines.push(Line::from(vec![
+        Span::raw(" lately   ").dim(),
+        Span::raw(tally.join(" · ")),
+    ]));
+    let marks = j.marks(JOB_MARKS);
+    let spans: Vec<Span> = marks
+        .chars()
+        .map(|c| match c {
+            '×' => Span::raw("×").red().bold(),
+            '○' => Span::raw("○").dim(),
+            _ => Span::raw("·"),
+        })
+        .collect();
+    let mut row = vec![Span::raw("          ")];
+    row.extend(spans);
+    lines.push(Line::from(row));
+    lines.push(Line::raw(""));
+    for i in j.runs.iter().take(JOB_RUNS) {
+        lines.push(Line::from(vec![
+            Span::raw(format!(" {}  ", fmt_clock(i.at, now))).dim(),
+            Span::styled(
+                format!("{:<8}", state_label(i.run.state, i.run.confidence)),
+                state_style(i.run.state),
+            ),
+            Span::raw(format!(" {}", i.summary)),
+        ]));
+    }
+    if j.runs.len() > JOB_RUNS {
+        lines.push(Line::from(
+            Span::raw(format!("   … {} more", j.runs.len() - JOB_RUNS)).dim(),
+        ));
     }
     lines
 }
