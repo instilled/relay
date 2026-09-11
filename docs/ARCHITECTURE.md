@@ -347,7 +347,11 @@ was down does not come back and fire a day of history.
 
 `rl on run.failed -- notify "{summary}"` appends a rule to your own file and reloads; the file
 stays yours, comments and all. `rl react test <event>` replays one real event through every rule
-and prints what each would do, and why it would not.
+and prints what each would do, and why it would not. `rl every 30m -- make test` (a cron line in quotes works too; `--agent claude -- <prompt>`,
+`--in <folder>`, `--global`, `--cwd`, `--title`, `--tag`, `--name`, `--replace`) writes a schedule into
+this folder's `.relay/schedules.yaml` — or yours with `--global` — through `rulefile.rs`, registers
+a folder new to Relay, reloads and approves it: the command line is the yes. A name already
+there is refused unless `--replace`.
 
 **Rules** is how both are shown: `rule.list` returns every schedule and reaction as one
 `Rule` (`relay-proto/src/rule.rs`, a tagged enum over the two rows with one set of accessors —

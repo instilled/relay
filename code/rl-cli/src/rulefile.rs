@@ -4,9 +4,95 @@
 //! top key (`schedules:` or `reactions:`), found by its name; putting one in
 //! replaces the block of that name or adds one at the end of the mapping.
 
+use crate::client::Client;
 use anyhow::{Context, Result, bail};
+use relay_proto::methods::{ReactionReload, RuleApprove, RuleRef, ScheduleReload, WorkspaceUp, WorkspaceUpParams};
 use relay_proto::rule::RuleKind;
-use std::path::Path;
+use relay_proto::schedule::GLOBAL_SCOPE;
+use std::path::{Path, PathBuf};
+
+/// A rule to write down: which file, and its block.
+#[derive(Debug)]
+pub struct RuleDraft {
+    pub kind: RuleKind,
+    /// The folder whose `.relay/` it goes in; none for yours.
+    pub folder: Option<PathBuf>,
+    pub name: String,
+    pub body: Vec<String>,
+}
+
+impl RuleDraft {
+    pub fn scope(&self) -> String {
+        match &self.folder {
+            Some(f) => f.to_string_lossy().into_owned(),
+            None => GLOBAL_SCOPE.into(),
+        }
+    }
+}
+
+/// The rule a draft replaces, when it is an edit: a rename or a move takes
+/// the old block out.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Was {
+    pub kind: RuleKind,
+    pub scope: String,
+    pub name: String,
+}
+
+/// Writes the draft into its file, then makes it so: a folder new to Relay
+/// is registered (and its rules approved, this being the user's yes);
+/// otherwise the kind is reloaded and this one rule approved. Returns the
+/// file. `registered` says whether the folder is known to the daemon.
+pub async fn install(
+    home: &relay_core::Home,
+    rpc: &mut Client,
+    d: &RuleDraft,
+    was: Option<&Was>,
+    registered: bool,
+) -> Result<PathBuf> {
+    let file = file(home, d.kind, d.folder.as_deref());
+    let text = std::fs::read_to_string(&file).unwrap_or_default();
+    let new = upsert(&text, top(d.kind), &d.name, &d.body)?;
+    if let Some(dir) = file.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(&file, new).with_context(|| format!("writing {}", file.display()))?;
+    let scope = d.scope();
+    if let Some(w) = was
+        && (w.kind, w.scope.as_str(), w.name.as_str()) != (d.kind, scope.as_str(), d.name.as_str())
+    {
+        let folder = (w.scope != GLOBAL_SCOPE).then(|| PathBuf::from(&w.scope));
+        let old = self::file(home, w.kind, folder.as_deref());
+        if let Ok(t) = std::fs::read_to_string(&old)
+            && let Some(t) = remove(&t, top(w.kind), &w.name)
+        {
+            std::fs::write(&old, t)?;
+        }
+    }
+    if let (Some(path), false) = (&d.folder, registered) {
+        rpc.call::<WorkspaceUp>(WorkspaceUpParams {
+            path: path.clone(),
+            approve: true,
+        })
+        .await?;
+    } else {
+        match d.kind {
+            RuleKind::Schedule => {
+                rpc.call::<ScheduleReload>(()).await?;
+            }
+            RuleKind::Reaction => {
+                rpc.call::<ReactionReload>(()).await?;
+            }
+        }
+        rpc.call::<RuleApprove>(RuleRef {
+            name: d.name.clone(),
+            scope: Some(scope),
+            kind: Some(d.kind),
+        })
+        .await?;
+    }
+    Ok(file)
+}
 
 /// The top key a kind's rules live under.
 pub fn top(kind: RuleKind) -> &'static str {
