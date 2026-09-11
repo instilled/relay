@@ -40,6 +40,14 @@ stop_daemon() {
   "$rl" daemon stop >/dev/null 2>&1 || true
 }
 
+# `rl-session` outlives `rld` on purpose (a daemon restart must never cost a
+# run) — so `daemon stop` alone leaves any run still going, working or not,
+# running forever. Everything under this live home is throwaway, so sweep
+# its holders too: they all name themselves on $RELAY_HOME/run/session-*.sock.
+kill_sessions() {
+  pkill -f "$RELAY_HOME/run/session-" >/dev/null 2>&1 || true
+}
+
 case ${1:-} in
   env)
     echo "export RELAY_HOME=$RELAY_HOME"
@@ -48,11 +56,13 @@ case ${1:-} in
 
   stop)
     stop_daemon
+    kill_sessions
     echo "live: daemon stopped"
     ;;
 
   reset)
     stop_daemon
+    kill_sessions
     rm -rf "$live/home" "$live/ws"
     mkdir -p "$live/home"
     cp -R "$seed/ws" "$live/ws"

@@ -4,9 +4,11 @@
 mod common;
 
 use common::{Conn, Harness, fake_cli, wait_journal};
+use nix::sys::signal::{Signal, kill};
+use nix::unistd::Pid;
 use relay_core::Home;
 use relay_ledger::session_io::{self, Direction};
-use relay_ledger::{Ledger, presence};
+use relay_ledger::{Ledger, presence, sessions};
 use relay_proto::rpc::RpcError;
 use relay_proto::types::{Run, RunState};
 use rl_session::proto::{Frame, read_frame, write_frame};
@@ -249,6 +251,7 @@ async fn joiner_resizes_the_pty_and_daemon_stop_detaches() {
     joiner.until("21 77").await;
 
     // The daemon leaving is not the run leaving.
+    let home = h.home.clone();
     h.stop().await;
     let mut said_so = false;
     while let Some(f) = joiner.next().await {
@@ -257,4 +260,13 @@ async fn joiner_resizes_the_pty_and_daemon_stop_detaches() {
         }
     }
     assert!(said_so);
+
+    // Proven: the holder survived. This test has no further use for either
+    // it or the child it was holding — they are not the daemon's to kill, so
+    // reach for them the way `kill -9` would.
+    let ledger = Ledger::open(&home.ledger()).unwrap();
+    let id = run.id.clone();
+    let row = ledger.call_blocking(move |c| sessions::get(c, &id)).unwrap().unwrap();
+    let _ = kill(Pid::from_raw(row.holder_pid as i32), Signal::SIGKILL);
+    let _ = kill(Pid::from_raw(row.pid as i32), Signal::SIGKILL);
 }
