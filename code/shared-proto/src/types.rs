@@ -325,6 +325,27 @@ pub mod event_kind {
     pub const DECISION_DISMISSED: &str = "decision.dismissed";
     pub const DECISION_EXPIRED: &str = "decision.expired";
     pub const PLUGIN_INVOKED: &str = "plugin.invoked";
+
+    /// Every kind above, for anything that lists them.
+    pub const ALL: &[&str] = &[
+        RUN_STARTED,
+        RUN_STATE,
+        RUN_NEEDS_INPUT,
+        RUN_BLOCKED,
+        RUN_RESUMED,
+        RUN_FINISHED,
+        RUN_FAILED,
+        RUN_STOPPED,
+        COMMIT_LANDED,
+        BRANCH_DONE,
+        SCHEDULE_FIRED,
+        SCHEDULE_SKIPPED,
+        DECISION_RAISED,
+        DECISION_TAKEN,
+        DECISION_DISMISSED,
+        DECISION_EXPIRED,
+        PLUGIN_INVOKED,
+    ];
 }
 
 #[cfg(test)]

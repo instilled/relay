@@ -43,9 +43,13 @@ async fn config_is_read_resolved_and_refused_when_wrong() {
         "shells are not agents"
     );
 
-    // No file: defaults, and the first available agent is the interpreter.
+    // A fresh home: the seeded file (all comments) means defaults, and the
+    // first available agent is the interpreter.
     let r: ConfigReport = c.ok("config.get", json!(null)).await;
-    assert!(!r.present && r.errors.is_empty(), "{r:?}");
+    assert!(
+        r.present && r.errors.is_empty() && r.config == Default::default(),
+        "{r:?}"
+    );
     let i = r.interpret.unwrap();
     assert_eq!(
         (i.agent.as_str(), i.source.as_str(), i.available),

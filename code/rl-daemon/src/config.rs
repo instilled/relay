@@ -20,6 +20,28 @@ pub struct Loaded {
     pub error: Option<String>,
 }
 
+/// What a fresh home gets: the shape, all of it commented out, so the file
+/// is there to find and `rl config edit` has something to show.
+pub const SEED: &str = "\
+# Your Relay defaults. Absent keys mean defaults; a key Relay does not know is refused.
+# `rl config` shows what this resolves to; `rl config edit` opens this file.
+#
+# assistants:            # the agents Relay itself calls on, by job
+#   interpret: claude    # what you type at n / e in plain words -> a draft for your enter
+#   # or, with a model and extra arguments:
+#   # interpret: { agent: claude, model: claude-haiku-4-5-20251001, args: [\"--max-turns\", \"1\"] }
+";
+
+/// Writes the seed when there is no file yet. Never touches one that exists.
+pub fn seed(home: &Home) -> Result<bool> {
+    let file = home.config_file();
+    if file.exists() {
+        return Ok(false);
+    }
+    std::fs::write(&file, SEED).with_context(|| format!("writing {}", file.display()))?;
+    Ok(true)
+}
+
 pub fn load(home: &Home) -> Loaded {
     let file = home.config_file();
     match read(&file) {
@@ -213,6 +235,18 @@ mod tests {
             None,
             "nothing installed: no default"
         );
+    }
+
+    #[test]
+    fn the_seed_is_all_comments_and_never_overwrites() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = Home::at(tmp.path());
+        assert!(seed(&home).unwrap());
+        let l = load(&home);
+        assert!(l.present && l.error.is_none() && l.config == Config::default(), "{l:?}");
+        std::fs::write(home.config_file(), "assistants:\n  interpret: codex\n").unwrap();
+        assert!(!seed(&home).unwrap());
+        assert_eq!(load(&home).config.assistants.interpret.unwrap().agent, "codex");
     }
 
     #[test]

@@ -99,6 +99,11 @@ pub async fn serve_with(home: Home, shutdown: CancellationToken, opts: ServeOpti
     let registry2 = registry.clone();
     let registry3 = registry.clone();
     let registry4 = registry.clone();
+    match crate::config::seed(&home) {
+        Ok(true) => info!(file = %home.config_file().display(), "config.yaml seeded"),
+        Ok(false) => {}
+        Err(e) => warn!(error = %format!("{e:#}"), "config.yaml not seeded"),
+    }
     let config = crate::config::load(&home);
     match &config.error {
         Some(e) => warn!(error = %e, "config.yaml not usable; running on defaults"),

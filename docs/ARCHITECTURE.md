@@ -384,7 +384,19 @@ argv: the binary, the headless arguments, the model through the profile's flag, 
 arguments; the prompt goes last. Unset, it is the first available agent; a name the registry
 does not know, or a `model` for a profile without `model_flag`, is an error, never a guess.
 `rl config` prints the resolved assistant and where it came from; `rl config edit` opens the
-file. Later assistants (`summarise`, `triage`, `answer`) will be keys in the same map.
+file, and `rld` seeds it, all comments, when there is none. Later assistants (`summarise`,
+`triage`, `answer`) will be keys in the same map.
+
+**What an assistant is told** is the context pack (`rl-cli/src/context.rs`, `rl ai context
+[--in <folder>]`), built from the code so it cannot drift: the words (run, folder, `yours`,
+rule, job, question, agent, `when`), one line per event kind in `event_kind::ALL` (a kind
+without words fails a test), the fields of a schedule and a reaction (every serde field of
+the specs must be explained, or a test fails), the placeholders a reaction can use, `rl
+--help` plus the help of `run`, `every`, `on` and `ask`, what is here (the folder and its
+name, the folders Relay knows, this folder's and the person's rules, the agents on this
+machine), and the answer contract: exactly one YAML document, `kind: run | schedule |
+reaction` then the form's fields. The interpreter, next, hands this and the typed words to
+`assistants.interpret` and shows what comes back in the form.
 
 Relay still talks to no one itself. A question surfaces in `rl decisions`, in `rl since` and at
 the top of the panel, where a number key answers it; getting it to Slack or mail is a reaction on

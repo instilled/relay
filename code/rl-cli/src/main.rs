@@ -89,6 +89,8 @@ enum Cmd {
     Config(ConfigArgs),
     /// The agent CLIs Relay knows, and which are on this machine.
     Agents,
+    /// What Relay tells an assistant: `rl ai context` prints the pack an interpreter reads.
+    Ai(AiArgs),
     /// Ask a human something and carry on: the question waits until answered.
     Ask(AskArgs),
     /// Questions waiting on you (and, with --all, the answered ones).
@@ -282,6 +284,23 @@ struct EveryArgs {
     /// Rewrite a rule of that name instead of refusing.
     #[arg(long)]
     replace: bool,
+}
+
+#[derive(Args)]
+struct AiArgs {
+    #[command(subcommand)]
+    cmd: AiCmd,
+}
+
+#[derive(Subcommand)]
+enum AiCmd {
+    /// The context pack, as an assistant would read it: words, events, the rule definitions,
+    /// placeholders, this command line, what is here, and the answer it must give.
+    Context {
+        /// The folder the words would be typed in (default: here).
+        #[arg(long = "in", value_name = "FOLDER")]
+        folder: Option<PathBuf>,
+    },
 }
 
 #[derive(Args)]
@@ -503,6 +522,7 @@ async fn main() -> Result<()> {
         Cmd::Every(a) => every(&home, a, cli.json).await,
         Cmd::Config(a) => config(&home, a, cli.json).await,
         Cmd::Agents => agents(&home, cli.json).await,
+        Cmd::Ai(a) => ai(&home, a).await,
         Cmd::Ask(a) => ask(&home, a, cli.json).await,
         Cmd::Decisions(a) => decisions(&home, a, cli.json).await,
         Cmd::Decide(a) => decide(&home, a, cli.json).await,
@@ -1703,6 +1723,73 @@ async fn config(home: &Home, a: ConfigArgs, json: bool) -> Result<()> {
     } else {
         std::process::exit(1)
     }
+}
+
+/// `rl ai context`: the pack, with `rl --help` and every subcommand's help
+/// rendered from this very binary, and what the daemon knows about here.
+async fn ai(home: &Home, a: AiArgs) -> Result<()> {
+    let AiCmd::Context { folder } = a.cmd;
+    let folder = match folder {
+        Some(f) => f,
+        None => std::env::current_dir()?,
+    };
+    let folder = std::fs::canonicalize(&folder).unwrap_or(folder);
+    let mut rpc = Client::connect(home).await?;
+    let workspaces = rpc.call::<WorkspaceList>(()).await?;
+    let rules = rpc.call::<RuleList>(ScheduleFilter { all: false }).await?;
+    let agents = rpc.call::<AgentList>(()).await?;
+    let name = workspaces.iter().find(|w| w.path == folder).map(|w| w.name.clone());
+    let scope_word = |r: &Rule| -> String {
+        if r.is_global() {
+            "yours".into()
+        } else {
+            workspaces
+                .iter()
+                .find(|w| w.path.as_os_str() == r.scope())
+                .map(|w| w.name.clone())
+                .unwrap_or_else(|| display_path(std::path::Path::new(r.scope())))
+        }
+    };
+    let here = rl_cli::context::Here {
+        folder: display_path(&folder),
+        name,
+        folders: workspaces
+            .iter()
+            .map(|w| (display_path(&w.path), w.name.clone()))
+            .collect(),
+        rules: rules
+            .iter()
+            .filter(|r| r.is_global() || std::path::Path::new(r.scope()) == folder)
+            .map(|r| {
+                (
+                    scope_word(r),
+                    r.kind().to_string(),
+                    r.name().to_string(),
+                    r.when(),
+                    r.does(),
+                )
+            })
+            .collect(),
+        agents: agents
+            .iter()
+            .filter(|a| a.available())
+            .map(|a| a.name.clone())
+            .collect(),
+    };
+    // The command list, and the help of the commands a draft would become.
+    // Every command's long help is ten times the rest of the pack, and an
+    // interpreter drafts things, it does not drive the CLI.
+    let mut help = String::new();
+    let mut root = <Cli as clap::CommandFactory>::command();
+    help.push_str(&root.render_long_help().to_string());
+    for sub in root.get_subcommands_mut() {
+        if matches!(sub.get_name(), "run" | "every" | "on" | "ask") {
+            help.push_str("\n---\n");
+            help.push_str(&sub.render_help().to_string());
+        }
+    }
+    print!("{}", rl_cli::context::render(&help, &here));
+    Ok(())
 }
 
 const AGENT_HEADERS: &[&str] = &["AGENT", "BIN", "HEADLESS", "MODEL"];
