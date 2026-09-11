@@ -25,6 +25,7 @@ use relay_proto::schedule::{Schedule, UpReport};
 use relay_proto::types::{AttachMode, Cause, Mark, RunKind, RunState};
 use rl_cli::client::Client;
 use rl_cli::daemon;
+use rl_cli::env::child_env;
 use rl_cli::render;
 use serde_json::json;
 use std::path::PathBuf;
@@ -570,24 +571,6 @@ async fn run(home: &Home, a: RunArgs, json: bool) -> Result<()> {
         println!("{}", run.id);
     }
     Ok(())
-}
-
-/// The run gets this shell's environment, as `nohup` would give it: PATH,
-/// HOME, the keys and settings the CLI expects. `--env` overrides. `RELAY_RUN`
-/// is dropped so a run started from inside another is not mistaken for it.
-fn child_env(extra: &[String]) -> Result<Vec<(String, String)>> {
-    let mut env: Vec<(String, String)> = std::env::vars_os()
-        .filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?)))
-        .filter(|(k, _)| k != "RELAY_RUN")
-        .collect();
-    for kv in extra {
-        let (k, v) = kv
-            .split_once('=')
-            .ok_or_else(|| anyhow::anyhow!("--env expects KEY=VALUE"))?;
-        env.retain(|(e, _)| e != k);
-        env.push((k.to_string(), v.to_string()));
-    }
-    Ok(env)
 }
 
 async fn schedule(home: &Home, cmd: ScheduleCmd, json: bool) -> Result<()> {

@@ -4,10 +4,12 @@
 //! then what is working and what finished — grouped by the folder it belongs
 //! to, whose rules ride the group's header. `enter` is the run's terminal,
 //! full screen and joined, the way you would have it in a tab of your own;
-//! `w` watches it; `i` opens a pane of facts beside the list. Monochrome;
+//! `w` watches it; `i` opens a pane of facts beside the list; `n` is a
+//! form at the foot for a run to start or a rule to write down. Monochrome;
 //! colour only for attention states; the footer is the only chrome (J8).
 //! Nothing on screen is an id.
 
+mod form;
 mod keys;
 mod pane;
 mod rows;
@@ -17,8 +19,10 @@ mod term;
 
 use crate::attach::client_name;
 use crate::client::Client;
+use crate::rulefile;
 use anyhow::Result;
 use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use form::{Act, Form};
 use futures::StreamExt;
 use jiff::Timestamp;
 use pane::state_style;
@@ -33,15 +37,17 @@ use relay_proto::decision::Decision;
 use relay_proto::methods::{
     DecisionDismiss, DecisionNote, DecisionTake, DecisionTakeParams, Digest, DigestGet, DigestItem, DigestParams,
     EventFilter, EventList, PresenceClient, PresenceTouch, ReactionPause, ReactionReload, ReactionResume, RuleApprove,
-    RuleList, RuleRef, RunArchive, RunArchiveParams, RunIds, RunMark, RunMarkParams, RunSeen, RunStop, RunStopParams,
-    ScheduleFilter, ScheduleName, SchedulePause, ScheduleReload, ScheduleResume, ScheduleRun, WorkspaceList,
+    RuleList, RuleRef, RunArchive, RunArchiveParams, RunIds, RunMark, RunMarkParams, RunSeen, RunSpec, RunStart,
+    RunStop, RunStopParams, ScheduleFilter, ScheduleName, SchedulePause, ScheduleReload, ScheduleResume, ScheduleRun,
+    WorkspaceList, WorkspaceUp, WorkspaceUpParams,
 };
 use relay_proto::rule::{Rule, RuleKind, RuleStatus};
-use relay_proto::types::{Event as LedgerEvent, Mark, Run, RunState};
-use rows::{Names, Row, fit};
+use relay_proto::schedule::GLOBAL_SCOPE;
+use relay_proto::types::{Cause, Event as LedgerEvent, Mark, Run, RunKind, RunState};
+use rows::{Names, Row, fit, short_path};
 use rules::RuleRow;
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use term::TermView;
 
@@ -79,6 +85,8 @@ enum Mode {
     Fire(ScheduleName),
     /// `/` pressed: typing a filter.
     Filter(String),
+    /// `n` or `e` pressed: a run or a rule being written down.
+    Form(Box<Form>),
 }
 
 struct App {
@@ -114,6 +122,9 @@ struct App {
     term_size: (u16, u16),
     /// The selected run's recent events.
     events: Vec<LedgerEvent>,
+    /// `E` pressed: the file and line to open in the editor once the
+    /// screen is given back.
+    editor: Option<(PathBuf, usize)>,
     /// Options marked so far on a multi-choice question.
     picked: Vec<usize>,
     mode: Mode,
@@ -179,12 +190,20 @@ struct Areas {
     head: Rect,
     list: Option<Rect>,
     pane: Option<Rect>,
+    /// The form, at the foot of the body.
+    form: Option<Rect>,
     footer: Rect,
 }
 
-fn areas(area: Rect, wide: bool, show_pane: bool) -> Areas {
-    let [head, body, footer] =
-        Layout::vertical([Constraint::Length(1), Constraint::Fill(1), Constraint::Length(1)]).areas(area);
+fn areas(area: Rect, wide: bool, show_pane: bool, form_h: u16) -> Areas {
+    let [head, body, form, footer] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Fill(1),
+        Constraint::Length(if form_h > 0 { form_h + 1 } else { 0 }),
+        Constraint::Length(1),
+    ])
+    .areas(area);
+    let form = (form_h > 0).then_some(form);
     let (list, pane) = if wide {
         (None, Some(body))
     } else if !show_pane {
@@ -204,8 +223,41 @@ fn areas(area: Rect, wide: bool, show_pane: bool) -> Areas {
         head,
         list,
         pane,
+        form,
         footer,
     }
+}
+
+/// `$VISUAL` or `$EDITOR` (else `vi`) on `file` at `line`, on this screen.
+fn edit_in_editor(file: &Path, line: usize) -> Result<()> {
+    let editor = std::env::var("VISUAL")
+        .or_else(|_| std::env::var("EDITOR"))
+        .ok()
+        .filter(|e| !e.trim().is_empty())
+        .unwrap_or_else(|| "vi".into());
+    let mut words = editor.split_whitespace();
+    let bin = words.next().unwrap_or("vi");
+    let mut cmd = std::process::Command::new(bin);
+    cmd.args(words);
+    let base = Path::new(bin).file_name().map(|s| s.to_string_lossy().into_owned());
+    match base.as_deref() {
+        Some("code" | "codium" | "cursor") => {
+            cmd.arg("--wait")
+                .arg("--goto")
+                .arg(format!("{}:{line}", file.display()));
+        }
+        Some("hx" | "subl" | "zed") => {
+            cmd.arg(format!("{}:{line}", file.display()));
+        }
+        _ => {
+            cmd.arg(format!("+{line}")).arg(file);
+        }
+    }
+    let status = cmd.status().map_err(|e| anyhow::anyhow!("{editor}: {e}"))?;
+    if !status.success() {
+        anyhow::bail!("{editor} ended with {status}");
+    }
+    Ok(())
 }
 
 pub async fn run(home: &Home) -> Result<()> {
@@ -237,6 +289,7 @@ pub async fn run(home: &Home) -> Result<()> {
         term: None,
         term_size: (0, 0),
         events: Vec::new(),
+        editor: None,
         picked: Vec::new(),
         mode: Mode::Normal,
         flash: None,
@@ -271,7 +324,21 @@ impl App {
             }
             tokio::select! {
                 ev = input.next() => match ev {
-                    Some(Ok(Event::Key(k))) if k.kind != KeyEventKind::Release => self.key(k, area).await?,
+                    Some(Ok(Event::Key(k))) if k.kind != KeyEventKind::Release => {
+                        self.key(k, area).await?;
+                        if let Some((file, line)) = self.editor.take() {
+                            // The editor gets the terminal; our reader lets go of stdin first.
+                            drop(input);
+                            ratatui::restore();
+                            let outcome = edit_in_editor(&file, line);
+                            *terminal = ratatui::init();
+                            input = EventStream::new();
+                            match outcome {
+                                Ok(()) => self.reload_rules().await,
+                                Err(e) => self.say(format!("{e:#}")),
+                            }
+                        }
+                    }
                     Some(Ok(_)) => {}
                     Some(Err(e)) => return Err(e.into()),
                     None => self.quit = true,
@@ -298,7 +365,7 @@ impl App {
 
     /// The area the terminal draws into.
     fn pane_size(&self, size: Rect) -> (u16, u16) {
-        let a = areas(size, self.wide, true);
+        let a = areas(size, self.wide, true, 0);
         let r = a.pane.unwrap_or(size);
         (r.width.max(1), r.height.max(1))
     }
@@ -418,6 +485,21 @@ impl App {
         self.rules.iter().find(|r| &rules::key(r) == key)
     }
 
+    /// The rule behind a job row.
+    fn rule_of_job(&self, j: &rows::Job) -> Option<&Rule> {
+        self.rules.iter().find(|x| {
+            x.kind() == j.kind
+                && x.name() == j.name
+                && (x.is_global() || Path::new(x.scope()) == j.last().run.workspace)
+        })
+    }
+
+    /// The rule under the cursor: in the rules view, or behind a job row.
+    fn rule_here(&self) -> Option<&Rule> {
+        self.selected_rule()
+            .or_else(|| self.selected_job().and_then(|j| self.rule_of_job(&j)))
+    }
+
     fn run_by_id(&self, id: &str) -> Option<&Run> {
         self.digest.items.iter().map(|i| &i.run).find(|r| r.id == id)
     }
@@ -470,7 +552,7 @@ impl App {
             return;
         };
         self.seen(vec![id.clone()]).await;
-        let a = areas(area, true, true);
+        let a = areas(area, true, true, 0);
         let r = a.pane.unwrap_or(area);
         let size = (r.width.max(1), r.height.max(1));
         match TermView::open(&self.home, &id, size).await {
@@ -653,6 +735,152 @@ impl App {
         }
     }
 
+    // ---- the form ----------------------------------------------------------
+
+    /// Where a new thing would go: the selected row's folder, else here.
+    fn folder_here(&self) -> PathBuf {
+        self.selected_folder()
+            .or_else(|| {
+                self.rule_here()
+                    .filter(|r| !r.is_global())
+                    .map(|r| PathBuf::from(r.scope()))
+            })
+            .or_else(|| self.rules_scope.clone())
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_else(|| PathBuf::from("/"))
+    }
+
+    fn new_run_form(&mut self) {
+        self.mode = Mode::Form(Box::new(Form::run(&self.folder_here())));
+    }
+
+    fn new_rule_form(&mut self) {
+        let folder = self.folder_here();
+        let yours =
+            self.view == View::Rules && self.rules_scope.is_none() && self.rule_here().is_none_or(Rule::is_global);
+        self.mode = Mode::Form(Box::new(Form::rule((!yours).then_some(folder.as_path()), &folder)));
+    }
+
+    fn edit_rule_form(&mut self) {
+        if let Some(r) = self.rule_here() {
+            self.mode = Mode::Form(Box::new(Form::edit(r)));
+        }
+    }
+
+    /// `E`: the rule's file in the editor, at its line, once the screen is free.
+    fn edit_rule_file(&mut self) {
+        if let Some(r) = self.rule_here() {
+            let file = r.source().to_path_buf();
+            let line = std::fs::read_to_string(&file)
+                .ok()
+                .and_then(|t| rulefile::line_of(&t, rulefile::top(r.kind()), r.name()))
+                .unwrap_or(1);
+            self.editor = Some((file, line));
+        }
+    }
+
+    /// `enter` on the form: what it says, or why not — the form stays up then.
+    async fn save_form(&mut self, f: Box<Form>, area: Rect) {
+        let outcome = match f.kind {
+            form::Kind::Run => match form::run_draft(&f) {
+                Ok(d) => self.start_run(d, area).await,
+                Err(e) => Err(e),
+            },
+            form::Kind::Rule => match form::rule_draft(&f) {
+                Ok(d) => self.save_rule(d, f.editing.as_ref()).await,
+                Err(e) => Err(e),
+            },
+        };
+        if let Err(e) = outcome {
+            self.say(format!("{e:#}"));
+            self.mode = Mode::Form(f);
+        }
+    }
+
+    /// A run from the form, sized to this screen; an agent's is joined at once.
+    async fn start_run(&mut self, d: form::RunDraft, area: Rect) -> Result<()> {
+        let spec = RunSpec {
+            argv: d.argv,
+            kind: d.kind,
+            cwd: d.cwd,
+            title: d.title,
+            ref_: None,
+            tags: vec![],
+            tty: true,
+            cols: Some(area.width),
+            rows: Some(area.height.saturating_sub(2)),
+            env: crate::env::child_env(&[])?,
+            inherit_env: false,
+            cause: Cause::Manual,
+            flow: None,
+        };
+        let run = self.rpc.call::<RunStart>(spec).await?;
+        self.say(format!("started {}", run.title));
+        if self.view == View::Rules {
+            self.toggle_view().await;
+        }
+        self.refresh().await;
+        self.select(Some(format!("r:{}", run.id)));
+        if run.kind == RunKind::Agent {
+            self.open_term(area, true).await;
+        }
+        Ok(())
+    }
+
+    /// A rule from the form into its file, then loaded and, since this is
+    /// your keystroke, on. A folder new to Relay is registered on the way.
+    async fn save_rule(&mut self, d: form::RuleDraft, was: Option<&form::Editing>) -> Result<()> {
+        let file = rulefile::file(&self.home, d.kind, d.folder.as_deref());
+        let text = std::fs::read_to_string(&file).unwrap_or_default();
+        let new = rulefile::upsert(&text, rulefile::top(d.kind), &d.name, &d.body)?;
+        if let Some(dir) = file.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        std::fs::write(&file, new)?;
+        // Renamed, moved, or a schedule made a reaction: the old block goes.
+        let scope = d.scope();
+        if let Some(e) = was
+            && (e.kind, e.scope.as_str(), e.name.as_str()) != (d.kind, scope.as_str(), d.name.as_str())
+        {
+            let folder = (e.scope != GLOBAL_SCOPE).then(|| PathBuf::from(&e.scope));
+            let old = rulefile::file(&self.home, e.kind, folder.as_deref());
+            if let Ok(t) = std::fs::read_to_string(&old)
+                && let Some(t) = rulefile::remove(&t, rulefile::top(e.kind), &e.name)
+            {
+                std::fs::write(&old, t)?;
+            }
+        }
+        let known = d.folder.as_deref().is_none_or(|f| self.names.registered(f).is_some());
+        if !known {
+            let path = d.folder.clone().unwrap_or_default();
+            self.rpc
+                .call::<WorkspaceUp>(WorkspaceUpParams { path, approve: true })
+                .await?;
+        } else {
+            match d.kind {
+                RuleKind::Schedule => {
+                    self.rpc.call::<ScheduleReload>(()).await?;
+                }
+                RuleKind::Reaction => {
+                    self.rpc.call::<ReactionReload>(()).await?;
+                }
+            }
+            self.rpc
+                .call::<RuleApprove>(RuleRef {
+                    name: d.name.clone(),
+                    scope: Some(scope.clone()),
+                    kind: Some(d.kind),
+                })
+                .await?;
+        }
+        self.say(format!("{} on · {}", d.name, short_path(&file)));
+        self.refresh().await;
+        if self.view == View::Rules {
+            self.select(Some(format!("{}:{}/{}", d.kind, scope, d.name)));
+        }
+        Ok(())
+    }
+
     // ---- keys --------------------------------------------------------------
 
     async fn key(&mut self, k: KeyEvent, area: Rect) -> Result<()> {
@@ -685,6 +913,14 @@ impl App {
                 };
                 if let Some(mark) = mark {
                     self.mark(id, mark).await;
+                }
+                return Ok(());
+            }
+            Mode::Form(mut f) => {
+                match f.key(&k) {
+                    Act::Typing => self.mode = Mode::Form(f),
+                    Act::Cancel => {}
+                    Act::Save => self.save_form(f, area).await,
                 }
                 return Ok(());
             }
@@ -828,11 +1064,13 @@ impl App {
                     }
                 }
             }
-            (KeyCode::Char('n'), _) => {
-                if let Some(q) = self.selected_question() {
-                    self.mode = Mode::Dismiss(q.id.clone());
-                }
-            }
+            (KeyCode::Char('n'), _) => match self.view {
+                View::Work => self.new_run_form(),
+                View::Rules => self.new_rule_form(),
+            },
+            (KeyCode::Char('N'), _) => self.new_rule_form(),
+            (KeyCode::Char('e'), _) => self.edit_rule_form(),
+            (KeyCode::Char('E'), _) => self.edit_rule_file(),
             (KeyCode::Char('i'), _) => self.show_pane = !self.show_pane,
             (KeyCode::Char('f'), _) => {
                 self.wide = !self.wide;
@@ -845,6 +1083,8 @@ impl App {
                     && !i.run.state.is_terminal()
                 {
                     self.mode = Mode::Stop(i.run.id.clone());
+                } else if let Some(q) = self.selected_question() {
+                    self.mode = Mode::Dismiss(q.id.clone());
                 }
             }
             (KeyCode::Char('m'), _) => {
@@ -938,7 +1178,11 @@ impl App {
     // ---- drawing -----------------------------------------------------------
 
     fn draw(&mut self, f: &mut Frame) {
-        let a = areas(f.area(), self.wide, self.show_pane);
+        let form_h = match &self.mode {
+            Mode::Form(x) => x.height(),
+            _ => 0,
+        };
+        let a = areas(f.area(), self.wide, self.show_pane, form_h);
         let rows = self.rows();
         let rule_rows = self.rule_rows();
         // News is counted the way it is shown: a job with unseen runs is one.
@@ -976,6 +1220,11 @@ impl App {
         }
         if let Some(pane) = a.pane {
             self.draw_pane(f, pane);
+        }
+        if let (Some(area), Mode::Form(x)) = (a.form, &self.mode) {
+            let mut lines = vec![Line::from(Span::raw("─".repeat(area.width as usize)).dim())];
+            lines.extend(x.lines());
+            f.render_widget(Paragraph::new(lines), area);
         }
         f.render_widget(Paragraph::new(format!(" {}", self.footer())).dim(), a.footer);
     }
@@ -1206,14 +1455,7 @@ impl App {
         }
         let lines = match self.selected() {
             Some(Row::Run(i)) | Some(Row::Fold(i)) => pane::run_lines(i, &self.events, &self.names, now),
-            Some(Row::Job(j)) => {
-                let rule = self.rules.iter().find(|x| {
-                    x.kind() == j.kind
-                        && x.name() == j.name
-                        && (x.is_global() || std::path::Path::new(x.scope()) == j.last().run.workspace)
-                });
-                pane::job_lines(&j, rule, &self.names, now)
-            }
+            Some(Row::Job(j)) => pane::job_lines(&j, self.rule_of_job(&j), &self.names, now),
             Some(Row::Question(q)) => {
                 let asker = q.run.as_deref().and_then(|id| self.run_by_id(id));
                 pane::question_lines(q, asker, &self.picked, now)
@@ -1240,6 +1482,14 @@ impl App {
             Mode::Fire(n) => return format!("run {} now? y / any key", n.name),
             Mode::Mark(id) => return format!("mark {}: d done · b blocked · w working · esc", title_of(id)),
             Mode::Filter(buf) => return format!("/{buf}▏  enter apply · esc clear"),
+            Mode::Form(_) => {
+                if let Some((m, at)) = &self.flash
+                    && at.elapsed() < FLASH
+                {
+                    return m.clone();
+                }
+                return "enter save · tab next field · esc cancel".into();
+            }
             Mode::Normal => {}
         }
         if let Some((m, at)) = &self.flash
@@ -1278,18 +1528,18 @@ impl App {
             if r.kind() == RuleKind::Schedule {
                 s.push_str(" · enter run now");
             }
-            s.push_str(" · R reload · r work · / filter · q quit");
+            s.push_str(" · e edit · E in editor · n new · R reload · r work · / filter · q quit");
             return s;
         }
         if self.view == View::Rules {
-            return "R reload · r work · / filter · q quit".into();
+            return "n new rule · R reload · r work · / filter · q quit".into();
         }
         let pane = if self.show_pane { "i hide details" } else { "i details" };
         match self.selected() {
             Some(Row::Question(q)) => {
                 let n = q.options.len().min(pane::MAX_KEYS);
                 let how = if q.multi { "pick · enter answer" } else { "answer" };
-                format!("1-{n} {how} · n not this · {pane} · r rules here · / filter · q quit")
+                format!("1-{n} {how} · x not this · {pane} · r rules here · / filter · q quit")
             }
             Some(Row::Job(j)) => {
                 let open = if self.opened.contains(&j.key) {
@@ -1297,9 +1547,7 @@ impl App {
                 } else {
                     "enter open"
                 };
-                format!(
-                    "{open} · {pane} · d done with its runs · D done with all seen · r rules here · / filter · q quit"
-                )
+                format!("{open} · e edit rule · {pane} · d done with its runs · r rules here · / filter · q quit")
             }
             Some(Row::Fold(_)) => {
                 format!("enter output · {pane} · d done · esc fold · r rules here · / filter · q quit")
@@ -1308,9 +1556,9 @@ impl App {
                 format!("enter output · {pane} · d done · D done with all seen · r rules here · / filter · q quit")
             }
             Some(Row::Run(_)) => {
-                format!("enter join · w watch · {pane} · x stop · m mark · r rules here · / filter · q quit")
+                format!("enter join · w watch · {pane} · x stop · m mark · n new · r rules here · / filter · q quit")
             }
-            _ => "r rules · / filter · q quit".into(),
+            _ => "n new run · N new rule · r rules · / filter · q quit".into(),
         }
     }
 }
