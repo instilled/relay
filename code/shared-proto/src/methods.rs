@@ -545,6 +545,35 @@ pub struct DecisionNote {
     pub note: Option<String>,
 }
 
+// ---- rule.* -----------------------------------------------------------------
+
+/// A rule by name. `scope` settles it when the name exists in several,
+/// `kind` when a schedule and a reaction share it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuleRef {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<crate::rule::RuleKind>,
+}
+
+/// Every schedule and reaction as one list: what starts work without you.
+pub struct RuleList;
+impl Method for RuleList {
+    const NAME: &'static str = "rule.list";
+    type Params = ScheduleFilter;
+    type Result = Vec<crate::rule::Rule>;
+}
+
+/// Says yes to the current version of one rule; it may fire from now on.
+pub struct RuleApprove;
+impl Method for RuleApprove {
+    const NAME: &'static str = "rule.approve";
+    type Params = RuleRef;
+    type Result = crate::rule::Rule;
+}
+
 // ---- reaction.* -------------------------------------------------------------
 
 pub struct ReactionList;

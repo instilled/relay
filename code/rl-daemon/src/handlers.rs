@@ -7,6 +7,7 @@ use relay_ledger::{events, presence, runs};
 use relay_proto::PROTOCOL_VERSION;
 use relay_proto::methods::*;
 use relay_proto::rpc::RpcError;
+use relay_proto::rule::{Rule, RuleKind};
 use tracing::info;
 
 pub fn register(r: &mut Router<Daemon>) {
@@ -109,6 +110,64 @@ pub fn register(r: &mut Router<Daemon>) {
             .list(f.all)
             .await
             .map_err(|e| RpcError::internal(format!("{e:#}")))
+    });
+    r.register::<RuleList, _, _>(|d, f: ScheduleFilter| async move {
+        let mut rules: Vec<Rule> = d
+            .scheduler
+            .list(f.all)
+            .await
+            .map_err(|e| RpcError::internal(format!("{e:#}")))?
+            .into_iter()
+            .map(Rule::Schedule)
+            .collect();
+        rules.extend(
+            d.reactor
+                .list(f.all)
+                .await
+                .map_err(|e| RpcError::internal(format!("{e:#}")))?
+                .into_iter()
+                .map(Rule::Reaction),
+        );
+        Ok(rules)
+    });
+    r.register::<RuleApprove, _, _>(|d, p: RuleRef| async move {
+        let scope = p.scope.as_deref();
+        let kind = match p.kind {
+            Some(k) => k,
+            None => {
+                let s = d.scheduler.get(&p.name, scope).await;
+                let r = d.reactor.get(&p.name, scope).await;
+                match (s, r) {
+                    (Ok(_), Ok(_)) => {
+                        return Err(RpcError::invalid_params(format!(
+                            "`{}` is both a schedule and a reaction; say which with --kind",
+                            p.name
+                        )));
+                    }
+                    (Ok(_), Err(_)) => RuleKind::Schedule,
+                    (Err(_), Ok(_)) => RuleKind::Reaction,
+                    (Err(se), Err(re)) => {
+                        // A name in several scopes is the more useful complaint.
+                        let e = if format!("{se:#}").contains("exists in") {
+                            se
+                        } else {
+                            re
+                        };
+                        let msg = format!("{e:#}");
+                        return Err(if msg.contains("exists in") {
+                            RpcError::invalid_params(msg)
+                        } else {
+                            RpcError::not_found("rule", &p.name)
+                        });
+                    }
+                }
+            }
+        };
+        let internal = |e: anyhow::Error| RpcError::internal(format!("{e:#}"));
+        Ok(match kind {
+            RuleKind::Schedule => Rule::Schedule(d.scheduler.approve(&p.name, scope).await.map_err(internal)?),
+            RuleKind::Reaction => Rule::Reaction(d.reactor.approve(&p.name, scope).await.map_err(internal)?),
+        })
     });
     r.register::<ReactionPause, _, _>(|d, p| async move {
         d.reactor

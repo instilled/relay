@@ -43,6 +43,11 @@ impl Names {
         Self(ws.into_iter().collect())
     }
 
+    /// The name a folder was registered under, if it was.
+    pub fn registered(&self, p: &Path) -> Option<String> {
+        self.0.get(p).cloned()
+    }
+
     /// A workspace by its registered name, else its last path component.
     pub fn workspace(&self, p: &Path) -> String {
         self.0.get(p).cloned().unwrap_or_else(|| {

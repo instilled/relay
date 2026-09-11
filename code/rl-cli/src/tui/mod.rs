@@ -10,6 +10,7 @@
 mod keys;
 mod pane;
 mod rows;
+mod rules;
 mod screen;
 mod term;
 
@@ -31,11 +32,14 @@ use relay_core::time::fmt_age;
 use relay_proto::decision::Decision;
 use relay_proto::methods::{
     DecisionDismiss, DecisionNote, DecisionTake, DecisionTakeParams, Digest, DigestGet, DigestItem, DigestParams,
-    EventFilter, EventList, PresenceClient, PresenceTouch, RunIds, RunMark, RunMarkParams, RunSeen, RunStop,
-    RunStopParams, WorkspaceList,
+    EventFilter, EventList, PresenceClient, PresenceTouch, ReactionPause, ReactionReload, ReactionResume, RuleApprove,
+    RuleList, RuleRef, RunIds, RunMark, RunMarkParams, RunSeen, RunStop, RunStopParams, ScheduleFilter, ScheduleName,
+    SchedulePause, ScheduleReload, ScheduleResume, ScheduleRun, WorkspaceList,
 };
+use relay_proto::rule::{Rule, RuleKind, RuleStatus};
 use relay_proto::types::{Event as LedgerEvent, Mark, Run};
 use rows::{Names, Row};
+use rules::RuleRow;
 use std::time::{Duration, Instant};
 use term::TermView;
 
@@ -61,6 +65,13 @@ enum Focus {
     Pane,
 }
 
+/// Which list the left side shows.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum View {
+    Work,
+    Rules,
+}
+
 enum Mode {
     Normal,
     /// `x` pressed: `y` stops this run.
@@ -69,6 +80,8 @@ enum Mode {
     Mark(String),
     /// `n` pressed: `y` dismisses this question.
     Dismiss(String),
+    /// `enter` on a schedule: `y` fires it now.
+    Fire(ScheduleName),
     /// `/` pressed: typing a filter.
     Filter(String),
 }
@@ -80,6 +93,11 @@ struct App {
     digest: Digest,
     names: Names,
     filter: String,
+    view: View,
+    /// Every rule, fetched while the rules view is up.
+    rules: Vec<Rule>,
+    /// The other view's selection, kept for when you come back.
+    other_sel: Option<String>,
     /// The selected row's key (`r:<id>` or `q:<id>`); the cursor follows it
     /// across re-ranks.
     sel: Option<String>,
@@ -149,6 +167,9 @@ pub async fn run(home: &Home) -> Result<()> {
         },
         names: Names::default(),
         filter: String::new(),
+        view: View::Work,
+        rules: Vec::new(),
+        other_sel: None,
         sel: None,
         pane: Pane::Facts,
         focus: Focus::List,
@@ -229,6 +250,12 @@ impl App {
             Ok(d) => self.digest = d,
             Err(e) => self.say(format!("daemon: {e:#}")),
         }
+        if self.view == View::Rules {
+            match self.rpc.call::<RuleList>(ScheduleFilter { all: false }).await {
+                Ok(r) => self.rules = r,
+                Err(e) => self.say(format!("daemon: {e:#}")),
+            }
+        }
         self.settle();
         if self.pane == Pane::Facts
             && let Some(Row::Run(i)) = self.selected()
@@ -250,9 +277,16 @@ impl App {
         rows::build(&self.digest, &self.names, &self.filter, Timestamp::now())
     }
 
-    /// Keys of the selectable rows, in order.
+    fn rule_rows(&self) -> Vec<RuleRow<'_>> {
+        rules::build(&self.rules, &self.names, &self.filter)
+    }
+
+    /// Keys of the selectable rows of the view that is up, in order.
     fn keys(&self) -> Vec<String> {
-        self.rows().into_iter().filter_map(|r| r.key()).collect()
+        match self.view {
+            View::Work => self.rows().into_iter().filter_map(|r| r.key()).collect(),
+            View::Rules => self.rule_rows().into_iter().filter_map(|r| r.key()).collect(),
+        }
     }
 
     /// Keeps the selection on something that exists.
@@ -273,6 +307,9 @@ impl App {
     }
 
     fn selected(&self) -> Option<Row<'_>> {
+        if self.view != View::Work {
+            return None;
+        }
         let key = self.sel.as_ref()?;
         self.rows().into_iter().find(|r| r.key().as_ref() == Some(key))
     }
@@ -289,6 +326,14 @@ impl App {
             Some(Row::Question(d)) => Some(d),
             _ => None,
         }
+    }
+
+    fn selected_rule(&self) -> Option<&Rule> {
+        if self.view != View::Rules {
+            return None;
+        }
+        let key = self.sel.as_ref()?;
+        self.rules.iter().find(|r| &rules::key(r) == key)
     }
 
     fn run_by_id(&self, id: &str) -> Option<&Run> {
@@ -415,6 +460,78 @@ impl App {
         self.say(format!("{n} cleared"));
     }
 
+    // ---- rules -------------------------------------------------------------
+
+    async fn toggle_view(&mut self) {
+        self.view = match self.view {
+            View::Work => View::Rules,
+            View::Rules => View::Work,
+        };
+        std::mem::swap(&mut self.sel, &mut self.other_sel);
+        self.picked.clear();
+        self.events.clear();
+        self.close_term();
+        self.focus = Focus::List;
+        self.refresh().await;
+    }
+
+    async fn approve(&mut self, name: String, scope: String, kind: RuleKind) {
+        let p = RuleRef {
+            name: name.clone(),
+            scope: Some(scope),
+            kind: Some(kind),
+        };
+        match self.rpc.call::<RuleApprove>(p).await {
+            Ok(_) => {
+                self.say(format!("{name} approved"));
+                self.refresh().await;
+            }
+            Err(e) => self.say(format!("approve: {e:#}")),
+        }
+    }
+
+    async fn set_paused(&mut self, name: String, scope: String, kind: RuleKind, paused: bool) {
+        let p = ScheduleName {
+            name: name.clone(),
+            scope: Some(scope),
+        };
+        let r = match (kind, paused) {
+            (RuleKind::Schedule, true) => self.rpc.call::<SchedulePause>(p).await.map(|_| ()),
+            (RuleKind::Schedule, false) => self.rpc.call::<ScheduleResume>(p).await.map(|_| ()),
+            (RuleKind::Reaction, true) => self.rpc.call::<ReactionPause>(p).await.map(|_| ()),
+            (RuleKind::Reaction, false) => self.rpc.call::<ReactionResume>(p).await.map(|_| ()),
+        };
+        match r {
+            Ok(()) => {
+                self.say(format!("{name} {}", if paused { "paused" } else { "resumed" }));
+                self.refresh().await;
+            }
+            Err(e) => self.say(format!("pause: {e:#}")),
+        }
+    }
+
+    async fn fire(&mut self, name: ScheduleName) {
+        match self.rpc.call::<ScheduleRun>(name).await {
+            Ok(run) => {
+                self.say(format!("started {}", run.title));
+                self.refresh().await;
+            }
+            Err(e) => self.say(format!("run: {e:#}")),
+        }
+    }
+
+    async fn reload_rules(&mut self) {
+        let s = self.rpc.call::<ScheduleReload>(()).await;
+        let r = self.rpc.call::<ReactionReload>(()).await;
+        match (s, r) {
+            (Ok(s), Ok(r)) => {
+                self.say(format!("reloaded · {} schedules · {} reactions", s.loaded, r.loaded));
+                self.refresh().await;
+            }
+            (Err(e), _) | (_, Err(e)) => self.say(format!("reload: {e:#}")),
+        }
+    }
+
     // ---- keys --------------------------------------------------------------
 
     async fn key(&mut self, k: KeyEvent, size: (u16, u16)) -> Result<()> {
@@ -429,6 +546,12 @@ impl App {
             Mode::Dismiss(id) => {
                 if k.code == KeyCode::Char('y') {
                     self.dismiss(id).await;
+                }
+                return Ok(());
+            }
+            Mode::Fire(name) => {
+                if k.code == KeyCode::Char('y') {
+                    self.fire(name).await;
                 }
                 return Ok(());
             }
@@ -495,7 +618,18 @@ impl App {
             (KeyCode::Home, _) | (KeyCode::Char('g'), _) => self.step(isize::MIN / 2),
             (KeyCode::End, _) | (KeyCode::Char('G'), _) => self.step(isize::MAX / 2),
             (KeyCode::Enter, _) => {
-                if let Some(q) = self.selected_question() {
+                if let Some(r) = self.selected_rule() {
+                    match r.kind() {
+                        RuleKind::Schedule if r.approved() => {
+                            self.mode = Mode::Fire(ScheduleName {
+                                name: r.name().into(),
+                                scope: Some(r.scope().into()),
+                            })
+                        }
+                        RuleKind::Schedule => self.say("not approved: y first"),
+                        RuleKind::Reaction => self.say("a reaction fires on its event"),
+                    }
+                } else if let Some(q) = self.selected_question() {
                     if q.multi && !self.picked.is_empty() {
                         let id = q.id.clone();
                         let opts: Vec<String> = self.picked.iter().map(|&i| q.options[i].key.clone()).collect();
@@ -552,7 +686,24 @@ impl App {
                 }
             }
             (KeyCode::Char('/'), _) => self.mode = Mode::Filter(self.filter.clone()),
-            (KeyCode::Char('d'), _) => self.clear_news().await,
+            (KeyCode::Char('d'), _) if self.view == View::Work => self.clear_news().await,
+            (KeyCode::Char('r'), _) => self.toggle_view().await,
+            (KeyCode::Char('R'), _) if self.view == View::Rules => self.reload_rules().await,
+            (KeyCode::Char('y'), _) => {
+                if let Some(r) = self.selected_rule()
+                    && r.status() == RuleStatus::NeedsApproval
+                {
+                    let (name, scope, kind) = (r.name().to_string(), r.scope().to_string(), r.kind());
+                    self.approve(name, scope, kind).await;
+                }
+            }
+            (KeyCode::Char('p'), _) => {
+                if let Some(r) = self.selected_rule() {
+                    let (name, scope, kind, paused) =
+                        (r.name().to_string(), r.scope().to_string(), r.kind(), r.paused());
+                    self.set_paused(name, scope, kind, !paused).await;
+                }
+            }
             _ => {}
         }
         Ok(())
@@ -597,14 +748,21 @@ impl App {
     fn draw(&mut self, f: &mut Frame) {
         let a = areas(f.area(), self.wide, self.focus);
         let rows = self.rows();
+        let rule_rows = self.rule_rows();
         let news = self.digest.items.iter().filter(|i| i.unseen).count();
-        let title = rows::headline(&rows, news, &self.filter);
+        let title = match self.view {
+            View::Work => rows::headline(&rows, news, &self.filter),
+            View::Rules => rules::headline(&rule_rows, &self.filter),
+        };
         let [l, r] =
             Layout::horizontal([Constraint::Fill(1), Constraint::Length(self.me.len() as u16 + 1)]).areas(a.head);
         f.render_widget(Paragraph::new(title).bold(), l);
         f.render_widget(Paragraph::new(self.me.clone()).dim().right_aligned(), r);
         if let Some(list) = a.list {
-            self.draw_list(f, list, &rows);
+            match self.view {
+                View::Work => self.draw_list(f, list, &rows),
+                View::Rules => self.draw_rules(f, list, &rule_rows),
+            }
             if a.pane.is_some() {
                 let x = list.x + list.width;
                 let bar = Rect::new(x, list.y, 1, list.height);
@@ -676,6 +834,53 @@ impl App {
         f.render_widget(Paragraph::new(lines).scroll((offset as u16, 0)), area);
     }
 
+    fn draw_rules(&self, f: &mut Frame, area: Rect, rows: &[RuleRow]) {
+        if rows.is_empty() {
+            let msg = if self.filter.is_empty() {
+                " no rules · rl on <event> -- <command>, or rl up in a folder with .relay/"
+            } else {
+                " nothing matches"
+            };
+            f.render_widget(Paragraph::new(msg).dim(), area);
+            return;
+        }
+        let now = Timestamp::now();
+        let mut lines: Vec<Line> = Vec::with_capacity(rows.len());
+        let mut sel_line = 0usize;
+        for (n, row) in rows.iter().enumerate() {
+            let selected = row.key().is_some() && row.key() == self.sel;
+            let mut line = match row {
+                RuleRow::Group(g) => {
+                    if n > 0 {
+                        lines.push(Line::raw(""));
+                    }
+                    Line::from(Span::raw(format!(" {g}")).bold())
+                }
+                RuleRow::Rule(r) => {
+                    let status = rules::status_word(r, now);
+                    let status = match r.status() {
+                        RuleStatus::NeedsApproval => Span::raw(format!(" ! {status:<14}")).yellow().bold(),
+                        RuleStatus::Paused => Span::raw(format!("   {status:<14}")).dim(),
+                        _ => Span::raw(format!("   {status:<14}")),
+                    };
+                    Line::from(vec![
+                        status,
+                        Span::raw(format!(" {:<18}", r.name())),
+                        Span::raw(format!(" {:<16}", r.when())).dim(),
+                        Span::raw(format!(" {}", r.does())).dim(),
+                    ])
+                }
+            };
+            if selected {
+                line = line.style(Style::default().add_modifier(Modifier::REVERSED));
+                sel_line = lines.len();
+            }
+            lines.push(line);
+        }
+        let offset = sel_line.saturating_sub(area.height.saturating_sub(1) as usize);
+        f.render_widget(Paragraph::new(lines).scroll((offset as u16, 0)), area);
+    }
+
     fn draw_pane(&mut self, f: &mut Frame, area: Rect) {
         if self.pane == Pane::Term
             && let Some(t) = &self.term
@@ -684,6 +889,12 @@ impl App {
             return;
         }
         let now = Timestamp::now();
+        if let Some(r) = self.selected_rule() {
+            let last = r.last_run().and_then(|id| self.run_by_id(id)).map(|x| x.title.as_str());
+            let lines = rules::lines(r, &self.names, now, last);
+            f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
+            return;
+        }
         let lines = match self.selected() {
             Some(Row::Run(i)) => pane::run_lines(i, &self.events, &self.names, now),
             Some(Row::Question(q)) => {
@@ -709,6 +920,7 @@ impl App {
                     .unwrap_or_default();
                 return format!("dismiss {t}? y / any key");
             }
+            Mode::Fire(n) => return format!("run {} now? y / any key", n.name),
             Mode::Mark(id) => return format!("mark {}: d done · b blocked · w working · esc", title_of(id)),
             Mode::Filter(buf) => return format!("/{buf}▏  enter apply · esc clear"),
             Mode::Normal => {}
@@ -740,17 +952,34 @@ impl App {
             }
             return s;
         }
+        if let Some(r) = self.selected_rule() {
+            let mut s = String::new();
+            if r.status() == RuleStatus::NeedsApproval {
+                s.push_str("y approve · ");
+            }
+            s.push_str(if r.paused() { "p resume" } else { "p pause" });
+            if r.kind() == RuleKind::Schedule {
+                s.push_str(" · enter run now");
+            }
+            s.push_str(" · R reload · r work · / filter · q quit");
+            return s;
+        }
+        if self.view == View::Rules {
+            return "R reload · r work · / filter · q quit".into();
+        }
         match self.selected() {
             Some(Row::Question(q)) => {
                 let n = q.options.len().min(pane::MAX_KEYS);
                 let how = if q.multi { "pick · enter answer" } else { "answer" };
-                format!("1-{n} {how} · n not this · ↑↓ · / filter · q quit")
+                format!("1-{n} {how} · n not this · ↑↓ · r rules · / filter · q quit")
             }
             Some(Row::Run(i)) if i.run.state.is_terminal() => {
-                "enter output · f wide · / filter · d clear news · q quit".into()
+                "enter output · f wide · r rules · / filter · d clear news · q quit".into()
             }
-            Some(Row::Run(_)) => "enter terminal · x stop · m mark · f wide · / filter · d clear news · q quit".into(),
-            _ => "/ filter · q quit".into(),
+            Some(Row::Run(_)) => {
+                "enter terminal · x stop · m mark · f wide · r rules · / filter · d clear news · q quit".into()
+            }
+            _ => "r rules · / filter · q quit".into(),
         }
     }
 }
