@@ -156,6 +156,15 @@ After a daemon restart, `reconcile` walks `sessions` where `closed_at IS NULL`: 
 the holder still answers (resuming the journal, with a `note` line if bytes were lost while the
 daemon was down), otherwise close the run from its exit sidecar — or as lost.
 
+Starting the daemon is nobody's job. Every `rl` command that needs it goes through
+`daemon::ensure`: `rld` is spawned when the socket is not there (one line on stderr, `rld
+started`), and the running one is compared with this `rl` — the same release, nothing to say;
+another release with the same wire protocol, `rl` offers `rl daemon restart` on a terminal and
+only notes it otherwise; another protocol, `rl` refuses, since messages could be misread. A
+restart costs nothing running, which is what makes the offer cheap. `rl daemon start|stop|
+status|restart` remain for saying it explicitly; a hook from inside a run (`rl hook`) never
+starts a daemon.
+
 ---
 
 ## 4. Watching and joining

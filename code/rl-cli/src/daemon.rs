@@ -1,4 +1,6 @@
-//! `rl daemon start|stop|status|restart`.
+//! `rl daemon start|stop|status|restart`, and the daemon every other command
+//! gets without asking: `ensure` starts `rld` when it is not there, and says
+//! so when the one that is there is not the same version as this `rl`.
 //!
 //! `rld` is spawned detached — own process group, stdio to `log/rld.log` — so it
 //! outlives the shell that started it. Session holders are separate processes
@@ -85,7 +87,108 @@ pub async fn restart(home: &Home) -> Result<DaemonInfo> {
     Ok(start(home).await?.0)
 }
 
+/// How the running daemon compares with this `rl`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Check {
+    Same,
+    /// Same wire protocol, another release: works, but a restart is due.
+    Version {
+        theirs: String,
+        mine: String,
+    },
+    /// Another wire protocol: messages could be misread; refuse.
+    Protocol {
+        theirs: u32,
+        mine: u32,
+    },
+}
+
+pub fn check(info: &DaemonInfo) -> Check {
+    let mine = env!("CARGO_PKG_VERSION");
+    if info.protocol != relay_proto::PROTOCOL_VERSION {
+        Check::Protocol {
+            theirs: info.protocol,
+            mine: relay_proto::PROTOCOL_VERSION,
+        }
+    } else if info.version != mine {
+        Check::Version {
+            theirs: info.version.clone(),
+            mine: mine.to_string(),
+        }
+    } else {
+        Check::Same
+    }
+}
+
+/// A connection to a daemon that is there and current: started if it was
+/// not running (one line on stderr says so), and when it is another release
+/// than this `rl`, offered a restart — asked on a terminal when `ask`, only
+/// noted otherwise. Another protocol is refused: `rl daemon restart` is the
+/// way out, and nothing running is lost by it.
+pub async fn ensure(home: &Home, ask: bool) -> Result<Client> {
+    let (info, started) = start(home).await?;
+    if started {
+        eprintln!("rld started");
+    }
+    match check(&info) {
+        Check::Same => {}
+        Check::Protocol { theirs, mine } => bail!(
+            "rld {} speaks protocol {theirs}, this rl {} speaks {mine}: `rl daemon restart` (runs survive it)",
+            info.version,
+            env!("CARGO_PKG_VERSION")
+        ),
+        Check::Version { theirs, mine } => {
+            let tty = std::io::IsTerminal::is_terminal(&std::io::stdin())
+                && std::io::IsTerminal::is_terminal(&std::io::stderr());
+            if ask && tty {
+                eprint!("rld {theirs} is running, rl is {mine}: restart it? runs survive. [y/N] ");
+                let mut line = String::new();
+                let _ = std::io::stdin().read_line(&mut line);
+                if line.trim().eq_ignore_ascii_case("y") {
+                    restart(home).await?;
+                    eprintln!("rld restarted");
+                }
+            } else {
+                eprintln!("note: rld {theirs} is running, rl is {mine}; `rl daemon restart` when convenient");
+            }
+        }
+    }
+    Client::connect(home).await
+}
+
 /// `$RELAY_RLD_BIN`, else `rld` next to this executable, else `rld` on PATH.
 fn locate_rld() -> Result<PathBuf> {
     Ok(relay_core::locate_bin("rld", RLD_BIN_ENV))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_check_reads_protocol_before_version() {
+        let mine = env!("CARGO_PKG_VERSION").to_string();
+        let info = |protocol: u32, version: &str| DaemonInfo {
+            protocol,
+            version: version.into(),
+            pid: 1,
+            started_at: jiff::Timestamp::UNIX_EPOCH,
+            home: "/h".into(),
+        };
+        assert_eq!(check(&info(relay_proto::PROTOCOL_VERSION, &mine)), Check::Same);
+        assert_eq!(
+            check(&info(relay_proto::PROTOCOL_VERSION, "0.0.1")),
+            Check::Version {
+                theirs: "0.0.1".into(),
+                mine: mine.clone()
+            }
+        );
+        assert_eq!(
+            check(&info(relay_proto::PROTOCOL_VERSION + 1, &mine)),
+            Check::Protocol {
+                theirs: relay_proto::PROTOCOL_VERSION + 1,
+                mine: relay_proto::PROTOCOL_VERSION
+            }
+        );
+    }
 }

@@ -229,7 +229,9 @@ fn areas(area: Rect, wide: bool, show_pane: bool, form_h: u16) -> Areas {
 
 pub async fn run(home: &Home) -> Result<()> {
     let me = client_name();
-    let mut rpc = Client::connect(home).await?;
+    // Before the screen is taken: the daemon is started or, if it is another
+    // release, a restart is offered on the plain terminal.
+    let mut rpc = crate::daemon::ensure(home, true).await?;
     let _ = rpc.call::<PresenceTouch>(PresenceClient { client: me.clone() }).await;
     let mut app = App {
         home: home.clone(),

@@ -39,7 +39,7 @@ const HOOK_TIMEOUT: Duration = Duration::from_millis(1500);
     name = "rl",
     version,
     about = "Relay — keeps your agents and long-running work alive",
-    after_help = "For agents:\n  rl context    what Relay is, its events and rules, and the answer it wants — read this first\n  rl agents     the agent CLIs on this machine\n  rl --json …   every command, machine-readable"
+    after_help = "Every command starts rld if it is not running, and says so when the one running is another release.\nNothing is deleted: `rl done` puts a run away, `rl ls --all` still has it.\n\nFor agents:\n  rl context    what Relay is, its events and rules, and the answer it wants — read this first\n  rl agents     the agent CLIs on this machine\n  rl --json …   every command, machine-readable"
 )]
 struct Cli {
     /// Machine-readable output on every command.
@@ -541,7 +541,7 @@ async fn attach(home: &Home, a: AttachArgs, mode: AttachMode) -> Result<()> {
 }
 
 async fn mark(home: &Home, a: MarkArgs, json: bool) -> Result<()> {
-    let run = Client::connect(home)
+    let run = daemon::ensure(home, !json)
         .await?
         .call::<RunMark>(RunMarkParams {
             id: a.id,
@@ -632,7 +632,7 @@ async fn run(home: &Home, a: RunArgs, json: bool) -> Result<()> {
         cause: Cause::Manual,
         flow: None,
     };
-    let run = Client::connect(home).await?.call::<RunStart>(spec).await?;
+    let run = daemon::ensure(home, !json).await?.call::<RunStart>(spec).await?;
     if json {
         println!("{}", serde_json::to_string(&run)?);
     } else {
@@ -642,7 +642,7 @@ async fn run(home: &Home, a: RunArgs, json: bool) -> Result<()> {
 }
 
 async fn schedule(home: &Home, cmd: ScheduleCmd, json: bool) -> Result<()> {
-    let mut rpc = Client::connect(home).await?;
+    let mut rpc = daemon::ensure(home, !json).await?;
     let name = |r: &ScheduleRef| ScheduleName {
         name: r.name.clone(),
         scope: r.scope.clone(),
@@ -706,7 +706,7 @@ async fn up(home: &Home, a: UpArgs, json: bool) -> Result<()> {
         Some(d) => d,
         None => std::env::current_dir()?,
     };
-    let mut rpc = Client::connect(home).await?;
+    let mut rpc = daemon::ensure(home, !json).await?;
     let mut r = rpc
         .call::<WorkspaceUp>(WorkspaceUpParams {
             path: path.clone(),
@@ -761,7 +761,7 @@ fn print_up(r: &UpReport) {
 }
 
 async fn workspace(home: &Home, cmd: WorkspaceCmd, json: bool) -> Result<()> {
-    let mut rpc = Client::connect(home).await?;
+    let mut rpc = daemon::ensure(home, !json).await?;
     match cmd {
         WorkspaceCmd::Ls => {
             let list = rpc.call::<WorkspaceList>(()).await?;
@@ -832,7 +832,7 @@ fn schedule_row(s: &Schedule, now: jiff::Timestamp) -> Vec<String> {
 }
 
 async fn stop(home: &Home, a: StopArgs, json: bool) -> Result<()> {
-    let run = Client::connect(home)
+    let run = daemon::ensure(home, !json)
         .await?
         .call::<RunStop>(RunStopParams {
             id: a.id,
@@ -895,7 +895,7 @@ async fn ls(home: &Home, a: LsArgs, json: bool) -> Result<()> {
         cause: a.cause,
         limit: Some(a.limit),
     };
-    let runs = Client::connect(home).await?.call::<RunList>(filter).await?;
+    let runs = daemon::ensure(home, !json).await?.call::<RunList>(filter).await?;
     if json {
         println!("{}", serde_json::to_string(&runs)?);
     } else if runs.is_empty() {
@@ -913,7 +913,7 @@ async fn done(home: &Home, a: DoneArgs, json: bool) -> Result<()> {
     if a.ids.is_empty() && !a.all {
         bail!("say which: `rl done <id>…`, or `rl done --all` for everything ended and seen");
     }
-    let n = Client::connect(home)
+    let n = daemon::ensure(home, !json)
         .await?
         .call::<RunArchive>(RunArchiveParams {
             ids: a.ids.clone(),
@@ -932,7 +932,7 @@ async fn done(home: &Home, a: DoneArgs, json: bool) -> Result<()> {
 
 async fn since(home: &Home, a: SinceArgs, json: bool) -> Result<()> {
     let n = now();
-    let mut c = Client::connect(home).await?;
+    let mut c = daemon::ensure(home, !json).await?;
     let boundary = match a.since.as_deref() {
         Some(s) => parse_since(s, n)?,
         None => {
@@ -963,7 +963,7 @@ async fn events(home: &Home, a: EventsArgs, json: bool) -> Result<()> {
         kinds: a.kinds,
         limit: Some(a.limit),
     };
-    let evs = Client::connect(home).await?.call::<EventList>(filter).await?;
+    let evs = daemon::ensure(home, !json).await?.call::<EventList>(filter).await?;
     if json {
         println!("{}", serde_json::to_string(&evs)?);
     } else if evs.is_empty() {
@@ -1098,7 +1098,7 @@ async fn ask(home: &Home, a: AskArgs, json: bool) -> Result<()> {
         spec.cwd = Some(std::env::current_dir()?);
     }
 
-    let d = Client::connect(home).await?.call::<DecisionRaise>(spec).await?;
+    let d = daemon::ensure(home, !json).await?.call::<DecisionRaise>(spec).await?;
     if json {
         println!("{}", serde_json::to_string(&d)?);
     } else {
@@ -1108,7 +1108,7 @@ async fn ask(home: &Home, a: AskArgs, json: bool) -> Result<()> {
 }
 
 async fn decisions(home: &Home, a: DecisionsArgs, json: bool) -> Result<()> {
-    let list = Client::connect(home)
+    let list = daemon::ensure(home, !json)
         .await?
         .call::<DecisionList>(DecisionFilter {
             all: a.all,
@@ -1166,7 +1166,7 @@ fn decision_row(d: &Decision, now: jiff::Timestamp) -> Vec<String> {
 }
 
 async fn decide(home: &Home, a: DecideArgs, json: bool) -> Result<()> {
-    let mut rpc = Client::connect(home).await?;
+    let mut rpc = daemon::ensure(home, !json).await?;
     let d = if a.dismiss {
         if !a.options.is_empty() {
             bail!("--dismiss takes no options");
@@ -1293,7 +1293,7 @@ async fn rule_kind(rpc: &mut Client, a: &RuleArg) -> Result<RuleKind> {
 }
 
 async fn rules(home: &Home, a: RulesArgs, json: bool) -> Result<()> {
-    let mut rpc = Client::connect(home).await?;
+    let mut rpc = daemon::ensure(home, !json).await?;
     let one = |r: Rule, json: bool| -> Result<()> {
         if json {
             println!("{}", serde_json::to_string(&r)?);
@@ -1428,7 +1428,7 @@ fn reaction_row(r: &Reaction, now: jiff::Timestamp) -> Vec<String> {
 }
 
 async fn react(home: &Home, cmd: ReactCmd, json: bool) -> Result<()> {
-    let mut rpc = Client::connect(home).await?;
+    let mut rpc = daemon::ensure(home, !json).await?;
     let one = |r: Reaction, json: bool| -> Result<()> {
         if json {
             println!("{}", serde_json::to_string(&r)?);
@@ -1559,7 +1559,7 @@ async fn on(home: &Home, a: OnArgs, json: bool) -> Result<()> {
     }
 
     std::fs::write(&file, format!("{existing}{block}"))?;
-    let report = Client::connect(home).await?.call::<ReactionReload>(()).await?;
+    let report = daemon::ensure(home, !json).await?.call::<ReactionReload>(()).await?;
     if json {
         println!("{}", serde_json::to_string(&report)?);
     } else {
@@ -1650,7 +1650,7 @@ async fn every(home: &Home, a: EveryArgs, json: bool) -> Result<()> {
             display_path(&file)
         );
     }
-    let mut rpc = Client::connect(home).await?;
+    let mut rpc = daemon::ensure(home, !json).await?;
     let registered = match &d.folder {
         Some(f) => rpc.call::<WorkspaceList>(()).await?.iter().any(|w| &w.path == f),
         None => true,
@@ -1690,7 +1690,7 @@ async fn config(home: &Home, a: ConfigArgs, json: bool) -> Result<()> {
         }
         rl_cli::env::open_in_editor(&file, 1)?;
     }
-    let r = Client::connect(home).await?.call::<ConfigGet>(()).await?;
+    let r = daemon::ensure(home, !json).await?.call::<ConfigGet>(()).await?;
     if json {
         println!("{}", serde_json::to_string(&r)?);
     } else {
@@ -1725,7 +1725,7 @@ async fn context(home: &Home, a: ContextArgs) -> Result<()> {
         None => std::env::current_dir()?,
     };
     let folder = std::fs::canonicalize(&folder).unwrap_or(folder);
-    let mut rpc = Client::connect(home).await?;
+    let mut rpc = daemon::ensure(home, true).await?;
     let workspaces = rpc.call::<WorkspaceList>(()).await?;
     let rules = rpc.call::<RuleList>(ScheduleFilter { all: false }).await?;
     let agents = rpc.call::<AgentList>(()).await?;
@@ -1787,7 +1787,7 @@ const AGENT_HEADERS: &[&str] = &["AGENT", "BIN", "HEADLESS", "MODEL"];
 
 /// `rl agents`: what the registry knows, and what is here.
 async fn agents(home: &Home, json: bool) -> Result<()> {
-    let list = Client::connect(home).await?.call::<AgentList>(()).await?;
+    let list = daemon::ensure(home, !json).await?.call::<AgentList>(()).await?;
     if json {
         println!("{}", serde_json::to_string(&list)?);
         return Ok(());
