@@ -37,9 +37,10 @@ use relay_proto::methods::{
     SchedulePause, ScheduleReload, ScheduleResume, ScheduleRun, WorkspaceList,
 };
 use relay_proto::rule::{Rule, RuleKind, RuleStatus};
-use relay_proto::types::{Event as LedgerEvent, Mark, Run};
+use relay_proto::types::{Event as LedgerEvent, Mark, Run, RunState};
 use rows::{Names, Row};
 use rules::RuleRow;
+use std::collections::HashSet;
 use std::time::{Duration, Instant};
 use term::TermView;
 
@@ -98,6 +99,12 @@ struct App {
     rules: Vec<Rule>,
     /// The other view's selection, kept for when you come back.
     other_sel: Option<String>,
+    /// Jobs opened to their runs.
+    opened: HashSet<String>,
+    /// First list line on screen, and how many fit: the scroll map. Cells,
+    /// because drawing sets them while the rows still borrow the app.
+    scroll: std::cell::Cell<usize>,
+    list_h: std::cell::Cell<u16>,
     /// The selected row's key (`r:<id>` or `q:<id>`); the cursor follows it
     /// across re-ranks.
     sel: Option<String>,
@@ -115,6 +122,30 @@ struct App {
     mode: Mode,
     flash: Option<(String, Instant)>,
     quit: bool,
+}
+
+/// The first of `n` lines to show in a window `h` tall so that line `sel` is
+/// visible and not under an edge marker: when the window starts past the
+/// top, its first line says how much is above; when it ends before the end,
+/// its last line says how much is below. `prev` is where the window was, so
+/// it only moves when it must.
+fn viewport(n: usize, h: usize, sel: usize, prev: usize) -> usize {
+    if n <= h || h < 3 {
+        return 0;
+    }
+    let mut top = prev.min(n - h);
+    if sel < top + usize::from(top > 0) {
+        top = sel.saturating_sub(1);
+    }
+    loop {
+        let more = top + h < n;
+        let last = top + h - 1 - usize::from(more);
+        if sel <= last || top + h >= n {
+            break;
+        }
+        top += 1;
+    }
+    top
 }
 
 /// Where things go on screen.
@@ -170,6 +201,9 @@ pub async fn run(home: &Home) -> Result<()> {
         view: View::Work,
         rules: Vec::new(),
         other_sel: None,
+        opened: HashSet::new(),
+        scroll: std::cell::Cell::new(0),
+        list_h: std::cell::Cell::new(0),
         sel: None,
         pane: Pane::Facts,
         focus: Focus::List,
@@ -250,15 +284,13 @@ impl App {
             Ok(d) => self.digest = d,
             Err(e) => self.say(format!("daemon: {e:#}")),
         }
-        if self.view == View::Rules {
-            match self.rpc.call::<RuleList>(ScheduleFilter { all: false }).await {
-                Ok(r) => self.rules = r,
-                Err(e) => self.say(format!("daemon: {e:#}")),
-            }
+        match self.rpc.call::<RuleList>(ScheduleFilter { all: false }).await {
+            Ok(r) => self.rules = r,
+            Err(e) => self.say(format!("daemon: {e:#}")),
         }
         self.settle();
         if self.pane == Pane::Facts
-            && let Some(Row::Run(i)) = self.selected()
+            && let Some(i) = self.selected_run()
         {
             let filter = EventFilter {
                 run: Some(i.run.id.clone()),
@@ -274,7 +306,16 @@ impl App {
     // ---- the list ----------------------------------------------------------
 
     fn rows(&self) -> Vec<Row<'_>> {
-        rows::build(&self.digest, &self.names, &self.filter, Timestamp::now())
+        rows::build(
+            &self.digest,
+            &rows::Context {
+                names: &self.names,
+                rules: &self.rules,
+                opened: &self.opened,
+                filter: &self.filter,
+                now: Timestamp::now(),
+            },
+        )
     }
 
     fn rule_rows(&self) -> Vec<RuleRow<'_>> {
@@ -315,8 +356,12 @@ impl App {
     }
 
     fn selected_run(&self) -> Option<&DigestItem> {
+        self.selected().and_then(|r| r.item())
+    }
+
+    fn selected_job(&self) -> Option<rows::Job<'_>> {
         match self.selected() {
-            Some(Row::Run(i)) => Some(i),
+            Some(Row::Job(j)) => Some(j),
             _ => None,
         }
     }
@@ -602,6 +647,21 @@ impl App {
                     self.wide = false;
                 } else if self.focus == Focus::Pane {
                     self.focus = Focus::List;
+                } else if let Some(key) = self.selected_job().map(|j| j.key.clone())
+                    && self.opened.remove(&key)
+                {
+                } else if let Some(id) = match self.selected() {
+                    Some(Row::Fold(i)) => Some(i.run.id.clone()),
+                    _ => None,
+                } {
+                    // Under an opened job: back up to the job, and fold it.
+                    let keys = self.keys();
+                    let at = keys.iter().position(|k| *k == format!("r:{id}")).unwrap_or(0);
+                    let job = keys[..at].iter().rev().find(|k| k.starts_with("j:")).cloned();
+                    if let Some(job) = job {
+                        self.opened.remove(&job);
+                        self.select(Some(job));
+                    }
                 } else if !self.filter.is_empty() {
                     self.filter.clear();
                     self.settle();
@@ -617,8 +677,20 @@ impl App {
             }
             (KeyCode::Home, _) | (KeyCode::Char('g'), _) => self.step(isize::MIN / 2),
             (KeyCode::End, _) | (KeyCode::Char('G'), _) => self.step(isize::MAX / 2),
+            (KeyCode::PageDown, _) | (KeyCode::Char('d'), KeyModifiers::CONTROL) => {
+                self.step(self.list_h.get().saturating_sub(2).max(1) as isize);
+                self.refresh().await;
+            }
+            (KeyCode::PageUp, _) | (KeyCode::Char('u'), KeyModifiers::CONTROL) => {
+                self.step(-(self.list_h.get().saturating_sub(2).max(1) as isize));
+                self.refresh().await;
+            }
             (KeyCode::Enter, _) => {
-                if let Some(r) = self.selected_rule() {
+                if let Some(key) = self.selected_job().map(|j| j.key.clone()) {
+                    if !self.opened.remove(&key) {
+                        self.opened.insert(key);
+                    }
+                } else if let Some(r) = self.selected_rule() {
                     match r.kind() {
                         RuleKind::Schedule if r.approved() => {
                             self.mode = Mode::Fire(ScheduleName {
@@ -749,7 +821,15 @@ impl App {
         let a = areas(f.area(), self.wide, self.focus);
         let rows = self.rows();
         let rule_rows = self.rule_rows();
-        let news = self.digest.items.iter().filter(|i| i.unseen).count();
+        // News is counted the way it is shown: a job with unseen runs is one.
+        let news = rows
+            .iter()
+            .filter(|r| match r {
+                Row::Run(i) => i.unseen,
+                Row::Job(j) => j.unseen(),
+                _ => false,
+            })
+            .count();
         let title = match self.view {
             View::Work => rows::headline(&rows, news, &self.filter),
             View::Rules => rules::headline(&rule_rows, &self.filter),
@@ -776,6 +856,7 @@ impl App {
     }
 
     fn draw_list(&self, f: &mut Frame, area: Rect, rows: &[Row]) {
+        self.list_h.set(area.height);
         if rows.is_empty() {
             let msg = if self.filter.is_empty() {
                 " nothing running · rl run -- <command>"
@@ -805,23 +886,42 @@ impl App {
                     Span::raw(format!(" {:>4}  ", fmt_age(q.created_at, now))),
                     Span::raw(q.title.clone()),
                 ]),
-                Row::Run(i) => {
+                Row::Run(i) | Row::Fold(i) => {
                     let r = &i.run;
+                    let under = matches!(row, Row::Fold(_));
                     let mark = if i.unseen { "•" } else { " " };
                     let mut spans = vec![
-                        Span::raw(format!(" {mark} ")),
+                        Span::raw(format!(" {mark} {}", if under { "  " } else { "" })),
                         Span::styled(
                             format!("{:<8}", state_label(r.state, r.confidence)),
                             state_style(r.state),
                         ),
                         Span::raw(format!(" {:>4}  ", fmt_age(i.at, now))),
-                        Span::raw(r.title.clone()),
+                        Span::raw(if under { String::new() } else { r.title.clone() }),
                     ];
                     if let Some(j) = &i.joined_by {
                         spans.push(Span::raw(format!("  ● {j}")).dim());
                     }
-                    spans.push(Span::raw(format!("  {}", i.summary)).dim());
+                    let sep = if under { "" } else { "  " };
+                    spans.push(Span::raw(format!("{sep}{}", i.summary)).dim());
                     Line::from(spans)
+                }
+                Row::Job(j) => {
+                    let last = j.last();
+                    let mark = if j.unseen() { "•" } else { " " };
+                    let open = if self.opened.contains(&j.key) { "▾" } else { "▸" };
+                    let word = match last.run.state {
+                        RunState::Failed => "failed",
+                        RunState::Stopped => "stopped",
+                        _ => "ok",
+                    };
+                    Line::from(vec![
+                        Span::raw(format!(" {mark} ")),
+                        Span::styled(format!("{open} {word:<6}"), state_style(last.run.state)),
+                        Span::raw(format!(" {:>4}  ", fmt_age(last.at, now))),
+                        Span::raw(j.name.clone()),
+                        Span::raw(format!("  {}", j.summary())).dim(),
+                    ])
                 }
             };
             if selected {
@@ -830,8 +930,26 @@ impl App {
             }
             lines.push(line);
         }
-        let offset = sel_line.saturating_sub(area.height.saturating_sub(1) as usize);
-        f.render_widget(Paragraph::new(lines).scroll((offset as u16, 0)), area);
+        // The window follows the selection; when there is more either side,
+        // the edge line says how much.
+        let h = area.height as usize;
+        let n = lines.len();
+        if h == 0 {
+            return;
+        }
+        let top = viewport(n, h, sel_line, self.scroll.get());
+        self.scroll.set(top);
+        let more_below = top + h < n;
+        let mut shown: Vec<Line> = lines[top..(top + h).min(n)].to_vec();
+        if top > 0 {
+            shown[0] = Line::from(Span::raw(format!(" ▲ {top} more")).dim());
+        }
+        if more_below {
+            let left = n - (top + h);
+            let i = shown.len() - 1;
+            shown[i] = Line::from(Span::raw(format!(" ▼ {left} more")).dim());
+        }
+        f.render_widget(Paragraph::new(shown), area);
     }
 
     fn draw_rules(&self, f: &mut Frame, area: Rect, rows: &[RuleRow]) {
@@ -896,7 +1014,15 @@ impl App {
             return;
         }
         let lines = match self.selected() {
-            Some(Row::Run(i)) => pane::run_lines(i, &self.events, &self.names, now),
+            Some(Row::Run(i)) | Some(Row::Fold(i)) => pane::run_lines(i, &self.events, &self.names, now),
+            Some(Row::Job(j)) => {
+                let rule = self.rules.iter().find(|x| {
+                    x.kind() == j.kind
+                        && x.name() == j.name
+                        && (x.is_global() || std::path::Path::new(x.scope()) == j.last().run.workspace)
+                });
+                pane::job_lines(&j, rule, &self.names, now)
+            }
             Some(Row::Question(q)) => {
                 let asker = q.run.as_deref().and_then(|id| self.run_by_id(id));
                 pane::question_lines(q, asker, &self.picked, now)
@@ -973,6 +1099,15 @@ impl App {
                 let how = if q.multi { "pick · enter answer" } else { "answer" };
                 format!("1-{n} {how} · n not this · ↑↓ · r rules · / filter · q quit")
             }
+            Some(Row::Job(j)) => {
+                let open = if self.opened.contains(&j.key) {
+                    "enter close"
+                } else {
+                    "enter open"
+                };
+                format!("{open} · r rules · / filter · d clear news · q quit")
+            }
+            Some(Row::Fold(_)) => "enter output · esc fold · f wide · r rules · / filter · q quit".into(),
             Some(Row::Run(i)) if i.run.state.is_terminal() => {
                 "enter output · f wide · r rules · / filter · d clear news · q quit".into()
             }
@@ -981,5 +1116,32 @@ impl App {
             }
             _ => "r rules · / filter · q quit".into(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::viewport;
+
+    #[test]
+    fn the_window_keeps_the_selection_clear_of_the_edge_markers() {
+        // Everything fits: no window.
+        assert_eq!(viewport(10, 20, 9, 0), 0);
+        // Selection at the top: no marker above, so line 0 shows.
+        assert_eq!(viewport(50, 10, 0, 0), 0);
+        // Down to the last usable line (the last of the window is the marker).
+        assert_eq!(viewport(50, 10, 8, 0), 0);
+        assert_eq!(viewport(50, 10, 9, 0), 1, "top 1 shows 1..=10; 1 and 10 are markers");
+        assert_eq!(viewport(50, 10, 10, 1), 2);
+        // The window stays put while the selection is inside it.
+        assert_eq!(viewport(50, 10, 5, 2), 2);
+        // Up under the top marker pulls the window up.
+        assert_eq!(viewport(50, 10, 2, 2), 1);
+        assert_eq!(viewport(50, 10, 1, 1), 0);
+        // At the very end there is no bottom marker, so the last line is usable.
+        assert_eq!(viewport(50, 10, 49, 0), 40);
+        assert_eq!(viewport(50, 10, 41, 40), 40);
+        // Too short for markers: just the lines.
+        assert_eq!(viewport(50, 2, 30, 0), 0);
     }
 }

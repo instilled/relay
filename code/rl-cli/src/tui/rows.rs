@@ -5,33 +5,141 @@
 //! order of their most urgent member; inside a group, questions come first,
 //! then runs by attention, newest change first. A workspace path reads as the
 //! name it was registered under.
+//!
+//! Runs a schedule or a rule started, once they have ended, fold into one
+//! line per job — the name, the cadence, how many went well, and the last
+//! outcome — so a job firing every thirty seconds is one row, not a screen.
+//! A run still going, or waiting on you, is never folded; `enter` on a job
+//! opens it to its recent runs.
 
 use crate::rank;
 use jiff::{SignedDuration, Timestamp};
 use relay_proto::decision::Decision;
 use relay_proto::methods::{Digest, DigestItem};
-use relay_proto::types::{Cause, Run};
-use std::collections::HashMap;
+use relay_proto::rule::{Rule, RuleKind};
+use relay_proto::types::{Cause, Run, RunState};
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 /// Ended runs stay on the list this long.
 pub const RECENT: SignedDuration = SignedDuration::from_hours(24);
 
+/// Ended runs a job shows when opened.
+pub const OPENED: usize = 20;
+
 pub enum Row<'a> {
     Group(String),
     Question(&'a Decision),
     Run(&'a DigestItem),
+    /// A schedule's or rule's ended runs, as one line.
+    Job(Job<'a>),
+    /// One of an opened job's runs, under it.
+    Fold(&'a DigestItem),
 }
 
-impl Row<'_> {
+impl<'a> Row<'a> {
     /// Selectable rows carry a stable key, so the cursor survives a re-rank.
     pub fn key(&self) -> Option<String> {
         match self {
             Row::Group(_) => None,
             Row::Question(d) => Some(format!("q:{}", d.id)),
-            Row::Run(i) => Some(format!("r:{}", i.run.id)),
+            Row::Run(i) | Row::Fold(i) => Some(format!("r:{}", i.run.id)),
+            Row::Job(j) => Some(j.key.clone()),
         }
     }
+
+    /// The run a row is, whether on its own or under a job.
+    pub fn item(&self) -> Option<&'a DigestItem> {
+        match self {
+            Row::Run(i) | Row::Fold(i) => Some(i),
+            _ => None,
+        }
+    }
+}
+
+/// A schedule's or rule's ended runs, folded: what the job is and how it has
+/// been going. `runs` is newest first.
+#[derive(Clone)]
+pub struct Job<'a> {
+    /// `j:<kind>:<name>@<group key>`.
+    pub key: String,
+    pub kind: RuleKind,
+    pub name: String,
+    pub runs: Vec<&'a DigestItem>,
+    /// `every 30s`, `on run.failed` — when the rule is known.
+    pub when: Option<String>,
+}
+
+impl<'a> Job<'a> {
+    pub fn last(&self) -> &'a DigestItem {
+        self.runs[0]
+    }
+    pub fn ok(&self) -> usize {
+        self.runs.iter().filter(|i| i.run.state == RunState::Finished).count()
+    }
+    pub fn failed(&self) -> usize {
+        self.runs.iter().filter(|i| i.run.state == RunState::Failed).count()
+    }
+    pub fn stopped(&self) -> usize {
+        self.runs.iter().filter(|i| i.run.state == RunState::Stopped).count()
+    }
+    pub fn unseen(&self) -> bool {
+        self.runs.iter().any(|i| i.unseen)
+    }
+    /// The job ranks as its last run did.
+    pub fn score(&self) -> u8 {
+        rank::score(&self.last().run)
+    }
+    /// `every 30s · ok ×118 · 1 failed · last exit 0 · 0s`.
+    pub fn summary(&self) -> String {
+        let mut parts = Vec::new();
+        if let Some(w) = &self.when {
+            parts.push(w.clone());
+        }
+        let ok = self.ok();
+        if ok > 0 {
+            parts.push(format!("ok ×{ok}"));
+        }
+        let failed = self.failed();
+        if failed > 0 {
+            parts.push(format!("{failed} failed"));
+        }
+        let stopped = self.stopped();
+        if stopped > 0 {
+            parts.push(format!("{stopped} stopped"));
+        }
+        parts.push(format!("last {}", self.last().summary));
+        parts.join(" · ")
+    }
+    /// One mark per run, oldest first: `·` went well, `×` failed, `○` stopped.
+    pub fn marks(&self, n: usize) -> String {
+        self.runs
+            .iter()
+            .take(n)
+            .rev()
+            .map(|i| match i.run.state {
+                RunState::Failed => '×',
+                RunState::Stopped => '○',
+                _ => '·',
+            })
+            .collect()
+    }
+}
+
+/// Which job an ended run folds into, if any.
+fn job_of(r: &Run) -> Option<(RuleKind, &str)> {
+    if !r.state.is_terminal() {
+        return None;
+    }
+    match &r.cause {
+        Cause::Schedule(n) => Some((RuleKind::Schedule, n)),
+        Cause::Reaction(n) => Some((RuleKind::Reaction, n)),
+        _ => None,
+    }
+}
+
+pub fn job_key(kind: RuleKind, name: &str, group: &str) -> String {
+    format!("j:{kind}:{name}@{group}")
 }
 
 /// Workspace paths → the names they were registered under.
@@ -93,6 +201,7 @@ struct Group<'a> {
     key: String,
     questions: Vec<&'a Decision>,
     runs: Vec<&'a DigestItem>,
+    jobs: Vec<Job<'a>>,
 }
 
 impl Group<'_> {
@@ -104,6 +213,7 @@ impl Group<'_> {
         self.runs
             .iter()
             .map(|i| rank::score(&i.run) as i16)
+            .chain(self.jobs.iter().map(|j| j.score() as i16))
             .min()
             .unwrap_or(i16::MAX)
     }
@@ -111,16 +221,30 @@ impl Group<'_> {
         self.runs
             .iter()
             .map(|i| i.at)
+            .chain(self.jobs.iter().map(|j| j.last().at))
             .chain(self.questions.iter().map(|q| q.created_at))
             .max()
             .unwrap_or(Timestamp::UNIX_EPOCH)
     }
 }
 
-/// Everything on the list, in order. `filter` is matched case-insensitively
+/// What the list is built from besides the digest.
+pub struct Context<'a> {
+    pub names: &'a Names,
+    /// Every rule, for a job's cadence; may be empty.
+    pub rules: &'a [Rule],
+    /// Jobs opened to their runs, by key.
+    pub opened: &'a HashSet<String>,
+    pub filter: &'a str,
+    pub now: Timestamp,
+}
+
+/// Everything on the list, in order. The filter is matched case-insensitively
 /// against titles, group names, CLIs and summaries.
-pub fn build<'a>(d: &'a Digest, names: &Names, filter: &str, now: Timestamp) -> Vec<Row<'a>> {
-    let f = filter.to_lowercase();
+pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
+    let names = cx.names;
+    let now = cx.now;
+    let f = cx.filter.to_lowercase();
     let hit = |parts: &[&str]| f.is_empty() || parts.iter().any(|s| s.to_lowercase().contains(&f));
     let mut groups: Vec<Group<'a>> = Vec::new();
     let group_of = |key: String, groups: &mut Vec<Group<'a>>| -> usize {
@@ -131,10 +255,17 @@ pub fn build<'a>(d: &'a Digest, names: &Names, filter: &str, now: Timestamp) -> 
                     key,
                     questions: Vec::new(),
                     runs: Vec::new(),
+                    jobs: Vec::new(),
                 });
                 groups.len() - 1
             }
         }
+    };
+    let when_of = |kind: RuleKind, name: &str, r: &Run| -> Option<String> {
+        cx.rules
+            .iter()
+            .find(|x| x.kind() == kind && x.name() == name && (x.is_global() || Path::new(x.scope()) == r.workspace))
+            .map(|x| x.when())
     };
     let run_by_id = |id: &str| d.items.iter().map(|i| &i.run).find(|r| r.id == id);
     for q in &d.decisions {
@@ -157,6 +288,24 @@ pub fn build<'a>(d: &'a Digest, names: &Names, filter: &str, now: Timestamp) -> 
         }
         let key = r.group_key();
         let name = names.group(&key);
+        if let Some((kind, job)) = job_of(r) {
+            if !hit(&[job, &name, &r.title, &i.summary]) {
+                continue;
+            }
+            let g = group_of(key.clone(), &mut groups);
+            let jkey = job_key(kind, job, &key);
+            match groups[g].jobs.iter_mut().find(|j| j.key == jkey) {
+                Some(j) => j.runs.push(i),
+                None => groups[g].jobs.push(Job {
+                    key: jkey,
+                    kind,
+                    name: job.to_string(),
+                    runs: vec![i],
+                    when: when_of(kind, job, r),
+                }),
+            }
+            continue;
+        }
         if !hit(&[&r.title, &name, r.cli.as_deref().unwrap_or(""), &i.summary]) {
             continue;
         }
@@ -170,23 +319,44 @@ pub fn build<'a>(d: &'a Digest, names: &Names, filter: &str, now: Timestamp) -> 
                 .cmp(&rank::score(&b.run))
                 .then_with(|| b.at.cmp(&a.at))
         });
+        for j in &mut g.jobs {
+            j.runs.sort_by_key(|i| std::cmp::Reverse(i.at));
+        }
+        g.jobs
+            .sort_by(|a, b| a.score().cmp(&b.score()).then_with(|| b.last().at.cmp(&a.last().at)));
     }
     groups.sort_by(|a, b| a.score().cmp(&b.score()).then_with(|| b.latest().cmp(&a.latest())));
     let mut rows = Vec::new();
     for g in groups {
         rows.push(Row::Group(names.group(&g.key)));
         rows.extend(g.questions.into_iter().map(Row::Question));
-        rows.extend(g.runs.into_iter().map(Row::Run));
+        // Runs and jobs share one order: attention first, newest first.
+        let mut mixed: Vec<(u8, Timestamp, Row<'a>)> = g
+            .runs
+            .into_iter()
+            .map(|i| (rank::score(&i.run), i.at, Row::Run(i)))
+            .collect();
+        mixed.extend(g.jobs.into_iter().map(|j| (j.score(), j.last().at, Row::Job(j))));
+        mixed.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| b.1.cmp(&a.1)));
+        for (_, _, row) in mixed {
+            let folded: Vec<&DigestItem> = match &row {
+                Row::Job(j) if cx.opened.contains(&j.key) => j.runs.iter().copied().take(OPENED).collect(),
+                _ => vec![],
+            };
+            rows.push(row);
+            rows.extend(folded.into_iter().map(Row::Fold));
+        }
     }
     rows
 }
 
-/// `(questions, need you, working, finished)` over what the list shows.
-pub fn counts(rows: &[Row]) -> (usize, usize, usize, usize) {
-    let mut c = (0, 0, 0, 0);
+/// `(questions, need you, working, finished, jobs)` over what the list shows.
+/// A job counts once, and as needing you when its last run failed.
+pub fn counts(rows: &[Row]) -> (usize, usize, usize, usize, usize) {
+    let mut c = (0, 0, 0, 0, 0);
     for r in rows {
         match r {
-            Row::Group(_) => {}
+            Row::Group(_) | Row::Fold(_) => {}
             Row::Question(_) => c.0 += 1,
             Row::Run(i) => {
                 use relay_proto::types::RunState::*;
@@ -196,6 +366,12 @@ pub fn counts(rows: &[Row]) -> (usize, usize, usize, usize) {
                     Finished | Stopped => c.3 += 1,
                 }
             }
+            Row::Job(j) => {
+                c.4 += 1;
+                if j.last().run.state == RunState::Failed {
+                    c.1 += 1;
+                }
+            }
         }
     }
     c
@@ -203,7 +379,7 @@ pub fn counts(rows: &[Row]) -> (usize, usize, usize, usize) {
 
 /// The header line: what needs you first, then what is moving.
 pub fn headline(rows: &[Row], news: usize, filter: &str) -> String {
-    let (asked, need, working, fin) = counts(rows);
+    let (asked, need, working, fin, jobs) = counts(rows);
     let mut parts = Vec::new();
     if asked > 0 {
         parts.push(format!("{asked} to decide"));
@@ -216,6 +392,9 @@ pub fn headline(rows: &[Row], news: usize, filter: &str) -> String {
     }
     if fin > 0 {
         parts.push(format!("{fin} finished"));
+    }
+    if jobs > 0 {
+        parts.push(format!("{jobs} job{}", if jobs == 1 { "" } else { "s" }));
     }
     if news > 0 {
         parts.push(format!("{news} new"));
@@ -288,9 +467,23 @@ mod tests {
         rows.iter()
             .map(|r| match r {
                 Row::Group(g) => format!("[{g}]"),
+                Row::Fold(i) => format!("  r:{}", i.run.id),
                 other => other.key().unwrap(),
             })
             .collect()
+    }
+
+    fn build_with<'a>(d: &'a Digest, names: &Names, filter: &str, now: Timestamp) -> Vec<Row<'a>> {
+        build(
+            d,
+            &Context {
+                names,
+                rules: &[],
+                opened: &HashSet::new(),
+                filter,
+                now,
+            },
+        )
     }
 
     #[test]
@@ -320,22 +513,126 @@ mod tests {
             decisions: vec![question("q1", "/home/f/relay", Some("fail1"), "2026-09-10T11:01:00Z")],
         };
         let names = Names::new([(PathBuf::from("/home/f/relay"), "relay".to_string())]);
-        let rows = build(&d, &names, "", now);
+        let rows = build_with(&d, &names, "", now);
         assert_eq!(
             keys(&rows),
             ["[relay]", "q:q1", "r:fail1", "r:done1", "[api]", "r:blok1", "r:work1"],
             "the question puts relay first; api is named by its folder; old01 is gone"
         );
-        assert_eq!(counts(&rows), (1, 2, 1, 1));
+        assert_eq!(counts(&rows), (1, 2, 1, 1, 0));
         assert_eq!(
             headline(&rows, 2, ""),
             "relay · 1 to decide · 2 need you · 1 working · 1 finished · 2 new"
         );
 
-        let rows = build(&d, &names, "api", now);
+        let rows = build_with(&d, &names, "api", now);
         assert_eq!(keys(&rows), ["[api]", "r:blok1", "r:work1"]);
         assert_eq!(headline(&rows, 0, "api"), "relay · 1 needs you · 1 working · /api");
         assert_eq!(headline(&[], 0, ""), "relay · nothing running");
+    }
+
+    fn fired(id: &str, job: &str, state: RunState, at: &str, unseen: bool) -> DigestItem {
+        let mut i = item(id, state, "/home/f/relay", at, unseen);
+        i.run.cause = Cause::Schedule(job.into());
+        i.summary = if state == RunState::Failed {
+            "exit 1 · 0s".into()
+        } else {
+            "exit 0 · 0s".into()
+        };
+        i
+    }
+
+    #[test]
+    fn a_jobs_ended_runs_are_one_line_until_opened() {
+        let now: Timestamp = "2026-09-10T12:00:00Z".parse().unwrap();
+        let mut items: Vec<DigestItem> = (0..30)
+            .map(|n| {
+                fired(
+                    &format!("p{n:02}"),
+                    "pulse",
+                    RunState::Finished,
+                    &format!("2026-09-10T11:{n:02}:00Z"),
+                    false,
+                )
+            })
+            .collect();
+        items.push(fired("bad", "pulse", RunState::Failed, "2026-09-10T10:30:00Z", true));
+        // Its run still going stays its own row; so does one started by hand.
+        let mut going = fired("go", "pulse", RunState::Working, "2026-09-10T11:59:30Z", false);
+        going.run.ended_at = None;
+        items.push(going);
+        items.push(item(
+            "hand",
+            RunState::Finished,
+            "/home/f/relay",
+            "2026-09-10T11:58:00Z",
+            false,
+        ));
+        let d = Digest {
+            since: now,
+            items,
+            decisions: vec![],
+        };
+        let names = Names::new([(PathBuf::from("/home/f/relay"), "relay".to_string())]);
+        let rows = build_with(&d, &names, "", now);
+        let job_key = job_key(RuleKind::Schedule, "pulse", "/home/f/relay");
+        assert_eq!(
+            keys(&rows),
+            ["[relay]", "r:hand", &job_key, "r:go"],
+            "finished before working, newest first among equals"
+        );
+        let Some(Row::Job(j)) = rows.iter().find(|r| matches!(r, Row::Job(_))) else {
+            panic!("no job row");
+        };
+        assert_eq!(j.runs.len(), 31);
+        assert_eq!(j.last().run.id, "p29");
+        assert_eq!((j.ok(), j.failed(), j.stopped()), (30, 1, 0));
+        assert!(j.unseen(), "the failed run is still news");
+        assert_eq!(j.summary(), "ok ×30 · 1 failed · last exit 0 · 0s");
+        assert_eq!(j.marks(31).chars().filter(|c| *c == '×').count(), 1);
+        assert!(j.marks(31).starts_with('×'), "oldest first: {}", j.marks(31));
+        assert_eq!(counts(&rows), (0, 0, 1, 1, 1));
+        assert_eq!(headline(&rows, 1, ""), "relay · 1 working · 1 finished · 1 job · 1 new");
+
+        // Opened: its newest runs, capped, under it.
+        let opened: HashSet<String> = [job_key.clone()].into_iter().collect();
+        let rows = build(
+            &d,
+            &Context {
+                names: &names,
+                rules: &[],
+                opened: &opened,
+                filter: "",
+                now,
+            },
+        );
+        let k = keys(&rows);
+        assert_eq!(k.len(), 4 + OPENED);
+        assert_eq!(k[3], "  r:p29");
+        assert_eq!(k[3 + OPENED - 1], "  r:p10");
+        assert_eq!(k[3 + OPENED], "r:go");
+
+        // The filter finds a job by its name.
+        let rows = build_with(&d, &names, "puls", now);
+        assert_eq!(keys(&rows), ["[relay]", &job_key], "{:?}", keys(&rows));
+
+        // A job whose last run failed ranks as failed and says so.
+        let d2 = Digest {
+            since: now,
+            items: vec![
+                fired("a", "pulse", RunState::Finished, "2026-09-10T11:00:00Z", false),
+                fired("b", "pulse", RunState::Failed, "2026-09-10T11:30:00Z", true),
+                item("w", RunState::Working, "/home/f/relay", "2026-09-10T11:40:00Z", false),
+            ],
+            decisions: vec![],
+        };
+        let rows = build_with(&d2, &names, "", now);
+        assert_eq!(
+            keys(&rows),
+            ["[relay]", &job_key, "r:w"],
+            "failed job above working run"
+        );
+        assert_eq!(counts(&rows), (0, 1, 1, 0, 1));
     }
 
     #[test]

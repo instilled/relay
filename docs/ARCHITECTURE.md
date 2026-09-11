@@ -191,7 +191,11 @@ connection journals regardless — so a viewer leaving costs nothing and the run
 The panel (`rl` with no command, `rl-cli/src/tui`) is the same two calls behind one screen. The
 left is one list built from `digest.get` (`tui/rows.rs`): questions first, then runs by attention,
 grouped by what they belong to, and named — a workspace by the name it was registered under, a
-cause as "schedule nightly" or "rule tests-failed", never an id. The right is the selected thing
+cause as "schedule nightly" or "rule tests-failed", never an id. Runs a schedule or a rule
+started fold, once ended, into one line per job — name, cadence, how many went well, the last
+outcome — so a job firing every thirty seconds is a row, not a screen; a run still going or
+waiting on you is never folded, and `enter` on a job opens it to its last twenty. When the list
+is taller than the screen, its first and last lines say how much is above and below. The right is the selected thing
 (`tui/pane.rs`): a run's facts and recent events, or a question with its options numbered;
 pressing the number is `decision.take`, and the run it starts becomes the selection. `enter` on a
 run turns the pane into its terminal, watched; `enter` again joins, `ctrl-\` lets go, `esc` is
