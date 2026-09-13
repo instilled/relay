@@ -18,6 +18,9 @@ use tokio::io::BufReader;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 
 const SCROLLBACK: u64 = 256 * 1024;
+/// Rows kept above the screen, to read back through. The daemon replays
+/// bytes; without somewhere to put them only the last screenful survived.
+const SCROLLBACK_ROWS: usize = 10_000;
 
 pub struct TermView {
     pub id: String,
@@ -33,6 +36,11 @@ pub struct TermView {
     /// Who holds the keyboard when our join was refused.
     pub busy_with: Option<String>,
     pub ended: Option<i32>,
+    /// How far back the view is, in rows; 0 is the live screen.
+    scroll: usize,
+    /// The watch stream is over. An ended run's output is still worth
+    /// reading, so the view stays; there is just nothing more to poll.
+    pub over: bool,
 }
 
 impl TermView {
@@ -56,7 +64,7 @@ impl TermView {
         };
         Ok(Self {
             id: id.to_string(),
-            parser: vt100::Parser::new(rows, cols, 0),
+            parser: vt100::Parser::new(rows, cols, SCROLLBACK_ROWS),
             info,
             rd,
             _wr: wr,
@@ -65,6 +73,8 @@ impl TermView {
             note: None,
             busy_with: None,
             ended: None,
+            scroll: 0,
+            over: false,
         })
     }
 
@@ -79,9 +89,16 @@ impl TermView {
     /// Next frame from the watch connection. `Ok(false)` when the stream is over.
     pub async fn pump(&mut self) -> io::Result<bool> {
         match read_frame(&mut self.rd).await? {
-            None => Ok(false),
+            None => {
+                self.over = true;
+                Ok(false)
+            }
             Some(Frame::Output(b)) => {
                 self.parser.process(&b);
+                // New output must not yank a reader back to the bottom.
+                if self.scroll > 0 {
+                    self.parser.screen_mut().set_scrollback(self.scroll);
+                }
                 Ok(true)
             }
             Some(Frame::Note(s)) => {
@@ -141,6 +158,10 @@ impl TermView {
         let (cols, rows) = self.pane;
         write_frame(&mut wr, &Frame::Resize { cols, rows }).await?;
         self.parser.screen_mut().set_size(rows, cols);
+        // Taking the keyboard means being where the run is, not where you
+        // were reading.
+        self.parser.screen_mut().set_scrollback(0);
+        self.scroll = 0;
         self.join = Some((rd, wr));
         self.busy_with = None;
         Ok(true)
@@ -161,11 +182,28 @@ impl TermView {
             let (cols, rows) = pane;
             write_frame(wr, &Frame::Resize { cols, rows }).await?;
             self.parser.screen_mut().set_size(rows, cols);
+            if self.scroll > 0 {
+                self.parser.screen_mut().set_scrollback(self.scroll);
+            }
         }
         Ok(())
     }
 
     pub fn app_cursor(&self) -> bool {
         self.parser.screen().application_cursor()
+    }
+
+    /// Moves the view back through what scrolled off. Positive rows go
+    /// further back; it stops at the oldest line kept, and at the live
+    /// screen. vt100 clamps, so its answer is the one we keep.
+    pub fn scroll_by(&mut self, rows: isize) {
+        let want = (self.scroll as isize).saturating_add(rows).max(0) as usize;
+        self.parser.screen_mut().set_scrollback(want);
+        self.scroll = self.parser.screen().scrollback();
+    }
+
+    /// How far back the view is, in rows.
+    pub fn scrolled(&self) -> usize {
+        self.scroll
     }
 }
