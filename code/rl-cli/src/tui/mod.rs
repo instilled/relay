@@ -3,15 +3,22 @@
 //! Everything ranked by attention — questions, then runs that need you,
 //! then what is working and what finished — grouped by the folder it belongs
 //! to, whose rules ride the group's header. `enter` is the run's terminal,
-//! full screen and joined, the way you would have it in a tab of your own;
-//! `w` watches it; `i` opens a pane of facts beside the list; `n` is a
-//! form at the foot for a run to start or a rule to write down; `a` is the
-//! same form drafted by an assistant from plain words. Monochrome;
-//! colour only for attention states; the footer is the only chrome (J8).
-//! Nothing on screen is an id.
+//! full screen and joined, the way you would have it in a tab of your own.
+//!
+//! Typing is what the panel rests in. One live line sits at the foot and
+//! always takes what you type: a shell line runs here, an agent's name runs
+//! that agent, and anything else is words the assistant reads and drafts into
+//! the form for your `enter`. The line says which of those it is, at its right
+//! edge, before you commit. `tab` completes against the folder of the row you
+//! are on. Everything that is not typing is a `/` command. Monochrome; colour
+//! only for attention states; the footer is the only chrome (J8). Nothing on
+//! screen is an id.
 
+mod complete;
 pub mod form;
 mod keys;
+mod line;
+mod palette;
 mod pane;
 mod rows;
 mod rules;
@@ -36,11 +43,11 @@ use relay_core::Home;
 use relay_core::time::fmt_age;
 use relay_proto::decision::Decision;
 use relay_proto::methods::{
-    DecisionDismiss, DecisionNote, DecisionTake, DecisionTakeParams, Digest, DigestGet, DigestItem, DigestParams,
-    EventFilter, EventList, PresenceClient, PresenceTouch, ReactionPause, ReactionReload, ReactionResume, RuleApprove,
-    RuleList, RuleRef, RunArchive, RunArchiveParams, RunId, RunIds, RunMark, RunMarkParams, RunSeen, RunSpec, RunStart,
-    RunStop, RunStopParams, ScheduleFilter, ScheduleName, SchedulePause, ScheduleReload, ScheduleResume, ScheduleRun,
-    SummaryGet, SummaryMake, SummaryParams, WorkspaceList,
+    AgentList, DecisionDismiss, DecisionNote, DecisionTake, DecisionTakeParams, Digest, DigestGet, DigestItem,
+    DigestParams, EventFilter, EventList, GcParams, GcRun, PresenceClient, PresenceTouch, ReactionPause,
+    ReactionReload, ReactionResume, RuleApprove, RuleList, RuleRef, RunArchive, RunArchiveParams, RunId, RunIds,
+    RunMark, RunMarkParams, RunSeen, RunSpec, RunStart, RunStop, RunStopParams, ScheduleFilter, ScheduleName,
+    SchedulePause, ScheduleReload, ScheduleResume, ScheduleRun, SummaryGet, SummaryMake, SummaryParams, WorkspaceList,
 };
 use relay_proto::rule::{Rule, RuleKind, RuleStatus};
 use relay_proto::types::{Cause, Event as LedgerEvent, Mark, Run, RunKind, RunState, Summary};
@@ -54,6 +61,8 @@ use term::TermView;
 const REFRESH: Duration = Duration::from_secs(1);
 /// Footer messages fade after this.
 const FLASH: Duration = Duration::from_secs(4);
+/// The most candidates `tab` shows at once.
+const CANDS: usize = 6;
 /// Narrower than this, the pane takes the screen instead of sharing it.
 const SPLIT_AT: u16 = 100;
 /// The list's share of a split screen, in percent.
@@ -83,12 +92,23 @@ enum Mode {
     Dismiss(String),
     /// `enter` on a schedule: `y` fires it now.
     Fire(ScheduleName),
-    /// `/` pressed: typing a filter.
-    Filter(String),
-    /// `n` or `e` pressed: a run or a rule being written down.
+    /// A run or a rule being written down, by hand or drafted for you.
     Form(Box<Form>),
-    /// `a` pressed: plain words for the assistant, being typed.
-    Ask(String),
+    /// A question taken out of the list: its options, answered by number.
+    Answer(String),
+}
+
+/// What `tab` is offering for the word being typed, and where the cycle is.
+struct Completing {
+    /// The line as it was when tab was first pressed, and where the cursor
+    /// was: every candidate goes into that, never into the last one taken.
+    line: String,
+    cursor: usize,
+    /// The line as it stands with that candidate in it, so any keystroke
+    /// since drops the offer.
+    shown: String,
+    cands: Vec<complete::Candidate>,
+    at: usize,
 }
 
 /// Words handed to the assistant, until it answers.
@@ -151,6 +171,13 @@ struct App {
     asking: Option<Asking>,
     /// Options marked so far on a multi-choice question.
     picked: Vec<usize>,
+    /// The live line at the foot; typing is the panel's resting state.
+    line: line::Line,
+    /// The agents the registry knows (`agent.list`), read once.
+    agents: Vec<String>,
+    /// The directories of $PATH, for completing the first word.
+    path_dirs: Vec<PathBuf>,
+    completing: Option<Completing>,
     mode: Mode,
     flash: Option<(String, Instant)>,
     quit: bool,
@@ -216,18 +243,25 @@ struct Areas {
     pane: Option<Rect>,
     /// The form, at the foot of the body.
     form: Option<Rect>,
+    /// What `tab` is offering, just above the line.
+    cands: Option<Rect>,
+    /// The live line.
+    line: Rect,
     footer: Rect,
 }
 
-fn areas(area: Rect, wide: bool, show_pane: bool, form_h: u16) -> Areas {
-    let [head, body, form, footer] = Layout::vertical([
+fn areas(area: Rect, wide: bool, show_pane: bool, form_h: u16, cands_h: u16) -> Areas {
+    let [head, body, form, cands, line, footer] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Fill(1),
         Constraint::Length(if form_h > 0 { form_h + 1 } else { 0 }),
+        Constraint::Length(cands_h),
+        Constraint::Length(1),
         Constraint::Length(1),
     ])
     .areas(area);
     let form = (form_h > 0).then_some(form);
+    let cands = (cands_h > 0).then_some(cands);
     let (list, pane) = if wide {
         (None, Some(body))
     } else if !show_pane {
@@ -248,6 +282,8 @@ fn areas(area: Rect, wide: bool, show_pane: bool, form_h: u16) -> Areas {
         list,
         pane,
         form,
+        cands,
+        line,
         footer,
     }
 }
@@ -288,6 +324,10 @@ pub async fn run(home: &Home) -> Result<()> {
         summary: None,
         summarising: None,
         picked: Vec::new(),
+        line: line::Line::default(),
+        agents: Vec::new(),
+        path_dirs: complete::path_dirs(),
+        completing: None,
         mode: Mode::Normal,
         flash: None,
         quit: false,
@@ -374,7 +414,7 @@ impl App {
 
     /// The area the terminal draws into.
     fn pane_size(&self, size: Rect) -> (u16, u16) {
-        let a = areas(size, self.wide, true, 0);
+        let a = areas(size, self.wide, true, 0, 0);
         let r = a.pane.unwrap_or(size);
         (r.width.max(1), r.height.max(1))
     }
@@ -390,6 +430,12 @@ impl App {
         match self.rpc.call::<RuleList>(ScheduleFilter { all: false }).await {
             Ok(r) => self.rules = r,
             Err(e) => self.say(format!("daemon: {e:#}")),
+        }
+        // Which CLIs are agents decides how a line reads; asked once.
+        if self.agents.is_empty()
+            && let Ok(list) = self.rpc.call::<AgentList>(()).await
+        {
+            self.agents = list.into_iter().map(|a| a.name).collect();
         }
         self.settle();
         if self.pane == Pane::Facts
@@ -564,7 +610,7 @@ impl App {
             return;
         };
         self.seen(vec![id.clone()]).await;
-        let a = areas(area, true, true, 0);
+        let a = areas(area, true, true, 0, 0);
         let r = a.pane.unwrap_or(area);
         let size = (r.width.max(1), r.height.max(1));
         match TermView::open(&self.home, &id, size).await {
@@ -762,22 +808,22 @@ impl App {
             .unwrap_or_else(|| PathBuf::from("/"))
     }
 
-    fn new_run_form(&mut self) {
-        let form = Form::run(&self.folder_here()).with_folders(&self.names.paths());
-        self.mode = Mode::Form(Box::new(form));
-    }
-
     fn new_rule_form(&mut self) {
         let folder = self.folder_here();
         let yours =
             self.view == View::Rules && self.rules_scope.is_none() && self.rule_here().is_none_or(Rule::is_global);
-        let form = Form::rule((!yours).then_some(folder.as_path()), &folder).with_folders(&self.names.paths());
+        let form = Form::rule((!yours).then_some(folder.as_path()), &folder)
+            .with_folders(&self.names.paths())
+            .with_agents(&self.agents);
         self.mode = Mode::Form(Box::new(form));
     }
 
     fn edit_rule_form(&mut self) {
         if let Some(r) = self.rule_here() {
-            self.mode = Mode::Form(Box::new(Form::edit(r).with_folders(&self.names.paths())));
+            let form = Form::edit(r)
+                .with_folders(&self.names.paths())
+                .with_agents(&self.agents);
+            self.mode = Mode::Form(Box::new(form));
         }
     }
 
@@ -890,7 +936,8 @@ impl App {
         match answer {
             Ok(Ok((draft, out))) => {
                 let form = crate::interpret::form_of(&draft, &asking.folder, asking.editing.as_ref())
-                    .with_folders(&self.names.paths());
+                    .with_folders(&self.names.paths())
+                    .with_agents(&self.agents);
                 self.mode = Mode::Form(Box::new(form));
                 self.say(format!(
                     "{} drafted this from \"{}\" · enter does it · esc does not",
@@ -988,19 +1035,36 @@ impl App {
                 }
                 return Ok(());
             }
-            Mode::Ask(mut buf) => {
+            Mode::Answer(id) => {
+                let Some(q) = self.digest.decisions.iter().find(|d| d.id == id).cloned() else {
+                    return Ok(());
+                };
                 match k.code {
-                    KeyCode::Esc => {}
-                    KeyCode::Enter => self.ask(buf),
-                    KeyCode::Backspace => {
-                        buf.pop();
-                        self.mode = Mode::Ask(buf);
+                    KeyCode::Esc => self.picked.clear(),
+                    KeyCode::Char(c @ '1'..='9') => {
+                        let i = (c as u8 - b'1') as usize;
+                        match (i < q.options.len(), q.multi) {
+                            (true, true) => {
+                                match self.picked.iter().position(|&p| p == i) {
+                                    Some(at) => {
+                                        self.picked.remove(at);
+                                    }
+                                    None => self.picked.push(i),
+                                }
+                                self.mode = Mode::Answer(id);
+                            }
+                            (true, false) => {
+                                let key = q.options[i].key.clone();
+                                self.answer(id, vec![key]).await;
+                            }
+                            (false, _) => self.mode = Mode::Answer(id),
+                        }
                     }
-                    KeyCode::Char(c) if !k.modifiers.contains(KeyModifiers::CONTROL) => {
-                        buf.push(c);
-                        self.mode = Mode::Ask(buf);
+                    KeyCode::Enter if q.multi && !self.picked.is_empty() => {
+                        let opts: Vec<String> = self.picked.iter().map(|&i| q.options[i].key.clone()).collect();
+                        self.answer(id, opts).await;
                     }
-                    _ => self.mode = Mode::Ask(buf),
+                    _ => self.mode = Mode::Answer(id),
                 }
                 return Ok(());
             }
@@ -1012,36 +1076,35 @@ impl App {
                 }
                 return Ok(());
             }
-            Mode::Filter(mut buf) => {
-                match k.code {
-                    KeyCode::Esc => self.filter.clear(),
-                    KeyCode::Enter => self.filter = buf,
-                    KeyCode::Backspace => {
-                        buf.pop();
-                        self.filter = buf.clone();
-                        self.mode = Mode::Filter(buf);
-                    }
-                    KeyCode::Char(c) => {
-                        buf.push(c);
-                        self.filter = buf.clone();
-                        self.mode = Mode::Filter(buf);
-                    }
-                    _ => self.mode = Mode::Filter(buf),
-                }
-                self.settle();
-                return Ok(());
-            }
             Mode::Normal => {}
         }
         if self.pane == Pane::Term && self.term.is_some() {
             return self.key_term(k).await;
         }
-        self.key_list(k, area).await
+        // The line takes the keyboard first; what it leaves, the list has.
+        match self.line.key(&k) {
+            line::Act::Typing => {
+                self.completing = None;
+                Ok(())
+            }
+            line::Act::Complete => {
+                self.tab();
+                Ok(())
+            }
+            line::Act::Submit => self.submit(area).await,
+            line::Act::Cancel if !self.line.is_empty() => {
+                self.line.clear();
+                self.completing = None;
+                Ok(())
+            }
+            _ => self.key_list(k, area).await,
+        }
     }
 
+    /// What the line does not take: moving about, and backing out.
     async fn key_list(&mut self, k: KeyEvent, area: Rect) -> Result<()> {
         match (k.code, k.modifiers) {
-            (KeyCode::Char('c'), KeyModifiers::CONTROL) | (KeyCode::Char('q'), _) => self.quit = true,
+            (KeyCode::Char('c'), KeyModifiers::CONTROL) => self.quit = true,
             (KeyCode::Esc, _) => {
                 if self.wide {
                     self.wide = false;
@@ -1070,128 +1133,202 @@ impl App {
                     self.settle();
                 }
             }
-            (KeyCode::Down, _) | (KeyCode::Char('j'), _) => {
+            (KeyCode::Down, _) => {
                 self.step(1);
                 self.saw_selected().await;
                 self.refresh().await;
             }
-            (KeyCode::Up, _) | (KeyCode::Char('k'), _) => {
+            (KeyCode::Up, _) => {
                 self.step(-1);
                 self.saw_selected().await;
                 self.refresh().await;
             }
-            (KeyCode::Home, _) | (KeyCode::Char('g'), _) => {
+            (KeyCode::Home, _) => {
                 self.step(isize::MIN / 2);
                 self.saw_selected().await;
                 self.refresh().await;
             }
-            (KeyCode::End, _) | (KeyCode::Char('G'), _) => {
+            (KeyCode::End, _) => {
                 self.step(isize::MAX / 2);
                 self.saw_selected().await;
                 self.refresh().await;
             }
-            (KeyCode::PageDown, _) | (KeyCode::Char('d'), KeyModifiers::CONTROL) => {
+            (KeyCode::PageDown, _) => {
                 self.step(self.list_h.get().saturating_sub(2).max(1) as isize);
                 self.saw_selected().await;
                 self.refresh().await;
             }
-            (KeyCode::PageUp, _) | (KeyCode::Char('u'), KeyModifiers::CONTROL) => {
+            (KeyCode::PageUp, _) => {
                 self.step(-(self.list_h.get().saturating_sub(2).max(1) as isize));
                 self.saw_selected().await;
                 self.refresh().await;
             }
-            (KeyCode::Enter, _) => {
-                if let Some(key) = self.selected_job().map(|j| j.key.clone()) {
-                    if !self.opened.remove(&key) {
-                        self.opened.insert(key);
-                    }
-                } else if let Some(r) = self.selected_rule() {
-                    match r.kind() {
-                        RuleKind::Schedule if r.approved() => {
-                            self.mode = Mode::Fire(ScheduleName {
-                                name: r.name().into(),
-                                scope: Some(r.scope().into()),
-                            })
-                        }
-                        RuleKind::Schedule => self.say("not approved: y first"),
-                        RuleKind::Reaction => self.say("a reaction fires on its event"),
-                    }
-                } else if let Some(q) = self.selected_question() {
-                    if q.multi && !self.picked.is_empty() {
-                        let id = q.id.clone();
-                        let opts: Vec<String> = self.picked.iter().map(|&i| q.options[i].key.clone()).collect();
-                        self.answer(id, opts).await;
-                    } else {
-                        let n = q.options.len().min(pane::MAX_KEYS);
-                        self.say(format!("press 1-{n} to answer"));
-                    }
-                } else {
-                    self.open_term(area, true).await;
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// `enter` on an empty line: whatever the row under the cursor is for.
+    async fn enter_row(&mut self, area: Rect) -> Result<()> {
+        if let Some(key) = self.selected_job().map(|j| j.key.clone()) {
+            if !self.opened.remove(&key) {
+                self.opened.insert(key);
+            }
+        } else if let Some(r) = self.selected_rule() {
+            match r.kind() {
+                RuleKind::Schedule if r.approved() => {
+                    self.mode = Mode::Fire(ScheduleName {
+                        name: r.name().into(),
+                        scope: Some(r.scope().into()),
+                    })
+                }
+                RuleKind::Schedule => self.say("not approved yet: /approve"),
+                RuleKind::Reaction => self.say("a reaction fires on its event"),
+            }
+        } else if let Some(q) = self.selected_question() {
+            let id = q.id.clone();
+            self.picked.clear();
+            self.mode = Mode::Answer(id);
+        } else {
+            self.open_term(area, true).await;
+        }
+        Ok(())
+    }
+
+    /// Where the line is being typed: the folder of the row under the cursor,
+    /// what agents there are, and $PATH.
+    fn here<'a>(&'a self, folder: &'a Path) -> complete::Here<'a> {
+        complete::Here {
+            folder,
+            agents: &self.agents,
+            path_dirs: &self.path_dirs,
+        }
+    }
+
+    /// `enter` on the line: what it says. Nothing typed, the row instead.
+    async fn submit(&mut self, area: Rect) -> Result<()> {
+        self.completing = None;
+        let folder = self.folder_here();
+        let what = {
+            let here = self.here(&folder);
+            line::what(self.line.text(), &self.agents, &|h| complete::runnable(h, &here))
+        };
+        match what {
+            line::What::Empty => return self.enter_row(area).await,
+            line::What::Slash(rest) => return self.command(&rest, area).await,
+            line::What::Shell(cmd) => {
+                self.line.clear();
+                let d = form::RunDraft {
+                    cwd: folder,
+                    kind: RunKind::Command,
+                    argv: vec!["sh".into(), "-c".into(), cmd],
+                    title: None,
+                };
+                if let Err(e) = self.start_run(d, area).await {
+                    self.say(format!("{e:#}"));
                 }
             }
-            (KeyCode::Char('w'), _) if self.view == View::Work => {
-                if self.selected_run().is_some() {
-                    self.open_term(area, false).await;
+            line::What::Agent { agent, prompt } => {
+                self.line.clear();
+                let mut argv = vec![agent];
+                argv.extend(prompt);
+                let d = form::RunDraft {
+                    cwd: folder,
+                    kind: RunKind::Agent,
+                    argv,
+                    title: None,
+                };
+                if let Err(e) = self.start_run(d, area).await {
+                    self.say(format!("{e:#}"));
                 }
             }
-            (KeyCode::Char(c @ '1'..='9'), _) => {
-                if let Some(q) = self.selected_question() {
-                    let i = (c as u8 - b'1') as usize;
-                    if i < q.options.len() {
-                        if q.multi {
-                            match self.picked.iter().position(|&p| p == i) {
-                                Some(at) => {
-                                    self.picked.remove(at);
-                                }
-                                None => self.picked.push(i),
-                            }
-                        } else {
-                            let (id, key) = (q.id.clone(), q.options[i].key.clone());
-                            self.answer(id, vec![key]).await;
-                        }
-                    }
-                }
-            }
-            (KeyCode::Char('n'), _) => match self.view {
-                View::Work => self.new_run_form(),
-                View::Rules => self.new_rule_form(),
-            },
-            (KeyCode::Char('N'), _) => self.new_rule_form(),
-            (KeyCode::Char('a'), _) => {
+            line::What::Ask(words) => {
                 if self.asking.is_some() {
-                    self.say("still asking; x on its run stops it");
+                    self.say("still asking; /stop on its run");
                 } else {
-                    self.mode = Mode::Ask(String::new());
+                    self.line.clear();
+                    self.ask(words);
                 }
             }
-            (KeyCode::Char('e'), _) => self.edit_rule_form(),
-            (KeyCode::Char('E'), _) => self.edit_rule_file(),
-            (KeyCode::Char('s'), _) if self.view == View::Work => self.summarise(),
-            (KeyCode::Char('i'), _) => self.show_pane = !self.show_pane,
-            (KeyCode::Char('f'), _) => {
-                self.wide = !self.wide;
-                if self.wide {
-                    self.show_pane = true;
-                }
+        }
+        Ok(())
+    }
+
+    /// `tab`: as much of the word as every candidate agrees on, then round
+    /// the candidates one at a time.
+    fn tab(&mut self) {
+        let text = self.line.text().to_string();
+        // A `/` line completes to the command it names.
+        if let Some(rest) = text.strip_prefix('/') {
+            if let Some(c) = palette::matching(rest).first() {
+                let taken = format!("/{} ", c.name);
+                let at = taken.len();
+                self.line.set_with_cursor(taken, at);
             }
-            (KeyCode::Char('x'), _) => {
+            self.completing = None;
+            return;
+        }
+        // Tab again on what tab last wrote: the next one.
+        if let Some(c) = self.completing.take()
+            && c.shown == text
+            && !c.cands.is_empty()
+        {
+            let at = (c.at + 1) % c.cands.len();
+            let (l, pos) = complete::apply(&c.line, c.cursor, &c.cands[at].text);
+            self.line.set_with_cursor(l.clone(), pos);
+            self.completing = Some(Completing { shown: l, at, ..c });
+            return;
+        }
+        let cur = self.line.cursor();
+        let folder = self.folder_here();
+        let cands = {
+            let here = self.here(&folder);
+            complete::candidates(&text, cur, &here)
+        };
+        if cands.is_empty() {
+            return;
+        }
+        // What they all share goes in first, and the next tab starts the list.
+        let (take, at) = match complete::common_prefix(&cands) {
+            Some(p) => (p, cands.len() - 1),
+            None => (cands[0].text.clone(), 0),
+        };
+        let (l, pos) = complete::apply(&text, cur, &take);
+        self.line.set_with_cursor(l.clone(), pos);
+        self.completing = Some(Completing {
+            line: text,
+            cursor: cur,
+            shown: l,
+            cands,
+            at,
+        });
+    }
+
+    /// A `/` command: the panel's own doing, by name.
+    async fn command(&mut self, rest: &str, area: Rect) -> Result<()> {
+        let Some((c, arg)) = palette::parse(rest) else {
+            self.say(format!("no such command: /{rest} · /help lists them"));
+            return Ok(());
+        };
+        self.line.clear();
+        match c.cmd {
+            palette::Cmd::Quit => self.quit = true,
+            palette::Cmd::Help => {
+                let names: Vec<&str> = palette::ALL.iter().map(|c| c.name).collect();
+                self.say(format!("/{}", names.join(" · /")));
+            }
+            palette::Cmd::Stop => {
                 if let Some(i) = self.selected_run()
                     && !i.run.state.is_terminal()
                 {
                     self.mode = Mode::Stop(i.run.id.clone());
                 } else if let Some(q) = self.selected_question() {
                     self.mode = Mode::Dismiss(q.id.clone());
+                } else {
+                    self.say("nothing here to stop");
                 }
             }
-            (KeyCode::Char('m'), _) => {
-                if let Some(i) = self.selected_run()
-                    && !i.run.state.is_terminal()
-                {
-                    self.mode = Mode::Mark(i.run.id.clone());
-                }
-            }
-            (KeyCode::Char('/'), _) => self.mode = Mode::Filter(self.filter.clone()),
-            (KeyCode::Char('d'), _) if self.view == View::Work => {
+            palette::Cmd::Done => {
                 if let Some(j) = self.selected_job() {
                     let ids: Vec<String> = j.runs.iter().map(|i| i.run.id.clone()).collect();
                     let what = format!("{} · {} runs", j.name, ids.len());
@@ -1201,35 +1338,94 @@ impl App {
                         let (id, title) = (i.run.id.clone(), i.run.title.clone());
                         self.archive(vec![id], &title).await;
                     } else {
-                        self.say("still going: x stops it");
+                        self.say("still going: /stop first");
                     }
                 }
             }
-            (KeyCode::Char('D'), _) if self.view == View::Work => self.archive_seen().await,
-            (KeyCode::Char('r'), _) => {
+            palette::Cmd::DoneAll => self.archive_seen().await,
+            palette::Cmd::Mark => {
+                let Some(i) = self.selected_run().filter(|i| !i.run.state.is_terminal()) else {
+                    self.say("nothing here that is still going");
+                    return Ok(());
+                };
+                let id = i.run.id.clone();
+                match arg.trim() {
+                    "" => self.mode = Mode::Mark(id),
+                    "done" => self.mark(id, Mark::Done).await,
+                    "blocked" => self.mark(id, Mark::Blocked).await,
+                    "working" => self.mark(id, Mark::Working).await,
+                    other => self.say(format!("mark {other}? done, blocked or working")),
+                }
+            }
+            palette::Cmd::Watch => {
+                if self.selected_run().is_some() {
+                    self.open_term(area, false).await;
+                }
+            }
+            palette::Cmd::Join => {
+                if self.selected_run().is_some() {
+                    self.open_term(area, true).await;
+                }
+            }
+            palette::Cmd::Info => self.show_pane = !self.show_pane,
+            palette::Cmd::Full => {
+                self.wide = !self.wide;
+                if self.wide {
+                    self.show_pane = true;
+                }
+            }
+            palette::Cmd::Rules => {
                 self.rules_scope = match self.view {
                     View::Work => self.selected_folder(),
                     View::Rules => None,
                 };
                 self.toggle_view().await;
             }
-            (KeyCode::Char('R'), _) if self.view == View::Rules => self.reload_rules().await,
-            (KeyCode::Char('y'), _) => {
+            palette::Cmd::Reload => self.reload_rules().await,
+            palette::Cmd::Approve => {
                 if let Some(r) = self.selected_rule()
                     && r.status() == RuleStatus::NeedsApproval
                 {
                     let (name, scope, kind) = (r.name().to_string(), r.scope().to_string(), r.kind());
                     self.approve(name, scope, kind).await;
+                } else {
+                    self.say("no rule here waiting on you");
                 }
             }
-            (KeyCode::Char('p'), _) => {
+            palette::Cmd::Pause => {
                 if let Some(r) = self.selected_rule() {
                     let (name, scope, kind, paused) =
                         (r.name().to_string(), r.scope().to_string(), r.kind(), r.paused());
                     self.set_paused(name, scope, kind, !paused).await;
                 }
             }
-            _ => {}
+            palette::Cmd::New => self.new_rule_form(),
+            palette::Cmd::Edit => self.edit_rule_form(),
+            palette::Cmd::Editor => self.edit_rule_file(),
+            palette::Cmd::Summarise => self.summarise(),
+            palette::Cmd::Ask => {
+                if arg.trim().is_empty() {
+                    self.say("/ask what? plain words, and the assistant drafts it");
+                } else if self.asking.is_some() {
+                    self.say("still asking; /stop on its run");
+                } else {
+                    self.ask(arg);
+                }
+            }
+            palette::Cmd::Filter => {
+                self.filter = arg.trim().to_string();
+                self.settle();
+            }
+            palette::Cmd::Gc => match self.rpc.call::<GcRun>(GcParams::default()).await {
+                Ok(r) if r.runs == 0 => self.say(format!("nothing with a journal ended over {} ago", r.older_than)),
+                Ok(r) => self.say(format!(
+                    "dropped {} journal{} · {} · the runs and their events stay",
+                    r.runs,
+                    if r.runs == 1 { "" } else { "s" },
+                    bytes_words(r.bytes)
+                )),
+                Err(e) => self.say(format!("gc: {e:#}")),
+            },
         }
         Ok(())
     }
@@ -1278,7 +1474,16 @@ impl App {
             Mode::Form(x) => x.height(),
             _ => 0,
         };
-        let a = areas(f.area(), self.wide, self.show_pane, form_h);
+        // A `/` line offers commands while it is typed; tab offers words.
+        let slash: Option<Vec<&palette::Command>> = matches!(self.mode, Mode::Normal)
+            .then(|| self.line.text().strip_prefix('/').map(palette::matching))
+            .flatten();
+        let cands_h = match (&slash, &self.completing) {
+            (Some(cs), _) => cs.len().min(CANDS) as u16,
+            (None, Some(c)) => c.cands.len().min(CANDS) as u16,
+            (None, None) => 0,
+        };
+        let a = areas(f.area(), self.wide, self.show_pane, form_h, cands_h);
         let rows = self.rows();
         let rule_rows = self.rule_rows();
         // News is counted the way it is shown: a job with unseen runs is one.
@@ -1322,7 +1527,69 @@ impl App {
             lines.extend(x.lines());
             f.render_widget(Paragraph::new(lines), area);
         }
+        if let Some(area) = a.cands {
+            let lines: Vec<Line> = match (&slash, &self.completing) {
+                (Some(cs), _) => cs
+                    .iter()
+                    .take(area.height as usize)
+                    .map(|c| {
+                        let name = if c.args.is_empty() {
+                            format!("   /{}", c.name)
+                        } else {
+                            format!("   /{} {}", c.name, c.args)
+                        };
+                        Line::from(vec![
+                            Span::raw(format!("{name:<30}")),
+                            Span::raw(c.what.to_string()).dim(),
+                        ])
+                    })
+                    .collect(),
+                (None, Some(c)) => c
+                    .cands
+                    .iter()
+                    .take(area.height as usize)
+                    .map(|x| Line::from(Span::raw(format!("   {}", x.text)).dim()))
+                    .collect(),
+                (None, None) => vec![],
+            };
+            f.render_widget(Paragraph::new(lines), area);
+        }
+        if matches!(self.mode, Mode::Normal) {
+            f.render_widget(Paragraph::new(self.line_line(a.line.width)), a.line);
+        }
         f.render_widget(Paragraph::new(format!(" {}", self.footer())).dim(), a.footer);
+    }
+
+    /// The live line: what is typed, where the cursor is, and — at the right
+    /// edge, before you commit — what `enter` is about to do with it.
+    fn line_line(&self, width: u16) -> Line<'static> {
+        if self.line.is_empty() {
+            return Line::from(vec![
+                Span::raw(" › ").dim(),
+                Span::raw("what do you want done here? / for commands").dim(),
+            ]);
+        }
+        let folder = self.folder_here();
+        let what = {
+            let here = self.here(&folder);
+            line::what(self.line.text(), &self.agents, &|h| complete::runnable(h, &here))
+        };
+        let hint = match &what {
+            line::What::Empty => String::new(),
+            line::What::Slash(_) => "↵ a command".into(),
+            line::What::Shell(_) => format!("↵ runs in {}", self.names.workspace(&folder)),
+            line::What::Agent { agent, .. } => format!("↵ {agent} here"),
+            line::What::Ask(_) => "↵ asks the assistant".into(),
+        };
+        let text = self.line.text();
+        let (before, after) = text.split_at(self.line.cursor());
+        let typed = format!(" › {before}▏{after}");
+        let room = (width as usize).saturating_sub(typed.chars().count() + hint.chars().count() + 1);
+        Line::from(vec![
+            Span::raw(typed),
+            Span::raw(" ".repeat(room)),
+            Span::raw(hint).dim(),
+        ])
     }
 
     fn draw_list(&self, f: &mut Frame, area: Rect, rows: &[Row]) {
@@ -1583,13 +1850,15 @@ impl App {
             }
             Mode::Fire(n) => return format!("run {} now? y / any key", n.name),
             Mode::Mark(id) => return format!("mark {}: d done · b blocked · w working · esc", title_of(id)),
-            Mode::Filter(buf) => return format!("/{buf}▏  enter apply · esc clear"),
-            Mode::Ask(buf) => {
-                let about = match self.rule_here() {
-                    Some(r) => format!("about {} · ", r.name()),
-                    None => String::new(),
+            Mode::Answer(id) => {
+                let q = self.digest.decisions.iter().find(|d| &d.id == id);
+                let n = q.map_or(0, |q| q.options.len().min(pane::MAX_KEYS));
+                let how = if q.is_some_and(|q| q.multi) {
+                    "pick · enter answers"
+                } else {
+                    "answers it"
                 };
-                return format!("ask › {buf}▏  {about}enter asks · esc");
+                return format!("1-{n} {how} · esc");
             }
             Mode::Form(f) => {
                 if let Some((m, at)) = &self.flash
@@ -1611,13 +1880,10 @@ impl App {
             return m.clone();
         }
         if let Some(a) = &self.asking {
-            return format!(
-                "asking about \"{}\"… · its run is in the list · x there stops it",
-                a.words
-            );
+            return format!("asking about \"{}\"… · its run is in the list · /stop there", a.words);
         }
         if let Some(s) = &self.summarising {
-            return format!("summarising `{}`… · its run is in the list · x there stops it", s.title);
+            return format!("summarising `{}`… · its run is in the list · /stop there", s.title);
         }
         if self.pane == Pane::Term
             && let Some(t) = &self.term
@@ -1644,48 +1910,55 @@ impl App {
         if let Some(r) = self.selected_rule() {
             let mut s = String::new();
             if r.status() == RuleStatus::NeedsApproval {
-                s.push_str("y approve · ");
+                s.push_str("/approve · ");
             }
-            s.push_str(if r.paused() { "p resume" } else { "p pause" });
+            s.push_str(if r.paused() { "/pause lets it run" } else { "/pause" });
             if r.kind() == RuleKind::Schedule {
-                s.push_str(" · enter run now");
+                s.push_str(" · enter runs it now");
             }
-            s.push_str(" · e edit · a ask · E in editor · n new · R reload · r work · / filter · q quit");
+            s.push_str(" · /edit · /editor · /new · /reload · /rules back");
             return s;
         }
         if self.view == View::Rules {
-            return "n new rule · a ask · R reload · r work · / filter · q quit".into();
+            return "/new a rule · /reload · /rules back · or type something to run here".into();
         }
-        let pane = if self.show_pane { "i hide details" } else { "i details" };
+        let pane = if self.show_pane {
+            "/info hides details"
+        } else {
+            "/info details"
+        };
         match self.selected() {
-            Some(Row::Question(q)) => {
-                let n = q.options.len().min(pane::MAX_KEYS);
-                let how = if q.multi { "pick · enter answer" } else { "answer" };
-                format!("1-{n} {how} · x not this · {pane} · r rules here · / filter · q quit")
-            }
+            Some(Row::Question(_)) => format!("enter answers it · /stop not this · {pane}"),
             Some(Row::Job(j)) => {
                 let open = if self.opened.contains(&j.key) {
-                    "enter close"
+                    "enter closes"
                 } else {
-                    "enter open"
+                    "enter opens"
                 };
-                format!("{open} · e edit rule · {pane} · d done with its runs · r rules here · / filter · q quit")
+                format!("{open} · /edit its rule · /done its runs · {pane}")
             }
-            Some(Row::Fold(_)) => {
-                format!("enter output · {pane} · d done · esc fold · r rules here · / filter · q quit")
-            }
+            Some(Row::Fold(_)) => format!("enter output · /done · esc folds · {pane}"),
             Some(Row::Run(i)) if i.run.state.is_terminal() => {
-                format!(
-                    "enter output · {pane} · s summarise · d done · D done with all seen · r rules here · / filter · q quit"
-                )
+                format!("enter output · /summarise · /done · /done-all · {pane}")
             }
-            Some(Row::Run(_)) => {
-                format!(
-                    "enter join · w watch · {pane} · x stop · m mark · n new · a ask · r rules here · / filter · q quit"
-                )
-            }
-            _ => "n new run · a ask · N new rule · r rules · / filter · q quit".into(),
+            Some(Row::Run(_)) => format!("enter joins it · /watch · /stop · /mark · {pane}"),
+            _ => String::new(),
         }
+    }
+}
+
+/// Bytes in words, near enough for a line of chrome.
+fn bytes_words(n: u64) -> String {
+    const K: f64 = 1024.0;
+    let x = n as f64;
+    if x < K {
+        format!("{n} B")
+    } else if x < K * K {
+        format!("{:.0} KB", x / K)
+    } else if x < K * K * K {
+        format!("{:.1} MB", x / (K * K))
+    } else {
+        format!("{:.1} GB", x / (K * K * K))
     }
 }
 
