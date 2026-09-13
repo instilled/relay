@@ -3,7 +3,8 @@
 //! Everything ranked by attention — questions, then runs that need you,
 //! then what is working and what finished — grouped by the folder it belongs
 //! to, whose rules ride the group's header. `enter` is the run's terminal,
-//! full screen and joined, the way you would have it in a tab of your own.
+//! full screen and watched; `enter` again takes the keyboard, the way you
+//! would have it in a tab of your own, and `ctrl-\` lets go.
 //!
 //! Typing is what the panel rests in. One live line sits at the foot and
 //! always takes what you type: a shell line runs here, an agent's name runs
@@ -395,12 +396,19 @@ impl App {
                 } => self.summarised(done).await,
                 more = async {
                     match &mut self.term {
-                        Some(t) => t.pump().await,
-                        None => std::future::pending().await,
+                        Some(t) if !t.over => t.pump().await,
+                        _ => std::future::pending().await,
                     }
                 } => match more {
                     Ok(true) => {}
-                    Ok(false) => { self.say("connection closed"); self.close_term(); }
+                    Ok(false) => {
+                        // An ended run's output is still worth reading, so the
+                        // view stays; there is just nothing more to poll.
+                        if self.term.as_ref().is_some_and(|t| t.ended.is_none()) {
+                            self.say("connection closed");
+                            self.close_term();
+                        }
+                    }
                     Err(e) => { self.say(format!("stream: {e}")); self.close_term(); }
                 },
             }
@@ -1078,7 +1086,9 @@ impl App {
             }
             Mode::Normal => {}
         }
-        if self.pane == Pane::Term && self.term.is_some() {
+        // Joined, every key is the run's. Watching, the line still has them,
+        // so you can type the next thing without leaving the run you are on.
+        if self.pane == Pane::Term && self.term.as_ref().is_some_and(|t| t.joined() && t.ended.is_none()) {
             return self.key_term(k).await;
         }
         // The line takes the keyboard first; what it leaves, the list has.
@@ -1095,6 +1105,11 @@ impl App {
             line::Act::Cancel if !self.line.is_empty() => {
                 self.line.clear();
                 self.completing = None;
+                Ok(())
+            }
+            _ if self.pane == Pane::Term && self.term.is_some() => {
+                let page = area.height.saturating_sub(3).max(1);
+                self.watch_key(&k, page);
                 Ok(())
             }
             _ => self.key_list(k, area).await,
@@ -1170,6 +1185,17 @@ impl App {
 
     /// `enter` on an empty line: whatever the row under the cursor is for.
     async fn enter_row(&mut self, area: Rect) -> Result<()> {
+        // Watching a run: enter is what takes the keyboard.
+        if self.pane == Pane::Term && self.term.as_ref().is_some_and(|t| !t.joined() && t.ended.is_none()) {
+            let home = self.home.clone();
+            if let Some(t) = &mut self.term {
+                let take = t.busy_with.is_some();
+                if let Err(e) = t.join(&home, take).await {
+                    self.say(format!("join: {e:#}"));
+                }
+            }
+            return Ok(());
+        }
         if let Some(key) = self.selected_job().map(|j| j.key.clone()) {
             if !self.opened.remove(&key) {
                 self.opened.insert(key);
@@ -1188,9 +1214,13 @@ impl App {
         } else if let Some(q) = self.selected_question() {
             let id = q.id.clone();
             self.picked.clear();
+            // The options are numbered in the pane; asking for a number with
+            // nothing numbered on screen is no question at all.
+            self.show_pane = true;
             self.mode = Mode::Answer(id);
         } else {
-            self.open_term(area, true).await;
+            // Watch first — the next enter is what takes the keyboard.
+            self.open_term(area, false).await;
         }
         Ok(())
     }
@@ -1430,6 +1460,7 @@ impl App {
         Ok(())
     }
 
+    /// Joined: every key is the run's, bar the one that lets go.
     async fn key_term(&mut self, k: KeyEvent) -> Result<()> {
         let Some(t) = &mut self.term else {
             self.close_term();
@@ -1438,33 +1469,41 @@ impl App {
         // ctrl-\ is byte 0x1c, which a plain terminal reports as ctrl-4.
         let back =
             matches!(k.code, KeyCode::Char('\\') | KeyCode::Char('4')) && k.modifiers.contains(KeyModifiers::CONTROL);
-        if back || t.ended.is_some() || (!t.joined() && k.code == KeyCode::Esc) {
+        if back {
             self.close_term();
-            return Ok(());
-        }
-        if !t.joined() {
-            // Watching: `enter` joins (or takes over, once refused); `f` widens.
-            match k.code {
-                KeyCode::Enter => {
-                    let take = t.busy_with.is_some();
-                    let home = self.home.clone();
-                    if let Err(e) = t.join(&home, take).await {
-                        self.say(format!("join: {e:#}"));
-                    }
-                }
-                KeyCode::Char('f') => {
-                    self.wide = !self.wide;
-                    self.show_pane = true;
-                }
-                KeyCode::Char('q') => self.quit = true,
-                _ => {}
-            }
             return Ok(());
         }
         if let Some(bytes) = keys::encode(&k, t.app_cursor()) {
             t.input(bytes).await?;
         }
         Ok(())
+    }
+
+    /// Watching a run, or reading an ended one: the few keys the view keeps
+    /// for itself. Everything else has already gone to the line.
+    fn watch_key(&mut self, k: &KeyEvent, page: u16) -> bool {
+        if self.term.is_none() {
+            return false;
+        }
+        let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+        let back = matches!(k.code, KeyCode::Char('\\') | KeyCode::Char('4')) && ctrl;
+        if back || k.code == KeyCode::Esc {
+            self.close_term();
+            return true;
+        }
+        let by = match k.code {
+            KeyCode::PageUp => page as isize,
+            KeyCode::PageDown => -(page as isize),
+            KeyCode::Up => 1,
+            KeyCode::Down => -1,
+            KeyCode::Home => isize::MAX / 2,
+            KeyCode::End => isize::MIN / 2,
+            _ => return false,
+        };
+        if let Some(t) = &mut self.term {
+            t.scroll_by(by);
+        }
+        true
     }
 
     // ---- drawing -----------------------------------------------------------
@@ -1890,15 +1929,18 @@ impl App {
         {
             let mut s = String::new();
             if t.ended.is_some() {
-                s.push_str("ended · any key back");
+                s.push_str("ended · pgup/pgdn reads back · esc back");
             } else if t.joined() {
                 s.push_str("joined · ctrl-\\ back");
             } else if let Some(who) = &t.busy_with {
-                s.push_str(&format!("watching · {who} is joined · enter to take over · esc back"));
+                s.push_str(&format!("watching · {who} is joined · enter takes over · esc back"));
             } else if let Some(who) = &t.info.joiner {
-                s.push_str(&format!("watching · {who} is joined · enter to join · esc back"));
+                s.push_str(&format!("watching · {who} is joined · enter joins · esc back"));
             } else {
-                s.push_str("watching · enter to join · f beside the list · esc back");
+                s.push_str("watching · enter joins · pgup/pgdn reads back · esc back");
+            }
+            if t.scrolled() > 0 {
+                s.push_str(&format!(" · {} back", t.scrolled()));
             }
             if let Some((n, at)) = &t.note
                 && at.elapsed() < FLASH
@@ -1941,7 +1983,7 @@ impl App {
             Some(Row::Run(i)) if i.run.state.is_terminal() => {
                 format!("enter output · /summarise · /done · /done-all · {pane}")
             }
-            Some(Row::Run(_)) => format!("enter joins it · /watch · /stop · /mark · {pane}"),
+            Some(Row::Run(_)) => format!("enter watches it · /join · /stop · /mark · {pane}"),
             _ => String::new(),
         }
     }

@@ -1,7 +1,9 @@
 //! A `vt100` screen drawn into a ratatui buffer. Watchers see the run at the
 //! holder's size; when the pane is shorter, the rows around the cursor win
 //! (a full-screen app keeps it at the bottom, a fresh shell at the top), and
-//! the right edge is clipped.
+//! the right edge is clipped. Scrolled back, the cursor stops deciding: the
+//! top of the window is what was asked for, and the cursor is not drawn
+//! because it is not where you are looking.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -9,10 +11,15 @@ use ratatui::style::{Color, Modifier, Style};
 
 pub fn draw(screen: &vt100::Screen, area: Rect, buf: &mut Buffer) {
     let (rows, cols) = screen.size();
+    let back = screen.scrollback();
     let (cursor_row, _) = screen.cursor_position();
-    let row_off = cursor_row
-        .saturating_sub(area.height.saturating_sub(1))
-        .min(rows.saturating_sub(area.height));
+    let row_off = if back > 0 {
+        0
+    } else {
+        cursor_row
+            .saturating_sub(area.height.saturating_sub(1))
+            .min(rows.saturating_sub(area.height))
+    };
     for y in 0..area.height.min(rows) {
         for x in 0..area.width.min(cols) {
             let Some(cell) = screen.cell(y + row_off, x) else {
@@ -42,7 +49,7 @@ pub fn draw(screen: &vt100::Screen, area: Rect, buf: &mut Buffer) {
             }
         }
     }
-    if !screen.hide_cursor() {
+    if back == 0 && !screen.hide_cursor() {
         let (cr, cc) = screen.cursor_position();
         if cr >= row_off
             && cr - row_off < area.height
@@ -80,6 +87,19 @@ mod tests {
         assert!(
             buf.cell((4, 1)).unwrap().modifier.contains(Modifier::REVERSED),
             "cursor after `last`"
+        );
+
+        // Scrolled back, the top of the window shows and the cursor does not.
+        let mut p = vt100::Parser::new(2, 10, 100);
+        p.process(b"one\r\ntwo\r\nthree\r\nfour");
+        p.screen_mut().set_scrollback(2);
+        let mut buf = Buffer::empty(area);
+        draw(p.screen(), area, &mut buf);
+        assert_eq!(buf.cell((0, 0)).unwrap().symbol(), "o", "two rows back is `one`");
+        assert_eq!(buf.cell((0, 1)).unwrap().symbol(), "t");
+        assert!(
+            !buf.cell((4, 1)).unwrap().modifier.contains(Modifier::REVERSED),
+            "no cursor while scrolled back"
         );
 
         // Content at the top of a tall screen: the cursor decides what shows.

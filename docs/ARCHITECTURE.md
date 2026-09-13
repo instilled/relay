@@ -214,12 +214,18 @@ header says which folder it is in. Moving the cursor onto a row is looking at it
 the digest leaves it out, `rl ls --all` and the ledger keep it — and `/done-all` is done with
 everything ended that has been looked at. Ended runs also leave on their own after a day;
 `/done` is for the impatient. On the line: `rl done <id>…`, `rl done --all`. Nothing is ever deleted here; that is
-retention (§7). `enter` on a run is its terminal, full screen and joined — the
-keyboard is the run's, as it would be in a tab of your own — and `ctrl-\` lets go; `/watch` only
-watches, and `esc` is the list again. `/info` opens a pane of facts beside the list
-(`tui/pane.rs`): a run's facts and recent events, a job's tally, a question with its options
-numbered; `enter` on a question takes it out of the list and the number answers it, which is
-`decision.take`, and the run it starts becomes the selection. `/summarise` on an ended run asks
+retention (§7). `enter` on a run opens its terminal, watching: the output is
+live but the keyboard is still yours, so the line at the foot goes on taking what you type.
+`enter` again takes the keyboard and `ctrl-\` lets go; `/join` goes straight in, and `esc` is the
+list again. While watching, `pgup` and `pgdn` read back through what scrolled off — the screen
+keeps ten thousand rows above itself (`tui/term.rs`), so a run that failed two hundred lines ago
+can still be read — and the footer says how far back you are. New output never yanks the view to
+the bottom; joining does, because taking the keyboard means being where the run is. An ended run
+keeps what it printed after its holder has gone, to be read the same way. `/info` opens a pane of
+facts beside the list (`tui/pane.rs`): a run's facts and recent events, a job's tally, a question
+with its options numbered; `enter` on a question opens that pane and takes the question out of
+the list, where the number answers it, which is `decision.take`, and the run it starts becomes
+the selection. `/summarise` on an ended run asks
 `assistants.summarise` what it did (§6): the asking is a run in the list, and the answer lands in
 the pane under the facts as `claude said, 2m ago`, always marked as the assistant's; asking again
 asks anew. 
