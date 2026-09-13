@@ -354,7 +354,7 @@ impl App {
             terminal.draw(|f| self.draw(f))?;
             let area: Rect = terminal.size()?.into();
             let size = self.pane_size(area);
-            if self.term.is_some() && size != self.term_size {
+            if self.pane == Pane::Term && self.term.is_some() && size != self.term_size {
                 self.term_size = size;
                 if let Some(t) = &mut self.term {
                     t.resized(size).await?;
@@ -595,11 +595,23 @@ impl App {
         self.select(Some(keys[next].clone()));
     }
 
+    /// The view goes for good: the stream died, or another run wants it.
     fn close_term(&mut self) {
         if self.term.is_some() {
             self.wide = false;
         }
         self.term = None;
+        self.pane = Pane::Facts;
+    }
+
+    /// Stepping back to the list. The view stays open and goes on reading, so
+    /// coming back is instant and lands where it was left; the keyboard, if
+    /// it was ours, goes back to the run.
+    fn leave_term(&mut self) {
+        if let Some(t) = &mut self.term {
+            t.unjoin();
+        }
+        self.wide = false;
         self.pane = Pane::Facts;
     }
 
@@ -615,8 +627,25 @@ impl App {
     /// The selected run's terminal, full screen: joined, or only watched.
     async fn open_term(&mut self, area: Rect, join: bool) {
         let Some(id) = self.selected_run().map(|i| i.run.id.clone()) else {
+            self.say("nothing here to open");
             return;
         };
+        // Still reading this one: back to it, where it was left.
+        if self.term.as_ref().is_some_and(|t| t.id == id) {
+            self.pane = Pane::Term;
+            self.wide = true;
+            self.term_size = self.pane_size(area);
+            if join {
+                let home = self.home.clone();
+                if let Some(t) = &mut self.term {
+                    let take = t.busy_with.is_some();
+                    if let Err(e) = t.join(&home, take).await {
+                        self.say(format!("join: {e:#}"));
+                    }
+                }
+            }
+            return;
+        }
         self.seen(vec![id.clone()]).await;
         let a = areas(area, true, true, 0, 0);
         let r = a.pane.unwrap_or(area);
@@ -1470,7 +1499,7 @@ impl App {
         let back =
             matches!(k.code, KeyCode::Char('\\') | KeyCode::Char('4')) && k.modifiers.contains(KeyModifiers::CONTROL);
         if back {
-            self.close_term();
+            self.leave_term();
             return Ok(());
         }
         if let Some(bytes) = keys::encode(&k, t.app_cursor()) {
@@ -1488,7 +1517,7 @@ impl App {
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         let back = matches!(k.code, KeyCode::Char('\\') | KeyCode::Char('4')) && ctrl;
         if back || k.code == KeyCode::Esc {
-            self.close_term();
+            self.leave_term();
             return true;
         }
         let by = match k.code {
