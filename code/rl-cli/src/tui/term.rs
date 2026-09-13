@@ -2,9 +2,10 @@
 //! screen, watched first, joined on the first keypress (J7).
 //!
 //! Two daemon connections at most: the watch connection carries output for
-//! as long as we look; a join connection is opened on demand and carries
-//! keystrokes and resizes. That way escalating to join never restarts the
-//! screen.
+//! as long as this view lasts — which outlives stepping back to the list, so
+//! coming back is instant and keeps its place — and a join connection is
+//! opened on demand, carrying keystrokes and resizes. That way escalating to
+//! join never restarts the screen, and letting go never loses it.
 
 use crate::attach::client_name;
 use crate::client::Client;
@@ -205,5 +206,11 @@ impl TermView {
     /// How far back the view is, in rows.
     pub fn scrolled(&self) -> usize {
         self.scroll
+    }
+
+    /// Gives the keyboard back, still watching. Dropping the connection is
+    /// how the daemon is told: it releases the run to whoever asks next.
+    pub fn unjoin(&mut self) {
+        self.join = None;
     }
 }

@@ -216,8 +216,10 @@ everything ended that has been looked at. Ended runs also leave on their own aft
 `/done` is for the impatient. On the line: `rl done <id>…`, `rl done --all`. Nothing is ever deleted here; that is
 retention (§7). `enter` on a run opens its terminal, watching: the output is
 live but the keyboard is still yours, so the line at the foot goes on taking what you type.
-`enter` again takes the keyboard and `ctrl-\` lets go; `/join` goes straight in, and `esc` is the
-list again. While watching, `pgup` and `pgdn` read back through what scrolled off — the screen
+`enter` again takes the keyboard and `ctrl-\` gives it back; `/join` goes straight in, and `esc`
+is the list again. Stepping back does not throw the view away — the watch connection stays open
+and goes on reading, so `enter` on that run again returns to it at once, at the place it was
+left, with nothing replayed. Another run's terminal replaces it; only the stream dying closes it. While watching, `pgup` and `pgdn` read back through what scrolled off — the screen
 keeps ten thousand rows above itself (`tui/term.rs`), so a run that failed two hundred lines ago
 can still be read — and the footer says how far back you are. New output never yanks the view to
 the bottom; joining does, because taking the keyboard means being where the run is. An ended run
