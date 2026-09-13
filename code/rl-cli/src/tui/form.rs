@@ -17,7 +17,9 @@ use relay_proto::schedule::{GLOBAL_SCOPE, ScheduleSpec};
 use relay_proto::types::RunKind;
 use std::path::{Path, PathBuf};
 
-/// CLIs that are agents: a line starting with one is a prompt, not a shell line.
+/// CLIs that are agents, for the moment before the daemon has said which it
+/// knows. The registry is the real answer (`agent.list`), and an agent of your
+/// own in `detect/*.yaml` only ever shows up there.
 const AGENTS: &[&str] = &["claude", "codex", "gemini", "aider", "cursor-agent", "copilot"];
 
 /// The word for your own rules in the `in` field.
@@ -55,6 +57,8 @@ pub struct Form {
     /// Folders `in` cycles through with ↑/↓: the known ones, and where
     /// the form was opened. Any other path can still be typed.
     pub folders: Vec<String>,
+    /// The agents the registry knows, for reading the run line.
+    pub agents: Vec<String>,
     /// The rule being edited — kind, scope, name — so a rename or a move
     /// takes the old block out, and what the form does not show survives.
     pub editing: Option<Editing>,
@@ -95,6 +99,7 @@ impl Form {
             cur: 1,
             origin: folder.to_path_buf(),
             folders: vec![],
+            agents: vec![],
             editing: None,
         }
     }
@@ -132,6 +137,7 @@ impl Form {
             cur: 1,
             origin: origin.to_path_buf(),
             folders: vec![],
+            agents: vec![],
             editing: None,
         }
     }
@@ -203,6 +209,12 @@ impl Form {
             (Kind::Rule, Some(e)) => format!("edit {}", e.rule.name()),
             (Kind::Rule, None) => "new rule".into(),
         }
+    }
+
+    /// The agents the registry knows, so a line naming one reads as an agent.
+    pub fn with_agents(mut self, agents: &[String]) -> Self {
+        self.agents = agents.to_vec();
+        self
     }
 
     /// Whether the cursor is on `in` with folders to walk through.
@@ -304,11 +316,17 @@ pub fn expand(s: &str) -> PathBuf {
 }
 
 /// A line as a task: an agent's name first makes the rest its prompt;
-/// anything else is a shell line.
-pub fn task_of(line: &str) -> Task {
+/// anything else is a shell line. `agents` is what the registry knows; empty,
+/// before the daemon has answered, the built-in names stand in.
+pub fn task_of(line: &str, agents: &[String]) -> Task {
     let line = line.trim();
     let (head, rest) = line.split_once(char::is_whitespace).unwrap_or((line, ""));
-    if AGENTS.contains(&head) {
+    let known = if agents.is_empty() {
+        AGENTS.contains(&head)
+    } else {
+        agents.iter().any(|a| a == head)
+    };
+    if known {
         let rest = rest.trim();
         let prompt = rest
             .strip_prefix('"')
@@ -356,7 +374,7 @@ pub fn run_draft(f: &Form) -> Result<RunDraft> {
     if f.get("in").is_empty() || !cwd.is_dir() {
         bail!("in: not a folder");
     }
-    let (kind, argv) = match task_of(line) {
+    let (kind, argv) = match task_of(line, &f.agents) {
         Task::Agent { agent, prompt, .. } => {
             let mut argv = vec![agent];
             argv.extend(prompt);
@@ -446,7 +464,7 @@ pub fn rule_draft(f: &Form) -> Result<RuleDraft> {
         (true, None) => Some(f.origin.clone()),
         (true, Some(_)) => None,
     };
-    let task = (!run.is_empty()).then(|| task_of(run));
+    let task = (!run.is_empty()).then(|| task_of(run, &f.agents));
     let (kind, body) = match when {
         When::On(on) => {
             let mut spec = match was {

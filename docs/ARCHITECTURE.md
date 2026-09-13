@@ -210,36 +210,58 @@ outcome — so a job firing every thirty seconds is a row, not a screen; a run s
 waiting on you is never folded, and `enter` on a job opens it to its last twenty. When the list
 is taller than the screen, its first and last lines say how much is above and below. A group's
 header says which folder it is in. Moving the cursor onto a row is looking at it;
-`d` on an ended run (or a job) is being done with it — `run.archive` sets `runs.archived_at`, the
-digest leaves it out, `rl ls --all` and the ledger keep it — and `D` is done with everything
-ended that has been looked at. Ended runs also leave on their own after a day; `d` is for the
-impatient. On the line: `rl done <id>…`, `rl done --all`. Nothing is ever deleted here; that is
+`/done` on an ended run (or a job) is being done with it — `run.archive` sets `runs.archived_at`,
+the digest leaves it out, `rl ls --all` and the ledger keep it — and `/done-all` is done with
+everything ended that has been looked at. Ended runs also leave on their own after a day;
+`/done` is for the impatient. On the line: `rl done <id>…`, `rl done --all`. Nothing is ever deleted here; that is
 retention (§7). `enter` on a run is its terminal, full screen and joined — the
-keyboard is the run's, as it would be in a tab of your own — and `ctrl-\` lets go; `w` only
-watches, and `esc` is the list again. `i` opens a pane of facts beside the list (`tui/pane.rs`):
-a run's facts and recent events, a job's tally, a question with its options numbered; pressing
-the number is `decision.take`, and the run it starts becomes the selection. `s` on an ended run
-asks `assistants.summarise` what it did (§6): the asking is a run in the list, and the answer
-lands in the pane under the facts as `claude said, 2m ago`, always marked as the assistant's;
-`s` again asks anew. `n` is a form at the
-foot of the screen (`tui/form.rs`): for a run, the folder, a line and a title — a line starting
-with an agent's name (`claude fix the build`) is that agent with the rest as its prompt, anything
-else is a shell line — and `enter` is `run.start`, sized to this screen, an agent's terminal joined
-at once. `N` (or `n` in the rules view) is the same form for a rule: `in` (a folder, or `yours`),
-`name`, `when` (`every 30m`, a cron line, or `on run.failed` — which decides between
-`schedules.yaml` and `reactions.yaml`), `run`, `title`, `tags`, `cwd`. `enter` writes the block
-into the file (`rulefile.rs`: the block of that name replaced in place or added at the end of the
-mapping, comments and the other rules untouched, the result checked to parse), reloads, and
-approves it — your keystroke is the yes; a folder new to Relay is registered on the way. `e` on a
-rule, or on a job row, is the same form filled in; saving rewrites only that block and keeps what
-the form does not show (`env`, `where`, `ask`), and a rename or a move takes the old block out.
-`E` opens the file in `$EDITOR` at the rule's line and reloads on return — an edit made there is
-a file change, so it waits for `y` like any other. `a` is the same form, drafted for you: a line
-for plain words (`run the tests every night and tell me if they fail`), and `enter` hands them
-with the context pack to `assistants.interpret` (§6) as a run of its own — it appears in the list
-like any other, `x` there stops it — while the panel stays yours. What comes back fills the form
-(`new run`, `new rule`, or the rule you were on when you pressed `a` in the rules view, with what
-the words changed), and your `enter` is what does it; the assistant never starts anything.
+keyboard is the run's, as it would be in a tab of your own — and `ctrl-\` lets go; `/watch` only
+watches, and `esc` is the list again. `/info` opens a pane of facts beside the list
+(`tui/pane.rs`): a run's facts and recent events, a job's tally, a question with its options
+numbered; `enter` on a question takes it out of the list and the number answers it, which is
+`decision.take`, and the run it starts becomes the selection. `/summarise` on an ended run asks
+`assistants.summarise` what it did (§6): the asking is a run in the list, and the answer lands in
+the pane under the facts as `claude said, 2m ago`, always marked as the assistant's; asking again
+asks anew. 
+
+**Typing is what the panel rests in.** One line sits at the foot and always takes what you type
+(`tui/line.rs`), so there is nothing to open and nothing to close. What a finished line means is
+read locally first: a first word naming an agent the registry knows (`agent.list`, never a
+hardcoded list) is that agent with the rest as its prompt; a first word this machine can actually
+run — a binary on `PATH`, a target in the folder — is a shell line, and a leading `!` forces one.
+Either is `run.start` in the folder of the row the cursor is on, sized to this screen, an agent's
+terminal joined at once. Anything else is plain words, and those go to `assistants.interpret`
+(§6) as a run of its own — it is in the list like any other, `/stop` there stops it — while the
+panel stays yours. What comes back fills the form (`tui/form.rs`), and your `enter` is what does
+it; the assistant never starts anything. The line says which of the three `enter` will do at its
+right edge (`↵ runs in api`, `↵ claude here`, `↵ asks the assistant`) before you commit, so a
+call that leaves the machine is never sprung on you.
+
+`tab` completes the word being typed (`tui/complete.rs`), rooted in that same folder: the first
+word against the agents the registry knows, the folder's `Makefile` targets and `package.json`
+scripts, and the binaries on `PATH`; after `every` a duration, after `on` an event kind; anywhere
+else the files and directories of the folder. What every candidate shares goes in first, and
+`tab` again walks the rest.
+
+Because letters go into the line, everything that is not typing is a `/` command
+(`tui/palette.rs`), offered as you type it: `/stop`, `/done` and `/done-all`, `/mark`, `/watch`
+and `/join`, `/info`, `/full`, `/rules` and `/reload`, `/approve` and `/pause`, `/new`, `/edit`
+and `/editor`, `/summarise`, `/ask`, `/filter`, `/gc`, `/help`, `/quit`. `enter` on an empty line
+is the row under the cursor instead — a job opens, a schedule offers to fire, a question comes
+out of the list to be answered by number, a run's terminal opens. Arrows, `home`/`end` and `esc`
+belong to the list; `esc` with something typed clears the line first, and `ctrl-c` leaves.
+
+`/new` is the form for a rule written by hand: `in` (a folder, or `yours`), `name`, `when`
+(`every 30m`, a cron line, or `on run.failed` — which decides between `schedules.yaml` and
+`reactions.yaml`), `run`, `title`, `tags`, `cwd`. `enter` writes the block into the file
+(`rulefile.rs`: the block of that name replaced in place or added at the end of the mapping,
+comments and the other rules untouched, the result checked to parse), reloads, and approves it —
+your keystroke is the yes; a folder new to Relay is registered on the way. `/edit` on a rule, or
+on a job row, is the same form filled in; saving rewrites only that block and keeps what the form
+does not show (`env`, `where`, `ask`), and a rename or a move takes the old block out. `/editor`
+opens the file in `$EDITOR` at the rule's line and reloads on return — an edit made there is a
+file change, so it waits for `/approve` like any other.
+
 Nothing is remembered between openings except presence: leaving the panel is what `rl since`
 counts from.
 
@@ -416,7 +438,7 @@ name, the folders Relay knows, this folder's and the person's rules, the agents 
 machine), and the answer contract: exactly one YAML document, `kind: run | schedule |
 reaction` then the form's fields.
 
-**The interpreter** is that pack, the typed words and an ordinary run. `a` in the panel and
+**The interpreter** is that pack, the typed words and an ordinary run. The panel's line (§4) and
 `rl interpret <words…> [--in <folder>] [--go]` build the pack on the client (it needs clap's
 help, which only `rl` has) and call `assistant.run`; `rld` resolves `assistants.interpret`,
 starts the agent headless with the prompt as its last argument (`rl-daemon/src/assistant.rs`:
@@ -425,16 +447,16 @@ for it to end — 60 s, then it is stopped and the caller told so — and return
 what it wrote. The client reads the last `kind:` block out of that by hand (`rl-cli/src/
 interpret.rs`: fences and prose around it dropped, `key: value` lines, block and flow lists; not
 a YAML parser, because an agent writes `run: claude fix it: now` and means it) and fills the
-form. In the panel that is the form of `n`/`N`/`e` with the assistant's answer in it and a line
-saying who drafted it; `rl interpret` prints the draft with `# by <agent> · run <id>` and does
+form. In the panel that is the same form `/new` and `/edit` open, with the assistant's answer in
+it and a line saying who drafted it; `rl interpret` prints the draft with `# by <agent> · run <id>` and does
 nothing, or with `--go` starts the run or writes the rule on the line, `cause: manual`, since the
-go was yours. When the words are about a rule (`a` on it in the rules view), the prompt carries
-the rule as it stands and asks for the whole rule as it should be. An answer without a `kind:`
+go was yours. When the words are typed with a rule under the cursor in the rules view, the
+prompt carries that rule as it stands and asks for the whole rule as it should be. An answer without a `kind:`
 is an error that quotes what the agent said. Interpretation is a run, so it is in the list, in
 `rl ls --all`, in the journal, and under retention like everything else; nothing about it is
 special except its cause.
 
-**The summariser** is the same machinery pointed at an ended run. `s` in the panel and
+**The summariser** is the same machinery pointed at an ended run. `/summarise` in the panel and
 `rl summarise <id> [--again]` call `summary.make`; `rld` (`rl-daemon/src/summarise.rs`) puts
 together what it knows — the run's row (title, command, folder, cause, when, how long, exit),
 its events, the last 64 KB of its output — asks for three sentences of prose, and runs
