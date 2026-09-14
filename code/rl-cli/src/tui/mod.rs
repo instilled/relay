@@ -592,7 +592,9 @@ impl App {
             self.sel = key;
             self.picked.clear();
             self.events.clear();
-            self.close_term();
+            // A watch tile stays pinned to its run while you browse the list;
+            // it closes on `esc` or when another run's terminal takes its place,
+            // not merely because the cursor moved.
         }
     }
 
@@ -707,25 +709,30 @@ impl App {
             self.say("nothing here to open");
             return;
         };
+        // Watching is a tile beside the list, not the whole screen: the list
+        // stays, the line stays yours, and `/full` pops it big.
         // Still reading this one: back to it, where it was left.
         if self.term.as_ref().is_some_and(|t| t.id == id) {
             self.pane = Pane::Term;
-            self.wide = true;
+            self.show_pane = true;
+            self.wide = false;
             self.term_size = self.pane_size(area);
             return;
         }
         self.seen(vec![id.clone()]).await;
-        let a = areas(area, true, true, 0, 0);
-        let r = a.pane.unwrap_or(area);
-        let size = (r.width.max(1), r.height.max(1));
+        self.pane = Pane::Term;
+        self.show_pane = true;
+        self.wide = false;
+        let size = self.pane_size(area);
         match TermView::open(&self.home, &id, size).await {
             Ok(t) => {
                 self.term = Some(t);
                 self.term_size = size;
-                self.pane = Pane::Term;
-                self.wide = true;
             }
-            Err(e) => self.say(format!("attach: {e:#}")),
+            Err(e) => {
+                self.pane = Pane::Facts;
+                self.say(format!("attach: {e:#}"));
+            }
         }
     }
 
@@ -1237,10 +1244,27 @@ impl App {
                 self.completing = None;
                 Ok(())
             }
-            _ if self.pane == Pane::Term && self.term.is_some() => {
+            // Full screen, the term has the keyboard: the keys scroll it.
+            _ if self.pane == Pane::Term && self.wide && self.term.is_some() => {
                 let page = area.height.saturating_sub(3).max(1);
                 self.watch_key(&k, page);
                 Ok(())
+            }
+            // A tile beside the list: the list keeps the keyboard, `esc` closes
+            // the tile, `pgup`/`pgdn` read the tile back.
+            _ if self.pane == Pane::Term && self.term.is_some() => {
+                let page = area.height.saturating_sub(3).max(1);
+                match k.code {
+                    KeyCode::Esc => {
+                        self.leave_term();
+                        Ok(())
+                    }
+                    KeyCode::PageUp | KeyCode::PageDown => {
+                        self.watch_key(&k, page);
+                        Ok(())
+                    }
+                    _ => self.key_list(k, area).await,
+                }
             }
             _ => self.key_list(k, area).await,
         }
@@ -1316,14 +1340,19 @@ impl App {
 
     /// `enter` on an empty line: whatever the row under the cursor is for.
     async fn enter_row(&mut self, area: Rect) -> Result<()> {
-        // Watching a live run: enter is what takes the keyboard — and taking
-        // it hands over the real terminal, so `main_loop` does it once ratatui
-        // has stepped aside.
-        if self.pane == Pane::Term
-            && let Some(t) = &self.term
-            && t.ended.is_none()
-        {
-            self.attach = Some((t.id.clone(), false));
+        // A run under the cursor: watch it as a tile, or — if it is already the
+        // tile — take the real terminal (a live run only; ended runs are just
+        // read). Taking it hands over the terminal, so `main_loop` does it once
+        // ratatui has stepped aside.
+        if let Some(i) = self.selected_run() {
+            let id = i.run.id.clone();
+            let watching =
+                self.pane == Pane::Term && self.term.as_ref().is_some_and(|t| t.id == id && t.ended.is_none());
+            if watching {
+                self.attach = Some((id, false));
+            } else {
+                self.open_term(area).await;
+            }
             return Ok(());
         }
         if let Some(key) = self.selected_job().map(|j| j.key.clone()) {
@@ -2031,6 +2060,17 @@ impl App {
         if self.pane == Pane::Term
             && let Some(t) = &self.term
         {
+            // As a tile the term lines up with the facts pane, whose lines
+            // carry a leading space; full screen it fills the pane edge to edge.
+            let area = if self.wide {
+                area
+            } else {
+                Rect {
+                    x: area.x + 1,
+                    width: area.width.saturating_sub(1),
+                    ..area
+                }
+            };
             screen::draw(t.screen(), area, f.buffer_mut());
             return;
         }
@@ -2110,8 +2150,12 @@ impl App {
         if let Some(s) = &self.summarising {
             return format!("summarising `{}`… · its run is in the list · /stop there", s.title);
         }
+        // The tile's own footer, but only while the cursor is on the run it
+        // shows — browse away and the selected row's actions take over, since
+        // that is what `enter` would act on.
         if self.pane == Pane::Term
             && let Some(t) = &self.term
+            && (self.wide || self.selected_run().is_some_and(|i| i.run.id == t.id))
         {
             let mut s = String::new();
             if t.ended.is_some() {
