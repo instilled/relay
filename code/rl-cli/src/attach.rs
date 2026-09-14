@@ -205,6 +205,14 @@ impl RawMode {
 
 impl Drop for RawMode {
     fn drop(&mut self) {
+        use std::io::Write;
+        // The run may have taken the terminal into an alternate screen or
+        // turned on mouse reporting. Put it back: main screen, cursor shown,
+        // mouse and bracketed paste off, attributes reset — so a shell prompt
+        // or the panel comes back to a clean screen, not the run's leftovers.
+        let mut out = std::io::stdout();
+        let _ = out.write_all(b"\x1b[?1049l\x1b[?2004l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?25h\x1b[0m");
+        let _ = out.flush();
         let _ = crossterm::terminal::disable_raw_mode();
     }
 }

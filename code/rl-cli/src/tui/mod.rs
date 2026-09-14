@@ -435,6 +435,8 @@ impl App {
                             )
                             .await;
                             *terminal = ratatui::init();
+                            // The run had the screen; start the panel's from blank.
+                            let _ = terminal.clear();
                             input = EventStream::new();
                             match outcome {
                                 // Letting go lands on the list, not back in the
