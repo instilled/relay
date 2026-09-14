@@ -215,7 +215,10 @@ is taller than the screen, its first and last lines say how much is above and be
 header says which folder it is in. Moving the cursor onto a row is looking at it;
 `/done` on an ended run (or a job) is being done with it — `run.archive` sets `runs.archived_at`,
 the digest leaves it out, `rl ls --all` and the ledger keep it — and `/done-all` is done with
-everything ended that has been looked at. Ended runs also leave on their own after a day;
+everything ended that has been looked at. `ctrl-x` is the one keystroke for it, whatever the row:
+an ended run or a job is archived at once, a run still going is stopped first (a second `ctrl-x`
+once it has ended archives it), a question is dismissed. Nothing is destroyed by any of this;
+that is retention's alone. Ended runs also leave on their own after a day;
 `/done` is for the impatient. On the line: `rl done <id>…`, `rl done --all`. Nothing is ever deleted here; that is
 retention (§7). `enter` on a run opens its terminal, watching: the output is
 live but the keyboard is still yours, so the line at the foot goes on taking what you type.
