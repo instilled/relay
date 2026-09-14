@@ -773,6 +773,32 @@ impl App {
         }
     }
 
+    /// `ctrl-x`: get whatever the cursor is on out of the list. An ended run
+    /// or a job is archived at once (reversible: the ledger keeps it); a run
+    /// still going is stopped first, so a second `ctrl-x` once it has ended is
+    /// what archives it; a question is dismissed. Nothing here is destroyed —
+    /// that is retention's alone.
+    async fn remove_selected(&mut self) {
+        if let Some(j) = self.selected_job() {
+            let ids: Vec<String> = j.runs.iter().map(|i| i.run.id.clone()).collect();
+            let what = format!("{} · {} runs", j.name, ids.len());
+            self.archive(ids, &what).await;
+        } else if let Some(i) = self.selected_run() {
+            if i.run.state.is_terminal() {
+                let (id, title) = (i.run.id.clone(), i.run.title.clone());
+                self.archive(vec![id], &title).await;
+            } else {
+                // Can't archive what is still going; stop it, then a second
+                // ctrl-x is done with it.
+                self.mode = Mode::Stop(i.run.id.clone());
+            }
+        } else if let Some(q) = self.selected_question() {
+            self.mode = Mode::Dismiss(q.id.clone());
+        } else {
+            self.say("nothing here to remove");
+        }
+    }
+
     /// Done with everything ended that has been looked at.
     async fn archive_seen(&mut self) {
         match self
@@ -1191,6 +1217,7 @@ impl App {
     async fn key_list(&mut self, k: KeyEvent, area: Rect) -> Result<()> {
         match (k.code, k.modifiers) {
             (KeyCode::Char('c'), KeyModifiers::CONTROL) => self.quit = true,
+            (KeyCode::Char('x'), KeyModifiers::CONTROL) => self.remove_selected().await,
             (KeyCode::Esc, _) => {
                 if self.wide {
                     self.wide = false;
@@ -2101,20 +2128,20 @@ impl App {
             "/info details"
         };
         match self.selected() {
-            Some(Row::Question(_)) => format!("enter answers it · /stop not this · {pane}"),
+            Some(Row::Question(_)) => format!("enter answers it · ^x dismiss · {pane}"),
             Some(Row::Job(j)) => {
                 let open = if self.opened.contains(&j.key) {
                     "enter closes"
                 } else {
                     "enter opens"
                 };
-                format!("{open} · /edit its rule · /done its runs · {pane}")
+                format!("{open} · /edit its rule · ^x done · {pane}")
             }
-            Some(Row::Fold(_)) => format!("enter output · /done · esc folds · {pane}"),
+            Some(Row::Fold(_)) => format!("enter output · ^x done · esc folds · {pane}"),
             Some(Row::Run(i)) if i.run.state.is_terminal() => {
-                format!("enter output · /summarise · /done · /done-all · {pane}")
+                format!("enter output · /summarise · ^x done · /done-all · {pane}")
             }
-            Some(Row::Run(_)) => format!("enter watches it · /join · /stop · /mark · {pane}"),
+            Some(Row::Run(_)) => format!("enter watches it · /join · ^x stops it · /mark · {pane}"),
             _ => String::new(),
         }
     }
