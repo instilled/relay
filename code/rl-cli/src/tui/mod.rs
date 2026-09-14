@@ -253,8 +253,6 @@ fn list_line(
 /// Where things go on screen.
 struct Areas {
     head: Rect,
-    /// The lens strip, just under the header, in the work view.
-    lens: Option<Rect>,
     /// The rules between the sections: under the header, above the line, above
     /// the footer. Empty in the full-screen terminal.
     rules: Vec<Rect>,
@@ -269,7 +267,7 @@ struct Areas {
     footer: Rect,
 }
 
-fn areas(area: Rect, wide: bool, show_pane: bool, form_h: u16, cands_h: u16, lens_h: u16) -> Areas {
+fn areas(area: Rect, wide: bool, show_pane: bool, form_h: u16, cands_h: u16) -> Areas {
     // A gutter of air around the panel and rules between its sections — but not
     // in the full-screen terminal, which wants every cell.
     let chrome = !wide;
@@ -284,9 +282,8 @@ fn areas(area: Rect, wide: bool, show_pane: bool, form_h: u16, cands_h: u16, len
         area
     };
     let rule = u16::from(chrome);
-    let [head, lens, rule_a, body, form, cands, rule_b, line, rule_c, footer] = Layout::vertical([
+    let [head, rule_a, body, form, cands, rule_b, line, rule_c, footer] = Layout::vertical([
         Constraint::Length(1),
-        Constraint::Length(lens_h),
         Constraint::Length(rule),
         Constraint::Fill(1),
         Constraint::Length(if form_h > 0 { form_h + 1 } else { 0 }),
@@ -298,7 +295,6 @@ fn areas(area: Rect, wide: bool, show_pane: bool, form_h: u16, cands_h: u16, len
     ])
     .areas(area);
     let rules = if chrome { vec![rule_a, rule_b, rule_c] } else { vec![] };
-    let lens = (lens_h > 0).then_some(lens);
     let form = (form_h > 0).then_some(form);
     let cands = (cands_h > 0).then_some(cands);
     let (list, pane) = if wide {
@@ -318,7 +314,6 @@ fn areas(area: Rect, wide: bool, show_pane: bool, form_h: u16, cands_h: u16, len
     };
     Areas {
         head,
-        lens,
         rules,
         list,
         pane,
@@ -490,15 +485,9 @@ impl App {
 
     /// The area the terminal draws into.
     fn pane_size(&self, size: Rect) -> (u16, u16) {
-        let a = areas(size, self.wide, true, 0, 0, self.lens_h());
+        let a = areas(size, self.wide, true, 0, 0);
         let r = a.pane.unwrap_or(size);
         (r.width.max(1), r.height.max(1))
-    }
-
-    /// The lens strip is a row of its own in the work view, unless the pane has
-    /// taken the whole screen.
-    fn lens_h(&self) -> u16 {
-        u16::from(self.view == View::Work && !self.wide)
     }
 
     /// Move the lens along the strip; the selection settles onto whatever the
@@ -726,7 +715,7 @@ impl App {
             return;
         }
         self.seen(vec![id.clone()]).await;
-        let a = areas(area, true, true, 0, 0, 0);
+        let a = areas(area, true, true, 0, 0);
         let r = a.pane.unwrap_or(area);
         let size = (r.width.max(1), r.height.max(1));
         match TermView::open(&self.home, &id, size).await {
@@ -1651,7 +1640,7 @@ impl App {
             (None, Some(c)) => c.cands.len().min(CANDS) as u16,
             (None, None) => 0,
         };
-        let a = areas(f.area(), self.wide, self.show_pane, form_h, cands_h, self.lens_h());
+        let a = areas(f.area(), self.wide, self.show_pane, form_h, cands_h);
         let rows = self.rows();
         let rule_rows = self.rule_rows();
         // News is counted the way it is shown: a job with unseen runs is one.
@@ -1672,8 +1661,17 @@ impl App {
         {
             title.push_str(&format!(" · in {} · esc all", self.names.workspace(p)));
         }
-        let [l, r] =
-            Layout::horizontal([Constraint::Fill(1), Constraint::Length(self.me.len() as u16 + 1)]).areas(a.head);
+        // The header carries three things on one line: the tally at the left,
+        // the lens at the right of it, and who you are at the edge. The lens
+        // rides here rather than a row of its own.
+        let lens = (self.view == View::Work).then(|| self.lens_line());
+        let lens_w = lens.as_ref().map_or(0, |l| l.width() as u16 + 2);
+        let [l, lens_area, r] = Layout::horizontal([
+            Constraint::Fill(1),
+            Constraint::Length(lens_w),
+            Constraint::Length(self.me.len() as u16 + 1),
+        ])
+        .areas(a.head);
         // The lead word wears the accent; the tally after it reads plainly.
         let head = match title.split_once(" · ") {
             Some((lead, rest)) => Line::from(vec![
@@ -1683,10 +1681,10 @@ impl App {
             None => Line::from(Span::styled(title, theme::accent().add_modifier(Modifier::BOLD))),
         };
         f.render_widget(Paragraph::new(head), l);
-        f.render_widget(Paragraph::new(self.me.clone()).dim().right_aligned(), r);
-        if let Some(area) = a.lens {
-            f.render_widget(Paragraph::new(self.lens_line()), area);
+        if let Some(lens) = lens {
+            f.render_widget(Paragraph::new(lens).right_aligned(), lens_area);
         }
+        f.render_widget(Paragraph::new(self.me.clone()).dim().right_aligned(), r);
         // The rules between the sections — a little air, a little structure.
         for rule in &a.rules {
             f.render_widget(Paragraph::new("─".repeat(rule.width as usize)).dim(), *rule);
@@ -1743,10 +1741,10 @@ impl App {
         f.render_widget(Paragraph::new(format!(" {}", self.footer())).dim(), a.footer);
     }
 
-    /// The lens strip under the header: the slices of the list, the one in
-    /// force accented, the rest quiet. `tab` on an empty line steps along it.
+    /// The lens, at the right of the header: the slices of the list, the one
+    /// in force accented, the rest quiet. `tab` on an empty line steps it.
     fn lens_line(&self) -> Line<'static> {
-        let mut spans = vec![Span::raw(" ")];
+        let mut spans = Vec::new();
         for (i, l) in rows::Lens::ALL.iter().enumerate() {
             if i > 0 {
                 spans.push(Span::styled(" · ", theme::dim()));
@@ -1758,7 +1756,6 @@ impl App {
             };
             spans.push(Span::styled(l.label(), style));
         }
-        spans.push(Span::styled("   tab", theme::dim()));
         Line::from(spans)
     }
 
