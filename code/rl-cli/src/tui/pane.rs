@@ -6,7 +6,7 @@ use super::rows::{Job, Names, asked_by, cause_words};
 use super::rules;
 use crate::render::{fmt_clock, state_label};
 use jiff::Timestamp;
-use ratatui::style::{Color, Modifier, Style, Stylize};
+use ratatui::style::{Style, Stylize};
 use ratatui::text::{Line, Span};
 use relay_core::time::{fmt_age, fmt_duration};
 use relay_proto::decision::Decision;
@@ -20,13 +20,7 @@ const EVENTS: usize = 12;
 pub const MAX_KEYS: usize = 9;
 
 pub fn state_style(s: RunState) -> Style {
-    match s {
-        RunState::NeedsInput | RunState::Blocked => Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
-        RunState::Failed => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-        RunState::Stale => Style::default().fg(Color::Magenta),
-        RunState::Finished | RunState::Stopped | RunState::Idle => Style::default().add_modifier(Modifier::DIM),
-        _ => Style::default(),
-    }
+    super::theme::state(s)
 }
 
 fn fact(k: &str, v: impl Into<String>) -> Line<'static> {
