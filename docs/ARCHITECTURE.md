@@ -223,19 +223,21 @@ once it has ended archives it), a question is dismissed. Nothing is destroyed by
 that is retention's alone. Ended runs also leave on their own after a day;
 `/done` is for the impatient. On the line: `rl done <id>…`, `rl done --all`. Nothing is ever deleted here; that is
 retention (§7). `enter` on a run opens its terminal, watching: a re-render of the run's output
-through a `vt100` screen (`tui/term.rs`), with the keyboard still yours, so the line at the foot
-goes on taking what you type. That re-render is right for a glance, but to *drive* a run you want
-the actual terminal — native scrolling, the mouse, the true size, no chrome. So `enter` again (or
-`/join`) hands it over: the panel steps out of ratatui and pipes the run straight to the real
-terminal, tmux-attach style — stdin is the run's input, its output is ours, `SIGWINCH` is a
+through a `vt100` screen (`tui/term.rs`), shown as a tile beside the list — the list stays, the
+line at the foot stays yours, arrows still walk the list, and `esc` closes the tile. It stays
+pinned to its run while you browse; another run's `enter` moves it. `/full` pops the tile to the
+whole screen. That re-render is right for a glance, but to *drive* a run you want the actual
+terminal — native scrolling, the mouse, the true size, no chrome. So `enter` again on the tile's
+run (or `/join`) hands it over: the panel steps out of ratatui and pipes the run straight to the
+real terminal, tmux-attach style — stdin is the run's input, its output is ours, `SIGWINCH` is a
 resize, and `ctrl-\` lets go, back to the list. This is the same passthrough `rl join <id>` uses
 (`rl-cli/src/attach.rs`), so it is also a standalone command: `tmux split-window 'rl join <id>'`
 puts a live pane wherever you like. Watching is only a re-render; joining is the run's own
 terminal. Stepping back from watching does not throw the view away — the watch connection stays
 open and goes on reading, so `enter` on that run again returns to it at once, where it was left,
-with nothing replayed. While watching, `pgup` and `pgdn` read back through what scrolled off — the
-screen keeps ten thousand rows above itself — and the footer says how far back you are. New output
-never yanks the view to the bottom. An ended run keeps what it printed after its holder has gone,
+with nothing replayed. `pgup` and `pgdn` read back through what scrolled off — the screen keeps
+ten thousand rows above itself — and the footer says how far back you are. New output never yanks
+the view to the bottom. An ended run keeps what it printed after its holder has gone,
 to be read the same way. `/info` opens a pane of
 facts beside the list (`tui/pane.rs`): a run's facts and recent events, a job's tally, a question
 with its options numbered; `enter` on a question opens that pane and takes the question out of
