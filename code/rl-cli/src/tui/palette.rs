@@ -26,6 +26,10 @@ pub enum Cmd {
     Summarise,
     Ask,
     Filter,
+    LensAll,
+    LensAgents,
+    LensJobs,
+    LensReactions,
     Gc,
     Help,
     Quit,
@@ -151,6 +155,30 @@ pub const ALL: &[Command] = &[
         cmd: Cmd::Filter,
     },
     Command {
+        name: "all",
+        args: "",
+        what: "show the whole list (the lens: also tab)",
+        cmd: Cmd::LensAll,
+    },
+    Command {
+        name: "agents",
+        args: "",
+        what: "the lens: only agent runs",
+        cmd: Cmd::LensAgents,
+    },
+    Command {
+        name: "jobs",
+        args: "",
+        what: "the lens: only what a schedule started",
+        cmd: Cmd::LensJobs,
+    },
+    Command {
+        name: "reactions",
+        args: "",
+        what: "the lens: only what a rule fired",
+        cmd: Cmd::LensReactions,
+    },
+    Command {
         name: "gc",
         args: "",
         what: "let the journals of old runs go",
@@ -243,8 +271,8 @@ mod tests {
 
     #[test]
     fn a_name_matches_by_what_it_contains_too() {
-        // Nothing starts with `ll`; two names carry it, alphabetically.
-        assert_eq!(names("ll"), vec!["done-all", "full"]);
+        // Nothing starts with `ll`; three names carry it, alphabetically.
+        assert_eq!(names("ll"), vec!["all", "done-all", "full"]);
         // `it` opens nothing, and sits inside both of these.
         assert_eq!(names("it"), vec!["edit", "editor", "quit"]);
     }

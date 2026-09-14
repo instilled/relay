@@ -136,6 +136,8 @@ struct App {
     digest: Digest,
     names: Names,
     filter: String,
+    /// Which slice of the list is shown: all, agents, jobs or reactions.
+    lens: rows::Lens,
     view: View,
     /// Every rule, fetched while the rules view is up.
     rules: Vec<Rule>,
@@ -242,6 +244,8 @@ fn list_line(
 /// Where things go on screen.
 struct Areas {
     head: Rect,
+    /// The lens strip, just under the header, in the work view.
+    lens: Option<Rect>,
     list: Option<Rect>,
     pane: Option<Rect>,
     /// The form, at the foot of the body.
@@ -253,9 +257,10 @@ struct Areas {
     footer: Rect,
 }
 
-fn areas(area: Rect, wide: bool, show_pane: bool, form_h: u16, cands_h: u16) -> Areas {
-    let [head, body, form, cands, line, footer] = Layout::vertical([
+fn areas(area: Rect, wide: bool, show_pane: bool, form_h: u16, cands_h: u16, lens_h: u16) -> Areas {
+    let [head, lens, body, form, cands, line, footer] = Layout::vertical([
         Constraint::Length(1),
+        Constraint::Length(lens_h),
         Constraint::Fill(1),
         Constraint::Length(if form_h > 0 { form_h + 1 } else { 0 }),
         Constraint::Length(cands_h),
@@ -263,6 +268,7 @@ fn areas(area: Rect, wide: bool, show_pane: bool, form_h: u16, cands_h: u16) -> 
         Constraint::Length(1),
     ])
     .areas(area);
+    let lens = (lens_h > 0).then_some(lens);
     let form = (form_h > 0).then_some(form);
     let cands = (cands_h > 0).then_some(cands);
     let (list, pane) = if wide {
@@ -282,6 +288,7 @@ fn areas(area: Rect, wide: bool, show_pane: bool, form_h: u16, cands_h: u16) -> 
     };
     Areas {
         head,
+        lens,
         list,
         pane,
         form,
@@ -308,6 +315,7 @@ pub async fn run(home: &Home) -> Result<()> {
         },
         names: Names::default(),
         filter: String::new(),
+        lens: rows::Lens::All,
         view: View::Work,
         rules: Vec::new(),
         other_sel: None,
@@ -424,9 +432,30 @@ impl App {
 
     /// The area the terminal draws into.
     fn pane_size(&self, size: Rect) -> (u16, u16) {
-        let a = areas(size, self.wide, true, 0, 0);
+        let a = areas(size, self.wide, true, 0, 0, self.lens_h());
         let r = a.pane.unwrap_or(size);
         (r.width.max(1), r.height.max(1))
+    }
+
+    /// The lens strip is a row of its own in the work view, unless the pane has
+    /// taken the whole screen.
+    fn lens_h(&self) -> u16 {
+        u16::from(self.view == View::Work && !self.wide)
+    }
+
+    /// Move the lens along the strip; the selection settles onto whatever the
+    /// new slice shows.
+    fn cycle_lens(&mut self, by: isize) {
+        let all = rows::Lens::ALL;
+        let at = all.iter().position(|l| *l == self.lens).unwrap_or(0);
+        let n = all.len() as isize;
+        self.set_lens(all[(((at as isize + by) % n + n) % n) as usize]);
+    }
+
+    /// Set the lens outright, and settle the selection onto the new slice.
+    fn set_lens(&mut self, lens: rows::Lens) {
+        self.lens = lens;
+        self.settle();
     }
 
     async fn refresh(&mut self) {
@@ -475,6 +504,7 @@ impl App {
                 rules: &self.rules,
                 opened: &self.opened,
                 filter: &self.filter,
+                lens: self.lens,
                 now: Timestamp::now(),
             },
         )
@@ -649,7 +679,7 @@ impl App {
             return;
         }
         self.seen(vec![id.clone()]).await;
-        let a = areas(area, true, true, 0, 0);
+        let a = areas(area, true, true, 0, 0, 0);
         let r = a.pane.unwrap_or(area);
         let size = (r.width.max(1), r.height.max(1));
         match TermView::open(&self.home, &id, size).await {
@@ -1122,6 +1152,16 @@ impl App {
         if self.pane == Pane::Term && self.term.as_ref().is_some_and(|t| t.joined() && t.ended.is_none()) {
             return self.key_term(k).await;
         }
+        // An empty line has nothing to complete, so `tab` steps the lens along
+        // instead — shift-tab the other way.
+        if self.line.is_empty()
+            && self.view == View::Work
+            && self.pane != Pane::Term
+            && matches!(k.code, KeyCode::Tab | KeyCode::BackTab)
+        {
+            self.cycle_lens(if k.code == KeyCode::BackTab { -1 } else { 1 });
+            return Ok(());
+        }
         // The line takes the keyboard first; what it leaves, the list has.
         match self.line.key(&k) {
             line::Act::Typing => {
@@ -1477,6 +1517,10 @@ impl App {
                 self.filter = arg.trim().to_string();
                 self.settle();
             }
+            palette::Cmd::LensAll => self.set_lens(rows::Lens::All),
+            palette::Cmd::LensAgents => self.set_lens(rows::Lens::Agents),
+            palette::Cmd::LensJobs => self.set_lens(rows::Lens::Jobs),
+            palette::Cmd::LensReactions => self.set_lens(rows::Lens::Reactions),
             palette::Cmd::Gc => match self.rpc.call::<GcRun>(GcParams::default()).await {
                 Ok(r) if r.runs == 0 => self.say(format!("nothing with a journal ended over {} ago", r.older_than)),
                 Ok(r) => self.say(format!(
@@ -1553,7 +1597,7 @@ impl App {
             (None, Some(c)) => c.cands.len().min(CANDS) as u16,
             (None, None) => 0,
         };
-        let a = areas(f.area(), self.wide, self.show_pane, form_h, cands_h);
+        let a = areas(f.area(), self.wide, self.show_pane, form_h, cands_h, self.lens_h());
         let rows = self.rows();
         let rule_rows = self.rule_rows();
         // News is counted the way it is shown: a job with unseen runs is one.
@@ -1586,6 +1630,9 @@ impl App {
         };
         f.render_widget(Paragraph::new(head), l);
         f.render_widget(Paragraph::new(self.me.clone()).dim().right_aligned(), r);
+        if let Some(area) = a.lens {
+            f.render_widget(Paragraph::new(self.lens_line()), area);
+        }
         if let Some(list) = a.list {
             match self.view {
                 View::Work => self.draw_list(f, list, &rows),
@@ -1638,6 +1685,25 @@ impl App {
         f.render_widget(Paragraph::new(format!(" {}", self.footer())).dim(), a.footer);
     }
 
+    /// The lens strip under the header: the slices of the list, the one in
+    /// force accented, the rest quiet. `tab` on an empty line steps along it.
+    fn lens_line(&self) -> Line<'static> {
+        let mut spans = vec![Span::raw(" ")];
+        for (i, l) in rows::Lens::ALL.iter().enumerate() {
+            if i > 0 {
+                spans.push(Span::styled(" · ", theme::dim()));
+            }
+            let style = if *l == self.lens {
+                theme::accent().add_modifier(Modifier::BOLD)
+            } else {
+                theme::dim()
+            };
+            spans.push(Span::styled(l.label(), style));
+        }
+        spans.push(Span::styled("   tab", theme::dim()));
+        Line::from(spans)
+    }
+
     /// The live line: what is typed, where the cursor is, and — at the right
     /// edge, before you commit — what `enter` is about to do with it.
     fn line_line(&self, width: u16) -> Line<'static> {
@@ -1680,10 +1746,12 @@ impl App {
     fn draw_list(&self, f: &mut Frame, area: Rect, rows: &[Row]) {
         self.list_h.set(area.height);
         if rows.is_empty() {
-            let msg = if self.filter.is_empty() {
-                " nothing running · rl run -- <command>"
+            let msg = if !self.filter.is_empty() {
+                " nothing matches".into()
+            } else if self.lens != rows::Lens::All {
+                format!(" no {} · tab for the rest", self.lens.label())
             } else {
-                " nothing matches"
+                " nothing running · rl run -- <command>".into()
             };
             f.render_widget(Paragraph::new(msg).dim(), area);
             return;

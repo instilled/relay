@@ -258,10 +258,18 @@ else the files and directories of the folder. What every candidate shares goes i
 Because letters go into the line, everything that is not typing is a `/` command
 (`tui/palette.rs`), offered as you type it: `/stop`, `/done` and `/done-all`, `/mark`, `/watch`
 and `/join`, `/info`, `/full`, `/rules` and `/reload`, `/approve` and `/pause`, `/new`, `/edit`
-and `/editor`, `/summarise`, `/ask`, `/filter`, `/gc`, `/help`, `/quit`. `enter` on an empty line
+and `/editor`, `/summarise`, `/ask`, `/filter`, `/all`, `/agents`, `/jobs`, `/reactions`, `/gc`,
+`/help`, `/quit`. `enter` on an empty line
 is the row under the cursor instead — a job opens, a schedule offers to fire, a question comes
 out of the list to be answered by number, a run's terminal opens. Arrows, `home`/`end` and `esc`
 belong to the list; `esc` with something typed clears the line first, and `ctrl-c` leaves.
+
+A strip under the header is the lens — `all · agents · jobs · reactions` — and the list shows
+only that slice: agents by what a run is, jobs and reactions by what started it (so a scheduled
+agent is in both `agents` and `jobs`, since the lens is a question, not a partition). Questions
+ignore it; they are what needs you, whatever slice you are in. `tab` on an empty line steps the
+lens along (shift-`tab` back), and `/all`, `/agents`, `/jobs`, `/reactions` jump straight to one;
+it composes with `/filter`. One-off shell commands live in `all` while they run and are recent.
 
 `/new` is the form for a rule written by hand: `in` (a folder, or `yours`), `name`, `when`
 (`every 30m`, a cron line, or `on run.failed` — which decides between `schedules.yaml` and
