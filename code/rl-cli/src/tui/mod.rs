@@ -31,7 +31,11 @@ use crate::attach::client_name;
 use crate::client::Client;
 use crate::rulefile;
 use anyhow::Result;
-use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags,
+    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+};
+use crossterm::terminal::supports_keyboard_enhancement;
 use form::{Act, Form};
 use futures::StreamExt;
 use jiff::Timestamp;
@@ -65,6 +69,8 @@ const REFRESH: Duration = Duration::from_secs(1);
 const FLASH: Duration = Duration::from_secs(4);
 /// The most candidates `tab` shows at once.
 const CANDS: usize = 6;
+/// The most rows the live line grows to before it scrolls within itself.
+const LINE_MAX: u16 = 8;
 /// Recent output replayed when joining a run for real, enough to paint the
 /// screen on arrival. Bytes.
 const JOIN_SCROLLBACK: u64 = 256 * 1024;
@@ -267,7 +273,7 @@ struct Areas {
     footer: Rect,
 }
 
-fn areas(area: Rect, wide: bool, show_pane: bool, form_h: u16, cands_h: u16) -> Areas {
+fn areas(area: Rect, wide: bool, show_pane: bool, form_h: u16, cands_h: u16, line_h: u16) -> Areas {
     // A gutter of air around the panel and rules between its sections — but not
     // in the full-screen terminal, which wants every cell.
     let chrome = !wide;
@@ -289,7 +295,7 @@ fn areas(area: Rect, wide: bool, show_pane: bool, form_h: u16, cands_h: u16) -> 
         Constraint::Length(if form_h > 0 { form_h + 1 } else { 0 }),
         Constraint::Length(cands_h),
         Constraint::Length(rule),
-        Constraint::Length(1),
+        Constraint::Length(line_h.max(1)),
         Constraint::Length(rule),
         Constraint::Length(1),
     ])
@@ -322,6 +328,29 @@ fn areas(area: Rect, wide: bool, show_pane: bool, form_h: u16, cands_h: u16) -> 
         line,
         footer,
     }
+}
+
+/// Take the screen, and — where the terminal speaks the kitty keyboard
+/// protocol — ask it to report modifiers on keys the base protocol folds
+/// away, so shift-enter arrives as its own event rather than a bare newline.
+/// Terminals that don't (Terminal.app, older tmux) simply see no flags.
+fn enter_screen() -> ratatui::DefaultTerminal {
+    let term = ratatui::init();
+    if supports_keyboard_enhancement().unwrap_or(false) {
+        let _ = crossterm::execute!(
+            std::io::stdout(),
+            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+        );
+    }
+    term
+}
+
+/// Hand the screen back, popping any enhancement flags we pushed.
+fn leave_screen() {
+    if supports_keyboard_enhancement().unwrap_or(false) {
+        let _ = crossterm::execute!(std::io::stdout(), PopKeyboardEnhancementFlags);
+    }
+    ratatui::restore();
 }
 
 pub async fn run(home: &Home) -> Result<()> {
@@ -372,9 +401,9 @@ pub async fn run(home: &Home) -> Result<()> {
     };
     app.refresh().await;
 
-    let mut terminal = ratatui::init();
+    let mut terminal = enter_screen();
     let result = app.main_loop(&mut terminal).await;
-    ratatui::restore();
+    leave_screen();
     // Leaving is looking: `rl since` starts from here next time.
     let _ = app
         .rpc
@@ -404,9 +433,9 @@ impl App {
                         if let Some((file, line)) = self.editor.take() {
                             // The editor gets the terminal; our reader lets go of stdin first.
                             drop(input);
-                            ratatui::restore();
+                            leave_screen();
                             let outcome = crate::env::open_in_editor(&file, line);
-                            *terminal = ratatui::init();
+                            *terminal = enter_screen();
                             input = EventStream::new();
                             match outcome {
                                 Ok(()) => self.reload_rules().await,
@@ -418,7 +447,7 @@ impl App {
                             // uses and the same passthrough `rl join` uses — a real terminal,
                             // not our re-render. We come back to the list when it lets go.
                             drop(input);
-                            ratatui::restore();
+                            leave_screen();
                             let outcome = crate::attach::attach(
                                 &self.home,
                                 crate::attach::Opts {
@@ -429,7 +458,7 @@ impl App {
                                 },
                             )
                             .await;
-                            *terminal = ratatui::init();
+                            *terminal = enter_screen();
                             input = EventStream::new();
                             match outcome {
                                 // Letting go lands on the list, not back in the
@@ -485,9 +514,14 @@ impl App {
 
     /// The area the terminal draws into.
     fn pane_size(&self, size: Rect) -> (u16, u16) {
-        let a = areas(size, self.wide, true, 0, 0);
+        let a = areas(size, self.wide, true, 0, 0, self.line_h());
         let r = a.pane.unwrap_or(size);
         (r.width.max(1), r.height.max(1))
+    }
+
+    /// How many rows the live line takes: its own, capped, at least one.
+    fn line_h(&self) -> u16 {
+        (self.line.rows() as u16).clamp(1, LINE_MAX)
     }
 
     /// Move the lens along the strip; the selection settles onto whatever the
@@ -1669,7 +1703,7 @@ impl App {
             (None, Some(c)) => c.cands.len().min(CANDS) as u16,
             (None, None) => 0,
         };
-        let a = areas(f.area(), self.wide, self.show_pane, form_h, cands_h);
+        let a = areas(f.area(), self.wide, self.show_pane, form_h, cands_h, self.line_h());
         let rows = self.rows();
         let rule_rows = self.rule_rows();
         // News is counted the way it is shown: a job with unseen runs is one.
@@ -1765,7 +1799,7 @@ impl App {
             f.render_widget(Paragraph::new(lines), area);
         }
         if matches!(self.mode, Mode::Normal) {
-            f.render_widget(Paragraph::new(self.line_line(a.line.width)), a.line);
+            f.render_widget(Paragraph::new(self.line_lines(a.line.width)), a.line);
         }
         f.render_widget(Paragraph::new(format!(" {}", self.footer())).dim(), a.footer);
     }
@@ -1789,13 +1823,16 @@ impl App {
     }
 
     /// The live line: what is typed, where the cursor is, and — at the right
-    /// edge, before you commit — what `enter` is about to do with it.
-    fn line_line(&self, width: u16) -> Line<'static> {
+    /// edge, before you commit — what `enter` is about to do with it. It grows
+    /// down a row per shift-enter; past `LINE_MAX` it keeps the cursor's row in
+    /// view. The `enter` hint rides the last row shown.
+    fn line_lines(&self, width: u16) -> Vec<Line<'static>> {
         if self.line.is_empty() {
-            return Line::from(vec![
+            return vec![Line::from(vec![
                 Span::styled(" › ", theme::accent()),
-                Span::raw("what do you want done here? / for commands").style(theme::dim()),
-            ]);
+                Span::raw("what do you want done here? / for commands · shift-enter for a new line")
+                    .style(theme::dim()),
+            ])];
         }
         let folder = self.folder_here();
         let what = {
@@ -1817,14 +1854,50 @@ impl App {
         };
         let hint = format!("{glyph}{tail}");
         let text = self.line.text();
-        let (before, after) = text.split_at(self.line.cursor());
-        let typed = format!(" › {before}▏{after}");
-        let room = (width as usize).saturating_sub(typed.chars().count() + hint.chars().count() + 1);
-        Line::from(vec![
-            Span::raw(typed),
-            Span::raw(" ".repeat(room)),
-            Span::styled(hint, style),
-        ])
+        let cursor = self.line.cursor();
+        // Rows and their byte offsets; the caret rides the row the cursor is in.
+        let rows: Vec<(usize, &str)> = {
+            let mut v = Vec::new();
+            let mut off = 0;
+            for part in text.split('\n') {
+                v.push((off, part));
+                off += part.len() + 1;
+            }
+            v
+        };
+        let cur_row = rows.iter().rposition(|(o, _)| *o <= cursor).unwrap_or(0);
+        // A window of at most LINE_MAX rows, keeping the cursor's row in view.
+        let max = LINE_MAX as usize;
+        let start = if rows.len() <= max {
+            0
+        } else {
+            cur_row.saturating_sub(max - 1).min(rows.len() - max)
+        };
+        let end = (start + max).min(rows.len());
+        let mut out = Vec::new();
+        for (idx, (o, part)) in rows.iter().enumerate().take(end).skip(start) {
+            let prefix = if idx == 0 { " › " } else { "   " };
+            let mut content = String::from(prefix);
+            if idx == cur_row {
+                let (a, b) = part.split_at(cursor - o);
+                content.push_str(a);
+                content.push('▏');
+                content.push_str(b);
+            } else {
+                content.push_str(part);
+            }
+            if idx == end - 1 {
+                let room = (width as usize).saturating_sub(content.chars().count() + hint.chars().count() + 1);
+                out.push(Line::from(vec![
+                    Span::raw(content),
+                    Span::raw(" ".repeat(room)),
+                    Span::styled(hint.clone(), style),
+                ]));
+            } else {
+                out.push(Line::from(Span::raw(content)));
+            }
+        }
+        out
     }
 
     fn draw_list(&self, f: &mut Frame, area: Rect, rows: &[Row]) {

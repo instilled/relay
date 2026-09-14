@@ -260,7 +260,12 @@ panel stays yours. What comes back fills the form (`tui/form.rs`), and your `ent
 it; the assistant never starts anything. The line says which of the three `enter` will do at its
 right edge — a glyph and a colour, accented when it will run something here, dim when the words
 are only asked (`❯ runs in api`, `✦ claude here`, `… asks the assistant`) — before you commit, so a
-call that leaves the machine is never sprung on you.
+call that leaves the machine is never sprung on you. A longer thought needs more than one line:
+`shift-enter` (or `alt-enter`) drops a newline in rather than sending, and the band grows a row
+per line up to eight before it windows around the caret, so `enter` still means send. The
+modifier is only there to catch where the terminal speaks the kitty keyboard protocol
+(Ghostty, WezTerm, recent iTerm2), which the panel asks for on the way in and gives back on the
+way out; where it does not (Terminal.app), plain `enter` sends as always.
 
 `tab` completes the word being typed (`tui/complete.rs`), rooted in that same folder: the first
 word against the agents the registry knows, the folder's `Makefile` targets and `package.json`

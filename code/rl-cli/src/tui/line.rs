@@ -73,9 +73,22 @@ impl Line {
         self.cursor = at;
     }
 
+    /// How many rows the text takes, splitting on newlines (one when empty).
+    pub fn rows(&self) -> usize {
+        self.text.bytes().filter(|&b| b == b'\n').count() + 1
+    }
+
     pub fn key(&mut self, k: &KeyEvent) -> Act {
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         match k.code {
+            // Shift-enter (and alt-enter, where a terminal sends that instead)
+            // adds a line rather than sending; plain enter still sends. It only
+            // arrives distinct from enter on a terminal that reports it — see
+            // the keyboard-enhancement flags the panel asks for.
+            KeyCode::Enter if k.modifiers.intersects(KeyModifiers::SHIFT | KeyModifiers::ALT) => {
+                self.text.insert(self.cursor, '\n');
+                self.cursor += 1;
+            }
             KeyCode::Enter => return Act::Submit,
             KeyCode::Esc => return Act::Cancel,
             KeyCode::Tab => return Act::Complete,
@@ -370,6 +383,29 @@ mod tests {
         assert_eq!(l.key(&KeyEvent::from(KeyCode::Esc)), Act::Cancel);
         assert_eq!(l.key(&KeyEvent::from(KeyCode::Tab)), Act::Complete);
         assert_eq!(l.text(), "make test", "none of them touch the text");
+    }
+
+    #[test]
+    fn shift_enter_adds_a_line_rather_than_sending() {
+        let mut l = Line::default();
+        press(&mut l, "first");
+        let shift_enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT);
+        assert_eq!(l.key(&shift_enter), Act::Typing);
+        press(&mut l, "second");
+        assert_eq!(l.text(), "first\nsecond");
+        assert_eq!(l.rows(), 2);
+        // Alt-enter does the same, for terminals that send that instead.
+        assert_eq!(l.key(&KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT)), Act::Typing);
+        assert_eq!(l.rows(), 3);
+        // Plain enter still sends.
+        assert_eq!(l.key(&KeyEvent::from(KeyCode::Enter)), Act::Submit);
+        // Backspace joins the lines back.
+        let mut l = Line::default();
+        press(&mut l, "a");
+        l.key(&shift_enter);
+        assert_eq!((l.text(), l.rows()), ("a\n", 2));
+        l.key(&KeyEvent::from(KeyCode::Backspace));
+        assert_eq!((l.text(), l.rows()), ("a", 1));
     }
 
     #[test]
