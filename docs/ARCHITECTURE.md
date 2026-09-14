@@ -275,7 +275,8 @@ is the row under the cursor instead — a job opens, a schedule offers to fire, 
 out of the list to be answered by number, a run's terminal opens. Arrows, `home`/`end` and `esc`
 belong to the list; `esc` with something typed clears the line first, and `ctrl-c` leaves.
 
-A strip under the header is the lens — `all · agents · jobs · reactions` — and the list shows
+At the right of the header is the lens — `all · agents · jobs · reactions`, the one in force
+accented — and the list shows
 only that slice: agents by what a run is, jobs and reactions by what started it (so a scheduled
 agent is in both `agents` and `jobs`, since the lens is a question, not a partition). Questions
 ignore it; they are what needs you, whatever slice you are in. `tab` on an empty line steps the
