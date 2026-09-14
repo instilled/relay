@@ -11,9 +11,10 @@
 //! that agent, and anything else is words the assistant reads and drafts into
 //! the form for your `enter`. The line says which of those it is, at its right
 //! edge, before you commit. `tab` completes against the folder of the row you
-//! are on. Everything that is not typing is a `/` command. Monochrome; colour
-//! only for attention states; the footer is the only chrome (J8). Nothing on
-//! screen is an id.
+//! are on. Everything that is not typing is a `/` command. Colour carries
+//! meaning — a saturated accent per state, on the terminal's own foreground so
+//! it reads on either theme (see `theme`); the footer is the only chrome (J8).
+//! Nothing on screen is an id.
 
 mod complete;
 pub mod form;
@@ -25,6 +26,7 @@ mod rows;
 mod rules;
 mod screen;
 mod term;
+mod theme;
 
 use crate::attach::client_name;
 use crate::client::Client;
@@ -37,7 +39,7 @@ use jiff::Timestamp;
 use pane::state_style;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Modifier, Style, Stylize};
+use ratatui::style::{Modifier, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
 use relay_core::Home;
@@ -1574,7 +1576,15 @@ impl App {
         }
         let [l, r] =
             Layout::horizontal([Constraint::Fill(1), Constraint::Length(self.me.len() as u16 + 1)]).areas(a.head);
-        f.render_widget(Paragraph::new(title).bold(), l);
+        // The lead word wears the accent; the tally after it reads plainly.
+        let head = match title.split_once(" · ") {
+            Some((lead, rest)) => Line::from(vec![
+                Span::styled(lead.to_string(), theme::accent().add_modifier(Modifier::BOLD)),
+                Span::raw(format!(" · {rest}")),
+            ]),
+            None => Line::from(Span::styled(title, theme::accent().add_modifier(Modifier::BOLD))),
+        };
+        f.render_widget(Paragraph::new(head), l);
         f.render_widget(Paragraph::new(self.me.clone()).dim().right_aligned(), r);
         if let Some(list) = a.list {
             match self.view {
@@ -1633,8 +1643,8 @@ impl App {
     fn line_line(&self, width: u16) -> Line<'static> {
         if self.line.is_empty() {
             return Line::from(vec![
-                Span::raw(" › ").dim(),
-                Span::raw("what do you want done here? / for commands").dim(),
+                Span::styled(" › ", theme::accent()),
+                Span::raw("what do you want done here? / for commands").style(theme::dim()),
             ]);
         }
         let folder = self.folder_here();
@@ -1642,13 +1652,20 @@ impl App {
             let here = self.here(&folder);
             line::what(self.line.text(), &self.agents, &|h| complete::runnable(h, &here))
         };
-        let hint = match &what {
-            line::What::Empty => String::new(),
-            line::What::Slash(_) => "↵ a command".into(),
-            line::What::Shell(_) => format!("↵ runs in {}", self.names.workspace(&folder)),
-            line::What::Agent { agent, .. } => format!("↵ {agent} here"),
-            line::What::Ask(_) => "↵ asks the assistant".into(),
+        // A glyph and a colour say what `enter` will do: teal when it will run
+        // something here, dim when the words are only asked or a command.
+        let (glyph, tail, style) = match &what {
+            line::What::Empty => ("↵", String::new(), theme::dim()),
+            line::What::Slash(_) => ("↵", " a command".into(), theme::dim()),
+            line::What::Shell(_) => (
+                "❯",
+                format!(" runs in {}", self.names.workspace(&folder)),
+                theme::accent(),
+            ),
+            line::What::Agent { agent, .. } => ("✦", format!(" {agent} here"), theme::accent()),
+            line::What::Ask(_) => ("…", " asks the assistant".into(), theme::dim()),
         };
+        let hint = format!("{glyph}{tail}");
         let text = self.line.text();
         let (before, after) = text.split_at(self.line.cursor());
         let typed = format!(" › {before}▏{after}");
@@ -1656,7 +1673,7 @@ impl App {
         Line::from(vec![
             Span::raw(typed),
             Span::raw(" ".repeat(room)),
-            Span::raw(hint).dim(),
+            Span::styled(hint, style),
         ])
     }
 
@@ -1687,39 +1704,56 @@ impl App {
                     }
                     let mut l = vec![Span::raw(" ")];
                     let mut used = 1;
-                    match &h.place {
-                        Some(p) => {
-                            l.push(Span::raw(p.clone()).bold());
-                            l.push(Span::raw(format!("  {}", h.name)).dim());
-                            used += p.chars().count() + 2 + h.name.chars().count();
-                        }
-                        None => {
-                            l.push(Span::raw(h.name.clone()).bold());
-                            used += h.name.chars().count();
-                        }
+                    // The name reads first; the folder it lives in follows, quiet.
+                    l.push(Span::styled(h.name.clone(), theme::name()));
+                    used += h.name.chars().count();
+                    if let Some(p) = &h.place {
+                        l.push(Span::styled(format!("  {p}"), theme::dim()));
+                        used += 2 + p.chars().count();
                     }
-                    // The folder's rules at the right, yellow when one waits
-                    // for a yes; as many as fit, what needs you first.
-                    let mut texts: Vec<String> = h.rules.iter().map(rows::Chip::text).collect();
+                    // The count of what is set up here sits at the right edge and
+                    // is the honest total even when few chips fit.
+                    let count = group_count(&h.rules);
+                    let cw = if count.is_empty() { 0 } else { count.chars().count() + 1 };
+                    // The rules as chips, just after the name — what needs a yes
+                    // first (they are already sorted so). As many as fit; a `+K`
+                    // stands in for the rest so the clip is never silent.
+                    let texts: Vec<String> = h.rules.iter().map(rows::Chip::text).collect();
                     let width = |t: &[String]| {
                         t.iter().map(|x| x.chars().count()).sum::<usize>() + 3 * t.len().saturating_sub(1)
                     };
-                    while !texts.is_empty() && used + 3 + width(&texts) > w {
-                        texts.pop();
+                    let mut show = texts.len();
+                    let more = |shown: usize, total: usize| {
+                        if shown < total {
+                            format!(" +{}", total - shown).chars().count()
+                        } else {
+                            0
+                        }
+                    };
+                    while show > 0 && used + 3 + width(&texts[..show]) + more(show, texts.len()) + cw + 2 > w {
+                        show -= 1;
                     }
-                    if !texts.is_empty() {
-                        let pad = w.saturating_sub(used + width(&texts) + 1).max(2);
-                        l.push(Span::raw(" ".repeat(pad)));
-                        for (i, (c, t)) in h.rules.iter().zip(texts).enumerate() {
+                    if show > 0 || !texts.is_empty() {
+                        l.push(Span::raw("   "));
+                        for (i, (c, t)) in h.rules.iter().zip(&texts[..show]).enumerate() {
                             if i > 0 {
-                                l.push(Span::raw(" · ").dim());
+                                l.push(Span::styled(" · ", theme::dim()));
                             }
                             l.push(match c.status {
-                                RuleStatus::NeedsApproval => Span::raw(t).yellow().bold(),
-                                RuleStatus::Paused => Span::raw(t).dim(),
-                                _ => Span::raw(t),
+                                RuleStatus::NeedsApproval => Span::styled(t.clone(), theme::needs()),
+                                RuleStatus::Paused => Span::styled(t.clone(), theme::dim()),
+                                _ => Span::styled(t.clone(), theme::accent()),
                             });
                         }
+                        if show < texts.len() {
+                            l.push(Span::styled(format!(" +{}", texts.len() - show), theme::dim()));
+                        }
+                    }
+                    if !count.is_empty() {
+                        let used_now: usize = l.iter().map(|s| s.content.chars().count()).sum();
+                        let pad = w.saturating_sub(used_now + count.chars().count() + 1).max(1);
+                        l.push(Span::raw(" ".repeat(pad)));
+                        l.push(Span::styled(count, theme::dim()));
                     }
                     Line::from(l)
                 }
@@ -1734,9 +1768,9 @@ impl App {
                     list_line(
                         w,
                         tw,
-                        Span::raw(" ✱ ").yellow().bold(),
-                        Span::raw(fit(&q.title, tw)).bold(),
-                        Span::raw(fit("to decide", 10)).yellow(),
+                        Span::styled(" ✱ ", theme::needs()),
+                        Span::styled(fit(&q.title, tw), theme::name()),
+                        Span::styled(fit("to decide", 10), theme::needs()),
                         &summary,
                         None,
                         None,
@@ -1796,7 +1830,7 @@ impl App {
                 }
             };
             if selected {
-                line = line.style(Style::default().add_modifier(Modifier::REVERSED));
+                line = line.style(theme::selected());
                 sel_line = lines.len();
             }
             lines.push(line);
@@ -1861,7 +1895,7 @@ impl App {
                 }
             };
             if selected {
-                line = line.style(Style::default().add_modifier(Modifier::REVERSED));
+                line = line.style(theme::selected());
                 sel_line = lines.len();
             }
             lines.push(line);
@@ -2018,6 +2052,22 @@ impl App {
     }
 }
 
+/// A group header's right-edge tally: how many schedules and reactions the
+/// folder has, in words, dropping a kind that has none and empty when it has
+/// neither. Schedules read as "jobs", the word the list uses for their runs.
+fn group_count(rules: &[rows::Chip]) -> String {
+    let jobs = rules.iter().filter(|c| c.kind == RuleKind::Schedule).count();
+    let reactions = rules.iter().filter(|c| c.kind == RuleKind::Reaction).count();
+    let mut parts = Vec::new();
+    if jobs > 0 {
+        parts.push(format!("{jobs} job{}", if jobs == 1 { "" } else { "s" }));
+    }
+    if reactions > 0 {
+        parts.push(format!("{reactions} reaction{}", if reactions == 1 { "" } else { "s" }));
+    }
+    parts.join(" · ")
+}
+
 /// Bytes in words, near enough for a line of chrome.
 fn bytes_words(n: u64) -> String {
     const K: f64 = 1024.0;
@@ -2035,7 +2085,30 @@ fn bytes_words(n: u64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::viewport;
+    use super::{group_count, viewport};
+    use crate::tui::rows::Chip;
+    use relay_proto::rule::{RuleKind, RuleStatus};
+
+    fn chip(kind: RuleKind) -> Chip {
+        Chip {
+            name: "x".into(),
+            kind,
+            status: RuleStatus::On,
+            due: None,
+        }
+    }
+
+    #[test]
+    fn the_header_count_drops_a_kind_with_none_and_pluralises() {
+        use RuleKind::*;
+        assert_eq!(group_count(&[]), "");
+        assert_eq!(group_count(&[chip(Schedule)]), "1 job");
+        assert_eq!(group_count(&[chip(Reaction)]), "1 reaction");
+        assert_eq!(
+            group_count(&[chip(Schedule), chip(Schedule), chip(Reaction)]),
+            "2 jobs · 1 reaction"
+        );
+    }
 
     #[test]
     fn the_window_keeps_the_selection_clear_of_the_edge_markers() {

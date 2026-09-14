@@ -231,7 +231,7 @@ Each job: **situation → want → so that**, then the herdr / old-ax baseline, 
 - Fleet screen: rows not panes; sort by attention score (needs-input, failed, stale-working, finished-unreviewed, working, idle); group by group key, then workspace.
 - Row: state + confidence, age in state, last meaningful line (transcript or PTY), cost so far, tags, plugin-contributed action keys.
 - No layout persistence. Persist *selection* and *filters* only.
-- Look and feel: monochrome by default, colour only for attention states; one line per run; no boxes inside boxes; the footer is the only chrome.
+- Look and feel: colour carries state — a saturated accent per state, painted on the terminal's own foreground so it reads on either theme; one line per run; no boxes inside boxes; the footer is the only chrome.
 
 **Done when.** With six runs across three branches, the one that needs me is the top row and the screen fits in 80×24.
 
