@@ -18,12 +18,50 @@ use relay_core::time::fmt_age;
 use relay_proto::decision::Decision;
 use relay_proto::methods::{Digest, DigestItem};
 use relay_proto::rule::{Rule, RuleKind, RuleStatus};
-use relay_proto::types::{Cause, Confidence, Run, RunState};
+use relay_proto::types::{Cause, Confidence, Run, RunKind, RunState};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 /// Ended runs stay on the list this long.
 pub const RECENT: SignedDuration = SignedDuration::from_hours(24);
+
+/// Which slice of the list you are looking at. Not exclusive: a scheduled
+/// agent is both an agent and a job, and shows under either — the lens is the
+/// question you are asking, not a partition. Questions ignore it; they are
+/// what needs you, whatever slice you are in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Lens {
+    #[default]
+    All,
+    Agents,
+    Jobs,
+    Reactions,
+}
+
+impl Lens {
+    /// In the order the strip lists them, and cycles through them.
+    pub const ALL: [Lens; 4] = [Lens::All, Lens::Agents, Lens::Jobs, Lens::Reactions];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Lens::All => "all",
+            Lens::Agents => "agents",
+            Lens::Jobs => "jobs",
+            Lens::Reactions => "reactions",
+        }
+    }
+
+    /// Whether a run belongs in this lens — by what it is (agents) or by what
+    /// started it (jobs are scheduled, reactions are event-driven).
+    fn keeps(self, r: &Run) -> bool {
+        match self {
+            Lens::All => true,
+            Lens::Agents => r.kind == RunKind::Agent,
+            Lens::Jobs => matches!(r.cause, Cause::Schedule(_)),
+            Lens::Reactions => matches!(r.cause, Cause::Reaction(_)),
+        }
+    }
+}
 
 /// Ended runs a job shows when opened.
 pub const OPENED: usize = 20;
@@ -379,6 +417,8 @@ pub struct Context<'a> {
     /// Jobs opened to their runs, by key.
     pub opened: &'a HashSet<String>,
     pub filter: &'a str,
+    /// Which slice of the list to show; questions ignore it.
+    pub lens: Lens,
     pub now: Timestamp,
 }
 
@@ -428,6 +468,9 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
         let r = &i.run;
         let live = !r.state.is_terminal() || i.unseen || r.ended_at.is_some_and(|t| now.duration_since(t) <= RECENT);
         if !live {
+            continue;
+        }
+        if !cx.lens.keeps(r) {
             continue;
         }
         let key = r.group_key();
@@ -637,10 +680,57 @@ mod tests {
                 names,
                 rules: &[],
                 opened: &HashSet::new(),
+                lens: Lens::All,
                 filter,
                 now,
             },
         )
+    }
+
+    fn lens_build<'a>(d: &'a Digest, names: &Names, lens: Lens, now: Timestamp) -> Vec<Row<'a>> {
+        build(
+            d,
+            &Context {
+                names,
+                rules: &[],
+                opened: &HashSet::new(),
+                lens,
+                filter: "",
+                now,
+            },
+        )
+    }
+
+    #[test]
+    fn a_lens_keeps_a_run_by_what_it_is_or_what_started_it() {
+        let now: Timestamp = "2026-09-10T12:00:00Z".parse().unwrap();
+        let ws = "/home/f/relay";
+        let at = "2026-09-10T11:00:00Z";
+        let agent = item("agent", RunState::Working, ws, at, false);
+        let mut shell = item("shell", RunState::Working, ws, at, false);
+        shell.run.kind = RunKind::Command;
+        let mut sched = item("sched", RunState::Working, ws, at, false);
+        sched.run.cause = Cause::Schedule("nightly".into());
+        let mut react = item("react", RunState::Working, ws, at, false);
+        react.run.cause = Cause::Reaction("on-fail".into());
+        let d = Digest {
+            since: now,
+            items: vec![agent, shell, sched, react],
+            decisions: vec![],
+        };
+        let names = Names::new([(PathBuf::from(ws), "relay".to_string())]);
+        let runs = |lens| {
+            lens_build(&d, &names, lens, now)
+                .iter()
+                .filter_map(|r| r.item().map(|i| i.run.id.clone()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(runs(Lens::All), ["agent", "shell", "sched", "react"]);
+        // Agents is by kind, so it keeps the scheduled and reacted agents too.
+        assert_eq!(runs(Lens::Agents), ["agent", "sched", "react"]);
+        // Jobs and reactions are by cause.
+        assert_eq!(runs(Lens::Jobs), ["sched"]);
+        assert_eq!(runs(Lens::Reactions), ["react"]);
     }
 
     #[test]
@@ -763,6 +853,7 @@ mod tests {
                 names: &names,
                 rules: &[],
                 opened: &opened,
+                lens: Lens::All,
                 filter: "",
                 now,
             },
@@ -892,6 +983,7 @@ mod tests {
                     names: &names,
                     rules,
                     opened: &HashSet::new(),
+                    lens: Lens::All,
                     filter: "",
                     now,
                 },
