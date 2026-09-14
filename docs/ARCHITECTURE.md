@@ -202,9 +202,12 @@ is one list, the width of the screen, built from `digest.get` (`tui/rows.rs`): q
 then runs by attention, grouped by the folder they belong to, and named — a workspace by the
 name it was registered under, a cause as "schedule nightly" or "rule tests-failed", never an id.
 A row is a mark (`✱` needs you, `·` going, `•` ended, `▸` a job), the title, the state as a word,
-the summary to the edge, and the ref and the age at the right. A group's header is the folder,
-its name, and at the right the rules that live there — `↻ nightly 4h · ⚡ tests-failed`, in
-yellow when one waits for a yes; your own rules get a line only then. Runs a schedule or a rule
+the summary to the edge, and the ref and the age at the right. Colour carries the state — a
+saturated accent per state, on the terminal's own foreground so it reads on either theme
+(`tui/theme.rs`). A group's header is its name, then the folder it lives in, then the rules that
+live there — `↻ nightly 4h · ⚡ tests-failed`, accented and amber when one waits for a yes, with a
+`+N` when more than fit — and, at the right edge, the tally of how many jobs and reactions the
+folder holds; your own rules get a line only when one waits for a yes. Runs a schedule or a rule
 started fold, once ended, into one line per job — name, cadence, how many went well, the last
 outcome — so a job firing every thirty seconds is a row, not a screen; a run still going or
 waiting on you is never folded, and `enter` on a job opens it to its last twenty. When the list
@@ -242,7 +245,8 @@ terminal joined at once. Anything else is plain words, and those go to `assistan
 (§6) as a run of its own — it is in the list like any other, `/stop` there stops it — while the
 panel stays yours. What comes back fills the form (`tui/form.rs`), and your `enter` is what does
 it; the assistant never starts anything. The line says which of the three `enter` will do at its
-right edge (`↵ runs in api`, `↵ claude here`, `↵ asks the assistant`) before you commit, so a
+right edge — a glyph and a colour, accented when it will run something here, dim when the words
+are only asked (`❯ runs in api`, `✦ claude here`, `… asks the assistant`) — before you commit, so a
 call that leaves the machine is never sprung on you.
 
 `tab` completes the word being typed (`tui/complete.rs`), rooted in that same folder: the first
