@@ -18,7 +18,6 @@
 
 mod complete;
 pub mod form;
-mod keys;
 mod line;
 mod palette;
 mod pane;
@@ -53,7 +52,7 @@ use relay_proto::methods::{
     SchedulePause, ScheduleReload, ScheduleResume, ScheduleRun, SummaryGet, SummaryMake, SummaryParams, WorkspaceList,
 };
 use relay_proto::rule::{Rule, RuleKind, RuleStatus};
-use relay_proto::types::{Cause, Event as LedgerEvent, Mark, Run, RunKind, RunState, Summary};
+use relay_proto::types::{AttachMode, Cause, Event as LedgerEvent, Mark, Run, RunKind, RunState, Summary};
 use rows::{Names, Row, fit, short_path};
 use rules::RuleRow;
 use std::collections::HashSet;
@@ -66,6 +65,9 @@ const REFRESH: Duration = Duration::from_secs(1);
 const FLASH: Duration = Duration::from_secs(4);
 /// The most candidates `tab` shows at once.
 const CANDS: usize = 6;
+/// Recent output replayed when joining a run for real, enough to paint the
+/// screen on arrival. Bytes.
+const JOIN_SCROLLBACK: u64 = 256 * 1024;
 /// Narrower than this, the pane takes the screen instead of sharing it.
 const SPLIT_AT: u16 = 100;
 /// The list's share of a split screen, in percent.
@@ -175,6 +177,9 @@ struct App {
     /// `E` pressed: the file and line to open in the editor once the
     /// screen is given back.
     editor: Option<(PathBuf, usize)>,
+    /// A run to hand the real terminal to (its id, and whether to take the
+    /// keyboard from whoever holds it), once ratatui has stepped aside.
+    attach: Option<(String, bool)>,
     /// The assistant at work on some words: what was asked, the rule it is
     /// about if any, and the task waiting for the answer.
     asking: Option<Asking>,
@@ -357,6 +362,7 @@ pub async fn run(home: &Home) -> Result<()> {
         term_size: (0, 0),
         events: Vec::new(),
         editor: None,
+        attach: None,
         asking: None,
         summary: None,
         summarising: None,
@@ -411,6 +417,32 @@ impl App {
                                 Ok(()) => self.reload_rules().await,
                                 Err(e) => self.say(format!("{e:#}")),
                             }
+                        }
+                        if let Some((id, take)) = self.attach.take() {
+                            // The run gets the real terminal, the same handover the editor
+                            // uses and the same passthrough `rl join` uses — a real terminal,
+                            // not our re-render. We come back to the list when it lets go.
+                            drop(input);
+                            ratatui::restore();
+                            let outcome = crate::attach::attach(
+                                &self.home,
+                                crate::attach::Opts {
+                                    id,
+                                    mode: AttachMode::Join,
+                                    take,
+                                    scrollback: JOIN_SCROLLBACK,
+                                },
+                            )
+                            .await;
+                            *terminal = ratatui::init();
+                            input = EventStream::new();
+                            match outcome {
+                                // Letting go lands on the list, not back in the
+                                // re-render we stepped out of.
+                                Ok(_) => self.leave_term(),
+                                Err(e) => self.say(join_error(&e)),
+                            }
+                            self.refresh().await;
                         }
                     }
                     Some(Ok(_)) => {}
@@ -663,12 +695,8 @@ impl App {
     }
 
     /// Stepping back to the list. The view stays open and goes on reading, so
-    /// coming back is instant and lands where it was left; the keyboard, if
-    /// it was ours, goes back to the run.
+    /// coming back is instant and lands where it was left.
     fn leave_term(&mut self) {
-        if let Some(t) = &mut self.term {
-            t.unjoin();
-        }
         self.wide = false;
         self.pane = Pane::Facts;
     }
@@ -682,8 +710,10 @@ impl App {
 
     // ---- doing things ------------------------------------------------------
 
-    /// The selected run's terminal, full screen: joined, or only watched.
-    async fn open_term(&mut self, area: Rect, join: bool) {
+    /// The selected run's terminal, full screen and watched. Taking the
+    /// keyboard is a separate step — `enter` again, or `/join` — which hands
+    /// the real terminal over (`raw::attach`), not this re-render.
+    async fn open_term(&mut self, area: Rect) {
         let Some(id) = self.selected_run().map(|i| i.run.id.clone()) else {
             self.say("nothing here to open");
             return;
@@ -693,15 +723,6 @@ impl App {
             self.pane = Pane::Term;
             self.wide = true;
             self.term_size = self.pane_size(area);
-            if join {
-                let home = self.home.clone();
-                if let Some(t) = &mut self.term {
-                    let take = t.busy_with.is_some();
-                    if let Err(e) = t.join(&home, take).await {
-                        self.say(format!("join: {e:#}"));
-                    }
-                }
-            }
             return;
         }
         self.seen(vec![id.clone()]).await;
@@ -709,10 +730,7 @@ impl App {
         let r = a.pane.unwrap_or(area);
         let size = (r.width.max(1), r.height.max(1));
         match TermView::open(&self.home, &id, size).await {
-            Ok(mut t) => {
-                if join && let Err(e) = t.join(&self.home, false).await {
-                    self.say(format!("join: {e:#}"));
-                }
+            Ok(t) => {
                 self.term = Some(t);
                 self.term_size = size;
                 self.pane = Pane::Term;
@@ -1003,7 +1021,9 @@ impl App {
         self.refresh().await;
         self.select(Some(format!("r:{}", run.id)));
         if run.kind == RunKind::Agent {
-            self.open_term(area, true).await;
+            // A fresh agent is one you mean to drive: hand it the real terminal
+            // at once (main_loop does it when this key returns).
+            self.attach = Some((run.id.clone(), false));
         }
         Ok(())
     }
@@ -1199,11 +1219,9 @@ impl App {
             }
             Mode::Normal => {}
         }
-        // Joined, every key is the run's. Watching, the line still has them,
-        // so you can type the next thing without leaving the run you are on.
-        if self.pane == Pane::Term && self.term.as_ref().is_some_and(|t| t.joined() && t.ended.is_none()) {
-            return self.key_term(k).await;
-        }
+        // Watching, the line still has the keyboard, so you can type the next
+        // thing without leaving the run you are on; taking the keyboard is the
+        // handover to the real terminal (`raw::attach`), never keys here.
         // An empty line has nothing to complete, so `tab` steps the lens along
         // instead — shift-tab the other way.
         if self.line.is_empty()
@@ -1309,15 +1327,14 @@ impl App {
 
     /// `enter` on an empty line: whatever the row under the cursor is for.
     async fn enter_row(&mut self, area: Rect) -> Result<()> {
-        // Watching a run: enter is what takes the keyboard.
-        if self.pane == Pane::Term && self.term.as_ref().is_some_and(|t| !t.joined() && t.ended.is_none()) {
-            let home = self.home.clone();
-            if let Some(t) = &mut self.term {
-                let take = t.busy_with.is_some();
-                if let Err(e) = t.join(&home, take).await {
-                    self.say(format!("join: {e:#}"));
-                }
-            }
+        // Watching a live run: enter is what takes the keyboard — and taking
+        // it hands over the real terminal, so `main_loop` does it once ratatui
+        // has stepped aside.
+        if self.pane == Pane::Term
+            && let Some(t) = &self.term
+            && t.ended.is_none()
+        {
+            self.attach = Some((t.id.clone(), false));
             return Ok(());
         }
         if let Some(key) = self.selected_job().map(|j| j.key.clone()) {
@@ -1344,7 +1361,7 @@ impl App {
             self.mode = Mode::Answer(id);
         } else {
             // Watch first — the next enter is what takes the keyboard.
-            self.open_term(area, false).await;
+            self.open_term(area).await;
         }
         Ok(())
     }
@@ -1513,14 +1530,17 @@ impl App {
             }
             palette::Cmd::Watch => {
                 if self.selected_run().is_some() {
-                    self.open_term(area, false).await;
+                    self.open_term(area).await;
                 }
             }
-            palette::Cmd::Join => {
-                if self.selected_run().is_some() {
-                    self.open_term(area, true).await;
+            palette::Cmd::Join => match self.selected_run() {
+                Some(i) if !i.run.state.is_terminal() => {
+                    // Assertive: take the keyboard from whoever holds it.
+                    self.attach = Some((i.run.id.clone(), true));
                 }
-            }
+                Some(_) => self.say("ended: nothing to join"),
+                None => self.say("nothing here to join"),
+            },
             palette::Cmd::Info => self.show_pane = !self.show_pane,
             palette::Cmd::Full => {
                 self.wide = !self.wide;
@@ -1584,25 +1604,6 @@ impl App {
                 )),
                 Err(e) => self.say(format!("gc: {e:#}")),
             },
-        }
-        Ok(())
-    }
-
-    /// Joined: every key is the run's, bar the one that lets go.
-    async fn key_term(&mut self, k: KeyEvent) -> Result<()> {
-        let Some(t) = &mut self.term else {
-            self.close_term();
-            return Ok(());
-        };
-        // ctrl-\ is byte 0x1c, which a plain terminal reports as ctrl-4.
-        let back =
-            matches!(k.code, KeyCode::Char('\\') | KeyCode::Char('4')) && k.modifiers.contains(KeyModifiers::CONTROL);
-        if back {
-            self.leave_term();
-            return Ok(());
-        }
-        if let Some(bytes) = keys::encode(&k, t.app_cursor()) {
-            t.input(bytes).await?;
         }
         Ok(())
     }
@@ -2118,14 +2119,12 @@ impl App {
             let mut s = String::new();
             if t.ended.is_some() {
                 s.push_str("ended · pgup/pgdn reads back · esc back");
-            } else if t.joined() {
-                s.push_str("joined · ctrl-\\ back");
-            } else if let Some(who) = &t.busy_with {
-                s.push_str(&format!("watching · {who} is joined · enter takes over · esc back"));
             } else if let Some(who) = &t.info.joiner {
-                s.push_str(&format!("watching · {who} is joined · enter joins · esc back"));
+                s.push_str(&format!(
+                    "watching · {who} is driving · enter takes the terminal · esc back"
+                ));
             } else {
-                s.push_str("watching · enter joins · pgup/pgdn reads back · esc back");
+                s.push_str("watching · enter takes the terminal · pgup/pgdn reads back · esc back");
             }
             if t.scrolled() > 0 {
                 s.push_str(&format!(" · {} back", t.scrolled()));
@@ -2191,6 +2190,17 @@ fn group_count(rules: &[rows::Chip]) -> String {
         parts.push(format!("{reactions} reaction{}", if reactions == 1 { "" } else { "s" }));
     }
     parts.join(" · ")
+}
+
+/// The word for a failed join: the one that matters is someone else holding
+/// the keyboard, which `/join` can take.
+fn join_error(e: &anyhow::Error) -> String {
+    if let Some(rpc) = e.downcast_ref::<relay_proto::rpc::RpcError>()
+        && rpc.code == relay_proto::rpc::RpcError::BUSY
+    {
+        return "someone holds the keyboard · /join takes it".into();
+    }
+    format!("join: {e:#}")
 }
 
 /// Bytes in words, near enough for a line of chrome.
