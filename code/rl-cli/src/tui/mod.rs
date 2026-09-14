@@ -70,6 +70,10 @@ const CANDS: usize = 6;
 const SPLIT_AT: u16 = 100;
 /// The list's share of a split screen, in percent.
 const LIST_SHARE: u16 = 50;
+/// Air around the panel: columns each side, a row top and bottom. None of it
+/// in the full-screen terminal, which wants every cell.
+const GUTTER_X: u16 = 2;
+const GUTTER_Y: u16 = 1;
 
 /// What the right pane shows for a run.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -246,6 +250,9 @@ struct Areas {
     head: Rect,
     /// The lens strip, just under the header, in the work view.
     lens: Option<Rect>,
+    /// The rules between the sections: under the header, above the line, above
+    /// the footer. Empty in the full-screen terminal.
+    rules: Vec<Rect>,
     list: Option<Rect>,
     pane: Option<Rect>,
     /// The form, at the foot of the body.
@@ -258,16 +265,34 @@ struct Areas {
 }
 
 fn areas(area: Rect, wide: bool, show_pane: bool, form_h: u16, cands_h: u16, lens_h: u16) -> Areas {
-    let [head, lens, body, form, cands, line, footer] = Layout::vertical([
+    // A gutter of air around the panel and rules between its sections — but not
+    // in the full-screen terminal, which wants every cell.
+    let chrome = !wide;
+    let area = if chrome {
+        Rect {
+            x: area.x + GUTTER_X,
+            y: area.y + GUTTER_Y,
+            width: area.width.saturating_sub(2 * GUTTER_X),
+            height: area.height.saturating_sub(2 * GUTTER_Y),
+        }
+    } else {
+        area
+    };
+    let rule = u16::from(chrome);
+    let [head, lens, rule_a, body, form, cands, rule_b, line, rule_c, footer] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(lens_h),
+        Constraint::Length(rule),
         Constraint::Fill(1),
         Constraint::Length(if form_h > 0 { form_h + 1 } else { 0 }),
         Constraint::Length(cands_h),
+        Constraint::Length(rule),
         Constraint::Length(1),
+        Constraint::Length(rule),
         Constraint::Length(1),
     ])
     .areas(area);
+    let rules = if chrome { vec![rule_a, rule_b, rule_c] } else { vec![] };
     let lens = (lens_h > 0).then_some(lens);
     let form = (form_h > 0).then_some(form);
     let cands = (cands_h > 0).then_some(cands);
@@ -289,6 +314,7 @@ fn areas(area: Rect, wide: bool, show_pane: bool, form_h: u16, cands_h: u16, len
     Areas {
         head,
         lens,
+        rules,
         list,
         pane,
         form,
@@ -1659,6 +1685,10 @@ impl App {
         f.render_widget(Paragraph::new(self.me.clone()).dim().right_aligned(), r);
         if let Some(area) = a.lens {
             f.render_widget(Paragraph::new(self.lens_line()), area);
+        }
+        // The rules between the sections — a little air, a little structure.
+        for rule in &a.rules {
+            f.render_widget(Paragraph::new("─".repeat(rule.width as usize)).dim(), *rule);
         }
         if let Some(list) = a.list {
             match self.view {

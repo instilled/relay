@@ -204,7 +204,9 @@ name it was registered under, a cause as "schedule nightly" or "rule tests-faile
 A row is a mark (`✱` needs you, `·` going, `•` ended, `▸` a job), the title, the state as a word,
 the summary to the edge, and the ref and the age at the right. Colour carries the state — a
 saturated accent per state, on the terminal's own foreground so it reads on either theme
-(`tui/theme.rs`). A group's header is its name, then the folder it lives in, then the rules that
+(`tui/theme.rs`). The panel sits in a gutter of air, with a rule between its sections — under the
+header, above the line, above the footer — and the list and its detail pane split by a vertical
+bar; the full-screen terminal drops all of it for the cells. A group's header is its name, then the folder it lives in, then the rules that
 live there — `↻ nightly 4h · ⚡ tests-failed`, accented and amber when one waits for a yes, with a
 `+N` when more than fit — and, at the right edge, the tally of how many jobs and reactions the
 folder holds; your own rules get a line only when one waits for a yes. Runs a schedule or a rule
