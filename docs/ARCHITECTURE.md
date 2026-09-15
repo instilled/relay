@@ -436,6 +436,21 @@ it wants (`run.failed`, `run.*`, `*`), may narrow by `where` (the run's tag, cau
 event's group), and fills `{summary}`, `{title}`, `{run}`, `{data.x}` and the rest into whatever
 it runs. The whole event is in the child's environment as `RELAY_EVENT`.
 
+**Emitting events.** A run's own output is not the only thing that lands in the events table:
+`rl emit <kind> [--data k=v]… [--json -]` puts one there itself, and the reactor picks it up like
+any built-in event (`event.emit`, appended by `rl-daemon/src/handlers.rs`). Inside a run it needs
+no arguments beyond the kind — it reads `RELAY_RUN` from the environment, the same way `rl ask`
+does, so the event is filed under that run's folder and joins its flow; outside a run, `--in
+<folder>` (or the cwd) says where it belongs. The kind is the caller's own dotted name
+(`log.issue`); the daemon's own families (`run.*`, `decision.*`, `schedule.*`, …) are refused, so
+an emit cannot forge a `run.failed` the digest would read as real. The payload rides in `data`,
+reachable in a reaction as `{data.severity}` and matchable with `where: { data: { severity:
+[ERROR, WARNING] } }`. This is all a "source" needs: a schedule runs a probe on a cadence (with
+`RELAY_LAST_RUN` in its environment, the previous firing, so it can ask "what is new since then"
+without keeping its own clock), the probe `rl emit`s what it finds, and a reaction fans out to an
+agent that works it and `rl ask`s. A plugin, for now, is just such a command; a lightweight JS/TS
+SDK over the same `rl emit` / `rl ask` / `rl run` contract is on the roadmap.
+
 Three things keep a rule from running away with itself. A run it starts carries `cause:
 reaction:<name>` and a question it asks remembers the same, so no rule ever answers its own
 doing. A throttle, ten seconds by default, collapses a burst. And the loop reads the event table

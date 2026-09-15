@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, Parser, Subcommand};
 use rl_core::time::{now, parse_since};
 use rl_core::{Home, display_path};
@@ -16,7 +16,8 @@ use rl_proto::methods::{
     DecisionTake, DecisionTakeParams,
 };
 use rl_proto::methods::{
-    EventId, ReactionList, ReactionPause, ReactionReload, ReactionResume, ReactionTest, ReactionTrial,
+    EventEmit, EventEmitParams, EventId, ReactionList, ReactionPause, ReactionReload, ReactionResume, ReactionTest,
+    ReactionTrial,
 };
 use rl_proto::methods::{
     ScheduleFilter, ScheduleList, ScheduleName, SchedulePause, ScheduleReload, ScheduleResume, ScheduleRun,
@@ -101,6 +102,8 @@ enum Cmd {
     Summarise(SummariseArgs),
     /// Let the journal of old runs go, as `retention:` in config.yaml says (or --older-than). Runs and events stay.
     Gc(GcArgs),
+    /// Emit a custom event, from a command or plugin; reactions pick it up.
+    Emit(EmitArgs),
     /// Ask a human something and carry on: the question waits until answered.
     Ask(AskArgs),
     /// Questions waiting on you (and, with --all, the answered ones).
@@ -348,6 +351,31 @@ enum ConfigCmd {
 }
 
 #[derive(Args)]
+struct EmitArgs {
+    /// The event kind — your own dotted name, like `log.issue`. The daemon's
+    /// own families (`run.*`, `decision.*`, …) are refused.
+    kind: String,
+    /// A field of the event's data: `-d severity=ERROR`. Repeatable.
+    #[arg(short = 'd', long = "data", value_name = "KEY=VALUE")]
+    data: Vec<String>,
+    /// Read the whole data object as JSON — a string, or `-` for stdin.
+    #[arg(long, value_name = "JSON")]
+    json: Option<String>,
+    /// A one-line summary (default: the kind).
+    #[arg(short, long)]
+    summary: Option<String>,
+    /// The folder it is about (default: $RELAY_RUN's folder, else here).
+    #[arg(long = "in", value_name = "DIR")]
+    in_: Option<PathBuf>,
+    /// The run it belongs to (default: $RELAY_RUN, when there is one).
+    #[arg(long, value_name = "ID")]
+    run: Option<String>,
+    /// Override the group key it is filed under.
+    #[arg(long)]
+    group: Option<String>,
+}
+
+#[derive(Args)]
 struct AskArgs {
     /// The question, in one line. Left out, the whole thing is read as YAML
     /// (or JSON) on stdin: title, summary, options with actions.
@@ -559,6 +587,7 @@ async fn main() -> Result<()> {
         Cmd::Interpret(a) => interpret(&home, a, cli.json).await,
         Cmd::Summarise(a) => summarise(&home, a, cli.json).await,
         Cmd::Gc(a) => gc(&home, a, cli.json).await,
+        Cmd::Emit(a) => emit(&home, a).await,
         Cmd::Ask(a) => ask(&home, a, cli.json).await,
         Cmd::Decisions(a) => decisions(&home, a, cli.json).await,
         Cmd::Decide(a) => decide(&home, a, cli.json).await,
@@ -1087,6 +1116,46 @@ fn describe(i: &DaemonInfo) -> String {
 /// `rl ask`: raise a question. With a title on the command line the flags say
 /// it all; without one, the whole spec is YAML (or JSON) on stdin, which is
 /// how an agent hands over options that carry actions.
+/// Emit a custom event. Inside a run, `RELAY_RUN` attributes it to that run's
+/// folder and flow; outside one, the folder is `--in` or the cwd.
+async fn emit(home: &Home, a: EmitArgs) -> Result<()> {
+    let mut data = serde_json::Map::new();
+    if let Some(src) = &a.json {
+        let text = if src == "-" {
+            std::io::read_to_string(std::io::stdin())?
+        } else {
+            src.clone()
+        };
+        match serde_json::from_str::<serde_json::Value>(&text).context("reading --json")? {
+            serde_json::Value::Object(m) => data.extend(m),
+            _ => bail!("--json must be a JSON object"),
+        }
+    }
+    for kv in &a.data {
+        let (k, v) = kv
+            .split_once('=')
+            .ok_or_else(|| anyhow!("--data wants KEY=VALUE, got `{kv}`"))?;
+        data.insert(k.to_string(), serde_json::Value::String(v.to_string()));
+    }
+    let run = a.run.or_else(|| std::env::var("RELAY_RUN").ok().filter(|s| !s.is_empty()));
+    // A folder is needed only when no run says which one; then, here.
+    let workspace = match a.in_ {
+        Some(p) => Some(p),
+        None if run.is_none() => Some(std::env::current_dir()?),
+        None => None,
+    };
+    let params = EventEmitParams {
+        kind: a.kind,
+        run,
+        workspace,
+        group: a.group,
+        summary: a.summary,
+        data: (!data.is_empty()).then(|| serde_json::Value::Object(data)),
+    };
+    Client::connect(home).await?.call::<EventEmit>(params).await?;
+    Ok(())
+}
+
 async fn ask(home: &Home, a: AskArgs, json: bool) -> Result<()> {
     let mut spec = match &a.title {
         Some(t) => DecisionSpec {
