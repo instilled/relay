@@ -352,13 +352,24 @@ fn areas(area: Rect, wide: bool, show_pane: bool, form_h: u16, cands_h: u16, lin
     }
 }
 
+/// Whether this terminal speaks the kitty keyboard protocol — asked once, the
+/// first time we take the screen, and remembered. The query is a terminal
+/// round-trip (it writes an escape sequence and reads the reply); asking it
+/// again at every screen handoff would fire that query just as we hand stdin
+/// to a run's terminal, and its reply would leak into the run — the stray
+/// `^[[?…c` an attached agent would otherwise see. So we ask exactly once.
+fn kitty_supported() -> bool {
+    static SUPPORTED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *SUPPORTED.get_or_init(|| supports_keyboard_enhancement().unwrap_or(false))
+}
+
 /// Take the screen, and — where the terminal speaks the kitty keyboard
 /// protocol — ask it to report modifiers on keys the base protocol folds
 /// away, so shift-enter arrives as its own event rather than a bare newline.
 /// Terminals that don't (Terminal.app, older tmux) simply see no flags.
 fn enter_screen() -> ratatui::DefaultTerminal {
     let term = ratatui::init();
-    if supports_keyboard_enhancement().unwrap_or(false) {
+    if kitty_supported() {
         let _ = crossterm::execute!(
             std::io::stdout(),
             PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
@@ -369,7 +380,7 @@ fn enter_screen() -> ratatui::DefaultTerminal {
 
 /// Hand the screen back, popping any enhancement flags we pushed.
 fn leave_screen() {
-    if supports_keyboard_enhancement().unwrap_or(false) {
+    if kitty_supported() {
         let _ = crossterm::execute!(std::io::stdout(), PopKeyboardEnhancementFlags);
     }
     ratatui::restore();
