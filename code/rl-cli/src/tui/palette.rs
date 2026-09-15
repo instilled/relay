@@ -18,6 +18,7 @@ pub enum Cmd {
     Full,
     Rules,
     Reload,
+    Reindex,
     Approve,
     Pause,
     New,
@@ -105,6 +106,12 @@ pub const ALL: &[Command] = &[
         args: "",
         what: "re-read the rule files from disk",
         cmd: Cmd::Reload,
+    },
+    Command {
+        name: "reindex",
+        args: "",
+        what: "re-read the shell's aliases and functions",
+        cmd: Cmd::Reindex,
     },
     Command {
         name: "approve",
