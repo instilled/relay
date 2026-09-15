@@ -195,6 +195,12 @@ pub fn verdict(r: &Reaction, cx: &Context_, now: Timestamp) -> Verdict {
         {
             return Verdict::Filtered("group".into());
         }
+        for (field, want) in &f.data {
+            let got = event_field(cx.event, field);
+            if got.as_deref().map(|g| want.matches(g)) != Some(true) {
+                return Verdict::Filtered(format!("data.{field}"));
+            }
+        }
     }
     if let (Some(last), Ok(gap)) = (r.last_fired_at, throttle(&r.spec))
         && !gap.is_zero()
@@ -203,6 +209,15 @@ pub fn verdict(r: &Reaction, cx: &Context_, now: Timestamp) -> Verdict {
         return Verdict::Throttled;
     }
     Verdict::Fires
+}
+
+/// One field of an event's `data`, as text — what `where.data` matches and
+/// `{data.<field>}` fills, rendered the same way in both.
+fn event_field(event: &Event, field: &str) -> Option<String> {
+    match event.data.as_ref()?.get(field)? {
+        serde_json::Value::String(s) => Some(s.clone()),
+        other => Some(other.to_string()),
+    }
 }
 
 /// What an event says, for `{…}` in a rule.
@@ -813,6 +828,9 @@ mod tests {
             "on: run.failed\nwhere: { tag: nightly, cli: claude, cause: 'schedule:', group: main }\nrun: x\ncwd: /tmp",
         );
         assert!(verdict(&yes, &cx(&e, &run), Timestamp::now()).fires());
+        // A data field, compared as text, one value or any of a list.
+        let by_data = reaction("n", "on: run.failed\nwhere: { data: { exit: ['0', '1'] } }\nrun: x\ncwd: /tmp");
+        assert!(verdict(&by_data, &cx(&e, &run), Timestamp::now()).fires());
         for (field, yaml) in [
             ("tag", "on: run.failed\nwhere: { tag: other }\nrun: x\ncwd: /tmp"),
             ("cli", "on: run.failed\nwhere: { cli: codex }\nrun: x\ncwd: /tmp"),
@@ -821,6 +839,14 @@ mod tests {
                 "on: run.failed\nwhere: { cause: 'decision:' }\nrun: x\ncwd: /tmp",
             ),
             ("group", "on: run.failed\nwhere: { group: other }\nrun: x\ncwd: /tmp"),
+            (
+                "data.exit",
+                "on: run.failed\nwhere: { data: { exit: '2' } }\nrun: x\ncwd: /tmp",
+            ),
+            (
+                "data.missing",
+                "on: run.failed\nwhere: { data: { missing: x } }\nrun: x\ncwd: /tmp",
+            ),
         ] {
             let r = reaction("n", yaml);
             assert_eq!(

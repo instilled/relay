@@ -394,6 +394,45 @@ pub fn register(r: &mut Router<Daemon>) {
             .map_err(RpcError::internal)
     });
 
+    r.register::<EventEmit, _, _>(|d, p| async move {
+        emit_kind_ok(&p.kind).map_err(RpcError::invalid_params)?;
+        let now = time::now();
+        // Inside a run, the event belongs to that run's chain and folder;
+        // outside one, the caller names the folder.
+        let (workspace, group_key, run) = match &p.run {
+            Some(id) => {
+                let r = get_run(&d, id).await?;
+                (r.workspace.clone(), r.group_key(), Some(r.id))
+            }
+            None => {
+                let ws = p
+                    .workspace
+                    .clone()
+                    .ok_or_else(|| RpcError::invalid_params("emit needs a run ($RELAY_RUN) or a folder"))?;
+                let group = ws.to_string_lossy().into_owned();
+                (ws, group, None)
+            }
+        };
+        let group_key = p.group.clone().unwrap_or(group_key);
+        let summary = p.summary.clone().unwrap_or_else(|| p.kind.clone());
+        let mut ev = events::NewEvent {
+            at: now,
+            workspace,
+            run,
+            group_key,
+            kind: p.kind.clone(),
+            summary,
+            data: None,
+        };
+        if let Some(data) = p.data.clone() {
+            ev = ev.with_data(data);
+        }
+        d.ledger
+            .call(move |c| events::append(c, &ev).map(|_| ()))
+            .await
+            .map_err(RpcError::internal)
+    });
+
     r.register::<PresenceTouch, _, _>(|d, PresenceClient { client }| async move {
         let now = time::now();
         let previous = d
@@ -409,6 +448,26 @@ pub fn register(r: &mut Router<Daemon>) {
             last_seen_at: previous,
         })
     });
+}
+
+/// A kind a command may `rl emit`: a dotted, lowercase name of its own. The
+/// daemon's own families are refused, so an emit cannot forge a `run.failed`
+/// the digest would read as real.
+fn emit_kind_ok(kind: &str) -> Result<(), String> {
+    const RESERVED: &[&str] = &["run.", "decision.", "schedule.", "commit.", "branch."];
+    if let Some(p) = RESERVED.iter().find(|p| kind.starts_with(**p)) {
+        return Err(format!("`{kind}`: `{p}` events are the daemon's; pick your own kind"));
+    }
+    let shaped = kind.contains('.')
+        && kind.split('.').all(|seg| {
+            !seg.is_empty()
+                && seg.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+                && seg.starts_with(|c: char| c.is_ascii_lowercase())
+        });
+    if !shaped {
+        return Err(format!("`{kind}`: a kind is dotted lowercase words, like `log.issue`"));
+    }
+    Ok(())
 }
 
 async fn get_run(d: &Daemon, id: &str) -> Result<rl_proto::types::Run, RpcError> {

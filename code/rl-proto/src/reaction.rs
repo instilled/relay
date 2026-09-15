@@ -108,6 +108,29 @@ pub struct Filter {
     /// The event's group key, exactly.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group: Option<String>,
+    /// Fields of the event's `data` that must match — a value, or any of a
+    /// list: `where: { data: { severity: [ERROR, WARNING] } }`. Compared as
+    /// text, so quote numbers.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub data: BTreeMap<String, Match>,
+}
+
+/// A `where.data` value: one string, or any of a list.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Match {
+    One(String),
+    Any(Vec<String>),
+}
+
+impl Match {
+    /// Whether an event's field (as text) satisfies this.
+    pub fn matches(&self, value: &str) -> bool {
+        match self {
+            Match::One(s) => s == value,
+            Match::Any(xs) => xs.iter().any(|x| x == value),
+        }
+    }
 }
 
 /// The question a reaction puts instead of running something.
@@ -212,5 +235,16 @@ mod tests {
         let s = spec(r#""run.failed""#);
         assert!(s.matches_kind("run.failed"));
         assert!(!s.matches_kind("run.failed.later"));
+    }
+
+    #[test]
+    fn where_data_reads_a_value_or_a_list() {
+        let f: Filter =
+            serde_json::from_str(r#"{"data": {"severity": ["ERROR", "WARNING"], "service": "api"}}"#).unwrap();
+        assert!(f.data["severity"].matches("ERROR"));
+        assert!(f.data["severity"].matches("WARNING"));
+        assert!(!f.data["severity"].matches("INFO"));
+        assert!(f.data["service"].matches("api"));
+        assert!(!f.data["service"].matches("web"));
     }
 }

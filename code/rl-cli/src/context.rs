@@ -184,7 +184,8 @@ A reaction fires on an event and either runs something or asks the person. Its f
 - on: an event kind, or a list of them, or a family (run.*).
 - where: only when the run the event is about matches every field given: tag (carries this \
 tag), cause (its cause starts with this: `schedule:`, `schedule:nightly`, `reaction:`), \
-cli (the agent it runs: claude, codex), group (its group key, exactly).
+cli (the agent it runs: claude, codex), group (its group key, exactly), data (fields of the \
+event's payload, each a value or any of a list: `data: { severity: [ERROR, WARNING] } }`).
 - run: what it starts, as for a schedule. Placeholders (below) are filled in from the event.
 - ask: instead of run — a question for the person: title, summary, options (each: key, \
 label, default, and optionally what choosing it runs: run, cwd, tags, title), multi \
@@ -363,6 +364,7 @@ mod tests {
                 cause: Some("c".into()),
                 cli: Some("c".into()),
                 group: Some("g".into()),
+                ..Default::default()
             }),
             run: Some(task),
             ask: Some(AskSpec {

@@ -174,6 +174,38 @@ pub struct RunId {
     pub id: String,
 }
 
+/// Emit a custom event into the ledger, from a command or plugin. A reaction
+/// picks it up like any built-in event. Inside a run, `RELAY_RUN` attributes
+/// it to that run's workspace and flow; outside one, the caller names the
+/// folder. The kind is the caller's own dotted name (`log.issue`); the
+/// daemon's own kinds (`run.*`, `decision.*`, …) are refused.
+pub struct EventEmit;
+impl Method for EventEmit {
+    const NAME: &'static str = "event.emit";
+    type Params = EventEmitParams;
+    type Result = ();
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EventEmitParams {
+    pub kind: String,
+    /// The run it belongs to; `RELAY_RUN` when emitting inside one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run: Option<String>,
+    /// The folder it is about, when no run says.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<PathBuf>,
+    /// Override the group key (default: the run's, else the folder path).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
+    /// A one-line summary (default: the kind).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    /// Arbitrary structured payload, reachable in a reaction as `{data.<key>}`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data: Option<Value>,
+}
+
 /// A CLI's own signal about a run, as delivered by `rl hook <event>`. The
 /// payload is the hook's JSON, passed through. Returns the run afterwards;
 /// events that say nothing about state leave it untouched.
