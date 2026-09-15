@@ -2,8 +2,8 @@
 //! replaced when asked again.
 
 use anyhow::Result;
-use relay_core::time::{from_millis, to_millis};
-use relay_proto::types::Summary;
+use rl_core::time::{from_millis, to_millis};
+use rl_proto::types::Summary;
 use rusqlite::{Connection, OptionalExtension, params};
 
 pub fn put(conn: &Connection, s: &Summary) -> Result<()> {
@@ -47,7 +47,7 @@ pub fn get(conn: &Connection, run: &str) -> Result<Option<Summary>> {
 mod tests {
     use super::*;
     use jiff::Timestamp;
-    use relay_proto::types::{Run, RunKind};
+    use rl_proto::types::{Run, RunKind};
 
     #[test]
     fn one_per_run_the_latest_kept() {

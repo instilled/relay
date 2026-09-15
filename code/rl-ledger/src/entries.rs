@@ -10,8 +10,8 @@
 use crate::conv;
 use anyhow::Result;
 use jiff::Timestamp;
-use relay_core::time::{from_millis, to_millis};
-use relay_proto::schedule::ReloadReport;
+use rl_core::time::{from_millis, to_millis};
+use rl_proto::schedule::ReloadReport;
 use rusqlite::{Connection, OptionalExtension, Row as SqlRow, params};
 use std::path::{Path, PathBuf};
 

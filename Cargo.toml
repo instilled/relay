@@ -4,10 +4,10 @@ members = [
   "code/rl-cli",
   "code/rl-daemon",
   "code/rl-session",
-  "code/shared-core",
-  "code/shared-detect",
-  "code/shared-ledger",
-  "code/shared-proto",
+  "code/rl-core",
+  "code/rl-detect",
+  "code/rl-ledger",
+  "code/rl-proto",
 ]
 
 [workspace.package]
@@ -17,10 +17,10 @@ license = "MIT"
 repository = "https://github.com/instilled/relay"
 
 [workspace.dependencies]
-relay-core = { path = "code/shared-core" }
-relay-detect = { path = "code/shared-detect" }
-relay-ledger = { path = "code/shared-ledger" }
-relay-proto = { path = "code/shared-proto" }
+rl-core = { path = "code/rl-core" }
+rl-detect = { path = "code/rl-detect" }
+rl-ledger = { path = "code/rl-ledger" }
+rl-proto = { path = "code/rl-proto" }
 rl-daemon = { path = "code/rl-daemon" }
 rl-session = { path = "code/rl-session" }
 

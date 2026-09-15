@@ -6,10 +6,10 @@ mod common;
 
 use common::{Conn, Harness};
 use jiff::Timestamp;
-use relay_core::Home;
-use relay_ledger::{Ledger, schedules};
-use relay_proto::schedule::{ReloadReport, Schedule};
-use relay_proto::types::{Event, Run};
+use rl_core::Home;
+use rl_ledger::{Ledger, schedules};
+use rl_proto::schedule::{ReloadReport, Schedule};
+use rl_proto::types::{Event, Run};
 use serde_json::json;
 use std::time::Duration;
 

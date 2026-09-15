@@ -1,10 +1,10 @@
 //! Typed JSON-RPC client over the daemon socket.
 
 use anyhow::{Context, Result, anyhow, bail};
-use relay_core::Home;
-use relay_proto::codec::{read_message, write_message};
-use relay_proto::methods::Method;
-use relay_proto::rpc::{Id, Request, Response};
+use rl_core::Home;
+use rl_proto::codec::{read_message, write_message};
+use rl_proto::methods::Method;
+use rl_proto::rpc::{Id, Request, Response};
 use std::io::ErrorKind;
 use tokio::io::BufReader;
 use tokio::net::UnixStream;

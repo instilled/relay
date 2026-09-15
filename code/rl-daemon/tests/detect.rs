@@ -4,9 +4,9 @@
 mod common;
 
 use common::{Conn, Harness, fake_cli, wait_journal};
-use relay_core::Home;
-use relay_proto::rpc::RpcError;
-use relay_proto::types::{Confidence, Event, Run, RunKind, RunState, Source};
+use rl_core::Home;
+use rl_proto::rpc::RpcError;
+use rl_proto::types::{Confidence, Event, Run, RunKind, RunState, Source};
 use serde_json::json;
 use std::time::Duration;
 

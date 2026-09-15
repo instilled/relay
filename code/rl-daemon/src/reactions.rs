@@ -11,17 +11,17 @@ use crate::decisions::Decisions;
 use crate::supervisor::Supervisor;
 use anyhow::{Context, Result, anyhow, bail};
 use jiff::{SignedDuration, Timestamp};
-use relay_core::Home;
-use relay_core::time::parse_duration;
-use relay_detect::Registry;
-use relay_ledger::entries::Loaded;
-use relay_ledger::{Ledger, decisions, events, meta, reactions, runs, workspaces};
-use relay_proto::action::{Action, Task};
-use relay_proto::decision::DecisionOption;
-use relay_proto::methods::{DecisionSpec, EventFilter};
-use relay_proto::reaction::{AskSpec, DEFAULT_THROTTLE, Reaction, ReactionSpec};
-use relay_proto::schedule::{GLOBAL_SCOPE, ReloadReport, WORKSPACE_DIR};
-use relay_proto::types::{Cause, Event, Run};
+use rl_core::Home;
+use rl_core::time::parse_duration;
+use rl_detect::Registry;
+use rl_ledger::entries::Loaded;
+use rl_ledger::{Ledger, decisions, events, meta, reactions, runs, workspaces};
+use rl_proto::action::{Action, Task};
+use rl_proto::decision::DecisionOption;
+use rl_proto::methods::{DecisionSpec, EventFilter};
+use rl_proto::reaction::{AskSpec, DEFAULT_THROTTLE, Reaction, ReactionSpec};
+use rl_proto::schedule::{GLOBAL_SCOPE, ReloadReport, WORKSPACE_DIR};
+use rl_proto::types::{Cause, Event, Run};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -734,7 +734,7 @@ impl Reactor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use relay_proto::types::{Confidence, RunKind, RunState, Source};
+    use rl_proto::types::{Confidence, RunKind, RunState, Source};
 
     fn spec(yaml: &str) -> ReactionSpec {
         serde_norway::from_str(yaml).unwrap()

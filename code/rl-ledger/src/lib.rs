@@ -53,7 +53,7 @@ impl Ledger {
         migrate::run(&mut conn)?;
         let (tx, rx) = mpsc::channel::<Job>();
         std::thread::Builder::new()
-            .name("relay-ledger".into())
+            .name("rl-ledger".into())
             .spawn(move || {
                 for job in rx {
                     job(&mut conn);

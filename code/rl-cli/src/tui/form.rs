@@ -9,12 +9,12 @@ use anyhow::{Result, bail};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::style::Stylize;
 use ratatui::text::{Line, Span};
-use relay_core::time::parse_duration;
-use relay_proto::action::Task;
-use relay_proto::reaction::ReactionSpec;
-use relay_proto::rule::{Rule, RuleKind};
-use relay_proto::schedule::{GLOBAL_SCOPE, ScheduleSpec};
-use relay_proto::types::RunKind;
+use rl_core::time::parse_duration;
+use rl_proto::action::Task;
+use rl_proto::reaction::ReactionSpec;
+use rl_proto::rule::{Rule, RuleKind};
+use rl_proto::schedule::{GLOBAL_SCOPE, ScheduleSpec};
+use rl_proto::types::RunKind;
 use std::path::{Path, PathBuf};
 
 /// CLIs that are agents, for the moment before the daemon has said which it
@@ -666,7 +666,7 @@ mod tests {
 
     #[test]
     fn editing_shows_the_rule_and_keeps_what_it_does_not_show() {
-        use relay_proto::schedule::Schedule;
+        use rl_proto::schedule::Schedule;
         let mut spec = ScheduleSpec {
             every: Some("4h".into()),
             run: Some(Task::Agent {

@@ -8,11 +8,11 @@ use crate::render::{fmt_clock, state_label};
 use jiff::Timestamp;
 use ratatui::style::{Style, Stylize};
 use ratatui::text::{Line, Span};
-use relay_core::time::{fmt_age, fmt_duration};
-use relay_proto::decision::Decision;
-use relay_proto::methods::DigestItem;
-use relay_proto::rule::Rule;
-use relay_proto::types::{Event, Run, RunState, Summary};
+use rl_core::time::{fmt_age, fmt_duration};
+use rl_proto::decision::Decision;
+use rl_proto::methods::DigestItem;
+use rl_proto::rule::Rule;
+use rl_proto::types::{Event, Run, RunState, Summary};
 
 /// How many events a run's pane lists.
 const EVENTS: usize = 12;
@@ -113,7 +113,7 @@ pub fn run_lines(
         for l in s.text.lines() {
             lines.push(Line::raw(format!(" {l}")));
         }
-    } else if r.state.is_terminal() && !matches!(r.cause, relay_proto::types::Cause::Assistant(_)) {
+    } else if r.state.is_terminal() && !matches!(r.cause, rl_proto::types::Cause::Assistant(_)) {
         lines.push(Line::raw(""));
         lines.push(Line::from(Span::raw(" s asks the assistant what it did").dim()));
     }
@@ -250,7 +250,7 @@ pub fn project_lines(
     let chips = super::rows::chips(rules, Some(workspace), now);
     let (sched, react): (Vec<_>, Vec<_>) = chips
         .iter()
-        .partition(|c| c.kind == relay_proto::rule::RuleKind::Schedule);
+        .partition(|c| c.kind == rl_proto::rule::RuleKind::Schedule);
     lines.push(Line::raw(""));
     lines.push(Line::from(Span::raw(" rules").dim()));
     if chips.is_empty() {
@@ -339,9 +339,9 @@ pub fn question_lines(d: &Decision, asker: Option<&Run>, picked: &[usize], now: 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use relay_proto::action::Task;
-    use relay_proto::decision::{DecisionOption, DecisionStatus};
-    use relay_proto::types::{Cause, Confidence, RunKind};
+    use rl_proto::action::Task;
+    use rl_proto::decision::{DecisionOption, DecisionStatus};
+    use rl_proto::types::{Cause, Confidence, RunKind};
 
     fn text(lines: &[Line]) -> String {
         lines.iter().map(|l| l.to_string()).collect::<Vec<_>>().join("\n")

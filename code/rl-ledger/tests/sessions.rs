@@ -1,8 +1,8 @@
 use jiff::Timestamp;
-use relay_ledger::session_io::{self, Direction};
-use relay_ledger::sessions::{self, SessionRow};
-use relay_ledger::{Ledger, runs};
-use relay_proto::types::{Run, RunKind};
+use rl_ledger::session_io::{self, Direction};
+use rl_ledger::sessions::{self, SessionRow};
+use rl_ledger::{Ledger, runs};
+use rl_proto::types::{Run, RunKind};
 
 fn ts(s: &str) -> Timestamp {
     s.parse().unwrap()

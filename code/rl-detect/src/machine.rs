@@ -11,7 +11,7 @@
 //!    signal is more certain, otherwise nothing.
 //! 5. Anything else is a transition.
 
-use relay_proto::types::{Confidence, Run, RunState, Source, event_kind};
+use rl_proto::types::{Confidence, Run, RunState, Source, event_kind};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 

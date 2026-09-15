@@ -8,8 +8,8 @@
 
 use crate::Signal;
 use anyhow::{Context, Result};
-use relay_core::Home;
-use relay_proto::types::{Confidence, RunState, Source};
+use rl_core::Home;
+use rl_proto::types::{Confidence, RunState, Source};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 
@@ -124,7 +124,7 @@ fn shell_quote(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use relay_proto::types::{Confidence, Source};
+    use rl_proto::types::{Confidence, Source};
 
     #[test]
     fn settings_have_one_hook_per_event() {

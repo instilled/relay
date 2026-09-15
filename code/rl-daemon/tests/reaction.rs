@@ -5,11 +5,11 @@
 mod common;
 
 use common::{Conn, Harness};
-use relay_core::Home;
-use relay_proto::decision::Decision;
-use relay_proto::methods::ReactionTrial;
-use relay_proto::reaction::Reaction;
-use relay_proto::types::{Cause, Event, Run};
+use rl_core::Home;
+use rl_proto::decision::Decision;
+use rl_proto::methods::ReactionTrial;
+use rl_proto::reaction::Reaction;
+use rl_proto::types::{Cause, Event, Run};
 use serde_json::json;
 use std::path::Path;
 use std::time::{Duration, Instant};

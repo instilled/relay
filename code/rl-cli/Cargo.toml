@@ -11,8 +11,8 @@ name = "rl"
 path = "src/main.rs"
 
 [dependencies]
-relay-core.workspace = true
-relay-proto.workspace = true
+rl-core.workspace = true
+rl-proto.workspace = true
 rl-session.workspace = true
 anyhow.workspace = true
 clap.workspace = true
@@ -28,7 +28,7 @@ tokio.workspace = true
 vt100.workspace = true
 
 [dev-dependencies]
-relay-ledger.workspace = true
+rl-ledger.workspace = true
 rl-daemon.workspace = true
 tokio-util.workspace = true
 tempfile.workspace = true

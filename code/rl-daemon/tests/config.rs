@@ -5,8 +5,8 @@
 mod common;
 
 use common::{Conn, Harness, session_bin};
-use relay_core::Home;
-use relay_proto::methods::{AgentInfo, ConfigReport};
+use rl_core::Home;
+use rl_proto::methods::{AgentInfo, ConfigReport};
 use serde_json::json;
 
 #[tokio::test]

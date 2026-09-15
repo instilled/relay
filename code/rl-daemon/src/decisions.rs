@@ -10,12 +10,12 @@
 use crate::supervisor::Supervisor;
 use anyhow::{Context, Result, anyhow, bail};
 use jiff::Timestamp;
-use relay_core::time::parse_duration;
-use relay_detect::Registry;
-use relay_ledger::{Ledger, decisions, events, events::NewEvent, runs};
-use relay_proto::decision::{Decision, DecisionStatus};
-use relay_proto::methods::{DecisionFilter, DecisionSpec};
-use relay_proto::types::{Cause, event_kind};
+use rl_core::time::parse_duration;
+use rl_detect::Registry;
+use rl_ledger::{Ledger, decisions, events, events::NewEvent, runs};
+use rl_proto::decision::{Decision, DecisionStatus};
+use rl_proto::methods::{DecisionFilter, DecisionSpec};
+use rl_proto::types::{Cause, event_kind};
 use serde_json::json;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -105,7 +105,7 @@ impl Decisions {
                 (None, String::new(), cwd)
             }
         };
-        let id = relay_core::id::new_id();
+        let id = rl_core::id::new_id();
         let mut d = Decision {
             flow: if flow.is_empty() { id.clone() } else { flow },
             id,

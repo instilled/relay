@@ -7,12 +7,12 @@ use crate::schedule::Scheduler;
 use crate::supervisor::{self, Supervisor};
 use anyhow::{Context, Result, bail};
 use jiff::Timestamp;
-use relay_core::Home;
-use relay_detect::Registry;
-use relay_ledger::Ledger;
-use relay_proto::codec::{read_message, write_message};
-use relay_proto::methods::{AttachParams, Method, RunAttach};
-use relay_proto::rpc::{Id, Request, Response, RpcError};
+use rl_core::Home;
+use rl_detect::Registry;
+use rl_ledger::Ledger;
+use rl_proto::codec::{read_message, write_message};
+use rl_proto::methods::{AttachParams, Method, RunAttach};
+use rl_proto::rpc::{Id, Request, Response, RpcError};
 use std::io::ErrorKind;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -76,7 +76,7 @@ pub async fn serve_with(home: Home, shutdown: CancellationToken, opts: ServeOpti
             }
         },
     };
-    match relay_detect::claude::write_settings(&home, &rl_bin) {
+    match rl_detect::claude::write_settings(&home, &rl_bin) {
         Ok(p) => debug!(path = %p.display(), "claude hooks settings ready"),
         Err(e) => warn!(error = %e, "claude hooks settings not written; claude runs get heuristics only"),
     }

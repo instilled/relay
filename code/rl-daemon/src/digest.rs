@@ -2,9 +2,9 @@
 //! the fleet's LAST column, the since-you-left screen and `rl since`.
 
 use jiff::Timestamp;
-use relay_core::time::fmt_duration;
-use relay_proto::methods::DigestItem;
-use relay_proto::types::{Event, Run, RunState};
+use rl_core::time::fmt_duration;
+use rl_proto::methods::DigestItem;
+use rl_proto::types::{Event, Run, RunState};
 
 pub fn item(run: Run, last: Option<Event>, joined_by: Option<String>) -> DigestItem {
     let at = last.as_ref().map(|e| e.at).unwrap_or(run.state_at);
@@ -65,7 +65,7 @@ pub fn unseen(run: &Run, at: Timestamp) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use relay_proto::types::RunKind;
+    use rl_proto::types::RunKind;
     use serde_json::json;
 
     fn run(state: RunState) -> Run {
