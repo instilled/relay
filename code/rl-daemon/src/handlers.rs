@@ -90,6 +90,12 @@ pub fn register(r: &mut Router<Daemon>) {
             .await
             .map_err(|e| RpcError::internal(format!("{e:#}")))
     });
+    r.register::<relay_proto::methods::WorkspaceRename, _, _>(|d, p| async move {
+        d.scheduler
+            .rename_workspace(&p.path, &p.name)
+            .await
+            .map_err(|e| RpcError::internal(format!("{e:#}")))
+    });
     r.register::<relay_proto::methods::WorkspaceRemove, _, _>(|d, p| async move {
         if let Ok(path) = std::fs::canonicalize(&p.path) {
             let _ = d.reactor.remove_scope(&path).await;

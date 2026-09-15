@@ -202,6 +202,78 @@ pub fn job_lines(j: &Job, rule: Option<&Rule>, names: &Names, now: Timestamp) ->
     lines
 }
 
+/// A project: the folder itself, how its runs stand, and the rules that live
+/// there. `items` is the whole digest; this picks the ones in the folder.
+pub fn project_lines(
+    name: &str,
+    place: &str,
+    workspace: &std::path::Path,
+    items: &[DigestItem],
+    rules: &[Rule],
+    now: Timestamp,
+) -> Vec<Line<'static>> {
+    let mine: Vec<&DigestItem> = items.iter().filter(|i| i.run.workspace == workspace).collect();
+    let mut lines = vec![Line::from(Span::raw(format!(" {name}")).bold())];
+    lines.push(Line::from(Span::raw(format!(" {place}")).dim()));
+    lines.push(Line::raw(""));
+
+    // How the runs here stand, the buckets in the order attention wants them.
+    let count = |f: &dyn Fn(RunState) -> bool| mine.iter().filter(|i| f(i.run.state)).count();
+    let needs = count(&|s| matches!(s, RunState::NeedsInput | RunState::Blocked | RunState::Failed));
+    let going = count(&|s| {
+        matches!(
+            s,
+            RunState::Starting | RunState::Working | RunState::Idle | RunState::Stale
+        )
+    });
+    let done = count(&|s| matches!(s, RunState::Finished | RunState::Stopped));
+    let tally: Vec<String> = [("needs you", needs), ("going", going), ("done", done)]
+        .into_iter()
+        .filter(|(_, n)| *n > 0)
+        .map(|(w, n)| format!("{n} {w}"))
+        .collect();
+    let n = mine.len();
+    let word = if n == 1 { "run" } else { "runs" };
+    let runs = if n == 0 {
+        "no runs yet".to_string()
+    } else if tally.is_empty() {
+        format!("{n} {word}")
+    } else {
+        format!("{n} {word} · {}", tally.join(" · "))
+    };
+    lines.push(fact("runs", runs));
+    if let Some(last) = mine.iter().map(|i| i.at).max() {
+        lines.push(fact("last", format!("{} ago", fmt_age(last, now))));
+    }
+
+    // The rules that live here, told the same way the header's chips are.
+    let chips = super::rows::chips(rules, Some(workspace), now);
+    let (sched, react): (Vec<_>, Vec<_>) = chips
+        .iter()
+        .partition(|c| c.kind == relay_proto::rule::RuleKind::Schedule);
+    lines.push(Line::raw(""));
+    lines.push(Line::from(Span::raw(" rules").dim()));
+    if chips.is_empty() {
+        lines.push(Line::from(
+            Span::raw("   none · /rules adds schedules & reactions").dim(),
+        ));
+    } else {
+        for (label, group) in [("schedule", &sched), ("reaction", &react)] {
+            for c in group {
+                lines.push(Line::from(vec![
+                    Span::raw(format!("   {:<9} ", label)).dim(),
+                    Span::raw(c.text()),
+                ]));
+            }
+        }
+    }
+    lines.push(Line::raw(""));
+    lines.push(Line::from(
+        Span::raw(" /rules edits schedules & reactions · ^r renames").dim(),
+    ));
+    lines
+}
+
 /// A question: what it asks, who asked, and the options with their keys.
 /// `picked` are the options marked so far on a multi-choice question.
 pub fn question_lines(d: &Decision, asker: Option<&Run>, picked: &[usize], now: Timestamp) -> Vec<Line<'static>> {
