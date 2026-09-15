@@ -1,0 +1,31 @@
+reactions:
+  # A flagged log entry: let claude decide whether it is real, and if so raise
+  # it for approval. `where.data` keeps this to real severities; {data.*} fills
+  # the event's payload into the prompt.
+  analyse-log-issue:
+    on: log.issue
+    where:
+      data:
+        severity: [ERROR, WARNING]
+    run:
+      agent: claude
+      prompt: |
+        A log entry was flagged, severity {data.severity}:
+
+            {data.message}
+
+        Decide whether this is a real, actionable problem or just noise (a
+        transient, a known-benign warning, a duplicate).
+
+        - If it is noise, do nothing and stop.
+        - If it is real, run `rl ask` so I can approve creating a Notion task.
+          Give the `create` option the command that makes it:
+
+              rl ask <<'YAML'
+              title: "<a short title>"
+              summary: "<one line: what it is and the likely cause>"
+              options:
+                - {key: create, label: Create Notion task, run: 'notion-task "<a short title>" "<the cause>"'}
+                - {key: skip, label: Skip, default: true}
+              expires: 1d
+              YAML

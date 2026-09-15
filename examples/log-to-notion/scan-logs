@@ -1,0 +1,31 @@
+#!/bin/sh
+# scan-logs — emit a `log.issue` event for each ERROR/WARNING Cloud Logging
+# entry since the last scan. Relay runs this as a schedule; `rl emit` files
+# each issue and the `analyse-log-issue` reaction picks it up.
+#
+# Relay hands us:
+#   $RELAY_LAST_RUN   when this schedule last fired (rfc3339; empty first run)
+#   $RELAY_RUN        the run we are part of — `rl emit` reads it, so each
+#                     issue is filed under this folder and joins the flow
+#
+# You provide: gcloud (authenticated), jq, and $GOOGLE_CLOUD_PROJECT.
+set -eu
+
+# Only what is new since we last looked; an hour the first time round.
+if [ -n "${RELAY_LAST_RUN:-}" ]; then
+  since=$RELAY_LAST_RUN
+else
+  since=$(date -u -v-1H +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+    || date -u -d '1 hour ago' +%Y-%m-%dT%H:%M:%SZ)
+fi
+
+gcloud logging read \
+  "severity>=WARNING AND timestamp>=\"$since\"" \
+  --project "$GOOGLE_CLOUD_PROJECT" \
+  --format=json \
+| jq -c '.[]' \
+| while IFS= read -r entry; do
+    severity=$(printf '%s' "$entry" | jq -r '.severity')
+    message=$(printf '%s' "$entry" | jq -r '.textPayload // .jsonPayload.message // "(no message)"')
+    rl emit log.issue --data "severity=$severity" --data "message=$message"
+  done
