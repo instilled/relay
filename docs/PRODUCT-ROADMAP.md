@@ -13,6 +13,7 @@ Goal for v1:
 * [ ] agent-attach reliability — join a just-spawned holder without bouncing back to the list
 * [ ] ts plugin subsystem
 * [ ] investigate a lightweight JS/TS SDK for plugins — a thin wrapper around the `rl emit` / `rl ask` / `rl run` contract so a plugin is a few lines of TS that reads its input and emits events, decisions or runs (a plugin is just a command; the SDK makes the common case trivial)
+* [ ] inter-run data passing — events carry small facts well, but bulk (a log dump, a file, a transcript) shouldn't ride through argv/env/the ledger; give each run a scratch dir (`$RELAY_RUN_DIR`) so runs pass bulk by path, not bytes (single-host); promote to a network-addressable run-artifact store — the daemon serving a blob by id/key — when runs span hosts
 * [ ] pipelines & easy wiring & visualization of "graph" — `workflows/<name>.yaml` engine (steps with `after`/`when` and decision steps) plus a graph view of how runs, schedules and reactions wire together
 * [ ] facts collector (J6) — git commits + `diff --stat` per run, transcript ingestion (Claude/Codex `*.jsonl`), tokens/cost; facts-first run detail (facts on top, narrative below, transcript behind enter)
 * [ ] retention purge of archived runs — today archive is out-of-list only; actually delete past the retention window
