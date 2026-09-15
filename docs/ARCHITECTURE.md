@@ -258,11 +258,15 @@ read locally first: a first word naming an agent the registry knows (`agent.list
 hardcoded list) is that agent with the rest as its prompt; a first word this machine can actually
 run — a binary on `PATH`, a target in the folder, or a name your own shell knows (its aliases and
 functions, read from `$SHELL` once at startup and again on `/reindex`) — is a shell line, and a
-leading `!` forces one. A shell line runs the way a terminal would, through your login shell
-interactively (`$SHELL -ic`, so `~/.zshrc` is read and `ll` resolves), not `sh -c` which knows
-none of that; the row still reads as what you typed. Either is `run.start` in the folder of the row the cursor is on, sized to this screen; a fresh
+leading `!` forces one. An agent is `run.start` in the folder of the row the cursor is on, sized to
+this screen; a fresh
 agent is one you mean to drive, so its terminal is handed to you at once (the raw passthrough
-above). Anything else is plain words, and those go to `assistants.interpret`
+above). A shell line does not start a run of its own: it goes to the folder's **warm shell** — one
+persistent `$SHELL -i` per project (`run.start`, tagged `shell`, spawned the first time a folder
+needs one and kept), so its rc is read once and its aliases and functions are there. The line is
+written to that shell's stdin (`run.input`, which feeds a live run's terminal over the daemon's own
+holder connection, no join, journaled as input) and the shell's tile comes up so you watch it run.
+Which shell: the one under the cursor when it is a shell, else the project's. Anything else is plain words, and those go to `assistants.interpret`
 (§6) as a run of its own — it is in the list like any other, `/stop` there stops it — while the
 panel stays yours. What comes back fills the form (`tui/form.rs`), and your `enter` is what does
 it; the assistant never starts anything. The line says which of the three `enter` will do at its

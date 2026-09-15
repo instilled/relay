@@ -228,6 +228,49 @@ async fn watchers_and_one_joiner() {
 }
 
 #[tokio::test]
+async fn run_input_writes_to_the_pty_without_a_join() {
+    // The warm-shell path: `run.input` feeds a run's stdin over the daemon's
+    // own holder connection — no interactive join — and it is journaled.
+    let tmp = tempfile::tempdir().unwrap();
+    let Some(h) = Harness::on(Home::at(tmp.path())) else {
+        eprintln!("skipping: rl-session not built");
+        return;
+    };
+    let mut c = Conn::open(&h.home).await;
+    let cwd = tmp.path().to_string_lossy().into_owned();
+    let run: Run = c
+        .ok(
+            "run.start",
+            json!({ "argv": [fake_cli()], "cwd": cwd, "kind": "agent" }),
+        )
+        .await;
+    wait_journal(&h.home, &run.id, "> ").await;
+
+    // No join, just the write — fake-cli answers a line with `echo: <line>`.
+    let res = c
+        .call("run.input", json!({ "id": run.id, "bytes": b"hi\n".to_vec() }))
+        .await;
+    assert!(res.error.is_none(), "run.input: {:?}", res.error);
+
+    // A watcher sees the echo, and the input is on the record as input.
+    let (_info, mut w) = Viewer::attach(&h.home, &run.id, "watch", "ann@laptop", false)
+        .await
+        .unwrap();
+    w.until("echo: hi").await;
+    let ledger = Ledger::open(&h.home.ledger()).unwrap();
+    let id = run.id.clone();
+    let ins: Vec<Vec<u8>> = ledger
+        .call_blocking(move |db| session_io::read(db, &id, 0, 10_000))
+        .unwrap()
+        .into_iter()
+        .filter(|c| c.direction == Direction::In)
+        .map(|c| c.data)
+        .collect();
+    assert_eq!(ins, [b"hi\n".to_vec()]);
+    h.stop().await;
+}
+
+#[tokio::test]
 async fn joiner_resizes_the_pty_and_daemon_stop_detaches() {
     let tmp = tempfile::tempdir().unwrap();
     let Some(h) = Harness::on(Home::at(tmp.path())) else {

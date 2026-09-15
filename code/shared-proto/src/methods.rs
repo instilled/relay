@@ -153,6 +153,22 @@ pub struct RunStopParams {
     pub force: bool,
 }
 
+/// Feed bytes to a run's terminal, as if typed — for a warm project shell a
+/// command line is written straight to its stdin without a full join.
+pub struct RunInput;
+impl Method for RunInput {
+    const NAME: &'static str = "run.input";
+    type Params = RunInputParams;
+    type Result = ();
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunInputParams {
+    pub id: String,
+    /// The bytes to write; the caller adds any trailing newline.
+    pub bytes: Vec<u8>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunId {
     pub id: String,
