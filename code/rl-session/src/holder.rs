@@ -127,12 +127,10 @@ pub async fn serve(cfg: Config, ready: oneshot::Sender<()>) -> Result<()> {
         }
     }
 
-    // Closing with a live child: hang it up, give it a moment. The child is a
-    // session leader (the PTY setsid'd it), so a negative pid reaches its whole
-    // process group — the wrapper shell and anything it spawned, not just it.
+    // Closing with a live child: hang it up, give it a moment.
     if ctx.exit.borrow().is_none() {
-        let pid = ctx.shared.lock().unwrap().pid;
-        let _ = kill(Pid::from_raw(-(pid as i32)), Signal::SIGHUP);
+        let pid = ctx.shared.lock().unwrap().pid as i32;
+        signal_tree(pid, Signal::SIGHUP);
         let mut rx = ctx.exit.subscribe();
         let _ = tokio::time::timeout(Duration::from_secs(5), async {
             while rx.borrow().is_none() {
@@ -150,6 +148,16 @@ pub async fn serve(cfg: Config, ready: oneshot::Sender<()>) -> Result<()> {
 
 /// Child output → ring + broadcast, under one lock so an attaching client's
 /// snapshot and subscription line up with no gap and no duplicate.
+/// Signal a run's child, and — when it leads its own process group (a PTY
+/// child, which the pty setsid'd) — that whole group, so a wrapper shell and
+/// everything it spawned go together. A pipe child leads no group of its own,
+/// so the direct pid is what reaches it and the group signal simply finds
+/// nothing. Both are best-effort.
+fn signal_tree(pid: i32, sig: Signal) {
+    let _ = kill(Pid::from_raw(pid), sig);
+    let _ = kill(Pid::from_raw(-pid), sig);
+}
+
 async fn pump_output(ctx: Arc<Ctx>, mut output: mpsc::Receiver<Vec<u8>>) {
     while let Some(chunk) = output.recv().await {
         let mut s = ctx.shared.lock().unwrap();
@@ -262,10 +270,7 @@ async fn client_loop(ctx: &Ctx, stream: UnixStream) -> std::io::Result<()> {
         write_frame(&mut wr, &Frame::Exit(exit)).await?;
     }
 
-    // The child's own process group (it is a session leader; the PTY setsid'd
-    // it): a negative pid signals the group, so `rl stop` reaps a wrapper shell
-    // and everything it spawned, not just the leader.
-    let group = Pid::from_raw(-(ctx.shared.lock().unwrap().pid as i32));
+    let pid = ctx.shared.lock().unwrap().pid as i32;
     let mut out_open = true;
     loop {
         tokio::select! {
@@ -283,7 +288,7 @@ async fn client_loop(ctx: &Ctx, stream: UnixStream) -> std::io::Result<()> {
                     }
                 }
                 Some(Frame::Signal(n)) => match Signal::try_from(n) {
-                    Ok(sig) => { let _ = kill(group, sig); }
+                    Ok(sig) => signal_tree(pid, sig),
                     Err(_) => warn!(signal = n, "unknown signal"),
                 },
                 Some(Frame::Close) => { ctx.shutdown.cancel(); return Ok(()); }
