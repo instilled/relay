@@ -296,6 +296,14 @@ async fn client_loop(ctx: &Ctx, stream: UnixStream) -> std::io::Result<()> {
                 if changed.is_err() { exit_sent = true; continue; }
                 let exit = exit_rx.borrow().clone();
                 if let Some(exit) = exit {
+                    // The exit is announced only after the output pump has drained
+                    // (see `watch_exit`), so every chunk is already in this client's
+                    // broadcast buffer. Flush what is waiting before the exit frame,
+                    // or `select!` could send the exit first and the relay — which
+                    // closes on it — would drop the child's last words.
+                    while let Ok(chunk) = out_rx.try_recv() {
+                        write_frame(&mut wr, &Frame::Output(chunk.to_vec())).await?;
+                    }
                     write_frame(&mut wr, &Frame::Exit(exit)).await?;
                     exit_sent = true;
                 }
