@@ -215,6 +215,9 @@ struct App {
     agents: Vec<String>,
     /// The directories of $PATH, for completing the first word.
     path_dirs: Vec<PathBuf>,
+    /// The shell's own names — aliases and functions — read once at startup,
+    /// so a `ll` reads as a command to run, not words for the assistant.
+    aliases: Vec<String>,
     completing: Option<Completing>,
     /// Which candidate the arrows have walked to, when a list is on offer.
     /// `None` until you press an arrow; typing clears it. When set, `enter`
@@ -427,6 +430,7 @@ pub async fn run(home: &Home) -> Result<()> {
         line: line::Line::default(),
         agents: Vec::new(),
         path_dirs: complete::path_dirs(),
+        aliases: complete::shell_names(),
         completing: None,
         pick: None,
         mode: Mode::Normal,
@@ -1518,6 +1522,7 @@ impl App {
             folder,
             agents: &self.agents,
             path_dirs: &self.path_dirs,
+            aliases: &self.aliases,
         }
     }
 
@@ -1537,8 +1542,9 @@ impl App {
                 let d = form::RunDraft {
                     cwd: folder,
                     kind: RunKind::Command,
-                    argv: vec!["sh".into(), "-c".into(), cmd],
-                    title: None,
+                    argv: crate::env::shell_argv(&cmd),
+                    // The row reads as what you typed, not the `$SHELL -ic` wrapper.
+                    title: Some(cmd),
                 };
                 if let Err(e) = self.start_run(d, area).await {
                     self.say(format!("{e:#}"));
@@ -1764,6 +1770,10 @@ impl App {
                 self.toggle_view().await;
             }
             palette::Cmd::Reload => self.reload_rules().await,
+            palette::Cmd::Reindex => {
+                self.aliases = complete::shell_names();
+                self.say(format!("re-read the shell: {} names", self.aliases.len()));
+            }
             palette::Cmd::Approve => {
                 if let Some(r) = self.selected_rule()
                     && r.status() == RuleStatus::NeedsApproval

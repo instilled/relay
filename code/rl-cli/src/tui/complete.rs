@@ -43,6 +43,9 @@ pub struct Here<'a> {
     pub agents: &'a [String],
     /// The directories of $PATH — given, so the tests can supply their own.
     pub path_dirs: &'a [PathBuf],
+    /// The names the person's shell knows that PATH does not: aliases and
+    /// functions, read from `$SHELL` once (see `shell_names`). A `ll` is here.
+    pub aliases: &'a [String],
 }
 
 fn cand(text: impl Into<String>, kind: Kind) -> Candidate {
@@ -71,6 +74,12 @@ pub fn candidates(line: &str, cursor: usize, here: &Here) -> Vec<Candidate> {
                 .into_iter()
                 .filter(|t| t.starts_with(frag))
                 .map(|t| cand(t, Kind::Target)),
+        );
+        out.extend(
+            here.aliases
+                .iter()
+                .filter(|a| a.starts_with(frag))
+                .map(|a| cand(a.clone(), Kind::Binary)),
         );
         out.extend(
             binaries(frag, here.path_dirs)
@@ -144,8 +153,55 @@ pub fn runnable(head: &str, here: &Here) -> bool {
         return false;
     }
     here.agents.iter().any(|a| a == head)
+        || here.aliases.iter().any(|a| a == head)
         || targets(here.folder).iter().any(|t| t == head)
         || here.path_dirs.iter().any(|d| is_exe(&d.join(head)))
+}
+
+/// The names the person's shell knows beyond `$PATH`: its aliases (and shell
+/// functions, where it lists them the same way). Asked of `$SHELL`
+/// interactively, once, so its rc is read the way a terminal would — the same
+/// reason a shell line runs through `$SHELL -ic`, not `sh -c`. Best-effort: an
+/// empty list on any trouble, and nothing for a shell that is only `sh`.
+pub fn shell_names() -> Vec<String> {
+    let Ok(sh) = std::env::var("SHELL") else {
+        return Vec::new();
+    };
+    if sh.trim().is_empty() || sh.ends_with("/sh") {
+        return Vec::new();
+    }
+    // `alias` prints `name='…'` in zsh, `alias name='…'` in bash; the function
+    // lister differs by shell, so ask for names only and let either form pass.
+    let script = "alias 2>/dev/null; { print -rl -- ${(k)functions} } 2>/dev/null; declare -F 2>/dev/null";
+    let Ok(out) = std::process::Command::new(&sh)
+        .args(["-ic", script])
+        .stdin(std::process::Stdio::null())
+        .output()
+    else {
+        return Vec::new();
+    };
+    parse_shell_names(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// Names out of `alias`/`declare -f`/`functions` output: the token before the
+/// first `=`, space or tab, once the shell's lead-in words are dropped, kept
+/// only when it is a plain identifier one could type as a first word.
+fn parse_shell_names(text: &str) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    for line in text.lines() {
+        let rest = line
+            .trim()
+            .strip_prefix("alias ")
+            .or_else(|| line.trim().strip_prefix("declare -f "))
+            .unwrap_or_else(|| line.trim());
+        let name = rest.split(['=', ' ', '\t']).next().unwrap_or("").trim();
+        if !name.is_empty() && name.chars().all(|c| c.is_alphanumeric() || "._-".contains(c)) {
+            names.push(name.to_string());
+        }
+    }
+    names.sort();
+    names.dedup();
+    names
 }
 
 /// The bytes the word under the cursor spans: the non-whitespace either side
@@ -335,6 +391,7 @@ mod tests {
             folder: dir.path(),
             agents: &agents,
             path_dirs: &dirs,
+            aliases: &[],
         };
         let c = candidates("c", 1, &here);
         assert_eq!(
@@ -375,6 +432,7 @@ mod tests {
             folder: dir.path(),
             agents: &[],
             path_dirs: &[],
+            aliases: &[],
         };
         let c = candidates("every ", 6, &here);
         assert_eq!(c.len(), DURATIONS.len());
@@ -407,6 +465,7 @@ mod tests {
             folder: dir.path(),
             agents: &[],
             path_dirs: &[],
+            aliases: &[],
         };
         let c = candidates("cat src/ma", 10, &here);
         assert_eq!(texts(&c), ["src/machine/", "src/main.rs"], "a folder keeps its slash");
@@ -454,6 +513,7 @@ mod tests {
             folder: dir.path(),
             agents: &[],
             path_dirs: &[],
+            aliases: &[],
         };
         let line = "cat src/ma";
         let c = candidates(line, line.len(), &here);
@@ -486,6 +546,7 @@ mod tests {
             folder: missing,
             agents: &[],
             path_dirs: &[missing.to_path_buf()],
+            aliases: &[],
         };
         assert_eq!(texts(&candidates("", 0, &here)), ["every", "on", "cron"]);
         assert!(candidates("cat x", 5, &here).is_empty());
@@ -499,6 +560,7 @@ mod tests {
             folder: dir.path(),
             agents: &[],
             path_dirs: &[],
+            aliases: &[],
         };
         assert_eq!(texts(&candidates("", 0, &here)), ["every", "on", "cron"]);
     }
@@ -512,6 +574,7 @@ mod tests {
             folder: dir.path(),
             agents: &agents,
             path_dirs: &dirs,
+            aliases: &[],
         };
         assert!(runnable("claude", &here), "an agent");
         assert!(runnable("build", &here), "a make target");
@@ -520,6 +583,22 @@ mod tests {
         assert!(!runnable("cheese.txt", &here), "on PATH, but not runnable");
         assert!(!runnable("nowhere", &here));
         assert!(!runnable("", &here));
+
+        // A shell alias PATH never knows is runnable once the shell is read.
+        let aliases = vec!["ll".to_string()];
+        let here = Here {
+            aliases: &aliases,
+            ..here
+        };
+        assert!(runnable("ll", &here), "a shell alias");
+        assert_eq!(candidates("l", 1, &here)[0].text, "ll", "and it completes");
+    }
+
+    #[test]
+    fn shell_names_reads_aliases_and_functions_from_either_shell() {
+        // zsh: `name='…'`; bash: `alias name='…'`; a bare function name.
+        let text = "ll='ls -la'\nalias gs='git status'\ngrep\ndeclare -f deploy\n= skip\n/usr/bin/x skip\n";
+        assert_eq!(parse_shell_names(text), ["deploy", "grep", "gs", "ll"]);
     }
 
     #[test]
