@@ -527,7 +527,12 @@ impl Scheduler {
     async fn fire(&self, s: &Schedule, now: Timestamp) -> Result<Run> {
         let dir = s.source.parent().map(Path::to_path_buf).unwrap_or_default();
         let workspace = (s.scope != GLOBAL_SCOPE).then(|| PathBuf::from(&s.scope));
-        let spec = run_spec(&s.name, &s.spec, &dir, workspace.as_deref(), &self.registry)?;
+        let mut spec = run_spec(&s.name, &s.spec, &dir, workspace.as_deref(), &self.registry)?;
+        // A probe can ask "what is new since last time" without keeping its own
+        // clock: the previous firing, empty the first time round.
+        if let Some(last) = s.last_fired_at {
+            spec.env.push(("RELAY_LAST_RUN".into(), last.to_string()));
+        }
         let run = self.supervisor.start(spec).await?;
         info!(schedule = %s.name, scope = %s.scope_label(), run = %run.id, "schedule fired");
         let (scope, name, hash, id) = (s.scope.clone(), s.name.clone(), s.hash.clone(), run.id.clone());
