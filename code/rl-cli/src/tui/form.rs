@@ -29,6 +29,8 @@ pub const YOURS: &str = "yours";
 pub enum Kind {
     Run,
     Rule,
+    /// Rename the registered folder in `origin` to the `name` field.
+    Rename,
 }
 
 pub struct Field {
@@ -97,6 +99,19 @@ impl Form {
                 Field::new("title", "what to call it", ""),
             ],
             cur: 1,
+            origin: folder.to_path_buf(),
+            folders: vec![],
+            agents: vec![],
+            editing: None,
+        }
+    }
+
+    /// Rename the folder at `folder`, prefilled with its current `name`.
+    pub fn rename(folder: &Path, name: &str) -> Self {
+        Self {
+            kind: Kind::Rename,
+            fields: vec![Field::new("name", "what to call this project", name)],
+            cur: 0,
             origin: folder.to_path_buf(),
             folders: vec![],
             agents: vec![],
@@ -208,6 +223,7 @@ impl Form {
             (Kind::Run, _) => "new run".into(),
             (Kind::Rule, Some(e)) => format!("edit {}", e.rule.name()),
             (Kind::Rule, None) => "new rule".into(),
+            (Kind::Rename, _) => format!("rename {}", short_path(&self.origin)),
         }
     }
 

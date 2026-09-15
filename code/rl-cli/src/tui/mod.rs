@@ -54,6 +54,7 @@ use relay_proto::methods::{
     ReactionReload, ReactionResume, RuleApprove, RuleList, RuleRef, RunArchive, RunArchiveParams, RunId, RunIds,
     RunMark, RunMarkParams, RunSeen, RunSpec, RunStart, RunStop, RunStopParams, ScheduleFilter, ScheduleName,
     SchedulePause, ScheduleReload, ScheduleResume, ScheduleRun, SummaryGet, SummaryMake, SummaryParams, WorkspaceList,
+    WorkspaceRename, WorkspaceRenameParams,
 };
 use relay_proto::rule::{Rule, RuleKind, RuleStatus};
 use relay_proto::types::{AttachMode, Cause, Event as LedgerEvent, Mark, Run, RunKind, RunState, Summary};
@@ -124,6 +125,23 @@ struct Completing {
     shown: String,
     cands: Vec<complete::Candidate>,
     at: usize,
+}
+
+/// The kind of candidate list under the line, and how many it holds.
+#[derive(Clone, Copy)]
+enum Cands {
+    /// The `/` commands the line names.
+    Slash(usize),
+    /// The completion words `tab` laid out.
+    Words(usize),
+}
+
+impl Cands {
+    fn len(self) -> usize {
+        match self {
+            Cands::Slash(n) | Cands::Words(n) => n,
+        }
+    }
 }
 
 /// Words handed to the assistant, until it answers.
@@ -198,6 +216,10 @@ struct App {
     /// The directories of $PATH, for completing the first word.
     path_dirs: Vec<PathBuf>,
     completing: Option<Completing>,
+    /// Which candidate the arrows have walked to, when a list is on offer.
+    /// `None` until you press an arrow; typing clears it. When set, `enter`
+    /// and `tab` take this one rather than submitting or cycling.
+    pick: Option<usize>,
     mode: Mode,
     flash: Option<(String, Instant)>,
     quit: bool,
@@ -395,6 +417,7 @@ pub async fn run(home: &Home) -> Result<()> {
         agents: Vec::new(),
         path_dirs: complete::path_dirs(),
         completing: None,
+        pick: None,
         mode: Mode::Normal,
         flash: None,
         quit: false,
@@ -601,7 +624,16 @@ impl App {
             Row::Run(i) | Row::Fold(i) => Some(i.run.workspace.clone()),
             Row::Job(j) => Some(j.last().run.workspace.clone()),
             Row::Question(q) => Some(q.workspace.clone()),
-            Row::Group(_) => None,
+            Row::Group(h) => h.workspace.clone(),
+        }
+    }
+
+    /// The registered folder under the cursor, when the cursor is on a project
+    /// header — what `e` and `^r` act on.
+    fn selected_project(&self) -> Option<PathBuf> {
+        match self.selected()? {
+            Row::Group(h) => h.workspace.clone(),
+            _ => None,
         }
     }
 
@@ -1019,6 +1051,10 @@ impl App {
                 Ok(d) => self.save_rule(d, f.editing.as_ref()).await,
                 Err(e) => Err(e),
             },
+            form::Kind::Rename => {
+                self.rename_project(f.origin.clone(), f.get("name").trim().to_string())
+                    .await
+            }
         };
         if let Err(e) = outcome {
             self.say(format!("{e:#}"));
@@ -1055,6 +1091,23 @@ impl App {
             // at once (main_loop does it when this key returns).
             self.attach = Some((run.id.clone(), false));
         }
+        Ok(())
+    }
+
+    /// Give a project a new name. The cursor stays on it, under the new key.
+    async fn rename_project(&mut self, folder: PathBuf, name: String) -> Result<()> {
+        if name.is_empty() {
+            anyhow::bail!("a name, please");
+        }
+        self.rpc
+            .call::<WorkspaceRename>(WorkspaceRenameParams {
+                path: folder.clone(),
+                name: name.clone(),
+            })
+            .await?;
+        self.say(format!("renamed to {name}"));
+        self.refresh().await;
+        self.select(Some(format!("g:{}", folder.display())));
         Ok(())
     }
 
@@ -1262,20 +1315,37 @@ impl App {
             self.cycle_lens(if k.code == KeyCode::BackTab { -1 } else { 1 });
             return Ok(());
         }
+        // Candidates on offer: the arrows walk them, not the list.
+        if self.cands().is_some() && matches!(k.code, KeyCode::Up | KeyCode::Down) {
+            self.walk_cands(if k.code == KeyCode::Down { 1 } else { -1 });
+            return Ok(());
+        }
         // The line takes the keyboard first; what it leaves, the list has.
         match self.line.key(&k) {
             line::Act::Typing => {
                 self.completing = None;
+                self.pick = None;
                 Ok(())
             }
+            // With a candidate highlighted, tab and enter take it; otherwise
+            // tab completes as ever and enter submits.
             line::Act::Complete => {
-                self.tab();
+                if self.pick.is_some() {
+                    self.accept_cand();
+                } else {
+                    self.tab();
+                }
+                Ok(())
+            }
+            line::Act::Submit if self.pick.is_some() => {
+                self.accept_cand();
                 Ok(())
             }
             line::Act::Submit => self.submit(area).await,
             line::Act::Cancel if !self.line.is_empty() => {
                 self.line.clear();
                 self.completing = None;
+                self.pick = None;
                 Ok(())
             }
             // Full screen, the term has the keyboard: the keys scroll it.
@@ -1309,6 +1379,14 @@ impl App {
         match (k.code, k.modifiers) {
             (KeyCode::Char('c'), KeyModifiers::CONTROL) => self.quit = true,
             (KeyCode::Char('x'), KeyModifiers::CONTROL) => self.remove_selected().await,
+            (KeyCode::Char('r'), KeyModifiers::CONTROL) => {
+                if let Some(folder) = self.selected_project() {
+                    let name = self.names.workspace(&folder);
+                    self.mode = Mode::Form(Box::new(Form::rename(&folder, &name)));
+                } else {
+                    self.say("^r renames a project — put the cursor on one");
+                }
+            }
             (KeyCode::Esc, _) => {
                 if self.wide {
                     self.wide = false;
@@ -1411,6 +1489,10 @@ impl App {
             // nothing numbered on screen is no question at all.
             self.show_pane = true;
             self.mode = Mode::Answer(id);
+        } else if self.selected_project().is_some() {
+            // A project header: its stats in the pane. `e` and `^r` act on it.
+            self.pane = Pane::Facts;
+            self.show_pane = true;
         } else {
             // Watch first — the next enter is what takes the keyboard.
             self.open_term(area).await;
@@ -1479,6 +1561,69 @@ impl App {
 
     /// `tab`: as much of the word as every candidate agrees on, then round
     /// the candidates one at a time.
+    /// The candidates on offer under the line, if any: the `/` commands it
+    /// names, or the words `tab` has laid out. Slash and words never both show.
+    fn cands(&self) -> Option<Cands> {
+        if !matches!(self.mode, Mode::Normal) {
+            return None;
+        }
+        if let Some(rest) = self.line.text().strip_prefix('/') {
+            let n = palette::matching(rest).len();
+            if n > 0 {
+                return Some(Cands::Slash(n));
+            }
+        }
+        match &self.completing {
+            Some(c) if !c.cands.is_empty() => Some(Cands::Words(c.cands.len())),
+            _ => None,
+        }
+    }
+
+    /// Walk the highlight through the candidates, wrapping. From nothing, down
+    /// lands on the first, up on the last.
+    fn walk_cands(&mut self, by: isize) {
+        let Some(n) = self.cands().map(|c| c.len() as isize) else {
+            return;
+        };
+        let next = match self.pick {
+            Some(i) => (i as isize + by).rem_euclid(n),
+            None if by > 0 => 0,
+            None => n - 1,
+        };
+        self.pick = Some(next as usize);
+    }
+
+    /// Take the highlighted candidate into the line: a `/` command filled in
+    /// with its name (its arguments left for you to type — it is not run), or
+    /// the completion word applied where the cursor was.
+    fn accept_cand(&mut self) {
+        let Some(cs) = self.cands() else {
+            self.pick = None;
+            return;
+        };
+        let i = self.pick.unwrap_or(0).min(cs.len().saturating_sub(1));
+        match cs {
+            Cands::Slash(_) => {
+                let rest = self.line.text().strip_prefix('/').unwrap_or("").to_string();
+                if let Some(c) = palette::matching(&rest).get(i) {
+                    let taken = format!("/{} ", c.name);
+                    let at = taken.len();
+                    self.line.set_with_cursor(taken, at);
+                }
+            }
+            Cands::Words(_) => {
+                if let Some(c) = self.completing.take()
+                    && let Some(cand) = c.cands.get(i)
+                {
+                    let (l, pos) = complete::apply(&c.line, c.cursor, &cand.text);
+                    self.line.set_with_cursor(l.clone(), pos);
+                    self.completing = Some(Completing { shown: l, at: i, ..c });
+                }
+            }
+        }
+        self.pick = None;
+    }
+
     fn tab(&mut self) {
         let text = self.line.text().to_string();
         // A `/` line completes to the command it names.
@@ -1772,18 +1917,35 @@ impl App {
             f.render_widget(Paragraph::new(lines), area);
         }
         if let Some(area) = a.cands {
+            // The arrowed-to row wears a caret and the accent; the rest are quiet.
+            let pick = self.pick;
+            let lead = |i: usize| {
+                if pick == Some(i) {
+                    (" › ", theme::accent())
+                } else {
+                    ("   ", theme::dim())
+                }
+            };
             let lines: Vec<Line> = match (&slash, &self.completing) {
                 (Some(cs), _) => cs
                     .iter()
                     .take(area.height as usize)
-                    .map(|c| {
+                    .enumerate()
+                    .map(|(i, c)| {
+                        let (mark, style) = lead(i);
                         let name = if c.args.is_empty() {
-                            format!("   /{}", c.name)
+                            format!("/{}", c.name)
                         } else {
-                            format!("   /{} {}", c.name, c.args)
+                            format!("/{} {}", c.name, c.args)
+                        };
+                        let name = if pick == Some(i) {
+                            Span::styled(format!("{name:<27}"), style)
+                        } else {
+                            Span::raw(format!("{name:<27}"))
                         };
                         Line::from(vec![
-                            Span::raw(format!("{name:<30}")),
+                            Span::styled(mark, style),
+                            name,
                             Span::raw(c.what.to_string()).dim(),
                         ])
                     })
@@ -1792,7 +1954,14 @@ impl App {
                     .cands
                     .iter()
                     .take(area.height as usize)
-                    .map(|x| Line::from(Span::raw(format!("   {}", x.text)).dim()))
+                    .enumerate()
+                    .map(|(i, x)| {
+                        let (mark, style) = lead(i);
+                        Line::from(vec![
+                            Span::styled(mark, style),
+                            Span::styled(x.text.clone(), if pick == Some(i) { style } else { theme::dim() }),
+                        ])
+                    })
                     .collect(),
                 (None, None) => vec![],
             };
@@ -2167,6 +2336,20 @@ impl App {
                 let asker = q.run.as_deref().and_then(|id| self.run_by_id(id));
                 pane::question_lines(q, asker, &self.picked, now)
             }
+            Some(Row::Group(h)) if h.workspace.is_some() => {
+                let ws = h.workspace.clone().unwrap();
+                // The pane is the project — the folder — so it is titled by the
+                // folder's name (what `^r` renames), not the branch the list row
+                // may be grouped under.
+                pane::project_lines(
+                    &self.names.workspace(&ws),
+                    h.place.as_deref().unwrap_or(""),
+                    &ws,
+                    &self.digest.items,
+                    &self.rules,
+                    now,
+                )
+            }
             _ => vec![Line::from(Span::raw(" nothing selected").dim())],
         };
         f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
@@ -2285,6 +2468,9 @@ impl App {
                 format!("enter output · /summarise · ^x done · /done-all · {pane}")
             }
             Some(Row::Run(_)) => format!("enter watches it · /join · ^x stops it · /mark · {pane}"),
+            Some(Row::Group(h)) if h.workspace.is_some() => {
+                format!("enter its stats · /rules edits schedules & reactions · ^r renames · {pane}")
+            }
             _ => String::new(),
         }
     }

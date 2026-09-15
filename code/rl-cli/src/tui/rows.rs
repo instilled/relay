@@ -78,10 +78,12 @@ pub enum Row<'a> {
 }
 
 impl<'a> Row<'a> {
-    /// Selectable rows carry a stable key, so the cursor survives a re-rank.
+    /// Selectable rows carry a stable key, so the cursor survives a re-rank. A
+    /// folder header is selectable (its path is the key); the global "yours"
+    /// rules row, which stands for no folder, is not.
     pub fn key(&self) -> Option<String> {
         match self {
-            Row::Group(..) => None,
+            Row::Group(h) => h.workspace.as_ref().map(|p| format!("g:{}", p.display())),
             Row::Question(d) => Some(format!("q:{}", d.id)),
             Row::Run(i) | Row::Fold(i) => Some(format!("r:{}", i.run.id)),
             Row::Job(j) => Some(j.key.clone()),
@@ -102,6 +104,8 @@ impl<'a> Row<'a> {
 pub struct Head {
     /// The folder, with `~` for home; none on the line of your own rules.
     pub place: Option<String>,
+    /// The folder itself, so actions can act on it; none for your own rules.
+    pub workspace: Option<PathBuf>,
     /// A ref, a branch, or a folder's registered name.
     pub name: String,
     /// The rules of that folder, needing a yes first, then by name.
@@ -519,6 +523,7 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
     if yours.iter().any(Chip::needs_yes) {
         rows.push(Row::Group(Head {
             place: None,
+            workspace: None,
             name: "yours".into(),
             rules: yours,
         }));
@@ -526,6 +531,7 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
     for g in groups {
         rows.push(Row::Group(Head {
             place: Some(names.place(&g.key, &g.workspace)),
+            workspace: Some(g.workspace.clone()),
             name: names.group(&g.key),
             rules: chips(cx.rules, Some(&g.workspace), now),
         }));

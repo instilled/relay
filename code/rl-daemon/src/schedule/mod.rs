@@ -353,6 +353,18 @@ impl Scheduler {
         self.ledger.call(|c| workspaces::list(c)).await
     }
 
+    /// Renames a registered folder (any spelling of its path), keeping
+    /// everything else. Fails when the folder was never `rl up`'d.
+    pub async fn rename_workspace(&self, path: &Path, name: &str) -> Result<Workspace> {
+        let scope = self.scope_of(&path.to_string_lossy()).await?;
+        let path = PathBuf::from(scope);
+        let name = name.to_string();
+        self.ledger
+            .call(move |c| workspaces::rename(c, &path, &name))
+            .await?
+            .ok_or_else(|| anyhow!("not a registered workspace; `rl up` there first"))
+    }
+
     /// Registers a folder (idempotent), loads its `.relay/schedules.yaml`,
     /// and approves every pending version when asked.
     pub async fn up(&self, path: &Path, approve: bool) -> Result<UpReport> {

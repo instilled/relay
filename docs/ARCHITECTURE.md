@@ -214,7 +214,12 @@ started fold, once ended, into one line per job — name, cadence, how many went
 outcome — so a job firing every thirty seconds is a row, not a screen; a run still going or
 waiting on you is never folded, and `enter` on a job opens it to its last twenty. When the list
 is taller than the screen, its first and last lines say how much is above and below. A group's
-header says which folder it is in. Moving the cursor onto a row is looking at it;
+header says which folder it is in, and the cursor stops on it like any other row: `enter` (or
+`/info`) turns the pane into the project's own — the folder, how its runs stand (needs-you /
+going / done), when it last stirred, and the schedules and reactions that live there. `/rules`
+from a header drops into the rules view filtered to that folder; `^r` renames the folder in
+place — an inline field over `workspace.rename`, which updates the registered name and keeps
+the registration (a folder never `rl up`'d has no name to change and says so). Moving the cursor onto a row is looking at it;
 `/done` on an ended run (or a job) is being done with it — `run.archive` sets `runs.archived_at`,
 the digest leaves it out, `rl ls --all` and the ledger keep it — and `/done-all` is done with
 everything ended that has been looked at. `ctrl-x` is the one keystroke for it, whatever the row:
@@ -271,7 +276,10 @@ way out; where it does not (Terminal.app), plain `enter` sends as always.
 word against the agents the registry knows, the folder's `Makefile` targets and `package.json`
 scripts, and the binaries on `PATH`; after `every` a duration, after `on` an event kind; anywhere
 else the files and directories of the folder. What every candidate shares goes in first, and
-`tab` again walks the rest.
+`tab` again walks the rest. When a list is on offer — those `tab` words, or the `/` commands a
+`/` line names — the arrows walk it too: `↑`/`↓` light a candidate with a caret, `tab` or `enter`
+takes the lit one (a command is filled in with its name for you to finish, never run on the
+spot), and typing anything clears the highlight so `enter` submits the line as before.
 
 Because letters go into the line, everything that is not typing is a `/` command
 (`tui/palette.rs`), offered as you type it: `/stop`, `/done` and `/done-all`, `/mark`, `/watch`
