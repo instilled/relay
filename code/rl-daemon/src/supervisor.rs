@@ -407,6 +407,25 @@ impl Supervisor {
 
     /// Asks the child to stop. Returns the run as of now; the terminal state
     /// lands when the holder reports the exit.
+    /// Write bytes to a live run's terminal — the warm-shell path: a command
+    /// typed on the panel goes to the shell's stdin, journaled as input, with
+    /// no interactive join.
+    pub async fn input(&self, id: &str, bytes: Vec<u8>) -> Result<()> {
+        let live = self.live(id).ok_or_else(|| anyhow!("no live session for run {id}"))?;
+        live.writer
+            .lock()
+            .await
+            .input(bytes.clone())
+            .await
+            .context("writing to holder")?;
+        let id = id.to_string();
+        let now = Timestamp::now();
+        self.ledger
+            .call(move |c| session_io::append(c, &id, Direction::In, &bytes, now).map(|_| ()))
+            .await?;
+        Ok(())
+    }
+
     pub async fn stop(&self, id: &str, force: bool) -> Result<Run> {
         let live = self.live(id).ok_or_else(|| anyhow!("no live session for run {id}"))?;
         live.stopping.store(true, Ordering::SeqCst);

@@ -52,9 +52,9 @@ use relay_proto::methods::{
     AgentList, DecisionDismiss, DecisionNote, DecisionTake, DecisionTakeParams, Digest, DigestGet, DigestItem,
     DigestParams, EventFilter, EventList, GcParams, GcRun, PresenceClient, PresenceTouch, ReactionPause,
     ReactionReload, ReactionResume, RuleApprove, RuleList, RuleRef, RunArchive, RunArchiveParams, RunId, RunIds,
-    RunMark, RunMarkParams, RunSeen, RunSpec, RunStart, RunStop, RunStopParams, ScheduleFilter, ScheduleName,
-    SchedulePause, ScheduleReload, ScheduleResume, ScheduleRun, SummaryGet, SummaryMake, SummaryParams, WorkspaceList,
-    WorkspaceRename, WorkspaceRenameParams,
+    RunInput, RunInputParams, RunMark, RunMarkParams, RunSeen, RunSpec, RunStart, RunStop, RunStopParams,
+    ScheduleFilter, ScheduleName, SchedulePause, ScheduleReload, ScheduleResume, ScheduleRun, SummaryGet, SummaryMake,
+    SummaryParams, WorkspaceList, WorkspaceRename, WorkspaceRenameParams,
 };
 use relay_proto::rule::{Rule, RuleKind, RuleStatus};
 use relay_proto::types::{AttachMode, Cause, Event as LedgerEvent, Mark, Run, RunKind, RunState, Summary};
@@ -70,6 +70,8 @@ const REFRESH: Duration = Duration::from_secs(1);
 const FLASH: Duration = Duration::from_secs(4);
 /// The most candidates `tab` shows at once.
 const CANDS: usize = 6;
+/// The tag that marks a run as a project's warm shell.
+const SHELL_TAG: &str = "shell";
 /// The most rows the live line grows to before it scrolls within itself.
 const LINE_MAX: u16 = 8;
 /// Recent output replayed when joining a run for real, enough to paint the
@@ -1109,6 +1111,72 @@ impl App {
         Ok(())
     }
 
+    /// Run a shell line in a project's warm shell: write it to the shell's
+    /// stdin (starting the shell if the folder has none), then watch it.
+    async fn run_in_shell(&mut self, cmd: String, folder: PathBuf, area: Rect) -> Result<()> {
+        let id = self.shell_target(folder, area).await?;
+        let mut bytes = cmd.into_bytes();
+        bytes.push(b'\n');
+        self.rpc
+            .call::<RunInput>(RunInputParams { id: id.clone(), bytes })
+            .await?;
+        // Show it running: select the shell and watch its tile.
+        self.refresh().await;
+        self.select(Some(format!("r:{id}")));
+        self.open_term(area).await;
+        Ok(())
+    }
+
+    /// Where a shell line goes: the selected shell if the cursor is on one,
+    /// else the folder's primary shell, started if it has none yet.
+    async fn shell_target(&mut self, folder: PathBuf, area: Rect) -> Result<String> {
+        if let Some(id) = self.selected_shell() {
+            return Ok(id);
+        }
+        if let Some(id) = self.project_shell(&folder) {
+            return Ok(id);
+        }
+        self.spawn_shell(folder, area).await
+    }
+
+    /// A live warm shell in `folder`, if one is running.
+    fn project_shell(&self, folder: &Path) -> Option<String> {
+        self.digest
+            .items
+            .iter()
+            .filter(|i| !i.run.state.is_terminal())
+            .filter(|i| i.run.workspace == folder)
+            .find(|i| i.run.tags.iter().any(|t| t == SHELL_TAG))
+            .map(|i| i.run.id.clone())
+    }
+
+    /// The run under the cursor, when it is a warm shell.
+    fn selected_shell(&self) -> Option<String> {
+        let i = self.selected_run()?;
+        i.run.tags.iter().any(|t| t == SHELL_TAG).then(|| i.run.id.clone())
+    }
+
+    /// Start a project's warm shell: a persistent `$SHELL -i` tagged so the
+    /// list and the router know it for what it is.
+    async fn spawn_shell(&mut self, folder: PathBuf, area: Rect) -> Result<String> {
+        let spec = RunSpec {
+            argv: crate::env::shell_i(),
+            kind: RunKind::Command,
+            cwd: folder,
+            title: Some("shell".into()),
+            ref_: None,
+            tags: vec![SHELL_TAG.into()],
+            tty: true,
+            cols: Some(area.width),
+            rows: Some(area.height.saturating_sub(2)),
+            env: crate::env::child_env(&[])?,
+            inherit_env: false,
+            cause: Cause::Manual,
+            flow: None,
+        };
+        Ok(self.rpc.call::<RunStart>(spec).await?.id)
+    }
+
     /// Give a project a new name. The cursor stays on it, under the new key.
     async fn rename_project(&mut self, folder: PathBuf, name: String) -> Result<()> {
         if name.is_empty() {
@@ -1539,14 +1607,9 @@ impl App {
             line::What::Slash(rest) => return self.command(&rest, area).await,
             line::What::Shell(cmd) => {
                 self.line.clear();
-                let d = form::RunDraft {
-                    cwd: folder,
-                    kind: RunKind::Command,
-                    argv: crate::env::shell_argv(&cmd),
-                    // The row reads as what you typed, not the `$SHELL -ic` wrapper.
-                    title: Some(cmd),
-                };
-                if let Err(e) = self.start_run(d, area).await {
+                // A shell line runs in the project's warm shell — one persistent
+                // `$SHELL -i` per folder, rc read once — not a fresh run each time.
+                if let Err(e) = self.run_in_shell(cmd, folder, area).await {
                     self.say(format!("{e:#}"));
                 }
             }

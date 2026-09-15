@@ -296,6 +296,15 @@ pub fn register(r: &mut Router<Daemon>) {
             .await
             .map_err(|e| RpcError::internal(format!("{e:#}")))
     });
+    r.register::<relay_proto::methods::RunInput, _, _>(|d, p: relay_proto::methods::RunInputParams| async move {
+        if d.supervisor.live(&p.id).is_none() {
+            return Err(RpcError::not_found("live run", &p.id));
+        }
+        d.supervisor
+            .input(&p.id, p.bytes)
+            .await
+            .map_err(|e| RpcError::internal(format!("{e:#}")))
+    });
 
     r.register::<RunHook, _, _>(|d, p| async move {
         if p.dialect != relay_detect::claude::DIALECT {
