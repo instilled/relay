@@ -4,9 +4,9 @@
 use crate::rank;
 use crate::render::{fmt_clock, state_label};
 use jiff::Timestamp;
-use relay_core::time::fmt_age;
-use relay_proto::methods::{Digest, DigestItem};
-use relay_proto::types::RunState;
+use rl_core::time::fmt_age;
+use rl_proto::methods::{Digest, DigestItem};
+use rl_proto::types::RunState;
 
 pub struct Group<'a> {
     pub key: String,
@@ -121,7 +121,7 @@ pub fn text(d: &Digest, now: Timestamp) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use relay_proto::types::{Confidence, Run, RunKind};
+    use rl_proto::types::{Confidence, Run, RunKind};
 
     fn item(id: &str, state: RunState, group: &str, at: &str, unseen: bool, summary: &str) -> DigestItem {
         let t: Timestamp = at.parse().unwrap();

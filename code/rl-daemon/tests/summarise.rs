@@ -6,9 +6,9 @@
 mod common;
 
 use common::{Conn, Harness, wait_journal};
-use relay_core::Home;
-use relay_proto::rpc::Response;
-use relay_proto::types::{Cause, Event, Run, RunState, Summary};
+use rl_core::Home;
+use rl_proto::rpc::Response;
+use rl_proto::types::{Cause, Event, Run, RunState, Summary};
 use serde_json::json;
 use std::path::PathBuf;
 

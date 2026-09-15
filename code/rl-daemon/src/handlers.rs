@@ -2,12 +2,12 @@
 
 use crate::router::Router;
 use crate::server::Daemon;
-use relay_core::time;
-use relay_ledger::{events, presence, runs};
-use relay_proto::PROTOCOL_VERSION;
-use relay_proto::methods::*;
-use relay_proto::rpc::RpcError;
-use relay_proto::rule::{Rule, RuleKind};
+use rl_core::time;
+use rl_ledger::{events, presence, runs};
+use rl_proto::PROTOCOL_VERSION;
+use rl_proto::methods::*;
+use rl_proto::rpc::RpcError;
+use rl_proto::rule::{Rule, RuleKind};
 use tracing::info;
 
 pub fn register(r: &mut Router<Daemon>) {
@@ -43,31 +43,31 @@ pub fn register(r: &mut Router<Daemon>) {
             .map_err(RpcError::internal)?;
         found.ok_or_else(|| RpcError::not_found("run", &id))
     });
-    r.register::<relay_proto::methods::ScheduleList, _, _>(|d, f| async move {
+    r.register::<rl_proto::methods::ScheduleList, _, _>(|d, f| async move {
         d.scheduler
             .list(f.all)
             .await
             .map_err(|e| RpcError::internal(format!("{e:#}")))
     });
-    r.register::<relay_proto::methods::ScheduleRun, _, _>(|d, p| async move {
+    r.register::<rl_proto::methods::ScheduleRun, _, _>(|d, p| async move {
         d.scheduler
             .run_now(&p.name, p.scope.as_deref())
             .await
             .map_err(|e| RpcError::internal(format!("{e:#}")))
     });
-    r.register::<relay_proto::methods::SchedulePause, _, _>(|d, p| async move {
+    r.register::<rl_proto::methods::SchedulePause, _, _>(|d, p| async move {
         d.scheduler
             .set_paused(&p.name, p.scope.as_deref(), true)
             .await
             .map_err(|e| RpcError::internal(format!("{e:#}")))
     });
-    r.register::<relay_proto::methods::ScheduleResume, _, _>(|d, p| async move {
+    r.register::<rl_proto::methods::ScheduleResume, _, _>(|d, p| async move {
         d.scheduler
             .set_paused(&p.name, p.scope.as_deref(), false)
             .await
             .map_err(|e| RpcError::internal(format!("{e:#}")))
     });
-    r.register::<relay_proto::methods::WorkspaceUp, _, _>(|d, p| async move {
+    r.register::<rl_proto::methods::WorkspaceUp, _, _>(|d, p| async move {
         let mut up = d
             .scheduler
             .up(&p.path, p.approve)
@@ -84,19 +84,19 @@ pub fn register(r: &mut Router<Daemon>) {
         up.approved_reactions = approved;
         Ok(up)
     });
-    r.register::<relay_proto::methods::WorkspaceList, _, _>(|d, ()| async move {
+    r.register::<rl_proto::methods::WorkspaceList, _, _>(|d, ()| async move {
         d.scheduler
             .workspaces()
             .await
             .map_err(|e| RpcError::internal(format!("{e:#}")))
     });
-    r.register::<relay_proto::methods::WorkspaceRename, _, _>(|d, p| async move {
+    r.register::<rl_proto::methods::WorkspaceRename, _, _>(|d, p| async move {
         d.scheduler
             .rename_workspace(&p.path, &p.name)
             .await
             .map_err(|e| RpcError::internal(format!("{e:#}")))
     });
-    r.register::<relay_proto::methods::WorkspaceRemove, _, _>(|d, p| async move {
+    r.register::<rl_proto::methods::WorkspaceRemove, _, _>(|d, p| async move {
         if let Ok(path) = std::fs::canonicalize(&p.path) {
             let _ = d.reactor.remove_scope(&path).await;
         }
@@ -146,7 +146,7 @@ pub fn register(r: &mut Router<Daemon>) {
         *d.config.write().unwrap() = loaded;
         Ok(report)
     });
-    r.register::<relay_proto::methods::ScheduleReload, _, _>(|d, ()| async move {
+    r.register::<rl_proto::methods::ScheduleReload, _, _>(|d, ()| async move {
         // A rules reload re-reads the config too: one `R` for everything on disk.
         *d.config.write().unwrap() = crate::config::load(&d.home);
         d.scheduler
@@ -296,7 +296,7 @@ pub fn register(r: &mut Router<Daemon>) {
             .await
             .map_err(|e| RpcError::internal(format!("{e:#}")))
     });
-    r.register::<relay_proto::methods::RunInput, _, _>(|d, p: relay_proto::methods::RunInputParams| async move {
+    r.register::<rl_proto::methods::RunInput, _, _>(|d, p: rl_proto::methods::RunInputParams| async move {
         if d.supervisor.live(&p.id).is_none() {
             return Err(RpcError::not_found("live run", &p.id));
         }
@@ -307,13 +307,13 @@ pub fn register(r: &mut Router<Daemon>) {
     });
 
     r.register::<RunHook, _, _>(|d, p| async move {
-        if p.dialect != relay_detect::claude::DIALECT {
+        if p.dialect != rl_detect::claude::DIALECT {
             return Err(RpcError::invalid_params(format!(
                 "unknown hook dialect `{}`",
                 p.dialect
             )));
         }
-        if let Some(sig) = relay_detect::claude::signal(&p.event, &p.payload) {
+        if let Some(sig) = rl_detect::claude::signal(&p.event, &p.payload) {
             d.supervisor
                 .apply(&p.id, sig)
                 .await
@@ -324,7 +324,7 @@ pub fn register(r: &mut Router<Daemon>) {
     r.register::<RunMark, _, _>(|d, RunMarkParams { id, mark, note }| async move {
         let detail = note.or_else(|| Some(format!("marked {mark}")));
         d.supervisor
-            .apply(&id, relay_detect::Signal::manual(mark.state(), detail))
+            .apply(&id, rl_detect::Signal::manual(mark.state(), detail))
             .await
             .map_err(|e| RpcError::internal(format!("{e:#}")))?;
         get_run(&d, &id).await
@@ -411,7 +411,7 @@ pub fn register(r: &mut Router<Daemon>) {
     });
 }
 
-async fn get_run(d: &Daemon, id: &str) -> Result<relay_proto::types::Run, RpcError> {
+async fn get_run(d: &Daemon, id: &str) -> Result<rl_proto::types::Run, RpcError> {
     let found = d
         .ledger
         .call({

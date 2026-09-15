@@ -3,12 +3,12 @@
 
 #![allow(dead_code)]
 
-use relay_core::Home;
-use relay_detect::Registry;
-use relay_ledger::{Ledger, session_io};
-use relay_proto::codec::{read_message, write_message};
-use relay_proto::rpc::{Id, Request, Response};
-use relay_proto::types::{Run, RunState};
+use rl_core::Home;
+use rl_detect::Registry;
+use rl_ledger::{Ledger, session_io};
+use rl_proto::codec::{read_message, write_message};
+use rl_proto::rpc::{Id, Request, Response};
+use rl_proto::types::{Run, RunState};
 use rl_daemon::ServeOptions;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};

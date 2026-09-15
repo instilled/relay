@@ -9,9 +9,9 @@
 
 use crate::attach::client_name;
 use crate::client::Client;
-use relay_core::Home;
-use relay_proto::methods::{AttachInfo, AttachParams, RunAttach};
-use relay_proto::types::AttachMode;
+use rl_core::Home;
+use rl_proto::methods::{AttachInfo, AttachParams, RunAttach};
+use rl_proto::types::AttachMode;
 use rl_session::proto::{Frame, read_frame};
 use std::io;
 use tokio::io::BufReader;

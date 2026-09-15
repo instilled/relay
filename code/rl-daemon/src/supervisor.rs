@@ -9,21 +9,21 @@
 //!
 //! State changes all go through [`Supervisor::apply`]: PTY heuristics from the
 //! follow task, hooks via `run.hook`, humans via `run.mark`. The ledger row is
-//! the truth; [`relay_detect::step`] decides against it, on the ledger thread.
+//! the truth; [`rl_detect::step`] decides against it, on the ledger thread.
 
 use crate::git;
 use anyhow::{Context, Result, anyhow, bail};
 use jiff::Timestamp;
-use relay_core::time::fmt_duration;
-use relay_core::{Home, id::new_id};
-use relay_detect::pty::Heuristics;
-use relay_detect::{Current, Registry, Signal, Transition, claude, step};
-use relay_ledger::events::NewEvent;
-use relay_ledger::session_io::Direction;
-use relay_ledger::sessions::SessionRow;
-use relay_ledger::{Ledger, events, runs, session_io, sessions};
-use relay_proto::methods::RunSpec;
-use relay_proto::types::{Confidence, Run, RunState, Source, event_kind};
+use rl_core::time::fmt_duration;
+use rl_core::{Home, id::new_id};
+use rl_detect::pty::Heuristics;
+use rl_detect::{Current, Registry, Signal, Transition, claude, step};
+use rl_ledger::events::NewEvent;
+use rl_ledger::session_io::Direction;
+use rl_ledger::sessions::SessionRow;
+use rl_ledger::{Ledger, events, runs, session_io, sessions};
+use rl_proto::methods::RunSpec;
+use rl_proto::types::{Confidence, Run, RunState, Source, event_kind};
 use rl_session::client::{Session, SessionReader, SessionWriter};
 use rl_session::exit::{Exit, read_exit_file};
 use rl_session::proto::{Frame, Hello};
@@ -196,7 +196,7 @@ impl Supervisor {
             .ledger
             .call({
                 let cwd = cwd.clone();
-                move |c| relay_ledger::workspaces::containing(c, &cwd)
+                move |c| rl_ledger::workspaces::containing(c, &cwd)
             })
             .await?
             .map(|w| w.path);
@@ -246,7 +246,7 @@ impl Supervisor {
             env.push((k.to_string(), v));
         };
         set("RELAY_RUN", id.clone());
-        set(relay_core::HOME_ENV, self.home.path().to_string_lossy().into_owned());
+        set(rl_core::HOME_ENV, self.home.path().to_string_lossy().into_owned());
         if let Some(r) = &run.ref_ {
             set("RELAY_REF", r.clone());
         }
@@ -776,9 +776,9 @@ fn default_title(argv: &[String]) -> String {
 }
 
 pub fn locate_session_bin() -> PathBuf {
-    relay_core::locate_bin("rl-session", SESSION_BIN_ENV)
+    rl_core::locate_bin("rl-session", SESSION_BIN_ENV)
 }
 
 pub fn locate_rl_bin() -> PathBuf {
-    relay_core::locate_bin("rl", RL_BIN_ENV)
+    rl_core::locate_bin("rl", RL_BIN_ENV)
 }

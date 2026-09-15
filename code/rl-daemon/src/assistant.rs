@@ -5,10 +5,10 @@
 
 use crate::server::Daemon;
 use anyhow::{Result, bail};
-use relay_core::time::parse_duration;
-use relay_ledger::{runs, session_io};
-use relay_proto::methods::{AssistantOutput, AssistantParams, RunSpec};
-use relay_proto::types::{Cause, RunKind};
+use rl_core::time::parse_duration;
+use rl_ledger::{runs, session_io};
+use rl_proto::methods::{AssistantOutput, AssistantParams, RunSpec};
+use rl_proto::types::{Cause, RunKind};
 use std::time::{Duration, Instant};
 
 /// The tag every assistant run carries.
@@ -25,7 +25,7 @@ pub async fn run(d: &Daemon, p: AssistantParams) -> Result<AssistantOutput> {
             None => bail!(
                 "`{}` is not a job Relay hands to an assistant ({})",
                 p.job,
-                relay_proto::config::Assistants::JOBS.join(", ")
+                rl_proto::config::Assistants::JOBS.join(", ")
             ),
         }
     };

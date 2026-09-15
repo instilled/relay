@@ -6,7 +6,7 @@
 //! yellow the panel used to allow.
 
 use ratatui::style::{Color, Modifier, Style};
-use relay_proto::types::RunState;
+use rl_proto::types::RunState;
 
 /// The one accent: the `relay` word, the prompt caret, a live schedule.
 pub const ACCENT: Color = Color::Rgb(0x1D, 0x9E, 0x75); // teal

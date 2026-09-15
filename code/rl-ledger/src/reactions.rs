@@ -5,8 +5,8 @@
 use crate::entries::{self, Loaded, REACTIONS as T, Row};
 use anyhow::Result;
 use jiff::Timestamp;
-use relay_proto::reaction::Reaction;
-use relay_proto::schedule::ReloadReport;
+use rl_proto::reaction::Reaction;
+use rl_proto::schedule::ReloadReport;
 use rusqlite::Connection;
 use std::path::Path;
 
@@ -80,8 +80,8 @@ pub fn set_fired(conn: &Connection, scope: &str, name: &str, at: Timestamp, run:
 mod tests {
     use super::*;
     use crate::Ledger;
-    use relay_proto::action::Task;
-    use relay_proto::reaction::ReactionSpec;
+    use rl_proto::action::Task;
+    use rl_proto::reaction::ReactionSpec;
 
     fn loaded(name: &str, on: &str) -> Loaded {
         let spec = ReactionSpec {

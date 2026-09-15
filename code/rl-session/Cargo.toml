@@ -11,7 +11,7 @@ name = "rl-session"
 path = "src/main.rs"
 
 [dependencies]
-relay-core.workspace = true
+rl-core.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 jiff.workspace = true

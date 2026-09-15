@@ -6,11 +6,11 @@ mod common;
 
 use common::{Conn, Harness, wait_journal};
 use jiff::{SignedDuration, Timestamp};
-use relay_core::Home;
-use relay_ledger::{Ledger, runs, session_io};
-use relay_proto::methods::GcReport;
-use relay_proto::rpc::Response;
-use relay_proto::types::{Event, Run, RunState, Source};
+use rl_core::Home;
+use rl_ledger::{Ledger, runs, session_io};
+use rl_proto::methods::GcReport;
+use rl_proto::rpc::Response;
+use rl_proto::types::{Event, Run, RunState, Source};
 use serde_json::json;
 
 #[tokio::test]

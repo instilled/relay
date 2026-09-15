@@ -4,9 +4,9 @@
 use crate::conv;
 use anyhow::Result;
 use jiff::Timestamp;
-use relay_core::time::{from_millis, to_millis};
-use relay_proto::methods::EventFilter;
-use relay_proto::types::{Event, Run};
+use rl_core::time::{from_millis, to_millis};
+use rl_proto::methods::EventFilter;
+use rl_proto::types::{Event, Run};
 use rusqlite::{Connection, OptionalExtension, Row, params, params_from_iter, types::Value};
 use std::path::PathBuf;
 

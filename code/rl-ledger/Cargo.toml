@@ -1,5 +1,5 @@
 [package]
-name = "relay-ledger"
+name = "rl-ledger"
 description = "Relay's SQLite ledger: schema, migrations, writers and queries"
 version.workspace = true
 edition.workspace = true
@@ -7,8 +7,8 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-relay-core.workspace = true
-relay-proto.workspace = true
+rl-core.workspace = true
+rl-proto.workspace = true
 anyhow.workspace = true
 jiff.workspace = true
 rusqlite.workspace = true

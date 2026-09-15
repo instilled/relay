@@ -1499,55 +1499,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
-name = "relay-core"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "jiff",
- "tempfile",
-]
-
-[[package]]
-name = "relay-detect"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "jiff",
- "regex",
- "relay-core",
- "relay-proto",
- "serde",
- "serde_json",
- "serde_norway",
- "tempfile",
-]
-
-[[package]]
-name = "relay-ledger"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "jiff",
- "relay-core",
- "relay-proto",
- "rusqlite",
- "serde_json",
- "tempfile",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "relay-proto"
-version = "0.1.0"
-dependencies = [
- "jiff",
- "serde",
- "serde_json",
- "tokio",
-]
-
-[[package]]
 name = "rl-cli"
 version = "0.1.0"
 dependencies = [
@@ -1558,10 +1509,10 @@ dependencies = [
  "jiff",
  "nix 0.31.3",
  "ratatui",
- "relay-core",
- "relay-ledger",
- "relay-proto",
+ "rl-core",
  "rl-daemon",
+ "rl-ledger",
+ "rl-proto",
  "rl-session",
  "serde",
  "serde_json",
@@ -1573,6 +1524,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "rl-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "jiff",
+ "tempfile",
+]
+
+[[package]]
 name = "rl-daemon"
 version = "0.1.0"
 dependencies = [
@@ -1580,10 +1540,10 @@ dependencies = [
  "jiff",
  "nix 0.31.3",
  "regex",
- "relay-core",
- "relay-detect",
- "relay-ledger",
- "relay-proto",
+ "rl-core",
+ "rl-detect",
+ "rl-ledger",
+ "rl-proto",
  "rl-session",
  "serde",
  "serde_json",
@@ -1597,6 +1557,46 @@ dependencies = [
 ]
 
 [[package]]
+name = "rl-detect"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "jiff",
+ "regex",
+ "rl-core",
+ "rl-proto",
+ "serde",
+ "serde_json",
+ "serde_norway",
+ "tempfile",
+]
+
+[[package]]
+name = "rl-ledger"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "jiff",
+ "rl-core",
+ "rl-proto",
+ "rusqlite",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "rl-proto"
+version = "0.1.0"
+dependencies = [
+ "jiff",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "rl-session"
 version = "0.1.0"
 dependencies = [
@@ -1605,7 +1605,7 @@ dependencies = [
  "jiff",
  "nix 0.31.3",
  "portable-pty",
- "relay-core",
+ "rl-core",
  "serde",
  "serde_json",
  "tempfile",

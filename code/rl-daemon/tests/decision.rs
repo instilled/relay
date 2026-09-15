@@ -6,9 +6,9 @@
 mod common;
 
 use common::{Conn, Harness};
-use relay_core::Home;
-use relay_proto::decision::{Decision, DecisionStatus};
-use relay_proto::types::{Cause, Run};
+use rl_core::Home;
+use rl_proto::decision::{Decision, DecisionStatus};
+use rl_proto::types::{Cause, Run};
 use serde_json::json;
 use std::time::{Duration, Instant};
 

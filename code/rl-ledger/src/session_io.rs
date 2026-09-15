@@ -2,7 +2,7 @@
 
 use anyhow::Result;
 use jiff::Timestamp;
-use relay_core::time::{from_millis, to_millis};
+use rl_core::time::{from_millis, to_millis};
 use rusqlite::{Connection, params};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -133,7 +133,7 @@ mod tests {
     use super::*;
     use crate::runs;
     use jiff::SignedDuration;
-    use relay_proto::types::{Run, RunKind, RunState, Source};
+    use rl_proto::types::{Run, RunKind, RunState, Source};
 
     #[test]
     fn only_journals_of_runs_ended_before_go() {

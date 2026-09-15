@@ -5,10 +5,10 @@
 
 use crate::client::Client;
 use anyhow::Result;
-use relay_core::display_path;
-use relay_proto::methods::{AgentList, RuleList, ScheduleFilter, WorkspaceList};
-use relay_proto::rule::Rule;
-use relay_proto::types::event_kind;
+use rl_core::display_path;
+use rl_proto::methods::{AgentList, RuleList, ScheduleFilter, WorkspaceList};
+use rl_proto::rule::Rule;
+use rl_proto::types::event_kind;
 use std::fmt::Write;
 use std::path::Path;
 use std::sync::OnceLock;
@@ -294,10 +294,10 @@ they will read your draft and press enter, or not. Be exact and short.\n\n",
 #[cfg(test)]
 mod tests {
     use super::*;
-    use relay_proto::action::Task;
-    use relay_proto::decision::DecisionOption;
-    use relay_proto::reaction::{AskSpec, Filter, ReactionSpec};
-    use relay_proto::schedule::ScheduleSpec;
+    use rl_proto::action::Task;
+    use rl_proto::decision::DecisionOption;
+    use rl_proto::reaction::{AskSpec, Filter, ReactionSpec};
+    use rl_proto::schedule::ScheduleSpec;
 
     /// Every serialised key of `v`, at every depth — except inside `env`,
     /// whose keys are the person's, not fields.

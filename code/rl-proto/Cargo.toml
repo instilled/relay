@@ -1,5 +1,5 @@
 [package]
-name = "relay-proto"
+name = "rl-proto"
 description = "Relay wire protocol: JSON-RPC 2.0 over a Unix socket, newline-delimited"
 version.workspace = true
 edition.workspace = true

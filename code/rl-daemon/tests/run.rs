@@ -5,10 +5,10 @@
 mod common;
 
 use common::{Conn, Harness, fake_cli, journal};
-use relay_core::Home;
-use relay_ledger::{Ledger, sessions};
-use relay_proto::rpc::RpcError;
-use relay_proto::types::{Event, Run, RunState};
+use rl_core::Home;
+use rl_ledger::{Ledger, sessions};
+use rl_proto::rpc::RpcError;
+use rl_proto::types::{Event, Run, RunState};
 use serde_json::json;
 use std::time::Duration;
 

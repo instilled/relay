@@ -1,7 +1,7 @@
-use relay_core::Home;
-use relay_proto::codec::{read_message, write_message};
-use relay_proto::methods::DaemonInfo;
-use relay_proto::rpc::{Id, Request, Response, RpcError};
+use rl_core::Home;
+use rl_proto::codec::{read_message, write_message};
+use rl_proto::methods::DaemonInfo;
+use rl_proto::rpc::{Id, Request, Response, RpcError};
 use serde_json::json;
 use std::time::Duration;
 use tokio::io::BufReader;
@@ -39,7 +39,7 @@ async fn ping_then_shutdown_removes_socket() {
     let res: Response = read_message(&mut rd).await.unwrap().unwrap();
     assert_eq!(res.id, Id::Num(1));
     let info: DaemonInfo = serde_json::from_value(res.result.unwrap()).unwrap();
-    assert_eq!(info.protocol, relay_proto::PROTOCOL_VERSION);
+    assert_eq!(info.protocol, rl_proto::PROTOCOL_VERSION);
     assert_eq!(info.pid, std::process::id());
     assert_eq!(info.home, tmp.path());
 

@@ -8,9 +8,9 @@
 
 use crate::client::Client;
 use anyhow::{Context, Result};
-use relay_core::Home;
-use relay_proto::methods::{AttachParams, RunAttach};
-use relay_proto::types::AttachMode;
+use rl_core::Home;
+use rl_proto::methods::{AttachParams, RunAttach};
+use rl_proto::types::AttachMode;
 use rl_session::proto::{Frame, read_frame, write_frame};
 use std::io::IsTerminal;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};

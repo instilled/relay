@@ -4,9 +4,9 @@
 mod common;
 
 use common::{Conn, Harness, fake_cli};
-use relay_core::Home;
-use relay_proto::methods::{Digest, DigestItem};
-use relay_proto::types::{Run, RunState};
+use rl_core::Home;
+use rl_proto::methods::{Digest, DigestItem};
+use rl_proto::types::{Run, RunState};
 use serde_json::json;
 
 fn by_id<'a>(d: &'a Digest, id: &str) -> &'a DigestItem {

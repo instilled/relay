@@ -3,8 +3,8 @@
 //! in the TUI.
 
 use jiff::{Timestamp, tz::TimeZone};
-use relay_core::time::fmt_age;
-use relay_proto::types::{Confidence, Event, Run, RunState};
+use rl_core::time::fmt_age;
+use rl_proto::types::{Confidence, Event, Run, RunState};
 
 /// `blocked`, `idle?` (guess), `idle~` (likely). Exact signals carry no mark.
 pub fn state_label(state: RunState, confidence: Confidence) -> String {

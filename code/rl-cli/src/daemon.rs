@@ -8,8 +8,8 @@
 
 use crate::client::{Client, NotRunning};
 use anyhow::{Context, Result, bail};
-use relay_core::Home;
-use relay_proto::methods::{DaemonInfo, DaemonPing, DaemonShutdown};
+use rl_core::Home;
+use rl_proto::methods::{DaemonInfo, DaemonPing, DaemonShutdown};
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::{Duration, Instant};
@@ -39,7 +39,7 @@ pub async fn start(home: &Home) -> Result<(DaemonInfo, bool)> {
         .with_context(|| format!("opening {}", home.daemon_log().display()))?;
 
     let mut cmd = std::process::Command::new(&bin);
-    cmd.env(relay_core::HOME_ENV, home.path())
+    cmd.env(rl_core::HOME_ENV, home.path())
         .stdin(Stdio::null())
         .stdout(Stdio::from(log.try_clone()?))
         .stderr(Stdio::from(log));
@@ -105,10 +105,10 @@ pub enum Check {
 
 pub fn check(info: &DaemonInfo) -> Check {
     let mine = env!("CARGO_PKG_VERSION");
-    if info.protocol != relay_proto::PROTOCOL_VERSION {
+    if info.protocol != rl_proto::PROTOCOL_VERSION {
         Check::Protocol {
             theirs: info.protocol,
-            mine: relay_proto::PROTOCOL_VERSION,
+            mine: rl_proto::PROTOCOL_VERSION,
         }
     } else if info.version != mine {
         Check::Version {
@@ -158,7 +158,7 @@ pub async fn ensure(home: &Home, ask: bool) -> Result<Client> {
 
 /// `$RELAY_RLD_BIN`, else `rld` next to this executable, else `rld` on PATH.
 fn locate_rld() -> Result<PathBuf> {
-    Ok(relay_core::locate_bin("rld", RLD_BIN_ENV))
+    Ok(rl_core::locate_bin("rld", RLD_BIN_ENV))
 }
 
 #[cfg(test)]
@@ -175,19 +175,19 @@ mod tests {
             started_at: jiff::Timestamp::UNIX_EPOCH,
             home: "/h".into(),
         };
-        assert_eq!(check(&info(relay_proto::PROTOCOL_VERSION, &mine)), Check::Same);
+        assert_eq!(check(&info(rl_proto::PROTOCOL_VERSION, &mine)), Check::Same);
         assert_eq!(
-            check(&info(relay_proto::PROTOCOL_VERSION, "0.0.1")),
+            check(&info(rl_proto::PROTOCOL_VERSION, "0.0.1")),
             Check::Version {
                 theirs: "0.0.1".into(),
                 mine: mine.clone()
             }
         );
         assert_eq!(
-            check(&info(relay_proto::PROTOCOL_VERSION + 1, &mine)),
+            check(&info(rl_proto::PROTOCOL_VERSION + 1, &mine)),
             Check::Protocol {
-                theirs: relay_proto::PROTOCOL_VERSION + 1,
-                mine: relay_proto::PROTOCOL_VERSION
+                theirs: rl_proto::PROTOCOL_VERSION + 1,
+                mine: rl_proto::PROTOCOL_VERSION
             }
         );
     }

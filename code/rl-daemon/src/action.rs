@@ -4,10 +4,10 @@
 //! wherever it is written.
 
 use anyhow::{Context, Result, bail};
-use relay_detect::Registry;
-use relay_proto::action::{Action, Task};
-use relay_proto::methods::RunSpec;
-use relay_proto::types::{Cause, RunKind};
+use rl_detect::Registry;
+use rl_proto::action::{Action, Task};
+use rl_proto::methods::RunSpec;
+use rl_proto::types::{Cause, RunKind};
 use std::path::{Path, PathBuf};
 
 /// `name` titles the run when the action does not. `source_dir` is what a

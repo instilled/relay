@@ -14,11 +14,11 @@
 
 use crate::rank;
 use jiff::{SignedDuration, Timestamp};
-use relay_core::time::fmt_age;
-use relay_proto::decision::Decision;
-use relay_proto::methods::{Digest, DigestItem};
-use relay_proto::rule::{Rule, RuleKind, RuleStatus};
-use relay_proto::types::{Cause, Confidence, Run, RunKind, RunState};
+use rl_core::time::fmt_age;
+use rl_proto::decision::Decision;
+use rl_proto::methods::{Digest, DigestItem};
+use rl_proto::rule::{Rule, RuleKind, RuleStatus};
+use rl_proto::types::{Cause, Confidence, Run, RunKind, RunState};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
@@ -565,7 +565,7 @@ pub fn counts(rows: &[Row]) -> (usize, usize, usize, usize, usize) {
             Row::Group(..) | Row::Fold(_) => {}
             Row::Question(_) => c.0 += 1,
             Row::Run(i) => {
-                use relay_proto::types::RunState::*;
+                use rl_proto::types::RunState::*;
                 match i.run.state {
                     NeedsInput | Blocked | Failed => c.1 += 1,
                     Starting | Working | Stale | Idle => c.2 += 1,
@@ -622,8 +622,8 @@ pub fn headline(rows: &[Row], news: usize, filter: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use relay_proto::decision::{DecisionOption, DecisionStatus};
-    use relay_proto::types::{Confidence, RunKind, RunState};
+    use rl_proto::decision::{DecisionOption, DecisionStatus};
+    use rl_proto::types::{Confidence, RunKind, RunState};
 
     fn item(id: &str, state: RunState, ws: &str, at: &str, unseen: bool) -> DigestItem {
         let t: Timestamp = at.parse().unwrap();
@@ -908,8 +908,8 @@ mod tests {
     }
 
     fn schedule(scope: &str, name: &str, approved: bool, next: Option<&str>) -> Rule {
-        use relay_proto::action::Task;
-        use relay_proto::schedule::{Schedule, ScheduleSpec};
+        use rl_proto::action::Task;
+        use rl_proto::schedule::{Schedule, ScheduleSpec};
         Rule::Schedule(Schedule {
             scope: scope.into(),
             name: name.into(),
@@ -930,8 +930,8 @@ mod tests {
     }
 
     fn reaction(scope: &str, name: &str) -> Rule {
-        use relay_proto::action::Task;
-        use relay_proto::reaction::{Reaction, ReactionSpec};
+        use rl_proto::action::Task;
+        use rl_proto::reaction::{Reaction, ReactionSpec};
         Rule::Reaction(Reaction {
             scope: scope.into(),
             name: name.into(),

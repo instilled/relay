@@ -9,11 +9,11 @@ use crate::assistant;
 use crate::server::Daemon;
 use anyhow::{Result, bail};
 use jiff::Timestamp;
-use relay_core::time::fmt_duration;
-use relay_ledger::events::NewEvent;
-use relay_ledger::{events, runs, session_io, summaries};
-use relay_proto::methods::{AssistantParams, EventFilter, SummaryParams};
-use relay_proto::types::{Cause, Event, Run, Summary, event_kind};
+use rl_core::time::fmt_duration;
+use rl_ledger::events::NewEvent;
+use rl_ledger::{events, runs, session_io, summaries};
+use rl_proto::methods::{AssistantParams, EventFilter, SummaryParams};
+use rl_proto::types::{Cause, Event, Run, Summary, event_kind};
 use std::fmt::Write as _;
 
 /// The most of a run's output the agent is shown, from the end.
@@ -210,7 +210,7 @@ fn first_line(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use relay_proto::types::{RunKind, RunState};
+    use rl_proto::types::{RunKind, RunState};
 
     #[test]
     fn the_prompt_carries_the_run_its_events_and_its_output() {

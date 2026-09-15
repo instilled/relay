@@ -6,9 +6,9 @@
 
 use crate::client::Client;
 use anyhow::{Context, Result, bail};
-use relay_proto::methods::{ReactionReload, RuleApprove, RuleRef, ScheduleReload, WorkspaceUp, WorkspaceUpParams};
-use relay_proto::rule::RuleKind;
-use relay_proto::schedule::GLOBAL_SCOPE;
+use rl_proto::methods::{ReactionReload, RuleApprove, RuleRef, ScheduleReload, WorkspaceUp, WorkspaceUpParams};
+use rl_proto::rule::RuleKind;
+use rl_proto::schedule::GLOBAL_SCOPE;
 use std::path::{Path, PathBuf};
 
 /// A rule to write down: which file, and its block.
@@ -44,7 +44,7 @@ pub struct Was {
 /// otherwise the kind is reloaded and this one rule approved. Returns the
 /// file. `registered` says whether the folder is known to the daemon.
 pub async fn install(
-    home: &relay_core::Home,
+    home: &rl_core::Home,
     rpc: &mut Client,
     d: &RuleDraft,
     was: Option<&Was>,
@@ -103,10 +103,10 @@ pub fn top(kind: RuleKind) -> &'static str {
 }
 
 /// The file a kind's rules are in: yours in the home, a folder's in `.relay/`.
-pub fn file(home: &relay_core::Home, kind: RuleKind, folder: Option<&Path>) -> std::path::PathBuf {
+pub fn file(home: &rl_core::Home, kind: RuleKind, folder: Option<&Path>) -> std::path::PathBuf {
     let name = format!("{}.yaml", top(kind));
     match folder {
-        Some(f) => f.join(relay_proto::schedule::WORKSPACE_DIR).join(name),
+        Some(f) => f.join(rl_proto::schedule::WORKSPACE_DIR).join(name),
         None => home.path().join(name),
     }
 }
@@ -375,8 +375,8 @@ schedules:
 
     #[test]
     fn a_body_says_only_what_differs_and_reads_back() {
-        use relay_proto::action::Task;
-        use relay_proto::schedule::ScheduleSpec;
+        use rl_proto::action::Task;
+        use rl_proto::schedule::ScheduleSpec;
         let spec = ScheduleSpec {
             cron: Some("0 2 * * *".into()),
             run: Some(Task::Agent {

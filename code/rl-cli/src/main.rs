@@ -1,31 +1,31 @@
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
-use relay_core::time::{now, parse_since};
-use relay_core::{Home, display_path};
-use relay_proto::decision::{Decision, DecisionOption, DecisionStatus};
-use relay_proto::methods::{
+use rl_core::time::{now, parse_since};
+use rl_core::{Home, display_path};
+use rl_proto::decision::{Decision, DecisionOption, DecisionStatus};
+use rl_proto::methods::{
     AgentList, ConfigGet, GcParams, GcRun, RuleApprove, RuleList, RuleRef, RunArchive, RunArchiveParams, RunId,
     SummaryGet, SummaryMake, SummaryParams,
 };
-use relay_proto::methods::{
+use rl_proto::methods::{
     DaemonInfo, DigestGet, DigestParams, EventFilter, EventList, PresenceClient, PresenceTouch, RunFilter, RunHook,
     RunHookParams, RunList, RunMark, RunMarkParams, RunSpec, RunStart, RunStop, RunStopParams,
 };
-use relay_proto::methods::{
+use rl_proto::methods::{
     DecisionDismiss, DecisionFilter, DecisionGet, DecisionId, DecisionList, DecisionNote, DecisionRaise, DecisionSpec,
     DecisionTake, DecisionTakeParams,
 };
-use relay_proto::methods::{
+use rl_proto::methods::{
     EventId, ReactionList, ReactionPause, ReactionReload, ReactionResume, ReactionTest, ReactionTrial,
 };
-use relay_proto::methods::{
+use rl_proto::methods::{
     ScheduleFilter, ScheduleList, ScheduleName, SchedulePause, ScheduleReload, ScheduleResume, ScheduleRun,
     WorkspaceList, WorkspacePath, WorkspaceRemove, WorkspaceUp, WorkspaceUpParams,
 };
-use relay_proto::reaction::Reaction;
-use relay_proto::rule::{Rule, RuleKind, RuleStatus};
-use relay_proto::schedule::{Schedule, UpReport};
-use relay_proto::types::{AttachMode, Cause, Mark, RunKind, RunState};
+use rl_proto::reaction::Reaction;
+use rl_proto::rule::{Rule, RuleKind, RuleStatus};
+use rl_proto::schedule::{Schedule, UpReport};
+use rl_proto::types::{AttachMode, Cause, Mark, RunKind, RunState};
 use rl_cli::client::Client;
 use rl_cli::daemon;
 use rl_cli::env::child_env;
@@ -822,7 +822,7 @@ async fn workspace(home: &Home, cmd: WorkspaceCmd, json: bool) -> Result<()> {
                         vec![
                             w.name.clone(),
                             display_path(&w.path),
-                            format!("{} ago", relay_core::time::fmt_age(w.registered_at, now)),
+                            format!("{} ago", rl_core::time::fmt_age(w.registered_at, now)),
                         ]
                     })
                     .collect();
@@ -846,12 +846,12 @@ async fn workspace(home: &Home, cmd: WorkspaceCmd, json: bool) -> Result<()> {
 fn schedule_row(s: &Schedule, now: jiff::Timestamp) -> Vec<String> {
     let next = match (s.paused || !s.approved(), s.removed_at, s.next_at) {
         (true, _, _) | (_, Some(_), _) => "—".to_string(),
-        (_, _, Some(t)) if t > now => format!("in {}", relay_core::time::fmt_duration(t.duration_since(now))),
+        (_, _, Some(t)) if t > now => format!("in {}", rl_core::time::fmt_duration(t.duration_since(now))),
         (_, _, Some(_)) => "due".to_string(),
         (_, _, None) => "—".to_string(),
     };
     let last = match (s.last_fired_at, &s.last_run) {
-        (Some(t), Some(id)) => format!("{} ago · {id}", relay_core::time::fmt_age(t, now)),
+        (Some(t), Some(id)) => format!("{} ago · {id}", rl_core::time::fmt_age(t, now)),
         _ => "never".to_string(),
     };
     let state = if s.removed_at.is_some() {
@@ -1203,7 +1203,7 @@ fn decision_row(d: &Decision, now: jiff::Timestamp) -> Vec<String> {
     };
     vec![
         d.id.clone(),
-        relay_core::time::fmt_age(d.created_at, now),
+        rl_core::time::fmt_age(d.created_at, now),
         state,
         d.title.clone(),
         options,
@@ -1260,7 +1260,7 @@ fn decision_text(d: &Decision, now: jiff::Timestamp) -> String {
             out.push_str(&format!("   {:<10} → {action}\n", ""));
         }
     }
-    out.push_str(&format!("\nasked {} ago", relay_core::time::fmt_age(d.created_at, now)));
+    out.push_str(&format!("\nasked {} ago", rl_core::time::fmt_age(d.created_at, now)));
     match d.expires_at {
         Some(e) => out.push_str(&format!(" · expires {}\n", until(e, now))),
         None => out.push('\n'),
@@ -1280,7 +1280,7 @@ fn spec_from_yaml(text: &str) -> Result<DecisionSpec> {
 /// `in 3h12m`, or `due` for a moment already gone.
 fn until(t: jiff::Timestamp, now: jiff::Timestamp) -> String {
     if t > now {
-        format!("in {}", relay_core::time::fmt_duration(t.duration_since(now)))
+        format!("in {}", rl_core::time::fmt_duration(t.duration_since(now)))
     } else {
         "due".to_string()
     }
@@ -1290,12 +1290,12 @@ const RULE_HEADERS: &[&str] = &["SCOPE", "NAME", "WHEN", "STATUS", "NEXT", "LAST
 
 fn rule_row(r: &Rule, now: jiff::Timestamp) -> Vec<String> {
     let next = match (r.status(), r.next_at()) {
-        (RuleStatus::On, Some(t)) if t > now => format!("in {}", relay_core::time::fmt_duration(t.duration_since(now))),
+        (RuleStatus::On, Some(t)) if t > now => format!("in {}", rl_core::time::fmt_duration(t.duration_since(now))),
         (RuleStatus::On, Some(_)) => "due".to_string(),
         _ => "—".to_string(),
     };
     let last = match r.last_fired_at() {
-        Some(t) => format!("{} ago", relay_core::time::fmt_age(t, now)),
+        Some(t) => format!("{} ago", rl_core::time::fmt_age(t, now)),
         None => "never".to_string(),
     };
     let does: String = r.does().chars().take(48).collect();
@@ -1430,7 +1430,7 @@ async fn rules(home: &Home, a: RulesArgs, json: bool) -> Result<()> {
     Ok(())
 }
 
-fn reload_line(r: &relay_proto::schedule::ReloadReport) -> String {
+fn reload_line(r: &rl_proto::schedule::ReloadReport) -> String {
     format!(
         "{} loaded · {} added · {} changed · {} removed",
         r.loaded,
@@ -1444,8 +1444,8 @@ const REACTION_HEADERS: &[&str] = &["SCOPE", "NAME", "ON", "LAST", "STATE", "DOE
 
 fn reaction_row(r: &Reaction, now: jiff::Timestamp) -> Vec<String> {
     let last = match (r.last_fired_at, &r.last_run) {
-        (Some(t), Some(id)) => format!("{} ago · {id}", relay_core::time::fmt_age(t, now)),
-        (Some(t), None) => format!("{} ago", relay_core::time::fmt_age(t, now)),
+        (Some(t), Some(id)) => format!("{} ago · {id}", rl_core::time::fmt_age(t, now)),
+        (Some(t), None) => format!("{} ago", rl_core::time::fmt_age(t, now)),
         _ => "never".to_string(),
     };
     let state = if r.removed_at.is_some() {
@@ -1621,11 +1621,11 @@ async fn on(home: &Home, a: OnArgs, json: bool) -> Result<()> {
 /// loaded and on — the command line is the yes. The file's comments and
 /// other rules stay as they were.
 async fn every(home: &Home, a: EveryArgs, json: bool) -> Result<()> {
-    use relay_proto::action::Task;
-    use relay_proto::schedule::ScheduleSpec;
+    use rl_proto::action::Task;
+    use rl_proto::schedule::ScheduleSpec;
     let mut spec = ScheduleSpec::default();
     let when = a.when.trim();
-    if relay_core::time::parse_duration(when).is_some() {
+    if rl_core::time::parse_duration(when).is_some() {
         spec.every = Some(when.to_string());
     } else if when.split_whitespace().count() == 5 {
         spec.cron = Some(when.to_string());
@@ -1914,7 +1914,7 @@ async fn summarise(home: &Home, a: SummariseArgs, json: bool) -> Result<()> {
         println!(
             "# by {} · {} ago · its run {} · --again asks anew",
             s.agent,
-            relay_core::time::fmt_age(s.at, now()),
+            rl_core::time::fmt_age(s.at, now()),
             s.by
         );
     }
