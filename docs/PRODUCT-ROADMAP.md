@@ -12,6 +12,7 @@ Goal for v1:
 * [ ] persistent project shell — multiple shells per project + switching between them ("panes", not a multiplexer); per-command facts via shell prompt integration (OSC 133 / precmd) so exit codes and history survive; a distinct "shell" presentation in the list
 * [ ] agent-attach reliability — join a just-spawned holder without bouncing back to the list
 * [ ] ts plugin subsystem
+* [ ] investigate a lightweight JS/TS SDK for plugins — a thin wrapper around the `rl emit` / `rl ask` / `rl run` contract so a plugin is a few lines of TS that reads its input and emits events, decisions or runs (a plugin is just a command; the SDK makes the common case trivial)
 * [ ] pipelines & easy wiring & visualization of "graph" — `workflows/<name>.yaml` engine (steps with `after`/`when` and decision steps) plus a graph view of how runs, schedules and reactions wire together
 * [ ] facts collector (J6) — git commits + `diff --stat` per run, transcript ingestion (Claude/Codex `*.jsonl`), tokens/cost; facts-first run detail (facts on top, narrative below, transcript behind enter)
 * [ ] retention purge of archived runs — today archive is out-of-list only; actually delete past the retention window
