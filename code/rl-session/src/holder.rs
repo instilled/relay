@@ -127,10 +127,12 @@ pub async fn serve(cfg: Config, ready: oneshot::Sender<()>) -> Result<()> {
         }
     }
 
-    // Closing with a live child: hang it up, give it a moment.
+    // Closing with a live child: hang it up, give it a moment. The child is a
+    // session leader (the PTY setsid'd it), so a negative pid reaches its whole
+    // process group — the wrapper shell and anything it spawned, not just it.
     if ctx.exit.borrow().is_none() {
         let pid = ctx.shared.lock().unwrap().pid;
-        let _ = kill(Pid::from_raw(pid as i32), Signal::SIGHUP);
+        let _ = kill(Pid::from_raw(-(pid as i32)), Signal::SIGHUP);
         let mut rx = ctx.exit.subscribe();
         let _ = tokio::time::timeout(Duration::from_secs(5), async {
             while rx.borrow().is_none() {
@@ -260,7 +262,10 @@ async fn client_loop(ctx: &Ctx, stream: UnixStream) -> std::io::Result<()> {
         write_frame(&mut wr, &Frame::Exit(exit)).await?;
     }
 
-    let pid = Pid::from_raw(ctx.shared.lock().unwrap().pid as i32);
+    // The child's own process group (it is a session leader; the PTY setsid'd
+    // it): a negative pid signals the group, so `rl stop` reaps a wrapper shell
+    // and everything it spawned, not just the leader.
+    let group = Pid::from_raw(-(ctx.shared.lock().unwrap().pid as i32));
     let mut out_open = true;
     loop {
         tokio::select! {
@@ -278,7 +283,7 @@ async fn client_loop(ctx: &Ctx, stream: UnixStream) -> std::io::Result<()> {
                     }
                 }
                 Some(Frame::Signal(n)) => match Signal::try_from(n) {
-                    Ok(sig) => { let _ = kill(pid, sig); }
+                    Ok(sig) => { let _ = kill(group, sig); }
                     Err(_) => warn!(signal = n, "unknown signal"),
                 },
                 Some(Frame::Close) => { ctx.shutdown.cancel(); return Ok(()); }
