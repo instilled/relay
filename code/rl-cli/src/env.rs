@@ -21,6 +21,18 @@ pub fn child_env(extra: &[String]) -> Result<Vec<(String, String)>> {
     Ok(env)
 }
 
+/// How to run a shell line the way the person's own terminal would: their
+/// login shell, interactive so its rc is read and aliases and functions are
+/// there — not `sh -c`, which knows none of them. Falls back to `sh` when
+/// `$SHELL` is unset. The `-i` is what loads `~/.zshrc`/`~/.bashrc`, where a
+/// `ll` lives; the environment (PATH included) is already inherited.
+pub fn shell_argv(cmd: &str) -> Vec<String> {
+    match std::env::var("SHELL") {
+        Ok(sh) if !sh.trim().is_empty() => vec![sh, "-ic".into(), cmd.to_string()],
+        _ => vec!["sh".into(), "-c".into(), cmd.to_string()],
+    }
+}
+
 /// `$VISUAL` or `$EDITOR` (else `vi`) on `file` at `line`, on this terminal,
 /// until it is closed.
 pub fn open_in_editor(file: &std::path::Path, line: usize) -> Result<()> {

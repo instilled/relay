@@ -256,8 +256,11 @@ asks anew.
 (`tui/line.rs`), so there is nothing to open and nothing to close. What a finished line means is
 read locally first: a first word naming an agent the registry knows (`agent.list`, never a
 hardcoded list) is that agent with the rest as its prompt; a first word this machine can actually
-run — a binary on `PATH`, a target in the folder — is a shell line, and a leading `!` forces one.
-Either is `run.start` in the folder of the row the cursor is on, sized to this screen; a fresh
+run — a binary on `PATH`, a target in the folder, or a name your own shell knows (its aliases and
+functions, read from `$SHELL` once at startup and again on `/reindex`) — is a shell line, and a
+leading `!` forces one. A shell line runs the way a terminal would, through your login shell
+interactively (`$SHELL -ic`, so `~/.zshrc` is read and `ll` resolves), not `sh -c` which knows
+none of that; the row still reads as what you typed. Either is `run.start` in the folder of the row the cursor is on, sized to this screen; a fresh
 agent is one you mean to drive, so its terminal is handed to you at once (the raw passthrough
 above). Anything else is plain words, and those go to `assistants.interpret`
 (§6) as a run of its own — it is in the list like any other, `/stop` there stops it — while the
