@@ -21,15 +21,14 @@ pub fn child_env(extra: &[String]) -> Result<Vec<(String, String)>> {
     Ok(env)
 }
 
-/// How to run a shell line the way the person's own terminal would: their
-/// login shell, interactive so its rc is read and aliases and functions are
-/// there — not `sh -c`, which knows none of them. Falls back to `sh` when
-/// `$SHELL` is unset. The `-i` is what loads `~/.zshrc`/`~/.bashrc`, where a
-/// `ll` lives; the environment (PATH included) is already inherited.
-pub fn shell_argv(cmd: &str) -> Vec<String> {
+/// A persistent interactive login shell — the argv for a project's warm shell.
+/// Interactive so its rc is read (aliases, functions, prompt) and it stays open
+/// reading stdin; the person's own `$SHELL`, or `sh` when that is unset. A shell
+/// line runs *in* this warm shell, so there is no per-command `$SHELL -ic`.
+pub fn shell_i() -> Vec<String> {
     match std::env::var("SHELL") {
-        Ok(sh) if !sh.trim().is_empty() => vec![sh, "-ic".into(), cmd.to_string()],
-        _ => vec!["sh".into(), "-c".into(), cmd.to_string()],
+        Ok(sh) if !sh.trim().is_empty() => vec![sh, "-i".into()],
+        _ => vec!["sh".into(), "-i".into()],
     }
 }
 
