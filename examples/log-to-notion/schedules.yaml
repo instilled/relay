@@ -1,8 +1,0 @@
-schedules:
-  # Every hour, look at the logs and emit a `log.issue` for each ERROR/WARNING.
-  # `scan-logs` reads $RELAY_LAST_RUN so each run only sees what is new.
-  scan-logs:
-    every: 1h
-    run: scan-logs
-    # a probe wants clean stdout, not a terminal
-    no_tty: true

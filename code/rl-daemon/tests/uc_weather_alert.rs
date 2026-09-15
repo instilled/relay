@@ -1,8 +1,9 @@
-//! UC2 end to end on Relay's own primitives: a schedule runs a probe, the
-//! probe `rl emit`s a `log.issue`, a reaction narrows by severity and asks,
-//! and approving the question runs the action that "creates the task". The
-//! agent that would analyse the issue is userland; what is tested here is the
-//! wiring Relay provides between a probe and an approved action.
+//! The source→reaction→decision wiring end to end on Relay's own primitives: a
+//! schedule runs a probe, the probe `rl emit`s a `weather.alert`, a reaction
+//! narrows by `where.data` and asks, and approving the question runs the action.
+//! The probe here emits a canned alert (no network); what is tested is the
+//! wiring Relay provides between a probe and an approved action, and that the
+//! real `rl emit` CLI works.
 
 mod common;
 
@@ -48,51 +49,52 @@ async fn wait_for_question(c: &mut Conn) -> Decision {
 }
 
 #[tokio::test]
-async fn a_probe_emits_an_issue_that_asks_and_approving_it_acts() {
+async fn a_probe_emits_an_alert_that_asks_and_approving_it_acts() {
     let tmp = tempfile::tempdir().unwrap();
     let home = Home::at(tmp.path().join("home"));
     home.ensure_dirs().unwrap();
     let dir = std::fs::canonicalize(tmp.path()).unwrap();
 
-    // A schedule whose probe emits one ERROR issue (a stand-in for scan-logs).
+    // A schedule whose probe emits one alert (a stand-in for check-weather,
+    // canned so the test needs no network).
     std::fs::write(
         home.schedules_file(),
         format!(
             "schedules:\n  \
-               scan:\n    \
+               check-weather:\n    \
                  every: 1h\n    \
                  no_tty: true\n    \
                  cwd: {dir}\n    \
                  run:\n      \
                    - {rl}\n      \
                    - emit\n      \
-                   - log.issue\n      \
+                   - weather.alert\n      \
                    - --data\n      \
-                   - severity=ERROR\n      \
+                   - condition=sunny\n      \
                    - --data\n      \
-                   - 'message=disk full'\n",
+                   - place=Zurich\n",
             dir = dir.display(),
             rl = rl_bin(),
         ),
     )
     .unwrap();
 
-    // On an ERROR/WARNING issue, ask; approving `create` runs the action.
+    // On a sunny/rain-likely alert, ask; approving `note` runs the action.
     std::fs::write(
         home.reactions_file(),
         format!(
             "reactions:\n  \
-               triage:\n    \
-                 on: log.issue\n    \
-                 where: {{ data: {{ severity: [ERROR, WARNING] }} }}\n    \
+               weather-advisory:\n    \
+                 on: weather.alert\n    \
+                 where: {{ data: {{ condition: [sunny, rain-likely] }} }}\n    \
                  throttle: '0'\n    \
                  cwd: {dir}\n    \
                  ask:\n      \
-                   title: 'log issue: {{data.message}}'\n      \
+                   title: 'weather in {{data.place}}: {{data.condition}}'\n      \
                    options:\n        \
-                     - key: create\n          \
-                       label: Create the task\n          \
-                       run: 'echo \"{{data.message}}\" >> tickets.txt'\n        \
+                     - key: note\n          \
+                       label: Add a note\n          \
+                       run: 'echo \"{{data.condition}} in {{data.place}}\" >> weather-notes.txt'\n        \
                      - key: skip\n          \
                        label: Skip\n          \
                        default: true\n",
@@ -107,21 +109,21 @@ async fn a_probe_emits_an_issue_that_asks_and_approving_it_acts() {
     };
     let mut c = Conn::open(&home).await;
 
-    // Fire the schedule now instead of waiting an hour; the probe emits.
-    let probe: Run = c.ok("schedule.run", json!({ "name": "scan" })).await;
+    // Fire the schedule now instead of waiting; the probe emits via the real CLI.
+    let probe: Run = c.ok("schedule.run", json!({ "name": "check-weather" })).await;
     let done = c.wait_terminal(&probe.id).await;
     assert_eq!(done.exit_code, Some(0), "the probe (rl emit) ran clean");
 
-    // The emitted issue reached the reaction, which asked, wearing the payload.
+    // The emitted alert reached the reaction, which asked, wearing the payload.
     let q = wait_for_question(&mut c).await;
-    assert_eq!(q.title, "log issue: disk full", "the reaction filled {{data.message}}");
+    assert_eq!(q.title, "weather in Zurich: sunny", "the reaction filled {{data.*}}");
     assert_eq!(q.options.len(), 2);
 
-    // Approving `create` runs the action that stands in for notion-task.
-    let taken: Decision = c.ok("decision.take", json!({ "id": q.id, "options": ["create"] })).await;
+    // Approving `note` runs the action.
+    let taken: Decision = c.ok("decision.take", json!({ "id": q.id, "options": ["note"] })).await;
     assert_eq!(taken.outcome_runs.len(), 1);
     c.wait_terminal(&taken.outcome_runs[0]).await;
-    assert_eq!(wait_for(&dir.join("tickets.txt")).await.trim(), "disk full");
+    assert_eq!(wait_for(&dir.join("weather-notes.txt")).await.trim(), "sunny in Zurich");
 
     h.stop().await;
 }

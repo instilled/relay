@@ -1,0 +1,27 @@
+#!/bin/sh
+# check-weather — fetch today's forecast (no API key) and emit a `weather.alert`
+# when it is sunny, or when the chance of rain is above a threshold. A schedule
+# runs this; `rl emit` files the alert and the `weather-advisory` reaction picks
+# it up. Needs only curl and jq.
+#
+# Relay hands us $RELAY_RUN, which `rl emit` inherits, so the alert joins this
+# run's flow. Configure with WEATHER_LAT / WEATHER_LON / WEATHER_PLACE, and the
+# rain threshold with RAIN_POP (percent, default 50).
+set -eu
+
+lat=${WEATHER_LAT:-47.37}
+lon=${WEATHER_LON:-8.55}
+place=${WEATHER_PLACE:-Zurich}
+threshold=${RAIN_POP:-50}
+
+url="https://api.open-meteo.com/v1/forecast?latitude=$lat&longitude=$lon&daily=weather_code,precipitation_probability_max&forecast_days=1&timezone=auto"
+day=$(curl -sS "$url" | jq -c '.daily')
+code=$(printf '%s' "$day" | jq -r '.weather_code[0]')
+pop=$(printf '%s' "$day" | jq -r '.precipitation_probability_max[0] // 0')
+
+# WMO weather codes 0 (clear) and 1 (mainly clear) read as "sunny".
+if [ "$code" = 0 ] || [ "$code" = 1 ]; then
+  rl emit weather.alert --data condition=sunny --data "place=$place" --data "rain_pct=$pop"
+elif awk -v p="$pop" -v t="$threshold" 'BEGIN { exit !(p > t) }'; then
+  rl emit weather.alert --data condition=rain-likely --data "place=$place" --data "rain_pct=$pop"
+fi
