@@ -517,6 +517,8 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
             .sort_by(|a, b| a.score().cmp(&b.score()).then_with(|| b.last().at.cmp(&a.last().at)));
     }
     groups.sort_by(|a, b| a.score().cmp(&b.score()).then_with(|| b.latest().cmp(&a.latest())));
+    // Which folders already have a line, so idle projects don't double up.
+    let shown: HashSet<PathBuf> = groups.iter().map(|g| g.workspace.clone()).collect();
     let mut rows = Vec::new();
     // Your own rules get a line of their own only when one waits for a yes.
     let yours = chips(cx.rules, None, now);
@@ -551,6 +553,28 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
             };
             rows.push(row);
             rows.extend(folded.into_iter().map(Row::Fold));
+        }
+    }
+    // A registered folder is always on the list, even before anything has run
+    // there — so you can select it, read its stats, edit its rules or open its
+    // shell. Idle projects come last (after every group with activity), and
+    // only under the all-lens, where a project-level line belongs.
+    if cx.lens == Lens::All {
+        for p in names.paths() {
+            if shown.contains(&p) {
+                continue;
+            }
+            let place = names.place(&p.to_string_lossy(), &p);
+            let name = names.workspace(&p);
+            if !hit(&[&name, &place]) {
+                continue;
+            }
+            rows.push(Row::Group(Head {
+                place: Some(place),
+                workspace: Some(p.clone()),
+                name,
+                rules: chips(cx.rules, Some(&p), now),
+            }));
         }
     }
     rows
@@ -786,6 +810,34 @@ mod tests {
         assert_eq!(keys(&rows), ["[api]", "r:blok1", "r:work1"]);
         assert_eq!(headline(&rows, 0, "api"), "relay · 1 needs you · 1 working · /api");
         assert_eq!(headline(&[], 0, ""), "relay · nothing running");
+    }
+
+    #[test]
+    fn a_registered_folder_shows_even_with_no_runs() {
+        let now: Timestamp = "2026-09-10T12:00:00Z".parse().unwrap();
+        let d = Digest {
+            since: now,
+            items: vec![item("work1", RunState::Working, "/home/f/relay", "2026-09-10T11:50:00Z", false)],
+            decisions: vec![],
+        };
+        let names = Names::new([
+            (PathBuf::from("/home/f/relay"), "relay".to_string()),
+            (PathBuf::from("/home/f/idle"), "idle".to_string()),
+        ]);
+        // The idle project is a line of its own, after every group with activity.
+        assert_eq!(keys(&build_with(&d, &names, "", now)), ["[relay]", "r:work1", "[idle]"]);
+        // It carries the folder so selecting it lands on the project.
+        match build_with(&d, &names, "", now).last() {
+            Some(Row::Group(h)) => {
+                assert_eq!(h.name, "idle");
+                assert_eq!(h.workspace.as_deref(), Some(Path::new("/home/f/idle")));
+            }
+            _ => panic!("idle folder is the last row"),
+        }
+        // The filter reaches idle projects too.
+        assert_eq!(keys(&build_with(&d, &names, "idle", now)), ["[idle]"]);
+        // A run-kind lens is about runs, so an idle project stays out of it.
+        assert_eq!(keys(&lens_build(&d, &names, Lens::Agents, now)), ["[relay]", "r:work1"]);
     }
 
     fn fired(id: &str, job: &str, state: RunState, at: &str, unseen: bool) -> DigestItem {
