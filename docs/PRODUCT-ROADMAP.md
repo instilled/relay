@@ -1,5 +1,10 @@
 # Relay Product Roadmap
 
+Goal for v1:
+
+* UC1: i want to check notion via api (cli client) periodically for new feedback log items, e.g. 1h. if it has output claude should work on it and trigger a skill then surface recommendations to me i can accept or reject.   
+* UC2: i want to check google cloud logs. on error / warn i want to trigger claude to analyse and create a notion task if i approve
+
 ## Open — in the order they'd be built
 
 * [ ] every registered workspace shows as a project row even with no runs — a folder you `rl up`'d is always on the list, so you can select it, read its stats, edit its rules, or open its shell before anything has happened there
