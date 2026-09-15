@@ -2,7 +2,7 @@
 
 use anyhow::Result;
 use jiff::Timestamp;
-use relay_core::time::{from_millis, to_millis};
+use rl_core::time::{from_millis, to_millis};
 use rusqlite::{Connection, OptionalExtension, params};
 
 /// Records `at` for `client` and returns the previous value, if any.

@@ -1,5 +1,5 @@
 //! Holder wire protocol. Deliberately not JSON-RPC and not shared with
-//! `relay-proto`: a session must stay reachable with nothing but this binary
+//! `rl-proto`: a session must stay reachable with nothing but this binary
 //! alive, so the protocol is frozen and tiny.
 //!
 //! Frame = `tag: u8`, `len: u32` (big-endian), `payload`. Text payloads

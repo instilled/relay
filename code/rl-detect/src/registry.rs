@@ -6,9 +6,9 @@
 use crate::pty::{Patterns, Timing};
 use anyhow::{Context, Result, bail};
 use regex::Regex;
-use relay_core::Home;
-use relay_core::time::parse_duration;
-use relay_proto::types::RunKind;
+use rl_core::Home;
+use rl_core::time::parse_duration;
+use rl_proto::types::RunKind;
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::path::Path;

@@ -8,10 +8,10 @@ use crate::context::{self, Here};
 use crate::rulefile;
 use crate::tui::form::{self, Form};
 use anyhow::{Context as _, Result, bail};
-use relay_core::Home;
-use relay_proto::methods::{AssistantOutput, AssistantParams, AssistantRun, RunSpec, RunStart};
-use relay_proto::rule::Rule;
-use relay_proto::types::{Cause, Run};
+use rl_core::Home;
+use rl_proto::methods::{AssistantOutput, AssistantParams, AssistantRun, RunSpec, RunStart};
+use rl_proto::rule::Rule;
+use rl_proto::types::{Cause, Run};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -272,12 +272,12 @@ pub async fn apply(home: &Home, f: &Form, registered: impl Fn(&Path) -> bool) ->
             let known = d.folder.as_deref().is_none_or(&registered);
             let was = f.editing.as_ref().map(form::Editing::was);
             let file = rulefile::install(home, &mut rpc, &d, was.as_ref(), known).await?;
-            Ok(format!("{} on · {}", d.name, relay_core::display_path(&file)))
+            Ok(format!("{} on · {}", d.name, rl_core::display_path(&file)))
         }
         form::Kind::Rename => {
             let name = f.get("name").trim().to_string();
             let w = rpc
-                .call::<relay_proto::methods::WorkspaceRename>(relay_proto::methods::WorkspaceRenameParams {
+                .call::<rl_proto::methods::WorkspaceRename>(rl_proto::methods::WorkspaceRenameParams {
                     path: f.origin.clone(),
                     name,
                 })

@@ -6,7 +6,7 @@
 //! binary on your PATH — or the word that starts a rule. After `every` comes
 //! a duration, after `on` an event; anywhere else, a file.
 
-use relay_proto::types::event_kind;
+use rl_proto::types::event_kind;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 

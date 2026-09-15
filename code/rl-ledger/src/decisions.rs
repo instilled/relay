@@ -7,9 +7,9 @@
 use crate::{conv, conv_str};
 use anyhow::{Result, bail};
 use jiff::Timestamp;
-use relay_core::time::{from_millis, to_millis};
-use relay_proto::decision::{Decision, DecisionOption, DecisionStatus};
-use relay_proto::methods::DecisionFilter;
+use rl_core::time::{from_millis, to_millis};
+use rl_proto::decision::{Decision, DecisionOption, DecisionStatus};
+use rl_proto::methods::DecisionFilter;
 use rusqlite::{Connection, OptionalExtension, Row, params, params_from_iter, types::Value};
 use std::path::PathBuf;
 
@@ -233,7 +233,7 @@ fn from_row(row: &Row) -> rusqlite::Result<Decision> {
 mod tests {
     use super::*;
     use crate::Ledger;
-    use relay_proto::action::Task;
+    use rl_proto::action::Task;
 
     fn decision(id: &str, group: Option<&str>) -> Decision {
         Decision {

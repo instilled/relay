@@ -4,10 +4,10 @@
 //! defaults, and nothing that needs the config runs on a guess.
 
 use anyhow::{Context, Result};
-use relay_core::Home;
-use relay_detect::Registry;
-use relay_proto::config::{Assistant, Config};
-use relay_proto::methods::{AgentInfo, ConfigReport, ResolvedAssistant};
+use rl_core::Home;
+use rl_detect::Registry;
+use rl_proto::config::{Assistant, Config};
+use rl_proto::methods::{AgentInfo, ConfigReport, ResolvedAssistant};
 use std::path::PathBuf;
 
 /// What reading the file gave.
@@ -88,7 +88,7 @@ pub fn agents(registry: &Registry) -> Vec<AgentInfo> {
         .agents()
         .map(|p| AgentInfo {
             name: p.name.clone(),
-            bin: relay_detect::registry::find_bin(&p.bins),
+            bin: rl_detect::registry::find_bin(&p.bins),
             bins: p.bins.clone(),
             headless: p.headless.clone(),
             model_flag: p.model_flag.clone(),
@@ -160,7 +160,7 @@ pub fn report(loaded: &Loaded, registry: &Registry) -> ConfigReport {
     }
     if let Some(r) = &loaded.config.retention
         && let Some(j) = &r.journal
-        && relay_core::time::parse_duration(j).is_none()
+        && rl_core::time::parse_duration(j).is_none()
     {
         errors.push(format!("retention: `{j}` is not a duration (30d, 12h)"));
     }

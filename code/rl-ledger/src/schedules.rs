@@ -4,8 +4,8 @@
 use crate::entries::{self, Loaded, Row, SCHEDULES as T};
 use anyhow::Result;
 use jiff::Timestamp;
-use relay_core::time::to_millis;
-use relay_proto::schedule::{ReloadReport, Schedule};
+use rl_core::time::to_millis;
+use rl_proto::schedule::{ReloadReport, Schedule};
 use rusqlite::{Connection, params};
 use std::path::Path;
 
@@ -87,8 +87,8 @@ pub fn set_fired(conn: &Connection, scope: &str, name: &str, at: Timestamp, run:
 mod tests {
     use super::*;
     use crate::Ledger;
-    use relay_proto::action::Task;
-    use relay_proto::schedule::ScheduleSpec;
+    use rl_proto::action::Task;
+    use rl_proto::schedule::ScheduleSpec;
 
     fn spec(every: &str) -> ScheduleSpec {
         ScheduleSpec {

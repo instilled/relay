@@ -5,9 +5,9 @@
 mod common;
 
 use common::{Conn, Harness};
-use relay_core::Home;
-use relay_proto::schedule::{Schedule, UpReport, Workspace};
-use relay_proto::types::Run;
+use rl_core::Home;
+use rl_proto::schedule::{Schedule, UpReport, Workspace};
+use rl_proto::types::Run;
 use serde_json::json;
 use std::path::Path;
 use std::time::Duration;

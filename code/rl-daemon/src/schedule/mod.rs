@@ -15,17 +15,17 @@ use crate::supervisor::Supervisor;
 use anyhow::{Context, Result, anyhow, bail};
 use cron::Cron;
 use jiff::Timestamp;
-use relay_core::Home;
-use relay_core::time::parse_duration;
-use relay_detect::Registry;
-use relay_ledger::entries::Loaded;
-use relay_ledger::schedules;
-use relay_ledger::{Ledger, events, events::NewEvent, runs, workspaces};
-use relay_proto::methods::{RunFilter, RunSpec};
-use relay_proto::schedule::{
+use rl_core::Home;
+use rl_core::time::parse_duration;
+use rl_detect::Registry;
+use rl_ledger::entries::Loaded;
+use rl_ledger::schedules;
+use rl_ledger::{Ledger, events, events::NewEvent, runs, workspaces};
+use rl_proto::methods::{RunFilter, RunSpec};
+use rl_proto::schedule::{
     GLOBAL_SCOPE, Missed, Overlap, ReloadReport, Schedule, ScheduleSpec, UpReport, WORKSPACE_DIR, Workspace,
 };
-use relay_proto::types::{Cause, Run, event_kind};
+use rl_proto::types::{Cause, Run, event_kind};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -588,7 +588,7 @@ impl Scheduler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use relay_proto::types::RunKind;
+    use rl_proto::types::RunKind;
 
     fn spec(yaml: &str) -> ScheduleSpec {
         serde_norway::from_str(yaml).unwrap()

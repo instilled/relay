@@ -1,8 +1,8 @@
 //! Method name → typed handler. Params are decoded and results encoded here so
 //! handlers only see their own types.
 
-use relay_proto::methods::Method;
-use relay_proto::rpc::RpcError;
+use rl_proto::methods::Method;
+use rl_proto::rpc::RpcError;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::future::Future;

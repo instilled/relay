@@ -3,7 +3,7 @@
 //! recent change first.
 
 use jiff::{SignedDuration, Timestamp};
-use relay_proto::types::{Run, RunState};
+use rl_proto::types::{Run, RunState};
 
 /// Lower is more urgent.
 pub fn score(r: &Run) -> u8 {
@@ -47,7 +47,7 @@ pub fn needs_you(runs: &[Run]) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use relay_proto::types::RunKind;
+    use rl_proto::types::RunKind;
 
     fn run(id: &str, state: RunState, group: &str, at: &str) -> Run {
         let t: Timestamp = at.parse().unwrap();

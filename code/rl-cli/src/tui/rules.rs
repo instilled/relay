@@ -6,9 +6,9 @@ use super::rows::Names;
 use jiff::Timestamp;
 use ratatui::style::Stylize;
 use ratatui::text::{Line, Span};
-use relay_core::time::{fmt_age, fmt_duration};
-use relay_proto::reaction::Reaction;
-use relay_proto::rule::{Rule, RuleKind, RuleStatus};
+use rl_core::time::{fmt_age, fmt_duration};
+use rl_proto::reaction::Reaction;
+use rl_proto::rule::{Rule, RuleKind, RuleStatus};
 use std::path::Path;
 
 pub enum RuleRow<'a> {
@@ -31,7 +31,7 @@ pub fn key(r: &Rule) -> String {
 
 /// Whose file a scope is: yours, or a workspace by name.
 pub fn owner(scope: &str, names: &Names) -> String {
-    if scope == relay_proto::schedule::GLOBAL_SCOPE {
+    if scope == rl_proto::schedule::GLOBAL_SCOPE {
         "yours".into()
     } else {
         names.workspace(Path::new(scope))
@@ -81,8 +81,8 @@ pub fn build<'a>(rules: &'a [Rule], names: &Names, filter: &str, scope: Option<&
         pending(vb)
             .cmp(&pending(va))
             .then_with(|| {
-                sb.eq(relay_proto::schedule::GLOBAL_SCOPE)
-                    .cmp(&sa.eq(relay_proto::schedule::GLOBAL_SCOPE))
+                sb.eq(rl_proto::schedule::GLOBAL_SCOPE)
+                    .cmp(&sa.eq(rl_proto::schedule::GLOBAL_SCOPE))
             })
             .then_with(|| la.cmp(lb))
     });
@@ -265,9 +265,9 @@ pub fn lines(r: &Rule, names: &Names, now: Timestamp, last_run_title: Option<&st
 #[cfg(test)]
 mod tests {
     use super::*;
-    use relay_proto::action::Task;
-    use relay_proto::reaction::ReactionSpec;
-    use relay_proto::schedule::{Schedule, ScheduleSpec};
+    use rl_proto::action::Task;
+    use rl_proto::reaction::ReactionSpec;
+    use rl_proto::schedule::{Schedule, ScheduleSpec};
 
     fn schedule(scope: &str, name: &str, approved: bool, paused: bool) -> Rule {
         Rule::Schedule(Schedule {

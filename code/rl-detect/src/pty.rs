@@ -10,8 +10,8 @@ use crate::ansi;
 use crate::registry::Profile;
 use jiff::Timestamp;
 use regex::Regex;
-use relay_core::time::fmt_duration;
-use relay_proto::types::{Confidence, RunKind, RunState};
+use rl_core::time::fmt_duration;
+use rl_proto::types::{Confidence, RunKind, RunState};
 use std::time::Duration;
 
 /// How much cleaned output is kept for reading the last lines.

@@ -4,10 +4,10 @@
 mod common;
 
 use common::{Conn, Harness};
-use relay_core::Home;
-use relay_proto::rule::{Rule, RuleKind, RuleStatus};
-use relay_proto::schedule::UpReport;
-use relay_proto::types::Run;
+use rl_core::Home;
+use rl_proto::rule::{Rule, RuleKind, RuleStatus};
+use rl_proto::schedule::UpReport;
+use rl_proto::types::Run;
 use serde_json::json;
 use std::time::Duration;
 

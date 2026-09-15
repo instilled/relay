@@ -4,8 +4,8 @@
 use crate::conv;
 use anyhow::Result;
 use jiff::Timestamp;
-use relay_core::time::{from_millis, to_millis};
-use relay_proto::schedule::Workspace;
+use rl_core::time::{from_millis, to_millis};
+use rl_proto::schedule::Workspace;
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use std::path::{Path, PathBuf};
 

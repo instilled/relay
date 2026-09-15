@@ -45,10 +45,10 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
-use relay_core::Home;
-use relay_core::time::fmt_age;
-use relay_proto::decision::Decision;
-use relay_proto::methods::{
+use rl_core::Home;
+use rl_core::time::fmt_age;
+use rl_proto::decision::Decision;
+use rl_proto::methods::{
     AgentList, DecisionDismiss, DecisionNote, DecisionTake, DecisionTakeParams, Digest, DigestGet, DigestItem,
     DigestParams, EventFilter, EventList, GcParams, GcRun, PresenceClient, PresenceTouch, ReactionPause,
     ReactionReload, ReactionResume, RuleApprove, RuleList, RuleRef, RunArchive, RunArchiveParams, RunId, RunIds,
@@ -56,8 +56,8 @@ use relay_proto::methods::{
     ScheduleFilter, ScheduleName, SchedulePause, ScheduleReload, ScheduleResume, ScheduleRun, SummaryGet, SummaryMake,
     SummaryParams, WorkspaceList, WorkspaceRename, WorkspaceRenameParams,
 };
-use relay_proto::rule::{Rule, RuleKind, RuleStatus};
-use relay_proto::types::{AttachMode, Cause, Event as LedgerEvent, Mark, Run, RunKind, RunState, Summary};
+use rl_proto::rule::{Rule, RuleKind, RuleStatus};
+use rl_proto::types::{AttachMode, Cause, Event as LedgerEvent, Mark, Run, RunKind, RunState, Summary};
 use rows::{Names, Row, fit, short_path};
 use rules::RuleRow;
 use std::collections::HashSet;
@@ -151,7 +151,7 @@ struct Asking {
     words: String,
     folder: PathBuf,
     editing: Option<Rule>,
-    task: tokio::task::JoinHandle<Result<(crate::interpret::Draft, relay_proto::methods::AssistantOutput)>>,
+    task: tokio::task::JoinHandle<Result<(crate::interpret::Draft, rl_proto::methods::AssistantOutput)>>,
 }
 
 /// A run being summarised, until the assistant answers.
@@ -1235,7 +1235,7 @@ impl App {
     async fn answered(
         &mut self,
         answer: std::result::Result<
-            Result<(crate::interpret::Draft, relay_proto::methods::AssistantOutput)>,
+            Result<(crate::interpret::Draft, rl_proto::methods::AssistantOutput)>,
             tokio::task::JoinError,
         >,
     ) {
@@ -2579,8 +2579,8 @@ fn group_count(rules: &[rows::Chip]) -> String {
 /// The word for a failed join: the one that matters is someone else holding
 /// the keyboard, which `/join` can take.
 fn join_error(e: &anyhow::Error) -> String {
-    if let Some(rpc) = e.downcast_ref::<relay_proto::rpc::RpcError>()
-        && rpc.code == relay_proto::rpc::RpcError::BUSY
+    if let Some(rpc) = e.downcast_ref::<rl_proto::rpc::RpcError>()
+        && rpc.code == rl_proto::rpc::RpcError::BUSY
     {
         return "someone holds the keyboard · /join takes it".into();
     }
@@ -2606,7 +2606,7 @@ fn bytes_words(n: u64) -> String {
 mod tests {
     use super::{group_count, viewport};
     use crate::tui::rows::Chip;
-    use relay_proto::rule::{RuleKind, RuleStatus};
+    use rl_proto::rule::{RuleKind, RuleStatus};
 
     fn chip(kind: RuleKind) -> Chip {
         Chip {
