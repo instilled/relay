@@ -274,6 +274,16 @@ pub async fn apply(home: &Home, f: &Form, registered: impl Fn(&Path) -> bool) ->
             let file = rulefile::install(home, &mut rpc, &d, was.as_ref(), known).await?;
             Ok(format!("{} on · {}", d.name, relay_core::display_path(&file)))
         }
+        form::Kind::Rename => {
+            let name = f.get("name").trim().to_string();
+            let w = rpc
+                .call::<relay_proto::methods::WorkspaceRename>(relay_proto::methods::WorkspaceRenameParams {
+                    path: f.origin.clone(),
+                    name,
+                })
+                .await?;
+            Ok(format!("renamed to {}", w.name))
+        }
     }
 }
 

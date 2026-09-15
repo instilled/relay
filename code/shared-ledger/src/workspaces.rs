@@ -19,6 +19,19 @@ pub fn register(conn: &Connection, path: &Path, name: &str, now: Timestamp) -> R
     Ok(get(conn, path)?.expect("just registered"))
 }
 
+/// Renames a registered folder in place, keeping its `registered_at`. Returns
+/// the row, or `None` when the path was never registered (nothing to rename).
+pub fn rename(conn: &Connection, path: &Path, name: &str) -> Result<Option<Workspace>> {
+    let n = conn.execute(
+        "UPDATE workspaces SET name = ?2 WHERE path = ?1",
+        params![path.to_string_lossy(), name],
+    )?;
+    if n == 0 {
+        return Ok(None);
+    }
+    get(conn, path)
+}
+
 pub fn get(conn: &Connection, path: &Path) -> Result<Option<Workspace>> {
     Ok(conn
         .query_row(
@@ -94,5 +107,28 @@ mod tests {
         assert_eq!(ledger.call_blocking(|c| list(c)).unwrap().len(), 2);
         assert!(ledger.call_blocking(|c| remove(c, Path::new("/w/outer"))).unwrap());
         assert_eq!(name("/w/outer/other"), None);
+    }
+
+    #[test]
+    fn rename_changes_the_name_and_keeps_the_registration() {
+        let ledger = Ledger::open_in_memory().unwrap();
+        let at = Timestamp::UNIX_EPOCH;
+        let was = ledger
+            .call_blocking(move |c| register(c, Path::new("/w/proj"), "proj", at))
+            .unwrap();
+        let now = ledger
+            .call_blocking(|c| rename(c, Path::new("/w/proj"), "shiny"))
+            .unwrap()
+            .expect("registered, so it renames");
+        assert_eq!(now.name, "shiny");
+        // The registration itself is untouched — same path, same moment.
+        assert_eq!(now.registered_at, was.registered_at);
+        // A folder nobody registered has nothing to rename.
+        assert!(
+            ledger
+                .call_blocking(|c| rename(c, Path::new("/w/ghost"), "x"))
+                .unwrap()
+                .is_none()
+        );
     }
 }

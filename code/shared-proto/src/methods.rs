@@ -463,6 +463,20 @@ impl Method for WorkspaceRemove {
     type Result = bool;
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspaceRenameParams {
+    pub path: PathBuf,
+    pub name: String,
+}
+
+/// Gives a registered folder a new display name, in place.
+pub struct WorkspaceRename;
+impl Method for WorkspaceRename {
+    const NAME: &'static str = "workspace.rename";
+    type Params = WorkspaceRenameParams;
+    type Result = crate::schedule::Workspace;
+}
+
 // ---- decision.* -------------------------------------------------------------
 
 /// Raises a question and returns it. With a `group`, an open decision with
