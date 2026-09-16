@@ -206,9 +206,9 @@ struct App {
     events: Vec<LedgerEvent>,
     /// The selected run's summary, when there is one kept.
     summary: Option<Summary>,
-    /// The assistant at work on a run's summary (`s`).
+    /// The assistant at work on a run's summary (`/summarise`).
     summarising: Option<Summarising>,
-    /// `E` pressed: the file and line to open in the editor once the
+    /// `/edit file` (or a scope's file): the file and line to open in the editor once the
     /// screen is given back.
     editor: Option<(PathBuf, usize)>,
     /// A run to hand the real terminal to (its id, and whether to take the
@@ -724,7 +724,7 @@ impl App {
     }
 
     /// The registered folder under the cursor, when the cursor is on a project
-    /// header — what `e` and `^r` act on.
+    /// header — what `^r` and `/edit schedule` act on.
     fn selected_project(&self) -> Option<PathBuf> {
         match self.selected()? {
             Row::Group(h) => h.workspace.clone(),
@@ -895,6 +895,46 @@ impl App {
         }
     }
 
+    /// `/pane`, `^o`: the pane beside the list, shown or hidden.
+    fn toggle_pane(&mut self) {
+        if self.show_pane {
+            self.hide_pane();
+        } else {
+            self.show_pane = true;
+        }
+    }
+
+    /// `/pane full`: the pane takes the whole screen, or gives it back.
+    fn toggle_full(&mut self) {
+        self.wide = !self.wide;
+        if self.wide {
+            self.show_pane = true;
+        }
+    }
+
+    /// `/rename`, `^r`: whatever the cursor is on, by the name it is known by —
+    /// a folder through the registry, a run (a shell is one) through the
+    /// ledger, and a job by the rule it comes from, which is the rule form's
+    /// own rename.
+    fn rename_here(&mut self) {
+        if let Some(folder) = self.selected_project() {
+            let name = self.names.workspace(&folder);
+            self.mode = Mode::Form(Box::new(Form::rename(&folder, &name)));
+        } else if let Some((id, title)) = self.selected_run().map(|i| (i.run.id.clone(), i.run.title.clone())) {
+            self.mode = Mode::Form(Box::new(Form::rename_run(&id, &title)));
+        } else if self.rule_here().is_some() {
+            self.edit_rule_form();
+        } else {
+            self.say("^r renames what the cursor is on");
+        }
+    }
+
+    /// `/reload shell`: the shell's aliases and functions, read again.
+    async fn reload_shell(&mut self) {
+        self.aliases = complete::shell_names().await;
+        self.say(format!("re-read the shell: {} names", self.aliases.len()));
+    }
+
     async fn seen(&mut self, ids: Vec<String>) {
         if ids.is_empty() {
             return;
@@ -913,7 +953,7 @@ impl App {
             return;
         };
         // Watching is a tile beside the list, not the whole screen: the list
-        // stays, the line stays yours, and `/full` pops it big.
+        // stays, the line stays yours, and `/pane full` pops it big.
         // Still reading this one: back to it, where it was left.
         if self.term.as_ref().is_some_and(|t| t.id == id) {
             self.pane = Pane::Term;
@@ -1007,17 +1047,17 @@ impl App {
             .call::<RunArchive>(RunArchiveParams { ids, all_seen: false })
             .await
         {
-            Ok(0) => self.say("nothing to be done with: still going"),
+            Ok(0) => self.say("nothing to archive: still going"),
             Ok(_) => {
-                self.say(format!("done with {what}"));
+                self.say(format!("archived {what}"));
                 self.refresh().await;
             }
-            Err(e) => self.say(format!("done: {e:#}")),
+            Err(e) => self.say(format!("archive: {e:#}")),
         }
     }
 
-    /// Done with a job's runs, however they ended: out of the list, kept in
-    /// the ledger. Shared by `^x` (`remove_selected`) and `/done`. Takes the
+    /// Archives a job's runs, however they ended: out of the list, kept in
+    /// the ledger. Shared by `^x` (`remove_selected`) and `/archive`. Takes the
     /// name and run ids rather than `&rows::Job` itself: `Job` borrows from
     /// `self`, and this needs `&mut self` to archive.
     async fn archive_job(&mut self, name: &str, ids: Vec<String>) {
@@ -1075,10 +1115,10 @@ impl App {
             .await
         {
             Ok(n) => {
-                self.say(format!("done with {n}"));
+                self.say(format!("archived {n}"));
                 self.refresh().await;
             }
-            Err(e) => self.say(format!("done: {e:#}")),
+            Err(e) => self.say(format!("archive: {e:#}")),
         }
     }
 
@@ -1187,7 +1227,7 @@ impl App {
         }
     }
 
-    /// `E`: the rule's file in the editor, at its line, once the screen is free.
+    /// `/edit file`: the rule's file in the editor, at its line, once the screen is free.
     fn edit_rule_file(&mut self) {
         if let Some(r) = self.rule_here() {
             let file = r.source().to_path_buf();
@@ -1388,7 +1428,7 @@ impl App {
     async fn add_dir(&mut self, arg: &str) -> Result<()> {
         let arg = arg.trim();
         if arg.is_empty() {
-            self.say("a folder: /add-dir <path>");
+            self.say("a folder: /up <path>");
             return Ok(());
         }
         let expanded = match arg.strip_prefix('~') {
@@ -1714,15 +1754,15 @@ impl App {
                         self.watch_key(&k, page);
                         Ok(())
                     }
-                    _ => self.key_list(k).await,
+                    _ => self.key_list(k, area).await,
                 }
             }
-            _ => self.key_list(k).await,
+            _ => self.key_list(k, area).await,
         }
     }
 
     /// What the line does not take: moving about, and backing out.
-    async fn key_list(&mut self, k: KeyEvent) -> Result<()> {
+    async fn key_list(&mut self, k: KeyEvent, area: Rect) -> Result<()> {
         // A destructive key is armed by its first press and acts on its second;
         // any other key here disarms it, so `ctrl-x`/`ctrl-c` never fire on one
         // slip (the way an agent view asks before it deletes).
@@ -1746,22 +1786,9 @@ impl App {
                     self.say("nothing here to remove");
                 }
             }
-            (KeyCode::Char('r'), KeyModifiers::CONTROL) => {
-                // Whatever the cursor is on, by the name it is known by: a
-                // folder through the registry, a run (a shell is one) through
-                // the ledger, and a job by the rule it comes from, which is
-                // the rule form's own rename.
-                if let Some(folder) = self.selected_project() {
-                    let name = self.names.workspace(&folder);
-                    self.mode = Mode::Form(Box::new(Form::rename(&folder, &name)));
-                } else if let Some((id, title)) = self.selected_run().map(|i| (i.run.id.clone(), i.run.title.clone())) {
-                    self.mode = Mode::Form(Box::new(Form::rename_run(&id, &title)));
-                } else if self.rule_here().is_some() {
-                    self.edit_rule_form();
-                } else {
-                    self.say("^r renames what the cursor is on");
-                }
-            }
+            (KeyCode::Char('r'), KeyModifiers::CONTROL) => self.rename_here(),
+            (KeyCode::Char('o'), KeyModifiers::CONTROL) => self.toggle_pane(),
+            (KeyCode::Char('t'), KeyModifiers::CONTROL) => self.new_shell(area).await,
             (KeyCode::Esc, _) => {
                 // The pane goes first, whatever stands open behind it: it is
                 // the largest thing on screen, so it is what `esc` should
@@ -2056,7 +2083,7 @@ impl App {
         self.line.clear();
         match c.cmd {
             palette::Cmd::Quit => self.quit = true,
-            palette::Cmd::AddDir => self.add_dir(&arg).await?,
+            palette::Cmd::Up => self.add_dir(&arg).await?,
             palette::Cmd::Help => {
                 let names: Vec<&str> = palette::ALL.iter().map(|c| c.name).collect();
                 self.say(format!("/{}", names.join(" · /")));
@@ -2072,20 +2099,25 @@ impl App {
                     self.say("nothing here to stop");
                 }
             }
-            palette::Cmd::Done => {
-                if let Some(j) = self.selected_job() {
-                    let ids: Vec<String> = j.runs.iter().map(|i| i.run.id.clone()).collect();
-                    self.archive_job(&j.name, ids).await;
-                } else if let Some(i) = self.selected_run() {
-                    if i.run.state.is_terminal() {
-                        let (id, title) = (i.run.id.clone(), i.run.title.clone());
-                        self.archive(vec![id], &title).await;
+            palette::Cmd::Archive => match arg.trim() {
+                "seen" | "all" => self.archive_seen().await,
+                "" => {
+                    if let Some(j) = self.selected_job() {
+                        let ids: Vec<String> = j.runs.iter().map(|i| i.run.id.clone()).collect();
+                        self.archive_job(&j.name, ids).await;
+                    } else if let Some(i) = self.selected_run() {
+                        if i.run.state.is_terminal() {
+                            let (id, title) = (i.run.id.clone(), i.run.title.clone());
+                            self.archive(vec![id], &title).await;
+                        } else {
+                            self.say("still going: /stop first");
+                        }
                     } else {
-                        self.say("still going: /stop first");
+                        self.say("nothing here to archive · /archive seen for everything you have seen");
                     }
                 }
-            }
-            palette::Cmd::DoneAll => self.archive_seen().await,
+                other => self.say(format!("archive {other}? on its own, or /archive seen")),
+            },
             palette::Cmd::Mark => {
                 let Some(i) = self.selected_run().filter(|i| !i.run.state.is_terminal()) else {
                     self.say("nothing here that is still going");
@@ -2100,11 +2132,6 @@ impl App {
                     other => self.say(format!("mark {other}? done, blocked or working")),
                 }
             }
-            palette::Cmd::Watch => {
-                if self.selected_run().is_some() {
-                    self.open_term(area).await;
-                }
-            }
             palette::Cmd::Join => match self.selected_run() {
                 Some(i) if !i.run.state.is_terminal() => {
                     // Assertive: take the keyboard from whoever holds it.
@@ -2113,19 +2140,12 @@ impl App {
                 Some(_) => self.say("ended: nothing to join"),
                 None => self.say("nothing here to join"),
             },
-            palette::Cmd::Info => {
-                if self.show_pane {
-                    self.hide_pane();
-                } else {
-                    self.show_pane = true;
-                }
-            }
-            palette::Cmd::Full => {
-                self.wide = !self.wide;
-                if self.wide {
-                    self.show_pane = true;
-                }
-            }
+            palette::Cmd::Pane => match arg.trim() {
+                "" => self.toggle_pane(),
+                "full" => self.toggle_full(),
+                other => self.say(format!("pane {other}? on its own, or /pane full")),
+            },
+            palette::Cmd::Rename => self.rename_here(),
             palette::Cmd::Rules => {
                 self.rules_scope = match self.view {
                     View::Work => self.selected_folder(),
@@ -2134,11 +2154,15 @@ impl App {
                 self.toggle_view().await;
             }
             palette::Cmd::Shell => self.new_shell(area).await,
-            palette::Cmd::Reload => self.reload_rules().await,
-            palette::Cmd::Reindex => {
-                self.aliases = complete::shell_names().await;
-                self.say(format!("re-read the shell: {} names", self.aliases.len()));
-            }
+            palette::Cmd::Reload => match arg.trim() {
+                "rules" => self.reload_rules().await,
+                "shell" => self.reload_shell().await,
+                "" => {
+                    self.reload_rules().await;
+                    self.reload_shell().await;
+                }
+                other => self.say(format!("reload {other}? rules or shell, or both on its own")),
+            },
             palette::Cmd::Approve => {
                 if let Some(r) = self.selected_rule()
                     && r.status() == RuleStatus::NeedsApproval
@@ -2159,11 +2183,11 @@ impl App {
             palette::Cmd::New => self.new_rule_form(),
             palette::Cmd::Edit => match arg.trim() {
                 "" => self.edit_rule_form(),
+                "file" => self.edit_rule_file(),
                 "schedule" | "schedules" => self.edit_scope_file(RuleKind::Schedule),
                 "reaction" | "reactions" => self.edit_scope_file(RuleKind::Reaction),
-                other => self.say(format!("edit {other}? schedule or reaction")),
+                other => self.say(format!("edit {other}? file, schedule or reaction")),
             },
-            palette::Cmd::Editor => self.edit_rule_file(),
             palette::Cmd::Summarise => self.summarise(),
             palette::Cmd::Ask => {
                 if arg.trim().is_empty() {
@@ -2178,11 +2202,17 @@ impl App {
                 self.filter = arg.trim().to_string();
                 self.settle();
             }
-            palette::Cmd::LensAll => self.set_lens(rows::Lens::All),
-            palette::Cmd::LensAgents => self.set_lens(rows::Lens::Agents),
-            palette::Cmd::LensJobs => self.set_lens(rows::Lens::Jobs),
-            palette::Cmd::LensReactions => self.set_lens(rows::Lens::Reactions),
-            palette::Cmd::Gc => match self.rpc.call::<GcRun>(GcParams::default()).await {
+            palette::Cmd::Lens => {
+                let want = arg.trim().to_ascii_lowercase();
+                match rows::Lens::ALL.iter().find(|l| l.label() == want) {
+                    Some(l) => self.set_lens(*l),
+                    None => {
+                        let all: Vec<&str> = rows::Lens::ALL.iter().map(|l| l.label()).collect();
+                        self.say(format!("/lens {} · tab steps through them", all.join("|")));
+                    }
+                }
+            }
+            palette::Cmd::Prune => match self.rpc.call::<GcRun>(GcParams::default()).await {
                 Ok(r) if r.runs == 0 => self.say(format!("nothing with a journal ended over {} ago", r.older_than)),
                 Ok(r) => self.say(format!(
                     "dropped {} journal{} · {} · the runs and their events stay",
@@ -2190,7 +2220,7 @@ impl App {
                     if r.runs == 1 { "" } else { "s" },
                     bytes_words(r.bytes)
                 )),
-                Err(e) => self.say(format!("gc: {e:#}")),
+                Err(e) => self.say(format!("prune: {e:#}")),
             },
         }
         Ok(())
@@ -2872,16 +2902,16 @@ impl App {
             if r.kind() == RuleKind::Schedule {
                 s.push_str(" · enter runs it now");
             }
-            s.push_str(" · /edit · /editor · /new · /reload · /rules back");
+            s.push_str(" · /edit · /edit file · /new · /reload · /rules back");
             return s;
         }
         if self.view == View::Rules {
             return "/new a rule · /reload · /rules back · or type something to run here".into();
         }
         let pane = if self.show_pane {
-            "/info hides details"
+            "^o hides details"
         } else {
-            "/info details"
+            "^o details"
         };
         match self.selected() {
             Some(Row::Question(_)) => format!("enter answers it · ^x dismiss · {pane}"),
@@ -2891,15 +2921,15 @@ impl App {
                 } else {
                     "enter opens"
                 };
-                format!("{open} · /edit its rule · ^x done · {pane}")
+                format!("{open} · /edit its rule · ^x archives · {pane}")
             }
-            Some(Row::Fold(_)) => format!("enter output · ^x done · esc folds · {pane}"),
+            Some(Row::Fold(_)) => format!("enter output · ^x archives · esc folds · {pane}"),
             Some(Row::Run(i)) if i.run.state.is_terminal() => {
-                format!("enter output · /summarise · ^x done · /done-all · {pane}")
+                format!("enter output · /summarise · ^x archives · /archive seen · {pane}")
             }
             Some(Row::Run(_)) => format!("enter watches it · /join · ^x stops it · /mark · {pane}"),
             Some(Row::Group(h)) if h.workspace.is_some() => {
-                format!("enter its stats · /rules edits schedules & reactions · ^r renames · {pane}")
+                format!("enter its stats · ^t shell · /rules edits schedules & reactions · ^r renames · {pane}")
             }
             // The "yours" row: global rules, no folder to rename.
             Some(Row::Group(_)) => format!("enter its rules · /rules edits your schedules & reactions · {pane}"),

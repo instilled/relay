@@ -211,37 +211,38 @@ live there — `↻ nightly 4h · ⚡ tests-failed`, accented and amber when one
 `+N` when more than fit — and, at the right edge, the tally of how many jobs and reactions the
 folder holds; your own (global) rules get a project row of their own — the "yours" row — always,
 rules or none: it leads the list when one waits for a yes, otherwise it trails with the idle
-projects, and either way the cursor stops on it, `enter` (or `/info`) shows its schedules and
+projects, and either way the cursor stops on it, `enter` (or `^o`) shows its schedules and
 reactions in the pane, and `/rules` opens them. Runs a schedule or a rule
 started fold, once ended, into one line per job — name, cadence, how many went well, the last
 outcome — so a job firing every thirty seconds is a row, not a screen; a run still going or
 waiting on you is never folded, and `enter` on a job opens it to its last twenty. When the list
 is taller than the screen, its first and last lines say how much is above and below. A group's
 header says which folder it is in, and the cursor stops on it like any other row: `enter` (or
-`/info`) turns the pane into the project's own — the folder, how its runs stand (needs-you /
+`^o`) turns the pane into the project's own — the folder, how its runs stand (needs-you /
 going / done), when it last stirred, and the schedules and reactions that live there. `/rules`
-from a header drops into the rules view filtered to that folder; `^r` renames the folder in
-place — an inline field over `workspace.rename`, which updates the registered name and keeps
-the registration (a folder never `rl up`'d has no name to change and says so). A folder you
+from a header drops into the rules view filtered to that folder; `^r` (or `/rename`) renames
+whatever the cursor is on in place — a folder over `workspace.rename`, which updates the
+registered name and keeps the registration, a run (a shell is one) over `run.rename`, and a job
+through the form of the rule it comes from. A folder you
 `rl up`'d is always on the list, even before anything has run there: its header sits below every
 group with activity, under every lens — a lens narrows what shows inside projects, never which
 projects there are — so you can select
-it, read its stats, edit its rules or open its shell from the first. `/add-dir <path>` registers a
+it, read its stats, edit its rules or open its shell (`^t`) from the first. `/up <path>` registers a
 folder from the line — the panel's `rl up`, over `workspace.up` — and lands the cursor on its new
 row. Moving the cursor onto a row is looking at it;
-`/done` on an ended run (or a job) is being done with it — `run.archive` sets `runs.archived_at`,
-the digest leaves it out, `rl ls --all` and the ledger keep it — and `/done-all` is done with
+`/archive` on an ended run (or a job) is being done with it — `run.archive` sets `runs.archived_at`,
+the digest leaves it out, `rl ls --all` and the ledger keep it — and `/archive seen` does it for
 everything ended that has been looked at. `ctrl-x` is the one keystroke for it, whatever the row,
 and it asks first: the first press arms it and says what a second would do — remove an ended run
 or a job, stop one still going, dismiss a question — and the second press does it, while any other
 key disarms it, so nothing goes on a single slip (the way an agent view confirms a delete). `ctrl-c`
 is the same for leaving: once to ask, again to quit. A run still going is stopped, and a `ctrl-x`
 once it has ended removes it. Nothing is destroyed by any of this; that is retention's alone. Ended runs also leave on their own after a day;
-`/done` is for the impatient. On the line: `rl done <id>…`, `rl done --all`. Nothing is ever deleted here; that is
+`/archive` is for the impatient. On the line: `rl done <id>…`, `rl done --all`. Nothing is ever deleted here; that is
 retention (§7). `enter` on a run opens its terminal, watching: a re-render of the run's output
 through a `vt100` screen (`tui/term.rs`), shown as a tile beside the list — the list stays, the
 line at the foot stays yours, arrows still walk the list, and `esc` closes the tile. It stays
-pinned to its run while you browse; another run's `enter` moves it. `/full` pops the tile to the
+pinned to its run while you browse; another run's `enter` moves it. `/pane full` pops the tile to the
 whole screen. That re-render is right for a glance, but to *drive* a run you want the actual
 terminal — native scrolling, the mouse, the true size, no chrome. So `enter` again on the tile's
 run (or `/join`) hands it over: the panel steps out of ratatui and pipes the run straight to the
@@ -254,7 +255,7 @@ open and goes on reading, so `enter` on that run again returns to it at once, wh
 with nothing replayed. `pgup` and `pgdn` read back through what scrolled off — the screen keeps
 ten thousand rows above itself — and the footer says how far back you are. New output never yanks
 the view to the bottom. An ended run keeps what it printed after its holder has gone,
-to be read the same way. `/info` opens a pane of
+to be read the same way. `^o` (or `/pane`) opens a pane of
 facts beside the list (`tui/pane.rs`): a run's facts and recent events, a job's tally, a question
 with its options numbered; `enter` on a question opens that pane and takes the question out of
 the list, where the number answers it, which is `decision.take`, and the run it starts becomes
@@ -268,7 +269,7 @@ asks anew.
 read locally first: a first word naming an agent the registry knows (`agent.list`, never a
 hardcoded list) is that agent with the rest as its prompt; a first word this machine can actually
 run — a binary on `PATH`, a target in the folder, or a name your own shell knows (its aliases and
-functions, read from `$SHELL` once at startup and again on `/reindex`) — is a shell line, and a
+functions, read from `$SHELL` once at startup and again on `/reload shell`) — is a shell line, and a
 leading `!` forces one. An agent is `run.start` in the folder of the row the cursor is on, sized to
 this screen; a fresh
 agent is one you mean to drive, so its terminal is handed to you at once (the raw passthrough
@@ -318,20 +319,25 @@ takes the lit one (a command is filled in with its name for you to finish, never
 spot), and typing anything clears the highlight so `enter` submits the line as before.
 
 Because letters go into the line, everything that is not typing is a `/` command
-(`tui/palette.rs`), offered as you type it: `/stop`, `/done` and `/done-all`, `/mark`, `/watch`
-and `/join`, `/info`, `/full`, `/rules` and `/reload`, `/approve` and `/pause`, `/new`, `/edit`
-and `/editor`, `/summarise`, `/ask`, `/filter`, `/all`, `/agents`, `/jobs`, `/reactions`, `/gc`,
-`/help`, `/quit`. `enter` on an empty line
+(`tui/palette.rs`), offered as you type it: `/stop`, `/archive [seen]`, `/mark`, `/join`,
+`/shell`, `/rename`, `/pane [full]`, `/rules`, `/reload [rules|shell]`, `/approve` and `/pause`,
+`/new`, `/edit [file|schedule|reaction]`, `/summarise`, `/ask`, `/filter`, `/lens`, `/prune`,
+`/up`, `/help`, `/quit`. One name per act: a variant of an act is an argument to it rather than a
+command of its own, and no word means two things — `done` is only ever what `/mark` says. `enter` on an empty line
 is the row under the cursor instead — a job opens, a schedule offers to fire, a question comes
 out of the list to be answered by number, a run's terminal opens. Arrows, `home`/`end` and `esc`
 belong to the list; `esc` with something typed clears the line first, and `ctrl-c` leaves.
+The few keys that are not the list's or the line's each stand for a command, and the command
+list shows them beside it: `^x` stops or archives, `^r` renames, `^o` shows or hides the pane,
+`^t` opens another shell in the folder. The line keeps `^a`, `^e`, `^u`, `^k` and `^w` for
+editing, as a shell does, so none of those is ever taken for anything else.
 
 At the right of the header is the lens — `all · agents · jobs · reactions`, the one in force
 accented — and the list shows
 only that slice: agents by what a run is, jobs and reactions by what started it (so a scheduled
 agent is in both `agents` and `jobs`, since the lens is a question, not a partition). Questions
 ignore it; they are what needs you, whatever slice you are in. `tab` on an empty line steps the
-lens along (shift-`tab` back), and `/all`, `/agents`, `/jobs`, `/reactions` jump straight to one;
+lens along (shift-`tab` back), and `/lens all|agents|jobs|reactions` jumps straight to one;
 it composes with `/filter`. One-off shell commands live in `all` while they run and are recent.
 
 `/new` is the form for a rule written by hand: `in` (a folder, or `yours`), `name`, `when`
@@ -341,7 +347,7 @@ it composes with `/filter`. One-off shell commands live in `all` while they run 
 comments and the other rules untouched, the result checked to parse), reloads, and approves it —
 your keystroke is the yes; a folder new to Relay is registered on the way. `/edit` on a rule, or
 on a job row, is the same form filled in; saving rewrites only that block and keeps what the form
-does not show (`env`, `where`, `ask`), and a rename or a move takes the old block out. `/editor`
+does not show (`env`, `where`, `ask`), and a rename or a move takes the old block out. `/edit file`
 opens the file in `$EDITOR` at the rule's line and reloads on return — an edit made there is a
 file change, so it waits for `/approve` like any other.
 
@@ -589,7 +595,7 @@ run's terminal bytes in `session_io`, its `log/<run>.log` and `run/<run>.exit|.e
 and `retention: 30d` in `config.yaml` (or `retention: { journal: 30d }`) lets that go for runs
 ended longer ago than that (`rl-daemon/src/gc.rs`, `gc.run`). The run and its events stay, and
 a `run.journal_dropped` event on the run says how many bytes went; attaching to such a run shows
-nothing, honestly. `rl gc` does it now (`--older-than 12h` for once, `--dry-run` to count), `rld`
+nothing, honestly. `rl gc` does it now (`--older-than 12h` for once, `--dry-run` to count; `/prune` in the panel), `rld`
 does it once a day when the key is set (`meta.gc.last_at`); unset, nothing is ever deleted.
 Facts (`retention.runs`) are deliberately not a key yet.
 

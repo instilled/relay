@@ -9,31 +9,24 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Cmd {
     Stop,
-    Done,
-    DoneAll,
+    Archive,
     Mark,
-    Watch,
     Join,
     Shell,
-    Info,
-    Full,
+    Rename,
+    Pane,
     Rules,
     Reload,
-    Reindex,
     Approve,
     Pause,
     New,
     Edit,
-    Editor,
     Summarise,
     Ask,
     Filter,
-    LensAll,
-    LensAgents,
-    LensJobs,
-    LensReactions,
-    Gc,
-    AddDir,
+    Lens,
+    Prune,
+    Up,
     Help,
     Quit,
 }
@@ -47,7 +40,9 @@ pub struct Command {
     pub cmd: Cmd,
 }
 
-/// Every command, in the order the palette lists them.
+/// Every command, in the order the palette lists them. One name per act: an
+/// act with a variant takes it as an argument rather than a second command,
+/// and no word means two things (`done` is only ever what `/mark` says).
 pub const ALL: &[Command] = &[
     Command {
         name: "stop",
@@ -56,16 +51,10 @@ pub const ALL: &[Command] = &[
         cmd: Cmd::Stop,
     },
     Command {
-        name: "done",
-        args: "",
-        what: "be done with an ended run: out of the panel, kept in the ledger",
-        cmd: Cmd::Done,
-    },
-    Command {
-        name: "done-all",
-        args: "",
-        what: "be done with everything you have seen",
-        cmd: Cmd::DoneAll,
+        name: "archive",
+        args: "[seen]",
+        what: "out of the panel, kept in the ledger: an ended run or job, or all you have seen",
+        cmd: Cmd::Archive,
     },
     Command {
         name: "mark",
@@ -74,15 +63,9 @@ pub const ALL: &[Command] = &[
         cmd: Cmd::Mark,
     },
     Command {
-        name: "watch",
-        args: "",
-        what: "watch a run's terminal without taking the keyboard",
-        cmd: Cmd::Watch,
-    },
-    Command {
         name: "join",
         args: "",
-        what: "join a run's terminal and take the keyboard",
+        what: "take a run's terminal and its keyboard (enter watches it first)",
         cmd: Cmd::Join,
     },
     Command {
@@ -92,16 +75,16 @@ pub const ALL: &[Command] = &[
         cmd: Cmd::Shell,
     },
     Command {
-        name: "info",
+        name: "rename",
         args: "",
-        what: "show or hide the pane of facts beside the list",
-        cmd: Cmd::Info,
+        what: "rename what the cursor is on: a folder, a run, a job's rule",
+        cmd: Cmd::Rename,
     },
     Command {
-        name: "full",
-        args: "",
-        what: "give the pane the whole screen",
-        cmd: Cmd::Full,
+        name: "pane",
+        args: "[full]",
+        what: "show or hide the pane beside the list, or give it the whole screen",
+        cmd: Cmd::Pane,
     },
     Command {
         name: "rules",
@@ -111,15 +94,9 @@ pub const ALL: &[Command] = &[
     },
     Command {
         name: "reload",
-        args: "",
-        what: "re-read the rule files from disk",
+        args: "[rules|shell]",
+        what: "re-read the rule files, or the shell's aliases and functions; both when bare",
         cmd: Cmd::Reload,
-    },
-    Command {
-        name: "reindex",
-        args: "",
-        what: "re-read the shell's aliases and functions",
-        cmd: Cmd::Reindex,
     },
     Command {
         name: "approve",
@@ -141,15 +118,9 @@ pub const ALL: &[Command] = &[
     },
     Command {
         name: "edit",
-        args: "[schedule|reaction]",
-        what: "the selected rule in the form, or a scope's whole rule file",
+        args: "[file|schedule|reaction]",
+        what: "the selected rule in the form or its file, or a scope's whole rule file",
         cmd: Cmd::Edit,
-    },
-    Command {
-        name: "editor",
-        args: "",
-        what: "open the selected rule's file in $EDITOR",
-        cmd: Cmd::Editor,
     },
     Command {
         name: "summarise",
@@ -170,40 +141,22 @@ pub const ALL: &[Command] = &[
         cmd: Cmd::Filter,
     },
     Command {
-        name: "all",
-        args: "",
-        what: "show the whole list (the lens: also tab)",
-        cmd: Cmd::LensAll,
+        name: "lens",
+        args: "all|agents|jobs|reactions",
+        what: "show one kind of run inside the projects (tab steps through them)",
+        cmd: Cmd::Lens,
     },
     Command {
-        name: "agents",
+        name: "prune",
         args: "",
-        what: "the lens: only agent runs",
-        cmd: Cmd::LensAgents,
+        what: "let the journals of old runs go; the runs and their events stay",
+        cmd: Cmd::Prune,
     },
     Command {
-        name: "jobs",
-        args: "",
-        what: "the lens: only what a schedule started",
-        cmd: Cmd::LensJobs,
-    },
-    Command {
-        name: "reactions",
-        args: "",
-        what: "the lens: only what a rule fired",
-        cmd: Cmd::LensReactions,
-    },
-    Command {
-        name: "gc",
-        args: "",
-        what: "let the journals of old runs go",
-        cmd: Cmd::Gc,
-    },
-    Command {
-        name: "add-dir",
+        name: "up",
         args: "<path>",
-        what: "register a folder as a project, so it shows on the list",
-        cmd: Cmd::AddDir,
+        what: "register a folder as a project, as `rl up` does",
+        cmd: Cmd::Up,
     },
     Command {
         name: "help",
@@ -246,19 +199,22 @@ pub fn matching(typed: &str) -> Vec<&'static Command> {
     out
 }
 
-/// A finished line: the command it names, and whatever followed it.
 /// The keyboard shortcut for a command, when it has one, for the commands list
-/// — so `^x` and `^c` are discoverable there, not only in the footer. `^x` is
-/// one key over whatever the cursor is on: it stops a run still going and is
-/// done with an ended one, so both `/stop` and `/done` wear it.
+/// — so every key is discoverable there, not only in the footer. `^x` is one
+/// key over whatever the cursor is on: it stops a run still going and archives
+/// an ended one, so both `/stop` and `/archive` wear it.
 pub fn key(cmd: Cmd) -> &'static str {
     match cmd {
         Cmd::Quit => "^c",
-        Cmd::Stop | Cmd::Done => "^x",
+        Cmd::Stop | Cmd::Archive => "^x",
+        Cmd::Rename => "^r",
+        Cmd::Pane => "^o",
+        Cmd::Shell => "^t",
         _ => "",
     }
 }
 
+/// A finished line: the command it names, and whatever followed it.
 pub fn parse(line: &str) -> Option<(&'static Command, String)> {
     let line = line.trim();
     let line = line.strip_prefix('/').unwrap_or(line).trim_start();
@@ -289,25 +245,26 @@ mod tests {
     }
 
     #[test]
-    fn an_exact_name_beats_a_prefix() {
-        assert_eq!(names("done"), vec!["done", "done-all"]);
-        assert_eq!(names("DONE"), vec!["done", "done-all"]);
+    fn an_exact_name_comes_first() {
+        assert_eq!(names("edit"), vec!["edit"]);
+        assert_eq!(names("EDIT"), vec!["edit"]);
+        // `up` is a name, and sits inside nothing else.
+        assert_eq!(names("up"), vec!["up"]);
     }
 
     #[test]
     fn a_prefix_comes_before_a_name_it_only_sits_inside() {
-        // Only `rules` carries `rule` at all.
-        assert_eq!(names("rule"), vec!["rules"]);
-        // `pa` opens `pause`, and `done-all` has no `pa`.
-        assert_eq!(names("pa"), vec!["pause"]);
+        // `ru` opens `rules` and sits inside `prune`.
+        assert_eq!(names("ru"), vec!["rules", "prune"]);
+        // `pa` opens both of these, alphabetically.
+        assert_eq!(names("pa"), vec!["pane", "pause"]);
     }
 
     #[test]
     fn a_name_matches_by_what_it_contains_too() {
-        // Nothing starts with `ll`; four names carry it, alphabetically.
-        assert_eq!(names("ll"), vec!["all", "done-all", "full", "shell"]);
+        assert_eq!(names("ll"), vec!["shell"]);
         // `it` opens nothing, and sits inside both of these.
-        assert_eq!(names("it"), vec!["edit", "editor", "quit"]);
+        assert_eq!(names("it"), vec!["edit", "quit"]);
     }
 
     #[test]
@@ -330,8 +287,11 @@ mod tests {
     fn a_command_shows_its_key_shortcut_when_it_has_one() {
         assert_eq!(key(Cmd::Quit), "^c");
         assert_eq!(key(Cmd::Stop), "^x");
-        assert_eq!(key(Cmd::Done), "^x");
-        assert_eq!(key(Cmd::Watch), "", "most commands are the slash line, no key");
+        assert_eq!(key(Cmd::Archive), "^x");
+        assert_eq!(key(Cmd::Rename), "^r");
+        assert_eq!(key(Cmd::Pane), "^o");
+        assert_eq!(key(Cmd::Shell), "^t");
+        assert_eq!(key(Cmd::Filter), "", "most commands are the slash line, no key");
     }
 
     #[test]
@@ -355,29 +315,28 @@ mod tests {
         let (c, rest) = parse("/mark   blocked  ").unwrap();
         assert_eq!(c.cmd, Cmd::Mark);
         assert_eq!(rest, "blocked");
+        let (c, rest) = parse("/lens jobs").unwrap();
+        assert_eq!(c.cmd, Cmd::Lens);
+        assert_eq!(rest, "jobs");
     }
 
     #[test]
     fn a_prefix_that_names_one_command_is_enough() {
         assert_eq!(parse("/sum").unwrap().0.cmd, Cmd::Summarise);
         assert_eq!(parse("/q").unwrap().0.cmd, Cmd::Quit);
+        assert_eq!(parse("/ren").unwrap().0.cmd, Cmd::Rename);
+        assert_eq!(parse("/rel").unwrap().0.cmd, Cmd::Reload);
         let (c, rest) = parse("/fi this").unwrap();
         assert_eq!(c.cmd, Cmd::Filter);
         assert_eq!(rest, "this");
-        // `f` opens both `full` and `filter`, so it names neither.
-        assert!(parse("/f").is_none());
-    }
-
-    #[test]
-    fn an_exact_name_wins_over_the_longer_one_it_opens() {
-        assert_eq!(parse("/done").unwrap().0.cmd, Cmd::Done);
-        assert_eq!(parse("/done-all").unwrap().0.cmd, Cmd::DoneAll);
     }
 
     #[test]
     fn an_ambiguous_or_unknown_name_is_nothing() {
-        assert!(parse("/d").is_none());
-        assert!(parse("/e").is_none());
+        // `re` opens `reload` and `rename`; `p` opens three.
+        assert!(parse("/re").is_none());
+        assert!(parse("/p").is_none());
+        assert!(parse("/done").is_none(), "gone: /archive, or /mark done");
         assert!(parse("/nope").is_none());
         assert!(parse("/").is_none());
         assert!(parse("").is_none());
