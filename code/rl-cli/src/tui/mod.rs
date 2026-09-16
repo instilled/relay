@@ -32,8 +32,9 @@ use crate::client::Client;
 use crate::rulefile;
 use anyhow::Result;
 use crossterm::event::{
-    Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags,
-    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
+    KeyboardEnhancementFlags, MouseButton, MouseEvent, MouseEventKind, PopKeyboardEnhancementFlags,
+    PushKeyboardEnhancementFlags,
 };
 use crossterm::terminal::supports_keyboard_enhancement;
 use form::{Act, Form};
@@ -183,6 +184,8 @@ struct App {
     /// because drawing sets them while the rows still borrow the app.
     scroll: std::cell::Cell<usize>,
     list_h: std::cell::Cell<u16>,
+    /// What the list drew last, so the mouse can tell which row it is over.
+    hit: std::cell::RefCell<ListHit>,
     /// The selected row's key (`r:<id>` or `q:<id>`); the cursor follows it
     /// across re-ranks.
     sel: Option<String>,
@@ -275,6 +278,34 @@ fn cand_window(n: usize, h: usize, pick: Option<usize>) -> usize {
         Some(i) => i.saturating_sub(h - 1).min(n - h),
         None => 0,
     }
+}
+
+/// Where the list last drew, so a click can find its row: the area it filled,
+/// how far it was scrolled, and the row key each of its lines carries — `None`
+/// for the blank line a group leaves above itself.
+#[derive(Default)]
+struct ListHit {
+    area: Rect,
+    scroll: usize,
+    keys: Vec<Option<String>>,
+}
+
+impl ListHit {
+    fn has(&self, col: u16, row: u16) -> bool {
+        col >= self.area.x
+            && col < self.area.x + self.area.width
+            && row >= self.area.y
+            && row < self.area.y + self.area.height
+    }
+}
+
+/// The row key on the line under a pointer, if the list drew one there.
+fn hit_row(hit: &ListHit, col: u16, row: u16) -> Option<String> {
+    if !hit.has(col, row) {
+        return None;
+    }
+    let line = hit.scroll + (row - hit.area.y) as usize;
+    hit.keys.get(line).cloned().flatten()
 }
 
 /// One row of the list, to the width: mark, title, state, the summary
@@ -403,11 +434,16 @@ fn enter_screen() -> ratatui::DefaultTerminal {
             PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
         );
     }
+    // The wheel and a click reach the list. This also takes the terminal's own
+    // drag-to-select, so hold shift (option, on macOS) to copy text as before.
+    let _ = crossterm::execute!(std::io::stdout(), EnableMouseCapture);
     term
 }
 
-/// Hand the screen back, popping any enhancement flags we pushed.
+/// Hand the screen back, popping any enhancement flags we pushed and giving
+/// the mouse to whoever we hand the terminal to — an editor, or a run.
 fn leave_screen() {
+    let _ = crossterm::execute!(std::io::stdout(), DisableMouseCapture);
     if kitty_supported() {
         let _ = crossterm::execute!(std::io::stdout(), PopKeyboardEnhancementFlags);
     }
@@ -439,6 +475,7 @@ pub async fn run(home: &Home) -> Result<()> {
         opened: HashSet::new(),
         scroll: std::cell::Cell::new(0),
         list_h: std::cell::Cell::new(0),
+        hit: std::cell::RefCell::default(),
         sel: None,
         pane: Pane::Facts,
         show_pane: false,
@@ -533,6 +570,7 @@ impl App {
                             self.refresh().await;
                         }
                     }
+                    Some(Ok(Event::Mouse(m))) => self.mouse(m).await?,
                     Some(Ok(_)) => {}
                     Some(Err(e)) => return Err(e.into()),
                     None => self.quit = true,
@@ -772,6 +810,31 @@ impl App {
             _ => vec![],
         };
         self.seen(ids).await;
+    }
+
+    /// The wheel steps the selection — the list scrolls to follow the cursor,
+    /// so there is no scroll of its own to move — and a left click puts the
+    /// cursor on the row under the pointer. Both only over the list itself.
+    async fn mouse(&mut self, m: MouseEvent) -> Result<()> {
+        if !matches!(self.mode, Mode::Normal) || !self.hit.borrow().has(m.column, m.row) {
+            return Ok(());
+        }
+        match m.kind {
+            MouseEventKind::ScrollDown => self.step(1),
+            MouseEventKind::ScrollUp => self.step(-1),
+            MouseEventKind::Down(MouseButton::Left) => {
+                // Bound first: the borrow has to be done with before `select`.
+                let key = hit_row(&self.hit.borrow(), m.column, m.row);
+                match key {
+                    Some(key) => self.select(Some(key)),
+                    None => return Ok(()),
+                }
+            }
+            _ => return Ok(()),
+        }
+        self.saw_selected().await;
+        self.refresh().await;
+        Ok(())
     }
 
     fn step(&mut self, by: isize) {
@@ -2303,6 +2366,9 @@ impl App {
 
     fn draw_list(&self, f: &mut Frame, area: Rect, rows: &[Row]) {
         self.list_h.set(area.height);
+        // Cleared here and filled in once the window is known, so a click can
+        // never land on a map left behind by a draw that returned early.
+        *self.hit.borrow_mut() = ListHit::default();
         if rows.is_empty() {
             let msg = if !self.filter.is_empty() {
                 " nothing matches".into()
@@ -2320,6 +2386,9 @@ impl App {
         // at the right — the title column is the screen's share, bounded.
         let tw = (w * 35 / 100).clamp(14, 44);
         let mut lines: Vec<Line> = Vec::with_capacity(rows.len());
+        // One entry per line, in step with `lines`: the row that line belongs
+        // to, for the mouse to find.
+        let mut keys: Vec<Option<String>> = Vec::with_capacity(rows.len());
         let mut sel_line = 0usize;
         for (n, row) in rows.iter().enumerate() {
             let selected = row.key().is_some() && row.key() == self.sel;
@@ -2327,6 +2396,7 @@ impl App {
                 Row::Group(h) => {
                     if n > 0 {
                         lines.push(Line::raw(""));
+                        keys.push(None);
                     }
                     let mut l = vec![Span::raw(" ")];
                     let mut used = 1;
@@ -2460,6 +2530,7 @@ impl App {
                 sel_line = lines.len();
             }
             lines.push(line);
+            keys.push(row.key());
         }
         // The window follows the selection; when there is more either side,
         // the edge line says how much.
@@ -2474,16 +2545,27 @@ impl App {
         let mut shown: Vec<Line> = lines[top..(top + h).min(n)].to_vec();
         if top > 0 {
             shown[0] = Line::from(Span::raw(format!(" ▲ {top} more")).dim());
+            // An edge line gave its place to a count, so it carries no row.
+            keys[top] = None;
         }
         if more_below {
             let left = n - (top + h);
             let i = shown.len() - 1;
             shown[i] = Line::from(Span::raw(format!(" ▼ {left} more")).dim());
+            keys[top + i] = None;
         }
         f.render_widget(Paragraph::new(shown), area);
+        *self.hit.borrow_mut() = ListHit {
+            area,
+            scroll: top,
+            keys,
+        };
     }
 
     fn draw_rules(&self, f: &mut Frame, area: Rect, rows: &[RuleRow]) {
+        // The rules view draws its own rows; until the mouse knows them, it
+        // must not act on the map the work list left behind.
+        *self.hit.borrow_mut() = ListHit::default();
         if rows.is_empty() {
             let msg = if self.filter.is_empty() {
                 " no rules · rl on <event> -- <command>, or rl up in a folder with .relay/"
@@ -2756,9 +2838,34 @@ fn bytes_words(n: u64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{cand_window, group_count, viewport};
+    use super::{ListHit, cand_window, group_count, hit_row, viewport};
     use crate::tui::rows::Chip;
+    use ratatui::layout::Rect;
     use rl_proto::rule::{RuleKind, RuleStatus};
+
+    #[test]
+    fn a_click_finds_the_row_on_the_line_it_fell_on() {
+        let hit = ListHit {
+            area: Rect::new(2, 3, 20, 4),
+            scroll: 1,
+            keys: vec![
+                Some("j:one".into()),   // scrolled out of sight
+                Some("r:two".into()),   // the top line drawn
+                None,                   // the blank a group leaves above itself
+                Some("g:three".into()),
+            ],
+        };
+        assert_eq!(hit_row(&hit, 5, 3), Some("r:two".into()));
+        assert_eq!(hit_row(&hit, 5, 4), None, "the blank above a group owns no row");
+        assert_eq!(hit_row(&hit, 5, 5), Some("g:three".into()));
+        // Off the list on every side.
+        assert_eq!(hit_row(&hit, 1, 3), None);
+        assert_eq!(hit_row(&hit, 22, 3), None);
+        assert_eq!(hit_row(&hit, 5, 2), None);
+        assert_eq!(hit_row(&hit, 5, 7), None);
+        // Inside the area, but past the last line the list drew.
+        assert_eq!(hit_row(&hit, 5, 6), None);
+    }
 
     #[test]
     fn the_candidate_window_follows_the_pick() {
