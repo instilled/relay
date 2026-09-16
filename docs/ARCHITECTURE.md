@@ -198,21 +198,23 @@ into a watcher. Each viewer gets its own holder connection, and the supervisor's
 connection journals regardless — so a viewer leaving costs nothing and the run never notices.
 
 The panel (`rl` with no command, `rl-cli/src/tui`) is the same two calls behind one screen. It
-is one list, the width of the screen, built from `digest.get` (`tui/rows.rs`): questions first,
-then runs by attention, grouped by the folder they belong to, and named — a workspace by the
+is one list, the width of the screen, built from `digest.get` (`tui/rows.rs`): grouped by the
+folder they belong to, the folders in order of name so each keeps its place, and inside one the
+questions first, then runs by attention; and named — a workspace by the
 name it was registered under, a cause as "schedule nightly" or "rule tests-failed", never an id.
 A row is a mark (`✱` needs you, `·` going, `•` ended, `▸` a job), the title, the state as a word,
 the summary to the edge, and the ref and the age at the right. Colour carries the state — a
 saturated accent per state, on the terminal's own foreground so it reads on either theme
 (`tui/theme.rs`). The panel sits in a gutter of air, with a rule between its sections — under the
 header, above the line, above the footer — and the list and its detail pane split by a vertical
-bar; the full-screen terminal drops all of it for the cells. A group's header is its name, then the folder it lives in, then the rules that
+bar — the list takes two thirds beside the details pane, half beside a terminal, which needs the
+width; the full-screen terminal drops all of it for the cells. A group's header is its name, then the folder it lives in, then the rules that
 live there — `↻ nightly 4h · ⚡ tests-failed`, accented and amber when one waits for a yes, with a
 `+N` when more than fit — and, at the right edge, the tally of how many jobs and reactions the
 folder holds; the global rules — the ones in the Relay home, which apply in every folder — get a project row of
 their own, `global`, shown with that home (`~/.relay`) where a folder row shows its folder — always,
-rules or none: it leads the list when one waits for a yes, otherwise it trails with the idle
-projects, and either way the cursor stops on it, `enter` (or `^o`) shows its schedules and
+rules or none: it is always the last project, a yes waiting there or not (its chip says so),
+and the cursor stops on it, `enter` (or `^o`) shows its schedules and
 reactions in the pane, and `^g` opens the graph on them. Runs a schedule or a rule
 started fold, once ended, into one line per job — name, cadence, how many went well, the last
 outcome — so a job firing every thirty seconds is a row, not a screen; a run still going or
@@ -226,18 +228,18 @@ from a header opens the graph on that folder's first rule, and from a job on the
 whatever the cursor is on in place — a folder over `workspace.rename`, which updates the
 registered name and keeps the registration, a run (a shell is one) over `run.rename`, and a job
 through the form of the rule it comes from. A folder you
-`rl up`'d is always on the list, even before anything has run there: its header sits below every
-group with activity, under every lens — a lens narrows what shows inside projects, never which
+`rl up`'d is always on the list, even before anything has run there: its header sits in its
+place by name, under every lens — a lens narrows what shows inside projects, never which
 projects there are — so you can select
-it, read its stats, edit its rules or open its shell (`^t`) from the first. `/up <path>` registers a
+it, read its stats, edit its rules or open its shell (`/shell`) from the first. `/up <path>` registers a
 folder from the line — the panel's `rl up`, over `workspace.up` — and lands the cursor on its new
 row. Moving the cursor onto a row is looking at it;
 `/archive` on an ended run (or a job) is being done with it — `run.archive` sets `runs.archived_at`,
 the digest leaves it out, `rl ls --all` and the ledger keep it — and `/archive seen` does it for
-everything ended that has been looked at, except what is pinned. `^p` (or `/pin`) pins the run under
+everything ended that has been looked at, except what is pinned. `^t` (or `/pin`) pins the run under
 the cursor — `run.pin` sets `runs.pinned_at` — and it stands above every project, in the order
 pinned, named with its folder (`relay › deploy shell`), under every lens and however long ago it
-ended; `^p` again lets it go back, and archiving it by name unpins it. `ctrl-x` is the one keystroke for it, whatever the row,
+ended; `^t` again lets it go back, and archiving it by name unpins it. `ctrl-x` is the one keystroke for it, whatever the row,
 and it asks first: the first press arms it and says what a second would do — remove an ended run
 or a job, stop one still going, dismiss a question — and the second press does it, while any other
 key disarms it, so nothing goes on a single slip (the way an agent view confirms a delete). `ctrl-c`
@@ -333,8 +335,8 @@ is the row under the cursor instead — a job opens, a question comes
 out of the list to be answered by number, a run's terminal opens. Arrows, `home`/`end` and `esc`
 belong to the list; `esc` with something typed clears the line first, and `ctrl-c` leaves.
 The few keys that are not the list's or the line's each stand for a command, and the command
-list shows them beside it: `^x` stops or archives, `^r` renames, `^p` pins, `^g` opens the graph, `^o` shows or hides the pane,
-`^t` opens another shell in the folder. The line keeps `^a`, `^e`, `^u`, `^k` and `^w` for
+list shows them beside it: `^x` stops or archives, `^r` renames, `^t` pins, `^g` opens the graph, `^o` shows or hides the pane.
+A shell is a command like any other — `/shell` — and has no key of its own. The line keeps `^a`, `^e`, `^u`, `^k` and `^w` for
 editing, as a shell does, so none of those is ever taken for anything else.
 
 At the right of the header is the lens — `all · agents · jobs · reactions`, the one in force
