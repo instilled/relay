@@ -825,11 +825,69 @@ impl App {
     }
 
     fn selected_rule(&self) -> Option<&Rule> {
-        if self.view != View::Rules {
+        let key = match self.view {
+            View::Rules => self.sel.clone()?,
+            // A node stands for its rule, or for what its rule runs or asks.
+            View::Graph => self.selected_node()?.rule.clone()?,
+            View::Work => return None,
+        };
+        self.rules.iter().find(|r| rules::key(r) == key)
+    }
+
+    /// The node under the cursor in the graph.
+    fn selected_node(&self) -> Option<&rl_proto::graph::Node> {
+        if self.view != View::Graph {
             return None;
         }
-        let key = self.sel.as_ref()?;
-        self.rules.iter().find(|r| &rules::key(r) == key)
+        self.graph.as_ref()?.node(self.sel.as_deref()?)
+    }
+
+    /// An arrow in the graph: along the wiring, or within a column.
+    fn graph_step(&mut self, dir: graph::Dir) {
+        let next = self
+            .graph_plan()
+            .and_then(|(_, p)| graph::step(&p, self.sel.as_deref(), dir));
+        if next.is_some() {
+            self.select(next);
+        }
+    }
+
+    /// `enter` on a node: answer the question waiting there, run a schedule
+    /// now, or else show what the node is.
+    fn graph_enter(&mut self) {
+        let Some(n) = self.selected_node() else {
+            return;
+        };
+        let waiting = n
+            .waiting
+            .iter()
+            .find(|id| self.digest.decisions.iter().any(|d| &d.id == *id))
+            .cloned();
+        let schedule = match self.selected_rule() {
+            Some(r) if r.kind() == RuleKind::Schedule && !matches!(n.kind, rl_proto::graph::NodeKind::Ask) => Some((
+                r.approved(),
+                ScheduleName {
+                    name: r.name().into(),
+                    scope: Some(r.scope().into()),
+                },
+            )),
+            _ => None,
+        };
+        if let Some(id) = waiting {
+            self.picked.clear();
+            self.pane = Pane::Facts;
+            self.show_pane = true;
+            self.mode = Mode::Answer(id);
+        } else if let Some((approved, name)) = schedule {
+            if approved {
+                self.mode = Mode::Fire(name);
+            } else {
+                self.say("not approved yet: /approve");
+            }
+        } else {
+            self.pane = Pane::Facts;
+            self.show_pane = !self.show_pane;
+        }
     }
 
     /// The rule behind a job row.
@@ -1040,12 +1098,23 @@ impl App {
         {
             Ok(d) => {
                 self.picked.clear();
+                // In the graph the cursor goes on to what the answer runs, a
+                // node there; in the list, to the run it started.
+                let next_node = (self.view == View::Graph && d.chosen.len() == 1)
+                    .then(|| self.sel.as_ref().map(|ask| format!("run:{ask}/{}", d.chosen[0])))
+                    .flatten();
                 self.refresh().await;
                 match d.outcome_runs.first() {
                     Some(r) => {
                         let title = self.run_by_id(r).map(|r| r.title.clone()).unwrap_or_default();
                         self.say(format!("{what} → started {title}"));
-                        self.select(Some(format!("r:{r}")));
+                        if self.view == View::Graph {
+                            if next_node.as_ref().is_some_and(|id| self.keys().contains(id)) {
+                                self.select(next_node);
+                            }
+                        } else {
+                            self.select(Some(format!("r:{r}")));
+                        }
                     }
                     None => self.say(format!("answered {what}")),
                 }
@@ -1806,6 +1875,20 @@ impl App {
             self.cycle_lens(if k.code == KeyCode::BackTab { -1 } else { 1 });
             return Ok(());
         }
+        // In the graph, with nothing typed, left and right follow the wiring
+        // rather than move a cursor through an empty line.
+        if self.view == View::Graph
+            && self.line.is_empty()
+            && matches!(self.mode, Mode::Normal)
+            && matches!(k.code, KeyCode::Left | KeyCode::Right)
+        {
+            self.graph_step(if k.code == KeyCode::Left {
+                graph::Dir::Left
+            } else {
+                graph::Dir::Right
+            });
+            return Ok(());
+        }
         // Candidates on offer: the arrows walk them, not the list.
         if self.cands().is_some() && matches!(k.code, KeyCode::Up | KeyCode::Down) {
             self.walk_cands(if k.code == KeyCode::Down { 1 } else { -1 });
@@ -1925,6 +2008,8 @@ impl App {
                     self.toggle_graph().await;
                 }
             }
+            (KeyCode::Down, _) if self.view == View::Graph => self.graph_step(graph::Dir::Down),
+            (KeyCode::Up, _) if self.view == View::Graph => self.graph_step(graph::Dir::Up),
             (KeyCode::Down, _) => {
                 self.step(1);
                 self.saw_selected().await;
@@ -1962,6 +2047,10 @@ impl App {
 
     /// `enter` on an empty line: whatever the row under the cursor is for.
     async fn enter_row(&mut self, area: Rect) -> Result<()> {
+        if self.view == View::Graph {
+            self.graph_enter();
+            return Ok(());
+        }
         // A run under the cursor: watch it as a tile, or — if it is already the
         // tile — take the real terminal (a live run only; ended runs are just
         // read). Taking it hands over the terminal, so `main_loop` does it once
@@ -2915,6 +3004,22 @@ impl App {
             return;
         }
         let now = Timestamp::now();
+        if let (Some(g), Some(n)) = (self.graph.as_ref(), self.selected_node()) {
+            let rule = self.selected_rule();
+            let last = rule
+                .and_then(|r| r.last_run())
+                .and_then(|id| self.run_by_id(id))
+                .map(|x| x.title.as_str());
+            // The one being answered, or else the first still waiting.
+            let asking = match &self.mode {
+                Mode::Answer(id) => Some(id.as_str()),
+                _ => n.waiting.first().map(String::as_str),
+            };
+            let q = asking.and_then(|id| self.digest.decisions.iter().find(|d| d.id == id));
+            let lines = graph::pane_lines(g, n, rule, last, q, &self.picked, &self.names, now);
+            f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
+            return;
+        }
         if let Some(r) = self.selected_rule() {
             let last = r.last_run().and_then(|id| self.run_by_id(id)).map(|x| x.title.as_str());
             let lines = rules::lines(r, &self.names, now, last);
@@ -3033,6 +3138,32 @@ impl App {
             }
             return s;
         }
+        if self.view == View::Graph {
+            let pane = if self.show_pane {
+                "^o hides details"
+            } else {
+                "^o details"
+            };
+            let mut s = String::new();
+            if self.selected_node().is_some_and(|n| !n.waiting.is_empty()) {
+                s.push_str("enter answers it · ");
+            } else if let Some(r) = self.selected_rule() {
+                if r.status() == RuleStatus::NeedsApproval {
+                    s.push_str("/approve · ");
+                }
+                if r.kind() == RuleKind::Schedule {
+                    s.push_str("enter runs it now · ");
+                }
+                s.push_str(if r.paused() {
+                    "/pause lets it run · "
+                } else {
+                    "/pause · "
+                });
+                s.push_str("/edit · ");
+            }
+            s.push_str(&format!("←→ follows the wiring · {pane} · ^g back"));
+            return s;
+        }
         if let Some(r) = self.selected_rule() {
             let mut s = String::new();
             if r.status() == RuleStatus::NeedsApproval {
@@ -3047,9 +3178,6 @@ impl App {
         }
         if self.view == View::Rules {
             return "/new a rule · /reload · /rules back · or type something to run here".into();
-        }
-        if self.view == View::Graph {
-            return "↑↓ steps through it · /filter narrows to what touches a folder · ^g or esc back".into();
         }
         let pane = if self.show_pane {
             "^o hides details"

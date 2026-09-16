@@ -635,9 +635,18 @@ draws it, pure from a `Graph` to a grid of styled cells:
   nothing raised yet. Every glyph is one column wide, so borders stay in line. The border turns
   red when the last run failed and dims when the rule is paused. `!` marks a rule waiting for
   approval.
-- **Selection and filter.** Arrows step through the nodes column by column; the window pans to
-  keep the selected one in view, and its edges are lit. `/filter` keeps what matches (name,
-  folder, when) plus everything upstream and downstream of it.
+- **Moving.** `←` and `→` follow the wiring, to what feeds the selected node or what it feeds,
+  taking the nearest in height. `↑` and `↓` stay in the column, and reach the nearest box above
+  or below when the column has none. The window pans to keep the selection in view, and its
+  edges are lit. `/filter` keeps what matches (name, folder, when) plus everything upstream and
+  downstream of it.
+- **Acting on a node.** A node stands for its rule, or for what its rule runs or asks, so
+  `/approve`, `/pause` and `/edit` work on it as in the rules view. `enter` on a question with
+  someone waiting takes it out to be answered by number in the pane, the same as in the list,
+  and the cursor goes on to what the answer ran. `enter` on a schedule, or on its command,
+  offers to run it now. Anywhere else, `enter` (or `^o`) shows the node in the pane: what it
+  is, its rule as the rules view shows it, how its runs went, and what it is wired to on
+  either side.
 
 ---
 
