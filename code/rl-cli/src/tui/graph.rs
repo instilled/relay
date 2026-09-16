@@ -762,6 +762,165 @@ pub fn draw(g: &Graph, p: &Plan, names: &Names, sel: Option<&str>, now: Timestam
     c
 }
 
+/// Which way an arrow moves the selection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Dir {
+    Up,
+    Down,
+    Left,
+    Right,
+}
+
+/// Where an arrow goes from the selected node. Left and right follow the
+/// wiring — to what feeds it, or what it feeds — picking the one nearest in
+/// height; up and down stay in the column, and reach the nearest box above
+/// or below elsewhere when the column has none. Nothing that way: stay.
+pub fn step(p: &Plan, sel: Option<&str>, dir: Dir) -> Option<String> {
+    let Some(cur) = sel.and_then(|s| p.get(s)) else {
+        return p.order().into_iter().next();
+    };
+    let mid = |b: &Placed| b.y as isize + b.h as isize / 2;
+    let centre = |b: &Placed| b.x as isize + b.w as isize / 2;
+    let nearest = |cands: Vec<&Placed>| {
+        cands
+            .into_iter()
+            .min_by_key(|b| ((mid(b) - mid(cur)).abs(), (centre(b) - centre(cur)).abs(), b.id.clone()))
+            .map(|b| b.id.clone())
+    };
+    match dir {
+        Dir::Left | Dir::Right => {
+            let ids: Vec<&str> = p
+                .routes
+                .iter()
+                .filter_map(|r| match dir {
+                    Dir::Right if r.from == cur.id => Some(r.to.as_str()),
+                    Dir::Left if r.to == cur.id => Some(r.from.as_str()),
+                    _ => None,
+                })
+                .collect();
+            nearest(p.boxes.iter().filter(|b| ids.contains(&b.id.as_str())).collect())
+        }
+        Dir::Up | Dir::Down => {
+            let past = |b: &Placed| match dir {
+                Dir::Up => mid(b) < mid(cur),
+                _ => mid(b) > mid(cur),
+            };
+            let column: Vec<&Placed> = p.boxes.iter().filter(|b| b.rank == cur.rank && past(b)).collect();
+            if column.is_empty() {
+                nearest(p.boxes.iter().filter(|b| past(b)).collect())
+            } else {
+                nearest(column)
+            }
+        }
+    }
+}
+
+/// A kind of node, in a word.
+fn kind_word(k: NodeKind) -> &'static str {
+    match k {
+        NodeKind::Schedule => "schedule",
+        NodeKind::Reaction => "reaction",
+        NodeKind::Ask => "question",
+        NodeKind::Shell => "command",
+        NodeKind::Agent => "agent",
+        NodeKind::Event => "event",
+        NodeKind::Outside => "outside",
+    }
+}
+
+/// What the pane says about the selected node: what it is, its rule as the
+/// rules list would show it, what it is wired to either side, and — on a
+/// question — the first one waiting, numbered to answer.
+#[allow(clippy::too_many_arguments)]
+pub fn pane_lines(
+    g: &Graph,
+    n: &Node,
+    rule: Option<&rl_proto::rule::Rule>,
+    last_run: Option<&str>,
+    waiting: Option<&rl_proto::decision::Decision>,
+    picked: &[usize],
+    names: &Names,
+    now: Timestamp,
+) -> Vec<Line<'static>> {
+    let mut lines = vec![Line::from(vec![
+        Span::styled(format!(" {} ", glyph(n.kind)), colour(n.kind)),
+        Span::styled(n.name.clone(), theme::name()),
+    ])];
+    let place = folder_word(n, names);
+    let mut what = kind_word(n.kind).to_string();
+    if !place.is_empty() {
+        what.push_str(&format!(" · {place}"));
+    }
+    lines.push(Line::from(Span::styled(format!(" {what}"), theme::dim())));
+    if matches!(n.kind, NodeKind::Shell | NodeKind::Agent) {
+        let mut spans = vec![Span::raw(format!(" {}", tally(n)))];
+        if let Some(at) = n.runs.last_at {
+            spans.push(Span::raw(format!(" · latest {} ago", fmt_age(at, now))));
+        }
+        spans.push(Span::styled(format!(" · past {}", fmt_age(g.since, now)), theme::dim()));
+        lines.push(Line::from(spans));
+    }
+    if let Some(q) = waiting {
+        lines.push(Line::raw(""));
+        let more = n.waiting.len().saturating_sub(1);
+        lines.extend(super::pane::question_lines(q, None, picked, now));
+        if more > 0 {
+            lines.push(Line::from(Span::styled(
+                format!(" and {more} more waiting"),
+                theme::dim(),
+            )));
+        }
+    }
+    if let Some(r) = rule {
+        lines.push(Line::raw(""));
+        if matches!(n.kind, NodeKind::Schedule | NodeKind::Reaction) {
+            lines.extend(super::rules::lines(r, names, now, last_run));
+        } else {
+            lines.push(Line::from(vec![
+                Span::styled(" from ", theme::dim()),
+                Span::raw(format!("{} {}", r.kind(), r.name())),
+            ]));
+        }
+    }
+    let side = |into: bool| -> Vec<Line<'static>> {
+        g.edges
+            .iter()
+            .filter(|e| if into { e.to == n.id } else { e.from == n.id })
+            .filter_map(|e| {
+                let other = g.node(if into { &e.from } else { &e.to })?;
+                let mut label = e.label.clone();
+                if e.count > 0 {
+                    label = if label.is_empty() {
+                        format!("×{}", e.count)
+                    } else {
+                        format!("{label} ×{}", e.count)
+                    };
+                }
+                Some(Line::from(vec![
+                    Span::styled(if into { "  ← " } else { "  → " }, theme::dim()),
+                    Span::styled(format!("{} ", glyph(other.kind)), colour(other.kind)),
+                    Span::raw(other.name.clone()),
+                    Span::styled(
+                        if label.is_empty() {
+                            String::new()
+                        } else {
+                            format!("  {label}")
+                        },
+                        theme::dim(),
+                    ),
+                ]))
+            })
+            .collect()
+    };
+    let (ins, outs) = (side(true), side(false));
+    if !ins.is_empty() || !outs.is_empty() {
+        lines.push(Line::raw(""));
+        lines.extend(ins);
+        lines.extend(outs);
+    }
+    lines
+}
+
 /// The headline over the graph.
 pub fn headline(g: &Graph, kept: usize, filter: &str) -> String {
     let rules = g
@@ -953,6 +1112,50 @@ mod tests {
         let kept = keep(&g, "advisory", &names());
         assert!(["s", "s.run", "r", "a", "a.note"].iter().all(|id| kept.contains(*id)));
         assert!(!kept.contains("shells"));
+    }
+
+    #[test]
+    fn arrows_follow_the_wiring_and_the_columns() {
+        let g = weather();
+        let p = plan(&g, &all(&g), &names(), now());
+        let go = |from: &str, dir| step(&p, Some(from), dir);
+        // Along the wiring, both ways.
+        assert_eq!(go("s", Dir::Right).as_deref(), Some("s.run"));
+        assert_eq!(go("r", Dir::Right).as_deref(), Some("a"));
+        assert_eq!(go("a", Dir::Left).as_deref(), Some("r"));
+        // Two feed tell-me: left goes to the nearer in height.
+        let near = go("t", Dir::Left).unwrap();
+        let (t, n) = (p.get("t").unwrap(), p.get(&near).unwrap());
+        for other in ["s.run", "shells"] {
+            let o = p.get(other).unwrap();
+            let d = |b: &Placed| (b.y as isize + b.h as isize / 2 - (t.y as isize + t.h as isize / 2)).abs();
+            assert!(d(n) <= d(o), "{near} is not the nearest feeder");
+        }
+        // Nothing further: stay put.
+        assert_eq!(go("a.note", Dir::Right), None);
+        assert_eq!(go("s", Dir::Left), None);
+        // Up and down keep to the column.
+        assert_eq!(go("s", Dir::Down).as_deref(), Some("shells"));
+        assert_eq!(go("shells", Dir::Up).as_deref(), Some("s"));
+        // No selection yet: the first node.
+        assert_eq!(step(&p, None, Dir::Down).as_deref(), Some("s"));
+    }
+
+    #[test]
+    fn the_pane_says_what_a_node_is_and_what_it_is_wired_to() {
+        let g = weather();
+        let r = g.node("r").unwrap();
+        let text: Vec<String> = pane_lines(&g, r, None, None, None, &[], &names(), now())
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+            .collect();
+        assert_eq!(text[0], " ↯ advisory");
+        assert_eq!(text[1], " reaction · relay");
+        assert!(
+            text.iter().any(|l| l == "  ← ❯ check-weather  weather.alert ×3"),
+            "{text:#?}"
+        );
+        assert!(text.iter().any(|l| l == "  → ◇ add a note?  ×3"), "{text:#?}");
     }
 
     #[test]
