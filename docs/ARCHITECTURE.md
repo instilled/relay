@@ -230,10 +230,12 @@ folder from the line — the panel's `rl up`, over `workspace.up` — and lands 
 row. Moving the cursor onto a row is looking at it;
 `/done` on an ended run (or a job) is being done with it — `run.archive` sets `runs.archived_at`,
 the digest leaves it out, `rl ls --all` and the ledger keep it — and `/done-all` is done with
-everything ended that has been looked at. `ctrl-x` is the one keystroke for it, whatever the row:
-an ended run or a job is archived at once, a run still going is stopped first (a second `ctrl-x`
-once it has ended archives it), a question is dismissed. Nothing is destroyed by any of this;
-that is retention's alone. Ended runs also leave on their own after a day;
+everything ended that has been looked at. `ctrl-x` is the one keystroke for it, whatever the row,
+and it asks first: the first press arms it and says what a second would do — remove an ended run
+or a job, stop one still going, dismiss a question — and the second press does it, while any other
+key disarms it, so nothing goes on a single slip (the way an agent view confirms a delete). `ctrl-c`
+is the same for leaving: once to ask, again to quit. A run still going is stopped, and a `ctrl-x`
+once it has ended removes it. Nothing is destroyed by any of this; that is retention's alone. Ended runs also leave on their own after a day;
 `/done` is for the impatient. On the line: `rl done <id>…`, `rl done --all`. Nothing is ever deleted here; that is
 retention (§7). `enter` on a run opens its terminal, watching: a re-render of the run's output
 through a `vt100` screen (`tui/term.rs`), shown as a tile beside the list — the list stays, the
