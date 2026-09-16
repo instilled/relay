@@ -51,8 +51,13 @@ pub fn state(s: RunState) -> Style {
     }
 }
 
-/// The selected row: the terminal reverses whatever colours the row already
-/// has, which reads on both themes without a colour of its own.
+/// The selected row: a band of its own — deep teal under near-white, both
+/// stated outright so it reads the same on a light terminal and a dark one.
+/// Reverse video, which this used to use, borrows whatever colours the row
+/// already has and came out harsh. A span with a colour of its own — a run's
+/// state — still wins over the band's foreground.
 pub fn selected() -> Style {
-    Style::default().add_modifier(Modifier::REVERSED)
+    Style::default()
+        .bg(Color::Rgb(0x1D, 0x3A, 0x33))
+        .fg(Color::Rgb(0xE8, 0xF0, 0xED))
 }
