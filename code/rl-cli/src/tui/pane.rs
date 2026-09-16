@@ -212,7 +212,7 @@ pub fn global_lines(rules: &[Rule], home: &str, now: Timestamp) -> Vec<Line<'sta
     lines.extend(rules_section(rules, None, now));
     lines.push(Line::raw(""));
     lines.push(Line::from(
-        Span::raw(" /rules edits the global schedules & reactions").dim(),
+        Span::raw(" ^g shows them in the wiring · /edit schedule edits the file").dim(),
     ));
     lines
 }
@@ -227,7 +227,7 @@ fn rules_section(rules: &[Rule], workspace: Option<&std::path::Path>, now: Times
     let mut lines = vec![Line::raw(""), Line::from(Span::raw(" rules").dim())];
     if chips.is_empty() {
         lines.push(Line::from(
-            Span::raw("   none · /rules adds schedules & reactions").dim(),
+            Span::raw("   none · /new adds a schedule or reaction").dim(),
         ));
     } else {
         for (label, group) in [("schedule", &sched), ("reaction", &react)] {
@@ -290,7 +290,7 @@ pub fn project_lines(
     lines.extend(rules_section(rules, Some(workspace), now));
     lines.push(Line::raw(""));
     lines.push(Line::from(
-        Span::raw(" /rules edits schedules & reactions · ^r renames").dim(),
+        Span::raw(" ^g shows its wiring · /edit schedule edits the file · ^r renames").dim(),
     ));
     lines
 }

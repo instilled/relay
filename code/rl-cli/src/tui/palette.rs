@@ -16,7 +16,6 @@ pub enum Cmd {
     Rename,
     Pin,
     Pane,
-    Rules,
     Graph,
     Reload,
     Approve,
@@ -93,12 +92,6 @@ pub const ALL: &[Command] = &[
         args: "[full]",
         what: "show or hide the pane beside the list, or give it the whole screen",
         cmd: Cmd::Pane,
-    },
-    Command {
-        name: "rules",
-        args: "",
-        what: "go to the rules of this folder",
-        cmd: Cmd::Rules,
     },
     Command {
         name: "graph",
@@ -270,8 +263,8 @@ mod tests {
 
     #[test]
     fn a_prefix_comes_before_a_name_it_only_sits_inside() {
-        // `ru` opens `rules` and sits inside `prune`.
-        assert_eq!(names("ru"), vec!["rules", "prune"]);
+        // `ap` opens `approve` and sits inside `graph`.
+        assert_eq!(names("ap"), vec!["approve", "graph"]);
         // `pa` opens both of these, alphabetically.
         assert_eq!(names("pa"), vec!["pane", "pause"]);
     }

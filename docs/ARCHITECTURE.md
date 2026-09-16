@@ -213,15 +213,16 @@ folder holds; the global rules — the ones in the Relay home, which apply in ev
 their own, `global`, shown with that home (`~/.relay`) where a folder row shows its folder — always,
 rules or none: it leads the list when one waits for a yes, otherwise it trails with the idle
 projects, and either way the cursor stops on it, `enter` (or `^o`) shows its schedules and
-reactions in the pane, and `/rules` opens them. Runs a schedule or a rule
+reactions in the pane, and `^g` opens the graph on them. Runs a schedule or a rule
 started fold, once ended, into one line per job — name, cadence, how many went well, the last
 outcome — so a job firing every thirty seconds is a row, not a screen; a run still going or
 waiting on you is never folded, and `enter` on a job opens it to its last twenty. When the list
 is taller than the screen, its first and last lines say how much is above and below. A group's
 header says which folder it is in, and the cursor stops on it like any other row: `enter` (or
 `^o`) turns the pane into the project's own — the folder, how its runs stand (needs-you /
-going / done), when it last stirred, and the schedules and reactions that live there. `/rules`
-from a header drops into the rules view filtered to that folder; `^r` (or `/rename`) renames
+going / done), when it last stirred, and the schedules and reactions that live there. `^g`
+from a header opens the graph on that folder's first rule, and from a job on the job's own;
+`^r` (or `/rename`) renames
 whatever the cursor is on in place — a folder over `workspace.rename`, which updates the
 registered name and keeps the registration, a run (a shell is one) over `run.rename`, and a job
 through the form of the rule it comes from. A folder you
@@ -324,11 +325,11 @@ spot), and typing anything clears the highlight so `enter` submits the line as b
 
 Because letters go into the line, everything that is not typing is a `/` command
 (`tui/palette.rs`), offered as you type it: `/stop`, `/archive [seen]`, `/mark`, `/join`,
-`/shell`, `/rename`, `/pin`, `/pane [full]`, `/rules`, `/graph`, `/reload [rules|shell]`, `/approve` and `/pause`,
+`/shell`, `/rename`, `/pin`, `/pane [full]`, `/graph`, `/reload [rules|shell]`, `/approve` and `/pause`,
 `/new`, `/edit [file|schedule|reaction]`, `/summarise`, `/ask`, `/filter`, `/lens`, `/prune`,
 `/up`, `/help`, `/quit`. One name per act: a variant of an act is an argument to it rather than a
 command of its own, and no word means two things — `done` is only ever what `/mark` says. `enter` on an empty line
-is the row under the cursor instead — a job opens, a schedule offers to fire, a question comes
+is the row under the cursor instead — a job opens, a question comes
 out of the list to be answered by number, a run's terminal opens. Arrows, `home`/`end` and `esc`
 belong to the list; `esc` with something typed clears the line first, and `ctrl-c` leaves.
 The few keys that are not the list's or the line's each stand for a command, and the command
@@ -558,7 +559,7 @@ a YAML parser, because an agent writes `run: claude fix it: now` and means it) a
 form. In the panel that is the same form `/new` and `/edit` open, with the assistant's answer in
 it and a line saying who drafted it; `rl interpret` prints the draft with `# by <agent> · run <id>` and does
 nothing, or with `--go` starts the run or writes the rule on the line, `cause: manual`, since the
-go was yours. When the words are typed with a rule under the cursor in the rules view, the
+go was yours. When the words are typed with a rule's node under the cursor in the graph, the
 prompt carries that rule as it stands and asks for the whole rule as it should be. An answer without a `kind:`
 is an error that quotes what the agent said. Interpretation is a run, so it is in the list, in
 `rl ls --all`, in the journal, and under retention like everything else; nothing about it is
@@ -616,8 +617,9 @@ went in the window. The edges are of two kinds:
 `emits: [logs.error]` on a schedule or reaction is only for the graph: it wires a command
 before it has ever raised anything.
 
-In the panel, `/graph` (or `^g`) swaps the list for the graph, and `^g` or `esc` goes back to
-wherever it was opened from; each view keeps its own selection. `tui/graph.rs` lays it out and
+In the panel, `/graph` (or `^g`) swaps the list for the graph, and `^g` or `esc` goes back;
+each keeps its own selection. The graph is where rules are seen: there is no separate rules
+list any more, and the project rows' chips are the list's glimpse of them. `tui/graph.rs` lays it out and
 draws it, pure from a `Graph` to a grid of styled cells:
 
 - **Layered, by connection.** A node's column is one past the furthest thing that feeds it,
@@ -641,11 +643,11 @@ draws it, pure from a `Graph` to a grid of styled cells:
   edges are lit. `/filter` keeps what matches (name, folder, when) plus everything upstream and
   downstream of it.
 - **Acting on a node.** A node stands for its rule, or for what its rule runs or asks, so
-  `/approve`, `/pause` and `/edit` work on it as in the rules view. `enter` on a question with
+  `/approve`, `/pause` and `/edit` work on it. `enter` on a question with
   someone waiting takes it out to be answered by number in the pane, the same as in the list,
   and the cursor goes on to what the answer ran. `enter` on a schedule, or on its command,
   offers to run it now. Anywhere else, `enter` (or `^o`) shows the node in the pane: what it
-  is, its rule as the rules view shows it, how its runs went, and what it is wired to on
+  is, its rule in words (when, what, where, which version you approved), how its runs went, and what it is wired to on
   either side.
 
 ---
