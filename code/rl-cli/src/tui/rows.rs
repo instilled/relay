@@ -11,6 +11,8 @@
 //! outcome — so a job firing every thirty seconds is one row, not a screen.
 //! A run still going, or waiting on you, is never folded; `enter` on a job
 //! opens it to its recent runs.
+//!
+//! Pinned runs come before all of it, in the order they were pinned.
 
 use crate::rank;
 use jiff::{SignedDuration, Timestamp};
@@ -502,6 +504,10 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
         hit: bool,
     }
     let mut jobs_acc: Vec<JobAcc<'a>> = Vec::new();
+    // Pinned runs stand above everything, however old, whatever the lens —
+    // kept on purpose, so neither a day nor a slice takes them away. Only the
+    // filter does, as with anything else.
+    let mut pinned: Vec<&'a DigestItem> = Vec::new();
     for q in &d.decisions {
         let asker = q.run.as_deref().and_then(run_by_id);
         let key = asker
@@ -516,6 +522,17 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
     }
     for i in &d.items {
         let r = &i.run;
+        if r.pinned_at.is_some() {
+            if hit(&[
+                &r.title,
+                &names.group(&r.group_key()),
+                r.cli.as_deref().unwrap_or(""),
+                &i.summary,
+            ]) {
+                pinned.push(i);
+            }
+            continue;
+        }
         let live = !r.state.is_terminal() || i.unseen || r.ended_at.is_some_and(|t| now.duration_since(t) <= RECENT);
         if !live {
             continue;
@@ -583,7 +600,8 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
     groups.sort_by(|a, b| a.score().cmp(&b.score()).then_with(|| b.latest().cmp(&a.latest())));
     // Which folders already have a line, so idle projects don't double up.
     let shown: HashSet<PathBuf> = groups.iter().map(|g| g.workspace.clone()).collect();
-    let mut rows = Vec::new();
+    pinned.sort_by_key(|i| (i.run.pinned_at, i.run.id.clone()));
+    let mut rows: Vec<Row<'a>> = pinned.into_iter().map(Row::Run).collect();
     // Your own (global) rules get a line of their own — a project row for the
     // things that live outside any folder. It leads the list only when one of
     // them waits for a yes; otherwise it trails, with the idle projects, so it
@@ -855,6 +873,52 @@ mod tests {
         // Jobs and reactions are by cause.
         assert_eq!(runs(Lens::Jobs), ["sched"]);
         assert_eq!(runs(Lens::Reactions), ["react"]);
+    }
+
+    #[test]
+    fn pinned_runs_stand_above_everything_however_old_whatever_the_lens() {
+        let now: Timestamp = "2026-09-10T12:00:00Z".parse().unwrap();
+        let mut old = item(
+            "old01",
+            RunState::Finished,
+            "/home/f/api",
+            "2026-09-01T10:00:00Z",
+            false,
+        );
+        old.run.pinned_at = Some("2026-09-02T10:00:00Z".parse().unwrap());
+        let mut shell = item(
+            "shell",
+            RunState::Working,
+            "/home/f/relay",
+            "2026-09-10T11:00:00Z",
+            false,
+        );
+        shell.run.kind = RunKind::Shell;
+        shell.run.pinned_at = Some("2026-09-03T10:00:00Z".parse().unwrap());
+        let d = Digest {
+            since: now,
+            items: vec![
+                shell,
+                item("fail1", RunState::Failed, "/home/f/relay", "2026-09-10T11:30:00Z", true),
+                old,
+            ],
+            decisions: vec![question("q1", "/home/f/relay", Some("fail1"), "2026-09-10T11:31:00Z")],
+        };
+        let names = Names::new([
+            (PathBuf::from("/home/f/relay"), "relay".to_string()),
+            (PathBuf::from("/home/f/api"), "api".to_string()),
+        ]);
+        // In the order they were pinned, ahead even of a question; a week-old
+        // run stays, and its folder, with nothing else to show, trails.
+        assert_eq!(
+            keys(&build_with(&d, &names, "", now)),
+            ["r:old01", "r:shell", "[relay]", "q:q1", "r:fail1", "[api]", "[global]"]
+        );
+        // No lens takes a pin away.
+        let jobs = lens_build(&d, &names, Lens::Jobs, now);
+        assert_eq!(&keys(&jobs)[..2], ["r:old01", "r:shell"]);
+        // The filter does, and matches a pin by its folder too.
+        assert_eq!(keys(&build_with(&d, &names, "api", now)), ["r:old01", "[api]"]);
     }
 
     #[test]

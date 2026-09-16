@@ -147,6 +147,14 @@ async fn rename_gives_a_run_a_new_title() {
     let got: Run = c.ok("run.get", json!({"id": "k7x2m9qa"})).await;
     assert_eq!(got.title, "deploy shell");
 
+    // `^p` is the same kind of call: it answers with the run as it now stands.
+    let pinned: Run = c.ok("run.pin", json!({"id": "k7x2m9qa", "pinned": true})).await;
+    assert!(pinned.pinned_at.is_some());
+    let unpinned: Run = c.ok("run.pin", json!({"id": "k7x2m9qa", "pinned": false})).await;
+    assert_eq!(unpinned.pinned_at, None);
+    let missing = c.call("run.pin", json!({"id": "zzzzzzzz", "pinned": true})).await;
+    assert_eq!(missing.error.unwrap().code, RpcError::NOT_FOUND);
+
     let missing = c.call("run.rename", json!({"id": "zzzzzzzz", "title": "x"})).await;
     assert_eq!(missing.error.unwrap().code, RpcError::NOT_FOUND);
     let bad = c.call("run.rename", json!({"id": "k7x2m9qa"})).await;

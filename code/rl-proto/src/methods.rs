@@ -336,6 +336,21 @@ impl Method for RunArchive {
     type Result = usize;
 }
 
+/// Keeps a run at the top of the panel, or lets it go back among the rest.
+/// Answers with the run as it now stands.
+pub struct RunPin;
+impl Method for RunPin {
+    const NAME: &'static str = "run.pin";
+    type Params = RunPinParams;
+    type Result = crate::types::Run;
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunPinParams {
+    pub id: String,
+    pub pinned: bool,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RunArchiveParams {
     #[serde(default)]

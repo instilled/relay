@@ -233,7 +233,10 @@ folder from the line — the panel's `rl up`, over `workspace.up` — and lands 
 row. Moving the cursor onto a row is looking at it;
 `/archive` on an ended run (or a job) is being done with it — `run.archive` sets `runs.archived_at`,
 the digest leaves it out, `rl ls --all` and the ledger keep it — and `/archive seen` does it for
-everything ended that has been looked at. `ctrl-x` is the one keystroke for it, whatever the row,
+everything ended that has been looked at, except what is pinned. `^p` (or `/pin`) pins the run under
+the cursor — `run.pin` sets `runs.pinned_at` — and it stands above every project, in the order
+pinned, named with its folder (`relay › deploy shell`), under every lens and however long ago it
+ended; `^p` again lets it go back, and archiving it by name unpins it. `ctrl-x` is the one keystroke for it, whatever the row,
 and it asks first: the first press arms it and says what a second would do — remove an ended run
 or a job, stop one still going, dismiss a question — and the second press does it, while any other
 key disarms it, so nothing goes on a single slip (the way an agent view confirms a delete). `ctrl-c`
@@ -321,7 +324,7 @@ spot), and typing anything clears the highlight so `enter` submits the line as b
 
 Because letters go into the line, everything that is not typing is a `/` command
 (`tui/palette.rs`), offered as you type it: `/stop`, `/archive [seen]`, `/mark`, `/join`,
-`/shell`, `/rename`, `/pane [full]`, `/rules`, `/reload [rules|shell]`, `/approve` and `/pause`,
+`/shell`, `/rename`, `/pin`, `/pane [full]`, `/rules`, `/reload [rules|shell]`, `/approve` and `/pause`,
 `/new`, `/edit [file|schedule|reaction]`, `/summarise`, `/ask`, `/filter`, `/lens`, `/prune`,
 `/up`, `/help`, `/quit`. One name per act: a variant of an act is an argument to it rather than a
 command of its own, and no word means two things — `done` is only ever what `/mark` says. `enter` on an empty line
@@ -329,7 +332,7 @@ is the row under the cursor instead — a job opens, a schedule offers to fire, 
 out of the list to be answered by number, a run's terminal opens. Arrows, `home`/`end` and `esc`
 belong to the list; `esc` with something typed clears the line first, and `ctrl-c` leaves.
 The few keys that are not the list's or the line's each stand for a command, and the command
-list shows them beside it: `^x` stops or archives, `^r` renames, `^o` shows or hides the pane,
+list shows them beside it: `^x` stops or archives, `^r` renames, `^p` pins, `^o` shows or hides the pane,
 `^t` opens another shell in the folder. The line keeps `^a`, `^e`, `^u`, `^k` and `^w` for
 editing, as a shell does, so none of those is ever taken for anything else.
 
