@@ -89,6 +89,14 @@ impl Line {
                 self.text.insert(self.cursor, '\n');
                 self.cursor += 1;
             }
+            // A line feed is shift-enter too, where the terminal is set to send
+            // one for it (iTerm2's shift-return mapping) — it passes through
+            // tmux untouched, where a reported modifier would not. Raw mode
+            // reads the byte as ctrl-j, which is the same key.
+            KeyCode::Char('j') if ctrl => {
+                self.text.insert(self.cursor, '\n');
+                self.cursor += 1;
+            }
             KeyCode::Enter => return Act::Submit,
             KeyCode::Esc => return Act::Cancel,
             KeyCode::Tab => return Act::Complete,
@@ -397,6 +405,11 @@ mod tests {
         // Alt-enter does the same, for terminals that send that instead.
         assert_eq!(l.key(&KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT)), Act::Typing);
         assert_eq!(l.rows(), 3);
+        // A terminal that sends a line feed for shift-enter: raw mode reads it
+        // as ctrl-j, and it adds a line as well.
+        let line_feed = KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL);
+        assert_eq!(l.key(&line_feed), Act::Typing);
+        assert_eq!(l.rows(), 4);
         // Plain enter still sends.
         assert_eq!(l.key(&KeyEvent::from(KeyCode::Enter)), Act::Submit);
         // Backspace joins the lines back.
