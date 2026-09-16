@@ -7,7 +7,6 @@ Goal for v1:
 
 ## Open — in the order they'd be built
 
-* [ ] ctrl-x should ask to delete hitting it a second time delete -> same as claude agent view. and ctrl-c dito
 * [ ] persistent project shell — multiple shells per project + switching between them ("panes", not a multiplexer); per-command facts via shell prompt integration (OSC 133 / precmd) so exit codes and history survive; a distinct "shell" presentation in the list
 * [ ] agent-attach reliability — join a just-spawned holder without bouncing back to the list
 * [ ] ts plugin subsystem
@@ -21,6 +20,8 @@ Goal for v1:
 
 ## Done — newest first
 
+* [x] the command list scrolls with the arrows — the window follows the highlight rather than pinning the first six, so a candidate past the sixth is no longer lit off-screen
+* [x] ctrl-x and ctrl-c ask first — a second press removes, or quits; any other key disarms them
 * [x] command list shows key shortcuts — `^x` / `^c` beside the cursor-navigable `/` commands (which already highlight the row and put it in the line on enter)
 * [x] add a folder from the panel — `/add-dir <path>` registers a workspace, landing on its new row (`workspace.up`)
 * [x] the global "yours" rules are a persistent, selectable project row — leads on a waiting yes, else trails; its pane lists the global schedules & reactions
