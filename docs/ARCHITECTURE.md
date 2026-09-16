@@ -289,6 +289,15 @@ modifier is only there to catch where the terminal speaks the kitty keyboard pro
 (Ghostty, WezTerm, recent iTerm2), which the panel asks for on the way in and gives back on the
 way out; where it does not (Terminal.app), plain `enter` sends as always.
 
+A shell you entered through Relay is still your own shell, so it is easy to lose track of being in
+one. Nothing of Relay's is ever drawn over a run's screen — the window title carries the status and
+the screen itself is left alone — so the mark is one Relay hands over rather than paints: every run
+carries `RELAY_RUN` in its environment (with `RELAY_HOME`, and `RELAY_REF`/`RELAY_TAGS` when the run
+has them), which a prompt can read for itself. In zsh, `RPROMPT='${RELAY_RUN:+●}'` puts a dot at the
+right edge while you are in a Relay shell and nothing at all when you are not; bash appends the same
+to `PS1`. A dot the prompt draws survives whatever the run paints next, which one Relay put in the
+corner itself would not.
+
 `tab` completes the word being typed (`tui/complete.rs`), rooted in that same folder: the first
 word against the agents the registry knows, the folder's `Makefile` targets and `package.json`
 scripts, and the binaries on `PATH`; after `every` a duration, after `on` an event kind; anywhere
