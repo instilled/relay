@@ -3,7 +3,7 @@
 use crate::router::Router;
 use crate::server::Daemon;
 use rl_core::time;
-use rl_ledger::{events, presence, runs};
+use rl_ledger::{events, graph, presence, runs};
 use rl_proto::PROTOCOL_VERSION;
 use rl_proto::methods::*;
 use rl_proto::rpc::RpcError;
@@ -319,6 +319,46 @@ pub fn register(r: &mut Router<Daemon>) {
             .await
             .map_err(RpcError::internal)?;
         get_run(&d, &p.id).await
+    });
+
+    r.register::<GraphGet, _, _>(|d, GraphParams { since }| async move {
+        let since = since.unwrap_or_else(|| time::now() - jiff::SignedDuration::from_hours(24 * 7));
+        let mut rules: Vec<Rule> = d
+            .scheduler
+            .list(false)
+            .await
+            .map_err(internal)?
+            .into_iter()
+            .map(Rule::Schedule)
+            .collect();
+        rules.extend(
+            d.reactor
+                .list(false)
+                .await
+                .map_err(internal)?
+                .into_iter()
+                .map(Rule::Reaction),
+        );
+        let (runs, events, asks) = d
+            .ledger
+            .call(move |c| {
+                Ok((
+                    graph::runs_since(c, since)?,
+                    graph::events_since(c, since)?,
+                    graph::asks_since(c, since)?,
+                ))
+            })
+            .await
+            .map_err(RpcError::internal)?;
+        Ok(crate::graph::build(
+            since,
+            crate::graph::Inputs {
+                rules: &rules,
+                runs: &runs,
+                events: &events,
+                asks: &asks,
+            },
+        ))
     });
 
     r.register::<DigestGet, _, _>(|d, DigestParams { since }| async move {

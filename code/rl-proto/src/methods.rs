@@ -360,6 +360,23 @@ pub struct RunArchiveParams {
     pub all_seen: bool,
 }
 
+// ---- graph.* ----------------------------------------------------------------
+
+/// The wiring graph over every project: rules, what they run, the questions
+/// they ask, and what set what off since `since` (default: the last 7 days).
+pub struct GraphGet;
+impl Method for GraphGet {
+    const NAME: &'static str = "graph.get";
+    type Params = GraphParams;
+    type Result = crate::graph::Graph;
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct GraphParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since: Option<Timestamp>,
+}
+
 // ---- digest.* ---------------------------------------------------------------
 
 /// Every run that had an event at or after `since` (default: everything),
