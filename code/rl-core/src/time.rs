@@ -91,6 +91,17 @@ pub fn from_millis(ms: i64) -> Result<Timestamp> {
     Timestamp::from_millisecond(ms).with_context(|| format!("timestamp {ms}ms out of range"))
 }
 
+/// Converts an optional epoch-millis column (as read from a row at `idx`) to
+/// an optional `Timestamp`, mapping a conversion failure through `conv` so
+/// row mappers can stay inside their own error type.
+pub fn optional_from_millis<E>(
+    ms: Option<i64>,
+    idx: usize,
+    conv: impl FnOnce(usize, anyhow::Error) -> E,
+) -> Result<Option<Timestamp>, E> {
+    ms.map(from_millis).transpose().map_err(|e| conv(idx, e))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -23,7 +23,7 @@ use rl_proto::methods::{
     ScheduleFilter, ScheduleList, ScheduleName, SchedulePause, ScheduleReload, ScheduleResume, ScheduleRun,
     WorkspaceList, WorkspacePath, WorkspaceRemove, WorkspaceUp, WorkspaceUpParams,
 };
-use rl_proto::reaction::Reaction;
+use rl_proto::reaction::{Filter, Reaction, ReactionSpec};
 use rl_proto::rule::{Rule, RuleKind, RuleStatus};
 use rl_proto::schedule::{Schedule, UpReport};
 use rl_proto::types::{AttachMode, Cause, Mark, RunKind, RunState};
@@ -587,7 +587,7 @@ async fn main() -> Result<()> {
         Cmd::Interpret(a) => interpret(&home, a, cli.json).await,
         Cmd::Summarise(a) => summarise(&home, a, cli.json).await,
         Cmd::Gc(a) => gc(&home, a, cli.json).await,
-        Cmd::Emit(a) => emit(&home, a).await,
+        Cmd::Emit(a) => emit(&home, a, cli.json).await,
         Cmd::Ask(a) => ask(&home, a, cli.json).await,
         Cmd::Decisions(a) => decisions(&home, a, cli.json).await,
         Cmd::Decide(a) => decide(&home, a, cli.json).await,
@@ -1113,12 +1113,9 @@ fn describe(i: &DaemonInfo) -> String {
     )
 }
 
-/// `rl ask`: raise a question. With a title on the command line the flags say
-/// it all; without one, the whole spec is YAML (or JSON) on stdin, which is
-/// how an agent hands over options that carry actions.
 /// Emit a custom event. Inside a run, `RELAY_RUN` attributes it to that run's
 /// folder and flow; outside one, the folder is `--in` or the cwd.
-async fn emit(home: &Home, a: EmitArgs) -> Result<()> {
+async fn emit(home: &Home, a: EmitArgs, json: bool) -> Result<()> {
     let mut data = serde_json::Map::new();
     if let Some(src) = &a.json_data {
         let text = if src == "-" {
@@ -1152,10 +1149,13 @@ async fn emit(home: &Home, a: EmitArgs) -> Result<()> {
         summary: a.summary,
         data: (!data.is_empty()).then(|| serde_json::Value::Object(data)),
     };
-    Client::connect(home).await?.call::<EventEmit>(params).await?;
+    daemon::ensure(home, !json).await?.call::<EventEmit>(params).await?;
     Ok(())
 }
 
+/// `rl ask`: raise a question. With a title on the command line the flags say
+/// it all; without one, the whole spec is YAML (or JSON) on stdin, which is
+/// how an agent hands over options that carry actions.
 async fn ask(home: &Home, a: AskArgs, json: bool) -> Result<()> {
     let mut spec = match &a.title {
         Some(t) => DecisionSpec {
@@ -1631,6 +1631,7 @@ fn trial_rows(trials: &[ReactionTrial]) -> Vec<Vec<String>> {
 /// `rl on`: append a rule to the user's own reactions.yaml. The file stays
 /// yours — this only adds to the end of it, comments and all.
 async fn on(home: &Home, a: OnArgs, json: bool) -> Result<()> {
+    use rl_proto::action::Task;
     let name = match a.name {
         Some(n) => n,
         None => {
@@ -1642,46 +1643,50 @@ async fn on(home: &Home, a: OnArgs, json: bool) -> Result<()> {
             format!("on-{}", base.trim_matches('-'))
         }
     };
-    if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || "._-".contains(c)) {
-        bail!("a name is letters, digits, `.`, `_` and `-`");
-    }
+    rl_cli::rulefile::check_name(&name)?;
     let cwd = match a.cwd {
         Some(c) => c,
         None => std::env::current_dir()?,
     };
-    let file = home.reactions_file();
-    let existing = std::fs::read_to_string(&file).unwrap_or_default();
-    if existing.contains(&format!("\n  {name}:")) || existing.starts_with(&format!("  {name}:")) {
-        bail!("`{name}` is already in {}; edit it there", display_path(&file));
+    let spec = ReactionSpec {
+        on: vec![a.kind],
+        filter: a.tag.map(|tag| Filter {
+            tag: Some(tag),
+            ..Default::default()
+        }),
+        run: Some(Task::Argv(a.argv)),
+        cwd: Some(cwd),
+        throttle: a.throttle,
+        ..Default::default()
+    };
+    let d = rl_cli::rulefile::RuleDraft {
+        kind: RuleKind::Reaction,
+        folder: None,
+        name,
+        body: rl_cli::rulefile::body(&spec, &ReactionSpec::default())?,
+    };
+    let file = rl_cli::rulefile::file(home, d.kind, d.folder.as_deref());
+    let text = std::fs::read_to_string(&file).unwrap_or_default();
+    if rl_cli::rulefile::line_of(&text, rl_cli::rulefile::top(d.kind), &d.name).is_some() {
+        bail!("`{}` is already in {}; edit it there", d.name, display_path(&file));
     }
-
-    let mut block = String::new();
-    if !existing.lines().any(|l| l.trim_start().starts_with("reactions:")) {
-        block.push_str("reactions:\n");
-    } else if !existing.ends_with('\n') {
-        block.push('\n');
-    }
-    block.push_str(&format!("  {name}:\n    on: {}\n", yaml_scalar(&a.kind)));
-    if let Some(tag) = &a.tag {
-        block.push_str(&format!("    where: {{ tag: {} }}\n", yaml_scalar(tag)));
-    }
-    let argv: Vec<String> = a.argv.iter().map(|w| yaml_scalar(w)).collect();
-    block.push_str(&format!("    run: [{}]\n", argv.join(", ")));
-    block.push_str(&format!("    cwd: {}\n", yaml_scalar(&cwd.to_string_lossy())));
-    if let Some(t) = &a.throttle {
-        block.push_str(&format!("    throttle: {}\n", yaml_scalar(t)));
-    }
-
-    std::fs::write(&file, format!("{existing}{block}"))?;
-    let report = daemon::ensure(home, !json).await?.call::<ReactionReload>(()).await?;
+    let mut rpc = daemon::ensure(home, !json).await?;
+    let file = rl_cli::rulefile::install(home, &mut rpc, &d, None, true).await?;
+    let rule = rpc
+        .call::<RuleApprove>(RuleRef {
+            name: d.name.clone(),
+            scope: Some(d.scope()),
+            kind: Some(RuleKind::Reaction),
+        })
+        .await?;
     if json {
-        println!("{}", serde_json::to_string(&report)?);
+        println!("{}", serde_json::to_string(&rule)?);
     } else {
-        print!("{block}");
-        println!("→ {}", display_path(&file));
-        for e in &report.errors {
-            eprintln!("not loaded: {e}");
+        println!("  {}:", d.name);
+        for l in &d.body {
+            println!("    {l}");
         }
+        println!("→ {} · {}", display_path(&file), rule.status());
     }
     Ok(())
 }
@@ -2019,17 +2024,6 @@ async fn agents(home: &Home, json: bool) -> Result<()> {
         .collect();
     print!("{}", render::table(AGENT_HEADERS, &rows));
     Ok(())
-}
-
-/// A YAML scalar that survives whatever the shell handed us.
-fn yaml_scalar(s: &str) -> String {
-    let plain =
-        !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || "._-/".contains(c)) && !s.starts_with('-');
-    if plain {
-        s.to_string()
-    } else {
-        format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
-    }
 }
 
 #[cfg(test)]

@@ -58,13 +58,21 @@ impl Cron {
     }
 
     fn matches(&self, z: &Zoned) -> bool {
-        let day_ok = match (self.dom_any, self.dow_any) {
+        self.minute[z.minute() as usize]
+            && self.hour[z.hour() as usize]
+            && self.month[z.month() as usize]
+            && self.day_ok(z)
+    }
+
+    /// Day-of-month and day-of-week combine the classic (and trickiest) way:
+    /// if both are restricted, either matching is enough.
+    fn day_ok(&self, z: &Zoned) -> bool {
+        match (self.dom_any, self.dow_any) {
             (true, true) => true,
             (false, true) => self.dom[z.day() as usize],
             (true, false) => self.dow[weekday_index(z.weekday())],
             (false, false) => self.dom[z.day() as usize] || self.dow[weekday_index(z.weekday())],
-        };
-        self.minute[z.minute() as usize] && self.hour[z.hour() as usize] && self.month[z.month() as usize] && day_ok
+        }
     }
 
     /// The first matching minute strictly after `after`, in `tz`.
@@ -94,13 +102,7 @@ impl Cron {
                     .ok()?;
                 continue;
             }
-            let day_ok = match (self.dom_any, self.dow_any) {
-                (true, true) => true,
-                (false, true) => self.dom[z.day() as usize],
-                (true, false) => self.dow[weekday_index(z.weekday())],
-                (false, false) => self.dom[z.day() as usize] || self.dow[weekday_index(z.weekday())],
-            };
-            if !day_ok {
+            if !self.day_ok(&z) {
                 z = z.with().hour(0).minute(0).build().ok()?.checked_add(1.day()).ok()?;
                 continue;
             }

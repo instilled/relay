@@ -158,12 +158,18 @@ pub fn runnable(head: &str, here: &Here) -> bool {
         || here.path_dirs.iter().any(|d| is_exe(&d.join(head)))
 }
 
+/// How long `$SHELL -ic` gets before it is given up on: long enough for a
+/// normal rc, short enough that a stuck one (a network check, an interactive
+/// prompt plugin, an rc that misbehaves under a null stdin) cannot freeze the
+/// panel.
+const SHELL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
 /// The names the person's shell knows beyond `$PATH`: its aliases (and shell
 /// functions, where it lists them the same way). Asked of `$SHELL`
 /// interactively, once, so its rc is read the way a terminal would — the same
 /// reason a shell line runs through `$SHELL -ic`, not `sh -c`. Best-effort: an
-/// empty list on any trouble, and nothing for a shell that is only `sh`.
-pub fn shell_names() -> Vec<String> {
+/// empty list on any trouble, a hang, or a shell that is only `sh`.
+pub async fn shell_names() -> Vec<String> {
     let Ok(sh) = std::env::var("SHELL") else {
         return Vec::new();
     };
@@ -173,11 +179,23 @@ pub fn shell_names() -> Vec<String> {
     // `alias` prints `name='…'` in zsh, `alias name='…'` in bash; the function
     // lister differs by shell, so ask for names only and let either form pass.
     let script = "alias 2>/dev/null; { print -rl -- ${(k)functions} } 2>/dev/null; declare -F 2>/dev/null";
-    let Ok(out) = std::process::Command::new(&sh)
+    let Ok(child) = tokio::process::Command::new(&sh)
         .args(["-ic", script])
         .stdin(std::process::Stdio::null())
-        .output()
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        // If the timeout below fires, dropping the still-running `child`
+        // (inside the timed-out `wait_with_output` future) kills it — nothing
+        // is left running in the background.
+        .kill_on_drop(true)
+        .spawn()
     else {
+        return Vec::new();
+    };
+    // `wait_with_output` drains stdout as it goes, so a chatty rc can't
+    // deadlock it against a full pipe the way waiting first, then reading,
+    // could.
+    let Ok(Ok(out)) = tokio::time::timeout(SHELL_TIMEOUT, child.wait_with_output()).await else {
         return Vec::new();
     };
     parse_shell_names(&String::from_utf8_lossy(&out.stdout))

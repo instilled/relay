@@ -10,7 +10,7 @@
 use crate::conv;
 use anyhow::Result;
 use jiff::Timestamp;
-use rl_core::time::{from_millis, to_millis};
+use rl_core::time::{optional_from_millis, to_millis};
 use rl_proto::schedule::ReloadReport;
 use rusqlite::{Connection, OptionalExtension, Row as SqlRow, params};
 use std::path::{Path, PathBuf};
@@ -282,12 +282,6 @@ pub fn set_fired(
 }
 
 fn from_row(row: &SqlRow) -> rusqlite::Result<Row> {
-    let millis = |i: usize| -> rusqlite::Result<Option<Timestamp>> {
-        row.get::<_, Option<i64>>(i)?
-            .map(from_millis)
-            .transpose()
-            .map_err(|e| conv(i, e))
-    };
     Ok(Row {
         scope: row.get(0)?,
         name: row.get(1)?,
@@ -295,10 +289,10 @@ fn from_row(row: &SqlRow) -> rusqlite::Result<Row> {
         source: PathBuf::from(row.get::<_, String>(3)?),
         spec_json: row.get(4)?,
         paused: row.get::<_, i32>(5)? != 0,
-        last_fired_at: millis(6)?,
+        last_fired_at: optional_from_millis(row.get(6)?, 6, conv)?,
         last_run: row.get(7)?,
-        next_at: millis(8)?,
-        removed_at: millis(9)?,
+        next_at: optional_from_millis(row.get(8)?, 8, conv)?,
+        removed_at: optional_from_millis(row.get(9)?, 9, conv)?,
         approved_hash: row.get(10)?,
     })
 }

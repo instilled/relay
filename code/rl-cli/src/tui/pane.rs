@@ -202,20 +202,27 @@ pub fn job_lines(j: &Job, rule: Option<&Rule>, names: &Names, now: Timestamp) ->
     lines
 }
 
-/// A project: the folder itself, how its runs stand, and the rules that live
-/// there. `items` is the whole digest; this picks the ones in the folder.
 /// The "yours" row's pane: your own (global) schedules & reactions — the rules
 /// that live outside any folder — told the way a project's are.
 pub fn global_lines(rules: &[Rule], now: Timestamp) -> Vec<Line<'static>> {
     let mut lines = vec![Line::from(Span::raw(" yours").bold())];
     lines.push(Line::from(Span::raw(" your own rules, in every folder").dim()));
+    lines.extend(rules_section(rules, None, now));
     lines.push(Line::raw(""));
+    lines.push(Line::from(Span::raw(" /rules edits your global schedules & reactions").dim()));
+    lines
+}
 
-    let chips = super::rows::chips(rules, None, now);
+/// The rules section shared by `global_lines` and `project_lines`: a leading
+/// blank line, the " rules" label, and the schedule/reaction chips (or the
+/// empty-state line), computed via `super::rows::chips` and filtered to
+/// `workspace` (`None` for the global rules).
+fn rules_section(rules: &[Rule], workspace: Option<&std::path::Path>, now: Timestamp) -> Vec<Line<'static>> {
+    let chips = super::rows::chips(rules, workspace, now);
     let (sched, react): (Vec<_>, Vec<_>) = chips
         .iter()
         .partition(|c| c.kind == rl_proto::rule::RuleKind::Schedule);
-    lines.push(Line::from(Span::raw(" rules").dim()));
+    let mut lines = vec![Line::raw(""), Line::from(Span::raw(" rules").dim())];
     if chips.is_empty() {
         lines.push(Line::from(
             Span::raw("   none · /rules adds schedules & reactions").dim(),
@@ -230,11 +237,11 @@ pub fn global_lines(rules: &[Rule], now: Timestamp) -> Vec<Line<'static>> {
             }
         }
     }
-    lines.push(Line::raw(""));
-    lines.push(Line::from(Span::raw(" /rules edits your global schedules & reactions").dim()));
     lines
 }
 
+/// A project: the folder itself, how its runs stand, and the rules that live
+/// there. `items` is the whole digest; this picks the ones in the folder.
 pub fn project_lines(
     name: &str,
     place: &str,
@@ -278,26 +285,7 @@ pub fn project_lines(
     }
 
     // The rules that live here, told the same way the header's chips are.
-    let chips = super::rows::chips(rules, Some(workspace), now);
-    let (sched, react): (Vec<_>, Vec<_>) = chips
-        .iter()
-        .partition(|c| c.kind == rl_proto::rule::RuleKind::Schedule);
-    lines.push(Line::raw(""));
-    lines.push(Line::from(Span::raw(" rules").dim()));
-    if chips.is_empty() {
-        lines.push(Line::from(
-            Span::raw("   none · /rules adds schedules & reactions").dim(),
-        ));
-    } else {
-        for (label, group) in [("schedule", &sched), ("reaction", &react)] {
-            for c in group {
-                lines.push(Line::from(vec![
-                    Span::raw(format!("   {:<9} ", label)).dim(),
-                    Span::raw(c.text()),
-                ]));
-            }
-        }
-    }
+    lines.extend(rules_section(rules, Some(workspace), now));
     lines.push(Line::raw(""));
     lines.push(Line::from(
         Span::raw(" /rules edits schedules & reactions · ^r renames").dim(),

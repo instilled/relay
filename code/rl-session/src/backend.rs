@@ -41,6 +41,9 @@ pub struct Spawned {
 }
 
 pub fn spawn(spec: &Spec) -> Result<Spawned> {
+    if spec.argv.is_empty() {
+        anyhow::bail!("argv must not be empty");
+    }
     if spec.tty { spawn_pty(spec) } else { spawn_pipes(spec) }
 }
 
@@ -289,5 +292,29 @@ mod tests {
         assert_eq!(pty_signal_number("Killed"), Some(9));
         assert_eq!(pty_signal_number("Signal 27"), Some(27));
         assert_eq!(pty_signal_number("nonsense"), None);
+    }
+
+    #[test]
+    fn spawn_with_empty_argv_errors_instead_of_panicking() {
+        let spec = Spec {
+            argv: vec![],
+            cwd: PathBuf::from("."),
+            env: vec![],
+            inherit_env: true,
+            cols: 80,
+            rows: 24,
+            tty: true,
+        };
+        match spawn(&spec) {
+            Ok(_) => panic!("empty argv must be rejected"),
+            Err(e) => assert!(e.to_string().contains("argv must not be empty")),
+        }
+
+        // Same check applies on the non-tty (plain pipes) path.
+        let spec = Spec { tty: false, ..spec };
+        match spawn(&spec) {
+            Ok(_) => panic!("empty argv must be rejected"),
+            Err(e) => assert!(e.to_string().contains("argv must not be empty")),
+        }
     }
 }
