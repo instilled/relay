@@ -36,6 +36,9 @@ action_struct! {
             /// Narrows it further, against the run the event is about.
             #[serde(rename = "where", default, skip_serializing_if = "Option::is_none")]
             pub filter: Option<Filter>,
+            /// Event kinds what it runs raises (`rl emit`), for the graph.
+            #[serde(default, skip_serializing_if = "Vec::is_empty")]
+            pub emits: Vec<String>,
         }
         after: {
             /// Or a question to put to a human instead.

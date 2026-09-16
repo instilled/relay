@@ -8,6 +8,7 @@ pub mod decisions;
 pub mod digest;
 pub mod gc;
 pub mod git;
+pub mod graph;
 pub mod handlers;
 pub mod reactions;
 pub mod router;

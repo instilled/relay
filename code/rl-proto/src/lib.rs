@@ -9,6 +9,7 @@ pub mod action;
 pub mod codec;
 pub mod config;
 pub mod decision;
+pub mod graph;
 pub mod methods;
 pub mod reaction;
 pub mod rpc;
