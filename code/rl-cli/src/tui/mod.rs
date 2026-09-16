@@ -81,8 +81,10 @@ const LINE_MAX: u16 = 8;
 const JOIN_SCROLLBACK: u64 = 256 * 1024;
 /// Narrower than this, the pane takes the screen instead of sharing it.
 const SPLIT_AT: u16 = 100;
-/// The list's share of a split screen, in percent.
-const LIST_SHARE: u16 = 50;
+/// The list's share of a split screen, in percent: two thirds beside a
+/// details pane, half beside a terminal, which needs the width.
+const LIST_SHARE: u16 = 67;
+const LIST_SHARE_TERM: u16 = 50;
 /// Air around the panel: columns each side, a row top and bottom. None of it
 /// in the full-screen terminal, which wants every cell.
 const GUTTER_X: u16 = 2;
@@ -362,7 +364,7 @@ struct Areas {
     footer: Rect,
 }
 
-fn areas(area: Rect, wide: bool, show_pane: bool, form_h: u16, cands_h: u16, line_h: u16) -> Areas {
+fn areas(area: Rect, wide: bool, show_pane: bool, share: u16, form_h: u16, cands_h: u16, line_h: u16) -> Areas {
     // A gutter of air around the panel and rules between its sections — but not
     // in the full-screen terminal, which wants every cell.
     let chrome = !wide;
@@ -400,7 +402,7 @@ fn areas(area: Rect, wide: bool, show_pane: bool, form_h: u16, cands_h: u16, lin
         (None, Some(body))
     } else {
         let [l, _, r] = Layout::horizontal([
-            Constraint::Percentage(LIST_SHARE),
+            Constraint::Percentage(share),
             Constraint::Length(1),
             Constraint::Fill(1),
         ])
@@ -643,7 +645,7 @@ impl App {
 
     /// The area the terminal draws into.
     fn pane_size(&self, size: Rect) -> (u16, u16) {
-        let a = areas(size, self.wide, true, 0, 0, self.line_h());
+        let a = areas(size, self.wide, true, LIST_SHARE_TERM, 0, 0, self.line_h());
         let r = a.pane.unwrap_or(size);
         (r.width.max(1), r.height.max(1))
     }
@@ -1626,7 +1628,7 @@ impl App {
             .selected_run()
             .map(|i| (i.run.id.clone(), i.run.pinned_at.is_some()))
         else {
-            self.say("^p pins a run");
+            self.say("^t pins a run");
             return;
         };
         match self
@@ -1940,15 +1942,15 @@ impl App {
                         self.watch_key(&k, page);
                         Ok(())
                     }
-                    _ => self.key_list(k, area).await,
+                    _ => self.key_list(k).await,
                 }
             }
-            _ => self.key_list(k, area).await,
+            _ => self.key_list(k).await,
         }
     }
 
     /// What the line does not take: moving about, and backing out.
-    async fn key_list(&mut self, k: KeyEvent, area: Rect) -> Result<()> {
+    async fn key_list(&mut self, k: KeyEvent) -> Result<()> {
         // A destructive key is armed by its first press and acts on its second;
         // any other key here disarms it, so `ctrl-x`/`ctrl-c` never fire on one
         // slip (the way an agent view asks before it deletes).
@@ -1973,10 +1975,9 @@ impl App {
                 }
             }
             (KeyCode::Char('r'), KeyModifiers::CONTROL) => self.rename_here(),
-            (KeyCode::Char('p'), KeyModifiers::CONTROL) => self.toggle_pin().await,
             (KeyCode::Char('o'), KeyModifiers::CONTROL) => self.toggle_pane(),
             (KeyCode::Char('g'), KeyModifiers::CONTROL) => self.toggle_graph().await,
-            (KeyCode::Char('t'), KeyModifiers::CONTROL) => self.new_shell(area).await,
+            (KeyCode::Char('t'), KeyModifiers::CONTROL) => self.toggle_pin().await,
             (KeyCode::Esc, _) => {
                 // The pane goes first, whatever stands open behind it: it is
                 // the largest thing on screen, so it is what `esc` should
@@ -2446,7 +2447,20 @@ impl App {
             (None, Some(c)) => c.cands.len().min(CANDS) as u16,
             (None, None) => 0,
         };
-        let a = areas(f.area(), self.wide, self.show_pane, form_h, cands_h, self.line_h());
+        let share = if self.pane == Pane::Term {
+            LIST_SHARE_TERM
+        } else {
+            LIST_SHARE
+        };
+        let a = areas(
+            f.area(),
+            self.wide,
+            self.show_pane,
+            share,
+            form_h,
+            cands_h,
+            self.line_h(),
+        );
         let rows = self.rows();
         // News is counted the way it is shown: a job with unseen runs is one.
         let news = rows
@@ -3098,11 +3112,11 @@ impl App {
             }
             Some(Row::Fold(_)) => format!("enter output · ^x archives · esc folds · {pane}"),
             Some(Row::Run(i)) if i.run.state.is_terminal() => {
-                format!("enter output · /summarise · ^x archives · ^p pins · {pane}")
+                format!("enter output · /summarise · ^x archives · ^t pins · {pane}")
             }
-            Some(Row::Run(_)) => format!("enter watches it · /join · ^x stops it · ^p pins · {pane}"),
+            Some(Row::Run(_)) => format!("enter watches it · /join · ^x stops it · ^t pins · {pane}"),
             Some(Row::Group(h)) if h.workspace.is_some() => {
-                format!("enter its stats · ^t shell · ^g its wiring · /edit schedule · ^r renames · {pane}")
+                format!("enter its stats · /shell · ^g its wiring · /edit schedule · ^r renames · {pane}")
             }
             // The global row: the rules in the Relay home, no folder to rename.
             Some(Row::Group(_)) => format!("enter its rules · ^g their wiring · /edit schedule · {pane}"),

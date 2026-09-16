@@ -215,10 +215,9 @@ pub fn key(cmd: Cmd) -> &'static str {
         Cmd::Quit => "^c",
         Cmd::Stop | Cmd::Archive => "^x",
         Cmd::Rename => "^r",
-        Cmd::Pin => "^p",
+        Cmd::Pin => "^t",
         Cmd::Graph => "^g",
         Cmd::Pane => "^o",
-        Cmd::Shell => "^t",
         _ => "",
     }
 }
@@ -298,10 +297,10 @@ mod tests {
         assert_eq!(key(Cmd::Stop), "^x");
         assert_eq!(key(Cmd::Archive), "^x");
         assert_eq!(key(Cmd::Rename), "^r");
-        assert_eq!(key(Cmd::Pin), "^p");
+        assert_eq!(key(Cmd::Pin), "^t");
         assert_eq!(key(Cmd::Graph), "^g");
         assert_eq!(key(Cmd::Pane), "^o");
-        assert_eq!(key(Cmd::Shell), "^t");
+        assert_eq!(key(Cmd::Shell), "", "a shell is a command, not a key");
         assert_eq!(key(Cmd::Filter), "", "most commands are the slash line, no key");
     }
 

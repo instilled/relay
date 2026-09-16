@@ -2,7 +2,7 @@
 //! they belong to, and named in words rather than ids and paths.
 //!
 //! A group is a run's group key (ref → branch → workspace). Groups come in
-//! order of their most urgent member; inside a group, questions come first,
+//! order of name, the global row last; inside a group, questions come first,
 //! then runs by attention, newest change first. A workspace path reads as the
 //! name it was registered under.
 //!
@@ -420,30 +420,6 @@ struct Group<'a> {
     jobs: Vec<Job<'a>>,
 }
 
-impl Group<'_> {
-    /// Lower is more urgent; a question beats any run.
-    fn score(&self) -> i16 {
-        if !self.questions.is_empty() {
-            return -1;
-        }
-        self.runs
-            .iter()
-            .map(|i| rank::score(&i.run) as i16)
-            .chain(self.jobs.iter().map(|j| j.score() as i16))
-            .min()
-            .unwrap_or(i16::MAX)
-    }
-    fn latest(&self) -> Timestamp {
-        self.runs
-            .iter()
-            .map(|i| i.at)
-            .chain(self.jobs.iter().map(|j| j.last().at))
-            .chain(self.questions.iter().map(|q| q.created_at))
-            .max()
-            .unwrap_or(Timestamp::UNIX_EPOCH)
-    }
-}
-
 /// What the list is built from besides the digest.
 pub struct Context<'a> {
     pub names: &'a Names,
@@ -597,37 +573,23 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
         g.jobs
             .sort_by(|a, b| a.score().cmp(&b.score()).then_with(|| b.last().at.cmp(&a.last().at)));
     }
-    groups.sort_by(|a, b| a.score().cmp(&b.score()).then_with(|| b.latest().cmp(&a.latest())));
     // Which folders already have a line, so idle projects don't double up.
     let shown: HashSet<PathBuf> = groups.iter().map(|g| g.workspace.clone()).collect();
     pinned.sort_by_key(|i| (i.run.pinned_at, i.run.id.clone()));
     let mut rows: Vec<Row<'a>> = pinned.into_iter().map(Row::Run).collect();
-    // Your own (global) rules get a line of their own — a project row for the
-    // things that live outside any folder. It leads the list only when one of
-    // them waits for a yes; otherwise it trails, with the idle projects, so it
-    // never steals the lead from work that needs you (pushed at the end below).
-    // It is always there, rules or none, so the cursor has somewhere to stand
-    // to reach them — `/edit schedule` on it opens yours — and it answers to
-    // the filter like any other project.
-    let yours = chips(cx.rules, None, now);
-    let yours_leads = yours.iter().any(Chip::needs_yes);
-    let yours_head = hit(&["global", cx.home]).then(|| Head {
-        place: Some(cx.home.to_string()),
-        workspace: None,
-        name: "global".into(),
-        rules: yours,
-    });
-    if yours_leads && let Some(head) = &yours_head {
-        rows.push(Row::Group(head.clone()));
-    }
+    // Projects in order of name, so each keeps its place as work comes and
+    // goes: what needs you says so with its marks and in the headline, not by
+    // jumping the queue. Each block is a project's header and what is under it.
+    let mut blocks: Vec<(String, String, Vec<Row<'a>>)> = Vec::new();
     for g in groups {
-        rows.push(Row::Group(Head {
+        let name = names.group(&g.key);
+        let mut block = vec![Row::Group(Head {
             place: Some(names.place(&g.key, &g.workspace)),
             workspace: Some(g.workspace.clone()),
-            name: names.group(&g.key),
+            name: name.clone(),
             rules: chips(cx.rules, Some(&g.workspace), now),
-        }));
-        rows.extend(g.questions.into_iter().map(Row::Question));
+        })];
+        block.extend(g.questions.into_iter().map(Row::Question));
         // Runs and jobs share one order: whatever asks for you leads, then the
         // folder's shells — where you work, rather than something that happens
         // to be idle — then the rest, newest first.
@@ -654,15 +616,15 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
                 Row::Job(j) if cx.opened.contains(&j.key) => j.runs.iter().copied().take(OPENED).collect(),
                 _ => vec![],
             };
-            rows.push(row);
-            rows.extend(folded.into_iter().map(Row::Fold));
+            block.push(row);
+            block.extend(folded.into_iter().map(Row::Fold));
         }
+        blocks.push((name.to_lowercase(), g.key, block));
     }
     // A registered folder is always on the list, under every lens, even before
     // anything has run there — so you can select it, read its stats, edit its
     // rules or open its shell. A lens narrows what is shown inside projects,
-    // never which projects there are. Ones with nothing to show come last,
-    // after every group with activity; only the filter takes them away.
+    // never which projects there are; only the filter takes them away.
     for p in names.paths() {
         if shown.contains(&p) {
             continue;
@@ -672,16 +634,27 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
         if !hit(&[&name, &place]) {
             continue;
         }
-        rows.push(Row::Group(Head {
+        let head = Row::Group(Head {
             place: Some(place),
             workspace: Some(p.clone()),
-            name,
+            name: name.clone(),
             rules: chips(cx.rules, Some(&p), now),
-        }));
+        });
+        blocks.push((name.to_lowercase(), p.to_string_lossy().into_owned(), vec![head]));
     }
-    // The global row trails, unless it already led on a waiting yes.
-    if !yours_leads && let Some(head) = yours_head {
-        rows.push(Row::Group(head));
+    blocks.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+    rows.extend(blocks.into_iter().flat_map(|(_, _, block)| block));
+    // The global rules get a line of their own — a project row for the things
+    // that live outside any folder — always last, rules or none, so the cursor
+    // has somewhere to stand to reach them. It answers to the filter like any
+    // other project.
+    if hit(&["global", cx.home]) {
+        rows.push(Row::Group(Head {
+            place: Some(cx.home.to_string()),
+            workspace: None,
+            name: "global".into(),
+            rules: chips(cx.rules, None, now),
+        }));
     }
     rows
 }
@@ -909,10 +882,10 @@ mod tests {
             (PathBuf::from("/home/f/api"), "api".to_string()),
         ]);
         // In the order they were pinned, ahead even of a question; a week-old
-        // run stays, and its folder, with nothing else to show, trails.
+        // run stays, and its folder keeps its place by name.
         assert_eq!(
             keys(&build_with(&d, &names, "", now)),
-            ["r:old01", "r:shell", "[relay]", "q:q1", "r:fail1", "[api]", "[global]"]
+            ["r:old01", "r:shell", "[api]", "[relay]", "q:q1", "r:fail1", "[global]"]
         );
         // No lens takes a pin away.
         let jobs = lens_build(&d, &names, Lens::Jobs, now);
@@ -952,14 +925,14 @@ mod tests {
         assert_eq!(
             keys(&rows),
             [
-                "[relay]", "q:q1", "r:fail1", "r:done1", "[api]", "r:blok1", "r:work1", "[global]"
+                "[api]", "r:blok1", "r:work1", "[relay]", "q:q1", "r:fail1", "r:done1", "[global]"
             ],
-            "the question puts relay first; api is named by its folder; old01 is gone; global trails"
+            "projects by name, however urgent; the question leads its own; api is named by its folder; old01 is gone; global last"
         );
         assert_eq!(counts(&rows), (1, 2, 1, 1, 0));
-        match &rows[0] {
+        match &rows[3] {
             Row::Group(h) => assert_eq!((h.name.as_str(), h.place.as_deref()), ("relay", Some("/home/f/relay"))),
-            _ => panic!("first row is the group"),
+            _ => panic!("relay's header"),
         }
         assert_eq!(
             headline(&rows, 2, ""),
@@ -990,10 +963,10 @@ mod tests {
             (PathBuf::from("/home/f/relay"), "relay".to_string()),
             (PathBuf::from("/home/f/idle"), "idle".to_string()),
         ]);
-        // The idle project is a line of its own, after every group with activity.
+        // The idle project is a line of its own, in its place by name.
         assert_eq!(
             keys(&build_with(&d, &names, "", now)),
-            ["[relay]", "r:work1", "[idle]", "[global]"]
+            ["[idle]", "[relay]", "r:work1", "[global]"]
         );
         // It carries the folder so selecting it lands on the project.
         match build_with(&d, &names, "idle", now).last() {
@@ -1014,7 +987,7 @@ mod tests {
     }
 
     #[test]
-    fn the_global_row_leads_on_a_yes_else_trails_and_is_selectable() {
+    fn the_global_row_is_last_and_selectable() {
         let now: Timestamp = "2026-09-10T12:00:00Z".parse().unwrap();
         let d = Digest {
             since: now,
@@ -1045,14 +1018,15 @@ mod tests {
             .map(|r| (r.key(), matches!(r, Row::Group(h) if h.workspace.is_none())))
             .collect::<Vec<_>>()
         };
-        // A calm global schedule trails the folder's work, under a stable key.
+        // The global row is last, under a stable key.
         let calm = build_with_rules(&[schedule("global", "pulse", true, Some("2026-09-10T12:00:30Z"))]);
         let last = calm.last().unwrap();
-        assert!(last.1, "the global row trails");
+        assert!(last.1, "the global row is last");
         assert_eq!(last.0.as_deref(), Some("g:*global*"), "and is selectable");
-        // One waiting on a yes leads instead.
+        // Even with a rule waiting on a yes: its place does not move.
         let waiting = build_with_rules(&[schedule("global", "backup", false, None)]);
-        assert!(waiting[0].1, "a waiting yes leads");
+        assert!(waiting.last().unwrap().1, "still last");
+        assert!(!waiting[0].1);
     }
 
     fn fired(id: &str, job: &str, state: RunState, at: &str, unseen: bool) -> DigestItem {
@@ -1323,17 +1297,18 @@ mod tests {
                 "r:work1",
                 "[global*] ↻ pulse 30s"
             ],
-            "idle global rules trail; a folder's work stays on top"
+            "global rules are last"
         );
         let mut with_yes = rules.clone();
         with_yes.push(schedule("global", "backup", false, None));
         assert_eq!(
             build_rules(&with_yes),
             [
-                "[global*] ! backup · ↻ pulse 30s",
                 "[relay] ! deploy · ↻ nightly 4h · ⚡ tests-failed",
-                "r:work1"
-            ]
+                "r:work1",
+                "[global*] ! backup · ↻ pulse 30s"
+            ],
+            "a waiting yes shows on its chip, not by moving the row"
         );
     }
 
