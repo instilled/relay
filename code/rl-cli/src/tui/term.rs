@@ -10,6 +10,7 @@
 use crate::attach::client_name;
 use crate::client::Client;
 use rl_core::Home;
+use rl_detect::ansi;
 use rl_proto::methods::{AttachInfo, AttachParams, RunAttach};
 use rl_proto::types::AttachMode;
 use rl_session::proto::{Frame, read_frame};
@@ -28,6 +29,10 @@ pub struct TermView {
     rd: BufReader<OwnedReadHalf>,
     _wr: OwnedWriteHalf,
     parser: vt100::Parser,
+    /// Draws the box-drawing set as the characters it stands for. `vt100`
+    /// hands `ESC ( 0` to its unhandled hook, so a prompt that rules a line
+    /// off would otherwise reach the screen spelling `qqqqqq`.
+    graphics: ansi::Graphics,
     /// The area we draw into, for clipping the re-render.
     pane: (u16, u16),
     /// Latest word from the daemon and when it arrived, for the footer.
@@ -62,6 +67,7 @@ impl TermView {
         Ok(Self {
             id: id.to_string(),
             parser: vt100::Parser::new(rows, cols, SCROLLBACK_ROWS),
+            graphics: ansi::Graphics::new(),
             info,
             rd,
             _wr: wr,
@@ -85,7 +91,7 @@ impl TermView {
                 Ok(false)
             }
             Some(Frame::Output(b)) => {
-                self.parser.process(&b);
+                self.parser.process(&self.graphics.rewrite(&b));
                 // New output must not yank a reader back to the bottom.
                 if self.scroll > 0 {
                     self.parser.screen_mut().set_scrollback(self.scroll);
