@@ -54,7 +54,7 @@ use rl_proto::methods::{
     ReactionReload, ReactionResume, RuleApprove, RuleList, RuleRef, RunArchive, RunArchiveParams, RunId, RunIds,
     RunInput, RunInputParams, RunMark, RunMarkParams, RunSeen, RunSpec, RunStart, RunStop, RunStopParams,
     ScheduleFilter, ScheduleName, SchedulePause, ScheduleReload, ScheduleResume, ScheduleRun, SummaryGet, SummaryMake,
-    SummaryParams, WorkspaceList, WorkspaceRename, WorkspaceRenameParams,
+    SummaryParams, WorkspaceList, WorkspaceRename, WorkspaceRenameParams, WorkspaceUp, WorkspaceUpParams,
 };
 use rl_proto::rule::{Rule, RuleKind, RuleStatus};
 use rl_proto::types::{AttachMode, Cause, Event as LedgerEvent, Mark, Run, RunKind, RunState, Summary};
@@ -1177,6 +1177,41 @@ impl App {
         Ok(self.rpc.call::<RunStart>(spec).await?.id)
     }
 
+    /// Register a folder as a project from the line — the panel's `rl up`. Its
+    /// rules load; its schedules wait for a yes in `/rules`. The cursor lands on
+    /// the new row (empty until something runs there, thanks to project rows).
+    async fn add_dir(&mut self, arg: &str) -> Result<()> {
+        let arg = arg.trim();
+        if arg.is_empty() {
+            self.say("a folder: /add-dir <path>");
+            return Ok(());
+        }
+        let expanded = match arg.strip_prefix('~') {
+            Some(rest) => match std::env::var_os("HOME") {
+                Some(home) => PathBuf::from(home).join(rest.trim_start_matches('/')),
+                None => PathBuf::from(arg),
+            },
+            None => PathBuf::from(arg),
+        };
+        let path = match std::fs::canonicalize(&expanded) {
+            Ok(p) => p,
+            Err(_) => {
+                self.say(format!("no such folder: {}", expanded.display()));
+                return Ok(());
+            }
+        };
+        self.rpc
+            .call::<WorkspaceUp>(WorkspaceUpParams {
+                path: path.clone(),
+                approve: false,
+            })
+            .await?;
+        self.refresh().await;
+        self.say(format!("added {}", self.names.workspace(&path)));
+        self.select(Some(format!("g:{}", path.display())));
+        Ok(())
+    }
+
     /// Give a project a new name. The cursor stays on it, under the new key.
     async fn rename_project(&mut self, folder: PathBuf, name: String) -> Result<()> {
         if name.is_empty() {
@@ -1761,6 +1796,7 @@ impl App {
         self.line.clear();
         match c.cmd {
             palette::Cmd::Quit => self.quit = true,
+            palette::Cmd::AddDir => self.add_dir(&arg).await?,
             palette::Cmd::Help => {
                 let names: Vec<&str> = palette::ALL.iter().map(|c| c.name).collect();
                 self.say(format!("/{}", names.join(" · /")));

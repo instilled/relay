@@ -32,6 +32,7 @@ pub enum Cmd {
     LensJobs,
     LensReactions,
     Gc,
+    AddDir,
     Help,
     Quit,
 }
@@ -190,6 +191,12 @@ pub const ALL: &[Command] = &[
         args: "",
         what: "let the journals of old runs go",
         cmd: Cmd::Gc,
+    },
+    Command {
+        name: "add-dir",
+        args: "<path>",
+        what: "register a folder as a project, so it shows on the list",
+        cmd: Cmd::AddDir,
     },
     Command {
         name: "help",
