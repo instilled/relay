@@ -239,7 +239,7 @@ or a job, stop one still going, dismiss a question — and the second press does
 key disarms it, so nothing goes on a single slip (the way an agent view confirms a delete). `ctrl-c`
 is the same for leaving: once to ask, again to quit. A run still going is stopped, and a `ctrl-x`
 once it has ended removes it. Nothing is destroyed by any of this; that is retention's alone. Ended runs also leave on their own after a day;
-`/archive` is for the impatient. On the line: `rl done <id>…`, `rl done --all`. Nothing is ever deleted here; that is
+`/archive` is for the impatient. On the line: `rl archive <id>…`, `rl archive --all`. Nothing is ever deleted here; that is
 retention (§7). `enter` on a run opens its terminal, watching: a re-render of the run's output
 through a `vt100` screen (`tui/term.rs`), shown as a tile beside the list — the list stays, the
 line at the foot stays yours, arrows still walk the list, and `esc` closes the tile. It stays
@@ -591,12 +591,12 @@ the top of the panel, where a number key answers it; getting it to Slack or mail
 ## 7. On disk
 
 **Retention is the one delete, and only when told.** Relay is a memory: runs and events are
-never removed, `rl done` only puts a run away. What does grow without bound is the journal — a
+never removed, `rl archive` only puts a run away. What does grow without bound is the journal — a
 run's terminal bytes in `session_io`, its `log/<run>.log` and `run/<run>.exit|.env` sidecars —
 and `retention: 30d` in `config.yaml` (or `retention: { journal: 30d }`) lets that go for runs
 ended longer ago than that (`rl-daemon/src/gc.rs`, `gc.run`). The run and its events stay, and
 a `run.journal_dropped` event on the run says how many bytes went; attaching to such a run shows
-nothing, honestly. `rl gc` does it now (`--older-than 12h` for once, `--dry-run` to count; `/prune` in the panel), `rld`
+nothing, honestly. `rl prune` does it now (`--older-than 12h` for once, `--dry-run` to count; `/prune` in the panel), `rld`
 does it once a day when the key is set (`meta.gc.last_at`); unset, nothing is ever deleted.
 Facts (`retention.runs`) are deliberately not a key yet.
 

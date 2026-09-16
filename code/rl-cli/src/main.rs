@@ -43,7 +43,7 @@ const HOOK_TIMEOUT: Duration = Duration::from_millis(1500);
     name = "rl",
     version,
     about = "Relay — keeps your agents and long-running work alive",
-    after_help = "Every command starts rld if it is not running, and says so when the one running is another release.\nNothing is deleted on its own: `rl done` puts a run away, `rl ls --all` still has it. `retention: 30d` in config.yaml lets the journal of old runs go (`rl gc`); runs and events stay.\n\nFor agents:\n  rl context    what Relay is, its events and rules, and the answer it wants — read this first\n  rl agents     the agent CLIs on this machine\n  rl --json …   every command, machine-readable"
+    after_help = "Every command starts rld if it is not running, and says so when the one running is another release.\nNothing is deleted on its own: `rl archive` puts a run away, `rl ls --all` still has it. `retention: 30d` in config.yaml lets the journal of old runs go (`rl prune`); runs and events stay.\n\nFor agents:\n  rl context    what Relay is, its events and rules, and the answer it wants — read this first\n  rl agents     the agent CLIs on this machine\n  rl --json …   every command, machine-readable"
 )]
 struct Cli {
     /// Machine-readable output on every command.
@@ -68,8 +68,9 @@ enum Cmd {
     Stop(StopArgs),
     /// List runs (active by default).
     Ls(LsArgs),
-    /// Done with a run: out of the panel and `rl since`, kept in the ledger. Ended runs only.
-    Done(DoneArgs),
+    /// Archive a run: out of the panel and `rl since`, kept in the ledger. Ended runs only.
+    #[command(alias = "done")]
+    Archive(ArchiveArgs),
     /// What happened while you were away: runs that need you, finished, or moved, grouped.
     Since(SinceArgs),
     /// List ledger events.
@@ -101,7 +102,8 @@ enum Cmd {
     /// What an ended run did, by `assistants.summarise`: kept by the run, made when there is none.
     Summarise(SummariseArgs),
     /// Let the journal of old runs go, as `retention:` in config.yaml says (or --older-than). Runs and events stay.
-    Gc(GcArgs),
+    #[command(alias = "gc")]
+    Prune(PruneArgs),
     /// Emit a custom event, from a command or plugin; reactions pick it up.
     Emit(EmitArgs),
     /// Ask a human something and carry on: the question waits until answered.
@@ -308,7 +310,7 @@ struct EveryArgs {
 }
 
 #[derive(Args)]
-struct GcArgs {
+struct PruneArgs {
     /// Runs ended longer ago than this (default: the config's retention).
     #[arg(long, value_name = "DURATION")]
     older_than: Option<String>,
@@ -532,11 +534,11 @@ struct LsArgs {
 }
 
 #[derive(Args)]
-struct DoneArgs {
+struct ArchiveArgs {
     /// Run ids.
     ids: Vec<String>,
-    /// Instead: everything that has ended and been looked at.
-    #[arg(long, conflicts_with = "ids")]
+    /// Instead: everything that has ended and been looked at (the panel's `/archive seen`).
+    #[arg(long, alias = "seen", conflicts_with = "ids")]
     all: bool,
 }
 
@@ -581,7 +583,7 @@ async fn main() -> Result<()> {
         Cmd::Run(a) => run(&home, a, cli.json).await,
         Cmd::Stop(a) => stop(&home, a, cli.json).await,
         Cmd::Ls(a) => ls(&home, a, cli.json).await,
-        Cmd::Done(a) => done(&home, a, cli.json).await,
+        Cmd::Archive(a) => archive(&home, a, cli.json).await,
         Cmd::Since(a) => since(&home, a, cli.json).await,
         Cmd::Events(a) => events(&home, a, cli.json).await,
         Cmd::Schedule { cmd } => schedule(&home, cmd, cli.json).await,
@@ -594,7 +596,7 @@ async fn main() -> Result<()> {
         Cmd::Context(a) => context(&home, a).await,
         Cmd::Interpret(a) => interpret(&home, a, cli.json).await,
         Cmd::Summarise(a) => summarise(&home, a, cli.json).await,
-        Cmd::Gc(a) => gc(&home, a, cli.json).await,
+        Cmd::Prune(a) => prune(&home, a, cli.json).await,
         Cmd::Emit(a) => emit(&home, a, cli.json).await,
         Cmd::Ask(a) => ask(&home, a, cli.json).await,
         Cmd::Decisions(a) => decisions(&home, a, cli.json).await,
@@ -992,9 +994,10 @@ async fn ls(home: &Home, a: LsArgs, json: bool) -> Result<()> {
     Ok(())
 }
 
-async fn done(home: &Home, a: DoneArgs, json: bool) -> Result<()> {
+/// `rl archive` (once `rl done`): the panel's `/archive`, from the line.
+async fn archive(home: &Home, a: ArchiveArgs, json: bool) -> Result<()> {
     if a.ids.is_empty() && !a.all {
-        bail!("say which: `rl done <id>…`, or `rl done --all` for everything ended and seen");
+        bail!("say which: `rl archive <id>…`, or `rl archive --all` for everything ended and seen");
     }
     let n = daemon::ensure(home, !json)
         .await?
@@ -1006,9 +1009,9 @@ async fn done(home: &Home, a: DoneArgs, json: bool) -> Result<()> {
     if json {
         println!("{}", json!({ "archived": n }));
     } else if n == 0 && !a.all {
-        bail!("nothing archived: not found, still running, or already done");
+        bail!("nothing archived: not found, still running, or already archived");
     } else {
-        println!("{n} done");
+        println!("{n} archived");
     }
     Ok(())
 }
@@ -1839,7 +1842,7 @@ async fn config(home: &Home, a: ConfigArgs, json: bool) -> Result<()> {
             }
         }
         match r.config.retention.as_ref().and_then(|x| x.journal.as_deref()) {
-            Some(d) => println!("retention.journal     {d}  (config; `rl gc` runs it now, rld daily)"),
+            Some(d) => println!("retention.journal     {d}  (config; `rl prune` runs it now, rld daily)"),
             None => println!("retention.journal     —  (unset: nothing is ever deleted)"),
         }
         for e in &r.errors {
@@ -1853,8 +1856,8 @@ async fn config(home: &Home, a: ConfigArgs, json: bool) -> Result<()> {
     }
 }
 
-/// `rl gc`: retention, now.
-async fn gc(home: &Home, a: GcArgs, json: bool) -> Result<()> {
+/// `rl prune` (once `rl gc`): retention, now — the panel's `/prune`.
+async fn prune(home: &Home, a: PruneArgs, json: bool) -> Result<()> {
     let r = daemon::ensure(home, !json)
         .await?
         .call::<GcRun>(GcParams {
