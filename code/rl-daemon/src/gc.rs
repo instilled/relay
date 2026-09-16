@@ -78,15 +78,17 @@ pub async fn run(
             let Ok(m) = std::fs::metadata(&f) else { continue };
             files += 1;
             bytes += m.len();
-            if !dry_run && let Err(e) = std::fs::remove_file(&f).with_context(|| format!("removing {}", f.display()))
-            {
+            if !dry_run && let Err(e) = std::fs::remove_file(&f).with_context(|| format!("removing {}", f.display())) {
                 warn!(error = %format!("{e:#}"), "gc: journal file not removed; orphaned on disk");
                 failed += 1;
             }
         }
     }
     if failed > 0 {
-        warn!(failed, "gc: some journal files could not be removed; see prior warnings");
+        warn!(
+            failed,
+            "gc: some journal files could not be removed; see prior warnings"
+        );
     }
     Ok(GcReport {
         older_than: spec,

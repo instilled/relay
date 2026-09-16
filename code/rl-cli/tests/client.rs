@@ -1,8 +1,8 @@
 //! Client against an in-process daemon.
 
+use rl_cli::client::{Client, NotRunning};
 use rl_core::Home;
 use rl_proto::methods::DaemonPing;
-use rl_cli::client::{Client, NotRunning};
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 

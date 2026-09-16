@@ -36,6 +36,11 @@ impl std::str::FromStr for RuleKind {
 }
 
 /// One rule as the daemon tracks it, whichever file it came from.
+// A schedule carries more than a reaction does, so the two variants differ
+// in size. Boxing one would reach every construction and match site across
+// the daemon and the CLI to spare a move the code never makes in a hot
+// path — a rule is read through a reference nearly everywhere it is used.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum Rule {

@@ -44,16 +44,10 @@ pub fn register(r: &mut Router<Daemon>) {
         found.ok_or_else(|| RpcError::not_found("run", &id))
     });
     r.register::<rl_proto::methods::ScheduleList, _, _>(|d, f| async move {
-        d.scheduler
-            .list(f.all)
-            .await
-            .map_err(internal)
+        d.scheduler.list(f.all).await.map_err(internal)
     });
     r.register::<rl_proto::methods::ScheduleRun, _, _>(|d, p| async move {
-        d.scheduler
-            .run_now(&p.name, p.scope.as_deref())
-            .await
-            .map_err(internal)
+        d.scheduler.run_now(&p.name, p.scope.as_deref()).await.map_err(internal)
     });
     r.register::<rl_proto::methods::SchedulePause, _, _>(|d, p| async move {
         d.scheduler
@@ -68,42 +62,25 @@ pub fn register(r: &mut Router<Daemon>) {
             .map_err(internal)
     });
     r.register::<rl_proto::methods::WorkspaceUp, _, _>(|d, p| async move {
-        let mut up = d
-            .scheduler
-            .up(&p.path, p.approve)
-            .await
-            .map_err(internal)?;
+        let mut up = d.scheduler.up(&p.path, p.approve).await.map_err(internal)?;
         // The folder's reactions are part of the same yes.
-        let (report, reactions, approved) = d
-            .reactor
-            .up(&up.workspace.path, p.approve)
-            .await
-            .map_err(internal)?;
+        let (report, reactions, approved) = d.reactor.up(&up.workspace.path, p.approve).await.map_err(internal)?;
         up.reaction_report = report;
         up.reactions = reactions;
         up.approved_reactions = approved;
         Ok(up)
     });
     r.register::<rl_proto::methods::WorkspaceList, _, _>(|d, ()| async move {
-        d.scheduler
-            .workspaces()
-            .await
-            .map_err(internal)
+        d.scheduler.workspaces().await.map_err(internal)
     });
     r.register::<rl_proto::methods::WorkspaceRename, _, _>(|d, p| async move {
-        d.scheduler
-            .rename_workspace(&p.path, &p.name)
-            .await
-            .map_err(internal)
+        d.scheduler.rename_workspace(&p.path, &p.name).await.map_err(internal)
     });
     r.register::<rl_proto::methods::WorkspaceRemove, _, _>(|d, p| async move {
         if let Ok(path) = std::fs::canonicalize(&p.path) {
             let _ = d.reactor.remove_scope(&path).await;
         }
-        d.scheduler
-            .remove_workspace(&p.path)
-            .await
-            .map_err(internal)
+        d.scheduler.remove_workspace(&p.path).await.map_err(internal)
     });
     r.register::<AgentList, _, _>(|d, ()| async move { Ok(crate::config::agents(&d.registry)) });
     r.register::<AssistantRun, _, _>(|d, p: AssistantParams| async move {
@@ -116,11 +93,9 @@ pub fn register(r: &mut Router<Daemon>) {
             .await
             .map_err(|e| RpcError::invalid_params(format!("{e:#}")))
     });
-    r.register::<SummaryGet, _, _>(|d, p: RunId| async move {
-        crate::summarise::get(&d, &p.id)
-            .await
-            .map_err(internal)
-    });
+    r.register::<SummaryGet, _, _>(
+        |d, p: RunId| async move { crate::summarise::get(&d, &p.id).await.map_err(internal) },
+    );
     r.register::<GcRun, _, _>(|d, p: GcParams| async move {
         let retention = d
             .config
@@ -149,17 +124,9 @@ pub fn register(r: &mut Router<Daemon>) {
     r.register::<rl_proto::methods::ScheduleReload, _, _>(|d, ()| async move {
         // A rules reload re-reads the config too: one `R` for everything on disk.
         *d.config.write().unwrap() = crate::config::load(&d.home);
-        d.scheduler
-            .reload()
-            .await
-            .map_err(internal)
+        d.scheduler.reload().await.map_err(internal)
     });
-    r.register::<ReactionList, _, _>(|d, f| async move {
-        d.reactor
-            .list(f.all)
-            .await
-            .map_err(internal)
-    });
+    r.register::<ReactionList, _, _>(|d, f| async move { d.reactor.list(f.all).await.map_err(internal) });
     r.register::<RuleList, _, _>(|d, f: ScheduleFilter| async move {
         let mut rules: Vec<Rule> = d
             .scheduler
@@ -226,12 +193,7 @@ pub fn register(r: &mut Router<Daemon>) {
             .await
             .map_err(internal)
     });
-    r.register::<ReactionReload, _, _>(|d, ()| async move {
-        d.reactor
-            .reload()
-            .await
-            .map_err(internal)
-    });
+    r.register::<ReactionReload, _, _>(|d, ()| async move { d.reactor.reload().await.map_err(internal) });
     r.register::<ReactionTest, _, _>(|d, p: EventId| async move {
         let trials = d
             .reactor
@@ -277,29 +239,18 @@ pub fn register(r: &mut Router<Daemon>) {
             .map_err(|e| RpcError::invalid_params(format!("{e:#}")))
     });
 
-    r.register::<RunStart, _, _>(|d, spec| async move {
-        d.supervisor
-            .start(spec)
-            .await
-            .map_err(internal)
-    });
+    r.register::<RunStart, _, _>(|d, spec| async move { d.supervisor.start(spec).await.map_err(internal) });
     r.register::<RunStop, _, _>(|d, RunStopParams { id, force }| async move {
         if d.supervisor.live(&id).is_none() {
             return Err(RpcError::not_found("live run", &id));
         }
-        d.supervisor
-            .stop(&id, force)
-            .await
-            .map_err(internal)
+        d.supervisor.stop(&id, force).await.map_err(internal)
     });
     r.register::<rl_proto::methods::RunInput, _, _>(|d, p: rl_proto::methods::RunInputParams| async move {
         if d.supervisor.live(&p.id).is_none() {
             return Err(RpcError::not_found("live run", &p.id));
         }
-        d.supervisor
-            .input(&p.id, p.bytes)
-            .await
-            .map_err(internal)
+        d.supervisor.input(&p.id, p.bytes).await.map_err(internal)
     });
 
     r.register::<RunHook, _, _>(|d, p| async move {
@@ -310,10 +261,7 @@ pub fn register(r: &mut Router<Daemon>) {
             )));
         }
         if let Some(sig) = rl_detect::claude::signal(&p.event, &p.payload) {
-            d.supervisor
-                .apply(&p.id, sig)
-                .await
-                .map_err(internal)?;
+            d.supervisor.apply(&p.id, sig).await.map_err(internal)?;
         }
         get_run(&d, &p.id).await
     });
@@ -457,7 +405,9 @@ fn emit_kind_ok(kind: &str) -> Result<(), String> {
     let shaped = kind.contains('.')
         && kind.split('.').all(|seg| {
             !seg.is_empty()
-                && seg.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+                && seg
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
                 && seg.starts_with(|c: char| c.is_ascii_lowercase())
         });
     if !shaped {

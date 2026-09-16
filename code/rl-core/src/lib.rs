@@ -22,7 +22,9 @@ unsafe extern "C" {
 /// FNV-1a, 32-bit: deterministic across Rust toolchains/versions, unlike
 /// `std::hash::DefaultHasher`.
 fn fnv1a(bytes: &[u8]) -> u32 {
-    bytes.iter().fold(0x811c9dc5u32, |h, &b| (h ^ b as u32).wrapping_mul(0x01000193))
+    bytes
+        .iter()
+        .fold(0x811c9dc5u32, |h, &b| (h ^ b as u32).wrapping_mul(0x01000193))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -253,7 +253,11 @@ mod tests {
     fn terminal_states_sql_matches_is_terminal() {
         for s in RunState::ALL {
             let listed = TERMINAL_STATES_SQL.contains(&format!("'{}'", s.as_str()));
-            assert_eq!(listed, s.is_terminal(), "state {s:?} disagrees with TERMINAL_STATES_SQL");
+            assert_eq!(
+                listed,
+                s.is_terminal(),
+                "state {s:?} disagrees with TERMINAL_STATES_SQL"
+            );
         }
     }
 }
