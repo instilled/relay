@@ -41,6 +41,21 @@ pub enum Mark {
     Ended { exit: Option<i32> },
 }
 
+/// Something that happened at a point in a chunk's stripped text: a prompt
+/// mark, or one of the two things a line editor does that the text alone
+/// cannot show — the cursor going back to the start of the line, and going
+/// back over one character. This is no terminal and drops both from what it
+/// returns; whoever is gathering a line as it was typed needs them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ev {
+    Mark(Mark),
+    /// `\r`: back to the start of the line. Nothing is erased by this alone —
+    /// the next character printed is what overwrites.
+    Return,
+    /// `\x08`: back over one character.
+    Backspace,
+}
+
 /// An OSC payload read as a prompt mark. Anything else — a window title, a
 /// colour query — is `None`, and is stripped the way it always was.
 fn mark_of(payload: &str) -> Option<Mark> {
@@ -69,11 +84,18 @@ pub struct Stripper {
     pending: usize,
     /// The OSC payload being read, kept only until its terminator.
     osc: String,
-    /// The prompt marks of the chunk just stripped, each with the byte offset
-    /// into that chunk's text where it stood. One read can hold a whole
-    /// command — `B`, what was typed, `C`, its output, `D` — so the offsets
-    /// are what make the pieces tellable apart afterwards.
-    marks: Vec<(usize, Mark)>,
+    /// What happened in the chunk just stripped, in order, each with the byte
+    /// offset into that chunk's text where it stood. One read can hold a whole
+    /// command — `B`, what was typed, `C`, its output, `D` — and the echo of
+    /// a line being edited, so the offsets are what make the pieces tellable
+    /// apart afterwards.
+    events: Vec<(usize, Ev)>,
+    /// The same chunk's printable characters with nothing undone: no line
+    /// restart, no backspace. What [`Stripper::strip`] returns has those
+    /// applied, destructively — a `\r` before the command runs takes the line
+    /// with it — so a line being gathered as it was typed is recovered from
+    /// here, and the events are positioned against this, not against that.
+    echo: String,
 }
 
 impl Stripper {
@@ -84,8 +106,14 @@ impl Stripper {
     /// The prompt marks of the text [`strip`] last returned, each with the
     /// byte offset into that text where it stood. Draining: a mark is read
     /// once, and offsets only ever mean anything against that one chunk.
-    pub fn take_marks(&mut self) -> Vec<(usize, Mark)> {
-        std::mem::take(&mut self.marks)
+    pub fn take_events(&mut self) -> Vec<(usize, Ev)> {
+        std::mem::take(&mut self.events)
+    }
+
+    /// The chunk just stripped as it was echoed, with nothing undone, which is
+    /// what the offsets from [`Self::take_events`] measure against. Draining.
+    pub fn take_echo(&mut self) -> String {
+        std::mem::take(&mut self.echo)
     }
 
     /// Strips CSI/OSC/other escape sequences and resolves `\r` within a
@@ -95,7 +123,8 @@ impl Stripper {
         let mut out = String::with_capacity(text.len());
         // Last chunk's marks were measured against last chunk's text; they
         // would be nonsense against this one.
-        self.marks.clear();
+        self.events.clear();
+        self.echo.clear();
         let mut chars = text.chars().peekable();
         while let Some(c) = chars.next() {
             match std::mem::take(&mut self.state) {
@@ -106,6 +135,9 @@ impl Stripper {
                     }
                     '\r' => {
                         // Carriage return without newline: the line restarts.
+                        // Only for what is returned — the echo keeps what was
+                        // written, and whoever gathers a line decides what a
+                        // return means to it.
                         if chars.peek() != Some(&'\n') {
                             if let Some(pos) = out.rfind('\n') {
                                 out.truncate(pos + 1);
@@ -113,10 +145,15 @@ impl Stripper {
                                 out.clear();
                             }
                         }
+                        self.events.push((self.echo.len(), Ev::Return));
                     }
-                    '\x07' | '\x08' => {}
+                    '\x07' => {}
+                    '\x08' => self.events.push((self.echo.len(), Ev::Backspace)),
                     c if c.is_control() && c != '\n' && c != '\t' => {}
-                    c => out.push(c),
+                    c => {
+                        out.push(c);
+                        self.echo.push(c);
+                    }
                 },
                 // CSI: ESC [ params… final byte 0x40..=0x7E
                 // OSC: ESC ] … BEL or ESC \
@@ -146,7 +183,7 @@ impl Stripper {
                     if c == '\x07' || (prev_was_esc && c == '\\') {
                         // Where the mark stood is where the text has got to.
                         if let Some(m) = mark_of(&self.osc) {
-                            self.marks.push((out.len(), m));
+                            self.events.push((self.echo.len(), Ev::Mark(m)));
                         }
                         self.osc.clear();
                         self.state = EscState::None;
@@ -227,32 +264,46 @@ mod tests {
         let out = s.strip(b"\x1b]133;A\x07$ \x1b]133;B\x07make test\x1b]133;C\x07ok\n\x1b]133;D;1\x07");
         assert_eq!(out, "$ make testok\n", "a mark leaves no text of its own behind");
         assert_eq!(
-            s.take_marks(),
+            s.take_events(),
             vec![
-                (0, Mark::Prompt),
-                (2, Mark::Input),
-                (11, Mark::Output),
-                (14, Mark::Ended { exit: Some(1) }),
+                (0, Ev::Mark(Mark::Prompt)),
+                (2, Ev::Mark(Mark::Input)),
+                (11, Ev::Mark(Mark::Output)),
+                (14, Ev::Mark(Mark::Ended { exit: Some(1) })),
             ],
-            "each mark stands where the text had got to, so `make test` lies between B and C"
+            "each mark stands where the echo had got to, so `make test` lies between B and C"
         );
-        assert!(s.take_marks().is_empty(), "draining: a mark is read once");
+        assert!(s.take_events().is_empty(), "draining: an event is read once");
     }
 
     #[test]
     fn a_mark_split_across_reads_and_an_osc_that_is_not_one() {
         let mut s = Stripper::default();
         assert_eq!(s.strip(b"\x1b]13"), "");
-        assert!(s.take_marks().is_empty(), "not terminated yet, so not a mark yet");
+        assert!(s.take_events().is_empty(), "not terminated yet, so not a mark yet");
         // Resumed, and terminated by ST (`ESC \`) rather than BEL.
         assert_eq!(s.strip(b"3;D;0\x1b\\done\n"), "done\n");
-        assert_eq!(s.take_marks(), vec![(0, Mark::Ended { exit: Some(0) })]);
+        assert_eq!(s.take_events(), vec![(0, Ev::Mark(Mark::Ended { exit: Some(0) }))]);
         // A window title is stripped as it always was, and is no mark.
         assert_eq!(s.strip(b"\x1b]0;title\x07real"), "real");
-        assert!(s.take_marks().is_empty());
+        assert!(s.take_events().is_empty());
         // `D` with no code still ends the command; the exit is simply unknown.
         s.strip(b"\x1b]133;D\x07");
-        assert_eq!(s.take_marks(), vec![(0, Mark::Ended { exit: None })]);
+        assert_eq!(s.take_events(), vec![(0, Ev::Mark(Mark::Ended { exit: None }))]);
+    }
+
+    #[test]
+    fn what_a_line_editor_undoes_is_told_rather_than_done() {
+        let mut s = Stripper::default();
+        // A shell echoing `s`, then backspacing and writing the line again.
+        assert_eq!(s.strip(b"s\x08sleep 2"), "ssleep 2", "no terminal here: both are kept");
+        assert_eq!(s.take_events(), vec![(1, Ev::Backspace)], "but it says where the backspace fell");
+        // A return takes the line away from what is returned, and the echo
+        // keeps it — which is the only place the `2` survives.
+        assert_eq!(s.strip(b"2\r\r\n"), "\n");
+        assert_eq!(s.take_events(), vec![(1, Ev::Return), (1, Ev::Return)]);
+        assert_eq!(s.take_echo(), "2\n", "the echo still has the `2` the return took away");
+        assert_eq!(s.take_echo(), "", "draining: read once");
     }
 
     #[test]

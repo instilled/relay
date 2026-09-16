@@ -16,14 +16,14 @@ use anyhow::{Context, Result, anyhow, bail};
 use jiff::Timestamp;
 use rl_core::time::fmt_duration;
 use rl_core::{Home, id::new_id};
-use rl_detect::pty::Heuristics;
+use rl_detect::pty::{Heuristics, ShellCommand};
 use rl_detect::{Current, Registry, Signal, Transition, claude, step};
 use rl_ledger::events::NewEvent;
 use rl_ledger::session_io::Direction;
 use rl_ledger::sessions::SessionRow;
 use rl_ledger::{Ledger, events, runs, session_io, sessions};
 use rl_proto::methods::RunSpec;
-use rl_proto::types::{Confidence, Run, RunState, Source, event_kind};
+use rl_proto::types::{Confidence, Run, RunKind, RunState, Source, event_kind};
 use rl_session::client::{Session, SessionReader, SessionWriter};
 use rl_session::exit::{Exit, read_exit_file};
 use rl_session::proto::{Frame, Hello};
@@ -629,6 +629,13 @@ impl Supervisor {
                         batch.extend_from_slice(&bytes);
                         let sig = heur.output(&bytes, Timestamp::now());
                         self.consider(&live, sig).await;
+                        // Drained whatever the run is, so marks cannot pile
+                        // up on one that would never file them; only a shell's
+                        // are worth keeping.
+                        let done = heur.take_commands();
+                        if !done.is_empty() && run.kind == RunKind::Shell {
+                            self.ran(&run, done).await;
+                        }
                         if batch.len() >= JOURNAL_BATCH_BYTES {
                             self.flush(&id, &mut batch, heur.last_line(LAST_LINE_MAX)).await;
                         }
@@ -691,6 +698,44 @@ impl Supervisor {
             .await
         {
             warn!(error = %e, "journaling output");
+        }
+    }
+
+    /// Files what a shell has run: one event each, and the newest as the run's
+    /// detail, which is what its row goes on showing afterwards.
+    ///
+    /// This writes the detail itself rather than going through [`Self::apply`],
+    /// where a PTY signal's detail is deliberately dropped in favour of
+    /// `last_line`. That rule is about scraping: a prompt mark is the shell
+    /// stating its own exit code, which is a signal like any other.
+    async fn ran(&self, run: &Run, done: Vec<ShellCommand>) {
+        let id = run.id.clone();
+        let run = run.clone();
+        let now = Timestamp::now();
+        if let Err(e) = self
+            .ledger
+            .call(move |c| {
+                let mut newest = None;
+                for cmd in &done {
+                    let summary = said(cmd);
+                    events::append(
+                        c,
+                        &NewEvent::for_run(&run, now, "shell.command", summary.clone()).with_data(json!({
+                            "command": cmd.text,
+                            "exit": cmd.exit,
+                            "ms": cmd.took.as_millis() as i64,
+                        })),
+                    )?;
+                    newest = Some(summary);
+                }
+                if let Some(d) = newest {
+                    runs::set_detail(c, &id, &d)?;
+                }
+                Ok(())
+            })
+            .await
+        {
+            warn!(error = %e, "filing what the shell ran");
         }
     }
 
@@ -763,6 +808,18 @@ impl Supervisor {
             debug!(error = %e, "closing holder");
         }
     }
+}
+
+/// One command as a line: what was typed, how it came out, and how long it
+/// took. The exit is left out when the shell's mark did not carry one, rather
+/// than shown as a zero it never said.
+fn said(cmd: &ShellCommand) -> String {
+    let mut s = cmd.text.clone();
+    if let Some(e) = cmd.exit {
+        s.push_str(&format!(" · exit {e}"));
+    }
+    s.push_str(&format!(" · {}", fmt_duration(cmd.took)));
+    s
 }
 
 fn default_title(argv: &[String]) -> String {

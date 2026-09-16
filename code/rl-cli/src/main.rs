@@ -32,7 +32,7 @@ use rl_cli::daemon;
 use rl_cli::env::child_env;
 use rl_cli::render;
 use serde_json::json;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 /// How long `rl hook` gives the daemon before letting the CLI carry on.
@@ -123,9 +123,17 @@ enum Cmd {
     Join(AttachArgs),
     /// Say what a run is doing when its CLI cannot: done, blocked or working.
     Mark(MarkArgs),
+    /// Print the prompt-mark snippet for your shell, so a project shell can tell one command from the next.
+    ShellInit(ShellInitArgs),
     /// Called by a CLI's hooks (Claude Code) with the hook's JSON on stdin. Never fails the CLI.
     #[command(hide = true)]
     Hook(HookArgs),
+}
+
+#[derive(Args)]
+struct ShellInitArgs {
+    /// zsh or bash. Defaults to whatever `$SHELL` says you use.
+    shell: Option<String>,
 }
 
 #[derive(Args)]
@@ -596,6 +604,7 @@ async fn main() -> Result<()> {
         Cmd::Watch(a) => attach(&home, a, AttachMode::Watch).await,
         Cmd::Join(a) => attach(&home, a, AttachMode::Join).await,
         Cmd::Mark(a) => mark(&home, a, cli.json).await,
+        Cmd::ShellInit(a) => shell_init(a),
         Cmd::Hook(a) => hook(&home, a).await,
     }
 }
@@ -1998,6 +2007,61 @@ async fn summarise(home: &Home, a: SummariseArgs, json: bool) -> Result<()> {
 const AGENT_HEADERS: &[&str] = &["AGENT", "BIN", "HEADLESS", "MODEL"];
 
 /// `rl agents`: what the registry knows, and what is here.
+/// zsh: `D` with the last exit and `A` from `precmd`, `C` from `preexec`, and
+/// `B` on the end of the prompt itself, where what you type begins.
+const ZSH_MARKS: &str = r#"# Relay prompt marks (OSC 133), so a project shell can tell one command from
+# the next. In ~/.zshrc:  eval "$(rl shell-init zsh)"
+if [[ -z ${_relay_marks:-} ]]; then
+  _relay_marks=1
+  autoload -Uz add-zsh-hook
+  _relay_precmd() { printf '\033]133;D;%s\007\033]133;A\007' "$?" }
+  _relay_preexec() { printf '\033]133;C\007' }
+  add-zsh-hook precmd _relay_precmd
+  add-zsh-hook preexec _relay_preexec
+  PS1="$PS1"$'\033]133;B\007'
+fi
+"#;
+
+/// bash: the same, with `PROMPT_COMMAND` for `D`/`A` — first, so `$?` is still
+/// the command's — a `DEBUG` trap for `C`, and `B` on the end of `PS1`.
+const BASH_MARKS: &str = r#"# Relay prompt marks (OSC 133), so a project shell can tell one command from
+# the next. In ~/.bashrc:  eval "$(rl shell-init bash)"
+if [ -z "${_relay_marks:-}" ]; then
+  _relay_marks=1
+  _relay_precmd() { printf '\033]133;D;%s\007\033]133;A\007' "$?"; }
+  PROMPT_COMMAND="_relay_precmd${PROMPT_COMMAND:+;$PROMPT_COMMAND}"
+  trap 'printf "\033]133;C\007"' DEBUG
+  PS1="$PS1\[\033]133;B\007\]"
+fi
+"#;
+
+/// The snippet for a shell, printed and never written anywhere: the marks are
+/// handed over, like `RELAY_RUN`, for a prompt to adopt if it wants them.
+/// Plenty of prompts — starship, powerlevel10k, the shell integrations of
+/// iTerm2, WezTerm and kitty — already emit these, and then there is nothing
+/// to add at all.
+fn shell_init(a: ShellInitArgs) -> Result<()> {
+    let shell = a
+        .shell
+        .or_else(|| {
+            let sh = std::env::var("SHELL").ok()?;
+            Path::new(&sh).file_name().map(|f| f.to_string_lossy().into_owned())
+        })
+        .unwrap_or_default();
+    let snippet = match shell.trim() {
+        "zsh" => ZSH_MARKS,
+        "bash" => BASH_MARKS,
+        // Marking where input begins means wrapping fish_prompt itself, and
+        // without that mark a command's text never arrives — better to say so
+        // than to print something that quietly records nothing.
+        "fish" => bail!("fish is not supported yet: its `B` mark needs fish_prompt wrapped"),
+        "" => bail!("no shell given and $SHELL says nothing; try `rl shell-init zsh`"),
+        other => bail!("no prompt marks for {other}; zsh and bash are known"),
+    };
+    print!("{snippet}");
+    Ok(())
+}
+
 async fn agents(home: &Home, json: bool) -> Result<()> {
     let list = daemon::ensure(home, !json).await?.call::<AgentList>(()).await?;
     if json {
