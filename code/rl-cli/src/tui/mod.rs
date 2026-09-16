@@ -2563,13 +2563,20 @@ impl App {
                     } else {
                         title
                     };
+                    // A shell at rest wears the accent on its caret, and says
+                    // nothing where a run says what it last did: the only line
+                    // it has to show there is its own prompt.
+                    let shell = rows::live_shell(r);
                     list_line(
                         w,
                         tw,
-                        Span::styled(format!(" {} ", rows::glyph(r.state)), style),
+                        Span::styled(
+                            format!(" {} ", rows::run_glyph(r)),
+                            if shell { theme::accent() } else { style },
+                        ),
                         title,
-                        Span::styled(fit(&rows::state_words(r.state, r.confidence), 10), style),
-                        &i.summary,
+                        Span::styled(fit(&rows::run_words(r), 10), style),
+                        if shell { "" } else { i.summary.as_str() },
                         i.joined_by.as_deref(),
                         r.ref_.as_deref(),
                         fmt_age(i.at, now),
