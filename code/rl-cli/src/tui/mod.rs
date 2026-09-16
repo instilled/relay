@@ -227,7 +227,17 @@ struct App {
     pick: Option<usize>,
     mode: Mode,
     flash: Option<(String, Instant)>,
+    /// A destructive key waits for its own second press: `ctrl-x` to remove,
+    /// `ctrl-c` to quit. Any other key clears it, so nothing goes on one slip.
+    arm: Option<Arm>,
     quit: bool,
+}
+
+/// What a second press of a destructive key would do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Arm {
+    Remove,
+    Quit,
 }
 
 /// The first of `n` lines to show in a window `h` tall so that line `sel` is
@@ -437,6 +447,7 @@ pub async fn run(home: &Home) -> Result<()> {
         pick: None,
         mode: Mode::Normal,
         flash: None,
+        arm: None,
         quit: false,
     };
     app.refresh().await;
@@ -901,29 +912,45 @@ impl App {
         }
     }
 
-    /// `ctrl-x`: get whatever the cursor is on out of the list. An ended run
-    /// or a job is archived at once (reversible: the ledger keeps it); a run
-    /// still going is stopped first, so a second `ctrl-x` once it has ended is
-    /// what archives it; a question is dismissed. Nothing here is destroyed —
-    /// that is retention's alone.
+    /// The second `ctrl-x` (the first only armed it): get whatever the cursor
+    /// is on out of the list. An ended run or a job is archived (reversible:
+    /// the ledger keeps it); a run still going is stopped, so once it has ended
+    /// another `ctrl-x` archives it; a question is dismissed. Nothing here is
+    /// destroyed — that is retention's alone.
     async fn remove_selected(&mut self) {
         if let Some(j) = self.selected_job() {
             let ids: Vec<String> = j.runs.iter().map(|i| i.run.id.clone()).collect();
             let what = format!("{} · {} runs", j.name, ids.len());
             self.archive(ids, &what).await;
         } else if let Some(i) = self.selected_run() {
+            let (id, title) = (i.run.id.clone(), i.run.title.clone());
             if i.run.state.is_terminal() {
-                let (id, title) = (i.run.id.clone(), i.run.title.clone());
                 self.archive(vec![id], &title).await;
             } else {
-                // Can't archive what is still going; stop it, then a second
-                // ctrl-x is done with it.
-                self.mode = Mode::Stop(i.run.id.clone());
+                self.stop(id).await;
             }
         } else if let Some(q) = self.selected_question() {
-            self.mode = Mode::Dismiss(q.id.clone());
+            self.dismiss(q.id.clone()).await;
         } else {
             self.say("nothing here to remove");
+        }
+    }
+
+    /// What a second `ctrl-x` would do to the row under the cursor, for the
+    /// armed hint — `None` when there is nothing to remove there.
+    fn remove_hint(&self) -> Option<String> {
+        if let Some(j) = self.selected_job() {
+            Some(format!("remove {} · {} runs", j.name, j.runs.len()))
+        } else if let Some(i) = self.selected_run() {
+            if i.run.state.is_terminal() {
+                Some(format!("remove {}", i.run.title))
+            } else {
+                Some(format!("stop {}", i.run.title))
+            }
+        } else if let Some(q) = self.selected_question() {
+            Some(format!("dismiss {}", q.title))
+        } else {
+            None
         }
     }
 
@@ -1351,6 +1378,15 @@ impl App {
 
     async fn key(&mut self, k: KeyEvent, area: Rect) -> Result<()> {
         self.flash = None;
+        // A destructive key stays armed only until the very next key: its own
+        // second press acts, anything else disarms it. (ctrl-x/ctrl-c re-check
+        // and re-arm themselves in `key_list`.)
+        if !matches!(
+            (k.code, k.modifiers),
+            (KeyCode::Char('c') | KeyCode::Char('x'), KeyModifiers::CONTROL)
+        ) {
+            self.arm = None;
+        }
         match std::mem::replace(&mut self.mode, Mode::Normal) {
             Mode::Stop(id) => {
                 if k.code == KeyCode::Char('y') {
@@ -1499,9 +1535,29 @@ impl App {
 
     /// What the line does not take: moving about, and backing out.
     async fn key_list(&mut self, k: KeyEvent, area: Rect) -> Result<()> {
+        // A destructive key is armed by its first press and acts on its second;
+        // any other key here disarms it, so `ctrl-x`/`ctrl-c` never fire on one
+        // slip (the way an agent view asks before it deletes).
+        let armed = self.arm.take();
         match (k.code, k.modifiers) {
-            (KeyCode::Char('c'), KeyModifiers::CONTROL) => self.quit = true,
-            (KeyCode::Char('x'), KeyModifiers::CONTROL) => self.remove_selected().await,
+            (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
+                if armed == Some(Arm::Quit) {
+                    self.quit = true;
+                } else {
+                    self.arm = Some(Arm::Quit);
+                    self.flash = Some(("press ^c again to quit".into(), Instant::now()));
+                }
+            }
+            (KeyCode::Char('x'), KeyModifiers::CONTROL) => {
+                if armed == Some(Arm::Remove) {
+                    self.remove_selected().await;
+                } else if let Some(what) = self.remove_hint() {
+                    self.arm = Some(Arm::Remove);
+                    self.flash = Some((format!("press ^x again to {what}"), Instant::now()));
+                } else {
+                    self.say("nothing here to remove");
+                }
+            }
             (KeyCode::Char('r'), KeyModifiers::CONTROL) => {
                 if let Some(folder) = self.selected_project() {
                     let name = self.names.workspace(&folder);
