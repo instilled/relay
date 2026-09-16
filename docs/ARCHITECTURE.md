@@ -222,7 +222,9 @@ place — an inline field over `workspace.rename`, which updates the registered 
 the registration (a folder never `rl up`'d has no name to change and says so). A folder you
 `rl up`'d is always on the list, even before anything has run there: its header sits below every
 group with activity (under the all-lens, where a project-level line belongs), so you can select
-it, read its stats, edit its rules or open its shell from the first. Moving the cursor onto a row is looking at it;
+it, read its stats, edit its rules or open its shell from the first. `/add-dir <path>` registers a
+folder from the line — the panel's `rl up`, over `workspace.up` — and lands the cursor on its new
+row. Moving the cursor onto a row is looking at it;
 `/done` on an ended run (or a job) is being done with it — `run.archive` sets `runs.archived_at`,
 the digest leaves it out, `rl ls --all` and the ledger keep it — and `/done-all` is done with
 everything ended that has been looked at. `ctrl-x` is the one keystroke for it, whatever the row:
