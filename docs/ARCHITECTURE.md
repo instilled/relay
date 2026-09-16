@@ -209,8 +209,8 @@ header, above the line, above the footer — and the list and its detail pane sp
 bar; the full-screen terminal drops all of it for the cells. A group's header is its name, then the folder it lives in, then the rules that
 live there — `↻ nightly 4h · ⚡ tests-failed`, accented and amber when one waits for a yes, with a
 `+N` when more than fit — and, at the right edge, the tally of how many jobs and reactions the
-folder holds; your own (global) rules get a project row of their own — the "yours" row — whenever
-there are any: it leads the list when one waits for a yes, otherwise it trails with the idle
+folder holds; your own (global) rules get a project row of their own — the "yours" row — always,
+rules or none: it leads the list when one waits for a yes, otherwise it trails with the idle
 projects, and either way the cursor stops on it, `enter` (or `/info`) shows its schedules and
 reactions in the pane, and `/rules` opens them. Runs a schedule or a rule
 started fold, once ended, into one line per job — name, cadence, how many went well, the last
@@ -224,7 +224,8 @@ from a header drops into the rules view filtered to that folder; `^r` renames th
 place — an inline field over `workspace.rename`, which updates the registered name and keeps
 the registration (a folder never `rl up`'d has no name to change and says so). A folder you
 `rl up`'d is always on the list, even before anything has run there: its header sits below every
-group with activity (under the all-lens, where a project-level line belongs), so you can select
+group with activity, under every lens — a lens narrows what shows inside projects, never which
+projects there are — so you can select
 it, read its stats, edit its rules or open its shell from the first. `/add-dir <path>` registers a
 folder from the line — the panel's `rl up`, over `workspace.up` — and lands the cursor on its new
 row. Moving the cursor onto a row is looking at it;
