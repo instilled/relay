@@ -34,7 +34,7 @@ pub async fn gather(rpc: &mut Client, folder: &Path) -> Result<Here> {
     let name = workspaces.iter().find(|w| w.path == folder).map(|w| w.name.clone());
     let scope_word = |r: &Rule| -> String {
         if r.is_global() {
-            "yours".into()
+            "global".into()
         } else {
             workspaces
                 .iter()
@@ -106,8 +106,8 @@ pub fn vocabulary() -> &'static str {
 - run: one thing Relay keeps alive — a shell command, or an agent CLI in a terminal — in a \
 folder. It has a title, a state (starting, working, idle, needs you, blocked, stale, done, \
 failed, stopped), tags, and a cause (by hand, a schedule, a reaction, a decision).
-- folder: a directory Relay knows; what `in` names. `yours` is not a folder: it means the \
-person's own files in ~/.relay, which apply everywhere.
+- folder: a directory Relay knows; what `in` names. `global` is not a folder: it means the \
+rule files in the Relay home (~/.relay), which apply in every folder.
 - rule: what starts work without the person. A schedule fires on time; a reaction fires on an \
 event. A folder's rules live in <folder>/.relay/schedules.yaml and reactions.yaml; the \
 person's own in ~/.relay/schedules.yaml and reactions.yaml.
@@ -215,22 +215,22 @@ run: <a shell line, or an agent's name followed by its prompt>
 title: <a few words, optional>
 
 kind: schedule     # something to do on time
-in: <folder, or yours>
+in: <folder, or global>
 name: <letters, digits, . _ -; short, no spaces>
 when: <every 30m | a cron line>
 run: <as above>
 title: <optional>
 tags: [<optional>]
-cwd: <optional; needed when in: yours>
+cwd: <optional; needed when in: global>
 
 kind: reaction     # something to do when an event happens
-in: <folder, or yours>
+in: <folder, or global>
 name: <as above>
 when: on <event> [<event> ...]
 run: <as above>
 title: <optional>
 tags: [<optional>]
-cwd: <optional; needed when in: yours>
+cwd: <optional; needed when in: global>
 
 Prefer the folder the words were typed in. Prefer a shell line for one command, an agent for \
 work that needs judgement. Never invent a folder, an event kind, or a field.

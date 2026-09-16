@@ -202,15 +202,17 @@ pub fn job_lines(j: &Job, rule: Option<&Rule>, names: &Names, now: Timestamp) ->
     lines
 }
 
-/// The "yours" row's pane: your own (global) schedules & reactions — the rules
-/// that live outside any folder — told the way a project's are.
-pub fn global_lines(rules: &[Rule], now: Timestamp) -> Vec<Line<'static>> {
-    let mut lines = vec![Line::from(Span::raw(" yours").bold())];
-    lines.push(Line::from(Span::raw(" your own rules, in every folder").dim()));
+/// The "global" row's pane: the schedules & reactions in the Relay home —
+/// the rules that apply in every folder — told the way a project's are.
+pub fn global_lines(rules: &[Rule], home: &str, now: Timestamp) -> Vec<Line<'static>> {
+    let mut lines = vec![Line::from(Span::raw(" global").bold())];
+    lines.push(Line::from(
+        Span::raw(format!(" {home} · rules that apply in every folder")).dim(),
+    ));
     lines.extend(rules_section(rules, None, now));
     lines.push(Line::raw(""));
     lines.push(Line::from(
-        Span::raw(" /rules edits your global schedules & reactions").dim(),
+        Span::raw(" /rules edits the global schedules & reactions").dim(),
     ));
     lines
 }
