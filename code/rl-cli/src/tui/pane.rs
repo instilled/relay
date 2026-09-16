@@ -204,6 +204,37 @@ pub fn job_lines(j: &Job, rule: Option<&Rule>, names: &Names, now: Timestamp) ->
 
 /// A project: the folder itself, how its runs stand, and the rules that live
 /// there. `items` is the whole digest; this picks the ones in the folder.
+/// The "yours" row's pane: your own (global) schedules & reactions — the rules
+/// that live outside any folder — told the way a project's are.
+pub fn global_lines(rules: &[Rule], now: Timestamp) -> Vec<Line<'static>> {
+    let mut lines = vec![Line::from(Span::raw(" yours").bold())];
+    lines.push(Line::from(Span::raw(" your own rules, in every folder").dim()));
+    lines.push(Line::raw(""));
+
+    let chips = super::rows::chips(rules, None, now);
+    let (sched, react): (Vec<_>, Vec<_>) = chips
+        .iter()
+        .partition(|c| c.kind == rl_proto::rule::RuleKind::Schedule);
+    lines.push(Line::from(Span::raw(" rules").dim()));
+    if chips.is_empty() {
+        lines.push(Line::from(
+            Span::raw("   none · /rules adds schedules & reactions").dim(),
+        ));
+    } else {
+        for (label, group) in [("schedule", &sched), ("reaction", &react)] {
+            for c in group {
+                lines.push(Line::from(vec![
+                    Span::raw(format!("   {:<9} ", label)).dim(),
+                    Span::raw(c.text()),
+                ]));
+            }
+        }
+    }
+    lines.push(Line::raw(""));
+    lines.push(Line::from(Span::raw(" /rules edits your global schedules & reactions").dim()));
+    lines
+}
+
 pub fn project_lines(
     name: &str,
     place: &str,

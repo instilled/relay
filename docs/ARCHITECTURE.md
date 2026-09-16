@@ -209,7 +209,10 @@ header, above the line, above the footer — and the list and its detail pane sp
 bar; the full-screen terminal drops all of it for the cells. A group's header is its name, then the folder it lives in, then the rules that
 live there — `↻ nightly 4h · ⚡ tests-failed`, accented and amber when one waits for a yes, with a
 `+N` when more than fit — and, at the right edge, the tally of how many jobs and reactions the
-folder holds; your own rules get a line only when one waits for a yes. Runs a schedule or a rule
+folder holds; your own (global) rules get a project row of their own — the "yours" row — whenever
+there are any: it leads the list when one waits for a yes, otherwise it trails with the idle
+projects, and either way the cursor stops on it, `enter` (or `/info`) shows its schedules and
+reactions in the pane, and `/rules` opens them. Runs a schedule or a rule
 started fold, once ended, into one line per job — name, cadence, how many went well, the last
 outcome — so a job firing every thirty seconds is a row, not a screen; a run still going or
 waiting on you is never folded, and `enter` on a job opens it to its last twenty. When the list

@@ -79,11 +79,14 @@ pub enum Row<'a> {
 
 impl<'a> Row<'a> {
     /// Selectable rows carry a stable key, so the cursor survives a re-rank. A
-    /// folder header is selectable (its path is the key); the global "yours"
-    /// rules row, which stands for no folder, is not.
+    /// folder header is selectable by its path; the global "yours" rules row,
+    /// which stands for no folder, is selectable too, under a fixed key.
     pub fn key(&self) -> Option<String> {
         match self {
-            Row::Group(h) => h.workspace.as_ref().map(|p| format!("g:{}", p.display())),
+            Row::Group(h) => Some(match &h.workspace {
+                Some(p) => format!("g:{}", p.display()),
+                None => "g:*global*".into(),
+            }),
             Row::Question(d) => Some(format!("q:{}", d.id)),
             Row::Run(i) | Row::Fold(i) => Some(format!("r:{}", i.run.id)),
             Row::Job(j) => Some(j.key.clone()),
@@ -520,15 +523,22 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
     // Which folders already have a line, so idle projects don't double up.
     let shown: HashSet<PathBuf> = groups.iter().map(|g| g.workspace.clone()).collect();
     let mut rows = Vec::new();
-    // Your own rules get a line of their own only when one waits for a yes.
+    // Your own (global) rules get a line of their own — a project row for the
+    // things that live outside any folder. It leads the list only when one of
+    // them waits for a yes; otherwise it trails, with the idle projects, so it
+    // never steals the lead from work that needs you (pushed at the end below).
     let yours = chips(cx.rules, None, now);
-    if yours.iter().any(Chip::needs_yes) {
-        rows.push(Row::Group(Head {
-            place: None,
-            workspace: None,
-            name: "yours".into(),
-            rules: yours,
-        }));
+    let yours_leads = yours.iter().any(Chip::needs_yes);
+    let yours_head = (!yours.is_empty()).then(|| Head {
+        place: None,
+        workspace: None,
+        name: "yours".into(),
+        rules: yours,
+    });
+    if yours_leads
+        && let Some(head) = &yours_head
+    {
+        rows.push(Row::Group(head.clone()));
     }
     for g in groups {
         rows.push(Row::Group(Head {
@@ -576,6 +586,12 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
                 rules: chips(cx.rules, Some(&p), now),
             }));
         }
+    }
+    // The global "yours" row trails, unless it already led on a waiting yes.
+    if !yours_leads
+        && let Some(head) = yours_head
+    {
+        rows.push(Row::Group(head));
     }
     rows
 }
@@ -840,6 +856,41 @@ mod tests {
         assert_eq!(keys(&lens_build(&d, &names, Lens::Agents, now)), ["[relay]", "r:work1"]);
     }
 
+    #[test]
+    fn the_global_row_leads_on_a_yes_else_trails_and_is_selectable() {
+        let now: Timestamp = "2026-09-10T12:00:00Z".parse().unwrap();
+        let d = Digest {
+            since: now,
+            items: vec![item("w", RunState::Working, "/home/f/relay", "2026-09-10T11:00:00Z", false)],
+            decisions: vec![],
+        };
+        let names = Names::new([(PathBuf::from("/home/f/relay"), "relay".to_string())]);
+        let build_with_rules = |rules: &[Rule]| {
+            build(
+                &d,
+                &Context {
+                    names: &names,
+                    rules,
+                    opened: &HashSet::new(),
+                    lens: Lens::All,
+                    filter: "",
+                    now,
+                },
+            )
+            .into_iter()
+            .map(|r| (r.key(), matches!(r, Row::Group(h) if h.workspace.is_none())))
+            .collect::<Vec<_>>()
+        };
+        // A calm global schedule trails the folder's work, under a stable key.
+        let calm = build_with_rules(&[schedule("global", "pulse", true, Some("2026-09-10T12:00:30Z"))]);
+        let last = calm.last().unwrap();
+        assert!(last.1, "the global row trails");
+        assert_eq!(last.0.as_deref(), Some("g:*global*"), "and is selectable");
+        // One waiting on a yes leads instead.
+        let waiting = build_with_rules(&[schedule("global", "backup", false, None)]);
+        assert!(waiting[0].1, "a waiting yes leads");
+    }
+
     fn fired(id: &str, job: &str, state: RunState, at: &str, unseen: bool) -> DigestItem {
         let mut i = item(id, state, "/home/f/relay", at, unseen);
         i.run.cause = Cause::Schedule(job.into());
@@ -1020,8 +1071,8 @@ mod tests {
         );
         assert_eq!(texts(&chips(&rules, None, now)), ["↻ pulse 30s"]);
 
-        // On the list: the folder's rules ride its header; your own rules get
-        // a line only when one of them waits for a yes.
+        // On the list: the folder's rules ride its header; your own (global)
+        // rules get a persistent line of their own whenever there are any.
         let d = Digest {
             since: now,
             items: vec![item(
@@ -1060,7 +1111,12 @@ mod tests {
         };
         assert_eq!(
             build_rules(&rules),
-            ["[relay] ! deploy · ↻ nightly 4h · ⚡ tests-failed", "r:work1"]
+            [
+                "[relay] ! deploy · ↻ nightly 4h · ⚡ tests-failed",
+                "r:work1",
+                "[yours*] ↻ pulse 30s"
+            ],
+            "idle global rules trail; a folder's work stays on top"
         );
         let mut with_yes = rules.clone();
         with_yes.push(schedule("global", "backup", false, None));
