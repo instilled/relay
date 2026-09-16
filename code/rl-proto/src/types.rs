@@ -254,6 +254,10 @@ pub struct Run {
     /// `rl since`, kept in the ledger.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub archived_at: Option<Timestamp>,
+    /// When it was pinned (`run.pin`): kept at the top of the panel, however
+    /// old, until unpinned or archived.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pinned_at: Option<Timestamp>,
 }
 
 impl Run {
@@ -295,6 +299,7 @@ impl Run {
             last_line: None,
             seen_at: None,
             archived_at: None,
+            pinned_at: None,
         }
     }
 

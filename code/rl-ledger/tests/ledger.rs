@@ -47,6 +47,55 @@ fn set_title_renames_a_run_and_moves_nothing_else() {
 }
 
 #[test]
+fn a_pinned_run_stays_in_view_until_let_go_by_name() {
+    let l = Ledger::open_in_memory().unwrap();
+    let long_ago = ts("2026-09-01T10:00:00Z");
+    for id in ["pinned01", "loose001"] {
+        let r = run(id, "2026-09-01T09:00:00Z");
+        l.call_blocking(move |c| {
+            runs::insert(c, &r)?;
+            runs::finish(c, &r.id, RunState::Finished, Source::Pty, Some(0), long_ago)?;
+            runs::set_seen(c, std::slice::from_ref(&r.id), long_ago)?;
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    let first = ts("2026-09-02T10:00:00Z");
+    l.call_blocking(move |c| runs::set_pinned(c, "pinned01", Some(first)))
+        .unwrap();
+    // Pinning again keeps the first time, so the band's order holds.
+    l.call_blocking(|c| runs::set_pinned(c, "pinned01", Some(ts("2026-09-03T10:00:00Z"))))
+        .unwrap();
+    let got = l.call_blocking(|c| runs::get(c, "pinned01")).unwrap().unwrap();
+    assert_eq!(got.pinned_at, Some(first));
+
+    // Nothing has happened to either for weeks; only the pinned one is news.
+    let now = ts("2026-09-16T10:00:00Z");
+    let ids = |l: &Ledger| {
+        l.call_blocking(move |c| runs::list_for_digest(c, now))
+            .unwrap()
+            .into_iter()
+            .map(|r| r.id)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(ids(&l), vec!["pinned01"]);
+
+    // `/archive seen` leaves what was pinned alone.
+    assert_eq!(l.call_blocking(move |c| runs::archive_seen(c, now)).unwrap(), 1);
+    assert_eq!(ids(&l), vec!["pinned01"]);
+
+    // Archived by name, it goes, and the pin with it.
+    let n = l
+        .call_blocking(move |c| runs::archive(c, &["pinned01".into()], now))
+        .unwrap();
+    assert_eq!(n, 1);
+    let got = l.call_blocking(|c| runs::get(c, "pinned01")).unwrap().unwrap();
+    assert_eq!(got.pinned_at, None);
+    assert!(ids(&l).is_empty());
+}
+
+#[test]
 fn runs_insert_get_list_and_transition() {
     let l = Ledger::open_in_memory().unwrap();
     let a = run("aaaaaaaa", "2026-09-08T10:00:00Z");

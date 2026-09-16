@@ -11,7 +11,7 @@ use std::path::PathBuf;
 
 const COLS: &str = "id, workspace, kind, title, cli, argv_json, cwd, branch, worktree, \"ref\", tags_json, \
     state, source, confidence, state_at, started_at, ended_at, exit_code, cost_json, \
-    cause, flow, parent_run, last_line, seen_at, detail, archived_at";
+    cause, flow, parent_run, last_line, seen_at, detail, archived_at, pinned_at";
 
 const DEFAULT_LIMIT: u32 = 200;
 
@@ -21,7 +21,7 @@ const TERMINAL_STATES_SQL: &str = "'finished','failed','stopped'";
 
 pub fn insert(conn: &Connection, r: &Run) -> Result<()> {
     conn.execute(
-        &format!("INSERT INTO runs ({COLS}) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26)"),
+        &format!("INSERT INTO runs ({COLS}) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27)"),
         params![
             r.id,
             path_str(&r.workspace),
@@ -49,6 +49,7 @@ pub fn insert(conn: &Connection, r: &Run) -> Result<()> {
             r.seen_at.map(to_millis),
             r.detail,
             r.archived_at.map(to_millis),
+            r.pinned_at.map(to_millis),
         ],
     )?;
     Ok(())
@@ -145,6 +146,16 @@ pub fn set_title(conn: &Connection, id: &str, title: &str) -> Result<()> {
     Ok(())
 }
 
+/// Pins a run (`Some`) or lets it go (`None`). Pinning what is already
+/// pinned keeps the first time, so the pinned band keeps its order.
+pub fn set_pinned(conn: &Connection, id: &str, at: Option<Timestamp>) -> Result<()> {
+    conn.execute(
+        "UPDATE runs SET pinned_at = CASE WHEN ?2 IS NULL THEN NULL ELSE COALESCE(pinned_at, ?2) END WHERE id = ?1",
+        params![id, at.map(to_millis)],
+    )?;
+    Ok(())
+}
+
 pub fn set_last_line(conn: &Connection, id: &str, line: &str) -> Result<()> {
     conn.execute("UPDATE runs SET last_line = ?2 WHERE id = ?1", params![id, line])?;
     Ok(())
@@ -196,28 +207,30 @@ fn from_row(row: &Row<'_>) -> rusqlite::Result<Run> {
         seen_at: optional_from_millis(row.get(23)?, 23, conv)?,
         detail: row.get(24)?,
         archived_at: optional_from_millis(row.get(25)?, 25, conv)?,
+        pinned_at: optional_from_millis(row.get(26)?, 26, conv)?,
     })
 }
 
 /// The digest's candidates: runs with an event at or after `since`, plus
-/// every run still waiting on a human whatever its age.
+/// every run still waiting on a human or pinned, whatever its age.
 pub fn list_for_digest(conn: &Connection, since: Timestamp) -> Result<Vec<Run>> {
     let mut stmt = conn.prepare(&format!(
         "SELECT {COLS} FROM runs WHERE archived_at IS NULL AND (id IN (SELECT DISTINCT run FROM events WHERE at >= ?1 AND run IS NOT NULL) \
-         OR state IN ('needs_input','blocked','failed','stale')) ORDER BY started_at DESC, id DESC LIMIT 1000"
+         OR state IN ('needs_input','blocked','failed','stale') OR pinned_at IS NOT NULL) ORDER BY started_at DESC, id DESC LIMIT 1000"
     ))?;
     let rows = stmt.query_map(params![to_millis(since)], from_row)?;
     Ok(rows.collect::<Result<_, _>>()?)
 }
 
 /// Done with these: out of the panel, kept. Only a run that has ended can
-/// be; the count is how many were.
+/// be; the count is how many were. Archiving a pinned run is letting it go,
+/// so the pin goes with it.
 pub fn archive(conn: &Connection, ids: &[String], at: Timestamp) -> Result<usize> {
     let mut n = 0;
     for id in ids {
         n += conn.execute(
             &format!(
-                "UPDATE runs SET archived_at = ?2 WHERE id = ?1 AND archived_at IS NULL \
+                "UPDATE runs SET archived_at = ?2, pinned_at = NULL WHERE id = ?1 AND archived_at IS NULL \
                  AND state IN ({TERMINAL_STATES_SQL})"
             ),
             params![id, to_millis(at)],
@@ -226,11 +239,12 @@ pub fn archive(conn: &Connection, ids: &[String], at: Timestamp) -> Result<usize
     Ok(n)
 }
 
-/// Done with everything that has ended and been looked at.
+/// Done with everything that has ended and been looked at — except what is
+/// pinned, which was kept on purpose and is only let go by name.
 pub fn archive_seen(conn: &Connection, at: Timestamp) -> Result<usize> {
     Ok(conn.execute(
         &format!(
-            "UPDATE runs SET archived_at = ?1 WHERE archived_at IS NULL AND seen_at IS NOT NULL \
+            "UPDATE runs SET archived_at = ?1 WHERE archived_at IS NULL AND seen_at IS NOT NULL AND pinned_at IS NULL \
              AND state IN ({TERMINAL_STATES_SQL})"
         ),
         params![to_millis(at)],

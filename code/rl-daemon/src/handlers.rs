@@ -309,6 +309,18 @@ pub fn register(r: &mut Router<Daemon>) {
             .map_err(RpcError::internal)
     });
 
+    r.register::<RunPin, _, _>(|d, p: RunPinParams| async move {
+        let at = p.pinned.then(time::now);
+        d.ledger
+            .call({
+                let id = p.id.clone();
+                move |c| runs::set_pinned(c, &id, at)
+            })
+            .await
+            .map_err(RpcError::internal)?;
+        get_run(&d, &p.id).await
+    });
+
     r.register::<DigestGet, _, _>(|d, DigestParams { since }| async move {
         let since = since.unwrap_or(jiff::Timestamp::UNIX_EPOCH);
         let found = d
