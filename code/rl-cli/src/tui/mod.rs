@@ -1274,7 +1274,7 @@ impl App {
 
     /// The live warm shells in `folder`, oldest first. The list itself is
     /// ranked by attention, which moves as runs change state, so the order
-    /// here is by when each shell started — stepping has to be steady.
+    /// here is by when each shell started — numbering has to be steady.
     fn project_shells(&self, folder: &Path) -> Vec<String> {
         let mut live: Vec<(Timestamp, String)> = self
             .digest
@@ -1289,7 +1289,7 @@ impl App {
         live.into_iter().map(|(_, id)| id).collect()
     }
 
-    /// The folder's current shell: the one last stepped to while it is still
+    /// The folder's current shell: the one last opened while it is still
     /// live, else the oldest one running.
     fn project_shell(&self, folder: &Path) -> Option<String> {
         let shells = self.project_shells(folder);
@@ -1303,25 +1303,6 @@ impl App {
     fn selected_shell(&self) -> Option<String> {
         let i = self.selected_run()?;
         i.run.tags.iter().any(|t| t == SHELL_TAG).then(|| i.run.id.clone())
-    }
-
-    /// Step to another of this folder's shells and show it, wrapping round.
-    async fn cycle_shell(&mut self, by: isize, area: Rect) {
-        let folder = self.folder_here();
-        let shells = self.project_shells(&folder);
-        if shells.len() < 2 {
-            self.say("one shell here · /shell opens another");
-            return;
-        }
-        let at = self
-            .project_shell(&folder)
-            .and_then(|id| shells.iter().position(|x| *x == id))
-            .unwrap_or(0) as isize;
-        let n = shells.len() as isize;
-        let id = shells[(((at + by) % n + n) % n) as usize].clone();
-        self.shell_at.insert(folder, id.clone());
-        self.select(Some(format!("r:{id}")));
-        self.open_term(area).await;
     }
 
     /// `/shell`: another shell in this folder, and what you type next goes to
@@ -1631,15 +1612,6 @@ impl App {
             && matches!(k.code, KeyCode::Tab | KeyCode::BackTab)
         {
             self.cycle_lens(if k.code == KeyCode::BackTab { -1 } else { 1 });
-            return Ok(());
-        }
-        // An empty line has no cursor to move either, so the side arrows step
-        // between this folder's shells.
-        if self.line.is_empty()
-            && self.view == View::Work
-            && matches!(k.code, KeyCode::Left | KeyCode::Right)
-        {
-            self.cycle_shell(if k.code == KeyCode::Left { -1 } else { 1 }, area).await;
             return Ok(());
         }
         // Candidates on offer: the arrows walk them, not the list.

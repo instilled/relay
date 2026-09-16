@@ -88,7 +88,7 @@ pub const ALL: &[Command] = &[
     Command {
         name: "shell",
         args: "",
-        what: "another shell in this folder; ← and → step between them",
+        what: "another shell in this folder",
         cmd: Cmd::Shell,
     },
     Command {
