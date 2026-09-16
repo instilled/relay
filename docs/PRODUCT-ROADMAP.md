@@ -7,11 +7,12 @@ Goal for v1:
 
 ## Open — in the order they'd be built
 
-* [ ] per-command facts in a project shell — shell prompt integration (OSC 133 / precmd) so each command's exit code and duration survive, filling the summary column a shell row now deliberately leaves empty
+* [ ] git backed workspaces should not hide the "name" the workspace should carry an icon after the path denoting git backing. and the current branch in brackets?!?! (or right aligned)
+* [ ] every registered workspace shows as a project row even with no runs — a folder you `rl up`'d is always on the list, so you can select it, read its stats, edit its rules, or open its shell before anything has happened there
+* [ ] rename shared-* modules to rl-core, rl-detect, rl-ledger, rl-proto (as well as the cargo modules)
+* [ ] persistent project shell — multiple shells per project + switching between them ("panes", not a multiplexer); per-command facts via shell prompt integration (OSC 133 / precmd) so exit codes and history survive; a distinct "shell" presentation in the list
 * [ ] agent-attach reliability — join a just-spawned holder without bouncing back to the list
 * [ ] ts plugin subsystem
-* [ ] investigate a lightweight JS/TS SDK for plugins — a thin wrapper around the `rl emit` / `rl ask` / `rl run` contract so a plugin is a few lines of TS that reads its input and emits events, decisions or runs (a plugin is just a command; the SDK makes the common case trivial)
-* [ ] inter-run data passing — events carry small facts well, but bulk (a log dump, a file, a transcript) shouldn't ride through argv/env/the ledger; give each run a scratch dir (`$RELAY_RUN_DIR`) so runs pass bulk by path, not bytes (single-host); promote to a network-addressable run-artifact store — the daemon serving a blob by id/key — when runs span hosts
 * [ ] pipelines & easy wiring & visualization of "graph" — `workflows/<name>.yaml` engine (steps with `after`/`when` and decision steps) plus a graph view of how runs, schedules and reactions wire together
 * [ ] facts collector (J6) — git commits + `diff --stat` per run, transcript ingestion (Claude/Codex `*.jsonl`), tokens/cost; facts-first run detail (facts on top, narrative below, transcript behind enter)
 * [ ] retention purge of archived runs — today archive is out-of-list only; actually delete past the retention window
@@ -20,16 +21,6 @@ Goal for v1:
 
 ## Done — newest first
 
-* [x] a shell reads as a shell in the list — the prompt caret in the accent, `shell` where the state word goes, and nothing in the summary column, where it used to show its own prompt; it leads its folder, though whatever asks for you still leads it
-* [x] more than one shell per project — `/shell` opens another (`shell`, `shell 2`, …), `←`/`→` on an empty line step between a folder's shells, and a shell line goes to the one you stepped to
-* [x] the command list scrolls with the arrows — the window follows the highlight rather than pinning the first six, so a candidate past the sixth is no longer lit off-screen
-* [x] ctrl-x and ctrl-c ask first — a second press removes, or quits; any other key disarms them
-* [x] command list shows key shortcuts — `^x` / `^c` beside the cursor-navigable `/` commands (which already highlight the row and put it in the line on enter)
-* [x] add a folder from the panel — `/add-dir <path>` registers a workspace, landing on its new row (`workspace.up`)
-* [x] the global "yours" rules are a persistent, selectable project row — leads on a waiting yes, else trails; its pane lists the global schedules & reactions
-* [x] every registered workspace shows as a project row, even with no runs
-* [x] rename shared-* crates to rl-core / rl-detect / rl-ledger / rl-proto (dirs, package names, imports)
-* [x] emit custom events — `rl emit` puts a custom event in the ledger, matched by `where.data`; a scheduled probe → reaction → decision (UC2), with a keyless weather example
 * [x] warm per-project shell (slice 1) — a shell line runs in a persistent `$SHELL -i` per folder, not a fresh run each time (`run.input`)
 * [x] trustworthy stop — reaps the whole process group (PTY + pipe children); a run's last output reaches viewers before the exit
 * [x] manual commands run in your real shell — aliases and functions resolve, recognised via `$SHELL` (`/reindex`)
