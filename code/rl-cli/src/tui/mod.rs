@@ -2023,13 +2023,16 @@ impl App {
                             format!("/{} {}", c.name, c.args)
                         };
                         let name = if pick == Some(i) {
-                            Span::styled(format!("{name:<27}"), style)
+                            Span::styled(format!("{name:<22}"), style)
                         } else {
-                            Span::raw(format!("{name:<27}"))
+                            Span::raw(format!("{name:<22}"))
                         };
+                        // The key shortcut, when the command has one (^x, ^c).
+                        let key = Span::raw(format!("{:<4}", palette::key(c.cmd))).dim();
                         Line::from(vec![
                             Span::styled(mark, style),
                             name,
+                            key,
                             Span::raw(c.what.to_string()).dim(),
                         ])
                     })

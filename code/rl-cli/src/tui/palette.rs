@@ -233,6 +233,18 @@ pub fn matching(typed: &str) -> Vec<&'static Command> {
 }
 
 /// A finished line: the command it names, and whatever followed it.
+/// The keyboard shortcut for a command, when it has one, for the commands list
+/// — so `^x` and `^c` are discoverable there, not only in the footer. `^x` is
+/// one key over whatever the cursor is on: it stops a run still going and is
+/// done with an ended one, so both `/stop` and `/done` wear it.
+pub fn key(cmd: Cmd) -> &'static str {
+    match cmd {
+        Cmd::Quit => "^c",
+        Cmd::Stop | Cmd::Done => "^x",
+        _ => "",
+    }
+}
+
 pub fn parse(line: &str) -> Option<(&'static Command, String)> {
     let line = line.trim();
     let line = line.strip_prefix('/').unwrap_or(line).trim_start();
@@ -298,6 +310,14 @@ mod tests {
     #[test]
     fn nothing_matching_is_an_empty_list() {
         assert!(matching("zzz").is_empty());
+    }
+
+    #[test]
+    fn a_command_shows_its_key_shortcut_when_it_has_one() {
+        assert_eq!(key(Cmd::Quit), "^c");
+        assert_eq!(key(Cmd::Stop), "^x");
+        assert_eq!(key(Cmd::Done), "^x");
+        assert_eq!(key(Cmd::Watch), "", "most commands are the slash line, no key");
     }
 
     #[test]
