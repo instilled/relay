@@ -1189,6 +1189,26 @@ impl App {
         }
     }
 
+    /// `/edit schedule|reaction`: the whole rule file for the scope the cursor
+    /// stands in, rather than the one rule under it. Any row answers which
+    /// folder its work is in, so this reads the same from a run as from the
+    /// folder's own header; the "yours" row answers with no folder at all,
+    /// which is what the global file is filed under.
+    fn edit_scope_file(&mut self, kind: RuleKind) {
+        let folder = match (self.selected_folder(), self.selected_global()) {
+            (Some(folder), _) => Some(folder),
+            // No folder and the cursor is on "yours": your own rules.
+            (None, true) => None,
+            // No folder and nothing selected: nothing to guess from, and
+            // guessing "yours" would edit global rules by accident.
+            (None, false) => {
+                self.say("/edit schedule: on a folder, or on yours");
+                return;
+            }
+        };
+        self.editor = Some((rulefile::file(&self.home, kind, folder.as_deref()), 1));
+    }
+
     /// `enter` on the form: what it says, or why not — the form stays up then.
     async fn save_form(&mut self, f: Box<Form>, area: Rect) {
         let outcome = match f.kind {
@@ -2127,7 +2147,12 @@ impl App {
                 }
             }
             palette::Cmd::New => self.new_rule_form(),
-            palette::Cmd::Edit => self.edit_rule_form(),
+            palette::Cmd::Edit => match arg.trim() {
+                "" => self.edit_rule_form(),
+                "schedule" | "schedules" => self.edit_scope_file(RuleKind::Schedule),
+                "reaction" | "reactions" => self.edit_scope_file(RuleKind::Reaction),
+                other => self.say(format!("edit {other}? schedule or reaction")),
+            },
             palette::Cmd::Editor => self.edit_rule_file(),
             palette::Cmd::Summarise => self.summarise(),
             palette::Cmd::Ask => {

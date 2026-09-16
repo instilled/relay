@@ -141,8 +141,8 @@ pub const ALL: &[Command] = &[
     },
     Command {
         name: "edit",
-        args: "",
-        what: "edit the selected rule in the form",
+        args: "[schedule|reaction]",
+        what: "the selected rule in the form, or a scope's whole rule file",
         cmd: Cmd::Edit,
     },
     Command {
