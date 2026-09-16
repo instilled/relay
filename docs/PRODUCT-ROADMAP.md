@@ -7,12 +7,7 @@ Goal for v1:
 
 ## Open — in the order they'd be built
 
-* [ ] commands list / should be navigatable by cursor (shoudl highlight the row and enter put it in the prompt)
-* [ ] command /add-workspace (or /add-dir) which adds a new "folder" from the "command line"
 * [ ] ctrl-x should ask to delete hitting it a second time delete -> same as claude agent view. and ctrl-c dito
-* [ ] every registered workspace shows as a project row even with no runs — a folder you `rl up`'d is always on the list, so you can select it, read its stats, edit its rules, or open its shell before anything has happened there
-* [ ] "realy global" (schedules, reactions) also als "project row"?
-* [ ] rename shared-* modules to rl-core, rl-detect, rl-ledger, rl-proto (as well as the cargo modules)
 * [ ] persistent project shell — multiple shells per project + switching between them ("panes", not a multiplexer); per-command facts via shell prompt integration (OSC 133 / precmd) so exit codes and history survive; a distinct "shell" presentation in the list
 * [ ] agent-attach reliability — join a just-spawned holder without bouncing back to the list
 * [ ] ts plugin subsystem
@@ -26,6 +21,12 @@ Goal for v1:
 
 ## Done — newest first
 
+* [x] command list shows key shortcuts — `^x` / `^c` beside the cursor-navigable `/` commands (which already highlight the row and put it in the line on enter)
+* [x] add a folder from the panel — `/add-dir <path>` registers a workspace, landing on its new row (`workspace.up`)
+* [x] the global "yours" rules are a persistent, selectable project row — leads on a waiting yes, else trails; its pane lists the global schedules & reactions
+* [x] every registered workspace shows as a project row, even with no runs
+* [x] rename shared-* crates to rl-core / rl-detect / rl-ledger / rl-proto (dirs, package names, imports)
+* [x] emit custom events — `rl emit` puts a custom event in the ledger, matched by `where.data`; a scheduled probe → reaction → decision (UC2), with a keyless weather example
 * [x] warm per-project shell (slice 1) — a shell line runs in a persistent `$SHELL -i` per folder, not a fresh run each time (`run.input`)
 * [x] trustworthy stop — reaps the whole process group (PTY + pipe children); a run's last output reaches viewers before the exit
 * [x] manual commands run in your real shell — aliases and functions resolve, recognised via `$SHELL` (`/reindex`)
