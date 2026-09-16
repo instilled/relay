@@ -61,7 +61,7 @@ use rl_proto::rule::{Rule, RuleKind, RuleStatus};
 use rl_proto::types::{AttachMode, Cause, Event as LedgerEvent, Mark, Run, RunKind, RunState, Summary};
 use rows::{Names, Row, fit, short_path};
 use rules::RuleRow;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use term::TermView;
@@ -180,6 +180,10 @@ struct App {
     rules_scope: Option<PathBuf>,
     /// Jobs opened to their runs.
     opened: HashSet<String>,
+    /// Which of a folder's shells a shell line goes to, and the one the
+    /// arrows step from. A folder is absent until you step; the entry is
+    /// ignored once that shell has ended.
+    shell_at: HashMap<PathBuf, String>,
     /// First list line on screen, and how many fit: the scroll map. Cells,
     /// because drawing sets them while the rows still borrow the app.
     scroll: std::cell::Cell<usize>,
@@ -473,6 +477,7 @@ pub async fn run(home: &Home) -> Result<()> {
         other_sel: None,
         rules_scope: None,
         opened: HashSet::new(),
+        shell_at: HashMap::new(),
         scroll: std::cell::Cell::new(0),
         list_h: std::cell::Cell::new(0),
         hit: std::cell::RefCell::default(),
@@ -1256,7 +1261,7 @@ impl App {
     }
 
     /// Where a shell line goes: the selected shell if the cursor is on one,
-    /// else the folder's primary shell, started if it has none yet.
+    /// else the folder's current shell, started if it has none yet.
     async fn shell_target(&mut self, folder: PathBuf, area: Rect) -> Result<String> {
         if let Some(id) = self.selected_shell() {
             return Ok(id);
@@ -1267,15 +1272,31 @@ impl App {
         self.spawn_shell(folder, area).await
     }
 
-    /// A live warm shell in `folder`, if one is running.
-    fn project_shell(&self, folder: &Path) -> Option<String> {
-        self.digest
+    /// The live warm shells in `folder`, oldest first. The list itself is
+    /// ranked by attention, which moves as runs change state, so the order
+    /// here is by when each shell started — stepping has to be steady.
+    fn project_shells(&self, folder: &Path) -> Vec<String> {
+        let mut live: Vec<(Timestamp, String)> = self
+            .digest
             .items
             .iter()
             .filter(|i| !i.run.state.is_terminal())
             .filter(|i| i.run.workspace == folder)
-            .find(|i| i.run.tags.iter().any(|t| t == SHELL_TAG))
-            .map(|i| i.run.id.clone())
+            .filter(|i| i.run.tags.iter().any(|t| t == SHELL_TAG))
+            .map(|i| (i.run.started_at, i.run.id.clone()))
+            .collect();
+        live.sort_by_key(|(at, _)| *at);
+        live.into_iter().map(|(_, id)| id).collect()
+    }
+
+    /// The folder's current shell: the one last stepped to while it is still
+    /// live, else the oldest one running.
+    fn project_shell(&self, folder: &Path) -> Option<String> {
+        let shells = self.project_shells(folder);
+        match self.shell_at.get(folder) {
+            Some(at) if shells.iter().any(|id| id == at) => Some(at.clone()),
+            _ => shells.into_iter().next(),
+        }
     }
 
     /// The run under the cursor, when it is a warm shell.
@@ -1284,14 +1305,56 @@ impl App {
         i.run.tags.iter().any(|t| t == SHELL_TAG).then(|| i.run.id.clone())
     }
 
+    /// Step to another of this folder's shells and show it, wrapping round.
+    async fn cycle_shell(&mut self, by: isize, area: Rect) {
+        let folder = self.folder_here();
+        let shells = self.project_shells(&folder);
+        if shells.len() < 2 {
+            self.say("one shell here · /shell opens another");
+            return;
+        }
+        let at = self
+            .project_shell(&folder)
+            .and_then(|id| shells.iter().position(|x| *x == id))
+            .unwrap_or(0) as isize;
+        let n = shells.len() as isize;
+        let id = shells[(((at + by) % n + n) % n) as usize].clone();
+        self.shell_at.insert(folder, id.clone());
+        self.select(Some(format!("r:{id}")));
+        self.open_term(area).await;
+    }
+
+    /// `/shell`: another shell in this folder, and what you type next goes to
+    /// it rather than to the one it joins.
+    async fn new_shell(&mut self, area: Rect) {
+        let folder = self.folder_here();
+        match self.spawn_shell(folder.clone(), area).await {
+            Ok(id) => {
+                self.shell_at.insert(folder, id.clone());
+                self.refresh().await;
+                self.select(Some(format!("r:{id}")));
+                self.open_term(area).await;
+            }
+            Err(e) => self.say(format!("shell: {e:#}")),
+        }
+    }
+
     /// Start a project's warm shell: a persistent `$SHELL -i` tagged so the
     /// list and the router know it for what it is.
     async fn spawn_shell(&mut self, folder: PathBuf, area: Rect) -> Result<String> {
+        // The first is `shell`; the rest are numbered, so one of a folder's
+        // shells reads differently from another in the list.
+        let n = self.project_shells(&folder).len();
+        let title = if n == 0 {
+            "shell".to_string()
+        } else {
+            format!("shell {}", n + 1)
+        };
         let spec = RunSpec {
             argv: crate::env::shell_i(),
             kind: RunKind::Command,
             cwd: folder,
-            title: Some("shell".into()),
+            title: Some(title),
             ref_: None,
             tags: vec![SHELL_TAG.into()],
             tty: true,
@@ -1568,6 +1631,15 @@ impl App {
             && matches!(k.code, KeyCode::Tab | KeyCode::BackTab)
         {
             self.cycle_lens(if k.code == KeyCode::BackTab { -1 } else { 1 });
+            return Ok(());
+        }
+        // An empty line has no cursor to move either, so the side arrows step
+        // between this folder's shells.
+        if self.line.is_empty()
+            && self.view == View::Work
+            && matches!(k.code, KeyCode::Left | KeyCode::Right)
+        {
+            self.cycle_shell(if k.code == KeyCode::Left { -1 } else { 1 }, area).await;
             return Ok(());
         }
         // Candidates on offer: the arrows walk them, not the list.
@@ -2035,6 +2107,7 @@ impl App {
                 };
                 self.toggle_view().await;
             }
+            palette::Cmd::Shell => self.new_shell(area).await,
             palette::Cmd::Reload => self.reload_rules().await,
             palette::Cmd::Reindex => {
                 self.aliases = complete::shell_names().await;
