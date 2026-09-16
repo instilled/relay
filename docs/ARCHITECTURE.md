@@ -324,7 +324,7 @@ spot), and typing anything clears the highlight so `enter` submits the line as b
 
 Because letters go into the line, everything that is not typing is a `/` command
 (`tui/palette.rs`), offered as you type it: `/stop`, `/archive [seen]`, `/mark`, `/join`,
-`/shell`, `/rename`, `/pin`, `/pane [full]`, `/rules`, `/reload [rules|shell]`, `/approve` and `/pause`,
+`/shell`, `/rename`, `/pin`, `/pane [full]`, `/rules`, `/graph`, `/reload [rules|shell]`, `/approve` and `/pause`,
 `/new`, `/edit [file|schedule|reaction]`, `/summarise`, `/ask`, `/filter`, `/lens`, `/prune`,
 `/up`, `/help`, `/quit`. One name per act: a variant of an act is an argument to it rather than a
 command of its own, and no word means two things — `done` is only ever what `/mark` says. `enter` on an empty line
@@ -332,7 +332,7 @@ is the row under the cursor instead — a job opens, a schedule offers to fire, 
 out of the list to be answered by number, a run's terminal opens. Arrows, `home`/`end` and `esc`
 belong to the list; `esc` with something typed clears the line first, and `ctrl-c` leaves.
 The few keys that are not the list's or the line's each stand for a command, and the command
-list shows them beside it: `^x` stops or archives, `^r` renames, `^p` pins, `^o` shows or hides the pane,
+list shows them beside it: `^x` stops or archives, `^r` renames, `^p` pins, `^g` opens the graph, `^o` shows or hides the pane,
 `^t` opens another shell in the folder. The line keeps `^a`, `^e`, `^u`, `^k` and `^w` for
 editing, as a shell does, so none of those is ever taken for anything else.
 
@@ -615,6 +615,29 @@ went in the window. The edges are of two kinds:
 
 `emits: [logs.error]` on a schedule or reaction is only for the graph: it wires a command
 before it has ever raised anything.
+
+In the panel, `/graph` (or `^g`) swaps the list for the graph, and `^g` or `esc` goes back to
+wherever it was opened from; each view keeps its own selection. `tui/graph.rs` lays it out and
+draws it, pure from a `Graph` to a grid of styled cells:
+
+- **Layered, by connection.** A node's column is one past the furthest thing that feeds it,
+  so a schedule is at the left because nothing feeds it, not because it is a schedule. Edges
+  that close a loop are set aside for ranking and routed back along the bottom.
+- **Ordered within columns.** Nodes are sorted by where their neighbours sit, a few sweeps
+  each way, and each is placed level with what feeds it where there is room, so a chain is a
+  straight line.
+- **Edges run right-angled.** Each leaves its source on a row of its own, turns in a lane of
+  its own in the gap before the target, and enters on a row of its own, with the event kinds
+  and count written past every lane in that gap. Lines that meet join into the box-drawing
+  character they make.
+- **Kind by glyph and colour.** `◷` schedule (blue), `↯` reaction (yellow), `◇` question
+  (amber, bright while someone is waiting), `❯` shell (teal), `✦` agent (magenta), `◆` an event
+  nothing raised yet. Every glyph is one column wide, so borders stay in line. The border turns
+  red when the last run failed and dims when the rule is paused. `!` marks a rule waiting for
+  approval.
+- **Selection and filter.** Arrows step through the nodes column by column; the window pans to
+  keep the selected one in view, and its edges are lit. `/filter` keeps what matches (name,
+  folder, when) plus everything upstream and downstream of it.
 
 ---
 
