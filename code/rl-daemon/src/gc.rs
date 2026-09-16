@@ -1,7 +1,7 @@
 //! Retention: the one thing Relay deletes, and only when told to. The
 //! journal — a run's terminal bytes, its log and sidecar files — goes once
 //! the run has ended longer ago than `retention: 30d` says; the run and its
-//! events stay, and an event says the journal went. `rl gc` does it now,
+//! events stay, and an event says the journal went. `rl prune` does it now,
 //! `rld` does it daily.
 
 use crate::config::Loaded;
