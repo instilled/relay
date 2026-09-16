@@ -20,6 +20,29 @@ const TAIL_MAX: usize = 4096;
 /// line with content, plus any pure decoration (box borders, rules) drawn
 /// under it. An older question above a fresh prompt is history, not state.
 const LINES_READ: usize = 3;
+/// How much of a typed command is kept: enough to know it again, not a
+/// pasted heredoc.
+const CMD_MAX: usize = 512;
+
+/// One command a shell ran, as its own prompt marks told it: what was typed,
+/// how it came out, how long it took. Only a shell whose prompt emits OSC 133
+/// has these — without marks there are simply none, and nothing is guessed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShellCommand {
+    pub text: String,
+    /// The exit code, when the `D` mark carried one.
+    pub exit: Option<i32>,
+    pub took: jiff::SignedDuration,
+}
+
+/// Appends up to the cap. The cap is in bytes and the text in characters, so
+/// it is approximate — it is a bound on memory, not a promise about length.
+fn push_capped(buf: &mut String, s: &str) {
+    let room = CMD_MAX.saturating_sub(buf.len());
+    if room > 0 {
+        buf.extend(s.chars().take(room));
+    }
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct Patterns {
@@ -48,6 +71,12 @@ pub struct Heuristics {
     /// off by a read boundary is resumed rather than leaking its tail into
     /// the visible text.
     ansi: ansi::Stripper,
+    /// What is being typed: gathered between the `B` and `C` marks.
+    typing: Option<String>,
+    /// The command now running, and when it started — from `C` until `D`.
+    running: Option<(String, Timestamp)>,
+    /// Commands finished since they were last drained.
+    done: Vec<ShellCommand>,
 }
 
 impl Heuristics {
@@ -62,6 +91,9 @@ impl Heuristics {
             stale_pending: true,
             pending: Vec::new(),
             ansi: ansi::Stripper::new(),
+            typing: None,
+            running: None,
+            done: Vec::new(),
         }
     }
 
@@ -77,7 +109,9 @@ impl Heuristics {
             _ => bytes.len(),
         };
         self.pending = bytes[cut..].to_vec();
-        self.tail.push_str(&self.ansi.strip(&bytes[..cut]));
+        let text = self.ansi.strip(&bytes[..cut]);
+        self.read_marks(&text, now);
+        self.tail.push_str(&text);
         if self.tail.len() > TAIL_MAX {
             let cut = self.tail.len() - TAIL_MAX;
             let cut = self
@@ -97,6 +131,54 @@ impl Heuristics {
             Confidence::Likely
         };
         Signal::pty(RunState::Working, confidence, None)
+    }
+
+    /// Walks one chunk's prompt marks: gathers what is typed between `B` and
+    /// `C`, and closes the command at `D`.
+    ///
+    /// The text between marks is sliced here, out of the chunk itself, rather
+    /// than located later in `tail` — `tail` is trimmed from the front once it
+    /// is long enough, which would leave any offset into it pointing at the
+    /// wrong place.
+    fn read_marks(&mut self, text: &str, now: Timestamp) {
+        let marks = self.ansi.take_marks();
+        let mut at = 0;
+        for (pos, mark) in marks {
+            if let Some(typing) = &mut self.typing {
+                push_capped(typing, &text[at..pos]);
+            }
+            at = pos;
+            match mark {
+                // A prompt drawn afresh abandons whatever was half-typed.
+                ansi::Mark::Prompt => self.typing = None,
+                ansi::Mark::Input => self.typing = Some(String::new()),
+                // What was typed ends here; what follows is the command's own
+                // output, which is not part of it.
+                ansi::Mark::Output => {
+                    self.running = Some((self.typing.take().unwrap_or_default(), now));
+                }
+                ansi::Mark::Ended { exit } => {
+                    if let Some((text, started)) = self.running.take() {
+                        let text = text.trim().to_string();
+                        if !text.is_empty() {
+                            self.done.push(ShellCommand {
+                                text,
+                                exit,
+                                took: now.duration_since(started),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(typing) = &mut self.typing {
+            push_capped(typing, &text[at..]);
+        }
+    }
+
+    /// The commands that have finished since this was last called. Draining.
+    pub fn take_commands(&mut self) -> Vec<ShellCommand> {
+        std::mem::take(&mut self.done)
     }
 
     /// Called periodically. Fires at most once per quiet spell for each of
@@ -196,6 +278,42 @@ mod tests {
         let s = h.tick(t(14.0)).unwrap();
         assert_eq!((s.state, s.confidence), (RunState::Idle, Confidence::Guess));
         assert_eq!(h.last_line(80).as_deref(), Some("lots of text with no prompt"));
+    }
+
+    #[test]
+    fn prompt_marks_make_a_command_with_its_exit_and_how_long_it_took() {
+        let reg = Registry::builtin();
+        let mut h = Heuristics::new(reg.generic(), RunKind::Shell, t(0.0));
+        h.output(b"\x1b]133;A\x07$ ", t(1.0));
+        h.output(b"\x1b]133;B\x07make test\n\x1b]133;C\x07", t(2.0));
+        assert!(h.take_commands().is_empty(), "still running: nothing finished yet");
+        h.output(b"all green\n", t(3.0));
+        h.output(b"\x1b]133;D;0\x07", t(6.0));
+        let done = h.take_commands();
+        assert_eq!(done.len(), 1);
+        assert_eq!(done[0].text, "make test", "what was typed, not what it printed");
+        assert_eq!(done[0].exit, Some(0));
+        assert_eq!(done[0].took, SignedDuration::from_secs(4), "C until D");
+        assert!(h.take_commands().is_empty(), "draining: reported once");
+        assert!(h.tail().contains("all green"), "the output is still the tail");
+    }
+
+    #[test]
+    fn a_whole_command_in_one_read_is_still_pulled_apart() {
+        let reg = Registry::builtin();
+        let mut h = Heuristics::new(reg.generic(), RunKind::Shell, t(0.0));
+        h.output(b"\x1b]133;B\x07echo hi\x1b]133;C\x07hi\n\x1b]133;D;1\x07", t(5.0));
+        let done = h.take_commands();
+        assert_eq!(done.len(), 1);
+        assert_eq!((done[0].text.as_str(), done[0].exit), ("echo hi", Some(1)));
+    }
+
+    #[test]
+    fn a_shell_whose_prompt_says_nothing_yields_no_commands() {
+        let reg = Registry::builtin();
+        let mut h = Heuristics::new(reg.generic(), RunKind::Shell, t(0.0));
+        h.output(b"$ make test\nall green\n", t(1.0));
+        assert!(h.take_commands().is_empty(), "nothing is invented without marks");
     }
 
     #[test]
