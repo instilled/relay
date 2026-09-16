@@ -130,7 +130,18 @@ pub async fn attach(d: &Daemon, p: AttachParams) -> Result<Attached, RpcError> {
         Ok(Ok(x)) => x,
         other => {
             if joiner {
-                live.leave(&p.client);
+                match &replaced {
+                    // The take-over didn't go through: put the client we
+                    // evicted back in the joiner's seat instead of leaving
+                    // the run with no joiner at all.
+                    Some(old) => {
+                        let _ = live.join(old, true);
+                        let _ = live.notes.send(format!("{} could not take over; {old} stays joined", p.client));
+                    }
+                    None => {
+                        live.leave(&p.client);
+                    }
+                }
             }
             let why = match other {
                 Ok(Err(e)) => format!("{e:#}"),

@@ -143,16 +143,20 @@ pub struct Registry {
     profiles: BTreeMap<String, Profile>,
 }
 
+/// Parses the compiled-in `BUILTIN` profiles, keyed by name.
+fn builtin_raw() -> BTreeMap<String, ProfileFile> {
+    let mut raw = BTreeMap::new();
+    for (name, text) in BUILTIN {
+        let file: ProfileFile = serde_norway::from_str(text).unwrap_or_else(|e| panic!("built-in {name}.yaml: {e}"));
+        raw.insert(name.to_string(), file);
+    }
+    raw
+}
+
 impl Registry {
     /// Compiled-in profiles only.
     pub fn builtin() -> Self {
-        let mut raw = BTreeMap::new();
-        for (name, text) in BUILTIN {
-            let file: ProfileFile =
-                serde_norway::from_str(text).unwrap_or_else(|e| panic!("built-in {name}.yaml: {e}"));
-            raw.insert(name.to_string(), file);
-        }
-        Self::compile(raw).expect("built-in profiles compile")
+        Self::compile(builtin_raw()).expect("built-in profiles compile")
     }
 
     /// Built-in profiles merged with `$RELAY_HOME/detect/*.yaml`.
@@ -161,12 +165,7 @@ impl Registry {
     }
 
     pub fn load_from(dir: &Path) -> Result<Self> {
-        let mut raw = BTreeMap::new();
-        for (name, text) in BUILTIN {
-            let file: ProfileFile =
-                serde_norway::from_str(text).unwrap_or_else(|e| panic!("built-in {name}.yaml: {e}"));
-            raw.insert(name.to_string(), file);
-        }
+        let mut raw = builtin_raw();
         if dir.is_dir() {
             let mut entries: Vec<_> = std::fs::read_dir(dir)
                 .with_context(|| format!("reading {}", dir.display()))?

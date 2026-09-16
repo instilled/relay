@@ -244,7 +244,10 @@ async fn handle_conn(stream: UnixStream, daemon: Arc<Daemon>, router: Arc<Router
             Ok(Some(r)) => r,
             Ok(None) => return,
             Err(e) if e.kind() == ErrorKind::InvalidData => {
-                // Can't reply with an id we couldn't parse; JSON-RPC says id: null.
+                // Can't reply with an id we couldn't parse. `Id` has no null
+                // variant (it's `Num(u64) | Str(String)`), so `Num(0)` stands
+                // in; a client that itself numbers requests from 0 can't tell
+                // this apart from a genuine reply to its request 0.
                 let res = Response::err(Id::Num(0), RpcError::new(RpcError::PARSE, e.to_string()));
                 if write_message(&mut wr, &res).await.is_err() {
                     return;

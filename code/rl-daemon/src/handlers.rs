@@ -47,38 +47,38 @@ pub fn register(r: &mut Router<Daemon>) {
         d.scheduler
             .list(f.all)
             .await
-            .map_err(|e| RpcError::internal(format!("{e:#}")))
+            .map_err(internal)
     });
     r.register::<rl_proto::methods::ScheduleRun, _, _>(|d, p| async move {
         d.scheduler
             .run_now(&p.name, p.scope.as_deref())
             .await
-            .map_err(|e| RpcError::internal(format!("{e:#}")))
+            .map_err(internal)
     });
     r.register::<rl_proto::methods::SchedulePause, _, _>(|d, p| async move {
         d.scheduler
             .set_paused(&p.name, p.scope.as_deref(), true)
             .await
-            .map_err(|e| RpcError::internal(format!("{e:#}")))
+            .map_err(internal)
     });
     r.register::<rl_proto::methods::ScheduleResume, _, _>(|d, p| async move {
         d.scheduler
             .set_paused(&p.name, p.scope.as_deref(), false)
             .await
-            .map_err(|e| RpcError::internal(format!("{e:#}")))
+            .map_err(internal)
     });
     r.register::<rl_proto::methods::WorkspaceUp, _, _>(|d, p| async move {
         let mut up = d
             .scheduler
             .up(&p.path, p.approve)
             .await
-            .map_err(|e| RpcError::internal(format!("{e:#}")))?;
+            .map_err(internal)?;
         // The folder's reactions are part of the same yes.
         let (report, reactions, approved) = d
             .reactor
             .up(&up.workspace.path, p.approve)
             .await
-            .map_err(|e| RpcError::internal(format!("{e:#}")))?;
+            .map_err(internal)?;
         up.reaction_report = report;
         up.reactions = reactions;
         up.approved_reactions = approved;
@@ -88,13 +88,13 @@ pub fn register(r: &mut Router<Daemon>) {
         d.scheduler
             .workspaces()
             .await
-            .map_err(|e| RpcError::internal(format!("{e:#}")))
+            .map_err(internal)
     });
     r.register::<rl_proto::methods::WorkspaceRename, _, _>(|d, p| async move {
         d.scheduler
             .rename_workspace(&p.path, &p.name)
             .await
-            .map_err(|e| RpcError::internal(format!("{e:#}")))
+            .map_err(internal)
     });
     r.register::<rl_proto::methods::WorkspaceRemove, _, _>(|d, p| async move {
         if let Ok(path) = std::fs::canonicalize(&p.path) {
@@ -103,7 +103,7 @@ pub fn register(r: &mut Router<Daemon>) {
         d.scheduler
             .remove_workspace(&p.path)
             .await
-            .map_err(|e| RpcError::internal(format!("{e:#}")))
+            .map_err(internal)
     });
     r.register::<AgentList, _, _>(|d, ()| async move { Ok(crate::config::agents(&d.registry)) });
     r.register::<AssistantRun, _, _>(|d, p: AssistantParams| async move {
@@ -119,7 +119,7 @@ pub fn register(r: &mut Router<Daemon>) {
     r.register::<SummaryGet, _, _>(|d, p: RunId| async move {
         crate::summarise::get(&d, &p.id)
             .await
-            .map_err(|e| RpcError::internal(format!("{e:#}")))
+            .map_err(internal)
     });
     r.register::<GcRun, _, _>(|d, p: GcParams| async move {
         let retention = d
@@ -152,20 +152,20 @@ pub fn register(r: &mut Router<Daemon>) {
         d.scheduler
             .reload()
             .await
-            .map_err(|e| RpcError::internal(format!("{e:#}")))
+            .map_err(internal)
     });
     r.register::<ReactionList, _, _>(|d, f| async move {
         d.reactor
             .list(f.all)
             .await
-            .map_err(|e| RpcError::internal(format!("{e:#}")))
+            .map_err(internal)
     });
     r.register::<RuleList, _, _>(|d, f: ScheduleFilter| async move {
         let mut rules: Vec<Rule> = d
             .scheduler
             .list(f.all)
             .await
-            .map_err(|e| RpcError::internal(format!("{e:#}")))?
+            .map_err(internal)?
             .into_iter()
             .map(Rule::Schedule)
             .collect();
@@ -173,7 +173,7 @@ pub fn register(r: &mut Router<Daemon>) {
             d.reactor
                 .list(f.all)
                 .await
-                .map_err(|e| RpcError::internal(format!("{e:#}")))?
+                .map_err(internal)?
                 .into_iter()
                 .map(Rule::Reaction),
         );
@@ -196,23 +196,19 @@ pub fn register(r: &mut Router<Daemon>) {
                     (Ok(_), Err(_)) => RuleKind::Schedule,
                     (Err(_), Ok(_)) => RuleKind::Reaction,
                     (Err(se), Err(re)) => {
-                        // A name in several scopes is the more useful complaint.
-                        let e = if format!("{se:#}").contains("exists in") {
-                            se
-                        } else {
-                            re
-                        };
-                        let msg = format!("{e:#}");
-                        return Err(if msg.contains("exists in") {
-                            RpcError::invalid_params(msg)
-                        } else {
-                            RpcError::not_found("rule", &p.name)
+                        // A name ambiguous in one scope is the more useful
+                        // complaint than "not found" from the other.
+                        let ambiguous = se
+                            .downcast_ref::<crate::AmbiguousName>()
+                            .or_else(|| re.downcast_ref::<crate::AmbiguousName>());
+                        return Err(match ambiguous {
+                            Some(a) => RpcError::invalid_params(a.0.clone()),
+                            None => RpcError::not_found("rule", &p.name),
                         });
                     }
                 }
             }
         };
-        let internal = |e: anyhow::Error| RpcError::internal(format!("{e:#}"));
         Ok(match kind {
             RuleKind::Schedule => Rule::Schedule(d.scheduler.approve(&p.name, scope).await.map_err(internal)?),
             RuleKind::Reaction => Rule::Reaction(d.reactor.approve(&p.name, scope).await.map_err(internal)?),
@@ -222,19 +218,19 @@ pub fn register(r: &mut Router<Daemon>) {
         d.reactor
             .set_paused(&p.name, p.scope.as_deref(), true)
             .await
-            .map_err(|e| RpcError::internal(format!("{e:#}")))
+            .map_err(internal)
     });
     r.register::<ReactionResume, _, _>(|d, p| async move {
         d.reactor
             .set_paused(&p.name, p.scope.as_deref(), false)
             .await
-            .map_err(|e| RpcError::internal(format!("{e:#}")))
+            .map_err(internal)
     });
     r.register::<ReactionReload, _, _>(|d, ()| async move {
         d.reactor
             .reload()
             .await
-            .map_err(|e| RpcError::internal(format!("{e:#}")))
+            .map_err(internal)
     });
     r.register::<ReactionTest, _, _>(|d, p: EventId| async move {
         let trials = d
@@ -285,7 +281,7 @@ pub fn register(r: &mut Router<Daemon>) {
         d.supervisor
             .start(spec)
             .await
-            .map_err(|e| RpcError::internal(format!("{e:#}")))
+            .map_err(internal)
     });
     r.register::<RunStop, _, _>(|d, RunStopParams { id, force }| async move {
         if d.supervisor.live(&id).is_none() {
@@ -294,7 +290,7 @@ pub fn register(r: &mut Router<Daemon>) {
         d.supervisor
             .stop(&id, force)
             .await
-            .map_err(|e| RpcError::internal(format!("{e:#}")))
+            .map_err(internal)
     });
     r.register::<rl_proto::methods::RunInput, _, _>(|d, p: rl_proto::methods::RunInputParams| async move {
         if d.supervisor.live(&p.id).is_none() {
@@ -303,7 +299,7 @@ pub fn register(r: &mut Router<Daemon>) {
         d.supervisor
             .input(&p.id, p.bytes)
             .await
-            .map_err(|e| RpcError::internal(format!("{e:#}")))
+            .map_err(internal)
     });
 
     r.register::<RunHook, _, _>(|d, p| async move {
@@ -317,7 +313,7 @@ pub fn register(r: &mut Router<Daemon>) {
             d.supervisor
                 .apply(&p.id, sig)
                 .await
-                .map_err(|e| RpcError::internal(format!("{e:#}")))?;
+                .map_err(internal)?;
         }
         get_run(&d, &p.id).await
     });
@@ -326,7 +322,7 @@ pub fn register(r: &mut Router<Daemon>) {
         d.supervisor
             .apply(&id, rl_detect::Signal::manual(mark.state(), detail))
             .await
-            .map_err(|e| RpcError::internal(format!("{e:#}")))?;
+            .map_err(internal)?;
         get_run(&d, &id).await
     });
 
@@ -468,6 +464,12 @@ fn emit_kind_ok(kind: &str) -> Result<(), String> {
         return Err(format!("`{kind}`: a kind is dotted lowercase words, like `log.issue`"));
     }
     Ok(())
+}
+
+/// The common shape for wrapping an internal failure: the full causal chain,
+/// via `{:#}`, rather than just the top-level message.
+fn internal(e: anyhow::Error) -> RpcError {
+    RpcError::internal(format!("{e:#}"))
 }
 
 async fn get_run(d: &Daemon, id: &str) -> Result<rl_proto::types::Run, RpcError> {

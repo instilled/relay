@@ -105,7 +105,7 @@ impl Decisions {
                 (None, String::new(), cwd)
             }
         };
-        let id = rl_core::id::new_id();
+        let id = rl_core::id::new_id().context("generating decision id")?;
         let mut d = Decision {
             flow: if flow.is_empty() { id.clone() } else { flow },
             id,

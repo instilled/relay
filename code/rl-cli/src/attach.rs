@@ -83,7 +83,9 @@ pub async fn attach(home: &Home, o: Opts) -> Result<i32> {
     }
 
     let (stdin_tx, mut stdin_rx) = mpsc::channel::<Vec<u8>>(64);
-    tokio::spawn(async move {
+    // Aborted on every exit from this function (see `AbortOnDrop`), so the
+    // reader never outlives `attach()` and races the next one for stdin.
+    let _stdin_task = AbortOnDrop(tokio::spawn(async move {
         let mut stdin = tokio::io::stdin();
         let mut buf = [0u8; 4096];
         loop {
@@ -96,7 +98,7 @@ pub async fn attach(home: &Home, o: Opts) -> Result<i32> {
                 }
             }
         }
-    });
+    }));
     let mut winch = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::window_change())?;
     let mut stdin_open = true;
 
@@ -192,6 +194,22 @@ fn title(s: &str) -> String {
 /// fresh line whatever state the cursor was in.
 fn dim(s: &str) -> String {
     format!("\r\n\x1b[2m{s}\x1b[0m\r\n")
+}
+
+/// Aborts a spawned task when dropped, so it never outlives its owner. The
+/// stdin-forwarding task in `attach()` is parked in a blocking read that
+/// `abort()` can't preempt mid-syscall, so this is best-effort: it stops the
+/// task from being polled (and thus from ever sending again) as soon as
+/// `attach()` returns, closing the window where a stale reader could steal a
+/// byte meant for the next `EventStream` — but on some platforms the
+/// underlying blocking thread may still be parked in the OS read a moment
+/// longer.
+struct AbortOnDrop<T>(tokio::task::JoinHandle<T>);
+
+impl<T> Drop for AbortOnDrop<T> {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
 
 struct RawMode;

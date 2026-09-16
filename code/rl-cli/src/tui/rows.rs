@@ -219,6 +219,9 @@ pub struct Job<'a> {
     pub key: String,
     pub kind: RuleKind,
     pub name: String,
+    /// The job's full run history (not just what a filter happened to match),
+    /// newest first. Invariant: never empty — a `Job` is always built with at
+    /// least the run that first revealed it.
     pub runs: Vec<&'a DigestItem>,
     /// `every 30s`, `on run.failed` — when the rule is known.
     pub when: Option<String>,
@@ -226,6 +229,7 @@ pub struct Job<'a> {
 
 impl<'a> Job<'a> {
     pub fn last(&self) -> &'a DigestItem {
+        debug_assert!(!self.runs.is_empty(), "Job::runs must never be empty");
         self.runs[0]
     }
     pub fn ok(&self) -> usize {
@@ -459,6 +463,21 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
             .map(|x| x.when())
     };
     let run_by_id = |id: &str| d.items.iter().map(|i| &i.run).find(|r| r.id == id);
+    // A job's remembered history must be the job's FULL history, independent
+    // of the filter — the filter only decides whether the job row is shown at
+    // all. So jobs are accumulated here first, unconditionally, and folded
+    // into their group afterwards only if the job or one of its own runs hit.
+    struct JobAcc<'a> {
+        key: String,
+        kind: RuleKind,
+        name: String,
+        group_key: String,
+        workspace: PathBuf,
+        when: Option<String>,
+        runs: Vec<&'a DigestItem>,
+        hit: bool,
+    }
+    let mut jobs_acc: Vec<JobAcc<'a>> = Vec::new();
     for q in &d.decisions {
         let asker = q.run.as_deref().and_then(run_by_id);
         let key = asker
@@ -483,19 +502,22 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
         let key = r.group_key();
         let name = names.group(&key);
         if let Some((kind, job)) = job_of(r) {
-            if !hit(&[job, &name, &r.title, &i.summary]) {
-                continue;
-            }
-            let g = group_of(key.clone(), &r.workspace, &mut groups);
+            let item_hit = hit(&[job, &name, &r.title, &i.summary]);
             let jkey = job_key(kind, job, &key);
-            match groups[g].jobs.iter_mut().find(|j| j.key == jkey) {
-                Some(j) => j.runs.push(i),
-                None => groups[g].jobs.push(Job {
+            match jobs_acc.iter_mut().find(|acc| acc.key == jkey) {
+                Some(acc) => {
+                    acc.runs.push(i);
+                    acc.hit = acc.hit || item_hit;
+                }
+                None => jobs_acc.push(JobAcc {
                     key: jkey,
                     kind,
                     name: job.to_string(),
-                    runs: vec![i],
+                    group_key: key.clone(),
+                    workspace: r.workspace.clone(),
                     when: when_of(kind, job, r),
+                    runs: vec![i],
+                    hit: item_hit,
                 }),
             }
             continue;
@@ -505,6 +527,21 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
         }
         let g = group_of(key, &r.workspace, &mut groups);
         groups[g].runs.push(i);
+    }
+    // Fold each job into its group now, with its full history, but only if
+    // the job (or one of its own runs) actually matched the filter.
+    for acc in jobs_acc {
+        if !acc.hit {
+            continue;
+        }
+        let g = group_of(acc.group_key, &acc.workspace, &mut groups);
+        groups[g].jobs.push(Job {
+            key: acc.key,
+            kind: acc.kind,
+            name: acc.name,
+            runs: acc.runs,
+            when: acc.when,
+        });
     }
     for g in &mut groups {
         g.questions.sort_by_key(|q| q.created_at);
@@ -994,6 +1031,47 @@ mod tests {
             "failed job above working run"
         );
         assert_eq!(counts(&rows), (0, 1, 1, 0, 1));
+    }
+
+    #[test]
+    fn a_job_filtered_by_one_runs_text_keeps_its_full_history() {
+        // A filter that matches only one run's own summary (not the job or
+        // group name) must still show the job's FULL history — not just the
+        // matching run — since `ok()`/`failed()`/`marks()`/`summary()` are
+        // all computed from `Job.runs`.
+        let now: Timestamp = "2026-09-10T12:00:00Z".parse().unwrap();
+        let mut items: Vec<DigestItem> = (0..30)
+            .map(|n| {
+                fired(
+                    &format!("p{n:02}"),
+                    "pulse",
+                    RunState::Finished,
+                    &format!("2026-09-10T11:{n:02}:00Z"),
+                    false,
+                )
+            })
+            .collect();
+        items.push(fired("bad", "pulse", RunState::Failed, "2026-09-10T11:30:30Z", true));
+        let d = Digest {
+            since: now,
+            items,
+            decisions: vec![],
+        };
+        let names = Names::new([(PathBuf::from("/home/f/relay"), "relay".to_string())]);
+        // "exit 1" only appears in the failing run's own summary, not in the
+        // job name ("pulse") or the group name ("relay").
+        let rows = build_with(&d, &names, "exit 1", now);
+        let job_key = job_key(RuleKind::Schedule, "pulse", "/home/f/relay");
+        assert_eq!(keys(&rows), ["[relay]", &job_key], "{:?}", keys(&rows));
+        let Some(Row::Job(j)) = rows.iter().find(|r| matches!(r, Row::Job(_))) else {
+            panic!("no job row");
+        };
+        assert_eq!(j.runs.len(), 31, "the job's full history, not just the matching run");
+        assert_eq!(
+            (j.ok(), j.failed(), j.stopped()),
+            (30, 1, 0),
+            "stats reflect the job's true, overwhelmingly-successful history"
+        );
     }
 
     #[test]

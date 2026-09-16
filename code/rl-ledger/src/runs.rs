@@ -3,7 +3,7 @@
 use crate::{conv, conv_str};
 use anyhow::Result;
 use jiff::Timestamp;
-use rl_core::time::{from_millis, to_millis};
+use rl_core::time::{from_millis, optional_from_millis, to_millis};
 use rl_proto::methods::RunFilter;
 use rl_proto::types::{Confidence, Run, RunState, Source};
 use rusqlite::{Connection, OptionalExtension, Row, params, params_from_iter, types::Value};
@@ -14,6 +14,10 @@ const COLS: &str = "id, workspace, kind, title, cli, argv_json, cwd, branch, wor
     cause, flow, parent_run, last_line, seen_at, detail, archived_at";
 
 const DEFAULT_LIMIT: u32 = 200;
+
+/// The terminal `RunState`s as a SQL `IN (...)` fragment. Must be kept in
+/// sync with `RunState::is_terminal()` (checked by a test below).
+const TERMINAL_STATES_SQL: &str = "'finished','failed','stopped'";
 
 pub fn insert(conn: &Connection, r: &Run) -> Result<()> {
     conn.execute(
@@ -69,7 +73,7 @@ pub fn list(conn: &Connection, f: &RunFilter) -> Result<Vec<Run>> {
         args.extend(f.states.iter().map(|s| Value::from(s.as_str().to_string())));
     }
     if f.active_only {
-        sql.push_str(" AND state NOT IN ('finished','failed','stopped')");
+        sql.push_str(&format!(" AND state NOT IN ({TERMINAL_STATES_SQL})"));
     }
     if !f.archived {
         sql.push_str(" AND archived_at IS NULL");
@@ -172,11 +176,7 @@ fn from_row(row: &Row<'_>) -> rusqlite::Result<Run> {
         confidence: confidence.parse().map_err(|e| conv_str(13, e))?,
         state_at: from_millis(row.get(14)?).map_err(|e| conv(14, e))?,
         started_at: from_millis(row.get(15)?).map_err(|e| conv(15, e))?,
-        ended_at: row
-            .get::<_, Option<i64>>(16)?
-            .map(from_millis)
-            .transpose()
-            .map_err(|e| conv(16, e))?,
+        ended_at: optional_from_millis(row.get(16)?, 16, conv)?,
         exit_code: row.get(17)?,
         cost: cost
             .map(|s| serde_json::from_str(&s))
@@ -186,17 +186,9 @@ fn from_row(row: &Row<'_>) -> rusqlite::Result<Run> {
         flow: row.get(20)?,
         parent_run: row.get(21)?,
         last_line: row.get(22)?,
-        seen_at: row
-            .get::<_, Option<i64>>(23)?
-            .map(from_millis)
-            .transpose()
-            .map_err(|e| conv(23, e))?,
+        seen_at: optional_from_millis(row.get(23)?, 23, conv)?,
         detail: row.get(24)?,
-        archived_at: row
-            .get::<_, Option<i64>>(25)?
-            .map(from_millis)
-            .transpose()
-            .map_err(|e| conv(25, e))?,
+        archived_at: optional_from_millis(row.get(25)?, 25, conv)?,
     })
 }
 
@@ -217,8 +209,10 @@ pub fn archive(conn: &Connection, ids: &[String], at: Timestamp) -> Result<usize
     let mut n = 0;
     for id in ids {
         n += conn.execute(
-            "UPDATE runs SET archived_at = ?2 WHERE id = ?1 AND archived_at IS NULL \
-             AND state IN ('finished','failed','stopped')",
+            &format!(
+                "UPDATE runs SET archived_at = ?2 WHERE id = ?1 AND archived_at IS NULL \
+                 AND state IN ({TERMINAL_STATES_SQL})"
+            ),
             params![id, to_millis(at)],
         )?;
     }
@@ -228,8 +222,10 @@ pub fn archive(conn: &Connection, ids: &[String], at: Timestamp) -> Result<usize
 /// Done with everything that has ended and been looked at.
 pub fn archive_seen(conn: &Connection, at: Timestamp) -> Result<usize> {
     Ok(conn.execute(
-        "UPDATE runs SET archived_at = ?1 WHERE archived_at IS NULL AND seen_at IS NOT NULL \
-         AND state IN ('finished','failed','stopped')",
+        &format!(
+            "UPDATE runs SET archived_at = ?1 WHERE archived_at IS NULL AND seen_at IS NOT NULL \
+             AND state IN ({TERMINAL_STATES_SQL})"
+        ),
         params![to_millis(at)],
     )?)
 }
@@ -245,4 +241,19 @@ pub fn set_seen(conn: &Connection, ids: &[String], at: Timestamp) -> Result<usiz
 
 fn path_str(p: &std::path::Path) -> String {
     p.to_string_lossy().into_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `TERMINAL_STATES_SQL` is hand-typed SQL; catch it drifting from
+    /// `RunState::is_terminal()` if a new state is ever added.
+    #[test]
+    fn terminal_states_sql_matches_is_terminal() {
+        for s in RunState::ALL {
+            let listed = TERMINAL_STATES_SQL.contains(&format!("'{}'", s.as_str()));
+            assert_eq!(listed, s.is_terminal(), "state {s:?} disagrees with TERMINAL_STATES_SQL");
+        }
+    }
 }

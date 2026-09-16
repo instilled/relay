@@ -442,7 +442,7 @@ pub async fn run(home: &Home) -> Result<()> {
         line: line::Line::default(),
         agents: Vec::new(),
         path_dirs: complete::path_dirs(),
-        aliases: complete::shell_names(),
+        aliases: complete::shell_names().await,
         completing: None,
         pick: None,
         mode: Mode::Normal,
@@ -791,6 +791,18 @@ impl App {
         self.pane = Pane::Facts;
     }
 
+    /// Hide the side pane. `pane == Term` must not outlive `show_pane`: a
+    /// stale `Term` with the pane hidden makes `enter_row`'s "already
+    /// watching" check fire on a row that looks, on screen, like nothing is
+    /// open — see the invariant `leave_term` restores by always resetting to
+    /// `Facts`.
+    fn hide_pane(&mut self) {
+        self.show_pane = false;
+        if self.pane == Pane::Term {
+            self.pane = Pane::Facts;
+        }
+    }
+
     async fn seen(&mut self, ids: Vec<String>) {
         if ids.is_empty() {
             return;
@@ -912,6 +924,15 @@ impl App {
         }
     }
 
+    /// Done with a job's runs, however they ended: out of the list, kept in
+    /// the ledger. Shared by `^x` (`remove_selected`) and `/done`. Takes the
+    /// name and run ids rather than `&rows::Job` itself: `Job` borrows from
+    /// `self`, and this needs `&mut self` to archive.
+    async fn archive_job(&mut self, name: &str, ids: Vec<String>) {
+        let what = format!("{name} · {} runs", ids.len());
+        self.archive(ids, &what).await;
+    }
+
     /// The second `ctrl-x` (the first only armed it): get whatever the cursor
     /// is on out of the list. An ended run or a job is archived (reversible:
     /// the ledger keeps it); a run still going is stopped, so once it has ended
@@ -920,8 +941,7 @@ impl App {
     async fn remove_selected(&mut self) {
         if let Some(j) = self.selected_job() {
             let ids: Vec<String> = j.runs.iter().map(|i| i.run.id.clone()).collect();
-            let what = format!("{} · {} runs", j.name, ids.len());
-            self.archive(ids, &what).await;
+            self.archive_job(&j.name, ids).await;
         } else if let Some(i) = self.selected_run() {
             let (id, title) = (i.run.id.clone(), i.run.title.clone());
             if i.run.state.is_terminal() {
@@ -1570,7 +1590,7 @@ impl App {
                 if self.wide {
                     self.wide = false;
                 } else if self.show_pane && area.width < SPLIT_AT {
-                    self.show_pane = false;
+                    self.hide_pane();
                 } else if self.view == View::Rules && self.rules_scope.is_some() {
                     self.rules_scope = None;
                     self.settle();
@@ -1876,8 +1896,7 @@ impl App {
             palette::Cmd::Done => {
                 if let Some(j) = self.selected_job() {
                     let ids: Vec<String> = j.runs.iter().map(|i| i.run.id.clone()).collect();
-                    let what = format!("{} · {} runs", j.name, ids.len());
-                    self.archive(ids, &what).await;
+                    self.archive_job(&j.name, ids).await;
                 } else if let Some(i) = self.selected_run() {
                     if i.run.state.is_terminal() {
                         let (id, title) = (i.run.id.clone(), i.run.title.clone());
@@ -1915,7 +1934,13 @@ impl App {
                 Some(_) => self.say("ended: nothing to join"),
                 None => self.say("nothing here to join"),
             },
-            palette::Cmd::Info => self.show_pane = !self.show_pane,
+            palette::Cmd::Info => {
+                if self.show_pane {
+                    self.hide_pane();
+                } else {
+                    self.show_pane = true;
+                }
+            }
             palette::Cmd::Full => {
                 self.wide = !self.wide;
                 if self.wide {
@@ -1931,7 +1956,7 @@ impl App {
             }
             palette::Cmd::Reload => self.reload_rules().await,
             palette::Cmd::Reindex => {
-                self.aliases = complete::shell_names();
+                self.aliases = complete::shell_names().await;
                 self.say(format!("re-read the shell: {} names", self.aliases.len()));
             }
             palette::Cmd::Approve => {

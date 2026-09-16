@@ -127,7 +127,6 @@ impl Form {
         }
         v.push(short_path(&self.origin));
         v.extend(known.iter().map(|p| short_path(p)));
-        v.dedup();
         let mut seen = std::collections::HashSet::new();
         v.retain(|f| !f.is_empty() && seen.insert(f.clone()));
         self.folders = v;

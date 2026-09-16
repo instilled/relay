@@ -2,7 +2,7 @@
 
 use anyhow::Result;
 use jiff::Timestamp;
-use rl_core::time::{from_millis, to_millis};
+use rl_core::time::{from_millis, optional_from_millis, to_millis};
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use std::path::PathBuf;
 
@@ -101,15 +101,7 @@ fn from_row(row: &Row<'_>) -> rusqlite::Result<SessionRow> {
         cols: row.get(7)?,
         rows: row.get(8)?,
         started_at: from_millis(row.get(9)?).map_err(|e| conv(9, e))?,
-        attached_at: row
-            .get::<_, Option<i64>>(10)?
-            .map(from_millis)
-            .transpose()
-            .map_err(|e| conv(10, e))?,
-        closed_at: row
-            .get::<_, Option<i64>>(11)?
-            .map(from_millis)
-            .transpose()
-            .map_err(|e| conv(11, e))?,
+        attached_at: optional_from_millis(row.get(10)?, 10, conv)?,
+        closed_at: optional_from_millis(row.get(11)?, 11, conv)?,
     })
 }

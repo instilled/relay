@@ -19,6 +19,12 @@ unsafe extern "C" {
     fn libc_getuid() -> u32;
 }
 
+/// FNV-1a, 32-bit: deterministic across Rust toolchains/versions, unlike
+/// `std::hash::DefaultHasher`.
+fn fnv1a(bytes: &[u8]) -> u32 {
+    bytes.iter().fold(0x811c9dc5u32, |h, &b| (h ^ b as u32).wrapping_mul(0x01000193))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Home(PathBuf);
 
@@ -59,16 +65,17 @@ impl Home {
     /// Where sockets live. Normally `run/`, but `sockaddr_un` caps paths at
     /// ~104 bytes on macOS (108 on Linux), so a long `RELAY_HOME` gets a short
     /// deterministic directory under the temp dir instead. Both sides derive
-    /// it from the home path, so nothing needs to be written down.
+    /// it from the home path with a fixed hash (not `DefaultHasher`, whose
+    /// output isn't stable across toolchains), so nothing needs to be written
+    /// down.
     pub fn socket_dir(&self) -> PathBuf {
         let run = self.run_dir();
         if run.as_os_str().len() + SOCKET_NAME_BUDGET < SUN_PATH_MAX {
             return run;
         }
-        let mut h = std::hash::DefaultHasher::new();
-        std::hash::Hash::hash(&self.0, &mut h);
+        let hash = fnv1a(self.0.as_os_str().as_encoded_bytes());
         let uid = unsafe { libc_getuid() };
-        std::env::temp_dir().join(format!("rl-{uid}-{:08x}", std::hash::Hasher::finish(&h) as u32))
+        std::env::temp_dir().join(format!("rl-{uid}-{hash:08x}"))
     }
     pub fn daemon_socket(&self) -> PathBuf {
         self.socket_dir().join("rld.sock")

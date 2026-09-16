@@ -4,10 +4,9 @@
 //! `cause = decision:<id>` and the same `flow`, so the trail from schedule to
 //! question to follow-up is one chain.
 
-use crate::action::{Action, Task};
+use crate::action::action_struct;
 use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -56,35 +55,22 @@ impl std::fmt::Display for DecisionStatus {
     }
 }
 
-/// One way to answer. `key` is what you type, `label` is what you read, and
-/// the flattened [`Action`] is what happens when it is chosen — nothing, for
-/// an option that is only an answer.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct DecisionOption {
-    pub key: String,
-    #[serde(default)]
-    pub label: String,
-    /// Taken on its own when the decision expires.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub default: bool,
-    /// What choosing it starts, if anything. See [`Task`].
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub run: Option<Task>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cwd: Option<PathBuf>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub env: BTreeMap<String, String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub tags: Vec<String>,
-    #[serde(default, rename = "ref", skip_serializing_if = "Option::is_none")]
-    pub ref_: Option<String>,
-    /// Title of the run it starts; the decision's own by default.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub title: Option<String>,
-    /// Pipes instead of a pty.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub no_tty: bool,
+action_struct! {
+    /// One way to answer. `key` is what you type, `label` is what you read,
+    /// and its `action()` is what happens when it is chosen — nothing, for
+    /// an option that is only an answer.
+    #[serde(deny_unknown_fields)]
+    struct DecisionOption {
+        before: {
+            pub key: String,
+            #[serde(default)]
+            pub label: String,
+            /// Taken on its own when the decision expires.
+            #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+            pub default: bool,
+        }
+        after: {}
+    }
 }
 
 impl DecisionOption {
@@ -93,19 +79,6 @@ impl DecisionOption {
             key: key.into(),
             label: label.into(),
             ..Default::default()
-        }
-    }
-
-    /// What choosing it starts, as the shape schedules and reactions use too.
-    pub fn action(&self) -> Action {
-        Action {
-            run: self.run.clone(),
-            cwd: self.cwd.clone(),
-            env: self.env.clone(),
-            tags: self.tags.clone(),
-            ref_: self.ref_.clone(),
-            title: self.title.clone(),
-            no_tty: self.no_tty,
         }
     }
 

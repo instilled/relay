@@ -11,6 +11,7 @@
 pub mod cron;
 
 use crate::action::expand_home;
+use crate::rulestore::RuleStore;
 use crate::supervisor::Supervisor;
 use anyhow::{Context, Result, anyhow, bail};
 use cron::Cron;
@@ -26,6 +27,7 @@ use rl_proto::schedule::{
     GLOBAL_SCOPE, Missed, Overlap, ReloadReport, Schedule, ScheduleSpec, UpReport, WORKSPACE_DIR, Workspace,
 };
 use rl_proto::types::{Cause, Run, event_kind};
+use rusqlite::Connection;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -200,53 +202,13 @@ impl Scheduler {
     /// Re-reads every file (the user's, then each workspace's), diffs them
     /// into the ledger, plans what is approved, and wakes the loop.
     pub async fn reload(&self) -> Result<ReloadReport> {
-        let mut report = self.load_scope(GLOBAL_SCOPE, &self.home.schedules_file(), true).await?;
-        for w in self.workspaces().await? {
-            let scope = w.path.to_string_lossy().into_owned();
-            match self.load_scope(&scope, &workspace_file(&w.path), false).await {
-                Ok(r) => {
-                    report.loaded += r.loaded;
-                    report
-                        .added
-                        .extend(r.added.into_iter().map(|n| format!("{}:{n}", w.name)));
-                    report
-                        .changed
-                        .extend(r.changed.into_iter().map(|n| format!("{}:{n}", w.name)));
-                    report
-                        .removed
-                        .extend(r.removed.into_iter().map(|n| format!("{}:{n}", w.name)));
-                    report
-                        .errors
-                        .extend(r.errors.into_iter().map(|e| format!("{}:{e}", w.name)));
-                }
-                Err(e) => report.errors.push(format!("{}: {e:#}", w.name)),
-            }
-        }
-        self.plan_all().await?;
-        info!(
-            loaded = report.loaded,
-            added = report.added.len(),
-            changed = report.changed.len(),
-            removed = report.removed.len(),
-            errors = report.errors.len(),
-            "schedules reloaded"
-        );
-        self.wake.notify_one();
-        Ok(report)
+        RuleStore::reload(self).await
     }
 
     /// One file into one scope. Errors in entries are reported, not fatal;
     /// a file that does not parse is.
     async fn load_scope(&self, scope: &str, path: &Path, trusted: bool) -> Result<ReloadReport> {
-        let (loaded, errors) = load_file(path, !trusted)?;
-        let now = Timestamp::now();
-        let (scope, path) = (scope.to_string(), path.to_path_buf());
-        let mut report = self
-            .ledger
-            .call(move |c| schedules::sync(c, &scope, &path, &loaded, trusted, now))
-            .await?;
-        report.errors = errors;
-        Ok(report)
+        RuleStore::load_scope(self, scope, path, trusted).await
     }
 
     /// Gives every approved, unpaused schedule without a `next_at` one.
@@ -267,39 +229,12 @@ impl Scheduler {
     /// A schedule by name; `scope` settles it when the name exists in more
     /// than one.
     pub async fn get(&self, name: &str, scope: Option<&str>) -> Result<Schedule> {
-        let n = name.to_string();
-        if let Some(scope) = scope {
-            let scope = self.scope_of(scope).await?;
-            let s = scope.clone();
-            return self
-                .ledger
-                .call(move |c| schedules::get(c, &s, &n))
-                .await?
-                .ok_or_else(|| anyhow!("no schedule named `{name}` in {scope}"));
-        }
-        let found = self.ledger.call(move |c| schedules::find(c, &n)).await?;
-        match found.len() {
-            0 => bail!("no schedule named `{name}`"),
-            1 => Ok(found.into_iter().next().unwrap()),
-            _ => {
-                let scopes: Vec<String> = found.iter().map(|s| s.scope_label()).collect();
-                bail!("`{name}` exists in {}; say which with --in", scopes.join(" and "))
-            }
-        }
+        RuleStore::get(self, name, scope).await
     }
 
     /// `global`, or a workspace path (any spelling of it) as registered.
     async fn scope_of(&self, scope: &str) -> Result<String> {
-        if scope == GLOBAL_SCOPE {
-            return Ok(scope.to_string());
-        }
-        let path = std::fs::canonicalize(scope).with_context(|| format!("workspace {scope}"))?;
-        let w = self
-            .ledger
-            .call(move |c| workspaces::get(c, &path))
-            .await?
-            .ok_or_else(|| anyhow!("{scope} is not a registered workspace; `rl up` there first"))?;
-        Ok(w.path.to_string_lossy().into_owned())
+        RuleStore::scope_of(self, scope).await
     }
 
     /// Pausing keeps `next_at`; resuming plans afresh from now, so nothing
@@ -535,9 +470,16 @@ impl Scheduler {
         }
         let run = self.supervisor.start(spec).await?;
         info!(schedule = %s.name, scope = %s.scope_label(), run = %run.id, "schedule fired");
+        // The run is alive from here on: if recording that it fired fails,
+        // that is a bookkeeping problem, not grounds to tell the caller this
+        // firing never happened. Reporting it as a failure here would have
+        // `due()` mark the schedule "skipped" for a run that is in fact
+        // running, and replan with `last_fired: None`, which also breaks
+        // `every`'s cadence.
         let (scope, name, hash, id) = (s.scope.clone(), s.name.clone(), s.hash.clone(), run.id.clone());
         let run_for_event = run.clone();
-        self.ledger
+        if let Err(e) = self
+            .ledger
             .call(move |c| {
                 schedules::set_fired(c, &scope, &name, now, &id)?;
                 events::append(
@@ -551,7 +493,10 @@ impl Scheduler {
                     .with_data(json!({ "schedule": name, "scope": scope, "hash": hash, "run": id })),
                 )
             })
-            .await?;
+            .await
+        {
+            warn!(schedule = %s.name, run = %run.id, error = %format!("{e:#}"), "schedule fired but recording it failed");
+        }
         self.plan(s, now, Some(now)).await?;
         Ok(run)
     }
@@ -568,11 +513,7 @@ impl Scheduler {
             at: now,
             workspace: cwd.clone(),
             run: None,
-            group_key: s
-                .spec
-                .ref_
-                .clone()
-                .unwrap_or_else(|| cwd.to_string_lossy().into_owned()),
+            group_key: s.spec.ref_.clone().unwrap_or_else(|| cwd.to_string_lossy().into_owned()),
             kind: event_kind::SCHEDULE_SKIPPED.into(),
             summary: format!("schedule `{}` skipped: {reason}", s.name),
             data: Some(json!({ "schedule": s.name, "scope": s.scope, "hash": s.hash, "reason": reason, "due": due })),
@@ -587,6 +528,70 @@ impl Scheduler {
         self.ledger
             .call(move |c| schedules::set_next(c, &scope, &name, next))
             .await
+    }
+}
+
+impl RuleStore for Scheduler {
+    type Item = Schedule;
+
+    fn ledger(&self) -> &Ledger {
+        &self.ledger
+    }
+
+    fn kind() -> &'static str {
+        "schedule"
+    }
+
+    fn home_file(&self) -> PathBuf {
+        self.home.schedules_file()
+    }
+
+    fn workspace_file(workspace: &Path) -> PathBuf {
+        workspace_file(workspace)
+    }
+
+    fn load_file(path: &Path, in_workspace: bool) -> Result<(Vec<Loaded>, Vec<String>)> {
+        load_file(path, in_workspace)
+    }
+
+    fn sync(
+        conn: &Connection,
+        scope: &str,
+        source: &Path,
+        loaded: &[Loaded],
+        trusted: bool,
+        now: Timestamp,
+    ) -> Result<ReloadReport> {
+        schedules::sync(conn, scope, source, loaded, trusted, now)
+    }
+
+    fn get_by_scope(conn: &Connection, scope: &str, name: &str) -> Result<Option<Schedule>> {
+        schedules::get(conn, scope, name)
+    }
+
+    fn find_by_name(conn: &Connection, name: &str) -> Result<Vec<Schedule>> {
+        schedules::find(conn, name)
+    }
+
+    fn scope_label(item: &Schedule) -> String {
+        item.scope_label()
+    }
+
+    /// Reloading also plans every newly-approved schedule.
+    async fn plan_after_reload(&self) -> Result<()> {
+        self.plan_all().await
+    }
+
+    fn log_and_wake(&self, report: &ReloadReport) {
+        info!(
+            loaded = report.loaded,
+            added = report.added.len(),
+            changed = report.changed.len(),
+            removed = report.removed.len(),
+            errors = report.errors.len(),
+            "schedules reloaded"
+        );
+        self.wake.notify_one();
     }
 }
 

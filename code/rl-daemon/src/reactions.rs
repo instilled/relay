@@ -8,6 +8,7 @@
 //! keeps a burst of failures from opening twenty terminals.
 
 use crate::decisions::Decisions;
+use crate::rulestore::RuleStore;
 use crate::supervisor::Supervisor;
 use anyhow::{Context, Result, anyhow, bail};
 use jiff::{SignedDuration, Timestamp};
@@ -15,13 +16,14 @@ use rl_core::Home;
 use rl_core::time::parse_duration;
 use rl_detect::Registry;
 use rl_ledger::entries::Loaded;
-use rl_ledger::{Ledger, decisions, events, meta, reactions, runs, workspaces};
+use rl_ledger::{Ledger, decisions, events, meta, reactions, runs};
 use rl_proto::action::{Action, Task};
 use rl_proto::decision::DecisionOption;
-use rl_proto::methods::{DecisionSpec, EventFilter};
+use rl_proto::methods::DecisionSpec;
 use rl_proto::reaction::{AskSpec, DEFAULT_THROTTLE, Reaction, ReactionSpec};
 use rl_proto::schedule::{GLOBAL_SCOPE, ReloadReport, WORKSPACE_DIR};
 use rl_proto::types::{Cause, Event, Run};
+use rusqlite::Connection;
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -382,51 +384,11 @@ impl Reactor {
 
     /// Re-reads every file (the user's, then each workspace's) into the ledger.
     pub async fn reload(&self) -> Result<ReloadReport> {
-        let mut report = self.load_scope(GLOBAL_SCOPE, &self.home.reactions_file(), true).await?;
-        let workspaces = self.ledger.call(|c| workspaces::list(c)).await?;
-        for w in workspaces {
-            let scope = w.path.to_string_lossy().into_owned();
-            match self.load_scope(&scope, &workspace_file(&w.path), false).await {
-                Ok(r) => {
-                    report.loaded += r.loaded;
-                    report
-                        .added
-                        .extend(r.added.into_iter().map(|n| format!("{}:{n}", w.name)));
-                    report
-                        .changed
-                        .extend(r.changed.into_iter().map(|n| format!("{}:{n}", w.name)));
-                    report
-                        .removed
-                        .extend(r.removed.into_iter().map(|n| format!("{}:{n}", w.name)));
-                    report
-                        .errors
-                        .extend(r.errors.into_iter().map(|e| format!("{}:{e}", w.name)));
-                }
-                Err(e) => report.errors.push(format!("{}: {e:#}", w.name)),
-            }
-        }
-        info!(
-            loaded = report.loaded,
-            added = report.added.len(),
-            changed = report.changed.len(),
-            removed = report.removed.len(),
-            errors = report.errors.len(),
-            "reactions reloaded"
-        );
-        self.wake.notify_one();
-        Ok(report)
+        RuleStore::reload(self).await
     }
 
     async fn load_scope(&self, scope: &str, path: &Path, trusted: bool) -> Result<ReloadReport> {
-        let (loaded, errors) = load_file(path, !trusted)?;
-        let now = Timestamp::now();
-        let (scope, path) = (scope.to_string(), path.to_path_buf());
-        let mut report = self
-            .ledger
-            .call(move |c| reactions::sync(c, &scope, &path, &loaded, trusted, now))
-            .await?;
-        report.errors = errors;
-        Ok(report)
+        RuleStore::load_scope(self, scope, path, trusted).await
     }
 
     /// One workspace's reactions, loaded and (when asked) approved. Called by
@@ -468,38 +430,7 @@ impl Reactor {
 
     /// A reaction by name; `scope` settles it when the name is in several.
     pub async fn get(&self, name: &str, scope: Option<&str>) -> Result<Reaction> {
-        let n = name.to_string();
-        if let Some(scope) = scope {
-            let scope = self.scope_of(scope).await?;
-            let s = scope.clone();
-            return self
-                .ledger
-                .call(move |c| reactions::get(c, &s, &n))
-                .await?
-                .ok_or_else(|| anyhow!("no reaction named `{name}` in {scope}"));
-        }
-        let found = self.ledger.call(move |c| reactions::find(c, &n)).await?;
-        match found.len() {
-            0 => bail!("no reaction named `{name}`"),
-            1 => Ok(found.into_iter().next().unwrap()),
-            _ => {
-                let scopes: Vec<String> = found.iter().map(|r| r.scope_label()).collect();
-                bail!("`{name}` exists in {}; say which with --in", scopes.join(" and "))
-            }
-        }
-    }
-
-    async fn scope_of(&self, scope: &str) -> Result<String> {
-        if scope == GLOBAL_SCOPE {
-            return Ok(scope.to_string());
-        }
-        let path = std::fs::canonicalize(scope).with_context(|| format!("workspace {scope}"))?;
-        let w = self
-            .ledger
-            .call(move |c| workspaces::get(c, &path))
-            .await?
-            .ok_or_else(|| anyhow!("{scope} is not a registered workspace; `rl up` there first"))?;
-        Ok(w.path.to_string_lossy().into_owned())
+        RuleStore::get(self, name, scope).await
     }
 
     pub async fn set_paused(&self, name: &str, scope: Option<&str>, paused: bool) -> Result<Reaction> {
@@ -557,24 +488,7 @@ impl Reactor {
     }
 
     async fn event(&self, id: i64) -> Result<Option<Event>> {
-        let list = self
-            .ledger
-            .call(move |c| {
-                events::list(
-                    c,
-                    &EventFilter {
-                        limit: Some(1),
-                        ..Default::default()
-                    },
-                )
-            })
-            .await?;
-        // `event.list` has no id filter; the one we want is usually recent.
-        if let Some(e) = list.into_iter().find(|e| e.id == id) {
-            return Ok(Some(e));
-        }
-        let all = self.ledger.call(move |c| events::get(c, id)).await?;
-        Ok(all)
+        self.ledger.call(move |c| events::get(c, id)).await
     }
 
     /// The run an event is about, and the reaction behind it when it is about
@@ -743,6 +657,65 @@ impl Reactor {
                 warn!(error = %format!("{e:#}"), "reactor");
             }
         }
+    }
+}
+
+impl RuleStore for Reactor {
+    type Item = Reaction;
+
+    fn ledger(&self) -> &Ledger {
+        &self.ledger
+    }
+
+    fn kind() -> &'static str {
+        "reaction"
+    }
+
+    fn home_file(&self) -> PathBuf {
+        self.home.reactions_file()
+    }
+
+    fn workspace_file(workspace: &Path) -> PathBuf {
+        workspace_file(workspace)
+    }
+
+    fn load_file(path: &Path, in_workspace: bool) -> Result<(Vec<Loaded>, Vec<String>)> {
+        load_file(path, in_workspace)
+    }
+
+    fn sync(
+        conn: &Connection,
+        scope: &str,
+        source: &Path,
+        loaded: &[Loaded],
+        trusted: bool,
+        now: Timestamp,
+    ) -> Result<ReloadReport> {
+        reactions::sync(conn, scope, source, loaded, trusted, now)
+    }
+
+    fn get_by_scope(conn: &Connection, scope: &str, name: &str) -> Result<Option<Reaction>> {
+        reactions::get(conn, scope, name)
+    }
+
+    fn find_by_name(conn: &Connection, name: &str) -> Result<Vec<Reaction>> {
+        reactions::find(conn, name)
+    }
+
+    fn scope_label(item: &Reaction) -> String {
+        item.scope_label()
+    }
+
+    fn log_and_wake(&self, report: &ReloadReport) {
+        info!(
+            loaded = report.loaded,
+            added = report.added.len(),
+            changed = report.changed.len(),
+            removed = report.removed.len(),
+            errors = report.errors.len(),
+            "reactions reloaded"
+        );
+        self.wake.notify_one();
     }
 }
 

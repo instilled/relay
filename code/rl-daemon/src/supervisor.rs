@@ -189,7 +189,7 @@ impl Supervisor {
         }
         let cwd = std::fs::canonicalize(&spec.cwd).with_context(|| format!("cwd {}", spec.cwd.display()))?;
         let now = Timestamp::now();
-        let id = new_id();
+        let id = new_id().context("generating run id")?;
         let place = git::placement(&cwd).await;
         // A registered workspace containing cwd wins; then the git root; then cwd.
         let registered = self
