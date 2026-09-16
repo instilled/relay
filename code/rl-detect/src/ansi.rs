@@ -26,6 +26,39 @@ enum EscState {
 /// forever.
 const MAX_PENDING_ESCAPE: usize = 64;
 
+/// A shell's OSC 133 prompt mark: where a prompt was drawn, where what you
+/// typed began, where it started running, and how it came out. Only a shell
+/// whose prompt emits these has them; nothing here invents one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mark {
+    /// `133;A` — a fresh prompt.
+    Prompt,
+    /// `133;B` — what you type starts here.
+    Input,
+    /// `133;C` — it is running now; its output starts here.
+    Output,
+    /// `133;D[;exit]` — it ended, with its exit code when the shell says one.
+    Ended { exit: Option<i32> },
+}
+
+/// An OSC payload read as a prompt mark. Anything else — a window title, a
+/// colour query — is `None`, and is stripped the way it always was.
+fn mark_of(payload: &str) -> Option<Mark> {
+    let rest = payload.strip_prefix("133;")?;
+    let mut parts = rest.split(';');
+    // Shells add parameters of their own (`133;A;aid=7`); the letter is all
+    // that is read.
+    match parts.next()?.chars().next()? {
+        'A' => Some(Mark::Prompt),
+        'B' => Some(Mark::Input),
+        'C' => Some(Mark::Output),
+        'D' => Some(Mark::Ended {
+            exit: parts.next().and_then(|c| c.trim().parse().ok()),
+        }),
+        _ => None,
+    }
+}
+
 /// Stateful ANSI stripper: like [`strip`], but remembers an escape sequence
 /// left open at the end of one chunk so the next call resumes it correctly
 /// instead of re-parsing its tail as literal text. Use one `Stripper` per
@@ -34,6 +67,13 @@ const MAX_PENDING_ESCAPE: usize = 64;
 pub struct Stripper {
     state: EscState,
     pending: usize,
+    /// The OSC payload being read, kept only until its terminator.
+    osc: String,
+    /// The prompt marks of the chunk just stripped, each with the byte offset
+    /// into that chunk's text where it stood. One read can hold a whole
+    /// command — `B`, what was typed, `C`, its output, `D` — so the offsets
+    /// are what make the pieces tellable apart afterwards.
+    marks: Vec<(usize, Mark)>,
 }
 
 impl Stripper {
@@ -41,11 +81,21 @@ impl Stripper {
         Self::default()
     }
 
+    /// The prompt marks of the text [`strip`] last returned, each with the
+    /// byte offset into that text where it stood. Draining: a mark is read
+    /// once, and offsets only ever mean anything against that one chunk.
+    pub fn take_marks(&mut self) -> Vec<(usize, Mark)> {
+        std::mem::take(&mut self.marks)
+    }
+
     /// Strips CSI/OSC/other escape sequences and resolves `\r` within a
     /// line, resuming any escape sequence left open by the previous call.
     pub fn strip(&mut self, bytes: &[u8]) -> String {
         let text = String::from_utf8_lossy(bytes);
         let mut out = String::with_capacity(text.len());
+        // Last chunk's marks were measured against last chunk's text; they
+        // would be nonsense against this one.
+        self.marks.clear();
         let mut chars = text.chars().peekable();
         while let Some(c) = chars.next() {
             match std::mem::take(&mut self.state) {
@@ -75,7 +125,10 @@ impl Stripper {
                     self.pending += 1;
                     self.state = match c {
                         '[' => EscState::Csi,
-                        ']' => EscState::Osc { prev_was_esc: false },
+                        ']' => {
+                            self.osc.clear();
+                            EscState::Osc { prev_was_esc: false }
+                        }
                         '(' | ')' => EscState::Charset,
                         _ => EscState::None,
                     };
@@ -90,11 +143,20 @@ impl Stripper {
                 }
                 EscState::Osc { prev_was_esc } => {
                     self.pending += 1;
-                    self.state = if c == '\x07' || (prev_was_esc && c == '\\') {
-                        EscState::None
+                    if c == '\x07' || (prev_was_esc && c == '\\') {
+                        // Where the mark stood is where the text has got to.
+                        if let Some(m) = mark_of(&self.osc) {
+                            self.marks.push((out.len(), m));
+                        }
+                        self.osc.clear();
+                        self.state = EscState::None;
                     } else {
-                        EscState::Osc { prev_was_esc: c == '\x1b' }
-                    };
+                        // The ESC of an `ESC \` terminator is not payload.
+                        if c != '\x1b' {
+                            self.osc.push(c);
+                        }
+                        self.state = EscState::Osc { prev_was_esc: c == '\x1b' };
+                    }
                 }
                 EscState::Charset => {
                     self.pending += 1;
@@ -102,8 +164,10 @@ impl Stripper {
                 }
             }
             if self.state != EscState::None && self.pending > MAX_PENDING_ESCAPE {
-                // Give up: not a well-formed escape after all.
+                // Give up: not a well-formed escape after all, so whatever of
+                // it was read is not half a mark either.
                 self.state = EscState::None;
+                self.osc.clear();
             }
         }
         out
@@ -155,6 +219,40 @@ mod tests {
             Some("⏵⏵ auto mode on")
         );
         assert_eq!(last_line("│ > │\n", 80).as_deref(), Some(">"));
+    }
+
+    #[test]
+    fn prompt_marks_are_read_out_of_the_osc_it_strips() {
+        let mut s = Stripper::default();
+        let out = s.strip(b"\x1b]133;A\x07$ \x1b]133;B\x07make test\x1b]133;C\x07ok\n\x1b]133;D;1\x07");
+        assert_eq!(out, "$ make testok\n", "a mark leaves no text of its own behind");
+        assert_eq!(
+            s.take_marks(),
+            vec![
+                (0, Mark::Prompt),
+                (2, Mark::Input),
+                (11, Mark::Output),
+                (14, Mark::Ended { exit: Some(1) }),
+            ],
+            "each mark stands where the text had got to, so `make test` lies between B and C"
+        );
+        assert!(s.take_marks().is_empty(), "draining: a mark is read once");
+    }
+
+    #[test]
+    fn a_mark_split_across_reads_and_an_osc_that_is_not_one() {
+        let mut s = Stripper::default();
+        assert_eq!(s.strip(b"\x1b]13"), "");
+        assert!(s.take_marks().is_empty(), "not terminated yet, so not a mark yet");
+        // Resumed, and terminated by ST (`ESC \`) rather than BEL.
+        assert_eq!(s.strip(b"3;D;0\x1b\\done\n"), "done\n");
+        assert_eq!(s.take_marks(), vec![(0, Mark::Ended { exit: Some(0) })]);
+        // A window title is stripped as it always was, and is no mark.
+        assert_eq!(s.strip(b"\x1b]0;title\x07real"), "real");
+        assert!(s.take_marks().is_empty());
+        // `D` with no code still ends the command; the exit is simply unknown.
+        s.strip(b"\x1b]133;D\x07");
+        assert_eq!(s.take_marks(), vec![(0, Mark::Ended { exit: None })]);
     }
 
     #[test]
