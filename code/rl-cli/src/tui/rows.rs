@@ -79,7 +79,7 @@ pub enum Row<'a> {
 
 impl<'a> Row<'a> {
     /// Selectable rows carry a stable key, so the cursor survives a re-rank. A
-    /// folder header is selectable by its path; the global "yours" rules row,
+    /// folder header is selectable by its path; the global rules row,
     /// which stands for no folder, is selectable too, under a fixed key.
     pub fn key(&self) -> Option<String> {
         match self {
@@ -105,9 +105,9 @@ impl<'a> Row<'a> {
 /// A group's header line.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Head {
-    /// The folder, with `~` for home; none on the line of your own rules.
+    /// The folder, with `~` for home; on the global row, the Relay home.
     pub place: Option<String>,
-    /// The folder itself, so actions can act on it; none for your own rules.
+    /// The folder itself, so actions can act on it; none on the global row.
     pub workspace: Option<PathBuf>,
     /// A ref, a branch, or a folder's registered name.
     pub name: String,
@@ -144,7 +144,7 @@ impl Chip {
     }
 }
 
-/// The rules of one folder (`None`: yours) as chips.
+/// The rules of one folder (`None`: global) as chips.
 pub fn chips(rules: &[Rule], scope: Option<&Path>, now: Timestamp) -> Vec<Chip> {
     let mut out: Vec<Chip> = rules
         .iter()
@@ -450,6 +450,8 @@ pub struct Context<'a> {
     /// Jobs opened to their runs, by key.
     pub opened: &'a HashSet<String>,
     pub filter: &'a str,
+    /// The Relay home as shown (`~/.relay`): where the global row's rules live.
+    pub home: &'a str,
     /// Which slice of the list to show; questions ignore it.
     pub lens: Lens,
     pub now: Timestamp,
@@ -591,10 +593,10 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
     // the filter like any other project.
     let yours = chips(cx.rules, None, now);
     let yours_leads = yours.iter().any(Chip::needs_yes);
-    let yours_head = hit(&["yours"]).then(|| Head {
-        place: None,
+    let yours_head = hit(&["global", cx.home]).then(|| Head {
+        place: Some(cx.home.to_string()),
         workspace: None,
-        name: "yours".into(),
+        name: "global".into(),
         rules: yours,
     });
     if yours_leads && let Some(head) = &yours_head {
@@ -659,7 +661,7 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
             rules: chips(cx.rules, Some(&p), now),
         }));
     }
-    // The global "yours" row trails, unless it already led on a waiting yes.
+    // The global row trails, unless it already led on a waiting yes.
     if !yours_leads && let Some(head) = yours_head {
         rows.push(Row::Group(head));
     }
@@ -798,6 +800,7 @@ mod tests {
                 opened: &HashSet::new(),
                 lens: Lens::All,
                 filter,
+                home: "~/.relay",
                 now,
             },
         )
@@ -812,6 +815,7 @@ mod tests {
                 opened: &HashSet::new(),
                 lens,
                 filter: "",
+                home: "~/.relay",
                 now,
             },
         )
@@ -884,9 +888,9 @@ mod tests {
         assert_eq!(
             keys(&rows),
             [
-                "[relay]", "q:q1", "r:fail1", "r:done1", "[api]", "r:blok1", "r:work1", "[yours]"
+                "[relay]", "q:q1", "r:fail1", "r:done1", "[api]", "r:blok1", "r:work1", "[global]"
             ],
-            "the question puts relay first; api is named by its folder; old01 is gone; yours trails"
+            "the question puts relay first; api is named by its folder; old01 is gone; global trails"
         );
         assert_eq!(counts(&rows), (1, 2, 1, 1, 0));
         match &rows[0] {
@@ -925,7 +929,7 @@ mod tests {
         // The idle project is a line of its own, after every group with activity.
         assert_eq!(
             keys(&build_with(&d, &names, "", now)),
-            ["[relay]", "r:work1", "[idle]", "[yours]"]
+            ["[relay]", "r:work1", "[idle]", "[global]"]
         );
         // It carries the folder so selecting it lands on the project.
         match build_with(&d, &names, "idle", now).last() {
@@ -941,7 +945,7 @@ mod tests {
         // the idle one and yours stay, even where nothing in them matches.
         assert_eq!(
             keys(&lens_build(&d, &names, Lens::Jobs, now)),
-            ["[idle]", "[relay]", "[yours]"]
+            ["[idle]", "[relay]", "[global]"]
         );
     }
 
@@ -969,6 +973,7 @@ mod tests {
                     opened: &HashSet::new(),
                     lens: Lens::All,
                     filter: "",
+                    home: "~/.relay",
                     now,
                 },
             )
@@ -1033,7 +1038,7 @@ mod tests {
         let job_key = job_key(RuleKind::Schedule, "pulse", "/home/f/relay");
         assert_eq!(
             keys(&rows),
-            ["[relay]", "r:hand", &job_key, "r:go", "[yours]"],
+            ["[relay]", "r:hand", &job_key, "r:go", "[global]"],
             "finished before working, newest first among equals"
         );
         let Some(Row::Job(j)) = rows.iter().find(|r| matches!(r, Row::Job(_))) else {
@@ -1059,11 +1064,12 @@ mod tests {
                 opened: &opened,
                 lens: Lens::All,
                 filter: "",
+                home: "~/.relay",
                 now,
             },
         );
         let k = keys(&rows);
-        assert_eq!(k.len(), 5 + OPENED, "…and yours trails");
+        assert_eq!(k.len(), 5 + OPENED, "…and global trails");
         assert_eq!(k[3], "  r:p29");
         assert_eq!(k[3 + OPENED - 1], "  r:p10");
         assert_eq!(k[3 + OPENED], "r:go");
@@ -1085,7 +1091,7 @@ mod tests {
         let rows = build_with(&d2, &names, "", now);
         assert_eq!(
             keys(&rows),
-            ["[relay]", &job_key, "r:w", "[yours]"],
+            ["[relay]", &job_key, "r:w", "[global]"],
             "failed job above working run"
         );
         assert_eq!(counts(&rows), (0, 1, 1, 0, 1));
@@ -1207,8 +1213,8 @@ mod tests {
         );
         assert_eq!(texts(&chips(&rules, None, now)), ["↻ pulse 30s"]);
 
-        // On the list: the folder's rules ride its header; your own (global)
-        // rules get a persistent line of their own whenever there are any.
+        // On the list: the folder's rules ride its header; the global
+        // rules get a line of their own, always.
         let d = Digest {
             since: now,
             items: vec![item(
@@ -1230,6 +1236,7 @@ mod tests {
                     opened: &HashSet::new(),
                     lens: Lens::All,
                     filter: "",
+                    home: "~/.relay",
                     now,
                 },
             );
@@ -1238,7 +1245,7 @@ mod tests {
                     Row::Group(h) => format!(
                         "[{}{}] {}",
                         h.name,
-                        if h.place.is_none() { "*" } else { "" },
+                        if h.workspace.is_none() { "*" } else { "" },
                         texts(&h.rules).join(" · ")
                     ),
                     other => other.key().unwrap(),
@@ -1250,7 +1257,7 @@ mod tests {
             [
                 "[relay] ! deploy · ↻ nightly 4h · ⚡ tests-failed",
                 "r:work1",
-                "[yours*] ↻ pulse 30s"
+                "[global*] ↻ pulse 30s"
             ],
             "idle global rules trail; a folder's work stays on top"
         );
@@ -1259,7 +1266,7 @@ mod tests {
         assert_eq!(
             build_rules(&with_yes),
             [
-                "[yours*] ! backup · ↻ pulse 30s",
+                "[global*] ! backup · ↻ pulse 30s",
                 "[relay] ! deploy · ↻ nightly 4h · ⚡ tests-failed",
                 "r:work1"
             ]
@@ -1304,7 +1311,7 @@ mod tests {
         // both are newer than it.
         assert_eq!(
             keys(&build_with(&d, &names, "", now)),
-            ["[relay]", "r:shell", "r:stale", "r:work", "[yours]"]
+            ["[relay]", "r:shell", "r:stale", "r:work", "[global]"]
         );
 
         let mut shell = item("shell", RunState::Idle, ws, "2026-09-10T11:00:00Z", false);
@@ -1318,7 +1325,7 @@ mod tests {
         // Where you work gives way to what wants you.
         assert_eq!(
             keys(&build_with(&d, &names, "", now)),
-            ["[relay]", "r:asks", "r:shell", "[yours]"]
+            ["[relay]", "r:asks", "r:shell", "[global]"]
         );
     }
 

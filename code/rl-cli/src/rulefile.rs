@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 #[derive(Debug)]
 pub struct RuleDraft {
     pub kind: RuleKind,
-    /// The folder whose `.relay/` it goes in; none for yours.
+    /// The folder whose `.relay/` it goes in; none for the global rules.
     pub folder: Option<PathBuf>,
     pub name: String,
     pub body: Vec<String>,
