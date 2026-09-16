@@ -387,6 +387,12 @@ mod tests {
         assert_eq!((x.kind, x.cli.as_deref()), (RunKind::Agent, Some("fake-cli")));
         let x = r.resolve(RunKind::Agent, &argv("sh -c x"));
         assert_eq!(x.kind, RunKind::Agent, "--agent wins");
+        // A warm shell is started with a `Command` hint and `$SHELL -i` for
+        // argv, so the profile's kind is what it ends up with. It matters:
+        // `Heuristics` turns prompt and idle detection on for everything that
+        // is not a `Command`.
+        let x = r.resolve(RunKind::Command, &argv("zsh -i"));
+        assert_eq!((x.kind, x.profile.name.as_str()), (RunKind::Shell, "sh"));
     }
 
     #[test]
