@@ -616,6 +616,9 @@ Facts (`retention.runs`) are deliberately not a key yet.
 
 detect/*.yaml                 in-tree, compiled in: generic, claude, codex, cursor, sh
 scripts/{rl,rld,relay-dev}    dev shims: build if needed, run the debug binaries
+scripts/ci                    the CI checks, on Linux, in a container: the same three commands
+                              ci.yml runs (fmt, clippy -D warnings, the suites), against its own
+                              target/ and cargo registry so macOS artifacts never mix in
 scripts/live                  a live Relay to poke at: its home is live/home, seeded from
                               live/seed by `scripts/live reset`; `scripts/live <rl args>` talks
                               to it, and the recorded claude player is first on its PATH
