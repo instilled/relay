@@ -35,12 +35,63 @@ pub struct ShellCommand {
     pub took: jiff::SignedDuration,
 }
 
-/// Appends up to the cap. The cap is in bytes and the text in characters, so
-/// it is approximate — it is a bound on memory, not a promise about length.
-fn push_capped(buf: &mut String, s: &str) {
-    let room = CMD_MAX.saturating_sub(buf.len());
-    if room > 0 {
-        buf.extend(s.chars().take(room));
+/// How many finished lines of a gathered command are kept. More than one is
+/// only a continuation or a redraw; the oldest is no longer of interest.
+const CMD_LINES: usize = 8;
+
+/// A line as its editor leaves it. A carriage return parks the cursor at the
+/// start of the line and erases nothing by itself — the next character printed
+/// is what overwrites — a backspace takes one character back, and a newline
+/// finishes the line. Just enough of a terminal to read back what was typed,
+/// and no more: the module proper is not one, and this is not trying to be.
+#[derive(Debug, Default)]
+struct Typed {
+    lines: Vec<String>,
+    cur: String,
+    overwrite: bool,
+}
+
+impl Typed {
+    fn put(&mut self, s: &str) {
+        for c in s.chars() {
+            if c == '\n' {
+                // A return before the newline was the cursor moving, not the
+                // line being thrown away: it ends as it stands.
+                self.overwrite = false;
+                self.lines.push(std::mem::take(&mut self.cur));
+                if self.lines.len() > CMD_LINES {
+                    self.lines.remove(0);
+                }
+                continue;
+            }
+            if self.overwrite {
+                self.cur.clear();
+                self.overwrite = false;
+            }
+            if self.cur.len() < CMD_MAX {
+                self.cur.push(c);
+            }
+        }
+    }
+
+    fn ret(&mut self) {
+        self.overwrite = true;
+    }
+
+    fn back(&mut self) {
+        self.overwrite = false;
+        self.cur.pop();
+    }
+
+    /// The last line with anything on it. A prompt draws and redraws, and it
+    /// is the line left standing that was typed.
+    fn line(&self) -> String {
+        std::iter::once(&self.cur)
+            .chain(self.lines.iter().rev())
+            .map(|l| l.trim())
+            .find(|l| !l.is_empty())
+            .unwrap_or_default()
+            .to_string()
     }
 }
 
@@ -72,7 +123,7 @@ pub struct Heuristics {
     /// the visible text.
     ansi: ansi::Stripper,
     /// What is being typed: gathered between the `B` and `C` marks.
-    typing: Option<String>,
+    typing: Option<Typed>,
     /// The command now running, and when it started — from `C` until `D`.
     running: Option<(String, Timestamp)>,
     /// Commands finished since they were last drained.
@@ -110,7 +161,7 @@ impl Heuristics {
         };
         self.pending = bytes[cut..].to_vec();
         let text = self.ansi.strip(&bytes[..cut]);
-        self.read_marks(&text, now);
+        self.read_marks(now);
         self.tail.push_str(&text);
         if self.tail.len() > TAIL_MAX {
             let cut = self.tail.len() - TAIL_MAX;
@@ -133,46 +184,63 @@ impl Heuristics {
         Signal::pty(RunState::Working, confidence, None)
     }
 
-    /// Walks one chunk's prompt marks: gathers what is typed between `B` and
-    /// `C`, and closes the command at `D`.
+    /// Walks one chunk's events in order: gathers what is typed between `B`
+    /// and `C`, lets the line editor's returns and backspaces act on it, and
+    /// closes the command at `D`.
     ///
-    /// The text between marks is sliced here, out of the chunk itself, rather
-    /// than located later in `tail` — `tail` is trimmed from the front once it
-    /// is long enough, which would leave any offset into it pointing at the
-    /// wrong place.
-    fn read_marks(&mut self, text: &str, now: Timestamp) {
-        let marks = self.ansi.take_marks();
+    /// This reads the echo rather than the stripped text. What `strip` returns
+    /// has already had a line restart applied to it — a `\r` just before the
+    /// command runs takes the typed line away with it — so the line is only
+    /// recoverable from what was echoed, with the editing applied here.
+    fn read_marks(&mut self, now: Timestamp) {
+        let events = self.ansi.take_events();
+        let echo = self.ansi.take_echo();
         let mut at = 0;
-        for (pos, mark) in marks {
+        for (pos, ev) in events {
             if let Some(typing) = &mut self.typing {
-                push_capped(typing, &text[at..pos]);
+                typing.put(&echo[at..pos]);
             }
             at = pos;
+            let mark = match ev {
+                ansi::Ev::Return => {
+                    if let Some(t) = &mut self.typing {
+                        t.ret();
+                    }
+                    continue;
+                }
+                ansi::Ev::Backspace => {
+                    if let Some(t) = &mut self.typing {
+                        t.back();
+                    }
+                    continue;
+                }
+                ansi::Ev::Mark(m) => m,
+            };
             match mark {
                 // A prompt drawn afresh abandons whatever was half-typed.
                 ansi::Mark::Prompt => self.typing = None,
-                ansi::Mark::Input => self.typing = Some(String::new()),
+                ansi::Mark::Input => self.typing = Some(Typed::default()),
                 // What was typed ends here; what follows is the command's own
                 // output, which is not part of it.
                 ansi::Mark::Output => {
-                    self.running = Some((self.typing.take().unwrap_or_default(), now));
+                    let line = self.typing.take().map(|t| t.line()).unwrap_or_default();
+                    self.running = Some((line, now));
                 }
                 ansi::Mark::Ended { exit } => {
-                    if let Some((text, started)) = self.running.take() {
-                        let text = text.trim().to_string();
-                        if !text.is_empty() {
-                            self.done.push(ShellCommand {
-                                text,
-                                exit,
-                                took: now.duration_since(started),
-                            });
-                        }
+                    if let Some((text, started)) = self.running.take()
+                        && !text.is_empty()
+                    {
+                        self.done.push(ShellCommand {
+                            text,
+                            exit,
+                            took: now.duration_since(started),
+                        });
                     }
                 }
             }
         }
         if let Some(typing) = &mut self.typing {
-            push_capped(typing, &text[at..]);
+            typing.put(&echo[at..]);
         }
     }
 
@@ -306,6 +374,25 @@ mod tests {
         let done = h.take_commands();
         assert_eq!(done.len(), 1);
         assert_eq!((done[0].text.as_str(), done[0].exit), ("echo hi", Some(1)));
+    }
+
+    #[test]
+    fn what_the_line_editor_echoed_is_read_back_as_the_line_typed() {
+        let reg = Registry::builtin();
+        let mut h = Heuristics::new(reg.generic(), RunKind::Shell, t(0.0));
+        // Byte for byte what zsh echoes for `sleep 2`, taken from a real
+        // session's journal: the first character, then a backspace and the
+        // line over again, then `\r\r\n` before the command starts.
+        h.output(b"\x1b]133;B\x07", t(1.0));
+        h.output(b"s", t(1.0));
+        h.output(b"\x08sleep ", t(1.0));
+        h.output(b"2\x1b[?2004l\r\r\n\x1b]133;C\x07", t(2.0));
+        h.output(b"\x1b]133;D;0\x07", t(6.0));
+        let done = h.take_commands();
+        assert_eq!(done.len(), 1);
+        assert_eq!(done[0].text, "sleep 2", "neither `ssleep 2` nor nothing at all");
+        assert_eq!(done[0].exit, Some(0));
+        assert_eq!(done[0].took, SignedDuration::from_secs(4));
     }
 
     #[test]

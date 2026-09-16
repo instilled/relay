@@ -298,6 +298,15 @@ right edge while you are in a Relay shell and nothing at all when you are not; b
 to `PS1`. A dot the prompt draws survives whatever the run paints next, which one Relay put in the
 corner itself would not.
 
+The same hand-over carries facts the other way. A prompt that emits OSC 133 marks — `A` where it is
+drawn, `B` where what you type begins, `C` where the command starts running, `D` with the exit code
+when it ends — tells Relay one command from the next, and each becomes a `shell.command` event with
+what was typed, how it came out and how long it took; the newest is the shell's row. Many prompts
+(starship, powerlevel10k, the shell integrations of iTerm2, WezTerm and kitty) already emit them, so
+there is nothing to do; `rl shell-init zsh` prints a snippet for prompts that do not. Relay reads
+the marks and never writes your rc. Without them nothing is guessed: no events, and the shell's row
+says nothing where a run says what it last did.
+
 `tab` completes the word being typed (`tui/complete.rs`), rooted in that same folder: the first
 word against the agents the registry knows, the folder's `Makefile` targets and `package.json`
 scripts, and the binaries on `PATH`; after `every` a duration, after `on` an event kind; anywhere
