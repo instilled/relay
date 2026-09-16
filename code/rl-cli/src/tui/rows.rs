@@ -197,6 +197,30 @@ pub fn glyph(state: RunState) -> &'static str {
     }
 }
 
+/// A shell that is simply there to be typed in. One that ended, failed or
+/// wants you is news like any other run and is left to read as one.
+pub fn live_shell(r: &Run) -> bool {
+    r.kind == RunKind::Shell
+        && !r.state.is_terminal()
+        && !matches!(r.state, RunState::NeedsInput | RunState::Blocked)
+}
+
+/// The mark a row wears. A shell at rest is not a run that happens to be
+/// idle — it is where you work — so it wears the prompt caret.
+pub fn run_glyph(r: &Run) -> &'static str {
+    if live_shell(r) { "❯" } else { glyph(r.state) }
+}
+
+/// The word beside the mark. `idle` says nothing about a shell, which is
+/// idle whenever you are not typing; what it is, is the useful part.
+pub fn run_words(r: &Run) -> String {
+    if live_shell(r) {
+        "shell".to_string()
+    } else {
+        state_words(r.state, r.confidence)
+    }
+}
+
 /// `s` in exactly `w` columns: padded, or cut with `…`.
 pub fn fit(s: &str, w: usize) -> String {
     let n = s.chars().count();
@@ -585,15 +609,32 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
             rules: chips(cx.rules, Some(&g.workspace), now),
         }));
         rows.extend(g.questions.into_iter().map(Row::Question));
-        // Runs and jobs share one order: attention first, newest first.
-        let mut mixed: Vec<(u8, Timestamp, Row<'a>)> = g
+        // Runs and jobs share one order: whatever asks for you leads, then the
+        // folder's shells — where you work, rather than something that happens
+        // to be idle — then the rest, newest first.
+        let cls = |score: u8, shell: bool| match (score, shell) {
+            (0, _) => 0u8,
+            (_, true) => 1,
+            _ => 2,
+        };
+        let mut mixed: Vec<(u8, u8, Timestamp, Row<'a>)> = g
             .runs
             .into_iter()
-            .map(|i| (rank::score(&i.run), i.at, Row::Run(i)))
+            .map(|i| {
+                let s = rank::score(&i.run);
+                (cls(s, live_shell(&i.run)), s, i.at, Row::Run(i))
+            })
             .collect();
-        mixed.extend(g.jobs.into_iter().map(|j| (j.score(), j.last().at, Row::Job(j))));
-        mixed.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| b.1.cmp(&a.1)));
-        for (_, _, row) in mixed {
+        mixed.extend(g.jobs.into_iter().map(|j| {
+            let s = j.score();
+            (cls(s, false), s, j.last().at, Row::Job(j))
+        }));
+        mixed.sort_by(|a, b| {
+            a.0.cmp(&b.0)
+                .then_with(|| a.1.cmp(&b.1))
+                .then_with(|| b.2.cmp(&a.2))
+        });
+        for (_, _, _, row) in mixed {
             let folded: Vec<&DigestItem> = match &row {
                 Row::Job(j) if cx.opened.contains(&j.key) => j.runs.iter().copied().take(OPENED).collect(),
                 _ => vec![],
@@ -810,7 +851,9 @@ mod tests {
                 .filter_map(|r| r.item().map(|i| i.run.id.clone()))
                 .collect::<Vec<_>>()
         };
-        assert_eq!(runs(Lens::All), ["agent", "shell", "sched", "react"]);
+        // The shell leads its folder: where you work comes before what merely
+        // runs there. The rest keep the order they were in.
+        assert_eq!(runs(Lens::All), ["shell", "agent", "sched", "react"]);
         // Agents is by kind, so it keeps the scheduled and reacted agents too.
         assert_eq!(runs(Lens::Agents), ["agent", "sched", "react"]);
         // Jobs and reactions are by cause.
@@ -1208,6 +1251,59 @@ mod tests {
                 "r:work1"
             ]
         );
+    }
+
+    #[test]
+    fn a_shell_at_rest_wears_the_caret_and_says_what_it_is() {
+        let mut i = item("sh", RunState::Idle, "/w", "2026-09-10T11:00:00Z", false);
+        i.run.kind = RunKind::Shell;
+        assert!(live_shell(&i.run));
+        assert_eq!(run_glyph(&i.run), "❯");
+        assert_eq!(run_words(&i.run), "shell", "`idle` says nothing about a shell");
+        // One that ended is news like any other ended run, and reads as one.
+        i.run.state = RunState::Stopped;
+        assert!(!live_shell(&i.run));
+        assert_eq!((run_glyph(&i.run), run_words(&i.run)), ("•", "stopped".to_string()));
+        // So is one that wants you: it keeps the mark that says so.
+        i.run.state = RunState::NeedsInput;
+        assert!(!live_shell(&i.run));
+        assert_eq!(run_glyph(&i.run), "✱");
+        // Anything that is not a shell is left exactly as it was.
+        let a = item("ag", RunState::Idle, "/w", "2026-09-10T11:00:00Z", false);
+        assert_eq!((run_glyph(&a.run), run_words(&a.run)), ("·", "idle".to_string()));
+    }
+
+    #[test]
+    fn a_shell_leads_its_folder_but_never_over_what_asks_for_you() {
+        let now: Timestamp = "2026-09-10T12:00:00Z".parse().unwrap();
+        let ws = "/home/f/relay";
+        let names = Names::new([(PathBuf::from(ws), "relay".to_string())]);
+        let mut shell = item("shell", RunState::Idle, ws, "2026-09-10T11:00:00Z", false);
+        shell.run.kind = RunKind::Shell;
+        let stale = item("stale", RunState::Stale, ws, "2026-09-10T11:50:00Z", false);
+        let work = item("work", RunState::Working, ws, "2026-09-10T11:55:00Z", false);
+        let d = Digest {
+            since: now,
+            items: vec![shell, stale, work],
+            decisions: vec![],
+        };
+        // The shell leads, though both of the others outrank it by state and
+        // both are newer than it.
+        assert_eq!(
+            keys(&build_with(&d, &names, "", now)),
+            ["[relay]", "r:shell", "r:stale", "r:work"]
+        );
+
+        let mut shell = item("shell", RunState::Idle, ws, "2026-09-10T11:00:00Z", false);
+        shell.run.kind = RunKind::Shell;
+        let asks = item("asks", RunState::NeedsInput, ws, "2026-09-10T11:10:00Z", false);
+        let d = Digest {
+            since: now,
+            items: vec![shell, asks],
+            decisions: vec![],
+        };
+        // Where you work gives way to what wants you.
+        assert_eq!(keys(&build_with(&d, &names, "", now)), ["[relay]", "r:asks", "r:shell"]);
     }
 
     #[test]
