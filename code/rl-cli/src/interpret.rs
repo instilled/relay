@@ -178,8 +178,7 @@ pub fn form_of(d: &Draft, origin: &Path, editing: Option<&Rule>) -> Form {
         (Kind::Run, _) => Form::run(origin),
         (_, Some(r)) => Form::edit(r),
         (_, None) => {
-            let yours = place.is_empty() || place == form::YOURS;
-            let folder = (!yours).then(|| form::expand(place));
+            let folder = (!form::is_global(place)).then(|| form::expand(place));
             Form::rule(folder.as_deref(), origin)
         }
     };
@@ -293,7 +292,7 @@ pub async fn apply(home: &Home, f: &Form, registered: impl Fn(&Path) -> bool) ->
 /// Where `in` points, for `apply`'s `registered`.
 pub fn folder_of(f: &Form) -> Option<PathBuf> {
     let p = f.get("in");
-    (!p.is_empty() && p != form::YOURS).then(|| form::expand(p))
+    (!form::is_global(p)).then(|| form::expand(p))
 }
 
 #[cfg(test)]
@@ -327,7 +326,7 @@ mod tests {
             ("0 2 * * *", "make test", "ci, slow")
         );
         // The prompt itself carries `kind:` lines; an answer is the last block that does.
-        let echoed = "kind: run          # something to do now, once\nin: <folder>\n\nkind: schedule\nin: <folder, or yours>\n\nkind: run\nin: /real\nrun: make it\n";
+        let echoed = "kind: run          # something to do now, once\nin: <folder>\n\nkind: schedule\nin: <folder, or global>\n\nkind: run\nin: /real\nrun: make it\n";
         assert_eq!(parse(echoed).unwrap().get("in"), "/real");
         assert!(
             parse("I cannot do that.")
@@ -353,12 +352,12 @@ mod tests {
             ("/w", "make test", "tests")
         );
 
-        let d = parse("kind: reaction\nin: yours\nname: notify\nwhen: on run.failed\nrun: say no\ncwd: /w\n").unwrap();
+        let d = parse("kind: reaction\nin: global\nname: notify\nwhen: on run.failed\nrun: say no\ncwd: /w\n").unwrap();
         let f = form_of(&d, Path::new("/w"), None);
         assert_eq!(f.kind, form::Kind::Rule);
         assert_eq!(
             (f.get("in"), f.get("when"), f.get("cwd")),
-            ("yours", "on run.failed", "/w")
+            ("global", "on run.failed", "/w")
         );
 
         // A rule kind with `when` left out gets its prefix, so the person sees what is missing.

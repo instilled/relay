@@ -209,7 +209,8 @@ header, above the line, above the footer — and the list and its detail pane sp
 bar; the full-screen terminal drops all of it for the cells. A group's header is its name, then the folder it lives in, then the rules that
 live there — `↻ nightly 4h · ⚡ tests-failed`, accented and amber when one waits for a yes, with a
 `+N` when more than fit — and, at the right edge, the tally of how many jobs and reactions the
-folder holds; your own (global) rules get a project row of their own — the "yours" row — always,
+folder holds; the global rules — the ones in the Relay home, which apply in every folder — get a project row of
+their own, `global`, shown with that home (`~/.relay`) where a folder row shows its folder — always,
 rules or none: it leads the list when one waits for a yes, otherwise it trails with the idle
 projects, and either way the cursor stops on it, `enter` (or `^o`) shows its schedules and
 reactions in the pane, and `/rules` opens them. Runs a schedule or a rule
@@ -340,7 +341,7 @@ ignore it; they are what needs you, whatever slice you are in. `tab` on an empty
 lens along (shift-`tab` back), and `/lens all|agents|jobs|reactions` jumps straight to one;
 it composes with `/filter`. One-off shell commands live in `all` while they run and are recent.
 
-`/new` is the form for a rule written by hand: `in` (a folder, or `yours`), `name`, `when`
+`/new` is the form for a rule written by hand: `in` (a folder, or `global`), `name`, `when`
 (`every 30m`, a cron line, or `on run.failed` — which decides between `schedules.yaml` and
 `reactions.yaml`), `run`, `title`, `tags`, `cwd`. `enter` writes the block into the file
 (`rulefile.rs`: the block of that name replaced in place or added at the end of the mapping,
@@ -533,7 +534,7 @@ file, and `rld` seeds it, all comments, when there is none. Later assistants (`t
 `answer`) will be keys in the same map. The second key is `retention` (§7).
 
 **What an assistant is told** is the context pack (`rl-cli/src/context.rs`, `rl context
-[--in <folder>]`), built from the code so it cannot drift: the words (run, folder, `yours`,
+[--in <folder>]`), built from the code so it cannot drift: the words (run, folder, `global`,
 rule, job, question, agent, `when`), one line per event kind in `event_kind::ALL` (a kind
 without words fails a test), the fields of a schedule and a reaction (every serde field of
 the specs must be explained, or a test fails), the placeholders a reaction can use, `rl

@@ -29,10 +29,10 @@ pub fn key(r: &Rule) -> String {
     format!("{}:{}/{}", r.kind(), r.scope(), r.name())
 }
 
-/// Whose file a scope is: yours, or a workspace by name.
+/// Whose file a scope is: global, or a workspace by name.
 pub fn owner(scope: &str, names: &Names) -> String {
     if scope == rl_proto::schedule::GLOBAL_SCOPE {
-        "yours".into()
+        "global".into()
     } else {
         names.workspace(Path::new(scope))
     }
@@ -330,14 +330,14 @@ mod tests {
         let rows = build(&rules, &names, "", None);
         assert_eq!(
             keys(&rows),
-            ["[relay]", "nightly", "backup", "[yours]", "notify", "[api]", "deploy"]
+            ["[relay]", "nightly", "backup", "[global]", "notify", "[api]", "deploy"]
         );
         assert_eq!(headline(&rows, ""), "rules · 1 needs your yes · 2 on · 1 paused");
         assert_eq!(status_word(&rules[2], now), "needs your yes");
         assert_eq!(status_word(&rules[3], now), "in 4h00m");
         assert_eq!(status_word(&rules[1], now), "paused");
         assert_eq!(status_word(&rules[0], now), "fired 1h ago");
-        assert_eq!(keys(&build(&rules, &names, "notif", None)), ["[yours]", "notify"]);
+        assert_eq!(keys(&build(&rules, &names, "notif", None)), ["[global]", "notify"]);
     }
 
     #[test]

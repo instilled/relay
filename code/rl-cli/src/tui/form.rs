@@ -22,8 +22,15 @@ use std::path::{Path, PathBuf};
 /// own in `detect/*.yaml` only ever shows up there.
 const AGENTS: &[&str] = &["claude", "codex", "gemini", "aider", "cursor-agent", "copilot"];
 
-/// The word for your own rules in the `in` field.
-pub const YOURS: &str = "yours";
+/// The word in the `in` field for the rules that apply in every folder —
+/// the scope their files in the Relay home are filed under.
+pub const GLOBAL: &str = GLOBAL_SCOPE;
+
+/// Whether an `in` names no folder: empty, `global`, or `yours`, the word it
+/// had before, which still reads so an older draft is not a folder named so.
+pub fn is_global(place: &str) -> bool {
+    place.is_empty() || place == GLOBAL || place == "yours"
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Kind {
@@ -144,7 +151,7 @@ impl Form {
     pub fn with_folders(mut self, known: &[PathBuf]) -> Self {
         let mut v: Vec<String> = vec![self.get("in").to_string()];
         if self.kind == Kind::Rule {
-            v.push(YOURS.into());
+            v.push(GLOBAL.into());
         }
         v.push(short_path(&self.origin));
         v.extend(known.iter().map(|p| short_path(p)));
@@ -157,11 +164,11 @@ impl Form {
     /// A rule in `folder`, or yours; `origin` is where a rule of yours runs
     /// unless the form says otherwise.
     pub fn rule(folder: Option<&Path>, origin: &Path) -> Self {
-        let place = folder.map(short_path).unwrap_or_else(|| YOURS.into());
+        let place = folder.map(short_path).unwrap_or_else(|| GLOBAL.into());
         Self {
             kind: Kind::Rule,
             fields: vec![
-                Field::new("in", "a folder, or yours", place),
+                Field::new("in", "a folder, or global", place),
                 Field::new("name", "nightly", ""),
                 Field::new("when", "every 30m · 0 2 * * * · on run.failed", ""),
                 Field::new("run", "make test · claude fix the build", ""),
@@ -479,7 +486,7 @@ pub fn rule_draft(f: &Form) -> Result<RuleDraft> {
         bail!("run: what it runs");
     }
     let place = f.get("in");
-    let folder = if place.is_empty() || place == YOURS || place == GLOBAL_SCOPE {
+    let folder = if is_global(place) {
         None
     } else {
         let p = expand(place);
@@ -610,7 +617,7 @@ mod tests {
         assert!(!f.on_folders());
         // A rule's `in` offers yours too.
         let f = Form::rule(Some(Path::new("/w/relay")), Path::new("/w/relay")).with_folders(&known);
-        assert_eq!(f.folders, ["/w/relay", "yours", "/w/api"]);
+        assert_eq!(f.folders, ["/w/relay", "global", "/w/api"]);
     }
 
     #[test]
@@ -728,7 +735,7 @@ mod tests {
                 field.value = "every 6h".into();
             }
             if field.key == "in" {
-                field.value = YOURS.into();
+                field.value = GLOBAL.into();
             }
         }
         let d = rule_draft(&f).unwrap();

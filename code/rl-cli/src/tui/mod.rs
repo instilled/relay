@@ -457,12 +457,19 @@ fn enter_screen() -> ratatui::DefaultTerminal {
 
 /// Hand the screen back, popping any enhancement flags we pushed and giving
 /// the mouse to whoever we hand the terminal to — an editor, or a run.
+///
+/// And the caret. Drawing hides the terminal's cursor, and `ratatui::restore`
+/// leaves raw mode and the alternate screen but never shows it again; the
+/// terminal we drew on is still alive across a handover, so nothing else
+/// does either. A joined shell or agent would get a terminal with its cursor
+/// switched off, and most never switch it back on. The next draw hides it again.
 fn leave_screen() {
     let _ = crossterm::execute!(std::io::stdout(), DisableMouseCapture);
     if kitty_supported() {
         let _ = crossterm::execute!(std::io::stdout(), PopKeyboardEnhancementFlags);
     }
     ratatui::restore();
+    let _ = crossterm::execute!(std::io::stdout(), crossterm::cursor::Show);
 }
 
 pub async fn run(home: &Home) -> Result<()> {
@@ -703,6 +710,7 @@ impl App {
                 rules: &self.rules,
                 opened: &self.opened,
                 filter: &self.filter,
+                home: &rl_core::display_path(self.home.path()),
                 lens: self.lens,
                 now: Timestamp::now(),
             },
@@ -732,7 +740,7 @@ impl App {
         }
     }
 
-    /// The cursor is on the "yours" row — your own (global) rules, no folder.
+    /// The cursor is on the global row — the rules in the Relay home, no folder.
     fn selected_global(&self) -> bool {
         matches!(self.selected(), Some(Row::Group(h)) if h.workspace.is_none())
     }
@@ -829,8 +837,13 @@ impl App {
     }
 
     /// The wheel steps the selection — the list scrolls to follow the cursor,
-    /// so there is no scroll of its own to move — and a left click puts the
-    /// cursor on the row under the pointer. Both only over the list itself.
+    /// so there is no scroll of its own to move — and the cursor travels with
+    /// the pointer: moving over a row puts the cursor on it, and so does a
+    /// click. All only over the list itself.
+    ///
+    /// Moving is not looking, though. Passing over a row on the way somewhere
+    /// else must not mark it seen, and a pointer sweeps many rows a second, so
+    /// a move only selects; the wheel and a click count as looking and refresh.
     async fn mouse(&mut self, m: MouseEvent) -> Result<()> {
         if !matches!(self.mode, Mode::Normal) || !self.hit.borrow().has(m.column, m.row) {
             return Ok(());
@@ -838,6 +851,15 @@ impl App {
         match m.kind {
             MouseEventKind::ScrollDown => self.step(1),
             MouseEventKind::ScrollUp => self.step(-1),
+            MouseEventKind::Moved => {
+                let key = hit_row(&self.hit.borrow(), m.column, m.row);
+                if let Some(key) = key
+                    && self.sel.as_deref() != Some(key.as_str())
+                {
+                    self.select(Some(key));
+                }
+                return Ok(());
+            }
             MouseEventKind::Down(MouseButton::Left) => {
                 // Bound first: the borrow has to be done with before `select`.
                 let key = hit_row(&self.hit.borrow(), m.column, m.row);
@@ -1242,17 +1264,17 @@ impl App {
     /// `/edit schedule|reaction`: the whole rule file for the scope the cursor
     /// stands in, rather than the one rule under it. Any row answers which
     /// folder its work is in, so this reads the same from a run as from the
-    /// folder's own header; the "yours" row answers with no folder at all,
+    /// folder's own header; the global row answers with no folder at all,
     /// which is what the global file is filed under.
     fn edit_scope_file(&mut self, kind: RuleKind) {
         let folder = match (self.selected_folder(), self.selected_global()) {
             (Some(folder), _) => Some(folder),
-            // No folder and the cursor is on "yours": your own rules.
+            // No folder and the cursor is on the global row: those rules.
             (None, true) => None,
             // No folder and nothing selected: nothing to guess from, and
-            // guessing "yours" would edit global rules by accident.
+            // guessing the global row would edit global rules by accident.
             (None, false) => {
-                self.say("/edit schedule: on a folder, or on yours");
+                self.say("/edit schedule: on a folder, or on global");
                 return;
             }
         };
@@ -1895,7 +1917,7 @@ impl App {
             self.show_pane = true;
             self.mode = Mode::Answer(id);
         } else if self.selected_project().is_some() || self.selected_global() {
-            // A project (or the global "yours") header: its rules in the pane.
+            // A project (or the global) header: its rules in the pane.
             self.pane = Pane::Facts;
             self.show_pane = true;
         } else {
@@ -2808,8 +2830,8 @@ impl App {
                     now,
                 )
             }
-            // The "yours" row: your own (global) rules, no folder.
-            Some(Row::Group(_)) => pane::global_lines(&self.rules, now),
+            // The global row: the rules in the Relay home, no folder.
+            Some(Row::Group(_)) => pane::global_lines(&self.rules, &rl_core::display_path(self.home.path()), now),
             _ => vec![Line::from(Span::raw(" nothing selected").dim())],
         };
         f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
@@ -2931,8 +2953,8 @@ impl App {
             Some(Row::Group(h)) if h.workspace.is_some() => {
                 format!("enter its stats · ^t shell · /rules edits schedules & reactions · ^r renames · {pane}")
             }
-            // The "yours" row: global rules, no folder to rename.
-            Some(Row::Group(_)) => format!("enter its rules · /rules edits your schedules & reactions · {pane}"),
+            // The global row: the rules in the Relay home, no folder to rename.
+            Some(Row::Group(_)) => format!("enter its rules · /rules edits the global schedules & reactions · {pane}"),
             _ => String::new(),
         }
     }
