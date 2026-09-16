@@ -284,6 +284,9 @@ pub async fn apply(home: &Home, f: &Form, registered: impl Fn(&Path) -> bool) ->
                 .await?;
             Ok(format!("renamed to {}", w.name))
         }
+        // Words never make one: a run is picked from the list to be renamed,
+        // and `form_of` only ever builds a run or a rule.
+        form::Kind::RenameRun => anyhow::bail!("a run is renamed from the panel"),
     }
 }
 

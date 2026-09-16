@@ -53,9 +53,10 @@ use rl_proto::methods::{
     AgentList, DecisionDismiss, DecisionNote, DecisionTake, DecisionTakeParams, Digest, DigestGet, DigestItem,
     DigestParams, EventFilter, EventList, GcParams, GcRun, PresenceClient, PresenceTouch, ReactionPause,
     ReactionReload, ReactionResume, RuleApprove, RuleList, RuleRef, RunArchive, RunArchiveParams, RunId, RunIds,
-    RunInput, RunInputParams, RunMark, RunMarkParams, RunSeen, RunSpec, RunStart, RunStop, RunStopParams,
-    ScheduleFilter, ScheduleName, SchedulePause, ScheduleReload, ScheduleResume, ScheduleRun, SummaryGet, SummaryMake,
-    SummaryParams, WorkspaceList, WorkspaceRename, WorkspaceRenameParams, WorkspaceUp, WorkspaceUpParams,
+    RunInput, RunInputParams, RunMark, RunMarkParams, RunRename, RunRenameParams, RunSeen, RunSpec, RunStart, RunStop,
+    RunStopParams, ScheduleFilter, ScheduleName, SchedulePause, ScheduleReload, ScheduleResume, ScheduleRun,
+    SummaryGet, SummaryMake, SummaryParams, WorkspaceList, WorkspaceRename, WorkspaceRenameParams, WorkspaceUp,
+    WorkspaceUpParams,
 };
 use rl_proto::rule::{Rule, RuleKind, RuleStatus};
 use rl_proto::types::{AttachMode, Cause, Event as LedgerEvent, Mark, Run, RunKind, RunState, Summary};
@@ -1203,6 +1204,10 @@ impl App {
                 self.rename_project(f.origin.clone(), f.get("name").trim().to_string())
                     .await
             }
+            form::Kind::RenameRun => match f.renaming.clone() {
+                Some(id) => self.rename_run(id, f.get("name").trim().to_string()).await,
+                None => Err(anyhow::anyhow!("no run to rename")),
+            },
         };
         if let Err(e) = outcome {
             self.say(format!("{e:#}"));
@@ -1396,6 +1401,24 @@ impl App {
         self.say(format!("renamed to {name}"));
         self.refresh().await;
         self.select(Some(format!("g:{}", folder.display())));
+        Ok(())
+    }
+
+    /// A run's own name, which is its title. The ledger is the only place it
+    /// lives, so the rename is one call and the next refresh shows it.
+    async fn rename_run(&mut self, id: String, title: String) -> Result<()> {
+        if title.is_empty() {
+            anyhow::bail!("a name, please");
+        }
+        self.rpc
+            .call::<RunRename>(RunRenameParams {
+                id: id.clone(),
+                title: title.clone(),
+            })
+            .await?;
+        self.say(format!("renamed to {title}"));
+        self.refresh().await;
+        self.select(Some(format!("r:{id}")));
         Ok(())
     }
 
@@ -1694,11 +1717,19 @@ impl App {
                 }
             }
             (KeyCode::Char('r'), KeyModifiers::CONTROL) => {
+                // Whatever the cursor is on, by the name it is known by: a
+                // folder through the registry, a run (a shell is one) through
+                // the ledger, and a job by the rule it comes from, which is
+                // the rule form's own rename.
                 if let Some(folder) = self.selected_project() {
                     let name = self.names.workspace(&folder);
                     self.mode = Mode::Form(Box::new(Form::rename(&folder, &name)));
+                } else if let Some((id, title)) = self.selected_run().map(|i| (i.run.id.clone(), i.run.title.clone())) {
+                    self.mode = Mode::Form(Box::new(Form::rename_run(&id, &title)));
+                } else if self.rule_here().is_some() {
+                    self.edit_rule_form();
                 } else {
-                    self.say("^r renames a project — put the cursor on one");
+                    self.say("^r renames what the cursor is on");
                 }
             }
             (KeyCode::Esc, _) => {

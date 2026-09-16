@@ -115,3 +115,47 @@ async fn list_get_events_presence() {
         .unwrap()
         .unwrap();
 }
+
+/// `^r` on a run in the panel comes through here: the title is the run's own
+/// name, and the ledger is the only place it lives.
+#[tokio::test]
+async fn rename_gives_a_run_a_new_title() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = Home::at(tmp.path());
+    let token = CancellationToken::new();
+    let server = tokio::spawn(rl_daemon::serve(home.clone(), token.clone()));
+    let mut c = Conn::open(&home).await;
+
+    let side = Ledger::open(&home.ledger()).unwrap();
+    let now: Timestamp = "2026-09-08T10:00:00Z".parse().unwrap();
+    let run = Run::new(
+        "k7x2m9qa",
+        RunKind::Shell,
+        "shell",
+        vec!["zsh".into()],
+        "/w/repo",
+        "/w/repo",
+        now,
+    );
+    side.call_blocking(move |db| runs::insert(db, &run)).unwrap();
+
+    let renamed: Run = c
+        .ok("run.rename", json!({"id": "k7x2m9qa", "title": "deploy shell"}))
+        .await;
+    assert_eq!(renamed.title, "deploy shell");
+    // The answer is not the only place it changed.
+    let got: Run = c.ok("run.get", json!({"id": "k7x2m9qa"})).await;
+    assert_eq!(got.title, "deploy shell");
+
+    let missing = c.call("run.rename", json!({"id": "zzzzzzzz", "title": "x"})).await;
+    assert_eq!(missing.error.unwrap().code, RpcError::NOT_FOUND);
+    let bad = c.call("run.rename", json!({"id": "k7x2m9qa"})).await;
+    assert_eq!(bad.error.unwrap().code, RpcError::INVALID_PARAMS);
+
+    token.cancel();
+    tokio::time::timeout(Duration::from_secs(3), server)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+}

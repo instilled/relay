@@ -138,6 +138,13 @@ pub fn set_detail(conn: &Connection, id: &str, detail: &str) -> Result<()> {
     Ok(())
 }
 
+/// A run's title, given by hand. Nothing else writes the column after the
+/// run starts, so what is set here stands.
+pub fn set_title(conn: &Connection, id: &str, title: &str) -> Result<()> {
+    conn.execute("UPDATE runs SET title = ?2 WHERE id = ?1", params![id, title])?;
+    Ok(())
+}
+
 pub fn set_last_line(conn: &Connection, id: &str, line: &str) -> Result<()> {
     conn.execute("UPDATE runs SET last_line = ?2 WHERE id = ?1", params![id, line])?;
     Ok(())
