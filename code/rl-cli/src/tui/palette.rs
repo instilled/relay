@@ -14,6 +14,7 @@ pub enum Cmd {
     Join,
     Shell,
     Rename,
+    Pin,
     Pane,
     Rules,
     Reload,
@@ -79,6 +80,12 @@ pub const ALL: &[Command] = &[
         args: "",
         what: "rename what the cursor is on: a folder, a run, a job's rule",
         cmd: Cmd::Rename,
+    },
+    Command {
+        name: "pin",
+        args: "",
+        what: "keep a run at the top of the list, or let it go back",
+        cmd: Cmd::Pin,
     },
     Command {
         name: "pane",
@@ -208,6 +215,7 @@ pub fn key(cmd: Cmd) -> &'static str {
         Cmd::Quit => "^c",
         Cmd::Stop | Cmd::Archive => "^x",
         Cmd::Rename => "^r",
+        Cmd::Pin => "^p",
         Cmd::Pane => "^o",
         Cmd::Shell => "^t",
         _ => "",
@@ -289,6 +297,7 @@ mod tests {
         assert_eq!(key(Cmd::Stop), "^x");
         assert_eq!(key(Cmd::Archive), "^x");
         assert_eq!(key(Cmd::Rename), "^r");
+        assert_eq!(key(Cmd::Pin), "^p");
         assert_eq!(key(Cmd::Pane), "^o");
         assert_eq!(key(Cmd::Shell), "^t");
         assert_eq!(key(Cmd::Filter), "", "most commands are the slash line, no key");

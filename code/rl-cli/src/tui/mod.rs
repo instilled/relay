@@ -53,10 +53,10 @@ use rl_proto::methods::{
     AgentList, DecisionDismiss, DecisionNote, DecisionTake, DecisionTakeParams, Digest, DigestGet, DigestItem,
     DigestParams, EventFilter, EventList, GcParams, GcRun, PresenceClient, PresenceTouch, ReactionPause,
     ReactionReload, ReactionResume, RuleApprove, RuleList, RuleRef, RunArchive, RunArchiveParams, RunId, RunIds,
-    RunInput, RunInputParams, RunMark, RunMarkParams, RunRename, RunRenameParams, RunSeen, RunSpec, RunStart, RunStop,
-    RunStopParams, ScheduleFilter, ScheduleName, SchedulePause, ScheduleReload, ScheduleResume, ScheduleRun,
-    SummaryGet, SummaryMake, SummaryParams, WorkspaceList, WorkspaceRename, WorkspaceRenameParams, WorkspaceUp,
-    WorkspaceUpParams,
+    RunInput, RunInputParams, RunMark, RunMarkParams, RunPin, RunPinParams, RunRename, RunRenameParams, RunSeen,
+    RunSpec, RunStart, RunStop, RunStopParams, ScheduleFilter, ScheduleName, SchedulePause, ScheduleReload,
+    ScheduleResume, ScheduleRun, SummaryGet, SummaryMake, SummaryParams, WorkspaceList, WorkspaceRename,
+    WorkspaceRenameParams, WorkspaceUp, WorkspaceUpParams,
 };
 use rl_proto::rule::{Rule, RuleKind, RuleStatus};
 use rl_proto::types::{AttachMode, Cause, Event as LedgerEvent, Mark, Run, RunKind, RunState, Summary};
@@ -1498,6 +1498,35 @@ impl App {
 
     /// A run's own name, which is its title. The ledger is the only place it
     /// lives, so the rename is one call and the next refresh shows it.
+    /// `^p`: the run under the cursor to the top of the list, or back among
+    /// the rest. The cursor goes with it.
+    async fn toggle_pin(&mut self) {
+        let Some((id, pinned)) = self
+            .selected_run()
+            .map(|i| (i.run.id.clone(), i.run.pinned_at.is_some()))
+        else {
+            self.say("^p pins a run");
+            return;
+        };
+        match self
+            .rpc
+            .call::<RunPin>(RunPinParams {
+                id: id.clone(),
+                pinned: !pinned,
+            })
+            .await
+        {
+            Ok(r) => self.say(if pinned {
+                format!("unpinned {}", r.title)
+            } else {
+                format!("pinned {}", r.title)
+            }),
+            Err(e) => self.say(format!("pin: {e}")),
+        }
+        self.refresh().await;
+        self.select(Some(format!("r:{id}")));
+    }
+
     async fn rename_run(&mut self, id: String, title: String) -> Result<()> {
         if title.is_empty() {
             anyhow::bail!("a name, please");
@@ -1809,6 +1838,7 @@ impl App {
                 }
             }
             (KeyCode::Char('r'), KeyModifiers::CONTROL) => self.rename_here(),
+            (KeyCode::Char('p'), KeyModifiers::CONTROL) => self.toggle_pin().await,
             (KeyCode::Char('o'), KeyModifiers::CONTROL) => self.toggle_pane(),
             (KeyCode::Char('t'), KeyModifiers::CONTROL) => self.new_shell(area).await,
             (KeyCode::Esc, _) => {
@@ -2168,6 +2198,7 @@ impl App {
                 other => self.say(format!("pane {other}? on its own, or /pane full")),
             },
             palette::Cmd::Rename => self.rename_here(),
+            palette::Cmd::Pin => self.toggle_pin().await,
             palette::Cmd::Rules => {
                 self.rules_scope = match self.view {
                     View::Work => self.selected_folder(),
@@ -2633,8 +2664,12 @@ impl App {
                     let r = &i.run;
                     let under = matches!(row, Row::Fold(_));
                     let style = state_style(r.state);
+                    // A pinned run stands above every folder, so it says
+                    // which one it is from.
                     let title = if under {
                         format!("  {}", r.title)
+                    } else if r.pinned_at.is_some() {
+                        format!("{} › {}", self.names.workspace(&r.workspace), r.title)
                     } else {
                         r.title.clone()
                     };
@@ -2947,9 +2982,9 @@ impl App {
             }
             Some(Row::Fold(_)) => format!("enter output · ^x archives · esc folds · {pane}"),
             Some(Row::Run(i)) if i.run.state.is_terminal() => {
-                format!("enter output · /summarise · ^x archives · /archive seen · {pane}")
+                format!("enter output · /summarise · ^x archives · ^p pins · {pane}")
             }
-            Some(Row::Run(_)) => format!("enter watches it · /join · ^x stops it · /mark · {pane}"),
+            Some(Row::Run(_)) => format!("enter watches it · /join · ^x stops it · ^p pins · {pane}"),
             Some(Row::Group(h)) if h.workspace.is_some() => {
                 format!("enter its stats · ^t shell · /rules edits schedules & reactions · ^r renames · {pane}")
             }
