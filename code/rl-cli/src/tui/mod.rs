@@ -1646,33 +1646,30 @@ impl App {
                 Ok(())
             }
             // Full screen, the term has the keyboard: the keys scroll it.
-            _ if self.pane == Pane::Term && self.wide && self.term.is_some() => {
+            // `esc` is the one it does not get — that closes the pane, below.
+            _ if self.pane == Pane::Term && self.wide && self.term.is_some() && k.code != KeyCode::Esc => {
                 let page = area.height.saturating_sub(3).max(1);
                 self.watch_key(&k, page);
                 Ok(())
             }
-            // A tile beside the list: the list keeps the keyboard, `esc` closes
-            // the tile, `pgup`/`pgdn` read the tile back.
+            // A tile beside the list: the list keeps the keyboard, `pgup` and
+            // `pgdn` read the tile back, and `esc` goes on to close the pane.
             _ if self.pane == Pane::Term && self.term.is_some() => {
                 let page = area.height.saturating_sub(3).max(1);
                 match k.code {
-                    KeyCode::Esc => {
-                        self.leave_term();
-                        Ok(())
-                    }
                     KeyCode::PageUp | KeyCode::PageDown => {
                         self.watch_key(&k, page);
                         Ok(())
                     }
-                    _ => self.key_list(k, area).await,
+                    _ => self.key_list(k).await,
                 }
             }
-            _ => self.key_list(k, area).await,
+            _ => self.key_list(k).await,
         }
     }
 
     /// What the line does not take: moving about, and backing out.
-    async fn key_list(&mut self, k: KeyEvent, area: Rect) -> Result<()> {
+    async fn key_list(&mut self, k: KeyEvent) -> Result<()> {
         // A destructive key is armed by its first press and acts on its second;
         // any other key here disarms it, so `ctrl-x`/`ctrl-c` never fire on one
         // slip (the way an agent view asks before it deletes).
@@ -1705,9 +1702,12 @@ impl App {
                 }
             }
             (KeyCode::Esc, _) => {
-                if self.wide {
+                // The pane goes first, whatever stands open behind it: it is
+                // the largest thing on screen, so it is what `esc` should
+                // take away. The term view itself lives on, so stepping back
+                // into it stays instant.
+                if self.show_pane {
                     self.wide = false;
-                } else if self.show_pane && area.width < SPLIT_AT {
                     self.hide_pane();
                 } else if self.view == View::Rules && self.rules_scope.is_some() {
                     self.rules_scope = None;
@@ -1730,11 +1730,6 @@ impl App {
                 } else if !self.filter.is_empty() {
                     self.filter.clear();
                     self.settle();
-                } else if self.show_pane {
-                    // Nothing left to back out of, so the pane itself closes.
-                    // It is the last rung because it is on by default: the
-                    // thing you just opened should give way before it does.
-                    self.hide_pane();
                 }
             }
             (KeyCode::Down, _) => {
