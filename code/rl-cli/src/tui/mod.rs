@@ -62,7 +62,6 @@ use rl_proto::methods::{
 use rl_proto::rule::{Rule, RuleKind, RuleStatus};
 use rl_proto::types::{AttachMode, Cause, Event as LedgerEvent, Mark, Run, RunKind, RunState, Summary};
 use rows::{Names, Row, fit, short_path};
-use rules::RuleRow;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -100,7 +99,6 @@ enum Pane {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum View {
     Work,
-    Rules,
     /// The wiring graph, over every project.
     Graph,
 }
@@ -176,18 +174,14 @@ struct App {
     /// Which slice of the list is shown: all, agents, jobs or reactions.
     lens: rows::Lens,
     view: View,
-    /// Every rule, fetched while the rules view is up.
+    /// Every rule: for the chips on project rows, a job's rule, and the graph's nodes.
     rules: Vec<Rule>,
-    /// The other view's selection, kept for when you come back.
-    other_sel: Option<String>,
     /// The wiring, fetched while the graph is up.
     graph: Option<rl_proto::graph::Graph>,
     /// The view the graph was opened from, and the selection it had.
     graph_from: (View, Option<String>),
     /// Where the window over the graph starts, column and row.
     graph_at: std::cell::Cell<(usize, usize)>,
-    /// The rules view, narrowed to one folder's rules (`r` on its row).
-    rules_scope: Option<PathBuf>,
     /// Jobs opened to their runs.
     opened: HashSet<String>,
     /// Which of a folder's shells a shell line goes to, and the one the
@@ -501,11 +495,9 @@ pub async fn run(home: &Home) -> Result<()> {
         lens: rows::Lens::All,
         view: View::Work,
         rules: Vec::new(),
-        other_sel: None,
         graph: None,
         graph_from: (View::Work, None),
         graph_at: std::cell::Cell::new((0, 0)),
-        rules_scope: None,
         opened: HashSet::new(),
         shell_at: HashMap::new(),
         scroll: std::cell::Cell::new(0),
@@ -735,10 +727,6 @@ impl App {
         )
     }
 
-    fn rule_rows(&self) -> Vec<RuleRow<'_>> {
-        rules::build(&self.rules, &self.names, &self.filter, self.rules_scope.as_deref())
-    }
-
     /// The folder the selected row's work is in.
     fn selected_folder(&self) -> Option<PathBuf> {
         match self.selected()? {
@@ -767,7 +755,6 @@ impl App {
     fn keys(&self) -> Vec<String> {
         match self.view {
             View::Work => self.rows().into_iter().filter_map(|r| r.key()).collect(),
-            View::Rules => self.rule_rows().into_iter().filter_map(|r| r.key()).collect(),
             View::Graph => self.graph_plan().map(|(_, p)| p.order()).unwrap_or_default(),
         }
     }
@@ -825,12 +812,8 @@ impl App {
     }
 
     fn selected_rule(&self) -> Option<&Rule> {
-        let key = match self.view {
-            View::Rules => self.sel.clone()?,
-            // A node stands for its rule, or for what its rule runs or asks.
-            View::Graph => self.selected_node()?.rule.clone()?,
-            View::Work => return None,
-        };
+        // A node stands for its rule, or for what its rule runs or asks.
+        let key = self.selected_node()?.rule.clone()?;
         self.rules.iter().find(|r| rules::key(r) == key)
     }
 
@@ -899,7 +882,7 @@ impl App {
         })
     }
 
-    /// The rule under the cursor: in the rules view, or behind a job row.
+    /// The rule under the cursor: a node's in the graph, or behind a job row.
     fn rule_here(&self) -> Option<&Rule> {
         self.selected_rule()
             .or_else(|| self.selected_job().and_then(|j| self.rule_of_job(&j)))
@@ -1241,9 +1224,11 @@ impl App {
 
     // ---- rules -------------------------------------------------------------
 
-    /// `/graph` and `^g`: into the wiring, or back to wherever it was opened
-    /// from, each view keeping its own place.
+    /// `/graph` and `^g`: into the wiring, or back to the list, each keeping
+    /// its own place. From a job, a project or the global row, the graph
+    /// opens on the rule that stands there.
     async fn toggle_graph(&mut self) {
+        let target = self.rule_target();
         if self.view == View::Graph {
             let (view, sel) = self.graph_from.clone();
             self.graph_from.1 = std::mem::replace(&mut self.sel, sel);
@@ -1257,24 +1242,38 @@ impl App {
         self.picked.clear();
         self.events.clear();
         self.refresh().await;
+        if self.view == View::Graph
+            && let Some(t) = target
+            && self.keys().contains(&t)
+        {
+            self.select(Some(t));
+        }
     }
 
-    async fn toggle_view(&mut self) {
-        if self.view == View::Graph {
-            self.toggle_graph().await;
-            if self.view == View::Rules {
-                return;
-            }
+    /// The rule the list's cursor stands on, as its graph node: a job's own
+    /// rule, else the first of a folder's rules (or the global ones) —
+    /// whatever waits for a yes first.
+    fn rule_target(&self) -> Option<String> {
+        if self.view != View::Work {
+            return None;
         }
-        self.view = match self.view {
-            View::Work | View::Graph => View::Rules,
-            View::Rules => View::Work,
+        if let Some(j) = self.selected_job() {
+            return self.rule_of_job(&j).map(rules::key);
+        }
+        let scope = match self.selected() {
+            Some(Row::Group(h)) => match &h.workspace {
+                Some(p) => p.to_string_lossy().into_owned(),
+                None => rl_proto::schedule::GLOBAL_SCOPE.to_string(),
+            },
+            _ => return None,
         };
-        std::mem::swap(&mut self.sel, &mut self.other_sel);
-        self.picked.clear();
-        self.events.clear();
-        self.close_term();
-        self.refresh().await;
+        let mut here: Vec<&Rule> = self
+            .rules
+            .iter()
+            .filter(|r| r.removed_at().is_none() && r.scope() == scope)
+            .collect();
+        here.sort_by_key(|r| (r.status() != RuleStatus::NeedsApproval, r.name().to_string()));
+        here.first().map(|r| rules::key(r))
     }
 
     async fn approve(&mut self, name: String, scope: String, kind: RuleKind) {
@@ -1344,15 +1343,18 @@ impl App {
                     .filter(|r| !r.is_global())
                     .map(|r| PathBuf::from(r.scope()))
             })
-            .or_else(|| self.rules_scope.clone())
             .or_else(|| std::env::current_dir().ok())
             .unwrap_or_else(|| PathBuf::from("/"))
     }
 
     fn new_rule_form(&mut self) {
         let folder = self.folder_here();
-        let yours =
-            self.view == View::Rules && self.rules_scope.is_none() && self.rule_here().is_none_or(Rule::is_global);
+        // A new rule is global from the global row, or from a global rule's
+        // node in the graph; else it belongs to the folder here.
+        let yours = self.selected_global()
+            || (self.view == View::Graph
+                && self.selected_node().is_some_and(|n| n.folder.is_none())
+                && self.rule_here().is_none_or(Rule::is_global));
         let form = Form::rule((!yours).then_some(folder.as_path()), &folder)
             .with_folders(&self.names.paths())
             .with_agents(&self.agents);
@@ -1445,8 +1447,8 @@ impl App {
         };
         let run = self.rpc.call::<RunStart>(spec).await?;
         self.say(format!("started {}", run.title));
-        if self.view == View::Rules {
-            self.toggle_view().await;
+        if self.view == View::Graph {
+            self.toggle_graph().await;
         }
         self.refresh().await;
         self.select(Some(format!("r:{}", run.id)));
@@ -1564,7 +1566,7 @@ impl App {
     }
 
     /// Register a folder as a project from the line — the panel's `rl up`. Its
-    /// rules load; its schedules wait for a yes in `/rules`. The cursor lands on
+    /// rules load; its schedules wait for a yes (`/approve` on its node in the graph). The cursor lands on
     /// the new row (empty until something runs there, thanks to project rows).
     async fn add_dir(&mut self, arg: &str) -> Result<()> {
         let arg = arg.trim();
@@ -1670,7 +1672,7 @@ impl App {
         let file = rulefile::install(&self.home, &mut self.rpc, &d, was.as_ref(), registered).await?;
         self.say(format!("{} on · {}", d.name, short_path(&file)));
         self.refresh().await;
-        if self.view == View::Rules {
+        if self.view == View::Graph {
             self.select(Some(format!("{}:{}/{}", d.kind, d.scope(), d.name)));
         }
         Ok(())
@@ -1983,9 +1985,6 @@ impl App {
                 if self.show_pane {
                     self.wide = false;
                     self.hide_pane();
-                } else if self.view == View::Rules && self.rules_scope.is_some() {
-                    self.rules_scope = None;
-                    self.settle();
                 } else if let Some(key) = self.selected_job().map(|j| j.key.clone())
                     && self.opened.remove(&key)
                 {
@@ -2069,17 +2068,6 @@ impl App {
         if let Some(key) = self.selected_job().map(|j| j.key.clone()) {
             if !self.opened.remove(&key) {
                 self.opened.insert(key);
-            }
-        } else if let Some(r) = self.selected_rule() {
-            match r.kind() {
-                RuleKind::Schedule if r.approved() => {
-                    self.mode = Mode::Fire(ScheduleName {
-                        name: r.name().into(),
-                        scope: Some(r.scope().into()),
-                    })
-                }
-                RuleKind::Schedule => self.say("not approved yet: /approve"),
-                RuleKind::Reaction => self.say("a reaction fires on its event"),
             }
         } else if let Some(q) = self.selected_question() {
             let id = q.id.clone();
@@ -2341,13 +2329,6 @@ impl App {
             },
             palette::Cmd::Rename => self.rename_here(),
             palette::Cmd::Pin => self.toggle_pin().await,
-            palette::Cmd::Rules => {
-                self.rules_scope = match self.view {
-                    View::Work => self.selected_folder(),
-                    View::Rules | View::Graph => None,
-                };
-                self.toggle_view().await;
-            }
             palette::Cmd::Graph => self.toggle_graph().await,
             palette::Cmd::Shell => self.new_shell(area).await,
             palette::Cmd::Reload => match arg.trim() {
@@ -2467,7 +2448,6 @@ impl App {
         };
         let a = areas(f.area(), self.wide, self.show_pane, form_h, cands_h, self.line_h());
         let rows = self.rows();
-        let rule_rows = self.rule_rows();
         // News is counted the way it is shown: a job with unseen runs is one.
         let news = rows
             .iter()
@@ -2477,19 +2457,13 @@ impl App {
                 _ => false,
             })
             .count();
-        let mut title = match self.view {
+        let title = match self.view {
             View::Work => rows::headline(&rows, news, &self.filter),
-            View::Rules => rules::headline(&rule_rows, &self.filter),
             View::Graph => match &self.graph {
                 Some(g) => graph::headline(g, graph::keep(g, &self.filter, &self.names).len(), &self.filter),
                 None => "wiring".into(),
             },
         };
-        if self.view == View::Rules
-            && let Some(p) = &self.rules_scope
-        {
-            title.push_str(&format!(" · in {} · esc all", self.names.workspace(p)));
-        }
         // The header carries three things on one line: the tally at the left,
         // the lens at the right of it, and who you are at the edge. The lens
         // rides here rather than a row of its own.
@@ -2521,7 +2495,6 @@ impl App {
         if let Some(list) = a.list {
             match self.view {
                 View::Work => self.draw_list(f, list, &rows),
-                View::Rules => self.draw_rules(f, list, &rule_rows),
                 View::Graph => self.draw_graph(f, list),
             }
             if a.pane.is_some() {
@@ -2935,56 +2908,6 @@ impl App {
         f.render_widget(Paragraph::new(canvas.lines(at.0, at.1, w, h)), area);
     }
 
-    fn draw_rules(&self, f: &mut Frame, area: Rect, rows: &[RuleRow]) {
-        // The rules view draws its own rows; until the mouse knows them, it
-        // must not act on the map the work list left behind.
-        *self.hit.borrow_mut() = ListHit::default();
-        if rows.is_empty() {
-            let msg = if self.filter.is_empty() {
-                " no rules · rl on <event> -- <command>, or rl up in a folder with .relay/"
-            } else {
-                " nothing matches"
-            };
-            f.render_widget(Paragraph::new(msg).dim(), area);
-            return;
-        }
-        let now = Timestamp::now();
-        let mut lines: Vec<Line> = Vec::with_capacity(rows.len());
-        let mut sel_line = 0usize;
-        for (n, row) in rows.iter().enumerate() {
-            let selected = row.key().is_some() && row.key() == self.sel;
-            let mut line = match row {
-                RuleRow::Group(g) => {
-                    if n > 0 {
-                        lines.push(Line::raw(""));
-                    }
-                    Line::from(Span::raw(format!(" {g}")).bold())
-                }
-                RuleRow::Rule(r) => {
-                    let status = rules::status_word(r, now);
-                    let status = match r.status() {
-                        RuleStatus::NeedsApproval => Span::raw(format!(" ! {status:<14}")).yellow().bold(),
-                        RuleStatus::Paused => Span::raw(format!("   {status:<14}")).dim(),
-                        _ => Span::raw(format!("   {status:<14}")),
-                    };
-                    Line::from(vec![
-                        status,
-                        Span::raw(format!(" {:<18}", r.name())),
-                        Span::raw(format!(" {:<16}", r.when())).dim(),
-                        Span::raw(format!(" {}", r.does())).dim(),
-                    ])
-                }
-            };
-            if selected {
-                line = line.style(theme::selected());
-                sel_line = lines.len();
-            }
-            lines.push(line);
-        }
-        let offset = sel_line.saturating_sub(area.height.saturating_sub(1) as usize);
-        f.render_widget(Paragraph::new(lines).scroll((offset as u16, 0)), area);
-    }
-
     fn draw_pane(&mut self, f: &mut Frame, area: Rect) {
         if self.pane == Pane::Term
             && let Some(t) = &self.term
@@ -3017,12 +2940,6 @@ impl App {
             };
             let q = asking.and_then(|id| self.digest.decisions.iter().find(|d| d.id == id));
             let lines = graph::pane_lines(g, n, rule, last, q, &self.picked, &self.names, now);
-            f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
-            return;
-        }
-        if let Some(r) = self.selected_rule() {
-            let last = r.last_run().and_then(|id| self.run_by_id(id)).map(|x| x.title.as_str());
-            let lines = rules::lines(r, &self.names, now, last);
             f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
             return;
         }
@@ -3164,21 +3081,6 @@ impl App {
             s.push_str(&format!("←→ follows the wiring · {pane} · ^g back"));
             return s;
         }
-        if let Some(r) = self.selected_rule() {
-            let mut s = String::new();
-            if r.status() == RuleStatus::NeedsApproval {
-                s.push_str("/approve · ");
-            }
-            s.push_str(if r.paused() { "/pause lets it run" } else { "/pause" });
-            if r.kind() == RuleKind::Schedule {
-                s.push_str(" · enter runs it now");
-            }
-            s.push_str(" · /edit · /edit file · /new · /reload · /rules back");
-            return s;
-        }
-        if self.view == View::Rules {
-            return "/new a rule · /reload · /rules back · or type something to run here".into();
-        }
         let pane = if self.show_pane {
             "^o hides details"
         } else {
@@ -3200,10 +3102,10 @@ impl App {
             }
             Some(Row::Run(_)) => format!("enter watches it · /join · ^x stops it · ^p pins · {pane}"),
             Some(Row::Group(h)) if h.workspace.is_some() => {
-                format!("enter its stats · ^t shell · /rules edits schedules & reactions · ^r renames · {pane}")
+                format!("enter its stats · ^t shell · ^g its wiring · /edit schedule · ^r renames · {pane}")
             }
             // The global row: the rules in the Relay home, no folder to rename.
-            Some(Row::Group(_)) => format!("enter its rules · /rules edits the global schedules & reactions · {pane}"),
+            Some(Row::Group(_)) => format!("enter its rules · ^g their wiring · /edit schedule · {pane}"),
             _ => String::new(),
         }
     }
