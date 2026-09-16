@@ -14,6 +14,7 @@ pub enum Cmd {
     Mark,
     Watch,
     Join,
+    Shell,
     Info,
     Full,
     Rules,
@@ -83,6 +84,12 @@ pub const ALL: &[Command] = &[
         args: "",
         what: "join a run's terminal and take the keyboard",
         cmd: Cmd::Join,
+    },
+    Command {
+        name: "shell",
+        args: "",
+        what: "another shell in this folder; ← and → step between them",
+        cmd: Cmd::Shell,
     },
     Command {
         name: "info",
@@ -297,8 +304,8 @@ mod tests {
 
     #[test]
     fn a_name_matches_by_what_it_contains_too() {
-        // Nothing starts with `ll`; three names carry it, alphabetically.
-        assert_eq!(names("ll"), vec!["all", "done-all", "full"]);
+        // Nothing starts with `ll`; four names carry it, alphabetically.
+        assert_eq!(names("ll"), vec!["all", "done-all", "full", "shell"]);
         // `it` opens nothing, and sits inside both of these.
         assert_eq!(names("it"), vec!["edit", "editor", "quit"]);
     }
