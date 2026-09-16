@@ -791,7 +791,9 @@ mod tests {
         let at = "2026-09-10T11:00:00Z";
         let agent = item("agent", RunState::Working, ws, at, false);
         let mut shell = item("shell", RunState::Working, ws, at, false);
-        shell.run.kind = RunKind::Command;
+        // What a warm shell really is: the `sh` profile's kind wins over the
+        // `Command` hint it was started with. Either way it is not an agent.
+        shell.run.kind = RunKind::Shell;
         let mut sched = item("sched", RunState::Working, ws, at, false);
         sched.run.cause = Cause::Schedule("nightly".into());
         let mut react = item("react", RunState::Working, ws, at, false);
