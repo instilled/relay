@@ -437,7 +437,7 @@ event's group), and fills `{summary}`, `{title}`, `{run}`, `{data.x}` and the re
 it runs. The whole event is in the child's environment as `RELAY_EVENT`.
 
 **Emitting events.** A run's own output is not the only thing that lands in the events table:
-`rl emit <kind> [--data k=v]… [--json -]` puts one there itself, and the reactor picks it up like
+`rl emit <kind> [--data k=v]… [--json-data -]` puts one there itself, and the reactor picks it up like
 any built-in event (`event.emit`, appended by `rl-daemon/src/handlers.rs`). Inside a run it needs
 no arguments beyond the kind — it reads `RELAY_RUN` from the environment, the same way `rl ask`
 does, so the event is filed under that run's folder and joins its flow; outside a run, `--in

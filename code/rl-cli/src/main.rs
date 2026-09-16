@@ -359,8 +359,8 @@ struct EmitArgs {
     #[arg(short = 'd', long = "data", value_name = "KEY=VALUE")]
     data: Vec<String>,
     /// Read the whole data object as JSON — a string, or `-` for stdin.
-    #[arg(long, value_name = "JSON")]
-    json: Option<String>,
+    #[arg(long = "json-data", value_name = "JSON")]
+    json_data: Option<String>,
     /// A one-line summary (default: the kind).
     #[arg(short, long)]
     summary: Option<String>,
@@ -1120,7 +1120,7 @@ fn describe(i: &DaemonInfo) -> String {
 /// folder and flow; outside one, the folder is `--in` or the cwd.
 async fn emit(home: &Home, a: EmitArgs) -> Result<()> {
     let mut data = serde_json::Map::new();
-    if let Some(src) = &a.json {
+    if let Some(src) = &a.json_data {
         let text = if src == "-" {
             std::io::read_to_string(std::io::stdin())?
         } else {
@@ -2035,6 +2035,26 @@ fn yaml_scalar(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::{CommandFactory, Parser};
+
+    #[test]
+    fn the_grammar_is_consistent() {
+        // Catches clashes like a subcommand arg colliding with a global flag.
+        Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn emit_parses_without_clashing_with_the_global_json() {
+        let cli = Cli::try_parse_from(["rl", "emit", "log.issue", "-d", "severity=ERROR", "--json", "--json-data", "-"])
+            .expect("emit args parse");
+        let Some(Cmd::Emit(a)) = cli.cmd else {
+            panic!("expected emit")
+        };
+        assert_eq!(a.kind, "log.issue");
+        assert_eq!(a.data, ["severity=ERROR"]);
+        assert_eq!(a.json_data.as_deref(), Some("-"));
+        assert!(cli.json, "the global --json still reads as a bool");
+    }
 
     #[test]
     fn a_question_can_be_written_as_yaml() {
