@@ -31,6 +31,8 @@ pub enum Kind {
     Rule,
     /// Rename the registered folder in `origin` to the `name` field.
     Rename,
+    /// Rename the run named by `renaming` to the `name` field.
+    RenameRun,
 }
 
 pub struct Field {
@@ -64,6 +66,9 @@ pub struct Form {
     /// The rule being edited — kind, scope, name — so a rename or a move
     /// takes the old block out, and what the form does not show survives.
     pub editing: Option<Editing>,
+    /// The run being renamed, by id: a run has no path to be found by, and
+    /// the list it was picked from will have re-ranked by the time this saves.
+    pub renaming: Option<String>,
 }
 
 pub struct Editing {
@@ -103,6 +108,7 @@ impl Form {
             folders: vec![],
             agents: vec![],
             editing: None,
+            renaming: None,
         }
     }
 
@@ -116,6 +122,21 @@ impl Form {
             folders: vec![],
             agents: vec![],
             editing: None,
+            renaming: None,
+        }
+    }
+
+    /// Rename the run `id`, prefilled with the title it carries now.
+    pub fn rename_run(id: &str, title: &str) -> Self {
+        Self {
+            kind: Kind::RenameRun,
+            fields: vec![Field::new("name", "what to call this run", title)],
+            cur: 0,
+            origin: PathBuf::new(),
+            folders: vec![],
+            agents: vec![],
+            editing: None,
+            renaming: Some(id.to_string()),
         }
     }
 
@@ -153,6 +174,7 @@ impl Form {
             folders: vec![],
             agents: vec![],
             editing: None,
+            renaming: None,
         }
     }
 
@@ -223,6 +245,9 @@ impl Form {
             (Kind::Rule, Some(e)) => format!("edit {}", e.rule.name()),
             (Kind::Rule, None) => "new rule".into(),
             (Kind::Rename, _) => format!("rename {}", short_path(&self.origin)),
+            // The run's own name is the field being typed into, so naming it
+            // here would have the heading change under the cursor.
+            (Kind::RenameRun, _) => "rename run".into(),
         }
     }
 

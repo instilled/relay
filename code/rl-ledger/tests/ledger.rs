@@ -23,6 +23,30 @@ fn run(id: &str, started: &str) -> Run {
 }
 
 #[test]
+fn set_title_renames_a_run_and_moves_nothing_else() {
+    let l = Ledger::open_in_memory().unwrap();
+    let a = run("aaaaaaaa", "2026-09-08T10:00:00Z");
+    l.call_blocking({
+        let a = a.clone();
+        move |c| runs::insert(c, &a)
+    })
+    .unwrap();
+
+    l.call_blocking(|c| runs::set_title(c, "aaaaaaaa", "the nightly build"))
+        .unwrap();
+
+    let got = l.call_blocking(|c| runs::get(c, "aaaaaaaa")).unwrap().unwrap();
+    assert_eq!(got.title, "the nightly build");
+    // The same run under a new name: put the old title back and it matches.
+    let mut back = got.clone();
+    back.title = a.title.clone();
+    assert_eq!(back, a, "only the title changed");
+
+    // A run that is not there is not an error, as with the other setters.
+    l.call_blocking(|c| runs::set_title(c, "nope", "x")).unwrap();
+}
+
+#[test]
 fn runs_insert_get_list_and_transition() {
     let l = Ledger::open_in_memory().unwrap();
     let a = run("aaaaaaaa", "2026-09-08T10:00:00Z");

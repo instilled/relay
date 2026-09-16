@@ -282,6 +282,19 @@ pub fn register(r: &mut Router<Daemon>) {
             .map_err(RpcError::internal)
     });
 
+    r.register::<RunRename, _, _>(|d, p: RunRenameParams| async move {
+        d.ledger
+            .call({
+                let (id, title) = (p.id.clone(), p.title);
+                move |c| runs::set_title(c, &id, &title)
+            })
+            .await
+            .map_err(RpcError::internal)?;
+        // Read it back rather than report success blindly: an id nobody knows
+        // writes no row, and the caller should hear that rather than assume.
+        get_run(&d, &p.id).await
+    });
+
     r.register::<RunArchive, _, _>(|d, p: RunArchiveParams| async move {
         let now = time::now();
         d.ledger
