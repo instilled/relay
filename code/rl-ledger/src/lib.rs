@@ -9,6 +9,7 @@
 pub mod decisions;
 pub mod entries;
 pub mod events;
+pub mod graph;
 pub mod meta;
 pub mod migrate;
 pub mod presence;

@@ -589,6 +589,33 @@ Relay still talks to no one itself. A question surfaces in `rl decisions`, in `r
 the top of the panel, where a number key answers it; getting it to Slack or mail is a reaction on
 `decision.raised` running your own command.
 
+**The wiring graph** is all of this as one network. A reaction hears events from every folder,
+whatever file it is written in, so there is one graph, not one per project. `graph.get
+{since}` (default: the last 7 days; `rl-daemon/src/graph.rs`, pure over rows from
+`rl-ledger/src/graph.rs`) returns nodes and edges. The nodes are:
+
+- schedules (`schedule:<scope>/<name>`) and reactions (`reaction:<scope>/<name>`);
+- what a rule runs (`run:<rule>`, a shell or an agent), and a reaction's question (`ask:<rule>`,
+  with the ids still waiting) plus what each answer runs (`run:ask:<rule>/<key>`);
+- runs you started, one node per folder and kind (`runs:shells:<folder>`), drawn only once
+  they set something off;
+- events raised outside any run, per folder (`outside:<folder>`);
+- an event kind a reaction listens for that nothing raised in the window (`event:<pattern>`),
+  so every reaction has a way in.
+
+Each node carries its folder as a fact rather than a box, its rule's status, and how its runs
+went in the window. The edges are of two kinds:
+
+- **Declared**, from the files: a rule to what it runs or asks, a question to each answer's
+  run, and the kinds a schedule or reaction says it `emits:`.
+- **Observed**, from the ledger: which runs raised which event kinds, and so which reactions
+  heard them, labelled with the kinds and counted. A run maps to its node by its cause. An
+  event with no run but a `data.decision` belongs to the question it is about. A reaction's
+  own runs and questions never reach it.
+
+`emits: [logs.error]` on a schedule or reaction is only for the graph: it wires a command
+before it has ever raised anything.
+
 ---
 
 ## 7. On disk

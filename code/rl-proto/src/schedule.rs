@@ -20,6 +20,10 @@ action_struct! {
             /// An interval (`30m`, `4h`), counted from the last firing.
             #[serde(default, skip_serializing_if = "Option::is_none")]
             pub every: Option<String>,
+            /// Event kinds what it runs raises (`rl emit`), so the graph can
+            /// wire it to the reactions that hear them before it ever has.
+            #[serde(default, skip_serializing_if = "Vec::is_empty")]
+            pub emits: Vec<String>,
         }
         after: {
             #[serde(default)]
