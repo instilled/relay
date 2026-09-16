@@ -264,6 +264,19 @@ fn viewport(n: usize, h: usize, sel: usize, prev: usize) -> usize {
     top
 }
 
+/// The first candidate to show, so the arrowed-to one is always on screen.
+/// Walking down past the last visible row slides the window by one; wrapping
+/// back to the top brings it home.
+fn cand_window(n: usize, h: usize, pick: Option<usize>) -> usize {
+    if h == 0 || n <= h {
+        return 0;
+    }
+    match pick {
+        Some(i) => i.saturating_sub(h - 1).min(n - h),
+        None => 0,
+    }
+}
+
 /// One row of the list, to the width: mark, title, state, the summary
 /// filling the middle, who is joined, then the ref and the age at the right.
 #[allow(clippy::too_many_arguments)]
@@ -2124,6 +2137,9 @@ impl App {
         }
         if let Some(area) = a.cands {
             // The arrowed-to row wears a caret and the accent; the rest are quiet.
+            // Only `h` of them fit at once, so the window slides to keep the
+            // arrowed-to one in view rather than highlighting it off-screen.
+            let h = area.height as usize;
             let pick = self.pick;
             let lead = |i: usize| {
                 if pick == Some(i) {
@@ -2135,8 +2151,9 @@ impl App {
             let lines: Vec<Line> = match (&slash, &self.completing) {
                 (Some(cs), _) => cs
                     .iter()
-                    .take(area.height as usize)
                     .enumerate()
+                    .skip(cand_window(cs.len(), h, pick))
+                    .take(h)
                     .map(|(i, c)| {
                         let (mark, style) = lead(i);
                         let name = if c.args.is_empty() {
@@ -2162,8 +2179,9 @@ impl App {
                 (None, Some(c)) => c
                     .cands
                     .iter()
-                    .take(area.height as usize)
                     .enumerate()
+                    .skip(cand_window(c.cands.len(), h, pick))
+                    .take(h)
                     .map(|(i, x)| {
                         let (mark, style) = lead(i);
                         Line::from(vec![
@@ -2733,9 +2751,26 @@ fn bytes_words(n: u64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{group_count, viewport};
+    use super::{cand_window, group_count, viewport};
     use crate::tui::rows::Chip;
     use rl_proto::rule::{RuleKind, RuleStatus};
+
+    #[test]
+    fn the_candidate_window_follows_the_pick() {
+        // Everything fits: no window at all.
+        assert_eq!(cand_window(4, 6, Some(3)), 0);
+        // More than fits, but the pick is still on the first screenful.
+        assert_eq!(cand_window(20, 6, None), 0);
+        assert_eq!(cand_window(20, 6, Some(5)), 0);
+        // Past the last visible row, the window slides and the pick sits at
+        // the foot of it.
+        assert_eq!(cand_window(20, 6, Some(6)), 1);
+        assert_eq!(cand_window(20, 6, Some(7)), 2);
+        // The end of the list, and no further.
+        assert_eq!(cand_window(20, 6, Some(19)), 14);
+        // Wrapping back to the top brings the window home.
+        assert_eq!(cand_window(20, 6, Some(0)), 0);
+    }
 
     fn chip(kind: RuleKind) -> Chip {
         Chip {
