@@ -431,12 +431,22 @@ fn kitty_supported() -> bool {
 /// protocol — ask it to report modifiers on keys the base protocol folds
 /// away, so shift-enter arrives as its own event rather than a bare newline.
 /// Terminals that don't (Terminal.app, older tmux) simply see no flags.
+///
+/// It takes both flags to get that. Disambiguation only tells the special keys
+/// apart from the escape sequences they are spelled with; `enter` still comes
+/// back as a bare `\r`, which has nowhere to carry a modifier, so shift-enter
+/// arrives indistinguishable from enter and sends instead of opening a line.
+/// Reporting every key as an escape code is what gives it somewhere to put the
+/// modifier (`CSI 13;2u`), which is what the line is watching for.
 fn enter_screen() -> ratatui::DefaultTerminal {
     let term = ratatui::init();
     if kitty_supported() {
         let _ = crossterm::execute!(
             std::io::stdout(),
-            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+            PushKeyboardEnhancementFlags(
+                KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                    | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
+            )
         );
     }
     // The wheel and a click reach the list. This also takes the terminal's own
