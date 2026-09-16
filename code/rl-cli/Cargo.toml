@@ -12,6 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 rl-core.workspace = true
+rl-detect.workspace = true
 rl-proto.workspace = true
 rl-session.workspace = true
 anyhow.workspace = true

@@ -17,14 +17,144 @@ enum EscState {
     Csi,
     /// Inside `ESC ] … BEL` or `… ESC \`, waiting for the terminator.
     Osc { prev_was_esc: bool },
-    /// Saw `ESC (` or `ESC )`; waiting for exactly one more byte.
-    Charset,
+    /// Saw `ESC (` or `ESC )`; waiting for the one byte saying which set.
+    /// `g0` is true for `(`, the set ordinary text is drawn from.
+    Charset { g0: bool },
 }
 
 /// An escape sequence still unterminated after this many bytes is treated as
 /// malformed and abandoned, so a stray, never-terminated ESC doesn't buffer
 /// forever.
 const MAX_PENDING_ESCAPE: usize = 64;
+
+/// One character of the DEC special graphics set, which a terminal draws in
+/// place of the letter while that set is chosen. What the set leaves alone
+/// comes back unchanged.
+pub fn dec_graphic(c: char) -> char {
+    match c {
+        '_' => ' ',
+        '`' => '◆',
+        'a' => '▒',
+        'f' => '°',
+        'g' => '±',
+        'j' => '┘',
+        'k' => '┐',
+        'l' => '┌',
+        'm' => '└',
+        'n' => '┼',
+        'o' => '⎺',
+        'p' => '⎻',
+        'q' => '─',
+        'r' => '⎼',
+        's' => '⎽',
+        't' => '├',
+        'u' => '┤',
+        'v' => '┴',
+        'w' => '┬',
+        'x' => '│',
+        'y' => '≤',
+        'z' => '≥',
+        '{' => 'π',
+        '|' => '≠',
+        '}' => '£',
+        '~' => '·',
+        c => c,
+    }
+}
+
+/// Rewrites a byte stream so the box-drawing set is drawn rather than spelled,
+/// leaving everything else exactly as it stood — colours, cursor moves and all.
+///
+/// [`Stripper`] answers what a run's output *said*; this answers what a
+/// terminal would have *shown*, for a screen that draws the bytes itself.
+/// `vt100` hands any escape carrying an intermediate byte to its unhandled
+/// hook, and `ESC ( 0` is one, so without this a ruled-off prompt arrives as
+/// `qqqqqq`.
+#[derive(Debug, Clone, Default)]
+pub struct Graphics {
+    state: EscState,
+    pending: usize,
+    /// Whether each designated set is the box-drawing one: G0, then G1.
+    sets: [bool; 2],
+    /// Which of them letters are drawn from; shift-out and shift-in move it.
+    shifted: usize,
+}
+
+impl Graphics {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// One chunk, rewritten. An escape left open at the end carries over, so
+    /// a sequence split across reads is still recognised.
+    pub fn rewrite(&mut self, bytes: &[u8]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(bytes.len());
+        for &b in bytes {
+            match std::mem::take(&mut self.state) {
+                EscState::None => {
+                    if b == 0x1b {
+                        // Held back: only the next byte says whether this
+                        // begins a charset escape, which goes no further.
+                        self.state = EscState::Escape;
+                        self.pending = 1;
+                    } else if b == 0x0e || b == 0x0f {
+                        // The shift is acted on here, so it goes no further
+                        // either: the screen is handed what it chose.
+                        self.shifted = usize::from(b == 0x0e);
+                    } else if self.sets[self.shifted] && (0x5f..=0x7e).contains(&b) {
+                        let mut buf = [0u8; 4];
+                        out.extend_from_slice(dec_graphic(b as char).encode_utf8(&mut buf).as_bytes());
+                    } else {
+                        out.push(b);
+                    }
+                }
+                EscState::Escape => {
+                    self.pending += 1;
+                    match b {
+                        b'(' | b')' => self.state = EscState::Charset { g0: b == b'(' },
+                        _ => {
+                            out.push(0x1b);
+                            out.push(b);
+                            self.state = match b {
+                                b'[' => EscState::Csi,
+                                b']' => EscState::Osc { prev_was_esc: false },
+                                _ => EscState::None,
+                            };
+                        }
+                    }
+                }
+                EscState::Csi => {
+                    self.pending += 1;
+                    out.push(b);
+                    self.state = if (0x40..=0x7e).contains(&b) {
+                        EscState::None
+                    } else {
+                        EscState::Csi
+                    };
+                }
+                EscState::Osc { prev_was_esc } => {
+                    self.pending += 1;
+                    out.push(b);
+                    self.state = if b == 0x07 || (prev_was_esc && b == b'\\') {
+                        EscState::None
+                    } else {
+                        EscState::Osc { prev_was_esc: b == 0x1b }
+                    };
+                }
+                EscState::Charset { g0 } => {
+                    self.pending += 1;
+                    self.sets[usize::from(!g0)] = b == b'0';
+                    self.state = EscState::None;
+                }
+            }
+            if self.state != EscState::None && self.pending > MAX_PENDING_ESCAPE {
+                // Not a well-formed escape after all.
+                self.state = EscState::None;
+            }
+        }
+        out
+    }
+}
 
 /// A shell's OSC 133 prompt mark: where a prompt was drawn, where what you
 /// typed began, where it started running, and how it came out. Only a shell
@@ -96,6 +226,12 @@ pub struct Stripper {
     /// with it — so a line being gathered as it was typed is recovered from
     /// here, and the events are positioned against this, not against that.
     echo: String,
+    /// Whether each designated set is the box-drawing one: G0, then G1.
+    sets: [bool; 2],
+    /// Which of them letters are drawn from: shift-out chooses G1, shift-in
+    /// G0. A prompt that rules a line off designates G1 once and shifts out
+    /// for the run of `q`s; read as letters they spell `qqqqqq`.
+    shifted: usize,
 }
 
 impl Stripper {
@@ -149,8 +285,13 @@ impl Stripper {
                     }
                     '\x07' => {}
                     '\x08' => self.events.push((self.echo.len(), Ev::Backspace)),
+                    // Shift-out and shift-in: which designated set letters are
+                    // drawn from from here on.
+                    '\x0e' => self.shifted = 1,
+                    '\x0f' => self.shifted = 0,
                     c if c.is_control() && c != '\n' && c != '\t' => {}
                     c => {
+                        let c = if self.sets[self.shifted] { dec_graphic(c) } else { c };
                         out.push(c);
                         self.echo.push(c);
                     }
@@ -166,7 +307,7 @@ impl Stripper {
                             self.osc.clear();
                             EscState::Osc { prev_was_esc: false }
                         }
-                        '(' | ')' => EscState::Charset,
+                        '(' | ')' => EscState::Charset { g0: c == '(' },
                         _ => EscState::None,
                     };
                 }
@@ -195,8 +336,12 @@ impl Stripper {
                         self.state = EscState::Osc { prev_was_esc: c == '\x1b' };
                     }
                 }
-                EscState::Charset => {
+                EscState::Charset { g0 } => {
                     self.pending += 1;
+                    // `0` is the box-drawing set, `B` ASCII. Designating a set
+                    // does not draw from it: that takes a shift, which is how
+                    // a prompt rules a line — `ESC ) 0` once, then shift out.
+                    self.sets[usize::from(!g0)] = c == '0';
                     self.state = EscState::None;
                 }
             }
@@ -304,6 +449,44 @@ mod tests {
         assert_eq!(s.take_events(), vec![(1, Ev::Return), (1, Ev::Return)]);
         assert_eq!(s.take_echo(), "2\n", "the echo still has the `2` the return took away");
         assert_eq!(s.take_echo(), "", "draining: read once");
+    }
+
+    #[test]
+    fn a_screen_is_handed_the_box_drawing_rather_than_the_letters() {
+        let mut g = Graphics::default();
+        assert_eq!(g.rewrite(b"\x1b(0qqq\x1b(Bok"), "───ok".as_bytes());
+        // Everything else passes through byte for byte — including a `q`
+        // inside a parameter, which is no part of the text at all.
+        let mut g = Graphics::default();
+        assert_eq!(g.rewrite(b"\x1b[31mred\x1b[0m\x1b]0;q\x07"), b"\x1b[31mred\x1b[0m\x1b]0;q\x07");
+        // The set and a half-read escape both carry across reads.
+        let mut g = Graphics::default();
+        assert_eq!(g.rewrite(b"\x1b(0l"), "┌".as_bytes());
+        assert_eq!(g.rewrite(b"q\x1b("), "─".as_bytes());
+        assert_eq!(g.rewrite(b"Bx"), b"x");
+        // The way a prompt actually rules its line, taken from a session's own
+        // journal: G1 designated, shifted out for the run of `q`s, shifted
+        // back. The shifts are acted on here, so the screen never sees them.
+        let mut g = Graphics::default();
+        assert_eq!(g.rewrite(b"\x1b)0\x0eqq\x0fx"), "──x".as_bytes());
+    }
+
+    #[test]
+    fn the_box_drawing_set_is_drawn_rather_than_spelled() {
+        // A prompt ruling a line off: choose the set, write `q`s, put ASCII
+        // back. Read as letters, those are the `qqqqqq` in a shell's row.
+        assert_eq!(strip(b"\x1b(0qqq\x1b(Bdone"), "───done");
+        // Outside the set the same letters are only letters.
+        assert_eq!(strip(b"qqq"), "qqq");
+        // The set holds across reads, like every other state here.
+        let mut s = Stripper::default();
+        assert_eq!(s.strip(b"\x1b(0lq"), "┌─");
+        assert_eq!(s.strip(b"k\x1b(Bx"), "┐x");
+        // `ESC ) 0` designates G1 without drawing from it: that takes a shift.
+        assert_eq!(strip(b"\x1b)0qq"), "qq");
+        // Which is how a real prompt rules its line, taken from a session's
+        // own journal: designate G1, shift out, `q`s, shift back.
+        assert_eq!(strip(b"\x1b)0\x0eqq\x0fq"), "──q");
     }
 
     #[test]
