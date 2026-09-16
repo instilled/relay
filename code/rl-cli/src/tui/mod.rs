@@ -1612,6 +1612,11 @@ impl App {
                 } else if !self.filter.is_empty() {
                     self.filter.clear();
                     self.settle();
+                } else if self.show_pane {
+                    // Nothing left to back out of, so the pane itself closes.
+                    // It is the last rung because it is on by default: the
+                    // thing you just opened should give way before it does.
+                    self.hide_pane();
                 }
             }
             (KeyCode::Down, _) => {
