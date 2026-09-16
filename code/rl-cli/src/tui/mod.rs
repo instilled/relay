@@ -2563,10 +2563,13 @@ impl App {
                     } else {
                         title
                     };
-                    // A shell at rest wears the accent on its caret, and says
-                    // nothing where a run says what it last did: the only line
-                    // it has to show there is its own prompt.
+                    // A shell at rest wears the accent on its caret. Where a
+                    // run says what it last did, a shell usually has only its
+                    // own prompt to show, so it says nothing — unless its
+                    // prompt marks what it runs, and the detail is the last
+                    // command, which is worth reading.
                     let shell = rows::live_shell(r);
+                    let quiet = shell && r.detail.is_none();
                     list_line(
                         w,
                         tw,
@@ -2576,7 +2579,7 @@ impl App {
                         ),
                         title,
                         Span::styled(fit(&rows::run_words(r), 10), style),
-                        if shell { "" } else { i.summary.as_str() },
+                        if quiet { "" } else { i.summary.as_str() },
                         i.joined_by.as_deref(),
                         r.ref_.as_deref(),
                         fmt_age(i.at, now),
