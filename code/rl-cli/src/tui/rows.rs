@@ -586,9 +586,12 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
     // things that live outside any folder. It leads the list only when one of
     // them waits for a yes; otherwise it trails, with the idle projects, so it
     // never steals the lead from work that needs you (pushed at the end below).
+    // It is always there, rules or none, so the cursor has somewhere to stand
+    // to reach them — `/edit schedule` on it opens yours — and it answers to
+    // the filter like any other project.
     let yours = chips(cx.rules, None, now);
     let yours_leads = yours.iter().any(Chip::needs_yes);
-    let yours_head = (!yours.is_empty()).then(|| Head {
+    let yours_head = hit(&["yours"]).then(|| Head {
         place: None,
         workspace: None,
         name: "yours".into(),
@@ -635,27 +638,26 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
             rows.extend(folded.into_iter().map(Row::Fold));
         }
     }
-    // A registered folder is always on the list, even before anything has run
-    // there — so you can select it, read its stats, edit its rules or open its
-    // shell. Idle projects come last (after every group with activity), and
-    // only under the all-lens, where a project-level line belongs.
-    if cx.lens == Lens::All {
-        for p in names.paths() {
-            if shown.contains(&p) {
-                continue;
-            }
-            let place = names.place(&p.to_string_lossy(), &p);
-            let name = names.workspace(&p);
-            if !hit(&[&name, &place]) {
-                continue;
-            }
-            rows.push(Row::Group(Head {
-                place: Some(place),
-                workspace: Some(p.clone()),
-                name,
-                rules: chips(cx.rules, Some(&p), now),
-            }));
+    // A registered folder is always on the list, under every lens, even before
+    // anything has run there — so you can select it, read its stats, edit its
+    // rules or open its shell. A lens narrows what is shown inside projects,
+    // never which projects there are. Ones with nothing to show come last,
+    // after every group with activity; only the filter takes them away.
+    for p in names.paths() {
+        if shown.contains(&p) {
+            continue;
         }
+        let place = names.place(&p.to_string_lossy(), &p);
+        let name = names.workspace(&p);
+        if !hit(&[&name, &place]) {
+            continue;
+        }
+        rows.push(Row::Group(Head {
+            place: Some(place),
+            workspace: Some(p.clone()),
+            name,
+            rules: chips(cx.rules, Some(&p), now),
+        }));
     }
     // The global "yours" row trails, unless it already led on a waiting yes.
     if !yours_leads && let Some(head) = yours_head {
@@ -881,8 +883,10 @@ mod tests {
         let rows = build_with(&d, &names, "", now);
         assert_eq!(
             keys(&rows),
-            ["[relay]", "q:q1", "r:fail1", "r:done1", "[api]", "r:blok1", "r:work1"],
-            "the question puts relay first; api is named by its folder; old01 is gone"
+            [
+                "[relay]", "q:q1", "r:fail1", "r:done1", "[api]", "r:blok1", "r:work1", "[yours]"
+            ],
+            "the question puts relay first; api is named by its folder; old01 is gone; yours trails"
         );
         assert_eq!(counts(&rows), (1, 2, 1, 1, 0));
         match &rows[0] {
@@ -919,19 +923,26 @@ mod tests {
             (PathBuf::from("/home/f/idle"), "idle".to_string()),
         ]);
         // The idle project is a line of its own, after every group with activity.
-        assert_eq!(keys(&build_with(&d, &names, "", now)), ["[relay]", "r:work1", "[idle]"]);
+        assert_eq!(
+            keys(&build_with(&d, &names, "", now)),
+            ["[relay]", "r:work1", "[idle]", "[yours]"]
+        );
         // It carries the folder so selecting it lands on the project.
-        match build_with(&d, &names, "", now).last() {
+        match build_with(&d, &names, "idle", now).last() {
             Some(Row::Group(h)) => {
                 assert_eq!(h.name, "idle");
                 assert_eq!(h.workspace.as_deref(), Some(Path::new("/home/f/idle")));
             }
-            _ => panic!("idle folder is the last row"),
+            _ => panic!("idle folder is the last row it filters to"),
         }
         // The filter reaches idle projects too.
         assert_eq!(keys(&build_with(&d, &names, "idle", now)), ["[idle]"]);
-        // A run-kind lens is about runs, so an idle project stays out of it.
-        assert_eq!(keys(&lens_build(&d, &names, Lens::Agents, now)), ["[relay]", "r:work1"]);
+        // A lens narrows what is inside projects, never which projects there are:
+        // the idle one and yours stay, even where nothing in them matches.
+        assert_eq!(
+            keys(&lens_build(&d, &names, Lens::Jobs, now)),
+            ["[idle]", "[relay]", "[yours]"]
+        );
     }
 
     #[test]
@@ -1022,7 +1033,7 @@ mod tests {
         let job_key = job_key(RuleKind::Schedule, "pulse", "/home/f/relay");
         assert_eq!(
             keys(&rows),
-            ["[relay]", "r:hand", &job_key, "r:go"],
+            ["[relay]", "r:hand", &job_key, "r:go", "[yours]"],
             "finished before working, newest first among equals"
         );
         let Some(Row::Job(j)) = rows.iter().find(|r| matches!(r, Row::Job(_))) else {
@@ -1052,7 +1063,7 @@ mod tests {
             },
         );
         let k = keys(&rows);
-        assert_eq!(k.len(), 4 + OPENED);
+        assert_eq!(k.len(), 5 + OPENED, "…and yours trails");
         assert_eq!(k[3], "  r:p29");
         assert_eq!(k[3 + OPENED - 1], "  r:p10");
         assert_eq!(k[3 + OPENED], "r:go");
@@ -1074,7 +1085,7 @@ mod tests {
         let rows = build_with(&d2, &names, "", now);
         assert_eq!(
             keys(&rows),
-            ["[relay]", &job_key, "r:w"],
+            ["[relay]", &job_key, "r:w", "[yours]"],
             "failed job above working run"
         );
         assert_eq!(counts(&rows), (0, 1, 1, 0, 1));
@@ -1293,7 +1304,7 @@ mod tests {
         // both are newer than it.
         assert_eq!(
             keys(&build_with(&d, &names, "", now)),
-            ["[relay]", "r:shell", "r:stale", "r:work"]
+            ["[relay]", "r:shell", "r:stale", "r:work", "[yours]"]
         );
 
         let mut shell = item("shell", RunState::Idle, ws, "2026-09-10T11:00:00Z", false);
@@ -1305,7 +1316,10 @@ mod tests {
             decisions: vec![],
         };
         // Where you work gives way to what wants you.
-        assert_eq!(keys(&build_with(&d, &names, "", now)), ["[relay]", "r:asks", "r:shell"]);
+        assert_eq!(
+            keys(&build_with(&d, &names, "", now)),
+            ["[relay]", "r:asks", "r:shell", "[yours]"]
+        );
     }
 
     #[test]
