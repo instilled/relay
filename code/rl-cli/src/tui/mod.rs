@@ -1048,10 +1048,8 @@ impl App {
             } else {
                 Some(format!("stop {}", i.run.title))
             }
-        } else if let Some(q) = self.selected_question() {
-            Some(format!("dismiss {}", q.title))
         } else {
-            None
+            self.selected_question().map(|q| format!("dismiss {}", q.title))
         }
     }
 
@@ -2904,9 +2902,9 @@ mod tests {
             area: Rect::new(2, 3, 20, 4),
             scroll: 1,
             keys: vec![
-                Some("j:one".into()),   // scrolled out of sight
-                Some("r:two".into()),   // the top line drawn
-                None,                   // the blank a group leaves above itself
+                Some("j:one".into()), // scrolled out of sight
+                Some("r:two".into()), // the top line drawn
+                None,                 // the blank a group leaves above itself
                 Some("g:three".into()),
             ],
         };

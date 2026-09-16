@@ -802,7 +802,10 @@ mod tests {
         );
         assert!(verdict(&yes, &cx(&e, &run), Timestamp::now()).fires());
         // A data field, compared as text, one value or any of a list.
-        let by_data = reaction("n", "on: run.failed\nwhere: { data: { exit: ['0', '1'] } }\nrun: x\ncwd: /tmp");
+        let by_data = reaction(
+            "n",
+            "on: run.failed\nwhere: { data: { exit: ['0', '1'] } }\nrun: x\ncwd: /tmp",
+        );
         assert!(verdict(&by_data, &cx(&e, &run), Timestamp::now()).fires());
         for (field, yaml) in [
             ("tag", "on: run.failed\nwhere: { tag: other }\nrun: x\ncwd: /tmp"),

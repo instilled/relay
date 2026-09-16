@@ -200,9 +200,7 @@ pub fn glyph(state: RunState) -> &'static str {
 /// A shell that is simply there to be typed in. One that ended, failed or
 /// wants you is news like any other run and is left to read as one.
 pub fn live_shell(r: &Run) -> bool {
-    r.kind == RunKind::Shell
-        && !r.state.is_terminal()
-        && !matches!(r.state, RunState::NeedsInput | RunState::Blocked)
+    r.kind == RunKind::Shell && !r.state.is_terminal() && !matches!(r.state, RunState::NeedsInput | RunState::Blocked)
 }
 
 /// The mark a row wears. A shell at rest is not a run that happens to be
@@ -596,9 +594,7 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
         name: "yours".into(),
         rules: yours,
     });
-    if yours_leads
-        && let Some(head) = &yours_head
-    {
+    if yours_leads && let Some(head) = &yours_head {
         rows.push(Row::Group(head.clone()));
     }
     for g in groups {
@@ -629,11 +625,7 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
             let s = j.score();
             (cls(s, false), s, j.last().at, Row::Job(j))
         }));
-        mixed.sort_by(|a, b| {
-            a.0.cmp(&b.0)
-                .then_with(|| a.1.cmp(&b.1))
-                .then_with(|| b.2.cmp(&a.2))
-        });
+        mixed.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)).then_with(|| b.2.cmp(&a.2)));
         for (_, _, _, row) in mixed {
             let folded: Vec<&DigestItem> = match &row {
                 Row::Job(j) if cx.opened.contains(&j.key) => j.runs.iter().copied().take(OPENED).collect(),
@@ -666,9 +658,7 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
         }
     }
     // The global "yours" row trails, unless it already led on a waiting yes.
-    if !yours_leads
-        && let Some(head) = yours_head
-    {
+    if !yours_leads && let Some(head) = yours_head {
         rows.push(Row::Group(head));
     }
     rows
@@ -915,7 +905,13 @@ mod tests {
         let now: Timestamp = "2026-09-10T12:00:00Z".parse().unwrap();
         let d = Digest {
             since: now,
-            items: vec![item("work1", RunState::Working, "/home/f/relay", "2026-09-10T11:50:00Z", false)],
+            items: vec![item(
+                "work1",
+                RunState::Working,
+                "/home/f/relay",
+                "2026-09-10T11:50:00Z",
+                false,
+            )],
             decisions: vec![],
         };
         let names = Names::new([
@@ -943,7 +939,13 @@ mod tests {
         let now: Timestamp = "2026-09-10T12:00:00Z".parse().unwrap();
         let d = Digest {
             since: now,
-            items: vec![item("w", RunState::Working, "/home/f/relay", "2026-09-10T11:00:00Z", false)],
+            items: vec![item(
+                "w",
+                RunState::Working,
+                "/home/f/relay",
+                "2026-09-10T11:00:00Z",
+                false,
+            )],
             decisions: vec![],
         };
         let names = Names::new([(PathBuf::from("/home/f/relay"), "relay".to_string())]);

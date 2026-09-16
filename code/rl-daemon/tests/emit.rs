@@ -70,7 +70,11 @@ async fn an_emitted_event_feeds_a_reaction_and_where_data_narrows() {
 
     // Only the ERROR one reached the rule, wearing its payload.
     let caught = wait_for(&dir.join("caught.txt")).await;
-    assert_eq!(caught.trim(), "disk full", "where.data let ERROR through and filled {{data.msg}}");
+    assert_eq!(
+        caught.trim(),
+        "disk full",
+        "where.data let ERROR through and filled {{data.msg}}"
+    );
 
     // Both events are in the ledger, with their data.
     let events: Vec<Event> = c.ok("event.list", json!({ "limit": 50 })).await;
