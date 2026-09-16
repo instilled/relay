@@ -18,6 +18,7 @@
 
 mod complete;
 pub mod form;
+mod graph;
 mod line;
 mod palette;
 mod pane;
@@ -51,10 +52,10 @@ use rl_core::time::fmt_age;
 use rl_proto::decision::Decision;
 use rl_proto::methods::{
     AgentList, DecisionDismiss, DecisionNote, DecisionTake, DecisionTakeParams, Digest, DigestGet, DigestItem,
-    DigestParams, EventFilter, EventList, GcParams, GcRun, PresenceClient, PresenceTouch, ReactionPause,
-    ReactionReload, ReactionResume, RuleApprove, RuleList, RuleRef, RunArchive, RunArchiveParams, RunId, RunIds,
-    RunInput, RunInputParams, RunMark, RunMarkParams, RunPin, RunPinParams, RunRename, RunRenameParams, RunSeen,
-    RunSpec, RunStart, RunStop, RunStopParams, ScheduleFilter, ScheduleName, SchedulePause, ScheduleReload,
+    DigestParams, EventFilter, EventList, GcParams, GcRun, GraphGet, GraphParams, PresenceClient, PresenceTouch,
+    ReactionPause, ReactionReload, ReactionResume, RuleApprove, RuleList, RuleRef, RunArchive, RunArchiveParams, RunId,
+    RunIds, RunInput, RunInputParams, RunMark, RunMarkParams, RunPin, RunPinParams, RunRename, RunRenameParams,
+    RunSeen, RunSpec, RunStart, RunStop, RunStopParams, ScheduleFilter, ScheduleName, SchedulePause, ScheduleReload,
     ScheduleResume, ScheduleRun, SummaryGet, SummaryMake, SummaryParams, WorkspaceList, WorkspaceRename,
     WorkspaceRenameParams, WorkspaceUp, WorkspaceUpParams,
 };
@@ -100,6 +101,8 @@ enum Pane {
 enum View {
     Work,
     Rules,
+    /// The wiring graph, over every project.
+    Graph,
 }
 
 enum Mode {
@@ -177,6 +180,12 @@ struct App {
     rules: Vec<Rule>,
     /// The other view's selection, kept for when you come back.
     other_sel: Option<String>,
+    /// The wiring, fetched while the graph is up.
+    graph: Option<rl_proto::graph::Graph>,
+    /// The view the graph was opened from, and the selection it had.
+    graph_from: (View, Option<String>),
+    /// Where the window over the graph starts, column and row.
+    graph_at: std::cell::Cell<(usize, usize)>,
     /// The rules view, narrowed to one folder's rules (`r` on its row).
     rules_scope: Option<PathBuf>,
     /// Jobs opened to their runs.
@@ -493,6 +502,9 @@ pub async fn run(home: &Home) -> Result<()> {
         view: View::Work,
         rules: Vec::new(),
         other_sel: None,
+        graph: None,
+        graph_from: (View::Work, None),
+        graph_at: std::cell::Cell::new((0, 0)),
         rules_scope: None,
         opened: HashSet::new(),
         shell_at: HashMap::new(),
@@ -676,6 +688,12 @@ impl App {
             Ok(r) => self.rules = r,
             Err(e) => self.say(format!("daemon: {e:#}")),
         }
+        if self.view == View::Graph {
+            match self.rpc.call::<GraphGet>(GraphParams::default()).await {
+                Ok(g) => self.graph = Some(g),
+                Err(e) => self.say(format!("daemon: {e:#}")),
+            }
+        }
         // Which CLIs are agents decides how a line reads; asked once.
         if self.agents.is_empty()
             && let Ok(list) = self.rpc.call::<AgentList>(()).await
@@ -750,7 +768,15 @@ impl App {
         match self.view {
             View::Work => self.rows().into_iter().filter_map(|r| r.key()).collect(),
             View::Rules => self.rule_rows().into_iter().filter_map(|r| r.key()).collect(),
+            View::Graph => self.graph_plan().map(|(_, p)| p.order()).unwrap_or_default(),
         }
+    }
+
+    /// The graph as the filter leaves it, laid out.
+    fn graph_plan(&self) -> Option<(&rl_proto::graph::Graph, graph::Plan)> {
+        let g = self.graph.as_ref()?;
+        let kept = graph::keep(g, &self.filter, &self.names);
+        Some((g, graph::plan(g, &kept, &self.names, Timestamp::now())))
     }
 
     /// Keeps the selection on something that exists.
@@ -1146,9 +1172,33 @@ impl App {
 
     // ---- rules -------------------------------------------------------------
 
+    /// `/graph` and `^g`: into the wiring, or back to wherever it was opened
+    /// from, each view keeping its own place.
+    async fn toggle_graph(&mut self) {
+        if self.view == View::Graph {
+            let (view, sel) = self.graph_from.clone();
+            self.graph_from.1 = std::mem::replace(&mut self.sel, sel);
+            self.view = view;
+        } else {
+            let sel = self.graph_from.1.take();
+            self.graph_from = (self.view, std::mem::replace(&mut self.sel, sel));
+            self.view = View::Graph;
+            self.close_term();
+        }
+        self.picked.clear();
+        self.events.clear();
+        self.refresh().await;
+    }
+
     async fn toggle_view(&mut self) {
+        if self.view == View::Graph {
+            self.toggle_graph().await;
+            if self.view == View::Rules {
+                return;
+            }
+        }
         self.view = match self.view {
-            View::Work => View::Rules,
+            View::Work | View::Graph => View::Rules,
             View::Rules => View::Work,
         };
         std::mem::swap(&mut self.sel, &mut self.other_sel);
@@ -1840,6 +1890,7 @@ impl App {
             (KeyCode::Char('r'), KeyModifiers::CONTROL) => self.rename_here(),
             (KeyCode::Char('p'), KeyModifiers::CONTROL) => self.toggle_pin().await,
             (KeyCode::Char('o'), KeyModifiers::CONTROL) => self.toggle_pane(),
+            (KeyCode::Char('g'), KeyModifiers::CONTROL) => self.toggle_graph().await,
             (KeyCode::Char('t'), KeyModifiers::CONTROL) => self.new_shell(area).await,
             (KeyCode::Esc, _) => {
                 // The pane goes first, whatever stands open behind it: it is
@@ -1870,6 +1921,8 @@ impl App {
                 } else if !self.filter.is_empty() {
                     self.filter.clear();
                     self.settle();
+                } else if self.view == View::Graph {
+                    self.toggle_graph().await;
                 }
             }
             (KeyCode::Down, _) => {
@@ -2202,10 +2255,11 @@ impl App {
             palette::Cmd::Rules => {
                 self.rules_scope = match self.view {
                     View::Work => self.selected_folder(),
-                    View::Rules => None,
+                    View::Rules | View::Graph => None,
                 };
                 self.toggle_view().await;
             }
+            palette::Cmd::Graph => self.toggle_graph().await,
             palette::Cmd::Shell => self.new_shell(area).await,
             palette::Cmd::Reload => match arg.trim() {
                 "rules" => self.reload_rules().await,
@@ -2337,6 +2391,10 @@ impl App {
         let mut title = match self.view {
             View::Work => rows::headline(&rows, news, &self.filter),
             View::Rules => rules::headline(&rule_rows, &self.filter),
+            View::Graph => match &self.graph {
+                Some(g) => graph::headline(g, graph::keep(g, &self.filter, &self.names).len(), &self.filter),
+                None => "wiring".into(),
+            },
         };
         if self.view == View::Rules
             && let Some(p) = &self.rules_scope
@@ -2375,6 +2433,7 @@ impl App {
             match self.view {
                 View::Work => self.draw_list(f, list, &rows),
                 View::Rules => self.draw_rules(f, list, &rule_rows),
+                View::Graph => self.draw_graph(f, list),
             }
             if a.pane.is_some() {
                 let x = list.x + list.width;
@@ -2763,6 +2822,30 @@ impl App {
         };
     }
 
+    /// The wiring, a window of it at a time, following the selection.
+    fn draw_graph(&self, f: &mut Frame, area: Rect) {
+        // Until the mouse knows the graph, it must not act on the list's map.
+        *self.hit.borrow_mut() = ListHit::default();
+        let Some((g, plan)) = self.graph_plan() else {
+            f.render_widget(Paragraph::new(" reading the wiring…").dim(), area);
+            return;
+        };
+        if plan.boxes.is_empty() {
+            let msg = if self.filter.is_empty() {
+                " nothing wired yet · rl every or rl on, or rl up in a folder with .relay/"
+            } else {
+                " nothing matches"
+            };
+            f.render_widget(Paragraph::new(msg).dim(), area);
+            return;
+        }
+        let (w, h) = (area.width as usize, area.height as usize);
+        let at = graph::follow(&plan, self.sel.as_deref(), self.graph_at.get(), w, h);
+        self.graph_at.set(at);
+        let canvas = graph::draw(g, &plan, &self.names, self.sel.as_deref(), Timestamp::now());
+        f.render_widget(Paragraph::new(canvas.lines(at.0, at.1, w, h)), area);
+    }
+
     fn draw_rules(&self, f: &mut Frame, area: Rect, rows: &[RuleRow]) {
         // The rules view draws its own rows; until the mouse knows them, it
         // must not act on the map the work list left behind.
@@ -2964,6 +3047,9 @@ impl App {
         }
         if self.view == View::Rules {
             return "/new a rule · /reload · /rules back · or type something to run here".into();
+        }
+        if self.view == View::Graph {
+            return "↑↓ steps through it · /filter narrows to what touches a folder · ^g or esc back".into();
         }
         let pane = if self.show_pane {
             "^o hides details"
