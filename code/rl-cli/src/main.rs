@@ -1,5 +1,9 @@
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, Parser, Subcommand};
+use rl_cli::client::Client;
+use rl_cli::daemon;
+use rl_cli::env::child_env;
+use rl_cli::render;
 use rl_core::time::{now, parse_since};
 use rl_core::{Home, display_path};
 use rl_proto::decision::{Decision, DecisionOption, DecisionStatus};
@@ -27,10 +31,6 @@ use rl_proto::reaction::{Filter, Reaction, ReactionSpec};
 use rl_proto::rule::{Rule, RuleKind, RuleStatus};
 use rl_proto::schedule::{Schedule, UpReport};
 use rl_proto::types::{AttachMode, Cause, Mark, RunKind, RunState};
-use rl_cli::client::Client;
-use rl_cli::daemon;
-use rl_cli::env::child_env;
-use rl_cli::render;
 use serde_json::json;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -1143,7 +1143,9 @@ async fn emit(home: &Home, a: EmitArgs, json: bool) -> Result<()> {
             .ok_or_else(|| anyhow!("--data wants KEY=VALUE, got `{kv}`"))?;
         data.insert(k.to_string(), serde_json::Value::String(v.to_string()));
     }
-    let run = a.run.or_else(|| std::env::var("RELAY_RUN").ok().filter(|s| !s.is_empty()));
+    let run = a
+        .run
+        .or_else(|| std::env::var("RELAY_RUN").ok().filter(|s| !s.is_empty()));
     // A folder is needed only when no run says which one; then, here.
     let workspace = match a.in_ {
         Some(p) => Some(p),
@@ -1156,7 +1158,7 @@ async fn emit(home: &Home, a: EmitArgs, json: bool) -> Result<()> {
         workspace,
         group: a.group,
         summary: a.summary,
-        data: (!data.is_empty()).then(|| serde_json::Value::Object(data)),
+        data: (!data.is_empty()).then_some(serde_json::Value::Object(data)),
     };
     daemon::ensure(home, !json).await?.call::<EventEmit>(params).await?;
     Ok(())
@@ -2103,8 +2105,17 @@ mod tests {
 
     #[test]
     fn emit_parses_without_clashing_with_the_global_json() {
-        let cli = Cli::try_parse_from(["rl", "emit", "log.issue", "-d", "severity=ERROR", "--json", "--json-data", "-"])
-            .expect("emit args parse");
+        let cli = Cli::try_parse_from([
+            "rl",
+            "emit",
+            "log.issue",
+            "-d",
+            "severity=ERROR",
+            "--json",
+            "--json-data",
+            "-",
+        ])
+        .expect("emit args parse");
         let Some(Cmd::Emit(a)) = cli.cmd else {
             panic!("expected emit")
         };

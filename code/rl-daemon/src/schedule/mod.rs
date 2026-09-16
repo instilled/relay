@@ -513,7 +513,11 @@ impl Scheduler {
             at: now,
             workspace: cwd.clone(),
             run: None,
-            group_key: s.spec.ref_.clone().unwrap_or_else(|| cwd.to_string_lossy().into_owned()),
+            group_key: s
+                .spec
+                .ref_
+                .clone()
+                .unwrap_or_else(|| cwd.to_string_lossy().into_owned()),
             kind: event_kind::SCHEDULE_SKIPPED.into(),
             summary: format!("schedule `{}` skipped: {reason}", s.name),
             data: Some(json!({ "schedule": s.name, "scope": s.scope, "hash": s.hash, "reason": reason, "due": due })),

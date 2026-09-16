@@ -138,7 +138,9 @@ impl Graphics {
                     self.state = if b == 0x07 || (prev_was_esc && b == b'\\') {
                         EscState::None
                     } else {
-                        EscState::Osc { prev_was_esc: b == 0x1b }
+                        EscState::Osc {
+                            prev_was_esc: b == 0x1b,
+                        }
                     };
                 }
                 EscState::Charset { g0 } => {
@@ -333,7 +335,9 @@ impl Stripper {
                         if c != '\x1b' {
                             self.osc.push(c);
                         }
-                        self.state = EscState::Osc { prev_was_esc: c == '\x1b' };
+                        self.state = EscState::Osc {
+                            prev_was_esc: c == '\x1b',
+                        };
                     }
                 }
                 EscState::Charset { g0 } => {
@@ -442,7 +446,11 @@ mod tests {
         let mut s = Stripper::default();
         // A shell echoing `s`, then backspacing and writing the line again.
         assert_eq!(s.strip(b"s\x08sleep 2"), "ssleep 2", "no terminal here: both are kept");
-        assert_eq!(s.take_events(), vec![(1, Ev::Backspace)], "but it says where the backspace fell");
+        assert_eq!(
+            s.take_events(),
+            vec![(1, Ev::Backspace)],
+            "but it says where the backspace fell"
+        );
         // A return takes the line away from what is returned, and the echo
         // keeps it — which is the only place the `2` survives.
         assert_eq!(s.strip(b"2\r\r\n"), "\n");
@@ -458,7 +466,10 @@ mod tests {
         // Everything else passes through byte for byte — including a `q`
         // inside a parameter, which is no part of the text at all.
         let mut g = Graphics::default();
-        assert_eq!(g.rewrite(b"\x1b[31mred\x1b[0m\x1b]0;q\x07"), b"\x1b[31mred\x1b[0m\x1b]0;q\x07");
+        assert_eq!(
+            g.rewrite(b"\x1b[31mred\x1b[0m\x1b]0;q\x07"),
+            b"\x1b[31mred\x1b[0m\x1b]0;q\x07"
+        );
         // The set and a half-read escape both carry across reads.
         let mut g = Graphics::default();
         assert_eq!(g.rewrite(b"\x1b(0l"), "┌".as_bytes());
