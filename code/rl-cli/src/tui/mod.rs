@@ -654,6 +654,11 @@ impl App {
         }
     }
 
+    /// The cursor is on the "yours" row — your own (global) rules, no folder.
+    fn selected_global(&self) -> bool {
+        matches!(self.selected(), Some(Row::Group(h)) if h.workspace.is_none())
+    }
+
     /// Keys of the selectable rows of the view that is up, in order.
     fn keys(&self) -> Vec<String> {
         match self.view {
@@ -1607,8 +1612,8 @@ impl App {
             // nothing numbered on screen is no question at all.
             self.show_pane = true;
             self.mode = Mode::Answer(id);
-        } else if self.selected_project().is_some() {
-            // A project header: its stats in the pane. `e` and `^r` act on it.
+        } else if self.selected_project().is_some() || self.selected_global() {
+            // A project (or the global "yours") header: its rules in the pane.
             self.pane = Pane::Facts;
             self.show_pane = true;
         } else {
@@ -2470,6 +2475,8 @@ impl App {
                     now,
                 )
             }
+            // The "yours" row: your own (global) rules, no folder.
+            Some(Row::Group(_)) => pane::global_lines(&self.rules, now),
             _ => vec![Line::from(Span::raw(" nothing selected").dim())],
         };
         f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
@@ -2591,6 +2598,8 @@ impl App {
             Some(Row::Group(h)) if h.workspace.is_some() => {
                 format!("enter its stats · /rules edits schedules & reactions · ^r renames · {pane}")
             }
+            // The "yours" row: global rules, no folder to rename.
+            Some(Row::Group(_)) => format!("enter its rules · /rules edits your schedules & reactions · {pane}"),
             _ => String::new(),
         }
     }
