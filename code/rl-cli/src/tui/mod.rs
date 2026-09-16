@@ -79,6 +79,9 @@ const LINE_MAX: u16 = 8;
 /// Recent output replayed when joining a run for real, enough to paint the
 /// screen on arrival. Bytes.
 const JOIN_SCROLLBACK: u64 = 256 * 1024;
+/// Where the header and footer text starts: level with what is typed on the
+/// line, past its `❯ `.
+const TEXT_INDENT: u16 = 2;
 /// Narrower than this, the pane takes the screen instead of sharing it.
 const SPLIT_AT: u16 = 100;
 /// The list's share of a split screen, in percent: two thirds beside a
@@ -2469,7 +2472,8 @@ impl App {
         // rides here rather than a row of its own.
         let lens = (self.view == View::Work).then(|| self.lens_line());
         let lens_w = lens.as_ref().map_or(0, |l| l.width() as u16 + 2);
-        let [l, lens_area, r] = Layout::horizontal([
+        let [_, l, lens_area, r] = Layout::horizontal([
+            Constraint::Length(TEXT_INDENT),
             Constraint::Fill(1),
             Constraint::Length(lens_w),
             Constraint::Length(self.me.len() as u16 + 1),
@@ -2573,7 +2577,12 @@ impl App {
         if matches!(self.mode, Mode::Normal) {
             f.render_widget(Paragraph::new(self.line_lines(a.line.width)), a.line);
         }
-        f.render_widget(Paragraph::new(self.footer()).dim(), a.footer);
+        let footer = Rect {
+            x: a.footer.x + TEXT_INDENT,
+            width: a.footer.width.saturating_sub(TEXT_INDENT),
+            ..a.footer
+        };
+        f.render_widget(Paragraph::new(self.footer()).dim(), footer);
     }
 
     /// The lens, at the right of the header: the slices of the list, the one
