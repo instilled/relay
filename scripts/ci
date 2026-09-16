@@ -1,0 +1,63 @@
+#!/bin/sh
+# The CI checks, on Linux, in a container: the same three commands
+# .github/workflows/ci.yml runs, in the same order, so green here is green
+# there.
+#
+#   scripts/ci              fmt, then clippy, then the suites
+#   scripts/ci fmt          just the formatting check
+#   scripts/ci clippy       just clippy, with -D warnings as CI has it
+#   scripts/ci test         just the suites
+#   scripts/ci shell        a shell in the container, to poke at a failure
+#
+# Knobs:
+#   RELAY_CI_IMAGE=rust:1.96       the toolchain image
+#   RELAY_CI_PLATFORM=linux/amd64  the architecture CI runs (slow: emulated)
+#
+# Why a container and not just `cargo test`: the suites spawn a daemon over a
+# unix socket and hand runs a pty, and macOS and Linux part ways on both —
+# a suite can pass here and fail there. The build stays out of the repo's own
+# target/, which holds macOS artifacts, so the two never mix: the container
+# keeps its target directory and cargo registry in named volumes, which makes
+# the first run slow and the rest quick.
+set -e
+
+self=$0
+while [ -L "$self" ]; do
+  target=$(readlink "$self")
+  case $target in
+    /*) self=$target ;;
+    *) self=$(dirname "$self")/$target ;;
+  esac
+done
+root=$(cd "$(dirname "$self")/.." && pwd)
+
+image=${RELAY_CI_IMAGE:-rust:1.96}
+platform=""
+[ -n "$RELAY_CI_PLATFORM" ] && platform="--platform $RELAY_CI_PLATFORM"
+
+fmt='cargo fmt --all --check'
+clippy='cargo clippy --workspace --all-targets -- -D warnings'
+suites='cargo test --workspace'
+
+tty=""
+case ${1:-all} in
+  fmt) run=$fmt ;;
+  clippy) run=$clippy ;;
+  test) run=$suites ;;
+  all) run="$fmt && $clippy && $suites" ;;
+  shell) run=bash; tty="-it" ;;
+  *) echo "scripts/ci: fmt | clippy | test | shell (default: all)" >&2; exit 2 ;;
+esac
+
+# The suites read $SHELL (a run inherits the shell's environment), and a
+# container image sets no such thing.
+exec docker run --rm $tty $platform \
+  -v "$root:/w" -w /w \
+  -v relay-ci-target:/target \
+  -v relay-ci-cargo:/usr/local/cargo/registry \
+  -v relay-ci-rustup:/usr/local/rustup \
+  -e CARGO_TARGET_DIR=/target \
+  -e CARGO_TERM_COLOR=always \
+  -e SHELL=/bin/bash \
+  "$image" \
+  sh -c "rustup component add rustfmt clippy >/dev/null && $run"
