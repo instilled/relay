@@ -7,7 +7,11 @@ Goal for v1:
 
 ## Open — in the order they'd be built
 
+* [ ] commands list / should be navigatable by cursor (shoudl highlight the row and enter put it in the prompt)
+* [ ] command /add-workspace (or /add-dir) which adds a new "folder" from the "command line"
+* [ ] ctrl-x should ask to delete hitting it a second time delete -> same as claude agent view. and ctrl-c dito
 * [ ] every registered workspace shows as a project row even with no runs — a folder you `rl up`'d is always on the list, so you can select it, read its stats, edit its rules, or open its shell before anything has happened there
+* [ ] "realy global" (schedules, reactions) also als "project row"?
 * [ ] rename shared-* modules to rl-core, rl-detect, rl-ledger, rl-proto (as well as the cargo modules)
 * [ ] persistent project shell — multiple shells per project + switching between them ("panes", not a multiplexer); per-command facts via shell prompt integration (OSC 133 / precmd) so exit codes and history survive; a distinct "shell" presentation in the list
 * [ ] agent-attach reliability — join a just-spawned holder without bouncing back to the list
