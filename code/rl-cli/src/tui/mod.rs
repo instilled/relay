@@ -85,10 +85,6 @@ const SPLIT_AT: u16 = 100;
 /// details pane, half beside a terminal, which needs the width.
 const LIST_SHARE: u16 = 67;
 const LIST_SHARE_TERM: u16 = 50;
-/// Air around the panel: columns each side, a row top and bottom. None of it
-/// in the full-screen terminal, which wants every cell.
-const GUTTER_X: u16 = 2;
-const GUTTER_Y: u16 = 1;
 
 /// What the right pane shows for a run.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -365,19 +361,9 @@ struct Areas {
 }
 
 fn areas(area: Rect, wide: bool, show_pane: bool, share: u16, form_h: u16, cands_h: u16, line_h: u16) -> Areas {
-    // A gutter of air around the panel and rules between its sections — but not
-    // in the full-screen terminal, which wants every cell.
+    // The panel runs to the screen's edges, with rules between its sections —
+    // but not in the full-screen terminal, which wants every cell.
     let chrome = !wide;
-    let area = if chrome {
-        Rect {
-            x: area.x + GUTTER_X,
-            y: area.y + GUTTER_Y,
-            width: area.width.saturating_sub(2 * GUTTER_X),
-            height: area.height.saturating_sub(2 * GUTTER_Y),
-        }
-    } else {
-        area
-    };
     let rule = u16::from(chrome);
     let [head, rule_a, body, form, cands, rule_b, line, rule_c, footer] = Layout::vertical([
         Constraint::Length(1),
@@ -2533,9 +2519,9 @@ impl App {
             let pick = self.pick;
             let lead = |i: usize| {
                 if pick == Some(i) {
-                    (" › ", theme::accent())
+                    ("❯ ", theme::accent())
                 } else {
-                    ("   ", theme::dim())
+                    ("  ", theme::dim())
                 }
             };
             let lines: Vec<Line> = match (&slash, &self.completing) {
@@ -2587,7 +2573,7 @@ impl App {
         if matches!(self.mode, Mode::Normal) {
             f.render_widget(Paragraph::new(self.line_lines(a.line.width)), a.line);
         }
-        f.render_widget(Paragraph::new(format!(" {}", self.footer())).dim(), a.footer);
+        f.render_widget(Paragraph::new(self.footer()).dim(), a.footer);
     }
 
     /// The lens, at the right of the header: the slices of the list, the one
@@ -2615,7 +2601,7 @@ impl App {
     fn line_lines(&self, width: u16) -> Vec<Line<'static>> {
         if self.line.is_empty() {
             return vec![Line::from(vec![
-                Span::styled(" › ", theme::accent()),
+                Span::styled("❯ ", theme::accent()),
                 Span::raw("what do you want done here? / for commands · shift-enter for a new line")
                     .style(theme::dim()),
             ])];
@@ -2662,7 +2648,7 @@ impl App {
         let end = (start + max).min(rows.len());
         let mut out = Vec::new();
         for (idx, (o, part)) in rows.iter().enumerate().take(end).skip(start) {
-            let prefix = if idx == 0 { " › " } else { "   " };
+            let prefix = if idx == 0 { "❯ " } else { "  " };
             let mut content = String::from(prefix);
             if idx == cur_row {
                 let (a, b) = part.split_at(cursor - o);
@@ -2720,8 +2706,10 @@ impl App {
                         lines.push(Line::raw(""));
                         keys.push(None);
                     }
-                    let mut l = vec![Span::raw(" ")];
-                    let mut used = 1;
+                    // At the edge, so the rows under it — indented by their mark's
+                    // leading space — read as its own.
+                    let mut l = vec![];
+                    let mut used = 0;
                     // The name reads first; the folder it lives in follows, quiet.
                     l.push(Span::styled(h.name.clone(), theme::name()));
                     used += h.name.chars().count();
