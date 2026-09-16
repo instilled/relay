@@ -69,19 +69,31 @@ pub async fn install(
             std::fs::write(&old, t)?;
         }
     }
+    // From here on, the file already carries the rule: `ScheduleReload` /
+    // `ReactionReload` (and `WorkspaceUp`'s scan of the folder) re-read it
+    // from disk, so the write above can't be deferred until after these
+    // calls succeed. If one of them fails, the write still stands, so a bare
+    // error would be misleading: say so, so a retry isn't confusing.
+    let partial = |e: anyhow::Error| {
+        e.context(format!(
+            "{} was saved to disk, but the daemon may not be caught up yet — retry is safe",
+            file.display()
+        ))
+    };
     if let (Some(path), false) = (&d.folder, registered) {
         rpc.call::<WorkspaceUp>(WorkspaceUpParams {
             path: path.clone(),
             approve: true,
         })
-        .await?;
+        .await
+        .map_err(partial)?;
     } else {
         match d.kind {
             RuleKind::Schedule => {
-                rpc.call::<ScheduleReload>(()).await?;
+                rpc.call::<ScheduleReload>(()).await.map_err(partial)?;
             }
             RuleKind::Reaction => {
-                rpc.call::<ReactionReload>(()).await?;
+                rpc.call::<ReactionReload>(()).await.map_err(partial)?;
             }
         }
         rpc.call::<RuleApprove>(RuleRef {
@@ -89,7 +101,8 @@ pub async fn install(
             scope: Some(scope),
             kind: Some(d.kind),
         })
-        .await?;
+        .await
+        .map_err(partial)?;
     }
     Ok(file)
 }

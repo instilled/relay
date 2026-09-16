@@ -1,62 +1,36 @@
 //! Schedules: time → an action. The spec is what `schedules.yaml` holds; the
 //! row is what the daemon tracks about it.
 
-use crate::action::{Action, Task};
+use crate::action::action_struct;
 use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-/// One entry of `schedules.yaml`, as written: when it fires, what it runs,
-/// and what to do about firings that clash or are missed.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ScheduleSpec {
-    /// Five-field cron expression, local time. `cron` or `every`, not both.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cron: Option<String>,
-    /// An interval (`30m`, `4h`), counted from the last firing.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub every: Option<String>,
-    /// What runs: a shell line, argv, or an agent. See [`Task`].
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub run: Option<Task>,
-    /// Required for global schedules; a workspace schedule defaults to the
+action_struct! {
+    /// One entry of `schedules.yaml`, as written: when it fires, what it runs,
+    /// and what to do about firings that clash or are missed. `cwd` is
+    /// required for global schedules; a workspace schedule defaults to the
     /// folder, and a relative one is inside it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cwd: Option<PathBuf>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub env: BTreeMap<String, String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub tags: Vec<String>,
-    #[serde(default, rename = "ref", skip_serializing_if = "Option::is_none")]
-    pub ref_: Option<String>,
-    /// Title of the runs; defaults to the schedule's name.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub title: Option<String>,
-    /// Pipes instead of a pty.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub no_tty: bool,
-    #[serde(default)]
-    pub missed: Missed,
-    #[serde(default)]
-    pub overlap: Overlap,
+    #[serde(deny_unknown_fields)]
+    struct ScheduleSpec {
+        before: {
+            /// Five-field cron expression, local time. `cron` or `every`, not both.
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            pub cron: Option<String>,
+            /// An interval (`30m`, `4h`), counted from the last firing.
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            pub every: Option<String>,
+        }
+        after: {
+            #[serde(default)]
+            pub missed: Missed,
+            #[serde(default)]
+            pub overlap: Overlap,
+        }
+    }
 }
 
 impl ScheduleSpec {
-    /// What it starts, as the shape decisions and workflows use too.
-    pub fn action(&self) -> Action {
-        Action {
-            run: self.run.clone(),
-            cwd: self.cwd.clone(),
-            env: self.env.clone(),
-            tags: self.tags.clone(),
-            ref_: self.ref_.clone(),
-            title: self.title.clone(),
-            no_tty: self.no_tty,
-        }
-    }
-
     /// `cron "0 2 * * *"` or `every 4h`, for lists.
     pub fn when(&self) -> String {
         match (&self.cron, &self.every) {

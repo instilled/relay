@@ -44,6 +44,10 @@ pub struct Heuristics {
     stale_pending: bool,
     /// Bytes of a character cut off by a read boundary.
     pending: Vec<u8>,
+    /// ANSI-stripping state carried across reads, so an escape sequence cut
+    /// off by a read boundary is resumed rather than leaking its tail into
+    /// the visible text.
+    ansi: ansi::Stripper,
 }
 
 impl Heuristics {
@@ -57,6 +61,7 @@ impl Heuristics {
             idle_pending: false,
             stale_pending: true,
             pending: Vec::new(),
+            ansi: ansi::Stripper::new(),
         }
     }
 
@@ -72,7 +77,7 @@ impl Heuristics {
             _ => bytes.len(),
         };
         self.pending = bytes[cut..].to_vec();
-        self.tail.push_str(&ansi::strip(&bytes[..cut]));
+        self.tail.push_str(&self.ansi.strip(&bytes[..cut]));
         if self.tail.len() > TAIL_MAX {
             let cut = self.tail.len() - TAIL_MAX;
             let cut = self
@@ -191,6 +196,15 @@ mod tests {
         let s = h.tick(t(14.0)).unwrap();
         assert_eq!((s.state, s.confidence), (RunState::Idle, Confidence::Guess));
         assert_eq!(h.last_line(80).as_deref(), Some("lots of text with no prompt"));
+    }
+
+    #[test]
+    fn output_resumes_an_escape_sequence_split_across_reads() {
+        let reg = Registry::builtin();
+        let mut h = Heuristics::new(reg.generic(), RunKind::Agent, t(0.0));
+        h.output(b"\x1b[", t(0.0));
+        h.output(b"32mready\n", t(1.0));
+        assert_eq!(h.tail(), "ready\n", "split escape must not leak into the tail");
     }
 
     #[test]

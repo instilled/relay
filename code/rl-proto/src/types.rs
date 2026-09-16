@@ -29,6 +29,19 @@ pub enum RunState {
 }
 
 impl RunState {
+    /// Every variant, for anything that needs to enumerate them.
+    pub const ALL: &'static [Self] = &[
+        Self::Starting,
+        Self::Working,
+        Self::Idle,
+        Self::NeedsInput,
+        Self::Blocked,
+        Self::Stale,
+        Self::Finished,
+        Self::Failed,
+        Self::Stopped,
+    ];
+
     pub fn is_terminal(self) -> bool {
         matches!(self, Self::Finished | Self::Failed | Self::Stopped)
     }

@@ -87,8 +87,6 @@ pub fn list(conn: &Connection, f: &EventFilter) -> Result<Vec<Event>> {
     Ok(rows.collect::<Result<_, _>>()?)
 }
 
-/// The newest event of a run other than `run.started` (that one if it is
-/// all there is).
 /// One event by id.
 pub fn get(conn: &Connection, id: i64) -> Result<Option<Event>> {
     Ok(conn
@@ -112,6 +110,8 @@ pub fn last_id(conn: &Connection) -> Result<i64> {
     Ok(conn.query_row("SELECT COALESCE(MAX(id), 0) FROM events", [], |r| r.get(0))?)
 }
 
+/// The newest event of a run other than `run.started` (that one if it is
+/// all there is).
 pub fn latest_for_run(conn: &Connection, run: &str) -> Result<Option<Event>> {
     let mut stmt = conn.prepare(&format!(
         "SELECT {COLS} FROM events WHERE run = ?1 ORDER BY (kind = 'run.started') ASC, at DESC, id DESC LIMIT 1"

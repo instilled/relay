@@ -7,7 +7,7 @@
 use crate::{conv, conv_str};
 use anyhow::{Result, bail};
 use jiff::Timestamp;
-use rl_core::time::{from_millis, to_millis};
+use rl_core::time::{from_millis, optional_from_millis, to_millis};
 use rl_proto::decision::{Decision, DecisionOption, DecisionStatus};
 use rl_proto::methods::DecisionFilter;
 use rusqlite::{Connection, OptionalExtension, Row, params, params_from_iter, types::Value};
@@ -213,16 +213,8 @@ fn from_row(row: &Row) -> rusqlite::Result<Decision> {
         options,
         multi: row.get(10)?,
         status: row.get::<_, String>(11)?.parse().map_err(|e| conv_str(11, e))?,
-        expires_at: row
-            .get::<_, Option<i64>>(12)?
-            .map(from_millis)
-            .transpose()
-            .map_err(|e| conv(12, e))?,
-        resolved_at: row
-            .get::<_, Option<i64>>(13)?
-            .map(from_millis)
-            .transpose()
-            .map_err(|e| conv(13, e))?,
+        expires_at: optional_from_millis(row.get(12)?, 12, conv)?,
+        resolved_at: optional_from_millis(row.get(13)?, 13, conv)?,
         chosen,
         outcome_runs,
         note: row.get(16)?,

@@ -366,7 +366,6 @@ mod tests {
                 group: Some("g".into()),
                 ..Default::default()
             }),
-            run: Some(task),
             ask: Some(AskSpec {
                 title: "t".into(),
                 summary: Some("s".into()),
@@ -386,6 +385,7 @@ mod tests {
                 group: Some("g".into()),
                 expires: Some("1h".into()),
             }),
+            run: Some(task),
             cwd: Some("/w".into()),
             tags: vec!["t".into()],
             ref_: Some("r".into()),

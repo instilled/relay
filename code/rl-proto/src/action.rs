@@ -201,6 +201,70 @@ impl Action {
     }
 }
 
+/// Declares a struct that carries the 7 [`Action`] fields — `run`, `cwd`,
+/// `env`, `tags`, `ref`, `title`, `no_tty`, with their serde attributes —
+/// alongside whatever else is its own, plus a `fn action(&self) -> Action`
+/// that assembles them. `DecisionOption`, `ScheduleSpec` and `ReactionSpec`
+/// are all declared through this, so the field list and the mapping onto
+/// `Action` are written once instead of by hand in three places.
+///
+/// This is not `#[serde(flatten)]`: flatten buffers deserialization through
+/// a generic `Content`, which loses the string-ness of an ambiguous YAML
+/// scalar before `Task` (or a plain `String` field) ever sees it — `run:
+/// [true]` would deserialize its argv as a bool and fail, where the same
+/// document deserializes fine into a struct with the fields written out
+/// directly. Declaring the real fields here, once, keeps that working.
+macro_rules! action_struct {
+    (
+        $(#[$meta:meta])*
+        struct $name:ident {
+            before: { $($before:tt)* }
+            after: { $($after:tt)* }
+        }
+    ) => {
+        #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+        $(#[$meta])*
+        pub struct $name {
+            $($before)*
+            /// What runs, if anything. See [`Task`](crate::action::Task).
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            pub run: Option<crate::action::Task>,
+            /// Where it runs.
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            pub cwd: Option<std::path::PathBuf>,
+            #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+            pub env: std::collections::BTreeMap<String, String>,
+            #[serde(default, skip_serializing_if = "Vec::is_empty")]
+            pub tags: Vec<String>,
+            #[serde(default, rename = "ref", skip_serializing_if = "Option::is_none")]
+            pub ref_: Option<String>,
+            /// Title of the run(s) it starts; the caller's own name by default.
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            pub title: Option<String>,
+            /// Pipes instead of a pty.
+            #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+            pub no_tty: bool,
+            $($after)*
+        }
+
+        impl $name {
+            /// What it starts, as the shape every other kind of rule uses too.
+            pub fn action(&self) -> crate::action::Action {
+                crate::action::Action {
+                    run: self.run.clone(),
+                    cwd: self.cwd.clone(),
+                    env: self.env.clone(),
+                    tags: self.tags.clone(),
+                    ref_: self.ref_.clone(),
+                    title: self.title.clone(),
+                    no_tty: self.no_tty,
+                }
+            }
+        }
+    };
+}
+pub(crate) use action_struct;
+
 #[cfg(test)]
 mod tests {
     use super::*;

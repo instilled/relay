@@ -64,6 +64,11 @@ pub async fn run(
         .await?;
     let mut files = 0usize;
     let mut bytes: u64 = dropped.iter().map(|(_, b)| b).sum();
+    // The ledger rows for this whole batch are already gone (committed above),
+    // so a run's id can never be re-selected by a later sweep: one file that
+    // won't remove must not stop us from trying the rest of the batch, or its
+    // siblings' sidecars are orphaned on disk forever too.
+    let mut failed = 0usize;
     for (id, _) in &dropped {
         for f in [
             home.session_log(id),
@@ -73,10 +78,15 @@ pub async fn run(
             let Ok(m) = std::fs::metadata(&f) else { continue };
             files += 1;
             bytes += m.len();
-            if !dry_run {
-                std::fs::remove_file(&f).with_context(|| format!("removing {}", f.display()))?;
+            if !dry_run && let Err(e) = std::fs::remove_file(&f).with_context(|| format!("removing {}", f.display()))
+            {
+                warn!(error = %format!("{e:#}"), "gc: journal file not removed; orphaned on disk");
+                failed += 1;
             }
         }
+    }
+    if failed > 0 {
+        warn!(failed, "gc: some journal files could not be removed; see prior warnings");
     }
     Ok(GcReport {
         older_than: spec,

@@ -15,68 +15,43 @@
 //!     run: { agent: claude, prompt: "{title} failed. Say whether it is flaky." }
 //! ```
 
-use crate::action::{Action, Task};
+use crate::action::action_struct;
 use crate::decision::DecisionOption;
 use jiff::Timestamp;
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-/// One entry of `reactions.yaml`, as written. Exactly one of `run` / `ask`.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ReactionSpec {
-    /// Event kinds, one or a list. A trailing `*` matches a family:
-    /// `run.*` takes every event about runs, `*` takes the lot.
-    #[serde(deserialize_with = "one_or_many")]
-    pub on: Vec<String>,
-    /// Narrows it further, against the run the event is about.
-    #[serde(rename = "where", default, skip_serializing_if = "Option::is_none")]
-    pub filter: Option<Filter>,
-    /// What runs. See [`Task`].
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub run: Option<Task>,
-    /// Or a question to put to a human instead.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ask: Option<AskSpec>,
-    /// Where it runs. Required in the global file; a workspace's defaults to
-    /// the folder, and a relative one is inside it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cwd: Option<PathBuf>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub env: BTreeMap<String, String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub tags: Vec<String>,
-    #[serde(default, rename = "ref", skip_serializing_if = "Option::is_none")]
-    pub ref_: Option<String>,
-    /// Title of the runs it starts; defaults to the reaction's name.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub title: Option<String>,
-    /// Pipes instead of a pty.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub no_tty: bool,
-    /// Not again within this long (`10s` by default, `0` to allow every one).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub throttle: Option<String>,
+action_struct! {
+    /// One entry of `reactions.yaml`, as written. Exactly one of `run` /
+    /// `ask`. `cwd` is required in the global file; a workspace's defaults
+    /// to the folder, and a relative one is inside it.
+    #[serde(deny_unknown_fields)]
+    struct ReactionSpec {
+        before: {
+            /// Event kinds, one or a list. A trailing `*` matches a family:
+            /// `run.*` takes every event about runs, `*` takes the lot.
+            #[serde(deserialize_with = "one_or_many")]
+            pub on: Vec<String>,
+            /// Narrows it further, against the run the event is about.
+            #[serde(rename = "where", default, skip_serializing_if = "Option::is_none")]
+            pub filter: Option<Filter>,
+        }
+        after: {
+            /// Or a question to put to a human instead.
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            pub ask: Option<AskSpec>,
+            /// Not again within this long (`10s` by default, `0` to allow every one).
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            pub throttle: Option<String>,
+        }
+    }
 }
 
 /// How long a rule waits before it may fire again, unless it says otherwise.
 pub const DEFAULT_THROTTLE: &str = "10s";
 
 impl ReactionSpec {
-    /// What it starts, as the shape schedules and decisions use too.
-    pub fn action(&self) -> Action {
-        Action {
-            run: self.run.clone(),
-            cwd: self.cwd.clone(),
-            env: self.env.clone(),
-            tags: self.tags.clone(),
-            ref_: self.ref_.clone(),
-            title: self.title.clone(),
-            no_tty: self.no_tty,
-        }
-    }
-
     /// `run.failed, run.blocked`, for lists.
     pub fn when(&self) -> String {
         self.on.join(", ")

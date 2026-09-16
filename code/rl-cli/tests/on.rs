@@ -49,7 +49,7 @@ fn on_writes_a_rule_that_fires() {
         "echo {kind} >> told.txt",
     ]));
     assert!(
-        written.contains("tell-me:") && written.contains("on: run.failed"),
+        written.contains("tell-me:") && written.contains("on:") && written.contains("run.failed"),
         "{written}"
     );
     let text = std::fs::read_to_string(&file).unwrap();
