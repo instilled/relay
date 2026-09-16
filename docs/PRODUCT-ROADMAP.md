@@ -7,7 +7,7 @@ Goal for v1:
 
 ## Open — in the order they'd be built
 
-* [ ] persistent project shell — multiple shells per project + switching between them ("panes", not a multiplexer); per-command facts via shell prompt integration (OSC 133 / precmd) so exit codes and history survive; a distinct "shell" presentation in the list
+* [ ] per-command facts in a project shell — shell prompt integration (OSC 133 / precmd) so each command's exit code and duration survive, filling the summary column a shell row now deliberately leaves empty
 * [ ] agent-attach reliability — join a just-spawned holder without bouncing back to the list
 * [ ] ts plugin subsystem
 * [ ] investigate a lightweight JS/TS SDK for plugins — a thin wrapper around the `rl emit` / `rl ask` / `rl run` contract so a plugin is a few lines of TS that reads its input and emits events, decisions or runs (a plugin is just a command; the SDK makes the common case trivial)
@@ -20,6 +20,8 @@ Goal for v1:
 
 ## Done — newest first
 
+* [x] a shell reads as a shell in the list — the prompt caret in the accent, `shell` where the state word goes, and nothing in the summary column, where it used to show its own prompt; it leads its folder, though whatever asks for you still leads it
+* [x] more than one shell per project — `/shell` opens another (`shell`, `shell 2`, …), `←`/`→` on an empty line step between a folder's shells, and a shell line goes to the one you stepped to
 * [x] the command list scrolls with the arrows — the window follows the highlight rather than pinning the first six, so a candidate past the sixth is no longer lit off-screen
 * [x] ctrl-x and ctrl-c ask first — a second press removes, or quits; any other key disarms them
 * [x] command list shows key shortcuts — `^x` / `^c` beside the cursor-navigable `/` commands (which already highlight the row and put it in the line on enter)
