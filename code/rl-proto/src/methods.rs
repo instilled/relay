@@ -312,6 +312,21 @@ pub struct RunIds {
     pub ids: Vec<String>,
 }
 
+/// Gives a run a new title, in place. A run is titled when it starts and
+/// nothing writes the title afterwards, so a rename is not overwritten.
+pub struct RunRename;
+impl Method for RunRename {
+    const NAME: &'static str = "run.rename";
+    type Params = RunRenameParams;
+    type Result = crate::types::Run;
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunRenameParams {
+    pub id: String,
+    pub title: String,
+}
+
 /// Done with these runs: out of the panel and `rl since`, kept in the
 /// ledger. Only ended runs are; the result is how many were.
 pub struct RunArchive;
