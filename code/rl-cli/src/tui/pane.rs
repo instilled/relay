@@ -14,6 +14,8 @@ use rl_proto::methods::DigestItem;
 use rl_proto::rule::Rule;
 use rl_proto::types::{Event, Run, RunState, Summary};
 
+/// Where a fact's value starts: past ` {key:<8} `.
+const VALUE_COL: usize = 10;
 /// How many events a run's pane lists.
 const EVENTS: usize = 12;
 /// Options past this have no key; they are still listed.
@@ -25,6 +27,26 @@ pub fn state_style(s: RunState) -> Style {
 
 fn fact(k: &str, v: impl Into<String>) -> Line<'static> {
     Line::from(vec![Span::raw(format!(" {k:<8} ")).dim(), Span::raw(v.into())])
+}
+
+/// Where a recap came from, how old it is, what stretch it covers, and
+/// whether the run has moved on since.
+pub fn recap_label(s: &Summary, now: Timestamp) -> String {
+    let from = match s.source.as_str() {
+        "claude recap" => "claude's own".to_string(),
+        "codex turns" if s.by.is_empty() => "codex's turns".to_string(),
+        "codex turns" => format!("codex's turns, by {}", s.agent),
+        "nothing new" => "nothing new".to_string(),
+        _ => format!("by {}", s.agent),
+    };
+    let mut label = format!("{from} · {} ago", fmt_age(s.at, now));
+    if let Some(since) = &s.since {
+        label.push_str(&format!(" · last {since}"));
+    }
+    if s.stale {
+        label.push_str(" · moved on since");
+    }
+    label
 }
 
 /// The command line as the user would have typed it: what Relay added for
@@ -48,11 +70,14 @@ fn shown_argv(argv: &[String]) -> String {
 
 /// A run: what it is, why it is, where it stands, what an assistant said
 /// about it if asked, what happened lately.
+/// A run in the pane, laid out for `width` columns where it wraps by hand (the
+/// recap keeps to the value column).
 pub fn run_lines(
     item: &DigestItem,
     events: &[Event],
     summary: Option<&Summary>,
     names: &Names,
+    width: usize,
     now: Timestamp,
 ) -> Vec<Line<'static>> {
     let r = &item.run;
@@ -106,16 +131,28 @@ pub fn run_lines(
         lines.push(fact("last", l.clone()));
     }
     if let Some(s) = summary {
+        // Aligned with the facts: where it came from on the label's line, the
+        // words under it in the value column.
+        lines.push(Line::raw(""));
+        let value = width.saturating_sub(VALUE_COL + 1).max(20);
+        for (i, t) in wrap(&recap_label(s, now), value).into_iter().enumerate() {
+            let key = if i == 0 { "recap" } else { "" };
+            lines.push(Line::from(Span::raw(format!(" {key:<8} {t}")).dim()));
+        }
+        for l in s.text.lines() {
+            for t in wrap(l, value) {
+                lines.push(Line::raw(format!(" {:<8} {t}", "")));
+            }
+        }
+    } else if !matches!(r.cause, rl_proto::types::Cause::Assistant(_)) {
         lines.push(Line::raw(""));
         lines.push(Line::from(
-            Span::raw(format!(" {} said, {} ago · s asks again", s.agent, fmt_age(s.at, now))).dim(),
+            Span::raw(format!(
+                " {:<8} /summarise recaps it · /summarise 2h the last 2h",
+                "recap"
+            ))
+            .dim(),
         ));
-        for l in s.text.lines() {
-            lines.push(Line::raw(format!(" {l}")));
-        }
-    } else if r.state.is_terminal() && !matches!(r.cause, rl_proto::types::Cause::Assistant(_)) {
-        lines.push(Line::raw(""));
-        lines.push(Line::from(Span::raw(" s asks the assistant what it did").dim()));
     }
     lines.push(Line::raw(""));
     lines.push(Line::from(Span::raw(" lately").dim()));
@@ -542,14 +579,17 @@ mod tests {
             joined_by: None,
         };
         let names = Names::new([("/home/f/relay".into(), "relay".to_string())]);
-        let s = text(&run_lines(&item, &[], None, &names, now));
+        let s = text(&run_lines(&item, &[], None, &names, 80, now));
         assert!(s.starts_with(" nightly tests\n failed  1h · via"), "{s}");
         assert!(s.contains(" why      schedule nightly-tests · started"), "{s}");
         assert!(s.contains(" where    relay\n"), "{s}");
         assert!(s.contains(" runs     ./test.sh\n"), "{s}");
         assert!(s.contains(" tags     nightly\n"), "{s}");
         assert!(s.contains("· after 0s · exit 1"), "{s}");
-        assert!(s.contains("\n s asks the assistant what it did\n"), "{s}");
+        assert!(
+            s.contains("\n recap    /summarise recaps it · /summarise 2h the last 2h\n"),
+            "{s}"
+        );
         assert!(s.ends_with(" lately\n   nothing yet"), "{s}");
         assert!(!s.contains("k7x2m9qa"), "no id on screen: {s}");
 
@@ -560,13 +600,43 @@ mod tests {
             by: "a1".into(),
             at: "2026-09-10T11:58:00Z".parse().unwrap(),
             text: "The parser test failed on an empty file.\nNothing was changed.".into(),
+            since: None,
+            source: "summarised".into(),
+            reach: "o:3".into(),
+            stale: false,
         };
-        let s = text(&run_lines(&item, &[], Some(&summary), &names, now));
+        let s = text(&run_lines(&item, &[], Some(&summary), &names, 80, now));
+        // Narrow, the recap wraps under its own column.
+        let narrow = text(&run_lines(&item, &[], Some(&summary), &names, 40, now));
         assert!(
-            s.contains("\n claude said, 2m ago · s asks again\n The parser test failed on an empty file.\n Nothing was changed.\n\n lately"),
+            narrow.contains("\n          The parser test failed on an\n          empty file.\n"),
+            "{narrow}"
+        );
+        assert!(
+            s.contains("\n recap    by claude · 2m ago\n          The parser test failed on an empty file.\n          Nothing was changed.\n\n lately"),
             "{s}"
         );
-        assert!(!s.contains("s asks the assistant"), "{s}");
+        assert!(!s.contains("/summarise recaps it"), "{s}");
+        // Claude's own, over a stretch, and the run gone on since.
+        let own = Summary {
+            by: String::new(),
+            since: Some("2h".into()),
+            source: "claude recap".into(),
+            stale: true,
+            ..summary.clone()
+        };
+        assert_eq!(
+            recap_label(&own, now),
+            "claude's own · 2m ago · last 2h · moved on since"
+        );
+        let turns = Summary {
+            source: "codex turns".into(),
+            ..own.clone()
+        };
+        assert_eq!(
+            recap_label(&turns, now),
+            "codex's turns · 2m ago · last 2h · moved on since"
+        );
     }
 
     #[test]

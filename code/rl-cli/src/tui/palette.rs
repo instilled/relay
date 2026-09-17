@@ -131,8 +131,8 @@ pub const ALL: &[Command] = &[
     },
     Command {
         name: "summarise",
-        args: "",
-        what: "ask an assistant what an ended run did",
+        args: "[since]",
+        what: "recap a run: its agent's own, or an assistant's; 2h, only the last 2h",
         cmd: Cmd::Summarise,
     },
     Command {

@@ -90,6 +90,28 @@ pub fn tail(conn: &Connection, run: &str, max_bytes: usize) -> Result<Vec<u8>> {
     Ok(out)
 }
 
+/// The last `max_bytes` of output written at or after `from`, concatenated —
+/// a stretch of a run for a recap.
+pub fn tail_since(conn: &Connection, run: &str, from: Timestamp, max_bytes: usize) -> Result<Vec<u8>> {
+    let mut stmt = conn
+        .prepare("SELECT data FROM session_io WHERE run = ?1 AND direction = 'out' AND ts >= ?2 ORDER BY seq DESC")?;
+    let mut chunks: Vec<Vec<u8>> = Vec::new();
+    let mut total = 0usize;
+    for row in stmt.query_map(params![run, to_millis(from)], |r| r.get::<_, Vec<u8>>(0))? {
+        let data = row?;
+        total += data.len();
+        chunks.push(data);
+        if total >= max_bytes {
+            break;
+        }
+    }
+    let mut out: Vec<u8> = chunks.into_iter().rev().flatten().collect();
+    if out.len() > max_bytes {
+        out.drain(..out.len() - max_bytes);
+    }
+    Ok(out)
+}
+
 /// Total child output bytes journaled — the offset to resume a replay from.
 pub fn out_bytes(conn: &Connection, run: &str) -> Result<u64> {
     let n: i64 = conn.query_row(

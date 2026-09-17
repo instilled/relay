@@ -1,32 +1,98 @@
-//! A summary of an ended run: what Relay knows about it — the row, its
-//! events, the tail of its output — handed to `assistants.summarise` as an
-//! ordinary assistant run, the answer kept in `summaries` by the run. On
-//! demand (`s` in the panel, `rl summarise <id>`), or from a reaction on
-//! `run.finished`. Never of an assistant's own run, so such a reaction cannot
-//! feed itself.
+//! A recap of a run, live or ended, over a stretch back from now or the whole
+//! of it, kept in `summaries` by the run. Only ever on demand (`/summarise
+//! [since]` in the panel, `rl summarise <id> [since]`, or a reaction on
+//! `run.finished`) — Relay never asks an agent on its own.
+//!
+//! From the cheapest source that has one:
+//! - Claude writes its own recap into its transcript; the latest in the
+//!   stretch is taken as it stands, no assistant asked;
+//! - Codex keeps no recap, but its turns say what it last said and did: with
+//!   `assistants.summarise` set, an assistant condenses them, else they are
+//!   the recap as facts;
+//! - anything else — and Claude with no recap in the stretch — is read by
+//!   `assistants.summarise`: what was said, or the output.
+//!
+//! The one kept is given back while the run has not moved on. Never of an
+//! assistant's own run, so a reaction cannot feed itself.
 
 use crate::assistant;
 use crate::server::Daemon;
-use anyhow::{Result, bail};
+use crate::transcript::{self, Agent};
+use anyhow::{Result, anyhow, bail};
 use jiff::Timestamp;
-use rl_core::time::fmt_duration;
+use rl_core::time::{fmt_duration, parse_duration};
 use rl_ledger::events::NewEvent;
 use rl_ledger::{events, runs, session_io, summaries};
 use rl_proto::methods::{AssistantParams, EventFilter, SummaryParams};
 use rl_proto::types::{Cause, Event, Run, Summary, event_kind};
 use std::fmt::Write as _;
+use std::path::{Path, PathBuf};
 
-/// The most of a run's output the agent is shown, from the end.
+/// The most of a run's output, or of what was said, the agent is shown.
 const OUTPUT_TAIL: usize = 64 * 1024;
 /// The most of an answer that is kept.
 const TEXT_MAX: usize = 8 * 1024;
 
+/// The one kept, marked stale when the run has moved on since.
 pub async fn get(d: &Daemon, run: &str) -> Result<Option<Summary>> {
     let id = run.to_string();
-    d.ledger.call(move |c| summaries::get(c, &id)).await
+    let Some(mut s) = d.ledger.call(move |c| summaries::get(c, &id)).await? else {
+        return Ok(None);
+    };
+    let id = run.to_string();
+    if let Some(r) = d.ledger.call(move |c| runs::get(c, &id)).await?
+        && !s.reach.is_empty()
+    {
+        let t = locate(d, &r).await?;
+        s.stale = reach(d, &r, t.as_deref()).await? != s.reach;
+    }
+    Ok(Some(s))
 }
 
-/// The summary of a run: the one kept, unless `again` or there is none yet.
+/// The agent's session file for a run: the one a hook named, else found by
+/// its folder and start and remembered.
+async fn locate(d: &Daemon, run: &Run) -> Result<Option<PathBuf>> {
+    let id = run.id.clone();
+    if let Some(p) = d.ledger.call(move |c| summaries::transcript(c, &id)).await? {
+        return Ok(Some(p));
+    }
+    let (Some(agent), Some(home)) = (Agent::of(run), std::env::var_os("HOME")) else {
+        return Ok(None);
+    };
+    let home = PathBuf::from(home);
+    let found = match agent {
+        Agent::Claude => transcript::find_claude(&home, &run.cwd, run.started_at),
+        Agent::Codex => transcript::find_codex(&home, &run.cwd, run.started_at),
+    };
+    if let Some(p) = &found {
+        let (id, path) = (run.id.clone(), p.to_string_lossy().into_owned());
+        d.ledger.call(move |c| summaries::set_transcript(c, &id, &path)).await?;
+    }
+    Ok(found)
+}
+
+/// How far a run has got: its session file's length, or its output's last
+/// chunk.
+async fn reach(d: &Daemon, run: &Run, transcript: Option<&Path>) -> Result<String> {
+    if let Some(len) = transcript.and_then(|p| std::fs::metadata(p).ok()).map(|m| m.len()) {
+        return Ok(format!("t:{len}"));
+    }
+    let id = run.id.clone();
+    let seq = d.ledger.call(move |c| session_io::last_seq(c, &id)).await?;
+    Ok(format!("o:{seq}"))
+}
+
+/// The last `max` bytes of `s`, on a character boundary.
+fn tail_of(s: &str, max: usize) -> &str {
+    let mut at = s.len().saturating_sub(max);
+    while !s.is_char_boundary(at) {
+        at += 1;
+    }
+    &s[at..]
+}
+
+/// A recap of a run: the one kept while the run has not moved on, unless
+/// `again`; else a new one from the cheapest source that has one.
 pub async fn make(d: &Daemon, p: SummaryParams) -> Result<Summary> {
     let id = p.run.clone();
     let run = d
@@ -37,16 +103,105 @@ pub async fn make(d: &Daemon, p: SummaryParams) -> Result<Summary> {
         })
         .await?;
     let Some(run) = run else { bail!("no run {id}") };
-    if !run.state.is_terminal() {
-        bail!("`{}` is still going; a summary is of an ended run", run.title);
-    }
     if matches!(run.cause, Cause::Assistant(_)) {
         bail!("`{}` is an assistant's own run; those are not summarised", run.title);
     }
+    let since = p
+        .since
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from);
+    let now = Timestamp::now();
+    // Whole milliseconds, as the ledger keeps them: what is returned is
+    // what `summary.get` will say.
+    let now = Timestamp::from_millisecond(now.as_millisecond()).unwrap_or(now);
+    let from = match &since {
+        Some(s) => {
+            Some(now - parse_duration(s).ok_or_else(|| anyhow!("`{s}` is not a stretch of time, like 30m or 2h"))?)
+        }
+        None => None,
+    };
+    let file = locate(d, &run).await?;
+    let reach = reach(d, &run, file.as_deref()).await?;
     if !p.again
-        && let Some(s) = get(d, &id).await?
+        && let Some(kept) = get(d, &id).await?
+        && kept.since == since
+        && kept.reach == reach
     {
-        return Ok(s);
+        return Ok(kept);
+    }
+    let body = match &file {
+        Some(f) => {
+            let f = f.clone();
+            tokio::task::spawn_blocking(move || std::fs::read_to_string(f).ok())
+                .await
+                .ok()
+                .flatten()
+        }
+        None => None,
+    };
+    let mut made = Summary {
+        run: id.clone(),
+        agent: String::new(),
+        by: String::new(),
+        at: now,
+        text: String::new(),
+        since: since.clone(),
+        source: String::new(),
+        reach,
+        stale: false,
+    };
+    // What an assistant would read, when the agent's own record does not do.
+    let (heading, material) = match (Agent::of(&run), body) {
+        (Some(Agent::Claude), Some(body)) => {
+            if let Some(r) = transcript::claude_recap(&body, from) {
+                made.agent = "claude".into();
+                made.source = "claude recap".into();
+                made.text = r.text;
+                return keep(d, &run, made).await;
+            }
+            ("What was said".to_string(), transcript::claude_messages(&body, from))
+        }
+        (Some(Agent::Codex), Some(body)) => {
+            let turns = transcript::codex_turns(&body, from);
+            let asked = d.config.read().unwrap().config.assistants.summarise.is_some();
+            if !turns.is_empty() && !asked {
+                made.agent = "codex".into();
+                made.source = "codex turns".into();
+                made.text = transcript::codex_line(&turns);
+                return keep(d, &run, made).await;
+            }
+            made.source = "codex turns".into();
+            ("Its turns".to_string(), transcript::codex_facts(&turns))
+        }
+        _ => {
+            let bytes = d
+                .ledger
+                .call({
+                    let id = id.clone();
+                    move |c| match from {
+                        Some(f) => session_io::tail_since(c, &id, f, OUTPUT_TAIL),
+                        None => session_io::tail(c, &id, OUTPUT_TAIL),
+                    }
+                })
+                .await?;
+            (
+                format!("Its output (the end of it, at most {} KB)", OUTPUT_TAIL / 1024),
+                String::from_utf8_lossy(&bytes).into_owned(),
+            )
+        }
+    };
+    if material.trim().is_empty() {
+        made.agent = "relay".into();
+        if made.source.is_empty() {
+            made.source = "nothing new".into();
+        }
+        made.text = match &since {
+            Some(s) => format!("Nothing in the last {s}."),
+            None => "Nothing to go on yet.".into(),
+        };
+        return keep(d, &run, made).await;
     }
     let evs = d
         .ledger
@@ -57,6 +212,7 @@ pub async fn make(d: &Daemon, p: SummaryParams) -> Result<Summary> {
                     c,
                     &EventFilter {
                         run: Some(id),
+                        since: from,
                         limit: Some(200),
                         ..Default::default()
                     },
@@ -64,15 +220,7 @@ pub async fn make(d: &Daemon, p: SummaryParams) -> Result<Summary> {
             }
         })
         .await?;
-    let bytes = d
-        .ledger
-        .call({
-            let id = id.clone();
-            move |c| session_io::tail(c, &id, OUTPUT_TAIL)
-        })
-        .await?;
-    let output = String::from_utf8_lossy(&bytes);
-    let prompt = prompt(&run, &evs, &output);
+    let prompt = prompt(&run, since.as_deref(), &evs, &heading, tail_of(&material, OUTPUT_TAIL));
     // Where the agent runs: the run's folder, if it is still there.
     let cwd = if run.cwd.is_dir() {
         run.cwd.clone()
@@ -104,17 +252,18 @@ pub async fn make(d: &Daemon, p: SummaryParams) -> Result<Summary> {
             out.run
         );
     }
-    // Whole milliseconds, as the ledger keeps them: what is returned is
-    // what `summary.get` will say.
-    let now = Timestamp::now();
-    let at = Timestamp::from_millisecond(now.as_millisecond()).unwrap_or(now);
-    let s = Summary {
-        run: id,
-        agent: out.agent,
-        by: out.run,
-        at,
-        text,
-    };
+    if made.source.is_empty() {
+        made.source = "summarised".into();
+    }
+    made.agent = out.agent;
+    made.by = out.run;
+    made.text = text;
+    keep(d, &run, made).await
+}
+
+/// Keeps a recap by its run, and says so in the ledger.
+async fn keep(d: &Daemon, run: &Run, s: Summary) -> Result<Summary> {
+    let run = run.clone();
     d.ledger
         .call({
             let s = s.clone();
@@ -129,15 +278,20 @@ pub async fn make(d: &Daemon, p: SummaryParams) -> Result<Summary> {
     Ok(s)
 }
 
-/// What the agent is asked: the run as Relay knows it, then the ask.
-pub fn prompt(run: &Run, events: &[Event], output: &str) -> String {
+/// What the agent is asked: the run as Relay knows it, the stretch, then the
+/// ask.
+pub fn prompt(run: &Run, since: Option<&str>, events: &[Event], heading: &str, material: &str) -> String {
     let mut s = String::new();
+    let stretch = match since {
+        Some(d) => format!("what happened in the last {d} of one run"),
+        None => "one run".to_string(),
+    };
     let _ = writeln!(
         s,
-        "You are summarising one run for the person who started it, who has not read its output. \
+        "You are summarising {stretch} for the person who started it, who has not read its output. \
          Answer in plain prose, three sentences at most: what it did, what changed, and what is \
          left or went wrong. No headings, lists, YAML or preamble; do not repeat the command. If \
-         the output shows nothing happened, say so in one sentence.\n"
+         nothing happened, say so in one sentence.\n"
     );
     let _ = writeln!(s, "## The run\n");
     let _ = writeln!(s, "title: {}", run.title);
@@ -166,6 +320,9 @@ pub fn prompt(run: &Run, events: &[Event], output: &str) -> String {
     if !run.tags.is_empty() {
         let _ = writeln!(s, "tags: {}", run.tags.join(", "));
     }
+    if let Some(d) = since {
+        let _ = writeln!(s, "stretch: the last {d}");
+    }
     let _ = writeln!(s, "\n## What happened\n");
     if events.is_empty() {
         let _ = writeln!(s, "(no events)");
@@ -173,15 +330,11 @@ pub fn prompt(run: &Run, events: &[Event], output: &str) -> String {
     for e in events {
         let _ = writeln!(s, "{}  {}  {}", e.at, e.kind, e.summary);
     }
-    let _ = writeln!(
-        s,
-        "\n## Its output (the end of it, at most {} KB)\n",
-        OUTPUT_TAIL / 1024
-    );
-    if output.trim().is_empty() {
+    let _ = writeln!(s, "\n## {heading}\n");
+    if material.trim().is_empty() {
         let _ = writeln!(s, "(nothing)");
     } else {
-        let _ = writeln!(s, "````\n{}\n````", output.trim_end());
+        let _ = writeln!(s, "````\n{}\n````", material.trim_end());
     }
     s
 }
@@ -238,7 +391,13 @@ mod tests {
             summary: "exit 2".into(),
             data: None,
         };
-        let p = prompt(&r, &[e], "test parser ... FAILED\n");
+        let p = prompt(
+            &r,
+            None,
+            &[e],
+            "Its output (the end of it, at most 64 KB)",
+            "test parser ... FAILED\n",
+        );
         assert!(
             p.contains("title: nightly tests\ncommand: make test\nfolder: /w\nwhy: schedule:nightly\n"),
             "{p}"
@@ -246,8 +405,15 @@ mod tests {
         assert!(p.contains("· after 2m30s · failed · exit 2"), "{p}");
         assert!(p.contains("run.failed  exit 2"), "{p}");
         assert!(p.contains("````\ntest parser ... FAILED\n````"), "{p}");
-        let p = prompt(&r, &[], "");
+        assert!(p.contains("## Its output (the end of it, at most 64 KB)\n"), "{p}");
+        let p = prompt(&r, Some("2h"), &[], "What was said", "");
         assert!(p.contains("(no events)") && p.contains("(nothing)"), "{p}");
+        assert!(p.contains("what happened in the last 2h of one run"), "{p}");
+        assert!(
+            p.contains("stretch: the last 2h\n") && p.contains("## What was said\n"),
+            "{p}"
+        );
+        assert_eq!(tail_of("aébc", 3), "bc", "on a character boundary");
     }
 
     #[test]

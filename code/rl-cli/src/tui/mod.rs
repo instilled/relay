@@ -23,6 +23,8 @@ mod line;
 mod palette;
 mod pane;
 mod query;
+
+pub use pane::recap_label;
 mod rows;
 mod rules;
 mod screen;
@@ -1897,27 +1899,28 @@ impl App {
 
     /// `s` on an ended run: the assistant is asked what it did, as a run; the
     /// answer lands in the pane through the main loop.
-    fn summarise(&mut self) {
+    /// `/summarise [since]`: a recap of the run under the cursor, live or
+    /// ended — the one kept while the run has not moved on.
+    fn summarise(&mut self, since: &str) {
         if let Some(s) = &self.summarising {
-            self.say(format!("still summarising `{}`; x on its run stops it", s.title));
+            self.say(format!("still summarising `{}`; ^x on its run stops it", s.title));
             return;
         }
-        let Some(i) = self.selected_run() else { return };
+        let Some(i) = self.selected_run() else {
+            self.say("/summarise works on a run");
+            return;
+        };
         let run = &i.run;
-        if !run.state.is_terminal() {
-            self.say(format!("`{}` is still going; s when it has ended", run.title));
-            return;
-        }
         if matches!(run.cause, Cause::Assistant(_)) {
             self.say("an assistant's own run; nothing to summarise");
             return;
         }
         let (id, title) = (run.id.clone(), run.title.clone());
-        let again = self.summary.as_ref().is_some_and(|s| s.run == id);
         let home = self.home.clone();
         let params = SummaryParams {
             run: id.clone(),
-            again,
+            since: (!since.is_empty()).then(|| since.to_string()),
+            again: false,
             timeout: None,
         };
         let task = tokio::spawn(async move {
@@ -1932,7 +1935,11 @@ impl App {
         let Some(s) = self.summarising.take() else { return };
         match done {
             Ok(Ok(summary)) => {
-                self.say(format!("{} summarised `{}`", summary.agent, s.title));
+                self.say(format!(
+                    "recap of `{}` · {}",
+                    s.title,
+                    pane::recap_label(&summary, Timestamp::now())
+                ));
                 if self.selected_run().is_some_and(|i| i.run.id == s.run) {
                     self.summary = Some(summary);
                 }
@@ -2634,7 +2641,7 @@ impl App {
                 "reaction" | "reactions" => self.edit_scope_file(RuleKind::Reaction),
                 other => self.say(format!("edit {other}? file, schedule or reaction")),
             },
-            palette::Cmd::Summarise => self.summarise(),
+            palette::Cmd::Summarise => self.summarise(arg.trim()),
             palette::Cmd::Ask => {
                 if arg.trim().is_empty() {
                     self.say("/ask what? plain words, and the assistant drafts it");
@@ -3295,6 +3302,7 @@ impl App {
                 &self.events,
                 self.summary.as_ref().filter(|s| s.run == i.run.id),
                 &self.names,
+                area.width as usize,
                 now,
             ),
             Some(Row::Job(j)) => pane::job_lines(&j, self.rule_of_job(&j), &self.names, now),
