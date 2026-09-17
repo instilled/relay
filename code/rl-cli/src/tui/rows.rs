@@ -123,14 +123,17 @@ pub struct Head {
     pub checkout: Option<Checkout>,
 }
 
-/// A checkout on a header: `⎇ main · 3 worktrees`, the count on the main
-/// checkout only and only when there are any.
+/// A checkout on a header: `⎇ main · PR #95 · 3 worktrees` — the badges after
+/// the branch, the count on the main checkout only and only when there are any.
 pub fn checkout_words(c: &Checkout) -> String {
+    let mut words = vec![format!("⎇ {}", c.head())];
+    words.extend(c.badges.iter().cloned());
     match c.worktrees {
-        0 => format!("⎇ {}", c.head()),
-        1 => format!("⎇ {} · 1 worktree", c.head()),
-        n => format!("⎇ {} · {n} worktrees", c.head()),
+        0 => {}
+        1 => words.push("1 worktree".into()),
+        n => words.push(format!("{n} worktrees")),
     }
+    words.join(" · ")
 }
 
 /// What a run's row says of its branch: only where it started on another
@@ -1038,6 +1041,7 @@ mod tests {
             branch: Some(b.into()),
             detached: None,
             worktrees,
+            badges: vec![],
         };
         let d = Digest {
             since: now,
@@ -1090,12 +1094,16 @@ mod tests {
             branch: None,
             detached: Some("a1b2c3d".into()),
             worktrees: 0,
+            badges: vec![],
         };
         assert_eq!(checkout_words(&c), "⎇ a1b2c3d");
         c.branch = Some("main".into());
         c.detached = None;
         c.worktrees = 1;
         assert_eq!(checkout_words(&c), "⎇ main · 1 worktree");
+        c.worktrees = 4;
+        c.badges = vec!["PR #95".into()];
+        assert_eq!(checkout_words(&c), "⎇ main · PR #95 · 4 worktrees");
     }
 
     #[test]

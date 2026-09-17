@@ -35,6 +35,8 @@ pub struct Daemon {
     pub scheduler: Arc<Scheduler>,
     pub decisions: Arc<crate::decisions::Decisions>,
     pub reactor: Arc<crate::reactions::Reactor>,
+    /// What the configured badges last said of each folder's branch.
+    pub badges: crate::badges::Badges,
     pub started_at: Timestamp,
     pub shutdown: CancellationToken,
 }
@@ -105,6 +107,9 @@ pub async fn serve_with(home: Home, shutdown: CancellationToken, opts: ServeOpti
         Ok(false) => {}
         Err(e) => warn!(error = %format!("{e:#}"), "config.yaml not seeded"),
     }
+    if let Err(e) = crate::badges::seed(&home) {
+        warn!(error = %format!("{e:#}"), "badges not seeded");
+    }
     let config = crate::config::load(&home);
     match &config.error {
         Some(e) => warn!(error = %e, "config.yaml not usable; running on defaults"),
@@ -170,6 +175,7 @@ pub async fn serve_with(home: Home, shutdown: CancellationToken, opts: ServeOpti
         scheduler,
         decisions,
         reactor,
+        badges: crate::badges::Badges::new(home.plugins_dir(), crate::badges::EVERY, crate::badges::WAIT),
         started_at: Timestamp::now(),
         shutdown: shutdown.clone(),
     });

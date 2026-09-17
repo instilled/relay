@@ -8,6 +8,8 @@
 //!   interpret: { agent: claude, model: claude-haiku-4-5-20251001, args: ["--max-turns", "1"] }
 //!   summarise: claude            # a recap where the agent keeps none (/summarise, rl summarise)
 //! retention: 30d                 # the journal of a run ended this long ago goes; or { journal: 30d }
+//! workspaces:
+//!   badges: [gh-pr]              # beside a git folder's branch on its header: `PR #95`
 //! ```
 
 use serde::{Deserialize, Serialize};
@@ -21,6 +23,29 @@ pub struct Config {
     /// The one thing Relay deletes, and only when told: unset, nothing ever goes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retention: Option<Retention>,
+    /// What a folder's header says.
+    #[serde(default, skip_serializing_if = "Workspaces::is_empty")]
+    pub workspaces: Workspaces,
+}
+
+/// A folder's header, beyond what Relay reads itself.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Workspaces {
+    /// Commands whose first line goes after a git folder's branch — `gh-pr`
+    /// says `PR #95`. Each runs in the folder through `sh -c`, with
+    /// `RELAY_WORKSPACE` and `RELAY_BRANCH` set and `~/.relay/plugins` first
+    /// on the PATH: when the branch changes, then at most every five minutes,
+    /// and only while something shows the list. Nothing printed, a failure or
+    /// a detached HEAD: no badge. Provisional: the plugin host takes it over.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub badges: Vec<String>,
+}
+
+impl Workspaces {
+    pub fn is_empty(&self) -> bool {
+        self.badges.is_empty()
+    }
 }
 
 /// What goes, and after how long. Written as one duration (the journal), or
@@ -184,6 +209,14 @@ mod tests {
         assert_eq!(c.retention.unwrap().journal.as_deref(), Some("7d"));
         let e = serde_json::from_str::<Config>(r#"{"retention":{"runs":"1y"}}"#).unwrap_err();
         assert!(e.to_string().contains("unknown field `runs`"), "{e}");
+    }
+
+    #[test]
+    fn badges_are_commands() {
+        let c: Config = serde_json::from_str(r#"{"workspaces":{"badges":["gh-pr","echo hi"]}}"#).unwrap();
+        assert_eq!(c.workspaces.badges, ["gh-pr", "echo hi"]);
+        let e = serde_json::from_str::<Config>(r#"{"workspaces":{"badge":["gh-pr"]}}"#).unwrap_err();
+        assert!(e.to_string().contains("unknown field `badge`"), "{e}");
     }
 
     #[test]

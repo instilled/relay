@@ -1847,6 +1847,13 @@ async fn config(home: &Home, a: ConfigArgs, json: bool) -> Result<()> {
             Some(d) => println!("retention.journal     {d}  (config; `rl prune` runs it now, rld daily)"),
             None => println!("retention.journal     —  (unset: nothing is ever deleted)"),
         }
+        match r.config.workspaces.badges.as_slice() {
+            [] => println!("workspaces.badges     —  (unset: a header shows the branch alone; gh-pr adds the open PR)"),
+            b => println!(
+                "workspaces.badges     {}  (config; ~/.relay/plugins first on the PATH)",
+                b.join(", ")
+            ),
+        }
         for e in &r.errors {
             eprintln!("not usable: {e}");
         }

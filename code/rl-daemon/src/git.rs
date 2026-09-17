@@ -62,6 +62,7 @@ pub fn checkout(dir: &Path) -> Option<Checkout> {
         branch,
         detached,
         worktrees,
+        badges: Vec::new(),
     })
 }
 
