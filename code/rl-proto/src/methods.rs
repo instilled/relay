@@ -2,7 +2,7 @@
 //! result live together so client and server cannot drift.
 
 use crate::decision::{Decision, DecisionOption};
-use crate::types::{AttachMode, Event, Mark, Run, RunKind, RunState};
+use crate::types::{AttachMode, Checkout, Event, Mark, Run, RunKind, RunState};
 use jiff::Timestamp;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
@@ -403,6 +403,9 @@ pub struct Digest {
     /// Everything still waiting on an answer, newest first.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub decisions: Vec<Decision>,
+    /// The git checkout of every folder the list shows that is in one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub checkouts: Vec<Checkout>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
