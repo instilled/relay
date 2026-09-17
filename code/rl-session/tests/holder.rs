@@ -21,6 +21,10 @@ struct Holder {
 
 /// Spawns `rl-session` for `fake-cli` and waits for it to report ready.
 fn start(tty: bool, linger: u64) -> Holder {
+    start_with(tty, linger, &[])
+}
+
+fn start_with(tty: bool, linger: u64, extra: &[&str]) -> Holder {
     let tmp = tempfile::tempdir().unwrap();
     let socket = tmp.path().join("s.sock");
     let exit_file = tmp.path().join("s.exit");
@@ -42,6 +46,7 @@ fn start(tty: bool, linger: u64) -> Holder {
     if !tty {
         cmd.arg("--no-tty");
     }
+    cmd.args(extra);
     cmd.arg("--").arg(fake_cli());
     // The detached holder keeps stderr for its log, so never `output()` here.
     let log = tmp.path().join("holder.log");
@@ -210,6 +215,20 @@ async fn no_tty_uses_pipes() {
     s.input("exit\n").await.unwrap();
     assert_eq!(read_exit(&mut s).await.code, 0);
     assert_eq!(read_exit_file(&h.exit_file).unwrap().unwrap().code, 0);
+    s.close().await.unwrap();
+    wait_gone(&h.socket, hello.holder_pid).await;
+}
+
+/// With no input, the child's read ends at once: `fake-cli` leaves on its own,
+/// and what is typed goes nowhere without breaking anything.
+#[tokio::test]
+async fn no_input_ends_the_childs_input_at_once() {
+    let h = start_with(false, 60, &["--no-input"]);
+    let (hello, mut s) = attach(&h, true).await;
+    s.input("echo me\n").await.unwrap();
+    let out = read_until(&mut s, "fake-cli ready").await;
+    assert_eq!(read_exit(&mut s).await.code, 0);
+    assert!(!out.contains("echo: echo me"), "{out}");
     s.close().await.unwrap();
     wait_gone(&h.socket, hello.holder_pid).await;
 }

@@ -1611,6 +1611,7 @@ impl App {
             rows: Some(area.height.saturating_sub(2)),
             env: crate::env::child_env(&[])?,
             inherit_env: false,
+            input: true,
             cause: Cause::Manual,
             flow: None,
         };
@@ -1728,6 +1729,7 @@ impl App {
             rows: Some(area.height.saturating_sub(2)),
             env: crate::env::child_env(&[])?,
             inherit_env: false,
+            input: true,
             cause: Cause::Manual,
             flow: None,
         };

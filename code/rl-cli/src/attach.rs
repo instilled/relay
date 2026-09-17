@@ -16,6 +16,31 @@ use std::io::IsTerminal;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
 
+/// A run on pipes ends its lines with `\n` alone, which a terminal takes as
+/// "down one" and not "back to the start": its output would climb down the
+/// screen as a staircase. On its way to a terminal each bare `\n` becomes
+/// `\r\n`. A pty's output already says `\r\n` and passes as it is.
+#[derive(Debug, Default)]
+pub struct Newlines {
+    /// The last byte seen ended in `\r`, so a `\n` that opens the next chunk
+    /// is not bare.
+    after_cr: bool,
+}
+
+impl Newlines {
+    pub fn fix(&mut self, b: &[u8]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(b.len() + b.len() / 16);
+        for &c in b {
+            if c == b'\n' && !self.after_cr {
+                out.push(b'\r');
+            }
+            out.push(c);
+            self.after_cr = c == b'\r';
+        }
+        out
+    }
+}
+
 /// `ctrl-\`: detach. Nothing interactive we care about uses it.
 const DETACH: u8 = 0x1c;
 const CTRL_C: u8 = 0x03;
@@ -101,12 +126,18 @@ pub async fn attach(home: &Home, o: Opts) -> Result<i32> {
     }));
     let mut winch = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::window_change())?;
     let mut stdin_open = true;
+    // Piped on, the bytes go as they came; to a terminal, a pipes run's lines
+    // need their carriage returns.
+    let mut newlines = (interactive && !info.tty).then(Newlines::default);
 
     loop {
         tokio::select! {
             frame = read_frame(&mut rd) => match frame? {
                 Some(Frame::Output(b)) => {
-                    out.write_all(&b).await?;
+                    match newlines.as_mut() {
+                        Some(n) => out.write_all(&n.fix(&b)).await?,
+                        None => out.write_all(&b).await?,
+                    }
                     out.flush().await?;
                 }
                 Some(Frame::Note(s)) => {
@@ -224,5 +255,20 @@ impl RawMode {
 impl Drop for RawMode {
     fn drop(&mut self) {
         let _ = crossterm::terminal::disable_raw_mode();
+    }
+}
+
+#[cfg(test)]
+mod newline_tests {
+    use super::Newlines;
+
+    #[test]
+    fn a_bare_newline_gets_its_carriage_return_across_chunks() {
+        let mut n = Newlines::default();
+        assert_eq!(n.fix(b"one\ntwo\r\n"), b"one\r\ntwo\r\n");
+        // A `\r` that ends one chunk carries its `\n` in the next.
+        assert_eq!(n.fix(b"three\r"), b"three\r");
+        assert_eq!(n.fix(b"\nfour\n\n"), b"\nfour\r\n\r\n");
+        assert_eq!(n.fix(b""), b"");
     }
 }

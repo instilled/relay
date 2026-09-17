@@ -6,7 +6,12 @@
 #                       in the current folder that echoes "drafted")
 #   FAKE_AGENT_PROMPT   a file the prompt (the last argument) is written to
 #   FAKE_AGENT_SLEEP    seconds to dawdle first (for the timeout)
+#   FAKE_AGENT_READS    read all of its input first, as `claude -p` waits on
+#                       it: an input left open never ends
 for last; do :; done
+if [ -n "$FAKE_AGENT_READS" ]; then
+  cat > /dev/null
+fi
 if [ -n "$FAKE_AGENT_PROMPT" ]; then
   printf '%s\n' "$last" > "$FAKE_AGENT_PROMPT"
 fi
