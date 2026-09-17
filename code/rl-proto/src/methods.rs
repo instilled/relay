@@ -905,7 +905,10 @@ impl Method for AssistantRun {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SummaryParams {
     pub run: String,
-    /// Ask again even when there is a summary kept.
+    /// Only this stretch, back from now: a duration (`2h`). None, the whole run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since: Option<String>,
+    /// Make a new one even when the one kept is up to date.
     #[serde(default)]
     pub again: bool,
     /// A duration; a minute when left out.
@@ -913,9 +916,11 @@ pub struct SummaryParams {
     pub timeout: Option<String>,
 }
 
-/// The summary of an ended run: the one kept, or a new one from
-/// `assistants.summarise` (an ordinary assistant run) when there is none or
-/// `again`. Refused for a run still going, and for an assistant's own run.
+/// A recap of a run, live or ended, over `since` or the whole of it: the one
+/// kept while the run has not moved on (unless `again`); else the agent's own
+/// recap from its transcript (Claude), its turns as facts (Codex), or
+/// `assistants.summarise` reading the stretch. Refused for an assistant's own
+/// run.
 pub struct SummaryMake;
 impl Method for SummaryMake {
     const NAME: &'static str = "summary.make";

@@ -99,7 +99,7 @@ enum Cmd {
     Context(ContextArgs),
     /// Plain words to `assistants.interpret`: a run or a rule, drafted; `--go` does it.
     Interpret(InterpretArgs),
-    /// What an ended run did, by `assistants.summarise`: kept by the run, made when there is none.
+    /// A recap of a run, live or ended: its agent's own (Claude), its turns (Codex), or `assistants.summarise`'s. Kept by the run.
     Summarise(SummariseArgs),
     /// Let the journal of old runs go, as `retention:` in config.yaml says (or --older-than). Runs and events stay.
     #[command(alias = "gc")]
@@ -336,7 +336,9 @@ struct InterpretArgs {
 struct SummariseArgs {
     /// The run.
     run: String,
-    /// Ask again, even when there is a summary kept.
+    /// Only the last stretch of it: a duration, like 30m or 2h (default: all of it).
+    since: Option<String>,
+    /// Make a new one, even when the one kept is up to date.
     #[arg(long)]
     again: bool,
 }
@@ -1985,12 +1987,13 @@ async fn interpret(home: &Home, a: InterpretArgs, json: bool) -> Result<()> {
 async fn summarise(home: &Home, a: SummariseArgs, json: bool) -> Result<()> {
     let mut rpc = daemon::ensure(home, !json).await?;
     let kept = rpc.call::<SummaryGet>(RunId { id: a.run.clone() }).await?;
-    if !json && (a.again || kept.is_none()) {
+    if !json && (a.again || kept.is_none_or(|k| k.stale || k.since != a.since)) {
         eprintln!("summarising…");
     }
     let s = rpc
         .call::<SummaryMake>(SummaryParams {
             run: a.run,
+            since: a.since,
             again: a.again,
             timeout: None,
         })
@@ -1999,11 +2002,14 @@ async fn summarise(home: &Home, a: SummariseArgs, json: bool) -> Result<()> {
         println!("{}", serde_json::to_string(&s)?);
     } else {
         println!("{}", s.text);
+        let by = if s.by.is_empty() {
+            String::new()
+        } else {
+            format!(" · its run {}", s.by)
+        };
         println!(
-            "# by {} · {} ago · its run {} · --again asks anew",
-            s.agent,
-            rl_core::time::fmt_age(s.at, now()),
-            s.by
+            "# {}{by} · --again makes a new one",
+            rl_cli::tui::recap_label(&s, now())
         );
     }
     Ok(())

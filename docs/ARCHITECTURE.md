@@ -286,10 +286,10 @@ again takes the keyboard.
 The line answers too: on a question, a line that starts with an option — its number or its key,
 several joined by commas where it takes several — answers with that option and the rest of the
 line as the note (`1 only the checkout path`), and the line's hint says so before you send it.
-Typed text before `^x` goes with a dismissal as its reason. `/summarise` on an ended run asks
-`assistants.summarise` what it did (§6): the asking is a run in the list, and the answer lands in
-the pane under the facts as `claude said, 2m ago`, always marked as the assistant's; asking again
-asks anew. 
+Typed text before `^x` goes with a dismissal as its reason. `/summarise [since]` recaps the run
+under the cursor, live or ended (§6), and the recap lands in the pane under the facts, aligned
+with them: `recap    claude's own · 2m ago · last 2h`, the words under it in the value column,
+and `· moved on since` once the run has gone on. Only ever when asked.
 
 **Typing is what the panel rests in.** One line sits at the foot and always takes what you type
 (`tui/line.rs`), so there is nothing to open and nothing to close. What a finished line means is
@@ -559,7 +559,7 @@ name or a map:
 ```yaml
 assistants:
   interpret: claude     # what you type at a / rl interpret "…" in plain words → a draft for your enter
-  summarise: claude     # what an ended run did, in three sentences (s, rl summarise)
+  summarise: claude     # a recap where the agent keeps none (/summarise, rl summarise)
   # interpret: { agent: claude, model: claude-haiku-4-5-20251001, args: ["--max-turns", "1"] }
 ```
 
@@ -601,17 +601,34 @@ is an error that quotes what the agent said. Interpretation is a run, so it is i
 `rl ls --all`, in the journal, and under retention like everything else; nothing about it is
 special except its cause.
 
-**The summariser** is the same machinery pointed at an ended run. `/summarise` in the panel and
-`rl summarise <id> [--again]` call `summary.make`; `rld` (`rl-daemon/src/summarise.rs`) puts
-together what it knows — the run's row (title, command, folder, cause, when, how long, exit),
-its events, the last 64 KB of its output — asks for three sentences of prose, and runs
-`assistants.summarise` as an assistant run (`cause: assistant:summarise`, titled `summarise:
-<the run's title>`). The answer is kept in `summaries`, one per run with the agent, the time
-and the assistant run that wrote it, and said as a `run.summarised` event; `summary.get` reads
-it without asking, and `summary.make` returns the kept one unless `again`. Facts come first
-and the narrative is always marked as the agent's, in the pane and on the line (`# by claude ·
-2m ago`). No git or transcript facts go in yet: that is the facts collector (§8). Two things
-are never summarised: a run still going, and an assistant's own run — so a rule like
+**The summariser** recaps a run, live or ended, over the whole of it or a stretch back from now.
+`/summarise [since]` in the panel and `rl summarise <id> [since] [--again]` call `summary.make`
+(`since` a duration, `2h`); `rld` (`rl-daemon/src/summarise.rs`) takes the cheapest source that
+has one, and never asks an agent on its own:
+
+- **The agent's own recap.** Claude writes one into its transcript
+  (`~/.claude/projects/<folder>/<session>.jsonl`, a `system` entry of subtype `away_summary`)
+  — the recap it shows when you come back to a session. The latest in the stretch is taken as it
+  stands; one written before the stretch does not count.
+- **The agent's turns.** Codex keeps no recap, but its rollout
+  (`~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`) ends every turn in a `task_complete` with its
+  last message, the commands and patches in between. Those are the recap as facts (`Fixed the
+  parser. (2 turns, 3 commands, 1 patch)`) — or, with `assistants.summarise` set, what the
+  assistant reads.
+- **An assistant reading the stretch.** For anything else, and Claude with no recap in the
+  stretch: the run's row, its events in the stretch, and what was said (Claude's messages,
+  without tool traffic) or the last 64 KB of its output, handed to `assistants.summarise` as an
+  assistant run (`cause: assistant:summarise`). A stretch with nothing in it says so without
+  asking anyone.
+
+`rld` learns the session file from Claude's hooks, which carry `transcript_path` (kept in
+`transcripts`), or finds it by the run's folder and start time. The recap is kept in
+`summaries`, one per run — the latest — with its stretch, where it came from, and how far the run
+had got (the session file's length, or the output's last chunk); said as a `run.summarised`
+event. `summary.make` gives the kept one back while the run has not moved on and the stretch is
+the same, unless `again`; `summary.get` reads it and marks it stale once the run has gone on. The
+narrative is always marked as whose it is, in the pane and on the line (`# claude's own · 2m
+ago`). An assistant's own run is never summarised — so a rule like
 
 ```yaml
 summarise-what-ends:
@@ -755,7 +772,8 @@ phasing.
   action keys and the detail tab. `~/.relay/plugins/` exists, unused.
 - **Facts** — the collector, transcript ingestion, cost: commits and diffs on the branch,
   commands with exit codes, tokens. No `facts` table yet; `Run.cost` is carried but never set.
-  The summariser (§6) works from the run's row, events and output until then.
+  The summariser (§6) reads Claude's and Codex's session files for its recaps, and otherwise the
+  run's row, events and output.
 - **Worktrees and ref rules** — `--worktree`, branch-naming, `.relay/config.yaml` ref derivation.
   `Run.worktree` and `Run.parent_run` are carried, never set.
 - **Notifications** — the notify reference plugins.

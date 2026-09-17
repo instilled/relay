@@ -6,7 +6,7 @@
 //! assistants:
 //!   interpret: claude            # or, with a model and extra arguments:
 //!   interpret: { agent: claude, model: claude-haiku-4-5-20251001, args: ["--max-turns", "1"] }
-//!   summarise: claude            # what an ended run did, in three sentences (s, rl summarise)
+//!   summarise: claude            # a recap where the agent keeps none (/summarise, rl summarise)
 //! retention: 30d                 # the journal of a run ended this long ago goes; or { journal: 30d }
 //! ```
 

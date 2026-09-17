@@ -28,7 +28,7 @@ pub const SEED: &str = "\
 #
 # assistants:            # the agents Relay itself calls on, by job
 #   interpret: claude    # what you type at a / rl interpret in plain words -> a draft for your enter
-#   summarise: claude    # what an ended run did, in three sentences (s in the panel, rl summarise)
+#   summarise: claude    # a recap where the agent keeps none (/summarise in the panel, rl summarise)
 #   # or, with a model and extra arguments:
 #   # interpret: { agent: claude, model: claude-haiku-4-5-20251001, args: [\"--max-turns\", \"1\"] }
 #
