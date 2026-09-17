@@ -12,7 +12,9 @@
 //! A run still going, or waiting on you, is never folded; `enter` on a job
 //! opens it to its recent runs.
 //!
-//! Pinned runs come before all of it, in the order they were pinned.
+//! Before all of it, the questions waiting on you, from every project, oldest
+//! first — what needs you does not hide under a project's name — then pinned
+//! runs, in the order they were pinned.
 
 use super::query::{Query, Subject};
 use crate::rank;
@@ -416,7 +418,6 @@ struct Group<'a> {
     key: String,
     /// The folder of whatever came first; a group's members share one.
     workspace: PathBuf,
-    questions: Vec<&'a Decision>,
     runs: Vec<&'a DigestItem>,
     jobs: Vec<Job<'a>>,
 }
@@ -492,7 +493,6 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
                 groups.push(Group {
                     key,
                     workspace: workspace.to_path_buf(),
-                    questions: Vec::new(),
                     runs: Vec::new(),
                     jobs: Vec::new(),
                 });
@@ -526,6 +526,8 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
     // kept on purpose, so neither a day nor a slice takes them away. Only the
     // filter does, as with anything else.
     let mut pinned: Vec<&'a DigestItem> = Vec::new();
+    // Questions lead the list, whichever project asked them.
+    let mut asked: Vec<&'a Decision> = Vec::new();
     for q in &d.decisions {
         let asker = q.run.as_deref().and_then(run_by_id);
         let key = asker
@@ -547,11 +549,9 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
             kind: vec!["question"],
             by,
         };
-        if !query.hits(&subject) {
-            continue;
+        if query.hits(&subject) {
+            asked.push(q);
         }
-        let g = group_of(key, &q.workspace, &mut groups);
-        groups[g].questions.push(q);
     }
     for i in &d.items {
         let r = &i.run;
@@ -615,7 +615,6 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
         });
     }
     for g in &mut groups {
-        g.questions.sort_by_key(|q| q.created_at);
         g.runs.sort_by(|a, b| {
             rank::score(&a.run)
                 .cmp(&rank::score(&b.run))
@@ -630,7 +629,9 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
     // Which folders already have a line, so idle projects don't double up.
     let shown: HashSet<PathBuf> = groups.iter().map(|g| g.workspace.clone()).collect();
     pinned.sort_by_key(|i| (i.run.pinned_at, i.run.id.clone()));
-    let mut rows: Vec<Row<'a>> = pinned.into_iter().map(Row::Run).collect();
+    asked.sort_by_key(|q| (q.created_at, q.id.clone()));
+    let mut rows: Vec<Row<'a>> = asked.into_iter().map(Row::Question).collect();
+    rows.extend(pinned.into_iter().map(Row::Run));
     // Projects in order of name, so each keeps its place as work comes and
     // goes: what needs you says so with its marks and in the headline, not by
     // jumping the queue. Each block is a project's header and what is under it.
@@ -643,7 +644,6 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
             name: name.clone(),
             rules: chips(cx.rules, Some(&g.workspace), now),
         })];
-        block.extend(g.questions.into_iter().map(Row::Question));
         // Runs and jobs share one order: whatever asks for you leads, then the
         // folder's shells — where you work, rather than something that happens
         // to be idle — then the rest, newest first.
@@ -895,14 +895,14 @@ mod tests {
         assert_eq!(shown("login api"), ["[api]", "r:agent"]);
         assert_eq!(shown("login web"), Vec::<String>::new());
         // A project's name keeps all of it; an idle project answers to its name.
-        assert_eq!(shown("in:api"), ["[api]", "q:q1", "r:agent"]);
+        assert_eq!(shown("in:api"), ["q:q1", "[api]", "r:agent"]);
         assert_eq!(shown("idle"), ["[idle]"]);
         // Tokens pick by what a thing is, and take no bare project along.
         assert_eq!(shown("is:failed"), ["[web]", "r:failed"]);
         assert_eq!(shown("kind:agent"), ["[api]", "r:agent"]);
-        assert_eq!(shown("kind:question"), ["[api]", "q:q1"]);
+        assert_eq!(shown("kind:question"), ["q:q1"], "a question stands above the projects");
         assert_eq!(shown("by:nightly"), ["[web]", "r:sched"]);
-        assert_eq!(shown("by:tests"), ["[api]", "q:q1"], "a question by its reaction");
+        assert_eq!(shown("by:tests"), ["q:q1"], "a question by its reaction");
         assert_eq!(shown("global"), ["[global]"]);
     }
 
@@ -975,21 +975,21 @@ mod tests {
             (PathBuf::from("/home/f/relay"), "relay".to_string()),
             (PathBuf::from("/home/f/api"), "api".to_string()),
         ]);
-        // In the order they were pinned, ahead even of a question; a week-old
+        // In the order they were pinned, after only the questions; a week-old
         // run stays, and its folder keeps its place by name.
         assert_eq!(
             keys(&build_with(&d, &names, "", now)),
-            ["r:old01", "r:shell", "[api]", "[relay]", "q:q1", "r:fail1", "[global]"]
+            ["q:q1", "r:old01", "r:shell", "[api]", "[relay]", "r:fail1", "[global]"]
         );
         // No lens takes a pin away.
         let jobs = lens_build(&d, &names, Lens::Jobs, now);
-        assert_eq!(&keys(&jobs)[..2], ["r:old01", "r:shell"]);
+        assert_eq!(&keys(&jobs)[..3], ["q:q1", "r:old01", "r:shell"]);
         // The filter does, and matches a pin by its folder too.
         assert_eq!(keys(&build_with(&d, &names, "api", now)), ["r:old01", "[api]"]);
     }
 
     #[test]
-    fn questions_lead_their_group_and_the_group_leads_the_list() {
+    fn questions_lead_the_list_and_projects_go_by_name() {
         let now: Timestamp = "2026-09-10T12:00:00Z".parse().unwrap();
         let d = Digest {
             since: now,
@@ -1019,12 +1019,12 @@ mod tests {
         assert_eq!(
             keys(&rows),
             [
-                "[api]", "r:blok1", "r:work1", "[relay]", "q:q1", "r:fail1", "r:done1", "[global]"
+                "q:q1", "[api]", "r:blok1", "r:work1", "[relay]", "r:fail1", "r:done1", "[global]"
             ],
-            "projects by name, however urgent; the question leads its own; api is named by its folder; old01 is gone; global last"
+            "projects by name, however urgent; the question leads the list; api is named by its folder; old01 is gone; global last"
         );
         assert_eq!(counts(&rows), (1, 2, 1, 1, 0));
-        match &rows[3] {
+        match &rows[4] {
             Row::Group(h) => assert_eq!((h.name.as_str(), h.place.as_deref()), ("relay", Some("/home/f/relay"))),
             _ => panic!("relay's header"),
         }
