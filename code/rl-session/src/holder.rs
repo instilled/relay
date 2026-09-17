@@ -5,6 +5,11 @@
 //! decides who may). After the child exits the holder lingers so a daemon that
 //! was down at the time can still attach, replay the tail and read the exit —
 //! then it goes away on `Close` or after `linger` with nobody attached.
+//!
+//! Its socket is the only way anyone reaches it. When that file is gone — the
+//! Relay home deleted, a test's temporary home cleaned up — no daemon can ever
+//! come back for the run, so the holder hangs up its child and leaves rather
+//! than wait out a linger (or a child) nobody will collect.
 
 use crate::backend::{self, Resizer, Spec};
 use crate::exit::{Exit, write_exit_file};
@@ -28,6 +33,8 @@ use tracing::{debug, info, warn};
 pub const RING_CAPACITY: usize = 1 << 20;
 /// Output chunks a slow client may fall behind before it is dropped.
 const BROADCAST_CAPACITY: usize = 4096;
+/// How often the holder checks that its socket is still there.
+const SOCKET_CHECK: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -116,6 +123,7 @@ pub async fn serve(cfg: Config, ready: oneshot::Sender<()>) -> Result<()> {
         cfg.linger,
     ));
     tokio::spawn(watch_signals(ctx.clone()));
+    tokio::spawn(watch_socket(ctx.clone(), cfg.socket.clone()));
 
     loop {
         tokio::select! {
@@ -208,6 +216,22 @@ async fn watch_exit(
             }
         } else {
             idle = Duration::ZERO;
+        }
+    }
+}
+
+/// The socket file removed from under the holder: nobody can reach it again,
+/// so hang up the child and leave.
+async fn watch_socket(ctx: Arc<Ctx>, socket: PathBuf) {
+    loop {
+        tokio::select! {
+            _ = ctx.shutdown.cancelled() => return,
+            _ = tokio::time::sleep(SOCKET_CHECK) => {}
+        }
+        if std::fs::symlink_metadata(&socket).is_err() {
+            info!(socket = %socket.display(), "socket removed; nobody can reach this session");
+            ctx.shutdown.cancel();
+            return;
         }
     }
 }
