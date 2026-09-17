@@ -23,7 +23,7 @@ pub fn sort(runs: &mut [Run]) {
     runs.sort_by(|a, b| {
         score(a)
             .cmp(&score(b))
-            .then_with(|| a.group_key().cmp(&b.group_key()))
+            .then_with(|| a.place_key().cmp(&b.place_key()))
             .then_with(|| a.workspace.cmp(&b.workspace))
             .then_with(|| b.state_at.cmp(&a.state_at))
     });

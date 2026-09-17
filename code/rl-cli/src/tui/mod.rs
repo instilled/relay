@@ -358,7 +358,7 @@ fn hit_row(hit: &ListHit, col: u16, row: u16) -> Option<String> {
 }
 
 /// One row of the list, to the width: mark, title, state, the summary
-/// filling the middle, who is joined, then the ref and the age at the right.
+/// filling the middle, who is joined, then the ref or branch and the age at the right.
 #[allow(clippy::too_many_arguments)]
 fn list_line(
     w: usize,
@@ -368,10 +368,10 @@ fn list_line(
     word: Span<'static>,
     summary: &str,
     joined: Option<&str>,
-    ref_: Option<&str>,
+    aside: Option<&str>,
     age: String,
 ) -> Line<'static> {
-    let right = match ref_ {
+    let right = match aside {
         Some(r) => format!("{r}  {age:>4}"),
         None => format!("{age:>4}"),
     };
@@ -546,6 +546,7 @@ pub async fn run(home: &Home) -> Result<()> {
             since: Timestamp::now(),
             items: Vec::new(),
             decisions: Vec::new(),
+            checkouts: Vec::new(),
         },
         names: Names::default(),
         filter: String::new(),
@@ -826,7 +827,7 @@ impl App {
     /// The graph as the filter leaves it, laid out.
     fn graph_plan(&self) -> Option<(&rl_proto::graph::Graph, graph::Plan)> {
         let g = self.graph.as_ref()?;
-        let kept = graph::keep(g, &self.filter, &self.names);
+        let kept = graph::keep(g, &self.filter, &self.names, &self.digest.checkouts);
         Some((g, graph::plan(g, &kept, &self.names, Timestamp::now())))
     }
 
@@ -2182,13 +2183,16 @@ impl App {
         let mut projects: Vec<String> = self.names.paths().iter().map(|p| self.names.workspace(p)).collect();
         projects.push("global".into());
         let rules: Vec<String> = self.rules.iter().map(|r| r.name().to_string()).collect();
+        let branches: Vec<String> = (self.digest.checkouts.iter().filter_map(|c| c.branch.clone()))
+            .chain(self.digest.items.iter().filter_map(|i| i.run.branch.clone()))
+            .collect();
         let Some(s) = self.search.as_mut() else {
             return;
         };
         let (text, cur) = (s.line.text().to_string(), s.line.cursor());
         let start = text[..cur].rfind(' ').map_or(0, |i| i + 1);
         let word = &text[start..cur];
-        let cands = query::complete(word, &projects, &rules);
+        let cands = query::complete(word, &projects, &rules, &branches);
         let take = match cands.as_slice() {
             [] => return,
             [one] if one.ends_with(':') => one.clone(),
@@ -2753,7 +2757,11 @@ impl App {
         let title = match self.view {
             View::Work => rows::headline(&rows, news, &self.filter),
             View::Graph => match &self.graph {
-                Some(g) => graph::headline(g, graph::keep(g, &self.filter, &self.names).len(), &self.filter),
+                Some(g) => graph::headline(
+                    g,
+                    graph::keep(g, &self.filter, &self.names, &self.digest.checkouts).len(),
+                    &self.filter,
+                ),
                 None => "wiring".into(),
             },
         };
@@ -3046,6 +3054,13 @@ impl App {
                         l.push(Span::styled(format!("  {p}"), theme::dim()));
                         used += 2 + p.chars().count();
                     }
+                    // Its git checkout follows the folder; the chips give way
+                    // to it, not it to them.
+                    if let Some(c) = &h.checkout {
+                        let git = rows::checkout_words(c);
+                        l.push(Span::styled(format!("  {git}"), theme::dim()));
+                        used += 2 + git.chars().count();
+                    }
                     // The count of what is set up here sits at the right edge and
                     // is the honest total even when few chips fit.
                     let count = group_count(&h.rules);
@@ -3142,6 +3157,12 @@ impl App {
                     // command, which is worth reading.
                     let shell = rows::live_shell(r);
                     let quiet = shell && r.detail.is_none();
+                    // Its ref, and its branch where the folder has moved on.
+                    let aside = [r.ref_.clone(), rows::branch_aside(r, &self.digest.checkouts)]
+                        .into_iter()
+                        .flatten()
+                        .collect::<Vec<_>>()
+                        .join("  ");
                     list_line(
                         w,
                         tw,
@@ -3153,7 +3174,7 @@ impl App {
                         Span::styled(fit(&rows::run_words(r), 10), style),
                         if quiet { "" } else { i.summary.as_str() },
                         i.joined_by.as_deref(),
-                        r.ref_.as_deref(),
+                        (!aside.is_empty()).then_some(aside.as_str()),
                         fmt_age(i.at, now),
                     )
                 }

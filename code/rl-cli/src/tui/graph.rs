@@ -20,7 +20,7 @@ use ratatui::text::{Line, Span};
 use rl_core::time::fmt_age;
 use rl_proto::graph::{Graph, Node, NodeKind};
 use rl_proto::rule::RuleStatus;
-use rl_proto::types::RunState;
+use rl_proto::types::{Checkout, RunState};
 use std::collections::{HashMap, HashSet, VecDeque};
 
 /// Widest a node's box grows, and narrowest.
@@ -61,7 +61,7 @@ pub fn colour(kind: NodeKind) -> Style {
 /// The nodes the filter — a search, see `query` — keeps: those that match,
 /// and everything upstream and downstream of them, so a folder's filter still
 /// shows what reaches it from elsewhere and where it leads.
-pub fn keep(g: &Graph, filter: &str, names: &Names) -> HashSet<String> {
+pub fn keep(g: &Graph, filter: &str, names: &Names, checkouts: &[Checkout]) -> HashSet<String> {
     let all = || g.nodes.iter().map(|n| n.id.clone()).collect();
     let query = Query::parse(filter);
     if query.is_empty() {
@@ -69,7 +69,15 @@ pub fn keep(g: &Graph, filter: &str, names: &Names) -> HashSet<String> {
     }
     let hit = |n: &Node| {
         let folder = folder_word(n, names);
-        query.hits(&node_subject(n, &folder))
+        let on = n
+            .folder
+            .as_deref()
+            .and_then(|f| super::rows::checkout_of(checkouts, f))
+            .and_then(|c| c.branch.as_deref());
+        query.hits(&Subject {
+            on,
+            ..node_subject(n, &folder)
+        })
     };
     let mut kept: HashSet<String> = HashSet::new();
     for dir in [true, false] {
@@ -119,6 +127,7 @@ fn node_subject<'a>(n: &'a Node, folder: &'a str) -> Subject<'a> {
         is,
         kind,
         by: n.rule.as_deref().map(|r| r.rsplit('/').next().unwrap_or(r)),
+        on: None,
     }
 }
 
@@ -1061,7 +1070,7 @@ mod tests {
     }
 
     fn all(g: &Graph) -> HashSet<String> {
-        keep(g, "", &names())
+        keep(g, "", &names(), &[])
     }
 
     #[test]
@@ -1141,15 +1150,15 @@ mod tests {
     #[test]
     fn a_filter_keeps_what_reaches_and_leaves_the_match() {
         let g = weather();
-        let kept = keep(&g, "api", &names());
+        let kept = keep(&g, "api", &names(), &[]);
         let mut ids: Vec<&str> = kept.iter().map(String::as_str).collect();
         ids.sort();
         assert_eq!(ids, ["shells", "t"], "api's shells, and the global rule they reach");
-        let kept = keep(&g, "advisory", &names());
+        let kept = keep(&g, "advisory", &names(), &[]);
         assert!(["s", "s.run", "r", "a", "a.note"].iter().all(|id| kept.contains(*id)));
         assert!(!kept.contains("shells"));
         // Tokens pick nodes too, and bring their wiring with them.
-        let kept = keep(&g, "kind:question", &names());
+        let kept = keep(&g, "kind:question", &names(), &[]);
         assert!(kept.contains("a") && kept.contains("r"), "{kept:?}");
         assert!(!kept.contains("shells"));
     }

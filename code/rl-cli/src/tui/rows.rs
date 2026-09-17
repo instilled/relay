@@ -1,7 +1,8 @@
 //! The one list: questions and runs, ranked by attention, grouped by what
 //! they belong to, and named in words rather than ids and paths.
 //!
-//! A group is a run's group key (ref → branch → workspace). Groups come in
+//! A group is a run's ref, else its folder — never its branch: a folder is one
+//! project whichever branch it is on, and its header says which. Groups come in
 //! order of name, the global row last; inside a group, questions come first,
 //! then runs by attention, newest change first. A workspace path reads as the
 //! name it was registered under.
@@ -23,7 +24,7 @@ use rl_core::time::fmt_age;
 use rl_proto::decision::Decision;
 use rl_proto::methods::{Digest, DigestItem};
 use rl_proto::rule::{Rule, RuleKind, RuleStatus};
-use rl_proto::types::{Cause, Confidence, Run, RunKind, RunState};
+use rl_proto::types::{Cause, Checkout, Confidence, Run, RunKind, RunState};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
@@ -114,10 +115,35 @@ pub struct Head {
     pub place: Option<String>,
     /// The folder itself, so actions can act on it; none on the global row.
     pub workspace: Option<PathBuf>,
-    /// A ref, a branch, or a folder's registered name.
+    /// A ref, or a folder by the name it was registered under.
     pub name: String,
     /// The rules of that folder, needing a yes first, then by name.
     pub rules: Vec<Chip>,
+    /// The folder's git checkout, when it is in one.
+    pub checkout: Option<Checkout>,
+}
+
+/// A checkout on a header: `⎇ main · 3 worktrees`, the count on the main
+/// checkout only and only when there are any.
+pub fn checkout_words(c: &Checkout) -> String {
+    match c.worktrees {
+        0 => format!("⎇ {}", c.head()),
+        1 => format!("⎇ {} · 1 worktree", c.head()),
+        n => format!("⎇ {} · {n} worktrees", c.head()),
+    }
+}
+
+/// What a run's row says of its branch: only where it started on another
+/// than the one its folder is on now, so a switch does not hide where it ran.
+pub fn branch_aside(r: &Run, checkouts: &[Checkout]) -> Option<String> {
+    let started = r.branch.as_deref()?;
+    let now = checkout_of(checkouts, &r.workspace)?;
+    (now.branch.as_deref() != Some(started)).then(|| format!("⎇ {started}"))
+}
+
+/// A folder's checkout among those the digest carries.
+pub fn checkout_of<'a>(checkouts: &'a [Checkout], folder: &Path) -> Option<&'a Checkout> {
+    checkouts.iter().find(|c| c.path == folder)
 }
 
 /// A rule on a group's header: `↻ nightly 4h`, `⚡ tests-failed`, `! deploy`.
@@ -476,6 +502,7 @@ fn run_subject<'a>(i: &'a DigestItem, project: &'a str) -> Subject<'a> {
         is,
         kind,
         by,
+        on: r.branch.as_deref(),
     }
 }
 
@@ -531,7 +558,7 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
     for q in &d.decisions {
         let asker = q.run.as_deref().and_then(run_by_id);
         let key = asker
-            .map(Run::group_key)
+            .map(Run::place_key)
             .unwrap_or_else(|| q.workspace.to_string_lossy().into_owned());
         let name = names.group(&key);
         let by = q
@@ -548,6 +575,7 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
             is: vec!["needs"],
             kind: vec!["question"],
             by,
+            on: asker.and_then(|r| r.branch.as_deref()),
         };
         if query.hits(&subject) {
             asked.push(q);
@@ -556,7 +584,7 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
     for i in &d.items {
         let r = &i.run;
         if r.pinned_at.is_some() {
-            if query.hits(&run_subject(i, &names.group(&r.group_key()))) {
+            if query.hits(&run_subject(i, &names.group(&r.place_key()))) {
                 pinned.push(i);
             }
             continue;
@@ -568,7 +596,7 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
         if !cx.lens.keeps(r) {
             continue;
         }
-        let key = r.group_key();
+        let key = r.place_key();
         let name = names.group(&key);
         if let Some((kind, job)) = job_of(r) {
             let mut subject = run_subject(i, &name);
@@ -643,6 +671,7 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
             workspace: Some(g.workspace.clone()),
             name: name.clone(),
             rules: chips(cx.rules, Some(&g.workspace), now),
+            checkout: checkout_of(&d.checkouts, &g.workspace).cloned(),
         })];
         // Runs and jobs share one order: whatever asks for you leads, then the
         // folder's shells — where you work, rather than something that happens
@@ -685,7 +714,11 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
         }
         let place = names.place(&p.to_string_lossy(), &p);
         let name = names.workspace(&p);
-        if !query.hits_project(&[&name, &place, p.to_str().unwrap_or("")]) {
+        let checkout = checkout_of(&d.checkouts, &p);
+        if !query.hits_project(
+            &[&name, &place, p.to_str().unwrap_or("")],
+            checkout.and_then(|c| c.branch.as_deref()),
+        ) {
             continue;
         }
         let head = Row::Group(Head {
@@ -693,6 +726,7 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
             workspace: Some(p.clone()),
             name: name.clone(),
             rules: chips(cx.rules, Some(&p), now),
+            checkout: checkout.cloned(),
         });
         blocks.push((name.to_lowercase(), p.to_string_lossy().into_owned(), vec![head]));
     }
@@ -702,12 +736,13 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
     // that live outside any folder — always last, rules or none, so the cursor
     // has somewhere to stand to reach them. It answers to the filter like any
     // other project.
-    if query.hits_project(&["global", cx.home]) {
+    if query.hits_project(&["global", cx.home], None) {
         rows.push(Row::Group(Head {
             place: Some(cx.home.to_string()),
             workspace: None,
             name: "global".into(),
             rules: chips(cx.rules, None, now),
+            checkout: None,
         }));
     }
     rows
@@ -884,6 +919,7 @@ mod tests {
             since: now,
             items: vec![agent, failed, sched],
             decisions: vec![question("q1", api, None, at)],
+            checkouts: Vec::new(),
         };
         let names = Names::new([
             (PathBuf::from(api), "api".to_string()),
@@ -924,6 +960,7 @@ mod tests {
             since: now,
             items: vec![agent, shell, sched, react],
             decisions: vec![],
+            checkouts: Vec::new(),
         };
         let names = Names::new([(PathBuf::from(ws), "relay".to_string())]);
         let runs = |lens| {
@@ -970,6 +1007,7 @@ mod tests {
                 old,
             ],
             decisions: vec![question("q1", "/home/f/relay", Some("fail1"), "2026-09-10T11:31:00Z")],
+            checkouts: Vec::new(),
         };
         let names = Names::new([
             (PathBuf::from("/home/f/relay"), "relay".to_string()),
@@ -986,6 +1024,78 @@ mod tests {
         assert_eq!(&keys(&jobs)[..3], ["q:q1", "r:old01", "r:shell"]);
         // The filter does, and matches a pin by its folder too.
         assert_eq!(keys(&build_with(&d, &names, "api", now)), ["r:old01", "[api]"]);
+    }
+
+    #[test]
+    fn a_folder_is_one_project_whatever_branch_its_runs_are_on() {
+        let now: Timestamp = "2026-09-10T12:00:00Z".parse().unwrap();
+        let on = |mut i: DigestItem, b: &str| {
+            i.run.branch = Some(b.into());
+            i
+        };
+        let co = |p: &str, b: &str, worktrees| Checkout {
+            path: p.into(),
+            branch: Some(b.into()),
+            detached: None,
+            worktrees,
+        };
+        let d = Digest {
+            since: now,
+            items: vec![
+                on(
+                    item("a1", RunState::Working, "/home/f/api", "2026-09-10T11:50:00Z", false),
+                    "main",
+                ),
+                on(
+                    item("a2", RunState::Working, "/home/f/api", "2026-09-10T11:40:00Z", false),
+                    "feat",
+                ),
+                on(
+                    item("w1", RunState::Working, "/home/f/web", "2026-09-10T11:30:00Z", false),
+                    "main",
+                ),
+            ],
+            decisions: vec![],
+            checkouts: vec![co("/home/f/api", "main", 3), co("/home/f/web", "main", 0)],
+        };
+        let names = Names::default();
+        let rows = build_with(&d, &names, "", now);
+        // Two repos on `main` stay two projects, each named for its folder.
+        assert_eq!(keys(&rows), ["[api]", "r:a1", "r:a2", "[web]", "r:w1", "[global]"]);
+        let head = |n: usize| match &rows[n] {
+            Row::Group(h) => checkout_words(h.checkout.as_ref().unwrap()),
+            _ => panic!("a header"),
+        };
+        assert_eq!((head(0), head(3)), ("⎇ main · 3 worktrees".into(), "⎇ main".into()));
+        // Only the run on another branch than its folder's says so.
+        assert_eq!(branch_aside(&d.items[0].run, &d.checkouts), None);
+        assert_eq!(branch_aside(&d.items[1].run, &d.checkouts).as_deref(), Some("⎇ feat"));
+        assert_eq!(
+            branch_aside(&d.items[1].run, &[]),
+            None,
+            "no checkout, nothing to differ from"
+        );
+
+        assert_eq!(keys(&build_with(&d, &names, "on:feat", now)), ["[api]", "r:a2"]);
+        assert_eq!(
+            keys(&build_with(&d, &names, "on:main", now)),
+            ["[api]", "r:a1", "[web]", "r:w1"]
+        );
+    }
+
+    #[test]
+    fn a_checkout_in_words() {
+        let mut c = Checkout {
+            path: "/w".into(),
+            branch: None,
+            detached: Some("a1b2c3d".into()),
+            worktrees: 0,
+        };
+        assert_eq!(checkout_words(&c), "⎇ a1b2c3d");
+        c.branch = Some("main".into());
+        c.detached = None;
+        c.worktrees = 1;
+        assert_eq!(checkout_words(&c), "⎇ main · 1 worktree");
     }
 
     #[test]
@@ -1013,6 +1123,7 @@ mod tests {
                 ),
             ],
             decisions: vec![question("q1", "/home/f/relay", Some("fail1"), "2026-09-10T11:01:00Z")],
+            checkouts: Vec::new(),
         };
         let names = Names::new([(PathBuf::from("/home/f/relay"), "relay".to_string())]);
         let rows = build_with(&d, &names, "", now);
@@ -1052,6 +1163,7 @@ mod tests {
                 false,
             )],
             decisions: vec![],
+            checkouts: Vec::new(),
         };
         let names = Names::new([
             (PathBuf::from("/home/f/relay"), "relay".to_string()),
@@ -1093,6 +1205,7 @@ mod tests {
                 false,
             )],
             decisions: vec![],
+            checkouts: Vec::new(),
         };
         let names = Names::new([(PathBuf::from("/home/f/relay"), "relay".to_string())]);
         let build_with_rules = |rules: &[Rule]| {
@@ -1164,6 +1277,7 @@ mod tests {
             since: now,
             items,
             decisions: vec![],
+            checkouts: Vec::new(),
         };
         let names = Names::new([(PathBuf::from("/home/f/relay"), "relay".to_string())]);
         let rows = build_with(&d, &names, "", now);
@@ -1219,6 +1333,7 @@ mod tests {
                 item("w", RunState::Working, "/home/f/relay", "2026-09-10T11:40:00Z", false),
             ],
             decisions: vec![],
+            checkouts: Vec::new(),
         };
         let rows = build_with(&d2, &names, "", now);
         assert_eq!(
@@ -1252,6 +1367,7 @@ mod tests {
             since: now,
             items,
             decisions: vec![],
+            checkouts: Vec::new(),
         };
         let names = Names::new([(PathBuf::from("/home/f/relay"), "relay".to_string())]);
         // "exit 1" only appears in the failing run's own summary, not in the
@@ -1357,6 +1473,7 @@ mod tests {
                 false,
             )],
             decisions: vec![],
+            checkouts: Vec::new(),
         };
         let names = Names::new([("/home/f/relay".into(), "relay".to_string())]);
         let build_rules = |rules: &[Rule]| {
@@ -1439,6 +1556,7 @@ mod tests {
             since: now,
             items: vec![shell, stale, work],
             decisions: vec![],
+            checkouts: Vec::new(),
         };
         // The shell leads, though both of the others outrank it by state and
         // both are newer than it.
@@ -1454,6 +1572,7 @@ mod tests {
             since: now,
             items: vec![shell, asks],
             decisions: vec![],
+            checkouts: Vec::new(),
         };
         // Where you work gives way to what wants you.
         assert_eq!(

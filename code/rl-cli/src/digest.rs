@@ -22,12 +22,12 @@ where
     items.sort_by(|a, b| {
         rank::score(&a.run)
             .cmp(&rank::score(&b.run))
-            .then_with(|| a.run.group_key().cmp(&b.run.group_key()))
+            .then_with(|| a.run.place_key().cmp(&b.run.place_key()))
             .then_with(|| b.at.cmp(&a.at))
     });
     let mut groups: Vec<Group> = Vec::new();
     for it in items {
-        let key = it.run.group_key();
+        let key = it.run.place_key();
         match groups.iter_mut().find(|g| g.key == key) {
             Some(g) => g.items.push(it),
             None => groups.push(Group { key, items: vec![it] }),
@@ -143,6 +143,7 @@ mod tests {
         let d = Digest {
             since: "2026-09-08T09:12:00Z".parse().unwrap(),
             decisions: Vec::new(),
+            checkouts: Vec::new(),
             items: vec![
                 item(
                     "done1",
