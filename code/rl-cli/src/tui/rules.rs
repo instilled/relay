@@ -33,6 +33,59 @@ fn place(p: &Path, names: &Names) -> String {
     names.registered(p).unwrap_or_else(|| super::rows::short_path(p))
 }
 
+/// A cadence in words, where it reads better than the line it came from:
+/// `cron 0 8-18 * * 1-5` → `hourly 08:00–18:00, Mon–Fri`. Anything this
+/// does not recognise stays exactly as written — a wrong reading would be
+/// worse than the cron line itself.
+pub fn when_words(when: &str) -> String {
+    let Some(expr) = when.strip_prefix("cron ") else {
+        return when.to_string();
+    };
+    let f: Vec<&str> = expr.split_whitespace().collect();
+    let [min, hour, dom, month, dow] = f[..] else {
+        return when.to_string();
+    };
+    if dom != "*" || month != "*" {
+        return when.to_string();
+    }
+    let m: u32 = match min.parse() {
+        Ok(m) if m < 60 => m,
+        _ => return when.to_string(),
+    };
+    let clock = |h: u32| format!("{h:02}:{m:02}");
+    let hours = match hour.split_once('-') {
+        _ if hour == "*" => format!("hourly at :{m:02}"),
+        Some((a, b)) => match (a.parse::<u32>(), b.parse::<u32>()) {
+            (Ok(a), Ok(b)) if a < 24 && b < 24 => format!("hourly {}–{}", clock(a), clock(b)),
+            _ => return when.to_string(),
+        },
+        None => match hour.parse::<u32>() {
+            Ok(h) if h < 24 => format!("at {}", clock(h)),
+            _ => return when.to_string(),
+        },
+    };
+    match days(dow) {
+        Some(d) => format!("{hours}, {d}"),
+        None if dow == "*" => hours,
+        None => when.to_string(),
+    }
+}
+
+/// The days of a cron's last field, in words; `None` when it is every day or
+/// a shape this does not read.
+fn days(dow: &str) -> Option<String> {
+    const NAMES: [&str; 8] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+    let name = |d: &str| d.parse::<usize>().ok().filter(|n| *n <= 7).map(|n| NAMES[n]);
+    if dow == "*" {
+        return None;
+    }
+    if let Some((a, b)) = dow.split_once('-') {
+        return Some(format!("{}–{}", name(a)?, name(b)?));
+    }
+    let each: Option<Vec<&str>> = dow.split(',').map(name).collect();
+    Some(each?.join(", "))
+}
+
 /// A rule in words: when, what, where, and where it stands.
 pub fn lines(r: &Rule, names: &Names, now: Timestamp, last_run_title: Option<&str>) -> Vec<Line<'static>> {
     let mut lines = vec![Line::from(vec![
@@ -47,7 +100,7 @@ pub fn lines(r: &Rule, names: &Names, now: Timestamp, last_run_title: Option<&st
     };
     lines.push(Line::from(status));
     lines.push(Line::raw(""));
-    lines.push(fact("when", r.when()));
+    lines.push(fact("when", when_words(&r.when())));
     if let Rule::Reaction(x) = r
         && let Some(f) = &x.spec.filter
     {
@@ -150,6 +203,22 @@ mod tests {
     use rl_proto::action::Task;
     use rl_proto::reaction::ReactionSpec;
     use rl_proto::schedule::{Schedule, ScheduleSpec};
+
+    #[test]
+    fn a_cadence_reads_in_words_where_it_can() {
+        let w = |s: &str| when_words(s);
+        assert_eq!(w("cron 0 8-18 * * 1-5"), "hourly 08:00–18:00, Mon–Fri");
+        assert_eq!(w("cron 30 2 * * *"), "at 02:30");
+        assert_eq!(w("cron 5 * * * *"), "hourly at :05");
+        assert_eq!(w("cron 0 9 * * 1,3,5"), "at 09:00, Mon, Wed, Fri");
+        assert_eq!(w("cron 0 7 * * 0"), "at 07:00, Sun");
+        // Left alone: an interval, a reaction, and cron this cannot read.
+        assert_eq!(w("every 30m"), "every 30m");
+        assert_eq!(w("on run.failed"), "on run.failed");
+        assert_eq!(w("cron */5 * * * *"), "cron */5 * * * *");
+        assert_eq!(w("cron 0 2 1 * *"), "cron 0 2 1 * *");
+        assert_eq!(w("cron 0 2 * * mon"), "cron 0 2 * * mon");
+    }
 
     fn schedule(scope: &str, name: &str, approved: bool, paused: bool) -> Rule {
         Rule::Schedule(Schedule {

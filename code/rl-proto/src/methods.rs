@@ -2,7 +2,7 @@
 //! result live together so client and server cannot drift.
 
 use crate::decision::{Decision, DecisionOption};
-use crate::types::{AttachMode, Checkout, Event, Mark, Run, RunKind, RunState};
+use crate::types::{AttachMode, Checkout, Event, Mark, Run, RunKind, RunState, Signal};
 use jiff::Timestamp;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
@@ -424,9 +424,10 @@ pub struct DigestItem {
     pub unseen: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub joined_by: Option<String>,
-    /// What the run raised itself (`rl emit`): each kind and how often.
+    /// What the run raised itself (`rl emit`), by kind, in the order they
+    /// first came.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub emitted: Vec<(String, u32)>,
+    pub emitted: Vec<Signal>,
 }
 
 // ---- event.* ----------------------------------------------------------------

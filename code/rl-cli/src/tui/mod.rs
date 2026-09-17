@@ -357,8 +357,9 @@ fn hit_row(hit: &ListHit, col: u16, row: u16) -> Option<String> {
     hit.keys.get(line).cloned().flatten()
 }
 
-/// One row of the list, to the width: mark, title, state, the summary
-/// filling the middle, who is joined, then the ref or branch and the age at the right.
+/// One row of the list, to the width: mark, title, state, whatever goes
+/// before the summary (who is joined, a job's marks), the summary filling the
+/// middle, then the ref or branch and the age at the right.
 #[allow(clippy::too_many_arguments)]
 fn list_line(
     w: usize,
@@ -367,7 +368,7 @@ fn list_line(
     title: Span<'static>,
     word: Span<'static>,
     summary: &str,
-    joined: Option<&str>,
+    lead: Vec<Span<'static>>,
     aside: Option<&str>,
     age: String,
 ) -> Line<'static> {
@@ -375,15 +376,38 @@ fn list_line(
         Some(r) => format!("{r}  {age:>4}"),
         None => format!("{age:>4}"),
     };
-    let joined = joined.map(|j| format!("● {j}  ")).unwrap_or_default();
-    let fixed = 3 + tw + 1 + 10 + 1 + joined.chars().count() + right.chars().count() + 1;
+    let before: usize = lead.iter().map(|s| s.content.chars().count()).sum();
+    let fixed = 3 + tw + 1 + 10 + 1 + before + right.chars().count() + 1;
     let mut spans = vec![mark, title, Span::raw(" "), word, Span::raw(" ")];
-    if !joined.is_empty() {
-        spans.push(Span::raw(joined).dim());
-    }
+    spans.extend(lead);
     spans.push(Span::raw(fit(summary, w.saturating_sub(fixed))).dim());
     spans.push(Span::raw(format!(" {right}")).dim());
     Line::from(spans)
+}
+
+/// How many of a job's firings the row shows as marks.
+const ROW_MARKS: usize = 5;
+
+/// Who is joined, for the slot before a row's summary.
+fn joined_lead(joined: Option<&str>) -> Vec<Span<'static>> {
+    joined
+        .map(|j| vec![Span::raw(format!("● {j}  ")).dim()])
+        .unwrap_or_default()
+}
+
+/// How a job has been going, oldest first, for the same slot: `···×·`.
+fn marks_lead(j: &rows::Job) -> Vec<Span<'static>> {
+    let mut spans: Vec<Span<'static>> = j
+        .marks(ROW_MARKS)
+        .chars()
+        .map(|c| match c {
+            '×' => Span::raw("×").red().bold(),
+            '○' => Span::raw("○").dim(),
+            _ => Span::raw("·").dim(),
+        })
+        .collect();
+    spans.push(Span::raw("  "));
+    spans
 }
 
 /// A line with the search's words lit up, wherever a span holds them.
@@ -3126,7 +3150,7 @@ impl App {
                         Span::styled(fit(&title, tw), theme::name()),
                         Span::styled(fit("to decide", 10), theme::needs()),
                         &summary,
-                        None,
+                        vec![],
                         None,
                         fmt_age(q.created_at, now),
                     )
@@ -3175,7 +3199,7 @@ impl App {
                         title,
                         Span::styled(fit(&rows::run_words(r), 10), style),
                         if quiet { "" } else { i.summary.as_str() },
-                        i.joined_by.as_deref(),
+                        joined_lead(i.joined_by.as_deref()),
                         (!aside.is_empty()).then_some(aside.as_str()),
                         fmt_age(i.at, now),
                     )
@@ -3197,7 +3221,7 @@ impl App {
                         title,
                         Span::styled(fit(word, 10), state_style(last.run.state)),
                         &j.summary(),
-                        None,
+                        marks_lead(j),
                         None,
                         fmt_age(last.at, now),
                     )
@@ -3333,7 +3357,7 @@ impl App {
                 area.width as usize,
                 now,
             ),
-            Some(Row::Job(j)) => pane::job_lines(&j, self.rule_of_job(&j), &self.names, now),
+            Some(Row::Job(j)) => pane::job_lines(&j, self.rule_of_job(&j), &self.names, area.width as usize, now),
             Some(Row::Question(q)) => {
                 let asker = q.run.as_deref().and_then(|id| self.run_by_id(id));
                 let at = matches!(&self.mode, Mode::Answer(id) if *id == q.id).then_some(self.answer_at);
