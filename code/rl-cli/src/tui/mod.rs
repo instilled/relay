@@ -3205,6 +3205,11 @@ impl App {
                 line = light(line, &words);
             }
             if selected {
+                // The highlight runs to the edge, however little the row says.
+                let short = w.saturating_sub(line.width());
+                if short > 0 {
+                    line.spans.push(Span::raw(" ".repeat(short)));
+                }
                 line = line.style(theme::selected());
                 sel_line = lines.len();
             }
