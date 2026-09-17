@@ -486,9 +486,11 @@ pub fn register(r: &mut Router<Daemon>) {
     });
 }
 
-/// A kind a command may `rl emit`: a dotted, lowercase name of its own. The
-/// daemon's own families are refused, so an emit cannot forge a `run.failed`
-/// the digest would read as real.
+/// A kind a command may `rl emit`: a dotted, lowercase name of its own, each
+/// word starting with a letter and going on in letters, digits, `_` or `-`
+/// (`flint.product.new-feedback`, as rules are named). The daemon's own
+/// families are refused, so an emit cannot forge a `run.failed` the digest
+/// would read as real.
 fn emit_kind_ok(kind: &str) -> Result<(), String> {
     const RESERVED: &[&str] = &["run.", "decision.", "schedule.", "commit.", "branch."];
     if let Some(p) = RESERVED.iter().find(|p| kind.starts_with(**p)) {
@@ -499,11 +501,13 @@ fn emit_kind_ok(kind: &str) -> Result<(), String> {
             !seg.is_empty()
                 && seg
                     .chars()
-                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
                 && seg.starts_with(|c: char| c.is_ascii_lowercase())
         });
     if !shaped {
-        return Err(format!("`{kind}`: a kind is dotted lowercase words, like `log.issue`"));
+        return Err(format!(
+            "`{kind}`: a kind is dotted lowercase words, like `log.issue` or `app.new-feedback`"
+        ));
     }
     Ok(())
 }
