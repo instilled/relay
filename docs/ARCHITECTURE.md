@@ -336,7 +336,8 @@ is the row under the cursor instead — a job opens, a question comes
 out of the list to be answered by number, a run's terminal opens. Arrows, `home`/`end` and `esc`
 belong to the list; `esc` with something typed clears the line first, and `ctrl-c` leaves.
 The few keys that are not the list's or the line's each stand for a command, and the command
-list shows them beside it: `^x` stops or archives, `^r` renames, `^t` pins, `^g` opens the graph, `^o` shows or hides the pane.
+list shows them beside it: `^x` stops or archives, `^r` renames, `^t` pins, `^g` opens the graph, `^o` shows or hides the pane,
+`^f` searches.
 A shell is a command like any other — `/shell` — and has no key of its own. The line keeps `^a`, `^e`, `^u`, `^k` and `^w` for
 editing, as a shell does, so none of those is ever taken for anything else.
 
@@ -347,6 +348,17 @@ agent is in both `agents` and `jobs`, since the lens is a question, not a partit
 ignore it; they are what needs you, whatever slice you are in. `tab` on an empty line steps the
 lens along (shift-`tab` back), and `/lens all|agents|jobs|reactions` jumps straight to one;
 it composes with `/filter`. One-off shell commands live in `all` while they run and are recent.
+
+Searching is `^f` (or `/filter` alone): the line turns from `❯` to `⌕`, and the list — or the
+graph — narrows with every key. `enter` keeps the search and gives the line back, `esc` puts
+back the search from before, the arrows still move through what is left, and the header shows
+`⌕ …` while one is in force; `esc` on the list clears it. `/filter <search>` sets one outright.
+A search (`tui/query.rs`) is words and tokens. Every word must match somewhere — a title, a
+project's name or folder, a CLI, a summary — and is lit up where it shows. The tokens pick by
+what a thing is: `in:` a project, `is:failed|going|done|stopped|needs|pinned|new`,
+`kind:agent|shell|command|job|reaction|question`, `by:` the schedule or reaction behind it.
+Values match by prefix, and `tab` completes names and values. A project stays while anything
+under it matches; a project with nothing under it answers only to words and `in:`.
 
 `/new` is the form for a rule written by hand: `in` (a folder, or `global`), `name`, `when`
 (`every 30m`, a cron line, or `on run.failed` — which decides between `schedules.yaml` and
@@ -643,8 +655,9 @@ draws it, pure from a `Graph` to a grid of styled cells:
 - **Moving.** `←` and `→` follow the wiring, to what feeds the selected node or what it feeds,
   taking the nearest in height. `↑` and `↓` stay in the column, and reach the nearest box above
   or below when the column has none. The window pans to keep the selection in view, and its
-  edges are lit. `/filter` keeps what matches (name, folder, when) plus everything upstream and
-  downstream of it.
+  edges are lit. A search (`^f`) keeps the nodes it hits — by name, detail and folder, and by
+  the same tokens, a schedule being a `job` and an ask a `question` — plus everything upstream
+  and downstream of them.
 - **Acting on a node.** A node stands for its rule, or for what its rule runs or asks, so
   `/approve`, `/pause` and `/edit` work on it. `enter` on a question with
   someone waiting takes it out to be answered by number in the pane, the same as in the list,
