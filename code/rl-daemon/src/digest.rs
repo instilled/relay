@@ -6,21 +6,33 @@ use rl_core::time::fmt_duration;
 use rl_proto::methods::DigestItem;
 use rl_proto::types::{Event, Run, RunState};
 
-pub fn item(run: Run, last: Option<Event>, joined_by: Option<String>) -> DigestItem {
+pub fn item(run: Run, last: Option<Event>, joined_by: Option<String>, emitted: Vec<(String, u32)>) -> DigestItem {
     let at = last.as_ref().map(|e| e.at).unwrap_or(run.state_at);
-    let summary = summarise(&run, last.as_ref());
+    let summary = summarise(&run, last.as_ref(), &emitted);
     let unseen = unseen(&run, at);
     DigestItem {
         summary,
         at,
         unseen,
         joined_by,
+        emitted,
         run,
     }
 }
 
-/// The question, the exit, the last thing said — in that order of interest.
-pub fn summarise(run: &Run, last: Option<&Event>) -> String {
+/// What a run raised, in words: `flint.product.new-feedback ×5`, a kind on
+/// its own when it came once.
+pub fn signals(emitted: &[(String, u32)]) -> String {
+    emitted
+        .iter()
+        .map(|(kind, n)| if *n > 1 { format!("{kind} ×{n}") } else { kind.clone() })
+        .collect::<Vec<_>>()
+        .join(" · ")
+}
+
+/// The question, the exit, the last thing said — in that order of interest;
+/// an ended run says what it raised on its way, which its exit would bury.
+pub fn summarise(run: &Run, last: Option<&Event>, emitted: &[(String, u32)]) -> String {
     let detail = last.and_then(|e| {
         e.data
             .as_ref()
@@ -39,10 +51,14 @@ pub fn summarise(run: &Run, last: Option<&Event>) -> String {
                 .map(str::to_string)
                 .or_else(|| run.exit_code.map(|c| format!("exit {c}")))
                 .unwrap_or_else(|| run.state.to_string());
-            match run.ended_at {
+            let mut out = match run.ended_at {
                 Some(e) => format!("{how} · {}", fmt_duration(e.duration_since(run.started_at))),
                 None => how,
+            };
+            if !emitted.is_empty() {
+                out.push_str(&format!(" · {}", signals(emitted)));
             }
+            out
         }
         RunState::NeedsInput | RunState::Blocked | RunState::Stale => detail.unwrap_or_else(|| run.state.to_string()),
         _ => run
@@ -95,35 +111,62 @@ mod tests {
             Some("Claude needs your permission to use Bash"),
         );
         assert_eq!(
-            summarise(&run(RunState::NeedsInput), Some(&q)),
+            summarise(&run(RunState::NeedsInput), Some(&q), &[]),
             "Claude needs your permission to use Bash"
         );
         let mut done = run(RunState::Finished);
         done.exit_code = Some(0);
         done.ended_at = Some("2026-09-08T10:41:03Z".parse().unwrap());
-        assert_eq!(summarise(&done, None), "exit 0 · 41m03s");
+        assert_eq!(summarise(&done, None, &[]), "exit 0 · 41m03s");
         let mut w = run(RunState::Working);
         w.last_line = Some("Compiling…".into());
         assert_eq!(
-            summarise(&w, Some(&ev("run.started", "started `x`", None))),
+            summarise(&w, Some(&ev("run.started", "started `x`", None)), &[]),
             "Compiling…"
         );
         assert_eq!(
-            summarise(&w, Some(&ev("run.state", "working: tool: Edit", Some("tool: Edit")))),
+            summarise(
+                &w,
+                Some(&ev("run.state", "working: tool: Edit", Some("tool: Edit"))),
+                &[]
+            ),
             "tool: Edit"
         );
-        assert_eq!(summarise(&run(RunState::Idle), None), "idle");
+        assert_eq!(summarise(&run(RunState::Idle), None, &[]), "idle");
         let mut busy = run(RunState::Working);
         busy.detail = Some("tool: Bash".into());
         busy.last_line = Some("$ cargo test".into());
         assert_eq!(
             summarise(
                 &busy,
-                Some(&ev("run.state", "working: session started", Some("session started")))
+                Some(&ev("run.state", "working: session started", Some("session started"))),
+                &[]
             ),
             "tool: Bash",
             "the run's own word beats the last event's"
         );
+    }
+
+    #[test]
+    fn an_ended_run_says_what_it_raised() {
+        let mut done = run(RunState::Finished);
+        done.ended_at = Some("2026-09-08T10:01:00Z".parse().unwrap());
+        done.exit_code = Some(0);
+        let raised = [
+            ("flint.product.new-feedback".to_string(), 5u32),
+            ("log.issue".into(), 1),
+        ];
+        assert_eq!(
+            summarise(&done, None, &raised),
+            "exit 0 · 1m00s · flint.product.new-feedback ×5 · log.issue"
+        );
+        assert_eq!(
+            summarise(&done, None, &[]),
+            "exit 0 · 1m00s",
+            "nothing raised, nothing said"
+        );
+        // A run still going says what it is doing, as before.
+        assert_eq!(summarise(&run(RunState::Idle), None, &raised), "idle");
     }
 
     #[test]

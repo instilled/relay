@@ -212,7 +212,11 @@ inside one runs by attention; and named — a workspace by the
 name it was registered under, a cause as "schedule nightly" or "rule tests-failed", never an id.
 A row is a mark (`✱` needs you, `·` going, `•` ended, `▸` a job), the title, the state as a word,
 the summary to the edge, and the ref and the age at the right — with `⎇ feat` there too when the
-run started on another branch than the one its folder is on now. Colour carries the state — a
+run started on another branch than the one its folder is on now. An ended run's summary says
+what it raised itself (`rl emit`) after its exit — `exit 0 · 1s · flint.product.new-feedback ×5`,
+each kind once with how often — which a probe's whole point is and its exit would otherwise bury;
+the pane says the same under `signals`. The daemon's own event families are left out of it, since
+the state already says them (`events::emitted_for_run`, carried on the digest's item). Colour carries the state — a
 saturated accent per state, on the terminal's own foreground so it reads on either theme
 (`tui/theme.rs`). The panel runs to the screen's edges, with a rule between its sections — under
 the header, above the line, above the footer. The project rows and the `❯` line start at the edge,
@@ -231,7 +235,7 @@ rules or none: it is always the last project, a yes waiting there or not (its ch
 and the cursor stops on it, `enter` (or `^o`) shows its schedules and
 reactions in the pane, and `^g` opens the graph on them. Runs a schedule or a rule
 started fold, once ended, into one line per job — name, cadence, how many went well, the last
-outcome — so a job firing every thirty seconds is a row, not a screen; a run still going or
+outcome and what that firing raised — so a job firing every thirty seconds is a row, not a screen; a run still going or
 waiting on you is never folded, and `enter` on a job opens it to its last twenty. When the list
 is taller than the screen, its first and last lines say how much is above and below. A group's
 header says which folder it is in, and the cursor stops on it like any other row: `enter` (or

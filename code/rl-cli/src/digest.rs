@@ -36,6 +36,16 @@ where
     groups
 }
 
+/// What a run raised, in words: `flint.product.new-feedback ×5`, a kind on
+/// its own when it came once.
+pub fn signals(emitted: &[(String, u32)]) -> String {
+    emitted
+        .iter()
+        .map(|(kind, n)| if *n > 1 { format!("{kind} ×{n}") } else { kind.clone() })
+        .collect::<Vec<_>>()
+        .join(" · ")
+}
+
 /// What the since screen shows: news since the boundary, and anything unseen.
 pub fn since_items(d: &Digest) -> Vec<&DigestItem> {
     d.items.iter().filter(|i| i.at >= d.since || i.unseen).collect()
@@ -135,6 +145,7 @@ mod tests {
             at: t,
             unseen,
             joined_by: None,
+            emitted: vec![],
         }
     }
 
