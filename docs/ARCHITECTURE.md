@@ -198,9 +198,11 @@ into a watcher. Each viewer gets its own holder connection, and the supervisor's
 connection journals regardless — so a viewer leaving costs nothing and the run never notices.
 
 The panel (`rl` with no command, `rl-cli/src/tui`) is the same two calls behind one screen. It
-is one list, the width of the screen, built from `digest.get` (`tui/rows.rs`): grouped by the
-folder they belong to, the folders in order of name so each keeps its place, and inside one the
-questions first, then runs by attention; and named — a workspace by the
+is one list, the width of the screen, built from `digest.get` (`tui/rows.rs`): the questions
+waiting on you first, from every project and each naming its own (`rlux › deploy tonight?`),
+oldest first, so what needs you never hides under a project's name; then pinned runs; then
+grouped by the folder they belong to, the folders in order of name so each keeps its place, and
+inside one runs by attention; and named — a workspace by the
 name it was registered under, a cause as "schedule nightly" or "rule tests-failed", never an id.
 A row is a mark (`✱` needs you, `·` going, `•` ended, `▸` a job), the title, the state as a word,
 the summary to the edge, and the ref and the age at the right. Colour carries the state — a
@@ -265,9 +267,14 @@ ten thousand rows above itself — and the footer says how far back you are. New
 the view to the bottom. An ended run keeps what it printed after its holder has gone,
 to be read the same way. `^o` (or `/pane`) opens a pane of
 facts beside the list (`tui/pane.rs`): a run's facts and recent events, a job's tally, a question
-with its options numbered; `enter` on a question opens that pane and takes the question out of
-the list, where the number answers it, which is `decision.take`, and the run it starts becomes
-the selection. `/summarise` on an ended run asks
+with its options numbered. With the pane closed, the selected question opens into a card under
+its row instead — who asked, the first lines of the summary, the options numbered with what each
+runs — so it can be answered where it is. `enter` on a question takes it out of the list, where
+the number answers it, which is `decision.take`, and the run it starts becomes the selection.
+The line answers too: on a question, a line that starts with an option — its number or its key,
+several joined by commas where it takes several — answers with that option and the rest of the
+line as the note (`1 only the checkout path`), and the line's hint says so before you send it.
+Typed text before `^x` goes with a dismissal as its reason. `/summarise` on an ended run asks
 `assistants.summarise` what it did (§6): the asking is a run in the list, and the answer lands in
 the pane under the facts as `claude said, 2m ago`, always marked as the assistant's; asking again
 asks anew. 
@@ -476,7 +483,9 @@ read rather than that nothing matched.
 **Decisions** are the human node, and they never block. `rl ask` writes the question and
 returns; the run that asked can finish, and the question waits in the ledger with its options.
 Answering is the only thing that starts the follow-up runs, and the row moves to `taken` before
-they start, so two `rl decide` racing cannot both fire. A `group` key is unique among open
+they start, so two `rl decide` racing cannot both fire. Each run an answer starts has the answer
+in its environment: `RELAY_DECISION` (the question), `RELAY_CHOICE` (the option) and
+`RELAY_NOTE` (what was said with it, or empty), so a note can steer what runs. A `group` key is unique among open
 questions: asking the same thing again restates the open one, keeping its id, so a nightly job
 leaves one line rather than thirty. An `expires` either takes the option marked `default` or
 moves the question to `expired`; the sweeper sleeps until the earliest deadline and does
@@ -660,8 +669,9 @@ draws it, pure from a `Graph` to a grid of styled cells:
   and downstream of them.
 - **Acting on a node.** A node stands for its rule, or for what its rule runs or asks, so
   `/approve`, `/pause` and `/edit` work on it. `enter` on a question with
-  someone waiting takes it out to be answered by number in the pane, the same as in the list,
-  and the cursor goes on to what the answer ran. `enter` on a schedule, or on its command,
+  someone waiting takes it out to be answered by number in the pane, the same as in the list —
+  and as there, a line starting with an option answers with the rest as its note — and the
+  cursor goes on to what the answer ran. `enter` on a schedule, or on its command,
   offers to run it now. Anywhere else, `enter` (or `^o`) shows the node in the pane: what it
   is, its rule in words (when, what, where, which version you approved), how its runs went, and what it is wired to on
   either side.

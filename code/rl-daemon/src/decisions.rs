@@ -238,10 +238,19 @@ impl Decisions {
                 Cause::Decision(d.id.clone()),
                 Some(d.flow.clone()),
             ) {
-                Ok(spec) => match self.supervisor.start(spec).await {
-                    Ok(run) => started.push(run.id),
-                    Err(e) => warn!(decision = d.id, option = key, error = %format!("{e:#}"), "option did not start"),
-                },
+                Ok(mut spec) => {
+                    // What was asked and answered reaches the option's run, so
+                    // the note that came with the answer can steer it.
+                    spec.env.push(("RELAY_DECISION".into(), d.id.clone()));
+                    spec.env.push(("RELAY_CHOICE".into(), key.clone()));
+                    spec.env.push(("RELAY_NOTE".into(), note.clone().unwrap_or_default()));
+                    match self.supervisor.start(spec).await {
+                        Ok(run) => started.push(run.id),
+                        Err(e) => {
+                            warn!(decision = d.id, option = key, error = %format!("{e:#}"), "option did not start")
+                        }
+                    }
+                }
                 Err(e) => warn!(decision = d.id, option = key, error = %format!("{e:#}"), "option is not runnable"),
             }
         }

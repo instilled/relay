@@ -302,6 +302,25 @@ pub fn question_lines(d: &Decision, asker: Option<&Run>, picked: &[usize], now: 
         Span::raw(" ? ").yellow().bold(),
         Span::raw(d.title.clone()).bold(),
     ])];
+    lines.extend(question_body(d, asker, picked, now, None));
+    lines
+}
+
+/// A summary longer than this is cut in the card on the list; the pane has
+/// all of it.
+pub const CARD_SUMMARY: usize = 3;
+
+/// Everything of a question under its title — who asked, the summary (cut to
+/// `summary_max` lines, if given), the options, how to answer — for the pane,
+/// and for the card the selected question opens into on the list.
+pub fn question_body(
+    d: &Decision,
+    asker: Option<&Run>,
+    picked: &[usize],
+    now: Timestamp,
+    summary_max: Option<usize>,
+) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
     let mut who = format!(" asked by {} · {} ago", asked_by(d, asker), fmt_age(d.created_at, now));
     if let Some(e) = d.expires_at {
         if e > now {
@@ -313,8 +332,15 @@ pub fn question_lines(d: &Decision, asker: Option<&Run>, picked: &[usize], now: 
     lines.push(Line::from(Span::raw(who).dim()));
     if let Some(s) = &d.summary {
         lines.push(Line::raw(""));
-        for l in s.lines() {
+        let all: Vec<&str> = s.lines().collect();
+        let max = summary_max.unwrap_or(all.len());
+        for l in all.iter().take(max) {
             lines.push(Line::raw(format!(" {l}")));
+        }
+        if all.len() > max {
+            lines.push(Line::from(
+                Span::raw(format!(" … {} more · ^o reads it all", all.len() - max)).dim(),
+            ));
         }
     }
     lines.push(Line::raw(""));
@@ -344,17 +370,42 @@ pub fn question_lines(d: &Decision, asker: Option<&Run>, picked: &[usize], now: 
     lines.push(Line::raw(""));
     let n = d.options.len().min(MAX_KEYS);
     let hint = if d.multi {
-        format!(" 1-{n} pick · enter answer · n not this")
+        format!(" 1-{n} pick · enter answer · or `1,2 and a note` on the line · ^x not this")
     } else if n == 1 {
-        " 1 answer · n not this".to_string()
+        " 1 answer · or `1 and a note` on the line · ^x not this".to_string()
     } else {
-        format!(" 1-{n} answer · n not this")
+        format!(" 1-{n} answer · or `1 and a note` on the line · ^x not this")
     };
     lines.push(Line::from(Span::raw(hint).dim()));
     if d.options.iter().any(|o| o.default) {
         lines.push(Line::from(Span::raw(" * taken on its own if it expires").dim()));
     }
     lines
+}
+
+/// A line that answers a question: the option first — its number or its key,
+/// several joined by commas where the question takes several — and whatever
+/// follows as the note that goes with the answer. `None` when the first word
+/// names no option, so the line means what it would anywhere else.
+pub fn answer_of(d: &Decision, line: &str) -> Option<(Vec<String>, Option<String>)> {
+    let line = line.trim();
+    let (head, rest) = line.split_once(char::is_whitespace).unwrap_or((line, ""));
+    let mut keys = Vec::new();
+    for part in head.split(',').filter(|p| !p.is_empty()) {
+        let opt = match part.parse::<usize>() {
+            Ok(i) if (1..=d.options.len().min(MAX_KEYS)).contains(&i) => &d.options[i - 1],
+            Ok(_) => return None,
+            Err(_) => d.options.iter().find(|o| o.key.eq_ignore_ascii_case(part))?,
+        };
+        if !keys.contains(&opt.key) {
+            keys.push(opt.key.clone());
+        }
+    }
+    if keys.is_empty() || (keys.len() > 1 && !d.multi) {
+        return None;
+    }
+    let note = rest.trim();
+    Some((keys, (!note.is_empty()).then(|| note.to_string())))
 }
 
 #[cfg(test)]
@@ -481,10 +532,38 @@ mod tests {
         assert!(s.contains("  1  look       Have Claude look at it\n"), "{s}");
         assert!(s.contains("→ claude · why?"), "{s}");
         assert!(s.contains("  2  ignore     ignore  *\n"), "{s}");
-        assert!(s.contains(" 1-2 answer · n not this\n * taken on its own"), "{s}");
+        assert!(
+            s.contains(" 1-2 answer · or `1 and a note` on the line · ^x not this\n * taken on its own"),
+            "{s}"
+        );
         assert!(!s.contains("kfmpg3sw"), "no id on screen: {s}");
 
         let s = text(&question_lines(&d, None, &[1], now));
         assert!(s.contains("  2  ignore     ignore  ◆\n"), "{s}");
+
+        // The card cuts a long summary and says where the rest is.
+        let mut long = d.clone();
+        long.summary = Some("a\nb\nc\nd\ne".into());
+        let s = text(&question_body(&long, None, &[], now, Some(CARD_SUMMARY)));
+        assert!(s.contains(" a\n b\n c\n … 2 more · ^o reads it all\n"), "{s}");
+        assert!(!s.contains(" d\n"), "{s}");
+
+        // The line answers by number or key, the rest the note.
+        let some = |k: &[&str], n: Option<&str>| Some((k.iter().map(|x| x.to_string()).collect(), n.map(String::from)));
+        assert_eq!(answer_of(&d, "1"), some(&["look"], None));
+        assert_eq!(answer_of(&d, "2  not tonight "), some(&["ignore"], Some("not tonight")));
+        assert_eq!(
+            answer_of(&d, "LOOK only the parser"),
+            some(&["look"], Some("only the parser"))
+        );
+        assert_eq!(answer_of(&d, "3"), None, "no third option");
+        assert_eq!(answer_of(&d, "make test"), None, "not an option: the line is a line");
+        assert_eq!(answer_of(&d, "1,2"), None, "one option only");
+        let mut multi = d.clone();
+        multi.multi = true;
+        assert_eq!(
+            answer_of(&multi, "1,ignore both"),
+            some(&["look", "ignore"], Some("both"))
+        );
     }
 }

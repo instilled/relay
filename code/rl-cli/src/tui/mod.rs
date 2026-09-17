@@ -844,6 +844,20 @@ impl App {
         }
     }
 
+    /// The question the line answers: the one under the cursor on the list,
+    /// or the first one waiting at the node under it in the graph.
+    fn question_here(&self) -> Option<&Decision> {
+        match self.view {
+            View::Work => self.selected_question(),
+            View::Graph => {
+                let n = self.selected_node()?;
+                n.waiting
+                    .iter()
+                    .find_map(|id| self.digest.decisions.iter().find(|d| &d.id == id))
+            }
+        }
+    }
+
     fn selected_rule(&self) -> Option<&Rule> {
         // A node stands for its rule, or for what its rule runs or asks.
         let key = self.selected_node()?.rule.clone()?;
@@ -1101,15 +1115,11 @@ impl App {
         }
     }
 
-    async fn answer(&mut self, id: String, options: Vec<String>) {
+    async fn answer(&mut self, id: String, options: Vec<String>, note: Option<String>) {
         let what = options.join(", ");
         match self
             .rpc
-            .call::<DecisionTake>(DecisionTakeParams {
-                id,
-                options,
-                note: None,
-            })
+            .call::<DecisionTake>(DecisionTakeParams { id, options, note })
             .await
         {
             Ok(d) => {
@@ -1139,9 +1149,18 @@ impl App {
         }
     }
 
+    /// "Not this". Whatever is typed on the line goes with it, as the reason.
     async fn dismiss(&mut self, id: String) {
-        match self.rpc.call::<DecisionDismiss>(DecisionNote { id, note: None }).await {
+        let note = Some(self.line.text().trim().to_string()).filter(|n| !n.is_empty());
+        match self
+            .rpc
+            .call::<DecisionDismiss>(DecisionNote { id, note: note.clone() })
+            .await
+        {
             Ok(_) => {
+                if note.is_some() {
+                    self.line.clear();
+                }
                 self.say("dismissed");
                 self.refresh().await;
             }
@@ -1874,14 +1893,14 @@ impl App {
                             }
                             (true, false) => {
                                 let key = q.options[i].key.clone();
-                                self.answer(id, vec![key]).await;
+                                self.answer(id, vec![key], None).await;
                             }
                             (false, _) => self.mode = Mode::Answer(id),
                         }
                     }
                     KeyCode::Enter if q.multi && !self.picked.is_empty() => {
                         let opts: Vec<String> = self.picked.iter().map(|&i| q.options[i].key.clone()).collect();
-                        self.answer(id, opts).await;
+                        self.answer(id, opts, None).await;
                     }
                     _ => self.mode = Mode::Answer(id),
                 }
@@ -2195,9 +2214,8 @@ impl App {
         } else if let Some(q) = self.selected_question() {
             let id = q.id.clone();
             self.picked.clear();
-            // The options are numbered in the pane; asking for a number with
-            // nothing numbered on screen is no question at all.
-            self.show_pane = true;
+            // The options are numbered on the card under the row, or in the
+            // pane when it is open.
             self.mode = Mode::Answer(id);
         } else if self.selected_project().is_some() || self.selected_global() {
             // A project (or the global) header: its rules in the pane.
@@ -2224,6 +2242,16 @@ impl App {
     /// `enter` on the line: what it says. Nothing typed, the row instead.
     async fn submit(&mut self, area: Rect) -> Result<()> {
         self.completing = None;
+        // On a question, a line that starts with an option answers it, and
+        // the rest of the line is the note that goes with the answer.
+        if let Some(q) = self.question_here()
+            && let Some((keys, note)) = pane::answer_of(q, self.line.text())
+        {
+            let id = q.id.clone();
+            self.line.clear();
+            self.answer(id, keys, note).await;
+            return Ok(());
+        }
         let folder = self.folder_here();
         let what = {
             let here = self.here(&folder);
@@ -2773,18 +2801,30 @@ impl App {
             let here = self.here(&folder);
             line::what(self.line.text(), &self.agents, &|h| complete::runnable(h, &here))
         };
+        let answer = self.question_here().and_then(|q| pane::answer_of(q, self.line.text()));
         // A glyph and a colour say what `enter` will do: teal when it will run
         // something here, dim when the words are only asked or a command.
-        let (glyph, tail, style) = match &what {
-            line::What::Empty => ("↵", String::new(), theme::dim()),
-            line::What::Slash(_) => ("↵", " a command".into(), theme::dim()),
-            line::What::Shell(_) => (
-                "❯",
-                format!(" runs in {}", self.names.workspace(&folder)),
-                theme::accent(),
+        let (glyph, tail, style) = match (&answer, &what) {
+            (Some((keys, note)), _) => (
+                "✱",
+                format!(
+                    " answers {}{}",
+                    keys.join(", "),
+                    if note.is_some() { " with that note" } else { "" }
+                ),
+                theme::needs(),
             ),
-            line::What::Agent { agent, .. } => ("✦", format!(" {agent} here"), theme::accent()),
-            line::What::Ask(_) => ("…", " asks the assistant".into(), theme::dim()),
+            (None, what) => match what {
+                line::What::Empty => ("↵", String::new(), theme::dim()),
+                line::What::Slash(_) => ("↵", " a command".into(), theme::dim()),
+                line::What::Shell(_) => (
+                    "❯",
+                    format!(" runs in {}", self.names.workspace(&folder)),
+                    theme::accent(),
+                ),
+                line::What::Agent { agent, .. } => ("✦", format!(" {agent} here"), theme::accent()),
+                line::What::Ask(_) => ("…", " asks the assistant".into(), theme::dim()),
+            },
         };
         let hint = format!("{glyph}{tail}");
         let text = self.line.text();
@@ -2928,18 +2968,20 @@ impl App {
                     Line::from(l)
                 }
                 Row::Question(q) => {
-                    let summary = q.summary.clone().unwrap_or_else(|| {
-                        q.options
-                            .iter()
-                            .map(|o| o.label.as_str())
-                            .collect::<Vec<_>>()
-                            .join(" / ")
-                    });
+                    // One line of it: the summary's first, or else the options.
+                    let summary = q
+                        .summary
+                        .as_deref()
+                        .and_then(|s| s.lines().find(|l| !l.trim().is_empty()))
+                        .map(str::to_string)
+                        .unwrap_or_else(|| q.options.iter().map(|o| o.text()).collect::<Vec<_>>().join(" / "));
+                    // Above every project, so it says which one asked.
+                    let title = format!("{} › {}", self.names.workspace(&q.workspace), q.title);
                     list_line(
                         w,
                         tw,
                         Span::styled(" ✱ ", theme::needs()),
-                        Span::styled(fit(&q.title, tw), theme::name()),
+                        Span::styled(fit(&title, tw), theme::name()),
                         Span::styled(fit("to decide", 10), theme::needs()),
                         &summary,
                         None,
@@ -3022,6 +3064,22 @@ impl App {
             }
             lines.push(line);
             keys.push(row.key());
+            // The selected question opens into a card under its row: who asked,
+            // what it is about, the options — answerable with the pane closed.
+            if selected
+                && !self.show_pane
+                && let Row::Question(q) = row
+            {
+                let asker = q.run.as_deref().and_then(|id| self.run_by_id(id));
+                for l in pane::question_body(q, asker, &self.picked, now, Some(pane::CARD_SUMMARY)) {
+                    let mut spans = vec![Span::raw("  ")];
+                    spans.extend(l.spans);
+                    lines.push(Line::from(spans));
+                    keys.push(row.key());
+                }
+                // Keep the whole card in view, not just its row.
+                sel_line = lines.len() - 1;
+            }
         }
         // The window follows the selection; when there is more either side,
         // the edge line says how much.
@@ -3235,7 +3293,7 @@ impl App {
             };
             let mut s = String::new();
             if self.selected_node().is_some_and(|n| !n.waiting.is_empty()) {
-                s.push_str("enter answers it · ");
+                s.push_str("enter or `1 and a note` on the line answers it · ");
             } else if let Some(r) = self.selected_rule() {
                 if r.status() == RuleStatus::NeedsApproval {
                     s.push_str("/approve · ");
@@ -3259,7 +3317,7 @@ impl App {
             "^o details"
         };
         match self.selected() {
-            Some(Row::Question(_)) => format!("enter answers it · ^x dismiss · {pane}"),
+            Some(Row::Question(_)) => format!("enter or `1 and a note` on the line answers it · ^x not this · {pane}"),
             Some(Row::Job(j)) => {
                 let open = if self.opened.contains(&j.key) {
                     "enter closes"
