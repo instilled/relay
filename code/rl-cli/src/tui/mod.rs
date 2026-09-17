@@ -22,6 +22,7 @@ mod graph;
 mod line;
 mod palette;
 mod pane;
+mod query;
 mod rows;
 mod rules;
 mod screen;
@@ -120,6 +121,14 @@ enum Mode {
     Answer(String),
 }
 
+/// The line searching rather than taking work: what is typed is the filter,
+/// live. Whatever was being typed for work waits in the main line.
+struct Search {
+    line: line::Line,
+    /// The filter as it stood when the search opened, for `esc` to put back.
+    before: String,
+}
+
 /// What `tab` is offering for the word being typed, and where the cycle is.
 struct Completing {
     /// The line as it was when tab was first pressed, and where the cursor
@@ -171,7 +180,10 @@ struct App {
     me: String,
     digest: Digest,
     names: Names,
+    /// A search the list and the graph are narrowed to; see `query`.
     filter: String,
+    /// `^f`: the line is searching, and the filter follows what is typed.
+    search: Option<Search>,
     /// Which slice of the list is shown: all, agents, jobs or reactions.
     lens: rows::Lens,
     view: View,
@@ -346,6 +358,32 @@ fn list_line(
     Line::from(spans)
 }
 
+/// A line with the search's words lit up, wherever a span holds them.
+fn light(line: Line<'static>, words: &[String]) -> Line<'static> {
+    let mut out = Vec::with_capacity(line.spans.len());
+    for span in line.spans {
+        let marks = query::marks(&span.content, words);
+        if marks.is_empty() {
+            out.push(span);
+            continue;
+        }
+        let text = span.content.to_string();
+        let lit = span.style.add_modifier(Modifier::UNDERLINED | Modifier::BOLD);
+        let mut at = 0;
+        for (a, b) in marks {
+            if a > at {
+                out.push(Span::styled(text[at..a].to_string(), span.style));
+            }
+            out.push(Span::styled(text[a..b].to_string(), lit));
+            at = b;
+        }
+        if at < text.len() {
+            out.push(Span::styled(text[at..].to_string(), span.style));
+        }
+    }
+    Line { spans: out, ..line }
+}
+
 /// Where things go on screen.
 struct Areas {
     head: Rect,
@@ -483,6 +521,7 @@ pub async fn run(home: &Home) -> Result<()> {
         },
         names: Names::default(),
         filter: String::new(),
+        search: None,
         lens: rows::Lens::All,
         view: View::Work,
         rules: Vec::new(),
@@ -641,6 +680,9 @@ impl App {
 
     /// How many rows the live line takes: its own, capped, at least one.
     fn line_h(&self) -> u16 {
+        if self.search.is_some() {
+            return 1;
+        }
         (self.line.rows() as u16).clamp(1, LINE_MAX)
     }
 
@@ -1855,6 +1897,16 @@ impl App {
             }
             Mode::Normal => {}
         }
+        if (k.code, k.modifiers) == (KeyCode::Char('f'), KeyModifiers::CONTROL) {
+            match self.search.take() {
+                Some(_) => {}
+                None => self.open_search(),
+            }
+            return Ok(());
+        }
+        if self.search.is_some() {
+            return self.key_search(k).await;
+        }
         // Watching, the line still has the keyboard, so you can type the next
         // thing without leaving the run you are on; taking the keyboard is the
         // handover to the real terminal (`raw::attach`), never keys here.
@@ -1936,6 +1988,87 @@ impl App {
             }
             _ => self.key_list(k).await,
         }
+    }
+
+    /// `^f` or `/filter`: search, starting from the filter already in force.
+    fn open_search(&mut self) {
+        let mut l = line::Line::default();
+        l.set_with_cursor(self.filter.clone(), self.filter.len());
+        self.search = Some(Search {
+            line: l,
+            before: self.filter.clone(),
+        });
+        self.completing = None;
+        self.pick = None;
+    }
+
+    /// A key while searching: typing narrows at once, `enter` keeps the
+    /// search and gives the line back, `esc` puts back the filter from before,
+    /// `tab` completes a token; the arrows still move through what is left.
+    async fn key_search(&mut self, k: KeyEvent) -> Result<()> {
+        let Some(s) = self.search.as_mut() else {
+            return Ok(());
+        };
+        // A search is one line: what would add a line keeps it instead.
+        let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+        if k.code == KeyCode::Enter || (ctrl && k.code == KeyCode::Char('j')) {
+            self.search = None;
+            return Ok(());
+        }
+        match s.line.key(&k) {
+            line::Act::Typing => {
+                self.filter = s.line.text().trim().to_string();
+                self.settle();
+            }
+            line::Act::Cancel => {
+                if let Some(s) = self.search.take() {
+                    self.filter = s.before;
+                    self.settle();
+                }
+            }
+            line::Act::Complete => self.complete_search(),
+            line::Act::Submit => self.search = None,
+            line::Act::Nothing => return self.key_list(k).await,
+        }
+        Ok(())
+    }
+
+    /// `tab` in a search: the token names, then a token's values — states,
+    /// kinds, projects, rules. One fits: taken. Several: what they share, and
+    /// the rest shown in the footer.
+    fn complete_search(&mut self) {
+        let mut projects: Vec<String> = self.names.paths().iter().map(|p| self.names.workspace(p)).collect();
+        projects.push("global".into());
+        let rules: Vec<String> = self.rules.iter().map(|r| r.name().to_string()).collect();
+        let Some(s) = self.search.as_mut() else {
+            return;
+        };
+        let (text, cur) = (s.line.text().to_string(), s.line.cursor());
+        let start = text[..cur].rfind(' ').map_or(0, |i| i + 1);
+        let word = &text[start..cur];
+        let cands = query::complete(word, &projects, &rules);
+        let take = match cands.as_slice() {
+            [] => return,
+            [one] if one.ends_with(':') => one.clone(),
+            [one] => format!("{one} "),
+            many => {
+                let mut prefix = many[0].clone();
+                for c in &many[1..] {
+                    while !c.starts_with(&prefix) {
+                        prefix.pop();
+                    }
+                }
+                if prefix.len() <= word.len() {
+                    self.flash = Some((many.join(" · "), Instant::now()));
+                    return;
+                }
+                prefix
+            }
+        };
+        let line = format!("{}{take}{}", &text[..start], &text[cur..]);
+        s.line.set_with_cursor(line, start + take.len());
+        self.filter = s.line.text().trim().to_string();
+        self.settle();
     }
 
     /// What the line does not take: moving about, and backing out.
@@ -2138,7 +2271,7 @@ impl App {
     /// The candidates on offer under the line, if any: the `/` commands it
     /// names, or the words `tab` has laid out. Slash and words never both show.
     fn cands(&self) -> Option<Cands> {
-        if !matches!(self.mode, Mode::Normal) {
+        if !matches!(self.mode, Mode::Normal) || self.search.is_some() {
             return None;
         }
         if let Some(rest) = self.line.text().strip_prefix('/') {
@@ -2366,8 +2499,12 @@ impl App {
                 }
             }
             palette::Cmd::Filter => {
-                self.filter = arg.trim().to_string();
-                self.settle();
+                if arg.trim().is_empty() {
+                    self.open_search();
+                } else {
+                    self.filter = arg.trim().to_string();
+                    self.settle();
+                }
             }
             palette::Cmd::Lens => {
                 let want = arg.trim().to_ascii_lowercase();
@@ -2608,6 +2745,22 @@ impl App {
     /// down a row per shift-enter; past `LINE_MAX` it keeps the cursor's row in
     /// view. The `enter` hint rides the last row shown.
     fn line_lines(&self, width: u16) -> Vec<Line<'static>> {
+        if let Some(s) = &self.search {
+            let (a, b) = s.line.text().split_at(s.line.cursor());
+            let content = format!("{a}▏{b}");
+            let hint = if s.line.is_empty() {
+                "words · in: is: kind: by:"
+            } else {
+                "narrowing"
+            };
+            let room = (width as usize).saturating_sub(2 + content.chars().count() + hint.chars().count() + 1);
+            return vec![Line::from(vec![
+                Span::styled("⌕ ", theme::accent()),
+                Span::raw(content),
+                Span::raw(" ".repeat(room)),
+                Span::styled(hint, theme::dim()),
+            ])];
+        }
         if self.line.is_empty() {
             return vec![Line::from(vec![
                 Span::styled("❯ ", theme::accent()),
@@ -2707,6 +2860,8 @@ impl App {
         // to, for the mouse to find.
         let mut keys: Vec<Option<String>> = Vec::with_capacity(rows.len());
         let mut sel_line = 0usize;
+        // What the search's words hit is lit up where it shows.
+        let words = query::Query::parse(&self.filter).words;
         for (n, row) in rows.iter().enumerate() {
             let selected = row.key().is_some() && row.key() == self.sel;
             let mut line = match row {
@@ -2858,6 +3013,9 @@ impl App {
                     )
                 }
             };
+            if !words.is_empty() {
+                line = light(line, &words);
+            }
             if selected {
                 line = line.style(theme::selected());
                 sel_line = lines.len();
@@ -3032,6 +3190,9 @@ impl App {
             && at.elapsed() < FLASH
         {
             return m.clone();
+        }
+        if self.search.is_some() {
+            return "type to narrow · tab completes in: is: kind: by: · ↑↓ move · enter keeps · esc puts back".into();
         }
         if let Some(a) = &self.asking {
             return format!("asking about \"{}\"… · its run is in the list · /stop there", a.words);
