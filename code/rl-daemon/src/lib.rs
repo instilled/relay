@@ -17,6 +17,7 @@ pub mod schedule;
 pub mod server;
 pub mod summarise;
 pub mod supervisor;
+pub mod transcript;
 
 pub use server::{Daemon, ServeOptions, serve, serve_with};
 

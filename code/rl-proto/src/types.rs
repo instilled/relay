@@ -335,10 +335,26 @@ pub struct Summary {
     pub run: String,
     /// Who wrote it.
     pub agent: String,
-    /// The assistant run that wrote it.
+    /// The assistant run that wrote it; empty when nothing had to be asked
+    /// (the agent's own recap, read from its transcript).
     pub by: String,
     pub at: Timestamp,
     pub text: String,
+    /// The stretch it covers: a duration back from when it was made (`2h`).
+    /// None, the whole run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since: Option<String>,
+    /// Where it came from: `claude recap` (the agent's own), `codex turns`
+    /// (its turns, as facts), or `summarised` (an assistant read the stretch).
+    #[serde(default)]
+    pub source: String,
+    /// How far the run had got when it was made, so asking again with nothing
+    /// new gives this one back.
+    #[serde(default)]
+    pub reach: String,
+    /// Not kept: whether the run has moved on since it was made.
+    #[serde(default)]
+    pub stale: bool,
 }
 
 /// Event kinds emitted by `rld` itself. Plugins add `plugin.<name>.*`.
@@ -362,7 +378,7 @@ pub mod event_kind {
     pub const PLUGIN_INVOKED: &str = "plugin.invoked";
     /// Retention took a run's journal; the run and its events stay.
     pub const RUN_JOURNAL_DROPPED: &str = "run.journal_dropped";
-    /// An assistant wrote a summary of an ended run (`summaries`).
+    /// A run was recapped: its agent's own, or an assistant's (`summaries`).
     pub const RUN_SUMMARISED: &str = "run.summarised";
 
     /// Every kind above, for anything that lists them.

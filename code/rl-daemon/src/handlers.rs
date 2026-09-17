@@ -260,6 +260,14 @@ pub fn register(r: &mut Router<Daemon>) {
                 p.dialect
             )));
         }
+        // Every Claude hook names the session's transcript: where its own recap is.
+        if let Some(path) = p.payload.get("transcript_path").and_then(|v| v.as_str()) {
+            let (id, path) = (p.id.clone(), path.to_string());
+            d.ledger
+                .call(move |c| rl_ledger::summaries::set_transcript(c, &id, &path))
+                .await
+                .map_err(internal)?;
+        }
         if let Some(sig) = rl_detect::claude::signal(&p.event, &p.payload) {
             d.supervisor.apply(&p.id, sig).await.map_err(internal)?;
         }

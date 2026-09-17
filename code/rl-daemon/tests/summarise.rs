@@ -1,7 +1,9 @@
-//! `summary.make` / `summary.get`: an ended run's facts and output go to
+//! `summary.make` / `summary.get`: a run's facts and output go to
 //! `assistants.summarise` as an assistant run; the answer is kept by the run
-//! and said in a `run.summarised` event. A run still going, and an
-//! assistant's own run, are refused.
+//! and said in a `run.summarised` event, and given back while the run has not
+//! moved on. A stretch with nothing in it needs no assistant; Claude's own
+//! recap, from the transcript its hook names, needs none either. An
+//! assistant's own run is refused.
 
 mod common;
 
@@ -101,7 +103,8 @@ async fn an_ended_run_gets_a_summary_kept_by_it() {
     let r: Response = c.call("summary.make", json!({ "run": again.by })).await;
     assert!(r.error.unwrap().message.contains("assistant's own run"));
 
-    // A run still going is not either.
+    // A run still going can be recapped too; a stretch with nothing in it
+    // says so without asking anyone.
     let slow: Run = c
         .ok(
             "run.start",
@@ -109,8 +112,12 @@ async fn an_ended_run_gets_a_summary_kept_by_it() {
         )
         .await;
     c.wait_state(&slow.id, RunState::Working).await;
-    let r: Response = c.call("summary.make", json!({ "run": slow.id })).await;
-    assert!(r.error.unwrap().message.contains("still going"));
+    let quiet: Summary = c.ok("summary.make", json!({ "run": slow.id, "since": "1m" })).await;
+    assert_eq!(quiet.text, "Nothing in the last 1m.");
+    assert_eq!((quiet.source.as_str(), quiet.by.as_str()), ("nothing new", ""));
+    assert_eq!(quiet.since.as_deref(), Some("1m"));
+    let r: Response = c.call("summary.make", json!({ "run": slow.id, "since": "soon" })).await;
+    assert!(r.error.unwrap().message.contains("not a stretch of time"));
     let _: serde_json::Value = c.ok("run.stop", json!({ "id": slow.id, "force": true })).await;
 
     // Nothing said: an error that names the assistant's run.
@@ -123,5 +130,86 @@ async fn an_ended_run_gets_a_summary_kept_by_it() {
         std::env::remove_var("FAKE_AGENT_ANSWER");
         std::env::remove_var("FAKE_AGENT_PROMPT");
     }
+    h.stop().await;
+}
+
+#[tokio::test]
+async fn claudes_own_recap_is_taken_from_its_transcript() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = Home::at(tmp.path().join("home"));
+    home.ensure_dirs().unwrap();
+    // An assistant that is not on this machine: a fallback that needs one
+    // fails plainly instead of asking a real agent.
+    std::fs::create_dir_all(home.detect_dir()).unwrap();
+    std::fs::write(
+        home.detect_dir().join("nosuchai.yaml"),
+        "kind: agent\nbins: [\"/nonexistent/nosuchai\"]\nheadless: [\"--headless\"]\n",
+    )
+    .unwrap();
+    std::fs::write(home.config_file(), "assistants:\n  summarise: nosuchai\n").unwrap();
+    let Some(h) = Harness::on(home.clone()) else {
+        eprintln!("skipping: rl-session not built");
+        return;
+    };
+    let mut c = Conn::open(&home).await;
+    let dir = std::fs::canonicalize(tmp.path()).unwrap();
+    // A stand-in `claude`: what makes the run Claude's is the binary's name.
+    let bin = dir.join("claude");
+    std::fs::write(&bin, "#!/bin/sh\nsleep 30\n").unwrap();
+    std::fs::set_permissions(&bin, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let run: Run = c
+        .ok(
+            "run.start",
+            json!({ "argv": [bin], "cwd": dir, "title": "fix search", "kind": "agent" }),
+        )
+        .await;
+    assert_eq!(run.cli.as_deref(), Some("claude"), "{run:?}");
+
+    // Its hook names the transcript, which holds Claude's own recap.
+    let transcript = dir.join("session.jsonl");
+    let recent = jiff::Timestamp::now() - jiff::SignedDuration::from_secs(30);
+    let old = jiff::Timestamp::now() - jiff::SignedDuration::from_hours(3);
+    std::fs::write(
+        &transcript,
+        format!(
+            "{{\"type\":\"system\",\"subtype\":\"away_summary\",\"timestamp\":\"{old}\",\"content\":\"Old news.\"}}\n\
+             {{\"type\":\"system\",\"subtype\":\"away_summary\",\"timestamp\":\"{recent}\",\"content\":\"Search fixed; nothing committed.\"}}\n"
+        ),
+    )
+    .unwrap();
+    let _: Run = c
+        .ok(
+            "run.hook",
+            json!({ "id": run.id, "event": "Stop", "payload": { "transcript_path": transcript } }),
+        )
+        .await;
+
+    let s: Summary = c.ok("summary.make", json!({ "run": run.id })).await;
+    assert_eq!(s.text, "Search fixed; nothing committed.");
+    assert_eq!(
+        (s.agent.as_str(), s.source.as_str(), s.by.as_str()),
+        ("claude", "claude recap", "")
+    );
+    assert!(!s.stale);
+
+    // Kept while the transcript has not grown; stale once it has.
+    let kept: Option<Summary> = c.ok("summary.get", json!({ "id": run.id })).await;
+    assert_eq!(kept.as_ref().map(|k| k.stale), Some(false));
+    let mut f = std::fs::OpenOptions::new().append(true).open(&transcript).unwrap();
+    std::io::Write::write_all(
+        &mut f,
+        format!("{{\"type\":\"assistant\",\"timestamp\":\"{}\",\"message\":{{\"content\":[{{\"type\":\"text\",\"text\":\"Committed.\"}}]}}}}\n", jiff::Timestamp::now()).as_bytes(),
+    )
+    .unwrap();
+    let kept: Option<Summary> = c.ok("summary.get", json!({ "id": run.id })).await;
+    assert_eq!(kept.map(|k| k.stale), Some(true));
+
+    // A recap from before the stretch does not count: what was said goes to
+    // the assistant instead — here one that is not on this machine.
+    let r: Response = c.call("summary.make", json!({ "run": run.id, "since": "10s" })).await;
+    let msg = r.error.map(|e| e.message).unwrap_or_default();
+    assert!(msg.contains("not on this machine"), "{msg}");
+
+    let _: serde_json::Value = c.ok("run.stop", json!({ "id": run.id, "force": true })).await;
     h.stop().await;
 }
