@@ -43,6 +43,9 @@ pub struct TermView {
     /// The watch stream is over. An ended run's output is still worth
     /// reading, so the view stays; there is just nothing more to poll.
     pub over: bool,
+    /// A run on pipes: its bare `\n`s get their `\r`s, or the screen climbs
+    /// down as a staircase.
+    newlines: Option<crate::attach::Newlines>,
 }
 
 impl TermView {
@@ -59,6 +62,7 @@ impl TermView {
             })
             .await?;
         let (rd, wr) = c.into_parts();
+        let newlines = (!info.tty).then(crate::attach::Newlines::default);
         let (cols, rows) = if info.live && info.cols > 0 {
             (info.cols, info.rows)
         } else {
@@ -76,6 +80,7 @@ impl TermView {
             ended: None,
             scroll: 0,
             over: false,
+            newlines,
         })
     }
 
@@ -91,6 +96,10 @@ impl TermView {
                 Ok(false)
             }
             Some(Frame::Output(b)) => {
+                let b = match self.newlines.as_mut() {
+                    Some(n) => n.fix(&b),
+                    None => b,
+                };
                 self.parser.process(&self.graphics.rewrite(&b));
                 // New output must not yank a reader back to the bottom.
                 if self.scroll > 0 {

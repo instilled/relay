@@ -28,6 +28,9 @@ pub struct Spec {
     pub cols: u16,
     pub rows: u16,
     pub tty: bool,
+    /// Whether the child reads what is typed (pipes only); without, its input
+    /// is `/dev/null` and what is typed goes nowhere.
+    pub input: bool,
 }
 
 pub type Resizer = Arc<dyn Fn(u16, u16) -> Result<()> + Send + Sync>;
@@ -198,12 +201,12 @@ fn spawn_pipes(spec: &Spec) -> Result<Spawned> {
     cmd.args(&spec.argv[1..])
         .current_dir(&spec.cwd)
         .envs(spec.env.iter().map(|(k, v)| (k, v)))
-        .stdin(Stdio::piped())
+        .stdin(if spec.input { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let mut child = cmd.spawn().with_context(|| format!("spawning {:?}", spec.argv))?;
     let pid = child.id();
-    let mut stdin = child.stdin.take().context("stdin")?;
+    let mut stdin = child.stdin.take();
     let stdout = child.stdout.take().context("stdout")?;
     let stderr = child.stderr.take().context("stderr")?;
 
@@ -234,6 +237,9 @@ fn spawn_pipes(spec: &Spec) -> Result<Spawned> {
     let (in_tx, mut in_rx) = mpsc::channel::<Vec<u8>>(OUTPUT_QUEUE);
     std::thread::Builder::new().name("pipe-write".into()).spawn(move || {
         while let Some(bytes) = in_rx.blocking_recv() {
+            let Some(stdin) = stdin.as_mut() else {
+                continue;
+            };
             if stdin.write_all(&bytes).and_then(|_| stdin.flush()).is_err() {
                 break;
             }
@@ -304,6 +310,7 @@ mod tests {
             cols: 80,
             rows: 24,
             tty: true,
+            input: true,
         };
         match spawn(&spec) {
             Ok(_) => panic!("empty argv must be rejected"),

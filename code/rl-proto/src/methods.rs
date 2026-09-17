@@ -119,6 +119,11 @@ pub struct RunSpec {
     pub env: Vec<(String, String)>,
     #[serde(default = "default_true")]
     pub inherit_env: bool,
+    /// Whether the child has input: what is typed at it (default), or none at
+    /// all — end of input at once, for a headless run that must not wait on
+    /// it. A pty always has input.
+    #[serde(default = "default_true")]
+    pub input: bool,
     /// Why this run starts; `manual` unless the daemon's own machinery says.
     #[serde(default)]
     pub cause: crate::types::Cause,

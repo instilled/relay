@@ -62,6 +62,9 @@ pub async fn run(d: &Daemon, p: AssistantParams) -> Result<AssistantOutput> {
         rows: None,
         env: vec![],
         inherit_env: true,
+        // `claude -p` waits for input it is never given, then warns into the
+        // answer; an assistant run has none.
+        input: false,
         cause: Cause::Assistant(p.job),
         flow: None,
     };

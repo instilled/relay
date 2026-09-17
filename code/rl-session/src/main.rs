@@ -44,6 +44,10 @@ struct Args {
     /// Pipes instead of a pty (headless/scheduled runs).
     #[arg(long)]
     no_tty: bool,
+    /// No input for the child: end of input at once (pipes only; a pty
+    /// always has input).
+    #[arg(long)]
+    no_input: bool,
     /// Seconds to stay around after the child exits with no client attached.
     #[arg(long, default_value_t = 86_400)]
     linger: u64,
@@ -87,6 +91,7 @@ fn main() -> Result<()> {
             cols: args.cols,
             rows: args.rows,
             tty: !args.no_tty,
+            input: !args.no_input,
         },
         linger: Duration::from_secs(args.linger),
         socket_check: Duration::from_secs(args.socket_check.max(1)),

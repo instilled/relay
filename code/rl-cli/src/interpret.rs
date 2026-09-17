@@ -260,6 +260,7 @@ pub async fn apply(home: &Home, f: &Form, registered: impl Fn(&Path) -> bool) ->
                 rows: None,
                 env: crate::env::child_env(&[])?,
                 inherit_env: false,
+                input: true,
                 cause: Cause::Manual,
                 flow: None,
             };
