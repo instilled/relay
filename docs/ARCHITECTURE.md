@@ -206,8 +206,8 @@ A row is a mark (`✱` needs you, `·` going, `•` ended, `▸` a job), the tit
 the summary to the edge, and the ref and the age at the right. Colour carries the state — a
 saturated accent per state, on the terminal's own foreground so it reads on either theme
 (`tui/theme.rs`). The panel runs to the screen's edges, with a rule between its sections — under
-the header, above the line, above the footer. The header, the project rows and the `❯` line start
-at the edge; a project's runs, shells and agents sit one column in, under it. The list and its
+the header, above the line, above the footer. The project rows and the `❯` line start at the edge,
+and the header and footer text level with what is typed after the `❯`; a project's runs, shells and agents sit one column in, under it. The list and its
 detail pane are split by a vertical bar — the list takes two thirds beside the details pane, half beside a terminal, which needs the
 width; the full-screen terminal drops all of it for the cells. A group's header is its name, then the folder it lives in, then the rules that
 live there — `↻ nightly 4h · ⚡ tests-failed`, accented and amber when one waits for a yes, with a
