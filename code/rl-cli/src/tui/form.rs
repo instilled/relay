@@ -281,6 +281,9 @@ impl Form {
 
     pub fn key(&mut self, k: &KeyEvent) -> Act {
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+        let alt = k.modifiers.contains(KeyModifiers::ALT);
+        // By word, as on the line: alt is the Mac habit, ctrl the other one.
+        let by_word = alt || ctrl;
         let n = self.fields.len();
         if self.on_folders() && matches!(k.code, KeyCode::Up | KeyCode::Down) {
             self.cycle_folder(if k.code == KeyCode::Down { 1 } else { -1 });
@@ -292,10 +295,27 @@ impl Form {
             KeyCode::Enter => return Act::Save,
             KeyCode::Tab | KeyCode::Down => self.cur = (self.cur + 1) % n,
             KeyCode::BackTab | KeyCode::Up => self.cur = (self.cur + n - 1) % n,
+            KeyCode::Left if by_word => f.at = word_left(&f.value, f.at),
+            KeyCode::Right if by_word => f.at = word_right(&f.value, f.at),
+            KeyCode::Char('b') if alt => f.at = word_left(&f.value, f.at),
+            KeyCode::Char('f') if alt => f.at = word_right(&f.value, f.at),
             KeyCode::Left => f.at = f.at.saturating_sub(1),
             KeyCode::Right => f.at = (f.at + 1).min(f.value.chars().count()),
             KeyCode::Home => f.at = 0,
             KeyCode::End => f.at = f.value.chars().count(),
+            KeyCode::Backspace if by_word => {
+                let to = word_left(&f.value, f.at);
+                f.value.drain(byte_at(&f.value, to)..byte_at(&f.value, f.at));
+                f.at = to;
+            }
+            KeyCode::Delete if by_word => {
+                let to = word_right(&f.value, f.at);
+                f.value.drain(byte_at(&f.value, f.at)..byte_at(&f.value, to));
+            }
+            KeyCode::Char('d') if alt => {
+                let to = word_right(&f.value, f.at);
+                f.value.drain(byte_at(&f.value, f.at)..byte_at(&f.value, to));
+            }
             KeyCode::Backspace => {
                 if f.at > 0 {
                     let i = byte_at(&f.value, f.at - 1);
@@ -315,6 +335,15 @@ impl Form {
             }
             KeyCode::Char('a') if ctrl => f.at = 0,
             KeyCode::Char('e') if ctrl => f.at = f.value.chars().count(),
+            KeyCode::Char('k') if ctrl => {
+                f.value.truncate(byte_at(&f.value, f.at));
+            }
+            KeyCode::Char('w') if ctrl => {
+                let head = f.value[..byte_at(&f.value, f.at)].trim_end_matches(' ');
+                let to = head.rfind(' ').map(|i| head[..i + 1].chars().count()).unwrap_or(0);
+                f.value.drain(byte_at(&f.value, to)..byte_at(&f.value, f.at));
+                f.at = to;
+            }
             KeyCode::Char(c) if !ctrl => {
                 let i = byte_at(&f.value, f.at);
                 f.value.insert(i, c);
@@ -347,6 +376,22 @@ impl Form {
         }
         out
     }
+}
+
+/// The start of the word before `at` (in characters): over anything between
+/// words, then the word itself — letters and digits, as on the line.
+fn word_left(s: &str, at: usize) -> usize {
+    let head: String = s.chars().take(at).collect();
+    let head = head.trim_end_matches(|c: char| !c.is_alphanumeric());
+    head.trim_end_matches(char::is_alphanumeric).chars().count()
+}
+
+/// The end of the word after `at`, the same way round.
+fn word_right(s: &str, at: usize) -> usize {
+    let tail: String = s.chars().skip(at).collect();
+    let tail = tail.trim_start_matches(|c: char| !c.is_alphanumeric());
+    let tail = tail.trim_start_matches(char::is_alphanumeric);
+    s.chars().count() - tail.chars().count()
 }
 
 fn byte_at(s: &str, chars: usize) -> usize {
@@ -566,6 +611,41 @@ mod tests {
             act = f.key(&KeyEvent::from(KeyCode::Char(c)));
         }
         act
+    }
+
+    #[test]
+    fn a_field_is_walked_and_cut_by_word_too() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = |code, m| KeyEvent::new(code, m);
+        let alt = KeyModifiers::ALT;
+        let ctrl = KeyModifiers::CONTROL;
+        let mut f = Form::run(dir.path());
+        press(&mut f, "make ~/Projects/flint");
+        let field = |f: &Form| f.fields[f.cur].value.clone();
+        let at = |f: &Form| f.fields[f.cur].at;
+
+        f.key(&key(KeyCode::Left, alt));
+        assert_eq!(at(&f), 16, "before `flint`");
+        f.key(&key(KeyCode::Char('b'), alt));
+        assert_eq!(at(&f), 7, "before `Projects`");
+        f.key(&key(KeyCode::Right, ctrl));
+        assert_eq!(at(&f), 15, "past `Projects`");
+
+        f.key(&key(KeyCode::Char('e'), ctrl));
+        f.key(&key(KeyCode::Backspace, alt));
+        assert_eq!(field(&f), "make ~/Projects/");
+        f.key(&key(KeyCode::Char('a'), ctrl));
+        f.key(&key(KeyCode::Delete, alt));
+        assert_eq!(field(&f), " ~/Projects/");
+        f.key(&key(KeyCode::Char('d'), alt));
+        assert_eq!(field(&f), "/");
+        // `^k` cuts to the end, `^w` the word behind, as on the line.
+        press(&mut f, "one two");
+        f.key(&key(KeyCode::Char('w'), ctrl));
+        assert_eq!(field(&f), "one /", "the text was typed before the slash left over");
+        f.key(&key(KeyCode::Char('a'), ctrl));
+        f.key(&key(KeyCode::Char('k'), ctrl));
+        assert_eq!(field(&f), "");
     }
 
     #[test]
