@@ -143,8 +143,8 @@ pub const ALL: &[Command] = &[
     },
     Command {
         name: "filter",
-        args: "<text>",
-        what: "narrow the list to what matches",
+        args: "[words in: is: kind: by:]",
+        what: "narrow the list or graph as you type; esc on the list clears it",
         cmd: Cmd::Filter,
     },
     Command {
@@ -218,6 +218,7 @@ pub fn key(cmd: Cmd) -> &'static str {
         Cmd::Pin => "^t",
         Cmd::Graph => "^g",
         Cmd::Pane => "^o",
+        Cmd::Filter => "^f",
         _ => "",
     }
 }
@@ -301,7 +302,8 @@ mod tests {
         assert_eq!(key(Cmd::Graph), "^g");
         assert_eq!(key(Cmd::Pane), "^o");
         assert_eq!(key(Cmd::Shell), "", "a shell is a command, not a key");
-        assert_eq!(key(Cmd::Filter), "", "most commands are the slash line, no key");
+        assert_eq!(key(Cmd::Filter), "^f");
+        assert_eq!(key(Cmd::Lens), "", "most commands are the slash line, no key");
     }
 
     #[test]

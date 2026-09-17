@@ -11,6 +11,7 @@
 //! up a lane of their own in the gap before the target, and into the target
 //! on a row of their own, where the event kinds they carry are written.
 
+use super::query::{Query, Subject};
 use super::rows::Names;
 use super::theme;
 use jiff::Timestamp;
@@ -57,19 +58,18 @@ pub fn colour(kind: NodeKind) -> Style {
     }
 }
 
-/// The nodes the filter keeps: those that match, and everything upstream and
-/// downstream of them, so a folder's filter still shows what reaches it from
-/// elsewhere and where it leads.
+/// The nodes the filter — a search, see `query` — keeps: those that match,
+/// and everything upstream and downstream of them, so a folder's filter still
+/// shows what reaches it from elsewhere and where it leads.
 pub fn keep(g: &Graph, filter: &str, names: &Names) -> HashSet<String> {
     let all = || g.nodes.iter().map(|n| n.id.clone()).collect();
-    let f = filter.trim().to_lowercase();
-    if f.is_empty() {
+    let query = Query::parse(filter);
+    if query.is_empty() {
         return all();
     }
     let hit = |n: &Node| {
-        [n.name.clone(), n.detail.clone(), folder_word(n, names)]
-            .iter()
-            .any(|s| s.to_lowercase().contains(&f))
+        let folder = folder_word(n, names);
+        query.hits(&node_subject(n, &folder))
     };
     let mut kept: HashSet<String> = HashSet::new();
     for dir in [true, false] {
@@ -86,6 +86,40 @@ pub fn keep(g: &Graph, filter: &str, names: &Names) -> HashSet<String> {
         }
     }
     kept
+}
+
+/// What a search matches a node on: its name and detail, its folder, how its
+/// runs went, what kind of node it is, and the rule it belongs to.
+fn node_subject<'a>(n: &'a Node, folder: &'a str) -> Subject<'a> {
+    let mut is = Vec::new();
+    match n.runs.last {
+        Some(RunState::Failed) => is.push("failed"),
+        Some(RunState::Finished) => is.push("done"),
+        Some(RunState::Stopped) => is.push("stopped"),
+        _ => {}
+    }
+    if n.runs.going > 0 {
+        is.push("going");
+    }
+    if !n.waiting.is_empty() || n.status == Some(RuleStatus::NeedsApproval) {
+        is.push("needs");
+    }
+    let kind = match n.kind {
+        NodeKind::Schedule => vec!["job", "schedule"],
+        NodeKind::Reaction => vec!["reaction"],
+        NodeKind::Ask => vec!["question"],
+        NodeKind::Shell => vec!["shell", "command"],
+        NodeKind::Agent => vec!["agent"],
+        NodeKind::Event => vec!["event"],
+        NodeKind::Outside => vec!["outside"],
+    };
+    Subject {
+        text: vec![&n.name, &n.detail],
+        project: vec![folder, n.folder.as_deref().and_then(|p| p.to_str()).unwrap_or("")],
+        is,
+        kind,
+        by: n.rule.as_deref().map(|r| r.rsplit('/').next().unwrap_or(r)),
+    }
 }
 
 /// Where a node is, in words: its folder's name, `global` for a rule of the
@@ -934,7 +968,7 @@ pub fn headline(g: &Graph, kept: usize, filter: &str) -> String {
         s.push_str(&format!(" · {waiting} waiting"));
     }
     if !filter.is_empty() {
-        s.push_str(&format!(" · {kept} of {} · /{filter}", g.nodes.len()));
+        s.push_str(&format!(" · {kept} of {} · ⌕ {filter}", g.nodes.len()));
     }
     s
 }
@@ -1111,6 +1145,10 @@ mod tests {
         assert_eq!(ids, ["shells", "t"], "api's shells, and the global rule they reach");
         let kept = keep(&g, "advisory", &names());
         assert!(["s", "s.run", "r", "a", "a.note"].iter().all(|id| kept.contains(*id)));
+        assert!(!kept.contains("shells"));
+        // Tokens pick nodes too, and bring their wiring with them.
+        let kept = keep(&g, "kind:question", &names());
+        assert!(kept.contains("a") && kept.contains("r"), "{kept:?}");
         assert!(!kept.contains("shells"));
     }
 

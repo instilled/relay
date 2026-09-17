@@ -14,6 +14,7 @@
 //!
 //! Pinned runs come before all of it, in the order they were pinned.
 
+use super::query::{Query, Subject};
 use crate::rank;
 use jiff::{SignedDuration, Timestamp};
 use rl_core::time::fmt_age;
@@ -435,13 +436,54 @@ pub struct Context<'a> {
     pub now: Timestamp,
 }
 
-/// Everything on the list, in order. The filter is matched case-insensitively
-/// against titles, group names, CLIs and summaries.
+/// What a search matches a run on: its words, its project, what state it is
+/// in, what it is, and the rule behind it.
+fn run_subject<'a>(i: &'a DigestItem, project: &'a str) -> Subject<'a> {
+    let r = &i.run;
+    let mut is = vec![match r.state {
+        RunState::Failed => "failed",
+        RunState::NeedsInput | RunState::Blocked => "needs",
+        RunState::Finished => "done",
+        RunState::Stopped => "stopped",
+        RunState::Starting | RunState::Working | RunState::Stale | RunState::Idle => "going",
+    }];
+    if r.pinned_at.is_some() {
+        is.push("pinned");
+    }
+    if i.unseen {
+        is.push("new");
+    }
+    let mut kind = vec![match r.kind {
+        RunKind::Agent => "agent",
+        RunKind::Shell => "shell",
+        RunKind::Command | RunKind::Plugin => "command",
+    }];
+    let by = match &r.cause {
+        Cause::Schedule(n) => {
+            kind.push("job");
+            Some(n.as_str())
+        }
+        Cause::Reaction(n) => {
+            kind.push("reaction");
+            Some(n.as_str())
+        }
+        _ => None,
+    };
+    Subject {
+        text: vec![&r.title, r.cli.as_deref().unwrap_or(""), &i.summary],
+        project: vec![project, r.workspace.to_str().unwrap_or("")],
+        is,
+        kind,
+        by,
+    }
+}
+
+/// Everything on the list, in order, narrowed to what the filter — a search,
+/// see `query` — hits.
 pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
     let names = cx.names;
     let now = cx.now;
-    let f = cx.filter.to_lowercase();
-    let hit = |parts: &[&str]| f.is_empty() || parts.iter().any(|s| s.to_lowercase().contains(&f));
+    let query = Query::parse(cx.filter);
     let mut groups: Vec<Group<'a>> = Vec::new();
     let group_of = |key: String, workspace: &Path, groups: &mut Vec<Group<'a>>| -> usize {
         match groups.iter().position(|g| g.key == key) {
@@ -490,7 +532,22 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
             .map(Run::group_key)
             .unwrap_or_else(|| q.workspace.to_string_lossy().into_owned());
         let name = names.group(&key);
-        if !hit(&[&q.title, &name, q.summary.as_deref().unwrap_or("")]) {
+        let by = q
+            .group
+            .as_deref()
+            .and_then(|g| g.strip_prefix("reaction:"))
+            .or(asker.and_then(|r| match &r.cause {
+                Cause::Schedule(n) | Cause::Reaction(n) => Some(n.as_str()),
+                _ => None,
+            }));
+        let subject = Subject {
+            text: vec![&q.title, q.summary.as_deref().unwrap_or("")],
+            project: vec![&name, q.workspace.to_str().unwrap_or("")],
+            is: vec!["needs"],
+            kind: vec!["question"],
+            by,
+        };
+        if !query.hits(&subject) {
             continue;
         }
         let g = group_of(key, &q.workspace, &mut groups);
@@ -499,12 +556,7 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
     for i in &d.items {
         let r = &i.run;
         if r.pinned_at.is_some() {
-            if hit(&[
-                &r.title,
-                &names.group(&r.group_key()),
-                r.cli.as_deref().unwrap_or(""),
-                &i.summary,
-            ]) {
+            if query.hits(&run_subject(i, &names.group(&r.group_key()))) {
                 pinned.push(i);
             }
             continue;
@@ -519,7 +571,9 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
         let key = r.group_key();
         let name = names.group(&key);
         if let Some((kind, job)) = job_of(r) {
-            let item_hit = hit(&[job, &name, &r.title, &i.summary]);
+            let mut subject = run_subject(i, &name);
+            subject.text.push(job);
+            let item_hit = query.hits(&subject);
             let jkey = job_key(kind, job, &key);
             match jobs_acc.iter_mut().find(|acc| acc.key == jkey) {
                 Some(acc) => {
@@ -539,7 +593,7 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
             }
             continue;
         }
-        if !hit(&[&r.title, &name, r.cli.as_deref().unwrap_or(""), &i.summary]) {
+        if !query.hits(&run_subject(i, &name)) {
             continue;
         }
         let g = group_of(key, &r.workspace, &mut groups);
@@ -631,7 +685,7 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
         }
         let place = names.place(&p.to_string_lossy(), &p);
         let name = names.workspace(&p);
-        if !hit(&[&name, &place]) {
+        if !query.hits_project(&[&name, &place, p.to_str().unwrap_or("")]) {
             continue;
         }
         let head = Row::Group(Head {
@@ -648,7 +702,7 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
     // that live outside any folder — always last, rules or none, so the cursor
     // has somewhere to stand to reach them. It answers to the filter like any
     // other project.
-    if hit(&["global", cx.home]) {
+    if query.hits_project(&["global", cx.home]) {
         rows.push(Row::Group(Head {
             place: Some(cx.home.to_string()),
             workspace: None,
@@ -717,7 +771,7 @@ pub fn headline(rows: &[Row], news: usize, filter: &str) -> String {
         s.push_str(&p);
     }
     if !filter.is_empty() {
-        s.push_str(&format!(" · /{filter}"));
+        s.push_str(&format!(" · ⌕ {filter}"));
     }
     s
 }
@@ -810,6 +864,46 @@ mod tests {
                 now,
             },
         )
+    }
+
+    #[test]
+    fn a_search_narrows_by_words_and_by_what_things_are() {
+        let now: Timestamp = "2026-09-10T12:00:00Z".parse().unwrap();
+        let (api, web) = ("/home/f/api", "/home/f/web");
+        let at = "2026-09-10T11:00:00Z";
+        let mut agent = item("agent", RunState::Working, api, at, false);
+        agent.run.kind = RunKind::Agent;
+        agent.run.title = "fix the login".into();
+        let mut failed = item("failed", RunState::Failed, web, at, false);
+        failed.run.title = "cargo test".into();
+        failed.run.kind = RunKind::Command;
+        let mut sched = item("sched", RunState::Working, web, at, false);
+        sched.run.kind = RunKind::Command;
+        sched.run.cause = Cause::Schedule("nightly".into());
+        let d = Digest {
+            since: now,
+            items: vec![agent, failed, sched],
+            decisions: vec![question("q1", api, None, at)],
+        };
+        let names = Names::new([
+            (PathBuf::from(api), "api".to_string()),
+            (PathBuf::from(web), "web".to_string()),
+            (PathBuf::from("/home/f/idle"), "idle".to_string()),
+        ]);
+        let shown = |f: &str| keys(&build_with(&d, &names, f, now));
+        // Every word somewhere: the title and the project both count.
+        assert_eq!(shown("login api"), ["[api]", "r:agent"]);
+        assert_eq!(shown("login web"), Vec::<String>::new());
+        // A project's name keeps all of it; an idle project answers to its name.
+        assert_eq!(shown("in:api"), ["[api]", "q:q1", "r:agent"]);
+        assert_eq!(shown("idle"), ["[idle]"]);
+        // Tokens pick by what a thing is, and take no bare project along.
+        assert_eq!(shown("is:failed"), ["[web]", "r:failed"]);
+        assert_eq!(shown("kind:agent"), ["[api]", "r:agent"]);
+        assert_eq!(shown("kind:question"), ["[api]", "q:q1"]);
+        assert_eq!(shown("by:nightly"), ["[web]", "r:sched"]);
+        assert_eq!(shown("by:tests"), ["[api]", "q:q1"], "a question by its reaction");
+        assert_eq!(shown("global"), ["[global]"]);
     }
 
     #[test]
@@ -941,7 +1035,7 @@ mod tests {
 
         let rows = build_with(&d, &names, "api", now);
         assert_eq!(keys(&rows), ["[api]", "r:blok1", "r:work1"]);
-        assert_eq!(headline(&rows, 0, "api"), "relay · 1 needs you · 1 working · /api");
+        assert_eq!(headline(&rows, 0, "api"), "relay · 1 needs you · 1 working · ⌕ api");
         assert_eq!(headline(&[], 0, ""), "relay · nothing running");
     }
 
