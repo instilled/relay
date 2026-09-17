@@ -871,8 +871,10 @@ pub fn pane_lines(
     n: &Node,
     rule: Option<&rl_proto::rule::Rule>,
     last_run: Option<&str>,
-    waiting: Option<&rl_proto::decision::Decision>,
+    waiting: Option<(&rl_proto::decision::Decision, Option<&rl_proto::types::Run>)>,
     picked: &[usize],
+    at: Option<usize>,
+    width: usize,
     names: &Names,
     now: Timestamp,
 ) -> Vec<Line<'static>> {
@@ -894,10 +896,10 @@ pub fn pane_lines(
         spans.push(Span::styled(format!(" · past {}", fmt_age(g.since, now)), theme::dim()));
         lines.push(Line::from(spans));
     }
-    if let Some(q) = waiting {
+    if let Some((q, asker)) = waiting {
         lines.push(Line::raw(""));
         let more = n.waiting.len().saturating_sub(1);
-        lines.extend(super::pane::question_lines(q, None, picked, now));
+        lines.extend(super::pane::question_lines(q, asker, picked, at, width, now).lines);
         if more > 0 {
             lines.push(Line::from(Span::styled(
                 format!(" and {more} more waiting"),
@@ -1183,7 +1185,7 @@ mod tests {
     fn the_pane_says_what_a_node_is_and_what_it_is_wired_to() {
         let g = weather();
         let r = g.node("r").unwrap();
-        let text: Vec<String> = pane_lines(&g, r, None, None, None, &[], &names(), now())
+        let text: Vec<String> = pane_lines(&g, r, None, None, None, &[], None, 80, &names(), now())
             .iter()
             .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
             .collect();
