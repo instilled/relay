@@ -247,6 +247,25 @@ async fn close_hangs_up_a_live_child() {
 }
 
 #[tokio::test]
+async fn leaves_when_its_socket_is_removed() {
+    // The Relay home it lived in is gone: no daemon can come back for it, so
+    // it hangs up a child that is still going and leaves, linger or not.
+    let h = start(true, 60);
+    let (hello, mut s) = attach(&h, true).await;
+    read_until(&mut s, "fake-cli ready").await;
+    drop(s);
+    std::fs::remove_file(&h.socket).unwrap();
+    for _ in 0..100 {
+        if !alive(hello.holder_pid) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(!alive(hello.holder_pid), "holder should have left");
+    assert!(!alive(hello.pid), "child should have been hung up");
+}
+
+#[tokio::test]
 async fn replay_from_an_offset() {
     let h = start(false, 60); // pipes: byte-exact output
     let (hello, mut s) = attach(&h, true).await;
