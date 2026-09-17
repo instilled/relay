@@ -33,8 +33,6 @@ use tracing::{debug, info, warn};
 pub const RING_CAPACITY: usize = 1 << 20;
 /// Output chunks a slow client may fall behind before it is dropped.
 const BROADCAST_CAPACITY: usize = 4096;
-/// How often the holder checks that its socket is still there.
-const SOCKET_CHECK: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -44,6 +42,9 @@ pub struct Config {
     pub spec: Spec,
     /// After the child exits: how long to stay with no clients attached.
     pub linger: Duration,
+    /// How often to check that the socket is still there. Nothing waits on
+    /// an orphaned holder leaving, so this can be slow.
+    pub socket_check: Duration,
 }
 
 struct Shared {
@@ -123,7 +124,7 @@ pub async fn serve(cfg: Config, ready: oneshot::Sender<()>) -> Result<()> {
         cfg.linger,
     ));
     tokio::spawn(watch_signals(ctx.clone()));
-    tokio::spawn(watch_socket(ctx.clone(), cfg.socket.clone()));
+    tokio::spawn(watch_socket(ctx.clone(), cfg.socket.clone(), cfg.socket_check));
 
     loop {
         tokio::select! {
@@ -222,11 +223,11 @@ async fn watch_exit(
 
 /// The socket file removed from under the holder: nobody can reach it again,
 /// so hang up the child and leave.
-async fn watch_socket(ctx: Arc<Ctx>, socket: PathBuf) {
+async fn watch_socket(ctx: Arc<Ctx>, socket: PathBuf, every: Duration) {
     loop {
         tokio::select! {
             _ = ctx.shutdown.cancelled() => return,
-            _ = tokio::time::sleep(SOCKET_CHECK) => {}
+            _ = tokio::time::sleep(every) => {}
         }
         if std::fs::symlink_metadata(&socket).is_err() {
             info!(socket = %socket.display(), "socket removed; nobody can reach this session");
