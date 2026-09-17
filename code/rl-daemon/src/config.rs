@@ -34,6 +34,11 @@ pub const SEED: &str = "\
 #
 # retention: 30d         # the only thing Relay deletes: a run's terminal bytes and log, once it
 #                        # ended this long ago. The run and its events stay. Unset: nothing goes.
+#
+# workspaces:
+#   badges: [gh-pr]      # beside a git folder's branch: the open PR, by `gh` (~/.relay/plugins/gh-pr).
+#                        # Any command whose first line says something; asked when the branch
+#                        # changes, then at most every 5 minutes, only while the list is shown.
 ";
 
 /// Writes the seed when there is no file yet. Never touches one that exists.

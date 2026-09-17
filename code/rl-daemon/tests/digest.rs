@@ -90,3 +90,52 @@ async fn digest_summarises_news_and_seen_clears_it() {
     c.wait_terminal(&agent.id).await;
     h.stop().await;
 }
+
+/// A registered git folder comes with its checkout, and the configured badges
+/// say their piece beside the branch once they have been asked.
+#[tokio::test]
+async fn a_git_folder_carries_its_checkout_and_badges() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = Home::at(tmp.path().join("home"));
+    let ws = tmp.path().canonicalize().unwrap().join("repo");
+    std::fs::create_dir_all(&ws).unwrap();
+    let st = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&ws)
+        .args(["init", "-q", "-b", "trunk"])
+        .status()
+        .unwrap();
+    assert!(st.success());
+    std::fs::create_dir_all(home.path()).unwrap();
+    std::fs::write(
+        home.config_file(),
+        "workspaces:\n  badges: [\"echo PR \\\"#1 on $RELAY_BRANCH\\\"\", \"exit 1\"]\n",
+    )
+    .unwrap();
+    let Some(h) = Harness::on(home) else {
+        eprintln!("skipping: rl-session not built (run `cargo test --workspace`)");
+        return;
+    };
+    let mut c = Conn::open(&h.home).await;
+    let _: serde_json::Value = c.ok("workspace.up", json!({ "path": ws })).await;
+    // The shipped badge is there to be named.
+    assert!(h.home.plugins_dir().join("gh-pr").exists());
+
+    let mut badges = vec![];
+    for _ in 0..100 {
+        let d: Digest = c.ok("digest.get", json!({})).await;
+        let co = d
+            .checkouts
+            .iter()
+            .find(|x| x.path == ws)
+            .expect("the folder's checkout");
+        assert_eq!(co.branch.as_deref(), Some("trunk"));
+        badges = co.badges.clone();
+        if !badges.is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert_eq!(badges, ["PR #1 on trunk"]);
+    h.stop().await;
+}

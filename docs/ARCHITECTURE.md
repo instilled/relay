@@ -219,10 +219,10 @@ the header, above the line, above the footer. The project rows and the `❯` lin
 and the header and footer text level with what is typed after the `❯`; a project's runs, shells and agents sit one column in, under it. The list and its
 detail pane are split by a vertical bar — the list takes two thirds beside the details pane, half beside a terminal, which needs the
 width; the full-screen terminal drops all of it for the cells. A group is a folder (or a ref), never a branch: its header is its name, then the folder it
-lives in, then its git checkout as it stands — `⎇ main · 3 worktrees`, the branch or a detached
-commit, and on a main checkout the linked worktrees whose folders are still there (`rld` reads
-`.git` directly on each digest, no `git` started; a worktree registered on its own is a project
-of its own, with its branch and no count) — then the rules that
+lives in, then its git checkout as it stands — `⎇ main · PR #95 · 3 worktrees`, the branch or a
+detached commit, the badges, and on a main checkout the linked worktrees whose folders are still
+there (`rld` reads `.git` directly on each digest, no `git` started; a worktree registered on its
+own is a project of its own, with its branch and no count) — then the rules that
 live there — `↻ nightly 4h · ⚡ tests-failed`, accented and amber when one waits for a yes, with a
 `+N` when more than fit — and, at the right edge, the tally of how many jobs and reactions the
 folder holds; the global rules — the ones in the Relay home, which apply in every folder — get a project row of
@@ -734,7 +734,7 @@ Facts (`retention.runs`) are deliberately not a key yet.
                               workspaces, decisions, summaries
   schedules.yaml              user-level schedules; the file is the interface, the ledger keeps
                               versions (by sha256), pause state, last/next firing
-  config.yaml                 your defaults (`assistants:`, `retention:`); absent means defaults,
+  config.yaml                 your defaults (`assistants:`, `retention:`, `workspaces:`); absent means defaults,
                               unknown keys refused
   reactions.yaml              user-level rules: events → actions, or questions; same file-first
                               deal, same versioning (`rl on` appends to it)
@@ -742,7 +742,7 @@ Facts (`retention.runs`) are deliberately not a key yet.
   log/                        rld.log, <run>.log
   hooks/claude.json           written at daemon start; passed to claude as --settings
   detect/*.yaml               user overrides, merged field by field over the built-ins
-  plugins/                    (empty — see below)
+  plugins/                    badge commands, first on their PATH; `gh-pr` written when missing
 
 <workspace>/.relay/           per folder registered with `rl up` — the trust boundary
   schedules.yaml              versioned with the folder; a version fires only once approved
@@ -777,7 +777,16 @@ phasing.
   `workflow:` is reserved. `rl up` loads a folder's `schedules.yaml` and `reactions.yaml`;
   `workflows/` is not read yet.
 - **Plugins** — `rl-plugin-host` (Bun), the broker, `relay.d.ts`, the manifest/approval flow,
-  action keys and the detail tab. `~/.relay/plugins/` exists, unused.
+  action keys and the detail tab. Until then, one provisional contract stands in for a piece of
+  it — **workspace badges** (`rl-daemon/src/badges.rs`): `workspaces.badges` in `config.yaml`
+  names commands, each run through `sh -c` in a git folder with `RELAY_WORKSPACE` and
+  `RELAY_BRANCH` set and `~/.relay/plugins/` first on the PATH, whose first line (40 characters
+  at most) goes on the folder's header after its branch. `digest.get` answers from memory and
+  asks in the background: a folder and branch not asked yet, or not for five minutes, and never
+  twice at once — so nothing runs unless something shows the list, and a switched branch is
+  asked at once. A failure, silence, ten seconds, or a detached HEAD: no badge. `rld` writes
+  `plugins/gh-pr` when it is missing (the open PR by `gh pr view`, `PR #95` or `PR #95 draft`)
+  and never over yours. The plugin host takes the contract over: a command in, a line out.
 - **Facts** — the collector, transcript ingestion, cost: commits and diffs on the branch,
   commands with exit codes, tokens. No `facts` table yet; `Run.cost` is carried but never set.
   The summariser (§6) reads Claude's and Codex's session files for its recaps, and otherwise the
