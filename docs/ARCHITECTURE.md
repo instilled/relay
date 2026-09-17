@@ -212,10 +212,11 @@ inside one runs by attention; and named — a workspace by the
 name it was registered under, a cause as "schedule nightly" or "rule tests-failed", never an id.
 A row is a mark (`✱` needs you, `·` going, `•` ended, `▸` a job), the title, the state as a word,
 the summary to the edge, and the ref and the age at the right — with `⎇ feat` there too when the
-run started on another branch than the one its folder is on now. An ended run's summary says
-what it raised itself (`rl emit`) after its exit — `exit 0 · 1s · flint.product.new-feedback ×5`,
-each kind once with how often — which a probe's whole point is and its exit would otherwise bury;
-the pane says the same under `signals`. The daemon's own event families are left out of it, since
+run started on another branch than the one its folder is on now. A run that ended well and raised
+something itself (`rl emit`) says the last of it in its own words — `5 feedback rows to process`,
+not `exit 0`, which for a probe is the whole point; one that failed keeps its exit, the one worth
+reading. What it raised, by kind, is in the pane under `signals`
+(`flint.product.new-feedback ×5`). The daemon's own event families are left out of that, since
 the state already says them (`events::emitted_for_run`, carried on the digest's item). Colour carries the state — a
 saturated accent per state, on the terminal's own foreground so it reads on either theme
 (`tui/theme.rs`). The panel runs to the screen's edges, with a rule between its sections — under
@@ -234,9 +235,12 @@ their own, `global`, shown with that home (`~/.relay`) where a folder row shows 
 rules or none: it is always the last project, a yes waiting there or not (its chip says so),
 and the cursor stops on it, `enter` (or `^o`) shows its schedules and
 reactions in the pane, and `^g` opens the graph on them. Runs a schedule or a rule
-started fold, once ended, into one line per job — name, cadence, how many went well, the last
-outcome and what that firing raised — so a job firing every thirty seconds is a row, not a screen; a run still going or
-waiting on you is never folded, and `enter` on a job opens it to its last twenty. When the list
+started fold, once ended, into one line per job — the name, how the last few went (`··×·`, oldest
+first) and what the last firing came to, in its own words — so a job firing every thirty seconds is a row, not a screen; a run still going or
+waiting on you is never folded, and `enter` on a job opens it to its last twenty. The cadence, the tally,
+what the last firing raised and the recent firings are all in its pane, with a cron line read
+back in words where it can be (`hourly 08:00–18:00, Mon–Fri`) and left as written where it
+cannot. When the list
 is taller than the screen, its first and last lines say how much is above and below. A group's
 header says which folder it is in, and the cursor stops on it like any other row: `enter` (or
 `^o`) turns the pane into the project's own — the folder, how its runs stand (needs-you /

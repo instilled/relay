@@ -6,7 +6,7 @@ use crate::render::{fmt_clock, state_label};
 use jiff::Timestamp;
 use rl_core::time::fmt_age;
 use rl_proto::methods::{Digest, DigestItem};
-use rl_proto::types::RunState;
+use rl_proto::types::{RunState, Signal};
 
 pub struct Group<'a> {
     pub key: String,
@@ -36,12 +36,18 @@ where
     groups
 }
 
-/// What a run raised, in words: `flint.product.new-feedback ×5`, a kind on
+/// What a run raised, by kind: `flint.product.new-feedback ×5`, a kind on
 /// its own when it came once.
-pub fn signals(emitted: &[(String, u32)]) -> String {
+pub fn signals(emitted: &[Signal]) -> String {
     emitted
         .iter()
-        .map(|(kind, n)| if *n > 1 { format!("{kind} ×{n}") } else { kind.clone() })
+        .map(|s| {
+            if s.count > 1 {
+                format!("{} ×{}", s.kind, s.count)
+            } else {
+                s.kind.clone()
+            }
+        })
         .collect::<Vec<_>>()
         .join(" · ")
 }

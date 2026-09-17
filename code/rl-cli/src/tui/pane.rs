@@ -185,20 +185,25 @@ const JOB_RUNS: usize = 10;
 const JOB_MARKS: usize = 40;
 
 /// A job: the rule behind it when known, then how it has been going.
-pub fn job_lines(j: &Job, rule: Option<&Rule>, names: &Names, now: Timestamp) -> Vec<Line<'static>> {
+pub fn job_lines(j: &Job, rule: Option<&Rule>, names: &Names, width: usize, now: Timestamp) -> Vec<Line<'static>> {
     let mut lines = match rule {
         Some(r) => {
             let mut l = rules::lines(r, names, now, Some(&j.last().run.title));
             l.push(Line::raw(""));
             l
         }
-        None => vec![
-            Line::from(vec![
+        None => {
+            let mut l = vec![Line::from(vec![
                 Span::raw(format!(" {}", j.name)).bold(),
                 Span::raw(format!("  {} · not in any file now", j.kind)).dim(),
-            ]),
-            Line::raw(""),
-        ],
+            ])];
+            l.push(Line::raw(""));
+            if let Some(w) = &j.when {
+                l.push(fact("when", w.clone()));
+                l.push(Line::raw(""));
+            }
+            l
+        }
     };
     let (ok, failed, stopped) = (j.ok(), j.failed(), j.stopped());
     let mut tally = vec![format!(
@@ -219,6 +224,13 @@ pub fn job_lines(j: &Job, rule: Option<&Rule>, names: &Names, now: Timestamp) ->
         Span::raw(" lately   ").dim(),
         Span::raw(tally.join(" · ")),
     ]));
+    // What the last firing raised, wrapping in the value column.
+    if !j.last().emitted.is_empty() {
+        let value = width.saturating_sub(VALUE_COL + 1).max(20);
+        for (i, t) in wrap(&signals(&j.last().emitted), value).into_iter().enumerate() {
+            lines.push(fact(if i == 0 { "signals" } else { "" }, t));
+        }
+    }
     let marks = j.marks(JOB_MARKS);
     let spans: Vec<Span> = marks
         .chars()
@@ -556,6 +568,7 @@ mod tests {
     use super::*;
     use rl_proto::action::Task;
     use rl_proto::decision::{DecisionOption, DecisionStatus};
+    use rl_proto::types::Signal;
     use rl_proto::types::{Cause, Confidence, RunKind};
 
     fn text(lines: &[Line]) -> String {
@@ -588,7 +601,20 @@ mod tests {
             at: t,
             unseen: true,
             joined_by: None,
-            emitted: vec![("flint.product.new-feedback".into(), 5), ("log.issue".into(), 1)],
+            emitted: vec![
+                Signal {
+                    kind: "flint.product.new-feedback".into(),
+                    count: 5,
+                    said: "5 feedback rows to process".into(),
+                    at: t,
+                },
+                Signal {
+                    kind: "log.issue".into(),
+                    count: 1,
+                    said: "a note".into(),
+                    at: t,
+                },
+            ],
         };
         let names = Names::new([("/home/f/relay".into(), "relay".to_string())]);
         let s = text(&run_lines(&item, &[], None, &names, 80, now));

@@ -391,6 +391,19 @@ pub struct Summary {
     pub stale: bool,
 }
 
+/// What a run raised itself (`rl emit`): one kind, how often it came, and
+/// what it last said in its own words.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Signal {
+    pub kind: String,
+    pub count: u32,
+    /// The newest one's summary — what the probe said, not what the wire is
+    /// called.
+    pub said: String,
+    /// When the newest one came.
+    pub at: Timestamp,
+}
+
 /// Event kinds emitted by `rld` itself. Plugins add `plugin.<name>.*`.
 pub mod event_kind {
     /// The families that are the daemon's own: a command may not `rl emit`

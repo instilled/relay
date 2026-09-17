@@ -4,9 +4,9 @@
 use jiff::Timestamp;
 use rl_core::time::fmt_duration;
 use rl_proto::methods::DigestItem;
-use rl_proto::types::{Event, Run, RunState};
+use rl_proto::types::{Event, Run, RunState, Signal};
 
-pub fn item(run: Run, last: Option<Event>, joined_by: Option<String>, emitted: Vec<(String, u32)>) -> DigestItem {
+pub fn item(run: Run, last: Option<Event>, joined_by: Option<String>, emitted: Vec<Signal>) -> DigestItem {
     let at = last.as_ref().map(|e| e.at).unwrap_or(run.state_at);
     let summary = summarise(&run, last.as_ref(), &emitted);
     let unseen = unseen(&run, at);
@@ -20,19 +20,20 @@ pub fn item(run: Run, last: Option<Event>, joined_by: Option<String>, emitted: V
     }
 }
 
-/// What a run raised, in words: `flint.product.new-feedback ×5`, a kind on
-/// its own when it came once.
-pub fn signals(emitted: &[(String, u32)]) -> String {
+/// The newest thing a run raised, in its own words.
+pub fn said(emitted: &[Signal]) -> Option<&str> {
     emitted
         .iter()
-        .map(|(kind, n)| if *n > 1 { format!("{kind} ×{n}") } else { kind.clone() })
-        .collect::<Vec<_>>()
-        .join(" · ")
+        .max_by_key(|s| s.at)
+        .map(|s| s.said.as_str())
+        .filter(|s| !s.is_empty())
 }
 
-/// The question, the exit, the last thing said — in that order of interest;
-/// an ended run says what it raised on its way, which its exit would bury.
-pub fn summarise(run: &Run, last: Option<&Event>, emitted: &[(String, u32)]) -> String {
+/// The question, the exit, the last thing said — in that order of interest.
+/// A run that ended well and raised something says what it raised, in its own
+/// words: for a probe that is the whole point, and `exit 0` says nothing. One
+/// that failed keeps its exit, which is the one worth reading.
+pub fn summarise(run: &Run, last: Option<&Event>, emitted: &[Signal]) -> String {
     let detail = last.and_then(|e| {
         e.data
             .as_ref()
@@ -51,14 +52,13 @@ pub fn summarise(run: &Run, last: Option<&Event>, emitted: &[(String, u32)]) -> 
                 .map(str::to_string)
                 .or_else(|| run.exit_code.map(|c| format!("exit {c}")))
                 .unwrap_or_else(|| run.state.to_string());
-            let mut out = match run.ended_at {
-                Some(e) => format!("{how} · {}", fmt_duration(e.duration_since(run.started_at))),
-                None => how,
-            };
-            if !emitted.is_empty() {
-                out.push_str(&format!(" · {}", signals(emitted)));
+            match said(emitted).filter(|_| run.state == RunState::Finished) {
+                Some(s) => s.to_string(),
+                None => match run.ended_at {
+                    Some(e) => format!("{how} · {}", fmt_duration(e.duration_since(run.started_at))),
+                    None => how,
+                },
             }
-            out
         }
         RunState::NeedsInput | RunState::Blocked | RunState::Stale => detail.unwrap_or_else(|| run.state.to_string()),
         _ => run
@@ -152,19 +152,34 @@ mod tests {
         let mut done = run(RunState::Finished);
         done.ended_at = Some("2026-09-08T10:01:00Z".parse().unwrap());
         done.exit_code = Some(0);
+        let at = |s: &str| -> Timestamp { s.parse().unwrap() };
+        let sig = |kind: &str, count, said: &str, when: &str| Signal {
+            kind: kind.into(),
+            count,
+            said: said.into(),
+            at: at(when),
+        };
         let raised = [
-            ("flint.product.new-feedback".to_string(), 5u32),
-            ("log.issue".into(), 1),
+            sig("log.issue", 1, "a note", "2026-09-08T10:00:30Z"),
+            sig(
+                "flint.product.new-feedback",
+                5,
+                "5 feedback rows to process",
+                "2026-09-08T10:00:40Z",
+            ),
         ];
-        assert_eq!(
-            summarise(&done, None, &raised),
-            "exit 0 · 1m00s · flint.product.new-feedback ×5 · log.issue"
-        );
+        // The newest words, not the exit — that is what the probe went for.
+        assert_eq!(summarise(&done, None, &raised), "5 feedback rows to process");
         assert_eq!(
             summarise(&done, None, &[]),
             "exit 0 · 1m00s",
             "nothing raised, nothing said"
         );
+        // A firing that failed keeps its exit, which is the one worth reading.
+        let mut bad = done.clone();
+        bad.state = RunState::Failed;
+        bad.exit_code = Some(1);
+        assert_eq!(summarise(&bad, None, &raised), "exit 1 · 1m00s");
         // A run still going says what it is doing, as before.
         assert_eq!(summarise(&run(RunState::Idle), None, &raised), "idle");
     }

@@ -304,26 +304,11 @@ impl<'a> Job<'a> {
     pub fn score(&self) -> u8 {
         rank::score(&self.last().run)
     }
-    /// `every 30s · ok ×118 · 1 failed · last exit 0 · 0s`.
+    /// What the last firing came to, in its own words — `5 feedback rows to
+    /// process`, or `exit 1 · 2s` where it failed. The cadence and the tally
+    /// are the pane's; the marks say how it has been going.
     pub fn summary(&self) -> String {
-        let mut parts = Vec::new();
-        if let Some(w) = &self.when {
-            parts.push(w.clone());
-        }
-        let ok = self.ok();
-        if ok > 0 {
-            parts.push(format!("ok ×{ok}"));
-        }
-        let failed = self.failed();
-        if failed > 0 {
-            parts.push(format!("{failed} failed"));
-        }
-        let stopped = self.stopped();
-        if stopped > 0 {
-            parts.push(format!("{stopped} stopped"));
-        }
-        parts.push(format!("last {}", self.last().summary));
-        parts.join(" · ")
+        self.last().summary.clone()
     }
     /// One mark per run, oldest first: `·` went well, `×` failed, `○` stopped.
     pub fn marks(&self, n: usize) -> String {
@@ -1303,7 +1288,11 @@ mod tests {
         assert_eq!(j.last().run.id, "p29");
         assert_eq!((j.ok(), j.failed(), j.stopped()), (30, 1, 0));
         assert!(j.unseen(), "the failed run is still news");
-        assert_eq!(j.summary(), "ok ×30 · 1 failed · last exit 0 · 0s");
+        assert_eq!(
+            j.summary(),
+            "exit 0 · 0s",
+            "the last firing's own line; the tally is the marks', the cadence the pane's"
+        );
         assert_eq!(j.marks(31).chars().filter(|c| *c == '×').count(), 1);
         assert!(j.marks(31).starts_with('×'), "oldest first: {}", j.marks(31));
         assert_eq!(counts(&rows), (0, 0, 1, 1, 1));
