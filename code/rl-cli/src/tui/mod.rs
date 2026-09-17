@@ -213,6 +213,13 @@ struct App {
     pane: Pane,
     /// The pane beside the list (`i`); off, the list has the width.
     show_pane: bool,
+    /// The pane was opened by selecting a question, and goes when the cursor
+    /// moves off it; opened by hand, it stays.
+    auto_pane: bool,
+    /// The highlighted choice of the question being answered.
+    answer_at: usize,
+    /// What the question pane drew last, so a click can take a choice.
+    pane_hit: std::cell::RefCell<PaneHit>,
     /// The pane alone, full width: a terminal, unless `f` says otherwise.
     wide: bool,
     term: Option<TermView>,
@@ -298,6 +305,25 @@ fn cand_window(n: usize, h: usize, pick: Option<usize>) -> usize {
     match pick {
         Some(i) => i.saturating_sub(h - 1).min(n - h),
         None => 0,
+    }
+}
+
+/// The question pane as drawn: which question, where, and the choice on each
+/// row.
+#[derive(Default)]
+struct PaneHit {
+    area: Rect,
+    question: String,
+    hits: Vec<Option<usize>>,
+}
+
+impl PaneHit {
+    fn choice(&self, col: u16, row: u16) -> Option<usize> {
+        let a = self.area;
+        if col < a.x || col >= a.x + a.width || row < a.y || row >= a.y + a.height {
+            return None;
+        }
+        self.hits.get((row - a.y) as usize).copied().flatten()
     }
 }
 
@@ -536,6 +562,9 @@ pub async fn run(home: &Home) -> Result<()> {
         sel: None,
         pane: Pane::Facts,
         show_pane: false,
+        auto_pane: false,
+        answer_at: 0,
+        pane_hit: std::cell::RefCell::default(),
         wide: false,
         term: None,
         term_size: (0, 0),
@@ -627,7 +656,7 @@ impl App {
                             self.refresh().await;
                         }
                     }
-                    Some(Ok(Event::Mouse(m))) => self.mouse(m).await?,
+                    Some(Ok(Event::Mouse(m))) => self.mouse(m, area).await?,
                     Some(Ok(_)) => {}
                     Some(Err(e)) => return Err(e.into()),
                     None => self.quit = true,
@@ -809,8 +838,24 @@ impl App {
 
     fn select(&mut self, key: Option<String>) {
         if key != self.sel {
+            // A question is only worth its details: selecting one opens the
+            // pane on it, and moving off closes the pane again — unless it was
+            // open already.
+            let question = self.view == View::Work && key.as_deref().is_some_and(|k| k.starts_with("q:"));
+            if question {
+                if !self.show_pane {
+                    self.auto_pane = true;
+                    self.show_pane = true;
+                }
+                if self.pane == Pane::Term {
+                    self.leave_term();
+                }
+            } else if self.auto_pane {
+                self.hide_pane();
+            }
             self.sel = key;
             self.picked.clear();
+            self.answer_at = 0;
             self.events.clear();
             // A watch tile stays pinned to its run while you browse the list;
             // it closes on `esc` or when another run's terminal takes its place,
@@ -907,6 +952,7 @@ impl App {
             self.picked.clear();
             self.pane = Pane::Facts;
             self.show_pane = true;
+            self.answer_at = 0;
             self.mode = Mode::Answer(id);
         } else if let Some((approved, name)) = schedule {
             if approved {
@@ -958,7 +1004,25 @@ impl App {
     /// Moving is not looking, though. Passing over a row on the way somewhere
     /// else must not mark it seen, and a pointer sweeps many rows a second, so
     /// a move only selects; the wheel and a click count as looking and refresh.
-    async fn mouse(&mut self, m: MouseEvent) -> Result<()> {
+    async fn mouse(&mut self, m: MouseEvent, area: Rect) -> Result<()> {
+        // A click on a question's choice in the pane takes it.
+        if m.kind == MouseEventKind::Down(MouseButton::Left) && matches!(self.mode, Mode::Normal | Mode::Answer(_)) {
+            let hit = {
+                let h = self.pane_hit.borrow();
+                h.choice(m.column, m.row).map(|c| (h.question.clone(), c))
+            };
+            if let Some((qid, at)) = hit
+                && let Some(q) = self.digest.decisions.iter().find(|d| d.id == qid).cloned()
+            {
+                let all = pane::choices(&q, q.run.as_deref().and_then(|r| self.run_by_id(r)));
+                if let Some(c) = all.get(at).cloned() {
+                    self.mode = Mode::Normal;
+                    self.answer_at = at;
+                    self.take_choice(&q, c, area).await;
+                }
+                return Ok(());
+            }
+        }
         if !matches!(self.mode, Mode::Normal) || !self.hit.borrow().has(m.column, m.row) {
             return Ok(());
         }
@@ -1026,6 +1090,7 @@ impl App {
     /// `Facts`.
     fn hide_pane(&mut self) {
         self.show_pane = false;
+        self.auto_pane = false;
         if self.pane == Pane::Term {
             self.pane = Pane::Facts;
         }
@@ -1033,6 +1098,7 @@ impl App {
 
     /// `/pane`, `^o`: the pane beside the list, shown or hidden.
     fn toggle_pane(&mut self) {
+        self.auto_pane = false;
         if self.show_pane {
             self.hide_pane();
         } else {
@@ -1147,6 +1213,54 @@ impl App {
             }
             Err(e) => self.say(format!("answer: {e:#}")),
         }
+    }
+
+    /// Mark an option of a question taking several, or unmark it.
+    fn toggle_pick(&mut self, i: usize) {
+        match self.picked.iter().position(|&p| p == i) {
+            Some(at) => {
+                self.picked.remove(at);
+            }
+            None => self.picked.push(i),
+        }
+    }
+
+    /// Do what a question's choice says — by `enter` on it, its number, or a
+    /// click. Picking where several are taken keeps the question open.
+    async fn take_choice(&mut self, q: &Decision, c: pane::Choice, area: Rect) {
+        let id = q.id.clone();
+        match c {
+            pane::Choice::Option(i) if q.multi => {
+                self.toggle_pick(i);
+                self.mode = Mode::Answer(id);
+            }
+            pane::Choice::Option(i) => self.answer(id, vec![q.options[i].key.clone()], None).await,
+            pane::Choice::Send if self.picked.is_empty() => {
+                self.say("pick one first: space, or its number");
+                self.mode = Mode::Answer(id);
+            }
+            pane::Choice::Send => {
+                let keys = self.picked.iter().map(|&i| q.options[i].key.clone()).collect();
+                self.answer(id, keys, None).await;
+            }
+            pane::Choice::Attach(run) => self.attach_to(run, area).await,
+            pane::Choice::Dismiss => self.dismiss(id).await,
+        }
+    }
+
+    /// The run that asked, in its terminal: on the list, it is selected and
+    /// watched as a tile — `enter` again takes the keyboard, as on any run.
+    async fn attach_to(&mut self, run: String, area: Rect) {
+        if self.view == View::Graph {
+            self.toggle_graph().await;
+        }
+        let key = format!("r:{run}");
+        if !self.keys().contains(&key) {
+            self.say("the run that asked is no longer on the list");
+            return;
+        }
+        self.select(Some(key));
+        self.open_term(area).await;
     }
 
     /// "Not this". Whatever is typed on the line goes with it, as the reason.
@@ -1877,31 +1991,33 @@ impl App {
                 let Some(q) = self.digest.decisions.iter().find(|d| d.id == id).cloned() else {
                     return Ok(());
                 };
+                let all = pane::choices(&q, q.run.as_deref().and_then(|r| self.run_by_id(r)));
+                let last = all.len().saturating_sub(1);
                 match k.code {
                     KeyCode::Esc => self.picked.clear(),
-                    KeyCode::Char(c @ '1'..='9') => {
-                        let i = (c as u8 - b'1') as usize;
-                        match (i < q.options.len(), q.multi) {
-                            (true, true) => {
-                                match self.picked.iter().position(|&p| p == i) {
-                                    Some(at) => {
-                                        self.picked.remove(at);
-                                    }
-                                    None => self.picked.push(i),
-                                }
-                                self.mode = Mode::Answer(id);
-                            }
-                            (true, false) => {
-                                let key = q.options[i].key.clone();
-                                self.answer(id, vec![key], None).await;
-                            }
-                            (false, _) => self.mode = Mode::Answer(id),
+                    KeyCode::Up => {
+                        self.answer_at = self.answer_at.saturating_sub(1);
+                        self.mode = Mode::Answer(id);
+                    }
+                    KeyCode::Down => {
+                        self.answer_at = (self.answer_at + 1).min(last);
+                        self.mode = Mode::Answer(id);
+                    }
+                    // An option by its number: the options come first.
+                    KeyCode::Char(c @ '1'..='9') if ((c as u8 - b'1') as usize) < q.options.len() => {
+                        self.answer_at = (c as u8 - b'1') as usize;
+                        self.take_choice(&q, all[self.answer_at].clone(), area).await;
+                    }
+                    KeyCode::Char(' ') if q.multi => {
+                        if let Some(pane::Choice::Option(i)) = all.get(self.answer_at) {
+                            self.toggle_pick(*i);
                         }
+                        self.mode = Mode::Answer(id);
                     }
-                    KeyCode::Enter if q.multi && !self.picked.is_empty() => {
-                        let opts: Vec<String> = self.picked.iter().map(|&i| q.options[i].key.clone()).collect();
-                        self.answer(id, opts, None).await;
-                    }
+                    KeyCode::Enter => match all.get(self.answer_at).cloned() {
+                        Some(c) => self.take_choice(&q, c, area).await,
+                        None => self.mode = Mode::Answer(id),
+                    },
                     _ => self.mode = Mode::Answer(id),
                 }
                 return Ok(());
@@ -2214,8 +2330,10 @@ impl App {
         } else if let Some(q) = self.selected_question() {
             let id = q.id.clone();
             self.picked.clear();
-            // The options are numbered on the card under the row, or in the
-            // pane when it is open.
+            // The choices are in the pane: the arrows walk them from the first.
+            self.answer_at = 0;
+            self.pane = Pane::Facts;
+            self.show_pane = true;
             self.mode = Mode::Answer(id);
         } else if self.selected_project().is_some() || self.selected_global() {
             // A project (or the global) header: its rules in the pane.
@@ -3064,22 +3182,6 @@ impl App {
             }
             lines.push(line);
             keys.push(row.key());
-            // The selected question opens into a card under its row: who asked,
-            // what it is about, the options — answerable with the pane closed.
-            if selected
-                && !self.show_pane
-                && let Row::Question(q) = row
-            {
-                let asker = q.run.as_deref().and_then(|id| self.run_by_id(id));
-                for l in pane::question_body(q, asker, &self.picked, now, Some(pane::CARD_SUMMARY)) {
-                    let mut spans = vec![Span::raw("  ")];
-                    spans.extend(l.spans);
-                    lines.push(Line::from(spans));
-                    keys.push(row.key());
-                }
-                // Keep the whole card in view, not just its row.
-                sel_line = lines.len() - 1;
-            }
         }
         // The window follows the selection; when there is more either side,
         // the edge line says how much.
@@ -3136,6 +3238,9 @@ impl App {
     }
 
     fn draw_pane(&mut self, f: &mut Frame, area: Rect) {
+        // Filled in again only if a question is drawn, so a click never takes
+        // a choice that is no longer on screen.
+        *self.pane_hit.borrow_mut() = PaneHit::default();
         if self.pane == Pane::Term
             && let Some(t) = &self.term
         {
@@ -3165,8 +3270,22 @@ impl App {
                 Mode::Answer(id) => Some(id.as_str()),
                 _ => n.waiting.first().map(String::as_str),
             };
-            let q = asking.and_then(|id| self.digest.decisions.iter().find(|d| d.id == id));
-            let lines = graph::pane_lines(g, n, rule, last, q, &self.picked, &self.names, now);
+            let q = asking
+                .and_then(|id| self.digest.decisions.iter().find(|d| d.id == id))
+                .map(|q| (q, q.run.as_deref().and_then(|r| self.run_by_id(r))));
+            let at = matches!(self.mode, Mode::Answer(_)).then_some(self.answer_at);
+            let lines = graph::pane_lines(
+                g,
+                n,
+                rule,
+                last,
+                q,
+                &self.picked,
+                at,
+                area.width as usize,
+                &self.names,
+                now,
+            );
             f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
             return;
         }
@@ -3181,7 +3300,16 @@ impl App {
             Some(Row::Job(j)) => pane::job_lines(&j, self.rule_of_job(&j), &self.names, now),
             Some(Row::Question(q)) => {
                 let asker = q.run.as_deref().and_then(|id| self.run_by_id(id));
-                pane::question_lines(q, asker, &self.picked, now)
+                let at = matches!(&self.mode, Mode::Answer(id) if *id == q.id).then_some(self.answer_at);
+                let p = pane::question_lines(q, asker, &self.picked, at, area.width as usize, now);
+                // Laid out to the width already, so row for row with the map.
+                *self.pane_hit.borrow_mut() = PaneHit {
+                    area,
+                    question: q.id.clone(),
+                    hits: p.hits,
+                };
+                f.render_widget(Paragraph::new(p.lines), area);
+                return;
             }
             Some(Row::Group(h)) if h.workspace.is_some() => {
                 let ws = h.workspace.clone().unwrap();
@@ -3223,12 +3351,11 @@ impl App {
             Mode::Answer(id) => {
                 let q = self.digest.decisions.iter().find(|d| &d.id == id);
                 let n = q.map_or(0, |q| q.options.len().min(pane::MAX_KEYS));
-                let how = if q.is_some_and(|q| q.multi) {
-                    "pick · enter answers"
+                return if q.is_some_and(|q| q.multi) {
+                    format!("↑↓ choose · space or 1-{n} picks · enter takes it · esc")
                 } else {
-                    "answers it"
+                    format!("↑↓ choose · enter takes it · 1-{n} answers · esc")
                 };
-                return format!("1-{n} {how} · esc");
             }
             Mode::Form(f) => {
                 if let Some((m, at)) = &self.flash

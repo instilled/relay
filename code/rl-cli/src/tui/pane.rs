@@ -2,7 +2,7 @@
 //! and the keys that answer it. Pure — takes what the daemon said, gives
 //! lines.
 
-use super::rows::{Job, Names, asked_by, cause_words};
+use super::rows::{Job, Names, asked_by, cause_words, fit};
 use super::rules;
 use crate::render::{fmt_clock, state_label};
 use jiff::Timestamp;
@@ -295,33 +295,99 @@ pub fn project_lines(
     lines
 }
 
-/// A question: what it asks, who asked, and the options with their keys.
-/// `picked` are the options marked so far on a multi-choice question.
-pub fn question_lines(d: &Decision, asker: Option<&Run>, picked: &[usize], now: Timestamp) -> Vec<Line<'static>> {
-    let mut lines = vec![Line::from(vec![
-        Span::raw(" ? ").yellow().bold(),
-        Span::raw(d.title.clone()).bold(),
-    ])];
-    lines.extend(question_body(d, asker, picked, now, None));
-    lines
+/// What can be done about a question, in the order the pane lists them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Choice {
+    /// An option, by its place among the options.
+    Option(usize),
+    /// A question taking several: answer with the options picked so far.
+    Send,
+    /// See the run that asked, in its terminal.
+    Attach(String),
+    /// Not this.
+    Dismiss,
 }
 
-/// A summary longer than this is cut in the card on the list; the pane has
-/// all of it.
-pub const CARD_SUMMARY: usize = 3;
+/// The choices a question offers: its options, answering with what is picked
+/// where it takes several, the run that asked when there is one, and not this.
+pub fn choices(d: &Decision, asker: Option<&Run>) -> Vec<Choice> {
+    let mut v: Vec<Choice> = (0..d.options.len()).map(Choice::Option).collect();
+    if d.multi {
+        v.push(Choice::Send);
+    }
+    if let Some(r) = asker {
+        v.push(Choice::Attach(r.id.clone()));
+    }
+    v.push(Choice::Dismiss);
+    v
+}
 
-/// Everything of a question under its title — who asked, the summary (cut to
-/// `summary_max` lines, if given), the options, how to answer — for the pane,
-/// and for the card the selected question opens into on the list.
-pub fn question_body(
+/// A question in the pane, ready to draw: every line fits the width it was
+/// laid out for, so line `i` is row `i`, and `hits[i]` is the choice on it.
+pub struct QuestionPane {
+    pub lines: Vec<Line<'static>>,
+    pub hits: Vec<Option<usize>>,
+}
+
+impl QuestionPane {
+    fn push(&mut self, l: Line<'static>, hit: Option<usize>) {
+        self.lines.push(l);
+        self.hits.push(hit);
+    }
+}
+
+/// Words laid out in lines of at most `width` characters, breaking at spaces
+/// where it can and mid-word where it must.
+fn wrap(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    for word in text.split(' ') {
+        let n = cur.chars().count();
+        if n > 0 && n + 1 + word.chars().count() > width {
+            out.push(std::mem::take(&mut cur));
+        } else if n > 0 {
+            cur.push(' ');
+        }
+        cur.push_str(word);
+        while cur.chars().count() > width {
+            out.push(cur.chars().take(width).collect());
+            cur = cur.chars().skip(width).collect();
+        }
+    }
+    out.push(cur);
+    out
+}
+
+/// A question: what it asks, who asked, what it says, and what can be done
+/// about it — each choice on a row of its own, `at` the highlighted one while
+/// it is being answered. `picked` are the options marked so far where it
+/// takes several. Laid out for `width` columns.
+pub fn question_lines(
     d: &Decision,
     asker: Option<&Run>,
     picked: &[usize],
+    at: Option<usize>,
+    width: usize,
     now: Timestamp,
-    summary_max: Option<usize>,
-) -> Vec<Line<'static>> {
-    let mut lines = Vec::new();
-    let mut who = format!(" asked by {} · {} ago", asked_by(d, asker), fmt_age(d.created_at, now));
+) -> QuestionPane {
+    let mut p = QuestionPane {
+        lines: Vec::new(),
+        hits: Vec::new(),
+    };
+    let text = width.saturating_sub(1);
+    for (i, t) in wrap(&d.title, text.saturating_sub(2)).into_iter().enumerate() {
+        let lead = if i == 0 { "? " } else { "  " };
+        p.push(
+            Line::from(vec![
+                Span::raw(" "),
+                Span::raw(lead).yellow().bold(),
+                Span::raw(t).bold(),
+            ]),
+            None,
+        );
+    }
+    let mut who = format!("asked by {} · {} ago", asked_by(d, asker), fmt_age(d.created_at, now));
     if let Some(e) = d.expires_at {
         if e > now {
             who.push_str(&format!(" · {} left", fmt_duration(e.duration_since(now))));
@@ -329,58 +395,87 @@ pub fn question_body(
             who.push_str(" · due");
         }
     }
-    lines.push(Line::from(Span::raw(who).dim()));
+    for t in wrap(&who, text) {
+        p.push(Line::from(Span::raw(format!(" {t}")).dim()), None);
+    }
     if let Some(s) = &d.summary {
-        lines.push(Line::raw(""));
-        let all: Vec<&str> = s.lines().collect();
-        let max = summary_max.unwrap_or(all.len());
-        for l in all.iter().take(max) {
-            lines.push(Line::raw(format!(" {l}")));
-        }
-        if all.len() > max {
-            lines.push(Line::from(
-                Span::raw(format!(" … {} more · ^o reads it all", all.len() - max)).dim(),
-            ));
+        p.push(Line::raw(""), None);
+        for l in s.lines() {
+            for t in wrap(l, text) {
+                p.push(Line::raw(format!(" {t}")), None);
+            }
         }
     }
-    lines.push(Line::raw(""));
-    for (i, o) in d.options.iter().enumerate() {
-        let key = if i < MAX_KEYS { (i + 1).to_string() } else { " ".into() };
-        let mark = if picked.contains(&i) {
-            "◆"
-        } else if o.default {
-            "*"
-        } else {
-            " "
+    p.push(Line::raw(""), None);
+    for (ci, c) in choices(d, asker).iter().enumerate() {
+        // The number (or a sign), a name, what it says, and a mark: picked, or
+        // taken on its own at the deadline.
+        let (key, name, what, mark, action) = match c {
+            Choice::Option(i) => {
+                let o = &d.options[*i];
+                let key = if *i < MAX_KEYS {
+                    (i + 1).to_string()
+                } else {
+                    String::new()
+                };
+                let mark = if picked.contains(i) {
+                    "  ◆"
+                } else if o.default {
+                    "  *"
+                } else {
+                    ""
+                };
+                (key, o.key.clone(), o.text().to_string(), mark, o.action().label())
+            }
+            Choice::Send => (
+                "↵".into(),
+                "answer".into(),
+                format!("with the {} picked", picked.len()),
+                "",
+                String::new(),
+            ),
+            Choice::Attach(_) => {
+                let (title, live) = asker.map_or((String::new(), false), |r| (r.title.clone(), !r.state.is_terminal()));
+                let what = if live { "still going" } else { "what it printed" };
+                (
+                    "↗".into(),
+                    "attach".into(),
+                    format!("{title} · {what}"),
+                    "",
+                    String::new(),
+                )
+            }
+            Choice::Dismiss => ("✕".into(), "dismiss".into(), "not this".into(), "", String::new()),
         };
-        let mut spans = vec![
-            Span::raw(format!("  {key}  ")).bold(),
-            Span::raw(format!("{:<10} ", o.key)),
-            Span::raw(o.text().to_string()),
-        ];
-        if mark != " " {
-            spans.push(Span::raw(format!("  {mark}")).dim());
-        }
-        lines.push(Line::from(spans));
-        let action = o.action().label();
+        let lit = at == Some(ci);
+        let caret = if lit { "❯" } else { " " };
+        let row = fit(&format!("{caret} {key:<2} {name:<10} {what}{mark}"), text);
+        let row = if lit {
+            Span::styled(row, super::theme::selected())
+        } else {
+            Span::raw(row)
+        };
+        p.push(Line::from(vec![Span::raw(" "), row]), Some(ci));
         if !action.is_empty() {
-            lines.push(Line::from(Span::raw(format!("     {:<10} → {action}", "")).dim()));
+            let row = fit(&format!("     {:<10} → {action}", ""), text);
+            p.push(Line::from(vec![Span::raw(" "), Span::raw(row).dim()]), Some(ci));
         }
     }
-    lines.push(Line::raw(""));
+    p.push(Line::raw(""), None);
     let n = d.options.len().min(MAX_KEYS);
-    let hint = if d.multi {
-        format!(" 1-{n} pick · enter answer · or `1,2 and a note` on the line · ^x not this")
-    } else if n == 1 {
-        " 1 answer · or `1 and a note` on the line · ^x not this".to_string()
-    } else {
-        format!(" 1-{n} answer · or `1 and a note` on the line · ^x not this")
+    let keys = if n == 1 { "1".to_string() } else { format!("1-{n}") };
+    let hint = match (at.is_some(), d.multi) {
+        (true, true) => format!("↑↓ choose · space picks · enter takes it · {keys} picks · esc back"),
+        (true, false) => format!("↑↓ choose · enter takes it · {keys} answers · esc back"),
+        (false, _) => "enter to choose, or click · `1 and a note` on the line answers with it".to_string(),
     };
-    lines.push(Line::from(Span::raw(hint).dim()));
-    if d.options.iter().any(|o| o.default) {
-        lines.push(Line::from(Span::raw(" * taken on its own if it expires").dim()));
+    for t in wrap(&hint, text) {
+        p.push(Line::from(Span::raw(format!(" {t}")).dim()), None);
     }
-    lines
+    if d.options.iter().any(|o| o.default) {
+        p.push(Line::from(Span::raw(" * taken on its own if it expires").dim()), None);
+    }
+    p
 }
 
 /// A line that answers a question: the option first — its number or its key,
@@ -523,30 +618,62 @@ mod tests {
             outcome_runs: vec![],
             note: None,
         };
-        let s = text(&question_lines(&d, None, &[], now));
+        let shown = |p: &QuestionPane| {
+            p.lines
+                .iter()
+                .map(|l| l.to_string().trim_end().to_string())
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let p = question_lines(&d, None, &[], None, 80, now);
+        let s = shown(&p);
         assert!(
             s.starts_with(" ? nightly tests failed\n asked by rule tests-failed · 7h ago · 1h00m left"),
             "{s}"
         );
         assert!(s.contains("\n test parser ... FAILED\n"), "{s}");
-        assert!(s.contains("  1  look       Have Claude look at it\n"), "{s}");
+        assert!(s.contains("\n   1  look       Have Claude look at it\n"), "{s}");
         assert!(s.contains("→ claude · why?"), "{s}");
-        assert!(s.contains("  2  ignore     ignore  *\n"), "{s}");
-        assert!(
-            s.contains(" 1-2 answer · or `1 and a note` on the line · ^x not this\n * taken on its own"),
-            "{s}"
-        );
+        assert!(s.contains("\n   2  ignore     ignore  *\n"), "{s}");
+        assert!(s.contains("\n   ✕  dismiss    not this\n"), "{s}");
+        assert!(!s.contains("attach"), "nothing asked it, so nothing to attach to: {s}");
+        assert!(s.contains("enter to choose, or click"), "{s}");
         assert!(!s.contains("kfmpg3sw"), "no id on screen: {s}");
+        // Line `i` is row `i`: each choice's rows say which it is.
+        let row = |needle: &str| p.lines.iter().position(|l| l.to_string().contains(needle)).unwrap();
+        assert_eq!(p.hits[row("Have Claude")], Some(0));
+        assert_eq!(p.hits[row("→ claude")], Some(0), "its action line is the same choice");
+        assert_eq!(p.hits[row("dismiss")], Some(2));
+        assert_eq!(p.hits[0], None);
 
-        let s = text(&question_lines(&d, None, &[1], now));
-        assert!(s.contains("  2  ignore     ignore  ◆\n"), "{s}");
+        // Being answered: a caret on the highlighted choice, and the keys that move it.
+        let s = shown(&question_lines(&d, None, &[1], Some(1), 80, now));
+        assert!(s.contains("\n ❯ 2  ignore     ignore  ◆\n"), "{s}");
+        assert!(s.contains("↑↓ choose · enter takes it · 1-2 answers · esc back"), "{s}");
 
-        // The card cuts a long summary and says where the rest is.
+        // A run that asked can be attached to; a question taking several can be sent.
+        let asker = Run::new("r1", RunKind::Command, "nightly", vec![], "/w", "/w", t);
+        let mut multi = d.clone();
+        multi.multi = true;
+        assert_eq!(
+            choices(&multi, Some(&asker)),
+            [
+                Choice::Option(0),
+                Choice::Option(1),
+                Choice::Send,
+                Choice::Attach("r1".into()),
+                Choice::Dismiss
+            ]
+        );
+        let s = shown(&question_lines(&multi, Some(&asker), &[0], None, 80, now));
+        assert!(s.contains("↵  answer     with the 1 picked"), "{s}");
+        assert!(s.contains("↗  attach     nightly · still going"), "{s}");
+
+        // Narrow, a long summary wraps onto rows of its own.
         let mut long = d.clone();
-        long.summary = Some("a\nb\nc\nd\ne".into());
-        let s = text(&question_body(&long, None, &[], now, Some(CARD_SUMMARY)));
-        assert!(s.contains(" a\n b\n c\n … 2 more · ^o reads it all\n"), "{s}");
-        assert!(!s.contains(" d\n"), "{s}");
+        long.summary = Some("one two three four five six".into());
+        let s = shown(&question_lines(&long, None, &[], None, 12, now));
+        assert!(s.contains("\n one two\n three four\n five six\n"), "{s}");
 
         // The line answers by number or key, the rest the note.
         let some = |k: &[&str], n: Option<&str>| Some((k.iter().map(|x| x.to_string()).collect(), n.map(String::from)));

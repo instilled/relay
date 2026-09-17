@@ -267,10 +267,16 @@ ten thousand rows above itself — and the footer says how far back you are. New
 the view to the bottom. An ended run keeps what it printed after its holder has gone,
 to be read the same way. `^o` (or `/pane`) opens a pane of
 facts beside the list (`tui/pane.rs`): a run's facts and recent events, a job's tally, a question
-with its options numbered. With the pane closed, the selected question opens into a card under
-its row instead — who asked, the first lines of the summary, the options numbered with what each
-runs — so it can be answered where it is. `enter` on a question takes it out of the list, where
-the number answers it, which is `decision.take`, and the run it starts becomes the selection.
+and what can be done about it. A question stays one line on the list; selecting it opens the pane
+on it by itself (and moving off closes the pane again, unless it was open already), since a
+question is only worth its details. The pane lists its choices a row each: the options, with what
+each runs; `answer` with what is picked, where it takes several; `attach` to the run that asked,
+when one did; and `dismiss`. `enter` on the question puts a caret on the first choice, the arrows
+walk them, `enter` takes one (space picks where several are taken), the number takes an option
+straight away, and a click on a choice's row takes it too. The pane is laid out to its width row
+for row, so the click lands on what it shows. Answering is `decision.take`, and the run it starts
+becomes the selection; `attach` selects the asking run and watches it as a tile, where `enter`
+again takes the keyboard.
 The line answers too: on a question, a line that starts with an option — its number or its key,
 several joined by commas where it takes several — answers with that option and the rest of the
 line as the note (`1 only the checkout path`), and the line's hint says so before you send it.
