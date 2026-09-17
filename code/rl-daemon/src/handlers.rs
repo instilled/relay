@@ -390,7 +390,7 @@ pub fn register(r: &mut Router<Daemon>) {
         folders.extend(found.iter().map(|(r, _)| r.workspace.clone()));
         folders.sort();
         folders.dedup();
-        let checkouts = tokio::task::spawn_blocking(move || {
+        let mut checkouts = tokio::task::spawn_blocking(move || {
             folders
                 .iter()
                 .filter_map(|f| crate::git::checkout(f))
@@ -398,6 +398,10 @@ pub fn register(r: &mut Router<Daemon>) {
         })
         .await
         .map_err(RpcError::internal)?;
+        let badges = d.config.read().unwrap().config.workspaces.badges.clone();
+        for c in &mut checkouts {
+            c.badges = d.badges.of(c, &badges);
+        }
         let joiners = d.supervisor.joiners();
         let items = found
             .into_iter()

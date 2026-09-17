@@ -3,6 +3,7 @@
 pub mod action;
 pub mod assistant;
 pub mod attach;
+pub mod badges;
 pub mod config;
 pub mod decisions;
 pub mod digest;

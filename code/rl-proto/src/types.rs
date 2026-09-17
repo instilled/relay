@@ -334,6 +334,9 @@ pub struct Checkout {
     /// Linked worktrees, counted on the main checkout only.
     #[serde(default)]
     pub worktrees: usize,
+    /// What the configured badges said of it (`PR #95`), in their order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub badges: Vec<String>,
 }
 
 impl Checkout {
