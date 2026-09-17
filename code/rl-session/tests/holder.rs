@@ -35,6 +35,8 @@ fn start(tty: bool, linger: u64) -> Holder {
         .arg(tmp.path())
         .arg("--linger")
         .arg(linger.to_string())
+        .arg("--socket-check")
+        .arg("1")
         .arg("--env")
         .arg("RELAY_RUN=test0001");
     if !tty {

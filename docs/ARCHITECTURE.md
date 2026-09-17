@@ -159,7 +159,7 @@ daemon was down), otherwise close the run from its exit sidecar — or as lost.
 A holder waits for that. After its child exits it lingers (a day by default) with the tail and
 the exit, and goes on `Close` — which the daemon sends once it has journaled the end — or when
 the linger runs out with nobody attached. Its socket is the only way anyone reaches it, so when
-the socket file is removed from under it (the Relay home deleted, a test's temporary home cleaned
+the socket file is removed from under it (it looks once a minute) (the Relay home deleted, a test's temporary home cleaned
 up) no daemon can come back for the run: the holder hangs up a child still going and leaves.
 
 Starting the daemon is nobody's job. Every `rl` command that needs it goes through

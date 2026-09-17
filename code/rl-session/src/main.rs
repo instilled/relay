@@ -47,6 +47,10 @@ struct Args {
     /// Seconds to stay around after the child exits with no client attached.
     #[arg(long, default_value_t = 86_400)]
     linger: u64,
+    /// Seconds between checks that the socket is still there; gone, the
+    /// holder leaves. For tests.
+    #[arg(long, default_value_t = 60, hide = true)]
+    socket_check: u64,
     /// Do not detach; log to this terminal. For debugging.
     #[arg(long)]
     foreground: bool,
@@ -85,6 +89,7 @@ fn main() -> Result<()> {
             tty: !args.no_tty,
         },
         linger: Duration::from_secs(args.linger),
+        socket_check: Duration::from_secs(args.socket_check.max(1)),
     };
 
     if args.foreground {
