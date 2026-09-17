@@ -371,19 +371,33 @@ pub fn register(r: &mut Router<Daemon>) {
 
     r.register::<DigestGet, _, _>(|d, DigestParams { since }| async move {
         let since = since.unwrap_or(jiff::Timestamp::UNIX_EPOCH);
-        let found = d
+        let (found, registered) = d
             .ledger
             .call(move |c| {
-                runs::list_for_digest(c, since)?
+                let found = runs::list_for_digest(c, since)?
                     .into_iter()
                     .map(|r| {
                         let e = events::latest_for_run(c, &r.id)?;
                         Ok((r, e))
                     })
-                    .collect::<anyhow::Result<Vec<_>>>()
+                    .collect::<anyhow::Result<Vec<_>>>()?;
+                Ok((found, rl_ledger::workspaces::list(c)?))
             })
             .await
             .map_err(RpcError::internal)?;
+        // Every folder the list can show: those registered, those run in.
+        let mut folders: Vec<std::path::PathBuf> = registered.into_iter().map(|w| w.path).collect();
+        folders.extend(found.iter().map(|(r, _)| r.workspace.clone()));
+        folders.sort();
+        folders.dedup();
+        let checkouts = tokio::task::spawn_blocking(move || {
+            folders
+                .iter()
+                .filter_map(|f| crate::git::checkout(f))
+                .collect::<Vec<_>>()
+        })
+        .await
+        .map_err(RpcError::internal)?;
         let joiners = d.supervisor.joiners();
         let items = found
             .into_iter()
@@ -401,6 +415,7 @@ pub fn register(r: &mut Router<Daemon>) {
             since,
             items,
             decisions,
+            checkouts,
         })
     });
 

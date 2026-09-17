@@ -211,13 +211,18 @@ grouped by the folder they belong to, the folders in order of name so each keeps
 inside one runs by attention; and named — a workspace by the
 name it was registered under, a cause as "schedule nightly" or "rule tests-failed", never an id.
 A row is a mark (`✱` needs you, `·` going, `•` ended, `▸` a job), the title, the state as a word,
-the summary to the edge, and the ref and the age at the right. Colour carries the state — a
+the summary to the edge, and the ref and the age at the right — with `⎇ feat` there too when the
+run started on another branch than the one its folder is on now. Colour carries the state — a
 saturated accent per state, on the terminal's own foreground so it reads on either theme
 (`tui/theme.rs`). The panel runs to the screen's edges, with a rule between its sections — under
 the header, above the line, above the footer. The project rows and the `❯` line start at the edge,
 and the header and footer text level with what is typed after the `❯`; a project's runs, shells and agents sit one column in, under it. The list and its
 detail pane are split by a vertical bar — the list takes two thirds beside the details pane, half beside a terminal, which needs the
-width; the full-screen terminal drops all of it for the cells. A group's header is its name, then the folder it lives in, then the rules that
+width; the full-screen terminal drops all of it for the cells. A group is a folder (or a ref), never a branch: its header is its name, then the folder it
+lives in, then its git checkout as it stands — `⎇ main · 3 worktrees`, the branch or a detached
+commit, and on a main checkout the linked worktrees whose folders are still there (`rld` reads
+`.git` directly on each digest, no `git` started; a worktree registered on its own is a project
+of its own, with its branch and no count) — then the rules that
 live there — `↻ nightly 4h · ⚡ tests-failed`, accented and amber when one waits for a yes, with a
 `+N` when more than fit — and, at the right edge, the tally of how many jobs and reactions the
 folder holds; the global rules — the ones in the Relay home, which apply in every folder — get a project row of
@@ -375,9 +380,10 @@ back the search from before, the arrows still move through what is left, and the
 A search (`tui/query.rs`) is words and tokens. Every word must match somewhere — a title, a
 project's name or folder, a CLI, a summary — and is lit up where it shows. The tokens pick by
 what a thing is: `in:` a project, `is:failed|going|done|stopped|needs|pinned|new`,
-`kind:agent|shell|command|job|reaction|question`, `by:` the schedule or reaction behind it.
-Values match by prefix, and `tab` completes names and values. A project stays while anything
-under it matches; a project with nothing under it answers only to words and `in:`.
+`kind:agent|shell|command|job|reaction|question`, `by:` the schedule or reaction behind it,
+`on:` a git branch — the one a run started on, the one a folder is on. Values match by prefix
+(names anywhere), and `tab` completes names and values. A project stays while anything under it
+matches; a project with nothing under it answers only to words, `in:` and `on:`.
 
 `/new` is the form for a rule written by hand: `in` (a folder, or `global`), `name`, `when`
 (`every 30m`, a cron line, or `on run.failed` — which decides between `schedules.yaml` and
@@ -439,7 +445,9 @@ stateDiagram-v2
 panel's list and are what `rl since` leads with. Confidence rides along in the UI, always visible.
 
 Grouping is derived, never a table: `group_key = ref → branch → workspace`, materialised onto
-each event row at write time so the digest groups without a join.
+each event row at write time so the digest groups without a join; it is what a reaction's
+`group` matches and what keeps one open question per group. The list files a run by
+`place_key = ref → workspace` instead, so a folder is one project whichever branch it is on.
 
 ---
 

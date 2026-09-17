@@ -310,6 +310,37 @@ impl Run {
             .or_else(|| self.branch.clone())
             .unwrap_or_else(|| self.workspace.to_string_lossy().into_owned())
     }
+
+    /// Where the list files it: under its ref, else its folder. Never its
+    /// branch — a folder is one project whichever branch it is on.
+    pub fn place_key(&self) -> String {
+        self.ref_
+            .clone()
+            .unwrap_or_else(|| self.workspace.to_string_lossy().into_owned())
+    }
+}
+
+/// A folder's git checkout as it stands now, read from its `.git` — not the
+/// branch a run started on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Checkout {
+    pub path: PathBuf,
+    /// The branch checked out; none on a detached HEAD.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    /// The commit, short, when HEAD is detached.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detached: Option<String>,
+    /// Linked worktrees, counted on the main checkout only.
+    #[serde(default)]
+    pub worktrees: usize,
+}
+
+impl Checkout {
+    /// What HEAD is, in a word: the branch, or the detached commit.
+    pub fn head(&self) -> &str {
+        self.branch.as_deref().or(self.detached.as_deref()).unwrap_or("")
+    }
 }
 
 /// An append-only fact.
@@ -424,7 +455,10 @@ mod tests {
         assert_eq!(r.group_key(), "/w");
         r.branch = Some("b".into());
         assert_eq!(r.group_key(), "b");
+        // The list keeps it with its folder, whatever the branch.
+        assert_eq!(r.place_key(), "/w");
         r.ref_ = Some("notion:X".into());
         assert_eq!(r.group_key(), "notion:X");
+        assert_eq!(r.place_key(), "notion:X");
     }
 }

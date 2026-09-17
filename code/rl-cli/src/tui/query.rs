@@ -7,14 +7,16 @@
 //! - `in:` a project, by name or folder;
 //! - `is:` a state — `failed`, `going`, `done`, `stopped`, `needs`, `pinned`, `new`;
 //! - `kind:` what it is — `agent`, `shell`, `command`, `job`, `reaction`, `question`;
-//! - `by:` the schedule or reaction behind it.
+//! - `by:` the schedule or reaction behind it;
+//! - `on:` a git branch — the one a run started on, the one a folder is on.
 //!
-//! Values match by prefix (`is:fail`), so the list narrows as you type.
+//! Values match by prefix (`is:fail`), so the list narrows as you type; names
+//! (`in:`, `by:`, `on:`) anywhere in them.
 //!
 //! Pure: parsing, matching and completing. Nothing about the panel.
 
 /// The token names, in the order completion offers them.
-pub const TOKENS: [&str; 4] = ["in:", "is:", "kind:", "by:"];
+pub const TOKENS: [&str; 5] = ["in:", "is:", "kind:", "by:", "on:"];
 
 /// What `is:` takes.
 pub const STATES: [&str; 7] = ["failed", "going", "done", "stopped", "needs", "pinned", "new"];
@@ -30,6 +32,7 @@ pub struct Query {
     is: Vec<String>,
     kind: Vec<String>,
     by: Vec<String>,
+    on: Vec<String>,
 }
 
 /// One thing the search is put to, described in the words it matches on.
@@ -45,6 +48,8 @@ pub struct Subject<'a> {
     pub kind: Vec<&'static str>,
     /// The rule behind it.
     pub by: Option<&'a str>,
+    /// The git branch it is on.
+    pub on: Option<&'a str>,
 }
 
 impl Query {
@@ -57,6 +62,7 @@ impl Query {
                 Some(("is", v)) => Some((&mut q.is, v)),
                 Some(("kind", v)) => Some((&mut q.kind, v)),
                 Some(("by", v)) => Some((&mut q.by, v)),
+                Some(("on", v)) => Some((&mut q.on, v)),
                 _ => None,
             };
             match into {
@@ -70,7 +76,7 @@ impl Query {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.words.is_empty() && self.within.is_empty() && !self.picks_rows()
+        self.words.is_empty() && self.within.is_empty() && self.on.is_empty() && !self.picks_rows()
     }
 
     /// Whether it asks about what things are — state, kind, rule — which a
@@ -91,22 +97,24 @@ impl Query {
                 .iter()
                 .all(|v| s.kind.iter().any(|x| x.starts_with(v.as_str())))
             && self.by.iter().all(|v| s.by.is_some_and(|b| has(b, v)))
+            && self.on.iter().all(|v| s.on.is_some_and(|b| has(b, v)))
     }
 
     /// A project header with nothing under it that hit: shown when the search
-    /// names it and asks nothing about rows.
-    pub fn hits_project(&self, project: &[&str]) -> bool {
+    /// names it — or the branch it is on — and asks nothing about rows.
+    pub fn hits_project(&self, project: &[&str], on: Option<&str>) -> bool {
         !self.picks_rows()
             && self.hits(&Subject {
                 project: project.to_vec(),
+                on,
                 ..Subject::default()
             })
     }
 }
 
 /// What `tab` offers for the word at the end of a search: the token names, or
-/// a token's values — `in:` the projects, `by:` the rules.
-pub fn complete(word: &str, projects: &[String], rules: &[String]) -> Vec<String> {
+/// a token's values — `in:` the projects, `by:` the rules, `on:` the branches.
+pub fn complete(word: &str, projects: &[String], rules: &[String], branches: &[String]) -> Vec<String> {
     let w = word.to_lowercase();
     let Some((name, v)) = w.split_once(':') else {
         return TOKENS
@@ -120,6 +128,7 @@ pub fn complete(word: &str, projects: &[String], rules: &[String]) -> Vec<String
         "kind" => KINDS.iter().map(|s| s.to_string()).collect(),
         "in" => projects.to_vec(),
         "by" => rules.to_vec(),
+        "on" => branches.to_vec(),
         _ => return vec![],
     };
     let mut out: Vec<String> = values
@@ -170,6 +179,7 @@ mod tests {
             is: vec!["failed"],
             kind: vec!["command", "job"],
             by: Some("nightly"),
+            on: Some("feat/search"),
         }
     }
 
@@ -193,6 +203,9 @@ mod tests {
         assert!(Query::parse("in:home/f").hits(&s), "the folder counts");
         assert!(!Query::parse("in:cargo").hits(&s), "in: is the project, not the title");
         assert!(!Query::parse("by:deploy").hits(&s));
+        assert!(Query::parse("on:search").hits(&s), "a branch by any part of its name");
+        assert!(!Query::parse("on:main").hits(&s));
+        assert!(!Query::parse("on:main").hits(&Subject::default()), "no branch, no hit");
     }
 
     #[test]
@@ -209,21 +222,26 @@ mod tests {
 
     #[test]
     fn a_project_alone_answers_to_words_and_in_only() {
-        assert!(Query::parse("api").hits_project(&["api", "/w/api"]));
-        assert!(Query::parse("in:api").hits_project(&["api", "/w/api"]));
-        assert!(!Query::parse("api is:failed").hits_project(&["api", "/w/api"]));
-        assert!(!Query::parse("web").hits_project(&["api", "/w/api"]));
+        assert!(Query::parse("api").hits_project(&["api", "/w/api"], None));
+        assert!(Query::parse("in:api").hits_project(&["api", "/w/api"], None));
+        assert!(!Query::parse("api is:failed").hits_project(&["api", "/w/api"], None));
+        assert!(!Query::parse("web").hits_project(&["api", "/w/api"], None));
+        assert!(Query::parse("on:ma").hits_project(&["api", "/w/api"], Some("main")));
+        assert!(!Query::parse("on:main").hits_project(&["api", "/w/api"], None));
     }
 
     #[test]
     fn tab_offers_names_then_values() {
         let projects = vec!["api".to_string(), "web".to_string()];
         let rules = vec!["nightly".to_string()];
-        assert_eq!(complete("i", &projects, &rules), ["in:", "is:"]);
-        assert_eq!(complete("is:f", &projects, &rules), ["is:failed"]);
-        assert_eq!(complete("in:", &projects, &rules), ["in:api", "in:web"]);
-        assert_eq!(complete("by:n", &projects, &rules), ["by:nightly"]);
-        assert!(complete("where:", &projects, &rules).is_empty());
+        let branches = vec!["main".to_string(), "feat".to_string(), "main".to_string()];
+        let c = |w| complete(w, &projects, &rules, &branches);
+        assert_eq!(c("i"), ["in:", "is:"]);
+        assert_eq!(c("is:f"), ["is:failed"]);
+        assert_eq!(c("in:"), ["in:api", "in:web"]);
+        assert_eq!(c("by:n"), ["by:nightly"]);
+        assert_eq!(c("on:"), ["on:feat", "on:main"]);
+        assert!(c("where:").is_empty());
     }
 
     #[test]
