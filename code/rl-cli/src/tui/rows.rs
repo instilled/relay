@@ -835,6 +835,7 @@ mod tests {
             at: t,
             unseen,
             joined_by: None,
+            emitted: vec![],
         }
     }
 

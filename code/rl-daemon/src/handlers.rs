@@ -378,7 +378,8 @@ pub fn register(r: &mut Router<Daemon>) {
                     .into_iter()
                     .map(|r| {
                         let e = events::latest_for_run(c, &r.id)?;
-                        Ok((r, e))
+                        let emitted = events::emitted_for_run(c, &r.id)?;
+                        Ok((r, e, emitted))
                     })
                     .collect::<anyhow::Result<Vec<_>>>()?;
                 Ok((found, rl_ledger::workspaces::list(c)?))
@@ -387,7 +388,7 @@ pub fn register(r: &mut Router<Daemon>) {
             .map_err(RpcError::internal)?;
         // Every folder the list can show: those registered, those run in.
         let mut folders: Vec<std::path::PathBuf> = registered.into_iter().map(|w| w.path).collect();
-        folders.extend(found.iter().map(|(r, _)| r.workspace.clone()));
+        folders.extend(found.iter().map(|(r, _, _)| r.workspace.clone()));
         folders.sort();
         folders.dedup();
         let mut checkouts = tokio::task::spawn_blocking(move || {
@@ -405,9 +406,9 @@ pub fn register(r: &mut Router<Daemon>) {
         let joiners = d.supervisor.joiners();
         let items = found
             .into_iter()
-            .map(|(run, e)| {
+            .map(|(run, e, emitted)| {
                 let joined_by = joiners.get(&run.id).cloned();
-                crate::digest::item(run, e, joined_by)
+                crate::digest::item(run, e, joined_by, emitted)
             })
             .collect();
         let decisions = d
@@ -492,8 +493,7 @@ pub fn register(r: &mut Router<Daemon>) {
 /// families are refused, so an emit cannot forge a `run.failed` the digest
 /// would read as real.
 fn emit_kind_ok(kind: &str) -> Result<(), String> {
-    const RESERVED: &[&str] = &["run.", "decision.", "schedule.", "commit.", "branch."];
-    if let Some(p) = RESERVED.iter().find(|p| kind.starts_with(**p)) {
+    if let Some(p) = rl_proto::types::event_kind::OWN.iter().find(|p| kind.starts_with(**p)) {
         return Err(format!("`{kind}`: `{p}` events are the daemon's; pick your own kind"));
     }
     let shaped = kind.contains('.')

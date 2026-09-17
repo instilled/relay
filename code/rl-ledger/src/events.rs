@@ -120,6 +120,19 @@ pub fn latest_for_run(conn: &Connection, run: &str) -> Result<Option<Event>> {
     Ok(rows.next().transpose()?)
 }
 
+/// What a run raised itself (`rl emit`): each kind and how often, in the
+/// order they first came. The daemon's own families are left out — those are
+/// its own doing, and the run's state already says them.
+pub fn emitted_for_run(conn: &Connection, run: &str) -> Result<Vec<(String, u32)>> {
+    let mut stmt = conn.prepare("SELECT kind, COUNT(*) FROM events WHERE run = ?1 GROUP BY kind ORDER BY MIN(id)")?;
+    let rows = stmt.query_map(params![run], |r| Ok((r.get::<_, String>(0)?, r.get::<_, u32>(1)?)))?;
+    Ok(rows
+        .collect::<std::result::Result<Vec<_>, _>>()?
+        .into_iter()
+        .filter(|(kind, _)| !rl_proto::types::event_kind::is_own(kind))
+        .collect())
+}
+
 fn from_row(row: &Row<'_>) -> rusqlite::Result<Event> {
     let data: Option<String> = row.get(7)?;
     Ok(Event {
@@ -135,4 +148,51 @@ fn from_row(row: &Row<'_>) -> rusqlite::Result<Event> {
             .transpose()
             .map_err(|e| conv(7, e))?,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn what_a_run_raised_leaves_out_the_daemons_own() {
+        let mut c = rusqlite::Connection::open_in_memory().unwrap();
+        crate::migrate::run(&mut c).unwrap();
+        let t: jiff::Timestamp = "2026-09-10T12:00:00Z".parse().unwrap();
+        let r = rl_proto::types::Run::new(
+            "r1",
+            rl_proto::types::RunKind::Command,
+            "probe",
+            vec!["probe".into()],
+            "/w",
+            "/w",
+            t,
+        );
+        crate::runs::insert(&c, &r).unwrap();
+        let ev = |kind: &str| NewEvent {
+            at: t,
+            workspace: PathBuf::from("/w"),
+            run: Some("r1".into()),
+            group_key: "/w".into(),
+            kind: kind.into(),
+            summary: kind.into(),
+            data: None,
+        };
+        for kind in [
+            "run.started",
+            "flint.product.new-feedback",
+            "log.issue",
+            "flint.product.new-feedback",
+            "run.finished",
+            "flint.product.new-feedback",
+        ] {
+            append(&c, &ev(kind)).unwrap();
+        }
+        assert_eq!(
+            emitted_for_run(&c, "r1").unwrap(),
+            [("flint.product.new-feedback".to_string(), 3), ("log.issue".into(), 1)],
+            "each kind once, in the order they first came"
+        );
+        assert!(emitted_for_run(&c, "nobody").unwrap().is_empty());
+    }
 }

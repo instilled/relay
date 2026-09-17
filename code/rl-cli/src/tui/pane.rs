@@ -4,6 +4,7 @@
 
 use super::rows::{Job, Names, asked_by, cause_words, fit};
 use super::rules;
+use crate::digest::signals;
 use crate::render::{fmt_clock, state_label};
 use jiff::Timestamp;
 use ratatui::style::{Style, Stylize};
@@ -129,6 +130,16 @@ pub fn run_lines(
     }
     if let Some(l) = &r.last_line {
         lines.push(fact("last", l.clone()));
+    }
+    // What the run raised itself: the reason a probe exists, and what a
+    // reaction would have heard.
+    if !item.emitted.is_empty() {
+        for (i, t) in wrap(&signals(&item.emitted), width.saturating_sub(VALUE_COL + 1).max(20))
+            .into_iter()
+            .enumerate()
+        {
+            lines.push(fact(if i == 0 { "signals" } else { "" }, t));
+        }
     }
     if let Some(s) = summary {
         // Aligned with the facts: where it came from on the label's line, the
@@ -577,6 +588,7 @@ mod tests {
             at: t,
             unseen: true,
             joined_by: None,
+            emitted: vec![("flint.product.new-feedback".into(), 5), ("log.issue".into(), 1)],
         };
         let names = Names::new([("/home/f/relay".into(), "relay".to_string())]);
         let s = text(&run_lines(&item, &[], None, &names, 80, now));
@@ -585,6 +597,10 @@ mod tests {
         assert!(s.contains(" where    relay\n"), "{s}");
         assert!(s.contains(" runs     ./test.sh\n"), "{s}");
         assert!(s.contains(" tags     nightly\n"), "{s}");
+        assert!(
+            s.contains(" signals  flint.product.new-feedback ×5 · log.issue\n"),
+            "what the run raised, once each kind: {s}"
+        );
         assert!(s.contains("· after 0s · exit 1"), "{s}");
         assert!(
             s.contains("\n recap    /summarise recaps it · /summarise 2h the last 2h\n"),
