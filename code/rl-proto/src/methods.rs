@@ -424,6 +424,9 @@ pub struct DigestItem {
     pub unseen: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub joined_by: Option<String>,
+    /// What the run raised itself (`rl emit`): each kind and how often.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub emitted: Vec<(String, u32)>,
 }
 
 // ---- event.* ----------------------------------------------------------------

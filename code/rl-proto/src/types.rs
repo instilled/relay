@@ -393,6 +393,15 @@ pub struct Summary {
 
 /// Event kinds emitted by `rld` itself. Plugins add `plugin.<name>.*`.
 pub mod event_kind {
+    /// The families that are the daemon's own: a command may not `rl emit`
+    /// one, and what a run raised is what falls outside them.
+    pub const OWN: &[&str] = &["run.", "decision.", "schedule.", "commit.", "branch."];
+
+    /// Whether a kind belongs to the daemon rather than to what a run raised.
+    pub fn is_own(kind: &str) -> bool {
+        OWN.iter().any(|p| kind.starts_with(p))
+    }
+
     pub const RUN_STARTED: &str = "run.started";
     pub const RUN_STATE: &str = "run.state";
     pub const RUN_NEEDS_INPUT: &str = "run.needs_input";
