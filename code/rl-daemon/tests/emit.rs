@@ -91,5 +91,22 @@ async fn an_emitted_event_feeds_a_reaction_and_where_data_narrows() {
         .await;
     assert!(forged.error.is_some(), "run.failed must be refused");
 
+    // Words may be hyphenated, as rules are named; not every shape goes.
+    for ok in ["flint.product.new-feedback", "log.issue_2"] {
+        let r = c.call("event.emit", json!({ "kind": ok, "workspace": dir })).await;
+        assert!(r.error.is_none(), "{ok}: {:?}", r.error);
+    }
+    for bad in [
+        "nodot",
+        "log.-issue",
+        "log..issue",
+        "Log.issue",
+        "log.1issue",
+        "log.is sue",
+    ] {
+        let r = c.call("event.emit", json!({ "kind": bad, "workspace": dir })).await;
+        assert!(r.error.is_some(), "{bad} must be refused");
+    }
+
     h.stop().await;
 }
