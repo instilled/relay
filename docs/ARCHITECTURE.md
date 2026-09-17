@@ -363,7 +363,11 @@ The few keys that are not the list's or the line's each stand for a command, and
 list shows them beside it: `^x` stops or archives, `^r` renames, `^t` pins, `^g` opens the graph, `^o` shows or hides the pane,
 `^f` searches.
 A shell is a command like any other — `/shell` — and has no key of its own. The line keeps `^a`, `^e`, `^u`, `^k` and `^w` for
-editing, as a shell does, so none of those is ever taken for anything else.
+editing, as a shell does, so none of those is ever taken for anything else. It moves and cuts by
+word too — alt or ctrl with `←`/`→`, `alt-b`/`alt-f`, `alt-backspace`, `alt-delete`/`alt-d` —
+where a word is letters and digits, so `~/Projects/flint` stops at its slashes; the form's fields
+take the same keys. A terminal only sends alt when it is set to (iTerm2: the option key as
+`Esc+`); the ctrl arrows arrive either way.
 
 At the right of the header is the lens — `all · agents · jobs · reactions`, the one in force
 accented — and the list shows

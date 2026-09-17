@@ -1,8 +1,14 @@
 //! The line at the foot of the panel: one place that is always taking text.
 //! Typing is the panel's resting state, so the line is never opened and never
 //! closed — what you type sits there until `enter` sends it or `esc` clears
-//! it. The usual editing keys work; `↑`/`↓` and `home`/`end` are left alone,
-//! because the list above wants them.
+//! it. The usual editing keys work: `^a` `^e` to the ends, `^u` `^k` to cut to
+//! them, `^w` the word behind (to the last space, as a shell does), and by
+//! word — alt or ctrl with `←`/`→`, `alt-b`/`alt-f`, `alt-backspace`,
+//! `alt-delete`/`alt-d` — where a word ends at anything that is not a letter
+//! or a digit, so a path stops at its slashes. `↑`/`↓` and `home`/`end` are
+//! left alone, because the list above wants them. Alt only ever arrives when
+//! the terminal sends it (iTerm2: the option key set to `Esc+`); the ctrl
+//! arrows work either way.
 //!
 //! Pure: what is typed, where the cursor is, and what a finished line means.
 //! No I/O, and nothing about the rest of the panel.
@@ -80,6 +86,9 @@ impl Line {
 
     pub fn key(&mut self, k: &KeyEvent) -> Act {
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+        let alt = k.modifiers.contains(KeyModifiers::ALT);
+        // By word: alt is the Mac habit, ctrl the one everywhere else.
+        let by_word = alt || ctrl;
         match k.code {
             // Shift-enter (and alt-enter, where a terminal sends that instead)
             // adds a line rather than sending; plain enter still sends. It only
@@ -100,17 +109,34 @@ impl Line {
             KeyCode::Enter => return Act::Submit,
             KeyCode::Esc => return Act::Cancel,
             KeyCode::Tab => return Act::Complete,
+            KeyCode::Backspace if by_word => {
+                let start = self.word_left();
+                self.text.drain(start..self.cursor);
+                self.cursor = start;
+            }
             KeyCode::Backspace => {
                 if let Some(i) = self.before() {
                     self.text.remove(i);
                     self.cursor = i;
                 }
             }
+            KeyCode::Delete if by_word => {
+                let end = self.word_right();
+                self.text.drain(self.cursor..end);
+            }
+            KeyCode::Char('d') if alt => {
+                let end = self.word_right();
+                self.text.drain(self.cursor..end);
+            }
             KeyCode::Delete => {
                 if self.cursor < self.text.len() {
                     self.text.remove(self.cursor);
                 }
             }
+            KeyCode::Left if by_word => self.cursor = self.word_left(),
+            KeyCode::Right if by_word => self.cursor = self.word_right(),
+            KeyCode::Char('b') if alt => self.cursor = self.word_left(),
+            KeyCode::Char('f') if alt => self.cursor = self.word_right(),
             KeyCode::Left => self.cursor = self.before().unwrap_or(0),
             KeyCode::Right => self.cursor = self.after().unwrap_or(self.text.len()),
             KeyCode::Char('a') if ctrl => self.cursor = 0,
@@ -151,6 +177,21 @@ impl Line {
     fn word_start(&self) -> usize {
         let head = self.text[..self.cursor].trim_end_matches(' ');
         head.rfind(' ').map(|i| i + 1).unwrap_or(0)
+    }
+
+    /// The word before the cursor: over anything between words, then the word
+    /// itself. A word is letters and digits, so `~/Projects/flint` is three of
+    /// them and the slashes are between.
+    fn word_left(&self) -> usize {
+        let head = self.text[..self.cursor].trim_end_matches(|c: char| !c.is_alphanumeric());
+        head.trim_end_matches(char::is_alphanumeric).len()
+    }
+
+    /// The end of the word after the cursor, the same way round.
+    fn word_right(&self) -> usize {
+        let tail = self.text[self.cursor..].trim_start_matches(|c: char| !c.is_alphanumeric());
+        let tail = tail.trim_start_matches(char::is_alphanumeric);
+        self.text.len() - tail.len()
     }
 }
 
@@ -381,6 +422,55 @@ mod tests {
         assert_eq!(l.cursor(), 3, "just past the é");
         l.set_with_cursor("héllo", 2);
         assert_eq!(l.cursor(), 1, "mid-é, so the boundary before it");
+    }
+
+    #[test]
+    fn words_are_walked_and_cut_by_alt_or_ctrl() {
+        let key = |code, m| KeyEvent::new(code, m);
+        let alt = KeyModifiers::ALT;
+        let ctrl = KeyModifiers::CONTROL;
+        let mut l = Line::default();
+        press(&mut l, "make test ~/Projects/flint");
+        // Back a word at a time: the path's slashes are edges too.
+        l.key(&key(KeyCode::Left, alt));
+        assert_eq!(l.cursor(), 21, "before `flint`");
+        l.key(&key(KeyCode::Left, ctrl));
+        assert_eq!(l.cursor(), 12, "before `Projects`");
+        l.key(&key(KeyCode::Char('b'), alt));
+        assert_eq!(l.cursor(), 5, "before `test`");
+        // Forward again.
+        l.key(&key(KeyCode::Right, alt));
+        assert_eq!(l.cursor(), 9, "past `test`");
+        l.key(&key(KeyCode::Char('f'), alt));
+        assert_eq!(l.cursor(), 20, "past `Projects`");
+        // At either end there is nowhere further to go.
+        for _ in 0..4 {
+            l.key(&key(KeyCode::Right, alt));
+        }
+        assert_eq!(l.cursor(), l.text().len());
+        for _ in 0..9 {
+            l.key(&key(KeyCode::Left, alt));
+        }
+        assert_eq!(l.cursor(), 0);
+
+        // Cutting: the word after, then the words before.
+        l.key(&key(KeyCode::Delete, alt));
+        assert_eq!(l.text(), " test ~/Projects/flint");
+        l.key(&key(KeyCode::Char('d'), alt));
+        assert_eq!(l.text(), " ~/Projects/flint");
+        l.key(&key(KeyCode::Char('e'), ctrl));
+        l.key(&key(KeyCode::Backspace, alt));
+        assert_eq!(l.text(), " ~/Projects/");
+        l.key(&key(KeyCode::Backspace, ctrl));
+        assert_eq!(l.text(), " ~/");
+        l.key(&key(KeyCode::Backspace, alt));
+        assert_eq!(l.text(), "", "nothing left but the edges");
+        assert_eq!(l.cursor(), 0);
+
+        // Alt with any other letter is still that letter.
+        let mut l = Line::default();
+        assert_eq!(l.key(&key(KeyCode::Char('x'), alt)), Act::Typing);
+        assert_eq!(l.text(), "x");
     }
 
     #[test]
