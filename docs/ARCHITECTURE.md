@@ -595,7 +595,9 @@ reaction` then the form's fields.
 `rl interpret <words…> [--in <folder>] [--go]` build the pack on the client (it needs clap's
 help, which only `rl` has) and call `assistant.run`; `rld` resolves `assistants.interpret`,
 starts the agent headless with the prompt as its last argument (`rl-daemon/src/assistant.rs`:
-`cause: assistant:interpret`, tag `relay:assistant`, cwd the folder asked about, no tty), waits
+`cause: assistant:interpret`, tag `relay:assistant`, cwd the folder asked about, no tty and no
+input — `claude -p` would otherwise wait on an input that never ends, and say so into the
+answer), waits
 for it to end — 60 s, then it is stopped and the caller told so — and returns the run's id and
 what it wrote. The client reads the last `kind:` block out of that by hand (`rl-cli/src/
 interpret.rs`: fences and prose around it dropped, `key: value` lines, block and flow lists; not

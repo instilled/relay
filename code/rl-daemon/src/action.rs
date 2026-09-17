@@ -68,6 +68,7 @@ pub fn run_spec(
         rows: None,
         env: action.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
         inherit_env: true,
+        input: true,
         cause,
         flow,
     })

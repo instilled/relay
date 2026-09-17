@@ -269,6 +269,7 @@ impl Supervisor {
                 cols,
                 rows,
                 spec.tty,
+                spec.input,
                 &env,
                 env_file.as_deref(),
                 &argv,
@@ -521,6 +522,7 @@ impl Supervisor {
         cols: u16,
         rows: u16,
         tty: bool,
+        input: bool,
         env: &[(String, String)],
         env_file: Option<&Path>,
         argv: &[String],
@@ -541,6 +543,9 @@ impl Supervisor {
             .arg(rows.to_string());
         if !tty {
             cmd.arg("--no-tty");
+        }
+        if !input {
+            cmd.arg("--no-input");
         }
         match env_file {
             Some(f) => {

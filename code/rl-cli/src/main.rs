@@ -716,6 +716,7 @@ async fn run(home: &Home, a: RunArgs, json: bool) -> Result<()> {
         rows,
         env,
         inherit_env: false,
+        input: true,
         cause: Cause::Manual,
         flow: None,
     };
