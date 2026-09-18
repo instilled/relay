@@ -65,7 +65,7 @@ use rl_proto::methods::{
 use rl_proto::rule::{Rule, RuleKind, RuleStatus};
 use rl_proto::types::{AttachMode, Cause, Event as LedgerEvent, Mark, Run, RunKind, RunState, Summary};
 use rows::{Names, Row, fit, short_path};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use term::TermView;
@@ -197,8 +197,6 @@ struct App {
     graph_from: (View, Option<String>),
     /// Where the window over the graph starts, column and row.
     graph_at: std::cell::Cell<(usize, usize)>,
-    /// Jobs opened to their runs.
-    opened: HashSet<String>,
     /// Which of a folder's shells a shell line goes to, and the one the
     /// arrows step from. A folder is absent until you step; the entry is
     /// ignored once that shell has ended.
@@ -581,7 +579,6 @@ pub async fn run(home: &Home) -> Result<()> {
         graph: None,
         graph_from: (View::Work, None),
         graph_at: std::cell::Cell::new((0, 0)),
-        opened: HashSet::new(),
         shell_at: HashMap::new(),
         scroll: std::cell::Cell::new(0),
         list_h: std::cell::Cell::new(0),
@@ -807,7 +804,6 @@ impl App {
             &rows::Context {
                 names: &self.names,
                 rules: &self.rules,
-                opened: &self.opened,
                 filter: &self.filter,
                 home: &rl_core::display_path(self.home.path()),
                 lens: self.lens,
@@ -819,7 +815,7 @@ impl App {
     /// The folder the selected row's work is in.
     fn selected_folder(&self) -> Option<PathBuf> {
         match self.selected()? {
-            Row::Run(i) | Row::Fold(i) => Some(i.run.workspace.clone()),
+            Row::Run(i) => Some(i.run.workspace.clone()),
             Row::Job(j) => Some(j.last().run.workspace.clone()),
             Row::Question(q) => Some(q.workspace.clone()),
             Row::Group(h) => h.workspace.clone(),
@@ -1016,7 +1012,7 @@ impl App {
     /// when the job is.
     async fn saw_selected(&mut self) {
         let ids: Vec<String> = match self.selected() {
-            Some(Row::Run(i)) | Some(Row::Fold(i)) if i.unseen => vec![i.run.id.clone()],
+            Some(Row::Run(i)) if i.unseen => vec![i.run.id.clone()],
             Some(Row::Job(j)) => j.runs.iter().filter(|i| i.unseen).map(|i| i.run.id.clone()).collect(),
             _ => vec![],
         };
@@ -2280,21 +2276,6 @@ impl App {
                 if self.show_pane {
                     self.wide = false;
                     self.hide_pane();
-                } else if let Some(key) = self.selected_job().map(|j| j.key.clone())
-                    && self.opened.remove(&key)
-                {
-                } else if let Some(id) = match self.selected() {
-                    Some(Row::Fold(i)) => Some(i.run.id.clone()),
-                    _ => None,
-                } {
-                    // Under an opened job: back up to the job, and fold it.
-                    let keys = self.keys();
-                    let at = keys.iter().position(|k| *k == format!("r:{id}")).unwrap_or(0);
-                    let job = keys[..at].iter().rev().find(|k| k.starts_with("j:")).cloned();
-                    if let Some(job) = job {
-                        self.opened.remove(&job);
-                        self.select(Some(job));
-                    }
                 } else if !self.filter.is_empty() {
                     self.filter.clear();
                     self.settle();
@@ -2360,10 +2341,11 @@ impl App {
             }
             return Ok(());
         }
-        if let Some(key) = self.selected_job().map(|j| j.key.clone()) {
-            if !self.opened.remove(&key) {
-                self.opened.insert(key);
-            }
+        if self.selected_job().is_some() {
+            // A job never grows into its runs on the list: they are in the
+            // pane, with the rule and what the last firing raised.
+            self.pane = Pane::Facts;
+            self.show_pane = true;
         } else if let Some(q) = self.selected_question() {
             let id = q.id.clone();
             self.picked.clear();
@@ -3155,9 +3137,9 @@ impl App {
                         fmt_age(q.created_at, now),
                     )
                 }
-                Row::Run(i) | Row::Fold(i) => {
+                Row::Run(i) => {
                     let r = &i.run;
-                    let under = matches!(row, Row::Fold(_));
+                    let under = false;
                     let style = state_style(r.state);
                     // A pinned run stands above every folder, so it says
                     // which one it is from.
@@ -3206,20 +3188,25 @@ impl App {
                 }
                 Row::Job(j) => {
                     let last = j.last();
-                    let open = if self.opened.contains(&j.key) { "▾" } else { "▸" };
+                    let glyph = match j.kind {
+                        RuleKind::Schedule => "↻",
+                        RuleKind::Reaction => "⚡",
+                    };
                     let word = match last.run.state {
                         RunState::Failed => "failed",
                         RunState::Stopped => "stopped",
                         _ => "ok",
                     };
+                    // How many times it has run sits with how the last one went.
+                    let word = format!("{word} ×{}", j.runs.len());
                     let title = Span::raw(fit(&j.name, tw));
                     let title = if j.unseen() { title.bold() } else { title };
                     list_line(
                         w,
                         tw,
-                        Span::raw(format!(" {open} ")),
+                        Span::raw(format!(" {glyph} ")),
                         title,
-                        Span::styled(fit(word, 10), state_style(last.run.state)),
+                        Span::styled(fit(&word, 10), state_style(last.run.state)),
                         &j.summary(),
                         marks_lead(j),
                         None,
@@ -3349,7 +3336,7 @@ impl App {
             return;
         }
         let lines = match self.selected() {
-            Some(Row::Run(i)) | Some(Row::Fold(i)) => pane::run_lines(
+            Some(Row::Run(i)) => pane::run_lines(
                 i,
                 &self.events,
                 self.summary.as_ref().filter(|s| s.run == i.run.id),
@@ -3505,15 +3492,9 @@ impl App {
         };
         match self.selected() {
             Some(Row::Question(_)) => format!("enter or `1 and a note` on the line answers it · ^x not this · {pane}"),
-            Some(Row::Job(j)) => {
-                let open = if self.opened.contains(&j.key) {
-                    "enter closes"
-                } else {
-                    "enter opens"
-                };
-                format!("{open} · /edit its rule · ^x archives · {pane}")
+            Some(Row::Job(_)) => {
+                format!("enter its firings · /edit its rule · ^x archives · {pane}")
             }
-            Some(Row::Fold(_)) => format!("enter output · ^x archives · esc folds · {pane}"),
             Some(Row::Run(i)) if i.run.state.is_terminal() => {
                 format!("enter output · /summarise · ^x archives · ^t pins · {pane}")
             }

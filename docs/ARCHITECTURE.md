@@ -235,12 +235,14 @@ their own, `global`, shown with that home (`~/.relay`) where a folder row shows 
 rules or none: it is always the last project, a yes waiting there or not (its chip says so),
 and the cursor stops on it, `enter` (or `^o`) shows its schedules and
 reactions in the pane, and `^g` opens the graph on them. Runs a schedule or a rule
-started fold, once ended, into one line per job — the name, how the last few went (`··×·`, oldest
-first) and what the last firing came to, in its own words — so a job firing every thirty seconds is a row, not a screen; a run still going or
-waiting on you is never folded, and `enter` on a job opens it to its last twenty. The cadence, the tally,
-what the last firing raised and the recent firings are all in its pane, with a cron line read
-back in words where it can be (`hourly 08:00–18:00, Mon–Fri`) and left as written where it
-cannot. When the list
+started fold, once ended, into one line per job — its rule's glyph, the name, how the last one
+went with how many there have been (`ok ×4`), how the last few went (`··×·`, oldest first) and
+what the last firing came to in its own words — so a job firing every thirty seconds is a row,
+not a screen, and it never grows into one: `enter` (or `^o`) puts its firings in the pane, as on
+a project header. A run still going or waiting on you is never folded. The pane holds the
+cadence — a cron line read back in words where it can be (`hourly 08:00–18:00, Mon–Fri`), left as
+written where it cannot — the tally, the marks, what the last firing raised under `signals`, and
+the last ten firings, each in its own words. When the list
 is taller than the screen, its first and last lines say how much is above and below. A group's
 header says which folder it is in, and the cursor stops on it like any other row: `enter` (or
 `^o`) turns the pane into the project's own — the folder, how its runs stand (needs-you /
