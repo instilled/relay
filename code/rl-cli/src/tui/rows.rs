@@ -8,10 +8,10 @@
 //! name it was registered under.
 //!
 //! Runs a schedule or a rule started, once they have ended, fold into one
-//! line per job — the name, the cadence, how many went well, and the last
-//! outcome — so a job firing every thirty seconds is one row, not a screen.
-//! A run still going, or waiting on you, is never folded; `enter` on a job
-//! opens it to its recent runs.
+//! line per job — the name, how the last few went, how many there have been,
+//! and what the last one came to — so a job firing every thirty seconds is
+//! one row, not a screen, and it never grows into one: its firings are in the
+//! pane. A run still going, or waiting on you, is never folded.
 //!
 //! Before all of it, the questions waiting on you, from every project, oldest
 //! first — what needs you does not hide under a project's name — then pinned
@@ -69,9 +69,6 @@ impl Lens {
     }
 }
 
-/// Ended runs a job shows when opened.
-pub const OPENED: usize = 20;
-
 pub enum Row<'a> {
     /// A group: where it is, what it is called, and the rules that live there.
     Group(Head),
@@ -79,8 +76,6 @@ pub enum Row<'a> {
     Run(&'a DigestItem),
     /// A schedule's or rule's ended runs, as one line.
     Job(Job<'a>),
-    /// One of an opened job's runs, under it.
-    Fold(&'a DigestItem),
 }
 
 impl<'a> Row<'a> {
@@ -94,15 +89,15 @@ impl<'a> Row<'a> {
                 None => "g:*global*".into(),
             }),
             Row::Question(d) => Some(format!("q:{}", d.id)),
-            Row::Run(i) | Row::Fold(i) => Some(format!("r:{}", i.run.id)),
+            Row::Run(i) => Some(format!("r:{}", i.run.id)),
             Row::Job(j) => Some(j.key.clone()),
         }
     }
 
-    /// The run a row is, whether on its own or under a job.
+    /// The run a row is.
     pub fn item(&self) -> Option<&'a DigestItem> {
         match self {
-            Row::Run(i) | Row::Fold(i) => Some(i),
+            Row::Run(i) => Some(i),
             _ => None,
         }
     }
@@ -441,8 +436,6 @@ pub struct Context<'a> {
     pub names: &'a Names,
     /// Every rule, for a job's cadence; may be empty.
     pub rules: &'a [Rule],
-    /// Jobs opened to their runs, by key.
-    pub opened: &'a HashSet<String>,
     pub filter: &'a str,
     /// The Relay home as shown (`~/.relay`): where the global row's rules live.
     pub home: &'a str,
@@ -683,12 +676,7 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
         }));
         mixed.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)).then_with(|| b.2.cmp(&a.2)));
         for (_, _, _, row) in mixed {
-            let folded: Vec<&DigestItem> = match &row {
-                Row::Job(j) if cx.opened.contains(&j.key) => j.runs.iter().copied().take(OPENED).collect(),
-                _ => vec![],
-            };
             block.push(row);
-            block.extend(folded.into_iter().map(Row::Fold));
         }
         blocks.push((name.to_lowercase(), g.key, block));
     }
@@ -742,7 +730,7 @@ pub fn counts(rows: &[Row]) -> (usize, usize, usize, usize, usize) {
     let mut c = (0, 0, 0, 0, 0);
     for r in rows {
         match r {
-            Row::Group(..) | Row::Fold(_) => {}
+            Row::Group(..) => {}
             Row::Question(_) => c.0 += 1,
             Row::Run(i) => {
                 use rl_proto::types::RunState::*;
@@ -854,7 +842,6 @@ mod tests {
         rows.iter()
             .map(|r| match r {
                 Row::Group(h) => format!("[{}]", h.name),
-                Row::Fold(i) => format!("  r:{}", i.run.id),
                 other => other.key().unwrap(),
             })
             .collect()
@@ -866,7 +853,6 @@ mod tests {
             &Context {
                 names,
                 rules: &[],
-                opened: &HashSet::new(),
                 lens: Lens::All,
                 filter,
                 home: "~/.relay",
@@ -881,7 +867,6 @@ mod tests {
             &Context {
                 names,
                 rules: &[],
-                opened: &HashSet::new(),
                 lens,
                 filter: "",
                 home: "~/.relay",
@@ -1208,7 +1193,6 @@ mod tests {
                 &Context {
                     names: &names,
                     rules,
-                    opened: &HashSet::new(),
                     lens: Lens::All,
                     filter: "",
                     home: "~/.relay",
@@ -1242,7 +1226,7 @@ mod tests {
     }
 
     #[test]
-    fn a_jobs_ended_runs_are_one_line_until_opened() {
+    fn a_jobs_ended_runs_are_one_line() {
         let now: Timestamp = "2026-09-10T12:00:00Z".parse().unwrap();
         let mut items: Vec<DigestItem> = (0..30)
             .map(|n| {
@@ -1298,25 +1282,9 @@ mod tests {
         assert_eq!(counts(&rows), (0, 0, 1, 1, 1));
         assert_eq!(headline(&rows, 1, ""), "relay · 1 working · 1 finished · 1 job · 1 new");
 
-        // Opened: its newest runs, capped, under it.
-        let opened: HashSet<String> = [job_key.clone()].into_iter().collect();
-        let rows = build(
-            &d,
-            &Context {
-                names: &names,
-                rules: &[],
-                opened: &opened,
-                lens: Lens::All,
-                filter: "",
-                home: "~/.relay",
-                now,
-            },
-        );
-        let k = keys(&rows);
-        assert_eq!(k.len(), 5 + OPENED, "…and global trails");
-        assert_eq!(k[3], "  r:p29");
-        assert_eq!(k[3 + OPENED - 1], "  r:p10");
-        assert_eq!(k[3 + OPENED], "r:go");
+        // Never opened: whatever happens, a job is one line.
+        let opened_rows = build_with(&d, &names, "", now);
+        assert_eq!(keys(&opened_rows), keys(&rows), "no row grows into its runs");
 
         // The filter finds a job by its name.
         let rows = build_with(&d, &names, "puls", now);
@@ -1480,7 +1448,6 @@ mod tests {
                 &Context {
                     names: &names,
                     rules,
-                    opened: &HashSet::new(),
                     lens: Lens::All,
                     filter: "",
                     home: "~/.relay",
