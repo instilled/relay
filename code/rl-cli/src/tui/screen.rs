@@ -3,7 +3,8 @@
 //! (a full-screen app keeps it at the bottom, a fresh shell at the top), and
 //! the right edge is clipped. Scrolled back, the cursor stops deciding: the
 //! top of the window is what was asked for, and the cursor is not drawn
-//! because it is not where you are looking.
+//! because it is not where you are looking. A row cut at the right edge ends
+//! in a dim `›`, so a clipped line never reads as the run's own.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -49,6 +50,17 @@ pub fn draw(screen: &vt100::Screen, area: Rect, buf: &mut Buffer) {
             }
         }
     }
+    // Rows that go on past the edge say so in the last column.
+    if cols > area.width && area.width > 0 {
+        for y in 0..area.height.min(rows) {
+            let row = y + row_off;
+            let cut = (area.width..cols).any(|x| screen.cell(row, x).is_some_and(|c| !c.contents().trim().is_empty()));
+            if cut && let Some(c) = buf.cell_mut((area.x + area.width - 1, area.y + y)) {
+                c.set_symbol("›");
+                c.set_style(Style::default().add_modifier(Modifier::DIM));
+            }
+        }
+    }
     if back == 0 && !screen.hide_cursor() {
         let (cr, cc) = screen.cursor_position();
         if cr >= row_off
@@ -72,6 +84,23 @@ fn color(c: vt100::Color) -> Color {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_row_cut_at_the_edge_says_so() {
+        let mut p = vt100::Parser::new(3, 12, 0);
+        p.process(b"short\r\nlonger one\r\n\x1b[?25l");
+        let area = Rect::new(0, 0, 6, 3);
+        let mut buf = Buffer::empty(area);
+        draw(p.screen(), area, &mut buf);
+        let row = |y: u16| {
+            (0..6)
+                .map(|x| buf.cell((x, y)).unwrap().symbol().to_string())
+                .collect::<String>()
+        };
+        assert_eq!(row(0), "short ", "fits: nothing added");
+        assert_eq!(row(1), "longe›");
+        assert!(buf.cell((5, 1)).unwrap().modifier.contains(Modifier::DIM));
+    }
 
     #[test]
     fn draws_text_colour_and_cursor_bottom_aligned() {
