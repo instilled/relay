@@ -97,6 +97,8 @@ enum Cmd {
     Agents,
     /// The setup guide: which agents the panel offers, who writes summaries.
     Setup,
+    /// Move Claude's own sessions (`claude --bg`) into Relay.
+    Import,
     /// What Relay tells an agent: the words, events, rule definitions, what is here, and the answer it wants.
     Context(ContextArgs),
     /// Plain words to `assistants.interpret`: a run or a rule, drafted; `--go` does it.
@@ -597,11 +599,17 @@ async fn main() -> Result<()> {
         Cmd::Every(a) => every(&home, a, cli.json).await,
         Cmd::Config(a) => config(&home, a, cli.json).await,
         Cmd::Agents => agents(&home, cli.json).await,
+        Cmd::Import => {
+            if !std::io::IsTerminal::is_terminal(&std::io::stdout()) {
+                bail!("rl import asks on the screen and needs a terminal; it moves sessions you pick");
+            }
+            rl_cli::tui::setup(&home, true).await
+        }
         Cmd::Setup => {
             if !std::io::IsTerminal::is_terminal(&std::io::stdout()) {
                 bail!("rl setup asks on the screen and needs a terminal; `rl config edit` changes the file");
             }
-            rl_cli::tui::setup(&home).await
+            rl_cli::tui::setup(&home, false).await
         }
         Cmd::Context(a) => context(&home, a).await,
         Cmd::Interpret(a) => interpret(&home, a, cli.json).await,
