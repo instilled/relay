@@ -5,14 +5,19 @@
 //! (so `rl watch <id> | tee log` works). Keys are bytes, never parsed: what
 //! you type is what the child gets. `ctrl-\` detaches a join; `q` leaves a
 //! watch. The run never notices either.
+//!
+//! Nothing of ours is ever drawn over the run's screen. What we have to say
+//! while it has the terminal — how to let go, how many other runs need you,
+//! a note from rld — goes in the window title, which the run cannot paint over.
 
 use crate::client::Client;
 use anyhow::{Context, Result};
 use rl_core::Home;
-use rl_proto::methods::{AttachParams, RunAttach};
-use rl_proto::types::AttachMode;
+use rl_proto::methods::{AttachParams, DecisionFilter, DecisionList, RunAttach, RunFilter, RunList};
+use rl_proto::types::{AttachMode, RunState};
 use rl_session::proto::{Frame, read_frame, write_frame};
 use std::io::IsTerminal;
+use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
 
@@ -45,6 +50,32 @@ impl Newlines {
 const DETACH: u8 = 0x1c;
 const CTRL_C: u8 = 0x03;
 
+/// How often a joined terminal asks how many other runs need you.
+const NEED_EVERY: Duration = Duration::from_secs(5);
+
+/// How an attach came to an end.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Ended {
+    /// `ctrl-\` on a join: the run keeps going.
+    Detached,
+    /// `q` on a watch, or a piped join whose input ran out.
+    Left,
+    /// The run ended while we were there: its code, and how in words.
+    Exit { code: i32, how: String },
+    /// The connection went without a word.
+    Closed,
+}
+
+impl Ended {
+    /// The process exit code: the run's own if it ended, else 0.
+    pub fn code(&self) -> i32 {
+        match self {
+            Ended::Exit { code, .. } => *code,
+            _ => 0,
+        }
+    }
+}
+
 pub struct Opts {
     pub id: String,
     pub mode: AttachMode,
@@ -53,9 +84,8 @@ pub struct Opts {
     pub scrollback: u64,
 }
 
-/// Runs until detached or the run ends. Returns the process exit code to use:
-/// the run's own if it ended while we were there, else 0.
-pub async fn attach(home: &Home, o: Opts) -> Result<i32> {
+/// Runs until detached or the run ends, and says which.
+pub async fn attach(home: &Home, o: Opts) -> Result<Ended> {
     let me = client_name();
     let mut c = Client::connect(home).await?;
     let info = c
@@ -86,9 +116,20 @@ pub async fn attach(home: &Home, o: Opts) -> Result<i32> {
     // On a terminal the banner is one ordinary line above the session and
     // the window title carries the status from then on; nothing of ours is
     // ever drawn over the run's own screen. Piped, it is all plain lines.
-    let status = format!("relay · {} {}", o.mode, info.run.id);
+    let mut status = Status {
+        base: format!("relay · {} {}", o.mode, info.run.id),
+        key: if joined {
+            "^\\ lets go"
+        } else if info.live {
+            "q leaves"
+        } else {
+            ""
+        },
+        need: 0,
+        note: None,
+    };
     if interactive {
-        out.write_all(format!("\x1b[2m{banner}\x1b[0m\n{}", title(&status)).as_bytes())
+        out.write_all(format!("\x1b[2m{banner}\x1b[0m\n{}", title(&status.line())).as_bytes())
             .await?;
     } else {
         out.write_all(dim(&banner).as_bytes()).await?;
@@ -129,6 +170,13 @@ pub async fn attach(home: &Home, o: Opts) -> Result<i32> {
     // Piped on, the bytes go as they came; to a terminal, a pipes run's lines
     // need their carriage returns.
     let mut newlines = (interactive && !info.tty).then(Newlines::default);
+    // Only a terminal has a title to say it in; a second connection asks.
+    let mut asker = if interactive && info.live {
+        Client::connect(home).await.ok()
+    } else {
+        None
+    };
+    let mut every = tokio::time::interval(NEED_EVERY);
 
     loop {
         tokio::select! {
@@ -142,7 +190,8 @@ pub async fn attach(home: &Home, o: Opts) -> Result<i32> {
                 }
                 Some(Frame::Note(s)) => {
                     if interactive {
-                        out.write_all(title(&format!("{status} · {s}")).as_bytes()).await?;
+                        status.note = Some(s);
+                        out.write_all(title(&status.line()).as_bytes()).await?;
                     } else {
                         out.write_all(dim(&format!("[relay] {s}")).as_bytes()).await?;
                     }
@@ -156,14 +205,14 @@ pub async fn attach(home: &Home, o: Opts) -> Result<i32> {
                     out.write_all(dim(&format!("[relay] run {} ended ({how})", info.run.id)).as_bytes()).await?;
                     out.write_all(title("").as_bytes()).await?;
                     out.flush().await?;
-                    return Ok(e.code);
+                    return Ok(Ended::Exit { code: e.code, how });
                 }
                 Some(_) => {}
                 None => {
                     out.write_all(dim("[relay] connection closed").as_bytes()).await?;
                     out.write_all(title("").as_bytes()).await?;
                     out.flush().await?;
-                    return Ok(0);
+                    return Ok(Ended::Closed);
                 }
             },
             bytes = stdin_rx.recv(), if stdin_open => match bytes {
@@ -171,7 +220,7 @@ pub async fn attach(home: &Home, o: Opts) -> Result<i32> {
                     stdin_open = false;
                     if joined {
                         // Nothing more will be typed: a piped join is over.
-                        return Ok(0);
+                        return Ok(Ended::Left);
                     }
                 }
                 Some(bytes) => {
@@ -183,17 +232,30 @@ pub async fn attach(home: &Home, o: Opts) -> Result<i32> {
                             out.write_all(dim("[relay] detached; the run keeps going").as_bytes()).await?;
                             out.write_all(title("").as_bytes()).await?;
                             out.flush().await?;
-                            return Ok(0);
+                            return Ok(Ended::Detached);
                         }
                         write_frame(&mut wr, &Frame::Input(bytes)).await?;
                     } else if bytes.iter().any(|&b| b == b'q' || b == CTRL_C || b == DETACH) {
                         out.write_all(dim("[relay] left").as_bytes()).await?;
                         out.write_all(title("").as_bytes()).await?;
                         out.flush().await?;
-                        return Ok(0);
+                        return Ok(Ended::Left);
                     }
                 }
             },
+            _ = every.tick(), if asker.is_some() => {
+                let c = asker.as_mut().expect("guarded");
+                match need_you(c, &info.run.id).await {
+                    Ok(n) if n != status.need => {
+                        status.need = n;
+                        out.write_all(title(&status.line()).as_bytes()).await?;
+                        out.flush().await?;
+                    }
+                    Ok(_) => {}
+                    // rld is going; its own note says so. Stop asking.
+                    Err(_) => asker = None,
+                }
+            }
             _ = winch.recv() => {
                 if joined && let Ok((cols, rows)) = crossterm::terminal::size() {
                     write_frame(&mut wr, &Frame::Resize { cols, rows }).await?;
@@ -201,6 +263,72 @@ pub async fn attach(home: &Home, o: Opts) -> Result<i32> {
             }
         }
     }
+}
+
+/// What the window title says while a run has the terminal.
+struct Status {
+    /// `relay · join <id>`.
+    base: String,
+    /// How to get out: `^\ lets go`, `q leaves`.
+    key: &'static str,
+    /// Other runs waiting on you.
+    need: usize,
+    /// rld's latest word: who joined, who took over.
+    note: Option<String>,
+}
+
+impl Status {
+    fn line(&self) -> String {
+        let mut parts = vec![self.base.clone()];
+        if !self.key.is_empty() {
+            parts.push(self.key.to_string());
+        }
+        if self.need > 0 {
+            parts.push(format!("{} need you", self.need));
+        }
+        if let Some(n) = &self.note {
+            parts.push(n.clone());
+        }
+        parts.join(" · ")
+    }
+}
+
+/// How many other runs wait on you: open questions, and runs that need
+/// input or are blocked without one — each counted once, this run left out.
+async fn need_you(c: &mut Client, this: &str) -> Result<usize> {
+    let asked = c.call::<DecisionList>(DecisionFilter::default()).await?;
+    let waiting = c
+        .call::<RunList>(RunFilter {
+            states: vec![RunState::NeedsInput, RunState::Blocked],
+            ..Default::default()
+        })
+        .await?;
+    let asked: Vec<Option<&str>> = asked.iter().map(|d| d.run.as_deref()).collect();
+    let waiting: Vec<&str> = waiting.iter().map(|r| r.id.as_str()).collect();
+    Ok(count_need(&asked, &waiting, this))
+}
+
+/// Open questions (by the run each is about, if any) and waiting runs.
+fn count_need(asked: &[Option<&str>], waiting: &[&str], this: &str) -> usize {
+    let mut runs: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    let mut n = 0;
+    for run in asked {
+        match *run {
+            Some(r) if r == this => {}
+            Some(r) => {
+                if runs.insert(r) {
+                    n += 1;
+                }
+            }
+            None => n += 1,
+        }
+    }
+    for &r in waiting {
+        if r != this && runs.insert(r) {
+            n += 1;
+        }
+    }
+    n
 }
 
 /// `user@host`: how a viewer is known to others and to presence.
@@ -260,7 +388,31 @@ impl Drop for RawMode {
 
 #[cfg(test)]
 mod newline_tests {
-    use super::Newlines;
+    use super::{Newlines, Status, count_need};
+
+    #[test]
+    fn who_waits_is_counted_once_and_never_this_run() {
+        // A question of its own, one about run b (also waiting), one about
+        // this run, and run c waiting without one.
+        let asked = [None, Some("b"), Some("me")];
+        let waiting = ["b", "c", "me"];
+        assert_eq!(count_need(&asked, &waiting, "me"), 3);
+        assert_eq!(count_need(&[], &[], "me"), 0);
+    }
+
+    #[test]
+    fn the_title_says_how_to_get_out_and_who_waits() {
+        let mut s = Status {
+            base: "relay · join abc".into(),
+            key: "^\\ lets go",
+            need: 0,
+            note: None,
+        };
+        assert_eq!(s.line(), "relay · join abc · ^\\ lets go");
+        s.need = 2;
+        s.note = Some("bo@x took over".into());
+        assert_eq!(s.line(), "relay · join abc · ^\\ lets go · 2 need you · bo@x took over");
+    }
 
     #[test]
     fn a_bare_newline_gets_its_carriage_return_across_chunks() {

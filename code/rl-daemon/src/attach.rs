@@ -253,8 +253,14 @@ where
                         write_frame(wr, &Frame::ReplayEnd).await?;
                         // Replayed bytes were drawn for a screen that is not this
                         // one: a full-screen app paints at stale cursor positions
-                        // until it repaints. Nudge the pty size so it does now.
-                        if a.info.tty {
+                        // until it repaints. Nudge the pty size so it does now —
+                        // only for the one at the keyboard, or when nobody is: a
+                        // watcher opening a pane must not jolt someone's join.
+                        let ours = match live.joiner() {
+                            None => true,
+                            Some(j) => a.joiner && j == a.client,
+                        };
+                        if a.info.tty && ours {
                             let (cols, rows) = size;
                             hwr.resize(cols.saturating_sub(1).max(1), rows).await?;
                             hwr.resize(cols, rows).await?;
