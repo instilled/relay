@@ -95,6 +95,7 @@ pub async fn attach(home: &Home, o: Opts) -> Result<Ended> {
             client: me.clone(),
             scrollback: o.scrollback,
             take: o.take,
+            terminal: Some(terminal()),
         })
         .await?;
     let (mut rd, mut wr) = c.into_parts();
@@ -341,6 +342,13 @@ pub fn client_name() -> String {
         .unwrap_or_else(|_| "localhost".into());
     let host = host.split('.').next().unwrap_or(&host).to_string();
     format!("{user}@{host}")
+}
+
+/// This terminal, as one of its person's: the process attaching. Two
+/// terminals of the same person are two seats, so a second `rl join` is
+/// refused (or takes over) instead of sharing the keyboard unseen.
+pub fn terminal() -> String {
+    std::process::id().to_string()
 }
 
 /// The terminal's window title: status without touching the screen. Empty

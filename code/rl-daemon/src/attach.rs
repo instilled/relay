@@ -7,7 +7,7 @@
 //! connection keeps journaling regardless, so a viewer leaving costs nothing.
 
 use crate::server::Daemon;
-use crate::supervisor::Live;
+use crate::supervisor::{Live, Seat};
 use jiff::Timestamp;
 use rl_ledger::session_io::{self, Direction};
 use rl_ledger::{presence, runs, sessions};
@@ -32,7 +32,7 @@ const SCROLLBACK_MAX: u64 = 8 << 20;
 /// An accepted attach, ready to stream.
 pub struct Attached {
     info: AttachInfo,
-    client: String,
+    seat: Seat,
     joiner: bool,
     tail: Vec<u8>,
     /// `None` for an ended run: the journal is all there is.
@@ -99,7 +99,10 @@ pub async fn attach(d: &Daemon, p: AttachParams) -> Result<Attached, RpcError> {
                 journaled,
                 replay_from: journaled,
             },
-            client: p.client,
+            seat: Seat {
+                client: p.client,
+                terminal: p.terminal,
+            },
             joiner: false,
             tail,
             holder: None,
@@ -113,13 +116,20 @@ pub async fn attach(d: &Daemon, p: AttachParams) -> Result<Attached, RpcError> {
         .live(&id)
         .ok_or_else(|| RpcError::internal(format!("run {id} is alive but this daemon is not attached to it")))?;
     let joiner = p.mode == AttachMode::Join;
+    let seat = Seat {
+        client: p.client.clone(),
+        terminal: p.terminal.clone(),
+    };
     let mut replaced = None;
     if joiner {
-        replaced = live.join(&p.client, p.take).map_err(|current| {
-            RpcError::new(
+        replaced = live.join(&seat, p.take).map_err(|current| {
+            let who = current.said_to(&seat);
+            let mut e = RpcError::new(
                 RpcError::BUSY,
-                format!("{id} is already joined by {current}; `--take` to take over"),
-            )
+                format!("{id} is already joined by {who}; `--take` to take over"),
+            );
+            e.data = Some(serde_json::json!({ "joiner": who }));
+            e
         })?;
     }
     // Subscribe before announcing, so nothing is missed.
@@ -136,12 +146,14 @@ pub async fn attach(d: &Daemon, p: AttachParams) -> Result<Attached, RpcError> {
                     // the run with no joiner at all.
                     Some(old) => {
                         let _ = live.join(old, true);
-                        let _ = live
-                            .notes
-                            .send(format!("{} could not take over; {old} stays joined", p.client));
+                        let _ = live.notes.send(format!(
+                            "{} could not take over; {} stays joined",
+                            p.client,
+                            old.said_to(&seat)
+                        ));
                     }
                     None => {
-                        live.leave(&p.client);
+                        live.leave(&seat);
                     }
                 }
             }
@@ -154,7 +166,11 @@ pub async fn attach(d: &Daemon, p: AttachParams) -> Result<Attached, RpcError> {
     };
     if joiner {
         let what = match replaced {
-            Some(old) if old != p.client => format!("{} took over from {old}", p.client),
+            // Your own other terminal: said so, not you twice.
+            Some(old) if old != seat && old.client == seat.client => {
+                format!("{} took over in another terminal", p.client)
+            }
+            Some(old) if old != seat => format!("{} took over from {}", p.client, old.client),
             _ => format!("{} joined", p.client),
         };
         let _ = live.notes.send(what);
@@ -167,11 +183,11 @@ pub async fn attach(d: &Daemon, p: AttachParams) -> Result<Attached, RpcError> {
             rows: hello.rows,
             tty: hello.tty,
             live: true,
-            joiner: live.joiner(),
+            joiner: live.joiner().map(|j| j.said_to(&seat)),
             journaled,
             replay_from: hello.replay_from,
         },
-        client: p.client,
+        seat,
         joiner,
         tail,
         holder: Some(holder),
@@ -224,7 +240,7 @@ where
                 frame = read_frame(rd) => match frame? {
                     None => return Ok(()),
                     Some(Frame::Input(bytes)) => {
-                        if a.joiner && live.is_joiner(&a.client) {
+                        if a.joiner && live.is_joiner(&a.seat) {
                             hwr.input(bytes.clone()).await?;
                             let id = id.clone();
                             let now = Timestamp::now();
@@ -238,7 +254,7 @@ where
                         }
                     }
                     Some(Frame::Resize { cols, rows }) => {
-                        if a.joiner && live.is_joiner(&a.client) {
+                        if a.joiner && live.is_joiner(&a.seat) {
                             size = (cols, rows);
                             hwr.resize(cols, rows).await?;
                             let id = id.clone();
@@ -258,7 +274,7 @@ where
                         // watcher opening a pane must not jolt someone's join.
                         let ours = match live.joiner() {
                             None => true,
-                            Some(j) => a.joiner && j == a.client,
+                            Some(j) => a.joiner && j == a.seat,
                         };
                         if a.info.tty && ours {
                             let (cols, rows) = size;
@@ -286,9 +302,9 @@ where
     }
     .await;
 
-    if a.joiner && live.leave(&a.client) {
-        let _ = live.notes.send(format!("{} left", a.client));
+    if a.joiner && live.leave(&a.seat) {
+        let _ = live.notes.send(format!("{} left", a.seat.client));
     }
-    info!(id, client = %a.client, "viewer detached");
+    info!(id, client = %a.seat.client, "viewer detached");
     result
 }

@@ -59,6 +59,7 @@ impl TermView {
                 client: client_name(),
                 scrollback: SCROLLBACK,
                 take: false,
+                terminal: Some(crate::attach::terminal()),
             })
             .await?;
         let (rd, wr) = c.into_parts();

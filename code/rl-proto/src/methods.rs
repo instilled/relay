@@ -280,6 +280,10 @@ pub struct AttachParams {
     /// Join even if someone else has: they become a watcher.
     #[serde(default)]
     pub take: bool,
+    /// Which of the client's terminals this is (its process, say): two
+    /// terminals of one person are two seats, and only one has the keyboard.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal: Option<String>,
 }
 
 fn default_scrollback() -> u64 {
