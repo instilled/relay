@@ -784,7 +784,8 @@ impl App {
     fn pane_size(&self, size: Rect) -> (u16, u16) {
         let a = areas(size, self.wide, true, LIST_SHARE_TERM, 0, 0, self.line_h());
         let r = a.pane.unwrap_or(size);
-        (r.width.max(1), r.height.max(1))
+        // Less the row that names the run.
+        (r.width.max(1), r.height.saturating_sub(1).max(1))
     }
 
     /// How many rows the live line takes: its own, capped, at least one.
@@ -3427,7 +3428,34 @@ impl App {
                     ..area
                 }
             };
-            screen::draw(t.screen(), area, f.buffer_mut());
+            // Whose terminal this is, on the first row: browse away and the
+            // tile stays on its run, so it has to say which one.
+            let (word, style) = if t.ended.is_some() {
+                ("ended", theme::dim())
+            } else {
+                ("watching", ratatui::style::Style::default().fg(theme::LIVE))
+            };
+            let title = self
+                .run_by_id(&t.id)
+                .map(|r| r.title.clone())
+                .unwrap_or_else(|| t.info.run.title.clone());
+            let head = Rect { height: 1, ..area };
+            f.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::styled(format!("{word} "), style),
+                    Span::styled(
+                        fit(&title, area.width.saturating_sub(word.len() as u16 + 1) as usize),
+                        theme::name(),
+                    ),
+                ])),
+                head,
+            );
+            let body = Rect {
+                y: area.y + 1,
+                height: area.height.saturating_sub(1),
+                ..area
+            };
+            screen::draw(t.screen(), body, f.buffer_mut());
             return;
         }
         let now = Timestamp::now();
@@ -3567,14 +3595,21 @@ impl App {
             && (self.wide || self.selected_run().is_some_and(|i| i.run.id == t.id))
         {
             let mut s = String::new();
+            // A full-screen app keeps no lines above its screen: nothing to
+            // read back, so the keys are not offered.
+            let back = if t.screen().alternate_screen() {
+                ""
+            } else {
+                " · pgup/pgdn reads back"
+            };
             if t.ended.is_some() {
-                s.push_str("ended · pgup/pgdn reads back · esc back");
+                s.push_str(&format!("ended{back} · esc back"));
             } else if let Some(who) = &t.info.joiner {
                 s.push_str(&format!(
                     "watching · {who} is driving · enter takes the terminal · esc back"
                 ));
             } else {
-                s.push_str("watching · enter takes the terminal · pgup/pgdn reads back · esc back");
+                s.push_str(&format!("watching · enter takes the terminal{back} · esc back"));
             }
             if t.scrolled() > 0 {
                 s.push_str(&format!(" · {} back", t.scrolled()));
