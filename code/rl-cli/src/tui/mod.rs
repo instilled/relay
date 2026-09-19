@@ -56,12 +56,12 @@ use rl_core::time::fmt_age;
 use rl_proto::decision::Decision;
 use rl_proto::methods::{
     AgentList, DecisionDismiss, DecisionNote, DecisionTake, DecisionTakeParams, Digest, DigestGet, DigestItem,
-    DigestParams, EventFilter, EventList, GcParams, GcRun, GraphGet, GraphParams, PresenceClient, PresenceTouch,
-    ReactionPause, ReactionReload, ReactionResume, RuleApprove, RuleList, RuleRef, RunArchive, RunArchiveParams, RunId,
-    RunIds, RunInput, RunInputParams, RunMark, RunMarkParams, RunPin, RunPinParams, RunRename, RunRenameParams,
-    RunSeen, RunSpec, RunStart, RunStop, RunStopParams, SETUP_STEPS, ScheduleFilter, ScheduleName, SchedulePause,
-    ScheduleReload, ScheduleResume, ScheduleRun, SetupGet, SummaryGet, SummaryMake, SummaryParams, WorkspaceList,
-    WorkspaceRename, WorkspaceRenameParams, WorkspaceUp, WorkspaceUpParams,
+    DigestParams, EventFilter, EventList, GcParams, GcRun, GraphGet, GraphParams, ImportList, ImportListParams,
+    PresenceClient, PresenceTouch, ReactionPause, ReactionReload, ReactionResume, RuleApprove, RuleList, RuleRef,
+    RunArchive, RunArchiveParams, RunId, RunIds, RunInput, RunInputParams, RunMark, RunMarkParams, RunPin,
+    RunPinParams, RunRename, RunRenameParams, RunSeen, RunSpec, RunStart, RunStop, RunStopParams, SETUP_STEPS,
+    ScheduleFilter, ScheduleName, SchedulePause, ScheduleReload, ScheduleResume, ScheduleRun, SetupGet, SummaryGet,
+    SummaryMake, SummaryParams, WorkspaceList, WorkspaceRename, WorkspaceRenameParams, WorkspaceUp, WorkspaceUpParams,
 };
 use rl_proto::rule::{Rule, RuleKind, RuleStatus};
 use rl_proto::types::{AttachMode, Cause, Event as LedgerEvent, Mark, Run, RunKind, RunState, Summary};
@@ -241,6 +241,8 @@ struct App {
     /// A run to hand the real terminal to (its id, and whether to take the
     /// keyboard from whoever holds it), once ratatui has stepped aside.
     attach: Option<(String, bool)>,
+    /// `/import`: the Claude sessions step, once the screen is free for it.
+    importing: bool,
     /// The assistant at work on some words: what was asked, the rule it is
     /// about if any, and the task waiting for the answer.
     asking: Option<Asking>,
@@ -577,19 +579,24 @@ fn leave_screen() {
 }
 
 /// `rl setup`: the whole guide, on its own, whatever was seen before.
-pub async fn setup(home: &Home) -> Result<()> {
+/// `rl import`: its Claude sessions step alone.
+pub async fn setup(home: &Home, only_import: bool) -> Result<()> {
     let mut rpc = crate::daemon::ensure(home, true).await?;
     let state = rpc.call::<SetupGet>(()).await?;
+    let sessions = rpc.call::<ImportList>(ImportListParams { mark: true }).await?;
     let file = state.config.file.clone();
+    let guide = if only_import {
+        setup::Guide::importing(&state, &sessions)
+    } else {
+        setup::Guide::new(&state, &sessions)
+    };
+    let agents = state.agents.clone();
     let mut terminal = enter_screen();
-    let outcome = setup::run(&mut terminal, &mut rpc, state).await;
+    let outcome = setup::run(&mut terminal, &mut rpc, guide, &agents).await;
     leave_screen();
     match outcome? {
-        setup::Outcome::Saved(words) => println!(
-            "{words}
-{}",
-            file.display()
-        ),
+        setup::Outcome::Saved(words) if only_import => println!("{words}"),
+        setup::Outcome::Saved(words) => println!("{words}\n{}", file.display()),
         setup::Outcome::Later => println!("left as it was"),
     }
     Ok(())
@@ -636,6 +643,7 @@ pub async fn run(home: &Home) -> Result<()> {
         events: Vec::new(),
         editor: None,
         attach: None,
+        importing: false,
         asking: None,
         summary: None,
         summarising: None,
@@ -655,18 +663,41 @@ pub async fn run(home: &Home) -> Result<()> {
 
     let mut terminal = enter_screen();
     // The first start, or a release with a step not seen yet: the guide
-    // before the list.
-    if let Ok(state) = app.rpc.call::<SetupGet>(()).await
-        && state.seen < SETUP_STEPS
-    {
-        match setup::run(&mut terminal, &mut app.rpc, state).await {
-            Ok(setup::Outcome::Saved(words)) => {
-                app.say(words);
-                app.agents.clear();
-                app.refresh().await;
+    // before the list, asking only what is new. Otherwise a word about
+    // Claude's sessions that are not here, once each.
+    if let Ok(state) = app.rpc.call::<SetupGet>(()).await {
+        let sessions = app
+            .rpc
+            .call::<ImportList>(ImportListParams { mark: true })
+            .await
+            .unwrap_or_default();
+        let outside = sessions
+            .sessions
+            .iter()
+            .filter(|s| s.new && s.run.is_none() && !s.in_a_terminal())
+            .count();
+        match setup::Guide::since(&state, &sessions) {
+            Some(guide) if state.seen < SETUP_STEPS => {
+                let agents = state.agents.clone();
+                match setup::run(&mut terminal, &mut app.rpc, guide, &agents).await {
+                    Ok(setup::Outcome::Saved(words)) => {
+                        if !words.is_empty() {
+                            app.say(words);
+                        }
+                        app.agents.clear();
+                        app.refresh().await;
+                    }
+                    Ok(setup::Outcome::Later) => {
+                        app.say("setup left for later · rl setup, or it asks again next start")
+                    }
+                    Err(e) => app.say(format!("setup: {e:#}")),
+                }
             }
-            Ok(setup::Outcome::Later) => app.say("setup left for later · rl setup, or it asks again next start"),
-            Err(e) => app.say(format!("setup: {e:#}")),
+            _ if outside > 0 => app.say(format!(
+                "{outside} Claude session{} outside Relay · /import",
+                if outside == 1 { "" } else { "s" }
+            )),
+            _ => {}
         }
     }
     let result = app.main_loop(&mut terminal).await;
@@ -707,6 +738,24 @@ impl App {
                             match outcome {
                                 Ok(()) => self.reload_rules().await,
                                 Err(e) => self.say(format!("{e:#}")),
+                            }
+                        }
+                        if std::mem::take(&mut self.importing) {
+                            // The guide takes the screen; the list comes back after.
+                            let state = self.rpc.call::<SetupGet>(()).await;
+                            let sessions = self.rpc.call::<ImportList>(ImportListParams { mark: true }).await;
+                            match (state, sessions) {
+                                (Ok(state), Ok(sessions)) => {
+                                    let agents = state.agents.clone();
+                                    let guide = setup::Guide::importing(&state, &sessions);
+                                    match setup::run(terminal, &mut self.rpc, guide, &agents).await {
+                                        Ok(setup::Outcome::Saved(words)) if !words.is_empty() => self.say(words),
+                                        Ok(_) => {}
+                                        Err(e) => self.say(format!("import: {e:#}")),
+                                    }
+                                    self.refresh().await;
+                                }
+                                (Err(e), _) | (_, Err(e)) => self.say(format!("import: {e:#}")),
                             }
                         }
                         if let Some((id, take)) = self.attach.take() {
@@ -2732,6 +2781,7 @@ impl App {
                 Some(_) => self.say("ended: nothing to join"),
                 None => self.say("nothing here to join"),
             },
+            palette::Cmd::Import => self.importing = true,
             palette::Cmd::Pane => match arg.trim() {
                 "" => self.toggle_pane(),
                 "full" => self.toggle_full(),

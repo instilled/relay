@@ -86,6 +86,12 @@ pub fn register(r: &mut Router<Daemon>) {
         let config = d.config.read().unwrap().config.clone();
         Ok(crate::config::agents(&d.registry, &config))
     });
+    r.register::<ImportList, _, _>(|d, p: ImportListParams| async move { Ok(crate::import::list(&d, p).await) });
+    r.register::<ImportMove, _, _>(|d, p: ImportMoveParams| async move {
+        crate::import::move_one(&d, p)
+            .await
+            .map_err(|e| RpcError::invalid_params(format!("{e:#}")))
+    });
     r.register::<SetupGet, _, _>(|d, ()| async move {
         let seen = d
             .ledger

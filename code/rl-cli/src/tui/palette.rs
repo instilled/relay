@@ -9,6 +9,7 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Cmd {
     Stop,
+    Import,
     Archive,
     Mark,
     Join,
@@ -62,6 +63,12 @@ pub const ALL: &[Command] = &[
         args: "done|blocked|working",
         what: "say what a run is really doing",
         cmd: Cmd::Mark,
+    },
+    Command {
+        name: "import",
+        args: "",
+        what: "move Claude's own sessions into Relay (claude --bg, and ones in a terminal)",
+        cmd: Cmd::Import,
     },
     Command {
         name: "join",

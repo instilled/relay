@@ -856,11 +856,94 @@ impl Method for ConfigGet {
     type Result = ConfigReport;
 }
 
+// ---- import.* ----------------------------------------------------------------
+
+/// A session Claude runs on its own (`claude --bg`, or open in a terminal),
+/// as `claude agents --json` lists it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClaudeSession {
+    /// The conversation: what `claude --resume` takes.
+    pub session_id: String,
+    /// A background session's short id (`claude stop <id>`); none when it
+    /// is open in a terminal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    pub name: String,
+    pub cwd: PathBuf,
+    /// `background` or `interactive`.
+    pub kind: String,
+    /// `busy` or `idle`.
+    pub status: String,
+    /// A background session's `working` or `done`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
+    /// The Relay run that carries it on, once moved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run: Option<String>,
+    /// Not yet mentioned when the panel started.
+    #[serde(default)]
+    pub new: bool,
+}
+
+impl ClaudeSession {
+    /// Open in someone's terminal: that terminal has it, not us.
+    pub fn in_a_terminal(&self) -> bool {
+        self.id.is_none()
+    }
+
+    /// In the middle of a turn: moving it now would cut the turn short.
+    pub fn working(&self) -> bool {
+        self.state.as_deref() == Some("working") || (self.state.is_none() && self.status == "busy")
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ImportListParams {
+    /// Remember these as mentioned, so the next start's hint is only about
+    /// sessions that are new since.
+    #[serde(default)]
+    pub mark: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImportReport {
+    pub sessions: Vec<ClaudeSession>,
+    /// Why there is no list: no `claude` here, or it would not say.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Claude's own sessions, and which of them Relay carries on already.
+pub struct ImportList;
+impl Method for ImportList {
+    const NAME: &'static str = "import.list";
+    type Params = ImportListParams;
+    type Result = ImportReport;
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImportMoveParams {
+    pub session_id: String,
+    /// The environment the resumed session starts with: the caller's.
+    #[serde(default)]
+    pub env: Vec<(String, String)>,
+}
+
+/// Moves a Claude session into Relay: Claude's background process is
+/// stopped (the conversation stays), and `claude --resume` carries it on as
+/// a Relay run in the same folder, which becomes a workspace.
+pub struct ImportMove;
+impl Method for ImportMove {
+    const NAME: &'static str = "import.move";
+    type Params = ImportMoveParams;
+    type Result = crate::types::Run;
+}
+
 // ---- setup.* -----------------------------------------------------------------
 
 /// The setup guide's steps, counted: a release that adds one raises it, and
 /// the panel shows the guide again for what is new.
-pub const SETUP_STEPS: u32 = 2;
+pub const SETUP_STEPS: u32 = 3;
 
 /// Where setup stands, and what it starts from.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
