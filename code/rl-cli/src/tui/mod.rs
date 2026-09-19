@@ -521,7 +521,16 @@ fn kitty_supported() -> bool {
 /// Reporting every key as an escape code is what gives it somewhere to put the
 /// modifier (`CSI 13;2u`), which is what the line is watching for.
 fn enter_screen() -> ratatui::DefaultTerminal {
-    let term = ratatui::init();
+    // Coming back from a run or an editor, the screen is whatever they left:
+    // a full-screen agent keeps its own alternate screen, its scroll region
+    // and its colours when it is let go of mid-session. Leave that screen so
+    // ours starts fresh, and put the region and the colours back.
+    let _ = crossterm::execute!(std::io::stdout(), crossterm::style::Print("\x1b[?1049l\x1b[r\x1b[0m"));
+    let mut term = ratatui::init();
+    // A fresh terminal diffs against an empty buffer, so it would never write
+    // the cells it means to leave blank — and whatever the run drew there
+    // would stay. Clearing makes the first draw paint every cell.
+    let _ = term.clear();
     if kitty_supported() {
         let _ = crossterm::execute!(
             std::io::stdout(),
