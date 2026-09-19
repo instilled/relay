@@ -61,6 +61,25 @@ const REATTACH_TIMEOUT: Duration = Duration::from_secs(2);
 /// How long shutdown waits for follow tasks to flush.
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// A viewer at the keyboard: who, and from which of their terminals.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Seat {
+    pub client: String,
+    pub terminal: Option<String>,
+}
+
+impl Seat {
+    /// How `self` reads to `other`: by name, and — when it is the same person
+    /// — as their other terminal.
+    pub fn said_to(&self, other: &Seat) -> String {
+        if self.client == other.client && self.terminal != other.terminal {
+            format!("{} in another terminal", self.client)
+        } else {
+            self.client.clone()
+        }
+    }
+}
+
 /// A run whose holder we are attached to right now.
 pub struct Live {
     pub id: String,
@@ -76,7 +95,7 @@ pub struct Live {
     /// The holder's socket, for viewers to open their own connection.
     pub socket: PathBuf,
     /// Who owns the keyboard. Several may watch; one joins.
-    joiner: Mutex<Option<String>>,
+    joiner: Mutex<Option<Seat>>,
     /// Remarks for every attached viewer: joined, left, took over.
     pub notes: broadcast::Sender<String>,
 }
@@ -86,33 +105,34 @@ impl Live {
         *self.current.lock().unwrap()
     }
 
-    pub fn joiner(&self) -> Option<String> {
+    pub fn joiner(&self) -> Option<Seat> {
         self.joiner.lock().unwrap().clone()
     }
 
-    pub fn is_joiner(&self, client: &str) -> bool {
-        self.joiner.lock().unwrap().as_deref() == Some(client)
+    pub fn is_joiner(&self, seat: &Seat) -> bool {
+        self.joiner.lock().unwrap().as_ref() == Some(seat)
     }
 
-    /// Claims the keyboard. `Err(current)` when someone else has it and
-    /// `take` is false; `Ok(Some(previous))` when taken over.
-    pub fn join(&self, client: &str, take: bool) -> Result<Option<String>, String> {
+    /// Claims the keyboard. `Err(current)` when another seat has it — another
+    /// person, or another terminal of the same one — and `take` is false;
+    /// `Ok(Some(previous))` when taken over.
+    pub fn join(&self, seat: &Seat, take: bool) -> Result<Option<Seat>, Seat> {
         let mut j = self.joiner.lock().unwrap();
-        match j.as_deref() {
-            Some(cur) if cur == client => Ok(None),
-            Some(cur) if !take => Err(cur.to_string()),
+        match j.as_ref() {
+            Some(cur) if cur == seat => Ok(None),
+            Some(cur) if !take => Err(cur.clone()),
             prev => {
-                let prev = prev.map(String::from);
-                *j = Some(client.to_string());
+                let prev = prev.cloned();
+                *j = Some(seat.clone());
                 Ok(prev)
             }
         }
     }
 
-    /// Releases the keyboard if `client` holds it.
-    pub fn leave(&self, client: &str) -> bool {
+    /// Releases the keyboard if `seat` holds it.
+    pub fn leave(&self, seat: &Seat) -> bool {
         let mut j = self.joiner.lock().unwrap();
-        if j.as_deref() == Some(client) {
+        if j.as_ref() == Some(seat) {
             *j = None;
             true
         } else {
@@ -177,7 +197,7 @@ impl Supervisor {
             .lock()
             .unwrap()
             .iter()
-            .filter_map(|(id, l)| l.joiner().map(|j| (id.clone(), j)))
+            .filter_map(|(id, l)| l.joiner().map(|j| (id.clone(), j.client)))
             .collect()
     }
 

@@ -26,11 +26,23 @@ struct Viewer {
 impl Viewer {
     /// Attaches a fresh connection; `Err` is the RPC error.
     async fn attach(home: &Home, id: &str, mode: &str, client: &str, take: bool) -> Result<(Value, Self), RpcError> {
+        Self::attach_from(home, id, mode, client, None, take).await
+    }
+
+    /// Attaches from one terminal of the client's.
+    async fn attach_from(
+        home: &Home,
+        id: &str,
+        mode: &str,
+        client: &str,
+        terminal: Option<&str>,
+        take: bool,
+    ) -> Result<(Value, Self), RpcError> {
         let mut c = Conn::open(home).await;
         let res = c
             .call(
                 "run.attach",
-                json!({ "id": id, "mode": mode, "client": client, "take": take, "scrollback": 4096 }),
+                json!({ "id": id, "mode": mode, "client": client, "terminal": terminal, "take": take, "scrollback": 4096 }),
             )
             .await;
         if let Some(e) = res.error {
@@ -268,6 +280,61 @@ async fn run_input_writes_to_the_pty_without_a_join() {
         .collect();
     assert_eq!(ins, [b"hi\n".to_vec()]);
     h.stop().await;
+}
+
+#[tokio::test]
+async fn two_terminals_of_one_person_are_two_seats() {
+    let tmp = tempfile::tempdir().unwrap();
+    let Some(h) = Harness::on(Home::at(tmp.path())) else {
+        return;
+    };
+    let mut c = Conn::open(&h.home).await;
+    let cwd = tmp.path().to_string_lossy().into_owned();
+    let run: Run = c
+        .ok(
+            "run.start",
+            json!({ "argv": [fake_cli()], "cwd": cwd, "kind": "agent" }),
+        )
+        .await;
+    wait_journal(&h.home, &run.id, "> ").await;
+
+    let (_, mut first) = Viewer::attach_from(&h.home, &run.id, "join", "me@here", Some("111"), false)
+        .await
+        .unwrap();
+    first.until("fake-cli ready").await;
+
+    // The same terminal again is still the same seat.
+    let (info, _again) = Viewer::attach_from(&h.home, &run.id, "join", "me@here", Some("111"), false)
+        .await
+        .unwrap();
+    assert_eq!(info["joiner"], "me@here");
+
+    // Another terminal of mine is refused, and told which.
+    let err = Viewer::attach_from(&h.home, &run.id, "join", "me@here", Some("222"), false)
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(err.code, RpcError::BUSY);
+    assert!(err.message.contains("me@here in another terminal"), "{}", err.message);
+    assert_eq!(err.data.unwrap()["joiner"], "me@here in another terminal");
+
+    // Taking over: the first terminal hears it, and its keys stop counting.
+    let (_, mut second) = Viewer::attach_from(&h.home, &run.id, "join", "me@here", Some("222"), true)
+        .await
+        .unwrap();
+    second.until("fake-cli ready").await;
+    first.input("from the first\n").await;
+    second.input("from the second\n").await;
+    let heard = first.until("echo: from the second").await;
+    assert!(
+        notes(&heard)
+            .iter()
+            .any(|n| n == "me@here took over in another terminal"),
+        "{:?}",
+        notes(&heard)
+    );
+    assert!(!first.seen.contains("echo: from the first"), "{}", first.seen);
+    let _ = c.call("run.stop", json!({ "id": run.id })).await;
 }
 
 #[tokio::test]
