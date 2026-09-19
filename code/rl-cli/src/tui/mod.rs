@@ -37,9 +37,9 @@ use crate::client::Client;
 use crate::rulefile;
 use anyhow::Result;
 use crossterm::event::{
-    DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
-    KeyboardEnhancementFlags, MouseButton, MouseEvent, MouseEventKind, PopKeyboardEnhancementFlags,
-    PushKeyboardEnhancementFlags,
+    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event, EventStream, KeyCode,
+    KeyEvent, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags, MouseButton, MouseEvent, MouseEventKind,
+    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::terminal::supports_keyboard_enhancement;
 use form::{Act, Form};
@@ -524,17 +524,25 @@ fn kitty_supported() -> bool {
 fn enter_screen() -> ratatui::DefaultTerminal {
     // Coming back from a run or an editor, the screen is whatever they left:
     // a full-screen agent keeps its own alternate screen, its scroll region
-    // and its colours when it is let go of mid-session. Leave that screen so
-    // ours starts fresh, and put the region and the colours back.
-    let _ = crossterm::execute!(std::io::stdout(), crossterm::style::Print("\x1b[?1049l\x1b[r\x1b[0m"));
+    // and its colours when it is let go of mid-session, and every mode it
+    // asked the terminal for — focus reports, mouse tracking. Leave that
+    // screen so ours starts fresh, and put the region, the colours and the
+    // modes back; ours are asked for again below.
+    let _ = crossterm::execute!(
+        std::io::stdout(),
+        crossterm::style::Print("\x1b[?1049l\x1b[r\x1b[0m\x1b[?1004l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l")
+    );
     let mut term = ratatui::init();
     // A fresh terminal diffs against an empty buffer, so it would never write
     // the cells it means to leave blank — and whatever the run drew there
     // would stay. Clearing makes the first draw paint every cell.
     let _ = term.clear();
     if kitty_supported() {
+        // A run's own keyboard flags would change what every key sends us:
+        // none, then ours.
         let _ = crossterm::execute!(
             std::io::stdout(),
+            crossterm::style::Print("\x1b[=0;1u"),
             PushKeyboardEnhancementFlags(
                 KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
                     | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
@@ -543,7 +551,8 @@ fn enter_screen() -> ratatui::DefaultTerminal {
     }
     // The wheel and a click reach the list. This also takes the terminal's own
     // drag-to-select, so hold shift (option, on macOS) to copy text as before.
-    let _ = crossterm::execute!(std::io::stdout(), EnableMouseCapture);
+    // A paste comes whole, so its newlines never send the line half-way.
+    let _ = crossterm::execute!(std::io::stdout(), EnableMouseCapture, EnableBracketedPaste);
     term
 }
 
@@ -556,7 +565,7 @@ fn enter_screen() -> ratatui::DefaultTerminal {
 /// does either. A joined shell or agent would get a terminal with its cursor
 /// switched off, and most never switch it back on. The next draw hides it again.
 fn leave_screen() {
-    let _ = crossterm::execute!(std::io::stdout(), DisableMouseCapture);
+    let _ = crossterm::execute!(std::io::stdout(), DisableMouseCapture, DisableBracketedPaste);
     if kitty_supported() {
         let _ = crossterm::execute!(std::io::stdout(), PopKeyboardEnhancementFlags);
     }
@@ -698,6 +707,7 @@ impl App {
                             }
                         }
                         if let Some((id, take)) = self.attach.take() {
+                            let id_back = id.clone();
                             // The run gets the real terminal, the same handover the editor
                             // uses and the same passthrough `rl join` uses — a real terminal,
                             // not our re-render. We come back to the list when it lets go.
@@ -706,7 +716,7 @@ impl App {
                             let outcome = crate::attach::attach(
                                 &self.home,
                                 crate::attach::Opts {
-                                    id,
+                                    id: id_back,
                                     mode: AttachMode::Join,
                                     take,
                                     scrollback: JOIN_SCROLLBACK,
@@ -715,15 +725,14 @@ impl App {
                             .await;
                             *terminal = enter_screen();
                             input = EventStream::new();
+                            self.refresh().await;
                             match outcome {
-                                // Letting go lands on the list, not back in the
-                                // re-render we stepped out of.
-                                Ok(_) => self.leave_term(),
+                                Ok(ended) => self.back_from_join(&id, ended, area).await,
                                 Err(e) => self.say(join_error(&e)),
                             }
-                            self.refresh().await;
                         }
                     }
+                    Some(Ok(Event::Paste(s))) => self.paste(s, area).await?,
                     Some(Ok(Event::Mouse(m))) => self.mouse(m, area).await?,
                     Some(Ok(_)) => {}
                     Some(Err(e)) => return Err(e.into()),
@@ -1139,6 +1148,44 @@ impl App {
         self.select(Some(keys[next].clone()));
     }
 
+    /// Back from a join: to the run's terminal in the pane, as it was left
+    /// or as it ended, with a word on how it went. Only a connection that
+    /// went without a word lands on the facts.
+    async fn back_from_join(&mut self, id: &str, ended: crate::attach::Ended, area: Rect) {
+        use crate::attach::Ended;
+        let title = self
+            .run_by_id(id)
+            .map(|r| r.title.clone())
+            .unwrap_or_else(|| id.to_string());
+        match ended {
+            Ended::Closed => {
+                self.leave_term();
+                self.say(format!("lost the connection to {title}"));
+                return;
+            }
+            Ended::Exit { how, .. } => self.say(format!("{title} ended ({how})")),
+            Ended::Detached | Ended::Left => self.say(format!("let go of {title} · it keeps going")),
+        }
+        self.select(Some(format!("r:{id}")));
+        self.open_term(area).await;
+    }
+
+    /// A paste, whole: into the line as it came, newlines and all, or a
+    /// form's field a character at a time.
+    async fn paste(&mut self, s: String, area: Rect) -> Result<()> {
+        let s = s.replace("\r\n", "\n").replace('\r', "\n");
+        if matches!(self.mode, Mode::Normal) {
+            self.line.insert(&s);
+            self.completing = None;
+            return Ok(());
+        }
+        for c in s.chars().filter(|c| !c.is_control()) {
+            self.key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE), area)
+                .await?;
+        }
+        Ok(())
+    }
+
     /// The view goes for good: the stream died, or another run wants it.
     fn close_term(&mut self) {
         if self.term.is_some() {
@@ -1163,6 +1210,8 @@ impl App {
     fn hide_pane(&mut self) {
         self.show_pane = false;
         self.auto_pane = false;
+        // Full screen is the pane too: hiding it gives the list back.
+        self.wide = false;
         if self.pane == Pane::Term {
             self.pane = Pane::Facts;
         }
@@ -1692,9 +1741,8 @@ impl App {
         self.refresh().await;
         self.select(Some(format!("r:{}", run.id)));
         if run.kind == RunKind::Agent {
-            // A fresh agent is one you mean to drive: hand it the real terminal
-            // at once (main_loop does it when this key returns).
-            self.attach = Some((run.id.clone(), false));
+            // Watch first, like every other run: the next enter takes it.
+            self.open_term(area).await;
         }
         Ok(())
     }
@@ -2182,8 +2230,14 @@ impl App {
                 Ok(())
             }
             // Full screen, the term has the keyboard: the keys scroll it.
-            // `esc` is the one it does not get — that closes the pane, below.
-            _ if self.pane == Pane::Term && self.wide && self.term.is_some() && k.code != KeyCode::Esc => {
+            // `esc` is the one it does not get — that closes the pane, below —
+            // and `^o`, which hides it.
+            _ if self.pane == Pane::Term
+                && self.wide
+                && self.term.is_some()
+                && k.code != KeyCode::Esc
+                && !(k.code == KeyCode::Char('o') && k.modifiers.contains(KeyModifiers::CONTROL)) =>
+            {
                 let page = area.height.saturating_sub(3).max(1);
                 self.watch_key(&k, page);
                 Ok(())
@@ -2850,6 +2904,11 @@ impl App {
         // The rules between the sections — a little air, a little structure.
         for rule in &a.rules {
             f.render_widget(Paragraph::new("─".repeat(rule.width as usize)).dim(), *rule);
+        }
+        // Clicks go by where the list was last drawn: with no list on screen,
+        // nothing is there to hit.
+        if a.list.is_none() || self.view != View::Work {
+            *self.hit.borrow_mut() = ListHit::default();
         }
         if let Some(list) = a.list {
             match self.view {

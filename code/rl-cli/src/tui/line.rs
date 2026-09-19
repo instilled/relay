@@ -79,6 +79,12 @@ impl Line {
         self.cursor = at;
     }
 
+    /// Text put in at the cursor, which ends up after it.
+    pub fn insert(&mut self, s: &str) {
+        self.text.insert_str(self.cursor, s);
+        self.cursor += s.len();
+    }
+
     /// How many rows the text takes, splitting on newlines (one when empty).
     pub fn rows(&self) -> usize {
         self.text.bytes().filter(|&b| b == b'\n').count() + 1
@@ -234,6 +240,15 @@ fn unquote(s: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_paste_goes_in_at_the_cursor() {
+        let mut l = Line::default();
+        l.set_with_cursor("ab", 1);
+        l.insert("x\ny");
+        assert_eq!((l.text(), l.cursor(), l.rows()), ("ax\nyb", 4, 2));
+    }
+
     use super::*;
 
     fn ctrl(c: char) -> KeyEvent {

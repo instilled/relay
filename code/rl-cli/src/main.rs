@@ -622,7 +622,7 @@ async fn main() -> Result<()> {
 }
 
 async fn attach(home: &Home, a: AttachArgs, mode: AttachMode) -> Result<()> {
-    let code = rl_cli::attach::attach(
+    let ended = rl_cli::attach::attach(
         home,
         rl_cli::attach::Opts {
             id: a.id,
@@ -632,7 +632,7 @@ async fn attach(home: &Home, a: AttachArgs, mode: AttachMode) -> Result<()> {
         },
     )
     .await?;
-    std::process::exit(code)
+    std::process::exit(ended.code())
 }
 
 async fn mark(home: &Home, a: MarkArgs, json: bool) -> Result<()> {
