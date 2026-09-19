@@ -16,6 +16,7 @@ pub mod router;
 pub mod rulestore;
 pub mod schedule;
 pub mod server;
+pub mod setup;
 pub mod summarise;
 pub mod supervisor;
 pub mod transcript;

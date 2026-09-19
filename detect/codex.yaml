@@ -3,6 +3,7 @@ kind: agent
 bins: [codex]
 headless: [exec]
 model_flag: ["-m"]
+small_model: gpt-5.6-luna   # "fast and affordable"; setup offers it for summaries
 patterns:
   needs_input:
     - '(?i)allow command\?'

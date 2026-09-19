@@ -28,6 +28,7 @@ pub use pane::recap_label;
 mod rows;
 mod rules;
 mod screen;
+mod setup;
 mod term;
 mod theme;
 
@@ -58,9 +59,9 @@ use rl_proto::methods::{
     DigestParams, EventFilter, EventList, GcParams, GcRun, GraphGet, GraphParams, PresenceClient, PresenceTouch,
     ReactionPause, ReactionReload, ReactionResume, RuleApprove, RuleList, RuleRef, RunArchive, RunArchiveParams, RunId,
     RunIds, RunInput, RunInputParams, RunMark, RunMarkParams, RunPin, RunPinParams, RunRename, RunRenameParams,
-    RunSeen, RunSpec, RunStart, RunStop, RunStopParams, ScheduleFilter, ScheduleName, SchedulePause, ScheduleReload,
-    ScheduleResume, ScheduleRun, SummaryGet, SummaryMake, SummaryParams, WorkspaceList, WorkspaceRename,
-    WorkspaceRenameParams, WorkspaceUp, WorkspaceUpParams,
+    RunSeen, RunSpec, RunStart, RunStop, RunStopParams, SETUP_STEPS, ScheduleFilter, ScheduleName, SchedulePause,
+    ScheduleReload, ScheduleResume, ScheduleRun, SetupGet, SummaryGet, SummaryMake, SummaryParams, WorkspaceList,
+    WorkspaceRename, WorkspaceRenameParams, WorkspaceUp, WorkspaceUpParams,
 };
 use rl_proto::rule::{Rule, RuleKind, RuleStatus};
 use rl_proto::types::{AttachMode, Cause, Event as LedgerEvent, Mark, Run, RunKind, RunState, Summary};
@@ -563,6 +564,25 @@ fn leave_screen() {
     let _ = crossterm::execute!(std::io::stdout(), crossterm::cursor::Show);
 }
 
+/// `rl setup`: the whole guide, on its own, whatever was seen before.
+pub async fn setup(home: &Home) -> Result<()> {
+    let mut rpc = crate::daemon::ensure(home, true).await?;
+    let state = rpc.call::<SetupGet>(()).await?;
+    let file = state.config.file.clone();
+    let mut terminal = enter_screen();
+    let outcome = setup::run(&mut terminal, &mut rpc, state).await;
+    leave_screen();
+    match outcome? {
+        setup::Outcome::Saved(words) => println!(
+            "{words}
+{}",
+            file.display()
+        ),
+        setup::Outcome::Later => println!("left as it was"),
+    }
+    Ok(())
+}
+
 pub async fn run(home: &Home) -> Result<()> {
     let me = client_name();
     // Before the screen is taken: the daemon is started or, if it is another
@@ -622,6 +642,21 @@ pub async fn run(home: &Home) -> Result<()> {
     app.refresh().await;
 
     let mut terminal = enter_screen();
+    // The first start, or a release with a step not seen yet: the guide
+    // before the list.
+    if let Ok(state) = app.rpc.call::<SetupGet>(()).await
+        && state.seen < SETUP_STEPS
+    {
+        match setup::run(&mut terminal, &mut app.rpc, state).await {
+            Ok(setup::Outcome::Saved(words)) => {
+                app.say(words);
+                app.agents.clear();
+                app.refresh().await;
+            }
+            Ok(setup::Outcome::Later) => app.say("setup left for later · rl setup, or it asks again next start"),
+            Err(e) => app.say(format!("setup: {e:#}")),
+        }
+    }
     let result = app.main_loop(&mut terminal).await;
     leave_screen();
     // Leaving is looking: `rl since` starts from here next time.
@@ -781,11 +816,16 @@ impl App {
                 Err(e) => self.say(format!("daemon: {e:#}")),
             }
         }
-        // Which CLIs are agents decides how a line reads; asked once.
+        // Which CLIs are agents decides how a line reads and what it offers:
+        // the ones here that the config has the panel offer. Asked once.
         if self.agents.is_empty()
             && let Ok(list) = self.rpc.call::<AgentList>(()).await
         {
-            self.agents = list.into_iter().map(|a| a.name).collect();
+            self.agents = list
+                .into_iter()
+                .filter(|a| a.offered && a.available())
+                .map(|a| a.name)
+                .collect();
         }
         self.settle();
         if self.pane == Pane::Facts

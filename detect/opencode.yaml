@@ -1,0 +1,6 @@
+# opencode. No hook API yet; PTY heuristics only. A model is named
+# provider/model, so there is no one small model to offer.
+kind: agent
+bins: [opencode]
+headless: [run]
+model_flag: ["-m"]

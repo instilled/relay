@@ -21,6 +21,8 @@ const BUILTIN: &[(&str, &str)] = &[
     ("claude", include_str!("../../../detect/claude.yaml")),
     ("codex", include_str!("../../../detect/codex.yaml")),
     ("cursor", include_str!("../../../detect/cursor.yaml")),
+    ("gemini", include_str!("../../../detect/gemini.yaml")),
+    ("opencode", include_str!("../../../detect/opencode.yaml")),
     ("sh", include_str!("../../../detect/sh.yaml")),
 ];
 
@@ -34,6 +36,7 @@ struct ProfileFile {
     hooks: Option<HooksFile>,
     headless: Option<Vec<String>>,
     model_flag: Option<Vec<String>>,
+    small_model: Option<String>,
     patterns: Option<PatternsFile>,
     timing: Option<TimingFile>,
 }
@@ -80,6 +83,9 @@ impl ProfileFile {
         if over.model_flag.is_some() {
             self.model_flag = over.model_flag;
         }
+        if over.small_model.is_some() {
+            self.small_model = over.small_model;
+        }
         if let Some(p) = over.patterns {
             let mine = self.patterns.get_or_insert_with(Default::default);
             if p.needs_input.is_some() {
@@ -121,13 +127,28 @@ pub struct Profile {
     pub interactive_only: bool,
     pub hooks: Option<Hooks>,
     /// Arguments that make the CLI run one prompt and exit (`-p`), for
-    /// scheduled runs.
+    /// scheduled runs. The prompt goes last, or in place of `{prompt}`.
     pub headless: Vec<String>,
     /// The flag that names a model (`--model`); empty when the CLI has none.
     pub model_flag: Vec<String>,
+    /// The quick, cheap model setup offers for summaries, when there is one.
+    pub small_model: Option<String>,
     /// Generic patterns first, then the profile's own.
     pub patterns: Patterns,
     pub timing: Timing,
+}
+
+/// Where a headless prompt goes when it does not simply go last: a CLI whose
+/// prompt is the value of a flag (`gemini -p <prompt>`).
+pub const PROMPT: &str = "{prompt}";
+
+/// A headless argv with its prompt: in place of `{prompt}`, else last.
+pub fn with_prompt(mut argv: Vec<String>, prompt: String) -> Vec<String> {
+    match argv.iter().position(|a| a == PROMPT) {
+        Some(i) => argv[i] = prompt,
+        None => argv.push(prompt),
+    }
+    argv
 }
 
 /// The outcome of looking at an argv.
@@ -217,6 +238,7 @@ impl Registry {
                     }),
                     headless: file.headless.unwrap_or_default(),
                     model_flag: file.model_flag.unwrap_or_default(),
+                    small_model: file.small_model,
                     patterns,
                     timing,
                     name,
@@ -352,8 +374,10 @@ mod tests {
         let r = Registry::builtin();
         assert_eq!(
             r.names().collect::<Vec<_>>(),
-            ["claude", "codex", "cursor", "generic", "sh"]
+            ["claude", "codex", "cursor", "gemini", "generic", "opencode", "sh"]
         );
+        assert_eq!(r.profile("claude").unwrap().small_model.as_deref(), Some("haiku"));
+        assert_eq!(r.profile("opencode").unwrap().small_model, None);
         let c = r.detect(&argv("/Users/me/.local/bin/claude -p hi")).unwrap();
         assert_eq!((c.name.as_str(), c.kind), ("claude", RunKind::Agent));
         assert_eq!(c.hooks.as_ref().unwrap().dialect, "claude");
@@ -362,6 +386,22 @@ mod tests {
         assert!(r.detect(&argv("make e2e")).is_none());
         assert_eq!(r.generic().timing.idle_after, Duration::from_secs(3));
         assert_eq!(r.profile("sh").unwrap().timing.idle_after, Duration::from_secs(2));
+    }
+
+    #[test]
+    fn the_prompt_goes_where_the_profile_says() {
+        let r = Registry::builtin();
+        let mut argv = vec!["gemini".to_string()];
+        argv.extend(r.profile("gemini").unwrap().headless.iter().cloned());
+        argv.extend(["-m".into(), "flash-lite".into()]);
+        assert_eq!(
+            with_prompt(argv, "say hi".into()),
+            ["gemini", "-p", "say hi", "-m", "flash-lite"]
+        );
+        assert_eq!(
+            with_prompt(vec!["claude".into(), "-p".into()], "say hi".into()),
+            ["claude", "-p", "say hi"]
+        );
     }
 
     #[test]

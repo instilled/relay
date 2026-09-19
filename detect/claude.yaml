@@ -8,6 +8,7 @@ hooks:
   args: ["--settings", "{hooks_file}"]
 headless: ["-p"]
 model_flag: ["--model"]
+small_model: haiku      # what setup offers for summaries: quick and cheap
 patterns:
   needs_input:
     - '(?i)do you want to'

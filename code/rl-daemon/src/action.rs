@@ -46,8 +46,7 @@ pub fn run_spec(
             let mut argv = vec![agent.clone()];
             argv.extend(profile.headless.iter().cloned());
             argv.extend(args.iter().cloned());
-            argv.push(prompt);
-            (RunKind::Agent, argv)
+            (RunKind::Agent, rl_detect::registry::with_prompt(argv, prompt))
         }
     };
     let cwd = match (action.cwd.as_deref().map(expand_home), base) {
