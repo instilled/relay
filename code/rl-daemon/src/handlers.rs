@@ -82,7 +82,42 @@ pub fn register(r: &mut Router<Daemon>) {
         }
         d.scheduler.remove_workspace(&p.path).await.map_err(internal)
     });
-    r.register::<AgentList, _, _>(|d, ()| async move { Ok(crate::config::agents(&d.registry)) });
+    r.register::<AgentList, _, _>(|d, ()| async move {
+        let config = d.config.read().unwrap().config.clone();
+        Ok(crate::config::agents(&d.registry, &config))
+    });
+    r.register::<SetupGet, _, _>(|d, ()| async move {
+        let seen = d
+            .ledger
+            .call(|c| rl_ledger::meta::get_i64(c, crate::setup::SEEN))
+            .await
+            .map_err(internal)?
+            .unwrap_or(0);
+        let loaded = crate::config::load(&d.home);
+        let config = crate::config::report(&loaded, &d.registry);
+        let agents = crate::config::agents(&d.registry, &loaded.config);
+        *d.config.write().unwrap() = loaded;
+        Ok(SetupState {
+            seen: seen.clamp(0, u32::MAX as i64) as u32,
+            config,
+            agents,
+        })
+    });
+    r.register::<SetupDone, _, _>(|d, p: SetupSave| async move {
+        if p.agents.is_some() || p.assistant.is_some() {
+            crate::setup::write(&d.home, p.agents.as_deref(), p.assistant.as_ref())
+                .map_err(|e| RpcError::invalid_params(format!("{e:#}")))?;
+        }
+        let seen = p.seen as i64;
+        d.ledger
+            .call(move |c| rl_ledger::meta::set_i64(c, crate::setup::SEEN, seen))
+            .await
+            .map_err(internal)?;
+        let loaded = crate::config::load(&d.home);
+        let report = crate::config::report(&loaded, &d.registry);
+        *d.config.write().unwrap() = loaded;
+        Ok(report)
+    });
     r.register::<AssistantRun, _, _>(|d, p: AssistantParams| async move {
         crate::assistant::run(&d, p)
             .await

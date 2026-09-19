@@ -789,6 +789,17 @@ pub struct AgentInfo {
     /// How to name a model, if the profile says.
     #[serde(default)]
     pub model_flag: Vec<String>,
+    /// The quick, cheap model the profile suggests for summaries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub small_model: Option<String>,
+    /// Whether the panel offers it: named in the config's `agents`, or that
+    /// list is empty.
+    #[serde(default = "yes")]
+    pub offered: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 impl AgentInfo {
@@ -838,6 +849,49 @@ pub struct ConfigGet;
 impl Method for ConfigGet {
     const NAME: &'static str = "config.get";
     type Params = ();
+    type Result = ConfigReport;
+}
+
+// ---- setup.* -----------------------------------------------------------------
+
+/// The setup guide's steps, counted: a release that adds one raises it, and
+/// the panel shows the guide again for what is new.
+pub const SETUP_STEPS: u32 = 2;
+
+/// Where setup stands, and what it starts from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SetupState {
+    /// How many steps were gone through last time; 0 when never.
+    pub seen: u32,
+    pub config: ConfigReport,
+    pub agents: Vec<AgentInfo>,
+}
+
+pub struct SetupGet;
+impl Method for SetupGet {
+    const NAME: &'static str = "setup.get";
+    type Params = ();
+    type Result = SetupState;
+}
+
+/// What setup settled. A field left out leaves that part of `config.yaml`
+/// as it is.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SetupSave {
+    /// Steps gone through, kept so the guide is not shown again for them.
+    pub seen: u32,
+    /// The `agents` the panel offers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agents: Option<Vec<String>>,
+    /// Who summarises and drafts: both `assistants` jobs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assistant: Option<crate::config::Assistant>,
+}
+
+pub struct SetupDone;
+impl Method for SetupDone {
+    const NAME: &'static str = "setup.save";
+    type Params = SetupSave;
     type Result = ConfigReport;
 }
 
