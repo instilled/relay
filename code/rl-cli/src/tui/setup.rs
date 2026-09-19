@@ -15,7 +15,9 @@ use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
 use rl_proto::config::Assistant;
-use rl_proto::methods::{AgentInfo, SETUP_STEPS, SetupDone, SetupSave, SetupState};
+use rl_proto::methods::{
+    AgentInfo, ClaudeSession, ImportMove, ImportMoveParams, ImportReport, SETUP_STEPS, SetupDone, SetupSave, SetupState,
+};
 use std::collections::HashMap;
 
 /// Who is asked first for summaries: quick and cheap, in this order.
@@ -25,9 +27,9 @@ const SUMMARISERS: &[&str] = &["claude", "codex", "gemini"];
 enum Step {
     Agents,
     Summaries,
+    /// Claude's own sessions, moved over to Relay.
+    Sessions,
 }
-
-const STEPS: [Step; 2] = [Step::Agents, Step::Summaries];
 
 /// An agent on the first screen.
 #[derive(Debug, Clone)]
@@ -36,18 +38,50 @@ struct Pick {
     on: bool,
 }
 
+/// One of Claude's sessions on the third.
+#[derive(Debug, Clone)]
+struct Session {
+    it: ClaudeSession,
+    on: bool,
+}
+
+impl Session {
+    /// Whether it can be moved at all: not already here, not in a terminal.
+    fn movable(&self) -> bool {
+        self.it.run.is_none() && !self.it.in_a_terminal()
+    }
+
+    /// Why it cannot be moved, or how it stands.
+    fn said(&self) -> String {
+        if self.it.run.is_some() {
+            "in Relay already".into()
+        } else if self.it.in_a_terminal() {
+            "open in a terminal · close it there first".into()
+        } else if self.it.working() {
+            "working · moving it stops the turn".into()
+        } else {
+            self.it.state.clone().unwrap_or_else(|| self.it.status.clone())
+        }
+    }
+}
+
 /// What the guide holds while it is open.
 #[derive(Debug)]
 pub struct Guide {
+    /// The steps this run of the guide asks, in order.
+    steps: Vec<Step>,
     step: usize,
     agents: Vec<Pick>,
+    sessions: Vec<Session>,
+    /// Why there are no sessions to show, when that is the reason.
+    sessions_error: Option<String>,
     /// What each agent's `--version` said, as it comes in.
     versions: HashMap<String, String>,
     /// Who could summarise, given the agents picked.
     cursor: usize,
     summariser: Option<Assistant>,
-    /// Whether each step was answered (enter) or left (esc).
-    answered: [bool; 2],
+    /// Whether each step was answered (enter) or left (esc), by step.
+    answered: [bool; 3],
     /// What the config said, to write only what changed.
     was_agents: Vec<String>,
     was_summariser: Option<Assistant>,
@@ -64,7 +98,40 @@ pub enum Outcome {
 }
 
 impl Guide {
-    pub fn new(state: &SetupState) -> Self {
+    /// The whole guide: what is set, and what could be moved over.
+    pub fn new(state: &SetupState, sessions: &ImportReport) -> Self {
+        let mut g = Self::of(state, sessions, vec![Step::Agents, Step::Summaries, Step::Sessions]);
+        g.enter_step();
+        g
+    }
+
+    /// `/import`, `rl import`: the sessions step on its own.
+    pub fn importing(state: &SetupState, sessions: &ImportReport) -> Self {
+        let mut g = Self::of(state, sessions, vec![Step::Sessions]);
+        g.enter_step();
+        g
+    }
+
+    /// The guide from a release's new steps on: what the last time through
+    /// did not ask. Nothing new: `None`.
+    pub fn since(state: &SetupState, sessions: &ImportReport) -> Option<Self> {
+        let steps: Vec<Step> = [Step::Agents, Step::Summaries, Step::Sessions]
+            .into_iter()
+            .enumerate()
+            .filter(|(i, _)| *i as u32 >= state.seen)
+            .map(|(_, s)| s)
+            .collect();
+        let mut g = Self::of(state, sessions, steps);
+        // A step with nothing to show is not worth a screen.
+        g.steps.retain(|s| *s != Step::Sessions || !g.sessions.is_empty());
+        if g.steps.is_empty() {
+            return None;
+        }
+        g.enter_step();
+        Some(g)
+    }
+
+    fn of(state: &SetupState, sessions: &ImportReport, steps: Vec<Step>) -> Self {
         let named = &state.config.config.agents;
         let agents = state
             .agents
@@ -75,13 +142,26 @@ impl Guide {
             })
             .collect();
         let current = state.config.config.assistants.summarise.clone();
+        let sessions_error = sessions.error.clone();
+        let sessions: Vec<Session> = sessions
+            .sessions
+            .iter()
+            .map(|s| Session {
+                // Ready to move, and not in the middle of a turn: picked.
+                on: s.run.is_none() && !s.in_a_terminal() && !s.working(),
+                it: s.clone(),
+            })
+            .collect();
         let mut g = Guide {
+            steps,
             step: 0,
             agents,
+            sessions,
+            sessions_error,
             versions: HashMap::new(),
             cursor: 0,
             summariser: None,
-            answered: [false; 2],
+            answered: [false; 3],
             was_agents: named.clone(),
             was_summariser: current.clone(),
             done: false,
@@ -89,6 +169,22 @@ impl Guide {
         };
         g.summariser = current.or_else(|| g.summarisers().into_iter().next());
         g
+    }
+
+    fn at(&self) -> Step {
+        self.steps[self.step]
+    }
+
+    /// The sessions to move, once the guide is through.
+    pub fn moving(&self) -> Vec<ClaudeSession> {
+        if !self.answered[2] {
+            return vec![];
+        }
+        self.sessions
+            .iter()
+            .filter(|s| s.on && s.movable())
+            .map(|s| s.it.clone())
+            .collect()
     }
 
     /// Everyone who could do summaries: the picked agents that are here,
@@ -119,16 +215,17 @@ impl Guide {
     }
 
     fn rows(&self) -> usize {
-        match STEPS[self.step] {
+        match self.at() {
             Step::Agents => self.agents.len(),
             Step::Summaries => self.summarisers().len(),
+            Step::Sessions => self.sessions.len(),
         }
     }
 
     /// Where the cursor starts on a step: the first agent, or the one picked.
     fn enter_step(&mut self) {
-        self.cursor = match STEPS[self.step] {
-            Step::Agents => 0,
+        self.cursor = match self.at() {
+            Step::Agents | Step::Sessions => 0,
             Step::Summaries => {
                 let all = self.summarisers();
                 if self.summariser.as_ref().is_none_or(|s| !all.contains(s)) {
@@ -143,8 +240,8 @@ impl Guide {
     }
 
     fn next(&mut self, answered: bool) {
-        self.answered[self.step] = answered;
-        if self.step + 1 == STEPS.len() {
+        self.answered[self.at() as usize] = answered;
+        if self.step + 1 == self.steps.len() {
             self.done = true;
         } else {
             self.step += 1;
@@ -169,7 +266,7 @@ impl Guide {
             }
             KeyCode::Char(' ') => self.choose(),
             KeyCode::Enter => {
-                if STEPS[self.step] == Step::Summaries {
+                if self.at() == Step::Summaries {
                     self.choose();
                 }
                 self.next(true);
@@ -181,7 +278,14 @@ impl Guide {
 
     /// Space: an agent in or out; a summariser picked.
     fn choose(&mut self) {
-        match STEPS[self.step] {
+        match self.at() {
+            Step::Sessions => {
+                if let Some(s) = self.sessions.get_mut(self.cursor)
+                    && s.movable()
+                {
+                    s.on = !s.on;
+                }
+            }
             Step::Agents => {
                 if let Some(p) = self.agents.get_mut(self.cursor)
                     && p.info.available()
@@ -203,7 +307,7 @@ impl Guide {
             seen: SETUP_STEPS,
             ..Default::default()
         };
-        if self.answered[0] {
+        if self.answered[Step::Agents as usize] {
             let on: Vec<String> = self
                 .agents
                 .iter()
@@ -226,7 +330,7 @@ impl Guide {
                 out.agents = Some(if on == all_here { vec![] } else { on });
             }
         }
-        if self.answered[1] && self.summariser != self.was_summariser {
+        if self.answered[Step::Summaries as usize] && self.summariser != self.was_summariser {
             out.assistant = self.summariser.clone();
         }
         out
@@ -244,18 +348,20 @@ impl Guide {
             Line::from(vec![
                 Span::styled("relay", theme::accent().add_modifier(Modifier::BOLD)),
                 Span::raw(" setup"),
-                Span::styled(format!("   {} of {}", self.step + 1, STEPS.len()), theme::dim()),
+                Span::styled(format!("   {} of {}", self.step + 1, self.steps.len()), theme::dim()),
             ]),
             Line::raw(""),
         ];
-        match STEPS[self.step] {
+        match self.at() {
             Step::Agents => self.draw_agents(&mut lines),
             Step::Summaries => self.draw_summaries(&mut lines),
+            Step::Sessions => self.draw_sessions(&mut lines),
         }
         lines.push(Line::raw(""));
-        let keys = match STEPS[self.step] {
+        let keys = match self.at() {
             Step::Agents => "space in or out · enter next · esc leave as it is · ← back · q later",
             Step::Summaries => "↑↓ pick · enter save · esc leave as it is · ← back · q later",
+            Step::Sessions => "space in or out · enter moves them · esc leaves them with Claude · ← back · q later",
         };
         lines.push(Line::styled(keys, theme::dim()));
         f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
@@ -293,6 +399,55 @@ impl Guide {
             if i == self.cursor {
                 for s in &mut spans {
                     s.style = s.style.patch(theme::selected());
+                }
+            }
+            lines.push(Line::from(spans));
+        }
+    }
+
+    fn draw_sessions(&self, lines: &mut Vec<Line<'static>>) {
+        lines.push(Line::styled("Move your Claude sessions into Relay?", theme::name()));
+        lines.push(Line::styled(
+            "Claude's background process stops — the conversation is kept — and Relay resumes it here.",
+            theme::dim(),
+        ));
+        lines.push(Line::raw(""));
+        if let Some(e) = &self.sessions_error {
+            lines.push(Line::styled(format!("  Claude did not say: {e}"), theme::dim()));
+            return;
+        }
+        if self.sessions.is_empty() {
+            lines.push(Line::styled("  Claude has none running.", theme::dim()));
+            return;
+        }
+        let width = self
+            .sessions
+            .iter()
+            .map(|s| s.it.name.chars().count())
+            .max()
+            .unwrap_or(0)
+            .min(40);
+        for (i, s) in self.sessions.iter().enumerate() {
+            let mark = if !s.movable() {
+                "   "
+            } else if s.on {
+                "[x]"
+            } else {
+                "[ ]"
+            };
+            let mut spans = vec![
+                Span::raw(if i == self.cursor { "▸ " } else { "  " }),
+                Span::styled(format!("{mark} "), if s.on { theme::accent() } else { theme::dim() }),
+                Span::styled(
+                    format!("{:<width$}  ", super::rows::fit(&s.it.name, width)),
+                    if s.movable() { theme::name() } else { theme::dim() },
+                ),
+                Span::styled(format!("{:<38}  ", s.said()), theme::dim()),
+                Span::styled(rl_core::display_path(&s.it.cwd), theme::dim()),
+            ];
+            if i == self.cursor {
+                for x in &mut spans {
+                    x.style = x.style.patch(theme::selected());
                 }
             }
             lines.push(Line::from(spans));
@@ -372,10 +527,15 @@ fn ask_versions(agents: &[AgentInfo]) -> tokio::sync::mpsc::UnboundedReceiver<(S
     rx
 }
 
-/// The guide on the screen until it is saved or left.
-pub async fn run(terminal: &mut ratatui::DefaultTerminal, rpc: &mut Client, state: SetupState) -> Result<Outcome> {
-    let mut guide = Guide::new(&state);
-    let mut versions = ask_versions(&state.agents);
+/// The guide on the screen until it is saved or left. Moving the sessions
+/// it settled on happens after: one call each, said as they go.
+pub async fn run(
+    terminal: &mut ratatui::DefaultTerminal,
+    rpc: &mut Client,
+    mut guide: Guide,
+    agents: &[AgentInfo],
+) -> Result<Outcome> {
+    let mut versions = ask_versions(agents);
     let mut input = EventStream::new();
     loop {
         terminal.draw(|f| guide.draw(f))?;
@@ -384,8 +544,17 @@ pub async fn run(terminal: &mut ratatui::DefaultTerminal, rpc: &mut Client, stat
         }
         if guide.done {
             let save = guide.save();
-            let words = said(&save);
+            let mut words = said(&save);
             rpc.call::<SetupDone>(save).await?;
+            let moving = guide.moving();
+            if !moving.is_empty() {
+                drop(input);
+                let moved = move_them(terminal, rpc, &moving).await;
+                words = match words.is_empty() {
+                    true => moved,
+                    false => format!("{words} · {moved}"),
+                };
+            }
             return Ok(Outcome::Saved(words));
         }
         tokio::select! {
@@ -400,6 +569,63 @@ pub async fn run(terminal: &mut ratatui::DefaultTerminal, rpc: &mut Client, stat
             }
         }
     }
+}
+
+/// Each session in turn, with the screen saying where it is up to. One
+/// that will not move says why and the rest still go.
+async fn move_them(terminal: &mut ratatui::DefaultTerminal, rpc: &mut Client, moving: &[ClaudeSession]) -> String {
+    let mut done: Vec<Line<'static>> = Vec::new();
+    let mut ok = 0;
+    let mut failed = Vec::new();
+    for s in moving {
+        let mut lines = vec![
+            Line::styled("Moving your Claude sessions into Relay", theme::name()),
+            Line::raw(""),
+        ];
+        lines.extend(done.clone());
+        lines.push(Line::styled(format!("  … {}", s.name), theme::dim()));
+        let _ = terminal.draw(|f| {
+            let area = f.area();
+            let inner = Rect {
+                x: area.x + 2,
+                y: area.y + 1,
+                width: area.width.saturating_sub(4),
+                height: area.height.saturating_sub(2),
+            };
+            f.render_widget(Paragraph::new(lines.clone()).wrap(Wrap { trim: false }), inner);
+        });
+        let env = crate::env::child_env(&[]).unwrap_or_default();
+        match rpc
+            .call::<ImportMove>(ImportMoveParams {
+                session_id: s.session_id.clone(),
+                env,
+            })
+            .await
+        {
+            Ok(run) => {
+                ok += 1;
+                done.push(Line::from(vec![
+                    Span::styled("  ✓ ", theme::accent()),
+                    Span::styled(s.name.clone(), theme::name()),
+                    Span::styled(format!("  now run {}", run.id), theme::dim()),
+                ]));
+            }
+            Err(e) => {
+                let why = format!("{e:#}");
+                failed.push(s.name.clone());
+                done.push(Line::from(vec![
+                    Span::styled("  ✗ ", theme::dim()),
+                    Span::styled(s.name.clone(), theme::dim()),
+                    Span::styled(format!("  {why}"), theme::dim()),
+                ]));
+            }
+        }
+    }
+    let mut words = format!("moved {ok} Claude session{}", if ok == 1 { "" } else { "s" });
+    if !failed.is_empty() {
+        words.push_str(&format!(" · {} would not move: {}", failed.len(), failed.join(", ")));
+    }
+    words
 }
 
 /// What saving changed, in words for the flash line.
@@ -418,7 +644,7 @@ fn said(s: &SetupSave) -> String {
         ));
     }
     if parts.is_empty() {
-        "setup done, nothing changed · rl setup to go through it again".into()
+        String::new()
     } else {
         format!("setup saved: {} · rl setup to change it", parts.join(", "))
     }
@@ -463,13 +689,92 @@ mod tests {
         }
     }
 
+    /// No sessions of Claude's, and nothing wrong: the usual case.
+    fn none() -> ImportReport {
+        ImportReport::default()
+    }
+
+    fn session(name: &str, id: Option<&str>, state: Option<&str>, run: Option<&str>) -> ClaudeSession {
+        ClaudeSession {
+            session_id: format!("s-{name}"),
+            id: id.map(Into::into),
+            name: name.into(),
+            cwd: format!("/w/{name}").into(),
+            kind: if id.is_some() { "background" } else { "interactive" }.into(),
+            status: if state == Some("working") { "busy" } else { "idle" }.into(),
+            state: state.map(Into::into),
+            run: run.map(Into::into),
+            new: run.is_none(),
+        }
+    }
+
     fn press(g: &mut Guide, code: KeyCode) {
         g.key(KeyEvent::new(code, KeyModifiers::NONE));
     }
 
     #[test]
+    fn the_sessions_step_moves_what_is_picked() {
+        let sessions = ImportReport {
+            sessions: vec![
+                session("done-one", Some("a1"), Some("done"), None),
+                session("busy-one", Some("b2"), Some("working"), None),
+                session("in-a-terminal", None, None, None),
+                session("here-already", Some("c3"), Some("done"), Some("r7")),
+            ],
+            error: None,
+        };
+        let mut g = Guide::importing(&state(Config::default()), &sessions);
+        assert_eq!(g.steps.len(), 1);
+        // Ready and idle: picked. Working, in a terminal, already here: not.
+        let on: Vec<&str> = g.sessions.iter().filter(|s| s.on).map(|s| s.it.name.as_str()).collect();
+        assert_eq!(on, ["done-one"]);
+        // A working one can still be picked by hand; the others cannot.
+        g.cursor = 1;
+        press(&mut g, KeyCode::Char(' '));
+        g.cursor = 2;
+        press(&mut g, KeyCode::Char(' '));
+        g.cursor = 3;
+        press(&mut g, KeyCode::Char(' '));
+        press(&mut g, KeyCode::Enter);
+        assert!(g.done);
+        let moving: Vec<String> = g.moving().into_iter().map(|s| s.name).collect();
+        assert_eq!(moving, ["done-one", "busy-one"]);
+        assert_eq!(g.sessions[2].said(), "open in a terminal · close it there first");
+        assert_eq!(g.sessions[3].said(), "in Relay already");
+    }
+
+    #[test]
+    fn esc_on_the_sessions_step_moves_nothing() {
+        let sessions = ImportReport {
+            sessions: vec![session("done-one", Some("a1"), Some("done"), None)],
+            error: None,
+        };
+        let mut g = Guide::importing(&state(Config::default()), &sessions);
+        press(&mut g, KeyCode::Esc);
+        assert!(g.done && g.moving().is_empty());
+    }
+
+    #[test]
+    fn only_the_steps_a_release_added_are_asked_again() {
+        let mut st = state(Config::default());
+        st.seen = 2;
+        let sessions = ImportReport {
+            sessions: vec![session("done-one", Some("a1"), Some("done"), None)],
+            error: None,
+        };
+        let g = Guide::since(&st, &sessions).expect("the sessions step is new");
+        assert_eq!(g.steps, [Step::Sessions]);
+        // Nothing of Claude's: nothing left to ask.
+        assert!(Guide::since(&st, &none()).is_none());
+        // Never gone through: all of it.
+        let g = Guide::since(&state(Config::default()), &sessions).unwrap();
+        assert_eq!(g.steps.len(), 3);
+    }
+
+    #[test]
     fn enter_twice_takes_the_defaults() {
-        let mut g = Guide::new(&state(Config::default()));
+        let mut g = Guide::new(&state(Config::default()), &none());
+        press(&mut g, KeyCode::Enter);
         press(&mut g, KeyCode::Enter);
         press(&mut g, KeyCode::Enter);
         assert!(g.done);
@@ -492,7 +797,7 @@ mod tests {
 
     #[test]
     fn leaving_claude_out_makes_codex_the_summariser() {
-        let mut g = Guide::new(&state(Config::default()));
+        let mut g = Guide::new(&state(Config::default()), &none());
         press(&mut g, KeyCode::Char(' '));
         press(&mut g, KeyCode::Down);
         press(&mut g, KeyCode::Down);
@@ -510,8 +815,9 @@ mod tests {
 
     #[test]
     fn esc_leaves_the_file_as_it_is() {
-        let mut g = Guide::new(&state(Config::default()));
+        let mut g = Guide::new(&state(Config::default()), &none());
         press(&mut g, KeyCode::Char(' '));
+        press(&mut g, KeyCode::Esc);
         press(&mut g, KeyCode::Esc);
         press(&mut g, KeyCode::Esc);
         assert!(g.done);
@@ -530,7 +836,7 @@ mod tests {
             model: Some("o3".into()),
             args: vec![],
         });
-        let mut g = Guide::new(&state(c));
+        let mut g = Guide::new(&state(c), &none());
         assert_eq!(g.agents.iter().filter(|p| p.on).count(), 1);
         press(&mut g, KeyCode::Enter);
         assert_eq!(
@@ -549,7 +855,7 @@ mod tests {
 
     #[test]
     fn back_and_q() {
-        let mut g = Guide::new(&state(Config::default()));
+        let mut g = Guide::new(&state(Config::default()), &none());
         press(&mut g, KeyCode::Enter);
         assert_eq!(g.step, 1);
         press(&mut g, KeyCode::Left);
@@ -560,7 +866,7 @@ mod tests {
 
     #[test]
     fn a_missing_agent_cannot_be_picked() {
-        let mut g = Guide::new(&state(Config::default()));
+        let mut g = Guide::new(&state(Config::default()), &none());
         g.cursor = 2;
         press(&mut g, KeyCode::Char(' '));
         assert!(!g.agents[2].on);
@@ -568,7 +874,7 @@ mod tests {
 
     #[test]
     fn it_draws() {
-        let g = Guide::new(&state(Config::default()));
+        let g = Guide::new(&state(Config::default()), &none());
         let backend = ratatui::backend::TestBackend::new(90, 16);
         let mut t = ratatui::Terminal::new(backend).unwrap();
         t.draw(|f| g.draw(f)).unwrap();
@@ -579,7 +885,7 @@ mod tests {
             .chunks(90)
             .map(|r| r.iter().map(|c| c.symbol()).collect::<String>() + "\n")
             .collect();
-        assert!(text.contains("relay setup   1 of 2"), "{text}");
+        assert!(text.contains("relay setup   1 of 3"), "{text}");
         assert!(text.contains("[x] claude"), "{text}");
         assert!(text.contains("[ ] cursor     not found"), "{text}");
     }

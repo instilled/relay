@@ -607,7 +607,17 @@ summaries — the first of claude, codex, gemini that is here, on its `small_mod
 it, esc leaves that part of the file as it is. `rld` writes what was settled (`setup.save`,
 `rl-daemon/src/setup.rs`) by replacing only those keys' blocks, so comments and every other key
 stay. How far the guide got is `setup.seen` in the ledger's `meta`, not the file: a release that
-adds a step raises `SETUP_STEPS` and the guide shows again. `rl setup` goes through all of it.
+adds a step raises `SETUP_STEPS` and the guide shows again — only the steps it added. `rl setup`
+goes through all of it.
+
+**Claude's own sessions** (`rl-daemon/src/import.rs`) are the guide's third step. `claude --bg`
+sessions are Claude's to supervise; `import.list` asks `claude agents --json` (no model call) and
+says which Relay carries on already — a run tagged `claude-session:<id>`. `import.move` stops
+Claude's background process (`claude stop <id>`; the conversation stays in its transcript),
+registers the folder's checkout as a workspace, and starts `claude --resume <id>` as an ordinary
+run in that folder, hooks and all. A session open in a terminal is listed but not moved: that
+terminal has it. `/import` and `rl import` are the same step on its own, and the panel says once
+per session when Claude has one that is not here.
 
 **What an assistant is told** is the context pack (`rl-cli/src/context.rs`, `rl context
 [--in <folder>]`), built from the code so it cannot drift: the words (run, folder, `global`,
