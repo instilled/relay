@@ -122,6 +122,9 @@ enum Mode {
     Form(Box<Form>),
     /// A question taken out of the list: its options, answered by number.
     Answer(String),
+    /// A join refused because someone holds the keyboard: `y` takes it from
+    /// them. The run, and who has it.
+    Take(String, String),
 }
 
 /// The line searching rather than taking work: what is typed is the filter,
@@ -728,7 +731,7 @@ impl App {
                             self.refresh().await;
                             match outcome {
                                 Ok(ended) => self.back_from_join(&id, ended, area).await,
-                                Err(e) => self.say(join_error(&e)),
+                                Err(e) => self.join_refused(id, &e),
                             }
                         }
                     }
@@ -1184,6 +1187,15 @@ impl App {
                 .await?;
         }
         Ok(())
+    }
+
+    /// A join that did not happen: someone has the keyboard — asked whether
+    /// to take it from them — or it failed.
+    fn join_refused(&mut self, id: String, e: &anyhow::Error) {
+        match held_by(e) {
+            Some(who) => self.mode = Mode::Take(id, who),
+            None => self.say(format!("join: {e:#}")),
+        }
     }
 
     /// The view goes for good: the stream died, or another run wants it.
@@ -2090,6 +2102,12 @@ impl App {
                 }
                 return Ok(());
             }
+            Mode::Take(id, _) => {
+                if k.code == KeyCode::Char('y') {
+                    self.attach = Some((id, true));
+                }
+                return Ok(());
+            }
             Mode::Dismiss(id) => {
                 if k.code == KeyCode::Char('y') {
                     self.dismiss(id).await;
@@ -2707,8 +2725,8 @@ impl App {
             }
             palette::Cmd::Join => match self.selected_run() {
                 Some(i) if !i.run.state.is_terminal() => {
-                    // Assertive: take the keyboard from whoever holds it.
-                    self.attach = Some((i.run.id.clone(), true));
+                    // Someone at the keyboard already: asked first, by name.
+                    self.attach = Some((i.run.id.clone(), false));
                 }
                 Some(_) => self.say("ended: nothing to join"),
                 None => self.say("nothing here to join"),
@@ -3491,6 +3509,7 @@ impl App {
         let title_of = |id: &str| self.run_by_id(id).map(|r| r.title.clone()).unwrap_or_default();
         match &self.mode {
             Mode::Stop(id) => return format!("stop {}? y / any key", title_of(id)),
+            Mode::Take(id, who) => return format!("{who} has {}'s keyboard · y takes it / any key", title_of(id)),
             Mode::Dismiss(id) => {
                 let t = self
                     .digest
@@ -3635,13 +3654,19 @@ fn group_count(rules: &[rows::Chip]) -> String {
 
 /// The word for a failed join: the one that matters is someone else holding
 /// the keyboard, which `/join` can take.
-fn join_error(e: &anyhow::Error) -> String {
-    if let Some(rpc) = e.downcast_ref::<rl_proto::rpc::RpcError>()
-        && rpc.code == rl_proto::rpc::RpcError::BUSY
-    {
-        return "someone holds the keyboard · /join takes it".into();
+/// Who holds the keyboard, when that is why a join was refused.
+fn held_by(e: &anyhow::Error) -> Option<String> {
+    let rpc = e.downcast_ref::<rl_proto::rpc::RpcError>()?;
+    if rpc.code != rl_proto::rpc::RpcError::BUSY {
+        return None;
     }
-    format!("join: {e:#}")
+    Some(
+        rpc.data
+            .as_ref()
+            .and_then(|d| d["joiner"].as_str())
+            .unwrap_or("someone")
+            .to_string(),
+    )
 }
 
 /// Bytes in words, near enough for a line of chrome.

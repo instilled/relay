@@ -200,7 +200,10 @@ sequenceDiagram
 ```
 
 Several watchers, one joiner; a second `join` is refused unless `take` turns the previous joiner
-into a watcher. Each viewer gets its own holder connection, and the supervisor's follow
+into a watcher. The joiner is a seat — `user@host` and which of their terminals (`terminal`, the
+attaching process) — so a second terminal of the same person is refused too, told it is "you in
+another terminal", rather than silently sharing the keyboard. The panel asks before it takes:
+`/join` on a held run says who has it, and `y` takes it over. Each viewer gets its own holder connection, and the supervisor's follow
 connection journals regardless — so a viewer leaving costs nothing and the run never notices.
 
 The panel (`rl` with no command, `rl-cli/src/tui`) is the same two calls behind one screen. It
