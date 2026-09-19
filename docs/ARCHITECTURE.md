@@ -586,14 +586,25 @@ assistants:
 ```
 
 Which CLIs are agents is not configured: the detection registry says (`detect/*.yaml`,
-`kind: agent`, `bins`, `headless`, and now `model_flag`, the flag that names a model), and `rld`
-looks for each on `PATH` when asked — `agent.list`, `rl agents`. An assistant resolves to an
-argv: the binary, the headless arguments, the model through the profile's flag, the extra
-arguments; the prompt goes last. Unset, it is the first available agent; a name the registry
+`kind: agent`, `bins`, `headless`, `model_flag`, the flag that names a model, and
+`small_model`, the quick one setup suggests), and `rld` looks for each on `PATH` when asked —
+`agent.list`, `rl agents`. Which of them the panel *offers* is the `agents` key
+(`agents: [claude, codex]`; unset, all of those here). An assistant resolves to an argv: the
+binary, the headless arguments, the model through the profile's flag, the extra arguments; the
+prompt goes last, or in place of `{prompt}` when the CLI takes it as a flag's value
+(`gemini -p {prompt}`). Unset, it is the first available agent; a name the registry
 does not know, or a `model` for a profile without `model_flag`, is an error, never a guess.
 `rl config` prints each resolved assistant and where it came from; `rl config edit` opens the
 file, and `rld` seeds it, all comments, when there is none. Later assistants (`triage`,
 `answer`) will be keys in the same map. The second key is `retention` (§7).
+
+**Setup.** The first start shows a guide before the list (`rl-cli/src/tui/setup.rs`), one
+question a screen with the answer already picked: which agents to offer, and who does
+summaries — the first of claude, codex, gemini that is here, on its `small_model`. Enter takes
+it, esc leaves that part of the file as it is. `rld` writes what was settled (`setup.save`,
+`rl-daemon/src/setup.rs`) by replacing only those keys' blocks, so comments and every other key
+stay. How far the guide got is `setup.seen` in the ledger's `meta`, not the file: a release that
+adds a step raises `SETUP_STEPS` and the guide shows again. `rl setup` goes through all of it.
 
 **What an assistant is told** is the context pack (`rl-cli/src/context.rs`, `rl context
 [--in <folder>]`), built from the code so it cannot drift: the words (run, folder, `global`,
@@ -750,7 +761,7 @@ Facts (`retention.runs`) are deliberately not a key yet.
                               workspaces, decisions, summaries
   schedules.yaml              user-level schedules; the file is the interface, the ledger keeps
                               versions (by sha256), pause state, last/next firing
-  config.yaml                 your defaults (`assistants:`, `retention:`, `workspaces:`); absent means defaults,
+  config.yaml                 your defaults (`agents:`, `assistants:`, `retention:`, `workspaces:`); absent means defaults,
                               unknown keys refused
   reactions.yaml              user-level rules: events → actions, or questions; same file-first
                               deal, same versioning (`rl on` appends to it)
@@ -765,7 +776,7 @@ Facts (`retention.runs`) are deliberately not a key yet.
                               (approved_hash == hash); an edit asks again
   reactions.yaml              the same, for rules; `rl up` loads and approves both
 
-detect/*.yaml                 in-tree, compiled in: generic, claude, codex, cursor, sh
+detect/*.yaml                 in-tree, compiled in: generic, claude, codex, cursor, gemini, opencode, sh
 scripts/{rl,rld,relay-dev}    dev shims: build if needed, run the debug binaries
 scripts/ci                    the CI checks, on Linux, in a container: the same three commands
                               ci.yml runs (fmt, clippy -D warnings, the suites), against its own

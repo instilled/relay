@@ -95,6 +95,8 @@ enum Cmd {
     Config(ConfigArgs),
     /// The agent CLIs Relay knows, and which are on this machine.
     Agents,
+    /// The setup guide: which agents the panel offers, who writes summaries.
+    Setup,
     /// What Relay tells an agent: the words, events, rule definitions, what is here, and the answer it wants.
     Context(ContextArgs),
     /// Plain words to `assistants.interpret`: a run or a rule, drafted; `--go` does it.
@@ -595,6 +597,12 @@ async fn main() -> Result<()> {
         Cmd::Every(a) => every(&home, a, cli.json).await,
         Cmd::Config(a) => config(&home, a, cli.json).await,
         Cmd::Agents => agents(&home, cli.json).await,
+        Cmd::Setup => {
+            if !std::io::IsTerminal::is_terminal(&std::io::stdout()) {
+                bail!("rl setup asks on the screen and needs a terminal; `rl config edit` changes the file");
+            }
+            rl_cli::tui::setup(&home).await
+        }
         Cmd::Context(a) => context(&home, a).await,
         Cmd::Interpret(a) => interpret(&home, a, cli.json).await,
         Cmd::Summarise(a) => summarise(&home, a, cli.json).await,
@@ -1844,6 +1852,10 @@ async fn config(home: &Home, a: ConfigArgs, json: bool) -> Result<()> {
                 None => println!("assistants.{job:<10} —  (no agent on this machine; see `rl agents`)"),
             }
         }
+        match r.config.agents.as_slice() {
+            [] => println!("agents                —  (unset: the panel offers every agent here)"),
+            a => println!("agents                {}  (config; `rl setup` asks)", a.join(", ")),
+        }
         match r.config.retention.as_ref().and_then(|x| x.journal.as_deref()) {
             Some(d) => println!("retention.journal     {d}  (config; `rl prune` runs it now, rld daily)"),
             None => println!("retention.journal     —  (unset: nothing is ever deleted)"),
@@ -2023,7 +2035,7 @@ async fn summarise(home: &Home, a: SummariseArgs, json: bool) -> Result<()> {
     Ok(())
 }
 
-const AGENT_HEADERS: &[&str] = &["AGENT", "BIN", "HEADLESS", "MODEL"];
+const AGENT_HEADERS: &[&str] = &["AGENT", "BIN", "HEADLESS", "MODEL", "OFFERED"];
 
 /// `rl agents`: what the registry knows, and what is here.
 /// zsh: `D` with the last exit and `A` from `precmd`, `C` from `preexec`, and
@@ -2102,6 +2114,7 @@ async fn agents(home: &Home, json: bool) -> Result<()> {
                 } else {
                     format!("{} <model>", a.model_flag.join(" "))
                 },
+                if a.offered { "yes" } else { "no (config: agents)" }.into(),
             ]
         })
         .collect();

@@ -1,0 +1,7 @@
+# Google's Gemini CLI. No hook API yet; PTY heuristics only. Its prompt is
+# the value of -p, so it goes in place of {prompt} rather than at the end.
+kind: agent
+bins: [gemini]
+headless: ["-p", "{prompt}"]
+model_flag: ["-m"]
+small_model: flash-lite   # its own alias for the smallest model

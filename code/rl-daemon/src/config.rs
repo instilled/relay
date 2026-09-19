@@ -25,6 +25,9 @@ pub struct Loaded {
 pub const SEED: &str = "\
 # Your Relay defaults. Absent keys mean defaults; a key Relay does not know is refused.
 # `rl config` shows what this resolves to; `rl config edit` opens this file.
+# `rl setup` walks through the main ones and writes them here.
+#
+# agents: [claude, codex] # the agent CLIs the panel offers; unset: all of them
 #
 # assistants:            # the agents Relay itself calls on, by job
 #   interpret: claude    # what you type at a / rl interpret in plain words -> a draft for your enter
@@ -87,8 +90,9 @@ fn read(file: &std::path::Path) -> Result<Option<Config>> {
         .with_context(|| format!("{}", file.display()))
 }
 
-/// Every agent the registry knows, and whether it is on this machine.
-pub fn agents(registry: &Registry) -> Vec<AgentInfo> {
+/// Every agent the registry knows, whether it is on this machine, and
+/// whether the config has the panel offer it.
+pub fn agents(registry: &Registry, config: &Config) -> Vec<AgentInfo> {
     registry
         .agents()
         .map(|p| AgentInfo {
@@ -97,6 +101,8 @@ pub fn agents(registry: &Registry) -> Vec<AgentInfo> {
             bins: p.bins.clone(),
             headless: p.headless.clone(),
             model_flag: p.model_flag.clone(),
+            small_model: p.small_model.clone(),
+            offered: config.agents.is_empty() || config.agents.contains(&p.name),
         })
         .collect()
 }
@@ -158,10 +164,17 @@ pub fn resolve(
 }
 
 pub fn report(loaded: &Loaded, registry: &Registry) -> ConfigReport {
-    let agents = agents(registry);
+    let agents = agents(registry, &loaded.config);
     let mut errors = Vec::new();
     if let Some(e) = &loaded.error {
         errors.push(e.clone());
+    }
+    for a in &loaded.config.agents {
+        if !agents.iter().any(|x| &x.name == a) {
+            errors.push(format!(
+                "agents: `{a}` is not an agent the registry knows; a detect/{a}.yaml would make it one"
+            ));
+        }
     }
     if let Some(r) = &loaded.config.retention
         && let Some(j) = &r.journal
@@ -199,6 +212,8 @@ mod tests {
             bin: bin.map(PathBuf::from),
             headless: vec!["-p".into()],
             model_flag: model_flag.iter().map(|s| s.to_string()).collect(),
+            small_model: None,
+            offered: true,
         }
     }
 

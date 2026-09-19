@@ -29,7 +29,8 @@ pub async fn run(d: &Daemon, p: AssistantParams) -> Result<AssistantOutput> {
             ),
         }
     };
-    let agents = crate::config::agents(&d.registry);
+    // Which agents the panel offers has no say in who does Relay's own jobs.
+    let agents = crate::config::agents(&d.registry, &Default::default());
     let resolved = match crate::config::resolve(&p.job, named.as_ref(), &agents) {
         Ok(Some(r)) => r,
         Ok(None) => bail!("no agent on this machine to ask; `rl agents` says which Relay knows"),
@@ -48,8 +49,7 @@ pub async fn run(d: &Daemon, p: AssistantParams) -> Result<AssistantOutput> {
             .unsigned_abs(),
         None => DEFAULT_TIMEOUT,
     };
-    let mut argv = resolved.argv.clone();
-    argv.push(p.prompt);
+    let argv = rl_detect::registry::with_prompt(resolved.argv.clone(), p.prompt);
     let spec = RunSpec {
         argv,
         kind: RunKind::Agent,

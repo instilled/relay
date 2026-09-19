@@ -3,6 +3,7 @@
 //! do nothing. Keys are added one at a time, when a real need shows up.
 //!
 //! ```yaml
+//! agents: [claude, codex]        # the agents the panel offers; unset: all of them
 //! assistants:
 //!   interpret: claude            # or, with a model and extra arguments:
 //!   interpret: { agent: claude, model: claude-haiku-4-5-20251001, args: ["--max-turns", "1"] }
@@ -17,6 +18,10 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
+    /// The agent CLIs the panel offers to start, by profile name. Empty: all
+    /// of them. `rl setup` asks.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub agents: Vec<String>,
     /// The agents Relay itself calls on, by job.
     #[serde(default, skip_serializing_if = "Assistants::is_empty")]
     pub assistants: Assistants,
@@ -209,6 +214,13 @@ mod tests {
         assert_eq!(c.retention.unwrap().journal.as_deref(), Some("7d"));
         let e = serde_json::from_str::<Config>(r#"{"retention":{"runs":"1y"}}"#).unwrap_err();
         assert!(e.to_string().contains("unknown field `runs`"), "{e}");
+    }
+
+    #[test]
+    fn the_agents_offered_are_names() {
+        let c: Config = serde_json::from_str(r#"{"agents":["claude","gemini"]}"#).unwrap();
+        assert_eq!(c.agents, ["claude", "gemini"]);
+        assert!(Config::default().agents.is_empty());
     }
 
     #[test]
