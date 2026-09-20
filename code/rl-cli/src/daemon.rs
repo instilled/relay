@@ -25,6 +25,16 @@ pub async fn status(home: &Home) -> Result<Option<DaemonInfo>> {
     }
 }
 
+/// A connection when rld is running, `None` when it is not: for what there
+/// is no point starting a daemon for.
+pub async fn connect_if_running(home: &Home) -> Result<Option<Client>> {
+    match Client::connect(home).await {
+        Ok(c) => Ok(Some(c)),
+        Err(e) if e.downcast_ref::<NotRunning>().is_some() => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
 /// Returns the daemon info and whether this call started it.
 pub async fn start(home: &Home) -> Result<(DaemonInfo, bool)> {
     if let Some(info) = status(home).await? {

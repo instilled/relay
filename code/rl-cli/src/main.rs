@@ -471,8 +471,12 @@ enum WorkspaceCmd {
 enum DaemonCmd {
     /// Start rld if it is not already running.
     Start,
-    /// Ask rld to exit. Running sessions are untouched.
-    Stop,
+    /// Ask rld to exit. Running sessions are untouched unless --with-runs.
+    Stop {
+        /// Stop the runs first, so nothing is left holding a terminal.
+        #[arg(long)]
+        with_runs: bool,
+    },
     /// Show whether rld is running.
     Status,
     /// Stop then start. Running sessions are untouched.
@@ -1094,12 +1098,21 @@ async fn run_daemon(home: &Home, cmd: DaemonCmd, json: bool) -> Result<()> {
                 println!("rld already running · {}", describe(&info));
             }
         }
-        DaemonCmd::Stop => {
+        DaemonCmd::Stop { with_runs } => {
+            let runs = if with_runs {
+                stop_every_run(home, json).await?
+            } else {
+                0
+            };
             let stopped = daemon::stop(home).await?;
             if json {
-                println!("{}", json!({ "stopped": stopped }));
+                println!("{}", json!({ "stopped": stopped, "runs_stopped": runs }));
             } else if stopped {
-                println!("rld stopped");
+                let also = match runs {
+                    0 => String::new(),
+                    n => format!(" · {n} run{} stopped", if n == 1 { "" } else { "s" }),
+                };
+                println!("rld stopped{also}");
             } else {
                 println!("rld was not running");
             }
@@ -1868,6 +1881,15 @@ async fn config(home: &Home, a: ConfigArgs, json: bool) -> Result<()> {
             Some(d) => println!("retention.journal     {d}  (config; `rl prune` runs it now, rld daily)"),
             None => println!("retention.journal     —  (unset: nothing is ever deleted)"),
         }
+        match r.config.runs.reap_after.as_deref() {
+            Some(s) => {
+                println!("runs.reap_after      {s}  (config; with nobody attached that long, a run stops itself)")
+            }
+            None => println!(
+                "runs.reap_after      {}  (default; `never` keeps a run whatever happens to rld)",
+                rl_proto::config::DEFAULT_REAP
+            ),
+        }
         match r.config.workspaces.badges.as_slice() {
             [] => println!("workspaces.badges     —  (unset: a header shows the branch alone; gh-pr adds the open PR)"),
             b => println!(
@@ -1884,6 +1906,42 @@ async fn config(home: &Home, a: ConfigArgs, json: bool) -> Result<()> {
     } else {
         std::process::exit(1)
     }
+}
+
+/// `rl daemon stop --with-runs`: every live run stopped before the daemon
+/// goes, so a throwaway home leaves nothing behind. A run that will not stop
+/// is reported and the rest still go.
+async fn stop_every_run(home: &Home, json: bool) -> Result<usize> {
+    let Some(mut rpc) = daemon::connect_if_running(home).await? else {
+        return Ok(0);
+    };
+    let live: Vec<rl_proto::types::Run> = rpc
+        .call::<RunList>(RunFilter {
+            active_only: true,
+            ..Default::default()
+        })
+        .await?;
+    let mut stopped = 0;
+    for run in live {
+        match rpc
+            .call::<RunStop>(RunStopParams {
+                id: run.id.clone(),
+                force: false,
+            })
+            .await
+        {
+            Ok(_) => stopped += 1,
+            Err(e) if !json => eprintln!("{}: {e:#}", run.title),
+            Err(_) => {}
+        }
+        // A holder lingers after its child so a daemon that was away can
+        // still read the exit. Nobody is coming: ask it to go.
+        let socket = home.session_socket(&run.id);
+        if let Ok((_, mut s)) = rl_session::client::Session::attach(&socket, false).await {
+            let _ = s.close().await;
+        }
+    }
+    Ok(stopped)
 }
 
 /// `rl prune` (once `rl gc`): retention, now — the panel's `/prune`.

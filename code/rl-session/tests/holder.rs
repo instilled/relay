@@ -151,6 +151,22 @@ async fn pty_lifecycle() {
 }
 
 #[tokio::test]
+async fn nobody_for_a_while_lets_the_run_go() {
+    // A throwaway home left on disk: the socket is there, but no daemon will
+    // ever come back for the run.
+    let h = start_with(true, 60, &["--reap-after", "1"]);
+    let (hello, mut s) = attach(&h, true).await;
+    read_until(&mut s, "fake-cli ready").await;
+    // Attached: it stays.
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert!(alive(hello.holder_pid) && alive(hello.pid), "someone is here");
+    drop(s);
+    // Alone: the child is hung up and the holder goes.
+    wait_gone(&h.socket, hello.holder_pid).await;
+    assert!(!alive(hello.pid), "the child went with it");
+}
+
+#[tokio::test]
 async fn survives_client_going_away_and_replays() {
     let h = start(true, 60);
     let (hello, mut s) = attach(&h, true).await;
