@@ -777,15 +777,19 @@ draws it, pure from a `Graph` to a grid of styled cells:
 
 ## 7. On disk
 
-**Retention is the one delete, and only when told.** Relay is a memory: runs and events are
-never removed, `rl archive` only puts a run away. What does grow without bound is the journal — a
-run's terminal bytes in `session_io`, its `log/<run>.log` and `run/<run>.exit|.env` sidecars —
-and `retention: 30d` in `config.yaml` (or `retention: { journal: 30d }`) lets that go for runs
-ended longer ago than that (`rl-daemon/src/gc.rs`, `gc.run`). The run and its events stay, and
-a `run.journal_dropped` event on the run says how many bytes went; attaching to such a run shows
-nothing, honestly. `rl prune` does it now (`--older-than 12h` for once, `--dry-run` to count; `/prune` in the panel), `rld`
-does it once a day when the key is set (`meta.gc.last_at`); unset, nothing is ever deleted.
-Facts (`retention.runs`) are deliberately not a key yet.
+**Retention is the one delete.** Relay is a memory: runs and events are never removed, `rl
+archive` only puts a run away. What would otherwise grow without bound is the journal — a run's
+terminal bytes in `session_io`, its `log/<run>.log` and `run/<run>.exit|.env` sidecars. A run
+that redraws while it works writes megabytes an hour of it, and a finished run has no reason to
+keep them for good, so **`retention` defaults to `30d`**: the journal of a run that ended longer
+ago than that goes (`rl-daemon/src/gc.rs`, `gc.run`). `retention: 30d` in `config.yaml` (or
+`retention: { journal: 30d }`) sets another span; `retention: never` keeps every byte, and then
+`rl prune` refuses rather than guessing. The run and its events stay, and a `run.journal_dropped`
+event on the run says how many bytes went; attaching to such a run shows nothing, honestly. `rl
+prune` does it now (`--older-than 12h` for once, `--dry-run` to count; `/prune` in the panel),
+`rld` does it once a day (`meta.gc.last_at`). `gc.run` reports where the span came from —
+`asked`, `config` or `default` — so nobody has to guess which applied. Facts (`retention.runs`)
+are deliberately not a key yet.
 
 
 ```text

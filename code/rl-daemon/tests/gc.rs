@@ -1,6 +1,7 @@
 //! `gc.run`: the journal of runs ended longer ago than retention says goes —
 //! bytes, log and sidecars — the run and its events stay, and an event says
-//! so. A recent run is untouched. Without retention or `older_than`, refused.
+//! so. A recent run is untouched. With nothing set anywhere the default
+//! stands (30d); only `retention: never` holds everything.
 
 mod common;
 
@@ -50,9 +51,22 @@ async fn old_journals_go_and_the_facts_stay() {
     let log = home.session_log(&old.id);
     assert!(log.exists(), "the holder's log is there before");
 
-    // No retention set and nothing asked: refused, nothing touched.
+    // Nothing in the file and nothing asked: the default, not a refusal.
+    let r: GcReport = c.ok("gc.run", json!({ "dry_run": true })).await;
+    assert_eq!(
+        (r.runs, r.from.as_str(), r.older_than.as_str()),
+        (1, "default", "30d"),
+        "{r:?}"
+    );
+
+    // `never` is the way to keep everything, and it is refused loudly.
+    std::fs::write(home.config_file(), "retention: never\n").unwrap();
+    let _: serde_json::Value = c.ok("config.get", json!(null)).await;
     let r: Response = c.call("gc.run", json!({})).await;
-    assert!(r.error.unwrap().message.contains("no retention"));
+    assert!(r.error.unwrap().message.contains("`never`"));
+    let id = old.id.clone();
+    let still = ledger.call_blocking(move |db| session_io::out_bytes(db, &id)).unwrap();
+    assert!(still > 0, "`never` kept it");
 
     // Asked for 30d, dry: one run would go, with its bytes and files.
     let r: GcReport = c.ok("gc.run", json!({ "older_than": "30d", "dry_run": true })).await;
