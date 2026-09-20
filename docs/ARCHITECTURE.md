@@ -160,7 +160,11 @@ A holder waits for that. After its child exits it lingers (a day by default) wit
 the exit, and goes on `Close` — which the daemon sends once it has journaled the end — or when
 the linger runs out with nobody attached. Its socket is the only way anyone reaches it, so when
 the socket file is removed from under it (it looks once a minute) (the Relay home deleted, a test's temporary home cleaned
-up) no daemon can come back for the run: the holder hangs up a child still going and leaves.
+up) no daemon can come back for the run: the holder hangs up a child still going and leaves. It
+does the same when nobody at all has been attached for `runs.reap_after` (default `6h`): `rld`
+holds a connection for as long as it lives, so that only comes about when Relay itself is gone
+for good — a throwaway home, a daemon that never returns — and while it is gone nothing journals
+the run anyway.
 
 Starting the daemon is nobody's job. Every `rl` command that needs it goes through
 `daemon::ensure`: `rld` is spawned when the socket is not there (one line on stderr, `rld
@@ -198,6 +202,13 @@ sequenceDiagram
     D->>S: Input · Resize
     D->>L: session_io.append(in)
 ```
+
+A holder outlives `rld` on purpose — stopping the daemon is not stopping the work — but while no
+daemon is attached nothing journals the run or knows its state, and a throwaway home's holders
+would otherwise sit there for good. So a holder with nobody attached at all (no daemon, no
+viewer) for `runs.reap_after` (default `6h`, `never` to keep them) hangs up its child and leaves,
+as it already does when its socket is deleted. `rl daemon stop --with-runs` is the deliberate
+version: every live run stopped, each holder asked to go, then the daemon.
 
 Several watchers, one joiner; a second `join` is refused unless `take` turns the previous joiner
 into a watcher. The joiner is a seat — `user@host` and which of their terminals (`terminal`, the

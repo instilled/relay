@@ -38,6 +38,10 @@ pub const SEED: &str = "\
 # retention: 30d         # the only thing Relay deletes: a run's terminal bytes and log, once it
 #                        # ended this long ago. The run and its events stay. Unset: nothing goes.
 #
+# runs:
+#   reap_after: 6h       # a run outlives rld, but nothing journals it while no daemon is there:
+#                        # with nobody attached at all this long, it stops itself. `never` keeps it.
+#
 # workspaces:
 #   badges: [gh-pr]      # beside a git folder's branch: the open PR, by `gh` (~/.relay/plugins/gh-pr).
 #                        # Any command whose first line says something; asked when the branch
@@ -88,6 +92,22 @@ fn read(file: &std::path::Path) -> Result<Option<Config>> {
     serde_norway::from_str(&text)
         .map(Some)
         .with_context(|| format!("{}", file.display()))
+}
+
+/// How long a holder waits for a Relay that may never come back; `None` is
+/// forever. A value that is not a duration falls back to the default, and
+/// `report` says so.
+pub fn reap_after(config: &Config) -> Option<std::time::Duration> {
+    let said = config.runs.reap_after();
+    if rl_proto::config::is_never(said) {
+        return None;
+    }
+    let fallback = || rl_core::time::parse_duration(rl_proto::config::DEFAULT_REAP).expect("the default is a duration");
+    Some(
+        rl_core::time::parse_duration(said)
+            .unwrap_or_else(fallback)
+            .unsigned_abs(),
+    )
 }
 
 /// Every agent the registry knows, whether it is on this machine, and
@@ -181,6 +201,12 @@ pub fn report(loaded: &Loaded, registry: &Registry) -> ConfigReport {
         && rl_core::time::parse_duration(j).is_none()
     {
         errors.push(format!("retention: `{j}` is not a duration (30d, 12h)"));
+    }
+    if let Some(s) = &loaded.config.runs.reap_after
+        && !rl_proto::config::is_never(s)
+        && rl_core::time::parse_duration(s).is_none()
+    {
+        errors.push(format!("runs.reap_after: `{s}` is not a duration (6h, 30m) or `never`"));
     }
     let mut each = |job: &str| match resolve(job, loaded.config.assistants.for_job(job).flatten(), &agents) {
         Ok(r) => r,

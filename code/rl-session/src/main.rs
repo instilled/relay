@@ -51,6 +51,10 @@ struct Args {
     /// Seconds to stay around after the child exits with no client attached.
     #[arg(long, default_value_t = 86_400)]
     linger: u64,
+    /// Seconds with nobody attached — no daemon, no viewer — after which the
+    /// holder hangs up its child and leaves. 0 waits forever.
+    #[arg(long, default_value_t = 0)]
+    reap_after: u64,
     /// Seconds between checks that the socket is still there; gone, the
     /// holder leaves. For tests.
     #[arg(long, default_value_t = 60, hide = true)]
@@ -95,6 +99,7 @@ fn main() -> Result<()> {
         },
         linger: Duration::from_secs(args.linger),
         socket_check: Duration::from_secs(args.socket_check.max(1)),
+        reap_after: (args.reap_after > 0).then(|| Duration::from_secs(args.reap_after)),
     };
 
     if args.foreground {
