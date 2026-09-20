@@ -166,6 +166,46 @@ async fn nobody_for_a_while_lets_the_run_go() {
     assert!(!alive(hello.pid), "the child went with it");
 }
 
+/// Reads whole frames until `needle` has arrived, and says how many it took.
+async fn count_until(s: &mut Session, needle: &str) -> (usize, String) {
+    let mut acc = String::new();
+    let mut frames = 0;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !acc.contains(needle) {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let frame = tokio::time::timeout(remaining, s.recv())
+            .await
+            .unwrap_or_else(|_| panic!("timed out waiting for {needle:?}; got {acc:?}"))
+            .unwrap();
+        match frame {
+            Some(Frame::Output(b)) => {
+                frames += 1;
+                acc.push_str(&String::from_utf8_lossy(&b));
+            }
+            Some(_) => {}
+            None => panic!("holder closed before {needle:?}; got {acc:?}"),
+        }
+    }
+    (frames, acc)
+}
+
+/// A child writing as fast as it can used to wake the holder once per `printf`
+/// — a wake-up and an allocation for a few bytes — and, because the holder
+/// drained the pty the instant anything landed, the child never met the
+/// backpressure a terminal would have given it. Settling collapses the burst
+/// into a handful of reads.
+#[tokio::test]
+async fn a_burst_of_small_writes_arrives_in_a_few_chunks() {
+    const LINES: usize = 60;
+    let h = start_with(true, 60, &["--settle", "200"]);
+    let (_, mut s) = attach(&h, true).await;
+    read_until(&mut s, "fake-cli ready").await;
+    s.input(format!("burst {LINES}\n")).await.unwrap();
+    let (frames, out) = count_until(&mut s, &format!("tick {LINES}")).await;
+    assert!(out.matches("tick ").count() >= LINES, "every line arrives: {out:?}");
+    assert!(frames <= LINES / 4, "{LINES} writes should not cost {frames} chunks");
+}
+
 #[tokio::test]
 async fn survives_client_going_away_and_replays() {
     let h = start(true, 60);

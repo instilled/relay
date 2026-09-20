@@ -579,9 +579,17 @@ impl Supervisor {
         }
         // How long this run waits for a Relay that may never come back: read
         // now, so an edit takes effect on the next run rather than a restart.
-        if let Some(d) = crate::config::reap_after(&crate::config::load(&self.home).config) {
+        let config = crate::config::load(&self.home).config;
+        if let Some(d) = crate::config::reap_after(&config) {
             cmd.arg("--reap-after").arg(d.as_secs().to_string());
         }
+        // Zero is "read as fast as the child writes", which is what `off` means.
+        cmd.arg("--settle").arg(
+            crate::config::settle(&config)
+                .unwrap_or_default()
+                .as_millis()
+                .to_string(),
+        );
         cmd.arg("--").args(argv);
         cmd.stdin(Stdio::null())
             .stdout(Stdio::null())

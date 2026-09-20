@@ -166,6 +166,15 @@ holds a connection for as long as it lives, so that only comes about when Relay 
 for good — a throwaway home, a daemon that never returns — and while it is gone nothing journals
 the run anyway.
 
+Reading its child is the one thing a holder does constantly, so it does it on one thread: a
+worker per core only bought a cross-thread wake-up and a trip through a work-stealing scheduler
+for every chunk, which cost more than relaying the bytes did. The reader also waits `runs.settle`
+(default `5ms`, `off` to read flat out) once it has caught up, before reading again. Nothing is
+held back — what was read is already on its way — but the next read finds a whole burst rather
+than the few bytes one `printf` wrote. That is also the backpressure a terminal gives a program:
+without it the holder empties the pty the instant anything lands, so a child that redraws in a
+loop spins at full speed against a reader that may have no viewers at all.
+
 Starting the daemon is nobody's job. Every `rl` command that needs it goes through
 `daemon::ensure`: `rld` is spawned when the socket is not there (one line on stderr, `rld
 started`), and the running one is compared with this `rl` — the same release, nothing to say;

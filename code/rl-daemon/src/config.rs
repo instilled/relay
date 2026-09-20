@@ -41,6 +41,9 @@ pub const SEED: &str = "\
 # runs:
 #   reap_after: 6h       # a run outlives rld, but nothing journals it while no daemon is there:
 #                        # with nobody attached at all this long, it stops itself. `never` keeps it.
+#   settle: 5ms          # caught up with its child, a holder waits this long before reading again,
+#                        # so a burst arrives as one chunk. Costs the next chunk that much; `off`
+#                        # reads as fast as it can.
 #
 # workspaces:
 #   badges: [gh-pr]      # beside a git folder's branch: the open PR, by `gh` (~/.relay/plugins/gh-pr).
@@ -103,6 +106,23 @@ pub fn reap_after(config: &Config) -> Option<std::time::Duration> {
         return None;
     }
     let fallback = || rl_core::time::parse_duration(rl_proto::config::DEFAULT_REAP).expect("the default is a duration");
+    Some(
+        rl_core::time::parse_duration(said)
+            .unwrap_or_else(fallback)
+            .unsigned_abs(),
+    )
+}
+
+/// How long a holder lets a burst of its child's output gather before it
+/// reads again; `None` reads as fast as the child writes. A value that is not
+/// a duration falls back to the default, and `report` says so.
+pub fn settle(config: &Config) -> Option<std::time::Duration> {
+    let said = config.runs.settle();
+    if rl_proto::config::is_never(said) {
+        return None;
+    }
+    let fallback =
+        || rl_core::time::parse_duration(rl_proto::config::DEFAULT_SETTLE).expect("the default is a duration");
     Some(
         rl_core::time::parse_duration(said)
             .unwrap_or_else(fallback)
@@ -208,6 +228,12 @@ pub fn report(loaded: &Loaded, registry: &Registry) -> ConfigReport {
     {
         errors.push(format!("runs.reap_after: `{s}` is not a duration (6h, 30m) or `never`"));
     }
+    if let Some(s) = &loaded.config.runs.settle
+        && !rl_proto::config::is_never(s)
+        && rl_core::time::parse_duration(s).is_none()
+    {
+        errors.push(format!("runs.settle: `{s}` is not a duration (5ms, 20ms) or `off`"));
+    }
     let mut each = |job: &str| match resolve(job, loaded.config.assistants.for_job(job).flatten(), &agents) {
         Ok(r) => r,
         Err(e) => {
@@ -230,6 +256,26 @@ pub fn report(loaded: &Loaded, registry: &Registry) -> ConfigReport {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn with_runs(yaml: &str) -> Config {
+        serde_json::from_str(yaml).expect("config")
+    }
+
+    #[test]
+    fn settling_falls_back_to_the_default_and_off_means_no_waiting() {
+        use std::time::Duration;
+        assert_eq!(settle(&with_runs("{}")), Some(Duration::from_millis(5)));
+        assert_eq!(
+            settle(&with_runs(r#"{"runs":{"settle":"20ms"}}"#)),
+            Some(Duration::from_millis(20))
+        );
+        assert_eq!(settle(&with_runs(r#"{"runs":{"settle":"off"}}"#)), None);
+        // Not a duration: the default stands and `rl config` reports it.
+        assert_eq!(
+            settle(&with_runs(r#"{"runs":{"settle":"soon"}}"#)),
+            Some(Duration::from_millis(5))
+        );
+    }
 
     fn agent(name: &str, bin: Option<&str>, model_flag: &[&str]) -> AgentInfo {
         AgentInfo {

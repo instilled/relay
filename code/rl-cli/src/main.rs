@@ -1890,6 +1890,13 @@ async fn config(home: &Home, a: ConfigArgs, json: bool) -> Result<()> {
                 rl_proto::config::DEFAULT_REAP
             ),
         }
+        match r.config.runs.settle.as_deref() {
+            Some(s) => println!("runs.settle          {s}  (config; a burst of output gathers this long)"),
+            None => println!(
+                "runs.settle          {}  (default; `off` reads as fast as a run writes)",
+                rl_proto::config::DEFAULT_SETTLE
+            ),
+        }
         match r.config.workspaces.badges.as_slice() {
             [] => println!("workspaces.badges     —  (unset: a header shows the branch alone; gh-pr adds the open PR)"),
             b => println!(

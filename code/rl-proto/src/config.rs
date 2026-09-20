@@ -11,6 +11,7 @@
 //! retention: 30d                 # the journal of a run ended this long ago goes; or { journal: 30d }
 //! runs:
 //!   reap_after: 6h               # a run nothing has come for in this long stops itself; `never` keeps it
+//!   settle: 5ms                  # how long a burst of output may gather before the holder passes it on
 //! workspaces:
 //!   badges: [gh-pr]              # beside a git folder's branch on its header: `PR #95`
 //! ```
@@ -58,7 +59,8 @@ impl Workspaces {
     }
 }
 
-/// How long a run outlives Relay itself.
+/// How a run's holder behaves between Relay and its child: how long it
+/// waits for a Relay that may never return, and how eagerly it reads.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Runs {
@@ -69,11 +71,19 @@ pub struct Runs {
     /// stop piling up. `never` waits forever. Unset: `6h`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reap_after: Option<String>,
+    /// Having caught up with its child, the holder waits this long before
+    /// reading again, so a burst of small writes arrives as one chunk instead
+    /// of one wake-up each — and a child that never stops writing meets the
+    /// backpressure its terminal would give it anywhere else. It costs the
+    /// next chunk at most this much. `off` reads as fast as it can. Unset:
+    /// `5ms`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settle: Option<String>,
 }
 
 impl Runs {
     pub fn is_empty(&self) -> bool {
-        self.reap_after.is_none()
+        self.reap_after.is_none() && self.settle.is_none()
     }
 
     /// What the file says, or the default. `Some("never")` is not a duration:
@@ -81,12 +91,21 @@ impl Runs {
     pub fn reap_after(&self) -> &str {
         self.reap_after.as_deref().unwrap_or(DEFAULT_REAP)
     }
+
+    /// What the file says about settling, or the default.
+    pub fn settle(&self) -> &str {
+        self.settle.as_deref().unwrap_or(DEFAULT_SETTLE)
+    }
 }
 
 /// How long a run waits for a Relay that never comes back, unset.
 pub const DEFAULT_REAP: &str = "6h";
 
-/// Whether a `reap_after` value means "wait forever".
+/// How long a burst may gather before the holder passes it on, unset.
+pub const DEFAULT_SETTLE: &str = "5ms";
+
+/// Whether a `reap_after` value means "wait forever", or a `settle` one
+/// "do not wait at all".
 pub fn is_never(s: &str) -> bool {
     s.eq_ignore_ascii_case("never") || s.eq_ignore_ascii_case("off")
 }
@@ -265,6 +284,16 @@ mod tests {
         assert!(is_never(c.runs.reap_after()));
         let e = serde_json::from_str::<Config>(r#"{"runs":{"reap":"30m"}}"#).unwrap_err();
         assert!(e.to_string().contains("unknown field `reap`"), "{e}");
+    }
+
+    #[test]
+    fn a_burst_gathers_for_five_milliseconds_unless_told_otherwise() {
+        let c: Config = serde_json::from_str("{}").unwrap();
+        assert_eq!(c.runs.settle(), "5ms");
+        let c: Config = serde_json::from_str(r#"{"runs":{"settle":"20ms"}}"#).unwrap();
+        assert_eq!(c.runs.settle(), "20ms");
+        let c: Config = serde_json::from_str(r#"{"runs":{"settle":"off"}}"#).unwrap();
+        assert!(is_never(c.runs.settle()));
     }
 
     #[test]
