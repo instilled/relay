@@ -8,7 +8,8 @@
 //!   interpret: claude            # or, with a model and extra arguments:
 //!   interpret: { agent: claude, model: claude-haiku-4-5-20251001, args: ["--max-turns", "1"] }
 //!   summarise: claude            # a recap where the agent keeps none (/summarise, rl summarise)
-//! retention: 30d                 # the journal of a run ended this long ago goes; or { journal: 30d }
+//! retention: 30d                 # the journal of a run ended this long ago goes (the default);
+//!                                # `never` keeps every byte. Or { journal: 30d }
 //! runs:
 //!   reap_after: 6h               # a run nothing has come for in this long stops itself; `never` keeps it
 //!   settle: 5ms                  # how long a burst of output may gather before the holder passes it on
@@ -28,7 +29,9 @@ pub struct Config {
     /// The agents Relay itself calls on, by job.
     #[serde(default, skip_serializing_if = "Assistants::is_empty")]
     pub assistants: Assistants,
-    /// The one thing Relay deletes, and only when told: unset, nothing ever goes.
+    /// The one thing Relay deletes: a run's terminal bytes, once it ended
+    /// long enough ago. Unset means the default, not "never" — see
+    /// [`Config::retention_journal`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retention: Option<Retention>,
     /// What becomes of a run Relay has lost touch with.
@@ -51,6 +54,19 @@ pub struct Workspaces {
     /// a detached HEAD: no badge. Provisional: the plugin host takes it over.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub badges: Vec<String>,
+}
+
+impl Config {
+    /// How long a run's journal is kept after it ends: what the file says,
+    /// or the default. `never` keeps every byte for good. Only the terminal
+    /// bytes and log of an *ended* run are ever at stake — the run itself,
+    /// its events and its summary stay whatever this says.
+    pub fn retention_journal(&self) -> &str {
+        self.retention
+            .as_ref()
+            .and_then(|r| r.journal.as_deref())
+            .unwrap_or(DEFAULT_RETENTION)
+    }
 }
 
 impl Workspaces {
@@ -97,6 +113,9 @@ impl Runs {
         self.settle.as_deref().unwrap_or(DEFAULT_SETTLE)
     }
 }
+
+/// How long a run's journal is kept once it has ended, unset.
+pub const DEFAULT_RETENTION: &str = "30d";
 
 /// How long a run waits for a Relay that never comes back, unset.
 pub const DEFAULT_REAP: &str = "6h";
@@ -261,6 +280,18 @@ mod tests {
             serde_json::to_string(&c).unwrap(),
             r#"{"assistants":{"interpret":{"agent":"claude"}}}"#
         );
+    }
+
+    #[test]
+    fn an_ended_runs_journal_is_kept_for_thirty_days_unless_told_otherwise() {
+        let c: Config = serde_json::from_str("{}").unwrap();
+        assert_eq!(c.retention_journal(), "30d");
+        let c: Config = serde_json::from_str(r#"{"retention":"7d"}"#).unwrap();
+        assert_eq!(c.retention_journal(), "7d");
+        let c: Config = serde_json::from_str(r#"{"retention":{"journal":"7d"}}"#).unwrap();
+        assert_eq!(c.retention_journal(), "7d");
+        let c: Config = serde_json::from_str(r#"{"retention":"never"}"#).unwrap();
+        assert!(is_never(c.retention_journal()), "nothing ever goes, when asked");
     }
 
     #[test]

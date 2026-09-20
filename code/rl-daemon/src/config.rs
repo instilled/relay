@@ -36,7 +36,8 @@ pub const SEED: &str = "\
 #   # interpret: { agent: claude, model: claude-haiku-4-5-20251001, args: [\"--max-turns\", \"1\"] }
 #
 # retention: 30d         # the only thing Relay deletes: a run's terminal bytes and log, once it
-#                        # ended this long ago. The run and its events stay. Unset: nothing goes.
+#                        # ended this long ago. The run and its events stay. Unset: 30d.
+#                        # `never` keeps every byte for good.
 #
 # runs:
 #   reap_after: 6h       # a run outlives rld, but nothing journals it while no daemon is there:
@@ -218,9 +219,10 @@ pub fn report(loaded: &Loaded, registry: &Registry) -> ConfigReport {
     }
     if let Some(r) = &loaded.config.retention
         && let Some(j) = &r.journal
+        && !rl_proto::config::is_never(j)
         && rl_core::time::parse_duration(j).is_none()
     {
-        errors.push(format!("retention: `{j}` is not a duration (30d, 12h)"));
+        errors.push(format!("retention: `{j}` is not a duration (30d, 12h) or `never`"));
     }
     if let Some(s) = &loaded.config.runs.reap_after
         && !rl_proto::config::is_never(s)

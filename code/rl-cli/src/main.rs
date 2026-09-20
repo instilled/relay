@@ -43,7 +43,7 @@ const HOOK_TIMEOUT: Duration = Duration::from_millis(1500);
     name = "rl",
     version,
     about = "Relay — keeps your agents and long-running work alive",
-    after_help = "Every command starts rld if it is not running, and says so when the one running is another release.\nNothing is deleted on its own: `rl archive` puts a run away, `rl ls --all` still has it. `retention: 30d` in config.yaml lets the journal of old runs go (`rl prune`); runs and events stay.\n\nFor agents:\n  rl context    what Relay is, its events and rules, and the answer it wants — read this first\n  rl agents     the agent CLIs on this machine\n  rl --json …   every command, machine-readable"
+    after_help = "Every command starts rld if it is not running, and says so when the one running is another release.\nA run and its events are never deleted: `rl archive` puts a run away, `rl ls --all` still has it. What does go is the journal — the terminal bytes of a run that ended over `retention` ago, 30d unless config.yaml says otherwise (`never` keeps them; `rl prune` runs it now).\n\nFor agents:\n  rl context    what Relay is, its events and rules, and the answer it wants — read this first\n  rl agents     the agent CLIs on this machine\n  rl --json …   every command, machine-readable"
 )]
 struct Cli {
     /// Machine-readable output on every command.
@@ -105,7 +105,7 @@ enum Cmd {
     Interpret(InterpretArgs),
     /// A recap of a run, live or ended: its agent's own (Claude), its turns (Codex), or `assistants.summarise`'s. Kept by the run.
     Summarise(SummariseArgs),
-    /// Let the journal of old runs go, as `retention:` in config.yaml says (or --older-than). Runs and events stay.
+    /// Let the journal of old runs go, as `retention:` says (30d unless set, or --older-than). Runs and events stay.
     #[command(alias = "gc")]
     Prune(PruneArgs),
     /// Emit a custom event, from a command or plugin; reactions pick it up.
@@ -315,7 +315,7 @@ struct EveryArgs {
 
 #[derive(Args)]
 struct PruneArgs {
-    /// Runs ended longer ago than this (default: the config's retention).
+    /// Runs ended longer ago than this (default: the config's retention, or 30d).
     #[arg(long, value_name = "DURATION")]
     older_than: Option<String>,
     /// Only say what would go.
@@ -1878,8 +1878,14 @@ async fn config(home: &Home, a: ConfigArgs, json: bool) -> Result<()> {
             a => println!("agents                {}  (config; `rl setup` asks)", a.join(", ")),
         }
         match r.config.retention.as_ref().and_then(|x| x.journal.as_deref()) {
+            Some(d) if rl_proto::config::is_never(d) => {
+                println!("retention.journal     {d}  (config; no journal is ever dropped)")
+            }
             Some(d) => println!("retention.journal     {d}  (config; `rl prune` runs it now, rld daily)"),
-            None => println!("retention.journal     —  (unset: nothing is ever deleted)"),
+            None => println!(
+                "retention.journal     {}  (default; the terminal bytes of runs ended longer ago go, `never` keeps them)",
+                rl_proto::config::DEFAULT_RETENTION
+            ),
         }
         match r.config.runs.reap_after.as_deref() {
             Some(s) => {

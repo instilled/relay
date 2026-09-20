@@ -1,8 +1,8 @@
-//! Retention: the one thing Relay deletes, and only when told to. The
-//! journal — a run's terminal bytes, its log and sidecar files — goes once
-//! the run has ended longer ago than `retention: 30d` says; the run and its
-//! events stay, and an event says the journal went. `rl prune` does it now,
-//! `rld` does it daily.
+//! Retention: the one thing Relay deletes. The journal — a run's terminal
+//! bytes, its log and sidecar files — goes once the run has ended longer ago
+//! than `retention` says, `30d` unless the file says otherwise; the run and
+//! its events stay, and an event says the journal went. `retention: never`
+//! keeps every byte. `rl prune` does it now, `rld` does it daily.
 
 use crate::config::Loaded;
 use anyhow::{Context, Result, bail};
@@ -37,8 +37,11 @@ pub async fn run(
     let (spec, from) = match (older_than, retention) {
         (Some(s), _) => (s.to_string(), "asked"),
         (None, Some(s)) => (s.to_string(), "config"),
-        (None, None) => bail!("no retention: `retention: 30d` in config.yaml, or --older-than"),
+        (None, None) => (rl_proto::config::DEFAULT_RETENTION.to_string(), "default"),
     };
+    if rl_proto::config::is_never(&spec) {
+        bail!("retention is `never`: nothing goes. `rl prune --older-than 30d` to let some go anyway");
+    }
     let d = parse_duration(&spec).ok_or_else(|| anyhow::anyhow!("`{spec}` is not a duration (30d, 12h)"))?;
     let now = Timestamp::now();
     let before = now - d;
@@ -110,17 +113,13 @@ pub fn fmt_bytes(n: u64) -> String {
     }
 }
 
-/// Once a day, when the config says how long the journal is kept.
+/// Once a day, unless the config says the journal is kept for good.
 pub async fn daily(home: Home, ledger: Ledger, config: Arc<RwLock<Loaded>>, shutdown: CancellationToken) {
     loop {
-        let retention = config
-            .read()
-            .unwrap()
-            .config
-            .retention
-            .as_ref()
-            .and_then(|r| r.journal.clone());
-        if let Some(keep) = retention {
+        // Unset is not "never": a journal is kept 30d unless the file says
+        // otherwise, so an old run's terminal bytes do not pile up for good.
+        let keep = config.read().unwrap().config.retention_journal().to_string();
+        if !rl_proto::config::is_never(&keep) {
             let due = match ledger.call(|c| meta::get_i64(c, LAST_AT)).await {
                 Ok(Some(last)) => Timestamp::now().as_millisecond() - last >= DAILY_MS,
                 Ok(None) => true,
