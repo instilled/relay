@@ -639,6 +639,12 @@ run in that folder, hooks and all. A session open in a terminal is listed but no
 terminal has it. `/import` and `rl import` are the same step on its own, and the panel says once
 per session when Claude has one that is not here.
 
+Alone among the steps, this one picks nothing for you: it acts on something outside Relay — it
+stops a live agent — and going back does not undo it. So every box starts empty (`a` fills them
+all, for a real migration), enter on an untouched list leaves them with Claude, and enter on a
+picked one asks once more, naming what it is about to stop. Two deliberate answers, or nothing
+happens; holding enter through the guide moves nothing at all, which is a test.
+
 **What an assistant is told** is the context pack (`rl-cli/src/context.rs`, `rl context
 [--in <folder>]`), built from the code so it cannot drift: the words (run, folder, `global`,
 rule, job, question, agent, `when`), one line per event kind in `event_kind::ALL` (a kind
