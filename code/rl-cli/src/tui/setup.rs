@@ -1,6 +1,8 @@
 //! The setup guide: a few screens, one question each, with an answer
 //! already picked. Enter takes it, esc leaves that part as it is, ← goes
-//! back. The first start shows it before the list, and again when a release
+//! back. Moving sessions is the exception: nothing is picked for you and
+//! enter asks once more, naming what it would stop, because that step acts
+//! on something outside Relay and cannot be undone by going back. The first start shows it before the list, and again when a release
 //! adds a step; `rl setup` shows all of it whenever you like. What it
 //! settles goes into `config.yaml`, written by rld; how far it got goes into
 //! the ledger, so the file stays yours.
@@ -19,6 +21,11 @@ use rl_proto::methods::{
     AgentInfo, ClaudeSession, ImportMove, ImportMoveParams, ImportReport, SETUP_STEPS, SetupDone, SetupSave, SetupState,
 };
 use std::collections::HashMap;
+
+/// `s` when there is more than one.
+fn plural(n: usize) -> &'static str {
+    if n == 1 { "" } else { "s" }
+}
 
 /// Who is asked first for summaries: quick and cheap, in this order.
 const SUMMARISERS: &[&str] = &["claude", "codex", "gemini"];
@@ -87,6 +94,9 @@ pub struct Guide {
     was_summariser: Option<Assistant>,
     done: bool,
     quit: bool,
+    /// On the sessions step: the list has been answered and the guide is
+    /// asking whether to really stop them.
+    confirm: bool,
 }
 
 /// What leaving the guide came to.
@@ -147,8 +157,9 @@ impl Guide {
             .sessions
             .iter()
             .map(|s| Session {
-                // Ready to move, and not in the middle of a turn: picked.
-                on: s.run.is_none() && !s.in_a_terminal() && !s.working(),
+                // Never picked for you: enter on an untouched list must move
+                // nothing, so tapping through the guide cannot stop an agent.
+                on: false,
                 it: s.clone(),
             })
             .collect();
@@ -166,6 +177,7 @@ impl Guide {
             was_summariser: current.clone(),
             done: false,
             quit: false,
+            confirm: false,
         };
         g.summariser = current.or_else(|| g.summarisers().into_iter().next());
         g
@@ -175,16 +187,28 @@ impl Guide {
         self.steps[self.step]
     }
 
-    /// The sessions to move, once the guide is through.
+    /// Every session picked to move, confirmed or not.
+    fn picked(&self) -> Vec<&Session> {
+        self.sessions.iter().filter(|s| s.on && s.movable()).collect()
+    }
+
+    /// `a` on the sessions step: all of them, or none if all are already on.
+    fn all(&mut self) {
+        let want = self.picked().len() < self.sessions.iter().filter(|s| s.movable()).count();
+        for s in &mut self.sessions {
+            if s.movable() {
+                s.on = want;
+            }
+        }
+    }
+
+    /// The sessions to move, once the guide is through. Only ever what was
+    /// picked by hand and then confirmed.
     pub fn moving(&self) -> Vec<ClaudeSession> {
         if !self.answered[2] {
             return vec![];
         }
-        self.sessions
-            .iter()
-            .filter(|s| s.on && s.movable())
-            .map(|s| s.it.clone())
-            .collect()
+        self.picked().into_iter().map(|s| s.it.clone()).collect()
     }
 
     /// Everyone who could do summaries: the picked agents that are here,
@@ -241,6 +265,7 @@ impl Guide {
 
     fn next(&mut self, answered: bool) {
         self.answered[self.at() as usize] = answered;
+        self.confirm = false;
         if self.step + 1 == self.steps.len() {
             self.done = true;
         } else {
@@ -259,18 +284,27 @@ impl Guide {
                 self.cursor = (self.cursor + 1).min(self.rows().saturating_sub(1));
             }
             KeyCode::Left | KeyCode::BackTab => {
-                if self.step > 0 {
+                if self.confirm {
+                    self.confirm = false;
+                } else if self.step > 0 {
                     self.step -= 1;
                     self.enter_step();
                 }
             }
-            KeyCode::Char(' ') => self.choose(),
-            KeyCode::Enter => {
-                if self.at() == Step::Summaries {
+            KeyCode::Char(' ') if !self.confirm => self.choose(),
+            KeyCode::Char('a') if !self.confirm && self.at() == Step::Sessions => self.all(),
+            KeyCode::Enter => match self.at() {
+                // Nothing picked is an answer: it leaves them with Claude.
+                Step::Sessions if self.picked().is_empty() => self.next(false),
+                // Picked, but not yet confirmed: say what would stop, first.
+                Step::Sessions if !self.confirm => self.confirm = true,
+                Step::Summaries => {
                     self.choose();
+                    self.next(true);
                 }
-                self.next(true);
-            }
+                _ => self.next(true),
+            },
+            KeyCode::Esc if self.confirm => self.confirm = false,
             KeyCode::Esc => self.next(false),
             _ => {}
         }
@@ -355,13 +389,18 @@ impl Guide {
         match self.at() {
             Step::Agents => self.draw_agents(&mut lines),
             Step::Summaries => self.draw_summaries(&mut lines),
+            Step::Sessions if self.confirm => self.draw_confirm(&mut lines),
             Step::Sessions => self.draw_sessions(&mut lines),
         }
         lines.push(Line::raw(""));
         let keys = match self.at() {
             Step::Agents => "space in or out · enter next · esc leave as it is · ← back · q later",
             Step::Summaries => "↑↓ pick · enter save · esc leave as it is · ← back · q later",
-            Step::Sessions => "space in or out · enter moves them · esc leaves them with Claude · ← back · q later",
+            Step::Sessions if self.confirm => "enter stops them and moves them · esc back to the list",
+            Step::Sessions if self.picked().is_empty() => {
+                "space picks one · a all · enter leaves them with Claude · ← back · q later"
+            }
+            Step::Sessions => "space in or out · a all · enter asks once more · esc leaves them · ← back",
         };
         lines.push(Line::styled(keys, theme::dim()));
         f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
@@ -420,6 +459,11 @@ impl Guide {
             lines.push(Line::styled("  Claude has none running.", theme::dim()));
             return;
         }
+        lines.push(Line::styled(
+            "  Nothing is picked: space takes one, a takes all. Enter on an empty list leaves them be.",
+            theme::dim(),
+        ));
+        lines.push(Line::raw(""));
         let width = self
             .sessions
             .iter()
@@ -451,6 +495,42 @@ impl Guide {
                 }
             }
             lines.push(Line::from(spans));
+        }
+    }
+
+    /// The last word before anything outside Relay is touched: what would
+    /// stop, by name, and nothing else on the screen.
+    fn draw_confirm(&self, lines: &mut Vec<Line<'static>>) {
+        let picked = self.picked();
+        let n = picked.len();
+        lines.push(Line::styled(
+            format!(
+                "Stop {n} Claude session{} and move {} here?",
+                plural(n),
+                if n == 1 { "it" } else { "them" }
+            ),
+            theme::name(),
+        ));
+        lines.push(Line::styled(
+            "Claude stops holding each one — the conversation is kept — and Relay resumes it as a run.",
+            theme::dim(),
+        ));
+        lines.push(Line::raw(""));
+        let width = picked
+            .iter()
+            .map(|s| s.it.name.chars().count())
+            .max()
+            .unwrap_or(0)
+            .min(40);
+        for s in &picked {
+            lines.push(Line::from(vec![
+                Span::raw("    "),
+                Span::styled(
+                    format!("{:<width$}  ", super::rows::fit(&s.it.name, width)),
+                    theme::name(),
+                ),
+                Span::styled(rl_core::display_path(&s.it.cwd), theme::dim()),
+            ]));
         }
     }
 
@@ -725,22 +805,71 @@ mod tests {
         };
         let mut g = Guide::importing(&state(Config::default()), &sessions);
         assert_eq!(g.steps.len(), 1);
-        // Ready and idle: picked. Working, in a terminal, already here: not.
-        let on: Vec<&str> = g.sessions.iter().filter(|s| s.on).map(|s| s.it.name.as_str()).collect();
-        assert_eq!(on, ["done-one"]);
-        // A working one can still be picked by hand; the others cannot.
+        // Nothing is picked for you, whatever state it is in.
+        assert!(g.sessions.iter().all(|s| !s.on), "nothing picked to start");
+        // Picked by hand: a ready one and a working one. The others cannot be.
+        g.cursor = 0;
+        press(&mut g, KeyCode::Char(' '));
         g.cursor = 1;
         press(&mut g, KeyCode::Char(' '));
         g.cursor = 2;
         press(&mut g, KeyCode::Char(' '));
         g.cursor = 3;
         press(&mut g, KeyCode::Char(' '));
+        // The first enter only asks; nothing has moved yet.
+        press(&mut g, KeyCode::Enter);
+        assert!(g.confirm && !g.done, "it asks before it acts");
+        assert!(g.moving().is_empty(), "nothing moves while it is still asking");
         press(&mut g, KeyCode::Enter);
         assert!(g.done);
         let moving: Vec<String> = g.moving().into_iter().map(|s| s.name).collect();
         assert_eq!(moving, ["done-one", "busy-one"]);
         assert_eq!(g.sessions[2].said(), "open in a terminal · close it there first");
         assert_eq!(g.sessions[3].said(), "in Relay already");
+    }
+
+    /// The whole guide answered by holding enter must not stop an agent.
+    #[test]
+    fn enter_all_the_way_through_moves_nothing() {
+        let sessions = ImportReport {
+            sessions: vec![
+                session("one", Some("a1"), Some("done"), None),
+                session("two", Some("b2"), Some("done"), None),
+            ],
+            error: None,
+        };
+        let mut g = Guide::new(&state(Config::default()), &sessions);
+        for _ in 0..8 {
+            press(&mut g, KeyCode::Enter);
+        }
+        assert!(g.done);
+        assert!(g.moving().is_empty(), "holding enter moved {:?}", g.moving());
+    }
+
+    #[test]
+    fn a_picks_all_of_them_and_esc_backs_out_of_the_asking() {
+        let sessions = ImportReport {
+            sessions: vec![
+                session("one", Some("a1"), Some("done"), None),
+                session("two", Some("b2"), Some("done"), None),
+                session("here-already", Some("c3"), Some("done"), Some("r7")),
+            ],
+            error: None,
+        };
+        let mut g = Guide::importing(&state(Config::default()), &sessions);
+        press(&mut g, KeyCode::Char('a'));
+        assert_eq!(g.picked().len(), 2, "all that can move, and no more");
+        press(&mut g, KeyCode::Enter);
+        assert!(g.confirm);
+        // Second thoughts: back to the list, still picked, nothing moved.
+        press(&mut g, KeyCode::Esc);
+        assert!(!g.confirm && !g.done);
+        assert_eq!(g.picked().len(), 2);
+        // And `a` again takes them all back off.
+        press(&mut g, KeyCode::Char('a'));
+        assert!(g.picked().is_empty());
+        press(&mut g, KeyCode::Enter);
+        assert!(g.done && g.moving().is_empty(), "an empty list is an answer");
     }
 
     #[test]
@@ -888,5 +1017,33 @@ mod tests {
         assert!(text.contains("relay setup   1 of 3"), "{text}");
         assert!(text.contains("[x] claude"), "{text}");
         assert!(text.contains("[ ] cursor     not found"), "{text}");
+    }
+
+    #[test]
+    fn the_asking_names_what_would_stop() {
+        let sessions = ImportReport {
+            sessions: vec![
+                session("infra-auth", Some("a1"), Some("done"), None),
+                session("left-alone", Some("b2"), Some("done"), None),
+            ],
+            error: None,
+        };
+        let mut g = Guide::importing(&state(Config::default()), &sessions);
+        press(&mut g, KeyCode::Char(' '));
+        press(&mut g, KeyCode::Enter);
+        let backend = ratatui::backend::TestBackend::new(90, 16);
+        let mut t = ratatui::Terminal::new(backend).unwrap();
+        t.draw(|f| g.draw(f)).unwrap();
+        let text: String = t
+            .backend()
+            .buffer()
+            .content()
+            .chunks(90)
+            .map(|r| r.iter().map(|c| c.symbol()).collect::<String>() + "\n")
+            .collect();
+        assert!(text.contains("Stop 1 Claude session and move it here?"), "{text}");
+        assert!(text.contains("infra-auth"), "{text}");
+        assert!(!text.contains("left-alone"), "only what would stop: {text}");
+        assert!(text.contains("esc back to the list"), "{text}");
     }
 }
