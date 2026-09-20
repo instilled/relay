@@ -10,6 +10,12 @@
 //! Relay home deleted, a test's temporary home cleaned up — no daemon can ever
 //! come back for the run, so the holder hangs up its child and leaves rather
 //! than wait out a linger (or a child) nobody will collect.
+//!
+//! The socket can outlive its daemon, though — a throwaway home left on disk,
+//! a `rld` that never comes back — and then nothing journals the run or knows
+//! its state. So a holder that has had nobody attached at all for `reap_after`
+//! hangs up its child and leaves too. `rld` attaches for as long as it lives,
+//! so this only ever fires when Relay itself is gone.
 
 use crate::backend::{self, Resizer, Spec};
 use crate::exit::{Exit, write_exit_file};
@@ -45,6 +51,9 @@ pub struct Config {
     /// How often to check that the socket is still there. Nothing waits on
     /// an orphaned holder leaving, so this can be slow.
     pub socket_check: Duration,
+    /// Nobody attached — no daemon, no viewer — for this long: hang up the
+    /// child and leave. `None` waits forever.
+    pub reap_after: Option<Duration>,
 }
 
 struct Shared {
@@ -125,6 +134,9 @@ pub async fn serve(cfg: Config, ready: oneshot::Sender<()>) -> Result<()> {
     ));
     tokio::spawn(watch_signals(ctx.clone()));
     tokio::spawn(watch_socket(ctx.clone(), cfg.socket.clone(), cfg.socket_check));
+    if let Some(after) = cfg.reap_after {
+        tokio::spawn(watch_alone(ctx.clone(), after));
+    }
 
     loop {
         tokio::select! {
@@ -231,6 +243,30 @@ async fn watch_socket(ctx: Arc<Ctx>, socket: PathBuf, every: Duration) {
         }
         if std::fs::symlink_metadata(&socket).is_err() {
             info!(socket = %socket.display(), "socket removed; nobody can reach this session");
+            ctx.shutdown.cancel();
+            return;
+        }
+    }
+}
+
+/// Nobody at all for `after` — not even a daemon, which attaches for as long
+/// as it lives: the run is unsupervised and nothing is journaling it, so hang
+/// up the child and leave instead of holding it forever.
+async fn watch_alone(ctx: Arc<Ctx>, after: Duration) {
+    let every = (after / 10).clamp(Duration::from_secs(1), Duration::from_secs(60));
+    let mut alone = Duration::ZERO;
+    loop {
+        tokio::select! {
+            _ = ctx.shutdown.cancelled() => return,
+            _ = tokio::time::sleep(every) => {}
+        }
+        if ctx.clients.load(Ordering::SeqCst) > 0 {
+            alone = Duration::ZERO;
+            continue;
+        }
+        alone += every;
+        if alone >= after {
+            info!(?after, "nobody has been attached for this long; letting the run go");
             ctx.shutdown.cancel();
             return;
         }

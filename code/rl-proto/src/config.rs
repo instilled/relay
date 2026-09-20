@@ -9,6 +9,8 @@
 //!   interpret: { agent: claude, model: claude-haiku-4-5-20251001, args: ["--max-turns", "1"] }
 //!   summarise: claude            # a recap where the agent keeps none (/summarise, rl summarise)
 //! retention: 30d                 # the journal of a run ended this long ago goes; or { journal: 30d }
+//! runs:
+//!   reap_after: 6h               # a run nothing has come for in this long stops itself; `never` keeps it
 //! workspaces:
 //!   badges: [gh-pr]              # beside a git folder's branch on its header: `PR #95`
 //! ```
@@ -28,6 +30,9 @@ pub struct Config {
     /// The one thing Relay deletes, and only when told: unset, nothing ever goes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retention: Option<Retention>,
+    /// What becomes of a run Relay has lost touch with.
+    #[serde(default, skip_serializing_if = "Runs::is_empty")]
+    pub runs: Runs,
     /// What a folder's header says.
     #[serde(default, skip_serializing_if = "Workspaces::is_empty")]
     pub workspaces: Workspaces,
@@ -51,6 +56,39 @@ impl Workspaces {
     pub fn is_empty(&self) -> bool {
         self.badges.is_empty()
     }
+}
+
+/// How long a run outlives Relay itself.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Runs {
+    /// A run's holder keeps the run alive when `rld` stops — that is the
+    /// point — but nothing journals it or knows its state while no daemon is
+    /// there. With nobody attached at all for this long, the holder hangs up
+    /// its child and leaves: the throwaway homes of tests and one-off scripts
+    /// stop piling up. `never` waits forever. Unset: `6h`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reap_after: Option<String>,
+}
+
+impl Runs {
+    pub fn is_empty(&self) -> bool {
+        self.reap_after.is_none()
+    }
+
+    /// What the file says, or the default. `Some("never")` is not a duration:
+    /// the daemon reads it as "wait forever".
+    pub fn reap_after(&self) -> &str {
+        self.reap_after.as_deref().unwrap_or(DEFAULT_REAP)
+    }
+}
+
+/// How long a run waits for a Relay that never comes back, unset.
+pub const DEFAULT_REAP: &str = "6h";
+
+/// Whether a `reap_after` value means "wait forever".
+pub fn is_never(s: &str) -> bool {
+    s.eq_ignore_ascii_case("never") || s.eq_ignore_ascii_case("off")
 }
 
 /// What goes, and after how long. Written as one duration (the journal), or
@@ -214,6 +252,19 @@ mod tests {
         assert_eq!(c.retention.unwrap().journal.as_deref(), Some("7d"));
         let e = serde_json::from_str::<Config>(r#"{"retention":{"runs":"1y"}}"#).unwrap_err();
         assert!(e.to_string().contains("unknown field `runs`"), "{e}");
+    }
+
+    #[test]
+    fn a_run_outlives_relay_for_six_hours_unless_told_otherwise() {
+        let c: Config = serde_json::from_str("{}").unwrap();
+        assert_eq!(c.runs.reap_after(), "6h");
+        assert!(c.runs.is_empty());
+        let c: Config = serde_json::from_str(r#"{"runs":{"reap_after":"30m"}}"#).unwrap();
+        assert_eq!(c.runs.reap_after(), "30m");
+        let c: Config = serde_json::from_str(r#"{"runs":{"reap_after":"never"}}"#).unwrap();
+        assert!(is_never(c.runs.reap_after()));
+        let e = serde_json::from_str::<Config>(r#"{"runs":{"reap":"30m"}}"#).unwrap_err();
+        assert!(e.to_string().contains("unknown field `reap`"), "{e}");
     }
 
     #[test]
