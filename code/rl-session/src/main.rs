@@ -55,6 +55,11 @@ struct Args {
     /// holder hangs up its child and leaves. 0 waits forever.
     #[arg(long, default_value_t = 0)]
     reap_after: u64,
+    /// Milliseconds a reader that has caught up with the child waits before
+    /// reading again, so a burst arrives as one chunk. 0 reads as fast as the
+    /// child writes.
+    #[arg(long, default_value_t = 5)]
+    settle: u64,
     /// Seconds between checks that the socket is still there; gone, the
     /// holder leaves. For tests.
     #[arg(long, default_value_t = 60, hide = true)]
@@ -96,6 +101,7 @@ fn main() -> Result<()> {
             rows: args.rows,
             tty: !args.no_tty,
             input: !args.no_input,
+            settle: Duration::from_millis(args.settle),
         },
         linger: Duration::from_secs(args.linger),
         socket_check: Duration::from_secs(args.socket_check.max(1)),
@@ -152,7 +158,12 @@ fn init_logging() {
 }
 
 fn run(cfg: Config, mut ready_pipe: Option<std::fs::File>) -> Result<()> {
-    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+    // One child, one socket, a handful of watchers: all of it is waiting on
+    // I/O, and none of it is work to spread. A worker per core only meant a
+    // cross-thread wake-up and a trip through the work-stealing scheduler for
+    // every chunk the child wrote, which cost the holder more than relaying
+    // the bytes did — and left sixteen parked threads behind at rest.
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
     rt.block_on(async move {
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
         let mut task = tokio::spawn(holder::serve(cfg, ready_tx));

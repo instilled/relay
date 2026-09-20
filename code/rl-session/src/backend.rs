@@ -3,6 +3,14 @@
 //!
 //! The PTY and pipe readers are blocking, so each lives on its own thread and
 //! hands chunks to the async side over a channel.
+//!
+//! A reader that has caught up waits `settle` before reading again. Nothing is
+//! held back — what was read is already on its way — but the next read finds a
+//! whole burst instead of the few bytes one `printf` wrote, so the holder wakes
+//! once for it rather than hundreds of times. It is also the backpressure a
+//! terminal gives a program: without it the holder drains the pty the instant
+//! anything lands, and a child that redraws in a loop spins at full speed
+//! against a reader nobody is even watching.
 
 use crate::exit::{Exit, signal_name};
 use anyhow::{Context, Result};
@@ -11,12 +19,40 @@ use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, warn};
 
 const CHUNK: usize = 8192;
 /// Output chunks buffered between the reader thread and the holder.
 const OUTPUT_QUEUE: usize = 256;
+
+/// One reader thread's whole life: read, hand on, and — once caught up — let
+/// the next burst gather for `settle` before reading again.
+fn pump(mut r: impl Read, tx: mpsc::Sender<Vec<u8>>, settle: Duration, what: &str) {
+    let mut buf = vec![0u8; CHUNK];
+    loop {
+        match r.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                if tx.blocking_send(buf[..n].to_vec()).is_err() {
+                    break;
+                }
+                // A short read means we are level with the child: anything it
+                // writes next can gather instead of waking us per `printf`.
+                // A full one means there is a backlog, so go straight back.
+                if n < buf.len() && !settle.is_zero() {
+                    std::thread::sleep(settle);
+                }
+            }
+            // EIO on a pty master is the normal "slave closed" on Linux/macOS.
+            Err(e) => {
+                debug!(error = %e, stream = what, "read ended");
+                break;
+            }
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct Spec {
@@ -31,6 +67,9 @@ pub struct Spec {
     /// Whether the child reads what is typed (pipes only); without, its input
     /// is `/dev/null` and what is typed goes nowhere.
     pub input: bool,
+    /// How long a reader that has caught up waits before reading again; zero
+    /// reads as fast as the child writes.
+    pub settle: Duration,
 }
 
 pub type Resizer = Arc<dyn Fn(u16, u16) -> Result<()> + Send + Sync>;
@@ -79,29 +118,15 @@ fn spawn_pty(spec: &Spec) -> Result<Spawned> {
     drop(pair.slave);
     let pid = child.process_id().context("child has no pid")?;
 
-    let mut reader = pair.master.try_clone_reader().context("pty reader")?;
+    let reader = pair.master.try_clone_reader().context("pty reader")?;
     let mut writer = pair.master.take_writer().context("pty writer")?;
     let master: Arc<Mutex<Box<dyn MasterPty + Send>>> = Arc::new(Mutex::new(pair.master));
 
     let (out_tx, out_rx) = mpsc::channel::<Vec<u8>>(OUTPUT_QUEUE);
-    std::thread::Builder::new().name("pty-read".into()).spawn(move || {
-        let mut buf = vec![0u8; CHUNK];
-        loop {
-            match reader.read(&mut buf) {
-                Ok(0) => break,
-                Ok(n) => {
-                    if out_tx.blocking_send(buf[..n].to_vec()).is_err() {
-                        break;
-                    }
-                }
-                // EIO on the master is the normal "slave closed" on Linux/macOS.
-                Err(e) => {
-                    debug!(error = %e, "pty read ended");
-                    break;
-                }
-            }
-        }
-    })?;
+    let settle = spec.settle;
+    std::thread::Builder::new()
+        .name("pty-read".into())
+        .spawn(move || pump(reader, out_tx, settle, "pty"))?;
 
     let (in_tx, mut in_rx) = mpsc::channel::<Vec<u8>>(OUTPUT_QUEUE);
     std::thread::Builder::new().name("pty-write".into()).spawn(move || {
@@ -211,26 +236,14 @@ fn spawn_pipes(spec: &Spec) -> Result<Spawned> {
     let stderr = child.stderr.take().context("stderr")?;
 
     let (out_tx, out_rx) = mpsc::channel::<Vec<u8>>(OUTPUT_QUEUE);
-    for (name, mut r) in [
+    for (name, r) in [
         ("stdout", Box::new(stdout) as Box<dyn Read + Send>),
         ("stderr", Box::new(stderr)),
     ] {
-        let tx = out_tx.clone();
+        let (tx, settle) = (out_tx.clone(), spec.settle);
         std::thread::Builder::new()
             .name(format!("pipe-{name}"))
-            .spawn(move || {
-                let mut buf = vec![0u8; CHUNK];
-                loop {
-                    match r.read(&mut buf) {
-                        Ok(0) | Err(_) => break,
-                        Ok(n) => {
-                            if tx.blocking_send(buf[..n].to_vec()).is_err() {
-                                break;
-                            }
-                        }
-                    }
-                }
-            })?;
+            .spawn(move || pump(r, tx, settle, name))?;
     }
     drop(out_tx);
 
@@ -311,6 +324,7 @@ mod tests {
             rows: 24,
             tty: true,
             input: true,
+            settle: Duration::ZERO,
         };
         match spawn(&spec) {
             Ok(_) => panic!("empty argv must be rejected"),

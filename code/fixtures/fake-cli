@@ -3,6 +3,7 @@
 # Prints a banner and a `> ` prompt, then answers lines on stdin:
 #   size        -> the terminal size (or "no tty")
 #   sleep N     -> sleeps N seconds, then "slept"
+#   burst N     -> writes N short lines as fast as it can
 #   ask         -> asks a yes/no question (the next line is the answer)
 #   exit [N]    -> exits with N (default 0)
 #   anything    -> "echo: <line>"
@@ -12,6 +13,7 @@ while IFS= read -r line; do
   case "$line" in
     size) stty size 2>/dev/null || echo "no tty" ;;
     sleep\ *) sleep "${line#sleep }"; echo "slept" ;;
+    burst\ *) i=0; while [ "$i" -lt "${line#burst }" ]; do i=$((i + 1)); printf 'tick %s\n' "$i"; done ;;
     ask) printf 'Do you want to proceed? [y/N] ' ; continue ;;
     exit) echo "bye"; exit 0 ;;
     exit\ *) echo "bye"; exit "${line#exit }" ;;
