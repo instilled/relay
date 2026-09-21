@@ -217,7 +217,11 @@ daemon is attached nothing journals the run or knows its state, and a throwaway 
 would otherwise sit there for good. So a holder with nobody attached at all (no daemon, no
 viewer) for `runs.reap_after` (default `6h`, `never` to keep them) hangs up its child and leaves,
 as it already does when its socket is deleted. `rl daemon stop --with-runs` is the deliberate
-version: every live run stopped, each holder asked to go, then the daemon.
+version: every live run stopped, each holder asked to go, then the daemon. Asked, and then waited
+for: the `Close` is only heard if the connection outlives the holder's own handshake writes, so
+`rl` stays on the socket until the holder hangs up on it. Sending `Close` and dropping in the
+same breath breaks those writes, the holder's client task ends on the write error, the frame is
+never read, and the holder sits there for the rest of its linger.
 
 Several watchers, one joiner; a second `join` is refused unless `take` turns the previous joiner
 into a watcher. The joiner is a seat — `user@host` and which of their terminals (`terminal`, the

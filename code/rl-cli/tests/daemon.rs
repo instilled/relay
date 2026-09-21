@@ -104,9 +104,13 @@ fn stop_with_runs_takes_the_runs_too() {
         (v["stopped"].as_bool(), v["runs_stopped"].as_u64()),
         (Some(true), Some(1))
     );
-    // The holder's socket goes with the run it held.
+    // The holder's socket goes with the run it held. `stop` already waited
+    // for each holder to hang up, so the `Close` was certainly heard; what is
+    // left is the holder reaping its child, which it gives a few seconds of
+    // its own. Wait longer than that, so a loaded machine cannot read as the
+    // holder never having heard.
     let sock = tmp.path().join(format!("run/session-{id}.sock"));
-    for _ in 0..100 {
+    for _ in 0..200 {
         if !sock.exists() {
             return;
         }
