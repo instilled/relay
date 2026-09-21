@@ -38,6 +38,10 @@ use std::time::Duration;
 /// How long `rl hook` gives the daemon before letting the CLI carry on.
 const HOOK_TIMEOUT: Duration = Duration::from_millis(1500);
 
+/// How long `rl daemon stop --with-runs` waits for a holder to hang up after
+/// being asked to go, before moving on to the next run.
+const GOING: Duration = Duration::from_secs(5);
+
 #[derive(Parser)]
 #[command(
     name = "rl",
@@ -1952,6 +1956,12 @@ async fn stop_every_run(home: &Home, json: bool) -> Result<usize> {
         let socket = home.session_socket(&run.id);
         if let Ok((_, mut s)) = rl_session::client::Session::attach(&socket, false).await {
             let _ = s.close().await;
+            // And stay until it hangs up. Dropping the connection here would
+            // break the holder's own handshake writes mid-flight, its client
+            // task would end on the write error, and the `Close` waiting in
+            // the buffer would never be read — leaving the holder sitting on
+            // its socket for the whole linger.
+            let _ = tokio::time::timeout(GOING, async { while let Ok(Some(_)) = s.recv().await {} }).await;
         }
     }
     Ok(stopped)
