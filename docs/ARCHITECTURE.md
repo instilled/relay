@@ -212,6 +212,15 @@ sequenceDiagram
     D->>L: session_io.append(in)
 ```
 
+Every one of those frames is read through `FrameReader`, never a bare `read_frame`. Each hop
+reads inside a `select!` — the viewer against stdin and a ticker, `rld` against the holder and
+its own shutdown — and a plain read holds the bytes it has gathered on the future's stack, so
+losing the race throws them away. The next read then starts in the middle of a payload and takes
+the child's own output for a header: a scrollback replay of a few hundred kilobytes is the frame
+most likely to lose, and the run's text decodes into a length of some billions, which ends the
+connection. `FrameReader` keeps the partial header and payload in the reader itself, so a
+dropped future costs nothing and the next call carries on where it stopped.
+
 A holder outlives `rld` on purpose — stopping the daemon is not stopping the work — but while no
 daemon is attached nothing journals the run or knows its state, and a throwaway home's holders
 would otherwise sit there for good. So a holder with nobody attached at all (no daemon, no
