@@ -38,6 +38,9 @@ pub struct TermView {
     /// Latest word from the daemon and when it arrived, for the footer.
     pub note: Option<(String, std::time::Instant)>,
     pub ended: Option<i32>,
+    /// The stream went without an exit: the run was not seen to end, so what
+    /// is on screen is the last that was heard, not the last that happened.
+    pub lost: bool,
     /// How far back the view is, in rows; 0 is the live screen.
     scroll: usize,
     /// The watch stream is over. An ended run's output is still worth
@@ -79,6 +82,7 @@ impl TermView {
             pane,
             note: None,
             ended: None,
+            lost: false,
             scroll: 0,
             over: false,
             newlines,

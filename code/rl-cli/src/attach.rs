@@ -13,13 +13,17 @@
 use crate::client::Client;
 use anyhow::{Context, Result};
 use rl_core::Home;
-use rl_proto::methods::{AttachParams, DecisionFilter, DecisionList, RunAttach, RunFilter, RunList};
-use rl_proto::types::{AttachMode, RunState};
+use rl_proto::methods::{AttachParams, DecisionFilter, DecisionList, RunAttach, RunFilter, RunGet, RunId, RunList};
+use rl_proto::types::{AttachMode, Run, RunState};
 use rl_session::proto::{Frame, read_frame, write_frame};
 use std::io::IsTerminal;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
+
+/// How long to let rld notice that a holder has gone, before saying what
+/// became of a run whose stream was cut off.
+const SETTLING: Duration = Duration::from_millis(1500);
 
 /// A run on pipes ends its lines with `\n` alone, which a terminal takes as
 /// "down one" and not "back to the start": its output would climb down the
@@ -62,16 +66,21 @@ pub enum Ended {
     Left,
     /// The run ended while we were there: its code, and how in words.
     Exit { code: i32, how: String },
-    /// The connection went without a word.
-    Closed,
+    /// The connection went without an exit: what rld says became of the run,
+    /// and its code if it has one. `None` when rld could not be asked.
+    Closed { state: Option<RunState>, code: Option<i32> },
 }
 
 impl Ended {
-    /// The process exit code: the run's own if it ended, else 0.
+    /// The process exit code. Leaving on purpose is 0; a run that ended is
+    /// its own code; a connection that went without one is the run's code if
+    /// rld knows it, and 1 otherwise — never 0, which would read as having
+    /// watched a run finish cleanly.
     pub fn code(&self) -> i32 {
         match self {
             Ended::Exit { code, .. } => *code,
-            _ => 0,
+            Ended::Closed { code, .. } => code.filter(|c| *c != 0).unwrap_or(1),
+            Ended::Detached | Ended::Left => 0,
         }
     }
 }
@@ -210,10 +219,20 @@ pub async fn attach(home: &Home, o: Opts) -> Result<Ended> {
                 }
                 Some(_) => {}
                 None => {
-                    out.write_all(dim("[relay] connection closed").as_bytes()).await?;
+                    // The stream went without an Exit frame. What that means
+                    // is rld's to say: the run may have failed, or may be
+                    // going on without us. "connection closed" and exit 0
+                    // told a script it had watched a clean ending.
+                    let became = what_became(home, asker.as_mut(), &o.id).await;
+                    let (state, code) = match &became {
+                        Some(r) => (Some(r.state), r.exit_code),
+                        None => (None, None),
+                    };
+                    out.write_all(dim(&format!("[relay] {}", closed_words(&o.id, state))).as_bytes())
+                        .await?;
                     out.write_all(title("").as_bytes()).await?;
                     out.flush().await?;
-                    return Ok(Ended::Closed);
+                    return Ok(Ended::Closed { state, code });
                 }
             },
             bytes = stdin_rx.recv(), if stdin_open => match bytes {
@@ -296,6 +315,45 @@ impl Status {
 
 /// How many other runs wait on you: open questions, and runs that need
 /// input or are blocked without one — each counted once, this run left out.
+/// What rld says became of the run, over whichever connection is at hand.
+///
+/// The stream usually goes because the holder did, and rld is finding that
+/// out at the same moment: asked straight away it would still say "working",
+/// and `rl ls` would say "failed" a second later. So give it a moment to
+/// settle — but only a moment, and then say honestly that the run may still
+/// be going, which for a daemon that merely restarted is the truth.
+async fn what_became(home: &Home, asker: Option<&mut Client>, id: &str) -> Option<Run> {
+    let mut own;
+    let c = match asker {
+        Some(c) => c,
+        None => {
+            own = Client::connect(home).await.ok()?;
+            &mut own
+        }
+    };
+    let deadline = tokio::time::Instant::now() + SETTLING;
+    loop {
+        let run = c.call::<RunGet>(RunId { id: id.to_string() }).await.ok()?;
+        if run.state.is_terminal() || tokio::time::Instant::now() >= deadline {
+            return Some(run);
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// What to say when the stream went without an exit. Never "connection
+/// closed" alone: that is the one thing the person already knows, and it
+/// reads like nothing went wrong.
+fn closed_words(id: &str, state: Option<RunState>) -> String {
+    match state {
+        Some(RunState::Failed) => format!("run {id} failed · the session holder went away"),
+        Some(RunState::Finished) => format!("run {id} finished · the connection went with it"),
+        Some(RunState::Stopped) => format!("run {id} was stopped"),
+        Some(s) => format!("lost touch with run {id} · rld says it is {s}"),
+        None => format!("lost touch with run {id} · rld could not say what became of it"),
+    }
+}
+
 async fn need_you(c: &mut Client, this: &str) -> Result<usize> {
     let asked = c.call::<DecisionList>(DecisionFilter::default()).await?;
     let waiting = c
@@ -396,7 +454,79 @@ impl Drop for RawMode {
 
 #[cfg(test)]
 mod newline_tests {
-    use super::{Newlines, Status, count_need};
+    use super::{Ended, Newlines, Status, closed_words, count_need};
+    use rl_proto::types::RunState;
+
+    /// Leaving on purpose is the only thing that may exit 0. A stream that
+    /// went without an exit used to, which told a script it had watched a
+    /// run finish cleanly.
+    #[test]
+    fn only_leaving_on_purpose_is_a_clean_exit() {
+        assert_eq!(Ended::Detached.code(), 0);
+        assert_eq!(Ended::Left.code(), 0);
+        assert_eq!(
+            Ended::Exit {
+                code: 0,
+                how: "exit 0".into()
+            }
+            .code(),
+            0
+        );
+        assert_eq!(
+            Ended::Exit {
+                code: 3,
+                how: "exit 3".into()
+            }
+            .code(),
+            3
+        );
+        // Cut off: the run's own code when rld has one…
+        assert_eq!(
+            Ended::Closed {
+                state: Some(RunState::Failed),
+                code: Some(137)
+            }
+            .code(),
+            137
+        );
+        // …and never 0, whether rld said nothing or said zero.
+        assert_eq!(
+            Ended::Closed {
+                state: None,
+                code: None
+            }
+            .code(),
+            1
+        );
+        assert_eq!(
+            Ended::Closed {
+                state: Some(RunState::Failed),
+                code: Some(0)
+            }
+            .code(),
+            1
+        );
+    }
+
+    #[test]
+    fn a_cut_off_stream_says_what_became_of_the_run() {
+        assert_eq!(
+            closed_words("ab12", Some(RunState::Failed)),
+            "run ab12 failed · the session holder went away"
+        );
+        assert_eq!(
+            closed_words("ab12", Some(RunState::Working)),
+            "lost touch with run ab12 · rld says it is working"
+        );
+        assert_eq!(
+            closed_words("ab12", None),
+            "lost touch with run ab12 · rld could not say what became of it"
+        );
+        // Never the old words, which read as nothing having gone wrong.
+        for s in [None, Some(RunState::Failed), Some(RunState::Working)] {
+            assert!(!closed_words("ab12", s).contains("connection closed"));
+        }
+    }
 
     #[test]
     fn who_waits_is_counted_once_and_never_this_run() {

@@ -131,6 +131,24 @@ pub fn run_lines(
     if let Some(l) = &r.last_line {
         lines.push(fact("last", l.clone()));
     }
+    // The latest thing that went wrong around the run without ending it. A
+    // fact rather than a line in `lately`, which the newest events push out:
+    // output lost while Relay was away is worth knowing days later.
+    if let Some(t) = events
+        .iter()
+        .rev()
+        .find(|e| e.kind == rl_proto::types::event_kind::RUN_TROUBLE)
+    {
+        for (i, w) in wrap(
+            &format!("{} · {}", t.summary, fmt_age(t.at, now)),
+            width.saturating_sub(VALUE_COL + 1).max(20),
+        )
+        .into_iter()
+        .enumerate()
+        {
+            lines.push(fact(if i == 0 { "trouble" } else { "" }, w));
+        }
+    }
     // What the run raised itself: the reason a probe exists, and what a
     // reaction would have heard.
     if !item.emitted.is_empty() {
@@ -634,6 +652,39 @@ mod tests {
         );
         assert!(s.ends_with(" lately\n   nothing yet"), "{s}");
         assert!(!s.contains("k7x2m9qa"), "no id on screen: {s}");
+        assert!(!s.contains(" trouble"), "nothing went wrong, so nothing is said: {s}");
+
+        // Trouble keeps as a fact: `lately` shows the newest events and would
+        // push it out, but "output was lost" is worth knowing days later.
+        let quiet = Event {
+            id: 1,
+            at: "2026-09-10T10:00:00Z".parse().unwrap(),
+            workspace: "/home/f/relay".into(),
+            run: Some("k7x2m9qa".into()),
+            group_key: "r:k7x2m9qa".into(),
+            kind: "run.started".into(),
+            summary: "started `./test.sh`".into(),
+            data: None,
+        };
+        let older = Event {
+            id: 2,
+            kind: rl_proto::types::event_kind::RUN_TROUBLE.into(),
+            summary: "18 bytes of output were lost while Relay was not running".into(),
+            ..quiet.clone()
+        };
+        let newer = Event {
+            id: 3,
+            at: "2026-09-10T11:00:00Z".parse().unwrap(),
+            kind: rl_proto::types::event_kind::RUN_TROUBLE.into(),
+            summary: "the session holder went without reporting an exit (it closed the connection)".into(),
+            ..quiet.clone()
+        };
+        let s = text(&run_lines(&item, &[quiet, older, newer], None, &names, 100, now));
+        assert!(
+            s.contains(" trouble  the session holder went without reporting an exit"),
+            "the latest one, as a fact: {s}"
+        );
+        assert!(!s.contains(" trouble  18 bytes"), "only the latest: {s}");
 
         // Summarised: the assistant's words, marked as its, under the facts.
         let summary = Summary {

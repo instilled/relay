@@ -1,6 +1,9 @@
 //! J1: nothing dies when the daemon does. A second daemon on the same home
 //! picks up the sessions the first one left, resuming the journal at the exact
 //! byte it stopped at, or closes runs that ended while nobody was watching.
+//!
+//! What went wrong on the way is kept as a `run.trouble` event, so it is still
+//! there tomorrow rather than having flashed past in somebody's footer.
 
 mod common;
 
@@ -128,6 +131,13 @@ async fn output_beyond_the_ring_is_noted_as_a_gap() {
     let notes = notes(&home, &run.id);
     assert_eq!(notes.len(), 1, "{notes:?}");
     assert!(notes[0].contains("bytes of output were lost"), "{}", notes[0]);
+    // And it keeps: a warning nobody saw is a warning nobody can act on.
+    let evs: Vec<Event> = c
+        .ok("event.list", json!({ "run": run.id, "kinds": ["run.trouble"] }))
+        .await;
+    assert_eq!(evs.len(), 1, "{evs:?}");
+    assert!(evs[0].summary.contains("output were lost"), "{}", evs[0].summary);
+    assert!(evs[0].data.as_ref().unwrap()["bytes"].as_u64().unwrap() > 0);
     h.stop().await;
 }
 
@@ -202,6 +212,17 @@ async fn holder_lost_without_exit_is_failed() {
         .ok("event.list", json!({ "run": run.id, "kinds": ["run.failed"] }))
         .await;
     assert!(evs[0].summary.contains("went away"), "{}", evs[0].summary);
+    // The diagnosis keeps too, beside the outcome: what the holder did, and
+    // why rld could not reach it.
+    let evs: Vec<Event> = c
+        .ok("event.list", json!({ "run": run.id, "kinds": ["run.trouble"] }))
+        .await;
+    assert_eq!(evs.len(), 1, "{evs:?}");
+    assert!(
+        evs[0].summary.contains("without recording an exit"),
+        "{}",
+        evs[0].summary
+    );
     let active: Vec<Run> = c.ok("run.list", json!({ "active_only": true })).await;
     assert!(active.is_empty());
     h.stop().await;

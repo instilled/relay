@@ -144,6 +144,9 @@ fn event_words(kind: &str) -> Option<&'static str> {
         event_kind::DECISION_DISMISSED => "the person dismissed a question",
         event_kind::DECISION_EXPIRED => "a question expired, its default taken if it had one",
         event_kind::PLUGIN_INVOKED => "a plugin was run",
+        event_kind::RUN_TROUBLE => {
+            "something went wrong around a run without ending it (output lost while rld was away, a holder that went): the run may be fine, but part of its story is missing"
+        }
         event_kind::RUN_JOURNAL_DROPPED => "retention let a run's terminal bytes go; the run and its events stay",
         event_kind::RUN_SUMMARISED => {
             "a run was recapped: its agent's own, or an assistant's (/summarise in the panel, rl summarise)"
