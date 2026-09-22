@@ -223,6 +223,19 @@ for: the `Close` is only heard if the connection outlives the holder's own hands
 same breath breaks those writes, the holder's client task ends on the write error, the frame is
 never read, and the holder sits there for the rest of its linger.
 
+A stream can also end without an exit — the holder killed, the machine gone. That is not a run
+ending, and it is never told as one: `rl watch`/`rl join` ask rld what became of the run (giving
+it a moment to notice, or `rl ls` would disagree a second later), say it — "run ab12 failed · the
+session holder went away", or "lost touch with run ab12 · it may still be going" — and exit with
+the run's own code, or 1 when there is none. Only leaving on purpose exits 0. The panel keeps the
+terminal it was showing, marked `lost`: the last thing the run said is worth most at exactly the
+moment the connection breaks, and it used to be thrown away.
+
+What went wrong around a run without ending it is a `run.trouble` event: output lost while no
+daemon was there, a holder that went without reporting an exit. A `warn!` is for whoever reads
+the log; the event is for whoever has the run in front of them, and the pane keeps the latest as
+a `trouble` fact rather than letting `lately` push it out of sight.
+
 Several watchers, one joiner; a second `join` is refused unless `take` turns the previous joiner
 into a watcher. The joiner is a seat — `user@host` and which of their terminals (`terminal`, the
 attaching process) — so a second terminal of the same person is refused too, told it is "you in

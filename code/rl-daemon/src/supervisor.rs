@@ -394,7 +394,12 @@ impl Supervisor {
                         })
                         .await?;
                     if gap > 0 {
-                        warn!(id, gap, "output lost while away");
+                        self.trouble(
+                            &run,
+                            format!("{gap} bytes of output were lost while Relay was not running"),
+                            json!({ "bytes": gap }),
+                        )
+                        .await;
                     }
                     info!(
                         id,
@@ -417,7 +422,12 @@ impl Supervisor {
                         info!(id, %why, "holder gone; closing from exit sidecar");
                     } else {
                         report.lost += 1;
-                        warn!(id, %why, "holder gone and no exit recorded");
+                        self.trouble(
+                            &run,
+                            format!("the session holder went without recording an exit ({why})"),
+                            json!({ "why": why }),
+                        )
+                        .await;
                     }
                     self.finish(&run, false, None, exit).await;
                 }
@@ -653,6 +663,8 @@ impl Supervisor {
         let mut heur = Heuristics::new(profile, run.kind, Timestamp::now());
         let mut batch: Vec<u8> = Vec::new();
         let mut exit: Option<Exit> = None;
+        // Why the connection went, when it went without an exit.
+        let mut gone: Option<String> = None;
         let mut flush = tokio::time::interval(JOURNAL_FLUSH);
         flush.tick().await;
         let mut tick = tokio::time::interval(DETECT_TICK);
@@ -680,8 +692,8 @@ impl Supervisor {
                     }
                     Ok(Some(Frame::Exit(e))) => { exit = Some(e); break false; }
                     Ok(Some(_)) => {}
-                    Ok(None) => { warn!(id, "holder closed the connection"); break false; }
-                    Err(e) => { warn!(id, error = %e, "holder connection failed"); break false; }
+                    Ok(None) => { warn!(id, "holder closed the connection"); gone = Some("it closed the connection".to_string()); break false; }
+                    Err(e) => { warn!(id, error = %e, "holder connection failed"); gone = Some(format!("{e}")); break false; }
                 },
                 _ = flush.tick(), if !batch.is_empty() => {
                     self.flush(&id, &mut batch, heur.last_line(LAST_LINE_MAX)).await;
@@ -702,6 +714,18 @@ impl Supervisor {
 
         // No Exit frame: the holder went away. The sidecar may still tell us.
         let exit = exit.or_else(|| read_exit_file(&exit_file).ok().flatten());
+        // Only now is it trouble: a holder that wrote its exit and then closed
+        // did its job, and the sidecar has just been read.
+        if exit.is_none()
+            && let Some(why) = gone
+        {
+            self.trouble(
+                &run,
+                format!("the session holder went without reporting an exit ({why})"),
+                json!({ "why": why }),
+            )
+            .await;
+        }
         let stopping = live.stopping.load(Ordering::SeqCst);
         self.finish(&run, stopping, Some(&live), exit).await;
     }
@@ -778,6 +802,18 @@ impl Supervisor {
     }
 
     /// Records the end of a run and, if we are still attached, releases the holder.
+    /// Something went wrong around a run without ending it. A `warn!` is for
+    /// whoever reads the log later; this is for whoever has the run in front
+    /// of them, so it keeps rather than flashing past.
+    async fn trouble(&self, run: &Run, words: impl Into<String>, data: serde_json::Value) {
+        let words = words.into();
+        warn!(id = %run.id, %words, "run trouble");
+        let ev = NewEvent::for_run(run, Timestamp::now(), event_kind::RUN_TROUBLE, words).with_data(data);
+        if let Err(e) = self.ledger.call(move |c| events::append(c, &ev)).await {
+            warn!(error = %e, "recording run trouble");
+        }
+    }
+
     async fn finish(&self, run: &Run, stopping: bool, live: Option<&Live>, exit: Option<Exit>) {
         let now = Timestamp::now();
         let (state, kind, summary, data) = match &exit {
