@@ -13,7 +13,7 @@ use rl_core::Home;
 use rl_detect::ansi;
 use rl_proto::methods::{AttachInfo, AttachParams, RunAttach};
 use rl_proto::types::AttachMode;
-use rl_session::proto::{Frame, read_frame};
+use rl_session::proto::{Frame, FrameReader};
 use std::io;
 use tokio::io::BufReader;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
@@ -26,7 +26,10 @@ const SCROLLBACK_ROWS: usize = 10_000;
 pub struct TermView {
     pub id: String,
     pub info: AttachInfo,
-    rd: BufReader<OwnedReadHalf>,
+    /// Cancel-safe: the panel polls this inside a `select!` beside keys,
+    /// the refresh tick and every other source, so a half-read frame has to
+    /// survive losing that race.
+    rd: FrameReader<BufReader<OwnedReadHalf>>,
     _wr: OwnedWriteHalf,
     parser: vt100::Parser,
     /// Draws the box-drawing set as the characters it stands for. `vt100`
@@ -66,6 +69,7 @@ impl TermView {
             })
             .await?;
         let (rd, wr) = c.into_parts();
+        let rd = FrameReader::new(rd);
         let newlines = (!info.tty).then(crate::attach::Newlines::default);
         let (cols, rows) = if info.live && info.cols > 0 {
             (info.cols, info.rows)
@@ -95,7 +99,7 @@ impl TermView {
 
     /// Next frame from the watch connection. `Ok(false)` when the stream is over.
     pub async fn pump(&mut self) -> io::Result<bool> {
-        match read_frame(&mut self.rd).await? {
+        match self.rd.next().await? {
             None => {
                 self.over = true;
                 Ok(false)
