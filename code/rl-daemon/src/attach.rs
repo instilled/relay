@@ -16,7 +16,7 @@ use rl_proto::rpc::RpcError;
 use rl_proto::types::AttachMode;
 use rl_session::client::Session;
 use rl_session::exit::Exit;
-use rl_session::proto::{Frame, read_frame, write_frame};
+use rl_session::proto::{Frame, FrameReader, write_frame};
 use std::io;
 use std::sync::Arc;
 use std::time::Duration;
@@ -227,6 +227,9 @@ where
         return Ok(());
     };
 
+    // The viewer's frames, read cancel-safely: this read shares the loop
+    // below with the holder's output and rld's own shutdown.
+    let mut rd = FrameReader::new(rd);
     let (mut hrd, mut hwr) = holder.split();
     let mut notes_open = true;
     let mut size = (a.info.cols, a.info.rows);
@@ -237,7 +240,7 @@ where
                     write_frame(wr, &Frame::Note("daemon stopping; detached (the run keeps going)".into())).await?;
                     return Ok(());
                 }
-                frame = read_frame(rd) => match frame? {
+                frame = rd.next() => match frame? {
                     None => return Ok(()),
                     Some(Frame::Input(bytes)) => {
                         if a.joiner && live.is_joiner(&a.seat) {

@@ -1,6 +1,6 @@
 //! Client side of the holder protocol — what `rld` (and tests) use.
 
-use crate::proto::{Frame, Hello, read_frame, write_frame};
+use crate::proto::{Frame, FrameReader, Hello, write_frame};
 use anyhow::{Context, Result, bail};
 use std::io;
 use std::path::Path;
@@ -13,7 +13,10 @@ pub struct Session {
     wr: SessionWriter,
 }
 
-pub struct SessionReader(BufReader<OwnedReadHalf>);
+/// Cancel-safe: `rld` reads holder frames inside a `select!` on both the
+/// viewer path and the follow loop, and a half-read frame must survive
+/// losing that race — see [`FrameReader`].
+pub struct SessionReader(FrameReader<BufReader<OwnedReadHalf>>);
 pub struct SessionWriter(OwnedWriteHalf);
 
 impl Session {
@@ -32,7 +35,7 @@ impl Session {
             .with_context(|| format!("connecting to {}", socket.display()))?;
         let (rd, wr) = stream.into_split();
         let mut s = Self {
-            rd: SessionReader(BufReader::new(rd)),
+            rd: SessionReader(FrameReader::new(BufReader::new(rd))),
             wr: SessionWriter(wr),
         };
         s.wr.send(&Frame::Attach {
@@ -78,7 +81,7 @@ impl Session {
 
 impl SessionReader {
     pub async fn recv(&mut self) -> io::Result<Option<Frame>> {
-        read_frame(&mut self.0).await
+        self.0.next().await
     }
 }
 

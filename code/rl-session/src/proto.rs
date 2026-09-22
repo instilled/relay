@@ -4,6 +4,13 @@
 //!
 //! Frame = `tag: u8`, `len: u32` (big-endian), `payload`. Text payloads
 //! (`Hello`, `Exit`) are JSON; everything else is raw bytes or fixed-width.
+//!
+//! Read frames through [`FrameReader`], never [`read_frame`], anywhere the
+//! read shares a `select!` with anything else. `read_frame` holds a
+//! half-read frame on the stack of the future doing the reading, so losing
+//! that race drops those bytes for good and every read after it lands in the
+//! middle of a payload. [`FrameReader`] keeps the same state in the struct,
+//! so a poll that loses carries on where it left off.
 
 use crate::exit::Exit;
 use jiff::Timestamp;
@@ -158,7 +165,95 @@ pub async fn write_frame<W: AsyncWrite + Unpin>(w: &mut W, f: &Frame) -> io::Res
     w.flush().await
 }
 
+/// A frame reader that survives a lost `select!`.
+///
+/// The half-read frame lives here rather than on the stack of the future,
+/// which is the whole point: `select!` drops the losing branch's future, and
+/// with it anything that future was holding. A 256 KiB scrollback replay
+/// takes long enough to read that a ticker on another branch will interrupt
+/// it, and before this existed that quietly desynchronised the connection —
+/// every later read starting somewhere inside a payload.
+pub struct FrameReader<R> {
+    rd: R,
+    /// The header, as far as it has been read.
+    head: [u8; 5],
+    /// How much of `head` is there.
+    got: usize,
+    /// The payload being gathered, once the header is whole.
+    payload: Vec<u8>,
+    /// How much of `payload` is there.
+    filled: usize,
+}
+
+impl<R: AsyncRead + Unpin> FrameReader<R> {
+    pub fn new(rd: R) -> Self {
+        Self {
+            rd,
+            head: [0u8; 5],
+            got: 0,
+            payload: Vec::new(),
+            filled: 0,
+        }
+    }
+
+    pub fn into_inner(self) -> R {
+        self.rd
+    }
+
+    /// The next whole frame; `Ok(None)` on a clean EOF between frames.
+    ///
+    /// Cancel-safe: dropping the returned future between `await`s keeps
+    /// whatever has been read so far, and the next call carries on.
+    pub async fn next(&mut self) -> io::Result<Option<Frame>> {
+        while self.got < 5 {
+            let n = self.rd.read(&mut self.head[self.got..]).await?;
+            if n == 0 {
+                // Nothing at all: the sender hung up between frames, which is
+                // how a connection is meant to end. Part of a header: it went
+                // mid-frame, and that is a broken stream.
+                return if self.got == 0 {
+                    Ok(None)
+                } else {
+                    Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        format!("stream ended {} bytes into a frame header", self.got),
+                    ))
+                };
+            }
+            self.got += n;
+        }
+        let len = u32::from_be_bytes([self.head[1], self.head[2], self.head[3], self.head[4]]);
+        if len > MAX_PAYLOAD {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("frame of {len} bytes exceeds limit"),
+            ));
+        }
+        if self.payload.len() != len as usize {
+            self.payload = vec![0u8; len as usize];
+        }
+        while self.filled < self.payload.len() {
+            let n = self.rd.read(&mut self.payload[self.filled..]).await?;
+            if n == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    format!("stream ended {} bytes into a {len}-byte payload", self.filled),
+                ));
+            }
+            self.filled += n;
+        }
+        let tag = self.head[0];
+        let payload = std::mem::take(&mut self.payload);
+        self.got = 0;
+        self.filled = 0;
+        Frame::decode(tag, payload).map(Some)
+    }
+}
+
 /// `Ok(None)` on a clean EOF between frames.
+///
+/// Not cancel-safe: a half-read frame is lost with the future. Use
+/// [`FrameReader`] wherever the read shares a `select!`.
 pub async fn read_frame<R: AsyncRead + Unpin>(r: &mut R) -> io::Result<Option<Frame>> {
     let mut head = [0u8; 5];
     match r.read_exact(&mut head).await {
@@ -181,6 +276,68 @@ pub async fn read_frame<R: AsyncRead + Unpin>(r: &mut R) -> io::Result<Option<Fr
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The bug this type exists for: a big frame read inside a `select!`
+    /// that loses to a ticker. `read_frame` drops what it had read along
+    /// with its future, so the next read lands inside the payload and takes
+    /// the child's own output for a frame header.
+    ///
+    /// The frame is fed in slices with a poll between each, so the read is
+    /// cut short a known number of times rather than whenever the scheduler
+    /// happens to interleave.
+    #[tokio::test]
+    async fn a_frame_survives_losing_a_select() {
+        const CHUNK: usize = 1024;
+        // Bytes that would read as an absurd length if taken for a header.
+        let bytes = Frame::Output(vec![b'#'; 8 * CHUNK]).encode();
+        let (mut w, r) = tokio::io::duplex(2 * CHUNK);
+        let mut fr = FrameReader::new(r);
+
+        let mut cut_short = 0;
+        let mut sent = 0;
+        let frame = loop {
+            if sent < bytes.len() {
+                let end = (sent + CHUNK).min(bytes.len());
+                w.write_all(&bytes[sent..end]).await.unwrap();
+                sent = end;
+            }
+            // A zero timeout polls the read once and then drops it — the
+            // same cancellation `select!` performs, without a clock.
+            match tokio::time::timeout(std::time::Duration::ZERO, fr.next()).await {
+                Ok(f) => break f.unwrap().unwrap(),
+                Err(_) => cut_short += 1,
+            }
+            assert!(cut_short < 1000, "the read never finished");
+        };
+        assert!(cut_short >= 8, "cut short {cut_short} times, expected one per slice");
+        match frame {
+            Frame::Output(b) => {
+                assert_eq!(b.len(), 8 * CHUNK, "the whole payload, not a piece of it");
+                assert!(b.iter().all(|c| *c == b'#'), "and none of it shifted");
+            }
+            other => panic!("expected the output frame, got {other:?}"),
+        }
+
+        // And the stream is still aligned behind it.
+        write_frame(&mut w, &Frame::ReplayEnd).await.unwrap();
+        assert_eq!(fr.next().await.unwrap(), Some(Frame::ReplayEnd));
+        drop(w);
+        assert_eq!(fr.next().await.unwrap(), None, "a clean end between frames");
+    }
+
+    /// A sender that goes mid-frame is a broken stream, not a clean end.
+    #[tokio::test]
+    async fn a_stream_cut_mid_frame_is_an_error() {
+        let (mut w, r) = tokio::io::duplex(1024);
+        let mut bytes = Frame::Output(vec![b'x'; 40]).encode();
+        bytes.truncate(20);
+        tokio::io::AsyncWriteExt::write_all(&mut w, &bytes).await.unwrap();
+        drop(w);
+        let mut fr = FrameReader::new(r);
+        let e = fr.next().await.unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::UnexpectedEof, "{e}");
+        assert!(e.to_string().contains("into a 40-byte payload"), "{e}");
+    }
 
     #[tokio::test]
     async fn every_frame_roundtrips() {

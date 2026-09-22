@@ -15,7 +15,7 @@ use anyhow::{Context, Result};
 use rl_core::Home;
 use rl_proto::methods::{AttachParams, DecisionFilter, DecisionList, RunAttach, RunFilter, RunGet, RunId, RunList};
 use rl_proto::types::{AttachMode, Run, RunState};
-use rl_session::proto::{Frame, read_frame, write_frame};
+use rl_session::proto::{Frame, FrameReader, write_frame};
 use std::io::IsTerminal;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -107,7 +107,11 @@ pub async fn attach(home: &Home, o: Opts) -> Result<Ended> {
             terminal: Some(terminal()),
         })
         .await?;
-    let (mut rd, mut wr) = c.into_parts();
+    let (rd, mut wr) = c.into_parts();
+    // The scrollback replay is one frame of up to a few hundred kilobytes,
+    // and this read shares a `select!` with stdin and the "who needs you"
+    // ticker. Read it cancel-safely or a lost race eats the connection.
+    let mut rd = FrameReader::new(rd);
     let joined = o.mode == AttachMode::Join && info.live;
     let interactive = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
 
@@ -190,7 +194,7 @@ pub async fn attach(home: &Home, o: Opts) -> Result<Ended> {
 
     loop {
         tokio::select! {
-            frame = read_frame(&mut rd) => match frame? {
+            frame = rd.next() => match frame? {
                 Some(Frame::Output(b)) => {
                     match newlines.as_mut() {
                         Some(n) => out.write_all(&n.fix(&b)).await?,

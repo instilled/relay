@@ -19,7 +19,7 @@
 
 use crate::backend::{self, Resizer, Spec};
 use crate::exit::{Exit, write_exit_file};
-use crate::proto::{Frame, Hello, read_frame, write_frame};
+use crate::proto::{Frame, FrameReader, Hello, write_frame};
 use crate::ring::Ring;
 use anyhow::{Context, Result};
 use jiff::Timestamp;
@@ -297,9 +297,9 @@ async fn handle_client(ctx: Arc<Ctx>, stream: UnixStream) {
 
 async fn client_loop(ctx: &Ctx, stream: UnixStream) -> std::io::Result<()> {
     let (rd, mut wr) = stream.into_split();
-    let mut rd = BufReader::new(rd);
+    let mut rd = FrameReader::new(BufReader::new(rd));
 
-    let (replay, from) = match read_frame(&mut rd).await? {
+    let (replay, from) = match rd.next().await? {
         Some(Frame::Attach { replay, from }) => (replay, from),
         _ => return Ok(()),
     };
@@ -336,7 +336,7 @@ async fn client_loop(ctx: &Ctx, stream: UnixStream) -> std::io::Result<()> {
     loop {
         tokio::select! {
             _ = ctx.shutdown.cancelled() => return Ok(()),
-            frame = read_frame(&mut rd) => match frame? {
+            frame = rd.next() => match frame? {
                 None => return Ok(()),
                 Some(Frame::Input(bytes)) => { let _ = ctx.input.send(bytes).await; }
                 Some(Frame::Resize { cols, rows }) => {
