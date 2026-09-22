@@ -319,23 +319,19 @@ key disarms it, so nothing goes on a single slip (the way an agent view confirms
 is the same for leaving: once to ask, again to quit. A run still going is stopped, and a `ctrl-x`
 once it has ended removes it. Nothing is destroyed by any of this; that is retention's alone. Ended runs also leave on their own after a day;
 `/archive` is for the impatient. On the line: `rl archive <id>…`, `rl archive --all`. Nothing is ever deleted here; that is
-retention (§7). `enter` on a run opens its terminal, watching: a re-render of the run's output
-through a `vt100` screen (`tui/term.rs`), shown as a tile beside the list — the list stays, the
-line at the foot stays yours, arrows still walk the list, and `esc` closes the tile. It stays
-pinned to its run while you browse; another run's `enter` moves it. `/pane full` pops the tile to the
-whole screen. That re-render is right for a glance, but to *drive* a run you want the actual
-terminal — native scrolling, the mouse, the true size, no chrome. So `enter` again on the tile's
-run (or `/join`) hands it over: the panel steps out of ratatui and pipes the run straight to the
-real terminal, tmux-attach style — stdin is the run's input, its output is ours, `SIGWINCH` is a
-resize, and `ctrl-\` lets go, back to the list. This is the same passthrough `rl join <id>` uses
-(`rl-cli/src/attach.rs`), so it is also a standalone command: `tmux split-window 'rl join <id>'`
-puts a live pane wherever you like. Watching is only a re-render; joining is the run's own
-terminal. Stepping back from watching does not throw the view away — the watch connection stays
-open and goes on reading, so `enter` on that run again returns to it at once, where it was left,
-with nothing replayed. `pgup` and `pgdn` read back through what scrolled off — the screen keeps
-ten thousand rows above itself — and the footer says how far back you are. New output never yanks
-the view to the bottom. An ended run keeps what it printed after its holder has gone,
-to be read the same way. `^o` (or `/pane`) opens a pane of
+retention (§7). `enter` on a run still going is the run itself: the panel steps out of ratatui and
+pipes the run straight to the real terminal, tmux-attach style — stdin is the run's input, its
+output is ours, `SIGWINCH` is a resize — with native scrolling, the mouse, the true size and no
+chrome. `ctrl-\` lets go, back to the list as it was, the cursor on the run and no pane beside it.
+`/join` does the same. This is the passthrough `rl join <id>` uses (`rl-cli/src/attach.rs`), so it
+is also a standalone command: `tmux split-window 'rl join <id>'` puts a live pane wherever you like.
+There is no watching a run from the side without taking its keyboard; a glance is the list row's
+last line. `enter` on an ended run reads what it printed, kept after its holder has gone: a
+re-render through a `vt100` screen (`tui/term.rs`) in a tile beside the list — the list stays, the
+line at the foot stays yours, `esc` closes the tile, and `/pane full` pops it to the whole screen.
+`pgup` and `pgdn` read back through what scrolled off — the screen keeps ten thousand rows above
+itself — and the footer says how far back you are. The same tile is how a line sent to a folder's
+warm shell shows it running (below), and new output never yanks it to the bottom. `^o` (or `/pane`) opens a pane of
 facts beside the list (`tui/pane.rs`): a run's facts and recent events, a job's tally, a question
 and what can be done about it. A question stays one line on the list; selecting it opens the pane
 on it by itself (and moving off closes the pane again, unless it was open already), since a
@@ -345,8 +341,7 @@ when one did; and `dismiss`. `enter` on the question puts a caret on the first c
 walk them, `enter` takes one (space picks where several are taken), the number takes an option
 straight away, and a click on a choice's row takes it too. The pane is laid out to its width row
 for row, so the click lands on what it shows. Answering is `decision.take`, and the run it starts
-becomes the selection; `attach` selects the asking run and watches it as a tile, where `enter`
-again takes the keyboard.
+becomes the selection; `attach` selects the asking run and joins it, as `enter` on it would.
 The line answers too: on a question, a line that starts with an option — its number or its key,
 several joined by commas where it takes several — answers with that option and the rest of the
 line as the note (`1 only the checkout path`), and the line's hint says so before you send it.
@@ -363,8 +358,7 @@ run — a binary on `PATH`, a target in the folder, or a name your own shell kno
 functions, read from `$SHELL` once at startup and again on `/reload shell`) — is a shell line, and a
 leading `!` forces one. An agent is `run.start` in the folder of the row the cursor is on, sized to
 this screen; a fresh
-agent is one you mean to drive, so its terminal is handed to you at once (the raw passthrough
-above). A shell line does not start a run of its own: it goes to the folder's **warm shell** — one
+agent is selected on the list, and `enter` hands you its terminal (the raw passthrough above). A shell line does not start a run of its own: it goes to the folder's **warm shell** — one
 persistent `$SHELL -i` per project (`run.start`, tagged `shell`, spawned the first time a folder
 needs one and kept), so its rc is read once and its aliases and functions are there. The line is
 written to that shell's stdin (`run.input`, which feeds a live run's terminal over the daemon's own
