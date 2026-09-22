@@ -1,5 +1,5 @@
-//! The terminal screen: a run's live output rendered through a `vt100`
-//! screen, watched first, joined on the first keypress (J7).
+//! The terminal screen: a run's output rendered through a `vt100` screen —
+//! an ended run's to read, a warm shell's while a line runs in it (J7).
 //!
 //! Two daemon connections at most: the watch connection carries output for
 //! as long as this view lasts — which outlives stepping back to the list, so

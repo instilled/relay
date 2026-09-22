@@ -73,7 +73,7 @@ pub const ALL: &[Command] = &[
     Command {
         name: "join",
         args: "",
-        what: "take a run's terminal and its keyboard (enter watches it first)",
+        what: "take a run's terminal and its keyboard, as enter on it does",
         cmd: Cmd::Join,
     },
     Command {

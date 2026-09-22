@@ -784,7 +784,7 @@ impl App {
                             input = EventStream::new();
                             self.refresh().await;
                             match outcome {
-                                Ok(ended) => self.back_from_join(&id, ended, area).await,
+                                Ok(ended) => self.back_from_join(&id, ended),
                                 Err(e) => self.join_refused(id, &e),
                             }
                         }
@@ -1212,10 +1212,9 @@ impl App {
         self.select(Some(keys[next].clone()));
     }
 
-    /// Back from a join: to the run's terminal in the pane, as it was left
-    /// or as it ended, with a word on how it went. Only a connection that
-    /// went without a word lands on the facts.
-    async fn back_from_join(&mut self, id: &str, ended: crate::attach::Ended, area: Rect) {
+    /// Back from a join: to the list, with the cursor on the run and no pane
+    /// beside it, and a word on how it went.
+    fn back_from_join(&mut self, id: &str, ended: crate::attach::Ended) {
         use crate::attach::Ended;
         let title = self
             .run_by_id(id)
@@ -1223,16 +1222,16 @@ impl App {
             .unwrap_or_else(|| id.to_string());
         match ended {
             Ended::Closed { .. } => {
-                if let Some(t) = self.term.as_mut() {
+                if let Some(t) = self.term.as_mut().filter(|t| t.id == id) {
                     t.lost = true;
                 }
-                self.say(self.lost_words());
+                self.say(self.gone_words(id, &title));
             }
             Ended::Exit { how, .. } => self.say(format!("{title} ended ({how})")),
             Ended::Detached | Ended::Left => self.say(format!("let go of {title} · it keeps going")),
         }
         self.select(Some(format!("r:{id}")));
-        self.open_term(area).await;
+        self.hide_pane();
     }
 
     /// A paste, whole: into the line as it came, newlines and all, or a
@@ -1268,11 +1267,16 @@ impl App {
         let Some(t) = self.term.as_ref() else {
             return "lost the connection".into();
         };
+        self.gone_words(&t.id, &t.info.run.title)
+    }
+
+    /// The same, for run `id`, known as `title` if the list no longer has it.
+    fn gone_words(&self, id: &str, title: &str) -> String {
         let title = self
-            .run_by_id(&t.id)
+            .run_by_id(id)
             .map(|r| r.title.clone())
-            .unwrap_or_else(|| t.info.run.title.clone());
-        match self.run_by_id(&t.id).map(|r| r.state) {
+            .unwrap_or_else(|| title.to_string());
+        match self.run_by_id(id).map(|r| r.state) {
             Some(RunState::Failed) => format!("{title} failed · the session holder went away"),
             Some(RunState::Finished) => format!("{title} finished"),
             Some(RunState::Stopped) => format!("{title} was stopped"),
@@ -1296,10 +1300,9 @@ impl App {
     }
 
     /// Hide the side pane. `pane == Term` must not outlive `show_pane`: a
-    /// stale `Term` with the pane hidden makes `enter_row`'s "already
-    /// watching" check fire on a row that looks, on screen, like nothing is
-    /// open — see the invariant `leave_term` restores by always resetting to
-    /// `Facts`.
+    /// stale `Term` with the pane hidden would size and route keys for a tile
+    /// nobody can see — the invariant `leave_term` keeps by always resetting
+    /// to `Facts`.
     fn hide_pane(&mut self) {
         self.show_pane = false;
         self.auto_pane = false;
@@ -1360,9 +1363,10 @@ impl App {
 
     // ---- doing things ------------------------------------------------------
 
-    /// The selected run's terminal, full screen and watched. Taking the
-    /// keyboard is a separate step — `enter` again, or `/join` — which hands
-    /// the real terminal over (`raw::attach`), not this re-render.
+    /// The selected run's terminal, re-rendered in the pane: an ended run's
+    /// output to read, or a warm shell's as a line runs in it. Taking the
+    /// keyboard is `enter` on a live run, which hands the real terminal over
+    /// (`raw::attach`), not this re-render.
     async fn open_term(&mut self, area: Rect) {
         let Some(id) = self.selected_run().map(|i| i.run.id.clone()) else {
             self.say("nothing here to open");
@@ -1462,8 +1466,8 @@ impl App {
         }
     }
 
-    /// The run that asked, in its terminal: on the list, it is selected and
-    /// watched as a tile — `enter` again takes the keyboard, as on any run.
+    /// The run that asked, in its terminal: selected on the list and joined,
+    /// as `enter` on it would.
     async fn attach_to(&mut self, run: String, area: Rect) {
         if self.view == View::Graph {
             self.toggle_graph().await;
@@ -1474,7 +1478,7 @@ impl App {
             return;
         }
         self.select(Some(key));
-        self.open_term(area).await;
+        self.open_run(area).await;
     }
 
     /// "Not this". Whatever is typed on the line goes with it, as the reason.
@@ -1827,16 +1831,16 @@ impl App {
             flow: None,
         };
         let run = self.rpc.call::<RunStart>(spec).await?;
-        self.say(format!("started {}", run.title));
+        if run.kind == RunKind::Agent {
+            self.say(format!("started {} · enter joins it", run.title));
+        } else {
+            self.say(format!("started {}", run.title));
+        }
         if self.view == View::Graph {
             self.toggle_graph().await;
         }
         self.refresh().await;
         self.select(Some(format!("r:{}", run.id)));
-        if run.kind == RunKind::Agent {
-            // Watch first, like every other run: the next enter takes it.
-            self.open_term(area).await;
-        }
         Ok(())
     }
 
@@ -2528,19 +2532,8 @@ impl App {
             self.graph_enter();
             return Ok(());
         }
-        // A run under the cursor: watch it as a tile, or — if it is already the
-        // tile — take the real terminal (a live run only; ended runs are just
-        // read). Taking it hands over the terminal, so `main_loop` does it once
-        // ratatui has stepped aside.
-        if let Some(i) = self.selected_run() {
-            let id = i.run.id.clone();
-            let watching =
-                self.pane == Pane::Term && self.term.as_ref().is_some_and(|t| t.id == id && t.ended.is_none());
-            if watching {
-                self.attach = Some((id, false));
-            } else {
-                self.open_term(area).await;
-            }
+        if self.selected_run().is_some() {
+            self.open_run(area).await;
             return Ok(());
         }
         if self.selected_job().is_some() {
@@ -2561,10 +2554,26 @@ impl App {
             self.pane = Pane::Facts;
             self.show_pane = true;
         } else {
-            // Watch first — the next enter is what takes the keyboard.
-            self.open_term(area).await;
+            self.say("nothing here to open");
         }
         Ok(())
+    }
+
+    /// The run under the cursor, itself: one still going is joined — its
+    /// real terminal and its keyboard, handed over by `main_loop` once
+    /// ratatui has stepped aside — and an ended one is read in the pane.
+    async fn open_run(&mut self, area: Rect) {
+        let Some((id, ended)) = self
+            .selected_run()
+            .map(|i| (i.run.id.clone(), i.run.state.is_terminal()))
+        else {
+            return;
+        };
+        if ended {
+            self.open_term(area).await;
+        } else {
+            self.attach = Some((id, false));
+        }
     }
 
     /// Where the line is being typed: the folder of the row under the cursor,
@@ -3745,7 +3754,7 @@ impl App {
             Some(Row::Run(i)) if i.run.state.is_terminal() => {
                 format!("enter output · /summarise · ^x archives · ^t pins · {pane}")
             }
-            Some(Row::Run(_)) => format!("enter watches it · /join · ^x stops it · ^t pins · {pane}"),
+            Some(Row::Run(_)) => format!("enter joins it · ^x stops it · ^t pins · {pane}"),
             Some(Row::Group(h)) if h.workspace.is_some() => {
                 format!("enter its stats · /shell · ^g its wiring · /edit schedule · ^r renames · {pane}")
             }
