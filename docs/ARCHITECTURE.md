@@ -382,6 +382,15 @@ modifier is only there to catch where the terminal speaks the kitty keyboard pro
 (Ghostty, WezTerm, recent iTerm2), which the panel asks for on the way in and gives back on the
 way out; where it does not (Terminal.app), plain `enter` sends as always.
 
+Taking the terminal back from a run also means taking back its input. A run asks the terminal
+things — which modes it speaks, whether it synchronises output — and the answers arrive as input;
+one that lands after the hand-over is ours to read. So coming back drops whatever the terminal
+has queued (`tui/input.rs`), and the key reader is patched for the answers that arrive later still:
+crossterm 0.29 waited on after a `CSI ?` reply for a `u` or a `c`, and took every key after it into
+that one sequence, so the panel drew on and heard nothing until someone happened to type a `c`.
+`vendor/crossterm` is that release with the sequence ending at its final byte, patched in over
+crates.io from the workspace manifest until a release carries it.
+
 A shell you entered through Relay is still your own shell, so it is easy to lose track of being in
 one. Nothing of Relay's is ever drawn over a run's screen — the window title carries the status and
 the screen itself is left alone — so the mark is one Relay hands over rather than paints: every run
