@@ -19,6 +19,7 @@
 mod complete;
 pub mod form;
 mod graph;
+mod input;
 mod line;
 mod palette;
 mod pane;
@@ -527,6 +528,10 @@ fn kitty_supported() -> bool {
 /// Reporting every key as an escape code is what gives it somewhere to put the
 /// modifier (`CSI 13;2u`), which is what the line is watching for.
 fn enter_screen() -> ratatui::DefaultTerminal {
+    // And the input is whatever they left too: answers to questions a run put
+    // to the terminal just before letting go, which were never its keys and
+    // are not ours (see `input`).
+    input::discard_pending(std::io::stdin());
     // Coming back from a run or an editor, the screen is whatever they left:
     // a full-screen agent keeps its own alternate screen, its scroll region
     // and its colours when it is let go of mid-session, and every mode it
