@@ -214,12 +214,12 @@ Each job: **situation → want → so that**, then the herdr / old-ax baseline, 
 **Baseline.** herdr: click agent → live terminal. Old ax: `ax watch` / `ax join`.
 
 **Work to be done.**
-- `enter` on any run opens watch; any keypress escalates to join; `esc` returns.
+- `enter` on a live run joins its real terminal; `ctrl-\` returns to the list; an ended run's output is read in the pane.
 - Attach via the session holder (J1), replay scrollback, forward resize.
 - Multi-client: several watchers, one joiner; the joiner is visible to others.
 - Works over ssh with no extra protocol: `ssh box rl`.
 
-**Done when.** From the digest, `enter` on a blocked run shows Claude's permission prompt; `y` answers it; `esc` returns to the digest with the item cleared.
+**Done when.** From the digest, `enter` on a blocked run shows Claude's permission prompt; `y` answers it; `ctrl-\` returns to the digest with the item cleared.
 
 #### J8 · Rank by attention, not by layout
 
