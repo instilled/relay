@@ -1255,7 +1255,6 @@ impl App {
         }
     }
 
-    /// The view goes for good: the stream died, or another run wants it.
     /// A stream that went without an exit, in words. What rld last said the
     /// run was is the honest part: it may have failed, or it may be going on
     /// without us, and those are not the same news.
@@ -1275,6 +1274,7 @@ impl App {
         }
     }
 
+    /// The view goes for good: the stream died, or another run wants it.
     fn close_term(&mut self) {
         if self.term.is_some() {
             self.wide = false;
