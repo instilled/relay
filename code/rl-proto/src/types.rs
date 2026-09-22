@@ -432,6 +432,10 @@ pub mod event_kind {
     pub const DECISION_DISMISSED: &str = "decision.dismissed";
     pub const DECISION_EXPIRED: &str = "decision.expired";
     pub const PLUGIN_INVOKED: &str = "plugin.invoked";
+    /// Something went wrong around a run without ending it: output lost
+    /// while no daemon was there, a holder connection that failed, a holder
+    /// gone without an exit. A warning that would otherwise only flash.
+    pub const RUN_TROUBLE: &str = "run.trouble";
     /// Retention took a run's journal; the run and its events stay.
     pub const RUN_JOURNAL_DROPPED: &str = "run.journal_dropped";
     /// A run was recapped: its agent's own, or an assistant's (`summaries`).
@@ -447,6 +451,7 @@ pub mod event_kind {
         RUN_FINISHED,
         RUN_FAILED,
         RUN_STOPPED,
+        RUN_TROUBLE,
         COMMIT_LANDED,
         BRANCH_DONE,
         SCHEDULE_FIRED,

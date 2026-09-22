@@ -38,6 +38,28 @@ async fn runs_caused_by(c: &mut Conn, cause: &str) -> Vec<Run> {
     c.ok("run.list", json!({ "cause": cause, "limit": 50 })).await
 }
 
+/// The runs a rule started, once there are `want` of them.
+///
+/// A rule's run reaches the ledger when rld writes the row, which is after
+/// the holder is up and the child is already running (`supervisor::start`).
+/// So a file the child wrote is not a sign that the row is there yet, and
+/// waiting on one to judge the other is a race.
+async fn wait_caused_by(c: &mut Conn, cause: &str, want: usize) -> Vec<Run> {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let runs = runs_caused_by(c, cause).await;
+        if runs.len() >= want {
+            return runs;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{cause} started {} runs, wanted {want}",
+            runs.len()
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
 #[tokio::test]
 async fn a_rule_answers_a_real_event() {
     let tmp = tempfile::tempdir().unwrap();
@@ -79,7 +101,7 @@ async fn a_rule_answers_a_real_event() {
     assert_eq!(told.trim(), "run.failed nightly tests", "the braces were filled in");
 
     // The run it started says who started it, and joins the same chain.
-    let started = runs_caused_by(&mut c, "reaction:tell-me").await;
+    let started = wait_caused_by(&mut c, "reaction:tell-me", 1).await;
     assert_eq!(started.len(), 1);
     assert_eq!(started[0].cause, Cause::Reaction("tell-me".into()));
     assert_eq!(started[0].flow, failing.flow, "the answer belongs to the chain");

@@ -812,10 +812,16 @@ impl App {
                     Ok(true) => {}
                     Ok(false) => {
                         // An ended run's output is still worth reading, so the
-                        // view stays; there is just nothing more to poll.
+                        // view stays; there is just nothing more to poll. A
+                        // stream that went without an exit is worth reading
+                        // most of all — throwing it away used to take the last
+                        // thing the run said, at the one moment it mattered.
                         if self.term.as_ref().is_some_and(|t| t.ended.is_none()) {
-                            self.say("connection closed");
-                            self.close_term();
+                            let words = self.lost_words();
+                            if let Some(t) = self.term.as_mut() {
+                                t.lost = true;
+                            }
+                            self.say(words);
                         }
                     }
                     Err(e) => { self.say(format!("stream: {e}")); self.close_term(); }
@@ -1211,10 +1217,11 @@ impl App {
             .map(|r| r.title.clone())
             .unwrap_or_else(|| id.to_string());
         match ended {
-            Ended::Closed => {
-                self.leave_term();
-                self.say(format!("lost the connection to {title}"));
-                return;
+            Ended::Closed { .. } => {
+                if let Some(t) = self.term.as_mut() {
+                    t.lost = true;
+                }
+                self.say(self.lost_words());
             }
             Ended::Exit { how, .. } => self.say(format!("{title} ended ({how})")),
             Ended::Detached | Ended::Left => self.say(format!("let go of {title} · it keeps going")),
@@ -1249,6 +1256,25 @@ impl App {
     }
 
     /// The view goes for good: the stream died, or another run wants it.
+    /// A stream that went without an exit, in words. What rld last said the
+    /// run was is the honest part: it may have failed, or it may be going on
+    /// without us, and those are not the same news.
+    fn lost_words(&self) -> String {
+        let Some(t) = self.term.as_ref() else {
+            return "lost the connection".into();
+        };
+        let title = self
+            .run_by_id(&t.id)
+            .map(|r| r.title.clone())
+            .unwrap_or_else(|| t.info.run.title.clone());
+        match self.run_by_id(&t.id).map(|r| r.state) {
+            Some(RunState::Failed) => format!("{title} failed · the session holder went away"),
+            Some(RunState::Finished) => format!("{title} finished"),
+            Some(RunState::Stopped) => format!("{title} was stopped"),
+            _ => format!("lost the connection to {title} · it may still be going"),
+        }
+    }
+
     fn close_term(&mut self) {
         if self.term.is_some() {
             self.wide = false;
@@ -3480,7 +3506,9 @@ impl App {
             };
             // Whose terminal this is, on the first row: browse away and the
             // tile stays on its run, so it has to say which one.
-            let (word, style) = if t.ended.is_some() {
+            let (word, style) = if t.lost {
+                ("lost", ratatui::style::Style::default().fg(theme::BAD))
+            } else if t.ended.is_some() {
                 ("ended", theme::dim())
             } else {
                 ("watching", ratatui::style::Style::default().fg(theme::LIVE))
@@ -3652,7 +3680,9 @@ impl App {
             } else {
                 " · pgup/pgdn reads back"
             };
-            if t.ended.is_some() {
+            if t.lost {
+                s.push_str(&format!("lost · the last that was heard{back} · esc back"));
+            } else if t.ended.is_some() {
                 s.push_str(&format!("ended{back} · esc back"));
             } else if let Some(who) = &t.info.joiner {
                 s.push_str(&format!(
