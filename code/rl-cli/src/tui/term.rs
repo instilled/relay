@@ -1,11 +1,9 @@
-//! The terminal screen: a run's output rendered through a `vt100` screen —
-//! an ended run's to read, a warm shell's while a line runs in it (J7).
+//! The terminal screen: an ended run's output rendered through a `vt100`
+//! screen, to read (J7).
 //!
-//! Two daemon connections at most: the watch connection carries output for
-//! as long as this view lasts — which outlives stepping back to the list, so
-//! coming back is instant and keeps its place — and a join connection is
-//! opened on demand, carrying keystrokes and resizes. That way escalating to
-//! join never restarts the screen, and letting go never loses it.
+//! One daemon connection, a watcher's: it carries the output for as long as
+//! this view lasts, which outlives stepping back to the list, so coming back
+//! is instant and keeps its place.
 
 use crate::attach::client_name;
 use crate::client::Client;

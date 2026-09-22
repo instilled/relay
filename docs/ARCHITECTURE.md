@@ -330,8 +330,7 @@ last line. `enter` on an ended run reads what it printed, kept after its holder 
 re-render through a `vt100` screen (`tui/term.rs`) in a tile beside the list — the list stays, the
 line at the foot stays yours, `esc` closes the tile, and `/pane full` pops it to the whole screen.
 `pgup` and `pgdn` read back through what scrolled off — the screen keeps ten thousand rows above
-itself — and the footer says how far back you are. The same tile is how a line sent to a folder's
-warm shell shows it running (below), and new output never yanks it to the bottom. `^o` (or `/pane`) opens a pane of
+itself — and the footer says how far back you are. `^o` (or `/pane`) opens a pane of
 facts beside the list (`tui/pane.rs`): a run's facts and recent events, a job's tally, a question
 and what can be done about it. A question stays one line on the list; selecting it opens the pane
 on it by itself (and moving off closes the pane again, unless it was open already), since a
@@ -362,7 +361,8 @@ agent is selected on the list, and `enter` hands you its terminal (the raw passt
 persistent `$SHELL -i` per project (`run.start`, tagged `shell`, spawned the first time a folder
 needs one and kept), so its rc is read once and its aliases and functions are there. The line is
 written to that shell's stdin (`run.input`, which feeds a live run's terminal over the daemon's own
-holder connection, no join, journaled as input) and the shell's tile comes up so you watch it run.
+holder connection, no join, journaled as input), and the cursor goes to the shell's row. What it
+prints stays the shell's: `enter` there joins the shell to read it, or to go on in it.
 Which shell: the one under the cursor when it is a shell, else the project's. Anything else is plain words, and those go to `assistants.interpret`
 (§6) as a run of its own — it is in the list like any other, `/stop` there stops it — while the
 panel stays yours. What comes back fills the form (`tui/form.rs`), and your `enter` is what does

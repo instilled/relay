@@ -1363,10 +1363,9 @@ impl App {
 
     // ---- doing things ------------------------------------------------------
 
-    /// The selected run's terminal, re-rendered in the pane: an ended run's
-    /// output to read, or a warm shell's as a line runs in it. Taking the
-    /// keyboard is `enter` on a live run, which hands the real terminal over
-    /// (`raw::attach`), not this re-render.
+    /// An ended run's terminal, re-rendered in the pane to read. A live run
+    /// is never shown here: `enter` on one hands the real terminal over
+    /// (`raw::attach`).
     async fn open_term(&mut self, area: Rect) {
         let Some(id) = self.selected_run().map(|i| i.run.id.clone()) else {
             self.say("nothing here to open");
@@ -1845,7 +1844,8 @@ impl App {
     }
 
     /// Run a shell line in a project's warm shell: write it to the shell's
-    /// stdin (starting the shell if the folder has none), then watch it.
+    /// stdin (starting the shell if the folder has none) and put the cursor
+    /// on it. What it prints is the shell's own, read by joining it.
     async fn run_in_shell(&mut self, cmd: String, folder: PathBuf, area: Rect) -> Result<()> {
         let id = self.shell_target(folder, area).await?;
         let mut bytes = cmd.into_bytes();
@@ -1853,10 +1853,10 @@ impl App {
         self.rpc
             .call::<RunInput>(RunInputParams { id: id.clone(), bytes })
             .await?;
-        // Show it running: select the shell and watch its tile.
         self.refresh().await;
         self.select(Some(format!("r:{id}")));
-        self.open_term(area).await;
+        let title = self.run_by_id(&id).map(|r| r.title.clone()).unwrap_or(id);
+        self.say(format!("sent to {title} · enter joins it"));
         Ok(())
     }
 
@@ -1914,7 +1914,7 @@ impl App {
                 self.shell_at.insert(folder, id.clone());
                 self.refresh().await;
                 self.select(Some(format!("r:{id}")));
-                self.open_term(area).await;
+                self.say("a new shell · what you type goes to it · enter joins it");
             }
             Err(e) => self.say(format!("shell: {e:#}")),
         }
