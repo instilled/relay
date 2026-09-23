@@ -49,7 +49,7 @@ use jiff::Timestamp;
 use pane::state_style;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Modifier, Stylize};
+use ratatui::style::{Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
 use rl_core::Home;
@@ -3132,27 +3132,27 @@ impl App {
     /// view. The `enter` hint rides the last row shown.
     fn line_lines(&self, width: u16) -> Vec<Line<'static>> {
         if let Some(s) = &self.search {
-            let (a, b) = s.line.text().split_at(s.line.cursor());
-            let content = format!("{a}▏{b}");
             let hint = if s.line.is_empty() {
                 "words · in: is: kind: by:"
             } else {
                 "narrowing"
             };
-            let room = (width as usize).saturating_sub(2 + content.chars().count() + hint.chars().count() + 1);
-            return vec![Line::from(vec![
-                Span::styled("⌕ ", theme::accent()),
-                Span::raw(content),
-                Span::raw(" ".repeat(room)),
-                Span::styled(hint, theme::dim()),
-            ])];
+            let mut spans = vec![Span::styled("⌕ ", theme::accent())];
+            spans.extend(theme::with_caret(s.line.text(), s.line.cursor(), Style::default()));
+            let used: usize = spans.iter().map(Span::width).sum();
+            let room = (width as usize).saturating_sub(used + hint.chars().count() + 1);
+            spans.push(Span::raw(" ".repeat(room)));
+            spans.push(Span::styled(hint, theme::dim()));
+            return vec![Line::from(spans)];
         }
         if self.line.is_empty() {
-            return vec![Line::from(vec![
-                Span::styled("❯ ", theme::accent()),
-                Span::raw("what do you want done here? / for commands · shift-enter for a new line")
-                    .style(theme::dim()),
-            ])];
+            let mut spans = vec![Span::styled("❯ ", theme::accent())];
+            spans.extend(theme::with_caret(
+                "what do you want done here? / for commands · shift-enter for a new line",
+                0,
+                theme::dim(),
+            ));
+            return vec![Line::from(spans)];
         }
         let folder = self.folder_here();
         let what = {
@@ -3209,25 +3209,19 @@ impl App {
         let mut out = Vec::new();
         for (idx, (o, part)) in rows.iter().enumerate().take(end).skip(start) {
             let prefix = if idx == 0 { "❯ " } else { "  " };
-            let mut content = String::from(prefix);
+            let mut spans = vec![Span::raw(prefix)];
             if idx == cur_row {
-                let (a, b) = part.split_at(cursor - o);
-                content.push_str(a);
-                content.push('▏');
-                content.push_str(b);
+                spans.extend(theme::with_caret(part, cursor - o, Style::default()));
             } else {
-                content.push_str(part);
+                spans.push(Span::raw(part.to_string()));
             }
             if idx == end - 1 {
-                let room = (width as usize).saturating_sub(content.chars().count() + hint.chars().count() + 1);
-                out.push(Line::from(vec![
-                    Span::raw(content),
-                    Span::raw(" ".repeat(room)),
-                    Span::styled(hint.clone(), style),
-                ]));
-            } else {
-                out.push(Line::from(Span::raw(content)));
+                let used: usize = spans.iter().map(Span::width).sum();
+                let room = (width as usize).saturating_sub(used + hint.chars().count() + 1);
+                spans.push(Span::raw(" ".repeat(room)));
+                spans.push(Span::styled(hint.clone(), style));
             }
+            out.push(Line::from(spans));
         }
         out
     }
