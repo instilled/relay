@@ -267,8 +267,9 @@ where
     let mut replayed = false;
     // Until when a joiner that has said no size is waited for.
     let mut size_wait: Option<tokio::time::Instant> = None;
-    // The viewer hung up, rather than the run ending or rld stopping.
-    let mut let_go = false;
+    // The run ended or rld is stopping: whatever else ended the stream was
+    // the viewer going — a hang-up, or (Linux) a write that finds it gone.
+    let mut over = false;
     let result: io::Result<()> = async {
         loop {
             tokio::select! {
@@ -285,14 +286,12 @@ where
                     }
                 }
                 _ = d.shutdown.cancelled() => {
+                    over = true;
                     write_frame(wr, &Frame::Note("daemon stopping; detached (the run keeps going)".into())).await?;
                     return Ok(());
                 }
                 frame = rd.next() => match frame? {
-                    None => {
-                        let_go = true;
-                        return Ok(());
-                    }
+                    None => return Ok(()),
                     Some(Frame::Input(bytes)) => {
                         if a.joiner && live.is_joiner(&a.seat) {
                             hwr.input(bytes.clone()).await?;
@@ -355,11 +354,13 @@ where
                         }
                     }
                     Ok(Some(Frame::Exit(e))) => {
+                        over = true;
                         write_frame(wr, &Frame::Exit(e)).await?;
                         return Ok(());
                     }
                     Ok(Some(_)) => {}
                     Ok(None) | Err(_) => {
+                        over = true;
                         write_frame(wr, &Frame::Note("session holder went away".into())).await?;
                         return Ok(());
                     }
@@ -384,7 +385,7 @@ where
     // Letting go of a run leaves it a row short, where nobody sees it redraw:
     // whoever joins next brings a size it does not have, and that one change
     // is the repaint — not two, as a nudge on the way in would be.
-    if let_go && a.info.tty && a.joiner && live.is_joiner(&a.seat) && live.nudged_size().is_none() {
+    if !over && a.info.tty && a.joiner && live.is_joiner(&a.seat) && live.nudged_size().is_none() {
         let _ = hwr.resize(size.0, size.1.saturating_sub(1).max(1)).await;
     }
     if a.joiner && live.leave(&a.seat) {
