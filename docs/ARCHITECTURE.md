@@ -214,7 +214,12 @@ sequenceDiagram
 
 What is replayed is a tail of bytes, not a screen: an app that redraws only what changed (Claude
 Code, and most that diff their own buffer) leaves its box and status line out until it repaints.
-So once the replay is done rld makes it repaint: it gives the pty a row less, holds that for a
+It repaints when its size changes, and an app that redraws everything then (Claude Code redraws
+its whole conversation) should do that once, not twice. So letting go of a run leaves it a row
+short, where nobody sees it redraw, and the next join — at the size it had, or any other — is one
+real change and one repaint. A joiner's first `Resize` says which: a new size needs nothing more.
+Only a joiner at the very size the run has (or one that says none within `JOIN_SIZE_WAIT`), and a
+watcher while nobody is joined, gets the nudge: rld gives the pty a row less, holds that for a
 fifth of a second, and gives the size back (`NUDGE_HOLD`, `rl-daemon/src/attach.rs`). Held,
 because two resizes sent back to back land together, the app reads the size it already had, and a
 runtime that only reports a change (Node, Bun) never repaints. A row rather than a column, as tmux
