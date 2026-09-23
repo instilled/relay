@@ -60,9 +60,10 @@ use rl_proto::methods::{
     DigestParams, EventFilter, EventList, GcParams, GcRun, GraphGet, GraphParams, ImportList, ImportListParams,
     PresenceClient, PresenceTouch, ReactionPause, ReactionReload, ReactionResume, RuleApprove, RuleList, RuleRef,
     RunArchive, RunArchiveParams, RunId, RunIds, RunInput, RunInputParams, RunMark, RunMarkParams, RunPin,
-    RunPinParams, RunRename, RunRenameParams, RunSeen, RunSpec, RunStart, RunStop, RunStopParams, SETUP_STEPS,
-    ScheduleFilter, ScheduleName, SchedulePause, ScheduleReload, ScheduleResume, ScheduleRun, SetupGet, SummaryGet,
-    SummaryMake, SummaryParams, WorkspaceList, WorkspaceRename, WorkspaceRenameParams, WorkspaceUp, WorkspaceUpParams,
+    RunPinParams, RunRename, RunRenameParams, RunResume, RunResumeParams, RunSeen, RunSpec, RunStart, RunStop,
+    RunStopParams, SETUP_STEPS, ScheduleFilter, ScheduleName, SchedulePause, ScheduleReload, ScheduleResume,
+    ScheduleRun, SetupGet, SummaryGet, SummaryMake, SummaryParams, WorkspaceList, WorkspaceRename,
+    WorkspaceRenameParams, WorkspaceUp, WorkspaceUpParams,
 };
 use rl_proto::rule::{Rule, RuleKind, RuleStatus};
 use rl_proto::types::{AttachMode, Cause, Event as LedgerEvent, Mark, Run, RunKind, RunState, Summary};
@@ -622,6 +623,7 @@ pub async fn run(home: &Home) -> Result<()> {
             items: Vec::new(),
             decisions: Vec::new(),
             checkouts: Vec::new(),
+            lost: Vec::new(),
         },
         names: Names::default(),
         filter: String::new(),
@@ -2576,6 +2578,58 @@ impl App {
         }
     }
 
+    /// `/resume`: runs picked back up, and in a word what came of it. One run
+    /// becomes the selection, so `enter` joins it.
+    async fn resume(&mut self, mut p: RunResumeParams, area: Rect) {
+        p.env = match crate::env::child_env(&[]) {
+            Ok(e) => e,
+            Err(e) => return self.say(format!("resume: {e:#}")),
+        };
+        p.cols = Some(area.width);
+        p.rows = Some(area.height.saturating_sub(2));
+        let lost = p.lost;
+        let out = match self.rpc.call::<RunResume>(p).await {
+            Ok(o) => o,
+            Err(e) => return self.say(format!("resume: {e:#}")),
+        };
+        self.refresh().await;
+        let done: Vec<_> = out.iter().filter_map(|r| r.run.as_ref().map(|n| (r, n))).collect();
+        let left_out = out
+            .iter()
+            .filter(|r| r.why_not.as_deref() == Some(rl_proto::methods::RESUME_LEFT_OUT))
+            .count();
+        let failed: Vec<_> = out
+            .iter()
+            .filter(|r| r.run.is_none() && r.why_not.as_deref() != Some(rl_proto::methods::RESUME_LEFT_OUT))
+            .collect();
+        if let [(_, new)] = done.as_slice() {
+            self.select(Some(format!("r:{}", new.id)));
+        }
+        let mut words = Vec::new();
+        match done.as_slice() {
+            [] if out.is_empty() && lost => words.push("nothing lost to resume".to_string()),
+            [] => {}
+            [(r, _)] => words.push(format!("resumed {} · enter joins it", r.title)),
+            many => words.push(format!("resumed {}", many.len())),
+        }
+        match failed.as_slice() {
+            [] => {}
+            [one] => words.push(format!(
+                "{}: {}",
+                one.title,
+                one.why_not.as_deref().unwrap_or("not resumed")
+            )),
+            many => words.push(format!("{} could not be · rl resume says why", many.len())),
+        }
+        if left_out > 0 {
+            let s = if left_out == 1 { "" } else { "s" };
+            words.push(format!("left {left_out} command{s} out · /resume all commands"));
+        }
+        if !words.is_empty() {
+            self.say(words.join(" · "));
+        }
+    }
+
     /// Where the line is being typed: the folder of the row under the cursor,
     /// what agents there are, and $PATH.
     fn here<'a>(&'a self, folder: &'a Path) -> complete::Here<'a> {
@@ -2813,6 +2867,42 @@ impl App {
                     other => self.say(format!("mark {other}? done, blocked or working")),
                 }
             }
+            palette::Cmd::Resume => match arg.trim() {
+                "" => match self.selected_run() {
+                    Some(i) if i.run.state.is_terminal() => {
+                        let ids = vec![i.run.id.clone()];
+                        self.resume(
+                            RunResumeParams {
+                                ids,
+                                ..Default::default()
+                            },
+                            area,
+                        )
+                        .await;
+                    }
+                    Some(_) => self.say("still going: enter joins it"),
+                    None => self.say("nothing here to resume"),
+                },
+                "all" => {
+                    self.resume(
+                        RunResumeParams {
+                            lost: true,
+                            ..Default::default()
+                        },
+                        area,
+                    )
+                    .await
+                }
+                "all commands" => {
+                    let p = RunResumeParams {
+                        lost: true,
+                        commands: true,
+                        ..Default::default()
+                    };
+                    self.resume(p, area).await
+                }
+                other => self.say(format!("resume {other}? on its own, all, or all commands")),
+            },
             palette::Cmd::Join => match self.selected_run() {
                 Some(i) if !i.run.state.is_terminal() => {
                     // Someone at the keyboard already: asked first, by name.
@@ -2998,13 +3088,20 @@ impl App {
         ])
         .areas(a.head);
         // The lead word wears the accent; the tally after it reads plainly.
-        let head = match title.split_once(" · ") {
+        let mut head = match title.split_once(" · ") {
             Some((lead, rest)) => Line::from(vec![
                 Span::styled(lead.to_string(), theme::accent().add_modifier(Modifier::BOLD)),
                 Span::raw(format!(" · {rest}")),
             ]),
             None => Line::from(Span::styled(title, theme::accent().add_modifier(Modifier::BOLD))),
         };
+        // What a restart took waits on you like anything else that does.
+        if self.view == View::Work
+            && let Some(note) = rows::lost_note(&self.digest)
+        {
+            head.spans.push(Span::raw(" · "));
+            head.spans.push(Span::styled(note, theme::needs()));
+        }
         f.render_widget(Paragraph::new(head), l);
         if let Some(lens) = lens {
             f.render_widget(Paragraph::new(lens).right_aligned(), lens_area);

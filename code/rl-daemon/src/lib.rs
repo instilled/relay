@@ -13,6 +13,7 @@ pub mod graph;
 pub mod handlers;
 pub mod import;
 pub mod reactions;
+pub mod resume;
 pub mod router;
 pub mod rulestore;
 pub mod schedule;

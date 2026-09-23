@@ -114,6 +114,31 @@ fn codex_meta(p: &Path) -> Option<(PathBuf, Timestamp)> {
     Some((cwd, at))
 }
 
+/// The conversation a session file holds, as its agent's CLI names it to
+/// resume it: Claude's is the file's own name, Codex's the id its first line
+/// records.
+pub fn session_id(agent: Agent, p: &Path) -> Option<String> {
+    match agent {
+        Agent::Claude => Some(p.file_stem()?.to_str()?.to_string()),
+        Agent::Codex => {
+            use std::io::BufRead;
+            let f = std::fs::File::open(p).ok()?;
+            let mut first = String::new();
+            std::io::BufReader::new(f).read_line(&mut first).ok()?;
+            codex_id(&first)
+        }
+    }
+}
+
+/// The session id in a Codex rollout's first line, its `session_meta`.
+fn codex_id(first: &str) -> Option<String> {
+    let v: Value = serde_json::from_str(first).ok()?;
+    if v.get("type")?.as_str()? != "session_meta" {
+        return None;
+    }
+    Some(v.get("payload")?.get("id")?.as_str()?.to_string())
+}
+
 /// The entries of a JSONL file that parse, with their time.
 fn entries(text: &str) -> impl Iterator<Item = (Timestamp, Value)> + '_ {
     text.lines().filter_map(|l| {
@@ -257,6 +282,19 @@ pub fn codex_line(turns: &[Turn]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_session_is_named_as_its_cli_resumes_it() {
+        let claude = Path::new("/h/.claude/projects/-w-app/8af077cd-5fe3.jsonl");
+        assert_eq!(session_id(Agent::Claude, claude).as_deref(), Some("8af077cd-5fe3"));
+        let meta = r#"{"type":"session_meta","payload":{"id":"01a0b3af-810e","cwd":"/w/app","timestamp":"2026-09-18T08:43:38Z"}}"#;
+        assert_eq!(codex_id(meta).as_deref(), Some("01a0b3af-810e"));
+        assert_eq!(
+            codex_id(r#"{"type":"response_item","payload":{"id":"x"}}"#),
+            None,
+            "only the session's own line"
+        );
+    }
 
     fn at(s: &str) -> Timestamp {
         s.parse().unwrap()

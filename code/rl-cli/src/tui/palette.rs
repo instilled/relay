@@ -13,6 +13,7 @@ pub enum Cmd {
     Archive,
     Mark,
     Join,
+    Resume,
     Shell,
     Rename,
     Pin,
@@ -75,6 +76,12 @@ pub const ALL: &[Command] = &[
         args: "",
         what: "take a run's terminal and its keyboard, as enter on it does",
         cmd: Cmd::Join,
+    },
+    Command {
+        name: "resume",
+        args: "[all [commands]]",
+        what: "pick an ended run back up — its conversation, a fresh shell; all: what a restart took",
+        cmd: Cmd::Resume,
     },
     Command {
         name: "shell",

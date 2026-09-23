@@ -51,7 +51,7 @@ pub async fn get(d: &Daemon, run: &str) -> Result<Option<Summary>> {
 
 /// The agent's session file for a run: the one a hook named, else found by
 /// its folder and start and remembered.
-async fn locate(d: &Daemon, run: &Run) -> Result<Option<PathBuf>> {
+pub(crate) async fn locate(d: &Daemon, run: &Run) -> Result<Option<PathBuf>> {
     let id = run.id.clone();
     if let Some(p) = d.ledger.call(move |c| summaries::transcript(c, &id)).await? {
         return Ok(Some(p));
