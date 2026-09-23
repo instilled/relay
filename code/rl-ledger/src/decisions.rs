@@ -109,6 +109,15 @@ pub fn list(conn: &Connection, f: &DecisionFilter) -> Result<Vec<Decision>> {
     Ok(rows.collect::<std::result::Result<_, _>>()?)
 }
 
+/// The open questions asked in one folder, as when its project is removed.
+pub fn open_in(conn: &Connection, workspace: &std::path::Path) -> Result<Vec<Decision>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {COLS} FROM decisions WHERE status = 'open' AND workspace = ?1 ORDER BY created_at, id"
+    ))?;
+    let rows = stmt.query_map(params![workspace.to_string_lossy()], from_row)?;
+    Ok(rows.collect::<std::result::Result<_, _>>()?)
+}
+
 /// Open questions whose time is up.
 pub fn due(conn: &Connection, now: Timestamp) -> Result<Vec<Decision>> {
     let mut stmt = conn.prepare(&format!(

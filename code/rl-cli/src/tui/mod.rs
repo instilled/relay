@@ -24,6 +24,7 @@ mod line;
 mod palette;
 mod pane;
 mod query;
+mod remove;
 
 pub use pane::recap_label;
 mod rows;
@@ -62,8 +63,8 @@ use rl_proto::methods::{
     RunArchive, RunArchiveParams, RunId, RunIds, RunInput, RunInputParams, RunMark, RunMarkParams, RunPin,
     RunPinParams, RunRename, RunRenameParams, RunResume, RunResumeParams, RunSeen, RunSpec, RunStart, RunStop,
     RunStopParams, SETUP_STEPS, ScheduleFilter, ScheduleName, SchedulePause, ScheduleReload, ScheduleResume,
-    ScheduleRun, SetupGet, SummaryGet, SummaryMake, SummaryParams, WorkspaceList, WorkspaceRename,
-    WorkspaceRenameParams, WorkspaceUp, WorkspaceUpParams,
+    ScheduleRun, SetupGet, SummaryGet, SummaryMake, SummaryParams, WorkspaceList, WorkspaceRemove,
+    WorkspaceRemoveParams, WorkspaceRemoved, WorkspaceRename, WorkspaceRenameParams, WorkspaceUp, WorkspaceUpParams,
 };
 use rl_proto::rule::{Rule, RuleKind, RuleStatus};
 use rl_proto::types::{AttachMode, Cause, Event as LedgerEvent, Mark, Run, RunKind, RunState, Summary};
@@ -127,6 +128,25 @@ enum Mode {
     /// A join refused because someone holds the keyboard: `y` takes it from
     /// them. The run, and who has it.
     Take(String, String),
+    /// The second `^x` on a project with a `.relay` that can move: `y` moves
+    /// it, `n` keeps it, and either removes the project; anything else
+    /// leaves everything as it was.
+    Remove(Box<Removal>),
+}
+
+/// A project removal waiting on the question about its `.relay`.
+struct Removal {
+    folder: PathBuf,
+    name: String,
+    question: String,
+}
+
+/// A project being removed, until the daemon answers: stopping its runs can
+/// take a few seconds, and the panel goes on meanwhile.
+struct Removing {
+    name: String,
+    fate: remove::RulesFate,
+    task: tokio::task::JoinHandle<Result<WorkspaceRemoved>>,
 }
 
 /// The line searching rather than taking work: what is typed is the filter,
@@ -237,6 +257,8 @@ struct App {
     summary: Option<Summary>,
     /// The assistant at work on a run's summary (`/summarise`).
     summarising: Option<Summarising>,
+    /// A project on its way out (`^x` twice on its header).
+    removing: Option<Removing>,
     /// `/edit file` (or a scope's file): the file and line to open in the editor once the
     /// screen is given back.
     editor: Option<(PathBuf, usize)>,
@@ -654,6 +676,7 @@ pub async fn run(home: &Home) -> Result<()> {
         asking: None,
         summary: None,
         summarising: None,
+        removing: None,
         picked: Vec::new(),
         line: line::Line::default(),
         agents: Vec::new(),
@@ -810,6 +833,12 @@ impl App {
                         None => std::future::pending().await,
                     }
                 } => self.summarised(done).await,
+                gone = async {
+                    match &mut self.removing {
+                        Some(r) => (&mut r.task).await,
+                        None => std::future::pending().await,
+                    }
+                } => self.removed(gone).await,
                 more = async {
                     match &mut self.term {
                         Some(t) if !t.over => t.pump().await,
@@ -1547,8 +1576,9 @@ impl App {
     /// The second `ctrl-x` (the first only armed it): get whatever the cursor
     /// is on out of the list. An ended run or a job is archived (reversible:
     /// the ledger keeps it); a run still going is stopped, so once it has ended
-    /// another `ctrl-x` archives it; a question is dismissed. Nothing here is
-    /// destroyed — that is retention's alone.
+    /// another `ctrl-x` archives it; a question is dismissed; a project is
+    /// removed, its runs stopped and archived and its `.relay` moved aside if
+    /// you say so. Nothing here is destroyed — that is retention's alone.
     async fn remove_selected(&mut self) {
         if let Some(j) = self.selected_job() {
             let ids: Vec<String> = j.runs.iter().map(|i| i.run.id.clone()).collect();
@@ -1562,9 +1592,63 @@ impl App {
             }
         } else if let Some(q) = self.selected_question() {
             self.dismiss(q.id.clone()).await;
+        } else if let Some(Row::Group(h)) = self.selected() {
+            let (folder, name) = (h.workspace.clone(), h.name.clone());
+            self.remove_project(folder, name);
         } else {
             self.say("nothing here to remove");
         }
+    }
+
+    /// The second `^x` on a project's header. Its `.relay` is asked about
+    /// first, when there is one that can move, and nothing is done until the
+    /// answer; with none, the project goes at once.
+    fn remove_project(&mut self, folder: PathBuf, name: String) {
+        if self.removing.is_some() {
+            self.say("still removing a project; a moment");
+            return;
+        }
+        let dir = rl_core::rules_dir::rules_dir(&folder.join(rl_proto::schedule::WORKSPACE_DIR), &self.home);
+        if let rl_core::rules_dir::RulesDir::Movable(files) = &dir {
+            let of = |kind: RuleKind| {
+                self.rules
+                    .iter()
+                    .filter(|r| r.kind() == kind && !r.is_global() && Path::new(r.scope()) == folder)
+                    .count()
+            };
+            let contents = remove::contents(of(RuleKind::Schedule), of(RuleKind::Reaction), files);
+            let question = remove::question(&name, &contents, &rl_core::display_path(&self.home.removed_dir()));
+            self.mode = Mode::Remove(Box::new(Removal { folder, name, question }));
+            return;
+        }
+        self.start_removal(folder, name, false, remove::RulesFate::unasked(&dir));
+    }
+
+    /// Hands the removal to the daemon on a connection of its own, so the
+    /// panel keeps drawing while the project's runs are stopped.
+    fn start_removal(&mut self, folder: PathBuf, name: String, move_rules: bool, fate: remove::RulesFate) {
+        let home = self.home.clone();
+        let params = WorkspaceRemoveParams {
+            path: folder,
+            stop_runs: true,
+            archive_runs: true,
+            move_rules,
+        };
+        let task = tokio::spawn(async move {
+            let mut rpc = Client::connect(&home).await?;
+            rpc.call::<WorkspaceRemove>(params).await
+        });
+        self.removing = Some(Removing { name, fate, task });
+    }
+
+    async fn removed(&mut self, done: std::result::Result<Result<WorkspaceRemoved>, tokio::task::JoinError>) {
+        let Some(r) = self.removing.take() else { return };
+        match done {
+            Ok(Ok(out)) => self.say(remove::done(&r.name, &out, &r.fate, rl_core::display_path)),
+            Ok(Err(e)) => self.say(format!("remove {}: {e:#}", r.name)),
+            Err(e) => self.say(format!("remove {}: {e}", r.name)),
+        }
+        self.refresh().await;
     }
 
     /// What a second `ctrl-x` would do to the row under the cursor, for the
@@ -1578,8 +1662,16 @@ impl App {
             } else {
                 Some(format!("stop {}", i.run.title))
             }
+        } else if let Some(q) = self.selected_question() {
+            Some(format!("dismiss {}", q.title))
+        } else if let Some(Row::Group(h)) = self.selected() {
+            Some(remove::arm(&remove::Plan::of(
+                &h.name,
+                &h.workspace,
+                &self.digest.items,
+            )))
         } else {
-            self.selected_question().map(|q| format!("dismiss {}", q.title))
+            None
         }
     }
 
@@ -2195,6 +2287,15 @@ impl App {
             Mode::Fire(name) => {
                 if k.code == KeyCode::Char('y') {
                     self.fire(name).await;
+                }
+                return Ok(());
+            }
+            Mode::Remove(r) => {
+                let Removal { folder, name, .. } = *r;
+                match k.code {
+                    KeyCode::Char('y') => self.start_removal(folder, name, true, remove::RulesFate::Moved),
+                    KeyCode::Char('n') => self.start_removal(folder, name, false, remove::RulesFate::Kept),
+                    _ => self.say(format!("{name} is left as it was")),
                 }
                 return Ok(());
             }
@@ -3737,6 +3838,7 @@ impl App {
                 return format!("dismiss {t}? y / any key");
             }
             Mode::Fire(n) => return format!("run {} now? y / any key", n.name),
+            Mode::Remove(r) => return r.question.clone(),
             Mode::Mark(id) => return format!("mark {}: d done · b blocked · w working · esc", title_of(id)),
             Mode::Answer(id) => {
                 let q = self.digest.decisions.iter().find(|d| &d.id == id);
@@ -3774,6 +3876,9 @@ impl App {
         }
         if let Some(s) = &self.summarising {
             return format!("summarising `{}`… · its run is in the list · /stop there", s.title);
+        }
+        if let Some(r) = &self.removing {
+            return format!("removing {}… · stopping its runs", r.name);
         }
         // The tile's own footer, but only while the cursor is on the run it
         // shows — browse away and the selected row's actions take over, since
@@ -3852,7 +3957,7 @@ impl App {
             }
             Some(Row::Run(_)) => format!("enter joins it · ^x stops it · ^t pins · {pane}"),
             Some(Row::Group(_)) => {
-                format!("enter its stats · /shell · ^g its wiring · /edit schedule · ^r renames · {pane}")
+                format!("enter its stats · /shell · ^g its wiring · /edit schedule · ^r renames · ^x removes · {pane}")
             }
             _ => String::new(),
         }
