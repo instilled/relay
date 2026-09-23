@@ -485,7 +485,12 @@ lens along (shift-`tab` back), and `/lens all|agents|jobs|reactions` jumps strai
 it composes with `/filter`. One-off shell commands live in `all` while they run and are recent.
 
 Searching is `^f` (or `/filter` alone): the line turns from `❯` to `⌕`, and the list — or the
-graph — narrows with every key. `enter` keeps the search and gives the line back, `esc` puts
+graph — narrows with every key. The list keeps its order; the cursor goes to the best match:
+a project whose name the words say, at its header, else the closest row — the title before the
+project's name before the summary, and within each, the words exactly, then at the start, then
+as a whole word, then anywhere, ties in list order. With only tokens typed it stays put, or
+falls to the first row. `tab` with nothing to complete goes on to the next match in that order,
+round, and shift-`tab` back. `enter` keeps the search and gives the line back, `esc` puts
 back the search from before, the arrows still move through what is left, and the header shows
 `⌕ …` while one is in force; `esc` on the list clears it. `/filter <search>` sets one outright.
 A search (`tui/query.rs`) is words and tokens. Every word must match somewhere — a title, a
