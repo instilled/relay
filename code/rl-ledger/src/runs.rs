@@ -139,11 +139,32 @@ pub fn set_detail(conn: &Connection, id: &str, detail: &str) -> Result<()> {
     Ok(())
 }
 
-/// A run's title, given by hand. Nothing else writes the column after the
-/// run starts, so what is set here stands.
+/// A run's title, given by hand. It is yours from then on: nothing of
+/// Relay's writes the column again (`name_once` leaves it be).
 pub fn set_title(conn: &Connection, id: &str, title: &str) -> Result<()> {
-    conn.execute("UPDATE runs SET title = ?2 WHERE id = ?1", params![id, title])?;
+    conn.execute(
+        "UPDATE runs SET title = ?2, title_auto = 0 WHERE id = ?1",
+        params![id, title],
+    )?;
     Ok(())
+}
+
+/// Says a run's title is the one Relay made up for it, nobody having given
+/// it one — so the run may still be named for what it was asked (`name_once`).
+pub fn set_title_auto(conn: &Connection, id: &str) -> Result<()> {
+    conn.execute("UPDATE runs SET title_auto = 1 WHERE id = ?1", params![id])?;
+    Ok(())
+}
+
+/// Names a run Relay titled, once: the title is set only while it is still
+/// Relay's own, and is not Relay's to change after. False when it was not
+/// (named by hand, already named once, or no such run).
+pub fn name_once(conn: &Connection, id: &str, title: &str) -> Result<bool> {
+    let n = conn.execute(
+        "UPDATE runs SET title = ?2, title_auto = 0 WHERE id = ?1 AND title_auto = 1",
+        params![id, title],
+    )?;
+    Ok(n == 1)
 }
 
 /// Pins a run (`Some`) or lets it go (`None`). Pinning what is already

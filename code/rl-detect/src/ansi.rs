@@ -22,10 +22,24 @@ enum EscState {
     Charset { g0: bool },
 }
 
+use std::path::PathBuf;
+
 /// An escape sequence still unterminated after this many bytes is treated as
 /// malformed and abandoned, so a stray, never-terminated ESC doesn't buffer
 /// forever.
 const MAX_PENDING_ESCAPE: usize = 64;
+/// An OSC carries text — a window title, a folder, a link — so it is given
+/// far longer before it is taken for a stray.
+const MAX_PENDING_OSC: usize = 4096;
+
+/// Whether an escape has run on past what its kind is allowed.
+fn overrun(state: &EscState, pending: usize) -> bool {
+    match state {
+        EscState::None => false,
+        EscState::Osc { .. } => pending > MAX_PENDING_OSC,
+        _ => pending > MAX_PENDING_ESCAPE,
+    }
+}
 
 /// One character of the DEC special graphics set, which a terminal draws in
 /// place of the letter while that set is chosen. What the set leaves alone
@@ -149,7 +163,7 @@ impl Graphics {
                     self.state = EscState::None;
                 }
             }
-            if self.state != EscState::None && self.pending > MAX_PENDING_ESCAPE {
+            if overrun(&self.state, self.pending) {
                 // Not a well-formed escape after all.
                 self.state = EscState::None;
             }
@@ -206,6 +220,38 @@ fn mark_of(payload: &str) -> Option<Mark> {
     }
 }
 
+/// An OSC 7 payload — `7;file://host/path`, the path percent-encoded — read
+/// as the folder a shell says it is in. The host is ignored: a shell under
+/// Relay runs on this machine. Anything else is `None`.
+pub fn cwd_of(payload: &str) -> Option<PathBuf> {
+    use std::os::unix::ffi::OsStringExt;
+    let rest = payload.strip_prefix("7;")?.strip_prefix("file://")?;
+    let path = &rest[rest.find('/')?..];
+    Some(PathBuf::from(std::ffi::OsString::from_vec(percent_decode(path))))
+}
+
+/// `%XX` as the byte it stands for; a `%` not followed by two hex digits is
+/// left as it is.
+fn percent_decode(s: &str) -> Vec<u8> {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        let hex = |c: u8| (c as char).to_digit(16);
+        if b[i] == b'%'
+            && i + 2 < b.len()
+            && let (Some(h), Some(l)) = (hex(b[i + 1]), hex(b[i + 2]))
+        {
+            out.push((h * 16 + l) as u8);
+            i += 3;
+        } else {
+            out.push(b[i]);
+            i += 1;
+        }
+    }
+    out
+}
+
 /// Stateful ANSI stripper: like [`strip`], but remembers an escape sequence
 /// left open at the end of one chunk so the next call resumes it correctly
 /// instead of re-parsing its tail as literal text. Use one `Stripper` per
@@ -234,6 +280,8 @@ pub struct Stripper {
     /// G0. A prompt that rules a line off designates G1 once and shifts out
     /// for the run of `q`s; read as letters they spell `qqqqqq`.
     shifted: usize,
+    /// The folder the stream last said it was in (OSC 7), until taken.
+    cwd: Option<PathBuf>,
 }
 
 impl Stripper {
@@ -252,6 +300,12 @@ impl Stripper {
     /// what the offsets from [`Self::take_events`] measure against. Draining.
     pub fn take_echo(&mut self) -> String {
         std::mem::take(&mut self.echo)
+    }
+
+    /// The folder the stream last reported (OSC 7) since this was last
+    /// called, the latest of several. Draining.
+    pub fn take_cwd(&mut self) -> Option<PathBuf> {
+        self.cwd.take()
     }
 
     /// Strips CSI/OSC/other escape sequences and resolves `\r` within a
@@ -327,6 +381,8 @@ impl Stripper {
                         // Where the mark stood is where the text has got to.
                         if let Some(m) = mark_of(&self.osc) {
                             self.events.push((self.echo.len(), Ev::Mark(m)));
+                        } else if let Some(cwd) = cwd_of(&self.osc) {
+                            self.cwd = Some(cwd);
                         }
                         self.osc.clear();
                         self.state = EscState::None;
@@ -349,7 +405,7 @@ impl Stripper {
                     self.state = EscState::None;
                 }
             }
-            if self.state != EscState::None && self.pending > MAX_PENDING_ESCAPE {
+            if overrun(&self.state, self.pending) {
                 // Give up: not a well-formed escape after all, so whatever of
                 // it was read is not half a mark either.
                 self.state = EscState::None;
@@ -439,6 +495,42 @@ mod tests {
         // `D` with no code still ends the command; the exit is simply unknown.
         s.strip(b"\x1b]133;D\x07");
         assert_eq!(s.take_events(), vec![(0, Ev::Mark(Mark::Ended { exit: None }))]);
+    }
+
+    #[test]
+    fn a_shell_says_its_folder_in_an_osc_7() {
+        let p = |s: &str| cwd_of(s).map(|p| p.to_string_lossy().into_owned());
+        // With a host, and without one; the host is not ours to check.
+        assert_eq!(p("7;file://mac.local/Users/f/app").as_deref(), Some("/Users/f/app"));
+        assert_eq!(p("7;file:///Users/f/app").as_deref(), Some("/Users/f/app"));
+        // Percent-encoded: a space, an ampersand, a multibyte name.
+        assert_eq!(
+            p("7;file://h/Users/f/Finance%20%26%20Real%20Estate").as_deref(),
+            Some("/Users/f/Finance & Real Estate")
+        );
+        assert_eq!(p("7;file://h/tmp/caf%C3%A9").as_deref(), Some("/tmp/café"));
+        // Unencoded, and a stray `%`, pass through as written.
+        assert_eq!(p("7;file://h/a b&c/50%").as_deref(), Some("/a b&c/50%"));
+        assert_eq!(p("7;file://h/x/%zz").as_deref(), Some("/x/%zz"));
+        // Not a folder: no path, another scheme, another OSC.
+        assert_eq!(p("7;file://host"), None);
+        assert_eq!(p("7;http://h/x"), None);
+        assert_eq!(p("133;A"), None);
+        assert_eq!(p("0;title"), None);
+
+        // In a stream: stripped, the latest kept, read once — and a long one
+        // is not mistaken for a stray escape that runs into the text.
+        let mut s = Stripper::default();
+        let long = format!("/Users/f/{}", "deep/".repeat(40));
+        let bytes = format!("\x1b]7;file://h/tmp/a\x07$ \x1b]7;file://h{long}\x1b\\ok");
+        assert_eq!(s.strip(bytes.as_bytes()), "$ ok");
+        assert_eq!(s.take_cwd(), Some(PathBuf::from(&long)));
+        assert_eq!(s.take_cwd(), None, "draining");
+        // Split across reads.
+        assert_eq!(s.strip(b"\x1b]7;file://h/tm"), "");
+        assert_eq!(s.take_cwd(), None);
+        assert_eq!(s.strip(b"p/x%20y\x07"), "");
+        assert_eq!(s.take_cwd(), Some(PathBuf::from("/tmp/x y")));
     }
 
     #[test]

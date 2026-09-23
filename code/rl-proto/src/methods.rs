@@ -486,6 +486,10 @@ pub struct DigestItem {
     /// first came.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub emitted: Vec<Signal>,
+    /// The folder a live run last said it was in (OSC 7) — a shell's, at its
+    /// prompt. Unknown until it says so; forgotten when the run ends.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<std::path::PathBuf>,
 }
 
 // ---- event.* ----------------------------------------------------------------

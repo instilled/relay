@@ -147,6 +147,7 @@ mod tests {
             unseen: false,
             joined_by: None,
             emitted: Vec::new(),
+            cwd: None,
         }
     }
 
