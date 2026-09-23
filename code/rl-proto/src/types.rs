@@ -260,7 +260,16 @@ pub struct Run {
     pub pinned_at: Option<Timestamp>,
 }
 
+/// The tag that marks a run as a project's warm shell.
+pub const SHELL_TAG: &str = "shell";
+
 impl Run {
+    /// A shell: an interactive one by its profile, or a project's warm shell
+    /// by its tag, whatever its argv resolved to.
+    pub fn is_shell(&self) -> bool {
+        self.kind == RunKind::Shell || self.tags.iter().any(|t| t == SHELL_TAG)
+    }
+
     /// A fresh run in `starting`, everything optional unset.
     pub fn new(
         id: impl Into<String>,
