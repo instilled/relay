@@ -2255,13 +2255,26 @@ const AGENT_HEADERS: &[&str] = &["AGENT", "BIN", "HEADLESS", "MODEL", "OFFERED"]
 
 /// `rl agents`: what the registry knows, and what is here.
 /// zsh: `D` with the last exit and `A` from `precmd`, `C` from `preexec`, and
-/// `B` on the end of the prompt itself, where what you type begins.
-const ZSH_MARKS: &str = r#"# Relay prompt marks (OSC 133), so a project shell can tell one command from
-# the next. In ~/.zshrc:  eval "$(rl shell-init zsh)"
+/// `B` on the end of the prompt itself, where what you type begins. At each
+/// prompt, too, the folder it is in (OSC 7), percent-encoded byte by byte.
+const ZSH_MARKS: &str = r#"# Relay prompt marks (OSC 133) and the folder you are in (OSC 7), so a project
+# shell can tell one command from the next and say where it is.
+# In ~/.zshrc:  eval "$(rl shell-init zsh)"
 if [[ -z ${_relay_marks:-} ]]; then
   _relay_marks=1
   autoload -Uz add-zsh-hook
-  _relay_precmd() { printf '\033]133;D;%s\007\033]133;A\007' "$?" }
+  _relay_cwd() {
+    local LC_ALL=C s=$PWD out= c i
+    for (( i = 1; i <= ${#s}; i++ )); do
+      c=${s[i]}
+      case $c in
+        [-/._~A-Za-z0-9]) out+=$c ;;
+        *) out+=$(printf '%%%02X' "'$c") ;;
+      esac
+    done
+    printf '\033]7;file://%s%s\007' "$HOST" "$out"
+  }
+  _relay_precmd() { printf '\033]133;D;%s\007\033]133;A\007' "$?"; _relay_cwd }
   _relay_preexec() { printf '\033]133;C\007' }
   add-zsh-hook precmd _relay_precmd
   add-zsh-hook preexec _relay_preexec
@@ -2269,13 +2282,26 @@ if [[ -z ${_relay_marks:-} ]]; then
 fi
 "#;
 
-/// bash: the same, with `PROMPT_COMMAND` for `D`/`A` — first, so `$?` is still
-/// the command's — a `DEBUG` trap for `C`, and `B` on the end of `PS1`.
-const BASH_MARKS: &str = r#"# Relay prompt marks (OSC 133), so a project shell can tell one command from
-# the next. In ~/.bashrc:  eval "$(rl shell-init bash)"
+/// bash: the same, with `PROMPT_COMMAND` for `D`/`A` and the folder — first,
+/// so `$?` is still the command's — a `DEBUG` trap for `C`, and `B` on the end
+/// of `PS1`.
+const BASH_MARKS: &str = r#"# Relay prompt marks (OSC 133) and the folder you are in (OSC 7), so a project
+# shell can tell one command from the next and say where it is.
+# In ~/.bashrc:  eval "$(rl shell-init bash)"
 if [ -z "${_relay_marks:-}" ]; then
   _relay_marks=1
-  _relay_precmd() { printf '\033]133;D;%s\007\033]133;A\007' "$?"; }
+  _relay_cwd() {
+    local LC_ALL=C s=$PWD out= c i
+    for (( i = 0; i < ${#s}; i++ )); do
+      c=${s:i:1}
+      case $c in
+        [-/._~A-Za-z0-9]) out+=$c ;;
+        *) printf -v c '%%%02X' "'$c"; out+=$c ;;
+      esac
+    done
+    printf '\033]7;file://%s%s\007' "$HOSTNAME" "$out"
+  }
+  _relay_precmd() { printf '\033]133;D;%s\007\033]133;A\007' "$?"; _relay_cwd; }
   PROMPT_COMMAND="_relay_precmd${PROMPT_COMMAND:+;$PROMPT_COMMAND}"
   trap 'printf "\033]133;C\007"' DEBUG
   PS1="$PS1\[\033]133;B\007\]"
@@ -2342,6 +2368,29 @@ async fn agents(home: &Home, json: bool) -> Result<()> {
 mod tests {
     use super::*;
     use clap::{CommandFactory, Parser};
+
+    #[test]
+    fn the_shell_snippets_say_the_folder_percent_encoded() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("a b&c").join("café");
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        for (sh, snippet) in [("bash", BASH_MARKS), ("zsh", ZSH_MARKS)] {
+            let file = tmp.path().join(sh);
+            std::fs::write(&file, snippet).unwrap();
+            let script = format!(". '{}'; cd '{}' && _relay_cwd", file.display(), dir.display());
+            let Ok(out) = std::process::Command::new(sh).args(["-c", &script]).output() else {
+                eprintln!("skipping {sh}: not installed");
+                continue;
+            };
+            assert!(out.status.success(), "{sh}: {}", String::from_utf8_lossy(&out.stderr));
+            let text = String::from_utf8_lossy(&out.stdout);
+            assert!(text.contains("a%20b%26c/caf%C3%A9\x07"), "{sh}: {text:?}");
+            let mut s = rl_detect::ansi::Stripper::new();
+            s.strip(&out.stdout);
+            assert_eq!(s.take_cwd(), Some(dir.clone()), "{sh}");
+        }
+    }
 
     #[test]
     fn the_grammar_is_consistent() {

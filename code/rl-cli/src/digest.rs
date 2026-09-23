@@ -152,6 +152,7 @@ mod tests {
             unseen,
             joined_by: None,
             emitted: vec![],
+            cwd: None,
         }
     }
 

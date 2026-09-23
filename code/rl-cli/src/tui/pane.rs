@@ -603,6 +603,7 @@ mod tests {
             at: t,
             unseen: true,
             joined_by: None,
+            cwd: None,
             emitted: vec![
                 Signal {
                     kind: "flint.product.new-feedback".into(),

@@ -6,7 +6,13 @@ use rl_core::time::fmt_duration;
 use rl_proto::methods::DigestItem;
 use rl_proto::types::{Event, Run, RunState, Signal};
 
-pub fn item(run: Run, last: Option<Event>, joined_by: Option<String>, emitted: Vec<Signal>) -> DigestItem {
+pub fn item(
+    run: Run,
+    last: Option<Event>,
+    joined_by: Option<String>,
+    emitted: Vec<Signal>,
+    cwd: Option<std::path::PathBuf>,
+) -> DigestItem {
     let at = last.as_ref().map(|e| e.at).unwrap_or(run.state_at);
     let summary = summarise(&run, last.as_ref(), &emitted);
     let unseen = unseen(&run, at);
@@ -16,6 +22,7 @@ pub fn item(run: Run, last: Option<Event>, joined_by: Option<String>, emitted: V
         unseen,
         joined_by,
         emitted,
+        cwd,
         run,
     }
 }
