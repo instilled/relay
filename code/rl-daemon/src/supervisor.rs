@@ -98,6 +98,9 @@ pub struct Live {
     joiner: Mutex<Option<Seat>>,
     /// Remarks for every attached viewer: joined, left, took over.
     pub notes: broadcast::Sender<String>,
+    /// The pty's own size while a repaint nudge holds it a row smaller, so a
+    /// viewer arriving meanwhile is not told the smaller size is the real one.
+    nudge: Mutex<Option<(u16, u16)>>,
 }
 
 impl Live {
@@ -107,6 +110,34 @@ impl Live {
 
     pub fn joiner(&self) -> Option<Seat> {
         self.joiner.lock().unwrap().clone()
+    }
+
+    /// Starts a repaint nudge from `size`, unless one is under way: its giving
+    /// the size back repaints for everyone. `true` when this one is ours.
+    pub fn nudge_start(&self, size: (u16, u16)) -> bool {
+        let mut n = self.nudge.lock().unwrap();
+        if n.is_some() {
+            return false;
+        }
+        *n = Some(size);
+        true
+    }
+
+    /// The size a nudge holds back, while one does.
+    pub fn nudged_size(&self) -> Option<(u16, u16)> {
+        *self.nudge.lock().unwrap()
+    }
+
+    /// The keyboard resized during a nudge: that is the size to give back.
+    pub fn nudge_resized(&self, size: (u16, u16)) {
+        if let Some(s) = self.nudge.lock().unwrap().as_mut() {
+            *s = size;
+        }
+    }
+
+    /// Ends the nudge: the size to give back.
+    pub fn nudge_end(&self) -> Option<(u16, u16)> {
+        self.nudge.lock().unwrap().take()
     }
 
     pub fn is_joiner(&self, seat: &Seat) -> bool {
@@ -658,6 +689,7 @@ impl Supervisor {
             current: Mutex::new(Current::from(&run)),
             socket,
             joiner: Mutex::new(None),
+            nudge: Mutex::new(None),
             notes,
         });
         self.live.lock().unwrap().insert(run.id.clone(), live.clone());

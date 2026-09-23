@@ -212,6 +212,16 @@ sequenceDiagram
     D->>L: session_io.append(in)
 ```
 
+What is replayed is a tail of bytes, not a screen: an app that redraws only what changed (Claude
+Code, and most that diff their own buffer) leaves its box and status line out until it repaints.
+So once the replay is done rld makes it repaint: it gives the pty a row less, holds that for a
+fifth of a second, and gives the size back (`NUDGE_HOLD`, `rl-daemon/src/attach.rs`). Held,
+because two resizes sent back to back land together, the app reads the size it already had, and a
+runtime that only reports a change (Node, Bun) never repaints. A row rather than a column, as tmux
+does, so what the run printed is not wrapped twice. One nudge per run at a time: while it holds,
+the run keeps its own size on record, a viewer arriving meanwhile starts from that, and the one in
+flight repaints for it too.
+
 Every one of those frames is read through `FrameReader`, never a bare `read_frame`. Each hop
 reads inside a `select!` — the viewer against stdin and a ticker, `rld` against the holder and
 its own shutdown — and a plain read holds the bytes it has gathered on the future's stack, so
