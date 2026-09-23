@@ -1006,6 +1006,55 @@ impl App {
         }
     }
 
+    /// Keys of what the search's words name, best first; see `query::ranked`.
+    /// Nothing when it has no words, only tokens.
+    fn matches(&self) -> Vec<String> {
+        let words = query::Query::parse(&self.filter).words;
+        if words.is_empty() {
+            return vec![];
+        }
+        let (keys, named): (Vec<Option<String>>, Vec<query::Named>) = match self.view {
+            View::Work => self
+                .rows()
+                .iter()
+                .map(|r| (r.key(), rows::named(r, &self.digest, &self.names)))
+                .unzip(),
+            View::Graph => {
+                let Some((g, p)) = self.graph_plan() else {
+                    return vec![];
+                };
+                p.order()
+                    .into_iter()
+                    .filter_map(|id| g.node(&id).map(|n| (Some(id.clone()), graph::named(n, &self.names))))
+                    .unzip()
+            }
+        };
+        query::ranked(&words, &named)
+            .into_iter()
+            .filter_map(|i| keys[i].clone())
+            .collect()
+    }
+
+    /// The search changed: the cursor goes to the best match. With no words
+    /// to match, it stays where it is if it can.
+    fn land(&mut self) {
+        match self.matches().into_iter().next() {
+            Some(k) => self.select(Some(k)),
+            None => self.settle(),
+        }
+    }
+
+    /// `tab` with nothing to complete: on to the next match, round; shift-tab
+    /// back. False when there is none to go to.
+    fn next_match(&mut self, back: bool) -> bool {
+        let order = self.matches();
+        let Some(k) = query::next_match(&order, self.sel.as_ref(), back).cloned() else {
+            return false;
+        };
+        self.select(Some(k));
+        true
+    }
+
     fn select(&mut self, key: Option<String>) {
         if key != self.sel {
             // A question is only worth its details: selecting one opens the
@@ -2468,9 +2517,10 @@ impl App {
         self.pick = None;
     }
 
-    /// A key while searching: typing narrows at once, `enter` keeps the
-    /// search and gives the line back, `esc` puts back the filter from before,
-    /// `tab` completes a token; the arrows still move through what is left.
+    /// A key while searching: typing narrows at once and puts the cursor on
+    /// the best match, `enter` keeps the search and gives the line back, `esc`
+    /// puts back the filter from before, `tab` completes a token or else goes
+    /// to the next match; the arrows still move through what is left.
     async fn key_search(&mut self, k: KeyEvent) -> Result<()> {
         let Some(s) = self.search.as_mut() else {
             return Ok(());
@@ -2481,10 +2531,17 @@ impl App {
             self.search = None;
             return Ok(());
         }
+        if k.code == KeyCode::BackTab {
+            self.next_match(true);
+            return Ok(());
+        }
         match s.line.key(&k) {
             line::Act::Typing => {
-                self.filter = s.line.text().trim().to_string();
-                self.settle();
+                let now = s.line.text().trim().to_string();
+                if now != self.filter {
+                    self.filter = now;
+                    self.land();
+                }
             }
             line::Act::Cancel => {
                 if let Some(s) = self.search.take() {
@@ -2501,7 +2558,8 @@ impl App {
 
     /// `tab` in a search: the token names, then a token's values — states,
     /// kinds, projects, rules. One fits: taken. Several: what they share, and
-    /// the rest shown in the footer.
+    /// the rest shown in the footer. None — a plain word, or no word at all
+    /// after one — and it goes to the next match instead.
     fn complete_search(&mut self) {
         let mut projects: Vec<String> = self.names.paths().iter().map(|p| self.names.workspace(p)).collect();
         projects.push("global".into());
@@ -2516,6 +2574,15 @@ impl App {
         let start = text[..cur].rfind(' ').map_or(0, |i| i + 1);
         let word = &text[start..cur];
         let cands = query::complete(word, &projects, &rules, &branches);
+        // A plain word has nothing to complete, and nor has the gap after one:
+        // tab goes on to the next match. With nothing to match yet, the gap
+        // still offers the names.
+        if (cands.is_empty() || word.is_empty()) && self.next_match(false) {
+            return;
+        }
+        let Some(s) = self.search.as_mut() else {
+            return;
+        };
         let take = match cands.as_slice() {
             [] => return,
             [one] if one.ends_with(':') => one.clone(),
@@ -2537,7 +2604,7 @@ impl App {
         let line = format!("{}{take}{}", &text[..start], &text[cur..]);
         s.line.set_with_cursor(line, start + take.len());
         self.filter = s.line.text().trim().to_string();
-        self.settle();
+        self.land();
     }
 
     /// What the line does not take: moving about, and backing out.
@@ -3071,7 +3138,7 @@ impl App {
                     self.open_search();
                 } else {
                     self.filter = arg.trim().to_string();
-                    self.settle();
+                    self.land();
                 }
             }
             palette::Cmd::Lens => {
@@ -3870,7 +3937,7 @@ impl App {
             return m.clone();
         }
         if self.search.is_some() {
-            return "type to narrow · tab completes in: is: kind: by: · ↑↓ move · enter keeps · esc puts back".into();
+            return "type to narrow · tab completes in: is: kind: by:, or next match · ↑↓ move · enter keeps · esc puts back".into();
         }
         if let Some(a) = &self.asking {
             return format!("asking about \"{}\"… · its run is in the list · /stop there", a.words);

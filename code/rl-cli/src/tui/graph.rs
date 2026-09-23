@@ -11,7 +11,7 @@
 //! up a lane of their own in the gap before the target, and into the target
 //! on a row of their own, where the event kinds they carry are written.
 
-use super::query::{Query, Subject};
+use super::query::{Named, Query, Subject};
 use super::rows::Names;
 use super::theme;
 use jiff::Timestamp;
@@ -128,6 +128,18 @@ fn node_subject<'a>(n: &'a Node, folder: &'a str) -> Subject<'a> {
         kind,
         by: n.rule.as_deref().map(|r| r.rsplit('/').next().unwrap_or(r)),
         on: None,
+    }
+}
+
+/// A node as the search ranks it (`query::ranked`): its name, its folder,
+/// its detail.
+pub fn named(n: &Node, names: &Names) -> Named {
+    Named {
+        title: n.name.clone(),
+        project: folder_word(n, names),
+        summary: n.detail.clone(),
+        rest: n.folder.iter().map(|p| p.to_string_lossy().into_owned()).collect(),
+        ..Named::default()
     }
 }
 
