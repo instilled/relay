@@ -77,10 +77,9 @@ pub fn register(r: &mut Router<Daemon>) {
         d.scheduler.rename_workspace(&p.path, &p.name).await.map_err(internal)
     });
     r.register::<rl_proto::methods::WorkspaceRemove, _, _>(|d, p| async move {
-        if let Ok(path) = std::fs::canonicalize(&p.path) {
-            let _ = d.reactor.remove_scope(&path).await;
-        }
-        d.scheduler.remove_workspace(&p.path).await.map_err(internal)
+        crate::workspace::remove(&d, p)
+            .await
+            .map_err(|e| RpcError::invalid_params(format!("{e:#}")))
     });
     r.register::<AgentList, _, _>(|d, ()| async move {
         let config = d.config.read().unwrap().config.clone();

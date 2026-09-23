@@ -239,6 +239,29 @@ pub fn archive(conn: &Connection, ids: &[String], at: Timestamp) -> Result<usize
     Ok(n)
 }
 
+/// Done with everything that has ended in one folder, as when its project is
+/// removed: the runs whose `workspace` is exactly `workspace` (a folder nested
+/// inside is a project of its own) go, pins and all. Runs still going stay.
+pub fn archive_workspace(conn: &Connection, workspace: &std::path::Path, at: Timestamp) -> Result<usize> {
+    Ok(conn.execute(
+        &format!(
+            "UPDATE runs SET archived_at = ?2, pinned_at = NULL WHERE workspace = ?1 AND archived_at IS NULL \
+             AND state IN ({TERMINAL_STATES_SQL})"
+        ),
+        params![path_str(workspace), to_millis(at)],
+    )?)
+}
+
+/// The runs in one folder that have not ended, oldest first.
+pub fn live_in(conn: &Connection, workspace: &std::path::Path) -> Result<Vec<Run>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {COLS} FROM runs WHERE workspace = ?1 AND state NOT IN ({TERMINAL_STATES_SQL}) \
+         ORDER BY started_at, id"
+    ))?;
+    let rows = stmt.query_map(params![path_str(workspace)], from_row)?;
+    Ok(rows.collect::<Result<_, _>>()?)
+}
+
 /// Runs lost in a restart that are still on the list, oldest first: ended,
 /// not archived, and marked `run.lost` when Relay came back without their
 /// holder. Resuming one archives it, so it leaves this list as it is picked up.

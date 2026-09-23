@@ -469,9 +469,18 @@ impl Supervisor {
     }
 
     pub async fn stop(&self, id: &str, force: bool) -> Result<Run> {
+        self.stop_with(id, if force { 9 } else { 15 }).await
+    }
+
+    /// Stops a run the way a closed terminal does, with `SIGHUP`: what an
+    /// interactive shell leaves on, where it shrugs off `SIGTERM`.
+    pub async fn hang_up(&self, id: &str) -> Result<Run> {
+        self.stop_with(id, 1).await
+    }
+
+    async fn stop_with(&self, id: &str, sig: i32) -> Result<Run> {
         let live = self.live(id).ok_or_else(|| anyhow!("no live session for run {id}"))?;
         live.stopping.store(true, Ordering::SeqCst);
-        let sig = if force { 9 } else { 15 };
         live.writer
             .lock()
             .await

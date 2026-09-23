@@ -349,11 +349,14 @@ impl Scheduler {
         })
     }
 
-    /// Unregisters a folder; its schedules stop and are marked removed.
+    /// Unregisters a folder, as the ledger keys it (see `rulestore::resolve`);
+    /// its schedules stop, are marked removed and forget their approvals.
+    /// `false` when it was not registered, which is no error: its old rules,
+    /// if any, are let go all the same.
     pub async fn remove_workspace(&self, path: &Path) -> Result<bool> {
-        let scope = self.scope_of(&path.to_string_lossy()).await?;
+        let scope = path.to_string_lossy().into_owned();
         let now = Timestamp::now();
-        let path = PathBuf::from(&scope);
+        let path = path.to_path_buf();
         let gone = self
             .ledger
             .call(move |c| {

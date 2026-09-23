@@ -600,11 +600,6 @@ pub struct WorkspaceUpParams {
     pub approve: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WorkspacePath {
-    pub path: PathBuf,
-}
-
 /// Registers a folder and loads its `.relay/`.
 pub struct WorkspaceUp;
 impl Method for WorkspaceUp {
@@ -620,12 +615,56 @@ impl Method for WorkspaceList {
     type Result = Vec<crate::schedule::Workspace>;
 }
 
-/// Unregisters a folder; its schedules stop.
+/// Unregisters a folder: its rules stop, are marked removed and forget their
+/// approvals, and its open questions are dismissed. The folder need not exist
+/// any more, nor have been registered — a folder the list shows only for its
+/// runs is removed by what the flags do to those. Asked to, it also stops
+/// every run still going there, archives what has ended, and moves the rule
+/// files of its `.relay/` into the Relay home's `removed/`.
 pub struct WorkspaceRemove;
 impl Method for WorkspaceRemove {
     const NAME: &'static str = "workspace.remove";
-    type Params = WorkspacePath;
-    type Result = bool;
+    type Params = WorkspaceRemoveParams;
+    type Result = WorkspaceRemoved;
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct WorkspaceRemoveParams {
+    pub path: PathBuf,
+    /// Stop every run in the folder still going — shells, agents, commands —
+    /// and wait (a while, not for ever) for them to end.
+    #[serde(default)]
+    pub stop_runs: bool,
+    /// Archive the folder's ended runs, those just stopped included.
+    #[serde(default)]
+    pub archive_runs: bool,
+    /// Move `.relay/schedules.yaml` and `reactions.yaml` to
+    /// `<home>/removed/<name>-<when>/`. Refused, before anything is done,
+    /// when `.relay` is a symlink or is the Relay home.
+    #[serde(default)]
+    pub move_rules: bool,
+}
+
+/// What removing a folder did.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct WorkspaceRemoved {
+    /// The folder as the daemon took it.
+    pub path: PathBuf,
+    /// It was registered, and no longer is.
+    pub removed: bool,
+    /// Runs asked to stop that have ended.
+    pub stopped: usize,
+    /// Runs asked to stop that were still going when the wait ran out, or
+    /// that no holder of this daemon's could be told to stop.
+    #[serde(default)]
+    pub still_running: usize,
+    pub archived: usize,
+    /// Open questions from the folder, dismissed.
+    #[serde(default)]
+    pub dismissed: usize,
+    /// Where the rule files went, when they were moved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rules_moved_to: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

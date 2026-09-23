@@ -195,16 +195,23 @@ pub fn approve(conn: &Connection, t: Tables, scope: &str, names: &[String]) -> R
     Ok(done)
 }
 
-/// Marks every entry of a scope removed, as when its workspace is unregistered.
+/// Marks every entry of a scope removed, as when its workspace is unregistered,
+/// and forgets every yes given there: a folder registered again is a stranger
+/// again, and its rules ask before they run. Returns how many were marked.
 pub fn remove_scope(conn: &Connection, t: Tables, scope: &str, now: Timestamp) -> Result<usize> {
-    Ok(conn.execute(
+    let n = conn.execute(
         &format!(
             "UPDATE {} SET removed_at = ?2{} WHERE scope = ?1 AND removed_at IS NULL",
             t.entries,
             t.clear_next()
         ),
         params![scope, to_millis(now)],
-    )?)
+    )?;
+    conn.execute(
+        &format!("UPDATE {} SET approved_hash = NULL WHERE scope = ?1", t.entries),
+        params![scope],
+    )?;
+    Ok(n)
 }
 
 pub fn get(conn: &Connection, t: Tables, scope: &str, name: &str) -> Result<Option<Row>> {

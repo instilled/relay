@@ -332,10 +332,26 @@ the cursor — `run.pin` sets `runs.pinned_at` — and it stands above every pro
 pinned, named with its folder (`relay › deploy shell`), under every lens and however long ago it
 ended; `^t` again lets it go back, and archiving it by name unpins it. `ctrl-x` is the one keystroke for it, whatever the row,
 and it asks first: the first press arms it and says what a second would do — remove an ended run
-or a job, stop one still going, dismiss a question — and the second press does it, while any other
+or a job, stop one still going, dismiss a question, remove a project — and the second press does it, while any other
 key disarms it, so nothing goes on a single slip (the way an agent view confirms a delete). `ctrl-c`
 is the same for leaving: once to ask, again to quit. A run still going is stopped, and a `ctrl-x`
-once it has ended removes it. Nothing is destroyed by any of this; that is retention's alone. Ended runs also leave on their own after a day;
+once it has ended removes it. On a project's header the first press counts what would go
+(`press ^x again to remove relay · stops 2 · archives 7 ended runs`), and the second removes the
+project over `workspace.remove` — unregistered, every run still going there stopped (a shell hung up
+on, anything else sent `SIGTERM`, whatever is left after a few seconds killed), its ended runs
+archived, which is what takes its header off the list, its open questions dismissed and the yes
+given to its rules forgotten, so registering it again asks again. When its `.relay` holds rule
+files that can move, the second press asks first, in the footer — `also move relay/.relay (2
+schedules · 1 reaction) to ~/.relay/removed? y moves · n keeps · any other key cancels` — and
+nothing happens until `y` or `n`; any other key leaves everything as it was. Moved means into
+`<home>/removed/<name>-<when>/`, never deleted: only `schedules.yaml` and `reactions.yaml` go, and
+the folder with them only when nothing else is in it. A `.relay` that is a symlink, or that is the
+Relay home itself (someone registered `~`), is never moved. The removal runs on its own connection,
+so the panel keeps drawing while the runs stop, and the flash says what came of it (`removed relay
+· stopped 2 · 9 runs archived · .relay kept`). On the line: `rl workspace rm <dir>`
+unregisters, with `--stop`, `--archive` and `--move-rules` (which asks, or wants `--yes`) for the
+rest. A folder gone from disk is still removed by the path it was registered under.
+Nothing is destroyed by any of this; that is retention's alone. Ended runs also leave on their own after a day;
 `/archive` is for the impatient. On the line: `rl archive <id>…`, `rl archive --all`. Nothing is ever deleted here; that is
 retention (§7). `enter` on a run still going is the run itself: the panel steps out of ratatui and
 pipes the run straight to the real terminal, tmux-attach style — stdin is the run's input, its
@@ -440,7 +456,7 @@ is the row under the cursor instead — a job opens, a question comes
 out of the list to be answered by number, a run's terminal opens. Arrows, `home`/`end` and `esc`
 belong to the list; `esc` with something typed clears the line first, and `ctrl-c` leaves.
 The few keys that are not the list's or the line's each stand for a command, and the command
-list shows them beside it: `^x` stops or archives, `^r` renames, `^t` pins, `^g` opens the graph, `^o` shows or hides the pane,
+list shows them beside it: `^x` stops, archives or removes, `^r` renames, `^t` pins, `^g` opens the graph, `^o` shows or hides the pane,
 `^f` searches.
 A shell is a command like any other — `/shell` — and has no key of its own. The line keeps `^a`, `^e`, `^u`, `^k` and `^w` for
 editing, as a shell does, so none of those is ever taken for anything else. It moves and cuts by
@@ -862,11 +878,15 @@ are deliberately not a key yet.
   hooks/claude.json           written at daemon start; passed to claude as --settings
   detect/*.yaml               user overrides, merged field by field over the built-ins
   plugins/                    badge commands, first on their PATH; `gh-pr` written when missing
+  removed/<name>-<when>/      a removed project's rule files, when you said to move them; kept, not
+                              read
 
 <workspace>/.relay/           per folder registered with `rl up` — the trust boundary
   schedules.yaml              versioned with the folder; a version fires only once approved
                               (approved_hash == hash); an edit asks again
-  reactions.yaml              the same, for rules; `rl up` loads and approves both
+  reactions.yaml              the same, for rules; `rl up` loads and approves both. Removing the
+                              project (`workspace.remove`) forgets every approval in it, and can
+                              move these two files to ~/.relay/removed/; anything else stays
 
 detect/*.yaml                 in-tree, compiled in: generic, claude, codex, cursor, gemini, opencode, sh
 scripts/{rl,rld,relay-dev}    dev shims: build if needed, run the debug binaries
