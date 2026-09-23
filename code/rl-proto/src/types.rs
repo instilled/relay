@@ -436,6 +436,9 @@ pub mod event_kind {
     /// while no daemon was there, a holder connection that failed, a holder
     /// gone without an exit. A warning that would otherwise only flash.
     pub const RUN_TROUBLE: &str = "run.trouble";
+    /// Relay came back and the run's holder was gone with no exit on record —
+    /// the machine restarted, most likely. `run.resume` can pick it back up.
+    pub const RUN_LOST: &str = "run.lost";
     /// Retention took a run's journal; the run and its events stay.
     pub const RUN_JOURNAL_DROPPED: &str = "run.journal_dropped";
     /// A run was recapped: its agent's own, or an assistant's (`summaries`).
@@ -452,6 +455,7 @@ pub mod event_kind {
         RUN_FAILED,
         RUN_STOPPED,
         RUN_TROUBLE,
+        RUN_LOST,
         COMMIT_LANDED,
         BRANCH_DONE,
         SCHEDULE_FIRED,

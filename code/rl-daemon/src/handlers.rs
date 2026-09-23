@@ -344,6 +344,10 @@ pub fn register(r: &mut Router<Daemon>) {
         get_run(&d, &p.id).await
     });
 
+    r.register::<rl_proto::methods::RunResume, _, _>(|d, p| async move {
+        crate::resume::resume(&d, p).await.map_err(RpcError::internal)
+    });
+
     r.register::<RunArchive, _, _>(|d, p: RunArchiveParams| async move {
         let now = time::now();
         d.ledger
@@ -457,11 +461,13 @@ pub fn register(r: &mut Router<Daemon>) {
             .list(DecisionFilter::default())
             .await
             .map_err(RpcError::internal)?;
+        let lost = d.ledger.call(|c| runs::lost(c)).await.map_err(RpcError::internal)?;
         Ok(Digest {
             since,
             items,
             decisions,
             checkouts,
+            lost,
         })
     });
 

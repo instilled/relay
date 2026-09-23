@@ -13,7 +13,8 @@ use nix::unistd::Pid;
 use rl_core::Home;
 use rl_ledger::session_io::{self, Direction};
 use rl_ledger::{Ledger, sessions};
-use rl_proto::types::{Event, Run, RunState};
+use rl_proto::methods::{Digest, Resumed};
+use rl_proto::types::{Event, Run, RunKind, RunState};
 use serde_json::json;
 use std::time::Duration;
 
@@ -225,5 +226,100 @@ async fn holder_lost_without_exit_is_failed() {
     );
     let active: Vec<Run> = c.ok("run.list", json!({ "active_only": true })).await;
     assert!(active.is_empty());
+    h.stop().await;
+}
+
+/// A restart takes a shell and a command with it. Coming back, both are
+/// marked lost and offered; resuming what was lost picks the shell back up
+/// and leaves the command until it is asked for, since running it again could
+/// do what it did twice. Each run picked up leaves the list for the one that
+/// carries it on, and names it.
+#[tokio::test]
+async fn runs_lost_in_a_restart_are_offered_and_picked_back_up() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = Home::at(tmp.path());
+    let Some(h) = Harness::on(home.clone()) else {
+        return;
+    };
+    let mut c = Conn::open(&home).await;
+    let cwd = tmp.path().to_string_lossy().into_owned();
+    let shell: Run = c
+        .ok(
+            "run.start",
+            json!({ "argv": ["/bin/sh", "-i"], "kind": "shell", "cwd": cwd, "tags": ["shell"] }),
+        )
+        .await;
+    assert_eq!(shell.kind, RunKind::Shell);
+    let cmd: Run = c.ok("run.start", json!({ "argv": [fake_cli()], "cwd": cwd })).await;
+    assert_eq!(cmd.kind, RunKind::Command);
+    drop(c);
+    h.stop().await;
+
+    // The machine goes: holders and children with it, and no exit on record.
+    for id in [&shell.id, &cmd.id] {
+        let row = session_row(&home, id);
+        kill(Pid::from_raw(row.holder_pid as i32), Signal::SIGKILL).unwrap();
+        wait_gone(row.holder_pid).await;
+        let _ = kill(Pid::from_raw(row.pid as i32), Signal::SIGKILL);
+    }
+
+    let h = Harness::on(home.clone()).unwrap();
+    let mut c = Conn::open(&home).await;
+    let d: Digest = c.ok("digest.get", json!({})).await;
+    let mut lost = d.lost.clone();
+    lost.sort();
+    let mut want = vec![shell.id.clone(), cmd.id.clone()];
+    want.sort();
+    assert_eq!(lost, want, "both lost, and offered");
+    let evs: Vec<Event> = c
+        .ok("event.list", json!({ "run": shell.id, "kinds": ["run.lost"] }))
+        .await;
+    assert_eq!(evs.len(), 1, "{evs:?}");
+
+    // What a restart took, less the command.
+    let out: Vec<Resumed> = c.ok("run.resume", json!({ "lost": true })).await;
+    assert_eq!(out.len(), 2, "{out:?}");
+    let sh = out.iter().find(|r| r.from == shell.id).unwrap();
+    let again = sh.run.as_ref().expect("the shell is picked back up");
+    assert_eq!(again.kind, RunKind::Shell);
+    assert_eq!(again.title, shell.title);
+    assert!(
+        again.tags.contains(&"shell".to_string()),
+        "still a warm shell: {:?}",
+        again.tags
+    );
+    assert!(
+        again.tags.contains(&format!("resumes:{}", shell.id)),
+        "{:?}",
+        again.tags
+    );
+    let left = out.iter().find(|r| r.from == cmd.id).unwrap();
+    assert!(left.run.is_none());
+    assert_eq!(left.why_not.as_deref(), Some(rl_proto::methods::RESUME_LEFT_OUT));
+
+    // The shell's old run has left the list; the command waits, still offered.
+    let d: Digest = c.ok("digest.get", json!({})).await;
+    assert_eq!(d.lost, vec![cmd.id.clone()]);
+    assert!(
+        d.items.iter().all(|i| i.run.id != shell.id),
+        "the old shell is archived"
+    );
+
+    // Asked for, the command runs again, and nothing lost is left.
+    let out: Vec<Resumed> = c.ok("run.resume", json!({ "lost": true, "commands": true })).await;
+    let rerun = out[0].run.as_ref().expect("the command runs again");
+    assert_eq!(rerun.argv, cmd.argv);
+    let d: Digest = c.ok("digest.get", json!({})).await;
+    assert!(d.lost.is_empty(), "{:?}", d.lost);
+
+    // A run still going is not picked up twice.
+    let out: Vec<Resumed> = c.ok("run.resume", json!({ "ids": [again.id] })).await;
+    assert!(out[0].run.is_none());
+    assert!(out[0].why_not.as_deref().unwrap().contains("still going"));
+
+    for id in [&again.id, &rerun.id] {
+        let _: Run = c.ok("run.stop", json!({ "id": id, "force": true })).await;
+        c.wait_terminal(id).await;
+    }
     h.stop().await;
 }

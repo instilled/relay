@@ -345,6 +345,56 @@ impl Method for RunArchive {
     type Result = usize;
 }
 
+/// Picks ended runs back up, each as a new run in its folder under its
+/// title: an agent's conversation where its CLI can resume one (`claude
+/// --resume`, `codex resume`), a shell as a fresh shell, a command run again.
+/// The run picked up leaves the list. One outcome per run asked about.
+pub struct RunResume;
+impl Method for RunResume {
+    const NAME: &'static str = "run.resume";
+    type Params = RunResumeParams;
+    type Result = Vec<Resumed>;
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RunResumeParams {
+    #[serde(default)]
+    pub ids: Vec<String>,
+    /// Instead: every run lost in a restart that is still on the list (see
+    /// `Digest::lost`) — agents and shells, and plain commands only when
+    /// `commands` says so, since running one again can do things twice.
+    #[serde(default)]
+    pub lost: bool,
+    #[serde(default)]
+    pub commands: bool,
+    /// The environment the new runs start in, as for `run.start`; empty means
+    /// the daemon's own.
+    #[serde(default)]
+    pub env: Vec<(String, String)>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cols: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rows: Option<u16>,
+}
+
+/// `Resumed::why_not` for a command `lost` left out because `commands` was
+/// not set: running one again can do what it did twice.
+pub const RESUME_LEFT_OUT: &str = "a command is run again only when asked";
+
+/// What became of one run asked to resume.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Resumed {
+    /// The run asked about.
+    pub from: String,
+    pub title: String,
+    /// The run that carries it on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run: Option<crate::types::Run>,
+    /// Why there is none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub why_not: Option<String>,
+}
+
 /// Keeps a run at the top of the panel, or lets it go back among the rest.
 /// Answers with the run as it now stands.
 pub struct RunPin;
@@ -415,6 +465,10 @@ pub struct Digest {
     /// The git checkout of every folder the list shows that is in one.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub checkouts: Vec<Checkout>,
+    /// Runs lost in a restart and still on the list, oldest first: what
+    /// `run.resume` with `lost` would pick up.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lost: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

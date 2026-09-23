@@ -9,7 +9,7 @@ use rl_core::{Home, display_path};
 use rl_proto::decision::{Decision, DecisionOption, DecisionStatus};
 use rl_proto::methods::{
     AgentList, ConfigGet, GcParams, GcRun, RuleApprove, RuleList, RuleRef, RunArchive, RunArchiveParams, RunId,
-    SummaryGet, SummaryMake, SummaryParams,
+    RunResume, RunResumeParams, SummaryGet, SummaryMake, SummaryParams,
 };
 use rl_proto::methods::{
     DaemonInfo, DigestGet, DigestParams, EventFilter, EventList, PresenceClient, PresenceTouch, RunFilter, RunHook,
@@ -75,6 +75,8 @@ enum Cmd {
     /// Archive a run: out of the panel and `rl since`, kept in the ledger. Ended runs only.
     #[command(alias = "done")]
     Archive(ArchiveArgs),
+    /// Pick an ended run back up as a new run: an agent's conversation, a fresh shell, a command again.
+    Resume(ResumeArgs),
     /// What happened while you were away: runs that need you, finished, or moved, grouped.
     Since(SinceArgs),
     /// List ledger events.
@@ -557,6 +559,18 @@ struct ArchiveArgs {
 }
 
 #[derive(Args)]
+struct ResumeArgs {
+    /// Run ids.
+    ids: Vec<String>,
+    /// Instead: every run lost in a restart that is still on the list — agents and shells.
+    #[arg(long, conflicts_with = "ids")]
+    lost: bool,
+    /// With --lost: plain commands too, run again.
+    #[arg(long, requires = "lost")]
+    commands: bool,
+}
+
+#[derive(Args)]
 struct SinceArgs {
     /// The boundary: a duration (8h), a date, or an instant. Default: when you last looked.
     since: Option<String>,
@@ -598,6 +612,7 @@ async fn main() -> Result<()> {
         Cmd::Stop(a) => stop(&home, a, cli.json).await,
         Cmd::Ls(a) => ls(&home, a, cli.json).await,
         Cmd::Archive(a) => archive(&home, a, cli.json).await,
+        Cmd::Resume(a) => resume(&home, a, cli.json).await,
         Cmd::Since(a) => since(&home, a, cli.json).await,
         Cmd::Events(a) => events(&home, a, cli.json).await,
         Cmd::Schedule { cmd } => schedule(&home, cmd, cli.json).await,
@@ -1039,6 +1054,41 @@ async fn archive(home: &Home, a: ArchiveArgs, json: bool) -> Result<()> {
         bail!("nothing archived: not found, still running, or already archived");
     } else {
         println!("{n} archived");
+    }
+    Ok(())
+}
+
+async fn resume(home: &Home, a: ResumeArgs, json: bool) -> Result<()> {
+    if a.ids.is_empty() && !a.lost {
+        bail!("say which: `rl resume <id>…`, or `rl resume --lost` for what a restart took");
+    }
+    let (cols, rows) = crossterm::terminal::size().map_or((None, None), |(c, r)| (Some(c), Some(r)));
+    let out = daemon::ensure(home, !json)
+        .await?
+        .call::<RunResume>(RunResumeParams {
+            ids: a.ids.clone(),
+            lost: a.lost,
+            commands: a.commands,
+            env: child_env(&[])?,
+            cols,
+            rows,
+        })
+        .await?;
+    if json {
+        println!("{}", serde_json::to_string(&out)?);
+        return Ok(());
+    }
+    if out.is_empty() {
+        println!("nothing to resume");
+    }
+    for r in &out {
+        match (&r.run, &r.why_not) {
+            (Some(new), _) => println!("{}  resumed {} as {}", r.from, r.title, new.id),
+            (None, why) => println!("{}  {}: {}", r.from, r.title, why.as_deref().unwrap_or("not resumed")),
+        }
+    }
+    if !a.ids.is_empty() && out.iter().all(|r| r.run.is_none()) {
+        bail!("nothing resumed");
     }
     Ok(())
 }
