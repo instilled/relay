@@ -311,6 +311,15 @@ pub fn register(r: &mut Router<Daemon>) {
         if let Some(sig) = rl_detect::claude::signal(&p.event, &p.payload) {
             d.supervisor.apply(&p.id, sig).await.map_err(internal)?;
         }
+        // An agent you did not name is named for what you first asked it.
+        if p.event == "UserPromptSubmit"
+            && let Some(prompt) = p.payload.get("prompt").and_then(|v| v.as_str())
+        {
+            d.supervisor
+                .name_from_prompt(&p.id, rl_detect::claude::DIALECT, prompt)
+                .await
+                .map_err(internal)?;
+        }
         get_run(&d, &p.id).await
     });
     r.register::<RunMark, _, _>(|d, RunMarkParams { id, mark, note }| async move {

@@ -357,8 +357,12 @@ impl Supervisor {
         self.ledger
             .call({
                 let run = run.clone();
+                let auto = spec.title.is_none();
                 move |c| {
                     runs::insert(c, &run)?;
+                    if auto {
+                        runs::set_title_auto(c, &run.id)?;
+                    }
                     sessions::insert(c, &row)?;
                     events::append(c, &started)?;
                     Ok(())
@@ -582,6 +586,34 @@ impl Supervisor {
             }
         }
         Ok(t)
+    }
+
+    /// An agent nobody named takes its first prompt for a title — once: the
+    /// title is Relay's to set only until it has, or until you rename the run
+    /// yourself, which always wins. True when it was named now.
+    /// `cli` stands in for the run's own when it has none.
+    pub async fn name_from_prompt(&self, id: &str, cli: &str, prompt: &str) -> Result<bool> {
+        let (id, cli, prompt) = (id.to_string(), cli.to_string(), prompt.to_string());
+        let named = self
+            .ledger
+            .call({
+                let id = id.clone();
+                move |c| {
+                    let Some(run) = runs::get(c, &id)? else {
+                        return Ok(None);
+                    };
+                    let cli = run.cli.as_deref().unwrap_or(&cli);
+                    match prompt_title(cli, &prompt) {
+                        Some(t) if run.kind == RunKind::Agent && runs::name_once(c, &id, &t)? => Ok(Some(t)),
+                        _ => Ok(None),
+                    }
+                }
+            })
+            .await?;
+        if let Some(title) = &named {
+            info!(id, title, "named for its first prompt");
+        }
+        Ok(named.is_some())
     }
 
     /// Waits for follow tasks to flush after `shutdown` was cancelled.
@@ -949,13 +981,29 @@ fn said(cmd: &ShellCommand) -> String {
 }
 
 fn default_title(argv: &[String]) -> String {
-    let joined = argv.join(" ");
-    if joined.chars().count() <= TITLE_MAX {
-        joined
+    clip_title(&argv.join(" "))
+}
+
+/// A title no longer than `TITLE_MAX`, cut with `…`.
+fn clip_title(s: &str) -> String {
+    if s.chars().count() <= TITLE_MAX {
+        s.to_string()
     } else {
-        let cut: String = joined.chars().take(TITLE_MAX - 1).collect();
+        let cut: String = s.chars().take(TITLE_MAX - 1).collect();
         format!("{cut}…")
     }
+}
+
+/// What an agent is called for what it was first asked: `claude: add a
+/// recipe import`, the first line of the prompt. Nothing for a prompt with
+/// nothing in it, or a slash command — `/model` or `/clear` says how to run,
+/// not what the run is for, so the title waits for the first real prompt.
+pub fn prompt_title(cli: &str, prompt: &str) -> Option<String> {
+    let first = prompt.trim().lines().next()?.trim();
+    if first.is_empty() || first.starts_with('/') {
+        return None;
+    }
+    Some(clip_title(&format!("{cli}: {first}")))
 }
 
 pub fn locate_session_bin() -> PathBuf {
@@ -964,4 +1012,26 @@ pub fn locate_session_bin() -> PathBuf {
 
 pub fn locate_rl_bin() -> PathBuf {
     rl_core::locate_bin("rl", RL_BIN_ENV)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{TITLE_MAX, prompt_title};
+
+    #[test]
+    fn an_agent_is_named_for_the_first_line_of_what_it_was_asked() {
+        assert_eq!(
+            prompt_title("claude", "  add a recipe import\nwith photos\n").as_deref(),
+            Some("claude: add a recipe import")
+        );
+        assert_eq!(prompt_title("claude", "   \n  "), None, "nothing asked");
+        assert_eq!(
+            prompt_title("claude", "/model opus"),
+            None,
+            "a slash command is not the work"
+        );
+        let long = prompt_title("claude", &"word ".repeat(40)).unwrap();
+        assert_eq!(long.chars().count(), TITLE_MAX);
+        assert!(long.starts_with("claude: word word") && long.ends_with('…'), "{long}");
+    }
 }

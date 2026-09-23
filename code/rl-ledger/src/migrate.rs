@@ -23,6 +23,7 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
     (11, "0011_summaries", include_str!("../migrations/0011_summaries.sql")),
     (12, "0012_pin", include_str!("../migrations/0012_pin.sql")),
     (13, "0013_recap", include_str!("../migrations/0013_recap.sql")),
+    (14, "0014_title_auto", include_str!("../migrations/0014_title_auto.sql")),
 ];
 
 pub fn run(conn: &mut Connection) -> Result<()> {

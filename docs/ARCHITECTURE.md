@@ -334,7 +334,11 @@ from a header opens the graph on that folder's first rule, and from a job on the
 `^r` (or `/rename`) renames
 whatever the cursor is on in place — a folder over `workspace.rename`, which updates the
 registered name and keeps the registration, a run (a shell is one) over `run.rename`, and a job
-through the form of the rule it comes from. A folder you
+through the form of the rule it comes from. An agent nobody named — no title from the form,
+`--title` or whatever started it — is named once for what it was first asked, from Claude's
+`UserPromptSubmit` hook: `claude: add a recipe import`, the prompt's first line cut to the title's
+length, a slash command skipped. The ledger keeps whether a title is still Relay's own
+(`runs.title_auto`), so a later prompt never renames it and a rename by hand always wins. A folder you
 `rl up`'d is always on the list, even before anything has run there: its header sits in its
 place by name, under every lens — a lens narrows what shows inside projects, never which
 projects there are — so you can select

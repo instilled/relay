@@ -47,6 +47,43 @@ fn set_title_renames_a_run_and_moves_nothing_else() {
 }
 
 #[test]
+fn a_run_relay_titled_is_named_once_and_a_rename_by_hand_wins() {
+    let l = Ledger::open_in_memory().unwrap();
+    for id in ["auto0001", "hand0001", "late0001"] {
+        let r = run(id, "2026-09-08T10:00:00Z");
+        l.call_blocking(move |c| runs::insert(c, &r)).unwrap();
+    }
+    let title = |id: &'static str| l.call_blocking(move |c| runs::get(c, id)).unwrap().unwrap().title;
+    for id in ["auto0001", "late0001"] {
+        l.call_blocking(move |c| runs::set_title_auto(c, id)).unwrap();
+    }
+    // Titled by Relay: named once, and never again.
+    assert!(
+        l.call_blocking(|c| runs::name_once(c, "auto0001", "claude: one"))
+            .unwrap()
+    );
+    assert!(
+        !l.call_blocking(|c| runs::name_once(c, "auto0001", "claude: two"))
+            .unwrap()
+    );
+    assert_eq!(title("auto0001"), "claude: one");
+    // Titled by whoever started it: left alone.
+    assert!(
+        !l.call_blocking(|c| runs::name_once(c, "hand0001", "claude: one"))
+            .unwrap()
+    );
+    assert_eq!(title("hand0001"), run("hand0001", "2026-09-08T10:00:00Z").title);
+    // Renamed by hand before it was asked anything: the rename stands.
+    l.call_blocking(|c| runs::set_title(c, "late0001", "mine")).unwrap();
+    assert!(
+        !l.call_blocking(|c| runs::name_once(c, "late0001", "claude: one"))
+            .unwrap()
+    );
+    assert_eq!(title("late0001"), "mine");
+    assert!(!l.call_blocking(|c| runs::name_once(c, "nope0000", "x")).unwrap());
+}
+
+#[test]
 fn a_pinned_run_stays_in_view_until_let_go_by_name() {
     let l = Ledger::open_in_memory().unwrap();
     let long_ago = ts("2026-09-01T10:00:00Z");
