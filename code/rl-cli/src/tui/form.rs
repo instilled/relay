@@ -7,7 +7,7 @@ pub use crate::rulefile::RuleDraft;
 use crate::rulefile::Was;
 use anyhow::{Result, bail};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use ratatui::style::Stylize;
+use ratatui::style::{Style, Stylize};
 use ratatui::text::{Line, Span};
 use rl_core::time::parse_duration;
 use rl_proto::action::Task;
@@ -360,10 +360,11 @@ impl Form {
             let label = Span::raw(format!(" {:<6} ", f.key));
             let mut spans = vec![if i == self.cur { label.bold() } else { label.dim() }];
             if i == self.cur {
-                let at = byte_at(&f.value, f.at);
-                spans.push(Span::raw(f.value[..at].to_string()));
-                spans.push(Span::raw("▏"));
-                spans.push(Span::raw(f.value[at..].to_string()));
+                spans.extend(super::theme::with_caret(
+                    &f.value,
+                    byte_at(&f.value, f.at),
+                    Style::default(),
+                ));
             } else if f.value.is_empty() {
                 spans.push(Span::raw(f.hint.to_string()).dim());
             } else {
