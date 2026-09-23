@@ -28,6 +28,10 @@ use tracing::{debug, info, warn};
 const ATTACH_TIMEOUT: Duration = Duration::from_secs(2);
 /// Scrollback is capped here whatever the viewer asks for.
 const SCROLLBACK_MAX: u64 = 8 << 20;
+/// How long the repaint nudge holds the smaller size: long enough for a busy
+/// app to read it before it is given back — back to back, the two resizes
+/// read as none — and short enough not to be seen.
+const NUDGE_HOLD: Duration = Duration::from_millis(200);
 
 /// An accepted attach, ready to stream.
 pub struct Attached {
@@ -232,10 +236,20 @@ where
     let mut rd = FrameReader::new(rd);
     let (mut hrd, mut hwr) = holder.split();
     let mut notes_open = true;
-    let mut size = (a.info.cols, a.info.rows);
+    // Another viewer's nudge may be holding the pty a row short: its own
+    // size is the one it will give back.
+    let mut size = live.nudged_size().unwrap_or((a.info.cols, a.info.rows));
+    // When our repaint nudge gives the pty its size back (see `ReplayEnd`).
+    let mut restore: Option<tokio::time::Instant> = None;
     let result: io::Result<()> = async {
         loop {
             tokio::select! {
+                _ = async { tokio::time::sleep_until(restore.unwrap()).await }, if restore.is_some() => {
+                    restore = None;
+                    if let Some((cols, rows)) = live.nudge_end() {
+                        hwr.resize(cols, rows).await?;
+                    }
+                }
                 _ = d.shutdown.cancelled() => {
                     write_frame(wr, &Frame::Note("daemon stopping; detached (the run keeps going)".into())).await?;
                     return Ok(());
@@ -259,6 +273,7 @@ where
                     Some(Frame::Resize { cols, rows }) => {
                         if a.joiner && live.is_joiner(&a.seat) {
                             size = (cols, rows);
+                            live.nudge_resized(size);
                             hwr.resize(cols, rows).await?;
                             let id = id.clone();
                             let _ = d.ledger.call(move |c| sessions::set_size(c, &id, cols, rows)).await;
@@ -271,18 +286,27 @@ where
                     Ok(Some(Frame::ReplayEnd)) => {
                         write_frame(wr, &Frame::ReplayEnd).await?;
                         // Replayed bytes were drawn for a screen that is not this
-                        // one: a full-screen app paints at stale cursor positions
-                        // until it repaints. Nudge the pty size so it does now —
-                        // only for the one at the keyboard, or when nobody is: a
-                        // watcher opening a pane must not jolt someone's join.
+                        // one, and a tail of them is not a screen at all: an app
+                        // that only redraws what changed leaves its box and its
+                        // status line out until it repaints. Nudge the pty size
+                        // so it does now — only for the one at the keyboard, or
+                        // when nobody is: a watcher opening a pane must not jolt
+                        // someone's join.
+                        //
+                        // The smaller size is held a moment before it is given
+                        // back. Sent back to back, the two land together, the
+                        // app reads the size it already had, and a runtime that
+                        // only reports a change (Node, Bun: Claude Code) never
+                        // repaints. A row rather than a column, as tmux does, so
+                        // what the run printed is not wrapped twice.
                         let ours = match live.joiner() {
                             None => true,
                             Some(j) => a.joiner && j == a.seat,
                         };
-                        if a.info.tty && ours {
+                        if a.info.tty && ours && live.nudge_start(size) {
                             let (cols, rows) = size;
-                            hwr.resize(cols.saturating_sub(1).max(1), rows).await?;
-                            hwr.resize(cols, rows).await?;
+                            hwr.resize(cols, rows.saturating_sub(1).max(1)).await?;
+                            restore = Some(tokio::time::Instant::now() + NUDGE_HOLD);
                         }
                     }
                     Ok(Some(Frame::Exit(e))) => {
@@ -305,6 +329,12 @@ where
     }
     .await;
 
+    // Gone inside our nudge: the run is not left a row short.
+    if restore.is_some()
+        && let Some((cols, rows)) = live.nudge_end()
+    {
+        let _ = hwr.resize(cols, rows).await;
+    }
     if a.joiner && live.leave(&a.seat) {
         let _ = live.notes.send(format!("{} left", a.seat.client));
     }

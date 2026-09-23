@@ -146,7 +146,9 @@ async fn watchers_and_one_joiner() {
     joiner.until("fake-cli ready").await;
     let frames = watcher.until("fake-cli ready").await;
     let _ = frames;
-    // The post-replay repaint nudge leaves the pty exactly as big as it was.
+    // The post-replay repaint nudge leaves the pty exactly as big as it was,
+    // once it has given the size back.
+    tokio::time::sleep(Duration::from_millis(500)).await;
     joiner.input("size\n").await;
     joiner.until("30 100").await;
     joiner.input("hello\n").await;
@@ -379,4 +381,37 @@ async fn joiner_resizes_the_pty_and_daemon_stop_detaches() {
     let row = ledger.call_blocking(move |c| sessions::get(c, &id)).unwrap().unwrap();
     let _ = kill(Pid::from_raw(row.holder_pid as i32), Signal::SIGKILL);
     let _ = kill(Pid::from_raw(row.pid as i32), Signal::SIGKILL);
+}
+
+/// Coming back to a run, it has to repaint: a tail of replayed bytes is not
+/// its screen. The nudge that makes it gives the pty a row less and then its
+/// size back — and it must hold the smaller one long enough to be read. Sent
+/// back to back, the two land together, the app reads the size it already
+/// had, and a runtime that only reports a change (Claude Code's) never
+/// repaints: its box and status line stay missing.
+#[tokio::test]
+async fn a_join_makes_the_run_see_a_resize_it_can_act_on() {
+    let tmp = tempfile::tempdir().unwrap();
+    let Some(h) = Harness::on(Home::at(tmp.path())) else {
+        return;
+    };
+    let mut c = Conn::open(&h.home).await;
+    let cwd = tmp.path().to_string_lossy().into_owned();
+    // Says what size it reads each time the terminal says it changed.
+    let script = r#"trap 'echo "winch $(stty size)"' WINCH; echo ready; while :; do sleep 0.02; done"#;
+    let run: Run = c
+        .ok("run.start", json!({ "argv": ["/bin/sh", "-c", script], "cwd": cwd }))
+        .await;
+    // Listening before anyone comes: the trap is set once it says so.
+    wait_journal(&h.home, &run.id, "ready").await;
+    let (info, mut joiner) = Viewer::attach(&h.home, &run.id, "join", "me@here", false)
+        .await
+        .unwrap();
+    let (cols, rows) = (info["cols"].as_u64().unwrap(), info["rows"].as_u64().unwrap());
+    // A row less, read as such; then the size back.
+    joiner.until(&format!("winch {} {cols}", rows - 1)).await;
+    joiner.until(&format!("winch {rows} {cols}")).await;
+    let _: Run = c.ok("run.stop", json!({ "id": run.id, "force": true })).await;
+    c.wait_terminal(&run.id).await;
+    h.stop().await;
 }
