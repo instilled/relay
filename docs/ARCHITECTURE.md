@@ -448,12 +448,13 @@ Because letters go into the line, everything that is not typing is a `/` command
 command of its own, and no word means two things — `done` is only ever what `/mark` says. `enter` on an empty line
 is the row under the cursor instead — a job opens, a question comes
 out of the list to be answered by number, a run's terminal opens. Arrows, `home`/`end` and `esc`
-belong to the list; `esc` with something typed clears the line first, and `ctrl-c` leaves.
+belong to the list, and so do `^j`/`^k` while nothing is typed (down and up, as vi's `j` and `k`); `esc` with something typed clears the line first, and `ctrl-c` leaves.
 The few keys that are not the list's or the line's each stand for a command, and the command
 list shows them beside it: `^x` stops or archives, `^r` renames, `^t` pins, `^g` opens the graph, `^o` shows or hides the pane,
 `^f` searches.
 A shell is a command like any other — `/shell` — and has no key of its own. The line keeps `^a`, `^e`, `^u`, `^k` and `^w` for
-editing, as a shell does, so none of those is ever taken for anything else. It moves and cuts by
+editing, as a shell does, so none of those is taken for anything else once something is typed —
+`^k` moving up on an empty line cuts nothing, and `^j` there adds no line. It moves and cuts by
 word too — alt or ctrl with `←`/`→`, `alt-b`/`alt-f`, `alt-backspace`, `alt-delete`/`alt-d` —
 where a word is letters and digits, so `~/Projects/flint` stops at its slashes; the form's fields
 take the same keys. A terminal only sends alt when it is set to (iTerm2: the option key as
