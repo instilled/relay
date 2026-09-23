@@ -752,6 +752,26 @@ pub fn counts(rows: &[Row]) -> (usize, usize, usize, usize, usize) {
 }
 
 /// The header line: what needs you first, then what is moving.
+/// What a restart took that is still on the list, as the headline says it,
+/// with the command that picks it up. `/resume all` leaves plain commands
+/// out, so when they are all there is, it says the command that takes them.
+pub fn lost_note(d: &Digest) -> Option<String> {
+    if d.lost.is_empty() {
+        return None;
+    }
+    let command = |id: &String| {
+        d.items
+            .iter()
+            .any(|i| &i.run.id == id && i.run.kind == RunKind::Command)
+    };
+    let how = if d.lost.iter().all(command) {
+        "/resume all commands"
+    } else {
+        "/resume all"
+    };
+    Some(format!("{} lost in a restart · {how}", d.lost.len()))
+}
+
 pub fn headline(rows: &[Row], news: usize, filter: &str) -> String {
     let (asked, need, working, fin, jobs) = counts(rows);
     let mut parts = Vec::new();
@@ -810,6 +830,36 @@ mod tests {
             joined_by: None,
             emitted: vec![],
         }
+    }
+
+    #[test]
+    fn what_a_restart_took_is_said_with_the_command_that_picks_it_up() {
+        let at = "2026-09-23T10:00:00Z";
+        let agent = item("a1", RunState::Failed, "/w", at, false);
+        let mut cmd = item("c1", RunState::Failed, "/w", at, false);
+        cmd.run.kind = RunKind::Command;
+        let d = |lost: &[&str], items: Vec<DigestItem>| Digest {
+            since: at.parse().unwrap(),
+            items,
+            decisions: vec![],
+            checkouts: vec![],
+            lost: lost.iter().map(|s| s.to_string()).collect(),
+        };
+        assert_eq!(
+            lost_note(&d(&[], vec![agent.clone()])),
+            None,
+            "nothing lost, nothing said"
+        );
+        assert_eq!(
+            lost_note(&d(&["a1", "c1"], vec![agent.clone(), cmd.clone()])).as_deref(),
+            Some("2 lost in a restart · /resume all")
+        );
+        // `/resume all` would leave a command out: only commands, then the
+        // words that take them.
+        assert_eq!(
+            lost_note(&d(&["c1"], vec![agent, cmd])).as_deref(),
+            Some("1 lost in a restart · /resume all commands")
+        );
     }
 
     fn question(id: &str, ws: &str, run: Option<&str>, at: &str) -> Decision {
@@ -894,6 +944,7 @@ mod tests {
             items: vec![agent, failed, sched],
             decisions: vec![question("q1", api, None, at)],
             checkouts: Vec::new(),
+            lost: Vec::new(),
         };
         let names = Names::new([
             (PathBuf::from(api), "api".to_string()),
@@ -935,6 +986,7 @@ mod tests {
             items: vec![agent, shell, sched, react],
             decisions: vec![],
             checkouts: Vec::new(),
+            lost: Vec::new(),
         };
         let names = Names::new([(PathBuf::from(ws), "relay".to_string())]);
         let runs = |lens| {
@@ -982,6 +1034,7 @@ mod tests {
             ],
             decisions: vec![question("q1", "/home/f/relay", Some("fail1"), "2026-09-10T11:31:00Z")],
             checkouts: Vec::new(),
+            lost: Vec::new(),
         };
         let names = Names::new([
             (PathBuf::from("/home/f/relay"), "relay".to_string()),
@@ -1032,6 +1085,7 @@ mod tests {
             ],
             decisions: vec![],
             checkouts: vec![co("/home/f/api", "main", 3), co("/home/f/web", "main", 0)],
+            lost: Vec::new(),
         };
         let names = Names::default();
         let rows = build_with(&d, &names, "", now);
@@ -1103,6 +1157,7 @@ mod tests {
             ],
             decisions: vec![question("q1", "/home/f/relay", Some("fail1"), "2026-09-10T11:01:00Z")],
             checkouts: Vec::new(),
+            lost: Vec::new(),
         };
         let names = Names::new([(PathBuf::from("/home/f/relay"), "relay".to_string())]);
         let rows = build_with(&d, &names, "", now);
@@ -1143,6 +1198,7 @@ mod tests {
             )],
             decisions: vec![],
             checkouts: Vec::new(),
+            lost: Vec::new(),
         };
         let names = Names::new([
             (PathBuf::from("/home/f/relay"), "relay".to_string()),
@@ -1185,6 +1241,7 @@ mod tests {
             )],
             decisions: vec![],
             checkouts: Vec::new(),
+            lost: Vec::new(),
         };
         let names = Names::new([(PathBuf::from("/home/f/relay"), "relay".to_string())]);
         let build_with_rules = |rules: &[Rule]| {
@@ -1256,6 +1313,7 @@ mod tests {
             items,
             decisions: vec![],
             checkouts: Vec::new(),
+            lost: Vec::new(),
         };
         let names = Names::new([(PathBuf::from("/home/f/relay"), "relay".to_string())]);
         let rows = build_with(&d, &names, "", now);
@@ -1300,6 +1358,7 @@ mod tests {
             ],
             decisions: vec![],
             checkouts: Vec::new(),
+            lost: Vec::new(),
         };
         let rows = build_with(&d2, &names, "", now);
         assert_eq!(
@@ -1334,6 +1393,7 @@ mod tests {
             items,
             decisions: vec![],
             checkouts: Vec::new(),
+            lost: Vec::new(),
         };
         let names = Names::new([(PathBuf::from("/home/f/relay"), "relay".to_string())]);
         // "exit 1" only appears in the failing run's own summary, not in the
@@ -1440,6 +1500,7 @@ mod tests {
             )],
             decisions: vec![],
             checkouts: Vec::new(),
+            lost: Vec::new(),
         };
         let names = Names::new([("/home/f/relay".into(), "relay".to_string())]);
         let build_rules = |rules: &[Rule]| {
@@ -1522,6 +1583,7 @@ mod tests {
             items: vec![shell, stale, work],
             decisions: vec![],
             checkouts: Vec::new(),
+            lost: Vec::new(),
         };
         // The shell leads, though both of the others outrank it by state and
         // both are newer than it.
@@ -1538,6 +1600,7 @@ mod tests {
             items: vec![shell, asks],
             decisions: vec![],
             checkouts: Vec::new(),
+            lost: Vec::new(),
         };
         // Where you work gives way to what wants you.
         assert_eq!(

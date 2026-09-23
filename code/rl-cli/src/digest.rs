@@ -161,6 +161,7 @@ mod tests {
             since: "2026-09-08T09:12:00Z".parse().unwrap(),
             decisions: Vec::new(),
             checkouts: Vec::new(),
+            lost: Vec::new(),
             items: vec![
                 item(
                     "done1",

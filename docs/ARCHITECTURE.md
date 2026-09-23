@@ -245,6 +245,20 @@ daemon was there, a holder that went without reporting an exit. A `warn!` is for
 the log; the event is for whoever has the run in front of them, and the pane keeps the latest as
 a `trouble` fact rather than letting `lately` push it out of sight.
 
+A restart takes every holder with it, and nothing records an exit. When rld comes back, reconcile
+finds each such run's holder gone, closes it as failed and marks it `run.lost`. The runs still on
+the list that a restart took are the digest's `lost`, and the headline says so in amber: "3 lost
+in a restart · /resume all". `/resume` (`rl resume <id>…`) picks an ended run back up as a new run
+in its folder, under its title and in its chain, tagged `resumes:<id>`, and archives the one it
+picks up, so the list shows the run that carries it on (`tui`'s `/resume`, `rl-daemon/src/resume.rs`).
+What that means depends on the kind of run. An agent's conversation comes back through its own CLI
+— `claude --resume <session>`, `codex resume <session>` — with the session named by the transcript
+a hook reported, or else the one found by folder and start time; a conversation reopened waits for
+you, and nothing is sent to it. A shell has nothing to resume but its place, so it comes back as a
+fresh shell. A command runs again. `/resume all` (`rl resume --lost`) brings back what was lost,
+except plain commands: running one again can do what it did twice, so those come back only when
+asked, with `/resume all commands` (`--commands`). Nothing is resumed on its own.
+
 Several watchers, one joiner; a second `join` is refused unless `take` turns the previous joiner
 into a watcher. The joiner is a seat — `user@host` and which of their terminals (`terminal`, the
 attaching process) — so a second terminal of the same person is refused too, told it is "you in

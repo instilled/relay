@@ -239,6 +239,19 @@ pub fn archive(conn: &Connection, ids: &[String], at: Timestamp) -> Result<usize
     Ok(n)
 }
 
+/// Runs lost in a restart that are still on the list, oldest first: ended,
+/// not archived, and marked `run.lost` when Relay came back without their
+/// holder. Resuming one archives it, so it leaves this list as it is picked up.
+pub fn lost(conn: &Connection) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT r.id FROM runs r WHERE r.archived_at IS NULL AND r.state IN ({TERMINAL_STATES_SQL}) \
+         AND EXISTS (SELECT 1 FROM events e WHERE e.run = r.id AND e.kind = 'run.lost') \
+         ORDER BY r.started_at, r.id"
+    ))?;
+    let ids = stmt.query_map([], |row| row.get::<_, String>(0))?;
+    Ok(ids.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
 /// Done with everything that has ended and been looked at — except what is
 /// pinned, which was kept on purpose and is only let go by name.
 pub fn archive_seen(conn: &Connection, at: Timestamp) -> Result<usize> {

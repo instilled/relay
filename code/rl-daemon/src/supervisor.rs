@@ -428,6 +428,17 @@ impl Supervisor {
                             json!({ "why": why }),
                         )
                         .await;
+                        // Gone while Relay was not looking — a restart, most
+                        // likely — and so something `run.resume` can pick up.
+                        let ev = NewEvent::for_run(
+                            &run,
+                            Timestamp::now(),
+                            event_kind::RUN_LOST,
+                            format!("{} was lost while Relay was away", run.title),
+                        );
+                        if let Err(e) = self.ledger.call(move |c| events::append(c, &ev)).await {
+                            warn!(error = %e, "recording a lost run");
+                        }
                     }
                     self.finish(&run, false, None, exit).await;
                 }

@@ -147,6 +147,9 @@ fn event_words(kind: &str) -> Option<&'static str> {
         event_kind::RUN_TROUBLE => {
             "something went wrong around a run without ending it (output lost while rld was away, a holder that went): the run may be fine, but part of its story is missing"
         }
+        event_kind::RUN_LOST => {
+            "Relay came back and a run's holder was gone with no exit recorded, most likely a restart; /resume picks it back up"
+        }
         event_kind::RUN_JOURNAL_DROPPED => "retention let a run's terminal bytes go; the run and its events stay",
         event_kind::RUN_SUMMARISED => {
             "a run was recapped: its agent's own, or an assistant's (/summarise in the panel, rl summarise)"
