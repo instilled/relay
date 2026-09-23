@@ -3,7 +3,7 @@
 
 mod common;
 
-use common::{Conn, Harness, fake_cli, wait_journal};
+use common::{Conn, Harness, fake_cli, journal, wait_journal};
 use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
 use rl_core::Home;
@@ -383,12 +383,12 @@ async fn joiner_resizes_the_pty_and_daemon_stop_detaches() {
     let _ = kill(Pid::from_raw(row.pid as i32), Signal::SIGKILL);
 }
 
-/// Coming back to a run, it has to repaint: a tail of replayed bytes is not
-/// its screen. The nudge that makes it gives the pty a row less and then its
-/// size back — and it must hold the smaller one long enough to be read. Sent
-/// back to back, the two land together, the app reads the size it already
-/// had, and a runtime that only reports a change (Claude Code's) never
-/// repaints: its box and status line stay missing.
+/// Coming back to a run at the size it has, it still has to repaint: a tail
+/// of replayed bytes is not its screen. The nudge that makes it gives the pty
+/// a row less and then its size back — and it must hold the smaller one long
+/// enough to be read. Sent back to back, the two land together, the app reads
+/// the size it already had, and a runtime that only reports a change (Claude
+/// Code's) never repaints: its box and status line stay missing.
 #[tokio::test]
 async fn a_join_makes_the_run_see_a_resize_it_can_act_on() {
     let tmp = tempfile::tempdir().unwrap();
@@ -408,9 +408,115 @@ async fn a_join_makes_the_run_see_a_resize_it_can_act_on() {
         .await
         .unwrap();
     let (cols, rows) = (info["cols"].as_u64().unwrap(), info["rows"].as_u64().unwrap());
+    // The joiner's terminal is the size the run already has.
+    write_frame(
+        &mut joiner.wr,
+        &Frame::Resize {
+            cols: cols as u16,
+            rows: rows as u16,
+        },
+    )
+    .await
+    .unwrap();
     // A row less, read as such; then the size back.
     joiner.until(&format!("winch {} {cols}", rows - 1)).await;
     joiner.until(&format!("winch {rows} {cols}")).await;
+    let _: Run = c.ok("run.stop", json!({ "id": run.id, "force": true })).await;
+    c.wait_terminal(&run.id).await;
+    h.stop().await;
+}
+
+/// Says each size it is told of, and `end` once the test drops a file named
+/// so in its folder: what came before that is everything it was told.
+const SIZES: &str = r#"trap 'echo "winch $(stty size)"' WINCH; echo ready; while :; do sleep 0.02; if [ -e end ]; then rm end; echo end; fi; done"#;
+
+/// Every resize the run heard up to `end`, in order.
+async fn sizes_heard(home: &Home, id: &str, cwd: &std::path::Path) -> Vec<String> {
+    let before = journal(home, id).matches("end").count();
+    std::fs::write(cwd.join("end"), "").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let text = loop {
+        let text = journal(home, id);
+        if text.matches("end").count() > before {
+            break text;
+        }
+        assert!(Instant::now() < deadline, "the run never said end: {text:?}");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    text.lines()
+        .filter_map(|l| l.trim().strip_prefix("winch "))
+        .map(str::to_string)
+        .collect()
+}
+
+async fn resize(v: &mut Viewer, cols: u16, rows: u16) {
+    write_frame(&mut v.wr, &Frame::Resize { cols, rows }).await.unwrap();
+}
+
+/// A joiner at a size the run does not have makes it repaint by that alone:
+/// no nudge on top, so an app that redraws everything on a resize (Claude
+/// Code redraws its whole conversation) does it once, not twice.
+#[tokio::test]
+async fn a_join_at_a_new_size_is_one_repaint() {
+    let tmp = tempfile::tempdir().unwrap();
+    let Some(h) = Harness::on(Home::at(tmp.path())) else {
+        return;
+    };
+    let mut c = Conn::open(&h.home).await;
+    let run: Run = c
+        .ok(
+            "run.start",
+            json!({ "argv": ["/bin/sh", "-c", SIZES], "cwd": tmp.path().to_string_lossy() }),
+        )
+        .await;
+    wait_journal(&h.home, &run.id, "ready").await;
+    let (_, mut joiner) = Viewer::attach(&h.home, &run.id, "join", "me@here", false)
+        .await
+        .unwrap();
+    resize(&mut joiner, 101, 33).await;
+    wait_journal(&h.home, &run.id, "winch 33 101").await;
+    // Past the time a nudge would hold its row and give it back.
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    assert_eq!(sizes_heard(&h.home, &run.id, tmp.path()).await, ["33 101"]);
+    let _: Run = c.ok("run.stop", json!({ "id": run.id, "force": true })).await;
+    c.wait_terminal(&run.id).await;
+    h.stop().await;
+}
+
+/// Letting go leaves the run a row short, so the next join at the old size
+/// is a change — one repaint — and not the same size, which would take two.
+#[tokio::test]
+async fn letting_go_leaves_the_run_a_row_short_for_the_next_join() {
+    let tmp = tempfile::tempdir().unwrap();
+    let Some(h) = Harness::on(Home::at(tmp.path())) else {
+        return;
+    };
+    let mut c = Conn::open(&h.home).await;
+    let run: Run = c
+        .ok(
+            "run.start",
+            json!({ "argv": ["/bin/sh", "-c", SIZES], "cwd": tmp.path().to_string_lossy() }),
+        )
+        .await;
+    wait_journal(&h.home, &run.id, "ready").await;
+    let (_, mut joiner) = Viewer::attach(&h.home, &run.id, "join", "me@here", false)
+        .await
+        .unwrap();
+    resize(&mut joiner, 101, 33).await;
+    wait_journal(&h.home, &run.id, "winch 33 101").await;
+    drop(joiner);
+    wait_journal(&h.home, &run.id, "winch 32 101").await;
+
+    let (info, mut again) = Viewer::attach(&h.home, &run.id, "join", "me@here", false)
+        .await
+        .unwrap();
+    assert_eq!((info["cols"].as_u64(), info["rows"].as_u64()), (Some(101), Some(32)));
+    resize(&mut again, 101, 33).await;
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    assert_eq!(
+        sizes_heard(&h.home, &run.id, tmp.path()).await,
+        ["33 101", "32 101", "33 101"]
+    );
     let _: Run = c.ok("run.stop", json!({ "id": run.id, "force": true })).await;
     c.wait_terminal(&run.id).await;
     h.stop().await;
