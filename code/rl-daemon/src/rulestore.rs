@@ -5,13 +5,29 @@
 //! read and write it differ; this trait carries the rest — scope
 //! resolution, name lookup, and the per-workspace reload loop.
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Result, anyhow, bail};
 use jiff::Timestamp;
 use rl_ledger::entries::Loaded;
 use rl_ledger::{Ledger, workspaces};
 use rl_proto::schedule::{GLOBAL_SCOPE, ReloadReport};
 use rusqlite::Connection;
 use std::path::{Path, PathBuf};
+
+/// A folder as the ledger keys it: its canonical path, or — once it is gone
+/// from disk — its canonical parent with its own name, or else just as given.
+/// Registered paths are canonical, so a folder deleted since can still be
+/// named the way it was named then.
+pub(crate) fn resolve(path: &Path) -> PathBuf {
+    if let Ok(p) = std::fs::canonicalize(path) {
+        return p;
+    }
+    if let (Some(parent), Some(name)) = (path.parent(), path.file_name())
+        && let Ok(p) = std::fs::canonicalize(parent)
+    {
+        return p.join(name);
+    }
+    path.to_path_buf()
+}
 
 pub(crate) trait RuleStore {
     /// `Schedule` or `Reaction`.
@@ -48,12 +64,14 @@ pub(crate) trait RuleStore {
         Ok(())
     }
 
-    /// `global`, or a workspace path (any spelling of it) as registered.
+    /// `global`, or a workspace path (any spelling of it) as registered. A
+    /// folder that is gone from disk is still found by the path it was
+    /// registered under.
     async fn scope_of(&self, scope: &str) -> Result<String> {
         if scope == GLOBAL_SCOPE {
             return Ok(scope.to_string());
         }
-        let path = std::fs::canonicalize(scope).with_context(|| format!("workspace {scope}"))?;
+        let path = resolve(Path::new(scope));
         let w = self
             .ledger()
             .call(move |c| workspaces::get(c, &path))

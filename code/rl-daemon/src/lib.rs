@@ -22,6 +22,7 @@ pub mod setup;
 pub mod summarise;
 pub mod supervisor;
 pub mod transcript;
+pub mod workspace;
 
 pub use server::{Daemon, ServeOptions, serve, serve_with};
 

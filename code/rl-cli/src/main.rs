@@ -25,7 +25,7 @@ use rl_proto::methods::{
 };
 use rl_proto::methods::{
     ScheduleFilter, ScheduleList, ScheduleName, SchedulePause, ScheduleReload, ScheduleResume, ScheduleRun,
-    WorkspaceList, WorkspacePath, WorkspaceRemove, WorkspaceUp, WorkspaceUpParams,
+    WorkspaceList, WorkspaceRemove, WorkspaceRemoveParams, WorkspaceRemoved, WorkspaceUp, WorkspaceUpParams,
 };
 use rl_proto::reaction::{Filter, Reaction, ReactionSpec};
 use rl_proto::rule::{Rule, RuleKind, RuleStatus};
@@ -469,8 +469,25 @@ struct UpArgs {
 enum WorkspaceCmd {
     /// List registered folders.
     Ls,
-    /// Unregister a folder; its schedules stop.
-    Rm { dir: PathBuf },
+    /// Unregister a folder: its rules stop and forget their approvals, its open questions are dismissed.
+    Rm(WorkspaceRmArgs),
+}
+
+#[derive(Args)]
+struct WorkspaceRmArgs {
+    dir: PathBuf,
+    /// Also stop every run still going in it — shells and agents alike.
+    #[arg(long)]
+    stop: bool,
+    /// Also archive its ended runs (those just stopped included).
+    #[arg(long)]
+    archive: bool,
+    /// Also move .relay/schedules.yaml and reactions.yaml to the Relay home's removed/. Asks first.
+    #[arg(long)]
+    move_rules: bool,
+    /// Move the rules without asking.
+    #[arg(short, long)]
+    yes: bool,
 }
 
 #[derive(Subcommand)]
@@ -911,18 +928,78 @@ async fn workspace(home: &Home, cmd: WorkspaceCmd, json: bool) -> Result<()> {
                 println!("{}", render::table(&["NAME", "PATH", "REGISTERED"], &rows));
             }
         }
-        WorkspaceCmd::Rm { dir } => {
-            let gone = rpc.call::<WorkspaceRemove>(WorkspacePath { path: dir.clone() }).await?;
+        WorkspaceCmd::Rm(a) => {
+            // The daemon's cwd is not ours: a relative folder is made whole here.
+            let dir = std::path::absolute(&a.dir).unwrap_or_else(|_| a.dir.clone());
+            if a.move_rules && !a.yes {
+                let relay = dir.join(rl_proto::schedule::WORKSPACE_DIR);
+                // Only what can move is asked about; a symlink or the Relay
+                // home is the daemon's to refuse, before it does anything.
+                if let rl_core::rules_dir::RulesDir::Movable(files) = rl_core::rules_dir::rules_dir(&relay, home) {
+                    if json || !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+                        anyhow::bail!("--move-rules moves files nobody can be asked about here; add --yes");
+                    }
+                    let names: Vec<String> = files
+                        .iter()
+                        .filter_map(|f| f.file_name().map(|n| n.to_string_lossy().into_owned()))
+                        .collect();
+                    eprint!(
+                        "move {} ({}) to {}? [y/N] ",
+                        display_path(&relay),
+                        names.join(", "),
+                        display_path(&home.removed_dir())
+                    );
+                    let mut line = String::new();
+                    std::io::stdin().read_line(&mut line)?;
+                    if !line.trim().eq_ignore_ascii_case("y") {
+                        println!("nothing removed");
+                        return Ok(());
+                    }
+                }
+            }
+            let r = rpc
+                .call::<WorkspaceRemove>(WorkspaceRemoveParams {
+                    path: dir.clone(),
+                    stop_runs: a.stop,
+                    archive_runs: a.archive,
+                    move_rules: a.move_rules,
+                })
+                .await?;
             if json {
-                println!("{}", json!({ "removed": gone }));
-            } else if gone {
-                println!("{} unregistered; its schedules stop", display_path(&dir));
+                println!("{}", serde_json::to_string(&r)?);
             } else {
-                println!("{} was not registered", display_path(&dir));
+                println!("{}", removed_words(&r));
             }
         }
     }
     Ok(())
+}
+
+/// What `rl workspace rm` did, in a line: whether the folder was registered,
+/// then only what was done besides.
+fn removed_words(r: &WorkspaceRemoved) -> String {
+    let mut words = vec![if r.removed {
+        format!("{} unregistered; its rules stop", display_path(&r.path))
+    } else {
+        format!("{} was not registered", display_path(&r.path))
+    }];
+    let n = |k: usize, one: &str, many: &str| format!("{k} {}", if k == 1 { one } else { many });
+    if r.stopped > 0 {
+        words.push(format!("stopped {}", n(r.stopped, "run", "runs")));
+    }
+    if r.still_running > 0 {
+        words.push(format!("{} still going", n(r.still_running, "run", "runs")));
+    }
+    if r.archived > 0 {
+        words.push(format!("{} archived", n(r.archived, "run", "runs")));
+    }
+    if r.dismissed > 0 {
+        words.push(format!("{} dismissed", n(r.dismissed, "question", "questions")));
+    }
+    if let Some(to) = &r.rules_moved_to {
+        words.push(format!("rules moved to {}", display_path(to)));
+    }
+    words.join(" · ")
 }
 
 fn schedule_row(s: &Schedule, now: jiff::Timestamp) -> Vec<String> {

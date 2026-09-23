@@ -2,6 +2,7 @@
 //! it, which is also how tests stay out of the real one.
 
 pub mod id;
+pub mod rules_dir;
 pub mod time;
 
 use anyhow::{Context, Result};
@@ -102,6 +103,11 @@ impl Home {
     /// The user's own reactions: events → actions.
     pub fn reactions_file(&self) -> PathBuf {
         self.0.join("reactions.yaml")
+    }
+    /// Where a removed project's rule files are kept, a folder each: moved
+    /// here rather than deleted, so taking a project away loses nothing.
+    pub fn removed_dir(&self) -> PathBuf {
+        self.0.join("removed")
     }
 
     pub fn session_socket(&self, run: &str) -> PathBuf {

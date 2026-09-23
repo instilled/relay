@@ -96,6 +96,61 @@ fn a_pinned_run_stays_in_view_until_let_go_by_name() {
 }
 
 #[test]
+fn removing_a_folder_archives_its_ended_runs_and_nothing_else() {
+    let l = Ledger::open_in_memory().unwrap();
+    let at = ts("2026-09-01T10:00:00Z");
+    let mk = |id: &str, ws: &str, state: RunState| {
+        let mut r = run(id, "2026-09-01T09:00:00Z");
+        r.workspace = ws.into();
+        r.cwd = ws.into();
+        r.state = state;
+        if state.is_terminal() {
+            r.ended_at = Some(at);
+        }
+        r
+    };
+    let rows = [
+        mk("ended001", "/w/repo", RunState::Finished),
+        mk("pinned01", "/w/repo", RunState::Failed),
+        mk("going001", "/w/repo", RunState::Working),
+        mk("nested01", "/w/repo/inner", RunState::Finished),
+        mk("other001", "/w/other", RunState::Stopped),
+    ];
+    l.call_blocking(move |c| {
+        for r in &rows {
+            runs::insert(c, r)?;
+        }
+        runs::set_pinned(c, "pinned01", Some(at))
+    })
+    .unwrap();
+
+    let live = l
+        .call_blocking(|c| runs::live_in(c, std::path::Path::new("/w/repo")))
+        .unwrap();
+    assert_eq!(live.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), ["going001"]);
+
+    let now = ts("2026-09-02T10:00:00Z");
+    let n = l
+        .call_blocking(move |c| runs::archive_workspace(c, std::path::Path::new("/w/repo"), now))
+        .unwrap();
+    assert_eq!(n, 2, "the folder's two ended runs, pinned or not");
+    let get = |id: &'static str| l.call_blocking(move |c| runs::get(c, id)).unwrap().unwrap();
+    assert_eq!(get("ended001").archived_at, Some(now));
+    let pinned = get("pinned01");
+    assert_eq!(pinned.archived_at, Some(now));
+    assert_eq!(pinned.pinned_at, None, "the pin goes with it");
+    // Still going, a folder of its own inside, another folder: untouched.
+    for id in ["going001", "nested01", "other001"] {
+        assert_eq!(get(id).archived_at, None, "{id}");
+    }
+    // Twice is nothing more.
+    let n = l
+        .call_blocking(move |c| runs::archive_workspace(c, std::path::Path::new("/w/repo"), now))
+        .unwrap();
+    assert_eq!(n, 0);
+}
+
+#[test]
 fn runs_insert_get_list_and_transition() {
     let l = Ledger::open_in_memory().unwrap();
     let a = run("aaaaaaaa", "2026-09-08T10:00:00Z");
