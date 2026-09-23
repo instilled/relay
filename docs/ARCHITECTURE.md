@@ -283,7 +283,10 @@ oldest first, so what needs you never hides under a project's name; then pinned 
 grouped by the folder they belong to, the folders in order of name so each keeps its place, and
 inside one runs by attention; and named — a workspace by the
 name it was registered under, a cause as "schedule nightly" or "rule tests-failed", never an id.
-A row is a mark (`✱` needs you, `·` going, `•` ended, `▸` a job), the title, the state as a word,
+A row is an icon for what it is — `🤖` an agent, `🐚` a shell, `🔧` a command, `⏰` a job, `❓` a
+question, each two columns wide by default (no variation selector) so every title starts in the
+same column — then the title, the state as a word in its colour (`needs you` and `blocked` amber,
+`failed` red, `done` and `stopped` dim; a shell at rest says nothing there, its icon says it),
 the summary to the edge, and the ref and the age at the right — with `⎇ feat` there too when the
 run started on another branch than the one its folder is on now. A run that ended well and raised
 something itself (`rl emit`) says the last of it in its own words — `5 feedback rows to process`,
@@ -296,14 +299,17 @@ saturated accent per state, on the terminal's own foreground so it reads on eith
 the header, above the line, above the footer. The project rows and the `❯` line start at the edge,
 and the header and footer text level with what is typed after the `❯`; a project's runs, shells and agents sit one column in, under it. The list and its
 detail pane are split by a vertical bar — the list takes two thirds beside the details pane, half beside a terminal, which needs the
-width; the full-screen terminal drops all of it for the cells. A group is a folder (or a ref), never a branch: its header is its name, then the folder it
-lives in, then its git checkout as it stands — `⎇ main · PR #95 · 3 worktrees`, the branch or a
-detached commit, the badges, and on a main checkout the linked worktrees whose folders are still
-there (`rld` reads `.git` directly on each digest, no `git` started; a worktree registered on its
-own is a project of its own, with its branch and no count) — then the rules that
-live there — `↻ nightly 4h · ⚡ tests-failed`, accented and amber when one waits for a yes, with a
-`+N` when more than fit — and, at the right edge, the tally of how many jobs and reactions the
-folder holds. The global rules — the ones in the Relay home, which apply in every folder — have no
+width; the full-screen terminal drops all of it for the cells. A group is a folder (or a ref), never a branch: its header is its path, with `~` for home, the
+folders above dim and its own bold, and ` · name` after it when it goes by a name that is not its
+folder's (a ref, or a folder registered or renamed under another); a path too long for the title
+column loses its start to `…`, never its last folder. From the state column on — level with the
+runs' state words, whatever the path's length — comes its git checkout as it stands — `⎇ main · PR
+#95 · 3 worktrees`, the branch or a detached commit, the badges, and on a main checkout the linked
+worktrees whose folders are still there (`rld` reads `.git` directly on each digest, no `git`
+started; a worktree registered on its own is a project of its own, with its branch and no count) —
+and, at the right edge, the tally of how many jobs and reactions the folder holds, with any rule
+that waits for a yes named just before it in amber (`! deploy`). The rest of its rules are the
+graph's and the project pane's to show. The global rules — the ones in the Relay home, which apply in every folder — have no
 row: nothing would ever sit under one, since a global rule's runs fold under the folder they ran in,
 and a row that is always there, rules or none, kept the empty list from ever saying `nothing running
 · rl run -- <command>`. The headline says them instead, when there are any — `relay · 3 working ·
@@ -312,9 +318,9 @@ amber when one waits for a yes, saying so and where to give it (`⚡ 1 everywher
 /graph`, `rows::everywhere`). `^g` (or `/graph`) from anywhere, an empty list too, shows them wired
 with everything else, and `/edit schedule` where nothing names a folder, or `/edit schedule global`
 from anywhere, opens the home's file. Runs a schedule or a rule
-started fold, once ended, into one line per job — its rule's glyph, the name, how the last one
-went with how many there have been (`ok ×4`), how the last few went (`··×·`, oldest first) and
-what the last firing came to in its own words — so a job firing every thirty seconds is a row,
+started fold, once ended, into one line per job — `⏰`, the name, how the last few went in the
+state column (`··×·`, oldest first, a failure red) and what the last firing came to in its own
+words — so a job firing every thirty seconds is a row,
 not a screen, and it never grows into one: `enter` (or `^o`) puts its firings in the pane, as on
 a project header. A run still going or waiting on you is never folded. The pane holds the
 cadence — a cron line read back in words where it can be (`hourly 08:00–18:00, Mon–Fri`), left as
@@ -827,7 +833,7 @@ before it has ever raised anything.
 
 In the panel, `/graph` (or `^g`) swaps the list for the graph, and `^g` or `esc` goes back;
 each keeps its own selection. The graph is where rules are seen: there is no separate rules
-list any more, and the project rows' chips are the list's glimpse of them. `tui/graph.rs` lays it out and
+list any more, and a project header's tally is the list's glimpse of them. `tui/graph.rs` lays it out and
 draws it, pure from a `Graph` to a grid of styled cells:
 
 - **Layered, by connection.** A node's column is one past the furthest thing that feeds it,

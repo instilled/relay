@@ -108,6 +108,9 @@ pub struct Head {
     pub workspace: PathBuf,
     /// A ref, or a folder by the name it was registered under.
     pub name: String,
+    /// The name it goes by where that is not its folder's own — a ref, or a
+    /// folder registered (or renamed) under another name.
+    pub own: Option<String>,
     /// The rules of that folder, needing a yes first, then by name.
     pub rules: Vec<Chip>,
     /// The folder's git checkout, when it is in one.
@@ -213,35 +216,88 @@ pub fn state_words(state: RunState, confidence: Confidence) -> String {
     }
 }
 
-/// The mark at the left of a run's row: `✱` needs you, `·` going, `•` ended.
-pub fn glyph(state: RunState) -> &'static str {
-    match state {
-        RunState::NeedsInput | RunState::Blocked | RunState::Failed => "✱",
-        RunState::Finished | RunState::Stopped => "•",
-        _ => "·",
-    }
+/// The tag that marks a run as a project's warm shell.
+pub const SHELL_TAG: &str = "shell";
+
+/// The icon slot at the left of every row: what a thing is, in two columns —
+/// how it stands is its word's, and its colour. Only emoji that are wide by
+/// default (no variation selector), so every width table, ratatui's and
+/// tmux's alike, puts the title after them in the same column.
+pub const AGENT: &str = "🤖";
+pub const SHELL: &str = "🐚";
+pub const COMMAND: &str = "🔧";
+/// A schedule's or a rule's ended runs, folded into one row.
+pub const JOB: &str = "⏰";
+/// A question waiting on you.
+pub const QUESTION: &str = "❓";
+
+/// A shell: an interactive one by its profile, or a project's warm shell by
+/// its tag, whatever its argv resolved to.
+pub fn is_shell(r: &Run) -> bool {
+    r.kind == RunKind::Shell || r.tags.iter().any(|t| t == SHELL_TAG)
 }
 
 /// A shell that is simply there to be typed in. One that ended, failed or
 /// wants you is news like any other run and is left to read as one.
 pub fn live_shell(r: &Run) -> bool {
-    r.kind == RunKind::Shell && !r.state.is_terminal() && !matches!(r.state, RunState::NeedsInput | RunState::Blocked)
+    is_shell(r) && !r.state.is_terminal() && !matches!(r.state, RunState::NeedsInput | RunState::Blocked)
 }
 
-/// The mark a row wears. A shell at rest is not a run that happens to be
-/// idle — it is where you work — so it wears the prompt caret.
-pub fn run_glyph(r: &Run) -> &'static str {
-    if live_shell(r) { "❯" } else { glyph(r.state) }
+/// A run's icon: an agent, a shell, or a command (a plugin is one).
+pub fn icon(r: &Run) -> &'static str {
+    if is_shell(r) {
+        return SHELL;
+    }
+    match r.kind {
+        RunKind::Agent => AGENT,
+        RunKind::Shell => SHELL,
+        RunKind::Command | RunKind::Plugin => COMMAND,
+    }
 }
 
-/// The word beside the mark. `idle` says nothing about a shell, which is
-/// idle whenever you are not typing; what it is, is the useful part.
+/// The word in the state column. A shell at rest says nothing there — it is
+/// idle whenever you are not typing, and its icon already says what it is.
 pub fn run_words(r: &Run) -> String {
     if live_shell(r) {
-        "shell".to_string()
+        String::new()
     } else {
         state_words(r.state, r.confidence)
     }
+}
+
+/// A header's place in the columns it has: the folder above, dim; the folder
+/// itself, bold; and, when it goes by a name of its own, that name — ` · api`.
+/// A path too long for the room loses its start to `…`, a whole folder at a
+/// time where it can; the folder itself is never cut. `(parent, last, own)`.
+pub fn place_parts(place: &str, own: Option<&str>, room: usize) -> (String, String, String) {
+    let (parent, last) = match place.rfind('/') {
+        Some(i) if i + 1 < place.len() => (&place[..=i], &place[i + 1..]),
+        _ => ("", place),
+    };
+    let own = own.map(|n| format!(" · {n}")).unwrap_or_default();
+    let n = |s: &str| s.chars().count();
+    let need = n(last) + n(&own);
+    if n(parent) + need <= room {
+        return (parent.to_string(), last.to_string(), own);
+    }
+    // The parent gives way first, from the left.
+    if need + 2 <= room {
+        let keep = room - need - 1;
+        let tail: String = parent.chars().skip(n(parent) - keep).collect();
+        let tail = match tail.find('/') {
+            Some(i) if i > 0 => tail[i..].to_string(),
+            _ => tail,
+        };
+        return (format!("…{tail}"), last.to_string(), own);
+    }
+    // Then the name; the folder stands whole, whatever the room.
+    let own_room = room.saturating_sub(n(last));
+    let own = if own_room >= 5 {
+        fit(&own, own_room).trim_end().to_string()
+    } else {
+        String::new()
+    };
+    (String::new(), last.to_string(), own)
 }
 
 /// `s` in exactly `w` columns: padded, or cut with `…`.
@@ -375,6 +431,17 @@ impl Names {
         } else {
             short_path(workspace)
         }
+    }
+
+    /// A group's name, where it is not just its folder's: a ref, or the name
+    /// a folder was registered or renamed under when that differs.
+    pub fn own(&self, key: &str, workspace: &Path) -> Option<String> {
+        if !key.starts_with('/') {
+            return Some(key.to_string());
+        }
+        let name = self.registered(Path::new(key))?;
+        let last = workspace.file_name().map(|s| s.to_string_lossy().into_owned());
+        (last.as_deref() != Some(name.as_str())).then_some(name)
     }
 
     /// A group key in words: a ref or branch as it is, a path by name.
@@ -686,6 +753,7 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
             place: names.place(&g.key, &g.workspace),
             workspace: g.workspace.clone(),
             name: name.clone(),
+            own: names.own(&g.key, &g.workspace),
             rules: chips(cx.rules, Some(&g.workspace), now),
             checkout: checkout_of(&d.checkouts, &g.workspace).cloned(),
         })];
@@ -736,6 +804,7 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
             place,
             workspace: p.clone(),
             name: name.clone(),
+            own: names.own(&p.to_string_lossy(), &p),
             rules: chips(cx.rules, Some(&p), now),
             checkout: checkout.cloned(),
         });
@@ -1638,23 +1707,86 @@ mod tests {
     }
 
     #[test]
-    fn a_shell_at_rest_wears_the_caret_and_says_what_it_is() {
+    fn a_row_wears_what_it_is_and_says_how_it_stands() {
         let mut i = item("sh", RunState::Idle, "/w", "2026-09-10T11:00:00Z", false);
         i.run.kind = RunKind::Shell;
         assert!(live_shell(&i.run));
-        assert_eq!(run_glyph(&i.run), "❯");
-        assert_eq!(run_words(&i.run), "shell", "`idle` says nothing about a shell");
+        assert_eq!(icon(&i.run), SHELL);
+        assert_eq!(
+            run_words(&i.run),
+            "",
+            "a shell at rest says nothing: its icon says what it is"
+        );
         // One that ended is news like any other ended run, and reads as one.
         i.run.state = RunState::Stopped;
         assert!(!live_shell(&i.run));
-        assert_eq!((run_glyph(&i.run), run_words(&i.run)), ("•", "stopped".to_string()));
-        // So is one that wants you: it keeps the mark that says so.
+        assert_eq!((icon(&i.run), run_words(&i.run)), (SHELL, "stopped".to_string()));
+        // So is one that wants you: the word says so.
         i.run.state = RunState::NeedsInput;
         assert!(!live_shell(&i.run));
-        assert_eq!(run_glyph(&i.run), "✱");
-        // Anything that is not a shell is left exactly as it was.
-        let a = item("ag", RunState::Idle, "/w", "2026-09-10T11:00:00Z", false);
-        assert_eq!((run_glyph(&a.run), run_words(&a.run)), ("·", "idle".to_string()));
+        assert_eq!(run_words(&i.run), "needs you");
+        // A warm shell is one by its tag, whatever its argv resolved to.
+        let mut warm = item("warm", RunState::Idle, "/w", "2026-09-10T11:00:00Z", false);
+        warm.run.kind = RunKind::Command;
+        warm.run.tags = vec![SHELL_TAG.into()];
+        assert_eq!((icon(&warm.run), run_words(&warm.run)), (SHELL, String::new()));
+        // An agent says its state; a command, a plugin too, is a wrench.
+        let mut a = item("ag", RunState::Idle, "/w", "2026-09-10T11:00:00Z", false);
+        assert_eq!((icon(&a.run), run_words(&a.run)), (AGENT, "idle".to_string()));
+        a.run.kind = RunKind::Command;
+        a.run.state = RunState::Finished;
+        assert_eq!((icon(&a.run), run_words(&a.run)), (COMMAND, "done".to_string()));
+        a.run.kind = RunKind::Plugin;
+        assert_eq!(icon(&a.run), COMMAND);
+    }
+
+    #[test]
+    fn every_icon_is_two_columns_wide() {
+        use ratatui::text::Span;
+        for i in [AGENT, SHELL, COMMAND, JOB, QUESTION] {
+            assert_eq!(Span::raw(i).width(), 2, "{i}");
+            assert_eq!(i.chars().count(), 1, "{i} carries no variation selector");
+        }
+    }
+
+    #[test]
+    fn a_header_is_its_path_and_a_name_of_its_own() {
+        let names = Names::new([
+            (PathBuf::from("/home/f/api"), "api".to_string()),
+            (PathBuf::from("/home/f/scratch-2"), "scratch".to_string()),
+        ]);
+        let own = |k: &str| names.own(k, Path::new(if k.starts_with('/') { k } else { "/home/f/api" }));
+        assert_eq!(own("/home/f/api"), None, "named for its folder: nothing to add");
+        assert_eq!(own("/home/f/scratch-2").as_deref(), Some("scratch"), "renamed");
+        assert_eq!(own("/home/f/web"), None, "never registered");
+        assert_eq!(own("RLX-12").as_deref(), Some("RLX-12"), "a ref");
+
+        let parts = |place: &str, own: Option<&str>, room: usize| {
+            let (a, b, c) = place_parts(place, own, room);
+            [a, b, c]
+        };
+        assert_eq!(parts("~/Projects/foodai", None, 40), ["~/Projects/", "foodai", ""]);
+        assert_eq!(
+            parts("~/tmp/scratch-2", Some("scratch"), 40),
+            ["~/tmp/", "scratch-2", " · scratch"]
+        );
+        assert_eq!(parts("~", None, 40), ["", "~", ""]);
+        assert_eq!(parts("/", None, 40), ["", "/", ""]);
+        // Too long: the start goes, a folder at a time; the last stays whole.
+        let long = "~/Projects/clients/acme/very/deep/tree/leaf-folder";
+        let [a, b, c] = parts(long, None, 30);
+        assert_eq!(
+            [a.as_str(), b.as_str(), c.as_str()],
+            ["…/very/deep/tree/", "leaf-folder", ""]
+        );
+        assert!(a.chars().count() + b.chars().count() <= 30);
+        // With no room for any of the start, the name gives way, then the
+        // folder stands alone, uncut, even past the room.
+        assert_eq!(parts(long, Some("x"), 14), ["", "leaf-folder", ""]);
+        assert_eq!(
+            parts("~/a/an-extremely-long-folder-name", None, 10)[1],
+            "an-extremely-long-folder-name"
+        );
     }
 
     #[test]
@@ -1699,9 +1831,6 @@ mod tests {
         assert_eq!(state_words(RunState::NeedsInput, Confidence::Exact), "needs you");
         assert_eq!(state_words(RunState::Working, Confidence::Likely), "working~");
         assert_eq!(state_words(RunState::Finished, Confidence::Guess), "done?");
-        assert_eq!(glyph(RunState::Blocked), "✱");
-        assert_eq!(glyph(RunState::Working), "·");
-        assert_eq!(glyph(RunState::Stopped), "•");
         assert_eq!(fit("abc", 5), "abc  ");
         assert_eq!(fit("abcdef", 5), "abcd…");
         assert_eq!(fit("abcdef", 0), "");

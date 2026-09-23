@@ -79,8 +79,7 @@ const REFRESH: Duration = Duration::from_secs(1);
 const FLASH: Duration = Duration::from_secs(4);
 /// The most candidates `tab` shows at once.
 const CANDS: usize = 6;
-/// The tag that marks a run as a project's warm shell.
-const SHELL_TAG: &str = "shell";
+use rows::SHELL_TAG;
 /// The most rows the live line grows to before it scrolls within itself.
 const LINE_MAX: u16 = 8;
 /// Recent output replayed when joining a run for real, enough to paint the
@@ -385,16 +384,33 @@ fn hit_row(hit: &ListHit, col: u16, row: u16) -> Option<String> {
     hit.keys.get(line).cloned().flatten()
 }
 
-/// One row of the list, to the width: mark, title, state, whatever goes
-/// before the summary (who is joined, a job's marks), the summary filling the
-/// middle, then the ref or branch and the age at the right.
+/// The icon slot: a space, a two-column icon, a space. Every row has one, so
+/// every title starts in the same column.
+const ICON_W: usize = 4;
+/// The state column's width: `needs you~` and a job's marks both fit.
+const WORD_W: usize = 10;
+
+/// Where the state column starts, for a title column `tw` wide — where a
+/// header's checkout starts too, so the two line up.
+fn state_col(tw: usize) -> usize {
+    ICON_W + tw + 1
+}
+
+/// A row's icon, in its slot.
+fn icon_span(icon: &str) -> Span<'static> {
+    Span::raw(format!(" {icon} "))
+}
+
+/// One row of the list, to the width: icon, title, state, whatever goes
+/// before the summary (who is joined), the summary filling the middle, then
+/// the ref or branch and the age at the right.
 #[allow(clippy::too_many_arguments)]
 fn list_line(
     w: usize,
     tw: usize,
-    mark: Span<'static>,
+    icon: &str,
     title: Span<'static>,
-    word: Span<'static>,
+    word: Vec<Span<'static>>,
     summary: &str,
     lead: Vec<Span<'static>>,
     aside: Option<&str>,
@@ -404,9 +420,13 @@ fn list_line(
         Some(r) => format!("{r}  {age:>4}"),
         None => format!("{age:>4}"),
     };
-    let before: usize = lead.iter().map(|s| s.content.chars().count()).sum();
-    let fixed = 3 + tw + 1 + 10 + 1 + before + right.chars().count() + 1;
-    let mut spans = vec![mark, title, Span::raw(" "), word, Span::raw(" ")];
+    let before: usize = lead.iter().map(Span::width).sum();
+    let fixed = state_col(tw) + WORD_W + 1 + before + right.chars().count() + 1;
+    // The word, padded out to its column whatever it is made of.
+    let used: usize = word.iter().map(Span::width).sum();
+    let mut spans = vec![icon_span(icon), title, Span::raw(" ")];
+    spans.extend(word);
+    spans.push(Span::raw(" ".repeat(WORD_W.saturating_sub(used) + 1)));
     spans.extend(lead);
     spans.push(Span::raw(fit(summary, w.saturating_sub(fixed))).dim());
     spans.push(Span::raw(format!(" {right}")).dim());
@@ -423,19 +443,58 @@ fn joined_lead(joined: Option<&str>) -> Vec<Span<'static>> {
         .unwrap_or_default()
 }
 
-/// How a job has been going, oldest first, for the same slot: `···×·`.
-fn marks_lead(j: &rows::Job) -> Vec<Span<'static>> {
-    let mut spans: Vec<Span<'static>> = j
-        .marks(ROW_MARKS)
+/// How a job has been going, oldest first, for its state column: `···×·`.
+fn job_marks(j: &rows::Job) -> Vec<Span<'static>> {
+    j.marks(ROW_MARKS)
         .chars()
         .map(|c| match c {
             '×' => Span::raw("×").red().bold(),
             '○' => Span::raw("○").dim(),
             _ => Span::raw("·").dim(),
         })
-        .collect();
-    spans.push(Span::raw("  "));
-    spans
+        .collect()
+}
+
+/// A group's header, to the width: its place in the title column — the
+/// folder bold, what it is in dim, the name it goes by after — then its git
+/// checkout from the state column on, and at the right edge the tally of its
+/// rules, with any that wait for a yes just before it, in amber. Each piece
+/// has its column, whatever the others say.
+fn header_line(h: &rows::Head, w: usize, tw: usize) -> Line<'static> {
+    let col = state_col(tw);
+    let (parent, last, own) = rows::place_parts(&h.place, h.own.as_deref(), col - 2);
+    let mut l = vec![
+        Span::styled(parent, theme::dim()),
+        Span::styled(last, theme::name()),
+        Span::styled(own, theme::dim()),
+    ];
+    let width = |l: &[Span]| l.iter().map(Span::width).sum::<usize>();
+    // The tally at the right edge is the honest total; a rule that waits for a
+    // yes is named beside it, since that one is yours to give.
+    let mut right: Vec<Span<'static>> = Vec::new();
+    for c in h.rules.iter().filter(|c| c.needs_yes()) {
+        right.push(Span::styled(c.text(), theme::needs()));
+        right.push(Span::raw("  "));
+    }
+    let count = group_count(&h.rules);
+    if count.is_empty() {
+        right.pop();
+    } else {
+        right.push(Span::styled(count, theme::dim()));
+    }
+    if let Some(c) = &h.checkout {
+        let at = col.max(width(&l) + 2);
+        l.push(Span::raw(" ".repeat(at - width(&l))));
+        let room = w.saturating_sub(at + width(&right) + usize::from(!right.is_empty()) * 2);
+        let git = fit(&rows::checkout_words(c), room);
+        l.push(Span::styled(git.trim_end().to_string(), theme::dim()));
+    }
+    if !right.is_empty() {
+        let pad = w.saturating_sub(width(&l) + width(&right)).max(1);
+        l.push(Span::raw(" ".repeat(pad)));
+        l.extend(right);
+    }
+    Line::from(l)
 }
 
 /// A line with the search's words lit up, wherever a span holds them.
@@ -3522,7 +3581,7 @@ impl App {
         }
         let now = Timestamp::now();
         let w = area.width as usize;
-        // Columns: mark, title, state, the summary to the edge, ref and age
+        // Columns: icon, title, state, the summary to the edge, ref and age
         // at the right — the title column is the screen's share, bounded.
         let tw = (w * 35 / 100).clamp(14, 44);
         let mut lines: Vec<Line> = Vec::with_capacity(rows.len());
@@ -3540,67 +3599,9 @@ impl App {
                         lines.push(Line::raw(""));
                         keys.push(None);
                     }
-                    // At the edge, so the rows under it — indented by their mark's
-                    // leading space — read as its own.
-                    let mut l = vec![];
-                    let mut used = 0;
-                    // The name reads first; the folder it lives in follows, quiet.
-                    l.push(Span::styled(h.name.clone(), theme::name()));
-                    used += h.name.chars().count();
-                    l.push(Span::styled(format!("  {}", h.place), theme::dim()));
-                    used += 2 + h.place.chars().count();
-                    // Its git checkout follows the folder; the chips give way
-                    // to it, not it to them.
-                    if let Some(c) = &h.checkout {
-                        let git = rows::checkout_words(c);
-                        l.push(Span::styled(format!("  {git}"), theme::dim()));
-                        used += 2 + git.chars().count();
-                    }
-                    // The count of what is set up here sits at the right edge and
-                    // is the honest total even when few chips fit.
-                    let count = group_count(&h.rules);
-                    let cw = if count.is_empty() { 0 } else { count.chars().count() + 1 };
-                    // The rules as chips, just after the name — what needs a yes
-                    // first (they are already sorted so). As many as fit; a `+K`
-                    // stands in for the rest so the clip is never silent.
-                    let texts: Vec<String> = h.rules.iter().map(rows::Chip::text).collect();
-                    let width = |t: &[String]| {
-                        t.iter().map(|x| x.chars().count()).sum::<usize>() + 3 * t.len().saturating_sub(1)
-                    };
-                    let mut show = texts.len();
-                    let more = |shown: usize, total: usize| {
-                        if shown < total {
-                            format!(" +{}", total - shown).chars().count()
-                        } else {
-                            0
-                        }
-                    };
-                    while show > 0 && used + 3 + width(&texts[..show]) + more(show, texts.len()) + cw + 2 > w {
-                        show -= 1;
-                    }
-                    if show > 0 || !texts.is_empty() {
-                        l.push(Span::raw("   "));
-                        for (i, (c, t)) in h.rules.iter().zip(&texts[..show]).enumerate() {
-                            if i > 0 {
-                                l.push(Span::styled(" · ", theme::dim()));
-                            }
-                            l.push(match c.status {
-                                RuleStatus::NeedsApproval => Span::styled(t.clone(), theme::needs()),
-                                RuleStatus::Paused => Span::styled(t.clone(), theme::dim()),
-                                _ => Span::styled(t.clone(), theme::accent()),
-                            });
-                        }
-                        if show < texts.len() {
-                            l.push(Span::styled(format!(" +{}", texts.len() - show), theme::dim()));
-                        }
-                    }
-                    if !count.is_empty() {
-                        let used_now: usize = l.iter().map(|s| s.content.chars().count()).sum();
-                        let pad = w.saturating_sub(used_now + count.chars().count() + 1).max(1);
-                        l.push(Span::raw(" ".repeat(pad)));
-                        l.push(Span::styled(count, theme::dim()));
-                    }
-                    Line::from(l)
+                    // At the edge, so the rows under it — indented by their
+                    // icon's leading space — read as its own.
+                    header_line(h, w, tw)
                 }
                 Row::Question(q) => {
                     // One line of it: the summary's first, or else the options.
@@ -3615,9 +3616,9 @@ impl App {
                     list_line(
                         w,
                         tw,
-                        Span::styled(" ✱ ", theme::needs()),
+                        rows::QUESTION,
                         Span::styled(fit(&title, tw), theme::name()),
-                        Span::styled(fit("to decide", 10), theme::needs()),
+                        vec![Span::styled("to decide", theme::needs())],
                         &summary,
                         vec![],
                         None,
@@ -3645,13 +3646,11 @@ impl App {
                     } else {
                         title
                     };
-                    // A shell at rest wears the accent on its caret. Where a
-                    // run says what it last did, a shell usually has only its
-                    // own prompt to show, so it says nothing — unless its
-                    // prompt marks what it runs, and the detail is the last
-                    // command, which is worth reading.
-                    let shell = rows::live_shell(r);
-                    let quiet = shell && r.detail.is_none();
+                    // Where a run says what it last did, a shell usually has
+                    // only its own prompt to show, so it says nothing — unless
+                    // its prompt marks what it runs, and the detail is the
+                    // last command, which is worth reading.
+                    let quiet = rows::live_shell(r) && r.detail.is_none();
                     // Its ref, and its branch where the folder has moved on.
                     let aside = [r.ref_.clone(), rows::branch_aside(r, &self.digest.checkouts)]
                         .into_iter()
@@ -3661,12 +3660,9 @@ impl App {
                     list_line(
                         w,
                         tw,
-                        Span::styled(
-                            format!(" {} ", rows::run_glyph(r)),
-                            if shell { theme::accent() } else { style },
-                        ),
+                        rows::icon(r),
                         title,
-                        Span::styled(fit(&rows::run_words(r), 10), style),
+                        vec![Span::styled(rows::run_words(r), style)],
                         if quiet { "" } else { i.summary.as_str() },
                         joined_lead(i.joined_by.as_deref()),
                         (!aside.is_empty()).then_some(aside.as_str()),
@@ -3675,27 +3671,18 @@ impl App {
                 }
                 Row::Job(j) => {
                     let last = j.last();
-                    let glyph = match j.kind {
-                        RuleKind::Schedule => "↻",
-                        RuleKind::Reaction => "⚡",
-                    };
-                    let word = match last.run.state {
-                        RunState::Failed => "failed",
-                        RunState::Stopped => "stopped",
-                        _ => "ok",
-                    };
-                    // How many times it has run sits with how the last one went.
-                    let word = format!("{word} ×{}", j.runs.len());
                     let title = Span::raw(fit(&j.name, tw));
                     let title = if j.unseen() { title.bold() } else { title };
+                    // Its state is how the last few went, oldest first; the
+                    // tally and the cadence are the pane's.
                     list_line(
                         w,
                         tw,
-                        Span::raw(format!(" {glyph} ")),
+                        rows::JOB,
                         title,
-                        Span::styled(fit(&word, 10), state_style(last.run.state)),
+                        job_marks(j),
                         &j.summary(),
-                        marks_lead(j),
+                        vec![],
                         None,
                         fmt_age(last.at, now),
                     )
@@ -4176,6 +4163,104 @@ mod tests {
             group_count(&[chip(Schedule), chip(Schedule), chip(Reaction)]),
             "2 jobs · 1 reaction"
         );
+    }
+
+    /// The column a piece of text starts at on a drawn line, counting cells.
+    fn col_of(line: &ratatui::text::Line, text: &str) -> usize {
+        let mut s = String::new();
+        let mut cols = 0;
+        for span in &line.spans {
+            s.push_str(&span.content);
+        }
+        let at = s.find(text).unwrap_or_else(|| panic!("{text:?} not in {s:?}"));
+        for c in s[..at].chars() {
+            cols += ratatui::text::Span::raw(c.to_string()).width();
+        }
+        cols
+    }
+
+    #[test]
+    fn headers_and_rows_keep_their_columns_whatever_the_lengths() {
+        use super::{header_line, list_line, state_col};
+        use crate::tui::rows::{self, Head};
+        use ratatui::text::Span;
+        use rl_proto::types::Checkout;
+        let (w, tw) = (100, 30);
+        let co = |b: &str, n| Checkout {
+            path: "/w".into(),
+            branch: Some(b.into()),
+            detached: None,
+            worktrees: n,
+            badges: vec![],
+        };
+        let head = |place: &str, own: Option<&str>, checkout, rules| Head {
+            place: place.into(),
+            workspace: "/w".into(),
+            name: "w".into(),
+            own: own.map(Into::into),
+            rules,
+            checkout,
+        };
+        let a = header_line(
+            &head("~/Projects/flint-platform", None, Some(co("main", 24)), vec![]),
+            w,
+            tw,
+        );
+        let b = header_line(
+            &head(
+                "~/tmp/foodai",
+                Some("food"),
+                Some(co("a-long-branch", 4)),
+                vec![chip(RuleKind::Schedule)],
+            ),
+            w,
+            tw,
+        );
+        let c = header_line(
+            &head(
+                "~/Downloads/some/very/deep/folder/Finance & Real Estate",
+                None,
+                Some(co("main", 0)),
+                vec![],
+            ),
+            w,
+            tw,
+        );
+        // The checkout starts in the state column on every header.
+        assert_eq!(col_of(&a, "⎇"), state_col(tw));
+        assert_eq!(col_of(&b, "⎇"), state_col(tw));
+        assert_eq!(col_of(&c, "⎇"), state_col(tw));
+        assert_eq!(col_of(&b, "tmp/"), 2, "the parent, then the folder");
+        assert!(b.to_string().contains("foodai · food"));
+        // A long path lost its start and kept its folder.
+        assert!(c.to_string().starts_with("…/"), "{c}");
+        assert!(c.to_string().contains("Finance & Real Estate"));
+        // The tally ends at the edge.
+        assert_eq!(b.width(), w);
+        assert!(b.to_string().ends_with("1 job"));
+
+        // A run's state word starts where a header's checkout does, and every
+        // title in the same column, whatever icon it wears.
+        let row = |icon: &str, word: &str| {
+            list_line(
+                w,
+                tw,
+                icon,
+                Span::raw(crate::tui::rows::fit("title", tw)),
+                vec![Span::raw(word.to_string())],
+                "summary",
+                vec![],
+                None,
+                "2m".into(),
+            )
+        };
+        for (icon, word) in [(rows::AGENT, "needs you"), (rows::SHELL, ""), (rows::JOB, "·×··")] {
+            let l = row(icon, word);
+            assert_eq!(col_of(&l, "title"), 4, "{l}");
+            assert_eq!(col_of(&l, "summary"), state_col(tw) + 11, "{l}");
+            assert_eq!(l.width(), w, "{l}");
+        }
+        assert_eq!(col_of(&row(rows::AGENT, "needs you"), "needs"), state_col(tw));
     }
 
     #[test]
