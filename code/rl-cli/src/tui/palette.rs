@@ -139,8 +139,8 @@ pub const ALL: &[Command] = &[
     },
     Command {
         name: "edit",
-        args: "[file|schedule|reaction]",
-        what: "the selected rule in the form or its file, or a scope's whole rule file",
+        args: "[file|schedule|reaction [global]]",
+        what: "the selected rule in the form or its file, or a scope's whole rule file; global, the Relay home's",
         cmd: Cmd::Edit,
     },
     Command {

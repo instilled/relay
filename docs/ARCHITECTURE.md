@@ -293,11 +293,15 @@ there (`rld` reads `.git` directly on each digest, no `git` started; a worktree 
 own is a project of its own, with its branch and no count) — then the rules that
 live there — `↻ nightly 4h · ⚡ tests-failed`, accented and amber when one waits for a yes, with a
 `+N` when more than fit — and, at the right edge, the tally of how many jobs and reactions the
-folder holds; the global rules — the ones in the Relay home, which apply in every folder — get a project row of
-their own, `global`, shown with that home (`~/.relay`) where a folder row shows its folder — always,
-rules or none: it is always the last project, a yes waiting there or not (its chip says so),
-and the cursor stops on it, `enter` (or `^o`) shows its schedules and
-reactions in the pane, and `^g` opens the graph on them. Runs a schedule or a rule
+folder holds. The global rules — the ones in the Relay home, which apply in every folder — have no
+row: nothing would ever sit under one, since a global rule's runs fold under the folder they ran in,
+and a row that is always there, rules or none, kept the empty list from ever saying `nothing running
+· rl run -- <command>`. The headline says them instead, when there are any — `relay · 3 working ·
+↻ 2 ⚡ 1 everywhere`, schedules and reactions counted as a folder's header counts them — and in
+amber when one waits for a yes, saying so and where to give it (`⚡ 1 everywhere needs a yes ·
+/graph`, `rows::everywhere`). `^g` (or `/graph`) from anywhere, an empty list too, shows them wired
+with everything else, and `/edit schedule` where nothing names a folder, or `/edit schedule global`
+from anywhere, opens the home's file. Runs a schedule or a rule
 started fold, once ended, into one line per job — its rule's glyph, the name, how the last one
 went with how many there have been (`ok ×4`), how the last few went (`··×·`, oldest first) and
 what the last firing came to in its own words — so a job firing every thirty seconds is a row,
@@ -429,7 +433,7 @@ spot), and typing anything clears the highlight so `enter` submits the line as b
 Because letters go into the line, everything that is not typing is a `/` command
 (`tui/palette.rs`), offered as you type it: `/stop`, `/archive [seen]`, `/mark`, `/join`,
 `/shell`, `/rename`, `/pin`, `/pane [full]`, `/graph`, `/reload [rules|shell]`, `/approve` and `/pause`,
-`/new`, `/edit [file|schedule|reaction]`, `/summarise`, `/ask`, `/filter`, `/lens`, `/prune`,
+`/new`, `/edit [file|schedule|reaction [global]]`, `/summarise`, `/ask`, `/filter`, `/lens`, `/prune`,
 `/up`, `/help`, `/quit`. One name per act: a variant of an act is an argument to it rather than a
 command of its own, and no word means two things — `done` is only ever what `/mark` says. `enter` on an empty line
 is the row under the cursor instead — a job opens, a question comes
@@ -474,7 +478,9 @@ your keystroke is the yes; a folder new to Relay is registered on the way. `/edi
 on a job row, is the same form filled in; saving rewrites only that block and keeps what the form
 does not show (`env`, `where`, `ask`), and a rename or a move takes the old block out. `/edit file`
 opens the file in `$EDITOR` at the rule's line and reloads on return — an edit made there is a
-file change, so it waits for `/approve` like any other.
+file change, so it waits for `/approve` like any other. `/edit schedule` (or `reaction`) opens the
+whole file of the folder the cursor is in — a run's, a job's, a header's, a graph node's — and the
+Relay home's where nothing names a folder; `/edit schedule global` opens the home's from anywhere.
 
 Nothing is remembered between openings except presence: leaving the panel is what `rl since`
 counts from.

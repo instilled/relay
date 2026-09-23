@@ -3,7 +3,7 @@
 //!
 //! A group is a run's ref, else its folder — never its branch: a folder is one
 //! project whichever branch it is on, and its header says which. Groups come in
-//! order of name, the global row last; inside a group, questions come first,
+//! order of name; inside a group, questions come first,
 //! then runs by attention, newest change first. A workspace path reads as the
 //! name it was registered under.
 //!
@@ -80,14 +80,10 @@ pub enum Row<'a> {
 
 impl<'a> Row<'a> {
     /// Selectable rows carry a stable key, so the cursor survives a re-rank. A
-    /// folder header is selectable by its path; the global rules row,
-    /// which stands for no folder, is selectable too, under a fixed key.
+    /// folder header is selectable by its path.
     pub fn key(&self) -> Option<String> {
         match self {
-            Row::Group(h) => Some(match &h.workspace {
-                Some(p) => format!("g:{}", p.display()),
-                None => "g:*global*".into(),
-            }),
+            Row::Group(h) => Some(format!("g:{}", h.workspace.display())),
             Row::Question(d) => Some(format!("q:{}", d.id)),
             Row::Run(i) => Some(format!("r:{}", i.run.id)),
             Row::Job(j) => Some(j.key.clone()),
@@ -106,10 +102,10 @@ impl<'a> Row<'a> {
 /// A group's header line.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Head {
-    /// The folder, with `~` for home; on the global row, the Relay home.
-    pub place: Option<String>,
-    /// The folder itself, so actions can act on it; none on the global row.
-    pub workspace: Option<PathBuf>,
+    /// The folder, with `~` for home.
+    pub place: String,
+    /// The folder itself, so actions can act on it.
+    pub workspace: PathBuf,
     /// A ref, or a folder by the name it was registered under.
     pub name: String,
     /// The rules of that folder, needing a yes first, then by name.
@@ -437,8 +433,6 @@ pub struct Context<'a> {
     /// Every rule, for a job's cadence; may be empty.
     pub rules: &'a [Rule],
     pub filter: &'a str,
-    /// The Relay home as shown (`~/.relay`): where the global row's rules live.
-    pub home: &'a str,
     /// Which slice of the list to show; questions ignore it.
     pub lens: Lens,
     pub now: Timestamp,
@@ -648,8 +642,8 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
     for g in groups {
         let name = names.group(&g.key);
         let mut block = vec![Row::Group(Head {
-            place: Some(names.place(&g.key, &g.workspace)),
-            workspace: Some(g.workspace.clone()),
+            place: names.place(&g.key, &g.workspace),
+            workspace: g.workspace.clone(),
             name: name.clone(),
             rules: chips(cx.rules, Some(&g.workspace), now),
             checkout: checkout_of(&d.checkouts, &g.workspace).cloned(),
@@ -698,8 +692,8 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
             continue;
         }
         let head = Row::Group(Head {
-            place: Some(place),
-            workspace: Some(p.clone()),
+            place,
+            workspace: p.clone(),
             name: name.clone(),
             rules: chips(cx.rules, Some(&p), now),
             checkout: checkout.cloned(),
@@ -708,19 +702,10 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
     }
     blocks.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
     rows.extend(blocks.into_iter().flat_map(|(_, _, block)| block));
-    // The global rules get a line of their own — a project row for the things
-    // that live outside any folder — always last, rules or none, so the cursor
-    // has somewhere to stand to reach them. It answers to the filter like any
-    // other project.
-    if query.hits_project(&["global", cx.home], None) {
-        rows.push(Row::Group(Head {
-            place: Some(cx.home.to_string()),
-            workspace: None,
-            name: "global".into(),
-            rules: chips(cx.rules, None, now),
-            checkout: None,
-        }));
-    }
+    // The global rules — the Relay home's, which apply in every folder — have
+    // no row: nothing would ever sit under one, since their runs fold under
+    // the folder they ran in. The headline says them (`everywhere`), and the
+    // graph is where they are wired.
     rows
 }
 
@@ -751,7 +736,6 @@ pub fn counts(rows: &[Row]) -> (usize, usize, usize, usize, usize) {
     c
 }
 
-/// The header line: what needs you first, then what is moving.
 /// What a restart took that is still on the list, as the headline says it,
 /// with the command that picks it up. `/resume all` leaves plain commands
 /// out, so when they are all there is, it says the command that takes them.
@@ -772,6 +756,38 @@ pub fn lost_note(d: &Digest) -> Option<String> {
     Some(format!("{} lost in a restart · {how}", d.lost.len()))
 }
 
+/// The global rules, as the headline says them: how many schedules and
+/// reactions the Relay home holds — `↻ 2 ⚡ 1 everywhere` — and, when any
+/// waits for a yes, that it does and where to give it. `chips` are the global
+/// ones (`chips(rules, None, ..)`); the flag says one is waiting, which is
+/// drawn amber. Nothing when there are none: a home with no rules of its own
+/// has nothing to say here.
+pub fn everywhere(chips: &[Chip]) -> Option<(String, bool)> {
+    if chips.is_empty() {
+        return None;
+    }
+    let jobs = chips.iter().filter(|c| c.kind == RuleKind::Schedule).count();
+    let reactions = chips.len() - jobs;
+    let waiting = chips.iter().filter(|c| c.needs_yes()).count();
+    let mut s = String::new();
+    if jobs > 0 {
+        s.push_str(&format!("↻ {jobs} "));
+    }
+    if reactions > 0 {
+        s.push_str(&format!("⚡ {reactions} "));
+    }
+    s.push_str("everywhere");
+    let need = |n: usize| if n == 1 { "needs" } else { "need" };
+    match waiting {
+        0 => {}
+        // All of them wait: the count already says how many.
+        n if n == chips.len() => s.push_str(&format!(" {} a yes · /graph", need(n))),
+        n => s.push_str(&format!(" · {n} {} a yes · /graph", need(n))),
+    }
+    Some((s, waiting > 0))
+}
+
+/// The header line: what needs you first, then what is moving.
 pub fn headline(rows: &[Row], news: usize, filter: &str) -> String {
     let (asked, need, working, fin, jobs) = counts(rows);
     let mut parts = Vec::new();
@@ -905,7 +921,6 @@ mod tests {
                 rules: &[],
                 lens: Lens::All,
                 filter,
-                home: "~/.relay",
                 now,
             },
         )
@@ -919,7 +934,6 @@ mod tests {
                 rules: &[],
                 lens,
                 filter: "",
-                home: "~/.relay",
                 now,
             },
         )
@@ -964,7 +978,8 @@ mod tests {
         assert_eq!(shown("kind:question"), ["q:q1"], "a question stands above the projects");
         assert_eq!(shown("by:nightly"), ["[web]", "r:sched"]);
         assert_eq!(shown("by:tests"), ["q:q1"], "a question by its reaction");
-        assert_eq!(shown("global"), ["[global]"]);
+        // The global rules have no row to find.
+        assert_eq!(shown("global"), Vec::<String>::new());
     }
 
     #[test]
@@ -1044,7 +1059,7 @@ mod tests {
         // run stays, and its folder keeps its place by name.
         assert_eq!(
             keys(&build_with(&d, &names, "", now)),
-            ["q:q1", "r:old01", "r:shell", "[api]", "[relay]", "r:fail1", "[global]"]
+            ["q:q1", "r:old01", "r:shell", "[api]", "[relay]", "r:fail1"]
         );
         // No lens takes a pin away.
         let jobs = lens_build(&d, &names, Lens::Jobs, now);
@@ -1090,7 +1105,7 @@ mod tests {
         let names = Names::default();
         let rows = build_with(&d, &names, "", now);
         // Two repos on `main` stay two projects, each named for its folder.
-        assert_eq!(keys(&rows), ["[api]", "r:a1", "r:a2", "[web]", "r:w1", "[global]"]);
+        assert_eq!(keys(&rows), ["[api]", "r:a1", "r:a2", "[web]", "r:w1"]);
         let head = |n: usize| match &rows[n] {
             Row::Group(h) => checkout_words(h.checkout.as_ref().unwrap()),
             _ => panic!("a header"),
@@ -1163,14 +1178,12 @@ mod tests {
         let rows = build_with(&d, &names, "", now);
         assert_eq!(
             keys(&rows),
-            [
-                "q:q1", "[api]", "r:blok1", "r:work1", "[relay]", "r:fail1", "r:done1", "[global]"
-            ],
-            "projects by name, however urgent; the question leads the list; api is named by its folder; old01 is gone; global last"
+            ["q:q1", "[api]", "r:blok1", "r:work1", "[relay]", "r:fail1", "r:done1"],
+            "projects by name, however urgent; the question leads the list; api is named by its folder; old01 is gone"
         );
         assert_eq!(counts(&rows), (1, 2, 1, 1, 0));
         match &rows[4] {
-            Row::Group(h) => assert_eq!((h.name.as_str(), h.place.as_deref()), ("relay", Some("/home/f/relay"))),
+            Row::Group(h) => assert_eq!((h.name.as_str(), h.place.as_str()), ("relay", "/home/f/relay")),
             _ => panic!("relay's header"),
         }
         assert_eq!(
@@ -1205,15 +1218,12 @@ mod tests {
             (PathBuf::from("/home/f/idle"), "idle".to_string()),
         ]);
         // The idle project is a line of its own, in its place by name.
-        assert_eq!(
-            keys(&build_with(&d, &names, "", now)),
-            ["[idle]", "[relay]", "r:work1", "[global]"]
-        );
+        assert_eq!(keys(&build_with(&d, &names, "", now)), ["[idle]", "[relay]", "r:work1"]);
         // It carries the folder so selecting it lands on the project.
         match build_with(&d, &names, "idle", now).last() {
             Some(Row::Group(h)) => {
                 assert_eq!(h.name, "idle");
-                assert_eq!(h.workspace.as_deref(), Some(Path::new("/home/f/idle")));
+                assert_eq!(h.workspace, Path::new("/home/f/idle"));
             }
             _ => panic!("idle folder is the last row it filters to"),
         }
@@ -1221,54 +1231,66 @@ mod tests {
         assert_eq!(keys(&build_with(&d, &names, "idle", now)), ["[idle]"]);
         // A lens narrows what is inside projects, never which projects there are:
         // the idle one and yours stay, even where nothing in them matches.
-        assert_eq!(
-            keys(&lens_build(&d, &names, Lens::Jobs, now)),
-            ["[idle]", "[relay]", "[global]"]
-        );
+        assert_eq!(keys(&lens_build(&d, &names, Lens::Jobs, now)), ["[idle]", "[relay]"]);
     }
 
     #[test]
-    fn the_global_row_is_last_and_selectable() {
+    fn with_no_runs_and_no_folders_the_list_is_empty() {
         let now: Timestamp = "2026-09-10T12:00:00Z".parse().unwrap();
         let d = Digest {
             since: now,
-            items: vec![item(
-                "w",
-                RunState::Working,
-                "/home/f/relay",
-                "2026-09-10T11:00:00Z",
-                false,
-            )],
+            items: vec![],
             decisions: vec![],
             checkouts: Vec::new(),
             lost: Vec::new(),
         };
-        let names = Names::new([(PathBuf::from("/home/f/relay"), "relay".to_string())]);
-        let build_with_rules = |rules: &[Rule]| {
-            build(
-                &d,
-                &Context {
-                    names: &names,
-                    rules,
-                    lens: Lens::All,
-                    filter: "",
-                    home: "~/.relay",
-                    now,
-                },
-            )
-            .into_iter()
-            .map(|r| (r.key(), matches!(r, Row::Group(h) if h.workspace.is_none())))
-            .collect::<Vec<_>>()
-        };
-        // The global row is last, under a stable key.
-        let calm = build_with_rules(&[schedule("global", "pulse", true, Some("2026-09-10T12:00:30Z"))]);
-        let last = calm.last().unwrap();
-        assert!(last.1, "the global row is last");
-        assert_eq!(last.0.as_deref(), Some("g:*global*"), "and is selectable");
-        // Even with a rule waiting on a yes: its place does not move.
-        let waiting = build_with_rules(&[schedule("global", "backup", false, None)]);
-        assert!(waiting.last().unwrap().1, "still last");
-        assert!(!waiting[0].1);
+        let rules = [schedule("global", "pulse", true, Some("2026-09-10T12:00:30Z"))];
+        let rows = build(
+            &d,
+            &Context {
+                names: &Names::default(),
+                rules: &rules,
+                lens: Lens::All,
+                filter: "",
+                now,
+            },
+        );
+        // Global rules or none, nothing stands on the list for them, so a
+        // fresh home says it has nothing running.
+        assert!(rows.is_empty(), "{:?}", keys(&rows));
+    }
+
+    #[test]
+    fn the_headline_says_the_global_rules_and_a_yes_they_wait_for() {
+        let now: Timestamp = "2026-09-10T12:00:00Z".parse().unwrap();
+        let say = |rules: &[Rule]| everywhere(&chips(rules, None, now));
+        let pulse = schedule("global", "pulse", true, Some("2026-09-10T12:00:30Z"));
+        let nightly = schedule("global", "nightly", true, None);
+        let notify = reaction("global", "notify");
+        let mut waiting = reaction("global", "deploy");
+        if let Rule::Reaction(r) = &mut waiting {
+            r.approved_hash = None;
+        }
+        assert_eq!(say(&[]), None, "no global rules, nothing said");
+        // A folder's rules are its header's, not the headline's.
+        assert_eq!(say(&[schedule("/home/f/relay", "nightly", true, None)]), None);
+        assert_eq!(
+            say(&[pulse.clone(), nightly.clone(), notify.clone()]),
+            Some(("↻ 2 ⚡ 1 everywhere".into(), false))
+        );
+        assert_eq!(
+            say(std::slice::from_ref(&notify)),
+            Some(("⚡ 1 everywhere".into(), false))
+        );
+        // One waiting, and it is all there is: the count already says which.
+        assert_eq!(
+            say(std::slice::from_ref(&waiting)),
+            Some(("⚡ 1 everywhere needs a yes · /graph".into(), true))
+        );
+        assert_eq!(
+            say(&[pulse, nightly, notify, waiting]),
+            Some(("↻ 2 ⚡ 2 everywhere · 1 needs a yes · /graph".into(), true))
+        );
     }
 
     fn fired(id: &str, job: &str, state: RunState, at: &str, unseen: bool) -> DigestItem {
@@ -1320,7 +1342,7 @@ mod tests {
         let job_key = job_key(RuleKind::Schedule, "pulse", "/home/f/relay");
         assert_eq!(
             keys(&rows),
-            ["[relay]", "r:hand", &job_key, "r:go", "[global]"],
+            ["[relay]", "r:hand", &job_key, "r:go"],
             "finished before working, newest first among equals"
         );
         let Some(Row::Job(j)) = rows.iter().find(|r| matches!(r, Row::Job(_))) else {
@@ -1363,7 +1385,7 @@ mod tests {
         let rows = build_with(&d2, &names, "", now);
         assert_eq!(
             keys(&rows),
-            ["[relay]", &job_key, "r:w", "[global]"],
+            ["[relay]", &job_key, "r:w"],
             "failed job above working run"
         );
         assert_eq!(counts(&rows), (0, 1, 1, 0, 1));
@@ -1488,7 +1510,7 @@ mod tests {
         assert_eq!(texts(&chips(&rules, None, now)), ["↻ pulse 30s"]);
 
         // On the list: the folder's rules ride its header; the global
-        // rules get a line of their own, always.
+        // rules stand nowhere on it.
         let d = Digest {
             since: now,
             items: vec![item(
@@ -1511,41 +1533,27 @@ mod tests {
                     rules,
                     lens: Lens::All,
                     filter: "",
-                    home: "~/.relay",
                     now,
                 },
             );
             rows.iter()
                 .map(|r| match r {
-                    Row::Group(h) => format!(
-                        "[{}{}] {}",
-                        h.name,
-                        if h.workspace.is_none() { "*" } else { "" },
-                        texts(&h.rules).join(" · ")
-                    ),
+                    Row::Group(h) => format!("[{}] {}", h.name, texts(&h.rules).join(" · ")),
                     other => other.key().unwrap(),
                 })
                 .collect::<Vec<_>>()
         };
         assert_eq!(
             build_rules(&rules),
-            [
-                "[relay] ! deploy · ↻ nightly 4h · ⚡ tests-failed",
-                "r:work1",
-                "[global*] ↻ pulse 30s"
-            ],
-            "global rules are last"
+            ["[relay] ! deploy · ↻ nightly 4h · ⚡ tests-failed", "r:work1"],
+            "no row for the global rules"
         );
         let mut with_yes = rules.clone();
         with_yes.push(schedule("global", "backup", false, None));
         assert_eq!(
             build_rules(&with_yes),
-            [
-                "[relay] ! deploy · ↻ nightly 4h · ⚡ tests-failed",
-                "r:work1",
-                "[global*] ! backup · ↻ pulse 30s"
-            ],
-            "a waiting yes shows on its chip, not by moving the row"
+            ["[relay] ! deploy · ↻ nightly 4h · ⚡ tests-failed", "r:work1"],
+            "not even for one waiting on a yes: the headline says that"
         );
     }
 
@@ -1589,7 +1597,7 @@ mod tests {
         // both are newer than it.
         assert_eq!(
             keys(&build_with(&d, &names, "", now)),
-            ["[relay]", "r:shell", "r:stale", "r:work", "[global]"]
+            ["[relay]", "r:shell", "r:stale", "r:work"]
         );
 
         let mut shell = item("shell", RunState::Idle, ws, "2026-09-10T11:00:00Z", false);
@@ -1603,10 +1611,7 @@ mod tests {
             lost: Vec::new(),
         };
         // Where you work gives way to what wants you.
-        assert_eq!(
-            keys(&build_with(&d, &names, "", now)),
-            ["[relay]", "r:asks", "r:shell", "[global]"]
-        );
+        assert_eq!(keys(&build_with(&d, &names, "", now)), ["[relay]", "r:asks", "r:shell"]);
     }
 
     #[test]
