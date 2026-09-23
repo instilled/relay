@@ -929,7 +929,6 @@ impl App {
                 names: &self.names,
                 rules: &self.rules,
                 filter: &self.filter,
-                home: &rl_core::display_path(self.home.path()),
                 lens: self.lens,
                 now: Timestamp::now(),
             },
@@ -942,7 +941,7 @@ impl App {
             Row::Run(i) => Some(i.run.workspace.clone()),
             Row::Job(j) => Some(j.last().run.workspace.clone()),
             Row::Question(q) => Some(q.workspace.clone()),
-            Row::Group(h) => h.workspace.clone(),
+            Row::Group(h) => Some(h.workspace.clone()),
         }
     }
 
@@ -950,14 +949,9 @@ impl App {
     /// header — what `^r` and `/edit schedule` act on.
     fn selected_project(&self) -> Option<PathBuf> {
         match self.selected()? {
-            Row::Group(h) => h.workspace.clone(),
+            Row::Group(h) => Some(h.workspace.clone()),
             _ => None,
         }
-    }
-
-    /// The cursor is on the global row — the rules in the Relay home, no folder.
-    fn selected_global(&self) -> bool {
-        matches!(self.selected(), Some(Row::Group(h)) if h.workspace.is_none())
     }
 
     /// Keys of the selectable rows of the view that is up, in order.
@@ -1610,8 +1604,10 @@ impl App {
     // ---- rules -------------------------------------------------------------
 
     /// `/graph` and `^g`: into the wiring, or back to the list, each keeping
-    /// its own place. From a job, a project or the global row, the graph
-    /// opens on the rule that stands there.
+    /// its own place. From a job or a project, the graph opens on the rule
+    /// that stands there; from anywhere else — an empty list too — on the
+    /// graph's own first node. The global rules have no row, so this is
+    /// where they are reached.
     async fn toggle_graph(&mut self) {
         let target = self.rule_target();
         if self.view == View::Graph {
@@ -1636,8 +1632,8 @@ impl App {
     }
 
     /// The rule the list's cursor stands on, as its graph node: a job's own
-    /// rule, else the first of a folder's rules (or the global ones) —
-    /// whatever waits for a yes first.
+    /// rule, else the first of a folder's rules — whatever waits for a yes
+    /// first.
     fn rule_target(&self) -> Option<String> {
         if self.view != View::Work {
             return None;
@@ -1646,10 +1642,7 @@ impl App {
             return self.rule_of_job(&j).map(rules::key);
         }
         let scope = match self.selected() {
-            Some(Row::Group(h)) => match &h.workspace {
-                Some(p) => p.to_string_lossy().into_owned(),
-                None => rl_proto::schedule::GLOBAL_SCOPE.to_string(),
-            },
+            Some(Row::Group(h)) => h.workspace.to_string_lossy().into_owned(),
             _ => return None,
         };
         let mut here: Vec<&Rule> = self
@@ -1734,12 +1727,12 @@ impl App {
 
     fn new_rule_form(&mut self) {
         let folder = self.folder_here();
-        // A new rule is global from the global row, or from a global rule's
-        // node in the graph; else it belongs to the folder here.
-        let yours = self.selected_global()
-            || (self.view == View::Graph
-                && self.selected_node().is_some_and(|n| n.folder.is_none())
-                && self.rule_here().is_none_or(Rule::is_global));
+        // A new rule is global from a global rule's node in the graph; else
+        // it belongs to the folder here, and `in: global` typed into the form
+        // makes it global from anywhere.
+        let yours = self.view == View::Graph
+            && self.selected_node().is_some_and(|n| n.folder.is_none())
+            && self.rule_here().is_none_or(Rule::is_global);
         let form = Form::rule((!yours).then_some(folder.as_path()), &folder)
             .with_folders(&self.names.paths())
             .with_agents(&self.agents);
@@ -1767,22 +1760,20 @@ impl App {
         }
     }
 
-    /// `/edit schedule|reaction`: the whole rule file for the scope the cursor
-    /// stands in, rather than the one rule under it. Any row answers which
-    /// folder its work is in, so this reads the same from a run as from the
-    /// folder's own header; the global row answers with no folder at all,
-    /// which is what the global file is filed under.
-    fn edit_scope_file(&mut self, kind: RuleKind) {
-        let folder = match (self.selected_folder(), self.selected_global()) {
-            (Some(folder), _) => Some(folder),
-            // No folder and the cursor is on the global row: those rules.
-            (None, true) => None,
-            // No folder and nothing selected: nothing to guess from, and
-            // guessing the global row would edit global rules by accident.
-            (None, false) => {
-                self.say("/edit schedule: on a folder, or on global");
-                return;
-            }
+    /// `/edit schedule|reaction [global]`: the whole rule file for the scope
+    /// the cursor stands in, rather than the one rule under it. Any row
+    /// answers which folder its work is in, so this reads the same from a run
+    /// as from the folder's own header, and a node in the graph answers with
+    /// its own folder. Where nothing names a folder — an empty list, a global
+    /// rule's node — it is the Relay home's file, the global rules having no
+    /// row of their own to stand on; `global` asks for that file from
+    /// anywhere.
+    fn edit_scope_file(&mut self, kind: RuleKind, global: bool) {
+        let folder = if global {
+            None
+        } else {
+            self.selected_folder()
+                .or_else(|| self.selected_node().and_then(|n| n.folder.clone()))
         };
         self.editor = Some((rulefile::file(&self.home, kind, folder.as_deref()), 1));
     }
@@ -2551,8 +2542,8 @@ impl App {
             self.pane = Pane::Facts;
             self.show_pane = true;
             self.mode = Mode::Answer(id);
-        } else if self.selected_project().is_some() || self.selected_global() {
-            // A project (or the global) header: its rules in the pane.
+        } else if self.selected_project().is_some() {
+            // A project header: its rules in the pane.
             self.pane = Pane::Facts;
             self.show_pane = true;
         } else {
@@ -2948,13 +2939,21 @@ impl App {
                 }
             }
             palette::Cmd::New => self.new_rule_form(),
-            palette::Cmd::Edit => match arg.trim() {
-                "" => self.edit_rule_form(),
-                "file" => self.edit_rule_file(),
-                "schedule" | "schedules" => self.edit_scope_file(RuleKind::Schedule),
-                "reaction" | "reactions" => self.edit_scope_file(RuleKind::Reaction),
-                other => self.say(format!("edit {other}? file, schedule or reaction")),
-            },
+            palette::Cmd::Edit => {
+                let words: Vec<&str> = arg.split_whitespace().collect();
+                let kind = match words.first().copied() {
+                    Some("schedule" | "schedules") => Some(RuleKind::Schedule),
+                    Some("reaction" | "reactions") => Some(RuleKind::Reaction),
+                    _ => None,
+                };
+                match (words.as_slice(), kind) {
+                    ([], _) => self.edit_rule_form(),
+                    (["file"], _) => self.edit_rule_file(),
+                    ([_], Some(kind)) => self.edit_scope_file(kind, false),
+                    ([_, "global"], Some(kind)) => self.edit_scope_file(kind, true),
+                    _ => self.say(format!("edit {}? file, or schedule or reaction [global]", arg.trim())),
+                }
+            }
             palette::Cmd::Summarise => self.summarise(arg.trim()),
             palette::Cmd::Ask => {
                 if arg.trim().is_empty() {
@@ -3101,6 +3100,19 @@ impl App {
         {
             head.spans.push(Span::raw(" · "));
             head.spans.push(Span::styled(note, theme::needs()));
+        }
+        // The global rules have no row — nothing would sit under one — so the
+        // headline says them, amber when one waits for a yes. The graph shows
+        // them wired, and it is where that yes is given.
+        if self.view == View::Work
+            && let Some((note, waiting)) = rows::everywhere(&rows::chips(&self.rules, None, Timestamp::now()))
+        {
+            head.spans.push(Span::raw(" · "));
+            head.spans.push(if waiting {
+                Span::styled(note, theme::needs())
+            } else {
+                Span::raw(note)
+            });
         }
         f.render_widget(Paragraph::new(head), l);
         if let Some(lens) = lens {
@@ -3366,10 +3378,8 @@ impl App {
                     // The name reads first; the folder it lives in follows, quiet.
                     l.push(Span::styled(h.name.clone(), theme::name()));
                     used += h.name.chars().count();
-                    if let Some(p) = &h.place {
-                        l.push(Span::styled(format!("  {p}"), theme::dim()));
-                        used += 2 + p.chars().count();
-                    }
+                    l.push(Span::styled(format!("  {}", h.place), theme::dim()));
+                    used += 2 + h.place.chars().count();
                     // Its git checkout follows the folder; the chips give way
                     // to it, not it to them.
                     if let Some(c) = &h.checkout {
@@ -3695,22 +3705,17 @@ impl App {
                 f.render_widget(Paragraph::new(p.lines), area);
                 return;
             }
-            Some(Row::Group(h)) if h.workspace.is_some() => {
-                let ws = h.workspace.clone().unwrap();
-                // The pane is the project — the folder — so it is titled by the
-                // folder's name (what `^r` renames), not the branch the list row
-                // may be grouped under.
-                pane::project_lines(
-                    &self.names.workspace(&ws),
-                    h.place.as_deref().unwrap_or(""),
-                    &ws,
-                    &self.digest.items,
-                    &self.rules,
-                    now,
-                )
-            }
-            // The global row: the rules in the Relay home, no folder.
-            Some(Row::Group(_)) => pane::global_lines(&self.rules, &rl_core::display_path(self.home.path()), now),
+            // The pane is the project — the folder — so it is titled by the
+            // folder's name (what `^r` renames), not the branch the list row
+            // may be grouped under.
+            Some(Row::Group(h)) => pane::project_lines(
+                &self.names.workspace(&h.workspace),
+                &h.place,
+                &h.workspace,
+                &self.digest.items,
+                &self.rules,
+                now,
+            ),
             _ => vec![Line::from(Span::raw(" nothing selected").dim())],
         };
         f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
@@ -3846,11 +3851,9 @@ impl App {
                 format!("enter output · /summarise · ^x archives · ^t pins · {pane}")
             }
             Some(Row::Run(_)) => format!("enter joins it · ^x stops it · ^t pins · {pane}"),
-            Some(Row::Group(h)) if h.workspace.is_some() => {
+            Some(Row::Group(_)) => {
                 format!("enter its stats · /shell · ^g its wiring · /edit schedule · ^r renames · {pane}")
             }
-            // The global row: the rules in the Relay home, no folder to rename.
-            Some(Row::Group(_)) => format!("enter its rules · ^g their wiring · /edit schedule · {pane}"),
             _ => String::new(),
         }
     }
