@@ -2366,6 +2366,7 @@ impl App {
         if self.search.is_some() {
             return self.key_search(k).await;
         }
+        let k = vi_step(k, self.line.is_empty());
         // Watching, the line still has the keyboard, so you can type the next
         // thing without leaving the run you are on; taking the keyboard is the
         // handover to the real terminal (`raw::attach`), never keys here.
@@ -4012,12 +4013,41 @@ fn bytes_words(n: u64) -> String {
     }
 }
 
+/// With nothing typed, `^j` and `^k` move as the arrows do, the way `j` and
+/// `k` do in vi. With text, they are the line's own: `^j` adds a line (it is
+/// what a shift-return mapped to a line feed sends) and `^k` cuts to the end.
+fn vi_step(k: KeyEvent, line_empty: bool) -> KeyEvent {
+    if !line_empty || k.modifiers != KeyModifiers::CONTROL {
+        return k;
+    }
+    match k.code {
+        KeyCode::Char('j') => KeyEvent::from(KeyCode::Down),
+        KeyCode::Char('k') => KeyEvent::from(KeyCode::Up),
+        _ => k,
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{ListHit, cand_window, group_count, hit_row, viewport};
+    use super::{ListHit, cand_window, group_count, hit_row, vi_step, viewport};
     use crate::tui::rows::Chip;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::layout::Rect;
     use rl_proto::rule::{RuleKind, RuleStatus};
+
+    #[test]
+    fn ctrl_j_and_k_move_when_nothing_is_typed() {
+        let ctrl = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL);
+        assert_eq!(vi_step(ctrl('j'), true).code, KeyCode::Down);
+        assert_eq!(vi_step(ctrl('k'), true).code, KeyCode::Up);
+        // Typed text keeps them: a new line, and a cut to the end.
+        assert_eq!(vi_step(ctrl('j'), false), ctrl('j'));
+        assert_eq!(vi_step(ctrl('k'), false), ctrl('k'));
+        // Plain j and k are letters, and other ctrl keys are left alone.
+        let j = KeyEvent::from(KeyCode::Char('j'));
+        assert_eq!(vi_step(j, true), j);
+        assert_eq!(vi_step(ctrl('x'), true), ctrl('x'));
+    }
 
     #[test]
     fn a_click_finds_the_row_on_the_line_it_fell_on() {
