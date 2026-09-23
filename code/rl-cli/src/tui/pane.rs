@@ -280,27 +280,11 @@ pub fn job_lines(j: &Job, rule: Option<&Rule>, names: &Names, width: usize, now:
     lines
 }
 
-/// The "global" row's pane: the schedules & reactions in the Relay home —
-/// the rules that apply in every folder — told the way a project's are.
-pub fn global_lines(rules: &[Rule], home: &str, now: Timestamp) -> Vec<Line<'static>> {
-    let mut lines = vec![Line::from(Span::raw(" global").bold())];
-    lines.push(Line::from(
-        Span::raw(format!(" {home} · rules that apply in every folder")).dim(),
-    ));
-    lines.extend(rules_section(rules, None, now));
-    lines.push(Line::raw(""));
-    lines.push(Line::from(
-        Span::raw(" ^g shows them in the wiring · /edit schedule edits the file").dim(),
-    ));
-    lines
-}
-
-/// The rules section shared by `global_lines` and `project_lines`: a leading
-/// blank line, the " rules" label, and the schedule/reaction chips (or the
-/// empty-state line), computed via `super::rows::chips` and filtered to
-/// `workspace` (`None` for the global rules).
-fn rules_section(rules: &[Rule], workspace: Option<&std::path::Path>, now: Timestamp) -> Vec<Line<'static>> {
-    let chips = super::rows::chips(rules, workspace, now);
+/// A project's rules section: a leading blank line, the " rules" label, and
+/// the schedule/reaction chips (or the empty-state line), computed via
+/// `super::rows::chips` and filtered to `workspace`.
+fn rules_section(rules: &[Rule], workspace: &std::path::Path, now: Timestamp) -> Vec<Line<'static>> {
+    let chips = super::rows::chips(rules, Some(workspace), now);
     let (sched, react): (Vec<_>, Vec<_>) = chips.iter().partition(|c| c.kind == rl_proto::rule::RuleKind::Schedule);
     let mut lines = vec![Line::raw(""), Line::from(Span::raw(" rules").dim())];
     if chips.is_empty() {
@@ -365,7 +349,7 @@ pub fn project_lines(
     }
 
     // The rules that live here, told the same way the header's chips are.
-    lines.extend(rules_section(rules, Some(workspace), now));
+    lines.extend(rules_section(rules, workspace, now));
     lines.push(Line::raw(""));
     lines.push(Line::from(
         Span::raw(" ^g shows its wiring · /edit schedule edits the file · ^r renames").dim(),
