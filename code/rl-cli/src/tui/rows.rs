@@ -17,7 +17,7 @@
 //! first — what needs you does not hide under a project's name — then pinned
 //! runs, in the order they were pinned.
 
-use super::query::{Query, Subject};
+use super::query::{Named, Query, Subject};
 use crate::rank;
 use jiff::{SignedDuration, Timestamp};
 use rl_core::time::fmt_age;
@@ -478,6 +478,47 @@ fn run_subject<'a>(i: &'a DigestItem, project: &'a str) -> Subject<'a> {
         kind,
         by,
         on: r.branch.as_deref(),
+    }
+}
+
+/// A row as the search ranks it (`query::ranked`): a header by its name, the
+/// rest by title, project and summary.
+pub fn named(row: &Row, d: &Digest, names: &Names) -> Named {
+    let path = |p: &Path| p.to_string_lossy().into_owned();
+    match row {
+        Row::Group(h) => Named {
+            head: h.name.clone(),
+            rest: vec![h.place.clone(), path(&h.workspace)],
+            ..Named::default()
+        },
+        Row::Question(q) => {
+            let asker = q.run.as_deref().and_then(|id| d.items.iter().find(|i| i.run.id == id));
+            let key = asker.map_or_else(|| path(&q.workspace), |i| i.run.place_key());
+            Named {
+                title: q.title.clone(),
+                project: names.group(&key),
+                summary: q.summary.clone().unwrap_or_default(),
+                rest: vec![path(&q.workspace)],
+                ..Named::default()
+            }
+        }
+        Row::Run(i) => Named {
+            title: i.run.title.clone(),
+            project: names.group(&i.run.place_key()),
+            summary: i.summary.clone(),
+            rest: vec![i.run.cli.clone().unwrap_or_default(), path(&i.run.workspace)],
+            ..Named::default()
+        },
+        Row::Job(j) => {
+            let r = &j.last().run;
+            Named {
+                title: j.name.clone(),
+                project: names.group(&r.place_key()),
+                summary: j.summary(),
+                rest: vec![r.title.clone(), r.cli.clone().unwrap_or_default(), path(&r.workspace)],
+                ..Named::default()
+            }
+        }
     }
 }
 
@@ -980,6 +1021,45 @@ mod tests {
         assert_eq!(shown("by:tests"), ["q:q1"], "a question by its reaction");
         // The global rules have no row to find.
         assert_eq!(shown("global"), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_search_lands_on_the_project_it_names_not_what_mentions_it() {
+        let now: Timestamp = "2026-09-10T12:00:00Z".parse().unwrap();
+        let (api, web) = ("/home/f/api", "/home/f/web");
+        let at = "2026-09-10T11:00:00Z";
+        let mut pinned = item("pinned", RunState::Working, api, at, false);
+        pinned.run.pinned_at = Some(now);
+        pinned.summary = "waiting on web to deploy".into();
+        let mut deploy = item("deploy", RunState::Working, api, at, false);
+        deploy.run.title = "web deploy".into();
+        let d = Digest {
+            since: now,
+            items: vec![pinned, deploy, item("w1", RunState::Working, web, at, false)],
+            decisions: vec![],
+            checkouts: Vec::new(),
+            lost: Vec::new(),
+        };
+        let names = Names::new([
+            (PathBuf::from(api), "api".to_string()),
+            (PathBuf::from(web), "web".to_string()),
+        ]);
+        let best = |f: &str| {
+            let rows = build_with(&d, &names, f, now);
+            let named: Vec<Named> = rows.iter().map(|r| named(r, &d, &names)).collect();
+            let list = keys(&rows);
+            let order = crate::tui::query::ranked(&Query::parse(f).words, &named);
+            let order: Vec<String> = order.iter().map(|&i| list[i].clone()).collect();
+            (list, order)
+        };
+        let (list, order) = best("web");
+        assert_eq!(
+            list,
+            ["r:pinned", "[api]", "r:deploy", "[web]", "r:w1"],
+            "the list keeps its order"
+        );
+        assert_eq!(order, ["[web]", "r:deploy", "r:w1", "r:pinned"]);
+        assert_eq!(best("deploy").1, ["r:deploy", "r:pinned"], "a title before a summary");
     }
 
     #[test]

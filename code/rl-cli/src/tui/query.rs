@@ -13,7 +13,10 @@
 //! Values match by prefix (`is:fail`), so the list narrows as you type; names
 //! (`in:`, `by:`, `on:`) anywhere in them.
 //!
-//! Pure: parsing, matching and completing. Nothing about the panel.
+//! As you type, the cursor goes to what the words name best (`ranked`), and
+//! `tab` walks on from there (`next_match`); the list keeps its order.
+//!
+//! Pure: parsing, matching, ranking and completing. Nothing about the panel.
 
 /// The token names, in the order completion offers them.
 pub const TOKENS: [&str; 5] = ["in:", "is:", "kind:", "by:", "on:"];
@@ -141,6 +144,92 @@ pub fn complete(word: &str, projects: &[String], rules: &[String], branches: &[S
     out
 }
 
+/// What a row is called, field by field, for `ranked`. A project header
+/// gives its name as `head`; anything else its title, its project's name and
+/// its summary. `rest` is whatever else a search hits — a CLI, a folder.
+#[derive(Debug, Default, Clone)]
+pub struct Named {
+    pub head: String,
+    pub title: String,
+    pub project: String,
+    pub summary: String,
+    pub rest: Vec<String>,
+}
+
+/// How close `text` comes to the words: 0 it is them, 1 it starts with them,
+/// 2 they are a whole word in it, 3 they are in it somewhere. `None` when
+/// they are not all in it.
+fn closeness(text: &str, words: &[String]) -> Option<u8> {
+    let text = text.to_lowercase();
+    let phrase = words.join(" ");
+    let bare = |c: Option<char>| !c.is_some_and(char::is_alphanumeric);
+    if text == phrase {
+        Some(0)
+    } else if text.starts_with(&phrase) {
+        Some(1)
+    } else if text
+        .match_indices(&phrase)
+        .any(|(i, m)| bare(text[..i].chars().next_back()) && bare(text[i + m.len()..].chars().next()))
+    {
+        Some(2)
+    } else if words.iter().all(|w| text.contains(w.as_str())) {
+        Some(3)
+    } else {
+        None
+    }
+}
+
+/// The rows the words name, best first, as indices into `rows`. A project
+/// whose name they say leads; then by where they are found — title, then
+/// project, then summary, then the rest — and how closely. Words found only
+/// across fields come last. Ties keep list order.
+pub fn ranked(words: &[String], rows: &[Named]) -> Vec<usize> {
+    if words.is_empty() {
+        return vec![];
+    }
+    let mut scored: Vec<((u8, u8), usize)> = rows
+        .iter()
+        .enumerate()
+        .filter_map(|(i, n)| {
+            let fields: Vec<(u8, &str)> = [&n.head, &n.title, &n.project, &n.summary]
+                .into_iter()
+                .enumerate()
+                .map(|(f, t)| (f as u8, t.as_str()))
+                .chain(n.rest.iter().map(|t| (4, t.as_str())))
+                .collect();
+            let best = fields
+                .iter()
+                .filter_map(|&(f, t)| closeness(t, words).map(|c| (f, c)))
+                .min();
+            let spread = || {
+                words
+                    .iter()
+                    .all(|w| fields.iter().any(|(_, t)| t.to_lowercase().contains(w.as_str())))
+            };
+            best.or_else(|| spread().then_some((5, 0))).map(|s| (s, i))
+        })
+        .collect();
+    scored.sort();
+    scored.into_iter().map(|(_, i)| i).collect()
+}
+
+/// Where `tab` goes from `at` in `order`: the next one, round to the first
+/// after the last; `back`, the one before. From off the order, the first — or
+/// the last, going back.
+pub fn next_match<'a, T: PartialEq>(order: &'a [T], at: Option<&T>, back: bool) -> Option<&'a T> {
+    let n = order.len();
+    if n == 0 {
+        return None;
+    }
+    let i = match (at.and_then(|a| order.iter().position(|x| x == a)), back) {
+        (Some(i), false) => (i + 1) % n,
+        (Some(i), true) => (i + n - 1) % n,
+        (None, false) => 0,
+        (None, true) => n - 1,
+    };
+    order.get(i)
+}
+
 /// Where the words of `text` sit, as byte ranges, merged: what a row lights up.
 pub fn marks(text: &str, words: &[String]) -> Vec<(usize, usize)> {
     let lower = text.to_lowercase();
@@ -250,5 +339,106 @@ mod tests {
         assert_eq!(marks("Cargo test cargo", &w(&["cargo"])), [(0, 5), (11, 16)]);
         assert_eq!(marks("testing", &w(&["test", "sting"])), [(0, 7)]);
         assert!(marks("nothing", &w(&[])).is_empty());
+    }
+
+    fn row(title: &str, project: &str, summary: &str) -> Named {
+        Named {
+            title: title.into(),
+            project: project.into(),
+            summary: summary.into(),
+            ..Named::default()
+        }
+    }
+
+    fn head(name: &str) -> Named {
+        Named {
+            head: name.into(),
+            rest: vec![format!("~/w/{name}")],
+            ..Named::default()
+        }
+    }
+
+    fn rank(search: &str, rows: &[Named]) -> Vec<usize> {
+        ranked(&Query::parse(search).words, rows)
+    }
+
+    #[test]
+    fn a_project_by_its_name_beats_a_row_that_mentions_it() {
+        let rows = [
+            row("which way?", "api", "asks about relay"),
+            row("relay", "api", ""),
+            head("api"),
+            row("sleep", "relay", ""),
+            head("relay"),
+        ];
+        assert_eq!(rank("relay", &rows), [4, 1, 3, 0]);
+        assert_eq!(rank("rel", &rows)[0], 4, "a prefix of the name will do");
+    }
+
+    #[test]
+    fn exact_then_prefix_then_whole_word_then_anywhere() {
+        let rows = [
+            row("retests", "", ""),
+            row("run test now", "", ""),
+            row("testing", "", ""),
+            row("test", "", ""),
+        ];
+        assert_eq!(rank("test", &rows), [3, 2, 1, 0]);
+        assert_eq!(rank("TEST", &rows), [3, 2, 1, 0], "whatever the case");
+        let rows = [row("make the test run", "", ""), row("test run", "", "")];
+        assert_eq!(rank("test run", &rows), [1, 0], "several words as one");
+    }
+
+    #[test]
+    fn title_then_project_then_summary_then_the_rest() {
+        let rows = [
+            Named {
+                rest: vec!["deploy".into()],
+                ..Named::default()
+            },
+            row("x", "", "deploy"),
+            row("x", "deploy", ""),
+            row("a deploying step", "", ""),
+            row("x", "api", "nothing"),
+        ];
+        assert_eq!(
+            rank("deploy", &rows),
+            [3, 2, 1, 0],
+            "anywhere in a title beats an exact project"
+        );
+        let spread = [row("cargo", "api", ""), row("cargo api", "", "")];
+        assert_eq!(
+            rank("cargo api", &spread),
+            [1, 0],
+            "words in one field beat words across them"
+        );
+    }
+
+    #[test]
+    fn ties_keep_list_order_and_no_words_rank_nothing() {
+        let rows = [row("b", "api", ""), row("a", "api", ""), row("c", "api", "")];
+        assert_eq!(rank("api", &rows), [0, 1, 2]);
+        assert!(rank("", &rows).is_empty());
+        assert!(
+            rank("is:failed", &rows).is_empty(),
+            "tokens alone are not words to match"
+        );
+    }
+
+    #[test]
+    fn tab_walks_the_matches_round_and_back() {
+        let order = ["a", "b", "c"].map(String::from);
+        let next = |at: Option<&str>, back| {
+            next_match(&order, at.map(String::from).as_ref(), back)
+                .cloned()
+                .unwrap_or_default()
+        };
+        assert_eq!(next(Some("a"), false), "b");
+        assert_eq!(next(Some("c"), false), "a", "round to the first");
+        assert_eq!(next(Some("a"), true), "c", "and back round to the last");
+        assert_eq!(next(Some("b"), true), "a");
+        assert_eq!(next(Some("zz"), false), "a", "from off the matches, the first");
+        assert_eq!(next(None, true), "c");
+        assert_eq!(next_match::<String>(&[], None, false), None);
     }
 }
