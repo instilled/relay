@@ -455,7 +455,15 @@ what was typed, how it came out and how long it took; the newest is the shell's 
 (starship, powerlevel10k, the shell integrations of iTerm2, WezTerm and kitty) already emit them, so
 there is nothing to do; `rl shell-init zsh` prints a snippet for prompts that do not. Relay reads
 the marks and never writes your rc. Without them nothing is guessed: no events, and the shell's row
-says nothing where a run says what it last did.
+says nothing where a run says what it last did. A prompt that also reports its folder — OSC 7,
+`ESC ] 7 ; file://host/path BEL` with the path percent-encoded, which the `rl shell-init` snippets
+send at every prompt and many terminals' integrations already do — tells Relay where the shell is.
+`rl-detect` reads it out of the stream (the host is ignored), the follow task keeps the latest on
+the live run in memory, as the filesystem resolves it, and `digest.get` carries it on the item
+(`cwd`, left out when unknown, so older panels read the digest as before). The shell's row then
+says where it is in its summary column: `app/src` inside its project, nothing at the project's own
+folder, the whole path with `~` for home anywhere else. A daemon restart forgets it until the next
+prompt says it again.
 
 `tab` completes the word being typed (`tui/complete.rs`), rooted in that same folder: the first
 word against the agents the registry knows, the folder's `Makefile` targets and `package.json`

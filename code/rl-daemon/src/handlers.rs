@@ -457,11 +457,13 @@ pub fn register(r: &mut Router<Daemon>) {
             c.badges = d.badges.of(c, &badges);
         }
         let joiners = d.supervisor.joiners();
+        let mut cwds = d.supervisor.cwds();
         let items = found
             .into_iter()
             .map(|(run, e, emitted)| {
                 let joined_by = joiners.get(&run.id).cloned();
-                crate::digest::item(run, e, joined_by, emitted)
+                let cwd = cwds.remove(&run.id);
+                crate::digest::item(run, e, joined_by, emitted, cwd)
             })
             .collect();
         let decisions = d

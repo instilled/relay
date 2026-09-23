@@ -101,6 +101,9 @@ pub struct Live {
     /// The pty's own size while a repaint nudge holds it a row smaller, so a
     /// viewer arriving meanwhile is not told the smaller size is the real one.
     nudge: Mutex<Option<(u16, u16)>>,
+    /// The folder the run last said it was in (OSC 7), for the list. Kept in
+    /// memory only: a shell says it again at its next prompt.
+    cwd: Mutex<Option<PathBuf>>,
 }
 
 impl Live {
@@ -223,6 +226,16 @@ impl Supervisor {
     }
 
     /// Who holds the keyboard of which run right now.
+    /// The folder each live run last said it was in, where one has.
+    pub fn cwds(&self) -> HashMap<String, PathBuf> {
+        self.live
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|(id, l)| l.cwd.lock().unwrap().clone().map(|c| (id.clone(), c)))
+            .collect()
+    }
+
     pub fn joiners(&self) -> HashMap<String, String> {
         self.live
             .lock()
@@ -731,6 +744,7 @@ impl Supervisor {
             socket,
             joiner: Mutex::new(None),
             nudge: Mutex::new(None),
+            cwd: Mutex::new(None),
             notes,
         });
         self.live.lock().unwrap().insert(run.id.clone(), live.clone());
@@ -769,6 +783,13 @@ impl Supervisor {
                         let done = heur.take_commands();
                         if !done.is_empty() && run.kind == RunKind::Shell {
                             self.ran(&run, done).await;
+                        }
+                        // Where it says it is, as the filesystem has it, so a
+                        // folder reached through a link (`/tmp` on macOS)
+                        // still reads as inside its project.
+                        if let Some(cwd) = heur.take_cwd() {
+                            let cwd = std::fs::canonicalize(&cwd).unwrap_or(cwd);
+                            *live.cwd.lock().unwrap() = Some(cwd);
                         }
                         if batch.len() >= JOURNAL_BATCH_BYTES {
                             self.flush(&id, &mut batch, heur.last_line(LAST_LINE_MAX)).await;

@@ -139,3 +139,55 @@ async fn a_git_folder_carries_its_checkout_and_badges() {
     assert_eq!(badges, ["PR #1 on trunk"]);
     h.stop().await;
 }
+
+/// A shell's prompt says where it is (OSC 7); the digest carries the latest,
+/// as the filesystem has it, while the run lives.
+#[tokio::test]
+async fn a_shell_says_where_it_is_and_the_digest_carries_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let Some(h) = Harness::on(Home::at(tmp.path().join("home"))) else {
+        return;
+    };
+    let mut c = Conn::open(&h.home).await;
+    let project = tmp.path().canonicalize().unwrap().join("project");
+    let sub = project.join("app").join("my src");
+    std::fs::create_dir_all(&sub).unwrap();
+    let cwd = project.to_string_lossy().into_owned();
+    // What a prompt says at each turn, twice; the latest is what counts.
+    let script = format!(
+        r"printf '\033]7;file://somehost/tmp\007'; printf '\033]7;file://somehost{}/app/my%%20src\007'; sleep 30",
+        project.display()
+    );
+    let shell: Run = c
+        .ok(
+            "run.start",
+            json!({ "argv": ["/bin/sh", "-c", script], "cwd": cwd, "tags": ["shell"], "title": "shell" }),
+        )
+        .await;
+    let quiet: Run = c
+        .ok(
+            "run.start",
+            json!({ "argv": ["/bin/sh", "-c", "sleep 30"], "cwd": cwd, "title": "quiet" }),
+        )
+        .await;
+    let mut got = None;
+    for _ in 0..100 {
+        let d: Digest = c.ok("digest.get", json!({})).await;
+        got = by_id(&d, &shell.id).cwd.clone();
+        if got.as_deref() == Some(sub.as_path()) {
+            assert_eq!(by_id(&d, &quiet.id).cwd, None, "one that never said has none");
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert_eq!(got.as_deref(), Some(sub.as_path()));
+
+    for id in [&shell.id, &quiet.id] {
+        c.ok::<Run>("run.stop", json!({ "id": id })).await;
+        c.wait_terminal(id).await;
+    }
+    // Ended, it is somewhere no longer.
+    let d: Digest = c.ok("digest.get", json!({})).await;
+    assert_eq!(by_id(&d, &shell.id).cwd, None);
+    h.stop().await;
+}

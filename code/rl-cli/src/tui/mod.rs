@@ -3646,11 +3646,23 @@ impl App {
                     } else {
                         title
                     };
-                    // Where a run says what it last did, a shell usually has
-                    // only its own prompt to show, so it says nothing — unless
-                    // its prompt marks what it runs, and the detail is the
-                    // last command, which is worth reading.
-                    let quiet = rows::live_shell(r) && r.detail.is_none();
+                    // Where a run says what it last did, a shell says where it
+                    // is, when its prompt tells (OSC 7): from its project's
+                    // folder down, nothing at the folder itself. One that has
+                    // not told says nothing — unless its prompt marks what it
+                    // runs, and the detail is the last command, worth reading.
+                    let shell = rows::live_shell(r);
+                    let place = i
+                        .cwd
+                        .as_deref()
+                        .filter(|_| shell)
+                        .map(|c| rows::shell_place(c, &r.workspace));
+                    let quiet = shell && r.detail.is_none();
+                    let summary = match &place {
+                        Some(p) => p.as_str(),
+                        None if quiet => "",
+                        None => i.summary.as_str(),
+                    };
                     // Its ref, and its branch where the folder has moved on.
                     let aside = [r.ref_.clone(), rows::branch_aside(r, &self.digest.checkouts)]
                         .into_iter()
@@ -3663,7 +3675,7 @@ impl App {
                         rows::icon(r),
                         title,
                         vec![Span::styled(rows::run_words(r), style)],
-                        if quiet { "" } else { i.summary.as_str() },
+                        summary,
                         joined_lead(i.joined_by.as_deref()),
                         (!aside.is_empty()).then_some(aside.as_str()),
                         fmt_age(i.at, now),

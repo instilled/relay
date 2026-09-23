@@ -454,12 +454,26 @@ impl Names {
     }
 }
 
-/// A path with `~` for home.
+/// A path with `~` for home — only for home itself and what is under it, not
+/// a sibling that happens to share its start.
 pub fn short_path(p: &Path) -> String {
-    let path = p.to_string_lossy();
-    match std::env::var("HOME") {
-        Ok(h) if !h.is_empty() && path.starts_with(&h) => format!("~{}", &path[h.len()..]),
-        _ => path.into_owned(),
+    match std::env::var_os("HOME").map(PathBuf::from) {
+        Some(h) if !h.as_os_str().is_empty() => match p.strip_prefix(&h) {
+            Ok(rest) if rest.as_os_str().is_empty() => "~".into(),
+            Ok(rest) => format!("~/{}", rest.to_string_lossy()),
+            Err(_) => p.to_string_lossy().into_owned(),
+        },
+        _ => p.to_string_lossy().into_owned(),
+    }
+}
+
+/// Where a shell is, as its row says it: inside its project, the way down
+/// from the project's folder (`app/src`); at the project's folder, nothing;
+/// anywhere else, the whole path with `~` for home.
+pub fn shell_place(cwd: &Path, project: &Path) -> String {
+    match cwd.strip_prefix(project) {
+        Ok(rest) => rest.to_string_lossy().into_owned(),
+        Err(_) => short_path(cwd),
     }
 }
 
@@ -955,6 +969,7 @@ mod tests {
             unseen,
             joined_by: None,
             emitted: vec![],
+            cwd: None,
         }
     }
 
@@ -1738,6 +1753,27 @@ mod tests {
         assert_eq!((icon(&a.run), run_words(&a.run)), (COMMAND, "done".to_string()));
         a.run.kind = RunKind::Plugin;
         assert_eq!(icon(&a.run), COMMAND);
+    }
+
+    #[test]
+    fn a_shell_says_where_it_is_from_its_project() {
+        let home = std::env::var("HOME").unwrap();
+        let project = PathBuf::from(&home).join("Projects/foodai");
+        assert_eq!(shell_place(&project.join("app/src"), &project), "app/src");
+        assert_eq!(shell_place(&project, &project), "", "at the root, nothing to say");
+        assert_eq!(shell_place(&PathBuf::from(&home).join("tmp/x"), &project), "~/tmp/x");
+        assert_eq!(shell_place(Path::new(&home), &project), "~");
+        assert_eq!(shell_place(Path::new("/etc/nginx"), &project), "/etc/nginx");
+        // A sibling that shares the project's start is not inside it.
+        assert_eq!(
+            shell_place(&PathBuf::from(&home).join("Projects/foodai-old"), &project),
+            "~/Projects/foodai-old"
+        );
+        assert_eq!(
+            short_path(&PathBuf::from(format!("{home}2"))),
+            format!("{home}2"),
+            "not home"
+        );
     }
 
     #[test]
