@@ -216,8 +216,7 @@ pub fn state_words(state: RunState, confidence: Confidence) -> String {
     }
 }
 
-/// The tag that marks a run as a project's warm shell.
-pub const SHELL_TAG: &str = "shell";
+pub use rl_proto::types::SHELL_TAG;
 
 /// The icon slot at the left of every row: what a thing is, in two columns —
 /// how it stands is its word's, and its colour. Only emoji that are wide by
@@ -234,7 +233,7 @@ pub const QUESTION: &str = "❓";
 /// A shell: an interactive one by its profile, or a project's warm shell by
 /// its tag, whatever its argv resolved to.
 pub fn is_shell(r: &Run) -> bool {
-    r.kind == RunKind::Shell || r.tags.iter().any(|t| t == SHELL_TAG)
+    r.is_shell()
 }
 
 /// A shell that is simply there to be typed in. One that ended, failed or

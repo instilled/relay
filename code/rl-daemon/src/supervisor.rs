@@ -516,8 +516,24 @@ impl Supervisor {
         Ok(())
     }
 
+    /// `SIGKILL` when forced. Otherwise what the run leaves on: a shell a
+    /// hang-up, as when its terminal closes — an interactive shell shrugs off
+    /// `SIGTERM`, and hung up it passes that on to what it runs — anything
+    /// else `SIGTERM`.
     pub async fn stop(&self, id: &str, force: bool) -> Result<Run> {
-        self.stop_with(id, if force { 9 } else { 15 }).await
+        let sig = if force {
+            9
+        } else {
+            let run = self
+                .ledger
+                .call({
+                    let id = id.to_string();
+                    move |c| runs::get(c, &id)
+                })
+                .await?;
+            if run.is_some_and(|r| r.is_shell()) { 1 } else { 15 }
+        };
+        self.stop_with(id, sig).await
     }
 
     /// Stops a run the way a closed terminal does, with `SIGHUP`: what an

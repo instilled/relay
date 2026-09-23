@@ -113,6 +113,34 @@ async fn stop_ends_in_stopped() {
     h.stop().await;
 }
 
+/// An interactive shell shrugs off `SIGTERM`, so a stop that sent it left the
+/// shell where it was. It is hung up instead, as its terminal closing would —
+/// whether it is a shell by its profile or a project's by its tag.
+#[tokio::test]
+async fn a_shell_stops_on_a_hang_up() {
+    let Some((tmp, h)) = start() else {
+        return;
+    };
+    let mut c = Conn::open(&h.home).await;
+    let cwd = tmp.path().to_string_lossy().into_owned();
+    for spec in [
+        json!({ "argv": ["/bin/sh", "-i"], "kind": "shell", "cwd": cwd }),
+        json!({ "argv": ["/bin/sh", "-i"], "kind": "command", "cwd": cwd, "tags": ["shell"] }),
+    ] {
+        let run: Run = c.ok("run.start", spec).await;
+        // Up and at its prompt, where it ignores `SIGTERM`.
+        tokio::time::sleep(Duration::from_millis(800)).await;
+        let _: Run = c.ok("run.stop", json!({ "id": run.id })).await;
+        let done = c.wait_terminal(&run.id).await;
+        assert_eq!(done.state, RunState::Stopped, "{}", run.title);
+        let evs: Vec<Event> = c
+            .ok("event.list", json!({ "run": run.id, "kinds": ["run.stopped"] }))
+            .await;
+        assert_eq!(evs[0].data.as_ref().unwrap()["signal"], "SIGHUP");
+    }
+    h.stop().await;
+}
+
 #[tokio::test]
 async fn no_tty_run_captures_both_streams() {
     let Some((tmp, h)) = start() else {

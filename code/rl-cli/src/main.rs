@@ -68,7 +68,7 @@ enum Cmd {
     },
     /// Start a run: a command, or an agent CLI with --agent. Returns immediately with the run id.
     Run(RunArgs),
-    /// Stop a run (SIGTERM; --force for SIGKILL).
+    /// Stop a run (SIGTERM, a shell SIGHUP; --force for SIGKILL).
     Stop(StopArgs),
     /// List runs (active by default).
     Ls(LsArgs),
@@ -1049,7 +1049,13 @@ async fn stop(home: &Home, a: StopArgs, json: bool) -> Result<()> {
         println!(
             "{} · stop requested ({})",
             run.id,
-            if a.force { "SIGKILL" } else { "SIGTERM" }
+            if a.force {
+                "SIGKILL"
+            } else if run.is_shell() {
+                "SIGHUP"
+            } else {
+                "SIGTERM"
+            }
         );
     }
     Ok(())
