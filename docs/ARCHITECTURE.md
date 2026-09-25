@@ -214,13 +214,24 @@ sequenceDiagram
 
 What is replayed is a tail of bytes, not a screen: an app that redraws only what changed (Claude
 Code, and most that diff their own buffer) leaves its box and status line out until it repaints.
-So once the replay is done rld makes it repaint: it gives the pty a row less, holds that for a
+It repaints when its size changes, and an app that redraws everything then (Claude Code redraws
+its whole conversation) should do that once, not twice. So letting go of a run leaves it a row
+short, where nobody sees it redraw, and the next join — at the size it had, or any other — is one
+real change and one repaint. A joiner's first `Resize` says which: a new size needs nothing more.
+Only a joiner at the very size the run has (or one that says none within `JOIN_SIZE_WAIT`), and a
+watcher while nobody is joined, gets the nudge: rld gives the pty a row less, holds that for a
 fifth of a second, and gives the size back (`NUDGE_HOLD`, `rl-daemon/src/attach.rs`). Held,
 because two resizes sent back to back land together, the app reads the size it already had, and a
 runtime that only reports a change (Node, Bun) never repaints. A row rather than a column, as tmux
 does, so what the run printed is not wrapped twice. One nudge per run at a time: while it holds,
 the run keeps its own size on record, a viewer arriving meanwhile starts from that, and the one in
 flight repaints for it too.
+
+A run just started is the hard case: a Node or Bun agent listens for a resize only half a second or
+so in, and one that lands before is lost — it draws for the rows it started with. So the panel
+starts a run at the whole terminal, the size its join will hand it (`spawn_size`, `tui/mod.rs`),
+and there is no resize to lose; and a run joined younger than `YOUNG` (three seconds) is nudged
+once more at that age, in case its first one went unheard.
 
 Every one of those frames is read through `FrameReader`, never a bare `read_frame`. Each hop
 reads inside a `select!` — the viewer against stdin and a ticker, `rld` against the holder and
