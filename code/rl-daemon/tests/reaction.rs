@@ -256,3 +256,137 @@ async fn where_narrows_and_test_explains() {
     }
     h.stop().await;
 }
+
+/// A project with a folder inside it, and a run that fails in that folder:
+/// `(root, project, the folder it failed in, the failed run)`.
+async fn fail_inside_a_project(c: &mut Conn, root: &Path) -> (std::path::PathBuf, std::path::PathBuf, Run) {
+    let ws = root.join("proj");
+    let deep = ws.join("deep");
+    for d in [deep.join("sub"), ws.join("other")] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    let up = c.call("workspace.up", json!({ "path": ws })).await;
+    assert!(up.error.is_none(), "{:?}", up.error);
+    let failing: Run = c
+        .ok(
+            "run.start",
+            json!({ "argv": ["sh", "-c", "exit 1"], "cwd": deep, "title": "deep" }),
+        )
+        .await;
+    assert_eq!(failing.workspace, ws);
+    c.wait_terminal(&failing.id).await;
+    (ws, deep, failing)
+}
+
+fn first(runs: Vec<Run>) -> Run {
+    runs.into_iter().next().unwrap()
+}
+
+/// A global rule with no `cwd` runs where the event happened: in the folder
+/// the failed run ran in, inside that run's project; for an event no run is
+/// behind, in the event's workspace. A global schedule still needs a `cwd`:
+/// nothing happened for it to follow.
+#[tokio::test]
+async fn a_global_rule_with_no_cwd_runs_where_the_event_was() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = Home::at(tmp.path().join("home"));
+    home.ensure_dirs().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let elsewhere = root.join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    write(
+        &home,
+        "reactions:\n  \
+           here:\n    \
+             on: run.failed\n    \
+             run: 'true'\n  \
+           emitted:\n    \
+             on: probe.found\n    \
+             run: 'true'\n",
+    );
+    std::fs::write(
+        home.schedules_file(),
+        "schedules:\n  nowhere:\n    every: 1h\n    run: 'true'\n",
+    )
+    .unwrap();
+    let Some(h) = Harness::on(home.clone()) else {
+        eprintln!("skipping: rl-session not built (run `cargo test --workspace`)");
+        return;
+    };
+    let mut c = Conn::open(&home).await;
+
+    // Both reactions load; the schedule without a `cwd` is refused.
+    let listed: Vec<Reaction> = c.ok("reaction.list", json!({})).await;
+    assert_eq!(listed.len(), 2, "{listed:?}");
+    let report: serde_json::Value = c.ok("schedule.reload", json!(null)).await;
+    let errors = report["errors"].to_string();
+    assert!(errors.contains("nowhere") && errors.contains("cwd"), "{report}");
+
+    let (ws, deep, _) = fail_inside_a_project(&mut c, &root).await;
+    let here = first(wait_caused_by(&mut c, "reaction:here", 1).await);
+    assert_eq!(here.cwd, deep, "where the failed run ran");
+    assert_eq!(here.workspace, ws, "and in its project");
+
+    // An event no run is behind: its workspace.
+    let emit = c
+        .call("event.emit", json!({ "kind": "probe.found", "workspace": elsewhere }))
+        .await;
+    assert!(emit.error.is_none(), "{:?}", emit.error);
+    let emitted = first(wait_caused_by(&mut c, "reaction:emitted", 1).await);
+    assert_eq!(emitted.cwd, elsewhere);
+
+    for r in [here, emitted] {
+        c.wait_terminal(&r.id).await;
+    }
+    h.stop().await;
+}
+
+/// A global rule's `cwd` is filled in like its `run` — `{workspace}`, and
+/// `{cwd}` for the folder the event's run ran in — and a relative one is
+/// under that folder, joined once.
+#[tokio::test]
+async fn a_global_rules_cwd_is_filled_in_and_joined_once() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = Home::at(tmp.path().join("home"));
+    home.ensure_dirs().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    write(
+        &home,
+        &format!(
+            "reactions:\n  \
+               under:\n    \
+                 on: run.failed\n    \
+                 run: 'true'\n    \
+                 cwd: sub\n  \
+               filled:\n    \
+                 on: run.failed\n    \
+                 run: 'true'\n    \
+                 cwd: '{{workspace}}/other'\n  \
+               said:\n    \
+                 on: run.failed\n    \
+                 run: 'echo \"{{cwd}}\" > said.txt'\n    \
+                 cwd: {}\n",
+            root.display()
+        ),
+    );
+    let Some(h) = Harness::on(home.clone()) else {
+        eprintln!("skipping: rl-session not built (run `cargo test --workspace`)");
+        return;
+    };
+    let mut c = Conn::open(&home).await;
+
+    let (ws, deep, _) = fail_inside_a_project(&mut c, &root).await;
+    let said = wait_for(&root.join("said.txt")).await;
+    assert_eq!(said.trim(), deep.to_string_lossy(), "{{cwd}} is the run's own folder");
+    let under = first(wait_caused_by(&mut c, "reaction:under", 1).await);
+    assert_eq!(under.cwd, deep.join("sub"), "relative to that folder, joined once");
+    let filled = first(wait_caused_by(&mut c, "reaction:filled", 1).await);
+    assert_eq!(filled.cwd, ws.join("other"), "{{workspace}} filled in a cwd");
+
+    for name in ["under", "filled", "said"] {
+        for r in runs_caused_by(&mut c, &format!("reaction:{name}")).await {
+            c.wait_terminal(&r.id).await;
+        }
+    }
+    h.stop().await;
+}
