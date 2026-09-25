@@ -275,7 +275,8 @@ struct OnArgs {
     /// Only for runs carrying this tag.
     #[arg(long)]
     tag: Option<String>,
-    /// Where it runs (default: here).
+    /// Where it runs (default: where the event happened — the folder the
+    /// event's run ran in, else its project).
     #[arg(long)]
     cwd: Option<PathBuf>,
     /// Not again within this long (default: 10s).
@@ -1827,9 +1828,13 @@ async fn on(home: &Home, a: OnArgs, json: bool) -> Result<()> {
         }
     };
     rl_cli::rulefile::check_name(&name)?;
+    // None: it runs where the event happened. A plain relative one is from
+    // here, as a path on the command line is; `~` and `{…}` stay as written.
     let cwd = match a.cwd {
-        Some(c) => c,
-        None => std::env::current_dir()?,
+        Some(c) if c.is_relative() && !c.starts_with("~") && !c.to_string_lossy().starts_with('{') => {
+            Some(std::env::current_dir()?.join(c))
+        }
+        other => other,
     };
     let spec = ReactionSpec {
         on: vec![a.kind],
@@ -1838,7 +1843,7 @@ async fn on(home: &Home, a: OnArgs, json: bool) -> Result<()> {
             ..Default::default()
         }),
         run: Some(Task::Argv(a.argv)),
-        cwd: Some(cwd),
+        cwd,
         throttle: a.throttle,
         ..Default::default()
     };
