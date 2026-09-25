@@ -36,6 +36,11 @@ const NUDGE_HOLD: Duration = Duration::from_millis(200);
 /// nudged anyway: its first `Resize` follows the attach at once, so this only
 /// runs out for one with no terminal to measure.
 const JOIN_SIZE_WAIT: Duration = Duration::from_millis(300);
+/// A run this young when it is joined may not yet be listening for a resize:
+/// Node and Bun agents (Claude Code) set that up half a second or so in, and
+/// one that lands before is lost. So it is nudged once more, this long after
+/// it started.
+const YOUNG: Duration = Duration::from_secs(3);
 
 /// An accepted attach, ready to stream.
 pub struct Attached {
@@ -267,6 +272,8 @@ where
     let mut replayed = false;
     // Until when a joiner that has said no size is waited for.
     let mut size_wait: Option<tokio::time::Instant> = None;
+    // When a run joined young is nudged once more (see `YOUNG`).
+    let mut again: Option<tokio::time::Instant> = None;
     // The run ended or rld is stopping: whatever else ended the stream was
     // the viewer going — a hang-up, or (Linux) a write that finds it gone.
     let mut over = false;
@@ -277,6 +284,12 @@ where
                     restore = None;
                     if let Some((cols, rows)) = live.nudge_end() {
                         hwr.resize(cols, rows).await?;
+                    }
+                }
+                _ = async { tokio::time::sleep_until(again.unwrap()).await }, if again.is_some() => {
+                    again = None;
+                    if live.is_joiner(&a.seat) && restore.is_none() {
+                        restore = nudge(&live, &mut hwr, size).await?;
                     }
                 }
                 _ = async { tokio::time::sleep_until(size_wait.unwrap()).await }, if size_wait.is_some() => {
@@ -344,6 +357,12 @@ where
                         // at the keyboard: opening a pane must not jolt a join.
                         replayed = true;
                         if a.info.tty && a.joiner && live.is_joiner(&a.seat) {
+                            let age = Timestamp::now().duration_since(a.info.run.started_at);
+                            if let Ok(left) = Duration::try_from(jiff::SignedDuration::try_from(YOUNG).unwrap_or_default() - age)
+                                && !left.is_zero()
+                            {
+                                again = Some(tokio::time::Instant::now() + left);
+                            }
                             match first_size {
                                 Some(true) => {}
                                 Some(false) => restore = nudge(&live, &mut hwr, size).await?,

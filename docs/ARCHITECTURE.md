@@ -227,6 +227,12 @@ does, so what the run printed is not wrapped twice. One nudge per run at a time:
 the run keeps its own size on record, a viewer arriving meanwhile starts from that, and the one in
 flight repaints for it too.
 
+A run just started is the hard case: a Node or Bun agent listens for a resize only half a second or
+so in, and one that lands before is lost — it draws for the rows it started with. So the panel
+starts a run at the whole terminal, the size its join will hand it (`spawn_size`, `tui/mod.rs`),
+and there is no resize to lose; and a run joined younger than `YOUNG` (three seconds) is nudged
+once more at that age, in case its first one went unheard.
+
 Every one of those frames is read through `FrameReader`, never a bare `read_frame`. Each hop
 reads inside a `select!` — the viewer against stdin and a ticker, `rld` against the holder and
 its own shutdown — and a plain read holds the bytes it has gathered on the future's stack, so
