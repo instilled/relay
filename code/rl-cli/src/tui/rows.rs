@@ -83,6 +83,7 @@ impl<'a> Row<'a> {
     /// folder header is selectable by its path.
     pub fn key(&self) -> Option<String> {
         match self {
+            Row::Group(h) if h.is_everywhere() => Some(format!("g:{EVERYWHERE}")),
             Row::Group(h) => Some(format!("g:{}", h.workspace.display())),
             Row::Question(d) => Some(format!("q:{}", d.id)),
             Row::Run(i) => Some(format!("r:{}", i.run.id)),
@@ -115,6 +116,51 @@ pub struct Head {
     pub rules: Vec<Chip>,
     /// The folder's git checkout, when it is in one.
     pub checkout: Option<Checkout>,
+}
+
+impl Head {
+    /// The `everywhere` group's header: no folder, and not a project.
+    pub fn everywhere() -> Self {
+        Self {
+            place: EVERYWHERE.into(),
+            workspace: PathBuf::new(),
+            name: EVERYWHERE.into(),
+            own: None,
+            rules: Vec::new(),
+            checkout: None,
+        }
+    }
+
+    /// Whether this is the `everywhere` group, which has no folder to act on.
+    pub fn is_everywhere(&self) -> bool {
+        self.workspace.as_os_str().is_empty()
+    }
+}
+
+/// The group, and the word, for the global rules' runs outside every project
+/// — the headline's word for those rules. It comes after the projects.
+pub const EVERYWHERE: &str = "everywhere";
+/// Its key among the groups: nothing a folder or a ref could be.
+const EVERYWHERE_KEY: &str = "\u{0}everywhere";
+
+/// Whether a run is a global rule's doing outside every project: started by
+/// a schedule or reaction of the Relay home's (and not by one of the same
+/// name in its own folder), in a folder that is not a registered project, and
+/// filed under no ref. Its group is `everywhere`, not a path like `~`.
+pub fn everywhere_run(r: &Run, names: &Names, rules: &[Rule]) -> bool {
+    let (kind, name) = match &r.cause {
+        Cause::Schedule(n) => (RuleKind::Schedule, n.as_str()),
+        Cause::Reaction(n) => (RuleKind::Reaction, n.as_str()),
+        _ => return false,
+    };
+    if r.ref_.is_some() || names.registered(&r.workspace).is_some() {
+        return false;
+    }
+    let named: Vec<&Rule> = rules.iter().filter(|x| x.kind() == kind && x.name() == name).collect();
+    named.iter().any(|x| x.is_global())
+        && !named
+            .iter()
+            .any(|x| !x.is_global() && Path::new(x.scope()) == r.workspace)
 }
 
 /// A checkout on a header: `⎇ main · PR #95 · 3 worktrees` — the badges after
@@ -692,8 +738,13 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
         if !cx.lens.keeps(r) {
             continue;
         }
-        let key = r.place_key();
-        let name = names.group(&key);
+        let (key, name, workspace) = if everywhere_run(r, names, cx.rules) {
+            (EVERYWHERE_KEY.to_string(), EVERYWHERE.to_string(), PathBuf::new())
+        } else {
+            let key = r.place_key();
+            let name = names.group(&key);
+            (key, name, r.workspace.clone())
+        };
         if let Some((kind, job)) = job_of(r) {
             let mut subject = run_subject(i, &name);
             subject.text.push(job);
@@ -709,7 +760,7 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
                     kind,
                     name: job.to_string(),
                     group_key: key.clone(),
-                    workspace: r.workspace.clone(),
+                    workspace: workspace.clone(),
                     when: when_of(kind, job, r),
                     runs: vec![i],
                     hit: item_hit,
@@ -720,7 +771,7 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
         if !query.hits(&run_subject(i, &name)) {
             continue;
         }
-        let g = group_of(key, &r.workspace, &mut groups);
+        let g = group_of(key, &workspace, &mut groups);
         groups[g].runs.push(i);
     }
     // Fold each job into its group now, with its full history, but only if
@@ -760,16 +811,22 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
     // goes: what needs you says so with its marks and in the headline, not by
     // jumping the queue. Each block is a project's header and what is under it.
     let mut blocks: Vec<(String, String, Vec<Row<'a>>)> = Vec::new();
+    let mut everywhere: Vec<Row<'a>> = Vec::new();
     for g in groups {
         let name = names.group(&g.key);
-        let mut block = vec![Row::Group(Head {
-            place: names.place(&g.key, &g.workspace),
-            workspace: g.workspace.clone(),
-            name: name.clone(),
-            own: names.own(&g.key, &g.workspace),
-            rules: chips(cx.rules, Some(&g.workspace), now),
-            checkout: checkout_of(&d.checkouts, &g.workspace).cloned(),
-        })];
+        let head = if g.key == EVERYWHERE_KEY {
+            Head::everywhere()
+        } else {
+            Head {
+                place: names.place(&g.key, &g.workspace),
+                workspace: g.workspace.clone(),
+                name: name.clone(),
+                own: names.own(&g.key, &g.workspace),
+                rules: chips(cx.rules, Some(&g.workspace), now),
+                checkout: checkout_of(&d.checkouts, &g.workspace).cloned(),
+            }
+        };
+        let mut block = vec![Row::Group(head)];
         // Runs and jobs share one order: whatever asks for you leads, then the
         // folder's shells — where you work, rather than something that happens
         // to be idle — then the rest, newest first.
@@ -794,7 +851,11 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
         for (_, _, _, row) in mixed {
             block.push(row);
         }
-        blocks.push((name.to_lowercase(), g.key, block));
+        if g.key == EVERYWHERE_KEY {
+            everywhere = block;
+        } else {
+            blocks.push((name.to_lowercase(), g.key, block));
+        }
     }
     // A registered folder is always on the list, under every lens, even before
     // anything has run there — so you can select it, read its stats, edit its
@@ -826,9 +887,11 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
     blocks.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
     rows.extend(blocks.into_iter().flat_map(|(_, _, block)| block));
     // The global rules — the Relay home's, which apply in every folder — have
-    // no row: nothing would ever sit under one, since their runs fold under
-    // the folder they ran in. The headline says them (`everywhere`), and the
-    // graph is where they are wired.
+    // no row of their own: the headline says them (`everywhere`), and the
+    // graph is where they are wired. Their runs fold under the project they
+    // ran in; what ran outside every project is gathered after the projects,
+    // under one `everywhere`, rather than under whatever folder that was.
+    rows.extend(everywhere);
     rows
 }
 
@@ -1859,6 +1922,111 @@ mod tests {
         };
         // Where you work gives way to what wants you.
         assert_eq!(keys(&build_with(&d, &names, "", now)), ["[relay]", "r:asks", "r:shell"]);
+    }
+
+    #[test]
+    fn a_global_rules_runs_outside_every_project_are_everywhere() {
+        let now: Timestamp = "2026-09-10T12:00:00Z".parse().unwrap();
+        let at = "2026-09-10T11:00:00Z";
+        let (home, relay, web) = ("/home/f", "/home/f/relay", "/home/f/web");
+        let by = |id: &str, state: RunState, ws: &str, cause: Cause| {
+            let mut i = item(id, state, ws, at, false);
+            i.run.cause = cause;
+            i
+        };
+        let sched = |n: &str| Cause::Schedule(n.into());
+        let d = Digest {
+            since: now,
+            items: vec![
+                // The global schedule, in home and in a project.
+                by("mentions", RunState::Finished, home, sched("gchat-mentions")),
+                by("mentions2", RunState::Failed, home, sched("gchat-mentions")),
+                by("inproj", RunState::Finished, relay, sched("gchat-mentions")),
+                // A global reaction's run still going, outside every project.
+                by("fix", RunState::Working, home, Cause::Reaction("look-at-it".into())),
+                // A folder's own rule, of the same name as a global one.
+                by("webs", RunState::Finished, web, sched("pulse")),
+                // By hand, in home.
+                by("hand", RunState::Working, home, Cause::Manual),
+            ],
+            decisions: vec![],
+            checkouts: Vec::new(),
+            lost: Vec::new(),
+        };
+        let rules = vec![
+            schedule("global", "gchat-mentions", true, None),
+            reaction("global", "look-at-it"),
+            schedule("global", "pulse", true, None),
+            schedule(web, "pulse", true, None),
+        ];
+        let names = Names::new([(PathBuf::from(relay), "relay".to_string())]);
+        let shown = |filter: &str| {
+            keys(&build(
+                &d,
+                &Context {
+                    names: &names,
+                    rules: &rules,
+                    lens: Lens::All,
+                    filter,
+                    now,
+                },
+            ))
+        };
+        let home_name = Names::default().workspace(Path::new(home));
+        let everywhere_job = job_key(RuleKind::Schedule, "gchat-mentions", EVERYWHERE_KEY);
+        assert_eq!(
+            shown(""),
+            [
+                // By hand, a run keeps its folder.
+                format!("[{home_name}]"),
+                "r:hand".into(),
+                // A global rule's run in a project stays in the project.
+                "[relay]".into(),
+                job_key(RuleKind::Schedule, "gchat-mentions", relay),
+                // A folder's own rule is the folder's, same name or not.
+                "[web]".into(),
+                job_key(RuleKind::Schedule, "pulse", web),
+                // The rest, after the projects, however they sort.
+                "[everywhere]".into(),
+                everywhere_job.clone(),
+                "r:fix".into(),
+            ],
+            "outside every project: everywhere, after the projects"
+        );
+
+        // It answers to its word, as a project answers to its name.
+        assert_eq!(
+            shown("in:everywhere"),
+            ["[everywhere]".to_string(), everywhere_job, "r:fix".into()]
+        );
+
+        // Its header is no folder, and its key says so.
+        let rows = build(
+            &d,
+            &Context {
+                names: &names,
+                rules: &rules,
+                lens: Lens::All,
+                filter: "",
+                now,
+            },
+        );
+        let head = rows
+            .iter()
+            .find_map(|r| match r {
+                Row::Group(h) if h.is_everywhere() => Some(h.clone()),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(
+            (head.place.as_str(), head.workspace.as_os_str().is_empty()),
+            ("everywhere", true)
+        );
+        assert_eq!(Row::Group(head).key().as_deref(), Some("g:everywhere"));
+
+        // Without the rules known, nothing is everywhere: each run keeps its folder.
+        let bare = keys(&build_with(&d, &names, "", now));
+        assert!(!bare.contains(&"[everywhere]".to_string()), "{bare:?}");
     }
 
     #[test]
