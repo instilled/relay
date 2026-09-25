@@ -2014,8 +2014,8 @@ impl App {
             ref_: None,
             tags: vec![],
             tty: true,
-            cols: Some(area.width),
-            rows: Some(area.height.saturating_sub(2)),
+            cols: Some(spawn_size(area).0),
+            rows: Some(spawn_size(area).1),
             env: crate::env::child_env(&[])?,
             inherit_env: false,
             input: true,
@@ -2132,8 +2132,8 @@ impl App {
             ref_: None,
             tags: vec![SHELL_TAG.into()],
             tty: true,
-            cols: Some(area.width),
-            rows: Some(area.height.saturating_sub(2)),
+            cols: Some(spawn_size(area).0),
+            rows: Some(spawn_size(area).1),
             env: crate::env::child_env(&[])?,
             inherit_env: false,
             input: true,
@@ -2804,8 +2804,9 @@ impl App {
             Ok(e) => e,
             Err(e) => return self.say(format!("resume: {e:#}")),
         };
-        p.cols = Some(area.width);
-        p.rows = Some(area.height.saturating_sub(2));
+        let (cols, rows) = spawn_size(area);
+        p.cols = Some(cols);
+        p.rows = Some(rows);
         let lost = p.lost;
         let out = match self.rpc.call::<RunResume>(p).await {
             Ok(o) => o,
@@ -4079,6 +4080,15 @@ fn bytes_words(n: u64) -> String {
     }
 }
 
+/// The size a run from the panel starts at: the whole terminal, which is
+/// what a join hands it. Started any smaller, its first join is a resize —
+/// and one that lands before a just-started agent listens for it (Node and
+/// Bun take half a second or so) is lost, so the agent draws for the rows it
+/// started with and the bottom of the screen stays empty.
+fn spawn_size(area: Rect) -> (u16, u16) {
+    (area.width, area.height)
+}
+
 /// With nothing typed, `^j` and `^k` move as the arrows do, the way `j` and
 /// `k` do in vi. With text, they are the line's own: `^j` adds a line (it is
 /// what a shift-return mapped to a line feed sends) and `^k` cuts to the end.
@@ -4095,11 +4105,16 @@ fn vi_step(k: KeyEvent, line_empty: bool) -> KeyEvent {
 
 #[cfg(test)]
 mod tests {
-    use super::{ListHit, cand_window, group_count, hit_row, vi_step, viewport};
+    use super::{ListHit, cand_window, group_count, hit_row, spawn_size, vi_step, viewport};
     use crate::tui::rows::Chip;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::layout::Rect;
     use rl_proto::rule::{RuleKind, RuleStatus};
+
+    #[test]
+    fn a_run_starts_at_the_size_a_join_gives_it() {
+        assert_eq!(spawn_size(Rect::new(0, 0, 120, 40)), (120, 40));
+    }
 
     #[test]
     fn ctrl_j_and_k_move_when_nothing_is_typed() {
