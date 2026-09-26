@@ -2922,7 +2922,10 @@ impl App {
         }
         let folder = self.folder_here();
         let what = {
-            let here = self.here(&folder);
+            // Runnable where it will run: a `./build.sh` in the folder the
+            // warm shell has `cd`'d into is a shell line.
+            let at = self.line_folder(self.line.text());
+            let here = self.here(&at);
             line::what(self.line.text(), &self.agents, &|h| complete::runnable(h, &here))
         };
         match what {
@@ -3055,10 +3058,12 @@ impl App {
             self.completing = None;
             return;
         }
-        // Tab again on what tab last wrote: the next one.
+        // Tab again on what tab last wrote: the next one. With only the one,
+        // there is nothing to walk: tab starts again from what it wrote, so a
+        // folder it filled in (`src/`) opens on the next press.
         if let Some(c) = self.completing.take()
             && c.shown == text
-            && !c.cands.is_empty()
+            && c.cands.len() > 1
         {
             let at = (c.at + 1) % c.cands.len();
             let (l, pos) = complete::apply(&c.line, c.cursor, &c.cands[at].text);
@@ -3548,7 +3553,10 @@ impl App {
         }
         let folder = self.folder_here();
         let what = {
-            let here = self.here(&folder);
+            // Runnable where it will run: a `./build.sh` in the folder the
+            // warm shell has `cd`'d into is a shell line.
+            let at = self.line_folder(self.line.text());
+            let here = self.here(&at);
             line::what(self.line.text(), &self.agents, &|h| complete::runnable(h, &here))
         };
         let answer = self.question_here().and_then(|q| pane::answer_of(q, self.line.text()));
