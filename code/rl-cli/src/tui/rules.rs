@@ -8,7 +8,7 @@ use ratatui::style::Stylize;
 use ratatui::text::{Line, Span};
 use rl_core::time::{fmt_age, fmt_duration};
 use rl_proto::reaction::Reaction;
-use rl_proto::rule::{Rule, RuleStatus};
+use rl_proto::rule::{Rule, RuleKind, RuleStatus};
 use std::path::Path;
 
 pub fn key(r: &Rule) -> String {
@@ -142,7 +142,10 @@ pub fn lines(r: &Rule, names: &Names, now: Timestamp, last_run_title: Option<&st
     }
     let mut where_ = match r.cwd() {
         Some(p) => place(p, names),
-        None if r.is_global() => "(no cwd)".into(),
+        None if r.is_global() => match r.kind() {
+            RuleKind::Reaction => "the event's folder".into(),
+            RuleKind::Schedule => "(no cwd)".into(),
+        },
         None => owner(r.scope(), names),
     };
     if !r.tags().is_empty() {
@@ -284,7 +287,7 @@ mod tests {
 
         let s = text(&reaction("global", "notify"));
         assert!(
-            s.contains(" when     on run.failed\n does     say no\n where    (no cwd)\n"),
+            s.contains(" when     on run.failed\n does     say no\n where    the event's folder\n"),
             "{s}"
         );
         assert!(

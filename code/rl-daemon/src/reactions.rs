@@ -58,8 +58,9 @@ pub fn workspace_file(workspace: &Path) -> PathBuf {
 }
 
 /// Reads and validates a reactions file. A missing file is an empty one.
-/// Entries that fail validation are reported, the rest load.
-pub fn load_file(path: &Path, in_workspace: bool) -> Result<(Vec<Loaded>, Vec<String>)> {
+/// Entries that fail validation are reported, the rest load. Where the file
+/// is makes no difference: a rule needs no `cwd` in either (`run_dir`).
+pub fn load_file(path: &Path, _in_workspace: bool) -> Result<(Vec<Loaded>, Vec<String>)> {
     if !path.is_file() {
         return Ok((Vec::new(), Vec::new()));
     }
@@ -68,7 +69,7 @@ pub fn load_file(path: &Path, in_workspace: bool) -> Result<(Vec<Loaded>, Vec<St
     let mut loaded = Vec::new();
     let mut errors = Vec::new();
     for (name, spec) in file.reactions {
-        match validate(&name, &spec, in_workspace) {
+        match validate(&name, &spec) {
             Ok(()) => loaded.push(Loaded {
                 hash: crate::schedule::hash(&spec),
                 spec_json: serde_json::to_string(&spec)?,
@@ -80,7 +81,7 @@ pub fn load_file(path: &Path, in_workspace: bool) -> Result<(Vec<Loaded>, Vec<St
     Ok((loaded, errors))
 }
 
-fn validate(name: &str, spec: &ReactionSpec, in_workspace: bool) -> Result<()> {
+fn validate(name: &str, spec: &ReactionSpec) -> Result<()> {
     if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || "._-".contains(c)) {
         bail!("names are letters, digits, `.`, `_` and `-`");
     }
@@ -99,9 +100,6 @@ fn validate(name: &str, spec: &ReactionSpec, in_workspace: bool) -> Result<()> {
             }
         }
         (Some(_), None) => {}
-    }
-    if spec.cwd.is_none() && !in_workspace {
-        bail!("needs `cwd`");
     }
     throttle(spec)?;
     Ok(())
@@ -230,6 +228,10 @@ pub fn vars(event: &Event, run: Option<&Run>) -> BTreeMap<String, String> {
     v.insert("group".into(), event.group_key.clone());
     v.insert("workspace".into(), event.workspace.to_string_lossy().into_owned());
     v.insert("run".into(), event.run.clone().unwrap_or_default());
+    v.insert(
+        "cwd".into(),
+        run.map(|r| r.cwd.to_string_lossy().into_owned()).unwrap_or_default(),
+    );
     v.insert("title".into(), run.map(|r| r.title.clone()).unwrap_or_default());
     v.insert("cause".into(), run.map(|r| r.cause.to_string()).unwrap_or_default());
     v.insert("cli".into(), run.and_then(|r| r.cli.clone()).unwrap_or_default());
@@ -296,7 +298,43 @@ fn resolved(action: &Action, vars: &BTreeMap<String, String>) -> Action {
     });
     a.title = a.title.map(|t| substitute(&t, vars));
     a.env = a.env.iter().map(|(k, v)| (k.clone(), substitute(v, vars))).collect();
+    a.cwd = a.cwd.and_then(|c| filled_path(&c, vars));
     a
+}
+
+/// A `cwd` with every `{…}` filled in; none when that leaves nothing, as
+/// `{cwd}` does for an event no run is behind.
+fn filled_path(p: &Path, vars: &BTreeMap<String, String>) -> Option<PathBuf> {
+    let text = substitute(&p.to_string_lossy(), vars);
+    (!text.trim().is_empty()).then(|| PathBuf::from(text))
+}
+
+/// The folder an event happened in: the folder its run ran in, while that is
+/// still there; else the event's workspace, while that is. None when it names
+/// neither.
+pub fn event_folder(event: &Event, run: Option<&Run>) -> Option<PathBuf> {
+    let there = |p: &Path| !p.as_os_str().is_empty() && p.is_dir();
+    run.map(|r| r.cwd.clone())
+        .filter(|p| there(p))
+        .or_else(|| Some(event.workspace.clone()).filter(|p| there(p)))
+}
+
+/// Where a rule's action runs. A workspace's rule runs in its folder, or
+/// under it when `cwd` is relative. A global rule runs where `cwd` says; with
+/// none, where the event happened (`event_folder`), else in the Relay home —
+/// and a relative `cwd` is under that same folder. `cwd` is the rule's, its
+/// `{…}` already filled in.
+pub fn run_dir(r: &Reaction, cwd: Option<&Path>, event: &Event, run: Option<&Run>, home: &Path) -> PathBuf {
+    let base = if r.scope == GLOBAL_SCOPE {
+        event_folder(event, run).unwrap_or_else(|| home.to_path_buf())
+    } else {
+        PathBuf::from(&r.scope)
+    };
+    match cwd.map(crate::action::expand_home) {
+        Some(c) if c.is_absolute() => c,
+        Some(c) => base.join(c),
+        None => base,
+    }
 }
 
 /// The question a rule asks, with every `{…}` filled in.
@@ -564,7 +602,8 @@ impl Reactor {
     async fn fire(&self, r: &Reaction, cx: &Context_<'_>) -> Result<()> {
         let vars = vars(cx.event, cx.run);
         let now = Timestamp::now();
-        let base = self.base_dir(r);
+        let cwd = r.spec.cwd.as_deref().and_then(|c| filled_path(c, &vars));
+        let dir = run_dir(r, cwd.as_deref(), cx.event, cx.run, self.home.path());
         let flow = cx.run.map(|run| run.flow.clone());
 
         if let Some(ask) = &r.spec.ask {
@@ -576,7 +615,7 @@ impl Reactor {
                 multi: ask.multi,
                 group: ask.group,
                 run: cx.event.run.clone(),
-                cwd: Some(base),
+                cwd: Some(dir),
                 expires: ask.expires,
             };
             let d = self.decisions.raise_by(spec, Some(&r.name)).await?;
@@ -585,12 +624,21 @@ impl Reactor {
             return Ok(());
         }
 
-        let action = resolved(&r.spec.action(), &vars);
+        let mut action = resolved(&r.spec.action(), &vars);
+        action.cwd = None; // settled: `dir`
+        // A relative `prompt_file` is read beside where it runs: a
+        // workspace's folder, or a global rule's own `cwd`; a global rule
+        // with none reads it from the Relay home, not wherever the event was.
+        let source = match (r.scope == GLOBAL_SCOPE, &cwd) {
+            (false, _) => PathBuf::from(&r.scope),
+            (true, Some(_)) => dir.clone(),
+            (true, None) => self.home.path().to_path_buf(),
+        };
         let mut spec = crate::action::run_spec(
             &action,
             &r.name,
-            &base,
-            Some(&base),
+            &source,
+            Some(&dir),
             &self.registry,
             Cause::Reaction(r.name.clone()),
             flow,
@@ -607,19 +655,6 @@ impl Reactor {
         self.fired(r, now, Some(&run.id)).await?;
         info!(reaction = r.name, event = cx.event.id, run = run.id, "reaction ran");
         Ok(())
-    }
-
-    /// Where a rule's action runs: what it says, or its workspace.
-    fn base_dir(&self, r: &Reaction) -> PathBuf {
-        if r.scope == GLOBAL_SCOPE {
-            r.spec
-                .cwd
-                .clone()
-                .map(|c| crate::action::expand_home(&c))
-                .unwrap_or_else(|| self.home.path().to_path_buf())
-        } else {
-            PathBuf::from(&r.scope)
-        }
     }
 
     async fn fired(&self, r: &Reaction, at: Timestamp, run: Option<&str>) -> Result<()> {
@@ -931,16 +966,62 @@ mod tests {
 
     #[test]
     fn validation_says_what_is_wrong() {
-        let err = |y: &str| validate("x", &spec(y), false).unwrap_err().to_string();
+        let err = |y: &str| validate("x", &spec(y)).unwrap_err().to_string();
         assert!(err("on: run.failed").contains("run"));
         assert!(err("on: run.failed\nrun: x\nask: { title: t, options: [{key: a}] }\ncwd: /tmp").contains("not both"));
-        assert!(err("on: run.failed\nrun: x").contains("cwd"));
         assert!(err("on: run.failed\nrun: x\ncwd: /tmp\nthrottle: soon").contains("throttle"));
         assert!(err("on: run.failed\nask: { title: t, options: [] }\ncwd: /tmp").contains("option"));
-        assert!(validate("ok", &spec("on: run.failed\nrun: x\ncwd: /tmp"), false).is_ok());
+        assert!(validate("ok", &spec("on: run.failed\nrun: x\ncwd: /tmp")).is_ok());
         assert!(
-            validate("ws", &spec("on: run.failed\nrun: x"), true).is_ok(),
-            "a workspace has a cwd"
+            validate("anywhere", &spec("on: run.failed\nrun: x")).is_ok(),
+            "no cwd: a workspace's folder, or where the event was"
         );
+    }
+
+    #[test]
+    fn a_global_rule_runs_where_the_event_was_unless_it_says() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let (ran, ws, home) = (root.join("ws/deep"), root.join("ws"), root.join("home"));
+        std::fs::create_dir_all(&ran).unwrap();
+        let mut e = event("run.failed");
+        e.workspace = ws.clone();
+        let mut r1 = run();
+        r1.cwd = ran.clone();
+        let global = reaction("n", "on: run.failed\nrun: x");
+        let dir = |cwd: Option<&str>, run: Option<&Run>, e: &Event| run_dir(&global, cwd.map(Path::new), e, run, &home);
+        // None: the folder the run ran in; then the event's workspace; then home.
+        assert_eq!(dir(None, Some(&r1), &e), ran);
+        assert_eq!(dir(None, None, &e), ws);
+        std::fs::remove_dir(&ran).unwrap();
+        assert_eq!(dir(None, Some(&r1), &e), ws, "that folder is gone");
+        let mut nowhere = e.clone();
+        nowhere.workspace = PathBuf::new();
+        assert_eq!(dir(None, None, &nowhere), home);
+        // What it says, absolute; relative, under the event's folder, once.
+        assert_eq!(dir(Some("/tmp"), Some(&r1), &e), PathBuf::from("/tmp"));
+        assert_eq!(dir(Some("sub"), None, &e), ws.join("sub"));
+        // A workspace's rule is its folder's, whatever the event.
+        let mut mine = reaction("n", "on: run.failed\nrun: x");
+        mine.scope = "/w/api".into();
+        assert_eq!(run_dir(&mine, None, &e, Some(&r1), &home), PathBuf::from("/w/api"));
+        assert_eq!(
+            run_dir(&mine, Some(Path::new("sub")), &e, Some(&r1), &home),
+            PathBuf::from("/w/api/sub")
+        );
+    }
+
+    #[test]
+    fn the_braces_fill_a_cwd_too() {
+        let (e, mut run) = (event("run.failed"), run());
+        run.cwd = "/w/deep".into();
+        let v = vars(&e, Some(&run));
+        assert_eq!(substitute("{cwd}", &v), "/w/deep", "the run's own folder");
+        let r = reaction("n", "on: run.failed\nrun: x\ncwd: '{workspace}/sub'");
+        assert_eq!(resolved(&r.spec.action(), &v).cwd, Some(PathBuf::from("/w/sub")));
+        // `{cwd}` of an event no run is behind is nothing, and so is the cwd.
+        let bare = vars(&e, None);
+        let r = reaction("n", "on: run.failed\nrun: x\ncwd: '{cwd}'");
+        assert_eq!(resolved(&r.spec.action(), &bare).cwd, None);
     }
 }

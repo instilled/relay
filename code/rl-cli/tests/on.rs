@@ -55,6 +55,8 @@ fn on_writes_a_rule_that_fires() {
     let text = std::fs::read_to_string(&file).unwrap();
     assert!(text.starts_with("# my rules\n"), "the file was rewritten: {text}");
     assert!(text.contains("  tell-me:\n"), "{text}");
+    // No folder written down: it runs where the event happens.
+    assert!(!text.contains("cwd:"), "a cwd nobody gave: {text}");
 
     let listed = ok(rl(&["react", "ls"]));
     assert!(listed.contains("tell-me") && listed.contains("run.failed"), "{listed}");
@@ -94,6 +96,21 @@ fn on_writes_a_rule_that_fires() {
     assert!(trial.contains("tell-me") && trial.contains("told.txt"), "{trial}");
     // It just fired, so the honest answer is that the throttle holds it.
     assert!(trial.contains("fired too recently"), "{trial}");
+
+    // A folder given is written down, a relative one from here.
+    ok(rl(&[
+        "on",
+        "run.stopped",
+        "--name",
+        "there",
+        "--cwd",
+        "sub",
+        "--",
+        "true",
+    ]));
+    let text = std::fs::read_to_string(&file).unwrap();
+    let there = &text[text.find("  there:").unwrap()..];
+    assert!(there.contains(&format!("cwd: {}", dir.join("sub").display())), "{text}");
 
     assert!(rl(&["daemon", "stop"]).status().unwrap().success());
 }

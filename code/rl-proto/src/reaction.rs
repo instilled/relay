@@ -24,8 +24,11 @@ use std::path::PathBuf;
 
 action_struct! {
     /// One entry of `reactions.yaml`, as written. Exactly one of `run` /
-    /// `ask`. `cwd` is required in the global file; a workspace's defaults
-    /// to the folder, and a relative one is inside it.
+    /// `ask`. Without a `cwd`, a workspace's runs in the folder, and a global
+    /// one where the event happened: the folder the event's run ran in while
+    /// it is there, else the event's workspace, else the Relay home. A
+    /// relative `cwd` is inside that same folder, and `{…}` fill it as they
+    /// fill `run`.
     #[serde(deny_unknown_fields)]
     struct ReactionSpec {
         before: {
