@@ -2640,17 +2640,24 @@ impl App {
         Ok(())
     }
 
-    /// `tab` in a search: the token names, then a token's values — states,
-    /// kinds, projects, rules. One fits: taken. Several: what they share, and
-    /// the rest shown in the footer. None — a plain word, or no word at all
-    /// after one — and it goes to the next match instead.
-    fn complete_search(&mut self) {
+    /// What a search token's values can be: the projects (and `global`), the
+    /// rules, the branches — for `tab` in a search and after `/filter`.
+    fn search_values(&self) -> (Vec<String>, Vec<String>, Vec<String>) {
         let mut projects: Vec<String> = self.names.paths().iter().map(|p| self.names.workspace(p)).collect();
         projects.push("global".into());
         let rules: Vec<String> = self.rules.iter().map(|r| r.name().to_string()).collect();
         let branches: Vec<String> = (self.digest.checkouts.iter().filter_map(|c| c.branch.clone()))
             .chain(self.digest.items.iter().filter_map(|i| i.run.branch.clone()))
             .collect();
+        (projects, rules, branches)
+    }
+
+    /// `tab` in a search: the token names, then a token's values — states,
+    /// kinds, projects, rules. One fits: taken. Several: what they share, and
+    /// the rest shown in the footer. None — a plain word, or no word at all
+    /// after one — and it goes to the next match instead.
+    fn complete_search(&mut self) {
+        let (projects, rules, branches) = self.search_values();
         let Some(s) = self.search.as_mut() else {
             return;
         };
@@ -2882,11 +2889,27 @@ impl App {
     /// what agents there are, and $PATH.
     fn here<'a>(&'a self, folder: &'a Path) -> complete::Here<'a> {
         complete::Here {
-            folder,
             agents: &self.agents,
             path_dirs: &self.path_dirs,
             aliases: &self.aliases,
+            ..complete::Here::at(folder)
         }
+    }
+
+    /// The folder the line at the foot will run in, for completing it: the
+    /// warm shell's own folder when the line goes there and the shell has
+    /// said where it is, else the folder here (`complete::line_folder`).
+    fn line_folder(&self, text: &str) -> PathBuf {
+        let folder = self.folder_here();
+        let shell = self.selected_shell().or_else(|| self.project_shell(&folder));
+        let cwd = shell.and_then(|id| {
+            self.digest
+                .items
+                .iter()
+                .find(|i| i.run.id == id)
+                .and_then(|i| i.cwd.clone())
+        });
+        complete::line_folder(text, &self.agents, &folder, cwd.as_deref())
     }
 
     /// `enter` on the line: what it says. Nothing typed, the row instead.
@@ -2952,16 +2975,29 @@ impl App {
         if !matches!(self.mode, Mode::Normal) || self.search.is_some() {
             return None;
         }
-        if let Some(rest) = self.line.text().strip_prefix('/') {
-            let n = palette::matching(rest).len();
-            if n > 0 {
-                return Some(Cands::Slash(n));
-            }
+        if let Some(n) = self.slash_list().map(|cs| cs.len())
+            && n > 0
+        {
+            return Some(Cands::Slash(n));
         }
         match &self.completing {
             Some(c) if !c.cands.is_empty() => Some(Cands::Words(c.cands.len())),
             _ => None,
         }
+    }
+
+    /// The `/` commands a `/` line names, for the list under it — until `tab`
+    /// lays out words for a command's argument, which show instead.
+    fn slash_list(&self) -> Option<Vec<&'static palette::Command>> {
+        if !matches!(self.mode, Mode::Normal) {
+            return None;
+        }
+        let rest = self.line.text().strip_prefix('/')?;
+        let args = rest.trim_start().contains(char::is_whitespace);
+        if args && self.completing.as_ref().is_some_and(|c| !c.cands.is_empty()) {
+            return None;
+        }
+        Some(palette::matching(rest))
     }
 
     /// Walk the highlight through the candidates, wrapping. From nothing, down
@@ -3011,8 +3047,11 @@ impl App {
 
     fn tab(&mut self) {
         let text = self.line.text().to_string();
-        // A `/` line completes to the command it names.
-        if let Some(rest) = text.strip_prefix('/') {
+        // A `/` line still on its name completes to the command it names; past
+        // the name, its arguments complete like any other word, below.
+        if let Some(rest) = text.strip_prefix('/')
+            && !rest.contains(char::is_whitespace)
+        {
             if let Some(c) = palette::matching(rest).first() {
                 let taken = format!("/{} ", c.name);
                 let at = taken.len();
@@ -3033,9 +3072,17 @@ impl App {
             return;
         }
         let cur = self.line.cursor();
-        let folder = self.folder_here();
+        let folder = self.line_folder(&text);
+        let (projects, rules, branches) = self.search_values();
         let cands = {
-            let here = self.here(&folder);
+            let here = complete::Here {
+                names: complete::Names {
+                    projects: &projects,
+                    rules: &rules,
+                    branches: &branches,
+                },
+                ..self.here(&folder)
+            };
             complete::candidates(&text, cur, &here)
         };
         if cands.is_empty() {
@@ -3288,9 +3335,7 @@ impl App {
             _ => 0,
         };
         // A `/` line offers commands while it is typed; tab offers words.
-        let slash: Option<Vec<&palette::Command>> = matches!(self.mode, Mode::Normal)
-            .then(|| self.line.text().strip_prefix('/').map(palette::matching))
-            .flatten();
+        let slash = self.slash_list();
         let cands_h = match (&slash, &self.completing) {
             (Some(cs), _) => cs.len().min(CANDS) as u16,
             (None, Some(c)) => c.cands.len().min(CANDS) as u16,

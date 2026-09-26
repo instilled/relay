@@ -482,11 +482,26 @@ says where it is in its summary column: `app/src` inside its project, nothing at
 folder, the whole path with `~` for home anywhere else. A daemon restart forgets it until the next
 prompt says it again.
 
-`tab` completes the word being typed (`tui/complete.rs`), rooted in that same folder: the first
-word against the agents the registry knows, the folder's `Makefile` targets and `package.json`
-scripts, and the binaries on `PATH`; after `every` a duration, after `on` an event kind; anywhere
-else the files and directories of the folder. What every candidate shares goes in first, and
-`tab` again walks the rest. When a list is on offer — those `tab` words, or the `/` commands a
+`tab` completes the word being typed (`tui/complete.rs`), rooted where the line will run: the
+warm shell's own folder when the line goes to that shell and its prompt has said where it is (a
+shell that has `cd`'d into `app/src` completes there), else the folder of the row the cursor is
+on (`complete::line_folder`; an agent starts in the project, so its line completes there). The
+first word completes against the agents the registry knows, the folder's `Makefile` targets and
+`package.json` scripts, and the binaries on `PATH` — or, when it starts like a path (`./`, `../`,
+`~`, or `/` after the `!` that forces a shell line), as a path, and a path to something runnable is
+then a shell line. After `every` a duration, after `on` an event kind. A few common tools know
+their own words, built in rather than borrowed from a shell's completion: `git` its common
+subcommands, and after `checkout`, `switch`, `merge`, `rebase`, `diff`, `log` or `branch -d` the
+branches, local then remote-tracking (asked of `git for-each-ref` in that folder, given half a
+second); `make` its targets and `just` its `justfile` recipes; `npm`/`pnpm`/`yarn`/`bun run` the
+`package.json` scripts (`yarn` and `pnpm` without `run` too); `cargo` its common subcommands.
+Anywhere else, or where a tool has nothing that fits, the files and directories: a folder ends in
+`/` so the next `tab` goes into it, dotfiles show once the dot is typed, and `~` is looked up as
+home but stays `~` on the line. A `/` line completes its name, then its arguments: the words each
+command takes (`palette.rs`, the same ones its hint shows — `/edit` `schedules` `reactions` then
+`global`, `/reload` `rules` `shell`, `/resume` `all` then `commands`, `/lens` its lenses, `/mark`
+its marks), `/filter`'s search tokens and their values, `/up`'s folders. What every candidate
+shares goes in first, and `tab` again walks the rest. When a list is on offer — those `tab` words, or the `/` commands a
 `/` line names — the arrows walk it too: `↑`/`↓` light a candidate with a caret, `tab` or `enter`
 takes the lit one (a command is filled in with its name for you to finish, never run on the
 spot), and typing anything clears the highlight so `enter` submits the line as before.
