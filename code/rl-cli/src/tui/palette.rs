@@ -38,6 +38,9 @@ pub struct Command {
     pub name: &'static str,
     /// What follows the name, for the hint; empty when nothing does.
     pub args: &'static str,
+    /// The words `tab` offers for each argument in turn, when they are a
+    /// fixed set; the hint in `args` says the same words.
+    pub words: &'static [&'static [&'static str]],
     /// One short line: what it does, in plain words.
     pub what: &'static str,
     pub cmd: Cmd,
@@ -50,144 +53,168 @@ pub const ALL: &[Command] = &[
     Command {
         name: "stop",
         args: "",
+        words: &[],
         what: "stop a run that is still going",
         cmd: Cmd::Stop,
     },
     Command {
         name: "archive",
         args: "[seen]",
+        words: &[&["seen"]],
         what: "out of the panel, kept in the ledger: an ended run or job, or all you have seen",
         cmd: Cmd::Archive,
     },
     Command {
         name: "mark",
         args: "done|blocked|working",
+        words: &[&["done", "blocked", "working"]],
         what: "say what a run is really doing",
         cmd: Cmd::Mark,
     },
     Command {
         name: "import",
         args: "",
+        words: &[],
         what: "move Claude's own sessions into Relay (claude --bg, and ones in a terminal)",
         cmd: Cmd::Import,
     },
     Command {
         name: "join",
         args: "",
+        words: &[],
         what: "take a run's terminal and its keyboard, as enter on it does",
         cmd: Cmd::Join,
     },
     Command {
         name: "resume",
         args: "[all [commands]]",
+        words: &[&["all"], &["commands"]],
         what: "pick an ended run back up — its conversation, a fresh shell; all: what a restart took",
         cmd: Cmd::Resume,
     },
     Command {
         name: "shell",
         args: "",
+        words: &[],
         what: "another shell in this folder",
         cmd: Cmd::Shell,
     },
     Command {
         name: "rename",
         args: "",
+        words: &[],
         what: "rename what the cursor is on: a folder, a run, a job's rule",
         cmd: Cmd::Rename,
     },
     Command {
         name: "pin",
         args: "",
+        words: &[],
         what: "keep a run at the top of the list, or let it go back",
         cmd: Cmd::Pin,
     },
     Command {
         name: "pane",
         args: "[full]",
+        words: &[&["full"]],
         what: "show or hide the pane beside the list, or give it the whole screen",
         cmd: Cmd::Pane,
     },
     Command {
         name: "graph",
         args: "",
+        words: &[],
         what: "the wiring: every schedule and reaction, what it runs and what sets it off, across projects",
         cmd: Cmd::Graph,
     },
     Command {
         name: "reload",
         args: "[rules|shell]",
+        words: &[&["rules", "shell"]],
         what: "re-read the rule files, or the shell's aliases and functions; both when bare",
         cmd: Cmd::Reload,
     },
     Command {
         name: "approve",
         args: "",
+        words: &[],
         what: "approve the selected rule, now that it has changed",
         cmd: Cmd::Approve,
     },
     Command {
         name: "pause",
         args: "",
+        words: &[],
         what: "pause the selected rule, or let it run again",
         cmd: Cmd::Pause,
     },
     Command {
         name: "new",
         args: "",
+        words: &[],
         what: "write a rule by hand in the form",
         cmd: Cmd::New,
     },
     Command {
         name: "edit",
-        args: "[file|schedule|reaction [global]]",
-        what: "the selected rule in the form or its file, or a scope's whole rule file; global, the Relay home's",
+        args: "[schedules|reactions [global]]",
+        words: &[&["schedules", "reactions"], &["global"]],
+        what: "a rule file in your editor: the rule's own, else the folder's schedules; global, the Relay home's",
         cmd: Cmd::Edit,
     },
     Command {
         name: "summarise",
         args: "[since]",
+        words: &[],
         what: "recap a run: its agent's own, or an assistant's; 2h, only the last 2h",
         cmd: Cmd::Summarise,
     },
     Command {
         name: "ask",
         args: "<words>",
+        words: &[],
         what: "hand plain words to an assistant yourself",
         cmd: Cmd::Ask,
     },
     Command {
         name: "filter",
         args: "[words in: is: kind: by:]",
+        words: &[],
         what: "narrow the list or graph as you type; esc on the list clears it",
         cmd: Cmd::Filter,
     },
     Command {
         name: "lens",
         args: "all|agents|jobs|reactions",
+        words: &[&["all", "agents", "jobs", "reactions"]],
         what: "show one kind of run inside the projects (tab steps through them)",
         cmd: Cmd::Lens,
     },
     Command {
         name: "prune",
         args: "",
+        words: &[],
         what: "let the journals of old runs go; the runs and their events stay",
         cmd: Cmd::Prune,
     },
     Command {
         name: "up",
         args: "<path>",
+        words: &[],
         what: "register a folder as a project, as `rl up` does",
         cmd: Cmd::Up,
     },
     Command {
         name: "help",
         args: "",
+        words: &[],
         what: "list these commands",
         cmd: Cmd::Help,
     },
     Command {
         name: "quit",
         args: "",
+        words: &[],
         what: "leave the panel",
         cmd: Cmd::Quit,
     },
@@ -259,9 +286,56 @@ pub fn parse(line: &str) -> Option<(&'static Command, String)> {
     }
 }
 
+/// The words a command takes for its argument at `at` (0 the first), when
+/// they are a fixed set there; none otherwise.
+pub fn arg_words(c: &Command, at: usize) -> &'static [&'static str] {
+    c.words.get(at).copied().unwrap_or(&[])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn cmd(name: &str) -> &'static Command {
+        ALL.iter().find(|c| c.name == name).unwrap()
+    }
+
+    #[test]
+    fn each_command_offers_its_argument_words_in_turn() {
+        assert_eq!(arg_words(cmd("edit"), 0), ["schedules", "reactions"]);
+        assert_eq!(arg_words(cmd("edit"), 1), ["global"]);
+        assert!(arg_words(cmd("edit"), 2).is_empty());
+        assert_eq!(arg_words(cmd("reload"), 0), ["rules", "shell"]);
+        assert_eq!(arg_words(cmd("archive"), 0), ["seen"]);
+        assert_eq!(arg_words(cmd("pane"), 0), ["full"]);
+        assert_eq!(arg_words(cmd("resume"), 0), ["all"]);
+        assert_eq!(arg_words(cmd("resume"), 1), ["commands"]);
+        assert_eq!(arg_words(cmd("mark"), 0), ["done", "blocked", "working"]);
+        let lenses: Vec<&str> = super::super::rows::Lens::ALL.iter().map(|l| l.label()).collect();
+        assert_eq!(arg_words(cmd("lens"), 0), lenses.as_slice(), "the lenses the list has");
+        assert!(arg_words(cmd("stop"), 0).is_empty(), "nothing follows /stop");
+        assert!(arg_words(cmd("ask"), 0).is_empty(), "free words are not a set");
+    }
+
+    #[test]
+    fn the_hint_says_the_words_tab_offers() {
+        for c in ALL {
+            for (i, set) in c.words.iter().enumerate() {
+                for w in *set {
+                    assert!(
+                        c.args.contains(w),
+                        "/{} offers {w} but its hint {:?} does not say it",
+                        c.name,
+                        c.args
+                    );
+                }
+                assert!(!set.is_empty(), "/{} has an empty set at {i}", c.name);
+            }
+            if !c.words.is_empty() {
+                assert!(!c.args.is_empty(), "/{} takes words but hints none", c.name);
+            }
+        }
+    }
 
     fn names(typed: &str) -> Vec<&'static str> {
         matching(typed).iter().map(|c| c.name).collect()

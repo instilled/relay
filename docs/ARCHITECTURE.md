@@ -331,9 +331,9 @@ project — goes under one group headed `everywhere`, after the projects, rather
 whatever folder that was (`rows::everywhere_run`: its cause names a rule the panel holds as global,
 and no rule of that name in its own folder; a run filed under a ref keeps the ref). That header is
 not a project: `enter` puts the global rules and how those runs stand in the pane, `/new` there
-writes a global rule, `/edit schedule` opens the home's file, and `^x`, `^r` and `/shell` say
+writes a global rule, `/edit` opens the home's schedules, and `^x`, `^r` and `/shell` say
 `everywhere is not a project` and do nothing; `in:everywhere` finds it. `^g` (or `/graph`) from anywhere, an empty list too, shows them wired
-with everything else, and `/edit schedule` where nothing names a folder, or `/edit schedule global`
+with everything else, and `/edit` where nothing names a folder, or `/edit schedules global`
 from anywhere, opens the home's file. Runs a schedule or a rule
 started fold, once ended, into one line per job — `⏰`, the name, how the last few went in the
 state column (`··×·`, oldest first, a failure red) and what the last firing came to in its own
@@ -482,11 +482,26 @@ says where it is in its summary column: `app/src` inside its project, nothing at
 folder, the whole path with `~` for home anywhere else. A daemon restart forgets it until the next
 prompt says it again.
 
-`tab` completes the word being typed (`tui/complete.rs`), rooted in that same folder: the first
-word against the agents the registry knows, the folder's `Makefile` targets and `package.json`
-scripts, and the binaries on `PATH`; after `every` a duration, after `on` an event kind; anywhere
-else the files and directories of the folder. What every candidate shares goes in first, and
-`tab` again walks the rest. When a list is on offer — those `tab` words, or the `/` commands a
+`tab` completes the word being typed (`tui/complete.rs`), rooted where the line will run: the
+warm shell's own folder when the line goes to that shell and its prompt has said where it is (a
+shell that has `cd`'d into `app/src` completes there), else the folder of the row the cursor is
+on (`complete::line_folder`; an agent starts in the project, so its line completes there). The
+first word completes against the agents the registry knows, the folder's `Makefile` targets and
+`package.json` scripts, and the binaries on `PATH` — or, when it starts like a path (`./`, `../`,
+`~`, or `/` after the `!` that forces a shell line), as a path, and a path to something runnable is
+then a shell line. After `every` a duration, after `on` an event kind. A few common tools know
+their own words, built in rather than borrowed from a shell's completion: `git` its common
+subcommands, and after `checkout`, `switch`, `merge`, `rebase`, `diff`, `log` or `branch -d` the
+branches, local then remote-tracking (asked of `git for-each-ref` in that folder, given half a
+second); `make` its targets and `just` its `justfile` recipes; `npm`/`pnpm`/`yarn`/`bun run` the
+`package.json` scripts (`yarn` and `pnpm` without `run` too); `cargo` its common subcommands.
+Anywhere else, or where a tool has nothing that fits, the files and directories: a folder ends in
+`/` so the next `tab` goes into it, dotfiles show once the dot is typed, and `~` is looked up as
+home but stays `~` on the line. A `/` line completes its name, then its arguments: the words each
+command takes (`palette.rs`, the same ones its hint shows — `/edit` `schedules` `reactions` then
+`global`, `/reload` `rules` `shell`, `/resume` `all` then `commands`, `/lens` its lenses, `/mark`
+its marks), `/filter`'s search tokens and their values, `/up`'s folders. What every candidate
+shares goes in first, and `tab` again walks the rest. When a list is on offer — those `tab` words, or the `/` commands a
 `/` line names — the arrows walk it too: `↑`/`↓` light a candidate with a caret, `tab` or `enter`
 takes the lit one (a command is filled in with its name for you to finish, never run on the
 spot), and typing anything clears the highlight so `enter` submits the line as before.
@@ -494,7 +509,7 @@ spot), and typing anything clears the highlight so `enter` submits the line as b
 Because letters go into the line, everything that is not typing is a `/` command
 (`tui/palette.rs`), offered as you type it: `/stop`, `/archive [seen]`, `/mark`, `/join`,
 `/shell`, `/rename`, `/pin`, `/pane [full]`, `/graph`, `/reload [rules|shell]`, `/approve` and `/pause`,
-`/new`, `/edit [file|schedule|reaction [global]]`, `/summarise`, `/ask`, `/filter`, `/lens`, `/prune`,
+`/new`, `/edit [schedules|reactions [global]]`, `/summarise`, `/ask`, `/filter`, `/lens`, `/prune`,
 `/up`, `/help`, `/quit`. One name per act: a variant of an act is an argument to it rather than a
 command of its own, and no word means two things — `done` is only ever what `/mark` says. `enter` on an empty line
 is the row under the cursor instead — a job opens, a question comes
@@ -544,13 +559,16 @@ has no event to follow, takes the folder the form was opened from (an edited one
 folder, must say). `enter` writes the block into the file
 (`rulefile.rs`: the block of that name replaced in place or added at the end of the mapping,
 comments and the other rules untouched, the result checked to parse), reloads, and approves it —
-your keystroke is the yes; a folder new to Relay is registered on the way. `/edit` on a rule, or
-on a job row, is the same form filled in; saving rewrites only that block and keeps what the form
-does not show (`env`, `where`, `ask`), and a rename or a move takes the old block out. `/edit file`
-opens the file in `$EDITOR` at the rule's line and reloads on return — an edit made there is a
-file change, so it waits for `/approve` like any other. `/edit schedule` (or `reaction`) opens the
-whole file of the folder the cursor is in — a run's, a job's, a header's, a graph node's — and the
-Relay home's where nothing names a folder; `/edit schedule global` opens the home's from anywhere.
+your keystroke is the yes; a folder new to Relay is registered on the way. `^r` on a rule — a job
+row, or its node in the graph — is the same form filled in; saving rewrites only that block and
+keeps what the form does not show (`env`, `where`, `ask`), and a rename or a move takes the old
+block out. `/edit` never opens the form: it opens a rule file in `$EDITOR` and reloads on return —
+an edit made there is a file change, so it waits for `/approve` like any other
+(`rulefile::edit_target`). Bare, on a rule, it is that rule's own file at the rule's line;
+anywhere else the schedules of the folder the cursor is in — a run's, a job's, a header's, a graph
+node's — and the Relay home's where nothing names a folder (the `everywhere` header, an empty
+list). `/edit reactions` opens the reactions instead (`schedule` and `reaction` still read), and
+`global` after either opens the home's from anywhere.
 
 Nothing is remembered between openings except presence: leaving the panel is what `rl since`
 counts from.
@@ -792,7 +810,7 @@ for it to end — 60 s, then it is stopped and the caller told so — and return
 what it wrote. The client reads the last `kind:` block out of that by hand (`rl-cli/src/
 interpret.rs`: fences and prose around it dropped, `key: value` lines, block and flow lists; not
 a YAML parser, because an agent writes `run: claude fix it: now` and means it) and fills the
-form. In the panel that is the same form `/new` and `/edit` open, with the assistant's answer in
+form. In the panel that is the same form `/new` and `^r` open, with the assistant's answer in
 it and a line saying who drafted it; `rl interpret` prints the draft with `# by <agent> · run <id>` and does
 nothing, or with `--go` starts the run or writes the rule on the line, `cause: manual`, since the
 go was yours. When the words are typed with a rule's node under the cursor in the graph, the

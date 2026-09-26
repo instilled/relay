@@ -124,6 +124,56 @@ pub fn file(home: &rl_core::Home, kind: RuleKind, folder: Option<&Path>) -> std:
     }
 }
 
+/// The rule under the cursor, as `/edit` needs it: its file, its kind and
+/// its name, to find its line.
+pub struct Here<'a> {
+    pub source: &'a Path,
+    pub kind: RuleKind,
+    pub name: &'a str,
+}
+
+/// Which file `/edit` opens in `$EDITOR`, and at which line, for the words
+/// after it and what the cursor stands on. `schedules` or `reactions` (or
+/// the singular) is that kind's file for the folder the cursor is in, the
+/// Relay home's where nothing names a folder; `global` after it is the
+/// home's from anywhere. Bare, it is the rule under the cursor's own file at
+/// its line, else the folder's schedules. Words it does not take are `Err`,
+/// saying which it does.
+pub fn edit_target(
+    home: &rl_core::Home,
+    words: &str,
+    rule: Option<Here>,
+    folder: Option<&Path>,
+) -> std::result::Result<(std::path::PathBuf, usize), String> {
+    let words: Vec<&str> = words.split_whitespace().collect();
+    let kind = |w: &str| match w {
+        "schedule" | "schedules" => Some(RuleKind::Schedule),
+        "reaction" | "reactions" => Some(RuleKind::Reaction),
+        _ => None,
+    };
+    let asked = match words.as_slice() {
+        [] => None,
+        [w] => kind(w).map(|k| (k, folder)),
+        [w, "global"] => kind(w).map(|k| (k, None)),
+        _ => None,
+    };
+    match (words.is_empty(), asked, rule) {
+        (true, _, Some(r)) => {
+            let line = std::fs::read_to_string(r.source)
+                .ok()
+                .and_then(|t| line_of(&t, top(r.kind), r.name))
+                .unwrap_or(1);
+            Ok((r.source.to_path_buf(), line))
+        }
+        (true, _, None) => Ok((file(home, RuleKind::Schedule, folder), 1)),
+        (false, Some((k, folder)), _) => Ok((file(home, k, folder), 1)),
+        (false, None, _) => Err(format!(
+            "edit {}? schedules or reactions, and global for the Relay home's",
+            words.join(" ")
+        )),
+    }
+}
+
 /// A rule name: letters, digits, `.`, `_` and `-`.
 pub fn check_name(name: &str) -> Result<()> {
     if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || "._-".contains(c)) {
@@ -419,5 +469,56 @@ schedules:
         let v: serde_norway::Value = serde_norway::from_str(&out).unwrap();
         let back: ScheduleSpec = serde_norway::from_value(v["schedules"]["night"].clone()).unwrap();
         assert_eq!(back, spec);
+    }
+
+    #[test]
+    fn edit_opens_the_file_the_words_and_the_cursor_name() {
+        let home = rl_core::Home::at("/h");
+        let w = Path::new("/w");
+        let open = |words: &str, folder: Option<&Path>| edit_target(&home, words, None, folder);
+        let at = |p: &str| Ok((PathBuf::from(p), 1));
+        // Bare, or schedules: the folder's schedules; nothing naming a folder
+        // (the `everywhere` header, an empty list): the home's.
+        assert_eq!(open("", Some(w)), at("/w/.relay/schedules.yaml"));
+        assert_eq!(open("", None), at("/h/schedules.yaml"));
+        assert_eq!(open("schedules", Some(w)), at("/w/.relay/schedules.yaml"));
+        assert_eq!(
+            open("schedule", Some(w)),
+            at("/w/.relay/schedules.yaml"),
+            "the singular still works"
+        );
+        assert_eq!(open("reactions", Some(w)), at("/w/.relay/reactions.yaml"));
+        assert_eq!(open("reaction", None), at("/h/reactions.yaml"));
+        // global: the home's, whatever the cursor is on.
+        assert_eq!(open("schedules global", Some(w)), at("/h/schedules.yaml"));
+        assert_eq!(open("reactions  global", Some(w)), at("/h/reactions.yaml"));
+        // Gone: the form, and `file`; anything else says what it takes.
+        for bad in ["file", "global", "schedules nope", "reactions global more"] {
+            let e = open(bad, Some(w)).unwrap_err();
+            assert!(e.contains("schedules or reactions"), "{bad}: {e}");
+        }
+
+        // Bare on a rule: that rule's own file, at its line.
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("schedules.yaml");
+        std::fs::write(&src, FILE).unwrap();
+        let rule = |name| {
+            Some(Here {
+                source: &src,
+                kind: RuleKind::Schedule,
+                name,
+            })
+        };
+        assert_eq!(edit_target(&home, "", rule("backup"), Some(w)), Ok((src.clone(), 8)));
+        assert_eq!(
+            edit_target(&home, "", rule("gone"), Some(w)),
+            Ok((src.clone(), 1)),
+            "not found: the top"
+        );
+        // Words still say which file, rule or not.
+        assert_eq!(
+            edit_target(&home, "reactions", rule("backup"), Some(w)),
+            at("/w/.relay/reactions.yaml")
+        );
     }
 }

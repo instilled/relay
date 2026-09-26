@@ -258,7 +258,7 @@ struct App {
     summarising: Option<Summarising>,
     /// A project on its way out (`^x` twice on its header).
     removing: Option<Removing>,
-    /// `/edit file` (or a scope's file): the file and line to open in the editor once the
+    /// `/edit`: the rule file and line to open in the editor once the
     /// screen is given back.
     editor: Option<(PathBuf, usize)>,
     /// A run to hand the real terminal to (its id, and whether to take the
@@ -1036,7 +1036,7 @@ impl App {
     }
 
     /// The registered folder under the cursor, when the cursor is on a project
-    /// header — what `^r` and `/edit schedule` act on.
+    /// header — what `^r` acts on.
     fn selected_project(&self) -> Option<PathBuf> {
         match self.selected()? {
             Row::Group(h) if !h.is_everywhere() => Some(h.workspace.clone()),
@@ -1969,34 +1969,29 @@ impl App {
         }
     }
 
-    /// `/edit file`: the rule's file in the editor, at its line, once the screen is free.
-    fn edit_rule_file(&mut self) {
-        if let Some(r) = self.rule_here() {
-            let file = r.source().to_path_buf();
-            let line = std::fs::read_to_string(&file)
-                .ok()
-                .and_then(|t| rulefile::line_of(&t, rulefile::top(r.kind()), r.name()))
-                .unwrap_or(1);
-            self.editor = Some((file, line));
+    /// `/edit [schedules|reactions [global]]`: a rule file in `$EDITOR`, once
+    /// the screen is free — never the form, which is `/new`'s. Bare, the rule
+    /// under the cursor (a job row, a graph node) opens its own file at its
+    /// line, and anything else the schedules of the folder the cursor stands
+    /// in. Any row answers which folder its work is in, so this reads the same
+    /// from a run as from the folder's own header, and a node in the graph
+    /// answers with its own folder. Where nothing names a folder — the
+    /// `everywhere` header, an empty list, a global rule's node — it is the
+    /// Relay home's file; `global` asks for that from anywhere
+    /// (`rulefile::edit_target`).
+    fn edit_file(&mut self, words: &str) {
+        let folder = self
+            .selected_folder()
+            .or_else(|| self.selected_node().and_then(|n| n.folder.clone()));
+        let rule = self.rule_here().map(|r| rulefile::Here {
+            source: r.source(),
+            kind: r.kind(),
+            name: r.name(),
+        });
+        match rulefile::edit_target(&self.home, words, rule, folder.as_deref()) {
+            Ok(at) => self.editor = Some(at),
+            Err(e) => self.say(e),
         }
-    }
-
-    /// `/edit schedule|reaction [global]`: the whole rule file for the scope
-    /// the cursor stands in, rather than the one rule under it. Any row
-    /// answers which folder its work is in, so this reads the same from a run
-    /// as from the folder's own header, and a node in the graph answers with
-    /// its own folder. Where nothing names a folder — an empty list, a global
-    /// rule's node — it is the Relay home's file, the global rules having no
-    /// row of their own to stand on; `global` asks for that file from
-    /// anywhere.
-    fn edit_scope_file(&mut self, kind: RuleKind, global: bool) {
-        let folder = if global {
-            None
-        } else {
-            self.selected_folder()
-                .or_else(|| self.selected_node().and_then(|n| n.folder.clone()))
-        };
-        self.editor = Some((rulefile::file(&self.home, kind, folder.as_deref()), 1));
     }
 
     /// `enter` on the form: what it says, or why not — the form stays up then.
@@ -2640,17 +2635,24 @@ impl App {
         Ok(())
     }
 
-    /// `tab` in a search: the token names, then a token's values — states,
-    /// kinds, projects, rules. One fits: taken. Several: what they share, and
-    /// the rest shown in the footer. None — a plain word, or no word at all
-    /// after one — and it goes to the next match instead.
-    fn complete_search(&mut self) {
+    /// What a search token's values can be: the projects (and `global`), the
+    /// rules, the branches — for `tab` in a search and after `/filter`.
+    fn search_values(&self) -> (Vec<String>, Vec<String>, Vec<String>) {
         let mut projects: Vec<String> = self.names.paths().iter().map(|p| self.names.workspace(p)).collect();
         projects.push("global".into());
         let rules: Vec<String> = self.rules.iter().map(|r| r.name().to_string()).collect();
         let branches: Vec<String> = (self.digest.checkouts.iter().filter_map(|c| c.branch.clone()))
             .chain(self.digest.items.iter().filter_map(|i| i.run.branch.clone()))
             .collect();
+        (projects, rules, branches)
+    }
+
+    /// `tab` in a search: the token names, then a token's values — states,
+    /// kinds, projects, rules. One fits: taken. Several: what they share, and
+    /// the rest shown in the footer. None — a plain word, or no word at all
+    /// after one — and it goes to the next match instead.
+    fn complete_search(&mut self) {
+        let (projects, rules, branches) = self.search_values();
         let Some(s) = self.search.as_mut() else {
             return;
         };
@@ -2882,11 +2884,27 @@ impl App {
     /// what agents there are, and $PATH.
     fn here<'a>(&'a self, folder: &'a Path) -> complete::Here<'a> {
         complete::Here {
-            folder,
             agents: &self.agents,
             path_dirs: &self.path_dirs,
             aliases: &self.aliases,
+            ..complete::Here::at(folder)
         }
+    }
+
+    /// The folder the line at the foot will run in, for completing it: the
+    /// warm shell's own folder when the line goes there and the shell has
+    /// said where it is, else the folder here (`complete::line_folder`).
+    fn line_folder(&self, text: &str) -> PathBuf {
+        let folder = self.folder_here();
+        let shell = self.selected_shell().or_else(|| self.project_shell(&folder));
+        let cwd = shell.and_then(|id| {
+            self.digest
+                .items
+                .iter()
+                .find(|i| i.run.id == id)
+                .and_then(|i| i.cwd.clone())
+        });
+        complete::line_folder(text, &self.agents, &folder, cwd.as_deref())
     }
 
     /// `enter` on the line: what it says. Nothing typed, the row instead.
@@ -2904,7 +2922,10 @@ impl App {
         }
         let folder = self.folder_here();
         let what = {
-            let here = self.here(&folder);
+            // Runnable where it will run: a `./build.sh` in the folder the
+            // warm shell has `cd`'d into is a shell line.
+            let at = self.line_folder(self.line.text());
+            let here = self.here(&at);
             line::what(self.line.text(), &self.agents, &|h| complete::runnable(h, &here))
         };
         match what {
@@ -2952,16 +2973,29 @@ impl App {
         if !matches!(self.mode, Mode::Normal) || self.search.is_some() {
             return None;
         }
-        if let Some(rest) = self.line.text().strip_prefix('/') {
-            let n = palette::matching(rest).len();
-            if n > 0 {
-                return Some(Cands::Slash(n));
-            }
+        if let Some(n) = self.slash_list().map(|cs| cs.len())
+            && n > 0
+        {
+            return Some(Cands::Slash(n));
         }
         match &self.completing {
             Some(c) if !c.cands.is_empty() => Some(Cands::Words(c.cands.len())),
             _ => None,
         }
+    }
+
+    /// The `/` commands a `/` line names, for the list under it — until `tab`
+    /// lays out words for a command's argument, which show instead.
+    fn slash_list(&self) -> Option<Vec<&'static palette::Command>> {
+        if !matches!(self.mode, Mode::Normal) {
+            return None;
+        }
+        let rest = self.line.text().strip_prefix('/')?;
+        let args = rest.trim_start().contains(char::is_whitespace);
+        if args && self.completing.as_ref().is_some_and(|c| !c.cands.is_empty()) {
+            return None;
+        }
+        Some(palette::matching(rest))
     }
 
     /// Walk the highlight through the candidates, wrapping. From nothing, down
@@ -3011,8 +3045,11 @@ impl App {
 
     fn tab(&mut self) {
         let text = self.line.text().to_string();
-        // A `/` line completes to the command it names.
-        if let Some(rest) = text.strip_prefix('/') {
+        // A `/` line still on its name completes to the command it names; past
+        // the name, its arguments complete like any other word, below.
+        if let Some(rest) = text.strip_prefix('/')
+            && !rest.contains(char::is_whitespace)
+        {
             if let Some(c) = palette::matching(rest).first() {
                 let taken = format!("/{} ", c.name);
                 let at = taken.len();
@@ -3021,10 +3058,12 @@ impl App {
             self.completing = None;
             return;
         }
-        // Tab again on what tab last wrote: the next one.
+        // Tab again on what tab last wrote: the next one. With only the one,
+        // there is nothing to walk: tab starts again from what it wrote, so a
+        // folder it filled in (`src/`) opens on the next press.
         if let Some(c) = self.completing.take()
             && c.shown == text
-            && !c.cands.is_empty()
+            && c.cands.len() > 1
         {
             let at = (c.at + 1) % c.cands.len();
             let (l, pos) = complete::apply(&c.line, c.cursor, &c.cands[at].text);
@@ -3033,9 +3072,17 @@ impl App {
             return;
         }
         let cur = self.line.cursor();
-        let folder = self.folder_here();
+        let folder = self.line_folder(&text);
+        let (projects, rules, branches) = self.search_values();
         let cands = {
-            let here = self.here(&folder);
+            let here = complete::Here {
+                names: complete::Names {
+                    projects: &projects,
+                    rules: &rules,
+                    branches: &branches,
+                },
+                ..self.here(&folder)
+            };
             complete::candidates(&text, cur, &here)
         };
         if cands.is_empty() {
@@ -3196,21 +3243,7 @@ impl App {
                 }
             }
             palette::Cmd::New => self.new_rule_form(),
-            palette::Cmd::Edit => {
-                let words: Vec<&str> = arg.split_whitespace().collect();
-                let kind = match words.first().copied() {
-                    Some("schedule" | "schedules") => Some(RuleKind::Schedule),
-                    Some("reaction" | "reactions") => Some(RuleKind::Reaction),
-                    _ => None,
-                };
-                match (words.as_slice(), kind) {
-                    ([], _) => self.edit_rule_form(),
-                    (["file"], _) => self.edit_rule_file(),
-                    ([_], Some(kind)) => self.edit_scope_file(kind, false),
-                    ([_, "global"], Some(kind)) => self.edit_scope_file(kind, true),
-                    _ => self.say(format!("edit {}? file, or schedule or reaction [global]", arg.trim())),
-                }
-            }
+            palette::Cmd::Edit => self.edit_file(&arg),
             palette::Cmd::Summarise => self.summarise(arg.trim()),
             palette::Cmd::Ask => {
                 if arg.trim().is_empty() {
@@ -3288,9 +3321,7 @@ impl App {
             _ => 0,
         };
         // A `/` line offers commands while it is typed; tab offers words.
-        let slash: Option<Vec<&palette::Command>> = matches!(self.mode, Mode::Normal)
-            .then(|| self.line.text().strip_prefix('/').map(palette::matching))
-            .flatten();
+        let slash = self.slash_list();
         let cands_h = match (&slash, &self.completing) {
             (Some(cs), _) => cs.len().min(CANDS) as u16,
             (None, Some(c)) => c.cands.len().min(CANDS) as u16,
@@ -3522,7 +3553,10 @@ impl App {
         }
         let folder = self.folder_here();
         let what = {
-            let here = self.here(&folder);
+            // Runnable where it will run: a `./build.sh` in the folder the
+            // warm shell has `cd`'d into is a shell line.
+            let at = self.line_folder(self.line.text());
+            let here = self.here(&at);
             line::what(self.line.text(), &self.agents, &|h| complete::runnable(h, &here))
         };
         let answer = self.question_here().and_then(|q| pane::answer_of(q, self.line.text()));
@@ -4062,10 +4096,14 @@ impl App {
             }
             Some(Row::Run(_)) => format!("enter joins it · ^x stops it · ^t pins · {pane}"),
             Some(Row::Group(h)) if h.is_everywhere() => {
-                format!("enter its stats · ^g the global rules' wiring · /edit schedule · /new a global rule · {pane}")
+                format!(
+                    "enter its stats · ^g the global rules' wiring · /edit their schedules · /new a global rule · {pane}"
+                )
             }
             Some(Row::Group(_)) => {
-                format!("enter its stats · /shell · ^g its wiring · /edit schedule · ^r renames · ^x removes · {pane}")
+                format!(
+                    "enter its stats · /shell · ^g its wiring · /edit its schedules · ^r renames · ^x removes · {pane}"
+                )
             }
             _ => String::new(),
         }
