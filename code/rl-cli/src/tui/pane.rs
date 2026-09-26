@@ -357,7 +357,7 @@ pub fn project_lines(
     lines.extend(rules_section(rules, Some(workspace), now));
     lines.push(Line::raw(""));
     lines.push(Line::from(
-        Span::raw(" ^g shows its wiring · /edit schedule edits the file · ^r renames").dim(),
+        Span::raw(" ^g shows its wiring · /edit opens its schedules · ^r renames").dim(),
     ));
     lines
 }
@@ -375,7 +375,7 @@ pub fn everywhere_lines(mine: &[&DigestItem], rules: &[Rule], now: Timestamp) ->
     lines.extend(rules_section(rules, None, now));
     lines.push(Line::raw(""));
     lines.push(Line::from(
-        Span::raw(" ^g shows their wiring · /edit schedule edits their file").dim(),
+        Span::raw(" ^g shows their wiring · /edit opens their schedules").dim(),
     ));
     lines
 }

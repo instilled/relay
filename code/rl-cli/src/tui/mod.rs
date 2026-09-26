@@ -258,7 +258,7 @@ struct App {
     summarising: Option<Summarising>,
     /// A project on its way out (`^x` twice on its header).
     removing: Option<Removing>,
-    /// `/edit file` (or a scope's file): the file and line to open in the editor once the
+    /// `/edit`: the rule file and line to open in the editor once the
     /// screen is given back.
     editor: Option<(PathBuf, usize)>,
     /// A run to hand the real terminal to (its id, and whether to take the
@@ -1036,7 +1036,7 @@ impl App {
     }
 
     /// The registered folder under the cursor, when the cursor is on a project
-    /// header — what `^r` and `/edit schedule` act on.
+    /// header — what `^r` acts on.
     fn selected_project(&self) -> Option<PathBuf> {
         match self.selected()? {
             Row::Group(h) if !h.is_everywhere() => Some(h.workspace.clone()),
@@ -1969,34 +1969,29 @@ impl App {
         }
     }
 
-    /// `/edit file`: the rule's file in the editor, at its line, once the screen is free.
-    fn edit_rule_file(&mut self) {
-        if let Some(r) = self.rule_here() {
-            let file = r.source().to_path_buf();
-            let line = std::fs::read_to_string(&file)
-                .ok()
-                .and_then(|t| rulefile::line_of(&t, rulefile::top(r.kind()), r.name()))
-                .unwrap_or(1);
-            self.editor = Some((file, line));
+    /// `/edit [schedules|reactions [global]]`: a rule file in `$EDITOR`, once
+    /// the screen is free — never the form, which is `/new`'s. Bare, the rule
+    /// under the cursor (a job row, a graph node) opens its own file at its
+    /// line, and anything else the schedules of the folder the cursor stands
+    /// in. Any row answers which folder its work is in, so this reads the same
+    /// from a run as from the folder's own header, and a node in the graph
+    /// answers with its own folder. Where nothing names a folder — the
+    /// `everywhere` header, an empty list, a global rule's node — it is the
+    /// Relay home's file; `global` asks for that from anywhere
+    /// (`rulefile::edit_target`).
+    fn edit_file(&mut self, words: &str) {
+        let folder = self
+            .selected_folder()
+            .or_else(|| self.selected_node().and_then(|n| n.folder.clone()));
+        let rule = self.rule_here().map(|r| rulefile::Here {
+            source: r.source(),
+            kind: r.kind(),
+            name: r.name(),
+        });
+        match rulefile::edit_target(&self.home, words, rule, folder.as_deref()) {
+            Ok(at) => self.editor = Some(at),
+            Err(e) => self.say(e),
         }
-    }
-
-    /// `/edit schedule|reaction [global]`: the whole rule file for the scope
-    /// the cursor stands in, rather than the one rule under it. Any row
-    /// answers which folder its work is in, so this reads the same from a run
-    /// as from the folder's own header, and a node in the graph answers with
-    /// its own folder. Where nothing names a folder — an empty list, a global
-    /// rule's node — it is the Relay home's file, the global rules having no
-    /// row of their own to stand on; `global` asks for that file from
-    /// anywhere.
-    fn edit_scope_file(&mut self, kind: RuleKind, global: bool) {
-        let folder = if global {
-            None
-        } else {
-            self.selected_folder()
-                .or_else(|| self.selected_node().and_then(|n| n.folder.clone()))
-        };
-        self.editor = Some((rulefile::file(&self.home, kind, folder.as_deref()), 1));
     }
 
     /// `enter` on the form: what it says, or why not — the form stays up then.
@@ -3243,21 +3238,7 @@ impl App {
                 }
             }
             palette::Cmd::New => self.new_rule_form(),
-            palette::Cmd::Edit => {
-                let words: Vec<&str> = arg.split_whitespace().collect();
-                let kind = match words.first().copied() {
-                    Some("schedule" | "schedules") => Some(RuleKind::Schedule),
-                    Some("reaction" | "reactions") => Some(RuleKind::Reaction),
-                    _ => None,
-                };
-                match (words.as_slice(), kind) {
-                    ([], _) => self.edit_rule_form(),
-                    (["file"], _) => self.edit_rule_file(),
-                    ([_], Some(kind)) => self.edit_scope_file(kind, false),
-                    ([_, "global"], Some(kind)) => self.edit_scope_file(kind, true),
-                    _ => self.say(format!("edit {}? file, or schedule or reaction [global]", arg.trim())),
-                }
-            }
+            palette::Cmd::Edit => self.edit_file(&arg),
             palette::Cmd::Summarise => self.summarise(arg.trim()),
             palette::Cmd::Ask => {
                 if arg.trim().is_empty() {
@@ -4107,10 +4088,14 @@ impl App {
             }
             Some(Row::Run(_)) => format!("enter joins it · ^x stops it · ^t pins · {pane}"),
             Some(Row::Group(h)) if h.is_everywhere() => {
-                format!("enter its stats · ^g the global rules' wiring · /edit schedule · /new a global rule · {pane}")
+                format!(
+                    "enter its stats · ^g the global rules' wiring · /edit their schedules · /new a global rule · {pane}"
+                )
             }
             Some(Row::Group(_)) => {
-                format!("enter its stats · /shell · ^g its wiring · /edit schedule · ^r renames · ^x removes · {pane}")
+                format!(
+                    "enter its stats · /shell · ^g its wiring · /edit its schedules · ^r renames · ^x removes · {pane}"
+                )
             }
             _ => String::new(),
         }

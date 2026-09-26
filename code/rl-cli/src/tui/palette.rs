@@ -159,7 +159,7 @@ pub const ALL: &[Command] = &[
         name: "edit",
         args: "[schedules|reactions [global]]",
         words: &[&["schedules", "reactions"], &["global"]],
-        what: "the selected rule in the form or its file, or a scope's whole rule file; global, the Relay home's",
+        what: "a rule file in your editor: the rule's own, else the folder's schedules; global, the Relay home's",
         cmd: Cmd::Edit,
     },
     Command {

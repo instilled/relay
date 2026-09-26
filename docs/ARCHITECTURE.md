@@ -331,9 +331,9 @@ project — goes under one group headed `everywhere`, after the projects, rather
 whatever folder that was (`rows::everywhere_run`: its cause names a rule the panel holds as global,
 and no rule of that name in its own folder; a run filed under a ref keeps the ref). That header is
 not a project: `enter` puts the global rules and how those runs stand in the pane, `/new` there
-writes a global rule, `/edit schedule` opens the home's file, and `^x`, `^r` and `/shell` say
+writes a global rule, `/edit` opens the home's schedules, and `^x`, `^r` and `/shell` say
 `everywhere is not a project` and do nothing; `in:everywhere` finds it. `^g` (or `/graph`) from anywhere, an empty list too, shows them wired
-with everything else, and `/edit schedule` where nothing names a folder, or `/edit schedule global`
+with everything else, and `/edit` where nothing names a folder, or `/edit schedules global`
 from anywhere, opens the home's file. Runs a schedule or a rule
 started fold, once ended, into one line per job — `⏰`, the name, how the last few went in the
 state column (`··×·`, oldest first, a failure red) and what the last firing came to in its own
@@ -509,7 +509,7 @@ spot), and typing anything clears the highlight so `enter` submits the line as b
 Because letters go into the line, everything that is not typing is a `/` command
 (`tui/palette.rs`), offered as you type it: `/stop`, `/archive [seen]`, `/mark`, `/join`,
 `/shell`, `/rename`, `/pin`, `/pane [full]`, `/graph`, `/reload [rules|shell]`, `/approve` and `/pause`,
-`/new`, `/edit [file|schedule|reaction [global]]`, `/summarise`, `/ask`, `/filter`, `/lens`, `/prune`,
+`/new`, `/edit [schedules|reactions [global]]`, `/summarise`, `/ask`, `/filter`, `/lens`, `/prune`,
 `/up`, `/help`, `/quit`. One name per act: a variant of an act is an argument to it rather than a
 command of its own, and no word means two things — `done` is only ever what `/mark` says. `enter` on an empty line
 is the row under the cursor instead — a job opens, a question comes
@@ -559,13 +559,16 @@ has no event to follow, takes the folder the form was opened from (an edited one
 folder, must say). `enter` writes the block into the file
 (`rulefile.rs`: the block of that name replaced in place or added at the end of the mapping,
 comments and the other rules untouched, the result checked to parse), reloads, and approves it —
-your keystroke is the yes; a folder new to Relay is registered on the way. `/edit` on a rule, or
-on a job row, is the same form filled in; saving rewrites only that block and keeps what the form
-does not show (`env`, `where`, `ask`), and a rename or a move takes the old block out. `/edit file`
-opens the file in `$EDITOR` at the rule's line and reloads on return — an edit made there is a
-file change, so it waits for `/approve` like any other. `/edit schedule` (or `reaction`) opens the
-whole file of the folder the cursor is in — a run's, a job's, a header's, a graph node's — and the
-Relay home's where nothing names a folder; `/edit schedule global` opens the home's from anywhere.
+your keystroke is the yes; a folder new to Relay is registered on the way. `^r` on a rule — a job
+row, or its node in the graph — is the same form filled in; saving rewrites only that block and
+keeps what the form does not show (`env`, `where`, `ask`), and a rename or a move takes the old
+block out. `/edit` never opens the form: it opens a rule file in `$EDITOR` and reloads on return —
+an edit made there is a file change, so it waits for `/approve` like any other
+(`rulefile::edit_target`). Bare, on a rule, it is that rule's own file at the rule's line;
+anywhere else the schedules of the folder the cursor is in — a run's, a job's, a header's, a graph
+node's — and the Relay home's where nothing names a folder (the `everywhere` header, an empty
+list). `/edit reactions` opens the reactions instead (`schedule` and `reaction` still read), and
+`global` after either opens the home's from anywhere.
 
 Nothing is remembered between openings except presence: leaving the panel is what `rl since`
 counts from.
@@ -807,7 +810,7 @@ for it to end — 60 s, then it is stopped and the caller told so — and return
 what it wrote. The client reads the last `kind:` block out of that by hand (`rl-cli/src/
 interpret.rs`: fences and prose around it dropped, `key: value` lines, block and flow lists; not
 a YAML parser, because an agent writes `run: claude fix it: now` and means it) and fills the
-form. In the panel that is the same form `/new` and `/edit` open, with the assistant's answer in
+form. In the panel that is the same form `/new` and `^r` open, with the assistant's answer in
 it and a line saying who drafted it; `rl interpret` prints the draft with `# by <agent> · run <id>` and does
 nothing, or with `--go` starts the run or writes the rule on the line, `cause: manual`, since the
 go was yours. When the words are typed with a rule's node under the cursor in the graph, the
