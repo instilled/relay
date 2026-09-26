@@ -174,7 +174,7 @@ impl Form {
                 Field::new("run", "make test · claude fix the build", ""),
                 Field::new("title", "what to call its runs", ""),
                 Field::new("tags", "a, b", ""),
-                Field::new("cwd", "where it runs (the folder)", ""),
+                Field::new("cwd", "where it runs (the folder, or where the event was)", ""),
             ],
             cur: 1,
             origin: origin.to_path_buf(),
@@ -185,10 +185,11 @@ impl Form {
         }
     }
 
-    /// The same form, filled in from a rule as it stands.
+    /// The same form, filled in from a rule as it stands. A global rule has
+    /// no folder it was opened from: its `cwd` is all there is.
     pub fn edit(r: &Rule) -> Self {
         let folder = (!r.is_global()).then(|| PathBuf::from(r.scope()));
-        let mut f = Self::rule(folder.as_deref(), Path::new(r.scope()));
+        let mut f = Self::rule(folder.as_deref(), folder.as_deref().unwrap_or(Path::new("")));
         let (when, run, title, tags, cwd) = match r {
             Rule::Schedule(s) => (
                 match (&s.spec.every, &s.spec.cron) {
@@ -550,12 +551,18 @@ pub fn rule_draft(f: &Form) -> Result<RuleDraft> {
         .filter(|t| !t.is_empty())
         .map(String::from)
         .collect();
-    // A rule of yours runs where the form was opened unless told otherwise.
+    // A folder's rule runs in the folder unless told otherwise, and a global
+    // reaction where its event happened. A global schedule has no event to
+    // follow: it runs where the form was opened, and an edited one — opened
+    // from no folder — has to say.
     let cwd = f.get("cwd");
+    let reaction = matches!(when, When::On(_));
     let cwd = match (cwd.is_empty(), &folder) {
         (false, _) => Some(expand(cwd)),
-        (true, None) => Some(f.origin.clone()),
         (true, Some(_)) => None,
+        (true, None) if reaction => None,
+        (true, None) if f.origin.as_os_str().is_empty() => bail!("cwd: a global schedule needs a folder to run in"),
+        (true, None) => Some(f.origin.clone()),
     };
     let task = (!run.is_empty()).then(|| task_of(run, &f.agents));
     let (kind, body) = match when {
@@ -753,20 +760,25 @@ mod tests {
         );
         assert_eq!(
             d.body,
-            ["on:", "- run.failed", "- decision.raised", "run: say no", "cwd: /w"],
-            "a rule of yours runs where the form was opened"
+            ["on:", "- run.failed", "- decision.raised", "run: say no"],
+            "a global reaction runs where its event happened, no folder written down"
         );
+        // A global schedule has no event: it runs where the form was opened.
         for field in &mut f.fields {
             if field.key == "when" {
                 field.value = "0 2 * * *".into();
-            }
-            if field.key == "cwd" {
-                field.value = "/elsewhere".into();
             }
         }
         let d = rule_draft(&f).unwrap();
         assert_eq!(d.kind, RuleKind::Schedule);
         assert_eq!(d.body[0], "cron: 0 2 * * *");
+        assert!(d.body.contains(&"cwd: /w".to_string()), "{:?}", d.body);
+        for field in &mut f.fields {
+            if field.key == "cwd" {
+                field.value = "/elsewhere".into();
+            }
+        }
+        let d = rule_draft(&f).unwrap();
         assert!(d.body.contains(&"cwd: /elsewhere".to_string()));
         for field in &mut f.fields {
             if field.key == "when" {
@@ -833,5 +845,63 @@ mod tests {
                 "title: night"
             ]
         );
+    }
+
+    #[test]
+    fn a_global_rule_edited_with_its_cwd_cleared_writes_none() {
+        use rl_proto::reaction::Reaction;
+        use rl_proto::schedule::Schedule;
+        let reaction = Rule::Reaction(Reaction {
+            scope: GLOBAL.into(),
+            name: "notify".into(),
+            hash: "h".into(),
+            source: "/home/.relay/reactions.yaml".into(),
+            spec: ReactionSpec {
+                on: vec!["run.failed".into()],
+                run: Some(Task::Shell("say no".into())),
+                cwd: Some("/w".into()),
+                ..Default::default()
+            },
+            paused: false,
+            last_fired_at: None,
+            last_run: None,
+            removed_at: None,
+            approved_hash: None,
+        });
+        let clear = |f: &mut Form| {
+            for field in &mut f.fields {
+                if field.key == "cwd" {
+                    field.value.clear();
+                }
+            }
+        };
+        let mut f = Form::edit(&reaction);
+        assert_eq!(f.get("cwd"), "/w");
+        clear(&mut f);
+        let d = rule_draft(&f).unwrap();
+        assert_eq!(d.body, ["on:", "- run.failed", "run: say no"], "never `cwd: global`");
+
+        // A global schedule cannot do without one, and says so.
+        let schedule = Rule::Schedule(Schedule {
+            scope: GLOBAL.into(),
+            name: "nightly".into(),
+            hash: "h".into(),
+            source: "/home/.relay/schedules.yaml".into(),
+            spec: ScheduleSpec {
+                every: Some("4h".into()),
+                run: Some(Task::Shell("make test".into())),
+                cwd: Some("/w".into()),
+                ..Default::default()
+            },
+            paused: false,
+            last_fired_at: None,
+            last_run: None,
+            next_at: None,
+            removed_at: None,
+            approved_hash: None,
+        });
+        let mut f = Form::edit(&schedule);
+        clear(&mut f);
+        assert!(rule_draft(&f).unwrap_err().to_string().starts_with("cwd:"));
     }
 }

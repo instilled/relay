@@ -1023,12 +1023,14 @@ impl App {
         )
     }
 
-    /// The folder the selected row's work is in.
+    /// The folder the selected row's work is in. The `everywhere` header has
+    /// none: what is under it ran in folders of all sorts.
     fn selected_folder(&self) -> Option<PathBuf> {
         match self.selected()? {
             Row::Run(i) => Some(i.run.workspace.clone()),
             Row::Job(j) => Some(j.last().run.workspace.clone()),
             Row::Question(q) => Some(q.workspace.clone()),
+            Row::Group(h) if h.is_everywhere() => None,
             Row::Group(h) => Some(h.workspace.clone()),
         }
     }
@@ -1037,10 +1039,20 @@ impl App {
     /// header — what `^r` and `/edit schedule` act on.
     fn selected_project(&self) -> Option<PathBuf> {
         match self.selected()? {
-            Row::Group(h) => Some(h.workspace.clone()),
+            Row::Group(h) if !h.is_everywhere() => Some(h.workspace.clone()),
             _ => None,
         }
     }
+
+    /// Whether the cursor is on the `everywhere` header, which is not a
+    /// project: what acts on a project's folder says so there, and does
+    /// nothing.
+    fn on_everywhere(&self) -> bool {
+        matches!(self.selected(), Some(Row::Group(h)) if h.is_everywhere())
+    }
+
+    /// What the `everywhere` header says to a project's action.
+    const NOT_A_PROJECT: &'static str = "everywhere is not a project";
 
     /// Keys of the selectable rows of the view that is up, in order.
     fn keys(&self) -> Vec<String> {
@@ -1469,7 +1481,9 @@ impl App {
     /// ledger, and a job by the rule it comes from, which is the rule form's
     /// own rename.
     fn rename_here(&mut self) {
-        if let Some(folder) = self.selected_project() {
+        if self.on_everywhere() {
+            self.say(format!("{} · nothing to rename", Self::NOT_A_PROJECT));
+        } else if let Some(folder) = self.selected_project() {
             let name = self.names.workspace(&folder);
             self.mode = Mode::Form(Box::new(Form::rename(&folder, &name)));
         } else if let Some((id, title)) = self.selected_run().map(|i| (i.run.id.clone(), i.run.title.clone())) {
@@ -1700,6 +1714,8 @@ impl App {
             }
         } else if let Some(q) = self.selected_question() {
             self.dismiss(q.id.clone()).await;
+        } else if self.on_everywhere() {
+            self.say(format!("{} · nothing to remove", Self::NOT_A_PROJECT));
         } else if let Some(Row::Group(h)) = self.selected() {
             let (folder, name) = (h.workspace.clone(), h.name.clone());
             self.remove_project(folder, name);
@@ -1772,6 +1788,8 @@ impl App {
             }
         } else if let Some(q) = self.selected_question() {
             Some(format!("dismiss {}", q.title))
+        } else if self.on_everywhere() {
+            None
         } else if let Some(Row::Group(h)) = self.selected() {
             Some(remove::arm(&remove::Plan::of(
                 &h.name,
@@ -1842,6 +1860,7 @@ impl App {
             return self.rule_of_job(&j).map(rules::key);
         }
         let scope = match self.selected() {
+            Some(Row::Group(h)) if h.is_everywhere() => rl_proto::schedule::GLOBAL_SCOPE.to_string(),
             Some(Row::Group(h)) => h.workspace.to_string_lossy().into_owned(),
             _ => return None,
         };
@@ -1927,12 +1946,14 @@ impl App {
 
     fn new_rule_form(&mut self) {
         let folder = self.folder_here();
-        // A new rule is global from a global rule's node in the graph; else
+        // A new rule is global from the `everywhere` header, and from a
+        // global rule's node in the graph; else
         // it belongs to the folder here, and `in: global` typed into the form
         // makes it global from anywhere.
-        let yours = self.view == View::Graph
-            && self.selected_node().is_some_and(|n| n.folder.is_none())
-            && self.rule_here().is_none_or(Rule::is_global);
+        let yours = self.on_everywhere()
+            || (self.view == View::Graph
+                && self.selected_node().is_some_and(|n| n.folder.is_none())
+                && self.rule_here().is_none_or(Rule::is_global));
         let form = Form::rule((!yours).then_some(folder.as_path()), &folder)
             .with_folders(&self.names.paths())
             .with_agents(&self.agents);
@@ -2101,6 +2122,10 @@ impl App {
     /// `/shell`: another shell in this folder, and what you type next goes to
     /// it rather than to the one it joins.
     async fn new_shell(&mut self, area: Rect) {
+        if self.on_everywhere() {
+            self.say(format!("{} · /shell on a project opens one there", Self::NOT_A_PROJECT));
+            return;
+        }
         let folder = self.folder_here();
         match self.spawn_shell(folder.clone(), area).await {
             Ok(id) => {
@@ -2687,6 +2712,8 @@ impl App {
                 } else if let Some(what) = self.remove_hint() {
                     self.arm = Some(Arm::Remove);
                     self.flash = Some((format!("press ^x again to {what}"), Instant::now()));
+                } else if self.on_everywhere() {
+                    self.say(format!("{} · nothing to remove", Self::NOT_A_PROJECT));
                 } else {
                     self.say("nothing here to remove");
                 }
@@ -2770,8 +2797,9 @@ impl App {
             self.pane = Pane::Facts;
             self.show_pane = true;
             self.mode = Mode::Answer(id);
-        } else if self.selected_project().is_some() {
-            // A project header: its rules in the pane.
+        } else if matches!(self.selected(), Some(Row::Group(_))) {
+            // A project header: its rules in the pane; `everywhere`'s, the
+            // global rules and how their runs outside every project stand.
             self.pane = Pane::Facts;
             self.show_pane = true;
         } else {
@@ -3877,6 +3905,15 @@ impl App {
             // The pane is the project — the folder — so it is titled by the
             // folder's name (what `^r` renames), not the branch the list row
             // may be grouped under.
+            Some(Row::Group(h)) if h.is_everywhere() => {
+                let mine: Vec<&rl_proto::methods::DigestItem> = self
+                    .digest
+                    .items
+                    .iter()
+                    .filter(|i| rows::everywhere_run(&i.run, &self.names, &self.rules))
+                    .collect();
+                pane::everywhere_lines(&mine, &self.rules, now)
+            }
             Some(Row::Group(h)) => pane::project_lines(
                 &self.names.workspace(&h.workspace),
                 &h.place,
@@ -4024,6 +4061,9 @@ impl App {
                 format!("enter output · /summarise · ^x archives · ^t pins · {pane}")
             }
             Some(Row::Run(_)) => format!("enter joins it · ^x stops it · ^t pins · {pane}"),
+            Some(Row::Group(h)) if h.is_everywhere() => {
+                format!("enter its stats · ^g the global rules' wiring · /edit schedule · /new a global rule · {pane}")
+            }
             Some(Row::Group(_)) => {
                 format!("enter its stats · /shell · ^g its wiring · /edit schedule · ^r renames · ^x removes · {pane}")
             }

@@ -321,12 +321,18 @@ started; a worktree registered on its own is a project of its own, with its bran
 and, at the right edge, the tally of how many jobs and reactions the folder holds, with any rule
 that waits for a yes named just before it in amber (`! deploy`). The rest of its rules are the
 graph's and the project pane's to show. The global rules — the ones in the Relay home, which apply in every folder — have no
-row: nothing would ever sit under one, since a global rule's runs fold under the folder they ran in,
-and a row that is always there, rules or none, kept the empty list from ever saying `nothing running
-· rl run -- <command>`. The headline says them instead, when there are any — `relay · 3 working ·
+row of their own: a row that is always there, rules or none, kept the empty list from ever saying
+`nothing running · rl run -- <command>`. The headline says them instead, when there are any — `relay · 3 working ·
 ↻ 2 ⚡ 1 everywhere`, schedules and reactions counted as a folder's header counts them — and in
 amber when one waits for a yes, saying so and where to give it (`⚡ 1 everywhere needs a yes ·
-/graph`, `rows::everywhere`). `^g` (or `/graph`) from anywhere, an empty list too, shows them wired
+/graph`, `rows::everywhere`). A global rule's run in a registered project folds under that
+project; one that ran anywhere else — a schedule's `cwd: ~`, a reaction to an event outside every
+project — goes under one group headed `everywhere`, after the projects, rather than under `~` or
+whatever folder that was (`rows::everywhere_run`: its cause names a rule the panel holds as global,
+and no rule of that name in its own folder; a run filed under a ref keeps the ref). That header is
+not a project: `enter` puts the global rules and how those runs stand in the pane, `/new` there
+writes a global rule, `/edit schedule` opens the home's file, and `^x`, `^r` and `/shell` say
+`everywhere is not a project` and do nothing; `in:everywhere` finds it. `^g` (or `/graph`) from anywhere, an empty list too, shows them wired
 with everything else, and `/edit schedule` where nothing names a folder, or `/edit schedule global`
 from anywhere, opens the home's file. Runs a schedule or a rule
 started fold, once ended, into one line per job — `⏰`, the name, how the last few went in the
@@ -532,7 +538,10 @@ matches; a project with nothing under it answers only to words, `in:` and `on:`.
 
 `/new` is the form for a rule written by hand: `in` (a folder, or `global`), `name`, `when`
 (`every 30m`, a cron line, or `on run.failed` — which decides between `schedules.yaml` and
-`reactions.yaml`), `run`, `title`, `tags`, `cwd`. `enter` writes the block into the file
+`reactions.yaml`), `run`, `title`, `tags`, `cwd`. A `cwd` left empty is left out: a folder's rule
+runs in the folder, a global reaction where its event happens, and only a global schedule, which
+has no event to follow, takes the folder the form was opened from (an edited one, opened from no
+folder, must say). `enter` writes the block into the file
 (`rulefile.rs`: the block of that name replaced in place or added at the end of the mapping,
 comments and the other rules untouched, the result checked to parse), reloads, and approves it —
 your keystroke is the yes; a folder new to Relay is registered on the way. `/edit` on a rule, or
@@ -661,8 +670,14 @@ nothing when there is none.
 **Reactions** are the other direction: every event the ledger records is offered to the rules in
 `reactions.yaml`, and a rule either runs something or asks a question. A rule says which kinds
 it wants (`run.failed`, `run.*`, `*`), may narrow by `where` (the run's tag, cause, cli, or the
-event's group), and fills `{summary}`, `{title}`, `{run}`, `{data.x}` and the rest into whatever
-it runs. The whole event is in the child's environment as `RELAY_EVENT`.
+event's group), and fills `{summary}`, `{title}`, `{run}`, `{cwd}` (the folder the event's run ran
+in), `{data.x}` and the rest into whatever it runs, and into its `cwd`. The whole event is in the
+child's environment as `RELAY_EVENT`. Where it runs (`reactions::run_dir`): a workspace's rule in
+its folder; a global rule where its `cwd` says, and with none where the event happened — the
+folder the event's run ran in while that is still there, else the event's workspace, else the
+Relay home. A relative `cwd` is under that same folder (the workspace's, or the event's), joined
+once. So a global reaction needs no `cwd`, and one written without runs inside the project it
+answers; a global schedule still needs one, since nothing happened for it to follow.
 
 **Emitting events.** A run's own output is not the only thing that lands in the events table:
 `rl emit <kind> [--data k=v]… [--json-data -]` puts one there itself, and the reactor picks it up like
@@ -686,7 +701,8 @@ by id from a cursor kept in `meta`, ignoring anything older than five minutes, s
 was down does not come back and fire a day of history.
 
 `rl on run.failed -- notify "{summary}"` appends a rule to your own file and reloads; the file
-stays yours, comments and all. `rl react test <event>` replays one real event through every rule
+stays yours, comments and all. It writes no `cwd` unless `--cwd` gives one (a plain relative path
+taken from where `rl` was run), so the rule runs where each event happens. `rl react test <event>` replays one real event through every rule
 and prints what each would do, and why it would not. `rl every 30m -- make test` (a cron line in quotes works too; `--agent claude -- <prompt>`,
 `--in <folder>`, `--global`, `--cwd`, `--title`, `--tag`, `--name`, `--replace`) writes a schedule into
 this folder's `.relay/schedules.yaml` — or yours with `--global` — through `rulefile.rs`, registers

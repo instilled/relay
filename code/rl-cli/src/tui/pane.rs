@@ -280,11 +280,11 @@ pub fn job_lines(j: &Job, rule: Option<&Rule>, names: &Names, width: usize, now:
     lines
 }
 
-/// A project's rules section: a leading blank line, the " rules" label, and
-/// the schedule/reaction chips (or the empty-state line), computed via
-/// `super::rows::chips` and filtered to `workspace`.
-fn rules_section(rules: &[Rule], workspace: &std::path::Path, now: Timestamp) -> Vec<Line<'static>> {
-    let chips = super::rows::chips(rules, Some(workspace), now);
+/// A rules section: a leading blank line, the " rules" label, and the
+/// schedule/reaction chips (or the empty-state line), computed via
+/// `super::rows::chips` for one folder, or the global ones (`None`).
+fn rules_section(rules: &[Rule], scope: Option<&std::path::Path>, now: Timestamp) -> Vec<Line<'static>> {
+    let chips = super::rows::chips(rules, scope, now);
     let (sched, react): (Vec<_>, Vec<_>) = chips.iter().partition(|c| c.kind == rl_proto::rule::RuleKind::Schedule);
     let mut lines = vec![Line::raw(""), Line::from(Span::raw(" rules").dim())];
     if chips.is_empty() {
@@ -304,22 +304,9 @@ fn rules_section(rules: &[Rule], workspace: &std::path::Path, now: Timestamp) ->
     lines
 }
 
-/// A project: the folder itself, how its runs stand, and the rules that live
-/// there. `items` is the whole digest; this picks the ones in the folder.
-pub fn project_lines(
-    name: &str,
-    place: &str,
-    workspace: &std::path::Path,
-    items: &[DigestItem],
-    rules: &[Rule],
-    now: Timestamp,
-) -> Vec<Line<'static>> {
-    let mine: Vec<&DigestItem> = items.iter().filter(|i| i.run.workspace == workspace).collect();
-    let mut lines = vec![Line::from(Span::raw(format!(" {name}")).bold())];
-    lines.push(Line::from(Span::raw(format!(" {place}")).dim()));
-    lines.push(Line::raw(""));
-
-    // How the runs here stand, the buckets in the order attention wants them.
+/// How some runs stand — the buckets in the order attention wants them —
+/// and when the last of them moved.
+fn runs_facts(mine: &[&DigestItem], now: Timestamp) -> Vec<Line<'static>> {
     let count = |f: &dyn Fn(RunState) -> bool| mine.iter().filter(|i| f(i.run.state)).count();
     let needs = count(&|s| matches!(s, RunState::NeedsInput | RunState::Blocked | RunState::Failed));
     let going = count(&|s| {
@@ -343,16 +330,52 @@ pub fn project_lines(
     } else {
         format!("{n} {word} · {}", tally.join(" · "))
     };
-    lines.push(fact("runs", runs));
+    let mut lines = vec![fact("runs", runs)];
     if let Some(last) = mine.iter().map(|i| i.at).max() {
         lines.push(fact("last", format!("{} ago", fmt_age(last, now))));
     }
+    lines
+}
+
+/// A project: the folder itself, how its runs stand, and the rules that live
+/// there. `items` is the whole digest; this picks the ones in the folder.
+pub fn project_lines(
+    name: &str,
+    place: &str,
+    workspace: &std::path::Path,
+    items: &[DigestItem],
+    rules: &[Rule],
+    now: Timestamp,
+) -> Vec<Line<'static>> {
+    let mine: Vec<&DigestItem> = items.iter().filter(|i| i.run.workspace == workspace).collect();
+    let mut lines = vec![Line::from(Span::raw(format!(" {name}")).bold())];
+    lines.push(Line::from(Span::raw(format!(" {place}")).dim()));
+    lines.push(Line::raw(""));
+    lines.extend(runs_facts(&mine, now));
 
     // The rules that live here, told the same way the header's chips are.
-    lines.extend(rules_section(rules, workspace, now));
+    lines.extend(rules_section(rules, Some(workspace), now));
     lines.push(Line::raw(""));
     lines.push(Line::from(
         Span::raw(" ^g shows its wiring · /edit schedule edits the file · ^r renames").dim(),
+    ));
+    lines
+}
+
+/// The `everywhere` group, which is not a project: how the global rules'
+/// runs outside every project stand, and the global rules themselves.
+/// `mine` are those runs.
+pub fn everywhere_lines(mine: &[&DigestItem], rules: &[Rule], now: Timestamp) -> Vec<Line<'static>> {
+    let mut lines = vec![Line::from(Span::raw(" everywhere").bold())];
+    lines.push(Line::from(
+        Span::raw(" what the global rules ran outside every project").dim(),
+    ));
+    lines.push(Line::raw(""));
+    lines.extend(runs_facts(mine, now));
+    lines.extend(rules_section(rules, None, now));
+    lines.push(Line::raw(""));
+    lines.push(Line::from(
+        Span::raw(" ^g shows their wiring · /edit schedule edits their file").dim(),
     ));
     lines
 }

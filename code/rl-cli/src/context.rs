@@ -107,10 +107,11 @@ pub fn vocabulary() -> &'static str {
 folder. It has a title, a state (starting, working, idle, needs you, blocked, stale, done, \
 failed, stopped), tags, and a cause (by hand, a schedule, a reaction, a decision).
 - folder: a directory Relay knows; what `in` names. `global` is not a folder: it means the \
-rule files in the Relay home (~/.relay), which apply in every folder.
+person's own rules, which apply in every folder.
 - rule: what starts work without the person. A schedule fires on time; a reaction fires on an \
 event. A folder's rules live in <folder>/.relay/schedules.yaml and reactions.yaml; the \
-person's own in ~/.relay/schedules.yaml and reactions.yaml.
+person's own in Relay's own files, which are no place to run anything. A global reaction \
+runs where its event happened.
 - job: a rule's ended runs, read as one line: how often, how many went well, the last outcome.
 - question: something a run or a reaction asks the person. Its options are answers; an \
 option can start a run when chosen.
@@ -175,7 +176,7 @@ A schedule fires on time. Its fields:
 - run: what it starts — a shell line (a string), argv (a list), or an agent as a map \
 {agent, prompt} (or {agent, prompt_file, args}).
 - cwd: where it runs; a folder's rules run in the folder unless told otherwise; the person's \
-own rules need one.
+own (global) schedules need one.
 - title: what to call its runs.
 - tags: labels on its runs, a list.
 - env: extra environment, a map.
@@ -198,15 +199,19 @@ event's payload, each a value or any of a list: `data: { severity: [ERROR, WARNI
 - ask: instead of run — a question for the person: title, summary, options (each: key, \
 label, default, and optionally what choosing it runs: run, cwd, tags, title), multi \
 (several answers), group (asking again replaces the open question with this key), expires.
-- cwd, title, tags, env, ref, no_tty: as for a schedule.
+- cwd: where it runs. A folder's reaction runs in the folder; a global one where its event \
+happened — the folder the event's run ran in, else the event's project. Leave it out unless \
+the words name a folder; a relative one is inside that folder, and placeholders fill it.
+- title, tags, env, ref, no_tty: as for a schedule.
 - throttle: not again within this long (default 10s), so a noisy event does not storm.
 "
 }
 
 pub fn placeholders() -> &'static str {
     "\
-In a reaction's run or ask, {name} is filled in from the event: {kind}, {summary}, {title} \
-(the run's), {run} (its id), {group}, {workspace}, {cause}, {cli}, and {data.<key>} for what \
+In a reaction's run, ask or cwd, {name} is filled in from the event: {kind}, {summary}, {title} \
+(the run's), {run} (its id), {cwd} (the folder it ran in), {group}, {workspace}, {cause}, {cli}, \
+and {data.<key>} for what \
 the event carried (for example {data.exit}). A name nothing knows is left as written, so \
 shell braces survive.
 "
@@ -238,7 +243,7 @@ when: on <event> [<event> ...]
 run: <as above>
 title: <optional>
 tags: [<optional>]
-cwd: <optional; needed when in: global>
+cwd: <optional; left out, it runs where the event happened>
 
 Prefer the folder the words were typed in. Prefer a shell line for one command, an agent for \
 work that needs judgement. Never invent a folder, an event kind, or a field.
