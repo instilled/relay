@@ -512,9 +512,19 @@ pub struct EventFilter {
     /// Only these kinds. Empty means any.
     #[serde(default)]
     pub kinds: Vec<String>,
-    /// Oldest first; default 500.
+    /// Oldest first, unless `newest_first`; default 500.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<u32>,
+    /// The newest `limit` rather than the oldest, newest first — in the
+    /// order they were written (by id), so a page ends where the next begins.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub newest_first: bool,
+    /// Only events written before this one: the page past one already read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before: Option<i64>,
+    /// Only events written after this one: what came since one already read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after: Option<i64>,
 }
 
 // ---- presence.* -------------------------------------------------------------
