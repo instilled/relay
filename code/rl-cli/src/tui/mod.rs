@@ -991,6 +991,12 @@ impl App {
                 .collect();
         }
         self.settle();
+        self.load_pane().await;
+    }
+
+    /// What the details pane shows of the selected run: its events and its
+    /// recap. Only when the pane is open on it.
+    async fn load_pane(&mut self) {
         if self.pane == Pane::Facts
             && let Some(id) = self.selected_run().map(|i| i.run.id.clone())
         {
@@ -1277,6 +1283,14 @@ impl App {
 
     /// The cursor is on it: that is looking. A job's runs count as looked at
     /// when the job is.
+    /// The cursor moved: what the new row needs, and nothing more. The list
+    /// itself is not fetched again — the tick keeps it current — so holding
+    /// a key moves at the speed of drawing, not of a whole digest per step.
+    async fn moved(&mut self) {
+        self.saw_selected().await;
+        self.load_pane().await;
+    }
+
     async fn saw_selected(&mut self) {
         let ids: Vec<String> = match self.selected() {
             Some(Row::Run(i)) if i.unseen => vec![i.run.id.clone()],
@@ -1338,8 +1352,7 @@ impl App {
             }
             _ => return Ok(()),
         }
-        self.saw_selected().await;
-        self.refresh().await;
+        self.moved().await;
         Ok(())
     }
 
@@ -1505,6 +1518,7 @@ impl App {
         if ids.is_empty() {
             return;
         }
+        mark_seen(&mut self.digest, &ids);
         let _ = self.rpc.call::<RunSeen>(RunIds { ids }).await;
     }
 
@@ -2743,33 +2757,27 @@ impl App {
             (KeyCode::Up, _) if self.view == View::Graph => self.graph_step(graph::Dir::Up),
             (KeyCode::Down, _) => {
                 self.step(1);
-                self.saw_selected().await;
-                self.refresh().await;
+                self.moved().await;
             }
             (KeyCode::Up, _) => {
                 self.step(-1);
-                self.saw_selected().await;
-                self.refresh().await;
+                self.moved().await;
             }
             (KeyCode::Home, _) => {
                 self.step(isize::MIN / 2);
-                self.saw_selected().await;
-                self.refresh().await;
+                self.moved().await;
             }
             (KeyCode::End, _) => {
                 self.step(isize::MAX / 2);
-                self.saw_selected().await;
-                self.refresh().await;
+                self.moved().await;
             }
             (KeyCode::PageDown, _) => {
                 self.step(self.list_h.get().saturating_sub(2).max(1) as isize);
-                self.saw_selected().await;
-                self.refresh().await;
+                self.moved().await;
             }
             (KeyCode::PageUp, _) => {
                 self.step(-(self.list_h.get().saturating_sub(2).max(1) as isize));
-                self.saw_selected().await;
-                self.refresh().await;
+                self.moved().await;
             }
             _ => {}
         }
@@ -4158,6 +4166,14 @@ fn bytes_words(n: u64) -> String {
     }
 }
 
+/// What was seen is no longer news, on screen at once rather than at the
+/// next fetch.
+fn mark_seen(digest: &mut Digest, ids: &[String]) {
+    for i in digest.items.iter_mut().filter(|i| ids.contains(&i.run.id)) {
+        i.unseen = false;
+    }
+}
+
 /// The size a run from the panel starts at: the whole terminal, which is
 /// what a join hands it. Started any smaller, its first join is a resize —
 /// and one that lands before a just-started agent listens for it (Node and
@@ -4183,11 +4199,36 @@ fn vi_step(k: KeyEvent, line_empty: bool) -> KeyEvent {
 
 #[cfg(test)]
 mod tests {
-    use super::{ListHit, cand_window, group_count, hit_row, spawn_size, vi_step, viewport};
+    use super::{ListHit, cand_window, group_count, hit_row, mark_seen, spawn_size, vi_step, viewport};
     use crate::tui::rows::Chip;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::layout::Rect;
     use rl_proto::rule::{RuleKind, RuleStatus};
+
+    #[test]
+    fn what_is_seen_stops_being_news_on_screen_at_once() {
+        use rl_proto::methods::{Digest, DigestItem};
+        use rl_proto::types::{Run, RunKind};
+        let now: jiff::Timestamp = "2026-09-28T10:00:00Z".parse().unwrap();
+        let item = |id: &str| DigestItem {
+            run: Run::new(id, RunKind::Command, "t", vec!["true".into()], "/w", "/w", now),
+            summary: String::new(),
+            at: now,
+            unseen: true,
+            joined_by: None,
+            emitted: vec![],
+            cwd: None,
+        };
+        let mut d = Digest {
+            since: now,
+            items: vec![item("a"), item("b")],
+            decisions: vec![],
+            checkouts: vec![],
+            lost: vec![],
+        };
+        mark_seen(&mut d, &["a".to_string()]);
+        assert_eq!(d.items.iter().map(|i| i.unseen).collect::<Vec<_>>(), [false, true]);
+    }
 
     #[test]
     fn a_run_starts_at_the_size_a_join_gives_it() {
