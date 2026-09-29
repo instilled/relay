@@ -390,3 +390,116 @@ async fn a_global_rules_cwd_is_filled_in_and_joined_once() {
     }
     h.stop().await;
 }
+
+/// What a reaction heard is kept: the run it starts names the event in its
+/// `run.started`, and so does the question it asks in its `decision.raised`.
+/// Two failures a moment apart in one chain each have their own — which the
+/// chain and the clock alone could not tell apart.
+#[tokio::test]
+async fn a_reaction_keeps_the_event_it_fired_on() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = Home::at(tmp.path().join("home"));
+    home.ensure_dirs().unwrap();
+    let dir = std::fs::canonicalize(tmp.path()).unwrap();
+    write(
+        &home,
+        &format!(
+            "reactions:\n  \
+               told:\n    \
+                 on: run.failed\n    \
+                 run: 'echo \"$RELAY_EVENT_RUN $RELAY_EVENT_ID\" >> told.txt'\n    \
+                 throttle: '0'\n    \
+                 cwd: {d}\n  \
+               ask-me:\n    \
+                 on: run.failed\n    \
+                 ask:\n      \
+                   title: 'retry?'\n      \
+                   options: [{{ key: ignore }}]\n    \
+                 throttle: '0'\n    \
+                 cwd: {d}\n",
+            d = dir.display()
+        ),
+    );
+    let Some(h) = Harness::on(home.clone()) else {
+        eprintln!("skipping: rl-session not built (run `cargo test --workspace`)");
+        return;
+    };
+    let mut c = Conn::open(&home).await;
+
+    // Two runs in one chain fail together.
+    let first: Run = c
+        .ok(
+            "run.start",
+            json!({ "argv": ["sh", "-c", "exit 1"], "cwd": dir, "title": "tests" }),
+        )
+        .await;
+    let second: Run = c
+        .ok(
+            "run.start",
+            json!({ "argv": ["sh", "-c", "exit 2"], "cwd": dir, "title": "lint", "flow": first.flow }),
+        )
+        .await;
+    assert_eq!(second.flow, first.flow);
+    c.wait_terminal(&first.id).await;
+    c.wait_terminal(&second.id).await;
+    let mut fails = Vec::new();
+    for r in [&first, &second] {
+        let evs: Vec<Event> = c
+            .ok("event.list", json!({ "run": r.id, "kinds": ["run.failed"] }))
+            .await;
+        assert_eq!(evs.len(), 1, "{evs:?}");
+        fails.push(evs[0].clone());
+    }
+
+    // One run for each, naming the event it heard, as the command was told.
+    let started = wait_caused_by(&mut c, "reaction:told", 2).await;
+    assert_eq!(started.len(), 2);
+    let mut heard = Vec::new();
+    for r in &started {
+        assert_eq!(r.flow, first.flow, "in the chain");
+        let evs: Vec<Event> = c
+            .ok("event.list", json!({ "run": r.id, "kinds": ["run.started"] }))
+            .await;
+        heard.push(
+            evs[0]
+                .data
+                .as_ref()
+                .and_then(|d| d["event"].as_i64())
+                .expect("data.event"),
+        );
+        c.wait_terminal(&r.id).await;
+    }
+    heard.sort();
+    assert_eq!(heard, [fails[0].id, fails[1].id], "each failure has its own run");
+    let told = std::fs::read_to_string(dir.join("told.txt")).unwrap();
+    let mut told: Vec<&str> = told.lines().collect();
+    told.sort();
+    let mut want: Vec<String> = fails
+        .iter()
+        .map(|e| format!("{} {}", e.run.as_deref().unwrap(), e.id))
+        .collect();
+    want.sort();
+    assert_eq!(told, want, "RELAY_EVENT_ID is the same event");
+
+    // The question says who asked and about which, each time it is asked.
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let asked = loop {
+        let evs: Vec<Event> = c.ok("event.list", json!({ "kinds": ["decision.raised"] })).await;
+        if evs.len() >= 2 {
+            break evs;
+        }
+        assert!(Instant::now() < deadline, "asked {} times, wanted 2", evs.len());
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    let mut about: Vec<i64> = asked
+        .iter()
+        .map(|e| {
+            let d = e.data.as_ref().unwrap();
+            assert_eq!(d["reaction"], "ask-me", "{d}");
+            d["event"].as_i64().expect("data.event")
+        })
+        .collect();
+    about.sort();
+    assert_eq!(about, [fails[0].id, fails[1].id]);
+    h.stop().await;
+}

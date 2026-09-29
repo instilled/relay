@@ -58,9 +58,10 @@ impl Decisions {
         self.raise_by(spec, None).await
     }
 
-    /// The same, remembering the reaction behind it so that rule never
-    /// answers, or reacts to, its own question.
-    pub async fn raise_by(&self, spec: DecisionSpec, by_reaction: Option<&str>) -> Result<Decision> {
+    /// The same, remembering the reaction behind it — its name and the id of
+    /// the event it heard — so that rule never answers, or reacts to, its own
+    /// question, and what the question answers is known.
+    pub async fn raise_by(&self, spec: DecisionSpec, by_reaction: Option<(&str, i64)>) -> Result<Decision> {
         if spec.title.trim().is_empty() {
             bail!("a decision needs a title");
         }
@@ -146,8 +147,11 @@ impl Decisions {
                 self.ledger.call(move |c| decisions::insert(c, &d2)).await?
             }
         };
-        if let Some(name) = by_reaction {
+        let mut data = json!({ "decision": stored.id, "options": stored.options.iter().map(|o| &o.key).collect::<Vec<_>>(), "restated": restated });
+        if let Some((name, event)) = by_reaction {
             let (id, name) = (stored.id.clone(), name.to_string());
+            data["reaction"] = json!(name);
+            data["event"] = json!(event);
             self.ledger
                 .call(move |c| decisions::set_by_reaction(c, &id, &name))
                 .await?;
@@ -156,7 +160,7 @@ impl Decisions {
             &stored,
             event_kind::DECISION_RAISED,
             format!("asks: {}", stored.title),
-            json!({ "decision": stored.id, "options": stored.options.iter().map(|o| &o.key).collect::<Vec<_>>(), "restated": restated }),
+            data,
         )
         .await?;
         info!(decision = stored.id, restated, "decision raised");

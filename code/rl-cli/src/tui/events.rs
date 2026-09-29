@@ -7,19 +7,20 @@
 //! - a schedule's firing is about the run it started (`schedule.fired`);
 //! - an answer names the runs its options started (`decision.taken`'s and
 //!   `decision.expired`'s `runs`);
-//! - a reaction's run carries its rule (`cause: reaction:<name>`) and the
-//!   chain the event's run was in (`flow`; its own id when the event had no
-//!   run). The event is the newest one before it in that chain of a kind the
-//!   rule listens for, within the five minutes the reactor still acts on;
-//! - a reaction's question is grouped `reaction:<name>` and names the event's
-//!   run. The event is the newest one of that run the rule listens for,
-//!   before it.
+//! - a reaction's run carries its rule (`cause: reaction:<name>`), and its
+//!   `run.started` names the event it fired on (`data.event`);
+//! - a reaction's question names its rule and the event it fired on
+//!   (`decision.raised`'s `reaction` and `event`).
 //!
-//! Which event a reaction fired on is not itself kept — it goes to the command
-//! in `RELAY_EVENT`, not into the ledger — so the last two are read back from
-//! those facts; `parent_run` is never set, and a rule that names its own
-//! `group:` asks questions that cannot be told from a run's own, so they stand
-//! on their own line only.
+//! Runs and questions from before reactions kept their event have no
+//! `event`, so theirs is read back from what was kept then: a reaction's run
+//! joined the chain the event's run was in (`flow`; its own id when the event
+//! had no run), and the event is the newest one before it in that chain of a
+//! kind the rule listens for, within the five minutes the reactor still acts
+//! on; a question was grouped `reaction:<name>` and named the event's run,
+//! and the event is the newest one of that run the rule listens for, before
+//! it. A rule that named its own `group:` then asked questions that cannot be
+//! told from a run's own, so those stand on their own line only.
 //!
 //! Pure: what was fetched in, rows and lines out. Fetching is the panel's.
 
@@ -139,6 +140,11 @@ impl Feed {
 /// One text field of an event's data.
 fn data_str<'a>(e: &'a Event, field: &str) -> Option<&'a str> {
     e.data.as_ref()?.get(field)?.as_str()
+}
+
+/// One whole-number field of an event's data.
+fn data_i64(e: &Event, field: &str) -> Option<i64> {
+    e.data.as_ref()?.get(field)?.as_i64()
 }
 
 /// The runs an event names: the one it is about, and the ones an answer
@@ -271,7 +277,7 @@ pub fn links(feed: &Feed, rules: &[Rule]) -> HashMap<i64, Vec<SetOff>> {
                 let fits = |t: &Event| {
                     flow_of(t) == chain && !own_doing(t, name) && listens(name, &t.kind).unwrap_or(chain.is_some())
                 };
-                if let Some(id) = before(i, &fits) {
+                if let Some(id) = data_i64(e, "event").or_else(|| before(i, &fits)) {
                     let s = SetOff::Reaction {
                         rule: name.clone(),
                         run: r.id.clone(),
@@ -281,18 +287,18 @@ pub fn links(feed: &Feed, rules: &[Rule]) -> HashMap<i64, Vec<SetOff>> {
             }
             event_kind::DECISION_RAISED => {
                 let Some(qid) = data_str(e, "decision") else { continue };
-                let Some(name) = feed
-                    .questions
-                    .get(qid)
-                    .and_then(|q| q.group.as_deref())
-                    .and_then(|g| g.strip_prefix("reaction:"))
-                else {
+                let Some(name) = data_str(e, "reaction").or_else(|| {
+                    feed.questions
+                        .get(qid)
+                        .and_then(|q| q.group.as_deref())
+                        .and_then(|g| g.strip_prefix("reaction:"))
+                }) else {
                     continue;
                 };
                 let fits = |t: &Event| {
                     t.run == e.run && !own_doing(t, name) && listens(name, &t.kind).unwrap_or(e.run.is_some())
                 };
-                if let Some(id) = before(i, &fits) {
+                if let Some(id) = data_i64(e, "event").or_else(|| before(i, &fits)) {
                     let s = SetOff::Question {
                         rule: name.to_string(),
                         question: qid.to_string(),
@@ -846,6 +852,70 @@ mod tests {
             &[reaction("notify", &["run.finished"]), reaction("ask-me", &["run.*"])],
         );
         assert!(l[&2].iter().all(|s| !matches!(s, SetOff::Reaction { .. })));
+    }
+
+    /// Two failures in one chain, a moment apart, and a rule that ran for
+    /// each and asked about the first: newest first, as they are read. With
+    /// `kept`, the runs and the question name the event they fired on, as
+    /// they do now; without, as they did before.
+    fn two_failures(kept: bool) -> Feed {
+        let on = |e: Event, id: i64| if kept { with(e, json!({ "event": id })) } else { e };
+        let mut asked = json!({ "decision": "q1" });
+        if kept {
+            asked["reaction"] = json!("ask-me");
+            asked["event"] = json!(1);
+        }
+        let mut f = Feed::default();
+        f.newer(
+            vec![
+                ev(1, "00:05", "run.failed", Some("a"), "exit 1"),
+                ev(2, "00:05", "run.failed", Some("b"), "exit 2"),
+                on(ev(3, "00:06", "run.started", Some("r1"), "started `echo reacted`"), 1),
+                on(ev(4, "00:06", "run.started", Some("r2"), "started `echo reacted`"), 2),
+                with(ev(5, "00:06", "decision.raised", Some("a"), "asks: retry?"), asked),
+            ],
+            PAGE as usize,
+        );
+        for r in [
+            run("a", "cargo test", Cause::Manual, "a"),
+            run("b", "cargo clippy", Cause::Manual, "a"),
+            run("r1", "echo reacted", Cause::Reaction("notify".into()), "a"),
+            run("r2", "echo reacted", Cause::Reaction("notify".into()), "a"),
+        ] {
+            f.runs.insert(r.id.clone(), r);
+        }
+        // Its own group: nothing but what the event says ties it to a rule.
+        f.questions
+            .insert("q1".into(), question("q1", Some("a"), Some("retries"), "retry?"));
+        f
+    }
+
+    #[test]
+    fn a_reaction_that_kept_its_event_is_linked_to_that_one() {
+        let reacted = |run: &str| SetOff::Reaction {
+            rule: "notify".into(),
+            run: run.into(),
+        };
+        let l = links(&two_failures(true), &rules_());
+        assert_eq!(
+            l[&1],
+            [
+                reacted("r1"),
+                SetOff::Question {
+                    rule: "ask-me".into(),
+                    question: "q1".into()
+                }
+            ],
+            "the first failure: its own run, and the question about it, though the second came after"
+        );
+        assert_eq!(l[&2], [reacted("r2")], "the second: its own run");
+
+        // Without it, as runs from before were kept: read back from the chain,
+        // both land on the newest failure, and a question grouped its own way
+        // stands alone.
+        let l = links(&two_failures(false), &rules_());
+        assert_eq!(l[&2], [reacted("r1"), reacted("r2")]);
+        assert!(!l.contains_key(&1));
     }
 
     #[test]

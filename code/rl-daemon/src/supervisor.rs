@@ -248,6 +248,12 @@ impl Supervisor {
     /// Spawns the holder, records the run, attaches. Returns once the run is
     /// in the ledger with its holder ready.
     pub async fn start(self: &Arc<Self>, spec: RunSpec) -> Result<Run> {
+        self.start_on(spec, None).await
+    }
+
+    /// The same, for a run an event set off: `event` is that event's id, kept
+    /// in the run's `run.started` (`data.event`) so what started it is known.
+    pub async fn start_on(self: &Arc<Self>, spec: RunSpec, event: Option<i64>) -> Result<Run> {
         if spec.argv.is_empty() {
             bail!("argv is empty");
         }
@@ -365,8 +371,12 @@ impl Supervisor {
             attached_at: Some(now),
             closed_at: None,
         };
-        let started = NewEvent::for_run(&run, now, event_kind::RUN_STARTED, format!("started `{}`", run.title))
-            .with_data(json!({ "argv": run.argv, "cwd": run.cwd, "tty": hello.tty, "pid": hello.pid, "cli": run.cli }));
+        let mut data = json!({ "argv": run.argv, "cwd": run.cwd, "tty": hello.tty, "pid": hello.pid, "cli": run.cli });
+        if let Some(id) = event {
+            data["event"] = json!(id);
+        }
+        let started =
+            NewEvent::for_run(&run, now, event_kind::RUN_STARTED, format!("started `{}`", run.title)).with_data(data);
         self.ledger
             .call({
                 let run = run.clone();
