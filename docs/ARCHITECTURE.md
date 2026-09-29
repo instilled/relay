@@ -694,7 +694,9 @@ nothing when there is none.
 it wants (`run.failed`, `run.*`, `*`), may narrow by `where` (the run's tag, cause, cli, or the
 event's group), and fills `{summary}`, `{title}`, `{run}`, `{cwd}` (the folder the event's run ran
 in), `{data.x}` and the rest into whatever it runs, and into its `cwd`. The whole event is in the
-child's environment as `RELAY_EVENT`. Where it runs (`reactions::run_dir`): a workspace's rule in
+child's environment as `RELAY_EVENT`, its id as `RELAY_EVENT_ID`; the run's `run.started` names it
+too (`data.event`), as a question's `decision.raised` names the rule and the event
+(`data.reaction`, `data.event`). Where it runs (`reactions::run_dir`): a workspace's rule in
 its folder; a global rule where its `cwd` says, and with none where the event happened — the
 folder the event's run ran in while that is still there, else the event's workspace, else the
 Relay home. A relative `cwd` is under that same folder (the workspace's, or the event's), joined
@@ -945,17 +947,21 @@ Under an event, indented, is what it set off — each read from what the ledger 
 - `↳ ↻ nightly → started 'make'`: a `schedule.fired` is about the run it started;
 - `↳ ▶ the answer started '…'`: a `decision.taken` (or `expired`) names the runs its options
   started (`data.runs`);
-- `↳ ⚡ notify → started '…'`: a reaction's run carries its rule (`cause: reaction:<name>`) and
-  the chain the event's run was in (`flow`, its own id when the event had no run). Its event is
-  the newest one before it, in that chain, of a kind the rule listens for (`on:`), within the
-  five minutes the reactor still acts on — or the newest with no run, when the chain is its own;
-- `↳ ? ask-me asked '…'`: a reaction's question is grouped `reaction:<name>` and names the
-  event's run; its event is the newest of that run the rule listens for, before it.
+- `↳ ⚡ notify → started '…'`: a reaction's run carries its rule (`cause: reaction:<name>`), and
+  its `run.started` names the event it fired on (`data.event`);
+- `↳ ? ask-me asked '…'`: a reaction's question names its rule and the event it fired on
+  (`decision.raised`'s `data.reaction` and `data.event`).
 
-Which event a reaction fired on is not itself kept — it goes to the command as `RELAY_EVENT`, not
-into the ledger — so those two are read back from the facts that are, and `parent_run` is never
-set. A rule that names its own `group:` asks questions that cannot be told from a run's own: they
-stand on their own `decision.raised` line. `enter` on an event with a run goes to the list with
+Those two are exact for what reactions do now. Runs and questions from before reactions kept
+their event have no `data.event`, and theirs is read back from what was kept then — so, for
+those only, two matching events close together can be told apart wrongly. A reaction's run joined
+the chain the event's run was in (`flow`, its own id when the event had no run), and its event is
+the newest one before it, in that chain, of a kind the rule listens for (`on:`), within the five
+minutes the reactor still acts on — or the newest with no run, when the chain is its own. A
+reaction's question was grouped `reaction:<name>` and named the event's run; its event is the
+newest of that run the rule listens for, before it, and one from a rule that named its own
+`group:` cannot be told from a run's own, so it stands on its own `decision.raised` line.
+`parent_run` is never set. `enter` on an event with a run goes to the list with
 the cursor on it (on its job's row when it folded into one; the search and the lens give way
 when they hide it; an archived run, or one gone from the list, is said so and the view stays).
 `enter` on a line a rule set off opens the graph on that rule, as `^g` there does, and `esc`
