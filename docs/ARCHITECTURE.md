@@ -294,9 +294,9 @@ oldest first, so what needs you never hides under a project's name; then pinned 
 grouped by the folder they belong to, the folders in order of name so each keeps its place, and
 inside one runs by attention; and named — a workspace by the
 name it was registered under, a cause as "schedule nightly" or "rule tests-failed", never an id.
-A row is an icon for what it is — `🤖` an agent, `🐚` a shell, `🔧` a command, `⏰` a job, `❓` a
-question, each two columns wide by default (no variation selector) so every title starts in the
-same column — then the title, the state as a word in its colour (`needs you` and `blocked` amber,
+A row is an icon for what it is — `✦` an agent, `❯` a shell (in the prompt's green), `▸` a
+command, `↻` a job, `?` a question (amber) — one quiet glyph, one column wide in every font, so
+every title starts in the same column, and dim once the run has ended — then the title, the state as a word in its colour (`needs you` and `blocked` amber,
 `failed` red, `done` and `stopped` dim; a shell at rest says nothing there, its icon says it),
 the summary to the edge, and the ref and the age at the right — with `⎇ feat` there too when the
 run started on another branch than the one its folder is on now. A run that ended well and raised
@@ -335,7 +335,7 @@ writes a global rule, `/edit` opens the home's schedules, and `^x`, `^r` and `/s
 `everywhere is not a project` and do nothing; `in:everywhere` finds it. `^g` (or `/graph`) from anywhere, an empty list too, shows them wired
 with everything else, and `/edit` where nothing names a folder, or `/edit schedules global`
 from anywhere, opens the home's file. Runs a schedule or a rule
-started fold, once ended, into one line per job — `⏰`, the name, how the last few went in the
+started fold, once ended, into one line per job — `↻`, the name, how the last few went in the
 state column (`··×·`, oldest first, a failure red) and what the last firing came to in its own
 words — so a job firing every thirty seconds is a row,
 not a screen, and it never grows into one: `enter` (or `^o`) puts its firings in the pane, as on
@@ -942,14 +942,14 @@ fetching is the panel's).
 
 Under an event, indented, is what it set off — each read from what the ledger keeps:
 
-- `↳ ⏰ nightly → started 'make'`: a `schedule.fired` is about the run it started;
+- `↳ ↻ nightly → started 'make'`: a `schedule.fired` is about the run it started;
 - `↳ ▶ the answer started '…'`: a `decision.taken` (or `expired`) names the runs its options
   started (`data.runs`);
 - `↳ ⚡ notify → started '…'`: a reaction's run carries its rule (`cause: reaction:<name>`) and
   the chain the event's run was in (`flow`, its own id when the event had no run). Its event is
   the newest one before it, in that chain, of a kind the rule listens for (`on:`), within the
   five minutes the reactor still acts on — or the newest with no run, when the chain is its own;
-- `↳ ❓ ask-me asked '…'`: a reaction's question is grouped `reaction:<name>` and names the
+- `↳ ? ask-me asked '…'`: a reaction's question is grouped `reaction:<name>` and names the
   event's run; its event is the newest of that run the rule listens for, before it.
 
 Which event a reaction fired on is not itself kept — it goes to the command as `RELAY_EVENT`, not

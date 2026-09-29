@@ -191,9 +191,9 @@ impl SetOff {
                     .questions
                     .get(question)
                     .map_or(question.as_str(), |q| q.title.as_str());
-                format!("❓ {rule} asked '{t}'")
+                format!("? {rule} asked '{t}'")
             }
-            SetOff::Schedule { rule, run } => format!("⏰ {rule} → started '{}'", title(run)),
+            SetOff::Schedule { rule, run } => format!("↻ {rule} → started '{}'", title(run)),
             SetOff::Answer { run } => format!("▶ the answer started '{}'", title(run)),
         }
     }
@@ -898,12 +898,12 @@ mod tests {
             text[8]
         );
         assert!(
-            text[9].trim_start().starts_with("↳ ❓ ask-me asked 'retry?'"),
+            text[9].trim_start().starts_with("↳ ? ask-me asked 'retry?'"),
             "{}",
             text[9]
         );
         assert!(
-            text[4].trim_start().starts_with("↳ ⏰ nightly → started 'make'"),
+            text[4].trim_start().starts_with("↳ ↻ nightly → started 'make'"),
             "{}",
             text[4]
         );
