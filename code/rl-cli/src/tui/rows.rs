@@ -16,13 +16,17 @@
 //! Before all of it, the questions waiting on you, from every project, oldest
 //! first — what needs you does not hide under a project's name — then pinned
 //! runs, in the order they were pinned.
+//!
+//! What you hid (`/hide`: a run, a job, a project and everything in it) is
+//! off the list and in the `hidden` lens instead — unless it comes to need
+//! you after you hid it: then it comes through, just after the questions.
 
 use super::query::{Named, Query, Subject};
 use crate::rank;
 use jiff::{SignedDuration, Timestamp};
 use rl_core::time::fmt_age;
 use rl_proto::decision::Decision;
-use rl_proto::methods::{Digest, DigestItem};
+use rl_proto::methods::{Digest, DigestItem, Hidden};
 use rl_proto::rule::{Rule, RuleKind, RuleStatus};
 use rl_proto::types::{Cause, Checkout, Confidence, Run, RunKind, RunState};
 use std::collections::{HashMap, HashSet};
@@ -34,7 +38,8 @@ pub const RECENT: SignedDuration = SignedDuration::from_hours(24);
 /// Which slice of the list you are looking at. Not exclusive: a scheduled
 /// agent is both an agent and a job, and shows under either — the lens is the
 /// question you are asking, not a partition. Questions ignore it; they are
-/// what needs you, whatever slice you are in.
+/// what needs you, whatever slice you are in. `hidden` is the one that is a
+/// partition: what you hid, and only that, which no other lens shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Lens {
     #[default]
@@ -42,11 +47,12 @@ pub enum Lens {
     Agents,
     Jobs,
     Reactions,
+    Hidden,
 }
 
 impl Lens {
     /// In the order the strip lists them, and cycles through them.
-    pub const ALL: [Lens; 4] = [Lens::All, Lens::Agents, Lens::Jobs, Lens::Reactions];
+    pub const ALL: [Lens; 5] = [Lens::All, Lens::Agents, Lens::Jobs, Lens::Reactions, Lens::Hidden];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -54,14 +60,16 @@ impl Lens {
             Lens::Agents => "agents",
             Lens::Jobs => "jobs",
             Lens::Reactions => "reactions",
+            Lens::Hidden => "hidden",
         }
     }
 
     /// Whether a run belongs in this lens — by what it is (agents) or by what
-    /// started it (jobs are scheduled, reactions are event-driven).
+    /// started it (jobs are scheduled, reactions are event-driven). Whether it
+    /// is hidden is `build`'s to say.
     fn keeps(self, r: &Run) -> bool {
         match self {
-            Lens::All => true,
+            Lens::All | Lens::Hidden => true,
             Lens::Agents => r.kind == RunKind::Agent,
             Lens::Jobs => matches!(r.cause, Cause::Schedule(_)),
             Lens::Reactions => matches!(r.cause, Cause::Reaction(_)),
@@ -161,6 +169,66 @@ pub fn everywhere_run(r: &Run, names: &Names, rules: &[Rule]) -> bool {
         && !named
             .iter()
             .any(|x| !x.is_global() && Path::new(x.scope()) == r.workspace)
+}
+
+/// The group a run is shown under: the `everywhere` one, or its ref, else
+/// its folder.
+fn group_key(r: &Run, names: &Names, rules: &[Rule]) -> String {
+    if everywhere_run(r, names, rules) {
+        EVERYWHERE_KEY.to_string()
+    } else {
+        r.place_key()
+    }
+}
+
+/// The key a header is hidden by, as its row's own: `g:<folder>`, or
+/// `g:everywhere`.
+fn head_key(r: &Run, group: &str) -> String {
+    if group == EVERYWHERE_KEY {
+        format!("g:{EVERYWHERE}")
+    } else {
+        format!("g:{}", r.workspace.display())
+    }
+}
+
+/// The job a run fires for, by its row's key, whether or not it has ended.
+fn job_key_of(r: &Run, group: &str) -> Option<String> {
+    match &r.cause {
+        Cause::Schedule(n) => Some(job_key(RuleKind::Schedule, n, group)),
+        Cause::Reaction(n) => Some(job_key(RuleKind::Reaction, n, group)),
+        _ => None,
+    }
+}
+
+/// What hides a run from the list — its own `/hide`, its project's, its
+/// job's — and since when: the latest of them, the last time you said so.
+/// `None`: it is on the list.
+pub fn hidden_since(r: &Run, names: &Names, rules: &[Rule], hidden: &[Hidden]) -> Option<Timestamp> {
+    let group = group_key(r, names, rules);
+    let at = |k: &str| hidden.iter().find(|h| h.key == k).map(|h| h.at);
+    let head = at(&head_key(r, &group));
+    let job = job_key_of(r, &group).and_then(|k| at(&k));
+    [r.hidden_at, head, job].into_iter().flatten().max()
+}
+
+/// Whether what hides a run is its project or its job rather than its own
+/// `/hide` — what bringing the run back alone cannot undo.
+pub fn hidden_with(r: &Run, names: &Names, rules: &[Rule], hidden: &[Hidden]) -> Option<&'static str> {
+    let group = group_key(r, names, rules);
+    let has = |k: &str| hidden.iter().any(|h| h.key == k);
+    if has(&head_key(r, &group)) {
+        Some("its project")
+    } else if job_key_of(r, &group).is_some_and(|k| has(&k)) {
+        Some("its job")
+    } else {
+        None
+    }
+}
+
+/// A hidden run that has come to need you since it was hidden — asking,
+/// blocked or failed after you said so. It comes through to the list.
+pub fn comes_through(r: &Run, since: Timestamp) -> bool {
+    matches!(r.state, RunState::NeedsInput | RunState::Blocked | RunState::Failed) && r.state_at > since
 }
 
 /// A checkout on a header: `⎇ main · PR #95 · 3 worktrees` — the badges after
@@ -597,6 +665,9 @@ fn run_subject<'a>(i: &'a DigestItem, project: &'a str) -> Subject<'a> {
     if r.pinned_at.is_some() {
         is.push("pinned");
     }
+    if i.run.hidden_at.is_some() {
+        is.push("hidden");
+    }
     if i.unseen {
         is.push("new");
     }
@@ -714,6 +785,10 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
     // kept on purpose, so neither a day nor a slice takes them away. Only the
     // filter does, as with anything else.
     let mut pinned: Vec<&'a DigestItem> = Vec::new();
+    // What you hid is off the list, and only it is in the `hidden` lens; what
+    // of it has come to need you since comes through, after the questions.
+    let hidden_lens = cx.lens == Lens::Hidden;
+    let mut through: Vec<&'a DigestItem> = Vec::new();
     // Questions lead the list, whichever project asked them.
     let mut asked: Vec<&'a Decision> = Vec::new();
     for q in &d.decisions {
@@ -744,6 +819,19 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
     }
     for i in &d.items {
         let r = &i.run;
+        match hidden_since(r, names, cx.rules, &d.hidden) {
+            Some(since) if !hidden_lens => {
+                if comes_through(r, since)
+                    && cx.lens.keeps(r)
+                    && query.hits(&run_subject(i, &names.group(&r.place_key())))
+                {
+                    through.push(i);
+                }
+                continue;
+            }
+            None if hidden_lens => continue,
+            _ => {}
+        }
         if r.pinned_at.is_some() {
             if query.hits(&run_subject(i, &names.group(&r.place_key()))) {
                 pinned.push(i);
@@ -824,7 +912,9 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
     let shown: HashSet<PathBuf> = groups.iter().map(|g| g.workspace.clone()).collect();
     pinned.sort_by_key(|i| (i.run.pinned_at, i.run.id.clone()));
     asked.sort_by_key(|q| (q.created_at, q.id.clone()));
+    through.sort_by_key(|i| (rank::score(&i.run), i.run.state_at, i.run.id.clone()));
     let mut rows: Vec<Row<'a>> = asked.into_iter().map(Row::Question).collect();
+    rows.extend(through.into_iter().map(Row::Run));
     rows.extend(pinned.into_iter().map(Row::Run));
     // Projects in order of name, so each keeps its place as work comes and
     // goes: what needs you says so with its marks and in the headline, not by
@@ -879,8 +969,31 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
     // A registered folder is always on the list, under every lens, even before
     // anything has run there — so you can select it, read its stats, edit its
     // rules or open its shell. A lens narrows what is shown inside projects,
-    // never which projects there are; only the filter takes them away.
-    for p in names.paths() {
+    // never which projects there are; only the filter takes them away — and
+    // `/hide`, which puts a project's header in the `hidden` lens, registered
+    // or not, and there only.
+    let hidden_heads: Vec<&str> = d.hidden.iter().filter_map(|h| h.key.strip_prefix("g:")).collect();
+    let heads: Vec<PathBuf> = if hidden_lens {
+        hidden_heads
+            .iter()
+            .filter(|k| **k != EVERYWHERE)
+            .map(PathBuf::from)
+            .collect()
+    } else {
+        names
+            .paths()
+            .into_iter()
+            .filter(|p| !hidden_heads.iter().any(|k| Path::new(k) == p))
+            .collect()
+    };
+    if hidden_lens
+        && everywhere.is_empty()
+        && hidden_heads.contains(&EVERYWHERE)
+        && query.hits_project(&[EVERYWHERE], None)
+    {
+        everywhere = vec![Row::Group(Head::everywhere())];
+    }
+    for p in heads {
         if shown.contains(&p) {
             continue;
         }
@@ -1066,6 +1179,7 @@ mod tests {
             decisions: vec![],
             checkouts: vec![],
             lost: lost.iter().map(|s| s.to_string()).collect(),
+            hidden: Vec::new(),
         };
         assert_eq!(
             lost_note(&d(&[], vec![agent.clone()])),
@@ -1165,6 +1279,7 @@ mod tests {
             decisions: vec![question("q1", api, None, at)],
             checkouts: Vec::new(),
             lost: Vec::new(),
+            hidden: Vec::new(),
         };
         let names = Names::new([
             (PathBuf::from(api), "api".to_string()),
@@ -1204,6 +1319,7 @@ mod tests {
             decisions: vec![],
             checkouts: Vec::new(),
             lost: Vec::new(),
+            hidden: Vec::new(),
         };
         let names = Names::new([
             (PathBuf::from(api), "api".to_string()),
@@ -1247,6 +1363,7 @@ mod tests {
             decisions: vec![],
             checkouts: Vec::new(),
             lost: Vec::new(),
+            hidden: Vec::new(),
         };
         let names = Names::new([(PathBuf::from(ws), "relay".to_string())]);
         let runs = |lens| {
@@ -1295,6 +1412,7 @@ mod tests {
             decisions: vec![question("q1", "/home/f/relay", Some("fail1"), "2026-09-10T11:31:00Z")],
             checkouts: Vec::new(),
             lost: Vec::new(),
+            hidden: Vec::new(),
         };
         let names = Names::new([
             (PathBuf::from("/home/f/relay"), "relay".to_string()),
@@ -1311,6 +1429,165 @@ mod tests {
         assert_eq!(&keys(&jobs)[..3], ["q:q1", "r:old01", "r:shell"]);
         // The filter does, and matches a pin by its folder too.
         assert_eq!(keys(&build_with(&d, &names, "api", now)), ["r:old01", "[api]"]);
+    }
+
+    fn hid(key: &str, at: &str) -> Hidden {
+        Hidden {
+            key: key.into(),
+            at: at.parse().unwrap(),
+        }
+    }
+
+    #[test]
+    fn what_you_hid_is_only_in_the_hidden_lens() {
+        let now: Timestamp = "2026-09-10T12:00:00Z".parse().unwrap();
+        let (api, relay, scratch) = ("/home/f/api", "/home/f/relay", "/home/f/scratch");
+        let at = "2026-09-10T11:00:00Z";
+        let mut mine = item("mine", RunState::Working, relay, at, false);
+        mine.run.hidden_at = Some("2026-09-10T11:10:00Z".parse().unwrap());
+        let mut fired = item("fired", RunState::Finished, relay, at, false);
+        fired.run.cause = Cause::Schedule("nightly".into());
+        let mut pinned = item("pinned", RunState::Working, relay, at, false);
+        pinned.run.pinned_at = Some(at.parse().unwrap());
+        pinned.run.hidden_at = Some("2026-09-10T11:10:00Z".parse().unwrap());
+        let d = Digest {
+            since: now,
+            items: vec![
+                mine,
+                item("kept", RunState::Working, relay, at, false),
+                fired,
+                pinned,
+                item("inapi", RunState::Finished, api, at, false),
+                item("loose", RunState::Working, scratch, at, false),
+            ],
+            decisions: Vec::new(),
+            checkouts: Vec::new(),
+            lost: Vec::new(),
+            hidden: vec![
+                // A registered project, a folder that is not one, a job, and
+                // a folder with nothing on the list at all.
+                hid(&format!("g:{api}"), "2026-09-10T11:10:00Z"),
+                hid(&format!("g:{scratch}"), "2026-09-10T11:10:00Z"),
+                hid(&job_key(RuleKind::Schedule, "nightly", relay), "2026-09-10T11:10:00Z"),
+                hid("g:/home/f/gone", "2026-09-10T11:10:00Z"),
+            ],
+        };
+        let names = Names::new([
+            (PathBuf::from(api), "api".to_string()),
+            (PathBuf::from(relay), "relay".to_string()),
+        ]);
+        // Off the list, whatever the lens: the project's header too, the pin
+        // too. Nothing hidden needs you, so nothing comes through.
+        assert_eq!(keys(&lens_build(&d, &names, Lens::All, now)), ["[relay]", "r:kept"]);
+        assert_eq!(keys(&lens_build(&d, &names, Lens::Agents, now)), ["[relay]", "r:kept"]);
+        assert_eq!(keys(&lens_build(&d, &names, Lens::Jobs, now)), ["[relay]"]);
+        // The hidden lens is that and only that, laid out the same way: a
+        // hidden project's header, registered or not, even with nothing
+        // under it; the job folded as ever; a hidden pin in the pinned band.
+        assert_eq!(
+            keys(&lens_build(&d, &names, Lens::Hidden, now)),
+            [
+                "r:pinned",
+                "[api]",
+                "r:inapi",
+                "[gone]",
+                "[relay]",
+                "j:schedule:nightly@/home/f/relay",
+                "r:mine",
+                "[scratch]",
+                "r:loose",
+            ]
+        );
+        // The search reads the word too.
+        assert_eq!(
+            keys(&build(
+                &d,
+                &Context {
+                    names: &names,
+                    rules: &[],
+                    filter: "is:hidden",
+                    lens: Lens::Hidden,
+                    now,
+                },
+            )),
+            ["r:pinned", "[relay]", "r:mine"]
+        );
+        assert_eq!(Lens::ALL.last(), Some(&Lens::Hidden), "the lens strip ends in hidden");
+    }
+
+    #[test]
+    fn what_you_hid_comes_through_when_it_comes_to_need_you() {
+        let now: Timestamp = "2026-09-10T12:00:00Z".parse().unwrap();
+        let (api, relay) = ("/home/f/api", "/home/f/relay");
+        let t = |s: &str| -> Timestamp { s.parse().unwrap() };
+        // Hidden while it worked, and failed after: it comes through.
+        let mut failed = item("failed", RunState::Failed, relay, "2026-09-10T11:00:00Z", true);
+        failed.run.hidden_at = Some(t("2026-09-10T10:00:00Z"));
+        // Hidden once it had failed: that was you saying so; it stays away.
+        let mut seen = item("seen", RunState::Failed, relay, "2026-09-10T11:00:00Z", true);
+        seen.run.hidden_at = Some(t("2026-09-10T11:30:00Z"));
+        // In a hidden project: one that asks after comes through, one still
+        // working does not.
+        let asks = item("asks", RunState::NeedsInput, api, "2026-09-10T10:30:00Z", true);
+        let busy = item("busy", RunState::Working, api, "2026-09-10T10:30:00Z", false);
+        // A hidden job's firing that failed after comes through as a run.
+        let mut firing = item("firing", RunState::Failed, relay, "2026-09-10T11:20:00Z", true);
+        firing.run.cause = Cause::Schedule("nightly".into());
+        let d = Digest {
+            since: now,
+            items: vec![failed, seen, asks, busy, firing],
+            decisions: vec![question("q1", relay, None, "2026-09-10T11:31:00Z")],
+            checkouts: Vec::new(),
+            lost: Vec::new(),
+            hidden: vec![
+                hid(&format!("g:{api}"), "2026-09-10T10:00:00Z"),
+                hid(&job_key(RuleKind::Schedule, "nightly", relay), "2026-09-10T10:00:00Z"),
+            ],
+        };
+        let names = Names::new([
+            (PathBuf::from(api), "api".to_string()),
+            (PathBuf::from(relay), "relay".to_string()),
+        ]);
+        let all = lens_build(&d, &names, Lens::All, now);
+        // After the questions, what asks before what failed, then in the
+        // order it came; its project stays hidden.
+        assert_eq!(keys(&all), ["q:q1", "r:asks", "r:failed", "r:firing", "[relay]"]);
+        let (_, need, ..) = counts(&all);
+        assert_eq!(need, 3, "the headline counts them as needing you");
+        // A lens still narrows it, as it would any run that needs you.
+        assert_eq!(
+            keys(&lens_build(&d, &names, Lens::Jobs, now)),
+            ["q:q1", "r:firing", "[relay]"]
+        );
+        // In the hidden lens they are in their places, not above them: the
+        // firing folds into its job again.
+        assert_eq!(
+            keys(&lens_build(&d, &names, Lens::Hidden, now)),
+            [
+                "q:q1",
+                "[api]",
+                "r:asks",
+                "r:busy",
+                "[relay]",
+                "j:schedule:nightly@/home/f/relay",
+                "r:failed",
+                "r:seen"
+            ]
+        );
+        // Hiding it again is how it goes back: the time moves on.
+        let mut again = d.clone();
+        again.items[0].run.hidden_at = Some(t("2026-09-10T11:45:00Z"));
+        assert_eq!(
+            keys(&lens_build(&again, &names, Lens::All, now)),
+            ["q:q1", "r:asks", "r:firing", "[relay]"]
+        );
+        let r = &d.items[2].run;
+        assert_eq!(hidden_since(r, &names, &[], &d.hidden), Some(t("2026-09-10T10:00:00Z")));
+        assert_eq!(hidden_with(r, &names, &[], &d.hidden), Some("its project"));
+        assert_eq!(hidden_with(&d.items[4].run, &names, &[], &d.hidden), Some("its job"));
+        assert_eq!(hidden_with(&d.items[0].run, &names, &[], &d.hidden), None);
+        assert!(comes_through(r, t("2026-09-10T10:00:00Z")));
+        assert!(!comes_through(r, t("2026-09-10T10:30:00Z")), "not after, at");
     }
 
     #[test]
@@ -1346,6 +1623,7 @@ mod tests {
             decisions: vec![],
             checkouts: vec![co("/home/f/api", "main", 3), co("/home/f/web", "main", 0)],
             lost: Vec::new(),
+            hidden: Vec::new(),
         };
         let names = Names::default();
         let rows = build_with(&d, &names, "", now);
@@ -1418,6 +1696,7 @@ mod tests {
             decisions: vec![question("q1", "/home/f/relay", Some("fail1"), "2026-09-10T11:01:00Z")],
             checkouts: Vec::new(),
             lost: Vec::new(),
+            hidden: Vec::new(),
         };
         let names = Names::new([(PathBuf::from("/home/f/relay"), "relay".to_string())]);
         let rows = build_with(&d, &names, "", now);
@@ -1457,6 +1736,7 @@ mod tests {
             decisions: vec![],
             checkouts: Vec::new(),
             lost: Vec::new(),
+            hidden: Vec::new(),
         };
         let names = Names::new([
             (PathBuf::from("/home/f/relay"), "relay".to_string()),
@@ -1488,6 +1768,7 @@ mod tests {
             decisions: vec![],
             checkouts: Vec::new(),
             lost: Vec::new(),
+            hidden: Vec::new(),
         };
         let rules = [schedule("global", "pulse", true, Some("2026-09-10T12:00:30Z"))];
         let rows = build(
@@ -1581,6 +1862,7 @@ mod tests {
             decisions: vec![],
             checkouts: Vec::new(),
             lost: Vec::new(),
+            hidden: Vec::new(),
         };
         let names = Names::new([(PathBuf::from("/home/f/relay"), "relay".to_string())]);
         let rows = build_with(&d, &names, "", now);
@@ -1626,6 +1908,7 @@ mod tests {
             decisions: vec![],
             checkouts: Vec::new(),
             lost: Vec::new(),
+            hidden: Vec::new(),
         };
         let rows = build_with(&d2, &names, "", now);
         assert_eq!(
@@ -1661,6 +1944,7 @@ mod tests {
             decisions: vec![],
             checkouts: Vec::new(),
             lost: Vec::new(),
+            hidden: Vec::new(),
         };
         let names = Names::new([(PathBuf::from("/home/f/relay"), "relay".to_string())]);
         // "exit 1" only appears in the failing run's own summary, not in the
@@ -1768,6 +2052,7 @@ mod tests {
             decisions: vec![],
             checkouts: Vec::new(),
             lost: Vec::new(),
+            hidden: Vec::new(),
         };
         let names = Names::new([("/home/f/relay".into(), "relay".to_string())]);
         let build_rules = |rules: &[Rule]| {
@@ -1924,6 +2209,7 @@ mod tests {
             decisions: vec![],
             checkouts: Vec::new(),
             lost: Vec::new(),
+            hidden: Vec::new(),
         };
         // The shell leads, though both of the others outrank it by state and
         // both are newer than it.
@@ -1941,6 +2227,7 @@ mod tests {
             decisions: vec![],
             checkouts: Vec::new(),
             lost: Vec::new(),
+            hidden: Vec::new(),
         };
         // Where you work gives way to what wants you.
         assert_eq!(keys(&build_with(&d, &names, "", now)), ["[relay]", "r:asks", "r:shell"]);
@@ -1974,6 +2261,7 @@ mod tests {
             decisions: vec![],
             checkouts: Vec::new(),
             lost: Vec::new(),
+            hidden: Vec::new(),
         };
         let rules = vec![
             schedule("global", "gchat-mentions", true, None),

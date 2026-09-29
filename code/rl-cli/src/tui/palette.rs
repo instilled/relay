@@ -17,6 +17,7 @@ pub enum Cmd {
     Shell,
     Rename,
     Pin,
+    Hide,
     Pane,
     Graph,
     Events,
@@ -115,6 +116,13 @@ pub const ALL: &[Command] = &[
         cmd: Cmd::Pin,
     },
     Command {
+        name: "hide",
+        args: "",
+        words: &[],
+        what: "take a run, a job or a project off the list, never stopping it; in the hidden lens, bring it back",
+        cmd: Cmd::Hide,
+    },
+    Command {
         name: "pane",
         args: "[full]",
         words: &[&["full"]],
@@ -193,8 +201,8 @@ pub const ALL: &[Command] = &[
     },
     Command {
         name: "lens",
-        args: "all|agents|jobs|reactions",
-        words: &[&["all", "agents", "jobs", "reactions"]],
+        args: "all|agents|jobs|reactions|hidden",
+        words: &[&["all", "agents", "jobs", "reactions", "hidden"]],
         what: "show one kind of run inside the projects (tab steps through them)",
         cmd: Cmd::Lens,
     },
@@ -436,6 +444,8 @@ mod tests {
         assert_eq!(parse("/ren").unwrap().0.cmd, Cmd::Rename);
         assert_eq!(parse("/rel").unwrap().0.cmd, Cmd::Reload);
         assert_eq!(parse("/ev").unwrap().0.cmd, Cmd::Events);
+        assert_eq!(parse("/hi").unwrap().0.cmd, Cmd::Hide);
+        assert_eq!(parse("/he").unwrap().0.cmd, Cmd::Help);
         let (c, rest) = parse("/fi this").unwrap();
         assert_eq!(c.cmd, Cmd::Filter);
         assert_eq!(rest, "this");
