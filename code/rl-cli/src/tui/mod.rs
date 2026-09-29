@@ -399,9 +399,9 @@ fn hit_row(hit: &ListHit, col: u16, row: u16) -> Option<String> {
     hit.keys.get(line).cloned().flatten()
 }
 
-/// The icon slot: a space, a two-column icon, a space. Every row has one, so
+/// The icon slot: a space, a one-column icon, a space. Every row has one, so
 /// every title starts in the same column.
-const ICON_W: usize = 4;
+const ICON_W: usize = 3;
 /// The state column's width: `needs you~` and a job's marks both fit.
 const WORD_W: usize = 10;
 
@@ -411,9 +411,13 @@ fn state_col(tw: usize) -> usize {
     ICON_W + tw + 1
 }
 
-/// A row's icon, in its slot.
-fn icon_span(icon: &str) -> Span<'static> {
-    Span::raw(format!(" {icon} "))
+/// A row's icon, in its slot and its colour; `ended`, quiet.
+fn icon_span(icon: &str, ended: bool) -> Vec<Span<'static>> {
+    vec![
+        Span::raw(" "),
+        Span::styled(icon.to_string(), rows::icon_style(icon, ended)),
+        Span::raw(" "),
+    ]
 }
 
 /// One row of the list, to the width: icon, title, state, whatever goes
@@ -423,7 +427,7 @@ fn icon_span(icon: &str) -> Span<'static> {
 fn list_line(
     w: usize,
     tw: usize,
-    icon: &str,
+    icon: Vec<Span<'static>>,
     title: Span<'static>,
     word: Vec<Span<'static>>,
     summary: &str,
@@ -439,7 +443,8 @@ fn list_line(
     let fixed = state_col(tw) + WORD_W + 1 + before + right.chars().count() + 1;
     // The word, padded out to its column whatever it is made of.
     let used: usize = word.iter().map(Span::width).sum();
-    let mut spans = vec![icon_span(icon), title, Span::raw(" ")];
+    let mut spans = icon;
+    spans.extend([title, Span::raw(" ")]);
     spans.extend(word);
     spans.push(Span::raw(" ".repeat(WORD_W.saturating_sub(used) + 1)));
     spans.extend(lead);
@@ -4024,7 +4029,7 @@ impl App {
                     list_line(
                         w,
                         tw,
-                        rows::QUESTION,
+                        icon_span(rows::QUESTION, false),
                         Span::styled(fit(&title, tw), theme::name()),
                         vec![Span::styled("to decide", theme::needs())],
                         &summary,
@@ -4080,7 +4085,7 @@ impl App {
                     list_line(
                         w,
                         tw,
-                        rows::icon(r),
+                        icon_span(rows::icon(r), r.state.is_terminal()),
                         title,
                         vec![Span::styled(rows::run_words(r), style)],
                         summary,
@@ -4098,7 +4103,7 @@ impl App {
                     list_line(
                         w,
                         tw,
-                        rows::JOB,
+                        icon_span(rows::JOB, false),
                         title,
                         job_marks(j),
                         &j.summary(),
@@ -4747,7 +4752,7 @@ mod tests {
 
     #[test]
     fn headers_and_rows_keep_their_columns_whatever_the_lengths() {
-        use super::{header_line, list_line, state_col};
+        use super::{header_line, icon_span, list_line, state_col};
         use crate::tui::rows::{self, Head};
         use ratatui::text::Span;
         use rl_proto::types::Checkout;
@@ -4811,7 +4816,7 @@ mod tests {
             list_line(
                 w,
                 tw,
-                icon,
+                icon_span(icon, false),
                 Span::raw(crate::tui::rows::fit("title", tw)),
                 vec![Span::raw(word.to_string())],
                 "summary",
@@ -4822,7 +4827,7 @@ mod tests {
         };
         for (icon, word) in [(rows::AGENT, "needs you"), (rows::SHELL, ""), (rows::JOB, "·×··")] {
             let l = row(icon, word);
-            assert_eq!(col_of(&l, "title"), 4, "{l}");
+            assert_eq!(col_of(&l, "title"), 3, "{l}");
             assert_eq!(col_of(&l, "summary"), state_col(tw) + 11, "{l}");
             assert_eq!(l.width(), w, "{l}");
         }

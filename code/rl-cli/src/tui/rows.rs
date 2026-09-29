@@ -264,17 +264,36 @@ pub fn state_words(state: RunState, confidence: Confidence) -> String {
 
 pub use rl_proto::types::SHELL_TAG;
 
-/// The icon slot at the left of every row: what a thing is, in two columns —
-/// how it stands is its word's, and its colour. Only emoji that are wide by
-/// default (no variation selector), so every width table, ratatui's and
-/// tmux's alike, puts the title after them in the same column.
-pub const AGENT: &str = "🤖";
-pub const SHELL: &str = "🐚";
-pub const COMMAND: &str = "🔧";
-/// A schedule's or a rule's ended runs, folded into one row.
-pub const JOB: &str = "⏰";
+/// The icon slot at the left of every row: what a thing is, as one quiet
+/// glyph in a colour (`icon_style`) — how it stands is its word's. Text
+/// glyphs one column wide in every font and every width table, ratatui's and
+/// tmux's alike, so the title after them always starts in the same column;
+/// emoji were wide, loud, and not always agreed on.
+pub const AGENT: &str = "✦";
+/// The prompt's own caret, in the prompt's green.
+pub const SHELL: &str = "❯";
+pub const COMMAND: &str = "▸";
+/// A schedule's or a rule's ended runs, folded into one row — the glyph the
+/// headline counts schedules with.
+pub const JOB: &str = "↻";
 /// A question waiting on you.
-pub const QUESTION: &str = "❓";
+pub const QUESTION: &str = "?";
+
+/// An icon's colour: a shell the prompt's green, a question amber, an agent
+/// the plain foreground, a command and a job quiet. Anything that has ended
+/// is quiet too — its word says how it ended.
+pub fn icon_style(icon: &str, ended: bool) -> ratatui::style::Style {
+    use crate::tui::theme;
+    if ended {
+        return theme::dim();
+    }
+    match icon {
+        SHELL => theme::accent(),
+        QUESTION => theme::needs(),
+        AGENT => ratatui::style::Style::default(),
+        _ => theme::dim(),
+    }
+}
 
 /// A shell: an interactive one by its profile, or a project's warm shell by
 /// its tag, whatever its argv resolved to.
@@ -1839,12 +1858,15 @@ mod tests {
     }
 
     #[test]
-    fn every_icon_is_two_columns_wide() {
+    fn every_icon_is_one_quiet_column() {
         use ratatui::text::Span;
         for i in [AGENT, SHELL, COMMAND, JOB, QUESTION] {
-            assert_eq!(Span::raw(i).width(), 2, "{i}");
+            assert_eq!(Span::raw(i).width(), 1, "{i}");
             assert_eq!(i.chars().count(), 1, "{i} carries no variation selector");
         }
+        assert_eq!(icon_style(SHELL, false), crate::tui::theme::accent());
+        assert_eq!(icon_style(QUESTION, false), crate::tui::theme::needs());
+        assert_eq!(icon_style(SHELL, true), crate::tui::theme::dim());
     }
 
     #[test]
