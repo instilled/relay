@@ -873,6 +873,15 @@ impl Method for RuleList {
     type Result = Vec<crate::rule::Rule>;
 }
 
+/// What did not load at the last reload of each rules file, the global ones
+/// and every folder's: it stays said until the file is fixed and reloaded.
+pub struct RuleErrors;
+impl Method for RuleErrors {
+    const NAME: &'static str = "rule.errors";
+    type Params = ();
+    type Result = Vec<crate::rule::NotLoaded>;
+}
+
 /// Says yes to the current version of one rule; it may fire from now on.
 pub struct RuleApprove;
 impl Method for RuleApprove {

@@ -904,7 +904,7 @@ async fn up(home: &Home, a: UpArgs, json: bool) -> Result<()> {
     } else if r.schedules.iter().any(|s| !s.approved()) {
         println!("not approved; nothing fires until `rl up --yes`");
     }
-    for e in &r.report.errors {
+    for e in r.report.errors.iter().chain(&r.reaction_report.errors) {
         eprintln!("not loaded: {e}");
     }
     Ok(())

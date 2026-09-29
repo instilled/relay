@@ -11,7 +11,7 @@
 pub mod cron;
 
 use crate::action::expand_home;
-use crate::rulestore::RuleStore;
+use crate::rulestore::{Broken, FileRead, RuleStore};
 use crate::supervisor::Supervisor;
 use anyhow::{Context, Result, anyhow, bail};
 use cron::Cron;
@@ -59,7 +59,7 @@ struct File {
 /// Reads and validates a schedules file. A missing file is an empty one.
 /// Entries that fail validation are reported, the rest load. `in_workspace`
 /// lets `cwd` default to the folder.
-pub fn load_file(path: &Path, in_workspace: bool) -> Result<(Vec<Loaded>, Vec<String>)> {
+pub fn load_file(path: &Path, in_workspace: bool) -> Result<FileRead> {
     if !path.is_file() {
         return Ok((Vec::new(), Vec::new()));
     }
@@ -74,7 +74,7 @@ pub fn load_file(path: &Path, in_workspace: bool) -> Result<(Vec<Loaded>, Vec<St
                 spec_json: serde_json::to_string(&spec)?,
                 name,
             }),
-            Err(e) => errors.push(format!("{name}: {e:#}")),
+            Err(e) => errors.push((name, format!("{e:#}"))),
         }
     }
     Ok((loaded, errors))
@@ -179,6 +179,7 @@ pub struct Scheduler {
     registry: Arc<Registry>,
     wake: Notify,
     shutdown: CancellationToken,
+    broken: Broken,
 }
 
 impl Scheduler {
@@ -196,6 +197,7 @@ impl Scheduler {
             registry,
             wake: Notify::new(),
             shutdown,
+            broken: Broken::default(),
         }
     }
 
@@ -205,10 +207,15 @@ impl Scheduler {
         RuleStore::reload(self).await
     }
 
-    /// One file into one scope. Errors in entries are reported, not fatal;
-    /// a file that does not parse is.
-    async fn load_scope(&self, scope: &str, path: &Path, trusted: bool) -> Result<ReloadReport> {
-        RuleStore::load_scope(self, scope, path, trusted).await
+    /// One file into one scope. What does not load is reported, not fatal:
+    /// a file that does not parse keeps its schedules as they last loaded.
+    async fn load_scope(&self, scope: &str, name: &str, path: &Path, trusted: bool) -> Result<ReloadReport> {
+        RuleStore::load_scope(self, scope, name, path, trusted).await
+    }
+
+    /// What did not load at each file's last load.
+    pub fn not_loaded(&self) -> Vec<rl_proto::rule::NotLoaded> {
+        RuleStore::not_loaded(self)
     }
 
     /// Gives every approved, unpaused schedule without a `next_at` one.
@@ -320,7 +327,9 @@ impl Scheduler {
             })
             .await?;
         let scope = path.to_string_lossy().into_owned();
-        let report = self.load_scope(&scope, &workspace_file(&path), false).await?;
+        let report = self
+            .load_scope(&scope, &workspace.name, &workspace_file(&path), false)
+            .await?;
         let approved = if approve {
             let sc = scope.clone();
             self.ledger.call(move |c| schedules::approve(c, &sc, &[])).await?
@@ -355,6 +364,7 @@ impl Scheduler {
     /// if any, are let go all the same.
     pub async fn remove_workspace(&self, path: &Path) -> Result<bool> {
         let scope = path.to_string_lossy().into_owned();
+        self.forget(&scope);
         let now = Timestamp::now();
         let path = path.to_path_buf();
         let gone = self
@@ -557,8 +567,12 @@ impl RuleStore for Scheduler {
         workspace_file(workspace)
     }
 
-    fn load_file(path: &Path, in_workspace: bool) -> Result<(Vec<Loaded>, Vec<String>)> {
+    fn load_file(path: &Path, in_workspace: bool) -> Result<FileRead> {
         load_file(path, in_workspace)
+    }
+
+    fn broken(&self) -> &Broken {
+        &self.broken
     }
 
     fn sync(

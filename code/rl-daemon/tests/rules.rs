@@ -5,8 +5,8 @@ mod common;
 
 use common::{Conn, Harness};
 use rl_core::Home;
-use rl_proto::rule::{Rule, RuleKind, RuleStatus};
-use rl_proto::schedule::UpReport;
+use rl_proto::rule::{NotLoaded, Rule, RuleKind, RuleStatus};
+use rl_proto::schedule::{ReloadReport, UpReport};
 use rl_proto::types::Run;
 use serde_json::json;
 use std::time::Duration;
@@ -97,5 +97,128 @@ async fn one_list_and_a_yes_by_name() {
         .await;
     assert!(r.approved());
 
+    h.stop().await;
+}
+
+/// A file that does not parse — yours too — is reported like a folder's:
+/// its rules stay as they last loaded, every other file still loads, and
+/// what did not load says where (scope, file, line, column) and why. It stays
+/// said, on `rule.errors`, until the file is fixed.
+#[tokio::test]
+async fn a_broken_file_is_said_and_the_rest_still_load() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = Home::at(tmp.path().join("home"));
+    home.ensure_dirs().unwrap();
+    let nightly = "schedules:\n  nightly:\n    every: 1h\n    run: 'true'\n    cwd: /tmp\n";
+    std::fs::write(home.schedules_file(), nightly).unwrap();
+    let ws = tmp.path().join("proj");
+    std::fs::create_dir_all(ws.join(".relay")).unwrap();
+    let ws = std::fs::canonicalize(&ws).unwrap();
+    let schedules = ws.join(".relay/schedules.yaml");
+    std::fs::write(&schedules, "schedules:\n  tick:\n    every: 1h\n    run: 'true'\n").unwrap();
+    let Some(h) = Harness::on(home.clone()) else {
+        eprintln!("skipping: rl-session not built (run `cargo test --workspace`)");
+        return;
+    };
+    let mut c = Conn::open(&home).await;
+    let _: UpReport = c.ok("workspace.up", json!({ "path": ws })).await;
+    let errors: Vec<NotLoaded> = c.ok("rule.errors", json!(null)).await;
+    assert!(errors.is_empty(), "{errors:?}");
+    let before: Vec<Rule> = c.ok("rule.list", json!({})).await;
+    let hash_of = |rules: &[Rule], name: &str| {
+        let r = rules.iter().find(|r| r.name() == name).expect(name);
+        match r {
+            Rule::Schedule(s) => s.hash.clone(),
+            Rule::Reaction(r) => r.hash.clone(),
+        }
+    };
+
+    // Your file breaks on line 4; the folder's gains a schedule.
+    std::fs::write(
+        home.schedules_file(),
+        "schedules:\n  nightly:\n    every: 2h\n   run: 'true'\n",
+    )
+    .unwrap();
+    std::fs::write(
+        &schedules,
+        "schedules:\n  tick:\n    every: 1h\n    run: 'true'\n  tock:\n    every: 1h\n    run: 'true'\n",
+    )
+    .unwrap();
+    let r: ReloadReport = c.ok("schedule.reload", json!(null)).await;
+    assert_eq!(r.added, ["proj:tock"], "the folder's file still loads: {r:?}");
+    assert_eq!(r.not_loaded.len(), 1, "{r:?}");
+    let n = &r.not_loaded[0];
+    assert_eq!(
+        (n.scope.as_str(), n.name.as_str(), &n.file, n.rule.as_deref(), n.line),
+        ("global", "global", &home.schedules_file(), None, Some(4))
+    );
+    assert!(n.column.is_some(), "{n:?}");
+    assert!(!n.message.is_empty() && !n.message.contains("at line 4"), "{n:?}");
+    assert!(
+        r.errors[0].starts_with(&format!("global · schedules.yaml:4:{}: ", n.column.unwrap())),
+        "{:?}",
+        r.errors
+    );
+    let after: Vec<Rule> = c.ok("rule.list", json!({})).await;
+    assert_eq!(
+        hash_of(&after, "nightly"),
+        hash_of(&before, "nightly"),
+        "your rule keeps its last good version"
+    );
+    let errors: Vec<NotLoaded> = c.ok("rule.errors", json!(null)).await;
+    assert_eq!(errors, r.not_loaded, "and it stays said");
+
+    // Yours fixed but for one rule without a `cwd`; the folder's reactions
+    // break. Each says whose it is.
+    std::fs::write(
+        home.schedules_file(),
+        format!("{nightly}  bad:\n    every: 1h\n    run: 'true'\n"),
+    )
+    .unwrap();
+    std::fs::write(ws.join(".relay/reactions.yaml"), "reactions: [\n").unwrap();
+    let r: ReloadReport = c.ok("schedule.reload", json!(null)).await;
+    assert_eq!(r.errors, ["global · schedules.yaml:6 · bad: needs `cwd`"]);
+    let r: ReloadReport = c.ok("reaction.reload", json!(null)).await;
+    assert_eq!(r.not_loaded.len(), 1, "{r:?}");
+    let n = &r.not_loaded[0];
+    assert_eq!((n.scope.as_str(), n.name.as_str()), (ws.to_str().unwrap(), "proj"));
+    assert_eq!(
+        r.errors,
+        ["proj · reactions.yaml:1:12: reactions: invalid type: sequence, expected a map"]
+    );
+    let errors: Vec<NotLoaded> = c.ok("rule.errors", json!(null)).await;
+    let mut said: Vec<(String, Option<String>)> = errors.iter().map(|e| (e.name.clone(), e.rule.clone())).collect();
+    said.sort();
+    assert_eq!(said, [("global".into(), Some("bad".into())), ("proj".into(), None)]);
+
+    // All fixed: nothing more to say.
+    std::fs::write(home.schedules_file(), nightly).unwrap();
+    std::fs::write(ws.join(".relay/reactions.yaml"), "reactions: {}\n").unwrap();
+    let _: ReloadReport = c.ok("schedule.reload", json!(null)).await;
+    let _: ReloadReport = c.ok("reaction.reload", json!(null)).await;
+    let errors: Vec<NotLoaded> = c.ok("rule.errors", json!(null)).await;
+    assert!(errors.is_empty(), "{errors:?}");
+
+    h.stop().await;
+}
+
+/// What the daemon's own load at start found is said the same way.
+#[tokio::test]
+async fn a_file_broken_at_start_is_said() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = Home::at(tmp.path().join("home"));
+    home.ensure_dirs().unwrap();
+    std::fs::write(home.reactions_file(), "reactions:\n  x:\n   on: [\n").unwrap();
+    let Some(h) = Harness::on(home.clone()) else {
+        eprintln!("skipping: rl-session not built (run `cargo test --workspace`)");
+        return;
+    };
+    let mut c = Conn::open(&home).await;
+    let errors: Vec<NotLoaded> = c.ok("rule.errors", json!(null)).await;
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert!(
+        errors[0].to_string().starts_with("global · reactions.yaml:"),
+        "{errors:?}"
+    );
     h.stop().await;
 }

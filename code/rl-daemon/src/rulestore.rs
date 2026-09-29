@@ -9,9 +9,12 @@ use anyhow::{Result, anyhow, bail};
 use jiff::Timestamp;
 use rl_ledger::entries::Loaded;
 use rl_ledger::{Ledger, workspaces};
+use rl_proto::rule::NotLoaded;
 use rl_proto::schedule::{GLOBAL_SCOPE, ReloadReport};
 use rusqlite::Connection;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 /// A folder as the ledger keys it: its canonical path, or — once it is gone
 /// from disk — its canonical parent with its own name, or else just as given.
@@ -41,7 +44,9 @@ pub(crate) trait RuleStore {
     /// Where a workspace keeps its file.
     fn workspace_file(workspace: &Path) -> PathBuf;
 
-    fn load_file(path: &Path, in_workspace: bool) -> Result<(Vec<Loaded>, Vec<String>)>;
+    /// The rules a file holds, and `(name, what was wrong)` for those that
+    /// do not check out. A file that cannot be read or parsed is an error.
+    fn load_file(path: &Path, in_workspace: bool) -> Result<FileRead>;
     fn sync(
         conn: &Connection,
         scope: &str,
@@ -107,28 +112,89 @@ pub(crate) trait RuleStore {
         }
     }
 
-    /// One file into one scope. Errors in entries are reported, not fatal;
-    /// a file that does not parse is.
-    async fn load_scope(&self, scope: &str, path: &Path, trusted: bool) -> Result<ReloadReport> {
-        let (loaded, errors) = Self::load_file(path, !trusted)?;
-        let now = Timestamp::now();
-        let (scope, path) = (scope.to_string(), path.to_path_buf());
-        let mut report = self
-            .ledger()
-            .call(move |c| Self::sync(c, &scope, &path, &loaded, trusted, now))
-            .await?;
-        report.errors = errors;
+    /// What did not load at each scope's last load, by scope. Kept until the
+    /// scope loads clean, so a broken file stays said, not just flashed.
+    fn broken(&self) -> &Broken;
+
+    /// One file into one scope, `name` being what the scope is called. A
+    /// rule that does not check out is left out and reported; a file that
+    /// cannot be read or parsed is reported and changes nothing, so its rules
+    /// stay as they last loaded. Only the ledger failing is an error.
+    async fn load_scope(&self, scope: &str, name: &str, path: &Path, trusted: bool) -> Result<ReloadReport> {
+        let not_loaded = |rule: Option<String>, line, column, message| NotLoaded {
+            scope: scope.to_string(),
+            name: name.to_string(),
+            file: path.to_path_buf(),
+            rule,
+            line,
+            column,
+            message,
+        };
+        let mut report = match Self::load_file(path, !trusted) {
+            Ok((loaded, errors)) => {
+                let now = Timestamp::now();
+                let (sc, p) = (scope.to_string(), path.to_path_buf());
+                let mut report = self
+                    .ledger()
+                    .call(move |c| Self::sync(c, &sc, &p, &loaded, trusted, now))
+                    .await?;
+                let text = if errors.is_empty() {
+                    String::new()
+                } else {
+                    std::fs::read_to_string(path).unwrap_or_default()
+                };
+                let top = format!("{}s", Self::kind());
+                report.not_loaded = errors
+                    .into_iter()
+                    .map(|(rule, why)| {
+                        let line = entry_line(&text, &top, &rule);
+                        not_loaded(Some(rule), line, None, why)
+                    })
+                    .collect();
+                report
+            }
+            Err(e) => {
+                let (line, column, message) = file_error(&e);
+                ReloadReport {
+                    not_loaded: vec![not_loaded(None, line, column, message)],
+                    ..Default::default()
+                }
+            }
+        };
+        report.errors = report.not_loaded.iter().map(ToString::to_string).collect();
+        let mut broken = self.broken().lock().unwrap();
+        if report.not_loaded.is_empty() {
+            broken.remove(scope);
+        } else {
+            broken.insert(scope.to_string(), report.not_loaded.clone());
+        }
         Ok(report)
     }
 
+    /// Everything that did not load at the last load of each scope.
+    fn not_loaded(&self) -> Vec<NotLoaded> {
+        self.broken().lock().unwrap().values().flatten().cloned().collect()
+    }
+
+    /// A scope that is gone: nothing of it is broken any more.
+    fn forget(&self, scope: &str) {
+        self.broken().lock().unwrap().remove(scope);
+    }
+
     /// Re-reads every file (the user's, then each workspace's) into the
-    /// ledger.
+    /// ledger. One that does not parse, the user's too, is reported and the
+    /// rest load all the same.
     async fn reload(&self) -> Result<ReloadReport> {
-        let mut report = self.load_scope(GLOBAL_SCOPE, &self.home_file(), true).await?;
+        let mut report = self
+            .load_scope(GLOBAL_SCOPE, GLOBAL_SCOPE, &self.home_file(), true)
+            .await?;
         let workspaces = self.ledger().call(|c| workspaces::list(c)).await?;
+        let mut scopes = vec![GLOBAL_SCOPE.to_string()];
         for w in workspaces {
             let scope = w.path.to_string_lossy().into_owned();
-            match self.load_scope(&scope, &Self::workspace_file(&w.path), false).await {
+            let file = Self::workspace_file(&w.path);
+            scopes.push(scope.clone());
+            match self.load_scope(&scope, &w.name, &file, false).await {
                 Ok(r) => {
                     report.loaded += r.loaded;
                     report
@@ -140,15 +206,114 @@ pub(crate) trait RuleStore {
                     report
                         .removed
                         .extend(r.removed.into_iter().map(|n| format!("{}:{n}", w.name)));
-                    report
-                        .errors
-                        .extend(r.errors.into_iter().map(|e| format!("{}:{e}", w.name)));
+                    report.errors.extend(r.errors);
+                    report.not_loaded.extend(r.not_loaded);
                 }
-                Err(e) => report.errors.push(format!("{}: {e:#}", w.name)),
+                Err(e) => {
+                    let n = NotLoaded {
+                        scope,
+                        name: w.name.clone(),
+                        file,
+                        rule: None,
+                        line: None,
+                        column: None,
+                        message: format!("{e:#}"),
+                    };
+                    report.errors.push(n.to_string());
+                    report.not_loaded.push(n);
+                }
             }
         }
+        // A folder no longer registered has nothing broken to say.
+        self.broken().lock().unwrap().retain(|s, _| scopes.contains(s));
         self.plan_after_reload().await?;
         self.log_and_wake(&report);
         Ok(report)
+    }
+}
+
+/// What did not load, by scope; see [`RuleStore::broken`].
+pub(crate) type Broken = Mutex<BTreeMap<String, Vec<NotLoaded>>>;
+
+/// What a rules file holds: the rules that check out, and `(name, what was
+/// wrong)` for those that do not.
+pub type FileRead = (Vec<Loaded>, Vec<(String, String)>);
+
+/// A file that did not load, as line, column and why. A YAML error says
+/// where itself; that is taken out of the words so it is not said twice. The
+/// file's path is the report's to say, so it is not in the words either.
+fn file_error(e: &anyhow::Error) -> (Option<usize>, Option<usize>, String) {
+    if let Some(y) = e.chain().find_map(|c| c.downcast_ref::<serde_norway::Error>()) {
+        let text = y.to_string();
+        return match y.location() {
+            Some(l) => {
+                let mark = format!(" at line {} column {}", l.line(), l.column());
+                (Some(l.line()), Some(l.column()), text.replacen(&mark, "", 1))
+            }
+            None => (None, None, text),
+        };
+    }
+    let io = e.chain().find_map(|c| c.downcast_ref::<std::io::Error>());
+    (None, None, io.map_or_else(|| format!("{e:#}"), ToString::to_string))
+}
+
+/// The line, from 1, where `name:` opens its block in the `top:` mapping of
+/// a rules file: the first key at the mapping's own indent that is `name`.
+fn entry_line(text: &str, top: &str, name: &str) -> Option<usize> {
+    let lines: Vec<&str> = text.lines().collect();
+    let start = lines.iter().position(|l| {
+        l.strip_prefix(top)
+            .is_some_and(|rest| rest.trim_start().starts_with(':'))
+    })?;
+    let mut indent = None;
+    for (i, l) in lines.iter().enumerate().skip(start + 1) {
+        let body = l.trim_start();
+        if body.is_empty() || body.starts_with('#') {
+            continue;
+        }
+        let at = l.len() - body.len();
+        if at == 0 {
+            break;
+        }
+        let want = *indent.get_or_insert(at);
+        if at != want {
+            continue;
+        }
+        let key = body.split(':').next().unwrap_or("").trim().trim_matches(['"', '\'']);
+        if key == name {
+            return Some(i + 1);
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_rule_is_found_at_its_own_key() {
+        let text = "# mine\nschedules:\n  # the first\n  run:\n    every: 1h\n    run: [true]\n  'bad':\n    every: 1h\nother:\n  bad: 1\n";
+        assert_eq!(
+            entry_line(text, "schedules", "run"),
+            Some(4),
+            "a rule named like a field"
+        );
+        assert_eq!(entry_line(text, "schedules", "bad"), Some(7));
+        assert_eq!(entry_line(text, "schedules", "gone"), None);
+        assert_eq!(entry_line(text, "reactions", "bad"), None);
+    }
+
+    #[test]
+    fn a_yaml_error_says_where_once() {
+        let e = serde_norway::from_str::<serde_norway::Value>("a:\n  b: 1\n c: [\n").unwrap_err();
+        let (line, column, why) = file_error(&anyhow::Error::from(e).context("parsing /x.yaml"));
+        assert_eq!((line, column), (Some(3), Some(2)));
+        assert!(!why.contains("/x.yaml") && !why.starts_with("parsing"), "{why}");
+        assert!(!why.contains("at line 3 column 2"), "{why}");
+        let io = std::fs::read_to_string("/nope/not/here").unwrap_err();
+        let (line, _, why) = file_error(&anyhow::Error::from(io).context("reading /nope/not/here"));
+        assert_eq!(line, None);
+        assert!(why.contains("No such file"), "{why}");
     }
 }
