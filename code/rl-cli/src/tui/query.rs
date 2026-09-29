@@ -7,11 +7,12 @@
 //! - `in:` a project, by name or folder;
 //! - `is:` a state — `failed`, `going`, `done`, `stopped`, `needs`, `pinned`, `new`;
 //! - `kind:` what it is — `agent`, `shell`, `command`, `job`, `reaction`, `question`;
-//! - `by:` the schedule or reaction behind it;
+//!   in the events view, the event's kind (`run.failed`, `run.` for the family);
+//! - `by:` the schedule or reaction behind it (in the events view, or set off by it);
 //! - `on:` a git branch — the one a run started on, the one a folder is on.
 //!
-//! Values match by prefix (`is:fail`), so the list narrows as you type; names
-//! (`in:`, `by:`, `on:`) anywhere in them.
+//! Values match by prefix (`is:fail`, `kind:run.f`), so the list narrows as
+//! you type; names (`in:`, `by:`, `on:`) anywhere in them.
 //!
 //! As you type, the cursor goes to what the words name best (`ranked`), and
 //! `tab` walks on from there (`next_match`); the list keeps its order.
@@ -47,10 +48,11 @@ pub struct Subject<'a> {
     pub project: Vec<&'a str>,
     /// Its states, from `STATES`.
     pub is: Vec<&'static str>,
-    /// What it is, from `KINDS` (or a graph node's own kinds).
-    pub kind: Vec<&'static str>,
-    /// The rule behind it.
-    pub by: Option<&'a str>,
+    /// What it is, from `KINDS` (or a graph node's own kinds, or an
+    /// event's).
+    pub kind: Vec<&'a str>,
+    /// The rules behind it.
+    pub by: Vec<&'a str>,
     /// The git branch it is on.
     pub on: Option<&'a str>,
 }
@@ -99,7 +101,7 @@ impl Query {
                 .kind
                 .iter()
                 .all(|v| s.kind.iter().any(|x| x.starts_with(v.as_str())))
-            && self.by.iter().all(|v| s.by.is_some_and(|b| has(b, v)))
+            && self.by.iter().all(|v| s.by.iter().any(|b| has(b, v)))
             && self.on.iter().all(|v| s.on.is_some_and(|b| has(b, v)))
     }
 
@@ -116,8 +118,15 @@ impl Query {
 }
 
 /// What `tab` offers for the word at the end of a search: the token names, or
-/// a token's values — `in:` the projects, `by:` the rules, `on:` the branches.
-pub fn complete(word: &str, projects: &[String], rules: &[String], branches: &[String]) -> Vec<String> {
+/// a token's values — `in:` the projects, `by:` the rules, `on:` the branches,
+/// `kind:` the `kinds` given (the events view's), else `KINDS`.
+pub fn complete(
+    word: &str,
+    projects: &[String],
+    rules: &[String],
+    branches: &[String],
+    kinds: &[String],
+) -> Vec<String> {
     let w = word.to_lowercase();
     let Some((name, v)) = w.split_once(':') else {
         return TOKENS
@@ -128,7 +137,8 @@ pub fn complete(word: &str, projects: &[String], rules: &[String], branches: &[S
     };
     let values: Vec<String> = match name {
         "is" => STATES.iter().map(|s| s.to_string()).collect(),
-        "kind" => KINDS.iter().map(|s| s.to_string()).collect(),
+        "kind" if kinds.is_empty() => KINDS.iter().map(|s| s.to_string()).collect(),
+        "kind" => kinds.to_vec(),
         "in" => projects.to_vec(),
         "by" => rules.to_vec(),
         "on" => branches.to_vec(),
@@ -267,7 +277,7 @@ mod tests {
             project: vec![project, "/home/f/api"],
             is: vec!["failed"],
             kind: vec!["command", "job"],
-            by: Some("nightly"),
+            by: vec!["nightly"],
             on: Some("feat/search"),
         }
     }
@@ -324,13 +334,24 @@ mod tests {
         let projects = vec!["api".to_string(), "web".to_string()];
         let rules = vec!["nightly".to_string()];
         let branches = vec!["main".to_string(), "feat".to_string(), "main".to_string()];
-        let c = |w| complete(w, &projects, &rules, &branches);
+        let c = |w| complete(w, &projects, &rules, &branches, &[]);
         assert_eq!(c("i"), ["in:", "is:"]);
         assert_eq!(c("is:f"), ["is:failed"]);
         assert_eq!(c("in:"), ["in:api", "in:web"]);
         assert_eq!(c("by:n"), ["by:nightly"]);
         assert_eq!(c("on:"), ["on:feat", "on:main"]);
         assert!(c("where:").is_empty());
+        assert_eq!(c("kind:").len(), KINDS.len(), "the list's kinds");
+        let kinds = vec![
+            "run.failed".to_string(),
+            "run.finished".to_string(),
+            "log.issue".to_string(),
+        ];
+        assert_eq!(
+            complete("kind:run.f", &projects, &rules, &branches, &kinds),
+            ["kind:run.failed", "kind:run.finished"],
+            "the events view's kinds, when it gives them"
+        );
     }
 
     #[test]

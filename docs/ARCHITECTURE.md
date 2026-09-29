@@ -508,7 +508,7 @@ spot), and typing anything clears the highlight so `enter` submits the line as b
 
 Because letters go into the line, everything that is not typing is a `/` command
 (`tui/palette.rs`), offered as you type it: `/stop`, `/archive [seen]`, `/mark`, `/join`,
-`/shell`, `/rename`, `/pin`, `/pane [full]`, `/graph`, `/reload [rules|shell]`, `/approve` and `/pause`,
+`/shell`, `/rename`, `/pin`, `/pane [full]`, `/graph`, `/events`, `/reload [rules|shell]`, `/approve` and `/pause`,
 `/new`, `/edit [schedules|reactions [global]]`, `/summarise`, `/ask`, `/filter`, `/lens`, `/prune`,
 `/up`, `/help`, `/quit`. One name per act: a variant of an act is an argument to it rather than a
 command of its own, and no word means two things — `done` is only ever what `/mark` says. `enter` on an empty line
@@ -549,7 +549,11 @@ what a thing is: `in:` a project, `is:failed|going|done|stopped|needs|pinned|new
 `kind:agent|shell|command|job|reaction|question`, `by:` the schedule or reaction behind it,
 `on:` a git branch — the one a run started on, the one a folder is on. Values match by prefix
 (names anywhere), and `tab` completes names and values. A project stays while anything under it
-matches; a project with nothing under it answers only to words, `in:` and `on:`.
+matches; a project with nothing under it answers only to words, `in:` and `on:`. The events
+view has a search of its own, kept while the list is up and back when it returns: there `kind:`
+is an event's kind (`kind:run.failed`, `kind:run.` the family; `tab` offers the kinds), `by:`
+the rule behind an event's run or the one it set off, `in:` its project, and words match its
+kind, its run's title and what it said.
 
 `/new` is the form for a rule written by hand: `in` (a folder, or `global`), `name`, `when`
 (`every 30m`, a cron line, or `on run.failed` — which decides between `schedules.yaml` and
@@ -922,6 +926,41 @@ draws it, pure from a `Graph` to a grid of styled cells:
   offers to run it now. Anywhere else, `enter` (or `^o`) shows the node in the pane: what it
   is, its rule in words (when, what, where, which version you approved), how its runs went, and what it is wired to on
   either side.
+
+**The events view** is what happened, where the graph is how things are wired. `/events` swaps
+the list for every event in the ledger, newest first, one line each: how long ago, its kind
+(red for what went wrong, amber for what waits on you), its project as a header names it (the
+folder, the last part bold, and the name it goes by), its run's title, and what it said. `esc`
+(or `/events` again) goes back, and like the graph it keeps its own selection. It reads the
+newest 500 through `event.list {newest_first, limit}` when it opens, what came since
+(`{after: <newest id>}`) on the panel's tick, and the 500 before the oldest
+(`{before: <oldest id>}`) once the cursor reaches the end — never because the cursor moved.
+Newest first goes by id, the order the events were written, so a page ends where the next
+begins. The runs and questions they name come from the list where it has them, the rest from
+`run.list {archived}` and `run.get`/`decision.get`, once each (`tui/events.rs`, pure; the
+fetching is the panel's).
+
+Under an event, indented, is what it set off — each read from what the ledger keeps:
+
+- `↳ ⏰ nightly → started 'make'`: a `schedule.fired` is about the run it started;
+- `↳ ▶ the answer started '…'`: a `decision.taken` (or `expired`) names the runs its options
+  started (`data.runs`);
+- `↳ ⚡ notify → started '…'`: a reaction's run carries its rule (`cause: reaction:<name>`) and
+  the chain the event's run was in (`flow`, its own id when the event had no run). Its event is
+  the newest one before it, in that chain, of a kind the rule listens for (`on:`), within the
+  five minutes the reactor still acts on — or the newest with no run, when the chain is its own;
+- `↳ ❓ ask-me asked '…'`: a reaction's question is grouped `reaction:<name>` and names the
+  event's run; its event is the newest of that run the rule listens for, before it.
+
+Which event a reaction fired on is not itself kept — it goes to the command as `RELAY_EVENT`, not
+into the ledger — so those two are read back from the facts that are, and `parent_run` is never
+set. A rule that names its own `group:` asks questions that cannot be told from a run's own: they
+stand on their own `decision.raised` line. `enter` on an event with a run goes to the list with
+the cursor on it (on its job's row when it folded into one; the search and the lens give way
+when they hide it; an archived run, or one gone from the list, is said so and the view stays).
+`enter` on a line a rule set off opens the graph on that rule, as `^g` there does, and `esc`
+comes back. `^o` shows the event whole in the pane: when, where, its run, all it said and its
+`data`.
 
 ---
 

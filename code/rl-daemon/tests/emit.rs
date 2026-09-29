@@ -110,3 +110,57 @@ async fn an_emitted_event_feeds_a_reaction_and_where_data_narrows() {
 
     h.stop().await;
 }
+
+/// `event.list` newest first, a page at a time: `before` goes on past the
+/// last one read, `after` picks up what came since — the events view's
+/// paging and its tick.
+#[tokio::test]
+async fn event_list_pages_newest_first() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = Home::at(tmp.path().join("home"));
+    home.ensure_dirs().unwrap();
+    let dir = std::fs::canonicalize(tmp.path()).unwrap();
+    let Some(h) = Harness::on(home.clone()) else {
+        eprintln!("skipping: rl-session not built (run `cargo test --workspace`)");
+        return;
+    };
+    let mut c = Conn::open(&home).await;
+    for n in 0..7 {
+        let r = c
+            .call(
+                "event.emit",
+                json!({ "kind": "page.test", "workspace": dir, "summary": format!("n{n}") }),
+            )
+            .await;
+        assert!(r.error.is_none(), "emit failed: {:?}", r.error);
+    }
+    let said = |evs: &[Event]| evs.iter().map(|e| e.summary.clone()).collect::<Vec<_>>();
+    let page = |extra: serde_json::Value| {
+        let mut p = json!({ "kinds": ["page.test"], "newest_first": true, "limit": 3 });
+        p.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        p
+    };
+
+    let first: Vec<Event> = c.ok("event.list", page(json!({}))).await;
+    assert_eq!(said(&first), ["n6", "n5", "n4"], "the newest, newest first");
+    let second: Vec<Event> = c.ok("event.list", page(json!({ "before": first[2].id }))).await;
+    assert_eq!(said(&second), ["n3", "n2", "n1"], "on from where the first page ended");
+    let last: Vec<Event> = c.ok("event.list", page(json!({ "before": second[2].id }))).await;
+    assert_eq!(said(&last), ["n0"], "a short page: nothing older");
+
+    // What came since the newest one read, and nothing else.
+    let r = c
+        .call(
+            "event.emit",
+            json!({ "kind": "page.test", "workspace": dir, "summary": "n7" }),
+        )
+        .await;
+    assert!(r.error.is_none());
+    let since: Vec<Event> = c.ok("event.list", page(json!({ "after": first[0].id }))).await;
+    assert_eq!(said(&since), ["n7"]);
+
+    // Without the flag, as ever: oldest first.
+    let old: Vec<Event> = c.ok("event.list", json!({ "kinds": ["page.test"], "limit": 2 })).await;
+    assert_eq!(said(&old), ["n0", "n1"]);
+    h.stop().await;
+}

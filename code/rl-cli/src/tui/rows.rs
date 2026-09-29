@@ -602,7 +602,7 @@ fn run_subject<'a>(i: &'a DigestItem, project: &'a str) -> Subject<'a> {
         project: vec![project, r.workspace.to_str().unwrap_or("")],
         is,
         kind,
-        by,
+        by: by.into_iter().collect(),
         on: r.branch.as_deref(),
     }
 }
@@ -716,7 +716,7 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
             project: vec![&name, q.workspace.to_str().unwrap_or("")],
             is: vec!["needs"],
             kind: vec!["question"],
-            by,
+            by: by.into_iter().collect(),
             on: asker.and_then(|r| r.branch.as_deref()),
         };
         if query.hits(&subject) {

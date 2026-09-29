@@ -126,7 +126,12 @@ fn node_subject<'a>(n: &'a Node, folder: &'a str) -> Subject<'a> {
         project: vec![folder, n.folder.as_deref().and_then(|p| p.to_str()).unwrap_or("")],
         is,
         kind,
-        by: n.rule.as_deref().map(|r| r.rsplit('/').next().unwrap_or(r)),
+        by: n
+            .rule
+            .as_deref()
+            .map(|r| r.rsplit('/').next().unwrap_or(r))
+            .into_iter()
+            .collect(),
         on: None,
     }
 }

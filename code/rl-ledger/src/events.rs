@@ -80,7 +80,20 @@ pub fn list(conn: &Connection, f: &EventFilter) -> Result<Vec<Event>> {
         sql.push_str(&format!(" AND kind IN ({marks})"));
         args.extend(f.kinds.iter().map(|k| Value::from(k.clone())));
     }
-    sql.push_str(" ORDER BY at ASC, id ASC LIMIT ?");
+    if let Some(id) = f.before {
+        sql.push_str(" AND id < ?");
+        args.push(Value::from(id));
+    }
+    if let Some(id) = f.after {
+        sql.push_str(" AND id > ?");
+        args.push(Value::from(id));
+    }
+    // Newest first goes by id alone: the order they were written, which a
+    // `before` cursor pages through without skipping or repeating one.
+    sql.push_str(match f.newest_first {
+        true => " ORDER BY id DESC LIMIT ?",
+        false => " ORDER BY at ASC, id ASC LIMIT ?",
+    });
     args.push(Value::from(f.limit.unwrap_or(DEFAULT_LIMIT) as i64));
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(params_from_iter(args), from_row)?;

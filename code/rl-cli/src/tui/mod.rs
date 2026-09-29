@@ -17,6 +17,7 @@
 //! Nothing on screen is an id.
 
 mod complete;
+mod events;
 pub mod form;
 mod graph;
 mod input;
@@ -57,14 +58,15 @@ use rl_core::Home;
 use rl_core::time::fmt_age;
 use rl_proto::decision::Decision;
 use rl_proto::methods::{
-    AgentList, DecisionDismiss, DecisionNote, DecisionTake, DecisionTakeParams, Digest, DigestGet, DigestItem,
-    DigestParams, EventFilter, EventList, GcParams, GcRun, GraphGet, GraphParams, ImportList, ImportListParams,
-    PresenceClient, PresenceTouch, ReactionPause, ReactionReload, ReactionResume, RuleApprove, RuleList, RuleRef,
-    RunArchive, RunArchiveParams, RunId, RunIds, RunInput, RunInputParams, RunMark, RunMarkParams, RunPin,
-    RunPinParams, RunRename, RunRenameParams, RunResume, RunResumeParams, RunSeen, RunSpec, RunStart, RunStop,
-    RunStopParams, SETUP_STEPS, ScheduleFilter, ScheduleName, SchedulePause, ScheduleReload, ScheduleResume,
-    ScheduleRun, SetupGet, SummaryGet, SummaryMake, SummaryParams, WorkspaceList, WorkspaceRemove,
-    WorkspaceRemoveParams, WorkspaceRemoved, WorkspaceRename, WorkspaceRenameParams, WorkspaceUp, WorkspaceUpParams,
+    AgentList, DecisionDismiss, DecisionGet, DecisionId, DecisionNote, DecisionTake, DecisionTakeParams, Digest,
+    DigestGet, DigestItem, DigestParams, EventFilter, EventList, GcParams, GcRun, GraphGet, GraphParams, ImportList,
+    ImportListParams, PresenceClient, PresenceTouch, ReactionPause, ReactionReload, ReactionResume, RuleApprove,
+    RuleList, RuleRef, RunArchive, RunArchiveParams, RunFilter, RunGet, RunId, RunIds, RunInput, RunInputParams,
+    RunList, RunMark, RunMarkParams, RunPin, RunPinParams, RunRename, RunRenameParams, RunResume, RunResumeParams,
+    RunSeen, RunSpec, RunStart, RunStop, RunStopParams, SETUP_STEPS, ScheduleFilter, ScheduleName, SchedulePause,
+    ScheduleReload, ScheduleResume, ScheduleRun, SetupGet, SummaryGet, SummaryMake, SummaryParams, WorkspaceList,
+    WorkspaceRemove, WorkspaceRemoveParams, WorkspaceRemoved, WorkspaceRename, WorkspaceRenameParams, WorkspaceUp,
+    WorkspaceUpParams,
 };
 use rl_proto::rule::{Rule, RuleKind, RuleStatus};
 use rl_proto::types::{AttachMode, Cause, Event as LedgerEvent, Mark, Run, RunKind, RunState, Summary};
@@ -80,6 +82,9 @@ const FLASH: Duration = Duration::from_secs(4);
 /// The most candidates `tab` shows at once.
 const CANDS: usize = 6;
 use rows::SHELL_TAG;
+/// How many runs, or questions, the events view asks the daemon for one at
+/// a time in a tick; more than this at once, it reads a page of runs.
+const EVENT_ASKS: usize = 40;
 /// The most rows the live line grows to before it scrolls within itself.
 const LINE_MAX: u16 = 8;
 /// Recent output replayed when joining a run for real, enough to paint the
@@ -103,11 +108,13 @@ enum Pane {
 }
 
 /// Which list the left side shows.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum View {
     Work,
     /// The wiring graph, over every project.
     Graph,
+    /// Every event, newest first, and what each set off (`/events`).
+    Events,
 }
 
 enum Mode {
@@ -218,8 +225,16 @@ struct App {
     rules: Vec<Rule>,
     /// The wiring, fetched while the graph is up.
     graph: Option<rl_proto::graph::Graph>,
-    /// The view the graph was opened from, and the selection it had.
-    graph_from: (View, Option<String>),
+    /// The views gone through to reach the one that is up, the list first:
+    /// going back walks them.
+    back: Vec<View>,
+    /// Each view's selection while another is up.
+    kept: HashMap<View, Option<String>>,
+    /// The events view's search while another view is up, or the list's
+    /// and the graph's while it is: `kind:` means another thing there.
+    filter_aside: String,
+    /// What the events view has read of the ledger.
+    feed: events::Feed,
     /// Where the window over the graph starts, column and row.
     graph_at: std::cell::Cell<(usize, usize)>,
     /// Which of a folder's shells a shell line goes to, and the one the
@@ -713,7 +728,10 @@ pub async fn run(home: &Home) -> Result<()> {
         view: View::Work,
         rules: Vec::new(),
         graph: None,
-        graph_from: (View::Work, None),
+        back: Vec::new(),
+        kept: HashMap::new(),
+        filter_aside: String::new(),
+        feed: events::Feed::default(),
         graph_at: std::cell::Cell::new((0, 0)),
         shell_at: HashMap::new(),
         scroll: std::cell::Cell::new(0),
@@ -879,7 +897,7 @@ impl App {
                     Some(Err(e)) => return Err(e.into()),
                     None => self.quit = true,
                 },
-                _ = tick.tick() => self.refresh().await,
+                _ = tick.tick() => self.tick().await,
                 answer = async {
                     match &mut self.asking {
                         Some(a) => (&mut a.task).await,
@@ -1059,6 +1077,7 @@ impl App {
         match self.view {
             View::Work => self.rows().into_iter().filter_map(|r| r.key()).collect(),
             View::Graph => self.graph_plan().map(|(_, p)| p.order()).unwrap_or_default(),
+            View::Events => self.event_items().iter().flat_map(|i| i.keys()).collect(),
         }
     }
 
@@ -1099,6 +1118,11 @@ impl App {
                     .filter_map(|id| g.node(&id).map(|n| (Some(id.clone()), graph::named(n, &self.names))))
                     .unzip()
             }
+            View::Events => self
+                .event_items()
+                .iter()
+                .map(|i| (Some(i.key()), events::named(i)))
+                .unzip(),
         };
         query::ranked(&words, &named)
             .into_iter()
@@ -1190,6 +1214,7 @@ impl App {
                     .iter()
                     .find_map(|id| self.digest.decisions.iter().find(|d| &d.id == id))
             }
+            View::Events => None,
         }
     }
 
@@ -1314,6 +1339,10 @@ impl App {
             }
         }
         if !matches!(self.mode, Mode::Normal) || !self.hit.borrow().has(m.column, m.row) {
+            return Ok(());
+        }
+        if self.view == View::Events {
+            self.events_mouse(m).await;
             return Ok(());
         }
         match m.kind {
@@ -1615,9 +1644,7 @@ impl App {
     /// The run that asked, in its terminal: selected on the list and joined,
     /// as `enter` on it would.
     async fn attach_to(&mut self, run: String, area: Rect) {
-        if self.view == View::Graph {
-            self.toggle_graph().await;
-        }
+        self.back_to_list().await;
         let key = format!("r:{run}");
         if !self.keys().contains(&key) {
             self.say("the run that asked is no longer on the list");
@@ -1829,13 +1856,9 @@ impl App {
     async fn toggle_graph(&mut self) {
         let target = self.rule_target();
         if self.view == View::Graph {
-            let (view, sel) = self.graph_from.clone();
-            self.graph_from.1 = std::mem::replace(&mut self.sel, sel);
-            self.view = view;
+            self.go_back();
         } else {
-            let sel = self.graph_from.1.take();
-            self.graph_from = (self.view, std::mem::replace(&mut self.sel, sel));
-            self.view = View::Graph;
+            self.open_view(View::Graph);
             self.close_term();
         }
         self.picked.clear();
@@ -1853,6 +1876,9 @@ impl App {
     /// rule, else the first of a folder's rules — whatever waits for a yes
     /// first.
     fn rule_target(&self) -> Option<String> {
+        if self.view == View::Events {
+            return self.event_rule();
+        }
         if self.view != View::Work {
             return None;
         }
@@ -1871,6 +1897,301 @@ impl App {
             .collect();
         here.sort_by_key(|r| (r.status() != RuleStatus::NeedsApproval, r.name().to_string()));
         here.first().map(|r| rules::key(r))
+    }
+
+    // ---- the views ---------------------------------------------------------
+
+    /// Puts another view up, keeping this one's selection for when it comes
+    /// back. A view already on the way here is gone back to rather than
+    /// stacked again, so going back always ends at the list.
+    fn open_view(&mut self, v: View) {
+        if v == self.view {
+            return;
+        }
+        match self.back.iter().position(|x| *x == v) {
+            Some(i) => self.back.truncate(i),
+            None => self.back.push(self.view),
+        }
+        self.switch_to(v);
+    }
+
+    /// Back to the view this one was opened from — the list, at the last.
+    fn go_back(&mut self) {
+        let v = self.back.pop().unwrap_or(View::Work);
+        self.switch_to(v);
+    }
+
+    /// The view changes: the selection is kept for its view, and the events
+    /// view's search swapped in or out, since its `kind:` means another thing.
+    fn switch_to(&mut self, v: View) {
+        let sel = self.kept.remove(&v).flatten();
+        self.kept.insert(self.view, std::mem::replace(&mut self.sel, sel));
+        if (self.view == View::Events) != (v == View::Events) {
+            std::mem::swap(&mut self.filter, &mut self.filter_aside);
+            self.search = None;
+        }
+        self.view = v;
+    }
+
+    /// Back to the list from whichever view is up.
+    async fn back_to_list(&mut self) {
+        if self.view == View::Work {
+            return;
+        }
+        self.back.clear();
+        self.switch_to(View::Work);
+        self.picked.clear();
+        self.events.clear();
+        self.refresh().await;
+    }
+
+    /// The tick: the list, and while the events view is up, what is new in
+    /// the ledger.
+    async fn tick(&mut self) {
+        self.refresh().await;
+        if self.view == View::Events {
+            self.fetch_events().await;
+        }
+    }
+
+    // ---- the events view ---------------------------------------------------
+
+    /// `/events`: the list gives way to every event, newest first, and what
+    /// each set off; `/events` again or `esc` goes back.
+    async fn toggle_events(&mut self) {
+        if self.view == View::Events {
+            self.go_back();
+        } else {
+            self.open_view(View::Events);
+            self.close_term();
+            // Asked again when the view opens: something may be back.
+            self.feed.gone.clear();
+            self.fetch_events().await;
+        }
+        self.picked.clear();
+        self.events.clear();
+        self.refresh().await;
+    }
+
+    fn event_items(&self) -> Vec<events::Item<'_>> {
+        events::build(&self.feed, &self.rules, &self.names, &self.filter)
+    }
+
+    /// What is new in the ledger since the newest event read — the newest
+    /// page when nothing is — and what is known of what it names. When the
+    /// view opens and on the tick; never because the cursor moved.
+    async fn fetch_events(&mut self) {
+        let f = EventFilter {
+            newest_first: true,
+            after: self.feed.newest(),
+            limit: Some(events::PAGE),
+            ..Default::default()
+        };
+        match self.rpc.call::<EventList>(f).await {
+            Ok(page) => self.feed.newer(page, events::PAGE as usize),
+            Err(e) => return self.say(format!("daemon: {e:#}")),
+        }
+        self.fill_feed().await;
+    }
+
+    /// The page before the oldest event read: the cursor reached the end.
+    async fn fetch_older(&mut self) {
+        let f = EventFilter {
+            newest_first: true,
+            before: self.feed.oldest(),
+            limit: Some(events::PAGE),
+            ..Default::default()
+        };
+        match self.rpc.call::<EventList>(f).await {
+            Ok(page) => self.feed.older(page, events::PAGE as usize),
+            Err(e) => return self.say(format!("daemon: {e:#}")),
+        }
+        self.fill_feed().await;
+    }
+
+    /// The runs and questions the events name: the list's own as they
+    /// stand, the rest — archived runs, answered questions — asked for once.
+    async fn fill_feed(&mut self) {
+        for i in &self.digest.items {
+            self.feed.runs.insert(i.run.id.clone(), i.run.clone());
+        }
+        for d in &self.digest.decisions {
+            self.feed.questions.insert(d.id.clone(), d.clone());
+        }
+        let mut missing = self.feed.unknown_runs();
+        if missing.len() > EVENT_ASKS {
+            // A page's worth at once: the newest runs, archived too, in one go.
+            let f = RunFilter {
+                archived: true,
+                limit: Some(events::PAGE),
+                ..Default::default()
+            };
+            if let Ok(runs) = self.rpc.call::<RunList>(f).await {
+                self.feed.runs.extend(runs.into_iter().map(|r| (r.id.clone(), r)));
+            }
+            missing = self.feed.unknown_runs();
+        }
+        // The rest a few at a time, so a tick stays a tick.
+        for id in missing.into_iter().take(EVENT_ASKS) {
+            match self.rpc.call::<RunGet>(RunId { id: id.clone() }).await {
+                Ok(r) => {
+                    self.feed.runs.insert(id, r);
+                }
+                Err(_) => {
+                    self.feed.gone.insert(id);
+                }
+            }
+        }
+        for id in self.feed.unknown_questions().into_iter().take(EVENT_ASKS) {
+            match self.rpc.call::<DecisionGet>(DecisionId { id: id.clone() }).await {
+                Ok(d) => {
+                    self.feed.questions.insert(id, d);
+                }
+                Err(_) => {
+                    self.feed.gone.insert(id);
+                }
+            }
+        }
+    }
+
+    /// A key that moves the cursor in the events view: along the lines, and
+    /// nothing fetched for it — only the older page, once it reaches the
+    /// end. False when the key is not one of those.
+    async fn events_step(&mut self, code: KeyCode) -> bool {
+        let page = self.list_h.get().saturating_sub(2).max(1) as isize;
+        let by = match code {
+            KeyCode::Down => 1,
+            KeyCode::Up => -1,
+            KeyCode::Home => isize::MIN / 2,
+            KeyCode::End => isize::MAX / 2,
+            KeyCode::PageDown => page,
+            KeyCode::PageUp => -page,
+            _ => return false,
+        };
+        self.step(by);
+        if self.feed.more && self.sel.is_some() && self.keys().last() == self.sel.as_ref() {
+            self.fetch_older().await;
+        }
+        true
+    }
+
+    /// The mouse over the events view: the wheel steps, a move or a click
+    /// puts the cursor on the line — and nothing is fetched for it.
+    async fn events_mouse(&mut self, m: MouseEvent) {
+        match m.kind {
+            MouseEventKind::ScrollDown => {
+                self.events_step(KeyCode::Down).await;
+            }
+            MouseEventKind::ScrollUp => {
+                self.events_step(KeyCode::Up).await;
+            }
+            MouseEventKind::Moved | MouseEventKind::Down(MouseButton::Left) => {
+                let key = hit_row(&self.hit.borrow(), m.column, m.row);
+                if key.is_some() && key != self.sel {
+                    self.select(key);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Where `enter` on the line under the cursor goes.
+    fn event_target(&self) -> Option<events::Target> {
+        let key = self.sel.as_deref()?;
+        events::target(&self.event_items(), &self.feed, key)
+    }
+
+    /// The rule the line under the cursor stands for, as its graph node: the
+    /// one behind what it set off, or behind its run.
+    fn event_rule(&self) -> Option<String> {
+        let (kind, name, near) = match self.event_target()? {
+            events::Target::Rule(kind, name, near) => (kind, name, near),
+            events::Target::Run(id) => {
+                let r = self.feed.runs.get(&id)?;
+                match &r.cause {
+                    Cause::Schedule(n) => (RuleKind::Schedule, n.clone(), Some(r.workspace.clone())),
+                    Cause::Reaction(n) => (RuleKind::Reaction, n.clone(), Some(r.workspace.clone())),
+                    _ => return None,
+                }
+            }
+        };
+        events::rule_key(&self.rules, kind, &name, near.as_deref())
+    }
+
+    /// `enter` in the events view: an event goes to its run on the list, a
+    /// line a rule set off to that rule in the graph (as `^g` there does).
+    async fn events_enter(&mut self) {
+        match self.event_target() {
+            Some(events::Target::Run(id)) => self.show_run(&id).await,
+            Some(events::Target::Rule(_, name, _)) => {
+                if self.event_rule().is_some() {
+                    self.toggle_graph().await;
+                } else {
+                    self.say(format!("{name} is not a rule any more"));
+                }
+            }
+            None => self.say("nothing here to open"),
+        }
+    }
+
+    /// The list, with the cursor on a run: its own row, or its job's. When
+    /// the lens or the search hides it, they give way; when the list does
+    /// not have it at all, the view stays and says why.
+    async fn show_run(&mut self, id: &str) {
+        let title = self
+            .feed
+            .runs
+            .get(id)
+            .map_or_else(|| id.to_string(), |r| r.title.clone());
+        let list_filter = match self.view {
+            View::Events => self.filter_aside.clone(),
+            _ => self.filter.clone(),
+        };
+        let (key, opened) = match self.list_key(id, &list_filter, self.lens) {
+            Some(k) => (k, false),
+            None => match self.list_key(id, "", rows::Lens::All) {
+                Some(k) => (k, true),
+                None => {
+                    // As it stands now: it may have been put away since it was read.
+                    if let Ok(r) = self.rpc.call::<RunGet>(RunId { id: id.to_string() }).await {
+                        self.feed.runs.insert(id.to_string(), r);
+                    }
+                    let archived = self.feed.runs.get(id).is_some_and(|r| r.archived_at.is_some());
+                    return self.say(if archived {
+                        format!("'{title}' is archived: kept in the ledger, off the list")
+                    } else {
+                        format!("'{title}' is off the list: it ended over a day ago")
+                    });
+                }
+            },
+        };
+        self.back_to_list().await;
+        if opened {
+            self.filter.clear();
+            self.lens = rows::Lens::All;
+            self.say(format!("the search and the lens let go, to show '{title}'"));
+        }
+        self.select(Some(key));
+    }
+
+    /// The list's row for a run, as the list would stand with this search
+    /// and lens: its own, or the job it folds into.
+    fn list_key(&self, id: &str, filter: &str, lens: rows::Lens) -> Option<String> {
+        let cx = rows::Context {
+            names: &self.names,
+            rules: &self.rules,
+            filter,
+            lens,
+            now: Timestamp::now(),
+        };
+        rows::build(&self.digest, &cx)
+            .iter()
+            .find(|r| match r {
+                Row::Run(i) => i.run.id == id,
+                Row::Job(j) => j.runs.iter().any(|i| i.run.id == id),
+                _ => false,
+            })
+            .and_then(|r| r.key())
     }
 
     async fn approve(&mut self, name: String, scope: String, kind: RuleKind) {
@@ -2044,9 +2365,7 @@ impl App {
         } else {
             self.say(format!("started {}", run.title));
         }
-        if self.view == View::Graph {
-            self.toggle_graph().await;
-        }
+        self.back_to_list().await;
         self.refresh().await;
         self.select(Some(format!("r:{}", run.id)));
         Ok(())
@@ -2637,14 +2956,19 @@ impl App {
 
     /// What a search token's values can be: the projects (and `global`), the
     /// rules, the branches — for `tab` in a search and after `/filter`.
-    fn search_values(&self) -> (Vec<String>, Vec<String>, Vec<String>) {
+    fn search_values(&self) -> (Vec<String>, Vec<String>, Vec<String>, Vec<String>) {
         let mut projects: Vec<String> = self.names.paths().iter().map(|p| self.names.workspace(p)).collect();
         projects.push("global".into());
         let rules: Vec<String> = self.rules.iter().map(|r| r.name().to_string()).collect();
         let branches: Vec<String> = (self.digest.checkouts.iter().filter_map(|c| c.branch.clone()))
             .chain(self.digest.items.iter().filter_map(|i| i.run.branch.clone()))
             .collect();
-        (projects, rules, branches)
+        // The events view's `kind:` is an event's; elsewhere, the list's own.
+        let kinds = match self.view {
+            View::Events => self.feed.kinds(),
+            _ => Vec::new(),
+        };
+        (projects, rules, branches, kinds)
     }
 
     /// `tab` in a search: the token names, then a token's values — states,
@@ -2652,14 +2976,14 @@ impl App {
     /// the rest shown in the footer. None — a plain word, or no word at all
     /// after one — and it goes to the next match instead.
     fn complete_search(&mut self) {
-        let (projects, rules, branches) = self.search_values();
+        let (projects, rules, branches, kinds) = self.search_values();
         let Some(s) = self.search.as_mut() else {
             return;
         };
         let (text, cur) = (s.line.text().to_string(), s.line.cursor());
         let start = text[..cur].rfind(' ').map_or(0, |i| i + 1);
         let word = &text[start..cur];
-        let cands = query::complete(word, &projects, &rules, &branches);
+        let cands = query::complete(word, &projects, &rules, &branches, &kinds);
         // A plain word has nothing to complete, and nor has the gap after one:
         // tab goes on to the next match. With nothing to match yet, the gap
         // still offers the names.
@@ -2699,6 +3023,9 @@ impl App {
         // any other key here disarms it, so `ctrl-x`/`ctrl-c` never fire on one
         // slip (the way an agent view asks before it deletes).
         let armed = self.arm.take();
+        if self.view == View::Events && self.events_step(k.code).await {
+            return Ok(());
+        }
         match (k.code, k.modifiers) {
             (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
                 if armed == Some(Arm::Quit) {
@@ -2737,6 +3064,8 @@ impl App {
                     self.settle();
                 } else if self.view == View::Graph {
                     self.toggle_graph().await;
+                } else if self.view == View::Events {
+                    self.toggle_events().await;
                 }
             }
             (KeyCode::Down, _) if self.view == View::Graph => self.graph_step(graph::Dir::Down),
@@ -2780,6 +3109,10 @@ impl App {
     async fn enter_row(&mut self, area: Rect) -> Result<()> {
         if self.view == View::Graph {
             self.graph_enter();
+            return Ok(());
+        }
+        if self.view == View::Events {
+            self.events_enter().await;
             return Ok(());
         }
         if self.selected_run().is_some() {
@@ -3073,13 +3406,14 @@ impl App {
         }
         let cur = self.line.cursor();
         let folder = self.line_folder(&text);
-        let (projects, rules, branches) = self.search_values();
+        let (projects, rules, branches, kinds) = self.search_values();
         let cands = {
             let here = complete::Here {
                 names: complete::Names {
                     projects: &projects,
                     rules: &rules,
                     branches: &branches,
+                    kinds: &kinds,
                 },
                 ..self.here(&folder)
             };
@@ -3215,6 +3549,7 @@ impl App {
             palette::Cmd::Rename => self.rename_here(),
             palette::Cmd::Pin => self.toggle_pin().await,
             palette::Cmd::Graph => self.toggle_graph().await,
+            palette::Cmd::Events => self.toggle_events().await,
             palette::Cmd::Shell => self.new_shell(area).await,
             palette::Cmd::Reload => match arg.trim() {
                 "rules" => self.reload_rules().await,
@@ -3361,6 +3696,7 @@ impl App {
                 ),
                 None => "wiring".into(),
             },
+            View::Events => events::headline(self.event_items().len(), &self.feed, &self.filter),
         };
         // The header carries three things on one line: the tally at the left,
         // the lens at the right of it, and who you are at the edge. The lens
@@ -3420,6 +3756,7 @@ impl App {
             match self.view {
                 View::Work => self.draw_list(f, list, &rows),
                 View::Graph => self.draw_graph(f, list),
+                View::Events => self.draw_events(f, list),
             }
             if a.pane.is_some() {
                 let x = list.x + list.width;
@@ -3778,8 +4115,20 @@ impl App {
             lines.push(line);
             keys.push(row.key());
         }
-        // The window follows the selection; when there is more either side,
-        // the edge line says how much.
+        self.draw_window(f, area, lines, keys, sel_line);
+    }
+
+    /// Lines in the list's place, a window of them following the selection;
+    /// when there is more either side, the edge line says how much. `keys`
+    /// is in step with `lines`: the row each belongs to, for the mouse.
+    fn draw_window(
+        &self,
+        f: &mut Frame,
+        area: Rect,
+        lines: Vec<Line<'static>>,
+        mut keys: Vec<Option<String>>,
+        sel_line: usize,
+    ) {
         let h = area.height as usize;
         let n = lines.len();
         if h == 0 {
@@ -3830,6 +4179,49 @@ impl App {
         self.graph_at.set(at);
         let canvas = graph::draw(g, &plan, &self.names, self.sel.as_deref(), Timestamp::now());
         f.render_widget(Paragraph::new(canvas.lines(at.0, at.1, w, h)), area);
+    }
+
+    /// The events, newest first, a window of them following the selection.
+    fn draw_events(&self, f: &mut Frame, area: Rect) {
+        self.list_h.set(area.height);
+        *self.hit.borrow_mut() = ListHit::default();
+        let items = self.event_items();
+        if items.is_empty() {
+            let msg = if !self.feed.read {
+                " reading the ledger…"
+            } else if !self.filter.is_empty() {
+                " nothing matches"
+            } else {
+                " nothing has happened yet"
+            };
+            f.render_widget(Paragraph::new(msg).dim(), area);
+            return;
+        }
+        let w = area.width as usize;
+        let (lines, keys) = events::lines(&items, &self.feed, w, Timestamp::now());
+        let words = query::Query::parse(&self.filter).words;
+        let mut sel_line = 0;
+        let mut shown = Vec::with_capacity(lines.len() + 1);
+        for (n, (mut line, key)) in lines.into_iter().zip(&keys).enumerate() {
+            if !words.is_empty() {
+                line = light(line, &words);
+            }
+            if self.sel.as_ref() == Some(key) {
+                let short = w.saturating_sub(line.width());
+                if short > 0 {
+                    line.spans.push(Span::raw(" ".repeat(short)));
+                }
+                line = line.style(theme::selected());
+                sel_line = n;
+            }
+            shown.push(line);
+        }
+        let mut keys: Vec<Option<String>> = keys.into_iter().map(Some).collect();
+        if self.feed.more {
+            shown.push(Line::from(Span::raw(" ··· older ones come as the cursor gets to the end")).dim());
+            keys.push(None);
+        }
+        self.draw_window(f, area, shown, keys, sel_line);
     }
 
     fn draw_pane(&mut self, f: &mut Frame, area: Rect) {
@@ -3910,6 +4302,15 @@ impl App {
                 &self.names,
                 now,
             );
+            f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
+            return;
+        }
+        if self.view == View::Events {
+            let items = self.event_items();
+            let lines = match self.sel.as_deref().and_then(|k| events::item_of(&items, k)) {
+                Some(it) => events::pane_lines(it, &self.feed, now),
+                None => vec![Line::from(Span::raw(" nothing selected").dim())],
+            };
             f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
             return;
         }
@@ -4008,7 +4409,13 @@ impl App {
             return m.clone();
         }
         if self.search.is_some() {
-            return "type to narrow · tab completes in: is: kind: by:, or next match · ↑↓ move · enter keeps · esc puts back".into();
+            let tokens = match self.view {
+                View::Events => "in: kind: by:",
+                _ => "in: is: kind: by:",
+            };
+            return format!(
+                "type to narrow · tab completes {tokens}, or next match · ↑↓ move · enter keeps · esc puts back"
+            );
         }
         if let Some(a) = &self.asking {
             return format!("asking about \"{}\"… · its run is in the list · /stop there", a.words);
@@ -4080,6 +4487,19 @@ impl App {
             }
             s.push_str(&format!("←→ follows the wiring · {pane} · ^g back"));
             return s;
+        }
+        if self.view == View::Events {
+            let pane = if self.show_pane {
+                "^o hides details"
+            } else {
+                "^o details"
+            };
+            let go = match self.event_target() {
+                Some(events::Target::Run(_)) => "enter its run on the list · ",
+                Some(events::Target::Rule(..)) => "enter its rule in the graph · ",
+                None => "",
+            };
+            return format!("{go}^f kind: in: by: · {pane} · esc back");
         }
         let pane = if self.show_pane {
             "^o hides details"

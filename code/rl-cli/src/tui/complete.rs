@@ -117,6 +117,9 @@ pub struct Names<'a> {
     pub projects: &'a [String],
     pub rules: &'a [String],
     pub branches: &'a [String],
+    /// What `kind:` takes, when the view says (the events view: event kinds);
+    /// empty, the list's own.
+    pub kinds: &'a [String],
 }
 
 impl<'a> Here<'a> {
@@ -218,7 +221,7 @@ fn command_args(rest: &str, frag: &str, here: &Here) -> Vec<Candidate> {
     match c.cmd {
         palette::Cmd::Filter => {
             let n = here.names;
-            query::complete(frag, n.projects, n.rules, n.branches)
+            query::complete(frag, n.projects, n.rules, n.branches, n.kinds)
                 .into_iter()
                 .map(|t| cand(t, Kind::Word))
                 .collect()
@@ -964,6 +967,7 @@ mod tests {
                 projects: &projects,
                 rules: &rules,
                 branches: &branches,
+                kinds: &[],
             },
             ..Here::at(dir.path())
         };
