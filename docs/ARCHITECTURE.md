@@ -367,7 +367,17 @@ the digest leaves it out, `rl ls --all` and the ledger keep it — and `/archive
 everything ended that has been looked at, except what is pinned. `^t` (or `/pin`) pins the run under
 the cursor — `run.pin` sets `runs.pinned_at` — and it stands above every project, in the order
 pinned, named with its folder (`relay › deploy shell`), under every lens and however long ago it
-ended; `^t` again lets it go back, and archiving it by name unpins it. `ctrl-x` is the one keystroke for it, whatever the row,
+ended; `^t` again lets it go back, and archiving it by name unpins it. `/hide` takes whatever the
+cursor is on off the list without stopping or removing anything — a run, going or ended (`run.hide`
+sets `runs.hidden_at`); a job, its firings to come too; a project's header and everything in it,
+registered or not (`digest.hide` keeps the row's key, `g:<folder>` or `j:<kind>:<name>@<group>`, in
+the ledger's `hidden` table, and the digest carries them). A question is never hidden: it needs you.
+What is hidden shows only in the `hidden` lens, where `/hide` brings it back (a header that is not
+hidden itself brings back what was hidden under it) — unless it comes to need you after it was
+hidden: a run that asks, blocks or fails since then comes through to the top of the list, after
+the questions, named with its folder and marked `hidden` before its summary. `/hide` on it again
+moves the time on and it goes back. Archiving and pruning are as before; `rl hide <id>…` and `rl
+hide --project <dir>` (`rl unhide` the same) do it from a shell. `ctrl-x` is the one keystroke for it, whatever the row,
 and it asks first: the first press arms it and says what a second would do — remove an ended run
 or a job, stop one still going, dismiss a question, remove a project — and the second press does it, while any other
 key disarms it, so nothing goes on a single slip (the way an agent view confirms a delete). `ctrl-c`
@@ -508,7 +518,7 @@ spot), and typing anything clears the highlight so `enter` submits the line as b
 
 Because letters go into the line, everything that is not typing is a `/` command
 (`tui/palette.rs`), offered as you type it: `/stop`, `/archive [seen]`, `/mark`, `/join`,
-`/shell`, `/rename`, `/pin`, `/pane [full]`, `/graph`, `/events`, `/reload [rules|shell]`, `/approve` and `/pause`,
+`/shell`, `/rename`, `/pin`, `/hide`, `/pane [full]`, `/graph`, `/events`, `/reload [rules|shell]`, `/approve` and `/pause`,
 `/new`, `/edit [schedules|reactions [global]]`, `/summarise`, `/ask`, `/filter`, `/lens`, `/prune`,
 `/up`, `/help`, `/quit`. One name per act: a variant of an act is an argument to it rather than a
 command of its own, and no word means two things — `done` is only ever what `/mark` says. `enter` on an empty line
@@ -526,12 +536,14 @@ where a word is letters and digits, so `~/Projects/flint` stops at its slashes; 
 take the same keys. A terminal only sends alt when it is set to (iTerm2: the option key as
 `Esc+`); the ctrl arrows arrive either way.
 
-At the right of the header is the lens — `all · agents · jobs · reactions`, the one in force
-accented — and the list shows
+At the right of the header is the lens — `all · agents · jobs · reactions · hidden`, the one in
+force accented — and the list shows
 only that slice: agents by what a run is, jobs and reactions by what started it (so a scheduled
-agent is in both `agents` and `jobs`, since the lens is a question, not a partition). Questions
+agent is in both `agents` and `jobs`, since the lens is a question, not a partition). `hidden` is
+the one partition: what you `/hide`, laid out as the list is, and nothing else — the other lenses
+never show it, except what comes through because it needs you. Questions
 ignore it; they are what needs you, whatever slice you are in. `tab` on an empty line steps the
-lens along (shift-`tab` back), and `/lens all|agents|jobs|reactions` jumps straight to one;
+lens along (shift-`tab` back), and `/lens all|agents|jobs|reactions|hidden` jumps straight to one;
 it composes with `/filter`. One-off shell commands live in `all` while they run and are recent.
 
 Searching is `^f` (or `/filter` alone): the line turns from `❯` to `⌕`, and the list — or the
@@ -990,7 +1002,8 @@ are deliberately not a key yet.
 ```text
 ~/.relay/                     ($RELAY_HOME overrides; tests and scripts/live point it elsewhere)
   ledger.db                   SQLite: runs, events, sessions, session_io, presence, schedules,
-                              workspaces, decisions, summaries
+                              workspaces, decisions, summaries, hidden (projects and jobs off
+                              the panel's list)
   schedules.yaml              user-level schedules; the file is the interface, the ledger keeps
                               versions (by sha256), pause state, last/next firing
   config.yaml                 your defaults (`agents:`, `assistants:`, `retention:`, `workspaces:`); absent means defaults,
