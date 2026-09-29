@@ -84,6 +84,31 @@ fn a_run_relay_titled_is_named_once_and_a_rename_by_hand_wins() {
 }
 
 #[test]
+fn a_hidden_run_is_kept_as_it_was_and_hiding_again_moves_the_time() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("ledger.db");
+    let l = Ledger::open(&path).unwrap();
+    let r = run("hidden01", "2026-09-08T10:00:00Z");
+    l.call_blocking(move |c| runs::insert(c, &r)).unwrap();
+    l.call_blocking(|c| runs::set_hidden(c, "hidden01", Some(ts("2026-09-08T10:05:00Z"))))
+        .unwrap();
+    // Unlike a pin, hiding again takes the new time: whatever came through
+    // since, because it needed you, goes back.
+    l.call_blocking(|c| runs::set_hidden(c, "hidden01", Some(ts("2026-09-08T11:00:00Z"))))
+        .unwrap();
+    drop(l);
+    // Kept across a reopen, and nothing else about the run moved.
+    let l = Ledger::open(&path).unwrap();
+    let got = l.call_blocking(|c| runs::get(c, "hidden01")).unwrap().unwrap();
+    assert_eq!(got.hidden_at, Some(ts("2026-09-08T11:00:00Z")));
+    assert_eq!(got.state, RunState::Starting);
+    assert_eq!(got.archived_at, None);
+    l.call_blocking(|c| runs::set_hidden(c, "hidden01", None)).unwrap();
+    let got = l.call_blocking(|c| runs::get(c, "hidden01")).unwrap().unwrap();
+    assert_eq!(got.hidden_at, None);
+}
+
+#[test]
 fn a_pinned_run_stays_in_view_until_let_go_by_name() {
     let l = Ledger::open_in_memory().unwrap();
     let long_ago = ts("2026-09-01T10:00:00Z");

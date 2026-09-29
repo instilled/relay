@@ -3,7 +3,7 @@
 use crate::router::Router;
 use crate::server::Daemon;
 use rl_core::time;
-use rl_ledger::{events, graph, presence, runs};
+use rl_ledger::{events, graph, hidden, presence, runs};
 use rl_proto::PROTOCOL_VERSION;
 use rl_proto::methods::*;
 use rl_proto::rpc::RpcError;
@@ -382,6 +382,38 @@ pub fn register(r: &mut Router<Daemon>) {
         get_run(&d, &p.id).await
     });
 
+    r.register::<RunHide, _, _>(|d, p: RunHideParams| async move {
+        // Known first: hiding a run nobody knows would write nothing and say so
+        // only by what came back.
+        get_run(&d, &p.id).await?;
+        let at = p.hidden.then(time::now);
+        d.ledger
+            .call({
+                let id = p.id.clone();
+                move |c| runs::set_hidden(c, &id, at)
+            })
+            .await
+            .map_err(RpcError::internal)?;
+        get_run(&d, &p.id).await
+    });
+
+    r.register::<DigestHide, _, _>(|d, p: DigestHideParams| async move {
+        if !Hidden::valid_key(&p.key) {
+            return Err(RpcError::invalid_params(format!(
+                "{:?}: a project is g:<folder>, a job j:<kind>:<name>@<group>",
+                p.key
+            )));
+        }
+        let at = p.hidden.then(time::now);
+        d.ledger
+            .call(move |c| {
+                hidden::set(c, &p.key, at)?;
+                hidden::list(c)
+            })
+            .await
+            .map_err(RpcError::internal)
+    });
+
     r.register::<GraphGet, _, _>(|d, GraphParams { since }| async move {
         let since = since.unwrap_or_else(|| time::now() - jiff::SignedDuration::from_hours(24 * 7));
         let mut rules: Vec<Rule> = d
@@ -471,13 +503,18 @@ pub fn register(r: &mut Router<Daemon>) {
             .list(DecisionFilter::default())
             .await
             .map_err(RpcError::internal)?;
-        let lost = d.ledger.call(|c| runs::lost(c)).await.map_err(RpcError::internal)?;
+        let (lost, hidden) = d
+            .ledger
+            .call(|c| Ok((runs::lost(c)?, hidden::list(c)?)))
+            .await
+            .map_err(RpcError::internal)?;
         Ok(Digest {
             since,
             items,
             decisions,
             checkouts,
             lost,
+            hidden,
         })
     });
 

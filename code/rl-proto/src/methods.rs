@@ -410,6 +410,23 @@ pub struct RunPinParams {
     pub pinned: bool,
 }
 
+/// Takes a run off the panel's list, or brings it back: it stays what it is,
+/// going or ended, and shows only in the `hidden` lens — unless it comes to
+/// need you after it was hidden. Hiding again moves the time on, so what came
+/// through goes back. Answers with the run as it now stands.
+pub struct RunHide;
+impl Method for RunHide {
+    const NAME: &'static str = "run.hide";
+    type Params = RunHideParams;
+    type Result = crate::types::Run;
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunHideParams {
+    pub id: String,
+    pub hidden: bool,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RunArchiveParams {
     #[serde(default)]
@@ -455,6 +472,40 @@ pub struct DigestParams {
     pub since: Option<Timestamp>,
 }
 
+/// Takes a whole project, or a job, off the panel's list — or brings it back
+/// — by its row's key: `g:<folder>` a project's header (`g:everywhere` the
+/// global rules' runs outside every project), `j:<kind>:<name>@<group>` a
+/// job. Everything under it is hidden with it, runs that come later too;
+/// nothing is stopped or removed. Answers with everything hidden so.
+pub struct DigestHide;
+impl Method for DigestHide {
+    const NAME: &'static str = "digest.hide";
+    type Params = DigestHideParams;
+    type Result = Vec<Hidden>;
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DigestHideParams {
+    pub key: String,
+    pub hidden: bool,
+}
+
+/// A project or a job taken off the list, and since when.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Hidden {
+    pub key: String,
+    pub at: Timestamp,
+}
+
+impl Hidden {
+    /// Whether `key` names something `digest.hide` can hide.
+    pub fn valid_key(key: &str) -> bool {
+        key.strip_prefix("g:")
+            .or_else(|| key.strip_prefix("j:"))
+            .is_some_and(|k| !k.is_empty())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Digest {
     pub since: Timestamp,
@@ -469,6 +520,9 @@ pub struct Digest {
     /// `run.resume` with `lost` would pick up.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub lost: Vec<String>,
+    /// The projects and jobs taken off the list (`digest.hide`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hidden: Vec<Hidden>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
