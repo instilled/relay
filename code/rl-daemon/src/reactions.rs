@@ -618,7 +618,7 @@ impl Reactor {
                 cwd: Some(dir),
                 expires: ask.expires,
             };
-            let d = self.decisions.raise_by(spec, Some(&r.name)).await?;
+            let d = self.decisions.raise_by(spec, Some((&r.name, cx.event.id))).await?;
             self.fired(r, now, None).await?;
             info!(reaction = r.name, decision = d.id, "reaction asked");
             return Ok(());
@@ -648,10 +648,12 @@ impl Reactor {
         spec.env.push(("RELAY_EVENT_SUMMARY".into(), cx.event.summary.clone()));
         spec.env
             .push(("RELAY_EVENT_RUN".into(), cx.event.run.clone().unwrap_or_default()));
+        spec.env.push(("RELAY_EVENT_ID".into(), cx.event.id.to_string()));
         if let Ok(json) = serde_json::to_string(cx.event) {
             spec.env.push(("RELAY_EVENT".into(), json));
         }
-        let run = self.supervisor.start(spec).await?;
+        // And for the ledger: the run's `run.started` names the event.
+        let run = self.supervisor.start_on(spec, Some(cx.event.id)).await?;
         self.fired(r, now, Some(&run.id)).await?;
         info!(reaction = r.name, event = cx.event.id, run = run.id, "reaction ran");
         Ok(())
