@@ -61,14 +61,14 @@ use rl_proto::methods::{
     AgentList, DecisionDismiss, DecisionGet, DecisionId, DecisionNote, DecisionTake, DecisionTakeParams, Digest,
     DigestGet, DigestHide, DigestHideParams, DigestItem, DigestParams, EventFilter, EventList, GcParams, GcRun,
     GraphGet, GraphParams, ImportList, ImportListParams, PresenceClient, PresenceTouch, ReactionPause, ReactionReload,
-    ReactionResume, RuleApprove, RuleList, RuleRef, RunArchive, RunArchiveParams, RunFilter, RunGet, RunHide,
-    RunHideParams, RunId, RunIds, RunInput, RunInputParams, RunList, RunMark, RunMarkParams, RunPin, RunPinParams,
-    RunRename, RunRenameParams, RunResume, RunResumeParams, RunSeen, RunSpec, RunStart, RunStop, RunStopParams,
-    SETUP_STEPS, ScheduleFilter, ScheduleName, SchedulePause, ScheduleReload, ScheduleResume, ScheduleRun, SetupGet,
-    SummaryGet, SummaryMake, SummaryParams, WorkspaceList, WorkspaceRemove, WorkspaceRemoveParams, WorkspaceRemoved,
-    WorkspaceRename, WorkspaceRenameParams, WorkspaceUp, WorkspaceUpParams,
+    ReactionResume, RuleApprove, RuleErrors, RuleList, RuleRef, RunArchive, RunArchiveParams, RunFilter, RunGet,
+    RunHide, RunHideParams, RunId, RunIds, RunInput, RunInputParams, RunList, RunMark, RunMarkParams, RunPin,
+    RunPinParams, RunRename, RunRenameParams, RunResume, RunResumeParams, RunSeen, RunSpec, RunStart, RunStop,
+    RunStopParams, SETUP_STEPS, ScheduleFilter, ScheduleName, SchedulePause, ScheduleReload, ScheduleResume,
+    ScheduleRun, SetupGet, SummaryGet, SummaryMake, SummaryParams, WorkspaceList, WorkspaceRemove,
+    WorkspaceRemoveParams, WorkspaceRemoved, WorkspaceRename, WorkspaceRenameParams, WorkspaceUp, WorkspaceUpParams,
 };
-use rl_proto::rule::{Rule, RuleKind, RuleStatus};
+use rl_proto::rule::{NotLoaded, Rule, RuleKind, RuleStatus};
 use rl_proto::types::{AttachMode, Cause, Event as LedgerEvent, Mark, Run, RunKind, RunState, Summary};
 use rows::{Names, Row, fit, short_path};
 use std::collections::HashMap;
@@ -223,6 +223,12 @@ struct App {
     view: View,
     /// Every rule: for the chips on project rows, a job's rule, and the graph's nodes.
     rules: Vec<Rule>,
+    /// What did not load at each rules file's last load: a red `! rules` on
+    /// its header, the headline's `rules broken` for the global ones.
+    not_loaded: Vec<NotLoaded>,
+    /// What the last `/reload` did not load, when it was more than the flash
+    /// has room for: listed in the pane until the next key.
+    reload_list: Option<Vec<NotLoaded>>,
     /// The wiring, fetched while the graph is up.
     graph: Option<rl_proto::graph::Graph>,
     /// The views gone through to reach the one that is up, the list first:
@@ -480,7 +486,7 @@ fn job_marks(j: &rows::Job) -> Vec<Span<'static>> {
 /// checkout from the state column on, and at the right edge the tally of its
 /// rules, with any that wait for a yes just before it, in amber. Each piece
 /// has its column, whatever the others say.
-fn header_line(h: &rows::Head, w: usize, tw: usize) -> Line<'static> {
+fn header_line(h: &rows::Head, w: usize, tw: usize, broken: bool) -> Line<'static> {
     let col = state_col(tw);
     let (parent, last, own) = rows::place_parts(&h.place, h.own.as_deref(), col - 2);
     let mut l = vec![
@@ -492,6 +498,12 @@ fn header_line(h: &rows::Head, w: usize, tw: usize) -> Line<'static> {
     // The tally at the right edge is the honest total; a rule that waits for a
     // yes is named beside it, since that one is yours to give.
     let mut right: Vec<Span<'static>> = Vec::new();
+    // A rules file here that did not load comes before anything waiting for
+    // a yes, in red: what is loaded is not what the file says.
+    if broken {
+        right.push(Span::styled(rows::BROKEN_CHIP, theme::bad()));
+        right.push(Span::raw("  "));
+    }
     for c in h.rules.iter().filter(|c| c.needs_yes()) {
         right.push(Span::styled(c.text(), theme::needs()));
         right.push(Span::raw("  "));
@@ -756,6 +768,8 @@ pub async fn run(home: &Home) -> Result<()> {
         editor: None,
         attach: None,
         importing: false,
+        not_loaded: Vec::new(),
+        reload_list: None,
         asking: None,
         summary: None,
         summarising: None,
@@ -997,6 +1011,8 @@ impl App {
             Ok(r) => self.rules = r,
             Err(e) => self.say(format!("daemon: {e:#}")),
         }
+        // A daemon from before `rule.errors` has nothing to say here.
+        self.not_loaded = self.rpc.call::<RuleErrors>(()).await.unwrap_or_default();
         if self.view == View::Graph {
             match self.rpc.call::<GraphGet>(GraphParams::default()).await {
                 Ok(g) => self.graph = Some(g),
@@ -2269,16 +2285,43 @@ impl App {
         }
     }
 
+    /// `/reload rules`, and after `/edit`: every rules file read again, and
+    /// what did not load said — one in the flash by name, more by count with
+    /// the pane listing each with whose it is, its file and line.
     async fn reload_rules(&mut self) {
         let s = self.rpc.call::<ScheduleReload>(()).await;
         let r = self.rpc.call::<ReactionReload>(()).await;
         match (s, r) {
             (Ok(s), Ok(r)) => {
-                self.say(format!("reloaded · {} schedules · {} reactions", s.loaded, r.loaded));
+                self.say(rules::reload_note(&s, &r));
+                let bad: Vec<NotLoaded> = s.not_loaded.into_iter().chain(r.not_loaded).collect();
+                if bad.len() > 1 {
+                    self.pane = Pane::Facts;
+                    self.show_pane = true;
+                    self.reload_list = Some(bad);
+                }
                 self.refresh().await;
             }
             (Err(e), _) | (_, Err(e)) => self.say(format!("reload: {e:#}")),
         }
+    }
+
+    /// What did not load in one folder's files, or (`None`) the Relay home's.
+    fn broken_in(&self, scope: Option<&Path>) -> Vec<&NotLoaded> {
+        self.not_loaded
+            .iter()
+            .filter(|n| match scope {
+                Some(p) => !n.is_global() && Path::new(&n.scope) == p,
+                None => n.is_global(),
+            })
+            .collect()
+    }
+
+    /// Whether a header's files — a folder's, or `everywhere`'s global ones —
+    /// did not all load.
+    fn header_broken(&self, h: &rows::Head) -> bool {
+        let scope = (!h.is_everywhere()).then_some(h.workspace.as_path());
+        !self.broken_in(scope).is_empty()
     }
 
     // ---- the form ----------------------------------------------------------
@@ -2339,7 +2382,13 @@ impl App {
             kind: r.kind(),
             name: r.name(),
         });
-        match rulefile::edit_target(&self.home, words, rule, folder.as_deref()) {
+        // A file that did not load opens where it broke.
+        let broken: Vec<(&Path, usize)> = self
+            .not_loaded
+            .iter()
+            .map(|n| (n.file.as_path(), n.line.unwrap_or(1)))
+            .collect();
+        match rulefile::edit_target(&self.home, words, rule, folder.as_deref(), &broken) {
             Ok(at) => self.editor = Some(at),
             Err(e) => self.say(e),
         }
@@ -2846,6 +2895,8 @@ impl App {
 
     async fn key(&mut self, k: KeyEvent, area: Rect) -> Result<()> {
         self.flash = None;
+        // Like the flash, the list of what a reload did not load lasts one key.
+        self.reload_list = None;
         // A destructive key stays armed only until the very next key: its own
         // second press acts, anything else disarms it. (ctrl-x/ctrl-c re-check
         // and re-arm themselves in `key_list`.)
@@ -3693,8 +3744,9 @@ impl App {
                 "rules" => self.reload_rules().await,
                 "shell" => self.reload_shell().await,
                 "" => {
-                    self.reload_rules().await;
+                    // The shell first: what the rules say is the flash that stays.
                     self.reload_shell().await;
+                    self.reload_rules().await;
                 }
                 other => self.say(format!("reload {other}? rules or shell, or both on its own")),
             },
@@ -3866,15 +3918,17 @@ impl App {
         // The global rules have no row — nothing would sit under one — so the
         // headline says them, amber when one waits for a yes. The graph shows
         // them wired, and it is where that yes is given.
-        if self.view == View::Work
-            && let Some((note, waiting)) = rows::everywhere(&rows::chips(&self.rules, None, Timestamp::now()))
-        {
-            head.spans.push(Span::raw(" · "));
-            head.spans.push(if waiting {
-                Span::styled(note, theme::needs())
-            } else {
-                Span::raw(note)
-            });
+        // A global file that did not load is said beside them, in red.
+        if self.view == View::Work {
+            let chips = rows::chips(&self.rules, None, Timestamp::now());
+            for (words, tone) in rows::global_parts(&chips, !self.broken_in(None).is_empty()) {
+                head.spans.push(Span::raw(" · "));
+                head.spans.push(match tone {
+                    rows::Tone::Plain => Span::raw(words),
+                    rows::Tone::Needs => Span::styled(words, theme::needs()),
+                    rows::Tone::Bad => Span::styled(words, theme::bad()),
+                });
+            }
         }
         f.render_widget(Paragraph::new(head), l);
         if let Some(lens) = lens {
@@ -4141,7 +4195,7 @@ impl App {
                     }
                     // At the edge, so the rows under it — indented by their
                     // icon's leading space — read as its own.
-                    header_line(h, w, tw)
+                    header_line(h, w, tw, self.header_broken(h))
                 }
                 Row::Question(q) => {
                     // One line of it: the summary's first, or else the options.
@@ -4423,6 +4477,17 @@ impl App {
             return;
         }
         let now = Timestamp::now();
+        // What a reload just did not load, when there was more than the flash
+        // could say: whose, which file and line, and why, until the next key.
+        if let Some(list) = &self.reload_list {
+            let list: Vec<&NotLoaded> = list.iter().collect();
+            let mut lines = pane::not_loaded_lines(&list, Some(&self.names));
+            lines.push(Line::from(
+                Span::raw(" /edit on a project's header opens its file at the line").dim(),
+            ));
+            f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
+            return;
+        }
         if let (Some(g), Some(n)) = (self.graph.as_ref(), self.selected_node()) {
             let rule = self.selected_rule();
             let last = rule
@@ -4495,7 +4560,7 @@ impl App {
                     .iter()
                     .filter(|i| rows::everywhere_run(&i.run, &self.names, &self.rules))
                     .collect();
-                pane::everywhere_lines(&mine, &self.rules, now)
+                pane::everywhere_lines(&mine, &self.rules, &self.broken_in(None), now)
             }
             Some(Row::Group(h)) => pane::project_lines(
                 &self.names.workspace(&h.workspace),
@@ -4503,6 +4568,7 @@ impl App {
                 &h.workspace,
                 &self.digest.items,
                 &self.rules,
+                &self.broken_in(Some(&h.workspace)),
                 now,
             ),
             _ => vec![Line::from(Span::raw(" nothing selected").dim())],
@@ -4663,15 +4729,22 @@ impl App {
                 format!("enter output · /summarise · ^x archives · ^t pins · {pane}")
             }
             Some(Row::Run(_)) => format!("enter joins it · ^x stops it · ^t pins · {pane}"),
+            // A file here that did not load is what `/edit` opens, at the line.
             Some(Row::Group(h)) if h.is_everywhere() => {
-                format!(
-                    "enter its stats · ^g the global rules' wiring · /edit their schedules · /new a global rule · {pane}"
-                )
+                let edit = if self.header_broken(&h) {
+                    "what broke"
+                } else {
+                    "their schedules"
+                };
+                format!("enter its stats · ^g the global rules' wiring · /edit {edit} · /new a global rule · {pane}")
             }
-            Some(Row::Group(_)) => {
-                format!(
-                    "enter its stats · /shell · ^g its wiring · /edit its schedules · ^r renames · ^x removes · {pane}"
-                )
+            Some(Row::Group(h)) => {
+                let edit = if self.header_broken(&h) {
+                    "what broke"
+                } else {
+                    "its schedules"
+                };
+                format!("enter its stats · /shell · ^g its wiring · /edit {edit} · ^r renames · ^x removes · {pane}")
             }
             _ => String::new(),
         }
@@ -4912,6 +4985,7 @@ mod tests {
             &head("~/Projects/flint-platform", None, Some(co("main", 24)), vec![]),
             w,
             tw,
+            false,
         );
         let b = header_line(
             &head(
@@ -4922,6 +4996,7 @@ mod tests {
             ),
             w,
             tw,
+            false,
         );
         let c = header_line(
             &head(
@@ -4932,6 +5007,7 @@ mod tests {
             ),
             w,
             tw,
+            false,
         );
         // The checkout starts in the state column on every header.
         assert_eq!(col_of(&a, "⎇"), state_col(tw));
@@ -4945,6 +5021,34 @@ mod tests {
         // The tally ends at the edge.
         assert_eq!(b.width(), w);
         assert!(b.to_string().ends_with("1 job"));
+
+        // A folder whose rules file did not load says so in red, before a
+        // rule waiting for a yes in amber; the tally still ends at the edge.
+        let waiting = Chip {
+            name: "deploy".into(),
+            status: RuleStatus::NeedsApproval,
+            ..chip(RuleKind::Reaction)
+        };
+        let rules = vec![waiting, chip(RuleKind::Schedule)];
+        let broken = header_line(
+            &head("~/tmp/foodai", None, Some(co("main", 0)), rules.clone()),
+            w,
+            tw,
+            true,
+        );
+        assert!(
+            broken.to_string().ends_with("! rules  ! deploy  1 job · 1 reaction"),
+            "{broken}"
+        );
+        assert_eq!(broken.width(), w);
+        let red = broken.spans.iter().find(|s| s.content == "! rules").unwrap();
+        assert_eq!(red.style, crate::tui::theme::bad());
+        let fine = header_line(&head("~/tmp/foodai", None, Some(co("main", 0)), rules), w, tw, false);
+        assert!(!fine.to_string().contains("! rules"), "{fine}");
+        // Nothing else on it: the chip alone, at the edge.
+        let alone = header_line(&head("~/tmp/foodai", None, None, vec![]), w, tw, true);
+        assert!(alone.to_string().ends_with("! rules"), "{alone}");
+        assert_eq!(alone.width(), w);
 
         // A run's state word starts where a header's checkout does, and every
         // title in the same column, whatever icon it wears.

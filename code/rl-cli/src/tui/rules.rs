@@ -8,7 +8,8 @@ use ratatui::style::Stylize;
 use ratatui::text::{Line, Span};
 use rl_core::time::{fmt_age, fmt_duration};
 use rl_proto::reaction::Reaction;
-use rl_proto::rule::{Rule, RuleKind, RuleStatus};
+use rl_proto::rule::{NotLoaded, Rule, RuleKind, RuleStatus};
+use rl_proto::schedule::ReloadReport;
 use std::path::Path;
 
 pub fn key(r: &Rule) -> String {
@@ -200,12 +201,36 @@ pub fn lines(r: &Rule, names: &Names, now: Timestamp, last_run_title: Option<&st
     lines
 }
 
+/// What `/reload` says in the flash: how many of each loaded, and what did
+/// not — the one by name and why (`· 1 not loaded: bad needs `cwd``), several
+/// by count, the pane listing them.
+pub fn reload_note(schedules: &ReloadReport, reactions: &ReloadReport) -> String {
+    let n = |k: usize, what: &str| format!("{k} {what}{}", if k == 1 { "" } else { "s" });
+    let mut note = format!(
+        "reloaded · {} · {}",
+        n(schedules.loaded, "schedule"),
+        n(reactions.loaded, "reaction")
+    );
+    let not_loaded: Vec<&NotLoaded> = schedules.not_loaded.iter().chain(&reactions.not_loaded).collect();
+    // A daemon from before `not_loaded` says the same in `errors`.
+    let errors: Vec<&String> = schedules.errors.iter().chain(&reactions.errors).collect();
+    match (not_loaded.as_slice(), errors.as_slice()) {
+        ([one], _) => note.push_str(&format!(" · 1 not loaded: {}", one.short())),
+        ([], []) => {}
+        ([], [one]) => note.push_str(&format!(" · 1 not loaded: {one}")),
+        ([], many) => note.push_str(&format!(" · {} not loaded", many.len())),
+        (many, _) => note.push_str(&format!(" · {} not loaded", many.len())),
+    }
+    note
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use rl_proto::action::Task;
     use rl_proto::reaction::ReactionSpec;
     use rl_proto::schedule::{Schedule, ScheduleSpec};
+    use std::path::PathBuf;
 
     #[test]
     fn a_cadence_reads_in_words_where_it_can() {
@@ -294,5 +319,104 @@ mod tests {
             s.contains(" last     1h ago · nightly tests\n version  this version is approved"),
             "{s}"
         );
+    }
+
+    fn not_loaded(scope: &str, name: &str, file: &str, rule: Option<&str>, message: &str) -> NotLoaded {
+        NotLoaded {
+            scope: scope.into(),
+            name: name.into(),
+            file: file.into(),
+            rule: rule.map(Into::into),
+            line: Some(4),
+            column: rule.is_none().then_some(3),
+            message: message.into(),
+        }
+    }
+
+    #[test]
+    fn a_reload_says_what_did_not_load() {
+        let report = |loaded, not_loaded: Vec<NotLoaded>| ReloadReport {
+            loaded,
+            errors: not_loaded.iter().map(ToString::to_string).collect(),
+            not_loaded,
+            ..Default::default()
+        };
+        let bad = not_loaded("global", "global", "/h/schedules.yaml", Some("bad"), "needs `cwd`");
+        let file = not_loaded(
+            "/w/relay",
+            "relay",
+            "/w/relay/.relay/reactions.yaml",
+            None,
+            "did not find expected key",
+        );
+        assert_eq!(
+            reload_note(&report(2, vec![]), &report(1, vec![])),
+            "reloaded · 2 schedules · 1 reaction"
+        );
+        assert_eq!(
+            reload_note(&report(2, vec![bad.clone()]), &report(1, vec![])),
+            "reloaded · 2 schedules · 1 reaction · 1 not loaded: bad needs `cwd`"
+        );
+        assert_eq!(
+            reload_note(&report(1, vec![]), &report(0, vec![file.clone()])),
+            "reloaded · 1 schedule · 0 reactions · 1 not loaded: relay reactions.yaml:4:3 did not find expected key"
+        );
+        let two = not_loaded("global", "global", "/h/schedules.yaml", Some("worse"), "needs `run`");
+        assert_eq!(
+            reload_note(&report(2, vec![bad, two]), &report(1, vec![file])),
+            "reloaded · 2 schedules · 1 reaction · 3 not loaded"
+        );
+        // An older daemon's words, when that is all there is.
+        let old = ReloadReport {
+            loaded: 1,
+            errors: vec!["bad: needs `cwd`".into()],
+            ..Default::default()
+        };
+        assert_eq!(
+            reload_note(&old, &report(0, vec![])),
+            "reloaded · 1 schedule · 0 reactions · 1 not loaded: bad: needs `cwd`"
+        );
+    }
+
+    #[test]
+    fn the_pane_lists_what_did_not_load_with_where() {
+        let names = Names::new([(PathBuf::from("/w/relay"), "relay".to_string())]);
+        let bad = not_loaded("global", "global", "/h/schedules.yaml", Some("bad"), "needs `cwd`");
+        let file = not_loaded(
+            "/w/relay",
+            "old-name",
+            "/w/relay/.relay/reactions.yaml",
+            None,
+            "did not find expected key",
+        );
+        let text = |names: Option<&Names>| {
+            super::super::pane::not_loaded_lines(&[&bad, &file], names)
+                .iter()
+                .map(|l| l.to_string())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            text(Some(&names)),
+            [
+                " not loaded",
+                "   global · schedules.yaml:4 · bad",
+                "     needs `cwd`",
+                "   relay · reactions.yaml:4:3",
+                "     did not find expected key",
+                ""
+            ],
+            "whose, by the name the list uses now"
+        );
+        assert_eq!(
+            text(None)[1..5],
+            [
+                "   schedules.yaml:4 · bad",
+                "     needs `cwd`",
+                "   reactions.yaml:4:3",
+                "     did not find expected key"
+            ],
+            "on a header, whose is already said"
+        );
+        assert!(super::super::pane::not_loaded_lines(&[], None).is_empty());
     }
 }
