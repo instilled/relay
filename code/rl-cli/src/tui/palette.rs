@@ -19,6 +19,7 @@ pub enum Cmd {
     Pin,
     Pane,
     Graph,
+    Events,
     Reload,
     Approve,
     Pause,
@@ -126,6 +127,13 @@ pub const ALL: &[Command] = &[
         words: &[],
         what: "the wiring: every schedule and reaction, what it runs and what sets it off, across projects",
         cmd: Cmd::Graph,
+    },
+    Command {
+        name: "events",
+        args: "",
+        words: &[],
+        what: "every event, newest first, and what each set off; enter goes to its run or its rule",
+        cmd: Cmd::Events,
     },
     Command {
         name: "reload",
@@ -392,6 +400,7 @@ mod tests {
         assert_eq!(key(Cmd::Shell), "", "a shell is a command, not a key");
         assert_eq!(key(Cmd::Filter), "^f");
         assert_eq!(key(Cmd::Lens), "", "most commands are the slash line, no key");
+        assert_eq!(key(Cmd::Events), "", "^e is the line's: the end of it");
     }
 
     #[test]
@@ -426,6 +435,7 @@ mod tests {
         assert_eq!(parse("/q").unwrap().0.cmd, Cmd::Quit);
         assert_eq!(parse("/ren").unwrap().0.cmd, Cmd::Rename);
         assert_eq!(parse("/rel").unwrap().0.cmd, Cmd::Reload);
+        assert_eq!(parse("/ev").unwrap().0.cmd, Cmd::Events);
         let (c, rest) = parse("/fi this").unwrap();
         assert_eq!(c.cmd, Cmd::Filter);
         assert_eq!(rest, "this");

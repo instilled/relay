@@ -1209,6 +1209,7 @@ async fn events(home: &Home, a: EventsArgs, json: bool) -> Result<()> {
         group: a.group,
         kinds: a.kinds,
         limit: Some(a.limit),
+        ..Default::default()
     };
     let evs = daemon::ensure(home, !json).await?.call::<EventList>(filter).await?;
     if json {
