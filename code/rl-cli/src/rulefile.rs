@@ -137,14 +137,21 @@ pub struct Here<'a> {
 /// the singular) is that kind's file for the folder the cursor is in, the
 /// Relay home's where nothing names a folder; `global` after it is the
 /// home's from anywhere. Bare, it is the rule under the cursor's own file at
-/// its line, else the folder's schedules. Words it does not take are `Err`,
-/// saying which it does.
+/// its line, else the folder's file that did not load at the line it broke
+/// on, else the folder's schedules. A file named by words that did not load
+/// opens at that line too. `broken` is every file that did not load, with
+/// its line. Words it does not take are `Err`, saying which it does.
 pub fn edit_target(
     home: &rl_core::Home,
     words: &str,
     rule: Option<Here>,
     folder: Option<&Path>,
+    broken: &[(&Path, usize)],
 ) -> std::result::Result<(std::path::PathBuf, usize), String> {
+    let at = |f: PathBuf| {
+        let line = broken.iter().find(|(b, _)| *b == f).map_or(1, |(_, l)| *l);
+        (f, line)
+    };
     let words: Vec<&str> = words.split_whitespace().collect();
     let kind = |w: &str| match w {
         "schedule" | "schedules" => Some(RuleKind::Schedule),
@@ -165,8 +172,15 @@ pub fn edit_target(
                 .unwrap_or(1);
             Ok((r.source.to_path_buf(), line))
         }
-        (true, _, None) => Ok((file(home, RuleKind::Schedule, folder), 1)),
-        (false, Some((k, folder)), _) => Ok((file(home, k, folder), 1)),
+        (true, _, None) => {
+            let mine = [RuleKind::Schedule, RuleKind::Reaction].map(|k| file(home, k, folder));
+            let first = broken.iter().find(|(b, _)| mine.iter().any(|m| m == b));
+            Ok(match first {
+                Some((b, line)) => (b.to_path_buf(), *line),
+                None => at(file(home, RuleKind::Schedule, folder)),
+            })
+        }
+        (false, Some((k, folder)), _) => Ok(at(file(home, k, folder))),
         (false, None, _) => Err(format!(
             "edit {}? schedules or reactions, and global for the Relay home's",
             words.join(" ")
@@ -475,7 +489,7 @@ schedules:
     fn edit_opens_the_file_the_words_and_the_cursor_name() {
         let home = rl_core::Home::at("/h");
         let w = Path::new("/w");
-        let open = |words: &str, folder: Option<&Path>| edit_target(&home, words, None, folder);
+        let open = |words: &str, folder: Option<&Path>| edit_target(&home, words, None, folder, &[]);
         let at = |p: &str| Ok((PathBuf::from(p), 1));
         // Bare, or schedules: the folder's schedules; nothing naming a folder
         // (the `everywhere` header, an empty list): the home's.
@@ -509,16 +523,47 @@ schedules:
                 name,
             })
         };
-        assert_eq!(edit_target(&home, "", rule("backup"), Some(w)), Ok((src.clone(), 8)));
         assert_eq!(
-            edit_target(&home, "", rule("gone"), Some(w)),
+            edit_target(&home, "", rule("backup"), Some(w), &[]),
+            Ok((src.clone(), 8))
+        );
+        assert_eq!(
+            edit_target(&home, "", rule("gone"), Some(w), &[]),
             Ok((src.clone(), 1)),
             "not found: the top"
         );
         // Words still say which file, rule or not.
         assert_eq!(
-            edit_target(&home, "reactions", rule("backup"), Some(w)),
+            edit_target(&home, "reactions", rule("backup"), Some(w), &[]),
             at("/w/.relay/reactions.yaml")
+        );
+    }
+
+    #[test]
+    fn edit_opens_a_file_that_did_not_load_at_the_line() {
+        let home = rl_core::Home::at("/h");
+        let w = Path::new("/w");
+        let (mine, yours) = (
+            PathBuf::from("/w/.relay/reactions.yaml"),
+            PathBuf::from("/h/schedules.yaml"),
+        );
+        let broken: [(&Path, usize); 2] = [(&mine, 7), (&yours, 4)];
+        let open = |words: &str, folder: Option<&Path>| edit_target(&home, words, None, folder, &broken);
+        // Bare on a header: its folder's broken file, at the line, before its
+        // schedules; `everywhere`'s is the home's.
+        assert_eq!(open("", Some(w)), Ok((mine.clone(), 7)));
+        assert_eq!(open("", None), Ok((yours.clone(), 4)));
+        // Named, at the line when it is the broken one, else the top.
+        assert_eq!(open("schedules global", Some(w)), Ok((yours.clone(), 4)));
+        assert_eq!(
+            open("schedules", Some(w)),
+            Ok((PathBuf::from("/w/.relay/schedules.yaml"), 1))
+        );
+        assert_eq!(open("reactions", Some(w)), Ok((mine.clone(), 7)));
+        // Another folder's broken file is not this one's.
+        assert_eq!(
+            open("", Some(Path::new("/v"))),
+            Ok((PathBuf::from("/v/.relay/schedules.yaml"), 1))
         );
     }
 }

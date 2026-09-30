@@ -154,6 +154,10 @@ pub struct ReloadReport {
     pub added: Vec<String>,
     pub changed: Vec<String>,
     pub removed: Vec<String>,
-    /// `name: what was wrong`, for entries that did not load.
+    /// What did not load, a line each, as `not_loaded` says it.
     pub errors: Vec<String>,
+    /// What did not load, and where: a file that does not parse (its rules
+    /// stay as they last loaded) or one rule in it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub not_loaded: Vec<crate::rule::NotLoaded>,
 }

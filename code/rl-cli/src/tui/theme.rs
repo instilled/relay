@@ -41,6 +41,11 @@ pub fn needs() -> Style {
     Style::default().fg(NEEDS).add_modifier(Modifier::BOLD)
 }
 
+/// Something that is broken, in red and bold: a rules file that did not load.
+pub fn bad() -> Style {
+    Style::default().fg(BAD).add_modifier(Modifier::BOLD)
+}
+
 /// A run's mark and its state word share one colour, by where it stands.
 pub fn state(s: RunState) -> Style {
     match s {

@@ -319,13 +319,16 @@ runs' state words, whatever the path's length — comes its git checkout as it s
 worktrees whose folders are still there (`rld` reads `.git` directly on each digest, no `git`
 started; a worktree registered on its own is a project of its own, with its branch and no count) —
 and, at the right edge, the tally of how many jobs and reactions the folder holds, with any rule
-that waits for a yes named just before it in amber (`! deploy`). The rest of its rules are the
+that waits for a yes named just before it in amber (`! deploy`), and before that a red `! rules`
+while one of the folder's rules files did not load (see **Rules**). The rest of its rules are the
 graph's and the project pane's to show. The global rules — the ones in the Relay home, which apply in every folder — have no
 row of their own: a row that is always there, rules or none, kept the empty list from ever saying
 `nothing running · rl run -- <command>`. The headline says them instead, when there are any — `relay · 3 working ·
 ↻ 2 ⚡ 1 everywhere`, schedules and reactions counted as a folder's header counts them — and in
 amber when one waits for a yes, saying so and where to give it (`⚡ 1 everywhere needs a yes ·
-/graph`, `rows::everywhere`). A global rule's run in a registered project folds under that
+/graph`, `rows::everywhere`), and in red beside them while one of the home's files did not load
+(`↻ 2 ⚡ 1 everywhere · rules broken`, or `global rules broken` when none of them loaded;
+`rows::global_parts`). A global rule's run in a registered project folds under that
 project; one that ran anywhere else — a schedule's `cwd: ~`, a reaction to an event outside every
 project — goes under one group headed `everywhere`, after the projects, rather than under `~` or
 whatever folder that was (`rows::everywhere_run`: a schedule or reaction started it, its folder is
@@ -583,10 +586,12 @@ keeps what the form does not show (`env`, `where`, `ask`), and a rename or a mov
 block out. `/edit` never opens the form: it opens a rule file in `$EDITOR` and reloads on return —
 an edit made there is a file change, so it waits for `/approve` like any other
 (`rulefile::edit_target`). Bare, on a rule, it is that rule's own file at the rule's line;
-anywhere else the schedules of the folder the cursor is in — a run's, a job's, a header's, a graph
+anywhere else the folder's file that did not load, at the line it broke on, when one did not;
+else the schedules of the folder the cursor is in — a run's, a job's, a header's, a graph
 node's — and the Relay home's where nothing names a folder (the `everywhere` header, an empty
 list). `/edit reactions` opens the reactions instead (`schedule` and `reaction` still read), and
-`global` after either opens the home's from anywhere.
+`global` after either opens the home's from anywhere; a file named so that did not load opens at
+its line too.
 
 Nothing is remembered between openings except presence: leaving the panel is what `rl since`
 counts from.
@@ -756,6 +761,30 @@ per-folder `rl up --yes` never allowed. `rl rules` is the table; `rl rules appro
 what needs a yes on top, narrowed to the folder of the row it was pressed on until `esc` — and
 `y` approves, `p` pauses, `enter` fires a schedule now. The two YAML
 files, the two ledger tables and `rl schedule` / `rl react` are unchanged underneath.
+
+**Reloading, and what did not load.** A reload (`schedule.reload`, `reaction.reload`; `rl rules
+reload`, the panel's `/reload`, and `rld`'s own load at start) reads the home's file, then each
+registered folder's, one scope at a time (`rulestore::RuleStore::reload`). A rule that does not
+check out (``bad: needs `cwd` ``) is left out and the rest of its file loads; a file that cannot be
+read or does not parse changes nothing in the ledger, so its rules stay as they last loaded — the
+home's the same as a folder's, and the folders after it load all the same. Neither is an RPC
+error: the report says each in `not_loaded` (`relay_proto::rule::NotLoaded`: the scope, what it is
+called — `global`, or the name the folder is registered under — the file, the rule when it was
+one, and the line and column, a YAML error's own taken out of its words so it is not said twice),
+and `errors` carries the same as lines — `global · schedules.yaml:4:3: did not find expected key`,
+``relay · reactions.yaml:7 · bad: needs `cwd` `` — which is what `rl schedule reload`, `rl rules
+reload` and `rl up` print after `not loaded:`. Only the ledger failing fails a reload. `rld` keeps
+the last load's `not_loaded` of each scope in memory, replaced by the scope's next load and dropped
+when its folder is unregistered, and `rule.errors` returns them all, so a broken file stays said
+until it is fixed, not only in the reload's flash. The panel asks for them beside `rule.list` and
+shows them where the rules are: a red `! rules` on the folder's header (on `everywhere` for the
+home's), the headline's `rules broken`, the pane on that header listing each with its file and
+line, and `/edit` there opening the file at that line. `/reload` says in its flash how many of each
+loaded and what did not — ``reloaded · 2 schedules · 1 reaction · 1 not loaded: bad needs `cwd` `` —
+and when more than one did not, `· 3 not loaded`, with the pane listing them all, whose each is,
+until the next key. Bare, it re-reads the shell first, so the flash that stays is the rules'.
+`not_loaded` and `rule.errors` are additions an older client ignores, so the protocol version
+stays.
 
 **Your defaults, and the agents Relay itself uses.** `~/.relay/config.yaml` is the one place for
 defaults (`relay_proto::config`, read by `rld` at start, on `config.get` and on a rules reload —

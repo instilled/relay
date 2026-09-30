@@ -8,7 +8,7 @@
 //! keeps a burst of failures from opening twenty terminals.
 
 use crate::decisions::Decisions;
-use crate::rulestore::RuleStore;
+use crate::rulestore::{Broken, FileRead, RuleStore};
 use crate::supervisor::Supervisor;
 use anyhow::{Context, Result, anyhow, bail};
 use jiff::{SignedDuration, Timestamp};
@@ -60,7 +60,7 @@ pub fn workspace_file(workspace: &Path) -> PathBuf {
 /// Reads and validates a reactions file. A missing file is an empty one.
 /// Entries that fail validation are reported, the rest load. Where the file
 /// is makes no difference: a rule needs no `cwd` in either (`run_dir`).
-pub fn load_file(path: &Path, _in_workspace: bool) -> Result<(Vec<Loaded>, Vec<String>)> {
+pub fn load_file(path: &Path, _in_workspace: bool) -> Result<FileRead> {
     if !path.is_file() {
         return Ok((Vec::new(), Vec::new()));
     }
@@ -75,7 +75,7 @@ pub fn load_file(path: &Path, _in_workspace: bool) -> Result<(Vec<Loaded>, Vec<S
                 spec_json: serde_json::to_string(&spec)?,
                 name,
             }),
-            Err(e) => errors.push(format!("{name}: {e:#}")),
+            Err(e) => errors.push((name, format!("{e:#}"))),
         }
     }
     Ok((loaded, errors))
@@ -386,6 +386,7 @@ pub struct Reactor {
     registry: Arc<Registry>,
     wake: Notify,
     shutdown: CancellationToken,
+    broken: Broken,
 }
 
 /// One rule against one event, as `rl react test` reports it.
@@ -417,6 +418,7 @@ impl Reactor {
             registry,
             wake: Notify::new(),
             shutdown,
+            broken: Broken::default(),
         }
     }
 
@@ -425,15 +427,25 @@ impl Reactor {
         RuleStore::reload(self).await
     }
 
-    async fn load_scope(&self, scope: &str, path: &Path, trusted: bool) -> Result<ReloadReport> {
-        RuleStore::load_scope(self, scope, path, trusted).await
+    async fn load_scope(&self, scope: &str, name: &str, path: &Path, trusted: bool) -> Result<ReloadReport> {
+        RuleStore::load_scope(self, scope, name, path, trusted).await
+    }
+
+    /// What did not load at each file's last load.
+    pub fn not_loaded(&self) -> Vec<rl_proto::rule::NotLoaded> {
+        RuleStore::not_loaded(self)
     }
 
     /// One workspace's reactions, loaded and (when asked) approved. Called by
-    /// `rl up`, beside the schedules.
-    pub async fn up(&self, path: &Path, approve: bool) -> Result<(ReloadReport, Vec<Reaction>, Vec<String>)> {
+    /// `rl up`, beside the schedules; `name` is what the folder is registered as.
+    pub async fn up(
+        &self,
+        path: &Path,
+        name: &str,
+        approve: bool,
+    ) -> Result<(ReloadReport, Vec<Reaction>, Vec<String>)> {
         let scope = path.to_string_lossy().into_owned();
-        let report = self.load_scope(&scope, &workspace_file(path), false).await?;
+        let report = self.load_scope(&scope, name, &workspace_file(path), false).await?;
         let approved = if approve {
             let sc = scope.clone();
             self.ledger.call(move |c| reactions::approve(c, &sc, &[])).await?
@@ -459,6 +471,7 @@ impl Reactor {
         self.ledger
             .call(move |c| reactions::remove_scope(c, &scope, now))
             .await?;
+        self.forget(&path.to_string_lossy());
         Ok(())
     }
 
@@ -716,8 +729,12 @@ impl RuleStore for Reactor {
         workspace_file(workspace)
     }
 
-    fn load_file(path: &Path, in_workspace: bool) -> Result<(Vec<Loaded>, Vec<String>)> {
+    fn load_file(path: &Path, in_workspace: bool) -> Result<FileRead> {
         load_file(path, in_workspace)
+    }
+
+    fn broken(&self) -> &Broken {
+        &self.broken
     }
 
     fn sync(

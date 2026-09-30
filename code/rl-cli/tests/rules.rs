@@ -94,3 +94,55 @@ fn rules_list_approve_pause() {
 
     ok(rl(&["daemon", "stop"]));
 }
+
+/// A file that does not parse is said with where and why — the YAML's own
+/// words, not just the method's name — and the reload still goes through.
+#[test]
+fn reload_says_what_did_not_load_and_where() {
+    let (Some(rld), Some(session)) = (sibling("rld"), sibling("rl-session")) else {
+        eprintln!("skipping: rld / rl-session not built (run `cargo test --workspace`)");
+        return;
+    };
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = std::fs::canonicalize(tmp.path()).unwrap();
+    let home = dir.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let ws = dir.join("proj");
+    std::fs::create_dir_all(ws.join(".relay")).unwrap();
+    let rl = |args: &[&str]| {
+        let mut c = Command::new(env!("CARGO_BIN_EXE_rl"));
+        c.args(args)
+            .current_dir(&ws)
+            .env("RELAY_HOME", &home)
+            .env("RELAY_RLD_BIN", &rld)
+            .env("RELAY_SESSION_BIN", &session)
+            .env_remove("RELAY_RUN");
+        c
+    };
+    let run = |mut c: Command| {
+        let out = c.output().unwrap();
+        let err = String::from_utf8_lossy(&out.stderr).to_string();
+        assert!(out.status.success(), "{err}");
+        (String::from_utf8_lossy(&out.stdout).trim().to_string(), err)
+    };
+    run(rl(&["daemon", "start"]));
+
+    std::fs::write(
+        home.join("schedules.yaml"),
+        "schedules:\n  nightly:\n    every: 1h\n   run: 'true'\n",
+    )
+    .unwrap();
+    let (out, err) = run(rl(&["schedule", "reload"]));
+    assert!(out.starts_with("0 loaded"), "{out}");
+    assert!(
+        err.contains("not loaded: global · schedules.yaml:4:") && err.contains("expected"),
+        "{err}"
+    );
+
+    // A folder's broken reactions, said when it is brought up.
+    std::fs::write(ws.join(".relay/reactions.yaml"), "reactions:\n  x: [\n").unwrap();
+    let (_, err) = run(rl(&["up"]));
+    assert!(err.contains("not loaded: proj · reactions.yaml:"), "{err}");
+
+    run(rl(&["daemon", "stop"]));
+}
