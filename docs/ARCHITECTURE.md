@@ -328,8 +328,10 @@ amber when one waits for a yes, saying so and where to give it (`⚡ 1 everywher
 /graph`, `rows::everywhere`). A global rule's run in a registered project folds under that
 project; one that ran anywhere else — a schedule's `cwd: ~`, a reaction to an event outside every
 project — goes under one group headed `everywhere`, after the projects, rather than under `~` or
-whatever folder that was (`rows::everywhere_run`: its cause names a rule the panel holds as global,
-and no rule of that name in its own folder; a run filed under a ref keeps the ref). That header is
+whatever folder that was (`rows::everywhere_run`: a schedule or reaction started it, its folder is
+no registered project, and no rule of that name lives in that folder; a run filed under a ref keeps
+the ref). It is read off the run, not the rules loaded now, so a global rule taken out of its file
+leaves its runs under `everywhere` until they are archived, not back under `~`. That header is
 not a project: `enter` puts the global rules and how those runs stand in the pane, `/new` there
 writes a global rule, `/edit` opens the home's schedules, and `^x`, `^r` and `/shell` say
 `everywhere is not a project` and do nothing; `in:everywhere` finds it. `^g` (or `/graph`) from anywhere, an empty list too, shows them wired
