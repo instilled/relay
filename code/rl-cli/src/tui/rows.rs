@@ -144,9 +144,12 @@ pub const EVERYWHERE: &str = "everywhere";
 const EVERYWHERE_KEY: &str = "\u{0}everywhere";
 
 /// Whether a run is a global rule's doing outside every project: started by
-/// a schedule or reaction of the Relay home's (and not by one of the same
-/// name in its own folder), in a folder that is not a registered project, and
-/// filed under no ref. Its group is `everywhere`, not a path like `~`.
+/// a schedule or reaction, in a folder that is not a registered project,
+/// filed under no ref, and not by a rule of that name in its own folder. It
+/// is read off the run, not the rules loaded now, so a global rule taken out
+/// of its file leaves its runs under `everywhere` rather than dropping them
+/// back under a path like `~`. A project's own rules run in its folder, which
+/// is registered, so they never land here.
 pub fn everywhere_run(r: &Run, names: &Names, rules: &[Rule]) -> bool {
     let (kind, name) = match &r.cause {
         Cause::Schedule(n) => (RuleKind::Schedule, n.as_str()),
@@ -156,11 +159,9 @@ pub fn everywhere_run(r: &Run, names: &Names, rules: &[Rule]) -> bool {
     if r.ref_.is_some() || names.registered(&r.workspace).is_some() {
         return false;
     }
-    let named: Vec<&Rule> = rules.iter().filter(|x| x.kind() == kind && x.name() == name).collect();
-    named.iter().any(|x| x.is_global())
-        && !named
-            .iter()
-            .any(|x| !x.is_global() && Path::new(x.scope()) == r.workspace)
+    !rules
+        .iter()
+        .any(|x| x.kind() == kind && x.name() == name && !x.is_global() && Path::new(x.scope()) == r.workspace)
 }
 
 /// A checkout on a header: `⎇ main · PR #95 · 3 worktrees` — the badges after
@@ -2046,9 +2047,18 @@ mod tests {
         );
         assert_eq!(Row::Group(head).key().as_deref(), Some("g:everywhere"));
 
-        // Without the rules known, nothing is everywhere: each run keeps its folder.
+        // A global rule taken out of its file leaves its runs everywhere: it
+        // is the run that says so, not the rules loaded now. A run by hand
+        // keeps its folder, and one in a project stays in the project.
         let bare = keys(&build_with(&d, &names, "", now));
-        assert!(!bare.contains(&"[everywhere]".to_string()), "{bare:?}");
+        let at = |k: &str| {
+            bare.iter()
+                .position(|x| x == k)
+                .unwrap_or_else(|| panic!("{k}: {bare:?}"))
+        };
+        assert!(at("[everywhere]") < at(&job_key(RuleKind::Schedule, "gchat-mentions", EVERYWHERE_KEY)));
+        assert!(at(&format!("[{home_name}]")) < at("r:hand"));
+        assert!(at("[relay]") < at(&job_key(RuleKind::Schedule, "gchat-mentions", relay)));
     }
 
     #[test]
