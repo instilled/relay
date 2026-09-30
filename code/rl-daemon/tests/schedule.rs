@@ -199,11 +199,7 @@ async fn reload_is_a_diff_and_reports_what_did_not_load() {
     let r: ReloadReport = c.ok("schedule.reload", json!(null)).await;
     assert_eq!(r.loaded, 1);
     assert_eq!(r.errors.len(), 1);
-    assert!(
-        r.errors[0].starts_with("bad: ") && r.errors[0].contains("cwd"),
-        "{:?}",
-        r.errors
-    );
+    assert_eq!(r.errors, ["global · schedules.yaml:6 · bad: needs `cwd`"]);
     let good = by_name(&mut c, "good").await;
     assert!(good.next_at.is_some());
     assert_eq!(good.source, home.schedules_file());
@@ -227,9 +223,10 @@ async fn reload_is_a_diff_and_reports_what_did_not_load() {
     let res = c.call("schedule.run", json!({ "name": "good" })).await;
     assert!(res.error.is_some(), "a removed schedule does not fire");
 
-    // A file that does not parse at all is an error, not a wipe.
+    // A file that does not parse at all is reported, not a wipe.
     write(&home, "schedules: [not, a, map]\n");
-    let res = c.call("schedule.reload", json!(null)).await;
-    assert!(res.error.is_some());
+    let r: ReloadReport = c.ok("schedule.reload", json!(null)).await;
+    assert_eq!(r.not_loaded.len(), 1, "{r:?}");
+    assert!(r.errors[0].starts_with("global · schedules.yaml:1:"), "{:?}", r.errors);
     h.stop().await;
 }

@@ -64,7 +64,11 @@ pub fn register(r: &mut Router<Daemon>) {
     r.register::<rl_proto::methods::WorkspaceUp, _, _>(|d, p| async move {
         let mut up = d.scheduler.up(&p.path, p.approve).await.map_err(internal)?;
         // The folder's reactions are part of the same yes.
-        let (report, reactions, approved) = d.reactor.up(&up.workspace.path, p.approve).await.map_err(internal)?;
+        let (report, reactions, approved) = d
+            .reactor
+            .up(&up.workspace.path, &up.workspace.name, p.approve)
+            .await
+            .map_err(internal)?;
         up.reaction_report = report;
         up.reactions = reactions;
         up.approved_reactions = approved;
@@ -185,6 +189,11 @@ pub fn register(r: &mut Router<Daemon>) {
                 .map(Rule::Reaction),
         );
         Ok(rules)
+    });
+    r.register::<rl_proto::methods::RuleErrors, _, _>(|d, ()| async move {
+        let mut all = d.scheduler.not_loaded();
+        all.extend(d.reactor.not_loaded());
+        Ok(all)
     });
     r.register::<RuleApprove, _, _>(|d, p: RuleRef| async move {
         let scope = p.scope.as_deref();

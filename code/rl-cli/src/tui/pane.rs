@@ -3,7 +3,7 @@
 //! lines.
 
 use super::rows::{Job, Names, asked_by, cause_words, fit};
-use super::rules;
+use super::{rules, theme};
 use crate::digest::signals;
 use crate::render::{fmt_clock, state_label};
 use jiff::Timestamp;
@@ -12,7 +12,7 @@ use ratatui::text::{Line, Span};
 use rl_core::time::{fmt_age, fmt_duration};
 use rl_proto::decision::Decision;
 use rl_proto::methods::DigestItem;
-use rl_proto::rule::Rule;
+use rl_proto::rule::{NotLoaded, Rule};
 use rl_proto::types::{Event, Run, RunState, Summary};
 
 /// Where a fact's value starts: past ` {key:<8} `.
@@ -345,38 +345,80 @@ pub fn project_lines(
     workspace: &std::path::Path,
     items: &[DigestItem],
     rules: &[Rule],
+    broken: &[&NotLoaded],
     now: Timestamp,
 ) -> Vec<Line<'static>> {
     let mine: Vec<&DigestItem> = items.iter().filter(|i| i.run.workspace == workspace).collect();
     let mut lines = vec![Line::from(Span::raw(format!(" {name}")).bold())];
     lines.push(Line::from(Span::raw(format!(" {place}")).dim()));
     lines.push(Line::raw(""));
+    // A file that did not load comes first: until it is fixed, what is
+    // below is not what the file says.
+    lines.extend(not_loaded_lines(broken, None));
     lines.extend(runs_facts(&mine, now));
 
     // The rules that live here, told the same way the header's chips are.
     lines.extend(rules_section(rules, Some(workspace), now));
     lines.push(Line::raw(""));
+    let edit = if broken.is_empty() {
+        "/edit opens its schedules"
+    } else {
+        "/edit opens what broke, at the line"
+    };
     lines.push(Line::from(
-        Span::raw(" ^g shows its wiring · /edit opens its schedules · ^r renames").dim(),
+        Span::raw(format!(" ^g shows its wiring · {edit} · ^r renames")).dim(),
     ));
     lines
 }
 
 /// The `everywhere` group, which is not a project: how the global rules'
 /// runs outside every project stand, and the global rules themselves.
-/// `mine` are those runs.
-pub fn everywhere_lines(mine: &[&DigestItem], rules: &[Rule], now: Timestamp) -> Vec<Line<'static>> {
+/// `mine` are those runs; `broken`, what of the global files did not load.
+pub fn everywhere_lines(
+    mine: &[&DigestItem],
+    rules: &[Rule],
+    broken: &[&NotLoaded],
+    now: Timestamp,
+) -> Vec<Line<'static>> {
     let mut lines = vec![Line::from(Span::raw(" everywhere").bold())];
     lines.push(Line::from(
         Span::raw(" what the global rules ran outside every project").dim(),
     ));
     lines.push(Line::raw(""));
+    lines.extend(not_loaded_lines(broken, None));
     lines.extend(runs_facts(mine, now));
     lines.extend(rules_section(rules, None, now));
     lines.push(Line::raw(""));
-    lines.push(Line::from(
-        Span::raw(" ^g shows their wiring · /edit opens their schedules").dim(),
-    ));
+    let edit = if broken.is_empty() {
+        "/edit opens their schedules"
+    } else {
+        "/edit opens what broke, at the line"
+    };
+    lines.push(Line::from(Span::raw(format!(" ^g shows their wiring · {edit}")).dim()));
+    lines
+}
+
+/// What did not load, two lines each: where in red — the file, its line and
+/// column, the rule when it was one — then why, under it. With `names`, each says
+/// whose file it is too (`global`, or the project as the list names it), for
+/// a list over every scope. Nothing when all loaded; else a blank line after.
+pub fn not_loaded_lines(broken: &[&NotLoaded], names: Option<&Names>) -> Vec<Line<'static>> {
+    if broken.is_empty() {
+        return Vec::new();
+    }
+    let mut lines = vec![Line::from(Span::styled(" not loaded", theme::bad()))];
+    for n in broken {
+        let mut place = match names {
+            Some(names) => format!("{} · {}", rules::owner(&n.scope, names), n.at()),
+            None => n.at(),
+        };
+        if let Some(r) = &n.rule {
+            place.push_str(&format!(" · {r}"));
+        }
+        lines.push(Line::from(Span::styled(format!("   {place}"), theme::bad())));
+        lines.push(Line::from(Span::raw(format!("     {}", n.message))));
+    }
+    lines.push(Line::raw(""));
     lines
 }
 

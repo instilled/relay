@@ -1106,6 +1106,41 @@ pub fn everywhere(chips: &[Chip]) -> Option<(String, bool)> {
     Some((s, waiting > 0))
 }
 
+/// On a header whose folder's rules file did not load — or on `everywhere`
+/// when one of the Relay home's did not — in red, before any rule waiting for
+/// a yes: the file is not what is loaded until it is fixed.
+pub const BROKEN_CHIP: &str = "! rules";
+
+/// How a piece of the headline is drawn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tone {
+    Plain,
+    /// Amber: yours to give.
+    Needs,
+    /// Red: broken.
+    Bad,
+}
+
+/// What the headline says of the global rules, piece by piece: the tally
+/// (`everywhere`), amber when one waits for a yes, then — when one of the
+/// Relay home's files did not load — `rules broken` in red beside it, or
+/// `global rules broken` when no global rule is loaded to stand beside.
+pub fn global_parts(chips: &[Chip], broken: bool) -> Vec<(String, Tone)> {
+    let mut out = Vec::new();
+    if let Some((note, waiting)) = everywhere(chips) {
+        out.push((note, if waiting { Tone::Needs } else { Tone::Plain }));
+    }
+    if broken {
+        let words = if chips.is_empty() {
+            "global rules broken"
+        } else {
+            "rules broken"
+        };
+        out.push((words.into(), Tone::Bad));
+    }
+    out
+}
+
 /// The header line: what needs you first, then what is moving.
 pub fn headline(rows: &[Row], news: usize, filter: &str) -> String {
     let (asked, need, working, fin, jobs) = counts(rows);
@@ -1818,6 +1853,28 @@ mod tests {
             say(&[pulse, nightly, notify, waiting]),
             Some(("↻ 2 ⚡ 2 everywhere · 1 needs a yes · /graph".into(), true))
         );
+    }
+
+    #[test]
+    fn the_headline_says_a_global_file_is_broken_beside_the_rules() {
+        let now: Timestamp = "2026-09-10T12:00:00Z".parse().unwrap();
+        let parts = |rules: &[Rule], broken| global_parts(&chips(rules, None, now), broken);
+        let rules = [
+            schedule("global", "pulse", true, None),
+            schedule("global", "nightly", true, None),
+            reaction("global", "notify"),
+        ];
+        assert_eq!(parts(&rules, false), [("↻ 2 ⚡ 1 everywhere".to_string(), Tone::Plain)]);
+        assert_eq!(
+            parts(&rules, true),
+            [
+                ("↻ 2 ⚡ 1 everywhere".to_string(), Tone::Plain),
+                ("rules broken".to_string(), Tone::Bad)
+            ]
+        );
+        // Nothing of yours loaded: it still says so, and whose.
+        assert_eq!(parts(&[], true), [("global rules broken".to_string(), Tone::Bad)]);
+        assert!(parts(&[], false).is_empty());
     }
 
     fn fired(id: &str, job: &str, state: RunState, at: &str, unseen: bool) -> DigestItem {
