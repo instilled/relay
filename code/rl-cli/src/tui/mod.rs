@@ -59,14 +59,14 @@ use rl_core::time::fmt_age;
 use rl_proto::decision::Decision;
 use rl_proto::methods::{
     AgentList, DecisionDismiss, DecisionGet, DecisionId, DecisionNote, DecisionTake, DecisionTakeParams, Digest,
-    DigestGet, DigestItem, DigestParams, EventFilter, EventList, GcParams, GcRun, GraphGet, GraphParams, ImportList,
-    ImportListParams, PresenceClient, PresenceTouch, ReactionPause, ReactionReload, ReactionResume, RuleApprove,
-    RuleList, RuleRef, RunArchive, RunArchiveParams, RunFilter, RunGet, RunId, RunIds, RunInput, RunInputParams,
-    RunList, RunMark, RunMarkParams, RunPin, RunPinParams, RunRename, RunRenameParams, RunResume, RunResumeParams,
-    RunSeen, RunSpec, RunStart, RunStop, RunStopParams, SETUP_STEPS, ScheduleFilter, ScheduleName, SchedulePause,
-    ScheduleReload, ScheduleResume, ScheduleRun, SetupGet, SummaryGet, SummaryMake, SummaryParams, WorkspaceList,
-    WorkspaceRemove, WorkspaceRemoveParams, WorkspaceRemoved, WorkspaceRename, WorkspaceRenameParams, WorkspaceUp,
-    WorkspaceUpParams,
+    DigestGet, DigestHide, DigestHideParams, DigestItem, DigestParams, EventFilter, EventList, GcParams, GcRun,
+    GraphGet, GraphParams, ImportList, ImportListParams, PresenceClient, PresenceTouch, ReactionPause, ReactionReload,
+    ReactionResume, RuleApprove, RuleList, RuleRef, RunArchive, RunArchiveParams, RunFilter, RunGet, RunHide,
+    RunHideParams, RunId, RunIds, RunInput, RunInputParams, RunList, RunMark, RunMarkParams, RunPin, RunPinParams,
+    RunRename, RunRenameParams, RunResume, RunResumeParams, RunSeen, RunSpec, RunStart, RunStop, RunStopParams,
+    SETUP_STEPS, ScheduleFilter, ScheduleName, SchedulePause, ScheduleReload, ScheduleResume, ScheduleRun, SetupGet,
+    SummaryGet, SummaryMake, SummaryParams, WorkspaceList, WorkspaceRemove, WorkspaceRemoveParams, WorkspaceRemoved,
+    WorkspaceRename, WorkspaceRenameParams, WorkspaceUp, WorkspaceUpParams,
 };
 use rl_proto::rule::{Rule, RuleKind, RuleStatus};
 use rl_proto::types::{AttachMode, Cause, Event as LedgerEvent, Mark, Run, RunKind, RunState, Summary};
@@ -725,6 +725,7 @@ pub async fn run(home: &Home) -> Result<()> {
             decisions: Vec::new(),
             checkouts: Vec::new(),
             lost: Vec::new(),
+            hidden: Vec::new(),
         },
         names: Names::default(),
         filter: String::new(),
@@ -2167,9 +2168,15 @@ impl App {
             _ => self.filter.clone(),
         };
         let (key, opened) = match self.list_key(id, &list_filter, self.lens) {
-            Some(k) => (k, false),
-            None => match self.list_key(id, "", rows::Lens::All) {
-                Some(k) => (k, true),
+            Some(k) => (k, None),
+            None => match self
+                .list_key(id, "", rows::Lens::All)
+                .map(|k| (k, rows::Lens::All))
+                .or_else(|| {
+                    self.list_key(id, "", rows::Lens::Hidden)
+                        .map(|k| (k, rows::Lens::Hidden))
+                }) {
+                Some((k, lens)) => (k, Some(lens)),
                 None => {
                     // As it stands now: it may have been put away since it was read.
                     if let Ok(r) = self.rpc.call::<RunGet>(RunId { id: id.to_string() }).await {
@@ -2185,10 +2192,14 @@ impl App {
             },
         };
         self.back_to_list().await;
-        if opened {
+        if let Some(lens) = opened {
             self.filter.clear();
-            self.lens = rows::Lens::All;
-            self.say(format!("the search and the lens let go, to show '{title}'"));
+            self.lens = lens;
+            self.say(if lens == rows::Lens::Hidden {
+                format!("'{title}' is hidden: here in the hidden lens, /hide brings it back")
+            } else {
+                format!("the search and the lens let go, to show '{title}'")
+            });
         }
         self.select(Some(key));
     }
@@ -2582,6 +2593,119 @@ impl App {
         }
         self.refresh().await;
         self.select(Some(format!("r:{id}")));
+    }
+
+    /// `/hide`: the row under the cursor off the list — a run, going or
+    /// ended; a job, its firings to come too; a project and everything in it.
+    /// Nothing is stopped or removed. In the `hidden` lens it is the way back:
+    /// the row comes back, and a header that is not hidden itself brings back
+    /// what was hidden under it. A question is never hidden: it needs you.
+    async fn hide(&mut self) {
+        let back = self.lens == rows::Lens::Hidden;
+        let rows = self.rows();
+        let Some(at) = self
+            .sel
+            .as_ref()
+            .and_then(|k| rows.iter().position(|r| r.key().as_ref() == Some(k)))
+        else {
+            self.say("nothing here to hide");
+            return;
+        };
+        // What to hide or bring back: runs by id, projects and jobs by key.
+        let mut ids: Vec<String> = Vec::new();
+        let mut keys: Vec<String> = Vec::new();
+        let hidden = |k: &str| self.digest.hidden.iter().any(|h| h.key == k);
+        let own_hidden = |i: &DigestItem| i.run.hidden_at.is_some();
+        let mut still: Option<&str> = None;
+        let what = match &rows[at] {
+            Row::Question(_) => {
+                self.say("a question is never hidden: it needs you · answer it, or ^x lets it go");
+                return;
+            }
+            Row::Run(i) => {
+                if back {
+                    still = rows::hidden_with(&i.run, &self.names, &self.rules, &self.digest.hidden);
+                    if own_hidden(i) {
+                        ids.push(i.run.id.clone());
+                    }
+                } else {
+                    ids.push(i.run.id.clone());
+                }
+                i.run.title.clone()
+            }
+            Row::Job(j) => {
+                if !back || hidden(&j.key) {
+                    keys.push(j.key.clone());
+                }
+                if back {
+                    ids.extend(j.runs.iter().filter(|i| own_hidden(i)).map(|i| i.run.id.clone()));
+                }
+                j.name.clone()
+            }
+            Row::Group(h) => {
+                let key = rows[at].key().unwrap_or_default();
+                if !back || hidden(&key) {
+                    keys.push(key);
+                } else {
+                    // Not hidden itself: what was hidden under it comes back.
+                    for r in rows[at + 1..].iter().take_while(|r| !matches!(r, Row::Group(_))) {
+                        match r {
+                            Row::Run(i) if own_hidden(i) => ids.push(i.run.id.clone()),
+                            Row::Job(j) => {
+                                if hidden(&j.key) {
+                                    keys.push(j.key.clone());
+                                }
+                                ids.extend(j.runs.iter().filter(|i| own_hidden(i)).map(|i| i.run.id.clone()));
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                h.name.clone()
+            }
+        };
+        if ids.is_empty() && keys.is_empty() {
+            let why = still.map_or_else(String::new, |w| format!(": it is hidden with {w} · /hide on that"));
+            self.say(format!("nothing to bring back in {what}{why}"));
+            return;
+        }
+        // Where the cursor goes once the row has left: the next one, else the
+        // one before.
+        let next = rows[at + 1..]
+            .iter()
+            .chain(rows[..at].iter().rev())
+            .find_map(|r| r.key());
+        let here = rows[at].key();
+        drop(rows);
+        let mut failed = None;
+        for id in ids {
+            if let Err(e) = self.rpc.call::<RunHide>(RunHideParams { id, hidden: !back }).await {
+                failed = Some(e);
+            }
+        }
+        for key in keys {
+            if let Err(e) = self
+                .rpc
+                .call::<DigestHide>(DigestHideParams { key, hidden: !back })
+                .await
+            {
+                failed = Some(e);
+            }
+        }
+        match failed {
+            Some(e) => self.say(format!("hide: {e:#}")),
+            None if back => self.say(match still {
+                Some(w) => format!("brought back {what} · still hidden with {w}"),
+                None => format!("brought back {what}"),
+            }),
+            None => self.say(format!("hid {what} · the hidden lens has it")),
+        }
+        self.refresh().await;
+        if self.keys().contains(here.as_ref().unwrap_or(&String::new())) {
+            self.select(here);
+        } else if next.as_ref().is_some_and(|k| self.keys().contains(k)) {
+            self.select(next);
+        }
     }
 
     async fn rename_run(&mut self, id: String, title: String) -> Result<()> {
@@ -3561,6 +3685,7 @@ impl App {
             },
             palette::Cmd::Rename => self.rename_here(),
             palette::Cmd::Pin => self.toggle_pin().await,
+            palette::Cmd::Hide => self.hide().await,
             palette::Cmd::Graph => self.toggle_graph().await,
             palette::Cmd::Events => self.toggle_events().await,
             palette::Cmd::Shell => self.new_shell(area).await,
@@ -3984,6 +4109,8 @@ impl App {
         if rows.is_empty() {
             let msg = if !self.filter.is_empty() {
                 " nothing matches".into()
+            } else if self.lens == rows::Lens::Hidden {
+                " nothing hidden · /hide takes a row off the list".into()
             } else if self.lens != rows::Lens::All {
                 format!(" no {} · tab for the rest", self.lens.label())
             } else {
@@ -4042,11 +4169,15 @@ impl App {
                     let r = &i.run;
                     let under = false;
                     let style = state_style(r.state);
+                    // Hidden, and on the list only because it came to need
+                    // you: it stands above every folder, and says it is hidden.
+                    let through = self.lens != rows::Lens::Hidden
+                        && rows::hidden_since(r, &self.names, &self.rules, &self.digest.hidden).is_some();
                     // A pinned run stands above every folder, so it says
                     // which one it is from.
                     let title = if under {
                         format!("  {}", r.title)
-                    } else if r.pinned_at.is_some() {
+                    } else if r.pinned_at.is_some() || through {
                         format!("{} › {}", self.names.workspace(&r.workspace), r.title)
                     } else {
                         r.title.clone()
@@ -4089,7 +4220,11 @@ impl App {
                         title,
                         vec![Span::styled(rows::run_words(r), style)],
                         summary,
-                        joined_lead(i.joined_by.as_deref()),
+                        [
+                            through.then(|| Span::raw("hidden  ").dim()).into_iter().collect(),
+                            joined_lead(i.joined_by.as_deref()),
+                        ]
+                        .concat(),
                         (!aside.is_empty()).then_some(aside.as_str()),
                         fmt_age(i.at, now),
                     )
@@ -4650,6 +4785,7 @@ mod tests {
             decisions: vec![],
             checkouts: vec![],
             lost: vec![],
+            hidden: Vec::new(),
         };
         mark_seen(&mut d, &["a".to_string()]);
         assert_eq!(d.items.iter().map(|i| i.unseen).collect::<Vec<_>>(), [false, true]);

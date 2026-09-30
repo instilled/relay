@@ -24,6 +24,7 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
     (12, "0012_pin", include_str!("../migrations/0012_pin.sql")),
     (13, "0013_recap", include_str!("../migrations/0013_recap.sql")),
     (14, "0014_title_auto", include_str!("../migrations/0014_title_auto.sql")),
+    (15, "0015_hide", include_str!("../migrations/0015_hide.sql")),
 ];
 
 pub fn run(conn: &mut Connection) -> Result<()> {
@@ -73,6 +74,7 @@ mod tests {
             [
                 "decisions",
                 "events",
+                "hidden",
                 "meta",
                 "presence",
                 "reaction_specs",

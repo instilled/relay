@@ -8,12 +8,13 @@ use rl_core::time::{now, parse_since};
 use rl_core::{Home, display_path};
 use rl_proto::decision::{Decision, DecisionOption, DecisionStatus};
 use rl_proto::methods::{
-    AgentList, ConfigGet, GcParams, GcRun, RuleApprove, RuleList, RuleRef, RunArchive, RunArchiveParams, RunId,
-    RunResume, RunResumeParams, SummaryGet, SummaryMake, SummaryParams,
+    AgentList, ConfigGet, GcParams, GcRun, RuleApprove, RuleList, RuleRef, RunArchive, RunArchiveParams, RunHide,
+    RunHideParams, RunId, RunResume, RunResumeParams, SummaryGet, SummaryMake, SummaryParams,
 };
 use rl_proto::methods::{
-    DaemonInfo, DigestGet, DigestParams, EventFilter, EventList, PresenceClient, PresenceTouch, RunFilter, RunHook,
-    RunHookParams, RunList, RunMark, RunMarkParams, RunSpec, RunStart, RunStop, RunStopParams,
+    DaemonInfo, DigestGet, DigestHide, DigestHideParams, DigestParams, EventFilter, EventList, PresenceClient,
+    PresenceTouch, RunFilter, RunHook, RunHookParams, RunList, RunMark, RunMarkParams, RunSpec, RunStart, RunStop,
+    RunStopParams,
 };
 use rl_proto::methods::{
     DecisionDismiss, DecisionFilter, DecisionGet, DecisionId, DecisionList, DecisionNote, DecisionRaise, DecisionSpec,
@@ -75,6 +76,10 @@ enum Cmd {
     /// Archive a run: out of the panel and `rl since`, kept in the ledger. Ended runs only.
     #[command(alias = "done")]
     Archive(ArchiveArgs),
+    /// Take runs, or a project and everything in it, off the panel's list: shown only in its `hidden` lens, unless they come to need you. Nothing is stopped.
+    Hide(HideArgs),
+    /// Bring back what `rl hide` took off the panel's list.
+    Unhide(HideArgs),
     /// Pick an ended run back up as a new run: an agent's conversation, a fresh shell, a command again.
     Resume(ResumeArgs),
     /// What happened while you were away: runs that need you, finished, or moved, grouped.
@@ -577,6 +582,15 @@ struct ArchiveArgs {
 }
 
 #[derive(Args)]
+struct HideArgs {
+    /// Run ids.
+    ids: Vec<String>,
+    /// A project instead, by its folder: everything in it, runs to come too.
+    #[arg(long, value_name = "DIR", conflicts_with = "ids")]
+    project: Option<PathBuf>,
+}
+
+#[derive(Args)]
 struct ResumeArgs {
     /// Run ids.
     ids: Vec<String>,
@@ -630,6 +644,8 @@ async fn main() -> Result<()> {
         Cmd::Stop(a) => stop(&home, a, cli.json).await,
         Cmd::Ls(a) => ls(&home, a, cli.json).await,
         Cmd::Archive(a) => archive(&home, a, cli.json).await,
+        Cmd::Hide(a) => hide(&home, a, true, cli.json).await,
+        Cmd::Unhide(a) => hide(&home, a, false, cli.json).await,
         Cmd::Resume(a) => resume(&home, a, cli.json).await,
         Cmd::Since(a) => since(&home, a, cli.json).await,
         Cmd::Events(a) => events(&home, a, cli.json).await,
@@ -1138,6 +1154,39 @@ async fn archive(home: &Home, a: ArchiveArgs, json: bool) -> Result<()> {
         bail!("nothing archived: not found, still running, or already archived");
     } else {
         println!("{n} archived");
+    }
+    Ok(())
+}
+
+/// `rl hide` and `rl unhide`: the panel's `/hide`, over `run.hide` for runs
+/// and `digest.hide` for a project, which is hidden by its header's key.
+async fn hide(home: &Home, a: HideArgs, hidden: bool, json: bool) -> Result<()> {
+    let verb = if hidden { "hide" } else { "unhide" };
+    let mut rpc = daemon::ensure(home, !json).await?;
+    if let Some(dir) = a.project {
+        let dir = std::fs::canonicalize(&dir).with_context(|| format!("{}: not a folder", dir.display()))?;
+        let key = format!("g:{}", dir.display());
+        let now = rpc.call::<DigestHide>(DigestHideParams { key, hidden }).await?;
+        if json {
+            println!("{}", serde_json::to_string(&now)?);
+        } else {
+            println!("{} {}", if hidden { "hid" } else { "brought back" }, dir.display());
+        }
+        return Ok(());
+    }
+    if a.ids.is_empty() {
+        bail!("say which: `rl {verb} <id>…`, or `rl {verb} --project <dir>`");
+    }
+    let mut out = Vec::new();
+    for id in a.ids {
+        out.push(rpc.call::<RunHide>(RunHideParams { id, hidden }).await?);
+    }
+    if json {
+        println!("{}", serde_json::to_string(&out)?);
+    } else {
+        for r in out {
+            println!("{} · {}", r.id, if hidden { "hidden" } else { "on the list" });
+        }
     }
     Ok(())
 }
