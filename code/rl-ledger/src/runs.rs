@@ -11,7 +11,7 @@ use std::path::PathBuf;
 
 const COLS: &str = "id, workspace, kind, title, cli, argv_json, cwd, branch, worktree, \"ref\", tags_json, \
     state, source, confidence, state_at, started_at, ended_at, exit_code, cost_json, \
-    cause, flow, parent_run, last_line, seen_at, detail, archived_at, pinned_at";
+    cause, flow, parent_run, last_line, seen_at, detail, archived_at, pinned_at, hidden_at";
 
 const DEFAULT_LIMIT: u32 = 200;
 
@@ -21,7 +21,7 @@ const TERMINAL_STATES_SQL: &str = "'finished','failed','stopped'";
 
 pub fn insert(conn: &Connection, r: &Run) -> Result<()> {
     conn.execute(
-        &format!("INSERT INTO runs ({COLS}) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27)"),
+        &format!("INSERT INTO runs ({COLS}) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28)"),
         params![
             r.id,
             path_str(&r.workspace),
@@ -50,6 +50,7 @@ pub fn insert(conn: &Connection, r: &Run) -> Result<()> {
             r.detail,
             r.archived_at.map(to_millis),
             r.pinned_at.map(to_millis),
+            r.hidden_at.map(to_millis),
         ],
     )?;
     Ok(())
@@ -177,6 +178,17 @@ pub fn set_pinned(conn: &Connection, id: &str, at: Option<Timestamp>) -> Result<
     Ok(())
 }
 
+/// Takes a run off the panel's list (`Some`, from then) or brings it back
+/// (`None`). Hiding what is already hidden moves the time on: whatever came
+/// through since, because it needed you, goes back.
+pub fn set_hidden(conn: &Connection, id: &str, at: Option<Timestamp>) -> Result<()> {
+    conn.execute(
+        "UPDATE runs SET hidden_at = ?2 WHERE id = ?1",
+        params![id, at.map(to_millis)],
+    )?;
+    Ok(())
+}
+
 pub fn set_last_line(conn: &Connection, id: &str, line: &str) -> Result<()> {
     conn.execute("UPDATE runs SET last_line = ?2 WHERE id = ?1", params![id, line])?;
     Ok(())
@@ -229,6 +241,7 @@ fn from_row(row: &Row<'_>) -> rusqlite::Result<Run> {
         detail: row.get(24)?,
         archived_at: optional_from_millis(row.get(25)?, 25, conv)?,
         pinned_at: optional_from_millis(row.get(26)?, 26, conv)?,
+        hidden_at: optional_from_millis(row.get(27)?, 27, conv)?,
     })
 }
 

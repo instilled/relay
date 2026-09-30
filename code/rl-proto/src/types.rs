@@ -258,6 +258,10 @@ pub struct Run {
     /// old, until unpinned or archived.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pinned_at: Option<Timestamp>,
+    /// When it was taken off the panel's list (`run.hide`): shown only in the
+    /// `hidden` lens, unless it comes to need you after. Never stopped by it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hidden_at: Option<Timestamp>,
 }
 
 /// The tag that marks a run as a project's warm shell.
@@ -309,6 +313,7 @@ impl Run {
             seen_at: None,
             archived_at: None,
             pinned_at: None,
+            hidden_at: None,
         }
     }
 
