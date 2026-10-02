@@ -103,6 +103,9 @@ const TALL_H: u16 = 24;
 const TALL_W: u16 = 80;
 /// The air between the header's mark and its words.
 const MARK_GAP: u16 = 3;
+/// The air above the tall header, so the mark does not sit on the screen's
+/// top edge.
+const HEAD_AIR: u16 = 1;
 /// The list's share of a split screen, in percent: two thirds beside a
 /// details pane, half beside a terminal, which needs the width.
 const LIST_SHARE: u16 = 67;
@@ -732,14 +735,14 @@ fn areas(area: Rect, wide: bool, show_pane: bool, share: u16, form_h: u16, cands
     }
 }
 
-/// How tall the header is: the small mark's rows, with three lines beside
-/// it, where the screen has room; one line in the full-screen terminal, which
+/// How tall the header is: a row of air and the small mark's rows, with
+/// three lines beside it, where the screen has room; one line in the full-screen terminal, which
 /// wants every cell, and on a screen too short or too narrow to spare them.
 fn head_h(area: Rect, wide: bool) -> u16 {
     if wide || area.height < TALL_H || area.width < TALL_W {
         1
     } else {
-        mark::SMALL.len() as u16
+        HEAD_AIR + mark::SMALL.len() as u16
     }
 }
 
@@ -4225,18 +4228,19 @@ impl App {
             }
         }
         let said = Said::new(title, notes);
-        // Where there is room the mark stands at the left, and the words go
-        // beside its middle rows. Its first column is air, so it starts a
-        // column early and its ink stands where the header's words would.
+        // Where there is room the mark stands at the left, under a row of
+        // air, and the words go beside its middle rows. Its first column is
+        // air too, so it starts at the edge and its ink stands one in.
         let text = if a.head.height > 1 {
             let mark = Rect {
-                x: a.head.x + TEXT_INDENT - 1,
+                x: a.head.x,
+                y: a.head.y + HEAD_AIR,
                 width: mark::W,
-                ..a.head
+                height: a.head.height - HEAD_AIR,
             };
             f.render_widget(Paragraph::new(mark::lines(&mark::SMALL)), mark);
             let x = mark.x + mark::W + MARK_GAP;
-            Rect::new(x, a.head.y + 1, a.head.right().saturating_sub(x), a.head.height - 2)
+            Rect::new(x, mark.y + 1, a.head.right().saturating_sub(x), mark.height - 2)
         } else {
             Rect {
                 x: a.head.x + TEXT_INDENT,
@@ -5302,9 +5306,9 @@ mod tests {
     #[test]
     fn the_header_stands_tall_where_there_is_room_and_is_one_line_elsewhere() {
         let screen = |w, h| Rect::new(0, 0, w, h);
-        assert_eq!(head_h(screen(160, 45), false), 5);
-        assert_eq!(head_h(screen(100, 30), false), 5);
-        assert_eq!(head_h(screen(80, 24), false), 5);
+        assert_eq!(head_h(screen(160, 45), false), 6);
+        assert_eq!(head_h(screen(100, 30), false), 6);
+        assert_eq!(head_h(screen(80, 24), false), 6);
         // The full-screen terminal wants every cell.
         assert_eq!(head_h(screen(160, 45), true), 1);
         // Too short, or too narrow, to spare the rows for the mark.
@@ -5317,7 +5321,7 @@ mod tests {
                 .list
                 .unwrap()
         };
-        assert_eq!(list(100, 30).y, 6);
+        assert_eq!(list(100, 30).y, 7);
         assert_eq!(list(80, 20).y, 2);
     }
 
@@ -5330,19 +5334,19 @@ mod tests {
             scroll: 0,
             keys: vec![Some("g:one".into()), Some("r:two".into())],
         };
-        assert_eq!(hit_row(&hit, 3, 6), Some("g:one".into()));
-        assert_eq!(hit_row(&hit, 3, 7), Some("r:two".into()));
+        assert_eq!(hit_row(&hit, 3, 7), Some("g:one".into()));
+        assert_eq!(hit_row(&hit, 3, 8), Some("r:two".into()));
         // The header's rows and the rule under it are nobody's.
-        for row in 0..6 {
+        for row in 0..7 {
             assert_eq!(hit_row(&hit, 3, row), None, "row {row}");
         }
     }
 
     #[test]
     fn a_terminal_in_the_pane_is_sized_under_the_header_it_has() {
-        // 45 rows, less the header (5) and its rule, the rules above the line
+        // 45 rows, less the header (6) and its rule, the rules above the line
         // and the footer, the line, the footer, and the row naming the run.
-        assert_eq!(term_size(Rect::new(0, 0, 160, 45), false, 1), (79, 34));
+        assert_eq!(term_size(Rect::new(0, 0, 160, 45), false, 1), (79, 33));
         // Full screen the header is one line and there are no rules.
         assert_eq!(term_size(Rect::new(0, 0, 160, 45), true, 1), (160, 41));
         // A short screen keeps the one-line header beside a tile too.
