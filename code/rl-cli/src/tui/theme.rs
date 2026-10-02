@@ -68,6 +68,12 @@ pub fn selected() -> Style {
         .fg(Color::Rgb(0xE8, 0xF0, 0xED))
 }
 
+/// Text selected to be typed over — a name, as its rename opens: the accent
+/// under near-white, so it stands out of the selected row's band.
+pub fn picked() -> Style {
+    Style::default().bg(ACCENT).fg(Color::Rgb(0xF4, 0xFA, 0xF8))
+}
+
 /// Text with a block caret at byte `at` (a char boundary): the character
 /// there in reverse video, or a reversed space past the end — a whole cell,
 /// the way a terminal draws its own block cursor, so nothing moves aside to
