@@ -329,8 +329,8 @@ the header, above the line, above the footer. The project rows and the `❯` lin
 and the header and footer text level with what is typed after the `❯`; a project's runs, shells and agents sit one column in, under it. The list and its
 detail pane are split by a vertical bar — the list takes two thirds beside the details pane, half beside a terminal, which needs the
 width; the full-screen terminal drops all of it for the cells. The header wears Relay's mark — a
-radio tower sending signals, drawn from one pixel grid in `tui/mark.rs` and in the accent: five
-rows of half-blocks at the left, and beside its middle
+radio tower sending signals, drawn from one pixel grid in `tui/mark.rs` and in the accent: under a row of air, five
+rows of half-blocks at the left edge, and beside its middle
 three rows the header's words — `relay` and its version (and the Relay home, `~` for home, when it
 is not the usual `~/.relay`, so a panel on a test ledger says so) with the lens and who you are at
 the right; then the tally (or the graph's or the events' own headline); then the notes — what a
