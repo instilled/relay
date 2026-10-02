@@ -201,6 +201,104 @@ impl Line {
     }
 }
 
+/// One line of text offered to be changed, the whole of it selected and the
+/// cursor at its start — a name, renamed where it stands. The keys are the
+/// line's own. While all of it is selected, typing (or a paste) replaces it,
+/// `backspace` or `delete` clears it, and any other key lets the selection
+/// go and does what it does from the start. One line only: `enter`, with or
+/// without shift, is done, never a new line, and `^j` is the list's — as is
+/// `^k` once there is nothing left to cut.
+#[derive(Debug, Clone)]
+pub struct Field {
+    line: Line,
+    /// Whether the whole of the text is selected.
+    all: bool,
+}
+
+impl Field {
+    /// `text`, all of it selected, the cursor at its start.
+    pub fn selected(text: impl Into<String>) -> Self {
+        let mut line = Line::default();
+        line.set_with_cursor(text, 0);
+        let all = !line.is_empty();
+        Self { line, all }
+    }
+
+    pub fn text(&self) -> &str {
+        self.line.text()
+    }
+
+    /// A byte index into the text, always on a char boundary.
+    pub fn cursor(&self) -> usize {
+        self.line.cursor()
+    }
+
+    /// Whether the whole of the text is still selected.
+    pub fn is_selected(&self) -> bool {
+        self.all
+    }
+
+    pub fn key(&mut self, k: &KeyEvent) -> Act {
+        let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+        match k.code {
+            KeyCode::Enter => return Act::Submit,
+            KeyCode::Char('j') if ctrl => return Act::Nothing,
+            KeyCode::Char('k') if ctrl && self.line.is_empty() => return Act::Nothing,
+            KeyCode::Backspace | KeyCode::Delete if self.all => {
+                self.all = false;
+                self.line.clear();
+                return Act::Typing;
+            }
+            _ => {}
+        }
+        let was = self.line.text().len();
+        let act = self.line.key(k);
+        // Typed over the selection: what went in at the start is all that
+        // stays. Anything else only lets the selection go.
+        if act == Act::Typing && std::mem::take(&mut self.all) && self.line.text().len() > was {
+            let at = self.line.cursor();
+            let typed = self.line.text()[..at].to_string();
+            self.line.set_with_cursor(typed, at);
+        }
+        act
+    }
+
+    /// A paste, at the cursor or over the selection. It stays one line: its
+    /// line breaks and tabs become spaces, and any other control character
+    /// goes.
+    pub fn paste(&mut self, s: &str) {
+        if std::mem::take(&mut self.all) {
+            self.line.clear();
+        }
+        let s: String = s
+            .chars()
+            .map(|c| if matches!(c, '\n' | '\t') { ' ' } else { c })
+            .filter(|c| !c.is_control())
+            .collect();
+        self.line.insert(&s);
+    }
+
+    /// Where a window `w` columns wide shows the text from, having last shown
+    /// it from `from`: the same while the cursor is in view, else just far
+    /// enough to bring it back — and never so far that the end leaves room
+    /// empty while text is hidden at the start. The cursor past the end takes
+    /// a column of its own.
+    pub fn window(&self, from: usize, w: usize) -> usize {
+        if w == 0 {
+            return 0;
+        }
+        let at = self.text()[..self.cursor()].chars().count();
+        let from = if at < from {
+            at
+        } else if at >= from + w {
+            at + 1 - w
+        } else {
+            from
+        };
+        from.min((self.text().chars().count() + 1).saturating_sub(w))
+    }
+}
+
 /// What a line means. `runnable` answers whether a first word names something
 /// this machine can actually run — a binary, a target here — which is what
 /// separates a shell line from words meant for the assistant.
@@ -538,6 +636,175 @@ mod tests {
         // A ctrl chord the line has no use for is the panel's, not ours.
         assert_eq!(l.key(&ctrl('c')), Act::Nothing);
         assert_eq!((l.text(), l.cursor()), ("abc", 3));
+    }
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::from(code)
+    }
+
+    fn type_into(f: &mut Field, text: &str) {
+        for c in text.chars() {
+            assert_eq!(f.key(&KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)), Act::Typing);
+        }
+    }
+
+    #[test]
+    fn a_field_opens_all_selected_with_the_cursor_at_the_start() {
+        let f = Field::selected("make test");
+        assert_eq!((f.text(), f.cursor(), f.is_selected()), ("make test", 0, true));
+        // Nothing to select in nothing.
+        assert!(!Field::selected("").is_selected());
+    }
+
+    #[test]
+    fn typing_over_the_selection_replaces_it() {
+        let mut f = Field::selected("make test");
+        type_into(&mut f, "n");
+        assert_eq!((f.text(), f.cursor(), f.is_selected()), ("n", 1, false));
+        type_into(&mut f, "ightly");
+        assert_eq!(f.text(), "nightly", "once it is gone, typing adds");
+        // Alt with a letter the line has no word key for is that letter.
+        let mut f = Field::selected("make test");
+        f.key(&KeyEvent::new(KeyCode::Char('x'), KeyModifiers::ALT));
+        assert_eq!(f.text(), "x");
+        // A character of several bytes replaces it whole as well.
+        let mut f = Field::selected("make test");
+        type_into(&mut f, "🌍");
+        assert_eq!((f.text(), f.cursor()), ("🌍", 4));
+    }
+
+    #[test]
+    fn a_paste_over_the_selection_replaces_it_and_stays_one_line() {
+        let mut f = Field::selected("make test");
+        f.paste("the\nnightly\tbuild");
+        assert_eq!((f.text(), f.cursor()), ("the nightly build", 17));
+        // With nothing selected it goes in at the cursor.
+        f.key(&ctrl('a'));
+        f.paste("x");
+        assert_eq!(f.text(), "xthe nightly build");
+    }
+
+    #[test]
+    fn backspace_or_delete_clears_the_selection() {
+        for code in [KeyCode::Backspace, KeyCode::Delete] {
+            let mut f = Field::selected("make test");
+            assert_eq!(f.key(&key(code)), Act::Typing);
+            assert_eq!((f.text(), f.cursor(), f.is_selected()), ("", 0, false), "{code:?}");
+        }
+        // With alt as well: the selection is what goes.
+        let mut f = Field::selected("make test");
+        f.key(&KeyEvent::new(KeyCode::Backspace, KeyModifiers::ALT));
+        assert_eq!(f.text(), "");
+        // Once it is gone they take a char each, as on the line.
+        let mut f = Field::selected("abc");
+        f.key(&key(KeyCode::Right));
+        f.key(&key(KeyCode::Delete));
+        assert_eq!(f.text(), "ac");
+    }
+
+    #[test]
+    fn moving_lets_the_selection_go_and_moves_from_the_start() {
+        let mut f = Field::selected("make test");
+        assert_eq!(f.key(&key(KeyCode::Right)), Act::Typing);
+        assert_eq!((f.cursor(), f.is_selected()), (1, false));
+        type_into(&mut f, "!");
+        assert_eq!(f.text(), "m!ake test", "nothing replaced once it is let go");
+
+        let mut f = Field::selected("make test");
+        f.key(&key(KeyCode::Left));
+        assert_eq!((f.text(), f.cursor(), f.is_selected()), ("make test", 0, false));
+
+        let mut f = Field::selected("make test");
+        f.key(&ctrl('e'));
+        assert_eq!((f.cursor(), f.is_selected()), (9, false));
+        f.key(&ctrl('a'));
+        assert_eq!(f.cursor(), 0);
+        type_into(&mut f, "sudo ");
+        assert_eq!(f.text(), "sudo make test");
+    }
+
+    #[test]
+    fn a_field_walks_and_cuts_by_word_as_the_line_does() {
+        let alt = |code| KeyEvent::new(code, KeyModifiers::ALT);
+        let mut f = Field::selected("make test ~/Projects/flint");
+        f.key(&alt(KeyCode::Right));
+        assert_eq!((f.cursor(), f.is_selected()), (4, false), "past `make`");
+        f.key(&alt(KeyCode::Char('f')));
+        assert_eq!(f.cursor(), 9, "past `test`");
+        f.key(&KeyEvent::new(KeyCode::Right, KeyModifiers::CONTROL));
+        assert_eq!(f.cursor(), 20, "past `Projects`: the slashes are between words");
+        f.key(&alt(KeyCode::Char('b')));
+        f.key(&alt(KeyCode::Left));
+        assert_eq!(f.cursor(), 5, "back before `test`");
+        f.key(&alt(KeyCode::Char('d')));
+        assert_eq!(f.text(), "make  ~/Projects/flint");
+        f.key(&ctrl('e'));
+        f.key(&ctrl('w'));
+        assert_eq!(f.text(), "make  ");
+        f.key(&ctrl('a'));
+        f.key(&ctrl('k'));
+        assert_eq!(f.text(), "");
+        // ^u cuts back to the start; a word cut lets the selection go first.
+        let mut f = Field::selected("make test");
+        f.key(&alt(KeyCode::Char('d')));
+        assert_eq!((f.text(), f.is_selected()), (" test", false));
+        f.key(&ctrl('e'));
+        f.key(&ctrl('u'));
+        assert_eq!(f.text(), "");
+    }
+
+    #[test]
+    fn a_field_is_one_line() {
+        let mut f = Field::selected("make");
+        f.key(&ctrl('e'));
+        for m in [KeyModifiers::NONE, KeyModifiers::SHIFT, KeyModifiers::ALT] {
+            assert_eq!(f.key(&KeyEvent::new(KeyCode::Enter, m)), Act::Submit, "{m:?}");
+        }
+        // ^j is the list's, never a line feed.
+        assert_eq!(f.key(&ctrl('j')), Act::Nothing);
+        assert_eq!(f.text(), "make");
+        assert_eq!(f.key(&key(KeyCode::Esc)), Act::Cancel);
+        // ^k cuts while there is something to cut; then it is the list's.
+        f.key(&ctrl('a'));
+        assert_eq!(f.key(&ctrl('k')), Act::Typing);
+        assert_eq!(f.key(&ctrl('k')), Act::Nothing);
+        // The list keeps what the line leaves it.
+        for code in [KeyCode::Up, KeyCode::Down, KeyCode::Home, KeyCode::End] {
+            assert_eq!(f.key(&key(code)), Act::Nothing, "{code:?}");
+        }
+    }
+
+    #[test]
+    fn a_window_follows_the_cursor_only_as_far_as_it_has_to() {
+        // Thirty letters in a window ten wide.
+        let mut f = Field::selected("abcdefghijklmnopqrstuvwxyz0123");
+        assert_eq!(f.window(0, 10), 0);
+        // To the end: the cursor's own column is the last one.
+        f.key(&ctrl('e'));
+        assert_eq!(f.window(0, 10), 21);
+        // Back a little: the window stays put while the cursor is in it.
+        for _ in 0..5 {
+            f.key(&key(KeyCode::Left));
+        }
+        assert_eq!(f.window(21, 10), 21);
+        // Back past its left edge: it follows, no further.
+        for _ in 0..10 {
+            f.key(&key(KeyCode::Left));
+        }
+        assert_eq!(f.window(21, 10), 15);
+        f.key(&ctrl('a'));
+        assert_eq!(f.window(15, 10), 0);
+        // Cut short, it shows all there is rather than empty room.
+        f.key(&ctrl('e'));
+        let from = f.window(0, 10);
+        f.key(&ctrl('w'));
+        assert_eq!(f.text(), "");
+        assert_eq!(f.window(from, 10), 0);
+        // Chars, not bytes.
+        let mut f = Field::selected("ééééé");
+        f.key(&ctrl('e'));
+        assert_eq!(f.window(0, 4), 2);
+        assert_eq!(f.window(0, 0), 0);
     }
 
     #[test]

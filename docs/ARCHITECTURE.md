@@ -384,13 +384,25 @@ header says which folder it is in, and the cursor stops on it like any other row
 going / done), when it last stirred, and the schedules and reactions that live there. `^g`
 from a header opens the graph on that folder's first rule, and from a job on the job's own;
 `^r` (or `/rename`) renames
-whatever the cursor is on in place — a folder over `workspace.rename`, which updates the
-registered name and keeps the registration, a run (a shell is one) over `run.rename`, and a job
-through the form of the rule it comes from. An agent nobody named — no title from the form,
+whatever the cursor is on in place. On a run (a shell is one) or a project's header the name
+turns into a field in its own cell, the whole of it selected and the caret at its start, drawn the
+way the line draws its own: typing or a paste replaces it, `backspace` or `delete` clears it, and
+any other key lets the selection go and does what it does from the start. The keys are the line's
+own, from the same code (`line::Field` wraps `tui/line.rs`'s editor), one line only, and a name
+wider than its cell scrolls sideways to keep the caret in view. `enter` saves — a folder over
+`workspace.rename`, which updates the registered name and keeps the registration, a run over
+`run.rename` — and `esc`, or anything that takes the cursor off the row (the arrows, `^j`/`^k`, a
+click elsewhere, the wheel, `tab` to another lens), lets it go unsaved; meanwhile the footer says
+`enter saves · esc cancels`, and the line below waits, quiet and without its caret. An empty name
+gives a project its folder's own back, and a run the name Relay gave it — what it started as, or
+what its first prompt named it, kept beside the title (`runs.relay_title`); a run from before
+Relay kept one says so, and the field stays up. The `everywhere` header has no name to change. A
+job is renamed through the form of the rule it comes from. An agent nobody named — no title from the form,
 `--title` or whatever started it — is named once for what it was first asked, from Claude's
 `UserPromptSubmit` hook: `claude: add a recipe import`, the prompt's first line cut to the title's
 length, a slash command skipped. The ledger keeps whether a title is still Relay's own
-(`runs.title_auto`), so a later prompt never renames it and a rename by hand always wins. A folder you
+(`runs.title_auto`), so a later prompt never renames it and a rename by hand always wins — until an
+empty one takes it back, after which the first prompt still names a run not yet asked anything. A folder you
 `rl up`'d is always on the list, even before anything has run there: its header sits in its
 place by name, under every lens — a lens narrows what shows inside projects, never which
 projects there are — so you can select
@@ -568,7 +580,7 @@ list shows them beside it: `^x` stops, archives or removes, `^r` renames, `^t` p
 `^f` searches.
 `?` on an empty line shows the keys for where you are in a quiet line under it (`tui/shortcuts.rs`)
 — the list's, the `hidden` lens's, a question's and its choices', a watched terminal's, the
-graph's, `/events`' — one table per place, a command's key read from the same table the command
+graph's, `/events`', a name being changed's — one table per place, a command's key read from the same table the command
 list shows; `/help` shows it too, beside the commands in the footer. It wraps between keys onto
 more rows on a narrow terminal rather than cut one off, and the foot of the panel grows to hold
 it. `?` again or `esc` puts it away — `esc` does that first, before it closes the pane, clears a

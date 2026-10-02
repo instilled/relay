@@ -288,6 +288,19 @@ async fn an_agent_nobody_named_is_named_for_its_first_prompt_once() {
     let r: Run = c.ok("run.hook", prompt(&unnamed.id, "and more")).await;
     assert_eq!(r.title, "recipes");
 
+    // An empty name takes a rename back, to the name Relay gave the run: what
+    // its first prompt named it, or what it started as — and one renamed
+    // before it was asked anything is still named for the next prompt.
+    let r: Run = c.ok("run.rename", json!({ "id": unnamed.id, "title": "" })).await;
+    assert_eq!(r.title, "fake-cli: add a recipe import");
+    let r: Run = c.ok("run.rename", json!({ "id": renamed.id, "title": "  " })).await;
+    assert_eq!(r.title, renamed.title);
+    let r: Run = c.ok("run.hook", prompt(&renamed.id, "fix the importer")).await;
+    assert_eq!(r.title, "fake-cli: fix the importer");
+    c.ok::<Run>("run.rename", json!({ "id": named.id, "title": "x" })).await;
+    let r: Run = c.ok("run.rename", json!({ "id": named.id, "title": "" })).await;
+    assert_eq!(r.title, "the importer");
+
     for id in [&unnamed.id, &named.id, &renamed.id] {
         c.ok::<Run>("run.stop", json!({ "id": id })).await;
         c.wait_terminal(id).await;

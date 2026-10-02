@@ -274,19 +274,6 @@ pub async fn apply(home: &Home, f: &Form, registered: impl Fn(&Path) -> bool) ->
             let file = rulefile::install(home, &mut rpc, &d, was.as_ref(), known).await?;
             Ok(format!("{} on · {}", d.name, rl_core::display_path(&file)))
         }
-        form::Kind::Rename => {
-            let name = f.get("name").trim().to_string();
-            let w = rpc
-                .call::<rl_proto::methods::WorkspaceRename>(rl_proto::methods::WorkspaceRenameParams {
-                    path: f.origin.clone(),
-                    name,
-                })
-                .await?;
-            Ok(format!("renamed to {}", w.name))
-        }
-        // Words never make one: a run is picked from the list to be renamed,
-        // and `form_of` only ever builds a run or a rule.
-        form::Kind::RenameRun => anyhow::bail!("a run is renamed from the panel"),
     }
 }
 

@@ -84,6 +84,46 @@ fn a_run_relay_titled_is_named_once_and_a_rename_by_hand_wins() {
 }
 
 #[test]
+fn a_rename_by_hand_is_undone_back_to_relays_own_name() {
+    let l = Ledger::open_in_memory().unwrap();
+    for id in ["asked001", "early001", "given001"] {
+        let r = run(id, "2026-09-08T10:00:00Z");
+        l.call_blocking(move |c| runs::insert(c, &r)).unwrap();
+    }
+    for id in ["asked001", "early001"] {
+        l.call_blocking(move |c| runs::set_title_auto(c, id)).unwrap();
+    }
+    let title = |id: &'static str| l.call_blocking(move |c| runs::get(c, id)).unwrap().unwrap().title;
+    let rename = |id: &'static str, t: &'static str| l.call_blocking(move |c| runs::set_title(c, id, t)).unwrap();
+    let restore = |id: &'static str| l.call_blocking(move |c| runs::restore_title(c, id)).unwrap();
+    let name_once = |id: &'static str, t: &'static str| l.call_blocking(move |c| runs::name_once(c, id, t)).unwrap();
+
+    // Named for its first prompt, then by hand: back to the prompt's name.
+    assert!(name_once("asked001", "claude: one"));
+    rename("asked001", "mine");
+    assert!(restore("asked001"));
+    assert_eq!(title("asked001"), "claude: one");
+    assert!(!name_once("asked001", "claude: two"), "named once is once");
+
+    // Named by hand before it was asked anything: back to what it started
+    // as, and the first prompt still names it.
+    rename("early001", "mine");
+    assert!(!name_once("early001", "claude: one"), "the rename stands");
+    assert!(restore("early001"));
+    assert_eq!(title("early001"), "make test");
+    assert!(name_once("early001", "claude: two"));
+    assert_eq!(title("early001"), "claude: two");
+
+    // Titled by whoever started it: that is the name it goes back to.
+    rename("given001", "mine");
+    assert!(restore("given001"));
+    assert_eq!(title("given001"), "make test");
+    assert!(!name_once("given001", "claude: one"));
+
+    assert!(!restore("nope0000"));
+}
+
+#[test]
 fn a_hidden_run_is_kept_as_it_was_and_hiding_again_moves_the_time() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("ledger.db");

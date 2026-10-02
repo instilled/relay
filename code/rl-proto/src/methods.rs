@@ -322,7 +322,9 @@ pub struct RunIds {
 }
 
 /// Gives a run a new title, in place. A run is titled when it starts and
-/// nothing writes the title afterwards, so a rename is not overwritten.
+/// nothing writes the title afterwards, so a rename is not overwritten. An
+/// empty title undoes the rename: the run goes back to the name Relay gave
+/// it — what it started as, or what its first prompt named it.
 pub struct RunRename;
 impl Method for RunRename {
     const NAME: &'static str = "run.rename";
