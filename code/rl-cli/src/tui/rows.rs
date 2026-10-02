@@ -380,6 +380,16 @@ pub fn live_shell(r: &Run) -> bool {
     is_shell(r) && !r.state.is_terminal() && !matches!(r.state, RunState::NeedsInput | RunState::Blocked)
 }
 
+/// What a run's row says in its summary column. A Claude or Codex run that is
+/// waiting — on you, or for nothing, or ended — says its latest recap, which
+/// is what you come back for; at work, what it is doing.
+pub fn said(i: &DigestItem) -> &str {
+    match &i.recap {
+        Some(r) if !matches!(i.run.state, RunState::Starting | RunState::Working) => r,
+        _ => &i.summary,
+    }
+}
+
 /// A run's icon: an agent, a shell, or a command (a plugin is one).
 pub fn icon(r: &Run) -> &'static str {
     if is_shell(r) {
@@ -693,7 +703,7 @@ fn run_subject<'a>(i: &'a DigestItem, project: &'a str) -> Subject<'a> {
         _ => None,
     };
     Subject {
-        text: vec![&r.title, r.cli.as_deref().unwrap_or(""), &i.summary],
+        text: vec![&r.title, r.cli.as_deref().unwrap_or(""), said(i)],
         project: vec![project, r.workspace.to_str().unwrap_or("")],
         is,
         kind,
@@ -726,7 +736,7 @@ pub fn named(row: &Row, d: &Digest, names: &Names) -> Named {
         Row::Run(i) => Named {
             title: i.run.title.clone(),
             project: names.group(&i.run.place_key()),
-            summary: i.summary.clone(),
+            summary: said(i).to_string(),
             rest: vec![i.run.cli.clone().unwrap_or_default(), path(&i.run.workspace)],
             ..Named::default()
         },
@@ -1301,7 +1311,55 @@ mod tests {
             joined_by: None,
             emitted: vec![],
             cwd: None,
+            recap: None,
         }
+    }
+
+    #[test]
+    fn a_row_says_its_recap_while_it_waits_and_what_it_does_at_work() {
+        let at = "2026-09-23T10:00:00Z";
+        let with = |state: RunState| {
+            let mut i = item("a1", state, "/w", at, false);
+            i.run.cli = Some("claude".into());
+            i.summary = "tool: Bash".into();
+            i.recap = Some("Search fixed; nothing committed. Next: say commit.".into());
+            i
+        };
+        for state in [RunState::Starting, RunState::Working] {
+            assert_eq!(said(&with(state)), "tool: Bash", "{state:?}");
+        }
+        for state in [
+            RunState::Idle,
+            RunState::NeedsInput,
+            RunState::Blocked,
+            RunState::Stale,
+            RunState::Finished,
+            RunState::Failed,
+            RunState::Stopped,
+        ] {
+            assert_eq!(
+                said(&with(state)),
+                "Search fixed; nothing committed. Next: say commit.",
+                "{state:?}"
+            );
+        }
+        // No recap kept: where it stands, as ever.
+        let mut none = with(RunState::Idle);
+        none.recap = None;
+        assert_eq!(said(&none), "tool: Bash");
+        // What the row says is what a search finds.
+        let d = Digest {
+            since: at.parse().unwrap(),
+            items: vec![with(RunState::Idle)],
+            decisions: vec![],
+            checkouts: vec![],
+            lost: vec![],
+            hidden: vec![],
+            order: vec![],
+        };
+        let names = Names::default();
+        let now: Timestamp = at.parse().unwrap();
+        assert_eq!(keys(&build_with(&d, &names, "commit", now)), ["[w]", "r:a1"]);
     }
 
     #[test]

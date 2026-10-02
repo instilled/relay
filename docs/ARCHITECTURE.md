@@ -315,7 +315,12 @@ the summary to the edge, and the ref and the age at the right — with `⎇ feat
 run started on another branch than the one its folder is on now. A run that ended well and raised
 something itself (`rl emit`) says the last of it in its own words — `5 feedback rows to process`,
 not `exit 0`, which for a probe is the whole point; one that failed keeps its exit, the one worth
-reading. What it raised, by kind, is in the pane under `signals`
+reading. A Claude or Codex run that is waiting — idle, needing you, blocked, or ended — says
+its agent's latest recap there instead (§6: `Search fixed; nothing committed. Next: say
+commit.`), the first line of it, which `digest.get` carries on the item (`recap`) from one query
+over `summaries` for the whole list, never a session file read; at work it says what it is
+doing, as ever. Other agents and shells say what they always have. A search finds what the row
+says. What it raised, by kind, is in the pane under `signals`
 (`flint.product.new-feedback ×5`). The daemon's own event families are left out of that, since
 the state already says them (`events::emitted_for_run`, carried on the digest's item). Colour carries the state — a
 saturated accent per state, on the terminal's own foreground so it reads on either theme
@@ -458,7 +463,10 @@ line as the note (`1 only the checkout path`), and the line's hint says so befor
 Typed text before `^x` goes with a dismissal as its reason. `/summarise [since]` recaps the run
 under the cursor, live or ended (§6), and the recap lands in the pane under the facts, aligned
 with them: `recap    claude's own · 2m ago · last 2h`, the words under it in the value column,
-and `· moved on since` once the run has gone on. Only ever when asked.
+and `· moved on since` once the run has gone on. Asked over a terminal being watched, the pane
+turns to the details, where the recap is; the terminal stays open, and `enter` on the run is
+back in it. An assistant is only ever asked when you ask; Claude's and Codex's own recaps are
+there already, kept as they write them (§6).
 
 **Typing is what the panel rests in.** One line sits at the foot and always takes what you type
 (`tui/line.rs`), so there is nothing to open and nothing to close. What a finished line means is
@@ -910,7 +918,8 @@ has one, and never asks an agent on its own:
 - **The agent's own recap.** Claude writes one into its transcript
   (`~/.claude/projects/<folder>/<session>.jsonl`, a `system` entry of subtype `away_summary`)
   — the recap it shows when you come back to a session. The latest in the stretch is taken as it
-  stands; one written before the stretch does not count.
+  stands, less the hint Claude ends it with for its own screen (`(disable recaps in /config)`);
+  one written before the stretch does not count.
 - **The agent's turns.** Codex keeps no recap, but its rollout
   (`~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`) ends every turn in a `task_complete` with its
   last message, the commands and patches in between. Those are the recap as facts (`Fixed the
@@ -920,7 +929,23 @@ has one, and never asks an agent on its own:
   stretch: the run's row, its events in the stretch, and what was said (Claude's messages,
   without tool traffic) or the last 64 KB of its output, handed to `assistants.summarise` as an
   assistant run (`cause: assistant:summarise`). A stretch with nothing in it says so without
-  asking anyone.
+  asking anyone. The assistant's input is `/dev/null` (`rl-session --no-input`), so `claude -p`
+  sees its end at once rather than waiting 3s and warning; should that warning ever come, it is
+  left out of the answer.
+
+**The agent's own recap is kept as it is written**, no one asked (`rl-daemon/src/recap.rs`):
+Claude's latest `away_summary`, and Codex's last turn that said something (its `task_complete`
+message). `rld` looks when a Claude hook says a turn is over or it waits on you (`Stop`,
+`Notification`), and every 5s over the Claude and Codex runs that wait on you or ended in the
+last 10 minutes — Claude writes its recap a while after the turn, a minute or more, and Codex
+has no hooks. Each look reads the session file on from where the last stopped (`read_to` in
+`transcripts`, back to 0 when the run names another file), whole lines only and only those that
+mention the entry it wants, so a transcript of many MB is read once. One written before the run
+started is about another session and does not count. It is kept in `summaries` as any recap is
+(source `claude recap` or `codex turn`, `reach` the file's length), so `/summarise`, the pane and
+the row see the same one — but never over a newer one: a recap asked for after the agent wrote
+its own stays until the agent writes another (`summaries::put_newer`, by the time each was
+written). It is said in no event — one a turn would bury the run's own news.
 
 `rld` learns the session file from Claude's hooks, which carry `transcript_path` (kept in
 `transcripts`), or finds it by the run's folder and start time. The recap is kept in

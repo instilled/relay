@@ -584,6 +584,11 @@ pub struct DigestItem {
     /// prompt. Unknown until it says so; forgotten when the run ends.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<std::path::PathBuf>,
+    /// A Claude or Codex run's latest recap, its first line cut for a row —
+    /// the agent's own, kept as it is written, or one asked for since. The
+    /// whole of it is `summary.get`'s.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recap: Option<String>,
 }
 
 // ---- event.* ----------------------------------------------------------------

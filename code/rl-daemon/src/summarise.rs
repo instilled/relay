@@ -13,7 +13,9 @@
 //!   `assistants.summarise`: what was said, or the output.
 //!
 //! The one kept is given back while the run has not moved on. Never of an
-//! assistant's own run, so a reaction cannot feed itself.
+//! assistant's own run, so a reaction cannot feed itself. The agent's own
+//! recap is also kept as it is written (`recap.rs`), so the one kept is often
+//! already there.
 
 use crate::assistant;
 use crate::server::Daemon;
@@ -339,10 +341,19 @@ pub fn prompt(run: &Run, since: Option<&str>, events: &[Event], heading: &str, m
     s
 }
 
-/// The answer as kept: trimmed, fences around the whole of it dropped,
-/// capped.
-fn clean(raw: &str) -> String {
-    let mut t = raw.trim();
+/// What `claude -p` says when its input is left open. An assistant's input is
+/// closed (`assistant::run`), but should it ever be open the warning is the
+/// CLI's, not the answer.
+const STDIN_WARNING: &str = "Warning: no stdin data received";
+
+/// The answer as kept: the CLI's stdin warning left out, trimmed, fences
+/// around the whole of it dropped, capped.
+pub(crate) fn clean(raw: &str) -> String {
+    let said: String = raw
+        .split_inclusive('\n')
+        .filter(|l| !l.trim_start().starts_with(STDIN_WARNING))
+        .collect();
+    let mut t = said.trim();
     if t.starts_with("```")
         && t.ends_with("```")
         && let Some(nl) = t.find('\n')
@@ -424,5 +435,23 @@ mod tests {
         assert_eq!(first_line("First.\nSecond."), "First.");
         let long = "é".repeat(TEXT_MAX);
         assert!(clean(&long).len() <= TEXT_MAX);
+    }
+
+    #[test]
+    fn the_clis_stdin_warning_is_not_the_answer() {
+        let warning = "Warning: no stdin data received in 3s, proceeding without it. If piping from a slow \
+                       command, redirect stdin explicitly: < /dev/null to skip, or wait longer.";
+        assert_eq!(clean(&format!("{warning}\nIt ran.\nAll good.\n")), "It ran.\nAll good.");
+        assert_eq!(
+            clean(&format!("It ran.\r\n{warning}\r\nAll good.")),
+            "It ran.\r\nAll good."
+        );
+        assert_eq!(clean(&format!("{warning}\n```\nIt ran.\n```\n")), "It ran.");
+        assert_eq!(clean(warning), "", "the warning alone is nothing said");
+        assert_eq!(
+            clean("It warned: \"Warning: no stdin data received\"."),
+            "It warned: \"Warning: no stdin data received\".",
+            "only a line of its own"
+        );
     }
 }

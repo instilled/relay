@@ -148,6 +148,7 @@ mod tests {
             joined_by: None,
             emitted: Vec::new(),
             cwd: None,
+            recap: None,
         }
     }
 

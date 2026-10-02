@@ -37,6 +37,7 @@ pub fn recap_label(s: &Summary, now: Timestamp) -> String {
         "claude recap" => "claude's own".to_string(),
         "codex turns" if s.by.is_empty() => "codex's turns".to_string(),
         "codex turns" => format!("codex's turns, by {}", s.agent),
+        "codex turn" => "codex's last turn".to_string(),
         "nothing new" => "nothing new".to_string(),
         _ => format!("by {}", s.agent),
     };
@@ -669,6 +670,7 @@ mod tests {
             unseen: true,
             joined_by: None,
             cwd: None,
+            recap: None,
             emitted: vec![
                 Signal {
                     kind: "flint.product.new-feedback".into(),
@@ -780,6 +782,13 @@ mod tests {
             recap_label(&turns, now),
             "codex's turns · 2m ago · last 2h · moved on since"
         );
+        let last = Summary {
+            source: "codex turn".into(),
+            since: None,
+            stale: false,
+            ..own
+        };
+        assert_eq!(recap_label(&last, now), "codex's last turn · 2m ago");
     }
 
     #[test]
