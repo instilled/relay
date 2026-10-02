@@ -20,13 +20,17 @@
 //! What you hid (`/hide`: a run, a job, a project and everything in it) is
 //! off the list and in the `hidden` lens instead — unless it comes to need
 //! you after you hid it: then it comes through, just after the questions.
+//!
+//! A project whose rows you moved (shift-↑/↓) keeps your order instead of
+//! sorting itself: what is new enters at its top, what needs you floats to
+//! its top until dealt with, and `/sort` lets it sort itself again.
 
 use super::query::{Named, Query, Subject};
 use crate::rank;
 use jiff::{SignedDuration, Timestamp};
 use rl_core::time::fmt_age;
 use rl_proto::decision::Decision;
-use rl_proto::methods::{Digest, DigestItem, Hidden};
+use rl_proto::methods::{Digest, DigestItem, Hidden, Order};
 use rl_proto::rule::{Rule, RuleKind, RuleStatus};
 use rl_proto::types::{Cause, Checkout, Confidence, Run, RunKind, RunState};
 use std::collections::{HashMap, HashSet};
@@ -958,8 +962,17 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
             (cls(s, false), s, j.last().at, Row::Job(j))
         }));
         mixed.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)).then_with(|| b.2.cmp(&a.2)));
-        for (_, _, _, row) in mixed {
-            block.push(row);
+        let mixed: Vec<Row<'a>> = mixed.into_iter().map(|(_, _, _, row)| row).collect();
+        // Once you have put a project's rows in order, it keeps yours: what
+        // needs you still floats to the top, what is new enters at the top,
+        // and the rest stand where you put them.
+        let kept = block[0]
+            .key()
+            .and_then(|k| d.order.iter().find(|o| o.group == k))
+            .filter(|o| !o.rows.is_empty());
+        match kept {
+            Some(o) => block.extend(in_order(mixed, &o.rows)),
+            None => block.extend(mixed),
         }
         if g.key == EVERYWHERE_KEY {
             everywhere = block;
@@ -1026,6 +1039,94 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
     // under one `everywhere`, rather than under whatever folder that was.
     rows.extend(everywhere);
     rows
+}
+
+/// Whether a row floats to the top of its project whatever order you put it
+/// in: it asks, is blocked, or failed — a job whose last firing failed too.
+/// Once that is dealt with, it drops back to where you put it.
+pub fn floats(row: &Row) -> bool {
+    let needs = |s: RunState| matches!(s, RunState::NeedsInput | RunState::Blocked | RunState::Failed);
+    match row {
+        Row::Run(i) => needs(i.run.state),
+        Row::Job(j) => needs(j.last().run.state),
+        Row::Group(_) | Row::Question(_) => false,
+    }
+}
+
+/// A project's rows, sorted as ever, put in the order kept for it: what
+/// floats first, then what the order does not know yet (new since), then the
+/// rest where the order has them. Each part keeps the sorted order within it.
+fn in_order<'a>(sorted: Vec<Row<'a>>, kept: &[String]) -> Vec<Row<'a>> {
+    let place = |r: &Row| r.key().and_then(|k| kept.iter().position(|x| *x == k));
+    let (floating, rest): (Vec<Row<'a>>, Vec<Row<'a>>) = sorted.into_iter().partition(floats);
+    let (mut placed, new): (Vec<Row<'a>>, Vec<Row<'a>>) = rest.into_iter().partition(|r| place(r).is_some());
+    placed.sort_by_key(|r| place(r));
+    floating.into_iter().chain(new).chain(placed).collect()
+}
+
+/// A project's rows in the order they stand underneath what floats: what
+/// `in_order` would keep, from the list as it is built with nothing narrowing
+/// it (`full`). Without an order kept, the list's own.
+fn standing(full: &[Row], kept: &[Order], group: &str) -> Vec<String> {
+    let Some(head) = full.iter().position(|r| r.key().as_deref() == Some(group)) else {
+        return Vec::new();
+    };
+    let keys: Vec<String> = full[head + 1..]
+        .iter()
+        .take_while(|r| !matches!(r, Row::Group(_)))
+        .filter_map(Row::key)
+        .collect();
+    match kept.iter().find(|o| o.group == group).filter(|o| !o.rows.is_empty()) {
+        Some(o) => {
+            let new = keys.iter().filter(|k| !o.rows.contains(k));
+            let placed = o.rows.iter().filter(|k| keys.contains(k));
+            new.chain(placed).cloned().collect()
+        }
+        None => keys,
+    }
+}
+
+/// The order to keep once the row `key` moves one place up (or down) among
+/// what is `shown`: its project's whole order, from `full` — the list with
+/// nothing narrowing it — so rows a search or a lens leaves out keep theirs.
+/// Rows move only inside their project, and below what floats; a question, a
+/// pinned run, a header, and what needs you stay put, and say why.
+pub fn reorder(shown: &[Row], full: &[Row], kept: &[Order], key: &str, up: bool) -> Result<Order, &'static str> {
+    let at = shown
+        .iter()
+        .position(|r| r.key().as_deref() == Some(key))
+        .ok_or("nothing here to move")?;
+    match &shown[at] {
+        Row::Group(_) => return Err("a project keeps its place by name · ⇧↑↓ moves the rows inside it"),
+        Row::Question(_) => return Err("a question stays at the top: it needs you"),
+        Row::Run(_) | Row::Job(_) => {}
+    }
+    let Some(head) = shown[..at].iter().rposition(|r| matches!(r, Row::Group(_))) else {
+        return Err(if shown[at].item().is_some_and(|i| i.run.pinned_at.is_some()) {
+            "a pinned run keeps the order it was pinned in · ^t lets it go back"
+        } else {
+            "it needs you, so it stays at the top until it is dealt with"
+        });
+    };
+    if floats(&shown[at]) {
+        return Err("it needs you, so it stays at the top of its project until it is dealt with");
+    }
+    let next = if up { at.checked_sub(1) } else { Some(at + 1) };
+    let other = match next.and_then(|i| shown.get(i)) {
+        Some(r) if floats(r) => return Err("already at the top · what needs you stays above it"),
+        Some(Row::Run(_) | Row::Job(_)) => shown[next.unwrap_or_default()].key().unwrap_or_default(),
+        _ if up => return Err("already at the top of its project"),
+        _ => return Err("already at the bottom of its project"),
+    };
+    let group = shown[head].key().unwrap_or_default();
+    let mut rows = standing(full, kept, &group);
+    rows.retain(|k| k != key);
+    let i = rows
+        .iter()
+        .position(|k| *k == other)
+        .ok_or("the list moved under it · try again")?;
+    rows.insert(if up { i } else { i + 1 }, key.to_string());
+    Ok(Order { group, rows })
 }
 
 /// `(questions, need you, working, finished, jobs)` over what the list shows.
@@ -1216,6 +1317,7 @@ mod tests {
             checkouts: vec![],
             lost: lost.iter().map(|s| s.to_string()).collect(),
             hidden: Vec::new(),
+            order: Vec::new(),
         };
         assert_eq!(
             lost_note(&d(&[], vec![agent.clone()])),
@@ -1316,6 +1418,7 @@ mod tests {
             checkouts: Vec::new(),
             lost: Vec::new(),
             hidden: Vec::new(),
+            order: Vec::new(),
         };
         let names = Names::new([
             (PathBuf::from(api), "api".to_string()),
@@ -1356,6 +1459,7 @@ mod tests {
             checkouts: Vec::new(),
             lost: Vec::new(),
             hidden: Vec::new(),
+            order: Vec::new(),
         };
         let names = Names::new([
             (PathBuf::from(api), "api".to_string()),
@@ -1400,6 +1504,7 @@ mod tests {
             checkouts: Vec::new(),
             lost: Vec::new(),
             hidden: Vec::new(),
+            order: Vec::new(),
         };
         let names = Names::new([(PathBuf::from(ws), "relay".to_string())]);
         let runs = |lens| {
@@ -1449,6 +1554,7 @@ mod tests {
             checkouts: Vec::new(),
             lost: Vec::new(),
             hidden: Vec::new(),
+            order: Vec::new(),
         };
         let names = Names::new([
             (PathBuf::from("/home/f/relay"), "relay".to_string()),
@@ -1507,6 +1613,7 @@ mod tests {
                 hid(&job_key(RuleKind::Schedule, "nightly", relay), "2026-09-10T11:10:00Z"),
                 hid("g:/home/f/gone", "2026-09-10T11:10:00Z"),
             ],
+            order: Vec::new(),
         };
         let names = Names::new([
             (PathBuf::from(api), "api".to_string()),
@@ -1579,6 +1686,7 @@ mod tests {
                 hid(&format!("g:{api}"), "2026-09-10T10:00:00Z"),
                 hid(&job_key(RuleKind::Schedule, "nightly", relay), "2026-09-10T10:00:00Z"),
             ],
+            order: Vec::new(),
         };
         let names = Names::new([
             (PathBuf::from(api), "api".to_string()),
@@ -1660,6 +1768,7 @@ mod tests {
             checkouts: vec![co("/home/f/api", "main", 3), co("/home/f/web", "main", 0)],
             lost: Vec::new(),
             hidden: Vec::new(),
+            order: Vec::new(),
         };
         let names = Names::default();
         let rows = build_with(&d, &names, "", now);
@@ -1733,6 +1842,7 @@ mod tests {
             checkouts: Vec::new(),
             lost: Vec::new(),
             hidden: Vec::new(),
+            order: Vec::new(),
         };
         let names = Names::new([(PathBuf::from("/home/f/relay"), "relay".to_string())]);
         let rows = build_with(&d, &names, "", now);
@@ -1773,6 +1883,7 @@ mod tests {
             checkouts: Vec::new(),
             lost: Vec::new(),
             hidden: Vec::new(),
+            order: Vec::new(),
         };
         let names = Names::new([
             (PathBuf::from("/home/f/relay"), "relay".to_string()),
@@ -1805,6 +1916,7 @@ mod tests {
             checkouts: Vec::new(),
             lost: Vec::new(),
             hidden: Vec::new(),
+            order: Vec::new(),
         };
         let rules = [schedule("global", "pulse", true, Some("2026-09-10T12:00:30Z"))];
         let rows = build(
@@ -1921,6 +2033,7 @@ mod tests {
             checkouts: Vec::new(),
             lost: Vec::new(),
             hidden: Vec::new(),
+            order: Vec::new(),
         };
         let names = Names::new([(PathBuf::from("/home/f/relay"), "relay".to_string())]);
         let rows = build_with(&d, &names, "", now);
@@ -1967,6 +2080,7 @@ mod tests {
             checkouts: Vec::new(),
             lost: Vec::new(),
             hidden: Vec::new(),
+            order: Vec::new(),
         };
         let rows = build_with(&d2, &names, "", now);
         assert_eq!(
@@ -2003,6 +2117,7 @@ mod tests {
             checkouts: Vec::new(),
             lost: Vec::new(),
             hidden: Vec::new(),
+            order: Vec::new(),
         };
         let names = Names::new([(PathBuf::from("/home/f/relay"), "relay".to_string())]);
         // "exit 1" only appears in the failing run's own summary, not in the
@@ -2111,6 +2226,7 @@ mod tests {
             checkouts: Vec::new(),
             lost: Vec::new(),
             hidden: Vec::new(),
+            order: Vec::new(),
         };
         let names = Names::new([("/home/f/relay".into(), "relay".to_string())]);
         let build_rules = |rules: &[Rule]| {
@@ -2268,6 +2384,7 @@ mod tests {
             checkouts: Vec::new(),
             lost: Vec::new(),
             hidden: Vec::new(),
+            order: Vec::new(),
         };
         // The shell leads, though both of the others outrank it by state and
         // both are newer than it.
@@ -2286,6 +2403,7 @@ mod tests {
             checkouts: Vec::new(),
             lost: Vec::new(),
             hidden: Vec::new(),
+            order: Vec::new(),
         };
         // Where you work gives way to what wants you.
         assert_eq!(keys(&build_with(&d, &names, "", now)), ["[relay]", "r:asks", "r:shell"]);
@@ -2320,6 +2438,7 @@ mod tests {
             checkouts: Vec::new(),
             lost: Vec::new(),
             hidden: Vec::new(),
+            order: Vec::new(),
         };
         let rules = vec![
             schedule("global", "gchat-mentions", true, None),
@@ -2404,6 +2523,186 @@ mod tests {
         assert!(at("[everywhere]") < at(&job_key(RuleKind::Schedule, "gchat-mentions", EVERYWHERE_KEY)));
         assert!(at(&format!("[{home_name}]")) < at("r:hand"));
         assert!(at("[relay]") < at(&job_key(RuleKind::Schedule, "gchat-mentions", relay)));
+    }
+
+    /// One project of four runs, sorting itself as ever: what ended first,
+    /// then what is working, newest first, then what is idle.
+    fn four(order: Vec<Order>) -> (Digest, Names) {
+        let (api, relay) = ("/home/f/api", "/home/f/relay");
+        let d = Digest {
+            since: "2026-09-10T09:00:00Z".parse().unwrap(),
+            items: vec![
+                item("one", RunState::Working, relay, "2026-09-10T10:00:00Z", false),
+                item("two", RunState::Working, relay, "2026-09-10T10:01:00Z", false),
+                item("three", RunState::Idle, relay, "2026-09-10T10:02:00Z", false),
+                item("four", RunState::Finished, relay, "2026-09-10T10:03:00Z", false),
+                item("there", RunState::Working, api, "2026-09-10T10:00:00Z", false),
+            ],
+            decisions: Vec::new(),
+            checkouts: Vec::new(),
+            lost: Vec::new(),
+            hidden: Vec::new(),
+            order,
+        };
+        let names = Names::new([
+            (PathBuf::from(api), "api".to_string()),
+            (PathBuf::from(relay), "relay".to_string()),
+        ]);
+        (d, names)
+    }
+
+    fn kept(rows: &[&str]) -> Vec<Order> {
+        vec![Order {
+            group: "g:/home/f/relay".into(),
+            rows: rows.iter().map(|s| s.to_string()).collect(),
+        }]
+    }
+
+    const NOW: &str = "2026-09-10T12:00:00Z";
+
+    #[test]
+    fn a_project_sorts_itself_until_you_put_it_in_order() {
+        let now: Timestamp = NOW.parse().unwrap();
+        // Nothing kept: the list's own order, as before.
+        let (d, names) = four(Vec::new());
+        assert_eq!(
+            keys(&build_with(&d, &names, "", now)),
+            ["[api]", "r:there", "[relay]", "r:four", "r:two", "r:one", "r:three"]
+        );
+        // An order kept for a project is its order; the other project's own
+        // is untouched, and an empty one is no order at all.
+        let (d, names) = four(kept(&["r:one", "r:three", "r:two", "r:four"]));
+        assert_eq!(
+            keys(&build_with(&d, &names, "", now)),
+            ["[api]", "r:there", "[relay]", "r:one", "r:three", "r:two", "r:four"]
+        );
+        let (d, names) = four(kept(&[]));
+        assert_eq!(
+            keys(&build_with(&d, &names, "", now))[3..],
+            ["r:four", "r:two", "r:one", "r:three"]
+        );
+        // What has left the list since is no matter: the rest keep theirs.
+        let (d, names) = four(kept(&["r:gone", "r:one", "r:three", "r:two", "r:four"]));
+        assert_eq!(
+            keys(&build_with(&d, &names, "", now))[3..],
+            ["r:one", "r:three", "r:two", "r:four"]
+        );
+    }
+
+    #[test]
+    fn a_new_run_enters_at_the_top_and_what_needs_you_floats_until_dealt_with() {
+        let now: Timestamp = NOW.parse().unwrap();
+        let (mut d, names) = four(kept(&["r:one", "r:three", "r:two", "r:four"]));
+        d.items.push(item(
+            "new",
+            RunState::Working,
+            "/home/f/relay",
+            "2026-09-10T11:00:00Z",
+            false,
+        ));
+        assert_eq!(
+            keys(&build_with(&d, &names, "", now))[3..],
+            ["r:new", "r:one", "r:three", "r:two", "r:four"]
+        );
+        // It asks: it floats above everything in its project, the new one
+        // too — and so does one that fails.
+        let at = |d: &mut Digest, id: &str, state: RunState| {
+            let i = d.items.iter_mut().find(|i| i.run.id == id).unwrap();
+            i.run.state = state;
+        };
+        at(&mut d, "two", RunState::NeedsInput);
+        at(&mut d, "four", RunState::Failed);
+        assert_eq!(
+            keys(&build_with(&d, &names, "", now))[3..],
+            ["r:two", "r:four", "r:new", "r:one", "r:three"]
+        );
+        // Answered, it drops back to where you put it.
+        at(&mut d, "two", RunState::Working);
+        assert_eq!(
+            keys(&build_with(&d, &names, "", now))[3..],
+            ["r:four", "r:new", "r:one", "r:three", "r:two"]
+        );
+    }
+
+    #[test]
+    fn a_row_moves_one_place_inside_its_project_and_no_further() {
+        let now: Timestamp = NOW.parse().unwrap();
+        let (mut d, names) = four(Vec::new());
+        d.decisions = vec![question("q1", "/home/f/relay", None, "2026-09-10T11:00:00Z")];
+        let mut pinned = item(
+            "pinned",
+            RunState::Working,
+            "/home/f/relay",
+            "2026-09-10T11:00:00Z",
+            false,
+        );
+        pinned.run.pinned_at = Some("2026-09-10T11:00:00Z".parse().unwrap());
+        d.items.push(pinned);
+        let rows = build_with(&d, &names, "", now);
+        assert_eq!(
+            keys(&rows),
+            [
+                "q:q1", "r:pinned", "[api]", "r:there", "[relay]", "r:four", "r:two", "r:one", "r:three"
+            ]
+        );
+        let mv = |key: &str, up: bool| reorder(&rows, &rows, &d.order, key, up);
+        // From the list's own order, the whole of it is kept.
+        assert_eq!(
+            mv("r:one", true).unwrap(),
+            Order {
+                group: "g:/home/f/relay".into(),
+                rows: ["r:four", "r:one", "r:two", "r:three"].map(String::from).to_vec(),
+            }
+        );
+        assert_eq!(
+            mv("r:four", false).unwrap().rows,
+            ["r:two", "r:four", "r:one", "r:three"]
+        );
+        // Never out of its project, nor into a band, nor anything but a row.
+        assert_eq!(mv("r:four", true), Err("already at the top of its project"));
+        assert_eq!(mv("r:three", false), Err("already at the bottom of its project"));
+        assert_eq!(mv("r:there", false), Err("already at the bottom of its project"));
+        assert_eq!(mv("r:there", true), Err("already at the top of its project"));
+        assert!(mv("r:pinned", false).unwrap_err().starts_with("a pinned run"));
+        assert!(mv("q:q1", false).unwrap_err().starts_with("a question"));
+        assert!(mv("g:/home/f/relay", false).unwrap_err().starts_with("a project keeps"));
+        assert_eq!(mv("r:nope", true), Err("nothing here to move"));
+
+        // What needs you neither moves nor is passed.
+        let (mut d, names) = four(kept(&["r:one", "r:three", "r:two", "r:four"]));
+        d.items.iter_mut().find(|i| i.run.id == "two").unwrap().run.state = RunState::Blocked;
+        let rows = build_with(&d, &names, "", now);
+        assert_eq!(keys(&rows)[3..], ["r:two", "r:one", "r:three", "r:four"]);
+        assert!(
+            reorder(&rows, &rows, &d.order, "r:two", false)
+                .unwrap_err()
+                .starts_with("it needs you")
+        );
+        assert_eq!(
+            reorder(&rows, &rows, &d.order, "r:one", true),
+            Err("already at the top · what needs you stays above it")
+        );
+        // A move keeps where the floating one stands underneath.
+        assert_eq!(
+            reorder(&rows, &rows, &d.order, "r:four", true).unwrap().rows,
+            ["r:one", "r:four", "r:three", "r:two"]
+        );
+    }
+
+    #[test]
+    fn a_move_in_a_narrowed_list_keeps_what_it_does_not_show() {
+        let now: Timestamp = NOW.parse().unwrap();
+        let (mut d, names) = four(kept(&["r:one", "r:three", "r:two", "r:four"]));
+        d.items.iter_mut().find(|i| i.run.id == "three").unwrap().run.kind = RunKind::Command;
+        let full = build_with(&d, &names, "", now);
+        let agents = lens_build(&d, &names, Lens::Agents, now);
+        assert_eq!(keys(&agents)[3..], ["r:one", "r:two", "r:four"]);
+        // `two` goes above `one`, the row shown above it; `three`, not shown,
+        // stays where it was among the rest.
+        assert_eq!(
+            reorder(&agents, &full, &d.order, "r:two", true).unwrap().rows,
+            ["r:two", "r:one", "r:three", "r:four"]
+        );
     }
 
     #[test]

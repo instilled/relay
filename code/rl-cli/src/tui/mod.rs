@@ -59,13 +59,13 @@ use rl_core::time::fmt_age;
 use rl_proto::decision::Decision;
 use rl_proto::methods::{
     AgentList, DecisionDismiss, DecisionGet, DecisionId, DecisionNote, DecisionTake, DecisionTakeParams, Digest,
-    DigestGet, DigestHide, DigestHideParams, DigestItem, DigestParams, EventFilter, EventList, GcParams, GcRun,
-    GraphGet, GraphParams, ImportList, ImportListParams, PresenceClient, PresenceTouch, ReactionPause, ReactionReload,
-    ReactionResume, RuleApprove, RuleErrors, RuleList, RuleRef, RunArchive, RunArchiveParams, RunFilter, RunGet,
-    RunHide, RunHideParams, RunId, RunIds, RunInput, RunInputParams, RunList, RunMark, RunMarkParams, RunPin,
-    RunPinParams, RunRename, RunRenameParams, RunResume, RunResumeParams, RunSeen, RunSpec, RunStart, RunStop,
-    RunStopParams, SETUP_STEPS, ScheduleFilter, ScheduleName, SchedulePause, ScheduleReload, ScheduleResume,
-    ScheduleRun, SetupGet, SummaryGet, SummaryMake, SummaryParams, WorkspaceList, WorkspaceRemove,
+    DigestGet, DigestHide, DigestHideParams, DigestItem, DigestOrder, DigestParams, EventFilter, EventList, GcParams,
+    GcRun, GraphGet, GraphParams, ImportList, ImportListParams, PresenceClient, PresenceTouch, ReactionPause,
+    ReactionReload, ReactionResume, RuleApprove, RuleErrors, RuleList, RuleRef, RunArchive, RunArchiveParams,
+    RunFilter, RunGet, RunHide, RunHideParams, RunId, RunIds, RunInput, RunInputParams, RunList, RunMark,
+    RunMarkParams, RunPin, RunPinParams, RunRename, RunRenameParams, RunResume, RunResumeParams, RunSeen, RunSpec,
+    RunStart, RunStop, RunStopParams, SETUP_STEPS, ScheduleFilter, ScheduleName, SchedulePause, ScheduleReload,
+    ScheduleResume, ScheduleRun, SetupGet, SummaryGet, SummaryMake, SummaryParams, WorkspaceList, WorkspaceRemove,
     WorkspaceRemoveParams, WorkspaceRemoved, WorkspaceRename, WorkspaceRenameParams, WorkspaceUp, WorkspaceUpParams,
 };
 use rl_proto::rule::{NotLoaded, Rule, RuleKind, RuleStatus};
@@ -738,6 +738,7 @@ pub async fn run(home: &Home) -> Result<()> {
             checkouts: Vec::new(),
             lost: Vec::new(),
             hidden: Vec::new(),
+            order: Vec::new(),
         },
         names: Names::default(),
         filter: String::new(),
@@ -2757,6 +2758,89 @@ impl App {
         }
     }
 
+    /// Shift-↑/↓: the row under the cursor one place up or down inside its
+    /// project, which keeps that order from then on (`digest.order`). The
+    /// cursor stays on the row, and holding the key goes on moving it. The
+    /// order kept comes back at once, so the next press builds on it without
+    /// waiting for the list to be fetched again.
+    async fn reorder(&mut self, up: bool) {
+        match self.view {
+            View::Work => {}
+            View::Graph => return self.say("⇧↑↓ moves rows on the list · the graph lays itself out"),
+            View::Events => return self.say("⇧↑↓ moves rows on the list · events stay in the order they came"),
+        }
+        if self.lens == rows::Lens::Hidden {
+            self.say("the hidden lens keeps the list's order · move it on the list");
+            return;
+        }
+        let Some(key) = self.sel.clone() else {
+            self.say("nothing here to move");
+            return;
+        };
+        let order = {
+            let shown = self.rows();
+            let full = rows::build(
+                &self.digest,
+                &rows::Context {
+                    names: &self.names,
+                    rules: &self.rules,
+                    filter: "",
+                    lens: rows::Lens::All,
+                    now: Timestamp::now(),
+                },
+            );
+            rows::reorder(&shown, &full, &self.digest.order, &key, up)
+        };
+        match order {
+            Ok(order) => match self.rpc.call::<DigestOrder>(order).await {
+                Ok(all) => self.digest.order = all,
+                Err(e) => self.say(format!("reorder: {e:#}")),
+            },
+            Err(why) => self.say(why),
+        }
+    }
+
+    /// `/sort`: the project under the cursor — its header, or any row in it
+    /// — lets go of the order you put it in and sorts itself again.
+    async fn sort_project(&mut self) {
+        let found = {
+            let rows = self.rows();
+            let at = self
+                .sel
+                .as_ref()
+                .and_then(|k| rows.iter().position(|r| r.key().as_ref() == Some(k)));
+            at.and_then(|at| rows[..=at].iter().rposition(|r| matches!(r, Row::Group(_))))
+                .and_then(|h| match &rows[h] {
+                    Row::Group(head) => Some((rows[h].key().unwrap_or_default(), head.name.clone())),
+                    _ => None,
+                })
+        };
+        let Some((group, name)) = found else {
+            self.say("/sort is for a project: on its header, it lets the project sort itself again");
+            return;
+        };
+        if !self.digest.order.iter().any(|o| o.group == group) {
+            self.say(format!("{name} already sorts itself · ⇧↑↓ puts its rows in your order"));
+            return;
+        }
+        match self
+            .rpc
+            .call::<DigestOrder>(rl_proto::methods::Order {
+                group,
+                rows: Vec::new(),
+            })
+            .await
+        {
+            Ok(all) => {
+                self.digest.order = all;
+                self.say(format!(
+                    "{name} sorts itself again · what needs you, then by state and time"
+                ));
+            }
+            Err(e) => self.say(format!("sort: {e:#}")),
+        }
+    }
+
     async fn rename_run(&mut self, id: String, title: String) -> Result<()> {
         if title.is_empty() {
             anyhow::bail!("a name, please");
@@ -3217,6 +3301,10 @@ impl App {
         // any other key here disarms it, so `ctrl-x`/`ctrl-c` never fire on one
         // slip (the way an agent view asks before it deletes).
         let armed = self.arm.take();
+        if let Some(up) = reorder_step(&k) {
+            self.reorder(up).await;
+            return Ok(());
+        }
         if self.view == View::Events && self.events_step(k.code).await {
             return Ok(());
         }
@@ -3638,7 +3726,7 @@ impl App {
             palette::Cmd::Up => self.add_dir(&arg).await?,
             palette::Cmd::Help => {
                 let names: Vec<&str> = palette::ALL.iter().map(|c| c.name).collect();
-                self.say(format!("/{}", names.join(" · /")));
+                self.say(format!("/{} · ⇧↑↓ moves a row in its project", names.join(" · /")));
             }
             palette::Cmd::Stop => {
                 if let Some(i) = self.selected_run()
@@ -3737,6 +3825,7 @@ impl App {
             palette::Cmd::Rename => self.rename_here(),
             palette::Cmd::Pin => self.toggle_pin().await,
             palette::Cmd::Hide => self.hide().await,
+            palette::Cmd::Sort => self.sort_project().await,
             palette::Cmd::Graph => self.toggle_graph().await,
             palette::Cmd::Events => self.toggle_events().await,
             palette::Cmd::Shell => self.new_shell(area).await,
@@ -4830,9 +4919,20 @@ fn vi_step(k: KeyEvent, line_empty: bool) -> KeyEvent {
     }
 }
 
+/// Shift-↑ and shift-↓ move the row under the cursor one place up (`true`)
+/// or down within its project. A terminal that does not report shift on the
+/// arrows sends them plain, and they just move the cursor.
+fn reorder_step(k: &KeyEvent) -> Option<bool> {
+    match (k.code, k.modifiers) {
+        (KeyCode::Up, KeyModifiers::SHIFT) => Some(true),
+        (KeyCode::Down, KeyModifiers::SHIFT) => Some(false),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{ListHit, cand_window, group_count, hit_row, mark_seen, spawn_size, vi_step, viewport};
+    use super::{ListHit, cand_window, group_count, hit_row, mark_seen, reorder_step, spawn_size, vi_step, viewport};
     use crate::tui::rows::Chip;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::layout::Rect;
@@ -4859,6 +4959,7 @@ mod tests {
             checkouts: vec![],
             lost: vec![],
             hidden: Vec::new(),
+            order: Vec::new(),
         };
         mark_seen(&mut d, &["a".to_string()]);
         assert_eq!(d.items.iter().map(|i| i.unseen).collect::<Vec<_>>(), [false, true]);
@@ -4881,6 +4982,22 @@ mod tests {
         let j = KeyEvent::from(KeyCode::Char('j'));
         assert_eq!(vi_step(j, true), j);
         assert_eq!(vi_step(ctrl('x'), true), ctrl('x'));
+    }
+
+    #[test]
+    fn shift_and_an_arrow_moves_the_row_and_the_arrow_alone_the_cursor() {
+        let shift = |c| KeyEvent::new(c, KeyModifiers::SHIFT);
+        assert_eq!(reorder_step(&shift(KeyCode::Up)), Some(true));
+        assert_eq!(reorder_step(&shift(KeyCode::Down)), Some(false));
+        // Plain arrows, other chords on them, and other shifted keys are not it.
+        assert_eq!(reorder_step(&KeyEvent::from(KeyCode::Up)), None);
+        assert_eq!(reorder_step(&KeyEvent::from(KeyCode::Down)), None);
+        assert_eq!(
+            reorder_step(&KeyEvent::new(KeyCode::Up, KeyModifiers::SHIFT | KeyModifiers::CONTROL)),
+            None
+        );
+        assert_eq!(reorder_step(&shift(KeyCode::Left)), None);
+        assert_eq!(reorder_step(&shift(KeyCode::Char('K'))), None);
     }
 
     #[test]
