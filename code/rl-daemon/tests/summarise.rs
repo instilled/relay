@@ -32,8 +32,10 @@ async fn an_ended_run_gets_a_summary_kept_by_it() {
     )
     .unwrap();
     std::fs::write(home.config_file(), "assistants:\n  summarise: fakeai\n").unwrap();
-    // The fixture answers with this file, and writes the prompt to that one.
-    // The daemon is in this process, so its runs see these variables.
+    // The fixture answers with this file, and writes the prompt to that one;
+    // it reads its input to the end first, as `claude -p` does, so an input
+    // left open would hang it. The daemon is in this process, so its runs see
+    // these variables.
     let answer = tmp.path().join("answer.txt");
     let prompt = tmp.path().join("prompt.txt");
     std::fs::write(&answer, "```\nIt printed hello and left.\nNothing changed.\n```\n").unwrap();
@@ -41,6 +43,7 @@ async fn an_ended_run_gets_a_summary_kept_by_it() {
     unsafe {
         std::env::set_var("FAKE_AGENT_ANSWER", &answer);
         std::env::set_var("FAKE_AGENT_PROMPT", &prompt);
+        std::env::set_var("FAKE_AGENT_READS", "1");
     }
     let Some(h) = Harness::on(home.clone()) else {
         eprintln!("skipping: rl-session not built");
@@ -120,6 +123,16 @@ async fn an_ended_run_gets_a_summary_kept_by_it() {
     assert!(r.error.unwrap().message.contains("not a stretch of time"));
     let _: serde_json::Value = c.ok("run.stop", json!({ "id": slow.id, "force": true })).await;
 
+    // The CLI's own warning about its input is not the answer.
+    std::fs::write(
+        &answer,
+        "Warning: no stdin data received in 3s, proceeding without it. If piping from a slow command, \
+         redirect stdin explicitly: < /dev/null to skip, or wait longer.\nIt printed hello and left.\n",
+    )
+    .unwrap();
+    let warned: Summary = c.ok("summary.make", json!({ "run": run.id, "again": true })).await;
+    assert_eq!(warned.text, "It printed hello and left.");
+
     // Nothing said: an error that names the assistant's run.
     std::fs::write(&answer, "\n").unwrap();
     let r: Response = c.call("summary.make", json!({ "run": run.id, "again": true })).await;
@@ -129,6 +142,7 @@ async fn an_ended_run_gets_a_summary_kept_by_it() {
     unsafe {
         std::env::remove_var("FAKE_AGENT_ANSWER");
         std::env::remove_var("FAKE_AGENT_PROMPT");
+        std::env::remove_var("FAKE_AGENT_READS");
     }
     h.stop().await;
 }

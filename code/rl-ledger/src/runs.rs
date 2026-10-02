@@ -256,6 +256,18 @@ pub fn list_for_digest(conn: &Connection, since: Timestamp) -> Result<Vec<Run>> 
     Ok(rows.collect::<Result<_, _>>()?)
 }
 
+/// Claude and Codex runs whose own recap may have moved on: waiting on you,
+/// or ended at or after `ended_since`. Never an assistant's own run.
+pub fn recappable(conn: &Connection, ended_since: Timestamp) -> Result<Vec<Run>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {COLS} FROM runs WHERE cli IN ('claude','codex') AND cause NOT LIKE 'assistant:%' \
+         AND archived_at IS NULL AND (state IN ('idle','needs_input','blocked','stale') \
+         OR (state IN ({TERMINAL_STATES_SQL}) AND ended_at >= ?1))"
+    ))?;
+    let rows = stmt.query_map(params![to_millis(ended_since)], from_row)?;
+    Ok(rows.collect::<Result<_, _>>()?)
+}
+
 /// Done with these: out of the panel, kept. Only a run that has ended can
 /// be; the count is how many were. Archiving a pinned run is letting it go,
 /// so the pin goes with it.
@@ -350,5 +362,57 @@ mod tests {
                 "state {s:?} disagrees with TERMINAL_STATES_SQL"
             );
         }
+    }
+
+    #[test]
+    fn recappable_runs_are_claude_and_codex_waiting_or_just_ended() {
+        let mut c = Connection::open_in_memory().unwrap();
+        crate::migrate::run(&mut c).unwrap();
+        let t: Timestamp = "2026-09-10T12:00:00Z".parse().unwrap();
+        let mk = |id: &str, cli: Option<&str>, state: RunState| {
+            let mut r = Run::new(id, rl_proto::types::RunKind::Agent, id, vec![], "/w", "/w", t);
+            r.cli = cli.map(String::from);
+            r.state = state;
+            r
+        };
+        for r in [
+            mk("idle", Some("claude"), RunState::Idle),
+            mk("asks", Some("codex"), RunState::NeedsInput),
+            mk("busy", Some("claude"), RunState::Working),
+            mk("shell", None, RunState::Idle),
+            mk("gemini", Some("gemini"), RunState::Idle),
+            mk("ended", Some("claude"), RunState::Working),
+            mk("old", Some("claude"), RunState::Working),
+        ] {
+            insert(&c, &r).unwrap();
+        }
+        let mut asked = mk("asked", Some("claude"), RunState::Idle);
+        asked.cause = rl_proto::types::Cause::Assistant("summarise".into());
+        insert(&c, &asked).unwrap();
+        finish(
+            &c,
+            "ended",
+            RunState::Finished,
+            Source::Pty,
+            Some(0),
+            "2026-09-10T12:30:00Z".parse().unwrap(),
+        )
+        .unwrap();
+        finish(
+            &c,
+            "old",
+            RunState::Failed,
+            Source::Pty,
+            Some(1),
+            "2026-09-10T11:00:00Z".parse().unwrap(),
+        )
+        .unwrap();
+        let mut ids: Vec<String> = recappable(&c, "2026-09-10T12:20:00Z".parse().unwrap())
+            .unwrap()
+            .into_iter()
+            .map(|r| r.id)
+            .collect();
+        ids.sort();
+        assert_eq!(ids, ["asks", "ended", "idle"]);
     }
 }

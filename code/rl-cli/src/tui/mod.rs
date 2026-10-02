@@ -3015,6 +3015,9 @@ impl App {
             let mut rpc = Client::connect(&home).await?;
             rpc.call::<SummaryMake>(params).await
         });
+        // The recap is in the details, not over a terminal being watched:
+        // that stays open, a step away.
+        self.leave_term();
         self.show_pane = true;
         self.summarising = Some(Summarising { run: id, title, task });
     }
@@ -4455,7 +4458,7 @@ impl App {
                     let summary = match &place {
                         Some(p) => p.as_str(),
                         None if quiet => "",
-                        None => i.summary.as_str(),
+                        None => rows::said(i),
                     };
                     // Its ref, and its branch where the folder has moved on.
                     let aside = [r.ref_.clone(), rows::branch_aside(r, &self.digest.checkouts)]
@@ -5070,6 +5073,7 @@ mod tests {
             joined_by: None,
             emitted: vec![],
             cwd: None,
+            recap: None,
         };
         let mut d = Digest {
             since: now,
