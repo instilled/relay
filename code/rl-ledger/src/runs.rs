@@ -19,9 +19,11 @@ const DEFAULT_LIMIT: u32 = 200;
 /// sync with `RunState::is_terminal()` (checked by a test below).
 const TERMINAL_STATES_SQL: &str = "'finished','failed','stopped'";
 
+/// A run, as it starts. The title it starts with is Relay's own as well
+/// (`relay_title`), for an empty rename to go back to.
 pub fn insert(conn: &Connection, r: &Run) -> Result<()> {
     conn.execute(
-        &format!("INSERT INTO runs ({COLS}) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28)"),
+        &format!("INSERT INTO runs ({COLS}, relay_title) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?4)"),
         params![
             r.id,
             path_str(&r.workspace),
@@ -141,13 +143,23 @@ pub fn set_detail(conn: &Connection, id: &str, detail: &str) -> Result<()> {
 }
 
 /// A run's title, given by hand. It is yours from then on: nothing of
-/// Relay's writes the column again (`name_once` leaves it be).
+/// Relay's writes the column again (`name_once` leaves it be) — until
+/// `restore_title` gives it back.
 pub fn set_title(conn: &Connection, id: &str, title: &str) -> Result<()> {
-    conn.execute(
-        "UPDATE runs SET title = ?2, title_auto = 0 WHERE id = ?1",
-        params![id, title],
-    )?;
+    conn.execute("UPDATE runs SET title = ?2 WHERE id = ?1", params![id, title])?;
     Ok(())
+}
+
+/// Undoes a rename by hand: the run goes back to the name Relay gave it, and
+/// one Relay has yet to name for its first prompt still will be. False when
+/// there is none to go back to — a run from before Relay kept it — or no
+/// such run.
+pub fn restore_title(conn: &Connection, id: &str) -> Result<bool> {
+    let n = conn.execute(
+        "UPDATE runs SET title = relay_title WHERE id = ?1 AND relay_title IS NOT NULL",
+        params![id],
+    )?;
+    Ok(n == 1)
 }
 
 /// Says a run's title is the one Relay made up for it, nobody having given
@@ -162,7 +174,8 @@ pub fn set_title_auto(conn: &Connection, id: &str) -> Result<()> {
 /// (named by hand, already named once, or no such run).
 pub fn name_once(conn: &Connection, id: &str, title: &str) -> Result<bool> {
     let n = conn.execute(
-        "UPDATE runs SET title = ?2, title_auto = 0 WHERE id = ?1 AND title_auto = 1",
+        "UPDATE runs SET title = ?2, relay_title = ?2, title_auto = 0 \
+         WHERE id = ?1 AND title_auto = 1 AND title IS relay_title",
         params![id, title],
     )?;
     Ok(n == 1)

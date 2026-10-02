@@ -360,16 +360,31 @@ pub fn register(r: &mut Router<Daemon>) {
     });
 
     r.register::<RunRename, _, _>(|d, p: RunRenameParams| async move {
-        d.ledger
+        // Nothing for a name takes the rename back.
+        let back = d
+            .ledger
             .call({
-                let (id, title) = (p.id.clone(), p.title);
-                move |c| runs::set_title(c, &id, &title)
+                let (id, title) = (p.id.clone(), p.title.trim().to_string());
+                move |c| {
+                    if title.is_empty() {
+                        runs::restore_title(c, &id)
+                    } else {
+                        runs::set_title(c, &id, &title).map(|()| true)
+                    }
+                }
             })
             .await
             .map_err(RpcError::internal)?;
         // Read it back rather than report success blindly: an id nobody knows
         // writes no row, and the caller should hear that rather than assume.
-        get_run(&d, &p.id).await
+        let run = get_run(&d, &p.id).await?;
+        if !back {
+            return Err(RpcError::invalid_params(format!(
+                "{} has no name of Relay's to go back to · type one",
+                run.title
+            )));
+        }
+        Ok(run)
     });
 
     r.register::<rl_proto::methods::RunResume, _, _>(|d, p| async move {

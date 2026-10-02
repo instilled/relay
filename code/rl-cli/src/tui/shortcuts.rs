@@ -1,6 +1,6 @@
 //! `?` on an empty line: the keys for where you are, in a quiet line under
 //! the command input — the list's, the graph's, the events view's, a
-//! question's. `?` again or `esc` puts it away, and so does typing, so it
+//! question's, a name being changed's. `?` again or `esc` puts it away, and so does typing, so it
 //! never takes room while you work. With words on the line `?` is only a
 //! character: a question, a note and a search all take it.
 //!
@@ -32,6 +32,8 @@ pub enum Place {
     Graph,
     /// `/events`.
     Events,
+    /// A name being changed where it stands in the list.
+    Rename,
 }
 
 /// One key and what it does there, in a word or two.
@@ -140,6 +142,15 @@ pub fn keys(at: Place) -> Vec<Key> {
             cmd(Cmd::Pane, "details"),
             cmd(Cmd::Graph, "its rule's wiring"),
             key("esc", "back"),
+        ],
+        // The line's own editing keys, the few that matter most.
+        Place::Rename => vec![
+            key("enter", "saves"),
+            key("esc", "cancels"),
+            key("^a ^e", "to the ends"),
+            key("alt ←→", "by word"),
+            key("^w ^u ^k", "cut"),
+            key("↑↓", "let it go"),
         ],
     }
 }
@@ -290,6 +301,11 @@ mod tests {
              ^t pin · ^r rename · ^o details · ^f search · ^g graph · tab lens · /help"
         );
 
+        assert_eq!(
+            one_line(Place::Rename),
+            "enter saves · esc cancels · ^a ^e to the ends · alt ←→ by word · ^w ^u ^k cut · ↑↓ let it go"
+        );
+
         let question = one_line(Place::Question);
         assert!(question.contains("enter its choices"), "{question}");
         assert!(question.contains("1-9 ↵ answers"), "{question}");
@@ -332,6 +348,7 @@ mod tests {
             Place::Question,
             Place::Graph,
             Place::Events,
+            Place::Rename,
             Place::Term {
                 wide: false,
                 live: true,
@@ -360,7 +377,14 @@ mod tests {
 
     #[test]
     fn a_narrow_terminal_wraps_between_keys_and_cuts_none() {
-        for at in [Place::List, Place::Graph, Place::Events, Place::Question, Place::Hidden] {
+        for at in [
+            Place::List,
+            Place::Graph,
+            Place::Events,
+            Place::Question,
+            Place::Hidden,
+            Place::Rename,
+        ] {
             let ks = keys(at);
             for width in [160, 120, 80, 60, 40, 30] {
                 let rows = wrap(&ks, width);

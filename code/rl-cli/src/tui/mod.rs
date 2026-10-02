@@ -149,6 +149,29 @@ enum Mode {
     /// it, `n` keeps it, and either removes the project; anything else
     /// leaves everything as it was.
     Remove(Box<Removal>),
+    /// `^r`: a run's or a project's name being changed where it stands, in
+    /// the list.
+    Rename(Box<Renaming>),
+}
+
+/// A name being changed in place: the row it is on, what it is the name
+/// of, and what is typed so far.
+struct Renaming {
+    /// The row's key: moving off the row lets the name go.
+    key: String,
+    what: Renamed,
+    /// The name as it was, so one left as it was is not saved.
+    was: String,
+    field: line::Field,
+    /// The first column of the name its cell shows, for a name wider than
+    /// the cell: it moves only as far as keeps the cursor in view.
+    from: std::cell::Cell<usize>,
+}
+
+/// What a name belongs to: a run by its id, a project by its folder.
+enum Renamed {
+    Run(String),
+    Project(PathBuf),
 }
 
 /// A project removal waiting on the question about its `.relay`.
@@ -440,6 +463,29 @@ fn icon_span(icon: &str, ended: bool) -> Vec<Span<'static>> {
     ]
 }
 
+/// A name being typed, in its cell `w` wide, having last shown it from
+/// column `from`: the part of it the cursor keeps in view, the caret where
+/// the cursor is, and all of it lit while it is selected — padded out to the
+/// cell. And the column it shows from now.
+fn name_cell(field: &line::Field, from: usize, w: usize) -> (Vec<Span<'static>>, usize) {
+    if w == 0 {
+        return (vec![], 0);
+    }
+    let from = field.window(from, w);
+    let text = field.text();
+    let at = |col: usize| text.char_indices().nth(col).map_or(text.len(), |(i, _)| i);
+    let (start, end) = (at(from), at(from + w));
+    let style = if field.is_selected() {
+        theme::picked()
+    } else {
+        Style::default()
+    };
+    let mut spans = theme::with_caret(&text[start..end], field.cursor() - start, style);
+    let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+    spans.push(Span::raw(" ".repeat(w.saturating_sub(used))));
+    (spans, from)
+}
+
 /// One row of the list, to the width: icon, title, state, whatever goes
 /// before the summary (who is joined), the summary filling the middle, then
 /// the ref or branch and the age at the right.
@@ -448,7 +494,7 @@ fn list_line(
     w: usize,
     tw: usize,
     icon: Vec<Span<'static>>,
-    title: Span<'static>,
+    title: Vec<Span<'static>>,
     word: Vec<Span<'static>>,
     summary: &str,
     lead: Vec<Span<'static>>,
@@ -464,7 +510,8 @@ fn list_line(
     // The word, padded out to its column whatever it is made of.
     let used: usize = word.iter().map(Span::width).sum();
     let mut spans = icon;
-    spans.extend([title, Span::raw(" ")]);
+    spans.extend(title);
+    spans.push(Span::raw(" "));
     spans.extend(word);
     spans.push(Span::raw(" ".repeat(WORD_W.saturating_sub(used) + 1)));
     spans.extend(lead);
@@ -501,13 +548,25 @@ fn job_marks(j: &rows::Job) -> Vec<Span<'static>> {
 /// rules, with any that wait for a yes just before it, in amber. Each piece
 /// has its column, whatever the others say.
 fn header_line(h: &rows::Head, w: usize, tw: usize, broken: bool) -> Line<'static> {
-    let col = state_col(tw);
-    let (parent, last, own) = rows::place_parts(&h.place, h.own.as_deref(), col - 2);
-    let mut l = vec![
+    let (parent, last, own) = rows::place_parts(&h.place, h.own.as_deref(), place_w(tw));
+    let place = vec![
         Span::styled(parent, theme::dim()),
         Span::styled(last, theme::name()),
         Span::styled(own, theme::dim()),
     ];
+    header_with(place, h, w, tw, broken)
+}
+
+/// The room a header's place has: up to the checkout's column, and a gap.
+fn place_w(tw: usize) -> usize {
+    state_col(tw) - 2
+}
+
+/// A header with `place` where its folder goes — the name being typed, when
+/// it is renamed where it stands.
+fn header_with(place: Vec<Span<'static>>, h: &rows::Head, w: usize, tw: usize, broken: bool) -> Line<'static> {
+    let col = state_col(tw);
+    let mut l = place;
     let width = |l: &[Span]| l.iter().map(Span::width).sum::<usize>();
     // The tally at the right edge is the honest total; a rule that waits for a
     // yes is named beside it, since that one is yours to give.
@@ -862,67 +921,8 @@ pub async fn run(home: &Home) -> Result<()> {
     // release, a restart is offered on the plain terminal.
     let mut rpc = crate::daemon::ensure(home, true).await?;
     let _ = rpc.call::<PresenceTouch>(PresenceClient { client: me.clone() }).await;
-    let mut app = App {
-        home: home.clone(),
-        rpc,
-        me,
-        digest: Digest {
-            since: Timestamp::now(),
-            items: Vec::new(),
-            decisions: Vec::new(),
-            checkouts: Vec::new(),
-            lost: Vec::new(),
-            hidden: Vec::new(),
-            order: Vec::new(),
-        },
-        names: Names::default(),
-        filter: String::new(),
-        search: None,
-        lens: rows::Lens::All,
-        view: View::Work,
-        rules: Vec::new(),
-        graph: None,
-        back: Vec::new(),
-        kept: HashMap::new(),
-        filter_aside: String::new(),
-        feed: events::Feed::default(),
-        graph_at: std::cell::Cell::new((0, 0)),
-        shell_at: HashMap::new(),
-        scroll: std::cell::Cell::new(0),
-        list_h: std::cell::Cell::new(0),
-        hit: std::cell::RefCell::default(),
-        sel: None,
-        pane: Pane::Facts,
-        show_pane: false,
-        auto_pane: false,
-        answer_at: 0,
-        pane_hit: std::cell::RefCell::default(),
-        wide: false,
-        term: None,
-        term_size: (0, 0),
-        events: Vec::new(),
-        editor: None,
-        attach: None,
-        importing: false,
-        not_loaded: Vec::new(),
-        reload_list: None,
-        asking: None,
-        summary: None,
-        summarising: None,
-        removing: None,
-        picked: Vec::new(),
-        line: line::Line::default(),
-        agents: Vec::new(),
-        path_dirs: complete::path_dirs(),
-        aliases: complete::shell_names().await,
-        completing: None,
-        pick: None,
-        mode: Mode::Normal,
-        flash: None,
-        arm: None,
-        shortcuts: false,
-        quit: false,
-    };
+    let aliases = complete::shell_names().await;
+    let mut app = App::new(home, rpc, me, aliases);
     app.refresh().await;
 
     let mut terminal = enter_screen();
@@ -975,6 +975,72 @@ pub async fn run(home: &Home) -> Result<()> {
 }
 
 impl App {
+    /// The panel as it opens: talking to the daemon on `rpc`, as `me`, with
+    /// the shell's `aliases` for the line to know. Nothing is read yet.
+    fn new(home: &Home, rpc: Client, me: String, aliases: Vec<String>) -> Self {
+        Self {
+            home: home.clone(),
+            rpc,
+            me,
+            digest: Digest {
+                since: Timestamp::now(),
+                items: Vec::new(),
+                decisions: Vec::new(),
+                checkouts: Vec::new(),
+                lost: Vec::new(),
+                hidden: Vec::new(),
+                order: Vec::new(),
+            },
+            names: Names::default(),
+            filter: String::new(),
+            search: None,
+            lens: rows::Lens::All,
+            view: View::Work,
+            rules: Vec::new(),
+            graph: None,
+            back: Vec::new(),
+            kept: HashMap::new(),
+            filter_aside: String::new(),
+            feed: events::Feed::default(),
+            graph_at: std::cell::Cell::new((0, 0)),
+            shell_at: HashMap::new(),
+            scroll: std::cell::Cell::new(0),
+            list_h: std::cell::Cell::new(0),
+            hit: std::cell::RefCell::default(),
+            sel: None,
+            pane: Pane::Facts,
+            show_pane: false,
+            auto_pane: false,
+            answer_at: 0,
+            pane_hit: std::cell::RefCell::default(),
+            wide: false,
+            term: None,
+            term_size: (0, 0),
+            events: Vec::new(),
+            editor: None,
+            attach: None,
+            importing: false,
+            not_loaded: Vec::new(),
+            reload_list: None,
+            asking: None,
+            summary: None,
+            summarising: None,
+            removing: None,
+            picked: Vec::new(),
+            line: line::Line::default(),
+            agents: Vec::new(),
+            path_dirs: complete::path_dirs(),
+            aliases,
+            completing: None,
+            pick: None,
+            mode: Mode::Normal,
+            flash: None,
+            arm: None,
+            shortcuts: false,
+            quit: false,
+        }
+    }
+
     async fn main_loop(&mut self, terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
         let mut input = EventStream::new();
         let mut tick = tokio::time::interval(REFRESH);
@@ -1137,6 +1203,7 @@ impl App {
                     multi: q.multi,
                 });
             }
+            Mode::Rename(_) => return Some(shortcuts::Place::Rename),
             _ => return None,
         }
         if self.search.is_some() {
@@ -1371,6 +1438,11 @@ impl App {
 
     fn select(&mut self, key: Option<String>) {
         if key != self.sel {
+            // A name being changed belongs to its row: off the row, it goes
+            // unsaved.
+            if matches!(self.mode, Mode::Rename(_)) {
+                self.mode = Mode::Normal;
+            }
             // A question is only worth its details: selecting one opens the
             // pane on it, and moving off closes the pane again — unless it was
             // open already.
@@ -1547,6 +1619,17 @@ impl App {
     /// else must not mark it seen, and a pointer sweeps many rows a second, so
     /// a move only selects; the wheel and a click count as looking and refresh.
     async fn mouse(&mut self, m: MouseEvent, area: Rect) -> Result<()> {
+        // A name being changed: a click anywhere but its row, or the wheel,
+        // lets it go and then does what it does. Passing over the list does
+        // nothing, so the cursor stays on the row being typed in.
+        if let Mode::Rename(r) = &self.mode {
+            let on_it = hit_row(&self.hit.borrow(), m.column, m.row).as_deref() == Some(r.key.as_str());
+            match m.kind {
+                MouseEventKind::Down(_) if !on_it => self.mode = Mode::Normal,
+                MouseEventKind::ScrollDown | MouseEventKind::ScrollUp => self.mode = Mode::Normal,
+                _ => return Ok(()),
+            }
+        }
         // A click on a question's choice in the pane takes it.
         if m.kind == MouseEventKind::Down(MouseButton::Left) && matches!(self.mode, Mode::Normal | Mode::Answer(_)) {
             let hit = {
@@ -1634,10 +1717,15 @@ impl App {
         self.hide_pane();
     }
 
-    /// A paste, whole: into the line as it came, newlines and all, or a
-    /// form's field a character at a time.
+    /// A paste, whole: into the line as it came, newlines and all, over a
+    /// name being changed as one line, or a form's field a character at a
+    /// time.
     async fn paste(&mut self, s: String, area: Rect) -> Result<()> {
         let s = s.replace("\r\n", "\n").replace('\r', "\n");
+        if let Mode::Rename(r) = &mut self.mode {
+            r.field.paste(&s);
+            return Ok(());
+        }
         if matches!(self.mode, Mode::Normal) {
             self.line.insert(&s);
             self.completing = None;
@@ -1734,16 +1822,30 @@ impl App {
 
     /// `/rename`, `^r`: whatever the cursor is on, by the name it is known by —
     /// a folder through the registry, a run (a shell is one) through the
-    /// ledger, and a job by the rule it comes from, which is the rule form's
-    /// own rename.
+    /// ledger, both typed over where they stand in the list, and a job by the
+    /// rule it comes from, which is the rule form's own rename.
     fn rename_here(&mut self) {
+        let what = if let Some(folder) = self.selected_project() {
+            Some((self.names.workspace(&folder), Renamed::Project(folder)))
+        } else {
+            self.selected_run()
+                .map(|i| (i.run.title.clone(), Renamed::Run(i.run.id.clone())))
+        };
         if self.on_everywhere() {
             self.say(format!("{} · nothing to rename", Self::NOT_A_PROJECT));
-        } else if let Some(folder) = self.selected_project() {
-            let name = self.names.workspace(&folder);
-            self.mode = Mode::Form(Box::new(Form::rename(&folder, &name)));
-        } else if let Some((id, title)) = self.selected_run().map(|i| (i.run.id.clone(), i.run.title.clone())) {
-            self.mode = Mode::Form(Box::new(Form::rename_run(&id, &title)));
+        } else if let (Some((was, what)), Some(key)) = (what, self.sel.clone()) {
+            // The keys are the name's now: a search gives the line back as
+            // `enter` would, and what the line offered is put away.
+            self.search = None;
+            self.completing = None;
+            self.pick = None;
+            self.mode = Mode::Rename(Box::new(Renaming {
+                key,
+                what,
+                field: line::Field::selected(was.clone()),
+                was,
+                from: Default::default(),
+            }));
         } else if self.rule_here().is_some() {
             self.edit_rule_form();
         } else {
@@ -2597,18 +2699,27 @@ impl App {
                 Ok(d) => self.save_rule(d, f.editing.as_ref()).await,
                 Err(e) => Err(e),
             },
-            form::Kind::Rename => {
-                self.rename_project(f.origin.clone(), f.get("name").trim().to_string())
-                    .await
-            }
-            form::Kind::RenameRun => match f.renaming.clone() {
-                Some(id) => self.rename_run(id, f.get("name").trim().to_string()).await,
-                None => Err(anyhow::anyhow!("no run to rename")),
-            },
         };
         if let Err(e) = outcome {
             self.say(format!("{e:#}"));
             self.mode = Mode::Form(f);
+        }
+    }
+
+    /// `enter` on a name being changed: saved, or why not — the name stays
+    /// up to be typed again then. One left as it was has nothing to save.
+    async fn save_rename(&mut self, r: Box<Renaming>) {
+        let name = r.field.text().trim().to_string();
+        if name == r.was {
+            return;
+        }
+        let outcome = match &r.what {
+            Renamed::Project(folder) => self.rename_project(folder.clone(), name).await,
+            Renamed::Run(id) => self.rename_run(id.clone(), name).await,
+        };
+        if let Err(e) = outcome {
+            self.say(format!("{e:#}"));
+            self.mode = Mode::Rename(r);
         }
     }
 
@@ -2788,25 +2899,28 @@ impl App {
         Ok(())
     }
 
-    /// Give a project a new name. The cursor stays on it, under the new key.
+    /// Give a project a new name — or, given none, its folder's own back, the
+    /// one `rl up` registered it under. The cursor stays on it.
     async fn rename_project(&mut self, folder: PathBuf, name: String) -> Result<()> {
-        if name.is_empty() {
-            anyhow::bail!("a name, please");
-        }
+        let back = name.is_empty();
+        let name = if back {
+            let own = folder.file_name().unwrap_or(folder.as_os_str());
+            own.to_string_lossy().into_owned()
+        } else {
+            name
+        };
         self.rpc
             .call::<WorkspaceRename>(WorkspaceRenameParams {
                 path: folder.clone(),
                 name: name.clone(),
             })
             .await?;
-        self.say(format!("renamed to {name}"));
+        self.say(format!("{} {name}", if back { "back to" } else { "renamed to" }));
         self.refresh().await;
         self.select(Some(format!("g:{}", folder.display())));
         Ok(())
     }
 
-    /// A run's own name, which is its title. The ledger is the only place it
-    /// lives, so the rename is one call and the next refresh shows it.
     /// `^p`: the run under the cursor to the top of the list, or back among
     /// the rest. The cursor goes with it.
     async fn toggle_pin(&mut self) {
@@ -3032,17 +3146,16 @@ impl App {
         }
     }
 
+    /// A run's own name, which is its title. The ledger is the only place it
+    /// lives, so the rename is one call and the next refresh shows it. Given
+    /// none, the run goes back to the name Relay gave it.
     async fn rename_run(&mut self, id: String, title: String) -> Result<()> {
-        if title.is_empty() {
-            anyhow::bail!("a name, please");
-        }
-        self.rpc
-            .call::<RunRename>(RunRenameParams {
-                id: id.clone(),
-                title: title.clone(),
-            })
+        let back = title.is_empty();
+        let r = self
+            .rpc
+            .call::<RunRename>(RunRenameParams { id: id.clone(), title })
             .await?;
-        self.say(format!("renamed to {title}"));
+        self.say(format!("{} {}", if back { "back to" } else { "renamed to" }, r.title));
         self.refresh().await;
         self.select(Some(format!("r:{id}")));
         Ok(())
@@ -3171,7 +3284,7 @@ impl App {
 
     // ---- keys --------------------------------------------------------------
 
-    async fn key(&mut self, k: KeyEvent, area: Rect) -> Result<()> {
+    async fn key(&mut self, mut k: KeyEvent, area: Rect) -> Result<()> {
         self.flash = None;
         // Like the flash, the list of what a reload did not load lasts one key.
         self.reload_list = None;
@@ -3185,8 +3298,9 @@ impl App {
             self.arm = None;
         }
         // A form or a `y`-or-not question has its keys in the footer; the
-        // shortcuts go, rather than come back when it is done.
-        if !matches!(self.mode, Mode::Normal | Mode::Answer(_)) {
+        // shortcuts go, rather than come back when it is done. A name typed
+        // in the list takes no room from them, so they stay for it.
+        if !matches!(self.mode, Mode::Normal | Mode::Answer(_) | Mode::Rename(_)) {
             self.shortcuts = false;
         }
         match std::mem::replace(&mut self.mode, Mode::Normal) {
@@ -3284,6 +3398,27 @@ impl App {
                 }
                 return Ok(());
             }
+            Mode::Rename(mut r) => match r.field.key(&k) {
+                line::Act::Typing => {
+                    self.mode = Mode::Rename(r);
+                    return Ok(());
+                }
+                line::Act::Submit => {
+                    self.save_rename(r).await;
+                    return Ok(());
+                }
+                line::Act::Cancel => return Ok(()),
+                // What the name does not take lets it go, and then does what
+                // it does on the list: `tab` steps the lens and `^j`/`^k`
+                // move, whatever is typed on the line below.
+                line::Act::Complete | line::Act::Nothing => {
+                    if matches!(k.code, KeyCode::Tab | KeyCode::BackTab) {
+                        self.cycle_lens(if k.code == KeyCode::BackTab { -1 } else { 1 });
+                        return Ok(());
+                    }
+                    k = vi_step(k, true);
+                }
+            },
             Mode::Normal => {}
         }
         if (k.code, k.modifiers) == (KeyCode::Char('f'), KeyModifiers::CONTROL) {
@@ -4362,8 +4497,12 @@ impl App {
         }
         let [line_area, keys_area] =
             Layout::vertical([Constraint::Fill(1), Constraint::Length(keys.len() as u16)]).areas(a.line);
-        if matches!(self.mode, Mode::Normal) {
-            f.render_widget(Paragraph::new(self.line_lines(line_area.width)), line_area);
+        match self.mode {
+            Mode::Normal => f.render_widget(Paragraph::new(self.line_lines(line_area.width)), line_area),
+            // The line waits under a name being changed, quiet and with no
+            // caret: the keys are the name's.
+            Mode::Rename(_) => f.render_widget(Paragraph::new(format!("❯ {}", self.line.text())).dim(), line_area),
+            _ => {}
         }
         if !keys.is_empty() {
             let keys_area = Rect {
@@ -4533,6 +4672,15 @@ impl App {
         let mut sel_line = 0usize;
         // What the search's words hit is lit up where it shows.
         let words = query::Query::parse(&self.filter).words;
+        // A name being changed is typed where it stands, in a cell `w` wide.
+        let renamed = |row: &Row, w: usize| match &self.mode {
+            Mode::Rename(r) if row.key().as_deref() == Some(r.key.as_str()) => {
+                let (spans, from) = name_cell(&r.field, r.from.get(), w);
+                r.from.set(from);
+                Some(spans)
+            }
+            _ => None,
+        };
         for (n, row) in rows.iter().enumerate() {
             let selected = row.key().is_some() && row.key() == self.sel;
             let mut line = match row {
@@ -4543,7 +4691,10 @@ impl App {
                     }
                     // At the edge, so the rows under it — indented by their
                     // icon's leading space — read as its own.
-                    header_line(h, w, tw, self.header_broken(h))
+                    match renamed(row, place_w(tw)) {
+                        Some(name) => header_with(name, h, w, tw, self.header_broken(h)),
+                        None => header_line(h, w, tw, self.header_broken(h)),
+                    }
                 }
                 Row::Question(q) => {
                     // One line of it: the summary's first, or else the options.
@@ -4559,7 +4710,7 @@ impl App {
                         w,
                         tw,
                         icon_span(rows::QUESTION, false),
-                        Span::styled(fit(&title, tw), theme::name()),
+                        vec![Span::styled(fit(&title, tw), theme::name())],
                         vec![Span::styled("to decide", theme::needs())],
                         &summary,
                         vec![],
@@ -4592,6 +4743,7 @@ impl App {
                     } else {
                         title
                     };
+                    let title = renamed(row, tw).unwrap_or_else(|| vec![title]);
                     // Where a run says what it last did, a shell says where it
                     // is, when its prompt tells (OSC 7): from its project's
                     // folder down, nothing at the folder itself. One that has
@@ -4634,7 +4786,7 @@ impl App {
                 Row::Job(j) => {
                     let last = j.last();
                     let title = Span::raw(fit(&j.name, tw));
-                    let title = if j.unseen() { title.bold() } else { title };
+                    let title = vec![if j.unseen() { title.bold() } else { title }];
                     // Its state is how the last few went, oldest first; the
                     // tally and the cadence are the pane's.
                     list_line(
@@ -4965,6 +5117,14 @@ impl App {
                 } else {
                     "enter save · tab next field · esc cancel".into()
                 };
+            }
+            Mode::Rename(_) => {
+                if let Some((m, at)) = &self.flash
+                    && at.elapsed() < FLASH
+                {
+                    return m.clone();
+                }
+                return "enter saves · esc cancels".into();
             }
             Mode::Normal => {}
         }
@@ -5565,7 +5725,7 @@ mod tests {
                 w,
                 tw,
                 icon_span(icon, false),
-                Span::raw(crate::tui::rows::fit("title", tw)),
+                vec![Span::raw(crate::tui::rows::fit("title", tw))],
                 vec![Span::raw(word.to_string())],
                 "summary",
                 vec![],
@@ -5602,5 +5762,301 @@ mod tests {
         assert_eq!(viewport(50, 10, 41, 40), 40);
         // Too short for markers: just the lines.
         assert_eq!(viewport(50, 2, 30, 0), 0);
+    }
+
+    #[test]
+    fn a_long_name_scrolls_sideways_to_keep_the_caret_in_its_cell() {
+        use super::{line, name_cell};
+        use ratatui::style::Modifier;
+        let shown = |spans: &[ratatui::text::Span]| spans.iter().map(|s| s.content.to_string()).collect::<String>();
+        let caret = |spans: &[ratatui::text::Span]| {
+            let at = spans
+                .iter()
+                .position(|s| s.style.add_modifier.contains(Modifier::REVERSED))
+                .unwrap();
+            spans[..at].iter().map(|s| s.content.chars().count()).sum::<usize>()
+        };
+        let mut f = line::Field::selected("the nightly build of everything we have");
+        // As it opens: the start, the caret on its first letter, all of it lit.
+        let (spans, from) = name_cell(&f, 0, 12);
+        assert_eq!((shown(&spans).as_str(), from, caret(&spans)), ("the nightly ", 0, 0));
+        assert_eq!(spans[2].style, crate::tui::theme::picked());
+        // At the end: the cell shows the tail, the caret in its last column.
+        f.key(&KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL));
+        let (spans, from) = name_cell(&f, from, 12);
+        assert_eq!((shown(&spans).as_str(), from, caret(&spans)), ("ing we have ", 28, 11));
+        assert!(!spans.iter().any(|s| s.style == crate::tui::theme::picked()), "let go");
+        // Back a few: the cell stays put while the caret is in it.
+        for _ in 0..4 {
+            f.key(&KeyEvent::from(KeyCode::Left));
+        }
+        let (spans, from) = name_cell(&f, from, 12);
+        assert_eq!((from, caret(&spans)), (28, 7));
+        // Every cell is the column's width, whatever it holds.
+        for w in [1, 5, 12, 60] {
+            let (spans, _) = name_cell(&f, 0, w);
+            assert_eq!(shown(&spans).chars().count(), w, "{w}");
+        }
+    }
+
+    /// A panel on a daemon of its own, in a home of its own: one project,
+    /// registered as `api` from a folder called `proj`, with one ended run in
+    /// it, `make test`. Nothing is started, and no agent is anywhere near.
+    async fn panel() -> (
+        tempfile::TempDir,
+        tokio_util::sync::CancellationToken,
+        super::App,
+        std::path::PathBuf,
+    ) {
+        use rl_ledger::events::{self, NewEvent};
+        use rl_ledger::{Ledger, runs, workspaces};
+        use rl_proto::types::{Run, RunKind, RunState, Source, event_kind};
+        let tmp = tempfile::tempdir().unwrap();
+        let home = rl_core::Home::at(tmp.path().join("h"));
+        home.ensure_dirs().unwrap();
+        let folder = std::fs::canonicalize(tmp.path()).unwrap().join("proj");
+        std::fs::create_dir_all(&folder).unwrap();
+        let now = jiff::Timestamp::now();
+        let run = Run::new(
+            "run00001",
+            RunKind::Command,
+            "make test",
+            vec!["make".into(), "test".into()],
+            &folder,
+            &folder,
+            now,
+        );
+        let ledger = Ledger::open(&home.ledger()).unwrap();
+        ledger
+            .call_blocking({
+                let folder = folder.clone();
+                move |c| {
+                    workspaces::register(c, &folder, "api", now)?;
+                    runs::insert(c, &run)?;
+                    // The list shows what has news since it last looked.
+                    events::append(c, &NewEvent::for_run(&run, now, event_kind::RUN_STARTED, "started"))?;
+                    runs::finish(c, &run.id, RunState::Finished, Source::Pty, Some(0), now)?;
+                    Ok(())
+                }
+            })
+            .unwrap();
+        drop(ledger);
+        let token = tokio_util::sync::CancellationToken::new();
+        tokio::spawn(rl_daemon::serve_with(
+            home.clone(),
+            token.clone(),
+            rl_daemon::ServeOptions::default(),
+        ));
+        let rpc = loop {
+            match crate::client::Client::connect(&home).await {
+                Ok(c) => break c,
+                Err(_) => tokio::time::sleep(std::time::Duration::from_millis(20)).await,
+            }
+        };
+        let mut app = super::App::new(&home, rpc, "test".into(), vec![]);
+        app.refresh().await;
+        (tmp, token, app, folder)
+    }
+
+    async fn type_in(app: &mut super::App, text: &str) {
+        for c in text.chars() {
+            app.key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE), AREA)
+                .await
+                .unwrap();
+        }
+    }
+
+    async fn press(app: &mut super::App, code: KeyCode, m: KeyModifiers) {
+        app.key(KeyEvent::new(code, m), AREA).await.unwrap();
+    }
+
+    const AREA: Rect = Rect::new(0, 0, 120, 40);
+    const RUN: &str = "r:run00001";
+
+    fn renaming(app: &super::App) -> Option<(String, bool)> {
+        match &app.mode {
+            super::Mode::Rename(r) => Some((r.field.text().to_string(), r.field.is_selected())),
+            _ => None,
+        }
+    }
+
+    fn title(app: &super::App) -> String {
+        app.run_by_id("run00001").unwrap().title.clone()
+    }
+
+    #[tokio::test]
+    async fn a_run_is_renamed_where_it_stands_and_only_enter_saves() {
+        let (_tmp, token, mut app, folder) = panel().await;
+        let none = KeyModifiers::NONE;
+        let ctrl = KeyModifiers::CONTROL;
+        app.select(Some(RUN.into()));
+        // Something half typed on the line below, to be left as it is.
+        type_in(&mut app, "echo hi").await;
+
+        // ^r: the name, all of it selected; typing replaces it, enter saves.
+        press(&mut app, KeyCode::Char('r'), ctrl).await;
+        assert_eq!(renaming(&app), Some(("make test".into(), true)));
+        type_in(&mut app, "nightly").await;
+        assert_eq!(renaming(&app), Some(("nightly".into(), false)));
+        // The line's own keys: to the start, a word in, and on.
+        press(&mut app, KeyCode::Char('a'), ctrl).await;
+        type_in(&mut app, "the ").await;
+        press(&mut app, KeyCode::Char('e'), ctrl).await;
+        type_in(&mut app, " build").await;
+        assert_eq!(renaming(&app), Some(("the nightly build".into(), false)));
+        press(&mut app, KeyCode::Enter, none).await;
+        assert!(renaming(&app).is_none());
+        assert_eq!(title(&app), "the nightly build");
+        assert_eq!(app.sel.as_deref(), Some(RUN), "the cursor stays on it");
+
+        // esc lets it go unsaved.
+        press(&mut app, KeyCode::Char('r'), ctrl).await;
+        type_in(&mut app, "x").await;
+        press(&mut app, KeyCode::Esc, none).await;
+        assert!(renaming(&app).is_none());
+        assert_eq!(title(&app), "the nightly build");
+
+        // So does moving off the row — the arrows, ^k with nothing to cut,
+        // ^j — and the key still moves.
+        let group = format!("g:{}", folder.display());
+        press(&mut app, KeyCode::Char('r'), ctrl).await;
+        type_in(&mut app, "x").await;
+        press(&mut app, KeyCode::Up, none).await;
+        assert!(renaming(&app).is_none());
+        assert_eq!(app.sel.as_deref(), Some(group.as_str()));
+        app.select(Some(RUN.into()));
+        press(&mut app, KeyCode::Char('r'), ctrl).await;
+        press(&mut app, KeyCode::Char('k'), ctrl).await;
+        assert_eq!(renaming(&app), Some((String::new(), false)), "^k cuts first");
+        press(&mut app, KeyCode::Char('k'), ctrl).await;
+        assert!(renaming(&app).is_none());
+        assert_eq!(app.sel.as_deref(), Some(group.as_str()));
+        press(&mut app, KeyCode::Char('r'), ctrl).await;
+        type_in(&mut app, "x").await;
+        press(&mut app, KeyCode::Char('j'), ctrl).await;
+        assert!(renaming(&app).is_none());
+        assert_eq!(app.sel.as_deref(), Some(RUN));
+        assert_eq!(title(&app), "the nightly build");
+
+        // A paste replaces the selection too, as one line.
+        press(&mut app, KeyCode::Char('r'), ctrl).await;
+        app.paste("from the\nclipboard".into(), AREA).await.unwrap();
+        assert_eq!(renaming(&app), Some(("from the clipboard".into(), false)));
+        press(&mut app, KeyCode::Esc, none).await;
+
+        // Nothing for a name: back to the one Relay gave it.
+        press(&mut app, KeyCode::Char('r'), ctrl).await;
+        press(&mut app, KeyCode::Backspace, none).await;
+        assert_eq!(renaming(&app), Some((String::new(), false)));
+        press(&mut app, KeyCode::Enter, none).await;
+        assert!(renaming(&app).is_none());
+        assert_eq!(title(&app), "make test");
+
+        // Shift-enter saves as well, never a new line in a name.
+        press(&mut app, KeyCode::Char('r'), ctrl).await;
+        type_in(&mut app, "tests").await;
+        press(&mut app, KeyCode::Enter, KeyModifiers::SHIFT).await;
+        assert_eq!(title(&app), "tests");
+
+        // None of it reached the line, which is as it was and still its own.
+        assert_eq!(app.line.text(), "echo hi");
+        press(&mut app, KeyCode::Char('j'), ctrl).await;
+        assert_eq!(app.line.text(), "echo hi\n", "^j on the line is a new line, as ever");
+        token.cancel();
+    }
+
+    #[tokio::test]
+    async fn a_project_is_renamed_in_its_header_and_an_empty_name_is_its_folders() {
+        let (_tmp, token, mut app, folder) = panel().await;
+        let (none, ctrl) = (KeyModifiers::NONE, KeyModifiers::CONTROL);
+        app.select(Some(format!("g:{}", folder.display())));
+        press(&mut app, KeyCode::Char('r'), ctrl).await;
+        assert_eq!(renaming(&app), Some(("api".into(), true)));
+        type_in(&mut app, "shiny").await;
+        press(&mut app, KeyCode::Enter, none).await;
+        assert!(renaming(&app).is_none());
+        assert_eq!(app.names.workspace(&folder), "shiny");
+
+        // A click on another row lets it go, and lands there; passing over
+        // the list does not.
+        press(&mut app, KeyCode::Char('r'), ctrl).await;
+        type_in(&mut app, "x").await;
+        let mut t = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 40)).unwrap();
+        t.draw(|f| app.draw(f)).unwrap();
+        let (x, y) = {
+            let hit = app.hit.borrow();
+            let at = hit.keys.iter().position(|k| k.as_deref() == Some(RUN)).unwrap();
+            (hit.area.x + 5, hit.area.y + (at - hit.scroll) as u16)
+        };
+        let mouse = |kind| crossterm::event::MouseEvent {
+            kind,
+            column: x,
+            row: y,
+            modifiers: none,
+        };
+        app.mouse(mouse(crossterm::event::MouseEventKind::Moved), AREA)
+            .await
+            .unwrap();
+        assert_eq!(renaming(&app), Some(("x".into(), false)));
+        let left = crossterm::event::MouseButton::Left;
+        app.mouse(mouse(crossterm::event::MouseEventKind::Down(left)), AREA)
+            .await
+            .unwrap();
+        assert!(renaming(&app).is_none());
+        assert_eq!(app.sel.as_deref(), Some(RUN));
+        assert_eq!(app.names.workspace(&folder), "shiny");
+
+        // `tab` steps the lens, and lets the name go as well.
+        app.select(Some(format!("g:{}", folder.display())));
+        press(&mut app, KeyCode::Char('r'), ctrl).await;
+        type_in(&mut app, "x").await;
+        press(&mut app, KeyCode::Tab, none).await;
+        assert!(renaming(&app).is_none());
+        assert_ne!(app.lens, crate::tui::rows::Lens::All);
+        app.set_lens(crate::tui::rows::Lens::All);
+        app.select(Some(format!("g:{}", folder.display())));
+        assert_eq!(app.names.workspace(&folder), "shiny");
+
+        press(&mut app, KeyCode::Char('r'), ctrl).await;
+        press(&mut app, KeyCode::Delete, none).await;
+        press(&mut app, KeyCode::Enter, none).await;
+        assert_eq!(app.names.workspace(&folder), "proj", "its folder's own name");
+        token.cancel();
+    }
+
+    #[tokio::test]
+    async fn the_name_is_typed_in_its_cell_with_the_caret_there() {
+        use ratatui::style::Modifier;
+        let (_tmp, token, mut app, _) = panel().await;
+        app.select(Some(RUN.into()));
+        press(&mut app, KeyCode::Char('r'), KeyModifiers::CONTROL).await;
+        let long = "a name far too long for the column it is typed into, end";
+        app.paste(long.into(), AREA).await.unwrap();
+        let mut t = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 40)).unwrap();
+        t.draw(|f| app.draw(f)).unwrap();
+        let buf = t.backend().buffer().clone();
+        // One caret on the screen: the line below has none while the name
+        // has the keys.
+        let carets: Vec<(u16, u16)> = (0..40)
+            .flat_map(|y| (0..120).map(move |x| (x, y)))
+            .filter(|&(x, y)| buf[(x, y)].modifier.contains(Modifier::REVERSED))
+            .collect();
+        assert_eq!(carets.len(), 1, "{carets:?}");
+        let (x, y) = carets[0];
+        let row: String = (0..120).map(|x| buf[(x, y)].symbol().to_string()).collect();
+        let before: String = (0..x).map(|x| buf[(x, y)].symbol().to_string()).collect();
+        // The name's end, up against the caret; its start scrolled away.
+        assert!(before.ends_with("typed into, end"), "{row}");
+        assert!(!row.contains("a name far"), "{row}");
+        assert!(buf_has(&buf, "enter saves · esc cancels"));
+        token.cancel();
+    }
+
+    fn buf_has(buf: &ratatui::buffer::Buffer, s: &str) -> bool {
+        let (w, h) = (buf.area.width, buf.area.height);
+        (0..h).any(|y| {
+            let row: String = (0..w).map(|x| buf[(x, y)].symbol().to_string()).collect();
+            row.contains(s)
+        })
     }
 }
