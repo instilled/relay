@@ -22,6 +22,7 @@ pub mod form;
 mod graph;
 mod input;
 mod line;
+mod mark;
 mod palette;
 mod pane;
 mod query;
@@ -96,6 +97,12 @@ const JOIN_SCROLLBACK: u64 = 256 * 1024;
 const TEXT_INDENT: u16 = 2;
 /// Narrower than this, the pane takes the screen instead of sharing it.
 const SPLIT_AT: u16 = 100;
+/// The tall header — the mark, and three lines beside it — wants a screen
+/// at least this tall and this wide; on a smaller one the header is one line.
+const TALL_H: u16 = 24;
+const TALL_W: u16 = 80;
+/// The air between the header's mark and its words.
+const MARK_GAP: u16 = 3;
 /// The list's share of a split screen, in percent: two thirds beside a
 /// details pane, half beside a terminal, which needs the width.
 const LIST_SHARE: u16 = 67;
@@ -559,6 +566,108 @@ fn light(line: Line<'static>, words: &[String]) -> Line<'static> {
     Line { spans: out, ..line }
 }
 
+/// The panel's name, as the header says it.
+const NAME: &str = "relay";
+
+/// The header's words, for either of its shapes: the headline — its lead
+/// word and the tally after it — and the notes that follow, each in its own
+/// tone: what a restart took, the global rules.
+struct Said {
+    lead: String,
+    rest: Option<String>,
+    notes: Vec<Span<'static>>,
+}
+
+impl Said {
+    fn new(title: String, notes: Vec<Span<'static>>) -> Self {
+        let (lead, rest) = match title.split_once(" · ") {
+            Some((lead, rest)) => (lead.to_string(), Some(rest.to_string())),
+            None => (title, None),
+        };
+        Said { lead, rest, notes }
+    }
+
+    /// The headline: the lead word wears the accent, the tally reads plainly.
+    fn headline(&self) -> Vec<Span<'static>> {
+        let mut spans = vec![Span::styled(
+            self.lead.clone(),
+            theme::accent().add_modifier(Modifier::BOLD),
+        )];
+        if let Some(rest) = &self.rest {
+            spans.push(Span::raw(format!(" · {rest}")));
+        }
+        spans
+    }
+
+    /// The notes, a ` · ` between each.
+    fn notes(&self) -> Vec<Span<'static>> {
+        let mut spans = Vec::new();
+        for (i, n) in self.notes.iter().enumerate() {
+            if i > 0 {
+                spans.push(Span::raw(" · "));
+            }
+            spans.push(n.clone());
+        }
+        spans
+    }
+
+    /// All of it on one line: the header where there is no room for the mark.
+    fn line(&self) -> Line<'static> {
+        let mut spans = self.headline();
+        if !self.notes.is_empty() {
+            spans.push(Span::raw(" · "));
+            spans.extend(self.notes());
+        }
+        Line::from(spans)
+    }
+
+    /// The three lines beside the mark: the panel's name and version — and
+    /// its home, when that is not the usual one — then the tally, then the
+    /// notes. A headline that leads with the name goes without it, since the
+    /// first line says it already.
+    fn lines(&self, home: Option<&str>) -> [Line<'static>; 3] {
+        let mut first = vec![
+            Span::styled(NAME, theme::accent().add_modifier(Modifier::BOLD)),
+            Span::styled(format!(" {}", env!("CARGO_PKG_VERSION")), theme::dim()),
+        ];
+        if let Some(home) = home {
+            first.push(Span::styled(format!(" · {home}"), theme::dim()));
+        }
+        let tally = if self.lead == NAME {
+            Line::raw(self.rest.clone().unwrap_or_default())
+        } else {
+            Line::from(self.headline())
+        };
+        [Line::from(first), tally, Line::from(self.notes())]
+    }
+}
+
+/// The Relay home, for the header, when it is not the usual `~/.relay` — a
+/// panel on a test ledger should say so — with `~` for home.
+fn home_note(home: &Path, user: Option<&Path>) -> Option<String> {
+    if user.is_some_and(|u| home == u.join(".relay")) {
+        return None;
+    }
+    Some(rl_core::display_path(home))
+}
+
+/// What the list says when it has nothing to show. When nothing is running
+/// at all — no search, no lens — the mark stands full size in the middle of
+/// it with the words under it, where it fits; otherwise the words alone.
+fn empty_list(msg: &str, area: Rect, nothing: bool) -> Paragraph<'static> {
+    let words = msg.trim_start();
+    let need = mark::FULL.len() as u16 + 2;
+    let fits = area.height >= need && area.width as usize >= words.chars().count().max(mark::W as usize);
+    if !nothing || !fits {
+        return Paragraph::new(msg.to_string()).dim();
+    }
+    let mut lines = vec![Line::raw(""); ((area.height - need) / 2) as usize];
+    lines.extend(mark::lines(&mark::FULL));
+    lines.push(Line::raw(""));
+    lines.push(Line::styled(words.to_string(), theme::dim()));
+    Paragraph::new(lines).centered()
+}
+
 /// Where things go on screen.
 struct Areas {
     head: Rect,
@@ -582,7 +691,7 @@ fn areas(area: Rect, wide: bool, show_pane: bool, share: u16, form_h: u16, cands
     let chrome = !wide;
     let rule = u16::from(chrome);
     let [head, rule_a, body, form, cands, rule_b, line, rule_c, footer] = Layout::vertical([
-        Constraint::Length(1),
+        Constraint::Length(head_h(area, wide)),
         Constraint::Length(rule),
         Constraint::Fill(1),
         Constraint::Length(if form_h > 0 { form_h + 1 } else { 0 }),
@@ -621,6 +730,25 @@ fn areas(area: Rect, wide: bool, show_pane: bool, share: u16, form_h: u16, cands
         line,
         footer,
     }
+}
+
+/// How tall the header is: the small mark's rows, with three lines beside
+/// it, where the screen has room; one line in the full-screen terminal, which
+/// wants every cell, and on a screen too short or too narrow to spare them.
+fn head_h(area: Rect, wide: bool) -> u16 {
+    if wide || area.height < TALL_H || area.width < TALL_W {
+        1
+    } else {
+        mark::SMALL.len() as u16
+    }
+}
+
+/// The size a terminal gets in the pane: the pane's area, less the row that
+/// names the run — or the whole screen, where there is no pane.
+fn term_size(size: Rect, wide: bool, foot_h: u16) -> (u16, u16) {
+    let a = areas(size, wide, true, LIST_SHARE_TERM, 0, 0, foot_h);
+    let r = a.pane.unwrap_or(size);
+    (r.width.max(1), r.height.saturating_sub(1).max(1))
 }
 
 /// Whether this terminal speaks the kitty keyboard protocol — asked once, the
@@ -976,10 +1104,7 @@ impl App {
 
     /// The area the terminal draws into.
     fn pane_size(&self, size: Rect) -> (u16, u16) {
-        let a = areas(size, self.wide, true, LIST_SHARE_TERM, 0, 0, self.foot_h(size.width));
-        let r = a.pane.unwrap_or(size);
-        // Less the row that names the run.
-        (r.width.max(1), r.height.saturating_sub(1).max(1))
+        term_size(size, self.wide, self.foot_h(size.width))
     }
 
     /// How many rows the live line takes: its own, capped, at least one.
@@ -3246,7 +3371,8 @@ impl App {
             // A tile beside the list: the list keeps the keyboard, `pgup` and
             // `pgdn` read the tile back, and `esc` goes on to close the pane.
             _ if self.pane == Pane::Term && self.term.is_some() => {
-                let page = area.height.saturating_sub(3).max(1);
+                // A page is the tile's own height, not the screen's.
+                let page = self.pane_size(area).1;
                 match k.code {
                     KeyCode::PageUp | KeyCode::PageDown => {
                         self.watch_key(&k, page);
@@ -4074,49 +4200,67 @@ impl App {
             },
             View::Events => events::headline(self.event_items().len(), &self.feed, &self.filter),
         };
-        // The header carries three things on one line: the tally at the left,
-        // the lens at the right of it, and who you are at the edge. The lens
-        // rides here rather than a row of its own.
-        let lens = (self.view == View::Work).then(|| self.lens_line());
-        let lens_w = lens.as_ref().map_or(0, |l| l.width() as u16 + 2);
-        let [_, l, lens_area, r] = Layout::horizontal([
-            Constraint::Length(TEXT_INDENT),
-            Constraint::Fill(1),
-            Constraint::Length(lens_w),
-            Constraint::Length(self.me.len() as u16 + 1),
-        ])
-        .areas(a.head);
-        // The lead word wears the accent; the tally after it reads plainly.
-        let mut head = match title.split_once(" · ") {
-            Some((lead, rest)) => Line::from(vec![
-                Span::styled(lead.to_string(), theme::accent().add_modifier(Modifier::BOLD)),
-                Span::raw(format!(" · {rest}")),
-            ]),
-            None => Line::from(Span::styled(title, theme::accent().add_modifier(Modifier::BOLD))),
-        };
+        let mut notes = Vec::new();
         // What a restart took waits on you like anything else that does.
         if self.view == View::Work
             && let Some(note) = rows::lost_note(&self.digest)
         {
-            head.spans.push(Span::raw(" · "));
-            head.spans.push(Span::styled(note, theme::needs()));
+            notes.push(Span::styled(note, theme::needs()));
         }
         // The global rules have no row — nothing would sit under one — so the
-        // headline says them, amber when one waits for a yes. The graph shows
+        // header says them, amber when one waits for a yes. The graph shows
         // them wired, and it is where that yes is given.
         // A global file that did not load is said beside them, in red.
         if self.view == View::Work {
             let chips = rows::chips(&self.rules, None, Timestamp::now());
             for (words, tone) in rows::global_parts(&chips, !self.broken_in(None).is_empty()) {
-                head.spans.push(Span::raw(" · "));
-                head.spans.push(match tone {
+                notes.push(match tone {
                     rows::Tone::Plain => Span::raw(words),
                     rows::Tone::Needs => Span::styled(words, theme::needs()),
                     rows::Tone::Bad => Span::styled(words, theme::bad()),
                 });
             }
         }
-        f.render_widget(Paragraph::new(head), l);
+        let said = Said::new(title, notes);
+        // Where there is room the mark stands at the left, and the words go
+        // beside its middle rows. Its first column is air, so it starts a
+        // column early and its ink stands where the header's words would.
+        let text = if a.head.height > 1 {
+            let mark = Rect {
+                x: a.head.x + TEXT_INDENT - 1,
+                width: mark::W,
+                ..a.head
+            };
+            f.render_widget(Paragraph::new(mark::lines(&mark::SMALL)), mark);
+            let x = mark.x + mark::W + MARK_GAP;
+            Rect::new(x, a.head.y + 1, a.head.right().saturating_sub(x), a.head.height - 2)
+        } else {
+            Rect {
+                x: a.head.x + TEXT_INDENT,
+                width: a.head.width.saturating_sub(TEXT_INDENT),
+                ..a.head
+            }
+        };
+        // The header's first line carries three things: its words at the
+        // left, the lens at the right of them, and who you are at the edge.
+        // The lens rides here rather than a row of its own.
+        let lens = (self.view == View::Work).then(|| self.lens_line());
+        let lens_w = lens.as_ref().map_or(0, |l| l.width() as u16 + 2);
+        let [top, below] = Layout::vertical([Constraint::Length(1), Constraint::Fill(1)]).areas(text);
+        let [l, lens_area, r] = Layout::horizontal([
+            Constraint::Fill(1),
+            Constraint::Length(lens_w),
+            Constraint::Length(self.me.len() as u16 + 1),
+        ])
+        .areas(top);
+        if a.head.height > 1 {
+            let home = home_note(self.home.path(), std::env::var_os("HOME").as_deref().map(Path::new));
+            let [first, tally, notes] = said.lines(home.as_deref());
+            f.render_widget(Paragraph::new(first), l);
+            f.render_widget(Paragraph::new(vec![tally, notes]), below);
+        } else {
+            f.render_widget(Paragraph::new(said.line()), l);
+        }
         if let Some(lens) = lens {
             f.render_widget(Paragraph::new(lens).right_aligned(), lens_area);
         }
@@ -4366,7 +4510,8 @@ impl App {
             } else {
                 " nothing running · rl run -- <command>".into()
             };
-            f.render_widget(Paragraph::new(msg).dim(), area);
+            let nothing = self.filter.is_empty() && self.lens == rows::Lens::All;
+            f.render_widget(empty_list(&msg, area, nothing), area);
             return;
         }
         let now = Timestamp::now();
@@ -5051,7 +5196,10 @@ fn reorder_step(k: &KeyEvent) -> Option<bool> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ListHit, cand_window, group_count, hit_row, mark_seen, reorder_step, spawn_size, vi_step, viewport};
+    use super::{
+        ListHit, Said, areas, cand_window, empty_list, group_count, head_h, hit_row, home_note, mark_seen,
+        reorder_step, spawn_size, term_size, vi_step, viewport,
+    };
     use crate::tui::rows::Chip;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::layout::Rect;
@@ -5141,6 +5289,122 @@ mod tests {
         assert_eq!(hit_row(&hit, 5, 7), None);
         // Inside the area, but past the last line the list drew.
         assert_eq!(hit_row(&hit, 5, 6), None);
+    }
+
+    fn text(l: &ratatui::text::Line) -> String {
+        l.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    #[test]
+    fn the_header_stands_tall_where_there_is_room_and_is_one_line_elsewhere() {
+        let screen = |w, h| Rect::new(0, 0, w, h);
+        assert_eq!(head_h(screen(160, 45), false), 5);
+        assert_eq!(head_h(screen(100, 30), false), 5);
+        assert_eq!(head_h(screen(80, 24), false), 5);
+        // The full-screen terminal wants every cell.
+        assert_eq!(head_h(screen(160, 45), true), 1);
+        // Too short, or too narrow, to spare the rows for the mark.
+        assert_eq!(head_h(screen(160, 23), false), 1);
+        assert_eq!(head_h(screen(80, 20), false), 1);
+        assert_eq!(head_h(screen(79, 45), false), 1);
+        // The list starts under the header and its rule, whichever it is.
+        let list = |w, h| {
+            areas(screen(w, h), false, false, super::LIST_SHARE, 0, 0, 1)
+                .list
+                .unwrap()
+        };
+        assert_eq!(list(100, 30).y, 6);
+        assert_eq!(list(80, 20).y, 2);
+    }
+
+    #[test]
+    fn a_click_under_the_tall_header_finds_its_row() {
+        let a = areas(Rect::new(0, 0, 100, 30), false, false, super::LIST_SHARE, 0, 0, 1);
+        let list = a.list.unwrap();
+        let hit = ListHit {
+            area: list,
+            scroll: 0,
+            keys: vec![Some("g:one".into()), Some("r:two".into())],
+        };
+        assert_eq!(hit_row(&hit, 3, 6), Some("g:one".into()));
+        assert_eq!(hit_row(&hit, 3, 7), Some("r:two".into()));
+        // The header's rows and the rule under it are nobody's.
+        for row in 0..6 {
+            assert_eq!(hit_row(&hit, 3, row), None, "row {row}");
+        }
+    }
+
+    #[test]
+    fn a_terminal_in_the_pane_is_sized_under_the_header_it_has() {
+        // 45 rows, less the header (5) and its rule, the rules above the line
+        // and the footer, the line, the footer, and the row naming the run.
+        assert_eq!(term_size(Rect::new(0, 0, 160, 45), false, 1), (79, 34));
+        // Full screen the header is one line and there are no rules.
+        assert_eq!(term_size(Rect::new(0, 0, 160, 45), true, 1), (160, 41));
+        // A short screen keeps the one-line header beside a tile too.
+        assert_eq!(term_size(Rect::new(0, 0, 80, 20), false, 1), (80, 13));
+    }
+
+    #[test]
+    fn the_header_says_the_same_on_one_line_and_on_three() {
+        use crate::tui::theme;
+        use ratatui::text::Span;
+        let notes = || vec![Span::raw("↻ 2 everywhere"), Span::styled("1 lost", theme::needs())];
+        let said = Said::new("relay · 2 working · 1 new".into(), notes());
+        assert_eq!(
+            text(&said.line()),
+            "relay · 2 working · 1 new · ↻ 2 everywhere · 1 lost"
+        );
+        let v = env!("CARGO_PKG_VERSION");
+        let [first, tally, rest] = said.lines(None);
+        assert_eq!(text(&first), format!("relay {v}"));
+        assert_eq!(text(&tally), "2 working · 1 new", "the first line says relay already");
+        assert_eq!(text(&rest), "↻ 2 everywhere · 1 lost");
+        assert_eq!(rest.spans[2].style, theme::needs(), "a note keeps its tone");
+        let [first, ..] = said.lines(Some("/tmp/x"));
+        assert_eq!(text(&first), format!("relay {v} · /tmp/x"));
+        // The graph's headline leads with its own word, and keeps it.
+        let said = Said::new("wiring · 3 rules".into(), vec![]);
+        let [_, tally, rest] = said.lines(None);
+        assert_eq!(text(&tally), "wiring · 3 rules");
+        assert_eq!(
+            tally.spans[0].style,
+            theme::accent().add_modifier(ratatui::style::Modifier::BOLD)
+        );
+        assert_eq!(text(&rest), "");
+    }
+
+    #[test]
+    fn the_home_is_said_only_when_it_is_not_the_usual_one() {
+        use std::path::Path;
+        let user = Some(Path::new("/Users/me"));
+        assert_eq!(home_note(Path::new("/Users/me/.relay"), user), None);
+        assert_eq!(home_note(Path::new("/Users/me/.relay/"), user), None);
+        assert_eq!(home_note(Path::new("/tmp/x"), user), Some("/tmp/x".into()));
+        assert_eq!(home_note(Path::new("/tmp/x"), None), Some("/tmp/x".into()));
+    }
+
+    #[test]
+    fn an_empty_list_shows_the_mark_where_it_fits() {
+        use ratatui::buffer::Buffer;
+        use ratatui::widgets::Widget;
+        let shown = |nothing: bool, w: u16, h: u16| {
+            let area = Rect::new(0, 0, w, h);
+            let mut buf = Buffer::empty(area);
+            empty_list(" nothing running · rl run -- <command>", area, nothing).render(area, &mut buf);
+            (0..h)
+                .map(|y| (0..w).map(|x| buf[(x, y)].symbol()).collect::<String>())
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let big = shown(true, 60, 20);
+        assert!(big.contains("██▀▀████▀▀██"), "{big}");
+        assert!(big.contains("nothing running"));
+        // Too small for it, or a lens or a search that came up empty: words.
+        for s in [shown(true, 60, 9), shown(true, 30, 20), shown(false, 60, 20)] {
+            assert!(!s.contains('█'), "{s}");
+            assert!(s.starts_with(" nothing running"), "{s}");
+        }
     }
 
     #[test]
