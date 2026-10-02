@@ -323,7 +323,18 @@ saturated accent per state, on the terminal's own foreground so it reads on eith
 the header, above the line, above the footer. The project rows and the `❯` line start at the edge,
 and the header and footer text level with what is typed after the `❯`; a project's runs, shells and agents sit one column in, under it. The list and its
 detail pane are split by a vertical bar — the list takes two thirds beside the details pane, half beside a terminal, which needs the
-width; the full-screen terminal drops all of it for the cells. A group is a folder (or a ref), never a branch: its header is its path, with `~` for home, the
+width; the full-screen terminal drops all of it for the cells. The header wears Relay's mark — a
+radio tower sending signals, drawn from one pixel grid in `tui/mark.rs` and in the accent: five
+rows of half-blocks at the left, and beside its middle
+three rows the header's words — `relay` and its version (and the Relay home, `~` for home, when it
+is not the usual `~/.relay`, so a panel on a test ledger says so) with the lens and who you are at
+the right; then the tally (or the graph's or the events' own headline); then the notes — what a
+restart took and the global rules, each in its tone. The full-screen terminal keeps the header to
+one line, all of it after the tally, and so does a screen under 24 rows or 80 columns
+(`head_h`); everything under the header — the list's rows for the mouse, a terminal's size in the
+pane — is measured from where `areas` put it. With nothing running at all, the empty list shows the
+mark full size in its middle, over its words, and the setup guide has it above its title, each
+where it fits. A group is a folder (or a ref), never a branch: its header is its path, with `~` for home, the
 folders above dim and its own bold, and ` · name` after it when it goes by a name that is not its
 folder's (a ref, or a folder registered or renamed under another); a path too long for the title
 column loses its start to `…`, never its last folder. From the state column on — level with the
@@ -336,8 +347,9 @@ that waits for a yes named just before it in amber (`! deploy`), and before that
 while one of the folder's rules files did not load (see **Rules**). The rest of its rules are the
 graph's and the project pane's to show. The global rules — the ones in the Relay home, which apply in every folder — have no
 row of their own: a row that is always there, rules or none, kept the empty list from ever saying
-`nothing running · rl run -- <command>`. The headline says them instead, when there are any — `relay · 3 working ·
-↻ 2 ⚡ 1 everywhere`, schedules and reactions counted as a folder's header counts them — and in
+`nothing running · rl run -- <command>`. The header says them instead, when there are any, on its
+line of notes — `↻ 2 ⚡ 1 everywhere` (on one line, `relay · 3 working · ↻ 2 ⚡ 1 everywhere`),
+schedules and reactions counted as a folder's header counts them — and in
 amber when one waits for a yes, saying so and where to give it (`⚡ 1 everywhere needs a yes ·
 /graph`, `rows::everywhere`), and in red beside them while one of the home's files did not load
 (`↻ 2 ⚡ 1 everywhere · rules broken`, or `global rules broken` when none of them loaded;

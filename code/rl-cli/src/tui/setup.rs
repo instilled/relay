@@ -7,7 +7,7 @@
 //! settles goes into `config.yaml`, written by rld; how far it got goes into
 //! the ledger, so the file stays yours.
 
-use super::{Client, theme};
+use super::{Client, mark, theme};
 use anyhow::Result;
 use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use futures::StreamExt;
@@ -403,6 +403,28 @@ impl Guide {
             Step::Sessions => "space in or out · a all · enter asks once more · esc leaves them · ← back",
         };
         lines.push(Line::styled(keys, theme::dim()));
+        // Where the screen has room for it and the guide both, the mark
+        // stands above the title. Its first column is air, so it starts a
+        // column early and its ink stands level with the title.
+        let w = inner.width.max(1) as usize;
+        let rows: usize = lines.iter().map(|l| l.width().div_ceil(w).max(1)).sum();
+        let tall = mark::FULL.len() as u16 + 1;
+        let inner = if rows + tall as usize <= inner.height as usize && inner.width >= mark::W {
+            let at = Rect {
+                x: inner.x - 1,
+                width: mark::W,
+                height: mark::FULL.len() as u16,
+                ..inner
+            };
+            f.render_widget(Paragraph::new(mark::lines(&mark::FULL)), at);
+            Rect {
+                y: inner.y + tall,
+                height: inner.height - tall,
+                ..inner
+            }
+        } else {
+            inner
+        };
         f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
     }
 
@@ -1017,6 +1039,32 @@ mod tests {
         assert!(text.contains("relay setup   1 of 3"), "{text}");
         assert!(text.contains("[x] claude"), "{text}");
         assert!(text.contains("[ ] cursor     not found"), "{text}");
+        assert!(!text.contains('█'), "no room for the mark: {text}");
+    }
+
+    #[test]
+    fn the_mark_stands_above_the_title_where_there_is_room() {
+        let g = Guide::new(&state(Config::default()), &none());
+        let backend = ratatui::backend::TestBackend::new(90, 30);
+        let mut t = ratatui::Terminal::new(backend).unwrap();
+        t.draw(|f| g.draw(f)).unwrap();
+        let rows: Vec<String> = t
+            .backend()
+            .buffer()
+            .content()
+            .chunks(90)
+            .map(|r| r.iter().map(|c| c.symbol()).collect::<String>())
+            .collect();
+        let foot = rows.iter().position(|r| r.contains("██▀▀████▀▀██")).unwrap();
+        let title = rows.iter().position(|r| r.contains("relay setup")).unwrap();
+        assert_eq!(title, foot + 2, "{rows:#?}");
+        // Its ink stands level with the title.
+        assert_eq!(rows[title].find('r'), Some(2));
+        assert_eq!(rows[foot - 4].trim_end(), "  █  █    ██    █  █");
+        assert!(
+            rows.iter().any(|r| r.contains("q later")),
+            "the keys still fit: {rows:#?}"
+        );
     }
 
     #[test]
