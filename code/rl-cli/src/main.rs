@@ -2352,12 +2352,13 @@ const BASH_MARKS: &str = r#"# Relay prompt marks (OSC 133) and the folder you ar
 if [ -z "${_relay_marks:-}" ]; then
   _relay_marks=1
   _relay_cwd() {
-    local LC_ALL=C s=$PWD out= c i
+    local LC_ALL=C s=$PWD out= c i n
     for (( i = 0; i < ${#s}; i++ )); do
       c=${s:i:1}
       case $c in
         [-/._~A-Za-z0-9]) out+=$c ;;
-        *) printf -v c '%%%02X' "'$c"; out+=$c ;;
+        # A byte past ASCII reads negative in bash 3.2 (macOS's own bash).
+        *) printf -v n '%d' "'$c"; printf -v c '%%%02X' $(( n & 255 )); out+=$c ;;
       esac
     done
     printf '\033]7;file://%s%s\007' "$HOSTNAME" "$out"
@@ -2436,8 +2437,9 @@ mod tests {
         let dir = tmp.path().join("a b&c").join("café");
         std::fs::create_dir_all(&dir).unwrap();
         let dir = std::fs::canonicalize(&dir).unwrap();
-        for (sh, snippet) in [("bash", BASH_MARKS), ("zsh", ZSH_MARKS)] {
-            let file = tmp.path().join(sh);
+        // `/bin/bash` too: on macOS it is bash 3.2, whatever `bash` finds first.
+        for (sh, snippet) in [("bash", BASH_MARKS), ("/bin/bash", BASH_MARKS), ("zsh", ZSH_MARKS)] {
+            let file = tmp.path().join(sh.trim_start_matches("/bin/"));
             std::fs::write(&file, snippet).unwrap();
             let script = format!(". '{}'; cd '{}' && _relay_cwd", file.display(), dir.display());
             let Ok(out) = std::process::Command::new(sh).args(["-c", &script]).output() else {

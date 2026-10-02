@@ -32,6 +32,7 @@ mod rows;
 mod rules;
 mod screen;
 mod setup;
+mod shortcuts;
 mod term;
 mod theme;
 
@@ -59,13 +60,13 @@ use rl_core::time::fmt_age;
 use rl_proto::decision::Decision;
 use rl_proto::methods::{
     AgentList, DecisionDismiss, DecisionGet, DecisionId, DecisionNote, DecisionTake, DecisionTakeParams, Digest,
-    DigestGet, DigestHide, DigestHideParams, DigestItem, DigestParams, EventFilter, EventList, GcParams, GcRun,
-    GraphGet, GraphParams, ImportList, ImportListParams, PresenceClient, PresenceTouch, ReactionPause, ReactionReload,
-    ReactionResume, RuleApprove, RuleErrors, RuleList, RuleRef, RunArchive, RunArchiveParams, RunFilter, RunGet,
-    RunHide, RunHideParams, RunId, RunIds, RunInput, RunInputParams, RunList, RunMark, RunMarkParams, RunPin,
-    RunPinParams, RunRename, RunRenameParams, RunResume, RunResumeParams, RunSeen, RunSpec, RunStart, RunStop,
-    RunStopParams, SETUP_STEPS, ScheduleFilter, ScheduleName, SchedulePause, ScheduleReload, ScheduleResume,
-    ScheduleRun, SetupGet, SummaryGet, SummaryMake, SummaryParams, WorkspaceList, WorkspaceRemove,
+    DigestGet, DigestHide, DigestHideParams, DigestItem, DigestOrder, DigestParams, EventFilter, EventList, GcParams,
+    GcRun, GraphGet, GraphParams, ImportList, ImportListParams, PresenceClient, PresenceTouch, ReactionPause,
+    ReactionReload, ReactionResume, RuleApprove, RuleErrors, RuleList, RuleRef, RunArchive, RunArchiveParams,
+    RunFilter, RunGet, RunHide, RunHideParams, RunId, RunIds, RunInput, RunInputParams, RunList, RunMark,
+    RunMarkParams, RunPin, RunPinParams, RunRename, RunRenameParams, RunResume, RunResumeParams, RunSeen, RunSpec,
+    RunStart, RunStop, RunStopParams, SETUP_STEPS, ScheduleFilter, ScheduleName, SchedulePause, ScheduleReload,
+    ScheduleResume, ScheduleRun, SetupGet, SummaryGet, SummaryMake, SummaryParams, WorkspaceList, WorkspaceRemove,
     WorkspaceRemoveParams, WorkspaceRemoved, WorkspaceRename, WorkspaceRenameParams, WorkspaceUp, WorkspaceUpParams,
 };
 use rl_proto::rule::{NotLoaded, Rule, RuleKind, RuleStatus};
@@ -311,6 +312,9 @@ struct App {
     /// A destructive key waits for its own second press: `ctrl-x` to remove,
     /// `ctrl-c` to quit. Any other key clears it, so nothing goes on one slip.
     arm: Option<Arm>,
+    /// `?` on an empty line: the keys for where you are, under the line,
+    /// until `?` again, `esc`, or typing.
+    shortcuts: bool,
     quit: bool,
 }
 
@@ -738,6 +742,7 @@ pub async fn run(home: &Home) -> Result<()> {
             checkouts: Vec::new(),
             lost: Vec::new(),
             hidden: Vec::new(),
+            order: Vec::new(),
         },
         names: Names::default(),
         filter: String::new(),
@@ -784,6 +789,7 @@ pub async fn run(home: &Home) -> Result<()> {
         mode: Mode::Normal,
         flash: None,
         arm: None,
+        shortcuts: false,
         quit: false,
     };
     app.refresh().await;
@@ -970,7 +976,7 @@ impl App {
 
     /// The area the terminal draws into.
     fn pane_size(&self, size: Rect) -> (u16, u16) {
-        let a = areas(size, self.wide, true, LIST_SHARE_TERM, 0, 0, self.line_h());
+        let a = areas(size, self.wide, true, LIST_SHARE_TERM, 0, 0, self.foot_h(size.width));
         let r = a.pane.unwrap_or(size);
         // Less the row that names the run.
         (r.width.max(1), r.height.saturating_sub(1).max(1))
@@ -982,6 +988,63 @@ impl App {
             return 1;
         }
         (self.line.rows() as u16).clamp(1, LINE_MAX)
+    }
+
+    /// The live line and the shortcuts under it, when they are up: the rows
+    /// the foot of the panel takes at this width.
+    fn foot_h(&self, width: u16) -> u16 {
+        self.line_h() + self.shortcut_lines(width).len() as u16
+    }
+
+    /// Where the keyboard is, for the shortcuts line; none where it has no
+    /// place — a form, a `y`-or-not question, a search, which keep their keys
+    /// in the footer.
+    fn shortcuts_place(&self) -> Option<shortcuts::Place> {
+        match &self.mode {
+            Mode::Normal => {}
+            Mode::Answer(id) => {
+                let q = self.digest.decisions.iter().find(|d| &d.id == id)?;
+                return Some(shortcuts::Place::Answer {
+                    n: q.options.len().min(pane::MAX_KEYS),
+                    multi: q.multi,
+                });
+            }
+            _ => return None,
+        }
+        if self.search.is_some() {
+            return None;
+        }
+        // The same test as the footer's: the tile's keys while the cursor is
+        // on the run it shows.
+        if self.pane == Pane::Term
+            && let Some(t) = &self.term
+            && (self.wide || self.selected_run().is_some_and(|i| i.run.id == t.id))
+        {
+            return Some(shortcuts::Place::Term {
+                wide: self.wide,
+                live: !t.lost && t.ended.is_none(),
+            });
+        }
+        Some(match self.view {
+            View::Graph => shortcuts::Place::Graph,
+            View::Events => shortcuts::Place::Events,
+            View::Work if self.selected_question().is_some() => shortcuts::Place::Question,
+            View::Work if self.lens == rows::Lens::Hidden => shortcuts::Place::Hidden,
+            View::Work => shortcuts::Place::List,
+        })
+    }
+
+    /// The shortcuts line as drawn at this width, wrapped between keys; none
+    /// while it is put away.
+    fn shortcut_lines(&self, width: u16) -> Vec<Line<'static>> {
+        if !self.shortcuts {
+            return vec![];
+        }
+        let Some(at) = self.shortcuts_place() else {
+            return vec![];
+        };
+        let room = width.saturating_sub(TEXT_INDENT).max(1) as usize;
+        shortcuts::lines(&shortcuts::keys(at), room)
     }
 
     /// Move the lens along the strip; the selection settles onto whatever the
@@ -1450,6 +1513,7 @@ impl App {
         if matches!(self.mode, Mode::Normal) {
             self.line.insert(&s);
             self.completing = None;
+            self.shortcuts = shortcuts::still_open(self.shortcuts, self.line.is_empty());
             return Ok(());
         }
         for c in s.chars().filter(|c| !c.is_control()) {
@@ -2757,6 +2821,89 @@ impl App {
         }
     }
 
+    /// Shift-↑/↓: the row under the cursor one place up or down inside its
+    /// project, which keeps that order from then on (`digest.order`). The
+    /// cursor stays on the row, and holding the key goes on moving it. The
+    /// order kept comes back at once, so the next press builds on it without
+    /// waiting for the list to be fetched again.
+    async fn reorder(&mut self, up: bool) {
+        match self.view {
+            View::Work => {}
+            View::Graph => return self.say("⇧↑↓ moves rows on the list · the graph lays itself out"),
+            View::Events => return self.say("⇧↑↓ moves rows on the list · events stay in the order they came"),
+        }
+        if self.lens == rows::Lens::Hidden {
+            self.say("the hidden lens keeps the list's order · move it on the list");
+            return;
+        }
+        let Some(key) = self.sel.clone() else {
+            self.say("nothing here to move");
+            return;
+        };
+        let order = {
+            let shown = self.rows();
+            let full = rows::build(
+                &self.digest,
+                &rows::Context {
+                    names: &self.names,
+                    rules: &self.rules,
+                    filter: "",
+                    lens: rows::Lens::All,
+                    now: Timestamp::now(),
+                },
+            );
+            rows::reorder(&shown, &full, &self.digest.order, &key, up)
+        };
+        match order {
+            Ok(order) => match self.rpc.call::<DigestOrder>(order).await {
+                Ok(all) => self.digest.order = all,
+                Err(e) => self.say(format!("reorder: {e:#}")),
+            },
+            Err(why) => self.say(why),
+        }
+    }
+
+    /// `/sort`: the project under the cursor — its header, or any row in it
+    /// — lets go of the order you put it in and sorts itself again.
+    async fn sort_project(&mut self) {
+        let found = {
+            let rows = self.rows();
+            let at = self
+                .sel
+                .as_ref()
+                .and_then(|k| rows.iter().position(|r| r.key().as_ref() == Some(k)));
+            at.and_then(|at| rows[..=at].iter().rposition(|r| matches!(r, Row::Group(_))))
+                .and_then(|h| match &rows[h] {
+                    Row::Group(head) => Some((rows[h].key().unwrap_or_default(), head.name.clone())),
+                    _ => None,
+                })
+        };
+        let Some((group, name)) = found else {
+            self.say("/sort is for a project: on its header, it lets the project sort itself again");
+            return;
+        };
+        if !self.digest.order.iter().any(|o| o.group == group) {
+            self.say(format!("{name} already sorts itself · ⇧↑↓ puts its rows in your order"));
+            return;
+        }
+        match self
+            .rpc
+            .call::<DigestOrder>(rl_proto::methods::Order {
+                group,
+                rows: Vec::new(),
+            })
+            .await
+        {
+            Ok(all) => {
+                self.digest.order = all;
+                self.say(format!(
+                    "{name} sorts itself again · what needs you, then by state and time"
+                ));
+            }
+            Err(e) => self.say(format!("sort: {e:#}")),
+        }
+    }
+
     async fn rename_run(&mut self, id: String, title: String) -> Result<()> {
         if title.is_empty() {
             anyhow::bail!("a name, please");
@@ -2906,6 +3053,11 @@ impl App {
         ) {
             self.arm = None;
         }
+        // A form or a `y`-or-not question has its keys in the footer; the
+        // shortcuts go, rather than come back when it is done.
+        if !matches!(self.mode, Mode::Normal | Mode::Answer(_)) {
+            self.shortcuts = false;
+        }
         match std::mem::replace(&mut self.mode, Mode::Normal) {
             Mode::Stop(id) => {
                 if k.code == KeyCode::Char('y') {
@@ -2958,6 +3110,12 @@ impl App {
                 };
                 let all = pane::choices(&q, q.run.as_deref().and_then(|r| self.run_by_id(r)));
                 let last = all.len().saturating_sub(1);
+                // Nothing is typed here, so `?` is the shortcuts', and `esc`
+                // puts them away before it puts the question back.
+                if self.shortcut_key(&k, true) {
+                    self.mode = Mode::Answer(id);
+                    return Ok(());
+                }
                 match k.code {
                     KeyCode::Esc => self.picked.clear(),
                     KeyCode::Up => {
@@ -3007,6 +3165,9 @@ impl App {
         if self.search.is_some() {
             return self.key_search(k).await;
         }
+        if self.shortcut_key(&k, self.line.is_empty()) {
+            return Ok(());
+        }
         let k = vi_step(k, self.line.is_empty());
         // Watching, the line still has the keyboard, so you can type the next
         // thing without leaving the run you are on; taking the keyboard is the
@@ -3045,6 +3206,7 @@ impl App {
             line::Act::Typing => {
                 self.completing = None;
                 self.pick = None;
+                self.shortcuts = shortcuts::still_open(self.shortcuts, self.line.is_empty());
                 Ok(())
             }
             // With a candidate highlighted, tab and enter take it; otherwise
@@ -3097,8 +3259,22 @@ impl App {
         }
     }
 
+    /// `?` and `esc`, for the shortcuts line, before anything else has them:
+    /// whether they were its.
+    fn shortcut_key(&mut self, k: &KeyEvent, line_empty: bool) -> bool {
+        match shortcuts::take(self.shortcuts, line_empty, k) {
+            shortcuts::Take::Toggle => self.shortcuts = !self.shortcuts,
+            shortcuts::Take::Close => self.shortcuts = false,
+            shortcuts::Take::Pass => return false,
+        }
+        true
+    }
+
     /// `^f` or `/filter`: search, starting from the filter already in force.
     fn open_search(&mut self) {
+        // What is typed now narrows the list: the shortcuts would only be in
+        // the way.
+        self.shortcuts = false;
         let mut l = line::Line::default();
         l.set_with_cursor(self.filter.clone(), self.filter.len());
         self.search = Some(Search {
@@ -3217,6 +3393,10 @@ impl App {
         // any other key here disarms it, so `ctrl-x`/`ctrl-c` never fire on one
         // slip (the way an agent view asks before it deletes).
         let armed = self.arm.take();
+        if let Some(up) = reorder_step(&k) {
+            self.reorder(up).await;
+            return Ok(());
+        }
         if self.view == View::Events && self.events_step(k.code).await {
             return Ok(());
         }
@@ -3639,6 +3819,9 @@ impl App {
             palette::Cmd::Help => {
                 let names: Vec<&str> = palette::ALL.iter().map(|c| c.name).collect();
                 self.say(format!("/{}", names.join(" · /")));
+                // The commands in the footer, the keys under the line: what
+                // `?` shows.
+                self.shortcuts = true;
             }
             palette::Cmd::Stop => {
                 if let Some(i) = self.selected_run()
@@ -3737,6 +3920,7 @@ impl App {
             palette::Cmd::Rename => self.rename_here(),
             palette::Cmd::Pin => self.toggle_pin().await,
             palette::Cmd::Hide => self.hide().await,
+            palette::Cmd::Sort => self.sort_project().await,
             palette::Cmd::Graph => self.toggle_graph().await,
             palette::Cmd::Events => self.toggle_events().await,
             palette::Cmd::Shell => self.new_shell(area).await,
@@ -3857,6 +4041,8 @@ impl App {
         } else {
             LIST_SHARE
         };
+        // `?`: the keys for here, under the line, as many rows as they wrap to.
+        let keys = self.shortcut_lines(f.area().width);
         let a = areas(
             f.area(),
             self.wide,
@@ -3864,7 +4050,7 @@ impl App {
             share,
             form_h,
             cands_h,
-            self.line_h(),
+            self.line_h() + keys.len() as u16,
         );
         let rows = self.rows();
         // News is counted the way it is shown: a job with unseen runs is one.
@@ -4023,15 +4209,25 @@ impl App {
             };
             f.render_widget(Paragraph::new(lines), area);
         }
+        let [line_area, keys_area] =
+            Layout::vertical([Constraint::Fill(1), Constraint::Length(keys.len() as u16)]).areas(a.line);
         if matches!(self.mode, Mode::Normal) {
-            f.render_widget(Paragraph::new(self.line_lines(a.line.width)), a.line);
+            f.render_widget(Paragraph::new(self.line_lines(line_area.width)), line_area);
+        }
+        if !keys.is_empty() {
+            let keys_area = Rect {
+                x: keys_area.x + TEXT_INDENT,
+                width: keys_area.width.saturating_sub(TEXT_INDENT),
+                ..keys_area
+            };
+            f.render_widget(Paragraph::new(keys), keys_area);
         }
         let footer = Rect {
             x: a.footer.x + TEXT_INDENT,
             width: a.footer.width.saturating_sub(TEXT_INDENT),
             ..a.footer
         };
-        f.render_widget(Paragraph::new(self.footer()).dim(), footer);
+        f.render_widget(Paragraph::new(self.footer(footer.width as usize)).dim(), footer);
     }
 
     /// The lens, at the right of the header: the slices of the list, the one
@@ -4576,7 +4772,10 @@ impl App {
         f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
     }
 
-    fn footer(&self) -> String {
+    /// The foot of the panel: a question being asked, a flash, what is
+    /// under way, else the keys for the row — with `? shortcuts` at the end
+    /// while `?` would show them and there is room.
+    fn footer(&self, width: usize) -> String {
         let title_of = |id: &str| self.run_by_id(id).map(|r| r.title.clone()).unwrap_or_default();
         match &self.mode {
             Mode::Stop(id) => return format!("stop {}? y / any key", title_of(id)),
@@ -4640,6 +4839,15 @@ impl App {
         if let Some(r) = &self.removing {
             return format!("removing {}… · stopping its runs", r.name);
         }
+        let hints = self.hints();
+        if self.shortcuts || !self.line.is_empty() || self.shortcuts_place().is_none() {
+            return hints;
+        }
+        shortcuts::with_hint(hints, width)
+    }
+
+    /// The keys for what the cursor is on, in the footer.
+    fn hints(&self) -> String {
         // The tile's own footer, but only while the cursor is on the run it
         // shows — browse away and the selected row's actions take over, since
         // that is what `enter` would act on.
@@ -4830,9 +5038,20 @@ fn vi_step(k: KeyEvent, line_empty: bool) -> KeyEvent {
     }
 }
 
+/// Shift-↑ and shift-↓ move the row under the cursor one place up (`true`)
+/// or down within its project. A terminal that does not report shift on the
+/// arrows sends them plain, and they just move the cursor.
+fn reorder_step(k: &KeyEvent) -> Option<bool> {
+    match (k.code, k.modifiers) {
+        (KeyCode::Up, KeyModifiers::SHIFT) => Some(true),
+        (KeyCode::Down, KeyModifiers::SHIFT) => Some(false),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{ListHit, cand_window, group_count, hit_row, mark_seen, spawn_size, vi_step, viewport};
+    use super::{ListHit, cand_window, group_count, hit_row, mark_seen, reorder_step, spawn_size, vi_step, viewport};
     use crate::tui::rows::Chip;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::layout::Rect;
@@ -4859,6 +5078,7 @@ mod tests {
             checkouts: vec![],
             lost: vec![],
             hidden: Vec::new(),
+            order: Vec::new(),
         };
         mark_seen(&mut d, &["a".to_string()]);
         assert_eq!(d.items.iter().map(|i| i.unseen).collect::<Vec<_>>(), [false, true]);
@@ -4881,6 +5101,22 @@ mod tests {
         let j = KeyEvent::from(KeyCode::Char('j'));
         assert_eq!(vi_step(j, true), j);
         assert_eq!(vi_step(ctrl('x'), true), ctrl('x'));
+    }
+
+    #[test]
+    fn shift_and_an_arrow_moves_the_row_and_the_arrow_alone_the_cursor() {
+        let shift = |c| KeyEvent::new(c, KeyModifiers::SHIFT);
+        assert_eq!(reorder_step(&shift(KeyCode::Up)), Some(true));
+        assert_eq!(reorder_step(&shift(KeyCode::Down)), Some(false));
+        // Plain arrows, other chords on them, and other shifted keys are not it.
+        assert_eq!(reorder_step(&KeyEvent::from(KeyCode::Up)), None);
+        assert_eq!(reorder_step(&KeyEvent::from(KeyCode::Down)), None);
+        assert_eq!(
+            reorder_step(&KeyEvent::new(KeyCode::Up, KeyModifiers::SHIFT | KeyModifiers::CONTROL)),
+            None
+        );
+        assert_eq!(reorder_step(&shift(KeyCode::Left)), None);
+        assert_eq!(reorder_step(&shift(KeyCode::Char('K'))), None);
     }
 
     #[test]
