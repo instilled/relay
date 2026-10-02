@@ -13,6 +13,7 @@ pub mod graph;
 pub mod hidden;
 pub mod meta;
 pub mod migrate;
+pub mod order;
 pub mod presence;
 pub mod reactions;
 pub mod runs;

@@ -164,6 +164,7 @@ mod tests {
             checkouts: Vec::new(),
             lost: Vec::new(),
             hidden: Vec::new(),
+            order: Vec::new(),
             items: vec![
                 item(
                     "done1",

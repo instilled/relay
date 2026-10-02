@@ -18,6 +18,7 @@ pub enum Cmd {
     Rename,
     Pin,
     Hide,
+    Sort,
     Pane,
     Graph,
     Events,
@@ -123,6 +124,13 @@ pub const ALL: &[Command] = &[
         cmd: Cmd::Hide,
     },
     Command {
+        name: "sort",
+        args: "",
+        words: &[],
+        what: "let a project sort itself again, after ⇧↑↓ put its rows in your order",
+        cmd: Cmd::Sort,
+    },
+    Command {
         name: "pane",
         args: "[full]",
         words: &[&["full"]],
@@ -224,7 +232,7 @@ pub const ALL: &[Command] = &[
         name: "help",
         args: "",
         words: &[],
-        what: "list these commands",
+        what: "list these commands, and the keys for where you are (? does that too)",
         cmd: Cmd::Help,
     },
     Command {
@@ -445,6 +453,7 @@ mod tests {
         assert_eq!(parse("/rel").unwrap().0.cmd, Cmd::Reload);
         assert_eq!(parse("/ev").unwrap().0.cmd, Cmd::Events);
         assert_eq!(parse("/hi").unwrap().0.cmd, Cmd::Hide);
+        assert_eq!(parse("/so").unwrap().0.cmd, Cmd::Sort);
         assert_eq!(parse("/he").unwrap().0.cmd, Cmd::Help);
         let (c, rest) = parse("/fi this").unwrap();
         assert_eq!(c.cmd, Cmd::Filter);

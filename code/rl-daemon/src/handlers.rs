@@ -3,7 +3,7 @@
 use crate::router::Router;
 use crate::server::Daemon;
 use rl_core::time;
-use rl_ledger::{events, graph, hidden, presence, runs};
+use rl_ledger::{events, graph, hidden, order, presence, runs};
 use rl_proto::PROTOCOL_VERSION;
 use rl_proto::methods::*;
 use rl_proto::rpc::RpcError;
@@ -423,6 +423,27 @@ pub fn register(r: &mut Router<Daemon>) {
             .map_err(RpcError::internal)
     });
 
+    r.register::<DigestOrder, _, _>(|d, p: Order| async move {
+        if !Order::valid_group(&p.group) {
+            return Err(RpcError::invalid_params(format!(
+                "{:?}: a project is g:<folder>, or g:everywhere",
+                p.group
+            )));
+        }
+        if let Some(bad) = p.rows.iter().find(|k| !Order::valid_row(k)) {
+            return Err(RpcError::invalid_params(format!(
+                "{bad:?}: a run is r:<id>, a job j:<kind>:<name>@<group>"
+            )));
+        }
+        d.ledger
+            .call(move |c| {
+                order::set(c, &p.group, &p.rows)?;
+                order::list(c)
+            })
+            .await
+            .map_err(RpcError::internal)
+    });
+
     r.register::<GraphGet, _, _>(|d, GraphParams { since }| async move {
         let since = since.unwrap_or_else(|| time::now() - jiff::SignedDuration::from_hours(24 * 7));
         let mut rules: Vec<Rule> = d
@@ -512,9 +533,9 @@ pub fn register(r: &mut Router<Daemon>) {
             .list(DecisionFilter::default())
             .await
             .map_err(RpcError::internal)?;
-        let (lost, hidden) = d
+        let (lost, hidden, order) = d
             .ledger
-            .call(|c| Ok((runs::lost(c)?, hidden::list(c)?)))
+            .call(|c| Ok((runs::lost(c)?, hidden::list(c)?, order::list(c)?)))
             .await
             .map_err(RpcError::internal)?;
         Ok(Digest {
@@ -524,6 +545,7 @@ pub fn register(r: &mut Router<Daemon>) {
             checkouts,
             lost,
             hidden,
+            order,
         })
     });
 

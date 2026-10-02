@@ -506,6 +506,43 @@ impl Hidden {
     }
 }
 
+/// Keeps a project's rows in the order given — moved by hand on the panel
+/// (shift-↑/↓) — or, with no rows, lets it sort itself again (`/sort`). The
+/// project is its header's key (`g:<folder>`, `g:everywhere`); the rows are
+/// run (`r:<id>`) and job (`j:<kind>:<name>@<group>`) keys, first on top.
+/// The order given replaces the one kept, so what has left the list drops
+/// out. Answers with every project's order.
+pub struct DigestOrder;
+impl Method for DigestOrder {
+    const NAME: &'static str = "digest.order";
+    type Params = Order;
+    type Result = Vec<Order>;
+}
+
+/// A project's rows in the order you put them, first on top.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Order {
+    /// The project's header key: `g:<folder>`, or `g:everywhere`.
+    pub group: String,
+    /// Run and job keys, `r:<id>` and `j:<kind>:<name>@<group>`.
+    #[serde(default)]
+    pub rows: Vec<String>,
+}
+
+impl Order {
+    /// Whether `key` names a project an order can be kept for.
+    pub fn valid_group(key: &str) -> bool {
+        key.strip_prefix("g:").is_some_and(|k| !k.is_empty())
+    }
+
+    /// Whether `key` names a row that can be put in order: a run or a job.
+    pub fn valid_row(key: &str) -> bool {
+        key.strip_prefix("r:")
+            .or_else(|| key.strip_prefix("j:"))
+            .is_some_and(|k| !k.is_empty())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Digest {
     pub since: Timestamp,
@@ -523,6 +560,9 @@ pub struct Digest {
     /// The projects and jobs taken off the list (`digest.hide`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hidden: Vec<Hidden>,
+    /// The projects whose rows you put in order (`digest.order`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub order: Vec<Order>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

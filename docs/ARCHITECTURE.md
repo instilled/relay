@@ -292,7 +292,20 @@ is one list, the width of the screen, built from `digest.get` (`tui/rows.rs`): t
 waiting on you first, from every project and each naming its own (`rlux › deploy tonight?`),
 oldest first, so what needs you never hides under a project's name; then pinned runs; then
 grouped by the folder they belong to, the folders in order of name so each keeps its place, and
-inside one runs by attention; and named — a workspace by the
+inside one runs by attention — until you put a project in your own order: shift-`↑`/`↓` on a run
+or a job moves it one place up or down inside its project (holding goes on moving it, the cursor
+stays on it), and from then on that project keeps your order rather than sorting itself. What is
+new there enters at its top; what needs you — asking, blocked or failed — floats to its top
+whatever the order, and drops back to where you put it once dealt with. A row never moves out of
+its project, past what floats, or into the questions or the pinned runs; on a header, a question,
+in the graph or `/events` the keys say why and do nothing. `digest.order` keeps a project's whole
+order — its header's key (`g:<folder>`, `g:everywhere`) and its rows' (`r:<id>`, `j:…`), in the
+ledger's `row_order` table — and the digest carries it; each move sends the whole of it again,
+built from the list with no search or lens narrowing it, so what a search hides keeps its place
+and what has left the list drops out. `/sort` on a project (its header, or any row in it) lets go
+of the order: it sorts itself again. Shift and an arrow arrive as `CSI 1;2A`/`B` in iTerm2,
+Terminal.app and tmux 3.2 or later; a terminal that does not report shift sends the plain arrow,
+which just moves the cursor. And named — a workspace by the
 name it was registered under, a cause as "schedule nightly" or "rule tests-failed", never an id.
 A row is an icon for what it is — `✦` an agent, `❯` a shell (in the prompt's green), `▸` a
 command, `↻` a job, `?` a question (amber) — one quiet glyph, one column wide in every font, so
@@ -523,16 +536,25 @@ spot), and typing anything clears the highlight so `enter` submits the line as b
 
 Because letters go into the line, everything that is not typing is a `/` command
 (`tui/palette.rs`), offered as you type it: `/stop`, `/archive [seen]`, `/mark`, `/join`,
-`/shell`, `/rename`, `/pin`, `/hide`, `/pane [full]`, `/graph`, `/events`, `/reload [rules|shell]`, `/approve` and `/pause`,
+`/shell`, `/rename`, `/pin`, `/hide`, `/sort`, `/pane [full]`, `/graph`, `/events`, `/reload [rules|shell]`, `/approve` and `/pause`,
 `/new`, `/edit [schedules|reactions [global]]`, `/summarise`, `/ask`, `/filter`, `/lens`, `/prune`,
 `/up`, `/help`, `/quit`. One name per act: a variant of an act is an argument to it rather than a
 command of its own, and no word means two things — `done` is only ever what `/mark` says. `enter` on an empty line
 is the row under the cursor instead — a job opens, a question comes
 out of the list to be answered by number, a run's terminal opens. Arrows, `home`/`end` and `esc`
-belong to the list, and so do `^j`/`^k` while nothing is typed (down and up, as vi's `j` and `k`); `esc` with something typed clears the line first, and `ctrl-c` leaves.
+belong to the list, and so do `^j`/`^k` while nothing is typed (down and up, as vi's `j` and `k`), and shift-`↑`/`↓`, which move the row itself inside its project (`/sort` undoes it); `esc` with something typed clears the line first, and `ctrl-c` leaves.
 The few keys that are not the list's or the line's each stand for a command, and the command
 list shows them beside it: `^x` stops, archives or removes, `^r` renames, `^t` pins, `^g` opens the graph, `^o` shows or hides the pane,
 `^f` searches.
+`?` on an empty line shows the keys for where you are in a quiet line under it (`tui/shortcuts.rs`)
+— the list's, the `hidden` lens's, a question's and its choices', a watched terminal's, the
+graph's, `/events`' — one table per place, a command's key read from the same table the command
+list shows; `/help` shows it too, beside the commands in the footer. It wraps between keys onto
+more rows on a narrow terminal rather than cut one off, and the foot of the panel grows to hold
+it. `?` again or `esc` puts it away — `esc` does that first, before it closes the pane, clears a
+filter or leaves a view — and so does typing, so it never takes room while you work. With
+anything on the line `?` is just a character, and so it is in a search; the footer ends in a
+dim `? shortcuts` where it has room and `?` would work.
 A shell is a command like any other — `/shell` — and has no key of its own. The line keeps `^a`, `^e`, `^u`, `^k` and `^w` for
 editing, as a shell does, so none of those is taken for anything else once something is typed —
 `^k` moving up on an empty line cuts nothing, and `^j` there adds no line. It moves and cuts by
@@ -639,7 +661,7 @@ stateDiagram-v2
 ```
 
 `needs_input`, `blocked` and `failed` are the attention states: they sort to the top of the
-panel's list and are what `rl since` leads with. Confidence rides along in the UI, always visible.
+panel's list — of a project in your own order too — and are what `rl since` leads with. Confidence rides along in the UI, always visible.
 
 Grouping is derived, never a table: `group_key = ref → branch → workspace`, materialised onto
 each event row at write time so the digest groups without a join; it is what a reaction's
@@ -1034,7 +1056,7 @@ are deliberately not a key yet.
 ~/.relay/                     ($RELAY_HOME overrides; tests and scripts/live point it elsewhere)
   ledger.db                   SQLite: runs, events, sessions, session_io, presence, schedules,
                               workspaces, decisions, summaries, hidden (projects and jobs off
-                              the panel's list)
+                              the panel's list), row_order (projects put in your order)
   schedules.yaml              user-level schedules; the file is the interface, the ledger keeps
                               versions (by sha256), pause state, last/next firing
   config.yaml                 your defaults (`agents:`, `assistants:`, `retention:`, `workspaces:`); absent means defaults,
