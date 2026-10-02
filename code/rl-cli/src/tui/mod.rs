@@ -32,6 +32,7 @@ mod rows;
 mod rules;
 mod screen;
 mod setup;
+mod shortcuts;
 mod term;
 mod theme;
 
@@ -311,6 +312,9 @@ struct App {
     /// A destructive key waits for its own second press: `ctrl-x` to remove,
     /// `ctrl-c` to quit. Any other key clears it, so nothing goes on one slip.
     arm: Option<Arm>,
+    /// `?` on an empty line: the keys for where you are, under the line,
+    /// until `?` again, `esc`, or typing.
+    shortcuts: bool,
     quit: bool,
 }
 
@@ -785,6 +789,7 @@ pub async fn run(home: &Home) -> Result<()> {
         mode: Mode::Normal,
         flash: None,
         arm: None,
+        shortcuts: false,
         quit: false,
     };
     app.refresh().await;
@@ -971,7 +976,7 @@ impl App {
 
     /// The area the terminal draws into.
     fn pane_size(&self, size: Rect) -> (u16, u16) {
-        let a = areas(size, self.wide, true, LIST_SHARE_TERM, 0, 0, self.line_h());
+        let a = areas(size, self.wide, true, LIST_SHARE_TERM, 0, 0, self.foot_h(size.width));
         let r = a.pane.unwrap_or(size);
         // Less the row that names the run.
         (r.width.max(1), r.height.saturating_sub(1).max(1))
@@ -983,6 +988,63 @@ impl App {
             return 1;
         }
         (self.line.rows() as u16).clamp(1, LINE_MAX)
+    }
+
+    /// The live line and the shortcuts under it, when they are up: the rows
+    /// the foot of the panel takes at this width.
+    fn foot_h(&self, width: u16) -> u16 {
+        self.line_h() + self.shortcut_lines(width).len() as u16
+    }
+
+    /// Where the keyboard is, for the shortcuts line; none where it has no
+    /// place — a form, a `y`-or-not question, a search, which keep their keys
+    /// in the footer.
+    fn shortcuts_place(&self) -> Option<shortcuts::Place> {
+        match &self.mode {
+            Mode::Normal => {}
+            Mode::Answer(id) => {
+                let q = self.digest.decisions.iter().find(|d| &d.id == id)?;
+                return Some(shortcuts::Place::Answer {
+                    n: q.options.len().min(pane::MAX_KEYS),
+                    multi: q.multi,
+                });
+            }
+            _ => return None,
+        }
+        if self.search.is_some() {
+            return None;
+        }
+        // The same test as the footer's: the tile's keys while the cursor is
+        // on the run it shows.
+        if self.pane == Pane::Term
+            && let Some(t) = &self.term
+            && (self.wide || self.selected_run().is_some_and(|i| i.run.id == t.id))
+        {
+            return Some(shortcuts::Place::Term {
+                wide: self.wide,
+                live: !t.lost && t.ended.is_none(),
+            });
+        }
+        Some(match self.view {
+            View::Graph => shortcuts::Place::Graph,
+            View::Events => shortcuts::Place::Events,
+            View::Work if self.selected_question().is_some() => shortcuts::Place::Question,
+            View::Work if self.lens == rows::Lens::Hidden => shortcuts::Place::Hidden,
+            View::Work => shortcuts::Place::List,
+        })
+    }
+
+    /// The shortcuts line as drawn at this width, wrapped between keys; none
+    /// while it is put away.
+    fn shortcut_lines(&self, width: u16) -> Vec<Line<'static>> {
+        if !self.shortcuts {
+            return vec![];
+        }
+        let Some(at) = self.shortcuts_place() else {
+            return vec![];
+        };
+        let room = width.saturating_sub(TEXT_INDENT).max(1) as usize;
+        shortcuts::lines(&shortcuts::keys(at), room)
     }
 
     /// Move the lens along the strip; the selection settles onto whatever the
@@ -1451,6 +1513,7 @@ impl App {
         if matches!(self.mode, Mode::Normal) {
             self.line.insert(&s);
             self.completing = None;
+            self.shortcuts = shortcuts::still_open(self.shortcuts, self.line.is_empty());
             return Ok(());
         }
         for c in s.chars().filter(|c| !c.is_control()) {
@@ -2990,6 +3053,11 @@ impl App {
         ) {
             self.arm = None;
         }
+        // A form or a `y`-or-not question has its keys in the footer; the
+        // shortcuts go, rather than come back when it is done.
+        if !matches!(self.mode, Mode::Normal | Mode::Answer(_)) {
+            self.shortcuts = false;
+        }
         match std::mem::replace(&mut self.mode, Mode::Normal) {
             Mode::Stop(id) => {
                 if k.code == KeyCode::Char('y') {
@@ -3042,6 +3110,12 @@ impl App {
                 };
                 let all = pane::choices(&q, q.run.as_deref().and_then(|r| self.run_by_id(r)));
                 let last = all.len().saturating_sub(1);
+                // Nothing is typed here, so `?` is the shortcuts', and `esc`
+                // puts them away before it puts the question back.
+                if self.shortcut_key(&k, true) {
+                    self.mode = Mode::Answer(id);
+                    return Ok(());
+                }
                 match k.code {
                     KeyCode::Esc => self.picked.clear(),
                     KeyCode::Up => {
@@ -3091,6 +3165,9 @@ impl App {
         if self.search.is_some() {
             return self.key_search(k).await;
         }
+        if self.shortcut_key(&k, self.line.is_empty()) {
+            return Ok(());
+        }
         let k = vi_step(k, self.line.is_empty());
         // Watching, the line still has the keyboard, so you can type the next
         // thing without leaving the run you are on; taking the keyboard is the
@@ -3129,6 +3206,7 @@ impl App {
             line::Act::Typing => {
                 self.completing = None;
                 self.pick = None;
+                self.shortcuts = shortcuts::still_open(self.shortcuts, self.line.is_empty());
                 Ok(())
             }
             // With a candidate highlighted, tab and enter take it; otherwise
@@ -3181,8 +3259,22 @@ impl App {
         }
     }
 
+    /// `?` and `esc`, for the shortcuts line, before anything else has them:
+    /// whether they were its.
+    fn shortcut_key(&mut self, k: &KeyEvent, line_empty: bool) -> bool {
+        match shortcuts::take(self.shortcuts, line_empty, k) {
+            shortcuts::Take::Toggle => self.shortcuts = !self.shortcuts,
+            shortcuts::Take::Close => self.shortcuts = false,
+            shortcuts::Take::Pass => return false,
+        }
+        true
+    }
+
     /// `^f` or `/filter`: search, starting from the filter already in force.
     fn open_search(&mut self) {
+        // What is typed now narrows the list: the shortcuts would only be in
+        // the way.
+        self.shortcuts = false;
         let mut l = line::Line::default();
         l.set_with_cursor(self.filter.clone(), self.filter.len());
         self.search = Some(Search {
@@ -3726,7 +3818,10 @@ impl App {
             palette::Cmd::Up => self.add_dir(&arg).await?,
             palette::Cmd::Help => {
                 let names: Vec<&str> = palette::ALL.iter().map(|c| c.name).collect();
-                self.say(format!("/{} · ⇧↑↓ moves a row in its project", names.join(" · /")));
+                self.say(format!("/{}", names.join(" · /")));
+                // The commands in the footer, the keys under the line: what
+                // `?` shows.
+                self.shortcuts = true;
             }
             palette::Cmd::Stop => {
                 if let Some(i) = self.selected_run()
@@ -3946,6 +4041,8 @@ impl App {
         } else {
             LIST_SHARE
         };
+        // `?`: the keys for here, under the line, as many rows as they wrap to.
+        let keys = self.shortcut_lines(f.area().width);
         let a = areas(
             f.area(),
             self.wide,
@@ -3953,7 +4050,7 @@ impl App {
             share,
             form_h,
             cands_h,
-            self.line_h(),
+            self.line_h() + keys.len() as u16,
         );
         let rows = self.rows();
         // News is counted the way it is shown: a job with unseen runs is one.
@@ -4112,15 +4209,25 @@ impl App {
             };
             f.render_widget(Paragraph::new(lines), area);
         }
+        let [line_area, keys_area] =
+            Layout::vertical([Constraint::Fill(1), Constraint::Length(keys.len() as u16)]).areas(a.line);
         if matches!(self.mode, Mode::Normal) {
-            f.render_widget(Paragraph::new(self.line_lines(a.line.width)), a.line);
+            f.render_widget(Paragraph::new(self.line_lines(line_area.width)), line_area);
+        }
+        if !keys.is_empty() {
+            let keys_area = Rect {
+                x: keys_area.x + TEXT_INDENT,
+                width: keys_area.width.saturating_sub(TEXT_INDENT),
+                ..keys_area
+            };
+            f.render_widget(Paragraph::new(keys), keys_area);
         }
         let footer = Rect {
             x: a.footer.x + TEXT_INDENT,
             width: a.footer.width.saturating_sub(TEXT_INDENT),
             ..a.footer
         };
-        f.render_widget(Paragraph::new(self.footer()).dim(), footer);
+        f.render_widget(Paragraph::new(self.footer(footer.width as usize)).dim(), footer);
     }
 
     /// The lens, at the right of the header: the slices of the list, the one
@@ -4665,7 +4772,10 @@ impl App {
         f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
     }
 
-    fn footer(&self) -> String {
+    /// The foot of the panel: a question being asked, a flash, what is
+    /// under way, else the keys for the row — with `? shortcuts` at the end
+    /// while `?` would show them and there is room.
+    fn footer(&self, width: usize) -> String {
         let title_of = |id: &str| self.run_by_id(id).map(|r| r.title.clone()).unwrap_or_default();
         match &self.mode {
             Mode::Stop(id) => return format!("stop {}? y / any key", title_of(id)),
@@ -4729,6 +4839,15 @@ impl App {
         if let Some(r) = &self.removing {
             return format!("removing {}… · stopping its runs", r.name);
         }
+        let hints = self.hints();
+        if self.shortcuts || !self.line.is_empty() || self.shortcuts_place().is_none() {
+            return hints;
+        }
+        shortcuts::with_hint(hints, width)
+    }
+
+    /// The keys for what the cursor is on, in the footer.
+    fn hints(&self) -> String {
         // The tile's own footer, but only while the cursor is on the run it
         // shows — browse away and the selected row's actions take over, since
         // that is what `enter` would act on.

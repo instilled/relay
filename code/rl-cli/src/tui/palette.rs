@@ -232,7 +232,7 @@ pub const ALL: &[Command] = &[
         name: "help",
         args: "",
         words: &[],
-        what: "list these commands",
+        what: "list these commands, and the keys for where you are (? does that too)",
         cmd: Cmd::Help,
     },
     Command {
