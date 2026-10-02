@@ -8,7 +8,7 @@ use rl_proto::PROTOCOL_VERSION;
 use rl_proto::methods::*;
 use rl_proto::rpc::RpcError;
 use rl_proto::rule::{Rule, RuleKind};
-use tracing::info;
+use tracing::{info, warn};
 
 pub fn register(r: &mut Router<Daemon>) {
     r.register::<DaemonPing, _, _>(|d, ()| async move {
@@ -329,7 +329,18 @@ pub fn register(r: &mut Router<Daemon>) {
                 .await
                 .map_err(internal)?;
         }
-        get_run(&d, &p.id).await
+        let run = get_run(&d, &p.id).await?;
+        // A turn over, or a wait on you: Claude may have written its recap.
+        // Read after the reply, which the hook is waiting on.
+        if matches!(p.event.as_str(), "Stop" | "Notification") {
+            let (d, run) = (d.clone(), run.clone());
+            tokio::spawn(async move {
+                if let Err(e) = crate::recap::pick_up(&d, &run).await {
+                    warn!(run = %run.id, error = %format!("{e:#}"), "recap not picked up");
+                }
+            });
+        }
+        Ok(run)
     });
     r.register::<RunMark, _, _>(|d, RunMarkParams { id, mark, note }| async move {
         let detail = note.or_else(|| Some(format!("marked {mark}")));
@@ -486,7 +497,7 @@ pub fn register(r: &mut Router<Daemon>) {
 
     r.register::<DigestGet, _, _>(|d, DigestParams { since }| async move {
         let since = since.unwrap_or(jiff::Timestamp::UNIX_EPOCH);
-        let (found, registered) = d
+        let (found, mut recaps, registered) = d
             .ledger
             .call(move |c| {
                 let found = runs::list_for_digest(c, since)?
@@ -497,7 +508,10 @@ pub fn register(r: &mut Router<Daemon>) {
                         Ok((r, e, emitted))
                     })
                     .collect::<anyhow::Result<Vec<_>>>()?;
-                Ok((found, rl_ledger::workspaces::list(c)?))
+                // Every row's recap in one query, never a session file read.
+                let ids: Vec<String> = found.iter().map(|(r, _, _)| r.id.clone()).collect();
+                let recaps = rl_ledger::summaries::lines(c, &ids)?;
+                Ok((found, recaps, rl_ledger::workspaces::list(c)?))
             })
             .await
             .map_err(RpcError::internal)?;
@@ -525,7 +539,8 @@ pub fn register(r: &mut Router<Daemon>) {
             .map(|(run, e, emitted)| {
                 let joined_by = joiners.get(&run.id).cloned();
                 let cwd = cwds.remove(&run.id);
-                crate::digest::item(run, e, joined_by, emitted, cwd)
+                let recap = recaps.remove(&run.id);
+                crate::digest::item(run, e, joined_by, emitted, cwd, recap)
             })
             .collect();
         let decisions = d

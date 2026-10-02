@@ -179,6 +179,7 @@ pub async fn serve_with(home: Home, shutdown: CancellationToken, opts: ServeOpti
         started_at: Timestamp::now(),
         shutdown: shutdown.clone(),
     });
+    tokio::spawn(crate::recap::sweep(daemon.clone()));
     let mut router: Router<Daemon> = Router::new();
     crate::handlers::register(&mut router);
     let router = Arc::new(router);

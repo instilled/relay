@@ -34,7 +34,7 @@ impl Agent {
 
 /// How early a session file may say it started and still be this run's: the
 /// agent starts a moment after its holder, but clocks and rounding differ.
-const SLACK: SignedDuration = SignedDuration::from_secs(10);
+pub const SLACK: SignedDuration = SignedDuration::from_secs(10);
 
 /// Claude's folder for a working directory: the path with `/` and `.` as `-`.
 pub fn claude_dir(home: &Path, cwd: &Path) -> PathBuf {
@@ -169,10 +169,62 @@ pub fn claude_recap(text: &str, from: Option<Timestamp>) -> Option<Recap> {
                 && v.get("subtype").and_then(Value::as_str) == Some("away_summary")
         })
         .filter_map(|(at, v)| {
-            let t = v.get("content")?.as_str()?.trim().to_string();
+            let t = without_hint(v.get("content")?.as_str()?.trim()).to_string();
             (!t.is_empty()).then_some(Recap { text: t, at })
         })
         .last()
+}
+
+/// Claude ends its recap with a hint for its own screen — `(disable recaps in
+/// /config)` — that means nothing on Relay's.
+fn without_hint(text: &str) -> &str {
+    let t = text.trim_end();
+    if let Some(body) = t.strip_suffix(')')
+        && let Some(open) = body.rfind('(')
+        && body[open + 1..]
+            .trim_start()
+            .to_ascii_lowercase()
+            .starts_with("disable recaps")
+    {
+        return t[..open].trim_end();
+    }
+    t
+}
+
+/// Codex's last turn that said something, at or after `from`, as its recap.
+pub fn codex_recap(text: &str, from: Option<Timestamp>) -> Option<Recap> {
+    codex_turns(text, from)
+        .into_iter()
+        .rfind(|t| !t.message.is_empty())
+        .map(|t| Recap {
+            text: t.message,
+            at: t.at,
+        })
+}
+
+/// The whole lines of a session file past `offset` that mention `word`, and
+/// where the next read starts: after the last whole line, so one the agent is
+/// still writing is read next time. A file shorter than `offset` has been
+/// written anew, and is read from its start. Line by line, so a transcript of
+/// many MB is never held at once.
+pub fn read_on(p: &Path, offset: u64, word: &str) -> std::io::Result<(String, u64)> {
+    use std::io::{BufRead, Seek, SeekFrom};
+    let mut f = std::fs::File::open(p)?;
+    let mut at = if f.metadata()?.len() < offset { 0 } else { offset };
+    f.seek(SeekFrom::Start(at))?;
+    let mut r = std::io::BufReader::new(f);
+    let (mut out, mut line) = (String::new(), Vec::new());
+    loop {
+        line.clear();
+        let n = r.read_until(b'\n', &mut line)?;
+        if n == 0 || line.last() != Some(&b'\n') {
+            return Ok((out, at));
+        }
+        at += n as u64;
+        if line.windows(word.len()).any(|w| w == word.as_bytes()) {
+            out.push_str(&String::from_utf8_lossy(&line));
+        }
+    }
 }
 
 /// What was said in a Claude session at or after `from`, a line a message:
@@ -319,6 +371,93 @@ not json
             claude_recap(CLAUDE, Some(at("2026-09-17T10:10:00Z"))),
             None,
             "a recap from before the stretch does not count"
+        );
+    }
+
+    #[test]
+    fn claudes_hint_for_its_own_screen_is_left_off() {
+        let line = |content: &str| {
+            format!(
+                "{{\"type\":\"system\",\"subtype\":\"away_summary\",\"timestamp\":\"2026-09-17T10:05:00Z\",\"content\":{}}}\n",
+                serde_json::to_string(content).unwrap()
+            )
+        };
+        let recap = |content: &str| claude_recap(&line(content), None).map(|r| r.text);
+        let said = "Goal: a shopping list. Next: add your credentials, then run it.";
+        for raw in [
+            format!("{said} (disable recaps in /config)"),
+            format!("{said}  ( disable recaps in /config )  \n"),
+            format!("{said}\n(Disable recaps in /config)"),
+        ] {
+            assert_eq!(recap(&raw).as_deref(), Some(said), "{raw:?}");
+        }
+        // Only that hint, and only at the end.
+        let kept = "Ran the tests (all green).";
+        assert_eq!(recap(kept).as_deref(), Some(kept));
+        let inside = "(disable recaps in /config) was shown; nothing else.";
+        assert_eq!(recap(inside).as_deref(), Some(inside));
+        assert_eq!(recap("(disable recaps in /config)"), None, "nothing but the hint");
+    }
+
+    #[test]
+    fn a_session_file_is_read_on_from_where_the_last_read_stopped() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("s.jsonl");
+        let first =
+            r#"{"type":"system","subtype":"away_summary","timestamp":"2026-09-17T10:05:00Z","content":"First."}"#;
+        let tool = r#"{"type":"user","timestamp":"2026-09-17T10:06:00Z","message":{"content":"x"}}"#;
+        let second =
+            r#"{"type":"system","subtype":"away_summary","timestamp":"2026-09-17T10:09:00Z","content":"Second."}"#;
+        std::fs::write(&p, format!("{first}\n{tool}\n")).unwrap();
+        let (got, at) = read_on(&p, 0, "away_summary").unwrap();
+        assert_eq!(got, format!("{first}\n"), "only the lines that mention it");
+        assert_eq!(at, std::fs::metadata(&p).unwrap().len());
+        assert_eq!(claude_recap(&got, None).unwrap().text, "First.");
+
+        // Nothing new: nothing read.
+        assert_eq!(read_on(&p, at, "away_summary").unwrap(), (String::new(), at));
+
+        // A line still being written waits for its end.
+        let mut f = std::fs::OpenOptions::new().append(true).open(&p).unwrap();
+        std::io::Write::write_all(&mut f, &second.as_bytes()[..20]).unwrap();
+        assert_eq!(read_on(&p, at, "away_summary").unwrap(), (String::new(), at));
+        std::io::Write::write_all(&mut f, format!("{}\n", &second[20..]).as_bytes()).unwrap();
+        let (got, next) = read_on(&p, at, "away_summary").unwrap();
+        assert_eq!(claude_recap(&got, None).unwrap().text, "Second.", "only the new tail");
+        assert!(!got.contains("First."));
+        assert_eq!(next, std::fs::metadata(&p).unwrap().len());
+
+        // Written anew and shorter: read from its start.
+        std::fs::write(&p, format!("{first}\n")).unwrap();
+        let (got, _) = read_on(&p, next, "away_summary").unwrap();
+        assert_eq!(claude_recap(&got, None).unwrap().text, "First.");
+    }
+
+    #[test]
+    fn codex_recap_is_its_last_turn_read_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("rollout.jsonl");
+        let (head, tail) = CODEX.split_at(CODEX.find(r#"{"timestamp":"2026-09-17T09:10:00Z""#).unwrap());
+        std::fs::write(&p, head).unwrap();
+        let (got, upto) = read_on(&p, 0, "task_complete").unwrap();
+        let r = codex_recap(&got, None).unwrap();
+        assert_eq!((r.text.as_str(), r.at), ("Tests pass.", at("2026-09-17T09:02:00Z")));
+        let mut f = std::fs::OpenOptions::new().append(true).open(&p).unwrap();
+        std::io::Write::write_all(&mut f, tail.as_bytes()).unwrap();
+        let (got, _) = read_on(&p, upto, "task_complete").unwrap();
+        let r = codex_recap(&got, None).unwrap();
+        assert_eq!(r.text, "Fixed the parser.\nDetails follow.");
+        assert_eq!(r.at, at("2026-09-17T09:13:00Z"));
+        assert_eq!(
+            codex_recap(CODEX, Some(at("2026-09-17T10:00:00Z"))),
+            None,
+            "a turn from before the run is not its own"
+        );
+        let silent = r#"{"timestamp":"2026-09-17T09:20:00Z","type":"event_msg","payload":{"type":"task_complete"}}"#;
+        assert_eq!(
+            codex_recap(&format!("{CODEX}{silent}\n"), None).unwrap().text,
+            "Fixed the parser.\nDetails follow.",
+            "a turn that said nothing is passed over"
         );
     }
 

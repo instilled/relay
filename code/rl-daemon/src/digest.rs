@@ -12,10 +12,14 @@ pub fn item(
     joined_by: Option<String>,
     emitted: Vec<Signal>,
     cwd: Option<std::path::PathBuf>,
+    recap: Option<String>,
 ) -> DigestItem {
     let at = last.as_ref().map(|e| e.at).unwrap_or(run.state_at);
     let summary = summarise(&run, last.as_ref(), &emitted);
     let unseen = unseen(&run, at);
+    // Only Claude's and Codex's rows say their recap; what any other run was
+    // asked about stays in the pane.
+    let recap = recap.filter(|_| crate::transcript::Agent::of(&run).is_some());
     DigestItem {
         summary,
         at,
@@ -23,6 +27,7 @@ pub fn item(
         joined_by,
         emitted,
         cwd,
+        recap,
         run,
     }
 }
