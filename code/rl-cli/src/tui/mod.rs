@@ -834,7 +834,9 @@ fn kitty_supported() -> bool {
 /// back as a bare `\r`, which has nowhere to carry a modifier, so shift-enter
 /// arrives indistinguishable from enter and sends instead of opening a line.
 /// Reporting every key as an escape code is what gives it somewhere to put the
-/// modifier (`CSI 13;2u`), which is what the line is watching for.
+/// modifier (`CSI 13;2u`), which is what the line is watching for. It also
+/// sends a shifted key as the key plus shift — `?` as shift and `/` — so the
+/// terminal is asked, too, to say what shift made of it (see `input::typed`).
 fn enter_screen() -> ratatui::DefaultTerminal {
     // And the input is whatever they left too: answers to questions a run put
     // to the terminal just before letting go, which were never its keys and
@@ -864,6 +866,7 @@ fn enter_screen() -> ratatui::DefaultTerminal {
             PushKeyboardEnhancementFlags(
                 KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
                     | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
+                    | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS
             )
         );
     }
@@ -1057,7 +1060,7 @@ impl App {
             tokio::select! {
                 ev = input.next() => match ev {
                     Some(Ok(Event::Key(k))) if k.kind != KeyEventKind::Release => {
-                        self.key(k, area).await?;
+                        self.key(input::typed(k), area).await?;
                         if let Some((file, line)) = self.editor.take() {
                             // The editor gets the terminal; our reader lets go of stdin first.
                             drop(input);
