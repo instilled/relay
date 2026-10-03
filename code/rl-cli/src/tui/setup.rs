@@ -661,7 +661,7 @@ pub async fn run(
         }
         tokio::select! {
             ev = input.next() => match ev {
-                Some(Ok(Event::Key(k))) if k.kind != KeyEventKind::Release => guide.key(k),
+                Some(Ok(Event::Key(k))) if k.kind != KeyEventKind::Release => guide.key(super::input::typed(k)),
                 Some(Ok(_)) => {}
                 Some(Err(e)) => return Err(e.into()),
                 None => return Ok(Outcome::Later),
