@@ -248,7 +248,7 @@ async fn where_narrows_and_test_explains() {
     // Pausing stops it; the row says so.
     let paused: Reaction = c.ok("reaction.pause", json!({ "name": "only-nightly" })).await;
     assert!(paused.paused);
-    for r in runs_caused_by(&mut c, "reaction:only-nightly").await {
+    for r in wait_caused_by(&mut c, "reaction:only-nightly", 1).await {
         c.wait_terminal(&r.id).await;
     }
     for r in runs_caused_by(&mut c, "reaction:everything").await {
