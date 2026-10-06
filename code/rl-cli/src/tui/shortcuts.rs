@@ -322,7 +322,7 @@ mod tests {
 
         assert_eq!(
             one_line(Place::CatchUp),
-            "↑↓ move · enter go to it · 1-9 answers · /summary [deep] · esc the list"
+            "↑↓ move · enter go to it · 1-9 answers · /summary [deep] · esc the list · ^h"
         );
 
         let question = one_line(Place::Question);
