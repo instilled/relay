@@ -71,6 +71,19 @@ pub fn fmt_age(from: Timestamp, now: Timestamp) -> String {
     }
 }
 
+/// `22:14` today, `Fri 18:40` this week, `Sep 07 18:40` before. Local time.
+pub fn fmt_when(t: Timestamp, now: Timestamp) -> String {
+    let tz = TimeZone::system();
+    let (z, n) = (t.to_zoned(tz.clone()), now.to_zoned(tz));
+    if z.date() == n.date() {
+        z.strftime("%H:%M").to_string()
+    } else if now.duration_since(t) < SignedDuration::from_hours(6 * 24) {
+        z.strftime("%a %H:%M").to_string()
+    } else {
+        z.strftime("%b %d %H:%M").to_string()
+    }
+}
+
 /// `41m03s`, `1h12m`, `3d4h` — for durations shown as facts.
 pub fn fmt_duration(d: SignedDuration) -> String {
     let secs = d.as_secs().max(0);

@@ -18,4 +18,4 @@ pub mod schedule;
 pub mod types;
 
 /// Bumped when a message changes shape incompatibly. Reported by `daemon.ping`.
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;

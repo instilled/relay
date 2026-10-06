@@ -76,6 +76,11 @@ pub async fn pick_up(d: &Daemon, run: &Run) -> Result<bool> {
         source: source.into(),
         reach: format!("t:{to}"),
         stale: false,
+        target: String::new(),
+        deep: false,
+        from: None,
+        calls: 0,
+        runs: 1,
     });
     let (id, path) = (run.id.clone(), file.to_string_lossy().into_owned());
     d.ledger
