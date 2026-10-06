@@ -38,9 +38,9 @@ use crate::assistant;
 use crate::server::Daemon;
 use crate::transcript::{self, Agent};
 use anyhow::{Result, bail};
-use jiff::{SignedDuration, Timestamp, tz::TimeZone};
+use jiff::{SignedDuration, Timestamp};
 use rl_core::display_path;
-use rl_core::time::fmt_duration;
+use rl_core::time::{fmt_duration, fmt_when};
 use rl_ledger::events::NewEvent;
 use rl_ledger::{events, kept, runs, session_io, summaries};
 use rl_proto::methods::{AssistantParams, EventFilter, SummaryParams};
@@ -318,7 +318,7 @@ fn nothing(s: &mut Summary) {
         s.source = "nothing new".into();
     }
     s.text = match s.from {
-        Some(f) => format!("nothing happened since {}", clock(f, s.at)),
+        Some(f) => format!("nothing happened since {}", fmt_when(f, s.at)),
         None => "Nothing to go on yet.".into(),
     };
 }
@@ -328,19 +328,6 @@ fn dry_of(mut s: Summary) -> Summary {
     s.text.clear();
     s.calls = 0;
     s
-}
-
-/// `22:14` today, `Fri 18:40` this week, `Sep 07 18:40` before. Local time.
-fn clock(t: Timestamp, now: Timestamp) -> String {
-    let tz = TimeZone::system();
-    let (z, n) = (t.to_zoned(tz.clone()), now.to_zoned(tz));
-    if z.date() == n.date() {
-        z.strftime("%H:%M").to_string()
-    } else if now.duration_since(t) < SignedDuration::from_hours(6 * 24) {
-        z.strftime("%a %H:%M").to_string()
-    } else {
-        z.strftime("%b %d %H:%M").to_string()
-    }
 }
 
 async fn read_body(file: Option<&Path>) -> Option<String> {
@@ -588,9 +575,9 @@ fn heading(t: &SummaryTarget, r: &Run, now: Timestamp) -> String {
             "{} · {} · {}",
             r.title,
             display_path(&r.workspace),
-            clock(r.started_at, now)
+            fmt_when(r.started_at, now)
         ),
-        _ => format!("{} · {}", r.title, clock(r.started_at, now)),
+        _ => format!("{} · {}", r.title, fmt_when(r.started_at, now)),
     }
 }
 
@@ -778,7 +765,7 @@ pub fn prompt(
 ) -> String {
     let mut s = String::new();
     let stretch = match from {
-        Some(f) => format!("what happened since {} in one run", clock(f, Timestamp::now())),
+        Some(f) => format!("what happened since {} in one run", fmt_when(f, Timestamp::now())),
         None => "one run".to_string(),
     };
     if deep {
@@ -851,7 +838,7 @@ pub fn prompt(
 /// and a line (or a few) for each.
 pub fn prompt_over(what: &str, from: Option<Timestamp>, lines: &[(String, String)]) -> String {
     let clock = match from {
-        Some(f) => clock(f, Timestamp::now()),
+        Some(f) => fmt_when(f, Timestamp::now()),
         None => "it began".into(),
     };
     let mut s = format!(

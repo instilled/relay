@@ -1,5 +1,6 @@
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, Parser, Subcommand};
+use jiff::SignedDuration;
 use rl_cli::client::Client;
 use rl_cli::daemon;
 use rl_cli::env::child_env;
@@ -350,12 +351,19 @@ struct InterpretArgs {
 
 #[derive(Args)]
 struct SummaryArgs {
-    /// The run.
-    run: String,
+    /// What: a run, a folder (its project), `schedule:<name>` or `reaction:<name>`, or `all`.
+    what: String,
     /// Only the stretch since: a duration back (30m, 2h), a date or an
-    /// instant (default: since you last looked, if it did anything since; else all
-    /// of it).
+    /// instant (default: a run, since you last looked, if it did anything
+    /// since, else all of it; a job, since its oldest firing you have not
+    /// seen; a project or all, the last day).
     since: Option<String>,
+    /// The folder a `schedule:` or `reaction:` belongs to (default: a global one).
+    #[arg(long = "in", value_name = "FOLDER")]
+    folder: Option<PathBuf>,
+    /// Read the logs, not the recaps: slower, and says more.
+    #[arg(long)]
+    deep: bool,
     /// Make a new one, even when the one kept is up to date.
     #[arg(long)]
     again: bool,
@@ -2283,16 +2291,53 @@ async fn interpret(home: &Home, a: InterpretArgs, json: bool) -> Result<()> {
     Ok(())
 }
 
+/// What `rl summary` was asked of: `all`, a folder (a project), a `schedule:` or
+/// `reaction:` job, else a run.
+fn summary_target(what: &str, folder: Option<&Path>) -> Result<SummaryTarget> {
+    let job = |rule, name: &str| -> Result<SummaryTarget> {
+        let workspace = folder
+            .map(|f| std::fs::canonicalize(f).with_context(|| format!("{}: not a folder", f.display())))
+            .transpose()?;
+        Ok(SummaryTarget::Job {
+            rule,
+            name: name.to_string(),
+            workspace,
+        })
+    };
+    let target = if what == "all" {
+        SummaryTarget::All
+    } else if let Some(name) = what.strip_prefix("schedule:") {
+        job(RuleKind::Schedule, name)?
+    } else if let Some(name) = what.strip_prefix("reaction:") {
+        job(RuleKind::Reaction, name)?
+    } else if Path::new(what).is_dir() {
+        SummaryTarget::Project {
+            workspace: std::fs::canonicalize(what)?,
+        }
+    } else {
+        SummaryTarget::Run { id: what.to_string() }
+    };
+    if folder.is_some() && !matches!(target, SummaryTarget::Job { .. }) {
+        bail!("--in is for a schedule: or a reaction:");
+    }
+    Ok(target)
+}
+
 async fn summary(home: &Home, a: SummaryArgs, json: bool) -> Result<()> {
+    let target = summary_target(&a.what, a.folder.as_deref())?;
     let mut rpc = daemon::ensure(home, !json).await?;
-    let from = a
-        .since
-        .as_deref()
-        .map(|s| rl_core::time::parse_since(s, now()))
-        .transpose()?;
+    let from = match a.since.as_deref() {
+        Some(s) => Some(parse_since(s, now())?),
+        // A project or everything has no "since you looked" of its own: the
+        // last day, and presence is not touched.
+        None if matches!(target, SummaryTarget::Project { .. } | SummaryTarget::All) => {
+            Some(now() - SignedDuration::from_hours(24))
+        }
+        None => None,
+    };
     let ask = |again: bool| SummaryParams {
-        target: SummaryTarget::Run { id: a.run.clone() },
-        deep: false,
+        target: target.clone(),
+        deep: a.deep,
         from,
         again,
         dry: false,
@@ -2314,7 +2359,7 @@ async fn summary(home: &Home, a: SummaryArgs, json: bool) -> Result<()> {
         };
         println!(
             "# {}{by} · --again makes a new one",
-            rl_cli::tui::recap_label(&s, now())
+            rl_cli::tui::summary_label(&s, now())
         );
     }
     Ok(())

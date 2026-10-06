@@ -1,6 +1,6 @@
-//! `rl summary <id>`: the kept summary, or a new one from
-//! `assistants.summary`; `--again` asks anew. `rl config` shows the
-//! summariser beside the interpreter.
+//! `rl summary <what>`: the kept summary, or a new one from
+//! `assistants.summary`; `--again` asks anew. `<what>` is a run, a folder, a
+//! job or `all`. `rl config` shows the summariser beside the interpreter.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -124,6 +124,50 @@ fn an_ended_run_is_summarised_on_the_line() {
         "{out}"
     );
     assert!(out.contains("--headless  (config)"), "{out}");
+
+    // Everything, over the last hour: said by what it is of, and from when.
+    let (ok, out, err) = run(rl(&["summary", "all", "1h"]));
+    assert!(ok, "{err}");
+    assert!(out.contains("# summary of everything · since "), "{out}");
+    assert!(out.contains("by fakeai"), "{out}");
+    // A stretch with nothing in it asks no one.
+    let (ok, out, err) = run(rl(&["summary", "all", "2999-01-01"]));
+    assert!(ok, "{err}");
+    assert!(out.contains("nothing happened since"), "{out}");
+    assert!(
+        out.contains("# summary of everything · since ") && out.contains("nothing new"),
+        "{out}"
+    );
+
+    // A folder is a project; with no stretch, the last day.
+    let (ok, out, err) = run(rl(&["summary", ".", "--deep"]));
+    assert!(ok, "{err}");
+    assert!(
+        out.contains("# summary of the project ") && out.contains("/proj · since "),
+        "{out}"
+    );
+    assert!(out.contains(" · deep · by fakeai · "), "{out}");
+    // From a fixed instant it is kept, like a run's.
+    let (ok, out, err) = run(rl(&["summary", ".", "2020-01-01"]));
+    assert!(ok && out.contains("since Jan 01 00:00 · by fakeai"), "{out}\n{err}");
+    assert!(err.contains("summarising…"), "{err}");
+    let (ok, again, err) = run(rl(&["summary", ".", "2020-01-01"]));
+    assert!(ok && again == out && !err.contains("summarising…"), "{again}\n{err}");
+
+    // A job, global or a project's.
+    let (ok, out, err) = run(rl(&["summary", "schedule:nightly", "1h"]));
+    assert!(ok, "{err}");
+    assert!(out.contains("# summary of the schedule nightly · since "), "{out}");
+    let (ok, out, err) = run(rl(&["summary", "reaction:fix", "1h", "--in", "."]));
+    assert!(ok, "{err}");
+    assert!(out.contains("# summary of the reaction fix · since "), "{out}");
+    let (ok, _, err) = run(rl(&["summary", &id, "--in", "."]));
+    assert!(!ok && err.contains("--in"), "{err}");
+
+    // A run, read from its logs.
+    let (ok, out, err) = run(rl(&["summary", &id, "--deep"]));
+    assert!(ok, "{err}");
+    assert!(out.lines().last().unwrap().contains(" · deep"), "{out}");
 
     // No such run.
     let (ok, _, err) = run(rl(&["summary", "nope"]));

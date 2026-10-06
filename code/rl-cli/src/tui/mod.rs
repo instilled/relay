@@ -28,7 +28,7 @@ mod pane;
 mod query;
 mod remove;
 
-pub use pane::recap_label;
+pub use pane::{recap_label, summary_label};
 mod rows;
 mod rules;
 mod screen;

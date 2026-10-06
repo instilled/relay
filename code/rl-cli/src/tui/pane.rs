@@ -9,11 +9,13 @@ use crate::render::{fmt_clock, state_label};
 use jiff::Timestamp;
 use ratatui::style::{Style, Stylize};
 use ratatui::text::{Line, Span};
-use rl_core::time::{fmt_age, fmt_duration};
+use rl_core::display_path;
+use rl_core::time::{fmt_age, fmt_duration, fmt_when};
 use rl_proto::decision::Decision;
 use rl_proto::methods::DigestItem;
 use rl_proto::rule::{NotLoaded, Rule};
 use rl_proto::types::{Event, Run, RunState, Summary};
+use std::path::Path;
 
 /// Where a fact's value starts: past ` {key:<8} `.
 const VALUE_COL: usize = 10;
@@ -33,15 +35,7 @@ fn fact(k: &str, v: impl Into<String>) -> Line<'static> {
 /// Where a recap came from, how old it is, what stretch it covers, and
 /// whether the run has moved on since.
 pub fn recap_label(s: &Summary, now: Timestamp) -> String {
-    let from = match s.source.as_str() {
-        "claude recap" => "claude's own".to_string(),
-        "codex turns" if s.by.is_empty() => "codex's turns".to_string(),
-        "codex turns" => format!("codex's turns, by {}", s.agent),
-        "codex turn" => "codex's last turn".to_string(),
-        "nothing new" => "nothing new".to_string(),
-        _ => format!("by {}", s.agent),
-    };
-    let mut label = format!("{from} · {} ago", fmt_age(s.at, now));
+    let mut label = format!("{} · {} ago", recap_source(s), fmt_age(s.at, now));
     if let Some(since) = &s.since {
         label.push_str(&format!(" · last {since}"));
     }
@@ -49,6 +43,58 @@ pub fn recap_label(s: &Summary, now: Timestamp) -> String {
         label.push_str(" · moved on since");
     }
     label
+}
+
+/// Who said it: the agent's own recap, its turns, or an assistant.
+fn recap_source(s: &Summary) -> String {
+    match s.source.as_str() {
+        "claude recap" => "claude's own".to_string(),
+        "codex turns" if s.by.is_empty() => "codex's turns".to_string(),
+        "codex turns" => format!("codex's turns, by {}", s.agent),
+        "codex turn" => "codex's last turn".to_string(),
+        "nothing new" => "nothing new".to_string(),
+        _ => format!("by {}", s.agent),
+    }
+}
+
+/// What a summary is of, in words, from how it is kept (`SummaryTarget::key`);
+/// None for a run.
+fn summary_of(target: &str) -> Option<String> {
+    if target == "all" {
+        return Some("everything".into());
+    }
+    if let Some(path) = target.strip_prefix("p:") {
+        return Some(format!("the project {}", display_path(Path::new(path))));
+    }
+    let job = target.strip_prefix("j:")?;
+    let (rule, rest) = job.split_once(':')?;
+    let name = rest.rsplit_once('@').map_or(rest, |(n, _)| n);
+    Some(format!("the {rule} {name}"))
+}
+
+/// What `rl summary` says under the text: what it is of, from when, how deep,
+/// who wrote it, how many calls it took. A run's is its recap's label, and
+/// `deep` when it was read from the logs.
+pub fn summary_label(s: &Summary, now: Timestamp) -> String {
+    let Some(of) = summary_of(&s.target) else {
+        let deep = if s.deep { " · deep" } else { "" };
+        return format!("{}{deep}", recap_label(s, now));
+    };
+    let mut parts = vec![format!("summary of {of}")];
+    if let Some(from) = s.from {
+        parts.push(format!("since {}", fmt_when(from, s.at)));
+    }
+    if s.deep {
+        parts.push("deep".into());
+    }
+    parts.push(recap_source(s));
+    if s.calls > 0 {
+        parts.push(format!("{} call{}", s.calls, if s.calls == 1 { "" } else { "s" }));
+    }
+    if s.stale {
+        parts.push("moved on since".into());
+    }
+    parts.join(" · ")
 }
 
 /// The command line as the user would have typed it: what Relay added for
@@ -797,6 +843,46 @@ mod tests {
             ..own
         };
         assert_eq!(recap_label(&last, now), "codex's last turn · 2m ago");
+    }
+
+    #[test]
+    fn a_summary_says_what_it_is_of() {
+        let now = Timestamp::now();
+        let s = Summary {
+            run: String::new(),
+            agent: "fakeai".into(),
+            by: "abc".into(),
+            at: now,
+            text: String::new(),
+            since: None,
+            source: "summarised".into(),
+            reach: String::new(),
+            stale: false,
+            target: "all".into(),
+            deep: true,
+            from: None,
+            calls: 2,
+        };
+        assert_eq!(
+            summary_label(&s, now),
+            "summary of everything · deep · by fakeai · 2 calls"
+        );
+        let job = Summary {
+            target: "j:schedule:nightly@everywhere".into(),
+            deep: false,
+            calls: 1,
+            stale: true,
+            ..s.clone()
+        };
+        assert_eq!(
+            summary_label(&job, now),
+            "summary of the schedule nightly · by fakeai · 1 call · moved on since"
+        );
+        let run = Summary {
+            target: "r:abc".into(),
+            ..s
+        };
+        assert_eq!(summary_label(&run, now), "by fakeai · 0s ago · deep");
     }
 
     #[test]
