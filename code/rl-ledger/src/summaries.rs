@@ -125,6 +125,10 @@ pub fn get(conn: &Connection, run: &str) -> Result<Option<Summary>> {
             source,
             reach,
             stale: false,
+            target: String::new(),
+            deep: false,
+            from: None,
+            calls: 0,
         })),
         None => Ok(None),
     }
@@ -196,6 +200,10 @@ mod tests {
             source: "summarised".into(),
             reach: "o:12".into(),
             stale: false,
+            target: String::new(),
+            deep: false,
+            from: None,
+            calls: 0,
         };
         put(&c, &s).unwrap();
         assert_eq!(get(&c, "r1").unwrap().unwrap(), s);
@@ -243,6 +251,10 @@ mod tests {
             source: "claude recap".into(),
             reach: "t:10".into(),
             stale: false,
+            target: String::new(),
+            deep: false,
+            from: None,
+            calls: 0,
         }
     }
 

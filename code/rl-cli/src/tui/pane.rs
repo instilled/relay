@@ -745,6 +745,10 @@ mod tests {
             source: "summarised".into(),
             reach: "o:3".into(),
             stale: false,
+            target: String::new(),
+            deep: false,
+            from: None,
+            calls: 0,
         };
         let s = text(&run_lines(&item, &[], Some(&summary), &names, 80, now));
         // Narrow, the recap wraps under its own column.
@@ -764,6 +768,10 @@ mod tests {
             since: Some("2h".into()),
             source: "claude recap".into(),
             stale: true,
+            target: String::new(),
+            deep: false,
+            from: None,
+            calls: 0,
             ..summary.clone()
         };
         assert_eq!(
@@ -782,6 +790,10 @@ mod tests {
             source: "codex turn".into(),
             since: None,
             stale: false,
+            target: String::new(),
+            deep: false,
+            from: None,
+            calls: 0,
             ..own
         };
         assert_eq!(recap_label(&last, now), "codex's last turn · 2m ago");

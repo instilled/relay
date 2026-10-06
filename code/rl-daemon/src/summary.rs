@@ -26,6 +26,7 @@ use rl_core::time::{fmt_duration, parse_duration};
 use rl_ledger::events::NewEvent;
 use rl_ledger::{events, runs, session_io, summaries};
 use rl_proto::methods::{AssistantParams, EventFilter, SummaryParams};
+use rl_proto::types::SummaryTarget;
 use rl_proto::types::{Cause, Event, Run, Summary, event_kind};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -35,8 +36,16 @@ const OUTPUT_TAIL: usize = 64 * 1024;
 /// The most of an answer that is kept.
 const TEXT_MAX: usize = 8 * 1024;
 
-/// The one kept, marked stale when the run has moved on since.
-pub async fn get(d: &Daemon, run: &str) -> Result<Option<Summary>> {
+/// The one kept for the target, marked stale when a run has moved on since.
+pub async fn get(d: &Daemon, p: &SummaryParams) -> Result<Option<Summary>> {
+    let SummaryTarget::Run { id: run } = &p.target else {
+        bail!("only a run can be summarised so far");
+    };
+    run_kept(d, run).await
+}
+
+/// The recap kept for a run, marked stale when it has moved on since.
+async fn run_kept(d: &Daemon, run: &str) -> Result<Option<Summary>> {
     let id = run.to_string();
     let Some(mut s) = d.ledger.call(move |c| summaries::get(c, &id)).await? else {
         return Ok(None);
@@ -96,7 +105,9 @@ fn tail_of(s: &str, max: usize) -> &str {
 /// A recap of a run: the one kept while the run has not moved on, unless
 /// `again`; else a new one from the cheapest source that has one.
 pub async fn make(d: &Daemon, p: SummaryParams) -> Result<Summary> {
-    let id = p.run.clone();
+    let SummaryTarget::Run { id } = p.target.clone() else {
+        bail!("only a run can be summarised so far");
+    };
     let run = d
         .ledger
         .call({
@@ -127,7 +138,7 @@ pub async fn make(d: &Daemon, p: SummaryParams) -> Result<Summary> {
     let file = locate(d, &run).await?;
     let reach = reach(d, &run, file.as_deref()).await?;
     if !p.again
-        && let Some(kept) = get(d, &id).await?
+        && let Some(kept) = run_kept(d, &id).await?
         && kept.since == since
         && kept.reach == reach
     {
@@ -153,6 +164,10 @@ pub async fn make(d: &Daemon, p: SummaryParams) -> Result<Summary> {
         source: String::new(),
         reach,
         stale: false,
+        target: String::new(),
+        deep: false,
+        from: None,
+        calls: 0,
     };
     // What an assistant would read, when the agent's own record does not do.
     let (heading, material) = match (Agent::of(&run), body) {

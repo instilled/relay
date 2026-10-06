@@ -71,7 +71,7 @@ use rl_proto::methods::{
     WorkspaceRemoveParams, WorkspaceRemoved, WorkspaceRename, WorkspaceRenameParams, WorkspaceUp, WorkspaceUpParams,
 };
 use rl_proto::rule::{NotLoaded, Rule, RuleKind, RuleStatus};
-use rl_proto::types::{AttachMode, Cause, Event as LedgerEvent, Mark, Run, RunKind, RunState, Summary};
+use rl_proto::types::{AttachMode, Cause, Event as LedgerEvent, Mark, Run, RunKind, RunState, Summary, SummaryTarget};
 use rows::{Names, Row, fit, short_path};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -1309,7 +1309,16 @@ impl App {
             if let Ok(evs) = self.rpc.call::<EventList>(filter).await {
                 self.events = evs;
             }
-            if let Ok(s) = self.rpc.call::<SummaryGet>(RunId { id }).await {
+            let kept = SummaryParams {
+                target: SummaryTarget::Run { id },
+                deep: false,
+                since: None,
+                from: None,
+                again: false,
+                dry: false,
+                timeout: None,
+            };
+            if let Ok(s) = self.rpc.call::<SummaryGet>(kept).await {
                 self.summary = s;
             }
         }
@@ -3250,9 +3259,12 @@ impl App {
         let (id, title) = (run.id.clone(), run.title.clone());
         let home = self.home.clone();
         let params = SummaryParams {
-            run: id.clone(),
+            target: SummaryTarget::Run { id: id.clone() },
+            deep: false,
             since: (!since.is_empty()).then(|| since.to_string()),
+            from: None,
             again: false,
+            dry: false,
             timeout: None,
         };
         let task = tokio::spawn(async move {

@@ -403,6 +403,56 @@ pub struct Summary {
     /// Not kept: whether the run has moved on since it was made.
     #[serde(default)]
     pub stale: bool,
+    /// What was summarised (`SummaryTarget::key`); empty on a run's own recap
+    /// row.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub target: String,
+    /// Read from the logs, not from the recaps.
+    #[serde(default)]
+    pub deep: bool,
+    /// Where the stretch began; None for a whole run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<Timestamp>,
+    /// How many assistant calls it took.
+    #[serde(default)]
+    pub calls: u32,
+}
+
+/// What a summary is of: a run, a schedule's or a reaction's runs, a
+/// project's, or everything.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SummaryTarget {
+    Run {
+        id: String,
+    },
+    /// A schedule's or a reaction's runs; `workspace` None for a global rule.
+    Job {
+        rule: crate::rule::RuleKind,
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        workspace: Option<PathBuf>,
+    },
+    Project {
+        workspace: PathBuf,
+    },
+    All,
+}
+
+impl SummaryTarget {
+    /// How it is kept: `r:<id>`, `j:<kind>:<name>@<workspace|everywhere>`,
+    /// `p:<path>`, `all`.
+    pub fn key(&self) -> String {
+        match self {
+            SummaryTarget::Run { id } => format!("r:{id}"),
+            SummaryTarget::Job { rule, name, workspace } => match workspace {
+                Some(w) => format!("j:{rule}:{name}@{}", w.display()),
+                None => format!("j:{rule}:{name}@everywhere"),
+            },
+            SummaryTarget::Project { workspace } => format!("p:{}", workspace.display()),
+            SummaryTarget::All => "all".into(),
+        }
+    }
 }
 
 /// What a run raised itself (`rl emit`): one kind, how often it came, and
@@ -487,6 +537,32 @@ pub mod event_kind {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_target_is_kept_by_a_key_that_says_what_it_is() {
+        use crate::rule::RuleKind;
+        assert_eq!(SummaryTarget::Run { id: "ab12".into() }.key(), "r:ab12");
+        let job = SummaryTarget::Job {
+            rule: RuleKind::Schedule,
+            name: "nightly".into(),
+            workspace: Some(PathBuf::from("/w/api")),
+        };
+        assert_eq!(job.key(), "j:schedule:nightly@/w/api");
+        let global = SummaryTarget::Job {
+            rule: RuleKind::Reaction,
+            name: "tell".into(),
+            workspace: None,
+        };
+        assert_eq!(global.key(), "j:reaction:tell@everywhere");
+        assert_eq!(
+            SummaryTarget::Project {
+                workspace: PathBuf::from("/w/api")
+            }
+            .key(),
+            "p:/w/api"
+        );
+        assert_eq!(SummaryTarget::All.key(), "all");
+    }
 
     #[test]
     fn enums_roundtrip_as_snake_case() {

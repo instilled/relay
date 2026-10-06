@@ -2,7 +2,7 @@
 //! result live together so client and server cannot drift.
 
 use crate::decision::{Decision, DecisionOption};
-use crate::types::{AttachMode, Checkout, Event, Mark, Run, RunKind, RunState, Signal};
+use crate::types::{AttachMode, Checkout, Event, Mark, Run, RunKind, RunState, Signal, SummaryTarget};
 use jiff::Timestamp;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
@@ -1272,15 +1272,28 @@ impl Method for AssistantRun {
 
 // ---- summary.* --------------------------------------------------------------
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SummaryParams {
-    pub run: String,
-    /// Only this stretch, back from now: a duration (`2h`). None, the whole run.
+    pub target: SummaryTarget,
+    /// Read the logs, not the recaps.
+    #[serde(default)]
+    pub deep: bool,
+    /// A run's stretch, back from now: a duration (`2h`). None, the whole run.
+    /// `from` takes its place for the other targets.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub since: Option<String>,
+    /// Where the stretch begins. None: since you last interacted with it (a
+    /// run's seen_at, a job's oldest unseen firing); required for a project
+    /// and all — the client knows when you were last here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<Timestamp>,
     /// Make a new one even when the one kept is up to date.
     #[serde(default)]
     pub again: bool,
+    /// Only say how many assistant calls it would take (`Summary.calls`, text
+    /// empty).
+    #[serde(default)]
+    pub dry: bool,
     /// A duration; a minute when left out.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout: Option<String>,
@@ -1298,10 +1311,11 @@ impl Method for SummaryMake {
     type Result = crate::types::Summary;
 }
 
-/// The summary kept for a run, if any. Never asks.
+/// The summary kept for a target, if any. Never asks. Of the params, the
+/// target, `deep` and `from` say which; the rest are ignored.
 pub struct SummaryGet;
 impl Method for SummaryGet {
     const NAME: &'static str = "summary.get";
-    type Params = RunId;
+    type Params = SummaryParams;
     type Result = Option<crate::types::Summary>;
 }

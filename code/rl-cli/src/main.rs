@@ -9,7 +9,7 @@ use rl_core::{Home, display_path};
 use rl_proto::decision::{Decision, DecisionOption, DecisionStatus};
 use rl_proto::methods::{
     AgentList, ConfigGet, GcParams, GcRun, RuleApprove, RuleList, RuleRef, RunArchive, RunArchiveParams, RunHide,
-    RunHideParams, RunId, RunResume, RunResumeParams, SummaryGet, SummaryMake, SummaryParams,
+    RunHideParams, RunResume, RunResumeParams, SummaryGet, SummaryMake, SummaryParams,
 };
 use rl_proto::methods::{
     DaemonInfo, DigestGet, DigestHide, DigestHideParams, DigestParams, EventFilter, EventList, PresenceClient,
@@ -31,7 +31,7 @@ use rl_proto::methods::{
 use rl_proto::reaction::{Filter, Reaction, ReactionSpec};
 use rl_proto::rule::{Rule, RuleKind, RuleStatus};
 use rl_proto::schedule::{Schedule, UpReport};
-use rl_proto::types::{AttachMode, Cause, Mark, RunKind, RunState};
+use rl_proto::types::{AttachMode, Cause, Mark, RunKind, RunState, SummaryTarget};
 use serde_json::json;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -2283,18 +2283,21 @@ async fn interpret(home: &Home, a: InterpretArgs, json: bool) -> Result<()> {
 
 async fn summary(home: &Home, a: SummaryArgs, json: bool) -> Result<()> {
     let mut rpc = daemon::ensure(home, !json).await?;
-    let kept = rpc.call::<SummaryGet>(RunId { id: a.run.clone() }).await?;
+    let target = SummaryTarget::Run { id: a.run.clone() };
+    let ask = |since: Option<String>, again: bool| SummaryParams {
+        target: target.clone(),
+        deep: false,
+        since,
+        from: None,
+        again,
+        dry: false,
+        timeout: None,
+    };
+    let kept = rpc.call::<SummaryGet>(ask(None, false)).await?;
     if !json && (a.again || kept.is_none_or(|k| k.stale || k.since != a.since)) {
         eprintln!("summarising…");
     }
-    let s = rpc
-        .call::<SummaryMake>(SummaryParams {
-            run: a.run,
-            since: a.since,
-            again: a.again,
-            timeout: None,
-        })
-        .await?;
+    let s = rpc.call::<SummaryMake>(ask(a.since, a.again)).await?;
     if json {
         println!("{}", serde_json::to_string(&s)?);
     } else {

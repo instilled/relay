@@ -43,7 +43,9 @@ fn append(p: &Path, text: &str) {
 async fn wait_recap(c: &mut Conn, run: &str, text: &str) -> Summary {
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
-        let res = c.call("summary.get", json!({ "id": run })).await;
+        let res = c
+            .call("summary.get", json!({ "target": { "kind": "run", "id": run } }))
+            .await;
         assert!(res.error.is_none(), "{:?}", res.error);
         let s: Option<Summary> = serde_json::from_value(res.result.unwrap_or_default()).unwrap();
         if let Some(s) = s.filter(|s| s.text == text) {
@@ -113,7 +115,9 @@ async fn claudes_recap_is_kept_as_it_writes_it() {
     assert_eq!(read, std::fs::metadata(&transcript).unwrap().len());
 
     // `/summary` sees the same one, without asking anyone.
-    let made: Summary = c.ok("summary.make", json!({ "run": run.id })).await;
+    let made: Summary = c
+        .ok("summary.make", json!({ "target": { "kind": "run", "id": run.id } }))
+        .await;
     assert_eq!(made, s);
 
     // The digest carries it, as a row's line; a shell's summary is its own.
@@ -129,6 +133,10 @@ async fn claudes_recap_is_kept_as_it_writes_it() {
             source: "summarised".into(),
             reach: "o:0".into(),
             stale: false,
+            target: String::new(),
+            deep: false,
+            from: None,
+            calls: 0,
         };
         ledger.call_blocking(move |c| summaries::put(c, &asked)).unwrap();
     }

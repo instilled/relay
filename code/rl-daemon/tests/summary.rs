@@ -59,13 +59,17 @@ async fn an_ended_run_gets_a_summary_kept_by_it() {
         )
         .await;
     // Nothing kept yet: a null result.
-    let nothing: Response = c.call("summary.get", json!({ "id": run.id })).await;
+    let nothing: Response = c
+        .call("summary.get", json!({ "target": { "kind": "run", "id": run.id } }))
+        .await;
     assert!(nothing.error.is_none(), "{nothing:?}");
     assert!(nothing.result.unwrap_or(serde_json::Value::Null).is_null());
     c.wait_terminal(&run.id).await;
     wait_journal(&home, &run.id, "hello from the run").await;
 
-    let s: Summary = c.ok("summary.make", json!({ "run": run.id })).await;
+    let s: Summary = c
+        .ok("summary.make", json!({ "target": { "kind": "run", "id": run.id } }))
+        .await;
     assert_eq!(s.run, run.id);
     assert_eq!(s.agent, "fakeai");
     assert_eq!(
@@ -86,13 +90,24 @@ async fn an_ended_run_gets_a_summary_kept_by_it() {
     assert!(p.contains("hello from the run"), "the output: {p}");
 
     // Kept: the same one comes back; asked again, a new assistant run.
-    let kept: Option<Summary> = c.ok("summary.get", json!({ "id": run.id })).await;
+    let kept: Option<Summary> = c
+        .ok("summary.get", json!({ "target": { "kind": "run", "id": run.id } }))
+        .await;
     assert_eq!(kept.as_ref(), Some(&s));
-    let same: Summary = c.ok("summary.make", json!({ "run": run.id })).await;
+    let same: Summary = c
+        .ok("summary.make", json!({ "target": { "kind": "run", "id": run.id } }))
+        .await;
     assert_eq!(same.by, s.by);
-    let again: Summary = c.ok("summary.make", json!({ "run": run.id, "again": true })).await;
+    let again: Summary = c
+        .ok(
+            "summary.make",
+            json!({ "target": { "kind": "run", "id": run.id }, "again": true }),
+        )
+        .await;
     assert_ne!(again.by, s.by);
-    let kept: Option<Summary> = c.ok("summary.get", json!({ "id": run.id })).await;
+    let kept: Option<Summary> = c
+        .ok("summary.get", json!({ "target": { "kind": "run", "id": run.id } }))
+        .await;
     assert_eq!(kept.map(|k| k.by), Some(again.by.clone()));
 
     // Said as an event on the run, first line only.
@@ -103,7 +118,9 @@ async fn an_ended_run_gets_a_summary_kept_by_it() {
     assert_eq!(evs[0].summary, "It printed hello and left.");
 
     // An assistant's own run is not summarised.
-    let r: Response = c.call("summary.make", json!({ "run": again.by })).await;
+    let r: Response = c
+        .call("summary.make", json!({ "target": { "kind": "run", "id": again.by } }))
+        .await;
     assert!(r.error.unwrap().message.contains("assistant's own run"));
 
     // A run still going can be recapped too; a stretch with nothing in it
@@ -115,11 +132,21 @@ async fn an_ended_run_gets_a_summary_kept_by_it() {
         )
         .await;
     c.wait_state(&slow.id, RunState::Working).await;
-    let quiet: Summary = c.ok("summary.make", json!({ "run": slow.id, "since": "1m" })).await;
+    let quiet: Summary = c
+        .ok(
+            "summary.make",
+            json!({ "target": { "kind": "run", "id": slow.id }, "since": "1m" }),
+        )
+        .await;
     assert_eq!(quiet.text, "Nothing in the last 1m.");
     assert_eq!((quiet.source.as_str(), quiet.by.as_str()), ("nothing new", ""));
     assert_eq!(quiet.since.as_deref(), Some("1m"));
-    let r: Response = c.call("summary.make", json!({ "run": slow.id, "since": "soon" })).await;
+    let r: Response = c
+        .call(
+            "summary.make",
+            json!({ "target": { "kind": "run", "id": slow.id }, "since": "soon" }),
+        )
+        .await;
     assert!(r.error.unwrap().message.contains("not a stretch of time"));
     let _: serde_json::Value = c.ok("run.stop", json!({ "id": slow.id, "force": true })).await;
 
@@ -130,12 +157,22 @@ async fn an_ended_run_gets_a_summary_kept_by_it() {
          redirect stdin explicitly: < /dev/null to skip, or wait longer.\nIt printed hello and left.\n",
     )
     .unwrap();
-    let warned: Summary = c.ok("summary.make", json!({ "run": run.id, "again": true })).await;
+    let warned: Summary = c
+        .ok(
+            "summary.make",
+            json!({ "target": { "kind": "run", "id": run.id }, "again": true }),
+        )
+        .await;
     assert_eq!(warned.text, "It printed hello and left.");
 
     // Nothing said: an error that names the assistant's run.
     std::fs::write(&answer, "\n").unwrap();
-    let r: Response = c.call("summary.make", json!({ "run": run.id, "again": true })).await;
+    let r: Response = c
+        .call(
+            "summary.make",
+            json!({ "target": { "kind": "run", "id": run.id }, "again": true }),
+        )
+        .await;
     let msg = r.error.unwrap().message;
     assert!(msg.contains("said nothing"), "{msg}");
 
@@ -198,7 +235,9 @@ async fn claudes_own_recap_is_taken_from_its_transcript() {
         )
         .await;
 
-    let s: Summary = c.ok("summary.make", json!({ "run": run.id })).await;
+    let s: Summary = c
+        .ok("summary.make", json!({ "target": { "kind": "run", "id": run.id } }))
+        .await;
     assert_eq!(s.text, "Search fixed; nothing committed.");
     assert_eq!(
         (s.agent.as_str(), s.source.as_str(), s.by.as_str()),
@@ -207,7 +246,9 @@ async fn claudes_own_recap_is_taken_from_its_transcript() {
     assert!(!s.stale);
 
     // Kept while the transcript has not grown; stale once it has.
-    let kept: Option<Summary> = c.ok("summary.get", json!({ "id": run.id })).await;
+    let kept: Option<Summary> = c
+        .ok("summary.get", json!({ "target": { "kind": "run", "id": run.id } }))
+        .await;
     assert_eq!(kept.as_ref().map(|k| k.stale), Some(false));
     let mut f = std::fs::OpenOptions::new().append(true).open(&transcript).unwrap();
     std::io::Write::write_all(
@@ -215,12 +256,19 @@ async fn claudes_own_recap_is_taken_from_its_transcript() {
         format!("{{\"type\":\"assistant\",\"timestamp\":\"{}\",\"message\":{{\"content\":[{{\"type\":\"text\",\"text\":\"Committed.\"}}]}}}}\n", jiff::Timestamp::now()).as_bytes(),
     )
     .unwrap();
-    let kept: Option<Summary> = c.ok("summary.get", json!({ "id": run.id })).await;
+    let kept: Option<Summary> = c
+        .ok("summary.get", json!({ "target": { "kind": "run", "id": run.id } }))
+        .await;
     assert_eq!(kept.map(|k| k.stale), Some(true));
 
     // A recap from before the stretch does not count: what was said goes to
     // the assistant instead — here one that is not on this machine.
-    let r: Response = c.call("summary.make", json!({ "run": run.id, "since": "10s" })).await;
+    let r: Response = c
+        .call(
+            "summary.make",
+            json!({ "target": { "kind": "run", "id": run.id }, "since": "10s" }),
+        )
+        .await;
     let msg = r.error.map(|e| e.message).unwrap_or_default();
     assert!(msg.contains("not on this machine"), "{msg}");
 
