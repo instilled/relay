@@ -21,6 +21,16 @@ pub fn set(conn: &mut Connection, group: &str, rows: &[String]) -> Result<()> {
     Ok(())
 }
 
+/// Gives `to` the place `from` held in every order that kept it — a run
+/// picked back up (`run.resume`) stays where the one it carries on stood.
+pub fn pass_on(conn: &Connection, from: &str, to: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE OR IGNORE row_order SET row_key = ?2 WHERE row_key = ?1",
+        params![from, to],
+    )?;
+    Ok(())
+}
+
 /// Every project's order, by its header's key.
 pub fn list(conn: &Connection) -> Result<Vec<Order>> {
     let mut stmt = conn.prepare("SELECT group_key, row_key FROM row_order ORDER BY group_key, pos")?;
@@ -72,5 +82,16 @@ mod tests {
         l.call_blocking(|c| set(c, "g:/w/api", &[])).unwrap();
         let got = l.call_blocking(|c| list(c)).unwrap();
         assert_eq!(got.iter().map(|o| o.group.as_str()).collect::<Vec<_>>(), ["g:/w/web"]);
+    }
+
+    #[test]
+    fn a_row_passes_its_place_on() {
+        let l = Ledger::open_in_memory().unwrap();
+        l.call_blocking(|c| set(c, "g:/w/api", &keys(&["r:a", "r:b", "r:c"])))
+            .unwrap();
+        l.call_blocking(|c| pass_on(c, "r:b", "r:d")).unwrap();
+        l.call_blocking(|c| pass_on(c, "r:x", "r:y")).unwrap();
+        let got = l.call_blocking(|c| list(c)).unwrap();
+        assert_eq!(got[0].rows, keys(&["r:a", "r:d", "r:c"]));
     }
 }
