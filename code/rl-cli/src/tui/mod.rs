@@ -309,7 +309,7 @@ struct App {
     events: Vec<LedgerEvent>,
     /// The selected run's summary, when there is one kept.
     summary: Option<Summary>,
-    /// The assistant at work on a run's summary (`/summarise`).
+    /// The assistant at work on a run's summary (`/summary`).
     summarising: Option<Summarising>,
     /// A project on its way out (`^x` twice on its header).
     removing: Option<Removing>,
@@ -3231,15 +3231,15 @@ impl App {
 
     /// `s` on an ended run: the assistant is asked what it did, as a run; the
     /// answer lands in the pane through the main loop.
-    /// `/summarise [since]`: a recap of the run under the cursor, live or
+    /// `/summary [since]`: a recap of the run under the cursor, live or
     /// ended — the one kept while the run has not moved on.
-    fn summarise(&mut self, since: &str) {
+    fn summary_of(&mut self, since: &str) {
         if let Some(s) = &self.summarising {
             self.say(format!("still summarising `{}`; ^x on its run stops it", s.title));
             return;
         }
         let Some(i) = self.selected_run() else {
-            self.say("/summarise works on a run");
+            self.say("/summary works on a run");
             return;
         };
         let run = &i.run;
@@ -4223,7 +4223,7 @@ impl App {
             }
             palette::Cmd::New => self.new_rule_form(),
             palette::Cmd::Edit => self.edit_file(&arg),
-            palette::Cmd::Summarise => self.summarise(arg.trim()),
+            palette::Cmd::Summary => self.summary_of(arg.trim()),
             palette::Cmd::Ask => {
                 if arg.trim().is_empty() {
                     self.say("/ask what? plain words, and the assistant drafts it");
@@ -5249,7 +5249,7 @@ impl App {
                 format!("enter its firings · /edit its rule · ^x archives · {pane}")
             }
             Some(Row::Run(i)) if i.run.state.is_terminal() => {
-                format!("enter output · /summarise · ^x archives · ^t pins · {pane}")
+                format!("enter output · /summary · ^x archives · ^t pins · {pane}")
             }
             Some(Row::Run(_)) => format!("enter joins it · ^x stops it · ^t pins · {pane}"),
             // A file here that did not load is what `/edit` opens, at the line.

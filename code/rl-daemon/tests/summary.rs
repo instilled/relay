@@ -1,5 +1,5 @@
 //! `summary.make` / `summary.get`: a run's facts and output go to
-//! `assistants.summarise` as an assistant run; the answer is kept by the run
+//! `assistants.summary` as an assistant run; the answer is kept by the run
 //! and said in a `run.summarised` event, and given back while the run has not
 //! moved on. A stretch with nothing in it needs no assistant; Claude's own
 //! recap, from the transcript its hook names, needs none either. An
@@ -31,7 +31,7 @@ async fn an_ended_run_gets_a_summary_kept_by_it() {
         ),
     )
     .unwrap();
-    std::fs::write(home.config_file(), "assistants:\n  summarise: fakeai\n").unwrap();
+    std::fs::write(home.config_file(), "assistants:\n  summary: fakeai\n").unwrap();
     // The fixture answers with this file, and writes the prompt to that one;
     // it reads its input to the end first, as `claude -p` does, so an input
     // left open would hang it. The daemon is in this process, so its runs see
@@ -73,8 +73,8 @@ async fn an_ended_run_gets_a_summary_kept_by_it() {
         "fences dropped, kept as prose"
     );
     let by: Run = c.get(&s.by).await;
-    assert_eq!(by.cause, Cause::Assistant("summarise".into()));
-    assert_eq!(by.title, "summarise: say hello");
+    assert_eq!(by.cause, Cause::Assistant("summary".into()));
+    assert_eq!(by.title, "summary: say hello");
     assert_eq!(by.state, RunState::Finished);
     let p = std::fs::read_to_string(&prompt).unwrap();
     assert!(p.contains("title: say hello"), "{p}");
@@ -160,7 +160,7 @@ async fn claudes_own_recap_is_taken_from_its_transcript() {
         "kind: agent\nbins: [\"/nonexistent/nosuchai\"]\nheadless: [\"--headless\"]\n",
     )
     .unwrap();
-    std::fs::write(home.config_file(), "assistants:\n  summarise: nosuchai\n").unwrap();
+    std::fs::write(home.config_file(), "assistants:\n  summary: nosuchai\n").unwrap();
     let Some(h) = Harness::on(home.clone()) else {
         eprintln!("skipping: rl-session not built");
         return;

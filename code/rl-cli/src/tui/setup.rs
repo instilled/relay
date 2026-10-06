@@ -151,7 +151,7 @@ impl Guide {
                 info: a.clone(),
             })
             .collect();
-        let current = state.config.config.assistants.summarise.clone();
+        let current = state.config.config.assistants.summary.clone();
         let sessions_error = sessions.error.clone();
         let sessions: Vec<Session> = sessions
             .sessions
@@ -778,7 +778,7 @@ mod tests {
                 present: true,
                 config,
                 interpret: None,
-                summarise: None,
+                summary: None,
                 errors: vec![],
             },
             agents: vec![
@@ -982,7 +982,7 @@ mod tests {
             agents: vec!["codex".into()],
             ..Default::default()
         };
-        c.assistants.summarise = Some(Assistant {
+        c.assistants.summary = Some(Assistant {
             agent: "codex".into(),
             model: Some("o3".into()),
             args: vec![],
