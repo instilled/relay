@@ -1037,6 +1037,8 @@ pub async fn run(home: &Home) -> Result<()> {
     }
     let result = app.main_loop(&mut terminal).await;
     leave_screen();
+    // Closing the panel on the catch-up is leaving it too.
+    app.saw_catch_up().await;
     // Leaving is looking: `rl since` starts from here next time.
     let _ = app
         .rpc
@@ -1604,7 +1606,8 @@ impl App {
             // A question is only worth its details: selecting one opens the
             // pane on it, and moving off closes the pane again — unless it was
             // open already.
-            let question = self.view == View::Work && key.as_deref().is_some_and(|k| k.starts_with("q:"));
+            let question =
+                matches!(self.view, View::Work | View::CatchUp) && key.as_deref().is_some_and(|k| k.starts_with("q:"));
             if question {
                 if !self.show_pane {
                     self.auto_pane = true;
@@ -2366,11 +2369,7 @@ impl App {
     /// graph's own first node. The global rules have no row, so this is
     /// where they are reached.
     async fn toggle_graph(&mut self) {
-        self.toggle_graph_at(self.rule_target()).await;
-    }
-
-    /// `toggle_graph`, the graph opening on `target` where it has it.
-    async fn toggle_graph_at(&mut self, target: Option<String>) {
+        let target = self.rule_target();
         if self.view == View::Graph {
             self.go_back();
         } else {
@@ -2449,11 +2448,13 @@ impl App {
         self.view = v;
     }
 
-    /// Back to the list from whichever view is up.
+    /// Back to the list from whichever view is up. Leaving the catch-up so,
+    /// what it showed is seen.
     async fn back_to_list(&mut self) {
         if self.view == View::Work {
             return;
         }
+        self.saw_catch_up().await;
         self.back.clear();
         self.switch_to(View::Work);
         self.picked.clear();
@@ -2509,13 +2510,14 @@ impl App {
         self.load_pane().await;
     }
 
-    /// The catch-up as it stands, built on the list's own rows.
+    /// The catch-up as it stands, built on the list's own rows and narrowed
+    /// by the search, as the list is.
     fn catch_up(&self) -> Option<crate::catchup::CatchUp<'_>> {
         let d = self.catch.as_ref()?;
         let cx = rows::Context {
             names: &self.names,
             rules: &self.rules,
-            filter: "",
+            filter: &self.filter,
             lens: rows::Lens::All,
             now: Timestamp::now(),
         };
@@ -2554,34 +2556,27 @@ impl App {
         shown
     }
 
-    /// Everything the catch-up showed is seen now.
-    async fn saw_catch_up(&mut self, shown: Shown) {
+    /// Leaving the catch-up, however it is left — for the list, or the
+    /// panel closing — while it is up or there to go back to: everything it
+    /// showed is seen now.
+    async fn saw_catch_up(&mut self) {
+        if self.view != View::CatchUp && !self.back.contains(&View::CatchUp) {
+            return;
+        }
+        let shown = self.catch_up_unseen();
         self.unseen_from.extend(shown.from);
         self.seen(shown.ids).await;
     }
 
-    /// `esc` in the catch-up: to the list, what it showed seen.
-    async fn leave_catch_up(&mut self) {
-        let shown = self.catch_up_unseen();
-        self.saw_catch_up(shown).await;
-        self.back_to_list().await;
-    }
-
-    /// `enter` in the catch-up: the row on the list, with the cursor on it —
-    /// or, on a job whose rule is still there, that rule in the graph, as
-    /// the events view goes to a rule. Leaving, what it showed is seen; a
-    /// run the list no longer has keeps the catch-up up, and says why.
+    /// `enter` in the catch-up: the row on the list, with the cursor on it
+    /// (`^g` from there is a job's rule in the graph). A run the list no
+    /// longer has keeps the catch-up up, and says why.
     async fn catch_up_enter(&mut self) {
         let Some(row) = self.selected() else {
             return self.say("nothing here to open");
         };
         let key = row.key();
         let run = row.item().map(|i| i.run.id.clone());
-        let rule = match &row {
-            Row::Job(j) => self.rule_of_job(j).map(rules::key),
-            _ => None,
-        };
-        let shown = self.catch_up_unseen();
         match run {
             Some(id) => self.show_run(&id).await,
             None => {
@@ -2595,13 +2590,6 @@ impl App {
                 }
                 self.select(key);
             }
-        }
-        if self.view == View::CatchUp {
-            return;
-        }
-        self.saw_catch_up(shown).await;
-        if rule.is_some() {
-            self.toggle_graph_at(rule).await;
         }
     }
 
@@ -4115,7 +4103,7 @@ impl App {
                 } else if self.view == View::Events {
                     self.toggle_events().await;
                 } else if self.view == View::CatchUp {
-                    self.leave_catch_up().await;
+                    self.back_to_list().await;
                 }
             }
             (KeyCode::Down, _) if self.view == View::Graph => self.graph_step(graph::Dir::Down),
@@ -5746,7 +5734,6 @@ impl App {
         if self.view == View::CatchUp {
             let go = match self.selected() {
                 Some(Row::Question(_)) => "`1 and a note` on the line answers it · enter it on the list · ",
-                Some(Row::Job(j)) if self.rule_of_job(&j).is_some() => "enter its rule in the graph · ",
                 Some(_) => "enter it on the list · ",
                 None => "",
             };
@@ -7123,15 +7110,13 @@ mod tests {
         token.cancel();
     }
 
-    #[tokio::test]
-    async fn a_number_answers_a_question_in_the_catch_up() {
-        use jiff::{SignedDuration, Timestamp};
+    /// An open question in the project, `ship it?`, asked by no run.
+    fn ask_in(tmp: &tempfile::TempDir, folder: &std::path::Path) {
         use rl_proto::decision::{Decision, DecisionOption, DecisionStatus};
-        let (tmp, token, mut app, folder) = panel().await;
-        let now = Timestamp::now();
+        let now = jiff::Timestamp::now();
         let asked = Decision {
             id: "dec00001".into(),
-            workspace: folder.clone(),
+            workspace: folder.to_path_buf(),
             run: None,
             flow: "f".into(),
             group: None,
@@ -7155,8 +7140,22 @@ mod tests {
         ledger
             .call_blocking(move |c| rl_ledger::decisions::insert(c, &asked))
             .unwrap();
+    }
+
+    fn nine_hours_ago() -> jiff::Timestamp {
+        jiff::Timestamp::now() - jiff::SignedDuration::from_hours(9)
+    }
+
+    fn unseen(app: &super::App, id: &str) -> bool {
+        app.digest.items.iter().any(|i| i.run.id == id && i.unseen)
+    }
+
+    #[tokio::test]
+    async fn a_number_answers_a_question_in_the_catch_up() {
+        let (tmp, token, mut app, folder) = panel().await;
+        ask_in(&tmp, &folder);
         app.refresh().await;
-        app.open_catch_up(now - SignedDuration::from_hours(9)).await;
+        app.open_catch_up(nine_hours_ago()).await;
         assert!(draw_text(&mut app).contains("ship it?"));
         press(&mut app, KeyCode::Down, KeyModifiers::NONE).await;
         assert_eq!(
@@ -7169,6 +7168,136 @@ mod tests {
         assert!(app.view == super::View::CatchUp, "answered where it stands");
         assert!(app.digest.decisions.is_empty(), "{:?}", app.flash);
         assert!(!draw_text(&mut app).contains("ship it?"));
+        token.cancel();
+    }
+
+    #[tokio::test]
+    async fn landing_on_a_question_in_the_catch_up_opens_its_pane() {
+        let (tmp, token, mut app, folder) = panel().await;
+        ask_in(&tmp, &folder);
+        app.refresh().await;
+        app.open_catch_up(nine_hours_ago()).await;
+        assert!(!app.show_pane, "on the project's line");
+        press(&mut app, KeyCode::Down, KeyModifiers::NONE).await;
+        assert_eq!(app.sel.as_deref(), Some("q:dec00001"));
+        assert!(app.show_pane, "a question is only worth its details, as on the list");
+        press(&mut app, KeyCode::Down, KeyModifiers::NONE).await;
+        assert!(!app.show_pane, "and off it the pane goes again");
+        token.cancel();
+    }
+
+    #[tokio::test]
+    async fn enter_on_a_job_in_the_catch_up_goes_to_its_row_on_the_list() {
+        let (_tmp, token, mut app, folder) = panel_of(|folder, now| {
+            let mut r = rl_proto::types::Run::new(
+                "run00002",
+                rl_proto::types::RunKind::Command,
+                "nightly",
+                vec!["sh".into(), "-c".into(), "true".into()],
+                folder,
+                folder,
+                now,
+            );
+            r.cause = rl_proto::types::Cause::Schedule("nightly".into());
+            vec![r]
+        })
+        .await;
+        app.open_catch_up(nine_hours_ago()).await;
+        // Its rule is there: the list is still where enter goes, and `^g`
+        // from there is the graph.
+        app.rules
+            .push(rl_proto::rule::Rule::Schedule(rl_proto::schedule::Schedule {
+                scope: folder.to_string_lossy().into_owned(),
+                name: "nightly".into(),
+                hash: "h".into(),
+                source: folder.join(".relay/schedules.yaml"),
+                spec: rl_proto::schedule::ScheduleSpec {
+                    every: Some("1h".into()),
+                    run: Some(rl_proto::action::Task::Shell("true".into())),
+                    ..Default::default()
+                },
+                paused: false,
+                last_fired_at: None,
+                last_run: None,
+                next_at: None,
+                removed_at: None,
+                approved_hash: Some("h".into()),
+            }));
+        let job = app
+            .catch_rows()
+            .iter()
+            .find_map(|r| match r {
+                super::Row::Job(j) => Some(j.key.clone()),
+                _ => None,
+            })
+            .expect("the nightly job in the catch-up");
+        app.select(Some(job.clone()));
+        assert!(app.rule_here().is_some());
+        assert!(app.hints().starts_with("enter it on the list"), "{}", app.hints());
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+        assert!(app.view == super::View::Work, "the list has job rows of its own");
+        assert_eq!(app.sel.as_deref(), Some(job.as_str()));
+        assert!(!unseen(&app, "run00002"));
+        token.cancel();
+    }
+
+    /// Every way out goes through `back_to_list`: here the pane's attach
+    /// choice, which starts nothing. (Starting a run from the line takes
+    /// the same way out, but needs the `rl-session` binary, which a unit
+    /// test does not have.)
+    #[tokio::test]
+    async fn leaving_the_catch_up_any_way_marks_what_it_showed() {
+        let (_tmp, token, mut app, _folder) = panel_with_runs(2).await;
+        app.open_catch_up(nine_hours_ago()).await;
+        assert!(unseen(&app, "run00001"));
+        app.attach_to("run00002".into(), AREA).await;
+        assert!(app.view == super::View::Work);
+        assert_eq!(
+            app.sel.as_deref(),
+            Some("r:run00002"),
+            "an ended one is read in the pane"
+        );
+        assert!(
+            !unseen(&app, "run00001"),
+            "what the catch-up showed is seen, not only the run gone to"
+        );
+        assert!(app.catch.is_none());
+        token.cancel();
+    }
+
+    #[tokio::test]
+    async fn closing_the_panel_on_the_catch_up_marks_what_it_showed() {
+        let (_tmp, token, mut app, _folder) = panel().await;
+        app.open_catch_up(nine_hours_ago()).await;
+        app.saw_catch_up().await;
+        assert!(!unseen(&app, "run00001"));
+        token.cancel();
+    }
+
+    #[tokio::test]
+    async fn the_list_marks_nothing_seen_when_there_was_no_catch_up() {
+        let (_tmp, token, mut app, _folder) = panel().await;
+        app.saw_catch_up().await;
+        assert!(unseen(&app, "run00001"));
+        token.cancel();
+    }
+
+    #[tokio::test]
+    async fn a_search_narrows_the_catch_up_and_only_what_it_shows_is_seen() {
+        let (_tmp, token, mut app, _folder) = panel_with_runs(2).await;
+        app.open_catch_up(nine_hours_ago()).await;
+        app.filter = "echo".into();
+        app.settle();
+        let keys = app.keys();
+        assert!(keys.iter().any(|k| k == "r:run00002"), "{keys:?}");
+        assert!(!keys.iter().any(|k| k == RUN), "{keys:?}");
+        let frame = draw_text(&mut app);
+        assert!(frame.contains("echo 2") && !frame.contains("make test"), "{frame}");
+        app.select(Some("r:run00002".into()));
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+        assert!(app.view == super::View::Work);
+        assert!(!unseen(&app, "run00002"));
+        assert!(unseen(&app, "run00001"), "the search kept it out of sight");
         token.cancel();
     }
 

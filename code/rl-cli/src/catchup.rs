@@ -63,13 +63,14 @@ impl<'a> CatchUp<'a> {
     /// needs you first, projects that need you first, a project with nothing
     /// new keeps an empty `rows`.
     pub fn build(d: &'a Digest, cx: &Context<'_>) -> Self {
-        // The whole list, whatever it is narrowed to now, with its day of
-        // ended runs counted back from when you left rather than from now,
-        // so a long stretch keeps what ended early in it.
+        // The whole list, whatever lens it is in now but narrowed by its
+        // search, with its day of ended runs counted back from when you left
+        // rather than from now, so a long stretch keeps what ended early in
+        // it.
         let list = Context {
             names: cx.names,
             rules: cx.rules,
-            filter: "",
+            filter: cx.filter,
             lens: Lens::All,
             now: d.since,
         };
