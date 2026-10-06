@@ -29,7 +29,7 @@ mod query;
 mod remove;
 
 pub use pane::{recap_label, summary_label};
-mod rows;
+pub(crate) mod rows;
 mod rules;
 mod screen;
 mod setup;

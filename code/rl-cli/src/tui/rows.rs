@@ -941,14 +941,7 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
         let head = if g.key == EVERYWHERE_KEY {
             Head::everywhere()
         } else {
-            Head {
-                place: names.place(&g.key, &g.workspace),
-                workspace: g.workspace.clone(),
-                name: name.clone(),
-                own: names.own(&g.key, &g.workspace),
-                rules: chips(cx.rules, Some(&g.workspace), now),
-                checkout: checkout_of(&d.checkouts, &g.workspace).cloned(),
-            }
+            head(&g.key, &g.workspace, d, cx)
         };
         let mut block = vec![Row::Group(head)];
         // Runs and jobs share one order: whatever asks for you leads, then the
@@ -1030,14 +1023,7 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
         ) {
             continue;
         }
-        let head = Row::Group(Head {
-            place,
-            workspace: p.clone(),
-            name: name.clone(),
-            own: names.own(&p.to_string_lossy(), &p),
-            rules: chips(cx.rules, Some(&p), now),
-            checkout: checkout.cloned(),
-        });
+        let head = Row::Group(head(&p.to_string_lossy(), &p, d, cx));
         blocks.push((name.to_lowercase(), p.to_string_lossy().into_owned(), vec![head]));
     }
     blocks.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
@@ -1049,6 +1035,20 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
     // under one `everywhere`, rather than under whatever folder that was.
     rows.extend(everywhere);
     rows
+}
+
+/// A project's header: the group `key` (a ref, or a folder), whose work is
+/// in `workspace`.
+pub fn head(key: &str, workspace: &Path, d: &Digest, cx: &Context<'_>) -> Head {
+    let names = cx.names;
+    Head {
+        place: names.place(key, workspace),
+        workspace: workspace.to_path_buf(),
+        name: names.group(key),
+        own: names.own(key, workspace),
+        rules: chips(cx.rules, Some(workspace), cx.now),
+        checkout: checkout_of(&d.checkouts, workspace).cloned(),
+    }
 }
 
 /// Whether a row floats to the top of its project whatever order you put it
