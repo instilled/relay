@@ -7,7 +7,7 @@ use super::{icon_span, pane, rows, theme};
 use crate::catchup::{CatchUp, Project, row_line};
 use jiff::Timestamp;
 use ratatui::text::{Line, Span};
-use rl_core::time::{fmt_duration, fmt_when};
+use rl_proto::types::Summary;
 use rows::{Row, fit};
 
 /// Where the top's bullets and the projects' lines start.
@@ -15,26 +15,44 @@ const INDENT: &str = "  ";
 /// Where a row's icon starts: under its project's name.
 const ROW_INDENT: &str = "   ";
 
-/// The header's words: since when, and how long that is.
-pub fn headline(since: Timestamp, now: Timestamp) -> String {
-    format!(
-        "while you were away · since {} ({})",
-        fmt_when(since, now),
-        fmt_duration(now.duration_since(since))
-    )
+pub use crate::catchup::headline;
+
+/// The top from counts: a bullet a line, cut to the width. A stretch with
+/// nothing in it says so.
+pub fn top(cu: &CatchUp, w: usize) -> Vec<Line<'static>> {
+    let lines = cu.counted();
+    let tone = if cu.bullets().is_empty() {
+        theme::dim()
+    } else {
+        ratatui::style::Style::default()
+    };
+    lines
+        .iter()
+        .map(|b| Line::styled(fit(&format!("{INDENT}{b}"), w).trim_end().to_string(), tone))
+        .collect()
 }
 
-/// The top: a bullet a line, cut to the width. A stretch with nothing in it
-/// says so.
-pub fn top(cu: &CatchUp, w: usize) -> Vec<Line<'static>> {
-    let bullets = cu.bullets();
-    if bullets.is_empty() {
-        return vec![Line::styled(format!("{INDENT}• nothing happened"), theme::dim())];
+/// The top as the assistant wrote it, wrapped to the width — a bullet's
+/// line goes on under its words, not under the bullet — and under it at the
+/// right who wrote it and from what.
+pub fn written(s: &Summary, w: usize) -> Vec<Line<'static>> {
+    let room = w.saturating_sub(INDENT.len()).max(1);
+    let mut out = Vec::new();
+    for l in s.text.lines().map(str::trim_end).filter(|l| !l.trim().is_empty()) {
+        let bullet = ["• ", "- ", "* "].iter().any(|b| l.trim_start().starts_with(b));
+        let hang = if bullet { "  " } else { "" };
+        for (n, part) in pane::wrap(l, room.saturating_sub(hang.len()).max(1))
+            .into_iter()
+            .enumerate()
+        {
+            let lead = if n == 0 { "" } else { hang };
+            out.push(Line::raw(format!("{INDENT}{lead}{part}")));
+        }
     }
-    bullets
-        .iter()
-        .map(|b| Line::raw(fit(&format!("{INDENT}• {b}"), w).trim_end().to_string()))
-        .collect()
+    let label = crate::catchup::top_label(s);
+    let pad = w.saturating_sub(label.chars().count() + 1);
+    out.push(Line::styled(format!("{}{label}", " ".repeat(pad)), theme::dim()));
+    out
 }
 
 /// The projects and their rows, a line each, and in step with them each
@@ -57,7 +75,7 @@ pub fn lines(cu: &CatchUp, w: usize, now: Timestamp) -> (Vec<Line<'static>>, Vec
 /// the left and how the stretch went at the right.
 fn project_line(p: &Project, w: usize) -> Line<'static> {
     let lead = if p.rows.is_empty() { "▸" } else { "▾" };
-    let right = tally(p);
+    let right = p.tally();
     let lead = format!("{INDENT}{lead} ");
     let room = w.saturating_sub(lead.chars().count() + right.chars().count() + 1);
     let tone = if p.need > 0 { theme::needs() } else { theme::dim() };
@@ -67,28 +85,6 @@ fn project_line(p: &Project, w: usize) -> Line<'static> {
         Span::raw(" "),
         Span::styled(right, tone),
     ])
-}
-
-/// How a project's stretch went, in a few words: what needs you, what ran,
-/// what failed; `nothing new` when it is folded.
-fn tally(p: &Project) -> String {
-    if p.rows.is_empty() {
-        return "nothing new".into();
-    }
-    let mut parts = Vec::new();
-    if p.need > 0 {
-        parts.push(format!("{} need{} you", p.need, if p.need == 1 { "s" } else { "" }));
-    }
-    if p.ran > 0 {
-        parts.push(format!("{} ran", p.ran));
-    }
-    if p.failed > 0 {
-        parts.push(format!("{} failed", p.failed));
-    }
-    if parts.is_empty() {
-        parts.push(format!("{} new", p.rows.len()));
-    }
-    parts.join(" · ")
 }
 
 /// A row's line: its icon, what `row_line` says of it, and on a question

@@ -1,40 +1,8 @@
-//! Grouping and text rendering of the digest, shared by `rl since` and the
-//! since-you-left screen.
+//! What the digest says, shared by the panel and `rl since`: what is news
+//! since the boundary, and what a run raised.
 
-use crate::rank;
-use crate::render::{fmt_clock, state_label};
-use jiff::Timestamp;
-use rl_core::time::fmt_age;
 use rl_proto::methods::{Digest, DigestItem};
-use rl_proto::types::{RunState, Signal};
-
-pub struct Group<'a> {
-    pub key: String,
-    pub items: Vec<&'a DigestItem>,
-}
-
-/// Attention-ranked items, grouped by group key in order of first appearance.
-pub fn group<'a, I>(items: I) -> Vec<Group<'a>>
-where
-    I: IntoIterator<Item = &'a DigestItem>,
-{
-    let mut items: Vec<&DigestItem> = items.into_iter().collect();
-    items.sort_by(|a, b| {
-        rank::score(&a.run)
-            .cmp(&rank::score(&b.run))
-            .then_with(|| a.run.place_key().cmp(&b.run.place_key()))
-            .then_with(|| b.at.cmp(&a.at))
-    });
-    let mut groups: Vec<Group> = Vec::new();
-    for it in items {
-        let key = it.run.place_key();
-        match groups.iter_mut().find(|g| g.key == key) {
-            Some(g) => g.items.push(it),
-            None => groups.push(Group { key, items: vec![it] }),
-        }
-    }
-    groups
-}
+use rl_proto::types::Signal;
 
 /// What a run raised, by kind: `flint.product.new-feedback ×5`, a kind on
 /// its own when it came once.
@@ -52,164 +20,47 @@ pub fn signals(emitted: &[Signal]) -> String {
         .join(" · ")
 }
 
-/// What the since screen shows: news since the boundary, and anything unseen.
+/// What the catch-up counts as news: what moved since the boundary, and
+/// anything not looked at yet.
 pub fn since_items(d: &Digest) -> Vec<&DigestItem> {
     d.items.iter().filter(|i| i.at >= d.since || i.unseen).collect()
-}
-
-/// `(need you, finished)` counts.
-pub fn counts<'a>(items: impl IntoIterator<Item = &'a DigestItem>) -> (usize, usize) {
-    let mut need = 0;
-    let mut fin = 0;
-    for i in items {
-        if i.run.state.needs_attention() {
-            need += 1;
-        } else if i.run.state == RunState::Finished {
-            fin += 1;
-        }
-    }
-    (need, fin)
-}
-
-pub fn headline(since: Timestamp, need: usize, fin: usize, now: Timestamp) -> String {
-    headline_with(since, need, fin, 0, now)
-}
-
-/// The same line, plus how many questions are waiting.
-pub fn headline_with(since: Timestamp, need: usize, fin: usize, asked: usize, now: Timestamp) -> String {
-    let mut s = format!("since {} ({} ago)", fmt_clock(since, now), fmt_age(since, now));
-    if asked > 0 {
-        s.push_str(&format!(" · {asked} to decide"));
-    }
-    if need > 0 {
-        s.push_str(&format!(" · {need} need{} you", if need == 1 { "s" } else { "" }));
-    }
-    if fin > 0 {
-        s.push_str(&format!(" · {fin} finished"));
-    }
-    s
-}
-
-/// `rl since` output.
-pub fn text(d: &Digest, now: Timestamp) -> String {
-    let items = since_items(d);
-    if items.is_empty() && d.decisions.is_empty() {
-        return format!(
-            "nothing since {} ({} ago)\n",
-            fmt_clock(d.since, now),
-            fmt_age(d.since, now)
-        );
-    }
-    let (need, fin) = counts(items.iter().copied());
-    let mut out = headline_with(d.since, need, fin, d.decisions.len(), now);
-    out.push('\n');
-    // Questions first: they are the only thing that cannot move without you.
-    if !d.decisions.is_empty() {
-        out.push_str("\nto decide\n");
-        for q in &d.decisions {
-            out.push_str(&format!(
-                "  ? {}  {:>4}  {}  [{}]\n",
-                q.id,
-                fmt_age(q.created_at, now),
-                q.title,
-                q.keys()
-            ));
-        }
-    }
-    for g in group(items) {
-        out.push('\n');
-        out.push_str(&g.key);
-        out.push('\n');
-        for i in g.items {
-            let mark = if i.unseen { '▸' } else { ' ' };
-            out.push_str(&format!(
-                "  {mark} {}  {:<12} {:>4}  {}\n",
-                i.run.id,
-                state_label(i.run.state, i.run.confidence),
-                fmt_age(i.at, now),
-                i.summary
-            ));
-        }
-    }
-    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rl_proto::types::{Confidence, Run, RunKind};
-
-    fn item(id: &str, state: RunState, group: &str, at: &str, unseen: bool, summary: &str) -> DigestItem {
-        let t: Timestamp = at.parse().unwrap();
-        let mut r = Run::new(id, RunKind::Agent, format!("title {id}"), vec![], "/w", "/w", t);
-        r.state = state;
-        r.confidence = Confidence::Exact;
-        r.ref_ = Some(group.into());
-        DigestItem {
-            run: r,
-            summary: summary.into(),
-            at: t,
-            unseen,
-            joined_by: None,
-            emitted: vec![],
-            cwd: None,
-            recap: None,
-        }
-    }
+    use jiff::Timestamp;
+    use rl_proto::types::{Run, RunKind};
 
     #[test]
-    fn groups_rank_and_render() {
-        let d = Digest {
-            since: "2026-09-08T09:12:00Z".parse().unwrap(),
-            decisions: Vec::new(),
-            checkouts: Vec::new(),
-            lost: Vec::new(),
-            hidden: Vec::new(),
-            order: Vec::new(),
-            items: vec![
-                item(
-                    "done1",
-                    RunState::Finished,
-                    "notion:FL-123",
-                    "2026-09-08T11:00:00Z",
-                    false,
-                    "exit 0 · 41m03s",
-                ),
-                item("old00", RunState::Idle, "relay", "2026-09-08T08:00:00Z", false, "idle"),
-                item(
-                    "ask00",
-                    RunState::NeedsInput,
-                    "notion:FL-123",
-                    "2026-09-08T11:48:00Z",
-                    true,
-                    "permission: Bash",
-                ),
-                item(
-                    "fail0",
-                    RunState::Failed,
-                    "nightly",
-                    "2026-09-08T10:00:00Z",
-                    true,
-                    "exit 2 · 3m",
-                ),
-            ],
+    fn news_is_what_moved_since_or_was_not_looked_at() {
+        let item = |id: &str, at: &str, unseen: bool| {
+            let t: Timestamp = at.parse().unwrap();
+            DigestItem {
+                run: Run::new(id, RunKind::Command, id, vec![], "/w", "/w", t),
+                summary: String::new(),
+                at: t,
+                unseen,
+                joined_by: None,
+                emitted: vec![],
+                cwd: None,
+                recap: None,
+            }
         };
-        let now: Timestamp = "2026-09-08T12:00:00Z".parse().unwrap();
-        let shown = since_items(&d);
-        assert_eq!(shown.len(), 3, "the old idle run is not news");
-        let groups = group(shown);
-        assert_eq!(
-            groups.iter().map(|g| g.key.as_str()).collect::<Vec<_>>(),
-            ["notion:FL-123", "nightly"]
-        );
-        assert_eq!(
-            groups[0].items.iter().map(|i| i.run.id.as_str()).collect::<Vec<_>>(),
-            ["ask00", "done1"]
-        );
-        let t = text(&d, now);
-        assert!(t.starts_with("since "), "{t}");
-        assert!(t.contains("2 need you · 1 finished"), "{t}");
-        assert!(t.contains("  ▸ ask00  needs_input   12m  permission: Bash"), "{t}");
-        assert!(t.contains("    done1  finished       1h  exit 0 · 41m03s"), "{t}");
+        let d = Digest {
+            since: "2026-09-08T09:00:00Z".parse().unwrap(),
+            items: vec![
+                item("moved", "2026-09-08T10:00:00Z", false),
+                item("old", "2026-09-08T08:00:00Z", false),
+                item("unseen", "2026-09-08T08:00:00Z", true),
+            ],
+            decisions: vec![],
+            checkouts: vec![],
+            lost: vec![],
+            hidden: vec![],
+            order: vec![],
+        };
+        let ids: Vec<&str> = since_items(&d).iter().map(|i| i.run.id.as_str()).collect();
+        assert_eq!(ids, ["moved", "unseen"]);
     }
 }

@@ -83,7 +83,7 @@ enum Cmd {
     Unhide(HideArgs),
     /// Pick an ended run back up as a new run: an agent's conversation, a fresh shell, a command again.
     Resume(ResumeArgs),
-    /// What happened while you were away: runs that need you, finished, or moved, grouped.
+    /// What happened while you were away: the panel's catch-up — a summary on top, then each project and what in it needs you, ran or failed.
     Since(SinceArgs),
     /// List ledger events.
     Events(EventsArgs),
@@ -1253,10 +1253,68 @@ async fn since(home: &Home, a: SinceArgs, json: bool) -> Result<()> {
     let d = c.call::<DigestGet>(DigestParams { since: Some(boundary) }).await?;
     if json {
         println!("{}", serde_json::to_string(&d)?);
-    } else {
-        print!("{}", rl_cli::digest::text(&d, n));
+        return Ok(());
     }
+    // The catch-up as the panel builds it: the list's rows, grouped as the
+    // list groups them.
+    let workspaces = c.call::<WorkspaceList>(()).await?;
+    let rules = c
+        .call::<RuleList>(ScheduleFilter { all: false })
+        .await
+        .unwrap_or_default();
+    let cu = rl_cli::catchup::CatchUp::of(&d, workspaces.into_iter().map(|w| (w.path, w.name)), &rules, n);
+    let top = since_top(&mut c, &cu, boundary).await;
+    print!("{}", rl_cli::catchup::text(&cu, &top, n));
     Ok(())
+}
+
+/// The top `rl since` prints: the summary of everything from `from` kept
+/// while it is up to date; else, when `catch_up.summary` is `auto` and
+/// there is an assistant to ask, a new one, waited for; else the one kept,
+/// moved on or not — or, with none, or the assistant failing, the counts.
+async fn since_top(c: &mut Client, cu: &rl_cli::catchup::CatchUp<'_>, from: jiff::Timestamp) -> Vec<String> {
+    use rl_cli::catchup::{top_worthy, written};
+    // No run in it: nothing to ask anyone about.
+    if !cu.has_runs() {
+        return cu.counted();
+    }
+    let ask = SummaryParams {
+        target: SummaryTarget::All,
+        deep: false,
+        from: Some(from),
+        again: false,
+        dry: false,
+        timeout: None,
+    };
+    let kept = c
+        .call::<SummaryGet>(ask.clone())
+        .await
+        .ok()
+        .flatten()
+        .filter(top_worthy);
+    if let Some(k) = kept.as_ref().filter(|k| !k.stale) {
+        return written(k);
+    }
+    let auto = c
+        .call::<ConfigGet>(())
+        .await
+        .is_ok_and(|r| r.config.catch_up.auto_summary() && r.summary.is_some_and(|a| a.available));
+    let made = if auto {
+        eprintln!("writing the top…");
+        match c.call::<SummaryMake>(ask).await {
+            Ok(s) => Some(s).filter(top_worthy),
+            Err(e) => {
+                eprintln!("the top: {e:#}");
+                None
+            }
+        }
+    } else {
+        kept
+    };
+    match made {
+        Some(s) => written(&s),
+        None => cu.counted(),
+    }
 }
 
 async fn events(home: &Home, a: EventsArgs, json: bool) -> Result<()> {

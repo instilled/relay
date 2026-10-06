@@ -566,7 +566,7 @@ impl QuestionPane {
 
 /// Words laid out in lines of at most `width` characters, breaking at spaces
 /// where it can and mid-word where it must.
-fn wrap(text: &str, width: usize) -> Vec<String> {
+pub(crate) fn wrap(text: &str, width: usize) -> Vec<String> {
     let width = width.max(1);
     let mut out = Vec::new();
     let mut cur = String::new();

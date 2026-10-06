@@ -2,20 +2,22 @@
 //!
 //! The list's rows for the stretch, under the list's own headers: a question,
 //! a run waiting on you, a run with news since you left — or that you have
-//! not looked at yet — and a job's firings in that time. What needs you leads
-//! each project, and the projects that need you lead; a project with nothing
-//! new keeps its header and folds to one line. Counted — only what happened
+//! not looked at yet — and a job's firings in that time; never an assistant's
+//! own run, which is Relay's doing. What needs you leads each project, and
+//! the projects that need you lead; a project with nothing new keeps its
+//! header and folds to one line. Counted — only what happened
 //! in the stretch is counted as ran or failed — they are the top without an
 //! assistant; in a line each, what an assistant is handed to write it.
 
 use crate::digest::since_items;
 use crate::tui::rows::{self, Context, Head, Lens, Row};
 use jiff::Timestamp;
-use rl_core::time::fmt_age;
+use rl_core::time::{fmt_age, fmt_duration, fmt_when};
 use rl_proto::methods::{Digest, DigestItem};
-use rl_proto::types::{Run, RunState};
+use rl_proto::rule::Rule;
+use rl_proto::types::{Cause, Run, RunState, Summary};
 use std::collections::HashSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// How many of a job's firings in the stretch its line shows as marks.
 const MARKS: usize = 10;
@@ -101,6 +103,9 @@ impl<'a> CatchUp<'a> {
                     continue;
                 }
                 Row::Question(q) => Row::Question(q),
+                // An assistant's own run — the top being written, a recap —
+                // is Relay's doing, not what happened.
+                Row::Run(i) if matches!(i.run.cause, Cause::Assistant(_)) => continue,
                 Row::Run(i) if news(i) || waiting(i) => Row::Run(i),
                 Row::Run(_) => continue,
                 Row::Job(mut j) => {
@@ -177,6 +182,27 @@ impl<'a> CatchUp<'a> {
         }
     }
 
+    /// The catch-up of `d` as `rl since` builds it: the folders by the names
+    /// they were registered under, the rules as they stand, nothing filtered.
+    pub fn of(
+        d: &'a Digest,
+        workspaces: impl IntoIterator<Item = (PathBuf, String)>,
+        rules: &[Rule],
+        now: Timestamp,
+    ) -> Self {
+        let names = rows::Names::new(workspaces);
+        Self::build(
+            d,
+            &Context {
+                names: &names,
+                rules,
+                filter: "",
+                lens: Lens::All,
+                now,
+            },
+        )
+    }
+
     /// The top without an assistant: a bullet per project with something to
     /// say, from counts.
     pub fn bullets(&self) -> Vec<String> {
@@ -207,6 +233,25 @@ impl<'a> CatchUp<'a> {
         out
     }
 
+    /// The top from counts, a bullet a line; `nothing happened` when there
+    /// is nothing to count.
+    pub fn counted(&self) -> Vec<String> {
+        let b = self.bullets();
+        if b.is_empty() {
+            return vec!["• nothing happened".into()];
+        }
+        b.iter().map(|b| format!("• {b}")).collect()
+    }
+
+    /// Whether a run or a job is in it: questions alone give an assistant
+    /// nothing to tell, and the counts say them.
+    pub fn has_runs(&self) -> bool {
+        self.projects
+            .iter()
+            .flat_map(|p| &p.rows)
+            .any(|r| matches!(r, Row::Run(_) | Row::Job(_)))
+    }
+
     /// What the assistant is handed for the top: (project name, its rows'
     /// lines). A project with nothing new hands nothing.
     pub fn lines(&self) -> Vec<(String, String)> {
@@ -219,6 +264,101 @@ impl<'a> CatchUp<'a> {
             })
             .collect()
     }
+}
+
+impl Project<'_> {
+    /// How its stretch went, in a few words: what needs you, what ran, what
+    /// failed; `nothing new` when it is folded.
+    pub fn tally(&self) -> String {
+        if self.rows.is_empty() {
+            return "nothing new".into();
+        }
+        let mut parts = Vec::new();
+        if self.need > 0 {
+            parts.push(format!(
+                "{} need{} you",
+                self.need,
+                if self.need == 1 { "s" } else { "" }
+            ));
+        }
+        if self.ran > 0 {
+            parts.push(format!("{} ran", self.ran));
+        }
+        if self.failed > 0 {
+            parts.push(format!("{} failed", self.failed));
+        }
+        if parts.is_empty() {
+            parts.push(format!("{} new", self.rows.len()));
+        }
+        parts.join(" · ")
+    }
+}
+
+/// The catch-up's first words: since when, and how long that is.
+pub fn headline(since: Timestamp, now: Timestamp) -> String {
+    format!(
+        "while you were away · since {} ({})",
+        fmt_when(since, now),
+        fmt_duration(now.duration_since(since))
+    )
+}
+
+/// Whether a summary of everything can stand as the top: one that only says
+/// nothing ran cannot — the counts say so, and what waits on you too.
+pub fn top_worthy(s: &Summary) -> bool {
+    s.source != "nothing new"
+}
+
+/// The top as the assistant wrote it, a line each, and last who wrote it and
+/// from what (`# by haiku · from 23 runs`).
+pub fn written(s: &Summary) -> Vec<String> {
+    s.text
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| l.trim_end().to_string())
+        .chain(std::iter::once(format!("# {}", top_label(s))))
+        .collect()
+}
+
+/// Who wrote the top and from what: `by haiku · from 23 runs`, `deep` first
+/// when it read the logs, `moved on since` when more has happened.
+pub fn top_label(s: &Summary) -> String {
+    let mut parts = Vec::new();
+    if s.deep {
+        parts.push("deep".to_string());
+    }
+    parts.push(format!("by {}", s.agent));
+    parts.push(format!("from {} run{}", s.runs, if s.runs == 1 { "" } else { "s" }));
+    if s.stale {
+        parts.push("moved on since".into());
+    }
+    parts.join(" · ")
+}
+
+/// The catch-up as `rl since` prints it: the headline, the `top` (a line
+/// each, as given), then each project's line and under it its rows — a run
+/// by its id, a question by its id and the keys that answer it.
+pub fn text(cu: &CatchUp, top: &[String], now: Timestamp) -> String {
+    let mut out = headline(cu.since, now);
+    out.push_str("\n\n");
+    for l in top {
+        out.push_str(&format!("  {l}\n"));
+    }
+    for p in &cu.projects {
+        let lead = if p.rows.is_empty() { '▸' } else { '▾' };
+        out.push_str(&format!("\n{lead} {} · {}", p.head.name, p.tally()));
+        for r in &p.rows {
+            let line = row_line(r, now);
+            out.push_str(&match r {
+                Row::Question(q) => format!("\n    {} {}  {line}  [{}]", rows::QUESTION, q.id, q.keys()),
+                Row::Run(i) => format!("\n    {} {}  {line}", rows::icon(&i.run), i.run.id),
+                Row::Job(_) => format!("\n    {} {line}", rows::JOB),
+                Row::Group(_) => continue,
+            });
+        }
+    }
+    out.push('\n');
+    out
 }
 
 /// The header a question or a run goes under where the list gives it none:
@@ -301,7 +441,7 @@ mod tests {
     use crate::tui::rows::{Lens, Names};
     use rl_proto::decision::{Decision, DecisionOption, DecisionStatus};
     use rl_proto::methods::DigestItem;
-    use rl_proto::types::{Cause, Confidence, Run, RunKind, RunState};
+    use rl_proto::types::{Cause, Confidence, Run, RunKind, RunState, Summary};
     use std::path::{Path, PathBuf};
 
     fn item(id: &str, state: RunState, ws: &str, at: &str, unseen: bool) -> DigestItem {
@@ -532,6 +672,30 @@ mod tests {
     }
 
     #[test]
+    fn only_a_question_is_nothing_for_an_assistant_to_tell() {
+        let mut d = fixture();
+        d.items.clear();
+        let names = names();
+        let cu = build(&d, &names);
+        assert!(!cu.has_runs(), "a question alone");
+        assert_eq!(cu.counted(), ["• 1 needs you: api"]);
+        assert!(build(&fixture(), &names).has_runs());
+    }
+
+    #[test]
+    fn an_assistants_own_run_is_not_news() {
+        let mut d = fixture();
+        let mut top = item("s1", RunState::Working, RELAY, "2026-10-06T11:00:00Z", true);
+        top.run.cause = Cause::Assistant("summary".into());
+        d.items.push(top);
+        let names = names();
+        let cu = build(&d, &names);
+        let relay = cu.projects.iter().find(|p| p.head.name == "relay").unwrap();
+        assert!(relay.rows.is_empty(), "writing the top is not what happened");
+        assert!(!cu.bullets().iter().any(|b| b.starts_with("relay")));
+    }
+
+    #[test]
     fn a_question_goes_under_its_own_folder_not_one_of_the_same_name() {
         let (one, two) = ("/home/f/app", "/home/g/app");
         let d = Digest {
@@ -598,5 +762,46 @@ mod tests {
         assert!(line.contains("needs you"), "{line}");
         assert!(line.contains("Search fixed; nothing committed."), "{line}");
         assert!(line.ends_with("2h ago"), "{line}");
+    }
+
+    #[test]
+    fn the_text_is_the_headline_the_top_then_each_project() {
+        let (d, names) = (fixture(), names());
+        let cu = build(&d, &names);
+        let t = text(&cu, &["• it went fine".to_string()], now());
+        let lines: Vec<&str> = t.lines().collect();
+        assert!(lines[0].starts_with("while you were away · since "), "{t}");
+        assert!(lines[0].ends_with("(12h00m)"), "{t}");
+        assert_eq!(lines[2], "  • it went fine", "{t}");
+        assert!(t.contains("\n▾ api · 3 need you · 4 ran · 2 failed\n"), "{t}");
+        assert!(t.contains("\n    ? q1  asks: question q1 · 4h ago  [ok]\n"), "{t}");
+        assert!(t.contains("    ✦ a1  title a1 · failed"), "a run by its id: {t}");
+        assert!(t.contains("    ↻ ··× nightly · failed"), "{t}");
+        assert!(t.ends_with("\n▸ relay · nothing new\n"), "{t}");
+    }
+
+    #[test]
+    fn the_top_says_who_wrote_it_and_from_how_many_runs() {
+        let mut s = Summary {
+            run: String::new(),
+            agent: "haiku".into(),
+            by: "x1".into(),
+            at: now(),
+            text: "• fine".into(),
+            since: None,
+            source: "summarised".into(),
+            reach: String::new(),
+            stale: false,
+            target: "all".into(),
+            deep: false,
+            from: Some(now()),
+            calls: 1,
+            runs: 23,
+        };
+        assert_eq!(top_label(&s), "by haiku · from 23 runs");
+        s.runs = 1;
+        s.deep = true;
+        s.stale = true;
+        assert_eq!(top_label(&s), "deep · by haiku · from 1 run · moved on since");
     }
 }
