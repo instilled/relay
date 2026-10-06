@@ -472,12 +472,20 @@ becomes the selection; `attach` selects the asking run and joins it, as `enter` 
 The line answers too: on a question, a line that starts with an option — its number or its key,
 several joined by commas where it takes several — answers with that option and the rest of the
 line as the note (`1 only the checkout path`), and the line's hint says so before you send it.
-Typed text before `^x` goes with a dismissal as its reason. `/summary [since]` recaps the run
-under the cursor, live or ended (§6), and the recap lands in the pane under the facts, aligned
-with them: `recap    claude's own · 2m ago · last 2h`, the words under it in the value column,
-and `· moved on since` once the run has gone on. Asked over a terminal being watched, the pane
-turns to the details, where the recap is; the terminal stays open, and `enter` on the run is
-back in it. An assistant is only ever asked when you ask; Claude's and Codex's own recaps are
+Typed text before `^x` goes with a dismissal as its reason. `/summary [deep] [since]` says what
+happened in the row under the cursor (§6): a run, live or ended; a job's runs, in its project's
+folder or, under `everywhere`, anywhere; a project's on its header; everything on `everywhere`.
+Brief reads the recaps, `deep` the logs. With no stretch typed, a run's and a job's is since you
+last looked at them (the daemon's to say), a project's and everything's since you were last here
+(`App::away_since`, else the last day). Deep asks `summary.make {dry: true}` first, and past one
+assistant call says so and waits (`deep over 3 runs · up to 4 calls · y / any key`; `y` asks,
+anything else lets it be). The answer lands in the pane under the facts, aligned with them —
+`recap` on a run, `summary` on a job or a header: `deep · by haiku · since 22:14 · 3m ago` (or
+`claude's own`, and `4 calls` past one), the words under it in the value column, and `· moved on
+since` once what it is of has gone on. The pane fetches the one kept (`summary.get`) over the
+stretch and depth last made of that row while the panel is open, else its default. Asked over a
+terminal being watched, the pane turns to the details, where the summary is; the terminal stays
+open, and `enter` on the run is back in it. An assistant is only ever asked when you ask; Claude's and Codex's own recaps are
 there already, kept as they write them (§6).
 
 **Typing is what the panel rests in.** One line sits at the foot and always takes what you type
@@ -924,8 +932,9 @@ special except its cause.
 
 **The summariser** says what happened, for someone who was not looking, in a run, a job's runs
 (a schedule's or a reaction's), a project's, or everything (`summary.make {target: run | job |
-project | all, deep, from, again, dry}`; `rld`'s `rl-daemon/src/summary.rs`). `/summary [since]`
-in the panel and `rl summary <id> [since] [--again]` ask it of a run; the client turns the
+project | all, deep, from, again, dry}`; `rld`'s `rl-daemon/src/summary.rs`). `/summary [deep]
+[since]` in the panel asks it of the row under the cursor (§4), and `rl summary <run|job|folder|all>
+[since] [--deep] [--again]` of what it names; the client turns the
 stretch (`2h`, a date, an instant) into `from`. Left out, `from` is since you last looked: a
 run's `seen_at` when it has written output or had an event since (selecting a row is looking,
 so a run that waits as it was is told whole), else the whole run; for a job, from the start of

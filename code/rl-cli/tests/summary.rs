@@ -167,7 +167,7 @@ fn an_ended_run_is_summarised_on_the_line() {
     // A run, read from its logs.
     let (ok, out, err) = run(rl(&["summary", &id, "--deep"]));
     assert!(ok, "{err}");
-    assert!(out.lines().last().unwrap().contains(" · deep"), "{out}");
+    assert!(out.lines().last().unwrap().starts_with("# deep · "), "{out}");
 
     // No such run.
     let (ok, _, err) = run(rl(&["summary", "nope"]));

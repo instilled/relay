@@ -188,9 +188,9 @@ pub const ALL: &[Command] = &[
     },
     Command {
         name: "summary",
-        args: "[since]",
-        words: &[],
-        what: "recap a run: its agent's own, or an assistant's; 2h, only the last 2h",
+        args: "[deep] [since]",
+        words: &[&["deep"]],
+        what: "say what happened here since you last looked: a run, a job, a project, everything · deep reads the logs",
         cmd: Cmd::Summary,
     },
     Command {
