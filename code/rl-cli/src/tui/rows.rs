@@ -178,7 +178,7 @@ pub fn everywhere_run(r: &Run, names: &Names, rules: &[Rule]) -> bool {
 
 /// The group a run is shown under: the `everywhere` one, or its ref, else
 /// its folder.
-fn group_key(r: &Run, names: &Names, rules: &[Rule]) -> String {
+pub fn group_key(r: &Run, names: &Names, rules: &[Rule]) -> String {
     if everywhere_run(r, names, rules) {
         EVERYWHERE_KEY.to_string()
     } else {

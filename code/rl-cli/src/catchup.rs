@@ -1,11 +1,12 @@
 //! The catch-up: what happened while you were away, as the list's own rows.
 //!
 //! The list's rows for the stretch, under the list's own headers: a question,
-//! a run with news since you left, a job's firings in that time. What needs
-//! you leads each project, and the projects that need you lead; a project
-//! with nothing new keeps its header and folds to one line. Counted, they are
-//! the top without an assistant; in a line each, what an assistant is handed
-//! to write it.
+//! a run waiting on you, a run with news since you left — or that you have
+//! not looked at yet — and a job's firings in that time. What needs you leads
+//! each project, and the projects that need you lead; a project with nothing
+//! new keeps its header and folds to one line. Counted — only what happened
+//! in the stretch is counted as ran or failed — they are the top without an
+//! assistant; in a line each, what an assistant is handed to write it.
 
 use crate::digest::since_items;
 use crate::tui::rows::{self, Context, Head, Lens, Row};
@@ -28,6 +29,8 @@ pub struct CatchUp<'a> {
 
 pub struct Project<'a> {
     pub head: Head,
+    /// The list's group key: a ref, a folder, or `everywhere`'s.
+    key: String,
     /// Questions, runs that need you, and jobs whose last firing failed.
     pub need: usize,
     /// Runs and job firings in the stretch.
@@ -38,9 +41,10 @@ pub struct Project<'a> {
 }
 
 impl<'a> Project<'a> {
-    fn new(head: Head) -> Self {
+    fn new(head: Head, key: String) -> Self {
         Self {
             head,
+            key,
             need: 0,
             ran: 0,
             failed: 0,
@@ -59,37 +63,60 @@ impl<'a> CatchUp<'a> {
     /// needs you first, projects that need you first, a project with nothing
     /// new keeps an empty `rows`.
     pub fn build(d: &'a Digest, cx: &Context<'_>) -> Self {
-        // The whole list, whatever it is narrowed to now.
-        let cx = Context {
+        // The whole list, whatever it is narrowed to now, with its day of
+        // ended runs counted back from when you left rather than from now,
+        // so a long stretch keeps what ended early in it.
+        let list = Context {
             names: cx.names,
             rules: cx.rules,
             filter: "",
             lens: Lens::All,
-            now: cx.now,
+            now: d.since,
         };
+        let since = d.since;
         let news: HashSet<&str> = since_items(d).into_iter().map(|i| i.run.id.as_str()).collect();
-        let fresh = |i: &DigestItem| news.contains(i.run.id.as_str());
+        let news = |i: &DigestItem| news.contains(i.run.id.as_str());
+        let waiting = |i: &DigestItem| matches!(i.run.state, RunState::NeedsInput | RunState::Blocked);
         let mut projects: Vec<Project<'a>> = Vec::new();
+        // Whether the last header's key has been read off a row under it.
+        let mut keyed = true;
         // Questions, and runs pinned or come through, stand above every
         // header on the list; here they go under their project's.
         let mut loose: Vec<Row<'a>> = Vec::new();
-        for row in rows::build(d, &cx) {
+        for row in rows::build(d, &list) {
+            if let (false, Some(p), Some(r)) = (keyed, projects.last_mut(), run_of(&row)) {
+                p.key = rows::group_key(r, cx.names, cx.rules);
+                keyed = true;
+            }
             let row = match row {
-                Row::Group(h) => {
-                    projects.push(Project::new(h));
+                Row::Group(mut h) => {
+                    // Its rules' times from now, not from when you left.
+                    if !h.is_everywhere() {
+                        h.rules = rows::chips(cx.rules, Some(&h.workspace), cx.now);
+                    }
+                    let key = h.workspace.to_string_lossy().into_owned();
+                    projects.push(Project::new(h, key));
+                    keyed = false;
                     continue;
                 }
                 Row::Question(q) => Row::Question(q),
-                Row::Run(i) if fresh(i) => Row::Run(i),
+                Row::Run(i) if news(i) || waiting(i) => Row::Run(i),
+                Row::Run(_) => continue,
                 Row::Job(mut j) => {
-                    // Only its firings in the stretch; a job with none is not news.
-                    j.runs.retain(|i| fresh(i));
-                    if j.runs.is_empty() {
+                    if !j.runs.iter().any(|i| news(i)) {
                         continue;
+                    }
+                    // Its marks speak for its firings in the stretch; one
+                    // you have not looked at from before it keeps the row,
+                    // and is all it shows when there is nothing since.
+                    let stretch: Vec<&DigestItem> = j.runs.iter().copied().filter(|i| i.at >= since).collect();
+                    if stretch.is_empty() {
+                        j.runs.retain(|i| i.unseen);
+                    } else {
+                        j.runs = stretch;
                     }
                     Row::Job(j)
                 }
-                Row::Run(_) => continue,
             };
             match projects.last_mut() {
                 Some(p) => p.rows.push(row),
@@ -105,33 +132,37 @@ impl<'a> CatchUp<'a> {
                 Row::Run(i) => (Some(&i.run), i.run.workspace.as_path()),
                 Row::Group(_) | Row::Job(_) => continue,
             };
-            let head = head_of(d, &cx, run, ws);
-            let p = match projects
-                .iter()
-                .position(|p| p.head.name == head.name && p.head.is_everywhere() == head.is_everywhere())
-            {
+            // Under the header the list would give it: its ref's, else its
+            // folder's — not another folder that goes by the same name.
+            let key = match run {
+                Some(r) => rows::group_key(r, cx.names, cx.rules),
+                None => ws.to_string_lossy().into_owned(),
+            };
+            let p = match projects.iter().position(|p| p.key == key) {
                 Some(p) => p,
                 None => {
-                    projects.push(Project::new(head));
+                    projects.push(Project::new(head_of(d, cx, run, ws), key));
                     projects.len() - 1
                 }
             };
             projects[p].rows.push(row);
         }
+        let ran = |i: &DigestItem| i.at >= since;
+        let failed = |i: &DigestItem| ran(i) && i.run.state == RunState::Failed;
         for p in &mut projects {
             p.rows.sort_by_key(|r| (tier(r), std::cmp::Reverse(at(r))));
             for r in &p.rows {
                 match r {
                     Row::Question(_) => p.need += 1,
                     Row::Run(i) => {
-                        p.ran += 1;
                         p.need += usize::from(i.run.state.needs_attention());
-                        p.failed += usize::from(i.run.state == RunState::Failed);
+                        p.ran += usize::from(ran(i));
+                        p.failed += usize::from(failed(i));
                     }
                     Row::Job(j) => {
-                        p.ran += j.runs.len();
                         p.need += usize::from(j.last().run.state == RunState::Failed);
-                        p.failed += j.failed();
+                        p.ran += j.runs.iter().filter(|i| ran(i)).count();
+                        p.failed += j.runs.iter().filter(|i| failed(i)).count();
                     }
                     Row::Group(_) => {}
                 }
@@ -200,6 +231,15 @@ fn head_of(d: &Digest, cx: &Context<'_>, run: Option<&Run>, ws: &Path) -> Head {
     }
 }
 
+/// The run a row is, or a job's last firing.
+fn run_of<'r>(r: &'r Row) -> Option<&'r Run> {
+    match r {
+        Row::Run(i) => Some(&i.run),
+        Row::Job(j) => Some(&j.last().run),
+        Row::Group(_) | Row::Question(_) => None,
+    }
+}
+
 /// Where a row stands in its project: a question, then what else needs you,
 /// then the rest.
 fn tier(r: &Row) -> u8 {
@@ -261,7 +301,7 @@ mod tests {
     use rl_proto::decision::{Decision, DecisionOption, DecisionStatus};
     use rl_proto::methods::DigestItem;
     use rl_proto::types::{Cause, Confidence, Run, RunKind, RunState};
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     fn item(id: &str, state: RunState, ws: &str, at: &str, unseen: bool) -> DigestItem {
         let t: Timestamp = at.parse().unwrap();
@@ -426,6 +466,94 @@ mod tests {
         assert_eq!(keys(scratch), ["q:q2"]);
         assert_eq!(scratch.need, 1);
         assert_eq!(scratch.head.workspace, PathBuf::from("/home/f/scratch"));
+    }
+
+    #[test]
+    fn what_is_unseen_from_before_the_stretch_shows_but_is_not_counted() {
+        let mut d = fixture();
+        // Before `since`, more than a day before now, and never looked at.
+        let mut old = fired("n0", "nightly", RunState::Failed, "2026-10-05T10:00:00Z");
+        old.unseen = true;
+        d.items.push(old);
+        d.items
+            .push(item("a0", RunState::Failed, API, "2026-10-05T09:00:00Z", true));
+        let names = names();
+        let cu = build(&d, &names);
+        let api = &cu.projects[0];
+        assert!(keys(api).contains(&"r:a0".to_string()), "still shown: {:?}", keys(api));
+        assert_eq!((api.ran, api.failed), (4, 2), "only the stretch is counted");
+        assert_eq!(api.need, 4, "but it still needs you");
+        let job = api.rows.iter().find(|r| matches!(r, Row::Job(_))).unwrap();
+        assert!(
+            row_line(job, now()).starts_with("··× nightly"),
+            "{}",
+            row_line(job, now())
+        );
+    }
+
+    #[test]
+    fn a_long_stretch_keeps_what_ended_more_than_a_day_ago() {
+        let mut d = fixture();
+        d.since = "2026-10-03T12:00:00Z".parse().unwrap();
+        // A stopped firing is never news; a run you looked at elsewhere is
+        // not news either. Both are in the stretch, and more than a day old.
+        let mut stopped = fired("h1", "hourly", RunState::Stopped, "2026-10-04T10:00:00Z");
+        stopped.unseen = false;
+        d.items.push(stopped);
+        d.items
+            .push(item("seen", RunState::Finished, API, "2026-10-04T12:00:00Z", false));
+        let names = names();
+        let cu = build(&d, &names);
+        let api = &cu.projects[0];
+        let k = keys(api);
+        assert!(k.contains(&"r:seen".to_string()), "{k:?}");
+        assert!(k.contains(&"j:schedule:hourly@/home/f/api".to_string()), "{k:?}");
+        let relay = cu.projects.iter().find(|p| p.head.name == "relay").unwrap();
+        assert_eq!(
+            keys(relay),
+            ["r:r1"],
+            "the run you saw before you left is now in the stretch"
+        );
+    }
+
+    #[test]
+    fn a_run_waiting_on_you_is_kept_however_old() {
+        let mut d = fixture();
+        d.items
+            .push(item("w1", RunState::NeedsInput, RELAY, "2026-10-05T20:00:00Z", false));
+        d.items
+            .push(item("r3", RunState::Finished, RELAY, "2026-10-06T10:00:00Z", true));
+        let names = names();
+        let cu = build(&d, &names);
+        let relay = cu.projects.iter().find(|p| p.head.name == "relay").unwrap();
+        assert_eq!(keys(relay), ["r:w1", "r:r3"]);
+        assert_eq!((relay.need, relay.ran), (1, 1));
+    }
+
+    #[test]
+    fn a_question_goes_under_its_own_folder_not_one_of_the_same_name() {
+        let (one, two) = ("/home/f/app", "/home/g/app");
+        let d = Digest {
+            since: "2026-10-06T00:00:00Z".parse().unwrap(),
+            items: vec![],
+            decisions: vec![question("q1", two, "2026-10-06T08:00:00Z")],
+            checkouts: vec![],
+            lost: vec![],
+            hidden: vec![],
+            order: vec![],
+        };
+        let names = Names::new([
+            (PathBuf::from(one), "app".to_string()),
+            (PathBuf::from(two), "app".to_string()),
+        ]);
+        let cu = build(&d, &names);
+        let under = |ws: &str| {
+            let p = cu.projects.iter().find(|p| p.head.workspace == Path::new(ws)).unwrap();
+            keys(p)
+        };
+        assert_eq!(under(two), ["q:q1"]);
+        assert!(under(one).is_empty());
+        assert_eq!(cu.projects.len(), 2, "no third header for it");
     }
 
     #[test]
