@@ -24,6 +24,8 @@ fn a_recorded_claude_session_reports_through_its_hooks() {
         .unwrap();
     let path = format!("{}:{}", fixtures.display(), std::env::var("PATH").unwrap_or_default());
     let tmp = tempfile::tempdir().unwrap();
+    // `rl since` would have the fixture write its top: it is counted instead.
+    std::fs::write(tmp.path().join("config.yaml"), "catch_up:\n  summary: ask\n").unwrap();
     let run = |args: &[&str]| {
         let out = Command::new(env!("CARGO_BIN_EXE_rl"))
             .args(args)
@@ -126,6 +128,7 @@ fn a_recorded_claude_session_reports_through_its_hooks() {
 
     let (_, out, _) = run(&["since", "24h"]);
     assert!(out.contains("gh:10"), "{out}");
-    assert!(out.contains(&format!("{id}  finished")), "{out}");
+    assert!(out.contains(&format!(" {id}  ")), "{out}");
+    assert!(out.contains("done · exit 0"), "{out}");
     assert!(run(&["daemon", "stop"]).0);
 }

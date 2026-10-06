@@ -124,6 +124,10 @@ fn an_ended_run_is_summarised_on_the_line() {
         "{out}"
     );
     assert!(out.contains("--headless  (config)"), "{out}");
+    assert!(
+        out.contains("`auto` writes the top when you come back after `after`, by assistants.summary"),
+        "{out}"
+    );
 
     // Everything, over the last hour: said by what it is of, and from when.
     let (ok, out, err) = run(rl(&["summary", "all", "1h"]));

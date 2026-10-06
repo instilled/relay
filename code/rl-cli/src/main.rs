@@ -83,7 +83,7 @@ enum Cmd {
     Unhide(HideArgs),
     /// Pick an ended run back up as a new run: an agent's conversation, a fresh shell, a command again.
     Resume(ResumeArgs),
-    /// What happened while you were away: runs that need you, finished, or moved, grouped.
+    /// What happened while you were away: the panel's catch-up — a summary on top, then each project and what in it needs you, ran or failed.
     Since(SinceArgs),
     /// List ledger events.
     Events(EventsArgs),
@@ -1239,24 +1239,78 @@ async fn resume(home: &Home, a: ResumeArgs, json: bool) -> Result<()> {
 async fn since(home: &Home, a: SinceArgs, json: bool) -> Result<()> {
     let n = now();
     let mut c = daemon::ensure(home, !json).await?;
-    let boundary = match a.since.as_deref() {
-        Some(s) => parse_since(s, n)?,
+    // Bare, it counts from when you last looked — and only then is the top
+    // written by itself, as you come back.
+    let (boundary, came_back) = match a.since.as_deref() {
+        Some(s) => (parse_since(s, n)?, false),
         None => {
             // Looking now; the boundary is the last time we did.
             let me = rl_cli::attach::client_name();
-            c.call::<PresenceTouch>(PresenceClient { client: me })
+            match c
+                .call::<PresenceTouch>(PresenceClient { client: me })
                 .await?
                 .last_seen_at
-                .unwrap_or(n - jiff::SignedDuration::from_hours(24))
+            {
+                Some(last) => (last, true),
+                None => (n - jiff::SignedDuration::from_hours(24), false),
+            }
         }
     };
-    let d = c.call::<DigestGet>(DigestParams { since: Some(boundary) }).await?;
+    // The stretch cut from the list's digest, as the panel cuts it, so the
+    // two never disagree.
+    let d = rl_cli::catchup::stretch(&c.call::<DigestGet>(DigestParams::default()).await?, boundary);
     if json {
         println!("{}", serde_json::to_string(&d)?);
-    } else {
-        print!("{}", rl_cli::digest::text(&d, n));
+        return Ok(());
     }
+    // The catch-up as the panel builds it: the list's rows, grouped as the
+    // list groups them.
+    let workspaces = c.call::<WorkspaceList>(()).await?;
+    let rules = c
+        .call::<RuleList>(ScheduleFilter { all: false })
+        .await
+        .unwrap_or_default();
+    let relay = std::fs::canonicalize(home.path()).unwrap_or_else(|_| home.path().to_path_buf());
+    let cu = rl_cli::catchup::CatchUp::of(
+        &d,
+        workspaces.into_iter().map(|w| (w.path, w.name)),
+        &rules,
+        Some(&relay),
+        n,
+    );
+    let top = since_top(&mut c, &cu, boundary, came_back).await;
+    print!("{}", rl_cli::catchup::text(&cu, &top, n));
     Ok(())
+}
+
+/// The top `rl since` prints, as `plan_top` says: the one shown, or one
+/// asked for and waited on, or — with neither, or the assistant failing —
+/// the counts.
+async fn since_top(
+    c: &mut Client,
+    cu: &rl_cli::catchup::CatchUp<'_>,
+    from: jiff::Timestamp,
+    came_back: bool,
+) -> Vec<String> {
+    use rl_cli::catchup::{plan_top, top_worthy, written};
+    let plan = plan_top(c, from, cu.has_runs(), came_back, now()).await;
+    let top = match plan.ask {
+        Some(ask) => {
+            eprintln!("writing the top…");
+            match c.call::<SummaryMake>(ask).await {
+                Ok(s) => Some(s).filter(top_worthy),
+                Err(e) => {
+                    eprintln!("the top: {e:#}");
+                    None
+                }
+            }
+        }
+        None => plan.shown,
+    };
+    match top {
+        Some(s) => written(&s),
+        None => cu.counted(),
+    }
 }
 
 async fn events(home: &Home, a: EventsArgs, json: bool) -> Result<()> {
@@ -2105,6 +2159,24 @@ async fn config(home: &Home, a: ConfigArgs, json: bool) -> Result<()> {
                 rl_proto::config::DEFAULT_SETTLE
             ),
         }
+        println!(
+            "catch_up.after        {}  ({}; away longer than this, the panel opens on what happened; `off` only on /since)",
+            r.catch_up_after,
+            if r.config.catch_up.after.is_some() {
+                "config"
+            } else {
+                "default"
+            }
+        );
+        println!(
+            "catch_up.summary      {}  ({}; `auto` writes the top when you come back after `after`, by assistants.summary; `ask` only on /summary)",
+            r.catch_up_summary,
+            if r.config.catch_up.summary.is_some() {
+                "config"
+            } else {
+                "default"
+            }
+        );
         match r.config.workspaces.badges.as_slice() {
             [] => println!("workspaces.badges     —  (unset: a header shows the branch alone; gh-pr adds the open PR)"),
             b => println!(

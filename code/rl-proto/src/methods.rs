@@ -1061,6 +1061,12 @@ pub struct ConfigReport {
     pub interpret: Option<ResolvedAssistant>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<ResolvedAssistant>,
+    /// `catch_up.after` as it resolves: a duration, or `off`.
+    #[serde(default)]
+    pub catch_up_after: String,
+    /// `catch_up.summary` as it resolves: `auto` or `ask`.
+    #[serde(default)]
+    pub catch_up_summary: String,
     /// Why the file, or an assistant in it, cannot be used as written.
     #[serde(default)]
     pub errors: Vec<String>,

@@ -1591,6 +1591,7 @@ name = "rl-proto"
 version = "0.1.0"
 dependencies = [
  "jiff",
+ "rl-core",
  "serde",
  "serde_json",
  "tokio",
