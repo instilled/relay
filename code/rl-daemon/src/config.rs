@@ -50,6 +50,10 @@ pub const SEED: &str = "\
 #   badges: [gh-pr]      # beside a git folder's branch: the open PR, by `gh` (~/.relay/plugins/gh-pr).
 #                        # Any command whose first line says something; asked when the branch
 #                        # changes, then at most every 5 minutes, only while the list is shown.
+#
+# catch_up:              # what happened while you were away
+#   after: 8h            # away longer than this, the panel opens on it; off: only /since
+#   summary: auto        # auto: a few bullets written when it opens · ask: only on /summary
 ";
 
 /// Writes the seed when there is no file yet. Never touches one that exists.
@@ -236,6 +240,18 @@ pub fn report(loaded: &Loaded, registry: &Registry) -> ConfigReport {
     {
         errors.push(format!("runs.settle: `{s}` is not a duration (5ms, 20ms) or `off`"));
     }
+    if let Some(s) = &loaded.config.catch_up.after
+        && !rl_proto::config::is_never(s)
+        && rl_core::time::parse_duration(s).is_none()
+    {
+        errors.push(format!("catch_up.after: `{s}` is not a duration (8h, 2d) or `off`"));
+    }
+    if let Some(s) = &loaded.config.catch_up.summary
+        && !s.eq_ignore_ascii_case("auto")
+        && !s.eq_ignore_ascii_case("ask")
+    {
+        errors.push(format!("catch_up.summary: `{s}` is not `auto` or `ask`"));
+    }
     let mut each = |job: &str| match resolve(job, loaded.config.assistants.for_job(job).flatten(), &agents) {
         Ok(r) => r,
         Err(e) => {
@@ -251,6 +267,18 @@ pub fn report(loaded: &Loaded, registry: &Registry) -> ConfigReport {
         config: loaded.config.clone(),
         interpret,
         summary,
+        catch_up_after: loaded
+            .config
+            .catch_up
+            .after
+            .clone()
+            .unwrap_or_else(|| rl_proto::config::CatchUp::DEFAULT_AFTER.into()),
+        catch_up_summary: if loaded.config.catch_up.auto_summary() {
+            "auto"
+        } else {
+            "ask"
+        }
+        .into(),
         errors,
     }
 }
@@ -276,6 +304,34 @@ mod tests {
         assert_eq!(
             settle(&with_runs(r#"{"runs":{"settle":"soon"}}"#)),
             Some(Duration::from_millis(5))
+        );
+    }
+
+    #[test]
+    fn the_report_says_what_catch_up_resolves_to_and_what_is_wrong() {
+        let said = |json: &str| {
+            let loaded = Loaded {
+                config: with_runs(json),
+                ..Loaded::default()
+            };
+            report(&loaded, &Registry::builtin())
+        };
+        let r = said("{}");
+        assert_eq!((r.catch_up_after.as_str(), r.catch_up_summary.as_str()), ("8h", "auto"));
+        assert!(r.errors.is_empty(), "{:?}", r.errors);
+        let r = said(r#"{"catch_up":{"after":"off","summary":"ask"}}"#);
+        assert_eq!((r.catch_up_after.as_str(), r.catch_up_summary.as_str()), ("off", "ask"));
+        assert!(r.errors.is_empty(), "{:?}", r.errors);
+        let r = said(r#"{"catch_up":{"after":"soon","summary":"always"}}"#);
+        assert!(
+            r.errors.iter().any(|e| e.starts_with("catch_up.after: `soon`")),
+            "{:?}",
+            r.errors
+        );
+        assert!(
+            r.errors.iter().any(|e| e.starts_with("catch_up.summary: `always`")),
+            "{:?}",
+            r.errors
         );
     }
 

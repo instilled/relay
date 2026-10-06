@@ -2105,6 +2105,24 @@ async fn config(home: &Home, a: ConfigArgs, json: bool) -> Result<()> {
                 rl_proto::config::DEFAULT_SETTLE
             ),
         }
+        println!(
+            "catch_up.after        {}  ({}; away longer than this, the panel opens on what happened; `off` only on /since)",
+            r.catch_up_after,
+            if r.config.catch_up.after.is_some() {
+                "config"
+            } else {
+                "default"
+            }
+        );
+        println!(
+            "catch_up.summary      {}  ({}; `auto` writes a few bullets when it opens, `ask` only on /summary)",
+            r.catch_up_summary,
+            if r.config.catch_up.summary.is_some() {
+                "config"
+            } else {
+                "default"
+            }
+        );
         match r.config.workspaces.badges.as_slice() {
             [] => println!("workspaces.badges     —  (unset: a header shows the branch alone; gh-pr adds the open PR)"),
             b => println!(

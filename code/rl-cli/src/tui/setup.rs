@@ -779,6 +779,8 @@ mod tests {
                 config,
                 interpret: None,
                 summary: None,
+                catch_up_after: "8h".into(),
+                catch_up_summary: "auto".into(),
                 errors: vec![],
             },
             agents: vec![
