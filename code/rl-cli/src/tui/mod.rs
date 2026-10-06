@@ -1312,7 +1312,6 @@ impl App {
             let kept = SummaryParams {
                 target: SummaryTarget::Run { id },
                 deep: false,
-                since: None,
                 from: None,
                 again: false,
                 dry: false,
@@ -3256,13 +3255,22 @@ impl App {
             self.say("an assistant's own run; nothing to summarise");
             return;
         }
+        let from = match since.trim() {
+            "" => None,
+            s => match rl_core::time::parse_since(s, Timestamp::now()) {
+                Ok(t) => Some(t),
+                Err(e) => {
+                    self.say(format!("{e:#}"));
+                    return;
+                }
+            },
+        };
         let (id, title) = (run.id.clone(), run.title.clone());
         let home = self.home.clone();
         let params = SummaryParams {
             target: SummaryTarget::Run { id: id.clone() },
             deep: false,
-            since: (!since.is_empty()).then(|| since.to_string()),
-            from: None,
+            from,
             again: false,
             dry: false,
             timeout: None,

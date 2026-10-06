@@ -352,7 +352,9 @@ struct InterpretArgs {
 struct SummaryArgs {
     /// The run.
     run: String,
-    /// Only the last stretch of it: a duration, like 30m or 2h (default: all of it).
+    /// Only the stretch since: a duration back (30m, 2h), a date or an
+    /// instant (default: since you last looked, if it has moved on; else all
+    /// of it).
     since: Option<String>,
     /// Make a new one, even when the one kept is up to date.
     #[arg(long)]
@@ -2283,21 +2285,24 @@ async fn interpret(home: &Home, a: InterpretArgs, json: bool) -> Result<()> {
 
 async fn summary(home: &Home, a: SummaryArgs, json: bool) -> Result<()> {
     let mut rpc = daemon::ensure(home, !json).await?;
-    let target = SummaryTarget::Run { id: a.run.clone() };
-    let ask = |since: Option<String>, again: bool| SummaryParams {
-        target: target.clone(),
+    let from = a
+        .since
+        .as_deref()
+        .map(|s| rl_core::time::parse_since(s, now()))
+        .transpose()?;
+    let ask = |again: bool| SummaryParams {
+        target: SummaryTarget::Run { id: a.run.clone() },
         deep: false,
-        since,
-        from: None,
+        from,
         again,
         dry: false,
         timeout: None,
     };
-    let kept = rpc.call::<SummaryGet>(ask(None, false)).await?;
-    if !json && (a.again || kept.is_none_or(|k| k.stale || k.since != a.since)) {
+    let kept = rpc.call::<SummaryGet>(ask(false)).await?;
+    if !json && (a.again || kept.is_none_or(|k| k.stale)) {
         eprintln!("summarising…");
     }
-    let s = rpc.call::<SummaryMake>(ask(a.since, a.again)).await?;
+    let s = rpc.call::<SummaryMake>(ask(a.again)).await?;
     if json {
         println!("{}", serde_json::to_string(&s)?);
     } else {

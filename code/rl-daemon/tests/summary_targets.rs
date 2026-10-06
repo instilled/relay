@@ -1,0 +1,247 @@
+//! `summary.make` past a single run's brief: a project's, a job's or
+//! everything's runs in one call over their lines, a run read deep — in parts
+//! when it is long — and a dry run that only counts the calls. A stretch with
+//! nothing in it asks no one. The fake summariser is set by environment
+//! variables, which are the process's, so the cases run one after another in
+//! one test.
+
+mod common;
+
+use common::{Conn, Harness};
+use jiff::{SignedDuration, Timestamp};
+use rl_core::Home;
+use rl_proto::types::{Run, Summary};
+use serde_json::json;
+use std::path::PathBuf;
+
+fn fake_agent() -> PathBuf {
+    std::fs::canonicalize(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../fixtures/fake-agent")).unwrap()
+}
+
+/// A daemon whose `assistants.summary` is the fake agent answering `answer`,
+/// and a project folder registered with it. The prompt the agent was last
+/// given is in the file `FAKE_AGENT_PROMPT` names.
+async fn with_fake_summariser(answer: &str) -> Option<(Harness, Conn, PathBuf, tempfile::TempDir)> {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = Home::at(tmp.path().join("home"));
+    std::fs::create_dir_all(home.detect_dir()).unwrap();
+    std::fs::write(
+        home.detect_dir().join("fakeai.yaml"),
+        format!(
+            "kind: agent\nbins: [\"{}\"]\nheadless: [\"--headless\"]\n",
+            fake_agent().display()
+        ),
+    )
+    .unwrap();
+    std::fs::write(home.config_file(), "assistants:\n  summary: fakeai\n").unwrap();
+    let (answer_file, prompt) = (tmp.path().join("answer.txt"), tmp.path().join("prompt.txt"));
+    std::fs::write(&answer_file, answer).unwrap();
+    // SAFETY: the cases run one at a time, alone in this binary.
+    unsafe {
+        std::env::set_var("FAKE_AGENT_ANSWER", &answer_file);
+        std::env::set_var("FAKE_AGENT_PROMPT", &prompt);
+        std::env::set_var("FAKE_AGENT_READS", "1");
+    }
+    let Some(h) = Harness::on(home.clone()) else {
+        eprintln!("skipping: rl-session not built");
+        return None;
+    };
+    let mut c = Conn::open(&home).await;
+    let dir = std::fs::canonicalize(tmp.path()).unwrap().join("proj");
+    std::fs::create_dir_all(&dir).unwrap();
+    let _: serde_json::Value = c.ok("workspace.up", json!({ "path": dir })).await;
+    Some((h, c, dir, tmp))
+}
+
+/// Back from now, in whole milliseconds as the ledger keeps them.
+fn ago(d: SignedDuration) -> Timestamp {
+    Timestamp::from_millisecond((Timestamp::now() - d).as_millisecond()).unwrap()
+}
+
+/// `summary.get`: the one kept, or None (a null result).
+async fn kept(c: &mut Conn, params: serde_json::Value) -> Option<Summary> {
+    let r = c.call("summary.get", params).await;
+    assert!(r.error.is_none(), "{:?}", r.error);
+    serde_json::from_value(r.result.unwrap_or_default()).unwrap()
+}
+
+#[tokio::test]
+async fn cases() {
+    a_project_brief_is_one_call_over_its_runs_lines().await;
+    nothing_in_the_stretch_asks_no_one().await;
+    deep_over_a_long_output_is_read_in_parts().await;
+    a_dry_run_says_how_many_calls_and_asks_no_one().await;
+    a_jobs_runs_are_its_firings().await;
+}
+
+async fn a_project_brief_is_one_call_over_its_runs_lines() {
+    let Some((h, mut c, dir, _tmp)) = with_fake_summariser("• api: two runs, both fine\n").await else {
+        return;
+    };
+    let from = ago(SignedDuration::from_mins(5));
+    for t in ["one", "two"] {
+        let r: Run = c
+            .ok(
+                "run.start",
+                json!({"argv": ["sh", "-c", "echo hi"], "cwd": dir, "title": t}),
+            )
+            .await;
+        c.wait_terminal(&r.id).await;
+    }
+    let target = json!({"kind": "project", "workspace": dir});
+    let s: Summary = c.ok("summary.make", json!({"target": target, "from": from})).await;
+    assert_eq!(s.calls, 1);
+    assert!(s.text.contains("two runs"), "{s:?}");
+    assert_eq!((s.target.clone(), s.from), (format!("p:{}", dir.display()), Some(from)));
+    let prompt = std::fs::read_to_string(std::env::var("FAKE_AGENT_PROMPT").unwrap()).unwrap();
+    assert!(prompt.contains("## one") && prompt.contains("## two"), "{prompt}");
+
+    // Kept: given back while nothing has moved; asked again, a new one.
+    let k = kept(&mut c, json!({"target": target, "from": from})).await;
+    assert_eq!(k.as_ref().map(|k| (&k.text, k.stale)), Some((&s.text, false)));
+    let same: Summary = c.ok("summary.make", json!({"target": target, "from": from})).await;
+    assert_eq!(same.by, s.by);
+    let again: Summary = c
+        .ok("summary.make", json!({"target": target, "from": from, "again": true}))
+        .await;
+    assert_ne!(again.by, s.by);
+
+    // A project's needs where to start.
+    let r = c.call("summary.make", json!({"target": target})).await;
+    let msg = r.error.unwrap().message;
+    assert!(msg.contains("needs where to start"), "{msg}");
+    h.stop().await;
+}
+
+async fn nothing_in_the_stretch_asks_no_one() {
+    let Some((h, mut c, dir, _tmp)) = with_fake_summariser("should not be asked").await else {
+        return;
+    };
+    // A run from before the stretch is not in it.
+    let r: Run = c
+        .ok("run.start", json!({"argv": ["true"], "cwd": dir, "title": "before"}))
+        .await;
+    c.wait_terminal(&r.id).await;
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    let from = ago(SignedDuration::ZERO);
+    for target in [
+        json!({"kind": "project", "workspace": dir}),
+        json!({"kind": "all"}),
+        json!({"kind": "job", "rule": "schedule", "name": "nightly", "workspace": dir}),
+        json!({"kind": "run", "id": r.id}),
+    ] {
+        for deep in [false, true] {
+            let s: Summary = c
+                .ok("summary.make", json!({"target": target, "from": from, "deep": deep}))
+                .await;
+            assert_eq!(s.source, "nothing new", "{target} {deep}: {s:?}");
+            assert_eq!((s.calls, s.agent.as_str()), (0, "relay"), "{target}");
+            assert!(s.text.starts_with("nothing happened since "), "{}", s.text);
+        }
+    }
+    let prompt = std::env::var("FAKE_AGENT_PROMPT").unwrap();
+    assert!(!std::path::Path::new(&prompt).exists(), "no one was asked");
+    h.stop().await;
+}
+
+async fn deep_over_a_long_output_is_read_in_parts() {
+    let Some((h, mut c, dir, _tmp)) = with_fake_summariser("a part").await else {
+        return;
+    };
+    // ~120 KB of output (a little more in the terminal's \r\n): three parts
+    // and one join.
+    let r: Run = c
+        .ok(
+            "run.start",
+            json!({"argv": ["sh", "-c", "yes 'a line of output to fill the journal' | head -c 120000"], "cwd": dir, "title": "loud"}),
+        )
+        .await;
+    c.wait_terminal(&r.id).await;
+    let target = json!({"kind": "run", "id": r.id});
+    let dry: Summary = c
+        .ok("summary.make", json!({"target": target, "deep": true, "dry": true}))
+        .await;
+    assert_eq!((dry.calls, dry.text.as_str()), (4, ""), "{dry:?}");
+    let s: Summary = c.ok("summary.make", json!({"target": target, "deep": true})).await;
+    assert!(s.deep);
+    assert_eq!(s.calls, 4);
+    assert_eq!(s.text, "a part");
+    let prompt = std::fs::read_to_string(std::env::var("FAKE_AGENT_PROMPT").unwrap()).unwrap();
+    assert!(
+        prompt.contains("## Part 1 of 3") && prompt.contains("## Part 3 of 3"),
+        "the join reads the parts: {prompt}"
+    );
+    // Kept apart from the run's brief recap, and given back.
+    let k = kept(&mut c, json!({"target": target, "deep": true})).await;
+    assert_eq!(k.map(|k| (k.by, k.deep, k.calls)), Some((s.by.clone(), true, 4)));
+    let brief = kept(&mut c, json!({"target": target})).await;
+    assert!(brief.is_none(), "{brief:?}");
+    h.stop().await;
+}
+
+async fn a_dry_run_says_how_many_calls_and_asks_no_one() {
+    let Some((h, mut c, dir, _tmp)) = with_fake_summariser("x").await else {
+        return;
+    };
+    let from = ago(SignedDuration::from_mins(5));
+    for t in ["a", "b", "c"] {
+        let r: Run = c
+            .ok("run.start", json!({"argv": ["true"], "cwd": dir, "title": t}))
+            .await;
+        c.wait_terminal(&r.id).await;
+    }
+    let s: Summary = c
+        .ok(
+            "summary.make",
+            json!({"target": {"kind": "all"}, "deep": true, "from": from, "dry": true}),
+        )
+        .await;
+    assert_eq!(s.calls, 4, "three deep reads and one to join");
+    assert!(s.text.is_empty());
+    let prompt = std::env::var("FAKE_AGENT_PROMPT").unwrap();
+    assert!(!std::path::Path::new(&prompt).exists(), "no one was asked");
+    let brief: Summary = c
+        .ok(
+            "summary.make",
+            json!({"target": {"kind": "all"}, "from": from, "dry": true}),
+        )
+        .await;
+    assert_eq!((brief.calls, brief.text.as_str()), (1, ""));
+    h.stop().await;
+}
+
+async fn a_jobs_runs_are_its_firings() {
+    let Some((h, mut c, dir, _tmp)) = with_fake_summariser("nightly: fine").await else {
+        return;
+    };
+    // A job's runs are those it caused; here a schedule firing, set in the
+    // ledger as it would be.
+    let r: Run = c
+        .ok(
+            "run.start",
+            json!({"argv": ["true"], "cwd": dir, "title": "nightly tests"}),
+        )
+        .await;
+    let other: Run = c
+        .ok("run.start", json!({"argv": ["true"], "cwd": dir, "title": "by hand"}))
+        .await;
+    c.wait_terminal(&other.id).await;
+    let r = c.wait_terminal(&r.id).await;
+    let ledger = rl_ledger::Ledger::open(&h.home.ledger()).unwrap();
+    let id = r.id.clone();
+    ledger
+        .call_blocking(move |c| {
+            c.execute("UPDATE runs SET cause = 'schedule:nightly' WHERE id = ?1", [id])?;
+            Ok(())
+        })
+        .unwrap();
+    // No stretch given: from its oldest firing not yet looked at.
+    let target = json!({"kind": "job", "rule": "schedule", "name": "nightly", "workspace": dir});
+    let s: Summary = c.ok("summary.make", json!({"target": target})).await;
+    assert_eq!((s.calls, s.text.as_str()), (1, "nightly: fine"), "{s:?}");
+    assert_eq!(s.from, r.ended_at);
+    let prompt = std::fs::read_to_string(std::env::var("FAKE_AGENT_PROMPT").unwrap()).unwrap();
+    assert!(prompt.contains("## nightly tests"), "{prompt}");
+    assert!(!prompt.contains("by hand"), "{prompt}");
+    h.stop().await;
+}

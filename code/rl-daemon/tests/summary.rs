@@ -132,22 +132,16 @@ async fn an_ended_run_gets_a_summary_kept_by_it() {
         )
         .await;
     c.wait_state(&slow.id, RunState::Working).await;
+    let from = jiff::Timestamp::from_millisecond(jiff::Timestamp::now().as_millisecond() - 60_000).unwrap();
     let quiet: Summary = c
         .ok(
             "summary.make",
-            json!({ "target": { "kind": "run", "id": slow.id }, "since": "1m" }),
+            json!({ "target": { "kind": "run", "id": slow.id }, "from": from }),
         )
         .await;
-    assert_eq!(quiet.text, "Nothing in the last 1m.");
+    assert!(quiet.text.starts_with("nothing happened since "), "{}", quiet.text);
     assert_eq!((quiet.source.as_str(), quiet.by.as_str()), ("nothing new", ""));
-    assert_eq!(quiet.since.as_deref(), Some("1m"));
-    let r: Response = c
-        .call(
-            "summary.make",
-            json!({ "target": { "kind": "run", "id": slow.id }, "since": "soon" }),
-        )
-        .await;
-    assert!(r.error.unwrap().message.contains("not a stretch of time"));
+    assert_eq!(quiet.from, Some(from));
     let _: serde_json::Value = c.ok("run.stop", json!({ "id": slow.id, "force": true })).await;
 
     // The CLI's own warning about its input is not the answer.
@@ -266,7 +260,7 @@ async fn claudes_own_recap_is_taken_from_its_transcript() {
     let r: Response = c
         .call(
             "summary.make",
-            json!({ "target": { "kind": "run", "id": run.id }, "since": "10s" }),
+            json!({ "target": { "kind": "run", "id": run.id }, "from": jiff::Timestamp::now() - jiff::SignedDuration::from_secs(10) }),
         )
         .await;
     let msg = r.error.map(|e| e.message).unwrap_or_default();

@@ -40,7 +40,7 @@ flowchart TB
     end
 
     detect["relay-detect<br/>registry (detect/*.yaml) · PTY heuristics<br/>Claude hooks · state machine"]
-    db[("~/.relay/ledger.db — relay-ledger<br/>runs · events · sessions · session_io · presence<br/>schedules · reactions (+ specs) · workspaces · decisions · summaries · meta")]
+    db[("~/.relay/ledger.db — relay-ledger<br/>runs · events · sessions · session_io · presence<br/>schedules · reactions (+ specs) · workspaces · decisions · summaries · summary_kept · meta")]
 
     cli -->|"JSON-RPC, one line per message<br/>~/.relay/run/rld.sock — relay-proto"| rld
     child -->|"hooks fire<br/>RELAY_RUN in the env"| hookcmd
@@ -922,10 +922,16 @@ is an error that quotes what the agent said. Interpretation is a run, so it is i
 `rl ls --all`, in the journal, and under retention like everything else; nothing about it is
 special except its cause.
 
-**The summariser** recaps a run, live or ended, over the whole of it or a stretch back from now.
-`/summary [since]` in the panel and `rl summary <id> [since] [--again]` call `summary.make`
-(`since` a duration, `2h`); `rld` (`rl-daemon/src/summary.rs`) takes the cheapest source that
-has one, and never asks an agent on its own:
+**The summariser** says what happened, for someone who was not looking, in a run, a job's runs
+(a schedule's or a reaction's), a project's, or everything (`summary.make {target: run | job |
+project | all, deep, from, again, dry}`; `rld`'s `rl-daemon/src/summary.rs`). `/summary [since]`
+in the panel and `rl summary <id> [since] [--again]` ask it of a run; the client turns the
+stretch (`2h`, a date, an instant) into `from`. Left out, `from` is since you last looked: a
+run's `seen_at` when it has moved on since, else the whole run; a job's oldest firing not seen
+since it ended (`runs::oldest_unseen`), else the last day. A project and everything need one —
+the client knows when you were last here. It never asks an agent on its own.
+
+Brief, a run is told from the cheapest source that has one:
 
 - **The agent's own recap.** Claude writes one into its transcript
   (`~/.claude/projects/<folder>/<session>.jsonl`, a `system` entry of subtype `away_summary`)
@@ -945,6 +951,22 @@ has one, and never asks an agent on its own:
   sees its end at once rather than waiting 3s and warning; should that warning ever come, it is
   left out of the answer.
 
+Deep, a run is always read by the assistant, all of the stretch: Claude's messages with a line
+per tool it used (the name and the start of its input) and per tool that failed, Codex's turns,
+or the whole recorded output, with up to 500 of Relay's events. Past 48 KB (`CHUNK`) it is read
+in parts split at line ends, each summarised (`Part 2 of 3`), then the parts' answers joined in
+one more call — so a weekend of a busy agent is still one answer, never one giant prompt.
+
+Many runs — a job's (its cause, in its folder unless the rule is global), a project's, or every
+folder's — are those that moved in the stretch or are still going, never an assistant's own.
+Brief is one call over each run's line as the list says it (its recap, else where it stands);
+deep reads each run deep first, reusing the deep reads kept, then one call to join them. Either
+way the answer is 3–6 bullets: what needs you, what broke, what moved. `calls` says how many
+assistant calls it took; `dry` only counts them (deep: the runs with no deep read kept, and one
+to join — an upper bound) and asks no one, so the panel can say the cost before a deep read of
+many. A stretch with no runs, or a run with nothing in it, says `nothing happened since 22:14`
+without asking anyone.
+
 **The agent's own recap is kept as it is written**, no one asked (`rl-daemon/src/recap.rs`):
 Claude's latest `away_summary`, and Codex's last turn that said something (its `task_complete`
 message). `rld` looks when a Claude hook says a turn is over or it waits on you (`Stop`,
@@ -960,11 +982,14 @@ its own stays until the agent writes another (`summaries::put_newer`, by the tim
 written). It is said in no event — one a turn would bury the run's own news.
 
 `rld` learns the session file from Claude's hooks, which carry `transcript_path` (kept in
-`transcripts`), or finds it by the run's folder and start time. The recap is kept in
-`summaries`, one per run — the latest — with its stretch, where it came from, and how far the run
-had got (the session file's length, or the output's last chunk); said as a `run.summarised`
-event. `summary.make` gives the kept one back while the run has not moved on and the stretch is
-the same, unless `again`; `summary.get` reads it and marks it stale once the run has gone on. The
+`transcripts`), or finds it by the run's folder and start time. A run's brief recap of the whole
+of it is kept in `summaries`, one per run — the latest — with where it came from and how far the
+run had got (the session file's length, or the output's last chunk). Everything else — a run
+read deep or over a stretch, a job, a project, everything — is kept in `summary_kept`, one per
+(what, brief or deep, from when), many runs' reach being how many there are and their latest
+change of state. A run's is said as a `run.summarised` event. `summary.make` gives the kept one
+back while what it covers has not moved on, unless `again`; `summary.get` reads it and marks it
+stale once it has (a run's default stretch with none of its own gives back the run's recap). The
 narrative is always marked as whose it is, in the pane and on the line (`# claude's own · 2m
 ago`). An assistant's own run is never summarised — so a rule like
 

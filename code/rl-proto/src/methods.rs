@@ -1278,13 +1278,10 @@ pub struct SummaryParams {
     /// Read the logs, not the recaps.
     #[serde(default)]
     pub deep: bool,
-    /// A run's stretch, back from now: a duration (`2h`). None, the whole run.
-    /// `from` takes its place for the other targets.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub since: Option<String>,
-    /// Where the stretch begins. None: since you last interacted with it (a
-    /// run's seen_at, a job's oldest unseen firing); required for a project
-    /// and all — the client knows when you were last here.
+    /// Where the stretch begins. None: since you last looked (a run's
+    /// seen_at, when it has moved on since, else the whole run; a job's
+    /// oldest unseen firing, else the last day); required for a project and
+    /// all — the client knows when you were last here.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from: Option<Timestamp>,
     /// Make a new one even when the one kept is up to date.
@@ -1299,9 +1296,9 @@ pub struct SummaryParams {
     pub timeout: Option<String>,
 }
 
-/// A recap of a run, live or ended, over `since` or the whole of it: the one
-/// kept while the run has not moved on (unless `again`); else the agent's own
-/// recap from its transcript (Claude), its turns as facts (Codex), or
+/// What happened in a run, a job's runs, a project's or everything's, over
+/// the stretch from `from`, brief or deep: the one kept while it has not moved
+/// on (unless `again`); else a run's own recap where it has one, or
 /// `assistants.summary` reading the stretch. Refused for an assistant's own
 /// run.
 pub struct SummaryMake;
