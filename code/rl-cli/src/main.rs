@@ -1,5 +1,6 @@
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, Parser, Subcommand};
+use jiff::SignedDuration;
 use rl_cli::client::Client;
 use rl_cli::daemon;
 use rl_cli::env::child_env;
@@ -9,7 +10,7 @@ use rl_core::{Home, display_path};
 use rl_proto::decision::{Decision, DecisionOption, DecisionStatus};
 use rl_proto::methods::{
     AgentList, ConfigGet, GcParams, GcRun, RuleApprove, RuleList, RuleRef, RunArchive, RunArchiveParams, RunHide,
-    RunHideParams, RunId, RunResume, RunResumeParams, SummaryGet, SummaryMake, SummaryParams,
+    RunHideParams, RunResume, RunResumeParams, SummaryGet, SummaryMake, SummaryParams,
 };
 use rl_proto::methods::{
     DaemonInfo, DigestGet, DigestHide, DigestHideParams, DigestParams, EventFilter, EventList, PresenceClient,
@@ -31,7 +32,7 @@ use rl_proto::methods::{
 use rl_proto::reaction::{Filter, Reaction, ReactionSpec};
 use rl_proto::rule::{Rule, RuleKind, RuleStatus};
 use rl_proto::schedule::{Schedule, UpReport};
-use rl_proto::types::{AttachMode, Cause, Mark, RunKind, RunState};
+use rl_proto::types::{AttachMode, Cause, Mark, RunKind, RunState, SummaryTarget};
 use serde_json::json;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -350,10 +351,19 @@ struct InterpretArgs {
 
 #[derive(Args)]
 struct SummaryArgs {
-    /// The run.
-    run: String,
-    /// Only the last stretch of it: a duration, like 30m or 2h (default: all of it).
+    /// What: a run, a folder (its project), `schedule:<name>` or `reaction:<name>`, or `all`.
+    what: String,
+    /// Only the stretch since: a duration back (30m, 2h), a date or an
+    /// instant (default: a run, since you last looked, if it did anything
+    /// since, else all of it; a job, since its oldest firing you have not
+    /// seen; a project or all, the last day).
     since: Option<String>,
+    /// The folder a `schedule:` or `reaction:` belongs to (default: a global one).
+    #[arg(long = "in", value_name = "FOLDER")]
+    folder: Option<PathBuf>,
+    /// Read the logs, not the recaps: slower, and says more.
+    #[arg(long)]
+    deep: bool,
     /// Make a new one, even when the one kept is up to date.
     #[arg(long)]
     again: bool,
@@ -2281,20 +2291,63 @@ async fn interpret(home: &Home, a: InterpretArgs, json: bool) -> Result<()> {
     Ok(())
 }
 
+/// What `rl summary` was asked of: `all`, a folder (a project), a `schedule:` or
+/// `reaction:` job, else a run.
+fn summary_target(what: &str, folder: Option<&Path>) -> Result<SummaryTarget> {
+    let job = |rule, name: &str| -> Result<SummaryTarget> {
+        let workspace = folder
+            .map(|f| std::fs::canonicalize(f).with_context(|| format!("{}: not a folder", f.display())))
+            .transpose()?;
+        Ok(SummaryTarget::Job {
+            rule,
+            name: name.to_string(),
+            workspace,
+        })
+    };
+    let target = if what == "all" {
+        SummaryTarget::All
+    } else if let Some(name) = what.strip_prefix("schedule:") {
+        job(RuleKind::Schedule, name)?
+    } else if let Some(name) = what.strip_prefix("reaction:") {
+        job(RuleKind::Reaction, name)?
+    } else if Path::new(what).is_dir() {
+        SummaryTarget::Project {
+            workspace: std::fs::canonicalize(what)?,
+        }
+    } else {
+        SummaryTarget::Run { id: what.to_string() }
+    };
+    if folder.is_some() && !matches!(target, SummaryTarget::Job { .. }) {
+        bail!("--in is for a schedule: or a reaction:");
+    }
+    Ok(target)
+}
+
 async fn summary(home: &Home, a: SummaryArgs, json: bool) -> Result<()> {
+    let target = summary_target(&a.what, a.folder.as_deref())?;
     let mut rpc = daemon::ensure(home, !json).await?;
-    let kept = rpc.call::<SummaryGet>(RunId { id: a.run.clone() }).await?;
-    if !json && (a.again || kept.is_none_or(|k| k.stale || k.since != a.since)) {
+    let from = match a.since.as_deref() {
+        Some(s) => Some(parse_since(s, now())?),
+        // A project or everything has no "since you looked" of its own: the
+        // last day, and presence is not touched.
+        None if matches!(target, SummaryTarget::Project { .. } | SummaryTarget::All) => {
+            Some(now() - SignedDuration::from_hours(24))
+        }
+        None => None,
+    };
+    let ask = |again: bool| SummaryParams {
+        target: target.clone(),
+        deep: a.deep,
+        from,
+        again,
+        dry: false,
+        timeout: None,
+    };
+    let kept = rpc.call::<SummaryGet>(ask(false)).await?;
+    if !json && (a.again || kept.is_none_or(|k| k.stale)) {
         eprintln!("summarising…");
     }
-    let s = rpc
-        .call::<SummaryMake>(SummaryParams {
-            run: a.run,
-            since: a.since,
-            again: a.again,
-            timeout: None,
-        })
-        .await?;
+    let s = rpc.call::<SummaryMake>(ask(a.again)).await?;
     if json {
         println!("{}", serde_json::to_string(&s)?);
     } else {
@@ -2306,7 +2359,7 @@ async fn summary(home: &Home, a: SummaryArgs, json: bool) -> Result<()> {
         };
         println!(
             "# {}{by} · --again makes a new one",
-            rl_cli::tui::recap_label(&s, now())
+            rl_cli::tui::summary_label(&s, now())
         );
     }
     Ok(())

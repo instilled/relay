@@ -9,11 +9,13 @@ use crate::render::{fmt_clock, state_label};
 use jiff::Timestamp;
 use ratatui::style::{Style, Stylize};
 use ratatui::text::{Line, Span};
-use rl_core::time::{fmt_age, fmt_duration};
+use rl_core::display_path;
+use rl_core::time::{fmt_age, fmt_duration, fmt_when};
 use rl_proto::decision::Decision;
 use rl_proto::methods::DigestItem;
 use rl_proto::rule::{NotLoaded, Rule};
 use rl_proto::types::{Event, Run, RunState, Summary};
+use std::path::Path;
 
 /// Where a fact's value starts: past ` {key:<8} `.
 const VALUE_COL: usize = 10;
@@ -30,25 +32,119 @@ fn fact(k: &str, v: impl Into<String>) -> Line<'static> {
     Line::from(vec![Span::raw(format!(" {k:<8} ")).dim(), Span::raw(v.into())])
 }
 
-/// Where a recap came from, how old it is, what stretch it covers, and
-/// whether the run has moved on since.
+/// How deep a recap went, where it came from (and in how many calls, past
+/// one), what stretch it covers, how old it is, and whether what it is of
+/// has moved on since: `deep · by haiku · since 22:14 · 3m ago`.
 pub fn recap_label(s: &Summary, now: Timestamp) -> String {
-    let from = match s.source.as_str() {
+    let mut parts = Vec::new();
+    if s.deep {
+        parts.push("deep".to_string());
+    }
+    parts.push(recap_source(s));
+    // One call is what `by` says already.
+    if s.calls > 1 {
+        parts.push(format!("{} calls", s.calls));
+    }
+    if let Some(from) = s.from {
+        parts.push(format!("since {}", fmt_when(from, now)));
+    } else if let Some(since) = &s.since {
+        parts.push(format!("last {since}"));
+    }
+    parts.push(format!("{} ago", fmt_age(s.at, now)));
+    if s.stale {
+        parts.push("moved on since".into());
+    }
+    parts.join(" · ")
+}
+
+/// Who said it: the agent's own recap, its turns, or an assistant.
+fn recap_source(s: &Summary) -> String {
+    match s.source.as_str() {
         "claude recap" => "claude's own".to_string(),
         "codex turns" if s.by.is_empty() => "codex's turns".to_string(),
         "codex turns" => format!("codex's turns, by {}", s.agent),
         "codex turn" => "codex's last turn".to_string(),
         "nothing new" => "nothing new".to_string(),
         _ => format!("by {}", s.agent),
+    }
+}
+
+/// What a summary is of, in words, from how it is kept (`SummaryTarget::key`);
+/// None for a run.
+fn summary_of(target: &str) -> Option<String> {
+    if target == "all" {
+        return Some("everything".into());
+    }
+    if let Some(path) = target.strip_prefix("p:") {
+        return Some(format!("the project {}", display_path(Path::new(path))));
+    }
+    let job = target.strip_prefix("j:")?;
+    let (rule, rest) = job.split_once(':')?;
+    let name = rest.split_once('@').map_or(rest, |(n, _)| n);
+    Some(format!("the {rule} {name}"))
+}
+
+/// What `rl summary` says under the text: what it is of, from when, how deep,
+/// who wrote it, how many calls it took. A run's is its recap's label, and
+/// `deep` first when it was read from the logs.
+pub fn summary_label(s: &Summary, now: Timestamp) -> String {
+    let Some(of) = summary_of(&s.target) else {
+        return recap_label(s, now);
     };
-    let mut label = format!("{from} · {} ago", fmt_age(s.at, now));
-    if let Some(since) = &s.since {
-        label.push_str(&format!(" · last {since}"));
+    let mut parts = vec![format!("summary of {of}")];
+    if let Some(from) = s.from {
+        parts.push(format!("since {}", fmt_when(from, s.at)));
+    }
+    if s.deep {
+        parts.push("deep".into());
+    }
+    parts.push(recap_source(s));
+    if s.calls > 0 {
+        parts.push(format!("{} call{}", s.calls, if s.calls == 1 { "" } else { "s" }));
     }
     if s.stale {
-        label.push_str(" · moved on since");
+        parts.push("moved on since".into());
     }
-    label
+    parts.join(" · ")
+}
+
+/// A summary aligned with the facts: where it came from on the `key`'s
+/// line — and, but for a run's, what it is of — the words under it in the
+/// value column.
+fn said(key: &str, s: &Summary, width: usize, now: Timestamp) -> Vec<Line<'static>> {
+    let value = width.saturating_sub(VALUE_COL + 1).max(20);
+    let label = match summary_of(&s.target) {
+        Some(of) => format!("of {of} · {}", recap_label(s, now)),
+        None => recap_label(s, now),
+    };
+    let mut lines = Vec::new();
+    for (i, t) in wrap(&label, value).into_iter().enumerate() {
+        let key = if i == 0 { key } else { "" };
+        lines.push(Line::from(Span::raw(format!(" {key:<8} {t}")).dim()));
+    }
+    for l in s.text.lines() {
+        for t in wrap(l, value) {
+            lines.push(Line::raw(format!(" {:<8} {t}", "")));
+        }
+    }
+    lines
+}
+
+/// What a job, a project or everything was said to have done, kept from
+/// the last `/summary` over it; else how to ask. A blank line first.
+fn summary_section(summary: Option<&Summary>, width: usize, now: Timestamp) -> Vec<Line<'static>> {
+    let mut lines = vec![Line::raw("")];
+    match summary {
+        Some(s) => lines.extend(said("summary", s, width, now)),
+        None => lines.push(Line::from(
+            Span::raw(format!(
+                " {:<8} /summary says what happened · /summary deep reads the logs",
+                "summary"
+            ))
+            .dim(),
+        )),
+    }
+    lines
 }
 
 /// The command line as the user would have typed it: what Relay added for
@@ -161,23 +257,16 @@ pub fn run_lines(
         }
     }
     if let Some(s) = summary {
-        // Aligned with the facts: where it came from on the label's line, the
-        // words under it in the value column.
         lines.push(Line::raw(""));
-        let value = width.saturating_sub(VALUE_COL + 1).max(20);
-        for (i, t) in wrap(&recap_label(s, now), value).into_iter().enumerate() {
-            let key = if i == 0 { "recap" } else { "" };
-            lines.push(Line::from(Span::raw(format!(" {key:<8} {t}")).dim()));
-        }
-        for l in s.text.lines() {
-            for t in wrap(l, value) {
-                lines.push(Line::raw(format!(" {:<8} {t}", "")));
-            }
-        }
+        lines.extend(said("recap", s, width, now));
     } else if !matches!(r.cause, rl_proto::types::Cause::Assistant(_)) {
         lines.push(Line::raw(""));
         lines.push(Line::from(
-            Span::raw(format!(" {:<8} /summary recaps it · /summary 2h the last 2h", "recap")).dim(),
+            Span::raw(format!(
+                " {:<8} /summary recaps it · /summary deep reads its logs · /summary 2h the last 2h",
+                "recap"
+            ))
+            .dim(),
         ));
     }
     lines.push(Line::raw(""));
@@ -200,7 +289,14 @@ const JOB_RUNS: usize = 10;
 const JOB_MARKS: usize = 40;
 
 /// A job: the rule behind it when known, then how it has been going.
-pub fn job_lines(j: &Job, rule: Option<&Rule>, names: &Names, width: usize, now: Timestamp) -> Vec<Line<'static>> {
+pub fn job_lines(
+    j: &Job,
+    rule: Option<&Rule>,
+    summary: Option<&Summary>,
+    names: &Names,
+    width: usize,
+    now: Timestamp,
+) -> Vec<Line<'static>> {
     let mut lines = match rule {
         Some(r) => {
             let mut l = rules::lines(r, names, now, Some(&j.last().run.title));
@@ -258,6 +354,7 @@ pub fn job_lines(j: &Job, rule: Option<&Rule>, names: &Names, width: usize, now:
     let mut row = vec![Span::raw("          ")];
     row.extend(spans);
     lines.push(Line::from(row));
+    lines.extend(summary_section(summary, width, now));
     lines.push(Line::raw(""));
     for i in j.runs.iter().take(JOB_RUNS) {
         lines.push(Line::from(vec![
@@ -336,6 +433,7 @@ fn runs_facts(mine: &[&DigestItem], now: Timestamp) -> Vec<Line<'static>> {
 
 /// A project: the folder itself, how its runs stand, and the rules that live
 /// there. `items` is the whole digest; this picks the ones in the folder.
+#[allow(clippy::too_many_arguments)]
 pub fn project_lines(
     name: &str,
     place: &str,
@@ -343,6 +441,8 @@ pub fn project_lines(
     items: &[DigestItem],
     rules: &[Rule],
     broken: &[&NotLoaded],
+    summary: Option<&Summary>,
+    width: usize,
     now: Timestamp,
 ) -> Vec<Line<'static>> {
     let mine: Vec<&DigestItem> = items.iter().filter(|i| i.run.workspace == workspace).collect();
@@ -353,6 +453,7 @@ pub fn project_lines(
     // below is not what the file says.
     lines.extend(not_loaded_lines(broken, None));
     lines.extend(runs_facts(&mine, now));
+    lines.extend(summary_section(summary, width, now));
 
     // The rules that live here, told the same way the header's chips are.
     lines.extend(rules_section(rules, Some(workspace), now));
@@ -375,6 +476,8 @@ pub fn everywhere_lines(
     mine: &[&DigestItem],
     rules: &[Rule],
     broken: &[&NotLoaded],
+    summary: Option<&Summary>,
+    width: usize,
     now: Timestamp,
 ) -> Vec<Line<'static>> {
     let mut lines = vec![Line::from(Span::raw(" everywhere").bold())];
@@ -384,6 +487,7 @@ pub fn everywhere_lines(
     lines.push(Line::raw(""));
     lines.extend(not_loaded_lines(broken, None));
     lines.extend(runs_facts(mine, now));
+    lines.extend(summary_section(summary, width, now));
     lines.extend(rules_section(rules, None, now));
     lines.push(Line::raw(""));
     let edit = if broken.is_empty() {
@@ -483,13 +587,15 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
     out
 }
 
-/// A question: what it asks, who asked, what it says, and what can be done
+/// A question: what it asks, who asked and what was said of that run (its
+/// summary, as in the run's own pane), what it says, and what can be done
 /// about it — each choice on a row of its own, `at` the highlighted one while
 /// it is being answered. `picked` are the options marked so far where it
 /// takes several. Laid out for `width` columns.
 pub fn question_lines(
     d: &Decision,
     asker: Option<&Run>,
+    summary: Option<&Summary>,
     picked: &[usize],
     at: Option<usize>,
     width: usize,
@@ -521,6 +627,11 @@ pub fn question_lines(
     }
     for t in wrap(&who, text) {
         p.push(Line::from(Span::raw(format!(" {t}")).dim()), None);
+    }
+    if d.run.is_some() {
+        for l in summary_section(summary, width, now) {
+            p.push(l, None);
+        }
     }
     if let Some(s) = &d.summary {
         p.push(Line::raw(""), None);
@@ -695,7 +806,7 @@ mod tests {
         );
         assert!(s.contains("· after 0s · exit 1"), "{s}");
         assert!(
-            s.contains("\n recap    /summary recaps it · /summary 2h the last 2h\n"),
+            s.contains("\n recap    /summary recaps it · /summary deep reads its logs · /summary 2h the last 2h\n"),
             "{s}"
         );
         assert!(s.ends_with(" lately\n   nothing yet"), "{s}");
@@ -745,6 +856,11 @@ mod tests {
             source: "summarised".into(),
             reach: "o:3".into(),
             stale: false,
+            target: String::new(),
+            deep: false,
+            from: None,
+            calls: 0,
+            runs: 1,
         };
         let s = text(&run_lines(&item, &[], Some(&summary), &names, 80, now));
         // Narrow, the recap wraps under its own column.
@@ -764,11 +880,15 @@ mod tests {
             since: Some("2h".into()),
             source: "claude recap".into(),
             stale: true,
+            target: String::new(),
+            deep: false,
+            from: None,
+            calls: 0,
             ..summary.clone()
         };
         assert_eq!(
             recap_label(&own, now),
-            "claude's own · 2m ago · last 2h · moved on since"
+            "claude's own · last 2h · 2m ago · moved on since"
         );
         let turns = Summary {
             source: "codex turns".into(),
@@ -776,15 +896,145 @@ mod tests {
         };
         assert_eq!(
             recap_label(&turns, now),
-            "codex's turns · 2m ago · last 2h · moved on since"
+            "codex's turns · last 2h · 2m ago · moved on since"
         );
         let last = Summary {
             source: "codex turn".into(),
             since: None,
             stale: false,
+            target: String::new(),
+            deep: false,
+            from: None,
+            calls: 0,
             ..own
         };
         assert_eq!(recap_label(&last, now), "codex's last turn · 2m ago");
+    }
+
+    #[test]
+    fn a_summary_says_what_it_is_of() {
+        let now = Timestamp::now();
+        let s = Summary {
+            run: String::new(),
+            agent: "fakeai".into(),
+            by: "abc".into(),
+            at: now,
+            text: String::new(),
+            since: None,
+            source: "summarised".into(),
+            reach: String::new(),
+            stale: false,
+            target: "all".into(),
+            deep: true,
+            from: None,
+            calls: 2,
+            runs: 0,
+        };
+        assert_eq!(
+            summary_label(&s, now),
+            "summary of everything · deep · by fakeai · 2 calls"
+        );
+        let job = Summary {
+            target: "j:schedule:nightly@everywhere".into(),
+            deep: false,
+            calls: 1,
+            stale: true,
+            ..s.clone()
+        };
+        assert_eq!(
+            summary_label(&job, now),
+            "summary of the schedule nightly · by fakeai · 1 call · moved on since"
+        );
+        // A folder may have an `@` in it; a job's name has none.
+        let there = Summary {
+            target: "j:reaction:fix@/w/me@work".into(),
+            ..job.clone()
+        };
+        assert!(
+            summary_label(&there, now).starts_with("summary of the reaction fix · "),
+            "{}",
+            summary_label(&there, now)
+        );
+        let run = Summary {
+            target: "r:abc".into(),
+            ..s
+        };
+        assert_eq!(summary_label(&run, now), "deep · by fakeai · 2 calls · 0s ago");
+    }
+
+    #[test]
+    fn a_recap_says_how_deep_who_from_when_and_how_old() {
+        let now: Timestamp = "2026-09-10T12:00:00Z".parse().unwrap();
+        let from: Timestamp = "2026-09-10T09:30:00Z".parse().unwrap();
+        let s = Summary {
+            run: String::new(),
+            agent: "haiku".into(),
+            by: "abc".into(),
+            at: now - jiff::SignedDuration::from_mins(3),
+            text: "It went.".into(),
+            since: None,
+            source: "summarised".into(),
+            reach: String::new(),
+            stale: false,
+            target: "p:/w/api".into(),
+            deep: true,
+            from: Some(from),
+            calls: 1,
+            runs: 2,
+        };
+        let at = fmt_when(from, now);
+        assert_eq!(recap_label(&s, now), format!("deep · by haiku · since {at} · 3m ago"));
+        // Many calls are said; one is what `by` means.
+        let many = Summary { calls: 4, ..s.clone() };
+        assert_eq!(
+            recap_label(&many, now),
+            format!("deep · by haiku · 4 calls · since {at} · 3m ago")
+        );
+        let own = Summary {
+            source: "claude recap".into(),
+            deep: false,
+            from: None,
+            calls: 0,
+            ..s.clone()
+        };
+        assert_eq!(recap_label(&own, now), "claude's own · 3m ago");
+
+        // A project's pane and a job's show the one kept, under the facts.
+        let lines = text(&project_lines(
+            "api",
+            "/w/api",
+            Path::new("/w/api"),
+            &[],
+            &[],
+            &[],
+            Some(&s),
+            80,
+            now,
+        ));
+        assert!(
+            lines.contains(&format!(
+                "\n summary  of the project /w/api · deep · by haiku · since {at} · 3m ago\n          It went.\n"
+            )),
+            "what it is of, then where it came from: {lines}"
+        );
+        let none = text(&project_lines(
+            "api",
+            "/w/api",
+            Path::new("/w/api"),
+            &[],
+            &[],
+            &[],
+            None,
+            80,
+            now,
+        ));
+        assert!(none.contains("/summary says what happened"), "{none}");
+        let everything = Summary {
+            target: "all".into(),
+            ..s.clone()
+        };
+        let all = text(&everywhere_lines(&[], &[], &[], Some(&everything), 80, now));
+        assert!(all.contains(" summary  of everything · deep · by haiku"), "{all}");
     }
 
     #[test]
@@ -843,7 +1093,7 @@ mod tests {
                 .collect::<Vec<_>>()
                 .join("\n")
         };
-        let p = question_lines(&d, None, &[], None, 80, now);
+        let p = question_lines(&d, None, None, &[], None, 80, now);
         let s = shown(&p);
         assert!(
             s.starts_with(" ? nightly tests failed\n asked by rule tests-failed · 7h ago · 1h00m left"),
@@ -865,7 +1115,7 @@ mod tests {
         assert_eq!(p.hits[0], None);
 
         // Being answered: a caret on the highlighted choice, and the keys that move it.
-        let s = shown(&question_lines(&d, None, &[1], Some(1), 80, now));
+        let s = shown(&question_lines(&d, None, None, &[1], Some(1), 80, now));
         assert!(s.contains("\n ❯ 2  ignore     ignore  ◆\n"), "{s}");
         assert!(s.contains("↑↓ choose · enter takes it · 1-2 answers · esc back"), "{s}");
 
@@ -883,14 +1133,14 @@ mod tests {
                 Choice::Dismiss
             ]
         );
-        let s = shown(&question_lines(&multi, Some(&asker), &[0], None, 80, now));
+        let s = shown(&question_lines(&multi, Some(&asker), None, &[0], None, 80, now));
         assert!(s.contains("↵  answer     with the 1 picked"), "{s}");
         assert!(s.contains("↗  attach     nightly · still going"), "{s}");
 
         // Narrow, a long summary wraps onto rows of its own.
         let mut long = d.clone();
         long.summary = Some("one two three four five six".into());
-        let s = shown(&question_lines(&long, None, &[], None, 12, now));
+        let s = shown(&question_lines(&long, None, None, &[], None, 12, now));
         assert!(s.contains("\n one two\n three four\n five six\n"), "{s}");
 
         // The line answers by number or key, the rest the note.

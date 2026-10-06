@@ -355,6 +355,19 @@ pub fn set_seen(conn: &Connection, ids: &[String], at: Timestamp) -> Result<usiz
     Ok(n)
 }
 
+/// When the oldest run caused by `cause` that you have not seen since it
+/// ended did start — so a job's stretch has that firing in it; None when
+/// every one is seen. With `workspace`, only that folder's runs.
+pub fn oldest_unseen(conn: &Connection, cause: &str, workspace: Option<&std::path::Path>) -> Result<Option<Timestamp>> {
+    let ms: Option<i64> = conn.query_row(
+        "SELECT MIN(started_at) FROM runs WHERE cause = ?1 AND ended_at IS NOT NULL AND archived_at IS NULL \
+         AND (seen_at IS NULL OR seen_at < ended_at) AND (?2 IS NULL OR workspace = ?2)",
+        params![cause, workspace.map(path_str)],
+        |r| r.get(0),
+    )?;
+    ms.map(from_millis).transpose()
+}
+
 fn path_str(p: &std::path::Path) -> String {
     p.to_string_lossy().into_owned()
 }
@@ -375,6 +388,45 @@ mod tests {
                 "state {s:?} disagrees with TERMINAL_STATES_SQL"
             );
         }
+    }
+
+    fn test_conn() -> Connection {
+        let mut c = Connection::open_in_memory().unwrap();
+        crate::migrate::run(&mut c).unwrap();
+        c
+    }
+
+    /// A run of `cause` that ended at `ended_at`, 100ms after it started,
+    /// looked at `seen_at`.
+    fn insert_ended(c: &Connection, id: &str, cause: &str, ended_at: Timestamp, seen_at: Option<Timestamp>) {
+        let started = ended_at - jiff::SignedDuration::from_millis(100);
+        let mut r = Run::new(id, rl_proto::types::RunKind::Command, id, vec![], "/w", "/w", started);
+        r.cause = cause.parse().unwrap();
+        r.state = RunState::Finished;
+        r.ended_at = Some(ended_at);
+        r.seen_at = seen_at;
+        insert(c, &r).unwrap();
+    }
+
+    #[test]
+    fn the_oldest_unseen_firing_is_where_a_job_starts() {
+        let c = test_conn();
+        let t = |ms| Timestamp::from_millisecond(ms).unwrap();
+        insert_ended(&c, "a", "schedule:nightly", t(1_000), None); // unseen
+        insert_ended(&c, "b", "schedule:nightly", t(2_000), Some(t(2_500))); // seen
+        insert_ended(&c, "x", "schedule:other", t(500), None);
+        assert_eq!(
+            oldest_unseen(&c, "schedule:nightly", None).unwrap(),
+            Some(t(900)),
+            "when that firing started: it is in the stretch"
+        );
+        assert_eq!(
+            oldest_unseen(&c, "schedule:nightly", Some(std::path::Path::new("/elsewhere"))).unwrap(),
+            None,
+            "only the rule's own folder's"
+        );
+        set_seen(&c, &["a".into()], t(3_000)).unwrap();
+        assert_eq!(oldest_unseen(&c, "schedule:nightly", None).unwrap(), None);
     }
 
     #[test]

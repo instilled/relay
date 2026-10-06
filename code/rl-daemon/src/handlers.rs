@@ -137,7 +137,11 @@ pub fn register(r: &mut Router<Daemon>) {
             .await
             .map_err(|e| RpcError::invalid_params(format!("{e:#}")))
     });
-    r.register::<SummaryGet, _, _>(|d, p: RunId| async move { crate::summary::get(&d, &p.id).await.map_err(internal) });
+    r.register::<SummaryGet, _, _>(|d, p: SummaryParams| async move {
+        crate::summary::get(&d, &p)
+            .await
+            .map_err(|e| RpcError::invalid_params(format!("{e:#}")))
+    });
     r.register::<GcRun, _, _>(|d, p: GcParams| async move {
         let retention = d
             .config

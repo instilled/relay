@@ -230,6 +230,20 @@ pub fn read_on(p: &Path, offset: u64, word: &str) -> std::io::Result<(String, u6
 /// What was said in a Claude session at or after `from`, a line a message:
 /// what you typed and what Claude wrote back, without tool traffic.
 pub fn claude_messages(text: &str, from: Option<Timestamp>) -> String {
+    claude_said(text, from, false)
+}
+
+/// What was said and done in a Claude session at or after `from`: the
+/// messages, and a line for each tool it used — its name and the start of
+/// what it was given — and for each that failed.
+pub fn claude_story(text: &str, from: Option<Timestamp>) -> String {
+    claude_said(text, from, true)
+}
+
+/// How much of a tool's input, or of its error, a line carries.
+const TOOL_LINE: usize = 120;
+
+fn claude_said(text: &str, from: Option<Timestamp>, tools: bool) -> String {
     let mut out = String::new();
     for (at, v) in entries(text).filter(|(at, _)| within(*at, from)) {
         if v.get("isMeta").and_then(Value::as_bool) == Some(true)
@@ -243,21 +257,56 @@ pub fn claude_messages(text: &str, from: Option<Timestamp>) -> String {
             Some("assistant") => "claude",
             _ => continue,
         };
-        let content = v.pointer("/message/content");
-        let said: Vec<String> = match content {
-            Some(Value::String(s)) => vec![s.clone()],
-            Some(Value::Array(blocks)) => blocks
-                .iter()
-                .filter(|b| b.get("type").and_then(Value::as_str) == Some("text"))
-                .filter_map(|b| b.get("text").and_then(Value::as_str).map(str::to_string))
-                .collect(),
+        let blocks = match v.pointer("/message/content") {
+            Some(Value::String(s)) => vec![json_text(s)],
+            Some(Value::Array(blocks)) => blocks.clone(),
             _ => vec![],
         };
-        for s in said.iter().map(|s| s.trim()).filter(|s| !s.is_empty()) {
-            let _ = writeln!(out, "{at} {who}: {s}");
+        for b in &blocks {
+            match b.get("type").and_then(Value::as_str) {
+                Some("text") => {
+                    let s = b.get("text").and_then(Value::as_str).unwrap_or_default().trim();
+                    if !s.is_empty() {
+                        let _ = writeln!(out, "{at} {who}: {s}");
+                    }
+                }
+                Some("tool_use") if tools => {
+                    let name = b.get("name").and_then(Value::as_str).unwrap_or("a tool");
+                    let input = b.get("input").map(Value::to_string).unwrap_or_default();
+                    let _ = writeln!(out, "{at} claude used {name}: {}", cut(&input, TOOL_LINE));
+                }
+                Some("tool_result") if tools && b.get("is_error").and_then(Value::as_bool) == Some(true) => {
+                    let said = match b.get("content") {
+                        Some(Value::String(s)) => s.clone(),
+                        Some(Value::Array(parts)) => parts
+                            .iter()
+                            .filter_map(|p| p.get("text").and_then(Value::as_str))
+                            .collect::<Vec<_>>()
+                            .join(" "),
+                        _ => String::new(),
+                    };
+                    let _ = writeln!(out, "{at} the tool failed: {}", cut(&said, TOOL_LINE));
+                }
+                _ => {}
+            }
         }
     }
     out
+}
+
+fn json_text(s: &str) -> Value {
+    serde_json::json!({ "type": "text", "text": s })
+}
+
+/// The first `max` characters of `s` on one line.
+fn cut(s: &str, max: usize) -> String {
+    let flat = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.chars().count() <= max {
+        return flat;
+    }
+    let mut c: String = flat.chars().take(max).collect();
+    c.push('…');
+    c
 }
 
 /// One Codex turn: when it ended, what it last said, and what it did.
@@ -474,6 +523,24 @@ not json
             claude_messages(CLAUDE, Some(at("2026-09-17T10:10:00Z"))),
             "2026-09-17T10:30:00Z claude: Committed.\n"
         );
+    }
+
+    #[test]
+    fn claudes_story_has_its_tools_too() {
+        let t = r#"{"type":"user","timestamp":"2026-09-17T10:00:00Z","message":{"content":"fix the search"}}
+{"type":"assistant","timestamp":"2026-09-17T10:01:00Z","message":{"content":[{"type":"text","text":"On it."},{"type":"tool_use","name":"Bash","input":{"command":"cargo   test\n-p search"}}]}}
+{"type":"user","timestamp":"2026-09-17T10:01:05Z","message":{"content":[{"type":"tool_result","content":"ok"}]}}
+{"type":"user","timestamp":"2026-09-17T10:02:00Z","message":{"content":[{"type":"tool_result","is_error":true,"content":[{"type":"text","text":"exit 101: 2 failed"}]}]}}
+"#;
+        assert_eq!(
+            claude_story(t, None),
+            "2026-09-17T10:00:00Z you: fix the search\n\
+             2026-09-17T10:01:00Z claude: On it.\n\
+             2026-09-17T10:01:00Z claude used Bash: {\"command\":\"cargo test\\n-p search\"}\n\
+             2026-09-17T10:02:00Z the tool failed: exit 101: 2 failed\n"
+        );
+        assert_eq!(claude_messages(t, None).lines().count(), 2, "no tools in the messages");
+        assert_eq!(cut(&"é".repeat(130), TOOL_LINE).chars().count(), TOOL_LINE + 1);
     }
 
     const CODEX: &str = r#"{"timestamp":"2026-09-17T09:00:00Z","type":"session_meta","payload":{"cwd":"/w/api","timestamp":"2026-09-17T09:00:00Z"}}
