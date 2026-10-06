@@ -594,15 +594,16 @@ belong to the list, and so do `^j`/`^k` while nothing is typed (down and up, as 
 The few keys that are not the list's or the line's each stand for a command, and the command
 list shows them beside it: `^x` stops, archives or removes, `^r` renames, `^t` pins, `^g` opens the graph, `^o` shows or hides the pane,
 `^f` searches.
-`?` on an empty line shows the keys for where you are in a quiet line under it (`tui/shortcuts.rs`)
+`^h` shows the keys for where you are in the footer, in place of its few hints (`tui/shortcuts.rs`)
 — the list's, the `hidden` lens's, a question's and its choices', a watched terminal's, the
-graph's, `/events`', a name being changed's — one table per place, a command's key read from the same table the command
-list shows; `/help` shows it too, beside the commands in the footer. It wraps between keys onto
-more rows on a narrow terminal rather than cut one off, and the foot of the panel grows to hold
-it. `?` again or `esc` puts it away — `esc` does that first, before it closes the pane, clears a
-filter or leaves a view — and so does typing, so it never takes room while you work. With
-anything on the line `?` is just a character, and so it is in a search; the footer ends in a
-dim `? shortcuts` where it has room and `?` would work.
+graph's, `/events`', the catch-up's, a name being changed's — one table per place, a command's key read from the same table the command
+list shows; `/help` shows it too, under the commands in the footer. It is a chord, so it works with
+anything on the line, and no editor here binds `^h`; on an empty line `?` does the same. The keys wrap
+between keys onto more rows on a narrow terminal rather than cut one off, and the footer grows to
+hold them — the command line stays where it is, and the list and the pane above it give up the
+rows, a watched terminal getting its new size. `^h` again or `esc` puts them away — `esc` does that
+first, before it closes the pane, clears a filter or leaves a view; typing leaves them up. In a
+search `^h` and `?` do nothing; the footer ends in a dim `^h shortcuts` where it has room.
 A shell is a command like any other — `/shell` — and has no key of its own. The line keeps `^a`, `^e`, `^u`, `^k` and `^w` for
 editing, as a shell does, so none of those is taken for anything else once something is typed —
 `^k` moving up on an empty line cuts nothing, and `^j` there adds no line. It moves and cuts by

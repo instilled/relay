@@ -815,7 +815,17 @@ struct Areas {
     footer: Rect,
 }
 
-fn areas(area: Rect, wide: bool, show_pane: bool, share: u16, form_h: u16, cands_h: u16, line_h: u16) -> Areas {
+#[allow(clippy::too_many_arguments)]
+fn areas(
+    area: Rect,
+    wide: bool,
+    show_pane: bool,
+    share: u16,
+    form_h: u16,
+    cands_h: u16,
+    line_h: u16,
+    foot_h: u16,
+) -> Areas {
     // The panel runs to the screen's edges, with rules between its sections —
     // but not in the full-screen terminal, which wants every cell.
     let chrome = !wide;
@@ -829,7 +839,7 @@ fn areas(area: Rect, wide: bool, show_pane: bool, share: u16, form_h: u16, cands
         Constraint::Length(rule),
         Constraint::Length(line_h.max(1)),
         Constraint::Length(rule),
-        Constraint::Length(1),
+        Constraint::Length(foot_h.max(1)),
     ])
     .areas(area);
     let rules = if chrome { vec![rule_a, rule_b, rule_c] } else { vec![] };
@@ -875,8 +885,8 @@ fn head_h(area: Rect, wide: bool) -> u16 {
 
 /// The size a terminal gets in the pane: the pane's area, less the row that
 /// names the run — or the whole screen, where there is no pane.
-fn term_size(size: Rect, wide: bool, foot_h: u16) -> (u16, u16) {
-    let a = areas(size, wide, true, LIST_SHARE_TERM, 0, 0, foot_h);
+fn term_size(size: Rect, wide: bool, line_h: u16, foot_h: u16) -> (u16, u16) {
+    let a = areas(size, wide, true, LIST_SHARE_TERM, 0, 0, line_h, foot_h);
     let r = a.pane.unwrap_or(size);
     (r.width.max(1), r.height.saturating_sub(1).max(1))
 }
@@ -1297,7 +1307,7 @@ impl App {
 
     /// The area the terminal draws into.
     fn pane_size(&self, size: Rect) -> (u16, u16) {
-        term_size(size, self.wide, self.foot_h(size.width))
+        term_size(size, self.wide, self.line_h(), self.foot_h(size.width))
     }
 
     /// How many rows the live line takes: its own, capped, at least one.
@@ -1308,10 +1318,34 @@ impl App {
         (self.line.rows() as u16).clamp(1, LINE_MAX)
     }
 
-    /// The live line and the shortcuts under it, when they are up: the rows
-    /// the foot of the panel takes at this width.
+    /// How many rows the footer takes at this width: one for the hints, or
+    /// the shortcuts' rows when they are up, with the flash's row above them
+    /// while there is a flash.
     fn foot_h(&self, width: u16) -> u16 {
-        self.line_h() + self.shortcut_lines(width).len() as u16
+        match self.shortcut_lines(width).len() as u16 {
+            0 => 1,
+            n => n + u16::from(self.flashing().is_some()),
+        }
+    }
+
+    /// What the footer says for a moment, while it still does.
+    fn flashing(&self) -> Option<&str> {
+        self.flash
+            .as_ref()
+            .filter(|(_, at)| at.elapsed() < FLASH)
+            .map(|(m, _)| m.as_str())
+    }
+
+    /// The rows of the footer at this width: the shortcuts where they are up,
+    /// under a flash if there is one, else the one row of hints.
+    fn foot_lines(&self, width: u16) -> Vec<Line<'static>> {
+        let keys = self.shortcut_lines(width);
+        if keys.is_empty() {
+            let room = width.saturating_sub(TEXT_INDENT) as usize;
+            return vec![Line::from(self.footer(room)).dim()];
+        }
+        let flash = self.flashing().map(|m| Line::from(m.to_string()).dim());
+        flash.into_iter().chain(keys).collect()
     }
 
     /// Where the keyboard is, for the shortcuts line; none where it has no
@@ -1354,8 +1388,8 @@ impl App {
         })
     }
 
-    /// The shortcuts line as drawn at this width, wrapped between keys; none
-    /// while it is put away.
+    /// The shortcuts as drawn in the footer at this width, wrapped between
+    /// keys; none while they are put away.
     fn shortcut_lines(&self, width: u16) -> Vec<Line<'static>> {
         if !self.shortcuts {
             return vec![];
@@ -1967,7 +2001,6 @@ impl App {
         if matches!(self.mode, Mode::Normal) {
             self.line.insert(&s);
             self.completing = None;
-            self.shortcuts = shortcuts::still_open(self.shortcuts, self.line.is_empty());
             return Ok(());
         }
         for c in s.chars().filter(|c| !c.is_control()) {
@@ -3989,8 +4022,8 @@ impl App {
                 };
                 let all = pane::choices(&q, q.run.as_deref().and_then(|r| self.run_by_id(r)));
                 let last = all.len().saturating_sub(1);
-                // Nothing is typed here, so `?` is the shortcuts', and `esc`
-                // puts them away before it puts the question back.
+                // Nothing is typed here, so `?` is the shortcuts' as `^h` is,
+                // and `esc` puts them away before it puts the question back.
                 if self.shortcut_key(&k, true) {
                     self.mode = Mode::Answer(id);
                     return Ok(());
@@ -4030,6 +4063,12 @@ impl App {
                     Act::Cancel => {}
                     Act::Save => self.save_form(f, area).await,
                 }
+                return Ok(());
+            }
+            // `^h` and `esc` are the shortcuts' first, and the name stays; `?`
+            // is a character of it.
+            Mode::Rename(r) if self.shortcut_key(&k, false) => {
+                self.mode = Mode::Rename(r);
                 return Ok(());
             }
             Mode::Rename(mut r) => match r.field.key(&k) {
@@ -4106,7 +4145,6 @@ impl App {
             line::Act::Typing => {
                 self.completing = None;
                 self.pick = None;
-                self.shortcuts = shortcuts::still_open(self.shortcuts, self.line.is_empty());
                 Ok(())
             }
             // With a candidate highlighted, tab and enter take it; otherwise
@@ -4160,7 +4198,7 @@ impl App {
         }
     }
 
-    /// `?` and `esc`, for the shortcuts line, before anything else has them:
+    /// `^h`, `?` and `esc`, for the shortcuts, before anything else has them:
     /// whether they were its.
     fn shortcut_key(&mut self, k: &KeyEvent, line_empty: bool) -> bool {
         match shortcuts::take(self.shortcuts, line_empty, k) {
@@ -4728,8 +4766,8 @@ impl App {
             palette::Cmd::Help => {
                 let names: Vec<&str> = palette::ALL.iter().map(|c| c.name).collect();
                 self.say(format!("/{}", names.join(" · /")));
-                // The commands in the footer, the keys under the line: what
-                // `?` shows.
+                // The commands in the footer, and the keys under them: what
+                // `^h` shows.
                 self.shortcuts = true;
             }
             palette::Cmd::Stop => {
@@ -4961,8 +4999,9 @@ impl App {
         } else {
             LIST_SHARE
         };
-        // `?`: the keys for here, under the line, as many rows as they wrap to.
-        let keys = self.shortcut_lines(f.area().width);
+        // The footer: the hints, or the keys for here, as many rows as they
+        // wrap to.
+        let foot = self.foot_lines(f.area().width);
         let a = areas(
             f.area(),
             self.wide,
@@ -4970,7 +5009,8 @@ impl App {
             share,
             form_h,
             cands_h,
-            self.line_h() + keys.len() as u16,
+            self.line_h(),
+            foot.len() as u16,
         );
         let rows = self.rows();
         // News is counted the way it is shown: a job with unseen runs is one.
@@ -5156,29 +5196,19 @@ impl App {
             };
             f.render_widget(Paragraph::new(lines), area);
         }
-        let [line_area, keys_area] =
-            Layout::vertical([Constraint::Fill(1), Constraint::Length(keys.len() as u16)]).areas(a.line);
         match self.mode {
-            Mode::Normal => f.render_widget(Paragraph::new(self.line_lines(line_area.width)), line_area),
+            Mode::Normal => f.render_widget(Paragraph::new(self.line_lines(a.line.width)), a.line),
             // The line waits under a name being changed, quiet and with no
             // caret: the keys are the name's.
-            Mode::Rename(_) => f.render_widget(Paragraph::new(format!("❯ {}", self.line.text())).dim(), line_area),
+            Mode::Rename(_) => f.render_widget(Paragraph::new(format!("❯ {}", self.line.text())).dim(), a.line),
             _ => {}
-        }
-        if !keys.is_empty() {
-            let keys_area = Rect {
-                x: keys_area.x + TEXT_INDENT,
-                width: keys_area.width.saturating_sub(TEXT_INDENT),
-                ..keys_area
-            };
-            f.render_widget(Paragraph::new(keys), keys_area);
         }
         let footer = Rect {
             x: a.footer.x + TEXT_INDENT,
             width: a.footer.width.saturating_sub(TEXT_INDENT),
             ..a.footer
         };
-        f.render_widget(Paragraph::new(self.footer(footer.width as usize)).dim(), footer);
+        f.render_widget(Paragraph::new(foot), footer);
     }
 
     /// The lens, at the right of the header: the slices of the list, the one
@@ -5828,8 +5858,8 @@ impl App {
     }
 
     /// The foot of the panel: a question being asked, a flash, what is
-    /// under way, else the keys for the row — with `? shortcuts` at the end
-    /// while `?` would show them and there is room.
+    /// under way, else the keys for the row — with `^h shortcuts` at the end
+    /// while `^h` would show them and there is room.
     fn footer(&self, width: usize) -> String {
         let title_of = |id: &str| self.run_by_id(id).map(|r| r.title.clone()).unwrap_or_default();
         match &self.mode {
@@ -5923,7 +5953,7 @@ impl App {
             return format!("removing {}… · stopping its runs", r.name);
         }
         let hints = self.hints();
-        if self.shortcuts || !self.line.is_empty() || self.shortcuts_place().is_none() {
+        if self.shortcuts || self.shortcuts_place().is_none() {
             return hints;
         }
         shortcuts::with_hint(hints, width)
@@ -6289,7 +6319,7 @@ mod tests {
         assert_eq!(head_h(screen(79, 45), false), 1);
         // The list starts under the header and its rule, whichever it is.
         let list = |w, h| {
-            areas(screen(w, h), false, false, super::LIST_SHARE, 0, 0, 1)
+            areas(screen(w, h), false, false, super::LIST_SHARE, 0, 0, 1, 1)
                 .list
                 .unwrap()
         };
@@ -6299,7 +6329,7 @@ mod tests {
 
     #[test]
     fn a_click_under_the_tall_header_finds_its_row() {
-        let a = areas(Rect::new(0, 0, 100, 30), false, false, super::LIST_SHARE, 0, 0, 1);
+        let a = areas(Rect::new(0, 0, 100, 30), false, false, super::LIST_SHARE, 0, 0, 1, 1);
         let list = a.list.unwrap();
         let hit = ListHit {
             area: list,
@@ -6318,11 +6348,11 @@ mod tests {
     fn a_terminal_in_the_pane_is_sized_under_the_header_it_has() {
         // 45 rows, less the header (6) and its rule, the rules above the line
         // and the footer, the line, the footer, and the row naming the run.
-        assert_eq!(term_size(Rect::new(0, 0, 160, 45), false, 1), (79, 33));
+        assert_eq!(term_size(Rect::new(0, 0, 160, 45), false, 1, 1), (79, 33));
         // Full screen the header is one line and there are no rules.
-        assert_eq!(term_size(Rect::new(0, 0, 160, 45), true, 1), (160, 41));
+        assert_eq!(term_size(Rect::new(0, 0, 160, 45), true, 1, 1), (160, 41));
         // A short screen keeps the one-line header beside a tile too.
-        assert_eq!(term_size(Rect::new(0, 0, 80, 20), false, 1), (80, 13));
+        assert_eq!(term_size(Rect::new(0, 0, 80, 20), false, 1, 1), (80, 13));
     }
 
     #[test]
@@ -6950,6 +6980,164 @@ mod tests {
         assert_eq!(app.line.text(), "echo hi");
         press(&mut app, KeyCode::Char('j'), ctrl).await;
         assert_eq!(app.line.text(), "echo hi\n", "^j on the line is a new line, as ever");
+        token.cancel();
+    }
+
+    /// The screen as rows of text, drawn at this size.
+    fn screen(app: &mut super::App, w: u16, h: u16) -> Vec<String> {
+        let mut t = ratatui::Terminal::new(ratatui::backend::TestBackend::new(w, h)).unwrap();
+        t.draw(|f| app.draw(f)).unwrap();
+        let buf = t.backend().buffer().clone();
+        (0..h)
+            .map(|y| (0..w).map(|x| buf[(x, y)].symbol().to_string()).collect())
+            .collect()
+    }
+
+    /// Where the live line is on the screen: its row.
+    fn line_row(rows: &[String]) -> usize {
+        rows.iter().position(|r| r.starts_with('❯')).unwrap()
+    }
+
+    #[tokio::test]
+    async fn ctrl_h_swaps_the_footers_hints_for_the_shortcuts_and_esc_swaps_them_back() {
+        let (_tmp, token, mut app, _folder) = panel().await;
+        let (none, ctrl) = (KeyModifiers::NONE, KeyModifiers::CONTROL);
+        app.select(Some(RUN.into()));
+
+        // Closed: the few hints, ending in the pointer, in the one last row.
+        let closed = screen(&mut app, 120, 40);
+        let last = closed.last().unwrap();
+        assert!(last.trim_end().ends_with("^h shortcuts"), "{last:?}");
+        assert!(!last.contains("? shortcuts"), "{last:?}");
+        assert!(!closed.iter().any(|r| r.contains("↑↓ ^j^k move")), "{closed:#?}");
+
+        // `^h`: the keys are the footer, and the line sits just above its
+        // rule, the footer's own rows under it.
+        press(&mut app, KeyCode::Char('h'), ctrl).await;
+        assert!(app.shortcuts);
+        let open = screen(&mut app, 120, 40);
+        let at = line_row(&open);
+        assert!(open[at + 1].starts_with('─'), "{:?}", open[at + 1]);
+        assert!(open[at + 2].contains("↑↓ ^j^k move"), "{:?}", open[at + 2]);
+        assert!(open[at + 2].starts_with("  "), "indented as the footer is");
+        assert!(
+            !open.last().unwrap().contains("shortcuts"),
+            "no pointer while they are up"
+        );
+        assert_eq!(open.len() - (at + 2), app.foot_h(120) as usize);
+
+        // `esc` puts them away first, and the hints are back.
+        press(&mut app, KeyCode::Esc, none).await;
+        assert!(!app.shortcuts);
+        assert_eq!(screen(&mut app, 120, 40), closed);
+
+        // `^h` again, too.
+        press(&mut app, KeyCode::Char('h'), ctrl).await;
+        press(&mut app, KeyCode::Char('h'), ctrl).await;
+        assert!(!app.shortcuts);
+        token.cancel();
+    }
+
+    #[tokio::test]
+    async fn the_footer_grows_on_a_narrow_screen_and_the_list_gives_up_the_rows() {
+        let (_tmp, token, mut app, _folder) = panel().await;
+        let ctrl = KeyModifiers::CONTROL;
+        app.select(Some(RUN.into()));
+        for (w, h) in [(160, 45), (80, 24)] {
+            let area = Rect::new(0, 0, w, h);
+            let closed = screen(&mut app, w, h);
+            assert_eq!(app.foot_h(w), 1);
+            let size = app.pane_size(area);
+            press(&mut app, KeyCode::Char('h'), ctrl).await;
+            // As many rows as the keys wrap to in the room the footer has,
+            // each with its keys whole.
+            let keys = super::shortcuts::keys(super::shortcuts::Place::List);
+            let rows = super::shortcuts::wrap(&keys, w as usize - super::TEXT_INDENT as usize);
+            assert_eq!(app.foot_h(w) as usize, rows.len(), "at {w}");
+            let open = screen(&mut app, w, h);
+            let foot = &open[open.len() - rows.len()..];
+            for (row, want) in foot.iter().zip(&rows) {
+                for k in want {
+                    assert!(row.contains(k.keys.as_str()), "{row:?} lacks {}", k.keys);
+                }
+                assert!(row.chars().count() <= w as usize);
+            }
+            // The line is the same distance above the bottom, less the rows
+            // the footer took over, and the list lost them.
+            let extra = rows.len() - 1;
+            assert_eq!(line_row(&open), line_row(&closed) - extra, "at {w}");
+            // A watched terminal is sized by what is left of the pane.
+            let size_open = app.pane_size(area);
+            assert_eq!(size_open.0, size.0);
+            assert_eq!(size.1 - size_open.1, extra as u16, "at {w}");
+            press(&mut app, KeyCode::Char('h'), ctrl).await;
+        }
+        // The width the shortcuts wrap at is the footer's, at 80: more than one row.
+        assert!(app.foot_h(80) == 1);
+        press(&mut app, KeyCode::Char('h'), ctrl).await;
+        let rows = app.foot_h(80);
+        assert!(rows > 1);
+        // A flash is said above the keys, which stay where they were.
+        app.say("daemon: gone");
+        assert_eq!(app.foot_h(80), rows + 1);
+        let said = screen(&mut app, 80, 24);
+        assert!(said[24 - rows as usize - 1].contains("daemon: gone"), "{said:#?}");
+        assert!(said[24 - rows as usize].contains("↑↓ ^j^k move"), "{said:#?}");
+        token.cancel();
+    }
+
+    #[tokio::test]
+    async fn a_question_mark_is_the_shortcuts_only_on_an_empty_line_and_typing_leaves_them_up() {
+        let (_tmp, token, mut app, _folder) = panel().await;
+        let (none, ctrl) = (KeyModifiers::NONE, KeyModifiers::CONTROL);
+        app.select(Some(RUN.into()));
+        press(&mut app, KeyCode::Char('?'), none).await;
+        assert!(app.shortcuts && app.line.is_empty());
+        press(&mut app, KeyCode::Char('?'), none).await;
+        assert!(!app.shortcuts);
+
+        // With words on the line `?` is a character, and `^h` still shows them.
+        type_in(&mut app, "why").await;
+        press(&mut app, KeyCode::Char('?'), none).await;
+        assert_eq!(app.line.text(), "why?");
+        assert!(!app.shortcuts);
+        press(&mut app, KeyCode::Char('h'), ctrl).await;
+        assert!(app.shortcuts);
+        assert_eq!(app.line.text(), "why?", "^h is no character");
+        // Typing and moving about the words do not put them away; `esc` does,
+        // before it clears the line.
+        type_in(&mut app, "!").await;
+        press(&mut app, KeyCode::Left, none).await;
+        assert!(app.shortcuts);
+        press(&mut app, KeyCode::Esc, none).await;
+        assert!(!app.shortcuts);
+        assert_eq!(app.line.text(), "why?!");
+        press(&mut app, KeyCode::Esc, none).await;
+        assert!(app.line.is_empty());
+        token.cancel();
+    }
+
+    #[tokio::test]
+    async fn a_name_being_changed_keeps_its_keys_and_takes_the_shortcuts_beside_them() {
+        let (_tmp, token, mut app, _folder) = panel().await;
+        let (none, ctrl) = (KeyModifiers::NONE, KeyModifiers::CONTROL);
+        app.select(Some(RUN.into()));
+        press(&mut app, KeyCode::Char('r'), ctrl).await;
+        type_in(&mut app, "new").await;
+        press(&mut app, KeyCode::Char('h'), ctrl).await;
+        assert!(app.shortcuts);
+        assert_eq!(renaming(&app), Some(("new".into(), false)), "the name is as it was");
+        let rows = screen(&mut app, 120, 40);
+        assert!(
+            rows.iter().any(|r| r.contains("enter saves · esc cancels · ^a ^e")),
+            "{rows:#?}"
+        );
+        // `esc` puts the keys away first; the next one cancels the name.
+        press(&mut app, KeyCode::Esc, none).await;
+        assert!(!app.shortcuts);
+        assert!(renaming(&app).is_some());
+        press(&mut app, KeyCode::Esc, none).await;
+        assert!(renaming(&app).is_none());
         token.cancel();
     }
 
