@@ -21,6 +21,8 @@ fn done_hides_but_keeps() {
         return;
     };
     let tmp = tempfile::tempdir().unwrap();
+    // `rl since` asks no assistant for its top here.
+    std::fs::write(tmp.path().join("config.yaml"), "catch_up:\n  summary: ask\n").unwrap();
     let run = |args: &[&str]| {
         let out = Command::new(env!("CARGO_BIN_EXE_rl"))
             .args(args)

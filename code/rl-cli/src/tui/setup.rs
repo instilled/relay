@@ -559,7 +559,8 @@ impl Guide {
     fn draw_summaries(&self, lines: &mut Vec<Line<'static>>) {
         lines.push(Line::styled("Who writes summaries and drafts rules?", theme::name()));
         lines.push(Line::styled(
-            "One short call each time you ask for a recap or type in plain words — never on its own.",
+            "One short call each time you ask for a recap or type in plain words, and one for the top of \
+             what happened when you come back after a while (catch_up.summary: ask turns that off).",
             theme::dim(),
         ));
         lines.push(Line::raw(""));
@@ -779,6 +780,8 @@ mod tests {
                 config,
                 interpret: None,
                 summary: None,
+                catch_up_after: "8h".into(),
+                catch_up_summary: "auto".into(),
                 errors: vec![],
             },
             agents: vec![
@@ -920,6 +923,17 @@ mod tests {
         // Never gone through: all of it.
         let g = Guide::since(&state(Config::default()), &sessions).unwrap();
         assert_eq!(g.steps.len(), 3);
+    }
+
+    #[test]
+    fn the_summaries_step_says_the_catch_up_asks_too_and_how_to_stop_it() {
+        let g = Guide::new(&state(Config::default()), &none());
+        let mut lines = Vec::new();
+        g.draw_summaries(&mut lines);
+        let said: String = lines.iter().map(|l| l.to_string()).collect::<Vec<_>>().join("\n");
+        assert!(said.contains("when you come back after a while"), "{said}");
+        assert!(said.contains("catch_up.summary: ask"), "{said}");
+        assert!(!said.contains("never on its own"), "{said}");
     }
 
     #[test]

@@ -15,6 +15,10 @@
 //!   settle: 5ms                  # how long a burst of output may gather before the holder passes it on
 //! workspaces:
 //!   badges: [gh-pr]              # beside a git folder's branch on its header: `PR #95`
+//! catch_up:
+//!   after: 8h                    # away longer than this, the panel opens on what happened; `off` never
+//!   summary: auto                # `auto`: the top is written when you come back after `after`,
+//!                                # by assistants.summary · `ask`: only on /summary
 //! ```
 
 use serde::{Deserialize, Serialize};
@@ -40,6 +44,53 @@ pub struct Config {
     /// What a folder's header says.
     #[serde(default, skip_serializing_if = "Workspaces::is_empty")]
     pub workspaces: Workspaces,
+    /// What the panel says when you come back after a while.
+    #[serde(default, skip_serializing_if = "CatchUp::is_empty")]
+    pub catch_up: CatchUp,
+}
+
+/// What the panel does when you open it after being away.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CatchUp {
+    /// Away longer than this, the panel opens on the catch-up; `off` (or
+    /// `never`) never does by itself. Unset: `8h`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after: Option<String>,
+    /// `auto`: the top is written when you come back after `after`, by
+    /// `assistants.summary` · `ask`: only on /summary. Unset: `auto`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+}
+
+impl CatchUp {
+    /// How long away, at the least, before the panel opens on the catch-up.
+    pub const DEFAULT_AFTER: &str = "8h";
+
+    pub fn is_empty(&self) -> bool {
+        self.after.is_none() && self.summary.is_none()
+    }
+
+    /// What the file says, or the default; `None` when it never opens by
+    /// itself. A value that is not a duration falls back to the default, and
+    /// the daemon's report says so.
+    pub fn after(&self) -> Option<jiff::SignedDuration> {
+        let said = self.after.as_deref().unwrap_or(Self::DEFAULT_AFTER);
+        if is_never(said) {
+            return None;
+        }
+        Some(
+            rl_core::time::parse_duration(said).unwrap_or_else(|| {
+                rl_core::time::parse_duration(Self::DEFAULT_AFTER).expect("the default is a duration")
+            }),
+        )
+    }
+
+    /// Whether the top is written when the catch-up opens: unless the file
+    /// says `ask`.
+    pub fn auto_summary(&self) -> bool {
+        !self.summary.as_deref().is_some_and(|s| s.eq_ignore_ascii_case("ask"))
+    }
 }
 
 /// A folder's header, beyond what Relay reads itself.
@@ -249,6 +300,7 @@ impl<'de> Deserialize<'de> for Assistant {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use jiff::SignedDuration;
 
     #[test]
     fn a_name_or_a_map() {
@@ -353,5 +405,32 @@ mod tests {
         assert!(e.to_string().contains("unknown field `modle`"), "{e}");
         let e = serde_json::from_str::<Config>(r#"{"assistants":{"interpret":{"model":"x"}}}"#).unwrap_err();
         assert!(e.to_string().contains("missing field `agent`"), "{e}");
+    }
+
+    #[test]
+    fn catch_up_defaults_and_its_off() {
+        let c: Config = serde_json::from_str("{}").unwrap();
+        assert_eq!(c.catch_up.after(), Some(SignedDuration::from_hours(8)));
+        assert!(c.catch_up.auto_summary());
+        let c: Config = serde_json::from_str(r#"{"catch_up":{"after":"off","summary":"ask"}}"#).unwrap();
+        assert_eq!(c.catch_up.after(), None);
+        assert!(!c.catch_up.auto_summary());
+        let c: Config = serde_json::from_str(r#"{"catch_up":{"after":"never"}}"#).unwrap();
+        assert_eq!(c.catch_up.after(), None);
+        let c: Config = serde_json::from_str(r#"{"catch_up":{"after":"90m","summary":"auto"}}"#).unwrap();
+        assert_eq!(c.catch_up.after(), Some(SignedDuration::from_mins(90)));
+        assert!(c.catch_up.auto_summary());
+        let c: Config = serde_json::from_str(r#"{"catch_up":{"after":"soon"}}"#).unwrap();
+        assert_eq!(
+            c.catch_up.after(),
+            Some(SignedDuration::from_hours(8)),
+            "a bad value is the default"
+        );
+        assert!(
+            serde_json::from_str::<Config>(r#"{"catch_up":{"afterr":"2h"}}"#).is_err(),
+            "a typo is refused"
+        );
+        let c: Config = serde_json::from_str("{}").unwrap();
+        assert_eq!(serde_json::to_string(&c).unwrap(), "{}", "unset stays unwritten");
     }
 }

@@ -1,8 +1,9 @@
 //! What happened, said for the person who was not looking: of a run, of a
 //! job's runs (a schedule's or a reaction's), of a project's, or of
-//! everything, over a stretch. Only ever on demand (`/summary` in the panel,
-//! `rl summary`, or a reaction on `run.finished`) — Relay never asks an agent
-//! on its own.
+//! everything, over a stretch. Only ever asked for: `/summary` in the panel,
+//! `rl summary`, a reaction on `run.finished`, or the catch-up's top when
+//! `catch_up.summary` is `auto` — the panel and `rl since` ask for it as you
+//! come back.
 //!
 //! Brief, a run is told from the cheapest source that has one:
 //! - Claude writes its own recap into its transcript; the latest in the
@@ -20,7 +21,8 @@
 //! weekend of a busy agent is still one answer.
 //!
 //! Many runs (a job, a project, everything) are told from their runs' lines
-//! in one call when brief (a job's firings folded, at most `LINES_MAX`);
+//! in one call when brief (a job's firings folded, at most `LINES_MAX`, the
+//! newest of each folder);
 //! deep, from each run's deep read (kept ones as they are) and a join. `dry`
 //! only counts the calls, each run's as its own deep read would.
 //!
@@ -740,8 +742,10 @@ const LINE_CUT: usize = 140;
 
 /// The lines many runs are told by, brief: each run's under its heading, but
 /// a job's firings folded into one (`nightly · 14 firings · 2 failed · last:
-/// …`) unless the job is what is told; past `LINES_MAX`, `… and 12 more`.
-/// Each is cut short, so the lot fits in one call.
+/// …`) unless the job is what is told. Past `LINES_MAX` the newest are told
+/// and the rest counted (`… and 12 earlier`); for everything, the room is
+/// shared between folders so a busy one does not crowd out the others. Each
+/// is cut short, so the lot fits in one call.
 fn many_lines(t: &SummaryTarget, runs: &[Run], lines: Vec<String>, now: Timestamp) -> Vec<(String, String)> {
     struct Fold {
         at: usize,
@@ -751,6 +755,13 @@ fn many_lines(t: &SummaryTarget, runs: &[Run], lines: Vec<String>, now: Timestam
         last: String,
     }
     let mut out: Vec<(String, String)> = Vec::new();
+    // Each line's share of the room — its folder for everything, one share
+    // for the rest — and when the newest run it tells started.
+    let mut when: Vec<(PathBuf, Timestamp)> = Vec::new();
+    let share = |r: &Run| match t {
+        SummaryTarget::All => r.workspace.clone(),
+        _ => PathBuf::new(),
+    };
     let mut folds: Vec<((String, PathBuf), Fold)> = Vec::new();
     for (r, line) in runs.iter().zip(lines) {
         let job = match (&r.cause, t) {
@@ -760,6 +771,7 @@ fn many_lines(t: &SummaryTarget, runs: &[Run], lines: Vec<String>, now: Timestam
         };
         let Some(name) = job else {
             out.push((heading(t, r, now), line));
+            when.push((share(r), r.started_at));
             continue;
         };
         let key = (r.cause.to_string(), r.workspace.clone());
@@ -779,6 +791,7 @@ fn many_lines(t: &SummaryTarget, runs: &[Run], lines: Vec<String>, now: Timestam
                     _ => f.name.clone(),
                 };
                 out[f.at] = (head, said);
+                when[f.at].1 = when[f.at].1.max(r.started_at);
             }
             None => {
                 folds.push((
@@ -792,19 +805,61 @@ fn many_lines(t: &SummaryTarget, runs: &[Run], lines: Vec<String>, now: Timestam
                     },
                 ));
                 out.push((heading(t, r, now), line));
+                when.push((share(r), r.started_at));
             }
         }
     }
-    let more = out.len().saturating_sub(LINES_MAX);
-    out.truncate(LINES_MAX);
-    for (head, line) in &mut out {
-        *head = cut(head, HEADING_CUT);
-        *line = cut(line, LINE_CUT);
+    let keep = newest(&when, LINES_MAX);
+    let mut told = Vec::with_capacity(out.len().min(LINES_MAX) + 1);
+    let mut counted: Vec<&Path> = Vec::new();
+    for (i, (head, line)) in out.into_iter().enumerate() {
+        if !keep[i] {
+            continue;
+        }
+        // What a share left out is counted above the first of it told.
+        let folder = when[i].0.as_path();
+        if !counted.contains(&folder) {
+            counted.push(folder);
+            let left = when.iter().zip(&keep).filter(|((w, _), k)| w == folder && !**k).count();
+            if left > 0 {
+                let whose = match t {
+                    SummaryTarget::All => format!(" · {}", display_path(folder)),
+                    _ => String::new(),
+                };
+                told.push((format!("… and {left} earlier{whose}"), String::new()));
+            }
+        }
+        told.push((cut(&head, HEADING_CUT), cut(&line, LINE_CUT)));
     }
-    if more > 0 {
-        out.push((format!("… and {more} more"), String::new()));
+    told
+}
+
+/// Which of many lines to tell, at most `max`, given each one's share (its
+/// folder, for everything) and when it last moved: the room is shared out
+/// between them — one with fewer lines than its part tells them all and
+/// leaves the rest to the others — and each tells its newest.
+fn newest(when: &[(PathBuf, Timestamp)], max: usize) -> Vec<bool> {
+    let mut folders: Vec<(&Path, usize)> = Vec::new();
+    for (w, _) in when {
+        match folders.iter_mut().find(|(f, _)| *f == w.as_path()) {
+            Some((_, n)) => *n += 1,
+            None => folders.push((w, 1)),
+        }
     }
-    out
+    folders.sort_by_key(|(_, n)| *n);
+    let (mut room, mut left) = (max, folders.len());
+    let mut keep = vec![false; when.len()];
+    for (folder, n) in folders {
+        let share = (room / left).min(n);
+        room -= share;
+        left -= 1;
+        let mut mine: Vec<usize> = (0..when.len()).filter(|&i| when[i].0 == folder).collect();
+        mine.sort_by_key(|&i| std::cmp::Reverse((when[i].1, i)));
+        for i in mine.into_iter().take(share) {
+            keep[i] = true;
+        }
+    }
+    keep
 }
 
 /// `s`, at most `max` characters, `…` where it was cut.
@@ -1258,14 +1313,24 @@ mod tests {
     #[test]
     fn many_runs_brief_fit_in_one_call() {
         let now: Timestamp = "2026-09-10T12:00:00Z".parse().unwrap();
+        let at = |s: i64| now - SignedDuration::from_secs(s);
         let mut runs = Vec::new();
         let mut lines = Vec::new();
+        // The job fired last; the 300 others before it.
         for i in 0..14 {
-            let mut r = Run::new(format!("n{i:03}"), RunKind::Command, "nightly", vec![], "/w", "/w", now);
+            let mut r = Run::new(
+                format!("n{i:03}"),
+                RunKind::Command,
+                "nightly",
+                vec![],
+                "/w",
+                "/w",
+                at(14 - i),
+            );
             r.cause = Cause::Schedule("nightly".into());
             r.state = if i < 2 { RunState::Failed } else { RunState::Finished };
             runs.push(r);
-            lines.push(format!("{} · exit {}", runs[i].state, i));
+            lines.push(format!("{} · exit {}", runs[i as usize].state, i));
         }
         for i in 0..300 {
             let title = format!("{i} {}", "a long title ".repeat(10));
@@ -1276,7 +1341,7 @@ mod tests {
                 vec![],
                 "/w",
                 "/w",
-                now,
+                at(1000 - i),
             ));
             lines.push(format!("finished · {}", "it said a great deal ".repeat(15)));
         }
@@ -1285,16 +1350,21 @@ mod tests {
         assert_eq!(
             told.len(),
             LINES_MAX + 1,
-            "a line each, the job's folded, then the rest counted"
+            "the earlier ones counted, then a line each, the job's folded"
         );
+        assert_eq!(told[0], ("… and 101 earlier".to_string(), String::new()));
         assert_eq!(
-            told[0],
+            told[1],
             (
                 "nightly".to_string(),
                 "14 firings · 2 failed · last: finished · exit 13".to_string()
             )
         );
-        assert_eq!(told[LINES_MAX], ("… and 101 more".to_string(), String::new()));
+        assert!(
+            told[2].0.starts_with("101 a long title"),
+            "the newest kept: {:?}",
+            told[2]
+        );
         assert!(over_body(&told).len() < CHUNK, "{}", over_body(&told).len());
         // A job told is told firing by firing.
         let job = SummaryTarget::Job {
@@ -1304,6 +1374,98 @@ mod tests {
         };
         let told = many_lines(&job, &runs[..14], lines[..14].to_vec(), now);
         assert_eq!(told.len(), 14);
+    }
+
+    #[test]
+    fn a_busy_job_is_told_by_its_newest_firings() {
+        let now: Timestamp = "2026-09-10T12:00:00Z".parse().unwrap();
+        let (mut runs, mut lines) = (Vec::new(), Vec::new());
+        for i in 0..250 {
+            let at = now - SignedDuration::from_mins(250 - i);
+            let mut r = Run::new(format!("n{i:03}"), RunKind::Command, "poll", vec![], "/w", "/w", at);
+            r.cause = Cause::Schedule("poll".into());
+            runs.push(r);
+            lines.push(format!("finished · firing {i}"));
+        }
+        let job = SummaryTarget::Job {
+            rule: rl_proto::rule::RuleKind::Schedule,
+            name: "poll".into(),
+            workspace: Some("/w".into()),
+        };
+        let told = many_lines(&job, &runs, lines, now);
+        assert_eq!(told.len(), LINES_MAX + 1);
+        assert_eq!(told[0], ("… and 50 earlier".to_string(), String::new()));
+        assert_eq!(told[1].1, "finished · firing 50");
+        assert_eq!(told[LINES_MAX].1, "finished · firing 249", "the last firing is told");
+    }
+
+    #[test]
+    fn a_global_job_keeps_its_newest_firings_wherever_they_ran() {
+        let now: Timestamp = "2026-09-10T12:00:00Z".parse().unwrap();
+        let (mut runs, mut lines) = (Vec::new(), Vec::new());
+        // By folder, then as they started: /a fired last, /b before it.
+        for (ws, base) in [("/a", 0), ("/b", 1000)] {
+            for i in 0..150 {
+                let at = now - SignedDuration::from_mins(base + 150 - i);
+                let mut r = Run::new(format!("{ws}{i:03}"), RunKind::Command, "poll", vec![], ws, ws, at);
+                r.cause = Cause::Schedule("poll".into());
+                runs.push(r);
+                lines.push(format!("finished · {ws} {i}"));
+            }
+        }
+        let job = SummaryTarget::Job {
+            rule: rl_proto::rule::RuleKind::Schedule,
+            name: "poll".into(),
+            workspace: None,
+        };
+        let told = many_lines(&job, &runs, lines, now);
+        assert_eq!(told.len(), LINES_MAX + 1, "one count of the earlier ones");
+        assert_eq!(told[0], ("… and 100 earlier".to_string(), String::new()));
+        let of = |ws: &str| told.iter().filter(|(_, l)| l.contains(ws)).count();
+        assert_eq!((of("/a "), of("/b ")), (150, 50), "the newest, wherever they ran");
+    }
+
+    #[test]
+    fn everything_keeps_the_newest_of_each_folder() {
+        let now: Timestamp = "2026-09-10T12:00:00Z".parse().unwrap();
+        let (mut runs, mut lines) = (Vec::new(), Vec::new());
+        // A busy folder sorts first; a quiet one, after it, ran earlier.
+        for i in 0..300 {
+            let at = now - SignedDuration::from_secs(300 - i);
+            runs.push(Run::new(
+                format!("a{i:03}"),
+                RunKind::Command,
+                format!("busy {i}"),
+                vec![],
+                "/a",
+                "/a",
+                at,
+            ));
+            lines.push(format!("finished · {i}"));
+        }
+        for i in 0..5 {
+            let at = now - SignedDuration::from_hours(5 - i);
+            runs.push(Run::new(
+                format!("b{i:03}"),
+                RunKind::Command,
+                format!("quiet {i}"),
+                vec![],
+                "/b",
+                "/b",
+                at,
+            ));
+            lines.push(format!("finished · {i}"));
+        }
+        let told = many_lines(&SummaryTarget::All, &runs, lines, now);
+        let of = |p: &str| told.iter().filter(|(h, _)| h.starts_with(p)).count();
+        assert_eq!(of("quiet "), 5, "the quiet folder is told whole");
+        assert_eq!(of("busy "), LINES_MAX - 5);
+        assert_eq!(told[0], ("… and 105 earlier · /a".to_string(), String::new()));
+        assert!(told[1].0.starts_with("busy 105 · /a"), "{:?}", told[1]);
+        assert!(
+            told.iter().any(|(h, _)| h.starts_with("busy 299")),
+            "the newest of the busy one"
+        );
     }
 
     #[test]

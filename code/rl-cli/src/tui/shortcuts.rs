@@ -1,8 +1,9 @@
 //! `?` on an empty line: the keys for where you are, in a quiet line under
-//! the command input — the list's, the graph's, the events view's, a
-//! question's, a name being changed's. `?` again or `esc` puts it away, and so does typing, so it
-//! never takes room while you work. With words on the line `?` is only a
-//! character: a question, a note and a search all take it.
+//! the command input — the list's, the graph's, the events view's, the
+//! catch-up's, a question's, a name being changed's. `?` again or `esc` puts
+//! it away, and so does typing, so it never takes room while you work. With
+//! words on the line `?` is only a character: a question, a note and a
+//! search all take it.
 //!
 //! One table per place, so what the line says stays what the keys do. A key
 //! that stands for a `/` command is read from `palette::key`, the same table
@@ -32,6 +33,8 @@ pub enum Place {
     Graph,
     /// `/events`.
     Events,
+    /// What happened while you were away.
+    CatchUp,
     /// A name being changed where it stands in the list.
     Rename,
 }
@@ -142,6 +145,13 @@ pub fn keys(at: Place) -> Vec<Key> {
             cmd(Cmd::Pane, "details"),
             cmd(Cmd::Graph, "its rule's wiring"),
             key("esc", "back"),
+        ],
+        Place::CatchUp => vec![
+            key("↑↓", "move"),
+            key("enter", "go to it"),
+            key("1-9", "answers"),
+            key("/summary [deep]", ""),
+            key("esc", "the list"),
         ],
         // The line's own editing keys, the few that matter most.
         Place::Rename => vec![
@@ -306,6 +316,11 @@ mod tests {
             "enter saves · esc cancels · ^a ^e to the ends · alt ←→ by word · ^w ^u ^k cut · ↑↓ let it go"
         );
 
+        assert_eq!(
+            one_line(Place::CatchUp),
+            "↑↓ move · enter go to it · 1-9 answers · /summary [deep] · esc the list"
+        );
+
         let question = one_line(Place::Question);
         assert!(question.contains("enter its choices"), "{question}");
         assert!(question.contains("1-9 ↵ answers"), "{question}");
@@ -348,6 +363,7 @@ mod tests {
             Place::Question,
             Place::Graph,
             Place::Events,
+            Place::CatchUp,
             Place::Rename,
             Place::Term {
                 wide: false,
@@ -381,6 +397,7 @@ mod tests {
             Place::List,
             Place::Graph,
             Place::Events,
+            Place::CatchUp,
             Place::Question,
             Place::Hidden,
             Place::Rename,

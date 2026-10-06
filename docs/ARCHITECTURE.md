@@ -476,13 +476,13 @@ line as the note (`1 only the checkout path`), and the line's hint says so befor
 Typed text before `^x` goes with a dismissal as its reason. `/summary [deep] [again] [since]`
 says what happened in the row under the cursor (§6): a run, live or ended; a job's runs, in its
 project's folder or, under `everywhere`, anywhere; a project's on its header; everything on
-`everywhere`; on a question, the run that asked it (one with no asking run says so). Brief reads
-the recaps, `deep` the logs; `again` makes a new one even when the one kept is up to date. The
-two words come first, in either order. With no stretch typed, a run's is since you last looked
-at it (the daemon's to say); a job's from the start of its oldest firing you had not seen when the
-cursor landed on it — landing marks them seen, so the panel notes where that firing started first
-(`App::unseen_from`, by row, until used or the row has firings not seen again) and sends it as
-`from`, else the daemon's; a project's and everything's since you were last here
+`everywhere` and on the catch-up's top; on a question, the run that asked it (one with no asking
+run says so). Brief reads the recaps, `deep` the logs; `again` makes a new one even when the one
+kept is up to date. The two words come first, in either order. With no stretch typed, a run's is
+since you last looked at it (the daemon's to say); a job's from the start of its oldest firing you
+had not seen when the cursor landed on it — landing marks them seen, so the panel notes where that
+firing started first (`App::unseen_from`, by row, until used or the row has firings not seen again)
+and sends it as `from`, else the daemon's; a project's and everything's since you were last here
 (`App::away_since`, else the last day). Deep asks `summary.make {dry: true}` first, and past one
 assistant call says what it reads and what it costs, and waits (`deep over 3 runs · 4 calls · y /
 any key`, from the dry run's `runs` and `calls`; `y` asks, anything else lets it be). The answer
@@ -492,8 +492,9 @@ header, saying what it is of: `of the project ~/api · deep · by haiku · since
 since` once what it is of has gone on. The pane fetches the one kept (`summary.get`) over the
 stretch and depth last made of that row while the panel is open, else its default. Asked over a
 terminal being watched, the pane turns to the details, where the summary is; the terminal stays
-open, and `enter` on the run is back in it. An assistant is only ever asked when you ask;
-Claude's and Codex's own recaps are there already, kept as they write them (§6).
+open, and `enter` on the run is back in it. An assistant is only ever asked when you ask — and
+for the catch-up's top as you come back, by the assistant you named, when `catch_up.summary` is
+`auto` (below); Claude's and Codex's own recaps are there already, kept as they write them (§6).
 
 **Typing is what the panel rests in.** One line sits at the foot and always takes what you type
 (`tui/line.rs`), so there is nothing to open and nothing to close. What a finished line means is
@@ -584,10 +585,10 @@ spot), and typing anything clears the highlight so `enter` submits the line as b
 Because letters go into the line, everything that is not typing is a `/` command
 (`tui/palette.rs`), offered as you type it: `/stop`, `/archive [seen]`, `/mark`, `/join`,
 `/shell`, `/rename`, `/pin`, `/hide`, `/sort`, `/pane [full]`, `/graph`, `/events`, `/reload [rules|shell]`, `/approve` and `/pause`,
-`/new`, `/edit [schedules|reactions [global]]`, `/summary`, `/ask`, `/filter`, `/lens`, `/prune`,
-`/up`, `/help`, `/quit`. One name per act: a variant of an act is an argument to it rather than a
-command of its own, and no word means two things — `done` is only ever what `/mark` says. `enter` on an empty line
-is the row under the cursor instead — a job opens, a question comes
+`/new`, `/edit [schedules|reactions [global]]`, `/summary`, `/since [when]`, `/ask`, `/filter`,
+`/lens`, `/prune`, `/up`, `/help`, `/quit`. One name per act: a variant of an act is an argument to
+it rather than a command of its own, and no word means two things — `done` is only ever what `/mark`
+says. `enter` on an empty line is the row under the cursor instead — a job opens, a question comes
 out of the list to be answered by number, a run's terminal opens. Arrows, `home`/`end` and `esc`
 belong to the list, and so do `^j`/`^k` while nothing is typed (down and up, as vi's `j` and `k`), and shift-`↑`/`↓`, which move the row itself inside its project (`/sort` undoes it); `esc` with something typed clears the line first, and `ctrl-c` leaves.
 The few keys that are not the list's or the line's each stand for a command, and the command
@@ -662,8 +663,80 @@ list). `/edit reactions` opens the reactions instead (`schedule` and `reaction` 
 `global` after either opens the home's from anywhere; a file named so that did not load opens at
 its line too.
 
-Nothing is remembered between openings except presence: leaving the panel is what `rl since`
-counts from.
+### Catch-up
+
+**When it opens.** `run()` touches presence before anything else; `presence.touch` gives back the
+`last_seen_at` it overwrites, so that is when you were last here. The open panel touches it again
+on the tick once a minute (`presence_due`) and as it closes, so a window closed without quitting
+still leaves when you were last here a minute or less before it went. Away longer than
+`catch_up.after` (default `8h`; `off` or `never`, not by itself) and with no setup guide this
+open, the panel opens on the catch-up (`View::CatchUp`) instead of the list; a first open, with
+no presence yet, has nothing to catch up on. `/since [when]` opens it any time, from any view:
+over the stretch typed (`1h`, a date, an instant), else since you were last here, else the last
+day. `esc` goes to the list (the pane and a search first, as on the list); `enter` goes to the
+row there, cursor on it — a job to its row, `^g` from there its rule. A row the list lets go of
+once it is seen — ended more than a day ago, not pinned (`App::kept_on_the_list`) — is read where
+it stands instead: the pane opens on it in the catch-up, and it is seen when the catch-up is left.
+What reads the list's own rows says where it is done (`/hide`, `/sort`, `⇧↑↓`, `^r`: `… on the
+list · esc goes there`), and so do `^x` and `/archive` on a job, whose row here holds only the
+stretch's firings; what acts on the row itself — `^t`, `/stop`, `/mark`, `^x` on a run or a
+question — acts here as on the list.
+
+**The tree.** The catch-up's digest is the list's, cut to the stretch (`catchup::stretch`,
+`App::catch`, again on each refresh; the list's left as it is): what moved since `since`, what
+waits on you, what you have not looked at, what is pinned, and the questions — no second digest
+asked for. It is built on the client (`rl-cli/src/catchup.rs`, `CatchUp::build`) from the list's
+own rows — `rows::build`, its day of ended runs counted back from `since` — so the two never
+disagree: a question, a run waiting on you however old, a run with news since then or not looked
+at yet, a job's firings in the stretch — never an assistant's own run, the top being written
+among them, which is Relay's doing and not what happened. A frame builds it once, however many of
+its parts read it (`App::drawn`, `catchup::Kept`: the rows by their place in the digest, laid
+back over it). What needs you leads each project and the projects that need you lead; a project with
+nothing new folds to one line (`▸ relay  nothing new`). A project's line tallies the stretch (`2
+need you · 9 ran · 1 failed`, only what happened in it counted); each row is a line (`row_line`): an
+agent's recap or its state and last line, a job's marks and how the last went, a command's state and
+how it ended, a question's ask — answered by number on the line, with a note, as on the list. Moving
+about it marks nothing seen; leaving it, any way, marks seen all it showed (`saw_catch_up`), notes
+each job's earliest firing not seen so its `/summary` still starts there, and gives a project's
+`/summary` its own stretch back (`App::away_since` is the catch-up's while it is up, since you were
+last here after).
+
+**The top.** Until it is written it is counted: a bullet for what needs you and one per project
+that did something (`CatchUp::bullets`: `2 need you: api` · `api: 3 ran · 1 failed`), from all
+of the stretch whatever the search narrows the rows to. It writes itself only as you come back:
+when the catch-up opened by itself (you were away longer than `catch_up.after`), with
+`catch_up.summary: auto` (the default), by the assistant you named for summaries
+(`assistants.summary` in `config.yaml`, as setup writes it — the first agent that happens to be
+here is never asked by itself), and over at least one run (`catchup::auto_top`). Panel and
+`rl since` decide it the same way (`catchup::plan_top`): `summary.get {target: all, from:
+since}` first — the one kept is given back while nothing has moved on — else, when it writes
+itself, `summary.make`, which the panel runs on a task of its own (`App::topping`, apart from
+`/summary`'s, so a row's `/summary` goes ahead meanwhile); else the one kept for that stretch,
+moved on or not, or the counts. The header says `writing the top…` until it lands; then the
+assistant's bullets take the counts' place, `by haiku · from 23 runs` under them at the right;
+past half the room it is cut, and its last line says `… ^o on the top shows the rest`.
+One that fails leaves the counts and says why in the flash; one that only says nothing ran never
+replaces them, since the counts also say what waits on you. `/since` shows the counts (or the
+one kept for that stretch): the cursor goes up onto the top (`↑` from the first project), and
+`/summary [deep] [again]` there — with whichever assistant resolves, the default too, since you
+asked — is of everything since the catch-up began, written into the top rather than the pane;
+over another stretch (`/summary 2d`) it is the pane's, which on the top shows what was said of
+everything. Asked while the top is being written, it says so. So bare `/since` in the panel never
+writes the top by itself — you asked for it, `/summary` writes it — while a bare `rl since` past
+`catch_up.after` does: it counts from presence, as the panel does when it opens by itself.
+
+**`rl since [stretch]`** prints the same catch-up (`catchup::text`): `while you were away · since
+Sun 14:56 (2d0h)`, the top, then each project's line and its rows — a run by its id, a question by
+its id and the keys that answer it. It counts from the stretch given, else from when you last
+left the panel or ran it bare (it touches presence, so the next one counts from now), else the
+last day. Its top is decided as the panel's: bare, counting from presence and away longer than
+`catch_up.after`, it is written by itself as above and waited for up to the assistant's timeout
+(`writing the top…` on stderr); with a stretch given it is the one kept for that stretch, else —
+or when writing fails — the counts. Its digest is cut as the panel's is, from the list's;
+`--json` prints that digest.
+
+Nothing is remembered between openings except presence: leaving the panel is what the catch-up
+and `rl since` count from.
 
 ---
 
@@ -866,8 +939,11 @@ name or a map:
 ```yaml
 assistants:
   interpret: claude     # what you type at a / rl interpret "…" in plain words → a draft for your enter
-  summary: claude       # a recap where the agent keeps none (/summary, rl summary)
+  summary: claude       # a recap where the agent keeps none (/summary, rl summary, the top)
   # interpret: { agent: claude, model: claude-haiku-4-5-20251001, args: ["--max-turns", "1"] }
+catch_up:
+  after: 8h             # away longer than this, the panel opens on the catch-up; off: only /since
+  summary: auto         # auto: assistants.summary writes the top as you come back · ask: /summary
 ```
 
 Which CLIs are agents is not configured: the detection registry says (`detect/*.yaml`,
@@ -881,7 +957,8 @@ prompt goes last, or in place of `{prompt}` when the CLI takes it as a flag's va
 does not know, or a `model` for a profile without `model_flag`, is an error, never a guess.
 `rl config` prints each resolved assistant and where it came from; `rl config edit` opens the
 file, and `rld` seeds it, all comments, when there is none. Later assistants (`triage`,
-`answer`) will be keys in the same map. The second key is `retention` (§7).
+`answer`) will be keys in the same map. The second key is `retention` (§7); `catch_up` (§4,
+Catch-up) is another, `rl config` showing what it resolves to.
 
 **Setup.** The first start shows a guide before the list (`rl-cli/src/tui/setup.rs`), one
 question a screen with the answer already picked: which agents to offer, and who does
@@ -947,9 +1024,12 @@ folder a `schedule:` or `reaction:` belongs to; none, a global one); the client 
 `seen_at` when it has written output or had an event since (selecting a row is looking, so a run
 that waits as it was is told whole), else the whole run; for a job, from the start of its oldest
 firing not seen since it ended (`runs::oldest_unseen`), else the last day. A project and
-everything need one — the client knows when you were last here. It never asks an agent on its
-own. `summary.make` and `summary.get` take a target where they took a run, so
-`PROTOCOL_VERSION` is 3.
+everything need one — the client knows when you were last here. The daemon never asks an agent
+on its own: every call is a client's — `/summary`, `rl summary`, a reaction, or the catch-up's top,
+which the panel and a bare `rl since` ask for as you come back, as `catch_up.summary` says (§4).
+`summary.make` and `summary.get` take a target where they took a run, so `PROTOCOL_VERSION` is 3.
+The top of everything runs in the Relay home, and an assistant's run there makes no group on the
+list (`rows::Context::relay`); `rl ls --all`, the events view and the ledger keep it.
 
 Brief, a run is told from the cheapest source that has one:
 
@@ -982,15 +1062,18 @@ prompt. A part that fails says which (`part 2 of 5: …`).
 Many runs — a job's (its cause, in its folder unless the rule is global), a project's, or every
 folder's — are those that moved in the stretch or are still going, never an assistant's own.
 Brief is one call over each run's line as the list says it (its recap, else where it stands),
-a job's firings folded into one (`nightly · 14 firings · 2 failed · last: …`) and past 200 lines
-`… and 12 more`; deep reads each run deep first, reusing the deep reads kept, then one call to
-join them (in parts past `CHUNK`, as a run's parts are). Either way the answer is 3–6 bullets:
-what needs you, what broke, what moved. `calls` says how many assistant calls it took and `runs`
-how many runs it covers; `dry` only counts them and asks no one, so the panel can say the cost
-before a deep read of many — deep, each run as its own deep read would cost (none for one kept or
-with nothing in it, its parts and their join for a long one) and one to join. A join that itself
-runs past `CHUNK` (answers of dozens of parts or runs) takes more than the dry run foresees. A stretch with no runs, or a run with nothing in it, says `nothing happened since 22:14`
-without asking anyone.
+a job's firings folded into one (`nightly · 14 firings · 2 failed · last: …`). Past 200 lines
+the newest are told and the rest counted (`… and 12 earlier`), the room shared between folders —
+one with fewer lines than its share tells them all — so a busy folder cannot crowd a quiet one
+out of everything's summary. Deep reads each run deep first, reusing the deep reads kept, then
+one call to join them (in parts past `CHUNK`, as a run's parts are). Either way the answer is 3–6
+bullets: what needs you, what broke, what moved. `calls` says how many assistant calls it took
+and `runs` how many runs it covers; `dry` only counts them and asks no one, so the panel can say
+the cost before a deep read of many — deep, each run as its own deep read would cost (none for
+one kept or with nothing in it, its parts and their join for a long one) and one to join. A join
+that itself runs past `CHUNK` (answers of dozens of parts or runs) takes more than the dry run
+foresees. A stretch with no runs, or a run with nothing in it, says `nothing happened since
+22:14` without asking anyone.
 
 **The agent's own recap is kept as it is written**, no one asked (`rl-daemon/src/recap.rs`):
 Claude's latest `away_summary`, and Codex's last turn that said something (its `task_complete`
@@ -1163,8 +1246,8 @@ are deliberately not a key yet.
                               the panel's list), row_order (projects put in your order)
   schedules.yaml              user-level schedules; the file is the interface, the ledger keeps
                               versions (by sha256), pause state, last/next firing
-  config.yaml                 your defaults (`agents:`, `assistants:`, `retention:`, `workspaces:`); absent means defaults,
-                              unknown keys refused
+  config.yaml                 your defaults (`agents:`, `assistants:`, `catch_up:`, `retention:`,
+                              `workspaces:`); absent means defaults, unknown keys refused
   reactions.yaml              user-level rules: events → actions, or questions; same file-first
                               deal, same versioning (`rl on` appends to it)
   run/                        0700 — rld.sock, rld.pid, <run>.sock, <run>.exit

@@ -178,7 +178,7 @@ pub fn everywhere_run(r: &Run, names: &Names, rules: &[Rule]) -> bool {
 
 /// The group a run is shown under: the `everywhere` one, or its ref, else
 /// its folder.
-fn group_key(r: &Run, names: &Names, rules: &[Rule]) -> String {
+pub fn group_key(r: &Run, names: &Names, rules: &[Rule]) -> String {
     if everywhere_run(r, names, rules) {
         EVERYWHERE_KEY.to_string()
     } else {
@@ -664,6 +664,9 @@ pub struct Context<'a> {
     /// Which slice of the list to show; questions ignore it.
     pub lens: Lens,
     pub now: Timestamp,
+    /// The Relay home: an assistant's run there — a summary of everything —
+    /// is Relay's own, and makes no group on the list.
+    pub relay: Option<&'a Path>,
 }
 
 /// What a search matches a run on: its words, its project, what state it is
@@ -834,6 +837,11 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
     }
     for i in &d.items {
         let r = &i.run;
+        // A summary of everything runs in the Relay home: Relay's doing, not
+        // a project of yours. `rl ls --all` and the events have it.
+        if matches!(r.cause, Cause::Assistant(_)) && cx.relay.is_some_and(|h| r.cwd == h) {
+            continue;
+        }
         match hidden_since(r, names, cx.rules, &d.hidden) {
             Some(since) if !hidden_lens => {
                 if comes_through(r, since)
@@ -941,14 +949,7 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
         let head = if g.key == EVERYWHERE_KEY {
             Head::everywhere()
         } else {
-            Head {
-                place: names.place(&g.key, &g.workspace),
-                workspace: g.workspace.clone(),
-                name: name.clone(),
-                own: names.own(&g.key, &g.workspace),
-                rules: chips(cx.rules, Some(&g.workspace), now),
-                checkout: checkout_of(&d.checkouts, &g.workspace).cloned(),
-            }
+            head(&g.key, &g.workspace, d, cx)
         };
         let mut block = vec![Row::Group(head)];
         // Runs and jobs share one order: whatever asks for you leads, then the
@@ -1030,14 +1031,7 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
         ) {
             continue;
         }
-        let head = Row::Group(Head {
-            place,
-            workspace: p.clone(),
-            name: name.clone(),
-            own: names.own(&p.to_string_lossy(), &p),
-            rules: chips(cx.rules, Some(&p), now),
-            checkout: checkout.cloned(),
-        });
+        let head = Row::Group(head(&p.to_string_lossy(), &p, d, cx));
         blocks.push((name.to_lowercase(), p.to_string_lossy().into_owned(), vec![head]));
     }
     blocks.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
@@ -1049,6 +1043,20 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
     // under one `everywhere`, rather than under whatever folder that was.
     rows.extend(everywhere);
     rows
+}
+
+/// A project's header: the group `key` (a ref, or a folder), whose work is
+/// in `workspace`.
+pub fn head(key: &str, workspace: &Path, d: &Digest, cx: &Context<'_>) -> Head {
+    let names = cx.names;
+    Head {
+        place: names.place(key, workspace),
+        workspace: workspace.to_path_buf(),
+        name: names.group(key),
+        own: names.own(key, workspace),
+        rules: chips(cx.rules, Some(workspace), cx.now),
+        checkout: checkout_of(&d.checkouts, workspace).cloned(),
+    }
 }
 
 /// Whether a row floats to the top of its project whatever order you put it
@@ -1438,6 +1446,7 @@ mod tests {
                 lens: Lens::All,
                 filter,
                 now,
+                relay: None,
             },
         )
     }
@@ -1451,6 +1460,7 @@ mod tests {
                 lens,
                 filter: "",
                 now,
+                relay: None,
             },
         )
     }
@@ -1498,6 +1508,50 @@ mod tests {
         assert_eq!(shown("by:tests"), ["q:q1"], "a question by its reaction");
         // The global rules have no row to find.
         assert_eq!(shown("global"), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_summary_of_everything_is_not_a_project_of_its_own() {
+        let now: Timestamp = "2026-09-10T12:00:00Z".parse().unwrap();
+        let (api, relay) = ("/home/f/api", "/home/f/.relay");
+        let at = "2026-09-10T11:00:00Z";
+        // The top, written in the Relay home; a recap, in the project's folder.
+        let mut top = item("s1", RunState::Finished, relay, at, true);
+        top.run.cause = Cause::Assistant("summary".into());
+        let mut recap = item("s2", RunState::Finished, api, at, true);
+        recap.run.cause = Cause::Assistant("summary".into());
+        // Anything else run there is the list's as ever.
+        let shell = item("sh1", RunState::Finished, relay, at, true);
+        let d = Digest {
+            since: now,
+            items: vec![top, recap, shell],
+            decisions: vec![],
+            checkouts: Vec::new(),
+            lost: Vec::new(),
+            hidden: Vec::new(),
+            order: Vec::new(),
+        };
+        let names = Names::new([(PathBuf::from(api), "api".to_string())]);
+        let cx = |relay: Option<&'static str>| Context {
+            names: &names,
+            rules: &[],
+            lens: Lens::All,
+            filter: "",
+            now,
+            relay: relay.map(Path::new),
+        };
+        assert_eq!(
+            keys(&build(&d, &cx(Some(relay)))),
+            ["[.relay]", "r:sh1", "[api]", "r:s2"]
+        );
+        let mut d = d;
+        d.items.retain(|i| i.run.id != "sh1");
+        assert_eq!(
+            keys(&build(&d, &cx(Some(relay)))),
+            ["[api]", "r:s2"],
+            "no group for the top alone"
+        );
+        assert_eq!(keys(&build(&d, &cx(None))), ["[.relay]", "r:s1", "[api]", "r:s2"]);
     }
 
     #[test]
@@ -1709,6 +1763,7 @@ mod tests {
                     filter: "is:hidden",
                     lens: Lens::Hidden,
                     now,
+                    relay: None,
                 },
             )),
             ["r:pinned", "[relay]", "r:mine"]
@@ -1985,6 +2040,7 @@ mod tests {
                 lens: Lens::All,
                 filter: "",
                 now,
+                relay: None,
             },
         );
         // Global rules or none, nothing stands on the list for them, so a
@@ -2296,6 +2352,7 @@ mod tests {
                     lens: Lens::All,
                     filter: "",
                     now,
+                    relay: None,
                 },
             );
             rows.iter()
@@ -2514,6 +2571,7 @@ mod tests {
                     lens: Lens::All,
                     filter,
                     now,
+                    relay: None,
                 },
             ))
         };
@@ -2554,6 +2612,7 @@ mod tests {
                 lens: Lens::All,
                 filter: "",
                 now,
+                relay: None,
             },
         );
         let head = rows

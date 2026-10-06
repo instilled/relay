@@ -8,6 +8,7 @@ repository.workspace = true
 
 [dependencies]
 jiff.workspace = true
+rl-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
