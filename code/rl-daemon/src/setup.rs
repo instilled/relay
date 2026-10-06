@@ -40,7 +40,7 @@ fn edit(text: &str, agents: Option<&[String]>, assistant: Option<&Assistant>) ->
         text = set_key(
             &text,
             "assistants",
-            Some(&format!("assistants:\n  interpret: {one}\n  summarise: {one}\n")),
+            Some(&format!("assistants:\n  interpret: {one}\n  summary: {one}\n")),
         );
     }
     if !text.trim().is_empty()
@@ -131,21 +131,21 @@ mod tests {
         let out = edit(crate::config::SEED, Some(&agents), Some(&claude_haiku())).unwrap();
         assert!(out.starts_with(crate::config::SEED), "{out}");
         assert!(out.ends_with(
-            "agents: [claude, codex]\nassistants:\n  interpret: { agent: claude, model: haiku }\n  summarise: { agent: claude, model: haiku }\n"
+            "agents: [claude, codex]\nassistants:\n  interpret: { agent: claude, model: haiku }\n  summary: { agent: claude, model: haiku }\n"
         ));
         let c: Config = serde_norway::from_str(&out).unwrap();
         assert_eq!(c.agents, agents);
-        assert_eq!(c.assistants.summarise, Some(claude_haiku()));
+        assert_eq!(c.assistants.summary, Some(claude_haiku()));
     }
 
     #[test]
     fn a_key_already_there_is_replaced_in_place() {
         let text =
-            "# mine\nassistants:\n  interpret: codex\n  summarise:\n    agent: codex\n    args: [x]\nretention: 30d\n";
+            "# mine\nassistants:\n  interpret: codex\n  summary:\n    agent: codex\n    args: [x]\nretention: 30d\n";
         let out = edit(text, None, Some(&claude_haiku())).unwrap();
         assert_eq!(
             out,
-            "# mine\nassistants:\n  interpret: { agent: claude, model: haiku }\n  summarise: { agent: claude, model: haiku }\nretention: 30d\n"
+            "# mine\nassistants:\n  interpret: { agent: claude, model: haiku }\n  summary: { agent: claude, model: haiku }\nretention: 30d\n"
         );
         let out = edit("agents: [claude]\nretention: 30d\n", Some(&[]), None).unwrap();
         assert_eq!(out, "retention: 30d\n", "none picked: every agent, so the key goes");

@@ -27,7 +27,7 @@ pub enum Cmd {
     Pause,
     New,
     Edit,
-    Summarise,
+    Summary,
     Ask,
     Filter,
     Lens,
@@ -187,11 +187,11 @@ pub const ALL: &[Command] = &[
         cmd: Cmd::Edit,
     },
     Command {
-        name: "summarise",
+        name: "summary",
         args: "[since]",
         words: &[],
         what: "recap a run: its agent's own, or an assistant's; 2h, only the last 2h",
-        cmd: Cmd::Summarise,
+        cmd: Cmd::Summary,
     },
     Command {
         name: "ask",
@@ -447,7 +447,7 @@ mod tests {
 
     #[test]
     fn a_prefix_that_names_one_command_is_enough() {
-        assert_eq!(parse("/sum").unwrap().0.cmd, Cmd::Summarise);
+        assert_eq!(parse("/sum").unwrap().0.cmd, Cmd::Summary);
         assert_eq!(parse("/q").unwrap().0.cmd, Cmd::Quit);
         assert_eq!(parse("/ren").unwrap().0.cmd, Cmd::Rename);
         assert_eq!(parse("/rel").unwrap().0.cmd, Cmd::Reload);

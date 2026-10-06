@@ -177,11 +177,7 @@ pub fn run_lines(
     } else if !matches!(r.cause, rl_proto::types::Cause::Assistant(_)) {
         lines.push(Line::raw(""));
         lines.push(Line::from(
-            Span::raw(format!(
-                " {:<8} /summarise recaps it · /summarise 2h the last 2h",
-                "recap"
-            ))
-            .dim(),
+            Span::raw(format!(" {:<8} /summary recaps it · /summary 2h the last 2h", "recap")).dim(),
         ));
     }
     lines.push(Line::raw(""));
@@ -699,7 +695,7 @@ mod tests {
         );
         assert!(s.contains("· after 0s · exit 1"), "{s}");
         assert!(
-            s.contains("\n recap    /summarise recaps it · /summarise 2h the last 2h\n"),
+            s.contains("\n recap    /summary recaps it · /summary 2h the last 2h\n"),
             "{s}"
         );
         assert!(s.ends_with(" lately\n   nothing yet"), "{s}");
@@ -761,7 +757,7 @@ mod tests {
             s.contains("\n recap    by claude · 2m ago\n          The parser test failed on an empty file.\n          Nothing was changed.\n\n lately"),
             "{s}"
         );
-        assert!(!s.contains("/summarise recaps it"), "{s}");
+        assert!(!s.contains("/summary recaps it"), "{s}");
         // Claude's own, over a stretch, and the run gone on since.
         let own = Summary {
             by: String::new(),

@@ -99,7 +99,7 @@ async fn the_assistant_is_a_run_and_answers() {
         )
         .await;
     let msg = r.error.unwrap().message;
-    assert!(msg.contains("poem") && msg.contains("interpret, summarise"), "{msg}");
+    assert!(msg.contains("poem") && msg.contains("interpret, summary"), "{msg}");
     std::fs::write(home.config_file(), "assistants:\n  interpret: cursor\n").unwrap();
     let _: serde_json::Value = c.ok("config.get", json!(null)).await;
     let r: Response = c

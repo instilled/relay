@@ -472,7 +472,7 @@ becomes the selection; `attach` selects the asking run and joins it, as `enter` 
 The line answers too: on a question, a line that starts with an option — its number or its key,
 several joined by commas where it takes several — answers with that option and the rest of the
 line as the note (`1 only the checkout path`), and the line's hint says so before you send it.
-Typed text before `^x` goes with a dismissal as its reason. `/summarise [since]` recaps the run
+Typed text before `^x` goes with a dismissal as its reason. `/summary [since]` recaps the run
 under the cursor, live or ended (§6), and the recap lands in the pane under the facts, aligned
 with them: `recap    claude's own · 2m ago · last 2h`, the words under it in the value column,
 and `· moved on since` once the run has gone on. Asked over a terminal being watched, the pane
@@ -569,7 +569,7 @@ spot), and typing anything clears the highlight so `enter` submits the line as b
 Because letters go into the line, everything that is not typing is a `/` command
 (`tui/palette.rs`), offered as you type it: `/stop`, `/archive [seen]`, `/mark`, `/join`,
 `/shell`, `/rename`, `/pin`, `/hide`, `/sort`, `/pane [full]`, `/graph`, `/events`, `/reload [rules|shell]`, `/approve` and `/pause`,
-`/new`, `/edit [schedules|reactions [global]]`, `/summarise`, `/ask`, `/filter`, `/lens`, `/prune`,
+`/new`, `/edit [schedules|reactions [global]]`, `/summary`, `/ask`, `/filter`, `/lens`, `/prune`,
 `/up`, `/help`, `/quit`. One name per act: a variant of an act is an argument to it rather than a
 command of its own, and no word means two things — `done` is only ever what `/mark` says. `enter` on an empty line
 is the row under the cursor instead — a job opens, a question comes
@@ -851,7 +851,7 @@ name or a map:
 ```yaml
 assistants:
   interpret: claude     # what you type at a / rl interpret "…" in plain words → a draft for your enter
-  summarise: claude     # a recap where the agent keeps none (/summarise, rl summarise)
+  summary: claude       # a recap where the agent keeps none (/summary, rl summary)
   # interpret: { agent: claude, model: claude-haiku-4-5-20251001, args: ["--max-turns", "1"] }
 ```
 
@@ -923,8 +923,8 @@ is an error that quotes what the agent said. Interpretation is a run, so it is i
 special except its cause.
 
 **The summariser** recaps a run, live or ended, over the whole of it or a stretch back from now.
-`/summarise [since]` in the panel and `rl summarise <id> [since] [--again]` call `summary.make`
-(`since` a duration, `2h`); `rld` (`rl-daemon/src/summarise.rs`) takes the cheapest source that
+`/summary [since]` in the panel and `rl summary <id> [since] [--again]` call `summary.make`
+(`since` a duration, `2h`); `rld` (`rl-daemon/src/summary.rs`) takes the cheapest source that
 has one, and never asks an agent on its own:
 
 - **The agent's own recap.** Claude writes one into its transcript
@@ -935,12 +935,12 @@ has one, and never asks an agent on its own:
 - **The agent's turns.** Codex keeps no recap, but its rollout
   (`~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`) ends every turn in a `task_complete` with its
   last message, the commands and patches in between. Those are the recap as facts (`Fixed the
-  parser. (2 turns, 3 commands, 1 patch)`) — or, with `assistants.summarise` set, what the
+  parser. (2 turns, 3 commands, 1 patch)`) — or, with `assistants.summary` set, what the
   assistant reads.
 - **An assistant reading the stretch.** For anything else, and Claude with no recap in the
   stretch: the run's row, its events in the stretch, and what was said (Claude's messages,
-  without tool traffic) or the last 64 KB of its output, handed to `assistants.summarise` as an
-  assistant run (`cause: assistant:summarise`). A stretch with nothing in it says so without
+  without tool traffic) or the last 64 KB of its output, handed to `assistants.summary` as an
+  assistant run (`cause: assistant:summary`). A stretch with nothing in it says so without
   asking anyone. The assistant's input is `/dev/null` (`rl-session --no-input`), so `claude -p`
   sees its end at once rather than waiting 3s and warning; should that warning ever come, it is
   left out of the answer.
@@ -954,7 +954,7 @@ has no hooks. Each look reads the session file on from where the last stopped (`
 `transcripts`, back to 0 when the run names another file), whole lines only and only those that
 mention the entry it wants, so a transcript of many MB is read once. One written before the run
 started is about another session and does not count. It is kept in `summaries` as any recap is
-(source `claude recap` or `codex turn`, `reach` the file's length), so `/summarise`, the pane and
+(source `claude recap` or `codex turn`, `reach` the file's length), so `/summary`, the pane and
 the row see the same one — but never over a newer one: a recap asked for after the agent wrote
 its own stays until the agent writes another (`summaries::put_newer`, by the time each was
 written). It is said in no event — one a turn would bury the run's own news.
@@ -969,9 +969,9 @@ narrative is always marked as whose it is, in the pane and on the line (`# claud
 ago`). An assistant's own run is never summarised — so a rule like
 
 ```yaml
-summarise-what-ends:
+summary-what-ends:
   on: run.finished
-  run: rl summarise {run}
+  run: rl summary {run}
 ```
 
 summarises every run that ends well and cannot feed itself. Nothing seeds that rule; on demand

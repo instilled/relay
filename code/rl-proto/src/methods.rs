@@ -1060,7 +1060,7 @@ pub struct ConfigReport {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub interpret: Option<ResolvedAssistant>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub summarise: Option<ResolvedAssistant>,
+    pub summary: Option<ResolvedAssistant>,
     /// Why the file, or an assistant in it, cannot be used as written.
     #[serde(default)]
     pub errors: Vec<String>,
@@ -1240,7 +1240,7 @@ impl Method for GcRun {
 /// argument, waited for, its output handed back.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AssistantParams {
-    /// `interpret` or `summarise`.
+    /// `interpret` or `summary`.
     pub job: String,
     pub prompt: String,
     pub cwd: PathBuf,
@@ -1289,7 +1289,7 @@ pub struct SummaryParams {
 /// A recap of a run, live or ended, over `since` or the whole of it: the one
 /// kept while the run has not moved on (unless `again`); else the agent's own
 /// recap from its transcript (Claude), its turns as facts (Codex), or
-/// `assistants.summarise` reading the stretch. Refused for an assistant's own
+/// `assistants.summary` reading the stretch. Refused for an assistant's own
 /// run.
 pub struct SummaryMake;
 impl Method for SummaryMake {

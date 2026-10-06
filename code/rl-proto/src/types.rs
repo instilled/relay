@@ -377,7 +377,7 @@ pub struct Event {
 }
 
 /// What an assistant said about an ended run, kept by the run; `s` in the
-/// panel and `rl summarise` make one, the pane shows it under the facts.
+/// panel and `rl summary` make one, the pane shows it under the facts.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Summary {
     pub run: String,
