@@ -188,9 +188,9 @@ pub const ALL: &[Command] = &[
     },
     Command {
         name: "summary",
-        args: "[deep] [since]",
-        words: &[&["deep"]],
-        what: "say what happened here since you last looked: a run, a job, a project, everything · deep reads the logs",
+        args: "[deep] [again] [since]",
+        words: &[&["deep", "again"], &["deep", "again"]],
+        what: "say what happened here since you last looked: a run, a job, a project, everything, a question's asker · deep reads the logs · again makes a new one",
         cmd: Cmd::Summary,
     },
     Command {
@@ -335,6 +335,7 @@ mod tests {
         assert_eq!(arg_words(cmd("resume"), 0), ["all"]);
         assert_eq!(arg_words(cmd("resume"), 1), ["commands"]);
         assert_eq!(arg_words(cmd("mark"), 0), ["done", "blocked", "working"]);
+        assert_eq!(arg_words(cmd("summary"), 1), ["deep", "again"]);
         let lenses: Vec<&str> = super::super::rows::Lens::ALL.iter().map(|l| l.label()).collect();
         assert_eq!(arg_words(cmd("lens"), 0), lenses.as_slice(), "the lenses the list has");
         assert!(arg_words(cmd("stop"), 0).is_empty(), "nothing follows /stop");

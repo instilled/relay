@@ -1399,7 +1399,8 @@ impl App {
             Row::Group(h) => SummaryTarget::Project {
                 workspace: h.workspace.clone(),
             },
-            Row::Question(_) => return None,
+            // A question is told by the run that asked it.
+            Row::Question(q) => SummaryTarget::Run { id: q.run.clone()? },
         })
     }
 
@@ -3322,17 +3323,27 @@ impl App {
             return;
         }
         let Some(target) = self.summary_target() else {
-            self.say("/summary works on a run, a job, a project or everything");
+            self.say(if self.selected_question().is_some() {
+                "this question has no run to summarise"
+            } else {
+                "/summary works on a run, a job, a project, everything or a question"
+            });
             return;
         };
-        if let Some(i) = self.selected_run()
-            && matches!(i.run.cause, Cause::Assistant(_))
+        if let SummaryTarget::Run { id } = &target
+            && self
+                .run_by_id(id)
+                .is_some_and(|r| matches!(r.cause, Cause::Assistant(_)))
         {
             self.say("an assistant's own run; nothing to summarise");
             return;
         }
         let now = Timestamp::now();
-        let (deep, typed) = match summary_args(arg, now) {
+        let SummaryArgs {
+            deep,
+            again,
+            from: typed,
+        } = match summary_args(arg, now) {
             Ok(a) => a,
             Err(e) => {
                 self.say(format!("{e:#}"));
@@ -3353,7 +3364,7 @@ impl App {
             target,
             deep,
             from,
-            again: false,
+            again,
             dry: false,
             timeout: None,
         };
@@ -5471,19 +5482,33 @@ impl App {
     }
 }
 
-/// `/summary`'s words: `deep` first if at all, then a stretch (`3d`, a
-/// date, an instant), as `rl summary` takes it.
-fn summary_args(arg: &str, now: Timestamp) -> Result<(bool, Option<Timestamp>)> {
-    let arg = arg.trim();
-    let (deep, rest) = match arg.strip_prefix("deep") {
-        Some(r) if r.is_empty() || r.starts_with(char::is_whitespace) => (true, r.trim()),
-        _ => (false, arg),
-    };
-    let from = match rest {
-        "" => None,
-        s => Some(rl_core::time::parse_since(s, now)?),
-    };
-    Ok((deep, from))
+/// `/summary`'s words: `deep` and `again`, either or both in either
+/// order, then a stretch (`3d`, a date, an instant), as `rl summary` takes
+/// it. `again` makes a new one even when the one kept is up to date.
+fn summary_args(arg: &str, now: Timestamp) -> Result<SummaryArgs> {
+    let mut a = SummaryArgs::default();
+    let mut rest = arg.trim();
+    loop {
+        let (word, after) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
+        match word {
+            "deep" if !a.deep => a.deep = true,
+            "again" if !a.again => a.again = true,
+            _ => break,
+        }
+        rest = after.trim_start();
+    }
+    if !rest.is_empty() {
+        a.from = Some(rl_core::time::parse_since(rest, now)?);
+    }
+    Ok(a)
+}
+
+/// What `/summary` was told: how deep, whether afresh, from when.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct SummaryArgs {
+    deep: bool,
+    again: bool,
+    from: Option<Timestamp>,
 }
 
 /// A group header's right-edge tally: how many schedules and reactions the
@@ -6403,15 +6428,21 @@ mod tests {
     }
 
     #[test]
-    fn summary_takes_deep_then_a_stretch() {
+    fn summary_takes_deep_and_again_then_a_stretch() {
+        use super::{SummaryArgs, summary_args};
         let now = jiff::Timestamp::now();
         let h3 = now - jiff::SignedDuration::from_hours(3);
-        assert_eq!(super::summary_args("", now).unwrap(), (false, None));
-        assert_eq!(super::summary_args("deep", now).unwrap(), (true, None));
-        assert_eq!(super::summary_args("3h", now).unwrap(), (false, Some(h3)));
-        assert_eq!(super::summary_args(" deep  3h ", now).unwrap(), (true, Some(h3)));
-        assert!(super::summary_args("soon", now).is_err());
-        assert!(super::summary_args("3h deep", now).is_err(), "deep comes first");
+        let a = |deep, again, from| SummaryArgs { deep, again, from };
+        assert_eq!(summary_args("", now).unwrap(), a(false, false, None));
+        assert_eq!(summary_args("deep", now).unwrap(), a(true, false, None));
+        assert_eq!(summary_args("again", now).unwrap(), a(false, true, None));
+        assert_eq!(summary_args("3h", now).unwrap(), a(false, false, Some(h3)));
+        assert_eq!(summary_args(" deep  3h ", now).unwrap(), a(true, false, Some(h3)));
+        assert_eq!(summary_args("again deep 3h", now).unwrap(), a(true, true, Some(h3)));
+        assert_eq!(summary_args("deep again", now).unwrap(), a(true, true, None));
+        assert!(summary_args("soon", now).is_err());
+        assert!(summary_args("3h deep", now).is_err(), "the words come first");
+        assert!(summary_args("deep deep", now).is_err(), "a word once");
     }
 
     #[tokio::test]
@@ -6452,6 +6483,76 @@ mod tests {
         let s = app.summarising.as_ref().expect("y asks");
         assert!(matches!(s.target, SummaryTarget::Project { .. }));
         assert_eq!((s.deep, s.from), (true, Some(away)));
+        token.cancel();
+    }
+
+    #[tokio::test]
+    async fn again_asks_for_a_new_one() {
+        let (_tmp, token, mut app, _folder) = panel_with_runs(3).await;
+        select_header(&mut app);
+        type_in(&mut app, "/summary deep again").await;
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+        assert!(matches!(app.mode, super::Mode::SummaryCost(4)));
+        let p = app.summary_ask.as_ref().unwrap();
+        assert!(p.deep && p.again && !p.dry, "{p:?}");
+        press(&mut app, KeyCode::Esc, KeyModifiers::NONE).await;
+        // Without it, the one kept will do.
+        type_in(&mut app, "/summary deep").await;
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+        assert!(!app.summary_ask.as_ref().unwrap().again);
+        token.cancel();
+    }
+
+    #[tokio::test]
+    async fn a_question_is_told_by_the_run_that_asked_it() {
+        use rl_proto::decision::{Decision, DecisionOption, DecisionStatus};
+        let (tmp, token, mut app, folder) = panel().await;
+        let now = jiff::Timestamp::now();
+        let ask = |id: &str, run: Option<&str>| Decision {
+            id: id.into(),
+            workspace: folder.clone(),
+            run: run.map(Into::into),
+            flow: id.into(),
+            group: None,
+            title: format!("question {id}"),
+            summary: None,
+            options: vec![DecisionOption {
+                key: "ok".into(),
+                ..Default::default()
+            }],
+            multi: false,
+            status: DecisionStatus::Open,
+            created_at: now,
+            updated_at: now,
+            expires_at: None,
+            resolved_at: None,
+            chosen: vec![],
+            outcome_runs: vec![],
+            note: None,
+        };
+        let (asked, alone) = (ask("dec00001", Some("run00001")), ask("dec00002", None));
+        let ledger = rl_ledger::Ledger::open(&rl_core::Home::at(tmp.path().join("h")).ledger()).unwrap();
+        ledger
+            .call_blocking(move |c| {
+                rl_ledger::decisions::insert(c, &asked)?;
+                rl_ledger::decisions::insert(c, &alone)?;
+                Ok(())
+            })
+            .unwrap();
+        app.refresh().await;
+
+        app.select(Some("q:dec00001".into()));
+        assert_eq!(app.summary_target(), Some(SummaryTarget::Run { id: "run00001".into() }));
+
+        app.select(Some("q:dec00002".into()));
+        assert_eq!(app.summary_target(), None);
+        type_in(&mut app, "/summary").await;
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+        assert!(app.summarising.is_none());
+        assert_eq!(
+            app.flash.as_ref().map(|(m, _)| m.as_str()),
+            Some("this question has no run to summarise")
+        );
         token.cancel();
     }
 
