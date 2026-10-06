@@ -1,16 +1,16 @@
 //! A recap of a run, live or ended, over a stretch back from now or the whole
-//! of it, kept in `summaries` by the run. Only ever on demand (`/summarise
-//! [since]` in the panel, `rl summarise <id> [since]`, or a reaction on
+//! of it, kept in `summaries` by the run. Only ever on demand (`/summary
+//! [since]` in the panel, `rl summary <id> [since]`, or a reaction on
 //! `run.finished`) — Relay never asks an agent on its own.
 //!
 //! From the cheapest source that has one:
 //! - Claude writes its own recap into its transcript; the latest in the
 //!   stretch is taken as it stands, no assistant asked;
 //! - Codex keeps no recap, but its turns say what it last said and did: with
-//!   `assistants.summarise` set, an assistant condenses them, else they are
+//!   `assistants.summary` set, an assistant condenses them, else they are
 //!   the recap as facts;
 //! - anything else — and Claude with no recap in the stretch — is read by
-//!   `assistants.summarise`: what was said, or the output.
+//!   `assistants.summary`: what was said, or the output.
 //!
 //! The one kept is given back while the run has not moved on. Never of an
 //! assistant's own run, so a reaction cannot feed itself. The agent's own
@@ -167,7 +167,7 @@ pub async fn make(d: &Daemon, p: SummaryParams) -> Result<Summary> {
         }
         (Some(Agent::Codex), Some(body)) => {
             let turns = transcript::codex_turns(&body, from);
-            let asked = d.config.read().unwrap().config.assistants.summarise.is_some();
+            let asked = d.config.read().unwrap().config.assistants.summary.is_some();
             if !turns.is_empty() && !asked {
                 made.agent = "codex".into();
                 made.source = "codex turns".into();
@@ -234,10 +234,10 @@ pub async fn make(d: &Daemon, p: SummaryParams) -> Result<Summary> {
     let out = assistant::run(
         d,
         AssistantParams {
-            job: "summarise".into(),
+            job: "summary".into(),
             prompt,
             cwd,
-            title: format!("summarise: {}", run.title),
+            title: format!("summary: {}", run.title),
             timeout: p.timeout.clone(),
         },
     )

@@ -6,13 +6,13 @@
 //! more, and Codex has no hooks. Each read goes on from where the last one
 //! stopped (`transcripts.read_to`), so a transcript of many MB is read once.
 //!
-//! Kept in `summaries` like any recap, so `/summarise`, the pane and the
+//! Kept in `summaries` like any recap, so `/summary`, the pane and the
 //! list's row see the same one — but never over a newer one: a recap asked
 //! for after the agent wrote its own stays. Said in no event: one a turn would
 //! bury the run's own news.
 
 use crate::server::Daemon;
-use crate::summarise;
+use crate::summary;
 use crate::transcript::{self, Agent};
 use anyhow::Result;
 use jiff::{SignedDuration, Timestamp};
@@ -41,7 +41,7 @@ pub async fn pick_up(d: &Daemon, run: &Run) -> Result<bool> {
         .await?;
     let (file, from) = match known {
         (Some(p), n) => (p, n),
-        (None, _) => match summarise::locate(d, run).await? {
+        (None, _) => match summary::locate(d, run).await? {
             Some(p) => (p, 0),
             None => return Ok(false),
         },
@@ -71,7 +71,7 @@ pub async fn pick_up(d: &Daemon, run: &Run) -> Result<bool> {
         agent: run.cli.clone().unwrap_or_default(),
         by: String::new(),
         at: r.at,
-        text: summarise::clean(&r.text),
+        text: summary::clean(&r.text),
         since: None,
         source: source.into(),
         reach: format!("t:{to}"),

@@ -112,7 +112,7 @@ async fn claudes_recap_is_kept_as_it_writes_it() {
     };
     assert_eq!(read, std::fs::metadata(&transcript).unwrap().len());
 
-    // `/summarise` sees the same one, without asking anyone.
+    // `/summary` sees the same one, without asking anyone.
     let made: Summary = c.ok("summary.make", json!({ "run": run.id })).await;
     assert_eq!(made, s);
 

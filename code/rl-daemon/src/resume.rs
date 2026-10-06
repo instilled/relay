@@ -51,7 +51,7 @@ pub async fn resume(d: &Daemon, p: RunResumeParams) -> Result<Vec<Resumed>> {
 
 async fn one(d: &Daemon, run: &Run, p: &RunResumeParams) -> Resumed {
     let session = match Agent::of(run) {
-        Some(agent) if run.kind == RunKind::Agent => match crate::summarise::locate(d, run).await {
+        Some(agent) if run.kind == RunKind::Agent => match crate::summary::locate(d, run).await {
             Ok(file) => file.and_then(|f| transcript::session_id(agent, &f)),
             Err(e) => return not(&run.id, &run.title, &format!("finding its conversation: {e:#}")),
         },

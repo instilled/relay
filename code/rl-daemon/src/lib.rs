@@ -20,7 +20,7 @@ pub mod rulestore;
 pub mod schedule;
 pub mod server;
 pub mod setup;
-pub mod summarise;
+pub mod summary;
 pub mod supervisor;
 pub mod transcript;
 pub mod workspace;

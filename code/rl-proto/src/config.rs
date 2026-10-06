@@ -7,7 +7,7 @@
 //! assistants:
 //!   interpret: claude            # or, with a model and extra arguments:
 //!   interpret: { agent: claude, model: claude-haiku-4-5-20251001, args: ["--max-turns", "1"] }
-//!   summarise: claude            # a recap where the agent keeps none (/summarise, rl summarise)
+//!   summary: claude              # a recap where the agent keeps none (/summary, rl summary)
 //! retention: 30d                 # the journal of a run ended this long ago goes (the default);
 //!                                # `never` keeps every byte. Or { journal: 30d }
 //! runs:
@@ -167,27 +167,27 @@ pub struct Assistants {
     /// rule, drafted for your enter.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub interpret: Option<Assistant>,
-    /// What an ended run did, in a few sentences (`s`, `rl summarise`).
+    /// What an ended run did, in a few sentences (`s`, `rl summary`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub summarise: Option<Assistant>,
+    pub summary: Option<Assistant>,
 }
 
 impl Assistants {
     pub fn is_empty(&self) -> bool {
-        self.interpret.is_none() && self.summarise.is_none()
+        self.interpret.is_none() && self.summary.is_none()
     }
 
     /// The assistant for a job, by its name in the file.
     pub fn for_job(&self, job: &str) -> Option<Option<&Assistant>> {
         match job {
             "interpret" => Some(self.interpret.as_ref()),
-            "summarise" => Some(self.summarise.as_ref()),
+            "summary" => Some(self.summary.as_ref()),
             _ => None,
         }
     }
 
     /// The jobs there are, in the order `rl config` lists them.
-    pub const JOBS: &[&str] = &["interpret", "summarise"];
+    pub const JOBS: &[&str] = &["interpret", "summary"];
 }
 
 /// An agent doing a job for Relay: written as its name, or as a map when

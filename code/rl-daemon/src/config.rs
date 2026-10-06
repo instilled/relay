@@ -31,7 +31,7 @@ pub const SEED: &str = "\
 #
 # assistants:            # the agents Relay itself calls on, by job
 #   interpret: claude    # what you type at a / rl interpret in plain words -> a draft for your enter
-#   summarise: claude    # a recap where the agent keeps none (/summarise in the panel, rl summarise)
+#   summary: claude      # a recap where the agent keeps none (/summary in the panel, rl summary)
 #   # or, with a model and extra arguments:
 #   # interpret: { agent: claude, model: claude-haiku-4-5-20251001, args: [\"--max-turns\", \"1\"] }
 #
@@ -244,13 +244,13 @@ pub fn report(loaded: &Loaded, registry: &Registry) -> ConfigReport {
         }
     };
     let interpret = each("interpret");
-    let summarise = each("summarise");
+    let summary = each("summary");
     ConfigReport {
         file: loaded.file.clone(),
         present: loaded.present,
         config: loaded.config.clone(),
         interpret,
-        summarise,
+        summary,
         errors,
     }
 }

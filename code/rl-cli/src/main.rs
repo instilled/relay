@@ -114,8 +114,8 @@ enum Cmd {
     Context(ContextArgs),
     /// Plain words to `assistants.interpret`: a run or a rule, drafted; `--go` does it.
     Interpret(InterpretArgs),
-    /// A recap of a run, live or ended: its agent's own (Claude), its turns (Codex), or `assistants.summarise`'s. Kept by the run.
-    Summarise(SummariseArgs),
+    /// A recap of a run, live or ended: its agent's own (Claude), its turns (Codex), or `assistants.summary`'s. Kept by the run.
+    Summary(SummaryArgs),
     /// Let the journal of old runs go, as `retention:` says (30d unless set, or --older-than). Runs and events stay.
     #[command(alias = "gc")]
     Prune(PruneArgs),
@@ -349,7 +349,7 @@ struct InterpretArgs {
 }
 
 #[derive(Args)]
-struct SummariseArgs {
+struct SummaryArgs {
     /// The run.
     run: String,
     /// Only the last stretch of it: a duration, like 30m or 2h (default: all of it).
@@ -670,7 +670,7 @@ async fn main() -> Result<()> {
         }
         Cmd::Context(a) => context(&home, a).await,
         Cmd::Interpret(a) => interpret(&home, a, cli.json).await,
-        Cmd::Summarise(a) => summarise(&home, a, cli.json).await,
+        Cmd::Summary(a) => summary(&home, a, cli.json).await,
         Cmd::Prune(a) => prune(&home, a, cli.json).await,
         Cmd::Emit(a) => emit(&home, a, cli.json).await,
         Cmd::Ask(a) => ask(&home, a, cli.json).await,
@@ -2043,7 +2043,7 @@ async fn config(home: &Home, a: ConfigArgs, json: bool) -> Result<()> {
                 &file,
                 "# Your defaults. Keys are added as Relay grows; one it does not know is refused.\n\
                  # assistants:\n#   interpret: claude   # or { agent: claude, model: …, args: [...] }\n\
-                 #   summarise: claude\n",
+                 #   summary: claude\n",
             )?;
         }
         rl_cli::env::open_in_editor(&file, 1)?;
@@ -2054,7 +2054,7 @@ async fn config(home: &Home, a: ConfigArgs, json: bool) -> Result<()> {
     } else {
         let file = display_path(&r.file);
         println!("{file}{}", if r.present { "" } else { "  (absent: all defaults)" });
-        for (job, x) in [("interpret", &r.interpret), ("summarise", &r.summarise)] {
+        for (job, x) in [("interpret", &r.interpret), ("summary", &r.summary)] {
             match x {
                 Some(x) => println!(
                     "assistants.{job:<10} {}  ({}{})",
@@ -2281,7 +2281,7 @@ async fn interpret(home: &Home, a: InterpretArgs, json: bool) -> Result<()> {
     Ok(())
 }
 
-async fn summarise(home: &Home, a: SummariseArgs, json: bool) -> Result<()> {
+async fn summary(home: &Home, a: SummaryArgs, json: bool) -> Result<()> {
     let mut rpc = daemon::ensure(home, !json).await?;
     let kept = rpc.call::<SummaryGet>(RunId { id: a.run.clone() }).await?;
     if !json && (a.again || kept.is_none_or(|k| k.stale || k.since != a.since)) {

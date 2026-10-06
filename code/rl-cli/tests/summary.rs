@@ -1,5 +1,5 @@
-//! `rl summarise <id>`: the kept summary, or a new one from
-//! `assistants.summarise`; `--again` asks anew. `rl config` shows the
+//! `rl summary <id>`: the kept summary, or a new one from
+//! `assistants.summary`; `--again` asks anew. `rl config` shows the
 //! summariser beside the interpreter.
 
 use std::path::PathBuf;
@@ -32,7 +32,7 @@ fn an_ended_run_is_summarised_on_the_line() {
         ),
     )
     .unwrap();
-    std::fs::write(home.join("config.yaml"), "assistants:\n  summarise: fakeai\n").unwrap();
+    std::fs::write(home.join("config.yaml"), "assistants:\n  summary: fakeai\n").unwrap();
     let ws = dir.path().join("proj");
     std::fs::create_dir_all(&ws).unwrap();
     // The assistant's run gets the daemon's environment, and the daemon is
@@ -89,13 +89,13 @@ fn an_ended_run_is_summarised_on_the_line() {
         std::thread::sleep(Duration::from_millis(100));
     }
 
-    let (ok, out, err) = run(rl(&["summarise", &id]));
+    let (ok, out, err) = run(rl(&["summary", &id]));
     assert!(ok, "{err}");
     assert!(out.starts_with("It said hi. That is all.\n# by fakeai · "), "{out}");
     assert!(err.contains("summarising…"), "{err}");
 
     // Kept: no asking the second time; `--again` asks.
-    let (ok, out2, err) = run(rl(&["summarise", &id]));
+    let (ok, out2, err) = run(rl(&["summary", &id]));
     assert!(ok && out2 == out, "{out2}\n{err}");
     assert!(!err.contains("summarising…"), "{err}");
     let (_, listed, _) = run(rl(&["ls", "--all", "--json"]));
@@ -104,11 +104,11 @@ fn an_ended_run_is_summarised_on_the_line() {
         v.as_array()
             .unwrap()
             .iter()
-            .filter(|r| r["cause"] == "assistant:summarise")
+            .filter(|r| r["cause"] == "assistant:summary")
             .count()
     };
     assert_eq!(asked(&v), 1);
-    let (ok, out, err) = run(rl(&["--json", "summarise", "--again", &id]));
+    let (ok, out, err) = run(rl(&["--json", "summary", "--again", &id]));
     assert!(ok, "{err}");
     let s: serde_json::Value = serde_json::from_str(&out).unwrap();
     assert_eq!(s["run"], id);
@@ -120,12 +120,12 @@ fn an_ended_run_is_summarised_on_the_line() {
     let (ok, out, err) = run(rl(&["config"]));
     assert!(ok, "{err}");
     assert!(
-        out.contains("assistants.interpret  ") && out.contains("assistants.summarise  "),
+        out.contains("assistants.interpret  ") && out.contains("assistants.summary  "),
         "{out}"
     );
     assert!(out.contains("--headless  (config)"), "{out}");
 
     // No such run.
-    let (ok, _, err) = run(rl(&["summarise", "nope"]));
+    let (ok, _, err) = run(rl(&["summary", "nope"]));
     assert!(!ok && err.contains("no run nope"), "{err}");
 }

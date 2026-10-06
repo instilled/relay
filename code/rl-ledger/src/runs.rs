@@ -400,7 +400,7 @@ mod tests {
             insert(&c, &r).unwrap();
         }
         let mut asked = mk("asked", Some("claude"), RunState::Idle);
-        asked.cause = rl_proto::types::Cause::Assistant("summarise".into());
+        asked.cause = rl_proto::types::Cause::Assistant("summary".into());
         insert(&c, &asked).unwrap();
         finish(
             &c,
