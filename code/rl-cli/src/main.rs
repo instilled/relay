@@ -353,7 +353,7 @@ struct SummaryArgs {
     /// The run.
     run: String,
     /// Only the stretch since: a duration back (30m, 2h), a date or an
-    /// instant (default: since you last looked, if it has moved on; else all
+    /// instant (default: since you last looked, if it did anything since; else all
     /// of it).
     since: Option<String>,
     /// Make a new one, even when the one kept is up to date.

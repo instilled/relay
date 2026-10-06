@@ -1279,8 +1279,8 @@ pub struct SummaryParams {
     #[serde(default)]
     pub deep: bool,
     /// Where the stretch begins. None: since you last looked (a run's
-    /// seen_at, when it has moved on since, else the whole run; a job's
-    /// oldest unseen firing, else the last day); required for a project and
+    /// seen_at, when it has done anything since, else the whole run; a job's
+    /// oldest unseen firing on, else the last day); required for a project and
     /// all — the client knows when you were last here.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from: Option<Timestamp>,

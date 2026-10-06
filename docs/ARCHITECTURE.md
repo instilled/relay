@@ -927,8 +927,9 @@ special except its cause.
 project | all, deep, from, again, dry}`; `rld`'s `rl-daemon/src/summary.rs`). `/summary [since]`
 in the panel and `rl summary <id> [since] [--again]` ask it of a run; the client turns the
 stretch (`2h`, a date, an instant) into `from`. Left out, `from` is since you last looked: a
-run's `seen_at` when it has moved on since, else the whole run; a job's oldest firing not seen
-since it ended (`runs::oldest_unseen`), else the last day. A project and everything need one —
+run's `seen_at` when it has written output or had an event since (selecting a row is looking,
+so a run that waits as it was is told whole), else the whole run; for a job, from the start of
+its oldest firing not seen since it ended (`runs::oldest_unseen`), else the last day. A project and everything need one —
 the client knows when you were last here. It never asks an agent on its own.
 
 Brief, a run is told from the cheapest source that has one:

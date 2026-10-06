@@ -356,11 +356,11 @@ pub fn set_seen(conn: &Connection, ids: &[String], at: Timestamp) -> Result<usiz
 }
 
 /// When the oldest run caused by `cause` that you have not seen since it
-/// ended did end; None when every one is seen. With `workspace`, only that
-/// folder's runs.
+/// ended did start — so a job's stretch has that firing in it; None when
+/// every one is seen. With `workspace`, only that folder's runs.
 pub fn oldest_unseen(conn: &Connection, cause: &str, workspace: Option<&std::path::Path>) -> Result<Option<Timestamp>> {
     let ms: Option<i64> = conn.query_row(
-        "SELECT MIN(ended_at) FROM runs WHERE cause = ?1 AND ended_at IS NOT NULL AND archived_at IS NULL \
+        "SELECT MIN(started_at) FROM runs WHERE cause = ?1 AND ended_at IS NOT NULL AND archived_at IS NULL \
          AND (seen_at IS NULL OR seen_at < ended_at) AND (?2 IS NULL OR workspace = ?2)",
         params![cause, workspace.map(path_str)],
         |r| r.get(0),
@@ -396,9 +396,11 @@ mod tests {
         c
     }
 
-    /// A run of `cause` that ended at `ended_at`, looked at `seen_at`.
+    /// A run of `cause` that ended at `ended_at`, 100ms after it started,
+    /// looked at `seen_at`.
     fn insert_ended(c: &Connection, id: &str, cause: &str, ended_at: Timestamp, seen_at: Option<Timestamp>) {
-        let mut r = Run::new(id, rl_proto::types::RunKind::Command, id, vec![], "/w", "/w", ended_at);
+        let started = ended_at - jiff::SignedDuration::from_millis(100);
+        let mut r = Run::new(id, rl_proto::types::RunKind::Command, id, vec![], "/w", "/w", started);
         r.cause = cause.parse().unwrap();
         r.state = RunState::Finished;
         r.ended_at = Some(ended_at);
@@ -413,7 +415,11 @@ mod tests {
         insert_ended(&c, "a", "schedule:nightly", t(1_000), None); // unseen
         insert_ended(&c, "b", "schedule:nightly", t(2_000), Some(t(2_500))); // seen
         insert_ended(&c, "x", "schedule:other", t(500), None);
-        assert_eq!(oldest_unseen(&c, "schedule:nightly", None).unwrap(), Some(t(1_000)));
+        assert_eq!(
+            oldest_unseen(&c, "schedule:nightly", None).unwrap(),
+            Some(t(900)),
+            "when that firing started: it is in the stretch"
+        );
         assert_eq!(
             oldest_unseen(&c, "schedule:nightly", Some(std::path::Path::new("/elsewhere"))).unwrap(),
             None,

@@ -23,8 +23,8 @@
 //! are) and one call to join them. `dry` only counts the calls.
 //!
 //! The stretch, unless given, is since you last looked: a run's `seen_at`
-//! when it has moved on since, else all of it; a job's oldest firing not
-//! seen, else the last day. A project or everything needs one given — the
+//! when it has written or had an event since, else all of it; a job's, from
+//! the start of its oldest firing not seen, else the last day. A project or everything needs one given — the
 //! client knows when you were last here. A stretch with nothing in it says so
 //! without asking anyone.
 //!
@@ -70,7 +70,7 @@ pub async fn get(d: &Daemon, p: &SummaryParams) -> Result<Option<Summary>> {
         SummaryTarget::Run { id } => {
             let run = load(d, id).await?;
             let from = match &run {
-                Some(r) => run_from(r, from),
+                Some(r) => run_stretch(d, r, from).await?,
                 None => from,
             };
             if !p.deep && from.is_none() {
@@ -115,7 +115,7 @@ pub async fn make(d: &Daemon, p: SummaryParams) -> Result<Summary> {
             if matches!(run.cause, Cause::Assistant(_)) {
                 bail!("`{}` is an assistant's own run; those are not summarised", run.title);
             }
-            let from = run_from(&run, from);
+            let from = run_stretch(d, &run, from).await?;
             if p.deep {
                 run_deep(d, &run, from, &p).await
             } else {
@@ -142,9 +142,43 @@ async fn load(d: &Daemon, id: &str) -> Result<Option<Run>> {
 }
 
 /// Where a run's stretch begins: as asked; else when you last looked at it,
-/// if it has moved on since; else all of it.
-fn run_from(run: &Run, asked: Option<Timestamp>) -> Option<Timestamp> {
-    asked.or_else(|| run.seen_at.filter(|s| run.ended_at.is_none_or(|e| e > *s)))
+/// if it has `moved` since; else all of it — live or ended alike.
+fn run_from(run: &Run, asked: Option<Timestamp>, moved: bool) -> Option<Timestamp> {
+    asked.or_else(|| run.seen_at.filter(|_| moved))
+}
+
+/// Whether a run has done anything since you last looked: written output, or
+/// had an event other than being summarised. Looking (selecting the row)
+/// sets `seen_at`, so a run that waits as it was is not "moved on".
+async fn moved_since_seen(d: &Daemon, run: &Run) -> Result<bool> {
+    let Some(seen) = run.seen_at else { return Ok(false) };
+    let after = seen + SignedDuration::from_millis(1);
+    let id = run.id.clone();
+    d.ledger
+        .call(move |c| {
+            if !session_io::tail_since(c, &id, after, 1)?.is_empty() {
+                return Ok(true);
+            }
+            let evs = events::list(
+                c,
+                &EventFilter {
+                    run: Some(id),
+                    since: Some(after),
+                    limit: Some(EVENTS_BRIEF),
+                    ..Default::default()
+                },
+            )?;
+            Ok(evs.iter().any(|e| e.kind != event_kind::RUN_SUMMARISED))
+        })
+        .await
+}
+
+/// A run's stretch, as `run_from` says, looking at what it did since.
+async fn run_stretch(d: &Daemon, run: &Run, asked: Option<Timestamp>) -> Result<Option<Timestamp>> {
+    if asked.is_some() || run.seen_at.is_none() {
+        return Ok(asked);
+    }
+    Ok(run_from(run, asked, moved_since_seen(d, run).await?))
 }
 
 /// The recap kept for a run, marked stale when it has moved on since.
@@ -494,8 +528,8 @@ async fn run_deep(d: &Daemon, run: &Run, from: Option<Timestamp>, p: &SummaryPar
     keep(d, Some(run), made).await
 }
 
-/// Where many runs' stretch begins: as asked; for a job, its oldest firing
-/// not seen, else the last day; a project and everything need one.
+/// Where many runs' stretch begins: as asked; for a job, the start of its
+/// oldest firing not seen, else the last day; a project and everything need one.
 async fn over_from(d: &Daemon, t: &SummaryTarget, asked: Option<Timestamp>, now: Timestamp) -> Result<Timestamp> {
     if let Some(f) = asked {
         return Ok(f);
@@ -973,7 +1007,7 @@ mod tests {
     }
 
     #[test]
-    fn a_runs_stretch_is_since_it_was_looked_at_if_it_moved_on() {
+    fn a_runs_stretch_is_since_it_was_looked_at_if_it_did_anything_since() {
         let t = |s: &str| s.parse::<Timestamp>().unwrap();
         let mut r = Run::new(
             "r1",
@@ -984,15 +1018,24 @@ mod tests {
             "/w",
             t("2026-09-10T09:00:00Z"),
         );
-        assert_eq!(run_from(&r, None), None, "never looked at: all of it");
+        assert_eq!(run_from(&r, None, false), None, "never looked at: all of it");
         r.seen_at = Some(t("2026-09-10T10:00:00Z"));
-        assert_eq!(run_from(&r, None), r.seen_at, "still going: since you looked");
+        assert_eq!(
+            run_from(&r, None, false),
+            None,
+            "still going, looked at just now, nothing since: all of it"
+        );
+        assert_eq!(
+            run_from(&r, None, true),
+            r.seen_at,
+            "still going, something since: since you looked"
+        );
         r.ended_at = Some(t("2026-09-10T11:00:00Z"));
-        assert_eq!(run_from(&r, None), r.seen_at, "ended since you looked");
+        assert_eq!(run_from(&r, None, true), r.seen_at, "ended since you looked");
         r.seen_at = Some(t("2026-09-10T12:00:00Z"));
-        assert_eq!(run_from(&r, None), None, "looked at once it ended: all of it");
+        assert_eq!(run_from(&r, None, false), None, "looked at once it ended: all of it");
         let asked = Some(t("2026-09-10T09:30:00Z"));
-        assert_eq!(run_from(&r, asked), asked);
+        assert_eq!(run_from(&r, asked, false), asked);
     }
 
     #[test]

@@ -7,7 +7,7 @@
 
 mod common;
 
-use common::{Conn, Harness};
+use common::{Conn, Harness, wait_journal};
 use jiff::{SignedDuration, Timestamp};
 use rl_core::Home;
 use rl_proto::types::{Run, Summary};
@@ -72,6 +72,7 @@ async fn cases() {
     deep_over_a_long_output_is_read_in_parts().await;
     a_dry_run_says_how_many_calls_and_asks_no_one().await;
     a_jobs_runs_are_its_firings().await;
+    a_run_looked_at_just_now_is_told_whole().await;
 }
 
 async fn a_project_brief_is_one_call_over_its_runs_lines() {
@@ -219,7 +220,7 @@ async fn a_jobs_runs_are_its_firings() {
     let r: Run = c
         .ok(
             "run.start",
-            json!({"argv": ["true"], "cwd": dir, "title": "nightly tests"}),
+            json!({"argv": ["sh", "-c", "echo nightly ran"], "cwd": dir, "title": "nightly tests"}),
         )
         .await;
     let other: Run = c
@@ -227,6 +228,7 @@ async fn a_jobs_runs_are_its_firings() {
         .await;
     c.wait_terminal(&other.id).await;
     let r = c.wait_terminal(&r.id).await;
+    wait_journal(&h.home, &r.id, "nightly ran").await;
     let ledger = rl_ledger::Ledger::open(&h.home.ledger()).unwrap();
     let id = r.id.clone();
     ledger
@@ -239,9 +241,55 @@ async fn a_jobs_runs_are_its_firings() {
     let target = json!({"kind": "job", "rule": "schedule", "name": "nightly", "workspace": dir});
     let s: Summary = c.ok("summary.make", json!({"target": target})).await;
     assert_eq!((s.calls, s.text.as_str()), (1, "nightly: fine"), "{s:?}");
-    assert_eq!(s.from, r.ended_at);
+    assert_eq!(s.from, Some(r.started_at), "the unseen firing is in the stretch");
     let prompt = std::fs::read_to_string(std::env::var("FAKE_AGENT_PROMPT").unwrap()).unwrap();
     assert!(prompt.contains("## nightly tests"), "{prompt}");
     assert!(!prompt.contains("by hand"), "{prompt}");
+
+    // Deep, the same stretch reads the firing itself: its output, then the
+    // join.
+    let deep: Summary = c.ok("summary.make", json!({"target": target, "deep": true})).await;
+    assert_ne!(deep.source, "nothing new", "{deep:?}");
+    assert_eq!((deep.calls, deep.text.as_str()), (2, "nightly: fine"), "{deep:?}");
+    let firing: Summary = c
+        .ok(
+            "summary.get",
+            json!({"target": {"kind": "run", "id": r.id}, "deep": true}),
+        )
+        .await;
+    assert_eq!(firing.text, "nightly: fine", "its deep read is kept: {firing:?}");
+    h.stop().await;
+}
+
+async fn a_run_looked_at_just_now_is_told_whole() {
+    let Some((h, mut c, dir, _tmp)) = with_fake_summariser("It said one, then two.").await else {
+        return;
+    };
+    let r: Run = c
+        .ok(
+            "run.start",
+            json!({"argv": ["sh", "-c", "echo one; read go; echo two; sleep 30"], "cwd": dir, "title": "waits"}),
+        )
+        .await;
+    wait_journal(&h.home, &r.id, "one").await;
+    // Selected in the panel: looked at now, and it has done nothing since —
+    // the whole of it, not "nothing happened".
+    let _: usize = c.ok("run.seen", json!({"ids": [r.id]})).await;
+    let target = json!({"kind": "run", "id": r.id});
+    let s: Summary = c.ok("summary.make", json!({"target": target})).await;
+    assert_eq!((s.from, s.text.as_str()), (None, "It said one, then two."), "{s:?}");
+    let prompt = std::fs::read_to_string(std::env::var("FAKE_AGENT_PROMPT").unwrap()).unwrap();
+    assert!(prompt.contains("one"), "{prompt}");
+
+    // It goes on after the look: since then.
+    let seen = c.get(&r.id).await.seen_at;
+    let res = c
+        .call("run.input", json!({"id": r.id, "bytes": b"go\n".to_vec()}))
+        .await;
+    assert!(res.error.is_none(), "{:?}", res.error);
+    wait_journal(&h.home, &r.id, "two").await;
+    let s: Summary = c.ok("summary.make", json!({"target": target})).await;
+    assert_eq!(s.from, seen, "{s:?}");
+    let _: serde_json::Value = c.ok("run.stop", json!({"id": r.id, "force": true})).await;
     h.stop().await;
 }
