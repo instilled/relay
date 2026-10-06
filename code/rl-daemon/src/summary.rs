@@ -16,11 +16,13 @@
 //! Deep, a run is always read by the assistant, all of the stretch: Claude's
 //! messages and tool calls, Codex's turns, or the whole output, with Relay's
 //! events. Past `CHUNK` it is read in parts, each summarised, then those
-//! joined — so a weekend of a busy agent is still one answer.
+//! joined — in parts again while what is joined is past `CHUNK` — so a
+//! weekend of a busy agent is still one answer.
 //!
 //! Many runs (a job, a project, everything) are told from their runs' lines
-//! in one call when brief; deep, from each run's deep read (kept ones as they
-//! are) and one call to join them. `dry` only counts the calls.
+//! in one call when brief (a job's firings folded, at most `LINES_MAX`);
+//! deep, from each run's deep read (kept ones as they are) and a join. `dry`
+//! only counts the calls, each run's as its own deep read would.
 //!
 //! The stretch, unless given, is since you last looked: a run's `seen_at`
 //! when it has written or had an event since, else all of it; a job's, from
@@ -30,21 +32,22 @@
 //!
 //! The one kept is given back while what it covers has not moved on: a run's
 //! brief recap of the whole of it in `summaries` (where the agent's own recap
-//! is also kept as it is written, `recap.rs`), everything else in
-//! `summary_kept` by (what, how deep, from when). Never of an assistant's own
-//! run, so a reaction cannot feed itself.
+//! is also kept as it is written, `recap.rs`), said on the run as a
+//! `run.summarised` event; everything else in `summary_kept` by (what, how
+//! deep, from when), said on no run. Never of an assistant's own run, so a
+//! reaction cannot feed itself.
 
 use crate::assistant;
 use crate::server::Daemon;
 use crate::transcript::{self, Agent};
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use jiff::{SignedDuration, Timestamp};
 use rl_core::display_path;
 use rl_core::time::{fmt_duration, fmt_when};
 use rl_ledger::events::NewEvent;
 use rl_ledger::{events, kept, runs, session_io, summaries};
 use rl_proto::methods::{AssistantParams, EventFilter, SummaryParams};
-use rl_proto::types::{Cause, Event, Run, Summary, SummaryTarget, event_kind};
+use rl_proto::types::{Cause, Event, Run, RunState, Summary, SummaryTarget, event_kind};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
@@ -58,12 +61,15 @@ const CHUNK: usize = 48 * 1024;
 /// The most of Relay's events a brief read, and a deep one, is given.
 const EVENTS_BRIEF: u32 = 200;
 const EVENTS_DEEP: u32 = 500;
+/// The most of those events one call is given, the newest kept.
+const EVENTS_BYTES: usize = 8 * 1024;
 /// How far back a job is read when every firing has been seen.
 const JOB_STRETCH: SignedDuration = SignedDuration::from_hours(24);
 
 /// The one kept for the target, depth and stretch, marked stale when what it
-/// covers has moved on since. A run's default stretch with no answer of its
-/// own yet gives back the run's recap.
+/// covers has moved on since. A run's default stretch, brief, with nothing
+/// kept for it gives back the newest said of the run — its recap, or one
+/// since you looked — so looking at it again does not hide what was said.
 pub async fn get(d: &Daemon, p: &SummaryParams) -> Result<Option<Summary>> {
     let from = p.from.map(whole);
     match &p.target {
@@ -73,20 +79,20 @@ pub async fn get(d: &Daemon, p: &SummaryParams) -> Result<Option<Summary>> {
                 Some(r) => run_stretch(d, r, from).await?,
                 None => from,
             };
-            if !p.deep && from.is_none() {
-                return run_kept(d, id).await;
-            }
-            let Some(mut s) = kept_of(d, &p.target, p.deep, from).await? else {
-                if !p.deep && p.from.is_none() {
-                    return run_kept(d, id).await;
-                }
-                return Ok(None);
+            let found = match (p.deep, from) {
+                (false, None) => None,
+                _ => kept_of(d, &p.target, p.deep, from).await?,
             };
-            if let Some(r) = &run {
-                let t = locate(d, r).await?;
-                s.stale = reach(d, r, t.as_deref()).await? != s.reach;
+            match found {
+                Some(mut s) => {
+                    if let Some(r) = &run {
+                        s.stale = run_reach(d, r).await? != s.reach;
+                    }
+                    Ok(Some(s))
+                }
+                None if !p.deep && p.from.is_none() => run_latest(d, id, run.as_ref()).await,
+                None => Ok(None),
             }
-            Ok(Some(s))
         }
         t => {
             // A project or everything with no stretch has nothing kept for it.
@@ -96,7 +102,7 @@ pub async fn get(d: &Daemon, p: &SummaryParams) -> Result<Option<Summary>> {
             let Some(mut s) = kept_of(d, t, p.deep, Some(from)).await? else {
                 return Ok(None);
             };
-            s.stale = many_reach(&in_stretch(d, t, from).await?) != s.reach;
+            s.stale = many_reach(d, &in_stretch(d, t, from).await?).await? != s.reach;
             Ok(Some(s))
         }
     }
@@ -189,12 +195,27 @@ async fn run_kept(d: &Daemon, run: &str) -> Result<Option<Summary>> {
     };
     s.target = SummaryTarget::Run { id: run.to_string() }.key();
     s.calls = u32::from(!s.by.is_empty());
-    let id = run.to_string();
-    if let Some(r) = d.ledger.call(move |c| runs::get(c, &id)).await?
+    if let Some(r) = load(d, run).await?
         && !s.reach.is_empty()
     {
-        let t = locate(d, &r).await?;
-        s.stale = reach(d, &r, t.as_deref()).await? != s.reach;
+        s.stale = run_reach(d, &r).await? != s.reach;
+    }
+    Ok(Some(s))
+}
+
+/// The newest brief one said of a run over any stretch: its recap of the
+/// whole of it (`summaries`), or one since you looked (`summary_kept`) —
+/// marked stale when it has moved on since.
+async fn run_latest(d: &Daemon, id: &str, run: Option<&Run>) -> Result<Option<Summary>> {
+    let whole = run_kept(d, id).await?;
+    let key = SummaryTarget::Run { id: id.to_string() }.key();
+    let since = d.ledger.call(move |c| kept::latest(c, &key, false)).await?;
+    let Some(mut s) = since.filter(|s| whole.as_ref().is_none_or(|w| s.at > w.at)) else {
+        return Ok(whole);
+    };
+    s.run = id.to_string();
+    if let Some(r) = run {
+        s.stale = run_reach(d, r).await? != s.reach;
     }
     Ok(Some(s))
 }
@@ -244,10 +265,23 @@ async fn reach(d: &Daemon, run: &Run, transcript: Option<&Path>) -> Result<Strin
     Ok(format!("o:{seq}"))
 }
 
-/// How far many runs have got: how many, and the latest change of state.
-fn many_reach(runs: &[Run]) -> String {
+/// How far a run has got, its session file found first.
+async fn run_reach(d: &Daemon, run: &Run) -> Result<String> {
+    let file = locate(d, run).await?;
+    reach(d, run, file.as_deref()).await
+}
+
+/// How far many runs have got: how many, the latest change of state, and
+/// how much they have written — so one that writes on, in the same state,
+/// has moved on too.
+async fn many_reach(d: &Daemon, runs: &[Run]) -> Result<String> {
     let last = runs.iter().map(|r| r.state_at.as_millisecond()).max().unwrap_or(0);
-    format!("n:{}:{last}", runs.len())
+    let ids: Vec<String> = runs.iter().map(|r| r.id.clone()).collect();
+    let out = d
+        .ledger
+        .call(move |c| ids.iter().map(|id| session_io::last_seq(c, id)).sum::<Result<i64>>())
+        .await?;
+    Ok(format!("n:{}:{last}:{out}", runs.len()))
 }
 
 /// The last `max` bytes of `s`, on a character boundary.
@@ -308,6 +342,7 @@ fn blank(target: &SummaryTarget, run: &str, deep: bool, from: Option<Timestamp>,
         deep,
         from,
         calls: 0,
+        runs: u32::from(!run.is_empty()),
     }
 }
 
@@ -444,8 +479,7 @@ async fn run_brief(d: &Daemon, run: &Run, from: Option<Timestamp>, p: &SummaryPa
 
 /// A run's deep read kept for this stretch, while the run has not moved on.
 async fn deep_kept(d: &Daemon, run: &Run, from: Option<Timestamp>) -> Result<Option<Summary>> {
-    let file = locate(d, run).await?;
-    let reach = reach(d, run, file.as_deref()).await?;
+    let reach = run_reach(d, run).await?;
     let t = SummaryTarget::Run { id: run.id.clone() };
     Ok(kept_of(d, &t, true, from).await?.filter(|k| k.reach == reach))
 }
@@ -501,10 +535,15 @@ async fn run_deep(d: &Daemon, run: &Run, from: Option<Timestamp>, p: &SummaryPar
             let at = format!("Part {} of {n}", i + 1);
             let evs = (i == 0).then_some(evs.as_slice());
             let q = prompt(run, from, evs, &format!("{at}: {heading}"), part, true);
-            said.push((at, ask(d, cwd.clone(), &run.title, q, p).await?.text));
+            let a = ask(d, cwd.clone(), &run.title, q, p)
+                .await
+                .with_context(|| format!("part {} of {n}", i + 1))?;
+            said.push((at, a.text));
         }
         let what = format!("the run `{}`", run.title);
-        ask(d, cwd, &run.title, prompt_over(&what, from, &said), p).await?
+        let (a, calls) = join(&what, from, &said, |q| ask(d, cwd.clone(), &run.title, q, p)).await?;
+        made.calls = n as u32 + calls;
+        a
     };
     made.source = if n == 1 {
         "summarised".into()
@@ -612,13 +651,14 @@ async fn over(d: &Daemon, t: &SummaryTarget, from: Option<Timestamp>, p: &Summar
     let now = now();
     let from = over_from(d, t, from, now).await?;
     let runs = in_stretch(d, t, from).await?;
-    let reach = many_reach(&runs);
+    let reach = many_reach(d, &runs).await?;
     if !p.again
         && let Some(k) = kept_of(d, t, p.deep, Some(from)).await?.filter(|k| k.reach == reach)
     {
         return Ok(if p.dry { dry_of(k) } else { k });
     }
     let mut made = blank(t, "", p.deep, Some(from), reach);
+    made.runs = runs.len() as u32;
     if runs.is_empty() {
         nothing(&mut made);
         return done(d, None, made, p.dry).await;
@@ -631,13 +671,22 @@ async fn over(d: &Daemon, t: &SummaryTarget, from: Option<Timestamp>, p: &Summar
             made.calls = 1;
             return Ok(made);
         }
-        brief_lines(d, &runs).await?
+        many_lines(t, &runs, brief_lines(d, &runs).await?, now)
     } else if p.dry {
+        // Each run as its own deep read would cost — none for one kept or
+        // with nothing in it, its parts and their join for a long one — and
+        // one to join them.
         let mut calls = 1;
         for r in &runs {
-            if deep_kept(d, r, stretch(r)).await?.is_none() {
-                calls += 1;
-            }
+            let dry = SummaryParams {
+                target: SummaryTarget::Run { id: r.id.clone() },
+                deep: true,
+                from: stretch(r),
+                again: false,
+                dry: true,
+                timeout: None,
+            };
+            calls += run_deep(d, r, stretch(r), &dry).await?.calls;
         }
         made.calls = calls;
         return Ok(made);
@@ -655,16 +704,17 @@ async fn over(d: &Daemon, t: &SummaryTarget, from: Option<Timestamp>, p: &Summar
                         dry: false,
                         timeout: p.timeout.clone(),
                     };
-                    let s = run_deep(d, r, stretch(r), &fresh).await?;
+                    let s = run_deep(d, r, stretch(r), &fresh)
+                        .await
+                        .with_context(|| format!("reading `{}`", r.title))?;
                     made.calls += s.calls;
                     s
                 }
             };
-            lines.push(s.text);
+            lines.push((heading(t, r, now), s.text));
         }
         lines
     };
-    let lines: Vec<(String, String)> = runs.iter().map(|r| heading(t, r, now)).zip(lines).collect();
     let what = what(t);
     let cwd = match t {
         SummaryTarget::Project { workspace }
@@ -674,11 +724,127 @@ async fn over(d: &Daemon, t: &SummaryTarget, from: Option<Timestamp>, p: &Summar
         } if workspace.is_dir() => workspace.clone(),
         _ => d.home.path().to_path_buf(),
     };
-    let a = ask(d, cwd, &what, prompt_over(&what, Some(from), &lines), p).await?;
-    made.calls += 1;
+    let (a, calls) = join(&what, Some(from), &lines, |q| ask(d, cwd.clone(), &what, q, p)).await?;
+    made.calls += calls;
     made.source = format!("over {} run{}", runs.len(), if runs.len() == 1 { "" } else { "s" });
     (made.agent, made.by, made.text) = (a.agent, a.by, a.text);
     keep(d, None, made).await
+}
+
+/// The most lines many runs are told by, brief; past it the rest are
+/// counted.
+const LINES_MAX: usize = 200;
+/// The most of a run's heading, and of its line, told among many.
+const HEADING_CUT: usize = 80;
+const LINE_CUT: usize = 140;
+
+/// The lines many runs are told by, brief: each run's under its heading, but
+/// a job's firings folded into one (`nightly · 14 firings · 2 failed · last:
+/// …`) unless the job is what is told; past `LINES_MAX`, `… and 12 more`.
+/// Each is cut short, so the lot fits in one call.
+fn many_lines(t: &SummaryTarget, runs: &[Run], lines: Vec<String>, now: Timestamp) -> Vec<(String, String)> {
+    struct Fold {
+        at: usize,
+        name: String,
+        firings: usize,
+        failed: usize,
+        last: String,
+    }
+    let mut out: Vec<(String, String)> = Vec::new();
+    let mut folds: Vec<((String, PathBuf), Fold)> = Vec::new();
+    for (r, line) in runs.iter().zip(lines) {
+        let job = match (&r.cause, t) {
+            (_, SummaryTarget::Job { .. }) => None,
+            (Cause::Schedule(n) | Cause::Reaction(n), _) => Some(n),
+            _ => None,
+        };
+        let Some(name) = job else {
+            out.push((heading(t, r, now), line));
+            continue;
+        };
+        let key = (r.cause.to_string(), r.workspace.clone());
+        let failed = usize::from(r.state == RunState::Failed);
+        match folds.iter_mut().find(|(k, _)| *k == key) {
+            Some((_, f)) => {
+                f.firings += 1;
+                f.failed += failed;
+                f.last = line;
+                let mut said = format!("{} firings", f.firings);
+                if f.failed > 0 {
+                    said.push_str(&format!(" · {} failed", f.failed));
+                }
+                said.push_str(&format!(" · last: {}", f.last));
+                let head = match t {
+                    SummaryTarget::All => format!("{} · {}", f.name, display_path(&r.workspace)),
+                    _ => f.name.clone(),
+                };
+                out[f.at] = (head, said);
+            }
+            None => {
+                folds.push((
+                    key,
+                    Fold {
+                        at: out.len(),
+                        name: name.clone(),
+                        firings: 1,
+                        failed,
+                        last: line.clone(),
+                    },
+                ));
+                out.push((heading(t, r, now), line));
+            }
+        }
+    }
+    let more = out.len().saturating_sub(LINES_MAX);
+    out.truncate(LINES_MAX);
+    for (head, line) in &mut out {
+        *head = cut(head, HEADING_CUT);
+        *line = cut(line, LINE_CUT);
+    }
+    if more > 0 {
+        out.push((format!("… and {more} more"), String::new()));
+    }
+    out
+}
+
+/// `s`, at most `max` characters, `…` where it was cut.
+fn cut(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let kept: String = s.chars().take(max - 1).collect();
+    format!("{}…", kept.trim_end())
+}
+
+/// Many answers or lines joined into one by `ask`: one call while what they
+/// say fits in `CHUNK`; past it, told in parts, then those joined the same
+/// way, until it fits. With the calls it took.
+async fn join<F: Future<Output = Result<Answer>>>(
+    what: &str,
+    from: Option<Timestamp>,
+    lines: &[(String, String)],
+    mut ask: impl FnMut(String) -> F,
+) -> Result<(Answer, u32)> {
+    let mut body = over_body(lines);
+    let mut calls = 0;
+    while body.len() > CHUNK {
+        let parts = parts(&body);
+        let n = parts.len();
+        let mut said = Vec::with_capacity(n);
+        for (i, part) in parts.iter().enumerate() {
+            let a = ask(prompt_over_text(what, from, part))
+                .await
+                .with_context(|| format!("joining, part {} of {n}", i + 1))?;
+            calls += 1;
+            said.push((format!("Part {} of {n}", i + 1), a.text));
+        }
+        let next = over_body(&said);
+        if next.len() >= body.len() {
+            bail!("joining what was said of {what} did not make it shorter");
+        }
+        body = next;
+    }
+    Ok((ask(prompt_over_text(what, from, &body)).await?, calls + 1))
 }
 
 /// What an assistant answered, and its run.
@@ -729,21 +895,23 @@ async fn done(d: &Daemon, run: Option<&Run>, s: Summary, dry: bool) -> Result<Su
     keep(d, run, s).await
 }
 
-/// Keeps a summary — a run's brief recap of the whole of it by the run,
-/// anything else by what, how deep and from when — and says so on the run.
+/// Keeps a summary — a run's brief recap of the whole of it by the run, and
+/// said on the run as a `run.summarised` event; anything else by what, how
+/// deep and from when, said on no run, so reading runs for a catch-up is not
+/// news on them.
 async fn keep(d: &Daemon, run: Option<&Run>, s: Summary) -> Result<Summary> {
-    let run = run.cloned();
+    let run = run.filter(|_| !s.deep && s.from.is_none()).cloned();
     d.ledger
         .call({
             let s = s.clone();
             move |c| {
                 match &run {
-                    Some(_) if !s.deep && s.from.is_none() => summaries::put(c, &s)?,
-                    _ => kept::put(c, &s)?,
-                }
-                if let Some(run) = &run {
-                    let e = NewEvent::for_run(run, s.at, event_kind::RUN_SUMMARISED, first_line(&s.text));
-                    events::append(c, &e)?;
+                    Some(run) => {
+                        summaries::put(c, &s)?;
+                        let e = NewEvent::for_run(run, s.at, event_kind::RUN_SUMMARISED, first_line(&s.text));
+                        events::append(c, &e)?;
+                    }
+                    None => kept::put(c, &s)?,
                 }
                 Ok(())
             }
@@ -821,8 +989,21 @@ pub fn prompt(
         if events.is_empty() {
             let _ = writeln!(s, "(no events)");
         }
-        for e in events {
-            let _ = writeln!(s, "{}  {}  {}", e.at, e.kind, e.summary);
+        // The newest that fit in `EVENTS_BYTES`.
+        let said: Vec<String> = events
+            .iter()
+            .map(|e| format!("{}  {}  {}", e.at, e.kind, e.summary))
+            .collect();
+        let (mut size, mut from) = (0, said.len());
+        while from > 0 && size + said[from - 1].len() < EVENTS_BYTES {
+            from -= 1;
+            size += said[from].len() + 1;
+        }
+        if from > 0 {
+            let _ = writeln!(s, "({from} earlier left out)");
+        }
+        for l in &said[from..] {
+            let _ = writeln!(s, "{l}");
         }
     }
     let _ = writeln!(s, "\n## {heading}\n");
@@ -837,15 +1018,26 @@ pub fn prompt(
 /// What the agent is asked of many: what they are, since when, and a heading
 /// and a line (or a few) for each.
 pub fn prompt_over(what: &str, from: Option<Timestamp>, lines: &[(String, String)]) -> String {
+    prompt_over_text(what, from, &over_body(lines))
+}
+
+/// The ask of many, over what is said of them (`over_body`, or a part of
+/// it).
+fn prompt_over_text(what: &str, from: Option<Timestamp>, body: &str) -> String {
     let clock = match from {
         Some(f) => fmt_when(f, Timestamp::now()),
         None => "it began".into(),
     };
-    let mut s = format!(
+    format!(
         "You are telling the person what happened in {what} since {clock}, who has not looked. \
          Answer with 3–6 bullets, most important first: what needs them, then what broke, then \
-         what moved or shipped. One line each, no preamble.\n"
-    );
+         what moved or shipped. One line each, no preamble.\n{body}"
+    )
+}
+
+/// A heading and a line (or a few) for each.
+fn over_body(lines: &[(String, String)]) -> String {
+    let mut s = String::new();
     for (title, line) in lines {
         let _ = write!(s, "\n## {title}\n{}\n", line.trim_end());
     }
@@ -1023,6 +1215,119 @@ mod tests {
         assert_eq!(run_from(&r, None, false), None, "looked at once it ended: all of it");
         let asked = Some(t("2026-09-10T09:30:00Z"));
         assert_eq!(run_from(&r, asked, false), asked);
+    }
+
+    #[tokio::test]
+    async fn a_join_past_chunk_is_joined_in_steps() {
+        let said = |i: usize| (format!("run {i} · 09:00"), "x".repeat(2_000));
+        let lines: Vec<(String, String)> = (0..40).map(said).collect();
+        assert!(over_body(&lines).len() > CHUNK);
+        let mut asked: Vec<String> = Vec::new();
+        let (a, calls) = join("the project ~/api", None, &lines, |q| {
+            asked.push(q);
+            let n = asked.len();
+            async move {
+                Ok(Answer {
+                    agent: "fakeai".into(),
+                    by: format!("a{n}"),
+                    text: "- it went".into(),
+                })
+            }
+        })
+        .await
+        .unwrap();
+        assert!(calls > 1, "{calls}");
+        assert_eq!(calls as usize, asked.len());
+        assert_eq!(a.by, format!("a{calls}"), "the last call is the answer");
+        assert!(asked.iter().all(|q| q.len() <= CHUNK + 1024), "each call fits");
+        let last = asked.last().unwrap();
+        assert!(last.contains("## Part 1 of 2\n- it went\n"), "{last}");
+        // What fits is one call.
+        let (_, calls) = join("the project ~/api", None, &lines[..3], |_| async {
+            Ok(Answer {
+                agent: "fakeai".into(),
+                by: "a".into(),
+                text: "- it went".into(),
+            })
+        })
+        .await
+        .unwrap();
+        assert_eq!(calls, 1);
+    }
+
+    #[test]
+    fn many_runs_brief_fit_in_one_call() {
+        let now: Timestamp = "2026-09-10T12:00:00Z".parse().unwrap();
+        let mut runs = Vec::new();
+        let mut lines = Vec::new();
+        for i in 0..14 {
+            let mut r = Run::new(format!("n{i:03}"), RunKind::Command, "nightly", vec![], "/w", "/w", now);
+            r.cause = Cause::Schedule("nightly".into());
+            r.state = if i < 2 { RunState::Failed } else { RunState::Finished };
+            runs.push(r);
+            lines.push(format!("{} · exit {}", runs[i].state, i));
+        }
+        for i in 0..300 {
+            let title = format!("{i} {}", "a long title ".repeat(10));
+            runs.push(Run::new(
+                format!("m{i:03}"),
+                RunKind::Command,
+                &title,
+                vec![],
+                "/w",
+                "/w",
+                now,
+            ));
+            lines.push(format!("finished · {}", "it said a great deal ".repeat(15)));
+        }
+        let project = SummaryTarget::Project { workspace: "/w".into() };
+        let told = many_lines(&project, &runs, lines.clone(), now);
+        assert_eq!(
+            told.len(),
+            LINES_MAX + 1,
+            "a line each, the job's folded, then the rest counted"
+        );
+        assert_eq!(
+            told[0],
+            (
+                "nightly".to_string(),
+                "14 firings · 2 failed · last: finished · exit 13".to_string()
+            )
+        );
+        assert_eq!(told[LINES_MAX], ("… and 101 more".to_string(), String::new()));
+        assert!(over_body(&told).len() < CHUNK, "{}", over_body(&told).len());
+        // A job told is told firing by firing.
+        let job = SummaryTarget::Job {
+            rule: rl_proto::rule::RuleKind::Schedule,
+            name: "nightly".into(),
+            workspace: None,
+        };
+        let told = many_lines(&job, &runs[..14], lines[..14].to_vec(), now);
+        assert_eq!(told.len(), 14);
+    }
+
+    #[test]
+    fn a_runs_events_are_the_newest_that_fit() {
+        let t: Timestamp = "2026-09-10T11:00:00Z".parse().unwrap();
+        let r = Run::new("r1", RunKind::Command, "loud", vec![], "/w", "/w", t);
+        let evs: Vec<Event> = (0..500)
+            .map(|i| Event {
+                id: i,
+                at: t,
+                workspace: "/w".into(),
+                run: Some("r1".into()),
+                group_key: "g".into(),
+                kind: "run.emitted".into(),
+                summary: format!("event {i} {}", "said ".repeat(20)),
+                data: None,
+            })
+            .collect();
+        let p = prompt(&r, None, Some(&evs), "Its output", "out\n", true);
+        let happened = &p[p.find("## What happened").unwrap()..p.find("## Its output").unwrap()];
+        assert!(happened.len() <= EVENTS_BYTES + 64, "{}", happened.len());
+        assert!(happened.contains("earlier left out)\n"), "{happened}");
+        assert!(happened.contains("event 499 "), "the newest kept");
+        assert!(!happened.contains("event 0 "), "the oldest left out");
     }
 
     #[test]

@@ -80,7 +80,7 @@ fn summary_of(target: &str) -> Option<String> {
     }
     let job = target.strip_prefix("j:")?;
     let (rule, rest) = job.split_once(':')?;
-    let name = rest.rsplit_once('@').map_or(rest, |(n, _)| n);
+    let name = rest.split_once('@').map_or(rest, |(n, _)| n);
     Some(format!("the {rule} {name}"))
 }
 
@@ -109,11 +109,16 @@ pub fn summary_label(s: &Summary, now: Timestamp) -> String {
 }
 
 /// A summary aligned with the facts: where it came from on the `key`'s
-/// line, the words under it in the value column.
+/// line — and, but for a run's, what it is of — the words under it in the
+/// value column.
 fn said(key: &str, s: &Summary, width: usize, now: Timestamp) -> Vec<Line<'static>> {
     let value = width.saturating_sub(VALUE_COL + 1).max(20);
+    let label = match summary_of(&s.target) {
+        Some(of) => format!("of {of} · {}", recap_label(s, now)),
+        None => recap_label(s, now),
+    };
     let mut lines = Vec::new();
-    for (i, t) in wrap(&recap_label(s, now), value).into_iter().enumerate() {
+    for (i, t) in wrap(&label, value).into_iter().enumerate() {
         let key = if i == 0 { key } else { "" };
         lines.push(Line::from(Span::raw(format!(" {key:<8} {t}")).dim()));
     }
@@ -257,7 +262,11 @@ pub fn run_lines(
     } else if !matches!(r.cause, rl_proto::types::Cause::Assistant(_)) {
         lines.push(Line::raw(""));
         lines.push(Line::from(
-            Span::raw(format!(" {:<8} /summary recaps it · /summary 2h the last 2h", "recap")).dim(),
+            Span::raw(format!(
+                " {:<8} /summary recaps it · /summary deep reads its logs · /summary 2h the last 2h",
+                "recap"
+            ))
+            .dim(),
         ));
     }
     lines.push(Line::raw(""));
@@ -578,13 +587,15 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
     out
 }
 
-/// A question: what it asks, who asked, what it says, and what can be done
+/// A question: what it asks, who asked and what was said of that run (its
+/// summary, as in the run's own pane), what it says, and what can be done
 /// about it — each choice on a row of its own, `at` the highlighted one while
 /// it is being answered. `picked` are the options marked so far where it
 /// takes several. Laid out for `width` columns.
 pub fn question_lines(
     d: &Decision,
     asker: Option<&Run>,
+    summary: Option<&Summary>,
     picked: &[usize],
     at: Option<usize>,
     width: usize,
@@ -616,6 +627,11 @@ pub fn question_lines(
     }
     for t in wrap(&who, text) {
         p.push(Line::from(Span::raw(format!(" {t}")).dim()), None);
+    }
+    if d.run.is_some() {
+        for l in summary_section(summary, width, now) {
+            p.push(l, None);
+        }
     }
     if let Some(s) = &d.summary {
         p.push(Line::raw(""), None);
@@ -790,7 +806,7 @@ mod tests {
         );
         assert!(s.contains("· after 0s · exit 1"), "{s}");
         assert!(
-            s.contains("\n recap    /summary recaps it · /summary 2h the last 2h\n"),
+            s.contains("\n recap    /summary recaps it · /summary deep reads its logs · /summary 2h the last 2h\n"),
             "{s}"
         );
         assert!(s.ends_with(" lately\n   nothing yet"), "{s}");
@@ -844,6 +860,7 @@ mod tests {
             deep: false,
             from: None,
             calls: 0,
+            runs: 1,
         };
         let s = text(&run_lines(&item, &[], Some(&summary), &names, 80, now));
         // Narrow, the recap wraps under its own column.
@@ -911,6 +928,7 @@ mod tests {
             deep: true,
             from: None,
             calls: 2,
+            runs: 0,
         };
         assert_eq!(
             summary_label(&s, now),
@@ -926,6 +944,16 @@ mod tests {
         assert_eq!(
             summary_label(&job, now),
             "summary of the schedule nightly · by fakeai · 1 call · moved on since"
+        );
+        // A folder may have an `@` in it; a job's name has none.
+        let there = Summary {
+            target: "j:reaction:fix@/w/me@work".into(),
+            ..job.clone()
+        };
+        assert!(
+            summary_label(&there, now).starts_with("summary of the reaction fix · "),
+            "{}",
+            summary_label(&there, now)
         );
         let run = Summary {
             target: "r:abc".into(),
@@ -952,6 +980,7 @@ mod tests {
             deep: true,
             from: Some(from),
             calls: 1,
+            runs: 2,
         };
         let at = fmt_when(from, now);
         assert_eq!(recap_label(&s, now), format!("deep · by haiku · since {at} · 3m ago"));
@@ -984,9 +1013,9 @@ mod tests {
         ));
         assert!(
             lines.contains(&format!(
-                "\n summary  deep · by haiku · since {at} · 3m ago\n          It went.\n"
+                "\n summary  of the project /w/api · deep · by haiku · since {at} · 3m ago\n          It went.\n"
             )),
-            "{lines}"
+            "what it is of, then where it came from: {lines}"
         );
         let none = text(&project_lines(
             "api",
@@ -1000,8 +1029,12 @@ mod tests {
             now,
         ));
         assert!(none.contains("/summary says what happened"), "{none}");
-        let all = text(&everywhere_lines(&[], &[], &[], Some(&s), 80, now));
-        assert!(all.contains(" summary  deep · by haiku"), "{all}");
+        let everything = Summary {
+            target: "all".into(),
+            ..s.clone()
+        };
+        let all = text(&everywhere_lines(&[], &[], &[], Some(&everything), 80, now));
+        assert!(all.contains(" summary  of everything · deep · by haiku"), "{all}");
     }
 
     #[test]
@@ -1060,7 +1093,7 @@ mod tests {
                 .collect::<Vec<_>>()
                 .join("\n")
         };
-        let p = question_lines(&d, None, &[], None, 80, now);
+        let p = question_lines(&d, None, None, &[], None, 80, now);
         let s = shown(&p);
         assert!(
             s.starts_with(" ? nightly tests failed\n asked by rule tests-failed · 7h ago · 1h00m left"),
@@ -1082,7 +1115,7 @@ mod tests {
         assert_eq!(p.hits[0], None);
 
         // Being answered: a caret on the highlighted choice, and the keys that move it.
-        let s = shown(&question_lines(&d, None, &[1], Some(1), 80, now));
+        let s = shown(&question_lines(&d, None, None, &[1], Some(1), 80, now));
         assert!(s.contains("\n ❯ 2  ignore     ignore  ◆\n"), "{s}");
         assert!(s.contains("↑↓ choose · enter takes it · 1-2 answers · esc back"), "{s}");
 
@@ -1100,14 +1133,14 @@ mod tests {
                 Choice::Dismiss
             ]
         );
-        let s = shown(&question_lines(&multi, Some(&asker), &[0], None, 80, now));
+        let s = shown(&question_lines(&multi, Some(&asker), None, &[0], None, 80, now));
         assert!(s.contains("↵  answer     with the 1 picked"), "{s}");
         assert!(s.contains("↗  attach     nightly · still going"), "{s}");
 
         // Narrow, a long summary wraps onto rows of its own.
         let mut long = d.clone();
         long.summary = Some("one two three four five six".into());
-        let s = shown(&question_lines(&long, None, &[], None, 12, now));
+        let s = shown(&question_lines(&long, None, None, &[], None, 12, now));
         assert!(s.contains("\n one two\n three four\n five six\n"), "{s}");
 
         // The line answers by number or key, the rest the note.

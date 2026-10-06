@@ -11,5 +11,6 @@ CREATE TABLE summary_kept (
   source  TEXT NOT NULL,
   reach   TEXT NOT NULL,
   calls   INTEGER NOT NULL DEFAULT 0,
+  runs    INTEGER NOT NULL DEFAULT 0,   -- how many runs it covers
   PRIMARY KEY (target, deep, from_at)
 );

@@ -10,7 +10,8 @@ mod common;
 use common::{Conn, Harness, wait_journal};
 use jiff::{SignedDuration, Timestamp};
 use rl_core::Home;
-use rl_proto::types::{Run, Summary};
+use rl_proto::methods::Digest;
+use rl_proto::types::{Event, Run, Summary};
 use serde_json::json;
 use std::path::PathBuf;
 
@@ -73,6 +74,10 @@ async fn cases() {
     a_dry_run_says_how_many_calls_and_asks_no_one().await;
     a_jobs_runs_are_its_firings().await;
     a_run_looked_at_just_now_is_told_whole().await;
+    a_runs_summary_since_you_looked_stays_once_you_look().await;
+    deep_over_a_project_leaves_its_runs_as_they_were().await;
+    a_dry_run_counts_a_long_runs_parts().await;
+    a_project_moves_on_while_a_run_writes().await;
 }
 
 async fn a_project_brief_is_one_call_over_its_runs_lines() {
@@ -187,17 +192,26 @@ async fn a_dry_run_says_how_many_calls_and_asks_no_one() {
     let from = ago(SignedDuration::from_mins(5));
     for t in ["a", "b", "c"] {
         let r: Run = c
-            .ok("run.start", json!({"argv": ["true"], "cwd": dir, "title": t}))
+            .ok(
+                "run.start",
+                json!({"argv": ["sh", "-c", format!("echo said-{t}")], "cwd": dir, "title": t}),
+            )
             .await;
         c.wait_terminal(&r.id).await;
+        wait_journal(&h.home, &r.id, &format!("said-{t}")).await;
     }
+    // One with nothing in it is told without asking anyone.
+    let quiet: Run = c
+        .ok("run.start", json!({"argv": ["true"], "cwd": dir, "title": "quiet"}))
+        .await;
+    c.wait_terminal(&quiet.id).await;
     let s: Summary = c
         .ok(
             "summary.make",
             json!({"target": {"kind": "all"}, "deep": true, "from": from, "dry": true}),
         )
         .await;
-    assert_eq!(s.calls, 4, "three deep reads and one to join");
+    assert_eq!((s.calls, s.runs), (4, 4), "three deep reads and one to join");
     assert!(s.text.is_empty());
     let prompt = std::env::var("FAKE_AGENT_PROMPT").unwrap();
     assert!(!std::path::Path::new(&prompt).exists(), "no one was asked");
@@ -290,6 +304,126 @@ async fn a_run_looked_at_just_now_is_told_whole() {
     wait_journal(&h.home, &r.id, "two").await;
     let s: Summary = c.ok("summary.make", json!({"target": target})).await;
     assert_eq!(s.from, seen, "{s:?}");
+    let _: serde_json::Value = c.ok("run.stop", json!({"id": r.id, "force": true})).await;
+    h.stop().await;
+}
+
+async fn a_runs_summary_since_you_looked_stays_once_you_look() {
+    let Some((h, mut c, dir, _tmp)) = with_fake_summariser("It said two.").await else {
+        return;
+    };
+    let r: Run = c
+        .ok(
+            "run.start",
+            json!({"argv": ["sh", "-c", "echo one; read go; echo two; sleep 30"], "cwd": dir, "title": "waits"}),
+        )
+        .await;
+    wait_journal(&h.home, &r.id, "one").await;
+    let _: usize = c.ok("run.seen", json!({"ids": [r.id]})).await;
+    let res = c
+        .call("run.input", json!({"id": r.id, "bytes": b"go\n".to_vec()}))
+        .await;
+    assert!(res.error.is_none(), "{:?}", res.error);
+    wait_journal(&h.home, &r.id, "two").await;
+    let target = json!({"kind": "run", "id": r.id});
+    let s: Summary = c.ok("summary.make", json!({"target": target})).await;
+    assert!(s.from.is_some(), "since you looked: {s:?}");
+    // Looked at again, with nothing new: the one made is still what the
+    // pane shows, not nothing.
+    let _: usize = c.ok("run.seen", json!({"ids": [r.id]})).await;
+    let k = kept(&mut c, json!({"target": target})).await;
+    assert_eq!(k.map(|k| (k.text, k.from)), Some((s.text.clone(), s.from)));
+    let _: serde_json::Value = c.ok("run.stop", json!({"id": r.id, "force": true})).await;
+    h.stop().await;
+}
+
+async fn deep_over_a_project_leaves_its_runs_as_they_were() {
+    let Some((h, mut c, dir, _tmp)) = with_fake_summariser("read closely").await else {
+        return;
+    };
+    let from = ago(SignedDuration::from_mins(5));
+    let r: Run = c
+        .ok(
+            "run.start",
+            json!({"argv": ["sh", "-c", "echo hi"], "cwd": dir, "title": "one"}),
+        )
+        .await;
+    c.wait_terminal(&r.id).await;
+    wait_journal(&h.home, &r.id, "hi").await;
+    let _: usize = c.ok("run.seen", json!({"ids": [r.id]})).await;
+    let line = |d: &Digest| {
+        d.items
+            .iter()
+            .find(|i| i.run.id == r.id)
+            .map(|i| (i.unseen, i.summary.clone()))
+    };
+    let before: Digest = c.ok("digest.get", json!({})).await;
+    let target = json!({"kind": "project", "workspace": dir});
+    let s: Summary = c
+        .ok("summary.make", json!({"target": target, "from": from, "deep": true}))
+        .await;
+    assert_eq!(s.calls, 2, "{s:?}");
+    // Reading a run for a catch-up is not news on it.
+    let evs: Vec<Event> = c
+        .ok("event.list", json!({"run": r.id, "kinds": ["run.summarised"]}))
+        .await;
+    assert!(evs.is_empty(), "{evs:?}");
+    let after: Digest = c.ok("digest.get", json!({})).await;
+    assert_eq!(line(&after), line(&before));
+    assert_eq!(line(&after).map(|l| l.0), Some(false), "still seen");
+    h.stop().await;
+}
+
+async fn a_dry_run_counts_a_long_runs_parts() {
+    let Some((h, mut c, dir, _tmp)) = with_fake_summariser("x").await else {
+        return;
+    };
+    let from = ago(SignedDuration::from_mins(5));
+    // ~120 KB: three parts and their join, then one more to join the runs.
+    let r: Run = c
+        .ok(
+            "run.start",
+            json!({"argv": ["sh", "-c", "yes 'a line of output to fill the journal' | head -c 120000"], "cwd": dir, "title": "loud"}),
+        )
+        .await;
+    c.wait_terminal(&r.id).await;
+    let target = json!({"kind": "project", "workspace": dir});
+    let dry: Summary = c
+        .ok(
+            "summary.make",
+            json!({"target": target, "from": from, "deep": true, "dry": true}),
+        )
+        .await;
+    assert_eq!((dry.calls, dry.runs), (5, 1), "{dry:?}");
+    let prompt = std::env::var("FAKE_AGENT_PROMPT").unwrap();
+    assert!(!std::path::Path::new(&prompt).exists(), "no one was asked");
+    h.stop().await;
+}
+
+async fn a_project_moves_on_while_a_run_writes() {
+    let Some((h, mut c, dir, _tmp)) = with_fake_summariser("it waits").await else {
+        return;
+    };
+    let from = ago(SignedDuration::from_mins(5));
+    let r: Run = c
+        .ok(
+            "run.start",
+            json!({"argv": ["sh", "-c", "echo one; read go; echo two; sleep 30"], "cwd": dir, "title": "waits"}),
+        )
+        .await;
+    wait_journal(&h.home, &r.id, "one").await;
+    let target = json!({"kind": "project", "workspace": dir});
+    let _: Summary = c.ok("summary.make", json!({"target": target, "from": from})).await;
+    let k = kept(&mut c, json!({"target": target, "from": from})).await;
+    assert_eq!(k.map(|k| k.stale), Some(false));
+    // It writes on, in the same state: what was said has moved on.
+    let res = c
+        .call("run.input", json!({"id": r.id, "bytes": b"go\n".to_vec()}))
+        .await;
+    assert!(res.error.is_none(), "{:?}", res.error);
+    wait_journal(&h.home, &r.id, "two").await;
+    let k = kept(&mut c, json!({"target": target, "from": from})).await;
+    assert_eq!(k.map(|k| k.stale), Some(true));
     let _: serde_json::Value = c.ok("run.stop", json!({"id": r.id, "force": true})).await;
     h.stop().await;
 }

@@ -152,9 +152,13 @@ enum Mode {
     /// `^r`: a run's or a project's name being changed where it stands, in
     /// the list.
     Rename(Box<Renaming>),
-    /// `/summary deep` over more than one assistant call (at most this
-    /// many): `y` asks (`App::summary_ask`), anything else lets it be.
-    SummaryCost(u32),
+    /// `/summary deep` over more than one assistant call: how many runs it
+    /// reads and how many calls that takes. `y` asks (`App::summary_ask`),
+    /// anything else lets it be.
+    SummaryCost {
+        runs: u32,
+        calls: u32,
+    },
 }
 
 /// A name being changed in place: the row it is on, what it is the name
@@ -329,6 +333,11 @@ struct App {
     /// everything's `/summary` starts with no stretch typed. None: the last
     /// day.
     away_since: Option<Timestamp>,
+    /// Where a job row's `/summary` starts with no stretch typed, by row key:
+    /// when its oldest firing not seen started, noted as the cursor lands on
+    /// it — landing marks them seen, so the daemon could no longer tell.
+    /// Kept until used, or until the row has firings not seen again.
+    unseen_from: HashMap<String, Timestamp>,
     /// A project on its way out (`^x` twice on its header).
     removing: Option<Removing>,
     /// `/edit`: the rule file and line to open in the editor once the
@@ -1049,6 +1058,7 @@ impl App {
             summary_ask: None,
             made: HashMap::new(),
             away_since: None,
+            unseen_from: HashMap::new(),
             removing: None,
             picked: Vec::new(),
             line: line::Line::default(),
@@ -1338,6 +1348,9 @@ impl App {
         let (deep, from) = match (&made, &target) {
             (Some(m), _) => (m.deep, m.from),
             (None, SummaryTarget::Project { .. } | SummaryTarget::All) => (false, self.away_since),
+            (None, SummaryTarget::Job { .. }) => {
+                (false, self.sel.as_ref().and_then(|k| self.unseen_from.get(k)).copied())
+            }
             (None, _) => (false, None),
         };
         // A project or everything with no stretch has nothing kept for it.
@@ -1688,11 +1701,23 @@ impl App {
     }
 
     async fn saw_selected(&mut self) {
+        let mut from = None;
         let ids: Vec<String> = match self.selected() {
             Some(Row::Run(i)) if i.unseen => vec![i.run.id.clone()],
-            Some(Row::Job(j)) => j.runs.iter().filter(|i| i.unseen).map(|i| i.run.id.clone()).collect(),
+            Some(Row::Job(j)) => {
+                let unseen: Vec<_> = j.runs.iter().filter(|i| i.unseen).collect();
+                from = unseen
+                    .iter()
+                    .map(|i| i.run.started_at)
+                    .min()
+                    .map(|at| (j.key.clone(), at));
+                unseen.iter().map(|i| i.run.id.clone()).collect()
+            }
             _ => vec![],
         };
+        if let Some((key, at)) = from {
+            self.unseen_from.insert(key, at);
+        }
         self.seen(ids).await;
     }
 
@@ -3350,14 +3375,19 @@ impl App {
                 return;
             }
         };
-        // A run's and a job's own stretch is the daemon's to say (since you
-        // looked at them); a project's and everything's, since you were here.
+        // A run's own stretch is the daemon's to say (since you looked at
+        // it); a job's, from the firing you had not seen when the cursor
+        // landed on it, else the daemon's; a project's and everything's,
+        // since you were here.
         let from = match target {
             SummaryTarget::Project { .. } | SummaryTarget::All => Some(
                 typed
                     .or(self.away_since)
                     .unwrap_or(now - SignedDuration::from_hours(24)),
             ),
+            SummaryTarget::Job { .. } if typed.is_none() => {
+                self.sel.as_ref().and_then(|k| self.unseen_from.get(k)).copied()
+            }
             _ => typed,
         };
         let params = SummaryParams {
@@ -3376,7 +3406,10 @@ impl App {
             match self.rpc.call::<SummaryMake>(dry).await {
                 Ok(d) if d.calls > 1 => {
                     self.summary_ask = Some(params);
-                    self.mode = Mode::SummaryCost(d.calls);
+                    self.mode = Mode::SummaryCost {
+                        runs: d.runs,
+                        calls: d.calls,
+                    };
                     return;
                 }
                 Ok(_) => {}
@@ -3392,6 +3425,13 @@ impl App {
     /// Hands `params` to the summariser; the answer lands in the pane through
     /// the main loop.
     fn summary_start(&mut self, params: SummaryParams) {
+        // A job's note of where its unseen firings began is used once asked.
+        if let Some(k) = &self.sel
+            && params.from.is_some()
+            && self.unseen_from.get(k) == params.from.as_ref()
+        {
+            self.unseen_from.remove(k);
+        }
         let title = match &params.target {
             SummaryTarget::Run { id } => self
                 .run_by_id(id)
@@ -3490,7 +3530,7 @@ impl App {
                 }
                 return Ok(());
             }
-            Mode::SummaryCost(_) => {
+            Mode::SummaryCost { .. } => {
                 if let Some(p) = self.summary_ask.take()
                     && k.code == KeyCode::Char('y')
                 {
@@ -5217,7 +5257,8 @@ impl App {
             Some(Row::Question(q)) => {
                 let asker = q.run.as_deref().and_then(|id| self.run_by_id(id));
                 let at = matches!(&self.mode, Mode::Answer(id) if *id == q.id).then_some(self.answer_at);
-                let p = pane::question_lines(q, asker, &self.picked, at, area.width as usize, now);
+                let said = self.summary_of_row(&Row::Question(q));
+                let p = pane::question_lines(q, asker, said, &self.picked, at, area.width as usize, now);
                 // Laid out to the width already, so row for row with the map.
                 *self.pane_hit.borrow_mut() = PaneHit {
                     area,
@@ -5282,19 +5323,15 @@ impl App {
                 return format!("dismiss {t}? y / any key");
             }
             Mode::Fire(n) => return format!("run {} now? y / any key", n.name),
-            Mode::SummaryCost(calls) => {
-                let calls = *calls;
+            Mode::SummaryCost { runs, calls } => {
+                let (runs, calls) = (*runs, *calls);
                 return match self.summary_ask.as_ref().map(|p| &p.target) {
                     Some(SummaryTarget::Run { id }) => {
-                        format!(
-                            "deep read of {} in parts · up to {calls} calls · y / any key",
-                            title_of(id)
-                        )
+                        format!("deep read of {} in parts · {calls} calls · y / any key", title_of(id))
                     }
                     _ => {
-                        let runs = calls - 1;
                         let s = if runs == 1 { "" } else { "s" };
-                        format!("deep over {runs} run{s} · up to {calls} calls · y / any key")
+                        format!("deep over {runs} run{s} · {calls} calls · y / any key")
                     }
                 };
             }
@@ -6093,7 +6130,7 @@ mod tests {
         std::path::PathBuf,
     ) {
         use rl_ledger::events::{self, NewEvent};
-        use rl_ledger::{Ledger, runs, workspaces};
+        use rl_ledger::{Ledger, runs, session_io, workspaces};
         use rl_proto::types::{Run, RunKind, RunState, Source, event_kind};
         let tmp = tempfile::tempdir().unwrap();
         let home = rl_core::Home::at(tmp.path().join("h"));
@@ -6135,6 +6172,9 @@ mod tests {
                         runs::insert(c, run)?;
                         // The list shows what has news since it last looked.
                         events::append(c, &NewEvent::for_run(run, now, event_kind::RUN_STARTED, "started"))?;
+                        // Each said something, so a deep read of it asks.
+                        let said = format!("{} said this\r\n", run.title);
+                        session_io::append(c, &run.id, session_io::Direction::Out, said.as_bytes(), now)?;
                         runs::finish(c, &run.id, RunState::Finished, Source::Pty, Some(0), now)?;
                     }
                     Ok(())
@@ -6452,11 +6492,11 @@ mod tests {
         type_in(&mut app, "/summary deep").await;
         press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
         assert!(
-            matches!(app.mode, super::Mode::SummaryCost(4)),
+            matches!(app.mode, super::Mode::SummaryCost { runs: 3, calls: 4 }),
             "three deep reads and one to join"
         );
         assert!(
-            app.footer(120).starts_with("deep over 3 runs · up to 4 calls · y"),
+            app.footer(120).starts_with("deep over 3 runs · 4 calls · y"),
             "{}",
             app.footer(120)
         );
@@ -6477,7 +6517,7 @@ mod tests {
         app.away_since = Some(away);
         type_in(&mut app, "/summary deep").await;
         press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
-        assert!(matches!(app.mode, super::Mode::SummaryCost(4)));
+        assert!(matches!(app.mode, super::Mode::SummaryCost { calls: 4, .. }));
         press(&mut app, KeyCode::Char('y'), KeyModifiers::NONE).await;
         assert!(matches!(app.mode, super::Mode::Normal));
         let s = app.summarising.as_ref().expect("y asks");
@@ -6487,12 +6527,147 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_deep_read_says_what_it_costs() {
+        let (tmp, token, mut app, _folder) = panel().await;
+        // One run, long enough to be read in three parts and joined.
+        let ledger = rl_ledger::Ledger::open(&rl_core::Home::at(tmp.path().join("h")).ledger()).unwrap();
+        ledger
+            .call_blocking(|c| {
+                let long = "a line of output to fill the journal\r\n".repeat(3_200);
+                rl_ledger::session_io::append(
+                    c,
+                    "run00001",
+                    rl_ledger::session_io::Direction::Out,
+                    long.as_bytes(),
+                    jiff::Timestamp::now(),
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        select_header(&mut app);
+        type_in(&mut app, "/summary deep").await;
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+        assert!(
+            app.footer(120).starts_with("deep over 1 run · 5 calls · y"),
+            "three parts, their join, and one over the runs: {}",
+            app.footer(120)
+        );
+        press(&mut app, KeyCode::Esc, KeyModifiers::NONE).await;
+        app.select(Some(RUN.into()));
+        type_in(&mut app, "/summary deep").await;
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+        assert!(
+            app.footer(120)
+                .starts_with("deep read of make test in parts · 4 calls · y"),
+            "{}",
+            app.footer(120)
+        );
+        token.cancel();
+    }
+
+    #[tokio::test]
+    async fn a_jobs_summary_starts_at_the_firing_you_had_not_seen() {
+        use rl_proto::types::{Cause, Run, RunKind};
+        let (_tmp, token, mut app, _folder) = panel_of(|folder, now| {
+            let firing = |id: &str, hours| {
+                let at = now - jiff::SignedDuration::from_hours(hours);
+                let mut r = Run::new(id, RunKind::Command, "tidy", vec!["true".into()], folder, folder, at);
+                r.cause = Cause::Schedule("tidy".into());
+                r
+            };
+            vec![firing("run00002", 2), firing("run00003", 1)]
+        })
+        .await;
+        let oldest = app.run_by_id("run00002").unwrap().started_at;
+        let key = app.rows().iter().find_map(|r| match r {
+            super::Row::Job(j) if j.name == "tidy" => Some(j.key.clone()),
+            _ => None,
+        });
+        // The cursor lands on it: that is looking, and its firings are seen.
+        app.select(key);
+        app.moved().await;
+        assert!(app.selected_job().is_some_and(|j| !j.unseen()));
+        type_in(&mut app, "/summary").await;
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+        let s = app.summarising.as_ref().expect("asked");
+        assert!(matches!(s.target, SummaryTarget::Job { .. }), "{:?}", s.target);
+        assert_eq!(
+            s.from,
+            Some(oldest),
+            "since the firing you had not seen, not the last day"
+        );
+        assert!(app.unseen_from.is_empty(), "used once asked");
+        token.cancel();
+    }
+
+    #[tokio::test]
+    async fn a_questions_pane_shows_what_was_said_of_its_asker() {
+        use rl_proto::decision::{Decision, DecisionOption, DecisionStatus};
+        let (tmp, token, mut app, folder) = panel().await;
+        let now = jiff::Timestamp::now();
+        let asked = Decision {
+            id: "dec00001".into(),
+            workspace: folder.clone(),
+            run: Some("run00001".into()),
+            flow: "f".into(),
+            group: None,
+            title: "ship it?".into(),
+            summary: None,
+            options: vec![DecisionOption {
+                key: "ok".into(),
+                ..Default::default()
+            }],
+            multi: false,
+            status: DecisionStatus::Open,
+            created_at: now,
+            updated_at: now,
+            expires_at: None,
+            resolved_at: None,
+            chosen: vec![],
+            outcome_runs: vec![],
+            note: None,
+        };
+        let recap = rl_proto::types::Summary {
+            run: "run00001".into(),
+            agent: "fakeai".into(),
+            by: "a1".into(),
+            at: now,
+            text: "Two tests failed.".into(),
+            since: None,
+            source: "summarised".into(),
+            reach: String::new(),
+            stale: false,
+            target: String::new(),
+            deep: false,
+            from: None,
+            calls: 1,
+            runs: 1,
+        };
+        let ledger = rl_ledger::Ledger::open(&rl_core::Home::at(tmp.path().join("h")).ledger()).unwrap();
+        ledger
+            .call_blocking(move |c| {
+                rl_ledger::decisions::insert(c, &asked)?;
+                rl_ledger::summaries::put(c, &recap)
+            })
+            .unwrap();
+        app.refresh().await;
+        app.select(Some("q:dec00001".into()));
+        app.moved().await;
+        let mut t = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 40)).unwrap();
+        t.draw(|f| app.draw(f)).unwrap();
+        let buf = t.backend().buffer().clone();
+        assert!(buf_has(&buf, "ship it?"));
+        assert!(buf_has(&buf, "Two tests failed."), "under the asker");
+        token.cancel();
+    }
+
+    #[tokio::test]
     async fn again_asks_for_a_new_one() {
         let (_tmp, token, mut app, _folder) = panel_with_runs(3).await;
         select_header(&mut app);
         type_in(&mut app, "/summary deep again").await;
         press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
-        assert!(matches!(app.mode, super::Mode::SummaryCost(4)));
+        assert!(matches!(app.mode, super::Mode::SummaryCost { calls: 4, .. }));
         let p = app.summary_ask.as_ref().unwrap();
         assert!(p.deep && p.again && !p.dry, "{p:?}");
         press(&mut app, KeyCode::Esc, KeyModifiers::NONE).await;
@@ -6590,6 +6765,7 @@ mod tests {
             deep: false,
             from: Some(away),
             calls: 1,
+            runs: 1,
         };
         let ledger = rl_ledger::Ledger::open(&rl_core::Home::at(tmp.path().join("h")).ledger()).unwrap();
         ledger.call_blocking(move |c| rl_ledger::kept::put(c, &kept)).unwrap();
@@ -6601,7 +6777,10 @@ mod tests {
         t.draw(|f| app.draw(f)).unwrap();
         let buf = t.backend().buffer().clone();
         assert!(buf_has(&buf, "- make test passed"));
-        assert!(buf_has(&buf, "by fakeai · since "));
+        // What it is of first; the folder is long here, so the rest wraps
+        // where it may.
+        assert!(buf_has(&buf, " summary  of the project "));
+        assert!(buf_has(&buf, "fakeai") && buf_has(&buf, "since "));
         token.cancel();
     }
 

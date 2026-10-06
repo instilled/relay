@@ -137,6 +137,7 @@ async fn claudes_recap_is_kept_as_it_writes_it() {
             deep: false,
             from: None,
             calls: 0,
+            runs: 1,
         };
         ledger.call_blocking(move |c| summaries::put(c, &asked)).unwrap();
     }
@@ -158,6 +159,9 @@ async fn claudes_recap_is_kept_as_it_writes_it() {
         )
         .await;
     wait_recap(&mut c, &run.id, "Committed; the PR is open.").await;
+    // Newer by the clock the ledger keeps, in milliseconds: one written in
+    // the same one is not newer, and is not kept.
+    tokio::time::sleep(Duration::from_millis(2)).await;
     append(&transcript, &away(Timestamp::now(), "Merged.\nNothing left."));
     wait_recap(&mut c, &run.id, "Merged.\nNothing left.").await;
     let d: Digest = c.ok("digest.get", json!({})).await;

@@ -129,6 +129,7 @@ pub fn get(conn: &Connection, run: &str) -> Result<Option<Summary>> {
             deep: false,
             from: None,
             calls: 0,
+            runs: 1,
         })),
         None => Ok(None),
     }
@@ -204,6 +205,7 @@ mod tests {
             deep: false,
             from: None,
             calls: 0,
+            runs: 1,
         };
         put(&c, &s).unwrap();
         assert_eq!(get(&c, "r1").unwrap().unwrap(), s);
@@ -255,6 +257,7 @@ mod tests {
             deep: false,
             from: None,
             calls: 0,
+            runs: 1,
         }
     }
 
