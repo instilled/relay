@@ -1239,15 +1239,21 @@ async fn resume(home: &Home, a: ResumeArgs, json: bool) -> Result<()> {
 async fn since(home: &Home, a: SinceArgs, json: bool) -> Result<()> {
     let n = now();
     let mut c = daemon::ensure(home, !json).await?;
-    let boundary = match a.since.as_deref() {
-        Some(s) => parse_since(s, n)?,
+    // Bare, it counts from when you last looked — and only then is the top
+    // written by itself, as you come back.
+    let (boundary, came_back) = match a.since.as_deref() {
+        Some(s) => (parse_since(s, n)?, false),
         None => {
             // Looking now; the boundary is the last time we did.
             let me = rl_cli::attach::client_name();
-            c.call::<PresenceTouch>(PresenceClient { client: me })
+            match c
+                .call::<PresenceTouch>(PresenceClient { client: me })
                 .await?
                 .last_seen_at
-                .unwrap_or(n - jiff::SignedDuration::from_hours(24))
+            {
+                Some(last) => (last, true),
+                None => (n - jiff::SignedDuration::from_hours(24), false),
+            }
         }
     };
     let d = c.call::<DigestGet>(DigestParams { since: Some(boundary) }).await?;
@@ -1263,55 +1269,36 @@ async fn since(home: &Home, a: SinceArgs, json: bool) -> Result<()> {
         .await
         .unwrap_or_default();
     let cu = rl_cli::catchup::CatchUp::of(&d, workspaces.into_iter().map(|w| (w.path, w.name)), &rules, n);
-    let top = since_top(&mut c, &cu, boundary).await;
+    let top = since_top(&mut c, &cu, boundary, came_back).await;
     print!("{}", rl_cli::catchup::text(&cu, &top, n));
     Ok(())
 }
 
-/// The top `rl since` prints: the summary of everything from `from` kept
-/// while it is up to date; else, when `catch_up.summary` is `auto` and
-/// there is an assistant to ask, a new one, waited for; else the one kept,
-/// moved on or not — or, with none, or the assistant failing, the counts.
-async fn since_top(c: &mut Client, cu: &rl_cli::catchup::CatchUp<'_>, from: jiff::Timestamp) -> Vec<String> {
-    use rl_cli::catchup::{top_worthy, written};
-    // No run in it: nothing to ask anyone about.
-    if !cu.has_runs() {
-        return cu.counted();
-    }
-    let ask = SummaryParams {
-        target: SummaryTarget::All,
-        deep: false,
-        from: Some(from),
-        again: false,
-        dry: false,
-        timeout: None,
-    };
-    let kept = c
-        .call::<SummaryGet>(ask.clone())
-        .await
-        .ok()
-        .flatten()
-        .filter(top_worthy);
-    if let Some(k) = kept.as_ref().filter(|k| !k.stale) {
-        return written(k);
-    }
-    let auto = c
-        .call::<ConfigGet>(())
-        .await
-        .is_ok_and(|r| r.config.catch_up.auto_summary() && r.summary.is_some_and(|a| a.available));
-    let made = if auto {
-        eprintln!("writing the top…");
-        match c.call::<SummaryMake>(ask).await {
-            Ok(s) => Some(s).filter(top_worthy),
-            Err(e) => {
-                eprintln!("the top: {e:#}");
-                None
+/// The top `rl since` prints, as `plan_top` says: the one shown, or one
+/// asked for and waited on, or — with neither, or the assistant failing —
+/// the counts.
+async fn since_top(
+    c: &mut Client,
+    cu: &rl_cli::catchup::CatchUp<'_>,
+    from: jiff::Timestamp,
+    came_back: bool,
+) -> Vec<String> {
+    use rl_cli::catchup::{plan_top, top_worthy, written};
+    let plan = plan_top(c, from, cu.has_runs(), came_back, now()).await;
+    let top = match plan.ask {
+        Some(ask) => {
+            eprintln!("writing the top…");
+            match c.call::<SummaryMake>(ask).await {
+                Ok(s) => Some(s).filter(top_worthy),
+                Err(e) => {
+                    eprintln!("the top: {e:#}");
+                    None
+                }
             }
         }
-    } else {
-        kept
+        None => plan.shown,
     };
-    match made {
+    match top {
         Some(s) => written(&s),
         None => cu.counted(),
     }

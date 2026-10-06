@@ -1048,7 +1048,7 @@ pub async fn run(home: &Home) -> Result<()> {
         }
     }
     if !guided && let Some(since) = away(prev, Timestamp::now(), after) {
-        app.open_catch_up(since).await;
+        app.open_catch_up(since, true).await;
     }
     let result = app.main_loop(&mut terminal).await;
     leave_screen();
@@ -2532,8 +2532,10 @@ impl App {
     /// What happened since `since`, in the list's place until you leave it:
     /// `esc` goes to the list, `enter` to the row there. It reads a digest of
     /// its own, counted from `since`; the list's stays as it is. `since` is
-    /// also where a project's or everything's `/summary` starts.
-    async fn open_catch_up(&mut self, since: Timestamp) {
+    /// also where a project's or everything's `/summary` starts. `came_back`:
+    /// it opened by itself, since you were away — only then may its top be
+    /// written by itself.
+    async fn open_catch_up(&mut self, since: Timestamp, came_back: bool) {
         let d = match self.rpc.call::<DigestGet>(DigestParams { since: Some(since) }).await {
             Ok(d) => d,
             Err(e) => return self.say(format!("daemon: {e:#}")),
@@ -2545,7 +2547,7 @@ impl App {
         }
         self.away_since = Some(since);
         self.catch = Some(d);
-        self.write_top(since).await;
+        self.write_top(since, came_back).await;
         self.open_view(View::CatchUp);
         self.close_term();
         self.picked.clear();
@@ -2557,11 +2559,17 @@ impl App {
     /// The catch-up as it stands, built on the list's own rows and narrowed
     /// by the search, as the list is.
     fn catch_up(&self) -> Option<crate::catchup::CatchUp<'_>> {
+        self.catch_up_by(&self.filter)
+    }
+
+    /// The catch-up as `filter` narrows it; the top is told from all of it
+    /// (`""`), whatever the search.
+    fn catch_up_by(&self, filter: &str) -> Option<crate::catchup::CatchUp<'_>> {
         let d = self.catch.as_ref()?;
         let cx = rows::Context {
             names: &self.names,
             rules: &self.rules,
-            filter: &self.filter,
+            filter,
             lens: rows::Lens::All,
             now: Timestamp::now(),
         };
@@ -3720,43 +3728,17 @@ impl App {
         self.refresh().await;
     }
 
-    /// The catch-up's top for its stretch from `since`: the one kept when it
-    /// is up to date; else, when `catch_up.summary` is `auto` and there is
-    /// an assistant to ask, one asked for — the counted bullets stand until
-    /// it lands; else the one kept, moved on or not, or the bullets.
-    async fn write_top(&mut self, since: Timestamp) {
+    /// The catch-up's top for its stretch from `since`, as `plan_top` says:
+    /// the one shown, if any (else the counts), and one asked for on a task
+    /// of its own when it is to be written — the counts stand until it lands.
+    async fn write_top(&mut self, since: Timestamp, came_back: bool) {
         if let Some(t) = self.topping.take() {
             t.task.abort();
         }
-        self.top = None;
-        let params = SummaryParams {
-            target: SummaryTarget::All,
-            deep: false,
-            from: Some(since),
-            again: false,
-            dry: false,
-            timeout: None,
-        };
-        let kept = self
-            .rpc
-            .call::<SummaryGet>(params.clone())
-            .await
-            .ok()
-            .flatten()
-            .filter(crate::catchup::top_worthy);
-        if kept.as_ref().is_some_and(|k| !k.stale) {
-            self.top = kept;
-            return;
-        }
-        let auto = match self.rpc.call::<rl_proto::methods::ConfigGet>(()).await {
-            Ok(c) => c.config.catch_up.auto_summary() && c.summary.is_some_and(|a| a.available),
-            Err(_) => false,
-        };
-        // No run in it: nothing to ask anyone about.
-        if !auto || !self.catch_up().is_some_and(|cu| cu.has_runs()) {
-            self.top = kept;
-            return;
-        }
+        let has_runs = self.catch_up_by("").is_some_and(|cu| cu.has_runs());
+        let plan = crate::catchup::plan_top(&mut self.rpc, since, has_runs, came_back, Timestamp::now()).await;
+        self.top = plan.shown;
+        let Some(params) = plan.ask else { return };
         let home = self.home.clone();
         let task = tokio::spawn(async move {
             let mut rpc = Client::connect(&home).await?;
@@ -3811,7 +3793,7 @@ impl App {
                 Err(e) => return self.say(format!("{e:#}")),
             },
         };
-        self.open_catch_up(since).await;
+        self.open_catch_up(since, false).await;
     }
 
     // ---- keys --------------------------------------------------------------
@@ -5486,14 +5468,15 @@ impl App {
     fn draw_catch_up(&self, f: &mut Frame, area: Rect) {
         self.list_h.set(area.height);
         *self.hit.borrow_mut() = ListHit::default();
-        let Some(cu) = self.catch_up() else {
+        let (Some(cu), Some(whole)) = (self.catch_up(), self.catch_up_by("")) else {
             f.render_widget(Paragraph::new(" reading what happened…").dim(), area);
             return;
         };
         let w = area.width as usize;
+        // The top is of all of it; the rows below follow the search.
         let mut top = match &self.top {
             Some(s) => catchup::written(s, w),
-            None => catchup::top(&cu, w),
+            None => catchup::top(&whole, w),
         };
         if self.topping.is_some() && self.top.is_none() {
             let words = "writing the top…";
@@ -6555,6 +6538,8 @@ mod tests {
     struct Setup {
         /// More of `config.yaml`, after `assistants: summary: fakeai`.
         config: &'static str,
+        /// `assistants.summary` left out: the first agent here would answer.
+        unnamed: bool,
         /// What `fakeai` answers; None, the fixture's own draft.
         answer: Option<&'static str>,
         /// `rl-session`, so an assistant's run really runs; without it the
@@ -6592,8 +6577,9 @@ mod tests {
         Some(panel_set(setup, |_, _| vec![]).await)
     }
 
-    /// `panel()` with more of the config: `fakeai` is the summariser, but no
-    /// assistant's run can start.
+    /// `panel()` with more of the config: `fakeai` is the summariser, run by
+    /// whatever `rl-session` the daemon finds (none, as a rule, so it fails
+    /// to start) — what is asserted is what was asked, not the answer.
     async fn panel_with_config(
         config: &'static str,
     ) -> (
@@ -6653,7 +6639,11 @@ mod tests {
         std::fs::write(home.detect_dir().join("fakeai.yaml"), profile).unwrap();
         std::fs::write(
             home.config_file(),
-            format!("assistants:\n  summary: fakeai\n{}", set.config),
+            if set.unnamed {
+                set.config.to_string()
+            } else {
+                format!("assistants:\n  summary: fakeai\n{}", set.config)
+            },
         )
         .unwrap();
         let folder = std::fs::canonicalize(tmp.path()).unwrap().join("proj");
@@ -7335,7 +7325,7 @@ mod tests {
         let (_tmp, token, mut app, _folder) = panel().await;
         assert!(app.digest.items.iter().any(|i| i.unseen), "news before it is looked at");
         let since = Timestamp::now() - SignedDuration::from_hours(9);
-        app.open_catch_up(since).await;
+        app.open_catch_up(since, true).await;
         assert!(app.view == super::View::CatchUp);
         assert_eq!(app.away_since, Some(since), "a project's /summary starts there");
         let frame = draw_text(&mut app);
@@ -7355,7 +7345,7 @@ mod tests {
     async fn enter_in_the_catch_up_goes_to_the_row_on_the_list() {
         use jiff::{SignedDuration, Timestamp};
         let (_tmp, token, mut app, _folder) = panel().await;
-        app.open_catch_up(Timestamp::now() - SignedDuration::from_hours(9))
+        app.open_catch_up(Timestamp::now() - SignedDuration::from_hours(9), true)
             .await;
         press(&mut app, KeyCode::Down, KeyModifiers::NONE).await;
         assert_eq!(app.sel.as_deref(), Some(RUN), "under the project's line");
@@ -7415,7 +7405,7 @@ mod tests {
         let (tmp, token, mut app, folder) = panel().await;
         ask_in(&tmp, &folder);
         app.refresh().await;
-        app.open_catch_up(nine_hours_ago()).await;
+        app.open_catch_up(nine_hours_ago(), true).await;
         assert!(draw_text(&mut app).contains("ship it?"));
         press(&mut app, KeyCode::Down, KeyModifiers::NONE).await;
         assert_eq!(
@@ -7436,7 +7426,7 @@ mod tests {
         let (tmp, token, mut app, folder) = panel().await;
         ask_in(&tmp, &folder);
         app.refresh().await;
-        app.open_catch_up(nine_hours_ago()).await;
+        app.open_catch_up(nine_hours_ago(), true).await;
         assert!(!app.show_pane, "on the project's line");
         press(&mut app, KeyCode::Down, KeyModifiers::NONE).await;
         assert_eq!(app.sel.as_deref(), Some("q:dec00001"));
@@ -7462,7 +7452,7 @@ mod tests {
             vec![r]
         })
         .await;
-        app.open_catch_up(nine_hours_ago()).await;
+        app.open_catch_up(nine_hours_ago(), true).await;
         // Its rule is there: the list is still where enter goes, and `^g`
         // from there is the graph.
         app.rules
@@ -7508,7 +7498,7 @@ mod tests {
     #[tokio::test]
     async fn leaving_the_catch_up_any_way_marks_what_it_showed() {
         let (_tmp, token, mut app, _folder) = panel_with_runs(2).await;
-        app.open_catch_up(nine_hours_ago()).await;
+        app.open_catch_up(nine_hours_ago(), true).await;
         assert!(unseen(&app, "run00001"));
         app.attach_to("run00002".into(), AREA).await;
         assert!(app.view == super::View::Work);
@@ -7528,7 +7518,7 @@ mod tests {
     #[tokio::test]
     async fn closing_the_panel_on_the_catch_up_marks_what_it_showed() {
         let (_tmp, token, mut app, _folder) = panel().await;
-        app.open_catch_up(nine_hours_ago()).await;
+        app.open_catch_up(nine_hours_ago(), true).await;
         app.saw_catch_up().await;
         assert!(!unseen(&app, "run00001"));
         token.cancel();
@@ -7545,7 +7535,7 @@ mod tests {
     #[tokio::test]
     async fn a_search_narrows_the_catch_up_and_only_what_it_shows_is_seen() {
         let (_tmp, token, mut app, _folder) = panel_with_runs(2).await;
-        app.open_catch_up(nine_hours_ago()).await;
+        app.open_catch_up(nine_hours_ago(), true).await;
         app.filter = "echo".into();
         app.settle();
         let keys = app.keys();
@@ -7582,7 +7572,7 @@ mod tests {
             return;
         };
         let since = nine_hours_ago();
-        app.open_catch_up(since).await;
+        app.open_catch_up(since, true).await;
         assert!(app.topping.is_some(), "auto: the top is being written");
         let frame = draw_text(&mut app);
         assert!(frame.contains("• api: 1 ran"), "counted bullets first: {frame}");
@@ -7592,11 +7582,16 @@ mod tests {
         assert!(frame.contains("• api: one run, fine"), "{frame}");
         assert!(frame.contains("by fakeai · from 1 run"), "{frame}");
         assert!(!frame.contains("• api: 1 ran"), "the bullets gave way: {frame}");
-        // Kept: the same stretch again asks no one.
+        // Kept: the same stretch again asks no one — and shows it when the
+        // stretch is asked for, too.
         app.back_to_list().await;
-        app.open_catch_up(since).await;
+        app.open_catch_up(since, true).await;
         assert!(app.topping.is_none(), "the one kept is given back");
         assert!(draw_text(&mut app).contains("one run, fine"));
+        app.back_to_list().await;
+        app.open_catch_up(since, false).await;
+        assert!(app.topping.is_none());
+        assert!(draw_text(&mut app).contains("one run, fine"), "kept for that stretch");
         token.cancel();
     }
 
@@ -7605,7 +7600,7 @@ mod tests {
         let Some((_tmp, token, mut app, _folder)) = panel_with_fake_summariser("").await else {
             return;
         };
-        app.open_catch_up(nine_hours_ago()).await;
+        app.open_catch_up(nine_hours_ago(), true).await;
         wait_topped(&mut app).await;
         let said = app.flash.as_ref().map(|(m, _)| m.clone()).unwrap_or_default();
         assert!(said.contains("said nothing"), "{said}");
@@ -7616,7 +7611,7 @@ mod tests {
     #[tokio::test]
     async fn ask_means_no_call_on_open() {
         let (_tmp, token, mut app, _folder) = panel_with_config("catch_up:\n  summary: ask\n").await;
-        app.open_catch_up(nine_hours_ago()).await;
+        app.open_catch_up(nine_hours_ago(), true).await;
         assert!(app.topping.is_none());
         assert!(app.summarising.is_none());
         let frame = draw_text(&mut app);
@@ -7628,9 +7623,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_first_agent_here_never_writes_the_top_by_itself() {
+        let setup = Setup {
+            unnamed: true,
+            ..Default::default()
+        };
+        let (_tmp, token, mut app, _folder) = panel_set(setup, |_, _| vec![]).await;
+        app.open_catch_up(nine_hours_ago(), true).await;
+        assert!(app.topping.is_none(), "no assistant named for summaries: no call");
+        let frame = draw_text(&mut app);
+        assert!(
+            frame.contains("• api: 1 ran") && !frame.contains("writing the top"),
+            "{frame}"
+        );
+        token.cancel();
+    }
+
+    #[tokio::test]
+    async fn the_top_is_counted_from_everything_whatever_the_search() {
+        let (_tmp, token, mut app, _folder) = panel_with_runs(2).await;
+        app.filter = "echo".into();
+        app.open_catch_up(nine_hours_ago(), true).await;
+        let frame = draw_text(&mut app);
+        assert!(frame.contains("• api: 2 ran"), "{frame}");
+        assert!(!frame.contains("make test"), "the rows are narrowed: {frame}");
+        token.cancel();
+    }
+
+    #[tokio::test]
     async fn a_rows_summary_goes_ahead_while_the_top_is_written() {
         let (_tmp, token, mut app, _folder) = panel_with_config("").await;
-        app.open_catch_up(nine_hours_ago()).await;
+        app.open_catch_up(nine_hours_ago(), true).await;
         assert!(app.topping.is_some());
         press(&mut app, KeyCode::Down, KeyModifiers::NONE).await;
         assert_eq!(app.sel.as_deref(), Some(RUN));
@@ -7646,7 +7669,7 @@ mod tests {
     async fn summary_on_the_top_is_of_everything_since_the_catch_up_began() {
         let (_tmp, token, mut app, _folder) = panel_with_config("catch_up:\n  summary: ask\n").await;
         let since = nine_hours_ago();
-        app.open_catch_up(since).await;
+        app.open_catch_up(since, true).await;
         assert_ne!(app.sel.as_deref(), Some(super::TOP), "the cursor starts on the rows");
         press(&mut app, KeyCode::Up, KeyModifiers::NONE).await;
         assert_eq!(app.sel.as_deref(), Some(super::TOP), "up from the first row is the top");
@@ -7663,7 +7686,7 @@ mod tests {
     #[tokio::test]
     async fn summary_on_the_top_waits_while_it_is_written() {
         let (_tmp, token, mut app, _folder) = panel_with_config("").await;
-        app.open_catch_up(nine_hours_ago()).await;
+        app.open_catch_up(nine_hours_ago(), true).await;
         app.select(Some(super::TOP.into()));
         type_in(&mut app, "/summary").await;
         press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
@@ -7675,13 +7698,17 @@ mod tests {
 
     #[tokio::test]
     async fn since_opens_the_catch_up_from_anywhere() {
-        let (_tmp, token, mut app, _folder) = panel_with_config("catch_up:\n  summary: ask\n").await;
+        let (_tmp, token, mut app, _folder) = panel_with_config("").await;
         let before = jiff::Timestamp::now();
-        type_in(&mut app, "/since 1h").await;
+        // Longer than `catch_up.after`, but asked for: counted, and
+        // `/summary` on the top writes it.
+        type_in(&mut app, "/since 2d").await;
         press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
         assert!(app.view == super::View::CatchUp);
+        assert!(app.topping.is_none(), "a stretch asked for is counted");
+        assert!(draw_text(&mut app).contains("• api: 1 ran"));
         let since = app.catch.as_ref().unwrap().since;
-        let hour = jiff::SignedDuration::from_hours(1);
+        let hour = jiff::SignedDuration::from_hours(48);
         assert!(
             since >= before - hour && since <= jiff::Timestamp::now() - hour,
             "{since}"

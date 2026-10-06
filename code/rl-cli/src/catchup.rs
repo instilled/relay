@@ -9,13 +9,14 @@
 //! in the stretch is counted as ran or failed — they are the top without an
 //! assistant; in a line each, what an assistant is handed to write it.
 
+use crate::client::Client;
 use crate::digest::since_items;
 use crate::tui::rows::{self, Context, Head, Lens, Row};
 use jiff::Timestamp;
 use rl_core::time::{fmt_age, fmt_duration, fmt_when};
-use rl_proto::methods::{Digest, DigestItem};
+use rl_proto::methods::{ConfigGet, ConfigReport, Digest, DigestItem, SummaryGet, SummaryParams};
 use rl_proto::rule::Rule;
-use rl_proto::types::{Cause, Run, RunState, Summary};
+use rl_proto::types::{Cause, Run, RunState, Summary, SummaryTarget};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
@@ -307,6 +308,67 @@ pub fn headline(since: Timestamp, now: Timestamp) -> String {
 /// nothing ran cannot — the counts say so, and what waits on you too.
 pub fn top_worthy(s: &Summary) -> bool {
     s.source != "nothing new"
+}
+
+/// How the catch-up's top starts: the summary it shows (none: the counts),
+/// and, when one is to be written, what to ask `summary.make`.
+pub struct TopPlan {
+    pub shown: Option<Summary>,
+    pub ask: Option<SummaryParams>,
+}
+
+/// The top of a catch-up from `since`, for the panel and `rl since` alike:
+/// the summary of everything kept for that stretch while it is up to date;
+/// else, when it writes itself (`auto_top`) and there are runs to tell, one to
+/// ask for — the counts stand until it lands; else the one kept, moved on or
+/// not, or the counts. `came_back`: the stretch begins where presence says
+/// you left (the panel opening on it by itself, a bare `rl since`), not
+/// where you asked.
+pub async fn plan_top(rpc: &mut Client, since: Timestamp, has_runs: bool, came_back: bool, now: Timestamp) -> TopPlan {
+    let ask = SummaryParams {
+        target: SummaryTarget::All,
+        deep: false,
+        from: Some(since),
+        again: false,
+        dry: false,
+        timeout: None,
+    };
+    let kept = rpc
+        .call::<SummaryGet>(ask.clone())
+        .await
+        .ok()
+        .flatten()
+        .filter(top_worthy);
+    if kept.as_ref().is_some_and(|k| !k.stale) {
+        return TopPlan { shown: kept, ask: None };
+    }
+    let writes = has_runs
+        && came_back
+        && rpc
+            .call::<ConfigGet>(())
+            .await
+            .is_ok_and(|r| auto_top(&r, since, came_back, now));
+    match writes {
+        true => TopPlan {
+            shown: None,
+            ask: Some(ask),
+        },
+        false => TopPlan { shown: kept, ask: None },
+    }
+}
+
+/// Whether the top writes itself: only as you come back (`came_back`) after
+/// longer away than `catch_up.after`, with `catch_up.summary: auto`, and by
+/// the assistant you named for summaries (`assistants.summary`, as setup
+/// writes it) — the first agent that happens to be here is asked only when
+/// you ask, with `/summary`.
+pub fn auto_top(r: &ConfigReport, since: Timestamp, came_back: bool, now: Timestamp) -> bool {
+    let away = came_back
+        && r.config
+            .catch_up
+            .after()
+            .is_some_and(|after| now.duration_since(since) > after);
+    away && r.config.catch_up.auto_summary() && r.summary.as_ref().is_some_and(|a| a.available && a.source == "config")
 }
 
 /// The top as the assistant wrote it, a line each, and last who wrote it and
@@ -803,5 +865,49 @@ mod tests {
         s.deep = true;
         s.stale = true;
         assert_eq!(top_label(&s), "deep · by haiku · from 1 run · moved on since");
+    }
+
+    #[test]
+    fn the_top_writes_itself_only_as_you_come_back_and_by_the_assistant_you_named() {
+        use rl_proto::methods::{ConfigReport, ResolvedAssistant};
+        let report = |source: &str, summary: Option<&str>, after: Option<&str>| {
+            let mut config = rl_proto::config::Config::default();
+            config.catch_up.summary = summary.map(String::from);
+            config.catch_up.after = after.map(String::from);
+            ConfigReport {
+                file: PathBuf::from("/h/config.yaml"),
+                present: true,
+                config,
+                interpret: None,
+                summary: Some(ResolvedAssistant {
+                    agent: "haiku".into(),
+                    source: source.into(),
+                    argv: vec![],
+                    available: true,
+                }),
+                catch_up_after: String::new(),
+                catch_up_summary: String::new(),
+                errors: vec![],
+            }
+        };
+        let now = now();
+        let two_days = now - jiff::SignedDuration::from_hours(48);
+        let hour = now - jiff::SignedDuration::from_hours(1);
+        let named = report("config", None, None);
+        assert!(auto_top(&named, two_days, true, now), "away, auto, named");
+        assert!(
+            !auto_top(&named, two_days, false, now),
+            "a stretch asked for is not coming back"
+        );
+        assert!(!auto_top(&named, hour, true, now), "not away longer than `after`");
+        assert!(
+            !auto_top(&report("default", None, None), two_days, true, now),
+            "the first agent here is never asked by itself"
+        );
+        assert!(!auto_top(&report("config", Some("ask"), None), two_days, true, now));
+        assert!(!auto_top(&report("config", None, Some("off")), two_days, true, now));
+        let mut gone = report("config", None, None);
+        gone.summary.as_mut().unwrap().available = false;
+        assert!(!auto_top(&gone, two_days, true, now), "not on this machine");
     }
 }

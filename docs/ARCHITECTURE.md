@@ -493,8 +493,8 @@ since` once what it is of has gone on. The pane fetches the one kept (`summary.g
 stretch and depth last made of that row while the panel is open, else its default. Asked over a
 terminal being watched, the pane turns to the details, where the summary is; the terminal stays
 open, and `enter` on the run is back in it. An assistant is only ever asked when you ask — and
-for the catch-up's top as you come back, when `catch_up.summary` is `auto` (below); Claude's and
-Codex's own recaps are there already, kept as they write them (§6).
+for the catch-up's top as you come back, by the assistant you named, when `catch_up.summary` is
+`auto` (below); Claude's and Codex's own recaps are there already, kept as they write them (§6).
 
 **Typing is what the panel rests in.** One line sits at the foot and always takes what you type
 (`tui/line.rs`), so there is nothing to open and nothing to close. What a finished line means is
@@ -689,27 +689,33 @@ leaving it, any way, marks seen all it showed (`saw_catch_up`), and notes each j
 firing not seen so its `/summary` still starts there.
 
 **The top.** Until it is written it is counted: a bullet for what needs you and one per project
-that did something (`CatchUp::bullets`: `2 need you: api` · `api: 3 ran · 1 failed`). With
-`catch_up.summary: auto` (the default) and an assistant to ask (`assistants.summary` resolves to
-an agent that is here), the panel asks as it opens: `summary.get {target: all, from: since}`
-first — the one kept is given back while nothing has moved on — else `summary.make` on a task of
-its own (`App::topping`, apart from `/summary`'s, so a row's `/summary` goes ahead meanwhile).
-The header says `writing the top…` until it lands; then the assistant's bullets take the counts'
-place, `by haiku · from 23 runs` under them at the right. One that fails leaves the counts and
-says why in the flash; one that only says nothing ran never replaces them, since the counts also
-say what waits on you. With `ask`, no one is asked on open, nor when the stretch holds no run
-(questions alone are what the counts say). Either way the cursor goes up onto
-the top (`↑` from the first project), and `/summary [deep] [again]` there is of everything since
-the catch-up began, written into the top rather than the pane; asked again while the top is
-being written, it says so.
+that did something (`CatchUp::bullets`: `2 need you: api` · `api: 3 ran · 1 failed`), from all
+of the stretch whatever the search narrows the rows to. It writes itself only as you come back:
+when the catch-up opened by itself (you were away longer than `catch_up.after`), with
+`catch_up.summary: auto` (the default), by the assistant you named for summaries
+(`assistants.summary` in `config.yaml`, as setup writes it — the first agent that happens to be
+here is never asked by itself), and over at least one run (`catchup::auto_top`). Panel and
+`rl since` decide it the same way (`catchup::plan_top`): `summary.get {target: all, from:
+since}` first — the one kept is given back while nothing has moved on — else, when it writes
+itself, `summary.make`, which the panel runs on a task of its own (`App::topping`, apart from
+`/summary`'s, so a row's `/summary` goes ahead meanwhile); else the one kept for that stretch,
+moved on or not, or the counts. The header says `writing the top…` until it lands; then the
+assistant's bullets take the counts' place, `by haiku · from 23 runs` under them at the right.
+One that fails leaves the counts and says why in the flash; one that only says nothing ran never
+replaces them, since the counts also say what waits on you. `/since` shows the counts (or the
+one kept for that stretch): the cursor goes up onto the top (`↑` from the first project), and
+`/summary [deep] [again]` there — with whichever assistant resolves, the default too, since you
+asked — is of everything since the catch-up began, written into the top rather than the pane;
+asked while the top is being written, it says so.
 
 **`rl since [stretch]`** prints the same catch-up (`catchup::text`): `while you were away · since
 Sun 14:56 (2d0h)`, the top, then each project's line and its rows — a run by its id, a question by
 its id and the keys that answer it. It counts from the stretch given, else from when you last
 left the panel or ran it bare (it touches presence, so the next one counts from now), else the
-last day. Its top is the one kept for that stretch, else with `auto` and an assistant a new one,
-waited for up to the assistant's timeout (`writing the top…` on stderr), else — or when that
-fails — the counts. `--json` prints the digest itself, as before.
+last day. Its top is decided as the panel's: bare, counting from presence and away longer than
+`catch_up.after`, it is written by itself as above and waited for up to the assistant's timeout
+(`writing the top…` on stderr); with a stretch given it is the one kept for that stretch, else —
+or when writing fails — the counts. `--json` prints the digest itself, as before.
 
 Nothing is remembered between openings except presence: leaving the panel is what the catch-up
 and `rl since` count from.
@@ -919,7 +925,7 @@ assistants:
   # interpret: { agent: claude, model: claude-haiku-4-5-20251001, args: ["--max-turns", "1"] }
 catch_up:
   after: 8h             # away longer than this, the panel opens on the catch-up; off: only /since
-  summary: auto         # auto: the assistant writes its top as it opens · ask: only on /summary
+  summary: auto         # auto: assistants.summary writes its top as you come back · ask: only on /summary
 ```
 
 Which CLIs are agents is not configured: the detection registry says (`detect/*.yaml`,
@@ -1000,8 +1006,9 @@ folder a `schedule:` or `reaction:` belongs to; none, a global one); the client 
 `seen_at` when it has written output or had an event since (selecting a row is looking, so a run
 that waits as it was is told whole), else the whole run; for a job, from the start of its oldest
 firing not seen since it ended (`runs::oldest_unseen`), else the last day. A project and
-everything need one — the client knows when you were last here. It never asks an agent on its
-own. `summary.make` and `summary.get` take a target where they took a run, so
+everything need one — the client knows when you were last here. The daemon never asks an agent
+on its own: every call is a client's — `/summary`, `rl summary`, a reaction, or the catch-up's top,
+which the panel and a bare `rl since` ask for as you come back, as `catch_up.summary` says (§4). `summary.make` and `summary.get` take a target where they took a run, so
 `PROTOCOL_VERSION` is 3.
 
 Brief, a run is told from the cheapest source that has one:

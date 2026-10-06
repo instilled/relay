@@ -91,7 +91,7 @@ fn fake_agent() -> PathBuf {
 }
 
 #[test]
-fn since_has_the_top_written_when_there_is_an_assistant() {
+fn since_has_the_top_written_only_as_you_come_back() {
     let (Some(rld), Some(session)) = (sibling("rld"), sibling("rl-session")) else {
         eprintln!("skipping: rld / rl-session not built (run `cargo test --workspace`)");
         return;
@@ -156,11 +156,41 @@ fn since_has_the_top_written_when_there_is_an_assistant() {
         std::thread::sleep(Duration::from_millis(100));
     }
 
+    let asked = || {
+        let (_, out, _) = rl(&["ls", "--all", "--json"]);
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        v.as_array()
+            .unwrap()
+            .iter()
+            .filter(|r| r["cause"] == "assistant:summary")
+            .count()
+    };
+
+    // A stretch asked for is counted: no one is asked.
     let (ok, text, err) = rl(&["since", "1h"]);
     assert!(ok, "{err}");
     assert!(text.contains("while you were away"), "{text}");
+    assert!(text.contains(": 1 ran\n"), "counted: {text}");
+    assert!(text.contains(&format!(" {id}  say hi")), "the tree under it: {text}");
+    assert!(!err.contains("writing the top"), "{err}");
+    // The first bare look has no presence to come back from: counted too.
+    let (ok, _, err) = rl(&["since"]);
+    assert!(ok && !err.contains("writing the top"), "{err}");
+    assert_eq!(asked(), 0);
+
+    // Away two days, then a bare look: the top is written for you.
+    let ledger = rl_ledger::Ledger::open(&home.join("ledger.db")).unwrap();
+    ledger
+        .call_blocking(|c| {
+            c.execute_batch("update presence set last_seen_at = (strftime('%s','now') - 172800) * 1000;")?;
+            Ok(())
+        })
+        .unwrap();
+    let (ok, text, err) = rl(&["since"]);
+    assert!(ok, "{err}");
     assert!(text.contains("\n  • proj: it echoed, and that went fine\n"), "{text}");
     assert!(text.contains("\n  # by fakeai · from 1 run\n"), "{text}");
     assert!(text.contains(&format!(" {id}  say hi")), "the tree under it: {text}");
     assert!(err.contains("writing the top…"), "{err}");
+    assert_eq!(asked(), 1);
 }
