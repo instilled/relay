@@ -6,13 +6,13 @@
 //! --resume <session>`, `codex resume <session>`), the session named exactly
 //! by the transcript a hook reported, else the one found by folder and start;
 //! a shell as a fresh shell; a command run again. The run picked up is
-//! archived, so the list shows the one that carries it on.
+//! archived, so the list shows the one that carries it on, where it stood.
 
 use crate::server::Daemon;
 use crate::transcript::{self, Agent};
 use anyhow::Result;
 use jiff::Timestamp;
-use rl_ledger::runs;
+use rl_ledger::{order, runs};
 use rl_proto::methods::{Resumed, RunResumeParams, RunSpec};
 use rl_proto::types::{Cause, Run, RunKind};
 
@@ -80,8 +80,13 @@ async fn one(d: &Daemon, run: &Run, p: &RunResumeParams) -> Resumed {
     match d.supervisor.start(spec).await {
         Ok(new) => {
             let old = run.id.clone();
+            let to = format!("r:{}", new.id);
             let now = Timestamp::now();
-            if let Err(e) = d.ledger.call(move |c| runs::archive(c, &[old], now)).await {
+            let archived = d.ledger.call(move |c| {
+                order::pass_on(c, &format!("r:{old}"), &to)?;
+                runs::archive(c, &[old], now)
+            });
+            if let Err(e) = archived.await {
                 tracing::warn!(error = %e, id = %run.id, "archiving a resumed run");
             }
             Resumed {
