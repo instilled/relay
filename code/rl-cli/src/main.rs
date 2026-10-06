@@ -1256,7 +1256,9 @@ async fn since(home: &Home, a: SinceArgs, json: bool) -> Result<()> {
             }
         }
     };
-    let d = c.call::<DigestGet>(DigestParams { since: Some(boundary) }).await?;
+    // The stretch cut from the list's digest, as the panel cuts it, so the
+    // two never disagree.
+    let d = rl_cli::catchup::stretch(&c.call::<DigestGet>(DigestParams::default()).await?, boundary);
     if json {
         println!("{}", serde_json::to_string(&d)?);
         return Ok(());
@@ -1268,7 +1270,14 @@ async fn since(home: &Home, a: SinceArgs, json: bool) -> Result<()> {
         .call::<RuleList>(ScheduleFilter { all: false })
         .await
         .unwrap_or_default();
-    let cu = rl_cli::catchup::CatchUp::of(&d, workspaces.into_iter().map(|w| (w.path, w.name)), &rules, n);
+    let relay = std::fs::canonicalize(home.path()).unwrap_or_else(|_| home.path().to_path_buf());
+    let cu = rl_cli::catchup::CatchUp::of(
+        &d,
+        workspaces.into_iter().map(|w| (w.path, w.name)),
+        &rules,
+        Some(&relay),
+        n,
+    );
     let top = since_top(&mut c, &cu, boundary, came_back).await;
     print!("{}", rl_cli::catchup::text(&cu, &top, n));
     Ok(())
@@ -2160,7 +2169,7 @@ async fn config(home: &Home, a: ConfigArgs, json: bool) -> Result<()> {
             }
         );
         println!(
-            "catch_up.summary      {}  ({}; `auto` writes a few bullets when it opens, `ask` only on /summary)",
+            "catch_up.summary      {}  ({}; `auto` writes the top when you come back after `after`, by assistants.summary; `ask` only on /summary)",
             r.catch_up_summary,
             if r.config.catch_up.summary.is_some() {
                 "config"

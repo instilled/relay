@@ -55,6 +55,20 @@ pub fn written(s: &Summary, w: usize) -> Vec<Line<'static>> {
     out
 }
 
+/// The top cut to `h` lines: past that, its last line says where the rest
+/// is — the pane, on the top.
+pub fn capped(mut top: Vec<Line<'static>>, h: usize) -> Vec<Line<'static>> {
+    if top.len() <= h || h == 0 {
+        return top;
+    }
+    top.truncate(h - 1);
+    top.push(Line::styled(
+        format!("{INDENT}… ^o on the top shows the rest"),
+        theme::dim(),
+    ));
+    top
+}
+
 /// The projects and their rows, a line each, and in step with them each
 /// line's row key, for the cursor and the mouse.
 pub fn lines(cu: &CatchUp, w: usize, now: Timestamp) -> (Vec<Line<'static>>, Vec<Option<String>>) {

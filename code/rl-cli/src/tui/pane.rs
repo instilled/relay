@@ -469,6 +469,16 @@ pub fn project_lines(
     lines
 }
 
+/// The catch-up's top, in the pane: what was said of everything over the
+/// stretch last asked of it — the top whole when it is cut, or another
+/// stretch's (`/summary 2d` on it).
+pub fn top_lines(summary: Option<&Summary>, width: usize, now: Timestamp) -> Vec<Line<'static>> {
+    let mut lines = vec![Line::from(Span::raw(" everything").bold())];
+    lines.push(Line::from(Span::raw(" what happened, over every project").dim()));
+    lines.extend(summary_section(summary, width, now));
+    lines
+}
+
 /// The `everywhere` group, which is not a project: how the global rules'
 /// runs outside every project stand, and the global rules themselves.
 /// `mine` are those runs; `broken`, what of the global files did not load.

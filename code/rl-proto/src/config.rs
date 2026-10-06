@@ -17,7 +17,8 @@
 //!   badges: [gh-pr]              # beside a git folder's branch on its header: `PR #95`
 //! catch_up:
 //!   after: 8h                    # away longer than this, the panel opens on what happened; `off` never
-//!   summary: auto                # `auto`: a few bullets written when it opens · `ask`: only on /summary
+//!   summary: auto                # `auto`: the top is written when you come back after `after`,
+//!                                # by assistants.summary · `ask`: only on /summary
 //! ```
 
 use serde::{Deserialize, Serialize};
@@ -56,8 +57,8 @@ pub struct CatchUp {
     /// `never`) never does by itself. Unset: `8h`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub after: Option<String>,
-    /// `auto`: the top is written when it opens · `ask`: only on /summary.
-    /// Unset: `auto`.
+    /// `auto`: the top is written when you come back after `after`, by
+    /// `assistants.summary` · `ask`: only on /summary. Unset: `auto`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
 }

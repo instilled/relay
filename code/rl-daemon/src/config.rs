@@ -53,7 +53,8 @@ pub const SEED: &str = "\
 #
 # catch_up:              # what happened while you were away
 #   after: 8h            # away longer than this, the panel opens on it; off: only /since
-#   summary: auto        # auto: a few bullets written when it opens · ask: only on /summary
+#   summary: auto        # auto: the top is written when you come back after `after`, by assistants.summary
+#                        # ask: only on /summary
 ";
 
 /// Writes the seed when there is no file yet. Never touches one that exists.
@@ -304,6 +305,15 @@ mod tests {
         assert_eq!(
             settle(&with_runs(r#"{"runs":{"settle":"soon"}}"#)),
             Some(Duration::from_millis(5))
+        );
+    }
+
+    #[test]
+    fn the_seed_says_when_the_top_writes_itself_and_by_whom() {
+        let line = SEED.lines().find(|l| l.starts_with("#   summary: auto")).unwrap();
+        assert!(
+            line.contains("when you come back after `after`, by assistants.summary"),
+            "{line}"
         );
     }
 

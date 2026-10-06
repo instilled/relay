@@ -14,14 +14,22 @@ use crate::digest::since_items;
 use crate::tui::rows::{self, Context, Head, Lens, Row};
 use jiff::Timestamp;
 use rl_core::time::{fmt_age, fmt_duration, fmt_when};
+use rl_proto::decision::Decision;
 use rl_proto::methods::{ConfigGet, ConfigReport, Digest, DigestItem, SummaryGet, SummaryParams};
-use rl_proto::rule::Rule;
+use rl_proto::rule::{Rule, RuleKind};
 use rl_proto::types::{Cause, Run, RunState, Summary, SummaryTarget};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 /// How many of a job's firings in the stretch its line shows as marks.
 const MARKS: usize = 10;
+
+#[cfg(test)]
+thread_local! {
+    /// How many catch-ups were built on this thread, for the tests that
+    /// count them.
+    pub static BUILT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
 pub struct CatchUp<'a> {
     pub since: Timestamp,
@@ -66,6 +74,8 @@ impl<'a> CatchUp<'a> {
     /// needs you first, projects that need you first, a project with nothing
     /// new keeps an empty `rows`.
     pub fn build(d: &'a Digest, cx: &Context<'_>) -> Self {
+        #[cfg(test)]
+        BUILT.with(|b| b.set(b.get() + 1));
         // The whole list, whatever lens it is in now but narrowed by its
         // search, with its day of ended runs counted back from when you left
         // rather than from now, so a long stretch keeps what ended early in
@@ -76,6 +86,7 @@ impl<'a> CatchUp<'a> {
             filter: cx.filter,
             lens: Lens::All,
             now: d.since,
+            relay: cx.relay,
         };
         let since = d.since;
         let news: HashSet<&str> = since_items(d).into_iter().map(|i| i.run.id.as_str()).collect();
@@ -184,11 +195,13 @@ impl<'a> CatchUp<'a> {
     }
 
     /// The catch-up of `d` as `rl since` builds it: the folders by the names
-    /// they were registered under, the rules as they stand, nothing filtered.
+    /// they were registered under, the rules as they stand, nothing filtered;
+    /// `relay`, the Relay home.
     pub fn of(
         d: &'a Digest,
         workspaces: impl IntoIterator<Item = (PathBuf, String)>,
         rules: &[Rule],
+        relay: Option<&Path>,
         now: Timestamp,
     ) -> Self {
         let names = rows::Names::new(workspaces);
@@ -200,6 +213,7 @@ impl<'a> CatchUp<'a> {
                 filter: "",
                 lens: Lens::All,
                 now,
+                relay,
             },
         )
     }
@@ -267,6 +281,129 @@ impl<'a> CatchUp<'a> {
     }
 }
 
+/// A catch-up by where its rows stand in the digest it was built from,
+/// rather than borrowing it: kept beside that digest, it is laid back over it
+/// (`over`) without being built again.
+pub struct Kept {
+    since: Timestamp,
+    now: Timestamp,
+    projects: Vec<KeptProject>,
+}
+
+struct KeptProject {
+    head: Head,
+    key: String,
+    need: usize,
+    ran: usize,
+    failed: usize,
+    rows: Vec<Slot>,
+}
+
+/// A row by its place: an item's or a question's index in the digest.
+enum Slot {
+    Group(Head),
+    Question(usize),
+    Run(usize),
+    Job {
+        key: String,
+        kind: RuleKind,
+        name: String,
+        when: Option<String>,
+        runs: Vec<usize>,
+    },
+}
+
+impl CatchUp<'_> {
+    /// This catch-up, kept by place in `d`, the digest it was built from.
+    pub fn keep(&self, d: &Digest) -> Kept {
+        let items: HashMap<*const DigestItem, usize> = d
+            .items
+            .iter()
+            .enumerate()
+            .map(|(n, i)| (std::ptr::from_ref(i), n))
+            .collect();
+        let asked: HashMap<*const Decision, usize> = d
+            .decisions
+            .iter()
+            .enumerate()
+            .map(|(n, q)| (std::ptr::from_ref(q), n))
+            .collect();
+        let item = |i: &DigestItem| items.get(&std::ptr::from_ref(i)).copied();
+        let slot = |r: &Row| -> Option<Slot> {
+            Some(match r {
+                Row::Group(h) => Slot::Group(h.clone()),
+                Row::Question(q) => Slot::Question(*asked.get(&std::ptr::from_ref(*q))?),
+                Row::Run(i) => Slot::Run(item(i)?),
+                Row::Job(j) => Slot::Job {
+                    key: j.key.clone(),
+                    kind: j.kind,
+                    name: j.name.clone(),
+                    when: j.when.clone(),
+                    runs: j.runs.iter().map(|i| item(i)).collect::<Option<_>>()?,
+                },
+            })
+        };
+        Kept {
+            since: self.since,
+            now: self.now,
+            projects: self
+                .projects
+                .iter()
+                .map(|p| KeptProject {
+                    head: p.head.clone(),
+                    key: p.key.clone(),
+                    need: p.need,
+                    ran: p.ran,
+                    failed: p.failed,
+                    rows: p.rows.iter().filter_map(slot).collect(),
+                })
+                .collect(),
+        }
+    }
+}
+
+impl Kept {
+    /// The catch-up again, over `d`: the digest it was kept from.
+    pub fn over<'a>(&self, d: &'a Digest) -> CatchUp<'a> {
+        let row = |s: &Slot| -> Option<Row<'a>> {
+            Some(match s {
+                Slot::Group(h) => Row::Group(h.clone()),
+                Slot::Question(n) => Row::Question(d.decisions.get(*n)?),
+                Slot::Run(n) => Row::Run(d.items.get(*n)?),
+                Slot::Job {
+                    key,
+                    kind,
+                    name,
+                    when,
+                    runs,
+                } => Row::Job(rows::Job {
+                    key: key.clone(),
+                    kind: *kind,
+                    name: name.clone(),
+                    runs: runs.iter().map(|n| d.items.get(*n)).collect::<Option<_>>()?,
+                    when: when.clone(),
+                }),
+            })
+        };
+        CatchUp {
+            since: self.since,
+            now: self.now,
+            projects: self
+                .projects
+                .iter()
+                .map(|p| Project {
+                    head: p.head.clone(),
+                    key: p.key.clone(),
+                    need: p.need,
+                    ran: p.ran,
+                    failed: p.failed,
+                    rows: p.rows.iter().filter_map(row).collect(),
+                })
+                .collect(),
+        }
+    }
+}
+
 impl Project<'_> {
     /// How its stretch went, in a few words: what needs you, what ran, what
     /// failed; `nothing new` when it is folded.
@@ -292,6 +429,28 @@ impl Project<'_> {
             parts.push(format!("{} new", self.rows.len()));
         }
         parts.join(" · ")
+    }
+}
+
+/// The digest of the stretch from `since`, cut from the list's own (`d`,
+/// which has everything): what moved since, what waits on you, what you have
+/// not looked at, what is pinned, and the questions as the list has them —
+/// so the catch-up asks the daemon for nothing more than the list does.
+pub fn stretch(d: &Digest, since: Timestamp) -> Digest {
+    let keeps = |i: &DigestItem| {
+        i.at >= since
+            || i.unseen
+            || matches!(i.run.state, RunState::NeedsInput | RunState::Blocked)
+            || i.run.pinned_at.is_some()
+    };
+    Digest {
+        since,
+        items: d.items.iter().filter(|i| keeps(i)).cloned().collect(),
+        decisions: d.decisions.clone(),
+        checkouts: d.checkouts.clone(),
+        lost: d.lost.clone(),
+        hidden: d.hidden.clone(),
+        order: d.order.clone(),
     }
 }
 
@@ -609,6 +768,7 @@ mod tests {
                 filter: "",
                 lens: Lens::All,
                 now: now(),
+                relay: None,
             },
         )
     }
@@ -717,6 +877,62 @@ mod tests {
             ["r:r1"],
             "the run you saw before you left is now in the stretch"
         );
+    }
+
+    #[test]
+    fn the_stretch_is_cut_from_the_lists_own_digest() {
+        // The list's digest, from the start of time: everything the daemon
+        // has, and the questions.
+        let mut list = fixture();
+        list.since = Timestamp::UNIX_EPOCH;
+        let mut pinned = item("p1", RunState::Finished, RELAY, "2026-09-01T00:00:00Z", false);
+        pinned.run.pinned_at = Some("2026-09-01T00:00:00Z".parse().unwrap());
+        list.items.extend([
+            item("w1", RunState::NeedsInput, RELAY, "2026-09-02T00:00:00Z", false),
+            item("u1", RunState::Finished, RELAY, "2026-09-03T00:00:00Z", true),
+            pinned,
+        ]);
+        let since: Timestamp = "2026-10-06T00:00:00Z".parse().unwrap();
+        let d = stretch(&list, since);
+        assert_eq!(d.since, since);
+        let ids: Vec<&str> = d.items.iter().map(|i| i.run.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            ["a1", "n1", "n2", "n3", "w1", "u1", "p1"],
+            "what moved since, what waits on you, what you have not looked at, what is pinned"
+        );
+        assert_eq!(
+            d.decisions.len(),
+            list.decisions.len(),
+            "the questions as the list has them"
+        );
+        // Built on it, the catch-up is the one the stretch's own would be.
+        let names = names();
+        let cu = build(&d, &names);
+        let relay = cu.projects.iter().find(|p| p.head.name == "relay").unwrap();
+        assert_eq!(keys(relay), ["r:w1", "r:u1"], "a pin alone is not news");
+        assert_eq!(keys(&cu.projects[0]), keys(&build(&fixture(), &names).projects[0]));
+    }
+
+    #[test]
+    fn a_catch_up_kept_by_place_comes_back_as_it_was() {
+        let (d, names) = (fixture(), names());
+        let cu = build(&d, &names);
+        let again = cu.keep(&d).over(&d);
+        let said = |cu: &CatchUp| -> Vec<(String, String, Vec<String>)> {
+            cu.projects
+                .iter()
+                .map(|p| {
+                    (
+                        p.head.name.clone(),
+                        p.tally(),
+                        p.rows.iter().map(|r| row_line(r, now())).collect(),
+                    )
+                })
+                .collect()
+        };
+        assert_eq!(said(&again), said(&cu));
+        assert_eq!((again.since, again.counted()), (cu.since, cu.counted()));
     }
 
     #[test]
