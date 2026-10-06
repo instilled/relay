@@ -16,6 +16,7 @@
 //! it reads on either theme (see `theme`); the footer is the only chrome (J8).
 //! Nothing on screen is an id.
 
+mod catchup;
 mod complete;
 mod events;
 pub mod form;
@@ -126,6 +127,9 @@ enum View {
     Graph,
     /// Every event, newest first, and what each set off (`/events`).
     Events,
+    /// What happened while you were away: what the panel opens on after a
+    /// while gone (`catch_up.after`).
+    CatchUp,
 }
 
 enum Mode {
@@ -254,6 +258,14 @@ struct Summarising {
     task: tokio::task::JoinHandle<Result<Summary>>,
 }
 
+/// What the catch-up showed that was not seen yet: the runs, and where each
+/// job's firings not seen start, by its row key.
+#[derive(Default)]
+struct Shown {
+    ids: Vec<String>,
+    from: Vec<(String, Timestamp)>,
+}
+
 struct App {
     home: Home,
     rpc: Client,
@@ -333,6 +345,10 @@ struct App {
     /// everything's `/summary` starts with no stretch typed. None: the last
     /// day.
     away_since: Option<Timestamp>,
+    /// The catch-up's stretch, read while it is up or on the way back to
+    /// it: the list's digest counted from when you left. The list's own
+    /// stays as it is.
+    catch: Option<Digest>,
     /// Where a job row's `/summary` starts with no stretch typed, by row key:
     /// when its oldest firing not seen started, noted as the cursor lands on
     /// it — landing marks them seen, so the daemon could no longer tell.
@@ -945,21 +961,42 @@ pub async fn setup(home: &Home, only_import: bool) -> Result<()> {
     Ok(())
 }
 
+/// Where the catch-up starts, if the panel opens on it: when you were last
+/// here (`prev`, what touching presence on this open gave back), when that
+/// is longer ago than `after`. A first open has nothing to catch up on, and
+/// `after: off` never opens it.
+pub(crate) fn away(prev: Option<Timestamp>, now: Timestamp, after: Option<SignedDuration>) -> Option<Timestamp> {
+    let (prev, after) = (prev?, after?);
+    (now.duration_since(prev) > after).then_some(prev)
+}
+
 pub async fn run(home: &Home) -> Result<()> {
     let me = client_name();
     // Before the screen is taken: the daemon is started or, if it is another
     // release, a restart is offered on the plain terminal.
     let mut rpc = crate::daemon::ensure(home, true).await?;
-    let _ = rpc.call::<PresenceTouch>(PresenceClient { client: me.clone() }).await;
+    // Touching presence gives back when you were last here — read before it
+    // is overwritten, since that is where the catch-up starts.
+    let prev = rpc
+        .call::<PresenceTouch>(PresenceClient { client: me.clone() })
+        .await
+        .ok()
+        .and_then(|p| p.last_seen_at);
     let aliases = complete::shell_names().await;
     let mut app = App::new(home, rpc, me, aliases);
+    // A project's or everything's `/summary` starts there, catch-up or not.
+    app.away_since = prev;
     app.refresh().await;
 
     let mut terminal = enter_screen();
     // The first start, or a release with a step not seen yet: the guide
     // before the list, asking only what is new. Otherwise a word about
-    // Claude's sessions that are not here, once each.
+    // Claude's sessions that are not here, once each. Away long enough, and
+    // with no guide this time, the catch-up before the list.
+    let mut after = None;
+    let mut guided = false;
     if let Ok(state) = app.rpc.call::<SetupGet>(()).await {
+        after = state.config.config.catch_up.after();
         let sessions = app
             .rpc
             .call::<ImportList>(ImportListParams { mark: true })
@@ -972,6 +1009,7 @@ pub async fn run(home: &Home) -> Result<()> {
             .count();
         match setup::Guide::since(&state, &sessions) {
             Some(guide) if state.seen < SETUP_STEPS => {
+                guided = true;
                 let agents = state.agents.clone();
                 match setup::run(&mut terminal, &mut app.rpc, guide, &agents).await {
                     Ok(setup::Outcome::Saved(words)) => {
@@ -993,6 +1031,9 @@ pub async fn run(home: &Home) -> Result<()> {
             )),
             _ => {}
         }
+    }
+    if !guided && let Some(since) = away(prev, Timestamp::now(), after) {
+        app.open_catch_up(since).await;
     }
     let result = app.main_loop(&mut terminal).await;
     leave_screen();
@@ -1058,6 +1099,7 @@ impl App {
             summary_ask: None,
             made: HashMap::new(),
             away_since: None,
+            catch: None,
             unseen_from: HashMap::new(),
             removing: None,
             picked: Vec::new(),
@@ -1257,6 +1299,7 @@ impl App {
         Some(match self.view {
             View::Graph => shortcuts::Place::Graph,
             View::Events => shortcuts::Place::Events,
+            View::CatchUp => shortcuts::Place::CatchUp,
             View::Work if self.selected_question().is_some() => shortcuts::Place::Question,
             View::Work if self.lens == rows::Lens::Hidden => shortcuts::Place::Hidden,
             View::Work => shortcuts::Place::List,
@@ -1305,6 +1348,16 @@ impl App {
         }
         // A daemon from before `rule.errors` has nothing to say here.
         self.not_loaded = self.rpc.call::<RuleErrors>(()).await.unwrap_or_default();
+        // The catch-up's stretch, while it is up or there to go back to.
+        match self.catch.as_ref().map(|c| c.since) {
+            Some(since) if self.view == View::CatchUp || self.back.contains(&View::CatchUp) => {
+                match self.rpc.call::<DigestGet>(DigestParams { since: Some(since) }).await {
+                    Ok(d) => self.catch = Some(d),
+                    Err(e) => self.say(format!("daemon: {e:#}")),
+                }
+            }
+            _ => self.catch = None,
+        }
         if self.view == View::Graph {
             match self.rpc.call::<GraphGet>(GraphParams::default()).await {
                 Ok(g) => self.graph = Some(g),
@@ -1463,6 +1516,7 @@ impl App {
             View::Work => self.rows().into_iter().filter_map(|r| r.key()).collect(),
             View::Graph => self.graph_plan().map(|(_, p)| p.order()).unwrap_or_default(),
             View::Events => self.event_items().iter().flat_map(|i| i.keys()).collect(),
+            View::CatchUp => self.catch_rows().into_iter().filter_map(|r| r.key()).collect(),
         }
     }
 
@@ -1507,6 +1561,11 @@ impl App {
                 .event_items()
                 .iter()
                 .map(|i| (Some(i.key()), events::named(i)))
+                .unzip(),
+            View::CatchUp => self
+                .catch_rows()
+                .iter()
+                .map(|r| (r.key(), rows::named(r, &self.digest, &self.names)))
                 .unzip(),
         };
         query::ranked(&words, &named)
@@ -1567,12 +1626,15 @@ impl App {
         }
     }
 
+    /// The row under the cursor, on the list or in the catch-up.
     fn selected(&self) -> Option<Row<'_>> {
-        if self.view != View::Work {
-            return None;
-        }
+        let rows = match self.view {
+            View::Work => self.rows(),
+            View::CatchUp => self.catch_rows(),
+            View::Graph | View::Events => return None,
+        };
         let key = self.sel.as_ref()?;
-        self.rows().into_iter().find(|r| r.key().as_ref() == Some(key))
+        rows.into_iter().find(|r| r.key().as_ref() == Some(key))
     }
 
     fn selected_run(&self) -> Option<&DigestItem> {
@@ -1593,11 +1655,12 @@ impl App {
         }
     }
 
-    /// The question the line answers: the one under the cursor on the list,
-    /// or the first one waiting at the node under it in the graph.
+    /// The question the line answers: the one under the cursor on the list
+    /// or in the catch-up, or the first one waiting at the node under it in
+    /// the graph.
     fn question_here(&self) -> Option<&Decision> {
         match self.view {
-            View::Work => self.selected_question(),
+            View::Work | View::CatchUp => self.selected_question(),
             View::Graph => {
                 let n = self.selected_node()?;
                 n.waiting
@@ -1696,7 +1759,10 @@ impl App {
     /// itself is not fetched again — the tick keeps it current — so holding
     /// a key moves at the speed of drawing, not of a whole digest per step.
     async fn moved(&mut self) {
-        self.saw_selected().await;
+        // The catch-up is looked at as a whole, when you leave it.
+        if self.view != View::CatchUp {
+            self.saw_selected().await;
+        }
         self.load_pane().await;
     }
 
@@ -1936,6 +2002,10 @@ impl App {
     /// ledger, both typed over where they stand in the list, and a job by the
     /// rule it comes from, which is the rule form's own rename.
     fn rename_here(&mut self) {
+        // A name is changed where it stands, and it stands on the list.
+        if self.view == View::CatchUp {
+            return self.say("^r renames on the list · esc goes there");
+        }
         let what = if let Some(folder) = self.selected_project() {
             Some((self.names.workspace(&folder), Renamed::Project(folder)))
         } else {
@@ -2034,12 +2104,13 @@ impl App {
                     Some(r) => {
                         let title = self.run_by_id(r).map(|r| r.title.clone()).unwrap_or_default();
                         self.say(format!("{what} → started {title}"));
+                        let started = format!("r:{r}");
                         if self.view == View::Graph {
                             if next_node.as_ref().is_some_and(|id| self.keys().contains(id)) {
                                 self.select(next_node);
                             }
-                        } else {
-                            self.select(Some(format!("r:{r}")));
+                        } else if self.view == View::Work || self.keys().contains(&started) {
+                            self.select(Some(started));
                         }
                     }
                     None => self.say(format!("answered {what}")),
@@ -2295,7 +2366,11 @@ impl App {
     /// graph's own first node. The global rules have no row, so this is
     /// where they are reached.
     async fn toggle_graph(&mut self) {
-        let target = self.rule_target();
+        self.toggle_graph_at(self.rule_target()).await;
+    }
+
+    /// `toggle_graph`, the graph opening on `target` where it has it.
+    async fn toggle_graph_at(&mut self, target: Option<String>) {
         if self.view == View::Graph {
             self.go_back();
         } else {
@@ -2320,7 +2395,7 @@ impl App {
         if self.view == View::Events {
             return self.event_rule();
         }
-        if self.view != View::Work {
+        if !matches!(self.view, View::Work | View::CatchUp) {
             return None;
         }
         if let Some(j) = self.selected_job() {
@@ -2412,6 +2487,122 @@ impl App {
         self.picked.clear();
         self.events.clear();
         self.refresh().await;
+    }
+
+    // ---- the catch-up -----------------------------------------------------
+
+    /// What happened since `since`, in the list's place until you leave it:
+    /// `esc` goes to the list, `enter` to the row there. It reads a digest of
+    /// its own, counted from `since`; the list's stays as it is. `since` is
+    /// also where a project's or everything's `/summary` starts.
+    async fn open_catch_up(&mut self, since: Timestamp) {
+        self.away_since = Some(since);
+        match self.rpc.call::<DigestGet>(DigestParams { since: Some(since) }).await {
+            Ok(d) => self.catch = Some(d),
+            Err(e) => return self.say(format!("daemon: {e:#}")),
+        }
+        self.open_view(View::CatchUp);
+        self.close_term();
+        self.picked.clear();
+        self.events.clear();
+        self.settle();
+        self.load_pane().await;
+    }
+
+    /// The catch-up as it stands, built on the list's own rows.
+    fn catch_up(&self) -> Option<crate::catchup::CatchUp<'_>> {
+        let d = self.catch.as_ref()?;
+        let cx = rows::Context {
+            names: &self.names,
+            rules: &self.rules,
+            filter: "",
+            lens: rows::Lens::All,
+            now: Timestamp::now(),
+        };
+        Some(crate::catchup::CatchUp::build(d, &cx))
+    }
+
+    /// The catch-up's rows in order: each project's line, then its rows.
+    fn catch_rows(&self) -> Vec<Row<'_>> {
+        let Some(cu) = self.catch_up() else {
+            return vec![];
+        };
+        cu.projects
+            .into_iter()
+            .flat_map(|p| std::iter::once(Row::Group(p.head)).chain(p.rows))
+            .collect()
+    }
+
+    /// What leaving the catch-up marks seen: every run it shows that was
+    /// not, and where each job's firings not seen till now start, so its
+    /// `/summary` still starts there (as `saw_selected` notes).
+    fn catch_up_unseen(&self) -> Shown {
+        let mut shown = Shown::default();
+        for r in self.catch_rows() {
+            match r {
+                Row::Run(i) if i.unseen => shown.ids.push(i.run.id.clone()),
+                Row::Job(j) => {
+                    let unseen: Vec<&DigestItem> = j.runs.iter().copied().filter(|i| i.unseen).collect();
+                    if let Some(at) = unseen.iter().map(|i| i.run.started_at).min() {
+                        shown.from.push((j.key.clone(), at));
+                    }
+                    shown.ids.extend(unseen.iter().map(|i| i.run.id.clone()));
+                }
+                _ => {}
+            }
+        }
+        shown
+    }
+
+    /// Everything the catch-up showed is seen now.
+    async fn saw_catch_up(&mut self, shown: Shown) {
+        self.unseen_from.extend(shown.from);
+        self.seen(shown.ids).await;
+    }
+
+    /// `esc` in the catch-up: to the list, what it showed seen.
+    async fn leave_catch_up(&mut self) {
+        let shown = self.catch_up_unseen();
+        self.saw_catch_up(shown).await;
+        self.back_to_list().await;
+    }
+
+    /// `enter` in the catch-up: the row on the list, with the cursor on it —
+    /// or, on a job whose rule is still there, that rule in the graph, as
+    /// the events view goes to a rule. Leaving, what it showed is seen; a
+    /// run the list no longer has keeps the catch-up up, and says why.
+    async fn catch_up_enter(&mut self) {
+        let Some(row) = self.selected() else {
+            return self.say("nothing here to open");
+        };
+        let key = row.key();
+        let run = row.item().map(|i| i.run.id.clone());
+        let rule = match &row {
+            Row::Job(j) => self.rule_of_job(j).map(rules::key),
+            _ => None,
+        };
+        let shown = self.catch_up_unseen();
+        match run {
+            Some(id) => self.show_run(&id).await,
+            None => {
+                self.back_to_list().await;
+                if let Some(k) = &key
+                    && !self.keys().contains(k)
+                {
+                    // A search or a lens hiding it gives way, as for a run.
+                    self.filter.clear();
+                    self.lens = rows::Lens::All;
+                }
+                self.select(key);
+            }
+        }
+        if self.view == View::CatchUp {
+            return;
+        }
+        self.saw_catch_up(shown).await;
+        if rule.is_some() {
+            self.toggle_graph_at(rule).await;
+        }
     }
 
     fn event_items(&self) -> Vec<events::Item<'_>> {
@@ -2583,6 +2774,11 @@ impl App {
             .feed
             .runs
             .get(id)
+            .or_else(|| self.run_by_id(id))
+            .or_else(|| {
+                let catch = self.catch.as_ref()?;
+                catch.items.iter().map(|i| &i.run).find(|r| r.id == id)
+            })
             .map_or_else(|| id.to_string(), |r| r.title.clone());
         let list_filter = match self.view {
             View::Events => self.filter_aside.clone(),
@@ -3184,6 +3380,7 @@ impl App {
             View::Work => {}
             View::Graph => return self.say("⇧↑↓ moves rows on the list · the graph lays itself out"),
             View::Events => return self.say("⇧↑↓ moves rows on the list · events stay in the order they came"),
+            View::CatchUp => return self.say("⇧↑↓ moves rows on the list · esc goes there"),
         }
         if self.lens == rows::Lens::Hidden {
             self.say("the hidden lens keeps the list's order · move it on the list");
@@ -3917,6 +4114,8 @@ impl App {
                     self.toggle_graph().await;
                 } else if self.view == View::Events {
                     self.toggle_events().await;
+                } else if self.view == View::CatchUp {
+                    self.leave_catch_up().await;
                 }
             }
             (KeyCode::Down, _) if self.view == View::Graph => self.graph_step(graph::Dir::Down),
@@ -3958,6 +4157,10 @@ impl App {
         }
         if self.view == View::Events {
             self.events_enter().await;
+            return Ok(());
+        }
+        if self.view == View::CatchUp {
+            self.catch_up_enter().await;
             return Ok(());
         }
         if self.selected_run().is_some() {
@@ -4550,8 +4753,15 @@ impl App {
                 None => "wiring".into(),
             },
             View::Events => events::headline(self.event_items().len(), &self.feed, &self.filter),
+            View::CatchUp => match &self.catch {
+                Some(c) => catchup::headline(c.since, Timestamp::now()),
+                None => "while you were away".into(),
+            },
         };
         let mut notes = Vec::new();
+        if self.view == View::CatchUp {
+            notes.push(Span::styled("esc to the list", theme::dim()));
+        }
         // What a restart took waits on you like anything else that does.
         if self.view == View::Work
             && let Some(note) = rows::lost_note(&self.digest)
@@ -4631,6 +4841,7 @@ impl App {
                 View::Work => self.draw_list(f, list, &rows),
                 View::Graph => self.draw_graph(f, list),
                 View::Events => self.draw_events(f, list),
+                View::CatchUp => self.draw_catch_up(f, list),
             }
             if a.pane.is_some() {
                 let x = list.x + list.width;
@@ -5136,6 +5347,50 @@ impl App {
         self.draw_window(f, area, shown, keys, sel_line);
     }
 
+    /// The catch-up: its top, a rule, then its projects and rows, a window
+    /// of them following the selection.
+    fn draw_catch_up(&self, f: &mut Frame, area: Rect) {
+        self.list_h.set(area.height);
+        *self.hit.borrow_mut() = ListHit::default();
+        let Some(cu) = self.catch_up() else {
+            f.render_widget(Paragraph::new(" reading what happened…").dim(), area);
+            return;
+        };
+        let w = area.width as usize;
+        let top = catchup::top(&cu, w);
+        // The top stands still above the rows, and never takes more than
+        // half the room.
+        let top_h = (top.len() as u16).min(area.height / 2);
+        let [top_area, rule, rest] = Layout::vertical([
+            Constraint::Length(top_h),
+            Constraint::Length(u16::from(top_h > 0)),
+            Constraint::Fill(1),
+        ])
+        .areas(area);
+        f.render_widget(Paragraph::new(top), top_area);
+        f.render_widget(Paragraph::new("─".repeat(rule.width as usize)).dim(), rule);
+        self.list_h.set(rest.height);
+        let (lines, keys) = catchup::lines(&cu, w, Timestamp::now());
+        let words = query::Query::parse(&self.filter).words;
+        let mut sel_line = 0;
+        let mut shown = Vec::with_capacity(lines.len());
+        for (n, (mut line, key)) in lines.into_iter().zip(&keys).enumerate() {
+            if !words.is_empty() {
+                line = light(line, &words);
+            }
+            if key.is_some() && *key == self.sel {
+                let short = w.saturating_sub(line.width());
+                if short > 0 {
+                    line.spans.push(Span::raw(" ".repeat(short)));
+                }
+                line = line.style(theme::selected());
+                sel_line = n;
+            }
+            shown.push(line);
+        }
+        self.draw_window(f, rest, shown, keys, sel_line);
+    }
+
     fn draw_pane(&mut self, f: &mut Frame, area: Rect) {
         // Filled in again only if a question is drawn, so a click never takes
         // a choice that is no longer on screen.
@@ -5488,6 +5743,15 @@ impl App {
         } else {
             "^o details"
         };
+        if self.view == View::CatchUp {
+            let go = match self.selected() {
+                Some(Row::Question(_)) => "`1 and a note` on the line answers it · enter it on the list · ",
+                Some(Row::Job(j)) if self.rule_of_job(&j).is_some() => "enter its rule in the graph · ",
+                Some(_) => "enter it on the list · ",
+                None => "",
+            };
+            return format!("{go}/summary · {pane} · esc the list");
+        }
         match self.selected() {
             Some(Row::Question(_)) => format!("enter or `1 and a note` on the line answers it · ^x not this · {pane}"),
             Some(Row::Job(_)) => {
@@ -6781,6 +7045,130 @@ mod tests {
         // where it may.
         assert!(buf_has(&buf, " summary  of the project "));
         assert!(buf_has(&buf, "fakeai") && buf_has(&buf, "since "));
+        token.cancel();
+    }
+
+    /// The screen as drawn at 120×40, its rows joined by newlines.
+    fn draw_text(app: &mut super::App) -> String {
+        let mut t = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 40)).unwrap();
+        t.draw(|f| app.draw(f)).unwrap();
+        let buf = t.backend().buffer().clone();
+        (0..buf.area.height)
+            .map(|y| {
+                (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn away_is_the_presence_before_this_open() {
+        use jiff::{SignedDuration, Timestamp};
+        let now = Timestamp::from_second(100_000).unwrap();
+        let h = |n| SignedDuration::from_hours(n);
+        assert_eq!(super::away(Some(now - h(9)), now, Some(h(8))), Some(now - h(9)));
+        assert_eq!(
+            super::away(Some(now - h(7)), now, Some(h(8))),
+            None,
+            "not away long enough"
+        );
+        assert_eq!(
+            super::away(None, now, Some(h(8))),
+            None,
+            "a first open has nothing to catch up on"
+        );
+        assert_eq!(super::away(Some(now - h(90)), now, None), None, "after: off");
+    }
+
+    #[tokio::test]
+    async fn the_catch_up_shows_and_esc_goes_to_the_list() {
+        use jiff::{SignedDuration, Timestamp};
+        let (_tmp, token, mut app, _folder) = panel().await;
+        assert!(app.digest.items.iter().any(|i| i.unseen), "news before it is looked at");
+        let since = Timestamp::now() - SignedDuration::from_hours(9);
+        app.open_catch_up(since).await;
+        assert!(app.view == super::View::CatchUp);
+        assert_eq!(app.away_since, Some(since), "a project's /summary starts there");
+        let frame = draw_text(&mut app);
+        assert!(frame.contains("while you were away"), "{frame}");
+        assert!(frame.contains("api"), "{frame}");
+        assert!(frame.contains("make test"), "{frame}");
+        press(&mut app, KeyCode::Esc, KeyModifiers::NONE).await;
+        assert!(app.view == super::View::Work);
+        assert!(
+            app.digest.items.iter().all(|i| !i.unseen),
+            "what the catch-up showed is seen once you leave it"
+        );
+        token.cancel();
+    }
+
+    #[tokio::test]
+    async fn enter_in_the_catch_up_goes_to_the_row_on_the_list() {
+        use jiff::{SignedDuration, Timestamp};
+        let (_tmp, token, mut app, _folder) = panel().await;
+        app.open_catch_up(Timestamp::now() - SignedDuration::from_hours(9))
+            .await;
+        press(&mut app, KeyCode::Down, KeyModifiers::NONE).await;
+        assert_eq!(app.sel.as_deref(), Some(RUN), "under the project's line");
+        assert!(
+            app.digest.items.iter().any(|i| i.unseen),
+            "moving about the catch-up is not leaving it"
+        );
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+        assert!(app.view == super::View::Work);
+        assert_eq!(app.sel.as_deref(), Some(RUN));
+        assert!(app.digest.items.iter().all(|i| !i.unseen));
+        token.cancel();
+    }
+
+    #[tokio::test]
+    async fn a_number_answers_a_question_in_the_catch_up() {
+        use jiff::{SignedDuration, Timestamp};
+        use rl_proto::decision::{Decision, DecisionOption, DecisionStatus};
+        let (tmp, token, mut app, folder) = panel().await;
+        let now = Timestamp::now();
+        let asked = Decision {
+            id: "dec00001".into(),
+            workspace: folder.clone(),
+            run: None,
+            flow: "f".into(),
+            group: None,
+            title: "ship it?".into(),
+            summary: None,
+            options: vec![DecisionOption {
+                key: "ok".into(),
+                ..Default::default()
+            }],
+            multi: false,
+            status: DecisionStatus::Open,
+            created_at: now,
+            updated_at: now,
+            expires_at: None,
+            resolved_at: None,
+            chosen: vec![],
+            outcome_runs: vec![],
+            note: None,
+        };
+        let ledger = rl_ledger::Ledger::open(&rl_core::Home::at(tmp.path().join("h")).ledger()).unwrap();
+        ledger
+            .call_blocking(move |c| rl_ledger::decisions::insert(c, &asked))
+            .unwrap();
+        app.refresh().await;
+        app.open_catch_up(now - SignedDuration::from_hours(9)).await;
+        assert!(draw_text(&mut app).contains("ship it?"));
+        press(&mut app, KeyCode::Down, KeyModifiers::NONE).await;
+        assert_eq!(
+            app.sel.as_deref(),
+            Some("q:dec00001"),
+            "what needs you leads its project"
+        );
+        type_in(&mut app, "1").await;
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+        assert!(app.view == super::View::CatchUp, "answered where it stands");
+        assert!(app.digest.decisions.is_empty(), "{:?}", app.flash);
+        assert!(!draw_text(&mut app).contains("ship it?"));
         token.cancel();
     }
 
