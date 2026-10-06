@@ -1,9 +1,9 @@
-//! `?` on an empty line: the keys for where you are, in a quiet line under
-//! the command input — the list's, the graph's, the events view's, the
-//! catch-up's, a question's, a name being changed's. `?` again or `esc` puts
-//! it away, and so does typing, so it never takes room while you work. With
-//! words on the line `?` is only a character: a question, a note and a
-//! search all take it.
+//! `^h`: the keys for where you are, in the footer in place of its few hints
+//! — the list's, the graph's, the events view's, the catch-up's, a
+//! question's, a name being changed's. `^h` again or `esc` puts them away.
+//! `^h` is a chord, so it works with words on the line too; on an empty line
+//! `?` does the same. With words on the line `?` is only a character: a
+//! question, a note and a search all take it.
 //!
 //! One table per place, so what the line says stays what the keys do. A key
 //! that stands for a `/` command is read from `palette::key`, the same table
@@ -58,8 +58,15 @@ fn cmd(c: Cmd, what: &'static str) -> Key {
     key(palette::key(c), what)
 }
 
-/// The keys in force at a place, the ones used most first.
+/// The keys in force at a place, the ones used most first, and last the one
+/// that puts them away: a bare `^h`, as `/hide` and `/help` are bare.
 pub fn keys(at: Place) -> Vec<Key> {
+    let mut v = place_keys(at);
+    v.push(key("^h", ""));
+    v
+}
+
+fn place_keys(at: Place) -> Vec<Key> {
     let moves = key("↑↓ ^j^k", "move");
     let help = key("/help", "");
     match at {
@@ -80,7 +87,7 @@ pub fn keys(at: Place) -> Vec<Key> {
         // The list's own keys, but for the one that brings a row back; the
         // order is the list's to keep, not this lens's.
         Place::Hidden => {
-            let mut v = keys(Place::List);
+            let mut v = place_keys(Place::List);
             v.retain(|k| k.what != "reorder" && k.keys != "/hide");
             v.insert(1, key("/hide", "brings it back"));
             v
@@ -165,11 +172,11 @@ pub fn keys(at: Place) -> Vec<Key> {
     }
 }
 
-/// What `?` and `esc` do to the shortcuts line before anything else sees the
+/// What `^h`, `?` and `esc` do to the shortcuts before anything else sees the
 /// key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Take {
-    /// `?` on an empty line: shown, or put away.
+    /// `^h`, or `?` on an empty line: shown, or put away.
     Toggle,
     /// `esc` with the line shown: put away, and nothing else — the pane, the
     /// search and the view wait for the next `esc`.
@@ -178,22 +185,19 @@ pub enum Take {
     Pass,
 }
 
-/// `?` on an empty line toggles the shortcuts; with anything typed it is a
+/// `^h` toggles the shortcuts whatever is on the line, as no editor here
+/// binds it; `?` on an empty line does too, but with anything typed it is a
 /// character like any other. `esc` closes them first, before it does any of
 /// its other jobs.
 pub fn take(open: bool, line_empty: bool, k: &KeyEvent) -> Take {
     let plain = !k.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
+    let ctrl = k.modifiers.contains(KeyModifiers::CONTROL) && !k.modifiers.contains(KeyModifiers::ALT);
     match k.code {
+        KeyCode::Char('h') if ctrl => Take::Toggle,
         KeyCode::Char('?') if plain && line_empty => Take::Toggle,
         KeyCode::Esc if open => Take::Close,
         _ => Take::Pass,
     }
-}
-
-/// Whether the shortcuts stay up once a key has gone to the line: typing
-/// puts them away, so they never take room while you work.
-pub fn still_open(open: bool, line_empty: bool) -> bool {
-    open && line_empty
 }
 
 const SEP: &str = " · ";
@@ -254,9 +258,9 @@ pub fn lines(keys: &[Key], width: usize) -> Vec<Line<'static>> {
 }
 
 /// The footer's pointer to all this.
-pub const HINT: &str = "? shortcuts";
+pub const HINT: &str = "^h shortcuts";
 
-/// A footer hint with `? shortcuts` at its end, when there is room for it;
+/// A footer hint with `^h shortcuts` at its end, when there is room for it;
 /// as it was when there is not.
 pub fn with_hint(footer: String, width: usize) -> String {
     let more = if footer.is_empty() {
@@ -288,7 +292,7 @@ mod tests {
         assert_eq!(
             one_line(Place::List),
             "↑↓ ^j^k move · ⇧↑↓ reorder · enter join/open · ^x stop/archive/remove · ^t pin · \
-             ^r rename · ^o details · ^f search · ^g graph · tab lens · /hide · /help"
+             ^r rename · ^o details · ^f search · ^g graph · tab lens · /hide · /help · ^h"
         );
     }
 
@@ -308,12 +312,12 @@ mod tests {
         assert_eq!(
             one_line(Place::Hidden),
             "↑↓ ^j^k move · /hide brings it back · enter join/open · ^x stop/archive/remove · \
-             ^t pin · ^r rename · ^o details · ^f search · ^g graph · tab lens · /help"
+             ^t pin · ^r rename · ^o details · ^f search · ^g graph · tab lens · /help · ^h"
         );
 
         assert_eq!(
             one_line(Place::Rename),
-            "enter saves · esc cancels · ^a ^e to the ends · alt ←→ by word · ^w ^u ^k cut · ↑↓ let it go"
+            "enter saves · esc cancels · ^a ^e to the ends · alt ←→ by word · ^w ^u ^k cut · ↑↓ let it go · ^h"
         );
 
         assert_eq!(
@@ -328,11 +332,11 @@ mod tests {
 
         assert_eq!(
             one_line(Place::Answer { n: 3, multi: false }),
-            "↑↓ choose · enter takes it · 1-3 answers · esc back"
+            "↑↓ choose · enter takes it · 1-3 answers · esc back · ^h"
         );
         assert_eq!(
             one_line(Place::Answer { n: 2, multi: true }),
-            "↑↓ choose · enter takes it · 1-2 picks · space picks · esc back"
+            "↑↓ choose · enter takes it · 1-2 picks · space picks · esc back · ^h"
         );
 
         let wide = one_line(Place::Term { wide: true, live: true });
@@ -384,7 +388,8 @@ mod tests {
         for at in all {
             for k in keys(at) {
                 if k.keys.starts_with('^') && !k.keys.contains(' ') {
-                    let known = ours.iter().any(|(_, s)| *s == k.keys);
+                    // `^h` is the shortcuts' own, not a command's.
+                    let known = k.keys == "^h" || ours.iter().any(|(_, s)| *s == k.keys);
                     assert!(known, "{at:?}: {} is not a key the palette has", k.keys);
                 }
             }
@@ -417,8 +422,9 @@ mod tests {
                 }
             }
         }
-        // The list's keys take one row at 160 columns and two at 80.
-        assert_eq!(wrap(&keys(Place::List), 160).len(), 1);
+        // The list's keys take one row at 160 columns (less the footer's
+        // indent) and two at 80.
+        assert_eq!(wrap(&keys(Place::List), 158).len(), 1);
         assert_eq!(wrap(&keys(Place::List), 78).len(), 2);
     }
 
@@ -463,16 +469,43 @@ mod tests {
     }
 
     #[test]
-    fn typing_puts_the_shortcuts_away() {
-        assert!(!still_open(true, false), "a character on the line closes them");
-        assert!(still_open(true, true), "moving about keeps them");
-        assert!(!still_open(false, true));
+    fn ctrl_h_toggles_with_or_without_words_on_the_line() {
+        let h = |m| KeyEvent::new(KeyCode::Char('h'), m);
+        for line_empty in [true, false] {
+            for open in [true, false] {
+                assert_eq!(take(open, line_empty, &h(KeyModifiers::CONTROL)), Take::Toggle);
+            }
+        }
+        // A plain `h` is a letter, and alt-ctrl-h is not this chord.
+        assert_eq!(take(false, true, &h(KeyModifiers::NONE)), Take::Pass);
+        assert_eq!(
+            take(false, true, &h(KeyModifiers::CONTROL | KeyModifiers::ALT)),
+            Take::Pass
+        );
+        assert_eq!(take(false, true, &h(KeyModifiers::ALT)), Take::Pass);
+    }
+
+    #[test]
+    fn every_place_ends_with_the_key_that_puts_the_shortcuts_away() {
+        for at in [
+            Place::List,
+            Place::Hidden,
+            Place::Question,
+            Place::Answer { n: 2, multi: false },
+            Place::Term { wide: true, live: true },
+            Place::Graph,
+            Place::Events,
+            Place::Rename,
+        ] {
+            let last = keys(at).pop().unwrap();
+            assert_eq!(last.keys, "^h", "{at:?}");
+        }
     }
 
     #[test]
     fn the_footer_points_here_only_where_there_is_room() {
-        assert_eq!(with_hint("^o details".into(), 80), "^o details · ? shortcuts");
+        assert_eq!(with_hint("^o details".into(), 80), "^o details · ^h shortcuts");
         assert_eq!(with_hint("^o details".into(), 20), "^o details");
-        assert_eq!(with_hint(String::new(), 80), "? shortcuts");
+        assert_eq!(with_hint(String::new(), 80), "^h shortcuts");
     }
 }
