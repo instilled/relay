@@ -117,6 +117,7 @@ macro_rules! str_enum {
         }
     };
 }
+pub(crate) use str_enum;
 
 str_enum!(RunKind { Agent => "agent", Shell => "shell", Command => "command", Plugin => "plugin" });
 str_enum!(RunState {

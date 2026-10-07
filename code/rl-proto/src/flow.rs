@@ -25,6 +25,7 @@
 use crate::action::{Action, action_struct};
 use crate::reaction::Filter;
 use crate::schedule::{Missed, Overlap};
+use crate::types::str_enum;
 use serde::de::{self, MapAccess, Visitor};
 use serde::ser::SerializeMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -166,6 +167,45 @@ pub fn kinds<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error> {
     Ok(kinds)
 }
 
+/// Where a step of a firing is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StepStatus {
+    /// Not reached yet.
+    Pending,
+    /// Its run is going: the step's own, or the option chosen at its question.
+    Running,
+    /// Its question is open.
+    Waiting,
+    /// Its run was lost while `rld` was down; resuming picks it up.
+    Lost,
+    Done,
+    /// Not run: its `if:` was false, its question went unanswered, or a step before it did not finish well.
+    Skipped,
+    Failed,
+}
+
+/// Where a firing is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FiringStatus {
+    Running,
+    /// On a question, or a lost step.
+    Waiting,
+    Done,
+    Failed,
+    /// Stopped by hand.
+    Stopped,
+}
+
+str_enum!(StepStatus {
+    Pending => "pending", Running => "running", Waiting => "waiting", Lost => "lost",
+    Done => "done", Skipped => "skipped", Failed => "failed",
+});
+str_enum!(FiringStatus {
+    Running => "running", Waiting => "waiting", Done => "done", Failed => "failed", Stopped => "stopped",
+});
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -235,5 +275,28 @@ mod tests {
         assert_eq!(on(serde_json::json!(["a", "b"])).unwrap().on, ["a", "b"]);
         assert!(on(serde_json::json!([])).is_err());
         assert!(on(serde_json::json!(" ")).is_err());
+    }
+
+    #[test]
+    fn statuses_read_back_as_they_are_written() {
+        use StepStatus as S;
+        for s in [
+            S::Pending,
+            S::Running,
+            S::Waiting,
+            S::Lost,
+            S::Done,
+            S::Skipped,
+            S::Failed,
+        ] {
+            assert_eq!(s.as_str().parse::<StepStatus>(), Ok(s));
+            assert_eq!(serde_json::to_value(s).unwrap(), s.as_str());
+        }
+        use FiringStatus as F;
+        for f in [F::Running, F::Waiting, F::Done, F::Failed, F::Stopped] {
+            assert_eq!(f.as_str().parse::<FiringStatus>(), Ok(f));
+            assert_eq!(serde_json::to_value(f).unwrap(), f.as_str());
+        }
+        assert!("ended".parse::<FiringStatus>().is_err());
     }
 }
