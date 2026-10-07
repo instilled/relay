@@ -1,4 +1,4 @@
-//! `rl up` and `rl workspace rm`: registering says so; unregistering says so;
+//! `rl up` (and its alias `rl add`) and `rl workspace rm`: registering says so; unregistering says so;
 //! `--archive` takes the folder's ended runs off the list.
 
 use jiff::Timestamp;
@@ -87,4 +87,31 @@ fn workspace_rm_unregisters_and_archives_when_told_to() {
     assert!(out.trim().ends_with("proj unregistered"), "{out}");
 
     assert!(run(&["daemon", "stop"], tmp.path()).0);
+}
+
+#[test]
+fn rl_add_registers_a_folder_as_rl_up_does() {
+    let Some(rld) = rld_bin() else {
+        eprintln!("skipping: rld not built (run `cargo test --workspace`)");
+        return;
+    };
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let rl = |args: &[&str]| {
+        let out = Command::new(env!("CARGO_BIN_EXE_rl"))
+            .args(args)
+            .current_dir(tmp.path())
+            .env("RELAY_HOME", &home)
+            .env("RELAY_RLD_BIN", &rld)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    let ws = std::fs::canonicalize(tmp.path()).unwrap().join("proj");
+    std::fs::create_dir_all(&ws).unwrap();
+    let dir = ws.to_str().unwrap();
+    assert_eq!(rl(&["add", dir]), format!("workspace proj ({dir})"));
+    assert!(rl(&["workspace", "ls"]).contains("proj"));
+    rl(&["daemon", "stop"]);
 }

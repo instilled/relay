@@ -1,6 +1,6 @@
 //! `rl summary <what>`: the kept summary, or a new one from
 //! `assistants.summary`; `--again` asks anew. `<what>` is a run, a folder, a
-//! job or `all`. `rl config` shows the summariser beside the interpreter.
+//! flow or `all`. `rl config` shows the summariser beside the interpreter.
 
 use std::path::PathBuf;
 use std::process::Command;
