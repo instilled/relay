@@ -334,6 +334,15 @@ pub fn lost(conn: &Connection) -> Result<Vec<String>> {
     Ok(ids.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
+/// Whether run `id` was marked `run.lost`: gone in a restart, archived since or not.
+pub fn was_lost(conn: &Connection, id: &str) -> Result<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM events WHERE run = ?1 AND kind = 'run.lost')",
+        params![id],
+        |row| row.get(0),
+    )?)
+}
+
 /// Done with everything that has ended and been looked at — except what is
 /// pinned, which was kept on purpose and is only let go by name.
 pub fn archive_seen(conn: &Connection, at: Timestamp) -> Result<usize> {

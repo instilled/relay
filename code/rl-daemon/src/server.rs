@@ -166,6 +166,11 @@ pub async fn serve_with(home: Home, shutdown: CancellationToken, opts: ServeOpti
     if let Err(e) = flows.cursor().await {
         warn!(error = %format!("{e:#}"), "flows: events cursor");
     }
+    // Firings carried on from what happened while Relay was away, the runs the
+    // supervisor found ended or lost among it, before anything can fire.
+    if let Err(e) = flows.reconcile().await {
+        warn!(error = %format!("{e:#}"), "flows: carrying firings on");
+    }
     tokio::spawn(flows.clone().serve());
     let reactor = Arc::new(crate::reactions::Reactor::new(
         home.clone(),

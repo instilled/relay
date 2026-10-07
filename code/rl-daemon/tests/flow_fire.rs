@@ -292,3 +292,159 @@ async fn overlap_kill_stops_the_last_firing_and_fires() {
     let _: Run = c.ok("run.stop", json!({ "id": run })).await;
     h.stop().await;
 }
+
+/// The runs of `flow`'s step `step` in firing `firing`, archived or not.
+async fn runs_of(c: &mut Conn, firing: &str, flow: &str, step: &str) -> Vec<Run> {
+    let cause = format!("flow:{flow}/{step}");
+    let runs: Vec<Run> = c.ok("run.list", json!({ "cause": cause, "archived": true })).await;
+    runs.into_iter().filter(|r| r.chain == firing).collect()
+}
+
+/// The machine goes: run `id`'s holder, and its child with it if `child`, with no exit on
+/// record unless the holder wrote one.
+#[cfg(unix)]
+async fn kill_holder(home: &Home, id: &str, child: bool) {
+    use nix::sys::signal::{Signal, kill};
+    use nix::unistd::Pid;
+    use rl_ledger::{Ledger, sessions};
+    let ledger = Ledger::open(&home.ledger()).unwrap();
+    let id = id.to_string();
+    let row = ledger.call_blocking(move |db| sessions::get(db, &id)).unwrap().unwrap();
+    kill(Pid::from_raw(row.holder_pid as i32), Signal::SIGKILL).unwrap();
+    for _ in 0..100 {
+        if kill(Pid::from_raw(row.holder_pid as i32), None).is_err() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    if child {
+        let _ = kill(Pid::from_raw(row.pid as i32), Signal::SIGKILL);
+    }
+}
+
+/// `a` ends while Relay is away. Coming back, the firing is carried on before the socket
+/// answers, and the events loop seeing `a`'s end as well starts nothing more.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_restart_mid_firing_carries_on_once() {
+    let tmp = tempfile::tempdir().unwrap();
+    let md = "---\nsteps:\n  a:\n    run: sleep 1\n  b:\n    after: a\n    run: echo b\n---\n";
+    let Some((h, mut c)) = start(tmp.path(), "x", md).await else {
+        return;
+    };
+    let fired = approve_and_run(&mut c, "x").await;
+    let f = wait_firing(&mut c, "x", |f| step(f, "a").run.is_some()).await;
+    drop(c);
+    let home = h.home.clone();
+    h.stop().await;
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    // Its holder goes too, its exit recorded: the supervisor closes it as it comes back.
+    kill_holder(&home, step(&f, "a").run.as_deref().unwrap(), false).await;
+
+    let h = Harness::on(home).unwrap();
+    let mut c = Conn::open(&h.home).await;
+    let first: Vec<Firing> = c.ok("flow.firings", json!({ "flow": "x" })).await;
+    assert_eq!(step(&first[0], "a").status, StepStatus::Done, "{first:?}");
+    let f = wait_firing(&mut c, "x", ended).await;
+    assert_eq!(
+        (f.id.as_str(), f.status),
+        (fired.id.as_str(), FiringStatus::Done),
+        "{f:?}"
+    );
+    assert_eq!(step(&f, "b").status, StepStatus::Done);
+    // Long enough for the events loop to have seen `a`'s end too.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let b = runs_of(&mut c, &f.id, "x", "b").await;
+    assert_eq!(b.len(), 1, "b runs once: {b:?}");
+    h.stop().await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_lost_step_waits_and_resume_picks_it_up_in_the_same_firing() {
+    use rl_proto::methods::Resumed;
+    let tmp = tempfile::tempdir().unwrap();
+    let md = "---\nsteps:\n  a:\n    run: \"echo $RELAY_STEP in $RELAY_FIRING; sleep 30\"\n  b:\n    after: a\n    run: echo b\n---\n";
+    let Some((h, mut c)) = start(tmp.path(), "far", md).await else {
+        return;
+    };
+    let fired = approve_and_run(&mut c, "far").await;
+    let f = wait_firing(&mut c, "far", |f| step(f, "a").run.is_some()).await;
+    let old = step(&f, "a").run.clone().unwrap();
+    drop(c);
+    let home = h.home.clone();
+    h.stop().await;
+
+    kill_holder(&home, &old, true).await;
+
+    let h = Harness::on(home).unwrap();
+    let mut c = Conn::open(&h.home).await;
+    let f = wait_firing(&mut c, "far", |f| step(f, "a").status == StepStatus::Lost).await;
+    assert_eq!(
+        (f.id.as_str(), f.status),
+        (fired.id.as_str(), FiringStatus::Waiting),
+        "{f:?}"
+    );
+    assert_eq!(step(&f, "b").status, StepStatus::Pending);
+
+    let out: Vec<Resumed> = c.ok("run.resume", json!({ "ids": [old] })).await;
+    let new = out[0].run.clone().expect("the step is picked back up");
+    assert_eq!(new.chain, f.id, "in the same firing's chain");
+    assert_eq!(
+        new.cause,
+        Cause::Flow {
+            flow: "far".into(),
+            step: "a".into()
+        }
+    );
+    let f = wait_firing(&mut c, "far", |f| step(f, "a").status == StepStatus::Running).await;
+    assert_eq!(f.status, FiringStatus::Running);
+    assert_eq!(step(&f, "a").run.as_deref(), Some(new.id.as_str()), "{f:?}");
+    wait_journal(&h.home, &new.id, &format!("a in {}", f.id)).await;
+
+    // The run that picks it up is the step's: its end carries the firing on.
+    let _: Run = c.ok("run.stop", json!({ "id": new.id })).await;
+    let f = wait_firing(&mut c, "far", ended).await;
+    assert_eq!(f.status, FiringStatus::Stopped, "{f:?}");
+    h.stop().await;
+}
+
+#[tokio::test]
+async fn a_question_never_raised_is_raised_at_a_restart() {
+    use rl_ledger::Ledger;
+    use rl_proto::decision::Decision;
+    let tmp = tempfile::tempdir().unwrap();
+    let md = "---\nsteps:\n  review:\n    ask: sure?\n    options: { ok: {} }\n---\n";
+    let Some((h, mut c)) = start(tmp.path(), "q", md).await else {
+        return;
+    };
+    approve_and_run(&mut c, "q").await;
+    let f = wait_firing(&mut c, "q", |f| step(f, "review").decision.is_some()).await;
+    let was = step(&f, "review").decision.clone().unwrap();
+    drop(c);
+    let home = h.home.clone();
+    h.stop().await;
+
+    // As if Relay went between saving the step waiting and raising its question.
+    let ledger = Ledger::open(&home.ledger()).unwrap();
+    let (firing, d) = (f.id.clone(), was.clone());
+    ledger
+        .call_blocking(move |db| {
+            db.execute("UPDATE steps SET decision = NULL WHERE firing = ?1", [&firing])?;
+            db.execute("DELETE FROM decisions WHERE id = ?1", [&d])?;
+            Ok(())
+        })
+        .unwrap();
+    drop(ledger);
+
+    let h = Harness::on(home).unwrap();
+    let mut c = Conn::open(&h.home).await;
+    let f = wait_firing(&mut c, "q", |f| step(f, "review").decision.is_some()).await;
+    assert_eq!(f.status, FiringStatus::Waiting, "{f:?}");
+    let open: Vec<Decision> = c.ok("decision.list", json!({})).await;
+    assert_eq!(open.len(), 1, "{open:?}");
+    assert_eq!(step(&f, "review").decision.as_deref(), Some(open[0].id.as_str()));
+    assert_ne!(open[0].id, was);
+    assert_eq!(open[0].title, "sure?");
+    h.stop().await;
+}
