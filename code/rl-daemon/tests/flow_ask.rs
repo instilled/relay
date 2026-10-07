@@ -281,3 +281,41 @@ async fn the_same_group_asks_once() {
     assert_eq!(step(&fb, "review").status, StepStatus::Done);
     h.stop().await;
 }
+
+/// `overlap: kill` against a firing waiting on a question: it ends stopped, its question
+/// dismissed, and the new firing asks afresh.
+#[tokio::test]
+async fn kill_ends_a_waiting_firing_stopped_and_fires() {
+    let tmp = tempfile::tempdir().unwrap();
+    let md = "---\noverlap: kill\nsteps:\n  review:\n    ask: sure?\n    options: { go: { run: echo go } }\n  \
+              after:\n    after: review\n    run: echo after\n---\n";
+    let Some((h, mut c)) = start(tmp.path(), &[("eager", md)]).await else {
+        return;
+    };
+    let first = approve_and_run(&mut c, "eager").await;
+    let f = wait_firing(&mut c, "eager", waiting).await;
+    let asked = the_question(&mut c, &f).await;
+    let second: Firing = c.ok("flow.run", json!({ "name": "eager" })).await;
+    assert_ne!(second.id, first.id);
+    let firings: Vec<Firing> = c.ok("flow.firings", json!({ "flow": "eager" })).await;
+    let old = firings.iter().find(|f| f.id == first.id).unwrap();
+    assert_eq!(old.status, FiringStatus::Stopped, "{old:?}");
+    assert!(old.ended_at.is_some());
+    assert_eq!(step(old, "review").status, StepStatus::Stopped);
+    assert_eq!(step(old, "after").status, StepStatus::Skipped);
+    let d: Decision = c.ok("decision.get", json!({ "id": asked.id })).await;
+    assert_eq!(d.status, DecisionStatus::Dismissed);
+    let new = wait_firing(&mut c, "eager", waiting).await;
+    assert_eq!(new.id, second.id);
+    let asked_again = the_question(&mut c, &new).await;
+    assert_ne!(asked_again.id, asked.id);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let firings: Vec<Firing> = c.ok("flow.firings", json!({ "flow": "eager" })).await;
+    let old = firings.iter().find(|f| f.id == first.id).unwrap();
+    assert_eq!(
+        step(old, "review").status,
+        StepStatus::Stopped,
+        "the dismissal changes nothing after"
+    );
+    h.stop().await;
+}

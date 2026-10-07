@@ -609,3 +609,161 @@ async fn a_question_raised_but_not_recorded_is_not_asked_twice() {
     assert_eq!(open[0].id, was);
     h.stop().await;
 }
+
+/// Polls `flow.firings` every 50 ms for 10 s until there are `n` firings, all ended; newest first.
+async fn wait_firings(c: &mut Conn, flow: &str, n: usize) -> Vec<Firing> {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let firings: Vec<Firing> = c.ok("flow.firings", json!({ "flow": flow })).await;
+        if firings.len() >= n && firings.iter().all(ended) {
+            return firings;
+        }
+        assert!(Instant::now() < deadline, "`{flow}` never fired {n} times: {firings:?}");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+#[tokio::test]
+async fn every_fires_on_its_cadence_and_says_when_it_last_did() {
+    let tmp = tempfile::tempdir().unwrap();
+    let md = "---\nwhen: every 1s\nsteps:\n  a:\n    run: 'echo \"last=$RELAY_LAST_FIRING.\"'\n---\n";
+    let Some((h, mut c)) = start(tmp.path(), "tick", md).await else {
+        return;
+    };
+    let _: Flow = c.ok("flow.approve", json!({ "name": "tick" })).await;
+    let firings = wait_firings(&mut c, "tick", 2).await;
+    let (second, first) = (&firings[firings.len() - 2], &firings[firings.len() - 1]);
+    for f in [first, second] {
+        assert_eq!((f.trigger.as_str(), f.status), ("when", FiringStatus::Done), "{f:?}");
+    }
+    wait_journal(&h.home, step(first, "a").run.as_deref().unwrap(), "last=.").await;
+    let said = wait_journal(&h.home, step(second, "a").run.as_deref().unwrap(), "last=2").await;
+    assert!(
+        said.contains(&format!("last={}.", first.started_at)),
+        "{said:?} {first:?}"
+    );
+    let fired: Vec<Event> = c.ok("event.list", json!({ "kinds": ["flow.fired"] })).await;
+    let lasts: Vec<_> = fired.iter().map(|e| e.data.clone().unwrap()["last"].clone()).collect();
+    assert_eq!(lasts[0], serde_json::Value::Null, "the first firing had none before it");
+    assert_eq!(lasts[1], json!(first.started_at));
+    h.stop().await;
+}
+
+#[tokio::test]
+async fn a_paused_flow_does_not_fire() {
+    let tmp = tempfile::tempdir().unwrap();
+    let md = "---\nwhen: every 1s\nsteps:\n  a:\n    run: echo hi\n---\n";
+    let Some((h, mut c)) = start(tmp.path(), "napping", md).await else {
+        return;
+    };
+    let _: Flow = c.ok("flow.pause", json!({ "name": "napping" })).await;
+    let _: Flow = c.ok("flow.approve", json!({ "name": "napping" })).await;
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+    let firings: Vec<Firing> = c.ok("flow.firings", json!({ "flow": "napping" })).await;
+    assert!(firings.is_empty(), "{firings:?}");
+    let _: Flow = c.ok("flow.resume", json!({ "name": "napping" })).await;
+    let firings = wait_firings(&mut c, "napping", 1).await;
+    assert_eq!(firings[0].trigger, "when");
+    let skipped: Vec<Event> = c.ok("event.list", json!({ "kinds": ["flow.skipped"] })).await;
+    let missed = skipped
+        .iter()
+        .filter(|e| e.data.as_ref().unwrap()["reason"] == "missed");
+    assert_eq!(
+        missed.count(),
+        0,
+        "nothing slept through while paused is said missed: {skipped:?}"
+    );
+    h.stop().await;
+}
+
+/// `queue`: a `when` firing due while the last still runs waits for it, and is not skipped.
+#[tokio::test]
+async fn a_queued_cadence_waits_for_the_last_firing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let md = "---\nwhen: every 1s\noverlap: queue\nsteps:\n  a:\n    run: sleep 2\n---\n";
+    let Some((h, mut c)) = start(tmp.path(), "patient", md).await else {
+        return;
+    };
+    let _: Flow = c.ok("flow.approve", json!({ "name": "patient" })).await;
+    let firings = wait_firings(&mut c, "patient", 2).await;
+    let (second, first) = (&firings[firings.len() - 2], &firings[firings.len() - 1]);
+    let gap = second.started_at.duration_since(first.ended_at.unwrap());
+    assert!(
+        gap.as_millis() >= 0 && gap.as_millis() < 1500,
+        "the second fired once the first was over: {gap:?}"
+    );
+    let skipped: Vec<Event> = c.ok("event.list", json!({ "kinds": ["flow.skipped"] })).await;
+    assert!(skipped.is_empty(), "{skipped:?}");
+    h.stop().await;
+}
+
+/// A firing slept through by more than two minutes: `skip` says so and does not fire;
+/// `catch-up-once` fires once.
+#[tokio::test]
+async fn a_firing_slept_through_follows_missed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = Home::at(tmp.path().join("home"));
+    let md = |missed: &str| format!("---\nwhen: every 1h\nmissed: {missed}\nsteps:\n  a:\n    run: echo hi\n---\n");
+    write(&home, "skipper", &[("flow.md", &md("skip"))]);
+    write(&home, "catcher", &[("flow.md", &md("catch-up-once"))]);
+    write(&home, "rester", &[("flow.md", &md("catch-up-once"))]);
+    let Some(h) = Harness::on(home.clone()) else { return };
+    let mut c = Conn::open(&h.home).await;
+    for name in ["skipper", "catcher", "rester"] {
+        let _: Flow = c.ok("flow.approve", json!({ "name": name })).await;
+    }
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while {
+        let all: Vec<Flow> = c.ok("flow.list", json!({})).await;
+        all.iter().any(|f| f.next_at.is_none())
+    } {
+        assert!(Instant::now() < deadline, "never planned");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let _: Flow = c.ok("flow.pause", json!({ "name": "rester" })).await;
+    drop(c);
+    h.stop().await;
+    let ten_minutes_ago = jiff::Timestamp::now().as_millisecond() - 600_000;
+    behind(&home, move |db| {
+        db.execute("UPDATE flows SET next_at = ?1", [ten_minutes_ago])?;
+        Ok(())
+    });
+
+    let h = Harness::on(home).unwrap();
+    let mut c = Conn::open(&h.home).await;
+    let caught = wait_firings(&mut c, "catcher", 1).await;
+    assert_eq!(caught.len(), 1, "{caught:?}");
+    // Resumed, a paused flow is planned from now: what it slept through is not made up.
+    let _: Flow = c.ok("flow.resume", json!({ "name": "rester" })).await;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let skipped = loop {
+        let skipped: Vec<Event> = c.ok("event.list", json!({ "kinds": ["flow.skipped"] })).await;
+        if !skipped.is_empty() {
+            break skipped;
+        }
+        assert!(Instant::now() < deadline, "the missed firing was never said");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    let data = skipped[0].data.clone().unwrap();
+    assert_eq!(
+        (data["flow"].as_str(), data["reason"].as_str()),
+        (Some("skipper"), Some("missed"))
+    );
+    let none: Vec<Firing> = c.ok("flow.firings", json!({ "flow": "skipper" })).await;
+    assert!(none.is_empty(), "{none:?}");
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    let all: Vec<Flow> = c.ok("flow.list", json!({})).await;
+    for f in all {
+        assert!(
+            f.next_at.unwrap() > jiff::Timestamp::now(),
+            "planned again, ahead: {f:?}"
+        );
+    }
+    let skipped: Vec<Event> = c.ok("event.list", json!({ "kinds": ["flow.skipped"] })).await;
+    assert_eq!(skipped.len(), 1, "{skipped:?}");
+    let caught: Vec<Firing> = c.ok("flow.firings", json!({ "flow": "catcher" })).await;
+    assert_eq!(caught.len(), 1, "caught up once: {caught:?}");
+    let rested: Vec<Firing> = c.ok("flow.firings", json!({ "flow": "rester" })).await;
+    assert!(rested.is_empty(), "{rested:?}");
+    h.stop().await;
+}

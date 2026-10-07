@@ -6,6 +6,7 @@
 
 use super::Flows;
 use super::ask::{option_of, question};
+use super::triggers::vars;
 use crate::action::{expand_home, run_spec};
 use anyhow::{Context, Result, anyhow};
 use jiff::Timestamp;
@@ -24,7 +25,7 @@ use rl_proto::schedule::Overlap;
 use rl_proto::types::{Cause, Event, Run, event_kind};
 use rusqlite::Connection;
 use serde_json::json;
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use tracing::{info, warn};
@@ -35,10 +36,8 @@ const OUT_MAX: usize = 64 << 10;
 /// What fired a firing; `firings.trigger` is `when`, `on` or `hand`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Fired {
-    /// On time; `last` is when the flow last fired.
-    When {
-        last: Option<Timestamp>,
-    },
+    /// On time.
+    When,
     On,
     Hand,
 }
@@ -46,7 +45,7 @@ pub enum Fired {
 impl Fired {
     fn as_str(self) -> &'static str {
         match self {
-            Fired::When { .. } => "when",
+            Fired::When => "when",
             Fired::On => "on",
             Fired::Hand => "hand",
         }
@@ -97,7 +96,8 @@ pub(super) enum Ready {
 
 impl Flows {
     /// Starts a firing of `name`: refused unless approved and loaded; `overlap` decides about a
-    /// firing still going. Records `flow.fired`.
+    /// firing still going. Records `flow.fired`. `None` when not fired: `skip` says so in
+    /// `flow.skipped`, as `queue` does for all but `when`, which stays due and says nothing.
     pub async fn fire(&self, name: &str, by: Fired, event: Option<&Event>) -> Result<Option<Firing>> {
         let _going = self.going.lock().await;
         let n = name.to_string();
@@ -117,24 +117,14 @@ impl Flows {
         let def: FlowDef = serde_json::from_value(flow.def.clone()).context("the flow as loaded")?;
         if let Some(going) = open.first() {
             match def.overlap {
+                Overlap::Queue if by == Fired::When => return Ok(None),
                 Overlap::Skip | Overlap::Queue => {
                     let data = json!({ "flow": name, "firing": going.id, "reason": "overlap" });
                     let summary = format!("flow `{name}` is still firing");
                     self.record(&def, event_kind::FLOW_SKIPPED, summary, data).await?;
                     return Ok(None);
                 }
-                Overlap::Kill => {
-                    for run in open
-                        .iter()
-                        .flat_map(|f| &f.steps)
-                        .filter(|s| s.status == StepStatus::Running)
-                        .filter_map(|s| s.run.as_deref())
-                    {
-                        if let Err(e) = self.supervisor.stop(run, false).await {
-                            warn!(flow = name, run, error = %format!("{e:#}"), "stopping the last firing");
-                        }
-                    }
-                }
+                Overlap::Kill => self.kill(name, &open).await,
             }
         }
 
@@ -146,10 +136,7 @@ impl Flows {
         if let Some(e) = event {
             data["event"] = json!(e.id);
         }
-        if let Fired::When { last: Some(last) } = by {
-            data["last"] = json!(last);
-        }
-        let fired = self.event(&def, event_kind::FLOW_FIRED, format!("flow `{name}` fired"), data);
+        let mut fired = self.event(&def, event_kind::FLOW_FIRED, format!("flow `{name}` fired"), data);
         let (n, i, ev) = (name.to_string(), id.clone(), event.map(|e| e.id));
         self.ledger
             .call(move |c| {
@@ -165,6 +152,12 @@ impl Flows {
                         steps: &names,
                     },
                 )?;
+                // When it last fired, from where a step's `RELAY_LAST_FIRING` reads it too.
+                if by == Fired::When
+                    && let (Some(last), Some(data)) = (firings::before(c, &i)?, fired.data.as_mut())
+                {
+                    data["last"] = json!(last);
+                }
                 events::append(c, &fired)?;
                 flows::set_fired(c, &n, now)
             })
@@ -177,6 +170,31 @@ impl Flows {
             .await?
             .with_context(|| format!("firing {id}"))
             .map(Some)
+    }
+
+    /// Ends every open firing of `name`, for `overlap: kill`: a running step's run is stopped,
+    /// and its end stops the firing; a step waiting, on a question or a lost run, stops now,
+    /// its question dismissed. The caller holds `going`.
+    async fn kill(&self, name: &str, open: &[Firing]) {
+        let mut stop = VecDeque::new();
+        for f in open {
+            for s in &f.steps {
+                match (s.status, s.run.as_deref()) {
+                    (StepStatus::Running, Some(run)) => {
+                        if let Err(e) = self.supervisor.stop(run, false).await {
+                            warn!(flow = name, run, error = %format!("{e:#}"), "stopping the last firing");
+                        }
+                    }
+                    (StepStatus::Waiting | StepStatus::Lost, _) => {
+                        stop.push_back((f.id.clone(), Happened::Stopped { step: s.name.clone() }));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if let Err(e) = self.follow(stop).await {
+            warn!(flow = name, error = %format!("{e:#}"), "stopping the last firing");
+        }
     }
 
     /// Hands one event to the firings it is about: a step's run ending, a step's question answered.
@@ -371,7 +389,13 @@ impl Flows {
         }
     }
 
-    async fn record(&self, def: &FlowDef, kind: &str, summary: String, data: serde_json::Value) -> Result<()> {
+    pub(super) async fn record(
+        &self,
+        def: &FlowDef,
+        kind: &str,
+        summary: String,
+        data: serde_json::Value,
+    ) -> Result<()> {
         let ev = self.event(def, kind, summary, data);
         self.ledger.call(move |c| events::append(c, &ev).map(|_| ())).await
     }
@@ -395,10 +419,8 @@ fn moved(c: &Connection, home: &Home, id: &str, h: &Happened) -> Result<Option<M
         steps.clear();
     }
     let firing = firings::get(c, id)?.context("the firing")?;
-    let facts = Facts {
-        conn: c,
-        steps: &firing.steps,
-    };
+    let event = event_of(c, &firing)?;
+    let facts = Facts::new(c, &firing.steps, event.as_ref());
     let todo = advance(&def, &mut steps, h, &facts);
     let over = todo.iter().find_map(|d| match d {
         Do::End(s) => Some(*s),
@@ -420,10 +442,8 @@ pub(super) fn def_of(c: &Connection, id: &str) -> Result<Option<FlowDef>> {
 /// The firing `id` as saved, with what `todo` needs made ready.
 pub(super) fn laid_out(c: &Connection, home: &Home, id: &str, def: FlowDef, todo: Vec<Do>) -> Result<Moved> {
     let firing = firings::get(c, id)?.context("the firing, saved")?;
-    let facts = Facts {
-        conn: c,
-        steps: &firing.steps,
-    };
+    let event = event_of(c, &firing)?;
+    let facts = Facts::new(c, &firing.steps, event.as_ref());
     let dir = home.flow_dir(&def.name);
     let todo = todo
         .into_iter()
@@ -437,13 +457,6 @@ pub(super) fn laid_out(c: &Connection, home: &Home, id: &str, def: FlowDef, todo
             Ok((d, ready.unwrap_or(Ready::Nothing)))
         })
         .collect::<Result<_>>()?;
-    let event = match firing.event {
-        Some(e) => events::get(c, e)?.map(|e| {
-            let run = e.run.as_deref().and_then(|r| runs::get(c, r).ok().flatten());
-            (e, run)
-        }),
-        None => None,
-    };
     let last = firings::before(c, id)?;
     Ok(Moved {
         def,
@@ -452,6 +465,15 @@ pub(super) fn laid_out(c: &Connection, home: &Home, id: &str, def: FlowDef, todo
         last,
         todo,
     })
+}
+
+/// The event that fired `firing`, and that event's run.
+fn event_of(c: &Connection, firing: &Firing) -> Result<Option<(Event, Option<Run>)>> {
+    let Some(e) = firing.event else { return Ok(None) };
+    Ok(events::get(c, e)?.map(|e| {
+        let run = e.run.as_deref().and_then(|r| runs::get(c, r).ok().flatten());
+        (e, run)
+    }))
 }
 
 fn run_of<'a>(def: &'a FlowDef, step: &str) -> Option<&'a Action> {
@@ -491,14 +513,25 @@ fn filled(action: &Action, dir: &Path, facts: &dyn Lookup) -> Result<Action> {
 }
 
 /// What a firing's steps left: `{x.out}` from the step's run, `{x.choice}` and `{x.note}`
-/// from its question.
+/// from its question; and what its event said, `{event.summary}`, `{event.data.x}`.
 struct Facts<'a> {
     conn: &'a Connection,
     steps: &'a [StepState],
+    event: Option<BTreeMap<String, String>>,
+}
+
+impl<'a> Facts<'a> {
+    fn new(conn: &'a Connection, steps: &'a [StepState], event: Option<&(Event, Option<Run>)>) -> Self {
+        let event = event.map(|(e, run)| vars(e, run.as_ref()));
+        Self { conn, steps, event }
+    }
 }
 
 impl Lookup for Facts<'_> {
     fn get(&self, r: &Ref) -> Option<String> {
+        if r.head == "event" {
+            return self.event.as_ref()?.get(&r.rest).cloned();
+        }
         let s = self.steps.iter().find(|s| s.name == r.head)?;
         let found = match r.rest.as_str() {
             "out" => {
@@ -599,7 +632,7 @@ mod tests {
                         decision: None,
                     },
                 ];
-                let facts = Facts { conn: c, steps: &steps };
+                let facts = Facts::new(c, &steps, None);
                 let shell = Action {
                     run: Some(Task::Shell("echo {probe.out}".into())),
                     ..Default::default()

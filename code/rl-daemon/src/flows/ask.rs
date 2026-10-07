@@ -81,24 +81,36 @@ impl Flows {
     }
 
     /// In a firing with a stopped step, its open questions are dismissed, so no option
-    /// starts inside it; the steps that asked them are returned, to be left unanswered.
+    /// starts inside it — a step's stopped while it waited too; the steps still waiting are
+    /// returned, to be left unanswered.
     pub(super) async fn dismiss_if_stopped(&self, m: &Moved) -> Vec<String> {
         let steps = &m.firing.steps;
         if !steps.iter().any(|s| s.status == StepStatus::Stopped) {
             return Vec::new();
         }
         let mut left = Vec::new();
-        for s in steps.iter().filter(|s| s.status == StepStatus::Waiting) {
+        for s in steps
+            .iter()
+            .filter(|s| matches!(s.status, StepStatus::Waiting | StepStatus::Stopped))
+        {
             if let Some(d) = s.decision.clone() {
                 let (firing, step, i) = (m.firing.id.clone(), s.name.clone(), d.clone());
-                let ours = self.ledger.call(move |c| firings::by_decision(c, &i)).await;
-                if matches!(ours, Ok(Some(o)) if o == (firing, step))
+                let open = self
+                    .ledger
+                    .call(move |c| {
+                        let ours = firings::by_decision(c, &i)? == Some((firing, step));
+                        Ok(ours && decisions::get(c, &i)?.is_some_and(|d| d.status.is_open()))
+                    })
+                    .await;
+                if matches!(open, Ok(true))
                     && let Err(e) = self.decisions.dismiss(&d, Some("its firing stopped".into())).await
                 {
                     warn!(firing = m.firing.id, step = s.name, decision = d, error = %format!("{e:#}"), "dismissing a stopped firing's question");
                 }
             }
-            left.push(s.name.clone());
+            if s.status == StepStatus::Waiting {
+                left.push(s.name.clone());
+            }
         }
         left
     }

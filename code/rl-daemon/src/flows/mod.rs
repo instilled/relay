@@ -8,10 +8,12 @@ pub mod engine;
 mod restart;
 pub(crate) mod rpc;
 mod store;
+mod triggers;
 
 use crate::decisions::Decisions;
 use crate::supervisor::Supervisor;
 use anyhow::Result;
+use jiff::Timestamp;
 use rl_core::Home;
 use rl_detect::Registry;
 use rl_ledger::{Ledger, events, meta};
@@ -74,17 +76,21 @@ impl Flows {
         self.broken.lock().unwrap().clone()
     }
 
-    /// The loop that fires flows and carries their firings out: each event,
-    /// once, to the firings it is about.
+    /// The loop that fires flows and carries their firings out: what is due fired, then each
+    /// event, once, to the firings it is about and the flows that hear it.
     pub async fn serve(self: Arc<Self>) {
         loop {
+            let next = self.due(Timestamp::now()).await.unwrap_or_else(|e| {
+                warn!(error = %format!("{e:#}"), "flows: when");
+                None
+            });
             if let Err(e) = self.drain().await {
                 warn!(error = %format!("{e:#}"), "flows");
             }
             tokio::select! {
                 _ = self.shutdown.cancelled() => return,
                 _ = self.wake.notified() => {}
-                _ = tokio::time::sleep(TICK) => {}
+                _ = tokio::time::sleep(nap(next, Timestamp::now())) => {}
             }
         }
     }
@@ -100,6 +106,9 @@ impl Flows {
             for e in &batch {
                 if let Err(err) = self.on_event(e).await {
                     warn!(event = e.id, kind = e.kind, error = %format!("{err:#}"), "flows: event");
+                }
+                if let Err(err) = self.heard(e).await {
+                    warn!(event = e.id, kind = e.kind, error = %format!("{err:#}"), "flows: on");
                 }
             }
             self.ledger.call(move |c| meta::set_i64(c, CURSOR, last)).await?;
@@ -125,5 +134,14 @@ impl Flows {
     pub(crate) fn shown(&self, mut f: Flow) -> Flow {
         f.source = self.home.flow_dir(&f.name);
         f
+    }
+}
+
+/// How long the loop naps: until `next` is due, a tick at most. One already due (a `queue`
+/// waiting on its last firing) is looked at again in a tick.
+fn nap(next: Option<Timestamp>, now: Timestamp) -> Duration {
+    match next.filter(|at| *at > now) {
+        Some(at) => at.duration_since(now).unsigned_abs().min(TICK),
+        None => TICK,
     }
 }

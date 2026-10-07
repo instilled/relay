@@ -73,6 +73,9 @@ async fn set_paused(d: &Daemon, name: String, paused: bool) -> Result<Flow, RpcE
     if !done {
         return Err(missing(d, &name));
     }
+    if !paused {
+        d.flows.replan(&name).await.map_err(internal)?;
+    }
     get(d, &name).await
 }
 

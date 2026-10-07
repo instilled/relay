@@ -18,7 +18,8 @@ pub enum Happened {
         step: String,
         ok: bool,
     },
-    /// A step's run was stopped by hand: the firing stops.
+    /// A step's run was stopped by hand, or its firing killed while the step waited: the
+    /// firing stops.
     Stopped {
         step: String,
     },
@@ -72,7 +73,10 @@ pub fn advance(def: &FlowDef, steps: &mut BTreeMap<String, StepStatus>, h: &Happ
             }
         }
         Happened::Stopped { step } => {
-            if !moved(steps, step, Running, Stopped) {
+            if ![Running, Waiting, Lost]
+                .iter()
+                .any(|from| moved(steps, step, *from, Stopped))
+            {
                 return todo;
             }
             for s in steps.values_mut().filter(|s| **s == Pending) {
@@ -447,6 +451,23 @@ Super high-level, one or two lines per teammate, what they worked on yesterday:
         assert_eq!(status(&s), FiringStatus::Stopped);
         assert_eq!(advance(&f, &mut s, &stopped, &x), []);
         assert_eq!(advance(&f, &mut s, &ended("probe", true), &x), []);
+    }
+
+    #[test]
+    fn a_step_waiting_or_lost_stops_too() {
+        let f = prod_logs();
+        let x = facts(&[]);
+        for waiting in [StepStatus::Waiting, StepStatus::Lost] {
+            let mut s = BTreeMap::new();
+            advance(&f, &mut s, &Happened::Started, &x);
+            s.insert("probe".into(), waiting);
+            let stopped = Happened::Stopped { step: "probe".into() };
+            assert_eq!(advance(&f, &mut s, &stopped, &x), [Do::End(FiringStatus::Stopped)]);
+            assert_eq!(s["probe"], StepStatus::Stopped);
+            assert_eq!(s["triage"], StepStatus::Skipped);
+            let late = Happened::Unanswered { step: "probe".into() };
+            assert_eq!(advance(&f, &mut s, &late, &x), [], "an answer after changes nothing");
+        }
     }
 
     #[test]
