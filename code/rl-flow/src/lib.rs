@@ -2,4 +2,6 @@
 //! does next. No I/O — the daemon hands in what it read and carries out the
 //! answer.
 
+pub mod cond;
 pub mod doc;
+pub mod template;
