@@ -221,6 +221,10 @@ pub struct Flow {
     pub def: serde_json::Value,
     /// The folder.
     pub source: PathBuf,
+    /// Its `in`, resolved: `~` expanded and the path made canonical, as the
+    /// projects are registered — where its row stands on the panel.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder: Option<PathBuf>,
     pub paused: bool,
     pub approved_hash: Option<String>,
     pub last_fired_at: Option<Timestamp>,
@@ -566,6 +570,7 @@ mod tests {
             hash: "h2".into(),
             def: serde_json::json!({ "trigger": trigger }),
             source: "/h/flows/pulse".into(),
+            folder: None,
             paused: false,
             approved_hash: Some("h1".into()),
             last_fired_at: None,

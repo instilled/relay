@@ -155,10 +155,10 @@ pub const EVERYWHERE: &str = "everywhere";
 const EVERYWHERE_KEY: &str = "\u{0}everywhere";
 
 /// The group a flow's row stands in, as `(key, folder)`: the folder it is
-/// `in`, else `everywhere` — also for a flow not loaded now, whose `in` is
-/// not known.
+/// `in` (as the daemon resolved it, so it is the project's own path), else
+/// `everywhere` — also for a flow not loaded now, whose `in` is not known.
 fn flow_group(flows: &[Flow], name: &str) -> (String, PathBuf) {
-    match flows.iter().find(|f| f.name == name).and_then(flows::in_of) {
+    match flows.iter().find(|f| f.name == name).and_then(|f| f.folder.clone()) {
         Some(p) => (p.to_string_lossy().into_owned(), p),
         None => (EVERYWHERE_KEY.to_string(), PathBuf::new()),
     }
@@ -295,7 +295,7 @@ pub fn chips(flows: &[Flow], scope: Option<&Path>, now: Timestamp) -> Vec<Chip> 
     let mut out: Vec<Chip> = flows
         .iter()
         .filter(|f| f.removed_at.is_none())
-        .filter(|f| flows::in_of(f).as_deref() == scope)
+        .filter(|f| f.folder.as_deref() == scope)
         .map(|f| Chip {
             name: f.name.clone(),
             status: f.status(),
@@ -631,14 +631,28 @@ pub fn cause_words(c: &Cause) -> String {
     }
 }
 
-/// Who asked a question, in words.
-pub fn asked_by(d: &Decision, run: Option<&Run>) -> String {
+/// The firing a question is a flow's ask in: the one whose id is its chain.
+pub fn firing_of<'a>(d: &Decision, firings: &'a [Firing]) -> Option<&'a Firing> {
+    firings.iter().find(|f| f.id == d.chain)
+}
+
+/// Who asked a question, in words: the run that asked; else the flow whose
+/// firing it is, and the step that asks (`flow prod-logs · review`); else you.
+pub fn asked_by(d: &Decision, run: Option<&Run>, firing: Option<&Firing>) -> String {
     if let Some(r) = run {
         return r.title.clone();
     }
-    match d.group.as_deref().and_then(|g| g.strip_prefix("reaction:")) {
-        Some(rule) => format!("rule {rule}"),
-        None => "you".into(),
+    let Some(f) = firing else {
+        return "you".into();
+    };
+    let step = f
+        .steps
+        .iter()
+        .find(|s| s.decision.as_deref() == Some(d.id.as_str()))
+        .or_else(|| f.steps.iter().find(|s| s.status == rl_proto::flow::StepStatus::Waiting));
+    match step {
+        Some(s) => format!("flow {} · {}", f.flow, s.name),
+        None => format!("flow {}", f.flow),
     }
 }
 
@@ -805,10 +819,7 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
             .unwrap_or_else(|| q.workspace.to_string_lossy().into_owned());
         let name = names.group(&key);
         // A flow's question is its firing's: the chain is the firing.
-        let by = d
-            .firings
-            .iter()
-            .find(|f| f.id == q.chain)
+        let by = firing_of(q, &d.firings)
             .map(|f| f.flow.as_str())
             .or(asker.and_then(|r| match &r.cause {
                 Cause::Flow { flow, .. } => Some(flow.as_str()),
@@ -1382,7 +1393,7 @@ mod tests {
             workspace: ws.into(),
             run: run.map(Into::into),
             chain: id.into(),
-            group: Some("reaction:tests-failed".into()),
+            group: None,
             title: format!("question {id}"),
             summary: None,
             options: vec![DecisionOption {
@@ -1470,6 +1481,7 @@ mod tests {
                 "trigger": { "when": { "Every": 1800 }, "on": [] },
             }),
             source: format!("/h/flows/{name}").into(),
+            folder: in_.map(PathBuf::from),
             paused: false,
             approved_hash: Some("h".into()),
             last_fired_at: None,
@@ -2366,10 +2378,24 @@ mod tests {
         );
         let q = question("q", "/w", None, "2026-09-10T11:01:00Z");
         let run = item("r", RunState::Failed, "/w", "2026-09-10T11:00:00Z", false).run;
-        assert_eq!(asked_by(&q, Some(&run)), "title r");
-        let mut plain = q.clone();
-        plain.group = None;
-        assert_eq!(asked_by(&plain, None), "you");
+        assert_eq!(asked_by(&q, Some(&run), None), "title r");
+        assert_eq!(asked_by(&q, None, None), "you");
+        // A flow's ask step: its firing is the question's chain, and the step
+        // that asks is the one holding it.
+        let mut asking = Firing {
+            id: "q".into(),
+            ..firing(
+                FiringStatus::Waiting,
+                &[("probe", StepStatus::Done), ("review", StepStatus::Waiting)],
+            )
+        };
+        let firings = [asking.clone()];
+        assert_eq!(firing_of(&q, &firings).map(|f| f.id.as_str()), Some("q"));
+        assert_eq!(asked_by(&q, None, firing_of(&q, &firings)), "flow prod-logs · review");
+        asking.steps[1].status = StepStatus::Done;
+        asking.steps[1].decision = Some("q".into());
+        assert_eq!(asked_by(&q, None, Some(&asking)), "flow prod-logs · review");
+        assert!(firing_of(&question("other", "/w", None, "2026-09-10T11:01:00Z"), &firings).is_none());
     }
 
     #[test]

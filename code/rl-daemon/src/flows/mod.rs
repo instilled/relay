@@ -132,9 +132,14 @@ impl Flows {
             .await
     }
 
-    /// A flow as a client is shown it: with where its folder is.
+    /// A flow as a client is shown it: with where its folder is, and its
+    /// `in` resolved as the projects are registered.
     pub(crate) fn shown(&self, mut f: Flow) -> Flow {
         f.source = self.home.flow_dir(&f.name);
+        f.folder = f.def.get("in_").and_then(|p| p.as_str()).map(|p| {
+            let p = crate::action::expand_home(std::path::Path::new(p));
+            std::fs::canonicalize(&p).unwrap_or(p)
+        });
         f
     }
 }

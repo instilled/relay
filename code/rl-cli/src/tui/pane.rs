@@ -12,7 +12,7 @@ use ratatui::text::{Line, Span};
 use rl_core::display_path;
 use rl_core::time::{fmt_age, fmt_duration, fmt_when};
 use rl_proto::decision::Decision;
-use rl_proto::flow::{Flow, NotLoaded};
+use rl_proto::flow::{Firing, Flow, NotLoaded};
 use rl_proto::methods::DigestItem;
 use rl_proto::types::{Event, Run, RunState, Summary};
 use std::path::Path;
@@ -566,10 +566,13 @@ pub(crate) fn wrap(text: &str, width: usize) -> Vec<String> {
 /// summary, as in the run's own pane), what it says, and what can be done
 /// about it — each choice on a row of its own, `at` the highlighted one while
 /// it is being answered. `picked` are the options marked so far where it
-/// takes several. Laid out for `width` columns.
+/// takes several. Laid out for `width` columns. `firing`: the flow's firing
+/// it is asked in, when it is a flow's.
+#[allow(clippy::too_many_arguments)]
 pub fn question_lines(
     d: &Decision,
     asker: Option<&Run>,
+    firing: Option<&Firing>,
     summary: Option<&Summary>,
     picked: &[usize],
     at: Option<usize>,
@@ -592,7 +595,11 @@ pub fn question_lines(
             None,
         );
     }
-    let mut who = format!("asked by {} · {} ago", asked_by(d, asker), fmt_age(d.created_at, now));
+    let mut who = format!(
+        "asked by {} · {} ago",
+        asked_by(d, asker, firing),
+        fmt_age(d.created_at, now)
+    );
     if let Some(e) = d.expires_at {
         if e > now {
             who.push_str(&format!(" · {} left", fmt_duration(e.duration_since(now))));
@@ -1019,8 +1026,8 @@ mod tests {
             id: "kfmpg3sw".into(),
             workspace: "/w".into(),
             run: None,
-            chain: "kfmpg3sw".into(),
-            group: Some("reaction:tests-failed".into()),
+            chain: "fi1".into(),
+            group: None,
             title: "nightly tests failed".into(),
             summary: Some("test parser ... FAILED".into()),
             options: vec![
@@ -1058,10 +1065,26 @@ mod tests {
                 .collect::<Vec<_>>()
                 .join("\n")
         };
-        let p = question_lines(&d, None, None, &[], None, 80, now);
+        // Asked by a flow's step: the firing whose id is its chain.
+        let firing = rl_proto::flow::Firing {
+            id: "fi1".into(),
+            flow: "nightly".into(),
+            trigger: "when".into(),
+            event: None,
+            status: rl_proto::flow::FiringStatus::Waiting,
+            started_at: t,
+            ended_at: None,
+            steps: vec![rl_proto::flow::StepState {
+                name: "review".into(),
+                status: rl_proto::flow::StepStatus::Waiting,
+                run: None,
+                decision: Some("kfmpg3sw".into()),
+            }],
+        };
+        let p = question_lines(&d, None, Some(&firing), None, &[], None, 80, now);
         let s = shown(&p);
         assert!(
-            s.starts_with(" ? nightly tests failed\n asked by rule tests-failed · 7h ago · 1h00m left"),
+            s.starts_with(" ? nightly tests failed\n asked by flow nightly · review · 7h ago · 1h00m left"),
             "{s}"
         );
         assert!(s.contains("\n test parser ... FAILED\n"), "{s}");
@@ -1080,7 +1103,7 @@ mod tests {
         assert_eq!(p.hits[0], None);
 
         // Being answered: a caret on the highlighted choice, and the keys that move it.
-        let s = shown(&question_lines(&d, None, None, &[1], Some(1), 80, now));
+        let s = shown(&question_lines(&d, None, None, None, &[1], Some(1), 80, now));
         assert!(s.contains("\n ❯ 2  ignore     ignore  ◆\n"), "{s}");
         assert!(s.contains("↑↓ choose · enter takes it · 1-2 answers · esc back"), "{s}");
 
@@ -1098,14 +1121,14 @@ mod tests {
                 Choice::Dismiss
             ]
         );
-        let s = shown(&question_lines(&multi, Some(&asker), None, &[0], None, 80, now));
+        let s = shown(&question_lines(&multi, Some(&asker), None, None, &[0], None, 80, now));
         assert!(s.contains("↵  answer     with the 1 picked"), "{s}");
         assert!(s.contains("↗  attach     nightly · still going"), "{s}");
 
         // Narrow, a long summary wraps onto rows of its own.
         let mut long = d.clone();
         long.summary = Some("one two three four five six".into());
-        let s = shown(&question_lines(&long, None, None, &[], None, 12, now));
+        let s = shown(&question_lines(&long, None, None, None, &[], None, 12, now));
         assert!(s.contains("\n one two\n three four\n five six\n"), "{s}");
 
         // The line answers by number or key, the rest the note.

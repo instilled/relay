@@ -118,6 +118,31 @@ async fn a_changed_script_asks_again() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn a_flows_in_is_shown_as_the_project_it_names() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = Home::at(tmp.path().join("home"));
+    let real = tmp.path().join("real");
+    std::fs::create_dir_all(&real).unwrap();
+    let link = tmp.path().join("link");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    // A link to the project, and a trailing slash: not the path it is
+    // registered under, but the same folder.
+    let text = format!("---\nin: {}/\nsteps:\n  a:\n    run: x\n---\n", link.display());
+    write(&home, "there", &[("flow.md", &text)]);
+    let Some(h) = Harness::on(home.clone()) else { return };
+    let mut c = Conn::open(&h.home).await;
+    let _: serde_json::Value = c.ok("workspace.up", json!({ "path": real })).await;
+    let _: Reloaded = c.ok("flow.reload", json!(null)).await;
+    let flows: Vec<Flow> = c.ok("flow.list", json!({})).await;
+    let ws: Vec<serde_json::Value> = c.ok("workspace.list", json!(null)).await;
+    let registered = ws[0]["path"].as_str().unwrap();
+    assert_eq!(flows[0].folder.as_deref(), Some(std::path::Path::new(registered)));
+    assert_eq!(flows[0].folder, Some(std::fs::canonicalize(&real).unwrap()));
+    h.stop().await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn a_pipe_in_a_flow_folder_does_not_hold_the_daemon_up() {
     let tmp = tempfile::tempdir().unwrap();
     let home = Home::at(tmp.path().join("home"));

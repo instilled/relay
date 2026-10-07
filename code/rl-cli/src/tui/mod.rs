@@ -1559,7 +1559,7 @@ impl App {
             Row::Run(i) => Some(i.run.workspace.clone()),
             Row::Flow(f) => Some(
                 self.flow_of_row(&f)
-                    .and_then(flows::in_of)
+                    .and_then(|x| x.folder.clone())
                     .unwrap_or_else(|| f.last().run.workspace.clone()),
             ),
             Row::Question(q) => Some(q.workspace.clone()),
@@ -3059,8 +3059,12 @@ impl App {
         self.not_loaded
             .iter()
             .filter(|n| {
-                let was = self.flows.iter().find(|f| f.name == n.flow).and_then(flows::in_of);
-                was.as_deref() == scope
+                let was = self
+                    .flows
+                    .iter()
+                    .find(|f| f.name == n.flow)
+                    .and_then(|f| f.folder.as_deref());
+                was == scope
             })
             .collect()
     }
@@ -5768,7 +5772,8 @@ impl App {
                 let asker = q.run.as_deref().and_then(|id| self.run_by_id(id));
                 let at = matches!(&self.mode, Mode::Answer(id) if *id == q.id).then_some(self.answer_at);
                 let said = self.summary_of_row(&Row::Question(q));
-                let p = pane::question_lines(q, asker, said, &self.picked, at, area.width as usize, now);
+                let firing = rows::firing_of(q, &self.digest.firings);
+                let p = pane::question_lines(q, asker, firing, said, &self.picked, at, area.width as usize, now);
                 // Laid out to the width already, so row for row with the map.
                 *self.pane_hit.borrow_mut() = PaneHit {
                     area,
@@ -7940,6 +7945,7 @@ mod tests {
             hash: "h".into(),
             def: serde_json::json!({ "in_": folder, "trigger": { "when": { "Every": 3600 }, "on": [] } }),
             source: "/h/flows/nightly".into(),
+            folder: Some(folder.clone()),
             paused: false,
             approved_hash: Some("h".into()),
             last_fired_at: None,
@@ -8414,6 +8420,58 @@ mod tests {
             .find(|l| l.contains("↻ nightly"))
             .expect("the flow's row");
         assert!(row.contains("waiting at review"), "{row}");
+        token.cancel();
+    }
+
+    #[tokio::test]
+    async fn a_flows_row_stands_in_its_project_however_its_in_is_spelled() {
+        let (tmp, token, mut app, folder) = panel_of(|folder, now| {
+            let mut r = rl_proto::types::Run::new(
+                "run00002",
+                rl_proto::types::RunKind::Command,
+                "probe",
+                vec!["true".into()],
+                folder,
+                folder,
+                now,
+            );
+            r.cause = rl_proto::types::Cause::Flow {
+                flow: "nightly".into(),
+                step: "probe".into(),
+            };
+            vec![r]
+        })
+        .await;
+        // Not the project's own path: the temp folder as given (a link on
+        // macOS), and a trailing slash.
+        let spelled = format!("{}/proj/", tmp.path().display());
+        let dir = rl_core::Home::at(tmp.path().join("h")).flow_dir("nightly");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("flow.md"),
+            format!("---\nin: {spelled}\nsteps:\n  probe:\n    run: x\n---\n"),
+        )
+        .unwrap();
+        app.rpc.call::<rl_proto::flow::FlowReload>(()).await.unwrap();
+        app.refresh().await;
+        let rows = app.rows();
+        let at = rows
+            .iter()
+            .position(|r| matches!(r, super::Row::Flow(_)))
+            .expect("the flow's row");
+        let head = rows[..at].iter().rev().find_map(|r| match r {
+            super::Row::Group(h) => Some(h.clone()),
+            _ => None,
+        });
+        assert_eq!(
+            head.map(|h| h.workspace),
+            Some(folder.clone()),
+            "under the project itself"
+        );
+        let headers = rows
+            .iter()
+            .filter(|r| matches!(r, super::Row::Group(h) if h.workspace == folder));
+        assert_eq!(headers.count(), 1, "and no second header beside it");
         token.cancel();
     }
 

@@ -928,7 +928,19 @@ pub fn pane_lines(
     if let Some((q, asker)) = waiting {
         lines.push(Line::raw(""));
         let more = n.waiting.len().saturating_sub(1);
-        lines.extend(super::pane::question_lines(q, asker, None, picked, at, width, now).lines);
+        lines.extend(
+            super::pane::question_lines(
+                q,
+                asker,
+                firing.filter(|f| f.id == q.chain),
+                None,
+                picked,
+                at,
+                width,
+                now,
+            )
+            .lines,
+        );
         if more > 0 {
             lines.push(Line::from(Span::styled(
                 format!(" and {more} more waiting"),

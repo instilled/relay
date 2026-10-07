@@ -764,6 +764,7 @@ mod tests {
                 hash: "h".into(),
                 def: serde_json::json!({ "in_": API, "trigger": { "when": { "Every": 3600 }, "on": [] } }),
                 source: format!("/h/flows/{name}").into(),
+                folder: Some(API.into()),
                 paused: false,
                 approved_hash: Some("h".into()),
                 last_fired_at: None,

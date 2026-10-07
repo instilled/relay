@@ -313,6 +313,7 @@ mod tests {
             hash: "h".into(),
             def: serde_json::to_value(def).unwrap(),
             source: PathBuf::new(),
+            folder: None,
             paused: false,
             approved_hash: Some("h".into()),
             last_fired_at: None,

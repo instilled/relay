@@ -10,17 +10,7 @@ use ratatui::text::{Line, Span};
 use rl_core::time::{fmt_age, fmt_duration};
 use rl_flow::def::{Does, FlowDef};
 use rl_proto::flow::{Firing, FiringStatus, Flow, FlowStatus, NotLoaded, Reloaded, StepStatus};
-use std::path::{Path, PathBuf};
-
-/// The folder a flow runs in, and its row stands in: its `in`, with `~` read
-/// as home. `None`: it has none, and its row is `everywhere`'s.
-pub fn in_of(f: &Flow) -> Option<PathBuf> {
-    let p = Path::new(f.def.get("in_")?.as_str()?);
-    Some(match (p.strip_prefix("~"), std::env::var_os("HOME")) {
-        (Ok(rest), Some(home)) => PathBuf::from(home).join(rest),
-        _ => p.to_path_buf(),
-    })
-}
+use std::path::Path;
 
 /// What starts a flow, in words where they read better than the line it
 /// came from: `30 7 * * 1-5` → `at 07:30, Mon–Fri`. Each part of `when()`
@@ -139,14 +129,12 @@ pub fn pane_lines(
     names: &Names,
     now: Timestamp,
 ) -> Vec<Line<'static>> {
-    let folder = in_of(f);
+    let folder = f.folder.as_deref();
     let mut lines = vec![Line::from(vec![
         Span::raw(format!(" {}", f.name)).bold(),
         Span::raw(format!(
             "  flow · {} · {}",
-            folder
-                .as_deref()
-                .map_or_else(|| "everywhere".into(), |p| names.workspace(p)),
+            folder.map_or_else(|| "everywhere".into(), |p| names.workspace(p)),
             f.status()
         ))
         .dim(),
@@ -323,6 +311,7 @@ mod tests {
         Flow {
             name: "prod-logs".into(),
             hash: "0123456789abcdef".into(),
+            folder: def["in_"].as_str().map(Into::into),
             def,
             source: "/h/flows/prod-logs".into(),
             paused: false,

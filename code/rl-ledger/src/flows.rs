@@ -157,6 +157,7 @@ fn from_row(row: &Row) -> rusqlite::Result<Flow> {
         hash: row.get(1)?,
         def: serde_json::from_str(&def).map_err(|e| conv(2, e))?,
         source: PathBuf::new(),
+        folder: None,
         paused: row.get::<_, i32>(3)? != 0,
         approved_hash: row.get(4)?,
         last_fired_at: optional_from_millis(row.get(5)?, 5, conv)?,
