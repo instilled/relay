@@ -161,7 +161,7 @@ pub const ALL: &[Command] = &[
         name: "flow",
         args: "run|pause|resume|approve|edit|reload [name]",
         words: &[&["run", "pause", "resume", "approve", "edit", "reload"]],
-        what: "a flow: the one under the cursor, else the one named · edit opens its flow.md, and says yes when it loads",
+        what: "a flow: the one named, else the one under the cursor · edit opens its flow.md, and says yes when it loads",
         cmd: Cmd::Flow,
     },
     Command {

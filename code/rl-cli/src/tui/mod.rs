@@ -1783,7 +1783,10 @@ impl App {
             .find(|id| self.digest.decisions.iter().any(|d| &d.id == *id))
             .cloned();
         let flow = match n.kind {
-            rl_proto::graph::NodeKind::Flow => self.flow_of_node(n).map(|f| (f.approved(), f.name.clone())),
+            rl_proto::graph::NodeKind::Flow => self.flow_of_node(n).map(|f| {
+                let fires = matches!(f.status(), FlowStatus::On | FlowStatus::Paused);
+                (fires, f.name.clone())
+            }),
             _ => None,
         };
         if let Some(id) = waiting {
@@ -1792,8 +1795,8 @@ impl App {
             self.show_pane = true;
             self.answer_at = 0;
             self.mode = Mode::Answer(id);
-        } else if let Some((approved, name)) = flow {
-            if approved {
+        } else if let Some((fires, name)) = flow {
+            if fires {
                 self.mode = Mode::Fire(name);
             } else {
                 self.say(format!("{name} needs a yes first: /flow approve"));
@@ -3043,8 +3046,8 @@ impl App {
         }
     }
 
-    /// `/flow …`: `reload` reads every flow again; the rest act on the flow
-    /// under the cursor, else the one named after the verb.
+    /// `/flow …`: `reload` reads every flow again; the rest act on the one
+    /// named after the verb, else on the flow under the cursor.
     async fn flow_command(&mut self, arg: &str) {
         let mut words = arg.split_whitespace();
         let verb = words.next().unwrap_or("");
@@ -3055,7 +3058,7 @@ impl App {
         if !matches!(verb, "run" | "pause" | "resume" | "approve" | "edit") {
             return self.say("/flow run|pause|resume|approve|edit|reload [name]");
         }
-        let Some(name) = self.flow_here().or(named) else {
+        let Some(name) = named.or_else(|| self.flow_here()) else {
             return self.say(format!("/flow {verb} which? a flow's row, its node, or its name"));
         };
         if verb == "edit" {
@@ -5911,14 +5914,16 @@ impl App {
             } else if let Some(n) = self.selected_node()
                 && let Some(f) = self.flow_of_node(n)
             {
-                // `enter` runs the flow from its own node; its question's only shows.
-                if n.kind == rl_proto::graph::NodeKind::Flow && f.approved() {
-                    s.push_str("enter runs it now · ");
-                }
+                // `enter` runs the flow from its own node; its question's only
+                // shows. A removed flow has nothing to run, pause or approve.
+                let runs = n.kind == rl_proto::graph::NodeKind::Flow;
                 s.push_str(match f.status() {
                     FlowStatus::NeedsApproval => "/flow approve · ",
+                    FlowStatus::Paused if runs => "enter runs it now · /flow resume · ",
                     FlowStatus::Paused => "/flow resume · ",
-                    FlowStatus::On | FlowStatus::Removed => "/flow pause · ",
+                    FlowStatus::On if runs => "enter runs it now · /flow pause · ",
+                    FlowStatus::On => "/flow pause · ",
+                    FlowStatus::Removed => "",
                 });
                 s.push_str("/flow edit · ");
             }
@@ -8362,10 +8367,11 @@ mod tests {
         token.cancel();
     }
 
-    /// `/flow` acts on the flow under the cursor, else on the one named after
-    /// its verb; with neither it says what it needs.
+    /// `/flow` acts on the one named after its verb, else on the flow under
+    /// the cursor; with neither it says what it needs. In the graph, enter on
+    /// a flow offers to run it.
     #[tokio::test]
-    async fn flow_commands_act_on_the_flow_here_else_the_one_named() {
+    async fn flow_commands_act_on_the_one_named_else_the_flow_here() {
         let (tmp, token, mut app, _folder) = panel_of(|folder, now| {
             let mut r = rl_proto::types::Run::new(
                 "run00002",
@@ -8418,6 +8424,10 @@ mod tests {
         run(&mut app, "/flow resume").await;
         assert_eq!(said(&app), "nightly resumed");
         assert!(!nightly(&app).paused);
+        // A name typed wins over the row: `other` is asked for, nightly left be.
+        run(&mut app, "/flow pause other").await;
+        assert!(said(&app).starts_with("pause other: "), "{}", said(&app));
+        assert!(!nightly(&app).paused);
 
         run(&mut app, "/flow now").await;
         assert_eq!(said(&app), "/flow run|pause|resume|approve|edit|reload [name]");
@@ -8439,6 +8449,34 @@ mod tests {
         app.edited("broken").await;
         assert!(said(&app).starts_with("not loaded: broken · flow.md"), "{}", said(&app));
         assert!(app.flows.iter().all(|f| f.name != "broken"));
+
+        // In the graph, enter on a flow with its yes offers to run it, and `y` does.
+        app.toggle_graph().await;
+        app.select(Some("flow:nightly".into()));
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+        assert!(matches!(&app.mode, super::Mode::Fire(n) if n == "nightly"));
+        assert_eq!(app.footer(200), "run nightly now? y / any key");
+        press(&mut app, KeyCode::Char('y'), KeyModifiers::NONE).await;
+        assert!(said(&app).starts_with("fired nightly · firing "), "{}", said(&app));
+        assert!(matches!(app.mode, super::Mode::Normal));
+        // One without its yes says so, and offers nothing to run.
+        std::fs::create_dir_all(home.flow_dir("fresh")).unwrap();
+        std::fs::write(
+            home.flow_dir("fresh").join("flow.md"),
+            "---\nsteps:\n  first:\n    run: echo hi\n---\n",
+        )
+        .unwrap();
+        run(&mut app, "/flow reload").await;
+        app.select(Some("flow:fresh".into()));
+        assert!(
+            app.hints().starts_with("/flow approve · /flow edit · "),
+            "{}",
+            app.hints()
+        );
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+        assert_eq!(said(&app), "fresh needs a yes first: /flow approve");
+        assert!(matches!(app.mode, super::Mode::Normal));
+        app.toggle_graph().await;
         app.select(Some(RUN.into()));
         run(&mut app, "/flow edit not_a_name").await;
         assert_eq!(
