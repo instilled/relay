@@ -8,6 +8,7 @@ use super::Flows;
 use crate::action::{expand_home, run_spec};
 use anyhow::{Context, Result, anyhow};
 use jiff::Timestamp;
+use rl_core::Home;
 use rl_core::id::new_id;
 use rl_flow::advance::{Do, Happened, advance, status};
 use rl_flow::def::{Does, FlowDef, Step};
@@ -78,8 +79,9 @@ struct Moved {
     event: Option<(Event, Option<Run>)>,
     /// When the flow's firing before this one started.
     last: Option<Timestamp>,
-    /// What to do, each `Start`/`RunOption` with its action, placeholders filled.
-    todo: Vec<(Do, Option<Action>)>,
+    /// What to do, each `Start`/`RunOption` with its action, placeholders filled, or why
+    /// there is none to start.
+    todo: Vec<(Do, Option<Result<Action>>)>,
 }
 
 impl Flows {
@@ -189,15 +191,16 @@ impl Flows {
     async fn step(&self, firing: &str, h: Happened) -> Result<()> {
         let mut queue = VecDeque::from([h]);
         while let Some(h) = queue.pop_front() {
-            let id = firing.to_string();
-            let Some(m) = self.ledger.call(move |c| moved(c, &id, &h)).await? else {
+            let (id, home) = (firing.to_string(), self.home.clone());
+            let Some(m) = self.ledger.call(move |c| moved(c, &home, &id, &h)).await? else {
                 return Ok(());
             };
             for (todo, action) in &m.todo {
                 match todo {
                     Do::Start(step) | Do::RunOption(step) => {
                         let started = match action {
-                            Some(a) => self.start(&m, step, a).await,
+                            Some(Ok(a)) => self.start(&m, step, a).await,
+                            Some(Err(e)) => Err(anyhow!("{e:#}")),
                             None => Err(anyhow!("it has nothing to run")),
                         };
                         if let Err(e) = started {
@@ -205,7 +208,7 @@ impl Flows {
                             warn!(flow = m.def.name, firing, step, reason, "step did not start");
                             let data = json!({ "flow": m.def.name, "firing": firing, "step": step, "reason": reason });
                             let summary = format!("flow `{}` step `{step}` did not start: {reason}", m.def.name);
-                            self.record(&m.def, event_kind::FLOW_SKIPPED, summary, data).await?;
+                            self.say(&m.def, event_kind::FLOW_SKIPPED, summary, data).await;
                             queue.push_back(Happened::Ended {
                                 step: step.clone(),
                                 ok: false,
@@ -217,7 +220,7 @@ impl Flows {
                         info!(flow = m.def.name, firing, status = how.as_str(), "firing ended");
                         let data = json!({ "flow": m.def.name, "firing": firing, "status": how.as_str() });
                         let summary = format!("flow `{}` {}", m.def.name, how.as_str());
-                        self.record(&m.def, event_kind::FLOW_ENDED, summary, data).await?;
+                        self.say(&m.def, event_kind::FLOW_ENDED, summary, data).await;
                     }
                 }
             }
@@ -309,10 +312,17 @@ impl Flows {
         let ev = self.event(def, kind, summary, data);
         self.ledger.call(move |c| events::append(c, &ev).map(|_| ())).await
     }
+
+    /// The same, where a firing must move on whatever: a failure is logged, not returned.
+    async fn say(&self, def: &FlowDef, kind: &str, summary: String, data: serde_json::Value) {
+        if let Err(e) = self.record(def, kind, summary, data).await {
+            warn!(flow = def.name, kind, error = %format!("{e:#}"), "recording a flow's event");
+        }
+    }
 }
 
 /// The firing `id` moved on from `h` and saved, in one go; `None` when there is no such firing.
-fn moved(c: &Connection, id: &str, h: &Happened) -> Result<Option<Moved>> {
+fn moved(c: &Connection, home: &Home, id: &str, h: &Happened) -> Result<Option<Moved>> {
     let (Some(def_json), Some(firing)) = (firings::def_json(c, id)?, firings::get(c, id)?) else {
         return Ok(None);
     };
@@ -333,12 +343,13 @@ fn moved(c: &Connection, id: &str, h: &Happened) -> Result<Option<Moved>> {
     });
     let now = over.map(|_| Timestamp::now());
     firings::save(c, id, &steps, over.unwrap_or_else(|| status(&steps)), now)?;
+    let dir = home.flow_dir(&def.name);
     let todo = todo
         .into_iter()
         .map(|d| {
             let action = match &d {
-                Do::Start(s) => run_of(&def, s).map(|a| filled(a, &facts)),
-                Do::RunOption(s) => option_of(c, &def, &firing.steps, s)?.map(|a| filled(a, &facts)),
+                Do::Start(s) => run_of(&def, s).map(|a| filled(a, &dir, &facts)),
+                Do::RunOption(s) => option_of(c, &def, &firing.steps, s)?.map(|a| filled(a, &dir, &facts)),
                 _ => None,
             };
             Ok((d, action))
@@ -388,13 +399,26 @@ fn option_of<'a>(c: &Connection, def: &'a FlowDef, steps: &[StepState], step: &s
     Ok(ask.options.iter().find(|(k, _)| Some(k) == chosen).map(|(_, a)| a))
 }
 
-/// The action with its agent prompt's placeholders filled; a command is never filled.
-fn filled(action: &Action, facts: &dyn Lookup) -> Action {
+/// The action with its agent prompt's placeholders filled; a command is never filled. A
+/// `prompt_file` (relative to the flow's folder) is read and becomes the prompt, filled.
+fn filled(action: &Action, dir: &Path, facts: &dyn Lookup) -> Result<Action> {
     let mut a = action.clone();
-    if let Some(Task::Agent { prompt: Some(p), .. }) = &mut a.run {
-        *p = template::fill(p, facts);
+    if let Some(Task::Agent {
+        prompt, prompt_file, ..
+    }) = &mut a.run
+    {
+        if prompt.is_none()
+            && let Some(f) = prompt_file.take()
+        {
+            let path = dir.join(f);
+            let text = std::fs::read_to_string(&path).with_context(|| format!("prompt_file {}", path.display()))?;
+            *prompt = Some(text);
+        }
+        if let Some(p) = prompt {
+            *p = template::fill(p, facts);
+        }
     }
-    a
+    Ok(a)
 }
 
 /// What a firing's steps left: `{x.out}` from the step's run, `{x.choice}` and `{x.note}`
@@ -460,9 +484,26 @@ mod tests {
 
     #[test]
     fn a_prompt_takes_what_a_step_printed_and_a_command_takes_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().to_path_buf();
+        std::fs::write(dir.join("triage.md"), "Triage this:\n{probe.out}\n").unwrap();
+        let from_file = |file: PathBuf| Action {
+            run: Some(Task::Agent {
+                agent: "claude".into(),
+                prompt: None,
+                prompt_file: Some(file),
+                args: vec![],
+            }),
+            ..Default::default()
+        };
+        let (from_file, absolute, missing) = (
+            from_file("triage.md".into()),
+            from_file(dir.join("triage.md")),
+            from_file("gone.md".into()),
+        );
         let ledger = Ledger::open_in_memory().unwrap();
-        let (prompt, command) = ledger
-            .call_blocking(|c| {
+        let (prompt, command, read, read_absolute, unread) = ledger
+            .call_blocking(move |c| {
                 let run = Run::new(
                     "r1",
                     RunKind::Command,
@@ -495,11 +536,26 @@ mod tests {
                     ..Default::default()
                 };
                 Ok((
-                    filled(&agent("look at {probe.out} and {triage.out}; {nope.out}"), &facts),
-                    filled(&shell, &facts),
+                    filled(&agent("look at {probe.out} and {triage.out}; {nope.out}"), &dir, &facts)?,
+                    filled(&shell, &dir, &facts)?,
+                    filled(&from_file, &dir, &facts)?,
+                    filled(&absolute, Path::new("/elsewhere"), &facts)?,
+                    filled(&missing, &dir, &facts).map(|_| ()).map_err(|e| format!("{e:#}")),
                 ))
             })
             .unwrap();
+        for read in [read, read_absolute] {
+            let Some(Task::Agent {
+                prompt, prompt_file, ..
+            }) = read.run
+            else {
+                panic!()
+            };
+            assert_eq!(prompt.as_deref(), Some("Triage this:\n3 new errors {triage.out}\n"));
+            assert_eq!(prompt_file, None, "read once, here, and filled");
+        }
+        let err = unread.unwrap_err();
+        assert!(err.contains("gone.md"), "{err}");
         let Some(Task::Agent { prompt, args, .. }) = prompt.run else {
             panic!()
         };
