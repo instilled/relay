@@ -5,19 +5,21 @@
 //! whatever is edited meanwhile.
 
 use super::Flows;
+use super::ask::{option_of, question};
 use crate::action::{expand_home, run_spec};
 use anyhow::{Context, Result, anyhow};
 use jiff::Timestamp;
 use rl_core::Home;
 use rl_core::id::new_id;
 use rl_flow::advance::{Do, Happened, advance, status};
-use rl_flow::def::{Does, FlowDef, Step};
+use rl_flow::def::{Ask, Does, FlowDef, Step};
 use rl_flow::template::{self, Lookup, Ref};
 use rl_ledger::events::NewEvent;
 use rl_ledger::firings::{self, NewFiring};
 use rl_ledger::{decisions, events, flows, runs, session_io};
 use rl_proto::action::{Action, Task};
 use rl_proto::flow::{Firing, StepState, StepStatus};
+use rl_proto::methods::DecisionSpec;
 use rl_proto::schedule::Overlap;
 use rl_proto::types::{Cause, Event, Run, event_kind};
 use rusqlite::Connection;
@@ -72,16 +74,25 @@ impl fmt::Display for Refused {
 impl std::error::Error for Refused {}
 
 /// A firing moved on, and what is needed to carry out what that says.
-struct Moved {
-    def: FlowDef,
-    firing: Firing,
+pub(super) struct Moved {
+    pub(super) def: FlowDef,
+    pub(super) firing: Firing,
     /// The event that fired it, and that event's run.
-    event: Option<(Event, Option<Run>)>,
+    pub(super) event: Option<(Event, Option<Run>)>,
     /// When the flow's firing before this one started.
     last: Option<Timestamp>,
-    /// What to do, each `Start`/`RunOption` with its action, placeholders filled, or why
-    /// there is none to start.
-    todo: Vec<(Do, Option<Result<Action>>)>,
+    /// What to do, each with what it needs, placeholders filled.
+    todo: Vec<(Do, Ready)>,
+}
+
+/// What one `Do` needs, made ready while the firing is read.
+enum Ready {
+    /// A `Start`/`RunOption`'s action, or why it cannot have one.
+    Run(Result<Action>),
+    /// An `Ask`'s question.
+    Ask(DecisionSpec),
+    /// There is nothing to run or ask.
+    Nothing,
 }
 
 impl Flows {
@@ -170,6 +181,9 @@ impl Flows {
 
     /// Hands one event to the firings it is about: a step's run ending, a step's question answered.
     pub(crate) async fn on_event(&self, e: &Event) -> Result<()> {
+        if e.kind.starts_with("decision.") {
+            return self.on_answer(e).await;
+        }
         let Some(run) = e.run.clone() else { return Ok(()) };
         let how: fn(String) -> Happened = match e.kind.as_str() {
             event_kind::RUN_FINISHED => |step| Happened::Ended { step, ok: true },
@@ -185,37 +199,49 @@ impl Flows {
         self.step(&firing, how(step)).await
     }
 
-    /// Moves one firing on from what happened, and does what that says. A step whose run
-    /// cannot start is skipped, said in `flow.skipped`, and its firing moves on as if it failed.
-    /// The caller holds `going`.
-    async fn step(&self, firing: &str, h: Happened) -> Result<()> {
-        let mut queue = VecDeque::from([h]);
-        while let Some(h) = queue.pop_front() {
-            let (id, home) = (firing.to_string(), self.home.clone());
+    /// Moves one firing on from what happened, and does what that says, and so on for what
+    /// that leads to — in this firing or, for a question taken over, another. A step that
+    /// cannot start or ask is said in `flow.skipped`: a run step moves on as if it failed, an
+    /// ask step as if unanswered. The caller holds `going`.
+    pub(super) async fn step(&self, firing: &str, h: Happened) -> Result<()> {
+        let mut queue = VecDeque::from([(firing.to_string(), h)]);
+        while let Some((firing, h)) = queue.pop_front() {
+            let (id, home) = (firing.clone(), self.home.clone());
             let Some(m) = self.ledger.call(move |c| moved(c, &home, &id, &h)).await? else {
-                return Ok(());
+                continue;
             };
-            for (todo, action) in &m.todo {
+            let firing = firing.as_str();
+            for (todo, ready) in &m.todo {
                 match todo {
                     Do::Start(step) | Do::RunOption(step) => {
-                        let started = match action {
-                            Some(Ok(a)) => self.start(&m, step, a).await,
-                            Some(Err(e)) => Err(anyhow!("{e:#}")),
-                            None => Err(anyhow!("it has nothing to run")),
+                        let started = match ready {
+                            Ready::Run(Ok(a)) => self.start(&m, step, a).await,
+                            Ready::Run(Err(e)) => Err(anyhow!("{e:#}")),
+                            _ => Err(anyhow!("it has nothing to run")),
                         };
                         if let Err(e) = started {
-                            let reason = format!("{e:#}");
-                            warn!(flow = m.def.name, firing, step, reason, "step did not start");
-                            let data = json!({ "flow": m.def.name, "firing": firing, "step": step, "reason": reason });
-                            let summary = format!("flow `{}` step `{step}` did not start: {reason}", m.def.name);
-                            self.say(&m.def, event_kind::FLOW_SKIPPED, summary, data).await;
-                            queue.push_back(Happened::Ended {
+                            self.not_started(&m, step, &e).await;
+                            let ended = Happened::Ended {
                                 step: step.clone(),
                                 ok: false,
-                            });
+                            };
+                            queue.push_back((firing.to_string(), ended));
                         }
                     }
-                    Do::Ask(_) => {}
+                    Do::Ask(step) => {
+                        let asked = match ready {
+                            Ready::Ask(spec) => self.ask(&m, step, spec.clone()).await,
+                            _ => Err(anyhow!("it has nothing to ask")),
+                        };
+                        match asked {
+                            Ok(None) => {}
+                            Ok(Some((was, step))) => queue.push_back((was, Happened::Unanswered { step })),
+                            Err(e) => {
+                                self.not_started(&m, step, &e).await;
+                                queue.push_back((firing.to_string(), Happened::Unanswered { step: step.clone() }));
+                            }
+                        }
+                    }
                     Do::End(how) => {
                         info!(flow = m.def.name, firing, status = how.as_str(), "firing ended");
                         let data = json!({ "flow": m.def.name, "firing": firing, "status": how.as_str() });
@@ -224,8 +250,20 @@ impl Flows {
                     }
                 }
             }
+            for step in self.dismiss_if_stopped(&m).await {
+                queue.push_back((firing.to_string(), Happened::Unanswered { step }));
+            }
         }
         Ok(())
+    }
+
+    /// Says that a step did not start, and why.
+    async fn not_started(&self, m: &Moved, step: &str, e: &anyhow::Error) {
+        let (flow, firing, reason) = (&m.def.name, &m.firing.id, format!("{e:#}"));
+        warn!(flow, firing, step, reason, "step did not start");
+        let data = json!({ "flow": flow, "firing": firing, "step": step, "reason": reason });
+        let summary = format!("flow `{flow}` step `{step}` did not start: {reason}");
+        self.say(&m.def, event_kind::FLOW_SKIPPED, summary, data).await;
     }
 
     /// Starts one step's run, in the firing's chain, and records it as the step's.
@@ -281,7 +319,13 @@ impl Flows {
 
     /// Where a step runs: its `in`, else the flow's; with neither, where an `on` firing's
     /// event happened; else the Relay home.
-    fn cwd(&self, def: &FlowDef, step: &Step, firing: &Firing, event: Option<&(Event, Option<Run>)>) -> PathBuf {
+    pub(super) fn cwd(
+        &self,
+        def: &FlowDef,
+        step: &Step,
+        firing: &Firing,
+        event: Option<&(Event, Option<Run>)>,
+    ) -> PathBuf {
         if let Some(p) = step.in_.as_deref().or(def.in_.as_deref()) {
             return expand_home(p);
         }
@@ -347,12 +391,13 @@ fn moved(c: &Connection, home: &Home, id: &str, h: &Happened) -> Result<Option<M
     let todo = todo
         .into_iter()
         .map(|d| {
-            let action = match &d {
-                Do::Start(s) => run_of(&def, s).map(|a| filled(a, &dir, &facts)),
-                Do::RunOption(s) => option_of(c, &def, &firing.steps, s)?.map(|a| filled(a, &dir, &facts)),
-                _ => None,
+            let ready = match &d {
+                Do::Start(s) => run_of(&def, s).map(|a| Ready::Run(filled(a, &dir, &facts))),
+                Do::RunOption(s) => option_of(c, &def, &firing.steps, s)?.map(|a| Ready::Run(filled(&a, &dir, &facts))),
+                Do::Ask(s) => ask_of(&def, s).map(|a| Ready::Ask(question(a, &facts))),
+                Do::End(_) => None,
             };
-            Ok((d, action))
+            Ok((d, ready.unwrap_or(Ready::Nothing)))
         })
         .collect::<Result<_>>()?;
     let event = match firing.event {
@@ -380,23 +425,11 @@ fn run_of<'a>(def: &'a FlowDef, step: &str) -> Option<&'a Action> {
     }
 }
 
-/// The action of the option chosen for an ask step.
-fn option_of<'a>(c: &Connection, def: &'a FlowDef, steps: &[StepState], step: &str) -> Result<Option<&'a Action>> {
-    let Some(Does::Ask(ask)) = def.steps.iter().find(|s| s.name == step).map(|s| &s.does) else {
-        return Ok(None);
-    };
-    let Some(d) = steps
-        .iter()
-        .find(|s| s.name == step)
-        .and_then(|s| s.decision.as_deref())
-    else {
-        return Ok(None);
-    };
-    let Some(d) = decisions::get(c, d)? else {
-        return Ok(None);
-    };
-    let chosen = d.chosen.first();
-    Ok(ask.options.iter().find(|(k, _)| Some(k) == chosen).map(|(_, a)| a))
+fn ask_of<'a>(def: &'a FlowDef, step: &str) -> Option<&'a Ask> {
+    match &def.steps.iter().find(|s| s.name == step)?.does {
+        Does::Ask(a) => Some(a),
+        Does::Run(_) => None,
+    }
 }
 
 /// The action with its agent prompt's placeholders filled; a command is never filled. A

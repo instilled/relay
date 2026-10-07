@@ -3,6 +3,7 @@
 //! A flow is a folder: `flow.md` and the flow's own scripts. It runs only
 //! once approved, by the hash of its folder less `runs/` ([`store`]).
 
+mod ask;
 pub mod engine;
 pub(crate) mod rpc;
 mod store;
@@ -32,8 +33,7 @@ pub struct Flows {
     pub(crate) home: Home,
     pub(crate) ledger: Ledger,
     pub(crate) supervisor: Arc<Supervisor>,
-    // What a firing's questions are raised with, from when flows ask.
-    #[allow(dead_code)]
+    /// What a firing's questions are raised with.
     pub(crate) decisions: Arc<Decisions>,
     pub(crate) registry: Arc<Registry>,
     /// Held while a firing is moved on, so a run's end is never read before

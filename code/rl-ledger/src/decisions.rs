@@ -186,6 +186,21 @@ pub fn set_by_reaction(conn: &Connection, id: &str, name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Which flow step owns this question, as `<firing>/<step>`, if one does: its answer is the
+/// engine's to carry out.
+pub fn by_step(conn: &Connection, id: &str) -> Result<Option<String>> {
+    Ok(conn
+        .query_row("SELECT by_step FROM decisions WHERE id = ?1", params![id], |r| r.get(0))
+        .optional()?
+        .flatten())
+}
+
+/// Records that a flow step owns a question.
+pub fn set_by_step(conn: &Connection, id: &str, by: &str) -> Result<()> {
+    conn.execute("UPDATE decisions SET by_step = ?2 WHERE id = ?1", params![id, by])?;
+    Ok(())
+}
+
 /// Records the runs an answer started, once they are up.
 pub fn set_outcomes(conn: &Connection, id: &str, outcomes: &[String]) -> Result<()> {
     conn.execute(
@@ -399,5 +414,18 @@ mod tests {
             .map(|d| d.id)
             .collect();
         assert_eq!(ids, ["d1"]);
+    }
+
+    #[test]
+    fn a_step_owns_its_question() {
+        let ledger = Ledger::open_in_memory().unwrap();
+        ledger.call_blocking(|c| insert(c, &decision("d1", None))).unwrap();
+        assert_eq!(ledger.call_blocking(|c| by_step(c, "d1")).unwrap(), None);
+        ledger.call_blocking(|c| set_by_step(c, "d1", "f1/review")).unwrap();
+        assert_eq!(
+            ledger.call_blocking(|c| by_step(c, "d1")).unwrap().as_deref(),
+            Some("f1/review")
+        );
+        assert_eq!(ledger.call_blocking(|c| by_step(c, "nope")).unwrap(), None);
     }
 }

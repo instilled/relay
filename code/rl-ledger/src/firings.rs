@@ -137,11 +137,13 @@ pub fn by_run(conn: &Connection, run: &str) -> Result<Option<(String, String)>> 
         .optional()?)
 }
 
-/// The firing and step a question was raised by.
+/// The firing and step a question belongs to. A question restated by another step is that
+/// step's: the one still waiting on it, else the newest.
 pub fn by_decision(conn: &Connection, decision: &str) -> Result<Option<(String, String)>> {
     Ok(conn
         .query_row(
-            "SELECT firing, name FROM steps WHERE decision = ?1",
+            "SELECT firing, name FROM steps WHERE decision = ?1 \
+             ORDER BY status = 'waiting' DESC, rowid DESC LIMIT 1",
             params![decision],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
@@ -288,6 +290,30 @@ mod tests {
             Some(("f1".to_string(), "review".to_string()))
         );
         assert!(ledger.call_blocking(|c| open(c)).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_restated_question_belongs_to_the_step_still_waiting_on_it() {
+        let ledger = Ledger::open_in_memory().unwrap();
+        fire(&ledger, "old", "2026-10-07T10:00:00Z");
+        fire(&ledger, "new", "2026-10-07T09:00:00Z");
+        let waiting = |step: &str| BTreeMap::from([(step.to_string(), StepStatus::Waiting)]);
+        let (old, new) = (waiting("review"), waiting("review"));
+        ledger
+            .call_blocking(move |c| {
+                save(c, "old", &old, FiringStatus::Waiting, None)?;
+                set_step_decision(c, "old", "review", "d1")?;
+                save(c, "new", &new, FiringStatus::Waiting, None)?;
+                set_step_decision(c, "new", "review", "d1")
+            })
+            .unwrap();
+        let owner = || ledger.call_blocking(|c| by_decision(c, "d1")).unwrap().unwrap().0;
+        assert_eq!(owner(), "new", "both waiting: the newest written");
+        let skipped = BTreeMap::from([("review".to_string(), StepStatus::Skipped)]);
+        ledger
+            .call_blocking(move |c| save(c, "new", &skipped, FiringStatus::Done, None))
+            .unwrap();
+        assert_eq!(owner(), "old", "the one still waiting");
     }
 
     #[test]
