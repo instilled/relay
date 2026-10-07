@@ -1572,6 +1572,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "rl-flow"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "jiff",
+ "rl-core",
+ "rl-proto",
+ "serde",
+ "serde_json",
+ "serde_norway",
+ "sha2",
+]
+
+[[package]]
 name = "rl-ledger"
 version = "0.1.0"
 dependencies = [

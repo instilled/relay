@@ -655,7 +655,6 @@ mod tests {
     fn a_bad_run_is_refused_where_it_is_read() {
         let err = |y: &str| serde_norway::from_str::<ScheduleSpec>(y).unwrap_err().to_string();
         assert!(err("every: 1h\nagent: claude\ncwd: /tmp").contains("unknown field"));
-        assert!(err("every: 1h\nrun:\n  agent: claude\ncwd: /tmp").contains("needs `prompt`"));
         assert!(err("every: 1h\nrun:\n  shell: ls\ncwd: /tmp").contains("no `shell`"));
     }
 

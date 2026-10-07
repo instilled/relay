@@ -631,7 +631,7 @@ pub fn cause_words(c: &Cause) -> String {
         Cause::Schedule(n) => format!("schedule {n}"),
         Cause::Decision(_) => "your answer".into(),
         Cause::Reaction(n) => format!("rule {n}"),
-        Cause::Workflow { name, step } => format!("workflow {name} · {step}"),
+        Cause::Flow { flow, step } => format!("flow {flow} · {step}"),
         Cause::Assistant(job) => format!("asked, to {job}"),
     }
 }

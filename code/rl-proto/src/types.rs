@@ -129,7 +129,7 @@ str_enum!(Mark { Done => "done", Blocked => "blocked", Working => "working" });
 str_enum!(AttachMode { Watch => "watch", Join => "join" });
 
 /// Why a run started. Serialised as one string: `manual`,
-/// `schedule:<name>`, `decision:<id>`, `workflow:<name>/<step>`,
+/// `schedule:<name>`, `decision:<id>`, `flow:<flow>/<step>`,
 /// `reaction:<name>`.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum Cause {
@@ -137,8 +137,9 @@ pub enum Cause {
     Manual,
     Schedule(String),
     Decision(String),
-    Workflow {
-        name: String,
+    /// A step of a flow.
+    Flow {
+        flow: String,
         step: String,
     },
     Reaction(String),
@@ -152,7 +153,7 @@ impl std::fmt::Display for Cause {
             Cause::Manual => write!(f, "manual"),
             Cause::Schedule(n) => write!(f, "schedule:{n}"),
             Cause::Decision(id) => write!(f, "decision:{id}"),
-            Cause::Workflow { name, step } => write!(f, "workflow:{name}/{step}"),
+            Cause::Flow { flow, step } => write!(f, "flow:{flow}/{step}"),
             Cause::Reaction(n) => write!(f, "reaction:{n}"),
             Cause::Assistant(job) => write!(f, "assistant:{job}"),
         }
@@ -174,10 +175,13 @@ impl std::str::FromStr for Cause {
             "decision" => Cause::Decision(rest.into()),
             "reaction" => Cause::Reaction(rest.into()),
             "assistant" => Cause::Assistant(rest.into()),
-            "workflow" => {
-                let (name, step) = rest.split_once('/').ok_or_else(|| format!("bad cause `{s}`"))?;
-                Cause::Workflow {
-                    name: name.into(),
+            "flow" => {
+                let (flow, step) = rest.split_once('/').ok_or_else(|| format!("bad cause `{s}`"))?;
+                if flow.is_empty() || step.is_empty() {
+                    return Err(format!("bad cause `{s}`"));
+                }
+                Cause::Flow {
+                    flow: flow.into(),
                     step: step.into(),
                 }
             }
@@ -541,6 +545,23 @@ pub mod event_kind {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_flow_step_is_its_own_cause() {
+        let c: Cause = "flow:prod-logs/triage".parse().unwrap();
+        assert_eq!(
+            c,
+            Cause::Flow {
+                flow: "prod-logs".into(),
+                step: "triage".into()
+            }
+        );
+        assert_eq!(c.to_string(), "flow:prod-logs/triage");
+        assert!("flow:prod-logs".parse::<Cause>().is_err());
+        assert!("flow:/triage".parse::<Cause>().is_err());
+        assert!("flow:prod-logs/".parse::<Cause>().is_err());
+        assert!("workflow:a/b".parse::<Cause>().is_err());
+    }
 
     #[test]
     fn a_target_is_kept_by_a_key_that_says_what_it_is() {

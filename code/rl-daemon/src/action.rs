@@ -40,7 +40,7 @@ pub fn run_spec(
                     let path = if f.is_absolute() { f.clone() } else { source_dir.join(f) };
                     std::fs::read_to_string(&path).with_context(|| format!("prompt_file {}", path.display()))?
                 }
-                (None, None) => bail!("an agent needs a prompt"),
+                (None, None) => bail!("`{name}` needs a prompt"),
             };
             let profile = registry.resolve(RunKind::Agent, std::slice::from_ref(agent)).profile;
             let mut argv = vec![agent.clone()];
@@ -81,5 +81,42 @@ pub fn expand_home(p: &Path) -> PathBuf {
     match std::env::var_os("HOME") {
         Some(home) => PathBuf::from(home).join(rest),
         None => p.to_path_buf(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn agent(prompt: Option<&str>) -> Action {
+        Action {
+            run: Some(Task::Agent {
+                agent: "claude".into(),
+                prompt: prompt.map(String::from),
+                prompt_file: None,
+                args: vec![],
+            }),
+            ..Action::default()
+        }
+    }
+
+    fn spec(action: &Action) -> Result<RunSpec> {
+        let registry = Registry::builtin();
+        run_spec(
+            action,
+            "triage",
+            Path::new("/tmp"),
+            Some(Path::new("/tmp")),
+            &registry,
+            Cause::Manual,
+            None,
+        )
+    }
+
+    #[test]
+    fn an_agent_with_no_prompt_says_which_one_needs_it() {
+        let e = spec(&agent(None)).unwrap_err().to_string();
+        assert_eq!(e, "`triage` needs a prompt");
+        assert!(spec(&agent(Some("look"))).is_ok());
     }
 }
