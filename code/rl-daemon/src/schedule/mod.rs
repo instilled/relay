@@ -8,17 +8,15 @@
 //! what is due as ordinary runs with `cause: schedule:<name>`, and applies
 //! the missed and overlap policies.
 
-pub mod cron;
-
 use crate::action::expand_home;
 use crate::rulestore::{Broken, FileRead, RuleStore};
 use crate::supervisor::Supervisor;
 use anyhow::{Context, Result, anyhow, bail};
-use cron::Cron;
 use jiff::Timestamp;
 use rl_core::Home;
 use rl_core::time::parse_duration;
 use rl_detect::Registry;
+use rl_flow::cron::Cron;
 use rl_ledger::entries::Loaded;
 use rl_ledger::schedules;
 use rl_ledger::{Ledger, events, events::NewEvent, runs, workspaces};

@@ -3,5 +3,8 @@
 //! answer.
 
 pub mod cond;
+pub mod cron;
+pub mod def;
 pub mod doc;
+pub mod plan;
 pub mod template;
