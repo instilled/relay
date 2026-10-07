@@ -26,7 +26,6 @@
 
 use super::query::{Named, Query, Subject};
 use super::rows::{self, Names, fit, place_parts};
-use super::rules;
 use super::theme;
 use crate::render::fmt_clock;
 use jiff::{SignedDuration, Timestamp};
@@ -470,7 +469,12 @@ pub fn rule_key(rules: &[Rule], kind: RuleKind, name: &str, near: Option<&Path>)
         .filter(|r| r.kind() == kind && r.name() == name && r.removed_at().is_none())
         .collect();
     of.sort_by_key(|r| (near.is_none_or(|p| Path::new(r.scope()) != p), !r.is_global()));
-    of.first().map(|r| rules::key(r))
+    of.first().map(|r| node_key(r))
+}
+
+/// A rule's key in the graph: `schedule:<scope>/<name>`.
+pub fn node_key(r: &Rule) -> String {
+    format!("{}:{}/{}", r.kind(), r.scope(), r.name())
 }
 
 /// The header's words: how many events, `+` when there are older ones to

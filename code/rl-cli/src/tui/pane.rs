@@ -2,8 +2,8 @@
 //! and the keys that answer it. Pure — takes what the daemon said, gives
 //! lines.
 
-use super::rows::{Job, Names, asked_by, cause_words, fit};
-use super::{rules, theme};
+use super::flows;
+use super::rows::{FlowRow, Names, asked_by, cause_words, fit};
 use crate::digest::signals;
 use crate::render::{fmt_clock, state_label};
 use jiff::Timestamp;
@@ -12,8 +12,8 @@ use ratatui::text::{Line, Span};
 use rl_core::display_path;
 use rl_core::time::{fmt_age, fmt_duration, fmt_when};
 use rl_proto::decision::Decision;
+use rl_proto::flow::{Flow, NotLoaded};
 use rl_proto::methods::DigestItem;
-use rl_proto::rule::{NotLoaded, Rule};
 use rl_proto::types::{Event, Run, RunState, Summary};
 use std::path::Path;
 
@@ -128,7 +128,7 @@ fn said(key: &str, s: &Summary, width: usize, now: Timestamp) -> Vec<Line<'stati
     lines
 }
 
-/// What a job, a project or everything was said to have done, kept from
+/// What a flow, a project or everything was said to have done, kept from
 /// the last `/summary` over it; else how to ask. A blank line first.
 fn summary_section(summary: Option<&Summary>, width: usize, now: Timestamp) -> Vec<Line<'static>> {
     let mut lines = vec![Line::raw("")];
@@ -282,33 +282,35 @@ pub fn run_lines(
     lines
 }
 
-/// How many of a job's runs the pane lists, and how many marks it draws.
-const JOB_RUNS: usize = 10;
-const JOB_MARKS: usize = 40;
+/// How many of a flow's runs the pane lists, and how many marks it draws.
+const FLOW_RUNS: usize = 10;
+const FLOW_MARKS: usize = 40;
 
-/// A job: the rule behind it when known, then how it has been going.
-pub fn job_lines(
-    j: &Job,
-    rule: Option<&Rule>,
+/// A flow's row: the flow as last loaded when it is, then how its runs have
+/// been going.
+pub fn flow_lines(
+    j: &FlowRow,
+    flow: Option<&Flow>,
     summary: Option<&Summary>,
     names: &Names,
     width: usize,
     now: Timestamp,
 ) -> Vec<Line<'static>> {
-    let mut lines = match rule {
-        Some(r) => {
-            let mut l = rules::lines(r, names, now, Some(&j.last().run.title));
+    let loaded = flow.and_then(|f| Some((f, serde_json::from_value::<rl_flow::def::FlowDef>(f.def.clone()).ok()?)));
+    let mut lines = match loaded {
+        Some((f, def)) => {
+            let mut l = flows::pane_lines(f, &def, j.firing, names, now);
             l.push(Line::raw(""));
             l
         }
         None => {
             let mut l = vec![Line::from(vec![
                 Span::raw(format!(" {}", j.name)).bold(),
-                Span::raw(format!("  {} · not in any file now", j.kind)).dim(),
+                Span::raw("  flow · not loaded now").dim(),
             ])];
             l.push(Line::raw(""));
-            if let Some(w) = &j.when {
-                l.push(fact("when", w.clone()));
+            if let Some(f) = j.firing {
+                l.push(fact("last", flows::state_words(f)));
                 l.push(Line::raw(""));
             }
             l
@@ -340,7 +342,7 @@ pub fn job_lines(
             lines.push(fact(if i == 0 { "signals" } else { "" }, t));
         }
     }
-    let marks = j.marks(JOB_MARKS);
+    let marks = j.marks(FLOW_MARKS);
     let spans: Vec<Span> = marks
         .chars()
         .map(|c| match c {
@@ -354,7 +356,7 @@ pub fn job_lines(
     lines.push(Line::from(row));
     lines.extend(summary_section(summary, width, now));
     lines.push(Line::raw(""));
-    for i in j.runs.iter().take(JOB_RUNS) {
+    for i in j.runs.iter().take(FLOW_RUNS) {
         lines.push(Line::from(vec![
             Span::raw(format!(" {}  ", fmt_clock(i.at, now))).dim(),
             Span::styled(
@@ -364,34 +366,25 @@ pub fn job_lines(
             Span::raw(format!(" {}", i.summary)),
         ]));
     }
-    if j.runs.len() > JOB_RUNS {
+    if j.runs.len() > FLOW_RUNS {
         lines.push(Line::from(
-            Span::raw(format!("   … {} more", j.runs.len() - JOB_RUNS)).dim(),
+            Span::raw(format!("   … {} more", j.runs.len() - FLOW_RUNS)).dim(),
         ));
     }
     lines
 }
 
-/// A rules section: a leading blank line, the " rules" label, and the
-/// schedule/reaction chips (or the empty-state line), computed via
-/// `super::rows::chips` for one folder, or the global ones (`None`).
-fn rules_section(rules: &[Rule], scope: Option<&std::path::Path>, now: Timestamp) -> Vec<Line<'static>> {
-    let chips = super::rows::chips(rules, scope, now);
-    let (sched, react): (Vec<_>, Vec<_>) = chips.iter().partition(|c| c.kind == rl_proto::rule::RuleKind::Schedule);
-    let mut lines = vec![Line::raw(""), Line::from(Span::raw(" rules").dim())];
+/// A flows section: a leading blank line, the " flows" label, and the
+/// chips (or the empty-state line), computed via `super::rows::chips` for
+/// the flows `in` one folder, or those with no `in` (`None`).
+fn flows_section(flows: &[Flow], scope: Option<&std::path::Path>, now: Timestamp) -> Vec<Line<'static>> {
+    let chips = super::rows::chips(flows, scope, now);
+    let mut lines = vec![Line::raw(""), Line::from(Span::raw(" flows").dim())];
     if chips.is_empty() {
-        lines.push(Line::from(
-            Span::raw("   none · /new adds a schedule or reaction").dim(),
-        ));
-    } else {
-        for (label, group) in [("schedule", &sched), ("reaction", &react)] {
-            for c in group {
-                lines.push(Line::from(vec![
-                    Span::raw(format!("   {:<9} ", label)).dim(),
-                    Span::raw(c.text()),
-                ]));
-            }
-        }
+        lines.push(Line::from(Span::raw("   none · rl flow edit <name> writes one").dim()));
+    }
+    for c in chips {
+        lines.push(Line::from(Span::raw(format!("   {}", c.text()))));
     }
     lines
 }
@@ -429,15 +422,15 @@ fn runs_facts(mine: &[&DigestItem], now: Timestamp) -> Vec<Line<'static>> {
     lines
 }
 
-/// A project: the folder itself, how its runs stand, and the rules that live
-/// there. `items` is the whole digest; this picks the ones in the folder.
+/// A project: the folder itself, how its runs stand, and the flows `in` it.
+/// `items` is the whole digest; this picks the ones in the folder.
 #[allow(clippy::too_many_arguments)]
 pub fn project_lines(
     name: &str,
     place: &str,
     workspace: &std::path::Path,
     items: &[DigestItem],
-    rules: &[Rule],
+    flows: &[Flow],
     broken: &[&NotLoaded],
     summary: Option<&Summary>,
     width: usize,
@@ -447,14 +440,14 @@ pub fn project_lines(
     let mut lines = vec![Line::from(Span::raw(format!(" {name}")).bold())];
     lines.push(Line::from(Span::raw(format!(" {place}")).dim()));
     lines.push(Line::raw(""));
-    // A file that did not load comes first: until it is fixed, what is
-    // below is not what the file says.
-    lines.extend(not_loaded_lines(broken, None));
+    // A flow that did not load comes first: until it is fixed, what is
+    // below is not what its folder says.
+    lines.extend(flows::not_loaded_lines(broken));
     lines.extend(runs_facts(&mine, now));
     lines.extend(summary_section(summary, width, now));
 
-    // The rules that live here, told the same way the header's chips are.
-    lines.extend(rules_section(rules, Some(workspace), now));
+    // The flows in it, told the same way the header's chips are.
+    lines.extend(flows_section(flows, Some(workspace), now));
     lines.push(Line::raw(""));
     let edit = if broken.is_empty() {
         "/edit opens its schedules"
@@ -477,26 +470,24 @@ pub fn top_lines(summary: Option<&Summary>, width: usize, now: Timestamp) -> Vec
     lines
 }
 
-/// The `everywhere` group, which is not a project: how the global rules'
-/// runs outside every project stand, and the global rules themselves.
-/// `mine` are those runs; `broken`, what of the global files did not load.
+/// The `everywhere` group, which is not a project: how the runs under it
+/// stand, and the flows with no `in`. `mine` are those runs; `broken`, what
+/// of those flows did not load.
 pub fn everywhere_lines(
     mine: &[&DigestItem],
-    rules: &[Rule],
+    flows: &[Flow],
     broken: &[&NotLoaded],
     summary: Option<&Summary>,
     width: usize,
     now: Timestamp,
 ) -> Vec<Line<'static>> {
     let mut lines = vec![Line::from(Span::raw(" everywhere").bold())];
-    lines.push(Line::from(
-        Span::raw(" what the global rules ran outside every project").dim(),
-    ));
+    lines.push(Line::from(Span::raw(" what flows ran outside every project").dim()));
     lines.push(Line::raw(""));
-    lines.extend(not_loaded_lines(broken, None));
+    lines.extend(flows::not_loaded_lines(broken));
     lines.extend(runs_facts(mine, now));
     lines.extend(summary_section(summary, width, now));
-    lines.extend(rules_section(rules, None, now));
+    lines.extend(flows_section(flows, None, now));
     lines.push(Line::raw(""));
     let edit = if broken.is_empty() {
         "/edit opens their schedules"
@@ -504,30 +495,6 @@ pub fn everywhere_lines(
         "/edit opens what broke, at the line"
     };
     lines.push(Line::from(Span::raw(format!(" ^g shows their wiring · {edit}")).dim()));
-    lines
-}
-
-/// What did not load, two lines each: where in red — the file, its line and
-/// column, the rule when it was one — then why, under it. With `names`, each says
-/// whose file it is too (`global`, or the project as the list names it), for
-/// a list over every scope. Nothing when all loaded; else a blank line after.
-pub fn not_loaded_lines(broken: &[&NotLoaded], names: Option<&Names>) -> Vec<Line<'static>> {
-    if broken.is_empty() {
-        return Vec::new();
-    }
-    let mut lines = vec![Line::from(Span::styled(" not loaded", theme::bad()))];
-    for n in broken {
-        let mut place = match names {
-            Some(names) => format!("{} · {}", rules::owner(&n.scope, names), n.at()),
-            None => n.at(),
-        };
-        if let Some(r) = &n.rule {
-            place.push_str(&format!(" · {r}"));
-        }
-        lines.push(Line::from(Span::styled(format!("   {place}"), theme::bad())));
-        lines.push(Line::from(Span::raw(format!("     {}", n.message))));
-    }
-    lines.push(Line::raw(""));
     lines
 }
 
@@ -997,7 +964,7 @@ mod tests {
         };
         assert_eq!(recap_label(&own, now), "claude's own · 3m ago");
 
-        // A project's pane and a job's show the one kept, under the facts.
+        // A project's pane and a flow's show the one kept, under the facts.
         let lines = text(&project_lines(
             "api",
             "/w/api",

@@ -7,17 +7,19 @@
 //! then runs by attention, newest change first. A workspace path reads as the
 //! name it was registered under.
 //!
-//! Runs a schedule or a rule started, once they have ended, fold into one
-//! line per job — the name, how the last few went, how many there have been,
-//! and what the last one came to — so a job firing every thirty seconds is
-//! one row, not a screen, and it never grows into one: its firings are in the
-//! pane. A run still going, or waiting on you, is never folded.
+//! A flow's step runs, once they have ended, fold into one row per flow —
+//! its name, how the last few went, and where its latest firing stands — so
+//! a flow firing every thirty seconds is one row, not a screen, and it never
+//! grows into one: its firings are in the pane. The row stands in the
+//! project the flow is `in`, wherever its runs ran; a flow with no `in`
+//! stands under `everywhere`. A run still going, or waiting on you, is never
+//! folded.
 //!
 //! Before all of it, the questions waiting on you, from every project, oldest
 //! first — what needs you does not hide under a project's name — then pinned
 //! runs, in the order they were pinned.
 //!
-//! What you hid (`/hide`: a run, a job, a project and everything in it) is
+//! What you hid (`/hide`: a run, a flow, a project and everything in it) is
 //! off the list and in the `hidden` lens instead — unless it comes to need
 //! you after you hid it: then it comes through, just after the questions.
 //!
@@ -25,13 +27,14 @@
 //! sorting itself: what is new enters at its top, what needs you floats to
 //! its top until dealt with, and `/sort` lets it sort itself again.
 
+use super::flows;
 use super::query::{Named, Query, Subject};
 use crate::rank;
 use jiff::{SignedDuration, Timestamp};
 use rl_core::time::fmt_age;
 use rl_proto::decision::Decision;
+use rl_proto::flow::{Firing, Flow, FlowStatus};
 use rl_proto::methods::{Digest, DigestItem, Hidden, Order};
-use rl_proto::rule::{Rule, RuleKind, RuleStatus};
 use rl_proto::types::{Cause, Checkout, Confidence, Run, RunKind, RunState};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -39,8 +42,8 @@ use std::path::{Path, PathBuf};
 /// Ended runs stay on the list this long.
 pub const RECENT: SignedDuration = SignedDuration::from_hours(24);
 
-/// Which slice of the list you are looking at. Not exclusive: a scheduled
-/// agent is both an agent and a job, and shows under either — the lens is the
+/// Which slice of the list you are looking at. Not exclusive: a flow's agent
+/// step is both an agent and a flow's, and shows under either — the lens is the
 /// question you are asking, not a partition. Questions ignore it; they are
 /// what needs you, whatever slice you are in. `hidden` is the one that is a
 /// partition: what you hid, and only that, which no other lens shows.
@@ -49,45 +52,41 @@ pub enum Lens {
     #[default]
     All,
     Agents,
-    Jobs,
-    Reactions,
+    Flows,
     Hidden,
 }
 
 impl Lens {
     /// In the order the strip lists them, and cycles through them.
-    pub const ALL: [Lens; 5] = [Lens::All, Lens::Agents, Lens::Jobs, Lens::Reactions, Lens::Hidden];
+    pub const ALL: [Lens; 4] = [Lens::All, Lens::Agents, Lens::Flows, Lens::Hidden];
 
     pub fn label(self) -> &'static str {
         match self {
             Lens::All => "all",
             Lens::Agents => "agents",
-            Lens::Jobs => "jobs",
-            Lens::Reactions => "reactions",
+            Lens::Flows => "flows",
             Lens::Hidden => "hidden",
         }
     }
 
     /// Whether a run belongs in this lens — by what it is (agents) or by what
-    /// started it (jobs are scheduled, reactions are event-driven). Whether it
-    /// is hidden is `build`'s to say.
+    /// started it (a flow's steps). Whether it is hidden is `build`'s to say.
     fn keeps(self, r: &Run) -> bool {
         match self {
             Lens::All | Lens::Hidden => true,
             Lens::Agents => r.kind == RunKind::Agent,
-            Lens::Jobs => matches!(r.cause, Cause::Schedule(_)),
-            Lens::Reactions => matches!(r.cause, Cause::Reaction(_)),
+            Lens::Flows => matches!(r.cause, Cause::Flow { .. }),
         }
     }
 }
 
 pub enum Row<'a> {
-    /// A group: where it is, what it is called, and the rules that live there.
+    /// A group: where it is, what it is called, and the flows that are in it.
     Group(Head),
     Question(&'a Decision),
     Run(&'a DigestItem),
-    /// A schedule's or rule's ended runs, as one line.
-    Job(Job<'a>),
+    /// A flow's ended runs, as one row.
+    Flow(FlowRow<'a>),
 }
 
 impl<'a> Row<'a> {
@@ -99,7 +98,7 @@ impl<'a> Row<'a> {
             Row::Group(h) => Some(format!("g:{}", h.workspace.display())),
             Row::Question(d) => Some(format!("q:{}", d.id)),
             Row::Run(i) => Some(format!("r:{}", i.run.id)),
-            Row::Job(j) => Some(j.key.clone()),
+            Row::Flow(f) => Some(f.key.clone()),
         }
     }
 
@@ -124,8 +123,8 @@ pub struct Head {
     /// The name it goes by where that is not its folder's own — a ref, or a
     /// folder registered (or renamed) under another name.
     pub own: Option<String>,
-    /// The rules of that folder, needing a yes first, then by name.
-    pub rules: Vec<Chip>,
+    /// The flows `in` that folder, needing a yes first, then by name.
+    pub flows: Vec<Chip>,
     /// The folder's git checkout, when it is in one.
     pub checkout: Option<Checkout>,
 }
@@ -138,7 +137,7 @@ impl Head {
             workspace: PathBuf::new(),
             name: EVERYWHERE.into(),
             own: None,
-            rules: Vec::new(),
+            flows: Vec::new(),
             checkout: None,
         }
     }
@@ -149,82 +148,86 @@ impl Head {
     }
 }
 
-/// The group, and the word, for the global rules' runs outside every project
-/// — the headline's word for those rules. It comes after the projects.
+/// The group, and the word, for the flows with no `in` and their runs
+/// outside every project. It comes after the projects.
 pub const EVERYWHERE: &str = "everywhere";
 /// Its key among the groups: nothing a folder or a ref could be.
 const EVERYWHERE_KEY: &str = "\u{0}everywhere";
 
-/// Whether a run is a global rule's doing outside every project: started by
-/// a schedule or reaction, in a folder that is not a registered project,
-/// filed under no ref, and not by a rule of that name in its own folder. It
-/// is read off the run, not the rules loaded now, so a global rule taken out
-/// of its file leaves its runs under `everywhere` rather than dropping them
-/// back under a path like `~`. A project's own rules run in its folder, which
-/// is registered, so they never land here.
-pub fn everywhere_run(r: &Run, names: &Names, rules: &[Rule]) -> bool {
-    let (kind, name) = match &r.cause {
-        Cause::Schedule(n) => (RuleKind::Schedule, n.as_str()),
-        Cause::Reaction(n) => (RuleKind::Reaction, n.as_str()),
-        _ => return false,
-    };
-    if r.ref_.is_some() || names.registered(&r.workspace).is_some() {
-        return false;
+/// The group a flow's row stands in, as `(key, folder)`: the folder it is
+/// `in`, else `everywhere` — also for a flow not loaded now, whose `in` is
+/// not known.
+fn flow_group(flows: &[Flow], name: &str) -> (String, PathBuf) {
+    match flows.iter().find(|f| f.name == name).and_then(flows::in_of) {
+        Some(p) => (p.to_string_lossy().into_owned(), p),
+        None => (EVERYWHERE_KEY.to_string(), PathBuf::new()),
     }
-    !rules
-        .iter()
-        .any(|x| x.kind() == kind && x.name() == name && !x.is_global() && Path::new(x.scope()) == r.workspace)
+}
+
+/// The group a run is shown under, as `(key, folder)`: an ended flow run's
+/// is its flow's row's; a flow's run still going outside every project —
+/// in a folder that is not a registered project, filed under no ref — is
+/// `everywhere`'s; anything else goes under its ref, else its folder.
+fn group_of(r: &Run, names: &Names, flows: &[Flow]) -> (String, PathBuf) {
+    if let Some(flow) = flow_of(r) {
+        return flow_group(flows, flow);
+    }
+    if matches!(r.cause, Cause::Flow { .. }) && r.ref_.is_none() && names.registered(&r.workspace).is_none() {
+        return (EVERYWHERE_KEY.to_string(), PathBuf::new());
+    }
+    (r.place_key(), r.workspace.clone())
+}
+
+/// Whether a run is shown under `everywhere`: a flow's, outside every
+/// project or folded into a flow with no `in`.
+pub fn everywhere_run(r: &Run, names: &Names, flows: &[Flow]) -> bool {
+    group_of(r, names, flows).0 == EVERYWHERE_KEY
 }
 
 /// The group a run is shown under: the `everywhere` one, or its ref, else
-/// its folder.
-pub fn group_key(r: &Run, names: &Names, rules: &[Rule]) -> String {
-    if everywhere_run(r, names, rules) {
-        EVERYWHERE_KEY.to_string()
-    } else {
-        r.place_key()
-    }
+/// its folder — or, ended and a flow's, its flow's row's.
+pub fn group_key(r: &Run, names: &Names, flows: &[Flow]) -> String {
+    group_of(r, names, flows).0
 }
 
 /// The key a header is hidden by, as its row's own: `g:<folder>`, or
 /// `g:everywhere`.
-fn head_key(r: &Run, group: &str) -> String {
-    if group == EVERYWHERE_KEY {
+fn head_key((key, workspace): &(String, PathBuf)) -> String {
+    if key == EVERYWHERE_KEY {
         format!("g:{EVERYWHERE}")
     } else {
-        format!("g:{}", r.workspace.display())
+        format!("g:{}", workspace.display())
     }
 }
 
-/// The job a run fires for, by its row's key, whether or not it has ended.
-fn job_key_of(r: &Run, group: &str) -> Option<String> {
+/// The flow a run is a step of, by its row's key, whether or not it has ended.
+fn flow_key_of(r: &Run) -> Option<String> {
     match &r.cause {
-        Cause::Schedule(n) => Some(job_key(RuleKind::Schedule, n, group)),
-        Cause::Reaction(n) => Some(job_key(RuleKind::Reaction, n, group)),
+        Cause::Flow { flow, .. } => Some(flow_key(flow)),
         _ => None,
     }
 }
 
 /// What hides a run from the list — its own `/hide`, its project's, its
-/// job's — and since when: the latest of them, the last time you said so.
+/// flow's — and since when: the latest of them, the last time you said so.
 /// `None`: it is on the list.
-pub fn hidden_since(r: &Run, names: &Names, rules: &[Rule], hidden: &[Hidden]) -> Option<Timestamp> {
-    let group = group_key(r, names, rules);
+pub fn hidden_since(r: &Run, names: &Names, flows: &[Flow], hidden: &[Hidden]) -> Option<Timestamp> {
+    let group = group_of(r, names, flows);
     let at = |k: &str| hidden.iter().find(|h| h.key == k).map(|h| h.at);
-    let head = at(&head_key(r, &group));
-    let job = job_key_of(r, &group).and_then(|k| at(&k));
-    [r.hidden_at, head, job].into_iter().flatten().max()
+    let head = at(&head_key(&group));
+    let flow = flow_key_of(r).and_then(|k| at(&k));
+    [r.hidden_at, head, flow].into_iter().flatten().max()
 }
 
-/// Whether what hides a run is its project or its job rather than its own
+/// Whether what hides a run is its project or its flow rather than its own
 /// `/hide` — what bringing the run back alone cannot undo.
-pub fn hidden_with(r: &Run, names: &Names, rules: &[Rule], hidden: &[Hidden]) -> Option<&'static str> {
-    let group = group_key(r, names, rules);
+pub fn hidden_with(r: &Run, names: &Names, flows: &[Flow], hidden: &[Hidden]) -> Option<&'static str> {
+    let group = group_of(r, names, flows);
     let has = |k: &str| hidden.iter().any(|h| h.key == k);
-    if has(&head_key(r, &group)) {
+    if has(&head_key(&group)) {
         Some("its project")
-    } else if job_key_of(r, &group).is_some_and(|k| has(&k)) {
-        Some("its job")
+    } else if flow_key_of(r).is_some_and(|k| has(&k)) {
+        Some("its flow")
     } else {
         None
     }
@@ -262,51 +265,43 @@ pub fn checkout_of<'a>(checkouts: &'a [Checkout], folder: &Path) -> Option<&'a C
     checkouts.iter().find(|c| c.path == folder)
 }
 
-/// A rule on a group's header: `↻ nightly 4h`, `⚡ tests-failed`, `! deploy`.
+/// A flow on its project's header: `↻ nightly 4h`, `↻ tidy paused`,
+/// `! deploy` when it needs a yes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Chip {
     pub name: String,
-    pub kind: RuleKind,
-    pub status: RuleStatus,
-    /// A schedule that is on: how long until it fires.
+    pub status: FlowStatus,
+    /// One that is on: how long until it fires.
     pub due: Option<String>,
 }
 
 impl Chip {
     pub fn needs_yes(&self) -> bool {
-        self.status == RuleStatus::NeedsApproval
+        self.status == FlowStatus::NeedsApproval
     }
 
     pub fn text(&self) -> String {
-        let glyph = match self.kind {
-            RuleKind::Schedule => "↻",
-            RuleKind::Reaction => "⚡",
-        };
         match (&self.status, &self.due) {
-            (RuleStatus::NeedsApproval, _) => format!("! {}", self.name),
-            (RuleStatus::Paused, _) => format!("{glyph} {} paused", self.name),
-            (_, Some(d)) => format!("{glyph} {} {d}", self.name),
-            (_, None) => format!("{glyph} {}", self.name),
+            (FlowStatus::NeedsApproval, _) => format!("! {}", self.name),
+            (FlowStatus::Paused, _) => format!("{JOB} {} paused", self.name),
+            (_, Some(d)) => format!("{JOB} {} {d}", self.name),
+            (_, None) => format!("{JOB} {}", self.name),
         }
     }
 }
 
-/// The rules of one folder (`None`: global) as chips.
-pub fn chips(rules: &[Rule], scope: Option<&Path>, now: Timestamp) -> Vec<Chip> {
-    let mut out: Vec<Chip> = rules
+/// The flows `in` one folder (`None`: those with no `in`) as chips.
+pub fn chips(flows: &[Flow], scope: Option<&Path>, now: Timestamp) -> Vec<Chip> {
+    let mut out: Vec<Chip> = flows
         .iter()
-        .filter(|r| r.removed_at().is_none())
-        .filter(|r| match scope {
-            Some(p) => !r.is_global() && Path::new(r.scope()) == p,
-            None => r.is_global(),
-        })
-        .map(|r| Chip {
-            name: r.name().to_string(),
-            kind: r.kind(),
-            status: r.status(),
-            due: match (r.kind(), r.status(), r.next_at()) {
-                (RuleKind::Schedule, RuleStatus::On, Some(t)) if t > now => Some(fmt_age(now, t)),
-                (RuleKind::Schedule, RuleStatus::On, Some(_)) => Some("due".into()),
+        .filter(|f| f.removed_at.is_none())
+        .filter(|f| flows::in_of(f).as_deref() == scope)
+        .map(|f| Chip {
+            name: f.name.clone(),
+            status: f.status(),
+            due: match (f.status(), f.next_at) {
+                (FlowStatus::On, Some(t)) if t > now => Some(fmt_age(now, t)),
+                (FlowStatus::On, Some(_)) => Some("due".into()),
                 _ => None,
             },
         })
@@ -346,14 +341,13 @@ pub const AGENT: &str = "✦";
 /// The prompt's own caret, in the prompt's green.
 pub const SHELL: &str = "❯";
 pub const COMMAND: &str = "▸";
-/// A schedule's or a rule's ended runs, folded into one row — the glyph the
-/// headline counts schedules with.
+/// A flow, as its row and its chips wear it.
 pub const JOB: &str = "↻";
 /// A question waiting on you.
 pub const QUESTION: &str = "?";
 
 /// An icon's colour: a shell the prompt's green, a question amber, an agent
-/// the plain foreground, a command and a job quiet. Anything that has ended
+/// the plain foreground, a command and a flow quiet. Anything that has ended
 /// is quiet too — its word says how it ended.
 pub fn icon_style(icon: &str, ended: bool) -> ratatui::style::Style {
     use crate::tui::theme;
@@ -461,25 +455,26 @@ pub fn fit(s: &str, w: usize) -> String {
     }
 }
 
-/// A schedule's or rule's ended runs, folded: what the job is and how it has
-/// been going. `runs` is newest first.
+/// A flow's runs, folded into one row: what the flow is, how it has been
+/// going, and where its latest firing stands. `runs` is newest first.
 #[derive(Clone)]
-pub struct Job<'a> {
-    /// `j:<kind>:<name>@<group key>`.
+pub struct FlowRow<'a> {
+    /// `f:<name>`.
     pub key: String,
-    pub kind: RuleKind,
     pub name: String,
-    /// The job's full run history (not just what a filter happened to match),
-    /// newest first. Invariant: never empty — a `Job` is always built with at
-    /// least the run that first revealed it.
+    /// The flow's full run history (not just what a filter happened to
+    /// match), newest first. Invariant: never empty — a `FlowRow` is always
+    /// built with at least the run that first revealed it.
     pub runs: Vec<&'a DigestItem>,
-    /// `every 30s`, `on run.failed` — when the rule is known.
+    /// `every 30m`, `on run.failed` — when the flow is known.
     pub when: Option<String>,
+    /// Its latest firing, when the digest has it.
+    pub firing: Option<&'a Firing>,
 }
 
-impl<'a> Job<'a> {
+impl<'a> FlowRow<'a> {
     pub fn last(&self) -> &'a DigestItem {
-        debug_assert!(!self.runs.is_empty(), "Job::runs must never be empty");
+        debug_assert!(!self.runs.is_empty(), "FlowRow::runs must never be empty");
         self.runs[0]
     }
     pub fn ok(&self) -> usize {
@@ -494,11 +489,11 @@ impl<'a> Job<'a> {
     pub fn unseen(&self) -> bool {
         self.runs.iter().any(|i| i.unseen)
     }
-    /// The job ranks as its last run did.
+    /// The flow ranks as its last run did.
     pub fn score(&self) -> u8 {
         rank::score(&self.last().run)
     }
-    /// What the last firing came to, in its own words — `5 feedback rows to
+    /// What the last run came to, in its own words — `5 feedback rows to
     /// process`, or `exit 1 · 2s` where it failed. The cadence and the tally
     /// are the pane's; the marks say how it has been going.
     pub fn summary(&self) -> String {
@@ -519,20 +514,20 @@ impl<'a> Job<'a> {
     }
 }
 
-/// Which job an ended run folds into, if any.
-fn job_of(r: &Run) -> Option<(RuleKind, &str)> {
+/// Which flow an ended run folds into, if any.
+pub fn flow_of(r: &Run) -> Option<&str> {
     if !r.state.is_terminal() {
         return None;
     }
     match &r.cause {
-        Cause::Schedule(n) => Some((RuleKind::Schedule, n)),
-        Cause::Reaction(n) => Some((RuleKind::Reaction, n)),
+        Cause::Flow { flow, .. } => Some(flow),
         _ => None,
     }
 }
 
-pub fn job_key(kind: RuleKind, name: &str, group: &str) -> String {
-    format!("j:{kind}:{name}@{group}")
+/// A flow's row key.
+pub fn flow_key(name: &str) -> String {
+    format!("f:{name}")
 }
 
 /// Workspace paths → the names they were registered under.
@@ -652,14 +647,14 @@ struct Group<'a> {
     /// The folder of whatever came first; a group's members share one.
     workspace: PathBuf,
     runs: Vec<&'a DigestItem>,
-    jobs: Vec<Job<'a>>,
+    flows: Vec<FlowRow<'a>>,
 }
 
 /// What the list is built from besides the digest.
 pub struct Context<'a> {
     pub names: &'a Names,
-    /// Every rule, for a job's cadence; may be empty.
-    pub rules: &'a [Rule],
+    /// Every flow, for where its row stands and what starts it; may be empty.
+    pub flows: &'a [Flow],
     pub filter: &'a str,
     /// Which slice of the list to show; questions ignore it.
     pub lens: Lens,
@@ -670,7 +665,7 @@ pub struct Context<'a> {
 }
 
 /// What a search matches a run on: its words, its project, what state it is
-/// in, what it is, and the rule behind it.
+/// in, what it is, and the flow behind it.
 fn run_subject<'a>(i: &'a DigestItem, project: &'a str) -> Subject<'a> {
     let r = &i.run;
     let mut is = vec![match r.state {
@@ -695,13 +690,9 @@ fn run_subject<'a>(i: &'a DigestItem, project: &'a str) -> Subject<'a> {
         RunKind::Command | RunKind::Plugin => "command",
     }];
     let by = match &r.cause {
-        Cause::Schedule(n) => {
-            kind.push("job");
-            Some(n.as_str())
-        }
-        Cause::Reaction(n) => {
-            kind.push("reaction");
-            Some(n.as_str())
+        Cause::Flow { flow, .. } => {
+            kind.push("flow");
+            Some(flow.as_str())
         }
         _ => None,
     };
@@ -743,12 +734,12 @@ pub fn named(row: &Row, d: &Digest, names: &Names) -> Named {
             rest: vec![i.run.cli.clone().unwrap_or_default(), path(&i.run.workspace)],
             ..Named::default()
         },
-        Row::Job(j) => {
-            let r = &j.last().run;
+        Row::Flow(f) => {
+            let r = &f.last().run;
             Named {
-                title: j.name.clone(),
+                title: f.name.clone(),
                 project: names.group(&r.place_key()),
-                summary: j.summary(),
+                summary: f.summary(),
                 rest: vec![r.title.clone(), r.cli.clone().unwrap_or_default(), path(&r.workspace)],
                 ..Named::default()
             }
@@ -763,7 +754,7 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
     let now = cx.now;
     let query = Query::parse(cx.filter);
     let mut groups: Vec<Group<'a>> = Vec::new();
-    let group_of = |key: String, workspace: &Path, groups: &mut Vec<Group<'a>>| -> usize {
+    let group_at = |key: String, workspace: &Path, groups: &mut Vec<Group<'a>>| -> usize {
         match groups.iter().position(|g| g.key == key) {
             Some(i) => i,
             None => {
@@ -771,34 +762,32 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
                     key,
                     workspace: workspace.to_path_buf(),
                     runs: Vec::new(),
-                    jobs: Vec::new(),
+                    flows: Vec::new(),
                 });
                 groups.len() - 1
             }
         }
     };
-    let when_of = |kind: RuleKind, name: &str, r: &Run| -> Option<String> {
-        cx.rules
+    let when_of = |name: &str| -> Option<String> {
+        cx.flows
             .iter()
-            .find(|x| x.kind() == kind && x.name() == name && (x.is_global() || Path::new(x.scope()) == r.workspace))
-            .map(|x| x.when())
+            .find(|f| f.name == name)
+            .map(|f| flows::when_words(&f.when()))
     };
     let run_by_id = |id: &str| d.items.iter().map(|i| &i.run).find(|r| r.id == id);
-    // A job's remembered history must be the job's FULL history, independent
-    // of the filter — the filter only decides whether the job row is shown at
-    // all. So jobs are accumulated here first, unconditionally, and folded
-    // into their group afterwards only if the job or one of its own runs hit.
-    struct JobAcc<'a> {
+    // A flow's remembered history must be its FULL history, independent of
+    // the filter — the filter only decides whether the flow's row is shown at
+    // all. So flows are accumulated here first, unconditionally, and folded
+    // into their group afterwards only if the flow or one of its own runs hit.
+    struct FlowAcc<'a> {
         key: String,
-        kind: RuleKind,
         name: String,
         group_key: String,
         workspace: PathBuf,
-        when: Option<String>,
         runs: Vec<&'a DigestItem>,
         hit: bool,
     }
-    let mut jobs_acc: Vec<JobAcc<'a>> = Vec::new();
+    let mut flows_acc: Vec<FlowAcc<'a>> = Vec::new();
     // Pinned runs stand above everything, however old, whatever the lens —
     // kept on purpose, so neither a day nor a slice takes them away. Only the
     // filter does, as with anything else.
@@ -815,12 +804,14 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
             .map(Run::place_key)
             .unwrap_or_else(|| q.workspace.to_string_lossy().into_owned());
         let name = names.group(&key);
-        let by = q
-            .group
-            .as_deref()
-            .and_then(|g| g.strip_prefix("reaction:"))
+        // A flow's question is its firing's: the chain is the firing.
+        let by = d
+            .firings
+            .iter()
+            .find(|f| f.id == q.chain)
+            .map(|f| f.flow.as_str())
             .or(asker.and_then(|r| match &r.cause {
-                Cause::Schedule(n) | Cause::Reaction(n) => Some(n.as_str()),
+                Cause::Flow { flow, .. } => Some(flow.as_str()),
                 _ => None,
             }));
         let subject = Subject {
@@ -842,7 +833,7 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
         if matches!(r.cause, Cause::Assistant(_)) && cx.relay.is_some_and(|h| r.cwd == h) {
             continue;
         }
-        match hidden_since(r, names, cx.rules, &d.hidden) {
+        match hidden_since(r, names, cx.flows, &d.hidden) {
             Some(since) if !hidden_lens => {
                 if comes_through(r, since)
                     && cx.lens.keeps(r)
@@ -868,30 +859,27 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
         if !cx.lens.keeps(r) {
             continue;
         }
-        let (key, name, workspace) = if everywhere_run(r, names, cx.rules) {
-            (EVERYWHERE_KEY.to_string(), EVERYWHERE.to_string(), PathBuf::new())
+        let (key, workspace) = group_of(r, names, cx.flows);
+        let name = if key == EVERYWHERE_KEY {
+            EVERYWHERE.to_string()
         } else {
-            let key = r.place_key();
-            let name = names.group(&key);
-            (key, name, r.workspace.clone())
+            names.group(&key)
         };
-        if let Some((kind, job)) = job_of(r) {
+        if let Some(flow) = flow_of(r) {
             let mut subject = run_subject(i, &name);
-            subject.text.push(job);
+            subject.text.push(flow);
             let item_hit = query.hits(&subject);
-            let jkey = job_key(kind, job, &key);
-            match jobs_acc.iter_mut().find(|acc| acc.key == jkey) {
+            let fkey = flow_key(flow);
+            match flows_acc.iter_mut().find(|acc| acc.key == fkey) {
                 Some(acc) => {
                     acc.runs.push(i);
                     acc.hit = acc.hit || item_hit;
                 }
-                None => jobs_acc.push(JobAcc {
-                    key: jkey,
-                    kind,
-                    name: job.to_string(),
-                    group_key: key.clone(),
-                    workspace: workspace.clone(),
-                    when: when_of(kind, job, r),
+                None => flows_acc.push(FlowAcc {
+                    key: fkey,
+                    name: flow.to_string(),
+                    group_key: key,
+                    workspace,
                     runs: vec![i],
                     hit: item_hit,
                 }),
@@ -901,22 +889,22 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
         if !query.hits(&run_subject(i, &name)) {
             continue;
         }
-        let g = group_of(key, &workspace, &mut groups);
+        let g = group_at(key, &workspace, &mut groups);
         groups[g].runs.push(i);
     }
-    // Fold each job into its group now, with its full history, but only if
-    // the job (or one of its own runs) actually matched the filter.
-    for acc in jobs_acc {
+    // Fold each flow into its group now, with its full history, but only if
+    // the flow (or one of its own runs) actually matched the filter.
+    for acc in flows_acc {
         if !acc.hit {
             continue;
         }
-        let g = group_of(acc.group_key, &acc.workspace, &mut groups);
-        groups[g].jobs.push(Job {
+        let g = group_at(acc.group_key, &acc.workspace, &mut groups);
+        groups[g].flows.push(FlowRow {
             key: acc.key,
-            kind: acc.kind,
+            when: when_of(&acc.name),
+            firing: d.firings.iter().find(|f| f.flow == acc.name),
             name: acc.name,
             runs: acc.runs,
-            when: acc.when,
         });
     }
     for g in &mut groups {
@@ -925,10 +913,10 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
                 .cmp(&rank::score(&b.run))
                 .then_with(|| b.at.cmp(&a.at))
         });
-        for j in &mut g.jobs {
-            j.runs.sort_by_key(|i| std::cmp::Reverse(i.at));
+        for f in &mut g.flows {
+            f.runs.sort_by_key(|i| std::cmp::Reverse(i.at));
         }
-        g.jobs
+        g.flows
             .sort_by(|a, b| a.score().cmp(&b.score()).then_with(|| b.last().at.cmp(&a.last().at)));
     }
     // Which folders already have a line, so idle projects don't double up.
@@ -952,7 +940,7 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
             head(&g.key, &g.workspace, d, cx)
         };
         let mut block = vec![Row::Group(head)];
-        // Runs and jobs share one order: whatever asks for you leads, then the
+        // Runs and flows share one order: whatever asks for you leads, then the
         // folder's shells — where you work, rather than something that happens
         // to be idle — then the rest, newest first.
         let cls = |score: u8, shell: bool| match (score, shell) {
@@ -968,9 +956,9 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
                 (cls(s, live_shell(&i.run)), s, i.at, Row::Run(i))
             })
             .collect();
-        mixed.extend(g.jobs.into_iter().map(|j| {
-            let s = j.score();
-            (cls(s, false), s, j.last().at, Row::Job(j))
+        mixed.extend(g.flows.into_iter().map(|f| {
+            let s = f.score();
+            (cls(s, false), s, f.last().at, Row::Flow(f))
         }));
         mixed.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)).then_with(|| b.2.cmp(&a.2)));
         let mixed: Vec<Row<'a>> = mixed.into_iter().map(|(_, _, _, row)| row).collect();
@@ -992,8 +980,8 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
         }
     }
     // A registered folder is always on the list, under every lens, even before
-    // anything has run there — so you can select it, read its stats, edit its
-    // rules or open its shell. A lens narrows what is shown inside projects,
+    // anything has run there — so you can select it, read its stats, see its
+    // flows or open its shell. A lens narrows what is shown inside projects,
     // never which projects there are; only the filter takes them away — and
     // `/hide`, which puts a project's header in the `hidden` lens, registered
     // or not, and there only.
@@ -1036,11 +1024,10 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
     }
     blocks.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
     rows.extend(blocks.into_iter().flat_map(|(_, _, block)| block));
-    // The global rules — the Relay home's, which apply in every folder — have
-    // no row of their own: the headline says them (`everywhere`), and the
-    // graph is where they are wired. Their runs fold under the project they
-    // ran in; what ran outside every project is gathered after the projects,
-    // under one `everywhere`, rather than under whatever folder that was.
+    // The flows with no `in` are said in the headline (`everywhere`), and the
+    // graph is where they are wired. Their rows, and what flows ran outside
+    // every project, are gathered after the projects, under one
+    // `everywhere`, rather than under whatever folder that was.
     rows.extend(everywhere);
     rows
 }
@@ -1054,19 +1041,19 @@ pub fn head(key: &str, workspace: &Path, d: &Digest, cx: &Context<'_>) -> Head {
         workspace: workspace.to_path_buf(),
         name: names.group(key),
         own: names.own(key, workspace),
-        rules: chips(cx.rules, Some(workspace), cx.now),
+        flows: chips(cx.flows, Some(workspace), cx.now),
         checkout: checkout_of(&d.checkouts, workspace).cloned(),
     }
 }
 
 /// Whether a row floats to the top of its project whatever order you put it
-/// in: it asks, is blocked, or failed — a job whose last firing failed too.
+/// in: it asks, is blocked, or failed — a flow whose last run failed too.
 /// Once that is dealt with, it drops back to where you put it.
 pub fn floats(row: &Row) -> bool {
     let needs = |s: RunState| matches!(s, RunState::NeedsInput | RunState::Blocked | RunState::Failed);
     match row {
         Row::Run(i) => needs(i.run.state),
-        Row::Job(j) => needs(j.last().run.state),
+        Row::Flow(f) => needs(f.last().run.state),
         Row::Group(_) | Row::Question(_) => false,
     }
 }
@@ -1117,7 +1104,7 @@ pub fn reorder(shown: &[Row], full: &[Row], kept: &[Order], key: &str, up: bool)
     match &shown[at] {
         Row::Group(_) => return Err("a project keeps its place by name · ⇧↑↓ moves the rows inside it"),
         Row::Question(_) => return Err("a question stays at the top: it needs you"),
-        Row::Run(_) | Row::Job(_) => {}
+        Row::Run(_) | Row::Flow(_) => {}
     }
     let Some(head) = shown[..at].iter().rposition(|r| matches!(r, Row::Group(_))) else {
         return Err(if shown[at].item().is_some_and(|i| i.run.pinned_at.is_some()) {
@@ -1132,7 +1119,7 @@ pub fn reorder(shown: &[Row], full: &[Row], kept: &[Order], key: &str, up: bool)
     let next = if up { at.checked_sub(1) } else { Some(at + 1) };
     let other = match next.and_then(|i| shown.get(i)) {
         Some(r) if floats(r) => return Err("already at the top · what needs you stays above it"),
-        Some(Row::Run(_) | Row::Job(_)) => shown[next.unwrap_or_default()].key().unwrap_or_default(),
+        Some(Row::Run(_) | Row::Flow(_)) => shown[next.unwrap_or_default()].key().unwrap_or_default(),
         _ if up => return Err("already at the top of its project"),
         _ => return Err("already at the bottom of its project"),
     };
@@ -1147,8 +1134,8 @@ pub fn reorder(shown: &[Row], full: &[Row], kept: &[Order], key: &str, up: bool)
     Ok(Order { group, rows })
 }
 
-/// `(questions, need you, working, finished, jobs)` over what the list shows.
-/// A job counts once, and as needing you when its last run failed.
+/// `(questions, need you, working, finished, flows)` over what the list shows.
+/// A flow counts once, and as needing you when its last run failed.
 pub fn counts(rows: &[Row]) -> (usize, usize, usize, usize, usize) {
     let mut c = (0, 0, 0, 0, 0);
     for r in rows {
@@ -1163,9 +1150,9 @@ pub fn counts(rows: &[Row]) -> (usize, usize, usize, usize, usize) {
                     Finished | Stopped => c.3 += 1,
                 }
             }
-            Row::Job(j) => {
+            Row::Flow(f) => {
                 c.4 += 1;
-                if j.last().run.state == RunState::Failed {
+                if f.last().run.state == RunState::Failed {
                     c.1 += 1;
                 }
             }
@@ -1194,27 +1181,16 @@ pub fn lost_note(d: &Digest) -> Option<String> {
     Some(format!("{} lost in a restart · {how}", d.lost.len()))
 }
 
-/// The global rules, as the headline says them: how many schedules and
-/// reactions the Relay home holds — `↻ 2 ⚡ 1 everywhere` — and, when any
-/// waits for a yes, that it does and where to give it. `chips` are the global
-/// ones (`chips(rules, None, ..)`); the flag says one is waiting, which is
-/// drawn amber. Nothing when there are none: a home with no rules of its own
-/// has nothing to say here.
+/// The flows with no `in`, as the headline says them: how many there are —
+/// `↻ 2 everywhere` — and, when any waits for a yes, that it does and where
+/// to give it. `chips` are those ones (`chips(flows, None, ..)`); the flag
+/// says one is waiting, which is drawn amber. Nothing when there are none.
 pub fn everywhere(chips: &[Chip]) -> Option<(String, bool)> {
     if chips.is_empty() {
         return None;
     }
-    let jobs = chips.iter().filter(|c| c.kind == RuleKind::Schedule).count();
-    let reactions = chips.len() - jobs;
     let waiting = chips.iter().filter(|c| c.needs_yes()).count();
-    let mut s = String::new();
-    if jobs > 0 {
-        s.push_str(&format!("↻ {jobs} "));
-    }
-    if reactions > 0 {
-        s.push_str(&format!("⚡ {reactions} "));
-    }
-    s.push_str("everywhere");
+    let mut s = format!("{JOB} {} everywhere", chips.len());
     let need = |n: usize| if n == 1 { "needs" } else { "need" };
     match waiting {
         0 => {}
@@ -1225,10 +1201,10 @@ pub fn everywhere(chips: &[Chip]) -> Option<(String, bool)> {
     Some((s, waiting > 0))
 }
 
-/// On a header whose folder's rules file did not load — or on `everywhere`
-/// when one of the Relay home's did not — in red, before any rule waiting for
-/// a yes: the file is not what is loaded until it is fixed.
-pub const BROKEN_CHIP: &str = "! rules";
+/// On a header whose flows did not load — or on `everywhere` when one with
+/// no `in`, or not known, did not — in red, before any flow waiting for a
+/// yes: the folder is not what is loaded until it is fixed.
+pub const BROKEN_CHIP: &str = "! flows";
 
 /// How a piece of the headline is drawn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1240,29 +1216,23 @@ pub enum Tone {
     Bad,
 }
 
-/// What the headline says of the global rules, piece by piece: the tally
-/// (`everywhere`), amber when one waits for a yes, then — when one of the
-/// Relay home's files did not load — `rules broken` in red beside it, or
-/// `global rules broken` when no global rule is loaded to stand beside.
+/// What the headline says of the flows with no `in`, piece by piece: the
+/// tally (`everywhere`), amber when one waits for a yes, then — when a flow
+/// of theirs did not load — `flows broken` in red beside it.
 pub fn global_parts(chips: &[Chip], broken: bool) -> Vec<(String, Tone)> {
     let mut out = Vec::new();
     if let Some((note, waiting)) = everywhere(chips) {
         out.push((note, if waiting { Tone::Needs } else { Tone::Plain }));
     }
     if broken {
-        let words = if chips.is_empty() {
-            "global rules broken"
-        } else {
-            "rules broken"
-        };
-        out.push((words.into(), Tone::Bad));
+        out.push(("flows broken".into(), Tone::Bad));
     }
     out
 }
 
 /// The header line: what needs you first, then what is moving.
 pub fn headline(rows: &[Row], news: usize, filter: &str) -> String {
-    let (asked, need, working, fin, jobs) = counts(rows);
+    let (asked, need, working, fin, flows) = counts(rows);
     let mut parts = Vec::new();
     if asked > 0 {
         parts.push(format!("{asked} to decide"));
@@ -1276,8 +1246,8 @@ pub fn headline(rows: &[Row], news: usize, filter: &str) -> String {
     if fin > 0 {
         parts.push(format!("{fin} finished"));
     }
-    if jobs > 0 {
-        parts.push(format!("{jobs} job{}", if jobs == 1 { "" } else { "s" }));
+    if flows > 0 {
+        parts.push(format!("{flows} flow{}", if flows == 1 { "" } else { "s" }));
     }
     if news > 0 {
         parts.push(format!("{news} new"));
@@ -1300,6 +1270,7 @@ pub fn headline(rows: &[Row], news: usize, filter: &str) -> String {
 mod tests {
     use super::*;
     use rl_proto::decision::{DecisionOption, DecisionStatus};
+    use rl_proto::flow::{FiringStatus, StepStatus};
     use rl_proto::types::{Confidence, RunKind, RunState};
 
     fn item(id: &str, state: RunState, ws: &str, at: &str, unseen: bool) -> DigestItem {
@@ -1364,6 +1335,7 @@ mod tests {
             lost: vec![],
             hidden: vec![],
             order: vec![],
+            firings: Vec::new(),
         };
         let names = Names::default();
         let now: Timestamp = at.parse().unwrap();
@@ -1384,6 +1356,7 @@ mod tests {
             lost: lost.iter().map(|s| s.to_string()).collect(),
             hidden: Vec::new(),
             order: Vec::new(),
+            firings: Vec::new(),
         };
         assert_eq!(
             lost_note(&d(&[], vec![agent.clone()])),
@@ -1442,7 +1415,7 @@ mod tests {
             d,
             &Context {
                 names,
-                rules: &[],
+                flows: &[],
                 lens: Lens::All,
                 filter,
                 now,
@@ -1456,13 +1429,61 @@ mod tests {
             d,
             &Context {
                 names,
-                rules: &[],
+                flows: &[],
                 lens,
                 filter: "",
                 now,
                 relay: None,
             },
         )
+    }
+
+    /// The list as it stands with these flows loaded.
+    fn flows_build<'a>(
+        d: &'a Digest,
+        names: &Names,
+        flows: &[Flow],
+        lens: Lens,
+        filter: &str,
+        now: Timestamp,
+    ) -> Vec<Row<'a>> {
+        build(
+            d,
+            &Context {
+                names,
+                flows,
+                lens,
+                filter,
+                now,
+                relay: None,
+            },
+        )
+    }
+
+    /// A flow as `flow.list` gives it: on, every 30m, `in` the folder given.
+    fn flow(name: &str, in_: Option<&str>) -> Flow {
+        Flow {
+            name: name.into(),
+            hash: "h".into(),
+            def: serde_json::json!({
+                "in_": in_,
+                "trigger": { "when": { "Every": 1800 }, "on": [] },
+            }),
+            source: format!("/h/flows/{name}").into(),
+            paused: false,
+            approved_hash: Some("h".into()),
+            last_fired_at: None,
+            next_at: None,
+            removed_at: None,
+        }
+    }
+
+    /// A step of a flow, as the cause of a run.
+    fn step_of(flow: &str) -> Cause {
+        Cause::Flow {
+            flow: flow.into(),
+            step: "probe".into(),
+        }
     }
 
     #[test]
@@ -1478,7 +1499,13 @@ mod tests {
         failed.run.kind = RunKind::Command;
         let mut sched = item("sched", RunState::Working, web, at, false);
         sched.run.kind = RunKind::Command;
-        sched.run.cause = Cause::Schedule("nightly".into());
+        sched.run.cause = step_of("nightly");
+        // The question is a firing's: its chain is the firing's id.
+        let asking = Firing {
+            id: "q1".into(),
+            flow: "tests-failed".into(),
+            ..firing(FiringStatus::Waiting, &[])
+        };
         let d = Digest {
             since: now,
             items: vec![agent, failed, sched],
@@ -1487,6 +1514,7 @@ mod tests {
             lost: Vec::new(),
             hidden: Vec::new(),
             order: Vec::new(),
+            firings: vec![asking],
         };
         let names = Names::new([
             (PathBuf::from(api), "api".to_string()),
@@ -1505,8 +1533,8 @@ mod tests {
         assert_eq!(shown("kind:agent"), ["[api]", "r:agent"]);
         assert_eq!(shown("kind:question"), ["q:q1"], "a question stands above the projects");
         assert_eq!(shown("by:nightly"), ["[web]", "r:sched"]);
-        assert_eq!(shown("by:tests"), ["q:q1"], "a question by its reaction");
-        // The global rules have no row to find.
+        assert_eq!(shown("by:tests"), ["q:q1"], "a question by its flow's firing");
+        // A word nothing says finds nothing.
         assert_eq!(shown("global"), Vec::<String>::new());
     }
 
@@ -1530,11 +1558,12 @@ mod tests {
             lost: Vec::new(),
             hidden: Vec::new(),
             order: Vec::new(),
+            firings: Vec::new(),
         };
         let names = Names::new([(PathBuf::from(api), "api".to_string())]);
         let cx = |relay: Option<&'static str>| Context {
             names: &names,
-            rules: &[],
+            flows: &[],
             lens: Lens::All,
             filter: "",
             now,
@@ -1572,6 +1601,7 @@ mod tests {
             lost: Vec::new(),
             hidden: Vec::new(),
             order: Vec::new(),
+            firings: Vec::new(),
         };
         let names = Names::new([
             (PathBuf::from(api), "api".to_string()),
@@ -1606,17 +1636,21 @@ mod tests {
         // `Command` hint it was started with. Either way it is not an agent.
         shell.run.kind = RunKind::Shell;
         let mut sched = item("sched", RunState::Working, ws, at, false);
-        sched.run.cause = Cause::Schedule("nightly".into());
+        sched.run.cause = step_of("nightly");
         let mut react = item("react", RunState::Working, ws, at, false);
-        react.run.cause = Cause::Reaction("on-fail".into());
+        react.run.cause = step_of("on-fail");
+        // A run an old rule started is just a run now.
+        let mut old = item("old", RunState::Working, ws, at, false);
+        old.run.cause = Cause::Schedule("nightly".into());
         let d = Digest {
             since: now,
-            items: vec![agent, shell, sched, react],
+            items: vec![agent, shell, sched, react, old],
             decisions: vec![],
             checkouts: Vec::new(),
             lost: Vec::new(),
             hidden: Vec::new(),
             order: Vec::new(),
+            firings: Vec::new(),
         };
         let names = Names::new([(PathBuf::from(ws), "relay".to_string())]);
         let runs = |lens| {
@@ -1627,12 +1661,11 @@ mod tests {
         };
         // The shell leads its folder: where you work comes before what merely
         // runs there. The rest keep the order they were in.
-        assert_eq!(runs(Lens::All), ["shell", "agent", "sched", "react"]);
-        // Agents is by kind, so it keeps the scheduled and reacted agents too.
-        assert_eq!(runs(Lens::Agents), ["agent", "sched", "react"]);
-        // Jobs and reactions are by cause.
-        assert_eq!(runs(Lens::Jobs), ["sched"]);
-        assert_eq!(runs(Lens::Reactions), ["react"]);
+        assert_eq!(runs(Lens::All), ["shell", "agent", "sched", "react", "old"]);
+        // Agents is by kind, so it keeps the flows' agents too.
+        assert_eq!(runs(Lens::Agents), ["agent", "sched", "react", "old"]);
+        // Flows is by cause.
+        assert_eq!(runs(Lens::Flows), ["sched", "react"]);
     }
 
     #[test]
@@ -1667,6 +1700,7 @@ mod tests {
             lost: Vec::new(),
             hidden: Vec::new(),
             order: Vec::new(),
+            firings: Vec::new(),
         };
         let names = Names::new([
             (PathBuf::from("/home/f/relay"), "relay".to_string()),
@@ -1679,8 +1713,8 @@ mod tests {
             ["q:q1", "r:old01", "r:shell", "[api]", "[relay]", "r:fail1"]
         );
         // No lens takes a pin away.
-        let jobs = lens_build(&d, &names, Lens::Jobs, now);
-        assert_eq!(&keys(&jobs)[..3], ["q:q1", "r:old01", "r:shell"]);
+        let flows = lens_build(&d, &names, Lens::Flows, now);
+        assert_eq!(&keys(&flows)[..3], ["q:q1", "r:old01", "r:shell"]);
         // The filter does, and matches a pin by its folder too.
         assert_eq!(keys(&build_with(&d, &names, "api", now)), ["r:old01", "[api]"]);
     }
@@ -1700,7 +1734,7 @@ mod tests {
         let mut mine = item("mine", RunState::Working, relay, at, false);
         mine.run.hidden_at = Some("2026-09-10T11:10:00Z".parse().unwrap());
         let mut fired = item("fired", RunState::Finished, relay, at, false);
-        fired.run.cause = Cause::Schedule("nightly".into());
+        fired.run.cause = step_of("nightly");
         let mut pinned = item("pinned", RunState::Working, relay, at, false);
         pinned.run.pinned_at = Some(at.parse().unwrap());
         pinned.run.hidden_at = Some("2026-09-10T11:10:00Z".parse().unwrap());
@@ -1718,36 +1752,39 @@ mod tests {
             checkouts: Vec::new(),
             lost: Vec::new(),
             hidden: vec![
-                // A registered project, a folder that is not one, a job, and
+                // A registered project, a folder that is not one, a flow, and
                 // a folder with nothing on the list at all.
                 hid(&format!("g:{api}"), "2026-09-10T11:10:00Z"),
                 hid(&format!("g:{scratch}"), "2026-09-10T11:10:00Z"),
-                hid(&job_key(RuleKind::Schedule, "nightly", relay), "2026-09-10T11:10:00Z"),
+                hid("f:nightly", "2026-09-10T11:10:00Z"),
                 hid("g:/home/f/gone", "2026-09-10T11:10:00Z"),
             ],
             order: Vec::new(),
+            firings: Vec::new(),
         };
         let names = Names::new([
             (PathBuf::from(api), "api".to_string()),
             (PathBuf::from(relay), "relay".to_string()),
         ]);
+        let nightly = [flow("nightly", Some(relay))];
+        let lens = |lens| keys(&flows_build(&d, &names, &nightly, lens, "", now));
         // Off the list, whatever the lens: the project's header too, the pin
         // too. Nothing hidden needs you, so nothing comes through.
-        assert_eq!(keys(&lens_build(&d, &names, Lens::All, now)), ["[relay]", "r:kept"]);
-        assert_eq!(keys(&lens_build(&d, &names, Lens::Agents, now)), ["[relay]", "r:kept"]);
-        assert_eq!(keys(&lens_build(&d, &names, Lens::Jobs, now)), ["[relay]"]);
+        assert_eq!(lens(Lens::All), ["[relay]", "r:kept"]);
+        assert_eq!(lens(Lens::Agents), ["[relay]", "r:kept"]);
+        assert_eq!(lens(Lens::Flows), ["[relay]"]);
         // The hidden lens is that and only that, laid out the same way: a
         // hidden project's header, registered or not, even with nothing
-        // under it; the job folded as ever; a hidden pin in the pinned band.
+        // under it; the flow folded as ever; a hidden pin in the pinned band.
         assert_eq!(
-            keys(&lens_build(&d, &names, Lens::Hidden, now)),
+            lens(Lens::Hidden),
             [
                 "r:pinned",
                 "[api]",
                 "r:inapi",
                 "[gone]",
                 "[relay]",
-                "j:schedule:nightly@/home/f/relay",
+                "f:nightly",
                 "r:mine",
                 "[scratch]",
                 "r:loose",
@@ -1759,7 +1796,7 @@ mod tests {
                 &d,
                 &Context {
                     names: &names,
-                    rules: &[],
+                    flows: &nightly,
                     filter: "is:hidden",
                     lens: Lens::Hidden,
                     now,
@@ -1786,9 +1823,9 @@ mod tests {
         // working does not.
         let asks = item("asks", RunState::NeedsInput, api, "2026-09-10T10:30:00Z", true);
         let busy = item("busy", RunState::Working, api, "2026-09-10T10:30:00Z", false);
-        // A hidden job's firing that failed after comes through as a run.
+        // A hidden flow's run that failed after comes through as a run.
         let mut firing = item("firing", RunState::Failed, relay, "2026-09-10T11:20:00Z", true);
-        firing.run.cause = Cause::Schedule("nightly".into());
+        firing.run.cause = step_of("nightly");
         let d = Digest {
             since: now,
             items: vec![failed, seen, asks, busy, firing],
@@ -1797,15 +1834,17 @@ mod tests {
             lost: Vec::new(),
             hidden: vec![
                 hid(&format!("g:{api}"), "2026-09-10T10:00:00Z"),
-                hid(&job_key(RuleKind::Schedule, "nightly", relay), "2026-09-10T10:00:00Z"),
+                hid("f:nightly", "2026-09-10T10:00:00Z"),
             ],
             order: Vec::new(),
+            firings: Vec::new(),
         };
         let names = Names::new([
             (PathBuf::from(api), "api".to_string()),
             (PathBuf::from(relay), "relay".to_string()),
         ]);
-        let all = lens_build(&d, &names, Lens::All, now);
+        let nightly = [flow("nightly", Some(relay))];
+        let all = flows_build(&d, &names, &nightly, Lens::All, "", now);
         // After the questions, what asks before what failed, then in the
         // order it came; its project stays hidden.
         assert_eq!(keys(&all), ["q:q1", "r:asks", "r:failed", "r:firing", "[relay]"]);
@@ -1813,20 +1852,20 @@ mod tests {
         assert_eq!(need, 3, "the headline counts them as needing you");
         // A lens still narrows it, as it would any run that needs you.
         assert_eq!(
-            keys(&lens_build(&d, &names, Lens::Jobs, now)),
+            keys(&flows_build(&d, &names, &nightly, Lens::Flows, "", now)),
             ["q:q1", "r:firing", "[relay]"]
         );
         // In the hidden lens they are in their places, not above them: the
-        // firing folds into its job again.
+        // run folds into its flow again.
         assert_eq!(
-            keys(&lens_build(&d, &names, Lens::Hidden, now)),
+            keys(&flows_build(&d, &names, &nightly, Lens::Hidden, "", now)),
             [
                 "q:q1",
                 "[api]",
                 "r:asks",
                 "r:busy",
                 "[relay]",
-                "j:schedule:nightly@/home/f/relay",
+                "f:nightly",
                 "r:failed",
                 "r:seen"
             ]
@@ -1835,13 +1874,13 @@ mod tests {
         let mut again = d.clone();
         again.items[0].run.hidden_at = Some(t("2026-09-10T11:45:00Z"));
         assert_eq!(
-            keys(&lens_build(&again, &names, Lens::All, now)),
+            keys(&flows_build(&again, &names, &nightly, Lens::All, "", now)),
             ["q:q1", "r:asks", "r:firing", "[relay]"]
         );
         let r = &d.items[2].run;
         assert_eq!(hidden_since(r, &names, &[], &d.hidden), Some(t("2026-09-10T10:00:00Z")));
         assert_eq!(hidden_with(r, &names, &[], &d.hidden), Some("its project"));
-        assert_eq!(hidden_with(&d.items[4].run, &names, &[], &d.hidden), Some("its job"));
+        assert_eq!(hidden_with(&d.items[4].run, &names, &[], &d.hidden), Some("its flow"));
         assert_eq!(hidden_with(&d.items[0].run, &names, &[], &d.hidden), None);
         assert!(comes_through(r, t("2026-09-10T10:00:00Z")));
         assert!(!comes_through(r, t("2026-09-10T10:30:00Z")), "not after, at");
@@ -1882,6 +1921,7 @@ mod tests {
             lost: Vec::new(),
             hidden: Vec::new(),
             order: Vec::new(),
+            firings: Vec::new(),
         };
         let names = Names::default();
         let rows = build_with(&d, &names, "", now);
@@ -1956,6 +1996,7 @@ mod tests {
             lost: Vec::new(),
             hidden: Vec::new(),
             order: Vec::new(),
+            firings: Vec::new(),
         };
         let names = Names::new([(PathBuf::from("/home/f/relay"), "relay".to_string())]);
         let rows = build_with(&d, &names, "", now);
@@ -1997,6 +2038,7 @@ mod tests {
             lost: Vec::new(),
             hidden: Vec::new(),
             order: Vec::new(),
+            firings: Vec::new(),
         };
         let names = Names::new([
             (PathBuf::from("/home/f/relay"), "relay".to_string()),
@@ -2016,96 +2058,82 @@ mod tests {
         assert_eq!(keys(&build_with(&d, &names, "idle", now)), ["[idle]"]);
         // A lens narrows what is inside projects, never which projects there are:
         // the idle one and yours stay, even where nothing in them matches.
-        assert_eq!(keys(&lens_build(&d, &names, Lens::Jobs, now)), ["[idle]", "[relay]"]);
+        assert_eq!(keys(&lens_build(&d, &names, Lens::Flows, now)), ["[idle]", "[relay]"]);
     }
 
     #[test]
     fn with_no_runs_and_no_folders_the_list_is_empty() {
         let now: Timestamp = "2026-09-10T12:00:00Z".parse().unwrap();
-        let d = Digest {
+        let d = digest(now, vec![], vec![]);
+        let flows = [flow("pulse", None)];
+        let rows = flows_build(&d, &Names::default(), &flows, Lens::All, "", now);
+        // Flows or none, nothing stands on the list for them until they
+        // run, so a fresh home says it has nothing running.
+        assert!(rows.is_empty(), "{:?}", keys(&rows));
+    }
+
+    /// The list's digest: these runs and firings, and nothing else.
+    fn digest(now: Timestamp, items: Vec<DigestItem>, firings: Vec<Firing>) -> Digest {
+        Digest {
             since: now,
-            items: vec![],
+            items,
             decisions: vec![],
             checkouts: Vec::new(),
             lost: Vec::new(),
             hidden: Vec::new(),
             order: Vec::new(),
-        };
-        let rules = [schedule("global", "pulse", true, Some("2026-09-10T12:00:30Z"))];
-        let rows = build(
-            &d,
-            &Context {
-                names: &Names::default(),
-                rules: &rules,
-                lens: Lens::All,
-                filter: "",
-                now,
-                relay: None,
-            },
-        );
-        // Global rules or none, nothing stands on the list for them, so a
-        // fresh home says it has nothing running.
-        assert!(rows.is_empty(), "{:?}", keys(&rows));
+            firings,
+        }
     }
 
     #[test]
-    fn the_headline_says_the_global_rules_and_a_yes_they_wait_for() {
+    fn the_headline_says_the_flows_with_no_in_and_a_yes_they_wait_for() {
         let now: Timestamp = "2026-09-10T12:00:00Z".parse().unwrap();
-        let say = |rules: &[Rule]| everywhere(&chips(rules, None, now));
-        let pulse = schedule("global", "pulse", true, Some("2026-09-10T12:00:30Z"));
-        let nightly = schedule("global", "nightly", true, None);
-        let notify = reaction("global", "notify");
-        let mut waiting = reaction("global", "deploy");
-        if let Rule::Reaction(r) = &mut waiting {
-            r.approved_hash = None;
-        }
-        assert_eq!(say(&[]), None, "no global rules, nothing said");
-        // A folder's rules are its header's, not the headline's.
-        assert_eq!(say(&[schedule("/home/f/relay", "nightly", true, None)]), None);
+        let say = |flows: &[Flow]| everywhere(&chips(flows, None, now));
+        let (pulse, nightly, notify) = (flow("pulse", None), flow("nightly", None), flow("notify", None));
+        let waiting = Flow {
+            approved_hash: None,
+            ..flow("deploy", None)
+        };
+        assert_eq!(say(&[]), None, "no flows, nothing said");
+        // A flow `in` a folder is its header's, not the headline's.
+        assert_eq!(say(&[flow("nightly", Some("/home/f/relay"))]), None);
         assert_eq!(
             say(&[pulse.clone(), nightly.clone(), notify.clone()]),
-            Some(("↻ 2 ⚡ 1 everywhere".into(), false))
-        );
-        assert_eq!(
-            say(std::slice::from_ref(&notify)),
-            Some(("⚡ 1 everywhere".into(), false))
+            Some(("↻ 3 everywhere".into(), false))
         );
         // One waiting, and it is all there is: the count already says which.
         assert_eq!(
             say(std::slice::from_ref(&waiting)),
-            Some(("⚡ 1 everywhere needs a yes · /graph".into(), true))
+            Some(("↻ 1 everywhere needs a yes · /graph".into(), true))
         );
         assert_eq!(
             say(&[pulse, nightly, notify, waiting]),
-            Some(("↻ 2 ⚡ 2 everywhere · 1 needs a yes · /graph".into(), true))
+            Some(("↻ 4 everywhere · 1 needs a yes · /graph".into(), true))
         );
     }
 
     #[test]
-    fn the_headline_says_a_global_file_is_broken_beside_the_rules() {
+    fn the_headline_says_a_flow_did_not_load_beside_them() {
         let now: Timestamp = "2026-09-10T12:00:00Z".parse().unwrap();
-        let parts = |rules: &[Rule], broken| global_parts(&chips(rules, None, now), broken);
-        let rules = [
-            schedule("global", "pulse", true, None),
-            schedule("global", "nightly", true, None),
-            reaction("global", "notify"),
-        ];
-        assert_eq!(parts(&rules, false), [("↻ 2 ⚡ 1 everywhere".to_string(), Tone::Plain)]);
+        let parts = |flows: &[Flow], broken| global_parts(&chips(flows, None, now), broken);
+        let flows = [flow("pulse", None), flow("nightly", None)];
+        assert_eq!(parts(&flows, false), [("↻ 2 everywhere".to_string(), Tone::Plain)]);
         assert_eq!(
-            parts(&rules, true),
+            parts(&flows, true),
             [
-                ("↻ 2 ⚡ 1 everywhere".to_string(), Tone::Plain),
-                ("rules broken".to_string(), Tone::Bad)
+                ("↻ 2 everywhere".to_string(), Tone::Plain),
+                ("flows broken".to_string(), Tone::Bad)
             ]
         );
-        // Nothing of yours loaded: it still says so, and whose.
-        assert_eq!(parts(&[], true), [("global rules broken".to_string(), Tone::Bad)]);
+        // None loaded: it still says so.
+        assert_eq!(parts(&[], true), [("flows broken".to_string(), Tone::Bad)]);
         assert!(parts(&[], false).is_empty());
     }
 
-    fn fired(id: &str, job: &str, state: RunState, at: &str, unseen: bool) -> DigestItem {
+    fn fired(id: &str, flow: &str, state: RunState, at: &str, unseen: bool) -> DigestItem {
         let mut i = item(id, state, "/home/f/relay", at, unseen);
-        i.run.cause = Cause::Schedule(job.into());
+        i.run.cause = step_of(flow);
         i.summary = if state == RunState::Failed {
             "exit 1 · 0s".into()
         } else {
@@ -2115,7 +2143,7 @@ mod tests {
     }
 
     #[test]
-    fn a_jobs_ended_runs_are_one_line() {
+    fn a_flows_runs_are_one_row() {
         let now: Timestamp = "2026-09-10T12:00:00Z".parse().unwrap();
         let mut items: Vec<DigestItem> = (0..30)
             .map(|n| {
@@ -2140,77 +2168,69 @@ mod tests {
             "2026-09-10T11:58:00Z",
             false,
         ));
-        let d = Digest {
-            since: now,
-            items,
-            decisions: vec![],
-            checkouts: Vec::new(),
-            lost: Vec::new(),
-            hidden: Vec::new(),
-            order: Vec::new(),
-        };
+        let d = digest(now, items, vec![]);
         let names = Names::new([(PathBuf::from("/home/f/relay"), "relay".to_string())]);
-        let rows = build_with(&d, &names, "", now);
-        let job_key = job_key(RuleKind::Schedule, "pulse", "/home/f/relay");
+        let flows = [flow("pulse", Some("/home/f/relay"))];
+        let rows = flows_build(&d, &names, &flows, Lens::All, "", now);
         assert_eq!(
             keys(&rows),
-            ["[relay]", "r:hand", &job_key, "r:go"],
+            ["[relay]", "r:hand", "f:pulse", "r:go"],
             "finished before working, newest first among equals"
         );
-        let Some(Row::Job(j)) = rows.iter().find(|r| matches!(r, Row::Job(_))) else {
-            panic!("no job row");
+        let Some(Row::Flow(f)) = rows.iter().find(|r| matches!(r, Row::Flow(_))) else {
+            panic!("no flow row");
         };
-        assert_eq!(j.runs.len(), 31);
-        assert_eq!(j.last().run.id, "p29");
-        assert_eq!((j.ok(), j.failed(), j.stopped()), (30, 1, 0));
-        assert!(j.unseen(), "the failed run is still news");
+        assert_eq!(f.runs.len(), 31);
+        assert_eq!(f.last().run.id, "p29");
+        assert_eq!((f.ok(), f.failed(), f.stopped()), (30, 1, 0));
+        assert!(f.unseen(), "the failed run is still news");
+        assert_eq!(f.when.as_deref(), Some("every 30m"));
         assert_eq!(
-            j.summary(),
+            f.summary(),
             "exit 0 · 0s",
-            "the last firing's own line; the tally is the marks', the cadence the pane's"
+            "the last run's own line; the tally is the marks', the cadence the pane's"
         );
-        assert_eq!(j.marks(31).chars().filter(|c| *c == '×').count(), 1);
-        assert!(j.marks(31).starts_with('×'), "oldest first: {}", j.marks(31));
+        assert_eq!(f.marks(31).chars().filter(|c| *c == '×').count(), 1);
+        assert!(f.marks(31).starts_with('×'), "oldest first: {}", f.marks(31));
         assert_eq!(counts(&rows), (0, 0, 1, 1, 1));
-        assert_eq!(headline(&rows, 1, ""), "relay · 1 working · 1 finished · 1 job · 1 new");
+        assert_eq!(
+            headline(&rows, 1, ""),
+            "relay · 1 working · 1 finished · 1 flow · 1 new"
+        );
 
-        // Never opened: whatever happens, a job is one line.
-        let opened_rows = build_with(&d, &names, "", now);
+        // Never opened: whatever happens, a flow is one row.
+        let opened_rows = flows_build(&d, &names, &flows, Lens::All, "", now);
         assert_eq!(keys(&opened_rows), keys(&rows), "no row grows into its runs");
 
-        // The filter finds a job by its name.
-        let rows = build_with(&d, &names, "puls", now);
-        assert_eq!(keys(&rows), ["[relay]", &job_key], "{:?}", keys(&rows));
+        // The filter finds a flow by its name.
+        let rows = flows_build(&d, &names, &flows, Lens::All, "puls", now);
+        assert_eq!(keys(&rows), ["[relay]", "f:pulse"], "{:?}", keys(&rows));
 
-        // A job whose last run failed ranks as failed and says so.
-        let d2 = Digest {
-            since: now,
-            items: vec![
+        // A flow whose last run failed ranks as failed and says so.
+        let d2 = digest(
+            now,
+            vec![
                 fired("a", "pulse", RunState::Finished, "2026-09-10T11:00:00Z", false),
                 fired("b", "pulse", RunState::Failed, "2026-09-10T11:30:00Z", true),
                 item("w", RunState::Working, "/home/f/relay", "2026-09-10T11:40:00Z", false),
             ],
-            decisions: vec![],
-            checkouts: Vec::new(),
-            lost: Vec::new(),
-            hidden: Vec::new(),
-            order: Vec::new(),
-        };
-        let rows = build_with(&d2, &names, "", now);
+            vec![],
+        );
+        let rows = flows_build(&d2, &names, &flows, Lens::All, "", now);
         assert_eq!(
             keys(&rows),
-            ["[relay]", &job_key, "r:w"],
-            "failed job above working run"
+            ["[relay]", "f:pulse", "r:w"],
+            "failed flow above working run"
         );
         assert_eq!(counts(&rows), (0, 1, 1, 0, 1));
     }
 
     #[test]
-    fn a_job_filtered_by_one_runs_text_keeps_its_full_history() {
-        // A filter that matches only one run's own summary (not the job or
-        // group name) must still show the job's FULL history — not just the
+    fn a_flow_filtered_by_one_runs_text_keeps_its_full_history() {
+        // A filter that matches only one run's own summary (not the flow or
+        // group name) must still show the flow's FULL history — not just the
         // matching run — since `ok()`/`failed()`/`marks()`/`summary()` are
-        // all computed from `Job.runs`.
+        // all computed from `FlowRow.runs`.
         let now: Timestamp = "2026-09-10T12:00:00Z".parse().unwrap();
         let mut items: Vec<DigestItem> = (0..30)
             .map(|n| {
@@ -2224,39 +2244,127 @@ mod tests {
             })
             .collect();
         items.push(fired("bad", "pulse", RunState::Failed, "2026-09-10T11:30:30Z", true));
-        let d = Digest {
-            since: now,
-            items,
-            decisions: vec![],
-            checkouts: Vec::new(),
-            lost: Vec::new(),
-            hidden: Vec::new(),
-            order: Vec::new(),
-        };
+        let d = digest(now, items, vec![]);
         let names = Names::new([(PathBuf::from("/home/f/relay"), "relay".to_string())]);
+        let flows = [flow("pulse", Some("/home/f/relay"))];
         // "exit 1" only appears in the failing run's own summary, not in the
-        // job name ("pulse") or the group name ("relay").
-        let rows = build_with(&d, &names, "exit 1", now);
-        let job_key = job_key(RuleKind::Schedule, "pulse", "/home/f/relay");
-        assert_eq!(keys(&rows), ["[relay]", &job_key], "{:?}", keys(&rows));
-        let Some(Row::Job(j)) = rows.iter().find(|r| matches!(r, Row::Job(_))) else {
-            panic!("no job row");
+        // flow's name ("pulse") or the group name ("relay").
+        let rows = flows_build(&d, &names, &flows, Lens::All, "exit 1", now);
+        assert_eq!(keys(&rows), ["[relay]", "f:pulse"], "{:?}", keys(&rows));
+        let Some(Row::Flow(f)) = rows.iter().find(|r| matches!(r, Row::Flow(_))) else {
+            panic!("no flow row");
         };
-        assert_eq!(j.runs.len(), 31, "the job's full history, not just the matching run");
+        assert_eq!(f.runs.len(), 31, "the flow's full history, not just the matching run");
         assert_eq!(
-            (j.ok(), j.failed(), j.stopped()),
+            (f.ok(), f.failed(), f.stopped()),
             (30, 1, 0),
-            "stats reflect the job's true, overwhelmingly-successful history"
+            "stats reflect the flow's true, overwhelmingly-successful history"
+        );
+    }
+
+    /// The latest firing of `prod-logs`, with its steps where they stand.
+    fn firing(status: FiringStatus, steps: &[(&str, StepStatus)]) -> Firing {
+        Firing {
+            id: "fi1".into(),
+            flow: "prod-logs".into(),
+            trigger: "when".into(),
+            event: None,
+            status,
+            started_at: "2026-09-10T11:00:00Z".parse().unwrap(),
+            ended_at: None,
+            steps: steps
+                .iter()
+                .map(|(name, status)| rl_proto::flow::StepState {
+                    name: name.to_string(),
+                    status: *status,
+                    run: None,
+                    decision: None,
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn a_flow_row_says_where_its_firing_stands() {
+        let now: Timestamp = "2026-09-10T12:00:00Z".parse().unwrap();
+        let d = digest(
+            now,
+            vec![
+                fired("probe", "prod-logs", RunState::Finished, "2026-09-10T11:01:00Z", false),
+                fired("triage", "prod-logs", RunState::Finished, "2026-09-10T11:02:00Z", false),
+            ],
+            vec![firing(
+                FiringStatus::Waiting,
+                &[
+                    ("probe", StepStatus::Done),
+                    ("triage", StepStatus::Done),
+                    ("review", StepStatus::Waiting),
+                ],
+            )],
+        );
+        let names = Names::new([(PathBuf::from("/home/f/relay"), "relay".to_string())]);
+        let flows = [flow("prod-logs", Some("/home/f/relay"))];
+        let rows = flows_build(&d, &names, &flows, Lens::All, "", now);
+        let Some(Row::Flow(f)) = rows.iter().find(|r| matches!(r, Row::Flow(_))) else {
+            panic!("no flow row: {:?}", keys(&rows));
+        };
+        assert_eq!(f.runs.len(), 2);
+        let at = f.firing.expect("its latest firing");
+        assert_eq!(flows::state_words(at), "waiting at review");
+        // A flow that has not fired since the digest knew it says nothing.
+        let d = digest(now, d.items.clone(), vec![]);
+        let rows = flows_build(&d, &names, &flows, Lens::All, "", now);
+        assert!(rows.iter().any(|r| matches!(r, Row::Flow(f) if f.firing.is_none())));
+    }
+
+    #[test]
+    fn a_flow_row_sits_in_its_in_project_wherever_its_runs_ran() {
+        let now: Timestamp = "2026-09-10T12:00:00Z".parse().unwrap();
+        let (api, other) = ("/w/api", "/w/other");
+        let mut ran = item("ran", RunState::Finished, other, "2026-09-10T11:00:00Z", false);
+        ran.run.cause = step_of("prod-logs");
+        let d = digest(now, vec![ran], vec![]);
+        let names = Names::new([
+            (PathBuf::from(api), "api".to_string()),
+            (PathBuf::from(other), "other".to_string()),
+        ]);
+        let flows = [flow("prod-logs", Some(api))];
+        assert_eq!(
+            keys(&flows_build(&d, &names, &flows, Lens::All, "", now)),
+            ["[api]", "f:prod-logs", "[other]"],
+            "under the project it is in, not the folder its run ran in"
+        );
+        assert_eq!(group_key(&d.items[0].run, &names, &flows), api);
+        // Not loaded now, where it is `in` is not known: everywhere.
+        assert_eq!(
+            keys(&flows_build(&d, &names, &[], Lens::All, "", now)),
+            ["[api]", "[other]", "[everywhere]", "f:prod-logs"]
+        );
+        // With no `in`, everywhere too.
+        assert_eq!(
+            keys(&flows_build(&d, &names, &[flow("prod-logs", None)], Lens::All, "", now)),
+            ["[api]", "[other]", "[everywhere]", "f:prod-logs"]
+        );
+        // Hiding the project it is in hides it with the project.
+        let mut hidden = d.clone();
+        hidden.hidden = vec![hid(&format!("g:{api}"), "2026-09-10T11:30:00Z")];
+        assert_eq!(
+            keys(&flows_build(&hidden, &names, &flows, Lens::All, "", now)),
+            ["[other]"]
         );
     }
 
     #[test]
     fn words_for_causes_and_askers() {
         assert_eq!(cause_words(&Cause::Manual), "started by hand");
-        assert_eq!(cause_words(&Cause::Schedule("nightly".into())), "schedule nightly");
-        assert_eq!(cause_words(&Cause::Reaction("notify".into())), "rule notify");
+        assert_eq!(
+            cause_words(&Cause::Flow {
+                flow: "nightly".into(),
+                step: "probe".into()
+            }),
+            "flow nightly · probe"
+        );
         let q = question("q", "/w", None, "2026-09-10T11:01:00Z");
-        assert_eq!(asked_by(&q, None), "rule tests-failed");
         let run = item("r", RunState::Failed, "/w", "2026-09-10T11:00:00Z", false).run;
         assert_eq!(asked_by(&q, Some(&run)), "title r");
         let mut plain = q.clone();
@@ -2264,115 +2372,60 @@ mod tests {
         assert_eq!(asked_by(&plain, None), "you");
     }
 
-    fn schedule(scope: &str, name: &str, approved: bool, next: Option<&str>) -> Rule {
-        use rl_proto::action::Task;
-        use rl_proto::schedule::{Schedule, ScheduleSpec};
-        Rule::Schedule(Schedule {
-            scope: scope.into(),
-            name: name.into(),
-            hash: "h".into(),
-            source: "/h/schedules.yaml".into(),
-            spec: ScheduleSpec {
-                every: Some("4h".into()),
-                run: Some(Task::Shell("make test".into())),
-                ..Default::default()
-            },
-            paused: false,
-            last_fired_at: None,
-            last_run: None,
-            next_at: next.map(|t| t.parse().unwrap()),
-            removed_at: None,
-            approved_hash: approved.then(|| "h".into()),
-        })
-    }
-
-    fn reaction(scope: &str, name: &str) -> Rule {
-        use rl_proto::action::Task;
-        use rl_proto::reaction::{Reaction, ReactionSpec};
-        Rule::Reaction(Reaction {
-            scope: scope.into(),
-            name: name.into(),
-            hash: "h".into(),
-            source: "/h/reactions.yaml".into(),
-            spec: ReactionSpec {
-                on: vec!["run.failed".into()],
-                run: Some(Task::Shell("say no".into())),
-                ..Default::default()
-            },
-            paused: false,
-            last_fired_at: None,
-            last_run: None,
-            removed_at: None,
-            approved_hash: Some("h".into()),
-        })
-    }
-
     #[test]
-    fn a_groups_header_carries_its_folders_rules() {
+    fn a_groups_header_carries_the_flows_in_its_folder() {
         let now: Timestamp = "2026-09-10T12:00:00Z".parse().unwrap();
-        let rules = vec![
-            schedule("/home/f/relay", "nightly", true, Some("2026-09-10T16:00:00Z")),
-            reaction("/home/f/relay", "tests-failed"),
-            schedule("/home/f/relay", "deploy", false, None),
-            reaction("/home/f/api", "elsewhere"),
-            schedule("global", "pulse", true, Some("2026-09-10T12:00:30Z")),
+        let relay = "/home/f/relay";
+        let next = |name: &str, in_: Option<&str>, at: &str| Flow {
+            next_at: Some(at.parse().unwrap()),
+            ..flow(name, in_)
+        };
+        let flows = vec![
+            next("nightly", Some(relay), "2026-09-10T16:00:00Z"),
+            flow("tests-failed", Some(relay)),
+            Flow {
+                approved_hash: None,
+                ..flow("deploy", Some(relay))
+            },
+            Flow {
+                paused: true,
+                ..flow("tidy", Some(relay))
+            },
+            flow("elsewhere", Some("/home/f/api")),
+            next("pulse", None, "2026-09-10T12:00:30Z"),
         ];
         let texts = |c: &[Chip]| c.iter().map(Chip::text).collect::<Vec<_>>();
         assert_eq!(
-            texts(&chips(&rules, Some(Path::new("/home/f/relay")), now)),
-            ["! deploy", "↻ nightly 4h", "⚡ tests-failed"],
-            "what needs a yes first, then by name; api's rule stays out"
+            texts(&chips(&flows, Some(Path::new(relay)), now)),
+            ["! deploy", "↻ nightly 4h", "↻ tests-failed", "↻ tidy paused"],
+            "what needs a yes first, then by name; api's flow stays out"
         );
-        assert_eq!(texts(&chips(&rules, None, now)), ["↻ pulse 30s"]);
+        assert_eq!(texts(&chips(&flows, None, now)), ["↻ pulse 30s"]);
 
-        // On the list: the folder's rules ride its header; the global
-        // rules stand nowhere on it.
-        let d = Digest {
-            since: now,
-            items: vec![item(
-                "work1",
-                RunState::Working,
-                "/home/f/relay",
-                "2026-09-10T11:59:00Z",
-                false,
-            )],
-            decisions: vec![],
-            checkouts: Vec::new(),
-            lost: Vec::new(),
-            hidden: Vec::new(),
-            order: Vec::new(),
-        };
-        let names = Names::new([("/home/f/relay".into(), "relay".to_string())]);
-        let build_rules = |rules: &[Rule]| {
-            let rows = build(
-                &d,
-                &Context {
-                    names: &names,
-                    rules,
-                    lens: Lens::All,
-                    filter: "",
-                    now,
-                    relay: None,
-                },
-            );
-            rows.iter()
+        // On the list: the folder's flows ride its header; those with no
+        // `in` stand nowhere on it until they run.
+        let d = digest(
+            now,
+            vec![item("work1", RunState::Working, relay, "2026-09-10T11:59:00Z", false)],
+            vec![],
+        );
+        let names = Names::new([(relay.into(), "relay".to_string())]);
+        let build_flows = |flows: &[Flow]| {
+            flows_build(&d, &names, flows, Lens::All, "", now)
+                .iter()
                 .map(|r| match r {
-                    Row::Group(h) => format!("[{}] {}", h.name, texts(&h.rules).join(" · ")),
+                    Row::Group(h) => format!("[{}] {}", h.name, texts(&h.flows).join(" · ")),
                     other => other.key().unwrap(),
                 })
                 .collect::<Vec<_>>()
         };
         assert_eq!(
-            build_rules(&rules),
-            ["[relay] ! deploy · ↻ nightly 4h · ⚡ tests-failed", "r:work1"],
-            "no row for the global rules"
-        );
-        let mut with_yes = rules.clone();
-        with_yes.push(schedule("global", "backup", false, None));
-        assert_eq!(
-            build_rules(&with_yes),
-            ["[relay] ! deploy · ↻ nightly 4h · ⚡ tests-failed", "r:work1"],
-            "not even for one waiting on a yes: the headline says that"
+            build_flows(&flows),
+            [
+                "[relay] ! deploy · ↻ nightly 4h · ↻ tests-failed · ↻ tidy paused",
+                "r:work1"
+            ],
+            "no row for the flows with no `in`"
         );
     }
 
@@ -2500,6 +2553,7 @@ mod tests {
             lost: Vec::new(),
             hidden: Vec::new(),
             order: Vec::new(),
+            firings: Vec::new(),
         };
         // The shell leads, though both of the others outrank it by state and
         // both are newer than it.
@@ -2519,13 +2573,14 @@ mod tests {
             lost: Vec::new(),
             hidden: Vec::new(),
             order: Vec::new(),
+            firings: Vec::new(),
         };
         // Where you work gives way to what wants you.
         assert_eq!(keys(&build_with(&d, &names, "", now)), ["[relay]", "r:asks", "r:shell"]);
     }
 
     #[test]
-    fn a_global_rules_runs_outside_every_project_are_everywhere() {
+    fn a_flows_runs_outside_every_project_are_everywhere() {
         let now: Timestamp = "2026-09-10T12:00:00Z".parse().unwrap();
         let at = "2026-09-10T11:00:00Z";
         let (home, relay, web) = ("/home/f", "/home/f/relay", "/home/f/web");
@@ -2534,87 +2589,53 @@ mod tests {
             i.run.cause = cause;
             i
         };
-        let sched = |n: &str| Cause::Schedule(n.into());
-        let d = Digest {
-            since: now,
-            items: vec![
-                // The global schedule, in home and in a project.
-                by("mentions", RunState::Finished, home, sched("gchat-mentions")),
-                by("mentions2", RunState::Failed, home, sched("gchat-mentions")),
-                by("inproj", RunState::Finished, relay, sched("gchat-mentions")),
-                // A global reaction's run still going, outside every project.
-                by("fix", RunState::Working, home, Cause::Reaction("look-at-it".into())),
-                // A folder's own rule, of the same name as a global one.
-                by("webs", RunState::Finished, web, sched("pulse")),
+        let d = digest(
+            now,
+            vec![
+                // A flow with no `in`, in home and in a project: one row.
+                by("mentions", RunState::Finished, home, step_of("gchat-mentions")),
+                by("mentions2", RunState::Failed, home, step_of("gchat-mentions")),
+                by("inproj", RunState::Finished, relay, step_of("gchat-mentions")),
+                // A flow's run still going, outside every project.
+                by("fix", RunState::Working, home, step_of("look-at-it")),
+                // A flow `in` a folder that is not a registered project.
+                by("webs", RunState::Finished, web, step_of("pulse")),
                 // By hand, in home.
                 by("hand", RunState::Working, home, Cause::Manual),
             ],
-            decisions: vec![],
-            checkouts: Vec::new(),
-            lost: Vec::new(),
-            hidden: Vec::new(),
-            order: Vec::new(),
-        };
-        let rules = vec![
-            schedule("global", "gchat-mentions", true, None),
-            reaction("global", "look-at-it"),
-            schedule("global", "pulse", true, None),
-            schedule(web, "pulse", true, None),
+            vec![],
+        );
+        let flows = vec![
+            flow("gchat-mentions", None),
+            flow("look-at-it", None),
+            flow("pulse", Some(web)),
         ];
         let names = Names::new([(PathBuf::from(relay), "relay".to_string())]);
-        let shown = |filter: &str| {
-            keys(&build(
-                &d,
-                &Context {
-                    names: &names,
-                    rules: &rules,
-                    lens: Lens::All,
-                    filter,
-                    now,
-                    relay: None,
-                },
-            ))
-        };
+        let shown = |filter: &str| keys(&flows_build(&d, &names, &flows, Lens::All, filter, now));
         let home_name = Names::default().workspace(Path::new(home));
-        let everywhere_job = job_key(RuleKind::Schedule, "gchat-mentions", EVERYWHERE_KEY);
         assert_eq!(
             shown(""),
             [
                 // By hand, a run keeps its folder.
                 format!("[{home_name}]"),
                 "r:hand".into(),
-                // A global rule's run in a project stays in the project.
                 "[relay]".into(),
-                job_key(RuleKind::Schedule, "gchat-mentions", relay),
-                // A folder's own rule is the folder's, same name or not.
+                // A flow's row is in the folder it is `in`.
                 "[web]".into(),
-                job_key(RuleKind::Schedule, "pulse", web),
+                "f:pulse".into(),
                 // The rest, after the projects, however they sort.
                 "[everywhere]".into(),
-                everywhere_job.clone(),
+                "f:gchat-mentions".into(),
                 "r:fix".into(),
             ],
             "outside every project: everywhere, after the projects"
         );
 
         // It answers to its word, as a project answers to its name.
-        assert_eq!(
-            shown("in:everywhere"),
-            ["[everywhere]".to_string(), everywhere_job, "r:fix".into()]
-        );
+        assert_eq!(shown("in:everywhere"), ["[everywhere]", "f:gchat-mentions", "r:fix"]);
 
         // Its header is no folder, and its key says so.
-        let rows = build(
-            &d,
-            &Context {
-                names: &names,
-                rules: &rules,
-                lens: Lens::All,
-                filter: "",
-                now,
-                relay: None,
-            },
-        );
+        let rows = flows_build(&d, &names, &flows, Lens::All, "", now);
         let head = rows
             .iter()
             .find_map(|r| match r {
@@ -2628,18 +2649,17 @@ mod tests {
         );
         assert_eq!(Row::Group(head).key().as_deref(), Some("g:everywhere"));
 
-        // A global rule taken out of its file leaves its runs everywhere: it
-        // is the run that says so, not the rules loaded now. A run by hand
-        // keeps its folder, and one in a project stays in the project.
+        // A flow not loaded now leaves its row everywhere: where it is `in`
+        // is not known. A run by hand keeps its folder.
         let bare = keys(&build_with(&d, &names, "", now));
         let at = |k: &str| {
             bare.iter()
                 .position(|x| x == k)
                 .unwrap_or_else(|| panic!("{k}: {bare:?}"))
         };
-        assert!(at("[everywhere]") < at(&job_key(RuleKind::Schedule, "gchat-mentions", EVERYWHERE_KEY)));
+        assert!(at("[everywhere]") < at("f:gchat-mentions"));
+        assert!(at("[everywhere]") < at("f:pulse"));
         assert!(at(&format!("[{home_name}]")) < at("r:hand"));
-        assert!(at("[relay]") < at(&job_key(RuleKind::Schedule, "gchat-mentions", relay)));
     }
 
     /// One project of four runs, sorting itself as ever: what ended first,
@@ -2660,6 +2680,7 @@ mod tests {
             lost: Vec::new(),
             hidden: Vec::new(),
             order,
+            firings: Vec::new(),
         };
         let names = Names::new([
             (PathBuf::from(api), "api".to_string()),

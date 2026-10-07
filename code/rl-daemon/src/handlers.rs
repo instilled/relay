@@ -313,7 +313,7 @@ pub fn register(r: &mut Router<Daemon>) {
     r.register::<DigestHide, _, _>(|d, p: DigestHideParams| async move {
         if !Hidden::valid_key(&p.key) {
             return Err(RpcError::invalid_params(format!(
-                "{:?}: a project is g:<folder>, a job j:<kind>:<name>@<group>",
+                "{:?}: a project is g:<folder>, a flow f:<name>",
                 p.key
             )));
         }
@@ -336,7 +336,7 @@ pub fn register(r: &mut Router<Daemon>) {
         }
         if let Some(bad) = p.rows.iter().find(|k| !Order::valid_row(k)) {
             return Err(RpcError::invalid_params(format!(
-                "{bad:?}: a run is r:<id>, a job j:<kind>:<name>@<group>"
+                "{bad:?}: a run is r:<id>, a flow f:<name>"
             )));
         }
         d.ledger
@@ -426,9 +426,16 @@ pub fn register(r: &mut Router<Daemon>) {
             .list(DecisionFilter::default())
             .await
             .map_err(RpcError::internal)?;
-        let (lost, hidden, order) = d
+        let (lost, hidden, order, firings) = d
             .ledger
-            .call(|c| Ok((runs::lost(c)?, hidden::list(c)?, order::list(c)?)))
+            .call(|c| {
+                Ok((
+                    runs::lost(c)?,
+                    hidden::list(c)?,
+                    order::list(c)?,
+                    crate::digest::firings(c)?,
+                ))
+            })
             .await
             .map_err(RpcError::internal)?;
         Ok(Digest {
@@ -439,6 +446,7 @@ pub fn register(r: &mut Router<Daemon>) {
             lost,
             hidden,
             order,
+            firings,
         })
     });
 

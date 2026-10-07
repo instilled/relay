@@ -2,6 +2,7 @@
 //! result live together so client and server cannot drift.
 
 use crate::decision::{Decision, DecisionOption};
+use crate::flow::Firing;
 use crate::types::{AttachMode, Checkout, Event, Mark, Run, RunKind, RunState, Signal, SummaryTarget};
 use jiff::Timestamp;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -474,11 +475,11 @@ pub struct DigestParams {
     pub since: Option<Timestamp>,
 }
 
-/// Takes a whole project, or a job, off the panel's list — or brings it back
+/// Takes a whole project, or a flow, off the panel's list — or brings it back
 /// — by its row's key: `g:<folder>` a project's header (`g:everywhere` the
-/// global rules' runs outside every project), `j:<kind>:<name>@<group>` a
-/// job. Everything under it is hidden with it, runs that come later too;
-/// nothing is stopped or removed. Answers with everything hidden so.
+/// flows' runs outside every project), `f:<name>` a flow. Everything under it
+/// is hidden with it, runs that come later too; nothing is stopped or
+/// removed. Answers with everything hidden so.
 pub struct DigestHide;
 impl Method for DigestHide {
     const NAME: &'static str = "digest.hide";
@@ -492,7 +493,7 @@ pub struct DigestHideParams {
     pub hidden: bool,
 }
 
-/// A project or a job taken off the list, and since when.
+/// A project or a flow taken off the list, and since when.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Hidden {
     pub key: String,
@@ -503,7 +504,7 @@ impl Hidden {
     /// Whether `key` names something `digest.hide` can hide.
     pub fn valid_key(key: &str) -> bool {
         key.strip_prefix("g:")
-            .or_else(|| key.strip_prefix("j:"))
+            .or_else(|| key.strip_prefix("f:"))
             .is_some_and(|k| !k.is_empty())
     }
 }
@@ -511,7 +512,7 @@ impl Hidden {
 /// Keeps a project's rows in the order given — moved by hand on the panel
 /// (shift-↑/↓) — or, with no rows, lets it sort itself again (`/sort`). The
 /// project is its header's key (`g:<folder>`, `g:everywhere`); the rows are
-/// run (`r:<id>`) and job (`j:<kind>:<name>@<group>`) keys, first on top.
+/// run (`r:<id>`) and flow (`f:<name>`) keys, first on top.
 /// The order given replaces the one kept, so what has left the list drops
 /// out. Answers with every project's order.
 pub struct DigestOrder;
@@ -526,7 +527,7 @@ impl Method for DigestOrder {
 pub struct Order {
     /// The project's header key: `g:<folder>`, or `g:everywhere`.
     pub group: String,
-    /// Run and job keys, `r:<id>` and `j:<kind>:<name>@<group>`.
+    /// Run and flow keys, `r:<id>` and `f:<name>`.
     #[serde(default)]
     pub rows: Vec<String>,
 }
@@ -537,10 +538,10 @@ impl Order {
         key.strip_prefix("g:").is_some_and(|k| !k.is_empty())
     }
 
-    /// Whether `key` names a row that can be put in order: a run or a job.
+    /// Whether `key` names a row that can be put in order: a run or a flow.
     pub fn valid_row(key: &str) -> bool {
         key.strip_prefix("r:")
-            .or_else(|| key.strip_prefix("j:"))
+            .or_else(|| key.strip_prefix("f:"))
             .is_some_and(|k| !k.is_empty())
     }
 }
@@ -559,12 +560,15 @@ pub struct Digest {
     /// `run.resume` with `lost` would pick up.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub lost: Vec<String>,
-    /// The projects and jobs taken off the list (`digest.hide`).
+    /// The projects and flows taken off the list (`digest.hide`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hidden: Vec<Hidden>,
     /// The projects whose rows you put in order (`digest.order`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub order: Vec<Order>,
+    /// Each flow's latest firing: where its row says it stands.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub firings: Vec<Firing>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -9,8 +9,9 @@ use rl_cli::render;
 use rl_core::time::{now, parse_since};
 use rl_core::{Home, display_path};
 use rl_proto::decision::{Decision, DecisionOption, DecisionStatus};
+use rl_proto::flow::{FlowFilter, FlowList};
 use rl_proto::methods::{
-    AgentList, ConfigGet, GcParams, GcRun, RuleList, RunArchive, RunArchiveParams, RunHide, RunHideParams, RunResume,
+    AgentList, ConfigGet, GcParams, GcRun, RunArchive, RunArchiveParams, RunHide, RunHideParams, RunResume,
     RunResumeParams, SummaryGet, SummaryMake, SummaryParams,
 };
 use rl_proto::methods::{
@@ -23,8 +24,8 @@ use rl_proto::methods::{
     DecisionTake, DecisionTakeParams,
 };
 use rl_proto::methods::{
-    EventEmit, EventEmitParams, ScheduleFilter, WorkspaceList, WorkspaceRemove, WorkspaceRemoveParams,
-    WorkspaceRemoved, WorkspaceUp, WorkspaceUpParams,
+    EventEmit, EventEmitParams, WorkspaceList, WorkspaceRemove, WorkspaceRemoveParams, WorkspaceRemoved, WorkspaceUp,
+    WorkspaceUpParams,
 };
 use rl_proto::types::{AttachMode, Cause, Mark, RunKind, RunState, SummaryTarget};
 use serde_json::json;
@@ -927,15 +928,12 @@ async fn since(home: &Home, a: SinceArgs, json: bool) -> Result<()> {
     // The catch-up as the panel builds it: the list's rows, grouped as the
     // list groups them.
     let workspaces = c.call::<WorkspaceList>(()).await?;
-    let rules = c
-        .call::<RuleList>(ScheduleFilter { all: false })
-        .await
-        .unwrap_or_default();
+    let flows = c.call::<FlowList>(FlowFilter::default()).await?;
     let relay = std::fs::canonicalize(home.path()).unwrap_or_else(|_| home.path().to_path_buf());
     let cu = rl_cli::catchup::CatchUp::of(
         &d,
         workspaces.into_iter().map(|w| (w.path, w.name)),
-        &rules,
+        &flows,
         Some(&relay),
         n,
     );

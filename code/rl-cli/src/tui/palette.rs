@@ -217,8 +217,8 @@ pub const ALL: &[Command] = &[
     },
     Command {
         name: "lens",
-        args: "all|agents|jobs|reactions|hidden",
-        words: &[&["all", "agents", "jobs", "reactions", "hidden"]],
+        args: "all|agents|flows|hidden",
+        words: &[&["all", "agents", "flows", "hidden"]],
         what: "show one kind of run inside the projects (tab steps through them)",
         cmd: Cmd::Lens,
     },
@@ -449,9 +449,9 @@ mod tests {
         let (c, rest) = parse("/mark   blocked  ").unwrap();
         assert_eq!(c.cmd, Cmd::Mark);
         assert_eq!(rest, "blocked");
-        let (c, rest) = parse("/lens jobs").unwrap();
+        let (c, rest) = parse("/lens flows").unwrap();
         assert_eq!(c.cmd, Cmd::Lens);
-        assert_eq!(rest, "jobs");
+        assert_eq!(rest, "flows");
     }
 
     #[test]

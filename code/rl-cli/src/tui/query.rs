@@ -6,9 +6,9 @@
 //!   must match somewhere;
 //! - `in:` a project, by name or folder;
 //! - `is:` a state — `failed`, `going`, `done`, `stopped`, `needs`, `pinned`, `new`;
-//! - `kind:` what it is — `agent`, `shell`, `command`, `job`, `reaction`, `question`;
+//! - `kind:` what it is — `agent`, `shell`, `command`, `flow`, `question`;
 //!   in the events view, the event's kind (`run.failed`, `run.` for the family);
-//! - `by:` the schedule or reaction behind it (in the events view, or set off by it);
+//! - `by:` the flow behind it (in the events view, or set off by it);
 //! - `on:` a git branch — the one a run started on, the one a folder is on.
 //!
 //! Values match by prefix (`is:fail`, `kind:run.f`), so the list narrows as
@@ -26,7 +26,7 @@ pub const TOKENS: [&str; 5] = ["in:", "is:", "kind:", "by:", "on:"];
 pub const STATES: [&str; 7] = ["failed", "going", "done", "stopped", "needs", "pinned", "new"];
 
 /// What `kind:` takes.
-pub const KINDS: [&str; 6] = ["agent", "shell", "command", "job", "reaction", "question"];
+pub const KINDS: [&str; 5] = ["agent", "shell", "command", "flow", "question"];
 
 /// A search, read.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -51,7 +51,7 @@ pub struct Subject<'a> {
     /// What it is, from `KINDS` (or a graph node's own kinds, or an
     /// event's).
     pub kind: Vec<&'a str>,
-    /// The rules behind it.
+    /// The flows behind it.
     pub by: Vec<&'a str>,
     /// The git branch it is on.
     pub on: Option<&'a str>,
@@ -118,12 +118,12 @@ impl Query {
 }
 
 /// What `tab` offers for the word at the end of a search: the token names, or
-/// a token's values — `in:` the projects, `by:` the rules, `on:` the branches,
+/// a token's values — `in:` the projects, `by:` the flows, `on:` the branches,
 /// `kind:` the `kinds` given (the events view's), else `KINDS`.
 pub fn complete(
     word: &str,
     projects: &[String],
-    rules: &[String],
+    flows: &[String],
     branches: &[String],
     kinds: &[String],
 ) -> Vec<String> {
@@ -140,7 +140,7 @@ pub fn complete(
         "kind" if kinds.is_empty() => KINDS.iter().map(|s| s.to_string()).collect(),
         "kind" => kinds.to_vec(),
         "in" => projects.to_vec(),
-        "by" => rules.to_vec(),
+        "by" => flows.to_vec(),
         "on" => branches.to_vec(),
         _ => return vec![],
     };
@@ -276,7 +276,7 @@ mod tests {
             text: vec![title],
             project: vec![project, "/home/f/api"],
             is: vec!["failed"],
-            kind: vec!["command", "job"],
+            kind: vec!["command", "flow"],
             by: vec!["nightly"],
             on: Some("feat/search"),
         }
@@ -295,7 +295,7 @@ mod tests {
     fn tokens_pick_by_what_a_thing_is() {
         let s = run("cargo test", "api");
         assert!(Query::parse("is:failed").hits(&s));
-        assert!(Query::parse("is:fail kind:job").hits(&s), "values match by prefix");
+        assert!(Query::parse("is:fail kind:fl").hits(&s), "values match by prefix");
         assert!(!Query::parse("is:going").hits(&s));
         assert!(!Query::parse("kind:agent").hits(&s));
         assert!(Query::parse("in:api by:night").hits(&s));
@@ -332,9 +332,9 @@ mod tests {
     #[test]
     fn tab_offers_names_then_values() {
         let projects = vec!["api".to_string(), "web".to_string()];
-        let rules = vec!["nightly".to_string()];
+        let flows = vec!["nightly".to_string()];
         let branches = vec!["main".to_string(), "feat".to_string(), "main".to_string()];
-        let c = |w| complete(w, &projects, &rules, &branches, &[]);
+        let c = |w| complete(w, &projects, &flows, &branches, &[]);
         assert_eq!(c("i"), ["in:", "is:"]);
         assert_eq!(c("is:f"), ["is:failed"]);
         assert_eq!(c("in:"), ["in:api", "in:web"]);
@@ -348,7 +348,7 @@ mod tests {
             "log.issue".to_string(),
         ];
         assert_eq!(
-            complete("kind:run.f", &projects, &rules, &branches, &kinds),
+            complete("kind:run.f", &projects, &flows, &branches, &kinds),
             ["kind:run.failed", "kind:run.finished"],
             "the events view's kinds, when it gives them"
         );

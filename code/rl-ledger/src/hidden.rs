@@ -45,20 +45,19 @@ mod tests {
         let t1: Timestamp = "2026-09-08T10:00:00Z".parse().unwrap();
         let t2: Timestamp = "2026-09-08T11:00:00Z".parse().unwrap();
         l.call_blocking(move |c| set(c, "g:/w/api", Some(t1))).unwrap();
-        l.call_blocking(move |c| set(c, "j:schedule:nightly@/w/api", Some(t1)))
-            .unwrap();
+        l.call_blocking(move |c| set(c, "f:nightly", Some(t1))).unwrap();
         l.call_blocking(move |c| set(c, "g:/w/api", Some(t2))).unwrap();
         let got = l.call_blocking(|c| list(c)).unwrap();
         assert_eq!(
             got,
             [
                 Hidden {
-                    key: "g:/w/api".into(),
-                    at: t2
+                    key: "f:nightly".into(),
+                    at: t1
                 },
                 Hidden {
-                    key: "j:schedule:nightly@/w/api".into(),
-                    at: t1
+                    key: "g:/w/api".into(),
+                    at: t2
                 },
             ]
         );
@@ -70,6 +69,6 @@ mod tests {
             .into_iter()
             .map(|h| h.key)
             .collect();
-        assert_eq!(keys, ["j:schedule:nightly@/w/api"]);
+        assert_eq!(keys, ["f:nightly"]);
     }
 }

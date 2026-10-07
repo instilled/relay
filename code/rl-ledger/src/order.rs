@@ -58,7 +58,7 @@ mod tests {
     #[test]
     fn an_order_replaces_the_last_and_none_lets_the_project_sort_itself() {
         let l = Ledger::open_in_memory().unwrap();
-        l.call_blocking(|c| set(c, "g:/w/api", &keys(&["r:a", "r:b", "j:schedule:nightly@/w/api"])))
+        l.call_blocking(|c| set(c, "g:/w/api", &keys(&["r:a", "r:b", "f:nightly"])))
             .unwrap();
         l.call_blocking(|c| set(c, "g:/w/web", &keys(&["r:c"]))).unwrap();
         // The next one for a project replaces it whole: what left drops out,

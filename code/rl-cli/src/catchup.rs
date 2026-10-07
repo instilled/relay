@@ -2,7 +2,7 @@
 //!
 //! The list's rows for the stretch, under the list's own headers: a question,
 //! a run waiting on you, a run with news since you left — or that you have
-//! not looked at yet — and a job's firings in that time; never an assistant's
+//! not looked at yet — and a flow's runs in that time; never an assistant's
 //! own run, which is Relay's doing. What needs you leads each project, and
 //! the projects that need you lead; a project with nothing new keeps its
 //! header and folds to one line. Counted — only what happened
@@ -15,13 +15,13 @@ use crate::tui::rows::{self, Context, Head, Lens, Row};
 use jiff::Timestamp;
 use rl_core::time::{fmt_age, fmt_duration, fmt_when};
 use rl_proto::decision::Decision;
+use rl_proto::flow::Flow;
 use rl_proto::methods::{ConfigGet, ConfigReport, Digest, DigestItem, SummaryGet, SummaryParams};
-use rl_proto::rule::{Rule, RuleKind};
 use rl_proto::types::{Cause, Run, RunState, Summary, SummaryTarget};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-/// How many of a job's firings in the stretch its line shows as marks.
+/// How many of a flow's runs in the stretch its line shows as marks.
 const MARKS: usize = 10;
 
 #[cfg(test)]
@@ -42,9 +42,9 @@ pub struct Project<'a> {
     pub head: Head,
     /// The list's group key: a ref, a folder, or `everywhere`'s.
     key: String,
-    /// Questions, runs that need you, and jobs whose last firing failed.
+    /// Questions, runs that need you, and flows whose last run failed.
     pub need: usize,
-    /// Runs and job firings in the stretch.
+    /// Runs, a flow's too, in the stretch.
     pub ran: usize,
     /// Of those, the ones that failed.
     pub failed: usize,
@@ -82,7 +82,7 @@ impl<'a> CatchUp<'a> {
         // it.
         let list = Context {
             names: cx.names,
-            rules: cx.rules,
+            flows: cx.flows,
             filter: cx.filter,
             lens: Lens::All,
             now: d.since,
@@ -100,14 +100,14 @@ impl<'a> CatchUp<'a> {
         let mut loose: Vec<Row<'a>> = Vec::new();
         for row in rows::build(d, &list) {
             if let (false, Some(p), Some(r)) = (keyed, projects.last_mut(), run_of(&row)) {
-                p.key = rows::group_key(r, cx.names, cx.rules);
+                p.key = rows::group_key(r, cx.names, cx.flows);
                 keyed = true;
             }
             let row = match row {
                 Row::Group(mut h) => {
-                    // Its rules' times from now, not from when you left.
+                    // Its flows' times from now, not from when you left.
                     if !h.is_everywhere() {
-                        h.rules = rows::chips(cx.rules, Some(&h.workspace), cx.now);
+                        h.flows = rows::chips(cx.flows, Some(&h.workspace), cx.now);
                     }
                     let key = h.workspace.to_string_lossy().into_owned();
                     projects.push(Project::new(h, key));
@@ -120,20 +120,20 @@ impl<'a> CatchUp<'a> {
                 Row::Run(i) if matches!(i.run.cause, Cause::Assistant(_)) => continue,
                 Row::Run(i) if news(i) || waiting(i) => Row::Run(i),
                 Row::Run(_) => continue,
-                Row::Job(mut j) => {
-                    if !j.runs.iter().any(|i| news(i)) {
+                Row::Flow(mut f) => {
+                    if !f.runs.iter().any(|i| news(i)) {
                         continue;
                     }
-                    // Its marks speak for its firings in the stretch; one
-                    // you have not looked at from before it keeps the row,
-                    // and is all it shows when there is nothing since.
-                    let stretch: Vec<&DigestItem> = j.runs.iter().copied().filter(|i| i.at >= since).collect();
+                    // Its marks speak for its runs in the stretch; one you
+                    // have not looked at from before it keeps the row, and
+                    // is all it shows when there is nothing since.
+                    let stretch: Vec<&DigestItem> = f.runs.iter().copied().filter(|i| i.at >= since).collect();
                     if stretch.is_empty() {
-                        j.runs.retain(|i| i.unseen);
+                        f.runs.retain(|i| i.unseen);
                     } else {
-                        j.runs = stretch;
+                        f.runs = stretch;
                     }
-                    Row::Job(j)
+                    Row::Flow(f)
                 }
             };
             match projects.last_mut() {
@@ -148,12 +148,12 @@ impl<'a> CatchUp<'a> {
                     (asker.map(|i| &i.run), q.workspace.as_path())
                 }
                 Row::Run(i) => (Some(&i.run), i.run.workspace.as_path()),
-                Row::Group(_) | Row::Job(_) => continue,
+                Row::Group(_) | Row::Flow(_) => continue,
             };
             // Under the header the list would give it: its ref's, else its
             // folder's — not another folder that goes by the same name.
             let key = match run {
-                Some(r) => rows::group_key(r, cx.names, cx.rules),
+                Some(r) => rows::group_key(r, cx.names, cx.flows),
                 None => ws.to_string_lossy().into_owned(),
             };
             let p = match projects.iter().position(|p| p.key == key) {
@@ -177,10 +177,10 @@ impl<'a> CatchUp<'a> {
                         p.ran += usize::from(ran(i));
                         p.failed += usize::from(failed(i));
                     }
-                    Row::Job(j) => {
-                        p.need += usize::from(j.last().run.state == RunState::Failed);
-                        p.ran += j.runs.iter().filter(|i| ran(i)).count();
-                        p.failed += j.runs.iter().filter(|i| failed(i)).count();
+                    Row::Flow(f) => {
+                        p.need += usize::from(f.last().run.state == RunState::Failed);
+                        p.ran += f.runs.iter().filter(|i| ran(i)).count();
+                        p.failed += f.runs.iter().filter(|i| failed(i)).count();
                     }
                     Row::Group(_) => {}
                 }
@@ -195,12 +195,12 @@ impl<'a> CatchUp<'a> {
     }
 
     /// The catch-up of `d` as `rl since` builds it: the folders by the names
-    /// they were registered under, the rules as they stand, nothing filtered;
+    /// they were registered under, the flows as they stand, nothing filtered;
     /// `relay`, the Relay home.
     pub fn of(
         d: &'a Digest,
         workspaces: impl IntoIterator<Item = (PathBuf, String)>,
-        rules: &[Rule],
+        flows: &[Flow],
         relay: Option<&Path>,
         now: Timestamp,
     ) -> Self {
@@ -209,7 +209,7 @@ impl<'a> CatchUp<'a> {
             d,
             &Context {
                 names: &names,
-                rules,
+                flows,
                 filter: "",
                 lens: Lens::All,
                 now,
@@ -258,13 +258,13 @@ impl<'a> CatchUp<'a> {
         b.iter().map(|b| format!("• {b}")).collect()
     }
 
-    /// Whether a run or a job is in it: questions alone give an assistant
+    /// Whether a run or a flow is in it: questions alone give an assistant
     /// nothing to tell, and the counts say them.
     pub fn has_runs(&self) -> bool {
         self.projects
             .iter()
             .flat_map(|p| &p.rows)
-            .any(|r| matches!(r, Row::Run(_) | Row::Job(_)))
+            .any(|r| matches!(r, Row::Run(_) | Row::Flow(_)))
     }
 
     /// What the assistant is handed for the top: (project name, its rows'
@@ -304,9 +304,8 @@ enum Slot {
     Group(Head),
     Question(usize),
     Run(usize),
-    Job {
+    Flow {
         key: String,
-        kind: RuleKind,
         name: String,
         when: Option<String>,
         runs: Vec<usize>,
@@ -334,12 +333,11 @@ impl CatchUp<'_> {
                 Row::Group(h) => Slot::Group(h.clone()),
                 Row::Question(q) => Slot::Question(*asked.get(&std::ptr::from_ref(*q))?),
                 Row::Run(i) => Slot::Run(item(i)?),
-                Row::Job(j) => Slot::Job {
-                    key: j.key.clone(),
-                    kind: j.kind,
-                    name: j.name.clone(),
-                    when: j.when.clone(),
-                    runs: j.runs.iter().map(|i| item(i)).collect::<Option<_>>()?,
+                Row::Flow(f) => Slot::Flow {
+                    key: f.key.clone(),
+                    name: f.name.clone(),
+                    when: f.when.clone(),
+                    runs: f.runs.iter().map(|i| item(i)).collect::<Option<_>>()?,
                 },
             })
         };
@@ -370,18 +368,12 @@ impl Kept {
                 Slot::Group(h) => Row::Group(h.clone()),
                 Slot::Question(n) => Row::Question(d.decisions.get(*n)?),
                 Slot::Run(n) => Row::Run(d.items.get(*n)?),
-                Slot::Job {
-                    key,
-                    kind,
-                    name,
-                    when,
-                    runs,
-                } => Row::Job(rows::Job {
+                Slot::Flow { key, name, when, runs } => Row::Flow(rows::FlowRow {
                     key: key.clone(),
-                    kind: *kind,
                     name: name.clone(),
                     runs: runs.iter().map(|n| d.items.get(*n)).collect::<Option<_>>()?,
                     when: when.clone(),
+                    firing: d.firings.iter().find(|f| f.flow == *name),
                 }),
             })
         };
@@ -451,6 +443,7 @@ pub fn stretch(d: &Digest, since: Timestamp) -> Digest {
         lost: d.lost.clone(),
         hidden: d.hidden.clone(),
         order: d.order.clone(),
+        firings: d.firings.clone(),
     }
 }
 
@@ -573,7 +566,7 @@ pub fn text(cu: &CatchUp, top: &[String], now: Timestamp) -> String {
             out.push_str(&match r {
                 Row::Question(q) => format!("\n    {} {}  {line}  [{}]", rows::QUESTION, q.id, q.keys()),
                 Row::Run(i) => format!("\n    {} {}  {line}", rows::icon(&i.run), i.run.id),
-                Row::Job(_) => format!("\n    {} {line}", rows::JOB),
+                Row::Flow(_) => format!("\n    {} {line}", rows::JOB),
                 Row::Group(_) => continue,
             });
         }
@@ -587,17 +580,17 @@ pub fn text(cu: &CatchUp, top: &[String], now: Timestamp) -> String {
 /// question's folder.
 fn head_of(d: &Digest, cx: &Context<'_>, run: Option<&Run>, ws: &Path) -> Head {
     match run {
-        Some(r) if rows::everywhere_run(r, cx.names, cx.rules) => Head::everywhere(),
+        Some(r) if rows::everywhere_run(r, cx.names, cx.flows) => Head::everywhere(),
         Some(r) => rows::head(&r.place_key(), &r.workspace, d, cx),
         None => rows::head(&ws.to_string_lossy(), ws, d, cx),
     }
 }
 
-/// The run a row is, or a job's last firing.
+/// The run a row is, or a flow's last run.
 fn run_of<'r>(r: &'r Row) -> Option<&'r Run> {
     match r {
         Row::Run(i) => Some(&i.run),
-        Row::Job(j) => Some(&j.last().run),
+        Row::Flow(f) => Some(&f.last().run),
         Row::Group(_) | Row::Question(_) => None,
     }
 }
@@ -618,12 +611,12 @@ fn at(r: &Row) -> Option<Timestamp> {
         Row::Group(_) => None,
         Row::Question(q) => Some(q.updated_at),
         Row::Run(i) => Some(i.at),
-        Row::Job(j) => Some(j.last().at),
+        Row::Flow(f) => Some(f.last().at),
     }
 }
 
-/// One line for a row: an agent's recap or state, a job's marks and last
-/// outcome, a shell's last line, a question's ask.
+/// One line for a row: an agent's recap or state, a flow's marks and where
+/// its latest firing stands, a shell's last line, a question's ask.
 pub fn row_line(r: &Row, now: Timestamp) -> String {
     let ago = |t: Timestamp| format!("{} ago", fmt_age(t, now));
     let parts: Vec<String> = match r {
@@ -639,13 +632,13 @@ pub fn row_line(r: &Row, now: Timestamp) -> String {
             rows::said(i).to_string(),
             ago(i.at),
         ],
-        Row::Job(j) => {
-            let last = &j.last().run;
+        Row::Flow(f) => {
+            let last = &f.last().run;
             vec![
-                format!("{} {}", j.marks(MARKS), j.name),
+                format!("{} {}", f.marks(MARKS), f.name),
                 rows::state_words(last.state, last.confidence),
-                j.summary(),
-                ago(j.last().at),
+                f.summary(),
+                ago(f.last().at),
             ]
         }
     };
@@ -686,9 +679,12 @@ mod tests {
         }
     }
 
-    fn fired(id: &str, job: &str, state: RunState, at: &str) -> DigestItem {
+    fn fired(id: &str, flow: &str, state: RunState, at: &str) -> DigestItem {
         let mut i = item(id, state, API, at, true);
-        i.run.cause = Cause::Schedule(job.into());
+        i.run.cause = Cause::Flow {
+            flow: flow.into(),
+            step: "probe".into(),
+        };
         i.summary = if state == RunState::Failed {
             "exit 1 · 0s".into()
         } else {
@@ -730,7 +726,7 @@ mod tests {
         "2026-10-06T12:00:00Z".parse().unwrap()
     }
 
-    /// `api`: a question, a failed run, a nightly job that went ok, ok,
+    /// `api`: a question, a failed run, a nightly flow's runs that went ok, ok,
     /// failed, and a run you saw before you left; `relay`: only a run you saw
     /// before you left.
     fn fixture() -> Digest {
@@ -749,6 +745,7 @@ mod tests {
             lost: vec![],
             hidden: vec![],
             order: vec![],
+            firings: Vec::new(),
         }
     }
 
@@ -759,12 +756,29 @@ mod tests {
         ])
     }
 
+    /// The flows the fixture's runs are steps of, both `in` api.
+    fn flows() -> Vec<Flow> {
+        ["nightly", "hourly"]
+            .map(|name| Flow {
+                name: name.into(),
+                hash: "h".into(),
+                def: serde_json::json!({ "in_": API, "trigger": { "when": { "Every": 3600 }, "on": [] } }),
+                source: format!("/h/flows/{name}").into(),
+                paused: false,
+                approved_hash: Some("h".into()),
+                last_fired_at: None,
+                next_at: None,
+                removed_at: None,
+            })
+            .to_vec()
+    }
+
     fn build<'a>(d: &'a Digest, names: &Names) -> CatchUp<'a> {
         CatchUp::build(
             d,
             &Context {
                 names,
-                rules: &[],
+                flows: &flows(),
                 filter: "",
                 lens: Lens::All,
                 now: now(),
@@ -786,12 +800,12 @@ mod tests {
         assert!(matches!(cu.projects[0].rows[0], Row::Question(_)));
         assert_eq!(
             keys(&cu.projects[0]),
-            ["q:q1", "r:a1", "j:schedule:nightly@/home/f/api"],
-            "the question, then the run and the job that failed, newest first; what you saw before is not news"
+            ["q:q1", "r:a1", "f:nightly"],
+            "the question, then the run and the flow that failed, newest first; what you saw before is not news"
         );
-        assert_eq!(cu.projects[0].need, 3, "the question, the failed run, the failed job");
-        assert_eq!(cu.projects[0].ran, 4, "the run and three firings");
-        assert_eq!(cu.projects[0].failed, 2, "the run and one firing");
+        assert_eq!(cu.projects[0].need, 3, "the question, the failed run, the failed flow");
+        assert_eq!(cu.projects[0].ran, 4, "the run and the flow's three");
+        assert_eq!(cu.projects[0].failed, 2, "the run and one of the flow's");
         let relay = cu.projects.iter().find(|p| p.head.name == "relay").unwrap();
         assert!(relay.rows.is_empty(), "nothing since: folded");
         assert_eq!((relay.need, relay.ran, relay.failed), (0, 0, 0));
@@ -846,11 +860,11 @@ mod tests {
         assert!(keys(api).contains(&"r:a0".to_string()), "still shown: {:?}", keys(api));
         assert_eq!((api.ran, api.failed), (4, 2), "only the stretch is counted");
         assert_eq!(api.need, 4, "but it still needs you");
-        let job = api.rows.iter().find(|r| matches!(r, Row::Job(_))).unwrap();
+        let flow = api.rows.iter().find(|r| matches!(r, Row::Flow(_))).unwrap();
         assert!(
-            row_line(job, now()).starts_with("··× nightly"),
+            row_line(flow, now()).starts_with("··× nightly"),
             "{}",
-            row_line(job, now())
+            row_line(flow, now())
         );
     }
 
@@ -858,7 +872,7 @@ mod tests {
     fn a_long_stretch_keeps_what_ended_more_than_a_day_ago() {
         let mut d = fixture();
         d.since = "2026-10-03T12:00:00Z".parse().unwrap();
-        // A stopped firing is never news; a run you looked at elsewhere is
+        // A stopped run is never news; a run you looked at elsewhere is
         // not news either. Both are in the stretch, and more than a day old.
         let mut stopped = fired("h1", "hourly", RunState::Stopped, "2026-10-04T10:00:00Z");
         stopped.unseen = false;
@@ -870,7 +884,7 @@ mod tests {
         let api = &cu.projects[0];
         let k = keys(api);
         assert!(k.contains(&"r:seen".to_string()), "{k:?}");
-        assert!(k.contains(&"j:schedule:hourly@/home/f/api".to_string()), "{k:?}");
+        assert!(k.contains(&"f:hourly".to_string()), "{k:?}");
         let relay = cu.projects.iter().find(|p| p.head.name == "relay").unwrap();
         assert_eq!(
             keys(relay),
@@ -984,6 +998,7 @@ mod tests {
             lost: vec![],
             hidden: vec![],
             order: vec![],
+            firings: Vec::new(),
         };
         let names = Names::new([
             (PathBuf::from(one), "app".to_string()),
@@ -1012,11 +1027,11 @@ mod tests {
     }
 
     #[test]
-    fn a_job_line_is_its_marks_and_last_outcome() {
+    fn a_flow_line_is_its_marks_and_last_outcome() {
         let (d, names) = (fixture(), names());
         let cu = build(&d, &names);
-        let job = cu.projects[0].rows.iter().find(|r| matches!(r, Row::Job(_))).unwrap();
-        let line = row_line(job, now());
+        let flow = cu.projects[0].rows.iter().find(|r| matches!(r, Row::Flow(_))).unwrap();
+        let line = row_line(flow, now());
         assert!(line.starts_with("··×"), "{line}");
         assert!(line.contains("nightly") && line.contains("failed"), "{line}");
     }

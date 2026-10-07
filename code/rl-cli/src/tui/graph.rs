@@ -891,15 +891,15 @@ fn kind_word(k: NodeKind) -> &'static str {
     }
 }
 
-/// What the pane says about the selected node: what it is, its rule as the
-/// rules list would show it, what it is wired to either side, and — on a
+/// What the pane says about the selected node: what it is, its flow as the
+/// list's pane would show it, what it is wired to either side, and — on a
 /// question — the first one waiting, numbered to answer.
 #[allow(clippy::too_many_arguments)]
 pub fn pane_lines(
     g: &Graph,
     n: &Node,
-    rule: Option<&rl_proto::rule::Rule>,
-    last_run: Option<&str>,
+    flow: Option<&rl_proto::flow::Flow>,
+    firing: Option<&rl_proto::flow::Firing>,
     waiting: Option<(&rl_proto::decision::Decision, Option<&rl_proto::types::Run>)>,
     picked: &[usize],
     at: Option<usize>,
@@ -936,15 +936,16 @@ pub fn pane_lines(
             )));
         }
     }
-    if let Some(r) = rule {
+    if let Some(f) = flow {
         lines.push(Line::raw(""));
-        if matches!(n.kind, NodeKind::Schedule | NodeKind::Reaction) {
-            lines.extend(super::rules::lines(r, names, now, last_run));
-        } else {
-            lines.push(Line::from(vec![
+        match serde_json::from_value::<rl_flow::def::FlowDef>(f.def.clone()) {
+            Ok(def) if n.kind == NodeKind::Flow => {
+                lines.extend(super::flows::pane_lines(f, &def, firing, names, now));
+            }
+            _ => lines.push(Line::from(vec![
                 Span::styled(" from ", theme::dim()),
-                Span::raw(format!("{} {}", r.kind(), r.name())),
-            ]));
+                Span::raw(format!("flow {}", f.name)),
+            ])),
         }
     }
     let side = |into: bool| -> Vec<Line<'static>> {
