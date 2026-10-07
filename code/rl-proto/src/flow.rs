@@ -1,4 +1,5 @@
-//! A flow file's shape: `flow.yaml` in a flow's folder.
+//! A flow file's shape: `flow.md`'s frontmatter in a flow's folder; and a
+//! flow, its firings and what did not load, as they cross the wire.
 //!
 //! ```yaml
 //! when: every 30m          # or `on: run.failed`, or neither (by hand only)
@@ -26,6 +27,7 @@ use crate::action::{Action, action_struct};
 use crate::reaction::Filter;
 use crate::schedule::{Missed, Overlap};
 use crate::types::str_enum;
+use jiff::Timestamp;
 use serde::de::{self, MapAccess, Visitor};
 use serde::ser::SerializeMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -208,6 +210,176 @@ str_enum!(FiringStatus {
     Running => "running", Waiting => "waiting", Done => "done", Failed => "failed", Stopped => "stopped",
 });
 
+/// A flow as `rld` has it: the folder as last loaded, and what became of it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Flow {
+    pub name: String,
+    /// The folder's, less `runs/`: what a yes is given to.
+    pub hash: String,
+    /// `rl_flow::def::FlowDef` as JSON; the client reads what it shows.
+    pub def: serde_json::Value,
+    /// The folder.
+    pub source: PathBuf,
+    pub paused: bool,
+    pub approved_hash: Option<String>,
+    pub last_fired_at: Option<Timestamp>,
+    pub next_at: Option<Timestamp>,
+    pub removed_at: Option<Timestamp>,
+}
+
+/// Where a flow stands, in one word.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum FlowStatus {
+    /// A version of the folder nobody has said yes to.
+    NeedsApproval,
+    Paused,
+    On,
+    Removed,
+}
+
+impl fmt::Display for FlowStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            FlowStatus::NeedsApproval => "needs approval",
+            FlowStatus::Paused => "paused",
+            FlowStatus::On => "on",
+            FlowStatus::Removed => "removed",
+        })
+    }
+}
+
+impl Flow {
+    /// Whether the folder as it is now has a yes.
+    pub fn approved(&self) -> bool {
+        self.approved_hash.as_deref() == Some(self.hash.as_str())
+    }
+
+    pub fn status(&self) -> FlowStatus {
+        if self.removed_at.is_some() {
+            FlowStatus::Removed
+        } else if !self.approved() {
+            FlowStatus::NeedsApproval
+        } else if self.paused {
+            FlowStatus::Paused
+        } else {
+            FlowStatus::On
+        }
+    }
+
+    /// What starts it: `every 30m`, `30 7 * * 1-5`, `on run.failed`, `by hand`.
+    pub fn when(&self) -> String {
+        let trigger = &self.def["trigger"];
+        let mut said = Vec::new();
+        if let Some(secs) = trigger["when"]["Every"].as_u64() {
+            said.push(format!("every {}", every(secs)));
+        }
+        if let Some(cron) = trigger["when"]["Cron"].as_str() {
+            said.push(cron.to_string());
+        }
+        let on: Vec<&str> = trigger["on"]
+            .as_array()
+            .map(|kinds| kinds.iter().filter_map(|k| k.as_str()).collect())
+            .unwrap_or_default();
+        if !on.is_empty() {
+            said.push(format!("on {}", on.join(", ")));
+        }
+        if said.is_empty() {
+            return "by hand".to_string();
+        }
+        said.join(" or ")
+    }
+}
+
+/// `30m`, `1h`, `1h30m`, `90s` as written in a `when:`, from seconds.
+fn every(secs: u64) -> String {
+    let parts = [
+        (secs / 86_400, "d"),
+        (secs / 3600 % 24, "h"),
+        (secs / 60 % 60, "m"),
+        (secs % 60, "s"),
+    ];
+    parts
+        .iter()
+        .filter(|(n, _)| *n > 0)
+        .map(|(n, unit)| format!("{n}{unit}"))
+        .collect()
+}
+
+/// One run of a flow, and where each of its steps is.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Firing {
+    /// Also its step runs' chain.
+    pub id: String,
+    pub flow: String,
+    /// `when`, `on` or `hand`.
+    pub trigger: String,
+    /// The event that fired it, for `on`.
+    pub event: Option<i64>,
+    pub status: FiringStatus,
+    pub started_at: Timestamp,
+    pub ended_at: Option<Timestamp>,
+    /// In the order the flow writes them.
+    pub steps: Vec<StepState>,
+}
+
+/// One step of a firing: where it is, the run it started, the question it raised.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StepState {
+    pub name: String,
+    pub status: StepStatus,
+    pub run: Option<String>,
+    pub decision: Option<String>,
+}
+
+/// A flow folder that did not load at the last reload: where, and why. It is
+/// left out while the rest load, and stays said until it is fixed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NotLoaded {
+    pub flow: String,
+    /// `<folder>/flow.md`, or the folder when it could not be read.
+    pub file: PathBuf,
+    /// From 1, when it is known.
+    pub line: Option<usize>,
+    pub column: Option<usize>,
+    pub message: String,
+}
+
+impl NotLoaded {
+    /// `flow.md:3:5`, `flow.md:3`, or just the file's name.
+    pub fn at(&self) -> String {
+        let file = self
+            .file
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| self.file.to_string_lossy().into_owned());
+        match (self.line, self.column) {
+            (Some(l), Some(c)) => format!("{file}:{l}:{c}"),
+            (Some(l), None) => format!("{file}:{l}"),
+            _ => file,
+        }
+    }
+}
+
+/// `prod-logs · flow.md:3 · in: ~/x is not a project Relay knows`.
+impl fmt::Display for NotLoaded {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} · {} · {}", self.flow, self.at(), self.message)
+    }
+}
+
+/// What a reload of `~/.relay/flows` found and changed.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Reloaded {
+    /// How many flows loaded.
+    pub loaded: usize,
+    pub added: Vec<String>,
+    /// Changed folders: each waits for a yes again.
+    pub changed: Vec<String>,
+    pub removed: Vec<String>,
+    pub not_loaded: Vec<NotLoaded>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -301,5 +473,85 @@ mod tests {
             assert_eq!(serde_json::to_value(f).unwrap(), f.as_str());
         }
         assert!("ended".parse::<FiringStatus>().is_err());
+    }
+
+    fn flow(trigger: serde_json::Value) -> Flow {
+        Flow {
+            name: "pulse".into(),
+            hash: "h2".into(),
+            def: serde_json::json!({ "trigger": trigger }),
+            source: "/h/flows/pulse".into(),
+            paused: false,
+            approved_hash: Some("h1".into()),
+            last_fired_at: None,
+            next_at: None,
+            removed_at: None,
+        }
+    }
+
+    #[test]
+    fn a_flow_is_on_once_its_folder_as_it_is_has_a_yes() {
+        let mut f = flow(serde_json::json!({ "when": null, "on": [] }));
+        assert_eq!(
+            f.status(),
+            FlowStatus::NeedsApproval,
+            "the folder changed since the yes"
+        );
+        f.approved_hash = Some("h2".into());
+        assert_eq!(f.status(), FlowStatus::On);
+        f.paused = true;
+        assert_eq!(f.status(), FlowStatus::Paused);
+        f.removed_at = Some(Timestamp::UNIX_EPOCH);
+        assert_eq!(f.status(), FlowStatus::Removed);
+        assert_eq!(FlowStatus::NeedsApproval.to_string(), "needs approval");
+        assert_eq!(
+            serde_json::to_value(FlowStatus::NeedsApproval).unwrap(),
+            "needs-approval"
+        );
+    }
+
+    #[test]
+    fn a_flow_says_what_starts_it() {
+        let when = |t: serde_json::Value| flow(t).when();
+        assert_eq!(
+            when(serde_json::json!({ "when": { "Every": 1800 }, "on": [] })),
+            "every 30m"
+        );
+        assert_eq!(
+            when(serde_json::json!({ "when": { "Every": 5400 }, "on": [] })),
+            "every 1h30m"
+        );
+        assert_eq!(
+            when(serde_json::json!({ "when": { "Cron": "30 7 * * 1-5" }, "on": [] })),
+            "30 7 * * 1-5"
+        );
+        assert_eq!(
+            when(serde_json::json!({ "when": null, "on": ["run.failed", "logs.*"] })),
+            "on run.failed, logs.*"
+        );
+        assert_eq!(
+            when(serde_json::json!({ "when": { "Every": 60 }, "on": ["run.failed"] })),
+            "every 1m or on run.failed"
+        );
+        assert_eq!(when(serde_json::json!({ "when": null, "on": [] })), "by hand");
+    }
+
+    #[test]
+    fn what_did_not_load_says_where_and_why() {
+        let mut n = NotLoaded {
+            flow: "prod-logs".into(),
+            file: "/h/flows/prod-logs/flow.md".into(),
+            line: Some(3),
+            column: None,
+            message: "in: ~/x is not a project Relay knows".into(),
+        };
+        assert_eq!(
+            n.to_string(),
+            "prod-logs · flow.md:3 · in: ~/x is not a project Relay knows"
+        );
+        n.column = Some(5);
+        assert_eq!(n.at(), "flow.md:3:5");
+        n.line = None;
+        assert_eq!(n.at(), "flow.md");
     }
 }

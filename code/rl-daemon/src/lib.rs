@@ -7,6 +7,7 @@ pub mod badges;
 pub mod config;
 pub mod decisions;
 pub mod digest;
+pub mod flows;
 pub mod gc;
 pub mod git;
 pub mod graph;

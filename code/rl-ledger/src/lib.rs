@@ -9,6 +9,8 @@
 pub mod decisions;
 pub mod entries;
 pub mod events;
+pub mod firings;
+pub mod flows;
 pub mod graph;
 pub mod hidden;
 pub mod kept;

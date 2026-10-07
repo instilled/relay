@@ -104,6 +104,17 @@ impl Home {
     pub fn reactions_file(&self) -> PathBuf {
         self.0.join("reactions.yaml")
     }
+    /// Flows, a folder each: `<name>/flow.md` and the flow's own scripts.
+    pub fn flows_dir(&self) -> PathBuf {
+        self.0.join("flows")
+    }
+    pub fn flow_dir(&self, name: &str) -> PathBuf {
+        self.flows_dir().join(name)
+    }
+    /// One firing's state: what its steps left for the steps after them.
+    pub fn firing_dir(&self, name: &str, id: &str) -> PathBuf {
+        self.flow_dir(name).join("runs").join(id)
+    }
     /// Where a removed project's rule files are kept, a folder each: moved
     /// here rather than deleted, so taking a project away loses nothing.
     pub fn removed_dir(&self) -> PathBuf {
@@ -186,6 +197,14 @@ mod tests {
         assert!(home.run_dir().is_dir());
         assert!(home.log_dir().is_dir());
         assert_eq!(home.daemon_socket(), home.run_dir().join("rld.sock"));
+    }
+
+    #[test]
+    fn a_firing_lives_in_its_flow_folder() {
+        let home = Home::at("/h");
+        assert_eq!(home.flows_dir(), Path::new("/h/flows"));
+        assert_eq!(home.flow_dir("pulse"), Path::new("/h/flows/pulse"));
+        assert_eq!(home.firing_dir("pulse", "f1"), Path::new("/h/flows/pulse/runs/f1"));
     }
 
     #[test]

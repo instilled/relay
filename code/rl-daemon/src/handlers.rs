@@ -11,6 +11,7 @@ use rl_proto::rule::{Rule, RuleKind};
 use tracing::{info, warn};
 
 pub fn register(r: &mut Router<Daemon>) {
+    crate::flows::rpc::register(r);
     r.register::<DaemonPing, _, _>(|d, ()| async move {
         Ok(DaemonInfo {
             protocol: PROTOCOL_VERSION,

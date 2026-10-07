@@ -12,6 +12,10 @@ pub struct Doc {
     pub sections: BTreeMap<String, String>,
     /// The line (1-based, in flow.md) each step's key is on, for errors.
     pub lines: BTreeMap<String, usize>,
+    /// The line each top-level frontmatter key is on: `in`, `when`, `steps`.
+    pub keys: BTreeMap<String, usize>,
+    /// The line each `## ` heading is on.
+    pub headings: BTreeMap<String, usize>,
 }
 
 /// What did not read, and where.
@@ -45,10 +49,13 @@ pub fn read(text: &str) -> Result<Doc, Problem> {
     let front = lines[1..end].join("\n");
     let spec: FlowSpec = serde_norway::from_str(&front).map_err(|e| yaml_problem(&e))?;
     let lines_of = step_lines(&lines[1..end], &spec);
+    let (sections, headings) = sections(&lines[end + 1..], end + 2)?;
     Ok(Doc {
         spec,
-        sections: sections(&lines[end + 1..], end + 2)?,
+        sections,
         lines: lines_of,
+        keys: key_lines(&lines[1..end]),
+        headings,
     })
 }
 
@@ -118,11 +125,32 @@ fn step_lines(front: &[&str], spec: &FlowSpec) -> BTreeMap<String, usize> {
     found
 }
 
-/// The text under each `## <name>` line, trimmed. Text before the first
-/// heading describes the flow and is not kept. `first` is the file line `body`
-/// starts on. A heading said twice is a mistake, at the second.
-fn sections(body: &[&str], first: usize) -> Result<BTreeMap<String, String>, Problem> {
+/// The line each top-level key is on: an unindented `<key>:`.
+fn key_lines(front: &[&str]) -> BTreeMap<String, usize> {
+    let mut found = BTreeMap::new();
+    for (i, l) in front.iter().enumerate() {
+        if l.starts_with([' ', '\t', '#', '-']) {
+            continue;
+        }
+        if let Some((key, _)) = l.split_once(':') {
+            found
+                .entry(key.trim().trim_matches(['"', '\'']).to_string())
+                .or_insert(i + 2);
+        }
+    }
+    found
+}
+
+/// Each heading's text, and the line it is on.
+type Sections = (BTreeMap<String, String>, BTreeMap<String, usize>);
+
+/// The text under each `## <name>` line, trimmed, and the line each heading is
+/// on. Text before the first heading describes the flow and is not kept.
+/// `first` is the file line `body` starts on. A heading said twice is a
+/// mistake, at the second.
+fn sections(body: &[&str], first: usize) -> Result<Sections, Problem> {
     let mut out = BTreeMap::new();
+    let mut at = BTreeMap::new();
     let mut open: Option<(&str, Vec<&str>)> = None;
     let mut close = |open: Option<(&str, Vec<&str>)>| {
         if let Some((name, text)) = open {
@@ -136,6 +164,7 @@ fn sections(body: &[&str], first: usize) -> Result<BTreeMap<String, String>, Pro
                 if !seen.insert(name) {
                     return Err(Problem::at(first + i, &format!("## {name} appears twice")));
                 }
+                at.insert(name.to_string(), first + i);
                 close(open.take());
                 open = Some((name, Vec::new()));
             }
@@ -147,7 +176,7 @@ fn sections(body: &[&str], first: usize) -> Result<BTreeMap<String, String>, Pro
         }
     }
     close(open);
-    Ok(out)
+    Ok((out, at))
 }
 
 /// The name in a `## name` line, if it is one: `[a-z0-9][a-z0-9.-]*`.
@@ -174,6 +203,18 @@ mod tests {
         assert_eq!(d.sections["review.apply"], "Do it.");
         assert_eq!(d.lines["probe"], 5);
         assert_eq!(d.lines["triage"], 7);
+    }
+
+    #[test]
+    fn each_top_level_key_and_heading_has_its_line() {
+        let d = read(PROD_LOGS).unwrap();
+        let keys: Vec<(&str, usize)> = d.keys.iter().map(|(k, l)| (k.as_str(), *l)).collect();
+        assert_eq!(keys, [("in", 2), ("steps", 4), ("when", 3)]);
+        assert_eq!(d.headings["triage"], 14);
+        assert_eq!(d.headings["review.apply"], 19);
+        let d = read("---\n# a comment: not a key\n\"throttle\": 5m\nsteps: {}\n---\n").unwrap();
+        assert_eq!(d.keys.keys().collect::<Vec<_>>(), ["steps", "throttle"]);
+        assert_eq!(d.keys["throttle"], 3);
     }
 
     #[test]

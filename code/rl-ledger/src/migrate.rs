@@ -38,6 +38,7 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         include_str!("../migrations/0019_summary_kept.sql"),
     ),
     (20, "0020_chain", include_str!("../migrations/0020_chain.sql")),
+    (21, "0021_flows", include_str!("../migrations/0021_flows.sql")),
 ];
 
 pub fn run(conn: &mut Connection) -> Result<()> {
@@ -87,6 +88,8 @@ mod tests {
             [
                 "decisions",
                 "events",
+                "firings",
+                "flows",
                 "hidden",
                 "meta",
                 "presence",
@@ -98,6 +101,7 @@ mod tests {
                 "schedules",
                 "session_io",
                 "sessions",
+                "steps",
                 "summaries",
                 "summary_kept",
                 "transcripts",

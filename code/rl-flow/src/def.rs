@@ -1,7 +1,7 @@
 //! A read flow, checked: what it is, and each step ready to carry out.
 //!
-//! Everything wrong is said at once, each at its step's line where it has
-//! one, so a flow is fixed in one pass rather than one mistake at a time.
+//! Everything wrong is said at once, each at the line it is about, so a flow
+//! is fixed in one pass rather than one mistake at a time.
 
 use crate::cond::{self, Cond};
 use crate::cron::Cron;
@@ -85,27 +85,37 @@ struct Flow<'a> {
 }
 
 /// Checks a read flow. `known` says whether a folder is a project Relay knows;
-/// it is given the path as written. Every problem is returned, each at its
-/// step's line where it has one.
+/// it is given the path as written. Every problem is returned, each at the
+/// line of its step, key or heading.
 pub fn check(name: &str, doc: Doc, known: &dyn Fn(&Path) -> bool) -> Result<FlowDef, Vec<Problem>> {
-    let Doc { spec, sections, lines } = doc;
+    let Doc {
+        spec,
+        sections,
+        lines,
+        keys,
+        headings,
+    } = doc;
     let mut problems = Vec::new();
-    let mut flow_problem = |message: String| {
+    // A problem with the flow itself is said at the key it is about.
+    let mut flow_problem = |key: &str, message: String| {
         problems.push(Problem {
-            line: None,
+            line: keys.get(key).copied(),
             column: None,
             message,
         })
     };
+    if spec.steps.is_empty() {
+        flow_problem("steps", "a flow needs at least one step".to_string());
+    }
     if let Some(dir) = spec.in_.as_deref().filter(|d| !known(d)) {
-        flow_problem(unknown_in(dir));
+        flow_problem("in", unknown_in(dir));
     }
     let when = spec.when.as_deref().map(when).transpose().unwrap_or_else(|e| {
-        flow_problem(e);
+        flow_problem("when", e);
         None
     });
     let throttle_secs = throttle(spec.throttle.as_deref()).unwrap_or_else(|e| {
-        flow_problem(e);
+        flow_problem("throttle", e);
         0
     });
     let flow = Flow {
@@ -139,7 +149,7 @@ pub fn check(name: &str, doc: Doc, known: &dyn Fn(&Path) -> bool) -> Result<Flow
     }
     for heading in sections.keys().filter(|h| !is_for_something(h, &spec.steps)) {
         problems.push(Problem {
-            line: None,
+            line: headings.get(heading).copied(),
             column: None,
             message: format!("`## {heading}` is not a step or an ask's option"),
         });
@@ -687,12 +697,12 @@ What was said with the yes: {review.note}
                 flow("  triage:\n    run: x\n")
             ),
             "`## triag` is not a step or an ask's option",
-            None,
+            Some(8),
         );
         refused(
             &format!("{}## a.ok\nhello\n", flow("  a:\n    run: x\n")),
             "`## a.ok` is not a step or an ask's option",
-            None,
+            Some(6),
         );
     }
 
@@ -702,7 +712,7 @@ What was said with the yes: {review.note}
         let ps = problems_known("---\nin: ~/x\nsteps:\n  a:\n    run: x\n---\n", &known);
         assert!(
             ps.iter()
-                .any(|p| p.message == "in: ~/x is not a project Relay knows — `rl add ~/x`"),
+                .any(|p| p.message == "in: ~/x is not a project Relay knows — `rl add ~/x`" && p.line == Some(2)),
             "{ps:#?}"
         );
         let ps = problems_known("---\nin: ~/known\nsteps:\n  a:\n    in: ~/y\n    run: x\n---\n", &known);
@@ -720,6 +730,7 @@ What was said with the yes: {review.note}
         assert_eq!(when("every 90s").unwrap(), Some(When::Every(90)));
         assert_eq!(when("every 1h30m").unwrap(), Some(When::Every(5400)));
         assert_eq!(when("30 7 * * 1-5").unwrap(), Some(When::Cron("30 7 * * 1-5".into())));
+        assert_eq!(when("hourly").unwrap_err()[0].line, Some(2));
         let said = |w: &str| when(w).unwrap_err()[0].message.clone();
         assert!(said("hourly").contains("cron needs 5 fields"), "{}", said("hourly"));
         assert!(said("61 * * * *").contains("minute"), "{}", said("61 * * * *"));
@@ -750,6 +761,16 @@ What was said with the yes: {review.note}
         assert_eq!(f.trigger.on, ["run.failed"]);
         let ps = problems("---\nthrottle: often\nsteps:\n  a:\n    run: x\n---\n");
         assert_eq!(ps[0].message, "throttle: `often` is not a duration");
+        assert_eq!(ps[0].line, Some(2));
+    }
+
+    #[test]
+    fn a_flow_with_no_steps_is_refused() {
+        refused(
+            "---\nwhen: every 1h\nsteps: {}\n---\n",
+            "a flow needs at least one step",
+            Some(3),
+        );
     }
 
     #[test]

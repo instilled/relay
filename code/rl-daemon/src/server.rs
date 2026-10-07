@@ -35,6 +35,7 @@ pub struct Daemon {
     pub scheduler: Arc<Scheduler>,
     pub decisions: Arc<crate::decisions::Decisions>,
     pub reactor: Arc<crate::reactions::Reactor>,
+    pub flows: Arc<crate::flows::Flows>,
     /// What the configured badges last said of each folder's branch.
     pub badges: crate::badges::Badges,
     pub started_at: Timestamp,
@@ -148,6 +149,20 @@ pub async fn serve_with(home: Home, shutdown: CancellationToken, opts: ServeOpti
         shutdown.child_token(),
     ));
     tokio::spawn(decisions.clone().serve());
+    let flows = crate::flows::Flows::new(
+        home.clone(),
+        ledger.clone(),
+        supervisor.clone(),
+        decisions.clone(),
+        registry4.clone(),
+        shutdown.child_token(),
+    );
+    // Loaded before the socket answers, so `rl flow list` right after
+    // `rl daemon start` already knows every flow.
+    if let Err(e) = flows.reload().await {
+        warn!(error = %format!("{e:#}"), "flows not loaded");
+    }
+    tokio::spawn(flows.clone().serve());
     let reactor = Arc::new(crate::reactions::Reactor::new(
         home.clone(),
         ledger.clone(),
@@ -175,6 +190,7 @@ pub async fn serve_with(home: Home, shutdown: CancellationToken, opts: ServeOpti
         scheduler,
         decisions,
         reactor,
+        flows,
         badges: crate::badges::Badges::new(home.plugins_dir(), crate::badges::EVERY, crate::badges::WAIT),
         started_at: Timestamp::now(),
         shutdown: shutdown.clone(),
