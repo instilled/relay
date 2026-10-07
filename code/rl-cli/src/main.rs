@@ -801,7 +801,7 @@ async fn run(home: &Home, a: RunArgs, json: bool) -> Result<()> {
         inherit_env: false,
         input: true,
         cause: Cause::Manual,
-        flow: None,
+        chain: None,
     };
     let run = daemon::ensure(home, !json).await?.call::<RunStart>(spec).await?;
     if json {
@@ -1410,7 +1410,7 @@ fn describe(i: &DaemonInfo) -> String {
 }
 
 /// Emit a custom event. Inside a run, `RELAY_RUN` attributes it to that run's
-/// folder and flow; outside one, the folder is `--in` or the cwd.
+/// folder and chain; outside one, the folder is `--in` or the cwd.
 async fn emit(home: &Home, a: EmitArgs, json: bool) -> Result<()> {
     let mut data = serde_json::Map::new();
     if let Some(src) = &a.json_data {
@@ -1525,7 +1525,7 @@ async fn decisions(home: &Home, a: DecisionsArgs, json: bool) -> Result<()> {
         .call::<DecisionList>(DecisionFilter {
             all: a.all,
             run: a.run,
-            flow: None,
+            chain: None,
             limit: Some(a.limit),
         })
         .await?;

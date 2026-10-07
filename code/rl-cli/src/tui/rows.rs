@@ -1408,7 +1408,7 @@ mod tests {
             id: id.into(),
             workspace: ws.into(),
             run: run.map(Into::into),
-            flow: id.into(),
+            chain: id.into(),
             group: Some("reaction:tests-failed".into()),
             title: format!("question {id}"),
             summary: None,

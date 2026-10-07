@@ -20,7 +20,7 @@ pub fn run_spec(
     base: Option<&Path>,
     registry: &Registry,
     cause: Cause,
-    flow: Option<String>,
+    chain: Option<String>,
 ) -> Result<RunSpec> {
     let Some(task) = &action.run else {
         bail!("nothing to run");
@@ -69,7 +69,7 @@ pub fn run_spec(
         inherit_env: true,
         input: true,
         cause,
-        flow,
+        chain,
     })
 }
 

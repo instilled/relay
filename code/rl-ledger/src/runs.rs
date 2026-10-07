@@ -11,7 +11,7 @@ use std::path::PathBuf;
 
 const COLS: &str = "id, workspace, kind, title, cli, argv_json, cwd, branch, worktree, \"ref\", tags_json, \
     state, source, confidence, state_at, started_at, ended_at, exit_code, cost_json, \
-    cause, flow, parent_run, last_line, seen_at, detail, archived_at, pinned_at, hidden_at";
+    cause, chain, parent_run, last_line, seen_at, detail, archived_at, pinned_at, hidden_at";
 
 const DEFAULT_LIMIT: u32 = 200;
 
@@ -45,7 +45,7 @@ pub fn insert(conn: &Connection, r: &Run) -> Result<()> {
             r.exit_code,
             r.cost.as_ref().map(serde_json::to_string).transpose()?,
             r.cause.to_string(),
-            r.flow,
+            r.chain,
             r.parent_run,
             r.last_line,
             r.seen_at.map(to_millis),
@@ -247,7 +247,7 @@ fn from_row(row: &Row<'_>) -> rusqlite::Result<Run> {
             .transpose()
             .map_err(|e| conv(18, e))?,
         cause: row.get::<_, String>(19)?.parse().map_err(|e| conv_str(19, e))?,
-        flow: row.get(20)?,
+        chain: row.get(20)?,
         parent_run: row.get(21)?,
         last_line: row.get(22)?,
         seen_at: optional_from_millis(row.get(23)?, 23, conv)?,

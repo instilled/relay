@@ -52,7 +52,7 @@ async fn the_graph_joins_rules_to_what_happened() {
         id: "dq000001".into(),
         workspace: "/tmp".into(),
         run: None,
-        flow: "dq000001".into(),
+        chain: "dq000001".into(),
         group: Some("asker".into()),
         title: "go?".into(),
         summary: None,

@@ -703,7 +703,7 @@ mod tests {
             id: id.into(),
             workspace: ws.into(),
             run: None,
-            flow: id.into(),
+            chain: id.into(),
             group: None,
             title: format!("question {id}"),
             summary: None,

@@ -199,7 +199,7 @@ pub async fn move_one(d: &Daemon, p: ImportMoveParams) -> Result<Run> {
             env: p.env,
             input: true,
             cause: Cause::Manual,
-            flow: None,
+            chain: None,
         })
         .await
 }

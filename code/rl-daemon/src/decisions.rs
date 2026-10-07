@@ -2,7 +2,7 @@
 //!
 //! A run raises a question with `rl ask` and carries on; the question waits in
 //! the ledger. Choosing an option starts whatever that option carries, as an
-//! ordinary run with `cause: decision:<id>` and the decision's `flow`, so a
+//! ordinary run with `cause: decision:<id>` and the decision's `chain`, so a
 //! schedule → question → follow-up is one chain. A decision with an `expires`
 //! either falls back to its default option or expires unanswered; the sweep
 //! that does it is the only clock involved.
@@ -90,7 +90,7 @@ impl Decisions {
         }
 
         // Where it belongs: the asking run's chain and workspace, or the cwd's.
-        let (run, flow, workspace) = match &spec.run {
+        let (run, chain, workspace) = match &spec.run {
             Some(id) => {
                 let id = id.clone();
                 let r = self
@@ -98,7 +98,7 @@ impl Decisions {
                     .call(move |c| runs::get(c, &id))
                     .await?
                     .ok_or_else(|| anyhow!("no run {}", spec.run.as_deref().unwrap_or_default()))?;
-                (Some(r.id.clone()), r.flow.clone(), r.workspace.clone())
+                (Some(r.id.clone()), r.chain.clone(), r.workspace.clone())
             }
             None => {
                 let cwd = spec.cwd.clone().unwrap_or_else(|| PathBuf::from("."));
@@ -108,7 +108,7 @@ impl Decisions {
         };
         let id = rl_core::id::new_id().context("generating decision id")?;
         let mut d = Decision {
-            flow: if flow.is_empty() { id.clone() } else { flow },
+            chain: if chain.is_empty() { id.clone() } else { chain },
             id,
             workspace,
             run,
@@ -137,8 +137,8 @@ impl Decisions {
         let restated = existing.is_some();
         let stored = match existing {
             Some(open) => {
-                // Same question, said again: keep the id and the flow it began.
-                d.flow = open.flow.clone();
+                // Same question, said again: keep the id and the chain it began.
+                d.chain = open.chain.clone();
                 let (id, d2) = (open.id.clone(), d.clone());
                 self.ledger.call(move |c| decisions::restate(c, &id, &d2, now)).await?
             }
@@ -240,7 +240,7 @@ impl Decisions {
                 Some(&base),
                 &self.registry,
                 Cause::Decision(d.id.clone()),
-                Some(d.flow.clone()),
+                Some(d.chain.clone()),
             ) {
                 Ok(mut spec) => {
                     // What was asked and answered reaches the option's run, so

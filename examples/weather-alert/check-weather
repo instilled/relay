@@ -5,7 +5,7 @@
 # it up. Needs only curl and jq.
 #
 # Relay hands us $RELAY_RUN, which `rl emit` inherits, so the alert joins this
-# run's flow. Configure with WEATHER_LAT / WEATHER_LON / WEATHER_PLACE, and the
+# run's chain. Configure with WEATHER_LAT / WEATHER_LON / WEATHER_PLACE, and the
 # rain threshold with RAIN_POP (percent, default 50).
 set -eu
 

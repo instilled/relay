@@ -23,7 +23,7 @@ That call travels as JSON-RPC over `~/.relay/run/rld.sock`, lands as an event ro
 in the ledger, and the reactor offers it to `reactions.yaml`. The reaction's
 `where.data.condition` narrows it, `{data.*}` fills the question and the note it
 carries, and approving `note` runs the action. Inside the scheduled run `rl emit`
-inherits `$RELAY_RUN`, so the alert is filed under this folder and joins the flow.
+inherits `$RELAY_RUN`, so the alert is filed under this folder and joins the chain.
 
 ## Run it
 

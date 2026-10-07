@@ -13,14 +13,14 @@ use rl_proto::methods::DecisionFilter;
 use rusqlite::{Connection, OptionalExtension, Row, params, params_from_iter, types::Value};
 use std::path::PathBuf;
 
-const COLS: &str = "id, created_at, updated_at, workspace, run, flow, group_key, title, summary, options_json, \
+const COLS: &str = "id, created_at, updated_at, workspace, run, chain, group_key, title, summary, options_json, \
      multi, status, expires_at, resolved_at, chosen_json, outcomes_json, note";
 const DEFAULT_LIMIT: u32 = 100;
 
 /// Writes a new question. Returns it as stored.
 pub fn insert(conn: &Connection, d: &Decision) -> Result<Decision> {
     conn.execute(
-        "INSERT INTO decisions (id, created_at, updated_at, workspace, run, flow, group_key, title, summary, \
+        "INSERT INTO decisions (id, created_at, updated_at, workspace, run, chain, group_key, title, summary, \
          options_json, multi, status, expires_at, resolved_at, chosen_json, outcomes_json, note) \
          VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
         params![
@@ -29,7 +29,7 @@ pub fn insert(conn: &Connection, d: &Decision) -> Result<Decision> {
             to_millis(d.updated_at),
             d.workspace.to_string_lossy(),
             d.run,
-            d.flow,
+            d.chain,
             d.group,
             d.title,
             d.summary,
@@ -49,13 +49,13 @@ pub fn insert(conn: &Connection, d: &Decision) -> Result<Decision> {
 /// Replaces the wording and options of an open question, keeping its id.
 pub fn restate(conn: &Connection, id: &str, d: &Decision, now: Timestamp) -> Result<Decision> {
     conn.execute(
-        "UPDATE decisions SET updated_at = ?2, run = ?3, flow = ?4, title = ?5, summary = ?6, options_json = ?7, \
+        "UPDATE decisions SET updated_at = ?2, run = ?3, chain = ?4, title = ?5, summary = ?6, options_json = ?7, \
          multi = ?8, expires_at = ?9, workspace = ?10 WHERE id = ?1 AND status = 'open'",
         params![
             id,
             to_millis(now),
             d.run,
-            d.flow,
+            d.chain,
             d.title,
             d.summary,
             serde_json::to_string(&d.options)?,
@@ -98,9 +98,9 @@ pub fn list(conn: &Connection, f: &DecisionFilter) -> Result<Vec<Decision>> {
         args.push(run.clone().into());
         sql.push_str(&format!(" AND run = ?{}", args.len()));
     }
-    if let Some(flow) = &f.flow {
-        args.push(flow.clone().into());
-        sql.push_str(&format!(" AND flow = ?{}", args.len()));
+    if let Some(chain) = &f.chain {
+        args.push(chain.clone().into());
+        sql.push_str(&format!(" AND chain = ?{}", args.len()));
     }
     sql.push_str(" ORDER BY created_at DESC, id DESC LIMIT ");
     sql.push_str(&f.limit.unwrap_or(DEFAULT_LIMIT).to_string());
@@ -215,7 +215,7 @@ fn from_row(row: &Row) -> rusqlite::Result<Decision> {
         updated_at: from_millis(row.get(2)?).map_err(|e| conv(2, e))?,
         workspace: PathBuf::from(row.get::<_, String>(3)?),
         run: row.get(4)?,
-        flow: row.get(5)?,
+        chain: row.get(5)?,
         group: row.get(6)?,
         title: row.get(7)?,
         summary: row.get(8)?,
@@ -241,7 +241,7 @@ mod tests {
             id: id.into(),
             workspace: "/w".into(),
             run: Some("r1".into()),
-            flow: "f1".into(),
+            chain: "f1".into(),
             group: group.map(Into::into),
             title: format!("question {id}"),
             summary: None,

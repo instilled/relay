@@ -1064,7 +1064,7 @@ mod tests {
             id: "kfmpg3sw".into(),
             workspace: "/w".into(),
             run: None,
-            flow: "kfmpg3sw".into(),
+            chain: "kfmpg3sw".into(),
             group: Some("reaction:tests-failed".into()),
             title: "nightly tests failed".into(),
             summary: Some("test parser ... FAILED".into()),

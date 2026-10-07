@@ -3220,7 +3220,7 @@ impl App {
             inherit_env: false,
             input: true,
             cause: Cause::Manual,
-            flow: None,
+            chain: None,
         };
         let run = self.rpc.call::<RunStart>(spec).await?;
         if run.kind == RunKind::Agent {
@@ -3340,7 +3340,7 @@ impl App {
             inherit_env: false,
             input: true,
             cause: Cause::Manual,
-            flow: None,
+            chain: None,
         };
         Ok(self.rpc.call::<RunStart>(spec).await?.id)
     }
@@ -7434,7 +7434,7 @@ mod tests {
             id: "dec00001".into(),
             workspace: folder.clone(),
             run: Some("run00001".into()),
-            flow: "f".into(),
+            chain: "f".into(),
             group: None,
             title: "ship it?".into(),
             summary: None,
@@ -7512,7 +7512,7 @@ mod tests {
             id: id.into(),
             workspace: folder.clone(),
             run: run.map(Into::into),
-            flow: id.into(),
+            chain: id.into(),
             group: None,
             title: format!("question {id}"),
             summary: None,
@@ -7910,7 +7910,7 @@ mod tests {
             id: "dec00001".into(),
             workspace: folder.to_path_buf(),
             run: None,
-            flow: "f".into(),
+            chain: "f".into(),
             group: None,
             title: "ship it?".into(),
             summary: None,

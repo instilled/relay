@@ -237,7 +237,7 @@ pub struct Run {
     pub cause: Cause,
     /// The chain it belongs to: its own id when it started one.
     #[serde(default)]
-    pub flow: String,
+    pub chain: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_run: Option<String>,
     /// What an exact source last said it was doing (`tool: Bash`, a mark's
@@ -286,7 +286,7 @@ impl Run {
     ) -> Self {
         let id: String = id.into();
         Self {
-            flow: id.clone(),
+            chain: id.clone(),
             id,
             workspace: workspace.into(),
             kind,

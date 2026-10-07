@@ -37,6 +37,7 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         "0019_summary_kept",
         include_str!("../migrations/0019_summary_kept.sql"),
     ),
+    (20, "0020_chain", include_str!("../migrations/0020_chain.sql")),
 ];
 
 pub fn run(conn: &mut Connection) -> Result<()> {

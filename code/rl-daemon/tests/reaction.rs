@@ -104,7 +104,7 @@ async fn a_rule_answers_a_real_event() {
     let started = wait_caused_by(&mut c, "reaction:tell-me", 1).await;
     assert_eq!(started.len(), 1);
     assert_eq!(started[0].cause, Cause::Reaction("tell-me".into()));
-    assert_eq!(started[0].flow, failing.flow, "the answer belongs to the chain");
+    assert_eq!(started[0].chain, failing.chain, "the answer belongs to the chain");
     c.wait_terminal(&started[0].id).await;
 
     // And that run's own events do not set the rule off again.
@@ -436,10 +436,10 @@ async fn a_reaction_keeps_the_event_it_fired_on() {
     let second: Run = c
         .ok(
             "run.start",
-            json!({ "argv": ["sh", "-c", "exit 2"], "cwd": dir, "title": "lint", "flow": first.flow }),
+            json!({ "argv": ["sh", "-c", "exit 2"], "cwd": dir, "title": "lint", "chain": first.chain }),
         )
         .await;
-    assert_eq!(second.flow, first.flow);
+    assert_eq!(second.chain, first.chain);
     c.wait_terminal(&first.id).await;
     c.wait_terminal(&second.id).await;
     let mut fails = Vec::new();
@@ -456,7 +456,7 @@ async fn a_reaction_keeps_the_event_it_fired_on() {
     assert_eq!(started.len(), 2);
     let mut heard = Vec::new();
     for r in &started {
-        assert_eq!(r.flow, first.flow, "in the chain");
+        assert_eq!(r.chain, first.chain, "in the chain");
         let evs: Vec<Event> = c
             .ok("event.list", json!({ "run": r.id, "kinds": ["run.started"] }))
             .await;

@@ -14,7 +14,7 @@
 //!
 //! Runs and questions from before reactions kept their event have no
 //! `event`, so theirs is read back from what was kept then: a reaction's run
-//! joined the chain the event's run was in (`flow`; its own id when the event
+//! joined the chain the event's run was in (`chain`; its own id when the event
 //! had no run), and the event is the newest one before it in that chain of a
 //! kind the rule listens for, within the five minutes the reactor still acts
 //! on; a question was grouped `reaction:<name>` and named the event's run,
@@ -210,7 +210,7 @@ impl SetOff {
 pub fn links(feed: &Feed, rules: &[Rule]) -> HashMap<i64, Vec<SetOff>> {
     let evs = &feed.events;
     let run_of = |e: &Event| e.run.as_deref().and_then(|id| feed.runs.get(id));
-    let flow_of = |e: &Event| run_of(e).map(|r| r.flow.as_str());
+    let chain_of = |e: &Event| run_of(e).map(|r| r.chain.as_str());
     // Whether a rule of that name listens for the kind; `None` when no rule
     // of that name is known any more.
     let listens = |name: &str, kind: &str| -> Option<bool> {
@@ -273,9 +273,9 @@ pub fn links(feed: &Feed, rules: &[Rule]) -> HashMap<i64, Vec<SetOff>> {
                 let Some(r) = run_of(e) else { continue };
                 let Cause::Reaction(name) = &r.cause else { continue };
                 // The event's chain; none when it had no run of its own.
-                let chain = (r.flow != r.id).then_some(r.flow.as_str());
+                let chain = (r.chain != r.id).then_some(r.chain.as_str());
                 let fits = |t: &Event| {
-                    flow_of(t) == chain && !own_doing(t, name) && listens(name, &t.kind).unwrap_or(chain.is_some())
+                    chain_of(t) == chain && !own_doing(t, name) && listens(name, &t.kind).unwrap_or(chain.is_some())
                 };
                 if let Some(id) = data_i64(e, "event").or_else(|| before(i, &fits)) {
                     let s = SetOff::Reaction {
@@ -640,10 +640,10 @@ mod tests {
         e
     }
 
-    fn run(id: &str, title: &str, cause: Cause, flow: &str) -> Run {
+    fn run(id: &str, title: &str, cause: Cause, chain: &str) -> Run {
         let mut r = Run::new(id, RunKind::Command, title, vec![], "/w/api", "/w/api", t("00:00"));
         r.cause = cause;
-        r.flow = flow.into();
+        r.chain = chain.into();
         r
     }
 
@@ -688,7 +688,7 @@ mod tests {
 
     fn question(id: &str, run: Option<&str>, group: Option<&str>, title: &str) -> Decision {
         serde_json::from_value(json!({
-            "id": id, "workspace": "/w/api", "run": run, "flow": "f", "group": group, "title": title,
+            "id": id, "workspace": "/w/api", "run": run, "chain": "f", "group": group, "title": title,
             "options": [], "status": "open", "created_at": "2026-09-28T10:00:00Z",
             "updated_at": "2026-09-28T10:00:00Z",
         }))

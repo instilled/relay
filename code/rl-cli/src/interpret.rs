@@ -262,7 +262,7 @@ pub async fn apply(home: &Home, f: &Form, registered: impl Fn(&Path) -> bool) ->
                 inherit_env: false,
                 input: true,
                 cause: Cause::Manual,
-                flow: None,
+                chain: None,
             };
             let run: Run = rpc.call::<RunStart>(spec).await?;
             Ok(format!("started {} · {}", run.title, run.id))

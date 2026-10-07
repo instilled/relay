@@ -54,7 +54,7 @@ async fn fires_on_time_and_obeys_pause_resume_and_run_now() {
     assert!(!runs.is_empty(), "nothing fired");
     let r = &runs[0];
     assert_eq!(r.cause.to_string(), "schedule:tick");
-    assert_eq!(r.flow, r.id, "a scheduled run starts its own flow");
+    assert_eq!(r.chain, r.id, "a scheduled run starts its own chain");
     assert_eq!(r.title, "tick");
     assert_eq!(r.tags, ["t"]);
     assert_eq!(r.ref_.as_deref(), Some("gh:1"));

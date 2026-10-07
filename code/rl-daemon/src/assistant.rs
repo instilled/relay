@@ -66,7 +66,7 @@ pub async fn run(d: &Daemon, p: AssistantParams) -> Result<AssistantOutput> {
         // answer; an assistant run has none.
         input: false,
         cause: Cause::Assistant(p.job),
-        flow: None,
+        chain: None,
     };
     let run = d.supervisor.start(spec).await?;
     let id = run.id.clone();

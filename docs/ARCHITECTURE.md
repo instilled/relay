@@ -794,10 +794,10 @@ each event row at write time so the digest groups without a join; it is what a r
 ## 6. What starts a run
 
 Every run says why it is there. `Run.cause` is one string — `manual`, `schedule:<name>`,
-`decision:<id>`, `reaction:<name>`, `assistant:<job>`, and later `workflow:<name>/<step>` — and `Run.flow` is
-the chain it belongs to: its own id when it starts one, the flow it was handed otherwise. A
+`decision:<id>`, `reaction:<name>`, `assistant:<job>`, and later `workflow:<name>/<step>` — and `Run.chain` is
+the chain it belongs to: its own id when it starts one, the chain it was handed otherwise. A
 nightly schedule that asks a question whose answer opens a pull request is three rows and one
-flow.
+chain.
 
 ```mermaid
 flowchart LR
@@ -869,7 +869,7 @@ answers; a global schedule still needs one, since nothing happened for it to fol
 `rl emit <kind> [--data k=v]… [--json-data -]` puts one there itself, and the reactor picks it up like
 any built-in event (`event.emit`, appended by `rl-daemon/src/handlers.rs`). Inside a run it needs
 no arguments beyond the kind — it reads `RELAY_RUN` from the environment, the same way `rl ask`
-does, so the event is filed under that run's folder and joins its flow; outside a run, `--in
+does, so the event is filed under that run's folder and joins its chain; outside a run, `--in
 <folder>` (or the cwd) says where it belongs. The kind is the caller's own dotted name
 (`log.issue`); the daemon's own families (`run.*`, `decision.*`, `schedule.*`, …) are refused, so
 an emit cannot forge a `run.failed` the digest would read as real. The payload rides in `data`,
@@ -1207,7 +1207,7 @@ Under an event, indented, is what it set off — each read from what the ledger 
 Those two are exact for what reactions do now. Runs and questions from before reactions kept
 their event have no `data.event`, and theirs is read back from what was kept then — so, for
 those only, two matching events close together can be told apart wrongly. A reaction's run joined
-the chain the event's run was in (`flow`, its own id when the event had no run), and its event is
+the chain the event's run was in (`chain`, its own id when the event had no run), and its event is
 the newest one before it, in that chain, of a kind the rule listens for (`on:`), within the five
 minutes the reactor still acts on — or the newest with no run, when the chain is its own. A
 reaction's question was grouped `reaction:<name>` and named the event's run; its event is the
@@ -1290,7 +1290,7 @@ phasing.
 
 - **Workflows** — `workflows/<name>.yaml`, steps with `after`/`when` and decision steps, as
   declarative sugar over the engine that reactions and decisions already are. `Run.cause` and
-  `Run.flow` carry `manual`, `schedule:<name>`, `decision:<id>`, `reaction:<name>` and `assistant:<job>` today;
+  `Run.chain` carry `manual`, `schedule:<name>`, `decision:<id>`, `reaction:<name>` and `assistant:<job>` today;
   `workflow:` is reserved. `rl up` loads a folder's `schedules.yaml` and `reactions.yaml`;
   `workflows/` is not read yet.
 - **Plugins** — `rl-plugin-host` (Bun), the broker, `relay.d.ts`, the manifest/approval flow,

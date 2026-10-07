@@ -129,7 +129,7 @@ pub struct RunSpec {
     pub cause: crate::types::Cause,
     /// The chain to join; a new one when unset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub flow: Option<String>,
+    pub chain: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -181,7 +181,7 @@ pub struct RunId {
 
 /// Emit a custom event into the ledger, from a command or plugin. A reaction
 /// picks it up like any built-in event. Inside a run, `RELAY_RUN` attributes
-/// it to that run's workspace and flow; outside one, the caller names the
+/// it to that run's workspace and chain; outside one, the caller names the
 /// folder. The kind is the caller's own dotted name (`log.issue`); the
 /// daemon's own kinds (`run.*`, `decision.*`, …) are refused.
 pub struct EventEmit;
@@ -847,7 +847,7 @@ pub struct DecisionFilter {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub flow: Option<String>,
+    pub chain: Option<String>,
     /// Newest first; default 100.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<u32>,
@@ -866,7 +866,7 @@ pub struct DecisionId {
 }
 
 /// Chooses. Every chosen option that carries an action starts a run
-/// (`cause = decision:<id>`, the decision's flow); the ids come back on the
+/// (`cause = decision:<id>`, the decision's chain); the ids come back on the
 /// decision. Answering twice is refused.
 pub struct DecisionTake;
 impl Method for DecisionTake {

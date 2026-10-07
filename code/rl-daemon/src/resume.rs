@@ -75,7 +75,7 @@ async fn one(d: &Daemon, run: &Run, p: &RunResumeParams) -> Resumed {
         inherit_env: p.env.is_empty(),
         input: true,
         cause: Cause::Manual,
-        flow: Some(run.flow.clone()),
+        chain: Some(run.chain.clone()),
     };
     match d.supervisor.start(spec).await {
         Ok(new) => {

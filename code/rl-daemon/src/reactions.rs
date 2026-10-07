@@ -617,7 +617,7 @@ impl Reactor {
         let now = Timestamp::now();
         let cwd = r.spec.cwd.as_deref().and_then(|c| filled_path(c, &vars));
         let dir = run_dir(r, cwd.as_deref(), cx.event, cx.run, self.home.path());
-        let flow = cx.run.map(|run| run.flow.clone());
+        let chain = cx.run.map(|run| run.chain.clone());
 
         if let Some(ask) = &r.spec.ask {
             let ask = resolved_ask(ask, &r.name, &vars);
@@ -654,7 +654,7 @@ impl Reactor {
             Some(&dir),
             &self.registry,
             Cause::Reaction(r.name.clone()),
-            flow,
+            chain,
         )?;
         // What set it off, for the command itself to read.
         spec.env.push(("RELAY_EVENT_KIND".into(), cx.event.kind.clone()));
