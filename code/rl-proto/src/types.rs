@@ -481,7 +481,7 @@ pub struct Signal {
 pub mod event_kind {
     /// The families that are the daemon's own: a command may not `rl emit`
     /// one, and what a run raised is what falls outside them.
-    pub const OWN: &[&str] = &["run.", "decision.", "schedule.", "commit.", "branch."];
+    pub const OWN: &[&str] = &["run.", "decision.", "schedule.", "flow.", "commit.", "branch."];
 
     /// Whether a kind belongs to the daemon rather than to what a run raised.
     pub fn is_own(kind: &str) -> bool {
@@ -500,6 +500,12 @@ pub mod event_kind {
     pub const BRANCH_DONE: &str = "branch.done";
     pub const SCHEDULE_FIRED: &str = "schedule.fired";
     pub const SCHEDULE_SKIPPED: &str = "schedule.skipped";
+    /// A flow fired: by hand, on time, or on an event.
+    pub const FLOW_FIRED: &str = "flow.fired";
+    /// A firing is over: done, failed or stopped.
+    pub const FLOW_ENDED: &str = "flow.ended";
+    /// A flow or one of its steps did not run, and why.
+    pub const FLOW_SKIPPED: &str = "flow.skipped";
     pub const DECISION_RAISED: &str = "decision.raised";
     pub const DECISION_TAKEN: &str = "decision.taken";
     pub const DECISION_DISMISSED: &str = "decision.dismissed";
@@ -533,6 +539,9 @@ pub mod event_kind {
         BRANCH_DONE,
         SCHEDULE_FIRED,
         SCHEDULE_SKIPPED,
+        FLOW_FIRED,
+        FLOW_ENDED,
+        FLOW_SKIPPED,
         DECISION_RAISED,
         DECISION_TAKEN,
         DECISION_DISMISSED,

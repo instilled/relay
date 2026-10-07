@@ -162,6 +162,10 @@ pub async fn serve_with(home: Home, shutdown: CancellationToken, opts: ServeOpti
     if let Err(e) = flows.reload().await {
         warn!(error = %format!("{e:#}"), "flows not loaded");
     }
+    // Where the loop starts reading, settled before anything can fire.
+    if let Err(e) = flows.cursor().await {
+        warn!(error = %format!("{e:#}"), "flows: events cursor");
+    }
     tokio::spawn(flows.clone().serve());
     let reactor = Arc::new(crate::reactions::Reactor::new(
         home.clone(),

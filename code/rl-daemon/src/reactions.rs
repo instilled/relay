@@ -8,6 +8,7 @@
 //! keeps a burst of failures from opening twenty terminals.
 
 use crate::decisions::Decisions;
+use crate::flows::engine::event_folder;
 use crate::rulestore::{Broken, FileRead, RuleStore};
 use crate::supervisor::Supervisor;
 use anyhow::{Context, Result, anyhow, bail};
@@ -307,16 +308,6 @@ fn resolved(action: &Action, vars: &BTreeMap<String, String>) -> Action {
 fn filled_path(p: &Path, vars: &BTreeMap<String, String>) -> Option<PathBuf> {
     let text = substitute(&p.to_string_lossy(), vars);
     (!text.trim().is_empty()).then(|| PathBuf::from(text))
-}
-
-/// The folder an event happened in: the folder its run ran in, while that is
-/// still there; else the event's workspace, while that is. None when it names
-/// neither.
-pub fn event_folder(event: &Event, run: Option<&Run>) -> Option<PathBuf> {
-    let there = |p: &Path| !p.as_os_str().is_empty() && p.is_dir();
-    run.map(|r| r.cwd.clone())
-        .filter(|p| there(p))
-        .or_else(|| Some(event.workspace.clone()).filter(|p| there(p)))
 }
 
 /// Where a rule's action runs. A workspace's rule runs in its folder, or

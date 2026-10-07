@@ -1,11 +1,12 @@
 //! The `flow.*` methods.
 
+use super::engine::{Fired, Refused};
 use crate::router::Router;
 use crate::server::Daemon;
 use rl_ledger::{firings, flows};
 use rl_proto::flow::{
     FiringFilter, Flow, FlowApprove, FlowErrors, FlowFilter, FlowFirings, FlowList, FlowName, FlowPause, FlowReload,
-    FlowResume,
+    FlowResume, FlowRun,
 };
 use rl_proto::rpc::RpcError;
 
@@ -39,6 +40,19 @@ pub fn register(r: &mut Router<Daemon>) {
     });
     r.register::<FlowPause, _, _>(|d, p: FlowName| async move { set_paused(&d, p.name, true).await });
     r.register::<FlowResume, _, _>(|d, p: FlowName| async move { set_paused(&d, p.name, false).await });
+    r.register::<FlowRun, _, _>(|d, FlowName { name }| async move {
+        match d.flows.fire(&name, Fired::Hand, None).await {
+            Ok(Some(f)) => Ok(f),
+            Ok(None) => Err(RpcError::invalid_params(format!(
+                "`{name}` is still firing, so this one was skipped (overlap)"
+            ))),
+            Err(e) => Err(match e.downcast_ref::<Refused>() {
+                Some(Refused::NotLoaded(_)) => missing(&d, &name),
+                Some(r @ Refused::NeedsYes(_)) => RpcError::invalid_params(r.to_string()),
+                None => internal(e),
+            }),
+        }
+    });
     r.register::<FlowFirings, _, _>(|d, f: FiringFilter| async move {
         d.flows
             .ledger

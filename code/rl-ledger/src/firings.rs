@@ -63,6 +63,27 @@ pub fn get(conn: &Connection, id: &str) -> Result<Option<Firing>> {
     found.map(|f| with_steps(conn, f)).transpose()
 }
 
+/// The definition a firing runs on, as it was when it started.
+pub fn def_json(conn: &Connection, id: &str) -> Result<Option<String>> {
+    Ok(conn
+        .query_row("SELECT def_json FROM firings WHERE id = ?1", params![id], |r| r.get(0))
+        .optional()?)
+}
+
+/// When the flow's firing before `id` started.
+pub fn before(conn: &Connection, id: &str) -> Result<Option<Timestamp>> {
+    let at: Option<i64> = conn
+        .query_row(
+            "SELECT p.started_at FROM firings f JOIN firings p ON p.flow = f.flow \
+             WHERE f.id = ?1 AND (p.started_at, p.rowid) < (f.started_at, f.rowid) \
+             ORDER BY p.started_at DESC, p.rowid DESC LIMIT 1",
+            params![id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    at.map(from_millis).transpose()
+}
+
 /// Each step's status, by name.
 pub fn steps(conn: &Connection, id: &str) -> Result<BTreeMap<String, StepStatus>> {
     Ok(states(conn, id)?.into_iter().map(|s| (s.name, s.status)).collect())
@@ -290,5 +311,15 @@ mod tests {
         );
         assert!(ledger.call_blocking(|c| latest(c, "other")).unwrap().is_none());
         assert_eq!(ledger.call_blocking(|c| open(c)).unwrap().len(), 2);
+        assert_eq!(
+            ledger.call_blocking(|c| before(c, "new")).unwrap(),
+            Some(at("2026-10-07T10:00:00Z"))
+        );
+        assert_eq!(ledger.call_blocking(|c| before(c, "old")).unwrap(), None);
+        assert_eq!(
+            ledger.call_blocking(|c| def_json(c, "old")).unwrap().as_deref(),
+            Some("{}")
+        );
+        assert_eq!(ledger.call_blocking(|c| def_json(c, "nope")).unwrap(), None);
     }
 }

@@ -449,6 +449,14 @@ impl Method for FlowResume {
     type Result = Flow;
 }
 
+/// Fires a flow now, by hand. Refused unless it has a yes.
+pub struct FlowRun;
+impl Method for FlowRun {
+    const NAME: &'static str = "flow.run";
+    type Params = FlowName;
+    type Result = Firing;
+}
+
 /// A flow's last firings, newest first.
 pub struct FlowFirings;
 impl Method for FlowFirings {
