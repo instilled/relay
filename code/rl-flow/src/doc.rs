@@ -2,7 +2,7 @@
 //! under each `## ` heading that says what an agent step is asked.
 
 use rl_proto::flow::FlowSpec;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// `flow.md` as written: the frontmatter, and the prompt under each `## ` heading.
 #[derive(Debug, Clone, PartialEq)]
@@ -47,7 +47,7 @@ pub fn read(text: &str) -> Result<Doc, Problem> {
     let lines_of = step_lines(&lines[1..end], &spec);
     Ok(Doc {
         spec,
-        sections: sections(&lines[end + 1..]),
+        sections: sections(&lines[end + 1..], end + 2)?,
         lines: lines_of,
     })
 }
@@ -119,8 +119,9 @@ fn step_lines(front: &[&str], spec: &FlowSpec) -> BTreeMap<String, usize> {
 }
 
 /// The text under each `## <name>` line, trimmed. Text before the first
-/// heading describes the flow and is not kept.
-fn sections(body: &[&str]) -> BTreeMap<String, String> {
+/// heading describes the flow and is not kept. `first` is the file line `body`
+/// starts on. A heading said twice is a mistake, at the second.
+fn sections(body: &[&str], first: usize) -> Result<BTreeMap<String, String>, Problem> {
     let mut out = BTreeMap::new();
     let mut open: Option<(&str, Vec<&str>)> = None;
     let mut close = |open: Option<(&str, Vec<&str>)>| {
@@ -128,9 +129,13 @@ fn sections(body: &[&str]) -> BTreeMap<String, String> {
             out.insert(name.to_string(), text.join("\n").trim().to_string());
         }
     };
-    for l in body {
+    let mut seen = BTreeSet::new();
+    for (i, l) in body.iter().enumerate() {
         match heading(l) {
             Some(name) => {
+                if !seen.insert(name) {
+                    return Err(Problem::at(first + i, &format!("## {name} appears twice")));
+                }
                 close(open.take());
                 open = Some((name, Vec::new()));
             }
@@ -142,7 +147,7 @@ fn sections(body: &[&str]) -> BTreeMap<String, String> {
         }
     }
     close(open);
-    out
+    Ok(out)
 }
 
 /// The name in a `## name` line, if it is one: `[a-z0-9][a-z0-9.-]*`.
@@ -182,6 +187,13 @@ mod tests {
     fn no_frontmatter_or_no_end_is_said() {
         assert!(read("## triage\nx\n").unwrap_err().message.contains("starts with ---"));
         assert!(read("---\nsteps: {}\n").unwrap_err().message.contains("closing ---"));
+    }
+
+    #[test]
+    fn a_heading_said_twice_is_said_at_the_second() {
+        let p = read("---\nsteps: {}\n---\n## triage\none\n\n## triage\ntwo\n").unwrap_err();
+        assert_eq!(p.line, Some(7), "{p:?}");
+        assert_eq!(p.message, "## triage appears twice");
     }
 
     #[test]
