@@ -24,6 +24,7 @@
 //! lists of pairs in the order they are written ([`ordered`]).
 
 use crate::action::{Action, action_struct};
+use crate::methods::Method;
 use crate::reaction::Filter;
 use crate::schedule::{Missed, Overlap};
 use crate::types::str_enum;
@@ -378,6 +379,82 @@ pub struct Reloaded {
     pub changed: Vec<String>,
     pub removed: Vec<String>,
     pub not_loaded: Vec<NotLoaded>,
+}
+
+// ---- flow.* methods ------------------------------------------------------
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct FlowFilter {
+    /// Removed flows too.
+    #[serde(default)]
+    pub all: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FlowName {
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FiringFilter {
+    pub flow: String,
+    /// Newest first; default 20.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+}
+
+/// Every flow in `~/.relay/flows` as last loaded, by name.
+pub struct FlowList;
+impl Method for FlowList {
+    const NAME: &'static str = "flow.list";
+    type Params = FlowFilter;
+    type Result = Vec<Flow>;
+}
+
+/// The flows that did not load at the last reload, each with its file and line.
+pub struct FlowErrors;
+impl Method for FlowErrors {
+    const NAME: &'static str = "flow.errors";
+    type Params = ();
+    type Result = Vec<NotLoaded>;
+}
+
+/// Reads `~/.relay/flows` again.
+pub struct FlowReload;
+impl Method for FlowReload {
+    const NAME: &'static str = "flow.reload";
+    type Params = ();
+    type Result = Reloaded;
+}
+
+/// Says yes to the folder as it is now; the flow may fire from then on.
+pub struct FlowApprove;
+impl Method for FlowApprove {
+    const NAME: &'static str = "flow.approve";
+    type Params = FlowName;
+    type Result = Flow;
+}
+
+pub struct FlowPause;
+impl Method for FlowPause {
+    const NAME: &'static str = "flow.pause";
+    type Params = FlowName;
+    type Result = Flow;
+}
+
+pub struct FlowResume;
+impl Method for FlowResume {
+    const NAME: &'static str = "flow.resume";
+    type Params = FlowName;
+    type Result = Flow;
+}
+
+/// A flow's last firings, newest first.
+pub struct FlowFirings;
+impl Method for FlowFirings {
+    const NAME: &'static str = "flow.firings";
+    type Params = FiringFilter;
+    type Result = Vec<Firing>;
 }
 
 #[cfg(test)]

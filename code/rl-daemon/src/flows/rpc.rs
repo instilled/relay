@@ -3,9 +3,8 @@
 use crate::router::Router;
 use crate::server::Daemon;
 use rl_ledger::{firings, flows};
-use rl_proto::flow::Flow;
-use rl_proto::methods::{
-    FiringFilter, FlowApprove, FlowErrors, FlowFilter, FlowFirings, FlowList, FlowName, FlowPause, FlowReload,
+use rl_proto::flow::{
+    FiringFilter, Flow, FlowApprove, FlowErrors, FlowFilter, FlowFirings, FlowList, FlowName, FlowPause, FlowReload,
     FlowResume,
 };
 use rl_proto::rpc::RpcError;

@@ -98,6 +98,45 @@ async fn a_changed_script_asks_again() {
     assert!(flows.is_empty());
     let flows: Vec<Flow> = c.ok("flow.list", json!({ "all": true })).await;
     assert_eq!(flows[0].status(), FlowStatus::Removed);
+
+    // Back, then broken: said as not loaded, never as removed.
+    write(
+        &home,
+        "pulse",
+        &[("flow.md", "---\nsteps:\n  beat:\n    run: date\n---\n")],
+    );
+    let r: Reloaded = c.ok("flow.reload", json!(null)).await;
+    assert_eq!(r.added, ["pulse"]);
+    write(&home, "pulse", &[("flow.md", "---\nsteps: {}\n---\n")]);
+    let r: Reloaded = c.ok("flow.reload", json!(null)).await;
+    assert!(r.removed.is_empty(), "{r:?}");
+    assert_eq!(r.not_loaded.len(), 1, "{r:?}");
+    assert!(r.not_loaded[0].message.contains("at least one step"), "{r:?}");
+    h.stop().await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_pipe_in_a_flow_folder_does_not_hold_the_daemon_up() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = Home::at(tmp.path().join("home"));
+    write(
+        &home,
+        "pulse",
+        &[("flow.md", "---\nsteps:\n  beat:\n    run: date\n---\n")],
+    );
+    let dir = home.flow_dir("pulse");
+    nix::unistd::mkfifo(&dir.join("pipe"), nix::sys::stat::Mode::S_IRWXU).unwrap();
+    std::os::unix::fs::symlink(&dir, dir.join("loop")).unwrap();
+    let Some(h) = Harness::on(home.clone()) else { return };
+    // The daemon answers only once the flows are loaded.
+    let flows: Vec<Flow> = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        let mut c = Conn::open(&h.home).await;
+        c.ok("flow.list", json!({})).await
+    })
+    .await
+    .expect("rld came up");
+    assert_eq!(flows.len(), 1);
     h.stop().await;
 }
 
