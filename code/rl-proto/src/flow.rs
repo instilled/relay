@@ -183,6 +183,8 @@ pub enum StepStatus {
     /// Not run: its `if:` was false, its question went unanswered, or a step before it did not finish well.
     Skipped,
     Failed,
+    /// Its run was stopped by hand, which stops the firing.
+    Stopped,
 }
 
 /// Where a firing is.
@@ -200,7 +202,7 @@ pub enum FiringStatus {
 
 str_enum!(StepStatus {
     Pending => "pending", Running => "running", Waiting => "waiting", Lost => "lost",
-    Done => "done", Skipped => "skipped", Failed => "failed",
+    Done => "done", Skipped => "skipped", Failed => "failed", Stopped => "stopped",
 });
 str_enum!(FiringStatus {
     Running => "running", Waiting => "waiting", Done => "done", Failed => "failed", Stopped => "stopped",
@@ -288,6 +290,7 @@ mod tests {
             S::Done,
             S::Skipped,
             S::Failed,
+            S::Stopped,
         ] {
             assert_eq!(s.as_str().parse::<StepStatus>(), Ok(s));
             assert_eq!(serde_json::to_value(s).unwrap(), s.as_str());

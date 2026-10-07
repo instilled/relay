@@ -72,7 +72,7 @@ pub fn advance(def: &FlowDef, steps: &mut BTreeMap<String, StepStatus>, h: &Happ
             }
         }
         Happened::Stopped { step } => {
-            if !moved(steps, step, Running, Failed) {
+            if !moved(steps, step, Running, Stopped) {
                 return todo;
             }
             for s in steps.values_mut().filter(|s| **s == Pending) {
@@ -108,18 +108,14 @@ pub fn advance(def: &FlowDef, steps: &mut BTreeMap<String, StepStatus>, h: &Happ
     }
     todo.extend(ready(def, steps, facts));
     if !steps.values().copied().any(live) {
-        todo.push(Do::End(match h {
-            Happened::Stopped { .. } => FiringStatus::Stopped,
-            _ => over(steps),
-        }));
+        todo.push(Do::End(over(steps)));
     }
     todo
 }
 
 /// The firing's status from its steps (for the ledger row and the list). A step going makes
 /// it running; else a question or a lost step makes it waiting, steps pending after them
-/// or not; else steps pending (not started yet) make it running; else it is over. A stop
-/// is not told apart from a failure here: the stopped step is `Failed` either way.
+/// or not; else steps pending (not started yet) make it running; else it is over.
 pub fn status(steps: &BTreeMap<String, StepStatus>) -> FiringStatus {
     use StepStatus::*;
     let any = |want: StepStatus| steps.values().any(|s| *s == want);
@@ -146,7 +142,7 @@ fn moved(steps: &mut BTreeMap<String, StepStatus>, step: &str, from: StepStatus,
 }
 
 /// Every pending step that can be decided now, decided, until none can: one after a step
-/// that did not finish well is skipped, its `if:` unasked; one whose steps before are all
+/// that did not finish well (skipped, failed or stopped) is skipped, its `if:` unasked; one whose steps before are all
 /// done is skipped when its `if:` is false, else started or asked. Steps ready together
 /// come out in the order they are written.
 fn ready(def: &FlowDef, steps: &mut BTreeMap<String, StepStatus>, facts: &dyn Lookup) -> Vec<Do> {
@@ -160,7 +156,11 @@ fn ready(def: &FlowDef, steps: &mut BTreeMap<String, StepStatus>, facts: &dyn Lo
                 continue;
             }
             let at = |a: &String| steps.get(a).copied();
-            let next = if step.after.iter().any(|a| matches!(at(a), Some(Skipped | Failed))) {
+            let next = if step
+                .after
+                .iter()
+                .any(|a| matches!(at(a), Some(Skipped | Failed | Stopped)))
+            {
                 Skipped
             } else if !step.after.iter().all(|a| at(a) == Some(Done)) {
                 continue;
@@ -193,9 +193,12 @@ fn live(s: StepStatus) -> bool {
     )
 }
 
-/// How a firing with nothing left to do ended.
+/// How a firing with nothing left to do ended: stopped if a step was, which wins over a
+/// failure; else failed if a step failed; else done.
 fn over(steps: &BTreeMap<String, StepStatus>) -> FiringStatus {
-    if steps.values().any(|s| *s == StepStatus::Failed) {
+    if steps.values().any(|s| *s == StepStatus::Stopped) {
+        FiringStatus::Stopped
+    } else if steps.values().any(|s| *s == StepStatus::Failed) {
         FiringStatus::Failed
     } else {
         FiringStatus::Done
@@ -438,9 +441,10 @@ Super high-level, one or two lines per teammate, what they worked on yesterday:
         advance(&f, &mut s, &Happened::Started, &x);
         let stopped = Happened::Stopped { step: "probe".into() };
         assert_eq!(advance(&f, &mut s, &stopped, &x), [Do::End(FiringStatus::Stopped)]);
-        assert_eq!(s["probe"], StepStatus::Failed);
+        assert_eq!(s["probe"], StepStatus::Stopped);
         assert_eq!(s["triage"], StepStatus::Skipped);
         assert_eq!(s["review"], StepStatus::Skipped);
+        assert_eq!(status(&s), FiringStatus::Stopped);
         assert_eq!(advance(&f, &mut s, &stopped, &x), []);
         assert_eq!(advance(&f, &mut s, &ended("probe", true), &x), []);
     }
@@ -459,6 +463,26 @@ Super high-level, one or two lines per teammate, what they worked on yesterday:
             advance(&f, &mut s, &stop("github"), &x),
             [Do::End(FiringStatus::Stopped)]
         );
+    }
+
+    #[test]
+    fn a_stop_wins_over_a_sibling_that_ends_after_it() {
+        let f = morning_brief();
+        let mut s = BTreeMap::new();
+        let x = facts(&[]);
+        advance(&f, &mut s, &Happened::Started, &x);
+        assert_eq!(advance(&f, &mut s, &ended("github", false), &x), []);
+        let stop = Happened::Stopped { step: "gchat".into() };
+        assert_eq!(advance(&f, &mut s, &stop, &x), []);
+        assert_eq!(s["gchat"], StepStatus::Stopped);
+        assert_eq!(s["notion"], StepStatus::Running);
+        assert_eq!(status(&s), FiringStatus::Running);
+        assert_eq!(
+            advance(&f, &mut s, &ended("notion", true), &x),
+            [Do::End(FiringStatus::Stopped)]
+        );
+        assert_eq!(s["notion"], StepStatus::Done);
+        assert_eq!(status(&s), FiringStatus::Stopped);
     }
 
     #[test]
@@ -507,5 +531,6 @@ Super high-level, one or two lines per teammate, what they worked on yesterday:
         assert_eq!(status(&steps(&[("a", Lost), ("b", Running)])), FiringStatus::Running);
         assert_eq!(status(&steps(&[("a", Done), ("b", Skipped)])), FiringStatus::Done);
         assert_eq!(status(&steps(&[("a", Failed), ("b", Skipped)])), FiringStatus::Failed);
+        assert_eq!(status(&steps(&[("a", Failed), ("b", Stopped)])), FiringStatus::Stopped);
     }
 }
