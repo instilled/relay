@@ -84,7 +84,7 @@ impl Query {
         self.words.is_empty() && self.within.is_empty() && self.on.is_empty() && !self.picks_rows()
     }
 
-    /// Whether it asks about what things are — state, kind, rule — which a
+    /// Whether it asks about what things are — state, kind, flow — which a
     /// project header on its own is none of.
     pub fn picks_rows(&self) -> bool {
         !(self.is.is_empty() && self.kind.is_empty() && self.by.is_empty())

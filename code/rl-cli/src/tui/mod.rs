@@ -2,7 +2,7 @@
 //!
 //! Everything ranked by attention — questions, then runs that need you,
 //! then what is working and what finished — grouped by the folder it belongs
-//! to, whose rules ride the group's header. `enter` is the run's terminal,
+//! to, whose flows ride the group's header. `enter` is the run's terminal,
 //! full screen and watched; `enter` again takes the keyboard, the way you
 //! would have it in a tab of your own, and `ctrl-\` lets go.
 //!
@@ -40,7 +40,6 @@ mod theme;
 
 use crate::attach::client_name;
 use crate::client::Client;
-use crate::rulefile;
 use anyhow::Result;
 use crossterm::event::{
     DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event, EventStream, KeyCode,
@@ -60,21 +59,22 @@ use ratatui::widgets::{Paragraph, Wrap};
 use rl_core::Home;
 use rl_core::time::fmt_age;
 use rl_proto::decision::Decision;
-use rl_proto::flow::{Flow, FlowErrors, FlowFilter, FlowList, FlowReload, NotLoaded};
+use rl_proto::flow::{
+    Flow, FlowApprove, FlowErrors, FlowFilter, FlowList, FlowName, FlowPause, FlowReload, FlowResume, FlowRun,
+    FlowStatus, NotLoaded,
+};
 use rl_proto::methods::{
     AgentList, DecisionDismiss, DecisionGet, DecisionId, DecisionNote, DecisionTake, DecisionTakeParams, Digest,
     DigestGet, DigestHide, DigestHideParams, DigestItem, DigestOrder, DigestParams, EventFilter, EventList, GcParams,
-    GcRun, GraphGet, GraphParams, ImportList, ImportListParams, PresenceClient, PresenceTouch, ReactionPause,
-    ReactionResume, RuleApprove, RuleRef, RunArchive, RunArchiveParams, RunFilter, RunGet, RunHide, RunHideParams,
-    RunId, RunIds, RunInput, RunInputParams, RunList, RunMark, RunMarkParams, RunPin, RunPinParams, RunRename,
-    RunRenameParams, RunResume, RunResumeParams, RunSeen, RunSpec, RunStart, RunStop, RunStopParams, SETUP_STEPS,
-    ScheduleName, SchedulePause, ScheduleResume, ScheduleRun, SetupGet, SummaryGet, SummaryMake, SummaryParams,
+    GcRun, GraphGet, GraphParams, ImportList, ImportListParams, PresenceClient, PresenceTouch, RunArchive,
+    RunArchiveParams, RunFilter, RunGet, RunHide, RunHideParams, RunId, RunIds, RunInput, RunInputParams, RunList,
+    RunMark, RunMarkParams, RunPin, RunPinParams, RunRename, RunRenameParams, RunResume, RunResumeParams, RunSeen,
+    RunSpec, RunStart, RunStop, RunStopParams, SETUP_STEPS, SetupGet, SummaryGet, SummaryMake, SummaryParams,
     WorkspaceList, WorkspaceRemove, WorkspaceRemoveParams, WorkspaceRemoved, WorkspaceRename, WorkspaceRenameParams,
     WorkspaceUp, WorkspaceUpParams,
 };
-use rl_proto::rule::{Rule, RuleKind, RuleStatus};
 use rl_proto::types::{AttachMode, Cause, Event as LedgerEvent, Mark, Run, RunKind, RunState, Summary, SummaryTarget};
-use rows::{Names, Row, fit, short_path};
+use rows::{Names, Row, fit};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -144,9 +144,9 @@ enum Mode {
     Mark(String),
     /// `n` pressed: `y` dismisses this question.
     Dismiss(String),
-    /// `enter` on a schedule: `y` fires it now.
-    Fire(ScheduleName),
-    /// A run or a rule being written down, by hand or drafted for you.
+    /// `enter` on a flow's node: `y` fires this flow now.
+    Fire(String),
+    /// A run being written down, by hand or drafted for you.
     Form(Box<Form>),
     /// A question taken out of the list: its options, answered by number.
     Answer(String),
@@ -234,15 +234,14 @@ impl Cands {
 struct Asking {
     words: String,
     folder: PathBuf,
-    editing: Option<Rule>,
     task: tokio::task::JoinHandle<Result<(crate::interpret::Draft, rl_proto::methods::AssistantOutput)>>,
 }
 
-/// A run, a job, a project or everything being summarised, until the
+/// A run, a flow, a project or everything being summarised, until the
 /// assistant answers.
 struct Summarising {
     target: SummaryTarget,
-    /// What it is of, in words: the run's title, `schedule nightly`, the
+    /// What it is of, in words: the run's title, `flow nightly`, the
     /// project's name, `everything`.
     title: String,
     deep: bool,
@@ -275,12 +274,9 @@ struct App {
     filter: String,
     /// `^f`: the line is searching, and the filter follows what is typed.
     search: Option<Search>,
-    /// Which slice of the list is shown: all, agents, jobs or reactions.
+    /// Which slice of the list is shown: all, agents, flows or hidden.
     lens: rows::Lens,
     view: View,
-    /// The old rules, which nothing serves now: what the rule commands and
-    /// the events' inference still read, empty, until they go.
-    rules: Vec<Rule>,
     /// Every flow: for its row's place and words, the chips on project rows,
     /// and the graph's pane.
     flows: Vec<Flow>,
@@ -374,16 +370,16 @@ struct App {
     unseen_from: HashMap<String, Timestamp>,
     /// A project on its way out (`^x` twice on its header).
     removing: Option<Removing>,
-    /// `/edit`: the rule file and line to open in the editor once the
-    /// screen is given back.
-    editor: Option<(PathBuf, usize)>,
+    /// `/flow edit`: the flow, and its `flow.md` and line, to open in the
+    /// editor once the screen is given back.
+    editor: Option<(String, PathBuf, usize)>,
     /// A run to hand the real terminal to (its id, and whether to take the
     /// keyboard from whoever holds it), once ratatui has stepped aside.
     attach: Option<(String, bool)>,
     /// `/import`: the Claude sessions step, once the screen is free for it.
     importing: bool,
-    /// The assistant at work on some words: what was asked, the rule it is
-    /// about if any, and the task waiting for the answer.
+    /// The assistant at work on some words: what was asked, where, and the
+    /// task waiting for the answer.
     asking: Option<Asking>,
     /// Options marked so far on a multi-choice question.
     picked: Vec<usize>,
@@ -694,7 +690,7 @@ const NAME: &str = "relay";
 
 /// The header's words, for either of its shapes: the headline — its lead
 /// word and the tally after it — and the notes that follow, each in its own
-/// tone: what a restart took, the global rules.
+/// tone: what a restart took, the flows that did not load.
 struct Said {
     lead: String,
     rest: Option<String>,
@@ -1108,7 +1104,6 @@ impl App {
             search: None,
             lens: rows::Lens::All,
             view: View::Work,
-            rules: Vec::new(),
             flows: Vec::new(),
             graph: None,
             back: Vec::new(),
@@ -1181,7 +1176,7 @@ impl App {
                 ev = input.next() => match ev {
                     Some(Ok(Event::Key(k))) if k.kind != KeyEventKind::Release => {
                         self.key(input::typed(k), area).await?;
-                        if let Some((file, line)) = self.editor.take() {
+                        if let Some((name, file, line)) = self.editor.take() {
                             // The editor gets the terminal; our reader lets go of stdin first.
                             drop(input);
                             leave_screen();
@@ -1189,7 +1184,7 @@ impl App {
                             *terminal = enter_screen();
                             input = EventStream::new();
                             match outcome {
-                                Ok(()) => self.reload_flows().await,
+                                Ok(()) => self.edited(&name).await,
                                 Err(e) => self.say(format!("{e:#}")),
                             }
                         }
@@ -1758,12 +1753,6 @@ impl App {
         }
     }
 
-    fn selected_rule(&self) -> Option<&Rule> {
-        // A node stands for its rule, or for what its rule runs or asks.
-        let key = self.selected_node()?.rule.clone()?;
-        self.rules.iter().find(|r| events::node_key(r) == key)
-    }
-
     /// The node under the cursor in the graph.
     fn selected_node(&self) -> Option<&rl_proto::graph::Node> {
         if self.view != View::Graph {
@@ -1782,7 +1771,7 @@ impl App {
         }
     }
 
-    /// `enter` on a node: answer the question waiting there, run a schedule
+    /// `enter` on a node: answer the question waiting there, run a flow
     /// now, or else show what the node is.
     fn graph_enter(&mut self) {
         let Some(n) = self.selected_node() else {
@@ -1793,14 +1782,8 @@ impl App {
             .iter()
             .find(|id| self.digest.decisions.iter().any(|d| &d.id == *id))
             .cloned();
-        let schedule = match self.selected_rule() {
-            Some(r) if r.kind() == RuleKind::Schedule && !matches!(n.kind, rl_proto::graph::NodeKind::Ask) => Some((
-                r.approved(),
-                ScheduleName {
-                    name: r.name().into(),
-                    scope: Some(r.scope().into()),
-                },
-            )),
+        let flow = match n.kind {
+            rl_proto::graph::NodeKind::Flow => self.flow_of_node(n).map(|f| (f.approved(), f.name.clone())),
             _ => None,
         };
         if let Some(id) = waiting {
@@ -1809,11 +1792,11 @@ impl App {
             self.show_pane = true;
             self.answer_at = 0;
             self.mode = Mode::Answer(id);
-        } else if let Some((approved, name)) = schedule {
+        } else if let Some((approved, name)) = flow {
             if approved {
                 self.mode = Mode::Fire(name);
             } else {
-                self.say("not approved yet: /approve");
+                self.say(format!("{name} needs a yes first: /flow approve"));
             }
         } else {
             self.pane = Pane::Facts;
@@ -1835,9 +1818,13 @@ impl App {
         self.flows.iter().find(|f| f.name == name)
     }
 
-    /// The rule under the cursor: a node's in the graph.
-    fn rule_here(&self) -> Option<&Rule> {
-        self.selected_rule()
+    /// The flow under the cursor: a flow's row, on the list or in the
+    /// catch-up, or a node in the graph that is a flow or asks for one.
+    fn flow_here(&self) -> Option<String> {
+        if let Some(f) = self.selected_flow() {
+            return Some(f.name.to_string());
+        }
+        self.selected_node().and_then(graph::flow_name).map(str::to_string)
     }
 
     fn run_by_id(&self, id: &str) -> Option<&Run> {
@@ -2089,8 +2076,8 @@ impl App {
 
     /// `/rename`, `^r`: whatever the cursor is on, by the name it is known by —
     /// a folder through the registry, a run (a shell is one) through the
-    /// ledger, both typed over where they stand in the list, and a job by the
-    /// rule it comes from, which is the rule form's own rename.
+    /// ledger, both typed over where they stand in the list. A flow is its
+    /// folder's name in `~/.relay/flows`.
     fn rename_here(&mut self) {
         // A name is changed where it stands, and it stands on the list.
         if self.view == View::CatchUp {
@@ -2117,8 +2104,8 @@ impl App {
                 was,
                 from: Default::default(),
             }));
-        } else if self.rule_here().is_some() {
-            self.edit_rule_form();
+        } else if let Some(name) = self.flow_here() {
+            self.say(format!("{name} is its folder's name in ~/.relay/flows"));
         } else {
             self.say("^r renames what the cursor is on");
         }
@@ -2473,7 +2460,7 @@ impl App {
     /// for a yes first.
     fn flow_target(&self) -> Option<String> {
         if self.view == View::Events {
-            return self.event_rule();
+            return self.event_flow();
         }
         if !matches!(self.view, View::Work | View::CatchUp) {
             return None;
@@ -2753,7 +2740,7 @@ impl App {
     }
 
     fn event_items(&self) -> Vec<events::Item<'_>> {
-        events::build(&self.feed, &self.rules, &self.names, &self.filter)
+        events::build(&self.feed, &self.names, &self.filter)
     }
 
     /// What is new in the ledger since the newest event read — the newest
@@ -2877,37 +2864,32 @@ impl App {
     /// Where `enter` on the line under the cursor goes.
     fn event_target(&self) -> Option<events::Target> {
         let key = self.sel.as_deref()?;
-        events::target(&self.event_items(), &self.feed, key)
+        events::target(&self.event_items(), key)
     }
 
-    /// The rule the line under the cursor stands for, as its graph node: the
+    /// The flow the line under the cursor stands for, as its graph node: the
     /// one behind what it set off, or behind its run.
-    fn event_rule(&self) -> Option<String> {
-        let (kind, name, near) = match self.event_target()? {
-            events::Target::Rule(kind, name, near) => (kind, name, near),
-            events::Target::Run(id) => {
-                let r = self.feed.runs.get(&id)?;
-                match &r.cause {
-                    Cause::Flow { flow, .. } => return Some(format!("flow:{flow}")),
-                    Cause::Schedule(n) => (RuleKind::Schedule, n.clone(), Some(r.workspace.clone())),
-                    Cause::Reaction(n) => (RuleKind::Reaction, n.clone(), Some(r.workspace.clone())),
-                    _ => return None,
-                }
-            }
+    fn event_flow(&self) -> Option<String> {
+        let name = match self.event_target()? {
+            events::Target::Flow(name) => name,
+            events::Target::Run(id) => match &self.feed.runs.get(&id)?.cause {
+                Cause::Flow { flow, .. } => flow.clone(),
+                _ => return None,
+            },
         };
-        events::rule_key(&self.rules, kind, &name, near.as_deref())
+        Some(format!("flow:{name}"))
     }
 
     /// `enter` in the events view: an event goes to its run on the list, a
-    /// line a rule set off to that rule in the graph (as `^g` there does).
+    /// line a flow set off to that flow in the graph (as `^g` there does).
     async fn events_enter(&mut self) {
         match self.event_target() {
             Some(events::Target::Run(id)) => self.show_run(&id).await,
-            Some(events::Target::Rule(_, name, _)) => {
-                if self.event_rule().is_some() {
+            Some(events::Target::Flow(name)) => {
+                if self.flows.iter().any(|f| f.name == name) {
                     self.toggle_graph().await;
                 } else {
-                    self.say(format!("{name} is not a rule any more"));
+                    self.say(format!("{name} is not a flow any more"));
                 }
             }
             None => self.say("nothing here to open"),
@@ -2990,52 +2972,100 @@ impl App {
             .and_then(|r| r.key())
     }
 
-    async fn approve(&mut self, name: String, scope: String, kind: RuleKind) {
-        let p = RuleRef {
-            name: name.clone(),
-            scope: Some(scope),
-            kind: Some(kind),
+    /// `/flow run|pause|resume|approve <name>`: the daemon's, then one line
+    /// saying it.
+    async fn flow_act(&mut self, verb: &str, name: String) {
+        let named = FlowName { name: name.clone() };
+        let done = match verb {
+            "run" => self
+                .rpc
+                .call::<FlowRun>(named)
+                .await
+                .map(|f| format!("fired {name} · firing {}", f.id)),
+            "pause" => self
+                .rpc
+                .call::<FlowPause>(named)
+                .await
+                .map(|_| format!("{name} paused")),
+            "resume" => self
+                .rpc
+                .call::<FlowResume>(named)
+                .await
+                .map(|_| format!("{name} resumed")),
+            "approve" => self
+                .rpc
+                .call::<FlowApprove>(named)
+                .await
+                .map(|_| format!("{name} approved")),
+            _ => return self.say(format!("/flow {verb}? run, pause, resume, approve, edit or reload")),
         };
-        match self.rpc.call::<RuleApprove>(p).await {
-            Ok(_) => {
-                self.say(format!("{name} approved"));
+        match done {
+            Ok(said) => {
+                self.say(said);
                 self.refresh().await;
             }
-            Err(e) => self.say(format!("approve: {e:#}")),
+            Err(e) => self.say(format!("{verb} {name}: {e:#}")),
         }
     }
 
-    async fn set_paused(&mut self, name: String, scope: String, kind: RuleKind, paused: bool) {
-        let p = ScheduleName {
-            name: name.clone(),
-            scope: Some(scope),
-        };
-        let r = match (kind, paused) {
-            (RuleKind::Schedule, true) => self.rpc.call::<SchedulePause>(p).await.map(|_| ()),
-            (RuleKind::Schedule, false) => self.rpc.call::<ScheduleResume>(p).await.map(|_| ()),
-            (RuleKind::Reaction, true) => self.rpc.call::<ReactionPause>(p).await.map(|_| ()),
-            (RuleKind::Reaction, false) => self.rpc.call::<ReactionResume>(p).await.map(|_| ()),
-        };
-        match r {
-            Ok(()) => {
-                self.say(format!("{name} {}", if paused { "paused" } else { "resumed" }));
-                self.refresh().await;
+    /// `/flow edit <name>`: its `flow.md` in `$EDITOR` once the screen is
+    /// free — a new one from a template, one that did not load at the line
+    /// where it broke.
+    fn edit_flow(&mut self, name: &str) {
+        match crate::flow::file_to_edit(&self.home, name) {
+            Ok(file) => {
+                let line = self
+                    .not_loaded
+                    .iter()
+                    .find(|n| n.flow == name && n.file == file)
+                    .and_then(|n| n.line)
+                    .unwrap_or(1);
+                self.editor = Some((name.to_string(), file, line));
             }
-            Err(e) => self.say(format!("pause: {e:#}")),
+            Err(e) => self.say(format!("{e:#}")),
         }
     }
 
-    async fn fire(&mut self, name: ScheduleName) {
-        match self.rpc.call::<ScheduleRun>(name).await {
-            Ok(run) => {
-                self.say(format!("started {}", run.title));
+    /// Back from the editor: every flow read again, and the one edited said
+    /// yes to when it loaded, since the one who edited it is the one saying
+    /// it; when it did not, why.
+    async fn edited(&mut self, name: &str) {
+        let r = match self.rpc.call::<FlowReload>(()).await {
+            Ok(r) => r,
+            Err(e) => return self.say(format!("reload: {e:#}")),
+        };
+        match r.not_loaded.iter().find(|n| n.flow == name) {
+            Some(n) => {
+                self.say(format!("not loaded: {n}"));
                 self.refresh().await;
             }
-            Err(e) => self.say(format!("run: {e:#}")),
+            None => self.flow_act("approve", name.to_string()).await,
         }
     }
 
-    /// `/reload`, and after `/edit`: every flow read again, and what did not
+    /// `/flow …`: `reload` reads every flow again; the rest act on the flow
+    /// under the cursor, else the one named after the verb.
+    async fn flow_command(&mut self, arg: &str) {
+        let mut words = arg.split_whitespace();
+        let verb = words.next().unwrap_or("");
+        let named = words.next().map(str::to_string);
+        if verb == "reload" {
+            return self.reload_flows().await;
+        }
+        if !matches!(verb, "run" | "pause" | "resume" | "approve" | "edit") {
+            return self.say("/flow run|pause|resume|approve|edit|reload [name]");
+        }
+        let Some(name) = self.flow_here().or(named) else {
+            return self.say(format!("/flow {verb} which? a flow's row, its node, or its name"));
+        };
+        if verb == "edit" {
+            self.edit_flow(&name);
+        } else {
+            self.flow_act(verb, name).await;
+        }
+    }
+
+    /// `/reload` and `/flow reload`: every flow read again, and what did not
     /// load said — one in the flash by name, more by count with the pane
     /// listing each with its file and line.
     async fn reload_flows(&mut self) {
@@ -3076,87 +3106,38 @@ impl App {
         !self.broken_in(scope).is_empty()
     }
 
+    /// What opens a header's first flow that did not load, as a hint:
+    /// `/flow edit <name> · `; nothing when they all loaded.
+    fn broken_hint(&self, h: &rows::Head) -> String {
+        let scope = (!h.is_everywhere()).then_some(h.workspace.as_path());
+        self.broken_in(scope)
+            .first()
+            .map(|n| format!("/flow edit {} · ", n.flow))
+            .unwrap_or_default()
+    }
+
     // ---- the form ----------------------------------------------------------
 
     /// Where a new thing would go: the selected row's folder, else here.
     fn folder_here(&self) -> PathBuf {
         self.selected_folder()
-            .or_else(|| {
-                self.rule_here()
-                    .filter(|r| !r.is_global())
-                    .map(|r| PathBuf::from(r.scope()))
-            })
             .or_else(|| std::env::current_dir().ok())
             .unwrap_or_else(|| PathBuf::from("/"))
     }
 
-    fn new_rule_form(&mut self) {
-        let folder = self.folder_here();
-        // A new rule is global from the `everywhere` header, and from a
-        // global rule's node in the graph; else
-        // it belongs to the folder here, and `in: global` typed into the form
-        // makes it global from anywhere.
-        let yours = self.on_everywhere()
-            || (self.view == View::Graph
-                && self.selected_node().is_some_and(|n| n.folder.is_none())
-                && self.rule_here().is_none_or(Rule::is_global));
-        let form = Form::rule((!yours).then_some(folder.as_path()), &folder)
+    /// `/new`: the run form, in the folder here.
+    fn new_run_form(&mut self) {
+        let form = Form::run(&self.folder_here())
             .with_folders(&self.names.paths())
             .with_agents(&self.agents);
         self.mode = Mode::Form(Box::new(form));
     }
 
-    fn edit_rule_form(&mut self) {
-        if let Some(r) = self.rule_here() {
-            let form = Form::edit(r)
-                .with_folders(&self.names.paths())
-                .with_agents(&self.agents);
-            self.mode = Mode::Form(Box::new(form));
-        }
-    }
-
-    /// `/edit [schedules|reactions [global]]`: a rule file in `$EDITOR`, once
-    /// the screen is free — never the form, which is `/new`'s. Bare, the rule
-    /// under the cursor (a job row, a graph node) opens its own file at its
-    /// line, and anything else the schedules of the folder the cursor stands
-    /// in. Any row answers which folder its work is in, so this reads the same
-    /// from a run as from the folder's own header, and a node in the graph
-    /// answers with its own folder. Where nothing names a folder — the
-    /// `everywhere` header, an empty list, a global rule's node — it is the
-    /// Relay home's file; `global` asks for that from anywhere
-    /// (`rulefile::edit_target`).
-    fn edit_file(&mut self, words: &str) {
-        let folder = self
-            .selected_folder()
-            .or_else(|| self.selected_node().and_then(|n| n.folder.clone()));
-        let rule = self.rule_here().map(|r| rulefile::Here {
-            source: r.source(),
-            kind: r.kind(),
-            name: r.name(),
-        });
-        // A file that did not load opens where it broke.
-        let broken: Vec<(&Path, usize)> = self
-            .not_loaded
-            .iter()
-            .map(|n| (n.file.as_path(), n.line.unwrap_or(1)))
-            .collect();
-        match rulefile::edit_target(&self.home, words, rule, folder.as_deref(), &broken) {
-            Ok(at) => self.editor = Some(at),
-            Err(e) => self.say(e),
-        }
-    }
-
     /// `enter` on the form: what it says, or why not — the form stays up then.
     async fn save_form(&mut self, f: Box<Form>, area: Rect) {
-        let outcome = match f.kind {
-            form::Kind::Run => match form::run_draft(&f) {
-                Ok(d) => self.start_run(d, area).await,
-                Err(e) => Err(e),
-            },
-            form::Kind::Rule => match form::rule_draft(&f) {
-                Ok(d) => self.save_rule(d, f.editing.as_ref()).await,
-                Err(e) => Err(e),
-            },
+        let outcome = match form::run_draft(&f) {
+            Ok(d) => self.start_run(d, area).await,
+            Err(e) => Err(e),
         };
         if let Err(e) = outcome {
             self.say(format!("{e:#}"));
@@ -3322,9 +3303,9 @@ impl App {
         Ok(self.rpc.call::<RunStart>(spec).await?.id)
     }
 
-    /// Register a folder as a project from the line — the panel's `rl up`. Its
-    /// rules load; its schedules wait for a yes (`/approve` on its node in the graph). The cursor lands on
-    /// the new row (empty until something runs there, thanks to project rows).
+    /// Register a folder as a project from the line — the panel's `rl up`. The
+    /// cursor lands on the new row (empty until something runs there, thanks
+    /// to project rows).
     async fn add_dir(&mut self, arg: &str) -> Result<()> {
         let arg = arg.trim();
         if arg.is_empty() {
@@ -3625,20 +3606,6 @@ impl App {
         Ok(())
     }
 
-    /// A rule from the form into its file, then loaded and, since this is
-    /// your keystroke, on. A folder new to Relay is registered on the way.
-    async fn save_rule(&mut self, d: form::RuleDraft, was: Option<&form::Editing>) -> Result<()> {
-        let registered = d.folder.as_deref().is_none_or(|f| self.names.registered(f).is_some());
-        let was = was.map(form::Editing::was);
-        let file = rulefile::install(&self.home, &mut self.rpc, &d, was.as_ref(), registered).await?;
-        self.say(format!("{} on · {}", d.name, short_path(&file)));
-        self.refresh().await;
-        if self.view == View::Graph {
-            self.select(Some(format!("{}:{}/{}", d.kind, d.scope(), d.name)));
-        }
-        Ok(())
-    }
-
     // ---- asking ------------------------------------------------------------
 
     /// `enter` on the ask line: the words go to the assistant as a run; the
@@ -3647,20 +3614,11 @@ impl App {
         if words.trim().is_empty() {
             return;
         }
-        let editing = self.rule_here().cloned();
-        let folder = match &editing {
-            Some(r) if !r.is_global() => PathBuf::from(r.scope()),
-            _ => self.folder_here(),
-        };
+        let folder = self.folder_here();
         let home = self.home.clone();
-        let (w, f, e) = (words.clone(), folder.clone(), editing.clone());
-        let task = tokio::spawn(async move { crate::interpret::ask(&home, &f, &w, e.as_ref()).await });
-        self.asking = Some(Asking {
-            words,
-            folder,
-            editing,
-            task,
-        });
+        let (w, f) = (words.clone(), folder.clone());
+        let task = tokio::spawn(async move { crate::interpret::ask(&home, &f, &w).await });
+        self.asking = Some(Asking { words, folder, task });
     }
 
     async fn answered(
@@ -3673,7 +3631,7 @@ impl App {
         let Some(asking) = self.asking.take() else { return };
         match answer {
             Ok(Ok((draft, out))) => {
-                let form = crate::interpret::form_of(&draft, &asking.folder, asking.editing.as_ref())
+                let form = crate::interpret::form_of(&draft, &asking.folder)
                     .with_folders(&self.names.paths())
                     .with_agents(&self.agents);
                 self.mode = Mode::Form(Box::new(form));
@@ -3708,7 +3666,7 @@ impl App {
             self.say(if self.selected_question().is_some() {
                 "this question has no run to summarise"
             } else {
-                "/summary works on a run, a job, a project, everything or a question"
+                "/summary works on a run, a flow, a project, everything or a question"
             });
             return;
         };
@@ -3957,7 +3915,7 @@ impl App {
             }
             Mode::Fire(name) => {
                 if k.code == KeyCode::Char('y') {
-                    self.fire(name).await;
+                    self.flow_act("run", name).await;
                 }
                 return Ok(());
             }
@@ -4246,18 +4204,18 @@ impl App {
     }
 
     /// `tab` in a search: the token names, then a token's values — states,
-    /// kinds, projects, rules. One fits: taken. Several: what they share, and
+    /// kinds, projects, flows. One fits: taken. Several: what they share, and
     /// the rest shown in the footer. None — a plain word, or no word at all
     /// after one — and it goes to the next match instead.
     fn complete_search(&mut self) {
-        let (projects, rules, branches, kinds) = self.search_values();
+        let (projects, flows, branches, kinds) = self.search_values();
         let Some(s) = self.search.as_mut() else {
             return;
         };
         let (text, cur) = (s.line.text().to_string(), s.line.cursor());
         let start = text[..cur].rfind(' ').map_or(0, |i| i + 1);
         let word = &text[start..cur];
-        let cands = query::complete(word, &projects, &rules, &branches, &kinds);
+        let cands = query::complete(word, &projects, &flows, &branches, &kinds);
         // A plain word has nothing to complete, and nor has the gap after one:
         // tab goes on to the next match. With nothing to match yet, the gap
         // still offers the names.
@@ -4413,8 +4371,8 @@ impl App {
             self.show_pane = true;
             self.mode = Mode::Answer(id);
         } else if matches!(self.selected(), Some(Row::Group(_))) {
-            // A project header: its rules in the pane; `everywhere`'s, the
-            // global rules and how their runs outside every project stand.
+            // A project header: its flows in the pane; `everywhere`'s, the
+            // flows with no `in` and how runs outside every project stand.
             self.pane = Pane::Facts;
             self.show_pane = true;
         } else {
@@ -4686,12 +4644,12 @@ impl App {
         }
         let cur = self.line.cursor();
         let folder = self.line_folder(&text);
-        let (projects, rules, branches, kinds) = self.search_values();
+        let (projects, flows, branches, kinds) = self.search_values();
         let cands = {
             let here = complete::Here {
                 names: complete::Names {
                     projects: &projects,
-                    rules: &rules,
+                    flows: &flows,
                     branches: &branches,
                     kinds: &kinds,
                 },
@@ -4839,7 +4797,7 @@ impl App {
             palette::Cmd::Events => self.toggle_events().await,
             palette::Cmd::Shell => self.new_shell(area).await,
             palette::Cmd::Reload => match arg.trim() {
-                "flows" | "rules" => self.reload_flows().await,
+                "flows" => self.reload_flows().await,
                 "shell" => self.reload_shell().await,
                 "" => {
                     // The shell first: what the flows say is the flash that stays.
@@ -4848,25 +4806,8 @@ impl App {
                 }
                 other => self.say(format!("reload {other}? flows or shell, or both on its own")),
             },
-            palette::Cmd::Approve => {
-                if let Some(r) = self.selected_rule()
-                    && r.status() == RuleStatus::NeedsApproval
-                {
-                    let (name, scope, kind) = (r.name().to_string(), r.scope().to_string(), r.kind());
-                    self.approve(name, scope, kind).await;
-                } else {
-                    self.say("no rule here waiting on you");
-                }
-            }
-            palette::Cmd::Pause => {
-                if let Some(r) = self.selected_rule() {
-                    let (name, scope, kind, paused) =
-                        (r.name().to_string(), r.scope().to_string(), r.kind(), r.paused());
-                    self.set_paused(name, scope, kind, !paused).await;
-                }
-            }
-            palette::Cmd::New => self.new_rule_form(),
-            palette::Cmd::Edit => self.edit_file(&arg),
+            palette::Cmd::Flow => self.flow_command(&arg).await,
+            palette::Cmd::New => self.new_run_form(),
             palette::Cmd::Summary => self.summary(&arg).await,
             palette::Cmd::Since => self.since(&arg).await,
             palette::Cmd::Ask => {
@@ -5837,7 +5778,7 @@ impl App {
                     .unwrap_or_default();
                 return format!("dismiss {t}? y / any key");
             }
-            Mode::Fire(n) => return format!("run {} now? y / any key", n.name),
+            Mode::Fire(name) => return format!("run {name} now? y / any key"),
             Mode::SummaryCost { runs, calls } => {
                 let (runs, calls) = (*runs, *calls);
                 return match self.summary_ask.as_ref().map(|p| &p.target) {
@@ -5967,19 +5908,19 @@ impl App {
             let mut s = String::new();
             if self.selected_node().is_some_and(|n| !n.waiting.is_empty()) {
                 s.push_str("enter or `1 and a note` on the line answers it · ");
-            } else if let Some(r) = self.selected_rule() {
-                if r.status() == RuleStatus::NeedsApproval {
-                    s.push_str("/approve · ");
-                }
-                if r.kind() == RuleKind::Schedule {
+            } else if let Some(n) = self.selected_node()
+                && let Some(f) = self.flow_of_node(n)
+            {
+                // `enter` runs the flow from its own node; its question's only shows.
+                if n.kind == rl_proto::graph::NodeKind::Flow && f.approved() {
                     s.push_str("enter runs it now · ");
                 }
-                s.push_str(if r.paused() {
-                    "/pause lets it run · "
-                } else {
-                    "/pause · "
+                s.push_str(match f.status() {
+                    FlowStatus::NeedsApproval => "/flow approve · ",
+                    FlowStatus::Paused => "/flow resume · ",
+                    FlowStatus::On | FlowStatus::Removed => "/flow pause · ",
                 });
-                s.push_str("/edit · ");
+                s.push_str("/flow edit · ");
             }
             s.push_str(&format!("←→ follows the wiring · {pane} · ^g back"));
             return s;
@@ -5992,7 +5933,7 @@ impl App {
             };
             let go = match self.event_target() {
                 Some(events::Target::Run(_)) => "enter its run on the list · ",
-                Some(events::Target::Rule(..)) => "enter its rule in the graph · ",
+                Some(events::Target::Flow(_)) => "enter its flow in the graph · ",
                 None => "",
             };
             return format!("{go}^f kind: in: by: · {pane} · esc back");
@@ -6015,27 +5956,25 @@ impl App {
         }
         match self.selected() {
             Some(Row::Question(_)) => format!("enter or `1 and a note` on the line answers it · ^x not this · {pane}"),
-            Some(Row::Flow(_)) => format!("enter its firings · ^g its wiring · ^x archives · {pane}"),
+            Some(Row::Flow(f)) => {
+                let yes = match self.flow_of_row(&f).map(Flow::status) {
+                    Some(FlowStatus::NeedsApproval) => "/flow approve · ",
+                    _ => "/flow run · ",
+                };
+                format!("enter its firings · {yes}^g its wiring · ^x archives · {pane}")
+            }
             Some(Row::Run(i)) if i.run.state.is_terminal() => {
                 format!("enter output · /summary · ^x archives · ^t pins · {pane}")
             }
             Some(Row::Run(_)) => format!("enter joins it · ^x stops it · ^t pins · {pane}"),
-            // A file here that did not load is what `/edit` opens, at the line.
+            // A flow here that did not load is what `/flow edit` opens, at the line.
             Some(Row::Group(h)) if h.is_everywhere() => {
-                let edit = if self.header_broken(&h) {
-                    "what broke"
-                } else {
-                    "their schedules"
-                };
-                format!("enter its stats · ^g the global rules' wiring · /edit {edit} · /new a global rule · {pane}")
+                let fix = self.broken_hint(&h);
+                format!("enter its stats · ^g the wiring · {fix}{pane}")
             }
             Some(Row::Group(h)) => {
-                let edit = if self.header_broken(&h) {
-                    "what broke"
-                } else {
-                    "its schedules"
-                };
-                format!("enter its stats · /shell · ^g its wiring · /edit {edit} · ^r renames · ^x removes · {pane}")
+                let fix = self.broken_hint(&h);
+                format!("enter its stats · /shell · ^g its wiring · {fix}^r renames · ^x removes · {pane}")
             }
             _ => String::new(),
         }
@@ -6328,9 +6267,9 @@ mod tests {
         let [first, ..] = said.lines(Some("/tmp/x"));
         assert_eq!(text(&first), format!("relay {v} · /tmp/x"));
         // The graph's headline leads with its own word, and keeps it.
-        let said = Said::new("wiring · 3 rules".into(), vec![]);
+        let said = Said::new("wiring · 3 flows".into(), vec![]);
         let [_, tally, rest] = said.lines(None);
-        assert_eq!(text(&tally), "wiring · 3 rules");
+        assert_eq!(text(&tally), "wiring · 3 flows");
         assert_eq!(
             tally.spans[0].style,
             theme::accent().add_modifier(ratatui::style::Modifier::BOLD)
@@ -8420,6 +8359,93 @@ mod tests {
             .find(|l| l.contains("↻ nightly"))
             .expect("the flow's row");
         assert!(row.contains("waiting at review"), "{row}");
+        token.cancel();
+    }
+
+    /// `/flow` acts on the flow under the cursor, else on the one named after
+    /// its verb; with neither it says what it needs.
+    #[tokio::test]
+    async fn flow_commands_act_on_the_flow_here_else_the_one_named() {
+        let (tmp, token, mut app, _folder) = panel_of(|folder, now| {
+            let mut r = rl_proto::types::Run::new(
+                "run00002",
+                rl_proto::types::RunKind::Command,
+                "probe",
+                vec!["true".into()],
+                folder,
+                folder,
+                now,
+            );
+            r.cause = rl_proto::types::Cause::Flow {
+                flow: "nightly".into(),
+                step: "probe".into(),
+            };
+            vec![r]
+        })
+        .await;
+        let ledger = rl_ledger::Ledger::open(&rl_core::Home::at(tmp.path().join("h")).ledger()).unwrap();
+        ledger
+            .call_blocking(|c| {
+                let loaded = rl_ledger::flows::Loaded {
+                    name: "nightly".into(),
+                    hash: "h".into(),
+                    def_json: "{}".into(),
+                };
+                rl_ledger::flows::sync(c, &[loaded], jiff::Timestamp::now())
+            })
+            .unwrap();
+        app.refresh().await;
+        let said = |app: &super::App| app.flash.as_ref().map(|(m, _)| m.clone()).unwrap_or_default();
+        let nightly = |app: &super::App| app.flows.iter().find(|f| f.name == "nightly").cloned().unwrap();
+        async fn run(app: &mut super::App, line: &str) {
+            type_in(app, line).await;
+            press(app, KeyCode::Enter, KeyModifiers::NONE).await;
+        }
+
+        app.select(Some(RUN.into()));
+        run(&mut app, "/flow pause").await;
+        assert_eq!(said(&app), "/flow pause which? a flow's row, its node, or its name");
+        run(&mut app, "/flow approve nightly").await;
+        assert_eq!(said(&app), "nightly approved");
+        assert!(nightly(&app).approved());
+
+        // On its row, no name is needed.
+        app.select(Some("f:nightly".into()));
+        assert_eq!(app.flow_here().as_deref(), Some("nightly"));
+        run(&mut app, "/flow pause").await;
+        assert_eq!(said(&app), "nightly paused");
+        assert!(nightly(&app).paused);
+        run(&mut app, "/flow resume").await;
+        assert_eq!(said(&app), "nightly resumed");
+        assert!(!nightly(&app).paused);
+
+        run(&mut app, "/flow now").await;
+        assert_eq!(said(&app), "/flow run|pause|resume|approve|edit|reload [name]");
+        // Its `flow.md` waits for the screen to be given back.
+        run(&mut app, "/flow edit").await;
+        let home = rl_core::Home::at(tmp.path().join("h"));
+        let (name, file, line) = app.editor.take().expect("the editor is next");
+        assert_eq!(
+            (name.as_str(), file, line),
+            ("nightly", home.flow_dir("nightly").join("flow.md"), 1)
+        );
+        // Back from the editor, the template as saved loads, and gets its yes.
+        app.edited("nightly").await;
+        assert_eq!(said(&app), "nightly approved");
+        assert!(nightly(&app).approved());
+        // One that does not load is said why, and gets none.
+        std::fs::create_dir_all(home.flow_dir("broken")).unwrap();
+        std::fs::write(home.flow_dir("broken").join("flow.md"), "---\nsteps: [\n---\n").unwrap();
+        app.edited("broken").await;
+        assert!(said(&app).starts_with("not loaded: broken · flow.md"), "{}", said(&app));
+        assert!(app.flows.iter().all(|f| f.name != "broken"));
+        app.select(Some(RUN.into()));
+        run(&mut app, "/flow edit not_a_name").await;
+        assert_eq!(
+            said(&app),
+            "`not_a_name` is not a flow name; use lowercase letters, digits and dashes"
+        );
+        assert!(app.editor.is_none());
         token.cancel();
     }
 

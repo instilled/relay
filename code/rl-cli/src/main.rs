@@ -95,9 +95,9 @@ enum Cmd {
     Setup,
     /// Move Claude's own sessions (`claude --bg`) into Relay.
     Import,
-    /// What Relay tells an agent: the words, events, rule definitions, what is here, and the answer it wants.
+    /// What Relay tells an agent: the words, events, the flows and folders here, and the answer it wants.
     Context(ContextArgs),
-    /// Plain words to `assistants.interpret`: a run or a rule, drafted; `--go` does it.
+    /// Plain words to `assistants.interpret`: a run, drafted; `--go` starts it.
     Interpret(InterpretArgs),
     /// A recap of a run, live or ended: its agent's own (Claude), its turns (Codex), or `assistants.summary`'s. Kept by the run.
     Summary(SummaryArgs),
@@ -1524,7 +1524,7 @@ fn help_for_the_pack() -> String {
     let mut root = <Cli as clap::CommandFactory>::command();
     help.push_str(&root.render_long_help().to_string());
     for sub in root.get_subcommands_mut() {
-        if matches!(sub.get_name(), "run" | "every" | "on" | "ask") {
+        if matches!(sub.get_name(), "run" | "flow" | "ask") {
             help.push_str("\n---\n");
             help.push_str(&sub.render_help().to_string());
         }
@@ -1542,14 +1542,14 @@ async fn interpret(home: &Home, a: InterpretArgs, json: bool) -> Result<()> {
     let folder = std::fs::canonicalize(&folder).unwrap_or(folder);
     let words = a.words.join(" ");
     if words.trim().is_empty() {
-        bail!("say what: rl interpret \"run the tests every night\"");
+        bail!("say what: rl interpret \"run the tests in api\"");
     }
     daemon::ensure(home, !json).await?;
     if !json {
         eprintln!("asking…");
     }
-    let (draft, out) = rl_cli::interpret::ask(home, &folder, &words, None).await?;
-    let form = rl_cli::interpret::form_of(&draft, &folder, None);
+    let (draft, out) = rl_cli::interpret::ask(home, &folder, &words).await?;
+    let form = rl_cli::interpret::form_of(&draft, &folder);
     if json {
         println!(
             "{}",
@@ -1562,14 +1562,7 @@ async fn interpret(home: &Home, a: InterpretArgs, json: bool) -> Result<()> {
         println!("# by {} · run {}", out.agent, out.run);
     }
     if a.go {
-        let known: Vec<PathBuf> = daemon::ensure(home, !json)
-            .await?
-            .call::<WorkspaceList>(())
-            .await?
-            .into_iter()
-            .map(|w| w.path)
-            .collect();
-        let done = rl_cli::interpret::apply(home, &form, |p| known.iter().any(|k| k == p)).await?;
+        let done = rl_cli::interpret::apply(home, &form).await?;
         if !json {
             println!("{done}");
         }

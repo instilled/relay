@@ -245,7 +245,7 @@ pub fn run_lines(
         }
     }
     // What the run raised itself: the reason a probe exists, and what a
-    // reaction would have heard.
+    // flow's `on` would hear.
     if !item.emitted.is_empty() {
         for (i, t) in wrap(&signals(&item.emitted), width.saturating_sub(VALUE_COL + 1).max(20))
             .into_iter()
@@ -449,13 +449,8 @@ pub fn project_lines(
     // The flows in it, told the same way the header's chips are.
     lines.extend(flows_section(flows, Some(workspace), now));
     lines.push(Line::raw(""));
-    let edit = if broken.is_empty() {
-        "/edit opens its schedules"
-    } else {
-        "/edit opens what broke, at the line"
-    };
     lines.push(Line::from(
-        Span::raw(format!(" ^g shows its wiring · {edit} · ^r renames")).dim(),
+        Span::raw(format!(" ^g shows its wiring{} · ^r renames", fix_hint(broken))).dim(),
     ));
     lines
 }
@@ -489,13 +484,19 @@ pub fn everywhere_lines(
     lines.extend(summary_section(summary, width, now));
     lines.extend(flows_section(flows, None, now));
     lines.push(Line::raw(""));
-    let edit = if broken.is_empty() {
-        "/edit opens their schedules"
-    } else {
-        "/edit opens what broke, at the line"
-    };
-    lines.push(Line::from(Span::raw(format!(" ^g shows their wiring · {edit}")).dim()));
+    lines.push(Line::from(
+        Span::raw(format!(" ^g shows their wiring{}", fix_hint(broken))).dim(),
+    ));
     lines
+}
+
+/// ` · /flow edit <name> opens what broke, at the line`, for the first flow
+/// that did not load; nothing when all did.
+fn fix_hint(broken: &[&NotLoaded]) -> String {
+    broken
+        .first()
+        .map(|n| format!(" · /flow edit {} opens what broke, at the line", n.flow))
+        .unwrap_or_default()
 }
 
 /// What can be done about a question, in the order the pane lists them.
@@ -750,7 +751,10 @@ mod tests {
         r.state_at = t;
         r.ended_at = Some(t);
         r.exit_code = Some(1);
-        r.cause = Cause::Schedule("nightly-tests".into());
+        r.cause = Cause::Flow {
+            flow: "nightly".into(),
+            step: "tests".into(),
+        };
         r.tags = vec!["nightly".into()];
         let item = DigestItem {
             run: r,
@@ -778,7 +782,7 @@ mod tests {
         let names = Names::new([("/home/f/relay".into(), "relay".to_string())]);
         let s = text(&run_lines(&item, &[], None, &names, 80, now));
         assert!(s.starts_with(" nightly tests\n failed  1h · via"), "{s}");
-        assert!(s.contains(" why      schedule nightly-tests · started"), "{s}");
+        assert!(s.contains(" why      flow nightly · tests · started"), "{s}");
         assert!(s.contains(" where    relay\n"), "{s}");
         assert!(s.contains(" runs     ./test.sh\n"), "{s}");
         assert!(s.contains(" tags     nightly\n"), "{s}");

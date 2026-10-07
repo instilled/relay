@@ -5,21 +5,18 @@
 
 use crate::client::Client;
 use crate::context::{self, Here};
-use crate::rulefile;
 use crate::tui::form::{self, Form};
 use anyhow::{Context as _, Result, bail};
 use rl_core::Home;
 use rl_proto::methods::{AssistantOutput, AssistantParams, AssistantRun, RunSpec, RunStart};
-use rl_proto::rule::Rule;
 use rl_proto::types::{Cause, Run};
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
+/// What a draft is. A run, for now: flows are written in `$EDITOR`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
     Run,
-    Schedule,
-    Reaction,
 }
 
 /// What the assistant answered, as the form's fields.
@@ -40,22 +37,21 @@ impl Draft {
             "kind: {}",
             match self.kind {
                 Kind::Run => "run",
-                Kind::Schedule => "schedule",
-                Kind::Reaction => "reaction",
             }
         )];
-        for key in ["in", "name", "when", "run", "title", "tags", "cwd"] {
+        for key in ["in", "run", "title"] {
             if let Some(val) = self.fields.get(key)
                 && !val.is_empty()
             {
-                v.push(format!("{key}: {}", rulefile_scalar(val)));
+                v.push(format!("{key}: {}", scalar(val)));
             }
         }
         v
     }
 }
 
-fn rulefile_scalar(s: &str) -> String {
+/// A value as YAML would read it back: quoted when it has to be.
+fn scalar(s: &str) -> String {
     if s.contains(['#', ':', '"', '\'']) || s.starts_with(['-', ' ', '[', '{']) {
         format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
     } else {
@@ -132,9 +128,7 @@ pub fn parse(raw: &str) -> Result<Draft> {
         if k == "kind" {
             kind = Some(match v.as_str() {
                 "run" => Kind::Run,
-                "schedule" => Kind::Schedule,
-                "reaction" => Kind::Reaction,
-                other => bail!("kind: `{other}` is not run, schedule or reaction"),
+                other => bail!("kind: `{other}` is not run"),
             });
         } else {
             fields.insert(k.to_string(), v);
@@ -170,59 +164,25 @@ fn unquote(v: &str) -> String {
     v.to_string()
 }
 
-/// The form for a draft: a run form or a rule form, filled in. `editing`
-/// keeps the rule the words were about, so saving rewrites its block.
-pub fn form_of(d: &Draft, origin: &Path, editing: Option<&Rule>) -> Form {
-    let place = d.get("in");
-    let mut f = match (d.kind, editing) {
-        (Kind::Run, _) => Form::run(origin),
-        (_, Some(r)) => Form::edit(r),
-        (_, None) => {
-            let folder = (!form::is_global(place)).then(|| form::expand(place));
-            Form::rule(folder.as_deref(), origin)
-        }
-    };
-    if !place.is_empty() {
-        f.set("in", place);
-    }
-    for key in ["name", "when", "run", "title", "tags", "cwd"] {
+/// The run form for a draft, filled in.
+pub fn form_of(d: &Draft, origin: &Path) -> Form {
+    let mut f = Form::run(origin);
+    for key in ["in", "run", "title"] {
         let v = d.get(key);
         if !v.is_empty() {
             f.set(key, v);
         }
     }
-    if d.kind != Kind::Run && d.get("when").is_empty() {
-        // The kind says what `when` must start with; the assistant may have
-        // left it for the person.
-        f.set("when", if d.kind == Kind::Reaction { "on " } else { "every " });
-    }
     f
 }
 
-/// Asks the interpreter: the pack for `folder` (and the rule, when editing),
-/// then the words. What comes back, parsed, with the run that said it.
-pub async fn ask(home: &Home, folder: &Path, words: &str, editing: Option<&Rule>) -> Result<(Draft, AssistantOutput)> {
+/// Asks the interpreter: the pack for `folder`, then the words. What comes
+/// back, parsed, with the run that said it.
+pub async fn ask(home: &Home, folder: &Path, words: &str) -> Result<(Draft, AssistantOutput)> {
     let mut rpc = Client::connect(home).await?;
     let here: Here = context::gather(&mut rpc, folder).await?;
     let pack = context::render(context::help(), &here);
-    let editing_yaml = editing.map(|r| {
-        let body = match r {
-            Rule::Schedule(s) => rulefile::body(&s.spec, &Default::default()),
-            Rule::Reaction(x) => rulefile::body(&x.spec, &Default::default()),
-        }
-        .unwrap_or_default();
-        format!(
-            "{}:\n{}",
-            r.name(),
-            body.iter().map(|l| format!("  {l}")).collect::<Vec<_>>().join("\n")
-        )
-    });
-    let prompt = context::ask(
-        &pack,
-        words,
-        editing.map(|r| (r.kind().to_string(), r.scope_label())).as_ref(),
-        editing_yaml.as_deref(),
-    );
+    let prompt = context::ask(&pack, words);
     let title = format!("interpret: {}", words.chars().take(48).collect::<String>());
     let out = rpc
         .call::<AssistantRun>(AssistantParams {
@@ -241,46 +201,29 @@ pub async fn ask(home: &Home, folder: &Path, words: &str, editing: Option<&Rule>
     Ok((draft, out))
 }
 
-/// What the form says, done: a run started, or a rule installed. The
-/// person's yes, on the line. Returns a line saying what happened.
-pub async fn apply(home: &Home, f: &Form, registered: impl Fn(&Path) -> bool) -> Result<String> {
+/// What the form says, done: a run started. The person's yes, on the line.
+/// Returns a line saying what happened.
+pub async fn apply(home: &Home, f: &Form) -> Result<String> {
     let mut rpc = Client::connect(home).await?;
-    match f.kind {
-        form::Kind::Run => {
-            let d = form::run_draft(f)?;
-            let spec = RunSpec {
-                argv: d.argv,
-                kind: d.kind,
-                cwd: d.cwd,
-                title: d.title,
-                ref_: None,
-                tags: vec![],
-                tty: true,
-                cols: None,
-                rows: None,
-                env: crate::env::child_env(&[])?,
-                inherit_env: false,
-                input: true,
-                cause: Cause::Manual,
-                chain: None,
-            };
-            let run: Run = rpc.call::<RunStart>(spec).await?;
-            Ok(format!("started {} · {}", run.title, run.id))
-        }
-        form::Kind::Rule => {
-            let d = form::rule_draft(f)?;
-            let known = d.folder.as_deref().is_none_or(&registered);
-            let was = f.editing.as_ref().map(form::Editing::was);
-            let file = rulefile::install(home, &mut rpc, &d, was.as_ref(), known).await?;
-            Ok(format!("{} on · {}", d.name, rl_core::display_path(&file)))
-        }
-    }
-}
-
-/// Where `in` points, for `apply`'s `registered`.
-pub fn folder_of(f: &Form) -> Option<PathBuf> {
-    let p = f.get("in");
-    (!form::is_global(p)).then(|| form::expand(p))
+    let d = form::run_draft(f)?;
+    let spec = RunSpec {
+        argv: d.argv,
+        kind: d.kind,
+        cwd: d.cwd,
+        title: d.title,
+        ref_: None,
+        tags: vec![],
+        tty: true,
+        cols: None,
+        rows: None,
+        env: crate::env::child_env(&[])?,
+        inherit_env: false,
+        input: true,
+        cause: Cause::Manual,
+        chain: None,
+    };
+    let run: Run = rpc.call::<RunStart>(spec).await?;
+    Ok(format!("started {} · {}", run.title, run.id))
 }
 
 #[cfg(test)]
@@ -289,32 +232,26 @@ mod tests {
 
     #[test]
     fn the_answer_is_found_among_fences_and_prose() {
-        let raw = "Sure — here is a draft:\n```yaml\nkind: schedule\nin: ~/w/relay\nname: nightly\nwhen: every 4h\nrun: make test\ntags: [ci, slow]\n```\nLet me know.";
+        let raw = "Sure — here is a draft:\n```yaml\nkind: run\nin: ~/w/relay\nrun: make test\ntitle: tests\n```\nLet me know.";
         let d = parse(raw).unwrap();
-        assert_eq!(d.kind, Kind::Schedule);
-        assert_eq!(d.get("name"), "nightly");
-        assert_eq!(d.get("tags"), "ci, slow");
+        assert_eq!(d.kind, Kind::Run);
+        assert_eq!(d.get("run"), "make test");
         assert_eq!(
             d.lines(),
-            [
-                "kind: schedule",
-                "in: ~/w/relay",
-                "name: nightly",
-                "when: every 4h",
-                "run: make test",
-                "tags: ci, slow"
-            ]
+            ["kind: run", "in: ~/w/relay", "run: make test", "title: tests"]
         );
         let d = parse("kind: run\nin: /w\nrun: claude fix the build: it's red   # now\n").unwrap();
         assert_eq!((d.kind, d.get("run")), (Kind::Run, "claude fix the build: it's red"));
-        let d =
-            parse("kind: schedule\nname: n\nwhen: \"0 2 * * *\"\nrun: 'make test'\ntags:\n  - ci\n  - slow\n").unwrap();
         assert_eq!(
-            (d.get("when"), d.get("run"), d.get("tags")),
-            ("0 2 * * *", "make test", "ci, slow")
+            d.lines()[2],
+            "run: \"claude fix the build: it's red\"",
+            "quoted, so it reads back"
         );
+        let d = parse("kind: run\nin: /w\nrun: 'make test'\ntitle: \"the tests\"\n").unwrap();
+        assert_eq!((d.get("run"), d.get("title")), ("make test", "the tests"));
         // The prompt itself carries `kind:` lines; an answer is the last block that does.
-        let echoed = "kind: run          # something to do now, once\nin: <folder>\n\nkind: schedule\nin: <folder, or global>\n\nkind: run\nin: /real\nrun: make it\n";
+        let echoed =
+            "kind: run          # something to do now, once\nin: <folder>\n\nkind: run\nin: /real\nrun: make it\n";
         assert_eq!(parse(echoed).unwrap().get("in"), "/real");
         assert!(
             parse("I cannot do that.")
@@ -322,34 +259,27 @@ mod tests {
                 .to_string()
                 .contains("no `kind:`")
         );
-        assert!(
-            parse("kind: poem\nrun: x")
-                .unwrap_err()
-                .to_string()
-                .contains("not run, schedule")
-        );
     }
 
     #[test]
-    fn a_draft_fills_the_right_form() {
+    fn an_answer_of_another_kind_is_refused_by_name() {
+        for kind in ["schedule", "flow", "poem"] {
+            let err = parse(&format!("kind: {kind}\nrun: x")).unwrap_err().to_string();
+            assert_eq!(err, format!("kind: `{kind}` is not run"));
+        }
+    }
+
+    #[test]
+    fn a_draft_fills_the_run_form() {
         let d = parse("kind: run\nin: /w\nrun: make test\ntitle: tests\n").unwrap();
-        let f = form_of(&d, Path::new("/w"), None);
-        assert_eq!(f.kind, form::Kind::Run);
+        let f = form_of(&d, Path::new("/elsewhere"));
+        assert_eq!(f.title(), "new run");
         assert_eq!(
             (f.get("in"), f.get("run"), f.get("title")),
             ("/w", "make test", "tests")
         );
-
-        let d = parse("kind: reaction\nin: global\nname: notify\nwhen: on run.failed\nrun: say no\ncwd: /w\n").unwrap();
-        let f = form_of(&d, Path::new("/w"), None);
-        assert_eq!(f.kind, form::Kind::Rule);
-        assert_eq!(
-            (f.get("in"), f.get("when"), f.get("cwd")),
-            ("global", "on run.failed", "/w")
-        );
-
-        // A rule kind with `when` left out gets its prefix, so the person sees what is missing.
-        let d = parse("kind: schedule\nname: x\nrun: y\n").unwrap();
-        assert_eq!(form_of(&d, Path::new("/w"), None).get("when"), "every");
+        // Where it was typed, when the answer names no folder.
+        let d = parse("kind: run\nrun: make test\n").unwrap();
+        assert_eq!(form_of(&d, Path::new("/w/api")).get("in"), "/w/api");
     }
 }

@@ -27,7 +27,10 @@ impl Flows {
     pub(super) async fn ask(&self, m: &Moved, step: &str, mut spec: DecisionSpec) -> Result<Option<(String, String)>> {
         let at = m.def.steps.iter().find(|s| s.name == step).context("no such step")?;
         spec.cwd = Some(self.cwd(&m.def, at, &m.firing, m.event.as_ref()));
-        let d = self.decisions.raise_for_step(spec, &m.firing.id, step).await?;
+        let d = self
+            .decisions
+            .raise_for_step(spec, &m.def.name, &m.firing.id, step)
+            .await?;
         let (firing, step, id) = (m.firing.id.clone(), step.to_string(), d.id.clone());
         let was = self
             .ledger

@@ -33,6 +33,7 @@ enum By<'a> {
     Nobody,
     /// A flow's ask step.
     Step {
+        flow: &'a str,
         firing: &'a str,
         step: &'a str,
     },
@@ -71,8 +72,9 @@ impl Decisions {
 
     /// The same, for a flow's ask step: in the firing's chain, restated or not, and owned by
     /// `<firing>/<step>`, so its answer is the engine's to carry out — choosing starts nothing here.
-    pub async fn raise_for_step(&self, spec: DecisionSpec, firing: &str, step: &str) -> Result<Decision> {
-        self.raise_as(spec, By::Step { firing, step }).await
+    /// Its `decision.raised` names the flow.
+    pub async fn raise_for_step(&self, spec: DecisionSpec, flow: &str, firing: &str, step: &str) -> Result<Decision> {
+        self.raise_as(spec, By::Step { flow, firing, step }).await
     }
 
     async fn raise_as(&self, spec: DecisionSpec, by: By<'_>) -> Result<Decision> {
@@ -163,7 +165,7 @@ impl Decisions {
         // Stored with who owns it in one go, so it is never taken before its owner is known.
         let (open, d2) = (existing.map(|o| o.id), d.clone());
         let owner = match by {
-            By::Step { firing, step } => Some(format!("{firing}/{step}")),
+            By::Step { firing, step, .. } => Some(format!("{firing}/{step}")),
             _ => None,
         };
         let stored = self
@@ -181,7 +183,10 @@ impl Decisions {
                 Ok(stored)
             })
             .await?;
-        let data = json!({ "decision": stored.id, "options": stored.options.iter().map(|o| &o.key).collect::<Vec<_>>(), "restated": restated });
+        let mut data = json!({ "decision": stored.id, "options": stored.options.iter().map(|o| &o.key).collect::<Vec<_>>(), "restated": restated });
+        if let By::Step { flow, .. } = by {
+            data["flow"] = json!(flow);
+        }
         self.append(
             &stored,
             event_kind::DECISION_RAISED,

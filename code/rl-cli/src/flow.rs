@@ -142,14 +142,7 @@ fn said(f: &Flow, what: &str, json: bool) -> Result<()> {
 /// loaded gets a yes, since the one who edited it is the one saying it; one
 /// that did not is said why, and the exit is 1.
 async fn edit(home: &Home, name: &str, json: bool) -> Result<()> {
-    if !valid_name(name) {
-        bail!("`{name}` is not a flow name; use lowercase letters, digits and dashes");
-    }
-    let file = home.flow_dir(name).join("flow.md");
-    if !file.exists() {
-        std::fs::create_dir_all(home.flow_dir(name))?;
-        std::fs::write(&file, TEMPLATE)?;
-    }
+    let file = file_to_edit(home, name)?;
     crate::env::open_in_editor(&file, 1)?;
     let mut rpc = daemon::ensure(home, !json).await?;
     let reloaded = rpc.call::<FlowReload>(()).await?;
@@ -166,6 +159,19 @@ async fn edit(home: &Home, name: &str, json: bool) -> Result<()> {
         }
     }
     std::process::exit(1)
+}
+
+/// A flow's `flow.md`, for an editor: a new one starts from a template.
+pub fn file_to_edit(home: &Home, name: &str) -> Result<std::path::PathBuf> {
+    if !valid_name(name) {
+        bail!("`{name}` is not a flow name; use lowercase letters, digits and dashes");
+    }
+    let file = home.flow_dir(name).join("flow.md");
+    if !file.exists() {
+        std::fs::create_dir_all(home.flow_dir(name))?;
+        std::fs::write(&file, TEMPLATE)?;
+    }
+    Ok(file)
 }
 
 /// `NAME STATUS WHEN LAST IN` for one flow, and its latest firing if any.

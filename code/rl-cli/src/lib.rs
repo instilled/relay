@@ -11,5 +11,4 @@ pub mod flow;
 pub mod interpret;
 pub mod rank;
 pub mod render;
-pub mod rulefile;
 pub mod tui;

@@ -6,7 +6,7 @@ use common::{Conn, Harness, wait_journal};
 use rl_core::Home;
 use rl_proto::decision::{Decision, DecisionStatus};
 use rl_proto::flow::{Firing, FiringStatus, Flow, StepState, StepStatus};
-use rl_proto::types::{Cause, Run};
+use rl_proto::types::{Cause, Event, Run};
 use serde_json::json;
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -95,6 +95,14 @@ async fn an_ask_step_waits_and_the_answer_runs_as_the_step() {
     assert_eq!(d.chain, f.id, "the question is in the firing's chain");
     let keys: Vec<(&str, bool)> = d.options.iter().map(|o| (o.key.as_str(), o.default)).collect();
     assert_eq!(keys, [("page", false), ("ignore", false)]);
+    let raised: Vec<Event> = c.ok("event.list", json!({ "kinds": ["decision.raised"] })).await;
+    assert_eq!(raised.len(), 1, "{raised:?}");
+    let data = raised[0].data.as_ref().unwrap();
+    assert_eq!(
+        (data["decision"].as_str(), data["flow"].as_str()),
+        (Some(d.id.as_str()), Some("pager")),
+        "its event names the flow that asked"
+    );
 
     let taken: Decision = c
         .ok(

@@ -1,19 +1,13 @@
-//! The form at the foot of the panel: a run to start, or a rule to write
-//! down, one field per line. `enter` saves, `tab` is the next field, `esc`
-//! is nothing. Pure: what is typed, and what it means.
+//! The form at the foot of the panel: a run to start, one field per line.
+//! `enter` saves, `tab` is the next field, `esc` is nothing. Pure: what is
+//! typed, and what it means.
 
 use super::rows::short_path;
-pub use crate::rulefile::RuleDraft;
-use crate::rulefile::Was;
 use anyhow::{Result, bail};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::style::{Style, Stylize};
 use ratatui::text::{Line, Span};
-use rl_core::time::parse_duration;
 use rl_proto::action::Task;
-use rl_proto::reaction::ReactionSpec;
-use rl_proto::rule::{Rule, RuleKind};
-use rl_proto::schedule::{GLOBAL_SCOPE, ScheduleSpec};
 use rl_proto::types::RunKind;
 use std::path::{Path, PathBuf};
 
@@ -21,22 +15,6 @@ use std::path::{Path, PathBuf};
 /// knows. The registry is the real answer (`agent.list`), and an agent of your
 /// own in `detect/*.yaml` only ever shows up there.
 const AGENTS: &[&str] = &["claude", "codex", "gemini", "aider", "cursor-agent", "copilot"];
-
-/// The word in the `in` field for the rules that apply in every folder —
-/// the scope their files in the Relay home are filed under.
-pub const GLOBAL: &str = GLOBAL_SCOPE;
-
-/// Whether an `in` names no folder: empty, `global`, or `yours`, the word it
-/// had before, which still reads so an older draft is not a folder named so.
-pub fn is_global(place: &str) -> bool {
-    place.is_empty() || place == GLOBAL || place == "yours"
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Kind {
-    Run,
-    Rule,
-}
 
 pub struct Field {
     pub key: &'static str,
@@ -55,34 +33,15 @@ impl Field {
 }
 
 pub struct Form {
-    pub kind: Kind,
     pub fields: Vec<Field>,
     pub cur: usize,
-    /// The folder the form was opened from: where a rule of yours runs
-    /// unless `cwd` says otherwise.
+    /// The folder the form was opened from.
     pub origin: PathBuf,
     /// Folders `in` cycles through with ↑/↓: the known ones, and where
     /// the form was opened. Any other path can still be typed.
     pub folders: Vec<String>,
     /// The agents the registry knows, for reading the run line.
     pub agents: Vec<String>,
-    /// The rule being edited — kind, scope, name — so a rename or a move
-    /// takes the old block out, and what the form does not show survives.
-    pub editing: Option<Editing>,
-}
-
-pub struct Editing {
-    pub rule: Rule,
-}
-
-impl Editing {
-    pub fn was(&self) -> Was {
-        Was {
-            kind: self.rule.kind(),
-            scope: self.rule.scope().to_string(),
-            name: self.rule.name().to_string(),
-        }
-    }
 }
 
 /// What a keystroke did.
@@ -97,7 +56,6 @@ impl Form {
     /// A run in `folder`.
     pub fn run(folder: &Path) -> Self {
         Self {
-            kind: Kind::Run,
             fields: vec![
                 Field::new("in", "a folder", short_path(folder)),
                 Field::new("run", "make test · claude fix the build", ""),
@@ -107,87 +65,18 @@ impl Form {
             origin: folder.to_path_buf(),
             folders: vec![],
             agents: vec![],
-            editing: None,
         }
     }
 
     /// The folders `in` cycles through; the one it holds now comes first.
     pub fn with_folders(mut self, known: &[PathBuf]) -> Self {
         let mut v: Vec<String> = vec![self.get("in").to_string()];
-        if self.kind == Kind::Rule {
-            v.push(GLOBAL.into());
-        }
         v.push(short_path(&self.origin));
         v.extend(known.iter().map(|p| short_path(p)));
         let mut seen = std::collections::HashSet::new();
         v.retain(|f| !f.is_empty() && seen.insert(f.clone()));
         self.folders = v;
         self
-    }
-
-    /// A rule in `folder`, or yours; `origin` is where a rule of yours runs
-    /// unless the form says otherwise.
-    pub fn rule(folder: Option<&Path>, origin: &Path) -> Self {
-        let place = folder.map(short_path).unwrap_or_else(|| GLOBAL.into());
-        Self {
-            kind: Kind::Rule,
-            fields: vec![
-                Field::new("in", "a folder, or global", place),
-                Field::new("name", "nightly", ""),
-                Field::new("when", "every 30m · 0 2 * * * · on run.failed", ""),
-                Field::new("run", "make test · claude fix the build", ""),
-                Field::new("title", "what to call its runs", ""),
-                Field::new("tags", "a, b", ""),
-                Field::new("cwd", "where it runs (the folder, or where the event was)", ""),
-            ],
-            cur: 1,
-            origin: origin.to_path_buf(),
-            folders: vec![],
-            agents: vec![],
-            editing: None,
-        }
-    }
-
-    /// The same form, filled in from a rule as it stands. A global rule has
-    /// no folder it was opened from: its `cwd` is all there is.
-    pub fn edit(r: &Rule) -> Self {
-        let folder = (!r.is_global()).then(|| PathBuf::from(r.scope()));
-        let mut f = Self::rule(folder.as_deref(), folder.as_deref().unwrap_or(Path::new("")));
-        let (when, run, title, tags, cwd) = match r {
-            Rule::Schedule(s) => (
-                match (&s.spec.every, &s.spec.cron) {
-                    (Some(e), _) => format!("every {e}"),
-                    (None, Some(c)) => c.clone(),
-                    _ => String::new(),
-                },
-                s.spec.run.as_ref(),
-                s.spec.title.clone(),
-                s.spec.tags.clone(),
-                s.spec.cwd.clone(),
-            ),
-            Rule::Reaction(x) => (
-                format!("on {}", x.spec.on.join(" ")),
-                x.spec.run.as_ref(),
-                x.spec.title.clone(),
-                x.spec.tags.clone(),
-                x.spec.cwd.clone(),
-            ),
-        };
-        let run = run.map(task_text).unwrap_or_default();
-        for field in &mut f.fields {
-            let v = match field.key {
-                "name" => r.name().to_string(),
-                "when" => when.clone(),
-                "run" => run.clone(),
-                "title" => title.clone().unwrap_or_default(),
-                "tags" => tags.join(", "),
-                "cwd" => cwd.as_deref().map(short_path).unwrap_or_default(),
-                _ => continue,
-            };
-            *field = Field::new(field.key, field.hint, v);
-        }
-        f.editing = Some(Editing { rule: r.clone() });
-        f
     }
 
     /// Sets a field, cursor at the end; a key the form lacks is ignored.
@@ -210,12 +99,8 @@ impl Form {
         self.fields.len() as u16 + 1
     }
 
-    pub fn title(&self) -> String {
-        match (self.kind, &self.editing) {
-            (Kind::Run, _) => "new run".into(),
-            (Kind::Rule, Some(e)) => format!("edit {}", e.rule.name()),
-            (Kind::Rule, None) => "new rule".into(),
-        }
+    pub fn title(&self) -> &'static str {
+        "new run"
     }
 
     /// The agents the registry knows, so a line naming one reads as an agent.
@@ -397,18 +282,6 @@ pub fn task_of(line: &str, agents: &[String]) -> Task {
     }
 }
 
-/// A task back as a line for the form.
-pub fn task_text(t: &Task) -> String {
-    match t {
-        Task::Shell(s) => s.clone(),
-        Task::Argv(v) => v.join(" "),
-        Task::Agent { agent, prompt, .. } => match prompt {
-            Some(p) => format!("{agent} {p}"),
-            None => agent.clone(),
-        },
-    }
-}
-
 /// The run the form describes.
 #[derive(Debug)]
 pub struct RunDraft {
@@ -442,129 +315,6 @@ pub fn run_draft(f: &Form) -> Result<RunDraft> {
         kind,
         argv,
         title: (!title.is_empty()).then(|| title.to_string()),
-    })
-}
-
-/// `every 30m`, `30m`, `0 2 * * *`, `cron …`, or `on <event>…`.
-enum When {
-    Every(String),
-    Cron(String),
-    On(Vec<String>),
-}
-
-fn when_of(s: &str) -> Result<When> {
-    let s = s.trim();
-    if let Some(rest) = s.strip_prefix("on ") {
-        let on: Vec<String> = rest.split_whitespace().map(String::from).collect();
-        if on.is_empty() {
-            bail!("when: on <event>, like on run.failed");
-        }
-        return Ok(When::On(on));
-    }
-    if let Some(rest) = s.strip_prefix("every ") {
-        let d = rest.trim();
-        if parse_duration(d).is_none() {
-            bail!("when: every <duration>, like every 30m");
-        }
-        return Ok(When::Every(d.to_string()));
-    }
-    if let Some(rest) = s.strip_prefix("cron ") {
-        return Ok(When::Cron(rest.trim().to_string()));
-    }
-    if parse_duration(s).is_some() {
-        return Ok(When::Every(s.to_string()));
-    }
-    if s.split_whitespace().count() == 5 {
-        return Ok(When::Cron(s.to_string()));
-    }
-    bail!("when: every 30m, a cron line, or on run.failed")
-}
-
-pub fn rule_draft(f: &Form) -> Result<RuleDraft> {
-    let name = f.get("name").to_string();
-    crate::rulefile::check_name(&name)?;
-    let when = when_of(f.get("when"))?;
-    // Editing keeps whatever the form does not show — env, where, ask…
-    let was = f.editing.as_ref().map(|e| &e.rule);
-    let run = f.get("run");
-    let asks = matches!(was, Some(Rule::Reaction(r)) if r.spec.ask.is_some());
-    if run.is_empty() && !asks {
-        bail!("run: what it runs");
-    }
-    let place = f.get("in");
-    let folder = if is_global(place) {
-        None
-    } else {
-        let p = expand(place);
-        if !p.is_dir() {
-            bail!("in: not a folder");
-        }
-        Some(std::fs::canonicalize(&p).unwrap_or(p))
-    };
-    let title = f.get("title");
-    let title = (!title.is_empty()).then(|| title.to_string());
-    let tags: Vec<String> = f
-        .get("tags")
-        .split([',', ' '])
-        .map(str::trim)
-        .filter(|t| !t.is_empty())
-        .map(String::from)
-        .collect();
-    // A folder's rule runs in the folder unless told otherwise, and a global
-    // reaction where its event happened. A global schedule has no event to
-    // follow: it runs where the form was opened, and an edited one — opened
-    // from no folder — has to say.
-    let cwd = f.get("cwd");
-    let reaction = matches!(when, When::On(_));
-    let cwd = match (cwd.is_empty(), &folder) {
-        (false, _) => Some(expand(cwd)),
-        (true, Some(_)) => None,
-        (true, None) if reaction => None,
-        (true, None) if f.origin.as_os_str().is_empty() => bail!("cwd: a global schedule needs a folder to run in"),
-        (true, None) => Some(f.origin.clone()),
-    };
-    let task = (!run.is_empty()).then(|| task_of(run, &f.agents));
-    let (kind, body) = match when {
-        When::On(on) => {
-            let mut spec = match was {
-                Some(Rule::Reaction(r)) => r.spec.clone(),
-                _ => ReactionSpec::default(),
-            };
-            spec.on = on;
-            spec.run = task;
-            spec.title = title;
-            spec.tags = tags;
-            spec.cwd = cwd;
-            (
-                RuleKind::Reaction,
-                crate::rulefile::body(&spec, &ReactionSpec::default())?,
-            )
-        }
-        every_or_cron => {
-            let mut spec = match was {
-                Some(Rule::Schedule(s)) => s.spec.clone(),
-                _ => ScheduleSpec::default(),
-            };
-            match every_or_cron {
-                When::Every(e) => (spec.every, spec.cron) = (Some(e), None),
-                When::Cron(c) => (spec.every, spec.cron) = (None, Some(c)),
-                When::On(_) => unreachable!(),
-            }
-            spec.run = task;
-            spec.title = title;
-            spec.tags = tags;
-            spec.cwd = cwd;
-            (
-                RuleKind::Schedule,
-                crate::rulefile::body(&spec, &ScheduleSpec::default())?,
-            )
-        }
-    };
-    Ok(RuleDraft {
-        kind,
-        folder,
-        name,
-        body,
     })
 }
 
@@ -662,9 +412,6 @@ mod tests {
         assert_eq!(f.get("in"), "/w/api/");
         f.key(&KeyEvent::from(KeyCode::Tab));
         assert!(!f.on_folders());
-        // A rule's `in` offers yours too.
-        let f = Form::rule(Some(Path::new("/w/relay")), Path::new("/w/relay")).with_folders(&known);
-        assert_eq!(f.folders, ["/w/relay", "global", "/w/api"]);
     }
 
     #[test]
@@ -682,185 +429,5 @@ mod tests {
         f.key(&KeyEvent::from(KeyCode::Delete));
         assert_eq!(f.get("run"), "élo");
         assert_eq!(f.key(&KeyEvent::from(KeyCode::Esc)), Act::Cancel);
-    }
-
-    #[test]
-    fn a_rule_from_its_fields() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut f = Form::rule(Some(dir.path()), dir.path());
-        press(&mut f, "nightly");
-        f.key(&KeyEvent::from(KeyCode::Tab));
-        press(&mut f, "every 4h");
-        f.key(&KeyEvent::from(KeyCode::Tab));
-        press(&mut f, "make test");
-        f.key(&KeyEvent::from(KeyCode::Tab));
-        f.key(&KeyEvent::from(KeyCode::Tab));
-        press(&mut f, "ci, slow");
-        let d = rule_draft(&f).unwrap();
-        assert_eq!(d.kind, RuleKind::Schedule);
-        assert_eq!(
-            d.folder.as_deref(),
-            Some(std::fs::canonicalize(dir.path()).unwrap().as_path())
-        );
-        assert_eq!(d.name, "nightly");
-        assert_eq!(d.body, ["every: 4h", "run: make test", "tags:", "- ci", "- slow"]);
-
-        // `on …` is a reaction; a cron line is a schedule.
-        let mut f = Form::rule(None, Path::new("/w"));
-        press(&mut f, "notify");
-        f.key(&KeyEvent::from(KeyCode::Tab));
-        press(&mut f, "on run.failed decision.raised");
-        f.key(&KeyEvent::from(KeyCode::Tab));
-        press(&mut f, "say no");
-        let d = rule_draft(&f).unwrap();
-        assert_eq!(
-            (d.kind, d.folder.clone(), d.scope()),
-            (RuleKind::Reaction, None, "global".to_string())
-        );
-        assert_eq!(
-            d.body,
-            ["on:", "- run.failed", "- decision.raised", "run: say no"],
-            "a global reaction runs where its event happened, no folder written down"
-        );
-        // A global schedule has no event: it runs where the form was opened.
-        for field in &mut f.fields {
-            if field.key == "when" {
-                field.value = "0 2 * * *".into();
-            }
-        }
-        let d = rule_draft(&f).unwrap();
-        assert_eq!(d.kind, RuleKind::Schedule);
-        assert_eq!(d.body[0], "cron: 0 2 * * *");
-        assert!(d.body.contains(&"cwd: /w".to_string()), "{:?}", d.body);
-        for field in &mut f.fields {
-            if field.key == "cwd" {
-                field.value = "/elsewhere".into();
-            }
-        }
-        let d = rule_draft(&f).unwrap();
-        assert!(d.body.contains(&"cwd: /elsewhere".to_string()));
-        for field in &mut f.fields {
-            if field.key == "when" {
-                field.value = "soon".into();
-            }
-        }
-        assert!(rule_draft(&f).unwrap_err().to_string().starts_with("when:"));
-    }
-
-    #[test]
-    fn editing_shows_the_rule_and_keeps_what_it_does_not_show() {
-        use rl_proto::schedule::Schedule;
-        let mut spec = ScheduleSpec {
-            every: Some("4h".into()),
-            run: Some(Task::Agent {
-                agent: "claude".into(),
-                prompt: Some("fix it".into()),
-                prompt_file: None,
-                args: vec![],
-            }),
-            title: Some("night".into()),
-            ..Default::default()
-        };
-        spec.env.insert("CI".into(), "1".into());
-        let rule = Rule::Schedule(Schedule {
-            scope: "/w".into(),
-            name: "nightly".into(),
-            hash: "h".into(),
-            source: "/w/.relay/schedules.yaml".into(),
-            spec,
-            paused: false,
-            last_fired_at: None,
-            last_run: None,
-            next_at: None,
-            removed_at: None,
-            approved_hash: None,
-        });
-        let mut f = Form::edit(&rule);
-        assert_eq!(f.title(), "edit nightly");
-        assert_eq!(
-            f.fields.iter().map(|x| x.value.as_str()).collect::<Vec<_>>(),
-            ["/w", "nightly", "every 4h", "claude fix it", "night", "", ""]
-        );
-        // Only the cadence changes; the env the form never showed stays.
-        for field in &mut f.fields {
-            if field.key == "when" {
-                field.value = "every 6h".into();
-            }
-            if field.key == "in" {
-                field.value = GLOBAL.into();
-            }
-        }
-        let d = rule_draft(&f).unwrap();
-        assert_eq!(
-            d.body,
-            [
-                "every: 6h",
-                "run:",
-                "  agent: claude",
-                "  prompt: fix it",
-                "cwd: /w",
-                "env:",
-                "  CI: '1'",
-                "title: night"
-            ]
-        );
-    }
-
-    #[test]
-    fn a_global_rule_edited_with_its_cwd_cleared_writes_none() {
-        use rl_proto::reaction::Reaction;
-        use rl_proto::schedule::Schedule;
-        let reaction = Rule::Reaction(Reaction {
-            scope: GLOBAL.into(),
-            name: "notify".into(),
-            hash: "h".into(),
-            source: "/home/.relay/reactions.yaml".into(),
-            spec: ReactionSpec {
-                on: vec!["run.failed".into()],
-                run: Some(Task::Shell("say no".into())),
-                cwd: Some("/w".into()),
-                ..Default::default()
-            },
-            paused: false,
-            last_fired_at: None,
-            last_run: None,
-            removed_at: None,
-            approved_hash: None,
-        });
-        let clear = |f: &mut Form| {
-            for field in &mut f.fields {
-                if field.key == "cwd" {
-                    field.value.clear();
-                }
-            }
-        };
-        let mut f = Form::edit(&reaction);
-        assert_eq!(f.get("cwd"), "/w");
-        clear(&mut f);
-        let d = rule_draft(&f).unwrap();
-        assert_eq!(d.body, ["on:", "- run.failed", "run: say no"], "never `cwd: global`");
-
-        // A global schedule cannot do without one, and says so.
-        let schedule = Rule::Schedule(Schedule {
-            scope: GLOBAL.into(),
-            name: "nightly".into(),
-            hash: "h".into(),
-            source: "/home/.relay/schedules.yaml".into(),
-            spec: ScheduleSpec {
-                every: Some("4h".into()),
-                run: Some(Task::Shell("make test".into())),
-                cwd: Some("/w".into()),
-                ..Default::default()
-            },
-            paused: false,
-            last_fired_at: None,
-            last_run: None,
-            next_at: None,
-            removed_at: None,
-            approved_hash: None,
-        });
-        let mut f = Form::edit(&schedule);
-        clear(&mut f);
-        assert!(rule_draft(&f).unwrap_err().to_string().starts_with("cwd:"));
     }
 }

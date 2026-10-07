@@ -623,11 +623,11 @@ pub fn shell_place(cwd: &Path, project: &Path) -> String {
 pub fn cause_words(c: &Cause) -> String {
     match c {
         Cause::Manual => "started by hand".into(),
-        Cause::Schedule(n) => format!("schedule {n}"),
         Cause::Decision(_) => "your answer".into(),
-        Cause::Reaction(n) => format!("rule {n}"),
         Cause::Flow { flow, step } => format!("flow {flow} · {step}"),
         Cause::Assistant(job) => format!("asked, to {job}"),
+        // Not recorded any more: their runs went with them.
+        Cause::Schedule(n) | Cause::Reaction(n) => n.clone(),
     }
 }
 

@@ -23,10 +23,8 @@ pub enum Cmd {
     Graph,
     Events,
     Reload,
-    Approve,
-    Pause,
+    Flow,
     New,
-    Edit,
     Summary,
     Since,
     Ask,
@@ -65,7 +63,7 @@ pub const ALL: &[Command] = &[
         name: "archive",
         args: "[seen]",
         words: &[&["seen"]],
-        what: "out of the panel, kept in the ledger: an ended run or job, or all you have seen",
+        what: "out of the panel, kept in the ledger: an ended run or a flow's, or all you have seen",
         cmd: Cmd::Archive,
     },
     Command {
@@ -107,7 +105,7 @@ pub const ALL: &[Command] = &[
         name: "rename",
         args: "",
         words: &[],
-        what: "rename what the cursor is on: a folder, a run, a job's rule",
+        what: "rename what the cursor is on: a folder or a run",
         cmd: Cmd::Rename,
     },
     Command {
@@ -121,7 +119,7 @@ pub const ALL: &[Command] = &[
         name: "hide",
         args: "",
         words: &[],
-        what: "take a run, a job or a project off the list, never stopping it; in the hidden lens, bring it back",
+        what: "take a run, a flow or a project off the list, never stopping it; in the hidden lens, bring it back",
         cmd: Cmd::Hide,
     },
     Command {
@@ -142,56 +140,42 @@ pub const ALL: &[Command] = &[
         name: "graph",
         args: "",
         words: &[],
-        what: "the wiring: every schedule and reaction, what it runs and what sets it off, across projects",
+        what: "the wiring: every flow, what it runs and what sets it off, across projects",
         cmd: Cmd::Graph,
     },
     Command {
         name: "events",
         args: "",
         words: &[],
-        what: "every event, newest first, and what each set off; enter goes to its run or its rule",
+        what: "every event, newest first, and what each set off; enter goes to its run or its flow",
         cmd: Cmd::Events,
     },
     Command {
         name: "reload",
-        args: "[rules|shell]",
-        words: &[&["rules", "shell"]],
-        what: "re-read the rule files, or the shell's aliases and functions; both when bare",
+        args: "[flows|shell]",
+        words: &[&["flows", "shell"]],
+        what: "read ~/.relay/flows again, or the shell's aliases and functions; both when bare",
         cmd: Cmd::Reload,
     },
     Command {
-        name: "approve",
-        args: "",
-        words: &[],
-        what: "approve the selected rule, now that it has changed",
-        cmd: Cmd::Approve,
-    },
-    Command {
-        name: "pause",
-        args: "",
-        words: &[],
-        what: "pause the selected rule, or let it run again",
-        cmd: Cmd::Pause,
+        name: "flow",
+        args: "run|pause|resume|approve|edit|reload [name]",
+        words: &[&["run", "pause", "resume", "approve", "edit", "reload"]],
+        what: "a flow: the one under the cursor, else the one named · edit opens its flow.md, and says yes when it loads",
+        cmd: Cmd::Flow,
     },
     Command {
         name: "new",
         args: "",
         words: &[],
-        what: "write a rule by hand in the form",
+        what: "start a run by hand in the form",
         cmd: Cmd::New,
-    },
-    Command {
-        name: "edit",
-        args: "[schedules|reactions [global]]",
-        words: &[&["schedules", "reactions"], &["global"]],
-        what: "a rule file in your editor: the rule's own, else the folder's schedules; global, the Relay home's",
-        cmd: Cmd::Edit,
     },
     Command {
         name: "summary",
         args: "[deep] [again] [since]",
         words: &[&["deep", "again"], &["deep", "again"]],
-        what: "say what happened here since you last looked: a run, a job, a project, everything (the catch-up's top), a question's asker · deep reads the logs · again makes a new one",
+        what: "say what happened here since you last looked: a run, a flow, a project, everything (the catch-up's top), a question's asker · deep reads the logs · again makes a new one",
         cmd: Cmd::Summary,
     },
     Command {
@@ -334,10 +318,12 @@ mod tests {
 
     #[test]
     fn each_command_offers_its_argument_words_in_turn() {
-        assert_eq!(arg_words(cmd("edit"), 0), ["schedules", "reactions"]);
-        assert_eq!(arg_words(cmd("edit"), 1), ["global"]);
-        assert!(arg_words(cmd("edit"), 2).is_empty());
-        assert_eq!(arg_words(cmd("reload"), 0), ["rules", "shell"]);
+        assert_eq!(
+            arg_words(cmd("flow"), 0),
+            ["run", "pause", "resume", "approve", "edit", "reload"]
+        );
+        assert!(arg_words(cmd("flow"), 1).is_empty(), "the flows' names are the panel's");
+        assert_eq!(arg_words(cmd("reload"), 0), ["flows", "shell"]);
         assert_eq!(arg_words(cmd("archive"), 0), ["seen"]);
         assert_eq!(arg_words(cmd("pane"), 0), ["full"]);
         assert_eq!(arg_words(cmd("resume"), 0), ["all"]);
@@ -376,25 +362,25 @@ mod tests {
 
     #[test]
     fn an_exact_name_comes_first() {
-        assert_eq!(names("edit"), vec!["edit"]);
-        assert_eq!(names("EDIT"), vec!["edit"]);
+        assert_eq!(names("flow"), vec!["flow"]);
+        assert_eq!(names("FLOW"), vec!["flow"]);
         // `up` is a name, and sits inside nothing else.
         assert_eq!(names("up"), vec!["up"]);
     }
 
     #[test]
     fn a_prefix_comes_before_a_name_it_only_sits_inside() {
-        // `ap` opens `approve` and sits inside `graph`.
-        assert_eq!(names("ap"), vec!["approve", "graph"]);
-        // `pa` opens both of these, alphabetically.
-        assert_eq!(names("pa"), vec!["pane", "pause"]);
+        // `ma` opens `mark` and sits inside `summary`.
+        assert_eq!(names("ma"), vec!["mark", "summary"]);
+        // `re` opens these three, alphabetically.
+        assert_eq!(names("re"), vec!["reload", "rename", "resume"]);
     }
 
     #[test]
     fn a_name_matches_by_what_it_contains_too() {
         assert_eq!(names("ll"), vec!["shell"]);
-        // `it` opens nothing, and sits inside both of these.
-        assert_eq!(names("it"), vec!["edit", "quit"]);
+        // `um` opens nothing, and sits inside both of these.
+        assert_eq!(names("um"), vec!["resume", "summary"]);
     }
 
     #[test]
@@ -461,6 +447,7 @@ mod tests {
         assert_eq!(parse("/ren").unwrap().0.cmd, Cmd::Rename);
         assert_eq!(parse("/rel").unwrap().0.cmd, Cmd::Reload);
         assert_eq!(parse("/ev").unwrap().0.cmd, Cmd::Events);
+        assert_eq!(parse("/fl run").unwrap().0.cmd, Cmd::Flow);
         assert_eq!(parse("/hi").unwrap().0.cmd, Cmd::Hide);
         assert_eq!(parse("/so").unwrap().0.cmd, Cmd::Sort);
         assert_eq!(parse("/he").unwrap().0.cmd, Cmd::Help);
@@ -475,6 +462,8 @@ mod tests {
         assert!(parse("/re").is_none());
         assert!(parse("/p").is_none());
         assert!(parse("/done").is_none(), "gone: /archive, or /mark done");
+        assert!(parse("/approve").is_none(), "gone: /flow approve");
+        assert!(parse("/edit").is_none(), "gone: /flow edit");
         assert!(parse("/nope").is_none());
         assert!(parse("/").is_none());
         assert!(parse("").is_none());
