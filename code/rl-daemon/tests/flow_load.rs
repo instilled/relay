@@ -4,6 +4,7 @@ mod common;
 use common::{Conn, Harness};
 use rl_core::Home;
 use rl_proto::flow::{Flow, FlowStatus, NotLoaded, Reloaded};
+use rl_proto::methods::AgentInfo;
 use serde_json::json;
 
 fn write(home: &Home, name: &str, files: &[(&str, &str)]) {
@@ -198,5 +199,34 @@ async fn a_folder_that_cannot_be_read_stays_as_it_last_loaded() {
         assert_eq!(flows.len(), 1);
         assert_eq!((flows[0].status(), &flows[0].hash), (FlowStatus::On, &was.hash));
     }
+    h.stop().await;
+}
+
+/// A reload re-reads `config.yaml` too: what it offers changes with it.
+#[tokio::test]
+async fn a_reload_reads_the_config_again() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = Home::at(tmp.path().join("home"));
+    std::fs::create_dir_all(home.path()).unwrap();
+    std::fs::write(home.config_file(), "agents: [claude]\n").unwrap();
+    let Some(h) = Harness::on(home.clone()) else {
+        eprintln!("skipping: rl-session not built (run `cargo test --workspace`)");
+        return;
+    };
+    let mut c = Conn::open(&h.home).await;
+    let offered =
+        |agents: &[AgentInfo]| -> Vec<String> { agents.iter().filter(|a| a.offered).map(|a| a.name.clone()).collect() };
+    let agents: Vec<AgentInfo> = c.ok("agent.list", json!(null)).await;
+    assert_eq!(offered(&agents), ["claude"]);
+    std::fs::write(home.config_file(), "agents: [codex]\n").unwrap();
+    let agents: Vec<AgentInfo> = c.ok("agent.list", json!(null)).await;
+    assert_eq!(
+        offered(&agents),
+        ["claude"],
+        "as last read, until something reads it again"
+    );
+    let _: Reloaded = c.ok("flow.reload", json!(null)).await;
+    let agents: Vec<AgentInfo> = c.ok("agent.list", json!(null)).await;
+    assert_eq!(offered(&agents), ["codex"]);
     h.stop().await;
 }

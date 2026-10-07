@@ -229,7 +229,10 @@ async fn a_probe_its_event_a_flow_that_asks_and_the_yes_that_acts() {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("flow.md"), md).unwrap();
     }
-    let Some(h) = Harness::on(home) else { return };
+    let Some(h) = Harness::on(home) else {
+        eprintln!("skipping: rl-session not built (run `cargo test --workspace`)");
+        return;
+    };
     let mut c = Conn::open(&h.home).await;
     // The probe runs in a folder Relay knows, so it loads once that is so.
     let _: serde_json::Value = c.ok("workspace.up", json!({ "path": ws })).await;

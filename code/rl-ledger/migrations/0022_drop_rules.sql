@@ -1,13 +1,21 @@
 -- Schedules and reactions are gone: flows replace them. Nothing is carried over, and what they
 -- left is cleared: their runs and all of each run, the questions they raised and what the answers
 -- started, and the keys their job rows went by.
+-- What they left, followed down: a run, the questions it raised, the runs their answers started,
+-- the questions those raised, and on. Never by chain: a reaction's runs took the chain of the run
+-- that set it off, so a chain can hold runs started by hand.
+CREATE TEMP TABLE gone (kind TEXT NOT NULL, id TEXT NOT NULL, PRIMARY KEY (kind, id));
+WITH RECURSIVE left_by(kind, id) AS (
+  SELECT 'run', id FROM runs WHERE cause LIKE 'schedule:%' OR cause LIKE 'reaction:%'
+  UNION SELECT 'decision', id FROM decisions WHERE by_reaction IS NOT NULL
+  UNION SELECT 'decision', d.id FROM decisions d JOIN left_by l ON l.kind = 'run' AND d.run = l.id
+  UNION SELECT 'run', r.id FROM runs r JOIN left_by l ON l.kind = 'decision' AND r.cause = 'decision:' || l.id
+)
+INSERT INTO gone SELECT kind, id FROM left_by;
 CREATE TEMP TABLE old_runs (id TEXT PRIMARY KEY);
-INSERT INTO old_runs SELECT id FROM runs WHERE cause LIKE 'schedule:%' OR cause LIKE 'reaction:%';
+INSERT INTO old_runs SELECT id FROM gone WHERE kind = 'run';
 CREATE TEMP TABLE old_decisions (id TEXT PRIMARY KEY);
-INSERT INTO old_decisions SELECT id FROM decisions
-  WHERE by_reaction IS NOT NULL OR run IN (SELECT id FROM old_runs);
-INSERT OR IGNORE INTO old_runs SELECT id FROM runs
-  WHERE cause IN (SELECT 'decision:' || id FROM old_decisions);
+INSERT INTO old_decisions SELECT id FROM gone WHERE kind = 'decision';
 DELETE FROM session_io WHERE run IN (SELECT id FROM old_runs);
 DELETE FROM sessions WHERE run IN (SELECT id FROM old_runs);
 DELETE FROM summaries WHERE run IN (SELECT id FROM old_runs);
@@ -27,5 +35,6 @@ DROP TABLE schedule_specs;
 DROP TABLE reactions;
 DROP TABLE reaction_specs;
 ALTER TABLE decisions DROP COLUMN by_reaction;
+DROP TABLE gone;
 DROP TABLE old_runs;
 DROP TABLE old_decisions;

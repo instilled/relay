@@ -24,7 +24,11 @@ pub fn register(r: &mut Router<Daemon>) {
         Ok(all.into_iter().map(|f| d.flows.shown(f)).collect())
     });
     r.register::<FlowErrors, _, _>(|d, ()| async move { Ok(d.flows.not_loaded()) });
-    r.register::<FlowReload, _, _>(|d, ()| async move { d.flows.reload().await.map_err(internal) });
+    r.register::<FlowReload, _, _>(|d, ()| async move {
+        // A reload re-reads the config too: one reload for everything on disk.
+        *d.config.write().unwrap() = crate::config::load(&d.home);
+        d.flows.reload().await.map_err(internal)
+    });
     r.register::<FlowApprove, _, _>(|d, FlowName { name }| async move {
         let n = name.clone();
         let done = d

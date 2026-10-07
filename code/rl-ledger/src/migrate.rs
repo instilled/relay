@@ -112,7 +112,8 @@ mod tests {
         );
     }
     /// What the old rules left at 21 is cleared at 22: a schedule's run with
-    /// all of it, the question it raised and the run the answer started, a
+    /// all of it, the question it raised and the run the answer started, the
+    /// question that run raised and the run its answer started, a
     /// reaction's question, the job rows' keys and the reactor's cursor. A
     /// run started by hand stays, with everything of its own.
     #[test]
@@ -125,6 +126,7 @@ mod tests {
                VALUES ('sched01', '/w', 'command', 'probe', '[]', '/w', 'finished', 'relay', 'exact', 1, 1, 'schedule:nightly'),
                       ('answer1', '/w', 'command', 'act', '[]', '/w', 'finished', 'relay', 'exact', 2, 2, 'decision:dq000001'),
                       ('react01', '/w', 'command', 'tell', '[]', '/w', 'finished', 'relay', 'exact', 2, 2, 'reaction:tell'),
+                      ('answer2', '/w', 'agent', 'fix', '[]', '/w', 'finished', 'relay', 'exact', 2, 2, 'decision:dq000004'),
                       ('manual1', '/w', 'shell', 'zsh', '[]', '/w', 'finished', 'relay', 'exact', 3, 3, 'manual');
              INSERT INTO sessions (run, socket, exit_file, log, pid, holder_pid, tty, cols, rows, started_at)
                VALUES ('sched01', 's', 'e', 'l', 1, 1, 0, 80, 24, 1), ('manual1', 's', 'e', 'l', 1, 1, 1, 80, 24, 3);
@@ -135,13 +137,16 @@ mod tests {
              INSERT INTO decisions (id, created_at, updated_at, workspace, run, chain, title, options_json, status, by_reaction)
                VALUES ('dq000001', 1, 1, '/w', 'sched01', 'sched01', 'act?', '[]', 'taken', NULL),
                       ('dq000002', 1, 1, '/w', NULL, 'dq000002', 'tell?', '[]', 'open', 'tell'),
-                      ('dq000003', 3, 3, '/w', 'manual1', 'manual1', 'mine?', '[]', 'open', NULL);
+                      ('dq000003', 3, 3, '/w', 'manual1', 'manual1', 'mine?', '[]', 'open', NULL),
+                      ('dq000004', 2, 2, '/w', 'answer1', 'sched01', 'and then?', '[]', 'taken', NULL);
              INSERT INTO events (at, workspace, run, group_key, kind, summary, data_json)
                VALUES (1, '/w', 'sched01', '/w', 'run.started', 's', NULL),
                       (1, '/w', NULL, '/w', 'schedule.skipped', 's', NULL),
                       (1, '/w', NULL, '/w', 'decision.taken', 's', '{\"decision\":\"dq000001\"}'),
                       (1, '/w', NULL, '/w', 'decision.raised', 's', '{\"decision\":\"dq000002\"}'),
                       (2, '/w', 'answer1', '/w', 'run.started', 's', NULL),
+                      (2, '/w', NULL, '/w', 'decision.taken', 's', '{\"decision\":\"dq000004\"}'),
+                      (2, '/w', 'answer2', '/w', 'run.started', 's', NULL),
                       (3, '/w', 'manual1', '/w', 'run.started', 's', NULL),
                       (3, '/w', 'manual1', '/w', 'decision.raised', 's', '{\"decision\":\"dq000003\"}');
              INSERT INTO summary_kept (target, deep, agent, by_run, at, text, source, reach)
@@ -183,9 +188,11 @@ mod tests {
         assert_eq!(col("SELECT key FROM hidden"), ["g:/elsewhere"]);
         assert_eq!(col("SELECT key FROM meta"), ["flows.cursor"]);
         let gone = col(
-            "SELECT name FROM sqlite_master WHERE name IN ('schedules', 'schedule_specs', 'reactions', 'reaction_specs', 'old_runs', 'old_decisions')",
+            "SELECT name FROM sqlite_master WHERE name IN ('schedules', 'schedule_specs', 'reactions', 'reaction_specs')",
         );
         assert!(gone.is_empty(), "{gone:?}");
+        let temp = col("SELECT name FROM sqlite_temp_master");
+        assert!(temp.is_empty(), "{temp:?}");
         let columns = col("SELECT name FROM pragma_table_info('decisions')");
         assert!(!columns.iter().any(|c| c == "by_reaction"), "{columns:?}");
         let broken = col("SELECT \"table\" FROM pragma_foreign_key_check");
