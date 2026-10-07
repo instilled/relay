@@ -166,38 +166,45 @@ impl Decisions {
             None => None,
         };
         let restated = existing.is_some();
-        let stored = match existing {
-            Some(open) => {
-                // Same question, said again: keep the id and the chain it began, unless a
-                // step asks it again, and it is now that step's firing's.
-                if !matches!(by, By::Step { .. }) {
-                    d.chain = open.chain.clone();
-                }
-                let (id, d2) = (open.id.clone(), d.clone());
-                self.ledger.call(move |c| decisions::restate(c, &id, &d2, now)).await?
-            }
-            None => {
-                let d2 = d.clone();
-                self.ledger.call(move |c| decisions::insert(c, &d2)).await?
-            }
+        // Same question, said again: keep the id and the chain it began, unless a step asks it
+        // again, and it is now that step's firing's.
+        if let Some(open) = &existing
+            && !matches!(by, By::Step { .. })
+        {
+            d.chain = open.chain.clone();
+        }
+        // Stored with who owns it in one go, so it is never taken before its owner is known.
+        let (open, d2) = (existing.map(|o| o.id), d.clone());
+        let reaction = match by {
+            By::Reaction(name, _) => Some(name.to_string()),
+            _ => None,
         };
+        let owner = match by {
+            By::Step { firing, step } => Some(format!("{firing}/{step}")),
+            _ => None,
+        };
+        let stored = self
+            .ledger
+            .call(move |c| {
+                let tx = c.unchecked_transaction()?;
+                let stored = match &open {
+                    Some(id) => decisions::restate(&tx, id, &d2, now)?,
+                    None => decisions::insert(&tx, &d2)?,
+                };
+                if let Some(name) = &reaction {
+                    decisions::set_by_reaction(&tx, &stored.id, name)?;
+                }
+                if let Some(owner) = &owner {
+                    decisions::set_by_step(&tx, &stored.id, owner)?;
+                }
+                tx.commit()?;
+                Ok(stored)
+            })
+            .await?;
         let mut data = json!({ "decision": stored.id, "options": stored.options.iter().map(|o| &o.key).collect::<Vec<_>>(), "restated": restated });
-        match by {
-            By::Nobody => {}
-            By::Reaction(name, event) => {
-                let (id, name) = (stored.id.clone(), name.to_string());
-                data["reaction"] = json!(name);
-                data["event"] = json!(event);
-                self.ledger
-                    .call(move |c| decisions::set_by_reaction(c, &id, &name))
-                    .await?;
-            }
-            By::Step { firing, step } => {
-                let (id, owner) = (stored.id.clone(), format!("{firing}/{step}"));
-                self.ledger
-                    .call(move |c| decisions::set_by_step(c, &id, &owner))
-                    .await?;
-            }
+        if let By::Reaction(name, event) = by {
+            data["reaction"] = json!(name);
+            data["event"] = json!(event);
         }
         self.append(
             &stored,

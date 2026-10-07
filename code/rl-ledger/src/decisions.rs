@@ -201,6 +201,17 @@ pub fn set_by_step(conn: &Connection, id: &str, by: &str) -> Result<()> {
     Ok(())
 }
 
+/// The open question a flow step owns, by `<firing>/<step>`, if there is one.
+pub fn open_by_step(conn: &Connection, by: &str) -> Result<Option<String>> {
+    Ok(conn
+        .query_row(
+            "SELECT id FROM decisions WHERE by_step = ?1 AND status = 'open' ORDER BY rowid DESC LIMIT 1",
+            params![by],
+            |r| r.get(0),
+        )
+        .optional()?)
+}
+
 /// Records the runs an answer started, once they are up.
 pub fn set_outcomes(conn: &Connection, id: &str, outcomes: &[String]) -> Result<()> {
     conn.execute(
@@ -427,5 +438,13 @@ mod tests {
             Some("f1/review")
         );
         assert_eq!(ledger.call_blocking(|c| by_step(c, "nope")).unwrap(), None);
+        assert_eq!(
+            ledger
+                .call_blocking(|c| open_by_step(c, "f1/review"))
+                .unwrap()
+                .as_deref(),
+            Some("d1")
+        );
+        assert_eq!(ledger.call_blocking(|c| open_by_step(c, "f1/other")).unwrap(), None);
     }
 }

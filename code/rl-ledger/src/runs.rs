@@ -343,6 +343,20 @@ pub fn was_lost(conn: &Connection, id: &str) -> Result<bool> {
     )?)
 }
 
+/// The newest run in chain `chain` with cause `cause`: a flow step's, by its firing and
+/// `flow:<flow>/<step>`, archived or not.
+pub fn newest_in_chain(conn: &Connection, chain: &str, cause: &str) -> Result<Option<Run>> {
+    Ok(conn
+        .query_row(
+            &format!(
+                "SELECT {COLS} FROM runs WHERE chain = ?1 AND cause = ?2 ORDER BY started_at DESC, rowid DESC LIMIT 1"
+            ),
+            params![chain, cause],
+            from_row,
+        )
+        .optional()?)
+}
+
 /// Done with everything that has ended and been looked at — except what is
 /// pinned, which was kept on purpose and is only let go by name.
 pub fn archive_seen(conn: &Connection, at: Timestamp) -> Result<usize> {

@@ -448,3 +448,164 @@ async fn a_question_never_raised_is_raised_at_a_restart() {
     assert_eq!(open[0].title, "sure?");
     h.stop().await;
 }
+
+/// Changes the ledger behind a stopped daemon's back, as a crash at the wrong moment would
+/// have left it.
+fn behind(home: &Home, f: impl FnOnce(&mut rusqlite::Connection) -> anyhow::Result<()> + Send + 'static) {
+    let ledger = rl_ledger::Ledger::open(&home.ledger()).unwrap();
+    ledger.call_blocking(f).unwrap();
+}
+
+/// Relay went between saving `a` running and recording its run, which did start: coming
+/// back, the run is found by its firing and step, and carries the firing on.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_step_run_never_recorded_is_found_at_a_restart() {
+    let tmp = tempfile::tempdir().unwrap();
+    let md = "---\nsteps:\n  a:\n    run: sleep 1\n  b:\n    after: a\n    run: echo b\n---\n";
+    let Some((h, mut c)) = start(tmp.path(), "found", md).await else {
+        return;
+    };
+    approve_and_run(&mut c, "found").await;
+    let f = wait_firing(&mut c, "found", |f| step(f, "a").run.is_some()).await;
+    let a = step(&f, "a").run.clone().unwrap();
+    drop(c);
+    let home = h.home.clone();
+    h.stop().await;
+    let firing = f.id.clone();
+    behind(&home, move |db| {
+        db.execute("UPDATE steps SET run = NULL WHERE firing = ?1", [&firing])?;
+        Ok(())
+    });
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    kill_holder(&home, &a, false).await;
+
+    let h = Harness::on(home).unwrap();
+    let mut c = Conn::open(&h.home).await;
+    let f = wait_firing(&mut c, "found", ended).await;
+    assert_eq!(f.status, FiringStatus::Done, "{f:?}");
+    assert_eq!(step(&f, "a").run.as_deref(), Some(a.as_str()), "{f:?}");
+    assert_eq!(runs_of(&mut c, &f.id, "found", "b").await.len(), 1);
+    h.stop().await;
+}
+
+/// Relay went between saving `a` running and starting its run: coming back, `a` is said not
+/// to have started and the firing moves on as if it failed.
+#[tokio::test]
+async fn a_step_run_never_started_fails_its_firing_at_a_restart() {
+    let tmp = tempfile::tempdir().unwrap();
+    let md = "---\nsteps:\n  a:\n    run: sleep 30\n  b:\n    after: a\n    run: echo b\n---\n";
+    let Some((h, mut c)) = start(tmp.path(), "unstarted", md).await else {
+        return;
+    };
+    approve_and_run(&mut c, "unstarted").await;
+    let f = wait_firing(&mut c, "unstarted", |f| step(f, "a").run.is_some()).await;
+    let a = step(&f, "a").run.clone().unwrap();
+    let _: Run = c.ok("run.stop", json!({ "id": a })).await;
+    c.wait_terminal(&a).await;
+    drop(c);
+    let home = h.home.clone();
+    h.stop().await;
+    // No run is the step's, nor was started for it.
+    let (firing, run) = (f.id.clone(), a.clone());
+    behind(&home, move |db| {
+        db.execute(
+            "UPDATE steps SET run = NULL, status = 'running' WHERE firing = ?1 AND name = 'a'",
+            [&firing],
+        )?;
+        db.execute(
+            "UPDATE steps SET status = 'pending' WHERE firing = ?1 AND name = 'b'",
+            [&firing],
+        )?;
+        db.execute(
+            "UPDATE firings SET status = 'running', ended_at = NULL WHERE id = ?1",
+            [&firing],
+        )?;
+        db.execute("UPDATE runs SET chain = 'elsewhere' WHERE id = ?1", [&run])?;
+        Ok(())
+    });
+
+    let h = Harness::on(home).unwrap();
+    let mut c = Conn::open(&h.home).await;
+    let f = wait_firing(&mut c, "unstarted", ended).await;
+    assert_eq!(f.status, FiringStatus::Failed, "{f:?}");
+    assert_eq!(
+        (step(&f, "a").status, step(&f, "a").run.as_deref()),
+        (StepStatus::Failed, None)
+    );
+    assert_eq!(step(&f, "b").status, StepStatus::Skipped);
+    let events: Vec<Event> = c.ok("event.list", json!({ "kinds": ["flow.skipped"] })).await;
+    assert_eq!(events.len(), 1, "{events:?}");
+    let data = events[0].data.clone().unwrap();
+    assert_eq!(data["step"], "a");
+    assert!(data["reason"].as_str().unwrap().contains("before it started"), "{data}");
+    h.stop().await;
+}
+
+/// Relay went between writing a firing and starting it: coming back, it starts.
+#[tokio::test]
+async fn a_firing_written_but_never_started_starts_at_a_restart() {
+    let tmp = tempfile::tempdir().unwrap();
+    let md = "---\nsteps:\n  a:\n    run: echo a\n---\n";
+    let Some((h, mut c)) = start(tmp.path(), "late", md).await else {
+        return;
+    };
+    let _: Flow = c.ok("flow.approve", json!({ "name": "late" })).await;
+    drop(c);
+    let home = h.home.clone();
+    h.stop().await;
+    behind(&home, |db| {
+        let def = rl_ledger::flows::get(db, "late")?.unwrap().def;
+        rl_ledger::firings::insert(
+            db,
+            &rl_ledger::firings::NewFiring {
+                id: "f-late",
+                flow: "late",
+                def_json: &serde_json::to_string(&def)?,
+                trigger: "hand",
+                event: None,
+                at: jiff::Timestamp::now(),
+                steps: &["a".to_string()],
+            },
+        )
+    });
+
+    let h = Harness::on(home).unwrap();
+    let mut c = Conn::open(&h.home).await;
+    let f = wait_firing(&mut c, "late", ended).await;
+    assert_eq!((f.id.as_str(), f.status), ("f-late", FiringStatus::Done), "{f:?}");
+    assert_eq!(runs_of(&mut c, "f-late", "late", "a").await.len(), 1);
+    h.stop().await;
+}
+
+/// Relay went between raising a step's question and recording it as the step's: coming
+/// back, that question is the step's, not asked again.
+#[tokio::test]
+async fn a_question_raised_but_not_recorded_is_not_asked_twice() {
+    use rl_proto::decision::Decision;
+    let tmp = tempfile::tempdir().unwrap();
+    let md = "---\nsteps:\n  review:\n    ask: sure?\n    options: { ok: {} }\n---\n";
+    let Some((h, mut c)) = start(tmp.path(), "once", md).await else {
+        return;
+    };
+    approve_and_run(&mut c, "once").await;
+    let f = wait_firing(&mut c, "once", |f| step(f, "review").decision.is_some()).await;
+    let was = step(&f, "review").decision.clone().unwrap();
+    drop(c);
+    let home = h.home.clone();
+    h.stop().await;
+    let firing = f.id.clone();
+    behind(&home, move |db| {
+        db.execute("UPDATE steps SET decision = NULL WHERE firing = ?1", [&firing])?;
+        Ok(())
+    });
+
+    let h = Harness::on(home).unwrap();
+    let mut c = Conn::open(&h.home).await;
+    let f = wait_firing(&mut c, "once", |f| step(f, "review").decision.is_some()).await;
+    assert_eq!(step(&f, "review").decision.as_deref(), Some(was.as_str()), "{f:?}");
+    let open: Vec<Decision> = c.ok("decision.list", json!({})).await;
+    assert_eq!(open.len(), 1, "{open:?}");
+    assert_eq!(open[0].id, was);
+    h.stop().await;
+}

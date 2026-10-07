@@ -21,7 +21,7 @@ use rl_proto::action::{Action, Task};
 use rl_proto::flow::{Firing, StepState, StepStatus};
 use rl_proto::methods::{DecisionSpec, RunSpec};
 use rl_proto::schedule::Overlap;
-use rl_proto::types::{Cause, Event, Run, RunState, event_kind};
+use rl_proto::types::{Cause, Event, Run, event_kind};
 use rusqlite::Connection;
 use serde_json::json;
 use std::collections::VecDeque;
@@ -82,11 +82,11 @@ pub(super) struct Moved {
     /// When the flow's firing before this one started.
     last: Option<Timestamp>,
     /// What to do, each with what it needs, placeholders filled.
-    todo: Vec<(Do, Ready)>,
+    pub(super) todo: Vec<(Do, Ready)>,
 }
 
 /// What one `Do` needs, made ready while the firing is read.
-enum Ready {
+pub(super) enum Ready {
     /// A `Start`/`RunOption`'s action, or why it cannot have one.
     Run(Result<Action>),
     /// An `Ask`'s question.
@@ -207,7 +207,7 @@ impl Flows {
     }
 
     /// Each of what happened, in turn, as [`step`](Self::step) does it.
-    async fn follow(&self, mut queue: VecDeque<(String, Happened)>) -> Result<()> {
+    pub(super) async fn follow(&self, mut queue: VecDeque<(String, Happened)>) -> Result<()> {
         while let Some((firing, h)) = queue.pop_front() {
             let (id, home) = (firing.clone(), self.home.clone());
             let Some(m) = self.ledger.call(move |c| moved(c, &home, &id, &h)).await? else {
@@ -221,7 +221,7 @@ impl Flows {
     /// Does what a firing moved on says, and returns what that led to. A step that cannot
     /// start or ask is said in `flow.skipped`: a run step moves on as if it failed, an ask
     /// step as if unanswered.
-    async fn carry_out(&self, m: &Moved) -> Vec<(String, Happened)> {
+    pub(super) async fn carry_out(&self, m: &Moved) -> Vec<(String, Happened)> {
         let mut next = Vec::new();
         let firing = m.firing.id.as_str();
         for (todo, ready) in &m.todo {
@@ -233,7 +233,7 @@ impl Flows {
                         _ => Err(anyhow!("it has nothing to run")),
                     };
                     if let Err(e) = started {
-                        self.not_started(m, step, &e).await;
+                        self.not_started(&m.def, firing, step, &e).await;
                         let ended = Happened::Ended {
                             step: step.clone(),
                             ok: false,
@@ -250,7 +250,7 @@ impl Flows {
                         Ok(None) => {}
                         Ok(Some((was, step))) => next.push((was, Happened::Unanswered { step })),
                         Err(e) => {
-                            self.not_started(m, step, &e).await;
+                            self.not_started(&m.def, firing, step, &e).await;
                             next.push((firing.to_string(), Happened::Unanswered { step: step.clone() }));
                         }
                     }
@@ -270,12 +270,12 @@ impl Flows {
     }
 
     /// Says that a step did not start, and why.
-    async fn not_started(&self, m: &Moved, step: &str, e: &anyhow::Error) {
-        let (flow, firing, reason) = (&m.def.name, &m.firing.id, format!("{e:#}"));
+    pub(super) async fn not_started(&self, def: &FlowDef, firing: &str, step: &str, e: &anyhow::Error) {
+        let (flow, reason) = (&def.name, format!("{e:#}"));
         warn!(flow, firing, step, reason, "step did not start");
         let data = json!({ "flow": flow, "firing": firing, "step": step, "reason": reason });
         let summary = format!("flow `{flow}` step `{step}` did not start: {reason}");
-        self.say(&m.def, event_kind::FLOW_SKIPPED, summary, data).await;
+        self.say(def, event_kind::FLOW_SKIPPED, summary, data).await;
     }
 
     /// Starts one step's run, in the firing's chain, and records it as the step's.
@@ -298,7 +298,7 @@ impl Flows {
 
     /// What a step's run is started with: no tty and no input, in the firing's chain, the
     /// flow's folder first on its `PATH` and the firing's names in its env.
-    fn spec(&self, m: &Moved, step: &str, action: &Action) -> Result<RunSpec> {
+    pub(super) fn spec(&self, m: &Moved, step: &str, action: &Action) -> Result<RunSpec> {
         let def = &m.def;
         let at = def.steps.iter().find(|s| s.name == step).context("no such step")?;
         let dir = self.home.flow_dir(&def.name);
@@ -382,139 +382,6 @@ impl Flows {
             warn!(flow = def.name, kind, error = %format!("{e:#}"), "recording a flow's event");
         }
     }
-
-    /// Carries every open firing on from what happened while Relay was not running: a step
-    /// whose run ended moves on as that end says, one whose run was lost waits to be resumed,
-    /// and a question never raised is raised. The events loop seeing the same ends afterwards
-    /// changes nothing.
-    pub async fn reconcile(&self) -> Result<()> {
-        let _going = self.going.lock().await;
-        let (ended, unasked) = self
-            .ledger
-            .call(|c| {
-                let (mut ended, mut unasked) = (Vec::new(), Vec::new());
-                for f in firings::open(c)? {
-                    for s in f.steps {
-                        match (s.status, s.run, s.decision) {
-                            (StepStatus::Running, Some(run), _) => {
-                                if let Some(h) = ended_as(c, &run, &s.name)? {
-                                    ended.push((f.id.clone(), h));
-                                }
-                            }
-                            (StepStatus::Waiting, _, None) => unasked.push((f.id.clone(), s.name)),
-                            _ => {}
-                        }
-                    }
-                }
-                Ok((ended, unasked))
-            })
-            .await?;
-        for (firing, h) in ended {
-            if let Err(e) = self.step(&firing, h).await {
-                warn!(firing, error = %format!("{e:#}"), "carrying a firing on");
-            }
-        }
-        for (firing, step) in unasked {
-            if let Err(e) = self.ask_again(&firing, &step).await {
-                warn!(firing, step, error = %format!("{e:#}"), "asking a step's question again");
-            }
-        }
-        Ok(())
-    }
-
-    /// Raises the question of an ask step left waiting with none, as moving on to it would
-    /// have. The caller holds `going`.
-    async fn ask_again(&self, firing: &str, step: &str) -> Result<()> {
-        let (id, step, home) = (firing.to_string(), step.to_string(), self.home.clone());
-        let m = self
-            .ledger
-            .call(move |c| {
-                let Some(f) = firings::get(c, &id)? else {
-                    return Ok(None);
-                };
-                // What was carried on before may have moved it.
-                let unasked = |s: &StepState| s.name == step && s.status == StepStatus::Waiting && s.decision.is_none();
-                let Some(def) = def_of(c, &id)?.filter(|_| f.steps.iter().any(unasked)) else {
-                    return Ok(None);
-                };
-                laid_out(c, &home, &id, def, vec![Do::Ask(step)]).map(Some)
-            })
-            .await?;
-        let Some(m) = m else { return Ok(()) };
-        let next = self.carry_out(&m).await;
-        self.follow(next.into()).await
-    }
-
-    /// What step run `run` was started with, made again for picking it up; `None` when it is
-    /// no firing's step.
-    pub(crate) async fn spec_again(&self, run: &Run) -> Result<Option<RunSpec>> {
-        let (id, home) = (run.id.clone(), self.home.clone());
-        let found = self
-            .ledger
-            .call(move |c| {
-                let Some((firing, step)) = firings::by_run(c, &id)? else {
-                    return Ok(None);
-                };
-                let Some(def) = def_of(c, &firing)? else {
-                    return Ok(None);
-                };
-                let todo = match def.steps.iter().find(|s| s.name == step).map(|s| &s.does) {
-                    Some(Does::Run(_)) => Do::Start(step.clone()),
-                    Some(Does::Ask(_)) => Do::RunOption(step.clone()),
-                    None => return Ok(None),
-                };
-                laid_out(c, &home, &firing, def, vec![todo]).map(|m| Some((m, step)))
-            })
-            .await?;
-        let Some((m, step)) = found else { return Ok(None) };
-        match m.todo.first() {
-            Some((_, Ready::Run(Ok(a)))) => self.spec(&m, &step, a).map(Some),
-            Some((_, Ready::Run(Err(e)))) => Err(anyhow!("{e:#}")),
-            _ => Ok(None),
-        }
-    }
-
-    /// Run `old` picked back up as `new`: when `old` was a lost step's, `new` is that step's
-    /// run now, and its firing goes on. The caller holds `going`, taken before `new` started.
-    pub(crate) async fn resumed(&self, old: &str, new: &str) -> Result<()> {
-        let (old, new) = (old.to_string(), new.to_string());
-        let lost = self
-            .ledger
-            .call(move |c| {
-                let Some((firing, step)) = firings::by_run(c, &old)? else {
-                    return Ok(None);
-                };
-                if firings::steps(c, &firing)?.get(&step) != Some(&StepStatus::Lost) {
-                    return Ok(None);
-                }
-                firings::set_step_run(c, &firing, &step, &new)?;
-                Ok(Some((firing, step)))
-            })
-            .await?;
-        match lost {
-            Some((firing, step)) => self.step(&firing, Happened::Resumed { step }).await,
-            None => Ok(()),
-        }
-    }
-}
-
-/// What a step's run having ended says: `None` while it goes on. A run marked lost is lost,
-/// whatever it ended as.
-fn ended_as(c: &Connection, run: &str, step: &str) -> Result<Option<Happened>> {
-    let Some(r) = runs::get(c, run)? else { return Ok(None) };
-    if !r.state.is_terminal() {
-        return Ok(None);
-    }
-    let step = step.to_string();
-    Ok(Some(if runs::was_lost(c, run)? {
-        Happened::Lost { step }
-    } else {
-        match r.state {
-            RunState::Finished => Happened::Ended { step, ok: true },
-            RunState::Stopped => Happened::Stopped { step },
-            _ => Happened::Ended { step, ok: false },
-        }
-    }))
 }
 
 /// The firing `id` moved on from `h` and saved, in one go; `None` when there is no such firing.
@@ -543,7 +410,7 @@ fn moved(c: &Connection, home: &Home, id: &str, h: &Happened) -> Result<Option<M
 }
 
 /// The definition firing `id` runs on; `None` when there is no such firing.
-fn def_of(c: &Connection, id: &str) -> Result<Option<FlowDef>> {
+pub(super) fn def_of(c: &Connection, id: &str) -> Result<Option<FlowDef>> {
     let Some(def) = firings::def_json(c, id)? else {
         return Ok(None);
     };
@@ -551,7 +418,7 @@ fn def_of(c: &Connection, id: &str) -> Result<Option<FlowDef>> {
 }
 
 /// The firing `id` as saved, with what `todo` needs made ready.
-fn laid_out(c: &Connection, home: &Home, id: &str, def: FlowDef, todo: Vec<Do>) -> Result<Moved> {
+pub(super) fn laid_out(c: &Connection, home: &Home, id: &str, def: FlowDef, todo: Vec<Do>) -> Result<Moved> {
     let firing = firings::get(c, id)?.context("the firing, saved")?;
     let facts = Facts {
         conn: c,
