@@ -170,22 +170,6 @@ pub fn resolve(
     get(conn, id)?.ok_or_else(|| anyhow::anyhow!("decision {id} vanished"))
 }
 
-/// Which reaction raised this question, if one did.
-pub fn by_reaction(conn: &Connection, id: &str) -> Result<Option<String>> {
-    Ok(conn
-        .query_row("SELECT by_reaction FROM decisions WHERE id = ?1", params![id], |r| {
-            r.get(0)
-        })
-        .optional()?
-        .flatten())
-}
-
-/// Records that a reaction is behind a question.
-pub fn set_by_reaction(conn: &Connection, id: &str, name: &str) -> Result<()> {
-    conn.execute("UPDATE decisions SET by_reaction = ?2 WHERE id = ?1", params![id, name])?;
-    Ok(())
-}
-
 /// Which flow step owns this question, as `<firing>/<step>`, if one does: its answer is the
 /// engine's to carry out.
 pub fn by_step(conn: &Connection, id: &str) -> Result<Option<String>> {

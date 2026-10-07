@@ -152,10 +152,6 @@ enum Mode {
     /// A join refused because someone holds the keyboard: `y` takes it from
     /// them. The run, and who has it.
     Take(String, String),
-    /// The second `^x` on a project with a `.relay` that can move: `y` moves
-    /// it, `n` keeps it, and either removes the project; anything else
-    /// leaves everything as it was.
-    Remove(Box<Removal>),
     /// `^r`: a run's or a project's name being changed where it stands, in
     /// the list.
     Rename(Box<Renaming>),
@@ -188,18 +184,10 @@ enum Renamed {
     Project(PathBuf),
 }
 
-/// A project removal waiting on the question about its `.relay`.
-struct Removal {
-    folder: PathBuf,
-    name: String,
-    question: String,
-}
-
 /// A project being removed, until the daemon answers: stopping its runs can
 /// take a few seconds, and the panel goes on meanwhile.
 struct Removing {
     name: String,
-    fate: remove::RulesFate,
     task: tokio::task::JoinHandle<Result<WorkspaceRemoved>>,
 }
 
@@ -1424,11 +1412,12 @@ impl App {
             Ok(d) => self.digest = d,
             Err(e) => self.say(format!("daemon: {e:#}")),
         }
-        match self.rpc.call::<RuleList>(ScheduleFilter { all: false }).await {
-            Ok(r) => self.rules = r,
-            Err(e) => self.say(format!("daemon: {e:#}")),
-        }
-        // A daemon from before `rule.errors` has nothing to say here.
+        // A daemon that has let rules go has none to list.
+        self.rules = self
+            .rpc
+            .call::<RuleList>(ScheduleFilter { all: false })
+            .await
+            .unwrap_or_default();
         self.not_loaded = self.rpc.call::<RuleErrors>(()).await.unwrap_or_default();
         // The catch-up's stretch, while it is up or there to go back to: cut
         // from the list's digest, not asked for again.
@@ -1481,7 +1470,7 @@ impl App {
         let (deep, from) = match (&made, &target) {
             (Some(m), _) => (m.deep, m.from),
             (None, SummaryTarget::Project { .. } | SummaryTarget::All) => (false, self.away_since),
-            (None, SummaryTarget::Job { .. }) => {
+            (None, SummaryTarget::Flow { .. }) => {
                 (false, self.sel.as_ref().and_then(|k| self.unseen_from.get(k)).copied())
             }
             (None, _) => (false, None),
@@ -1538,14 +1527,7 @@ impl App {
     fn target_of(&self, row: &Row) -> Option<SummaryTarget> {
         Some(match row {
             Row::Run(i) => SummaryTarget::Run { id: i.run.id.clone() },
-            Row::Job(j) => {
-                let last = &j.last().run;
-                SummaryTarget::Job {
-                    rule: j.kind,
-                    name: j.name.clone(),
-                    workspace: (!rows::everywhere_run(last, &self.names, &self.rules)).then(|| last.workspace.clone()),
-                }
-            }
+            Row::Job(j) => SummaryTarget::Flow { name: j.name.clone() },
             Row::Group(h) if h.is_everywhere() => SummaryTarget::All,
             Row::Group(h) => SummaryTarget::Project {
                 workspace: h.workspace.clone(),
@@ -2367,51 +2349,35 @@ impl App {
         }
     }
 
-    /// The second `^x` on a project's header. Its `.relay` is asked about
-    /// first, when there is one that can move, and nothing is done until the
-    /// answer; with none, the project goes at once.
+    /// The second `^x` on a project's header: the project goes at once.
     fn remove_project(&mut self, folder: PathBuf, name: String) {
         if self.removing.is_some() {
             self.say("still removing a project; a moment");
             return;
         }
-        let dir = rl_core::rules_dir::rules_dir(&folder.join(rl_proto::schedule::WORKSPACE_DIR), &self.home);
-        if let rl_core::rules_dir::RulesDir::Movable(files) = &dir {
-            let of = |kind: RuleKind| {
-                self.rules
-                    .iter()
-                    .filter(|r| r.kind() == kind && !r.is_global() && Path::new(r.scope()) == folder)
-                    .count()
-            };
-            let contents = remove::contents(of(RuleKind::Schedule), of(RuleKind::Reaction), files);
-            let question = remove::question(&name, &contents, &rl_core::display_path(&self.home.removed_dir()));
-            self.mode = Mode::Remove(Box::new(Removal { folder, name, question }));
-            return;
-        }
-        self.start_removal(folder, name, false, remove::RulesFate::unasked(&dir));
+        self.start_removal(folder, name);
     }
 
     /// Hands the removal to the daemon on a connection of its own, so the
     /// panel keeps drawing while the project's runs are stopped.
-    fn start_removal(&mut self, folder: PathBuf, name: String, move_rules: bool, fate: remove::RulesFate) {
+    fn start_removal(&mut self, folder: PathBuf, name: String) {
         let home = self.home.clone();
         let params = WorkspaceRemoveParams {
             path: folder,
             stop_runs: true,
             archive_runs: true,
-            move_rules,
         };
         let task = tokio::spawn(async move {
             let mut rpc = Client::connect(&home).await?;
             rpc.call::<WorkspaceRemove>(params).await
         });
-        self.removing = Some(Removing { name, fate, task });
+        self.removing = Some(Removing { name, task });
     }
 
     async fn removed(&mut self, done: std::result::Result<Result<WorkspaceRemoved>, tokio::task::JoinError>) {
         let Some(r) = self.removing.take() else { return };
         match done {
-            Ok(Ok(out)) => self.say(remove::done(&r.name, &out, &r.fate, rl_core::display_path)),
+            Ok(Ok(out)) => self.say(remove::done(&r.name, &out)),
             Ok(Err(e)) => self.say(format!("remove {}: {e:#}", r.name)),
             Err(e) => self.say(format!("remove {}: {e}", r.name)),
         }
@@ -3369,10 +3335,7 @@ impl App {
             }
         };
         self.rpc
-            .call::<WorkspaceUp>(WorkspaceUpParams {
-                path: path.clone(),
-                approve: false,
-            })
+            .call::<WorkspaceUp>(WorkspaceUpParams { path: path.clone() })
             .await?;
         self.refresh().await;
         self.say(format!("added {}", self.names.workspace(&path)));
@@ -3768,7 +3731,7 @@ impl App {
                     .or(self.away_since)
                     .unwrap_or(now - SignedDuration::from_hours(24)),
             ),
-            SummaryTarget::Job { .. } if typed.is_none() => {
+            SummaryTarget::Flow { .. } if typed.is_none() => {
                 self.sel.as_ref().and_then(|k| self.unseen_from.get(k)).copied()
             }
             _ => typed,
@@ -3820,7 +3783,7 @@ impl App {
                 .run_by_id(id)
                 .map(|r| r.title.clone())
                 .unwrap_or_else(|| id.clone()),
-            SummaryTarget::Job { rule, name, .. } => format!("{rule} {name}"),
+            SummaryTarget::Flow { name } => format!("flow {name}"),
             SummaryTarget::Project { workspace } => self.names.workspace(workspace),
             SummaryTarget::All => "everything".into(),
         };
@@ -3992,15 +3955,6 @@ impl App {
                     && k.code == KeyCode::Char('y')
                 {
                     self.summary_start(p);
-                }
-                return Ok(());
-            }
-            Mode::Remove(r) => {
-                let Removal { folder, name, .. } = *r;
-                match k.code {
-                    KeyCode::Char('y') => self.start_removal(folder, name, true, remove::RulesFate::Moved),
-                    KeyCode::Char('n') => self.start_removal(folder, name, false, remove::RulesFate::Kept),
-                    _ => self.say(format!("{name} is left as it was")),
                 }
                 return Ok(());
             }
@@ -5888,7 +5842,6 @@ impl App {
                     }
                 };
             }
-            Mode::Remove(r) => return r.question.clone(),
             Mode::Mark(id) => return format!("mark {}: d done · b blocked · w working · esc", title_of(id)),
             Mode::Answer(id) => {
                 let q = self.digest.decisions.iter().find(|d| &d.id == id);
@@ -7262,24 +7215,13 @@ mod tests {
                 _ => None,
             })
         };
-        // A project's job is in its folder; a global one's is anywhere.
+        // A job row's summary is of the flow of that name.
         app.select(job_key(&app, "tidy"));
-        assert_eq!(
-            app.summary_target(),
-            Some(SummaryTarget::Job {
-                rule: RuleKind::Schedule,
-                name: "tidy".into(),
-                workspace: Some(folder.clone())
-            })
-        );
+        assert_eq!(app.summary_target(), Some(SummaryTarget::Flow { name: "tidy".into() }));
         app.select(job_key(&app, "nightly"));
         assert_eq!(
             app.summary_target(),
-            Some(SummaryTarget::Job {
-                rule: RuleKind::Schedule,
-                name: "nightly".into(),
-                workspace: None
-            })
+            Some(SummaryTarget::Flow { name: "nightly".into() })
         );
         app.select(Some(format!("g:{}", folder.display())));
         assert_eq!(app.summary_target(), Some(SummaryTarget::Project { workspace: folder }));
@@ -7415,7 +7357,7 @@ mod tests {
         type_in(&mut app, "/summary").await;
         press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
         let s = app.summarising.as_ref().expect("asked");
-        assert!(matches!(s.target, SummaryTarget::Job { .. }), "{:?}", s.target);
+        assert!(matches!(s.target, SummaryTarget::Flow { .. }), "{:?}", s.target);
         assert_eq!(
             s.from,
             Some(oldest),

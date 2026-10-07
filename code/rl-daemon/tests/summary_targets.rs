@@ -1,4 +1,4 @@
-//! `summary.make` past a single run's brief: a project's, a job's or
+//! `summary.make` past a single run's brief: a project's, a flow's or
 //! everything's runs in one call over their lines, a run read deep — in parts
 //! when it is long — and a dry run that only counts the calls. A stretch with
 //! nothing in it asks no one. The fake summariser is set by environment
@@ -72,7 +72,7 @@ async fn cases() {
     nothing_in_the_stretch_asks_no_one().await;
     deep_over_a_long_output_is_read_in_parts().await;
     a_dry_run_says_how_many_calls_and_asks_no_one().await;
-    a_jobs_runs_are_its_firings().await;
+    a_flows_runs_are_its_steps_runs().await;
     a_run_looked_at_just_now_is_told_whole().await;
     a_runs_summary_since_you_looked_stays_once_you_look().await;
     deep_over_a_project_leaves_its_runs_as_they_were().await;
@@ -133,7 +133,7 @@ async fn nothing_in_the_stretch_asks_no_one() {
     for target in [
         json!({"kind": "project", "workspace": dir}),
         json!({"kind": "all"}),
-        json!({"kind": "job", "rule": "schedule", "name": "nightly", "workspace": dir}),
+        json!({"kind": "flow", "name": "nightly"}),
         json!({"kind": "run", "id": r.id}),
     ] {
         for deep in [false, true] {
@@ -225,11 +225,11 @@ async fn a_dry_run_says_how_many_calls_and_asks_no_one() {
     h.stop().await;
 }
 
-async fn a_jobs_runs_are_its_firings() {
+async fn a_flows_runs_are_its_steps_runs() {
     let Some((h, mut c, dir, _tmp)) = with_fake_summariser("nightly: fine").await else {
         return;
     };
-    // A job's runs are those it caused; here a schedule firing, set in the
+    // A flow's runs are those its steps started; here one, set in the
     // ledger as it would be.
     let r: Run = c
         .ok(
@@ -247,31 +247,32 @@ async fn a_jobs_runs_are_its_firings() {
     let id = r.id.clone();
     ledger
         .call_blocking(move |c| {
-            c.execute("UPDATE runs SET cause = 'schedule:nightly' WHERE id = ?1", [id])?;
+            c.execute("UPDATE runs SET cause = 'flow:nightly/test' WHERE id = ?1", [id])?;
             Ok(())
         })
         .unwrap();
-    // No stretch given: from its oldest firing not yet looked at.
-    let target = json!({"kind": "job", "rule": "schedule", "name": "nightly", "workspace": dir});
+    // No stretch given: from its oldest run not yet looked at.
+    let target = json!({"kind": "flow", "name": "nightly"});
     let s: Summary = c.ok("summary.make", json!({"target": target})).await;
     assert_eq!((s.calls, s.text.as_str()), (1, "nightly: fine"), "{s:?}");
-    assert_eq!(s.from, Some(r.started_at), "the unseen firing is in the stretch");
+    assert_eq!(s.from, Some(r.started_at), "the unseen run is in the stretch");
+    assert_eq!(s.target, "f:nightly");
     let prompt = std::fs::read_to_string(std::env::var("FAKE_AGENT_PROMPT").unwrap()).unwrap();
     assert!(prompt.contains("## nightly tests"), "{prompt}");
     assert!(!prompt.contains("by hand"), "{prompt}");
 
-    // Deep, the same stretch reads the firing itself: its output, then the
+    // Deep, the same stretch reads the run itself: its output, then the
     // join.
     let deep: Summary = c.ok("summary.make", json!({"target": target, "deep": true})).await;
     assert_ne!(deep.source, "nothing new", "{deep:?}");
     assert_eq!((deep.calls, deep.text.as_str()), (2, "nightly: fine"), "{deep:?}");
-    let firing: Summary = c
+    let run: Summary = c
         .ok(
             "summary.get",
             json!({"target": {"kind": "run", "id": r.id}, "deep": true}),
         )
         .await;
-    assert_eq!(firing.text, "nightly: fine", "its deep read is kept: {firing:?}");
+    assert_eq!(run.text, "nightly: fine", "its deep read is kept: {run:?}");
     h.stop().await;
 }
 

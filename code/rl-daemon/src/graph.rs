@@ -1,123 +1,80 @@
-//! `graph.get`: the wiring graph, built from the rules as they stand and what
+//! `graph.get`: the wiring graph, built from the flows as they stand and what
 //! the ledger saw in a window. Pure — rows in, a `Graph` out.
 //!
-//! The rules give the nodes and the edges that are always there: a schedule
-//! and what it runs, a reaction and what it runs or asks, a question's
-//! answers and what each runs. The ledger gives the rest: which runs raised
-//! which events, and so which reactions heard them. A run is its rule's
-//! action node when a rule started it; a run you started stands in one node
-//! per folder and kind (`shells` in relay), drawn only when it set something
-//! off. An event a reaction listens for that nothing raised in the window
-//! still shows, as an event node, so every reaction has a way in.
+//! Every flow is a node, there before it has fired. The ledger gives the
+//! rest: which runs raised which events, and so which flows heard them, and
+//! the questions a flow's ask steps put to you. A run is its flow's node when
+//! one of the flow's steps started it; a run you started stands in one node
+//! per folder and kind (`shells` in relay). An event a flow's `on` takes that
+//! nothing raised in the window still shows, as an event node, so every flow
+//! that listens has a way in. The steps inside a flow are not drawn yet.
 
+use crate::action::expand_home;
+use crate::flows::kind_matches;
+use rl_flow::def::FlowDef;
 use rl_ledger::graph::{AskRow, EventCount, RunRow};
-use rl_proto::action::Task;
 use rl_proto::decision::DecisionStatus;
+use rl_proto::flow::Flow;
 use rl_proto::graph::{Edge, Graph, Node, NodeKind, Tally};
-use rl_proto::reaction::Reaction;
-use rl_proto::rule::{Rule, RuleKind};
-use rl_proto::schedule::GLOBAL_SCOPE;
-use rl_proto::types::{Cause, RunKind};
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use rl_proto::types::{Cause, RunKind, RunState};
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 pub struct Inputs<'a> {
-    pub rules: &'a [Rule],
+    pub flows: &'a [Flow],
     pub runs: &'a [RunRow],
     pub events: &'a [EventCount],
     pub asks: &'a [AskRow],
 }
 
 pub fn build(since: jiff::Timestamp, inp: Inputs<'_>) -> Graph {
-    let rules: Vec<&Rule> = inp.rules.iter().filter(|r| r.removed_at().is_none()).collect();
+    // Each flow as loaded: its folder, and what its `on` takes.
+    let flows: Vec<(&Flow, Option<PathBuf>, Vec<String>)> = inp
+        .flows
+        .iter()
+        .filter(|f| f.removed_at.is_none())
+        .map(|f| {
+            let def = serde_json::from_value::<FlowDef>(f.def.clone()).ok();
+            let folder = def.as_ref().and_then(|d| d.in_.as_deref()).map(expand_home);
+            (f, folder, def.map(|d| d.trigger.on).unwrap_or_default())
+        })
+        .collect();
     let mut g = Builder::default();
 
-    // What the files say.
-    for rule in &rules {
-        let id = rule_id(rule);
-        let folder = folder_of(rule.scope());
-        let key = id.clone();
+    for (f, folder, _) in &flows {
         g.node(Node {
-            id: id.clone(),
-            kind: match rule.kind() {
-                RuleKind::Schedule => NodeKind::Schedule,
-                RuleKind::Reaction => NodeKind::Reaction,
-            },
-            name: rule.name().to_string(),
-            folder: folder.clone(),
-            rule: Some(key.clone()),
-            status: Some(rule.status()),
-            detail: rule.when(),
-            next_at: rule.next_at(),
-            runs: Tally::default(),
-            waiting: vec![],
+            status: Some(f.status()),
+            detail: f.when(),
+            next_at: f.next_at,
+            ..bare(&flow_id(&f.name), NodeKind::Flow, &f.name, folder.clone())
         });
-        let task = match rule {
-            Rule::Schedule(s) => s.spec.run.as_ref(),
-            Rule::Reaction(r) if r.spec.ask.is_none() => r.spec.run.as_ref(),
-            Rule::Reaction(_) => None,
-        };
-        if let Some(task) = task {
-            let run = format!("run:{id}");
-            g.node(action(&run, task, folder.clone(), &key, rule));
-            g.edge(&id, &run, "", true);
-        }
-        if let Rule::Reaction(r) = rule
-            && let Some(ask) = &r.spec.ask
-        {
-            let ask_id = format!("ask:{id}");
-            g.node(Node {
-                id: ask_id.clone(),
-                kind: NodeKind::Ask,
-                name: ask.title.clone(),
-                folder: folder.clone(),
-                rule: Some(key.clone()),
-                status: Some(rule.status()),
-                detail: String::new(),
-                next_at: None,
-                runs: Tally::default(),
-                waiting: vec![],
-            });
-            g.edge(&id, &ask_id, "", true);
-            for opt in &ask.options {
-                if let Some(task) = &opt.run {
-                    let run = format!("run:{ask_id}/{}", opt.key);
-                    g.node(action(&run, task, folder.clone(), &key, rule));
-                    g.edge(&ask_id, &run, &opt.key, true);
-                }
-            }
-        }
     }
 
-    // Questions: who is waiting, and what was answered.
-    let asks: HashMap<&str, &AskRow> = inp.asks.iter().map(|a| (a.id.as_str(), a)).collect();
+    // Questions its ask steps put to you: how many, and who is waiting.
     for a in inp.asks {
-        let Some(r) = find(&rules, RuleKind::Reaction, &a.by_reaction, &a.workspace) else {
-            continue;
-        };
-        let ask_id = format!("ask:{}", rule_id(r));
-        if !g.has(&ask_id) {
-            continue;
-        }
-        g.count(&rule_id(r), &ask_id, "", 1);
+        let from = flow_id(&a.flow);
+        let Some(owner) = g.nodes.get(&from) else { continue };
+        let (folder, status) = (owner.folder.clone(), owner.status);
+        let id = ask_id(&a.flow);
+        let node = g.nodes.entry(id.clone()).or_insert_with(|| Node {
+            status,
+            ..bare(&id, NodeKind::Ask, "", folder)
+        });
+        // Oldest first: the newest question names it.
+        node.name = a.title.clone();
         if a.status == DecisionStatus::Open {
-            g.nodes.get_mut(&ask_id).unwrap().waiting.push(a.id.clone());
+            node.waiting.push(a.id.clone());
         }
-        for key in &a.chosen {
-            let run = format!("run:{ask_id}/{key}");
-            if g.has(&run) {
-                g.count(&ask_id, &run, key, 1);
-            }
-        }
+        g.count(&from, &id, "", 1);
     }
 
     // Runs: each onto the node that stands for it.
     for run in inp.runs {
-        let id = g.producer(&rules, &asks, &run.cause, run.kind, &run.workspace);
+        let id = g.producer(&run.cause, run.kind, &run.workspace);
         g.ensure(&id, run.kind, &run.workspace);
         let t = &mut g.nodes.get_mut(&id).unwrap().runs;
         t.total += 1;
-        if run.state == rl_proto::types::RunState::Failed {
+        if run.state == RunState::Failed {
             t.failed += 1;
         }
         if !run.state.is_terminal() {
@@ -125,38 +82,24 @@ pub fn build(since: jiff::Timestamp, inp: Inputs<'_>) -> Graph {
         }
         t.last = Some(run.state);
         t.last_at = Some(run.started_at);
-        // A rule's own edge to what it runs counts its runs.
-        if let Some(rule) = id.strip_prefix("run:").filter(|r| !r.starts_with("ask:")) {
-            let rule = rule.to_string();
-            g.count(&rule, &id, "", 1);
-        }
     }
 
-    // Events: from whoever raised them to every reaction that hears them.
-    let reactions: Vec<&Reaction> = rules
-        .iter()
-        .filter_map(|r| match r {
-            Rule::Reaction(r) => Some(r),
-            _ => None,
-        })
-        .collect();
+    // Events: from whoever raised them to every flow that hears them.
     let mut heard: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for e in inp.events {
-        let from = match (&e.run, &e.asked_by) {
-            (Some((cause, kind, ws)), _) => g.producer(&rules, &asks, cause, *kind, ws),
-            (None, Some(name)) => match find(&rules, RuleKind::Reaction, name, &e.workspace) {
-                Some(r) => format!("ask:{}", rule_id(r)),
-                None => outside(&e.workspace),
-            },
-            (None, None) => outside(&e.workspace),
+        let from = match (&e.run, &e.by_flow) {
+            (Some((cause, kind, ws)), _) => g.producer(cause, *kind, ws),
+            (None, Some(name)) if e.kind.starts_with("decision.") && g.has(&ask_id(name)) => ask_id(name),
+            (None, Some(name)) if g.has(&flow_id(name)) => flow_id(name),
+            (None, _) => outside(&e.workspace),
         };
-        for r in &reactions {
-            if !r.spec.matches_kind(&e.kind) {
+        for (f, _, on) in &flows {
+            if !on.iter().any(|p| kind_matches(p, &e.kind)) {
                 continue;
             }
-            let to = format!("reaction:{}/{}", r.scope, r.name);
-            // Its own doing: a reaction does not hear what it started or asked.
-            if from == format!("run:{to}") || from == format!("ask:{to}") {
+            let to = flow_id(&f.name);
+            // Its own doing: a flow does not hear what its steps did or asked.
+            if from == to || from == ask_id(&f.name) {
                 continue;
             }
             match &e.run {
@@ -168,51 +111,16 @@ pub fn build(since: jiff::Timestamp, inp: Inputs<'_>) -> Graph {
         }
     }
 
-    // What the files say a command raises.
-    for rule in &rules {
-        let emits = match rule {
-            Rule::Schedule(s) => &s.spec.emits,
-            Rule::Reaction(r) => &r.spec.emits,
-        };
-        let from = format!("run:{}", rule_id(rule));
-        if emits.is_empty() || !g.has(&from) {
-            continue;
-        }
-        for kind in emits {
-            for r in &reactions {
-                let to = format!("reaction:{}/{}", r.scope, r.name);
-                if r.spec.matches_kind(kind) && from != format!("run:{to}") {
-                    g.edge(&from, &to, kind, true);
-                    heard.entry(to).or_default().insert(kind.clone());
-                }
-            }
-        }
-    }
-
     // A way in for every pattern nothing raised.
-    for r in &reactions {
-        let to = format!("reaction:{}/{}", r.scope, r.name);
+    for (f, _, on) in &flows {
+        let to = flow_id(&f.name);
         let got = heard.get(&to);
-        for pattern in &r.spec.on {
-            let covered = got.is_some_and(|kinds| kinds.iter().any(|k| matches(pattern, k)));
-            if covered {
+        for pattern in on {
+            if got.is_some_and(|kinds| kinds.iter().any(|k| kind_matches(pattern, k))) {
                 continue;
             }
             let id = format!("event:{pattern}");
-            if !g.has(&id) {
-                g.node(Node {
-                    id: id.clone(),
-                    kind: NodeKind::Event,
-                    name: pattern.clone(),
-                    folder: None,
-                    rule: None,
-                    status: None,
-                    detail: String::new(),
-                    next_at: None,
-                    runs: Tally::default(),
-                    waiting: vec![],
-                });
-            }
+            g.node(bare(&id, NodeKind::Event, pattern, None));
             g.edge(&id, &to, pattern, true);
         }
     }
@@ -232,37 +140,20 @@ impl Builder {
         self.nodes.contains_key(id)
     }
 
-    /// The node a run stands in: its rule's action, an answer's action, or
-    /// its folder's own runs of its kind.
-    fn producer(
-        &self,
-        rules: &[&Rule],
-        asks: &HashMap<&str, &AskRow>,
-        cause: &str,
-        kind: RunKind,
-        ws: &Path,
-    ) -> String {
-        let by_rule = match cause.parse::<Cause>() {
-            Ok(Cause::Schedule(n)) => find(rules, RuleKind::Schedule, &n, ws).map(|r| format!("run:{}", rule_id(r))),
-            Ok(Cause::Reaction(n)) => find(rules, RuleKind::Reaction, &n, ws).map(|r| format!("run:{}", rule_id(r))),
-            Ok(Cause::Decision(id)) => asks.get(id.as_str()).and_then(|a| {
-                let r = find(rules, RuleKind::Reaction, &a.by_reaction, &a.workspace)?;
-                let key = a.chosen.first()?;
-                Some(format!("run:ask:{}/{key}", rule_id(r)))
-            }),
-            _ => None,
-        };
-        match by_rule {
-            Some(id) if self.has(&id) => id,
-            _ => {
-                let k = match kind {
-                    RunKind::Agent => "agents",
-                    RunKind::Shell => "shells",
-                    RunKind::Command | RunKind::Plugin => "commands",
-                };
-                format!("runs:{k}:{}", ws.display())
-            }
+    /// The node a run stands in: its flow, when one of its steps started it,
+    /// or its folder's own runs of its kind.
+    fn producer(&self, cause: &str, kind: RunKind, ws: &Path) -> String {
+        if let Ok(Cause::Flow { flow, .. }) = cause.parse::<Cause>()
+            && self.has(&flow_id(&flow))
+        {
+            return flow_id(&flow);
         }
+        let k = match kind {
+            RunKind::Agent => "agents",
+            RunKind::Shell => "shells",
+            RunKind::Command | RunKind::Plugin => "commands",
+        };
+        format!("runs:{k}:{}", ws.display())
     }
 
     fn node(&mut self, n: Node) {
@@ -338,103 +229,40 @@ fn bare(id: &str, kind: NodeKind, name: &str, folder: Option<PathBuf>) -> Node {
     }
 }
 
-/// What a rule, or one of its answers, runs.
-fn action(id: &str, task: &Task, folder: Option<PathBuf>, key: &str, rule: &Rule) -> Node {
-    Node {
-        id: id.into(),
-        kind: match task {
-            Task::Agent { .. } => NodeKind::Agent,
-            Task::Shell(_) | Task::Argv(_) => NodeKind::Shell,
-        },
-        name: task.label(),
-        folder,
-        rule: Some(key.into()),
-        status: Some(rule.status()),
-        detail: String::new(),
-        next_at: None,
-        runs: Tally::default(),
-        waiting: vec![],
-    }
+fn flow_id(name: &str) -> String {
+    format!("flow:{name}")
 }
 
-fn rule_id(r: &Rule) -> String {
-    format!("{}:{}/{}", r.kind(), r.scope(), r.name())
-}
-
-fn folder_of(scope: &str) -> Option<PathBuf> {
-    (scope != GLOBAL_SCOPE).then(|| PathBuf::from(scope))
+fn ask_id(flow: &str) -> String {
+    format!("ask:{flow}")
 }
 
 fn outside(ws: &Path) -> String {
     format!("outside:{}", ws.display())
 }
 
-fn matches(pattern: &str, kind: &str) -> bool {
-    match pattern.strip_suffix('*') {
-        Some(prefix) => kind.starts_with(prefix),
-        None => pattern == kind,
-    }
-}
-
-/// A rule by kind and name. Names can repeat across files: the one in the
-/// run's own folder wins, then the global one, then any.
-fn find<'a>(rules: &[&'a Rule], kind: RuleKind, name: &str, ws: &Path) -> Option<&'a Rule> {
-    let named: Vec<&'a Rule> = rules
-        .iter()
-        .copied()
-        .filter(|r| r.kind() == kind && r.name() == name)
-        .collect();
-    named
-        .iter()
-        .find(|r| Path::new(r.scope()) == ws)
-        .or_else(|| named.iter().find(|r| r.is_global()))
-        .or_else(|| named.first())
-        .copied()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rl_proto::reaction::ReactionSpec;
-    use rl_proto::schedule::{Schedule, ScheduleSpec};
-    use rl_proto::types::RunState;
-    use serde_json::json;
 
     fn at(s: &str) -> jiff::Timestamp {
         s.parse().unwrap()
     }
 
-    fn schedule(scope: &str, name: &str, spec: serde_json::Value) -> Rule {
-        let spec: ScheduleSpec = serde_json::from_value(spec).unwrap();
-        Rule::Schedule(Schedule {
-            scope: scope.into(),
+    fn flow(name: &str, yaml: &str) -> Flow {
+        let text = format!("---\n{yaml}steps:\n  a:\n    run: x\n---\n");
+        let def = rl_flow::def::check(name, rl_flow::doc::read(&text).unwrap(), &|_| true).unwrap();
+        Flow {
             name: name.into(),
             hash: "h".into(),
-            source: "/x".into(),
-            spec,
+            def: serde_json::to_value(&def).unwrap(),
+            source: PathBuf::new(),
             paused: false,
+            approved_hash: Some("h".into()),
             last_fired_at: None,
-            last_run: None,
             next_at: None,
             removed_at: None,
-            approved_hash: Some("h".into()),
-        })
-    }
-
-    fn reaction(scope: &str, name: &str, spec: serde_json::Value) -> Rule {
-        let spec: ReactionSpec = serde_json::from_value(spec).unwrap();
-        Rule::Reaction(Reaction {
-            scope: scope.into(),
-            name: name.into(),
-            hash: "h".into(),
-            source: "/x".into(),
-            spec,
-            paused: false,
-            last_fired_at: None,
-            last_run: None,
-            removed_at: None,
-            approved_hash: Some("h".into()),
-        })
+        }
     }
 
     fn run(cause: &str, kind: RunKind, ws: &str, state: RunState) -> RunRow {
@@ -452,7 +280,7 @@ mod tests {
             kind: kind.into(),
             workspace: ws.into(),
             run: run.map(|(c, k, w)| (c.to_string(), k, PathBuf::from(w))),
-            asked_by: None,
+            by_flow: None,
             count,
         }
     }
@@ -465,78 +293,69 @@ mod tests {
     }
 
     #[test]
-    fn one_network_across_folders_from_files_and_what_happened() {
-        let rules = vec![
-            schedule(
-                "/w/relay",
-                "check-weather",
-                json!({"cron": "0 7 * * *", "run": "check-weather"}),
-            ),
-            reaction(
-                "/w/relay",
-                "advisory",
-                json!({"on": "weather.alert", "ask": {"title": "add a note?", "options": [
-                    {"key": "note", "run": "echo note >> notes"},
-                    {"key": "skip"},
-                ]}}),
-            ),
-            // Global, and hears failures from every folder.
-            reaction(
-                GLOBAL_SCOPE,
-                "tell-me",
-                json!({"on": ["run.failed", "never.*"], "cwd": "/w", "run": {"agent": "claude", "prompt": "why"}}),
-            ),
+    fn one_network_of_flows_from_what_happened() {
+        let flows = vec![
+            flow("nightly", "in: /w/relay\nwhen: every 1h\n"),
+            // Hears failures from every folder, and a kind nothing raised.
+            flow("notify", "on: [run.failed, never.*]\n"),
+            flow("review", "on: weather.alert\n"),
+            Flow {
+                removed_at: Some(at("2026-09-01T00:00:00Z")),
+                ..flow("gone", "on: run.failed\n")
+            },
         ];
         let runs = vec![
-            run(
-                "schedule:check-weather",
-                RunKind::Command,
-                "/w/relay",
-                RunState::Finished,
-            ),
-            run("schedule:check-weather", RunKind::Command, "/w/relay", RunState::Failed),
+            run("flow:nightly/probe", RunKind::Command, "/w/relay", RunState::Finished),
+            run("flow:nightly/test", RunKind::Command, "/w/relay", RunState::Failed),
             run("manual", RunKind::Shell, "/w/api", RunState::Failed),
             run("manual", RunKind::Shell, "/w/api", RunState::Working),
-            run("decision:d1", RunKind::Command, "/w/relay", RunState::Finished),
-            run("reaction:tell-me", RunKind::Agent, "/w", RunState::Failed),
+            run("flow:notify/a", RunKind::Agent, "/w", RunState::Failed),
         ];
         let events = vec![
             event(
                 "weather.alert",
                 "/w/relay",
-                Some(("schedule:check-weather", RunKind::Command, "/w/relay")),
+                Some(("flow:nightly/probe", RunKind::Command, "/w/relay")),
                 3,
             ),
             event(
                 "run.failed",
                 "/w/relay",
-                Some(("schedule:check-weather", RunKind::Command, "/w/relay")),
+                Some(("flow:nightly/test", RunKind::Command, "/w/relay")),
                 1,
             ),
             event("run.failed", "/w/api", Some(("manual", RunKind::Shell, "/w/api")), 2),
-            // The rule's own failure is not news to it.
-            event("run.failed", "/w", Some(("reaction:tell-me", RunKind::Agent, "/w")), 1),
+            // Its own failure is not news to it.
+            event("run.failed", "/w", Some(("flow:notify/a", RunKind::Agent, "/w")), 1),
+            EventCount {
+                by_flow: Some("review".into()),
+                ..event("decision.raised", "/w", None, 2)
+            },
         ];
         let asks = vec![
             AskRow {
                 id: "d1".into(),
-                by_reaction: "advisory".into(),
-                workspace: "/w/relay".into(),
+                flow: "review".into(),
+                title: "add a note?".into(),
                 status: DecisionStatus::Taken,
-                chosen: vec!["note".into()],
             },
             AskRow {
                 id: "d2".into(),
-                by_reaction: "advisory".into(),
-                workspace: "/w/relay".into(),
+                flow: "review".into(),
+                title: "add another?".into(),
                 status: DecisionStatus::Open,
-                chosen: vec![],
+            },
+            AskRow {
+                id: "d3".into(),
+                flow: "gone".into(),
+                title: "never mind".into(),
+                status: DecisionStatus::Open,
             },
         ];
         let g = build(
             at("2026-09-09T00:00:00Z"),
             Inputs {
-                rules: &rules,
+                flows: &flows,
                 runs: &runs,
                 events: &events,
                 asks: &asks,
@@ -547,93 +366,85 @@ mod tests {
         assert_eq!(
             ids,
             [
-                "ask:reaction:/w/relay/advisory",
+                "ask:review",
                 "event:never.*",
-                "reaction:/w/relay/advisory",
-                "reaction:global/tell-me",
-                "run:ask:reaction:/w/relay/advisory/note",
-                "run:reaction:global/tell-me",
-                "run:schedule:/w/relay/check-weather",
+                "flow:nightly",
+                "flow:notify",
+                "flow:review",
                 "runs:shells:/w/api",
-                "schedule:/w/relay/check-weather",
             ],
-            "a folder's own runs show only because they set something off"
+            "a removed flow is not drawn"
         );
 
-        // The schedule and what it runs: declared, counted.
-        let e = edge(
-            &g,
-            "schedule:/w/relay/check-weather",
-            "run:schedule:/w/relay/check-weather",
+        // A flow, and its runs whichever step ran them.
+        let nightly = g.node("flow:nightly").unwrap();
+        assert_eq!(
+            (nightly.kind, nightly.detail.as_str(), nightly.folder.as_deref()),
+            (NodeKind::Flow, "every 1h", Some(Path::new("/w/relay")))
         );
-        assert_eq!((e.count, e.declared), (2, true));
-        let action = g.node("run:schedule:/w/relay/check-weather").unwrap();
-        assert_eq!((action.kind, action.name.as_str()), (NodeKind::Shell, "check-weather"));
-        assert_eq!((action.runs.total, action.runs.failed), (2, 1));
+        assert_eq!((nightly.runs.total, nightly.runs.failed), (2, 1));
 
-        // What only the ledger knows: the command raised the alert.
-        let e = edge(&g, "run:schedule:/w/relay/check-weather", "reaction:/w/relay/advisory");
+        // What only the ledger knows: nightly raised the alert and failed.
+        let e = edge(&g, "flow:nightly", "flow:review");
         assert_eq!((e.label.as_str(), e.count, e.declared), ("weather.alert", 3, false));
-
-        // The question: one waiting, one answered `note`, whose run is its action's.
-        let ask = g.node("ask:reaction:/w/relay/advisory").unwrap();
-        assert_eq!(ask.waiting, ["d2"]);
-        assert_eq!(
-            edge(&g, "reaction:/w/relay/advisory", "ask:reaction:/w/relay/advisory").count,
-            2
-        );
-        let e = edge(
-            &g,
-            "ask:reaction:/w/relay/advisory",
-            "run:ask:reaction:/w/relay/advisory/note",
-        );
-        assert_eq!((e.label.as_str(), e.count), ("note", 1));
-        assert_eq!(g.node("run:ask:reaction:/w/relay/advisory/note").unwrap().runs.total, 1);
-
-        // Across folders: relay's schedule and api's shells both reach a global rule.
-        assert_eq!(
-            edge(&g, "run:schedule:/w/relay/check-weather", "reaction:global/tell-me").count,
-            1
-        );
-        let e = edge(&g, "runs:shells:/w/api", "reaction:global/tell-me");
+        assert_eq!(edge(&g, "flow:nightly", "flow:notify").count, 1);
+        let e = edge(&g, "runs:shells:/w/api", "flow:notify");
         assert_eq!((e.label.as_str(), e.count), ("run.failed", 2));
         let shells = g.node("runs:shells:/w/api").unwrap();
         assert_eq!((shells.runs.total, shells.runs.going), (2, 1));
-        assert_eq!(g.node("run:reaction:global/tell-me").unwrap().kind, NodeKind::Agent);
         assert!(
-            !g.edges
-                .iter()
-                .any(|e| e.from == "run:reaction:global/tell-me" && e.to == "reaction:global/tell-me"),
-            "no rule hears itself"
+            !g.edges.iter().any(|e| e.from == "flow:notify" && e.to == "flow:notify"),
+            "no flow hears itself"
         );
 
+        // Its questions: one waiting, the newest naming it.
+        let ask = g.node("ask:review").unwrap();
+        assert_eq!((ask.kind, ask.name.as_str()), (NodeKind::Ask, "add another?"));
+        assert_eq!(ask.waiting, ["d2"]);
+        assert_eq!(edge(&g, "flow:review", "ask:review").count, 2);
+
         // A pattern nothing raised still has a way in.
-        let e = edge(&g, "event:never.*", "reaction:global/tell-me");
+        let e = edge(&g, "event:never.*", "flow:notify");
         assert_eq!((e.count, e.declared), (0, true));
         assert!(g.node("event:run.failed").is_none(), "run.failed was heard");
     }
 
     #[test]
-    fn emits_wires_a_command_before_it_has_run() {
-        let rules = vec![
-            schedule(
-                "/w/a",
-                "probe",
-                json!({"every": "1h", "run": "probe", "emits": ["logs.error"]}),
-            ),
-            reaction("/w/b", "triage", json!({"on": "logs.*", "run": "triage"})),
+    fn a_flows_own_events_and_questions_come_from_it() {
+        let flows = vec![
+            flow("asker", "on: custom.thing\n"),
+            flow("watch", "on: [flow.ended, decision.*]\n"),
         ];
+        let events = vec![
+            EventCount {
+                by_flow: Some("asker".into()),
+                ..event("flow.ended", "/h", None, 1)
+            },
+            EventCount {
+                by_flow: Some("asker".into()),
+                ..event("decision.raised", "/h", None, 1)
+            },
+            event("decision.raised", "/w", None, 1),
+        ];
+        let asks = vec![AskRow {
+            id: "d1".into(),
+            flow: "asker".into(),
+            title: "go?".into(),
+            status: DecisionStatus::Open,
+        }];
         let g = build(
             at("2026-09-09T00:00:00Z"),
             Inputs {
-                rules: &rules,
+                flows: &flows,
                 runs: &[],
-                events: &[],
-                asks: &[],
+                events: &events,
+                asks: &asks,
             },
         );
-        let e = edge(&g, "run:schedule:/w/a/probe", "reaction:/w/b/triage");
-        assert_eq!((e.label.as_str(), e.count, e.declared), ("logs.error", 0, true));
-        assert!(g.node("event:logs.*").is_none(), "declared counts as heard");
+        assert_eq!(edge(&g, "flow:asker", "flow:watch").label, "flow.ended");
+        assert_eq!(edge(&g, "ask:asker", "flow:watch").label, "decision.raised");
+        let e = edge(&g, "outside:/w", "flow:watch");
+        assert_eq!((e.label.as_str(), e.count), ("decision.raised", 1));
+        assert!(edge(&g, "event:custom.thing", "flow:asker").declared);
     }
 }

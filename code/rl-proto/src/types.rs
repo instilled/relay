@@ -427,20 +427,16 @@ pub struct Summary {
     pub runs: u32,
 }
 
-/// What a summary is of: a run, a schedule's or a reaction's runs, a
-/// project's, or everything.
+/// What a summary is of: a run, a flow's runs, a project's, or everything.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SummaryTarget {
     Run {
         id: String,
     },
-    /// A schedule's or a reaction's runs; `workspace` None for a global rule.
-    Job {
-        rule: crate::rule::RuleKind,
+    /// A flow's runs: those of its steps, wherever they ran.
+    Flow {
         name: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        workspace: Option<PathBuf>,
     },
     Project {
         workspace: PathBuf,
@@ -449,15 +445,11 @@ pub enum SummaryTarget {
 }
 
 impl SummaryTarget {
-    /// How it is kept: `r:<id>`, `j:<kind>:<name>@<workspace|everywhere>`,
-    /// `p:<path>`, `all`.
+    /// How it is kept: `r:<id>`, `f:<name>`, `p:<path>`, `all`.
     pub fn key(&self) -> String {
         match self {
             SummaryTarget::Run { id } => format!("r:{id}"),
-            SummaryTarget::Job { rule, name, workspace } => match workspace {
-                Some(w) => format!("j:{rule}:{name}@{}", w.display()),
-                None => format!("j:{rule}:{name}@everywhere"),
-            },
+            SummaryTarget::Flow { name } => format!("f:{name}"),
             SummaryTarget::Project { workspace } => format!("p:{}", workspace.display()),
             SummaryTarget::All => "all".into(),
         }
@@ -575,20 +567,9 @@ mod tests {
 
     #[test]
     fn a_target_is_kept_by_a_key_that_says_what_it_is() {
-        use crate::rule::RuleKind;
         assert_eq!(SummaryTarget::Run { id: "ab12".into() }.key(), "r:ab12");
-        let job = SummaryTarget::Job {
-            rule: RuleKind::Schedule,
-            name: "nightly".into(),
-            workspace: Some(PathBuf::from("/w/api")),
-        };
-        assert_eq!(job.key(), "j:schedule:nightly@/w/api");
-        let global = SummaryTarget::Job {
-            rule: RuleKind::Reaction,
-            name: "tell".into(),
-            workspace: None,
-        };
-        assert_eq!(global.key(), "j:reaction:tell@everywhere");
+        let flow = SummaryTarget::Flow { name: "nightly".into() };
+        assert_eq!(flow.key(), "f:nightly");
         assert_eq!(
             SummaryTarget::Project {
                 workspace: PathBuf::from("/w/api")

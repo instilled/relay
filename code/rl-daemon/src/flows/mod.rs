@@ -10,6 +10,8 @@ pub(crate) mod rpc;
 mod store;
 mod triggers;
 
+pub(crate) use triggers::kind_matches;
+
 use crate::decisions::Decisions;
 use crate::supervisor::Supervisor;
 use anyhow::Result;

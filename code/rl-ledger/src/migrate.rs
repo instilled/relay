@@ -39,12 +39,18 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
     ),
     (20, "0020_chain", include_str!("../migrations/0020_chain.sql")),
     (21, "0021_flows", include_str!("../migrations/0021_flows.sql")),
+    (22, "0022_drop_rules", include_str!("../migrations/0022_drop_rules.sql")),
 ];
 
 pub fn run(conn: &mut Connection) -> Result<()> {
+    run_to(conn, latest())
+}
+
+/// Applies the migrations after the ledger's own, up to `last`.
+fn run_to(conn: &mut Connection, last: i32) -> Result<()> {
     let current: i32 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
     for (n, name, sql) in MIGRATIONS {
-        if *n <= current {
+        if *n <= current || *n > last {
             continue;
         }
         let tx = conn.transaction()?;
@@ -93,12 +99,8 @@ mod tests {
                 "hidden",
                 "meta",
                 "presence",
-                "reaction_specs",
-                "reactions",
                 "row_order",
                 "runs",
-                "schedule_specs",
-                "schedules",
                 "session_io",
                 "sessions",
                 "steps",
@@ -108,5 +110,85 @@ mod tests {
                 "workspaces"
             ]
         );
+    }
+    /// What the old rules left at 21 is cleared at 22: a schedule's run with
+    /// all of it, the question it raised and the run the answer started, a
+    /// reaction's question, the job rows' keys and the reactor's cursor. A
+    /// run started by hand stays, with everything of its own.
+    #[test]
+    fn what_the_old_rules_left_goes_and_the_rest_stays() {
+        let mut c = Connection::open_in_memory().unwrap();
+        c.pragma_update(None, "foreign_keys", "ON").unwrap();
+        run_to(&mut c, 21).unwrap();
+        c.execute_batch(
+            "INSERT INTO runs (id, workspace, kind, title, argv_json, cwd, state, source, confidence, state_at, started_at, cause)
+               VALUES ('sched01', '/w', 'command', 'probe', '[]', '/w', 'finished', 'relay', 'exact', 1, 1, 'schedule:nightly'),
+                      ('answer1', '/w', 'command', 'act', '[]', '/w', 'finished', 'relay', 'exact', 2, 2, 'decision:dq000001'),
+                      ('react01', '/w', 'command', 'tell', '[]', '/w', 'finished', 'relay', 'exact', 2, 2, 'reaction:tell'),
+                      ('manual1', '/w', 'shell', 'zsh', '[]', '/w', 'finished', 'relay', 'exact', 3, 3, 'manual');
+             INSERT INTO sessions (run, socket, exit_file, log, pid, holder_pid, tty, cols, rows, started_at)
+               VALUES ('sched01', 's', 'e', 'l', 1, 1, 0, 80, 24, 1), ('manual1', 's', 'e', 'l', 1, 1, 1, 80, 24, 3);
+             INSERT INTO session_io (run, seq, direction, data, ts)
+               VALUES ('sched01', 0, 'out', x'00', 1), ('manual1', 0, 'out', x'00', 3);
+             INSERT INTO summaries (run, agent, by_run, at, text) VALUES ('sched01', 'a', 'x', 1, 't'), ('manual1', 'a', 'x', 3, 't');
+             INSERT INTO transcripts (run, path) VALUES ('sched01', '/t'), ('manual1', '/t');
+             INSERT INTO decisions (id, created_at, updated_at, workspace, run, chain, title, options_json, status, by_reaction)
+               VALUES ('dq000001', 1, 1, '/w', 'sched01', 'sched01', 'act?', '[]', 'taken', NULL),
+                      ('dq000002', 1, 1, '/w', NULL, 'dq000002', 'tell?', '[]', 'open', 'tell'),
+                      ('dq000003', 3, 3, '/w', 'manual1', 'manual1', 'mine?', '[]', 'open', NULL);
+             INSERT INTO events (at, workspace, run, group_key, kind, summary, data_json)
+               VALUES (1, '/w', 'sched01', '/w', 'run.started', 's', NULL),
+                      (1, '/w', NULL, '/w', 'schedule.skipped', 's', NULL),
+                      (1, '/w', NULL, '/w', 'decision.taken', 's', '{\"decision\":\"dq000001\"}'),
+                      (1, '/w', NULL, '/w', 'decision.raised', 's', '{\"decision\":\"dq000002\"}'),
+                      (2, '/w', 'answer1', '/w', 'run.started', 's', NULL),
+                      (3, '/w', 'manual1', '/w', 'run.started', 's', NULL),
+                      (3, '/w', 'manual1', '/w', 'decision.raised', 's', '{\"decision\":\"dq000003\"}');
+             INSERT INTO summary_kept (target, deep, agent, by_run, at, text, source, reach)
+               VALUES ('r:sched01', 1, 'a', 'x', 1, 't', 's', 'r'), ('j:schedule:nightly@/w', 0, 'a', 'x', 1, 't', 's', 'r'),
+                      ('r:manual1', 1, 'a', 'x', 3, 't', 's', 'r');
+             INSERT INTO row_order (group_key, row_key, pos)
+               VALUES ('g:/w', 'r:answer1', 0), ('g:/w', 'j:schedule:nightly@/w', 1), ('g:/w', 'r:manual1', 2);
+             INSERT INTO hidden (key, hidden_at) VALUES ('j:reaction:tell@everywhere', 1), ('g:/elsewhere', 1);
+             INSERT INTO meta (key, value) VALUES ('reactions.cursor', '7'), ('flows.cursor', '7');
+             INSERT INTO schedule_specs (hash, spec_json, first_seen_at) VALUES ('h', '{}', 1);
+             INSERT INTO schedules (scope, name, hash, source) VALUES ('global', 'nightly', 'h', '/s');
+             INSERT INTO reaction_specs (hash, spec_json, first_seen_at) VALUES ('h', '{}', 1);
+             INSERT INTO reactions (scope, name, hash, source) VALUES ('global', 'tell', 'h', '/r');",
+        )
+        .unwrap();
+        run(&mut c).unwrap();
+        assert_eq!(version(&c).unwrap(), 22);
+        let col = |sql: &str| -> Vec<String> {
+            c.prepare(sql)
+                .unwrap()
+                .query_map([], |r| r.get(0))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
+        };
+        assert_eq!(col("SELECT id FROM runs"), ["manual1"]);
+        assert_eq!(col("SELECT run FROM sessions"), ["manual1"]);
+        assert_eq!(col("SELECT run FROM session_io"), ["manual1"]);
+        assert_eq!(col("SELECT run FROM summaries"), ["manual1"]);
+        assert_eq!(col("SELECT run FROM transcripts"), ["manual1"]);
+        assert_eq!(col("SELECT id FROM decisions"), ["dq000003"]);
+        assert_eq!(
+            col("SELECT kind FROM events ORDER BY id"),
+            ["run.started", "decision.raised"],
+            "only the manual run's"
+        );
+        assert_eq!(col("SELECT target FROM summary_kept"), ["r:manual1"]);
+        assert_eq!(col("SELECT row_key FROM row_order"), ["r:manual1"]);
+        assert_eq!(col("SELECT key FROM hidden"), ["g:/elsewhere"]);
+        assert_eq!(col("SELECT key FROM meta"), ["flows.cursor"]);
+        let gone = col(
+            "SELECT name FROM sqlite_master WHERE name IN ('schedules', 'schedule_specs', 'reactions', 'reaction_specs', 'old_runs', 'old_decisions')",
+        );
+        assert!(gone.is_empty(), "{gone:?}");
+        let columns = col("SELECT name FROM pragma_table_info('decisions')");
+        assert!(!columns.iter().any(|c| c == "by_reaction"), "{columns:?}");
+        let broken = col("SELECT \"table\" FROM pragma_foreign_key_check");
+        assert!(broken.is_empty(), "{broken:?}");
     }
 }

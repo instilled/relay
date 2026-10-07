@@ -710,17 +710,15 @@ impl Method for ScheduleReload {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkspaceUpParams {
     pub path: PathBuf,
-    /// Approve every pending schedule version in it.
-    #[serde(default)]
-    pub approve: bool,
 }
 
-/// Registers a folder and loads its `.relay/`.
+/// Registers a folder, so flows can run in it (`in:`); registered already,
+/// it is as it was.
 pub struct WorkspaceUp;
 impl Method for WorkspaceUp {
     const NAME: &'static str = "workspace.up";
     type Params = WorkspaceUpParams;
-    type Result = crate::schedule::UpReport;
+    type Result = crate::schedule::Workspace;
 }
 
 pub struct WorkspaceList;
@@ -730,12 +728,11 @@ impl Method for WorkspaceList {
     type Result = Vec<crate::schedule::Workspace>;
 }
 
-/// Unregisters a folder: its rules stop, are marked removed and forget their
-/// approvals, and its open questions are dismissed. The folder need not exist
-/// any more, nor have been registered — a folder the list shows only for its
-/// runs is removed by what the flags do to those. Asked to, it also stops
-/// every run still going there, archives what has ended, and moves the rule
-/// files of its `.relay/` into the Relay home's `removed/`.
+/// Unregisters a folder: its open questions are dismissed, and flows `in` it
+/// no longer load. The folder need not exist any more, nor have been
+/// registered — a folder the list shows only for its runs is removed by what
+/// the flags do to those. Asked to, it also stops every run still going
+/// there, and archives what has ended.
 pub struct WorkspaceRemove;
 impl Method for WorkspaceRemove {
     const NAME: &'static str = "workspace.remove";
@@ -753,11 +750,6 @@ pub struct WorkspaceRemoveParams {
     /// Archive the folder's ended runs, those just stopped included.
     #[serde(default)]
     pub archive_runs: bool,
-    /// Move `.relay/schedules.yaml` and `reactions.yaml` to
-    /// `<home>/removed/<name>-<when>/`. Refused, before anything is done,
-    /// when `.relay` is a symlink or is the Relay home.
-    #[serde(default)]
-    pub move_rules: bool,
 }
 
 /// What removing a folder did.
@@ -777,9 +769,6 @@ pub struct WorkspaceRemoved {
     /// Open questions from the folder, dismissed.
     #[serde(default)]
     pub dismissed: usize,
-    /// Where the rule files went, when they were moved.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub rules_moved_to: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

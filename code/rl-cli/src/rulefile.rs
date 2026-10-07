@@ -81,12 +81,9 @@ pub async fn install(
         ))
     };
     if let (Some(path), false) = (&d.folder, registered) {
-        rpc.call::<WorkspaceUp>(WorkspaceUpParams {
-            path: path.clone(),
-            approve: true,
-        })
-        .await
-        .map_err(partial)?;
+        rpc.call::<WorkspaceUp>(WorkspaceUpParams { path: path.clone() })
+            .await
+            .map_err(partial)?;
     } else {
         match d.kind {
             RuleKind::Schedule => {

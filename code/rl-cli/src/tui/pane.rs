@@ -78,10 +78,8 @@ fn summary_of(target: &str) -> Option<String> {
     if let Some(path) = target.strip_prefix("p:") {
         return Some(format!("the project {}", display_path(Path::new(path))));
     }
-    let job = target.strip_prefix("j:")?;
-    let (rule, rest) = job.split_once(':')?;
-    let name = rest.split_once('@').map_or(rest, |(n, _)| n);
-    Some(format!("the {rule} {name}"))
+    let name = target.strip_prefix("f:")?;
+    Some(format!("the flow {name}"))
 }
 
 /// What `rl summary` says under the text: what it is of, from when, how deep,
@@ -944,26 +942,16 @@ mod tests {
             summary_label(&s, now),
             "summary of everything · deep · by fakeai · 2 calls"
         );
-        let job = Summary {
-            target: "j:schedule:nightly@everywhere".into(),
+        let flow = Summary {
+            target: "f:nightly".into(),
             deep: false,
             calls: 1,
             stale: true,
             ..s.clone()
         };
         assert_eq!(
-            summary_label(&job, now),
-            "summary of the schedule nightly · by fakeai · 1 call · moved on since"
-        );
-        // A folder may have an `@` in it; a job's name has none.
-        let there = Summary {
-            target: "j:reaction:fix@/w/me@work".into(),
-            ..job.clone()
-        };
-        assert!(
-            summary_label(&there, now).starts_with("summary of the reaction fix · "),
-            "{}",
-            summary_label(&there, now)
+            summary_label(&flow, now),
+            "summary of the flow nightly · by fakeai · 1 call · moved on since"
         );
         let run = Summary {
             target: "r:abc".into(),

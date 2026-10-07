@@ -3,7 +3,7 @@
 //! A run raises a question with `rl ask` and carries on; the question waits in
 //! the ledger. Choosing an option starts whatever that option carries, as an
 //! ordinary run with `cause: decision:<id>` and the decision's `chain`, so a
-//! schedule → question → follow-up is one chain. A decision with an `expires`
+//! run → question → follow-up is one chain. A decision with an `expires`
 //! either falls back to its default option or expires unanswered; the sweep
 //! that does it is the only clock involved.
 
@@ -31,8 +31,6 @@ const IDLE: Duration = Duration::from_secs(300);
 #[derive(Clone, Copy)]
 enum By<'a> {
     Nobody,
-    /// A reaction's name, and the id of the event it heard.
-    Reaction(&'a str, i64),
     /// A flow's ask step.
     Step {
         firing: &'a str,
@@ -68,18 +66,7 @@ impl Decisions {
     /// Raises a question. With a `group`, an open question with that key is
     /// restated rather than duplicated, keeping its id.
     pub async fn raise(&self, spec: DecisionSpec) -> Result<Decision> {
-        self.raise_by(spec, None).await
-    }
-
-    /// The same, remembering the reaction behind it — its name and the id of
-    /// the event it heard — so that rule never answers, or reacts to, its own
-    /// question, and what the question answers is known.
-    pub async fn raise_by(&self, spec: DecisionSpec, by_reaction: Option<(&str, i64)>) -> Result<Decision> {
-        self.raise_as(
-            spec,
-            by_reaction.map_or(By::Nobody, |(name, event)| By::Reaction(name, event)),
-        )
-        .await
+        self.raise_as(spec, By::Nobody).await
     }
 
     /// The same, for a flow's ask step: in the firing's chain, restated or not, and owned by
@@ -175,10 +162,6 @@ impl Decisions {
         }
         // Stored with who owns it in one go, so it is never taken before its owner is known.
         let (open, d2) = (existing.map(|o| o.id), d.clone());
-        let reaction = match by {
-            By::Reaction(name, _) => Some(name.to_string()),
-            _ => None,
-        };
         let owner = match by {
             By::Step { firing, step } => Some(format!("{firing}/{step}")),
             _ => None,
@@ -191,9 +174,6 @@ impl Decisions {
                     Some(id) => decisions::restate(&tx, id, &d2, now)?,
                     None => decisions::insert(&tx, &d2)?,
                 };
-                if let Some(name) = &reaction {
-                    decisions::set_by_reaction(&tx, &stored.id, name)?;
-                }
                 if let Some(owner) = &owner {
                     decisions::set_by_step(&tx, &stored.id, owner)?;
                 }
@@ -201,11 +181,7 @@ impl Decisions {
                 Ok(stored)
             })
             .await?;
-        let mut data = json!({ "decision": stored.id, "options": stored.options.iter().map(|o| &o.key).collect::<Vec<_>>(), "restated": restated });
-        if let By::Reaction(name, event) = by {
-            data["reaction"] = json!(name);
-            data["event"] = json!(event);
-        }
+        let data = json!({ "decision": stored.id, "options": stored.options.iter().map(|o| &o.key).collect::<Vec<_>>(), "restated": restated });
         self.append(
             &stored,
             event_kind::DECISION_RAISED,

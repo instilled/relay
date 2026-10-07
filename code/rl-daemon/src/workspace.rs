@@ -1,18 +1,18 @@
-//! Taking a project away: `workspace.remove`. Unregistering is the old half —
-//! its rules stop and are marked removed. What a project leaves behind is the
-//! new: the runs still going there, the ended ones that keep its header on
-//! the list, the questions it asked, the yes given to its rules, and its
-//! `.relay/`. Each goes only as far as the caller asks; nothing is deleted.
+//! Projects: `workspace.up` registers a folder so flows can run in it,
+//! `workspace.list` and `workspace.rename` read and name them, and
+//! `workspace.remove` takes one away — the runs still going there, the ended
+//! ones that keep its header on the list, the questions it asked, and the
+//! flows `in` it, which no longer load. Each goes only as far as the caller
+//! asks; nothing is deleted.
 
-use crate::rulestore::resolve;
 use crate::server::Daemon;
-use anyhow::{Context, Result, bail};
-use rl_core::rules_dir::{self, RulesDir};
+use anyhow::{Context, Result, anyhow, bail};
+use rl_core::time;
 use rl_ledger::{decisions, runs, workspaces};
 use rl_proto::methods::{WorkspaceRemoveParams, WorkspaceRemoved};
-use rl_proto::schedule::WORKSPACE_DIR;
+use rl_proto::schedule::Workspace;
 use rl_proto::types::{Run, RunKind};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use tracing::{info, warn};
 
@@ -24,31 +24,67 @@ const KILLED: Duration = Duration::from_secs(3);
 /// The note a question dismissed this way carries.
 const DISMISS_NOTE: &str = "its project was removed";
 
+/// A folder as the ledger keys it: its canonical path, or — once it is gone
+/// from disk — its canonical parent with its own name, or else just as given.
+/// Registered paths are canonical, so a folder deleted since can still be
+/// named the way it was named then.
+fn resolve(path: &Path) -> PathBuf {
+    if let Ok(p) = std::fs::canonicalize(path) {
+        return p;
+    }
+    if let (Some(parent), Some(name)) = (path.parent(), path.file_name())
+        && let Ok(p) = std::fs::canonicalize(parent)
+    {
+        return p.join(name);
+    }
+    path.to_path_buf()
+}
+
+/// Registers a folder, named for itself; one registered already is as it was.
+pub async fn up(d: &Daemon, path: &Path) -> Result<Workspace> {
+    let path = std::fs::canonicalize(path).with_context(|| format!("workspace {}", path.display()))?;
+    if !path.is_dir() {
+        bail!("{} is not a directory", path.display());
+    }
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.to_string_lossy().into_owned());
+    let now = time::now();
+    let w = {
+        let path = path.clone();
+        d.ledger
+            .call(move |c| workspaces::register(c, &path, &name, now))
+            .await?
+    };
+    info!(workspace = %path.display(), "workspace up");
+    Ok(w)
+}
+
+pub async fn list(d: &Daemon) -> Result<Vec<Workspace>> {
+    d.ledger.call(|c| workspaces::list(c)).await
+}
+
+/// Renames a registered folder (any spelling of its path), keeping
+/// everything else. Fails when the folder was never `rl up`'d.
+pub async fn rename(d: &Daemon, path: &Path, name: &str) -> Result<Workspace> {
+    let (path, name) = (resolve(path), name.to_string());
+    d.ledger
+        .call(move |c| workspaces::rename(c, &path, &name))
+        .await?
+        .ok_or_else(|| anyhow!("not a registered workspace; `rl up` there first"))
+}
+
 pub async fn remove(d: &Daemon, p: WorkspaceRemoveParams) -> Result<WorkspaceRemoved> {
     let path = resolve(&p.path);
-    // Every check before anything is done, so a refusal leaves all as it was.
-    let relay = path.join(WORKSPACE_DIR);
-    let movable = if p.move_rules {
-        match rules_dir::rules_dir(&relay, &d.home) {
-            RulesDir::Symlink => bail!("{} is a symlink; it is left where it is", relay.display()),
-            RulesDir::Home => bail!("{} is the Relay home; it is left where it is", relay.display()),
-            RulesDir::Nothing => false,
-            RulesDir::Movable(_) => true,
-        }
-    } else {
-        false
-    };
-    let name = {
+    let removed = {
         let p2 = path.clone();
-        d.ledger.call(move |c| workspaces::get(c, &p2)).await?
+        d.ledger.call(move |c| workspaces::remove(c, &p2)).await?
+    };
+    // Flows `in` it no longer load, so nothing new starts there while the rest goes.
+    if let Err(e) = d.flows.reload().await {
+        warn!(error = %format!("{e:#}"), "flows not reloaded");
     }
-    .map(|w| w.name)
-    .or_else(|| path.file_name().map(|n| n.to_string_lossy().into_owned()))
-    .unwrap_or_else(|| "project".into());
-
-    // Its rules first, so nothing new starts there while the rest goes.
-    d.reactor.remove_scope(&path).await?;
-    let removed = d.scheduler.remove_workspace(&path).await?;
 
     let asked = {
         let p2 = path.clone();
@@ -65,28 +101,15 @@ pub async fn remove(d: &Daemon, p: WorkspaceRemoveParams) -> Result<WorkspaceRem
     let (stopped, still_running) = if p.stop_runs { stop_all(d, &path).await? } else { (0, 0) };
 
     let archived = if p.archive_runs {
-        let (p2, now) = (path.clone(), rl_core::time::now());
+        let (p2, now) = (path.clone(), time::now());
         d.ledger.call(move |c| runs::archive_workspace(c, &p2, now)).await?
     } else {
         0
     };
 
-    let rules_moved_to = if movable {
-        let (relay, home, now) = (relay.clone(), d.home.clone(), rl_core::time::now());
-        let n = name.clone();
-        Some(
-            tokio::task::spawn_blocking(move || rules_dir::move_aside(&relay, &home, &n, now))
-                .await
-                .context("moving the rules")??,
-        )
-    } else {
-        None
-    };
-
     info!(
         workspace = %path.display(),
         removed, stopped, still_running, archived, dismissed,
-        rules_moved = rules_moved_to.is_some(),
         "workspace removed"
     );
     Ok(WorkspaceRemoved {
@@ -96,7 +119,6 @@ pub async fn remove(d: &Daemon, p: WorkspaceRemoveParams) -> Result<WorkspaceRem
         still_running,
         archived,
         dismissed,
-        rules_moved_to,
     })
 }
 

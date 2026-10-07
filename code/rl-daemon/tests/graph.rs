@@ -1,90 +1,63 @@
-//! `graph.get` over the socket: rules from the user's own file, and what the
-//! ledger saw — a folder's failing shells reach a global reaction, and a
-//! question's own events are traced back to the reaction that asked it.
+//! `graph.get` over the socket: every flow a node, a flow's failures reaching
+//! another flow's `on`, and an ask step's question drawn as the flow's ask
+//! node, waiting on you.
 
 mod common;
 
-use common::Conn;
+use common::{Conn, Harness};
 use jiff::{SignedDuration, Timestamp};
 use rl_core::Home;
-use rl_ledger::events::NewEvent;
-use rl_ledger::{Ledger, decisions, events, runs};
-use rl_proto::decision::{Decision, DecisionOption, DecisionStatus};
+use rl_proto::flow::{Firing, FiringStatus, Flow, FlowStatus};
 use rl_proto::graph::{Graph, NodeKind};
-use rl_proto::types::{Run, RunKind, RunState, event_kind};
 use serde_json::json;
-use std::time::Duration;
-use tokio_util::sync::CancellationToken;
+use std::time::{Duration, Instant};
+
+/// Polls `flow.firings` every 50 ms for 10 s until the newest firing of `flow` is `there`.
+async fn wait_firing(c: &mut Conn, flow: &str, there: impl Fn(&Firing) -> bool) -> Firing {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let firings: Vec<Firing> = c.ok("flow.firings", json!({ "flow": flow })).await;
+        if let Some(f) = firings.into_iter().next().filter(|f| there(f)) {
+            return f;
+        }
+        assert!(Instant::now() < deadline, "`{flow}` never got there");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
 
 #[tokio::test]
-async fn the_graph_joins_rules_to_what_happened() {
+async fn the_graph_joins_flows_to_what_happened() {
     let tmp = tempfile::tempdir().unwrap();
     let home = Home::at(tmp.path().join("home"));
-    home.ensure_dirs().unwrap();
-    std::fs::write(
-        home.reactions_file(),
-        "reactions:\n  \
-           tell-me:\n    \
-             on: [run.failed, decision.raised]\n    \
-             cwd: /tmp\n    \
-             run: 'true'\n  \
-           asker:\n    \
-             on: custom.thing\n    \
-             cwd: /tmp\n    \
-             ask:\n      \
-               title: go?\n      \
-               options:\n        \
-                 - key: yes\n          \
-                   run: 'true'\n",
-    )
-    .unwrap();
-    let token = CancellationToken::new();
-    let server = tokio::spawn(rl_daemon::serve(home.clone(), token.clone()));
-    let mut c = Conn::open(&home).await;
-
-    // An hour ago: inside the window, too old for the reactor to act on.
-    let then = Timestamp::now() - SignedDuration::from_hours(1);
-    let side = Ledger::open(&home.ledger()).unwrap();
-    let mut shell = Run::new("shell001", RunKind::Shell, "zsh", vec![], "/w/api", "/w/api", then);
-    shell.state = RunState::Failed;
-    let failed = NewEvent::for_run(&shell, then, event_kind::RUN_FAILED, "exit 1");
-    let question = Decision {
-        id: "dq000001".into(),
-        workspace: "/tmp".into(),
-        run: None,
-        chain: "dq000001".into(),
-        group: Some("asker".into()),
-        title: "go?".into(),
-        summary: None,
-        options: vec![DecisionOption::new("yes", "")],
-        multi: false,
-        status: DecisionStatus::Open,
-        created_at: then,
-        updated_at: then,
-        expires_at: None,
-        resolved_at: None,
-        chosen: vec![],
-        outcome_runs: vec![],
-        note: None,
+    for (name, md) in [
+        ("nightly", "---\nsteps:\n  a:\n    run: exit 1\n---\n"),
+        (
+            "notify",
+            "---\non: [run.failed, never.*]\nwhere: { cause: \"flow:nightly\" }\nsteps:\n  tell:\n    run: \"true\"\n---\n",
+        ),
+        (
+            "asker",
+            "---\nsteps:\n  review:\n    ask: \"go?\"\n    options: { yes: { run: \"true\" } }\n---\n",
+        ),
+    ] {
+        let dir = home.flow_dir(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("flow.md"), md).unwrap();
+    }
+    let Some(h) = Harness::on(home) else {
+        eprintln!("skipping: rl-session not built (run `cargo test --workspace`)");
+        return;
     };
-    let raised = NewEvent {
-        at: then,
-        workspace: "/tmp".into(),
-        run: None,
-        group_key: "asker".into(),
-        kind: "decision.raised".into(),
-        summary: "go?".into(),
-        data: Some(json!({"decision": "dq000001"})),
-    };
-    side.call_blocking(move |db| {
-        runs::insert(db, &shell)?;
-        events::append(db, &failed)?;
-        decisions::insert(db, &question)?;
-        decisions::set_by_reaction(db, "dq000001", "asker")?;
-        events::append(db, &raised)?;
-        Ok(())
-    })
-    .unwrap();
+    let mut c = Conn::open(&h.home).await;
+    for name in ["nightly", "notify", "asker"] {
+        let _: Flow = c.ok("flow.approve", json!({ "name": name })).await;
+    }
+    let _: Firing = c.ok("flow.run", json!({ "name": "nightly" })).await;
+    let _: Firing = c.ok("flow.run", json!({ "name": "asker" })).await;
+    wait_firing(&mut c, "notify", |f| f.ended_at.is_some()).await;
+    wait_firing(&mut c, "nightly", |f| f.ended_at.is_some()).await;
+    let asked = wait_firing(&mut c, "asker", |f| f.status == FiringStatus::Waiting).await;
+    let question = asked.steps[0].decision.clone().expect("asked");
 
     let g: Graph = c.ok("graph.get", json!({})).await;
     let edge = |from: &str, to: &str| {
@@ -94,38 +67,30 @@ async fn the_graph_joins_rules_to_what_happened() {
             .unwrap_or_else(|| panic!("no edge {from} → {to} in {:#?}", g.edges))
     };
 
-    let shells = g
-        .node("runs:shells:/w/api")
-        .expect("the folder's shells set something off");
-    assert_eq!((shells.kind, shells.runs.failed), (NodeKind::Shell, 1));
-    let e = edge("runs:shells:/w/api", "reaction:global/tell-me");
-    assert_eq!((e.label.as_str(), e.count), ("run.failed", 1));
+    let nightly = g.node("flow:nightly").expect("every flow is a node");
+    assert_eq!(
+        (nightly.kind, nightly.status, nightly.detail.as_str()),
+        (NodeKind::Flow, Some(FlowStatus::On), "by hand")
+    );
+    assert_eq!((nightly.runs.total, nightly.runs.failed), (1, 1));
+    let e = edge("flow:nightly", "flow:notify");
+    assert_eq!((e.label.as_str(), e.count, e.declared), ("run.failed", 1, false));
 
-    // The question's event comes from the question, not from nowhere.
-    let ask = g.node("ask:reaction:global/asker").unwrap();
-    assert_eq!(ask.waiting, ["dq000001"]);
-    let e = edge("ask:reaction:global/asker", "reaction:global/tell-me");
-    assert_eq!((e.label.as_str(), e.count), ("decision.raised", 1));
+    // The ask step's question, waiting.
+    let ask = g.node("ask:asker").unwrap();
+    assert_eq!((ask.kind, ask.name.as_str()), (NodeKind::Ask, "go?"));
+    assert_eq!(ask.waiting, [question]);
+    assert_eq!(edge("flow:asker", "ask:asker").count, 1);
+
+    // What nothing raised is a way in.
+    assert!(edge("event:never.*", "flow:notify").declared);
     assert!(g.nodes.iter().all(|n| n.kind != NodeKind::Outside));
 
-    // Declared: the answer and what it runs, and the event nothing raised.
-    assert!(edge("ask:reaction:global/asker", "run:ask:reaction:global/asker/yes").declared);
-    assert!(edge("event:custom.thing", "reaction:global/asker").declared);
-
-    // A window that starts after all of it keeps the files and drops the rest.
+    // A window that starts after all of it keeps the flows and what still waits.
     let later = Timestamp::now() + SignedDuration::from_mins(1);
     let g: Graph = c.ok("graph.get", json!({ "since": later })).await;
-    assert!(g.node("runs:shells:/w/api").is_none());
-    assert_eq!(
-        g.node("ask:reaction:global/asker").unwrap().waiting,
-        ["dq000001"],
-        "still waiting"
-    );
-
-    token.cancel();
-    tokio::time::timeout(Duration::from_secs(3), server)
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
+    assert!(g.node("flow:nightly").unwrap().runs.total == 0);
+    assert!(!g.edges.iter().any(|e| e.from == "flow:nightly"));
+    assert_eq!(g.node("ask:asker").unwrap().waiting.len(), 1, "still waiting");
+    h.stop().await;
 }

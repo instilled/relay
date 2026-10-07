@@ -378,14 +378,14 @@ pub fn set_seen(conn: &Connection, ids: &[String], at: Timestamp) -> Result<usiz
     Ok(n)
 }
 
-/// When the oldest run caused by `cause` that you have not seen since it
-/// ended did start — so a job's stretch has that firing in it; None when
-/// every one is seen. With `workspace`, only that folder's runs.
-pub fn oldest_unseen(conn: &Connection, cause: &str, workspace: Option<&std::path::Path>) -> Result<Option<Timestamp>> {
+/// When the oldest run whose cause starts with `cause` that you have not seen
+/// since it ended did start — so a flow's stretch (`flow:<name>/`) has that
+/// run in it; None when every one is seen.
+pub fn oldest_unseen(conn: &Connection, cause: &str) -> Result<Option<Timestamp>> {
     let ms: Option<i64> = conn.query_row(
-        "SELECT MIN(started_at) FROM runs WHERE cause = ?1 AND ended_at IS NOT NULL AND archived_at IS NULL \
-         AND (seen_at IS NULL OR seen_at < ended_at) AND (?2 IS NULL OR workspace = ?2)",
-        params![cause, workspace.map(path_str)],
+        "SELECT MIN(started_at) FROM runs WHERE substr(cause, 1, length(?1)) = ?1 \
+         AND ended_at IS NOT NULL AND archived_at IS NULL AND (seen_at IS NULL OR seen_at < ended_at)",
+        params![cause],
         |r| r.get(0),
     )?;
     ms.map(from_millis).transpose()
@@ -432,24 +432,19 @@ mod tests {
     }
 
     #[test]
-    fn the_oldest_unseen_firing_is_where_a_job_starts() {
+    fn the_oldest_unseen_run_is_where_a_flow_starts() {
         let c = test_conn();
         let t = |ms| Timestamp::from_millisecond(ms).unwrap();
-        insert_ended(&c, "a", "schedule:nightly", t(1_000), None); // unseen
-        insert_ended(&c, "b", "schedule:nightly", t(2_000), Some(t(2_500))); // seen
-        insert_ended(&c, "x", "schedule:other", t(500), None);
+        insert_ended(&c, "a", "flow:nightly/test", t(1_000), None); // unseen
+        insert_ended(&c, "b", "flow:nightly/probe", t(2_000), Some(t(2_500))); // seen
+        insert_ended(&c, "x", "flow:nightly-2/test", t(500), None);
         assert_eq!(
-            oldest_unseen(&c, "schedule:nightly", None).unwrap(),
+            oldest_unseen(&c, "flow:nightly/").unwrap(),
             Some(t(900)),
-            "when that firing started: it is in the stretch"
-        );
-        assert_eq!(
-            oldest_unseen(&c, "schedule:nightly", Some(std::path::Path::new("/elsewhere"))).unwrap(),
-            None,
-            "only the rule's own folder's"
+            "when that run started, whichever its step: it is in the stretch"
         );
         set_seen(&c, &["a".into()], t(3_000)).unwrap();
-        assert_eq!(oldest_unseen(&c, "schedule:nightly", None).unwrap(), None);
+        assert_eq!(oldest_unseen(&c, "flow:nightly/").unwrap(), None);
     }
 
     #[test]

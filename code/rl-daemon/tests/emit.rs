@@ -1,5 +1,5 @@
 //! `event.emit`: a command or plugin puts a custom event into the ledger, a
-//! reaction picks it up, and `where.data` narrows by the payload. Reserved
+//! flow's `on` picks it up, and `where.data` narrows by the payload. Reserved
 //! kinds are refused so an emit cannot forge one of the daemon's own.
 
 mod common;
@@ -25,23 +25,17 @@ async fn wait_for(path: &Path) -> String {
 }
 
 #[tokio::test]
-async fn an_emitted_event_feeds_a_reaction_and_where_data_narrows() {
+async fn an_emitted_event_fires_a_flow_and_where_data_narrows() {
     let tmp = tempfile::tempdir().unwrap();
     let home = Home::at(tmp.path().join("home"));
     home.ensure_dirs().unwrap();
     let dir = std::fs::canonicalize(tmp.path()).unwrap();
+    let flow = home.flow_dir("triage");
+    std::fs::create_dir_all(&flow).unwrap();
     std::fs::write(
-        home.reactions_file(),
-        format!(
-            "reactions:\n  \
-               triage:\n    \
-                 on: log.issue\n    \
-                 where: {{ data: {{ severity: [ERROR, WARNING] }} }}\n    \
-                 run: 'echo \"{{data.msg}}\" >> caught.txt'\n    \
-                 throttle: '0'\n    \
-                 cwd: {}\n",
-            dir.display()
-        ),
+        flow.join("flow.md"),
+        "---\non: log.issue\nwhere: { data: { severity: [ERROR, WARNING] } }\nthrottle: 0\nsteps:\n  \
+         catch:\n    run: echo \"$RELAY_EVENT_SUMMARY\" >> caught.txt\n---\n",
     )
     .unwrap();
     let Some(h) = Harness::on(home.clone()) else {
@@ -49,32 +43,29 @@ async fn an_emitted_event_feeds_a_reaction_and_where_data_narrows() {
         return;
     };
     let mut c = Conn::open(&home).await;
+    let _: serde_json::Value = c.ok("flow.approve", json!({ "name": "triage" })).await;
 
-    // An INFO issue: the rule's `where` should pass it by.
+    // An INFO issue: the flow's `where` should pass it by.
     let quiet = c
         .call(
             "event.emit",
-            json!({ "kind": "log.issue", "workspace": dir, "data": { "severity": "INFO", "msg": "nothing" } }),
+            json!({ "kind": "log.issue", "workspace": dir, "summary": "nothing", "data": { "severity": "INFO" } }),
         )
         .await;
     assert!(quiet.error.is_none(), "emit failed: {:?}", quiet.error);
 
-    // An ERROR issue: this one fires the rule.
+    // An ERROR issue: this one fires the flow.
     let loud = c
         .call(
             "event.emit",
-            json!({ "kind": "log.issue", "workspace": dir, "data": { "severity": "ERROR", "msg": "disk full" } }),
+            json!({ "kind": "log.issue", "workspace": dir, "summary": "disk full", "data": { "severity": "ERROR" } }),
         )
         .await;
     assert!(loud.error.is_none(), "emit failed: {:?}", loud.error);
 
-    // Only the ERROR one reached the rule, wearing its payload.
+    // Only the ERROR one reached the flow, in the folder it was raised in.
     let caught = wait_for(&dir.join("caught.txt")).await;
-    assert_eq!(
-        caught.trim(),
-        "disk full",
-        "where.data let ERROR through and filled {{data.msg}}"
-    );
+    assert_eq!(caught.trim(), "disk full", "where.data let ERROR through");
 
     // Both events are in the ledger, with their data.
     let events: Vec<Event> = c.ok("event.list", json!({ "limit": 50 })).await;
@@ -91,7 +82,7 @@ async fn an_emitted_event_feeds_a_reaction_and_where_data_narrows() {
         .await;
     assert!(forged.error.is_some(), "run.failed must be refused");
 
-    // Words may be hyphenated, as rules are named; not every shape goes.
+    // Words may be hyphenated, as flows are named; not every shape goes.
     for ok in ["flint.product.new-feedback", "log.issue_2"] {
         let r = c.call("event.emit", json!({ "kind": ok, "workspace": dir })).await;
         assert!(r.error.is_none(), "{ok}: {:?}", r.error);

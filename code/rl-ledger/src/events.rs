@@ -111,7 +111,7 @@ pub fn get(conn: &Connection, id: i64) -> Result<Option<Event>> {
         .optional()?)
 }
 
-/// Events after `id`, oldest first: how the reactor reads the stream.
+/// Events after `id`, oldest first: how flows read the stream.
 pub fn after(conn: &Connection, id: i64, limit: u32) -> Result<Vec<Event>> {
     let mut stmt = conn.prepare(&format!("SELECT {COLS} FROM events WHERE id > ?1 ORDER BY id LIMIT ?2"))?;
     let rows = stmt.query_map(params![id, limit], from_row)?;

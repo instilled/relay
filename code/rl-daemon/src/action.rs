@@ -1,7 +1,6 @@
 //! Turning an [`Action`] into a [`RunSpec`]: the one place that knows how a
-//! written-down action becomes a run. Schedules, decisions and (later)
-//! workflow steps all come through here, so `agent:` means the same thing
-//! wherever it is written.
+//! written-down action becomes a run. Decisions and flow steps all come
+//! through here, so `agent:` means the same thing wherever it is written.
 
 use anyhow::{Context, Result, bail};
 use rl_detect::Registry;

@@ -126,27 +126,6 @@ pub struct Workspace {
     pub registered_at: Timestamp,
 }
 
-/// What `rl up` found and did.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct UpReport {
-    pub workspace: Workspace,
-    /// What reading the folder's `schedules.yaml` changed.
-    pub report: ReloadReport,
-    /// Its schedules as they now stand.
-    pub schedules: Vec<Schedule>,
-    /// Schedules approved by this call.
-    pub approved: Vec<String>,
-    /// What reading its `reactions.yaml` changed.
-    #[serde(default)]
-    pub reaction_report: ReloadReport,
-    /// Its reactions as they now stand.
-    #[serde(default)]
-    pub reactions: Vec<crate::reaction::Reaction>,
-    /// Reactions approved by this call.
-    #[serde(default)]
-    pub approved_reactions: Vec<String>,
-}
-
 /// What a reload found.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct ReloadReport {

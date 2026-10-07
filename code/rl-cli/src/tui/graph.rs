@@ -18,8 +18,8 @@ use jiff::Timestamp;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use rl_core::time::fmt_age;
+use rl_proto::flow::FlowStatus;
 use rl_proto::graph::{Graph, Node, NodeKind};
-use rl_proto::rule::RuleStatus;
 use rl_proto::types::{Checkout, RunState};
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -36,6 +36,7 @@ pub const REACTION: Color = Color::Rgb(0xC9, 0xB2, 0x2E); // yellow
 /// emoji-width glyph (`⚡`, `⏱`) would push a box's border out of line.
 pub fn glyph(kind: NodeKind) -> &'static str {
     match kind {
+        NodeKind::Flow => "↻",
         NodeKind::Schedule => "◷",
         NodeKind::Reaction => "↯",
         NodeKind::Ask => "◇",
@@ -49,7 +50,7 @@ pub fn glyph(kind: NodeKind) -> &'static str {
 /// The colour a kind of node wears.
 pub fn colour(kind: NodeKind) -> Style {
     match kind {
-        NodeKind::Schedule => Style::default().fg(theme::LIVE),
+        NodeKind::Flow | NodeKind::Schedule => Style::default().fg(theme::LIVE),
         NodeKind::Reaction => Style::default().fg(REACTION),
         NodeKind::Ask => Style::default().fg(theme::NEEDS),
         NodeKind::Shell => Style::default().fg(theme::ACCENT),
@@ -109,10 +110,11 @@ fn node_subject<'a>(n: &'a Node, folder: &'a str) -> Subject<'a> {
     if n.runs.going > 0 {
         is.push("going");
     }
-    if !n.waiting.is_empty() || n.status == Some(RuleStatus::NeedsApproval) {
+    if !n.waiting.is_empty() || n.status == Some(FlowStatus::NeedsApproval) {
         is.push("needs");
     }
     let kind = match n.kind {
+        NodeKind::Flow => vec!["flow"],
         NodeKind::Schedule => vec!["job", "schedule"],
         NodeKind::Reaction => vec!["reaction"],
         NodeKind::Ask => vec!["question"],
@@ -160,21 +162,21 @@ fn folder_word(n: &Node, names: &Names) -> String {
 
 /// The two lines inside a node's box.
 pub fn texts(n: &Node, names: &Names, now: Timestamp) -> (String, String) {
-    let mark = if n.status == Some(RuleStatus::NeedsApproval) {
+    let mark = if n.status == Some(FlowStatus::NeedsApproval) {
         "! "
     } else {
         ""
     };
     let top = format!("{} {mark}{}", glyph(n.kind), n.name);
     let what = match n.kind {
-        NodeKind::Schedule => match (n.status, n.next_at) {
-            (Some(RuleStatus::On), Some(t)) if t > now => format!("in {}", fmt_age(now, t)),
-            (Some(RuleStatus::On), _) => n.detail.clone(),
+        NodeKind::Flow | NodeKind::Schedule => match (n.status, n.next_at) {
+            (Some(FlowStatus::On), Some(t)) if t > now => format!("in {}", fmt_age(now, t)),
+            (Some(FlowStatus::On), _) => n.detail.clone(),
             (Some(s), _) => s.to_string(),
             (None, _) => String::new(),
         },
         NodeKind::Reaction => match n.status {
-            Some(RuleStatus::On) | None => n.detail.clone(),
+            Some(FlowStatus::On) | None => n.detail.clone(),
             Some(s) => s.to_string(),
         },
         NodeKind::Ask => match n.waiting.len() {
@@ -767,7 +769,7 @@ pub fn draw(g: &Graph, p: &Plan, names: &Names, sel: Option<&str>, now: Timestam
         if n.runs.last == Some(RunState::Failed) {
             border = Style::default().fg(theme::BAD);
         }
-        if n.status == Some(RuleStatus::Paused) {
+        if n.status == Some(FlowStatus::Paused) {
             border = theme::dim();
         }
         if selected {
@@ -804,7 +806,7 @@ pub fn draw(g: &Graph, p: &Plan, names: &Names, sel: Option<&str>, now: Timestam
             }
         };
         let name_style = match (n.status, n.waiting.is_empty()) {
-            (Some(RuleStatus::NeedsApproval), _) | (_, false) => theme::needs(),
+            (Some(FlowStatus::NeedsApproval), _) | (_, false) => theme::needs(),
             _ => colour(n.kind).add_modifier(Modifier::BOLD),
         };
         c.text(
@@ -878,6 +880,7 @@ pub fn step(p: &Plan, sel: Option<&str>, dir: Dir) -> Option<String> {
 /// A kind of node, in a word.
 fn kind_word(k: NodeKind) -> &'static str {
     match k {
+        NodeKind::Flow => "flow",
         NodeKind::Schedule => "schedule",
         NodeKind::Reaction => "reaction",
         NodeKind::Ask => "question",
@@ -988,7 +991,7 @@ pub fn headline(g: &Graph, kept: usize, filter: &str) -> String {
     let rules = g
         .nodes
         .iter()
-        .filter(|n| matches!(n.kind, NodeKind::Schedule | NodeKind::Reaction))
+        .filter(|n| matches!(n.kind, NodeKind::Flow | NodeKind::Schedule | NodeKind::Reaction))
         .count();
     let waiting: usize = g.nodes.iter().map(|n| n.waiting.len()).sum();
     let mut s = format!("wiring · {rules} rules");
@@ -1034,7 +1037,7 @@ mod tests {
             name: name.into(),
             folder: folder.map(PathBuf::from),
             rule: None,
-            status: Some(RuleStatus::On),
+            status: Some(FlowStatus::On),
             detail: String::new(),
             next_at: None,
             runs: Tally::default(),

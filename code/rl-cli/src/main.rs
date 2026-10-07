@@ -31,7 +31,7 @@ use rl_proto::methods::{
 };
 use rl_proto::reaction::{Filter, Reaction, ReactionSpec};
 use rl_proto::rule::{Rule, RuleKind, RuleStatus};
-use rl_proto::schedule::{Schedule, UpReport};
+use rl_proto::schedule::Schedule;
 use rl_proto::types::{AttachMode, Cause, Mark, RunKind, RunState, SummaryTarget};
 use serde_json::json;
 use std::path::{Path, PathBuf};
@@ -351,16 +351,13 @@ struct InterpretArgs {
 
 #[derive(Args)]
 struct SummaryArgs {
-    /// What: a run, a folder (its project), `schedule:<name>` or `reaction:<name>`, or `all`.
+    /// What: a run, a folder (its project), `flow:<name>`, or `all`.
     what: String,
     /// Only the stretch since: a duration back (30m, 2h), a date or an
     /// instant (default: a run, since you last looked, if it did anything
-    /// since, else all of it; a job, since its oldest firing you have not
+    /// since, else all of it; a flow, since its oldest run you have not
     /// seen; a project or all, the last day).
     since: Option<String>,
-    /// The folder a `schedule:` or `reaction:` belongs to (default: a global one).
-    #[arg(long = "in", value_name = "FOLDER")]
-    folder: Option<PathBuf>,
     /// Read the logs, not the recaps: slower, and says more.
     #[arg(long)]
     deep: bool,
@@ -476,16 +473,13 @@ struct DecideArgs {
 struct UpArgs {
     /// The folder (default: current).
     dir: Option<PathBuf>,
-    /// Approve every pending schedule without asking.
-    #[arg(short, long)]
-    yes: bool,
 }
 
 #[derive(Subcommand)]
 enum WorkspaceCmd {
     /// List registered folders.
     Ls,
-    /// Unregister a folder: its rules stop and forget their approvals, its open questions are dismissed.
+    /// Unregister a folder: flows in it no longer load, its open questions are dismissed.
     Rm(WorkspaceRmArgs),
 }
 
@@ -498,12 +492,6 @@ struct WorkspaceRmArgs {
     /// Also archive its ended runs (those just stopped included).
     #[arg(long)]
     archive: bool,
-    /// Also move .relay/schedules.yaml and reactions.yaml to the Relay home's removed/. Asks first.
-    #[arg(long)]
-    move_rules: bool,
-    /// Move the rules without asking.
-    #[arg(short, long)]
-    yes: bool,
 }
 
 #[derive(Subcommand)]
@@ -878,57 +866,13 @@ async fn up(home: &Home, a: UpArgs, json: bool) -> Result<()> {
         None => std::env::current_dir()?,
     };
     let mut rpc = daemon::ensure(home, !json).await?;
-    let mut r = rpc
-        .call::<WorkspaceUp>(WorkspaceUpParams {
-            path: path.clone(),
-            approve: a.yes,
-        })
-        .await?;
-    let pending: Vec<String> = r
-        .schedules
-        .iter()
-        .filter(|s| !s.approved())
-        .map(|s| s.name.clone())
-        .collect();
-    if !pending.is_empty() && !json && std::io::IsTerminal::is_terminal(&std::io::stdin()) {
-        print_up(&r);
-        eprint!("approve {} ({})? [y/N] ", pending.len(), pending.join(", "));
-        let mut line = String::new();
-        std::io::stdin().read_line(&mut line)?;
-        if line.trim().eq_ignore_ascii_case("y") {
-            r = rpc
-                .call::<WorkspaceUp>(WorkspaceUpParams {
-                    path: path.clone(),
-                    approve: true,
-                })
-                .await?;
-        }
-    }
+    let w = rpc.call::<WorkspaceUp>(WorkspaceUpParams { path }).await?;
     if json {
-        println!("{}", serde_json::to_string(&r)?);
-        return Ok(());
-    }
-    print_up(&r);
-    if !r.approved.is_empty() {
-        println!("approved: {}", r.approved.join(", "));
-    } else if r.schedules.iter().any(|s| !s.approved()) {
-        println!("not approved; nothing fires until `rl up --yes`");
-    }
-    for e in r.report.errors.iter().chain(&r.reaction_report.errors) {
-        eprintln!("not loaded: {e}");
+        println!("{}", serde_json::to_string(&w)?);
+    } else {
+        println!("workspace {} ({})", w.name, display_path(&w.path));
     }
     Ok(())
-}
-
-fn print_up(r: &UpReport) {
-    println!("workspace {} ({})", r.workspace.name, display_path(&r.workspace.path));
-    if r.schedules.is_empty() {
-        println!("no schedules in .relay/schedules.yaml");
-    } else {
-        let now = now();
-        let rows: Vec<Vec<String>> = r.schedules.iter().map(|s| schedule_row(s, now)).collect();
-        println!("{}", render::table(SCHEDULE_HEADERS, &rows));
-    }
 }
 
 async fn workspace(home: &Home, cmd: WorkspaceCmd, json: bool) -> Result<()> {
@@ -958,38 +902,11 @@ async fn workspace(home: &Home, cmd: WorkspaceCmd, json: bool) -> Result<()> {
         WorkspaceCmd::Rm(a) => {
             // The daemon's cwd is not ours: a relative folder is made whole here.
             let dir = std::path::absolute(&a.dir).unwrap_or_else(|_| a.dir.clone());
-            if a.move_rules && !a.yes {
-                let relay = dir.join(rl_proto::schedule::WORKSPACE_DIR);
-                // Only what can move is asked about; a symlink or the Relay
-                // home is the daemon's to refuse, before it does anything.
-                if let rl_core::rules_dir::RulesDir::Movable(files) = rl_core::rules_dir::rules_dir(&relay, home) {
-                    if json || !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
-                        anyhow::bail!("--move-rules moves files nobody can be asked about here; add --yes");
-                    }
-                    let names: Vec<String> = files
-                        .iter()
-                        .filter_map(|f| f.file_name().map(|n| n.to_string_lossy().into_owned()))
-                        .collect();
-                    eprint!(
-                        "move {} ({}) to {}? [y/N] ",
-                        display_path(&relay),
-                        names.join(", "),
-                        display_path(&home.removed_dir())
-                    );
-                    let mut line = String::new();
-                    std::io::stdin().read_line(&mut line)?;
-                    if !line.trim().eq_ignore_ascii_case("y") {
-                        println!("nothing removed");
-                        return Ok(());
-                    }
-                }
-            }
             let r = rpc
                 .call::<WorkspaceRemove>(WorkspaceRemoveParams {
                     path: dir.clone(),
                     stop_runs: a.stop,
                     archive_runs: a.archive,
-                    move_rules: a.move_rules,
                 })
                 .await?;
             if json {
@@ -1006,7 +923,7 @@ async fn workspace(home: &Home, cmd: WorkspaceCmd, json: bool) -> Result<()> {
 /// then only what was done besides.
 fn removed_words(r: &WorkspaceRemoved) -> String {
     let mut words = vec![if r.removed {
-        format!("{} unregistered; its rules stop", display_path(&r.path))
+        format!("{} unregistered", display_path(&r.path))
     } else {
         format!("{} was not registered", display_path(&r.path))
     }];
@@ -1022,9 +939,6 @@ fn removed_words(r: &WorkspaceRemoved) -> String {
     }
     if r.dismissed > 0 {
         words.push(format!("{} dismissed", n(r.dismissed, "question", "questions")));
-    }
-    if let Some(to) = &r.rules_moved_to {
-        words.push(format!("rules moved to {}", display_path(to)));
     }
     words.join(" · ")
 }
@@ -2363,40 +2277,24 @@ async fn interpret(home: &Home, a: InterpretArgs, json: bool) -> Result<()> {
     Ok(())
 }
 
-/// What `rl summary` was asked of: `all`, a folder (a project), a `schedule:` or
-/// `reaction:` job, else a run.
-fn summary_target(what: &str, folder: Option<&Path>) -> Result<SummaryTarget> {
-    let job = |rule, name: &str| -> Result<SummaryTarget> {
-        let workspace = folder
-            .map(|f| std::fs::canonicalize(f).with_context(|| format!("{}: not a folder", f.display())))
-            .transpose()?;
-        Ok(SummaryTarget::Job {
-            rule,
-            name: name.to_string(),
-            workspace,
-        })
-    };
-    let target = if what == "all" {
+/// What `rl summary` was asked of: `all`, a folder (a project), a
+/// `flow:<name>`, else a run.
+fn summary_target(what: &str) -> Result<SummaryTarget> {
+    Ok(if what == "all" {
         SummaryTarget::All
-    } else if let Some(name) = what.strip_prefix("schedule:") {
-        job(RuleKind::Schedule, name)?
-    } else if let Some(name) = what.strip_prefix("reaction:") {
-        job(RuleKind::Reaction, name)?
+    } else if let Some(name) = what.strip_prefix("flow:") {
+        SummaryTarget::Flow { name: name.to_string() }
     } else if Path::new(what).is_dir() {
         SummaryTarget::Project {
             workspace: std::fs::canonicalize(what)?,
         }
     } else {
         SummaryTarget::Run { id: what.to_string() }
-    };
-    if folder.is_some() && !matches!(target, SummaryTarget::Job { .. }) {
-        bail!("--in is for a schedule: or a reaction:");
-    }
-    Ok(target)
+    })
 }
 
 async fn summary(home: &Home, a: SummaryArgs, json: bool) -> Result<()> {
-    let target = summary_target(&a.what, a.folder.as_deref())?;
+    let target = summary_target(&a.what)?;
     let mut rpc = daemon::ensure(home, !json).await?;
     let from = match a.since.as_deref() {
         Some(s) => Some(parse_since(s, now())?),

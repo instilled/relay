@@ -29,7 +29,11 @@ pub fn help() -> &'static str {
 /// knows, its rules and the person's own, the agents on this machine.
 pub async fn gather(rpc: &mut Client, folder: &Path) -> Result<Here> {
     let workspaces = rpc.call::<WorkspaceList>(()).await?;
-    let rules = rpc.call::<RuleList>(ScheduleFilter { all: false }).await?;
+    // A daemon that has let rules go has none to list.
+    let rules = rpc
+        .call::<RuleList>(ScheduleFilter { all: false })
+        .await
+        .unwrap_or_default();
     let agents = rpc.call::<AgentList>(()).await?;
     let name = workspaces.iter().find(|w| w.path == folder).map(|w| w.name.clone());
     let scope_word = |r: &Rule| -> String {

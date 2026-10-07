@@ -174,11 +174,8 @@ pub async fn move_one(d: &Daemon, p: ImportMoveParams) -> Result<Run> {
     let root = crate::git::checkout(&s.cwd)
         .map(|c| c.path)
         .unwrap_or_else(|| s.cwd.clone());
-    match d.scheduler.up(&root, false).await {
-        Err(e) => tracing::warn!(error = %e, root = %root.display(), "import: registering the folder"),
-        Ok(up) => {
-            let _ = d.reactor.up(&up.workspace.path, &up.workspace.name, false).await;
-        }
+    if let Err(e) = crate::workspace::up(d, &root).await {
+        tracing::warn!(error = %e, root = %root.display(), "import: registering the folder");
     }
     d.supervisor
         .start(RunSpec {

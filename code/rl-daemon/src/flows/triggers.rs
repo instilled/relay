@@ -172,12 +172,17 @@ fn def_of(f: &Flow) -> Option<FlowDef> {
         .ok()
 }
 
-/// Whether `def`'s `on` takes an event of this kind: `run.failed`, `run.*`, `*`.
+/// Whether `def`'s `on` takes an event of this kind.
 fn hears(def: &FlowDef, kind: &str) -> bool {
-    def.trigger.on.iter().any(|p| match p.strip_suffix('*') {
+    def.trigger.on.iter().any(|p| kind_matches(p, kind))
+}
+
+/// Whether an `on` pattern takes an event of this kind: `run.failed`, `run.*`, `*`.
+pub(crate) fn kind_matches(pattern: &str, kind: &str) -> bool {
+    match pattern.strip_suffix('*') {
         Some(prefix) => kind.starts_with(prefix),
-        None => p == kind,
-    })
+        None => pattern == kind,
+    }
 }
 
 /// Why a flow did or did not fire on an event.

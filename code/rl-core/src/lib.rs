@@ -2,7 +2,6 @@
 //! it, which is also how tests stay out of the real one.
 
 pub mod id;
-pub mod rules_dir;
 pub mod time;
 
 use anyhow::{Context, Result};
@@ -114,11 +113,6 @@ impl Home {
     /// One firing's state: what its steps left for the steps after them.
     pub fn firing_dir(&self, name: &str, id: &str) -> PathBuf {
         self.flow_dir(name).join("runs").join(id)
-    }
-    /// Where a removed project's rule files are kept, a folder each: moved
-    /// here rather than deleted, so taking a project away loses nothing.
-    pub fn removed_dir(&self) -> PathBuf {
-        self.0.join("removed")
     }
 
     pub fn session_socket(&self, run: &str) -> PathBuf {

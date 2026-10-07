@@ -8,7 +8,7 @@ use rl_proto::decision::Decision;
 use rl_proto::flow::{Firing, FiringStatus, Flow, StepState, StepStatus};
 use rl_proto::types::{Event, Run};
 use serde_json::json;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 /// A daemon on a fresh home with each flow's `flow.md` written and approved; `None` when
@@ -192,5 +192,77 @@ async fn a_question_says_what_the_event_said() {
     let firings: Vec<Firing> = c.ok("flow.firings", json!({ "flow": "asker" })).await;
     assert_eq!(step(&firings[0], "loud").status, StepStatus::Done);
     assert_eq!(step(&firings[0], "quiet").status, StepStatus::Skipped);
+    h.stop().await;
+}
+
+/// The `rl` binary sits beside `rld` in the target dir.
+fn rl_bin() -> Option<PathBuf> {
+    let p = PathBuf::from(env!("CARGO_BIN_EXE_rld")).with_file_name("rl");
+    p.is_file().then_some(p)
+}
+
+/// The wiring end to end on Relay's own primitives: a probe `rl emit`s an
+/// alert through the real CLI, a flow narrows by `where.data` and asks, and
+/// the yes acts where the alert was raised. The probe's alert is canned, so
+/// no network is needed.
+#[tokio::test]
+async fn a_probe_its_event_a_flow_that_asks_and_the_yes_that_acts() {
+    let Some(rl) = rl_bin() else {
+        eprintln!("skipping: rl not built (run `cargo build --workspace`)");
+        return;
+    };
+    let tmp = tempfile::tempdir().unwrap();
+    let ws = tmp.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let ws = std::fs::canonicalize(&ws).unwrap();
+    let probe = format!(
+        "---\nin: {}\nsteps:\n  look:\n    run: {} emit weather.alert --data level=storm\n---\n",
+        ws.display(),
+        rl.display()
+    );
+    let alert = "---\non: weather.alert\nwhere: { data: { level: [storm] } }\nsteps:\n  \
+                 review:\n    ask: \"storm — tell everyone?\"\n    \
+                 options: { tell: { run: \"echo told > told.txt\" } }\n---\n";
+    let home = Home::at(tmp.path().join("home"));
+    for (name, md) in [("probe", probe.as_str()), ("alert", alert)] {
+        let dir = home.flow_dir(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("flow.md"), md).unwrap();
+    }
+    let Some(h) = Harness::on(home) else { return };
+    let mut c = Conn::open(&h.home).await;
+    // The probe runs in a folder Relay knows, so it loads once that is so.
+    let _: serde_json::Value = c.ok("workspace.up", json!({ "path": ws })).await;
+    let _: serde_json::Value = c.ok("flow.reload", json!(null)).await;
+    for name in ["probe", "alert"] {
+        let _: Flow = c.ok("flow.approve", json!({ "name": name })).await;
+    }
+
+    let _: Firing = c.ok("flow.run", json!({ "name": "probe" })).await;
+    let p = wait_ended(&mut c, "probe").await;
+    assert_eq!(p.status, FiringStatus::Done, "the probe (rl emit) ran clean: {p:?}");
+
+    // The alert reached the flow, which asked.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let q = loop {
+        let open: Vec<Decision> = c.ok("decision.list", json!({})).await;
+        if let Some(q) = open.into_iter().next() {
+            break q;
+        }
+        assert!(Instant::now() < deadline, "the alert flow never asked");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    assert_eq!(q.title, "storm — tell everyone?");
+    let waiting: Vec<Firing> = c.ok("flow.firings", json!({ "flow": "alert" })).await;
+    assert_eq!(
+        (waiting[0].trigger.as_str(), waiting[0].status),
+        ("on", FiringStatus::Waiting)
+    );
+
+    // The yes acts, in the folder the alert was raised in.
+    let _: Decision = c.ok("decision.take", json!({ "id": q.id, "options": ["tell"] })).await;
+    let f = wait_ended(&mut c, "alert").await;
+    assert_eq!(f.status, FiringStatus::Done, "{f:?}");
+    assert_eq!(std::fs::read_to_string(ws.join("told.txt")).unwrap().trim(), "told");
     h.stop().await;
 }
