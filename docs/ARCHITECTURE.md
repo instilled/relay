@@ -932,7 +932,12 @@ again too.
 A flow runs only once approved: the hash you said yes to is the folder's hash now. Any change to
 any file in the folder — the frontmatter, a prompt, a script — asks again: the flow says `needs a
 yes` (`FlowStatus::NeedsApproval`) and neither fires nor can be run by hand until `rl flow
-approve` or `/flow approve`. Writing it through `rl` is the yes: an `rl flow edit` or `/flow
+approve` or `/flow approve`. Nothing watches the folder between reloads, so the engine reads and
+hashes it again before a firing starts and before each step's run starts or is resumed
+(`Flows::yes_holds`): on a folder changed since its yes the firing is refused (`needs a yes`), or
+the step does not start — `flow.skipped`, "the flow changed since its yes", and its firing moves
+on as if it failed — and the flows are read again, so it shows `needs a yes`. A firing waiting
+four hours on a question therefore never runs a script changed while it waited. Writing it through `rl` is the yes: an `rl flow edit` or `/flow
 edit` that saves a flow that loads approves it. Nothing else is approved for you — not a hand
 edit, not a flow an agent wrote.
 

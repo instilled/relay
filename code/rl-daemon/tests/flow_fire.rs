@@ -2,7 +2,7 @@
 //! definition the firing started with.
 
 mod common;
-use common::{Conn, Harness, wait_journal};
+use common::{Conn, Harness, kill_holder, wait_journal};
 use rl_core::Home;
 use rl_proto::flow::{Firing, FiringStatus, Flow, Reloaded, StepState, StepStatus};
 use rl_proto::types::{Cause, Event, Run};
@@ -306,28 +306,6 @@ async fn runs_of(c: &mut Conn, firing: &str, flow: &str, step: &str) -> Vec<Run>
     let cause = format!("flow:{flow}/{step}");
     let runs: Vec<Run> = c.ok("run.list", json!({ "cause": cause, "archived": true })).await;
     runs.into_iter().filter(|r| r.chain == firing).collect()
-}
-
-/// The machine goes: run `id`'s holder, and its child with it if `child`, with no exit on
-/// record unless the holder wrote one.
-#[cfg(unix)]
-async fn kill_holder(home: &Home, id: &str, child: bool) {
-    use nix::sys::signal::{Signal, kill};
-    use nix::unistd::Pid;
-    use rl_ledger::{Ledger, sessions};
-    let ledger = Ledger::open(&home.ledger()).unwrap();
-    let id = id.to_string();
-    let row = ledger.call_blocking(move |db| sessions::get(db, &id)).unwrap().unwrap();
-    kill(Pid::from_raw(row.holder_pid as i32), Signal::SIGKILL).unwrap();
-    for _ in 0..100 {
-        if kill(Pid::from_raw(row.holder_pid as i32), None).is_err() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    if child {
-        let _ = kill(Pid::from_raw(row.pid as i32), Signal::SIGKILL);
-    }
 }
 
 /// `a` ends while Relay is away. Coming back, the firing is carried on before the socket

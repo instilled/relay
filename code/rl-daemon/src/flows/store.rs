@@ -95,6 +95,37 @@ impl Flows {
     }
 }
 
+impl Flows {
+    /// Whether the folder of `name`, read and hashed now, is the one said yes to. Nothing
+    /// watches it between reloads, so this is asked before a firing starts and before each
+    /// step does. One gone, unreadable, or holding a link to a folder is not.
+    pub(super) async fn yes_holds(&self, name: &str) -> bool {
+        let n = name.to_string();
+        let approved = match self.ledger.call(move |c| flows::get(c, &n)).await {
+            Ok(f) => f.filter(|f| f.removed_at.is_none()).and_then(|f| f.approved_hash),
+            Err(e) => {
+                warn!(flow = name, error = %format!("{e:#}"), "reading a flow's yes");
+                None
+            }
+        };
+        approved.is_some_and(|yes| hash_now(&self.home.flow_dir(name)).is_some_and(|now| now == yes))
+    }
+
+    /// The folders read again once one is found changed under its yes, so it says it needs one.
+    pub(super) async fn changed_since_yes(&self, name: &str) {
+        info!(flow = name, "flow changed since its yes");
+        if let Err(e) = self.reload().await {
+            warn!(flow = name, error = %format!("{e:#}"), "reading the flows again");
+        }
+    }
+}
+
+/// The hash of `folder` as it is now; `None` when it cannot be read or holds a link to a folder.
+fn hash_now(folder: &Path) -> Option<String> {
+    let read = rl_core::folder::read(folder).ok()?;
+    read.linked.is_empty().then(|| hash::folder(&read.files))
+}
+
 /// The folders under `dir` that can be flows, by name: no dotfiles, no names
 /// a flow cannot have.
 fn folders(dir: &Path) -> Result<Vec<String>> {

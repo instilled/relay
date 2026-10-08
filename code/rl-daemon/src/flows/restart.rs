@@ -5,8 +5,8 @@
 //! step's run from then on.
 
 use super::Flows;
-use super::engine::{Ready, def_of, laid_out};
-use anyhow::{Result, anyhow};
+use super::engine::{CHANGED, Ready, def_of, laid_out};
+use anyhow::{Result, anyhow, bail};
 use rl_flow::advance::{Do, Happened};
 use rl_flow::def::Does;
 use rl_ledger::{decisions, firings, runs};
@@ -98,7 +98,7 @@ impl Flows {
     }
 
     /// What step run `run` was started with, made again for picking it up; `None` when it is
-    /// no firing's step.
+    /// no firing's step. Refused when the flow's folder changed since its yes, as a step's start is.
     pub(crate) async fn spec_again(&self, run: &Run) -> Result<Option<RunSpec>> {
         let (id, home) = (run.id.clone(), self.home.clone());
         let found = self
@@ -119,6 +119,10 @@ impl Flows {
             })
             .await?;
         let Some((m, step)) = found else { return Ok(None) };
+        if !self.yes_holds(&m.def.name).await {
+            self.changed_since_yes(&m.def.name).await;
+            bail!(CHANGED);
+        }
         match m.todo.first() {
             Some((_, Ready::Run(Ok(a)))) => self.spec(&m, &step, a).map(Some),
             Some((_, Ready::Run(Err(e)))) => Err(anyhow!("{e:#}")),

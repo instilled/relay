@@ -31,6 +31,8 @@ use tracing::{info, warn};
 
 /// How much of a step's output is its `out`: the last of it.
 const OUT_MAX: usize = 64 << 10;
+/// Why a step did not start on a folder changed since its yes.
+pub(super) const CHANGED: &str = "the flow changed since its yes";
 
 /// What fired a firing; `firings.trigger` is `when`, `on` or `hand`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -111,6 +113,10 @@ impl Flows {
             return Err(Refused::NotLoaded(name.to_string()).into());
         };
         if !flow.approved() {
+            return Err(Refused::NeedsYes(name.to_string()).into());
+        }
+        if !self.yes_holds(name).await {
+            self.changed_since_yes(name).await;
             return Err(Refused::NeedsYes(name.to_string()).into());
         }
         let def: FlowDef = serde_json::from_value(flow.def.clone()).context("the flow as loaded")?;
@@ -237,15 +243,26 @@ impl Flows {
 
     /// Does what a firing moved on says, and returns what that led to. A step that cannot
     /// start or ask is said in `flow.skipped`: a run step moves on as if it failed, an ask
-    /// step as if unanswered.
+    /// step as if unanswered. No step starts on a folder changed since its yes.
     pub(super) async fn carry_out(&self, m: &Moved) -> Vec<(String, Happened)> {
         let mut next = Vec::new();
         let firing = m.firing.id.as_str();
+        // Asked once, at the first step to start.
+        let mut holds = None;
         for (todo, ready) in &m.todo {
             match todo {
                 Do::Start(step) | Do::RunOption(step) => {
                     let started = match ready {
-                        Ready::Run(Ok(a)) => self.start(m, step, a).await,
+                        Ready::Run(Ok(a)) => {
+                            if holds.is_none() {
+                                holds = Some(self.yes_holds(&m.def.name).await);
+                            }
+                            if holds == Some(true) {
+                                self.start(m, step, a).await
+                            } else {
+                                Err(anyhow!(CHANGED))
+                            }
+                        }
                         Ready::Run(Err(e)) => Err(anyhow!("{e:#}")),
                         _ => Err(anyhow!("it has nothing to run")),
                     };
@@ -282,6 +299,9 @@ impl Flows {
         }
         for step in self.dismiss_if_stopped(m).await {
             next.push((firing.to_string(), Happened::Unanswered { step }));
+        }
+        if holds == Some(false) {
+            self.changed_since_yes(&m.def.name).await;
         }
         next
     }
