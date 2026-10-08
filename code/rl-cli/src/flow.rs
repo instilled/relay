@@ -1,5 +1,6 @@
 //! `rl flow`: the flows in `~/.relay/flows` and what they are doing; edit
-//! one (and say yes to it, if it loads), run, pause, resume, approve, reload.
+//! one (and say yes to it, if it loads), run, pause, resume, approve, reload; and, inside a step,
+//! its firing's state.
 
 use crate::client::Client;
 use crate::{daemon, render};
@@ -15,6 +16,9 @@ use rl_proto::flow::{
     FlowPause, FlowReload, FlowResume, FlowRun, NotLoaded, Reloaded,
 };
 use std::path::{Path, PathBuf};
+
+mod state;
+pub use state::StateCmd;
 
 #[derive(Subcommand)]
 pub enum FlowCmd {
@@ -45,6 +49,11 @@ pub enum FlowCmd {
     },
     /// Read ~/.relay/flows again (rld does it on start too).
     Reload,
+    /// What a step leaves for the steps after it, and reads of theirs: set, get, write, read. Inside a step only.
+    State {
+        #[command(subcommand)]
+        cmd: StateCmd,
+    },
 }
 
 const HEADERS: &[&str] = &["NAME", "HASH", "STATUS", "WHEN", "LAST", "IN"];
@@ -53,6 +62,10 @@ const HEADERS: &[&str] = &["NAME", "HASH", "STATUS", "WHEN", "LAST", "IN"];
 const TEMPLATE: &str = "---\nwhen: every 1h\nsteps:\n  first:\n    run: echo hello\n---\n";
 
 pub async fn flow(home: &Home, cmd: FlowCmd, json: bool) -> Result<()> {
+    let cmd = match cmd {
+        FlowCmd::State { cmd } => return state::state(home, cmd, json).await,
+        cmd => cmd,
+    };
     if let FlowCmd::Edit { name } = &cmd {
         return edit(home, name, json).await;
     }
@@ -135,7 +148,7 @@ pub async fn flow(home: &Home, cmd: FlowCmd, json: bool) -> Result<()> {
                 }
             }
         }
-        FlowCmd::Edit { .. } => unreachable!("handled above"),
+        FlowCmd::Edit { .. } | FlowCmd::State { .. } => unreachable!("handled above"),
     }
     Ok(())
 }

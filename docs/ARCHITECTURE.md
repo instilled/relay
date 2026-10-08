@@ -933,6 +933,18 @@ it, `.relay/<step>/` (`$RELAY_IN` and `$RELAY_OUT`), is apart from them, as no s
 start with a dot. What a step left is read one way, wherever it is asked for
 (`flows/facts.rs`). A group naming a value no step set is no group.
 
+`rl flow state set signature=abc found=3`, `get probe.signature` (a bare key is the step's own;
+`probe.out` and an ask's `review.choice` read the same way), `write report.md < x` and `read
+report.md` (or `read probe.out`) are what an agent uses, as a plain script may write
+`$RELAY_WORK` and `$RELAY_OUT` itself. They go through `rld` (`flow.state.*`,
+`flows/state.rs`), never to disk, because an agent's permissions may not reach `~/.relay` while
+`Bash(rl flow state:*)` is one allow rule — and that rule gives an agent its firing's state and
+nothing else. `rld` finds the step from the run asking (`$RELAY_RUN`), while that run is going; any
+other run, or one over, is refused (`not in a flow step`), as `rl` itself refuses without
+`RELAY_RUN`, `RELAY_FIRING` and `RELAY_STEP`. It checks the name (one name, no `/` or `..`, not
+from a dot, not a step's `<step>.out`), caps a value at 4 KB and a file at 10 MB, and writes a
+file beside its place and renames it there, so a step reading it sees the old or the new.
+
 **Loading and approval.** `rld` reads every `~/.relay/flows/*/flow.md` at start, on
 `flow.reload` (`rl flow reload`, the panel's `/reload`), when a folder is registered or removed,
 and after `rl flow edit` and `/flow edit` (`flows/store.rs`). Each folder is hashed — sha256 over

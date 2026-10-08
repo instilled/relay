@@ -329,3 +329,27 @@ fn flow_approve_binds_to_the_version_shown() {
 
     assert!(out(rl(&["daemon", "stop"])).0);
 }
+
+#[test]
+fn flow_state_outside_a_step_is_refused_without_starting_rld() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    for args in [
+        &["flow", "state", "set", "a=1"][..],
+        &["flow", "state", "get", "a"],
+        &["flow", "state", "read", "x"],
+        &["flow", "state", "write", "x"],
+    ] {
+        let mut c = Command::new(env!("CARGO_BIN_EXE_rl"));
+        c.args(args)
+            .env("RELAY_HOME", &home)
+            .env_remove("RELAY_RUN")
+            .env_remove("RELAY_FIRING")
+            .env_remove("RELAY_STEP")
+            .stdin(std::process::Stdio::null());
+        let (ok, _, e) = out(c);
+        assert!(!ok, "{args:?}");
+        assert!(e.contains("not in a flow step"), "{args:?}: {e}");
+        assert!(!e.contains("rld started"), "nothing to start rld for: {e}");
+    }
+}
