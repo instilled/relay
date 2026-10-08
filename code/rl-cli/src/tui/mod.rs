@@ -254,7 +254,7 @@ struct Summarising {
 const TOP: &str = "top";
 
 /// What the catch-up showed that was not seen yet: the runs, and where each
-/// job's firings not seen start, by its row key.
+/// flow's firings not seen start, by its row key.
 #[derive(Default)]
 struct Shown {
     ids: Vec<String>,
@@ -363,7 +363,7 @@ struct App {
     /// While a frame is drawn, the catch-ups built for it, by the search
     /// each is narrowed by: built once a draw, and let go when it ends.
     drawn: std::cell::RefCell<Option<Vec<(String, crate::catchup::Kept)>>>,
-    /// Where a job row's `/summary` starts with no stretch typed, by row key:
+    /// Where a flow row's `/summary` starts with no stretch typed, by row key:
     /// when its oldest firing not seen started, noted as the cursor lands on
     /// it — landing marks them seen, so the daemon could no longer tell.
     /// Kept until used, or until the row has firings not seen again.
@@ -502,7 +502,7 @@ fn hit_row(hit: &ListHit, col: u16, row: u16) -> Option<String> {
 /// The icon slot: a space, a one-column icon, a space. Every row has one, so
 /// every title starts in the same column.
 const ICON_W: usize = 3;
-/// The state column's width: `needs you~` and a job's marks both fit.
+/// The state column's width: `needs you~` and a flow's marks both fit.
 const WORD_W: usize = 10;
 
 /// Where the state column starts, for a title column `tw` wide — where a
@@ -790,9 +790,9 @@ fn empty_list(msg: &str, area: Rect, nothing: bool) -> Paragraph<'static> {
 /// Where things go on screen.
 struct Areas {
     head: Rect,
-    /// The rules between the sections: under the header, above the line, above
-    /// the footer. Empty in the full-screen terminal.
-    rules: Vec<Rect>,
+    /// The separators between the sections: under the header, above the line,
+    /// above the footer. Empty in the full-screen terminal.
+    seps: Vec<Rect>,
     list: Option<Rect>,
     pane: Option<Rect>,
     /// The form, at the foot of the body.
@@ -815,23 +815,23 @@ fn areas(
     line_h: u16,
     foot_h: u16,
 ) -> Areas {
-    // The panel runs to the screen's edges, with rules between its sections —
+    // The panel runs to the screen's edges, with separators between its sections —
     // but not in the full-screen terminal, which wants every cell.
     let chrome = !wide;
-    let rule = u16::from(chrome);
-    let [head, rule_a, body, form, cands, rule_b, line, rule_c, footer] = Layout::vertical([
+    let sep = u16::from(chrome);
+    let [head, sep_a, body, form, cands, sep_b, line, sep_c, footer] = Layout::vertical([
         Constraint::Length(head_h(area, wide)),
-        Constraint::Length(rule),
+        Constraint::Length(sep),
         Constraint::Fill(1),
         Constraint::Length(if form_h > 0 { form_h + 1 } else { 0 }),
         Constraint::Length(cands_h),
-        Constraint::Length(rule),
+        Constraint::Length(sep),
         Constraint::Length(line_h.max(1)),
-        Constraint::Length(rule),
+        Constraint::Length(sep),
         Constraint::Length(foot_h.max(1)),
     ])
     .areas(area);
-    let rules = if chrome { vec![rule_a, rule_b, rule_c] } else { vec![] };
+    let seps = if chrome { vec![sep_a, sep_b, sep_c] } else { vec![] };
     let form = (form_h > 0).then_some(form);
     let cands = (cands_h > 0).then_some(cands);
     let (list, pane) = if wide {
@@ -851,7 +851,7 @@ fn areas(
     };
     Areas {
         head,
-        rules,
+        seps,
         list,
         pane,
         form,
@@ -2328,8 +2328,8 @@ impl App {
     /// is on out of the list. An ended run, or a flow's runs, are archived
     /// (reversible: the ledger keeps them); a run still going is stopped, so
     /// once it has ended another `ctrl-x` archives it; a question is
-    /// dismissed; a project is removed, its runs stopped and archived and its
-    /// `.relay` moved aside if you say so. Nothing here is destroyed — that is retention's alone.
+    /// dismissed; a project is removed, its runs stopped and archived. Nothing
+    /// here is destroyed — that is retention's alone.
     async fn remove_selected(&mut self) {
         if let Some(f) = self.selected_flow() {
             let ids: Vec<String> = f.runs.iter().map(|i| i.run.id.clone()).collect();
@@ -3390,7 +3390,7 @@ impl App {
     }
 
     /// `/hide`: the row under the cursor off the list — a run, going or
-    /// ended; a job, its firings to come too; a project and everything in it.
+    /// ended; a flow, its firings to come too; a project and everything in it.
     /// Nothing is stopped or removed. In the `hidden` lens it is the way back:
     /// the row comes back, and a header that is not hidden itself brings back
     /// what was hidden under it. A question is never hidden: it needs you.
@@ -3652,7 +3652,7 @@ impl App {
     // ---- summarising -------------------------------------------------------
 
     /// `/summary [deep] [stretch]`: what happened in the row under the
-    /// cursor — a run, a job's runs, a project's, or everything on the
+    /// cursor — a run, a flow's runs, a project's, or everything on the
     /// `everywhere` header — brief from the recaps or deep from the logs,
     /// since you last looked unless a stretch is typed. Deep over more than
     /// one assistant call says how many first and waits for `y`.
@@ -3694,7 +3694,7 @@ impl App {
             }
         };
         // A run's own stretch is the daemon's to say (since you looked at
-        // it); a job's, from the firing you had not seen when the cursor
+        // it); a flow's, from the firing you had not seen when the cursor
         // landed on it, else the daemon's; a project's and everything's,
         // since you were here.
         let from = match target {
@@ -3743,7 +3743,7 @@ impl App {
     /// Hands `params` to the summariser; the answer lands in the pane through
     /// the main loop.
     fn summary_start(&mut self, params: SummaryParams) {
-        // A job's note of where its unseen firings began is used once asked.
+        // A flow's note of where its unseen firings began is used once asked.
         if let Some(k) = &self.sel
             && params.from.is_some()
             && self.unseen_from.get(k) == params.from.as_ref()
@@ -5016,9 +5016,9 @@ impl App {
             f.render_widget(Paragraph::new(lens).right_aligned(), lens_area);
         }
         f.render_widget(Paragraph::new(self.me.clone()).dim().right_aligned(), r);
-        // The rules between the sections — a little air, a little structure.
-        for rule in &a.rules {
-            f.render_widget(Paragraph::new("─".repeat(rule.width as usize)).dim(), *rule);
+        // The separators between the sections — a little air, a little structure.
+        for sep in &a.seps {
+            f.render_widget(Paragraph::new("─".repeat(sep.width as usize)).dim(), *sep);
         }
         // Clicks go by where the list was last drawn: with no list on screen,
         // nothing is there to hit.
@@ -5394,7 +5394,7 @@ impl App {
                     list_line(
                         w,
                         tw,
-                        icon_span(rows::JOB, false),
+                        icon_span(rows::FLOW, false),
                         title,
                         flow_marks(f),
                         &stands,
@@ -5471,7 +5471,7 @@ impl App {
         };
         if plan.boxes.is_empty() {
             let msg = if self.filter.is_empty() {
-                " nothing wired yet · rl every or rl on, or rl up in a folder with .relay/"
+                " nothing wired yet · /flow edit <name> writes a flow"
             } else {
                 " nothing matches"
             };
@@ -5528,7 +5528,7 @@ impl App {
         self.draw_window(f, area, shown, keys, sel_line);
     }
 
-    /// The catch-up: its top, a rule, then its projects and rows, a window
+    /// The catch-up: its top, a separator, then its projects and rows, a window
     /// of them following the selection.
     fn draw_catch_up(&self, f: &mut Frame, area: Rect) {
         self.list_h.set(area.height);
@@ -5562,14 +5562,14 @@ impl App {
                 .collect();
         }
         let top_h = (top.len() as u16).min(area.height / 2);
-        let [top_area, rule, rest] = Layout::vertical([
+        let [top_area, sep, rest] = Layout::vertical([
             Constraint::Length(top_h),
             Constraint::Length(u16::from(top_h > 0)),
             Constraint::Fill(1),
         ])
         .areas(area);
         f.render_widget(Paragraph::new(top), top_area);
-        f.render_widget(Paragraph::new("─".repeat(rule.width as usize)).dim(), rule);
+        f.render_widget(Paragraph::new("─".repeat(sep.width as usize)).dim(), sep);
         self.list_h.set(rest.height);
         let (lines, keys) = catchup::lines(&cu, w, Timestamp::now());
         let words = query::Query::parse(&self.filter).words;
@@ -6215,7 +6215,7 @@ mod tests {
         assert_eq!(head_h(screen(160, 23), false), 1);
         assert_eq!(head_h(screen(80, 20), false), 1);
         assert_eq!(head_h(screen(79, 45), false), 1);
-        // The list starts under the header and its rule, whichever it is.
+        // The list starts under the header and its separator, whichever it is.
         let list = |w, h| {
             areas(screen(w, h), false, false, super::LIST_SHARE, 0, 0, 1, 1)
                 .list
@@ -6236,7 +6236,7 @@ mod tests {
         };
         assert_eq!(hit_row(&hit, 3, 7), Some("g:one".into()));
         assert_eq!(hit_row(&hit, 3, 8), Some("r:two".into()));
-        // The header's rows and the rule under it are nobody's.
+        // The header's rows and the separator under it are nobody's.
         for row in 0..7 {
             assert_eq!(hit_row(&hit, 3, row), None, "row {row}");
         }
@@ -6244,10 +6244,10 @@ mod tests {
 
     #[test]
     fn a_terminal_in_the_pane_is_sized_under_the_header_it_has() {
-        // 45 rows, less the header (6) and its rule, the rules above the line
+        // 45 rows, less the header (6) and its separator, the separators above the line
         // and the footer, the line, the footer, and the row naming the run.
         assert_eq!(term_size(Rect::new(0, 0, 160, 45), false, 1, 1), (79, 33));
-        // Full screen the header is one line and there are no rules.
+        // Full screen the header is one line and there are no separators.
         assert_eq!(term_size(Rect::new(0, 0, 160, 45), true, 1, 1), (160, 41));
         // A short screen keeps the one-line header beside a tile too.
         assert_eq!(term_size(Rect::new(0, 0, 80, 20), false, 1, 1), (80, 13));
@@ -6459,7 +6459,7 @@ mod tests {
                 "2m".into(),
             )
         };
-        for (icon, word) in [(rows::AGENT, "needs you"), (rows::SHELL, ""), (rows::JOB, "·×··")] {
+        for (icon, word) in [(rows::AGENT, "needs you"), (rows::SHELL, ""), (rows::FLOW, "·×··")] {
             let l = row(icon, word);
             assert_eq!(col_of(&l, "title"), 3, "{l}");
             assert_eq!(col_of(&l, "summary"), state_col(tw) + 11, "{l}");
@@ -6896,7 +6896,7 @@ mod tests {
         assert!(!closed.iter().any(|r| r.contains("↑↓ ^j^k move")), "{closed:#?}");
 
         // `^h`: the keys are the footer, and the line sits just above its
-        // rule, the footer's own rows under it.
+        // separator, the footer's own rows under it.
         press(&mut app, KeyCode::Char('h'), ctrl).await;
         assert!(app.shortcuts);
         let open = screen(&mut app, 120, 40);

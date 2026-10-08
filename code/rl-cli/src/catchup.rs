@@ -566,7 +566,7 @@ pub fn text(cu: &CatchUp, top: &[String], now: Timestamp) -> String {
             out.push_str(&match r {
                 Row::Question(q) => format!("\n    {} {}  {line}  [{}]", rows::QUESTION, q.id, q.keys()),
                 Row::Run(i) => format!("\n    {} {}  {line}", rows::icon(&i.run), i.run.id),
-                Row::Flow(_) => format!("\n    {} {line}", rows::JOB),
+                Row::Flow(_) => format!("\n    {} {line}", rows::FLOW),
                 Row::Group(_) => continue,
             });
         }

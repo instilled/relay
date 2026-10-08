@@ -1130,7 +1130,7 @@ pub struct SummaryParams {
     #[serde(default)]
     pub deep: bool,
     /// Where the stretch begins. None: since you last looked (a run's
-    /// seen_at, when it has done anything since, else the whole run; a job's
+    /// seen_at, when it has done anything since, else the whole run; a flow's
     /// oldest unseen firing on, else the last day); required for a project and
     /// all — the client knows when you were last here.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1147,7 +1147,7 @@ pub struct SummaryParams {
     pub timeout: Option<String>,
 }
 
-/// What happened in a run, a job's runs, a project's or everything's, over
+/// What happened in a run, a flow's runs, a project's or everything's, over
 /// the stretch from `from`, brief or deep: the one kept while it has not moved
 /// on (unless `again`); else a run's own recap where it has one, or
 /// `assistants.summary` reading the stretch. Refused for an assistant's own

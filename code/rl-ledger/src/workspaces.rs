@@ -1,5 +1,5 @@
-//! Workspaces: folders the user registered with `rl up`. A workspace is the
-//! trust boundary for everything under its `.relay/`.
+//! Workspaces: folders the user registered with `rl up` (`rl add`). A flow's
+//! `in` must be one of them, or the flow does not load.
 
 use crate::conv;
 use anyhow::Result;

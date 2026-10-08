@@ -101,8 +101,8 @@ async fn removing_a_project_stops_and_archives_its_runs_and_lets_its_questions_a
         return;
     };
     let mut c = Conn::open(&home).await;
+    // Registering the folder is enough: the flows are read again.
     let _: Workspace = c.ok("workspace.up", json!({ "path": ws })).await;
-    let _: serde_json::Value = c.ok("flow.reload", json!(null)).await;
     let flows: Vec<Flow> = c.ok("flow.list", json!({})).await;
     assert_eq!(flows.len(), 1, "it loads once the folder is known: {flows:?}");
 

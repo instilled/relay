@@ -41,6 +41,7 @@ fn resolve(path: &Path) -> PathBuf {
 }
 
 /// Registers a folder, named for itself; one registered already is as it was.
+/// The flows are read again, so one `in` it loads.
 pub async fn up(d: &Daemon, path: &Path) -> Result<Workspace> {
     let path = std::fs::canonicalize(path).with_context(|| format!("workspace {}", path.display()))?;
     if !path.is_dir() {
@@ -58,6 +59,10 @@ pub async fn up(d: &Daemon, path: &Path) -> Result<Workspace> {
             .await?
     };
     info!(workspace = %path.display(), "workspace up");
+    // Flows `in` it load now, not at the next reload.
+    if let Err(e) = d.flows.reload().await {
+        warn!(error = %format!("{e:#}"), "flows not reloaded");
+    }
     Ok(w)
 }
 

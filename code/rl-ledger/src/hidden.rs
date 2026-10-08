@@ -1,4 +1,4 @@
-//! `hidden` table: projects and jobs taken off the panel's list, by the key
+//! `hidden` table: projects and flows taken off the panel's list, by the key
 //! of their row. A run is hidden on its own row (`runs.hidden_at`).
 
 use crate::conv;

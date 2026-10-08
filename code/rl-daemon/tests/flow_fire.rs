@@ -108,7 +108,11 @@ async fn three_steps_run_in_order_in_one_chain_and_the_firing_ends_done() {
     assert_eq!(data(0)["firing"], f.id.as_str());
     assert_eq!(data(0)["trigger"], "hand");
     assert_eq!(data(1)["status"], "done");
-    assert_eq!(events[0].workspace, ws, "the flow's `in`");
+    assert_eq!(
+        events[0].workspace,
+        std::fs::canonicalize(&ws).unwrap(),
+        "the flow's `in`, as the project is registered"
+    );
     h.stop().await;
 }
 

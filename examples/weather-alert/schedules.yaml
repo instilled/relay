@@ -1,8 +1,0 @@
-schedules:
-  # Every morning at 07:00, look at today's forecast and emit a `weather.alert`
-  # when it is sunny or rain is likely. `check-weather` reads no secrets.
-  check-weather:
-    cron: "0 7 * * *"
-    run: check-weather
-    # a probe wants clean stdout, not a terminal
-    no_tty: true

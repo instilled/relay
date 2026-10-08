@@ -183,11 +183,11 @@ async fn an_in_relay_does_not_know_does_not_load() {
     assert_eq!((errs[0].flow.as_str(), errs[0].line), ("there", Some(2)));
     assert!(errs[0].message.contains("rl add"), "{:?}", errs[0]);
 
-    // Once Relay knows the folder, by whatever spelling, the flow loads.
+    // Once Relay knows the folder, by whatever spelling, the flow loads: registering it reads
+    // the flows again.
     let _: serde_json::Value = c.ok("workspace.up", json!({ "path": elsewhere })).await;
-    let r: Reloaded = c.ok("flow.reload", json!(null)).await;
-    assert_eq!(r.added, ["there"], "{r:?}");
-    assert!(r.not_loaded.is_empty(), "{r:?}");
+    let flows: Vec<Flow> = c.ok("flow.list", json!({})).await;
+    assert_eq!(flows.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(), ["there"]);
     let errs: Vec<NotLoaded> = c.ok("flow.errors", json!(null)).await;
     assert!(errs.is_empty(), "{errs:?}");
     h.stop().await;

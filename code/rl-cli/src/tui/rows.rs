@@ -283,9 +283,9 @@ impl Chip {
     pub fn text(&self) -> String {
         match (&self.status, &self.due) {
             (FlowStatus::NeedsApproval, _) => format!("! {}", self.name),
-            (FlowStatus::Paused, _) => format!("{JOB} {} paused", self.name),
-            (_, Some(d)) => format!("{JOB} {} {d}", self.name),
-            (_, None) => format!("{JOB} {}", self.name),
+            (FlowStatus::Paused, _) => format!("{FLOW} {} paused", self.name),
+            (_, Some(d)) => format!("{FLOW} {} {d}", self.name),
+            (_, None) => format!("{FLOW} {}", self.name),
         }
     }
 }
@@ -342,7 +342,7 @@ pub const AGENT: &str = "✦";
 pub const SHELL: &str = "❯";
 pub const COMMAND: &str = "▸";
 /// A flow, as its row and its chips wear it.
-pub const JOB: &str = "↻";
+pub const FLOW: &str = "↻";
 /// A question waiting on you.
 pub const QUESTION: &str = "?";
 
@@ -1199,7 +1199,7 @@ pub fn everywhere(chips: &[Chip]) -> Option<(String, bool)> {
         return None;
     }
     let waiting = chips.iter().filter(|c| c.needs_yes()).count();
-    let mut s = format!("{JOB} {} everywhere", chips.len());
+    let mut s = format!("{FLOW} {} everywhere", chips.len());
     let need = |n: usize| if n == 1 { "needs" } else { "need" };
     match waiting {
         0 => {}
@@ -1507,9 +1507,9 @@ mod tests {
         let mut failed = item("failed", RunState::Failed, web, at, false);
         failed.run.title = "cargo test".into();
         failed.run.kind = RunKind::Command;
-        let mut sched = item("sched", RunState::Working, web, at, false);
-        sched.run.kind = RunKind::Command;
-        sched.run.cause = step_of("nightly");
+        let mut probe = item("probe", RunState::Working, web, at, false);
+        probe.run.kind = RunKind::Command;
+        probe.run.cause = step_of("nightly");
         // The question is a firing's: its chain is the firing's id.
         let asking = Firing {
             id: "q1".into(),
@@ -1518,7 +1518,7 @@ mod tests {
         };
         let d = Digest {
             since: now,
-            items: vec![agent, failed, sched],
+            items: vec![agent, failed, probe],
             decisions: vec![question("q1", api, None, at)],
             checkouts: Vec::new(),
             lost: Vec::new(),
@@ -1542,7 +1542,7 @@ mod tests {
         assert_eq!(shown("is:failed"), ["[web]", "r:failed"]);
         assert_eq!(shown("kind:agent"), ["[api]", "r:agent"]);
         assert_eq!(shown("kind:question"), ["q:q1"], "a question stands above the projects");
-        assert_eq!(shown("by:nightly"), ["[web]", "r:sched"]);
+        assert_eq!(shown("by:nightly"), ["[web]", "r:probe"]);
         assert_eq!(shown("by:tests"), ["q:q1"], "a question by its flow's firing");
         // A word nothing says finds nothing.
         assert_eq!(shown("global"), Vec::<String>::new());
@@ -1645,13 +1645,13 @@ mod tests {
         // What a warm shell really is: the `sh` profile's kind wins over the
         // `Command` hint it was started with. Either way it is not an agent.
         shell.run.kind = RunKind::Shell;
-        let mut sched = item("sched", RunState::Working, ws, at, false);
-        sched.run.cause = step_of("nightly");
-        let mut react = item("react", RunState::Working, ws, at, false);
-        react.run.cause = step_of("on-fail");
+        let mut probe = item("probe", RunState::Working, ws, at, false);
+        probe.run.cause = step_of("nightly");
+        let mut onfail = item("onfail", RunState::Working, ws, at, false);
+        onfail.run.cause = step_of("on-fail");
         let d = Digest {
             since: now,
-            items: vec![agent, shell, sched, react],
+            items: vec![agent, shell, probe, onfail],
             decisions: vec![],
             checkouts: Vec::new(),
             lost: Vec::new(),
@@ -1668,11 +1668,11 @@ mod tests {
         };
         // The shell leads its folder: where you work comes before what merely
         // runs there. The rest keep the order they were in.
-        assert_eq!(runs(Lens::All), ["shell", "agent", "sched", "react"]);
+        assert_eq!(runs(Lens::All), ["shell", "agent", "probe", "onfail"]);
         // Agents is by kind, so it keeps the flows' agents too.
-        assert_eq!(runs(Lens::Agents), ["agent", "sched", "react"]);
+        assert_eq!(runs(Lens::Agents), ["agent", "probe", "onfail"]);
         // Flows is by cause.
-        assert_eq!(runs(Lens::Flows), ["sched", "react"]);
+        assert_eq!(runs(Lens::Flows), ["probe", "onfail"]);
     }
 
     #[test]
@@ -2508,7 +2508,7 @@ mod tests {
     #[test]
     fn every_icon_is_one_quiet_column() {
         use ratatui::text::Span;
-        for i in [AGENT, SHELL, COMMAND, JOB, QUESTION] {
+        for i in [AGENT, SHELL, COMMAND, FLOW, QUESTION] {
             assert_eq!(Span::raw(i).width(), 1, "{i}");
             assert_eq!(i.chars().count(), 1, "{i} carries no variation selector");
         }

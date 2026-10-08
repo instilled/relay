@@ -422,7 +422,7 @@ pub struct Summary {
     /// How many assistant calls it took.
     #[serde(default)]
     pub calls: u32,
-    /// How many runs it covers: one for a run; for a job, a project or
+    /// How many runs it covers: one for a run; for a flow, a project or
     /// everything, those in the stretch.
     #[serde(default)]
     pub runs: u32,
