@@ -10,6 +10,8 @@ pub const FILE_MAX: usize = 10 << 20;
 pub const OUT_FILE_MAX: usize = 1 << 20;
 /// What Relay itself says of a step, so no value may be called it.
 pub const RESERVED: &[&str] = &["out", "choice", "note"];
+/// The most of a key, a name or a line a refusal quotes, in chars.
+const QUOTED_MAX: usize = 80;
 
 /// A value's key: `[a-z][a-z0-9_]*`, and none of [`RESERVED`]. It is a placeholder's
 /// (`{probe.signature}`) and part of a variable's name (`$RELAY_V_probe_signature`), and nothing
@@ -19,7 +21,10 @@ pub fn key(k: &str) -> Result<(), String> {
     let word = chars.next().is_some_and(|c| c.is_ascii_lowercase())
         && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
     if !word {
-        return Err(format!("`{k}` is not a value's key: a-z, 0-9 and _, from a letter"));
+        return Err(format!(
+            "`{}` is not a value's key: a-z, 0-9 and _, from a letter",
+            quoted(k)
+        ));
     }
     if RESERVED.contains(&k) {
         return Err(format!("`{k}` is Relay's to say of a step, not a value's key"));
@@ -32,7 +37,8 @@ pub fn value(k: &str, v: &str) -> Result<(), String> {
     key(k)?;
     if v.len() > VALUE_MAX {
         return Err(format!(
-            "`{k}` is {} bytes; a value is 4 KB at most — write a file instead",
+            "`{}` is {} bytes; a value is 4 KB at most — write a file instead",
+            quoted(k),
             v.len()
         ));
     }
@@ -50,7 +56,8 @@ pub fn file_name(name: &str, steps: &[&str]) -> Result<(), String> {
         && !name.contains("..");
     if !plain {
         return Err(format!(
-            "`{name}` is not a file's name here: one name, no / or .., not starting with a dot"
+            "`{}` is not a file's name here: one name, no / or .., not starting with a dot",
+            quoted(name)
         ));
     }
     if let Some(step) = out_of(name, steps) {
@@ -88,13 +95,26 @@ pub fn out_lines(text: &str) -> Result<Vec<(String, String)>, String> {
             continue;
         }
         let Some((k, v)) = line.split_once('=') else {
-            return Err(format!("$RELAY_OUT line {}: `{line}` is not key=value", i + 1));
+            return Err(format!(
+                "$RELAY_OUT line {}: `{}` is not key=value",
+                i + 1,
+                quoted(line)
+            ));
         };
         value(k, v).map_err(|e| format!("$RELAY_OUT line {}: {e}", i + 1))?;
         kept.retain(|(had, _)| had != k);
         kept.push((k.to_string(), v.to_string()));
     }
     Ok(kept)
+}
+
+/// `s` as a refusal quotes it: [`QUOTED_MAX`] chars at most, a cut one ending in `…`, so a
+/// refusal said to the step and kept in its events stays a line, whatever it was given.
+fn quoted(s: &str) -> String {
+    match s.char_indices().nth(QUOTED_MAX) {
+        Some((cut, _)) => format!("{}…", &s[..cut]),
+        None => s.to_string(),
+    }
 }
 
 /// The variable a command reads an earlier step's value from: `RELAY_V_<step>_<key>`, a `-` in
@@ -189,6 +209,29 @@ mod tests {
         assert!(e.contains("4 KB"), "{e}");
         let e = out_lines(&"x".repeat(OUT_FILE_MAX + 1)).unwrap_err();
         assert!(e.contains("1 MB"), "{e}");
+    }
+
+    #[test]
+    fn a_refusal_quotes_a_long_line_or_name_cut_short() {
+        let line = "Y".repeat(10 << 10);
+        for e in [
+            out_lines(&format!("found=3\n{line}\n")).unwrap_err(),
+            out_lines(&format!("{line}=3\n")).unwrap_err(),
+            key(&line).unwrap_err(),
+            file_name(&line, &[]).unwrap_err(),
+        ] {
+            assert!(e.len() < 300, "{} bytes: {e}", e.len());
+            assert!(e.contains(&format!("{}…`", "Y".repeat(QUOTED_MAX))), "{e}");
+        }
+        let e = value(&"y".repeat(10 << 10), &"x".repeat(VALUE_MAX + 1)).unwrap_err();
+        assert!(e.len() < 300 && e.contains("4 KB"), "a good key, a value too big: {e}");
+        let e = out_lines("not a value\n").unwrap_err();
+        assert!(e.contains("`not a value`"), "a short line is quoted whole: {e}");
+        let e = key(&"é".repeat(QUOTED_MAX + 1)).unwrap_err();
+        assert!(
+            e.contains(&format!("{}…`", "é".repeat(QUOTED_MAX))),
+            "cut at a char: {e}"
+        );
     }
 
     #[test]
