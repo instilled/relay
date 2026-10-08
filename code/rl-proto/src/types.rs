@@ -497,6 +497,8 @@ pub mod event_kind {
     pub const FLOW_ENDED: &str = "flow.ended";
     /// A flow or one of its steps did not run, and why.
     pub const FLOW_SKIPPED: &str = "flow.skipped";
+    /// What a step left that Relay would not keep (a `$RELAY_OUT` line), and why: the step failed.
+    pub const FLOW_REFUSED: &str = "flow.refused";
     pub const DECISION_RAISED: &str = "decision.raised";
     pub const DECISION_TAKEN: &str = "decision.taken";
     pub const DECISION_DISMISSED: &str = "decision.dismissed";
@@ -531,6 +533,7 @@ pub mod event_kind {
         FLOW_FIRED,
         FLOW_ENDED,
         FLOW_SKIPPED,
+        FLOW_REFUSED,
         DECISION_RAISED,
         DECISION_TAKEN,
         DECISION_DISMISSED,

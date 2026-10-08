@@ -819,8 +819,8 @@ as the file; a link to a folder keeps the flow from loading, since what is under
 without being hashed. `runs/` is set aside for a
 firing's state: it is never part of the folder's hash, and `rld` writes `flows/.gitignore`
 (`runs/`) when there is none, so `~/.relay/flows/` may be a git repository — history with `git
-log`, sharing with a push — though Relay neither needs nor assumes it. Nothing is written under
-`runs/` yet (§8).
+log`, sharing with a push — though Relay neither needs nor assumes it. What a firing's steps
+leave is under `runs/<firing>/` (**State between steps**, below).
 
 ```markdown
 ---
@@ -888,15 +888,17 @@ The frontmatter is `relay_proto::flow::FlowSpec`; a key it does not know is refu
 Where a step runs: its `in`, else the flow's; with neither, a step of an `on` firing runs where
 its event happened — the folder of the event's run while that is still there, else the event's
 workspace — and anything else in the Relay home (`engine::cwd`). Each run, titled `prod-logs ·
-probe`, is started with `RELAY_FLOW`, `RELAY_FIRING`, `RELAY_STEP` and `RELAY_FLOW_DIR` (with
-`RELAY_RUN`, as every run is), the folder first on `PATH`; a `when` firing's steps get `RELAY_LAST_FIRING` too — when the
-previous firing started, empty on the first — so a probe can ask only for what is new without
-keeping a clock of its own, and an `on` firing's get the event: `RELAY_EVENT` whole, as JSON,
-and `RELAY_EVENT_ID`, `_KIND`, `_SUMMARY`, `_RUN`.
+probe`, is started with `RELAY_FLOW`, `RELAY_FIRING`, `RELAY_STEP`, `RELAY_FLOW_DIR`,
+`RELAY_WORK`, `RELAY_IN` and `RELAY_OUT` (with `RELAY_RUN`, as every run is), the folder first on
+`PATH`, and `RELAY_LAST_FIRING` — when the flow's previous firing started, whatever fired it,
+empty on the first — so a probe can ask only for what is new without keeping a clock of its own;
+an `on` firing's get the event: `RELAY_EVENT` whole, as JSON, and `RELAY_EVENT_ID`, `_KIND`,
+`_SUMMARY`, `_RUN`.
 
 What came before reaches a step through placeholders. `{probe.out}` is what a step's run printed
 — the last 64 KB of it, ANSI stripped and trimmed, which for an agent run headless is its answer;
 `{review.choice}` and `{review.note}` are an ask step's answer and what was said with it;
+any other `{probe.signature}` is a value the step set;
 `{event.summary}`, `{event.data.x}` and the rest (`kind`, `run`, `title`, `cwd`, `cli`, `cause`,
 `group`, `workspace`) are the event an `on` firing fired on. They are spliced into an agent's prompt and an
 `ask:` text only, in one pass — what was spliced in is never read for more
@@ -905,10 +907,10 @@ as the agent's flag; an agent whose prompt is a flag's value (`gemini -p <prompt
 `--` there, and a filled prompt that starts with `-` does not start
 (`rl_detect::registry::with_given_prompt`). A command never gets one: a `run:` string or argv, or an agent's
 `args`, that names `{probe.out}` is refused at load, so an error line in production logs can
-never become shell. The refusal says what to do instead: for the event, read it from the
-environment (`$RELAY_EVENT_SUMMARY`, `$RELAY_EVENT`); what a step left goes into an agent's prompt
-or an `ask:`, since a command has no way to it yet (§8). Other braces (`awk '{print $1}'`) are the
-shell's.
+never become shell. The refusal says which variable to read instead: `$RELAY_IN/probe.out` for
+what a step printed, `$RELAY_V_probe_signature` for a value, `$RELAY_CHOICE` and `$RELAY_NOTE` in
+an ask's own option, `$RELAY_EVENT_SUMMARY` or `$RELAY_EVENT` for the event. Other braces (`awk
+'{print $1}'`) are the shell's.
 
 What is wrong is said at load, all of it at once, each at its line (`rl-flow/src/def.rs`,
 `check`): an unknown `after`, a cycle, an agent step with neither a prompt nor a section, a
@@ -917,6 +919,19 @@ a placeholder in a command, a `prompt_file` that is not in the flow's folder (ab
 through `..`, or under `runs/`, which no hash covers), a `multi` ask with more than one option that runs something (only one chosen
 option would run), an `in` Relay does not know (`prod-logs · flow.md:2 · in: ~/x is not
 a project Relay knows — rl add ~/x`; `rl add` is `rl up` by another name).
+
+**State between steps.** Three layers, each opt-in. A step's **out** — what it printed, as
+`{probe.out}` has it — is written for each step after it to `$RELAY_IN/probe.out`. Its
+**values** are `key=value` lines it appends to `$RELAY_OUT`, read when its run ends well and
+kept in the ledger (`step_values`); a later step reads them as `{probe.signature}` in a prompt,
+an `ask:` or a `group:`, in `if: probe.found`, and as `$RELAY_V_probe_signature` (a `-` in the
+step's name is `_`). A key is `[a-z][a-z0-9_]*` — not `out`, `choice` or `note`, which Relay
+says of a step — and a value 4 KB at most; a `$RELAY_OUT` line that is not that, or a file over
+1 MB, is not kept: `flow.refused` says why and the step fails (`flows/work.rs`). Its **files**
+go in `$RELAY_WORK`, `runs/<firing>/`, shared by every step of the firing; Relay's own corner of
+it, `.relay/<step>/` (`$RELAY_IN` and `$RELAY_OUT`), is apart from them, as no step's file may
+start with a dot. What a step left is read one way, wherever it is asked for
+(`flows/facts.rs`). A group naming a value no step set is no group.
 
 **Loading and approval.** `rld` reads every `~/.relay/flows/*/flow.md` at start, on
 `flow.reload` (`rl flow reload`, the panel's `/reload`), when a folder is registered or removed,

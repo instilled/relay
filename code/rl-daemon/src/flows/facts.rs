@@ -4,6 +4,8 @@
 //! and the event an `on` firing fired on.
 
 use super::triggers::vars;
+use rl_flow::def::FlowDef;
+use rl_flow::plan;
 use rl_flow::template::{Lookup, Ref};
 use rl_ledger::{decisions, firings, session_io};
 use rl_proto::flow::{Firing, StepState};
@@ -14,6 +16,15 @@ use tracing::warn;
 
 /// How much of a step's output is its `out`: the last of it.
 pub(super) const OUT_MAX: usize = 64 << 10;
+
+/// What a step is handed of the steps it comes after, for its environment and `$RELAY_IN`.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub(super) struct Handed {
+    /// `(step, out)`.
+    pub(super) outs: Vec<(String, String)>,
+    /// `(step, key, value)`.
+    pub(super) values: Vec<(String, String, String)>,
+}
 
 pub(super) struct Facts<'a> {
     conn: &'a Connection,
@@ -33,14 +44,36 @@ impl<'a> Facts<'a> {
         }
     }
 
-    // Read by the state RPCs and the command environment, next.
-    #[allow(dead_code)]
     /// What `step` printed: the last 64 KB of its run, ANSI stripped and trimmed.
     pub(super) fn out(&self, step: &str) -> Option<String> {
         self.get(&Ref {
             head: step.to_string(),
             rest: "out".to_string(),
         })
+    }
+
+    /// What `step` is handed of the steps it comes after: each one's out, and every value it
+    /// left — an ask's choice and note among them.
+    pub(super) fn handed(&self, def: &FlowDef, step: &str) -> anyhow::Result<Handed> {
+        let mut h = Handed::default();
+        for up in plan::upstream(def, step) {
+            if let Some(out) = self.out(&up) {
+                h.outs.push((up.clone(), out));
+            }
+            for key in ["choice", "note"] {
+                let r = Ref {
+                    head: up.clone(),
+                    rest: key.to_string(),
+                };
+                if let Some(v) = self.get(&r) {
+                    h.values.push((up.clone(), key.to_string(), v));
+                }
+            }
+            for (key, v) in firings::values(self.conn, self.firing, &up)? {
+                h.values.push((up.clone(), key, v));
+            }
+        }
+        Ok(h)
     }
 }
 

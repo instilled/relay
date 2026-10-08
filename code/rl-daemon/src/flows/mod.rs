@@ -10,6 +10,7 @@ mod restart;
 pub(crate) mod rpc;
 mod store;
 mod triggers;
+mod work;
 
 pub(crate) use triggers::kind_matches;
 

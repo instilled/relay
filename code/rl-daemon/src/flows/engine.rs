@@ -7,7 +7,8 @@
 
 use super::Flows;
 use super::ask::{option_of, question};
-use super::facts::Facts;
+use super::facts::{Facts, Handed};
+use super::work::Work;
 use crate::action::{expand_home, run_spec};
 use anyhow::{Context, Result, anyhow};
 use jiff::Timestamp;
@@ -15,6 +16,7 @@ use rl_core::Home;
 use rl_core::id::new_id;
 use rl_flow::advance::{Do, Happened, advance, status};
 use rl_flow::def::{Ask, Does, FlowDef, Step};
+use rl_flow::state;
 use rl_flow::template::{self, Lookup};
 use rl_ledger::events::NewEvent;
 use rl_ledger::firings::{self, NewFiring};
@@ -25,7 +27,7 @@ use rl_proto::methods::{DecisionSpec, RunSpec};
 use rl_proto::types::{Cause, Event, Run, event_kind};
 use rusqlite::Connection;
 use serde_json::json;
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use tracing::{info, warn};
@@ -86,6 +88,8 @@ pub(super) struct Moved {
     pub(super) began: Option<String>,
     /// What to do, each with what it needs, placeholders filled.
     pub(super) todo: Vec<(Do, Ready)>,
+    /// What each step to start is handed of the steps before it.
+    pub(super) handed: BTreeMap<String, Handed>,
 }
 
 /// What one `Do` needs, made ready while the firing is read.
@@ -237,6 +241,8 @@ impl Flows {
     /// Each of what happened, in turn, as [`step`](Self::step) does it.
     pub(super) async fn follow(&self, mut queue: VecDeque<(String, Happened)>) -> Result<()> {
         while let Some((firing, h)) = queue.pop_front() {
+            // What a step appended to `$RELAY_OUT` is its values before anything after it is decided.
+            let h = self.kept(&firing, h).await;
             let (id, home) = (firing.clone(), self.home.clone());
             let Some(m) = self.ledger.call(move |c| moved(c, &home, &id, &h)).await? else {
                 continue;
@@ -339,7 +345,8 @@ impl Flows {
     }
 
     /// What a step's run is started with: no tty and no input, in the firing's chain, the
-    /// flow's folder first on its `PATH` and the firing's names in its env.
+    /// flow's folder first on its `PATH`, the firing's names in its env, its folder made ready
+    /// (`Work::prepare`), and what the steps before it left as `RELAY_V_<step>_<key>`.
     pub(super) fn spec(&self, m: &Moved, step: &str, action: &Action) -> Result<RunSpec> {
         let def = &m.def;
         let at = def.steps.iter().find(|s| s.name == step).context("no such step")?;
@@ -354,19 +361,27 @@ impl Flows {
         let mut spec = run_spec(action, &name, &dir, Some(&cwd), &self.registry, cause, chain)?;
         spec.tty = false;
         spec.input = false;
+        let handed = m.handed.get(step).cloned().unwrap_or_default();
+        let work = Work::of(&self.home, &def.name, &m.firing.id, step);
+        work.prepare(&handed.outs)?;
         let path = std::env::var_os("PATH").unwrap_or_default();
+        let shown = |p: &Path| p.to_string_lossy().into_owned();
         let env = [
             ("RELAY_FLOW", def.name.clone()),
             ("RELAY_FIRING", m.firing.id.clone()),
             ("RELAY_STEP", step.to_string()),
-            ("RELAY_FLOW_DIR", dir.to_string_lossy().into_owned()),
+            ("RELAY_FLOW_DIR", shown(&dir)),
+            ("RELAY_WORK", shown(&work.dir)),
+            ("RELAY_IN", shown(&work.input)),
+            ("RELAY_OUT", shown(&work.out)),
+            // When the flow's firing before this one started, whatever fired either: empty on the first.
+            ("RELAY_LAST_FIRING", m.last.map(|t| t.to_string()).unwrap_or_default()),
             ("PATH", format!("{}:{}", dir.display(), path.to_string_lossy())),
         ];
         spec.env.extend(env.map(|(k, v)| (k.to_string(), v)));
-        if m.firing.trigger == "when" {
-            let last = m.last.map(|t| t.to_string()).unwrap_or_default();
-            spec.env.push(("RELAY_LAST_FIRING".into(), last));
-        }
+        // What the steps before it left, a variable each: `$RELAY_V_probe_signature`.
+        spec.env
+            .extend(handed.values.iter().map(|(s, k, v)| (state::env_name(s, k), v.clone())));
         if let Some((e, _)) = &m.event {
             spec.env.push(("RELAY_EVENT_KIND".into(), e.kind.clone()));
             spec.env.push(("RELAY_EVENT_SUMMARY".into(), e.summary.clone()));
@@ -426,7 +441,7 @@ impl Flows {
     }
 
     /// The same, where a firing must move on whatever: a failure is logged, not returned.
-    async fn say(&self, def: &FlowDef, kind: &str, summary: String, data: serde_json::Value) {
+    pub(super) async fn say(&self, def: &FlowDef, kind: &str, summary: String, data: serde_json::Value) {
         if let Err(e) = self.record(def, kind, summary, data).await {
             warn!(flow = def.name, kind, error = %format!("{e:#}"), "recording a flow's event");
         }
@@ -470,9 +485,13 @@ pub(super) fn laid_out(c: &Connection, home: &Home, id: &str, def: FlowDef, todo
     let event = event_of(c, &firing)?;
     let facts = Facts::new(c, &firing, event.as_ref());
     let dir = home.flow_dir(&def.name);
+    let mut handed = BTreeMap::new();
     let todo = todo
         .into_iter()
         .map(|d| {
+            if let Do::Start(s) | Do::RunOption(s) = &d {
+                handed.insert(s.clone(), facts.handed(&def, s)?);
+            }
             let ready = match &d {
                 Do::Start(s) => run_of(&def, s).map(|a| Ready::Run(filled(a, &dir, &facts))),
                 Do::RunOption(s) => option_of(c, &def, &firing.steps, s)?.map(|a| Ready::Run(filled(&a, &dir, &facts))),
@@ -491,6 +510,7 @@ pub(super) fn laid_out(c: &Connection, home: &Home, id: &str, def: FlowDef, todo
         last,
         began,
         todo,
+        handed,
     })
 }
 

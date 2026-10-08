@@ -119,6 +119,9 @@ fn event_words(kind: &str) -> Option<&'static str> {
         event_kind::FLOW_FIRED => "a flow fired: by hand, on time or on an event (data: flow, firing, trigger)",
         event_kind::FLOW_ENDED => "a flow's firing is over (data: flow, firing, status: done, failed or stopped)",
         event_kind::FLOW_SKIPPED => "a flow, or one of its steps, did not run (data: flow, firing, step, reason)",
+        event_kind::FLOW_REFUSED => {
+            "a step's $RELAY_OUT said something Relay would not keep, so the step failed (data: flow, firing, step, reason)"
+        }
         event_kind::DECISION_RAISED => "a question was put to the person",
         event_kind::DECISION_TAKEN => "the person answered a question",
         event_kind::DECISION_DISMISSED => "the person dismissed a question",
