@@ -186,7 +186,8 @@ fn runs(c: &Connection, firing: &str, step: &str, decision: &str) -> Result<bool
     Ok(chosen(&def, step, &d).is_some())
 }
 
-/// The first option chosen that runs something.
+/// The option chosen that runs something: one at most, since a `multi` ask with more than one
+/// that runs is refused at load.
 fn chosen<'a>(def: &'a FlowDef, step: &str, d: &Decision) -> Option<(&'a str, &'a Action)> {
     let Some(Does::Ask(ask)) = def.steps.iter().find(|s| s.name == step).map(|s| &s.does) else {
         return None;

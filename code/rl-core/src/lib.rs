@@ -1,6 +1,7 @@
 //! `~/.relay/` — one place for everything user-level. `RELAY_HOME` overrides
 //! it, which is also how tests stay out of the real one.
 
+pub mod folder;
 pub mod id;
 pub mod time;
 

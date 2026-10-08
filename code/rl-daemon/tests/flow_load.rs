@@ -156,13 +156,23 @@ async fn a_pipe_in_a_flow_folder_does_not_hold_the_daemon_up() {
     std::os::unix::fs::symlink(&dir, dir.join("loop")).unwrap();
     let Some(h) = Harness::on(home.clone()) else { return };
     // The daemon answers only once the flows are loaded.
-    let flows: Vec<Flow> = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+    let (flows, errs): (Vec<Flow>, Vec<NotLoaded>) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
         let mut c = Conn::open(&h.home).await;
-        c.ok("flow.list", json!({})).await
+        (
+            c.ok("flow.list", json!({})).await,
+            c.ok("flow.errors", json!(null)).await,
+        )
     })
     .await
     .expect("rld came up");
-    assert_eq!(flows.len(), 1);
+    // The link back up is a link to a folder: not followed, and not loaded.
+    assert!(flows.is_empty(), "{flows:?}");
+    assert_eq!(errs.len(), 1, "{errs:?}");
+    assert_eq!(errs[0].file, dir.join("loop"));
+    std::fs::remove_file(dir.join("loop")).unwrap();
+    let mut c = Conn::open(&h.home).await;
+    let r: Reloaded = c.ok("flow.reload", json!(null)).await;
+    assert_eq!((r.loaded, r.not_loaded.len()), (1, 0), "the pipe is passed over: {r:?}");
     h.stop().await;
 }
 

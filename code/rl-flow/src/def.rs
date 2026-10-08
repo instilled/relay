@@ -13,7 +13,7 @@ use rl_proto::action::{Action, Task};
 use rl_proto::flow::{DEFAULT_THROTTLE, Filter, Missed, Overlap, StepSpec};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 /// A flow that checked out: what it is, and each step ready to carry out.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -259,6 +259,12 @@ fn step(name: &str, s: &StepSpec, flow: &Flow, said: &mut Vec<String>) -> Option
                 prompt_of(&action).inspect(|p| uses_in(p, true, said));
                 options.push((option.clone(), action));
             }
+            // Only the first option chosen would run: until each does, one at most may.
+            if s.multi && options.iter().filter(|(_, a)| !a.is_empty()).count() > 1 {
+                said.push(format!(
+                    "`{name}`: `multi` with more than one option that runs something — only one may"
+                ));
+            }
             Does::Ask(Ask {
                 text: text.clone(),
                 options,
@@ -296,8 +302,21 @@ fn ask_keys(s: &StepSpec) -> Vec<&'static str> {
     .collect()
 }
 
-/// `action`, an agent with no prompt given the `## <label>` section.
+/// `action`, an agent with no prompt given the `## <label>` section. A `prompt_file` is the
+/// folder's: relative, and never out of it, so the folder's hash covers it.
 fn filled(label: &str, mut action: Action, sections: &BTreeMap<String, String>, said: &mut Vec<String>) -> Action {
+    if let Some(Task::Agent {
+        prompt_file: Some(f), ..
+    }) = &action.run
+        && !f
+            .components()
+            .all(|c| matches!(c, Component::Normal(_) | Component::CurDir))
+    {
+        said.push(format!(
+            "`{label}`: prompt_file {} is not in the flow's folder",
+            f.display()
+        ));
+    }
     if let Some(Task::Agent {
         prompt: prompt @ None,
         prompt_file: None,
@@ -692,8 +711,39 @@ What was said with the yes: {review.note}
             "`r.go`: an agent needs a prompt, or a `## r.go` section",
             Some(3),
         );
-        let text = flow("  x:\n    run: { agent: claude, prompt_file: x.md }\n");
+        let text = flow("  x:\n    run: { agent: claude, prompt_file: prompts/x.md }\n");
         assert!(check("t", doc::read(&text).unwrap(), &|_| true).is_ok());
+    }
+
+    #[test]
+    fn a_prompt_file_outside_the_folder_is_refused() {
+        for file in ["/etc/motd", "../other/x.md", "prompts/../../x.md"] {
+            refused(
+                &flow(&format!(
+                    "  x:\n    run: {{ agent: claude, prompt_file: \"{file}\" }}\n"
+                )),
+                &format!("`x`: prompt_file {file} is not in the flow's folder"),
+                Some(3),
+            );
+        }
+        refused(
+            &flow("  r:\n    ask: ok?\n    options: { go: { run: { agent: claude, prompt_file: /x.md } } }\n"),
+            "`r.go`: prompt_file /x.md is not in the flow's folder",
+            Some(3),
+        );
+    }
+
+    #[test]
+    fn a_multi_ask_with_more_than_one_option_to_run_is_refused() {
+        refused(
+            &flow(
+                "  r:\n    ask: which?\n    multi: true\n    options: { a: { run: echo a }, b: { run: echo b }, c: {} }\n",
+            ),
+            "`r`: `multi` with more than one option that runs something",
+            Some(3),
+        );
+        let one = flow("  r:\n    ask: which?\n    multi: true\n    options: { a: { run: echo a }, b: {}, c: {} }\n");
+        assert!(check("t", doc::read(&one).unwrap(), &|_| true).is_ok());
     }
 
     #[test]

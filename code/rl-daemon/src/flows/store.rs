@@ -122,8 +122,8 @@ fn read(folder: &Path, name: &str, known: &BTreeSet<PathBuf>) -> Read {
         column,
         message,
     };
-    let files = match files(folder) {
-        Ok(f) => f,
+    let (files, linked) = match rl_core::folder::read(folder) {
+        Ok(f) => (f.files, f.linked),
         Err(e) => {
             return Read::Unreadable(NotLoaded {
                 file: folder.to_path_buf(),
@@ -131,6 +131,18 @@ fn read(folder: &Path, name: &str, known: &BTreeSet<PathBuf>) -> Read {
             });
         }
     };
+    if !linked.is_empty() {
+        let message = "a link to a folder: what is in it would run without a yes — copy it in instead";
+        return Read::Broken(
+            linked
+                .iter()
+                .map(|p| NotLoaded {
+                    file: folder.join(p),
+                    ..said(None, None, message.to_string())
+                })
+                .collect(),
+        );
+    }
     let Some((_, bytes)) = files.iter().find(|(p, _)| p == Path::new("flow.md")) else {
         return Read::Broken(vec![said(None, None, "a flow's folder needs a flow.md".to_string())]);
     };
@@ -157,67 +169,26 @@ fn read(folder: &Path, name: &str, known: &BTreeSet<PathBuf>) -> Read {
     }
 }
 
-/// Every file under `folder` but `runs/`, by its path in the folder. A link
-/// to a file counts as the file; a link to a folder is not followed, so it
-/// cannot loop; a pipe, socket or device is passed over, so reading never
-/// waits on one.
-fn files(folder: &Path) -> std::io::Result<Vec<(PathBuf, Vec<u8>)>> {
-    let mut out = Vec::new();
-    let mut todo = vec![PathBuf::new()];
-    while let Some(rel) = todo.pop() {
-        for entry in std::fs::read_dir(folder.join(&rel))? {
-            let entry = entry?;
-            let path = rel.join(entry.file_name());
-            if path == Path::new("runs") {
-                continue;
-            }
-            let kind = entry.file_type()?;
-            if kind.is_dir() {
-                todo.push(path);
-                continue;
-            }
-            let is_file =
-                kind.is_file() || (kind.is_symlink() && std::fs::metadata(entry.path()).is_ok_and(|m| m.is_file()));
-            if is_file {
-                out.push((path, std::fs::read(entry.path())?));
-            }
-        }
-    }
-    Ok(out)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn a_folder_is_every_file_in_it_but_its_runs() {
-        let tmp = tempfile::tempdir().unwrap();
-        let dir = tmp.path();
-        std::fs::create_dir_all(dir.join("lib")).unwrap();
-        std::fs::create_dir_all(dir.join("runs/f1")).unwrap();
-        std::fs::write(dir.join("flow.md"), "x").unwrap();
-        std::fs::write(dir.join("lib/a.sh"), "a").unwrap();
-        std::fs::write(dir.join("runs/f1/probe.out"), "o").unwrap();
-        let mut got: Vec<PathBuf> = files(dir).unwrap().into_iter().map(|(p, _)| p).collect();
-        got.sort();
-        assert_eq!(got, [PathBuf::from("flow.md"), PathBuf::from("lib/a.sh")]);
-    }
-
     #[cfg(unix)]
     #[test]
-    fn a_pipe_or_a_link_back_up_is_passed_over() {
+    fn a_link_to_a_folder_does_not_load() {
         let tmp = tempfile::tempdir().unwrap();
-        let dir = tmp.path();
-        std::fs::create_dir_all(dir.join("lib")).unwrap();
-        std::fs::write(dir.join("flow.md"), "x").unwrap();
-        std::fs::write(dir.join("lib/a.sh"), "a").unwrap();
-        nix::unistd::mkfifo(&dir.join("pipe"), nix::sys::stat::Mode::S_IRWXU).unwrap();
-        std::os::unix::fs::symlink(dir, dir.join("lib/up")).unwrap();
-        std::os::unix::fs::symlink(dir.join("lib/a.sh"), dir.join("b.sh")).unwrap();
-        let mut got: Vec<PathBuf> = files(dir).unwrap().into_iter().map(|(p, _)| p).collect();
-        got.sort();
-        assert_eq!(got, ["b.sh", "flow.md", "lib/a.sh"].map(PathBuf::from));
+        let dir = tmp.path().join("linked");
+        let elsewhere = tmp.path().join("elsewhere");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        std::fs::write(elsewhere.join("apply.sh"), "rm -rf /").unwrap();
+        std::fs::write(dir.join("flow.md"), "---\nsteps:\n  a:\n    run: lib/apply.sh\n---\n").unwrap();
+        std::os::unix::fs::symlink(&elsewhere, dir.join("lib")).unwrap();
+        let Read::Broken(said) = read(&dir, "linked", &BTreeSet::new()) else {
+            panic!("loaded")
+        };
+        assert_eq!(said[0].file, dir.join("lib"));
+        assert!(said[0].message.contains("a link to a folder"), "{said:?}");
     }
 
     #[test]

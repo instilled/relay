@@ -814,7 +814,9 @@ folder's name the flow's (`[a-z0-9][a-z0-9-]*`; a dotfile or any other name is n
 checkout's `.relay/` never holds one, so cloning a repo can never make Relay run anything.
 `flow.md` is the definition: YAML frontmatter, then prose and the prompts, each under a `## <step>`
 heading. Every other file in the folder is the flow's own, and the folder goes first on its
-steps' `PATH`, so `run: new-log-errors.sh` finds the script beside it. `runs/` is set aside for a
+steps' `PATH`, so `run: new-log-errors.sh` finds the script beside it. A link to a file counts
+as the file; a link to a folder keeps the flow from loading, since what is under it would run
+without being hashed. `runs/` is set aside for a
 firing's state: it is never part of the folder's hash, and `rld` writes `flows/.gitignore`
 (`runs/`) when there is none, so `~/.relay/flows/` may be a git repository — history with `git
 log`, sharing with a push — though Relay neither needs nor assumes it. Nothing is written under
@@ -908,7 +910,9 @@ shell's.
 What is wrong is said at load, all of it at once, each at its line (`rl-flow/src/def.rs`,
 `check`): an unknown `after`, a cycle, an agent step with neither a prompt nor a section, a
 placeholder or an `if:` naming a step it does not come after, a `## ` heading that is no step's,
-a placeholder in a command, an `in` Relay does not know (`prod-logs · flow.md:2 · in: ~/x is not
+a placeholder in a command, a `prompt_file` that is not in the flow's folder (absolute, or out
+through `..`), a `multi` ask with more than one option that runs something (only one chosen
+option would run), an `in` Relay does not know (`prod-logs · flow.md:2 · in: ~/x is not
 a project Relay knows — rl add ~/x`; `rl add` is `rl up` by another name).
 
 **Loading and approval.** `rld` reads every `~/.relay/flows/*/flow.md` at start, on

@@ -494,7 +494,8 @@ fn ask_of<'a>(def: &'a FlowDef, step: &str) -> Option<&'a Ask> {
 }
 
 /// The action with its agent prompt's placeholders filled; a command is never filled. A
-/// `prompt_file` (relative to the flow's folder) is read and becomes the prompt, filled.
+/// `prompt_file` (in the flow's folder: load refuses one that is not) is read and becomes the
+/// prompt, filled.
 fn filled(action: &Action, dir: &Path, facts: &dyn Lookup) -> Result<Action> {
     let mut a = action.clone();
     if let Some(Task::Agent {
@@ -601,13 +602,9 @@ mod tests {
             }),
             ..Default::default()
         };
-        let (from_file, absolute, missing) = (
-            from_file("triage.md".into()),
-            from_file(dir.join("triage.md")),
-            from_file("gone.md".into()),
-        );
+        let (from_file, missing) = (from_file("triage.md".into()), from_file("gone.md".into()));
         let ledger = Ledger::open_in_memory().unwrap();
-        let (prompt, command, read, read_absolute, unread) = ledger
+        let (prompt, command, read, unread) = ledger
             .call_blocking(move |c| {
                 let run = Run::new(
                     "r1",
@@ -644,21 +641,20 @@ mod tests {
                     filled(&agent("look at {probe.out} and {triage.out}; {nope.out}"), &dir, &facts)?,
                     filled(&shell, &dir, &facts)?,
                     filled(&from_file, &dir, &facts)?,
-                    filled(&absolute, Path::new("/elsewhere"), &facts)?,
                     filled(&missing, &dir, &facts).map(|_| ()).map_err(|e| format!("{e:#}")),
                 ))
             })
             .unwrap();
-        for read in [read, read_absolute] {
-            let Some(Task::Agent {
-                prompt, prompt_file, ..
-            }) = read.run
-            else {
-                panic!()
-            };
-            assert_eq!(prompt.as_deref(), Some("Triage this:\n3 new errors {triage.out}\n"));
-            assert_eq!(prompt_file, None, "read once, here, and filled");
-        }
+        let Some(Task::Agent {
+            prompt: from_md,
+            prompt_file,
+            ..
+        }) = read.run
+        else {
+            panic!()
+        };
+        assert_eq!(from_md.as_deref(), Some("Triage this:\n3 new errors {triage.out}\n"));
+        assert_eq!(prompt_file, None, "read once, here, and filled");
         let err = unread.unwrap_err();
         assert!(err.contains("gone.md"), "{err}");
         let Some(Task::Agent { prompt, args, .. }) = prompt.run else {
