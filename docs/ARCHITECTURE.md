@@ -975,7 +975,8 @@ runs on the definition it started with (`firings.def_json`), whatever is edited 
 - **Fan-in.** A step that comes after several starts only when every one of them is `done`; one
   that did not finish well means it does not run at all.
 - **Overlap.** A trigger while a firing of the same flow is still going: `skip` lets it be, as
-  `flow.skipped {reason: overlap}`; `queue` holds a `when` firing until the last one ends (one by
+  `flow.skipped {reason: overlap}`; `queue` holds a `when` firing until the last one ends, however
+  long — it is not late while it waits, its lateness counted from when that one ended (one by
   hand or `on` is skipped); `kill` stops the open firing's runs and questions — it ends `stopped`
   — before the new one starts.
 - **One at a time.** The engine holds a lock while it moves a firing on, so a run's end is never
@@ -997,8 +998,9 @@ one that had it skipped, so one error does not ask every thirty minutes.
 **`when` and `on`** (`flows/triggers.rs`) are a scheduler and a reactor in one loop
 (`Flows::serve`): what is due is fired, then each new event — read by id from a cursor in `meta`
 (`flows.cursor`) — is handed to the firings it is about and to the flows that hear it. A `when`
-flow's next firing is planned from its last (`every`) or from the clock (cron); one more than two
-minutes late — `rld` down, the machine asleep — is said as `flow.skipped {reason: missed}` and
+flow's next firing is planned from its last (`every`, never in the past: planned long after its
+last firing — a yes, an edit — it is due at once, not said missed) or from the clock (cron); one
+more than two minutes late — `rld` down, the machine asleep — is said as `flow.skipped {reason: missed}` and
 planned from now, unless `missed: catch-up-once`, which fires it once. A resumed flow is planned
 from now: what it slept through while paused is neither made up nor said missed. An `on` flow
 hears an event of a kind it names (`x`, `x.*`, `*`) while it is approved and not paused, as

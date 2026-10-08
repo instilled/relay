@@ -12,7 +12,7 @@ use jiff::{SignedDuration, Timestamp};
 use rl_flow::cron::Cron;
 use rl_flow::def::{FlowDef, When};
 use rl_ledger::{decisions, firings, flows, runs};
-use rl_proto::flow::{Flow, Missed, Overlap};
+use rl_proto::flow::{Firing, Flow, Missed, Overlap};
 use rl_proto::types::{Cause, Event, Run, event_kind};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
@@ -26,15 +26,29 @@ pub const MISSED_AFTER: Duration = Duration::from_secs(120);
 const HORIZON: SignedDuration = SignedDuration::from_secs(300);
 
 /// When `def` fires next after `after`, given when it last did. `every` counts
-/// from the last firing; a cron line from the clock.
+/// from the last firing, and is never planned in the past: one planned long after it (a yes,
+/// an edit) is due at `after`, neither said missed nor a cadence off. A cron line counts from
+/// the clock.
 pub fn next_fire(def: &FlowDef, after: Timestamp, last: Option<Timestamp>) -> Option<Timestamp> {
     match def.trigger.when.as_ref()? {
         When::Cron(line) => Cron::parse(line).ok()?.next_after(after),
         When::Every(secs) => {
             let every = SignedDuration::from_secs(i64::try_from(*secs).ok()?);
-            last.unwrap_or(after).checked_add(every).ok()
+            let next = last.unwrap_or(after).checked_add(every).ok()?;
+            Some(next.max(after))
         }
     }
+}
+
+/// Whether a `when` firing due at `due` is missed at `now`: more than MISSED_AFTER late. For
+/// one `queued` behind the flow's `last` firing, lateness counts from when that ended, if it
+/// held the time that was due.
+fn missed(due: Timestamp, now: Timestamp, last: Option<&Firing>, queued: bool) -> bool {
+    let held_until = last
+        .filter(|f| queued && f.started_at <= due)
+        .and_then(|f| f.ended_at)
+        .filter(|ended| *ended > due);
+    now.duration_since(held_until.unwrap_or(due)).unsigned_abs() > MISSED_AFTER
 }
 
 impl Flows {
@@ -63,10 +77,15 @@ impl Flows {
     }
 
     /// A `when` flow whose time has come: fired, or said missed, and planned again. While
-    /// it waits on its last firing (`overlap: queue`) it stays due.
+    /// it waits on its last firing (`overlap: queue`) it stays due, and is not late for it.
     async fn on_time(&self, def: &FlowDef, now: Timestamp, due: Timestamp) -> Result<Option<Timestamp>> {
-        let late = now.duration_since(due).unsigned_abs() > MISSED_AFTER;
-        if late && def.missed == Missed::Skip {
+        let name = def.name.clone();
+        let last = self.ledger.call(move |c| firings::latest(c, &name)).await?;
+        let queued = def.overlap == Overlap::Queue;
+        if queued && last.as_ref().is_some_and(|f| f.ended_at.is_none()) {
+            return Ok(Some(due));
+        }
+        if missed(due, now, last.as_ref(), queued) && def.missed == Missed::Skip {
             info!(flow = def.name, %due, "flow missed its time");
             let data = json!({ "flow": def.name, "reason": "missed", "due": due });
             let summary = format!("flow `{}` missed its time", def.name);
@@ -361,10 +380,39 @@ mod tests {
             next_fire(&every, now, Some(last)),
             Some("2026-09-09T10:20:00Z".parse().unwrap())
         );
+        // Planned long after the last firing (a yes, an edit): due now, neither long past nor
+        // a whole cadence off.
+        let long_ago: Timestamp = "2026-09-09T07:00:00Z".parse().unwrap();
+        assert_eq!(next_fire(&every, now, Some(long_ago)), Some(now));
         let cron = def("when: \"*/15 * * * *\"\n");
         let next = next_fire(&cron, now, Some(last)).unwrap();
         assert!(next > now && next <= now + SignedDuration::from_mins(15), "{next}");
         assert_eq!(next_fire(&def(""), now, None), None, "no `when`, no time");
+    }
+
+    #[test]
+    fn a_queued_firing_is_late_from_when_the_one_it_waited_on_ended() {
+        let at = |m: i64| Timestamp::UNIX_EPOCH + SignedDuration::from_mins(m);
+        let firing = |started: i64, ended: Option<i64>| Firing {
+            id: "f1".into(),
+            flow: "f".into(),
+            trigger: "when".into(),
+            event: None,
+            status: rl_proto::flow::FiringStatus::Done,
+            started_at: at(started),
+            ended_at: ended.map(at),
+            steps: vec![],
+        };
+        let due = at(10);
+        assert!(!missed(due, at(11), None, true));
+        assert!(missed(due, at(13), None, true), "two minutes past due");
+        // Queued behind a firing that started before it was due and ended at 19.
+        let held = firing(5, Some(19));
+        assert!(!missed(due, at(20), Some(&held), true), "late only from 19");
+        assert!(missed(due, at(22), Some(&held), true));
+        assert!(missed(due, at(20), Some(&held), false), "only a queue waits");
+        // One that started after it was due held nothing up.
+        assert!(missed(due, at(20), Some(&firing(12, Some(19))), true));
     }
 
     #[test]
