@@ -1,5 +1,6 @@
 //! Firings: each run of a flow, the definition it runs on, and where each of
-//! its steps is — the run a step started, the question it raised.
+//! its steps is — the run a step started, the question it raised,
+//! the values it set.
 
 use crate::{conv, conv_str};
 use anyhow::Result;
@@ -137,6 +138,38 @@ pub fn set_step_decision(conn: &Connection, firing: &str, step: &str, decision: 
         params![firing, step, decision],
     )?;
     Ok(())
+}
+
+/// Keeps values a step set, each over any it set before under the same key.
+pub fn set_values(conn: &Connection, firing: &str, step: &str, values: &[(String, String)]) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    for (key, value) in values {
+        tx.execute(
+            "INSERT INTO step_values (firing, step, key, value) VALUES (?1, ?2, ?3, ?4) \
+             ON CONFLICT (firing, step, key) DO UPDATE SET value = excluded.value",
+            params![firing, step, key, value],
+        )?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+/// One value a step set.
+pub fn value(conn: &Connection, firing: &str, step: &str, key: &str) -> Result<Option<String>> {
+    Ok(conn
+        .query_row(
+            "SELECT value FROM step_values WHERE firing = ?1 AND step = ?2 AND key = ?3",
+            params![firing, step, key],
+            |r| r.get(0),
+        )
+        .optional()?)
+}
+
+/// Every value a step set, by key.
+pub fn values(conn: &Connection, firing: &str, step: &str) -> Result<BTreeMap<String, String>> {
+    let mut stmt = conn.prepare("SELECT key, value FROM step_values WHERE firing = ?1 AND step = ?2")?;
+    let rows = stmt.query_map(params![firing, step], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    Ok(rows.collect::<std::result::Result<_, _>>()?)
 }
 
 /// The firing and step a run is.
@@ -359,5 +392,35 @@ mod tests {
             Some("{}")
         );
         assert_eq!(ledger.call_blocking(|c| def_json(c, "nope")).unwrap(), None);
+    }
+
+    #[test]
+    fn a_steps_values_are_kept_the_last_said_winning() {
+        let ledger = Ledger::open_in_memory().unwrap();
+        fire(&ledger, "f1", "2026-10-07T10:00:00Z");
+        ledger
+            .call_blocking(|c| {
+                let first = [
+                    ("found".to_string(), "2".to_string()),
+                    ("signature".to_string(), "abc".to_string()),
+                ];
+                set_values(c, "f1", "probe", &first)?;
+                set_values(c, "f1", "probe", &[("found".to_string(), "3".to_string())])
+            })
+            .unwrap();
+        let one =
+            |step: &'static str, key: &'static str| ledger.call_blocking(move |c| value(c, "f1", step, key)).unwrap();
+        assert_eq!(one("probe", "found").as_deref(), Some("3"));
+        assert_eq!(one("probe", "signature").as_deref(), Some("abc"));
+        assert_eq!(one("triage", "found"), None, "a value is its own step's");
+        let all = ledger.call_blocking(|c| values(c, "f1", "probe")).unwrap();
+        assert_eq!(
+            all,
+            BTreeMap::from([
+                ("found".to_string(), "3".to_string()),
+                ("signature".to_string(), "abc".to_string())
+            ])
+        );
+        assert!(ledger.call_blocking(|c| values(c, "f1", "triage")).unwrap().is_empty());
     }
 }

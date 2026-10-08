@@ -5,6 +5,7 @@
 
 mod ask;
 pub mod engine;
+mod facts;
 mod restart;
 pub(crate) mod rpc;
 mod store;

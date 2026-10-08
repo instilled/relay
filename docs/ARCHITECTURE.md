@@ -995,7 +995,7 @@ next firing runs the new version whole. A resume checks the same.
 
 **Ask steps** go over the question engine (**Decisions**, below). `flows/ask.rs` builds the
 question — the `ask:` text filled, each option keyed and labelled by its name, the default
-marked, the `group` filled (empty is none), filed in the step's folder — and raises it in the
+marked, the `group` filled (empty, or naming a value no step set, is none), filed in the step's folder — and raises it in the
 firing's chain, its `decision.raised` naming the flow (`data.flow`), the step `waiting` on it. It
 is an ordinary question: on top of the list and the catch-up, answered by number with a note, in
 `rl decisions`, expiring to its default. Answering does not start the option the way an `rl ask`
