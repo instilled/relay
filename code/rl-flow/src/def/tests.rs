@@ -244,16 +244,33 @@ fn braces_that_name_no_step_are_left_alone_in_a_prompt() {
 }
 
 #[test]
-fn a_placeholder_in_a_command_is_refused() {
+fn a_placeholder_in_a_command_is_refused_saying_what_to_read() {
     refused(
         &flow("  probe:\n    run: x\n  b:\n    after: probe\n    run: \"echo {probe.out}\"\n"),
-        "`b`: `{probe.out}` cannot go into a command — what a step left goes into an agent's prompt or an `ask:`",
+        "`b`: `{probe.out}` cannot go into a command — read `$RELAY_IN/probe.out`",
         Some(5),
     );
     refused(
-        &flow("  probe:\n    run: x\n  b:\n    after: probe\n    run: [echo, \"{probe.out}\"]\n"),
-        "`b`: `{probe.out}` cannot go into a command",
+        &flow("  probe:\n    run: x\n  b:\n    after: probe\n    run: [echo, \"{probe.signature}\"]\n"),
+        "`b`: `{probe.signature}` cannot go into a command — read `$RELAY_V_probe_signature`",
         Some(5),
+    );
+    refused(
+        &flow("  new-errors:\n    run: x\n  b:\n    after: new-errors\n    run: \"echo {new-errors.found}\"\n"),
+        "read `$RELAY_V_new_errors_found`",
+        Some(5),
+    );
+    refused(
+        &flow(
+            "  review:\n    ask: ok?\n    options: { ok: {} }\n  b:\n    after: review\n    run: \"echo {review.choice}\"\n",
+        ),
+        "`b`: `{review.choice}` cannot go into a command — read `$RELAY_V_review_choice`",
+        Some(6),
+    );
+    refused(
+        &flow("  b:\n    ask: ok?\n    options: { ok: { run: \"echo {b.note}\" } }\n"),
+        "`b.ok`: `{b.note}` cannot go into a command — read `$RELAY_NOTE`",
+        Some(3),
     );
     refused(
         &flow("  b:\n    run: \"echo {event.summary}\"\n"),
@@ -265,15 +282,17 @@ fn a_placeholder_in_a_command_is_refused() {
         "`b`: `{event.data.x}` cannot go into a command — read `$RELAY_EVENT`",
         Some(3),
     );
-    refused(
-        &flow(
-            "  probe:\n    run: x\n  b:\n    after: probe\n    ask: ok?\n    options: { ok: { run: \"echo {probe.out}\" } }\n",
-        ),
-        "`b.ok`: `{probe.out}` cannot go into a command",
-        Some(5),
-    );
     // The shell's own braces are its own.
     let text = flow("  a:\n    run: \"awk '{print $1}' {x}\"\n");
+    assert!(check("t", doc::read(&text).unwrap(), &|_| true).is_ok());
+}
+
+#[test]
+fn a_group_and_an_if_may_name_a_value() {
+    let text = flow(
+        "  probe:\n    run: x\n  triage:\n    after: probe\n    if: probe.found\n    run: echo t\n  \
+         review:\n    after: probe\n    ask: \"{probe.signature}?\"\n    group: \"{probe.signature}\"\n    options: { ok: {} }\n",
+    );
     assert!(check("t", doc::read(&text).unwrap(), &|_| true).is_ok());
 }
 

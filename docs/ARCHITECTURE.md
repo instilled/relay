@@ -112,7 +112,7 @@ flowchart LR
 links, the binary half (`holder`, `backend`) is the process itself.
 
 `rl-flow` is all the deciding about a flow (§6), and none of the doing: `flow.md` read and
-checked, the steps' order, what a firing does next, `if:`, the placeholders, the cron line and the
+checked, the steps' order, what a firing does next, `if:`, the placeholders, what a step may leave (`state.rs`: a value's key, a file's name, the caps, `$RELAY_OUT`'s lines), the cron line and the
 folder's hash, each a function of what it is handed. `rld` carries its answers out; `rl` reads a
 flow's definition with it to draw the row and the pane.
 
