@@ -6,7 +6,7 @@ use common::{Conn, Harness};
 use rl_core::Home;
 use rl_proto::decision::Decision;
 use rl_proto::flow::{Firing, FiringStatus, StepState, StepStatus};
-use rl_proto::types::Event;
+use rl_proto::types::{Event, Run};
 use serde_json::json;
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -166,5 +166,127 @@ async fn every_firing_says_when_the_last_one_started() {
         format!("last={}.\n", first.started_at),
         "a firing by hand too"
     );
+    h.stop().await;
+}
+
+#[tokio::test]
+async fn state_is_refused_outside_a_step() {
+    let tmp = tempfile::tempdir().unwrap();
+    let Some((h, mut c)) = start(tmp.path(), "none", "---\nsteps:\n  a:\n    run: echo a\n---\n").await else {
+        return;
+    };
+    let cwd = tmp.path().to_string_lossy().into_owned();
+    let plain: Run = c
+        .ok("run.start", json!({ "argv": ["sh", "-c", "sleep 5"], "cwd": cwd }))
+        .await;
+    for run in [plain.id.as_str(), "nope"] {
+        for (method, params) in [
+            ("flow.state.set", json!({ "run": run, "values": [["a", "1"]] })),
+            ("flow.state.get", json!({ "run": run, "name": "a" })),
+            ("flow.state.write", json!({ "run": run, "name": "x", "bytes": [1] })),
+            ("flow.state.read", json!({ "run": run, "name": "x" })),
+        ] {
+            let err = c.call(method, params).await.error.expect(method);
+            assert!(
+                err.message.contains("not in a flow step"),
+                "{method} for {run}: {err:?}"
+            );
+        }
+    }
+    let _ = c.call("run.stop", json!({ "id": plain.id })).await;
+    h.stop().await;
+}
+
+#[tokio::test]
+async fn a_running_step_sets_gets_writes_and_reads_through_rld() {
+    let tmp = tempfile::tempdir().unwrap();
+    let md = "---\nsteps:\n  a:\n    run: 'while [ ! -e \"$RELAY_WORK/go\" ]; do sleep 0.05; done; echo done'\n  \
+              b:\n    after: a\n    ask: \"{a.signature} · {a.out}\"\n    options: { ok: {} }\n---\n";
+    let Some((h, mut c)) = start(tmp.path(), "st", md).await else {
+        return;
+    };
+    approve_and_run(&mut c, "st").await;
+    let f = wait_firing(&mut c, "st", |f| step(f, "a").run.is_some()).await;
+    let run = step(&f, "a").run.clone().unwrap();
+    let dir = h.home.firing_dir("st", &f.id);
+
+    let set = c
+        .call(
+            "flow.state.set",
+            json!({ "run": run, "values": [["signature", "abc"], ["found", "3"]] }),
+        )
+        .await;
+    assert!(set.error.is_none(), "{:?}", set.error);
+    let get = |name: &str| json!({ "run": run, "name": name });
+    let v: Option<String> = c.ok("flow.state.get", get("signature")).await;
+    assert_eq!(v.as_deref(), Some("abc"), "a bare key is the step's own");
+    let v: Option<String> = c.ok("flow.state.get", get("a.found")).await;
+    assert_eq!(v.as_deref(), Some("3"));
+    let v: Option<String> = c.ok("flow.state.get", get("a.nope")).await;
+    assert_eq!(v, None);
+
+    let wrote = c
+        .call(
+            "flow.state.write",
+            json!({ "run": run, "name": "report.md", "bytes": b"# found\n".to_vec() }),
+        )
+        .await;
+    assert!(wrote.error.is_none(), "{:?}", wrote.error);
+    assert_eq!(std::fs::read_to_string(dir.join("report.md")).unwrap(), "# found\n");
+    let back: Vec<u8> = c.ok("flow.state.read", get("report.md")).await;
+    assert_eq!(back, b"# found\n");
+
+    let big = "x".repeat(4097);
+    for (method, params, want) in [
+        (
+            "flow.state.set",
+            json!({ "run": run, "values": [["out", "x"]] }),
+            "Relay's",
+        ),
+        (
+            "flow.state.set",
+            json!({ "run": run, "values": [["big", big]] }),
+            "4 KB",
+        ),
+        (
+            "flow.state.write",
+            json!({ "run": run, "name": "../x", "bytes": [1] }),
+            "not a file's name",
+        ),
+        (
+            "flow.state.write",
+            json!({ "run": run, "name": ".relay", "bytes": [1] }),
+            "not a file's name",
+        ),
+        (
+            "flow.state.write",
+            json!({ "run": run, "name": "a.out", "bytes": [1] }),
+            "what a printed",
+        ),
+        (
+            "flow.state.read",
+            json!({ "run": run, "name": "nope.md" }),
+            "no `nope.md`",
+        ),
+        ("flow.state.get", json!({ "run": run, "name": "zz.found" }), "no step"),
+    ] {
+        let err = c.call(method, params).await.error.expect(method);
+        assert!(err.message.contains(want), "{method}: {err:?}");
+    }
+    assert!(
+        !dir.parent().unwrap().join("x").exists(),
+        "nothing is written out of the firing's folder"
+    );
+
+    std::fs::write(dir.join("go"), "").unwrap();
+    wait_firing(&mut c, "st", waiting).await;
+    let q = the_question(&mut c).await;
+    assert_eq!(q.title, "abc · done");
+    // Its run over, the step is not there to ask for anything: a child it left behind cannot write.
+    let late = c
+        .call("flow.state.set", json!({ "run": run, "values": [["late", "1"]] }))
+        .await;
+    assert!(late.error.expect("over").message.contains("not in a flow step"));
+    let _: Decision = c.ok("decision.take", json!({ "id": q.id, "options": ["ok"] })).await;
     h.stop().await;
 }

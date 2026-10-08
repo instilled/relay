@@ -541,6 +541,60 @@ impl Method for FlowFirings {
     type Result = Vec<Firing>;
 }
 
+/// What a step asks of its firing's state: by the run it is called in (`$RELAY_RUN`), and a name.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StateName {
+    pub run: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StateValues {
+    pub run: String,
+    /// `(key, value)`; a key given twice is its last.
+    pub values: Vec<(String, String)>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StateFile {
+    pub run: String,
+    pub name: String,
+    pub bytes: Vec<u8>,
+}
+
+/// Sets values of the step asking, for the steps after it. Refused outside a running step.
+pub struct FlowStateSet;
+impl Method for FlowStateSet {
+    const NAME: &'static str = "flow.state.set";
+    type Params = StateValues;
+    type Result = ();
+}
+
+/// A value, an out, a choice or a note a step of the firing left: `probe.signature`; a bare key
+/// is the asking step's own. `None`: not set.
+pub struct FlowStateGet;
+impl Method for FlowStateGet {
+    const NAME: &'static str = "flow.state.get";
+    type Params = StateName;
+    type Result = Option<String>;
+}
+
+/// Writes a file in the firing's folder, whole or not at all.
+pub struct FlowStateWrite;
+impl Method for FlowStateWrite {
+    const NAME: &'static str = "flow.state.write";
+    type Params = StateFile;
+    type Result = ();
+}
+
+/// A file in the firing's folder, or what a step printed (`probe.out`).
+pub struct FlowStateRead;
+impl Method for FlowStateRead {
+    const NAME: &'static str = "flow.state.read";
+    type Params = StateName;
+    type Result = Vec<u8>;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

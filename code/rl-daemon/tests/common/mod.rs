@@ -64,7 +64,7 @@ impl Conn {
     pub async fn ok<T: DeserializeOwned>(&mut self, method: &str, params: Value) -> T {
         let res = self.call(method, params).await;
         assert!(res.error.is_none(), "{method}: {:?}", res.error);
-        serde_json::from_value(res.result.unwrap()).unwrap()
+        serde_json::from_value(res.result.unwrap_or(Value::Null)).unwrap()
     }
     /// The raw halves, once `run.attach` has upgraded the connection.
     pub fn into_parts(self) -> (BufReader<OwnedReadHalf>, OwnedWriteHalf) {
