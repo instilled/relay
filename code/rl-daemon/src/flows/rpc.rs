@@ -31,6 +31,8 @@ pub fn register(r: &mut Router<Daemon>) {
     });
     r.register::<FlowApprove, _, _>(|d, FlowApproval { name, hash }| async move {
         let (n, h) = (name.clone(), hash.clone());
+        // Planned from now once it has its yes: marked first, as approving clears `next_at`.
+        d.flows.plan_afresh(&name);
         let done = d
             .flows
             .ledger
@@ -40,6 +42,7 @@ pub fn register(r: &mut Router<Daemon>) {
         if done {
             return get(&d, &name).await;
         }
+        d.flows.afresh.lock().unwrap().remove(&name);
         // Not given: the flow is not there, or is not the version shown.
         let now = get(&d, &name).await?;
         if now.removed_at.is_some() {

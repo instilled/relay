@@ -20,6 +20,7 @@ use rl_core::Home;
 use rl_detect::Registry;
 use rl_ledger::{Ledger, events, meta};
 use rl_proto::flow::{Flow, NotLoaded};
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -50,6 +51,8 @@ pub struct Flows {
     pub(crate) shutdown: CancellationToken,
     /// What did not load at the last reload.
     pub(crate) broken: Mutex<Vec<NotLoaded>>,
+    /// Flows said yes to or loaded changed since they were last planned: planned from now.
+    pub(crate) afresh: Mutex<BTreeSet<String>>,
 }
 
 impl Flows {
@@ -71,6 +74,7 @@ impl Flows {
             wake: Notify::new(),
             shutdown,
             broken: Mutex::new(Vec::new()),
+            afresh: Mutex::new(BTreeSet::new()),
         })
     }
 

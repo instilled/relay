@@ -60,3 +60,69 @@ async fn a_queued_firing_waits_past_two_minutes_and_is_not_missed() {
     }
     h.stop().await;
 }
+
+/// An `every` flow whose last firing is hours past its cadence: a yes plans it from now, so it
+/// neither fires nor is missed at once; a restart that finds it unplanned catches up once.
+#[tokio::test]
+async fn a_yes_plans_from_now_and_a_restart_catches_up() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = Home::at(tmp.path().join("home"));
+    let dir = home.flow_dir("hourly");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("flow.md"),
+        "---\nwhen: every 1h\nsteps:\n  a:\n    run: echo hi\n---\n",
+    )
+    .unwrap();
+    let ago = |mins: i64| jiff::Timestamp::now().as_millisecond() - mins * 60_000;
+    let set = |sql: &'static str| {
+        let ledger = rl_ledger::Ledger::open(&home.ledger()).unwrap();
+        let n = ledger
+            .call_blocking(move |db| Ok(db.execute(sql, [ago(5 * 60)])?))
+            .unwrap();
+        assert_eq!(n, 1, "{sql}");
+    };
+    let Some(h) = Harness::on(home.clone()) else { return };
+    let mut c = Conn::open(&h.home).await;
+    let _: rl_proto::flow::Reloaded = c.ok("flow.reload", json!(null)).await;
+    set("UPDATE flows SET last_fired_at = ?1 WHERE name = 'hourly'");
+    approve(&mut c, "hourly").await;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let next = loop {
+        let f: Vec<Flow> = c.ok("flow.list", json!({})).await;
+        if let Some(at) = f[0].next_at {
+            break at;
+        }
+        assert!(Instant::now() < deadline, "never planned: {f:?}");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    let hour = jiff::SignedDuration::from_hours(1);
+    let ahead = next.duration_since(jiff::Timestamp::now());
+    assert!(
+        ahead > hour - jiff::SignedDuration::from_mins(1) && ahead <= hour,
+        "{next}"
+    );
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    let firings: Vec<Firing> = c.ok("flow.firings", json!({ "flow": "hourly" })).await;
+    assert!(firings.is_empty(), "{firings:?}");
+    let skipped: Vec<Event> = c.ok("event.list", json!({ "kinds": ["flow.skipped"] })).await;
+    assert!(skipped.is_empty(), "{skipped:?}");
+    drop(c);
+    h.stop().await;
+
+    // Found unplanned at a restart, five hours after it last fired: due now.
+    set("UPDATE flows SET next_at = NULL, last_fired_at = ?1 WHERE name = 'hourly'");
+    let h = Harness::on(home.clone()).unwrap();
+    let mut c = Conn::open(&h.home).await;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let firings: Vec<Firing> = c.ok("flow.firings", json!({ "flow": "hourly" })).await;
+        if let Some(f) = firings.first() {
+            assert_eq!(f.trigger, "when");
+            break;
+        }
+        assert!(Instant::now() < deadline, "the restart never caught up");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    h.stop().await;
+}

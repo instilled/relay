@@ -1006,8 +1006,10 @@ plain one is open, so neither answer does what the other asker meant.
 is saved once per batch of 200 events, so `rld` dying mid-batch hands that batch out again when
 it comes back: a firing's steps move on once all the same, but an `on` flow may fire twice for one
 event (its throttle and the five-minute horizon narrow that, they do not rule it out). A `when`
-flow's next firing is planned from its last (`every`, never in the past: planned long after its
-last firing — a yes, an edit — it is due at once, not said missed) or from the clock (cron); one
+flow's next firing is planned from its last (`every`) or from the clock (cron). A yes, or a reload
+that finds it changed, plans an `every` from now when its last firing is already a cadence past,
+so a yes or an edit neither fires it nor has it said missed at once; found unplanned at a start,
+it is due at once and catches up once (`Flows::plan_afresh`, `first_time`). One
 more than two minutes late — `rld` down, the machine asleep — is said as `flow.skipped {reason: missed}` and
 planned from now, unless `missed: catch-up-once`, which fires it once. A resumed flow is planned
 from now: what it slept through while paused is neither made up nor said missed. An `on` flow

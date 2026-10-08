@@ -66,6 +66,14 @@ impl Flows {
                 }
             }
         }
+        // Loaded changed or back: planned from now, not from a firing long past. Marked before
+        // the sync clears their `next_at`.
+        for l in loaded
+            .iter()
+            .filter(|l| last.get(&l.name).is_none_or(|was| was.hash != l.hash))
+        {
+            self.plan_afresh(&l.name);
+        }
         let fresh = loaded.len();
         loaded.extend(kept);
         let now = Timestamp::now();

@@ -26,9 +26,9 @@ pub const MISSED_AFTER: Duration = Duration::from_secs(120);
 const HORIZON: SignedDuration = SignedDuration::from_secs(300);
 
 /// When `def` fires next after `after`, given when it last did. `every` counts
-/// from the last firing, and is never planned in the past: one planned long after it (a yes,
-/// an edit) is due at `after`, neither said missed nor a cadence off. A cron line counts from
-/// the clock.
+/// from the last firing, and is never planned in the past: one found unplanned long after it
+/// (a restart) is due at `after`, caught up once rather than said missed. A cron line counts
+/// from the clock. A yes or an edit plans from now instead ([`Flows::plan_afresh`]).
 pub fn next_fire(def: &FlowDef, after: Timestamp, last: Option<Timestamp>) -> Option<Timestamp> {
     match def.trigger.when.as_ref()? {
         When::Cron(line) => Cron::parse(line).ok()?.next_after(after),
@@ -63,7 +63,7 @@ impl Flows {
                 continue;
             }
             let next = match f.next_at {
-                None => self.plan(&def, next_fire(&def, now, f.last_fired_at)).await,
+                None => self.plan(&def, self.first_time(&def, now, f.last_fired_at)).await,
                 Some(at) if at <= now => self.on_time(&def, now, at).await,
                 at => Ok(at),
             };
@@ -103,11 +103,30 @@ impl Flows {
         }
     }
 
+    /// When a flow with no `next_at` fires: from its last firing; but one said yes to or edited
+    /// whose last firing is a cadence past is planned from now, so it neither fires nor is
+    /// missed at once. One found so at a start is due now, and catches up once.
+    fn first_time(&self, def: &FlowDef, now: Timestamp, last: Option<Timestamp>) -> Option<Timestamp> {
+        let next = next_fire(def, now, last);
+        if !self.afresh.lock().unwrap().remove(&def.name) {
+            return next;
+        }
+        next.filter(|at| *at > now).or_else(|| next_fire(def, now, None))
+    }
+
     /// Writes when `def` fires next, and says it.
     async fn plan(&self, def: &FlowDef, next: Option<Timestamp>) -> Result<Option<Timestamp>> {
         let name = def.name.clone();
         self.ledger.call(move |c| flows::set_next(c, &name, next)).await?;
         Ok(next)
+    }
+
+    /// Marks `name` to be planned from now the next time it is planned: it was said yes to, or
+    /// loaded changed. Marked before its `next_at` is cleared, so the loop never plans it from a
+    /// firing long past in between.
+    pub(crate) fn plan_afresh(&self, name: &str) {
+        self.afresh.lock().unwrap().insert(name.to_string());
+        self.wake.notify_one();
     }
 
     /// Plans `name` afresh from now, as a resumed flow is: what it slept through while
@@ -380,8 +399,7 @@ mod tests {
             next_fire(&every, now, Some(last)),
             Some("2026-09-09T10:20:00Z".parse().unwrap())
         );
-        // Planned long after the last firing (a yes, an edit): due now, neither long past nor
-        // a whole cadence off.
+        // Found unplanned long after the last firing (a restart): due now, caught up once.
         let long_ago: Timestamp = "2026-09-09T07:00:00Z".parse().unwrap();
         assert_eq!(next_fire(&every, now, Some(long_ago)), Some(now));
         let cron = def("when: \"*/15 * * * *\"\n");
