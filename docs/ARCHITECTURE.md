@@ -1002,7 +1002,10 @@ plain one is open, so neither answer does what the other asker meant.
 
 **`when` and `on`** (`flows/triggers.rs`) are a scheduler and a reactor in one loop
 (`Flows::serve`): what is due is fired, then each new event — read by id from a cursor in `meta`
-(`flows.cursor`) — is handed to the firings it is about and to the flows that hear it. A `when`
+(`flows.cursor`) — is handed to the firings it is about and to the flows that hear it. The cursor
+is saved once per batch of 200 events, so `rld` dying mid-batch hands that batch out again when
+it comes back: a firing's steps move on once all the same, but an `on` flow may fire twice for one
+event (its throttle and the five-minute horizon narrow that, they do not rule it out). A `when`
 flow's next firing is planned from its last (`every`, never in the past: planned long after its
 last firing — a yes, an edit — it is due at once, not said missed) or from the clock (cron); one
 more than two minutes late — `rld` down, the machine asleep — is said as `flow.skipped {reason: missed}` and
