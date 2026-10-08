@@ -226,3 +226,102 @@ fn flow_edit_approves_no_more_than_was_edited() {
 
     assert!(out(rl(&["daemon", "stop"])).0);
 }
+
+/// A new flow's template is dropped however the editor ends, and only what the template was:
+/// a `runs/` already there stays.
+#[test]
+fn a_template_is_dropped_however_the_editor_ends() {
+    let (Some(rld), Some(session)) = (sibling("rld"), sibling("rl-session")) else {
+        eprintln!("skipping: rld / rl-session not built (run `cargo test --workspace`)");
+        return;
+    };
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = std::fs::canonicalize(tmp.path()).unwrap();
+    let home = dir.join("home");
+    let ws = dir.join("proj");
+    std::fs::create_dir_all(&ws).unwrap();
+    let rl = |args: &[&str]| rl(&home, &ws, &rld, &session, args);
+
+    // An editor that fails, as `:cq` does.
+    let mut edit = rl(&["flow", "edit", "aborted"]);
+    edit.env("EDITOR", "false");
+    let (ok, o, e) = out(edit);
+    assert!(!ok, "{o}{e}");
+    assert!(!home.join("flows/aborted").exists(), "{o}{e}");
+
+    // A folder holding only what a firing left: the template goes, runs/ stays.
+    let kept = home.join("flows/kept");
+    std::fs::create_dir_all(kept.join("runs/f1")).unwrap();
+    std::fs::write(kept.join("runs/f1/probe.out"), "o").unwrap();
+    let (ok, o, e) = out(rl(&["flow", "edit", "kept"]));
+    assert!(ok, "{o}{e}");
+    assert_eq!(o, "kept left as the template: not kept");
+    assert!(!kept.join("flow.md").exists());
+    assert!(
+        kept.join("runs/f1/probe.out").exists(),
+        "what a firing left is not the edit's to drop"
+    );
+
+    assert!(out(rl(&["daemon", "stop"])).0);
+}
+
+/// `rl flow approve` says yes to a version: the list shows each flow's, and a prefix that is
+/// not the folder as it is now is refused.
+#[test]
+fn flow_approve_binds_to_the_version_shown() {
+    let (Some(rld), Some(session)) = (sibling("rld"), sibling("rl-session")) else {
+        eprintln!("skipping: rld / rl-session not built (run `cargo test --workspace`)");
+        return;
+    };
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = std::fs::canonicalize(tmp.path()).unwrap();
+    let home = dir.join("home");
+    let ws = dir.join("proj");
+    std::fs::create_dir_all(&ws).unwrap();
+    let rl = |args: &[&str]| rl(&home, &ws, &rld, &session, args);
+    let flow = home.join("flows/prod");
+    std::fs::create_dir_all(&flow).unwrap();
+    std::fs::write(flow.join("flow.md"), "---\nsteps:\n  a:\n    run: sh apply.sh\n---\n").unwrap();
+    std::fs::write(flow.join("apply.sh"), "echo as seen\n").unwrap();
+
+    let (ok, listed, e) = out(rl(&["flow", "list"]));
+    assert!(ok && listed.lines().next().unwrap().contains("HASH"), "{listed}{e}");
+    let shown = listed
+        .lines()
+        .nth(1)
+        .unwrap()
+        .split_whitespace()
+        .nth(1)
+        .unwrap()
+        .to_string();
+    assert!(
+        shown.len() == 8 && shown.chars().all(|c| c.is_ascii_hexdigit()),
+        "{listed}"
+    );
+
+    // Changed after it was looked at: the version shown is gone, and takes no yes.
+    std::fs::write(flow.join("apply.sh"), "echo unseen\n").unwrap();
+    let (ok, o, e) = out(rl(&["flow", "approve", "prod", &shown]));
+    assert!(!ok, "{o}{e}");
+    assert!(e.contains(&format!("not {shown}")), "{e}");
+    let (_, listed, _) = out(rl(&["flow", "list"]));
+    assert!(listed.contains("needs approval"), "{listed}");
+
+    // The version now, by its prefix.
+    let now = listed
+        .lines()
+        .nth(1)
+        .unwrap()
+        .split_whitespace()
+        .nth(1)
+        .unwrap()
+        .to_string();
+    assert_ne!(now, shown);
+    let (ok, o, e) = out(rl(&["flow", "approve", "prod", &now[..6]]));
+    assert!(ok, "{o}{e}");
+    assert_eq!(o, format!("approved prod · {now}"));
+    let (_, listed, _) = out(rl(&["flow", "list"]));
+    assert!(listed.contains("  on  "), "{listed}");
+
+    assert!(out(rl(&["daemon", "stop"])).0);
+}

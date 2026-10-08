@@ -913,8 +913,8 @@ shell's.
 What is wrong is said at load, all of it at once, each at its line (`rl-flow/src/def.rs`,
 `check`): an unknown `after`, a cycle, an agent step with neither a prompt nor a section, a
 placeholder or an `if:` naming a step it does not come after, a `## ` heading that is no step's,
-a placeholder in a command, a `prompt_file` that is not in the flow's folder (absolute, or out
-through `..`), a `multi` ask with more than one option that runs something (only one chosen
+a placeholder in a command, a `prompt_file` that is not in the flow's folder (absolute, out
+through `..`, or under `runs/`, which no hash covers), a `multi` ask with more than one option that runs something (only one chosen
 option would run), an `in` Relay does not know (`prod-logs · flow.md:2 · in: ~/x is not
 a project Relay knows — rl add ~/x`; `rl add` is `rl up` by another name).
 
@@ -943,20 +943,24 @@ on as if it failed — and the flows are read again, so it shows `needs a yes`. 
 four hours on a question therefore never runs a script changed while it waited.
 
 A yes is to one version: `flow.approve` carries the hash of the flow as the one saying it was
-shown it (`rl flow approve` the one it reads and prints, the panel the one it has on screen), and
-is refused once the folder as last loaded is another. Writing it through `rl` is the yes, and
+shown it — the panel the one it has on screen; `rl flow approve <name> [<hash>]` reads the folder
+again and then says yes only to a version the hash (a prefix of it, as `rl flow list` shows it)
+matches, or, given none, to the one just read, which it prints — and is refused once the folder as
+last loaded is another. Writing it through `rl` is the yes, and
 covers no more than was written: an `rl flow edit` or `/flow edit` approves only when `flow.md`
 was saved changed, the folder before the editor opened had its yes (or held nothing yet), and
 nothing else in it changed while the editor was open — the client hashes the folder as it was
 with the saved `flow.md` in it, and says yes to exactly that hash (`rl-cli/src/flow.rs`,
 `finish_edit`). Otherwise the flows are read again and it is left needing a yes, saying why; an
-edit just to look gives none. A new flow left as the template is not kept. Nothing else is
+edit just to look gives none. A new flow left as the template is not kept, however the editor
+ends: its `flow.md` goes, and its folder once nothing else is in it (what a firing left in
+`runs/` stays). Nothing else is
 approved for you — not a hand edit, not a flow an agent wrote.
 
-`rl flow` is the line's way in: `list` (`NAME STATUS WHEN LAST IN`, then what did not load;
-`--all` keeps the removed), `edit <name>` (a new name starts from a template, gone again if
-saved unchanged), `run <name>` (now,
-by hand, paused or not, never without its yes), `pause`, `resume`, `approve` and `reload`, each
+`rl flow` is the line's way in: `list` (`NAME HASH STATUS WHEN LAST IN`, the hash's first eight;
+then what did not load; `--all` keeps the removed), `edit <name>` (a new name starts from a
+template, gone again if left as it was), `run <name>` (now,
+by hand, paused or not, never without its yes), `pause`, `resume`, `approve <name> [<hash>]` and `reload`, each
 with `--json`. Behind them are `flow.list`, `flow.errors`, `flow.reload`, `flow.approve`,
 `flow.pause`, `flow.resume`, `flow.run` and `flow.firings` (`rl-daemon/src/flows/rpc.rs`).
 

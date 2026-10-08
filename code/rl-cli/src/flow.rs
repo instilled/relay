@@ -36,13 +36,18 @@ pub enum FlowCmd {
     Pause { name: String },
     /// Let a paused flow fire again.
     Resume { name: String },
-    /// Say yes to a flow's folder as it was last loaded; it may fire from then on.
-    Approve { name: String },
+    /// Say yes to a flow's folder, read again now; it may fire from then on.
+    Approve {
+        name: String,
+        /// The version looked at: its hash as `rl flow list` shows it, or a prefix. Refused when
+        /// the folder is another version now. Without it, the version read now, which is printed.
+        hash: Option<String>,
+    },
     /// Read ~/.relay/flows again (rld does it on start too).
     Reload,
 }
 
-const HEADERS: &[&str] = &["NAME", "STATUS", "WHEN", "LAST", "IN"];
+const HEADERS: &[&str] = &["NAME", "HASH", "STATUS", "WHEN", "LAST", "IN"];
 
 /// What `rl flow edit` starts a new flow from.
 const TEMPLATE: &str = "---\nwhen: every 1h\nsteps:\n  first:\n    run: echo hello\n---\n";
@@ -105,8 +110,8 @@ pub async fn flow(home: &Home, cmd: FlowCmd, json: bool) -> Result<()> {
             let f = rpc.call::<FlowResume>(named(name)).await?;
             said(&f, "resumed", json)?;
         }
-        FlowCmd::Approve { name } => {
-            let f = approve(&mut rpc, &name).await?;
+        FlowCmd::Approve { name, hash } => {
+            let f = approve(&mut rpc, &name, hash.as_deref()).await?;
             if json {
                 println!("{}", serde_json::to_string(&f)?);
             } else {
@@ -145,14 +150,26 @@ fn said(f: &Flow, what: &str, json: bool) -> Result<()> {
     Ok(())
 }
 
-/// Says yes to `name` as the daemon has it now, by its hash: the version this shows.
-async fn approve(rpc: &mut Client, name: &str) -> Result<Flow> {
+/// Says yes to `name` as a reload reads it now, by its hash. `shown`, the hash `rl flow list`
+/// showed or a prefix of it, must be that version; without it, the version read now is the one
+/// approved, and said.
+async fn approve(rpc: &mut Client, name: &str, shown: Option<&str>) -> Result<Flow> {
+    rpc.call::<FlowReload>(()).await?;
     let flows = rpc.call::<FlowList>(FlowFilter { all: false }).await?;
     let hash = flows
         .into_iter()
         .find(|f| f.name == name)
         .map(|f| f.hash)
         .unwrap_or_default();
+    if let Some(shown) = shown
+        && !hash.is_empty()
+        && (shown.is_empty() || !hash.starts_with(shown))
+    {
+        bail!(
+            "`{name}` is {} now, not {shown}: look at it again (rl flow list)",
+            short(&hash)
+        );
+    }
     rpc.call::<FlowApprove>(FlowApproval {
         name: name.into(),
         hash,
@@ -169,7 +186,11 @@ fn short(hash: &str) -> String {
 /// did not load, or was saved and is left needing a yes, exits 1.
 async fn edit(home: &Home, name: &str, json: bool) -> Result<()> {
     let editing = start_edit(home, name)?;
-    crate::env::open_in_editor(&editing.file, 1)?;
+    if let Err(e) = crate::env::open_in_editor(&editing.file, 1) {
+        // However the editor ends, a new flow's template is not left behind.
+        drop_template(home, &editing)?;
+        return Err(e);
+    }
     let mut rpc = daemon::ensure(home, !json).await?;
     let (edited, reloaded) = finish_edit(&mut rpc, home, editing).await?;
     if let Edited::Approved(f) = &edited {
@@ -266,12 +287,9 @@ pub fn start_edit(home: &Home, name: &str) -> Result<Editing> {
 /// else in it changed meanwhile — the yes is to exactly that version, by its hash. A new flow
 /// left as the template is not kept.
 pub async fn finish_edit(rpc: &mut Client, home: &Home, e: Editing) -> Result<(Edited, Reloaded)> {
-    let dir = home.flow_dir(&e.name);
     let now = std::fs::read(&e.file).ok();
     let untouched = now.as_deref() == Some(e.was.as_slice());
-    // Fresh, `flow.md` was the template: left as it was, with nothing added beside it.
-    if untouched && e.fresh && folder_files(&dir)? == e.before {
-        std::fs::remove_dir_all(&dir)?;
+    if drop_template(home, &e)? {
         return Ok((Edited::Dropped, rpc.call::<FlowReload>(()).await?));
     }
     let reloaded = rpc.call::<FlowReload>(()).await?;
@@ -308,6 +326,21 @@ pub async fn finish_edit(rpc: &mut Client, home: &Home, e: Editing) -> Result<(E
     Ok((Edited::Approved(Box::new(f)), reloaded))
 }
 
+/// Drops a new flow's template left as it was, with nothing added beside it: `flow.md` goes, and
+/// the folder too once nothing else is in it — what a firing left in `runs/`, or anything the
+/// hash passes over, stays. Whether it was dropped.
+pub fn drop_template(home: &Home, e: &Editing) -> Result<bool> {
+    let dir = home.flow_dir(&e.name);
+    let untouched = std::fs::read(&e.file).is_ok_and(|now| now == e.was);
+    if !(e.fresh && untouched && folder_files(&dir)? == e.before) {
+        return Ok(false);
+    }
+    std::fs::remove_file(&e.file)?;
+    // Not empty: something not the edit's is there, and stays.
+    let _ = std::fs::remove_dir(&dir);
+    Ok(true)
+}
+
 /// A flow's folder as its hash reads it; an empty one when there is none.
 fn folder_files(dir: &Path) -> Result<Vec<(PathBuf, Vec<u8>)>> {
     match rl_core::folder::read(dir) {
@@ -317,7 +350,7 @@ fn folder_files(dir: &Path) -> Result<Vec<(PathBuf, Vec<u8>)>> {
     }
 }
 
-/// `NAME STATUS WHEN LAST IN` for one flow, and its latest firing if any.
+/// `NAME HASH STATUS WHEN LAST IN` for one flow, and its latest firing if any.
 fn row(f: &Flow, last: Option<&Firing>, now: Timestamp) -> Vec<String> {
     let last = match last {
         Some(x) => format!("{} {} ago", x.status, fmt_age(x.started_at, now)),
@@ -328,5 +361,12 @@ fn row(f: &Flow, last: Option<&Firing>, now: Timestamp) -> Vec<String> {
         .and_then(|d| d.in_)
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|| "—".to_string());
-    vec![f.name.clone(), f.status().to_string(), f.when(), last, in_]
+    vec![
+        f.name.clone(),
+        short(&f.hash),
+        f.status().to_string(),
+        f.when(),
+        last,
+        in_,
+    ]
 }

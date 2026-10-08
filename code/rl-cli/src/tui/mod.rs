@@ -1185,7 +1185,13 @@ impl App {
                             input = EventStream::new();
                             match outcome {
                                 Ok(()) => self.edited(editing).await,
-                                Err(e) => self.say(format!("{e:#}")),
+                                Err(e) => {
+                                    // However the editor ends, a new flow's template is not left behind.
+                                    match crate::flow::drop_template(&self.home, &editing) {
+                                        Err(left) => self.say(format!("{e:#}; {left:#}")),
+                                        Ok(_) => self.say(format!("{e:#}")),
+                                    }
+                                }
                             }
                         }
                         if std::mem::take(&mut self.importing) {
