@@ -947,6 +947,8 @@ other run, or one over, is refused (`not in a flow step`), as `rl` itself refuse
 `RELAY_RUN`, `RELAY_FIRING` and `RELAY_STEP`. It checks the name (one name, no `/` or `..`, not
 from a dot, not a step's `<step>.out`), caps a value at 4 KB and a file at 10 MB, and writes a
 file beside its place and renames it there, so a step reading it sees the old or the new.
+`rl flow state` says nothing of `rld` — not that it started, nor that it is another release —
+as its stderr is the step's out.
 
 **Loading and approval.** `rld` reads every `~/.relay/flows/*/flow.md` at start, on
 `flow.reload` (`rl flow reload`, the panel's `/reload`), when a folder is registered or removed,

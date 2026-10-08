@@ -37,8 +37,9 @@ fn here() -> Result<String> {
 
 pub async fn state(home: &Home, cmd: StateCmd, json: bool) -> Result<()> {
     let run = here()?;
-    // Inside a step rld is running; nothing is said of it, so a step's out stays its own.
-    let mut rpc = daemon::ensure(home, false).await?;
+    // Nothing is said of rld — not that it started, nor that it is another release — as what
+    // this prints is the step's out.
+    let mut rpc = daemon::ensure_quiet(home).await?;
     match cmd {
         StateCmd::Set { values } => {
             let values = values

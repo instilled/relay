@@ -320,3 +320,24 @@ async fn a_step_uses_rl_flow_state_and_the_next_reads_it() {
     assert_eq!(got, "abc\nhi\nsaid", "the value, the file, and what probe printed");
     h.stop().await;
 }
+
+/// `rl flow state` says nothing of rld, so what a step printed is the step's own.
+#[tokio::test]
+async fn rl_flow_state_adds_nothing_to_a_steps_out() {
+    if common::rl_bin().is_none() {
+        eprintln!("skipping: rl not built (run `cargo build --workspace`)");
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let md = "---\nsteps:\n  a:\n    run: rl flow state set x=1\n  b:\n    after: a\n    \
+              run: 'printf \"[%s]\" \"$(cat \"$RELAY_IN/a.out\")\" > \"$RELAY_WORK/out\"'\n---\n";
+    let Some((h, mut c)) = start(tmp.path(), "hush", md).await else {
+        return;
+    };
+    let fired = approve_and_run(&mut c, "hush").await;
+    let f = wait_firing(&mut c, "hush", ended).await;
+    assert_eq!(f.status, FiringStatus::Done, "{f:?}");
+    let out = std::fs::read_to_string(h.home.firing_dir("hush", &fired.id).join("out")).unwrap();
+    assert_eq!(out, "[]", "a's out is empty");
+    h.stop().await;
+}
