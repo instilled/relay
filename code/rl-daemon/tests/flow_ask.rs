@@ -327,3 +327,60 @@ async fn kill_ends_a_waiting_firing_stopped_and_fires() {
     );
     h.stop().await;
 }
+
+/// A plain `rl ask` in a group a flow's step asks in does not restate the step's question,
+/// nor the other way round: each asks its own, and each answer does what its asker meant.
+#[tokio::test]
+async fn a_plain_ask_and_a_step_do_not_restate_each_other() {
+    let tmp = tempfile::tempdir().unwrap();
+    let md = "---\nsteps:\n  review:\n    ask: \"the step asks\"\n    group: same\n    options: { go: { run: echo went } }\n---\n";
+    let Some((h, mut c)) = start(tmp.path(), &[("stepped", md)]).await else {
+        return;
+    };
+    let dir = std::fs::canonicalize(tmp.path()).unwrap();
+    let plain = |title: &str| {
+        json!({ "title": title, "group": "same", "cwd": dir,
+                "options": [{ "key": "mine", "run": ["sh", "-c", "echo mine > mine.txt"] }] })
+    };
+    // The step first, then a plain ask in its group.
+    approve_and_run(&mut c, "stepped").await;
+    let f = wait_firing(&mut c, "stepped", waiting).await;
+    let asked = the_question(&mut c, &f).await;
+    let mine: Decision = c.ok("decision.raise", plain("a plain ask")).await;
+    assert_ne!(mine.id, asked.id, "asked on its own");
+    let theirs: Decision = c.ok("decision.get", json!({ "id": asked.id })).await;
+    assert_eq!(
+        (theirs.title.as_str(), theirs.options[0].key.as_str()),
+        ("the step asks", "go"),
+        "the step's question is as it asked it"
+    );
+    // The plain one's answer starts its option; the step's carries the firing on.
+    let taken: Decision = c
+        .ok("decision.take", json!({ "id": mine.id, "options": ["mine"] }))
+        .await;
+    assert_eq!(taken.outcome_runs.len(), 1, "{taken:?}");
+    let _: Decision = c
+        .ok("decision.take", json!({ "id": asked.id, "options": ["go"] }))
+        .await;
+    let f = wait_firing(&mut c, "stepped", ended).await;
+    assert_eq!(
+        (f.status, step(&f, "review").status),
+        (FiringStatus::Done, StepStatus::Done)
+    );
+
+    // A plain ask first, then the step in its group.
+    let mine: Decision = c.ok("decision.raise", plain("asked first")).await;
+    let _: Firing = c.ok("flow.run", json!({ "name": "stepped" })).await;
+    let f = wait_firing(&mut c, "stepped", waiting).await;
+    let stepped = step(&f, "review").decision.clone().unwrap();
+    assert_ne!(stepped, mine.id, "the step asks its own");
+    let still: Decision = c.ok("decision.get", json!({ "id": mine.id })).await;
+    assert_eq!(
+        (still.title.as_str(), still.status),
+        ("asked first", DecisionStatus::Open)
+    );
+    // Plain again: the plain one is restated, the step's left be.
+    let again: Decision = c.ok("decision.raise", plain("asked again")).await;
+    assert_eq!(again.id, mine.id, "restated");
+    h.stop().await;
+}

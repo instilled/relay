@@ -993,7 +993,9 @@ question's does: the engine hears `decision.taken` and starts the option's run a
 option that runs nothing leaves the step done. Dismissed, or expired with no default, the step is
 skipped, and what comes after it with it. A `group` restates: asked again while a question of its
 group is open, the open one is kept — its id, its place — and the newest step takes it over, the
-one that had it skipped, so one error does not ask every thirty minutes.
+one that had it skipped, so one error does not ask every thirty minutes. Only a step restates a
+step's question: a plain `rl ask` in the same group asks its own, and so does a step where a
+plain one is open, so neither answer does what the other asker meant.
 
 **`when` and `on`** (`flows/triggers.rs`) are a scheduler and a reactor in one loop
 (`Flows::serve`): what is due is fired, then each new event — read by id from a cursor in `meta`
@@ -1055,7 +1057,8 @@ Answering is the only thing that starts the follow-up runs, and the row moves to
 they start, so two `rl decide` racing cannot both fire. Each run an answer starts has the answer
 in its environment: `RELAY_DECISION` (the question), `RELAY_CHOICE` (the option) and
 `RELAY_NOTE` (what was said with it, or empty), so a note can steer what runs. A `group` key is unique among open
-questions: asking the same thing again restates the open one, keeping its id, so a flow that asks
+questions of one kind of asker — a flow's ask steps, or everything else (`0023_group_owner`):
+asking the same thing again restates the open one, keeping its id, so a flow that asks
 every thirty minutes leaves one line rather than thirty. An `expires` either takes the option marked `default` or
 moves the question to `expired`; the sweeper sleeps until the earliest deadline and does
 nothing when there is none.

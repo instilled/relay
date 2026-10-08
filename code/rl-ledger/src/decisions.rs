@@ -19,10 +19,16 @@ const DEFAULT_LIMIT: u32 = 100;
 
 /// Writes a new question. Returns it as stored.
 pub fn insert(conn: &Connection, d: &Decision) -> Result<Decision> {
+    insert_by(conn, d, None)
+}
+
+/// The same, owned by a flow step (`<firing>/<step>`) when `by_step` says so: stored with its
+/// owner in one go, since which group it may share depends on it.
+pub fn insert_by(conn: &Connection, d: &Decision, by_step: Option<&str>) -> Result<Decision> {
     conn.execute(
         "INSERT INTO decisions (id, created_at, updated_at, workspace, run, chain, group_key, title, summary, \
-         options_json, multi, status, expires_at, resolved_at, chosen_json, outcomes_json, note) \
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
+         options_json, multi, status, expires_at, resolved_at, chosen_json, outcomes_json, note, by_step) \
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)",
         params![
             d.id,
             to_millis(d.created_at),
@@ -41,6 +47,7 @@ pub fn insert(conn: &Connection, d: &Decision) -> Result<Decision> {
             serde_json::to_string(&d.chosen)?,
             serde_json::to_string(&d.outcome_runs)?,
             d.note,
+            by_step,
         ],
     )?;
     get(conn, &d.id)?.ok_or_else(|| anyhow::anyhow!("decision {} vanished", d.id))
@@ -78,11 +85,16 @@ pub fn get(conn: &Connection, id: &str) -> Result<Option<Decision>> {
 }
 
 /// The open question of a group, if there is one.
-pub fn open_in_group(conn: &Connection, group: &str) -> Result<Option<Decision>> {
+/// The open question in `group` a flow step asked (`by_step`), or one asked otherwise: a group
+/// holds one of each.
+pub fn open_in_group(conn: &Connection, group: &str, by_step: bool) -> Result<Option<Decision>> {
     Ok(conn
         .query_row(
-            &format!("SELECT {COLS} FROM decisions WHERE group_key = ?1 AND status = 'open'"),
-            params![group],
+            &format!(
+                "SELECT {COLS} FROM decisions \
+                 WHERE group_key = ?1 AND status = 'open' AND (by_step IS NOT NULL) = ?2"
+            ),
+            params![group, by_step],
             from_row,
         )
         .optional()?)
@@ -345,7 +357,7 @@ mod tests {
             .call_blocking(|c| insert(c, &decision("d1", Some("nightly/errors"))))
             .unwrap();
         let open = ledger
-            .call_blocking(|c| open_in_group(c, "nightly/errors"))
+            .call_blocking(|c| open_in_group(c, "nightly/errors", false))
             .unwrap()
             .unwrap();
         assert_eq!(open.id, "d1");
@@ -356,7 +368,21 @@ mod tests {
                 .call_blocking(|c| insert(c, &decision("d2", Some("nightly/errors"))))
                 .is_err()
         );
-        // …but restating the open one is how it is asked again.
+        // …unless a flow step asks it: one of each kind of asker.
+        ledger
+            .call_blocking(|c| insert_by(c, &decision("s1", Some("nightly/errors")), Some("f1/review")))
+            .unwrap();
+        let stepped = ledger
+            .call_blocking(|c| open_in_group(c, "nightly/errors", true))
+            .unwrap()
+            .unwrap();
+        assert_eq!(stepped.id, "s1");
+        assert!(
+            ledger
+                .call_blocking(|c| insert_by(c, &decision("s2", Some("nightly/errors")), Some("f2/review")))
+                .is_err()
+        );
+        // Restating the open one is how it is asked again.
         let mut next = decision("ignored", Some("nightly/errors"));
         next.title = "3 errors, not 2".into();
         let restated = ledger

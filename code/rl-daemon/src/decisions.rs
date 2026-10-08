@@ -147,10 +147,15 @@ impl Decisions {
             note: None,
         };
 
+        // Restated only by its own kind of asker: a plain ask never takes a step's question
+        // over, nor a step a plain one.
+        let stepped = matches!(by, By::Step { .. });
         let existing = match &spec.group {
             Some(g) => {
                 let g = g.clone();
-                self.ledger.call(move |c| decisions::open_in_group(c, &g)).await?
+                self.ledger
+                    .call(move |c| decisions::open_in_group(c, &g, stepped))
+                    .await?
             }
             None => None,
         };
@@ -158,7 +163,7 @@ impl Decisions {
         // Same question, said again: keep the id and the chain it began, unless a step asks it
         // again, and it is now that step's firing's.
         if let Some(open) = &existing
-            && !matches!(by, By::Step { .. })
+            && !stepped
         {
             d.chain = open.chain.clone();
         }
@@ -173,12 +178,15 @@ impl Decisions {
             .call(move |c| {
                 let tx = c.unchecked_transaction()?;
                 let stored = match &open {
-                    Some(id) => decisions::restate(&tx, id, &d2, now)?,
-                    None => decisions::insert(&tx, &d2)?,
+                    Some(id) => {
+                        let stored = decisions::restate(&tx, id, &d2, now)?;
+                        if let Some(owner) = &owner {
+                            decisions::set_by_step(&tx, &stored.id, owner)?;
+                        }
+                        stored
+                    }
+                    None => decisions::insert_by(&tx, &d2, owner.as_deref())?,
                 };
-                if let Some(owner) = &owner {
-                    decisions::set_by_step(&tx, &stored.id, owner)?;
-                }
                 tx.commit()?;
                 Ok(stored)
             })

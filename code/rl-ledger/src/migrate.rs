@@ -40,6 +40,11 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
     (20, "0020_chain", include_str!("../migrations/0020_chain.sql")),
     (21, "0021_flows", include_str!("../migrations/0021_flows.sql")),
     (22, "0022_drop_rules", include_str!("../migrations/0022_drop_rules.sql")),
+    (
+        23,
+        "0023_group_owner",
+        include_str!("../migrations/0023_group_owner.sql"),
+    ),
 ];
 
 pub fn run(conn: &mut Connection) -> Result<()> {
@@ -162,7 +167,7 @@ mod tests {
              INSERT INTO reactions (scope, name, hash, source) VALUES ('global', 'tell', 'h', '/r');",
         )
         .unwrap();
-        run(&mut c).unwrap();
+        run_to(&mut c, 22).unwrap();
         assert_eq!(version(&c).unwrap(), 22);
         let col = |sql: &str| -> Vec<String> {
             c.prepare(sql)
