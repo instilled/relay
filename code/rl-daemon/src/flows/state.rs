@@ -62,9 +62,16 @@ fn caller(c: &Connection, run: &str) -> Result<Option<Caller>> {
 }
 
 impl Flows {
+    /// Looked for under `going`: a step's run is started with it held until the run is recorded as
+    /// the step's, so a step asking at once is found, never refused as no step. Held for the
+    /// look only, never for the work, and no holder of `going` waits on a step's ask.
     async fn caller(&self, run: &str) -> Result<Caller> {
         let run = run.to_string();
-        match self.ledger.call(move |c| caller(c, &run)).await? {
+        let found = {
+            let _going = self.going.lock().await;
+            self.ledger.call(move |c| caller(c, &run)).await?
+        };
+        match found {
             Some(who) => Ok(who),
             None => Err(Refusal(NOT_IN_A_STEP.to_string()).into()),
         }
