@@ -315,7 +315,7 @@ of the order: it sorts itself again. Shift and an arrow arrive as `CSI 1;2A`/`B`
 Terminal.app and tmux 3.2 or later; a terminal that does not report shift sends the plain arrow,
 which just moves the cursor. And named — a workspace by the
 name it was registered under, a cause as "flow nightly · probe" or "your answer", never an id.
-A row is an icon for what it is — `✦` an agent, `❯` a shell (in the prompt's green), `▸` a
+A row is an icon for what it is — an agent in its CLI's glyph and colour (`✻` claude in its clay, `⬡` codex, `✧` gemini in blue, `❖` cursor, `⊡` opencode, `✦` any other), `❯` a shell (in the prompt's green), `▸` a
 command, `↻` a flow, `?` a question (amber) — one quiet glyph, one column wide in every font, so
 every title starts in the same column, and dim once the run has ended — then the title, the state as a word in its colour (`needs you` and `blocked` amber,
 `failed` red, `done` and `stopped` dim; a shell at rest says nothing there, its icon says it),
@@ -1113,7 +1113,7 @@ catch_up:
 
 Which CLIs are agents is not configured: the detection registry says (`detect/*.yaml`,
 `kind: agent`, `bins`, `headless`, `model_flag`, the flag that names a model, and
-`small_model`, the quick one setup suggests), and `rld` looks for each on `PATH` when asked —
+`small_model`, the quick one setup suggests, `icon` and `color`, how its rows look — a glyph one column wide under every width table and a `#rrggbb`, checked as the profile loads), and `rld` looks for each on `PATH` when asked —
 `agent.list`, `rl agents`. Which of them the panel *offers* is the `agents` key
 (`agents: [claude, codex]`; unset, all of those here). An assistant resolves to an argv: the
 binary, the headless arguments, the model through the profile's flag, the extra arguments; the

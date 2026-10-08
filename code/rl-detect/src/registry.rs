@@ -37,6 +37,8 @@ struct ProfileFile {
     headless: Option<Vec<String>>,
     model_flag: Option<Vec<String>>,
     small_model: Option<String>,
+    icon: Option<String>,
+    color: Option<String>,
     patterns: Option<PatternsFile>,
     timing: Option<TimingFile>,
 }
@@ -86,6 +88,12 @@ impl ProfileFile {
         if over.small_model.is_some() {
             self.small_model = over.small_model;
         }
+        if over.icon.is_some() {
+            self.icon = over.icon;
+        }
+        if over.color.is_some() {
+            self.color = over.color;
+        }
         if let Some(p) = over.patterns {
             let mine = self.patterns.get_or_insert_with(Default::default);
             if p.needs_input.is_some() {
@@ -134,6 +142,11 @@ pub struct Profile {
     pub model_flag: Vec<String>,
     /// The quick, cheap model setup offers for summaries, when there is one.
     pub small_model: Option<String>,
+    /// The glyph its rows wear in place of the plain agent one: one column
+    /// wide under every width table, so the titles after it stay in line.
+    pub icon: Option<String>,
+    /// The colour that glyph is drawn in (`#rrggbb`); none, the foreground.
+    pub color: Option<(u8, u8, u8)>,
     /// Generic patterns first, then the profile's own.
     pub patterns: Patterns,
     pub timing: Timing,
@@ -253,6 +266,8 @@ impl Registry {
                     headless: file.headless.unwrap_or_default(),
                     model_flag: file.model_flag.unwrap_or_default(),
                     small_model: file.small_model,
+                    icon: file.icon.map(|i| check_icon(&name, i)).transpose()?,
+                    color: file.color.map(|c| parse_color(&name, &c)).transpose()?,
                     patterns,
                     timing,
                     name,
@@ -317,6 +332,28 @@ fn basename(arg: &str) -> &str {
 /// A shell started with nothing but flags, and not `-c`.
 fn is_interactive(argv: &[String]) -> bool {
     argv.iter().skip(1).all(|a| a.starts_with('-') && a != "-c")
+}
+
+/// One character one column wide in the CJK width table too: an ambiguous
+/// one (`◆`, `◎`) is two there, and the title after it would move over.
+fn check_icon(name: &str, icon: String) -> Result<String> {
+    use unicode_width::UnicodeWidthChar;
+    let mut chars = icon.chars();
+    match (chars.next(), chars.next()) {
+        (Some(c), None) if c.width() == Some(1) && c.width_cjk() == Some(1) => Ok(icon),
+        _ => bail!("{name}.yaml: icon `{icon}` is not one character one column wide (✦, ✻, ⬡)"),
+    }
+}
+
+fn parse_color(name: &str, s: &str) -> Result<(u8, u8, u8)> {
+    let hex = s
+        .strip_prefix('#')
+        .filter(|h| h.len() == 6 && h.bytes().all(|b| b.is_ascii_hexdigit()));
+    let Some(h) = hex else {
+        bail!("{name}.yaml: color `{s}` is not #rrggbb")
+    };
+    let byte = |i: usize| u8::from_str_radix(&h[i..i + 2], 16).unwrap();
+    Ok((byte(0), byte(2), byte(4)))
 }
 
 fn compile_patterns(name: &str, base: &Patterns, file: Option<&PatternsFile>) -> Result<Patterns> {
@@ -400,6 +437,41 @@ mod tests {
         assert!(r.detect(&argv("make e2e")).is_none());
         assert_eq!(r.generic().timing.idle_after, Duration::from_secs(3));
         assert_eq!(r.profile("sh").unwrap().timing.idle_after, Duration::from_secs(2));
+    }
+
+    #[test]
+    fn agents_wear_their_own_glyph_and_colour() {
+        let r = Registry::builtin();
+        let look = |n: &str| {
+            let p = r.profile(n).unwrap();
+            (p.icon.as_deref(), p.color)
+        };
+        assert_eq!(look("claude"), (Some("✻"), Some((0xD9, 0x77, 0x57))));
+        assert_eq!(look("codex"), (Some("⬡"), None));
+        assert_eq!(look("gemini"), (Some("✧"), Some((0x4C, 0x8D, 0xF6))));
+        assert_eq!(look("cursor"), (Some("❖"), None));
+        assert_eq!(look("opencode"), (Some("⊡"), None));
+        assert_eq!(look("generic"), (None, None));
+    }
+
+    #[test]
+    fn a_user_file_recolours_a_cli_and_a_bad_look_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("codex.yaml"), "color: '#10a37f'\n").unwrap();
+        let r = Registry::load_from(dir.path()).unwrap();
+        let c = r.profile("codex").unwrap();
+        assert_eq!((c.icon.as_deref(), c.color), (Some("⬡"), Some((0x10, 0xA3, 0x7F))));
+        for (bad, says) in [
+            ("icon: ◆", "◆"),
+            ("icon: ab", "ab"),
+            ("icon: 🤖", "🤖"),
+            ("color: teal", "teal"),
+            ("color: '#12345'", "#12345"),
+        ] {
+            std::fs::write(dir.path().join("codex.yaml"), bad).unwrap();
+            let err = format!("{:#}", Registry::load_from(dir.path()).unwrap_err());
+            assert!(err.contains("codex.yaml") && err.contains(says), "{bad}: {err}");
+        }
     }
 
     #[test]

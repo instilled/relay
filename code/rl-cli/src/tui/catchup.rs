@@ -104,10 +104,10 @@ fn project_line(p: &Project, w: usize) -> Line<'static> {
 /// A row's line: its icon, what `row_line` says of it, and on a question
 /// the keys that answer it.
 fn row(r: &Row, w: usize, now: Timestamp) -> Line<'static> {
-    let (icon, ended) = match r {
-        Row::Question(_) => (rows::QUESTION, false),
-        Row::Run(i) => (rows::icon(&i.run), i.run.state.is_terminal()),
-        Row::Flow(_) => (rows::FLOW, false),
+    let (icon, cli, ended) = match r {
+        Row::Question(_) => (rows::QUESTION, None, false),
+        Row::Run(i) => (rows::icon(&i.run), i.run.cli.as_deref(), i.run.state.is_terminal()),
+        Row::Flow(_) => (rows::FLOW, None, false),
         Row::Group(h) => return Line::raw(h.name.clone()),
     };
     let right = match r {
@@ -119,7 +119,7 @@ fn row(r: &Row, w: usize, now: Timestamp) -> Line<'static> {
         _ => String::new(),
     };
     let mut spans = vec![Span::raw(ROW_INDENT)];
-    spans.extend(icon_span(icon, ended));
+    spans.extend(icon_span(icon, cli, ended));
     let used = ROW_INDENT.len() + 3 + right.chars().count() + 1;
     let text = fit(&row_line(r, now), w.saturating_sub(used));
     spans.push(Span::raw(text));
