@@ -177,9 +177,7 @@ async fn edit(home: &Home, name: &str, json: bool) -> Result<()> {
     }
     if json {
         println!("{}", serde_json::to_string(&reloaded)?);
-    }
-    let failed = matches!(edited, Edited::NotLoaded(_) | Edited::NeedsYes(_));
-    if !json {
+    } else {
         match &edited {
             Edited::NotLoaded(said) => {
                 for n in said {
@@ -190,7 +188,7 @@ async fn edit(home: &Home, name: &str, json: bool) -> Result<()> {
             _ => println!("{}", edited.words(name)),
         }
     }
-    if failed {
+    if matches!(edited, Edited::NotLoaded(_) | Edited::NeedsYes(_)) {
         std::process::exit(1)
     }
     Ok(())
@@ -227,7 +225,7 @@ impl Edited {
     /// The line that says it, for the CLI and the panel alike.
     pub fn words(&self, name: &str) -> String {
         match self {
-            Edited::Approved(_) => format!("approved {name}"),
+            Edited::Approved(_) => format!("{name} approved"),
             Edited::NotLoaded(said) => match said.first() {
                 Some(n) => format!("not loaded: {n}"),
                 None => format!("{name} did not load"),
@@ -271,7 +269,8 @@ pub async fn finish_edit(rpc: &mut Client, home: &Home, e: Editing) -> Result<(E
     let dir = home.flow_dir(&e.name);
     let now = std::fs::read(&e.file).ok();
     let untouched = now.as_deref() == Some(e.was.as_slice());
-    if untouched && e.fresh && now.as_deref() == Some(TEMPLATE.as_bytes()) && folder_files(&dir)? == e.before {
+    // Fresh, `flow.md` was the template: left as it was, with nothing added beside it.
+    if untouched && e.fresh && folder_files(&dir)? == e.before {
         std::fs::remove_dir_all(&dir)?;
         return Ok((Edited::Dropped, rpc.call::<FlowReload>(()).await?));
     }

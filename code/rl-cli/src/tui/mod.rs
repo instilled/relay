@@ -8444,7 +8444,7 @@ mod tests {
         text.push_str("\nEdited.\n");
         std::fs::write(&file, text).unwrap();
         app.edited(editing).await;
-        assert_eq!(said(&app), "approved nightly");
+        assert_eq!(said(&app), "nightly approved");
         assert!(nightly(&app).approved());
         // A new one left as the template is not kept.
         run(&mut app, "/flow edit draft").await;

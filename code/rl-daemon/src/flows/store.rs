@@ -92,9 +92,7 @@ impl Flows {
             not_loaded: broken,
         })
     }
-}
 
-impl Flows {
     /// Whether the folder of `name`, read and hashed now, is the one said yes to. Nothing
     /// watches it between reloads, so this is asked before a firing starts and before each
     /// step does. One gone, unreadable, or holding a link to a folder is not.
