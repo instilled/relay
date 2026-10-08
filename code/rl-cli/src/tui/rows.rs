@@ -36,8 +36,9 @@ use rl_proto::decision::Decision;
 use rl_proto::flow::{Firing, Flow, FlowStatus};
 use rl_proto::methods::{Digest, DigestItem, Hidden, Order};
 use rl_proto::types::{Cause, Checkout, Confidence, Run, RunKind, RunState};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 /// Ended runs stay on the list this long.
 pub const RECENT: SignedDuration = SignedDuration::from_hours(24);
@@ -346,20 +347,58 @@ pub const FLOW: &str = "↻";
 /// A question waiting on you.
 pub const QUESTION: &str = "?";
 
-/// An icon's colour: a shell the prompt's green, a question amber, an agent
-/// the plain foreground, a command and a flow quiet. Anything that has ended
-/// is quiet too — its word says how it ended.
-pub fn icon_style(icon: &str, ended: bool) -> ratatui::style::Style {
+/// An icon's colour: a shell the prompt's green, a question amber, a command
+/// and a flow quiet, an agent its CLI's colour (`cli`) or the plain
+/// foreground. Anything that has ended is quiet too — its word says how it
+/// ended.
+pub fn icon_style(icon: &str, cli: Option<&str>, ended: bool) -> ratatui::style::Style {
     use crate::tui::theme;
+    use ratatui::style::{Color, Style};
     if ended {
         return theme::dim();
     }
     match icon {
         SHELL => theme::accent(),
         QUESTION => theme::needs(),
-        AGENT => ratatui::style::Style::default(),
-        _ => theme::dim(),
+        COMMAND | FLOW => theme::dim(),
+        _ => match cli.and_then(|c| looks().get(c)).and_then(|l| l.color) {
+            Some((r, g, b)) => Style::default().fg(Color::Rgb(r, g, b)),
+            None => Style::default(),
+        },
     }
+}
+
+/// How a CLI's rows look: its glyph and its colour, as its profile has them.
+struct Look {
+    icon: Option<String>,
+    color: Option<(u8, u8, u8)>,
+}
+
+/// Every CLI's look, by name: the built-in profiles with yours in
+/// `$RELAY_HOME/detect/` over them, read once. Profiles that do not load
+/// leave the built-ins — `rld` is the one that says what is wrong with them.
+fn looks() -> &'static BTreeMap<String, Look> {
+    static LOOKS: OnceLock<BTreeMap<String, Look>> = OnceLock::new();
+    LOOKS.get_or_init(|| {
+        use rl_detect::Registry;
+        let reg = if cfg!(test) {
+            Registry::builtin()
+        } else {
+            rl_core::Home::resolve()
+                .ok()
+                .and_then(|h| Registry::load(&h).ok())
+                .unwrap_or_else(Registry::builtin)
+        };
+        reg.agents()
+            .map(|p| {
+                let look = Look {
+                    icon: p.icon.clone(),
+                    color: p.color,
+                };
+                (p.name.clone(), look)
+            })
+            .collect()
+    })
 }
 
 /// A shell: an interactive one by its profile, or a project's warm shell by
@@ -384,13 +423,18 @@ pub fn said(i: &DigestItem) -> &str {
     }
 }
 
-/// A run's icon: an agent, a shell, or a command (a plugin is one).
+/// A run's icon: an agent — in its CLI's own glyph, where its profile has
+/// one — a shell, or a command (a plugin is one).
 pub fn icon(r: &Run) -> &'static str {
     if is_shell(r) {
         return SHELL;
     }
     match r.kind {
-        RunKind::Agent => AGENT,
+        RunKind::Agent => r
+            .cli
+            .as_deref()
+            .and_then(|c| looks().get(c)?.icon.as_deref())
+            .unwrap_or(AGENT),
         RunKind::Shell => SHELL,
         RunKind::Command | RunKind::Plugin => COMMAND,
     }
@@ -2485,6 +2529,35 @@ mod tests {
     }
 
     #[test]
+    fn an_agent_wears_its_clis_glyph_in_its_clis_colour() {
+        use ratatui::style::{Color, Style};
+        let mut a = item("ag", RunState::Working, "/w", "2026-09-10T11:00:00Z", false);
+        let mut look = |cli: Option<&str>| {
+            a.run.cli = cli.map(String::from);
+            let i = icon(&a.run);
+            (i, icon_style(i, cli, false))
+        };
+        assert_eq!(
+            look(Some("claude")),
+            ("✻", Style::default().fg(Color::Rgb(0xD9, 0x77, 0x57)))
+        );
+        assert_eq!(look(Some("codex")), ("⬡", Style::default()));
+        assert_eq!(look(Some("gemini")).0, "✧");
+        assert_eq!(look(Some("cursor")).0, "❖");
+        assert_eq!(look(Some("opencode")).0, "⊡");
+        // One Relay has no profile for, or none at all, is a plain agent.
+        assert_eq!(look(Some("fake-cli")), (AGENT, Style::default()));
+        assert_eq!(look(None), (AGENT, Style::default()));
+        // Ended, it is quiet whatever it is.
+        assert_eq!(icon_style("✻", Some("claude"), true), crate::tui::theme::dim());
+        for l in looks().values() {
+            if let Some(i) = &l.icon {
+                assert_eq!(ratatui::text::Span::raw(i.as_str()).width(), 1, "{i}");
+            }
+        }
+    }
+
+    #[test]
     fn a_shell_says_where_it_is_from_its_project() {
         let home = std::env::var("HOME").unwrap();
         let project = PathBuf::from(&home).join("Projects/foodai");
@@ -2512,9 +2585,9 @@ mod tests {
             assert_eq!(Span::raw(i).width(), 1, "{i}");
             assert_eq!(i.chars().count(), 1, "{i} carries no variation selector");
         }
-        assert_eq!(icon_style(SHELL, false), crate::tui::theme::accent());
-        assert_eq!(icon_style(QUESTION, false), crate::tui::theme::needs());
-        assert_eq!(icon_style(SHELL, true), crate::tui::theme::dim());
+        assert_eq!(icon_style(SHELL, None, false), crate::tui::theme::accent());
+        assert_eq!(icon_style(QUESTION, None, false), crate::tui::theme::needs());
+        assert_eq!(icon_style(SHELL, None, true), crate::tui::theme::dim());
     }
 
     #[test]

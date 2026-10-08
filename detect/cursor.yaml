@@ -1,6 +1,7 @@
 # Cursor's agent CLI. PTY heuristics only.
 kind: agent
 bins: [cursor-agent]
+icon: "❖"        # its rows in the panel; one column wide
 patterns:
   needs_input:
     - '(?i)approve'

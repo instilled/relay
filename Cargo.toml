@@ -48,6 +48,7 @@ tokio-util = { version = "0.7", features = ["rt"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tempfile = "3"
+unicode-width = "0.2"
 
 # crossterm 0.29.0 with one change, in its unix key parser: a `CSI ?` sequence
 # ends at its final byte rather than only at a `u` or a `c`. Without it a mode

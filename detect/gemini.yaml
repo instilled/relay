@@ -2,6 +2,8 @@
 # the value of -p, so it goes in place of {prompt} rather than at the end.
 kind: agent
 bins: [gemini]
+icon: "✧"        # its rows in the panel; one column wide
+color: "#4c8df6"    # #rrggbb; without one, the foreground
 headless: ["-p", "{prompt}"]
 model_flag: ["-m"]
 small_model: flash-lite   # its own alias for the smallest model

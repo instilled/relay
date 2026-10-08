@@ -2,5 +2,6 @@
 # provider/model, so there is no one small model to offer.
 kind: agent
 bins: [opencode]
+icon: "⊡"        # its rows in the panel; one column wide
 headless: [run]
 model_flag: ["-m"]
