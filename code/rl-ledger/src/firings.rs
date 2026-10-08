@@ -16,6 +16,8 @@ pub struct NewFiring<'a> {
     pub flow: &'a str,
     /// The definition it runs on, whatever is edited meanwhile.
     pub def_json: &'a str,
+    /// The hash of the flow's folder it began on: the version said yes to.
+    pub hash: &'a str,
     /// `when`, `on` or `hand`.
     pub trigger: &'a str,
     pub event: Option<i64>,
@@ -28,12 +30,13 @@ pub struct NewFiring<'a> {
 pub fn insert(conn: &Connection, f: &NewFiring) -> Result<()> {
     let tx = conn.unchecked_transaction()?;
     tx.execute(
-        "INSERT INTO firings (id, flow, def_json, trigger, event, status, started_at) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        "INSERT INTO firings (id, flow, def_json, hash, trigger, event, status, started_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         params![
             f.id,
             f.flow,
             f.def_json,
+            f.hash,
             f.trigger,
             f.event,
             FiringStatus::Running.as_str(),
@@ -68,6 +71,14 @@ pub fn def_json(conn: &Connection, id: &str) -> Result<Option<String>> {
     Ok(conn
         .query_row("SELECT def_json FROM firings WHERE id = ?1", params![id], |r| r.get(0))
         .optional()?)
+}
+
+/// The hash of the folder firing `id` began on; `None` for none such, or one from before it was kept.
+pub fn hash(conn: &Connection, id: &str) -> Result<Option<String>> {
+    Ok(conn
+        .query_row("SELECT hash FROM firings WHERE id = ?1", params![id], |r| r.get(0))
+        .optional()?
+        .flatten())
 }
 
 /// When the flow's firing before `id` started.
@@ -228,6 +239,7 @@ mod tests {
                         id,
                         flow: "prod-logs",
                         def_json: "{}",
+                        hash: "h",
                         trigger: "when",
                         event: None,
                         at: at(when),

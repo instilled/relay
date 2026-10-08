@@ -8344,6 +8344,7 @@ mod tests {
                         id: "fi1",
                         flow: "nightly",
                         def_json: "{}",
+                        hash: "h",
                         trigger: "when",
                         event: None,
                         at: jiff::Timestamp::now(),

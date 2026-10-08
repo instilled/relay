@@ -169,8 +169,10 @@ async fn an_unapproved_flow_does_not_run() {
     h.stop().await;
 }
 
+/// An edit said yes to mid-firing: the firing does not carry on as a mix of two versions — its
+/// later steps do not start.
 #[tokio::test]
-async fn an_edit_mid_firing_leaves_that_firing_as_it_started() {
+async fn an_edit_approved_mid_firing_starts_none_of_that_firings_later_steps() {
     let tmp = tempfile::tempdir().unwrap();
     let md = |b: &str| {
         format!("---\nsteps:\n  a:\n    run: sleep 1; echo old\n  b:\n    after: a\n    run: echo {b}\n---\n")
@@ -183,11 +185,21 @@ async fn an_edit_mid_firing_leaves_that_firing_as_it_started() {
     write(&h.home, "edited", &[("flow.md", &md("b-new"))]);
     let r: Reloaded = c.ok("flow.reload", json!(null)).await;
     assert_eq!(r.changed, ["edited"], "{r:?}");
-    let _: Flow = common::approve(&mut c, "edited").await;
+    common::approve(&mut c, "edited").await;
     let f = wait_firing(&mut c, "edited", ended).await;
-    assert_eq!(f.status, FiringStatus::Done, "{f:?}");
+    assert_eq!(f.status, FiringStatus::Failed, "{f:?}");
+    assert_eq!(
+        (step(&f, "b").status, step(&f, "b").run.as_deref()),
+        (StepStatus::Failed, None)
+    );
+    let skipped: Vec<Event> = c.ok("event.list", json!({ "kinds": ["flow.skipped"] })).await;
+    let data = skipped[0].data.clone().unwrap();
+    assert_eq!(data["reason"], "the flow changed since this firing began", "{data}");
+    // The next firing runs the version said yes to, whole.
+    let _: Firing = c.ok("flow.run", json!({ "name": "edited" })).await;
+    let f = wait_firing(&mut c, "edited", |f| f.ended_at.is_some() && step(f, "b").run.is_some()).await;
     let b: Run = c.get(step(&f, "b").run.as_deref().unwrap()).await;
-    assert!(b.argv.iter().any(|a| a.contains("b-old")), "{:?}", b.argv);
+    assert!(b.argv.iter().any(|a| a.contains("b-new")), "{:?}", b.argv);
     h.stop().await;
 }
 
@@ -548,6 +560,7 @@ async fn a_firing_written_but_never_started_starts_at_a_restart() {
                 id: "f-late",
                 flow: "late",
                 def_json: &serde_json::to_string(&def)?,
+                hash: &rl_ledger::flows::get(db, "late")?.unwrap().hash,
                 trigger: "hand",
                 event: None,
                 at: jiff::Timestamp::now(),

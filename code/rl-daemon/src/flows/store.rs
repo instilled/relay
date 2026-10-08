@@ -1,6 +1,7 @@
 //! `~/.relay/flows` read into the ledger: each folder hashed, its `flow.md`
 //! checked, and what did not load said with its file and line.
 
+use super::engine::{CHANGED, CHANGED_SINCE_BEGAN};
 use super::{Flows, canonical_in};
 use anyhow::{Context, Result};
 use jiff::Timestamp;
@@ -101,10 +102,12 @@ impl Flows {
         })
     }
 
-    /// Whether the folder of `name`, read and hashed now, is the one said yes to. Nothing
-    /// watches it between reloads, so this is asked before a firing starts and before each
-    /// step does. One gone, unreadable, or holding a link to a folder is not.
-    pub(super) async fn yes_holds(&self, name: &str) -> bool {
+    /// Why nothing of `name` may start now, if nothing may: its folder, read and hashed now, is
+    /// not the one said yes to ([`CHANGED`]: nothing watches it between reloads), or the yes is
+    /// no longer to the version a firing `began` on ([`CHANGED_SINCE_BEGAN`]). Asked before a
+    /// firing starts and before each step does. A folder gone, unreadable, or holding a link to
+    /// a folder never has its yes.
+    pub(super) async fn why_not_run(&self, name: &str, began: Option<&str>) -> Option<&'static str> {
         let n = name.to_string();
         let approved = match self.ledger.call(move |c| flows::get(c, &n)).await {
             Ok(f) => f.filter(|f| f.removed_at.is_none()).and_then(|f| f.approved_hash),
@@ -113,7 +116,11 @@ impl Flows {
                 None
             }
         };
-        approved.is_some_and(|yes| hash_now(&self.home.flow_dir(name)).is_some_and(|now| now == yes))
+        let Some(yes) = approved else { return Some(CHANGED) };
+        if hash_now(&self.home.flow_dir(name)).is_none_or(|now| now != yes) {
+            return Some(CHANGED);
+        }
+        began.is_some_and(|b| b != yes).then_some(CHANGED_SINCE_BEGAN)
     }
 
     /// The folders read again once one is found changed under its yes, so it says it needs one.

@@ -119,13 +119,24 @@ async fn a_lost_step_is_not_picked_up_on_a_changed_folder() {
 
     let h = Harness::on(home.clone()).unwrap();
     let mut c = Conn::open(&h.home).await;
-    let out: Vec<Resumed> = c.ok("run.resume", json!({ "ids": [old] })).await;
+    let out: Vec<Resumed> = c.ok("run.resume", json!({ "ids": [old.clone()] })).await;
     assert!(out[0].run.is_none(), "{out:?}");
     assert!(
         out[0]
             .why_not
             .as_deref()
             .is_some_and(|e| e.contains("the flow changed since its yes")),
+        "{out:?}"
+    );
+    // Said yes to now, the new version is not the one this firing began on: still not picked up.
+    approve(&mut c, "far").await;
+    let out: Vec<Resumed> = c.ok("run.resume", json!({ "ids": [old] })).await;
+    assert!(out[0].run.is_none(), "{out:?}");
+    assert!(
+        out[0]
+            .why_not
+            .as_deref()
+            .is_some_and(|e| e.contains("the flow changed since this firing began")),
         "{out:?}"
     );
     h.stop().await;

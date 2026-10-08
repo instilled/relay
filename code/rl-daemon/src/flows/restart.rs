@@ -98,7 +98,8 @@ impl Flows {
     }
 
     /// What step run `run` was started with, made again for picking it up; `None` when it is
-    /// no firing's step. Refused when the flow's folder changed since its yes, as a step's start is.
+    /// no firing's step. Refused as a step's start is: on a folder changed since its yes, or a yes to
+    /// another version than the firing's.
     pub(crate) async fn spec_again(&self, run: &Run) -> Result<Option<RunSpec>> {
         let (id, home) = (run.id.clone(), self.home.clone());
         let found = self
@@ -119,9 +120,11 @@ impl Flows {
             })
             .await?;
         let Some((m, step)) = found else { return Ok(None) };
-        if !self.yes_holds(&m.def.name).await {
-            self.changed_since_yes(&m.def.name).await;
-            bail!(CHANGED);
+        if let Some(why) = self.why_not_run(&m.def.name, m.began.as_deref()).await {
+            if why == CHANGED {
+                self.changed_since_yes(&m.def.name).await;
+            }
+            bail!(why);
         }
         match m.todo.first() {
             Some((_, Ready::Run(Ok(a)))) => self.spec(&m, &step, a).map(Some),

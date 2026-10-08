@@ -962,7 +962,11 @@ with `--json`. Behind them are `flow.list`, `flow.errors`, `flow.reload`, `flow.
 
 **The engine.** A firing is a small state machine in `rld`, decided by pure code
 (`rl-flow/src/advance.rs`) and carried out by the daemon (`rl-daemon/src/flows/engine.rs`). It
-runs on the definition it started with (`firings.def_json`), whatever is edited meanwhile.
+runs on the definition it started with (`firings.def_json`), whatever is edited meanwhile, and
+remembers the folder's hash it began on (`firings.hash`): a step starts only while the yes is
+still to that version, so an edit said yes to mid-firing does not leave the firing a mix of two —
+its later steps do not start (`flow.skipped`, "the flow changed since this firing began") and the
+next firing runs the new version whole. A resume checks the same.
 
 - **States.** A firing is `running`, `waiting` (on a question, or a lost step), `done`, `failed`
   or `stopped`; a step `pending`, `running`, `waiting`, `lost`, `done`, `skipped`, `failed` or

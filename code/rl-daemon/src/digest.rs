@@ -227,6 +227,7 @@ mod tests {
                             id,
                             flow: "nightly",
                             def_json: "{}",
+                            hash: "h",
                             trigger: "when",
                             event: None,
                             at: at.parse().unwrap(),

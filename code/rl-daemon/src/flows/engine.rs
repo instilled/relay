@@ -2,7 +2,8 @@
 //! [`advance`] says, and the firing moved on as those runs end.
 //!
 //! A firing runs on the definition it started with (`firings.def_json`),
-//! whatever is edited meanwhile.
+//! whatever is edited meanwhile; its steps start only while the yes is still
+//! to the version it began on (`firings.hash`).
 
 use super::Flows;
 use super::ask::{option_of, question};
@@ -33,6 +34,8 @@ use tracing::{info, warn};
 const OUT_MAX: usize = 64 << 10;
 /// Why a step did not start on a folder changed since its yes.
 pub(super) const CHANGED: &str = "the flow changed since its yes";
+/// Why a step did not start once the yes went to a version other than its firing's.
+pub(super) const CHANGED_SINCE_BEGAN: &str = "the flow changed since this firing began";
 
 /// What fired a firing; `firings.trigger` is `when`, `on` or `hand`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,6 +84,8 @@ pub(super) struct Moved {
     pub(super) event: Option<(Event, Option<Run>)>,
     /// When the flow's firing before this one started.
     last: Option<Timestamp>,
+    /// The hash of the folder it began on.
+    pub(super) began: Option<String>,
     /// What to do, each with what it needs, placeholders filled.
     pub(super) todo: Vec<(Do, Ready)>,
 }
@@ -115,7 +120,7 @@ impl Flows {
         if !flow.approved() {
             return Err(Refused::NeedsYes(name.to_string()).into());
         }
-        if !self.yes_holds(name).await {
+        if self.why_not_run(name, None).await.is_some() {
             self.changed_since_yes(name).await;
             return Err(Refused::NeedsYes(name.to_string()).into());
         }
@@ -137,6 +142,7 @@ impl Flows {
         let now = Timestamp::now();
         let names: Vec<String> = def.steps.iter().map(|s| s.name.clone()).collect();
         let def_json = serde_json::to_string(&flow.def)?;
+        let hash = flow.hash.clone();
         let mut data = json!({ "flow": name, "firing": id, "trigger": by.as_str() });
         if let Some(e) = event {
             data["event"] = json!(e.id);
@@ -151,6 +157,7 @@ impl Flows {
                         id: &i,
                         flow: &n,
                         def_json: &def_json,
+                        hash: &hash,
                         trigger: by.as_str(),
                         event: ev,
                         at: now,
@@ -243,24 +250,24 @@ impl Flows {
 
     /// Does what a firing moved on says, and returns what that led to. A step that cannot
     /// start or ask is said in `flow.skipped`: a run step moves on as if it failed, an ask
-    /// step as if unanswered. No step starts on a folder changed since its yes.
+    /// step as if unanswered. No step starts on a folder changed since its yes, or once the yes
+    /// is to another version than the one the firing began on.
     pub(super) async fn carry_out(&self, m: &Moved) -> Vec<(String, Happened)> {
         let mut next = Vec::new();
         let firing = m.firing.id.as_str();
-        // Asked once, at the first step to start.
-        let mut holds = None;
+        // Asked once, at the first step to start: why none may, if none may.
+        let mut refused: Option<Option<&str>> = None;
         for (todo, ready) in &m.todo {
             match todo {
                 Do::Start(step) | Do::RunOption(step) => {
                     let started = match ready {
                         Ready::Run(Ok(a)) => {
-                            if holds.is_none() {
-                                holds = Some(self.yes_holds(&m.def.name).await);
+                            if refused.is_none() {
+                                refused = Some(self.why_not_run(&m.def.name, m.began.as_deref()).await);
                             }
-                            if holds == Some(true) {
-                                self.start(m, step, a).await
-                            } else {
-                                Err(anyhow!(CHANGED))
+                            match refused.flatten() {
+                                None => self.start(m, step, a).await,
+                                Some(why) => Err(anyhow!(why)),
                             }
                         }
                         Ready::Run(Err(e)) => Err(anyhow!("{e:#}")),
@@ -300,7 +307,7 @@ impl Flows {
         for step in self.dismiss_if_stopped(m).await {
             next.push((firing.to_string(), Happened::Unanswered { step }));
         }
-        if holds == Some(false) {
+        if refused.flatten() == Some(CHANGED) {
             self.changed_since_yes(&m.def.name).await;
         }
         next
@@ -478,11 +485,13 @@ pub(super) fn laid_out(c: &Connection, home: &Home, id: &str, def: FlowDef, todo
         })
         .collect::<Result<_>>()?;
     let last = firings::before(c, id)?;
+    let began = firings::hash(c, id)?;
     Ok(Moved {
         def,
         firing,
         event,
         last,
+        began,
         todo,
     })
 }
