@@ -317,7 +317,11 @@ fn flow_approve_binds_to_the_version_shown() {
         .unwrap()
         .to_string();
     assert_ne!(now, shown);
-    let (ok, o, e) = out(rl(&["flow", "approve", "prod", &now[..6]]));
+    // Too short a prefix says too little of what was looked at.
+    let (ok, o, e) = out(rl(&["flow", "approve", "prod", &now[..5]]));
+    assert!(!ok, "{o}{e}");
+    assert!(e.contains("at least 6"), "{e}");
+    let (ok, o, e) = out(rl(&["flow", "approve", "prod", &now[..6].to_uppercase()]));
     assert!(ok, "{o}{e}");
     assert_eq!(o, format!("approved prod · {now}"));
     let (_, listed, _) = out(rl(&["flow", "list"]));

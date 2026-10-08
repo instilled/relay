@@ -318,7 +318,11 @@ fn filled(label: &str, mut action: Action, sections: &BTreeMap<String, String>, 
                 "`{label}`: prompt_file {} is not in the flow's folder",
                 f.display()
             ));
-        } else if parts.next() == Some(Component::Normal("runs".as_ref())) {
+        } else if parts
+            .next()
+            // A case-blind disk opens `Runs/` as `runs/`.
+            .is_some_and(|c| c.as_os_str().eq_ignore_ascii_case("runs"))
+        {
             said.push(format!(
                 "`{label}`: prompt_file {} is under runs/, which no yes covers",
                 f.display()

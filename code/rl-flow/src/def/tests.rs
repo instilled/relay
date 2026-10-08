@@ -313,7 +313,7 @@ fn a_prompt_file_outside_the_folder_is_refused() {
 
 #[test]
 fn a_prompt_file_under_runs_is_refused() {
-    for file in ["runs/x.md", "./runs/f1/x.md"] {
+    for file in ["runs/x.md", "./runs/f1/x.md", "Runs/x.md"] {
         refused(
             &flow(&format!(
                 "  x:\n    run: {{ agent: claude, prompt_file: \"{file}\" }}\n"

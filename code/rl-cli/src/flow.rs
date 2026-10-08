@@ -39,7 +39,7 @@ pub enum FlowCmd {
     /// Say yes to a flow's folder, read again now; it may fire from then on.
     Approve {
         name: String,
-        /// The version looked at: its hash as `rl flow list` shows it, or a prefix. Refused when
+        /// The version looked at: its hash as `rl flow list` shows it, or 6 of it or more. Refused when
         /// the folder is another version now. Without it, the version read now, which is printed.
         hash: Option<String>,
     },
@@ -154,6 +154,13 @@ fn said(f: &Flow, what: &str, json: bool) -> Result<()> {
 /// showed or a prefix of it, must be that version; without it, the version read now is the one
 /// approved, and said.
 async fn approve(rpc: &mut Client, name: &str, shown: Option<&str>) -> Result<Flow> {
+    let shown = shown.map(str::to_ascii_lowercase);
+    if let Some(shown) = &shown
+        && shown.len() < MIN_SHOWN
+    {
+        bail!("give at least {MIN_SHOWN} of the hash rl flow list shows, not {shown}");
+    }
+    let shown = shown.as_deref();
     rpc.call::<FlowReload>(()).await?;
     let flows = rpc.call::<FlowList>(FlowFilter { all: false }).await?;
     let hash = flows
@@ -163,7 +170,7 @@ async fn approve(rpc: &mut Client, name: &str, shown: Option<&str>) -> Result<Fl
         .unwrap_or_default();
     if let Some(shown) = shown
         && !hash.is_empty()
-        && (shown.is_empty() || !hash.starts_with(shown))
+        && !hash.starts_with(shown)
     {
         bail!(
             "`{name}` is {} now, not {shown}: look at it again (rl flow list)",
@@ -177,6 +184,10 @@ async fn approve(rpc: &mut Client, name: &str, shown: Option<&str>) -> Result<Fl
     .await
 }
 
+/// How much of a hash `rl flow approve` takes as naming a version: fewer could match another
+/// by chance.
+const MIN_SHOWN: usize = 6;
+
 /// A hash as it is shown: its first eight.
 fn short(hash: &str) -> String {
     hash.chars().take(8).collect()
@@ -188,7 +199,9 @@ async fn edit(home: &Home, name: &str, json: bool) -> Result<()> {
     let editing = start_edit(home, name)?;
     if let Err(e) = crate::env::open_in_editor(&editing.file, 1) {
         // However the editor ends, a new flow's template is not left behind.
-        drop_template(home, &editing)?;
+        if let Err(dropped) = drop_template(home, &editing) {
+            bail!("{e:#}; and its template is left: {dropped:#}");
+        }
         return Err(e);
     }
     let mut rpc = daemon::ensure(home, !json).await?;
