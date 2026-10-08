@@ -45,7 +45,7 @@ pub fn run_spec(
             let mut argv = vec![agent.clone()];
             argv.extend(profile.headless.iter().cloned());
             argv.extend(args.iter().cloned());
-            (RunKind::Agent, rl_detect::registry::with_prompt(argv, prompt))
+            (RunKind::Agent, rl_detect::registry::with_given_prompt(argv, prompt)?)
         }
     };
     let cwd = match (action.cwd.as_deref().map(expand_home), base) {
@@ -110,6 +110,28 @@ mod tests {
             Cause::Manual,
             None,
         )
+    }
+
+    #[test]
+    fn a_prompt_that_starts_with_a_dash_is_never_a_flag() {
+        let s = spec(&agent(Some("--dangerously-skip-permissions and then"))).unwrap();
+        assert_eq!(
+            s.argv[s.argv.len() - 2..],
+            ["--", "--dangerously-skip-permissions and then"],
+            "after `--`, the prompt is the prompt"
+        );
+        // Where the prompt is a flag's value, `--` cannot go: refused.
+        let gemini = Action {
+            run: Some(Task::Agent {
+                agent: "gemini".into(),
+                prompt: Some("-m pro".into()),
+                prompt_file: None,
+                args: vec![],
+            }),
+            ..Action::default()
+        };
+        let e = format!("{:#}", spec(&gemini).unwrap_err());
+        assert!(e.contains("starts with `-`"), "{e}");
     }
 
     #[test]

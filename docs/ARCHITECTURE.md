@@ -900,7 +900,10 @@ What came before reaches a step through placeholders. `{probe.out}` is what a st
 `{event.summary}`, `{event.data.x}` and the rest (`kind`, `run`, `title`, `cwd`, `cli`, `cause`,
 `group`, `workspace`) are the event an `on` firing fired on. They are spliced into an agent's prompt and an
 `ask:` text only, in one pass — what was spliced in is never read for more
-(`rl-flow/src/template.rs`). A command never gets one: a `run:` string or argv, or an agent's
+(`rl-flow/src/template.rs`). The prompt goes after `--`, so one that starts with `-` is never read
+as the agent's flag; an agent whose prompt is a flag's value (`gemini -p <prompt>`) cannot take
+`--` there, and a filled prompt that starts with `-` does not start
+(`rl_detect::registry::with_given_prompt`). A command never gets one: a `run:` string or argv, or an agent's
 `args`, that names `{probe.out}` is refused at load, so an error line in production logs can
 never become shell. The refusal says what to do instead: for the event, read it from the
 environment (`$RELAY_EVENT_SUMMARY`, `$RELAY_EVENT`); what a step left goes into an agent's prompt
