@@ -95,14 +95,6 @@ impl Home {
     pub fn config_file(&self) -> PathBuf {
         self.0.join("config.yaml")
     }
-    /// User-level schedules, human-edited.
-    pub fn schedules_file(&self) -> PathBuf {
-        self.0.join("schedules.yaml")
-    }
-    /// The user's own reactions: events → actions.
-    pub fn reactions_file(&self) -> PathBuf {
-        self.0.join("reactions.yaml")
-    }
     /// Flows, a folder each: `<name>/flow.md` and the flow's own scripts.
     pub fn flows_dir(&self) -> PathBuf {
         self.0.join("flows")

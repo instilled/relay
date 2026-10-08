@@ -5,7 +5,7 @@ use crate::conv;
 use anyhow::Result;
 use jiff::Timestamp;
 use rl_core::time::{from_millis, to_millis};
-use rl_proto::schedule::Workspace;
+use rl_proto::types::Workspace;
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use std::path::{Path, PathBuf};
 

@@ -10,7 +10,7 @@ use rl_core::Home;
 use rl_proto::decision::{Decision, DecisionStatus};
 use rl_proto::flow::{Flow, NotLoaded};
 use rl_proto::methods::{Digest, WorkspaceRemoved};
-use rl_proto::schedule::Workspace;
+use rl_proto::types::Workspace;
 use rl_proto::types::{Run, RunState};
 use serde_json::json;
 use std::path::Path;

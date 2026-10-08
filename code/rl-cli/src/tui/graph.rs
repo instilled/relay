@@ -41,8 +41,6 @@ pub fn glyph(kind: NodeKind) -> &'static str {
         NodeKind::Agent => "✦",
         NodeKind::Event => "◆",
         NodeKind::Outside => "⇢",
-        // Not sent any more: nothing to draw.
-        NodeKind::Schedule | NodeKind::Reaction => " ",
     }
 }
 
@@ -53,7 +51,7 @@ pub fn colour(kind: NodeKind) -> Style {
         NodeKind::Ask => Style::default().fg(theme::NEEDS),
         NodeKind::Shell => Style::default().fg(theme::ACCENT),
         NodeKind::Agent => Style::default().fg(AGENT),
-        NodeKind::Event | NodeKind::Outside | NodeKind::Schedule | NodeKind::Reaction => theme::dim(),
+        NodeKind::Event | NodeKind::Outside => theme::dim(),
     }
 }
 
@@ -118,7 +116,6 @@ fn node_subject<'a>(n: &'a Node, folder: &'a str) -> Subject<'a> {
         NodeKind::Agent => vec!["agent"],
         NodeKind::Event => vec!["event"],
         NodeKind::Outside => vec!["outside"],
-        NodeKind::Schedule | NodeKind::Reaction => vec![],
     };
     Subject {
         text: vec![&n.name, &n.detail],
@@ -179,7 +176,6 @@ pub fn texts(n: &Node, names: &Names, now: Timestamp) -> (String, String) {
         NodeKind::Shell | NodeKind::Agent => tally(n),
         NodeKind::Event => "nothing raised it yet".into(),
         NodeKind::Outside => "raised outside a run".into(),
-        NodeKind::Schedule | NodeKind::Reaction => String::new(),
     };
     let place = folder_word(n, names);
     let bottom = match (place.is_empty(), what.is_empty()) {
@@ -880,7 +876,6 @@ fn kind_word(k: NodeKind) -> &'static str {
         NodeKind::Agent => "agent",
         NodeKind::Event => "event",
         NodeKind::Outside => "outside",
-        NodeKind::Schedule | NodeKind::Reaction => "",
     }
 }
 
@@ -1038,7 +1033,6 @@ mod tests {
             kind,
             name: name.into(),
             folder: folder.map(PathBuf::from),
-            rule: None,
             status: Some(FlowStatus::On),
             detail: String::new(),
             next_at: None,

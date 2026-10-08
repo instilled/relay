@@ -130,20 +130,17 @@ str_enum!(Mark { Done => "done", Blocked => "blocked", Working => "working" });
 str_enum!(AttachMode { Watch => "watch", Join => "join" });
 
 /// Why a run started. Serialised as one string: `manual`,
-/// `schedule:<name>`, `decision:<id>`, `flow:<flow>/<step>`,
-/// `reaction:<name>`.
+/// `decision:<id>`, `flow:<flow>/<step>`, `assistant:<job>`.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum Cause {
     #[default]
     Manual,
-    Schedule(String),
     Decision(String),
     /// A step of a flow.
     Flow {
         flow: String,
         step: String,
     },
-    Reaction(String),
     /// A job Relay handed to an agent (`assistant:interpret`).
     Assistant(String),
 }
@@ -152,10 +149,8 @@ impl std::fmt::Display for Cause {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Cause::Manual => write!(f, "manual"),
-            Cause::Schedule(n) => write!(f, "schedule:{n}"),
             Cause::Decision(id) => write!(f, "decision:{id}"),
             Cause::Flow { flow, step } => write!(f, "flow:{flow}/{step}"),
-            Cause::Reaction(n) => write!(f, "reaction:{n}"),
             Cause::Assistant(job) => write!(f, "assistant:{job}"),
         }
     }
@@ -172,9 +167,7 @@ impl std::str::FromStr for Cause {
             return Err(format!("bad cause `{s}`"));
         }
         Ok(match kind {
-            "schedule" => Cause::Schedule(rest.into()),
             "decision" => Cause::Decision(rest.into()),
-            "reaction" => Cause::Reaction(rest.into()),
             "assistant" => Cause::Assistant(rest.into()),
             "flow" => {
                 let (flow, step) = rest.split_once('/').ok_or_else(|| format!("bad cause `{s}`"))?;
@@ -202,6 +195,14 @@ impl<'de> Deserialize<'de> for Cause {
         let s = String::deserialize(d)?;
         s.parse().map_err(serde::de::Error::custom)
     }
+}
+
+/// A folder registered with `rl up`: where a flow may run (`in:`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Workspace {
+    pub path: PathBuf,
+    pub name: String,
+    pub registered_at: Timestamp,
 }
 
 /// The one noun. Everything `rld` starts and owns.
@@ -473,7 +474,7 @@ pub struct Signal {
 pub mod event_kind {
     /// The families that are the daemon's own: a command may not `rl emit`
     /// one, and what a run raised is what falls outside them.
-    pub const OWN: &[&str] = &["run.", "decision.", "schedule.", "flow.", "commit.", "branch."];
+    pub const OWN: &[&str] = &["run.", "decision.", "flow.", "commit.", "branch."];
 
     /// Whether a kind belongs to the daemon rather than to what a run raised.
     pub fn is_own(kind: &str) -> bool {
@@ -490,8 +491,6 @@ pub mod event_kind {
     pub const RUN_STOPPED: &str = "run.stopped";
     pub const COMMIT_LANDED: &str = "commit.landed";
     pub const BRANCH_DONE: &str = "branch.done";
-    pub const SCHEDULE_FIRED: &str = "schedule.fired";
-    pub const SCHEDULE_SKIPPED: &str = "schedule.skipped";
     /// A flow fired: by hand, on time, or on an event.
     pub const FLOW_FIRED: &str = "flow.fired";
     /// A firing is over: done, failed or stopped.
@@ -529,8 +528,6 @@ pub mod event_kind {
         RUN_LOST,
         COMMIT_LANDED,
         BRANCH_DONE,
-        SCHEDULE_FIRED,
-        SCHEDULE_SKIPPED,
         FLOW_FIRED,
         FLOW_ENDED,
         FLOW_SKIPPED,
@@ -563,6 +560,13 @@ mod tests {
         assert!("flow:/triage".parse::<Cause>().is_err());
         assert!("flow:prod-logs/".parse::<Cause>().is_err());
         assert!("workflow:a/b".parse::<Cause>().is_err());
+    }
+
+    #[test]
+    fn the_old_causes_are_refused() {
+        assert!("schedule:x".parse::<Cause>().is_err());
+        assert!("reaction:x".parse::<Cause>().is_err());
+        assert!(serde_json::from_str::<Cause>("\"schedule:nightly\"").is_err());
     }
 
     #[test]

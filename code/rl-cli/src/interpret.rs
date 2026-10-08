@@ -263,7 +263,7 @@ mod tests {
 
     #[test]
     fn an_answer_of_another_kind_is_refused_by_name() {
-        for kind in ["schedule", "flow", "poem"] {
+        for kind in ["reminder", "flow", "poem"] {
             let err = parse(&format!("kind: {kind}\nrun: x")).unwrap_err().to_string();
             assert_eq!(err, format!("kind: `{kind}` is not run"));
         }

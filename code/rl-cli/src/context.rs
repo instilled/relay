@@ -116,8 +116,6 @@ fn event_words(kind: &str) -> Option<&'static str> {
         event_kind::RUN_STOPPED => "a run was stopped by the person",
         event_kind::COMMIT_LANDED => "a commit landed on a branch Relay watches",
         event_kind::BRANCH_DONE => "a branch was finished (merged or closed)",
-        event_kind::SCHEDULE_FIRED => "a schedule started its run",
-        event_kind::SCHEDULE_SKIPPED => "a schedule did not fire (the previous run still going, or a missed slot)",
         event_kind::FLOW_FIRED => "a flow fired: by hand, on time or on an event (data: flow, firing, trigger)",
         event_kind::FLOW_ENDED => "a flow's firing is over (data: flow, firing, status: done, failed or stopped)",
         event_kind::FLOW_SKIPPED => "a flow, or one of its steps, did not run (data: flow, firing, step, reason)",

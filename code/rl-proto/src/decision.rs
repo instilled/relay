@@ -1,7 +1,7 @@
 //! Decisions: a run's question to a human, with the next steps already
 //! written down. Raising one does not stop the run — it outlives it — and
 //! choosing an option starts the runs that option carries, with
-//! `cause = decision:<id>` and the same `chain`, so the trail from schedule to
+//! `cause = decision:<id>` and the same `chain`, so the trail from flow to
 //! question to follow-up is one chain.
 
 use crate::action::action_struct;

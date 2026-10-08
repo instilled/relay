@@ -25,16 +25,80 @@
 
 use crate::action::{Action, action_struct};
 use crate::methods::Method;
-use crate::reaction::Filter;
-use crate::schedule::{Missed, Overlap};
 use crate::types::str_enum;
 use jiff::Timestamp;
 use serde::de::{self, MapAccess, Visitor};
 use serde::ser::SerializeMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::collections::BTreeMap;
 use std::fmt;
 use std::marker::PhantomData;
 use std::path::PathBuf;
+
+/// How long a flow waits before an event may fire it again, unless it says
+/// otherwise.
+pub const DEFAULT_THROTTLE: &str = "10s";
+
+/// What else has to be true of the run an event is about. Every field given
+/// must match; a flow with none takes every event of its kinds.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Filter {
+    /// The run carries this tag.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tag: Option<String>,
+    /// Its cause starts with this: `flow:`, or `flow:nightly`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cause: Option<String>,
+    /// The CLI it is running: `claude`, `codex`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cli: Option<String>,
+    /// The event's group key, exactly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
+    /// Fields of the event's `data` that must match — a value, or any of a
+    /// list: `where: { data: { severity: [ERROR, WARNING] } }`. Compared as
+    /// text, so quote numbers.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub data: BTreeMap<String, Match>,
+}
+
+/// A `where.data` value: one string, or any of a list.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Match {
+    One(String),
+    Any(Vec<String>),
+}
+
+impl Match {
+    /// Whether an event's field (as text) satisfies this.
+    pub fn matches(&self, value: &str) -> bool {
+        match self {
+            Match::One(s) => s == value,
+            Match::Any(xs) => xs.iter().any(|x| x == value),
+        }
+    }
+}
+
+/// What to do about a time that passed while asleep or down.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Missed {
+    #[default]
+    Skip,
+    CatchUpOnce,
+}
+
+/// What to do when the previous firing is still going.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Overlap {
+    #[default]
+    Skip,
+    Queue,
+    Kill,
+}
 
 /// What a flow file says. How a flow starts is `when` (a time) or `on` (an
 /// event kind); with neither it runs only when asked.
@@ -472,6 +536,17 @@ impl Method for FlowFirings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn where_data_reads_a_value_or_a_list() {
+        let f: Filter =
+            serde_json::from_str(r#"{"data": {"severity": ["ERROR", "WARNING"], "service": "api"}}"#).unwrap();
+        assert!(f.data["severity"].matches("ERROR"));
+        assert!(f.data["severity"].matches("WARNING"));
+        assert!(!f.data["severity"].matches("INFO"));
+        assert!(f.data["service"].matches("api"));
+        assert!(!f.data["service"].matches("web"));
+    }
 
     #[test]
     fn steps_keep_the_order_they_are_written_in() {

@@ -37,10 +37,6 @@ impl Graph {
 pub enum NodeKind {
     /// A flow: `~/.relay/flows/<name>`.
     Flow,
-    /// A clock: `schedules.yaml`.
-    Schedule,
-    /// An ear: `reactions.yaml`.
-    Reaction,
     /// A flow's question: what its ask steps put to you.
     Ask,
     /// A shell line or command.
@@ -64,10 +60,6 @@ pub struct Node {
     /// The folder it belongs to; none for a flow with no `in` and what is not in one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub folder: Option<PathBuf>,
-    /// The rule it is, or comes from: `schedule:<scope>/<name>`, the key the
-    /// rules commands take.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub rule: Option<String>,
     /// The flow's own state, for a flow and its questions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<FlowStatus>,

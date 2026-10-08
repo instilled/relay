@@ -10,7 +10,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use rl_core::time;
 use rl_ledger::{decisions, runs, workspaces};
 use rl_proto::methods::{WorkspaceRemoveParams, WorkspaceRemoved};
-use rl_proto::schedule::Workspace;
+use rl_proto::types::Workspace;
 use rl_proto::types::{Run, RunKind};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};

@@ -1,9 +1,8 @@
 //! What to do when something fires.
 //!
 //! One shape, used by everything that can start a run on its own — a
-//! schedule's entry, a decision's option, later a workflow's step — so that
-//! the YAML looks the same wherever it is written and one piece of code turns
-//! it into a `RunSpec`.
+//! decision's option, a flow's step — so that the YAML looks the same
+//! wherever it is written and one piece of code turns it into a `RunSpec`.
 //!
 //! ```yaml
 //! run: "date +%T >> pulse.log"     # a string goes through sh -c
@@ -205,9 +204,9 @@ impl Action {
 /// Declares a struct that carries the 7 [`Action`] fields — `run`, `cwd`,
 /// `env`, `tags`, `ref`, `title`, `no_tty`, with their serde attributes —
 /// alongside whatever else is its own, plus a `fn action(&self) -> Action`
-/// that assembles them. `DecisionOption`, `ScheduleSpec` and `ReactionSpec`
-/// are all declared through this, so the field list and the mapping onto
-/// `Action` are written once instead of by hand in three places.
+/// that assembles them. `DecisionOption` and `StepSpec` are both declared
+/// through this, so the field list and the mapping onto `Action` are written
+/// once instead of by hand in two places.
 ///
 /// This is not `#[serde(flatten)]`: flatten buffers deserialization through
 /// a generic `Content`, which loses the string-ness of an ambiguous YAML
@@ -249,7 +248,7 @@ macro_rules! action_struct {
         }
 
         impl $name {
-            /// What it starts, as the shape every other kind of rule uses too.
+            /// What it starts, as the shape every other kind of action uses too.
             pub fn action(&self) -> crate::action::Action {
                 crate::action::Action {
                     run: self.run.clone(),

@@ -220,7 +220,6 @@ fn bare(id: &str, kind: NodeKind, name: &str, folder: Option<PathBuf>) -> Node {
         kind,
         name: name.into(),
         folder,
-        rule: None,
         status: None,
         detail: String::new(),
         next_at: None,

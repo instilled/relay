@@ -12,11 +12,8 @@ pub mod decision;
 pub mod flow;
 pub mod graph;
 pub mod methods;
-pub mod reaction;
 pub mod rpc;
-pub mod rule;
-pub mod schedule;
 pub mod types;
 
 /// Bumped when a message changes shape incompatibly. Reported by `daemon.ping`.
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;

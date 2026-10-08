@@ -626,8 +626,6 @@ pub fn cause_words(c: &Cause) -> String {
         Cause::Decision(_) => "your answer".into(),
         Cause::Flow { flow, step } => format!("flow {flow} · {step}"),
         Cause::Assistant(job) => format!("asked, to {job}"),
-        // Not recorded any more: their runs went with them.
-        Cause::Schedule(n) | Cause::Reaction(n) => n.clone(),
     }
 }
 
@@ -1651,12 +1649,9 @@ mod tests {
         sched.run.cause = step_of("nightly");
         let mut react = item("react", RunState::Working, ws, at, false);
         react.run.cause = step_of("on-fail");
-        // A run an old rule started is just a run now.
-        let mut old = item("old", RunState::Working, ws, at, false);
-        old.run.cause = Cause::Schedule("nightly".into());
         let d = Digest {
             since: now,
-            items: vec![agent, shell, sched, react, old],
+            items: vec![agent, shell, sched, react],
             decisions: vec![],
             checkouts: Vec::new(),
             lost: Vec::new(),
@@ -1673,9 +1668,9 @@ mod tests {
         };
         // The shell leads its folder: where you work comes before what merely
         // runs there. The rest keep the order they were in.
-        assert_eq!(runs(Lens::All), ["shell", "agent", "sched", "react", "old"]);
+        assert_eq!(runs(Lens::All), ["shell", "agent", "sched", "react"]);
         // Agents is by kind, so it keeps the flows' agents too.
-        assert_eq!(runs(Lens::Agents), ["agent", "sched", "react", "old"]);
+        assert_eq!(runs(Lens::Agents), ["agent", "sched", "react"]);
         // Flows is by cause.
         assert_eq!(runs(Lens::Flows), ["sched", "react"]);
     }

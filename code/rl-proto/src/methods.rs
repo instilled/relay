@@ -68,7 +68,7 @@ pub struct RunFilter {
     pub group: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tag: Option<String>,
-    /// Only runs with this cause, e.g. `schedule:nightly`.
+    /// Only runs with this cause, e.g. `flow:nightly/probe`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cause: Option<String>,
     /// Newest first; default 200.
@@ -180,8 +180,8 @@ pub struct RunId {
     pub id: String,
 }
 
-/// Emit a custom event into the ledger, from a command or plugin. A reaction
-/// picks it up like any built-in event. Inside a run, `RELAY_RUN` attributes
+/// Emit a custom event into the ledger, from a command or plugin. A flow with
+/// `on:` picks it up like any built-in event. Inside a run, `RELAY_RUN` attributes
 /// it to that run's workspace and chain; outside one, the caller names the
 /// folder. The kind is the caller's own dotted name (`log.issue`); the
 /// daemon's own kinds (`run.*`, `decision.*`, …) are refused.
@@ -207,7 +207,7 @@ pub struct EventEmitParams {
     /// A one-line summary (default: the kind).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
-    /// Arbitrary structured payload, reachable in a reaction as `{data.<key>}`.
+    /// Arbitrary structured payload, reachable in a flow as `{event.data.<key>}`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data: Option<Value>,
 }
@@ -441,7 +441,7 @@ pub struct RunArchiveParams {
 
 // ---- graph.* ----------------------------------------------------------------
 
-/// The wiring graph over every project: rules, what they run, the questions
+/// The wiring graph over every project: flows, what they run, the questions
 /// they ask, and what set what off since `since` (default: the last 7 days).
 pub struct GraphGet;
 impl Method for GraphGet {
@@ -655,60 +655,6 @@ pub struct PresenceInfo {
     pub last_seen_at: Option<Timestamp>,
 }
 
-// ---- schedule.* -------------------------------------------------------------
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct ScheduleFilter {
-    /// Include schedules removed from their file.
-    #[serde(default)]
-    pub all: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ScheduleName {
-    pub name: String,
-    /// `global` or a workspace path; needed when the name is in several.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub scope: Option<String>,
-}
-
-pub struct ScheduleList;
-impl Method for ScheduleList {
-    const NAME: &'static str = "schedule.list";
-    type Params = ScheduleFilter;
-    type Result = Vec<crate::schedule::Schedule>;
-}
-
-/// Fires a schedule now, whatever the clock or its policies say.
-pub struct ScheduleRun;
-impl Method for ScheduleRun {
-    const NAME: &'static str = "schedule.run";
-    type Params = ScheduleName;
-    type Result = crate::types::Run;
-}
-
-pub struct SchedulePause;
-impl Method for SchedulePause {
-    const NAME: &'static str = "schedule.pause";
-    type Params = ScheduleName;
-    type Result = crate::schedule::Schedule;
-}
-
-pub struct ScheduleResume;
-impl Method for ScheduleResume {
-    const NAME: &'static str = "schedule.resume";
-    type Params = ScheduleName;
-    type Result = crate::schedule::Schedule;
-}
-
-/// Re-reads `schedules.yaml`.
-pub struct ScheduleReload;
-impl Method for ScheduleReload {
-    const NAME: &'static str = "schedule.reload";
-    type Params = ();
-    type Result = crate::schedule::ReloadReport;
-}
-
 // ---- workspace.* ------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -722,14 +668,14 @@ pub struct WorkspaceUp;
 impl Method for WorkspaceUp {
     const NAME: &'static str = "workspace.up";
     type Params = WorkspaceUpParams;
-    type Result = crate::schedule::Workspace;
+    type Result = crate::types::Workspace;
 }
 
 pub struct WorkspaceList;
 impl Method for WorkspaceList {
     const NAME: &'static str = "workspace.list";
     type Params = ();
-    type Result = Vec<crate::schedule::Workspace>;
+    type Result = Vec<crate::types::Workspace>;
 }
 
 /// Unregisters a folder: its open questions are dismissed, and flows `in` it
@@ -786,14 +732,14 @@ pub struct WorkspaceRename;
 impl Method for WorkspaceRename {
     const NAME: &'static str = "workspace.rename";
     type Params = WorkspaceRenameParams;
-    type Result = crate::schedule::Workspace;
+    type Result = crate::types::Workspace;
 }
 
 // ---- decision.* -------------------------------------------------------------
 
 /// Raises a question and returns it. With a `group`, an open decision with
 /// that key is replaced in place — the same id, the new wording — so a
-/// schedule that asks nightly leaves one line, not thirty.
+/// flow that asks nightly leaves one line, not thirty.
 pub struct DecisionRaise;
 impl Method for DecisionRaise {
     const NAME: &'static str = "decision.raise";
@@ -890,100 +836,6 @@ pub struct DecisionNote {
     pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
-}
-
-// ---- rule.* -----------------------------------------------------------------
-
-/// A rule by name. `scope` settles it when the name exists in several,
-/// `kind` when a schedule and a reaction share it.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RuleRef {
-    pub name: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub scope: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub kind: Option<crate::rule::RuleKind>,
-}
-
-/// Every schedule and reaction as one list: what starts work without you.
-pub struct RuleList;
-impl Method for RuleList {
-    const NAME: &'static str = "rule.list";
-    type Params = ScheduleFilter;
-    type Result = Vec<crate::rule::Rule>;
-}
-
-/// What did not load at the last reload of each rules file, the global ones
-/// and every folder's: it stays said until the file is fixed and reloaded.
-pub struct RuleErrors;
-impl Method for RuleErrors {
-    const NAME: &'static str = "rule.errors";
-    type Params = ();
-    type Result = Vec<crate::rule::NotLoaded>;
-}
-
-/// Says yes to the current version of one rule; it may fire from now on.
-pub struct RuleApprove;
-impl Method for RuleApprove {
-    const NAME: &'static str = "rule.approve";
-    type Params = RuleRef;
-    type Result = crate::rule::Rule;
-}
-
-// ---- reaction.* -------------------------------------------------------------
-
-pub struct ReactionList;
-impl Method for ReactionList {
-    const NAME: &'static str = "reaction.list";
-    type Params = ScheduleFilter;
-    type Result = Vec<crate::reaction::Reaction>;
-}
-
-pub struct ReactionPause;
-impl Method for ReactionPause {
-    const NAME: &'static str = "reaction.pause";
-    type Params = ScheduleName;
-    type Result = crate::reaction::Reaction;
-}
-
-pub struct ReactionResume;
-impl Method for ReactionResume {
-    const NAME: &'static str = "reaction.resume";
-    type Params = ScheduleName;
-    type Result = crate::reaction::Reaction;
-}
-
-/// Re-reads every `reactions.yaml`.
-pub struct ReactionReload;
-impl Method for ReactionReload {
-    const NAME: &'static str = "reaction.reload";
-    type Params = ();
-    type Result = crate::schedule::ReloadReport;
-}
-
-/// What every rule would do with one event, without doing any of it.
-pub struct ReactionTest;
-impl Method for ReactionTest {
-    const NAME: &'static str = "reaction.test";
-    type Params = EventId;
-    type Result = Vec<ReactionTrial>;
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EventId {
-    pub event: i64,
-}
-
-/// One rule against one event: whether it fires, and why not when it does not.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ReactionTrial {
-    pub reaction: String,
-    pub scope: String,
-    pub fires: bool,
-    pub why: String,
-    /// What it would run, or the question it would ask.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub action: Option<String>,
 }
 
 // ---- agent.* / config.* ------------------------------------------------------
