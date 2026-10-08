@@ -111,12 +111,10 @@ async fn old_journals_go_and_the_facts_stay() {
     h.stop().await;
 }
 
-/// prod-logs keeps `runs/seen` beside its firings, by hand: retention takes old firings' folders
-/// and leaves that, a folder of the flow's own, and a recent firing's, alone.
-#[tokio::test]
-async fn a_firings_folder_goes_with_its_runs_and_nothing_else_under_runs_does() {
-    let tmp = tempfile::tempdir().unwrap();
-    let home = Home::at(tmp.path().join("home"));
+/// A daemon on a fresh home with `keeps`, whose one step leaves a file in its firing's folder,
+/// said yes to; `None` when `rl-session` is not built.
+async fn keeps(tmp: &std::path::Path) -> Option<(Home, Harness, Conn)> {
+    let home = Home::at(tmp.join("home"));
     let dir = home.flow_dir("keeps");
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(
@@ -126,36 +124,52 @@ async fn a_firings_folder_goes_with_its_runs_and_nothing_else_under_runs_does() 
     .unwrap();
     let Some(h) = Harness::on(home.clone()) else {
         eprintln!("skipping: rl-session not built");
-        return;
+        return None;
     };
     let mut c = Conn::open(&home).await;
     common::approve(&mut c, "keeps").await;
-    let mut ids = Vec::new();
-    for _ in 0..2 {
-        let f: Firing = c.ok("flow.run", json!({ "name": "keeps" })).await;
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        loop {
-            let fs: Vec<Firing> = c.ok("flow.firings", json!({ "flow": "keeps" })).await;
-            if fs.iter().any(|x| x.id == f.id && x.ended_at.is_some()) {
-                break;
-            }
-            assert!(std::time::Instant::now() < deadline, "{fs:?}");
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    Some((home, h, c))
+}
+
+/// Fires `flow` by hand and waits for that firing to end: its id.
+async fn fire_and_end(c: &mut Conn, flow: &str) -> String {
+    let f: Firing = c.ok("flow.run", json!({ "name": flow })).await;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let fs: Vec<Firing> = c.ok("flow.firings", json!({ "flow": flow })).await;
+        if fs.iter().any(|x| x.id == f.id && x.ended_at.is_some()) {
+            return f.id;
         }
-        ids.push(f.id);
+        assert!(std::time::Instant::now() < deadline, "{fs:?}");
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
-    let (old, recent) = (ids[0].clone(), ids[1].clone());
-    // `old` ended forty days ago, as far as the ledger knows.
+}
+
+/// Firing `id` ended forty days ago, as far as the ledger knows.
+fn ended_long_ago(home: &Home, id: &str) {
     let ledger = Ledger::open(&home.ledger()).unwrap();
     let ago = Timestamp::now() - SignedDuration::from_hours(40 * 24);
-    let id = old.clone();
+    let id = id.to_string();
     ledger
         .call_blocking(move |db| {
             let steps = firings::steps(db, &id)?;
             firings::save(db, &id, &steps, FiringStatus::Done, Some(ago))
         })
         .unwrap();
-    let runs = dir.join("runs");
+}
+
+/// prod-logs keeps `runs/seen` beside its firings, by hand: retention takes old firings' folders
+/// and leaves that, a folder of the flow's own, and a recent firing's, alone.
+#[tokio::test]
+async fn a_firings_folder_goes_with_its_runs_and_nothing_else_under_runs_does() {
+    let tmp = tempfile::tempdir().unwrap();
+    let Some((home, h, mut c)) = keeps(tmp.path()).await else {
+        return;
+    };
+    let old = fire_and_end(&mut c, "keeps").await;
+    let recent = fire_and_end(&mut c, "keeps").await;
+    ended_long_ago(&home, &old);
+    let runs = home.flow_dir("keeps").join("runs");
     std::fs::write(runs.join("seen"), "abc\n").unwrap();
     std::fs::create_dir_all(runs.join("notes")).unwrap();
     assert!(home.firing_dir("keeps", &old).join("kept").exists());
@@ -176,5 +190,36 @@ async fn a_firings_folder_goes_with_its_runs_and_nothing_else_under_runs_does() 
         "a file of the flow's own stays"
     );
     assert!(runs.join("notes").is_dir(), "a folder that is no firing stays");
+    h.stop().await;
+}
+
+/// A firing's folder that cannot be removed is not said to be gone, nor its bytes freed; it goes
+/// at a later sweep, once it can.
+#[tokio::test]
+async fn a_firings_folder_not_removed_is_not_counted() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::tempdir().unwrap();
+    let Some((home, h, mut c)) = keeps(tmp.path()).await else {
+        return;
+    };
+    let old = fire_and_end(&mut c, "keeps").await;
+    ended_long_ago(&home, &old);
+    let dir = home.firing_dir("keeps", &old);
+    let mode = |m| std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(m)).unwrap();
+    mode(0o555);
+    // Root removes it anyway: nothing to see there.
+    if std::fs::write(dir.join("probe"), "").is_ok() {
+        mode(0o755);
+        h.stop().await;
+        return;
+    }
+
+    let r: GcReport = c.ok("gc.run", json!({})).await;
+    assert!(dir.join("kept").exists(), "its folder could not go");
+    assert_eq!((r.firings, r.bytes), (0, 0), "{r:?}");
+    mode(0o755);
+    let r: GcReport = c.ok("gc.run", json!({})).await;
+    assert_eq!(r.firings, 1, "{r:?}");
+    assert!(!dir.exists());
     h.stop().await;
 }

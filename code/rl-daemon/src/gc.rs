@@ -148,11 +148,14 @@ async fn firing_folders(home: &Home, ledger: &Ledger, before: Timestamp, dry_run
     for (flow, ids) in gone {
         for id in ids {
             let dir = home.firing_dir(&flow, &id);
-            bytes += size_of(&dir);
-            count += 1;
+            let size = size_of(&dir);
+            // One that could not go is not counted: it goes at a later sweep.
             if !dry_run && let Err(e) = std::fs::remove_dir_all(&dir) {
                 warn!(flow, firing = id, error = %e, "gc: a firing's folder not removed");
+                continue;
             }
+            bytes += size;
+            count += 1;
         }
     }
     Ok((count, bytes))
