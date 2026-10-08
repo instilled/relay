@@ -303,19 +303,27 @@ fn ask_keys(s: &StepSpec) -> Vec<&'static str> {
 }
 
 /// `action`, an agent with no prompt given the `## <label>` section. A `prompt_file` is the
-/// folder's: relative, and never out of it, so the folder's hash covers it.
+/// folder's: relative, never out of it, and not under `runs/`, so the folder's hash covers it.
 fn filled(label: &str, mut action: Action, sections: &BTreeMap<String, String>, said: &mut Vec<String>) -> Action {
     if let Some(Task::Agent {
         prompt_file: Some(f), ..
     }) = &action.run
-        && !f
+    {
+        let mut parts = f.components().filter(|c| *c != Component::CurDir);
+        if !f
             .components()
             .all(|c| matches!(c, Component::Normal(_) | Component::CurDir))
-    {
-        said.push(format!(
-            "`{label}`: prompt_file {} is not in the flow's folder",
-            f.display()
-        ));
+        {
+            said.push(format!(
+                "`{label}`: prompt_file {} is not in the flow's folder",
+                f.display()
+            ));
+        } else if parts.next() == Some(Component::Normal("runs".as_ref())) {
+            said.push(format!(
+                "`{label}`: prompt_file {} is under runs/, which no yes covers",
+                f.display()
+            ));
+        }
     }
     if let Some(Task::Agent {
         prompt: prompt @ None,

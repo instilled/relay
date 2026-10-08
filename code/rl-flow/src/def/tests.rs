@@ -312,6 +312,19 @@ fn a_prompt_file_outside_the_folder_is_refused() {
 }
 
 #[test]
+fn a_prompt_file_under_runs_is_refused() {
+    for file in ["runs/x.md", "./runs/f1/x.md"] {
+        refused(
+            &flow(&format!(
+                "  x:\n    run: {{ agent: claude, prompt_file: \"{file}\" }}\n"
+            )),
+            &format!("`x`: prompt_file {file} is under runs/, which no yes covers"),
+            Some(3),
+        );
+    }
+}
+
+#[test]
 fn a_multi_ask_with_more_than_one_option_to_run_is_refused() {
     refused(
         &flow(

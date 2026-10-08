@@ -1,8 +1,9 @@
 //! Decisions: questions waiting on a human, and how they were answered.
 //!
-//! One row per question. A `group_key` is unique among open rows, so raising
-//! the same question again replaces the one already waiting instead of piling
-//! another line on top of it.
+//! One row per question. A `group_key` is unique among open rows of one kind of
+//! asker — a flow's ask steps, or everything else — so raising the same question
+//! again replaces the one already waiting instead of piling another line on top
+//! of it, and never takes over the other kind's.
 
 use crate::{conv, conv_str};
 use anyhow::{Result, bail};
