@@ -3,7 +3,6 @@
 //! connections so the `daemon.shutdown` reply gets out.
 
 use crate::router::Router;
-use crate::schedule::Scheduler;
 use crate::supervisor::{self, Supervisor};
 use anyhow::{Context, Result, bail};
 use jiff::Timestamp;
@@ -28,13 +27,12 @@ pub struct Daemon {
     pub home: Home,
     pub ledger: Ledger,
     pub registry: Arc<Registry>,
-    /// `config.yaml` as last read; `config.get` and a rules reload re-read it.
+    /// `config.yaml` as last read; `config.get` re-reads it.
     /// Shared with the daily sweep (`gc`).
     pub config: Arc<std::sync::RwLock<crate::config::Loaded>>,
     pub supervisor: Arc<Supervisor>,
-    pub scheduler: Arc<Scheduler>,
     pub decisions: Arc<crate::decisions::Decisions>,
-    pub reactor: Arc<crate::reactions::Reactor>,
+    pub flows: Arc<crate::flows::Flows>,
     /// What the configured badges last said of each folder's branch.
     pub badges: crate::badges::Badges,
     pub started_at: Timestamp,
@@ -99,9 +97,6 @@ pub async fn serve_with(home: Home, shutdown: CancellationToken, opts: ServeOpti
         ),
         Err(e) => warn!(error = %e, "reconciling sessions"),
     }
-    let registry2 = registry.clone();
-    let registry3 = registry.clone();
-    let registry4 = registry.clone();
     match crate::config::seed(&home) {
         Ok(true) => info!(file = %home.config_file().display(), "config.yaml seeded"),
         Ok(false) => {}
@@ -123,58 +118,44 @@ pub async fn serve_with(home: Home, shutdown: CancellationToken, opts: ServeOpti
         config.clone(),
         shutdown.child_token(),
     ));
-    let scheduler = Arc::new(Scheduler::new(
-        home.clone(),
-        ledger.clone(),
-        supervisor.clone(),
-        registry,
-        shutdown.child_token(),
-    ));
-    // Loaded before the socket answers, so `rl schedule ls` right after
-    // `rl daemon start` already knows when things fire.
-    match scheduler.reload().await {
-        Ok(r) => {
-            for e in &r.errors {
-                warn!(schedule = %e, "schedule not loaded");
-            }
-        }
-        Err(e) => warn!(error = %format!("{e:#}"), "schedules not loaded"),
-    }
-    tokio::spawn(scheduler.clone().serve());
     let decisions = Arc::new(crate::decisions::Decisions::new(
         ledger.clone(),
         supervisor.clone(),
-        registry2,
+        registry.clone(),
         shutdown.child_token(),
     ));
     tokio::spawn(decisions.clone().serve());
-    let reactor = Arc::new(crate::reactions::Reactor::new(
+    let flows = crate::flows::Flows::new(
         home.clone(),
         ledger.clone(),
         supervisor.clone(),
         decisions.clone(),
-        registry3,
+        registry.clone(),
         shutdown.child_token(),
-    ));
-    // Read before the socket answers, so a rule is live as soon as `rld` is.
-    match reactor.reload().await {
-        Ok(r) => {
-            for e in &r.errors {
-                warn!(reaction = %e, "reaction not loaded");
-            }
-        }
-        Err(e) => warn!(error = %format!("{e:#}"), "reactions not loaded"),
+    );
+    // Loaded before the socket answers, so `rl flow list` right after
+    // `rl daemon start` already knows every flow.
+    if let Err(e) = flows.reload().await {
+        warn!(error = %format!("{e:#}"), "flows not loaded");
     }
-    tokio::spawn(reactor.clone().serve());
+    // Where the loop starts reading, settled before anything can fire.
+    if let Err(e) = flows.cursor().await {
+        warn!(error = %format!("{e:#}"), "flows: events cursor");
+    }
+    // Firings carried on from what happened while Relay was away, the runs the
+    // supervisor found ended or lost among it, before anything can fire.
+    if let Err(e) = flows.reconcile().await {
+        warn!(error = %format!("{e:#}"), "flows: carrying firings on");
+    }
+    tokio::spawn(flows.clone().serve());
     let daemon = Arc::new(Daemon {
         home: home.clone(),
         ledger,
-        registry: registry4,
+        registry,
         config: config.clone(),
         supervisor,
-        scheduler,
         decisions,
-        reactor,
+        flows,
         badges: crate::badges::Badges::new(home.plugins_dir(), crate::badges::EVERY, crate::badges::WAIT),
         started_at: Timestamp::now(),
         shutdown: shutdown.clone(),

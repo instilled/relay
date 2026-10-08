@@ -117,6 +117,7 @@ macro_rules! str_enum {
         }
     };
 }
+pub(crate) use str_enum;
 
 str_enum!(RunKind { Agent => "agent", Shell => "shell", Command => "command", Plugin => "plugin" });
 str_enum!(RunState {
@@ -129,19 +130,17 @@ str_enum!(Mark { Done => "done", Blocked => "blocked", Working => "working" });
 str_enum!(AttachMode { Watch => "watch", Join => "join" });
 
 /// Why a run started. Serialised as one string: `manual`,
-/// `schedule:<name>`, `decision:<id>`, `workflow:<name>/<step>`,
-/// `reaction:<name>`.
+/// `decision:<id>`, `flow:<flow>/<step>`, `assistant:<job>`.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum Cause {
     #[default]
     Manual,
-    Schedule(String),
     Decision(String),
-    Workflow {
-        name: String,
+    /// A step of a flow.
+    Flow {
+        flow: String,
         step: String,
     },
-    Reaction(String),
     /// A job Relay handed to an agent (`assistant:interpret`).
     Assistant(String),
 }
@@ -150,10 +149,8 @@ impl std::fmt::Display for Cause {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Cause::Manual => write!(f, "manual"),
-            Cause::Schedule(n) => write!(f, "schedule:{n}"),
             Cause::Decision(id) => write!(f, "decision:{id}"),
-            Cause::Workflow { name, step } => write!(f, "workflow:{name}/{step}"),
-            Cause::Reaction(n) => write!(f, "reaction:{n}"),
+            Cause::Flow { flow, step } => write!(f, "flow:{flow}/{step}"),
             Cause::Assistant(job) => write!(f, "assistant:{job}"),
         }
     }
@@ -170,14 +167,15 @@ impl std::str::FromStr for Cause {
             return Err(format!("bad cause `{s}`"));
         }
         Ok(match kind {
-            "schedule" => Cause::Schedule(rest.into()),
             "decision" => Cause::Decision(rest.into()),
-            "reaction" => Cause::Reaction(rest.into()),
             "assistant" => Cause::Assistant(rest.into()),
-            "workflow" => {
-                let (name, step) = rest.split_once('/').ok_or_else(|| format!("bad cause `{s}`"))?;
-                Cause::Workflow {
-                    name: name.into(),
+            "flow" => {
+                let (flow, step) = rest.split_once('/').ok_or_else(|| format!("bad cause `{s}`"))?;
+                if flow.is_empty() || step.is_empty() {
+                    return Err(format!("bad cause `{s}`"));
+                }
+                Cause::Flow {
+                    flow: flow.into(),
                     step: step.into(),
                 }
             }
@@ -197,6 +195,14 @@ impl<'de> Deserialize<'de> for Cause {
         let s = String::deserialize(d)?;
         s.parse().map_err(serde::de::Error::custom)
     }
+}
+
+/// A folder registered with `rl up`: where a flow may run (`in:`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Workspace {
+    pub path: PathBuf,
+    pub name: String,
+    pub registered_at: Timestamp,
 }
 
 /// The one noun. Everything `rld` starts and owns.
@@ -237,7 +243,7 @@ pub struct Run {
     pub cause: Cause,
     /// The chain it belongs to: its own id when it started one.
     #[serde(default)]
-    pub flow: String,
+    pub chain: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_run: Option<String>,
     /// What an exact source last said it was doing (`tool: Bash`, a mark's
@@ -286,7 +292,7 @@ impl Run {
     ) -> Self {
         let id: String = id.into();
         Self {
-            flow: id.clone(),
+            chain: id.clone(),
             id,
             workspace: workspace.into(),
             kind,
@@ -416,26 +422,22 @@ pub struct Summary {
     /// How many assistant calls it took.
     #[serde(default)]
     pub calls: u32,
-    /// How many runs it covers: one for a run; for a job, a project or
+    /// How many runs it covers: one for a run; for a flow, a project or
     /// everything, those in the stretch.
     #[serde(default)]
     pub runs: u32,
 }
 
-/// What a summary is of: a run, a schedule's or a reaction's runs, a
-/// project's, or everything.
+/// What a summary is of: a run, a flow's runs, a project's, or everything.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SummaryTarget {
     Run {
         id: String,
     },
-    /// A schedule's or a reaction's runs; `workspace` None for a global rule.
-    Job {
-        rule: crate::rule::RuleKind,
+    /// A flow's runs: those of its steps, wherever they ran.
+    Flow {
         name: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        workspace: Option<PathBuf>,
     },
     Project {
         workspace: PathBuf,
@@ -444,15 +446,11 @@ pub enum SummaryTarget {
 }
 
 impl SummaryTarget {
-    /// How it is kept: `r:<id>`, `j:<kind>:<name>@<workspace|everywhere>`,
-    /// `p:<path>`, `all`.
+    /// How it is kept: `r:<id>`, `f:<name>`, `p:<path>`, `all`.
     pub fn key(&self) -> String {
         match self {
             SummaryTarget::Run { id } => format!("r:{id}"),
-            SummaryTarget::Job { rule, name, workspace } => match workspace {
-                Some(w) => format!("j:{rule}:{name}@{}", w.display()),
-                None => format!("j:{rule}:{name}@everywhere"),
-            },
+            SummaryTarget::Flow { name } => format!("f:{name}"),
             SummaryTarget::Project { workspace } => format!("p:{}", workspace.display()),
             SummaryTarget::All => "all".into(),
         }
@@ -476,7 +474,7 @@ pub struct Signal {
 pub mod event_kind {
     /// The families that are the daemon's own: a command may not `rl emit`
     /// one, and what a run raised is what falls outside them.
-    pub const OWN: &[&str] = &["run.", "decision.", "schedule.", "commit.", "branch."];
+    pub const OWN: &[&str] = &["run.", "decision.", "flow.", "commit.", "branch."];
 
     /// Whether a kind belongs to the daemon rather than to what a run raised.
     pub fn is_own(kind: &str) -> bool {
@@ -493,8 +491,12 @@ pub mod event_kind {
     pub const RUN_STOPPED: &str = "run.stopped";
     pub const COMMIT_LANDED: &str = "commit.landed";
     pub const BRANCH_DONE: &str = "branch.done";
-    pub const SCHEDULE_FIRED: &str = "schedule.fired";
-    pub const SCHEDULE_SKIPPED: &str = "schedule.skipped";
+    /// A flow fired: by hand, on time, or on an event.
+    pub const FLOW_FIRED: &str = "flow.fired";
+    /// A firing is over: done, failed or stopped.
+    pub const FLOW_ENDED: &str = "flow.ended";
+    /// A flow or one of its steps did not run, and why.
+    pub const FLOW_SKIPPED: &str = "flow.skipped";
     pub const DECISION_RAISED: &str = "decision.raised";
     pub const DECISION_TAKEN: &str = "decision.taken";
     pub const DECISION_DISMISSED: &str = "decision.dismissed";
@@ -526,8 +528,9 @@ pub mod event_kind {
         RUN_LOST,
         COMMIT_LANDED,
         BRANCH_DONE,
-        SCHEDULE_FIRED,
-        SCHEDULE_SKIPPED,
+        FLOW_FIRED,
+        FLOW_ENDED,
+        FLOW_SKIPPED,
         DECISION_RAISED,
         DECISION_TAKEN,
         DECISION_DISMISSED,
@@ -543,21 +546,34 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_flow_step_is_its_own_cause() {
+        let c: Cause = "flow:prod-logs/triage".parse().unwrap();
+        assert_eq!(
+            c,
+            Cause::Flow {
+                flow: "prod-logs".into(),
+                step: "triage".into()
+            }
+        );
+        assert_eq!(c.to_string(), "flow:prod-logs/triage");
+        assert!("flow:prod-logs".parse::<Cause>().is_err());
+        assert!("flow:/triage".parse::<Cause>().is_err());
+        assert!("flow:prod-logs/".parse::<Cause>().is_err());
+        assert!("workflow:a/b".parse::<Cause>().is_err());
+    }
+
+    #[test]
+    fn the_old_causes_are_refused() {
+        assert!("schedule:x".parse::<Cause>().is_err());
+        assert!("reaction:x".parse::<Cause>().is_err());
+        assert!(serde_json::from_str::<Cause>("\"schedule:nightly\"").is_err());
+    }
+
+    #[test]
     fn a_target_is_kept_by_a_key_that_says_what_it_is() {
-        use crate::rule::RuleKind;
         assert_eq!(SummaryTarget::Run { id: "ab12".into() }.key(), "r:ab12");
-        let job = SummaryTarget::Job {
-            rule: RuleKind::Schedule,
-            name: "nightly".into(),
-            workspace: Some(PathBuf::from("/w/api")),
-        };
-        assert_eq!(job.key(), "j:schedule:nightly@/w/api");
-        let global = SummaryTarget::Job {
-            rule: RuleKind::Reaction,
-            name: "tell".into(),
-            workspace: None,
-        };
-        assert_eq!(global.key(), "j:reaction:tell@everywhere");
+        let flow = SummaryTarget::Flow { name: "nightly".into() };
+        assert_eq!(flow.key(), "f:nightly");
         assert_eq!(
             SummaryTarget::Project {
                 workspace: PathBuf::from("/w/api")

@@ -1,6 +1,6 @@
 # Relay
 
-Relay keeps your agents and long-running work alive when you're gone, tells you what they need and what they did, runs work on a schedule, and is extended by small plugins that run in their own process — plugins that agents can write.
+Relay keeps your agents and long-running work alive when you're gone, tells you what they need and what they did, runs recurring work as flows, with your yes where it matters, and is extended by small plugins that run in their own process — plugins that agents can write.
 
 Command: `rl`. Daemon: `rld`.
 

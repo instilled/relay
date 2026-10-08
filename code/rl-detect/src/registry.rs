@@ -127,7 +127,8 @@ pub struct Profile {
     pub interactive_only: bool,
     pub hooks: Option<Hooks>,
     /// Arguments that make the CLI run one prompt and exit (`-p`), for
-    /// scheduled runs. The prompt goes last, or in place of `{prompt}`.
+    /// headless runs: a flow's agent steps, Relay's own assistants. The prompt
+    /// goes last, or in place of `{prompt}`.
     pub headless: Vec<String>,
     /// The flag that names a model (`--model`); empty when the CLI has none.
     pub model_flag: Vec<String>,
@@ -149,6 +150,19 @@ pub fn with_prompt(mut argv: Vec<String>, prompt: String) -> Vec<String> {
         None => argv.push(prompt),
     }
     argv
+}
+
+/// The same for a prompt Relay did not write — a flow's, with what its steps left spliced in, or
+/// an option's: last, after `--`, so one that starts with `-` is never read as a flag. In place
+/// of `{prompt}` it is a flag's value, where `--` cannot go, and one that starts with `-` is
+/// refused.
+pub fn with_given_prompt(mut argv: Vec<String>, prompt: String) -> Result<Vec<String>> {
+    if !argv.iter().any(|a| a == PROMPT) {
+        argv.push("--".into());
+    } else if prompt.starts_with('-') {
+        bail!("the prompt starts with `-`, and this agent would read it as a flag");
+    }
+    Ok(with_prompt(argv, prompt))
 }
 
 /// The outcome of looking at an argv.
@@ -402,6 +416,21 @@ mod tests {
             with_prompt(vec!["claude".into(), "-p".into()], "say hi".into()),
             ["claude", "-p", "say hi"]
         );
+    }
+
+    #[test]
+    fn a_prompt_relay_did_not_write_goes_after_the_flags_end() {
+        let claude = vec!["claude".to_string(), "-p".into()];
+        assert_eq!(
+            with_given_prompt(claude, "-v please".into()).unwrap(),
+            ["claude", "-p", "--", "-v please"]
+        );
+        let gemini = vec!["gemini".to_string(), "-p".into(), PROMPT.into()];
+        assert_eq!(
+            with_given_prompt(gemini.clone(), "say hi".into()).unwrap(),
+            ["gemini", "-p", "say hi"]
+        );
+        assert!(with_given_prompt(gemini, "-m pro".into()).is_err());
     }
 
     #[test]

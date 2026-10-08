@@ -1,4 +1,4 @@
-//! `summary_kept`: a summary of anything — a run read deep, a job, a project,
+//! `summary_kept`: a summary of anything — a run read deep, a flow, a project,
 //! all of it — over a stretch, one per (what, how deep, from when), replaced
 //! when a newer one is made. A run's own brief recap stays in `summaries`.
 

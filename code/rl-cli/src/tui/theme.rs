@@ -9,11 +9,11 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Span;
 use rl_proto::types::RunState;
 
-/// The one accent: the `relay` word, the prompt caret, a live schedule.
+/// The one accent: the `relay` word, the prompt caret, a flow that is on.
 pub const ACCENT: Color = Color::Rgb(0x1D, 0x9E, 0x75); // teal
-/// Something waits on you: a question, a run that needs input, a rule's yes.
+/// Something waits on you: a question, a run that needs input, a flow's yes.
 pub const NEEDS: Color = Color::Rgb(0xC8, 0x8A, 0x1E); // amber
-/// Something went wrong: a failed run, a failed job's last outcome.
+/// Something went wrong: a failed run, a flow's last firing that failed.
 pub const BAD: Color = Color::Rgb(0xD9, 0x4A, 0x48); // red
 /// Something is moving: a working or starting run.
 pub const LIVE: Color = Color::Rgb(0x37, 0x8A, 0xDD); // blue
@@ -41,7 +41,7 @@ pub fn needs() -> Style {
     Style::default().fg(NEEDS).add_modifier(Modifier::BOLD)
 }
 
-/// Something that is broken, in red and bold: a rules file that did not load.
+/// Something that is broken, in red and bold: a flow that did not load.
 pub fn bad() -> Style {
     Style::default().fg(BAD).add_modifier(Modifier::BOLD)
 }

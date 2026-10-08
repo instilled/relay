@@ -2,8 +2,8 @@
 //!
 //! A run raises a question with `rl ask` and carries on; the question waits in
 //! the ledger. Choosing an option starts whatever that option carries, as an
-//! ordinary run with `cause: decision:<id>` and the decision's `flow`, so a
-//! schedule → question → follow-up is one chain. A decision with an `expires`
+//! ordinary run with `cause: decision:<id>` and the decision's `chain`, so a
+//! run → question → follow-up is one chain. A decision with an `expires`
 //! either falls back to its default option or expires unanswered; the sweep
 //! that does it is the only clock involved.
 
@@ -26,6 +26,18 @@ use tracing::{debug, info, warn};
 
 /// How long the sweep sleeps when nothing has a deadline at all.
 const IDLE: Duration = Duration::from_secs(300);
+
+/// Who raised a question, when not a run or a person.
+#[derive(Clone, Copy)]
+enum By<'a> {
+    Nobody,
+    /// A flow's ask step.
+    Step {
+        flow: &'a str,
+        firing: &'a str,
+        step: &'a str,
+    },
+}
 
 pub struct Decisions {
     ledger: Ledger,
@@ -55,13 +67,17 @@ impl Decisions {
     /// Raises a question. With a `group`, an open question with that key is
     /// restated rather than duplicated, keeping its id.
     pub async fn raise(&self, spec: DecisionSpec) -> Result<Decision> {
-        self.raise_by(spec, None).await
+        self.raise_as(spec, By::Nobody).await
     }
 
-    /// The same, remembering the reaction behind it — its name and the id of
-    /// the event it heard — so that rule never answers, or reacts to, its own
-    /// question, and what the question answers is known.
-    pub async fn raise_by(&self, spec: DecisionSpec, by_reaction: Option<(&str, i64)>) -> Result<Decision> {
+    /// The same, for a flow's ask step: in the firing's chain, restated or not, and owned by
+    /// `<firing>/<step>`, so its answer is the engine's to carry out — choosing starts nothing here.
+    /// Its `decision.raised` names the flow.
+    pub async fn raise_for_step(&self, spec: DecisionSpec, flow: &str, firing: &str, step: &str) -> Result<Decision> {
+        self.raise_as(spec, By::Step { flow, firing, step }).await
+    }
+
+    async fn raise_as(&self, spec: DecisionSpec, by: By<'_>) -> Result<Decision> {
         if spec.title.trim().is_empty() {
             bail!("a decision needs a title");
         }
@@ -90,7 +106,7 @@ impl Decisions {
         }
 
         // Where it belongs: the asking run's chain and workspace, or the cwd's.
-        let (run, flow, workspace) = match &spec.run {
+        let (run, chain, workspace) = match &spec.run {
             Some(id) => {
                 let id = id.clone();
                 let r = self
@@ -98,7 +114,7 @@ impl Decisions {
                     .call(move |c| runs::get(c, &id))
                     .await?
                     .ok_or_else(|| anyhow!("no run {}", spec.run.as_deref().unwrap_or_default()))?;
-                (Some(r.id.clone()), r.flow.clone(), r.workspace.clone())
+                (Some(r.id.clone()), r.chain.clone(), r.workspace.clone())
             }
             None => {
                 let cwd = spec.cwd.clone().unwrap_or_else(|| PathBuf::from("."));
@@ -106,9 +122,13 @@ impl Decisions {
                 (None, String::new(), cwd)
             }
         };
+        let chain = match by {
+            By::Step { firing, .. } => firing.to_string(),
+            _ => chain,
+        };
         let id = rl_core::id::new_id().context("generating decision id")?;
         let mut d = Decision {
-            flow: if flow.is_empty() { id.clone() } else { flow },
+            chain: if chain.is_empty() { id.clone() } else { chain },
             id,
             workspace,
             run,
@@ -127,34 +147,53 @@ impl Decisions {
             note: None,
         };
 
+        // Restated only by its own kind of asker: a plain ask never takes a step's question
+        // over, nor a step a plain one.
+        let stepped = matches!(by, By::Step { .. });
         let existing = match &spec.group {
             Some(g) => {
                 let g = g.clone();
-                self.ledger.call(move |c| decisions::open_in_group(c, &g)).await?
+                self.ledger
+                    .call(move |c| decisions::open_in_group(c, &g, stepped))
+                    .await?
             }
             None => None,
         };
         let restated = existing.is_some();
-        let stored = match existing {
-            Some(open) => {
-                // Same question, said again: keep the id and the flow it began.
-                d.flow = open.flow.clone();
-                let (id, d2) = (open.id.clone(), d.clone());
-                self.ledger.call(move |c| decisions::restate(c, &id, &d2, now)).await?
-            }
-            None => {
-                let d2 = d.clone();
-                self.ledger.call(move |c| decisions::insert(c, &d2)).await?
-            }
+        // Same question, said again: keep the id and the chain it began, unless a step asks it
+        // again, and it is now that step's firing's.
+        if let Some(open) = &existing
+            && !stepped
+        {
+            d.chain = open.chain.clone();
+        }
+        // Stored with who owns it in one go, so it is never taken before its owner is known.
+        let (open, d2) = (existing.map(|o| o.id), d.clone());
+        let owner = match by {
+            By::Step { firing, step, .. } => Some(format!("{firing}/{step}")),
+            _ => None,
         };
+        let stored = self
+            .ledger
+            .call(move |c| {
+                let tx = c.unchecked_transaction()?;
+                let stored = match &open {
+                    Some(id) => {
+                        let stored = decisions::restate(&tx, id, &d2, now)?;
+                        if let Some(owner) = &owner {
+                            decisions::set_by_step(&tx, &stored.id, owner)?;
+                        }
+                        stored
+                    }
+                    None => decisions::insert_by(&tx, &d2, owner.as_deref())?,
+                };
+                tx.commit()?;
+                Ok(stored)
+            })
+            .await?;
         let mut data = json!({ "decision": stored.id, "options": stored.options.iter().map(|o| &o.key).collect::<Vec<_>>(), "restated": restated });
-        if let Some((name, event)) = by_reaction {
-            let (id, name) = (stored.id.clone(), name.to_string());
-            data["reaction"] = json!(name);
-            data["event"] = json!(event);
-            self.ledger
-                .call(move |c| decisions::set_by_reaction(c, &id, &name))
-                .await?;
+        if let By::Step { flow, .. } = by {
+            data["flow"] = json!(flow);
         }
         self.append(
             &stored,
@@ -210,6 +249,7 @@ impl Decisions {
 
     /// Marks the decision answered first, then starts what the answer says.
     /// That order is what stops a second `take` from starting the runs twice.
+    /// A flow step's question starts nothing: its firing runs the option.
     async fn resolve(
         &self,
         d: &Decision,
@@ -224,8 +264,10 @@ impl Decisions {
             .call(move |c| decisions::resolve(c, &id, status, &chosen, &[], note2.as_deref(), now))
             .await?;
 
+        let i = d.id.clone();
+        let by_step = self.ledger.call(move |c| decisions::by_step(c, &i)).await?;
         let mut started = Vec::new();
-        for key in keys {
+        for key in keys.iter().filter(|_| by_step.is_none()) {
             let Some(opt) = d.option(key) else { continue };
             let action = opt.action();
             if action.is_empty() {
@@ -240,7 +282,7 @@ impl Decisions {
                 Some(&base),
                 &self.registry,
                 Cause::Decision(d.id.clone()),
-                Some(d.flow.clone()),
+                Some(d.chain.clone()),
             ) {
                 Ok(mut spec) => {
                     // What was asked and answered reaches the option's run, so

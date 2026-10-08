@@ -22,13 +22,13 @@ Collisions accepted: Facebook's Relay (GraphQL) owns `relay` on npm and most sea
 ~/.relay/
   config.yaml        user defaults (worktrees, presence, notify)
   plugins/           user plugins
-  schedules.yaml     user schedules
+  flows/<name>/      flows: flow.md and the flow's own scripts (built; see ARCHITECTURE.md §6)
   ledger.db          SQLite ledger (runs, events, sessions, …)
   run/               rld.sock, session sockets, pids, exit sidecars
   log/               rld and plugin-host logs
 ```
 
-Per-repo state is `.relay/` in the repo (`config.yaml`, `plugins/`, `schedules.yaml`); it is versioned and never holds runtime state.
+Per-repo state is `.relay/` in the repo (`config.yaml`, `plugins/`); it is versioned and never holds runtime state. It never holds a flow: flows live in `~/.relay/flows/` only, so cloning a repo can never make Relay run anything.
 
 "ax" from here on means the old code base in `instilled/ax`, frozen as reference.
 
@@ -171,6 +171,8 @@ Each job: **situation → want → so that**, then the herdr / old-ax baseline, 
 - Missed-run policy per schedule: `skip` or `catch-up-once`, evaluated on daemon start and wake-from-sleep.
 - Overlap policy: `skip|queue|kill`.
 - Every fired schedule is a normal run → appears in J5's digest for free.
+
+*As built:* this job is done by **flows** (`docs/specs/2026-10-07-flows.md`, ARCHITECTURE.md §6) — a folder in `~/.relay/flows/` with a `when` or `on` trigger, steps and ask steps, approved by its folder's hash — not by `schedules.yaml`; the plan above is kept as it was written.
 
 **Done when.** A nightly `cargo test` schedule and a Monday "bump dependencies" agent schedule exist in the repo; both show up in the morning digest with their outcome under `nightly` / `deps/2026-09-14`; a missed night after sleep follows the declared policy.
 
@@ -498,7 +500,7 @@ Each item states the question, the proposed answer, and what would change our mi
 4. **Where does the summariser authenticate?**
    *Proposed:* it is a plugin, so it declares `tools: [claude]` and runs the host's `claude -p` with whatever login the user has. Relay core never holds API keys or talks to a provider.
 
-5. **Are repo-level schedules enabled on clone?**
+5. **Are repo-level schedules enabled on clone?** *Decided by flows:* a repo holds none — they live in `~/.relay/flows/` only.
    *Proposed:* no. Same flow as plugins: `rl up` shows the schedules the repo declares, you approve, Relay records the file's hash; a changed file requires re-approval. Nothing declared by a repo ever fires on its own.
 
 6. **Holder binary name and entry points?**

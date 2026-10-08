@@ -11,7 +11,7 @@ use std::path::PathBuf;
 
 const COLS: &str = "id, workspace, kind, title, cli, argv_json, cwd, branch, worktree, \"ref\", tags_json, \
     state, source, confidence, state_at, started_at, ended_at, exit_code, cost_json, \
-    cause, flow, parent_run, last_line, seen_at, detail, archived_at, pinned_at, hidden_at";
+    cause, chain, parent_run, last_line, seen_at, detail, archived_at, pinned_at, hidden_at";
 
 const DEFAULT_LIMIT: u32 = 200;
 
@@ -45,7 +45,7 @@ pub fn insert(conn: &Connection, r: &Run) -> Result<()> {
             r.exit_code,
             r.cost.as_ref().map(serde_json::to_string).transpose()?,
             r.cause.to_string(),
-            r.flow,
+            r.chain,
             r.parent_run,
             r.last_line,
             r.seen_at.map(to_millis),
@@ -247,7 +247,7 @@ fn from_row(row: &Row<'_>) -> rusqlite::Result<Run> {
             .transpose()
             .map_err(|e| conv(18, e))?,
         cause: row.get::<_, String>(19)?.parse().map_err(|e| conv_str(19, e))?,
-        flow: row.get(20)?,
+        chain: row.get(20)?,
         parent_run: row.get(21)?,
         last_line: row.get(22)?,
         seen_at: optional_from_millis(row.get(23)?, 23, conv)?,
@@ -334,6 +334,29 @@ pub fn lost(conn: &Connection) -> Result<Vec<String>> {
     Ok(ids.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
+/// Whether run `id` was marked `run.lost`: gone in a restart, archived since or not.
+pub fn was_lost(conn: &Connection, id: &str) -> Result<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM events WHERE run = ?1 AND kind = 'run.lost')",
+        params![id],
+        |row| row.get(0),
+    )?)
+}
+
+/// The newest run in chain `chain` with cause `cause`: a flow step's, by its firing and
+/// `flow:<flow>/<step>`, archived or not.
+pub fn newest_in_chain(conn: &Connection, chain: &str, cause: &str) -> Result<Option<Run>> {
+    Ok(conn
+        .query_row(
+            &format!(
+                "SELECT {COLS} FROM runs WHERE chain = ?1 AND cause = ?2 ORDER BY started_at DESC, rowid DESC LIMIT 1"
+            ),
+            params![chain, cause],
+            from_row,
+        )
+        .optional()?)
+}
+
 /// Done with everything that has ended and been looked at — except what is
 /// pinned, which was kept on purpose and is only let go by name.
 pub fn archive_seen(conn: &Connection, at: Timestamp) -> Result<usize> {
@@ -355,14 +378,14 @@ pub fn set_seen(conn: &Connection, ids: &[String], at: Timestamp) -> Result<usiz
     Ok(n)
 }
 
-/// When the oldest run caused by `cause` that you have not seen since it
-/// ended did start — so a job's stretch has that firing in it; None when
-/// every one is seen. With `workspace`, only that folder's runs.
-pub fn oldest_unseen(conn: &Connection, cause: &str, workspace: Option<&std::path::Path>) -> Result<Option<Timestamp>> {
+/// When the oldest run whose cause starts with `cause` that you have not seen
+/// since it ended did start — so a flow's stretch (`flow:<name>/`) has that
+/// run in it; None when every one is seen.
+pub fn oldest_unseen(conn: &Connection, cause: &str) -> Result<Option<Timestamp>> {
     let ms: Option<i64> = conn.query_row(
-        "SELECT MIN(started_at) FROM runs WHERE cause = ?1 AND ended_at IS NOT NULL AND archived_at IS NULL \
-         AND (seen_at IS NULL OR seen_at < ended_at) AND (?2 IS NULL OR workspace = ?2)",
-        params![cause, workspace.map(path_str)],
+        "SELECT MIN(started_at) FROM runs WHERE substr(cause, 1, length(?1)) = ?1 \
+         AND ended_at IS NOT NULL AND archived_at IS NULL AND (seen_at IS NULL OR seen_at < ended_at)",
+        params![cause],
         |r| r.get(0),
     )?;
     ms.map(from_millis).transpose()
@@ -409,24 +432,19 @@ mod tests {
     }
 
     #[test]
-    fn the_oldest_unseen_firing_is_where_a_job_starts() {
+    fn the_oldest_unseen_run_is_where_a_flow_starts() {
         let c = test_conn();
         let t = |ms| Timestamp::from_millisecond(ms).unwrap();
-        insert_ended(&c, "a", "schedule:nightly", t(1_000), None); // unseen
-        insert_ended(&c, "b", "schedule:nightly", t(2_000), Some(t(2_500))); // seen
-        insert_ended(&c, "x", "schedule:other", t(500), None);
+        insert_ended(&c, "a", "flow:nightly/test", t(1_000), None); // unseen
+        insert_ended(&c, "b", "flow:nightly/probe", t(2_000), Some(t(2_500))); // seen
+        insert_ended(&c, "x", "flow:nightly-2/test", t(500), None);
         assert_eq!(
-            oldest_unseen(&c, "schedule:nightly", None).unwrap(),
+            oldest_unseen(&c, "flow:nightly/").unwrap(),
             Some(t(900)),
-            "when that firing started: it is in the stretch"
-        );
-        assert_eq!(
-            oldest_unseen(&c, "schedule:nightly", Some(std::path::Path::new("/elsewhere"))).unwrap(),
-            None,
-            "only the rule's own folder's"
+            "when that run started, whichever its step: it is in the stretch"
         );
         set_seen(&c, &["a".into()], t(3_000)).unwrap();
-        assert_eq!(oldest_unseen(&c, "schedule:nightly", None).unwrap(), None);
+        assert_eq!(oldest_unseen(&c, "flow:nightly/").unwrap(), None);
     }
 
     #[test]

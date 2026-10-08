@@ -215,7 +215,7 @@ impl<'de> Deserialize<'de> for Retention {
 #[serde(deny_unknown_fields)]
 pub struct Assistants {
     /// What you type at `a` / `rl interpret` in plain words → a run or a
-    /// rule, drafted for your enter.
+    /// flow, drafted for your enter.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub interpret: Option<Assistant>,
     /// What an ended run did, in a few sentences (`s`, `rl summary`).

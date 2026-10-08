@@ -557,7 +557,7 @@ impl Guide {
     }
 
     fn draw_summaries(&self, lines: &mut Vec<Line<'static>>) {
-        lines.push(Line::styled("Who writes summaries and drafts rules?", theme::name()));
+        lines.push(Line::styled("Who writes summaries and drafts runs?", theme::name()));
         lines.push(Line::styled(
             "One short call each time you ask for a recap or type in plain words, and one for the top of \
              what happened when you come back after a while (catch_up.summary: ask turns that off).",

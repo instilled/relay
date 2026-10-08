@@ -1,7 +1,7 @@
 //! What happened, said for the person who was not looking: of a run, of a
-//! job's runs (a schedule's or a reaction's), of a project's, or of
-//! everything, over a stretch. Only ever asked for: `/summary` in the panel,
-//! `rl summary`, a reaction on `run.finished`, or the catch-up's top when
+//! flow's runs, of a project's, or of everything, over a stretch. Only ever
+//! asked for: `/summary` in the panel, `rl summary`, a flow on
+//! `run.finished`, or the catch-up's top when
 //! `catch_up.summary` is `auto` — the panel and `rl since` ask for it as you
 //! come back.
 //!
@@ -20,15 +20,15 @@
 //! joined — in parts again while what is joined is past `CHUNK` — so a
 //! weekend of a busy agent is still one answer.
 //!
-//! Many runs (a job, a project, everything) are told from their runs' lines
-//! in one call when brief (a job's firings folded, at most `LINES_MAX`, the
+//! Many runs (a flow, a project, everything) are told from their runs' lines
+//! in one call when brief (a flow's runs folded, at most `LINES_MAX`, the
 //! newest of each folder);
 //! deep, from each run's deep read (kept ones as they are) and a join. `dry`
 //! only counts the calls, each run's as its own deep read would.
 //!
 //! The stretch, unless given, is since you last looked: a run's `seen_at`
-//! when it has written or had an event since, else all of it; a job's, from
-//! the start of its oldest firing not seen, else the last day. A project or everything needs one given — the
+//! when it has written or had an event since, else all of it; a flow's, from
+//! the start of its oldest run not seen, else the last day. A project or everything needs one given — the
 //! client knows when you were last here. A stretch with nothing in it says so
 //! without asking anyone.
 //!
@@ -37,7 +37,7 @@
 //! is also kept as it is written, `recap.rs`), said on the run as a
 //! `run.summarised` event; everything else in `summary_kept` by (what, how
 //! deep, from when), said on no run. Never of an assistant's own run, so a
-//! reaction cannot feed itself.
+//! flow cannot feed itself.
 
 use crate::assistant;
 use crate::server::Daemon;
@@ -65,8 +65,8 @@ const EVENTS_BRIEF: u32 = 200;
 const EVENTS_DEEP: u32 = 500;
 /// The most of those events one call is given, the newest kept.
 const EVENTS_BYTES: usize = 8 * 1024;
-/// How far back a job is read when every firing has been seen.
-const JOB_STRETCH: SignedDuration = SignedDuration::from_hours(24);
+/// How far back a flow is read when every run of it has been seen.
+const FLOW_STRETCH: SignedDuration = SignedDuration::from_hours(24);
 
 /// The one kept for the target, depth and stretch, marked stale when what it
 /// covers has moved on since. A run's default stretch, brief, with nothing
@@ -556,20 +556,17 @@ async fn run_deep(d: &Daemon, run: &Run, from: Option<Timestamp>, p: &SummaryPar
     keep(d, Some(run), made).await
 }
 
-/// Where many runs' stretch begins: as asked; for a job, the start of its
-/// oldest firing not seen, else the last day; a project and everything need one.
+/// Where many runs' stretch begins: as asked; for a flow, the start of its
+/// oldest run not seen, else the last day; a project and everything need one.
 async fn over_from(d: &Daemon, t: &SummaryTarget, asked: Option<Timestamp>, now: Timestamp) -> Result<Timestamp> {
     if let Some(f) = asked {
         return Ok(f);
     }
     match t {
-        SummaryTarget::Job { rule, name, workspace } => {
-            let (cause, ws) = (format!("{rule}:{name}"), workspace.clone());
-            let oldest = d
-                .ledger
-                .call(move |c| runs::oldest_unseen(c, &cause, ws.as_deref()))
-                .await?;
-            Ok(oldest.unwrap_or(now - JOB_STRETCH))
+        SummaryTarget::Flow { name } => {
+            let cause = format!("flow:{name}/");
+            let oldest = d.ledger.call(move |c| runs::oldest_unseen(c, &cause)).await?;
+            Ok(oldest.unwrap_or(now - FLOW_STRETCH))
         }
         SummaryTarget::Project { .. } => bail!("a project's summary needs where to start (from)"),
         SummaryTarget::All => bail!("a summary of everything needs where to start (from)"),
@@ -577,7 +574,7 @@ async fn over_from(d: &Daemon, t: &SummaryTarget, asked: Option<Timestamp>, now:
     }
 }
 
-/// The runs a job, a project or everything has in the stretch: those that
+/// The runs a flow, a project or everything has in the stretch: those that
 /// moved in it or are still going, never an assistant's own; by folder, then
 /// as they started.
 async fn in_stretch(d: &Daemon, t: &SummaryTarget, from: Timestamp) -> Result<Vec<Run>> {
@@ -586,9 +583,7 @@ async fn in_stretch(d: &Daemon, t: &SummaryTarget, from: Timestamp) -> Result<Ve
         .into_iter()
         .filter(|r| !matches!(r.cause, Cause::Assistant(_)) && r.ended_at.is_none_or(|e| e >= from))
         .filter(|r| match t {
-            SummaryTarget::Job { rule, name, workspace } => {
-                r.cause.to_string() == format!("{rule}:{name}") && workspace.as_ref().is_none_or(|w| *w == r.workspace)
-            }
+            SummaryTarget::Flow { name } => matches!(&r.cause, Cause::Flow { flow, .. } if flow == name),
             SummaryTarget::Project { workspace } => r.workspace == *workspace,
             SummaryTarget::All => true,
             SummaryTarget::Run { id } => r.id == *id,
@@ -601,7 +596,7 @@ async fn in_stretch(d: &Daemon, t: &SummaryTarget, from: Timestamp) -> Result<Ve
 /// What many runs are, for the assistant.
 fn what(t: &SummaryTarget) -> String {
     match t {
-        SummaryTarget::Job { rule, name, .. } => format!("the {rule} `{name}`"),
+        SummaryTarget::Flow { name } => format!("the flow `{name}`"),
         SummaryTarget::Project { workspace } => format!("the project {}", display_path(workspace)),
         SummaryTarget::All => "everything Relay ran".into(),
         SummaryTarget::Run { id } => format!("the run {id}"),
@@ -646,7 +641,7 @@ async fn brief_lines(d: &Daemon, runs: &[Run]) -> Result<Vec<String>> {
         .await
 }
 
-/// A job's, a project's or everything's runs: one call over their lines,
+/// A flow's, a project's or everything's runs: one call over their lines,
 /// brief; deep, each run's deep read first (kept ones as they are), then one
 /// call to join them.
 async fn over(d: &Daemon, t: &SummaryTarget, from: Option<Timestamp>, p: &SummaryParams) -> Result<Summary> {
@@ -719,11 +714,7 @@ async fn over(d: &Daemon, t: &SummaryTarget, from: Option<Timestamp>, p: &Summar
     };
     let what = what(t);
     let cwd = match t {
-        SummaryTarget::Project { workspace }
-        | SummaryTarget::Job {
-            workspace: Some(workspace),
-            ..
-        } if workspace.is_dir() => workspace.clone(),
+        SummaryTarget::Project { workspace } if workspace.is_dir() => workspace.clone(),
         _ => d.home.path().to_path_buf(),
     };
     let (a, calls) = join(&what, Some(from), &lines, |q| ask(d, cwd.clone(), &what, q, p)).await?;
@@ -741,8 +732,8 @@ const HEADING_CUT: usize = 80;
 const LINE_CUT: usize = 140;
 
 /// The lines many runs are told by, brief: each run's under its heading, but
-/// a job's firings folded into one (`nightly · 14 firings · 2 failed · last:
-/// …`) unless the job is what is told. Past `LINES_MAX` the newest are told
+/// a flow's runs folded into one (`nightly · 14 runs · 2 failed · last: …`)
+/// unless the flow is what is told. Past `LINES_MAX` the newest are told
 /// and the rest counted (`… and 12 earlier`); for everything, the room is
 /// shared between folders so a busy one does not crowd out the others. Each
 /// is cut short, so the lot fits in one call.
@@ -750,7 +741,7 @@ fn many_lines(t: &SummaryTarget, runs: &[Run], lines: Vec<String>, now: Timestam
     struct Fold {
         at: usize,
         name: String,
-        firings: usize,
+        runs: usize,
         failed: usize,
         last: String,
     }
@@ -764,24 +755,24 @@ fn many_lines(t: &SummaryTarget, runs: &[Run], lines: Vec<String>, now: Timestam
     };
     let mut folds: Vec<((String, PathBuf), Fold)> = Vec::new();
     for (r, line) in runs.iter().zip(lines) {
-        let job = match (&r.cause, t) {
-            (_, SummaryTarget::Job { .. }) => None,
-            (Cause::Schedule(n) | Cause::Reaction(n), _) => Some(n),
+        let flow = match (&r.cause, t) {
+            (_, SummaryTarget::Flow { .. }) => None,
+            (Cause::Flow { flow, .. }, _) => Some(flow),
             _ => None,
         };
-        let Some(name) = job else {
+        let Some(name) = flow else {
             out.push((heading(t, r, now), line));
             when.push((share(r), r.started_at));
             continue;
         };
-        let key = (r.cause.to_string(), r.workspace.clone());
+        let key = (name.clone(), r.workspace.clone());
         let failed = usize::from(r.state == RunState::Failed);
         match folds.iter_mut().find(|(k, _)| *k == key) {
             Some((_, f)) => {
-                f.firings += 1;
+                f.runs += 1;
                 f.failed += failed;
                 f.last = line;
-                let mut said = format!("{} firings", f.firings);
+                let mut said = format!("{} runs", f.runs);
                 if f.failed > 0 {
                     said.push_str(&format!(" · {} failed", f.failed));
                 }
@@ -799,7 +790,7 @@ fn many_lines(t: &SummaryTarget, runs: &[Run], lines: Vec<String>, now: Timestam
                     Fold {
                         at: out.len(),
                         name: name.clone(),
-                        firings: 1,
+                        runs: 1,
                         failed,
                         last: line.clone(),
                     },
@@ -1149,7 +1140,10 @@ mod tests {
         r.state = RunState::Failed;
         r.ended_at = Some("2026-09-10T11:02:30Z".parse().unwrap());
         r.exit_code = Some(2);
-        r.cause = Cause::Schedule("nightly".into());
+        r.cause = Cause::Flow {
+            flow: "nightly".into(),
+            step: "test".into(),
+        };
         let e = Event {
             id: 1,
             at: t,
@@ -1169,7 +1163,7 @@ mod tests {
             false,
         );
         assert!(
-            p.contains("title: nightly tests\ncommand: make test\nfolder: /w\nwhy: schedule:nightly\n"),
+            p.contains("title: nightly tests\ncommand: make test\nfolder: /w\nwhy: flow:nightly/test\n"),
             "{p}"
         );
         assert!(p.contains("· after 2m30s · failed · exit 2"), "{p}");
@@ -1316,7 +1310,7 @@ mod tests {
         let at = |s: i64| now - SignedDuration::from_secs(s);
         let mut runs = Vec::new();
         let mut lines = Vec::new();
-        // The job fired last; the 300 others before it.
+        // The flow ran last; the 300 others before it.
         for i in 0..14 {
             let mut r = Run::new(
                 format!("n{i:03}"),
@@ -1327,7 +1321,10 @@ mod tests {
                 "/w",
                 at(14 - i),
             );
-            r.cause = Cause::Schedule("nightly".into());
+            r.cause = Cause::Flow {
+                flow: "nightly".into(),
+                step: "test".into(),
+            };
             r.state = if i < 2 { RunState::Failed } else { RunState::Finished };
             runs.push(r);
             lines.push(format!("{} · exit {}", runs[i as usize].state, i));
@@ -1350,14 +1347,14 @@ mod tests {
         assert_eq!(
             told.len(),
             LINES_MAX + 1,
-            "the earlier ones counted, then a line each, the job's folded"
+            "the earlier ones counted, then a line each, the flow's folded"
         );
         assert_eq!(told[0], ("… and 101 earlier".to_string(), String::new()));
         assert_eq!(
             told[1],
             (
                 "nightly".to_string(),
-                "14 firings · 2 failed · last: finished · exit 13".to_string()
+                "14 runs · 2 failed · last: finished · exit 13".to_string()
             )
         );
         assert!(
@@ -1366,59 +1363,53 @@ mod tests {
             told[2]
         );
         assert!(over_body(&told).len() < CHUNK, "{}", over_body(&told).len());
-        // A job told is told firing by firing.
-        let job = SummaryTarget::Job {
-            rule: rl_proto::rule::RuleKind::Schedule,
-            name: "nightly".into(),
-            workspace: None,
-        };
-        let told = many_lines(&job, &runs[..14], lines[..14].to_vec(), now);
+        // A flow told is told run by run.
+        let flow = SummaryTarget::Flow { name: "nightly".into() };
+        let told = many_lines(&flow, &runs[..14], lines[..14].to_vec(), now);
         assert_eq!(told.len(), 14);
     }
 
     #[test]
-    fn a_busy_job_is_told_by_its_newest_firings() {
+    fn a_busy_flow_is_told_by_its_newest_runs() {
         let now: Timestamp = "2026-09-10T12:00:00Z".parse().unwrap();
         let (mut runs, mut lines) = (Vec::new(), Vec::new());
         for i in 0..250 {
             let at = now - SignedDuration::from_mins(250 - i);
             let mut r = Run::new(format!("n{i:03}"), RunKind::Command, "poll", vec![], "/w", "/w", at);
-            r.cause = Cause::Schedule("poll".into());
+            r.cause = Cause::Flow {
+                flow: "poll".into(),
+                step: "test".into(),
+            };
             runs.push(r);
-            lines.push(format!("finished · firing {i}"));
+            lines.push(format!("finished · run {i}"));
         }
-        let job = SummaryTarget::Job {
-            rule: rl_proto::rule::RuleKind::Schedule,
-            name: "poll".into(),
-            workspace: Some("/w".into()),
-        };
-        let told = many_lines(&job, &runs, lines, now);
+        let flow = SummaryTarget::Flow { name: "poll".into() };
+        let told = many_lines(&flow, &runs, lines, now);
         assert_eq!(told.len(), LINES_MAX + 1);
         assert_eq!(told[0], ("… and 50 earlier".to_string(), String::new()));
-        assert_eq!(told[1].1, "finished · firing 50");
-        assert_eq!(told[LINES_MAX].1, "finished · firing 249", "the last firing is told");
+        assert_eq!(told[1].1, "finished · run 50");
+        assert_eq!(told[LINES_MAX].1, "finished · run 249", "the last run is told");
     }
 
     #[test]
-    fn a_global_job_keeps_its_newest_firings_wherever_they_ran() {
+    fn a_flow_keeps_its_newest_runs_wherever_they_ran() {
         let now: Timestamp = "2026-09-10T12:00:00Z".parse().unwrap();
         let (mut runs, mut lines) = (Vec::new(), Vec::new());
-        // By folder, then as they started: /a fired last, /b before it.
+        // By folder, then as they started: /a ran last, /b before it.
         for (ws, base) in [("/a", 0), ("/b", 1000)] {
             for i in 0..150 {
                 let at = now - SignedDuration::from_mins(base + 150 - i);
                 let mut r = Run::new(format!("{ws}{i:03}"), RunKind::Command, "poll", vec![], ws, ws, at);
-                r.cause = Cause::Schedule("poll".into());
+                r.cause = Cause::Flow {
+                    flow: "poll".into(),
+                    step: "test".into(),
+                };
                 runs.push(r);
                 lines.push(format!("finished · {ws} {i}"));
             }
         }
-        let job = SummaryTarget::Job {
-            rule: rl_proto::rule::RuleKind::Schedule,
-            name: "poll".into(),
-            workspace: None,
-        };
-        let told = many_lines(&job, &runs, lines, now);
+        let flow = SummaryTarget::Flow { name: "poll".into() };
+        let told = many_lines(&flow, &runs, lines, now);
         assert_eq!(told.len(), LINES_MAX + 1, "one count of the earlier ones");
         assert_eq!(told[0], ("… and 100 earlier".to_string(), String::new()));
         let of = |ws: &str| told.iter().filter(|(_, l)| l.contains(ws)).count();

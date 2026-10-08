@@ -1,6 +1,6 @@
 # Relay — architecture
 
-**Status:** as built · **Date:** 2026-09-09 · **Tree:** `reactions` branch
+**Status:** as built · **Date:** 2026-10-08 · **Tree:** `flows-spec` branch
 
 [PRODUCT.md](PRODUCT.md) says what Relay is for and where it is going. This file says how the
 tree that exists is wired: which processes there are, who owns what, and what crosses which
@@ -17,7 +17,7 @@ Three kinds of process and two socket protocols. Nothing else talks to anything.
 flowchart TB
     subgraph cli["rl — CLI + control panel (rl-cli)"]
         tui["TUI: one list · the selected thing · its terminal"]
-        cmds["run · stop · ls · since · events · watch · join · mark<br/>schedule · up · workspace · ask · decisions · decide · on · react"]
+        cmds["run · stop · ls · since · events · watch · join · mark<br/>flow · up · workspace · emit · ask · decisions · decide"]
         hookcmd["rl hook &lt;Event&gt; — hidden, called by the agent's hooks"]
     end
 
@@ -26,9 +26,8 @@ flowchart TB
         router["router — method name → typed handler"]
         handlers["handlers — every method in one place"]
         sup["supervisor — start · follow · apply · reconcile"]
-        sched["scheduler — schedules.yaml → runs, on time"]
+        flows["flows — flows/*/flow.md → firings: when · on · steps · asks"]
         dec["decisions — questions waiting on a human → runs"]
-        react["reactor — events → actions, and questions"]
         attach["attach — scrollback → replay → live"]
         digest["digest — one line per run, and whether it is news"]
         gitm["git — read-only placement: workspace, branch"]
@@ -40,18 +39,17 @@ flowchart TB
     end
 
     detect["relay-detect<br/>registry (detect/*.yaml) · PTY heuristics<br/>Claude hooks · state machine"]
-    db[("~/.relay/ledger.db — relay-ledger<br/>runs · events · sessions · session_io · presence<br/>schedules · reactions (+ specs) · workspaces · decisions · summaries · summary_kept · meta")]
+    db[("~/.relay/ledger.db — relay-ledger<br/>runs · events · sessions · session_io · presence<br/>flows · firings · steps · workspaces · decisions · summaries · summary_kept · meta")]
 
     cli -->|"JSON-RPC, one line per message<br/>~/.relay/run/rld.sock — relay-proto"| rld
     child -->|"hooks fire<br/>RELAY_RUN in the env"| hookcmd
 
     sup -->|"spawn, wait for the readiness line"| h
     sup <-->|"framed holder protocol on the run's socket<br/>Output · Input · Resize · Signal · Exit"| h
-    sched -->|"run.start with cause: schedule:&lt;name&gt;"| sup
+    flows -->|"a step's run, cause: flow:&lt;flow&gt;/&lt;step&gt;"| sup
+    flows -->|"an ask step's question"| dec
     dec -->|"the chosen option, cause: decision:&lt;id&gt;"| sup
-    db -.->|"new event rows, by id"| react
-    react -->|"cause: reaction:&lt;name&gt;"| sup
-    react -->|"or a question"| dec
+    db -.->|"new event rows, by id: runs ending, answers, what on: hears"| flows
     attach -.->|"one holder connection per viewer"| h
     h --> child
 
@@ -82,31 +80,41 @@ What the picture is enforcing:
 ```mermaid
 flowchart LR
     rl["rl-cli → bin rl<br/>client · attach · digest · rank · render · tui"]
-    rld["rl-daemon → bin rld<br/>server · router · handlers · supervisor · attach · digest · git"]
+    rld["rl-daemon → bin rld<br/>server · router · handlers · supervisor · flows · attach · digest · git"]
     sess["rl-session → bin rl-session<br/>holder · backend · ring · exit | proto · client"]
     proto["relay-proto (shared-proto)<br/>codec · rpc · methods · types — the public API"]
     core["relay-core (shared-core)<br/>Home paths · ids · time"]
     ledger["relay-ledger (shared-ledger)<br/>migrations · runs · events · sessions · session_io · presence"]
     det["relay-detect (shared-detect)<br/>registry · pty · claude · machine · ansi"]
+    flow["rl-flow (pure: no I/O, no tokio)<br/>doc · def · plan · advance · cond · template · cron · hash"]
 
     rl --> proto
     rl --> core
+    rl --> flow
     rl -->|"holder frames after run.attach"| sess
     rld --> proto
     rld --> core
     rld --> ledger
     rld --> det
+    rld --> flow
     rld -->|"client half only"| sess
     ledger --> proto
     ledger --> core
     det --> proto
     det --> core
+    flow --> proto
+    flow --> core
     sess --> core
     proto --> core
 ```
 
 `rl-session` splits in two on purpose: the library half (`proto`, `client`, `exit`) is what `rld`
 links, the binary half (`holder`, `backend`) is the process itself.
+
+`rl-flow` is all the deciding about a flow (§6), and none of the doing: `flow.md` read and
+checked, the steps' order, what a firing does next, `if:`, the placeholders, the cron line and the
+folder's hash, each a function of what it is handed. `rld` carries its answers out; `rl` reads a
+flow's definition with it to draw the row and the pane.
 
 ---
 
@@ -293,22 +301,22 @@ waiting on you first, from every project and each naming its own (`rlux › depl
 oldest first, so what needs you never hides under a project's name; then pinned runs; then
 grouped by the folder they belong to, the folders in order of name so each keeps its place, and
 inside one runs by attention — until you put a project in your own order: shift-`↑`/`↓` on a run
-or a job moves it one place up or down inside its project (holding goes on moving it, the cursor
+or a flow moves it one place up or down inside its project (holding goes on moving it, the cursor
 stays on it), and from then on that project keeps your order rather than sorting itself. What is
 new there enters at its top; what needs you — asking, blocked or failed — floats to its top
 whatever the order, and drops back to where you put it once dealt with. A row never moves out of
 its project, past what floats, or into the questions or the pinned runs; on a header, a question,
 in the graph or `/events` the keys say why and do nothing. `digest.order` keeps a project's whole
-order — its header's key (`g:<folder>`, `g:everywhere`) and its rows' (`r:<id>`, `j:…`), in the
+order — its header's key (`g:<folder>`, `g:everywhere`) and its rows' (`r:<id>`, `f:<name>`), in the
 ledger's `row_order` table — and the digest carries it; each move sends the whole of it again,
 built from the list with no search or lens narrowing it, so what a search hides keeps its place
 and what has left the list drops out. `/sort` on a project (its header, or any row in it) lets go
 of the order: it sorts itself again. Shift and an arrow arrive as `CSI 1;2A`/`B` in iTerm2,
 Terminal.app and tmux 3.2 or later; a terminal that does not report shift sends the plain arrow,
 which just moves the cursor. And named — a workspace by the
-name it was registered under, a cause as "schedule nightly" or "rule tests-failed", never an id.
+name it was registered under, a cause as "flow nightly · probe" or "your answer", never an id.
 A row is an icon for what it is — `✦` an agent, `❯` a shell (in the prompt's green), `▸` a
-command, `↻` a job, `?` a question (amber) — one quiet glyph, one column wide in every font, so
+command, `↻` a flow, `?` a question (amber) — one quiet glyph, one column wide in every font, so
 every title starts in the same column, and dim once the run has ended — then the title, the state as a word in its colour (`needs you` and `blocked` amber,
 `failed` red, `done` and `stopped` dim; a shell at rest says nothing there, its icon says it),
 the summary to the edge, and the ref and the age at the right — with `⎇ feat` there too when the
@@ -324,8 +332,8 @@ says. What it raised, by kind, is in the pane under `signals`
 (`flint.product.new-feedback ×5`). The daemon's own event families are left out of that, since
 the state already says them (`events::emitted_for_run`, carried on the digest's item). Colour carries the state — a
 saturated accent per state, on the terminal's own foreground so it reads on either theme
-(`tui/theme.rs`). The panel runs to the screen's edges, with a rule between its sections — under
-the header, above the line, above the footer. The project rows and the `❯` line start at the edge,
+(`tui/theme.rs`). The panel runs to the screen's edges, with a separator between its sections —
+under the header, above the line, above the footer. The project rows and the `❯` line start at the edge,
 and the header and footer text level with what is typed after the `❯`; a project's runs, shells and agents sit one column in, under it. The list and its
 detail pane are split by a vertical bar — the list takes two thirds beside the details pane, half beside a terminal, which needs the
 width; the full-screen terminal drops all of it for the cells. The header wears Relay's mark — a
@@ -334,7 +342,7 @@ rows of half-blocks at the left edge, and beside its middle
 three rows the header's words — `relay` and its version (and the Relay home, `~` for home, when it
 is not the usual `~/.relay`, so a panel on a test ledger says so) with the lens and who you are at
 the right; then the tally (or the graph's or the events' own headline); then the notes — what a
-restart took and the global rules, each in its tone. The full-screen terminal keeps the header to
+restart took and the flows that are in no project, each in its tone. The full-screen terminal keeps the header to
 one line, all of it after the tally, and so does a screen under 24 rows or 80 columns
 (`head_h`); everything under the header — the list's rows for the mouse, a terminal's size in the
 pane — is measured from where `areas` put it. With nothing running at all, the empty list shows the
@@ -347,42 +355,37 @@ runs' state words, whatever the path's length — comes its git checkout as it s
 #95 · 3 worktrees`, the branch or a detached commit, the badges, and on a main checkout the linked
 worktrees whose folders are still there (`rld` reads `.git` directly on each digest, no `git`
 started; a worktree registered on its own is a project of its own, with its branch and no count) —
-and, at the right edge, the tally of how many jobs and reactions the folder holds, with any rule
-that waits for a yes named just before it in amber (`! deploy`), and before that a red `! rules`
-while one of the folder's rules files did not load (see **Rules**). The rest of its rules are the
-graph's and the project pane's to show. The global rules — the ones in the Relay home, which apply in every folder — have no
-row of their own: a row that is always there, rules or none, kept the empty list from ever saying
-`nothing running · rl run -- <command>`. The header says them instead, when there are any, on its
-line of notes — `↻ 2 ⚡ 1 everywhere` (on one line, `relay · 3 working · ↻ 2 ⚡ 1 everywhere`),
-schedules and reactions counted as a folder's header counts them — and in
-amber when one waits for a yes, saying so and where to give it (`⚡ 1 everywhere needs a yes ·
-/graph`, `rows::everywhere`), and in red beside them while one of the home's files did not load
-(`↻ 2 ⚡ 1 everywhere · rules broken`, or `global rules broken` when none of them loaded;
-`rows::global_parts`). A global rule's run in a registered project folds under that
-project; one that ran anywhere else — a schedule's `cwd: ~`, a reaction to an event outside every
-project — goes under one group headed `everywhere`, after the projects, rather than under `~` or
-whatever folder that was (`rows::everywhere_run`: a schedule or reaction started it, its folder is
-no registered project, and no rule of that name lives in that folder; a run filed under a ref keeps
-the ref). It is read off the run, not the rules loaded now, so a global rule taken out of its file
-leaves its runs under `everywhere` until they are archived, not back under `~`. That header is
-not a project: `enter` puts the global rules and how those runs stand in the pane, `/new` there
-writes a global rule, `/edit` opens the home's schedules, and `^x`, `^r` and `/shell` say
-`everywhere is not a project` and do nothing; `in:everywhere` finds it. `^g` (or `/graph`) from anywhere, an empty list too, shows them wired
-with everything else, and `/edit` where nothing names a folder, or `/edit schedules global`
-from anywhere, opens the home's file. Runs a schedule or a rule
-started fold, once ended, into one line per job — `↻`, the name, how the last few went in the
-state column (`··×·`, oldest first, a failure red) and what the last firing came to in its own
-words — so a job firing every thirty seconds is a row,
-not a screen, and it never grows into one: `enter` (or `^o`) puts its firings in the pane, as on
-a project header. A run still going or waiting on you is never folded. The pane holds the
-cadence — a cron line read back in words where it can be (`hourly 08:00–18:00, Mon–Fri`), left as
-written where it cannot — the tally, the marks, what the last firing raised under `signals`, and
-the last ten firings, each in its own words. When the list
+and, at the right edge, the tally of the flows `in` the folder (`2 flows`), with any flow that
+waits for a yes named just before it in amber (`! deploy`), and before that a red `! flows` while
+one of the folder's flows did not load (§6, **Loading and approval**). The rest of a folder's flows
+are the graph's and the project pane's to show. A flow with no `in` belongs to no project, and
+has no row of its own until it runs: the header says those on its line of notes, when there are
+any — `↻ 2 everywhere` (on one line, `relay · 3 working · ↻ 2 everywhere`) — in amber when one
+waits for a yes, saying so and where to give it (`↻ 1 everywhere needs a yes · /graph`,
+`rows::everywhere`), and `flows broken` in red beside it while one of theirs, or one whose `in` is
+not known, did not load (`rows::global_parts`). A flow's runs fold, once ended, under the project
+its flow is `in`, wherever they ran; a flow with no `in` has its row, and those runs, under one
+group headed `everywhere`, after the projects, rather than under `~` or whatever folder that was
+— and so does a flow's run still going outside every registered project (`rows::everywhere_run`;
+a run filed under a ref keeps the ref). That header is not a project: `enter` puts the flows with
+no `in` and how their runs stand in the pane, and `^x`, `^r` and `/shell` say `everywhere is not a
+project` and do nothing; `in:everywhere` finds it. `^g` (or `/graph`) from anywhere, an empty list
+too, shows every flow wired with everything else. A flow's runs, once ended, fold into one row per
+flow (`f:<name>`) — `↻`, the name, a mark per run in the state column (`··×·`, oldest first, a
+failure red), where its latest firing stands (`waiting at review`, `running · triage`, `failed at
+probe`, `done`, `rows::FlowRow`, `flows::state_words`) and how long ago — so a flow firing every
+thirty seconds is a row, not a screen, and it never grows into one: `enter` (or `^o`) puts it in
+the pane, as on a project header. A run still going or waiting on you is never folded. The pane
+holds the flow: `flow · <in> · <status>`, then what starts it — a cron line read back in words
+where it can be (`hourly 08:00–18:00, Mon–Fri`), left as written where it cannot — where it runs,
+whether its folder as it is has a yes, when it fires next and when it last did, its folder, and
+each step as the latest firing left it (`✓ done`, `? waiting`, `× failed`) with what it does
+(`flows::pane_lines`). When the list
 is taller than the screen, its first and last lines say how much is above and below. A group's
 header says which folder it is in, and the cursor stops on it like any other row: `enter` (or
 `^o`) turns the pane into the project's own — the folder, how its runs stand (needs-you /
-going / done), when it last stirred, and the schedules and reactions that live there. `^g`
-from a header opens the graph on that folder's first rule, and from a job on the job's own;
+going / done), when it last stirred, and the flows `in` it. `^g`
+from a header opens the graph on that folder's first flow, and from a flow's row on its own;
 `^r` (or `/rename`) renames
 whatever the cursor is on in place. On a run (a shell is one) or a project's header the name
 turns into a field in its own cell, the whole of it selected and the caret at its start, drawn the
@@ -396,28 +399,28 @@ click elsewhere, the wheel, `tab` to another lens), lets it go unsaved; meanwhil
 `enter saves · esc cancels`, and the line below waits, quiet and without its caret. An empty name
 gives a project its folder's own back, and a run the name Relay gave it — what it started as, or
 what its first prompt named it, kept beside the title (`runs.relay_title`); a run from before
-Relay kept one says so, and the field stays up. The `everywhere` header has no name to change. A
-job is renamed through the form of the rule it comes from. An agent nobody named — no title from the form,
+Relay kept one says so, and the field stays up. The `everywhere` header has no name to change, and
+a flow's name is its folder's, so `^r` on its row says so. An agent nobody named — no title from the form,
 `--title` or whatever started it — is named once for what it was first asked, from Claude's
 `UserPromptSubmit` hook: `claude: add a recipe import`, the prompt's first line cut to the title's
 length, a slash command skipped. The ledger keeps whether a title is still Relay's own
 (`runs.title_auto`), so a later prompt never renames it and a rename by hand always wins — until an
 empty one takes it back, after which the first prompt still names a run not yet asked anything. A folder you
-`rl up`'d is always on the list, even before anything has run there: its header sits in its
+`rl up`'d (`rl add`) is always on the list, even before anything has run there: its header sits in its
 place by name, under every lens — a lens narrows what shows inside projects, never which
 projects there are — so you can select
-it, read its stats, edit its rules or open its shell (`/shell`) from the first. `/up <path>` registers a
-folder from the line — the panel's `rl up`, over `workspace.up` — and lands the cursor on its new
-row. Moving the cursor onto a row is looking at it;
-`/archive` on an ended run (or a job) is being done with it — `run.archive` sets `runs.archived_at`,
+it, read its stats or open its shell (`/shell`) from the first. `/up <path>` registers a
+folder from the line — the panel's `rl up`, over `workspace.up`, which reads the flows again so one
+`in` it loads — and lands the cursor on its new row. Moving the cursor onto a row is looking at it;
+`/archive` on an ended run (or a flow's row) is being done with it — `run.archive` sets `runs.archived_at`,
 the digest leaves it out, `rl ls --all` and the ledger keep it — and `/archive seen` does it for
 everything ended that has been looked at, except what is pinned. `^t` (or `/pin`) pins the run under
 the cursor — `run.pin` sets `runs.pinned_at` — and it stands above every project, in the order
 pinned, named with its folder (`relay › deploy shell`), under every lens and however long ago it
 ended; `^t` again lets it go back, and archiving it by name unpins it. `/hide` takes whatever the
 cursor is on off the list without stopping or removing anything — a run, going or ended (`run.hide`
-sets `runs.hidden_at`); a job, its firings to come too; a project's header and everything in it,
-registered or not (`digest.hide` keeps the row's key, `g:<folder>` or `j:<kind>:<name>@<group>`, in
+sets `runs.hidden_at`); a flow, its firings to come too; a project's header and everything in it,
+registered or not (`digest.hide` keeps the row's key, `g:<folder>` or `f:<name>`, in
 the ledger's `hidden` table, and the digest carries them). A question is never hidden: it needs you.
 What is hidden shows only in the `hidden` lens, where `/hide` brings it back (a header that is not
 hidden itself brings back what was hidden under it) — unless it comes to need you after it was
@@ -426,25 +429,20 @@ the questions, named with its folder and marked `hidden` before its summary. `/h
 moves the time on and it goes back. Archiving and pruning are as before; `rl hide <id>…` and `rl
 hide --project <dir>` (`rl unhide` the same) do it from a shell. `ctrl-x` is the one keystroke for it, whatever the row,
 and it asks first: the first press arms it and says what a second would do — remove an ended run
-or a job, stop one still going, dismiss a question, remove a project — and the second press does it, while any other
+or a flow's runs, stop one still going, dismiss a question, remove a project — and the second press does it, while any other
 key disarms it, so nothing goes on a single slip (the way an agent view confirms a delete). `ctrl-c`
 is the same for leaving: once to ask, again to quit. A run still going is stopped, and a `ctrl-x`
 once it has ended removes it. On a project's header the first press counts what would go
 (`press ^x again to remove relay · stops 2 · archives 7 ended runs`), and the second removes the
 project over `workspace.remove` — unregistered, every run still going there stopped (a shell hung up
 on, anything else sent `SIGTERM`, whatever is left after a few seconds killed), its ended runs
-archived, which is what takes its header off the list, its open questions dismissed and the yes
-given to its rules forgotten, so registering it again asks again. When its `.relay` holds rule
-files that can move, the second press asks first, in the footer — `also move relay/.relay (2
-schedules · 1 reaction) to ~/.relay/removed? y moves · n keeps · any other key cancels` — and
-nothing happens until `y` or `n`; any other key leaves everything as it was. Moved means into
-`<home>/removed/<name>-<when>/`, never deleted: only `schedules.yaml` and `reactions.yaml` go, and
-the folder with them only when nothing else is in it. A `.relay` that is a symlink, or that is the
-Relay home itself (someone registered `~`), is never moved. The removal runs on its own connection,
-so the panel keeps drawing while the runs stop, and the flash says what came of it (`removed relay
-· stopped 2 · 9 runs archived · .relay kept`). On the line: `rl workspace rm <dir>`
-unregisters, with `--stop`, `--archive` and `--move-rules` (which asks, or wants `--yes`) for the
-rest. A folder gone from disk is still removed by the path it was registered under.
+archived, which is what takes its header off the list, and its open questions dismissed. The
+flows `in` it are read again first, so none of them starts anything while the rest goes: each is
+said as not loaded (`in: ~/relay is not a project Relay knows — rl add ~/relay`), its folder left
+as it is, and registering the project again loads it again — with its yes, while its folder has
+not changed. The removal runs on its own connection, so the panel keeps drawing while the runs
+stop, and the flash says what came of it (`removed relay · stopped 2 · 9 runs archived`). On the
+line: `rl workspace rm <dir>` unregisters, with `--stop` and `--archive` for the rest. A folder gone from disk is still removed by the path it was registered under.
 Nothing is destroyed by any of this; that is retention's alone. Ended runs also leave on their own after a day;
 `/archive` is for the impatient. On the line: `rl archive <id>…`, `rl archive --all`. Nothing is ever deleted here; that is
 retention (§7). `enter` on a run still going is the run itself: the panel steps out of ratatui and
@@ -459,7 +457,7 @@ re-render through a `vt100` screen (`tui/term.rs`) in a tile beside the list —
 line at the foot stays yours, `esc` closes the tile, and `/pane full` pops it to the whole screen.
 `pgup` and `pgdn` read back through what scrolled off — the screen keeps ten thousand rows above
 itself — and the footer says how far back you are. `^o` (or `/pane`) opens a pane of
-facts beside the list (`tui/pane.rs`): a run's facts and recent events, a job's tally, a question
+facts beside the list (`tui/pane.rs`): a run's facts and recent events, a flow (above), a question
 and what can be done about it — under who asked, what was said of the run that asked it (its
 `/summary`, as in that run's own pane). A question stays one line on the list; selecting it opens the pane
 on it by itself (and moving off closes the pane again, unless it was open already), since a
@@ -474,19 +472,19 @@ The line answers too: on a question, a line that starts with an option — its n
 several joined by commas where it takes several — answers with that option and the rest of the
 line as the note (`1 only the checkout path`), and the line's hint says so before you send it.
 Typed text before `^x` goes with a dismissal as its reason. `/summary [deep] [again] [since]`
-says what happened in the row under the cursor (§6): a run, live or ended; a job's runs, in its
-project's folder or, under `everywhere`, anywhere; a project's on its header; everything on
+says what happened in the row under the cursor (§6): a run, live or ended; a flow's runs, wherever
+they ran; a project's on its header; everything on
 `everywhere` and on the catch-up's top; on a question, the run that asked it (one with no asking
 run says so). Brief reads the recaps, `deep` the logs; `again` makes a new one even when the one
 kept is up to date. The two words come first, in either order. With no stretch typed, a run's is
-since you last looked at it (the daemon's to say); a job's from the start of its oldest firing you
+since you last looked at it (the daemon's to say); a flow's from the start of its oldest firing you
 had not seen when the cursor landed on it — landing marks them seen, so the panel notes where that
 firing started first (`App::unseen_from`, by row, until used or the row has firings not seen again)
 and sends it as `from`, else the daemon's; a project's and everything's since you were last here
 (`App::away_since`, else the last day). Deep asks `summary.make {dry: true}` first, and past one
 assistant call says what it reads and what it costs, and waits (`deep over 3 runs · 4 calls · y /
 any key`, from the dry run's `runs` and `calls`; `y` asks, anything else lets it be). The answer
-lands in the pane under the facts, aligned with them — `recap` on a run, `summary` on a job or a
+lands in the pane under the facts, aligned with them — `recap` on a run, `summary` on a flow or a
 header, saying what it is of: `of the project ~/api · deep · by haiku · since 22:14 · 3m ago` (or
 `claude's own`, and `4 calls` past one), the words under it in the value column, and `· moved on
 since` once what it is of has gone on. The pane fetches the one kept (`summary.get`) over the
@@ -565,7 +563,7 @@ on (`complete::line_folder`; an agent starts in the project, so its line complet
 first word completes against the agents the registry knows, the folder's `Makefile` targets and
 `package.json` scripts, and the binaries on `PATH` — or, when it starts like a path (`./`, `../`,
 `~`, or `/` after the `!` that forces a shell line), as a path, and a path to something runnable is
-then a shell line. After `every` a duration, after `on` an event kind. A few common tools know
+then a shell line. A few common tools know
 their own words, built in rather than borrowed from a shell's completion: `git` its common
 subcommands, and after `checkout`, `switch`, `merge`, `rebase`, `diff`, `log` or `branch -d` the
 branches, local then remote-tracking (asked of `git for-each-ref` in that folder, given half a
@@ -574,8 +572,8 @@ second); `make` its targets and `just` its `justfile` recipes; `npm`/`pnpm`/`yar
 Anywhere else, or where a tool has nothing that fits, the files and directories: a folder ends in
 `/` so the next `tab` goes into it, dotfiles show once the dot is typed, and `~` is looked up as
 home but stays `~` on the line. A `/` line completes its name, then its arguments: the words each
-command takes (`palette.rs`, the same ones its hint shows — `/edit` `schedules` `reactions` then
-`global`, `/reload` `rules` `shell`, `/resume` `all` then `commands`, `/lens` its lenses, `/mark`
+command takes (`palette.rs`, the same ones its hint shows — `/flow` its verbs then a flow's
+name, `/reload` `flows` `shell`, `/resume` `all` then `commands`, `/lens` its lenses, `/mark`
 its marks), `/filter`'s search tokens and their values, `/up`'s folders. What every candidate
 shares goes in first, and `tab` again walks the rest. When a list is on offer — those `tab` words, or the `/` commands a
 `/` line names — the arrows walk it too: `↑`/`↓` light a candidate with a caret, `tab` or `enter`
@@ -584,11 +582,11 @@ spot), and typing anything clears the highlight so `enter` submits the line as b
 
 Because letters go into the line, everything that is not typing is a `/` command
 (`tui/palette.rs`), offered as you type it: `/stop`, `/archive [seen]`, `/mark`, `/join`,
-`/shell`, `/rename`, `/pin`, `/hide`, `/sort`, `/pane [full]`, `/graph`, `/events`, `/reload [rules|shell]`, `/approve` and `/pause`,
-`/new`, `/edit [schedules|reactions [global]]`, `/summary`, `/since [when]`, `/ask`, `/filter`,
+`/shell`, `/rename`, `/pin`, `/hide`, `/sort`, `/pane [full]`, `/graph`, `/events`, `/reload [flows|shell]`,
+`/flow run|pause|resume|approve|edit|reload [name]`, `/new`, `/summary`, `/since [when]`, `/ask`, `/filter`,
 `/lens`, `/prune`, `/up`, `/help`, `/quit`. One name per act: a variant of an act is an argument to
 it rather than a command of its own, and no word means two things — `done` is only ever what `/mark`
-says. `enter` on an empty line is the row under the cursor instead — a job opens, a question comes
+says. `enter` on an empty line is the row under the cursor instead — a flow opens, a question comes
 out of the list to be answered by number, a run's terminal opens. Arrows, `home`/`end` and `esc`
 belong to the list, and so do `^j`/`^k` while nothing is typed (down and up, as vi's `j` and `k`), and shift-`↑`/`↓`, which move the row itself inside its project (`/sort` undoes it); `esc` with something typed clears the line first, and `ctrl-c` leaves.
 The few keys that are not the list's or the line's each stand for a command, and the command
@@ -612,14 +610,14 @@ where a word is letters and digits, so `~/Projects/flint` stops at its slashes; 
 take the same keys. A terminal only sends alt when it is set to (iTerm2: the option key as
 `Esc+`); the ctrl arrows arrive either way.
 
-At the right of the header is the lens — `all · agents · jobs · reactions · hidden`, the one in
+At the right of the header is the lens — `all · agents · flows · hidden`, the one in
 force accented — and the list shows
-only that slice: agents by what a run is, jobs and reactions by what started it (so a scheduled
-agent is in both `agents` and `jobs`, since the lens is a question, not a partition). `hidden` is
+only that slice: agents by what a run is, flows by what started it (so an agent a flow's step
+started is in both `agents` and `flows`, since the lens is a question, not a partition). `hidden` is
 the one partition: what you `/hide`, laid out as the list is, and nothing else — the other lenses
 never show it, except what comes through because it needs you. Questions
 ignore it; they are what needs you, whatever slice you are in. `tab` on an empty line steps the
-lens along (shift-`tab` back), and `/lens all|agents|jobs|reactions|hidden` jumps straight to one;
+lens along (shift-`tab` back), and `/lens all|agents|flows|hidden` jumps straight to one;
 it composes with `/filter`. One-off shell commands live in `all` while they run and are recent.
 
 Searching is `^f` (or `/filter` alone): the line turns from `❯` to `⌕`, and the list — or the
@@ -634,35 +632,27 @@ back the search from before, the arrows still move through what is left, and the
 A search (`tui/query.rs`) is words and tokens. Every word must match somewhere — a title, a
 project's name or folder, a CLI, a summary — and is lit up where it shows. The tokens pick by
 what a thing is: `in:` a project, `is:failed|going|done|stopped|needs|pinned|new`,
-`kind:agent|shell|command|job|reaction|question`, `by:` the schedule or reaction behind it,
+`kind:agent|shell|command|flow|question`, `by:` the flow behind it (a question's too: the flow
+whose firing asked it),
 `on:` a git branch — the one a run started on, the one a folder is on. Values match by prefix
 (names anywhere), and `tab` completes names and values. A project stays while anything under it
 matches; a project with nothing under it answers only to words, `in:` and `on:`. The events
 view has a search of its own, kept while the list is up and back when it returns: there `kind:`
 is an event's kind (`kind:run.failed`, `kind:run.` the family; `tab` offers the kinds), `by:`
-the rule behind an event's run or the one it set off, `in:` its project, and words match its
+the flow behind an event's run, the one it names or the one it set off, `in:` its project, and words match its
 kind, its run's title and what it said.
 
-`/new` is the form for a rule written by hand: `in` (a folder, or `global`), `name`, `when`
-(`every 30m`, a cron line, or `on run.failed` — which decides between `schedules.yaml` and
-`reactions.yaml`), `run`, `title`, `tags`, `cwd`. A `cwd` left empty is left out: a folder's rule
-runs in the folder, a global reaction where its event happens, and only a global schedule, which
-has no event to follow, takes the folder the form was opened from (an edited one, opened from no
-folder, must say). `enter` writes the block into the file
-(`rulefile.rs`: the block of that name replaced in place or added at the end of the mapping,
-comments and the other rules untouched, the result checked to parse), reloads, and approves it —
-your keystroke is the yes; a folder new to Relay is registered on the way. `^r` on a rule — a job
-row, or its node in the graph — is the same form filled in; saving rewrites only that block and
-keeps what the form does not show (`env`, `where`, `ask`), and a rename or a move takes the old
-block out. `/edit` never opens the form: it opens a rule file in `$EDITOR` and reloads on return —
-an edit made there is a file change, so it waits for `/approve` like any other
-(`rulefile::edit_target`). Bare, on a rule, it is that rule's own file at the rule's line;
-anywhere else the folder's file that did not load, at the line it broke on, when one did not;
-else the schedules of the folder the cursor is in — a run's, a job's, a header's, a graph
-node's — and the Relay home's where nothing names a folder (the `everywhere` header, an empty
-list). `/edit reactions` opens the reactions instead (`schedule` and `reaction` still read), and
-`global` after either opens the home's from anywhere; a file named so that did not load opens at
-its line too.
+`/new` is the form for a run started by hand: `in` (a folder), `run` (a shell line, or an agent's
+name and its prompt) and `title`; `enter` starts it, and the form is all it does. A flow is not
+written in a form: it is a folder (§6), and `/flow` is how the panel works with one
+(`App::flow_command`). `/flow run|pause|resume|approve <name>` fires it now, stops it firing by
+itself, lets it again, or says yes to its folder as it is; `/flow edit <name>` opens its `flow.md`
+in `$EDITOR` — at the line it broke on when it did not load, a template when there is no such
+flow yet — and on return reads the flows again and approves that one if it loads (your save is
+the yes), or flashes `not loaded:` with its file and line if it does not; `/flow reload` reads
+them all again, as bare `/reload` does after the shell. On a flow's row, in the list or the
+catch-up, or a flow's node (or its question's) in the graph, the name can be left out; a name
+typed wins over the row, and with neither the flash asks `which?`.
 
 ### Catch-up
 
@@ -675,11 +665,11 @@ open, the panel opens on the catch-up (`View::CatchUp`) instead of the list; a f
 no presence yet, has nothing to catch up on. `/since [when]` opens it any time, from any view:
 over the stretch typed (`1h`, a date, an instant), else since you were last here, else the last
 day. `esc` goes to the list (the pane and a search first, as on the list); `enter` goes to the
-row there, cursor on it — a job to its row, `^g` from there its rule. A row the list lets go of
+row there, cursor on it — a flow to its row, `^g` from there its node. A row the list lets go of
 once it is seen — ended more than a day ago, not pinned (`App::kept_on_the_list`) — is read where
 it stands instead: the pane opens on it in the catch-up, and it is seen when the catch-up is left.
 What reads the list's own rows says where it is done (`/hide`, `/sort`, `⇧↑↓`, `^r`: `… on the
-list · esc goes there`), and so do `^x` and `/archive` on a job, whose row here holds only the
+list · esc goes there`), and so do `^x` and `/archive` on a flow, whose row here holds only the
 stretch's firings; what acts on the row itself — `^t`, `/stop`, `/mark`, `^x` on a run or a
 question — acts here as on the list.
 
@@ -689,16 +679,16 @@ waits on you, what you have not looked at, what is pinned, and the questions —
 asked for. It is built on the client (`rl-cli/src/catchup.rs`, `CatchUp::build`) from the list's
 own rows — `rows::build`, its day of ended runs counted back from `since` — so the two never
 disagree: a question, a run waiting on you however old, a run with news since then or not looked
-at yet, a job's firings in the stretch — never an assistant's own run, the top being written
+at yet, a flow's runs in the stretch — never an assistant's own run, the top being written
 among them, which is Relay's doing and not what happened. A frame builds it once, however many of
 its parts read it (`App::drawn`, `catchup::Kept`: the rows by their place in the digest, laid
 back over it). What needs you leads each project and the projects that need you lead; a project with
 nothing new folds to one line (`▸ relay  nothing new`). A project's line tallies the stretch (`2
 need you · 9 ran · 1 failed`, only what happened in it counted); each row is a line (`row_line`): an
-agent's recap or its state and last line, a job's marks and how the last went, a command's state and
+agent's recap or its state and last line, a flow's marks and how the last went, a command's state and
 how it ended, a question's ask — answered by number on the line, with a note, as on the list. Moving
 about it marks nothing seen; leaving it, any way, marks seen all it showed (`saw_catch_up`), notes
-each job's earliest firing not seen so its `/summary` still starts there, and gives a project's
+each flow's earliest firing not seen so its `/summary` still starts there, and gives a project's
 `/summary` its own stretch back (`App::away_since` is the catch-up's while it is up, since you were
 last here after).
 
@@ -754,7 +744,7 @@ place a `(current, signal)` pair becomes a transition, and it decides against th
 | `transcript` | exact | not yet | `~/.claude` transcripts |
 | `git` | exact | placement only | commits landed, branch done |
 
-The rules, in order: terminal states never change here; `stale` only ever replaces
+In order: terminal states never change here; `stale` only ever replaces
 `working`/`starting`; a PTY guess never overrides an exact state from another source; the same
 state again upgrades source/confidence at most; anything else is a transition, journaled as an
 event.
@@ -785,41 +775,278 @@ stateDiagram-v2
 panel's list — of a project in your own order too — and are what `rl since` leads with. Confidence rides along in the UI, always visible.
 
 Grouping is derived, never a table: `group_key = ref → branch → workspace`, materialised onto
-each event row at write time so the digest groups without a join; it is what a reaction's
-`group` matches and what keeps one open question per group. The list files a run by
+each event row at write time so the digest groups without a join; it is what a flow's
+`where: { group }` matches. A question's own `group` is another thing: a key of its asker's
+choosing that keeps one open question per group. The list files a run by
 `place_key = ref → workspace` instead, so a folder is one project whichever branch it is on.
 
 ---
 
-## 6. What starts a run
+## 6. Flows
 
-Every run says why it is there. `Run.cause` is one string — `manual`, `schedule:<name>`,
-`decision:<id>`, `reaction:<name>`, `assistant:<job>`, and later `workflow:<name>/<step>` — and `Run.flow` is
-the chain it belongs to: its own id when it starts one, the flow it was handed otherwise. A
-nightly schedule that asks a question whose answer opens a pull request is three rows and one
-flow.
+Every run says why it is there. `Run.cause` is one string — `manual`, `decision:<id>`,
+`flow:<flow>/<step>` or `assistant:<job>` — and `Run.chain` is the chain it belongs to: its own
+id when it starts one, the chain it was handed otherwise. What starts work without you is a
+**flow**: a trigger, steps, and the review as a step Relay itself raises. One run of a flow is a
+**firing**, and the firing's id is the chain of every run in it. A probe every thirty minutes,
+an agent that reads what it found, a question, and the agent that acts on your yes are four rows,
+one firing and one chain, each run naming its step.
 
 ```mermaid
 flowchart LR
-    file["schedules.yaml<br/>(global, or a workspace's)"] --> sched["scheduler"]
-    sched -->|"cause: schedule:nightly"| run1["run — analyse the logs"]
-    run1 -->|"rl ask, then it ends"| q(["decision — open<br/>fix · ignore"])
-    q -->|"rl decide &lt;id&gt; fix"| run2["run — claude, open a PR"]
-    q -.->|"expires with a default"| run2
-    q -.->|"expires with none"| gone(["expired"])
-
-    run1 -.->|"run.failed"| ev{{"events"}}
-    q -.->|"decision.raised"| ev
-    ev --> rules["reactions.yaml"]
-    rules -->|"cause: reaction:&lt;name&gt;"| run3["run — notify me"]
-    rules -.->|"or ask:"| q
+    folder["~/.relay/flows/prod-logs/<br/>flow.md · new-log-errors.sh"] -->|"loaded; runs once approved, by hash"| fl["flows (rld)"]
+    clock(["when: every 30m"]) --> fl
+    ev{{"events"}} -->|"on: run.failed"| fl
+    fl -->|"a firing — its id the chain"| probe["probe<br/>cause: flow:prod-logs/probe"]
+    probe -->|"ends; if: probe.out"| triage["triage — claude, its ## section as prompt"]
+    triage --> q(["review — a question<br/>apply · ignore"])
+    q -->|"answered apply"| apply["review.apply — the step's own run"]
+    q -.->|"expires to its default"| gone(["ignore — nothing runs"])
+    probe -.->|"run.*"| ev
+    fl -.->|"flow.fired · flow.ended"| ev
 
     classDef q fill:#3e2f10,stroke:#d9a441,color:#f5e6c8
     class q,gone q
 ```
 
-**Actions.** A schedule's entry and a decision's option are the same shape, and one function
-turns that shape into a `RunSpec`. Adding workflow steps later adds no third dialect. What runs
+**A flow is a folder.** Flows live in the Relay home only — `~/.relay/flows/<name>/`, the
+folder's name the flow's (`[a-z0-9][a-z0-9-]*`; a dotfile or any other name is not a flow). A
+checkout's `.relay/` never holds one, so cloning a repo can never make Relay run anything.
+`flow.md` is the definition: YAML frontmatter, then prose and the prompts, each under a `## <step>`
+heading. Every other file in the folder is the flow's own, and the folder goes first on its
+steps' `PATH`, so `run: new-log-errors.sh` finds the script beside it. A link to a file counts
+as the file; a link to a folder keeps the flow from loading, since what is under it would run
+without being hashed. `runs/` is set aside for a
+firing's state: it is never part of the folder's hash, and `rld` writes `flows/.gitignore`
+(`runs/`) when there is none, so `~/.relay/flows/` may be a git repository — history with `git
+log`, sharing with a push — though Relay neither needs nor assumes it. Nothing is written under
+`runs/` yet (§8).
+
+```markdown
+---
+in: ~/Projects/flint-platform
+when: every 30m
+steps:
+  probe:
+    run: new-log-errors.sh
+  triage:
+    after: probe
+    if: probe.out
+    run: { agent: claude }
+  review:
+    after: triage
+    ask: "{triage.out}"
+    group: prod-logs
+    options:
+      apply:  { run: { agent: claude } }
+      ignore: {}
+    default: ignore
+    expires: 4h
+---
+
+## triage
+Analyse the new errors and warnings below. Propose exactly one action, in two lines at most.
+
+{probe.out}
+
+## review.apply
+Do this, in this repository: {triage.out}
+
+What was said with the yes: {review.note}
+```
+
+The frontmatter is `relay_proto::flow::FlowSpec`; a key it does not know is refused:
+
+| key | what |
+|---|---|
+| `in` | the project the steps run in — a path (`~` allowed), never a name, so a rename (`^r`) cannot break it. It must be a folder Relay knows (`rl add`), or the flow does not load. A step's own `in` overrides it. |
+| `when` | a cadence: `every 30m`, or a five-field cron line in quotes, local time |
+| `on` | an event kind or a list (`run.failed`, `logs.*`, `*`), narrowed by `where` (`tag`, `cause`, `cli`, `group`, `data`) |
+| neither | the flow runs only when asked: `rl flow run`, `/flow run` |
+| `missed` | `skip` (the default) or `catch-up-once`: a `when` firing slept through |
+| `overlap` | `skip` (the default), `queue` or `kill`: a trigger while the last firing is still going |
+| `throttle` | for `on`: a burst within it is one firing (`10s` unless said, `0` for none) |
+| `steps` | the steps, by name, in the order written; at least one |
+
+`when` and `on` may both be given; either fires it.
+
+**Steps.** A step is one of two things, and when it runs:
+
+- **`run:`** — an action (below): a string through `sh -c`, a list as argv, a map as an agent run
+  headless, with `cwd`, `env`, `tags` and `title` beside it. An agent step with no prompt takes
+  its `## <step>` section. A step's run has no tty and no input.
+- **`ask:`** — a question Relay raises, its text built from what came before, with `options`
+  (each an action, `{}` doing nothing), `default`, `expires`, `group` and `multi`. An option's
+  agent with no prompt takes the `## <step>.<option>` section.
+- **`after:`** — a step's name, or a list. None: the step starts when the firing does. Steps
+  ready together start together.
+- **`if:`** — `probe.out`, `!probe.out`, `review.choice == apply`, `event.cli != claude`. A bare
+  name holds when it is set and not empty; nothing more — no `&&`, no arithmetic
+  (`rl-flow/src/cond.rs`).
+- **`in:`** — overrides the flow's.
+
+Where a step runs: its `in`, else the flow's; with neither, a step of an `on` firing runs where
+its event happened — the folder of the event's run while that is still there, else the event's
+workspace — and anything else in the Relay home (`engine::cwd`). Each run, titled `prod-logs ·
+probe`, is started with `RELAY_FLOW`, `RELAY_FIRING`, `RELAY_STEP` and `RELAY_FLOW_DIR` (with
+`RELAY_RUN`, as every run is), the folder first on `PATH`; a `when` firing's steps get `RELAY_LAST_FIRING` too — when the
+previous firing started, empty on the first — so a probe can ask only for what is new without
+keeping a clock of its own, and an `on` firing's get the event: `RELAY_EVENT` whole, as JSON,
+and `RELAY_EVENT_ID`, `_KIND`, `_SUMMARY`, `_RUN`.
+
+What came before reaches a step through placeholders. `{probe.out}` is what a step's run printed
+— the last 64 KB of it, ANSI stripped and trimmed, which for an agent run headless is its answer;
+`{review.choice}` and `{review.note}` are an ask step's answer and what was said with it;
+`{event.summary}`, `{event.data.x}` and the rest (`kind`, `run`, `title`, `cwd`, `cli`, `cause`,
+`group`, `workspace`) are the event an `on` firing fired on. They are spliced into an agent's prompt and an
+`ask:` text only, in one pass — what was spliced in is never read for more
+(`rl-flow/src/template.rs`). The prompt goes after `--`, so one that starts with `-` is never read
+as the agent's flag; an agent whose prompt is a flag's value (`gemini -p <prompt>`) cannot take
+`--` there, and a filled prompt that starts with `-` does not start
+(`rl_detect::registry::with_given_prompt`). A command never gets one: a `run:` string or argv, or an agent's
+`args`, that names `{probe.out}` is refused at load, so an error line in production logs can
+never become shell. The refusal says what to do instead: for the event, read it from the
+environment (`$RELAY_EVENT_SUMMARY`, `$RELAY_EVENT`); what a step left goes into an agent's prompt
+or an `ask:`, since a command has no way to it yet (§8). Other braces (`awk '{print $1}'`) are the
+shell's.
+
+What is wrong is said at load, all of it at once, each at its line (`rl-flow/src/def.rs`,
+`check`): an unknown `after`, a cycle, an agent step with neither a prompt nor a section, a
+placeholder or an `if:` naming a step it does not come after, a `## ` heading that is no step's,
+a placeholder in a command, a `prompt_file` that is not in the flow's folder (absolute, out
+through `..`, or under `runs/`, which no hash covers), a `multi` ask with more than one option that runs something (only one chosen
+option would run), an `in` Relay does not know (`prod-logs · flow.md:2 · in: ~/x is not
+a project Relay knows — rl add ~/x`; `rl add` is `rl up` by another name).
+
+**Loading and approval.** `rld` reads every `~/.relay/flows/*/flow.md` at start, on
+`flow.reload` (`rl flow reload`, the panel's `/reload`), when a folder is registered or removed,
+and after `rl flow edit` and `/flow edit` (`flows/store.rs`). Each folder is hashed — sha256 over
+every file's path and bytes, `runs/` left out (`rl-flow/src/hash.rs`) — its `flow.md` read and
+checked, and the flow kept in the ledger's `flows` table: the hash, the checked definition as
+JSON, whether it is paused, the hash you approved, when it last fired and fires next. A flow that
+does not load is left out and said, with its file and line — `rl flow list` under `not loaded:`,
+a red `! flows` on its project's header (`flows broken` on the headline for one in no project),
+the project's or everywhere's pane, `/flow edit <name>` opening it at that line — and the rest
+load; a folder that cannot be read stays as it last loaded. `flow.errors` returns what the last
+reload left out, so a broken flow stays said until it is fixed, not only in the reload's flash.
+A flow whose folder is gone is marked removed; its firings stay. A reload reads `config.yaml`
+again too.
+
+A flow runs only once approved: the hash you said yes to is the folder's hash now. Any change to
+any file in the folder — the frontmatter, a prompt, a script — asks again: the flow says `needs a
+yes` (`FlowStatus::NeedsApproval`) and neither fires nor can be run by hand until `rl flow
+approve` or `/flow approve`. Nothing watches the folder between reloads, so the engine reads and
+hashes it again before a firing starts and before each step's run starts or is resumed
+(`Flows::yes_holds`): on a folder changed since its yes the firing is refused (`needs a yes`), or
+the step does not start — `flow.skipped`, "the flow changed since its yes", and its firing moves
+on as if it failed — and the flows are read again, so it shows `needs a yes`. A firing waiting
+four hours on a question therefore never runs a script changed while it waited.
+
+A yes is to one version: `flow.approve` carries the hash of the flow as the one saying it was
+shown it — the panel the one it has on screen; `rl flow approve <name> [<hash>]` reads the folder
+again and then says yes only to a version the hash (a prefix of it, as `rl flow list` shows it)
+matches, or, given none, to the one just read, which it prints — and is refused once the folder as
+last loaded is another. Writing it through `rl` is the yes, and
+covers no more than was written: an `rl flow edit` or `/flow edit` approves only when `flow.md`
+was saved changed, the folder before the editor opened had its yes (or held nothing yet), and
+nothing else in it changed while the editor was open — the client hashes the folder as it was
+with the saved `flow.md` in it, and says yes to exactly that hash (`rl-cli/src/flow.rs`,
+`finish_edit`). Otherwise the flows are read again and it is left needing a yes, saying why; an
+edit just to look gives none. A new flow left as the template is not kept, however the editor
+ends: its `flow.md` goes, and its folder once nothing else is in it (what a firing left in
+`runs/` stays). Nothing else is
+approved for you — not a hand edit, not a flow an agent wrote.
+
+`rl flow` is the line's way in: `list` (`NAME HASH STATUS WHEN LAST IN`, the hash's first eight;
+then what did not load; `--all` keeps the removed), `edit <name>` (a new name starts from a
+template, gone again if left as it was), `run <name>` (now,
+by hand, paused or not, never without its yes), `pause`, `resume`, `approve <name> [<hash>]` and `reload`, each
+with `--json`. Behind them are `flow.list`, `flow.errors`, `flow.reload`, `flow.approve`,
+`flow.pause`, `flow.resume`, `flow.run` and `flow.firings` (`rl-daemon/src/flows/rpc.rs`).
+
+**The engine.** A firing is a small state machine in `rld`, decided by pure code
+(`rl-flow/src/advance.rs`) and carried out by the daemon (`rl-daemon/src/flows/engine.rs`). It
+runs on the definition it started with (`firings.def_json`), whatever is edited meanwhile, and
+remembers the folder's hash it began on (`firings.hash`): a step starts only while the yes is
+still to that version, so an edit said yes to mid-firing does not leave the firing a mix of two —
+its later steps do not start (`flow.skipped`, "the flow changed since this firing began") and the
+next firing runs the new version whole. A resume checks the same.
+
+- **States.** A firing is `running`, `waiting` (on a question, or a lost step), `done`, `failed`
+  or `stopped`; a step `pending`, `running`, `waiting`, `lost`, `done`, `skipped`, `failed` or
+  `stopped` — the ledger's `firings` and `steps`.
+- **Advancing.** When a firing starts, on a step's run ending, on an answer or an expiry, and when
+  `rld` starts, the engine takes each pending step whose `after` are all `done`: its `if:` false,
+  it is `skipped`; else it starts, or asks. A step after one that did not finish well — failed,
+  skipped or stopped — is skipped, its `if:` unasked. A run that ends in failure fails its step;
+  one stopped by hand stops the firing, the steps not reached skipped and its open question
+  dismissed. With nothing pending, going or waiting, the firing ends: `stopped` if a step was,
+  else `failed` if one failed, else `done`. Deciding is idempotent: an event heard twice moves
+  nothing twice.
+- **Fan-in.** A step that comes after several starts only when every one of them is `done`; one
+  that did not finish well means it does not run at all.
+- **Overlap.** A trigger while a firing of the same flow is still going: `skip` lets it be, as
+  `flow.skipped {reason: overlap}`; `queue` holds a `when` firing until the last one ends, however
+  long — it is not late while it waits, its lateness counted from when that one ended (one by
+  hand or `on` is skipped); `kill` stops the open firing's runs and questions — it ends `stopped`
+  — before the new one starts.
+- **One at a time.** The engine holds a lock while it moves a firing on, so a run's end is never
+  read before the run is recorded as its step's.
+
+**Ask steps** go over the question engine (**Decisions**, below). `flows/ask.rs` builds the
+question — the `ask:` text filled, each option keyed and labelled by its name, the default
+marked, the `group` filled (empty is none), filed in the step's folder — and raises it in the
+firing's chain, its `decision.raised` naming the flow (`data.flow`), the step `waiting` on it. It
+is an ordinary question: on top of the list and the catch-up, answered by number with a note, in
+`rl decisions`, expiring to its default. Answering does not start the option the way an `rl ask`
+question's does: the engine hears `decision.taken` and starts the option's run as the step's own
+— its run, its out the step's out, with `RELAY_DECISION`, `RELAY_CHOICE` and `RELAY_NOTE` — and an
+option that runs nothing leaves the step done. Dismissed, or expired with no default, the step is
+skipped, and what comes after it with it. A `group` restates: asked again while a question of its
+group is open, the open one is kept — its id, its place — and the newest step takes it over, the
+one that had it skipped, so one error does not ask every thirty minutes. Only a step restates a
+step's question: a plain `rl ask` in the same group asks its own, and so does a step where a
+plain one is open, so neither answer does what the other asker meant.
+
+**`when` and `on`** (`flows/triggers.rs`) are a scheduler and a reactor in one loop
+(`Flows::serve`): what is due is fired, then each new event — read by id from a cursor in `meta`
+(`flows.cursor`) — is handed to the firings it is about and to the flows that hear it. The cursor
+is saved once per batch of 200 events, so `rld` dying mid-batch hands that batch out again when
+it comes back: a firing's steps move on once all the same, but an `on` flow may fire twice for one
+event (its throttle and the five-minute horizon narrow that, they do not rule it out). A `when`
+flow's next firing is planned from its last (`every`) or from the clock (cron). A yes, or a reload
+that finds it changed, plans an `every` from now when its last firing is already a cadence past,
+so a yes or an edit neither fires it nor has it said missed at once; found unplanned at a start,
+it is due at once and catches up once (`Flows::plan_afresh`, `first_time`). One
+more than two minutes late — `rld` down, the machine asleep — is said as `flow.skipped {reason: missed}` and
+planned from now, unless `missed: catch-up-once`, which fires it once. A resumed flow is planned
+from now: what it slept through while paused is neither made up nor said missed. An `on` flow
+hears an event of a kind it names (`x`, `x.*`, `*`) while it is approved and not paused, as
+`where` narrows it, and throttled against its last firing. Three things keep a flow from running
+away with itself. A flow never fires on its own doing: a run of its steps, a question its step
+asked, or one of its own `flow.*` events. A throttle collapses a burst.
+And an event older than five minutes is let be — on a first start the cursor begins at now — so a
+daemon that was down does not come back and fire a day of history. **Between flows there are only
+events**: one flow's runs raise events, Relay's own or `rl emit`'s, and another's `on:` hears
+them; a step that truly needs another flow runs `rl flow run <name>`.
+
+**Restarts and resume.** When `rld` starts — after the supervisor's own reconcile, so the runs
+that ended or were lost while it was down are already said — the flows are read, the cursor is
+taken, and every open firing is reconciled before the socket answers (`Flows::reconcile`): a step
+whose run ended advances as though the end had been heard; one whose run was lost (`run.lost`) is
+`lost`, its firing `waiting · <step> lost`; a waiting step with no question raised has it raised.
+`/resume` (`rl resume <id>`) on a lost step's run starts it again as the step's own — the same
+cause, chain and environment, the flow's folder on `PATH`, rebuilt from the firing's definition
+(`Flows::spec_again`) — and the firing goes on where it was.
+
+**Events.** `flow.fired` (`flow`, `firing`, `trigger` — `when`, `on` or `hand` — the `event` an
+`on` firing fired on, and when the last firing started), `flow.ended` (`flow`, `firing`,
+`status`) and `flow.skipped` (`flow`, and `reason`: `overlap`, `missed`, or why a step's run
+could not start, with the `firing` and `step`). They are filed in the flow's `in`, as the project
+is registered, else in the Relay home. The steps' runs raise `run.*` as any run does.
+
+**Actions.** A flow's step, an ask step's option and an `rl ask` question's option are the same
+shape, and one function turns that shape into a `RunSpec` (`rl-daemon/src/action.rs`). What runs
 is written under one key, in whichever of the three forms fits:
 
 ```yaml
@@ -827,14 +1054,14 @@ run: "date +%T >> pulse.log"     # a string goes through sh -c
 run: [grep, -c, ERROR, app.log]  # a list is argv, no shell
 run:                             # a map is an agent, run headless:
   agent: claude                  #   the profile's headless args, then args, then the prompt
-  prompt_file: standup.md
+  prompt_file: standup.md        #   (or prompt:, or a step's ## section)
   args: [--model, opus]
 cwd: ~/work/api                  # and these decorate it, whichever form
 env: { CI: "1" }
 tags: [nightly]
 ref: gh:1
 title: nightly checks
-no_tty: false
+no_tty: false                    # a flow's steps never have one
 ```
 
 The parser for those three forms is hand-written, so a mistake says which form it could not
@@ -846,91 +1073,28 @@ Answering is the only thing that starts the follow-up runs, and the row moves to
 they start, so two `rl decide` racing cannot both fire. Each run an answer starts has the answer
 in its environment: `RELAY_DECISION` (the question), `RELAY_CHOICE` (the option) and
 `RELAY_NOTE` (what was said with it, or empty), so a note can steer what runs. A `group` key is unique among open
-questions: asking the same thing again restates the open one, keeping its id, so a nightly job
-leaves one line rather than thirty. An `expires` either takes the option marked `default` or
+questions of one kind of asker — a flow's ask steps, or everything else (`0023_group_owner`):
+asking the same thing again restates the open one, keeping its id, so a flow that asks
+every thirty minutes leaves one line rather than thirty. An `expires` either takes the option marked `default` or
 moves the question to `expired`; the sweeper sleeps until the earliest deadline and does
 nothing when there is none.
 
-**Reactions** are the other direction: every event the ledger records is offered to the rules in
-`reactions.yaml`, and a rule either runs something or asks a question. A rule says which kinds
-it wants (`run.failed`, `run.*`, `*`), may narrow by `where` (the run's tag, cause, cli, or the
-event's group), and fills `{summary}`, `{title}`, `{run}`, `{cwd}` (the folder the event's run ran
-in), `{data.x}` and the rest into whatever it runs, and into its `cwd`. The whole event is in the
-child's environment as `RELAY_EVENT`, its id as `RELAY_EVENT_ID`; the run's `run.started` names it
-too (`data.event`), as a question's `decision.raised` names the rule and the event
-(`data.reaction`, `data.event`). Where it runs (`reactions::run_dir`): a workspace's rule in
-its folder; a global rule where its `cwd` says, and with none where the event happened — the
-folder the event's run ran in while that is still there, else the event's workspace, else the
-Relay home. A relative `cwd` is under that same folder (the workspace's, or the event's), joined
-once. So a global reaction needs no `cwd`, and one written without runs inside the project it
-answers; a global schedule still needs one, since nothing happened for it to follow.
-
 **Emitting events.** A run's own output is not the only thing that lands in the events table:
-`rl emit <kind> [--data k=v]… [--json-data -]` puts one there itself, and the reactor picks it up like
+`rl emit <kind> [--data k=v]… [--json-data -]` puts one there itself, and a flow's `on` hears it like
 any built-in event (`event.emit`, appended by `rl-daemon/src/handlers.rs`). Inside a run it needs
 no arguments beyond the kind — it reads `RELAY_RUN` from the environment, the same way `rl ask`
-does, so the event is filed under that run's folder and joins its flow; outside a run, `--in
+does, so the event is filed under that run's folder and joins its chain; outside a run, `--in
 <folder>` (or the cwd) says where it belongs. The kind is the caller's own dotted name
-(`log.issue`); the daemon's own families (`run.*`, `decision.*`, `schedule.*`, …) are refused, so
+(`log.issue`); the daemon's own families (`run.*`, `decision.*`, `flow.*`, …) are refused, so
 an emit cannot forge a `run.failed` the digest would read as real. The payload rides in `data`,
-reachable in a reaction as `{data.severity}` and matchable with `where: { data: { severity:
-[ERROR, WARNING] } }`. This is all a "source" needs: a schedule runs a probe on a cadence (with
-`RELAY_LAST_RUN` in its environment, the previous firing, so it can ask "what is new since then"
-without keeping its own clock), the probe `rl emit`s what it finds, and a reaction fans out to an
-agent that works it and `rl ask`s. A plugin, for now, is just such a command; a lightweight JS/TS
+reachable in a flow's prompt or question as `{event.data.severity}` and matchable with `where: {
+data: { severity: [ERROR, WARNING] } }`. Inside one flow a step needs none of it — what it printed
+is the next step's `{probe.out}` — so an emit is for what another flow, or the graph, should
+hear. A plugin, for now, is just such a command; a lightweight JS/TS
 SDK over the same `rl emit` / `rl ask` / `rl run` contract is on the roadmap.
 
-Three things keep a rule from running away with itself. A run it starts carries `cause:
-reaction:<name>` and a question it asks remembers the same, so no rule ever answers its own
-doing. A throttle, ten seconds by default, collapses a burst. And the loop reads the event table
-by id from a cursor kept in `meta`, ignoring anything older than five minutes, so a daemon that
-was down does not come back and fire a day of history.
-
-`rl on run.failed -- notify "{summary}"` appends a rule to your own file and reloads; the file
-stays yours, comments and all. It writes no `cwd` unless `--cwd` gives one (a plain relative path
-taken from where `rl` was run), so the rule runs where each event happens. `rl react test <event>` replays one real event through every rule
-and prints what each would do, and why it would not. `rl every 30m -- make test` (a cron line in quotes works too; `--agent claude -- <prompt>`,
-`--in <folder>`, `--global`, `--cwd`, `--title`, `--tag`, `--name`, `--replace`) writes a schedule into
-this folder's `.relay/schedules.yaml` — or yours with `--global` — through `rulefile.rs`, registers
-a folder new to Relay, reloads and approves it: the command line is the yes. A name already
-there is refused unless `--replace`.
-
-**Rules** is how both are shown: `rule.list` returns every schedule and reaction as one
-`Rule` (`relay-proto/src/rule.rs`, a tagged enum over the two rows with one set of accessors —
-`when()`, `does()`, `status()`), and `rule.approve` says yes to one of them by name, which the
-per-folder `rl up --yes` never allowed. `rl rules` is the table; `rl rules approve|pause|resume|run
-<name>` act on one, finding its kind by name (`--kind` when a schedule and a reaction share it,
-`--in` when two folders do). In the panel, `r` flips the list to rules — grouped by whose file,
-what needs a yes on top, narrowed to the folder of the row it was pressed on until `esc` — and
-`y` approves, `p` pauses, `enter` fires a schedule now. The two YAML
-files, the two ledger tables and `rl schedule` / `rl react` are unchanged underneath.
-
-**Reloading, and what did not load.** A reload (`schedule.reload`, `reaction.reload`; `rl rules
-reload`, the panel's `/reload`, and `rld`'s own load at start) reads the home's file, then each
-registered folder's, one scope at a time (`rulestore::RuleStore::reload`). A rule that does not
-check out (``bad: needs `cwd` ``) is left out and the rest of its file loads; a file that cannot be
-read or does not parse changes nothing in the ledger, so its rules stay as they last loaded — the
-home's the same as a folder's, and the folders after it load all the same. Neither is an RPC
-error: the report says each in `not_loaded` (`relay_proto::rule::NotLoaded`: the scope, what it is
-called — `global`, or the name the folder is registered under — the file, the rule when it was
-one, and the line and column, a YAML error's own taken out of its words so it is not said twice),
-and `errors` carries the same as lines — `global · schedules.yaml:4:3: did not find expected key`,
-``relay · reactions.yaml:7 · bad: needs `cwd` `` — which is what `rl schedule reload`, `rl rules
-reload` and `rl up` print after `not loaded:`. Only the ledger failing fails a reload. `rld` keeps
-the last load's `not_loaded` of each scope in memory, replaced by the scope's next load and dropped
-when its folder is unregistered, and `rule.errors` returns them all, so a broken file stays said
-until it is fixed, not only in the reload's flash. The panel asks for them beside `rule.list` and
-shows them where the rules are: a red `! rules` on the folder's header (on `everywhere` for the
-home's), the headline's `rules broken`, the pane on that header listing each with its file and
-line, and `/edit` there opening the file at that line. `/reload` says in its flash how many of each
-loaded and what did not — ``reloaded · 2 schedules · 1 reaction · 1 not loaded: bad needs `cwd` `` —
-and when more than one did not, `· 3 not loaded`, with the pane listing them all, whose each is,
-until the next key. Bare, it re-reads the shell first, so the flash that stays is the rules'.
-`not_loaded` and `rule.errors` are additions an older client ignores, so the protocol version
-stays.
-
 **Your defaults, and the agents Relay itself uses.** `~/.relay/config.yaml` is the one place for
-defaults (`relay_proto::config`, read by `rld` at start, on `config.get` and on a rules reload —
+defaults (`relay_proto::config`, read by `rld` at start, on `config.get` and on a flow reload —
 `rl-daemon/src/config.rs`). Absent means all defaults; a key it does not know is refused with the
 line, so a typo cannot silently do nothing, and a file that does not parse is reported by
 `rl config` (exit 1) while the daemon runs on defaults. Keys arrive one at a time, when a need
@@ -986,14 +1150,13 @@ picked one asks once more, naming what it is about to stop. Two deliberate answe
 happens; holding enter through the guide moves nothing at all, which is a test.
 
 **What an assistant is told** is the context pack (`rl-cli/src/context.rs`, `rl context
-[--in <folder>]`), built from the code so it cannot drift: the words (run, folder, `global`,
-rule, job, question, agent, `when`), one line per event kind in `event_kind::ALL` (a kind
-without words fails a test), the fields of a schedule and a reaction (every serde field of
-the specs must be explained, or a test fails), the placeholders a reaction can use, `rl
---help` plus the help of `run`, `every`, `on` and `ask`, what is here (the folder and its
-name, the folders Relay knows, this folder's and the person's rules, the agents on this
-machine), and the answer contract: exactly one YAML document, `kind: run | schedule |
-reaction` then the form's fields.
+[--in <folder>]`), built from the code so it cannot drift: the words (run, folder, flow,
+question, agent, tag and ref), one line per event kind in `event_kind::ALL` (a kind without
+words fails a test), `rl --help` plus the help of `run`, `flow` and `ask`, what is here (the
+folder and its name, the folders Relay knows, the flows — each by what starts it and where it is
+`in` — and the agents on this machine), and the answer contract: exactly one YAML document,
+`kind: run` then the form's fields. A flow is not drafted yet: the pack says the person writes
+one with `rl flow edit`.
 
 **The interpreter** is that pack, the typed words and an ordinary run. The panel's line (§4) and
 `rl interpret <words…> [--in <folder>] [--go]` build the pack on the client (it needs clap's
@@ -1006,29 +1169,26 @@ for it to end — 60 s, then it is stopped and the caller told so — and return
 what it wrote. The client reads the last `kind:` block out of that by hand (`rl-cli/src/
 interpret.rs`: fences and prose around it dropped, `key: value` lines, block and flow lists; not
 a YAML parser, because an agent writes `run: claude fix it: now` and means it) and fills the
-form. In the panel that is the same form `/new` and `^r` open, with the assistant's answer in
+form. In the panel that is the run form `/new` opens, with the assistant's answer in
 it and a line saying who drafted it; `rl interpret` prints the draft with `# by <agent> · run <id>` and does
-nothing, or with `--go` starts the run or writes the rule on the line, `cause: manual`, since the
-go was yours. When the words are typed with a rule's node under the cursor in the graph, the
-prompt carries that rule as it stands and asks for the whole rule as it should be. An answer without a `kind:`
-is an error that quotes what the agent said. Interpretation is a run, so it is in the list, in
+nothing, or with `--go` starts the run, `cause: manual`, since the go was yours. An answer of
+another `kind:` is refused by name, and one without a `kind:` is an error that quotes what the
+agent said. Interpretation is a run, so it is in the list, in
 `rl ls --all`, in the journal, and under retention like everything else; nothing about it is
 special except its cause.
 
-**The summariser** says what happened, for someone who was not looking, in a run, a job's runs
-(a schedule's or a reaction's), a project's, or everything (`summary.make {target: run | job |
+**The summariser** says what happened, for someone who was not looking, in a run, a flow's runs
+(its steps', wherever they ran), a project's, or everything (`summary.make {target: run | flow |
 project | all, deep, from, again, dry}`; `rld`'s `rl-daemon/src/summary.rs`). `/summary [deep]
 [again] [since]` in the panel asks it of the row under the cursor (§4), and `rl summary
-<run|job|folder|all> [since] [--in <folder>] [--deep] [--again]` of what it names (`--in`: the
-folder a `schedule:` or `reaction:` belongs to; none, a global one); the client turns the stretch
+<run|folder|flow:<name>|all> [since] [--deep] [--again]` of what it names; the client turns the stretch
 (`2h`, a date, an instant) into `from`. Left out, `from` is since you last looked: a run's
 `seen_at` when it has written output or had an event since (selecting a row is looking, so a run
-that waits as it was is told whole), else the whole run; for a job, from the start of its oldest
-firing not seen since it ended (`runs::oldest_unseen`), else the last day. A project and
+that waits as it was is told whole), else the whole run; for a flow, from the start of its oldest
+run not seen since it ended (`runs::oldest_unseen`, by the cause `flow:<name>/`), else the last day. A project and
 everything need one — the client knows when you were last here. The daemon never asks an agent
-on its own: every call is a client's — `/summary`, `rl summary`, a reaction, or the catch-up's top,
+on its own: every call is a client's — `/summary`, `rl summary`, a flow's step, or the catch-up's top,
 which the panel and a bare `rl since` ask for as you come back, as `catch_up.summary` says (§4).
-`summary.make` and `summary.get` take a target where they took a run, so `PROTOCOL_VERSION` is 3.
 The top of everything runs in the Relay home, and an assistant's run there makes no group on the
 list (`rows::Context::relay`); `rl ls --all`, the events view and the ledger keep it.
 
@@ -1060,10 +1220,10 @@ or the whole recorded output, with up to 500 of Relay's events (the newest of th
 what it joins is past `CHUNK` — so a weekend of a busy agent is still one answer, never one giant
 prompt. A part that fails says which (`part 2 of 5: …`).
 
-Many runs — a job's (its cause, in its folder unless the rule is global), a project's, or every
+Many runs — a flow's (its cause), a project's, or every
 folder's — are those that moved in the stretch or are still going, never an assistant's own.
 Brief is one call over each run's line as the list says it (its recap, else where it stands),
-a job's firings folded into one (`nightly · 14 firings · 2 failed · last: …`). Past 200 lines
+a flow's runs folded into one (`nightly · 14 runs · 2 failed · last: …`). Past 200 lines
 the newest are told and the rest counted (`… and 12 earlier`), the room shared between folders —
 one with fewer lines than its share tells them all — so a busy folder cannot crowd a quiet one
 out of everything's summary. Deep reads each run deep first, reusing the deep reads kept, then
@@ -1094,7 +1254,7 @@ written). It is said in no event — one a turn would bury the run's own news.
 `transcripts`), or finds it by the run's folder and start time. A run's brief recap of the whole
 of it is kept in `summaries`, one per run — the latest — with where it came from and how far the
 run had got (the session file's length, or the output's last chunk). Everything else — a run
-read deep or over a stretch, a job, a project, everything — is kept in `summary_kept`, one per
+read deep or over a stretch, a flow, a project, everything — is kept in `summary_kept`, one per
 (what, brief or deep, from when), many runs' reach being how many there are, their latest change
 of state and how much they have written (so one that writes on in the same state has moved on).
 A run's brief recap of the whole of it is said as a `run.summarised` event; nothing kept in
@@ -1104,55 +1264,54 @@ marks it stale once it has. A run's default stretch, brief, with nothing kept fo
 the newest said of the run — its recap, or one since you looked (`kept::latest`) — so looking at
 the run again does not hide what was said of it. The
 narrative is always marked as whose it is, in the pane and on the line (`# claude's own · 2m
-ago`). An assistant's own run is never summarised — so a rule like
+ago`). An assistant's own run is never summarised — so a flow like
 
-```yaml
-summary-what-ends:
-  on: run.finished
-  run: rl summary {run}
+```markdown
+---
+on: run.finished
+steps:
+  recap:
+    run: 'rl summary "$RELAY_EVENT_RUN"'
+---
 ```
 
-summarises every run that ends well and cannot feed itself. Nothing seeds that rule; on demand
+summarises every run that ends well and cannot feed itself. Nothing seeds that flow; on demand
 is the default.
 
 Relay still talks to no one itself. A question surfaces in `rl decisions`, in `rl since` and at
-the top of the panel, where a number key answers it; getting it to Slack or mail is a reaction on
-`decision.raised` running your own command.
+the top of the panel, where a number key answers it; getting it to Slack or mail is a flow
+`on: decision.raised` running your own command.
 
-**The wiring graph** is all of this as one network. A reaction hears events from every folder,
-whatever file it is written in, so there is one graph, not one per project. `graph.get
+**The wiring graph** is all of this as one network. A flow's `on` hears events from every
+folder, whatever project it is `in`, so there is one graph, not one per project. `graph.get
 {since}` (default: the last 7 days; `rl-daemon/src/graph.rs`, pure over rows from
 `rl-ledger/src/graph.rs`) returns nodes and edges. The nodes are:
 
-- schedules (`schedule:<scope>/<name>`) and reactions (`reaction:<scope>/<name>`);
-- what a rule runs (`run:<rule>`, a shell or an agent), and a reaction's question (`ask:<rule>`,
-  with the ids still waiting) plus what each answer runs (`run:ask:<rule>/<key>`);
+- every flow (`flow:<name>`), there before it has fired, with what starts it (`every 30m`,
+  `on run.failed`), its status and when it fires next; a run one of its steps started counts on
+  the flow's node, not one of its own. The steps inside a flow are not drawn yet (§8);
+- a flow's questions (`ask:<flow>`, the ask steps' questions, named by the newest, with the ids
+  still waiting), counted on the edge from the flow;
 - runs you started, one node per folder and kind (`runs:shells:<folder>`), drawn only once
   they set something off;
 - events raised outside any run, per folder (`outside:<folder>`);
-- an event kind a reaction listens for that nothing raised in the window (`event:<pattern>`),
-  so every reaction has a way in.
+- an event kind a flow's `on` takes that nothing raised in the window (`event:<pattern>`), so
+  every flow that listens has a way in.
 
-Each node carries its folder as a fact rather than a box, its rule's status, and how its runs
-went in the window. The edges are of two kinds:
-
-- **Declared**, from the files: a rule to what it runs or asks, a question to each answer's
-  run, and the kinds a schedule or reaction says it `emits:`.
-- **Observed**, from the ledger: which runs raised which event kinds, and so which reactions
-  heard them, labelled with the kinds and counted. A run maps to its node by its cause. An
-  event with no run but a `data.decision` belongs to the question it is about. A reaction's
-  own runs and questions never reach it.
-
-`emits: [logs.error]` on a schedule or reaction is only for the graph: it wires a command
-before it has ever raised anything.
+Each node carries its folder as a fact rather than a box, its flow's status, and how its runs
+went in the window. Apart from a flow's edge to its questions, the edges are **observed**, from the
+ledger: which runs raised which event kinds, and so which flows heard them, labelled with the
+kinds and counted. A run maps to its node by its cause. An event with no run belongs to the flow
+whose step asked the question it is about, or whose `flow.*` it is. A flow never hears its own
+runs, questions or events, so no edge loops back to where it started.
 
 In the panel, `/graph` (or `^g`) swaps the list for the graph, and `^g` or `esc` goes back;
-each keeps its own selection. The graph is where rules are seen: there is no separate rules
-list any more, and a project header's tally is the list's glimpse of them. `tui/graph.rs` lays it out and
+each keeps its own selection. The graph is where flows are seen wired together; a project
+header's tally and a flow's row are the list's glimpse of them. `tui/graph.rs` lays it out and
 draws it, pure from a `Graph` to a grid of styled cells:
 
 - **Layered, by connection.** A node's column is one past the furthest thing that feeds it,
-  so a schedule is at the left because nothing feeds it, not because it is a schedule. Edges
+  so a `when` flow is at the left because nothing feeds it, not because of what it is. Edges
   that close a loop are set aside for ranking and routed back along the bottom.
 - **Ordered within columns.** Nodes are sorted by where their neighbours sit, a few sweeps
   each way, and each is placed level with what feeds it where there is room, so a chain is a
@@ -1161,25 +1320,26 @@ draws it, pure from a `Graph` to a grid of styled cells:
   its own in the gap before the target, and enters on a row of its own, with the event kinds
   and count written past every lane in that gap. Lines that meet join into the box-drawing
   character they make.
-- **Kind by glyph and colour.** `◷` schedule (blue), `↯` reaction (yellow), `◇` question
-  (amber, bright while someone is waiting), `❯` shell (teal), `✦` agent (magenta), `◆` an event
-  nothing raised yet. Every glyph is one column wide, so borders stay in line. The border turns
-  red when the last run failed and dims when the rule is paused. `!` marks a rule waiting for
-  approval.
+- **Kind by glyph and colour.** `↻` flow (blue), `◇` question (amber, bright while someone is
+  waiting), `❯` shell (teal), `✦` agent (magenta), `◆` an event nothing raised yet, `⇢` events
+  from outside any run. Every glyph is one column wide, so borders stay in line. The border turns
+  red when the last run failed and dims when the flow is paused. `!` marks a flow waiting for a
+  yes.
 - **Moving.** `←` and `→` follow the wiring, to what feeds the selected node or what it feeds,
   taking the nearest in height. `↑` and `↓` stay in the column, and reach the nearest box above
   or below when the column has none. The window pans to keep the selection in view, and its
   edges are lit. A search (`^f`) keeps the nodes it hits — by name, detail and folder, and by
-  the same tokens, a schedule being a `job` and an ask a `question` — plus everything upstream
+  the same tokens, a flow being a `flow` and an ask a `question` — plus everything upstream
   and downstream of them.
-- **Acting on a node.** A node stands for its rule, or for what its rule runs or asks, so
-  `/approve`, `/pause` and `/edit` work on it. `enter` on a question with
+- **Acting on a node.** A flow's node, or its questions', stands for the flow, so `/flow
+  run|pause|resume|approve|edit` work on it with no name. `enter` on a question with
   someone waiting takes it out to be answered by number in the pane, the same as in the list —
   and as there, a line starting with an option answers with the rest as its note — and the
-  cursor goes on to what the answer ran. `enter` on a schedule, or on its command,
-  offers to run it now. Anywhere else, `enter` (or `^o`) shows the node in the pane: what it
-  is, its rule in words (when, what, where, which version you approved), how its runs went, and what it is wired to on
-  either side.
+  cursor goes on to what the answer ran. `enter` on a flow with its yes offers to
+  run it now (`run prod-logs now? y`), and on one without says `/flow approve`. Anywhere else,
+  `enter` (or `^o`) shows the node in the pane: what it is, a flow as its row's pane shows it
+  (when, where, its yes, its steps as the latest firing left them), how its runs went, and what
+  it is wired to on either side.
 
 **The events view** is what happened, where the graph is how things are wired. `/events` swaps
 the list for every event in the ledger, newest first, one line each: how long ago, its kind
@@ -1194,31 +1354,24 @@ begins. The runs and questions they name come from the list where it has them, t
 `run.list {archived}` and `run.get`/`decision.get`, once each (`tui/events.rs`, pure; the
 fetching is the panel's).
 
-Under an event, indented, is what it set off — each read from what the ledger keeps:
+Under an event, indented, is what it set off — each read from a cause, so it is exact:
 
-- `↳ ↻ nightly → started 'make'`: a `schedule.fired` is about the run it started;
-- `↳ ▶ the answer started '…'`: a `decision.taken` (or `expired`) names the runs its options
-  started (`data.runs`);
-- `↳ ⚡ notify → started '…'`: a reaction's run carries its rule (`cause: reaction:<name>`), and
-  its `run.started` names the event it fired on (`data.event`);
-- `↳ ? ask-me asked '…'`: a reaction's question names its rule and the event it fired on
-  (`decision.raised`'s `data.reaction` and `data.event`).
+- `↳ ↻ prod-logs · probe → started 'prod-logs · probe'`: a step's run, by its `cause:
+  flow:<flow>/<step>`, under the event that fired its firing — the `flow.fired`'s `data.event`,
+  when that event was read — else under its firing's `flow.fired`, else under the event its own
+  `run.started` names;
+- `↳ ? prod-logs asked '…'`: a step's question, by its `decision.raised`'s `data.flow`, its
+  firing found through the question's chain;
+- `↳ ▶ the answer started '…'`: a `decision.taken` (or `expired`) of an `rl ask` question names
+  the runs its options started (`data.runs`).
 
-Those two are exact for what reactions do now. Runs and questions from before reactions kept
-their event have no `data.event`, and theirs is read back from what was kept then — so, for
-those only, two matching events close together can be told apart wrongly. A reaction's run joined
-the chain the event's run was in (`flow`, its own id when the event had no run), and its event is
-the newest one before it, in that chain, of a kind the rule listens for (`on:`), within the five
-minutes the reactor still acts on — or the newest with no run, when the chain is its own. A
-reaction's question was grouped `reaction:<name>` and named the event's run; its event is the
-newest of that run the rule listens for, before it, and one from a rule that named its own
-`group:` cannot be told from a run's own, so it stands on its own `decision.raised` line.
-`parent_run` is never set. `enter` on an event with a run goes to the list with
-the cursor on it (on its job's row when it folded into one; the search and the lens give way
-when they hide it; an archived run, or one gone from the list, is said so and the view stays).
-`enter` on a line a rule set off opens the graph on that rule, as `^g` there does, and `esc`
-comes back. `^o` shows the event whole in the pane: when, where, its run, all it said and its
-`data`.
+Nothing is guessed back: what a firing did is in its chain and its causes, and a firing lists
+under what fired it. `parent_run` is never set. `enter` on an event with a run goes to the list
+with the cursor on it (on its flow's row when it folded into one; the search and the lens give
+way when they hide it; an archived run, or one gone from the list, is said so and the view
+stays). `enter` on a `flow.*` event, or on a line a flow set off, opens the graph on that flow, as
+`^g` there does, and `esc` comes back. `^o` shows the event whole in the pane: when, where, its
+run, all it said and its `data`.
 
 ---
 
@@ -1241,30 +1394,26 @@ are deliberately not a key yet.
 
 ```text
 ~/.relay/                     ($RELAY_HOME overrides; tests and scripts/live point it elsewhere)
-  ledger.db                   SQLite: runs, events, sessions, session_io, presence, schedules,
-                              workspaces, decisions, summaries, summary_kept (summaries of a
-                              stretch, a job, a project, everything), hidden (projects and jobs off
-                              the panel's list), row_order (projects put in your order)
-  schedules.yaml              user-level schedules; the file is the interface, the ledger keeps
-                              versions (by sha256), pause state, last/next firing
+  ledger.db                   SQLite: runs, events, sessions, session_io, presence, flows (each
+                              as last loaded: its hash, the one approved, paused, last/next
+                              firing), firings and steps, workspaces, decisions, summaries,
+                              summary_kept (summaries of a stretch, a flow, a project,
+                              everything), hidden (projects and flows off the panel's list),
+                              row_order (projects put in your order)
+  flows/                      the flows, the only place one can be; may be a git repository
+    .gitignore                written by rld when missing: `runs/`
+    <name>/                   one flow, the folder's name its own ([a-z0-9][a-z0-9-]*)
+      flow.md                 the definition: YAML frontmatter, prompts as `## <step>` sections
+      …                       the flow's own scripts, first on its steps' PATH; all of the
+                              folder but runs/ is hashed, and a change asks for a yes again
+      runs/                   set aside for a firing's state; not hashed, not written yet (§8)
   config.yaml                 your defaults (`agents:`, `assistants:`, `catch_up:`, `retention:`,
                               `workspaces:`); absent means defaults, unknown keys refused
-  reactions.yaml              user-level rules: events → actions, or questions; same file-first
-                              deal, same versioning (`rl on` appends to it)
   run/                        0700 — rld.sock, rld.pid, <run>.sock, <run>.exit
   log/                        rld.log, <run>.log
   hooks/claude.json           written at daemon start; passed to claude as --settings
   detect/*.yaml               user overrides, merged field by field over the built-ins
   plugins/                    badge commands, first on their PATH; `gh-pr` written when missing
-  removed/<name>-<when>/      a removed project's rule files, when you said to move them; kept, not
-                              read
-
-<workspace>/.relay/           per folder registered with `rl up` — the trust boundary
-  schedules.yaml              versioned with the folder; a version fires only once approved
-                              (approved_hash == hash); an edit asks again
-  reactions.yaml              the same, for rules; `rl up` loads and approves both. Removing the
-                              project (`workspace.remove`) forgets every approval in it, and can
-                              move these two files to ~/.relay/removed/; anything else stays
 
 detect/*.yaml                 in-tree, compiled in: generic, claude, codex, cursor, gemini, opencode, sh
 scripts/{rl,rld,relay-dev}    dev shims: build if needed, run the debug binaries
@@ -1272,10 +1421,12 @@ scripts/ci                    the CI checks, on Linux, in a container: the same 
                               ci.yml runs (fmt, clippy -D warnings, the suites), against its own
                               target/ and cargo registry so macOS artifacts never mix in
 scripts/live                  a live Relay to poke at: its home is live/home, seeded from
-                              live/seed by `scripts/live reset`; `scripts/live <rl args>` talks
-                              to it, and the recorded claude player is first on its PATH
-live/seed/                    what reset copies: global schedules.yaml + reactions.yaml and a
-                              ws/ workspace (everything else under live/ is throwaway)
+                              live/seed by `scripts/live reset`, which registers live/ws and
+                              approves the seed's flows; `scripts/live <rl args>` talks to it,
+                              and the recorded claude player is first on its PATH
+live/seed/                    what reset copies: flows/ (each `in` the workspace) and a ws/
+                              workspace (everything else under live/ is throwaway)
+examples/weather-alert/       a flow folder to copy into ~/.relay/flows: a probe, a question
 ```
 
 Sockets normally live in `run/`; a long `$RELAY_HOME` would blow the ~104-byte `sockaddr_un`
@@ -1288,11 +1439,13 @@ limit, so both sides fall back to the same short hashed directory under the temp
 Named here so the diagrams above are not read as the whole plan — see §7 of the brief for
 phasing.
 
-- **Workflows** — `workflows/<name>.yaml`, steps with `after`/`when` and decision steps, as
-  declarative sugar over the engine that reactions and decisions already are. `Run.cause` and
-  `Run.flow` carry `manual`, `schedule:<name>`, `decision:<id>`, `reaction:<name>` and `assistant:<job>` today;
-  `workflow:` is reserved. `rl up` loads a folder's `schedules.yaml` and `reactions.yaml`;
-  `workflows/` is not read yet.
+- **The rest of flows** (`docs/specs/2026-10-07-flows.md`) — state between steps: `rl flow
+  state set|get|write|read`, values (`{probe.signature}`, `$RELAY_V_<step>_<key>`), the step's
+  out and files under `$RELAY_IN` and `$RELAY_WORK` in `runs/<firing>/`, and their retention with
+  the firing's runs. Seeing it: steps as nodes in the graph, a flow's row expanded to its latest
+  firing's steps, `catch_up: top` (a flow's latest firing heading the catch-up), `/summary` on one
+  firing. Writing it: `rl flow new` and `/flow new` drafted from words, the context pack teaching
+  flows, `rl flow test`, and templates.
 - **Plugins** — `rl-plugin-host` (Bun), the broker, `relay.d.ts`, the manifest/approval flow,
   action keys and the detail tab. Until then, one provisional contract stands in for a piece of
   it — **workspace badges** (`rl-daemon/src/badges.rs`): `workspaces.badges` in `config.yaml`
@@ -1308,6 +1461,6 @@ phasing.
   commands with exit codes, tokens. No `facts` table yet; `Run.cost` is carried but never set.
   The summariser (§6) reads Claude's and Codex's session files for its recaps, and otherwise the
   run's row, events and output.
-- **Worktrees and ref rules** — `--worktree`, branch-naming, `.relay/config.yaml` ref derivation.
+- **Worktrees and refs** — `--worktree`, branch-naming, `.relay/config.yaml` ref derivation.
   `Run.worktree` and `Run.parent_run` are carried, never set.
 - **Notifications** — the notify reference plugins.

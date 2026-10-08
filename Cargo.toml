@@ -6,6 +6,7 @@ members = [
   "code/rl-session",
   "code/rl-core",
   "code/rl-detect",
+  "code/rl-flow",
   "code/rl-ledger",
   "code/rl-proto",
 ]
@@ -20,6 +21,7 @@ repository = "https://github.com/instilled/relay"
 [workspace.dependencies]
 rl-core = { path = "code/rl-core" }
 rl-detect = { path = "code/rl-detect" }
+rl-flow = { path = "code/rl-flow" }
 rl-ledger = { path = "code/rl-ledger" }
 rl-proto = { path = "code/rl-proto" }
 rl-daemon = { path = "code/rl-daemon" }

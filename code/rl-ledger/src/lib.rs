@@ -7,8 +7,9 @@
 //! over `&Connection` in their own modules so they unit-test without the thread.
 
 pub mod decisions;
-pub mod entries;
 pub mod events;
+pub mod firings;
+pub mod flows;
 pub mod graph;
 pub mod hidden;
 pub mod kept;
@@ -16,9 +17,7 @@ pub mod meta;
 pub mod migrate;
 pub mod order;
 pub mod presence;
-pub mod reactions;
 pub mod runs;
-pub mod schedules;
 pub mod session_io;
 pub mod sessions;
 pub mod summaries;

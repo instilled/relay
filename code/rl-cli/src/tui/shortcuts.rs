@@ -138,19 +138,20 @@ fn place_keys(at: Place) -> Vec<Key> {
             key("enter", "answer/run/details"),
             cmd(Cmd::Pane, "details"),
             cmd(Cmd::Filter, "search"),
-            key("/approve", ""),
-            key("/pause", ""),
-            key("/edit", ""),
+            key("/flow run", ""),
+            key("/flow pause", ""),
+            key("/flow approve", ""),
+            key("/flow edit", ""),
             cmd(Cmd::Graph, "back"),
             key("esc", "back"),
         ],
         Place::Events => vec![
             moves,
             key("pgup/pgdn", "page"),
-            key("enter", "its run or rule"),
+            key("enter", "its run or flow"),
             cmd(Cmd::Filter, "kind: in: by:"),
             cmd(Cmd::Pane, "details"),
-            cmd(Cmd::Graph, "its rule's wiring"),
+            cmd(Cmd::Graph, "its flow's wiring"),
             key("esc", "back"),
         ],
         Place::CatchUp => vec![
@@ -305,7 +306,12 @@ mod tests {
         assert!(!graph.contains("reorder"), "{graph}");
 
         let events = one_line(Place::Events);
-        assert!(events.contains("enter its run or rule"), "{events}");
+        assert!(events.contains("enter its run or flow"), "{events}");
+        assert!(events.contains("^g its flow's wiring"), "{events}");
+        assert!(
+            graph.contains("/flow run · /flow pause · /flow approve · /flow edit"),
+            "{graph}"
+        );
         assert!(events.contains("^f kind: in: by:"), "{events}");
         assert!(!events.contains("←→"), "{events}");
 
