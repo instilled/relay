@@ -1,6 +1,7 @@
 # OpenAI Codex CLI. No hook API yet; PTY heuristics only.
 kind: agent
 bins: [codex]
+icon: "⬡"        # its rows in the panel; one column wide
 headless: [exec]
 model_flag: ["-m"]
 small_model: gpt-5.6-luna   # "fast and affordable"; setup offers it for summaries

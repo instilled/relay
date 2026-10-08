@@ -3,6 +3,8 @@
 # the project's own .claude/settings.json. The patterns are only the fallback.
 kind: agent
 bins: [claude]
+icon: "✻"        # its rows in the panel; one column wide
+color: "#d97757"    # #rrggbb; without one, the foreground
 hooks:
   dialect: claude
   args: ["--settings", "{hooks_file}"]

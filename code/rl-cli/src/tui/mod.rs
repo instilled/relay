@@ -511,11 +511,12 @@ fn state_col(tw: usize) -> usize {
     ICON_W + tw + 1
 }
 
-/// A row's icon, in its slot and its colour; `ended`, quiet.
-fn icon_span(icon: &str, ended: bool) -> Vec<Span<'static>> {
+/// A row's icon, in its slot and its colour — an agent's its CLI's (`cli`);
+/// `ended`, quiet.
+fn icon_span(icon: &str, cli: Option<&str>, ended: bool) -> Vec<Span<'static>> {
     vec![
         Span::raw(" "),
-        Span::styled(icon.to_string(), rows::icon_style(icon, ended)),
+        Span::styled(icon.to_string(), rows::icon_style(icon, cli, ended)),
         Span::raw(" "),
     ]
 }
@@ -5317,7 +5318,7 @@ impl App {
                     list_line(
                         w,
                         tw,
-                        icon_span(rows::QUESTION, false),
+                        icon_span(rows::QUESTION, None, false),
                         vec![Span::styled(fit(&title, tw), theme::name())],
                         vec![Span::styled("to decide", theme::needs())],
                         &summary,
@@ -5378,7 +5379,7 @@ impl App {
                     list_line(
                         w,
                         tw,
-                        icon_span(rows::icon(r), r.state.is_terminal()),
+                        icon_span(rows::icon(r), r.cli.as_deref(), r.state.is_terminal()),
                         title,
                         vec![Span::styled(rows::run_words(r), style)],
                         summary,
@@ -5402,7 +5403,7 @@ impl App {
                     list_line(
                         w,
                         tw,
-                        icon_span(rows::FLOW, false),
+                        icon_span(rows::FLOW, None, false),
                         title,
                         flow_marks(f),
                         &stands,
@@ -6458,7 +6459,7 @@ mod tests {
             list_line(
                 w,
                 tw,
-                icon_span(icon, false),
+                icon_span(icon, None, false),
                 vec![Span::raw(crate::tui::rows::fit("title", tw))],
                 vec![Span::raw(word.to_string())],
                 "summary",
