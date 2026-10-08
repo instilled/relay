@@ -937,12 +937,22 @@ hashes it again before a firing starts and before each step's run starts or is r
 (`Flows::yes_holds`): on a folder changed since its yes the firing is refused (`needs a yes`), or
 the step does not start — `flow.skipped`, "the flow changed since its yes", and its firing moves
 on as if it failed — and the flows are read again, so it shows `needs a yes`. A firing waiting
-four hours on a question therefore never runs a script changed while it waited. Writing it through `rl` is the yes: an `rl flow edit` or `/flow
-edit` that saves a flow that loads approves it. Nothing else is approved for you — not a hand
-edit, not a flow an agent wrote.
+four hours on a question therefore never runs a script changed while it waited.
+
+A yes is to one version: `flow.approve` carries the hash of the flow as the one saying it was
+shown it (`rl flow approve` the one it reads and prints, the panel the one it has on screen), and
+is refused once the folder as last loaded is another. Writing it through `rl` is the yes, and
+covers no more than was written: an `rl flow edit` or `/flow edit` approves only when `flow.md`
+was saved changed, the folder before the editor opened had its yes (or held nothing yet), and
+nothing else in it changed while the editor was open — the client hashes the folder as it was
+with the saved `flow.md` in it, and says yes to exactly that hash (`rl-cli/src/flow.rs`,
+`finish_edit`). Otherwise the flows are read again and it is left needing a yes, saying why; an
+edit just to look gives none. A new flow left as the template is not kept. Nothing else is
+approved for you — not a hand edit, not a flow an agent wrote.
 
 `rl flow` is the line's way in: `list` (`NAME STATUS WHEN LAST IN`, then what did not load;
-`--all` keeps the removed), `edit <name>` (a new name starts from a template), `run <name>` (now,
+`--all` keeps the removed), `edit <name>` (a new name starts from a template, gone again if
+saved unchanged), `run <name>` (now,
 by hand, paused or not, never without its yes), `pause`, `resume`, `approve` and `reload`, each
 with `--json`. Behind them are `flow.list`, `flow.errors`, `flow.reload`, `flow.approve`,
 `flow.pause`, `flow.resume`, `flow.run` and `flow.firings` (`rl-daemon/src/flows/rpc.rs`).

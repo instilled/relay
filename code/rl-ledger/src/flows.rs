@@ -115,12 +115,13 @@ pub fn get(conn: &Connection, name: &str) -> Result<Option<Flow>> {
         .optional()?)
 }
 
-/// Says yes to the folder as it is now. False when there is no such flow, or
-/// it is gone.
-pub fn approve(conn: &Connection, name: &str) -> Result<bool> {
+/// Says yes to the folder as it was shown, by its hash: given only while that is the folder as
+/// last loaded. False when it is not, there is no such flow, or it is gone.
+pub fn approve(conn: &Connection, name: &str, hash: &str) -> Result<bool> {
     let n = conn.execute(
-        "UPDATE flows SET approved_hash = hash, next_at = NULL WHERE name = ?1 AND removed_at IS NULL",
-        params![name],
+        "UPDATE flows SET approved_hash = hash, next_at = NULL \
+         WHERE name = ?1 AND hash = ?2 AND removed_at IS NULL",
+        params![name, hash],
     )?;
     Ok(n == 1)
 }
@@ -199,7 +200,7 @@ mod tests {
         let next: Timestamp = "2026-10-07T11:00:00Z".parse().unwrap();
         ledger
             .call_blocking(move |c| {
-                assert!(approve(c, "a")?);
+                assert!(approve(c, "a", "h1")?);
                 assert!(set_paused(c, "a", true)?);
                 set_next(c, "a", Some(next))?;
                 set_fired(c, "a", now)
@@ -228,9 +229,12 @@ mod tests {
         );
         assert_eq!(ledger.call_blocking(|c| list(c, false)).unwrap().len(), 1);
         assert!(
-            !ledger.call_blocking(|c| approve(c, "b")).unwrap(),
+            !ledger.call_blocking(|c| approve(c, "b", "h1")).unwrap(),
             "a gone flow takes no yes"
         );
+        // A yes is to the version shown: one gone by is not given.
+        assert!(!ledger.call_blocking(|c| approve(c, "a", "h1")).unwrap());
+        assert!(!ledger.call_blocking(|c| get(c, "a")).unwrap().unwrap().approved());
 
         // The same folder again changes nothing; one back is added.
         let s = ledger
@@ -251,7 +255,7 @@ mod tests {
                 .removed_at
                 .is_none()
         );
-        assert!(!ledger.call_blocking(|c| approve(c, "nope")).unwrap());
+        assert!(!ledger.call_blocking(|c| approve(c, "nope", "h1")).unwrap());
         assert!(ledger.call_blocking(|c| get(c, "nope")).unwrap().is_none());
     }
 }

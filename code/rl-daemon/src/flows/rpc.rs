@@ -5,8 +5,8 @@ use crate::router::Router;
 use crate::server::Daemon;
 use rl_ledger::{firings, flows};
 use rl_proto::flow::{
-    FiringFilter, Flow, FlowApprove, FlowErrors, FlowFilter, FlowFirings, FlowList, FlowName, FlowPause, FlowReload,
-    FlowResume, FlowRun,
+    FiringFilter, Flow, FlowApproval, FlowApprove, FlowErrors, FlowFilter, FlowFirings, FlowList, FlowName, FlowPause,
+    FlowReload, FlowResume, FlowRun,
 };
 use rl_proto::rpc::RpcError;
 
@@ -29,18 +29,27 @@ pub fn register(r: &mut Router<Daemon>) {
         *d.config.write().unwrap() = crate::config::load(&d.home);
         d.flows.reload().await.map_err(internal)
     });
-    r.register::<FlowApprove, _, _>(|d, FlowName { name }| async move {
-        let n = name.clone();
+    r.register::<FlowApprove, _, _>(|d, FlowApproval { name, hash }| async move {
+        let (n, h) = (name.clone(), hash.clone());
         let done = d
             .flows
             .ledger
-            .call(move |c| flows::approve(c, &n))
+            .call(move |c| flows::approve(c, &n, &h))
             .await
             .map_err(internal)?;
-        if !done {
+        if done {
+            return get(&d, &name).await;
+        }
+        // Not given: the flow is not there, or is not the version shown.
+        let now = get(&d, &name).await?;
+        if now.removed_at.is_some() {
             return Err(missing(&d, &name));
         }
-        get(&d, &name).await
+        Err(RpcError::invalid_params(format!(
+            "`{name}` changed since it was shown ({} now, not {}): look at it again",
+            short(&now.hash),
+            short(&hash)
+        )))
     });
     r.register::<FlowPause, _, _>(|d, p: FlowName| async move { set_paused(&d, p.name, true).await });
     r.register::<FlowResume, _, _>(|d, p: FlowName| async move { set_paused(&d, p.name, false).await });
@@ -100,6 +109,11 @@ fn missing(d: &Daemon, name: &str) -> RpcError {
         Some(n) => RpcError::invalid_params(format!("`{name}` did not load: {n}")),
         None => RpcError::not_found("flow", name),
     }
+}
+
+/// A hash as the panel shows it: its first eight.
+fn short(hash: &str) -> String {
+    hash.chars().take(8).collect()
 }
 
 fn internal(e: anyhow::Error) -> RpcError {

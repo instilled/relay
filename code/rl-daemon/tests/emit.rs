@@ -43,7 +43,7 @@ async fn an_emitted_event_fires_a_flow_and_where_data_narrows() {
         return;
     };
     let mut c = Conn::open(&home).await;
-    let _: serde_json::Value = c.ok("flow.approve", json!({ "name": "triage" })).await;
+    let _ = common::approve(&mut c, "triage").await;
 
     // An INFO issue: the flow's `where` should pass it by.
     let quiet = c

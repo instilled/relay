@@ -50,7 +50,7 @@ async fn the_graph_joins_flows_to_what_happened() {
     };
     let mut c = Conn::open(&h.home).await;
     for name in ["nightly", "notify", "asker"] {
-        let _: Flow = c.ok("flow.approve", json!({ "name": name })).await;
+        let _: Flow = common::approve(&mut c, name).await;
     }
     let _: Firing = c.ok("flow.run", json!({ "name": "nightly" })).await;
     let _: Firing = c.ok("flow.run", json!({ "name": "asker" })).await;

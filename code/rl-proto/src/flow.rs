@@ -463,6 +463,13 @@ pub struct FlowName {
     pub name: String,
 }
 
+/// A yes to one version of a flow's folder: the hash of the version the one saying it was shown.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FlowApproval {
+    pub name: String,
+    pub hash: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FiringFilter {
     pub flow: String,
@@ -495,11 +502,12 @@ impl Method for FlowReload {
     type Result = Reloaded;
 }
 
-/// Says yes to the folder as it is now; the flow may fire from then on.
+/// Says yes to the folder as it was shown; the flow may fire from then on. Refused when the
+/// folder as last loaded is not that version any more.
 pub struct FlowApprove;
 impl Method for FlowApprove {
     const NAME: &'static str = "flow.approve";
-    type Params = FlowName;
+    type Params = FlowApproval;
     type Result = Flow;
 }
 

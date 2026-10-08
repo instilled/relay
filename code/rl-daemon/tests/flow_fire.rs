@@ -53,7 +53,7 @@ fn step<'a>(f: &'a Firing, name: &str) -> &'a StepState {
 }
 
 async fn approve_and_run(c: &mut Conn, flow: &str) -> Firing {
-    let _: Flow = c.ok("flow.approve", json!({ "name": flow })).await;
+    common::approve(c, flow).await;
     c.ok("flow.run", json!({ "name": flow })).await
 }
 
@@ -183,7 +183,7 @@ async fn an_edit_mid_firing_leaves_that_firing_as_it_started() {
     write(&h.home, "edited", &[("flow.md", &md("b-new"))]);
     let r: Reloaded = c.ok("flow.reload", json!(null)).await;
     assert_eq!(r.changed, ["edited"], "{r:?}");
-    let _: Flow = c.ok("flow.approve", json!({ "name": "edited" })).await;
+    let _: Flow = common::approve(&mut c, "edited").await;
     let f = wait_firing(&mut c, "edited", ended).await;
     assert_eq!(f.status, FiringStatus::Done, "{f:?}");
     let b: Run = c.get(step(&f, "b").run.as_deref().unwrap()).await;
@@ -536,7 +536,7 @@ async fn a_firing_written_but_never_started_starts_at_a_restart() {
     let Some((h, mut c)) = start(tmp.path(), "late", md).await else {
         return;
     };
-    let _: Flow = c.ok("flow.approve", json!({ "name": "late" })).await;
+    let _: Flow = common::approve(&mut c, "late").await;
     drop(c);
     let home = h.home.clone();
     h.stop().await;
@@ -616,7 +616,7 @@ async fn every_fires_on_its_cadence_and_says_when_it_last_did() {
     let Some((h, mut c)) = start(tmp.path(), "tick", md).await else {
         return;
     };
-    let _: Flow = c.ok("flow.approve", json!({ "name": "tick" })).await;
+    let _: Flow = common::approve(&mut c, "tick").await;
     let firings = wait_firings(&mut c, "tick", 2).await;
     let (second, first) = (&firings[firings.len() - 2], &firings[firings.len() - 1]);
     for f in [first, second] {
@@ -643,7 +643,7 @@ async fn a_paused_flow_does_not_fire() {
         return;
     };
     let _: Flow = c.ok("flow.pause", json!({ "name": "napping" })).await;
-    let _: Flow = c.ok("flow.approve", json!({ "name": "napping" })).await;
+    let _: Flow = common::approve(&mut c, "napping").await;
     tokio::time::sleep(Duration::from_millis(2500)).await;
     let firings: Vec<Firing> = c.ok("flow.firings", json!({ "flow": "napping" })).await;
     assert!(firings.is_empty(), "{firings:?}");
@@ -670,7 +670,7 @@ async fn a_queued_cadence_waits_for_the_last_firing() {
     let Some((h, mut c)) = start(tmp.path(), "patient", md).await else {
         return;
     };
-    let _: Flow = c.ok("flow.approve", json!({ "name": "patient" })).await;
+    let _: Flow = common::approve(&mut c, "patient").await;
     let firings = wait_firings(&mut c, "patient", 2).await;
     let (second, first) = (&firings[firings.len() - 2], &firings[firings.len() - 1]);
     let gap = second.started_at.duration_since(first.ended_at.unwrap());
@@ -696,7 +696,7 @@ async fn a_firing_slept_through_follows_missed() {
     let Some(h) = Harness::on(home.clone()) else { return };
     let mut c = Conn::open(&h.home).await;
     for name in ["skipper", "catcher", "rester"] {
-        let _: Flow = c.ok("flow.approve", json!({ "name": name })).await;
+        let _: Flow = common::approve(&mut c, name).await;
     }
     let deadline = Instant::now() + Duration::from_secs(10);
     while {

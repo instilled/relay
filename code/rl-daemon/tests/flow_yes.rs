@@ -2,7 +2,7 @@
 //! starts and before each step does, reload or no reload.
 
 mod common;
-use common::{Conn, Harness};
+use common::{Conn, Harness, approve};
 use rl_core::Home;
 use rl_proto::flow::{Firing, FiringStatus, Flow, FlowStatus, StepStatus};
 use rl_proto::types::Event;
@@ -15,10 +15,6 @@ fn write(home: &Home, name: &str, files: &[(&str, &str)]) {
     for (f, text) in files {
         std::fs::write(dir.join(f), text).unwrap();
     }
-}
-
-async fn approve(c: &mut Conn, name: &str) -> Flow {
-    c.ok("flow.approve", json!({ "name": name })).await
 }
 
 async fn status(c: &mut Conn, name: &str) -> FlowStatus {
@@ -132,5 +128,38 @@ async fn a_lost_step_is_not_picked_up_on_a_changed_folder() {
             .is_some_and(|e| e.contains("the flow changed since its yes")),
         "{out:?}"
     );
+    h.stop().await;
+}
+
+/// A yes is to the version shown: a reload between seeing a flow and saying yes leaves it
+/// needing one.
+#[tokio::test]
+async fn a_yes_to_a_version_gone_by_is_not_given() {
+    use rl_proto::flow::Reloaded;
+    let tmp = tempfile::tempdir().unwrap();
+    let home = Home::at(tmp.path().join("home"));
+    write(
+        &home,
+        "pulse",
+        &[
+            ("flow.md", "---\nsteps:\n  a:\n    run: sh a.sh\n---\n"),
+            ("a.sh", "date\n"),
+        ],
+    );
+    let Some(h) = Harness::on(home.clone()) else { return };
+    let mut c = Conn::open(&h.home).await;
+    let flows: Vec<Flow> = c.ok("flow.list", json!({})).await;
+    let shown = flows[0].hash.clone();
+    write(&home, "pulse", &[("a.sh", "rm -rf ~\n")]);
+    let r: Reloaded = c.ok("flow.reload", json!(null)).await;
+    assert_eq!(r.changed, ["pulse"]);
+    let res = c.call("flow.approve", json!({ "name": "pulse", "hash": shown })).await;
+    let err = res.error.expect("the version shown is gone");
+    assert!(err.message.contains("changed since it was shown"), "{err:?}");
+    assert_eq!(status(&mut c, "pulse").await, FlowStatus::NeedsApproval);
+    let f = approve(&mut c, "pulse").await;
+    assert_eq!(f.status(), FlowStatus::On, "the version shown now");
+    let res = c.call("flow.approve", json!({ "name": "nope", "hash": shown })).await;
+    assert!(res.error.unwrap().message.contains("nope"), "no such flow");
     h.stop().await;
 }

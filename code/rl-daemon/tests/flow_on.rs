@@ -23,7 +23,7 @@ async fn start(tmp: &Path, flows: &[(&str, &str)]) -> Option<(Harness, Conn)> {
     let h = Harness::on(home)?;
     let mut c = Conn::open(&h.home).await;
     for (name, _) in flows {
-        let _: Flow = c.ok("flow.approve", json!({ "name": name })).await;
+        let _: Flow = common::approve(&mut c, name).await;
     }
     Some((h, c))
 }
@@ -158,7 +158,7 @@ async fn an_unapproved_or_paused_flow_does_not_hear() {
     let _: serde_json::Value = c.ok("flow.reload", json!(null)).await;
     emit(&mut c, "logs.issue", tmp.path(), "unapproved", json!({})).await;
     assert!(settled(&mut c, "deaf").await.is_empty());
-    let _: Flow = c.ok("flow.approve", json!({ "name": "deaf" })).await;
+    let _: Flow = common::approve(&mut c, "deaf").await;
     emit(&mut c, "logs.issue", tmp.path(), "heard", json!({})).await;
     let f = wait_ended(&mut c, "deaf").await;
     let heard: Vec<Event> = c.ok("event.list", json!({ "kinds": ["logs.issue"] })).await;
@@ -238,7 +238,7 @@ async fn a_probe_its_event_a_flow_that_asks_and_the_yes_that_acts() {
     let _: serde_json::Value = c.ok("workspace.up", json!({ "path": ws })).await;
     let _: serde_json::Value = c.ok("flow.reload", json!(null)).await;
     for name in ["probe", "alert"] {
-        let _: Flow = c.ok("flow.approve", json!({ "name": name })).await;
+        let _: Flow = common::approve(&mut c, name).await;
     }
 
     let _: Firing = c.ok("flow.run", json!({ "name": "probe" })).await;

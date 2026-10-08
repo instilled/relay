@@ -25,6 +25,13 @@ fn rl(home: &Path, ws: &Path, rld: &Path, session: &Path, args: &[&str]) -> Comm
     c
 }
 
+/// An editor that saves the file with a line of prose added, as `sh <script> +1 <file>`.
+fn adds_a_line(dir: &Path) -> String {
+    let script = dir.join("editor.sh");
+    std::fs::write(&script, "printf '\\nEdited.\\n' >> \"$2\"\n").unwrap();
+    format!("sh {}", script.display())
+}
+
 fn out(mut c: Command) -> (bool, String, String) {
     let o = c.output().unwrap();
     (
@@ -47,13 +54,21 @@ fn flow_edit_writes_approves_and_runs() {
     std::fs::create_dir_all(&ws).unwrap();
     let rl = |args: &[&str]| rl(&home, &ws, &rld, &session, args);
 
-    // The editor leaves the template; it loads, so it is approved.
+    // The editor leaves the template as it was: nothing is kept, nothing approved.
     let (ok, o, e) = out(rl(&["flow", "edit", "pulse"]));
+    assert!(ok, "{o}{e}");
+    assert_eq!(o, "pulse left as the template: not kept");
+    assert!(!home.join("flows/pulse").exists());
+
+    // Saved, it loads, and is approved.
+    let mut edit = rl(&["flow", "edit", "pulse"]);
+    edit.env("EDITOR", adds_a_line(&dir));
+    let (ok, o, e) = out(edit);
     assert!(ok, "{o}{e}");
     assert_eq!(o, "approved pulse");
     let text = std::fs::read_to_string(home.join("flows/pulse/flow.md")).unwrap();
     assert!(
-        text.contains("when: every 1h") && text.contains("run: echo hello"),
+        text.contains("when: every 1h") && text.contains("run: echo hello") && text.contains("Edited."),
         "{text}"
     );
 
@@ -133,6 +148,81 @@ fn flow_list_says_what_did_not_load() {
     assert!(!ok, "{o}{e}");
     assert!(e.contains("not loaded: broken · flow.md:3"), "{e}");
     assert!(!o.contains("approved"), "{o}");
+
+    assert!(out(rl(&["daemon", "stop"])).0);
+}
+
+/// A yes from an edit covers only what was edited: a script changed with no yes before it, or
+/// while the editor was open, is not approved with it.
+#[test]
+fn flow_edit_approves_no_more_than_was_edited() {
+    let (Some(rld), Some(session)) = (sibling("rld"), sibling("rl-session")) else {
+        eprintln!("skipping: rld / rl-session not built (run `cargo test --workspace`)");
+        return;
+    };
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = std::fs::canonicalize(tmp.path()).unwrap();
+    let home = dir.join("home");
+    let ws = dir.join("proj");
+    std::fs::create_dir_all(&ws).unwrap();
+    let rl = |args: &[&str]| rl(&home, &ws, &rld, &session, args);
+    let editing = |args: &[&str], editor: &str| {
+        let mut c = rl(args);
+        c.env("EDITOR", editor);
+        c
+    };
+    let flow = home.join("flows/prod");
+    std::fs::create_dir_all(&flow).unwrap();
+    std::fs::write(flow.join("flow.md"), "---\nsteps:\n  a:\n    run: sh apply.sh\n---\n").unwrap();
+    std::fs::write(flow.join("apply.sh"), "echo as seen\n").unwrap();
+    let (ok, o, e) = out(rl(&["flow", "approve", "prod"]));
+    assert!(ok && o.starts_with("approved prod"), "{o}{e}");
+
+    // A script changed behind its back; an edit just to look, quit without saving.
+    std::fs::write(flow.join("apply.sh"), "echo unseen\n").unwrap();
+    let (ok, o, e) = out(rl(&["flow", "edit", "prod"]));
+    assert!(ok, "{o}{e}");
+    assert_eq!(
+        o,
+        "flow.md unchanged: no yes given · prod needs one: rl flow approve prod"
+    );
+    let (_, listed, _) = out(rl(&["flow", "list"]));
+    assert!(listed.contains("needs approval"), "{listed}");
+
+    // Saved now, but the change it did not show still has no yes.
+    let (ok, o, e) = out(editing(&["flow", "edit", "prod"], &adds_a_line(&dir)));
+    assert!(!ok, "{o}{e}");
+    assert!(
+        e.contains("prod needs a yes: its folder changed since its last yes"),
+        "{e}"
+    );
+    let (_, listed, _) = out(rl(&["flow", "list"]));
+    assert!(listed.contains("needs approval"), "{listed}");
+
+    // Looked at and approved, an edit's yes covers the edit.
+    let (ok, o, e) = out(rl(&["flow", "approve", "prod"]));
+    assert!(ok, "{o}{e}");
+    let (ok, o, e) = out(editing(&["flow", "edit", "prod"], &adds_a_line(&dir)));
+    assert!(ok && o == "approved prod", "{o}{e}");
+
+    // A script changed while flow.md was open is not covered.
+    let sneaky = dir.join("sneaky.sh");
+    std::fs::write(
+        &sneaky,
+        format!(
+            "echo sneaked > {}\nprintf '\\nAgain.\\n' >> \"$2\"\n",
+            flow.join("apply.sh").display()
+        ),
+    )
+    .unwrap();
+    let (ok, o, e) = out(editing(&["flow", "edit", "prod"], &format!("sh {}", sneaky.display())));
+    assert!(!ok, "{o}{e}");
+    assert!(
+        e.contains("prod needs a yes: something else in its folder changed while flow.md was open"),
+        "{e}"
+    );
+    let (_, listed, _) = out(rl(&["flow", "list"]));
+    assert!(listed.contains("needs approval"), "{listed}");
 
     assert!(out(rl(&["daemon", "stop"])).0);
 }

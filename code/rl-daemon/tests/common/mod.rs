@@ -196,3 +196,14 @@ pub async fn kill_holder(home: &Home, id: &str, child: bool) {
         let _ = kill(Pid::from_raw(row.pid as i32), Signal::SIGKILL);
     }
 }
+
+/// Says yes to flow `name` as `flow.list` shows it now.
+pub async fn approve(c: &mut Conn, name: &str) -> rl_proto::flow::Flow {
+    let flows: Vec<rl_proto::flow::Flow> = c.ok("flow.list", json!({})).await;
+    let hash = flows
+        .iter()
+        .find(|f| f.name == name)
+        .map(|f| f.hash.clone())
+        .unwrap_or_default();
+    c.ok("flow.approve", json!({ "name": name, "hash": hash })).await
+}

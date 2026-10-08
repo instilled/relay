@@ -60,8 +60,8 @@ use rl_core::Home;
 use rl_core::time::fmt_age;
 use rl_proto::decision::Decision;
 use rl_proto::flow::{
-    Flow, FlowApprove, FlowErrors, FlowFilter, FlowList, FlowName, FlowPause, FlowReload, FlowResume, FlowRun,
-    FlowStatus, NotLoaded,
+    Flow, FlowApproval, FlowApprove, FlowErrors, FlowFilter, FlowList, FlowName, FlowPause, FlowReload, FlowResume,
+    FlowRun, FlowStatus, NotLoaded,
 };
 use rl_proto::methods::{
     AgentList, DecisionDismiss, DecisionGet, DecisionId, DecisionNote, DecisionTake, DecisionTakeParams, Digest,
@@ -370,9 +370,9 @@ struct App {
     unseen_from: HashMap<String, Timestamp>,
     /// A project on its way out (`^x` twice on its header).
     removing: Option<Removing>,
-    /// `/flow edit`: the flow, and its `flow.md` and line, to open in the
-    /// editor once the screen is given back.
-    editor: Option<(String, PathBuf, usize)>,
+    /// `/flow edit`: the flow being edited, and the line of its `flow.md` to
+    /// open the editor at once the screen is given back.
+    editor: Option<(crate::flow::Editing, usize)>,
     /// A run to hand the real terminal to (its id, and whether to take the
     /// keyboard from whoever holds it), once ratatui has stepped aside.
     attach: Option<(String, bool)>,
@@ -1176,15 +1176,15 @@ impl App {
                 ev = input.next() => match ev {
                     Some(Ok(Event::Key(k))) if k.kind != KeyEventKind::Release => {
                         self.key(input::typed(k), area).await?;
-                        if let Some((name, file, line)) = self.editor.take() {
+                        if let Some((editing, line)) = self.editor.take() {
                             // The editor gets the terminal; our reader lets go of stdin first.
                             drop(input);
                             leave_screen();
-                            let outcome = crate::env::open_in_editor(&file, line);
+                            let outcome = crate::env::open_in_editor(&editing.file, line);
                             *terminal = enter_screen();
                             input = EventStream::new();
                             match outcome {
-                                Ok(()) => self.edited(&name).await,
+                                Ok(()) => self.edited(editing).await,
                                 Err(e) => self.say(format!("{e:#}")),
                             }
                         }
@@ -2995,11 +2995,18 @@ impl App {
                 .call::<FlowResume>(named)
                 .await
                 .map(|_| format!("{name} resumed")),
-            "approve" => self
-                .rpc
-                .call::<FlowApprove>(named)
-                .await
-                .map(|_| format!("{name} approved")),
+            // The yes is to the version shown here: one loaded since is refused.
+            "approve" => {
+                let shown = self.flows.iter().find(|f| f.name == name);
+                let hash = shown.map(|f| f.hash.clone()).unwrap_or_default();
+                self.rpc
+                    .call::<FlowApprove>(FlowApproval {
+                        name: name.clone(),
+                        hash,
+                    })
+                    .await
+                    .map(|_| format!("{name} approved"))
+            }
             _ => return self.say(format!("/flow {verb}? run, pause, resume, approve, edit or reload")),
         };
         match done {
@@ -3015,35 +3022,30 @@ impl App {
     /// free — a new one from a template, one that did not load at the line
     /// where it broke.
     fn edit_flow(&mut self, name: &str) {
-        match crate::flow::file_to_edit(&self.home, name) {
-            Ok(file) => {
+        match crate::flow::start_edit(&self.home, name) {
+            Ok(editing) => {
                 let line = self
                     .not_loaded
                     .iter()
-                    .find(|n| n.flow == name && n.file == file)
+                    .find(|n| n.flow == name && n.file == editing.file)
                     .and_then(|n| n.line)
                     .unwrap_or(1);
-                self.editor = Some((name.to_string(), file, line));
+                self.editor = Some((editing, line));
             }
             Err(e) => self.say(format!("{e:#}")),
         }
     }
 
     /// Back from the editor: every flow read again, and the one edited said
-    /// yes to when it loaded, since the one who edited it is the one saying
-    /// it; when it did not, why.
-    async fn edited(&mut self, name: &str) {
-        let r = match self.rpc.call::<FlowReload>(()).await {
-            Ok(r) => r,
-            Err(e) => return self.say(format!("reload: {e:#}")),
-        };
-        match r.not_loaded.iter().find(|n| n.flow == name) {
-            Some(n) => {
-                self.say(format!("not loaded: {n}"));
-                self.refresh().await;
-            }
-            None => self.flow_act("approve", name.to_string()).await,
+    /// yes to only as `rl flow edit` gives it — saved, loaded, and no more
+    /// than the edit in it; else why not.
+    async fn edited(&mut self, editing: crate::flow::Editing) {
+        let name = editing.name.clone();
+        match crate::flow::finish_edit(&mut self.rpc, &self.home, editing).await {
+            Ok((edited, _)) => self.say(edited.words(&name)),
+            Err(e) => self.say(format!("edit {name}: {e:#}")),
         }
+        self.refresh().await;
     }
 
     /// `/flow …`: `reload` reads every flow again; the rest act on the one
@@ -8434,19 +8436,26 @@ mod tests {
         // Its `flow.md` waits for the screen to be given back.
         run(&mut app, "/flow edit").await;
         let home = rl_core::Home::at(tmp.path().join("h"));
-        let (name, file, line) = app.editor.take().expect("the editor is next");
-        assert_eq!(
-            (name.as_str(), file, line),
-            ("nightly", home.flow_dir("nightly").join("flow.md"), 1)
-        );
+        let (editing, line) = app.editor.take().expect("the editor is next");
+        let file = home.flow_dir("nightly").join("flow.md");
+        assert_eq!((editing.name.as_str(), &editing.file, line), ("nightly", &file, 1));
         // Back from the editor, the template as saved loads, and gets its yes.
-        app.edited("nightly").await;
-        assert_eq!(said(&app), "nightly approved");
+        let mut text = std::fs::read_to_string(&file).unwrap();
+        text.push_str("\nEdited.\n");
+        std::fs::write(&file, text).unwrap();
+        app.edited(editing).await;
+        assert_eq!(said(&app), "approved nightly");
         assert!(nightly(&app).approved());
+        // A new one left as the template is not kept.
+        run(&mut app, "/flow edit draft").await;
+        let (editing, _) = app.editor.take().expect("the editor is next");
+        app.edited(editing).await;
+        assert_eq!(said(&app), "draft left as the template: not kept");
+        assert!(!home.flow_dir("draft").exists());
         // One that does not load is said why, and gets none.
         std::fs::create_dir_all(home.flow_dir("broken")).unwrap();
         std::fs::write(home.flow_dir("broken").join("flow.md"), "---\nsteps: [\n---\n").unwrap();
-        app.edited("broken").await;
+        app.edited(crate::flow::start_edit(&home, "broken").unwrap()).await;
         assert!(said(&app).starts_with("not loaded: broken · flow.md"), "{}", said(&app));
         assert!(app.flows.iter().all(|f| f.name != "broken"));
 

@@ -5,7 +5,7 @@ mod common;
 use common::{Conn, Harness, wait_journal};
 use rl_core::Home;
 use rl_proto::decision::{Decision, DecisionStatus};
-use rl_proto::flow::{Firing, FiringStatus, Flow, StepState, StepStatus};
+use rl_proto::flow::{Firing, FiringStatus, StepState, StepStatus};
 use rl_proto::types::{Cause, Event, Run};
 use serde_json::json;
 use std::path::Path;
@@ -58,7 +58,7 @@ fn step<'a>(f: &'a Firing, name: &str) -> &'a StepState {
 }
 
 async fn approve_and_run(c: &mut Conn, flow: &str) -> Firing {
-    let _: Flow = c.ok("flow.approve", json!({ "name": flow })).await;
+    common::approve(c, flow).await;
     c.ok("flow.run", json!({ "name": flow })).await
 }
 

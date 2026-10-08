@@ -44,7 +44,7 @@ async fn a_flow_loads_needs_a_yes_and_a_broken_one_says_where() {
     assert_eq!(errs[0].line, Some(3));
     assert!(errs[0].message.contains("no step"), "{:?}", errs[0]);
     assert_eq!(errs[0].file, home.flow_dir("broken").join("flow.md"));
-    let f: Flow = c.ok("flow.approve", json!({ "name": "pulse" })).await;
+    let f: Flow = common::approve(&mut c, "pulse").await;
     assert_eq!(f.status(), FlowStatus::On);
     assert!(home.flows_dir().join(".gitignore").exists());
     assert_eq!(
@@ -55,7 +55,7 @@ async fn a_flow_loads_needs_a_yes_and_a_broken_one_says_where() {
     assert_eq!(f.status(), FlowStatus::Paused);
     let f: Flow = c.ok("flow.resume", json!({ "name": "pulse" })).await;
     assert_eq!(f.status(), FlowStatus::On);
-    let res = c.call("flow.approve", json!({ "name": "broken" })).await;
+    let res = c.call("flow.approve", json!({ "name": "broken", "hash": "" })).await;
     assert!(res.error.is_some(), "a flow that did not load takes no yes");
     h.stop().await;
 }
@@ -74,7 +74,7 @@ async fn a_changed_script_asks_again() {
     );
     let Some(h) = Harness::on(home.clone()) else { return };
     let mut c = Conn::open(&h.home).await;
-    let f: Flow = c.ok("flow.approve", json!({ "name": "pulse" })).await;
+    let f: Flow = common::approve(&mut c, "pulse").await;
     assert_eq!(f.status(), FlowStatus::On);
     assert_eq!(f.when(), "by hand");
 
@@ -219,7 +219,7 @@ async fn a_folder_that_cannot_be_read_stays_as_it_last_loaded() {
     );
     let Some(h) = Harness::on(home.clone()) else { return };
     let mut c = Conn::open(&h.home).await;
-    let was: Flow = c.ok("flow.approve", json!({ "name": "pulse" })).await;
+    let was: Flow = common::approve(&mut c, "pulse").await;
     let lib = home.flow_dir("pulse").join("lib");
     std::fs::set_permissions(&lib, std::fs::Permissions::from_mode(0o000)).unwrap();
     // Root reads it all the same, and then there is nothing to see.
