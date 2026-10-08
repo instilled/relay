@@ -194,6 +194,20 @@ pub fn by_decision(conn: &Connection, decision: &str) -> Result<Option<(String, 
         .optional()?)
 }
 
+/// Which of `ids` are firings of `flow` that ended before `before`: one still open, another
+/// flow's, or no firing at all is not among them.
+pub fn ended_before(conn: &Connection, flow: &str, ids: &[String], before: Timestamp) -> Result<Vec<String>> {
+    let mut stmt =
+        conn.prepare("SELECT 1 FROM firings WHERE id = ?1 AND flow = ?2 AND ended_at IS NOT NULL AND ended_at < ?3")?;
+    let mut gone = Vec::new();
+    for id in ids {
+        if stmt.exists(params![id, flow, to_millis(before)])? {
+            gone.push(id.clone());
+        }
+    }
+    Ok(gone)
+}
+
 /// Every firing not ended, oldest first.
 pub fn open(conn: &Connection) -> Result<Vec<Firing>> {
     query(conn, "WHERE ended_at IS NULL ORDER BY started_at, id", params![])
@@ -422,5 +436,47 @@ mod tests {
             ])
         );
         assert!(ledger.call_blocking(|c| values(c, "f1", "triage")).unwrap().is_empty());
+    }
+
+    #[test]
+    fn only_a_flows_firings_that_ended_before_are_said_to_have() {
+        let ledger = Ledger::open_in_memory().unwrap();
+        fire(&ledger, "old", "2026-10-01T10:00:00Z");
+        fire(&ledger, "open", "2026-10-01T11:00:00Z");
+        fire(&ledger, "new", "2026-10-07T10:00:00Z");
+        ledger
+            .call_blocking(|c| {
+                save(
+                    c,
+                    "old",
+                    &BTreeMap::new(),
+                    FiringStatus::Done,
+                    Some(at("2026-10-01T10:05:00Z")),
+                )?;
+                save(
+                    c,
+                    "new",
+                    &BTreeMap::new(),
+                    FiringStatus::Done,
+                    Some(at("2026-10-07T10:05:00Z")),
+                )
+            })
+            .unwrap();
+        let ids: Vec<String> = ["old", "open", "new", "seen", "notes"].map(String::from).into();
+        let cut = at("2026-10-05T00:00:00Z");
+        let i = ids.clone();
+        assert_eq!(
+            ledger
+                .call_blocking(move |c| ended_before(c, "prod-logs", &i, cut))
+                .unwrap(),
+            ["old"]
+        );
+        assert!(
+            ledger
+                .call_blocking(move |c| ended_before(c, "other", &ids, cut))
+                .unwrap()
+                .is_empty(),
+            "another flow's firing is not this one's"
+        );
     }
 }

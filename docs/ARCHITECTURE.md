@@ -1068,8 +1068,9 @@ cause, chain and environment, the flow's folder on `PATH`, rebuilt from the firi
 
 **Events.** `flow.fired` (`flow`, `firing`, `trigger` — `when`, `on` or `hand` — the `event` an
 `on` firing fired on, and when the last firing started), `flow.ended` (`flow`, `firing`,
-`status`) and `flow.skipped` (`flow`, and `reason`: `overlap`, `missed`, or why a step's run
-could not start, with the `firing` and `step`). They are filed in the flow's `in`, as the project
+`status`), `flow.skipped` (`flow`, and `reason`: `overlap`, `missed`, or why a step's run
+could not start, with the `firing` and `step`) and `flow.refused` (`flow`, `firing`, `step`,
+`reason`: a `$RELAY_OUT` that was not kept). They are filed in the flow's `in`, as the project
 is registered, else in the Relay home. The steps' runs raise `run.*` as any run does.
 
 **Actions.** A flow's step, an ask step's option and an `rl ask` question's option are the same
@@ -1409,7 +1410,10 @@ archive` only puts a run away. What would otherwise grow without bound is the jo
 terminal bytes in `session_io`, its `log/<run>.log` and `run/<run>.exit|.env` sidecars. A run
 that redraws while it works writes megabytes an hour of it, and a finished run has no reason to
 keep them for good, so **`retention` defaults to `30d`**: the journal of a run that ended longer
-ago than that goes (`rl-daemon/src/gc.rs`, `gc.run`). `retention: 30d` in `config.yaml` (or
+ago than that goes (`rl-daemon/src/gc.rs`, `gc.run`). So does a firing's folder, `flows/<name>/runs/<firing>/`, once
+the firing ended as long ago — only a folder named for a firing of that flow the ledger knows, so
+whatever else a flow keeps under `runs/` (prod-logs' `runs/seen`) stays; its values in the ledger
+stay, as its runs do. `retention: 30d` in `config.yaml` (or
 `retention: { journal: 30d }`) sets another span; `retention: never` keeps every byte, and then
 `rl prune` refuses rather than guessing. The run and its events stay, and a `run.journal_dropped`
 event on the run says how many bytes went; attaching to such a run shows nothing, honestly. `rl
@@ -1433,7 +1437,8 @@ are deliberately not a key yet.
       flow.md                 the definition: YAML frontmatter, prompts as `## <step>` sections
       …                       the flow's own scripts, first on its steps' PATH; all of the
                               folder but runs/ is hashed, and a change asks for a yes again
-      runs/                   set aside for a firing's state; not hashed, not written yet (§8)
+      runs/<firing>/          a firing's state: $RELAY_WORK, and .relay/<step>/{in/,out}; not
+                              hashed; goes with the firing's runs at retention
   config.yaml                 your defaults (`agents:`, `assistants:`, `catch_up:`, `retention:`,
                               `workspaces:`); absent means defaults, unknown keys refused
   run/                        0700 — rld.sock, rld.pid, <run>.sock, <run>.exit
@@ -1466,10 +1471,7 @@ limit, so both sides fall back to the same short hashed directory under the temp
 Named here so the diagrams above are not read as the whole plan — see §7 of the brief for
 phasing.
 
-- **The rest of flows** (`docs/specs/2026-10-07-flows.md`) — state between steps: `rl flow
-  state set|get|write|read`, values (`{probe.signature}`, `$RELAY_V_<step>_<key>`), the step's
-  out and files under `$RELAY_IN` and `$RELAY_WORK` in `runs/<firing>/`, and their retention with
-  the firing's runs. Seeing it: steps as nodes in the graph, a flow's row expanded to its latest
+- **The rest of flows** (`docs/specs/2026-10-07-flows.md`) — Seeing it: steps as nodes in the graph, a flow's row expanded to its latest
   firing's steps, `catch_up: top` (a flow's latest firing heading the catch-up), `/summary` on one
   firing. Writing it: `rl flow new` and `/flow new` drafted from words, the context pack teaching
   flows, `rl flow test`, and templates.
