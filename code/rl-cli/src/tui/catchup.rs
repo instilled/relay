@@ -107,7 +107,7 @@ fn row(r: &Row, w: usize, now: Timestamp) -> Line<'static> {
     let (icon, ended) = match r {
         Row::Question(_) => (rows::QUESTION, false),
         Row::Run(i) => (rows::icon(&i.run), i.run.state.is_terminal()),
-        Row::Job(_) => (rows::JOB, false),
+        Row::Flow(_) => (rows::FLOW, false),
         Row::Group(h) => return Line::raw(h.name.clone()),
     };
     let right = match r {

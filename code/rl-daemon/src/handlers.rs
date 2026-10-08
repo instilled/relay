@@ -7,10 +7,10 @@ use rl_ledger::{events, graph, hidden, order, presence, runs};
 use rl_proto::PROTOCOL_VERSION;
 use rl_proto::methods::*;
 use rl_proto::rpc::RpcError;
-use rl_proto::rule::{Rule, RuleKind};
 use tracing::{info, warn};
 
 pub fn register(r: &mut Router<Daemon>) {
+    crate::flows::rpc::register(r);
     r.register::<DaemonPing, _, _>(|d, ()| async move {
         Ok(DaemonInfo {
             protocol: PROTOCOL_VERSION,
@@ -43,42 +43,14 @@ pub fn register(r: &mut Router<Daemon>) {
             .map_err(RpcError::internal)?;
         found.ok_or_else(|| RpcError::not_found("run", &id))
     });
-    r.register::<rl_proto::methods::ScheduleList, _, _>(|d, f| async move {
-        d.scheduler.list(f.all).await.map_err(internal)
-    });
-    r.register::<rl_proto::methods::ScheduleRun, _, _>(|d, p| async move {
-        d.scheduler.run_now(&p.name, p.scope.as_deref()).await.map_err(internal)
-    });
-    r.register::<rl_proto::methods::SchedulePause, _, _>(|d, p| async move {
-        d.scheduler
-            .set_paused(&p.name, p.scope.as_deref(), true)
-            .await
-            .map_err(internal)
-    });
-    r.register::<rl_proto::methods::ScheduleResume, _, _>(|d, p| async move {
-        d.scheduler
-            .set_paused(&p.name, p.scope.as_deref(), false)
-            .await
-            .map_err(internal)
-    });
     r.register::<rl_proto::methods::WorkspaceUp, _, _>(|d, p| async move {
-        let mut up = d.scheduler.up(&p.path, p.approve).await.map_err(internal)?;
-        // The folder's reactions are part of the same yes.
-        let (report, reactions, approved) = d
-            .reactor
-            .up(&up.workspace.path, &up.workspace.name, p.approve)
-            .await
-            .map_err(internal)?;
-        up.reaction_report = report;
-        up.reactions = reactions;
-        up.approved_reactions = approved;
-        Ok(up)
+        crate::workspace::up(&d, &p.path).await.map_err(internal)
     });
     r.register::<rl_proto::methods::WorkspaceList, _, _>(|d, ()| async move {
-        d.scheduler.workspaces().await.map_err(internal)
+        crate::workspace::list(&d).await.map_err(internal)
     });
     r.register::<rl_proto::methods::WorkspaceRename, _, _>(|d, p| async move {
-        d.scheduler.rename_workspace(&p.path, &p.name).await.map_err(internal)
+        crate::workspace::rename(&d, &p.path, &p.name).await.map_err(internal)
     });
     r.register::<rl_proto::methods::WorkspaceRemove, _, _>(|d, p| async move {
         crate::workspace::remove(&d, p)
@@ -167,102 +139,6 @@ pub fn register(r: &mut Router<Daemon>) {
         *d.config.write().unwrap() = loaded;
         Ok(report)
     });
-    r.register::<rl_proto::methods::ScheduleReload, _, _>(|d, ()| async move {
-        // A rules reload re-reads the config too: one `R` for everything on disk.
-        *d.config.write().unwrap() = crate::config::load(&d.home);
-        d.scheduler.reload().await.map_err(internal)
-    });
-    r.register::<ReactionList, _, _>(|d, f| async move { d.reactor.list(f.all).await.map_err(internal) });
-    r.register::<RuleList, _, _>(|d, f: ScheduleFilter| async move {
-        let mut rules: Vec<Rule> = d
-            .scheduler
-            .list(f.all)
-            .await
-            .map_err(internal)?
-            .into_iter()
-            .map(Rule::Schedule)
-            .collect();
-        rules.extend(
-            d.reactor
-                .list(f.all)
-                .await
-                .map_err(internal)?
-                .into_iter()
-                .map(Rule::Reaction),
-        );
-        Ok(rules)
-    });
-    r.register::<rl_proto::methods::RuleErrors, _, _>(|d, ()| async move {
-        let mut all = d.scheduler.not_loaded();
-        all.extend(d.reactor.not_loaded());
-        Ok(all)
-    });
-    r.register::<RuleApprove, _, _>(|d, p: RuleRef| async move {
-        let scope = p.scope.as_deref();
-        let kind = match p.kind {
-            Some(k) => k,
-            None => {
-                let s = d.scheduler.get(&p.name, scope).await;
-                let r = d.reactor.get(&p.name, scope).await;
-                match (s, r) {
-                    (Ok(_), Ok(_)) => {
-                        return Err(RpcError::invalid_params(format!(
-                            "`{}` is both a schedule and a reaction; say which with --kind",
-                            p.name
-                        )));
-                    }
-                    (Ok(_), Err(_)) => RuleKind::Schedule,
-                    (Err(_), Ok(_)) => RuleKind::Reaction,
-                    (Err(se), Err(re)) => {
-                        // A name ambiguous in one scope is the more useful
-                        // complaint than "not found" from the other.
-                        let ambiguous = se
-                            .downcast_ref::<crate::AmbiguousName>()
-                            .or_else(|| re.downcast_ref::<crate::AmbiguousName>());
-                        return Err(match ambiguous {
-                            Some(a) => RpcError::invalid_params(a.0.clone()),
-                            None => RpcError::not_found("rule", &p.name),
-                        });
-                    }
-                }
-            }
-        };
-        Ok(match kind {
-            RuleKind::Schedule => Rule::Schedule(d.scheduler.approve(&p.name, scope).await.map_err(internal)?),
-            RuleKind::Reaction => Rule::Reaction(d.reactor.approve(&p.name, scope).await.map_err(internal)?),
-        })
-    });
-    r.register::<ReactionPause, _, _>(|d, p| async move {
-        d.reactor
-            .set_paused(&p.name, p.scope.as_deref(), true)
-            .await
-            .map_err(internal)
-    });
-    r.register::<ReactionResume, _, _>(|d, p| async move {
-        d.reactor
-            .set_paused(&p.name, p.scope.as_deref(), false)
-            .await
-            .map_err(internal)
-    });
-    r.register::<ReactionReload, _, _>(|d, ()| async move { d.reactor.reload().await.map_err(internal) });
-    r.register::<ReactionTest, _, _>(|d, p: EventId| async move {
-        let trials = d
-            .reactor
-            .test(p.event)
-            .await
-            .map_err(|e| RpcError::invalid_params(format!("{e:#}")))?;
-        Ok(trials
-            .into_iter()
-            .map(|t| ReactionTrial {
-                reaction: t.reaction,
-                scope: t.scope,
-                fires: t.fires,
-                why: t.why,
-                action: t.action,
-            })
-            .collect::<Vec<_>>())
-    });
-
     r.register::<DecisionRaise, _, _>(|d, spec| async move {
         d.decisions
             .raise(spec)
@@ -437,7 +313,7 @@ pub fn register(r: &mut Router<Daemon>) {
     r.register::<DigestHide, _, _>(|d, p: DigestHideParams| async move {
         if !Hidden::valid_key(&p.key) {
             return Err(RpcError::invalid_params(format!(
-                "{:?}: a project is g:<folder>, a job j:<kind>:<name>@<group>",
+                "{:?}: a project is g:<folder>, a flow f:<name>",
                 p.key
             )));
         }
@@ -460,7 +336,7 @@ pub fn register(r: &mut Router<Daemon>) {
         }
         if let Some(bad) = p.rows.iter().find(|k| !Order::valid_row(k)) {
             return Err(RpcError::invalid_params(format!(
-                "{bad:?}: a run is r:<id>, a job j:<kind>:<name>@<group>"
+                "{bad:?}: a run is r:<id>, a flow f:<name>"
             )));
         }
         d.ledger
@@ -474,26 +350,11 @@ pub fn register(r: &mut Router<Daemon>) {
 
     r.register::<GraphGet, _, _>(|d, GraphParams { since }| async move {
         let since = since.unwrap_or_else(|| time::now() - jiff::SignedDuration::from_hours(24 * 7));
-        let mut rules: Vec<Rule> = d
-            .scheduler
-            .list(false)
-            .await
-            .map_err(internal)?
-            .into_iter()
-            .map(Rule::Schedule)
-            .collect();
-        rules.extend(
-            d.reactor
-                .list(false)
-                .await
-                .map_err(internal)?
-                .into_iter()
-                .map(Rule::Reaction),
-        );
-        let (runs, events, asks) = d
+        let (flows, runs, events, asks) = d
             .ledger
             .call(move |c| {
                 Ok((
+                    rl_ledger::flows::list(c, false)?,
                     graph::runs_since(c, since)?,
                     graph::events_since(c, since)?,
                     graph::asks_since(c, since)?,
@@ -501,10 +362,11 @@ pub fn register(r: &mut Router<Daemon>) {
             })
             .await
             .map_err(RpcError::internal)?;
+        let flows: Vec<_> = flows.into_iter().map(|f| d.flows.shown(f)).collect();
         Ok(crate::graph::build(
             since,
             crate::graph::Inputs {
-                rules: &rules,
+                flows: &flows,
                 runs: &runs,
                 events: &events,
                 asks: &asks,
@@ -565,9 +427,16 @@ pub fn register(r: &mut Router<Daemon>) {
             .list(DecisionFilter::default())
             .await
             .map_err(RpcError::internal)?;
-        let (lost, hidden, order) = d
+        let (lost, hidden, order, firings) = d
             .ledger
-            .call(|c| Ok((runs::lost(c)?, hidden::list(c)?, order::list(c)?)))
+            .call(|c| {
+                Ok((
+                    runs::lost(c)?,
+                    hidden::list(c)?,
+                    order::list(c)?,
+                    crate::digest::firings(c)?,
+                ))
+            })
             .await
             .map_err(RpcError::internal)?;
         Ok(Digest {
@@ -578,6 +447,7 @@ pub fn register(r: &mut Router<Daemon>) {
             lost,
             hidden,
             order,
+            firings,
         })
     });
 
@@ -646,7 +516,7 @@ pub fn register(r: &mut Router<Daemon>) {
 
 /// A kind a command may `rl emit`: a dotted, lowercase name of its own, each
 /// word starting with a letter and going on in letters, digits, `_` or `-`
-/// (`flint.product.new-feedback`, as rules are named). The daemon's own
+/// (`flint.product.new-feedback`, as flows are named). The daemon's own
 /// families are refused, so an emit cannot forge a `run.failed` the digest
 /// would read as real.
 fn emit_kind_ok(kind: &str) -> Result<(), String> {

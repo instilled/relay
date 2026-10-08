@@ -1,6 +1,6 @@
 //! `rl summary <what>`: the kept summary, or a new one from
 //! `assistants.summary`; `--again` asks anew. `<what>` is a run, a folder, a
-//! job or `all`. `rl config` shows the summariser beside the interpreter.
+//! flow or `all`. `rl config` shows the summariser beside the interpreter.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -158,15 +158,10 @@ fn an_ended_run_is_summarised_on_the_line() {
     let (ok, again, err) = run(rl(&["summary", ".", "2020-01-01"]));
     assert!(ok && again == out && !err.contains("summarising…"), "{again}\n{err}");
 
-    // A job, global or a project's.
-    let (ok, out, err) = run(rl(&["summary", "schedule:nightly", "1h"]));
+    // A flow.
+    let (ok, out, err) = run(rl(&["summary", "flow:nightly", "1h"]));
     assert!(ok, "{err}");
-    assert!(out.contains("# summary of the schedule nightly · since "), "{out}");
-    let (ok, out, err) = run(rl(&["summary", "reaction:fix", "1h", "--in", "."]));
-    assert!(ok, "{err}");
-    assert!(out.contains("# summary of the reaction fix · since "), "{out}");
-    let (ok, _, err) = run(rl(&["summary", &id, "--in", "."]));
-    assert!(!ok && err.contains("--in"), "{err}");
+    assert!(out.contains("# summary of the flow nightly · since "), "{out}");
 
     // A run, read from its logs.
     let (ok, out, err) = run(rl(&["summary", &id, "--deep"]));

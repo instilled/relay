@@ -3,6 +3,7 @@
 
 use jiff::Timestamp;
 use rl_core::time::fmt_duration;
+use rl_proto::flow::Firing;
 use rl_proto::methods::DigestItem;
 use rl_proto::types::{Event, Run, RunState, Signal};
 
@@ -30,6 +31,15 @@ pub fn item(
         recap,
         run,
     }
+}
+
+/// Each flow's latest firing, for the row that stands for it on the list.
+pub fn firings(c: &rusqlite::Connection) -> anyhow::Result<Vec<Firing>> {
+    let mut out = Vec::new();
+    for f in rl_ledger::flows::list(c, false)? {
+        out.extend(rl_ledger::firings::latest(c, &f.name)?);
+    }
+    Ok(out)
 }
 
 /// The newest thing a run raised, in its own words.
@@ -194,6 +204,43 @@ mod tests {
         assert_eq!(summarise(&bad, None, &raised), "exit 1 · 1m00s");
         // A run still going says what it is doing, as before.
         assert_eq!(summarise(&run(RunState::Idle), None, &raised), "idle");
+    }
+
+    #[test]
+    fn the_digest_carries_each_flows_latest_firing() {
+        use rl_ledger::firings::{NewFiring, insert};
+        use rl_ledger::flows::{Loaded, sync};
+        let ledger = rl_ledger::Ledger::open_in_memory().unwrap();
+        let found = ledger
+            .call_blocking(|c| {
+                let loaded = |name: &str| Loaded {
+                    name: name.into(),
+                    hash: "h".into(),
+                    def_json: "{}".into(),
+                };
+                sync(c, &[loaded("nightly"), loaded("quiet")], Timestamp::UNIX_EPOCH)?;
+                let steps = ["probe".to_string()];
+                for (id, at) in [("f1", "2026-09-08T10:00:00Z"), ("f2", "2026-09-08T11:00:00Z")] {
+                    insert(
+                        c,
+                        &NewFiring {
+                            id,
+                            flow: "nightly",
+                            def_json: "{}",
+                            hash: "h",
+                            trigger: "when",
+                            event: None,
+                            at: at.parse().unwrap(),
+                            steps: &steps,
+                        },
+                    )?;
+                }
+                firings(c)
+            })
+            .unwrap();
+        // The newer of nightly's two; nothing for a flow that never fired.
+        assert_eq!(found.iter().map(|f| f.id.as_str()).collect::<Vec<_>>(), ["f2"]);
+        assert_eq!(found[0].steps.len(), 1);
     }
 
     #[test]

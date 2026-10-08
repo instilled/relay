@@ -41,7 +41,7 @@ struct Args {
     /// holder's own is not inherited. `--env` still adds to it.
     #[arg(long, value_name = "FILE")]
     env_file: Option<PathBuf>,
-    /// Pipes instead of a pty (headless/scheduled runs).
+    /// Pipes instead of a pty (headless runs, a flow's steps).
     #[arg(long)]
     no_tty: bool,
     /// No input for the child: end of input at once (pipes only; a pty

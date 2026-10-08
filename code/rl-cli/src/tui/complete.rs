@@ -5,22 +5,14 @@
 //! the folder of the row the cursor is on — so a path means that folder's,
 //! not the one `rl` was started in. The first word is what to run — an
 //! agent, one of the folder's make targets or scripts, a binary on your
-//! PATH, a path — or the word that starts a rule. After `every` comes a
-//! duration, after `on` an event; a few common tools know their own words
-//! (`git`'s subcommands and branches, `make` and `just` targets, a
-//! package's scripts, `cargo`'s subcommands); anywhere else, a file. A `/`
-//! line's arguments are the words its command takes.
+//! PATH, a path. A few common tools know their own words (`git`'s
+//! subcommands and branches, `make` and `just` targets, a package's scripts,
+//! `cargo`'s subcommands); anywhere else, a file. A `/` line's arguments are
+//! the words its command takes, and `/flow`'s second one a flow.
 
 use super::{palette, query};
-use rl_proto::types::event_kind;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-
-/// The durations offered after `every`.
-const DURATIONS: &[&str] = &["30s", "5m", "15m", "30m", "1h", "6h", "12h", "24h"];
-
-/// The words that begin a rule rather than a run.
-const RULE_WORDS: &[&str] = &["every", "on", "cron"];
 
 /// `git`'s subcommands, the ones a person types most.
 const GIT: &[&str] = &[
@@ -107,7 +99,8 @@ pub struct Here<'a> {
     /// The names the person's shell knows that PATH does not: aliases and
     /// functions, read from `$SHELL` once (see `shell_names`). A `ll` is here.
     pub aliases: &'a [String],
-    /// What `/filter`'s tokens can name: projects, rules, branches.
+    /// What `/filter`'s tokens can name: projects, flows, branches; and the
+    /// flows `/flow` acts on.
     pub names: Names<'a>,
 }
 
@@ -115,7 +108,7 @@ pub struct Here<'a> {
 #[derive(Default, Clone, Copy)]
 pub struct Names<'a> {
     pub projects: &'a [String],
-    pub rules: &'a [String],
+    pub flows: &'a [String],
     pub branches: &'a [String],
     /// What `kind:` takes, when the view says (the events view: event kinds);
     /// empty, the list's own.
@@ -189,7 +182,7 @@ pub fn candidates(line: &str, cursor: usize, here: &Here) -> Vec<Candidate> {
     if words.is_empty() && looks_like_path(frag) {
         out = paths(frag, here.folder);
     } else if words.is_empty() {
-        // The head of the line: what to run, or the word that opens a rule.
+        // The head of the line: what to run.
         out.extend(starting(here.agents.iter().map(String::as_str), frag, Kind::Agent));
         out.extend(starting(
             targets(here.folder).iter().map(String::as_str),
@@ -202,7 +195,6 @@ pub fn candidates(line: &str, cursor: usize, here: &Here) -> Vec<Candidate> {
                 .into_iter()
                 .map(|b| cand(b, Kind::Binary)),
         );
-        out.extend(starting(RULE_WORDS.iter().copied(), frag, Kind::Word));
     } else {
         out = arguments(&words, frag, here.folder);
     }
@@ -210,18 +202,23 @@ pub fn candidates(line: &str, cursor: usize, here: &Here) -> Vec<Candidate> {
 }
 
 /// A `/` command's argument: the words it takes there, `/filter`'s search
-/// tokens and their values, `/up`'s folders. `rest` is the line after the
+/// tokens and their values, `/up`'s folders, `/flow`'s flows after its verb
+/// (any but `reload`, which is every flow's). `rest` is the line after the
 /// slash, up to the word being typed.
 fn command_args(rest: &str, frag: &str, here: &Here) -> Vec<Candidate> {
     let mut words = rest.split_whitespace();
     let Some((c, _)) = words.next().and_then(palette::parse) else {
         return Vec::new();
     };
-    let at = words.count();
+    let said: Vec<&str> = words.collect();
+    let at = said.len();
     match c.cmd {
+        palette::Cmd::Flow if at == 1 && said[0] != "reload" => {
+            starting(here.names.flows.iter().map(String::as_str), frag, Kind::Word)
+        }
         palette::Cmd::Filter => {
             let n = here.names;
-            query::complete(frag, n.projects, n.rules, n.branches, n.kinds)
+            query::complete(frag, n.projects, n.flows, n.branches, n.kinds)
                 .into_iter()
                 .map(|t| cand(t, Kind::Word))
                 .collect()
@@ -235,15 +232,10 @@ fn command_args(rest: &str, frag: &str, here: &Here) -> Vec<Candidate> {
     }
 }
 
-/// A word after the first: what `every` and `on` take, what a known tool
-/// takes there, and otherwise a path. A tool with nothing that fits falls
-/// back to paths too, so `make -C sr` still finds `src/`.
+/// A word after the first: what a known tool takes there, and otherwise a
+/// path. A tool with nothing that fits falls back to paths too, so `make -C
+/// sr` still finds `src/`.
 fn arguments(words: &[&str], frag: &str, folder: &Path) -> Vec<Candidate> {
-    match words.last().copied() {
-        Some("every") => return starting(DURATIONS.iter().copied(), frag, Kind::Word),
-        Some("on") => return starting(event_kind::ALL.iter().copied(), frag, Kind::Word),
-        _ => {}
-    }
     let at = words.len();
     let prev = words.last().copied().unwrap_or("");
     let own: Vec<Candidate> = match (words[0], words.get(1).copied()) {
@@ -432,7 +424,7 @@ fn shared(a: &str, b: &str) -> usize {
 /// Sorted by kind then name, one per name, and not more than the cap.
 fn tidy(mut out: Vec<Candidate>) -> Vec<Candidate> {
     // Within a kind, by name — except the words Relay itself offers, which
-    // keep the order they were written in: 30m before 1h, not 12h before 15m.
+    // keep the order they were written in: `/flow`'s run before its pause.
     out.sort_by(|a, b| {
         a.kind.cmp(&b.kind).then_with(|| {
             if a.kind == Kind::Word {
@@ -707,62 +699,20 @@ mod tests {
         let c = candidates("c", 1, &here);
         assert_eq!(
             texts(&c),
-            ["claude", "codex", "check", "cargo", "check-deps", "cron"],
-            "agents, then the folder's targets, then PATH, then the rule words"
+            ["claude", "codex", "check", "cargo", "check-deps"],
+            "agents, then the folder's targets, then PATH"
         );
         assert_eq!(c[0].kind, Kind::Agent);
         assert_eq!(c[2].kind, Kind::Target, "check is a target once, not twice");
         assert_eq!(c[3].kind, Kind::Binary);
-        assert_eq!(c[5].kind, Kind::Word);
         assert!(!texts(&c).contains(&"cheese.txt"), "only what can be run");
 
         // An empty word matches everything for that position.
         let c = candidates("", 0, &here);
         assert_eq!(
             texts(&c),
-            [
-                "claude",
-                "codex",
-                "build",
-                "check",
-                "dev",
-                "cargo",
-                "check-deps",
-                "every",
-                "on",
-                "cron"
-            ],
-            "no .PHONY, no variable, no recipe line; Relay's own words last, as written"
-        );
-    }
-
-    #[test]
-    fn every_and_on_say_what_comes_next() {
-        let dir = tempfile::tempdir().unwrap();
-        let here = Here {
-            folder: dir.path(),
-            agents: &[],
-            path_dirs: &[],
-            aliases: &[],
-            names: Names::default(),
-        };
-        let c = candidates("every ", 6, &here);
-        assert_eq!(c.len(), DURATIONS.len());
-        assert!(texts(&c).contains(&"30s"));
-        assert!(c.iter().all(|x| x.kind == Kind::Word));
-        assert_eq!(
-            texts(&candidates("every 1", 7, &here)),
-            ["15m", "1h", "12h"],
-            "short to long"
-        );
-
-        let c = candidates("on ", 3, &here);
-        assert_eq!(c.len(), event_kind::ALL.len());
-        assert_eq!(texts(&candidates("on run.f", 8, &here)), ["run.finished", "run.failed"]);
-        // The cursor sits in the word it is completing, wherever the line goes.
-        assert_eq!(
-            texts(&candidates("on run.f now", 8, &here)),
-            ["run.finished", "run.failed"]
+            ["claude", "codex", "build", "check", "dev", "cargo", "check-deps"],
+            "no .PHONY, no variable, no recipe line"
         );
     }
 
@@ -863,7 +813,7 @@ mod tests {
             aliases: &[],
             names: Names::default(),
         };
-        assert_eq!(texts(&candidates("", 0, &here)), ["every", "on", "cron"]);
+        assert!(candidates("", 0, &here).is_empty());
         assert!(candidates("cat x", 5, &here).is_empty());
         assert!(!runnable("make", &here));
 
@@ -878,7 +828,7 @@ mod tests {
             aliases: &[],
             names: Names::default(),
         };
-        assert_eq!(texts(&candidates("", 0, &here)), ["every", "on", "cron"]);
+        assert!(candidates("", 0, &here).is_empty());
     }
 
     #[test]
@@ -933,42 +883,32 @@ mod tests {
     fn a_slash_commands_arguments_are_its_words() {
         let dir = tempfile::tempdir().unwrap();
         let here = Here::at(dir.path());
-        assert_eq!(at_end("/edit ", &here), ["schedules", "reactions"]);
-        assert_eq!(at_end("/edit sch", &here), ["schedules"]);
-        assert_eq!(at_end("/edit schedules gl", &here), ["global"]);
-        assert_eq!(at_end("/edit reactions ", &here), ["global"]);
-        assert!(
-            at_end("/edit schedules global ", &here).is_empty(),
-            "nothing after global"
-        );
-        assert_eq!(at_end("/ed r", &here), ["reactions"], "a name's prefix will do");
-        assert_eq!(at_end("/reload ", &here), ["rules", "shell"]);
+        assert_eq!(at_end("/reload ", &here), ["flows", "shell"]);
+        assert_eq!(at_end("/rel s", &here), ["shell"], "a name's prefix will do");
+        assert!(at_end("/reload shell ", &here).is_empty(), "nothing after shell");
         assert_eq!(at_end("/archive ", &here), ["seen"]);
         assert_eq!(at_end("/pane ", &here), ["full"]);
         assert_eq!(at_end("/resume ", &here), ["all"]);
         assert_eq!(at_end("/resume all ", &here), ["commands"]);
-        assert_eq!(
-            at_end("/lens ", &here),
-            ["all", "agents", "jobs", "reactions", "hidden"]
-        );
+        assert_eq!(at_end("/lens ", &here), ["all", "agents", "flows", "hidden"]);
         assert_eq!(at_end("/lens a", &here), ["all", "agents"]);
         assert_eq!(at_end("/mark b", &here), ["blocked"]);
         assert!(at_end("/stop ", &here).is_empty(), "a command that takes nothing");
         assert!(at_end("/nope ", &here).is_empty(), "no such command");
         // The name itself is the panel's to complete, not a path.
-        assert!(at_end("/ed", &here).is_empty());
+        assert!(at_end("/rel", &here).is_empty());
         // What is taken goes in where the word was.
-        let line = "/edit sch";
-        assert_eq!(apply(line, line.len(), "schedules").0, "/edit schedules");
+        let line = "/reload sh";
+        assert_eq!(apply(line, line.len(), "shell").0, "/reload shell");
 
         // /filter: the search tokens, and a token's values.
         let projects = vec!["api".to_string(), "web".to_string(), "global".to_string()];
-        let rules = vec!["nightly".to_string()];
+        let flows = vec!["nightly".to_string()];
         let branches = vec!["main".to_string()];
         let here = Here {
             names: Names {
                 projects: &projects,
-                rules: &rules,
+                flows: &flows,
                 branches: &branches,
                 kinds: &[],
             },
@@ -978,6 +918,28 @@ mod tests {
         assert_eq!(at_end("/filter build in:", &here), ["in:api", "in:global", "in:web"]);
         assert_eq!(at_end("/filter by:n", &here), ["by:nightly"]);
         assert_eq!(at_end("/filter on:", &here), ["on:main"]);
+    }
+
+    #[test]
+    fn flow_commands_complete_their_verb_then_a_flow() {
+        let dir = tempfile::tempdir().unwrap();
+        let flows = vec!["nightly".to_string(), "prod-logs".to_string()];
+        let here = Here {
+            names: Names {
+                flows: &flows,
+                ..Names::default()
+            },
+            ..Here::at(dir.path())
+        };
+        assert_eq!(
+            at_end("/flow ", &here),
+            ["run", "pause", "resume", "approve", "edit", "reload"]
+        );
+        assert_eq!(at_end("/flow re", &here), ["resume", "reload"]);
+        assert_eq!(at_end("/flow run ", &here), ["nightly", "prod-logs"]);
+        assert_eq!(at_end("/flow edit p", &here), ["prod-logs"]);
+        assert!(at_end("/flow run nightly ", &here).is_empty(), "one flow at a time");
+        assert!(at_end("/flow reload ", &here).is_empty(), "reload is every flow");
     }
 
     #[test]

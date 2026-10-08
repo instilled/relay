@@ -59,6 +59,7 @@ mod tests {
             lost: vec![],
             hidden: vec![],
             order: vec![],
+            firings: Vec::new(),
         };
         let ids: Vec<&str> = since_items(&d).iter().map(|i| i.run.id.as_str()).collect();
         assert_eq!(ids, ["moved", "unseen"]);

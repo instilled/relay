@@ -1,12 +1,11 @@
 #!/bin/sh
-# check-weather — fetch today's forecast (no API key) and emit a `weather.alert`
-# when it is sunny, or when the chance of rain is above a threshold. A schedule
-# runs this; `rl emit` files the alert and the `weather-advisory` reaction picks
-# it up. Needs only curl and jq.
+# check-weather — today's forecast (no API key) in one line, when it is sunny or
+# the chance of rain is above a threshold; nothing otherwise. The flow's probe
+# step runs this (the flow's folder is first on its PATH), and what it prints
+# is the step's out: `{probe.out}` in the question. Needs only curl and jq.
 #
-# Relay hands us $RELAY_RUN, which `rl emit` inherits, so the alert joins this
-# run's flow. Configure with WEATHER_LAT / WEATHER_LON / WEATHER_PLACE, and the
-# rain threshold with RAIN_POP (percent, default 50).
+# Configure with WEATHER_LAT / WEATHER_LON / WEATHER_PLACE, and the rain
+# threshold with RAIN_POP (percent, default 50).
 set -eu
 
 lat=${WEATHER_LAT:-47.37}
@@ -21,7 +20,7 @@ pop=$(printf '%s' "$day" | jq -r '.precipitation_probability_max[0] // 0')
 
 # WMO weather codes 0 (clear) and 1 (mainly clear) read as "sunny".
 if [ "$code" = 0 ] || [ "$code" = 1 ]; then
-  rl emit weather.alert --data condition=sunny --data "place=$place" --data "rain_pct=$pop"
+  echo "$(date +%F) sunny in $place (rain $pop%)"
 elif awk -v p="$pop" -v t="$threshold" 'BEGIN { exit !(p > t) }'; then
-  rl emit weather.alert --data condition=rain-likely --data "place=$place" --data "rain_pct=$pop"
+  echo "$(date +%F) rain likely in $place (rain $pop%)"
 fi

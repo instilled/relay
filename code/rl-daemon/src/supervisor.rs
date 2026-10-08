@@ -299,8 +299,8 @@ impl Supervisor {
         run.ref_ = spec.ref_.clone();
         run.tags = spec.tags.clone();
         run.cause = spec.cause.clone();
-        if let Some(f) = &spec.flow {
-            run.flow = f.clone();
+        if let Some(f) = &spec.chain {
+            run.chain = f.clone();
         }
 
         let (cols, rows) = (spec.cols.unwrap_or(DEFAULT_COLS), spec.rows.unwrap_or(DEFAULT_ROWS));

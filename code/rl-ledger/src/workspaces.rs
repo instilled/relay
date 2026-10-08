@@ -1,11 +1,11 @@
-//! Workspaces: folders the user registered with `rl up`. A workspace is the
-//! trust boundary for everything under its `.relay/`.
+//! Workspaces: folders the user registered with `rl up` (`rl add`). A flow's
+//! `in` must be one of them, or the flow does not load.
 
 use crate::conv;
 use anyhow::Result;
 use jiff::Timestamp;
 use rl_core::time::{from_millis, to_millis};
-use rl_proto::schedule::Workspace;
+use rl_proto::types::Workspace;
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use std::path::{Path, PathBuf};
 

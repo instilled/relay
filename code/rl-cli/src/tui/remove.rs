@@ -1,11 +1,10 @@
 //! Removing a project from the list (`^x` twice on its header), in words:
-//! what the first press says a second will do, the question about the
-//! folder's `.relay`, and what came of it. Apart from `App`, which needs a
-//! daemon, so that what the user is told can be tested on its own.
+//! what the first press says a second will do, and what came of it. Apart
+//! from `App`, which needs a daemon, so that what the user is told can be
+//! tested on its own.
 
-use rl_core::rules_dir::RulesDir;
 use rl_proto::methods::{DigestItem, WorkspaceRemoved};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 /// What removing a folder would take with it, as the list has it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -55,59 +54,9 @@ pub fn arm(p: &Plan) -> String {
     words.join(" · ")
 }
 
-/// What is in a `.relay`: the rules loaded from it, or — when none are, as
-/// in a folder never registered — the files that hold them.
-pub fn contents(schedules: usize, reactions: usize, files: &[PathBuf]) -> String {
-    let mut words = Vec::new();
-    if schedules > 0 {
-        words.push(count(schedules, "schedule", "schedules"));
-    }
-    if reactions > 0 {
-        words.push(count(reactions, "reaction", "reactions"));
-    }
-    if words.is_empty() {
-        words = files
-            .iter()
-            .filter_map(|f| f.file_name().map(|n| n.to_string_lossy().into_owned()))
-            .collect();
-    }
-    words.join(" · ")
-}
-
-/// Asked on the second `^x`, before anything is done, when the folder has a
-/// `.relay` that can be moved. `removed` is where it would go, as shown.
-pub fn question(name: &str, contents: &str, removed: &str) -> String {
-    format!("also move {name}/.relay ({contents}) to {removed}? y moves · n keeps · any other key cancels")
-}
-
-/// What becomes of a folder's `.relay` in a removal, for the result's words.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RulesFate {
-    /// There is none worth a word.
-    Nothing,
-    /// Asked, and the answer was to keep it.
-    Kept,
-    /// Not movable, so not asked: kept, and why.
-    KeptBecause(&'static str),
-    /// Asked, and the answer was to move it.
-    Moved,
-}
-
-impl RulesFate {
-    /// The fate of a `.relay` nobody is asked about: one there is nothing
-    /// to move out of, or one that may not be moved.
-    pub fn unasked(dir: &RulesDir) -> Self {
-        match dir {
-            RulesDir::Symlink => RulesFate::KeptBecause("a symlink"),
-            RulesDir::Home => RulesFate::KeptBecause("it is the Relay home"),
-            RulesDir::Nothing | RulesDir::Movable(_) => RulesFate::Nothing,
-        }
-    }
-}
-
-/// The flash once it is done: `removed relay · stopped 2 · 7 runs archived ·
-/// .relay kept`. Only what happened is said. `show` renders a path for humans.
-pub fn done(name: &str, r: &WorkspaceRemoved, fate: &RulesFate, show: impl Fn(&Path) -> String) -> String {
+/// The flash once it is done: `removed relay · stopped 2 · 7 runs archived`.
+/// Only what happened is said.
+pub fn done(name: &str, r: &WorkspaceRemoved) -> String {
     let mut words = vec![format!("removed {name}")];
     if r.stopped > 0 {
         words.push(format!("stopped {}", r.stopped));
@@ -120,13 +69,6 @@ pub fn done(name: &str, r: &WorkspaceRemoved, fate: &RulesFate, show: impl Fn(&P
     }
     if r.dismissed > 0 {
         words.push(format!("{} dismissed", count(r.dismissed, "question", "questions")));
-    }
-    match (fate, &r.rules_moved_to) {
-        (_, Some(to)) => words.push(format!(".relay moved to {}", show(to))),
-        (RulesFate::Kept, None) => words.push(".relay kept".into()),
-        (RulesFate::KeptBecause(why), None) => words.push(format!(".relay kept: {why}")),
-        // Asked to move and nothing moved: it held no rules by then.
-        (RulesFate::Moved, None) | (RulesFate::Nothing, None) => {}
     }
     words.join(" · ")
 }
@@ -182,21 +124,7 @@ mod tests {
     }
 
     #[test]
-    fn the_relay_question_names_what_would_move_and_where() {
-        let files = [PathBuf::from("/w/relay/.relay/schedules.yaml")];
-        assert_eq!(contents(2, 1, &files), "2 schedules · 1 reaction");
-        assert_eq!(contents(0, 3, &files), "3 reactions");
-        // Nothing loaded from it (a folder never registered): its files.
-        assert_eq!(contents(0, 0, &files), "schedules.yaml");
-        assert_eq!(
-            question("relay", "2 schedules · 1 reaction", "~/.relay/removed"),
-            "also move relay/.relay (2 schedules · 1 reaction) to ~/.relay/removed? y moves · n keeps · any other key cancels"
-        );
-    }
-
-    #[test]
     fn the_result_says_only_what_happened() {
-        let show = |p: &Path| p.display().to_string();
         let r = WorkspaceRemoved {
             path: "/w/relay".into(),
             removed: true,
@@ -204,19 +132,15 @@ mod tests {
             archived: 7,
             ..Default::default()
         };
-        assert_eq!(
-            done("relay", &r, &RulesFate::Kept, show),
-            "removed relay · stopped 2 · 7 runs archived · .relay kept"
-        );
-        let moved = WorkspaceRemoved {
-            rules_moved_to: Some("/h/removed/relay-20260923-101500".into()),
+        assert_eq!(done("relay", &r), "removed relay · stopped 2 · 7 runs archived");
+        let more = WorkspaceRemoved {
             dismissed: 1,
             archived: 1,
             ..r.clone()
         };
         assert_eq!(
-            done("relay", &moved, &RulesFate::Moved, show),
-            "removed relay · stopped 2 · 1 run archived · 1 question dismissed · .relay moved to /h/removed/relay-20260923-101500"
+            done("relay", &more),
+            "removed relay · stopped 2 · 1 run archived · 1 question dismissed"
         );
         let stubborn = WorkspaceRemoved {
             path: "/w/relay".into(),
@@ -224,22 +148,7 @@ mod tests {
             still_running: 1,
             ..Default::default()
         };
-        assert_eq!(
-            done("relay", &stubborn, &RulesFate::unasked(&RulesDir::Symlink), show),
-            "removed relay · stopped 1 · 1 still going · .relay kept: a symlink"
-        );
-        assert_eq!(
-            done(
-                "relay",
-                &WorkspaceRemoved::default(),
-                &RulesFate::unasked(&RulesDir::Nothing),
-                show
-            ),
-            "removed relay"
-        );
-        assert_eq!(
-            RulesFate::unasked(&RulesDir::Home),
-            RulesFate::KeptBecause("it is the Relay home")
-        );
+        assert_eq!(done("relay", &stubborn), "removed relay · stopped 1 · 1 still going");
+        assert_eq!(done("relay", &WorkspaceRemoved::default()), "removed relay");
     }
 }

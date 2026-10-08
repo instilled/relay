@@ -18,8 +18,8 @@ use jiff::Timestamp;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use rl_core::time::fmt_age;
+use rl_proto::flow::FlowStatus;
 use rl_proto::graph::{Graph, Node, NodeKind};
-use rl_proto::rule::RuleStatus;
 use rl_proto::types::{Checkout, RunState};
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -30,14 +30,12 @@ const BOX_MAX: usize = 30;
 const LABEL_MAX: usize = 22;
 
 pub const AGENT: Color = Color::Rgb(0xB0, 0x5C, 0xC8); // magenta
-pub const REACTION: Color = Color::Rgb(0xC9, 0xB2, 0x2E); // yellow
 
 /// One column wide each, every one: the grid is a cell per character, and an
 /// emoji-width glyph (`⚡`, `⏱`) would push a box's border out of line.
 pub fn glyph(kind: NodeKind) -> &'static str {
     match kind {
-        NodeKind::Schedule => "◷",
-        NodeKind::Reaction => "↯",
+        NodeKind::Flow => "↻",
         NodeKind::Ask => "◇",
         NodeKind::Shell => "❯",
         NodeKind::Agent => "✦",
@@ -49,8 +47,7 @@ pub fn glyph(kind: NodeKind) -> &'static str {
 /// The colour a kind of node wears.
 pub fn colour(kind: NodeKind) -> Style {
     match kind {
-        NodeKind::Schedule => Style::default().fg(theme::LIVE),
-        NodeKind::Reaction => Style::default().fg(REACTION),
+        NodeKind::Flow => Style::default().fg(theme::LIVE),
         NodeKind::Ask => Style::default().fg(theme::NEEDS),
         NodeKind::Shell => Style::default().fg(theme::ACCENT),
         NodeKind::Agent => Style::default().fg(AGENT),
@@ -97,7 +94,7 @@ pub fn keep(g: &Graph, filter: &str, names: &Names, checkouts: &[Checkout]) -> H
 }
 
 /// What a search matches a node on: its name and detail, its folder, how its
-/// runs went, what kind of node it is, and the rule it belongs to.
+/// runs went, what kind of node it is, and the flow it is or asks for.
 fn node_subject<'a>(n: &'a Node, folder: &'a str) -> Subject<'a> {
     let mut is = Vec::new();
     match n.runs.last {
@@ -109,12 +106,11 @@ fn node_subject<'a>(n: &'a Node, folder: &'a str) -> Subject<'a> {
     if n.runs.going > 0 {
         is.push("going");
     }
-    if !n.waiting.is_empty() || n.status == Some(RuleStatus::NeedsApproval) {
+    if !n.waiting.is_empty() || n.status == Some(FlowStatus::NeedsApproval) {
         is.push("needs");
     }
     let kind = match n.kind {
-        NodeKind::Schedule => vec!["job", "schedule"],
-        NodeKind::Reaction => vec!["reaction"],
+        NodeKind::Flow => vec!["flow"],
         NodeKind::Ask => vec!["question"],
         NodeKind::Shell => vec!["shell", "command"],
         NodeKind::Agent => vec!["agent"],
@@ -126,14 +122,14 @@ fn node_subject<'a>(n: &'a Node, folder: &'a str) -> Subject<'a> {
         project: vec![folder, n.folder.as_deref().and_then(|p| p.to_str()).unwrap_or("")],
         is,
         kind,
-        by: n
-            .rule
-            .as_deref()
-            .map(|r| r.rsplit('/').next().unwrap_or(r))
-            .into_iter()
-            .collect(),
+        by: flow_name(n).into_iter().collect(),
         on: None,
     }
+}
+
+/// The flow a node is, or asks for: `flow:<name>`, `ask:<name>`.
+pub fn flow_name(n: &Node) -> Option<&str> {
+    n.id.strip_prefix("flow:").or_else(|| n.id.strip_prefix("ask:"))
 }
 
 /// A node as the search ranks it (`query::ranked`): its name, its folder,
@@ -148,8 +144,8 @@ pub fn named(n: &Node, names: &Names) -> Named {
     }
 }
 
-/// Where a node is, in words: its folder's name, `global` for a rule of the
-/// Relay home, nothing for an event.
+/// Where a node is, in words: its folder's name, `global` for a flow with
+/// no `in`, nothing for an event.
 fn folder_word(n: &Node, names: &Names) -> String {
     match (&n.folder, n.kind) {
         (Some(p), _) => names.workspace(p),
@@ -160,22 +156,18 @@ fn folder_word(n: &Node, names: &Names) -> String {
 
 /// The two lines inside a node's box.
 pub fn texts(n: &Node, names: &Names, now: Timestamp) -> (String, String) {
-    let mark = if n.status == Some(RuleStatus::NeedsApproval) {
+    let mark = if n.status == Some(FlowStatus::NeedsApproval) {
         "! "
     } else {
         ""
     };
     let top = format!("{} {mark}{}", glyph(n.kind), n.name);
     let what = match n.kind {
-        NodeKind::Schedule => match (n.status, n.next_at) {
-            (Some(RuleStatus::On), Some(t)) if t > now => format!("in {}", fmt_age(now, t)),
-            (Some(RuleStatus::On), _) => n.detail.clone(),
+        NodeKind::Flow => match (n.status, n.next_at) {
+            (Some(FlowStatus::On), Some(t)) if t > now => format!("in {}", fmt_age(now, t)),
+            (Some(FlowStatus::On), _) => n.detail.clone(),
             (Some(s), _) => s.to_string(),
             (None, _) => String::new(),
-        },
-        NodeKind::Reaction => match n.status {
-            Some(RuleStatus::On) | None => n.detail.clone(),
-            Some(s) => s.to_string(),
         },
         NodeKind::Ask => match n.waiting.len() {
             0 => String::new(),
@@ -767,7 +759,7 @@ pub fn draw(g: &Graph, p: &Plan, names: &Names, sel: Option<&str>, now: Timestam
         if n.runs.last == Some(RunState::Failed) {
             border = Style::default().fg(theme::BAD);
         }
-        if n.status == Some(RuleStatus::Paused) {
+        if n.status == Some(FlowStatus::Paused) {
             border = theme::dim();
         }
         if selected {
@@ -804,7 +796,7 @@ pub fn draw(g: &Graph, p: &Plan, names: &Names, sel: Option<&str>, now: Timestam
             }
         };
         let name_style = match (n.status, n.waiting.is_empty()) {
-            (Some(RuleStatus::NeedsApproval), _) | (_, false) => theme::needs(),
+            (Some(FlowStatus::NeedsApproval), _) | (_, false) => theme::needs(),
             _ => colour(n.kind).add_modifier(Modifier::BOLD),
         };
         c.text(
@@ -878,8 +870,7 @@ pub fn step(p: &Plan, sel: Option<&str>, dir: Dir) -> Option<String> {
 /// A kind of node, in a word.
 fn kind_word(k: NodeKind) -> &'static str {
     match k {
-        NodeKind::Schedule => "schedule",
-        NodeKind::Reaction => "reaction",
+        NodeKind::Flow => "flow",
         NodeKind::Ask => "question",
         NodeKind::Shell => "command",
         NodeKind::Agent => "agent",
@@ -888,15 +879,15 @@ fn kind_word(k: NodeKind) -> &'static str {
     }
 }
 
-/// What the pane says about the selected node: what it is, its rule as the
-/// rules list would show it, what it is wired to either side, and — on a
+/// What the pane says about the selected node: what it is, its flow as the
+/// list's pane would show it, what it is wired to either side, and — on a
 /// question — the first one waiting, numbered to answer.
 #[allow(clippy::too_many_arguments)]
 pub fn pane_lines(
     g: &Graph,
     n: &Node,
-    rule: Option<&rl_proto::rule::Rule>,
-    last_run: Option<&str>,
+    flow: Option<&rl_proto::flow::Flow>,
+    firing: Option<&rl_proto::flow::Firing>,
     waiting: Option<(&rl_proto::decision::Decision, Option<&rl_proto::types::Run>)>,
     picked: &[usize],
     at: Option<usize>,
@@ -925,7 +916,19 @@ pub fn pane_lines(
     if let Some((q, asker)) = waiting {
         lines.push(Line::raw(""));
         let more = n.waiting.len().saturating_sub(1);
-        lines.extend(super::pane::question_lines(q, asker, None, picked, at, width, now).lines);
+        lines.extend(
+            super::pane::question_lines(
+                q,
+                asker,
+                firing.filter(|f| f.id == q.chain),
+                None,
+                picked,
+                at,
+                width,
+                now,
+            )
+            .lines,
+        );
         if more > 0 {
             lines.push(Line::from(Span::styled(
                 format!(" and {more} more waiting"),
@@ -933,15 +936,16 @@ pub fn pane_lines(
             )));
         }
     }
-    if let Some(r) = rule {
+    if let Some(f) = flow {
         lines.push(Line::raw(""));
-        if matches!(n.kind, NodeKind::Schedule | NodeKind::Reaction) {
-            lines.extend(super::rules::lines(r, names, now, last_run));
-        } else {
-            lines.push(Line::from(vec![
+        match serde_json::from_value::<rl_flow::def::FlowDef>(f.def.clone()) {
+            Ok(def) if n.kind == NodeKind::Flow => {
+                lines.extend(super::flows::pane_lines(f, &def, firing, names, now));
+            }
+            _ => lines.push(Line::from(vec![
                 Span::styled(" from ", theme::dim()),
-                Span::raw(format!("{} {}", r.kind(), r.name())),
-            ]));
+                Span::raw(format!("flow {}", f.name)),
+            ])),
         }
     }
     let side = |into: bool| -> Vec<Line<'static>> {
@@ -985,13 +989,9 @@ pub fn pane_lines(
 
 /// The headline over the graph.
 pub fn headline(g: &Graph, kept: usize, filter: &str) -> String {
-    let rules = g
-        .nodes
-        .iter()
-        .filter(|n| matches!(n.kind, NodeKind::Schedule | NodeKind::Reaction))
-        .count();
+    let flows = g.nodes.iter().filter(|n| n.kind == NodeKind::Flow).count();
     let waiting: usize = g.nodes.iter().map(|n| n.waiting.len()).sum();
-    let mut s = format!("wiring · {rules} rules");
+    let mut s = format!("wiring · {flows} flow{}", if flows == 1 { "" } else { "s" });
     if waiting > 0 {
         s.push_str(&format!(" · {waiting} waiting"));
     }
@@ -1033,8 +1033,7 @@ mod tests {
             kind,
             name: name.into(),
             folder: folder.map(PathBuf::from),
-            rule: None,
-            status: Some(RuleStatus::On),
+            status: Some(FlowStatus::On),
             detail: String::new(),
             next_at: None,
             runs: Tally::default(),
@@ -1060,13 +1059,13 @@ mod tests {
         Graph {
             since: now(),
             nodes: vec![
-                node("s", NodeKind::Schedule, "check-weather", Some("/w/relay")),
+                node("s", NodeKind::Flow, "check-weather", Some("/w/relay")),
                 node("s.run", NodeKind::Shell, "check-weather", Some("/w/relay")),
-                node("r", NodeKind::Reaction, "advisory", Some("/w/relay")),
+                node("r", NodeKind::Flow, "advisory", Some("/w/relay")),
                 node("a", NodeKind::Ask, "add a note?", Some("/w/relay")),
                 node("a.note", NodeKind::Shell, "echo >> notes", Some("/w/relay")),
                 node("shells", NodeKind::Shell, "shells", Some("/w/api")),
-                node("t", NodeKind::Reaction, "tell-me", None),
+                node("t", NodeKind::Flow, "tell-me", None),
             ],
             edges: vec![
                 edge("s", "s.run", "", 6),
@@ -1099,9 +1098,9 @@ mod tests {
             (rank("s"), rank("s.run"), rank("r"), rank("a"), rank("a.note")),
             (0, 1, 2, 3, 4)
         );
-        // A folder's shells feed a reaction directly: they start at the left
-        // too, and the reaction they share with a schedule's command sits one
-        // past the further of the two.
+        // A folder's shells feed a flow directly: they start at the left too,
+        // and the flow they share with another flow's command sits one past
+        // the further of the two.
         assert_eq!((rank("shells"), rank("t")), (0, 2));
         // Nothing overlaps.
         for a in &p.boxes {
@@ -1120,7 +1119,7 @@ mod tests {
         let g = Graph {
             since: now(),
             nodes: vec![
-                node("s", NodeKind::Schedule, "nightly", Some("/w/relay")),
+                node("s", NodeKind::Flow, "nightly", Some("/w/relay")),
                 Node {
                     runs: Tally {
                         total: 2,
@@ -1128,21 +1127,21 @@ mod tests {
                     },
                     ..node("run", NodeKind::Shell, "make test", Some("/w/relay"))
                 },
-                node("r", NodeKind::Reaction, "tell-me", None),
+                node("r", NodeKind::Flow, "tell-me", None),
             ],
             edges: vec![edge("s", "run", "", 2), edge("run", "r", "run.failed", 1)],
         };
         let p = plan(&g, &all(&g), &names(), now());
         let text = draw(&g, &p, &names(), None, now()).plain();
-        assert!(text.contains("◷ nightly"), "{text}");
+        assert!(text.contains("↻ nightly"), "{text}");
         assert!(text.contains("❯ make test"), "{text}");
-        assert!(text.contains("↯ tell-me"), "{text}");
+        assert!(text.contains("↻ tell-me"), "{text}");
         assert!(text.contains("relay · ok ×2"), "{text}");
         assert!(text.contains("run.failed ×1"), "{text}");
         assert!(text.contains("▶"), "{text}");
         // Level with what feeds it, a chain is one straight line.
-        let row = text.lines().find(|l| l.contains("◷ nightly")).unwrap();
-        assert!(row.contains("❯ make test") && row.contains("↯ tell-me"), "{text}");
+        let row = text.lines().find(|l| l.contains("↻ nightly")).unwrap();
+        assert!(row.contains("❯ make test") && row.contains("↻ tell-me"), "{text}");
     }
 
     #[test]
@@ -1150,7 +1149,7 @@ mod tests {
         let g = Graph {
             since: now(),
             nodes: vec![
-                node("r", NodeKind::Reaction, "fixer", None),
+                node("r", NodeKind::Flow, "fixer", None),
                 node("run", NodeKind::Agent, "claude · fix", None),
             ],
             edges: vec![edge("r", "run", "", 1), edge("run", "r", "run.failed", 1)],
@@ -1170,7 +1169,11 @@ mod tests {
         let kept = keep(&g, "api", &names(), &[]);
         let mut ids: Vec<&str> = kept.iter().map(String::as_str).collect();
         ids.sort();
-        assert_eq!(ids, ["shells", "t"], "api's shells, and the global rule they reach");
+        assert_eq!(
+            ids,
+            ["shells", "t"],
+            "api's shells, and the flow with no `in` they reach"
+        );
         let kept = keep(&g, "advisory", &names(), &[]);
         assert!(["s", "s.run", "r", "a", "a.note"].iter().all(|id| kept.contains(*id)));
         assert!(!kept.contains("shells"));
@@ -1215,13 +1218,35 @@ mod tests {
             .iter()
             .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
             .collect();
-        assert_eq!(text[0], " ↯ advisory");
-        assert_eq!(text[1], " reaction · relay");
+        assert_eq!(text[0], " ↻ advisory");
+        assert_eq!(text[1], " flow · relay");
         assert!(
             text.iter().any(|l| l == "  ← ❯ check-weather  weather.alert ×3"),
             "{text:#?}"
         );
         assert!(text.iter().any(|l| l == "  → ◇ add a note?  ×3"), "{text:#?}");
+    }
+
+    #[test]
+    fn a_node_is_found_by_the_flow_it_is_or_asks_for() {
+        let g = Graph {
+            since: now(),
+            nodes: vec![
+                node("flow:nightly", NodeKind::Flow, "nightly", Some("/w/relay")),
+                node("ask:nightly", NodeKind::Ask, "ship it?", Some("/w/relay")),
+                node("runs:shell:/w/api", NodeKind::Shell, "shells", Some("/w/api")),
+            ],
+            edges: vec![edge("flow:nightly", "ask:nightly", "", 1)],
+        };
+        let kept = keep(&g, "by:nightly", &names(), &[]);
+        assert!(
+            kept.contains("flow:nightly") && kept.contains("ask:nightly"),
+            "{kept:?}"
+        );
+        assert!(!kept.contains("runs:shell:/w/api"));
+        assert_eq!(flow_name(g.node("ask:nightly").unwrap()), Some("nightly"));
+        assert_eq!(flow_name(g.node("runs:shell:/w/api").unwrap()), None);
+        assert_eq!(headline(&g, 3, ""), "wiring · 1 flow");
     }
 
     #[test]

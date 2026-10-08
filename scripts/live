@@ -68,14 +68,20 @@ case ${1:-} in
     cp -R "$seed/ws" "$live/ws"
     # Its own repo, so it has its own branch instead of inheriting relay's.
     git -C "$live/ws" init -q -b demo 2>/dev/null || true
-    for f in schedules reactions; do
-      sed "s|@LIVE@|$live|g" "$seed/$f.yaml" > "$live/home/$f.yaml"
+    # The seed's flows, `in` the live workspace. Each is approved below: a
+    # flow runs only once it has a yes, and these are ours.
+    for d in "$seed"/flows/*/; do
+      name=$(basename "$d")
+      mkdir -p "$live/home/flows/$name"
+      sed "s|@LIVE@|$live|g" "$d/flow.md" > "$live/home/flows/$name/flow.md"
     done
     echo "live: home $live/home, workspace $live/ws"
     "$rl" daemon start
-    "$rl" up --yes "$live/ws"
-    "$rl" schedule ls
-    "$rl" react ls
+    "$rl" add "$live/ws"
+    for d in "$live"/home/flows/*/; do
+      "$rl" flow approve "$(basename "$d")" >/dev/null
+    done
+    "$rl" flow list
     echo
     echo "live: now try \`scripts/live\` (the control panel), \`scripts/live ls --all\`,"
     echo "      or \`eval \"\$(scripts/live env)\"\` to use plain \`rl\` in this shell."

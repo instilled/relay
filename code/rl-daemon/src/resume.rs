@@ -61,24 +61,40 @@ async fn one(d: &Daemon, run: &Run, p: &RunResumeParams) -> Resumed {
         Ok(a) => a,
         Err(why) => return not(&run.id, &run.title, &why),
     };
-    let spec = RunSpec {
-        argv,
-        kind: run.kind,
-        cwd: run.cwd.clone(),
-        title: Some(run.title.clone()),
-        ref_: run.ref_.clone(),
-        tags: tags_for(run),
-        tty: true,
-        cols: p.cols,
-        rows: p.rows,
-        env: p.env.clone(),
-        inherit_env: p.env.is_empty(),
-        input: true,
-        cause: Cause::Manual,
-        flow: Some(run.flow.clone()),
+    // A flow's step is picked up as a step: started as its firing starts it, in that
+    // firing, the step's run from then on.
+    let step = matches!(run.cause, Cause::Flow { .. });
+    let spec = if step {
+        match d.flows.spec_again(run).await {
+            Ok(Some(again)) => RunSpec {
+                argv,
+                kind: run.kind,
+                cwd: run.cwd.clone(),
+                title: Some(run.title.clone()),
+                ref_: run.ref_.clone(),
+                tags: tags_for(run),
+                ..again
+            },
+            Ok(None) => RunSpec {
+                cause: run.cause.clone(),
+                ..spec_for(run, argv, p)
+            },
+            Err(e) => return not(&run.id, &run.title, &format!("starting it as its step: {e:#}")),
+        }
+    } else {
+        spec_for(run, argv, p)
     };
+    // Held from the start until the step has its new run, so that run's end is never read
+    // before it is the step's.
+    let going = if step { Some(d.flows.going.lock().await) } else { None };
     match d.supervisor.start(spec).await {
         Ok(new) => {
+            if going.is_some()
+                && let Err(e) = d.flows.resumed(&run.id, &new.id).await
+            {
+                tracing::warn!(error = %format!("{e:#}"), id = %run.id, "carrying a resumed step's firing on");
+            }
+            drop(going);
             let old = run.id.clone();
             let to = format!("r:{}", new.id);
             let now = Timestamp::now();
@@ -97,6 +113,27 @@ async fn one(d: &Daemon, run: &Run, p: &RunResumeParams) -> Resumed {
             }
         }
         Err(e) => not(&run.id, &run.title, &format!("{e:#}")),
+    }
+}
+
+/// What picking `run` up starts, by hand, in its chain: on a terminal, with the client's
+/// size and env.
+fn spec_for(run: &Run, argv: Vec<String>, p: &RunResumeParams) -> RunSpec {
+    RunSpec {
+        argv,
+        kind: run.kind,
+        cwd: run.cwd.clone(),
+        title: Some(run.title.clone()),
+        ref_: run.ref_.clone(),
+        tags: tags_for(run),
+        tty: true,
+        cols: p.cols,
+        rows: p.rows,
+        env: p.env.clone(),
+        inherit_env: p.env.is_empty(),
+        input: true,
+        cause: Cause::Manual,
+        chain: Some(run.chain.clone()),
     }
 }
 

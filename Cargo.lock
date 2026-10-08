@@ -1510,6 +1510,7 @@ dependencies = [
  "rl-core",
  "rl-daemon",
  "rl-detect",
+ "rl-flow",
  "rl-ledger",
  "rl-proto",
  "rl-session",
@@ -1528,6 +1529,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "jiff",
+ "nix 0.31.3",
  "tempfile",
 ]
 
@@ -1541,6 +1543,7 @@ dependencies = [
  "regex",
  "rl-core",
  "rl-detect",
+ "rl-flow",
  "rl-ledger",
  "rl-proto",
  "rl-session",
@@ -1569,6 +1572,20 @@ dependencies = [
  "serde_json",
  "serde_norway",
  "tempfile",
+]
+
+[[package]]
+name = "rl-flow"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "jiff",
+ "rl-core",
+ "rl-proto",
+ "serde",
+ "serde_json",
+ "serde_norway",
+ "sha2",
 ]
 
 [[package]]

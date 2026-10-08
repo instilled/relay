@@ -1,8 +1,8 @@
 //! `~/.relay/` — one place for everything user-level. `RELAY_HOME` overrides
 //! it, which is also how tests stay out of the real one.
 
+pub mod folder;
 pub mod id;
-pub mod rules_dir;
 pub mod time;
 
 use anyhow::{Context, Result};
@@ -96,18 +96,16 @@ impl Home {
     pub fn config_file(&self) -> PathBuf {
         self.0.join("config.yaml")
     }
-    /// User-level schedules, human-edited.
-    pub fn schedules_file(&self) -> PathBuf {
-        self.0.join("schedules.yaml")
+    /// Flows, a folder each: `<name>/flow.md` and the flow's own scripts.
+    pub fn flows_dir(&self) -> PathBuf {
+        self.0.join("flows")
     }
-    /// The user's own reactions: events → actions.
-    pub fn reactions_file(&self) -> PathBuf {
-        self.0.join("reactions.yaml")
+    pub fn flow_dir(&self, name: &str) -> PathBuf {
+        self.flows_dir().join(name)
     }
-    /// Where a removed project's rule files are kept, a folder each: moved
-    /// here rather than deleted, so taking a project away loses nothing.
-    pub fn removed_dir(&self) -> PathBuf {
-        self.0.join("removed")
+    /// One firing's state: what its steps left for the steps after them.
+    pub fn firing_dir(&self, name: &str, id: &str) -> PathBuf {
+        self.flow_dir(name).join("runs").join(id)
     }
 
     pub fn session_socket(&self, run: &str) -> PathBuf {
@@ -186,6 +184,14 @@ mod tests {
         assert!(home.run_dir().is_dir());
         assert!(home.log_dir().is_dir());
         assert_eq!(home.daemon_socket(), home.run_dir().join("rld.sock"));
+    }
+
+    #[test]
+    fn a_firing_lives_in_its_flow_folder() {
+        let home = Home::at("/h");
+        assert_eq!(home.flows_dir(), Path::new("/h/flows"));
+        assert_eq!(home.flow_dir("pulse"), Path::new("/h/flows/pulse"));
+        assert_eq!(home.firing_dir("pulse", "f1"), Path::new("/h/flows/pulse/runs/f1"));
     }
 
     #[test]
