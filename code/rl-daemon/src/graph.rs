@@ -9,7 +9,6 @@
 //! nothing raised in the window still shows, as an event node, so every flow
 //! that listens has a way in. The steps inside a flow are not drawn yet.
 
-use crate::action::expand_home;
 use crate::flows::kind_matches;
 use rl_flow::def::FlowDef;
 use rl_ledger::graph::{AskRow, EventCount, RunRow};
@@ -21,6 +20,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 pub struct Inputs<'a> {
+    /// As a client is shown them: each one's `in` resolved (`Flow::folder`).
     pub flows: &'a [Flow],
     pub runs: &'a [RunRow],
     pub events: &'a [EventCount],
@@ -35,8 +35,7 @@ pub fn build(since: jiff::Timestamp, inp: Inputs<'_>) -> Graph {
         .filter(|f| f.removed_at.is_none())
         .map(|f| {
             let def = serde_json::from_value::<FlowDef>(f.def.clone()).ok();
-            let folder = def.as_ref().and_then(|d| d.in_.as_deref()).map(expand_home);
-            (f, folder, def.map(|d| d.trigger.on).unwrap_or_default())
+            (f, f.folder.clone(), def.map(|d| d.trigger.on).unwrap_or_default())
         })
         .collect();
     let mut g = Builder::default();
@@ -256,7 +255,7 @@ mod tests {
             hash: "h".into(),
             def: serde_json::to_value(&def).unwrap(),
             source: PathBuf::new(),
-            folder: None,
+            folder: def.in_.clone(),
             paused: false,
             approved_hash: Some("h".into()),
             last_fired_at: None,

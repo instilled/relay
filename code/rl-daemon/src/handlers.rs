@@ -362,6 +362,7 @@ pub fn register(r: &mut Router<Daemon>) {
             })
             .await
             .map_err(RpcError::internal)?;
+        let flows: Vec<_> = flows.into_iter().map(|f| d.flows.shown(f)).collect();
         Ok(crate::graph::build(
             since,
             crate::graph::Inputs {

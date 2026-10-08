@@ -395,10 +395,7 @@ impl Flows {
     /// the Relay home.
     fn event(&self, def: &FlowDef, kind: &str, summary: String, data: serde_json::Value) -> NewEvent {
         let workspace = match &def.in_ {
-            Some(p) => {
-                let p = expand_home(p);
-                std::fs::canonicalize(&p).unwrap_or(p)
-            }
+            Some(p) => super::canonical_in(p),
             None => self.home.path().to_path_buf(),
         };
         NewEvent {

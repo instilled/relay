@@ -1,8 +1,7 @@
 //! `~/.relay/flows` read into the ledger: each folder hashed, its `flow.md`
 //! checked, and what did not load said with its file and line.
 
-use super::Flows;
-use crate::action::expand_home;
+use super::{Flows, canonical_in};
 use anyhow::{Context, Result};
 use jiff::Timestamp;
 use rl_flow::{def, doc, hash};
@@ -184,7 +183,7 @@ fn read(folder: &Path, name: &str, known: &BTreeSet<PathBuf>) -> Read {
         Ok(d) => d,
         Err(p) => return Read::Broken(vec![said(p.line, p.column, p.message)]),
     };
-    let is_known = |p: &Path| std::fs::canonicalize(expand_home(p)).is_ok_and(|c| known.contains(&c));
+    let is_known = |p: &Path| known.contains(&canonical_in(p));
     match def::check(name, read, &is_known) {
         Ok(d) => Read::Loaded(Loaded {
             name: name.to_string(),

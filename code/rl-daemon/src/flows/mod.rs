@@ -20,6 +20,7 @@ use rl_core::Home;
 use rl_detect::Registry;
 use rl_ledger::{Ledger, events, meta};
 use rl_proto::flow::{Flow, NotLoaded};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::Notify;
@@ -136,12 +137,20 @@ impl Flows {
     /// `in` resolved as the projects are registered.
     pub(crate) fn shown(&self, mut f: Flow) -> Flow {
         f.source = self.home.flow_dir(&f.name);
-        f.folder = f.def.get("in_").and_then(|p| p.as_str()).map(|p| {
-            let p = crate::action::expand_home(std::path::Path::new(p));
-            std::fs::canonicalize(&p).unwrap_or(p)
-        });
+        f.folder = f
+            .def
+            .get("in_")
+            .and_then(|p| p.as_str())
+            .map(|p| canonical_in(Path::new(p)));
         f
     }
+}
+
+/// A flow's `in` as the projects are registered: `~` expanded and the path made canonical, or
+/// as written while it is not there. What a flow is filed under, wherever it shows.
+pub(crate) fn canonical_in(p: &Path) -> PathBuf {
+    let p = crate::action::expand_home(p);
+    std::fs::canonicalize(&p).unwrap_or(p)
 }
 
 /// How long the loop naps: until `next` is due, a tick at most. One already due (a `queue`

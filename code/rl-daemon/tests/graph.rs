@@ -94,3 +94,26 @@ async fn the_graph_joins_flows_to_what_happened() {
     assert_eq!(g.node("ask:asker").unwrap().waiting.len(), 1, "still waiting");
     h.stop().await;
 }
+
+/// A flow's node stands in its `in` as the project is registered, however `in` is spelled.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_flows_node_stands_in_its_project_however_its_in_is_spelled() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = Home::at(tmp.path().join("home"));
+    let real = tmp.path().join("real");
+    std::fs::create_dir_all(&real).unwrap();
+    let link = tmp.path().join("link");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let dir = home.flow_dir("there");
+    std::fs::create_dir_all(&dir).unwrap();
+    let md = format!("---\nin: {}/\nsteps:\n  a:\n    run: \"true\"\n---\n", link.display());
+    std::fs::write(dir.join("flow.md"), md).unwrap();
+    let Some(h) = Harness::on(home) else { return };
+    let mut c = Conn::open(&h.home).await;
+    let _: serde_json::Value = c.ok("workspace.up", json!({ "path": real })).await;
+    let g: Graph = c.ok("graph.get", json!({})).await;
+    let node = g.node("flow:there").expect("every flow is a node");
+    assert_eq!(node.folder, Some(std::fs::canonicalize(&real).unwrap()));
+    h.stop().await;
+}
