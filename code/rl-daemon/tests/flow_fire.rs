@@ -57,11 +57,15 @@ async fn approve_and_run(c: &mut Conn, flow: &str) -> Firing {
     c.ok("flow.run", json!({ "name": flow })).await
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn three_steps_run_in_order_in_one_chain_and_the_firing_ends_done() {
     let tmp = tempfile::tempdir().unwrap();
+    // `in` names the project by a link, so the canonical folder is another path on any system.
+    let real = tmp.path().join("real");
+    std::fs::create_dir_all(&real).unwrap();
     let ws = tmp.path().join("ws");
-    std::fs::create_dir_all(&ws).unwrap();
+    std::os::unix::fs::symlink(&real, &ws).unwrap();
     let home = Home::at(tmp.path().join("home"));
     let Some(h) = Harness::on(home.clone()) else { return };
     let mut c = Conn::open(&h.home).await;

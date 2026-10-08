@@ -6181,7 +6181,7 @@ mod tests {
             area: Rect::new(2, 3, 20, 4),
             scroll: 1,
             keys: vec![
-                Some("j:one".into()), // scrolled out of sight
+                Some("f:one".into()), // scrolled out of sight
                 Some("r:two".into()), // the top line drawn
                 None,                 // the blank a group leaves above itself
                 Some("g:three".into()),

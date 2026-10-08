@@ -30,7 +30,7 @@ option asks the forecast again rather than echoing what the probe said.
 ## Run it
 
 ```bash
-cp -R examples/weather-alert ~/.relay/flows/   # needs curl + jq
+mkdir -p ~/.relay/flows && cp -R examples/weather-alert ~/.relay/flows/   # needs curl + jq
 rl flow reload
 rl flow approve weather-alert                  # a flow runs only once you've said yes to its folder
 

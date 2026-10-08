@@ -127,7 +127,8 @@ pub struct Profile {
     pub interactive_only: bool,
     pub hooks: Option<Hooks>,
     /// Arguments that make the CLI run one prompt and exit (`-p`), for
-    /// scheduled runs. The prompt goes last, or in place of `{prompt}`.
+    /// headless runs: a flow's agent steps, Relay's own assistants. The prompt
+    /// goes last, or in place of `{prompt}`.
     pub headless: Vec<String>,
     /// The flag that names a model (`--model`); empty when the CLI has none.
     pub model_flag: Vec<String>,

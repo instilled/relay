@@ -332,7 +332,7 @@ fn command(label: &str, action: &Action, flow: &Flow, said: &mut Vec<String>) {
     for r in words.iter().flat_map(|w| template::refs(w)) {
         if r.head == "event" || flow.names.contains(r.head.as_str()) {
             said.push(format!(
-                "`{label}`: `{{{}.{}}}` cannot go into a command — read `{}`",
+                "`{label}`: `{{{}.{}}}` cannot go into a command — {}",
                 r.head,
                 r.rest,
                 instead(&r)
@@ -341,13 +341,17 @@ fn command(label: &str, action: &Action, flow: &Flow, said: &mut Vec<String>) {
     }
 }
 
-/// Where a command finds what a placeholder would have said.
+/// What to do instead: a command reads the event from its environment; what a
+/// step left reaches only a prompt or a question.
 fn instead(r: &Ref) -> String {
-    match (r.head.as_str(), r.rest.as_str()) {
-        ("event", _) => "$RELAY_EVENT".to_string(),
-        (step, "out") => format!("$RELAY_IN/{step}.out"),
-        (step, key) => format!("$RELAY_V_{step}_{key}"),
-    }
+    let var = match (r.head.as_str(), r.rest.as_str()) {
+        ("event", "summary") => "$RELAY_EVENT_SUMMARY",
+        ("event", "kind") => "$RELAY_EVENT_KIND",
+        ("event", "run") => "$RELAY_EVENT_RUN",
+        ("event", _) => "$RELAY_EVENT",
+        _ => return "what a step left goes into an agent's prompt or an `ask:`".to_string(),
+    };
+    format!("read `{var}`")
 }
 
 /// Whether a `## heading` is some step's, or some ask's option's.
@@ -377,7 +381,7 @@ fn when(s: &str) -> Result<When, String> {
         .map_err(|e| format!("when: {e:#}"))
 }
 
-/// `30m`, `4h`, `1h30m`: the scheduler's durations, in whole seconds, never none.
+/// `30m`, `4h`, `1h30m`: a `when` cadence, in whole seconds, never none.
 fn every(s: &str) -> Result<u64, String> {
     let s = s.trim();
     parse_duration(s)
@@ -646,7 +650,7 @@ What was said with the yes: {review.note}
     fn a_placeholder_in_a_command_is_refused() {
         refused(
             &flow("  probe:\n    run: x\n  b:\n    after: probe\n    run: \"echo {probe.out}\"\n"),
-            "`b`: `{probe.out}` cannot go into a command — read `$RELAY_IN/probe.out`",
+            "`b`: `{probe.out}` cannot go into a command — what a step left goes into an agent's prompt or an `ask:`",
             Some(5),
         );
         refused(
@@ -656,7 +660,12 @@ What was said with the yes: {review.note}
         );
         refused(
             &flow("  b:\n    run: \"echo {event.summary}\"\n"),
-            "`b`: `{event.summary}` cannot go into a command",
+            "`b`: `{event.summary}` cannot go into a command — read `$RELAY_EVENT_SUMMARY`",
+            Some(3),
+        );
+        refused(
+            &flow("  b:\n    run: \"echo {event.data.x}\"\n"),
+            "`b`: `{event.data.x}` cannot go into a command — read `$RELAY_EVENT`",
             Some(3),
         );
         refused(

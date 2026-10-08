@@ -899,8 +899,10 @@ What came before reaches a step through placeholders. `{probe.out}` is what a st
 `group`, `workspace`) are the event an `on` firing fired on. They are spliced into an agent's prompt and an
 `ask:` text only, in one pass — what was spliced in is never read for more
 (`rl-flow/src/template.rs`). A command never gets one: a `run:` string or argv, or an agent's
-`args`, that names `{probe.out}` is refused at load, saying what a command reads instead, so an
-error line in production logs can never become shell. Other braces (`awk '{print $1}'`) are the
+`args`, that names `{probe.out}` is refused at load, so an error line in production logs can
+never become shell. The refusal says what to do instead: for the event, read it from the
+environment (`$RELAY_EVENT_SUMMARY`, `$RELAY_EVENT`); what a step left goes into an agent's prompt
+or an `ask:`, since a command has no way to it yet (§8). Other braces (`awk '{print $1}'`) are the
 shell's.
 
 What is wrong is said at load, all of it at once, each at its line (`rl-flow/src/def.rs`,
