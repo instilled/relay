@@ -51,6 +51,10 @@ impl Home {
     pub fn run_dir(&self) -> PathBuf {
         self.0.join("run")
     }
+    /// `rld`'s own, put on each flow step's `PATH`: only a link to the `rl` beside `rld`.
+    pub fn bin_dir(&self) -> PathBuf {
+        self.run_dir().join("bin")
+    }
     pub fn log_dir(&self) -> PathBuf {
         self.0.join("log")
     }

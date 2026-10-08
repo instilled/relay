@@ -8,6 +8,7 @@
 use super::Flows;
 use super::ask::{option_of, question};
 use super::facts::{Facts, Handed};
+use super::path;
 use super::work::Work;
 use crate::action::{expand_home, run_spec};
 use anyhow::{Context, Result, anyhow};
@@ -345,7 +346,7 @@ impl Flows {
     }
 
     /// What a step's run is started with: no tty and no input, in the firing's chain, the
-    /// flow's folder first on its `PATH`, the firing's names in its env, its folder made ready
+    /// flow's folder first on its `PATH` and the `rl` beside `rld` next ([`super::path`]), the firing's names in its env, its folder made ready
     /// (`Work::prepare`), and what the steps before it left as `RELAY_V_<step>_<key>`.
     pub(super) fn spec(&self, m: &Moved, step: &str, action: &Action) -> Result<RunSpec> {
         let def = &m.def;
@@ -376,7 +377,7 @@ impl Flows {
             ("RELAY_OUT", shown(&work.out)),
             // When the flow's firing before this one started, whatever fired either: empty on the first.
             ("RELAY_LAST_FIRING", m.last.map(|t| t.to_string()).unwrap_or_default()),
-            ("PATH", format!("{}:{}", dir.display(), path.to_string_lossy())),
+            ("PATH", path::step_path(&dir, self.bin.as_deref(), &path)),
         ];
         spec.env.extend(env.map(|(k, v)| (k.to_string(), v)));
         // What the steps before it left, a variable each: `$RELAY_V_probe_signature`.

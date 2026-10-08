@@ -890,7 +890,10 @@ its event happened — the folder of the event's run while that is still there, 
 workspace — and anything else in the Relay home (`engine::cwd`). Each run, titled `prod-logs ·
 probe`, is started with `RELAY_FLOW`, `RELAY_FIRING`, `RELAY_STEP`, `RELAY_FLOW_DIR`,
 `RELAY_WORK`, `RELAY_IN` and `RELAY_OUT` (with `RELAY_RUN`, as every run is), the folder first on
-`PATH`, and `RELAY_LAST_FIRING` — when the flow's previous firing started, whatever fired it,
+`PATH` and `run/bin/` next — a folder `rld` owns, holding only a link to the `rl` beside it,
+made afresh at each start, so a step's `rl` is the one that matches the `rld` running it and
+nothing else of `rld`'s folder goes ahead of yours (`flows/path.rs`; with no `rl` beside `rld`,
+no link and no entry) — and `RELAY_LAST_FIRING` — when the flow's previous firing started, whatever fired it,
 empty on the first — so a probe can ask only for what is new without keeping a clock of its own;
 an `on` firing's get the event: `RELAY_EVENT` whole, as JSON, and `RELAY_EVENT_ID`, `_KIND`,
 `_SUMMARY`, `_RUN`.
@@ -1063,7 +1066,7 @@ taken, and every open firing is reconciled before the socket answers (`Flows::re
 whose run ended advances as though the end had been heard; one whose run was lost (`run.lost`) is
 `lost`, its firing `waiting · <step> lost`; a waiting step with no question raised has it raised.
 `/resume` (`rl resume <id>`) on a lost step's run starts it again as the step's own — the same
-cause, chain and environment, the flow's folder on `PATH`, rebuilt from the firing's definition
+cause, chain and environment, the flow's folder and `run/bin/` on `PATH`, rebuilt from the firing's definition
 (`Flows::spec_again`) — and the firing goes on where it was.
 
 **Events.** `flow.fired` (`flow`, `firing`, `trigger` — `when`, `on` or `hand` — the `event` an
@@ -1441,7 +1444,8 @@ are deliberately not a key yet.
                               hashed; goes with the firing's runs at retention
   config.yaml                 your defaults (`agents:`, `assistants:`, `catch_up:`, `retention:`,
                               `workspaces:`); absent means defaults, unknown keys refused
-  run/                        0700 — rld.sock, rld.pid, <run>.sock, <run>.exit
+  run/                        0700 — rld.sock, rld.pid, <run>.sock, <run>.exit, and bin/rl:
+                              a link to the rl beside rld, on each flow step's PATH
   log/                        rld.log, <run>.log
   hooks/claude.json           written at daemon start; passed to claude as --settings
   detect/*.yaml               user overrides, merged field by field over the built-ins

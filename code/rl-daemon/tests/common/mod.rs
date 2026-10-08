@@ -26,6 +26,12 @@ pub fn session_bin() -> Option<PathBuf> {
     p.is_file().then_some(p)
 }
 
+/// `rl` next to `rld` in target/; built by `cargo build --workspace`.
+pub fn rl_bin() -> Option<PathBuf> {
+    let p = PathBuf::from(env!("CARGO_BIN_EXE_rld")).with_file_name("rl");
+    p.is_file().then_some(p)
+}
+
 pub fn fake_cli() -> String {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../fixtures/fake-cli")
@@ -116,6 +122,7 @@ impl Harness {
         let opts = ServeOptions {
             session_bin: Some(session_bin),
             rl_bin: Some(PathBuf::from("/usr/local/bin/rl")),
+            step_rl: rl_bin(),
             registry: registry.map(Arc::new),
         };
         let server = tokio::spawn(rl_daemon::serve_with(home.clone(), token.clone(), opts));

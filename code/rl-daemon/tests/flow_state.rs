@@ -291,29 +291,28 @@ async fn a_running_step_sets_gets_writes_and_reads_through_rld() {
     h.stop().await;
 }
 
-/// The `rl` binary sits beside `rld` in the target dir.
-fn rl_bin() -> Option<std::path::PathBuf> {
-    let p = std::path::PathBuf::from(env!("CARGO_BIN_EXE_rld")).with_file_name("rl");
-    p.is_file().then_some(p)
-}
-
+/// The `rl` a step finds on its `PATH` is rld's link to the one beside it, ahead of the user's
+/// own: plain `rl` works in a step, whatever `PATH` rld was started with.
 #[tokio::test]
 async fn a_step_uses_rl_flow_state_and_the_next_reads_it() {
-    let Some(rl) = rl_bin() else {
+    let Some(rl) = common::rl_bin() else {
         eprintln!("skipping: rl not built (run `cargo build --workspace`)");
         return;
     };
-    let rl = rl.display();
     let tmp = tempfile::tempdir().unwrap();
-    let md = format!(
-        "---\nsteps:\n  probe:\n    \
-         run: '{rl} flow state set signature=abc && echo hi | {rl} flow state write note.txt && echo said'\n  \
-         triage:\n    after: probe\n    \
-         run: '({rl} flow state get probe.signature; {rl} flow state read note.txt; {rl} flow state read probe.out) > \"$RELAY_WORK/got\"'\n---\n"
-    );
-    let Some((h, mut c)) = start(tmp.path(), "uses", &md).await else {
+    let md = "---\nsteps:\n  probe:\n    \
+              run: '[ \"$(command -v rl)\" = \"$RELAY_HOME/run/bin/rl\" ] && rl flow state set signature=abc && \
+              echo hi | rl flow state write note.txt && echo said'\n  \
+              triage:\n    after: probe\n    \
+              run: '(rl flow state get probe.signature; rl flow state read note.txt; rl flow state read probe.out) > \"$RELAY_WORK/got\"'\n---\n";
+    let Some((h, mut c)) = start(tmp.path(), "uses", md).await else {
         return;
     };
+    assert_eq!(
+        std::fs::read_link(h.home.run_dir().join("bin").join("rl")).unwrap(),
+        rl,
+        "the link is to the rl beside rld"
+    );
     let fired = approve_and_run(&mut c, "uses").await;
     let f = wait_firing(&mut c, "uses", ended).await;
     assert_eq!(f.status, FiringStatus::Done, "{f:?}");
