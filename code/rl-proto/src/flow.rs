@@ -23,6 +23,9 @@
 //! Steps and options are maps whose order matters, so they are read into
 //! lists of pairs in the order they are written ([`ordered`]).
 
+mod outcome;
+pub use outcome::{FiringRef, FlowOutcome, Outcome};
+
 use crate::action::{Action, action_struct};
 use crate::methods::Method;
 use crate::types::str_enum;
@@ -406,6 +409,9 @@ pub struct Firing {
     pub ended_at: Option<Timestamp>,
     /// In the order the flow writes them.
     pub steps: Vec<StepState>,
+    /// The first line of what it came to (`Outcome`), as `rld` sends it; not kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<String>,
 }
 
 /// One step of a firing: where it is, the run it started, the question it raised.

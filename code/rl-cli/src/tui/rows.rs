@@ -2323,6 +2323,7 @@ mod tests {
             status,
             started_at: "2026-09-10T11:00:00Z".parse().unwrap(),
             ended_at: None,
+            outcome: None,
             steps: steps
                 .iter()
                 .map(|(name, status)| rl_proto::flow::StepState {

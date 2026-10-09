@@ -1078,6 +1078,7 @@ mod tests {
             status: rl_proto::flow::FiringStatus::Waiting,
             started_at: t,
             ended_at: None,
+            outcome: None,
             steps: vec![rl_proto::flow::StepState {
                 name: "review".into(),
                 status: rl_proto::flow::StepStatus::Waiting,

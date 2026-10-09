@@ -6,6 +6,7 @@
 mod ask;
 pub mod engine;
 mod facts;
+pub(crate) mod outcome;
 pub(crate) mod path;
 mod restart;
 pub(crate) mod rpc;
