@@ -230,24 +230,32 @@ impl Drafted {
     }
 }
 
-/// A line as it is written, a character that does not print — a control character but a tab
-/// (shown as spaces), or one that is not seen or turns the text around — as its escape (`\r`,
+/// A line as it is written, a character that does not print — a control character, a tab among
+/// them, or one that is not seen or turns the text around — as its escape (`\t`, `\r`,
 /// `\u{1b}`).
 fn shown(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
-        match c {
-            '\t' => out.push_str("    "),
-            c if c.is_control() || unseen(c) => out.extend(c.escape_default()),
-            c => out.push(c),
+        if c.is_control() || unseen(c) {
+            out.extend(c.escape_default());
+        } else {
+            out.push(c);
         }
     }
     out
 }
 
 /// A character that takes no room or turns the text's direction: one a draft could hide behind.
+/// Every format character (Unicode's Cf), the line and paragraph separators (Zl, Zp), the
+/// combining grapheme joiner, the Mongolian vowel separator, the variation selectors and the tags.
 fn unseen(c: char) -> bool {
-    matches!(c, '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2060}'..='\u{2069}' | '\u{feff}')
+    matches!(c,
+        '\u{ad}' | '\u{34f}' | '\u{600}'..='\u{605}' | '\u{61c}' | '\u{6dd}' | '\u{70f}'
+        | '\u{890}'..='\u{891}' | '\u{8e2}' | '\u{180e}' | '\u{200b}'..='\u{200f}'
+        | '\u{2028}'..='\u{202e}' | '\u{2060}'..='\u{206f}' | '\u{fe00}'..='\u{fe0f}' | '\u{feff}'
+        | '\u{fff9}'..='\u{fffb}' | '\u{110bd}' | '\u{110cd}' | '\u{13430}'..='\u{1343f}'
+        | '\u{1bca0}'..='\u{1bca3}' | '\u{1d173}'..='\u{1d17a}' | '\u{e0000}'..='\u{e007f}'
+        | '\u{e0100}'..='\u{e01ef}')
 }
 
 /// Lines broken into the rows a pane `width` wide draws, each piece keeping its style.
@@ -566,6 +574,21 @@ mod tests {
             text.contains(&"     run: \"echo \\u{1b}[2J\\u{202e}hi\"".to_string()),
             "{text:#?}"
         );
-        assert_eq!(shown("a\tb"), "a    b");
+        assert_eq!(shown("a\tb"), "a\\tb", "a tab is said, not passed for spaces");
+        // Whatever takes no room: a format character, a separator, a joiner, a selector, a tag.
+        for (c, esc) in [
+            ('\u{ad}', "\\u{ad}"),
+            ('\u{61c}', "\\u{61c}"),
+            ('\u{34f}', "\\u{34f}"),
+            ('\u{180e}', "\\u{180e}"),
+            ('\u{2028}', "\\u{2028}"),
+            ('\u{2029}', "\\u{2029}"),
+            ('\u{fe0f}', "\\u{fe0f}"),
+            ('\u{e0100}', "\\u{e0100}"),
+            ('\u{e0041}', "\\u{e0041}"),
+        ] {
+            assert_eq!(shown(&format!("a{c}b")), format!("a{esc}b"));
+        }
+        assert_eq!(shown("é ü ─ 日本"), "é ü ─ 日本", "what prints is as written");
     }
 }
