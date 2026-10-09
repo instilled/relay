@@ -200,10 +200,16 @@ async fn enter_twice_on_a_flow_walks_its_steps_and_enter_on_one_reads_its_run() 
     press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
     assert!(app.show_pane, "enter shows the flow");
     let frame = draw_text(&mut app);
-    assert!(
-        frame.contains(" firings") && frame.contains("restart the api pod"),
-        "{frame}"
-    );
+    // The firings in the pane, each a row: the one shown marked, when, where it stands, what it
+    // came to (cut to the pane's width).
+    let row = frame.lines().find(|l| {
+        let Some((_, pane)) = l.rsplit_once('│') else {
+            return false;
+        };
+        let words: Vec<&str> = pane.split_whitespace().collect();
+        matches!(words.as_slice(), ["▸", _when, "done", came_to] if came_to.starts_with("res"))
+    });
+    assert!(row.is_some(), "a firing's row: {frame}");
     press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
     assert!(matches!(app.mode, super::Mode::Walk), "again: its steps, walked");
     press(&mut app, KeyCode::Down, KeyModifiers::NONE).await;
