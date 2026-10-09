@@ -173,14 +173,19 @@ pub(super) fn write_new_file(path: &Path, bytes: &[u8], exec: bool) -> Result<()
         .create_new(true)
         .open(path)
         .with_context(|| format!("writing {}", path.display()))?;
-    f.write_all(bytes)
-        .with_context(|| format!("writing {}", path.display()))?;
-    #[cfg(unix)]
-    if exec {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))?;
+    let written = f.write_all(bytes).and_then(|()| {
+        #[cfg(unix)]
+        if exec {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))?;
+        }
+        Ok(())
+    });
+    // The file is ours from the open on: a half-written one is not left behind.
+    if written.is_err() {
+        let _ = std::fs::remove_file(path);
     }
-    Ok(())
+    written.with_context(|| format!("writing {}", path.display()))
 }
 
 /// A flow's folder as its hash reads it; an empty one when there is none.

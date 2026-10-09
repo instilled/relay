@@ -325,9 +325,10 @@ impl App {
 
     /// A flow the assistant answered: shown, when the keys are free — nothing open, nothing typed
     /// on the line; else parked, said, and shown by `/flow draft`, so no key meant for what was
-    /// there is taken as its yes. A second parked replaces the first.
+    /// there is taken as its yes. A newer draft replaces a parked one, shown or parked.
     pub(super) fn drafted(&mut self, name: Option<String>, text: String, agent: String) {
         if matches!(self.mode, Mode::Normal) && self.line.is_empty() {
+            self.parked = None;
             return self.show_draft(name, text, agent);
         }
         let named = name.as_deref().map_or("a flow".to_string(), shown);
