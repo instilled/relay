@@ -17,7 +17,10 @@ use rl_proto::flow::{
 };
 use std::path::{Path, PathBuf};
 
+mod new;
 mod state;
+pub mod templates;
+pub use new::NewFile;
 pub use state::StateCmd;
 
 #[derive(Subcommand)]
