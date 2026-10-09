@@ -216,9 +216,17 @@ pub async fn new(home: &Home, a: NewArgs, json: bool) -> Result<()> {
         None => (vec![NewFile::flow_md(TEMPLATE)], false),
     };
     if a.go {
+        // A draft's bytes go in the JSON too, as `rl interpret --go --json` gives them.
+        let draft = (!a.words.is_empty()).then(|| String::from_utf8_lossy(&files[0].bytes).into_owned());
         let mut rpc = daemon::ensure(home, !json).await?;
         let known = projects(&mut rpc).await?;
         let f = write_new(&mut rpc, home, &name, files, &known).await?;
+        if json && let Some(text) = draft {
+            let mut said = serde_json::to_value(&f)?;
+            said["flow_md"] = serde_json::json!(text);
+            println!("{said}");
+            return Ok(());
+        }
         return super::said(&f, "approved", json);
     }
     super::in_editor(home, start_new(home, &name, files, yours)?, json).await
@@ -245,10 +253,10 @@ async fn drafted(
     };
     if !json {
         eprintln!("# drafted by {} · run {}", out.agent, out.run);
-        // No editor will show it: what is said yes to is shown first.
-        if go {
-            eprint!("{}", d.text);
-        }
+    }
+    // No editor will show it: what is said yes to is shown first, JSON or not.
+    if go {
+        eprint!("{}", d.text);
     }
     Ok(vec![NewFile::flow_md(d.text)])
 }

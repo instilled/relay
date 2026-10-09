@@ -250,6 +250,17 @@ fn words_become_a_flow_and_go_writes_it() {
         "{v}"
     );
     assert_eq!(v["said"], "hello-json approved");
+    assert_eq!(v["flow_md"], flow_md, "what was said yes to is in it");
+
+    // `rl flow new … --go --json` likewise: the draft shown, and its bytes in the JSON.
+    let (ok, out, err) = run(rl(&["--json", "flow", "new", "hi-json", "--go", "say", "hi"]));
+    assert!(ok, "{err}");
+    assert!(err.contains(flow_md.trim_end()), "shown before its yes: {err}");
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap_or_else(|e| panic!("{e}: {out}"));
+    assert_eq!(
+        (v["name"].as_str(), v["flow_md"].as_str()),
+        (Some("hi-json"), Some(flow_md))
+    );
 
     // A name that is not a flow's is never printed as one, nor written.
     std::fs::write(&answer, format!("kind: flow\nname: ../escaped\n{flow_md}")).unwrap();
