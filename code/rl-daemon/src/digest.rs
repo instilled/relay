@@ -33,11 +33,11 @@ pub fn item(
     }
 }
 
-/// Each flow's latest firing, for the row that stands for it on the list.
+/// Each flow's latest firing, with what it came to, for the row that stands for it on the list.
 pub fn firings(c: &rusqlite::Connection) -> anyhow::Result<Vec<Firing>> {
     let mut out = Vec::new();
     for f in rl_ledger::flows::list(c, false)? {
-        out.extend(rl_ledger::firings::latest(c, &f.name)?);
+        out.extend(rl_ledger::firings::latest(c, &f.name)?.map(|x| crate::flows::outcome::told(c, x)));
     }
     Ok(out)
 }

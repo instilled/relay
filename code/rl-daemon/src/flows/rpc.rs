@@ -1,14 +1,15 @@
 //! The `flow.*` methods.
 
 use super::engine::{Fired, Refused};
+use super::outcome;
 use super::state::Refusal;
 use crate::router::Router;
 use crate::server::Daemon;
 use rl_ledger::{firings, flows};
 use rl_proto::flow::{
-    FiringFilter, Flow, FlowApproval, FlowApprove, FlowErrors, FlowFilter, FlowFirings, FlowList, FlowName, FlowPause,
-    FlowReload, FlowResume, FlowRun, FlowStateGet, FlowStateRead, FlowStateSet, FlowStateWrite, StateFile, StateName,
-    StateValues,
+    FiringFilter, FiringRef, Flow, FlowApproval, FlowApprove, FlowErrors, FlowFilter, FlowFirings, FlowList, FlowName,
+    FlowOutcome, FlowPause, FlowReload, FlowResume, FlowRun, FlowStateGet, FlowStateRead, FlowStateSet, FlowStateWrite,
+    StateFile, StateName, StateValues,
 };
 use rl_proto::rpc::RpcError;
 
@@ -86,7 +87,17 @@ pub fn register(r: &mut Router<Daemon>) {
     r.register::<FlowFirings, _, _>(|d, f: FiringFilter| async move {
         d.flows
             .ledger
-            .call(move |c| firings::list(c, &f.flow, f.limit.unwrap_or(FIRINGS)))
+            .call(move |c| {
+                let found = firings::list(c, &f.flow, f.limit.unwrap_or(FIRINGS))?;
+                Ok(found.into_iter().map(|x| outcome::told(c, x)).collect())
+            })
+            .await
+            .map_err(internal)
+    });
+    r.register::<FlowOutcome, _, _>(|d, FiringRef { id }| async move {
+        d.flows
+            .ledger
+            .call(move |c| Ok(firings::get(c, &id)?.and_then(|f| outcome::of(c, &f))))
             .await
             .map_err(internal)
     });

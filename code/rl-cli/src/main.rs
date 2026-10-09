@@ -196,7 +196,7 @@ struct InterpretArgs {
 
 #[derive(Args)]
 struct SummaryArgs {
-    /// What: a run, a folder (its project), `flow:<name>`, or `all`.
+    /// What: a run, a folder (its project), `flow:<name>`, `firing:<id>`, or `all`.
     what: String,
     /// Only the stretch since: a duration back (30m, 2h), a date or an
     /// instant (default: a run, since you last looked, if it did anything
@@ -937,7 +937,14 @@ async fn since(home: &Home, a: SinceArgs, json: bool) -> Result<()> {
         Some(&relay),
         n,
     );
-    let top = since_top(&mut c, &cu, boundary, came_back).await;
+    // What heads it: each `catch_up: top` flow's latest firing since, all it came to fetched.
+    let leads = rl_cli::catchup::heads::leads(&flows, &d.firings, boundary);
+    let mut outcomes = rl_cli::catchup::heads::Outcomes::default();
+    outcomes
+        .fetch(&mut c, leads.iter().map(|l| l.firing.clone()).collect())
+        .await;
+    let mut top = rl_cli::catchup::heads::text(&leads, &outcomes, n);
+    top.extend(since_top(&mut c, &cu, boundary, came_back).await);
     print!("{}", rl_cli::catchup::text(&cu, &top, n));
     Ok(())
 }
@@ -1578,12 +1585,14 @@ async fn interpret(home: &Home, a: InterpretArgs, json: bool) -> Result<()> {
 }
 
 /// What `rl summary` was asked of: `all`, a folder (a project), a
-/// `flow:<name>`, else a run.
+/// `flow:<name>`, a `firing:<id>`, else a run.
 fn summary_target(what: &str) -> Result<SummaryTarget> {
     Ok(if what == "all" {
         SummaryTarget::All
     } else if let Some(name) = what.strip_prefix("flow:") {
         SummaryTarget::Flow { name: name.to_string() }
+    } else if let Some(id) = what.strip_prefix("firing:") {
+        SummaryTarget::Firing { id: id.to_string() }
     } else if Path::new(what).is_dir() {
         SummaryTarget::Project {
             workspace: std::fs::canonicalize(what)?,

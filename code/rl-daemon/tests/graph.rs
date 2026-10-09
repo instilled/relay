@@ -1,5 +1,5 @@
 //! `graph.get` over the socket: every flow a node, a flow's failures reaching
-//! another flow's `on`, and an ask step's question drawn as the flow's ask
+//! another flow's `on`, and an ask step's question drawn on the step's own
 //! node, waiting on you.
 
 mod common;
@@ -73,25 +73,40 @@ async fn the_graph_joins_flows_to_what_happened() {
         (NodeKind::Flow, Some(FlowStatus::On), "by hand")
     );
     assert_eq!((nightly.runs.total, nightly.runs.failed), (1, 1));
-    let e = edge("flow:nightly", "flow:notify");
+    assert_eq!(g.node("step:nightly/a").unwrap().runs.failed, 1);
+    let e = edge("step:nightly/a", "flow:notify");
     assert_eq!((e.label.as_str(), e.count, e.declared), ("run.failed", 1, false));
+    assert_eq!(edge("flow:nightly", "step:nightly/a").count, 1);
 
-    // The ask step's question, waiting.
-    let ask = g.node("ask:asker").unwrap();
-    assert_eq!((ask.kind, ask.name.as_str()), (NodeKind::Ask, "go?"));
+    // The ask step's question, waiting, on the step.
+    let ask = g.node("step:asker/review").unwrap();
+    assert_eq!(
+        (ask.kind, ask.name.as_str(), ask.detail.as_str()),
+        (NodeKind::Ask, "review", "go?")
+    );
     assert_eq!(ask.waiting, [question]);
-    assert_eq!(edge("flow:asker", "ask:asker").count, 1);
+    assert_eq!(edge("flow:asker", "step:asker/review").count, 1);
 
     // What nothing raised is a way in.
     assert!(edge("event:never.*", "flow:notify").declared);
     assert!(g.nodes.iter().all(|n| n.kind != NodeKind::Outside));
 
-    // A window that starts after all of it keeps the flows and what still waits.
+    // A window that starts after all of it keeps the flows, their steps, and what still waits.
     let later = Timestamp::now() + SignedDuration::from_mins(1);
     let g: Graph = c.ok("graph.get", json!({ "since": later })).await;
     assert!(g.node("flow:nightly").unwrap().runs.total == 0);
-    assert!(!g.edges.iter().any(|e| e.from == "flow:nightly"));
-    assert_eq!(g.node("ask:asker").unwrap().waiting.len(), 1, "still waiting");
+    let first = g
+        .edges
+        .iter()
+        .find(|e| e.from == "flow:nightly" && e.to == "step:nightly/a")
+        .expect("a flow's wiring is there in any window");
+    assert_eq!(first.count, 0);
+    assert!(
+        !g.edges
+            .iter()
+            .any(|e| e.to == "flow:notify" && e.from.starts_with("step:nightly"))
+    );
+    assert_eq!(g.node("step:asker/review").unwrap().waiting.len(), 1, "still waiting");
     h.stop().await;
 }
 

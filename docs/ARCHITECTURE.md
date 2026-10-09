@@ -371,16 +371,26 @@ a run filed under a ref keeps the ref). That header is not a project: `enter` pu
 no `in` and how their runs stand in the pane, and `^x`, `^r` and `/shell` say `everywhere is not a
 project` and do nothing; `in:everywhere` finds it. `^g` (or `/graph`) from anywhere, an empty list
 too, shows every flow wired with everything else. A flow's runs, once ended, fold into one row per
-flow (`f:<name>`) — `↻`, the name, a mark per run in the state column (`··×·`, oldest first, a
-failure red), where its latest firing stands (`waiting at review`, `running · triage`, `failed at
-probe`, `done`, `rows::FlowRow`, `flows::state_words`) and how long ago — so a flow firing every
-thirty seconds is a row, not a screen, and it never grows into one: `enter` (or `^o`) puts it in
+flow (`f:<name>`) — `↻`, the name, a mark per firing in the state column (`··×·`, oldest first, red where
+a step failed), where its latest firing stands and what it came to (`waiting at review · page
+on-call?`, `running · triage`, `failed at probe · token expired`, `done · *Morning brief*`;
+`rows::FlowRow`, `flows::stands`) and how long ago — so a flow firing every
+thirty seconds is a row, not a screen, and it never grows into one: `→` on it (nothing typed) opens
+it to its latest firing's steps on a line under it — `probe ✓ · triage ✓ · review ?`, a failure red
+(`flows::steps_line`) — and `←` folds it again; `enter` (or `^o`) puts it in
 the pane, as on a project header. A run still going or waiting on you is never folded. The pane
 holds the flow: `flow · <in> · <status>`, then what starts it — a cron line read back in words
 where it can be (`hourly 08:00–18:00, Mon–Fri`), left as written where it cannot — where it runs,
 whether its folder as it is has a yes, when it fires next and when it last did, its folder, and
 each step as the latest firing left it (`✓ done`, `? waiting`, `× failed`) with what it does
-(`flows::pane_lines`). When the list
+(`flows::pane_lines`). Under them, the files the shown firing's steps wrote to `runs/<firing>/`
+(`note.txt 12 B · report.md 2 kB`, read from the folder, `.relay/` left out), how its runs went,
+what `/summary` said, and its last eight firings — when, where each stands, what it came to — the
+one shown marked `▸` (`tui/firings.rs`). `enter` again walks the steps and then the firings, as a
+question's choices are walked: `enter` on a step joins its run, or reads what an ended one
+printed in the tile; on a firing it shows that firing's steps above, and `/summary` on the row
+is then of that firing (`SummaryTarget::Firing`) until the cursor leaves the row, when the
+flow's latest is shown again; `esc` ends the walk. When the list
 is taller than the screen, its first and last lines say how much is above and below. A group's
 header says which folder it is in, and the cursor stops on it like any other row: `enter` (or
 `^o`) turns the pane into the project's own — the folder, how its runs stand (needs-you /
@@ -685,7 +695,7 @@ its parts read it (`App::drawn`, `catchup::Kept`: the rows by their place in the
 back over it). What needs you leads each project and the projects that need you lead; a project with
 nothing new folds to one line (`▸ relay  nothing new`). A project's line tallies the stretch (`2
 need you · 9 ran · 1 failed`, only what happened in it counted); each row is a line (`row_line`): an
-agent's recap or its state and last line, a flow's marks and how the last went, a command's state and
+agent's recap or its state and last line, a flow's firings as marks, then where the latest stands and what it came to, a command's state and
 how it ended, a question's ask — answered by number on the line, with a note, as on the list. Moving
 about it marks nothing seen; leaving it, any way, marks seen all it showed (`saw_catch_up`), notes
 each flow's earliest firing not seen so its `/summary` still starts there, and gives a project's
@@ -715,6 +725,21 @@ over another stretch (`/summary 2d`) it is the pane's, which on the top shows wh
 everything. Asked while the top is being written, it says so. So bare `/since` in the panel never
 writes the top by itself — you asked for it, `/summary` writes it — while a bare `rl since` past
 `catch_up.after` does: it counts from presence, as the panel does when it opens by itself.
+
+**What heads it.** A flow that says `catch_up: top` (§6) puts its latest firing, when it started or
+ended since you were last here, above the top, newest first (`catchup/heads.rs`, `heads::leads`):
+`↻ morning-brief · 07:30 · done`, then what it came to — its last step's out (`flow.outcome`),
+blank lines left out, a Google Chat link said by its text (`<https://…|PR 123>` as `PR 123`,
+`*bold*` as written), at most eight lines, the last saying `… ^o on it shows the rest`; the pane
+shows all of it as printed, links and all. One still running heads it with its state alone; one a
+source failed in says `failed at gchat` and, under it, what gchat printed. Relay's own top takes
+what is left of half the room, two lines at least: several leads are cut to two thirds of the room
+less those two lines, the last kept saying `… ^o on it shows the rest`
+(`tui::catchup::head_block`). The cursor goes up onto it from the top (`h:<flow>`); `enter` or `^o`
+shows all of it in the pane, and `/summary [deep]` there tells that firing (§6). Yesterday's firing
+does not head today's, and a flow without the key is a line under its project as any other; one
+heading it is not a line under its project too — moved, not copied (`CatchUp::build`) — while the
+list keeps its row. `rl since` prints the same over its top.
 
 **`rl since [stretch]`** prints the same catch-up (`catchup::text`): `while you were away · since
 Sun 14:56 (2d0h)`, the top, then each project's line and its rows — a run by its id, a question by
@@ -863,9 +888,10 @@ The frontmatter is `relay_proto::flow::FlowSpec`; a key it does not know is refu
 | `when` | a cadence: `every 30m`, or a five-field cron line in quotes, local time |
 | `on` | an event kind or a list (`run.failed`, `logs.*`, `*`), narrowed by `where` (`tag`, `cause`, `cli`, `group`, `data`) |
 | neither | the flow runs only when asked: `rl flow run`, `/flow run` |
-| `missed` | `skip` (the default) or `catch-up-once`: a `when` firing slept through |
+| `missed` | `catch-up-once` (the default) or `skip`: a `when` firing slept through |
 | `overlap` | `skip` (the default), `queue` or `kill`: a trigger while the last firing is still going |
 | `throttle` | for `on`: a burst within it is one firing (`10s` unless said, `0` for none) |
+| `catch_up` | `top`: its latest firing since you left heads the catch-up, above Relay's own bullets (§4, **Catch-up**) |
 | `steps` | the steps, by name, in the order written; at least one |
 
 `when` and `on` may both be given; either fires it.
@@ -1052,8 +1078,9 @@ flow's next firing is planned from its last (`every`) or from the clock (cron). 
 that finds it changed, plans an `every` from now when its last firing is already a cadence past,
 so a yes or an edit neither fires it nor has it said missed at once; found unplanned at a start,
 it is due at once and catches up once (`Flows::plan_afresh`, `first_time`). One
-more than two minutes late — `rld` down, the machine asleep — is said as `flow.skipped {reason: missed}` and
-planned from now, unless `missed: catch-up-once`, which fires it once. A resumed flow is planned
+more than two minutes late — `rld` down, the machine asleep — is made up once, however many
+were slept through (`missed: catch-up-once`, the default); with `missed: skip` it is said as
+`flow.skipped {reason: missed}` and planned from now. A resumed flow is planned
 from now: what it slept through while paused is neither made up nor said missed. An `on` flow
 hears an event of a kind it names (`x`, `x.*`, `*`) while it is approved and not paused, as
 `where` narrows it, and throttled against its last firing. Three things keep a flow from running
@@ -1079,6 +1106,16 @@ cause, chain and environment, the flow's folder and `run/bin/` on `PATH`, rebuil
 could not start, with the `firing` and `step`) and `flow.refused` (`flow`, `firing`, `step`,
 `reason`: a `$RELAY_OUT` that was not kept). They are filed in the flow's `in`, as the project
 is registered, else in the Relay home. The steps' runs raise `run.*` as any run does.
+
+**What a firing came to** is, for a failed one, what its first failed step printed — the step
+its row names, `failed at gchat`: the error a source failed with. A running one has come to
+nothing yet; its state says it all. Waiting, done or stopped, it is what its last step to run
+printed — the last in the flow's order that ran, done or failed, and printed something
+(`flows/outcome.rs`): the brief, the proposal (`waiting at review · <triage's>`). A step skipped,
+an ask whose option ran nothing, a journal gone to retention is passed over for the step before.
+Every `Firing` a client is sent carries its
+first line (`outcome`); `flow.outcome {id}` gives all of it. It is read from the step's run each
+time, never kept.
 
 **Actions.** A flow's step, an ask step's option and an `rl ask` question's option are the same
 shape, and one function turns that shape into a `RunSpec` (`rl-daemon/src/action.rs`). What runs
@@ -1213,14 +1250,14 @@ agent said. Interpretation is a run, so it is in the list, in
 special except its cause.
 
 **The summariser** says what happened, for someone who was not looking, in a run, a flow's runs
-(its steps', wherever they ran), a project's, or everything (`summary.make {target: run | flow |
+(its steps', wherever they ran), one firing's (the runs whose chain it is), a project's, or everything (`summary.make {target: run | flow | firing |
 project | all, deep, from, again, dry}`; `rld`'s `rl-daemon/src/summary.rs`). `/summary [deep]
 [again] [since]` in the panel asks it of the row under the cursor (§4), and `rl summary
-<run|folder|flow:<name>|all> [since] [--deep] [--again]` of what it names; the client turns the stretch
+<run|folder|flow:<name>|firing:<id>|all> [since] [--deep] [--again]` of what it names; the client turns the stretch
 (`2h`, a date, an instant) into `from`. Left out, `from` is since you last looked: a run's
 `seen_at` when it has written output or had an event since (selecting a row is looking, so a run
 that waits as it was is told whole), else the whole run; for a flow, from the start of its oldest
-run not seen since it ended (`runs::oldest_unseen`, by the cause `flow:<name>/`), else the last day. A project and
+run not seen since it ended (`runs::oldest_unseen`, by the cause `flow:<name>/`), else the last day. One firing's is all of it, from when it began. A project and
 everything need one — the client knows when you were last here. The daemon never asks an agent
 on its own: every call is a client's — `/summary`, `rl summary`, a flow's step, or the catch-up's top,
 which the panel and a bare `rl since` ask for as you come back, as `catch_up.summary` says (§4).
@@ -1323,22 +1360,27 @@ folder, whatever project it is `in`, so there is one graph, not one per project.
 `rl-ledger/src/graph.rs`) returns nodes and edges. The nodes are:
 
 - every flow (`flow:<name>`), there before it has fired, with what starts it (`every 30m`,
-  `on run.failed`), its status and when it fires next; a run one of its steps started counts on
-  the flow's node, not one of its own. The steps inside a flow are not drawn yet (§8);
-- a flow's questions (`ask:<flow>`, the ask steps' questions, named by the newest, with the ids
-  still waiting), counted on the edge from the flow;
+  `on run.failed`), its status and when it fires next; and each of its steps
+  (`step:<flow>/<step>`) — an agent's, a command's, or an ask's — wired as the flow writes
+  them, from the flow when a step waits on nothing, else from each step it comes after, the
+  edge labelled with the step's `if:` and counting what the step did in the window; a step's
+  run counts on its step and on its flow;
+- an ask step's questions on the step's own node, the newest naming it, with the ids still
+  waiting;
 - runs you started, one node per folder and kind (`runs:shells:<folder>`), drawn only once
   they set something off;
 - events raised outside any run, per folder (`outside:<folder>`);
 - an event kind a flow's `on` takes that nothing raised in the window (`event:<pattern>`), so
-  every flow that listens has a way in.
+  every flow that listens has a way in, counting 0: it is what could fire the flow, not what
+  did.
 
 Each node carries its folder as a fact rather than a box, its flow's status, and how its runs
-went in the window. Apart from a flow's edge to its questions, the edges are **observed**, from the
-ledger: which runs raised which event kinds, and so which flows heard them, labelled with the
-kinds and counted. A run maps to its node by its cause. An event with no run belongs to the flow
-whose step asked the question it is about, or whose `flow.*` it is. A flow never hears its own
-runs, questions or events, so no edge loops back to where it started.
+went in the window. Apart from a flow's wiring of its own steps and the ways in, the edges are
+**observed**, from the ledger: which runs raised which event kinds, and so which flows heard
+them, labelled with the kinds and counted. A run maps to its node by its cause. An event with
+no run belongs to the step that asked the question it is about, or to the flow whose `flow.*`
+it is. A flow never hears its own runs, questions or events, so no edge loops back to where it
+started.
 
 In the panel, `/graph` (or `^g`) swaps the list for the graph, and `^g` or `esc` goes back;
 each keeps its own selection. The graph is where flows are seen wired together; a project
@@ -1359,22 +1401,26 @@ draws it, pure from a `Graph` to a grid of styled cells:
   waiting), `❯` shell (teal), `✦` agent (magenta), `◆` an event nothing raised yet, `⇢` events
   from outside any run. Every glyph is one column wide, so borders stay in line. The border turns
   red when the last run failed and dims when the flow is paused. `!` marks a flow waiting for a
-  yes.
+  yes. A flow's box says its trigger — `◷ every 30m`, `◷ at 07:30, Mon–Fri`, `◆ run.failed`,
+  `by hand`, and when it fires next — and a step's how its runs went (`ok ×3 · 1 failed`) or
+  who waits (`1 waiting`); an ask step is drawn by the question it put. The folder of each is
+  the pane's. Its steps sit to its right, as its edges lead (`tui/graph/words.rs` says what a
+  node says, `tui/graph.rs` lays it out).
 - **Moving.** `←` and `→` follow the wiring, to what feeds the selected node or what it feeds,
   taking the nearest in height. `↑` and `↓` stay in the column, and reach the nearest box above
   or below when the column has none. The window pans to keep the selection in view, and its
   edges are lit. A search (`^f`) keeps the nodes it hits — by name, detail and folder, and by
-  the same tokens, a flow being a `flow` and an ask a `question` — plus everything upstream
-  and downstream of them.
-- **Acting on a node.** A flow's node, or its questions', stands for the flow, so `/flow
+  the same tokens, a flow being a `flow`, a flow's step a `step` and an ask a `question` —
+  plus everything upstream and downstream of them.
+- **Acting on a node.** A flow's node, or any of its steps', stands for the flow, so `/flow
   run|pause|resume|approve|edit` work on it with no name. `enter` on a question with
   someone waiting takes it out to be answered by number in the pane, the same as in the list —
   and as there, a line starting with an option answers with the rest as its note — and the
   cursor goes on to what the answer ran. `enter` on a flow with its yes offers to
   run it now (`run prod-logs now? y`), and on one without says `/flow approve`. Anywhere else,
   `enter` (or `^o`) shows the node in the pane: what it is, a flow as its row's pane shows it
-  (when, where, its yes, its steps as the latest firing left them), how its runs went, and what
-  it is wired to on either side.
+  (when, where, its yes, its steps as the latest firing left them), a step as `step of <flow>`
+  and what it does, how its runs went, and what it is wired to on either side.
 
 **The events view** is what happened, where the graph is how things are wired. `/events` swaps
 the list for every event in the ledger, newest first, one line each: how long ago, its kind
@@ -1479,10 +1525,8 @@ limit, so both sides fall back to the same short hashed directory under the temp
 Named here so the diagrams above are not read as the whole plan — see §7 of the brief for
 phasing.
 
-- **The rest of flows** (`docs/specs/2026-10-07-flows.md`) — Seeing it: steps as nodes in the graph, a flow's row expanded to its latest
-  firing's steps, `catch_up: top` (a flow's latest firing heading the catch-up), `/summary` on one
-  firing. Writing it: `rl flow new` and `/flow new` drafted from words, the context pack teaching
-  flows, `rl flow test`, and templates.
+- **The rest of flows** (`docs/specs/2026-10-07-flows.md`) — Writing it: `rl flow new` and
+  `/flow new` drafted from words, the context pack teaching flows, `rl flow test`, and templates.
 - **Plugins** — `rl-plugin-host` (Bun), the broker, `relay.d.ts`, the manifest/approval flow,
   action keys and the detail tab. Until then, one provisional contract stands in for a piece of
   it — **workspace badges** (`rl-daemon/src/badges.rs`): `workspaces.badges` in `config.yaml`

@@ -19,7 +19,10 @@
 mod catchup;
 mod complete;
 mod events;
-mod flows;
+mod firings;
+#[cfg(test)]
+mod flow_tests;
+pub(crate) mod flows;
 pub mod form;
 mod graph;
 mod input;
@@ -39,6 +42,7 @@ mod term;
 mod theme;
 
 use crate::attach::client_name;
+use crate::catchup::heads;
 use crate::client::Client;
 use anyhow::Result;
 use crossterm::event::{
@@ -60,8 +64,8 @@ use rl_core::Home;
 use rl_core::time::fmt_age;
 use rl_proto::decision::Decision;
 use rl_proto::flow::{
-    Flow, FlowApproval, FlowApprove, FlowErrors, FlowFilter, FlowList, FlowName, FlowPause, FlowReload, FlowResume,
-    FlowRun, FlowStatus, NotLoaded,
+    Firing, FiringFilter, Flow, FlowApproval, FlowApprove, FlowErrors, FlowFilter, FlowFirings, FlowList, FlowName,
+    FlowPause, FlowReload, FlowResume, FlowRun, FlowStatus, NotLoaded,
 };
 use rl_proto::methods::{
     AgentList, DecisionDismiss, DecisionGet, DecisionId, DecisionNote, DecisionTake, DecisionTakeParams, Digest,
@@ -75,7 +79,7 @@ use rl_proto::methods::{
 };
 use rl_proto::types::{AttachMode, Cause, Event as LedgerEvent, Mark, Run, RunKind, RunState, Summary, SummaryTarget};
 use rows::{Names, Row, fit};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use term::TermView;
@@ -150,6 +154,9 @@ enum Mode {
     Form(Box<Form>),
     /// A question taken out of the list: its options, answered by number.
     Answer(String),
+    /// `enter` on a flow whose pane is up: its steps, then its last firings, walked
+    /// (`App::flow_pane`).
+    Walk,
     /// A join refused because someone holds the keyboard: `y` takes it from
     /// them. The run, and who has it.
     Take(String, String),
@@ -321,6 +328,10 @@ struct App {
     auto_pane: bool,
     /// The highlighted choice of the question being answered.
     answer_at: usize,
+    /// The flow whose pane is up: its last firings, the one shown, the caret while walked.
+    flow_pane: firings::FlowPane,
+    /// The flows' rows opened with `→` to their latest firing's steps, by row key.
+    open_flows: HashSet<String>,
     /// What the question pane drew last, so a click can take a choice.
     pane_hit: std::cell::RefCell<PaneHit>,
     /// The pane alone, full width: a terminal, unless `f` says otherwise.
@@ -340,6 +351,8 @@ struct App {
     /// The catch-up's top as written, for the stretch it shows; until there
     /// is one, it is counted.
     top: Option<Summary>,
+    /// What each firing heading the catch-up came to (`catch_up: top`), by firing.
+    outcomes: heads::Outcomes,
     /// `/summary deep` waiting on `y`: what it would ask.
     summary_ask: Option<SummaryParams>,
     /// The last summary made of each target (`SummaryTarget::key`) while the
@@ -1121,6 +1134,8 @@ impl App {
             show_pane: false,
             auto_pane: false,
             answer_at: 0,
+            flow_pane: Default::default(),
+            open_flows: HashSet::new(),
             pane_hit: std::cell::RefCell::default(),
             wide: false,
             term: None,
@@ -1136,6 +1151,7 @@ impl App {
             summarising: None,
             topping: None,
             top: None,
+            outcomes: Default::default(),
             summary_ask: None,
             made: HashMap::new(),
             away_since: None,
@@ -1359,6 +1375,7 @@ impl App {
                 });
             }
             Mode::Rename(_) => return Some(shortcuts::Place::Rename),
+            Mode::Walk => return Some(shortcuts::Place::Walk),
             _ => return None,
         }
         if self.search.is_some() {
@@ -1436,6 +1453,7 @@ impl App {
             }
             _ => self.catch = None,
         }
+        self.fetch_leads().await;
         if self.view == View::Graph {
             match self.rpc.call::<GraphGet>(GraphParams::default()).await {
                 Ok(g) => self.graph = Some(g),
@@ -1453,6 +1471,24 @@ impl App {
                 .map(|a| a.name)
                 .collect();
         }
+        // A flow gone from the list takes its open steps line with it; one only a search or a lens
+        // hides keeps it, for when it shows again.
+        let all = rows::Context {
+            names: &self.names,
+            flows: &self.flows,
+            filter: "",
+            lens: rows::Lens::All,
+            now: Timestamp::now(),
+            relay: Some(&self.relay),
+        };
+        let flow_keys: HashSet<String> = rows::build(&self.digest, &all)
+            .iter()
+            .filter_map(|r| match r {
+                Row::Flow(f) => Some(f.key.clone()),
+                _ => None,
+            })
+            .collect();
+        self.open_flows.retain(|k| flow_keys.contains(k));
         self.settle();
         self.load_pane().await;
     }
@@ -1472,6 +1508,20 @@ impl App {
             };
             if let Ok(evs) = self.rpc.call::<EventList>(filter).await {
                 self.events = evs;
+            }
+        }
+        if let Some(name) = self.selected_flow().map(|f| f.name.clone()) {
+            let filter = FiringFilter {
+                flow: name.clone(),
+                limit: Some(firings::LAST),
+            };
+            if let Ok(fs) = self.rpc.call::<FlowFirings>(filter).await {
+                self.flow_pane.load(&name, fs);
+                self.flow_pane.files = self
+                    .flow_pane
+                    .shown()
+                    .map(|f| firings::files_in(&self.home.firing_dir(&name, &f.id)))
+                    .unwrap_or_default();
             }
         }
         let Some(target) = self.summary_target() else { return };
@@ -1524,6 +1574,11 @@ impl App {
     /// What `/summary` on the selected row is of: everything on the
     /// catch-up's top; a question's, the run that asked it.
     fn summary_target(&self) -> Option<SummaryTarget> {
+        if let Some(l) = self.lead_here() {
+            return Some(SummaryTarget::Firing {
+                id: l.firing.id.clone(),
+            });
+        }
         if self.on_top() {
             return Some(SummaryTarget::All);
         }
@@ -1535,7 +1590,11 @@ impl App {
     fn target_of(&self, row: &Row) -> Option<SummaryTarget> {
         Some(match row {
             Row::Run(i) => SummaryTarget::Run { id: i.run.id.clone() },
-            Row::Flow(f) => SummaryTarget::Flow { name: f.name.clone() },
+            // An older firing picked in its pane is what is told; else the flow.
+            Row::Flow(f) => match self.flow_pane.picked_firing().filter(|x| x.flow == f.name) {
+                Some(x) => SummaryTarget::Firing { id: x.id.clone() },
+                None => SummaryTarget::Flow { name: f.name.clone() },
+            },
             Row::Group(h) if h.is_everywhere() => SummaryTarget::All,
             Row::Group(h) => SummaryTarget::Project {
                 workspace: h.workspace.clone(),
@@ -1595,7 +1654,10 @@ impl App {
             View::Work => self.rows().into_iter().filter_map(|r| r.key()).collect(),
             View::Graph => self.graph_plan().map(|(_, p)| p.order()).unwrap_or_default(),
             View::Events => self.event_items().iter().flat_map(|i| i.keys()).collect(),
-            View::CatchUp => std::iter::once(TOP.to_string())
+            View::CatchUp => self
+                .lead_keys()
+                .into_iter()
+                .chain(std::iter::once(TOP.to_string()))
                 .chain(self.catch_rows().into_iter().filter_map(|r| r.key()))
                 .collect(),
         }
@@ -1609,11 +1671,14 @@ impl App {
     }
 
     /// Keeps the selection on something that exists: the first row, when
-    /// it has to move — in the catch-up, the first under its top.
+    /// it has to move — in the catch-up, the first under its top and what heads it.
     fn settle(&mut self) {
         let keys = self.keys();
         if self.sel.as_ref().is_none_or(|k| !keys.contains(k)) {
-            let first = keys.iter().find(|k| *k != TOP).or(keys.first());
+            let first = keys
+                .iter()
+                .find(|k| *k != TOP && heads::flow_of(k).is_none())
+                .or(keys.first());
             self.select(first.cloned());
         }
     }
@@ -1707,6 +1772,9 @@ impl App {
             }
             self.sel = key;
             self.picked.clear();
+            // A firing picked in a flow's walk lasts while the cursor is on its row: off it, the
+            // flow's latest again.
+            self.flow_pane.picked = None;
             self.answer_at = 0;
             self.events.clear();
             // A watch tile stays pinned to its run while you browse the list;
@@ -1819,17 +1887,14 @@ impl App {
         self.flows.iter().find(|x| x.name == f.name)
     }
 
-    /// The flow a graph node is, or asks for.
+    /// The flow a graph node is, or is a step of.
     fn flow_of_node(&self, n: &rl_proto::graph::Node) -> Option<&Flow> {
-        let name = match n.kind {
-            rl_proto::graph::NodeKind::Flow => n.name.as_str(),
-            _ => n.id.strip_prefix("ask:")?,
-        };
+        let name = n.flow.as_deref()?;
         self.flows.iter().find(|f| f.name == name)
     }
 
     /// The flow under the cursor: a flow's row, on the list or in the
-    /// catch-up, or a node in the graph that is a flow or asks for one.
+    /// catch-up, or a node in the graph that is a flow, or is a step of one.
     fn flow_here(&self) -> Option<String> {
         if let Some(f) = self.selected_flow() {
             return Some(f.name.to_string());
@@ -2145,6 +2210,11 @@ impl App {
             self.say("nothing here to open");
             return;
         };
+        self.open_term_on(id, area).await;
+    }
+
+    /// What run `id` printed, in the tile beside the list.
+    async fn open_term_on(&mut self, id: String, area: Rect) {
         // Watching is a tile beside the list, not the whole screen: the list
         // stays, the line stays yours, and `/pane full` pops it big.
         // Still reading this one: back to it, where it was left.
@@ -2169,6 +2239,24 @@ impl App {
                 self.pane = Pane::Facts;
                 self.say(format!("attach: {e:#}"));
             }
+        }
+    }
+
+    /// A step's run, from its flow's pane: one still going joined, an ended one read in the
+    /// tile — as `enter` on its own row would.
+    async fn join_step(&mut self, run: String, area: Rect) {
+        let live = match self.run_by_id(&run) {
+            Some(r) => !r.state.is_terminal(),
+            None => self
+                .rpc
+                .call::<RunGet>(RunId { id: run.clone() })
+                .await
+                .is_ok_and(|r| !r.state.is_terminal()),
+        };
+        if live {
+            self.attach = Some((run, false));
+        } else {
+            self.open_term_on(run, area).await;
         }
     }
 
@@ -2589,6 +2677,7 @@ impl App {
         }
         self.away_since = Some(since);
         self.catch = Some(d);
+        self.fetch_leads().await;
         self.write_top(since, came_back).await;
         self.open_view(View::CatchUp);
         self.close_term();
@@ -2640,6 +2729,34 @@ impl App {
             .collect()
     }
 
+    /// The keys of the firings heading the catch-up, newest first.
+    fn lead_keys(&self) -> Vec<String> {
+        let Some(c) = &self.catch else { return vec![] };
+        heads::leads(&self.flows, &c.firings, c.since)
+            .iter()
+            .map(|l| heads::key(l.flow))
+            .collect()
+    }
+
+    /// The firing heading the catch-up that the cursor is on.
+    fn lead_here(&self) -> Option<heads::Lead<'_>> {
+        let flow = heads::flow_of(self.sel.as_deref()?)?;
+        let c = self.catch.as_ref().filter(|_| self.view == View::CatchUp)?;
+        heads::leads(&self.flows, &c.firings, c.since)
+            .into_iter()
+            .find(|l| l.flow == flow)
+    }
+
+    /// What each firing heading the catch-up came to, asked for when it is new or has moved on.
+    async fn fetch_leads(&mut self) {
+        let Some(c) = &self.catch else { return };
+        let firings: Vec<Firing> = heads::leads(&self.flows, &c.firings, c.since)
+            .iter()
+            .map(|l| l.firing.clone())
+            .collect();
+        self.outcomes.fetch(&mut self.rpc, firings).await;
+    }
+
     /// What leaving the catch-up marks seen: every run it shows that was
     /// not, and where each flow's runs not seen till now start, so its
     /// `/summary` still starts there (as `saw_selected` notes).
@@ -2680,6 +2797,13 @@ impl App {
     /// go of once it is seen — it ended over a day ago — is read here
     /// instead, in the pane, and seen only once the catch-up is left.
     async fn catch_up_enter(&mut self) {
+        // A firing heading it is read where it stands: all of it, in the pane.
+        if self.lead_here().is_some() {
+            self.pane = Pane::Facts;
+            self.show_pane = true;
+            self.load_pane().await;
+            return;
+        }
         let Some(row) = self.selected() else {
             return self.say("nothing here to open");
         };
@@ -3765,6 +3889,10 @@ impl App {
                 .map(|r| r.title.clone())
                 .unwrap_or_else(|| id.clone()),
             SummaryTarget::Flow { name } => format!("flow {name}"),
+            SummaryTarget::Firing { id } => match self.digest.firings.iter().find(|f| f.id == *id) {
+                Some(f) => format!("a firing of {}", f.flow),
+                None => "a firing".into(),
+            },
             SummaryTarget::Project { workspace } => self.names.workspace(workspace),
             SummaryTarget::All => "everything".into(),
         };
@@ -3903,7 +4031,7 @@ impl App {
         // A form or a `y`-or-not question has its keys in the footer; the
         // shortcuts go, rather than come back when it is done. A name typed
         // in the list takes no room from them, so they stay for it.
-        if !matches!(self.mode, Mode::Normal | Mode::Answer(_) | Mode::Rename(_)) {
+        if !matches!(self.mode, Mode::Normal | Mode::Answer(_) | Mode::Rename(_) | Mode::Walk) {
             self.shortcuts = false;
         }
         match std::mem::replace(&mut self.mode, Mode::Normal) {
@@ -3992,6 +4120,27 @@ impl App {
                 }
                 return Ok(());
             }
+            Mode::Walk => {
+                if self.shortcut_key(&k, true) {
+                    self.mode = Mode::Walk;
+                    return Ok(());
+                }
+                let picked = self.flow_pane.picked.clone();
+                match self.flow_pane.key(k.code) {
+                    firings::Walked::On => self.mode = Mode::Walk,
+                    firings::Walked::Done => {}
+                    firings::Walked::Join(run) => self.join_step(run, area).await,
+                    firings::Walked::NoRun(step) => {
+                        self.say(format!("{step} has not run in this firing"));
+                        self.mode = Mode::Walk;
+                    }
+                }
+                // Another firing shown: its files, and what was said of it.
+                if self.flow_pane.picked != picked {
+                    self.load_pane().await;
+                }
+                return Ok(());
+            }
             Mode::Form(mut f) => {
                 match f.key(&k) {
                     Act::Typing => self.mode = Mode::Form(f),
@@ -4068,6 +4217,21 @@ impl App {
             } else {
                 graph::Dir::Right
             });
+            return Ok(());
+        }
+        // On a flow's row, with nothing typed, → opens it to its latest firing's steps and ←
+        // folds it again.
+        if self.view == View::Work
+            && self.line.is_empty()
+            && matches!(self.mode, Mode::Normal)
+            && matches!(k.code, KeyCode::Left | KeyCode::Right)
+            && let Some(key) = self.selected_flow().map(|f| f.key.clone())
+        {
+            if k.code == KeyCode::Right {
+                self.open_flows.insert(key);
+            } else {
+                self.open_flows.remove(&key);
+            }
             return Ok(());
         }
         // Candidates on offer: the arrows walk them, not the list.
@@ -4370,10 +4534,17 @@ impl App {
             return Ok(());
         }
         if self.selected_flow().is_some() {
-            // A flow never grows into its runs on the list: they are in the
-            // pane, with the flow and what its last run raised.
-            self.pane = Pane::Facts;
-            self.show_pane = true;
+            // A flow never grows into its runs on the list: they are in the pane, and enter
+            // again walks its steps and its last firings there.
+            let on_it = self.selected_flow().is_some_and(|f| f.name == self.flow_pane.flow);
+            if self.show_pane && self.pane == Pane::Facts && on_it && !self.flow_pane.firings.is_empty() {
+                self.flow_pane.at = 0;
+                self.mode = Mode::Walk;
+            } else {
+                self.pane = Pane::Facts;
+                self.show_pane = true;
+                self.load_pane().await;
+            }
         } else if let Some(q) = self.selected_question() {
             let id = q.id.clone();
             self.picked.clear();
@@ -5396,10 +5567,10 @@ impl App {
                     let last = f.last();
                     let title = Span::raw(fit(&f.name, tw));
                     let title = vec![if f.unseen() { title.bold() } else { title }];
-                    // How the last few went, oldest first, then where its
-                    // latest firing stands; the tally and the cadence are
-                    // the pane's.
-                    let stands = f.firing.map_or_else(|| f.summary(), flows::state_words);
+                    // How the last few firings went, oldest first, then where
+                    // the latest stands and what it came to; the tally and the
+                    // cadence are the pane's.
+                    let stands = flows::stands(f);
                     list_line(
                         w,
                         tw,
@@ -5427,6 +5598,14 @@ impl App {
             }
             lines.push(line);
             keys.push(row.key());
+            // A flow opened with → has its latest firing's steps under it.
+            if let Row::Flow(f) = row
+                && self.open_flows.contains(&f.key)
+                && let Some(x) = f.firing
+            {
+                lines.push(flows::steps_line(x, state_col(tw)));
+                keys.push(row.key());
+            }
         }
         self.draw_window(f, area, lines, keys, sel_line);
     }
@@ -5557,27 +5736,20 @@ impl App {
             let pad = w.saturating_sub(words.chars().count() + 1);
             top.push(Line::styled(format!("{}{words}", " ".repeat(pad)), theme::dim()));
         }
-        // The top stands still above the rows, and never takes more than
-        // half the room; cut, it says where the rest is.
-        top = catchup::capped(top, (area.height / 2) as usize);
-        if self.sel.as_deref() == Some(TOP) {
-            top = top
-                .into_iter()
-                .map(|mut l| {
-                    let short = w.saturating_sub(l.width());
-                    l.spans.push(Span::raw(" ".repeat(short)));
-                    l.style(theme::selected())
-                })
-                .collect();
-        }
-        let top_h = (top.len() as u16).min(area.height / 2);
+        // What heads it comes first, cut so Relay's own top under it always shows.
+        let firings = self.catch.as_ref().map_or(&[][..], |c| c.firings.as_slice());
+        let leads = heads::leads(&self.flows, firings, cu.since);
+        let leads = catchup::leads(&leads, &self.outcomes, w, Timestamp::now());
+        let (block, block_keys) = catchup::head_block(leads, top, TOP, area.height as usize);
+        let block = catchup::lit(block, &block_keys, self.sel.as_deref(), w);
+        let top_h = (block.len() as u16).min(area.height * 2 / 3);
         let [top_area, sep, rest] = Layout::vertical([
             Constraint::Length(top_h),
             Constraint::Length(u16::from(top_h > 0)),
             Constraint::Fill(1),
         ])
         .areas(area);
-        f.render_widget(Paragraph::new(top), top_area);
+        f.render_widget(Paragraph::new(block), top_area);
         f.render_widget(Paragraph::new("─".repeat(sep.width as usize)).dim(), sep);
         self.list_h.set(rest.height);
         let (lines, keys) = catchup::lines(&cu, w, Timestamp::now());
@@ -5696,6 +5868,16 @@ impl App {
             f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
             return;
         }
+        if let Some(l) = self.lead_here() {
+            let key = SummaryTarget::Firing {
+                id: l.firing.id.clone(),
+            }
+            .key();
+            let said = self.summary.as_ref().filter(|s| s.target == key);
+            let lines = catchup::lead_pane(&l, self.outcomes.of(&l.firing.id), said, area.width as usize, now);
+            f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
+            return;
+        }
         // The catch-up's top: what was said of everything, kept for the
         // stretch last asked of it here.
         if self.on_top() {
@@ -5716,6 +5898,8 @@ impl App {
             Some(Row::Flow(f)) => pane::flow_lines(
                 &f,
                 self.flow_of_row(&f),
+                Some(&self.flow_pane).filter(|p| p.flow == f.name),
+                matches!(self.mode, Mode::Walk),
                 self.summary_of_row(&Row::Flow(f.clone())),
                 &self.names,
                 area.width as usize,
@@ -5804,6 +5988,7 @@ impl App {
                 };
             }
             Mode::Mark(id) => return format!("mark {}: d done · b blocked · w working · esc", title_of(id)),
+            Mode::Walk => return "↑↓ steps, then firings · enter joins a step, or shows a firing · esc".into(),
             Mode::Answer(id) => {
                 let q = self.digest.decisions.iter().find(|d| &d.id == id);
                 let n = q.map_or(0, |q| q.options.len().min(pane::MAX_KEYS));
@@ -5957,6 +6142,9 @@ impl App {
         } else {
             "^o details"
         };
+        if self.lead_here().is_some() {
+            return format!("enter shows all of it · /summary tells this firing · {pane} · esc the list");
+        }
         if self.on_top() {
             return format!("/summary [deep] [again] writes it · {pane} · esc the list");
         }
@@ -6537,7 +6725,7 @@ mod tests {
     /// A panel on a daemon of its own, in a home of its own: one project,
     /// registered as `api` from a folder called `proj`, with one ended run in
     /// it, `make test`. Nothing is started, and no agent is anywhere near.
-    async fn panel() -> (
+    pub(super) async fn panel() -> (
         tempfile::TempDir,
         tokio_util::sync::CancellationToken,
         super::App,
@@ -6769,7 +6957,7 @@ mod tests {
         app.select(key);
     }
 
-    async fn type_in(app: &mut super::App, text: &str) {
+    pub(super) async fn type_in(app: &mut super::App, text: &str) {
         for c in text.chars() {
             app.key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE), AREA)
                 .await
@@ -6777,11 +6965,11 @@ mod tests {
         }
     }
 
-    async fn press(app: &mut super::App, code: KeyCode, m: KeyModifiers) {
+    pub(super) async fn press(app: &mut super::App, code: KeyCode, m: KeyModifiers) {
         app.key(KeyEvent::new(code, m), AREA).await.unwrap();
     }
 
-    const AREA: Rect = Rect::new(0, 0, 120, 40);
+    pub(super) const AREA: Rect = Rect::new(0, 0, 120, 40);
     const RUN: &str = "r:run00001";
 
     fn renaming(app: &super::App) -> Option<(String, bool)> {
@@ -7501,7 +7689,7 @@ mod tests {
     }
 
     /// The screen as drawn at 120×40, its rows joined by newlines.
-    fn draw_text(app: &mut super::App) -> String {
+    pub(super) fn draw_text(app: &mut super::App) -> String {
         let mut t = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 40)).unwrap();
         t.draw(|f| app.draw(f)).unwrap();
         let buf = t.backend().buffer().clone();
@@ -7828,7 +8016,7 @@ mod tests {
             .unwrap();
     }
 
-    fn nine_hours_ago() -> jiff::Timestamp {
+    pub(super) fn nine_hours_ago() -> jiff::Timestamp {
         jiff::Timestamp::now() - jiff::SignedDuration::from_hours(9)
     }
 

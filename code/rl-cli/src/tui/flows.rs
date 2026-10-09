@@ -2,7 +2,7 @@
 //! stands, what starts it, where it runs, whether it has a yes, and each of
 //! its steps. Pure.
 
-use super::rows::{Names, short_path};
+use super::rows::{FlowRow, Names, short_path};
 use super::theme;
 use jiff::Timestamp;
 use ratatui::style::Stylize;
@@ -98,9 +98,39 @@ pub fn state_words(f: &Firing) -> String {
     }
 }
 
+/// Where a flow's row says it stands: where its latest firing is, and what that came to —
+/// `waiting at review · page on-call?`, `done · *Morning brief*`; with no firing known, what
+/// its last run came to.
+pub fn stands(f: &FlowRow) -> String {
+    let Some(x) = f.firing else { return f.summary() };
+    match x.outcome.as_deref().filter(|o| !o.is_empty()) {
+        Some(o) => format!("{} · {o}", state_words(x)),
+        None => state_words(x),
+    }
+}
+
+/// A flow's row opened (`→`): its latest firing's steps, each with its mark, from column `from`
+/// — `probe ✓ · triage ✓ · review ?`, dim, a failure red.
+pub fn steps_line(f: &Firing, from: usize) -> Line<'static> {
+    let mut spans = vec![Span::raw(" ".repeat(from))];
+    for (n, s) in f.steps.iter().enumerate() {
+        if n > 0 {
+            spans.push(Span::raw(" · ").dim());
+        }
+        spans.push(Span::raw(format!("{} ", s.name)).dim());
+        let mark = Span::raw(glyph(s.status));
+        spans.push(if s.status == StepStatus::Failed {
+            mark.style(theme::bad())
+        } else {
+            mark.dim()
+        });
+    }
+    Line::from(spans)
+}
+
 /// A step's mark in the pane: `✓` done, `×` failed, `○` not run (yet, or
 /// at all), `?` asking, `…` going.
-fn glyph(s: StepStatus) -> &'static str {
+pub(crate) fn glyph(s: StepStatus) -> &'static str {
     match s {
         StepStatus::Done => "✓",
         StepStatus::Failed => "×",
@@ -121,11 +151,13 @@ fn place(p: &Path, names: &Names) -> String {
 
 /// A flow in the pane: what starts it, where it runs, whether it has a yes,
 /// when it fires next and last did, and each step as the latest firing left
-/// it — or, before it has fired, as the flow writes them.
+/// it — or, before it has fired, as the flow writes them. `at`: the step under the caret,
+/// while the pane is walked, lit.
 pub fn pane_lines(
     f: &Flow,
     def: &FlowDef,
     firing: Option<&Firing>,
+    at: Option<usize>,
     names: &Names,
     now: Timestamp,
 ) -> Vec<Line<'static>> {
@@ -181,13 +213,15 @@ pub fn pane_lines(
         None => def.steps.iter().map(|s| (s.name.as_str(), None)).collect(),
     };
     let w = steps.iter().map(|(n, _)| n.chars().count()).max().unwrap_or(0);
-    for (name, status) in steps {
+    for (n, (name, status)) in steps.into_iter().enumerate() {
+        let lit = at == Some(n);
         let does = def.steps.iter().find(|s| s.name == name).map(|s| match &s.does {
             Does::Run(a) => a.label(),
             Does::Ask(a) => format!("asks: {}", a.text),
         });
         let mut spans = vec![Span::raw(format!(
-            "   {} {name:<w$}",
+            " {} {} {name:<w$}",
+            if lit { "❯" } else { " " },
             glyph(status.unwrap_or(StepStatus::Pending))
         ))];
         if let Some(s) = status {
@@ -196,7 +230,8 @@ pub fn pane_lines(
         if let Some(d) = does.filter(|d| !d.is_empty()) {
             spans.push(Span::raw(format!("  {d}")).dim());
         }
-        lines.push(Line::from(spans));
+        let line = Line::from(spans);
+        lines.push(if lit { line.style(theme::selected()) } else { line });
     }
     lines
 }
@@ -233,8 +268,11 @@ pub fn not_loaded_lines(broken: &[&NotLoaded]) -> Vec<Line<'static>> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::rows::FlowRow;
     use super::*;
     use rl_proto::flow::StepState;
+    use rl_proto::methods::DigestItem;
+    use rl_proto::types::{Run, RunKind};
 
     #[test]
     fn a_cadence_reads_in_words_where_it_can() {
@@ -254,6 +292,20 @@ mod tests {
         assert_eq!(w("0 2 * * mon"), "0 2 * * mon");
     }
 
+    #[test]
+    fn a_flows_row_opened_says_its_latest_firings_steps() {
+        use StepStatus as S;
+        let f = firing(
+            FiringStatus::Waiting,
+            &[("probe", S::Done), ("triage", S::Done), ("review", S::Waiting)],
+        );
+        assert_eq!(steps_line(&f, 4).to_string(), "    probe ✓ · triage ✓ · review ?");
+        let failed = firing(FiringStatus::Failed, &[("gchat", S::Failed), ("brief", S::Skipped)]);
+        let line = steps_line(&failed, 0);
+        assert_eq!(line.to_string(), "gchat × · brief ○");
+        assert!(line.spans.iter().any(|s| s.content == "×" && s.style == theme::bad()));
+    }
+
     fn firing(status: FiringStatus, steps: &[(&str, StepStatus)]) -> Firing {
         Firing {
             id: "fi1".into(),
@@ -263,6 +315,7 @@ mod tests {
             status,
             started_at: "2026-09-10T11:00:00Z".parse().unwrap(),
             ended_at: None,
+            outcome: None,
             steps: steps
                 .iter()
                 .map(|(name, status)| StepState {
@@ -273,6 +326,57 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    fn ran(summary: &str) -> DigestItem {
+        let at: Timestamp = "2026-09-10T11:00:00Z".parse().unwrap();
+        DigestItem {
+            run: Run::new("r1", RunKind::Command, "probe", vec![], "/w", "/w", at),
+            summary: summary.into(),
+            at,
+            unseen: false,
+            joined_by: None,
+            emitted: vec![],
+            cwd: None,
+            recap: None,
+        }
+    }
+
+    fn row<'a>(i: &'a DigestItem, firing: Option<&'a Firing>) -> FlowRow<'a> {
+        FlowRow {
+            key: "f:prod-logs".into(),
+            name: "prod-logs".into(),
+            runs: vec![i],
+            when: None,
+            firing,
+        }
+    }
+
+    #[test]
+    fn a_flows_row_says_where_it_stands_and_what_it_came_to() {
+        use FiringStatus as F;
+        use StepStatus as S;
+        let i = ran("exit 0 · 2s");
+        let mut waiting = firing(
+            F::Waiting,
+            &[("probe", S::Done), ("triage", S::Done), ("review", S::Waiting)],
+        );
+        waiting.outcome = Some("page on-call?".into());
+        assert_eq!(stands(&row(&i, Some(&waiting))), "waiting at review · page on-call?");
+        let mut quiet = firing(F::Done, &[("probe", S::Done)]);
+        quiet.outcome = Some(String::new());
+        assert_eq!(
+            stands(&row(&i, Some(&quiet))),
+            "done",
+            "nothing printed: no dot with nothing after"
+        );
+        quiet.outcome = None;
+        assert_eq!(stands(&row(&i, Some(&quiet))), "done");
+        assert_eq!(
+            stands(&row(&i, None)),
+            "exit 0 · 2s",
+            "no firing known: its last run's own line"
+        );
     }
 
     #[test]
@@ -346,7 +450,7 @@ mod tests {
         let names = Names::new([("/w/api".into(), "api".to_string())]);
         let text = |f: &Flow, firing: Option<&Firing>| {
             let d: FlowDef = serde_json::from_value(f.def.clone()).unwrap();
-            pane_lines(f, &d, firing, &names, now)
+            pane_lines(f, &d, firing, None, &names, now)
                 .iter()
                 .map(|l| l.to_string())
                 .collect::<Vec<_>>()
@@ -381,6 +485,22 @@ mod tests {
             s.contains("   ○ probe   new-log-errors.sh\n   ○ review  asks: fix it?"),
             "{s}"
         );
+    }
+
+    #[test]
+    fn a_step_under_the_caret_is_lit() {
+        let now: Timestamp = "2026-09-10T12:00:00Z".parse().unwrap();
+        let names = Names::new([("/w/api".into(), "api".to_string())]);
+        let f = flow(Some("0123456789abcdef"), def(Some("/w/api")));
+        let d: FlowDef = serde_json::from_value(f.def.clone()).unwrap();
+        let x = firing(
+            FiringStatus::Waiting,
+            &[("probe", StepStatus::Done), ("review", StepStatus::Waiting)],
+        );
+        let lines = pane_lines(&f, &d, Some(&x), Some(1), &names, now);
+        let review = lines.iter().find(|l| l.to_string().contains("? review")).unwrap();
+        assert!(review.to_string().starts_with(" ❯ ? review"), "{review}");
+        assert_eq!(review.style, theme::selected());
     }
 
     fn not_loaded(flow: &str, line: Option<usize>, message: &str) -> NotLoaded {

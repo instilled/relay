@@ -419,6 +419,7 @@ mod tests {
             status: rl_proto::flow::FiringStatus::Done,
             started_at: at(started),
             ended_at: ended.map(at),
+            outcome: None,
             steps: vec![],
         };
         let due = at(10);
