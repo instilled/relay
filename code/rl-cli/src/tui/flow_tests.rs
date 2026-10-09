@@ -250,6 +250,7 @@ async fn summary_on_a_flow_showing_an_older_firing_tells_that_firing() {
     press(&mut app, KeyCode::Down, KeyModifiers::NONE).await;
     press(&mut app, KeyCode::Down, KeyModifiers::NONE).await;
     press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+    press(&mut app, KeyCode::Esc, KeyModifiers::NONE).await;
     let older = app.flow_pane.shown().map(|f| f.id.clone()).unwrap();
     assert_eq!(app.summary_target(), Some(SummaryTarget::Firing { id: older }));
     token.cancel();
@@ -271,7 +272,7 @@ async fn pick_older(app: &mut super::App) {
 }
 
 #[tokio::test]
-async fn the_firing_picked_goes_with_the_walk() {
+async fn the_firing_picked_goes_when_the_cursor_leaves_the_row() {
     let (tmp, token, mut app, folder) = panel().await;
     flow_in(&tmp, &mut app, "prod-logs", "---\nsteps:\n  probe:\n    run: x\n---\n").await;
     for id in ["fire0001", "fire0002"] {
@@ -288,16 +289,13 @@ async fn the_firing_picked_goes_with_the_walk() {
     let flow = || SummaryTarget::Flow {
         name: "prod-logs".into(),
     };
-    // esc ends the walk, and the latest is the flow's again.
+    // esc ends the walk; the pick stays while the cursor is on the row.
     pick_older(&mut app).await;
     press(&mut app, KeyCode::Esc, KeyModifiers::NONE).await;
     assert!(!matches!(app.mode, super::Mode::Walk));
-    assert_eq!(app.flow_pane.picked, None);
-    assert_eq!(app.summary_target(), Some(flow()));
+    assert!(app.flow_pane.picked.is_some());
 
-    // Off the flow and back: the same.
-    pick_older(&mut app).await;
-    app.mode = super::Mode::Normal;
+    // Off the flow and back: the latest is the flow's again.
     app.select(Some(super::TOP.into()));
     app.select(Some("f:prod-logs".into()));
     assert_eq!(app.flow_pane.picked, None);

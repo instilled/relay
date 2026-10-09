@@ -1772,7 +1772,8 @@ impl App {
             }
             self.sel = key;
             self.picked.clear();
-            // A firing picked in a flow's walk is that walk's: off the row, its latest again.
+            // A firing picked in a flow's walk lasts while the cursor is on its row: off it, the
+            // flow's latest again.
             self.flow_pane.picked = None;
             self.answer_at = 0;
             self.events.clear();
@@ -4127,8 +4128,7 @@ impl App {
                 let picked = self.flow_pane.picked.clone();
                 match self.flow_pane.key(k.code) {
                     firings::Walked::On => self.mode = Mode::Walk,
-                    // The walk over, the firing picked goes with it: the flow's latest again.
-                    firings::Walked::Done => self.flow_pane.picked = None,
+                    firings::Walked::Done => {}
                     firings::Walked::Join(run) => self.join_step(run, area).await,
                     firings::Walked::NoRun(step) => {
                         self.say(format!("{step} has not run in this firing"));
