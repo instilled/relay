@@ -89,7 +89,11 @@ fn the_flow_itself_is_kept() {
     assert_eq!(f.in_, Some(PathBuf::from("~/Projects/flint-platform")));
     assert_eq!(f.trigger.when, Some(When::Every(30 * 60)));
     assert_eq!(f.throttle_secs, 10);
-    assert_eq!(f.missed, Missed::CatchUpOnce, "a firing slept through is made up by default");
+    assert_eq!(
+        f.missed,
+        Missed::CatchUpOnce,
+        "a firing slept through is made up by default"
+    );
     let Does::Ask(ask) = &f.steps[2].does else { panic!() };
     assert_eq!(ask.text, "{triage.out}");
     assert_eq!(ask.group.as_deref(), Some("{probe.signature}"));
