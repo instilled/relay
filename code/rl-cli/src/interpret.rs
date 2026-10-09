@@ -41,7 +41,8 @@ pub enum Answer {
 /// The answer in what the assistant said. A flow is the first `kind: flow` at the start of a
 /// line — the pack's own shapes are indented, so an echo of it is never one — then its `name:`,
 /// then its `flow.md` from a `---` line: to the end, or, when a fence opened before it, to the
-/// last bare ```` ``` ```` line, the prose after dropped. Anything else is a run (`parse`).
+/// bare ```` ``` ```` line that closes that fence, what comes after dropped. Anything else is a
+/// run (`parse`).
 pub fn answer(raw: &str) -> Result<Answer> {
     let lines: Vec<&str> = raw.lines().collect();
     let is_flow = |l: &&str| l.starts_with("kind:") && unquote(&strip_comment(l["kind:".len()..].trim())) == "flow";
@@ -56,10 +57,32 @@ pub fn answer(raw: &str) -> Result<Answer> {
         .find_map(|l| l.strip_prefix("name:"))
         .map(|n| unquote(&strip_comment(n.trim())))
         .filter(|n| !n.is_empty());
-    // Inside a fence when an odd number of fence lines came before it.
-    let fenced = lines[..at].iter().filter(|l| l.trim_start().starts_with("```")).count() % 2 == 1;
-    let close = lines[dash..].iter().rposition(|l| l.trim() == "```").filter(|_| fenced);
-    let end = close.map_or(lines.len(), |i| dash + i);
+    // Fences nest: one with an info string (```` ```sh ````) opens a level, a bare one closes one —
+    // or opens one, with none open. Inside a fence, the flow ends at the bare fence that closes
+    // it; one never closed runs to the end, the blocks inside it whole.
+    let mut depth = 0usize;
+    for l in &lines[..at] {
+        match fence(l) {
+            Some(true) if depth > 0 => depth -= 1,
+            Some(_) => depth += 1,
+            None => {}
+        }
+    }
+    let mut end = lines.len();
+    if depth > 0 {
+        let mut inner = 0usize;
+        for (i, l) in lines.iter().enumerate().skip(dash) {
+            match fence(l) {
+                Some(true) if inner == 0 => {
+                    end = i;
+                    break;
+                }
+                Some(true) => inner -= 1,
+                Some(false) => inner += 1,
+                None => {}
+            }
+        }
+    }
     let mut body: Vec<&str> = lines[dash..end].to_vec();
     while body.last().is_some_and(|l| l.trim().is_empty()) {
         body.pop();
@@ -68,6 +91,12 @@ pub fn answer(raw: &str) -> Result<Answer> {
         name,
         text: format!("{}\n", body.join("\n")),
     }))
+}
+
+/// A fence line: `Some(true)` a bare ```` ``` ````, `Some(false)` one with an info string.
+fn fence(l: &str) -> Option<bool> {
+    let rest = l.trim().strip_prefix("```")?;
+    Some(rest.trim().is_empty())
 }
 
 /// What the assistant answered, as the form's fields.
@@ -444,6 +473,11 @@ mod tests {
         );
         // Not fenced: a prompt that ends in its own code block keeps its closing fence.
         assert_eq!(flow(&format!("kind: flow\nname: t\n{md}\n")), md);
+        // Prose and another block after it: the flow ends at the fence that closes its own.
+        let raw = format!("```markdown\nkind: flow\nname: t\n{md}```\n\nOr run:\n```sh\nmake all\n```\nDone.\n");
+        assert_eq!(flow(&raw), md, "cut at the fence that closes it, not the last one");
+        // Its fence never closed: to the end, its prompt's block whole.
+        assert_eq!(flow(&format!("```markdown\nkind: flow\nname: t\n{md}")), md);
     }
 
     #[test]
