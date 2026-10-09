@@ -2,7 +2,7 @@
 //! stands, what starts it, where it runs, whether it has a yes, and each of
 //! its steps. Pure.
 
-use super::rows::{Names, short_path};
+use super::rows::{FlowRow, Names, short_path};
 use super::theme;
 use jiff::Timestamp;
 use ratatui::style::Stylize;
@@ -98,9 +98,20 @@ pub fn state_words(f: &Firing) -> String {
     }
 }
 
+/// Where a flow's row says it stands: where its latest firing is, and what that came to —
+/// `waiting at review · page on-call?`, `done · *Morning brief*`; with no firing known, what
+/// its last run came to.
+pub fn stands(f: &FlowRow) -> String {
+    let Some(x) = f.firing else { return f.summary() };
+    match x.outcome.as_deref().filter(|o| !o.is_empty()) {
+        Some(o) => format!("{} · {o}", state_words(x)),
+        None => state_words(x),
+    }
+}
+
 /// A step's mark in the pane: `✓` done, `×` failed, `○` not run (yet, or
 /// at all), `?` asking, `…` going.
-fn glyph(s: StepStatus) -> &'static str {
+pub(crate) fn glyph(s: StepStatus) -> &'static str {
     match s {
         StepStatus::Done => "✓",
         StepStatus::Failed => "×",
@@ -233,8 +244,11 @@ pub fn not_loaded_lines(broken: &[&NotLoaded]) -> Vec<Line<'static>> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::rows::FlowRow;
     use super::*;
     use rl_proto::flow::StepState;
+    use rl_proto::methods::DigestItem;
+    use rl_proto::types::{Run, RunKind};
 
     #[test]
     fn a_cadence_reads_in_words_where_it_can() {
@@ -274,6 +288,57 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    fn ran(summary: &str) -> DigestItem {
+        let at: Timestamp = "2026-09-10T11:00:00Z".parse().unwrap();
+        DigestItem {
+            run: Run::new("r1", RunKind::Command, "probe", vec![], "/w", "/w", at),
+            summary: summary.into(),
+            at,
+            unseen: false,
+            joined_by: None,
+            emitted: vec![],
+            cwd: None,
+            recap: None,
+        }
+    }
+
+    fn row<'a>(i: &'a DigestItem, firing: Option<&'a Firing>) -> FlowRow<'a> {
+        FlowRow {
+            key: "f:prod-logs".into(),
+            name: "prod-logs".into(),
+            runs: vec![i],
+            when: None,
+            firing,
+        }
+    }
+
+    #[test]
+    fn a_flows_row_says_where_it_stands_and_what_it_came_to() {
+        use FiringStatus as F;
+        use StepStatus as S;
+        let i = ran("exit 0 · 2s");
+        let mut waiting = firing(
+            F::Waiting,
+            &[("probe", S::Done), ("triage", S::Done), ("review", S::Waiting)],
+        );
+        waiting.outcome = Some("page on-call?".into());
+        assert_eq!(stands(&row(&i, Some(&waiting))), "waiting at review · page on-call?");
+        let mut quiet = firing(F::Done, &[("probe", S::Done)]);
+        quiet.outcome = Some(String::new());
+        assert_eq!(
+            stands(&row(&i, Some(&quiet))),
+            "done",
+            "nothing printed: no dot with nothing after"
+        );
+        quiet.outcome = None;
+        assert_eq!(stands(&row(&i, Some(&quiet))), "done");
+        assert_eq!(
+            stands(&row(&i, None)),
+            "exit 0 · 2s",
+            "no firing known: its last run's own line"
+        );
     }
 
     #[test]

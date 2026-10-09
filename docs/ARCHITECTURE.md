@@ -371,9 +371,10 @@ a run filed under a ref keeps the ref). That header is not a project: `enter` pu
 no `in` and how their runs stand in the pane, and `^x`, `^r` and `/shell` say `everywhere is not a
 project` and do nothing; `in:everywhere` finds it. `^g` (or `/graph`) from anywhere, an empty list
 too, shows every flow wired with everything else. A flow's runs, once ended, fold into one row per
-flow (`f:<name>`) — `↻`, the name, a mark per run in the state column (`··×·`, oldest first, a
-failure red), where its latest firing stands (`waiting at review`, `running · triage`, `failed at
-probe`, `done`, `rows::FlowRow`, `flows::state_words`) and how long ago — so a flow firing every
+flow (`f:<name>`) — `↻`, the name, a mark per firing in the state column (`··×·`, oldest first, red where
+a step failed), where its latest firing stands and what it came to (`waiting at review · page
+on-call?`, `running · triage`, `failed at probe · token expired`, `done · *Morning brief*`;
+`rows::FlowRow`, `flows::stands`) and how long ago — so a flow firing every
 thirty seconds is a row, not a screen, and it never grows into one: `enter` (or `^o`) puts it in
 the pane, as on a project header. A run still going or waiting on you is never folded. The pane
 holds the flow: `flow · <in> · <status>`, then what starts it — a cron line read back in words
@@ -685,7 +686,7 @@ its parts read it (`App::drawn`, `catchup::Kept`: the rows by their place in the
 back over it). What needs you leads each project and the projects that need you lead; a project with
 nothing new folds to one line (`▸ relay  nothing new`). A project's line tallies the stretch (`2
 need you · 9 ran · 1 failed`, only what happened in it counted); each row is a line (`row_line`): an
-agent's recap or its state and last line, a flow's marks and how the last went, a command's state and
+agent's recap or its state and last line, a flow's firings as marks, then where the latest stands and what it came to, a command's state and
 how it ended, a question's ask — answered by number on the line, with a note, as on the list. Moving
 about it marks nothing seen; leaving it, any way, marks seen all it showed (`saw_catch_up`), notes
 each flow's earliest firing not seen so its `/summary` still starts there, and gives a project's

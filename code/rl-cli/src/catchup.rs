@@ -21,7 +21,7 @@ use rl_proto::types::{Cause, Run, RunState, Summary, SummaryTarget};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-/// How many of a flow's runs in the stretch its line shows as marks.
+/// How many of a flow's firings in the stretch its line shows as marks.
 const MARKS: usize = 10;
 
 #[cfg(test)]
@@ -634,12 +634,13 @@ pub fn row_line(r: &Row, now: Timestamp) -> String {
         ],
         Row::Flow(f) => {
             let last = &f.last().run;
-            vec![
-                format!("{} {}", f.marks(MARKS), f.name),
-                rows::state_words(last.state, last.confidence),
-                f.summary(),
-                ago(f.last().at),
-            ]
+            let mut parts = vec![format!("{} {}", f.marks(MARKS), f.name)];
+            match f.firing {
+                Some(_) => parts.push(crate::tui::flows::stands(f)),
+                None => parts.extend([rows::state_words(last.state, last.confidence), f.summary()]),
+            }
+            parts.push(ago(f.last().at));
+            parts
         }
     };
     parts
@@ -654,6 +655,7 @@ mod tests {
     use super::*;
     use crate::tui::rows::{Lens, Names};
     use rl_proto::decision::{Decision, DecisionOption, DecisionStatus};
+    use rl_proto::flow::{Firing, FiringStatus, StepState, StepStatus};
     use rl_proto::methods::DigestItem;
     use rl_proto::types::{Cause, Confidence, Run, RunKind, RunState, Summary};
     use std::path::{Path, PathBuf};
@@ -721,6 +723,31 @@ mod tests {
 
     const API: &str = "/home/f/api";
     const RELAY: &str = "/home/f/relay";
+
+    #[test]
+    fn a_flow_line_says_its_latest_firing_and_what_it_came_to() {
+        let (mut d, names) = (fixture(), names());
+        d.firings.push(Firing {
+            id: "fi1".into(),
+            flow: "nightly".into(),
+            trigger: "when".into(),
+            event: None,
+            status: FiringStatus::Failed,
+            started_at: now(),
+            ended_at: Some(now()),
+            steps: vec![StepState {
+                name: "probe".into(),
+                status: StepStatus::Failed,
+                run: None,
+                decision: None,
+            }],
+            outcome: Some("disk full".into()),
+        });
+        let cu = build(&d, &names);
+        let flow = cu.projects[0].rows.iter().find(|r| matches!(r, Row::Flow(_))).unwrap();
+        let line = row_line(flow, now());
+        assert!(line.contains("nightly · failed at probe · disk full · "), "{line}");
+    }
 
     fn now() -> Timestamp {
         "2026-10-06T12:00:00Z".parse().unwrap()

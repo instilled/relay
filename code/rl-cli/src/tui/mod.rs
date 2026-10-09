@@ -19,7 +19,7 @@
 mod catchup;
 mod complete;
 mod events;
-mod flows;
+pub(crate) mod flows;
 pub mod form;
 mod graph;
 mod input;
@@ -5396,10 +5396,10 @@ impl App {
                     let last = f.last();
                     let title = Span::raw(fit(&f.name, tw));
                     let title = vec![if f.unseen() { title.bold() } else { title }];
-                    // How the last few went, oldest first, then where its
-                    // latest firing stands; the tally and the cadence are
-                    // the pane's.
-                    let stands = f.firing.map_or_else(|| f.summary(), flows::state_words);
+                    // How the last few firings went, oldest first, then where
+                    // the latest stands and what it came to; the tally and the
+                    // cadence are the pane's.
+                    let stands = flows::stands(f);
                     list_line(
                         w,
                         tw,
