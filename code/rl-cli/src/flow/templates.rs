@@ -139,8 +139,22 @@ pub fn names() -> String {
 }
 
 /// The blanks given as `key=value` words, and `in`, when the template has one and it is not
-/// given, the folder `here` (as a path is shown: `~/…`).
-pub fn given_in<S: AsRef<str>>(t: &Template, words: &[S], here: &str) -> Result<BTreeMap<String, String>, String> {
+/// given, the folder `here` (as a path is shown: `~/…`). `named`: `here` was named (`--in`), so
+/// a template with no `in` refuses it, as it refuses a key that is not one of its blanks.
+pub fn given_in<S: AsRef<str>>(
+    t: &Template,
+    words: &[S],
+    here: &str,
+    named: bool,
+) -> Result<BTreeMap<String, String>, String> {
+    if named && !t.blanks.iter().any(|b| b.key == IN) {
+        let keys: Vec<&str> = t.blanks.iter().map(|b| b.key).collect();
+        return Err(format!(
+            "--in: `{IN}` is not a blank of {}: {}",
+            t.name,
+            keys.join(", ")
+        ));
+    }
     let mut given = BTreeMap::new();
     for w in words {
         let w = w.as_ref();
@@ -330,21 +344,34 @@ mod tests {
             find("nope").unwrap_err(),
             "`nope` is not a template: prod-logs, morning-brief"
         );
-        let mut given = given_in(t, &["project=my-prod"], "~/w/api").unwrap();
+        let mut given = given_in(t, &["project=my-prod"], "~/w/api", false).unwrap();
         assert_eq!(
             given.get("in").map(String::as_str),
             Some("~/w/api"),
             "in: the folder here"
         );
         assert_eq!(
-            given_in(t, &["in=/w/x", "project=p"], "~/w/api").unwrap()["in"],
+            given_in(t, &["in=/w/x", "project=p"], "~/w/api", false).unwrap()["in"],
             "/w/x",
             "in, given, wins"
         );
         assert!(fill(t, &given).is_ok());
         assert_eq!(
-            given_in(t, &["project"], "~").unwrap_err(),
+            given_in(t, &["project"], "~", false).unwrap_err(),
             "`project` is not key=value"
+        );
+        // A folder named for a template with no `in` is refused, as a key not its blank is.
+        assert_eq!(given_in(t, &["project=p"], "/w/x", true).unwrap()["in"], "/w/x");
+        let brief = find("morning-brief").unwrap();
+        assert_eq!(
+            given_in(brief, &["space=s", "org=o"], "/w/x", true).unwrap_err(),
+            "--in: `in` is not a blank of morning-brief: space, org"
+        );
+        assert!(
+            !given_in(brief, &["space=s", "org=o"], "/w/x", false)
+                .unwrap()
+                .contains_key("in"),
+            "here, not named: no in"
         );
 
         given.remove("project");

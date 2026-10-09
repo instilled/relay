@@ -28,8 +28,8 @@ pub struct NewArgs {
     /// A template's blank: --set project=my-prod. Asked for when missing, on a terminal.
     #[arg(long = "set", value_name = "KEY=VALUE", requires = "from")]
     pub set: Vec<String>,
-    /// The project the flow works in (a template's `in`); default here.
-    #[arg(long = "in", value_name = "FOLDER")]
+    /// The project a template's flow works in (its `in`); default here.
+    #[arg(long = "in", value_name = "FOLDER", requires = "from")]
     pub folder: Option<PathBuf>,
     /// Write it and say yes to it without opening $EDITOR.
     #[arg(long)]
@@ -207,7 +207,7 @@ pub async fn new(home: &Home, a: NewArgs, json: bool) -> Result<()> {
     let folder = std::fs::canonicalize(&folder).unwrap_or(folder);
     let name = check_name(home, &a.name)?;
     let (files, yours) = match &a.from {
-        Some(t) => (template_files(t, &a.set, &folder)?, true),
+        Some(t) => (template_files(t, &a.set, &folder, a.folder.is_some())?, true),
         None if !a.words.is_empty() => (
             drafted(home, &name, &folder, &a.words.join(" "), a.go, json).await?,
             true,
@@ -261,11 +261,11 @@ async fn drafted(
     Ok(vec![NewFile::flow_md(d.text)])
 }
 
-/// A template's files, its blanks from `--set`, `in` from the folder, and — on a terminal — the
-/// rest asked for; off one, what is missing is said.
-fn template_files(name: &str, set: &[String], folder: &Path) -> Result<Vec<NewFile>> {
+/// A template's files, its blanks from `--set`, `in` from the folder (`named` by `--in`, or here),
+/// and — on a terminal — the rest asked for; off one, what is missing is said.
+fn template_files(name: &str, set: &[String], folder: &Path, named: bool) -> Result<Vec<NewFile>> {
     let t = templates::find(name).map_err(anyhow::Error::msg)?;
-    let mut given = templates::given_in(t, set, &display_path(folder)).map_err(anyhow::Error::msg)?;
+    let mut given = templates::given_in(t, set, &display_path(folder), named).map_err(anyhow::Error::msg)?;
     let missing = templates::missing(t, &given);
     if !missing.is_empty() && !std::io::stdin().is_terminal() {
         bail!("{}", templates::needs(t, &missing, "--set "));

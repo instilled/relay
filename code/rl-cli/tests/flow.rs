@@ -535,6 +535,28 @@ fn flow_new_writes_a_template_filled_and_says_yes() {
     assert!(!ok);
     assert!(e.contains("not loaded: far · flow.md:2") && e.contains("rl add"), "{e}");
 
+    // --in is a template's `in`: refused without --from, and for a template with no `in`.
+    let (ok, _, e) = out(rl(&["flow", "new", "lost", "--in", ws.to_str().unwrap()]));
+    assert!(!ok && e.contains("--from"), "{e}");
+    let (ok, _, e) = out(rl(&[
+        "flow",
+        "new",
+        "lost",
+        "--from",
+        "morning-brief",
+        "--set",
+        "space=spaces/AAAA1",
+        "--set",
+        "org=acme",
+        "--in",
+        ws.to_str().unwrap(),
+    ]));
+    assert!(
+        !ok && e.contains("--in: `in` is not a blank of morning-brief: space, org"),
+        "{e}"
+    );
+    assert!(!flows.join("lost").exists());
+
     assert!(out(rl(&["daemon", "stop"])).0);
 }
 

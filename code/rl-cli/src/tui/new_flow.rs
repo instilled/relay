@@ -68,7 +68,7 @@ pub fn asked(words: &[&str]) -> Result<Asked, String> {
 /// `here`; what is missing is said as it would be typed.
 pub fn template_files(template: &str, given: &[String], here: &str) -> Result<Vec<NewFile>, String> {
     let t = templates::find(template)?;
-    let given = templates::given_in(t, given, here)?;
+    let given = templates::given_in(t, given, here, false)?;
     let missing = templates::missing(t, &given);
     if !missing.is_empty() {
         return Err(templates::needs(t, &missing, ""));
