@@ -2,7 +2,7 @@
 //! flow's row opened to its steps. A real `rld` over a fresh home, each firing written into its
 //! ledger as the engine leaves one — nothing runs, no agent is asked.
 
-use super::tests::{draw_text, nine_hours_ago, panel, press};
+use super::tests::{draw_text, nine_hours_ago, panel, press, type_in};
 use crossterm::event::{KeyCode, KeyModifiers};
 use rl_proto::flow::{FiringStatus, FlowReload, StepStatus};
 use rl_proto::types::SummaryTarget;
@@ -212,5 +212,42 @@ async fn summary_on_a_flow_showing_an_older_firing_tells_that_firing() {
     press(&mut app, KeyCode::Esc, KeyModifiers::NONE).await;
     let older = app.flow_pane.shown().map(|f| f.id.clone()).unwrap();
     assert_eq!(app.summary_target(), Some(SummaryTarget::Firing { id: older }));
+    token.cancel();
+}
+
+#[tokio::test]
+async fn right_opens_a_flows_row_to_its_latest_firings_steps_and_left_folds_it() {
+    let (tmp, token, mut app, folder) = panel().await;
+    flow_in(
+        &tmp,
+        &mut app,
+        "prod-logs",
+        "---\nsteps:\n  probe:\n    run: x\n  triage:\n    after: probe\n    run: y\n  review:\n    after: triage\n    ask: ok?\n    options: { ok: {} }\n---\n",
+    )
+    .await;
+    fired(
+        &tmp,
+        &folder,
+        "prod-logs",
+        "fire0001",
+        &[
+            ("probe", StepStatus::Done, Some("3x connection reset\r\n")),
+            ("triage", StepStatus::Done, Some("restart the api pod\r\n")),
+            ("review", StepStatus::Waiting, None),
+        ],
+        FiringStatus::Waiting,
+    );
+    app.refresh().await;
+    app.select(Some("f:prod-logs".into()));
+    let steps = "probe ✓ · triage ✓ · review ?";
+    assert!(!draw_text(&mut app).contains(steps));
+    press(&mut app, KeyCode::Right, KeyModifiers::NONE).await;
+    assert!(draw_text(&mut app).contains(steps), "→ opens it");
+    press(&mut app, KeyCode::Left, KeyModifiers::NONE).await;
+    assert!(!draw_text(&mut app).contains(steps), "← folds it");
+    // With words on the line, the arrows are the line's.
+    type_in(&mut app, "ab").await;
+    press(&mut app, KeyCode::Right, KeyModifiers::NONE).await;
+    assert!(!draw_text(&mut app).contains(steps));
     token.cancel();
 }

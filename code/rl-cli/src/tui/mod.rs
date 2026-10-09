@@ -79,7 +79,7 @@ use rl_proto::methods::{
 };
 use rl_proto::types::{AttachMode, Cause, Event as LedgerEvent, Mark, Run, RunKind, RunState, Summary, SummaryTarget};
 use rows::{Names, Row, fit};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use term::TermView;
@@ -330,6 +330,8 @@ struct App {
     answer_at: usize,
     /// The flow whose pane is up: its last firings, the one shown, the caret while walked.
     flow_pane: firings::FlowPane,
+    /// The flows' rows opened with `→` to their latest firing's steps, by row key.
+    open_flows: HashSet<String>,
     /// What the question pane drew last, so a click can take a choice.
     pane_hit: std::cell::RefCell<PaneHit>,
     /// The pane alone, full width: a terminal, unless `f` says otherwise.
@@ -1133,6 +1135,7 @@ impl App {
             auto_pane: false,
             answer_at: 0,
             flow_pane: Default::default(),
+            open_flows: HashSet::new(),
             pane_hit: std::cell::RefCell::default(),
             wide: false,
             term: None,
@@ -4198,6 +4201,21 @@ impl App {
             });
             return Ok(());
         }
+        // On a flow's row, with nothing typed, → opens it to its latest firing's steps and ←
+        // folds it again.
+        if self.view == View::Work
+            && self.line.is_empty()
+            && matches!(self.mode, Mode::Normal)
+            && matches!(k.code, KeyCode::Left | KeyCode::Right)
+            && let Some(key) = self.selected_flow().map(|f| f.key.clone())
+        {
+            if k.code == KeyCode::Right {
+                self.open_flows.insert(key);
+            } else {
+                self.open_flows.remove(&key);
+            }
+            return Ok(());
+        }
         // Candidates on offer: the arrows walk them, not the list.
         if self.cands().is_some() && matches!(k.code, KeyCode::Up | KeyCode::Down) {
             self.walk_cands(if k.code == KeyCode::Down { 1 } else { -1 });
@@ -5562,6 +5580,14 @@ impl App {
             }
             lines.push(line);
             keys.push(row.key());
+            // A flow opened with → has its latest firing's steps under it.
+            if let Row::Flow(f) = row
+                && self.open_flows.contains(&f.key)
+                && let Some(x) = f.firing
+            {
+                lines.push(flows::steps_line(x, state_col(tw)));
+                keys.push(row.key());
+            }
         }
         self.draw_window(f, area, lines, keys, sel_line);
     }

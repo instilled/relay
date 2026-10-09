@@ -375,7 +375,9 @@ flow (`f:<name>`) — `↻`, the name, a mark per firing in the state column (`�
 a step failed), where its latest firing stands and what it came to (`waiting at review · page
 on-call?`, `running · triage`, `failed at probe · token expired`, `done · *Morning brief*`;
 `rows::FlowRow`, `flows::stands`) and how long ago — so a flow firing every
-thirty seconds is a row, not a screen, and it never grows into one: `enter` (or `^o`) puts it in
+thirty seconds is a row, not a screen, and it never grows into one: `→` on it (nothing typed) opens
+it to its latest firing's steps on a line under it — `probe ✓ · triage ✓ · review ?`, a failure red
+(`flows::steps_line`) — and `←` folds it again; `enter` (or `^o`) puts it in
 the pane, as on a project header. A run still going or waiting on you is never folded. The pane
 holds the flow: `flow · <in> · <status>`, then what starts it — a cron line read back in words
 where it can be (`hourly 08:00–18:00, Mon–Fri`), left as written where it cannot — where it runs,

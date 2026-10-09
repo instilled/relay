@@ -109,6 +109,25 @@ pub fn stands(f: &FlowRow) -> String {
     }
 }
 
+/// A flow's row opened (`→`): its latest firing's steps, each with its mark, from column `from`
+/// — `probe ✓ · triage ✓ · review ?`, dim, a failure red.
+pub fn steps_line(f: &Firing, from: usize) -> Line<'static> {
+    let mut spans = vec![Span::raw(" ".repeat(from))];
+    for (n, s) in f.steps.iter().enumerate() {
+        if n > 0 {
+            spans.push(Span::raw(" · ").dim());
+        }
+        spans.push(Span::raw(format!("{} ", s.name)).dim());
+        let mark = Span::raw(glyph(s.status));
+        spans.push(if s.status == StepStatus::Failed {
+            mark.style(theme::bad())
+        } else {
+            mark.dim()
+        });
+    }
+    Line::from(spans)
+}
+
 /// A step's mark in the pane: `✓` done, `×` failed, `○` not run (yet, or
 /// at all), `?` asking, `…` going.
 pub(crate) fn glyph(s: StepStatus) -> &'static str {
@@ -271,6 +290,20 @@ mod tests {
         assert_eq!(w("*/5 * * * *"), "*/5 * * * *");
         assert_eq!(w("0 2 1 * *"), "0 2 1 * *");
         assert_eq!(w("0 2 * * mon"), "0 2 * * mon");
+    }
+
+    #[test]
+    fn a_flows_row_opened_says_its_latest_firings_steps() {
+        use StepStatus as S;
+        let f = firing(
+            FiringStatus::Waiting,
+            &[("probe", S::Done), ("triage", S::Done), ("review", S::Waiting)],
+        );
+        assert_eq!(steps_line(&f, 4).to_string(), "    probe ✓ · triage ✓ · review ?");
+        let failed = firing(FiringStatus::Failed, &[("gchat", S::Failed), ("brief", S::Skipped)]);
+        let line = steps_line(&failed, 0);
+        assert_eq!(line.to_string(), "gchat × · brief ○");
+        assert!(line.spans.iter().any(|s| s.content == "×" && s.style == theme::bad()));
     }
 
     fn firing(status: FiringStatus, steps: &[(&str, StepStatus)]) -> Firing {
