@@ -159,9 +159,9 @@ pub const ALL: &[Command] = &[
     },
     Command {
         name: "flow",
-        args: "run|pause|resume|approve|edit|reload [name]",
-        words: &[&["run", "pause", "resume", "approve", "edit", "reload"]],
-        what: "a flow: the one named, else the one under the cursor · edit opens its flow.md, and says yes when it loads",
+        args: "run|pause|resume|approve|edit|test|reload [name]",
+        words: &[&["run", "pause", "resume", "approve", "edit", "test", "reload"]],
+        what: "a flow: the one named, else the one under the cursor · edit opens its flow.md, and says yes when it loads · test says what would fire",
         cmd: Cmd::Flow,
     },
     Command {
@@ -320,7 +320,7 @@ mod tests {
     fn each_command_offers_its_argument_words_in_turn() {
         assert_eq!(
             arg_words(cmd("flow"), 0),
-            ["run", "pause", "resume", "approve", "edit", "reload"]
+            ["run", "pause", "resume", "approve", "edit", "test", "reload"]
         );
         assert!(arg_words(cmd("flow"), 1).is_empty(), "the flows' names are the panel's");
         assert_eq!(arg_words(cmd("reload"), 0), ["flows", "shell"]);

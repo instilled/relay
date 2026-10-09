@@ -1,5 +1,5 @@
 //! `rl flow`: the flows in `~/.relay/flows` and what they are doing; edit
-//! one (and say yes to it, if it loads), run, pause, resume, approve, reload; and, inside a step,
+//! one (and say yes to it, if it loads), run, pause, resume, approve, test, reload; and, inside a step,
 //! its firing's state.
 
 use crate::client::Client;
@@ -12,13 +12,14 @@ use rl_core::{Home, display_path};
 use rl_flow::def::FlowDef;
 use rl_proto::flow::{
     Firing, FiringFilter, Flow, FlowApproval, FlowApprove, FlowErrors, FlowFilter, FlowFirings, FlowList, FlowName,
-    FlowPause, FlowReload, FlowResume, FlowRun, Reloaded,
+    FlowPause, FlowReload, FlowResume, FlowRun, FlowTest, FlowTestParams, Reloaded,
 };
 
 mod edit;
 mod new;
 mod state;
 pub mod templates;
+pub mod tested;
 pub use edit::{Edited, Editing, TEMPLATE, drop_new, finish_edit, start_edit};
 pub use new::{NewArgs, NewFile, check_name, start_new};
 pub use state::StateCmd;
@@ -51,6 +52,13 @@ pub enum FlowCmd {
         /// The version looked at: its hash as `rl flow list` shows it, or 6 of it or more. Refused when
         /// the folder is another version now. Without it, the version read now, which is printed.
         hash: Option<String>,
+    },
+    /// What firing a flow would do now — what would fire it, which steps would run — starting nothing.
+    Test {
+        name: String,
+        /// An event, by id (rl events): whether it would fire the flow, and what its steps would make of it.
+        #[arg(long)]
+        event: Option<i64>,
     },
     /// Read ~/.relay/flows again (rld does it on start too).
     Reload,
@@ -133,6 +141,16 @@ pub async fn flow(home: &Home, cmd: FlowCmd, json: bool) -> Result<()> {
                 println!("{}", serde_json::to_string(&f)?);
             } else {
                 println!("approved {} · {}", f.name, short(&f.hash));
+            }
+        }
+        FlowCmd::Test { name, event } => {
+            let t = rpc.call::<FlowTest>(FlowTestParams { name, event }).await?;
+            if json {
+                println!("{}", serde_json::to_string(&t)?);
+            } else {
+                for l in tested::lines(&t, now()) {
+                    println!("{l}");
+                }
             }
         }
         FlowCmd::Reload => {

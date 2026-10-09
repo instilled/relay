@@ -660,7 +660,8 @@ itself, lets it again, or says yes to its folder as it is; `/flow edit <name>` o
 in `$EDITOR` — at the line it broke on when it did not load, a template when there is no such
 flow yet — and on return reads the flows again and approves that one if it loads (your save is
 the yes), or flashes `not loaded:` with its file and line if it does not; `/flow reload` reads
-them all again, as bare `/reload` does after the shell. On a flow's row, in the list or the
+them all again, as bare `/reload` does after the shell. `/flow test <name>` shows in the pane what
+firing it would do now, until the next key (§6, Trying one). On a flow's row, in the list or the
 catch-up, or a flow's node (or its question's) in the graph, the name can be left out; a name
 typed wins over the row, and with neither the flash asks `which?`.
 
@@ -1035,7 +1036,8 @@ writes the brief and `post.sh` sends it, so the agent needs no tool.
 then what did not load; `--all` keeps the removed), `edit <name>` (a new name starts from a
 template, gone again if left as it was), `new <name> [--from <template> --set k=v --in <folder>]
 [--go]`, `run <name>` (now,
-by hand, paused or not, never without its yes), `pause`, `resume`, `approve <name> [<hash>]` and `reload`, each
+by hand, paused or not, never without its yes), `pause`, `resume`, `approve <name> [<hash>]`, `test <name>
+[--event <id>]` (what would fire it and which steps would run, starting nothing) and `reload`, each
 with `--json`. Behind them are `flow.list`, `flow.errors`, `flow.reload`, `flow.approve`,
 `flow.pause`, `flow.resume`, `flow.run`, `flow.test` and `flow.firings` (`rl-daemon/src/flows/rpc.rs`).
 

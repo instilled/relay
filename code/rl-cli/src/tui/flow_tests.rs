@@ -428,3 +428,30 @@ async fn a_flow_opened_stays_open_while_a_search_hides_it() {
     assert!(draw_text(&mut app).contains("probe ✓"), "still open");
     token.cancel();
 }
+
+#[tokio::test]
+async fn flow_test_shows_what_would_fire_in_the_pane() {
+    let (tmp, token, mut app, _) = panel().await;
+    flow_in(
+        &tmp,
+        &mut app,
+        "nightly",
+        "---\nwhen: every 1h\nsteps:\n  a:\n    run: echo hello\n---\n",
+    )
+    .await;
+    type_in(&mut app, "/flow test nightly").await;
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+    let screen = draw_text(&mut app);
+    assert!(screen.contains("nightly · every 1h"), "{screen}");
+    // The pane is a third of the screen: the last line wraps after the flow's name.
+    assert!(screen.contains("started nothing · rl flow run nightly"), "{screen}");
+    let last = app.tested.as_ref().and_then(|t| t.last());
+    assert_eq!(
+        last.map(String::as_str),
+        Some("started nothing · rl flow run nightly fires it now")
+    );
+    // The next key puts it away, as it does a reload's list.
+    press(&mut app, KeyCode::Down, KeyModifiers::NONE).await;
+    assert!(!draw_text(&mut app).contains("started nothing"));
+    token.cancel();
+}

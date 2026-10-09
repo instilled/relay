@@ -933,11 +933,12 @@ mod tests {
         };
         assert_eq!(
             at_end("/flow ", &here),
-            ["run", "pause", "resume", "approve", "edit", "reload"]
+            ["run", "pause", "resume", "approve", "edit", "test", "reload"]
         );
         assert_eq!(at_end("/flow re", &here), ["resume", "reload"]);
         assert_eq!(at_end("/flow run ", &here), ["nightly", "prod-logs"]);
         assert_eq!(at_end("/flow edit p", &here), ["prod-logs"]);
+        assert_eq!(at_end("/flow test n", &here), ["nightly"]);
         assert!(at_end("/flow run nightly ", &here).is_empty(), "one flow at a time");
         assert!(at_end("/flow reload ", &here).is_empty(), "reload is every flow");
     }

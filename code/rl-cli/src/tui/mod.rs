@@ -65,7 +65,7 @@ use rl_core::time::fmt_age;
 use rl_proto::decision::Decision;
 use rl_proto::flow::{
     Firing, FiringFilter, Flow, FlowApproval, FlowApprove, FlowErrors, FlowFilter, FlowFirings, FlowList, FlowName,
-    FlowPause, FlowReload, FlowResume, FlowRun, FlowStatus, NotLoaded,
+    FlowPause, FlowReload, FlowResume, FlowRun, FlowStatus, FlowTest, FlowTestParams, NotLoaded,
 };
 use rl_proto::methods::{
     AgentList, DecisionDismiss, DecisionGet, DecisionId, DecisionNote, DecisionTake, DecisionTakeParams, Digest,
@@ -295,6 +295,8 @@ struct App {
     /// What the last `/reload` did not load, when it was more than the flash
     /// has room for: listed in the pane until the next key.
     reload_list: Option<Vec<NotLoaded>>,
+    /// What `/flow test` found, as lines, until the next key.
+    tested: Option<Vec<String>>,
     /// The wiring, fetched while the graph is up.
     graph: Option<rl_proto::graph::Graph>,
     /// The views gone through to reach the one that is up, the list first:
@@ -1151,6 +1153,7 @@ impl App {
             importing: false,
             not_loaded: Vec::new(),
             reload_list: None,
+            tested: None,
             asking: None,
             summary: None,
             summarising: None,
@@ -3147,7 +3150,11 @@ impl App {
                     .await
                     .map(|_| format!("{name} approved"))
             }
-            _ => return self.say(format!("/flow {verb}? run, pause, resume, approve, edit or reload")),
+            _ => {
+                return self.say(format!(
+                    "/flow {verb}? run, pause, resume, approve, edit, test or reload"
+                ));
+            }
         };
         match done {
             Ok(said) => {
@@ -3197,16 +3204,34 @@ impl App {
         if verb == "reload" {
             return self.reload_flows().await;
         }
-        if !matches!(verb, "run" | "pause" | "resume" | "approve" | "edit") {
-            return self.say("/flow run|pause|resume|approve|edit|reload [name]");
+        if !matches!(verb, "run" | "pause" | "resume" | "approve" | "edit" | "test") {
+            return self.say("/flow run|pause|resume|approve|edit|test|reload [name]");
         }
         let Some(name) = named.or_else(|| self.flow_here()) else {
             return self.say(format!("/flow {verb} which? a flow's row, its node, or its name"));
         };
-        if verb == "edit" {
-            self.edit_flow(&name);
-        } else {
-            self.flow_act(verb, name).await;
+        match verb {
+            "edit" => self.edit_flow(&name),
+            "test" => self.test_flow(name).await,
+            _ => self.flow_act(verb, name).await,
+        }
+    }
+
+    /// `/flow test <name>`: what firing it would do now, in the pane until the next key. Nothing
+    /// starts.
+    async fn test_flow(&mut self, name: String) {
+        let asked = FlowTestParams {
+            name: name.clone(),
+            event: None,
+        };
+        match self.rpc.call::<FlowTest>(asked).await {
+            Ok(t) => {
+                self.tested = Some(crate::flow::tested::lines(&t, Timestamp::now()));
+                self.pane = Pane::Facts;
+                self.show_pane = true;
+                self.say(format!("{name}: what would fire · started nothing"));
+            }
+            Err(e) => self.say(format!("test {name}: {e:#}")),
         }
     }
 
@@ -4042,6 +4067,7 @@ impl App {
         self.flash = None;
         // Like the flash, the list of what a reload did not load lasts one key.
         self.reload_list = None;
+        self.tested = None;
         // A destructive key stays armed only until the very next key: its own
         // second press acts, anything else disarms it. (ctrl-x/ctrl-c re-check
         // and re-arm themselves in `key_list`.)
@@ -5856,6 +5882,11 @@ impl App {
         let now = Timestamp::now();
         // What a reload just did not load, when there was more than the flash
         // could say: whose, which file and line, and why, until the next key.
+        if let Some(lines) = &self.tested {
+            let lines: Vec<Line> = lines.iter().map(|l| Line::raw(format!(" {l}"))).collect();
+            f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
+            return;
+        }
         if let Some(list) = &self.reload_list {
             let list: Vec<&NotLoaded> = list.iter().collect();
             let lines = flows::not_loaded_lines(&list);
@@ -8658,7 +8689,7 @@ mod tests {
         assert!(!nightly(&app).paused);
 
         run(&mut app, "/flow now").await;
-        assert_eq!(said(&app), "/flow run|pause|resume|approve|edit|reload [name]");
+        assert_eq!(said(&app), "/flow run|pause|resume|approve|edit|test|reload [name]");
         // Its `flow.md` waits for the screen to be given back.
         run(&mut app, "/flow edit").await;
         let home = rl_core::Home::at(tmp.path().join("h"));

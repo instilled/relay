@@ -514,3 +514,60 @@ fn flow_new_writes_a_template_filled_and_says_yes() {
 
     assert!(out(rl(&["daemon", "stop"])).0);
 }
+
+#[test]
+fn flow_test_says_what_would_fire_and_starts_nothing() {
+    let (Some(rld), Some(session)) = (sibling("rld"), sibling("rl-session")) else {
+        eprintln!("skipping: rld / rl-session not built (run `cargo test --workspace`)");
+        return;
+    };
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = std::fs::canonicalize(tmp.path()).unwrap();
+    let home = dir.join("home");
+    let ws = dir.join("proj");
+    std::fs::create_dir_all(&ws).unwrap();
+    let rl = |args: &[&str]| rl(&home, &ws, &rld, &session, args);
+    let flow = home.join("flows/probe");
+    std::fs::create_dir_all(&flow).unwrap();
+    std::fs::write(
+        flow.join("flow.md"),
+        "---\nwhen: every 30m\nsteps:\n  probe:\n    run: echo found\n  triage:\n    after: probe\n    if: probe.out\n    run: echo triage\n---\n",
+    )
+    .unwrap();
+
+    let (ok, o, e) = out(rl(&["flow", "test", "probe"]));
+    assert!(ok, "{o}{e}");
+    let lines: Vec<&str> = o.lines().collect();
+    assert_eq!(lines[0], "probe · every 30m");
+    assert!(lines[1].starts_with("  held    needs a yes"), "{o}");
+    assert!(lines[2].starts_with("  next    "), "{o}");
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.starts_with("  probe   runs") && l.contains("echo found")),
+        "{o}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.starts_with("  triage  if probe.out") && l.contains("echo triage")),
+        "{o}"
+    );
+    assert_eq!(
+        *lines.last().unwrap(),
+        "started nothing · rl flow run probe fires it now"
+    );
+
+    let (ok, o, _) = out(rl(&["--json", "flow", "test", "probe"]));
+    assert!(ok);
+    let v: serde_json::Value = serde_json::from_str(&o).unwrap();
+    assert_eq!(v["steps"][1]["runs"], serde_json::json!({ "if": ["probe.out"] }));
+
+    // Nothing fired.
+    let (_, listed, _) = out(rl(&["flow", "list"]));
+    assert!(listed.lines().nth(1).is_some_and(|l| l.contains("never")), "{listed}");
+
+    let (ok, _, e) = out(rl(&["flow", "test", "nope"]));
+    assert!(!ok && e.contains("nope"), "{e}");
+    assert!(out(rl(&["daemon", "stop"])).0);
+}
