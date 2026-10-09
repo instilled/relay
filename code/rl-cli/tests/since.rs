@@ -194,3 +194,76 @@ fn since_has_the_top_written_only_as_you_come_back() {
     assert!(err.contains("writing the top…"), "{err}");
     assert_eq!(asked(), 1);
 }
+
+/// A `catch_up: top` flow whose first source failed while a later one went fine heads `rl since`
+/// with what the failed one printed: the daemon's outcome, as the catch-up says it.
+#[test]
+fn since_heads_with_why_a_flow_failed() {
+    let (Some(rld), Some(session)) = (sibling("rld"), sibling("rl-session")) else {
+        eprintln!("skipping: rld / rl-session not built (run `cargo test --workspace`)");
+        return;
+    };
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    std::fs::create_dir_all(home.join("flows/brief")).unwrap();
+    std::fs::write(home.join("config.yaml"), "catch_up:\n  summary: ask\n").unwrap();
+    std::fs::write(
+        home.join("flows/brief/flow.md"),
+        "---\ncatch_up: top\nsteps:\n  gchat:\n    run: \"echo token expired; exit 3\"\n  days:\n    run: echo Thu 9 Oct\n  brief:\n    after: [gchat, days]\n    run: echo never\n---\n",
+    )
+    .unwrap();
+    let rl = |args: &[&str]| {
+        let out = Command::new(env!("CARGO_BIN_EXE_rl"))
+            .args(args)
+            .current_dir(tmp.path())
+            .env("RELAY_HOME", &home)
+            .env("RELAY_RLD_BIN", &rld)
+            .env("RELAY_SESSION_BIN", &session)
+            .env_remove("RELAY_RUN")
+            .env_remove("RELAY_REF")
+            .env_remove("RELAY_TAGS")
+            .output()
+            .unwrap();
+        (
+            out.status.success(),
+            String::from_utf8_lossy(&out.stdout).to_string(),
+            String::from_utf8_lossy(&out.stderr).to_string(),
+        )
+    };
+    struct Stop(PathBuf, PathBuf);
+    impl Drop for Stop {
+        fn drop(&mut self) {
+            let _ = Command::new(env!("CARGO_BIN_EXE_rl"))
+                .args(["daemon", "stop"])
+                .env("RELAY_HOME", &self.0)
+                .env("RELAY_RLD_BIN", &self.1)
+                .output();
+        }
+    }
+    let _stop = Stop(home.clone(), rld.clone());
+    let (ok, o, err) = rl(&["flow", "approve", "brief"]);
+    assert!(ok, "{o}{err}");
+    let (ok, o, err) = rl(&["flow", "run", "brief"]);
+    assert!(ok, "{o}{err}");
+
+    // Asked until it has come to something: gchat's why, or (wrongly) days' date.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let text = loop {
+        let (ok, text, err) = rl(&["since", "1h"]);
+        assert!(ok, "{err}");
+        if text.contains("token expired") || text.contains("Thu 9 Oct") {
+            break text;
+        }
+        assert!(Instant::now() < deadline, "never came to anything: {text}");
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    let lead: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .skip_while(|l| !l.starts_with("↻ brief · "))
+        .take(2)
+        .collect();
+    assert!(lead[0].ends_with(" · failed at gchat"), "{text}");
+    assert_eq!(lead[1], "token expired", "{text}");
+    assert!(!text.contains("Thu 9 Oct"), "not days' date: {text}");
+}

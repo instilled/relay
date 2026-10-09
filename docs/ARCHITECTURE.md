@@ -1101,10 +1101,13 @@ could not start, with the `firing` and `step`) and `flow.refused` (`flow`, `firi
 `reason`: a `$RELAY_OUT` that was not kept). They are filed in the flow's `in`, as the project
 is registered, else in the Relay home. The steps' runs raise `run.*` as any run does.
 
-**What a firing came to** is what its last step to run printed — the last in the flow's order
-that ran, done or failed, and printed something (`flows/outcome.rs`): the brief, the proposal,
-the error a source failed with. A step skipped, an ask whose option ran nothing, a journal gone
-to retention is passed over for the step before. Every `Firing` a client is sent carries its
+**What a firing came to** is, for a failed one, what its first failed step printed — the step
+its row names, `failed at gchat`: the error a source failed with. A running one has come to
+nothing yet; its state says it all. Waiting, done or stopped, it is what its last step to run
+printed — the last in the flow's order that ran, done or failed, and printed something
+(`flows/outcome.rs`): the brief, the proposal (`waiting at review · <triage's>`). A step skipped,
+an ask whose option ran nothing, a journal gone to retention is passed over for the step before.
+Every `Firing` a client is sent carries its
 first line (`outcome`); `flow.outcome {id}` gives all of it. It is read from the step's run each
 time, never kept.
 

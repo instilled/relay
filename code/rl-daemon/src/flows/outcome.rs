@@ -1,31 +1,40 @@
-//! What a firing came to: what its last step to run printed — the brief, the proposal, the
-//! error. A flow's row and its catch-up line say the first line of it; a `catch_up: top` flow's
+//! What a firing came to: what its last step to run printed — the brief, the proposal — or, for
+//! one that failed, what its first failed step printed: the error. A flow's row and its catch-up line say the first line of it; a `catch_up: top` flow's
 //! head shows all of it. Read from the step's run each time, never kept.
 
 use super::facts::Facts;
-use rl_proto::flow::{Firing, Outcome, StepStatus};
+use rl_proto::flow::{Firing, FiringStatus, Outcome, StepState, StepStatus};
 use rusqlite::Connection;
 
 /// The most of an outcome's first line a row is sent, in characters.
 const LINE_MAX: usize = 200;
 
-/// The last step in the flow's order that ran and printed something — done, or the one that
-/// failed — and what it printed. A step skipped, an ask whose option ran nothing, a run whose
-/// journal is gone: passed over for the step before. None while nothing has.
+/// What a firing came to, by where it stands. Failed: what its first failed step printed — the
+/// step its row names, `failed at gchat`. Running: nothing yet; its state says it all. Waiting,
+/// done or stopped: the last step in the flow's order that ran and printed something, and what it
+/// printed — a step skipped, an ask whose option ran nothing, a run whose journal is gone: passed
+/// over for the step before. None while nothing has.
 pub(crate) fn of(conn: &Connection, f: &Firing) -> Option<Outcome> {
     let facts = Facts::new(conn, f, None);
-    f.steps
-        .iter()
-        .rev()
-        .filter(|s| matches!(s.status, StepStatus::Done | StepStatus::Failed) && s.run.is_some())
-        .find_map(|s| {
-            let text = facts.out(&s.name).filter(|t| !t.is_empty())?;
-            Some(Outcome {
-                firing: f.id.clone(),
-                step: s.name.clone(),
-                text,
-            })
+    let said = |s: &StepState| -> Option<Outcome> {
+        s.run.as_ref()?;
+        let text = facts.out(&s.name).filter(|t| !t.is_empty())?;
+        Some(Outcome {
+            firing: f.id.clone(),
+            step: s.name.clone(),
+            text,
         })
+    };
+    match f.status {
+        FiringStatus::Running => None,
+        FiringStatus::Failed => f.steps.iter().find(|s| s.status == StepStatus::Failed).and_then(said),
+        FiringStatus::Waiting | FiringStatus::Done | FiringStatus::Stopped => f
+            .steps
+            .iter()
+            .rev()
+            .filter(|s| matches!(s.status, StepStatus::Done | StepStatus::Failed))
+            .find_map(said),
+    }
 }
 
 /// The first line of `text` that says something, trimmed and cut to `LINE_MAX` characters.
@@ -49,13 +58,17 @@ mod tests {
     use jiff::Timestamp;
     use rl_ledger::firings::{self, NewFiring};
     use rl_ledger::{Ledger, runs, session_io};
-    use rl_proto::flow::FiringStatus;
     use rl_proto::types::{Run, RunKind};
     use std::collections::BTreeMap;
 
     /// The outcome of a firing of `steps` — (name, status, what its run printed; None: no run) —
     /// as the ledger has it.
     fn outcome(steps: &[(&str, StepStatus, Option<&str>)]) -> Option<Outcome> {
+        outcome_of(FiringStatus::Done, steps)
+    }
+
+    /// As `outcome`, of a firing that stands at `stands`.
+    fn outcome_of(stands: FiringStatus, steps: &[(&str, StepStatus, Option<&str>)]) -> Option<Outcome> {
         let steps: Vec<(String, StepStatus, Option<String>)> = steps
             .iter()
             .map(|(n, s, o)| (n.to_string(), *s, o.map(String::from)))
@@ -90,7 +103,7 @@ mod tests {
                     session_io::append(c, &id, session_io::Direction::Out, out.as_bytes(), at)?;
                     firings::set_step_run(c, "f1", n, &id)?;
                 }
-                firings::save(c, "f1", &status, FiringStatus::Done, Some(at))?;
+                firings::save(c, "f1", &status, stands, Some(at))?;
                 let f = firings::get(c, "f1")?.unwrap();
                 Ok(of(c, &f))
             })
@@ -125,20 +138,17 @@ mod tests {
         .unwrap();
         assert_eq!((o.step.as_str(), o.text.as_str()), ("triage", "restart the api pod"));
 
-        // A source failed: what it printed says why; the join never ran.
-        let o = outcome(&[
-            ("gchat", Failed, Some("token expired\n")),
-            ("github", Done, Some("2 PRs\n")),
-            ("brief", Skipped, None),
-        ])
+        // Still waiting on a question: what triage proposed is what it has come to so far.
+        let o = outcome_of(
+            FiringStatus::Waiting,
+            &[
+                ("probe", Done, Some("3x connection reset\n")),
+                ("triage", Done, Some("restart the api pod\n")),
+                ("review", Waiting, None),
+            ],
+        )
         .unwrap();
-        assert_eq!(o.step, "github", "the last in the flow's order that ran");
-        let o = outcome(&[
-            ("github", Done, Some("2 PRs\n")),
-            ("gchat", Failed, Some("token expired\n")),
-        ])
-        .unwrap();
-        assert_eq!((o.step.as_str(), o.text.as_str()), ("gchat", "token expired"));
+        assert_eq!((o.step.as_str(), o.text.as_str()), ("triage", "restart the api pod"));
 
         // Nothing found: the probe printed nothing, and the rest was skipped.
         assert_eq!(
@@ -147,6 +157,50 @@ mod tests {
         );
         // Still going: nothing done yet.
         assert_eq!(outcome(&[("probe", Running, None)]), None);
+    }
+
+    #[test]
+    fn a_failed_firing_came_to_what_its_first_failed_step_printed() {
+        use StepStatus::*;
+        // morning-brief's order: gchat failed first, so its error is what the firing came to —
+        // not days' date, though days ran after it.
+        let o = outcome_of(
+            FiringStatus::Failed,
+            &[
+                ("gchat", Failed, Some("token expired\n")),
+                ("notion", Done, Some("3 pages\n")),
+                ("github", Failed, Some("rate limited\n")),
+                ("days", Done, Some("Thu 9 Oct\n")),
+                ("brief", Skipped, None),
+            ],
+        )
+        .unwrap();
+        assert_eq!((o.step.as_str(), o.text.as_str()), ("gchat", "token expired"));
+        // The failed step said nothing: no outcome, rather than another step's words.
+        assert_eq!(
+            outcome_of(
+                FiringStatus::Failed,
+                &[("gchat", Failed, Some(" \n")), ("days", Done, Some("Thu 9 Oct\n"))],
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn a_running_firing_has_come_to_nothing_yet() {
+        use StepStatus::*;
+        assert_eq!(
+            outcome_of(
+                FiringStatus::Running,
+                &[
+                    ("gchat", Done, Some("Anna: parser\n")),
+                    ("days", Done, Some("Thu 9 Oct\n")),
+                    ("brief", Running, None),
+                ],
+            ),
+            None,
+            "the state alone, not days' date"
+        );
     }
 
     #[test]
