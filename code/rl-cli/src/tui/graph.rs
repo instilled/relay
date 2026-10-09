@@ -4,10 +4,12 @@
 //! Laid out in layers, the way `dot` does it, because that is what reads on
 //! a terminal: a node's column comes from what feeds it (one to the right of
 //! its furthest source), not from what kind of node it is. Edges that close a
-//! loop are set aside for ranking and drawn back along the bottom. Within a
-//! column, nodes are ordered by where their neighbours sit, a few sweeps each
-//! way, to untangle crossings; each is placed level with what feeds it where
-//! there is room. Edges run right-angled: out of the source's side, down or
+//! loop are set aside for ranking and drawn back along the bottom of their
+//! part. Within a column, nodes are ordered by where their neighbours sit, a
+//! few sweeps each way, to untangle crossings; each is placed level with what
+//! feeds it where there is room. What is wired together is a part (`parts`):
+//! it keeps to rows of its own, under the part before, so two flows' edges
+//! never meet. Edges run right-angled: out of the source's side, down or
 //! up a lane of their own in the gap before the target, and into the target
 //! on a row of their own, where the event kinds they carry are written.
 
@@ -27,6 +29,9 @@ const BOX_MAX: usize = 30;
 /// Longest an edge label is written before it is cut.
 const LABEL_MAX: usize = 22;
 
+#[cfg(test)]
+mod lane_tests;
+mod parts;
 mod words;
 pub use words::{colour, flow_name, headline, keep, named, pane_lines, texts};
 
@@ -261,24 +266,40 @@ pub fn plan(g: &Graph, kept: &HashSet<String>, names: &Names, now: Timestamp) ->
     }
     let width = x;
 
-    // Rows: level with what feeds a node, where there is room.
+    // Rows: level with what feeds a node, where there is room. Each part keeps to rows of its
+    // own, its loops' ways back under it, and the next part under those.
+    let part = parts::of(
+        n,
+        edges.iter().map(|(a, b, _)| (*a, *b)),
+        cols.iter().flatten().copied(),
+    );
     let mut y = vec![0usize; n];
-    for (r, col) in cols.iter().enumerate() {
-        let mut next = 0usize;
-        for &v in col {
-            let feeds: Vec<usize> = forward
-                .iter()
-                .filter(|&&k| edges[k].1 == v && rank[edges[k].0] < r)
-                .map(|&k| y[edges[k].0] + h[edges[k].0] / 2)
-                .collect();
-            let want = if feeds.is_empty() {
-                0
-            } else {
-                (feeds.iter().sum::<usize>() / feeds.len()).saturating_sub(h[v] / 2)
-            };
-            y[v] = want.max(next);
-            next = y[v] + h[v] + 1;
+    let mut top = 0usize;
+    let mut loop_at = Vec::new();
+    for p in 0..part.iter().max().map_or(0, |m| m + 1) {
+        let mut bottom = top;
+        for (r, col) in cols.iter().enumerate() {
+            let mut next = top;
+            for &v in col.iter().filter(|&&v| part[v] == p) {
+                let feeds: Vec<usize> = forward
+                    .iter()
+                    .filter(|&&k| edges[k].1 == v && rank[edges[k].0] < r)
+                    .map(|&k| y[edges[k].0] + h[edges[k].0] / 2)
+                    .collect();
+                let want = if feeds.is_empty() {
+                    top
+                } else {
+                    (feeds.iter().sum::<usize>() / feeds.len()).saturating_sub(h[v] / 2)
+                };
+                y[v] = want.max(next);
+                next = y[v] + h[v] + 1;
+                bottom = bottom.max(next);
+            }
         }
+        // Under its boxes, a row for each of its loops' ways back.
+        let loops = (0..edges.len()).filter(|&k| back[k] && part[edges[k].0] == p).count();
+        loop_at.push(bottom);
+        top = bottom + loops + usize::from(loops > 0);
     }
     let body = (0..n).map(|v| y[v] + h[v]).max().unwrap_or(0);
 
@@ -323,14 +344,13 @@ pub fn plan(g: &Graph, kept: &HashSet<String>, names: &Names, now: Timestamp) ->
         }
         label_at[r] = next + 1;
     }
-    let mut bottom = body + 1;
     let routes: Vec<Route> = edges
         .iter()
         .enumerate()
         .map(|(k, (a, b, e))| {
             let back_path = back[k].then(|| {
-                let yb = bottom;
-                bottom += 1;
+                let yb = loop_at[part[*a]];
+                loop_at[part[*a]] += 1;
                 (yb, down_x[k])
             });
             Route {
@@ -363,7 +383,7 @@ pub fn plan(g: &Graph, kept: &HashSet<String>, names: &Names, now: Timestamp) ->
         boxes,
         routes,
         width,
-        height: bottom,
+        height: loop_at.into_iter().fold(body + 1, usize::max),
     }
 }
 
@@ -717,7 +737,7 @@ mod tests {
     use rl_proto::graph::{Edge, NodeKind, Tally};
     use std::path::PathBuf;
 
-    fn node(id: &str, kind: NodeKind, name: &str, folder: Option<&str>) -> Node {
+    pub(super) fn node(id: &str, kind: NodeKind, name: &str, folder: Option<&str>) -> Node {
         Node {
             id: id.into(),
             kind,
@@ -732,7 +752,7 @@ mod tests {
         }
     }
 
-    fn edge(from: &str, to: &str, label: &str, count: u64) -> Edge {
+    pub(super) fn edge(from: &str, to: &str, label: &str, count: u64) -> Edge {
         Edge {
             from: from.into(),
             to: to.into(),
@@ -742,7 +762,7 @@ mod tests {
         }
     }
 
-    fn now() -> Timestamp {
+    pub(super) fn now() -> Timestamp {
         "2026-09-16T12:00:00Z".parse().unwrap()
     }
 
@@ -769,14 +789,14 @@ mod tests {
         }
     }
 
-    fn names() -> Names {
+    pub(super) fn names() -> Names {
         Names::new([
             (PathBuf::from("/w/relay"), "relay".to_string()),
             (PathBuf::from("/w/api"), "api".to_string()),
         ])
     }
 
-    fn all(g: &Graph) -> HashSet<String> {
+    pub(super) fn all(g: &Graph) -> HashSet<String> {
         keep(g, "", &names(), &[])
     }
 

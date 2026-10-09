@@ -353,6 +353,9 @@ struct App {
     top: Option<Summary>,
     /// What each firing heading the catch-up came to (`catch_up: top`), by firing.
     outcomes: heads::Outcomes,
+    /// The keys of the leads the catch-up drew last, the ones the room let it show; until it is
+    /// drawn, all of them. The cursor stops only on these.
+    leads_shown: std::cell::RefCell<Option<Vec<String>>>,
     /// `/summary deep` waiting on `y`: what it would ask.
     summary_ask: Option<SummaryParams>,
     /// The last summary made of each target (`SummaryTarget::key`) while the
@@ -1152,6 +1155,7 @@ impl App {
             topping: None,
             top: None,
             outcomes: Default::default(),
+            leads_shown: Default::default(),
             summary_ask: None,
             made: HashMap::new(),
             away_since: None,
@@ -2677,6 +2681,7 @@ impl App {
         }
         self.away_since = Some(since);
         self.catch = Some(d);
+        *self.leads_shown.get_mut() = None;
         self.fetch_leads().await;
         self.write_top(since, came_back).await;
         self.open_view(View::CatchUp);
@@ -2732,9 +2737,11 @@ impl App {
     /// The keys of the firings heading the catch-up, newest first.
     fn lead_keys(&self) -> Vec<String> {
         let Some(c) = &self.catch else { return vec![] };
+        let shown = self.leads_shown.borrow();
         heads::leads(&self.flows, &c.firings, c.since)
             .iter()
             .map(|l| heads::key(l.flow))
+            .filter(|k| shown.as_ref().is_none_or(|s| s.contains(k)))
             .collect()
     }
 
@@ -5741,6 +5748,13 @@ impl App {
         let leads = heads::leads(&self.flows, firings, cu.since);
         let leads = catchup::leads(&leads, &self.outcomes, w, Timestamp::now());
         let (block, block_keys) = catchup::head_block(leads, top, TOP, area.height as usize);
+        let mut shown: Vec<String> = block_keys
+            .iter()
+            .filter(|k| heads::flow_of(k).is_some())
+            .cloned()
+            .collect();
+        shown.dedup();
+        *self.leads_shown.borrow_mut() = Some(shown);
         let block = catchup::lit(block, &block_keys, self.sel.as_deref(), w);
         let top_h = (block.len() as u16).min(area.height * 2 / 3);
         let [top_area, sep, rest] = Layout::vertical([
