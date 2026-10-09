@@ -100,6 +100,14 @@ pub enum Overlap {
     Kill,
 }
 
+/// Where a flow's firing goes in the catch-up besides its project's line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CatchUpPlace {
+    /// Its latest firing since you left heads the catch-up, above Relay's own bullets.
+    Top,
+}
+
 /// What a flow file says. How a flow starts is `when` (a time) or `on` (an
 /// event kind); with neither it runs only when asked.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -130,6 +138,9 @@ pub struct FlowSpec {
     /// The least time between two firings: `10m`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub throttle: Option<String>,
+    /// `top`: its latest firing since you left heads the catch-up.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catch_up: Option<CatchUpPlace>,
     /// The steps, in the order they are written.
     #[serde(with = "crate::flow::ordered")]
     pub steps: Vec<(String, StepSpec)>,
@@ -322,6 +333,11 @@ impl Flow {
     /// Whether the folder as it is now has a yes.
     pub fn approved(&self) -> bool {
         self.approved_hash.as_deref() == Some(self.hash.as_str())
+    }
+
+    /// Whether its latest firing since you left heads the catch-up (`catch_up: top`).
+    pub fn heads_catch_up(&self) -> bool {
+        self.def["catch_up"] == "top"
     }
 
     pub fn status(&self) -> FlowStatus {
@@ -780,5 +796,20 @@ mod tests {
         assert_eq!(n.at(), "flow.md:3:5");
         n.line = None;
         assert_eq!(n.at(), "flow.md");
+    }
+
+    #[test]
+    fn catch_up_top_is_read_and_nothing_else_is() {
+        let s: FlowSpec = serde_json::from_str(r#"{"catch_up": "top", "steps": {}}"#).unwrap();
+        assert_eq!(s.catch_up, Some(CatchUpPlace::Top));
+        let none: FlowSpec = serde_json::from_str(r#"{"steps": {}}"#).unwrap();
+        assert_eq!(none.catch_up, None);
+        let e = serde_json::from_str::<FlowSpec>(r#"{"catch_up": "bottom", "steps": {}}"#).unwrap_err();
+        assert!(e.to_string().contains("top"), "{e}");
+
+        let mut f = flow(serde_json::json!({ "when": null, "on": [] }));
+        assert!(!f.heads_catch_up());
+        f.def["catch_up"] = serde_json::json!("top");
+        assert!(f.heads_catch_up());
     }
 }

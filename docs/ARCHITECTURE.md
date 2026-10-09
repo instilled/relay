@@ -866,6 +866,7 @@ The frontmatter is `relay_proto::flow::FlowSpec`; a key it does not know is refu
 | `missed` | `skip` (the default) or `catch-up-once`: a `when` firing slept through |
 | `overlap` | `skip` (the default), `queue` or `kill`: a trigger while the last firing is still going |
 | `throttle` | for `on`: a burst within it is one firing (`10s` unless said, `0` for none) |
+| `catch_up` | `top`: its latest firing since you left heads the catch-up, above Relay's own bullets (§4, **Catch-up**) |
 | `steps` | the steps, by name, in the order written; at least one |
 
 `when` and `on` may both be given; either fires it.
