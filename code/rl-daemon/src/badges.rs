@@ -234,7 +234,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let at = Instant::now();
         let said = ask(
-            "sleep 60; echo late",
+            "sleep 5; echo late",
             tmp.path(),
             "main",
             tmp.path(),

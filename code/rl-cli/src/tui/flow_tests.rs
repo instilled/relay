@@ -210,7 +210,12 @@ async fn leads_past_the_room_are_said_by_count_and_the_cursor_skips_them() {
     app.refresh().await;
     app.open_catch_up(nine_hours_ago(), false).await;
     let frame = draw_text(&mut app);
-    assert!(frame.contains(" more"), "{frame}");
+    assert!(
+        frame
+            .lines()
+            .any(|l| l.trim_start().starts_with('+') && l.trim_end().ends_with(" more")),
+        "the cut says +N more: {frame}"
+    );
     assert!(frame.contains("• api:"), "Relay's own top shows: {frame}");
     let leads: Vec<String> = app
         .keys()
