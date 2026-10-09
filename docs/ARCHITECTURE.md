@@ -1352,24 +1352,26 @@ folder, whatever project it is `in`, so there is one graph, not one per project.
 
 - every flow (`flow:<name>`), there before it has fired, with what starts it (`every 30m`,
   `on run.failed`), its status and when it fires next; and each of its steps
-  (`step:<flow>/<step>`) — an agent's, a command's, or an ask's — wired as the flow writes them,
-  from the flow when a step waits on nothing, else from each step it comes after, the edge
-  labelled with the step's `if:` and counting what the step did in the window; a step's run
-  counts on its step and on its flow;
+  (`step:<flow>/<step>`) — an agent's, a command's, or an ask's — wired as the flow writes
+  them, from the flow when a step waits on nothing, else from each step it comes after, the
+  edge labelled with the step's `if:` and counting what the step did in the window; a step's
+  run counts on its step and on its flow;
 - an ask step's questions on the step's own node, the newest naming it, with the ids still
   waiting;
 - runs you started, one node per folder and kind (`runs:shells:<folder>`), drawn only once
   they set something off;
 - events raised outside any run, per folder (`outside:<folder>`);
 - an event kind a flow's `on` takes that nothing raised in the window (`event:<pattern>`), so
-  every flow that listens has a way in.
+  every flow that listens has a way in, counting 0: it is what could fire the flow, not what
+  did.
 
 Each node carries its folder as a fact rather than a box, its flow's status, and how its runs
 went in the window. Apart from a flow's wiring of its own steps and the ways in, the edges are
-**observed**, from the ledger: which runs raised which event kinds, and so which flows heard them,
-labelled with the kinds and counted. A run maps to its node by its cause. An event with no run
-belongs to the step that asked the question it is about, or to the flow whose `flow.*` it is. A flow never hears its own
-runs, questions or events, so no edge loops back to where it started.
+**observed**, from the ledger: which runs raised which event kinds, and so which flows heard
+them, labelled with the kinds and counted. A run maps to its node by its cause. An event with
+no run belongs to the step that asked the question it is about, or to the flow whose `flow.*`
+it is. A flow never hears its own runs, questions or events, so no edge loops back to where it
+started.
 
 In the panel, `/graph` (or `^g`) swaps the list for the graph, and `^g` or `esc` goes back;
 each keeps its own selection. The graph is where flows are seen wired together; a project

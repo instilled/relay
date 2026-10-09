@@ -113,8 +113,9 @@ pub fn build(since: jiff::Timestamp, inp: Inputs<'_>) -> Graph {
         {
             g.tally(&flow_id(&flow), run);
         }
-        // An ask's option runs as the step's own: the question already counted it.
-        if g.nodes[&id].kind != NodeKind::Ask {
+        // What a step did; an ask's option runs as the step's own, and the question
+        // already counted it.
+        if id.starts_with("step:") && g.nodes[&id].kind != NodeKind::Ask {
             g.did(&id);
         }
     }
@@ -263,8 +264,9 @@ impl Builder {
         e.1 += n;
     }
 
-    /// A declared edge counts what its target did (a way in, from an event
-    /// node, did nothing and stays 0); one only the ledger knows, its own count.
+    /// A declared edge counts what its target step did; a way in, from an
+    /// event node, is what could fire a flow, not what did, and stays 0. One
+    /// only the ledger knows keeps its own count.
     fn finish(self, since: jiff::Timestamp) -> Graph {
         let did = self.did;
         Graph {
@@ -274,10 +276,10 @@ impl Builder {
                 .edges
                 .into_iter()
                 .map(|((from, to), (labels, count, declared))| Edge {
-                    count: if declared {
-                        did.get(&to).copied().unwrap_or(0)
-                    } else {
-                        count
+                    count: match (declared, from.starts_with("event:")) {
+                        (true, true) => 0,
+                        (true, false) => did.get(&to).copied().unwrap_or(0),
+                        (false, _) => count,
                     },
                     from,
                     to,
@@ -387,6 +389,8 @@ mod tests {
             run("manual", RunKind::Shell, "/w/api", RunState::Failed),
             run("manual", RunKind::Shell, "/w/api", RunState::Working),
             run("flow:notify/a", RunKind::Agent, "/w", RunState::Failed),
+            // From a step notify no longer has: it stands on the flow.
+            run("flow:notify/gone", RunKind::Agent, "/w", RunState::Finished),
         ];
         let events = vec![
             event(
@@ -489,7 +493,9 @@ mod tests {
         assert_eq!(ask.waiting, ["d2"]);
         assert_eq!(edge(&g, "flow:review", "step:review/ask").count, 2);
 
-        // A pattern nothing raised still has a way in.
+        // A pattern nothing raised still has a way in, which nothing came by — though the
+        // flow ran, from a step it no longer has.
+        assert_eq!(g.node("flow:notify").unwrap().runs.total, 2);
         let e = edge(&g, "event:never.*", "flow:notify");
         assert_eq!((e.count, e.declared), (0, true));
         assert!(g.node("event:run.failed").is_none(), "run.failed was heard");

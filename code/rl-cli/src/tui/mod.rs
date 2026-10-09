@@ -1883,7 +1883,7 @@ impl App {
     }
 
     /// The flow under the cursor: a flow's row, on the list or in the
-    /// catch-up, or a node in the graph that is a flow or asks for one.
+    /// catch-up, or a node in the graph that is a flow, or is a step of one.
     fn flow_here(&self) -> Option<String> {
         if let Some(f) = self.selected_flow() {
             return Some(f.name.to_string());

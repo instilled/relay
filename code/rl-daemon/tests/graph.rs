@@ -95,10 +95,12 @@ async fn the_graph_joins_flows_to_what_happened() {
     let later = Timestamp::now() + SignedDuration::from_mins(1);
     let g: Graph = c.ok("graph.get", json!({ "since": later })).await;
     assert!(g.node("flow:nightly").unwrap().runs.total == 0);
-    assert_eq!(
-        g.edges.iter().find(|e| e.from == "flow:nightly").map(|e| e.count),
-        Some(0)
-    );
+    let first = g
+        .edges
+        .iter()
+        .find(|e| e.from == "flow:nightly" && e.to == "step:nightly/a")
+        .expect("a flow's wiring is there in any window");
+    assert_eq!(first.count, 0);
     assert!(
         !g.edges
             .iter()

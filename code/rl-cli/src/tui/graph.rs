@@ -94,7 +94,7 @@ pub fn keep(g: &Graph, filter: &str, names: &Names, checkouts: &[Checkout]) -> H
 }
 
 /// What a search matches a node on: its name and detail, its folder, how its
-/// runs went, what kind of node it is, and the flow it is or asks for.
+/// runs went, what kind of node it is, and the flow it is, or is a step of.
 fn node_subject<'a>(n: &'a Node, folder: &'a str) -> Subject<'a> {
     let mut is = Vec::new();
     match n.runs.last {
