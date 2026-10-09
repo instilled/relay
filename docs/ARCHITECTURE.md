@@ -1401,8 +1401,8 @@ draws it, pure from a `Graph` to a grid of styled cells:
   taking the nearest in height. `↑` and `↓` stay in the column, and reach the nearest box above
   or below when the column has none. The window pans to keep the selection in view, and its
   edges are lit. A search (`^f`) keeps the nodes it hits — by name, detail and folder, and by
-  the same tokens, a flow being a `flow` and an ask a `question` — plus everything upstream
-  and downstream of them.
+  the same tokens, a flow being a `flow`, a flow's step a `step` and an ask a `question` —
+  plus everything upstream and downstream of them.
 - **Acting on a node.** A flow's node, or any of its steps', stands for the flow, so `/flow
   run|pause|resume|approve|edit` work on it with no name. `enter` on a question with
   someone waiting takes it out to be answered by number in the pane, the same as in the list —

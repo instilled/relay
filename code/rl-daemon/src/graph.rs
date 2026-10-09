@@ -58,7 +58,9 @@ pub fn build(since: jiff::Timestamp, inp: Inputs<'_>) -> Graph {
         for s in def.iter().flat_map(|d| &d.steps) {
             let id = step_id(&f.name, &s.name);
             let (kind, detail) = match &s.does {
-                Does::Ask(a) => (NodeKind::Ask, a.text.clone()),
+                // An ask's detail is the question it raised, set below; its `ask:` text
+                // unfilled says nothing.
+                Does::Ask(_) => (NodeKind::Ask, String::new()),
                 Does::Run(a) => match &a.run {
                     Some(Task::Agent { .. }) => (NodeKind::Agent, a.label()),
                     _ => (NodeKind::Shell, a.label()),
@@ -636,6 +638,28 @@ mod tests {
         assert!(
             g.nodes.iter().all(|n| !n.id.starts_with("ask:")),
             "no ask:<flow> node any more"
+        );
+    }
+
+    #[test]
+    fn an_ask_step_says_its_question_only_once_raised() {
+        let md = "---\nsteps:\n  triage:\n    run: echo restart\n  review:\n    after: triage\n    \
+            ask: \"{triage.out}\"\n    options:\n      apply: {}\n---\n";
+        let flows = vec![flow_md("prod-logs", md)];
+        let g = build(
+            at("2026-09-09T00:00:00Z"),
+            Inputs {
+                flows: &flows,
+                runs: &[],
+                events: &[],
+                asks: &[],
+            },
+        );
+        let review = g.node("step:prod-logs/review").unwrap();
+        assert_eq!(
+            (review.kind, review.name.as_str(), review.detail.as_str()),
+            (NodeKind::Ask, "review", ""),
+            "never the ask: text unfilled"
         );
     }
 }

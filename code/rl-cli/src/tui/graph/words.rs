@@ -265,7 +265,7 @@ pub fn pane_lines(
     let place = folder_word(n, names);
     let mut what = match (&n.flow, is_step(n)) {
         // An ask step drawn by its question still says which step it is.
-        (Some(flow), true) if title(n) != n.name => format!("step {} of {flow}", n.name),
+        (Some(flow), true) if n.kind == NodeKind::Ask && title(n) != n.name => format!("step {} of {flow}", n.name),
         (Some(flow), true) => format!("step of {flow}"),
         _ => kind_word(n.kind).to_string(),
     };
@@ -527,9 +527,14 @@ mod tests {
     fn an_ask_steps_box_says_its_question() {
         let mut r = node("step:prod-logs/review", NodeKind::Ask, "review", Some("/w/relay"));
         r.flow = Some("prod-logs".into());
-        assert_eq!(texts(&r, &names(), now()).0, "◇ review", "nothing asked yet: its name");
+        assert_eq!(texts(&r, &names(), now()).0, "◇ review", "nothing raised yet: its name");
+        // As rld sends it once raised: the question, someone waiting on it.
         r.detail = "restart the api pod?".into();
-        assert_eq!(texts(&r, &names(), now()).0, "◇ restart the api pod?");
+        r.waiting = vec!["d1".into()];
+        assert_eq!(
+            texts(&r, &names(), now()),
+            ("◇ restart the api pod?".into(), "1 waiting".into())
+        );
         let g = Graph {
             since: now(),
             nodes: vec![
