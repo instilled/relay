@@ -5891,16 +5891,18 @@ impl App {
             return;
         }
         let now = Timestamp::now();
-        // What a reload just did not load, when there was more than the flash
-        // could say: whose, which file and line, and why, until the next key.
+        // A draft, until it is written or let go.
         if let Mode::Draft(d) = &self.mode {
             return d.draw(f, area);
         }
+        // What `/flow test` found, until the next key.
         if let Some(lines) = &self.tested {
             let lines: Vec<Line> = lines.iter().map(|l| Line::raw(format!(" {l}"))).collect();
             f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
             return;
         }
+        // What a reload just did not load, when there was more than the flash
+        // could say: whose, which file and line, and why, until the next key.
         if let Some(list) = &self.reload_list {
             let list: Vec<&NotLoaded> = list.iter().collect();
             let lines = flows::not_loaded_lines(&list);

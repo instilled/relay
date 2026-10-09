@@ -36,7 +36,7 @@ pub fn lines(t: &Tested, now: Timestamp) -> Vec<String> {
                 format!("not: {}", e.why)
             };
             let mut s = format!("#{} {} · {} — {verdict}", e.id, e.kind, e.summary);
-            if e.old && e.fires {
+            if e.old {
                 s.push_str(" (over 5 minutes old: the loop would pass over it)");
             }
             v.push(row("event", s));
@@ -182,5 +182,17 @@ mod tests {
             lines(&fired, now)[1],
             "  event   #412 logs.issue · a lot — not: it is paused"
         );
+        // Over five minutes old: said whether it fires or not.
+        for (fires, verdict) in [(true, "fires it"), (false, "not: it is paused")] {
+            let mut old = fired.clone();
+            let e = old.event.as_mut().unwrap();
+            (e.fires, e.old) = (fires, true);
+            assert_eq!(
+                lines(&old, now)[1],
+                format!(
+                    "  event   #412 logs.issue · a lot — {verdict} (over 5 minutes old: the loop would pass over it)"
+                )
+            );
+        }
     }
 }
