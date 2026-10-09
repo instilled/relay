@@ -241,7 +241,9 @@ impl Cands {
 struct Asking {
     words: String,
     folder: PathBuf,
-    task: tokio::task::JoinHandle<Result<(crate::interpret::Draft, rl_proto::methods::AssistantOutput)>>,
+    /// What was asked for: whatever fits the words, or a flow by name.
+    want: crate::context::Want,
+    task: tokio::task::JoinHandle<Result<(crate::interpret::Answer, rl_proto::methods::AssistantOutput)>>,
 }
 
 /// A run, a flow, a project or everything being summarised, until the
@@ -3753,27 +3755,41 @@ impl App {
 
     /// `enter` on the ask line: the words go to the assistant as a run; the
     /// panel stays live and the answer comes back through the main loop.
-    fn ask(&mut self, words: String) {
+    fn ask(&mut self, words: String, want: crate::context::Want) {
         if words.trim().is_empty() {
             return;
         }
         let folder = self.folder_here();
         let home = self.home.clone();
-        let (w, f) = (words.clone(), folder.clone());
-        let task = tokio::spawn(async move { crate::interpret::ask(&home, &f, &w).await });
-        self.asking = Some(Asking { words, folder, task });
+        let (w, f, wanted) = (words.clone(), folder.clone(), want.clone());
+        let task = tokio::spawn(async move { crate::interpret::ask(&home, &f, &w, &wanted).await });
+        self.asking = Some(Asking {
+            words,
+            folder,
+            want,
+            task,
+        });
     }
 
     async fn answered(
         &mut self,
         answer: std::result::Result<
-            Result<(crate::interpret::Draft, rl_proto::methods::AssistantOutput)>,
+            Result<(crate::interpret::Answer, rl_proto::methods::AssistantOutput)>,
             tokio::task::JoinError,
         >,
     ) {
         let Some(asking) = self.asking.take() else { return };
         match answer {
-            Ok(Ok((draft, out))) => {
+            Ok(Ok((crate::interpret::Answer::Flow(d), out))) => self.say(format!(
+                "{} drafted a flow, {} · rl interpret --go \"{}\" writes it",
+                out.agent,
+                d.name.as_deref().unwrap_or("unnamed"),
+                asking.words
+            )),
+            Ok(Ok((crate::interpret::Answer::Run(_), out))) if asking.want != crate::context::Want::Any => self.say(
+                format!("asked for a flow; {} answered a run (run {})", out.agent, out.run),
+            ),
+            Ok(Ok((crate::interpret::Answer::Run(draft), out))) => {
                 let form = crate::interpret::form_of(&draft, &asking.folder)
                     .with_folders(&self.names.paths())
                     .with_agents(&self.agents);
@@ -4719,7 +4735,7 @@ impl App {
                     self.say("still asking; /stop on its run");
                 } else {
                     self.line.clear();
-                    self.ask(words);
+                    self.ask(words, crate::context::Want::Any);
                 }
             }
         }
@@ -5006,7 +5022,7 @@ impl App {
                 } else if self.asking.is_some() {
                     self.say("still asking; /stop on its run");
                 } else {
-                    self.ask(arg);
+                    self.ask(arg, crate::context::Want::Any);
                 }
             }
             palette::Cmd::Filter => {

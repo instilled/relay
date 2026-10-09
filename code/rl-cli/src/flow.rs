@@ -32,7 +32,7 @@ pub enum FlowCmd {
         #[arg(short, long)]
         all: bool,
     },
-    /// Write a new flow: the bare template, or one Relay ships (--from); then $EDITOR, and a yes when it loads.
+    /// Write a new flow: from plain words (an assistant drafts it), from a template Relay ships (--from), or the bare template; then $EDITOR, and a yes when it loads.
     New(NewArgs),
     /// Open a flow's flow.md in $VISUAL / $EDITOR; saved, and if it loads, it is approved.
     Edit {

@@ -2,7 +2,9 @@
 
 use super::edit::{Editing, TEMPLATE, drop_new, finish_edit, folder_files};
 use super::templates;
+use crate::context::Want;
 use crate::daemon;
+use crate::interpret::Answer;
 use anyhow::{Context as _, Result, bail};
 use rl_core::{Home, display_path};
 use rl_flow::def::valid_name;
@@ -13,6 +15,9 @@ use std::path::{Path, PathBuf};
 pub struct NewArgs {
     /// The new flow's folder in ~/.relay/flows: lowercase letters, digits and dashes.
     pub name: String,
+    /// What it should do, in plain words: assistants.interpret drafts its flow.md.
+    #[arg(conflicts_with = "from")]
+    pub words: Vec<String>,
     /// Start from a template Relay ships: prod-logs, morning-brief.
     #[arg(long, value_name = "TEMPLATE")]
     pub from: Option<String>,
@@ -100,8 +105,8 @@ fn write(path: &Path, bytes: &[u8], exec: bool) -> Result<()> {
     Ok(())
 }
 
-/// `rl flow new`: the bare template, or a template filled — written to a new folder, opened in
-/// `$EDITOR` unless `--go`, and said yes to as an edit is, when it loads.
+/// `rl flow new`: the bare template, a template filled, or a draft from words — written to a new
+/// folder, opened in `$EDITOR` unless `--go`, and said yes to as an edit is, when it loads.
 pub async fn new(home: &Home, a: NewArgs, json: bool) -> Result<()> {
     let folder = match &a.folder {
         Some(f) => f.clone(),
@@ -111,7 +116,8 @@ pub async fn new(home: &Home, a: NewArgs, json: bool) -> Result<()> {
     check_name(home, &a.name)?;
     let (files, yours) = match &a.from {
         Some(t) => (template_files(t, &a.set, &folder)?, true),
-        None if a.go => bail!("--go writes a template as it is filled; the bare template needs $EDITOR"),
+        None if !a.words.is_empty() => (drafted(home, &a.name, &folder, &a.words.join(" "), json).await?, true),
+        None if a.go => bail!("--go writes a template or a draft as it is; the bare template needs $EDITOR"),
         None => (vec![NewFile::flow_md(TEMPLATE)], false),
     };
     let editing = start_new(home, &a.name, files, yours)?;
@@ -126,6 +132,24 @@ pub async fn new(home: &Home, a: NewArgs, json: bool) -> Result<()> {
     let mut rpc = daemon::ensure(home, !json).await?;
     let (edited, reloaded) = finish_edit(&mut rpc, home, editing).await?;
     super::told(&edited, &reloaded, &a.name, json)
+}
+
+/// The flow `name` drafted from `words` by `assistants.interpret`: its `flow.md`, the draft's own
+/// name passed over for the person's.
+async fn drafted(home: &Home, name: &str, folder: &Path, words: &str, json: bool) -> Result<Vec<NewFile>> {
+    daemon::ensure(home, !json).await?;
+    if !json {
+        eprintln!("asking…");
+    }
+    let want = Want::Flow { name: name.to_string() };
+    let (answer, out) = crate::interpret::ask(home, folder, words, &want).await?;
+    let Answer::Flow(d) = answer else {
+        bail!("asked for a flow; {} answered a run (run {})", out.agent, out.run);
+    };
+    if !json {
+        eprintln!("# drafted by {} · run {}", out.agent, out.run);
+    }
+    Ok(vec![NewFile::flow_md(d.text)])
 }
 
 /// A template's files, its blanks from `--set`, `in` from the folder, and — on a terminal — the

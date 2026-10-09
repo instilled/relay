@@ -131,3 +131,104 @@ fn words_become_a_draft_and_go_does_it() {
         "{err}"
     );
 }
+
+#[test]
+fn words_become_a_flow_and_go_writes_it() {
+    let (Some(rld), Some(session)) = (sibling("rld"), sibling("rl-session")) else {
+        eprintln!("skipping: rld/rl-session not built (run `cargo test --workspace`)");
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    std::fs::create_dir_all(home.join("detect")).unwrap();
+    std::fs::write(
+        home.join("detect/fakeai.yaml"),
+        format!(
+            "kind: agent\nbins: [\"{}\"]\nheadless: [\"--headless\"]\n",
+            fake_agent().display()
+        ),
+    )
+    .unwrap();
+    std::fs::write(home.join("config.yaml"), "assistants:\n  interpret: fakeai\n").unwrap();
+    let ws = dir.path().join("proj");
+    std::fs::create_dir_all(&ws).unwrap();
+    // Named up front, as the daemon the first `rl` starts passes its environment on.
+    let answer = dir.path().join("answer.txt");
+    let prompt = dir.path().join("prompt.txt");
+    let flow_md = "---\nwhen: every 1h\nsteps:\n  say:\n    run: echo hello\n---\n\nSays hello every hour.\n";
+    std::fs::write(&answer, format!("Here it is:\nkind: flow\nname: hello\n{flow_md}")).unwrap();
+    let rl = |args: &[&str]| {
+        let mut c = Command::new(env!("CARGO_BIN_EXE_rl"));
+        c.args(args)
+            .current_dir(&ws)
+            .env("RELAY_HOME", &home)
+            .env("RELAY_RLD_BIN", &rld)
+            .env("RELAY_SESSION_BIN", &session)
+            .env("FAKE_AGENT_ANSWER", &answer)
+            .env("FAKE_AGENT_PROMPT", &prompt)
+            .env("EDITOR", "true")
+            .env_remove("VISUAL")
+            .env_remove("RELAY_RUN")
+            .env_remove("FAKE_AGENT_SLEEP");
+        c
+    };
+    let run = |mut c: Command| {
+        let out = c.output().unwrap();
+        (
+            out.status.success(),
+            String::from_utf8_lossy(&out.stdout).trim().to_string(),
+            String::from_utf8_lossy(&out.stderr).trim().to_string(),
+        )
+    };
+    struct Stop(PathBuf, PathBuf);
+    impl Drop for Stop {
+        fn drop(&mut self) {
+            let _ = Command::new(env!("CARGO_BIN_EXE_rl"))
+                .args(["daemon", "stop"])
+                .env("RELAY_HOME", &self.0)
+                .env("RELAY_RLD_BIN", &self.1)
+                .output();
+        }
+    }
+    let _stop = Stop(home.clone(), rld.clone());
+
+    // The draft, printed; nothing written.
+    let (ok, out, err) = run(rl(&["interpret", "say", "hello", "every", "hour"]));
+    assert!(ok, "{err}");
+    assert!(
+        out.starts_with(&format!("kind: flow\nname: hello\n{}", flow_md.trim_end())),
+        "{out}"
+    );
+    assert!(
+        out.contains("# by fakeai · run ") && out.contains("--go writes it"),
+        "{out}"
+    );
+    assert!(!home.join("flows/hello").exists());
+
+    // --go: written as drafted, and said yes to.
+    let (ok, out, err) = run(rl(&["interpret", "--go", "say", "hello", "every", "hour"]));
+    assert!(ok, "{err}");
+    assert!(out.ends_with("hello approved"), "{out}");
+    assert_eq!(
+        std::fs::read_to_string(home.join("flows/hello/flow.md")).unwrap(),
+        flow_md
+    );
+
+    // `rl flow new <name> <words>` asks for that flow by name; the person's name wins the draft's.
+    let (ok, out, err) = run(rl(&["flow", "new", "hi", "say", "hi", "every", "hour"]));
+    assert!(ok, "{out}{err}");
+    assert_eq!(out, "approved hi");
+    assert_eq!(std::fs::read_to_string(home.join("flows/hi/flow.md")).unwrap(), flow_md);
+    let asked = std::fs::read_to_string(&prompt).unwrap();
+    assert!(
+        asked.contains("a flow named `hi`") && asked.contains("## Flows"),
+        "{asked}"
+    );
+
+    // Asked for a flow, answered a run: said, and nothing written.
+    std::fs::write(&answer, "kind: run\nrun: echo hey\n").unwrap();
+    let (ok, _, err) = run(rl(&["flow", "new", "hey", "say", "hey"]));
+    assert!(!ok);
+    assert!(err.contains("asked for a flow; fakeai answered a run"), "{err}");
+    assert!(!home.join("flows/hey").exists());
+}

@@ -1247,9 +1247,10 @@ instead, what a step may leave (`rl flow state`) and every variable it starts wi
 loads; one line per event kind in `event_kind::ALL` (a kind without words fails a test); `rl
 --help` plus the help of `run`, `flow`, `flow new`, `flow test`, `flow state` and `ask`; what is
 here (the folder and its name, the folders Relay knows, the flows — each by what starts it and
-where it is `in` — and the agents on this machine); and the answer contract: exactly one YAML
-document, `kind: run` then the form's fields. A flow is not drafted yet: the pack says the person
-writes one with `rl flow new`.
+where it is `in` — and the agents on this machine); and the answer contract: one run or one flow
+— `kind: run` then the form's fields, or `kind: flow`, `name:`, then the whole `flow.md` — its
+shapes indented so an echo of the pack is never read as an answer; asked for a flow by name (`rl
+flow new <name> <words>`), only that flow.
 
 **The interpreter** is that pack, the typed words and an ordinary run. The panel's line (§4) and
 `rl interpret <words…> [--in <folder>] [--go]` build the pack on the client (it needs clap's
@@ -1262,7 +1263,13 @@ for it to end — 60 s, then it is stopped and the caller told so — and return
 what it wrote. The client reads the last `kind:` block out of that by hand (`rl-cli/src/
 interpret.rs`: fences and prose around it dropped, `key: value` lines, block and flow lists; not
 a YAML parser, because an agent writes `run: claude fix it: now` and means it) and fills the
-form. In the panel that is the run form `/new` opens, with the assistant's answer in
+form. A flow is read from the first `kind: flow` at the start of a line: its `name:`, then the
+text from its `---` line to the end, a closing fence dropped (`interpret::answer`); asked for a
+flow, the assistant has three minutes, not one. `rl interpret` prints a flow with `# by <agent> ·
+run <id>`, and with `--go` writes it to `~/.relay/flows/<name>/flow.md` and says yes to it as a
+new flow's save does (Loading and approval, above). `rl flow new <name> <words…>` asks for that
+flow, writes the draft, opens it in `$EDITOR` (not with `--go`), and gives it its yes the same
+way; a run answered there is refused by name. In the panel that is the run form `/new` opens, with the assistant's answer in
 it and a line saying who drafted it; `rl interpret` prints the draft with `# by <agent> · run <id>` and does
 nothing, or with `--go` starts the run, `cause: manual`, since the go was yours. An answer of
 another `kind:` is refused by name, and one without a `kind:` is an error that quotes what the

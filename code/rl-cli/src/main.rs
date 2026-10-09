@@ -2,17 +2,19 @@ use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, Parser, Subcommand};
 use jiff::SignedDuration;
 use rl_cli::client::Client;
+use rl_cli::context::Want;
 use rl_cli::daemon;
 use rl_cli::env::child_env;
-use rl_cli::flow::FlowCmd;
+use rl_cli::flow::{Edited, FlowCmd};
+use rl_cli::interpret::{Answer, FlowDraft};
 use rl_cli::render;
 use rl_core::time::{now, parse_since};
 use rl_core::{Home, display_path};
 use rl_proto::decision::{Decision, DecisionOption, DecisionStatus};
 use rl_proto::flow::{FlowFilter, FlowList};
 use rl_proto::methods::{
-    AgentList, ConfigGet, GcParams, GcRun, RunArchive, RunArchiveParams, RunHide, RunHideParams, RunResume,
-    RunResumeParams, SummaryGet, SummaryMake, SummaryParams,
+    AgentList, AssistantOutput, ConfigGet, GcParams, GcRun, RunArchive, RunArchiveParams, RunHide, RunHideParams,
+    RunResume, RunResumeParams, SummaryGet, SummaryMake, SummaryParams,
 };
 use rl_proto::methods::{
     DaemonInfo, DigestGet, DigestHide, DigestHideParams, DigestParams, EventFilter, EventList, PresenceClient,
@@ -97,7 +99,7 @@ enum Cmd {
     Import,
     /// What Relay tells an agent: the words, events, the flows and folders here, and the answer it wants.
     Context(ContextArgs),
-    /// Plain words to `assistants.interpret`: a run, drafted; `--go` starts it.
+    /// Plain words to `assistants.interpret`: a run or a flow, drafted; `--go` starts the run, or writes the flow and says yes.
     Interpret(InterpretArgs),
     /// A recap of a run, live or ended: its agent's own (Claude), its turns (Codex), or `assistants.summary`'s. Kept by the run.
     Summary(SummaryArgs),
@@ -1524,7 +1526,10 @@ async fn context(home: &Home, a: ContextArgs) -> Result<()> {
     let folder = std::fs::canonicalize(&folder).unwrap_or(folder);
     let mut rpc = daemon::ensure(home, true).await?;
     let here = rl_cli::context::gather(&mut rpc, &folder).await?;
-    print!("{}", rl_cli::context::render(rl_cli::context::help(), &here));
+    print!(
+        "{}",
+        rl_cli::context::render(rl_cli::context::help(), &here, &Want::Any)
+    );
     Ok(())
 }
 
@@ -1568,7 +1573,11 @@ async fn interpret(home: &Home, a: InterpretArgs, json: bool) -> Result<()> {
     if !json {
         eprintln!("asking…");
     }
-    let (draft, out) = rl_cli::interpret::ask(home, &folder, &words).await?;
+    let (answer, out) = rl_cli::interpret::ask(home, &folder, &words, &Want::Any).await?;
+    let draft = match answer {
+        Answer::Run(draft) => draft,
+        Answer::Flow(d) => return flow_drafted(home, d, &out, &words, a.go, json).await,
+    };
     let form = rl_cli::interpret::form_of(&draft, &folder);
     if json {
         println!(
@@ -1588,6 +1597,45 @@ async fn interpret(home: &Home, a: InterpretArgs, json: bool) -> Result<()> {
         }
     } else if !json {
         println!("# --go does it; or n / a in the panel");
+    }
+    Ok(())
+}
+
+/// A flow `rl interpret` was answered with: printed; `--go` writes it and says yes to it.
+async fn flow_drafted(
+    home: &Home,
+    d: FlowDraft,
+    out: &AssistantOutput,
+    words: &str,
+    go: bool,
+    json: bool,
+) -> Result<()> {
+    if json {
+        println!(
+            "{}",
+            json!({ "kind": "flow", "name": d.name, "flow_md": d.text, "run": out.run, "agent": out.agent })
+        );
+    } else {
+        println!("kind: flow");
+        if let Some(n) = &d.name {
+            println!("name: {n}");
+        }
+        print!("{}", d.text);
+        println!("# by {} · run {}", out.agent, out.run);
+    }
+    let Some(name) = d.name.as_deref() else {
+        bail!("the draft names no flow; rl flow new <name> \"{words}\" names it");
+    };
+    if !go {
+        if !json {
+            println!("# --go writes it to ~/.relay/flows/{name} and says yes to it");
+        }
+        return Ok(());
+    }
+    let (edited, _) = rl_cli::interpret::write_flow(home, name, &d.text).await?;
+    println!("{}", edited.words(name));
+    if !matches!(edited, Edited::Approved(_)) {
+        std::process::exit(1)
     }
     Ok(())
 }
