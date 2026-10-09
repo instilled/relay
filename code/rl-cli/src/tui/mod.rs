@@ -21,6 +21,8 @@ mod complete;
 mod events;
 mod firings;
 #[cfg(test)]
+mod flow_new_tests;
+#[cfg(test)]
 mod flow_tests;
 pub(crate) mod flows;
 pub mod form;
@@ -28,6 +30,7 @@ mod graph;
 mod input;
 mod line;
 mod mark;
+mod new_flow;
 mod palette;
 mod pane;
 mod query;
@@ -44,6 +47,8 @@ mod theme;
 use crate::attach::client_name;
 use crate::catchup::heads;
 use crate::client::Client;
+use crate::context::Want;
+use crate::flow::NewFile;
 use anyhow::Result;
 use crossterm::event::{
     DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event, EventStream, KeyCode,
@@ -170,6 +175,9 @@ enum Mode {
         runs: u32,
         calls: u32,
     },
+    /// A flow the assistant drafted, in the pane: `enter` writes it and says yes, `e` opens it in
+    /// `$EDITOR` first, `esc` lets it go.
+    Draft(Box<new_flow::Drafted>),
 }
 
 /// A name being changed in place: the row it is on, what it is the name
@@ -3152,7 +3160,7 @@ impl App {
             }
             _ => {
                 return self.say(format!(
-                    "/flow {verb}? run, pause, resume, approve, edit, test or reload"
+                    "/flow {verb}? run, pause, resume, approve, edit, new, test or reload"
                 ));
             }
         };
@@ -3200,12 +3208,16 @@ impl App {
     async fn flow_command(&mut self, arg: &str) {
         let mut words = arg.split_whitespace();
         let verb = words.next().unwrap_or("");
+        if verb == "new" {
+            let rest: Vec<&str> = words.collect();
+            return self.new_flow(&rest);
+        }
         let named = words.next().map(str::to_string);
         if verb == "reload" {
             return self.reload_flows().await;
         }
         if !matches!(verb, "run" | "pause" | "resume" | "approve" | "edit" | "test") {
-            return self.say("/flow run|pause|resume|approve|edit|test|reload [name]");
+            return self.say("/flow run|pause|resume|approve|edit|new|test|reload [name]");
         }
         let Some(name) = named.or_else(|| self.flow_here()) else {
             return self.say(format!("/flow {verb} which? a flow's row, its node, or its name"));
@@ -3214,6 +3226,72 @@ impl App {
             "edit" => self.edit_flow(&name),
             "test" => self.test_flow(name).await,
             _ => self.flow_act(verb, name).await,
+        }
+    }
+
+    /// `/flow new …`: the bare template or a template filled, written and opened in `$EDITOR`
+    /// once the screen is free (and said yes to on return, as `/flow edit` is); or the words to
+    /// the assistant, its draft shown when it answers.
+    fn new_flow(&mut self, words: &[&str]) {
+        let asked = match new_flow::asked(words) {
+            Ok(a) => a,
+            Err(e) => return self.say(e),
+        };
+        if let Err(e) = crate::flow::check_name(&self.home, asked.name()) {
+            return self.say(format!("{e:#}"));
+        }
+        let (name, files, yours) = match asked {
+            new_flow::Asked::Words { .. } if self.asking.is_some() => {
+                return self.say("still asking; /stop on its run");
+            }
+            new_flow::Asked::Words { name, words } => return self.ask(words, Want::Flow { name }),
+            new_flow::Asked::Bare { name } => (name, vec![NewFile::flow_md(crate::flow::TEMPLATE)], false),
+            new_flow::Asked::From { name, template, given } => {
+                let here = rl_core::display_path(&self.folder_here());
+                match new_flow::template_files(&template, &given, &here) {
+                    Ok(files) => (name, files, true),
+                    Err(e) => return self.say(e),
+                }
+            }
+        };
+        match crate::flow::start_new(&self.home, &name, files, yours) {
+            Ok(editing) => self.editor = Some((editing, 1)),
+            Err(e) => self.say(format!("{e:#}")),
+        }
+    }
+
+    /// A flow the assistant drafted, shown in the pane until enter writes it, `e` opens it, or esc
+    /// lets it go. Checked as a reload would check it, against the projects Relay knows.
+    fn show_draft(&mut self, name: Option<String>, text: String, agent: String) {
+        let known = self.names.paths();
+        let home = self.home.clone();
+        let is_known = |p: &Path| {
+            let p = form::expand(&p.to_string_lossy());
+            known.contains(&std::fs::canonicalize(&p).unwrap_or(p))
+        };
+        let taken = |n: &str| crate::flow::check_name(&home, n).err().map(|e| format!("{e:#}"));
+        let d = new_flow::Drafted::new(name, text, agent, &is_known, &taken);
+        self.say(format!(
+            "{} drafted {}",
+            d.agent,
+            if d.name.is_empty() { "a flow" } else { d.name.as_str() }
+        ));
+        self.mode = Mode::Draft(Box::new(d));
+        self.pane = Pane::Facts;
+        self.show_pane = true;
+    }
+
+    /// The draft written to its folder and said yes to at once, or (`edit`) opened in `$EDITOR`
+    /// first and said yes to on return, as a new flow's save is.
+    async fn write_draft(&mut self, d: new_flow::Drafted, edit: bool) {
+        let files = vec![NewFile::flow_md(d.text.clone())];
+        match crate::flow::start_new(&self.home, &d.name, files, true) {
+            Ok(editing) if edit => self.editor = Some((editing, 1)),
+            Ok(editing) => self.edited(editing).await,
+            Err(e) => {
+                self.say(format!("{e:#}"));
+                self.mode = Mode::Draft(Box::new(d));
+            }
         }
     }
 
@@ -3805,15 +3883,17 @@ impl App {
     ) {
         let Some(asking) = self.asking.take() else { return };
         match answer {
-            Ok(Ok((crate::interpret::Answer::Flow(d), out))) => self.say(format!(
-                "{} drafted a flow, {} · rl interpret --go \"{}\" writes it",
-                out.agent,
-                d.name.as_deref().unwrap_or("unnamed"),
-                asking.words
-            )),
-            Ok(Ok((crate::interpret::Answer::Run(_), out))) if asking.want != crate::context::Want::Any => self.say(
+            Ok(Ok((crate::interpret::Answer::Run(_), out))) if matches!(asking.want, Want::Flow { .. }) => self.say(
                 format!("asked for a flow; {} answered a run (run {})", out.agent, out.run),
             ),
+            Ok(Ok((crate::interpret::Answer::Flow(d), out))) => {
+                // Asked for a flow by name, the person's name wins the draft's.
+                let name = match asking.want {
+                    Want::Flow { name } => Some(name),
+                    Want::Any => d.name,
+                };
+                self.show_draft(name, d.text, out.agent);
+            }
             Ok(Ok((crate::interpret::Answer::Run(draft), out))) => {
                 let form = crate::interpret::form_of(&draft, &asking.folder)
                     .with_folders(&self.names.paths())
@@ -4195,6 +4275,19 @@ impl App {
                     Act::Typing => self.mode = Mode::Form(f),
                     Act::Cancel => {}
                     Act::Save => self.save_form(f, area).await,
+                }
+                return Ok(());
+            }
+            Mode::Draft(d) => {
+                match k.code {
+                    KeyCode::Enter if d.ready() => self.write_draft(*d, false).await,
+                    KeyCode::Enter => {
+                        self.say(format!("it would not load: {} · e opens it in $EDITOR", d.problems[0]));
+                        self.mode = Mode::Draft(d);
+                    }
+                    KeyCode::Char('e') => self.write_draft(*d, true).await,
+                    KeyCode::Esc => self.say("draft let go: nothing written"),
+                    _ => self.mode = Mode::Draft(d),
                 }
                 return Ok(());
             }
@@ -4761,7 +4854,7 @@ impl App {
                     self.say("still asking; /stop on its run");
                 } else {
                     self.line.clear();
-                    self.ask(words, crate::context::Want::Any);
+                    self.ask(words, Want::Any);
                 }
             }
         }
@@ -5048,7 +5141,7 @@ impl App {
                 } else if self.asking.is_some() {
                     self.say("still asking; /stop on its run");
                 } else {
-                    self.ask(arg, crate::context::Want::Any);
+                    self.ask(arg, Want::Any);
                 }
             }
             palette::Cmd::Filter => {
@@ -5708,7 +5801,7 @@ impl App {
         };
         if plan.boxes.is_empty() {
             let msg = if self.filter.is_empty() {
-                " nothing wired yet · /flow edit <name> writes a flow"
+                " nothing wired yet · /flow new <name> writes a flow"
             } else {
                 " nothing matches"
             };
@@ -5882,6 +5975,10 @@ impl App {
         let now = Timestamp::now();
         // What a reload just did not load, when there was more than the flash
         // could say: whose, which file and line, and why, until the next key.
+        if let Mode::Draft(d) = &self.mode {
+            f.render_widget(Paragraph::new(d.lines()).wrap(Wrap { trim: false }), area);
+            return;
+        }
         if let Some(lines) = &self.tested {
             let lines: Vec<Line> = lines.iter().map(|l| Line::raw(format!(" {l}"))).collect();
             f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
@@ -6070,6 +6167,14 @@ impl App {
                 } else {
                     "enter save · tab next field · esc cancel".into()
                 };
+            }
+            Mode::Draft(d) => {
+                if let Some((m, at)) = &self.flash
+                    && at.elapsed() < FLASH
+                {
+                    return m.clone();
+                }
+                return d.hint();
             }
             Mode::Rename(_) => {
                 if let Some((m, at)) = &self.flash
@@ -8689,7 +8794,7 @@ mod tests {
         assert!(!nightly(&app).paused);
 
         run(&mut app, "/flow now").await;
-        assert_eq!(said(&app), "/flow run|pause|resume|approve|edit|test|reload [name]");
+        assert_eq!(said(&app), "/flow run|pause|resume|approve|edit|new|test|reload [name]");
         // Its `flow.md` waits for the screen to be given back.
         run(&mut app, "/flow edit").await;
         let home = rl_core::Home::at(tmp.path().join("h"));

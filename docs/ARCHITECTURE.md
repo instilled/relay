@@ -656,7 +656,13 @@ kind, its run's title and what it said.
 name and its prompt) and `title`; `enter` starts it, and the form is all it does. A flow is not
 written in a form: it is a folder (§6), and `/flow` is how the panel works with one
 (`App::flow_command`). `/flow run|pause|resume|approve <name>` fires it now, stops it firing by
-itself, lets it again, or says yes to its folder as it is; `/flow edit <name>` opens its `flow.md`
+itself, lets it again, or says yes to its folder as it is; `/flow new <name>` writes a new one as
+`rl flow new` does — the bare template, or `--from <template> key=value…` (its `in` the folder
+under the cursor), opened in `$EDITOR` and said yes to on return; with words after the name it asks
+the assistant for that flow, and its draft is shown in the pane (`tui/new_flow.rs`) with what
+would stop it loading, at its line: `enter` writes it and says yes, `e` writes it and opens it
+first, `esc` lets it go, and a draft that would not load is not written on enter. The ask line,
+answered a flow, shows its draft the same way; `/flow edit <name>` opens its `flow.md`
 in `$EDITOR` — at the line it broke on when it did not load, a template when there is no such
 flow yet — and on return reads the flows again and approves that one if it loads (your save is
 the yes), or flashes `not loaded:` with its file and line if it does not; `/flow reload` reads
