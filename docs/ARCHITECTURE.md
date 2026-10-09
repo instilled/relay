@@ -888,7 +888,7 @@ The frontmatter is `relay_proto::flow::FlowSpec`; a key it does not know is refu
 | `when` | a cadence: `every 30m`, or a five-field cron line in quotes, local time |
 | `on` | an event kind or a list (`run.failed`, `logs.*`, `*`), narrowed by `where` (`tag`, `cause`, `cli`, `group`, `data`) |
 | neither | the flow runs only when asked: `rl flow run`, `/flow run` |
-| `missed` | `skip` (the default) or `catch-up-once`: a `when` firing slept through |
+| `missed` | `catch-up-once` (the default) or `skip`: a `when` firing slept through |
 | `overlap` | `skip` (the default), `queue` or `kill`: a trigger while the last firing is still going |
 | `throttle` | for `on`: a burst within it is one firing (`10s` unless said, `0` for none) |
 | `catch_up` | `top`: its latest firing since you left heads the catch-up, above Relay's own bullets (§4, **Catch-up**) |
@@ -1078,8 +1078,9 @@ flow's next firing is planned from its last (`every`) or from the clock (cron). 
 that finds it changed, plans an `every` from now when its last firing is already a cadence past,
 so a yes or an edit neither fires it nor has it said missed at once; found unplanned at a start,
 it is due at once and catches up once (`Flows::plan_afresh`, `first_time`). One
-more than two minutes late — `rld` down, the machine asleep — is said as `flow.skipped {reason: missed}` and
-planned from now, unless `missed: catch-up-once`, which fires it once. A resumed flow is planned
+more than two minutes late — `rld` down, the machine asleep — is made up once, however many
+were slept through (`missed: catch-up-once`, the default); with `missed: skip` it is said as
+`flow.skipped {reason: missed}` and planned from now. A resumed flow is planned
 from now: what it slept through while paused is neither made up nor said missed. An `on` flow
 hears an event of a kind it names (`x`, `x.*`, `*`) while it is approved and not paused, as
 `where` narrows it, and throttled against its last firing. Three things keep a flow from running

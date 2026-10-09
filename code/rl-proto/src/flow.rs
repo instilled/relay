@@ -84,12 +84,12 @@ impl Match {
     }
 }
 
-/// What to do about a time that passed while asleep or down.
+/// What to do about a time that passed while asleep or down. By default it is made up, once.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Missed {
-    #[default]
     Skip,
+    #[default]
     CatchUpOnce,
 }
 
