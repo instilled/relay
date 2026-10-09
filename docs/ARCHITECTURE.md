@@ -663,9 +663,13 @@ the assistant for that flow, and its draft is shown in the pane (`tui/new_flow.r
 would stop it loading, at its line: `enter` writes it and says yes, `e` writes it and opens it
 first, `esc` lets it go, and a draft that would not load is not written on enter. The yes is to
 what was shown: the pane scrolls (`↑↓`, `pgup/pgdn`), enter waits until the draft's last line has
-been on screen, a character that does not print is shown as its escape, and a draft written that
-then does not load, or gets no answer, is taken away again. The ask line,
-answered a flow, shows its draft the same way; `/flow edit <name>` opens its `flow.md`
+been on screen and it has been there 300 ms (an enter sooner was typed for what was there
+before, and is let go unsaid), a character that does not print — a tab, a control character,
+one that takes no room or turns the text — is shown as its escape, and a draft written that
+then gets no yes is taken away again, as `write_new` does. The ask line, answered a flow, shows
+its draft the same way. A draft that comes while the keys are another's — a form, a rename,
+words on the line — does not take them: it waits, said in the flash, until `/flow draft` shows
+it, a later one in its place; `/flow edit <name>` opens its `flow.md`
 in `$EDITOR` — at the line it broke on when it did not load, a template when there is no such
 flow yet — and on return reads the flows again and approves that one if it loads (your save is
 the yes), or flashes `not loaded:` with its file and line if it does not; `/flow reload` reads
@@ -1023,14 +1027,21 @@ nothing else in it changed while the editor was open — the client hashes the f
 with the saved `flow.md` in it, and says yes to exactly that hash (`rl-cli/src/flow/edit.rs`,
 `finish_edit`). Otherwise the flows are read again and it is left needing a yes, saying why; an
 edit just to look gives none. A new flow left as the template is not kept, however the editor
-ends: its `flow.md` goes, and its folder once nothing else is in it (what a firing left in
-`runs/` stays). Nothing else is
-approved for you — not a hand edit, not a flow an agent wrote. `rl flow new <name>` writes a new
-folder and opens its `flow.md` the same way (`rl-cli/src/flow/new.rs`): the bare template, kept
-only once saved changed, or a template with its blanks filled (`--from`) — the person's as
-written, so saved unchanged it is kept and said yes to as well; `--go` writes it and says yes
-without the editor. An editor that fails leaves nothing of a new flow behind (`drop_new`); a name
-that is a flow already is refused.
+ends — taken away before the daemon is reached, so it goes even when the daemon cannot be
+started: its `flow.md` goes, and its folder once nothing else is in it (a file that was there
+before, or what a firing left in `runs/`, stays; `drop_new`). Nothing else is approved for
+you — not a hand edit, not a flow an agent wrote. `rl flow new <name>` writes a new folder and
+opens its `flow.md` the same way (`rl-cli/src/flow/new.rs`): the bare template, kept only once
+saved changed, or a template with its blanks filled (`--from`) — the person's as written, so
+saved unchanged it is kept and said yes to as well. A new flow is written only where nothing is:
+a name with a `flow.md` already (even a link) is refused, and each file is opened only to be
+made, never over one or through a link. With no editor between — `--go`, `rl interpret --go`,
+the panel's enter on a draft — one writer does it all (`write_new`): it refuses a `flow.md` that
+would not load, saying the first problem at its line, before anything is written; writes; says
+yes as an edit's save does; and when no yes comes (it did not load, it needs one, the daemon did
+not answer) takes back exactly the files it wrote, and the folder if that leaves it empty. A
+draft written with `--go` is shown first, on stderr, JSON or not, and `--json` carries it as
+`flow_md`.
 
 **Templates.** `rl flow new <name> --from prod-logs` or `--from morning-brief` starts from a flow
 Relay ships (`rl-cli/src/flow/templates.rs`; the folders under `rl-cli/templates/`, compiled in),
@@ -1043,8 +1054,9 @@ writes the brief and `post.sh` sends it, so the agent needs no tool.
 
 `rl flow` is the line's way in: `list` (`NAME HASH STATUS WHEN LAST IN`, the hash's first eight;
 then what did not load; `--all` keeps the removed), `edit <name>` (a new name starts from a
-template, gone again if left as it was), `new <name> [--from <template> --set k=v --in <folder>]
-[--go]`, `run <name>` (now,
+template, gone again if left as it was), `new <name> [words…] [--from <template> [--set k=v…]
+[--in <folder>]] [--go]` (words, or a template; `--set` and `--in` only with `--from`, `--in` only
+for a template with an `in`), `run <name>` (now,
 by hand, paused or not, never without its yes), `pause`, `resume`, `approve <name> [<hash>]`, `test <name>
 [--event <id>]` (what would fire it and which steps would run, starting nothing) and `reload`, each
 with `--json`. Behind them are `flow.list`, `flow.errors`, `flow.reload`, `flow.approve`,
@@ -1058,7 +1070,8 @@ it by itself (`needs a yes`, `paused`), its next three times, a firing still goi
 `verdict`, and whether it is over five minutes old), and each step — what it does, where it would
 run, and whether it would run, only if (its `if:` and those it waits on, which only a step that
 ran can settle), or not (an `if:` on the event that does not hold, or a step it waits on that would
-not run).
+not run). A flow with no `on:` is never fired by an event, so an `if:` on the event reads there as
+the engine decides it: never set, event named or not.
 
 **The engine.** A firing is a small state machine in `rld`, decided by pure code
 (`rl-flow/src/advance.rs`) and carried out by the daemon (`rl-daemon/src/flows/engine.rs`). It
@@ -1292,12 +1305,16 @@ agent said.
 
 A flow is read from the first `kind: flow` at the start of a line (`interpret::answer`): its
 `name:`, then the text from its `---` line to the end — or, when a fence opened before it, to
-the last bare closing fence, the prose after it dropped. Asked for a flow, the assistant has
+the bare fence that closes that one, what comes after dropped. Fences nest: one with an info
+string (```` ```sh ````) opens a level and a bare one closes it, so a prompt's own code block
+stays whole, and a fence never closed runs to the end. Asked for a flow, the assistant has
 three minutes, not one. `rl interpret` prints a flow with `# by <agent> · run <id>`, its name
 only when it is a flow's name; with `--go` — a new ask, not the draft printed before — it prints
-what it was answered and writes it to `~/.relay/flows/<name>/flow.md`, saying yes to it as a new flow's save does (Loading and
-approval, above). `rl flow new <name> <words…>` asks for that flow, writes the draft, opens it
-in `$EDITOR` — with `--go` it shows the draft instead — and gives it its yes the same way; a run
+what it was answered and writes it to `~/.relay/flows/<name>/flow.md` by the one writer
+(`write_new`), saying yes to it as a new flow's save does (Loading and approval, above); its
+`--json` carries the draft as `flow_md`. `rl flow new <name> <words…>` asks for that flow,
+writes the draft, opens it in `$EDITOR` — with `--go` it shows the draft on stderr instead,
+JSON or not — and gives it its yes the same way; a run
 answered there is refused by name. Interpretation is a run, so it is in the list, in `rl ls
 --all`, in the journal, and under retention like everything else; nothing about it is special
 except its cause.
