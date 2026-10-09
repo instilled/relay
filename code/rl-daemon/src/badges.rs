@@ -153,9 +153,10 @@ mod tests {
         }
     }
 
-    /// Waits until nothing is being asked.
+    /// Waits until nothing is being asked: on that, not on a time, though not past a minute.
     async fn idle(b: &Badges) {
-        for _ in 0..200 {
+        let end = Instant::now() + Duration::from_secs(60);
+        while Instant::now() < end {
             if !b.kept.lock().unwrap().values().any(|k| k.asking) {
                 return;
             }
@@ -187,23 +188,19 @@ mod tests {
             std::fs::set_permissions(plugins.join("pr"), std::fs::Permissions::from_mode(0o755)).unwrap();
         }
         let asked = || std::fs::read_to_string(&count).map(|s| s.lines().count()).unwrap_or(0);
-        let cmds: Vec<String> = [
-            "pr",
-            "exit 3",
-            "true",
-            "sleep 5; echo late",
-            "basename \"$RELAY_WORKSPACE\"",
-        ]
-        .map(String::from)
-        .to_vec();
-        let b = Badges::new(plugins.clone(), Duration::from_secs(3600), Duration::from_millis(300));
+        let cmds: Vec<String> = ["pr", "exit 3", "true", "basename \"$RELAY_WORKSPACE\""]
+            .map(String::from)
+            .to_vec();
+        // The daemon's wait: what answers here answers well inside it, however busy the machine.
+        // A script run for the first time can take a while — a third of a second on a Mac.
+        let b = Badges::new(plugins.clone(), Duration::from_secs(3600), WAIT);
         let main = checkout(&dir, Some("main"));
 
         // Nothing yet: the first digest starts the asking.
         assert!(b.of(&main, &cmds).is_empty());
         idle(&b).await;
-        // The first non-empty line, trimmed; a failure, silence and a command
-        // that takes too long say nothing; the folder is in the environment.
+        // The first non-empty line, trimmed; a failure and silence say nothing;
+        // the folder is in the environment.
         assert_eq!(b.of(&main, &cmds), ["PR #7 on main", "repo"]);
         idle(&b).await;
         // Kept, not asked again before it is due.
@@ -218,7 +215,7 @@ mod tests {
         assert_eq!(asked(), 2);
 
         // Once due, asked again — the kept answer stands in the meantime.
-        let soon = Badges::new(plugins, Duration::ZERO, Duration::from_millis(300));
+        let soon = Badges::new(plugins, Duration::ZERO, WAIT);
         let one = vec!["pr".to_string()];
         soon.of(&main, &one);
         idle(&soon).await;
@@ -230,6 +227,25 @@ mod tests {
         // A detached HEAD, or no badges set: nothing asked.
         assert!(b.of(&checkout(&dir, None), &cmds).is_empty());
         assert!(b.of(&main, &[]).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_command_that_takes_too_long_says_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let at = Instant::now();
+        let said = ask(
+            "sleep 60; echo late",
+            tmp.path(),
+            "main",
+            tmp.path(),
+            Duration::from_millis(300),
+        )
+        .await;
+        assert_eq!(said, None);
+        assert!(
+            at.elapsed() < Duration::from_secs(30),
+            "given up at the wait, not at its end"
+        );
     }
 
     #[test]
