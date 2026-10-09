@@ -1037,7 +1037,17 @@ template, gone again if left as it was), `new <name> [--from <template> --set k=
 [--go]`, `run <name>` (now,
 by hand, paused or not, never without its yes), `pause`, `resume`, `approve <name> [<hash>]` and `reload`, each
 with `--json`. Behind them are `flow.list`, `flow.errors`, `flow.reload`, `flow.approve`,
-`flow.pause`, `flow.resume`, `flow.run` and `flow.firings` (`rl-daemon/src/flows/rpc.rs`).
+`flow.pause`, `flow.resume`, `flow.run`, `flow.test` and `flow.firings` (`rl-daemon/src/flows/rpc.rs`).
+
+**Trying one.** `rl flow test <name> [--event <id>]` and `/flow test`
+(`flow.test`; `rl-daemon/src/flows/preview.rs`, deciding in `rl-flow/src/preview.rs`) read the
+folders again and say what firing it would do now, and start nothing: whether anything would fire
+it by itself (`needs a yes`, `paused`), its next three times, a firing still going and what
+`overlap` would do, whether the event named would fire it and why not (the reactor's own
+`verdict`, and whether it is over five minutes old), and each step — what it does, where it would
+run, and whether it would run, only if (its `if:` and those it waits on, which only a step that
+ran can settle), or not (an `if:` on the event that does not hold, or a step it waits on that would
+not run).
 
 **The engine.** A firing is a small state machine in `rld`, decided by pure code
 (`rl-flow/src/advance.rs`) and carried out by the daemon (`rl-daemon/src/flows/engine.rs`). It
