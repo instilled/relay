@@ -196,7 +196,7 @@ struct InterpretArgs {
 
 #[derive(Args)]
 struct SummaryArgs {
-    /// What: a run, a folder (its project), `flow:<name>`, or `all`.
+    /// What: a run, a folder (its project), `flow:<name>`, `firing:<id>`, or `all`.
     what: String,
     /// Only the stretch since: a duration back (30m, 2h), a date or an
     /// instant (default: a run, since you last looked, if it did anything
@@ -1578,12 +1578,14 @@ async fn interpret(home: &Home, a: InterpretArgs, json: bool) -> Result<()> {
 }
 
 /// What `rl summary` was asked of: `all`, a folder (a project), a
-/// `flow:<name>`, else a run.
+/// `flow:<name>`, a `firing:<id>`, else a run.
 fn summary_target(what: &str) -> Result<SummaryTarget> {
     Ok(if what == "all" {
         SummaryTarget::All
     } else if let Some(name) = what.strip_prefix("flow:") {
         SummaryTarget::Flow { name: name.to_string() }
+    } else if let Some(id) = what.strip_prefix("firing:") {
+        SummaryTarget::Firing { id: id.to_string() }
     } else if Path::new(what).is_dir() {
         SummaryTarget::Project {
             workspace: std::fs::canonicalize(what)?,

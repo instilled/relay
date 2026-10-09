@@ -3765,6 +3765,10 @@ impl App {
                 .map(|r| r.title.clone())
                 .unwrap_or_else(|| id.clone()),
             SummaryTarget::Flow { name } => format!("flow {name}"),
+            SummaryTarget::Firing { id } => match self.digest.firings.iter().find(|f| f.id == *id) {
+                Some(f) => format!("a firing of {}", f.flow),
+                None => "a firing".into(),
+            },
             SummaryTarget::Project { workspace } => self.names.workspace(workspace),
             SummaryTarget::All => "everything".into(),
         };

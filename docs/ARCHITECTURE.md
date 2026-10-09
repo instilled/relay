@@ -1222,14 +1222,14 @@ agent said. Interpretation is a run, so it is in the list, in
 special except its cause.
 
 **The summariser** says what happened, for someone who was not looking, in a run, a flow's runs
-(its steps', wherever they ran), a project's, or everything (`summary.make {target: run | flow |
+(its steps', wherever they ran), one firing's (the runs whose chain it is), a project's, or everything (`summary.make {target: run | flow | firing |
 project | all, deep, from, again, dry}`; `rld`'s `rl-daemon/src/summary.rs`). `/summary [deep]
 [again] [since]` in the panel asks it of the row under the cursor (§4), and `rl summary
-<run|folder|flow:<name>|all> [since] [--deep] [--again]` of what it names; the client turns the stretch
+<run|folder|flow:<name>|firing:<id>|all> [since] [--deep] [--again]` of what it names; the client turns the stretch
 (`2h`, a date, an instant) into `from`. Left out, `from` is since you last looked: a run's
 `seen_at` when it has written output or had an event since (selecting a row is looking, so a run
 that waits as it was is told whole), else the whole run; for a flow, from the start of its oldest
-run not seen since it ended (`runs::oldest_unseen`, by the cause `flow:<name>/`), else the last day. A project and
+run not seen since it ended (`runs::oldest_unseen`, by the cause `flow:<name>/`), else the last day. One firing's is all of it, from when it began. A project and
 everything need one — the client knows when you were last here. The daemon never asks an agent
 on its own: every call is a client's — `/summary`, `rl summary`, a flow's step, or the catch-up's top,
 which the panel and a bare `rl since` ask for as you come back, as `catch_up.summary` says (§4).

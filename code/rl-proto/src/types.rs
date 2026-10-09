@@ -439,6 +439,10 @@ pub enum SummaryTarget {
     Flow {
         name: String,
     },
+    /// One firing of a flow: its steps' runs, all of it.
+    Firing {
+        id: String,
+    },
     Project {
         workspace: PathBuf,
     },
@@ -446,11 +450,12 @@ pub enum SummaryTarget {
 }
 
 impl SummaryTarget {
-    /// How it is kept: `r:<id>`, `f:<name>`, `p:<path>`, `all`.
+    /// How it is kept: `r:<id>`, `f:<name>`, `fi:<id>`, `p:<path>`, `all`.
     pub fn key(&self) -> String {
         match self {
             SummaryTarget::Run { id } => format!("r:{id}"),
             SummaryTarget::Flow { name } => format!("f:{name}"),
+            SummaryTarget::Firing { id } => format!("fi:{id}"),
             SummaryTarget::Project { workspace } => format!("p:{}", workspace.display()),
             SummaryTarget::All => "all".into(),
         }
@@ -585,6 +590,16 @@ mod tests {
             "p:/w/api"
         );
         assert_eq!(SummaryTarget::All.key(), "all");
+    }
+
+    #[test]
+    fn a_firing_is_a_summarys_target_of_its_own() {
+        let t = SummaryTarget::Firing { id: "fi1".into() };
+        assert_eq!(t.key(), "fi:fi1");
+        assert_eq!(
+            serde_json::to_value(&t).unwrap(),
+            serde_json::json!({"kind": "firing", "id": "fi1"})
+        );
     }
 
     #[test]

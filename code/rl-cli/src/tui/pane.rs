@@ -78,6 +78,9 @@ fn summary_of(target: &str) -> Option<String> {
     if let Some(path) = target.strip_prefix("p:") {
         return Some(format!("the project {}", display_path(Path::new(path))));
     }
+    if target.starts_with("fi:") {
+        return Some("one firing".into());
+    }
     let name = target.strip_prefix("f:")?;
     Some(format!("the flow {name}"))
 }
