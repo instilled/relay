@@ -388,8 +388,9 @@ each step as the latest firing left it (`✓ done`, `? waiting`, `× failed`) wi
 what `/summary` said, and its last eight firings — when, where each stands, what it came to — the
 one shown marked `▸` (`tui/firings.rs`). `enter` again walks the steps and then the firings, as a
 question's choices are walked: `enter` on a step joins its run, or reads what an ended one
-printed in the tile; on a firing it shows that firing's steps above, and `/summary` on the row
-is then of that firing (`SummaryTarget::Firing`); `esc` ends the walk. When the list
+printed in the tile; on a firing it shows that firing's steps above, and what `/summary` said
+of that firing (`SummaryTarget::Firing`); `esc` ends the walk and the flow's latest is shown
+again, as it is once the cursor leaves the row. When the list
 is taller than the screen, its first and last lines say how much is above and below. A group's
 header says which folder it is in, and the cursor stops on it like any other row: `enter` (or
 `^o`) turns the pane into the project's own — the folder, how its runs stand (needs-you /

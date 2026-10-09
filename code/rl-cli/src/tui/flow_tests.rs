@@ -250,9 +250,58 @@ async fn summary_on_a_flow_showing_an_older_firing_tells_that_firing() {
     press(&mut app, KeyCode::Down, KeyModifiers::NONE).await;
     press(&mut app, KeyCode::Down, KeyModifiers::NONE).await;
     press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
-    press(&mut app, KeyCode::Esc, KeyModifiers::NONE).await;
     let older = app.flow_pane.shown().map(|f| f.id.clone()).unwrap();
     assert_eq!(app.summary_target(), Some(SummaryTarget::Firing { id: older }));
+    token.cancel();
+}
+
+/// On `prod-logs`, walked to its older firing and shown it: enter (the pane, unless shown),
+/// enter (the walk), down past probe and the latest, enter.
+async fn pick_older(app: &mut super::App) {
+    app.select(Some("f:prod-logs".into()));
+    if !app.show_pane {
+        press(app, KeyCode::Enter, KeyModifiers::NONE).await;
+    }
+    press(app, KeyCode::Enter, KeyModifiers::NONE).await;
+    assert!(matches!(app.mode, super::Mode::Walk));
+    press(app, KeyCode::Down, KeyModifiers::NONE).await;
+    press(app, KeyCode::Down, KeyModifiers::NONE).await;
+    press(app, KeyCode::Enter, KeyModifiers::NONE).await;
+    assert!(app.flow_pane.picked.is_some(), "the older one shown");
+}
+
+#[tokio::test]
+async fn the_firing_picked_goes_with_the_walk() {
+    let (tmp, token, mut app, folder) = panel().await;
+    flow_in(&tmp, &mut app, "prod-logs", "---\nsteps:\n  probe:\n    run: x\n---\n").await;
+    for id in ["fire0001", "fire0002"] {
+        fired(
+            &tmp,
+            &folder,
+            "prod-logs",
+            id,
+            &[("probe", StepStatus::Done, Some("found\r\n"))],
+            FiringStatus::Done,
+        );
+    }
+    app.refresh().await;
+    let flow = || SummaryTarget::Flow {
+        name: "prod-logs".into(),
+    };
+    // esc ends the walk, and the latest is the flow's again.
+    pick_older(&mut app).await;
+    press(&mut app, KeyCode::Esc, KeyModifiers::NONE).await;
+    assert!(!matches!(app.mode, super::Mode::Walk));
+    assert_eq!(app.flow_pane.picked, None);
+    assert_eq!(app.summary_target(), Some(flow()));
+
+    // Off the flow and back: the same.
+    pick_older(&mut app).await;
+    app.mode = super::Mode::Normal;
+    app.select(Some(super::TOP.into()));
+    app.select(Some("f:prod-logs".into()));
+    assert_eq!(app.flow_pane.picked, None);
+    assert_eq!(app.summary_target(), Some(flow()));
     token.cancel();
 }
 
