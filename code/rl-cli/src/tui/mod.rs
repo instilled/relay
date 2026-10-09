@@ -5725,15 +5725,11 @@ impl App {
             let pad = w.saturating_sub(words.chars().count() + 1);
             top.push(Line::styled(format!("{}{words}", " ".repeat(pad)), theme::dim()));
         }
-        // What heads it comes first; Relay's own top under it takes what is left of half the
-        // room, two lines at least, and cut, says where the rest is.
+        // What heads it comes first, cut so Relay's own top under it always shows.
         let firings = self.catch.as_ref().map_or(&[][..], |c| c.firings.as_slice());
         let leads = heads::leads(&self.flows, firings, cu.since);
-        let (mut block, mut block_keys) = catchup::leads(&leads, &self.outcomes, w, Timestamp::now());
-        let half = (area.height / 2) as usize;
-        let top = catchup::capped(top, half.saturating_sub(block.len()).max(2));
-        block_keys.extend(std::iter::repeat_n(TOP.to_string(), top.len()));
-        block.extend(top);
+        let leads = catchup::leads(&leads, &self.outcomes, w, Timestamp::now());
+        let (block, block_keys) = catchup::head_block(leads, top, TOP, area.height as usize);
         let block = catchup::lit(block, &block_keys, self.sel.as_deref(), w);
         let top_h = (block.len() as u16).min(area.height * 2 / 3);
         let [top_area, sep, rest] = Layout::vertical([

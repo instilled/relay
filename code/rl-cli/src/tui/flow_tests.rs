@@ -140,6 +140,41 @@ async fn a_catch_up_top_flows_firing_heads_the_catch_up_above_relays_own() {
 }
 
 #[tokio::test]
+async fn several_leads_never_push_relays_own_top_off_screen() {
+    let (tmp, token, mut app, folder) = panel().await;
+    let long: String = (1..=12).map(|i| format!("line {i}\n")).collect();
+    for (n, flow) in ["brief-a", "brief-b", "brief-c"].into_iter().enumerate() {
+        flow_in(
+            &tmp,
+            &mut app,
+            flow,
+            "---\ncatch_up: top\nsteps:\n  brief:\n    run: echo brief\n---\n",
+        )
+        .await;
+        fired(
+            &tmp,
+            &folder,
+            flow,
+            &format!("fire000{n}"),
+            &[("brief", StepStatus::Done, Some(&long))],
+            FiringStatus::Done,
+        );
+    }
+    app.refresh().await;
+    app.open_catch_up(nine_hours_ago(), false).await;
+    let frame = draw_text(&mut app);
+    assert!(frame.contains("↻ brief-"), "{frame}");
+    let ours = frame
+        .find("• api:")
+        .unwrap_or_else(|| panic!("Relay's own top shows: {frame}"));
+    let cut = frame
+        .rfind("… ^o on it shows the rest")
+        .unwrap_or_else(|| panic!("{frame}"));
+    assert!(cut < ours, "the leads are cut above it: {frame}");
+    token.cancel();
+}
+
+#[tokio::test]
 async fn enter_twice_on_a_flow_walks_its_steps_and_enter_on_one_reads_its_run() {
     let (tmp, token, mut app, folder) = panel().await;
     flow_in(

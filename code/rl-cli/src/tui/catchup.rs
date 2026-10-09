@@ -114,6 +114,36 @@ pub fn leads(leads: &[Lead], outcomes: &Outcomes, w: usize, now: Timestamp) -> (
     (lines, keys)
 }
 
+/// What heads the catch-up in `h` rows: the leads (`leads`, in step with their keys), then
+/// Relay's own `top`, keyed `top_key`. The leads take at most two thirds of the rows less the
+/// top's first two lines — cut there, the last line kept says where the rest is — and the top
+/// what is left of half the rows, two lines at least (`capped`).
+pub fn head_block(
+    leads: (Vec<Line<'static>>, Vec<String>),
+    top: Vec<Line<'static>>,
+    top_key: &str,
+    h: usize,
+) -> (Vec<Line<'static>>, Vec<String>) {
+    let (mut lines, mut keys) = leads;
+    let room = (h * 2 / 3).saturating_sub(top.len().min(2));
+    if lines.len() > room {
+        lines.truncate(room);
+        keys.truncate(room);
+        // A lead's title alone, its body all cut, goes too: the cut is said under the one before.
+        if keys.len() >= 2 && keys[keys.len() - 1] != keys[keys.len() - 2] {
+            lines.pop();
+            keys.pop();
+        }
+        if let Some(last) = lines.last_mut() {
+            *last = Line::styled(format!("{INDENT}  … ^o on it shows the rest"), theme::dim());
+        }
+    }
+    let top = capped(top, (h / 2).saturating_sub(lines.len()).max(2));
+    keys.extend(std::iter::repeat_n(top_key.to_string(), top.len()));
+    lines.extend(top);
+    (lines, keys)
+}
+
 /// `lines` with those whose key is `sel` lit to the width, as the list lights its selection.
 pub fn lit(lines: Vec<Line<'static>>, keys: &[String], sel: Option<&str>, w: usize) -> Vec<Line<'static>> {
     lines
@@ -280,5 +310,37 @@ mod tests {
 
         let lit = lit(lines, &keys, Some("h:morning-brief"), 60);
         assert!(lit.iter().all(|l| l.width() == 60), "lit to the edge");
+    }
+
+    #[test]
+    fn the_leads_are_cut_so_relays_top_keeps_two_lines() {
+        let lead = |k: &str| {
+            let lines: Vec<Line<'static>> = (0..10).map(|i| Line::raw(format!("{k} {i}"))).collect();
+            (lines, vec![format!("h:{k}"); 10])
+        };
+        let (mut lines, mut keys) = lead("a");
+        let (b, bk) = lead("b");
+        lines.extend(b);
+        keys.extend(bk);
+        let top = || (0..5).map(|i| Line::raw(format!("top {i}"))).collect::<Vec<_>>();
+
+        // 15 rows: the leads take 10 less 2, the top keeps two lines.
+        let (got, k) = head_block((lines.clone(), keys.clone()), top(), "top", 15);
+        let text: Vec<String> = got.iter().map(|l| l.to_string()).collect();
+        assert_eq!(text.len(), 10, "{text:#?}");
+        assert_eq!(text[7], "    … ^o on it shows the rest");
+        assert_eq!(&text[8..], ["top 0", "  … ^o on the top shows the rest"]);
+        assert_eq!(k.len(), 10);
+        assert!(k[..8].iter().all(|k| k == "h:a") && k[8..].iter().all(|k| k == "top"));
+
+        // Cut just past b's title: it goes with its body, a's line says the cut.
+        let (got, k) = head_block((lines.clone(), keys.clone()), top(), "top", 20);
+        assert_eq!(got.len(), 10 + 2, "{got:#?}");
+        assert_eq!(got[9].to_string(), "    … ^o on it shows the rest");
+        assert_eq!(k[9], "h:a");
+
+        // Room for all of them: nothing cut.
+        let (got, _) = head_block((lines, keys), top(), "top", 90);
+        assert_eq!(got.len(), 20 + 5);
     }
 }
