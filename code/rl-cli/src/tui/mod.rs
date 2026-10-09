@@ -3282,17 +3282,41 @@ impl App {
     }
 
     /// The draft written to its folder and said yes to at once, or (`edit`) opened in `$EDITOR`
-    /// first and said yes to on return, as a new flow's save is.
+    /// first and said yes to on return, as a new flow's save is. Written but not said yes to —
+    /// the daemon did not load it, or did not answer — it is taken away again, and stays shown.
     async fn write_draft(&mut self, d: new_flow::Drafted, edit: bool) {
         let files = vec![NewFile::flow_md(d.text.clone())];
-        match crate::flow::start_new(&self.home, &d.name, files, true) {
-            Ok(editing) if edit => self.editor = Some((editing, 1)),
-            Ok(editing) => self.edited(editing).await,
+        let editing = match crate::flow::start_new(&self.home, &d.name, files, true) {
+            Ok(editing) if edit => return self.editor = Some((editing, 1)),
+            Ok(editing) => editing,
             Err(e) => {
                 self.say(format!("{e:#}"));
-                self.mode = Mode::Draft(Box::new(d));
+                return self.mode = Mode::Draft(Box::new(d));
             }
-        }
+        };
+        let written = editing.clone();
+        let said = match crate::flow::finish_edit(&mut self.rpc, &self.home, editing).await {
+            Ok((edited @ crate::flow::Edited::Approved(_), _)) => Ok(edited.words(&d.name)),
+            Ok((edited, _)) => Err(edited.words(&d.name)),
+            Err(e) => Err(format!("write {}: {e:#}", d.name)),
+        };
+        let said = match said {
+            Ok(said) => said,
+            Err(why) => {
+                let gone = match crate::flow::drop_new(&self.home, &written, true) {
+                    Ok(true) => " · nothing kept".to_string(),
+                    Ok(false) => String::new(),
+                    Err(e) => format!(" · and what was written is left: {e:#}"),
+                };
+                // The daemon forgets it too, when it is up.
+                let _ = self.rpc.call::<FlowReload>(()).await;
+                self.mode = Mode::Draft(Box::new(d));
+                format!("{why}{gone}")
+            }
+        };
+        self.refresh().await;
+        // Said last: a refresh that fails says so, and this is what matters.
+        self.say(said);
     }
 
     /// `/flow test <name>`: what firing it would do now, in the pane until the next key. Nothing
@@ -4280,11 +4304,17 @@ impl App {
             }
             Mode::Draft(d) => {
                 match k.code {
-                    KeyCode::Enter if d.ready() => self.write_draft(*d, false).await,
-                    KeyCode::Enter => {
+                    code if d.scroll(code) => self.mode = Mode::Draft(d),
+                    KeyCode::Enter if !d.ready() => {
                         self.say(format!("it would not load: {} · e opens it in $EDITOR", d.problems[0]));
                         self.mode = Mode::Draft(d);
                     }
+                    // The yes is to what was shown: none until its end has been.
+                    KeyCode::Enter if !d.seen() => {
+                        self.say("the end is below · ↓ to read it");
+                        self.mode = Mode::Draft(d);
+                    }
+                    KeyCode::Enter => self.write_draft(*d, false).await,
                     KeyCode::Char('e') => self.write_draft(*d, true).await,
                     KeyCode::Esc => self.say("draft let go: nothing written"),
                     _ => self.mode = Mode::Draft(d),
@@ -5976,8 +6006,7 @@ impl App {
         // What a reload just did not load, when there was more than the flash
         // could say: whose, which file and line, and why, until the next key.
         if let Mode::Draft(d) = &self.mode {
-            f.render_widget(Paragraph::new(d.lines()).wrap(Wrap { trim: false }), area);
-            return;
+            return d.draw(f, area);
         }
         if let Some(lines) = &self.tested {
             let lines: Vec<Line> = lines.iter().map(|l| Line::raw(format!(" {l}"))).collect();

@@ -121,3 +121,84 @@ async fn a_drafted_flow_is_shown_then_written_with_its_yes() {
     );
     token.cancel();
 }
+
+#[tokio::test]
+async fn a_draft_taller_than_its_pane_is_written_once_its_end_was_shown() {
+    let (tmp, token, mut app, _) = panel().await;
+    let home = rl_core::Home::at(tmp.path().join("h"));
+    let mut md = HELLO.to_string();
+    for i in 1..=80 {
+        md.push_str(&format!("Line {i} of what it does.\n"));
+    }
+    app.show_draft(Some("tall".into()), md.clone(), "fakeai".into());
+    let screen = draw_text(&mut app);
+    assert!(!screen.contains("Line 80"), "{screen}");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+    assert_eq!(said(&app), "the end is below · ↓ to read it");
+    assert!(!home.flow_dir("tall").exists());
+    assert!(matches!(app.mode, super::Mode::Draft(_)), "still shown");
+
+    // Read down to its end: then enter writes it.
+    for _ in 0..80 {
+        press(&mut app, KeyCode::Down, KeyModifiers::NONE).await;
+        draw_text(&mut app);
+    }
+    assert!(draw_text(&mut app).contains("Line 80 of what it does."));
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+    assert_eq!(said(&app), "tall approved");
+    assert_eq!(
+        std::fs::read_to_string(home.flow_dir("tall").join("flow.md")).unwrap(),
+        md
+    );
+    token.cancel();
+}
+
+#[tokio::test]
+async fn a_draft_written_without_its_yes_is_taken_away_again() {
+    let (tmp, token, mut app, _) = panel().await;
+    let home = rl_core::Home::at(tmp.path().join("h"));
+    app.show_draft(Some("hello".into()), HELLO.into(), "fakeai".into());
+    draw_text(&mut app);
+    // No daemon to load it and say yes: what was written goes again.
+    token.cancel();
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+    assert!(said(&app).starts_with("write hello: "), "{}", said(&app));
+    assert!(said(&app).ends_with(" · nothing kept"), "{}", said(&app));
+    assert!(!home.flow_dir("hello").exists());
+    assert!(matches!(app.mode, super::Mode::Draft(_)), "still shown");
+}
+
+#[tokio::test]
+async fn a_flow_answered_is_shown_as_a_draft_named_by_whoever_asked() {
+    use crate::interpret::{Answer, FlowDraft};
+    let (_tmp, token, mut app, folder) = panel().await;
+    let asked = [(Want::Flow { name: "mine".into() }, "mine"), (Want::Any, "theirs")];
+    for (want, shown) in asked {
+        app.asking = Some(super::Asking {
+            words: "say hello".into(),
+            folder: folder.clone(),
+            want,
+            task: tokio::spawn(async { anyhow::bail!("not asked") }),
+        });
+        let out = rl_proto::methods::AssistantOutput {
+            run: "run00009".into(),
+            agent: "fakeai".into(),
+            output: String::new(),
+            exit: Some(0),
+            timed_out: false,
+        };
+        let draft = FlowDraft {
+            name: Some("theirs".into()),
+            text: HELLO.into(),
+        };
+        app.answered(Ok(Ok((Answer::Flow(draft), out)))).await;
+        let super::Mode::Draft(d) = &app.mode else {
+            panic!("the draft is shown: {}", said(&app));
+        };
+        assert_eq!(d.name, shown);
+        assert_eq!(said(&app), format!("fakeai drafted {shown}"));
+        app.mode = super::Mode::Normal;
+    }
+    token.cancel();
+}

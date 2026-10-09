@@ -15,6 +15,7 @@ pub const TEMPLATE: &str = "---\nwhen: every 1h\nsteps:\n  first:\n    run: echo
 
 /// A flow's `flow.md` about to be edited, and its folder as it was: what a yes after the edit
 /// may cover, and no more.
+#[derive(Clone)]
 pub struct Editing {
     pub name: String,
     pub file: PathBuf,

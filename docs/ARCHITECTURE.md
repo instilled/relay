@@ -661,7 +661,10 @@ itself, lets it again, or says yes to its folder as it is; `/flow new <name>` wr
 under the cursor), opened in `$EDITOR` and said yes to on return; with words after the name it asks
 the assistant for that flow, and its draft is shown in the pane (`tui/new_flow.rs`) with what
 would stop it loading, at its line: `enter` writes it and says yes, `e` writes it and opens it
-first, `esc` lets it go, and a draft that would not load is not written on enter. The ask line,
+first, `esc` lets it go, and a draft that would not load is not written on enter. The yes is to
+what was shown: the pane scrolls (`↑↓`, `pgup/pgdn`), enter waits until the draft's last line has
+been on screen, a character that does not print is shown as its escape, and a draft written that
+then does not load, or gets no answer, is taken away again. The ask line,
 answered a flow, shows its draft the same way; `/flow edit <name>` opens its `flow.md`
 in `$EDITOR` — at the line it broke on when it did not load, a template when there is no such
 flow yet — and on return reads the flows again and approves that one if it loads (your save is
