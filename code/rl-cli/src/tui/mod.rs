@@ -1208,7 +1208,7 @@ impl App {
                                 Ok(()) => self.edited(editing).await,
                                 Err(e) => {
                                     // However the editor ends, a new flow's template is not left behind.
-                                    match crate::flow::drop_template(&self.home, &editing) {
+                                    match crate::flow::drop_new(&self.home, &editing, true) {
                                         Err(left) => self.say(format!("{e:#}; {left:#}")),
                                         Ok(_) => self.say(format!("{e:#}")),
                                     }

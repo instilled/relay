@@ -1010,16 +1010,31 @@ last loaded is another. Writing it through `rl` is the yes, and
 covers no more than was written: an `rl flow edit` or `/flow edit` approves only when `flow.md`
 was saved changed, the folder before the editor opened had its yes (or held nothing yet), and
 nothing else in it changed while the editor was open — the client hashes the folder as it was
-with the saved `flow.md` in it, and says yes to exactly that hash (`rl-cli/src/flow.rs`,
+with the saved `flow.md` in it, and says yes to exactly that hash (`rl-cli/src/flow/edit.rs`,
 `finish_edit`). Otherwise the flows are read again and it is left needing a yes, saying why; an
 edit just to look gives none. A new flow left as the template is not kept, however the editor
 ends: its `flow.md` goes, and its folder once nothing else is in it (what a firing left in
 `runs/` stays). Nothing else is
-approved for you — not a hand edit, not a flow an agent wrote.
+approved for you — not a hand edit, not a flow an agent wrote. `rl flow new <name>` writes a new
+folder and opens its `flow.md` the same way (`rl-cli/src/flow/new.rs`): the bare template, kept
+only once saved changed, or a template with its blanks filled (`--from`) — the person's as
+written, so saved unchanged it is kept and said yes to as well; `--go` writes it and says yes
+without the editor. An editor that fails leaves nothing of a new flow behind (`drop_new`); a name
+that is a flow already is refused.
+
+**Templates.** `rl flow new <name> --from prod-logs` or `--from morning-brief` starts from a flow
+Relay ships (`rl-cli/src/flow/templates.rs`; the folders under `rl-cli/templates/`, compiled in),
+shaped as the two flows this design was measured by. What is particular to a person is a blank,
+`{{key}}`, filled when the flow is written: `--set key=value`, asked for on a terminal, `in` from
+`--in` or the folder here; a value may not hold `"`, `\`, `{` or `}`, and nothing is written until
+every blank is good. A template's scripts read their blanks from their step's `env:`
+(`GCP_PROJECT`, `BRIEF_SPACE`, `GITHUB_ORG`), so no one's ids are in one; morning-brief's agent
+writes the brief and `post.sh` sends it, so the agent needs no tool.
 
 `rl flow` is the line's way in: `list` (`NAME HASH STATUS WHEN LAST IN`, the hash's first eight;
 then what did not load; `--all` keeps the removed), `edit <name>` (a new name starts from a
-template, gone again if left as it was), `run <name>` (now,
+template, gone again if left as it was), `new <name> [--from <template> --set k=v --in <folder>]
+[--go]`, `run <name>` (now,
 by hand, paused or not, never without its yes), `pause`, `resume`, `approve <name> [<hash>]` and `reload`, each
 with `--json`. Behind them are `flow.list`, `flow.errors`, `flow.reload`, `flow.approve`,
 `flow.pause`, `flow.resume`, `flow.run` and `flow.firings` (`rl-daemon/src/flows/rpc.rs`).
