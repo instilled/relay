@@ -1392,22 +1392,26 @@ draws it, pure from a `Graph` to a grid of styled cells:
   waiting), `❯` shell (teal), `✦` agent (magenta), `◆` an event nothing raised yet, `⇢` events
   from outside any run. Every glyph is one column wide, so borders stay in line. The border turns
   red when the last run failed and dims when the flow is paused. `!` marks a flow waiting for a
-  yes.
+  yes. A flow's box says its trigger — `◷ every 30m`, `◷ at 07:30, Mon–Fri`, `◆ run.failed`,
+  `by hand`, and when it fires next — and a step's how its runs went (`ok ×3 · 1 failed`) or
+  who waits (`1 waiting`); an ask step is drawn by the question it put. The folder of each is
+  the pane's. Its steps sit to its right, as its edges lead (`tui/graph/words.rs` says what a
+  node says, `tui/graph.rs` lays it out).
 - **Moving.** `←` and `→` follow the wiring, to what feeds the selected node or what it feeds,
   taking the nearest in height. `↑` and `↓` stay in the column, and reach the nearest box above
   or below when the column has none. The window pans to keep the selection in view, and its
   edges are lit. A search (`^f`) keeps the nodes it hits — by name, detail and folder, and by
   the same tokens, a flow being a `flow` and an ask a `question` — plus everything upstream
   and downstream of them.
-- **Acting on a node.** A flow's node, or its questions', stands for the flow, so `/flow
+- **Acting on a node.** A flow's node, or any of its steps', stands for the flow, so `/flow
   run|pause|resume|approve|edit` work on it with no name. `enter` on a question with
   someone waiting takes it out to be answered by number in the pane, the same as in the list —
   and as there, a line starting with an option answers with the rest as its note — and the
   cursor goes on to what the answer ran. `enter` on a flow with its yes offers to
   run it now (`run prod-logs now? y`), and on one without says `/flow approve`. Anywhere else,
   `enter` (or `^o`) shows the node in the pane: what it is, a flow as its row's pane shows it
-  (when, where, its yes, its steps as the latest firing left them), how its runs went, and what
-  it is wired to on either side.
+  (when, where, its yes, its steps as the latest firing left them), a step as `step of <flow>`
+  and what it does, how its runs went, and what it is wired to on either side.
 
 **The events view** is what happened, where the graph is how things are wired. `/events` swaps
 the list for every event in the ledger, newest first, one line each: how long ago, its kind
@@ -1512,10 +1516,8 @@ limit, so both sides fall back to the same short hashed directory under the temp
 Named here so the diagrams above are not read as the whole plan — see §7 of the brief for
 phasing.
 
-- **The rest of flows** (`docs/specs/2026-10-07-flows.md`) — Seeing it: steps as nodes in the graph, a flow's row expanded to its latest
-  firing's steps, `catch_up: top` (a flow's latest firing heading the catch-up), `/summary` on one
-  firing. Writing it: `rl flow new` and `/flow new` drafted from words, the context pack teaching
-  flows, `rl flow test`, and templates.
+- **The rest of flows** (`docs/specs/2026-10-07-flows.md`) — Writing it: `rl flow new` and
+  `/flow new` drafted from words, the context pack teaching flows, `rl flow test`, and templates.
 - **Plugins** — `rl-plugin-host` (Bun), the broker, `relay.d.ts`, the manifest/approval flow,
   action keys and the detail tab. Until then, one provisional contract stands in for a piece of
   it — **workspace badges** (`rl-daemon/src/badges.rs`): `workspaces.badges` in `config.yaml`
