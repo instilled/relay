@@ -940,7 +940,7 @@ pub fn pane_lines(
         lines.push(Line::raw(""));
         match serde_json::from_value::<rl_flow::def::FlowDef>(f.def.clone()) {
             Ok(def) if n.kind == NodeKind::Flow => {
-                lines.extend(super::flows::pane_lines(f, &def, firing, names, now));
+                lines.extend(super::flows::pane_lines(f, &def, firing, None, names, now));
             }
             _ => lines.push(Line::from(vec![
                 Span::styled(" from ", theme::dim()),

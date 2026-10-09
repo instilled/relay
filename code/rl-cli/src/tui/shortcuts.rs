@@ -37,6 +37,8 @@ pub enum Place {
     CatchUp,
     /// A name being changed where it stands in the list.
     Rename,
+    /// A flow's pane walked: its steps, then its last firings.
+    Walk,
 }
 
 /// One key and what it does there, in a word or two.
@@ -169,6 +171,11 @@ fn place_keys(at: Place) -> Vec<Key> {
             key("alt ←→", "by word"),
             key("^w ^u ^k", "cut"),
             key("↑↓", "let it go"),
+        ],
+        Place::Walk => vec![
+            key("↑↓", "steps, then firings"),
+            key("enter", "opens it"),
+            key("esc", "back"),
         ],
     }
 }
@@ -375,6 +382,7 @@ mod tests {
             Place::Events,
             Place::CatchUp,
             Place::Rename,
+            Place::Walk,
             Place::Term {
                 wide: false,
                 live: true,
@@ -412,6 +420,7 @@ mod tests {
             Place::Question,
             Place::Hidden,
             Place::Rename,
+            Place::Walk,
         ] {
             let ks = keys(at);
             for width in [160, 120, 80, 60, 40, 30] {
@@ -502,6 +511,7 @@ mod tests {
             Place::Graph,
             Place::Events,
             Place::Rename,
+            Place::Walk,
         ] {
             let last = keys(at).pop().unwrap();
             assert_eq!(last.keys, "^h", "{at:?}");

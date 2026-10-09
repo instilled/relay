@@ -19,6 +19,7 @@
 mod catchup;
 mod complete;
 mod events;
+mod firings;
 #[cfg(test)]
 mod flow_tests;
 pub(crate) mod flows;
@@ -63,8 +64,8 @@ use rl_core::Home;
 use rl_core::time::fmt_age;
 use rl_proto::decision::Decision;
 use rl_proto::flow::{
-    Firing, Flow, FlowApproval, FlowApprove, FlowErrors, FlowFilter, FlowList, FlowName, FlowPause, FlowReload,
-    FlowResume, FlowRun, FlowStatus, NotLoaded,
+    Firing, FiringFilter, Flow, FlowApproval, FlowApprove, FlowErrors, FlowFilter, FlowFirings, FlowList, FlowName,
+    FlowPause, FlowReload, FlowResume, FlowRun, FlowStatus, NotLoaded,
 };
 use rl_proto::methods::{
     AgentList, DecisionDismiss, DecisionGet, DecisionId, DecisionNote, DecisionTake, DecisionTakeParams, Digest,
@@ -153,6 +154,9 @@ enum Mode {
     Form(Box<Form>),
     /// A question taken out of the list: its options, answered by number.
     Answer(String),
+    /// `enter` on a flow whose pane is up: its steps, then its last firings, walked
+    /// (`App::flow_pane`).
+    Walk,
     /// A join refused because someone holds the keyboard: `y` takes it from
     /// them. The run, and who has it.
     Take(String, String),
@@ -324,6 +328,8 @@ struct App {
     auto_pane: bool,
     /// The highlighted choice of the question being answered.
     answer_at: usize,
+    /// The flow whose pane is up: its last firings, the one shown, the caret while walked.
+    flow_pane: firings::FlowPane,
     /// What the question pane drew last, so a click can take a choice.
     pane_hit: std::cell::RefCell<PaneHit>,
     /// The pane alone, full width: a terminal, unless `f` says otherwise.
@@ -1126,6 +1132,7 @@ impl App {
             show_pane: false,
             auto_pane: false,
             answer_at: 0,
+            flow_pane: Default::default(),
             pane_hit: std::cell::RefCell::default(),
             wide: false,
             term: None,
@@ -1365,6 +1372,7 @@ impl App {
                 });
             }
             Mode::Rename(_) => return Some(shortcuts::Place::Rename),
+            Mode::Walk => return Some(shortcuts::Place::Walk),
             _ => return None,
         }
         if self.search.is_some() {
@@ -1481,6 +1489,20 @@ impl App {
                 self.events = evs;
             }
         }
+        if let Some(name) = self.selected_flow().map(|f| f.name.clone()) {
+            let filter = FiringFilter {
+                flow: name.clone(),
+                limit: Some(firings::LAST),
+            };
+            if let Ok(fs) = self.rpc.call::<FlowFirings>(filter).await {
+                self.flow_pane.load(&name, fs);
+                self.flow_pane.files = self
+                    .flow_pane
+                    .shown()
+                    .map(|f| firings::files_in(&self.home.firing_dir(&name, &f.id)))
+                    .unwrap_or_default();
+            }
+        }
         let Some(target) = self.summary_target() else { return };
         let made = self.made.get(&target.key()).cloned();
         let (deep, from) = match (&made, &target) {
@@ -1547,7 +1569,11 @@ impl App {
     fn target_of(&self, row: &Row) -> Option<SummaryTarget> {
         Some(match row {
             Row::Run(i) => SummaryTarget::Run { id: i.run.id.clone() },
-            Row::Flow(f) => SummaryTarget::Flow { name: f.name.clone() },
+            // An older firing picked in its pane is what is told; else the flow.
+            Row::Flow(f) => match self.flow_pane.picked_firing().filter(|x| x.flow == f.name) {
+                Some(x) => SummaryTarget::Firing { id: x.id.clone() },
+                None => SummaryTarget::Flow { name: f.name.clone() },
+            },
             Row::Group(h) if h.is_everywhere() => SummaryTarget::All,
             Row::Group(h) => SummaryTarget::Project {
                 workspace: h.workspace.clone(),
@@ -2163,6 +2189,11 @@ impl App {
             self.say("nothing here to open");
             return;
         };
+        self.open_term_on(id, area).await;
+    }
+
+    /// What run `id` printed, in the tile beside the list.
+    async fn open_term_on(&mut self, id: String, area: Rect) {
         // Watching is a tile beside the list, not the whole screen: the list
         // stays, the line stays yours, and `/pane full` pops it big.
         // Still reading this one: back to it, where it was left.
@@ -2187,6 +2218,24 @@ impl App {
                 self.pane = Pane::Facts;
                 self.say(format!("attach: {e:#}"));
             }
+        }
+    }
+
+    /// A step's run, from its flow's pane: one still going joined, an ended one read in the
+    /// tile — as `enter` on its own row would.
+    async fn join_step(&mut self, run: String, area: Rect) {
+        let live = match self.run_by_id(&run) {
+            Some(r) => !r.state.is_terminal(),
+            None => self
+                .rpc
+                .call::<RunGet>(RunId { id: run.clone() })
+                .await
+                .is_ok_and(|r| !r.state.is_terminal()),
+        };
+        if live {
+            self.attach = Some((run, false));
+        } else {
+            self.open_term_on(run, area).await;
         }
     }
 
@@ -3961,7 +4010,7 @@ impl App {
         // A form or a `y`-or-not question has its keys in the footer; the
         // shortcuts go, rather than come back when it is done. A name typed
         // in the list takes no room from them, so they stay for it.
-        if !matches!(self.mode, Mode::Normal | Mode::Answer(_) | Mode::Rename(_)) {
+        if !matches!(self.mode, Mode::Normal | Mode::Answer(_) | Mode::Rename(_) | Mode::Walk) {
             self.shortcuts = false;
         }
         match std::mem::replace(&mut self.mode, Mode::Normal) {
@@ -4047,6 +4096,27 @@ impl App {
                         None => self.mode = Mode::Answer(id),
                     },
                     _ => self.mode = Mode::Answer(id),
+                }
+                return Ok(());
+            }
+            Mode::Walk => {
+                if self.shortcut_key(&k, true) {
+                    self.mode = Mode::Walk;
+                    return Ok(());
+                }
+                let picked = self.flow_pane.picked.clone();
+                match self.flow_pane.key(k.code) {
+                    firings::Walked::On => self.mode = Mode::Walk,
+                    firings::Walked::Done => {}
+                    firings::Walked::Join(run) => self.join_step(run, area).await,
+                    firings::Walked::NoRun(step) => {
+                        self.say(format!("{step} has not run in this firing"));
+                        self.mode = Mode::Walk;
+                    }
+                }
+                // Another firing shown: its files, and what was said of it.
+                if self.flow_pane.picked != picked {
+                    self.load_pane().await;
                 }
                 return Ok(());
             }
@@ -4428,10 +4498,17 @@ impl App {
             return Ok(());
         }
         if self.selected_flow().is_some() {
-            // A flow never grows into its runs on the list: they are in the
-            // pane, with the flow and what its last run raised.
-            self.pane = Pane::Facts;
-            self.show_pane = true;
+            // A flow never grows into its runs on the list: they are in the pane, and enter
+            // again walks its steps and its last firings there.
+            let on_it = self.selected_flow().is_some_and(|f| f.name == self.flow_pane.flow);
+            if self.show_pane && self.pane == Pane::Facts && on_it && !self.flow_pane.firings.is_empty() {
+                self.flow_pane.at = 0;
+                self.mode = Mode::Walk;
+            } else {
+                self.pane = Pane::Facts;
+                self.show_pane = true;
+                self.load_pane().await;
+            }
         } else if let Some(q) = self.selected_question() {
             let id = q.id.clone();
             self.picked.clear();
@@ -5781,6 +5858,8 @@ impl App {
             Some(Row::Flow(f)) => pane::flow_lines(
                 &f,
                 self.flow_of_row(&f),
+                Some(&self.flow_pane).filter(|p| p.flow == f.name),
+                matches!(self.mode, Mode::Walk),
                 self.summary_of_row(&Row::Flow(f.clone())),
                 &self.names,
                 area.width as usize,
@@ -5869,6 +5948,7 @@ impl App {
                 };
             }
             Mode::Mark(id) => return format!("mark {}: d done · b blocked · w working · esc", title_of(id)),
+            Mode::Walk => return "↑↓ steps, then firings · enter joins a step, or shows a firing · esc".into(),
             Mode::Answer(id) => {
                 let q = self.digest.decisions.iter().find(|d| &d.id == id);
                 let n = q.map_or(0, |q| q.options.len().min(pane::MAX_KEYS));

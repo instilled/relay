@@ -17,8 +17,8 @@ async fn flow_in(tmp: &tempfile::TempDir, app: &mut super::App, name: &str, md: 
 }
 
 /// A firing `id` of `flow` from an hour ago, as the engine leaves one: each step `(name, status,
-/// what its run printed)` — a step that printed has a run, ended, in `folder`, its chain the
-/// firing's — and the firing `status`, ended unless it still runs or waits.
+/// what its run printed)` — a step that printed has a run, started and ended, in `folder`, its
+/// chain the firing's — and the firing `status`, ended unless it still runs or waits.
 fn fired(
     tmp: &tempfile::TempDir,
     folder: &Path,
@@ -27,9 +27,10 @@ fn fired(
     steps: &[(&str, StepStatus, Option<&str>)],
     status: FiringStatus,
 ) {
+    use rl_ledger::events::{self, NewEvent};
     use rl_ledger::firings::{self, NewFiring};
     use rl_ledger::{Ledger, runs, session_io};
-    use rl_proto::types::{Cause, Run, RunKind, RunState, Source};
+    use rl_proto::types::{Cause, Run, RunKind, RunState, Source, event_kind};
     let at = jiff::Timestamp::now() - jiff::SignedDuration::from_hours(1);
     let steps: Vec<(String, StepStatus, Option<String>)> = steps
         .iter()
@@ -74,6 +75,8 @@ fn fired(
                 };
                 r.chain = id.clone();
                 runs::insert(c, &r)?;
+                // The list shows a run with news: the step's run, started.
+                events::append(c, &NewEvent::for_run(&r, at, event_kind::RUN_STARTED, "started"))?;
                 session_io::append(c, &run, session_io::Direction::Out, out.as_bytes(), at)?;
                 let failed = *s == StepStatus::Failed;
                 let state = if failed { RunState::Failed } else { RunState::Finished };
@@ -133,5 +136,81 @@ async fn a_catch_up_top_flows_firing_heads_the_catch_up_above_relays_own() {
     assert!(app.show_pane);
     let frame = draw_text(&mut app);
     assert!(frame.contains("what brief printed"), "{frame}");
+    token.cancel();
+}
+
+#[tokio::test]
+async fn enter_twice_on_a_flow_walks_its_steps_and_enter_on_one_reads_its_run() {
+    let (tmp, token, mut app, folder) = panel().await;
+    flow_in(
+        &tmp,
+        &mut app,
+        "prod-logs",
+        "---\nsteps:\n  probe:\n    run: x\n  triage:\n    after: probe\n    run: y\n---\n",
+    )
+    .await;
+    fired(
+        &tmp,
+        &folder,
+        "prod-logs",
+        "fire0001",
+        &[
+            ("probe", StepStatus::Done, Some("3x connection reset\r\n")),
+            ("triage", StepStatus::Done, Some("restart the api pod\r\n")),
+        ],
+        FiringStatus::Done,
+    );
+    app.refresh().await;
+    app.select(Some("f:prod-logs".into()));
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+    assert!(app.show_pane, "enter shows the flow");
+    let frame = draw_text(&mut app);
+    assert!(
+        frame.contains(" firings") && frame.contains("restart the api pod"),
+        "{frame}"
+    );
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+    assert!(matches!(app.mode, super::Mode::Walk), "again: its steps, walked");
+    press(&mut app, KeyCode::Down, KeyModifiers::NONE).await;
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+    assert_eq!(
+        app.term.as_ref().map(|t| t.id.as_str()),
+        Some("fire0001-triage"),
+        "the step's run, read in the tile"
+    );
+    token.cancel();
+}
+
+#[tokio::test]
+async fn summary_on_a_flow_showing_an_older_firing_tells_that_firing() {
+    let (tmp, token, mut app, folder) = panel().await;
+    flow_in(&tmp, &mut app, "prod-logs", "---\nsteps:\n  probe:\n    run: x\n---\n").await;
+    for id in ["fire0001", "fire0002"] {
+        fired(
+            &tmp,
+            &folder,
+            "prod-logs",
+            id,
+            &[("probe", StepStatus::Done, Some("found\r\n"))],
+            FiringStatus::Done,
+        );
+    }
+    app.refresh().await;
+    app.select(Some("f:prod-logs".into()));
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+    assert_eq!(
+        app.summary_target(),
+        Some(SummaryTarget::Flow {
+            name: "prod-logs".into()
+        })
+    );
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+    // probe, then the firings, newest first: the older is the third stop.
+    press(&mut app, KeyCode::Down, KeyModifiers::NONE).await;
+    press(&mut app, KeyCode::Down, KeyModifiers::NONE).await;
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+    press(&mut app, KeyCode::Esc, KeyModifiers::NONE).await;
+    let older = app.flow_pane.shown().map(|f| f.id.clone()).unwrap();
+    assert_eq!(app.summary_target(), Some(SummaryTarget::Firing { id: older }));
     token.cancel();
 }

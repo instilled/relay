@@ -2,6 +2,7 @@
 //! and the keys that answer it. Pure — takes what the daemon said, gives
 //! lines.
 
+use super::firings::{self, FlowPane};
 use super::flows;
 use super::rows::{FlowRow, Names, asked_by, cause_words, fit};
 use crate::digest::signals;
@@ -289,20 +290,29 @@ pub fn run_lines(
 const FLOW_RUNS: usize = 10;
 const FLOW_MARKS: usize = 40;
 
-/// A flow's row: the flow as last loaded when it is, then how its runs have
-/// been going.
+/// A flow in the pane: the flow itself — its steps as the firing shown left them, the caret's
+/// lit while walking — the files that firing's steps wrote, how its runs went, what was said of
+/// it, then its last firings (`fp`, once fetched; else its last runs).
+#[allow(clippy::too_many_arguments)]
 pub fn flow_lines(
     j: &FlowRow,
     flow: Option<&Flow>,
+    fp: Option<&FlowPane>,
+    walking: bool,
     summary: Option<&Summary>,
     names: &Names,
     width: usize,
     now: Timestamp,
 ) -> Vec<Line<'static>> {
+    let shown = fp.and_then(FlowPane::shown).or(j.firing);
+    let at = fp.filter(|_| walking).and_then(FlowPane::step_at);
     let loaded = flow.and_then(|f| Some((f, serde_json::from_value::<rl_flow::def::FlowDef>(f.def.clone()).ok()?)));
     let mut lines = match loaded {
         Some((f, def)) => {
-            let mut l = flows::pane_lines(f, &def, j.firing, names, now);
+            let mut l = flows::pane_lines(f, &def, shown, at, names, now);
+            if let Some(p) = fp.filter(|p| !p.files.is_empty()) {
+                l.push(fact("files", firings::files_words(&p.files)));
+            }
             l.push(Line::raw(""));
             l
         }
@@ -358,21 +368,27 @@ pub fn flow_lines(
     row.extend(spans);
     lines.push(Line::from(row));
     lines.extend(summary_section(summary, width, now));
-    lines.push(Line::raw(""));
-    for i in j.runs.iter().take(FLOW_RUNS) {
-        lines.push(Line::from(vec![
-            Span::raw(format!(" {}  ", fmt_clock(i.at, now))).dim(),
-            Span::styled(
-                format!("{:<8}", state_label(i.run.state, i.run.confidence)),
-                state_style(i.run.state),
-            ),
-            Span::raw(format!(" {}", i.summary)),
-        ]));
-    }
-    if j.runs.len() > FLOW_RUNS {
-        lines.push(Line::from(
-            Span::raw(format!("   … {} more", j.runs.len() - FLOW_RUNS)).dim(),
-        ));
+    match fp.filter(|p| !p.firings.is_empty()) {
+        // Its last firings lead with their own blank line.
+        Some(p) => lines.extend(p.firing_lines(walking, width, now)),
+        None => {
+            lines.push(Line::raw(""));
+            for i in j.runs.iter().take(FLOW_RUNS) {
+                lines.push(Line::from(vec![
+                    Span::raw(format!(" {}  ", fmt_clock(i.at, now))).dim(),
+                    Span::styled(
+                        format!("{:<8}", state_label(i.run.state, i.run.confidence)),
+                        state_style(i.run.state),
+                    ),
+                    Span::raw(format!(" {}", i.summary)),
+                ]));
+            }
+            if j.runs.len() > FLOW_RUNS {
+                lines.push(Line::from(
+                    Span::raw(format!("   … {} more", j.runs.len() - FLOW_RUNS)).dim(),
+                ));
+            }
+        }
     }
     lines
 }

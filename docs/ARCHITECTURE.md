@@ -381,7 +381,13 @@ holds the flow: `flow · <in> · <status>`, then what starts it — a cron line 
 where it can be (`hourly 08:00–18:00, Mon–Fri`), left as written where it cannot — where it runs,
 whether its folder as it is has a yes, when it fires next and when it last did, its folder, and
 each step as the latest firing left it (`✓ done`, `? waiting`, `× failed`) with what it does
-(`flows::pane_lines`). When the list
+(`flows::pane_lines`). Under them, the files the shown firing's steps wrote to `runs/<firing>/`
+(`note.txt 12 B · report.md 2 kB`, read from the folder, `.relay/` left out), how its runs went,
+what `/summary` said, and its last eight firings — when, where each stands, what it came to — the
+one shown marked `▸` (`tui/firings.rs`). `enter` again walks the steps and then the firings, as a
+question's choices are walked: `enter` on a step joins its run, or reads what an ended one
+printed in the tile; on a firing it shows that firing's steps above, and `/summary` on the row
+is then of that firing (`SummaryTarget::Firing`); `esc` ends the walk. When the list
 is taller than the screen, its first and last lines say how much is above and below. A group's
 header says which folder it is in, and the cursor stops on it like any other row: `enter` (or
 `^o`) turns the pane into the project's own — the folder, how its runs stand (needs-you /

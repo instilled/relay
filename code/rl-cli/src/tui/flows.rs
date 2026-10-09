@@ -132,11 +132,13 @@ fn place(p: &Path, names: &Names) -> String {
 
 /// A flow in the pane: what starts it, where it runs, whether it has a yes,
 /// when it fires next and last did, and each step as the latest firing left
-/// it — or, before it has fired, as the flow writes them.
+/// it — or, before it has fired, as the flow writes them. `at`: the step under the caret,
+/// while the pane is walked, lit.
 pub fn pane_lines(
     f: &Flow,
     def: &FlowDef,
     firing: Option<&Firing>,
+    at: Option<usize>,
     names: &Names,
     now: Timestamp,
 ) -> Vec<Line<'static>> {
@@ -192,13 +194,15 @@ pub fn pane_lines(
         None => def.steps.iter().map(|s| (s.name.as_str(), None)).collect(),
     };
     let w = steps.iter().map(|(n, _)| n.chars().count()).max().unwrap_or(0);
-    for (name, status) in steps {
+    for (n, (name, status)) in steps.into_iter().enumerate() {
+        let lit = at == Some(n);
         let does = def.steps.iter().find(|s| s.name == name).map(|s| match &s.does {
             Does::Run(a) => a.label(),
             Does::Ask(a) => format!("asks: {}", a.text),
         });
         let mut spans = vec![Span::raw(format!(
-            "   {} {name:<w$}",
+            " {} {} {name:<w$}",
+            if lit { "❯" } else { " " },
             glyph(status.unwrap_or(StepStatus::Pending))
         ))];
         if let Some(s) = status {
@@ -207,7 +211,8 @@ pub fn pane_lines(
         if let Some(d) = does.filter(|d| !d.is_empty()) {
             spans.push(Span::raw(format!("  {d}")).dim());
         }
-        lines.push(Line::from(spans));
+        let line = Line::from(spans);
+        lines.push(if lit { line.style(theme::selected()) } else { line });
     }
     lines
 }
@@ -412,7 +417,7 @@ mod tests {
         let names = Names::new([("/w/api".into(), "api".to_string())]);
         let text = |f: &Flow, firing: Option<&Firing>| {
             let d: FlowDef = serde_json::from_value(f.def.clone()).unwrap();
-            pane_lines(f, &d, firing, &names, now)
+            pane_lines(f, &d, firing, None, &names, now)
                 .iter()
                 .map(|l| l.to_string())
                 .collect::<Vec<_>>()
@@ -447,6 +452,22 @@ mod tests {
             s.contains("   ○ probe   new-log-errors.sh\n   ○ review  asks: fix it?"),
             "{s}"
         );
+    }
+
+    #[test]
+    fn a_step_under_the_caret_is_lit() {
+        let now: Timestamp = "2026-09-10T12:00:00Z".parse().unwrap();
+        let names = Names::new([("/w/api".into(), "api".to_string())]);
+        let f = flow(Some("0123456789abcdef"), def(Some("/w/api")));
+        let d: FlowDef = serde_json::from_value(f.def.clone()).unwrap();
+        let x = firing(
+            FiringStatus::Waiting,
+            &[("probe", StepStatus::Done), ("review", StepStatus::Waiting)],
+        );
+        let lines = pane_lines(&f, &d, Some(&x), Some(1), &names, now);
+        let review = lines.iter().find(|l| l.to_string().contains("? review")).unwrap();
+        assert!(review.to_string().starts_with(" ❯ ? review"), "{review}");
+        assert_eq!(review.style, theme::selected());
     }
 
     fn not_loaded(flow: &str, line: Option<usize>, message: &str) -> NotLoaded {
