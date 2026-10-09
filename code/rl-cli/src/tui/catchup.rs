@@ -116,31 +116,77 @@ pub fn leads(leads: &[Lead], outcomes: &Outcomes, w: usize, now: Timestamp) -> (
 
 /// What heads the catch-up in `h` rows: the leads (`leads`, in step with their keys), then
 /// Relay's own `top`, keyed `top_key`. The leads take at most two thirds of the rows less the
-/// top's first two lines — cut there, the last line kept says where the rest is — and the top
-/// what is left of half the rows, two lines at least (`capped`).
+/// top's first two lines (`squeezed`), and the top what is left of half the rows, two lines at
+/// least (`capped`).
 pub fn head_block(
     leads: (Vec<Line<'static>>, Vec<String>),
     top: Vec<Line<'static>>,
     top_key: &str,
     h: usize,
 ) -> (Vec<Line<'static>>, Vec<String>) {
-    let (mut lines, mut keys) = leads;
     let room = (h * 2 / 3).saturating_sub(top.len().min(2));
-    if lines.len() > room {
-        lines.truncate(room);
-        keys.truncate(room);
-        // A lead's title alone, its body all cut, goes too: the cut is said under the one before.
-        if keys.len() >= 2 && keys[keys.len() - 1] != keys[keys.len() - 2] {
-            lines.pop();
-            keys.pop();
-        }
-        if let Some(last) = lines.last_mut() {
-            *last = Line::styled(format!("{INDENT}  … ^o on it shows the rest"), theme::dim());
-        }
-    }
+    let (mut lines, mut keys) = squeezed(leads, room);
     let top = capped(top, (h / 2).saturating_sub(lines.len()).max(2));
     keys.extend(std::iter::repeat_n(top_key.to_string(), top.len()));
     lines.extend(top);
+    (lines, keys)
+}
+
+/// The leads in `room` lines. Each keeps its title and the blank after it; the bodies get what
+/// is left, the newest first, a cut one saying where the rest is. Past even that, titles alone,
+/// as many as fit, the last line saying how many more: those have no line, and so no key.
+fn squeezed(leads: (Vec<Line<'static>>, Vec<String>), room: usize) -> (Vec<Line<'static>>, Vec<String>) {
+    let (lines, keys) = leads;
+    if lines.len() <= room {
+        return (lines, keys);
+    }
+    // Each lead: its key, its title, its body, the blank after it left out.
+    let mut each: Vec<(String, Line<'static>, Vec<Line<'static>>)> = Vec::new();
+    for (line, key) in lines.into_iter().zip(keys) {
+        match each.last_mut() {
+            Some((k, _, body)) if *k == key => body.push(line),
+            _ => each.push((key, line, vec![])),
+        }
+    }
+    for (_, _, body) in &mut each {
+        if body.last().is_some_and(|l| l.width() == 0) {
+            body.pop();
+        }
+    }
+    let n = each.len();
+    let (mut lines, mut keys) = (Vec::new(), Vec::new());
+    if 2 * n <= room {
+        let mut left = room - 2 * n;
+        for (key, title, mut body) in each {
+            let take = body.len().min(left);
+            left -= take;
+            if take < body.len() {
+                body.truncate(take);
+                if let Some(last) = body.last_mut() {
+                    *last = Line::styled(format!("{INDENT}  … ^o on it shows the rest"), theme::dim());
+                }
+            }
+            lines.push(title);
+            lines.extend(body);
+            lines.push(Line::raw(""));
+            keys.resize(lines.len(), key);
+        }
+        return (lines, keys);
+    }
+    if room == 0 {
+        return (lines, keys);
+    }
+    let shown = if n < room { n } else { room - 1 };
+    for (key, title, _) in each.into_iter().take(shown) {
+        lines.push(title);
+        keys.push(key);
+    }
+    lines.push(if shown < n {
+        Line::styled(format!("{INDENT}+{} more", n - shown), theme::dim())
+    } else {
+        Line::raw("")
+    });
+    keys.push(String::new());
     (lines, keys)
 }
 
@@ -314,33 +360,118 @@ mod tests {
 
     #[test]
     fn the_leads_are_cut_so_relays_top_keeps_two_lines() {
-        let lead = |k: &str| {
-            let lines: Vec<Line<'static>> = (0..10).map(|i| Line::raw(format!("{k} {i}"))).collect();
-            (lines, vec![format!("h:{k}"); 10])
-        };
-        let (mut lines, mut keys) = lead("a");
-        let (b, bk) = lead("b");
-        lines.extend(b);
-        keys.extend(bk);
-        let top = || (0..5).map(|i| Line::raw(format!("top {i}"))).collect::<Vec<_>>();
-
-        // 15 rows: the leads take 10 less 2, the top keeps two lines.
-        let (got, k) = head_block((lines.clone(), keys.clone()), top(), "top", 15);
+        // 15 rows: the leads take 10 less 2; the newest's body gets what the titles leave.
+        let (got, k) = head_block(long_leads(2), top5(), "top", 15);
         let text: Vec<String> = got.iter().map(|l| l.to_string()).collect();
         assert_eq!(text.len(), 10, "{text:#?}");
-        assert_eq!(text[7], "    … ^o on it shows the rest");
+        assert!(text[0].starts_with("  ↻ brief-0 · "), "{text:#?}");
+        assert_eq!(
+            &text[1..6],
+            [
+                "    line 1",
+                "    line 2",
+                "    line 3",
+                "    … ^o on it shows the rest",
+                ""
+            ]
+        );
+        assert!(text[6].starts_with("  ↻ brief-1 · "), "{text:#?}");
+        assert_eq!(text[7], "", "its body all cut, its title stays");
         assert_eq!(&text[8..], ["top 0", "  … ^o on the top shows the rest"]);
-        assert_eq!(k.len(), 10);
-        assert!(k[..8].iter().all(|k| k == "h:a") && k[8..].iter().all(|k| k == "top"));
-
-        // Cut just past b's title: it goes with its body, a's line says the cut.
-        let (got, k) = head_block((lines.clone(), keys.clone()), top(), "top", 20);
-        assert_eq!(got.len(), 10 + 2, "{got:#?}");
-        assert_eq!(got[9].to_string(), "    … ^o on it shows the rest");
-        assert_eq!(k[9], "h:a");
+        assert!(k[..6].iter().all(|k| k == "h:brief-0") && k[6..8].iter().all(|k| k == "h:brief-1"));
+        assert!(k[8..].iter().all(|k| k == "top"));
 
         // Room for all of them: nothing cut.
-        let (got, _) = head_block((lines, keys), top(), "top", 90);
-        assert_eq!(got.len(), 20 + 5);
+        let (got, _) = head_block(long_leads(2), top5(), "top", 90);
+        assert_eq!(got.len(), 2 * (1 + heads::LINES + 1) + 5);
+    }
+
+    /// `n` leads, each of a long outcome, drawn 60 wide, newest first.
+    fn long_leads(n: usize) -> (Vec<Line<'static>>, Vec<String>) {
+        let now: Timestamp = "2026-10-10T08:00:00Z".parse().unwrap();
+        let names: Vec<String> = (0..n).map(|i| format!("brief-{i}")).collect();
+        let firings: Vec<Firing> = names
+            .iter()
+            .map(|name| Firing {
+                id: format!("fi-{name}"),
+                flow: name.clone(),
+                trigger: "when".into(),
+                event: None,
+                status: FiringStatus::Done,
+                started_at: "2026-10-10T05:30:00Z".parse().unwrap(),
+                ended_at: None,
+                steps: vec![],
+                outcome: None,
+            })
+            .collect();
+        let mut o = Outcomes::default();
+        let long: String = (1..=30).map(|i| format!("line {i}\n")).collect();
+        for f in &firings {
+            o.put(
+                f,
+                Some(Outcome {
+                    firing: f.id.clone(),
+                    step: "brief".into(),
+                    text: long.clone(),
+                }),
+            );
+        }
+        let all: Vec<Lead> = names
+            .iter()
+            .zip(&firings)
+            .map(|(flow, firing)| Lead { flow, firing })
+            .collect();
+        leads(&all, &o, 60, now)
+    }
+
+    fn top5() -> Vec<Line<'static>> {
+        (0..5).map(|i| Line::raw(format!("top {i}"))).collect()
+    }
+
+    #[test]
+    fn every_lead_keeps_its_title_when_the_room_is_short() {
+        // 15 rows: two thirds less the top's two is 8, for three leads of 10 lines each.
+        let (got, k) = head_block(long_leads(3), top5(), "top", 15);
+        let text: Vec<String> = got.iter().map(|l| l.to_string()).collect();
+        assert_eq!(k.len(), got.len());
+        for i in 0..3 {
+            let title = format!("  ↻ brief-{i} · ");
+            let at = text.iter().position(|t| t.starts_with(&title));
+            let at = at.unwrap_or_else(|| panic!("brief-{i}'s title shows: {text:#?}"));
+            assert_eq!(k[at], format!("h:brief-{i}"));
+        }
+        assert_eq!(
+            &text[text.len() - 2..],
+            ["top 0", "  … ^o on the top shows the rest"],
+            "the top keeps two lines: {text:#?}"
+        );
+        assert_eq!(
+            text[text.len() - 3],
+            "",
+            "a blank between the leads and the top: {text:#?}"
+        );
+        // Every line keyed to a lead is under that lead's title.
+        for (n, key) in k.iter().enumerate() {
+            if let Some(flow) = heads::flow_of(key) {
+                let above = text[..=n].iter().rev().find(|t| t.starts_with("  ↻ "));
+                assert!(
+                    above.is_some_and(|t| t.starts_with(&format!("  ↻ {flow} · "))),
+                    "line {n} is keyed to {flow} under another's title: {text:#?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn leads_past_even_their_titles_say_how_many_more() {
+        // 12 rows: two thirds less two is 6, for ten leads.
+        let (got, k) = head_block(long_leads(10), top5(), "top", 12);
+        let text: Vec<String> = got.iter().map(|l| l.to_string()).collect();
+        let titles = text.iter().filter(|t| t.starts_with("  ↻ ")).count();
+        assert_eq!(titles, 5, "{text:#?}");
+        assert_eq!(text[5], "  +5 more", "{text:#?}");
+        assert_eq!(&text[6..], ["top 0", "  … ^o on the top shows the rest"]);
+        let shown: std::collections::BTreeSet<&str> = k.iter().filter_map(|k| heads::flow_of(k)).collect();
+        assert_eq!(shown.len(), 5, "the unshown leads have no key: {k:?}");
     }
 }
