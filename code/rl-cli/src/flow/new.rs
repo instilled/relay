@@ -116,7 +116,10 @@ pub async fn new(home: &Home, a: NewArgs, json: bool) -> Result<()> {
     check_name(home, &a.name)?;
     let (files, yours) = match &a.from {
         Some(t) => (template_files(t, &a.set, &folder)?, true),
-        None if !a.words.is_empty() => (drafted(home, &a.name, &folder, &a.words.join(" "), json).await?, true),
+        None if !a.words.is_empty() => (
+            drafted(home, &a.name, &folder, &a.words.join(" "), a.go, json).await?,
+            true,
+        ),
         None if a.go => bail!("--go writes a template or a draft as it is; the bare template needs $EDITOR"),
         None => (vec![NewFile::flow_md(TEMPLATE)], false),
     };
@@ -136,7 +139,7 @@ pub async fn new(home: &Home, a: NewArgs, json: bool) -> Result<()> {
 
 /// The flow `name` drafted from `words` by `assistants.interpret`: its `flow.md`, the draft's own
 /// name passed over for the person's.
-async fn drafted(home: &Home, name: &str, folder: &Path, words: &str, json: bool) -> Result<Vec<NewFile>> {
+async fn drafted(home: &Home, name: &str, folder: &Path, words: &str, go: bool, json: bool) -> Result<Vec<NewFile>> {
     daemon::ensure(home, !json).await?;
     if !json {
         eprintln!("asking…");
@@ -148,6 +151,10 @@ async fn drafted(home: &Home, name: &str, folder: &Path, words: &str, json: bool
     };
     if !json {
         eprintln!("# drafted by {} · run {}", out.agent, out.run);
+        // No editor will show it: what is said yes to is shown first.
+        if go {
+            eprint!("{}", d.text);
+        }
     }
     Ok(vec![NewFile::flow_md(d.text)])
 }

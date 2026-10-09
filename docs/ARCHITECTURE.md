@@ -1263,19 +1263,23 @@ for it to end — 60 s, then it is stopped and the caller told so — and return
 what it wrote. The client reads the last `kind:` block out of that by hand (`rl-cli/src/
 interpret.rs`: fences and prose around it dropped, `key: value` lines, block and flow lists; not
 a YAML parser, because an agent writes `run: claude fix it: now` and means it) and fills the
-form. A flow is read from the first `kind: flow` at the start of a line: its `name:`, then the
-text from its `---` line to the end, a closing fence dropped (`interpret::answer`); asked for a
-flow, the assistant has three minutes, not one. `rl interpret` prints a flow with `# by <agent> ·
-run <id>`, and with `--go` writes it to `~/.relay/flows/<name>/flow.md` and says yes to it as a
-new flow's save does (Loading and approval, above). `rl flow new <name> <words…>` asks for that
-flow, writes the draft, opens it in `$EDITOR` (not with `--go`), and gives it its yes the same
-way; a run answered there is refused by name. In the panel that is the run form `/new` opens, with the assistant's answer in
-it and a line saying who drafted it; `rl interpret` prints the draft with `# by <agent> · run <id>` and does
-nothing, or with `--go` starts the run, `cause: manual`, since the go was yours. An answer of
-another `kind:` is refused by name, and one without a `kind:` is an error that quotes what the
-agent said. Interpretation is a run, so it is in the list, in
-`rl ls --all`, in the journal, and under retention like everything else; nothing about it is
-special except its cause.
+form. In the panel that is the run form `/new` opens, with the assistant's answer in it and a
+line saying who drafted it; `rl interpret` prints the draft with `# by <agent> · run <id>` and
+does nothing, or with `--go` starts the run, `cause: manual`, since the go was yours. An answer
+of another `kind:` is refused by name, and one without a `kind:` is an error that quotes what the
+agent said.
+
+A flow is read from the first `kind: flow` at the start of a line (`interpret::answer`): its
+`name:`, then the text from its `---` line to the end — or, when a fence opened before it, to
+the last bare closing fence, the prose after it dropped. Asked for a flow, the assistant has
+three minutes, not one. `rl interpret` prints a flow with `# by <agent> · run <id>`, its name
+only when it is a flow's name; with `--go` — a new ask, not the draft printed before — it prints
+what it was answered and writes it to `~/.relay/flows/<name>/flow.md`, saying yes to it as a new flow's save does (Loading and
+approval, above). `rl flow new <name> <words…>` asks for that flow, writes the draft, opens it
+in `$EDITOR` — with `--go` it shows the draft instead — and gives it its yes the same way; a run
+answered there is refused by name. Interpretation is a run, so it is in the list, in `rl ls
+--all`, in the journal, and under retention like everything else; nothing about it is special
+except its cause.
 
 **The summariser** says what happened, for someone who was not looking, in a run, a flow's runs
 (its steps', wherever they ran), one firing's (the runs whose chain it is), a project's, or everything (`summary.make {target: run | flow | firing |

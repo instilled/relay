@@ -199,9 +199,10 @@ fn words_become_a_flow_and_go_writes_it() {
         out.starts_with(&format!("kind: flow\nname: hello\n{}", flow_md.trim_end())),
         "{out}"
     );
+    assert!(out.contains("# by fakeai · run "), "{out}");
     assert!(
-        out.contains("# by fakeai · run ") && out.contains("--go writes it"),
-        "{out}"
+        out.contains("--go asks again and writes what it answers") && out.contains("rl flow new hello \""),
+        "the hint says what --go does: {out}"
     );
     assert!(!home.join("flows/hello").exists());
 
@@ -224,6 +225,39 @@ fn words_become_a_flow_and_go_writes_it() {
         asked.contains("a flow named `hi`") && asked.contains("## Flows"),
         "{asked}"
     );
+
+    // With --go no editor shows it: the draft is shown before its yes.
+    let (ok, out, err) = run(rl(&["flow", "new", "hi-go", "--go", "say", "hi"]));
+    assert!(ok, "{out}{err}");
+    assert_eq!(out, "approved hi-go");
+    assert!(err.contains(flow_md.trim_end()), "{err}");
+
+    // --json --go: one JSON object, the outcome in it.
+    let (ok, out, err) = run(rl(&["--json", "interpret", "--go", "say", "hello"]));
+    assert!(!ok, "hello is a flow already: {out}");
+    assert!(err.contains("is a flow already"), "{err}");
+    assert!(
+        out.is_empty() || serde_json::from_str::<serde_json::Value>(&out).is_ok(),
+        "{out}"
+    );
+    std::fs::write(&answer, format!("kind: flow\nname: hello-json\n{flow_md}")).unwrap();
+    let (ok, out, err) = run(rl(&["--json", "interpret", "--go", "say", "hello"]));
+    assert!(ok, "{err}");
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap_or_else(|e| panic!("{e}: {out}"));
+    assert_eq!(
+        (v["name"].as_str(), v["approved"].as_bool()),
+        (Some("hello-json"), Some(true)),
+        "{v}"
+    );
+    assert_eq!(v["said"], "hello-json approved");
+
+    // A name that is not a flow's is never printed as one, nor written.
+    std::fs::write(&answer, format!("kind: flow\nname: ../escaped\n{flow_md}")).unwrap();
+    let (ok, out, err) = run(rl(&["interpret", "--go", "say", "hello"]));
+    assert!(!ok);
+    assert!(!out.contains("name: ../escaped"), "{out}");
+    assert!(err.contains("is not a flow name"), "{err}");
+    assert!(!home.join("escaped").exists() && !dir.path().join("escaped").exists());
 
     // Asked for a flow, answered a run: said, and nothing written.
     std::fs::write(&answer, "kind: run\nrun: echo hey\n").unwrap();

@@ -1610,31 +1610,47 @@ async fn flow_drafted(
     go: bool,
     json: bool,
 ) -> Result<()> {
-    if json {
-        println!(
-            "{}",
-            json!({ "kind": "flow", "name": d.name, "flow_md": d.text, "run": out.run, "agent": out.agent })
-        );
-    } else {
+    // The assistant's name for it, only when it is a flow's name: never printed or written else.
+    let named = d.name.as_deref().filter(|n| rl_flow::def::valid_name(n));
+    let mut said = json!({ "kind": "flow", "name": named, "flow_md": d.text, "run": out.run, "agent": out.agent });
+    if !json {
         println!("kind: flow");
-        if let Some(n) = &d.name {
+        if let Some(n) = named {
             println!("name: {n}");
         }
         print!("{}", d.text);
         println!("# by {} · run {}", out.agent, out.run);
     }
-    let Some(name) = d.name.as_deref() else {
-        bail!("the draft names no flow; rl flow new <name> \"{words}\" names it");
+    let Some(name) = named else {
+        if json {
+            println!("{said}");
+        }
+        match &d.name {
+            Some(n) => bail!("the draft's name {n:?} is not a flow name; rl flow new <name> \"{words}\" names it"),
+            None => bail!("the draft names no flow; rl flow new <name> \"{words}\" names it"),
+        }
     };
     if !go {
-        if !json {
-            println!("# --go writes it to ~/.relay/flows/{name} and says yes to it");
+        if json {
+            println!("{said}");
+        } else {
+            println!(
+                "# --go asks again and writes what it answers; rl flow new {name} \"{words}\" drafts it \
+                 and opens $EDITOR first"
+            );
         }
         return Ok(());
     }
     let (edited, _) = rl_cli::interpret::write_flow(home, name, &d.text).await?;
-    println!("{}", edited.words(name));
-    if !matches!(edited, Edited::Approved(_)) {
+    let approved = matches!(edited, Edited::Approved(_));
+    if json {
+        said["said"] = json!(edited.words(name));
+        said["approved"] = json!(approved);
+        println!("{said}");
+    } else {
+        println!("{}", edited.words(name));
+    }
+    if !approved {
         std::process::exit(1)
     }
     Ok(())

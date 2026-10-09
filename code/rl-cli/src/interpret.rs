@@ -38,11 +38,11 @@ pub enum Answer {
 
 /// The answer in what the assistant said. A flow is the first `kind: flow` at the start of a
 /// line — the pack's own shapes are indented, so an echo of it is never one — then its `name:`,
-/// then its `flow.md` from a `---` line to the end, a closing fence dropped. Anything else is a
-/// run ([`parse`]).
+/// then its `flow.md` from a `---` line: to the end, or, when a fence opened before it, to the
+/// last bare ```` ``` ```` line, the prose after dropped. Anything else is a run (`parse`).
 pub fn answer(raw: &str) -> Result<Answer> {
     let lines: Vec<&str> = raw.lines().collect();
-    let is_flow = |l: &&str| l.starts_with("kind:") && strip_comment(l["kind:".len()..].trim()) == "flow";
+    let is_flow = |l: &&str| l.starts_with("kind:") && unquote(&strip_comment(l["kind:".len()..].trim())) == "flow";
     let Some(at) = lines.iter().position(is_flow) else {
         return parse(raw).map(Answer::Run);
     };
@@ -54,11 +54,12 @@ pub fn answer(raw: &str) -> Result<Answer> {
         .find_map(|l| l.strip_prefix("name:"))
         .map(|n| unquote(&strip_comment(n.trim())))
         .filter(|n| !n.is_empty());
-    let mut body: Vec<&str> = lines[dash..].to_vec();
-    while body
-        .last()
-        .is_some_and(|l| l.trim().is_empty() || l.trim_start().starts_with("```"))
-    {
+    // Inside a fence when an odd number of fence lines came before it.
+    let fenced = lines[..at].iter().filter(|l| l.trim_start().starts_with("```")).count() % 2 == 1;
+    let close = lines[dash..].iter().rposition(|l| l.trim() == "```").filter(|_| fenced);
+    let end = close.map_or(lines.len(), |i| dash + i);
+    let mut body: Vec<&str> = lines[dash..end].to_vec();
+    while body.last().is_some_and(|l| l.trim().is_empty()) {
         body.pop();
     }
     Ok(Answer::Flow(FlowDraft {
@@ -361,6 +362,29 @@ mod tests {
         assert_eq!(d.name, None);
         let e = answer("kind: flow\nname: x\nwhen: every 1h\n").unwrap_err().to_string();
         assert_eq!(e, "kind: flow, then its flow.md from a `---` line: there is none");
+        // Quoted, as YAML allows.
+        for k in ["\"flow\"", "'flow'"] {
+            let raw = format!("kind: {k}\nname: x\n---\nsteps: {{}}\n---\n");
+            assert!(matches!(answer(&raw).unwrap(), Answer::Flow(_)), "{k}");
+        }
+    }
+
+    #[test]
+    fn a_fenced_flow_ends_at_its_fence() {
+        let md = "---\nsteps:\n  look:\n    agent: claude\n---\n\n## look\nRun this:\n```sh\nmake test\n```\n";
+        let flow = |raw: &str| match answer(raw).unwrap() {
+            Answer::Flow(d) => d.text,
+            other => panic!("{other:?}"),
+        };
+        // Prose after the closing fence is not the flow's.
+        let raw = format!("Here:\n```markdown\nkind: flow\nname: t\n{md}```\n\nLet me know if you want changes.\n");
+        assert_eq!(
+            flow(&raw),
+            md,
+            "the prompt's own code block kept, the prose after dropped"
+        );
+        // Not fenced: a prompt that ends in its own code block keeps its closing fence.
+        assert_eq!(flow(&format!("kind: flow\nname: t\n{md}\n")), md);
     }
 
     #[test]
