@@ -735,7 +735,8 @@ the rest`; the pane shows all of it as printed, links and all. One still running
 the room, two lines at least. The cursor goes up onto it from the top (`h:<flow>`); `enter` or
 `^o` shows all of it in the pane, and `/summary [deep]` there tells that firing (§6). Yesterday's
 firing does not head today's, and a flow without the key is a line under its project as any
-other. `rl since` prints the same over its top.
+other; one heading it is not a line under its project too — moved, not copied (`CatchUp::build`)
+— while the list keeps its row. `rl since` prints the same over its top.
 
 **`rl since [stretch]`** prints the same catch-up (`catchup::text`): `while you were away · since
 Sun 14:56 (2d0h)`, the top, then each project's line and its rows — a run by its id, a question by

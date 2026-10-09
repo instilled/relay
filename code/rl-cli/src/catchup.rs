@@ -94,6 +94,11 @@ impl<'a> CatchUp<'a> {
         let news: HashSet<&str> = since_items(d).into_iter().map(|i| i.run.id.as_str()).collect();
         let news = |i: &DigestItem| news.contains(i.run.id.as_str());
         let waiting = |i: &DigestItem| matches!(i.run.state, RunState::NeedsInput | RunState::Blocked);
+        // A flow heading the catch-up is told there, not again under its project.
+        let heading: HashSet<&str> = heads::leads(cx.flows, &d.firings, since)
+            .iter()
+            .map(|l| l.flow)
+            .collect();
         let mut projects: Vec<Project<'a>> = Vec::new();
         // Whether the last header's key has been read off a row under it.
         let mut keyed = true;
@@ -123,7 +128,7 @@ impl<'a> CatchUp<'a> {
                 Row::Run(i) if news(i) || waiting(i) => Row::Run(i),
                 Row::Run(_) => continue,
                 Row::Flow(mut f) => {
-                    if !f.runs.iter().any(|i| news(i)) {
+                    if heading.contains(f.name.as_str()) || !f.runs.iter().any(|i| news(i)) {
                         continue;
                     }
                     // Its marks speak for its runs in the stretch; one you
@@ -750,6 +755,59 @@ mod tests {
         let flow = cu.projects[0].rows.iter().find(|r| matches!(r, Row::Flow(_))).unwrap();
         let line = row_line(flow, now());
         assert!(line.contains("nightly · failed at probe · disk full · "), "{line}");
+    }
+
+    #[test]
+    fn a_flow_heading_the_catch_up_is_not_a_line_under_its_project_too() {
+        let (mut d, names) = (fixture(), names());
+        d.firings.push(Firing {
+            id: "fi1".into(),
+            flow: "nightly".into(),
+            trigger: "when".into(),
+            event: None,
+            status: FiringStatus::Failed,
+            started_at: "2026-10-06T04:00:00Z".parse().unwrap(),
+            ended_at: Some("2026-10-06T04:00:00Z".parse().unwrap()),
+            steps: vec![],
+            outcome: Some("disk full".into()),
+        });
+        let mut flows = flows();
+        flows[0].def["catch_up"] = "top".into();
+        let cu = CatchUp::build(
+            &d,
+            &Context {
+                names: &names,
+                flows: &flows,
+                filter: "",
+                lens: Lens::All,
+                now: now(),
+                relay: None,
+            },
+        );
+        let api = cu.projects.iter().find(|p| p.head.name == "api").unwrap();
+        assert!(
+            !api.rows.iter().any(|r| matches!(r, Row::Flow(_))),
+            "moved to the head, not copied: {:?}",
+            keys(api)
+        );
+        assert_eq!(keys(api), ["q:q1", "r:a1"]);
+        assert_eq!((api.ran, api.failed), (1, 1), "its runs are the head's to tell");
+
+        // Its latest firing from before you left heads nothing: it stays a line.
+        d.firings[0].started_at = "2026-10-05T04:00:00Z".parse().unwrap();
+        d.firings[0].ended_at = d.firings[0].started_at.into();
+        let cu = CatchUp::build(
+            &d,
+            &Context {
+                names: &names,
+                flows: &flows,
+                filter: "",
+                lens: Lens::All,
+                now: now(),
+                relay: None,
+            },
+        );
+        assert!(cu.projects[0].rows.iter().any(|r| matches!(r, Row::Flow(_))));
     }
 
     fn now() -> Timestamp {
