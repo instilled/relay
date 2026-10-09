@@ -131,7 +131,8 @@ pub fn lit(lines: Vec<Line<'static>>, keys: &[String], sel: Option<&str>, w: usi
 }
 
 /// A lead in the pane: its flow, when it fired and where it stands, all of what it came to —
-/// blank lines kept — then what `/summary` said of the firing.
+/// blank lines kept, links as printed (the catch-up says them by their text) — then what
+/// `/summary` said of the firing.
 pub fn lead_pane(
     l: &Lead,
     outcome: Option<&Outcome>,

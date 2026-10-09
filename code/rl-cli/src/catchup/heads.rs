@@ -62,17 +62,46 @@ pub fn title(l: &Lead, now: Timestamp) -> String {
     )
 }
 
-/// What a lead came to, a line each, blank lines left out; nothing while nothing has.
+/// What a lead came to, a line each, blank lines left out, links said by their text
+/// (`links_as_text`); nothing while nothing has.
 pub fn body(o: Option<&Outcome>) -> Vec<String> {
     o.map(|o| {
         o.text
             .lines()
             .map(str::trim_end)
             .filter(|l| !l.trim().is_empty())
-            .map(String::from)
+            .map(links_as_text)
             .collect()
     })
     .unwrap_or_default()
+}
+
+/// `line` with each Google Chat link — `<https://…|PR 123>` — said by its text, `PR 123`; the
+/// rest, `*bold*` too, as it is.
+pub fn links_as_text(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut rest = line;
+    while let Some(open) = rest.find('<') {
+        out.push_str(&rest[..open]);
+        let after = &rest[open + 1..];
+        let link = after.find('>').and_then(|close| {
+            let (url, text) = after[..close].split_once('|')?;
+            let is_url = !url.contains(char::is_whitespace) && (url.contains("://") || url.starts_with("mailto:"));
+            (is_url && !text.is_empty() && !text.contains('<')).then_some((text, close))
+        });
+        match link {
+            Some((text, close)) => {
+                out.push_str(text);
+                rest = &after[close + 1..];
+            }
+            None => {
+                out.push('<');
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 /// The leads as `rl since` prints them over the top: `↻` and the title, what it came to under
@@ -267,6 +296,36 @@ mod tests {
         );
         assert!(t[0].ends_with(" · running · brief"), "{t:?}");
         assert_eq!(&t[1..], [""]);
+    }
+
+    #[test]
+    fn a_link_is_said_by_its_text() {
+        assert_eq!(
+            links_as_text("• <https://github.com/o/r/pull/123|PR 123> by *Anna*"),
+            "• PR 123 by *Anna*"
+        );
+        assert_eq!(
+            links_as_text("<http://a.example/x?y=1|one> and <mailto:b@c.d|mail Bea>"),
+            "one and mail Bea"
+        );
+        // Not links: left as they are.
+        for kept in [
+            "a <b> c",
+            "x < y | z > w",
+            "<not a url|text>",
+            "<https://a.b|",
+            "*bold*",
+            "",
+        ] {
+            assert_eq!(links_as_text(kept), kept);
+        }
+        // What a lead came to says links by their text.
+        let o = Outcome {
+            firing: "fi1".into(),
+            step: "brief".into(),
+            text: "*Brief*\n\n• <https://x.y/1|PR 1> merged\n".into(),
+        };
+        assert_eq!(body(Some(&o)), ["*Brief*", "• PR 1 merged"]);
     }
 
     #[test]

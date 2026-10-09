@@ -728,8 +728,9 @@ writes the top by itself — you asked for it, `/summary` writes it — while a 
 **What heads it.** A flow that says `catch_up: top` (§6) puts its latest firing, when it started
 or ended since you were last here, above the top, newest first (`catchup/heads.rs`,
 `heads::leads`): `↻ morning-brief · 07:30 · done`, then what it came to — its last step's out
-(`flow.outcome`), blank lines left out, at most eight lines, the last saying `… ^o on it shows
-the rest`. One still running heads it with its state alone; one a source failed in says
+(`flow.outcome`), blank lines left out, a Google Chat link said by its text (`<https://…|PR
+123>` as `PR 123`, `*bold*` as written), at most eight lines, the last saying `… ^o on it shows
+the rest`; the pane shows all of it as printed, links and all. One still running heads it with its state alone; one a source failed in says
 `failed at gchat` and, under it, what gchat printed. Relay's own top takes what is left of half
 the room, two lines at least. The cursor goes up onto it from the top (`h:<flow>`); `enter` or
 `^o` shows all of it in the pane, and `/summary [deep]` there tells that firing (§6). Yesterday's
