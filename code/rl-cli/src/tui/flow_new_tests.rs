@@ -174,7 +174,11 @@ async fn a_draft_written_without_its_yes_is_taken_away_again() {
     on_screen(&mut app);
     // No daemon to load it and say yes: what was written goes again.
     token.cancel();
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while crate::client::Client::connect(&home).await.is_ok() {
+        assert!(Instant::now() < deadline, "the daemon never went");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
     press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
     assert!(said(&app).starts_with("write hello: "), "{}", said(&app));
     assert!(said(&app).ends_with(" · nothing kept"), "{}", said(&app));

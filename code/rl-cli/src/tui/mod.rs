@@ -6863,7 +6863,7 @@ mod tests {
     /// What a test panel's daemon is told beyond `panel()`'s.
     #[derive(Default)]
     struct Setup {
-        /// More of `config.yaml`, after `assistants: summary: fakeai`.
+        /// More of `config.yaml`, after `assistants: {summary: fakeai, interpret: fakeai}`.
         config: &'static str,
         /// `assistants.summary` left out: the first agent here would answer.
         unnamed: bool,
@@ -6966,10 +6966,11 @@ mod tests {
         std::fs::write(home.detect_dir().join("fakeai.yaml"), profile).unwrap();
         std::fs::write(
             home.config_file(),
+            // The interpreter is always `fakeai`: a real `claude` on the PATH is never picked.
             if set.unnamed {
-                set.config.to_string()
+                format!("assistants:\n  interpret: fakeai\n{}", set.config)
             } else {
-                format!("assistants:\n  summary: fakeai\n{}", set.config)
+                format!("assistants:\n  summary: fakeai\n  interpret: fakeai\n{}", set.config)
             },
         )
         .unwrap();
