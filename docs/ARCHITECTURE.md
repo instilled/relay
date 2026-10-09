@@ -86,7 +86,7 @@ flowchart LR
     core["relay-core (shared-core)<br/>Home paths · ids · time"]
     ledger["relay-ledger (shared-ledger)<br/>migrations · runs · events · sessions · session_io · presence"]
     det["relay-detect (shared-detect)<br/>registry · pty · claude · machine · ansi"]
-    flow["rl-flow (pure: no I/O, no tokio)<br/>doc · def · plan · advance · cond · template · cron · hash"]
+    flow["rl-flow (pure: no I/O, no tokio)<br/>doc · def · plan · advance · cond · template · state · preview · cron · hash"]
 
     rl --> proto
     rl --> core
@@ -1578,8 +1578,6 @@ limit, so both sides fall back to the same short hashed directory under the temp
 Named here so the diagrams above are not read as the whole plan — see §7 of the brief for
 phasing.
 
-- **The rest of flows** (`docs/specs/2026-10-07-flows.md`) — Writing it: `rl flow new` and
-  `/flow new` drafted from words, the context pack teaching flows, `rl flow test`, and templates.
 - **Plugins** — `rl-plugin-host` (Bun), the broker, `relay.d.ts`, the manifest/approval flow,
   action keys and the detail tab. Until then, one provisional contract stands in for a piece of
   it — **workspace badges** (`rl-daemon/src/badges.rs`): `workspaces.badges` in `config.yaml`
