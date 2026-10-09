@@ -6,11 +6,9 @@
 
 use crate::client::Client;
 use crate::context::{self, Here, Want};
-use crate::flow::{Edited, NewFile};
 use crate::tui::form::{self, Form};
 use anyhow::{Context as _, Result, bail};
 use rl_core::Home;
-use rl_proto::flow::Reloaded;
 use rl_proto::methods::{AssistantOutput, AssistantParams, AssistantRun, RunSpec, RunStart};
 use rl_proto::types::{Cause, Run};
 use std::collections::BTreeMap;
@@ -253,15 +251,6 @@ pub async fn ask(home: &Home, folder: &Path, words: &str, want: &Want) -> Result
     Ok((said, out))
 }
 
-/// A drafted flow written to its folder and, as it loads, said yes to: the person's enter, or
-/// their `--go`. Only `flow.md`, in a new folder by a flow's name: a draft cannot reach past it,
-/// nor over a flow there already.
-pub async fn write_flow(home: &Home, name: &str, text: &str) -> Result<(Edited, Reloaded)> {
-    let editing = crate::flow::start_new(home, name, vec![NewFile::flow_md(text)], true)?;
-    let mut rpc = Client::connect(home).await?;
-    crate::flow::finish_edit(&mut rpc, home, editing).await
-}
-
 /// What the form says, done: a run started. The person's yes, on the line.
 /// Returns a line saying what happened.
 pub async fn apply(home: &Home, f: &Form) -> Result<String> {
@@ -399,31 +388,5 @@ mod tests {
         // Where it was typed, when the answer names no folder.
         let d = run("kind: run\nrun: make test\n");
         assert_eq!(form_of(&d, Path::new("/w/api")).get("in"), "/w/api");
-    }
-
-    #[tokio::test]
-    async fn a_draft_is_written_only_to_a_new_flow_of_its_own() {
-        let tmp = tempfile::tempdir().unwrap();
-        let home = Home::at(tmp.path().join("h"));
-        let text = "---\nsteps:\n  a:\n    run: echo\n---\n";
-        // A name the assistant gave is a flow's name, or nothing is written: refused before
-        // the daemon is reached, so none is needed here.
-        for name in ["../../escaped", "/tmp/abs", "a/b", ".."] {
-            let e = write_flow(&home, name, text).await.err().expect("refused").to_string();
-            assert!(e.contains("is not a flow name"), "{name}: {e}");
-        }
-        assert!(!tmp.path().join("escaped").exists());
-        assert!(!home.flow_dir("").exists(), "nothing written under flows/");
-        // Nor over a flow there already.
-        let mine = home.flow_dir("mine");
-        std::fs::create_dir_all(&mine).unwrap();
-        std::fs::write(mine.join("flow.md"), "mine\n").unwrap();
-        let e = write_flow(&home, "mine", text)
-            .await
-            .err()
-            .expect("refused")
-            .to_string();
-        assert!(e.contains("is a flow already"), "{e}");
-        assert_eq!(std::fs::read_to_string(mine.join("flow.md")).unwrap(), "mine\n");
     }
 }

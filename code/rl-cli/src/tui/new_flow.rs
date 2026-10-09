@@ -11,7 +11,7 @@ use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use std::cell::Cell;
-use std::path::Path;
+use std::path::PathBuf;
 use unicode_width::UnicodeWidthChar;
 
 pub const USAGE: &str = "/flow new <name> [words…] · /flow new <name> --from <template> [key=value…]";
@@ -90,13 +90,13 @@ pub struct Drafted {
 }
 
 impl Drafted {
-    /// `text` as `name`'s `flow.md`, checked as a reload checks a flow: `known` says whether a
-    /// folder is a project Relay knows; `taken`, why a name may not be a new flow, if it may not.
+    /// `text` as `name`'s `flow.md`, checked as a reload checks a flow: `known` is the projects
+    /// Relay knows; `taken`, why a name may not be a new flow, if it may not.
     pub fn new(
         name: Option<String>,
         text: String,
         agent: String,
-        known: &dyn Fn(&Path) -> bool,
+        known: &[PathBuf],
         taken: &dyn Fn(&str) -> Option<String>,
     ) -> Self {
         let name = name.unwrap_or_default();
@@ -106,14 +106,7 @@ impl Drafted {
         } else if let Some(why) = taken(&name) {
             problems.push(why);
         }
-        match rl_flow::doc::read(&text) {
-            Err(p) => problems.push(at(p.line, &p.message)),
-            Ok(doc) => {
-                if let Err(found) = rl_flow::def::check(&name, doc, known) {
-                    problems.extend(found.iter().map(|p| at(p.line, &p.message)));
-                }
-            }
-        }
+        problems.extend(crate::flow::problems(&name, &text, known));
         Drafted {
             name,
             text,
@@ -259,14 +252,6 @@ fn wrap(lines: Vec<Line<'static>>, width: usize) -> Vec<Line<'static>> {
     rows
 }
 
-/// A problem at its line of `flow.md`, when it has one.
-fn at(line: Option<usize>, message: &str) -> String {
-    match line {
-        Some(l) => format!("flow.md:{l} · {message}"),
-        None => message.to_string(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -308,9 +293,7 @@ mod tests {
 
     #[test]
     fn a_draft_says_what_would_stop_it_loading() {
-        let ok = Drafted::new(Some("hello".into()), HELLO.into(), "fakeai".into(), &|_| true, &|_| {
-            None
-        });
+        let ok = Drafted::new(Some("hello".into()), HELLO.into(), "fakeai".into(), &[], &|_| None);
         assert!(ok.ready(), "{:?}", ok.problems);
         let text: Vec<String> = ok.lines().iter().map(|l| l.to_string()).collect();
         assert_eq!(text[0], " hello  drafted by fakeai · flows/hello/flow.md");
@@ -324,7 +307,7 @@ mod tests {
             Some("x".into()),
             "---\nin: ~/nowhere\nsteps:\n  a:\n    after: nope\n    run: x\n---\n".into(),
             "fakeai".into(),
-            &|_| false,
+            &[],
             &|_| None,
         );
         assert_eq!(
@@ -341,13 +324,13 @@ mod tests {
             " ! flow.md:2 · in: ~/nowhere is not a project Relay knows — `rl add ~/nowhere`"
         );
 
-        let unnamed = Drafted::new(None, HELLO.into(), "fakeai".into(), &|_| true, &|_| None);
+        let unnamed = Drafted::new(None, HELLO.into(), "fakeai".into(), &[], &|_| None);
         assert_eq!(
             unnamed.problems,
             ["it names no flow · /flow new <name> <words> names one"]
         );
         assert!(unnamed.lines()[0].to_string().starts_with(" (unnamed)"));
-        let taken = Drafted::new(Some("hello".into()), HELLO.into(), "fakeai".into(), &|_| true, &|n| {
+        let taken = Drafted::new(Some("hello".into()), HELLO.into(), "fakeai".into(), &[], &|n| {
             Some(format!("`{n}` is a flow already"))
         });
         assert_eq!(taken.problems, ["`hello` is a flow already"]);
@@ -355,7 +338,7 @@ mod tests {
             Some("y".into()),
             "no frontmatter\n".into(),
             "fakeai".into(),
-            &|_| true,
+            &[],
             &|_| None,
         );
         assert_eq!(
@@ -376,9 +359,7 @@ mod tests {
 
     #[test]
     fn a_draft_is_seen_once_its_last_line_has_been_drawn() {
-        let fits = Drafted::new(Some("hello".into()), HELLO.into(), "fakeai".into(), &|_| true, &|_| {
-            None
-        });
+        let fits = Drafted::new(Some("hello".into()), HELLO.into(), "fakeai".into(), &[], &|_| None);
         assert!(!fits.seen(), "not drawn yet");
         drawn(&fits, 80, 20);
         assert!(fits.seen(), "it fits: seen at once");
@@ -388,7 +369,7 @@ mod tests {
         for i in 1..=30 {
             md.push_str(&format!("Line {i}.\n"));
         }
-        let tall = Drafted::new(Some("tall".into()), md, "fakeai".into(), &|_| true, &|_| None);
+        let tall = Drafted::new(Some("tall".into()), md, "fakeai".into(), &[], &|_| None);
         let first = drawn(&tall, 80, 10);
         assert!(first[0].starts_with(" tall  drafted by fakeai"), "{first:#?}");
         assert!(!tall.seen(), "its end is below");
@@ -411,7 +392,7 @@ mod tests {
 
         // A line wider than the pane is broken, not cut: its end is drawn, and counted.
         let wide = format!("{HELLO}{}END\n", "x".repeat(200));
-        let wide = Drafted::new(Some("wide".into()), wide, "fakeai".into(), &|_| true, &|_| None);
+        let wide = Drafted::new(Some("wide".into()), wide, "fakeai".into(), &[], &|_| None);
         let rows = drawn(&wide, 40, 30);
         assert!(wide.seen());
         assert!(rows.iter().any(|r| r.contains("END")), "{rows:#?}");
@@ -420,7 +401,7 @@ mod tests {
     #[test]
     fn what_does_not_print_is_shown_as_its_escape() {
         let md = "---\nwhen: every 1h\r\nsteps:\n  say:\n    run: \"echo \u{1b}[2J\u{202e}hi\"\n---\n";
-        let d = Drafted::new(Some("odd".into()), md.into(), "fakeai".into(), &|_| true, &|_| None);
+        let d = Drafted::new(Some("odd".into()), md.into(), "fakeai".into(), &[], &|_| None);
         let text: Vec<String> = d.lines().iter().map(|l| l.to_string()).collect();
         assert!(text.contains(&" when: every 1h\\r".to_string()), "{text:#?}");
         assert!(

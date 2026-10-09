@@ -170,6 +170,29 @@ async fn a_draft_written_without_its_yes_is_taken_away_again() {
 }
 
 #[tokio::test]
+async fn a_draft_with_no_yes_in_a_folder_of_yours_leaves_only_what_was_yours() {
+    let (tmp, token, mut app, _) = panel().await;
+    let home = rl_core::Home::at(tmp.path().join("h"));
+    let dir = home.flow_dir("hello");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("notes.txt"), "mine").unwrap();
+    app.show_draft(Some("hello".into()), HELLO.into(), "fakeai".into());
+    draw_text(&mut app);
+    // The folder never had a yes: none is given, and what was written goes again — each time.
+    for _ in 0..2 {
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+        assert_eq!(
+            said(&app),
+            "hello was not said yes to: its folder changed since its last yes · nothing kept"
+        );
+        assert!(!dir.join("flow.md").exists());
+        assert_eq!(std::fs::read_to_string(dir.join("notes.txt")).unwrap(), "mine");
+        assert!(matches!(app.mode, super::Mode::Draft(_)), "still shown");
+    }
+    token.cancel();
+}
+
+#[tokio::test]
 async fn a_flow_answered_is_shown_as_a_draft_named_by_whoever_asked() {
     use crate::interpret::{Answer, FlowDraft};
     let (_tmp, token, mut app, folder) = panel().await;

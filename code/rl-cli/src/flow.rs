@@ -21,7 +21,7 @@ mod state;
 pub mod templates;
 pub mod tested;
 pub use edit::{Edited, Editing, TEMPLATE, drop_new, finish_edit, start_edit};
-pub use new::{NewArgs, NewFile, check_name, start_new};
+pub use new::{NewArgs, NewFile, NewName, check_name, problems, projects, start_new, write_new};
 pub use state::StateCmd;
 
 #[derive(Subcommand)]
@@ -231,17 +231,32 @@ fn short(hash: &str) -> String {
 /// Opens the flow's `flow.md`, then reads the folder again and says what came of it; one that
 /// did not load, or was saved and is left needing a yes, exits 1.
 async fn edit(home: &Home, name: &str, json: bool) -> Result<()> {
-    let editing = start_edit(home, name)?;
+    in_editor(home, start_edit(home, name)?, json).await
+}
+
+/// `flow.md` in `$EDITOR`, then the edit finished and said. However the editor ends, a new flow
+/// left as the template is not kept: taken away before the daemon is reached, so it goes even
+/// when the daemon cannot be started.
+async fn in_editor(home: &Home, editing: Editing, json: bool) -> Result<()> {
     if let Err(e) = crate::env::open_in_editor(&editing.file, 1) {
-        // However the editor ends, a new flow's template is not left behind.
-        if let Err(dropped) = drop_new(home, &editing, true) {
-            bail!("{e:#}; and its template is left: {dropped:#}");
+        if let Err(left) = drop_new(home, &editing, true) {
+            bail!("{e:#}; and what was written is left: {left:#}");
         }
         return Err(e);
     }
+    let name = editing.name.clone();
+    if drop_new(home, &editing, false)? {
+        let said = Edited::Dropped.words(&name);
+        if json {
+            println!("{}", serde_json::json!({ "name": name, "kept": false, "said": said }));
+        } else {
+            println!("{said}");
+        }
+        return Ok(());
+    }
     let mut rpc = daemon::ensure(home, !json).await?;
-    let (edited, reloaded) = finish_edit(&mut rpc, home, editing).await?;
-    told(&edited, &reloaded, name, json)
+    let (edited, reloaded) = finish_edit(&mut rpc, editing).await?;
+    told(&edited, &reloaded, &name, json)
 }
 
 /// What came of an edit or a new flow, said; one that did not load, or was saved and is left

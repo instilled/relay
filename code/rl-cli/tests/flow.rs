@@ -242,6 +242,16 @@ fn a_template_is_dropped_however_the_editor_ends() {
     std::fs::create_dir_all(&ws).unwrap();
     let rl = |args: &[&str]| rl(&home, &ws, &rld, &session, args);
 
+    // Taken away before the daemon is reached: one that cannot be started keeps nothing either.
+    for verb in ["new", "edit"] {
+        let mut c = rl(&["flow", verb, "nodaemon"]);
+        c.env("RELAY_RLD_BIN", dir.join("no-rld"));
+        let (ok, o, e) = out(c);
+        assert!(ok, "{o}{e}");
+        assert_eq!(o, "nodaemon left as the template: not kept");
+        assert!(!home.join("flows/nodaemon").exists());
+    }
+
     // An editor that fails, as `:cq` does.
     let mut edit = rl(&["flow", "edit", "aborted"]);
     edit.env("EDITOR", "false");
@@ -261,6 +271,19 @@ fn a_template_is_dropped_however_the_editor_ends() {
         kept.join("runs/f1/probe.out").exists(),
         "what a firing left is not the edit's to drop"
     );
+
+    // A folder holding a script of the person's: the template goes, the script stays, by either
+    // way in.
+    let mine = home.join("flows/mine");
+    std::fs::create_dir_all(&mine).unwrap();
+    std::fs::write(mine.join("probe.sh"), "echo mine\n").unwrap();
+    for args in [["flow", "new", "mine"], ["flow", "edit", "mine"]] {
+        let (ok, o, e) = out(rl(&args));
+        assert!(ok, "{o}{e}");
+        assert_eq!(o, "mine left as the template: not kept");
+        assert!(!mine.join("flow.md").exists(), "{args:?}");
+        assert_eq!(std::fs::read_to_string(mine.join("probe.sh")).unwrap(), "echo mine\n");
+    }
 
     assert!(out(rl(&["daemon", "stop"])).0);
 }

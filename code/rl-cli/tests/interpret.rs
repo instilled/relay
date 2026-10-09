@@ -259,6 +259,21 @@ fn words_become_a_flow_and_go_writes_it() {
     assert!(err.contains("is not a flow name"), "{err}");
     assert!(!home.join("escaped").exists() && !dir.path().join("escaped").exists());
 
+    // A draft that would not load is refused before anything is written, by either way in.
+    let broken = "---\nsteps:\n  a:\n    after: nope\n    run: x\n---\n";
+    std::fs::write(&answer, format!("kind: flow\nname: broken\n{broken}")).unwrap();
+    let (ok, out, err) = run(rl(&["interpret", "--go", "say", "hello"]));
+    assert!(!ok, "{out}");
+    assert!(
+        err.contains("broken would not load: flow.md:3 · `a` comes after `nope`"),
+        "{err}"
+    );
+    assert!(!home.join("flows/broken").exists());
+    let (ok, out, err) = run(rl(&["flow", "new", "broken-too", "--go", "say", "hello"]));
+    assert!(!ok, "{out}");
+    assert!(err.contains("broken-too would not load: flow.md:3"), "{err}");
+    assert!(!home.join("flows/broken-too").exists());
+
     // Asked for a flow, answered a run: said, and nothing written.
     std::fs::write(&answer, "kind: run\nrun: echo hey\n").unwrap();
     let (ok, _, err) = run(rl(&["flow", "new", "hey", "say", "hey"]));

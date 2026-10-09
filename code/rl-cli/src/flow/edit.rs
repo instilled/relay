@@ -3,7 +3,7 @@
 //! changed meanwhile — to exactly that version, by its hash.
 
 use crate::client::Client;
-use anyhow::{Result, bail};
+use anyhow::{Context as _, Result, bail};
 use rl_core::Home;
 use rl_flow::def::valid_name;
 use rl_flow::hash;
@@ -25,6 +25,8 @@ pub struct Editing {
     pub(super) was: Vec<u8>,
     /// The folder held nothing before this edit wrote to it.
     pub(super) fresh: bool,
+    /// What this edit wrote, as written: a new flow's files, and no one else's.
+    pub(super) wrote: Vec<(PathBuf, Vec<u8>)>,
     /// What was written is the person's — a template they filled, a draft they asked for — so it
     /// is kept and said yes to even saved unchanged. The bare template is not.
     pub(super) yours: bool,
@@ -71,9 +73,11 @@ pub fn start_edit(home: &Home, name: &str) -> Result<Editing> {
     let dir = home.flow_dir(name);
     let file = dir.join("flow.md");
     let fresh = folder_files(&dir)?.is_empty();
+    let mut wrote = Vec::new();
     if !file.exists() {
         std::fs::create_dir_all(&dir)?;
-        std::fs::write(&file, TEMPLATE)?;
+        write_new_file(&file, TEMPLATE.as_bytes(), false)?;
+        wrote.push((PathBuf::from("flow.md"), TEMPLATE.as_bytes().to_vec()));
     }
     Ok(Editing {
         name: name.to_string(),
@@ -81,21 +85,20 @@ pub fn start_edit(home: &Home, name: &str) -> Result<Editing> {
         was: std::fs::read(&file)?,
         file,
         fresh,
+        wrote,
         yours: false,
     })
 }
 
 /// Back from the editor: every flow read again, and the one edited said yes to only when
 /// `flow.md` was saved changed, the folder before it had its yes (or held nothing), and nothing
-/// else in it changed meanwhile — the yes is to exactly that version, by its hash. A new flow
-/// left as the template is not kept. A new flow the person wrote — a filled template, a draft —
-/// is said yes to saved unchanged as well.
-pub async fn finish_edit(rpc: &mut Client, home: &Home, e: Editing) -> Result<(Edited, Reloaded)> {
+/// else in it changed meanwhile — the yes is to exactly that version, by its hash. A new flow the
+/// person wrote — a filled template, a draft — is said yes to saved unchanged as well. A new flow
+/// left as the template is the caller's to take away first, before the daemon is reached, so it
+/// goes even when the daemon cannot be (`drop_new`).
+pub async fn finish_edit(rpc: &mut Client, e: Editing) -> Result<(Edited, Reloaded)> {
     let now = std::fs::read(&e.file).ok();
     let untouched = now.as_deref() == Some(e.was.as_slice());
-    if drop_new(home, &e, false)? {
-        return Ok((Edited::Dropped, rpc.call::<FlowReload>(()).await?));
-    }
     let reloaded = rpc.call::<FlowReload>(()).await?;
     let mine: Vec<NotLoaded> = reloaded
         .not_loaded
@@ -130,24 +133,54 @@ pub async fn finish_edit(rpc: &mut Client, home: &Home, e: Editing) -> Result<(E
     Ok((Edited::Approved(Box::new(f)), reloaded))
 }
 
-/// Takes a new flow away as it was written, when nothing since is the person's: its folder held
-/// nothing before, `flow.md` is untouched and the folder is as written. Back from the editor
-/// (`unseen` false) only the bare template goes — a filled template or a draft is the person's;
-/// when the editor did not open or failed (`unseen`), whatever was written goes, for no yes was
-/// given to it. What a firing left in `runs/`, or anything the hash passes over, stays, and so
-/// does the folder then. Whether it went.
+/// Takes a new flow away as it was written, when nothing since is the person's: this edit wrote
+/// its `flow.md`, and it is untouched. Back from the editor (`unseen` false) only the bare
+/// template goes — a filled template or a draft is the person's; when the editor did not open or
+/// failed (`unseen`), whatever was written goes, for no yes was given to it. Only what the edit
+/// wrote goes (`take_back`): a file the person had there, or what a firing left in `runs/`,
+/// stays, and so does the folder then. Whether it went.
 pub fn drop_new(home: &Home, e: &Editing, unseen: bool) -> Result<bool> {
-    let dir = home.flow_dir(&e.name);
+    let wrote_md = e.wrote.iter().any(|(p, _)| p == Path::new("flow.md"));
     let untouched = std::fs::read(&e.file).is_ok_and(|now| now == e.was);
-    if !(e.fresh && (unseen || !e.yours) && untouched && folder_files(&dir)? == e.before) {
+    if !(wrote_md && (unseen || !e.yours) && untouched) {
         return Ok(false);
     }
-    for (p, _) in &e.before {
-        std::fs::remove_file(dir.join(p))?;
+    take_back(home, e)?;
+    Ok(true)
+}
+
+/// What an edit wrote, removed — each file only while it is as written — and then its folder,
+/// only if nothing else is in it.
+pub(super) fn take_back(home: &Home, e: &Editing) -> Result<()> {
+    let dir = home.flow_dir(&e.name);
+    for (p, bytes) in &e.wrote {
+        let file = dir.join(p);
+        if std::fs::read(&file).is_ok_and(|now| &now == bytes) {
+            std::fs::remove_file(&file).with_context(|| format!("removing {}", file.display()))?;
+        }
     }
     // Not empty: something not the edit's is there, and stays.
     let _ = std::fs::remove_dir(&dir);
-    Ok(true)
+    Ok(())
+}
+
+/// A file written where there is none — never over a file, nor through a link, dangling or not —
+/// and made executable when a step runs it.
+pub(super) fn write_new_file(path: &Path, bytes: &[u8], exec: bool) -> Result<()> {
+    use std::io::Write as _;
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .with_context(|| format!("writing {}", path.display()))?;
+    f.write_all(bytes)
+        .with_context(|| format!("writing {}", path.display()))?;
+    #[cfg(unix)]
+    if exec {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))?;
+    }
+    Ok(())
 }
 
 /// A flow's folder as its hash reads it; an empty one when there is none.

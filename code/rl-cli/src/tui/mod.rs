@@ -3193,11 +3193,16 @@ impl App {
 
     /// Back from the editor: every flow read again, and the one edited said
     /// yes to only as `rl flow edit` gives it — saved, loaded, and no more
-    /// than the edit in it; else why not.
+    /// than the edit in it; else why not. A new flow left as the template is taken away first.
     async fn edited(&mut self, editing: crate::flow::Editing) {
         let name = editing.name.clone();
-        match crate::flow::finish_edit(&mut self.rpc, &self.home, editing).await {
-            Ok((edited, _)) => self.say(edited.words(&name)),
+        let said = match crate::flow::drop_new(&self.home, &editing, false) {
+            Ok(true) => Ok(crate::flow::Edited::Dropped),
+            Ok(false) => crate::flow::finish_edit(&mut self.rpc, editing).await.map(|(e, _)| e),
+            Err(e) => Err(e),
+        };
+        match said {
+            Ok(edited) => self.say(edited.words(&name)),
             Err(e) => self.say(format!("edit {name}: {e:#}")),
         }
         self.refresh().await;
@@ -3237,19 +3242,22 @@ impl App {
             Ok(a) => a,
             Err(e) => return self.say(e),
         };
-        if let Err(e) = crate::flow::check_name(&self.home, asked.name()) {
-            return self.say(format!("{e:#}"));
-        }
-        let (name, files, yours) = match asked {
+        let name = match crate::flow::check_name(&self.home, asked.name()) {
+            Ok(name) => name,
+            Err(e) => return self.say(format!("{e:#}")),
+        };
+        let (files, yours) = match asked {
             new_flow::Asked::Words { .. } if self.asking.is_some() => {
                 return self.say("still asking; /stop on its run");
             }
-            new_flow::Asked::Words { name, words } => return self.ask(words, Want::Flow { name }),
-            new_flow::Asked::Bare { name } => (name, vec![NewFile::flow_md(crate::flow::TEMPLATE)], false),
-            new_flow::Asked::From { name, template, given } => {
+            new_flow::Asked::Words { words, .. } => {
+                return self.ask(words, Want::Flow { name: name.to_string() });
+            }
+            new_flow::Asked::Bare { .. } => (vec![NewFile::flow_md(crate::flow::TEMPLATE)], false),
+            new_flow::Asked::From { template, given, .. } => {
                 let here = rl_core::display_path(&self.folder_here());
                 match new_flow::template_files(&template, &given, &here) {
-                    Ok(files) => (name, files, true),
+                    Ok(files) => (files, true),
                     Err(e) => return self.say(e),
                 }
             }
@@ -3263,14 +3271,9 @@ impl App {
     /// A flow the assistant drafted, shown in the pane until enter writes it, `e` opens it, or esc
     /// lets it go. Checked as a reload would check it, against the projects Relay knows.
     fn show_draft(&mut self, name: Option<String>, text: String, agent: String) {
-        let known = self.names.paths();
         let home = self.home.clone();
-        let is_known = |p: &Path| {
-            let p = form::expand(&p.to_string_lossy());
-            known.contains(&std::fs::canonicalize(&p).unwrap_or(p))
-        };
         let taken = |n: &str| crate::flow::check_name(&home, n).err().map(|e| format!("{e:#}"));
-        let d = new_flow::Drafted::new(name, text, agent, &is_known, &taken);
+        let d = new_flow::Drafted::new(name, text, agent, &self.names.paths(), &taken);
         self.say(format!(
             "{} drafted {}",
             d.agent,
@@ -3281,37 +3284,34 @@ impl App {
         self.show_pane = true;
     }
 
-    /// The draft written to its folder and said yes to at once, or (`edit`) opened in `$EDITOR`
-    /// first and said yes to on return, as a new flow's save is. Written but not said yes to —
-    /// the daemon did not load it, or did not answer — it is taken away again, and stays shown.
+    /// The draft written to its folder and said yes to at once (`flow::write_new`), or (`edit`)
+    /// opened in `$EDITOR` first and said yes to on return, as a new flow's save is. Not said yes
+    /// to, what was written is taken away again, and the draft stays shown.
     async fn write_draft(&mut self, d: new_flow::Drafted, edit: bool) {
         let files = vec![NewFile::flow_md(d.text.clone())];
-        let editing = match crate::flow::start_new(&self.home, &d.name, files, true) {
-            Ok(editing) if edit => return self.editor = Some((editing, 1)),
-            Ok(editing) => editing,
+        let name = match crate::flow::check_name(&self.home, &d.name) {
+            Ok(name) => name,
             Err(e) => {
                 self.say(format!("{e:#}"));
                 return self.mode = Mode::Draft(Box::new(d));
             }
         };
-        let written = editing.clone();
-        let said = match crate::flow::finish_edit(&mut self.rpc, &self.home, editing).await {
-            Ok((edited @ crate::flow::Edited::Approved(_), _)) => Ok(edited.words(&d.name)),
-            Ok((edited, _)) => Err(edited.words(&d.name)),
-            Err(e) => Err(format!("write {}: {e:#}", d.name)),
-        };
-        let said = match said {
-            Ok(said) => said,
-            Err(why) => {
-                let gone = match crate::flow::drop_new(&self.home, &written, true) {
-                    Ok(true) => " · nothing kept".to_string(),
-                    Ok(false) => String::new(),
-                    Err(e) => format!(" · and what was written is left: {e:#}"),
-                };
-                // The daemon forgets it too, when it is up.
-                let _ = self.rpc.call::<FlowReload>(()).await;
+        if edit {
+            match crate::flow::start_new(&self.home, &name, files, true) {
+                Ok(editing) => self.editor = Some((editing, 1)),
+                Err(e) => {
+                    self.say(format!("{e:#}"));
+                    self.mode = Mode::Draft(Box::new(d));
+                }
+            }
+            return;
+        }
+        let known = self.names.paths();
+        let said = match crate::flow::write_new(&mut self.rpc, &self.home, &name, files, &known).await {
+            Ok(_) => format!("{name} approved"),
+            Err(e) => {
                 self.mode = Mode::Draft(Box::new(d));
-                format!("{why}{gone}")
+                format!("{e:#}")
             }
         };
         self.refresh().await;

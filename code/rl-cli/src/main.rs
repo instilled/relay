@@ -5,7 +5,7 @@ use rl_cli::client::Client;
 use rl_cli::context::Want;
 use rl_cli::daemon;
 use rl_cli::env::child_env;
-use rl_cli::flow::{Edited, FlowCmd};
+use rl_cli::flow::{FlowCmd, NewFile};
 use rl_cli::interpret::{Answer, FlowDraft};
 use rl_cli::render;
 use rl_core::time::{now, parse_since};
@@ -1641,14 +1641,24 @@ async fn flow_drafted(
         }
         return Ok(());
     }
-    let (edited, _) = rl_cli::interpret::write_flow(home, name, &d.text).await?;
-    let approved = matches!(edited, Edited::Approved(_));
+    let name = rl_cli::flow::check_name(home, name)?;
+    let mut rpc = Client::connect(home).await?;
+    let known = rl_cli::flow::projects(&mut rpc).await?;
+    let files = vec![NewFile::flow_md(d.text.as_str())];
+    let wrote = rl_cli::flow::write_new(&mut rpc, home, &name, files, &known).await;
+    let approved = wrote.is_ok();
+    let words = match &wrote {
+        Ok(_) => format!("{name} approved"),
+        Err(e) => format!("{e:#}"),
+    };
     if json {
-        said["said"] = json!(edited.words(name));
+        said["said"] = json!(words);
         said["approved"] = json!(approved);
         println!("{said}");
+    } else if approved {
+        println!("{words}");
     } else {
-        println!("{}", edited.words(name));
+        eprintln!("{words}");
     }
     if !approved {
         std::process::exit(1)
