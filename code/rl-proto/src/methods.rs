@@ -1075,6 +1075,9 @@ pub struct GcReport {
     pub bytes: u64,
     /// Log and sidecar files removed (or that would be).
     pub files: usize,
+    /// Firings' folders (`flows/<name>/runs/<firing>/`) removed (or that would be).
+    #[serde(default)]
+    pub firings: usize,
 }
 
 /// Drops the journal of runs ended longer ago than retention says.

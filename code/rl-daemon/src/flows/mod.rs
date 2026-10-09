@@ -5,10 +5,14 @@
 
 mod ask;
 pub mod engine;
+mod facts;
+pub(crate) mod path;
 mod restart;
 pub(crate) mod rpc;
+mod state;
 mod store;
 mod triggers;
+mod work;
 
 pub(crate) use triggers::kind_matches;
 
@@ -43,6 +47,9 @@ pub struct Flows {
     /// What a firing's questions are raised with.
     pub(crate) decisions: Arc<Decisions>,
     pub(crate) registry: Arc<Registry>,
+    /// `run/bin/`, put on each step's `PATH` after the flow's folder, when it holds the link to
+    /// the `rl` beside `rld` ([`path`]).
+    pub(crate) bin: Option<PathBuf>,
     /// Held while a firing is moved on, so a run's end is never read before
     /// the run is recorded as its step's.
     pub(crate) going: tokio::sync::Mutex<()>,
@@ -62,6 +69,7 @@ impl Flows {
         supervisor: Arc<Supervisor>,
         decisions: Arc<Decisions>,
         registry: Arc<Registry>,
+        bin: Option<PathBuf>,
         shutdown: CancellationToken,
     ) -> Arc<Self> {
         Arc::new(Self {
@@ -70,6 +78,7 @@ impl Flows {
             supervisor,
             decisions,
             registry,
+            bin,
             going: tokio::sync::Mutex::new(()),
             wake: Notify::new(),
             shutdown,

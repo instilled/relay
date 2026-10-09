@@ -46,6 +46,9 @@ pub struct ServeOptions {
     /// Where `rl` is, for the hook commands CLIs call back with; defaults to
     /// `$RELAY_RL_BIN` or a sibling of `rld`.
     pub rl_bin: Option<PathBuf>,
+    /// The `rl` a flow's steps find first on their `PATH`, linked into `run/bin/`; defaults to
+    /// the one beside `rld`, and with none there a step's `PATH` is left as it was.
+    pub step_rl: Option<PathBuf>,
     /// Detection registry; defaults to the built-ins merged with `$RELAY_HOME/detect/`.
     pub registry: Option<Arc<Registry>>,
 }
@@ -64,6 +67,9 @@ pub async fn serve_with(home: Home, shutdown: CancellationToken, opts: ServeOpti
     std::fs::write(home.daemon_pid(), std::process::id().to_string())?;
     let session_bin = opts.session_bin.unwrap_or_else(supervisor::locate_session_bin);
     let rl_bin = opts.rl_bin.unwrap_or_else(supervisor::locate_rl_bin);
+    // Refreshed at each start, so a step's `rl` is always the one beside the `rld` running it.
+    let step_rl = opts.step_rl.or_else(crate::flows::path::beside_rld);
+    let bin = crate::flows::path::link_rl(&home, step_rl.as_deref());
     info!(socket = %sock_path.display(), pid = std::process::id(), session_bin = %session_bin.display(), "rld listening");
 
     let registry = match opts.registry {
@@ -131,6 +137,7 @@ pub async fn serve_with(home: Home, shutdown: CancellationToken, opts: ServeOpti
         supervisor.clone(),
         decisions.clone(),
         registry.clone(),
+        bin,
         shutdown.child_token(),
     );
     // Loaded before the socket answers, so `rl flow list` right after

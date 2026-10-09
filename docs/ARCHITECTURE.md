@@ -112,7 +112,7 @@ flowchart LR
 links, the binary half (`holder`, `backend`) is the process itself.
 
 `rl-flow` is all the deciding about a flow (§6), and none of the doing: `flow.md` read and
-checked, the steps' order, what a firing does next, `if:`, the placeholders, the cron line and the
+checked, the steps' order, what a firing does next, `if:`, the placeholders, what a step may leave (`state.rs`: a value's key, a file's name, the caps, `$RELAY_OUT`'s lines), the cron line and the
 folder's hash, each a function of what it is handed. `rld` carries its answers out; `rl` reads a
 flow's definition with it to draw the row and the pane.
 
@@ -819,8 +819,8 @@ as the file; a link to a folder keeps the flow from loading, since what is under
 without being hashed. `runs/` is set aside for a
 firing's state: it is never part of the folder's hash, and `rld` writes `flows/.gitignore`
 (`runs/`) when there is none, so `~/.relay/flows/` may be a git repository — history with `git
-log`, sharing with a push — though Relay neither needs nor assumes it. Nothing is written under
-`runs/` yet (§8).
+log`, sharing with a push — though Relay neither needs nor assumes it. What a firing's steps
+leave is under `runs/<firing>/` (**State between steps**, below).
 
 ```markdown
 ---
@@ -888,15 +888,20 @@ The frontmatter is `relay_proto::flow::FlowSpec`; a key it does not know is refu
 Where a step runs: its `in`, else the flow's; with neither, a step of an `on` firing runs where
 its event happened — the folder of the event's run while that is still there, else the event's
 workspace — and anything else in the Relay home (`engine::cwd`). Each run, titled `prod-logs ·
-probe`, is started with `RELAY_FLOW`, `RELAY_FIRING`, `RELAY_STEP` and `RELAY_FLOW_DIR` (with
-`RELAY_RUN`, as every run is), the folder first on `PATH`; a `when` firing's steps get `RELAY_LAST_FIRING` too — when the
-previous firing started, empty on the first — so a probe can ask only for what is new without
-keeping a clock of its own, and an `on` firing's get the event: `RELAY_EVENT` whole, as JSON,
-and `RELAY_EVENT_ID`, `_KIND`, `_SUMMARY`, `_RUN`.
+probe`, is started with `RELAY_FLOW`, `RELAY_FIRING`, `RELAY_STEP`, `RELAY_FLOW_DIR`,
+`RELAY_WORK`, `RELAY_IN` and `RELAY_OUT` (with `RELAY_RUN`, as every run is), the folder first on
+`PATH` and `run/bin/` next — a folder `rld` owns, holding only a link to the `rl` beside it,
+made afresh at each start, so a step's `rl` is the one that matches the `rld` running it and
+nothing else of `rld`'s folder goes ahead of yours (`flows/path.rs`; with no `rl` beside `rld`,
+no link and no entry) — and `RELAY_LAST_FIRING` — when the flow's previous firing started, whatever fired it,
+empty on the first — so a probe can ask only for what is new without keeping a clock of its own;
+an `on` firing's get the event: `RELAY_EVENT` whole, as JSON, and `RELAY_EVENT_ID`, `_KIND`,
+`_SUMMARY`, `_RUN`.
 
 What came before reaches a step through placeholders. `{probe.out}` is what a step's run printed
 — the last 64 KB of it, ANSI stripped and trimmed, which for an agent run headless is its answer;
 `{review.choice}` and `{review.note}` are an ask step's answer and what was said with it;
+any other `{probe.signature}` is a value the step set;
 `{event.summary}`, `{event.data.x}` and the rest (`kind`, `run`, `title`, `cwd`, `cli`, `cause`,
 `group`, `workspace`) are the event an `on` firing fired on. They are spliced into an agent's prompt and an
 `ask:` text only, in one pass — what was spliced in is never read for more
@@ -905,10 +910,10 @@ as the agent's flag; an agent whose prompt is a flag's value (`gemini -p <prompt
 `--` there, and a filled prompt that starts with `-` does not start
 (`rl_detect::registry::with_given_prompt`). A command never gets one: a `run:` string or argv, or an agent's
 `args`, that names `{probe.out}` is refused at load, so an error line in production logs can
-never become shell. The refusal says what to do instead: for the event, read it from the
-environment (`$RELAY_EVENT_SUMMARY`, `$RELAY_EVENT`); what a step left goes into an agent's prompt
-or an `ask:`, since a command has no way to it yet (§8). Other braces (`awk '{print $1}'`) are the
-shell's.
+never become shell. The refusal says which variable to read instead: `$RELAY_IN/probe.out` for
+what a step printed, `$RELAY_V_probe_signature` for a value, `$RELAY_CHOICE` and `$RELAY_NOTE` in
+an ask's own option, `$RELAY_EVENT_SUMMARY` or `$RELAY_EVENT` for the event. Other braces (`awk
+'{print $1}'`) are the shell's.
 
 What is wrong is said at load, all of it at once, each at its line (`rl-flow/src/def.rs`,
 `check`): an unknown `after`, a cycle, an agent step with neither a prompt nor a section, a
@@ -917,6 +922,35 @@ a placeholder in a command, a `prompt_file` that is not in the flow's folder (ab
 through `..`, or under `runs/`, which no hash covers), a `multi` ask with more than one option that runs something (only one chosen
 option would run), an `in` Relay does not know (`prod-logs · flow.md:2 · in: ~/x is not
 a project Relay knows — rl add ~/x`; `rl add` is `rl up` by another name).
+
+**State between steps.** Three layers, each opt-in. A step's **out** — what it printed, as
+`{probe.out}` has it — is written for each step after it to `$RELAY_IN/probe.out`. Its
+**values** are `key=value` lines it appends to `$RELAY_OUT`, read when its run ends well and
+kept in the ledger (`step_values`); a later step reads them as `{probe.signature}` in a prompt,
+an `ask:` or a `group:`, in `if: probe.found`, and as `$RELAY_V_probe_signature` (a `-` in the
+step's name is `_`). A key is `[a-z][a-z0-9_]*` — not `out`, `choice` or `note`, which Relay
+says of a step — and a value 4 KB at most; a `$RELAY_OUT` line that is not that, or a file over
+1 MB, is not kept: `flow.refused` says why and the step fails (`flows/work.rs`). Its **files**
+go in `$RELAY_WORK`, `runs/<firing>/`, shared by every step of the firing; Relay's own corner of
+it, `.relay/<step>/` (`$RELAY_IN` and `$RELAY_OUT`), is apart from them, as no step's file may
+start with a dot. What a step left is read one way, wherever it is asked for
+(`flows/facts.rs`). A group naming a value no step set is no group.
+
+`rl flow state set signature=abc found=3`, `get probe.signature` (a bare key is the step's own;
+`probe.out` and an ask's `review.choice` read the same way), `write report.md < x` and `read
+report.md` (or `read probe.out`) are what an agent uses, as a plain script may write
+`$RELAY_WORK` and `$RELAY_OUT` itself. They go through `rld` (`flow.state.*`,
+`flows/state.rs`), never to disk, because an agent's permissions may not reach `~/.relay` while
+`Bash(rl flow state:*)` is one allow rule — and that rule gives an agent its firing's state and
+nothing else. `rld` finds the step from the run asking (`$RELAY_RUN`), while that run is going; any
+other run, or one over, is refused (`not in a flow step`), as `rl` itself refuses without
+`RELAY_RUN`, `RELAY_FIRING` and `RELAY_STEP`. It checks the name (one name, no `/` or `..`, not
+from a dot, not a step's `<step>.out`), caps a value at 4 KB and a file at 10 MB, and writes a
+file beside its place and renames it there, so a step reading it sees the old or the new.
+`rl flow state` says nothing of `rld` — not that it started, nor that it is another release —
+as its stderr is the step's out. A refusal quotes at most 80 characters of what it was given. A
+key both set this way and appended to `$RELAY_OUT` is `$RELAY_OUT`'s: that file is read when the
+run ends, over whatever was set while it ran.
 
 **Loading and approval.** `rld` reads every `~/.relay/flows/*/flow.md` at start, on
 `flow.reload` (`rl flow reload`, the panel's `/reload`), when a folder is registered or removed,
@@ -995,7 +1029,7 @@ next firing runs the new version whole. A resume checks the same.
 
 **Ask steps** go over the question engine (**Decisions**, below). `flows/ask.rs` builds the
 question — the `ask:` text filled, each option keyed and labelled by its name, the default
-marked, the `group` filled (empty is none), filed in the step's folder — and raises it in the
+marked, the `group` filled (empty, or naming a value no step set, is none), filed in the step's folder — and raises it in the
 firing's chain, its `decision.raised` naming the flow (`data.flow`), the step `waiting` on it. It
 is an ordinary question: on top of the list and the catch-up, answered by number with a note, in
 `rl decisions`, expiring to its default. Answering does not start the option the way an `rl ask`
@@ -1036,13 +1070,14 @@ taken, and every open firing is reconciled before the socket answers (`Flows::re
 whose run ended advances as though the end had been heard; one whose run was lost (`run.lost`) is
 `lost`, its firing `waiting · <step> lost`; a waiting step with no question raised has it raised.
 `/resume` (`rl resume <id>`) on a lost step's run starts it again as the step's own — the same
-cause, chain and environment, the flow's folder on `PATH`, rebuilt from the firing's definition
+cause, chain and environment, the flow's folder and `run/bin/` on `PATH`, rebuilt from the firing's definition
 (`Flows::spec_again`) — and the firing goes on where it was.
 
 **Events.** `flow.fired` (`flow`, `firing`, `trigger` — `when`, `on` or `hand` — the `event` an
 `on` firing fired on, and when the last firing started), `flow.ended` (`flow`, `firing`,
-`status`) and `flow.skipped` (`flow`, and `reason`: `overlap`, `missed`, or why a step's run
-could not start, with the `firing` and `step`). They are filed in the flow's `in`, as the project
+`status`), `flow.skipped` (`flow`, and `reason`: `overlap`, `missed`, or why a step's run
+could not start, with the `firing` and `step`) and `flow.refused` (`flow`, `firing`, `step`,
+`reason`: a `$RELAY_OUT` that was not kept). They are filed in the flow's `in`, as the project
 is registered, else in the Relay home. The steps' runs raise `run.*` as any run does.
 
 **Actions.** A flow's step, an ask step's option and an `rl ask` question's option are the same
@@ -1382,7 +1417,10 @@ archive` only puts a run away. What would otherwise grow without bound is the jo
 terminal bytes in `session_io`, its `log/<run>.log` and `run/<run>.exit|.env` sidecars. A run
 that redraws while it works writes megabytes an hour of it, and a finished run has no reason to
 keep them for good, so **`retention` defaults to `30d`**: the journal of a run that ended longer
-ago than that goes (`rl-daemon/src/gc.rs`, `gc.run`). `retention: 30d` in `config.yaml` (or
+ago than that goes (`rl-daemon/src/gc.rs`, `gc.run`). So does a firing's folder, `flows/<name>/runs/<firing>/`, once
+the firing ended as long ago — only a folder named for a firing of that flow the ledger knows, so
+whatever else a flow keeps under `runs/` (prod-logs' `runs/seen`) stays; its values in the ledger
+stay, as its runs do. `retention: 30d` in `config.yaml` (or
 `retention: { journal: 30d }`) sets another span; `retention: never` keeps every byte, and then
 `rl prune` refuses rather than guessing. The run and its events stay, and a `run.journal_dropped`
 event on the run says how many bytes went; attaching to such a run shows nothing, honestly. `rl
@@ -1406,10 +1444,12 @@ are deliberately not a key yet.
       flow.md                 the definition: YAML frontmatter, prompts as `## <step>` sections
       …                       the flow's own scripts, first on its steps' PATH; all of the
                               folder but runs/ is hashed, and a change asks for a yes again
-      runs/                   set aside for a firing's state; not hashed, not written yet (§8)
+      runs/<firing>/          a firing's state: $RELAY_WORK, and .relay/<step>/{in/,out}; not
+                              hashed; goes with the firing's runs at retention
   config.yaml                 your defaults (`agents:`, `assistants:`, `catch_up:`, `retention:`,
                               `workspaces:`); absent means defaults, unknown keys refused
-  run/                        0700 — rld.sock, rld.pid, <run>.sock, <run>.exit
+  run/                        0700 — rld.sock, rld.pid, <run>.sock, <run>.exit, and bin/rl:
+                              a link to the rl beside rld, on each flow step's PATH
   log/                        rld.log, <run>.log
   hooks/claude.json           written at daemon start; passed to claude as --settings
   detect/*.yaml               user overrides, merged field by field over the built-ins
@@ -1439,10 +1479,7 @@ limit, so both sides fall back to the same short hashed directory under the temp
 Named here so the diagrams above are not read as the whole plan — see §7 of the brief for
 phasing.
 
-- **The rest of flows** (`docs/specs/2026-10-07-flows.md`) — state between steps: `rl flow
-  state set|get|write|read`, values (`{probe.signature}`, `$RELAY_V_<step>_<key>`), the step's
-  out and files under `$RELAY_IN` and `$RELAY_WORK` in `runs/<firing>/`, and their retention with
-  the firing's runs. Seeing it: steps as nodes in the graph, a flow's row expanded to its latest
+- **The rest of flows** (`docs/specs/2026-10-07-flows.md`) — Seeing it: steps as nodes in the graph, a flow's row expanded to its latest
   firing's steps, `catch_up: top` (a flow's latest firing heading the catch-up), `/summary` on one
   firing. Writing it: `rl flow new` and `/flow new` drafted from words, the context pack teaching
   flows, `rl flow test`, and templates.

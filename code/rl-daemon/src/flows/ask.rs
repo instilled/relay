@@ -143,10 +143,12 @@ pub(super) fn question(ask: &Ask, facts: &dyn Lookup) -> DecisionSpec {
         summary: None,
         options,
         multi: ask.multi,
+        // A group naming a value not set is no group: every firing whose probe set nothing
+        // would otherwise share the braces, and restate one question for good.
         group: ask
             .group
             .as_ref()
-            .map(|g| template::fill(g, facts))
+            .and_then(|g| template::fill_known(g, facts))
             .filter(|g| !g.trim().is_empty()),
         run: None,
         cwd: None,
@@ -198,4 +200,44 @@ fn chosen<'a>(def: &'a FlowDef, step: &str, d: &Decision) -> Option<(&'a str, &'
             .find(|(o, a)| o == k && !a.is_empty())
             .map(|(o, a)| (o.as_str(), a))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rl_flow::template::Ref;
+
+    struct One(&'static str, &'static str, &'static str);
+    impl Lookup for One {
+        fn get(&self, r: &Ref) -> Option<String> {
+            (r.head == self.0 && r.rest == self.1).then(|| self.2.to_string())
+        }
+    }
+
+    fn ask(group: &str) -> Ask {
+        Ask {
+            text: "act on {probe.signature}?".into(),
+            options: vec![("ok".into(), Action::default())],
+            default: None,
+            expires: None,
+            group: Some(group.into()),
+            multi: false,
+        }
+    }
+
+    #[test]
+    fn a_group_is_its_value_or_none_never_its_braces() {
+        let set = One("probe", "signature", "abc");
+        let q = question(&ask("{probe.signature}"), &set);
+        assert_eq!(q.group.as_deref(), Some("abc"));
+        assert_eq!(q.title, "act on abc?");
+        let unset = One("probe", "other", "x");
+        let q = question(&ask("{probe.signature}"), &unset);
+        assert_eq!(q.group, None, "every firing that set nothing would share the braces");
+        assert_eq!(
+            q.title, "act on {probe.signature}?",
+            "a prompt or a question keeps them, as before"
+        );
+        assert_eq!(question(&ask("errors"), &unset).group.as_deref(), Some("errors"));
+    }
 }
