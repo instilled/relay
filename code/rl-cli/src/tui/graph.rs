@@ -127,9 +127,9 @@ fn node_subject<'a>(n: &'a Node, folder: &'a str) -> Subject<'a> {
     }
 }
 
-/// The flow a node is, or asks for: `flow:<name>`, `ask:<name>`.
+/// The flow a node is, or is a step of.
 pub fn flow_name(n: &Node) -> Option<&str> {
-    n.id.strip_prefix("flow:").or_else(|| n.id.strip_prefix("ask:"))
+    n.flow.as_deref()
 }
 
 /// A node as the search ranks it (`query::ranked`): its name, its folder,
@@ -1038,6 +1038,7 @@ mod tests {
             next_at: None,
             runs: Tally::default(),
             waiting: vec![],
+            flow: None,
         }
     }
 
@@ -1228,23 +1229,33 @@ mod tests {
     }
 
     #[test]
-    fn a_node_is_found_by_the_flow_it_is_or_asks_for() {
+    fn a_node_is_found_by_the_flow_it_is_or_is_a_step_of() {
+        let of = |n: Node, flow: &str| Node {
+            flow: Some(flow.into()),
+            ..n
+        };
         let g = Graph {
             since: now(),
             nodes: vec![
-                node("flow:nightly", NodeKind::Flow, "nightly", Some("/w/relay")),
-                node("ask:nightly", NodeKind::Ask, "ship it?", Some("/w/relay")),
+                of(
+                    node("flow:nightly", NodeKind::Flow, "nightly", Some("/w/relay")),
+                    "nightly",
+                ),
+                of(
+                    node("step:nightly/review", NodeKind::Ask, "review", Some("/w/relay")),
+                    "nightly",
+                ),
                 node("runs:shell:/w/api", NodeKind::Shell, "shells", Some("/w/api")),
             ],
-            edges: vec![edge("flow:nightly", "ask:nightly", "", 1)],
+            edges: vec![edge("flow:nightly", "step:nightly/review", "", 1)],
         };
         let kept = keep(&g, "by:nightly", &names(), &[]);
         assert!(
-            kept.contains("flow:nightly") && kept.contains("ask:nightly"),
+            kept.contains("flow:nightly") && kept.contains("step:nightly/review"),
             "{kept:?}"
         );
         assert!(!kept.contains("runs:shell:/w/api"));
-        assert_eq!(flow_name(g.node("ask:nightly").unwrap()), Some("nightly"));
+        assert_eq!(flow_name(g.node("step:nightly/review").unwrap()), Some("nightly"));
         assert_eq!(flow_name(g.node("runs:shell:/w/api").unwrap()), None);
         assert_eq!(headline(&g, 3, ""), "wiring · 1 flow");
     }

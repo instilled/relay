@@ -1876,12 +1876,9 @@ impl App {
         self.flows.iter().find(|x| x.name == f.name)
     }
 
-    /// The flow a graph node is, or asks for.
+    /// The flow a graph node is, or is a step of.
     fn flow_of_node(&self, n: &rl_proto::graph::Node) -> Option<&Flow> {
-        let name = match n.kind {
-            rl_proto::graph::NodeKind::Flow => n.name.as_str(),
-            _ => n.id.strip_prefix("ask:")?,
-        };
+        let name = n.flow.as_deref()?;
         self.flows.iter().find(|f| f.name == name)
     }
 

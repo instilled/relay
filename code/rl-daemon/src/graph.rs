@@ -1,17 +1,19 @@
 //! `graph.get`: the wiring graph, built from the flows as they stand and what
 //! the ledger saw in a window. Pure — rows in, a `Graph` out.
 //!
-//! Every flow is a node, there before it has fired. The ledger gives the
-//! rest: which runs raised which events, and so which flows heard them, and
-//! the questions a flow's ask steps put to you. A run is its flow's node when
-//! one of the flow's steps started it; a run you started stands in one node
-//! per folder and kind (`shells` in relay). An event a flow's `on` takes that
-//! nothing raised in the window still shows, as an event node, so every flow
-//! that listens has a way in. The steps inside a flow are not drawn yet.
+//! Every flow is a node, there before it has fired, and so is each of its
+//! steps (`step:<flow>/<step>`), wired as the flow writes them. The ledger
+//! gives the rest: which runs raised which events, and so which flows heard
+//! them, and the questions a flow's ask steps put to you. A run is its step's
+//! node when the step is the flow's still, else its flow's; a run you started
+//! stands in one node per folder and kind (`shells` in relay). An event a
+//! flow's `on` takes that nothing raised in the window still shows, as an
+//! event node, so every flow that listens has a way in.
 
 use crate::flows::kind_matches;
-use rl_flow::def::FlowDef;
+use rl_flow::def::{Does, FlowDef};
 use rl_ledger::graph::{AskRow, EventCount, RunRow};
+use rl_proto::action::Task;
 use rl_proto::decision::DecisionStatus;
 use rl_proto::flow::Flow;
 use rl_proto::graph::{Edge, Graph, Node, NodeKind, Tally};
@@ -27,60 +29,94 @@ pub struct Inputs<'a> {
     pub asks: &'a [AskRow],
 }
 
+/// A flow as loaded: its folder, its def, and what its `on` takes.
+type Loaded<'a> = (&'a Flow, Option<PathBuf>, Option<FlowDef>, Vec<String>);
+
 pub fn build(since: jiff::Timestamp, inp: Inputs<'_>) -> Graph {
-    // Each flow as loaded: its folder, and what its `on` takes.
-    let flows: Vec<(&Flow, Option<PathBuf>, Vec<String>)> = inp
+    let flows: Vec<Loaded<'_>> = inp
         .flows
         .iter()
         .filter(|f| f.removed_at.is_none())
         .map(|f| {
             let def = serde_json::from_value::<FlowDef>(f.def.clone()).ok();
-            (f, f.folder.clone(), def.map(|d| d.trigger.on).unwrap_or_default())
+            let on = def.as_ref().map(|d| d.trigger.on.clone()).unwrap_or_default();
+            (f, f.folder.clone(), def, on)
         })
         .collect();
     let mut g = Builder::default();
 
-    for (f, folder, _) in &flows {
+    for (f, folder, def, _) in &flows {
         g.node(Node {
             status: Some(f.status()),
             detail: f.when(),
             next_at: f.next_at,
+            flow: Some(f.name.clone()),
             ..bare(&flow_id(&f.name), NodeKind::Flow, &f.name, folder.clone())
         });
+        // Its steps, wired as it writes them: from the flow itself when a step waits on
+        // nothing, else from each step it comes after; its `if:` on the edge.
+        for s in def.iter().flat_map(|d| &d.steps) {
+            let id = step_id(&f.name, &s.name);
+            let (kind, detail) = match &s.does {
+                Does::Ask(a) => (NodeKind::Ask, a.text.clone()),
+                Does::Run(a) => match &a.run {
+                    Some(Task::Agent { .. }) => (NodeKind::Agent, a.label()),
+                    _ => (NodeKind::Shell, a.label()),
+                },
+            };
+            g.node(Node {
+                status: Some(f.status()),
+                detail,
+                flow: Some(f.name.clone()),
+                ..bare(&id, kind, &s.name, folder.clone())
+            });
+            let label = s.if_.as_ref().map(|c| format!("if {c}")).unwrap_or_default();
+            if s.after.is_empty() {
+                g.edge(&flow_id(&f.name), &id, &label, true);
+            }
+            for a in &s.after {
+                g.edge(&step_id(&f.name, a), &id, &label, true);
+            }
+        }
     }
 
-    // Questions its ask steps put to you: how many, and who is waiting.
+    // Questions its ask steps put to you, on the step that asked: who is waiting, and the
+    // newest naming it. A step the flow no longer has still shows while it asks.
     for a in inp.asks {
-        let from = flow_id(&a.flow);
-        let Some(owner) = g.nodes.get(&from) else { continue };
+        let flow = flow_id(&a.flow);
+        let Some(owner) = g.nodes.get(&flow) else { continue };
         let (folder, status) = (owner.folder.clone(), owner.status);
-        let id = ask_id(&a.flow);
-        let node = g.nodes.entry(id.clone()).or_insert_with(|| Node {
-            status,
-            ..bare(&id, NodeKind::Ask, "", folder)
-        });
-        // Oldest first: the newest question names it.
-        node.name = a.title.clone();
+        let id = step_id(&a.flow, &a.step);
+        if !g.has(&id) {
+            g.node(Node {
+                status,
+                flow: Some(a.flow.clone()),
+                ..bare(&id, NodeKind::Ask, &a.step, folder)
+            });
+            g.edge(&flow, &id, "", true);
+        }
+        let node = g.nodes.get_mut(&id).unwrap();
+        node.detail = a.title.clone();
         if a.status == DecisionStatus::Open {
             node.waiting.push(a.id.clone());
         }
-        g.count(&from, &id, "", 1);
+        g.did(&id);
     }
 
-    // Runs: each onto the node that stands for it.
+    // Runs: each onto the node that stands for it; a step's on its flow's too.
     for run in inp.runs {
         let id = g.producer(&run.cause, run.kind, &run.workspace);
         g.ensure(&id, run.kind, &run.workspace);
-        let t = &mut g.nodes.get_mut(&id).unwrap().runs;
-        t.total += 1;
-        if run.state == RunState::Failed {
-            t.failed += 1;
+        g.tally(&id, run);
+        if id.starts_with("step:")
+            && let Some(flow) = g.nodes[&id].flow.clone()
+        {
+            g.tally(&flow_id(&flow), run);
         }
-        if !run.state.is_terminal() {
-            t.going += 1;
+        // An ask's option runs as the step's own: the question already counted it.
+        if g.nodes[&id].kind != NodeKind::Ask {
+            g.did(&id);
         }
-        t.last = Some(run.state);
-        t.last_at = Some(run.started_at);
     }
 
     // Events: from whoever raised them to every flow that hears them.
@@ -88,19 +124,25 @@ pub fn build(since: jiff::Timestamp, inp: Inputs<'_>) -> Graph {
     for e in inp.events {
         let from = match (&e.run, &e.by_flow) {
             (Some((cause, kind, ws)), _) => g.producer(cause, *kind, ws),
-            (None, Some(name)) if e.kind.starts_with("decision.") && g.has(&ask_id(name)) => ask_id(name),
+            (None, Some(name)) if e.kind.starts_with("decision.") => {
+                match e.by_step.as_deref().map(|s| step_id(name, s)).filter(|id| g.has(id)) {
+                    Some(id) => id,
+                    None if g.has(&flow_id(name)) => flow_id(name),
+                    None => outside(&e.workspace),
+                }
+            }
             (None, Some(name)) if g.has(&flow_id(name)) => flow_id(name),
             (None, _) => outside(&e.workspace),
         };
-        for (f, _, on) in &flows {
+        for (f, _, _, on) in &flows {
             if !on.iter().any(|p| kind_matches(p, &e.kind)) {
                 continue;
             }
-            let to = flow_id(&f.name);
             // Its own doing: a flow does not hear what its steps did or asked.
-            if from == to || from == ask_id(&f.name) {
+            if g.owner(&from) == Some(f.name.as_str()) {
                 continue;
             }
+            let to = flow_id(&f.name);
             match &e.run {
                 Some((_, kind, ws)) => g.ensure(&from, *kind, ws),
                 None => g.ensure_outside(&from, &e.workspace),
@@ -111,7 +153,7 @@ pub fn build(since: jiff::Timestamp, inp: Inputs<'_>) -> Graph {
     }
 
     // A way in for every pattern nothing raised.
-    for (f, _, on) in &flows {
+    for (f, _, _, on) in &flows {
         let to = flow_id(&f.name);
         let got = heard.get(&to);
         for pattern in on {
@@ -132,6 +174,8 @@ struct Builder {
     nodes: BTreeMap<String, Node>,
     /// By (from, to): the kinds or keys it carries, its count, whether declared.
     edges: BTreeMap<(String, String), (BTreeSet<String>, u64, bool)>,
+    /// By node: what it did in the window, which a declared edge into it counts.
+    did: BTreeMap<String, u64>,
 }
 
 impl Builder {
@@ -139,13 +183,38 @@ impl Builder {
         self.nodes.contains_key(id)
     }
 
-    /// The node a run stands in: its flow, when one of its steps started it,
-    /// or its folder's own runs of its kind.
+    /// The flow a node is, or is a step of.
+    fn owner(&self, id: &str) -> Option<&str> {
+        self.nodes.get(id)?.flow.as_deref()
+    }
+
+    /// Something `id` did in the window: a run of it, or a question it asked.
+    fn did(&mut self, id: &str) {
+        *self.did.entry(id.to_string()).or_default() += 1;
+    }
+
+    fn tally(&mut self, id: &str, run: &RunRow) {
+        let t = &mut self.nodes.get_mut(id).unwrap().runs;
+        t.total += 1;
+        if run.state == RunState::Failed {
+            t.failed += 1;
+        }
+        if !run.state.is_terminal() {
+            t.going += 1;
+        }
+        t.last = Some(run.state);
+        t.last_at = Some(run.started_at);
+    }
+
+    /// The node a run stands in: its step, when the flow still has the step
+    /// that started it, else its flow; or its folder's own runs of its kind.
     fn producer(&self, cause: &str, kind: RunKind, ws: &Path) -> String {
-        if let Ok(Cause::Flow { flow, .. }) = cause.parse::<Cause>()
-            && self.has(&flow_id(&flow))
-        {
-            return flow_id(&flow);
+        if let Ok(Cause::Flow { flow, step }) = cause.parse::<Cause>() {
+            for id in [step_id(&flow, &step), flow_id(&flow)] {
+                if self.has(&id) {
+                    return id;
+                }
+            }
         }
         let k = match kind {
             RunKind::Agent => "agents",
@@ -194,7 +263,10 @@ impl Builder {
         e.1 += n;
     }
 
+    /// A declared edge counts what its target did (a way in, from an event
+    /// node, did nothing and stays 0); one only the ledger knows, its own count.
     fn finish(self, since: jiff::Timestamp) -> Graph {
+        let did = self.did;
         Graph {
             since,
             nodes: self.nodes.into_values().collect(),
@@ -202,10 +274,14 @@ impl Builder {
                 .edges
                 .into_iter()
                 .map(|((from, to), (labels, count, declared))| Edge {
+                    count: if declared {
+                        did.get(&to).copied().unwrap_or(0)
+                    } else {
+                        count
+                    },
                     from,
                     to,
                     label: labels.into_iter().collect::<Vec<_>>().join(", "),
-                    count,
                     declared,
                 })
                 .collect(),
@@ -224,6 +300,7 @@ fn bare(id: &str, kind: NodeKind, name: &str, folder: Option<PathBuf>) -> Node {
         next_at: None,
         runs: Tally::default(),
         waiting: vec![],
+        flow: None,
     }
 }
 
@@ -231,8 +308,8 @@ fn flow_id(name: &str) -> String {
     format!("flow:{name}")
 }
 
-fn ask_id(flow: &str) -> String {
-    format!("ask:{flow}")
+fn step_id(flow: &str, step: &str) -> String {
+    format!("step:{flow}/{step}")
 }
 
 fn outside(ws: &Path) -> String {
@@ -280,6 +357,7 @@ mod tests {
             workspace: ws.into(),
             run: run.map(|(c, k, w)| (c.to_string(), k, PathBuf::from(w))),
             by_flow: None,
+            by_step: None,
             count,
         }
     }
@@ -335,18 +413,21 @@ mod tests {
             AskRow {
                 id: "d1".into(),
                 flow: "review".into(),
+                step: "ask".into(),
                 title: "add a note?".into(),
                 status: DecisionStatus::Taken,
             },
             AskRow {
                 id: "d2".into(),
                 flow: "review".into(),
+                step: "ask".into(),
                 title: "add another?".into(),
                 status: DecisionStatus::Open,
             },
             AskRow {
                 id: "d3".into(),
                 flow: "gone".into(),
+                step: "ask".into(),
                 title: "never mind".into(),
                 status: DecisionStatus::Open,
             },
@@ -365,14 +446,17 @@ mod tests {
         assert_eq!(
             ids,
             [
-                "ask:review",
                 "event:never.*",
                 "flow:nightly",
                 "flow:notify",
                 "flow:review",
                 "runs:shells:/w/api",
+                "step:nightly/a",
+                "step:notify/a",
+                "step:review/a",
+                "step:review/ask",
             ],
-            "a removed flow is not drawn"
+            "a removed flow is not drawn; an ask step it no longer has still shows while it asks"
         );
 
         // A flow, and its runs whichever step ran them.
@@ -397,10 +481,13 @@ mod tests {
         );
 
         // Its questions: one waiting, the newest naming it.
-        let ask = g.node("ask:review").unwrap();
-        assert_eq!((ask.kind, ask.name.as_str()), (NodeKind::Ask, "add another?"));
+        let ask = g.node("step:review/ask").unwrap();
+        assert_eq!(
+            (ask.kind, ask.name.as_str(), ask.detail.as_str()),
+            (NodeKind::Ask, "ask", "add another?")
+        );
         assert_eq!(ask.waiting, ["d2"]);
-        assert_eq!(edge(&g, "flow:review", "ask:review").count, 2);
+        assert_eq!(edge(&g, "flow:review", "step:review/ask").count, 2);
 
         // A pattern nothing raised still has a way in.
         let e = edge(&g, "event:never.*", "flow:notify");
@@ -421,6 +508,7 @@ mod tests {
             },
             EventCount {
                 by_flow: Some("asker".into()),
+                by_step: Some("ask".into()),
                 ..event("decision.raised", "/h", None, 1)
             },
             event("decision.raised", "/w", None, 1),
@@ -428,6 +516,7 @@ mod tests {
         let asks = vec![AskRow {
             id: "d1".into(),
             flow: "asker".into(),
+            step: "ask".into(),
             title: "go?".into(),
             status: DecisionStatus::Open,
         }];
@@ -441,9 +530,106 @@ mod tests {
             },
         );
         assert_eq!(edge(&g, "flow:asker", "flow:watch").label, "flow.ended");
-        assert_eq!(edge(&g, "ask:asker", "flow:watch").label, "decision.raised");
+        assert_eq!(edge(&g, "step:asker/ask", "flow:watch").label, "decision.raised");
         let e = edge(&g, "outside:/w", "flow:watch");
         assert_eq!((e.label.as_str(), e.count), ("decision.raised", 1));
         assert!(edge(&g, "event:custom.thing", "flow:asker").declared);
+    }
+
+    /// A flow as `rld` has it, from its whole `flow.md`.
+    fn flow_md(name: &str, text: &str) -> Flow {
+        let def = rl_flow::def::check(name, rl_flow::doc::read(text).unwrap(), &|_| true).unwrap();
+        Flow {
+            name: name.into(),
+            hash: "h".into(),
+            def: serde_json::to_value(&def).unwrap(),
+            source: PathBuf::new(),
+            folder: def.in_.clone(),
+            paused: false,
+            approved_hash: Some("h".into()),
+            last_fired_at: None,
+            next_at: None,
+            removed_at: None,
+        }
+    }
+
+    #[test]
+    fn a_flows_steps_hang_off_it_as_it_writes_them() {
+        let prod_logs = "---\nin: /w/api\nwhen: every 30m\nsteps:\n  probe:\n    run: new-log-errors.sh\n  \
+            triage:\n    after: probe\n    if: probe.out\n    run: { agent: claude, prompt: look }\n  \
+            review:\n    after: triage\n    ask: \"{triage.out}\"\n    options:\n      \
+            apply: { run: { agent: claude, prompt: do it } }\n      ignore: {}\n---\n";
+        let flows = vec![flow_md("prod-logs", prod_logs), flow("notify", "on: run.failed\n")];
+        let runs = vec![
+            run("flow:prod-logs/probe", RunKind::Command, "/w/api", RunState::Finished),
+            run("flow:prod-logs/probe", RunKind::Command, "/w/api", RunState::Finished),
+            run("flow:prod-logs/triage", RunKind::Agent, "/w/api", RunState::Failed),
+        ];
+        let events = vec![event(
+            "run.failed",
+            "/w/api",
+            Some(("flow:prod-logs/triage", RunKind::Agent, "/w/api")),
+            1,
+        )];
+        let asks = vec![AskRow {
+            id: "d1".into(),
+            flow: "prod-logs".into(),
+            step: "review".into(),
+            title: "restart the api pod?".into(),
+            status: DecisionStatus::Open,
+        }];
+        let g = build(
+            at("2026-09-09T00:00:00Z"),
+            Inputs {
+                flows: &flows,
+                runs: &runs,
+                events: &events,
+                asks: &asks,
+            },
+        );
+        let node = |id: &str| g.node(id).unwrap_or_else(|| panic!("no {id} in {:#?}", g.nodes));
+        let probe = node("step:prod-logs/probe");
+        assert_eq!(
+            (
+                probe.kind,
+                probe.name.as_str(),
+                probe.detail.as_str(),
+                probe.flow.as_deref()
+            ),
+            (NodeKind::Shell, "probe", "new-log-errors.sh", Some("prod-logs"))
+        );
+        assert_eq!(probe.runs.total, 2);
+        assert_eq!(node("step:prod-logs/triage").kind, NodeKind::Agent);
+        let review = node("step:prod-logs/review");
+        assert_eq!(
+            (review.kind, review.detail.as_str()),
+            (NodeKind::Ask, "restart the api pod?")
+        );
+        assert_eq!(review.waiting, ["d1"]);
+        assert_eq!(node("flow:prod-logs").flow.as_deref(), Some("prod-logs"));
+        assert_eq!(
+            (node("flow:prod-logs").runs.total, node("flow:prod-logs").runs.failed),
+            (3, 1),
+            "a step's runs count on its flow too"
+        );
+
+        // Declared, as the flow writes them, each counting what its step did.
+        let e = edge(&g, "flow:prod-logs", "step:prod-logs/probe");
+        assert_eq!((e.declared, e.count, e.label.as_str()), (true, 2, ""));
+        let e = edge(&g, "step:prod-logs/probe", "step:prod-logs/triage");
+        assert_eq!((e.declared, e.count, e.label.as_str()), (true, 1, "if probe.out"));
+        assert_eq!(
+            edge(&g, "step:prod-logs/triage", "step:prod-logs/review").count,
+            1,
+            "one question"
+        );
+
+        // Between flows, the event leaves the step that raised it.
+        let e = edge(&g, "step:prod-logs/triage", "flow:notify");
+        assert_eq!((e.label.as_str(), e.count, e.declared), ("run.failed", 1, false));
+        assert!(
+            g.nodes.iter().all(|n| !n.id.starts_with("ask:")),
+            "no ask:<flow> node any more"
+        );
     }
 }

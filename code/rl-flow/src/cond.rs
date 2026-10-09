@@ -47,6 +47,18 @@ fn value(s: &str) -> Option<String> {
     (!s.is_empty() && !s.contains(char::is_whitespace) && !s.contains(['"', '\''])).then(|| s.to_string())
 }
 
+/// As it is written: `probe.out`, `!probe.out`, `review.choice == apply`.
+impl std::fmt::Display for Cond {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Cond::Set(r) => write!(f, "{}.{}", r.head, r.rest),
+            Cond::Unset(r) => write!(f, "!{}.{}", r.head, r.rest),
+            Cond::Is(r, v) => write!(f, "{}.{} == {v}", r.head, r.rest),
+            Cond::IsNot(r, v) => write!(f, "{}.{} != {v}", r.head, r.rest),
+        }
+    }
+}
+
 impl Cond {
     /// The step and key it asks about.
     pub fn subject(&self) -> &Ref {
@@ -110,6 +122,18 @@ mod tests {
                 "a b".into()
             )
         );
+    }
+
+    #[test]
+    fn a_condition_reads_back_as_it_was_written() {
+        for s in [
+            "probe.out",
+            "!probe.out",
+            "review.choice == apply",
+            "probe.severity != low",
+        ] {
+            assert_eq!(parse(s).unwrap().to_string(), s);
+        }
     }
 
     #[test]
