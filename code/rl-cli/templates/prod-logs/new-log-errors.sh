@@ -7,7 +7,7 @@
 # them asks no new yes. Delete a line there to hear about that kind again. Cluster noise
 # (kube-system, gke-*) is left out; LOG_FILTER in the probe's env replaces the whole filter.
 set -eu
-: "${GCP_PROJECT:?set GCP_PROJECT in the probe step's env}"
+: "${GCP_PROJECT:?set GCP_PROJECT in the env of the probe step}"
 runs="${RELAY_FLOW_DIR:-$(dirname "$0")}/runs"
 mkdir -p "$runs"
 seen="$runs/seen"

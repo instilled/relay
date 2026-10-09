@@ -300,6 +300,8 @@ mod tests {
         }
     }
 
+    /// Parsed by the `/bin/sh` their first line names, and by bash too: macOS's `/bin/sh` is a
+    /// bash, which reads a `'` inside `"${x:?…}"` as a quote where dash does not.
     #[test]
     fn its_shell_scripts_parse() {
         let dir = tempfile::tempdir().unwrap();
@@ -307,14 +309,16 @@ mod tests {
             for f in t.files.iter().filter(|f| f.path.ends_with(".sh")) {
                 let p = dir.path().join(f.path);
                 std::fs::write(&p, f.text).unwrap();
-                let out = std::process::Command::new("sh").arg("-n").arg(&p).output().unwrap();
-                assert!(
-                    out.status.success(),
-                    "{}/{}: {}",
-                    t.name,
-                    f.path,
-                    String::from_utf8_lossy(&out.stderr)
-                );
+                for sh in ["/bin/sh", "bash"] {
+                    let out = std::process::Command::new(sh).arg("-n").arg(&p).output().unwrap();
+                    assert!(
+                        out.status.success(),
+                        "{}/{} under {sh}: {}",
+                        t.name,
+                        f.path,
+                        String::from_utf8_lossy(&out.stderr)
+                    );
+                }
             }
         }
     }
