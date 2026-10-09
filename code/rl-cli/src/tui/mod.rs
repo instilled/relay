@@ -1471,9 +1471,17 @@ impl App {
                 .map(|a| a.name)
                 .collect();
         }
-        // A flow gone from the list takes its open steps line with it.
-        let flow_keys: HashSet<String> = self
-            .rows()
+        // A flow gone from the list takes its open steps line with it; one only a search or a lens
+        // hides keeps it, for when it shows again.
+        let all = rows::Context {
+            names: &self.names,
+            flows: &self.flows,
+            filter: "",
+            lens: rows::Lens::All,
+            now: Timestamp::now(),
+            relay: Some(&self.relay),
+        };
+        let flow_keys: HashSet<String> = rows::build(&self.digest, &all)
             .iter()
             .filter_map(|r| match r {
                 Row::Flow(f) => Some(f.key.clone()),

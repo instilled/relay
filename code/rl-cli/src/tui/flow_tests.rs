@@ -349,3 +349,28 @@ async fn right_opens_a_flows_row_to_its_latest_firings_steps_and_left_folds_it()
     assert!(!draw_text(&mut app).contains(steps));
     token.cancel();
 }
+
+#[tokio::test]
+async fn a_flow_opened_stays_open_while_a_search_hides_it() {
+    let (tmp, token, mut app, folder) = panel().await;
+    flow_in(&tmp, &mut app, "prod-logs", "---\nsteps:\n  probe:\n    run: x\n---\n").await;
+    fired(
+        &tmp,
+        &folder,
+        "prod-logs",
+        "fire0001",
+        &[("probe", StepStatus::Done, Some("found\r\n"))],
+        FiringStatus::Done,
+    );
+    app.refresh().await;
+    app.select(Some("f:prod-logs".into()));
+    press(&mut app, KeyCode::Right, KeyModifiers::NONE).await;
+    assert!(draw_text(&mut app).contains("probe ✓"), "→ opens it");
+    app.filter = "nothing-like-it".into();
+    app.refresh().await;
+    assert!(!draw_text(&mut app).contains("prod-logs"), "the search hides it");
+    app.filter.clear();
+    app.refresh().await;
+    assert!(draw_text(&mut app).contains("probe ✓"), "still open");
+    token.cancel();
+}
