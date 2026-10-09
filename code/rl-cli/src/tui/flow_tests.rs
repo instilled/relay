@@ -171,6 +171,57 @@ async fn several_leads_never_push_relays_own_top_off_screen() {
         .rfind("… ^o on it shows the rest")
         .unwrap_or_else(|| panic!("{frame}"));
     assert!(cut < ours, "the leads are cut above it: {frame}");
+    for flow in ["brief-a", "brief-b", "brief-c"] {
+        assert!(
+            frame.contains(&format!("↻ {flow}")),
+            "every lead's title shows: {frame}"
+        );
+    }
+    // The cursor stops only on a lead that has a line on screen.
+    for key in app.keys() {
+        if let Some(flow) = super::heads::flow_of(&key) {
+            assert!(frame.contains(&format!("↻ {flow}")), "{key} has no line: {frame}");
+        }
+    }
+    token.cancel();
+}
+
+#[tokio::test]
+async fn leads_past_the_room_are_said_by_count_and_the_cursor_skips_them() {
+    let (tmp, token, mut app, folder) = panel().await;
+    let flows: Vec<String> = (0..30).map(|n| format!("brief-{n:02}")).collect();
+    for (n, flow) in flows.iter().enumerate() {
+        flow_in(
+            &tmp,
+            &mut app,
+            flow,
+            "---\ncatch_up: top\nsteps:\n  brief:\n    run: echo brief\n---\n",
+        )
+        .await;
+        fired(
+            &tmp,
+            &folder,
+            flow,
+            &format!("fire{n:04}"),
+            &[("brief", StepStatus::Done, Some("a line\n"))],
+            FiringStatus::Done,
+        );
+    }
+    app.refresh().await;
+    app.open_catch_up(nine_hours_ago(), false).await;
+    let frame = draw_text(&mut app);
+    assert!(frame.contains(" more"), "{frame}");
+    assert!(frame.contains("• api:"), "Relay's own top shows: {frame}");
+    let leads: Vec<String> = app
+        .keys()
+        .into_iter()
+        .filter(|k| super::heads::flow_of(k).is_some())
+        .collect();
+    assert!(!leads.is_empty() && leads.len() < flows.len(), "{leads:?}");
+    for key in leads {
+        let flow = super::heads::flow_of(&key).unwrap();
+        assert!(frame.contains(&format!("↻ {flow}")), "{key} has no line: {frame}");
+    }
     token.cancel();
 }
 
