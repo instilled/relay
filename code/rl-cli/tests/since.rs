@@ -246,12 +246,13 @@ fn since_heads_with_why_a_flow_failed() {
     let (ok, o, err) = rl(&["flow", "run", "brief"]);
     assert!(ok, "{o}{err}");
 
-    // Asked until it has come to something: gchat's why, or (wrongly) days' date.
+    // Asked until it has failed and come to something: gchat's why, or (wrongly) days' date.
     let deadline = Instant::now() + Duration::from_secs(20);
     let text = loop {
         let (ok, text, err) = rl(&["since", "1h"]);
         assert!(ok, "{err}");
-        if text.contains("token expired") || text.contains("Thu 9 Oct") {
+        let came_to = text.contains("token expired") || text.contains("Thu 9 Oct");
+        if text.contains(" · failed at gchat") && came_to {
             break text;
         }
         assert!(Instant::now() < deadline, "never came to anything: {text}");
