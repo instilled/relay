@@ -541,6 +541,15 @@ mod tests {
         for (k, val) in want {
             assert_eq!(v.get(k).map(String::as_str), Some(val), "{k}");
         }
+        let mut named: Vec<&str> = v
+            .keys()
+            .filter(|k| !k.starts_with("data."))
+            .map(String::as_str)
+            .collect();
+        named.sort();
+        let mut taught = rl_flow::template::EVENT_NAMES.to_vec();
+        taught.sort();
+        assert_eq!(named, taught, "the names the pack teaches are the names an event has");
         assert_eq!(vars(&event("x.y", json!({})), None)["cwd"], "");
     }
 }

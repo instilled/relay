@@ -3,6 +3,8 @@
 //! cannot drift from what Relay does; the prose around it is here, in one
 //! place. `rl context` prints it.
 
+mod flows;
+
 use crate::client::Client;
 use anyhow::Result;
 use rl_core::display_path;
@@ -92,8 +94,8 @@ folder. It has a title, a state (starting, working, idle, needs you, blocked, st
 failed, stopped), tags, and a cause (by hand, a flow's step, a decision).
 - folder: a directory Relay knows; what `in` names.
 - flow: work that starts without the person — on time, on an event, or by hand — as steps, \
-written in ~/.relay/flows/<name>/flow.md.
-  A flow is not drafted here: the person writes one with `rl flow edit <name>`.
+written in ~/.relay/flows/<name>/flow.md (Flows, below, says what one holds).
+  A flow is not drafted here: the person writes one with `rl flow new <name>`.
 - question: something a run or a flow asks the person. Its options are answers; an option \
 can start a run when chosen.
 - agent: an agent CLI (see `agents` below). A `run` line that starts with an agent's name is \
@@ -175,6 +177,8 @@ they will read your draft and press enter, or not. Be exact and short.\n\n",
     );
     s.push_str("## Words\n\n");
     s.push_str(vocabulary());
+    s.push_str("\n## Flows\n\n");
+    s.push_str(&flows::section());
     s.push_str("\n## Events (what a flow's `on` can take)\n\n");
     s.push_str(&events());
     s.push_str("\n## The rl command line\n\n```\n");
@@ -251,7 +255,17 @@ mod tests {
             "## Words",
             "- flow: ",
             "~/.relay/flows/<name>/flow.md",
-            "`rl flow edit <name>`",
+            "`rl flow new <name>`",
+            "## Flows",
+            "### The frontmatter",
+            "- when: ",
+            "### A step",
+            "- after: ",
+            "### if:",
+            "### Placeholders",
+            "### What a step leaves, and starts with",
+            "### Templates",
+            "### An example",
             "## Events",
             "- run.failed:",
             "## The rl command line",

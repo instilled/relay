@@ -1540,6 +1540,14 @@ fn help_for_the_pack() -> String {
             help.push_str("\n---\n");
             help.push_str(&sub.render_help().to_string());
         }
+        if sub.get_name() == "flow" {
+            for inner in sub.get_subcommands_mut() {
+                if matches!(inner.get_name(), "new" | "test" | "state") {
+                    help.push_str("\n---\n");
+                    help.push_str(&inner.render_help().to_string());
+                }
+            }
+        }
     }
     help
 }

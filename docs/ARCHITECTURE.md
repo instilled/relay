@@ -1238,12 +1238,18 @@ happens; holding enter through the guide moves nothing at all, which is a test.
 
 **What an assistant is told** is the context pack (`rl-cli/src/context.rs`, `rl context
 [--in <folder>]`), built from the code so it cannot drift: the words (run, folder, flow,
-question, agent, tag and ref), one line per event kind in `event_kind::ALL` (a kind without
-words fails a test), `rl --help` plus the help of `run`, `flow` and `ask`, what is here (the
-folder and its name, the folders Relay knows, the flows — each by what starts it and where it is
-`in` — and the agents on this machine), and the answer contract: exactly one YAML document,
-`kind: run` then the form's fields. A flow is not drafted yet: the pack says the person writes
-one with `rl flow edit`.
+question, agent, tag and ref); a part on flows (`rl-cli/src/context/flows.rs`) — what `flow.md`
+holds, each frontmatter and step key (a test holds them to `FlowSpec`'s and `StepSpec`'s), `if:`
+as `rl-flow`'s `cond::ALLOWED` says it, the placeholders and the variables a command reads
+instead, what a step may leave (`rl flow state`) and every variable it starts with
+(`rl_flow::state::STEP_ENV`, which a daemon test holds every step to), an event's names
+(`template::EVENT_NAMES`, held to what the daemon fills), the templates, and an example that
+loads; one line per event kind in `event_kind::ALL` (a kind without words fails a test); `rl
+--help` plus the help of `run`, `flow`, `flow new`, `flow test`, `flow state` and `ask`; what is
+here (the folder and its name, the folders Relay knows, the flows — each by what starts it and
+where it is `in` — and the agents on this machine); and the answer contract: exactly one YAML
+document, `kind: run` then the form's fields. A flow is not drafted yet: the pack says the person
+writes one with `rl flow new`.
 
 **The interpreter** is that pack, the typed words and an ordinary run. The panel's line (§4) and
 `rl interpret <words…> [--in <folder>] [--go]` build the pack on the client (it needs clap's
