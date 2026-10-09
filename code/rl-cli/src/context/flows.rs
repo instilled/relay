@@ -164,13 +164,16 @@ refused at load: what a step printed must never become shell. A command reads a 
         state::env_name("<step>", "<key>"),
         events.join(", ")
     );
-    s.push_str(
+    let _ = write!(
+        s,
         "### What a step leaves, and starts with\n\n\
 What it prints is its out. A value: `rl flow state set key=value …`, or a `key=value` line appended \
-to $RELAY_OUT (a key is a-z, 0-9 and _; 4 KB at most). A file: `rl flow state write <name> < file`, \
-or a file written in $RELAY_WORK (10 MB at most). A later step reads them with `rl flow state get \
-<step>.<key>` and `rl flow state read <name>`. Allowed `Bash(rl flow state:*)`, an agent reaches its \
-firing's state and nothing else. Every step starts with:\n\n",
+to $RELAY_OUT (a key is a-z, 0-9 and _, from a letter; a value is {} KB at most). A file: `rl flow state write \
+<name> < file`, or a file written in $RELAY_WORK ({} MB at most). A later step reads them with `rl flow \
+state get <step>.<key>` and `rl flow state read <name>`. Allowed `Bash(rl flow state:*)`, an agent \
+reaches its firing's state and nothing else. Every step starts with:\n\n",
+        state::VALUE_MAX >> 10,
+        state::FILE_MAX >> 20
     );
     for (var, w) in state::STEP_ENV {
         let _ = writeln!(s, "- ${var}: {w}");
@@ -212,6 +215,88 @@ mod tests {
     fn every_key_a_flow_takes_has_words_and_none_that_it_does_not() {
         assert_eq!(words(FRONTMATTER), keys_of::<FlowSpec>(), "the frontmatter");
         assert_eq!(words(STEP), keys_of::<StepSpec>(), "a step");
+    }
+
+    fn said(key: &str) -> &'static str {
+        FRONTMATTER.iter().find(|(k, _)| *k == key).expect(key).1
+    }
+
+    /// Whether `fm` (frontmatter lines) with one step is a flow that loads.
+    fn loads(fm: &str, step: &str) -> bool {
+        let text = format!("---\n{fm}steps:\n  a:\n    run: \"{step}\"\n---\n");
+        rl_flow::def::check("t", rl_flow::doc::read(&text).unwrap(), &|_| true).is_ok()
+    }
+
+    #[test]
+    fn the_values_and_defaults_it_names_are_the_ones_that_load() {
+        use rl_proto::flow::{Filter, Missed, Overlap};
+        for v in ["catch-up-once", "skip"] {
+            assert!(loads(&format!("missed: {v}\nwhen: every 1h\n"), "true"), "missed: {v}");
+            assert!(said("missed").contains(&format!("`{v}`")), "{v}");
+        }
+        assert_eq!(Missed::default(), Missed::CatchUpOnce);
+        assert!(said("missed").contains("`catch-up-once` (the default)"));
+        for v in ["skip", "queue", "kill"] {
+            assert!(loads(&format!("overlap: {v}\n"), "true"), "overlap: {v}");
+            assert!(said("overlap").contains(&format!("`{v}`")), "{v}");
+        }
+        assert_eq!(Overlap::default(), Overlap::Skip);
+        assert!(said("overlap").contains("`skip` (the default)"));
+        assert!(loads("catch_up: top\n", "true"));
+        assert!(said("catch_up").contains("`top`"));
+        assert!(
+            said("throttle").contains(rl_proto::flow::DEFAULT_THROTTLE),
+            "the default throttle"
+        );
+        for k in keys_of::<Filter>() {
+            assert!(said("where").contains(&format!("`{k}")), "where: {k}");
+        }
+    }
+
+    #[test]
+    fn the_variables_a_command_reads_instead_are_the_ones_load_refuses_with() {
+        // (the placeholder in a command, the variable the pack names for it)
+        let cases = [
+            ("{event.kind}", "$RELAY_EVENT_KIND", "$RELAY_EVENT_KIND"),
+            ("{event.summary}", "$RELAY_EVENT_SUMMARY", "$RELAY_EVENT_SUMMARY"),
+            ("{event.run}", "$RELAY_EVENT_RUN", "$RELAY_EVENT_RUN"),
+            ("{event.data.f}", "$RELAY_EVENT", "$RELAY_EVENT (the event, as JSON)"),
+            ("{a.out}", "$RELAY_IN/a.out", "$RELAY_IN/<step>.out"),
+            ("{a.found}", "$RELAY_V_a_found", "$RELAY_V_<step>_<key>"),
+        ];
+        let pack = section();
+        for (ph, var, taught) in cases {
+            let text = format!(
+                "---\non: run.failed\nsteps:\n  a:\n    run: x\n  b:\n    after: a\n    run: \"echo {ph}\"\n---\n"
+            );
+            let p = rl_flow::def::check("t", rl_flow::doc::read(&text).unwrap(), &|_| true).unwrap_err();
+            assert!(
+                p.iter().any(|p| p.message.contains(&format!("read `{var}`"))),
+                "{ph}: {p:?}"
+            );
+            assert!(pack.contains(taught), "{ph}: the pack says {taught}");
+        }
+        for (ph, var) in [("{s.choice}", "$RELAY_CHOICE"), ("{s.note}", "$RELAY_NOTE")] {
+            let text =
+                format!("---\nsteps:\n  s:\n    ask: ok?\n    options: {{ ok: {{ run: \"echo {ph}\" }} }}\n---\n");
+            let p = rl_flow::def::check("t", rl_flow::doc::read(&text).unwrap(), &|_| true).unwrap_err();
+            assert!(
+                p.iter().any(|p| p.message.contains(&format!("read `{var}`"))),
+                "{ph}: {p:?}"
+            );
+            assert!(pack.contains(var), "{var}");
+        }
+    }
+
+    #[test]
+    fn the_key_rule_it_states_is_the_one_state_holds() {
+        for ok in ["a", "found", "a_1", "z9_"] {
+            assert!(rl_flow::state::key(ok).is_ok(), "{ok}");
+        }
+        for bad in ["A", "a-b", "1a", "_a", "a b", ""] {
+            assert!(rl_flow::state::key(bad).is_err(), "{bad}");
+        }
+        assert!(section().contains("a key is a-z, 0-9 and _, from a letter"));
     }
 
     #[test]

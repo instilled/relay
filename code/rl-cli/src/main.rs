@@ -1772,6 +1772,18 @@ mod tests {
     use clap::{CommandFactory, Parser};
 
     #[test]
+    fn the_flow_state_commands_the_pack_teaches_exist() {
+        let root = Cli::command();
+        let state = root
+            .find_subcommand("flow")
+            .and_then(|f| f.find_subcommand("state"))
+            .expect("rl flow state");
+        for sub in ["set", "get", "write", "read"] {
+            assert!(state.find_subcommand(sub).is_some(), "rl flow state {sub}");
+        }
+    }
+
+    #[test]
     fn the_shell_snippets_say_the_folder_percent_encoded() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join("a b&c").join("café");
