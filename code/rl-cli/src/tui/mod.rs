@@ -1471,6 +1471,16 @@ impl App {
                 .map(|a| a.name)
                 .collect();
         }
+        // A flow gone from the list takes its open steps line with it.
+        let flow_keys: HashSet<String> = self
+            .rows()
+            .iter()
+            .filter_map(|r| match r {
+                Row::Flow(f) => Some(f.key.clone()),
+                _ => None,
+            })
+            .collect();
+        self.open_flows.retain(|k| flow_keys.contains(k));
         self.settle();
         self.load_pane().await;
     }

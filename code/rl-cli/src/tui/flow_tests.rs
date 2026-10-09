@@ -245,6 +245,14 @@ async fn right_opens_a_flows_row_to_its_latest_firings_steps_and_left_folds_it()
     assert!(draw_text(&mut app).contains(steps), "→ opens it");
     press(&mut app, KeyCode::Left, KeyModifiers::NONE).await;
     assert!(!draw_text(&mut app).contains(steps), "← folds it");
+    // On a row that is not a flow, → does nothing.
+    app.select(Some("r:run00001".into()));
+    assert!(app.selected_flow().is_none(), "a run row is selected");
+    let before = draw_text(&mut app);
+    press(&mut app, KeyCode::Right, KeyModifiers::NONE).await;
+    assert_eq!(draw_text(&mut app), before);
+    assert!(app.open_flows.is_empty());
+    app.select(Some("f:prod-logs".into()));
     // With words on the line, the arrows are the line's.
     type_in(&mut app, "ab").await;
     press(&mut app, KeyCode::Right, KeyModifiers::NONE).await;
