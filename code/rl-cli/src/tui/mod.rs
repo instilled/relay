@@ -305,6 +305,8 @@ struct App {
     reload_list: Option<Vec<NotLoaded>>,
     /// What `/flow test` found, as lines, until the next key.
     tested: Option<Vec<String>>,
+    /// A flow drafted while the keys were another's: shown by `/flow draft`.
+    parked: Option<new_flow::Parked>,
     /// The wiring, fetched while the graph is up.
     graph: Option<rl_proto::graph::Graph>,
     /// The views gone through to reach the one that is up, the list first:
@@ -1162,6 +1164,7 @@ impl App {
             not_loaded: Vec::new(),
             reload_list: None,
             tested: None,
+            parked: None,
             asking: None,
             summary: None,
             summarising: None,
@@ -3221,8 +3224,11 @@ impl App {
         if verb == "reload" {
             return self.reload_flows().await;
         }
+        if verb == "draft" {
+            return self.show_parked();
+        }
         if !matches!(verb, "run" | "pause" | "resume" | "approve" | "edit" | "test") {
-            return self.say("/flow run|pause|resume|approve|edit|new|test|reload [name]");
+            return self.say("/flow run|pause|resume|approve|edit|new|test|draft|reload [name]");
         }
         let Some(name) = named.or_else(|| self.flow_here()) else {
             return self.say(format!("/flow {verb} which? a flow's row, its node, or its name"));
@@ -3813,7 +3819,7 @@ impl App {
                     Want::Flow { name } => Some(name),
                     Want::Any => d.name,
                 };
-                self.show_draft(name, d.text, out.agent);
+                self.drafted(name, d.text, out.agent);
             }
             Ok(Ok((crate::interpret::Answer::Run(draft), out))) => {
                 let form = crate::interpret::form_of(&draft, &asking.folder)
@@ -8705,7 +8711,10 @@ mod tests {
         assert!(!nightly(&app).paused);
 
         run(&mut app, "/flow now").await;
-        assert_eq!(said(&app), "/flow run|pause|resume|approve|edit|new|test|reload [name]");
+        assert_eq!(
+            said(&app),
+            "/flow run|pause|resume|approve|edit|new|test|draft|reload [name]"
+        );
         // Its `flow.md` waits for the screen to be given back.
         run(&mut app, "/flow edit").await;
         let home = rl_core::Home::at(tmp.path().join("h"));

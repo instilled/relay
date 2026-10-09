@@ -939,7 +939,9 @@ mod tests {
         };
         assert_eq!(
             at_end("/flow ", &here),
-            ["run", "pause", "resume", "approve", "edit", "new", "test", "reload"]
+            [
+                "run", "pause", "resume", "approve", "edit", "new", "test", "draft", "reload"
+            ]
         );
         assert_eq!(at_end("/flow re", &here), ["resume", "reload"]);
         assert_eq!(at_end("/flow run ", &here), ["nightly", "prod-logs"]);

@@ -15,6 +15,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use std::cell::Cell;
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 use unicode_width::UnicodeWidthChar;
 
 pub const USAGE: &str = "/flow new <name> [words…] · /flow new <name> --from <template> [key=value…]";
@@ -90,6 +91,20 @@ pub struct Drafted {
     page: Cell<usize>,
     /// Its last line has been on screen: the yes is to what was shown.
     seen_end: Cell<bool>,
+    /// When it was first drawn: an enter sooner than `SETTLE` after was meant for something else.
+    pub(super) drawn: Cell<Option<Instant>>,
+}
+
+/// How long a draft is on screen before enter writes it: a key typed for what was there before
+/// it came is not its yes.
+const SETTLE: Duration = Duration::from_millis(300);
+
+/// A flow drafted while the keys were another's — a form, a rename, words being typed — kept
+/// until `/flow draft` shows it.
+pub struct Parked {
+    name: Option<String>,
+    text: String,
+    agent: String,
 }
 
 impl Drafted {
@@ -119,7 +134,14 @@ impl Drafted {
             rows: Cell::new(0),
             page: Cell::new(0),
             seen_end: Cell::new(false),
+            drawn: Cell::new(None),
         }
+    }
+
+    /// Whether it came on screen too lately, at `now`, for an enter to be its yes — or is not on
+    /// screen yet.
+    pub fn settling(&self, now: Instant) -> bool {
+        self.drawn.get().is_none_or(|at| now.duration_since(at) < SETTLE)
     }
 
     /// Whether enter may write it.
@@ -160,6 +182,9 @@ impl Drafted {
         self.page.set(page);
         if area.width > 0 && page > 0 && top + page >= rows.len() {
             self.seen_end.set(true);
+        }
+        if area.width > 0 && page > 0 && self.drawn.get().is_none() {
+            self.drawn.set(Some(Instant::now()));
         }
         let shown: Vec<Line> = rows.into_iter().skip(top).take(page).collect();
         f.render_widget(Paragraph::new(shown), area);
@@ -290,6 +315,26 @@ impl App {
         }
     }
 
+    /// A flow the assistant answered: shown, when the keys are free — nothing open, nothing typed
+    /// on the line; else parked, said, and shown by `/flow draft`, so no key meant for what was
+    /// there is taken as its yes. A second parked replaces the first.
+    pub(super) fn drafted(&mut self, name: Option<String>, text: String, agent: String) {
+        if matches!(self.mode, Mode::Normal) && self.line.is_empty() {
+            return self.show_draft(name, text, agent);
+        }
+        let named = name.as_deref().map_or("a flow".to_string(), shown);
+        self.say(format!("{named} drafted · /flow draft shows it"));
+        self.parked = Some(Parked { name, text, agent });
+    }
+
+    /// `/flow draft`: the draft parked while the keys were another's, shown.
+    pub(super) fn show_parked(&mut self) {
+        match self.parked.take() {
+            Some(p) => self.show_draft(p.name, p.text, p.agent),
+            None => self.say("no draft waiting · /flow new <name> <words> asks for one"),
+        }
+    }
+
     /// A flow the assistant drafted, shown in the pane until enter writes it, `e` opens it, or esc
     /// lets it go. Checked as a reload would check it, against the projects Relay knows.
     pub(super) fn show_draft(&mut self, name: Option<String>, text: String, agent: String) {
@@ -311,6 +356,8 @@ impl App {
     pub(super) async fn draft_key(&mut self, d: Box<Drafted>, key: KeyCode) {
         match key {
             code if d.scroll(code) => self.mode = Mode::Draft(d),
+            // Typed for what was there before it came: not its yes, and nothing said.
+            KeyCode::Enter if d.settling(Instant::now()) => self.mode = Mode::Draft(d),
             KeyCode::Enter if !d.ready() => {
                 self.say(format!("it would not load: {} · e opens it in $EDITOR", d.problems[0]));
                 self.mode = Mode::Draft(d);

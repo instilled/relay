@@ -5,6 +5,7 @@
 use super::tests::{draw_text, panel, press, type_in};
 use crate::context::Want;
 use crossterm::event::{KeyCode, KeyModifiers};
+use std::time::{Duration, Instant};
 
 const HELLO: &str = "---\nwhen: every 1h\nsteps:\n  say:\n    run: echo hello\n---\n\nSays hello.\n";
 
@@ -15,6 +16,16 @@ async fn run(app: &mut super::App, line: &str) {
 
 fn said(app: &super::App) -> String {
     app.flash.as_ref().map(|(m, _)| m.clone()).unwrap_or_default()
+}
+
+/// The screen drawn, and a draft on it there long enough for an enter to be its yes — as if the
+/// person had looked a moment, without the test waiting.
+fn on_screen(app: &mut super::App) -> String {
+    let screen = draw_text(app);
+    if let super::Mode::Draft(d) = &app.mode {
+        d.drawn.set(Some(Instant::now() - Duration::from_secs(1)));
+    }
+    screen
 }
 
 #[tokio::test]
@@ -74,7 +85,7 @@ async fn a_drafted_flow_is_shown_then_written_with_its_yes() {
 
     // Its answer, shown; nothing written yet.
     app.show_draft(Some("hello".into()), HELLO.into(), "fakeai".into());
-    let screen = draw_text(&mut app);
+    let screen = on_screen(&mut app);
     assert!(screen.contains("hello  drafted by fakeai"), "{screen}");
     assert!(screen.contains("run: echo hello"), "{screen}");
     assert!(!home.flow_dir("hello").exists());
@@ -92,6 +103,7 @@ async fn a_drafted_flow_is_shown_then_written_with_its_yes() {
         "---\nsteps:\n  a:\n    after: nope\n    run: x\n---\n".into(),
         "fakeai".into(),
     );
+    on_screen(&mut app);
     press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
     assert_eq!(
         said(&app),
@@ -113,6 +125,7 @@ async fn a_drafted_flow_is_shown_then_written_with_its_yes() {
 
     // A name that is taken is a problem of the draft's, said before anything is written.
     app.show_draft(Some("hello".into()), HELLO.into(), "fakeai".into());
+    on_screen(&mut app);
     press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
     assert!(
         said(&app).starts_with("it would not load: `hello` is a flow already"),
@@ -131,7 +144,7 @@ async fn a_draft_taller_than_its_pane_is_written_once_its_end_was_shown() {
         md.push_str(&format!("Line {i} of what it does.\n"));
     }
     app.show_draft(Some("tall".into()), md.clone(), "fakeai".into());
-    let screen = draw_text(&mut app);
+    let screen = on_screen(&mut app);
     assert!(!screen.contains("Line 80"), "{screen}");
     press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
     assert_eq!(said(&app), "the end is below · ↓ to read it");
@@ -158,7 +171,7 @@ async fn a_draft_written_without_its_yes_is_taken_away_again() {
     let (tmp, token, mut app, _) = panel().await;
     let home = rl_core::Home::at(tmp.path().join("h"));
     app.show_draft(Some("hello".into()), HELLO.into(), "fakeai".into());
-    draw_text(&mut app);
+    on_screen(&mut app);
     // No daemon to load it and say yes: what was written goes again.
     token.cancel();
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
@@ -177,7 +190,7 @@ async fn a_draft_with_no_yes_in_a_folder_of_yours_leaves_only_what_was_yours() {
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("notes.txt"), "mine").unwrap();
     app.show_draft(Some("hello".into()), HELLO.into(), "fakeai".into());
-    draw_text(&mut app);
+    on_screen(&mut app);
     // The folder never had a yes: none is given, and what was written goes again — each time.
     for _ in 0..2 {
         press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
@@ -192,30 +205,35 @@ async fn a_draft_with_no_yes_in_a_folder_of_yours_leaves_only_what_was_yours() {
     token.cancel();
 }
 
+/// The assistant answering what `want` asked with `HELLO`, named `name` by the draft.
+async fn answer_flow(app: &mut super::App, folder: &std::path::Path, want: Want, name: &str) {
+    use crate::interpret::{Answer, FlowDraft};
+    app.asking = Some(super::Asking {
+        words: "say hello".into(),
+        folder: folder.to_path_buf(),
+        want,
+        task: tokio::spawn(async { anyhow::bail!("not asked") }),
+    });
+    let out = rl_proto::methods::AssistantOutput {
+        run: "run00009".into(),
+        agent: "fakeai".into(),
+        output: String::new(),
+        exit: Some(0),
+        timed_out: false,
+    };
+    let draft = FlowDraft {
+        name: Some(name.into()),
+        text: HELLO.into(),
+    };
+    app.answered(Ok(Ok((Answer::Flow(draft), out)))).await;
+}
+
 #[tokio::test]
 async fn a_flow_answered_is_shown_as_a_draft_named_by_whoever_asked() {
-    use crate::interpret::{Answer, FlowDraft};
     let (_tmp, token, mut app, folder) = panel().await;
     let asked = [(Want::Flow { name: "mine".into() }, "mine"), (Want::Any, "theirs")];
     for (want, shown) in asked {
-        app.asking = Some(super::Asking {
-            words: "say hello".into(),
-            folder: folder.clone(),
-            want,
-            task: tokio::spawn(async { anyhow::bail!("not asked") }),
-        });
-        let out = rl_proto::methods::AssistantOutput {
-            run: "run00009".into(),
-            agent: "fakeai".into(),
-            output: String::new(),
-            exit: Some(0),
-            timed_out: false,
-        };
-        let draft = FlowDraft {
-            name: Some("theirs".into()),
-            text: HELLO.into(),
-        };
-        app.answered(Ok(Ok((Answer::Flow(draft), out)))).await;
+        answer_flow(&mut app, &folder, want, "theirs").await;
         let super::Mode::Draft(d) = &app.mode else {
             panic!("the draft is shown: {}", said(&app));
         };
@@ -223,5 +241,58 @@ async fn a_flow_answered_is_shown_as_a_draft_named_by_whoever_asked() {
         assert_eq!(said(&app), format!("fakeai drafted {shown}"));
         app.mode = super::Mode::Normal;
     }
+    token.cancel();
+}
+
+#[tokio::test]
+async fn a_draft_that_comes_while_the_keys_are_anothers_waits_for_flow_draft() {
+    let (_tmp, token, mut app, folder) = panel().await;
+    run(&mut app, "/new").await;
+    type_in(&mut app, "make").await;
+    assert!(matches!(app.mode, super::Mode::Form(_)));
+    // It comes mid-form: the form stays, its keys its own, and the draft waits.
+    answer_flow(&mut app, &folder, Want::Any, "first").await;
+    let super::Mode::Form(f) = &app.mode else {
+        panic!("the form is left as it was");
+    };
+    assert_eq!(f.get("run"), "make");
+    assert_eq!(said(&app), "first drafted · /flow draft shows it");
+    // Another replaces it; so does one that comes while words are typed on the line.
+    answer_flow(&mut app, &folder, Want::Any, "second").await;
+    press(&mut app, KeyCode::Esc, KeyModifiers::NONE).await;
+    type_in(&mut app, "half typed").await;
+    answer_flow(&mut app, &folder, Want::Any, "third").await;
+    assert!(matches!(app.mode, super::Mode::Normal));
+    assert_eq!(said(&app), "third drafted · /flow draft shows it");
+    while !app.line.is_empty() {
+        press(&mut app, KeyCode::Backspace, KeyModifiers::NONE).await;
+    }
+
+    run(&mut app, "/flow draft").await;
+    let super::Mode::Draft(d) = &app.mode else {
+        panic!("shown now: {}", said(&app));
+    };
+    assert_eq!(d.name, "third");
+    press(&mut app, KeyCode::Esc, KeyModifiers::NONE).await;
+    run(&mut app, "/flow draft").await;
+    assert_eq!(said(&app), "no draft waiting · /flow new <name> <words> asks for one");
+    token.cancel();
+}
+
+#[tokio::test]
+async fn an_enter_as_a_draft_comes_on_screen_is_not_its_yes() {
+    let (tmp, token, mut app, folder) = panel().await;
+    let home = rl_core::Home::at(tmp.path().join("h"));
+    answer_flow(&mut app, &folder, Want::Any, "hello").await;
+    draw_text(&mut app);
+    // Pressed as it was drawn: ignored, and nothing said.
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+    assert!(matches!(app.mode, super::Mode::Draft(_)), "still shown");
+    assert_eq!(said(&app), "");
+    assert!(!home.flow_dir("hello").exists());
+    // A moment later, it is the yes.
+    on_screen(&mut app);
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+    assert_eq!(said(&app), "hello approved");
     token.cancel();
 }
