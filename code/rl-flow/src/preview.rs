@@ -11,11 +11,17 @@ use std::collections::BTreeMap;
 
 /// Each step, in the order written, and whether it would run. A step's `if:` on a step before it
 /// cannot be known before that step runs: it is said as a condition, with those of the steps it
-/// waits on. One on the event is decided when an event is given (`event` looks up `{event.…}`).
+/// waits on. One on the event is decided when an event is given (`event` looks up `{event.…}`) —
+/// and, for a flow with no `on:`, always as the engine decides it: no event ever fires it.
 pub fn steps(def: &FlowDef, event: Option<&dyn Lookup>) -> Vec<(String, Runs)> {
     let graph: Vec<(String, Vec<String>)> = def.steps.iter().map(|s| (s.name.clone(), s.after.clone())).collect();
     // A loaded flow has no cycle; were one there, the order written is as good as any.
     let order = plan::order(&graph).unwrap_or_else(|_| graph.iter().map(|(n, _)| n.clone()).collect());
+    let event = if def.trigger.on.is_empty() {
+        Event::None
+    } else {
+        event.map_or(Event::Unknown, Event::Given)
+    };
     let mut said: BTreeMap<String, Runs> = BTreeMap::new();
     for name in &order {
         if let Some(step) = def.steps.iter().find(|s| &s.name == name) {
@@ -29,8 +35,27 @@ pub fn steps(def: &FlowDef, event: Option<&dyn Lookup>) -> Vec<(String, Runs)> {
         .collect()
 }
 
+/// The event a firing would have, as far as a test knows it.
+#[derive(Clone, Copy)]
+enum Event<'a> {
+    /// The one named.
+    Given(&'a dyn Lookup),
+    /// One may fire it, but none was named.
+    Unknown,
+    /// None ever does: the flow has no `on:`.
+    None,
+}
+
+/// What a firing with no event looks up: nothing.
+struct NoEvent;
+impl Lookup for NoEvent {
+    fn get(&self, _: &crate::template::Ref) -> Option<String> {
+        None
+    }
+}
+
 /// One step, given what was said of those before it.
-fn runs(step: &Step, before: &BTreeMap<String, Runs>, event: Option<&dyn Lookup>) -> Runs {
+fn runs(step: &Step, before: &BTreeMap<String, Runs>, event: Event<'_>) -> Runs {
     let mut conds: Vec<String> = Vec::new();
     let mut add = |c: String| {
         if !conds.contains(&c) {
@@ -46,8 +71,11 @@ fn runs(step: &Step, before: &BTreeMap<String, Runs>, event: Option<&dyn Lookup>
     }
     if let Some(c) = &step.if_ {
         match (c.subject().head.as_str(), event) {
-            ("event", Some(e)) if !c.holds(e) => return Runs::No(format!("if {c}: not for this event")),
-            ("event", Some(_)) => {}
+            ("event", Event::Given(e)) if !c.holds(e) => return Runs::No(format!("if {c}: not for this event")),
+            ("event", Event::None) if !c.holds(&NoEvent) => {
+                return Runs::No(format!("if {c}: a flow with no on: has no event"));
+            }
+            ("event", Event::Given(_) | Event::None) => {}
             _ => add(c.to_string()),
         }
     }
@@ -123,6 +151,12 @@ mod tests {
         .unwrap()
     }
 
+    /// A flow an event fires, `on: run.failed`.
+    fn on_event(steps: &str) -> FlowDef {
+        let text = format!("---\non: run.failed\nsteps:\n{steps}---\n");
+        def::check("t", doc::read(&text).unwrap(), &|_| true).unwrap()
+    }
+
     /// An event whose `data.sev` is this.
     struct Sev(&'static str);
     impl Lookup for Sev {
@@ -151,7 +185,7 @@ mod tests {
 
     #[test]
     fn an_event_says_whether_its_if_holds_and_what_waits_on_it_follows() {
-        let f = flow(
+        let f = on_event(
             "  a:\n    if: event.data.sev == high\n    run: echo a\n  b:\n    after: a\n    run: echo b\n  c:\n    run: echo c\n",
         );
         assert_eq!(
@@ -178,6 +212,26 @@ mod tests {
             Runs::If(vec!["event.data.sev == high".into()]),
             "no event: not known yet"
         );
+    }
+
+    #[test]
+    fn with_no_on_an_if_on_the_event_reads_as_the_engine_decides_it() {
+        // No event ever fires it: `if: event.…` never holds, its negation always does — event
+        // named or not.
+        let f =
+            flow("  a:\n    if: event.data.sev\n    run: echo a\n  b:\n    if: \"!event.data.sev\"\n    run: echo b\n");
+        for event in [None, Some(&Sev("high") as &dyn Lookup)] {
+            assert_eq!(
+                steps(&f, event),
+                [
+                    (
+                        "a".to_string(),
+                        Runs::No("if event.data.sev: a flow with no on: has no event".into())
+                    ),
+                    ("b".to_string(), Runs::Yes),
+                ]
+            );
+        }
     }
 
     #[test]
