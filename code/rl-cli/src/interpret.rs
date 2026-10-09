@@ -1,16 +1,20 @@
 //! Plain words → a draft: the context pack and the words go to
 //! `assistants.interpret` as a run of that agent; what it answers — a run, or
 //! a flow's `flow.md` — becomes the form, or a draft to read, for the
-//! person's enter. Nothing here acts on its own: `apply` and `write_flow` are
-//! called only after that enter, or `--go`.
+//! person's enter. Nothing here acts on its own: `apply` starts a run only
+//! after that enter, or `--go`, and a drafted flow is written — by
+//! `flow::write_new`, as the panel's enter on a draft writes it — only with
+//! `--go`.
 
 use crate::client::Client;
 use crate::context::{self, Here, Want};
+use crate::flow::NewFile;
 use crate::tui::form::{self, Form};
 use anyhow::{Context as _, Result, bail};
 use rl_core::Home;
 use rl_proto::methods::{AssistantOutput, AssistantParams, AssistantRun, RunSpec, RunStart};
 use rl_proto::types::{Cause, Run};
+use serde_json::json;
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -249,6 +253,72 @@ pub async fn ask(home: &Home, folder: &Path, words: &str, want: &Want) -> Result
     let said = answer(&out.output)
         .with_context(|| format!("{} answered (run {}):\n{}", out.agent, out.run, out.output.trim()))?;
     Ok((said, out))
+}
+
+/// A flow `rl interpret` was answered with: printed; `--go` writes it and says yes to it, by the
+/// writer every new flow shares (`flow::write_new`).
+pub async fn flow_drafted(
+    home: &Home,
+    d: FlowDraft,
+    out: &AssistantOutput,
+    words: &str,
+    go: bool,
+    json: bool,
+) -> Result<()> {
+    // The assistant's name for it, only when it is a flow's name: never printed or written else.
+    let named = d.name.as_deref().filter(|n| rl_flow::def::valid_name(n));
+    let mut said = json!({ "kind": "flow", "name": named, "flow_md": d.text, "run": out.run, "agent": out.agent });
+    if !json {
+        println!("kind: flow");
+        if let Some(n) = named {
+            println!("name: {n}");
+        }
+        print!("{}", d.text);
+        println!("# by {} · run {}", out.agent, out.run);
+    }
+    let Some(name) = named else {
+        if json {
+            println!("{said}");
+        }
+        match &d.name {
+            Some(n) => bail!("the draft's name {n:?} is not a flow name; rl flow new <name> \"{words}\" names it"),
+            None => bail!("the draft names no flow; rl flow new <name> \"{words}\" names it"),
+        }
+    };
+    if !go {
+        if json {
+            println!("{said}");
+        } else {
+            println!(
+                "# --go asks again and writes what it answers; rl flow new {name} \"{words}\" drafts it \
+                 and opens $EDITOR first"
+            );
+        }
+        return Ok(());
+    }
+    let name = crate::flow::check_name(home, name)?;
+    let mut rpc = Client::connect(home).await?;
+    let known = crate::flow::projects(&mut rpc).await?;
+    let files = vec![NewFile::flow_md(d.text.as_str())];
+    let wrote = crate::flow::write_new(&mut rpc, home, &name, files, &known).await;
+    let approved = wrote.is_ok();
+    let words = match &wrote {
+        Ok(_) => format!("{name} approved"),
+        Err(e) => format!("{e:#}"),
+    };
+    if json {
+        said["said"] = json!(words);
+        said["approved"] = json!(approved);
+        println!("{said}");
+    } else if approved {
+        println!("{words}");
+    } else {
+        eprintln!("{words}");
+    }
+    if !approved {
+        std::process::exit(1)
+    }
+    Ok(())
 }
 
 /// What the form says, done: a run started. The person's yes, on the line.

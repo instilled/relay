@@ -42,13 +42,13 @@ mod screen;
 mod setup;
 mod shortcuts;
 mod term;
+mod tested;
 mod theme;
 
 use crate::attach::client_name;
 use crate::catchup::heads;
 use crate::client::Client;
 use crate::context::Want;
-use crate::flow::NewFile;
 use anyhow::Result;
 use crossterm::event::{
     DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event, EventStream, KeyCode,
@@ -70,7 +70,7 @@ use rl_core::time::fmt_age;
 use rl_proto::decision::Decision;
 use rl_proto::flow::{
     Firing, FiringFilter, Flow, FlowApproval, FlowApprove, FlowErrors, FlowFilter, FlowFirings, FlowList, FlowName,
-    FlowPause, FlowReload, FlowResume, FlowRun, FlowStatus, FlowTest, FlowTestParams, NotLoaded,
+    FlowPause, FlowReload, FlowResume, FlowRun, FlowStatus, NotLoaded,
 };
 use rl_proto::methods::{
     AgentList, DecisionDismiss, DecisionGet, DecisionId, DecisionNote, DecisionTake, DecisionTakeParams, Digest,
@@ -3234,109 +3234,6 @@ impl App {
         }
     }
 
-    /// `/flow new …`: the bare template or a template filled, written and opened in `$EDITOR`
-    /// once the screen is free (and said yes to on return, as `/flow edit` is); or the words to
-    /// the assistant, its draft shown when it answers.
-    fn new_flow(&mut self, words: &[&str]) {
-        let asked = match new_flow::asked(words) {
-            Ok(a) => a,
-            Err(e) => return self.say(e),
-        };
-        let name = match crate::flow::check_name(&self.home, asked.name()) {
-            Ok(name) => name,
-            Err(e) => return self.say(format!("{e:#}")),
-        };
-        let (files, yours) = match asked {
-            new_flow::Asked::Words { .. } if self.asking.is_some() => {
-                return self.say("still asking; /stop on its run");
-            }
-            new_flow::Asked::Words { words, .. } => {
-                return self.ask(words, Want::Flow { name: name.to_string() });
-            }
-            new_flow::Asked::Bare { .. } => (vec![NewFile::flow_md(crate::flow::TEMPLATE)], false),
-            new_flow::Asked::From { template, given, .. } => {
-                let here = rl_core::display_path(&self.folder_here());
-                match new_flow::template_files(&template, &given, &here) {
-                    Ok(files) => (files, true),
-                    Err(e) => return self.say(e),
-                }
-            }
-        };
-        match crate::flow::start_new(&self.home, &name, files, yours) {
-            Ok(editing) => self.editor = Some((editing, 1)),
-            Err(e) => self.say(format!("{e:#}")),
-        }
-    }
-
-    /// A flow the assistant drafted, shown in the pane until enter writes it, `e` opens it, or esc
-    /// lets it go. Checked as a reload would check it, against the projects Relay knows.
-    fn show_draft(&mut self, name: Option<String>, text: String, agent: String) {
-        let home = self.home.clone();
-        let taken = |n: &str| crate::flow::check_name(&home, n).err().map(|e| format!("{e:#}"));
-        let d = new_flow::Drafted::new(name, text, agent, &self.names.paths(), &taken);
-        self.say(format!(
-            "{} drafted {}",
-            d.agent,
-            if d.name.is_empty() { "a flow" } else { d.name.as_str() }
-        ));
-        self.mode = Mode::Draft(Box::new(d));
-        self.pane = Pane::Facts;
-        self.show_pane = true;
-    }
-
-    /// The draft written to its folder and said yes to at once (`flow::write_new`), or (`edit`)
-    /// opened in `$EDITOR` first and said yes to on return, as a new flow's save is. Not said yes
-    /// to, what was written is taken away again, and the draft stays shown.
-    async fn write_draft(&mut self, d: new_flow::Drafted, edit: bool) {
-        let files = vec![NewFile::flow_md(d.text.clone())];
-        let name = match crate::flow::check_name(&self.home, &d.name) {
-            Ok(name) => name,
-            Err(e) => {
-                self.say(format!("{e:#}"));
-                return self.mode = Mode::Draft(Box::new(d));
-            }
-        };
-        if edit {
-            match crate::flow::start_new(&self.home, &name, files, true) {
-                Ok(editing) => self.editor = Some((editing, 1)),
-                Err(e) => {
-                    self.say(format!("{e:#}"));
-                    self.mode = Mode::Draft(Box::new(d));
-                }
-            }
-            return;
-        }
-        let known = self.names.paths();
-        let said = match crate::flow::write_new(&mut self.rpc, &self.home, &name, files, &known).await {
-            Ok(_) => format!("{name} approved"),
-            Err(e) => {
-                self.mode = Mode::Draft(Box::new(d));
-                format!("{e:#}")
-            }
-        };
-        self.refresh().await;
-        // Said last: a refresh that fails says so, and this is what matters.
-        self.say(said);
-    }
-
-    /// `/flow test <name>`: what firing it would do now, in the pane until the next key. Nothing
-    /// starts.
-    async fn test_flow(&mut self, name: String) {
-        let asked = FlowTestParams {
-            name: name.clone(),
-            event: None,
-        };
-        match self.rpc.call::<FlowTest>(asked).await {
-            Ok(t) => {
-                self.tested = Some(crate::flow::tested::lines(&t, Timestamp::now()));
-                self.pane = Pane::Facts;
-                self.show_pane = true;
-                self.say(format!("{name}: what would fire · started nothing"));
-            }
-            Err(e) => self.say(format!("test {name}: {e:#}")),
-        }
-    }
-
     /// `/reload` and `/flow reload`: every flow read again, and what did not
     /// load said — one in the flash by name, more by count with the pane
     /// listing each with its file and line.
@@ -4303,22 +4200,7 @@ impl App {
                 return Ok(());
             }
             Mode::Draft(d) => {
-                match k.code {
-                    code if d.scroll(code) => self.mode = Mode::Draft(d),
-                    KeyCode::Enter if !d.ready() => {
-                        self.say(format!("it would not load: {} · e opens it in $EDITOR", d.problems[0]));
-                        self.mode = Mode::Draft(d);
-                    }
-                    // The yes is to what was shown: none until its end has been.
-                    KeyCode::Enter if !d.seen() => {
-                        self.say("the end is below · ↓ to read it");
-                        self.mode = Mode::Draft(d);
-                    }
-                    KeyCode::Enter => self.write_draft(*d, false).await,
-                    KeyCode::Char('e') => self.write_draft(*d, true).await,
-                    KeyCode::Esc => self.say("draft let go: nothing written"),
-                    _ => self.mode = Mode::Draft(d),
-                }
+                self.draft_key(d, k.code).await;
                 return Ok(());
             }
             // `^h` and `esc` are the shortcuts' first, and the name stays; `?`

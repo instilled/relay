@@ -1,9 +1,12 @@
 //! A new flow in the panel: what `/flow new …` asks for, and a flow an assistant drafted, shown
 //! before anything is written — its `flow.md`, what would stop it loading, and who drafted it.
-//! Pure but for drawing it: the words read, a draft checked and said, and how much of it has been
-//! on screen; the panel writes it on `enter`, once its last line has been.
+//! The words read, a draft checked and said, and how much of it has been on screen; then the
+//! panel's side (`App::new_flow`, `App::show_draft`, `App::draft_key`): a template written and
+//! opened, and a draft written on `enter`, once its last line has been, by the writer every new
+//! flow shares (`flow::write_new`).
 
-use super::theme;
+use super::{App, Mode, Pane, theme};
+use crate::context::Want;
 use crate::flow::{NewFile, templates};
 use crossterm::event::KeyCode;
 use ratatui::Frame;
@@ -250,6 +253,114 @@ fn wrap(lines: Vec<Line<'static>>, width: usize) -> Vec<Line<'static>> {
         rows.push(Line::from(row));
     }
     rows
+}
+
+impl App {
+    /// `/flow new …`: the bare template or a template filled, written and opened in `$EDITOR`
+    /// once the screen is free (and said yes to on return, as `/flow edit` is); or the words to
+    /// the assistant, its draft shown when it answers.
+    pub(super) fn new_flow(&mut self, words: &[&str]) {
+        let asked = match asked(words) {
+            Ok(a) => a,
+            Err(e) => return self.say(e),
+        };
+        let name = match crate::flow::check_name(&self.home, asked.name()) {
+            Ok(name) => name,
+            Err(e) => return self.say(format!("{e:#}")),
+        };
+        let (files, yours) = match asked {
+            Asked::Words { .. } if self.asking.is_some() => {
+                return self.say("still asking; /stop on its run");
+            }
+            Asked::Words { words, .. } => {
+                return self.ask(words, Want::Flow { name: name.to_string() });
+            }
+            Asked::Bare { .. } => (vec![NewFile::flow_md(crate::flow::TEMPLATE)], false),
+            Asked::From { template, given, .. } => {
+                let here = rl_core::display_path(&self.folder_here());
+                match template_files(&template, &given, &here) {
+                    Ok(files) => (files, true),
+                    Err(e) => return self.say(e),
+                }
+            }
+        };
+        match crate::flow::start_new(&self.home, &name, files, yours) {
+            Ok(editing) => self.editor = Some((editing, 1)),
+            Err(e) => self.say(format!("{e:#}")),
+        }
+    }
+
+    /// A flow the assistant drafted, shown in the pane until enter writes it, `e` opens it, or esc
+    /// lets it go. Checked as a reload would check it, against the projects Relay knows.
+    pub(super) fn show_draft(&mut self, name: Option<String>, text: String, agent: String) {
+        let home = self.home.clone();
+        let taken = |n: &str| crate::flow::check_name(&home, n).err().map(|e| format!("{e:#}"));
+        let d = Drafted::new(name, text, agent, &self.names.paths(), &taken);
+        self.say(format!(
+            "{} drafted {}",
+            d.agent,
+            if d.name.is_empty() { "a flow" } else { d.name.as_str() }
+        ));
+        self.mode = Mode::Draft(Box::new(d));
+        self.pane = Pane::Facts;
+        self.show_pane = true;
+    }
+
+    /// A key while a draft is shown: the scroll keys read it, enter writes it — once it would
+    /// load and its end has been on screen — `e` opens it first, esc lets it go.
+    pub(super) async fn draft_key(&mut self, d: Box<Drafted>, key: KeyCode) {
+        match key {
+            code if d.scroll(code) => self.mode = Mode::Draft(d),
+            KeyCode::Enter if !d.ready() => {
+                self.say(format!("it would not load: {} · e opens it in $EDITOR", d.problems[0]));
+                self.mode = Mode::Draft(d);
+            }
+            // The yes is to what was shown: none until its end has been.
+            KeyCode::Enter if !d.seen() => {
+                self.say("the end is below · ↓ to read it");
+                self.mode = Mode::Draft(d);
+            }
+            KeyCode::Enter => self.write_draft(*d, false).await,
+            KeyCode::Char('e') => self.write_draft(*d, true).await,
+            KeyCode::Esc => self.say("draft let go: nothing written"),
+            _ => self.mode = Mode::Draft(d),
+        }
+    }
+
+    /// The draft written to its folder and said yes to at once (`flow::write_new`), or (`edit`)
+    /// opened in `$EDITOR` first and said yes to on return, as a new flow's save is. Not said yes
+    /// to, what was written is taken away again, and the draft stays shown.
+    async fn write_draft(&mut self, d: Drafted, edit: bool) {
+        let files = vec![NewFile::flow_md(d.text.clone())];
+        let name = match crate::flow::check_name(&self.home, &d.name) {
+            Ok(name) => name,
+            Err(e) => {
+                self.say(format!("{e:#}"));
+                return self.mode = Mode::Draft(Box::new(d));
+            }
+        };
+        if edit {
+            match crate::flow::start_new(&self.home, &name, files, true) {
+                Ok(editing) => self.editor = Some((editing, 1)),
+                Err(e) => {
+                    self.say(format!("{e:#}"));
+                    self.mode = Mode::Draft(Box::new(d));
+                }
+            }
+            return;
+        }
+        let known = self.names.paths();
+        let said = match crate::flow::write_new(&mut self.rpc, &self.home, &name, files, &known).await {
+            Ok(_) => format!("{name} approved"),
+            Err(e) => {
+                self.mode = Mode::Draft(Box::new(d));
+                format!("{e:#}")
+            }
+        };
+        self.refresh().await;
+        // Said last: a refresh that fails says so, and this is what matters.
+        self.say(said);
+    }
 }
 
 #[cfg(test)]

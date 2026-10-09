@@ -5,16 +5,16 @@ use rl_cli::client::Client;
 use rl_cli::context::Want;
 use rl_cli::daemon;
 use rl_cli::env::child_env;
-use rl_cli::flow::{FlowCmd, NewFile};
-use rl_cli::interpret::{Answer, FlowDraft};
+use rl_cli::flow::FlowCmd;
+use rl_cli::interpret::Answer;
 use rl_cli::render;
 use rl_core::time::{now, parse_since};
 use rl_core::{Home, display_path};
 use rl_proto::decision::{Decision, DecisionOption, DecisionStatus};
 use rl_proto::flow::{FlowFilter, FlowList};
 use rl_proto::methods::{
-    AgentList, AssistantOutput, ConfigGet, GcParams, GcRun, RunArchive, RunArchiveParams, RunHide, RunHideParams,
-    RunResume, RunResumeParams, SummaryGet, SummaryMake, SummaryParams,
+    AgentList, ConfigGet, GcParams, GcRun, RunArchive, RunArchiveParams, RunHide, RunHideParams, RunResume,
+    RunResumeParams, SummaryGet, SummaryMake, SummaryParams,
 };
 use rl_proto::methods::{
     DaemonInfo, DigestGet, DigestHide, DigestHideParams, DigestParams, EventFilter, EventList, PresenceClient,
@@ -1576,7 +1576,7 @@ async fn interpret(home: &Home, a: InterpretArgs, json: bool) -> Result<()> {
     let (answer, out) = rl_cli::interpret::ask(home, &folder, &words, &Want::Any).await?;
     let draft = match answer {
         Answer::Run(draft) => draft,
-        Answer::Flow(d) => return flow_drafted(home, d, &out, &words, a.go, json).await,
+        Answer::Flow(d) => return rl_cli::interpret::flow_drafted(home, d, &out, &words, a.go, json).await,
     };
     let form = rl_cli::interpret::form_of(&draft, &folder);
     if json {
@@ -1597,71 +1597,6 @@ async fn interpret(home: &Home, a: InterpretArgs, json: bool) -> Result<()> {
         }
     } else if !json {
         println!("# --go does it; or n / a in the panel");
-    }
-    Ok(())
-}
-
-/// A flow `rl interpret` was answered with: printed; `--go` writes it and says yes to it.
-async fn flow_drafted(
-    home: &Home,
-    d: FlowDraft,
-    out: &AssistantOutput,
-    words: &str,
-    go: bool,
-    json: bool,
-) -> Result<()> {
-    // The assistant's name for it, only when it is a flow's name: never printed or written else.
-    let named = d.name.as_deref().filter(|n| rl_flow::def::valid_name(n));
-    let mut said = json!({ "kind": "flow", "name": named, "flow_md": d.text, "run": out.run, "agent": out.agent });
-    if !json {
-        println!("kind: flow");
-        if let Some(n) = named {
-            println!("name: {n}");
-        }
-        print!("{}", d.text);
-        println!("# by {} · run {}", out.agent, out.run);
-    }
-    let Some(name) = named else {
-        if json {
-            println!("{said}");
-        }
-        match &d.name {
-            Some(n) => bail!("the draft's name {n:?} is not a flow name; rl flow new <name> \"{words}\" names it"),
-            None => bail!("the draft names no flow; rl flow new <name> \"{words}\" names it"),
-        }
-    };
-    if !go {
-        if json {
-            println!("{said}");
-        } else {
-            println!(
-                "# --go asks again and writes what it answers; rl flow new {name} \"{words}\" drafts it \
-                 and opens $EDITOR first"
-            );
-        }
-        return Ok(());
-    }
-    let name = rl_cli::flow::check_name(home, name)?;
-    let mut rpc = Client::connect(home).await?;
-    let known = rl_cli::flow::projects(&mut rpc).await?;
-    let files = vec![NewFile::flow_md(d.text.as_str())];
-    let wrote = rl_cli::flow::write_new(&mut rpc, home, &name, files, &known).await;
-    let approved = wrote.is_ok();
-    let words = match &wrote {
-        Ok(_) => format!("{name} approved"),
-        Err(e) => format!("{e:#}"),
-    };
-    if json {
-        said["said"] = json!(words);
-        said["approved"] = json!(approved);
-        println!("{said}");
-    } else if approved {
-        println!("{words}");
-    } else {
-        eprintln!("{words}");
-    }
-    if !approved {
-        std::process::exit(1)
     }
     Ok(())
 }
