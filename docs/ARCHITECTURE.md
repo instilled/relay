@@ -717,6 +717,17 @@ everything. Asked while the top is being written, it says so. So bare `/since` i
 writes the top by itself — you asked for it, `/summary` writes it — while a bare `rl since` past
 `catch_up.after` does: it counts from presence, as the panel does when it opens by itself.
 
+**What heads it.** A flow that says `catch_up: top` (§6) puts its latest firing, when it started
+or ended since you were last here, above the top, newest first (`catchup/heads.rs`,
+`heads::leads`): `↻ morning-brief · 07:30 · done`, then what it came to — its last step's out
+(`flow.outcome`), blank lines left out, at most eight lines, the last saying `… ^o on it shows
+the rest`. One still running heads it with its state alone; one a source failed in says
+`failed at gchat` and, under it, what gchat printed. Relay's own top takes what is left of half
+the room, two lines at least. The cursor goes up onto it from the top (`h:<flow>`); `enter` or
+`^o` shows all of it in the pane, and `/summary [deep]` there tells that firing (§6). Yesterday's
+firing does not head today's, and a flow without the key is a line under its project as any
+other. `rl since` prints the same over its top.
+
 **`rl since [stretch]`** prints the same catch-up (`catchup::text`): `while you were away · since
 Sun 14:56 (2d0h)`, the top, then each project's line and its rows — a run by its id, a question by
 its id and the keys that answer it. It counts from the stretch given, else from when you last

@@ -9,6 +9,8 @@
 //! in the stretch is counted as ran or failed — they are the top without an
 //! assistant; in a line each, what an assistant is handed to write it.
 
+pub mod heads;
+
 use crate::client::Client;
 use crate::digest::since_items;
 use crate::tui::rows::{self, Context, Head, Lens, Row};
@@ -556,7 +558,8 @@ pub fn text(cu: &CatchUp, top: &[String], now: Timestamp) -> String {
     let mut out = headline(cu.since, now);
     out.push_str("\n\n");
     for l in top {
-        out.push_str(&format!("  {l}\n"));
+        out.push_str(format!("  {l}").trim_end());
+        out.push('\n');
     }
     for p in &cu.projects {
         let lead = if p.rows.is_empty() { '▸' } else { '▾' };
@@ -1094,6 +1097,15 @@ mod tests {
         assert!(lines[0].starts_with("while you were away · since "), "{t}");
         assert!(lines[0].ends_with("(12h00m)"), "{t}");
         assert_eq!(lines[2], "  • it went fine", "{t}");
+        let t = text(
+            &cu,
+            &["↻ brief · done".into(), "  line".into(), String::new(), "• fine".into()],
+            now(),
+        );
+        assert!(
+            t.contains("\n  ↻ brief · done\n    line\n\n  • fine\n"),
+            "a blank line has no spaces: {t}"
+        );
         assert!(t.contains("\n▾ api · 3 need you · 4 ran · 2 failed\n"), "{t}");
         assert!(t.contains("\n    ? q1  asks: question q1 · 4h ago  [ok]\n"), "{t}");
         assert!(t.contains("    ✦ a1  title a1 · failed"), "a run by its id: {t}");

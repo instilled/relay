@@ -19,6 +19,8 @@
 mod catchup;
 mod complete;
 mod events;
+#[cfg(test)]
+mod flow_tests;
 pub(crate) mod flows;
 pub mod form;
 mod graph;
@@ -39,6 +41,7 @@ mod term;
 mod theme;
 
 use crate::attach::client_name;
+use crate::catchup::heads;
 use crate::client::Client;
 use anyhow::Result;
 use crossterm::event::{
@@ -60,8 +63,8 @@ use rl_core::Home;
 use rl_core::time::fmt_age;
 use rl_proto::decision::Decision;
 use rl_proto::flow::{
-    Flow, FlowApproval, FlowApprove, FlowErrors, FlowFilter, FlowList, FlowName, FlowPause, FlowReload, FlowResume,
-    FlowRun, FlowStatus, NotLoaded,
+    Firing, Flow, FlowApproval, FlowApprove, FlowErrors, FlowFilter, FlowList, FlowName, FlowPause, FlowReload,
+    FlowResume, FlowRun, FlowStatus, NotLoaded,
 };
 use rl_proto::methods::{
     AgentList, DecisionDismiss, DecisionGet, DecisionId, DecisionNote, DecisionTake, DecisionTakeParams, Digest,
@@ -340,6 +343,8 @@ struct App {
     /// The catch-up's top as written, for the stretch it shows; until there
     /// is one, it is counted.
     top: Option<Summary>,
+    /// What each firing heading the catch-up came to (`catch_up: top`), by firing.
+    outcomes: heads::Outcomes,
     /// `/summary deep` waiting on `y`: what it would ask.
     summary_ask: Option<SummaryParams>,
     /// The last summary made of each target (`SummaryTarget::key`) while the
@@ -1136,6 +1141,7 @@ impl App {
             summarising: None,
             topping: None,
             top: None,
+            outcomes: Default::default(),
             summary_ask: None,
             made: HashMap::new(),
             away_since: None,
@@ -1436,6 +1442,7 @@ impl App {
             }
             _ => self.catch = None,
         }
+        self.fetch_leads().await;
         if self.view == View::Graph {
             match self.rpc.call::<GraphGet>(GraphParams::default()).await {
                 Ok(g) => self.graph = Some(g),
@@ -1524,6 +1531,11 @@ impl App {
     /// What `/summary` on the selected row is of: everything on the
     /// catch-up's top; a question's, the run that asked it.
     fn summary_target(&self) -> Option<SummaryTarget> {
+        if let Some(l) = self.lead_here() {
+            return Some(SummaryTarget::Firing {
+                id: l.firing.id.clone(),
+            });
+        }
         if self.on_top() {
             return Some(SummaryTarget::All);
         }
@@ -1595,7 +1607,10 @@ impl App {
             View::Work => self.rows().into_iter().filter_map(|r| r.key()).collect(),
             View::Graph => self.graph_plan().map(|(_, p)| p.order()).unwrap_or_default(),
             View::Events => self.event_items().iter().flat_map(|i| i.keys()).collect(),
-            View::CatchUp => std::iter::once(TOP.to_string())
+            View::CatchUp => self
+                .lead_keys()
+                .into_iter()
+                .chain(std::iter::once(TOP.to_string()))
                 .chain(self.catch_rows().into_iter().filter_map(|r| r.key()))
                 .collect(),
         }
@@ -1609,11 +1624,14 @@ impl App {
     }
 
     /// Keeps the selection on something that exists: the first row, when
-    /// it has to move — in the catch-up, the first under its top.
+    /// it has to move — in the catch-up, the first under its top and what heads it.
     fn settle(&mut self) {
         let keys = self.keys();
         if self.sel.as_ref().is_none_or(|k| !keys.contains(k)) {
-            let first = keys.iter().find(|k| *k != TOP).or(keys.first());
+            let first = keys
+                .iter()
+                .find(|k| *k != TOP && heads::flow_of(k).is_none())
+                .or(keys.first());
             self.select(first.cloned());
         }
     }
@@ -2589,6 +2607,7 @@ impl App {
         }
         self.away_since = Some(since);
         self.catch = Some(d);
+        self.fetch_leads().await;
         self.write_top(since, came_back).await;
         self.open_view(View::CatchUp);
         self.close_term();
@@ -2640,6 +2659,34 @@ impl App {
             .collect()
     }
 
+    /// The keys of the firings heading the catch-up, newest first.
+    fn lead_keys(&self) -> Vec<String> {
+        let Some(c) = &self.catch else { return vec![] };
+        heads::leads(&self.flows, &c.firings, c.since)
+            .iter()
+            .map(|l| heads::key(l.flow))
+            .collect()
+    }
+
+    /// The firing heading the catch-up that the cursor is on.
+    fn lead_here(&self) -> Option<heads::Lead<'_>> {
+        let flow = heads::flow_of(self.sel.as_deref()?)?;
+        let c = self.catch.as_ref().filter(|_| self.view == View::CatchUp)?;
+        heads::leads(&self.flows, &c.firings, c.since)
+            .into_iter()
+            .find(|l| l.flow == flow)
+    }
+
+    /// What each firing heading the catch-up came to, asked for when it is new or has moved on.
+    async fn fetch_leads(&mut self) {
+        let Some(c) = &self.catch else { return };
+        let firings: Vec<Firing> = heads::leads(&self.flows, &c.firings, c.since)
+            .iter()
+            .map(|l| l.firing.clone())
+            .collect();
+        self.outcomes.fetch(&mut self.rpc, firings).await;
+    }
+
     /// What leaving the catch-up marks seen: every run it shows that was
     /// not, and where each flow's runs not seen till now start, so its
     /// `/summary` still starts there (as `saw_selected` notes).
@@ -2680,6 +2727,13 @@ impl App {
     /// go of once it is seen — it ended over a day ago — is read here
     /// instead, in the pane, and seen only once the catch-up is left.
     async fn catch_up_enter(&mut self) {
+        // A firing heading it is read where it stands: all of it, in the pane.
+        if self.lead_here().is_some() {
+            self.pane = Pane::Facts;
+            self.show_pane = true;
+            self.load_pane().await;
+            return;
+        }
         let Some(row) = self.selected() else {
             return self.say("nothing here to open");
         };
@@ -5561,27 +5615,24 @@ impl App {
             let pad = w.saturating_sub(words.chars().count() + 1);
             top.push(Line::styled(format!("{}{words}", " ".repeat(pad)), theme::dim()));
         }
-        // The top stands still above the rows, and never takes more than
-        // half the room; cut, it says where the rest is.
-        top = catchup::capped(top, (area.height / 2) as usize);
-        if self.sel.as_deref() == Some(TOP) {
-            top = top
-                .into_iter()
-                .map(|mut l| {
-                    let short = w.saturating_sub(l.width());
-                    l.spans.push(Span::raw(" ".repeat(short)));
-                    l.style(theme::selected())
-                })
-                .collect();
-        }
-        let top_h = (top.len() as u16).min(area.height / 2);
+        // What heads it comes first; Relay's own top under it takes what is left of half the
+        // room, two lines at least, and cut, says where the rest is.
+        let firings = self.catch.as_ref().map_or(&[][..], |c| c.firings.as_slice());
+        let leads = heads::leads(&self.flows, firings, cu.since);
+        let (mut block, mut block_keys) = catchup::leads(&leads, &self.outcomes, w, Timestamp::now());
+        let half = (area.height / 2) as usize;
+        let top = catchup::capped(top, half.saturating_sub(block.len()).max(2));
+        block_keys.extend(std::iter::repeat_n(TOP.to_string(), top.len()));
+        block.extend(top);
+        let block = catchup::lit(block, &block_keys, self.sel.as_deref(), w);
+        let top_h = (block.len() as u16).min(area.height * 2 / 3);
         let [top_area, sep, rest] = Layout::vertical([
             Constraint::Length(top_h),
             Constraint::Length(u16::from(top_h > 0)),
             Constraint::Fill(1),
         ])
         .areas(area);
-        f.render_widget(Paragraph::new(top), top_area);
+        f.render_widget(Paragraph::new(block), top_area);
         f.render_widget(Paragraph::new("─".repeat(sep.width as usize)).dim(), sep);
         self.list_h.set(rest.height);
         let (lines, keys) = catchup::lines(&cu, w, Timestamp::now());
@@ -5697,6 +5748,16 @@ impl App {
                 Some(it) => events::pane_lines(it, &self.feed, now),
                 None => vec![Line::from(Span::raw(" nothing selected").dim())],
             };
+            f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
+            return;
+        }
+        if let Some(l) = self.lead_here() {
+            let key = SummaryTarget::Firing {
+                id: l.firing.id.clone(),
+            }
+            .key();
+            let said = self.summary.as_ref().filter(|s| s.target == key);
+            let lines = catchup::lead_pane(&l, self.outcomes.of(&l.firing.id), said, area.width as usize, now);
             f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
             return;
         }
@@ -5961,6 +6022,9 @@ impl App {
         } else {
             "^o details"
         };
+        if self.lead_here().is_some() {
+            return format!("enter shows all of it · /summary tells this firing · {pane} · esc the list");
+        }
         if self.on_top() {
             return format!("/summary [deep] [again] writes it · {pane} · esc the list");
         }
@@ -6541,7 +6605,7 @@ mod tests {
     /// A panel on a daemon of its own, in a home of its own: one project,
     /// registered as `api` from a folder called `proj`, with one ended run in
     /// it, `make test`. Nothing is started, and no agent is anywhere near.
-    async fn panel() -> (
+    pub(super) async fn panel() -> (
         tempfile::TempDir,
         tokio_util::sync::CancellationToken,
         super::App,
@@ -6773,7 +6837,7 @@ mod tests {
         app.select(key);
     }
 
-    async fn type_in(app: &mut super::App, text: &str) {
+    pub(super) async fn type_in(app: &mut super::App, text: &str) {
         for c in text.chars() {
             app.key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE), AREA)
                 .await
@@ -6781,11 +6845,11 @@ mod tests {
         }
     }
 
-    async fn press(app: &mut super::App, code: KeyCode, m: KeyModifiers) {
+    pub(super) async fn press(app: &mut super::App, code: KeyCode, m: KeyModifiers) {
         app.key(KeyEvent::new(code, m), AREA).await.unwrap();
     }
 
-    const AREA: Rect = Rect::new(0, 0, 120, 40);
+    pub(super) const AREA: Rect = Rect::new(0, 0, 120, 40);
     const RUN: &str = "r:run00001";
 
     fn renaming(app: &super::App) -> Option<(String, bool)> {
@@ -7505,7 +7569,7 @@ mod tests {
     }
 
     /// The screen as drawn at 120×40, its rows joined by newlines.
-    fn draw_text(app: &mut super::App) -> String {
+    pub(super) fn draw_text(app: &mut super::App) -> String {
         let mut t = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 40)).unwrap();
         t.draw(|f| app.draw(f)).unwrap();
         let buf = t.backend().buffer().clone();
@@ -7832,7 +7896,7 @@ mod tests {
             .unwrap();
     }
 
-    fn nine_hours_ago() -> jiff::Timestamp {
+    pub(super) fn nine_hours_ago() -> jiff::Timestamp {
         jiff::Timestamp::now() - jiff::SignedDuration::from_hours(9)
     }
 

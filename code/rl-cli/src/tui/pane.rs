@@ -133,7 +133,7 @@ fn said(key: &str, s: &Summary, width: usize, now: Timestamp) -> Vec<Line<'stati
 
 /// What a flow, a project or everything was said to have done, kept from
 /// the last `/summary` over it; else how to ask. A blank line first.
-fn summary_section(summary: Option<&Summary>, width: usize, now: Timestamp) -> Vec<Line<'static>> {
+pub(super) fn summary_section(summary: Option<&Summary>, width: usize, now: Timestamp) -> Vec<Line<'static>> {
     let mut lines = vec![Line::raw("")];
     match summary {
         Some(s) => lines.extend(said("summary", s, width, now)),

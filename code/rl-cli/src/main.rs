@@ -937,7 +937,14 @@ async fn since(home: &Home, a: SinceArgs, json: bool) -> Result<()> {
         Some(&relay),
         n,
     );
-    let top = since_top(&mut c, &cu, boundary, came_back).await;
+    // What heads it: each `catch_up: top` flow's latest firing since, all it came to fetched.
+    let leads = rl_cli::catchup::heads::leads(&flows, &d.firings, boundary);
+    let mut outcomes = rl_cli::catchup::heads::Outcomes::default();
+    outcomes
+        .fetch(&mut c, leads.iter().map(|l| l.firing.clone()).collect())
+        .await;
+    let mut top = rl_cli::catchup::heads::text(&leads, &outcomes, n);
+    top.extend(since_top(&mut c, &cu, boundary, came_back).await);
     print!("{}", rl_cli::catchup::text(&cu, &top, n));
     Ok(())
 }
