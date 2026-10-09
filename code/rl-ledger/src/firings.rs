@@ -264,6 +264,7 @@ fn from_row(row: &Row) -> rusqlite::Result<Firing> {
         started_at: from_millis(row.get(5)?).map_err(|e| conv(5, e))?,
         ended_at: optional_from_millis(row.get(6)?, 6, conv)?,
         steps: Vec::new(),
+        outcome: None,
     })
 }
 

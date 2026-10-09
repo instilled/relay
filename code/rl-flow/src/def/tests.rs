@@ -89,7 +89,11 @@ fn the_flow_itself_is_kept() {
     assert_eq!(f.in_, Some(PathBuf::from("~/Projects/flint-platform")));
     assert_eq!(f.trigger.when, Some(When::Every(30 * 60)));
     assert_eq!(f.throttle_secs, 10);
-    assert_eq!(f.missed, Missed::Skip);
+    assert_eq!(
+        f.missed,
+        Missed::CatchUpOnce,
+        "a firing slept through is made up by default"
+    );
     let Does::Ask(ask) = &f.steps[2].does else { panic!() };
     assert_eq!(ask.text, "{triage.out}");
     assert_eq!(ask.group.as_deref(), Some("{probe.signature}"));
@@ -461,4 +465,25 @@ fn names_are_lowercase_words_and_dashes() {
     for bad in ["", "-a", "Prod", "a_b", "a.b", "a b", "é"] {
         assert!(!valid_name(bad), "{bad}");
     }
+}
+
+#[test]
+fn catch_up_top_is_kept_and_a_def_from_before_it_still_reads() {
+    let text = "---\nwhen: \"30 7 * * 1-5\"\ncatch_up: top\nsteps:\n  brief:\n    run: echo brief\n---\n";
+    let f = check("morning-brief", doc::read(text).unwrap(), &|_| true).unwrap();
+    assert_eq!(f.catch_up, Some(CatchUpPlace::Top));
+    let mut v = serde_json::to_value(&f).unwrap();
+    assert_eq!(v["catch_up"], "top", "the client reads it from the def");
+    v.as_object_mut().unwrap().remove("catch_up");
+    let old: FlowDef = serde_json::from_value(v).unwrap();
+    assert_eq!(old.catch_up, None, "a firing's def kept before catch_up existed");
+    let plain = check("p", doc::read(&flow("  a:\n    run: x\n")).unwrap(), &|_| true).unwrap();
+    assert!(serde_json::to_value(&plain).unwrap().get("catch_up").is_none());
+}
+
+#[test]
+fn a_catch_up_that_is_not_top_is_refused_at_its_line() {
+    let p = doc::read("---\ncatch_up: bottom\nsteps:\n  a:\n    run: x\n---\n").unwrap_err();
+    assert_eq!(p.line, Some(2), "the value's line in the file: {p:?}");
+    assert!(p.message.contains("top"), "{p:?}");
 }

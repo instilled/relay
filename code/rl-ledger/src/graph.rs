@@ -54,22 +54,26 @@ pub struct EventCount {
     /// With no run: the flow whose step asked the question the event is
     /// about, or whose own `flow.*` event it is.
     pub by_flow: Option<String>,
+    /// With no run, and about a question an ask step raised: that step.
+    pub by_step: Option<String>,
     pub count: u64,
 }
 
 pub fn events_since(conn: &Connection, since: Timestamp) -> Result<Vec<EventCount>> {
     let mut stmt = conn.prepare(
-        "SELECT kind, workspace, cause, run_kind, run_workspace, by_flow, COUNT(*) FROM ( \
+        "SELECT kind, workspace, cause, run_kind, run_workspace, by_flow, by_step, COUNT(*) FROM ( \
            SELECT e.kind, e.workspace, r.cause, r.kind AS run_kind, r.workspace AS run_workspace, \
              CASE WHEN r.id IS NOT NULL THEN NULL \
                   WHEN e.kind LIKE 'flow.%' THEN json_extract(e.data_json, '$.flow') \
-                  ELSE f.flow END AS by_flow \
+                  ELSE f.flow END AS by_flow, \
+             CASE WHEN r.id IS NULL AND e.kind NOT LIKE 'flow.%' AND d.by_step IS NOT NULL \
+                  THEN substr(d.by_step, instr(d.by_step, '/') + 1) END AS by_step \
            FROM events e \
            LEFT JOIN runs r ON r.id = e.run \
            LEFT JOIN decisions d ON r.id IS NULL AND d.id = json_extract(e.data_json, '$.decision') \
            LEFT JOIN firings f ON f.id = substr(d.by_step, 1, instr(d.by_step, '/') - 1) \
            WHERE e.at >= ?1) \
-         GROUP BY kind, workspace, cause, run_kind, run_workspace, by_flow \
+         GROUP BY kind, workspace, cause, run_kind, run_workspace, by_flow, by_step \
          ORDER BY kind, workspace",
     )?;
     let rows = stmt.query_map(params![to_millis(since)], |row| {
@@ -87,7 +91,8 @@ pub fn events_since(conn: &Connection, since: Timestamp) -> Result<Vec<EventCoun
             workspace: PathBuf::from(row.get::<_, String>(1)?),
             run,
             by_flow: row.get(5)?,
-            count: row.get::<_, i64>(6)? as u64,
+            by_step: row.get(6)?,
+            count: row.get::<_, i64>(7)? as u64,
         })
     })?;
     Ok(rows.collect::<Result<_, _>>()?)
@@ -99,6 +104,8 @@ pub struct AskRow {
     pub id: String,
     /// The flow whose step asked it.
     pub flow: String,
+    /// The step that asked it.
+    pub step: String,
     pub title: String,
     pub status: DecisionStatus,
 }
@@ -107,7 +114,8 @@ pub struct AskRow {
 /// open — oldest first.
 pub fn asks_since(conn: &Connection, since: Timestamp) -> Result<Vec<AskRow>> {
     let mut stmt = conn.prepare(
-        "SELECT d.id, f.flow, d.title, d.status FROM decisions d \
+        "SELECT d.id, f.flow, substr(d.by_step, instr(d.by_step, '/') + 1), d.title, d.status \
+         FROM decisions d \
          JOIN firings f ON f.id = substr(d.by_step, 1, instr(d.by_step, '/') - 1) \
          WHERE d.created_at >= ?1 OR d.status = 'open' \
          ORDER BY d.created_at, d.id",
@@ -116,8 +124,9 @@ pub fn asks_since(conn: &Connection, since: Timestamp) -> Result<Vec<AskRow>> {
         Ok(AskRow {
             id: row.get(0)?,
             flow: row.get(1)?,
-            title: row.get(2)?,
-            status: row.get::<_, String>(3)?.parse().map_err(|e| conv_str(3, e))?,
+            step: row.get(2)?,
+            title: row.get(3)?,
+            status: row.get::<_, String>(4)?.parse().map_err(|e| conv_str(4, e))?,
         })
     })?;
     Ok(rows.collect::<Result<_, _>>()?)
@@ -151,22 +160,23 @@ mod tests {
         .unwrap();
         let since = from_millis(5).unwrap();
         let asks = asks_since(&c, since).unwrap();
-        let said: Vec<(&str, &str, &str)> = asks
+        let said: Vec<(&str, &str, &str, &str)> = asks
             .iter()
-            .map(|a| (a.id.as_str(), a.flow.as_str(), a.title.as_str()))
+            .map(|a| (a.id.as_str(), a.flow.as_str(), a.step.as_str(), a.title.as_str()))
             .collect();
         assert_eq!(
             said,
-            [("dq000001", "review", "ship it?")],
+            [("dq000001", "review", "ask", "ship it?")],
             "a run's own question is not a step's; an old answered one is out of the window"
         );
         let events = events_since(&c, since).unwrap();
-        let by: Vec<(&str, Option<&str>, Option<&str>)> = events
+        let by: Vec<_> = events
             .iter()
             .map(|e| {
                 (
                     e.kind.as_str(),
                     e.by_flow.as_deref(),
+                    e.by_step.as_deref(),
                     e.run.as_ref().map(|r| r.0.as_str()),
                 )
             })
@@ -174,10 +184,10 @@ mod tests {
         assert_eq!(
             by,
             [
-                ("decision.raised", Some("review"), None),
-                ("decision.raised", None, Some("flow:nightly/probe")),
-                ("flow.fired", Some("review"), None),
-                ("logs.issue", None, None),
+                ("decision.raised", Some("review"), Some("ask"), None),
+                ("decision.raised", None, None, Some("flow:nightly/probe")),
+                ("flow.fired", Some("review"), None, None),
+                ("logs.issue", None, None, None),
             ]
         );
     }

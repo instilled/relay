@@ -11,16 +11,14 @@
 //! up a lane of their own in the gap before the target, and into the target
 //! on a row of their own, where the event kinds they carry are written.
 
-use super::query::{Named, Query, Subject};
 use super::rows::Names;
 use super::theme;
 use jiff::Timestamp;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use rl_core::time::fmt_age;
 use rl_proto::flow::FlowStatus;
-use rl_proto::graph::{Graph, Node, NodeKind};
-use rl_proto::types::{Checkout, RunState};
+use rl_proto::graph::{Graph, Node};
+use rl_proto::types::RunState;
 use std::collections::{HashMap, HashSet, VecDeque};
 
 /// Widest a node's box grows, and narrowest.
@@ -29,182 +27,8 @@ const BOX_MAX: usize = 30;
 /// Longest an edge label is written before it is cut.
 const LABEL_MAX: usize = 22;
 
-pub const AGENT: Color = Color::Rgb(0xB0, 0x5C, 0xC8); // magenta
-
-/// One column wide each, every one: the grid is a cell per character, and an
-/// emoji-width glyph (`⚡`, `⏱`) would push a box's border out of line.
-pub fn glyph(kind: NodeKind) -> &'static str {
-    match kind {
-        NodeKind::Flow => "↻",
-        NodeKind::Ask => "◇",
-        NodeKind::Shell => "❯",
-        NodeKind::Agent => "✦",
-        NodeKind::Event => "◆",
-        NodeKind::Outside => "⇢",
-    }
-}
-
-/// The colour a kind of node wears.
-pub fn colour(kind: NodeKind) -> Style {
-    match kind {
-        NodeKind::Flow => Style::default().fg(theme::LIVE),
-        NodeKind::Ask => Style::default().fg(theme::NEEDS),
-        NodeKind::Shell => Style::default().fg(theme::ACCENT),
-        NodeKind::Agent => Style::default().fg(AGENT),
-        NodeKind::Event | NodeKind::Outside => theme::dim(),
-    }
-}
-
-/// The nodes the filter — a search, see `query` — keeps: those that match,
-/// and everything upstream and downstream of them, so a folder's filter still
-/// shows what reaches it from elsewhere and where it leads.
-pub fn keep(g: &Graph, filter: &str, names: &Names, checkouts: &[Checkout]) -> HashSet<String> {
-    let all = || g.nodes.iter().map(|n| n.id.clone()).collect();
-    let query = Query::parse(filter);
-    if query.is_empty() {
-        return all();
-    }
-    let hit = |n: &Node| {
-        let folder = folder_word(n, names);
-        let on = n
-            .folder
-            .as_deref()
-            .and_then(|f| super::rows::checkout_of(checkouts, f))
-            .and_then(|c| c.branch.as_deref());
-        query.hits(&Subject {
-            on,
-            ..node_subject(n, &folder)
-        })
-    };
-    let mut kept: HashSet<String> = HashSet::new();
-    for dir in [true, false] {
-        let mut queue: VecDeque<&str> = g.nodes.iter().filter(|n| hit(n)).map(|n| n.id.as_str()).collect();
-        let mut seen: HashSet<&str> = queue.iter().copied().collect();
-        while let Some(id) = queue.pop_front() {
-            kept.insert(id.to_string());
-            for e in &g.edges {
-                let (from, to) = if dir { (&e.from, &e.to) } else { (&e.to, &e.from) };
-                if from == id && seen.insert(to) {
-                    queue.push_back(to);
-                }
-            }
-        }
-    }
-    kept
-}
-
-/// What a search matches a node on: its name and detail, its folder, how its
-/// runs went, what kind of node it is, and the flow it is or asks for.
-fn node_subject<'a>(n: &'a Node, folder: &'a str) -> Subject<'a> {
-    let mut is = Vec::new();
-    match n.runs.last {
-        Some(RunState::Failed) => is.push("failed"),
-        Some(RunState::Finished) => is.push("done"),
-        Some(RunState::Stopped) => is.push("stopped"),
-        _ => {}
-    }
-    if n.runs.going > 0 {
-        is.push("going");
-    }
-    if !n.waiting.is_empty() || n.status == Some(FlowStatus::NeedsApproval) {
-        is.push("needs");
-    }
-    let kind = match n.kind {
-        NodeKind::Flow => vec!["flow"],
-        NodeKind::Ask => vec!["question"],
-        NodeKind::Shell => vec!["shell", "command"],
-        NodeKind::Agent => vec!["agent"],
-        NodeKind::Event => vec!["event"],
-        NodeKind::Outside => vec!["outside"],
-    };
-    Subject {
-        text: vec![&n.name, &n.detail],
-        project: vec![folder, n.folder.as_deref().and_then(|p| p.to_str()).unwrap_or("")],
-        is,
-        kind,
-        by: flow_name(n).into_iter().collect(),
-        on: None,
-    }
-}
-
-/// The flow a node is, or asks for: `flow:<name>`, `ask:<name>`.
-pub fn flow_name(n: &Node) -> Option<&str> {
-    n.id.strip_prefix("flow:").or_else(|| n.id.strip_prefix("ask:"))
-}
-
-/// A node as the search ranks it (`query::ranked`): its name, its folder,
-/// its detail.
-pub fn named(n: &Node, names: &Names) -> Named {
-    Named {
-        title: n.name.clone(),
-        project: folder_word(n, names),
-        summary: n.detail.clone(),
-        rest: n.folder.iter().map(|p| p.to_string_lossy().into_owned()).collect(),
-        ..Named::default()
-    }
-}
-
-/// Where a node is, in words: its folder's name, `global` for a flow with
-/// no `in`, nothing for an event.
-fn folder_word(n: &Node, names: &Names) -> String {
-    match (&n.folder, n.kind) {
-        (Some(p), _) => names.workspace(p),
-        (None, NodeKind::Event) => String::new(),
-        (None, _) => "global".into(),
-    }
-}
-
-/// The two lines inside a node's box.
-pub fn texts(n: &Node, names: &Names, now: Timestamp) -> (String, String) {
-    let mark = if n.status == Some(FlowStatus::NeedsApproval) {
-        "! "
-    } else {
-        ""
-    };
-    let top = format!("{} {mark}{}", glyph(n.kind), n.name);
-    let what = match n.kind {
-        NodeKind::Flow => match (n.status, n.next_at) {
-            (Some(FlowStatus::On), Some(t)) if t > now => format!("in {}", fmt_age(now, t)),
-            (Some(FlowStatus::On), _) => n.detail.clone(),
-            (Some(s), _) => s.to_string(),
-            (None, _) => String::new(),
-        },
-        NodeKind::Ask => match n.waiting.len() {
-            0 => String::new(),
-            k => format!("{k} waiting"),
-        },
-        NodeKind::Shell | NodeKind::Agent => tally(n),
-        NodeKind::Event => "nothing raised it yet".into(),
-        NodeKind::Outside => "raised outside a run".into(),
-    };
-    let place = folder_word(n, names);
-    let bottom = match (place.is_empty(), what.is_empty()) {
-        (true, _) => what,
-        (false, true) => place,
-        (false, false) => format!("{place} · {what}"),
-    };
-    (top, bottom)
-}
-
-/// `ok ×5 · 1 failed`, `2 going`.
-fn tally(n: &Node) -> String {
-    let t = &n.runs;
-    if t.total == 0 {
-        return "not run yet".into();
-    }
-    let mut parts = Vec::new();
-    if t.going > 0 {
-        parts.push(format!("{} going", t.going));
-    }
-    let ok = t.total - t.failed - t.going;
-    if ok > 0 {
-        parts.push(format!("ok ×{ok}"));
-    }
-    if t.failed > 0 {
-        parts.push(format!("{} failed", t.failed));
-    }
-    parts.join(" · ")
-}
+mod words;
+pub use words::{colour, flow_name, headline, keep, named, pane_lines, texts};
 
 /// A node's box on the grid.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -866,141 +690,6 @@ pub fn step(p: &Plan, sel: Option<&str>, dir: Dir) -> Option<String> {
         }
     }
 }
-
-/// A kind of node, in a word.
-fn kind_word(k: NodeKind) -> &'static str {
-    match k {
-        NodeKind::Flow => "flow",
-        NodeKind::Ask => "question",
-        NodeKind::Shell => "command",
-        NodeKind::Agent => "agent",
-        NodeKind::Event => "event",
-        NodeKind::Outside => "outside",
-    }
-}
-
-/// What the pane says about the selected node: what it is, its flow as the
-/// list's pane would show it, what it is wired to either side, and — on a
-/// question — the first one waiting, numbered to answer.
-#[allow(clippy::too_many_arguments)]
-pub fn pane_lines(
-    g: &Graph,
-    n: &Node,
-    flow: Option<&rl_proto::flow::Flow>,
-    firing: Option<&rl_proto::flow::Firing>,
-    waiting: Option<(&rl_proto::decision::Decision, Option<&rl_proto::types::Run>)>,
-    picked: &[usize],
-    at: Option<usize>,
-    width: usize,
-    names: &Names,
-    now: Timestamp,
-) -> Vec<Line<'static>> {
-    let mut lines = vec![Line::from(vec![
-        Span::styled(format!(" {} ", glyph(n.kind)), colour(n.kind)),
-        Span::styled(n.name.clone(), theme::name()),
-    ])];
-    let place = folder_word(n, names);
-    let mut what = kind_word(n.kind).to_string();
-    if !place.is_empty() {
-        what.push_str(&format!(" · {place}"));
-    }
-    lines.push(Line::from(Span::styled(format!(" {what}"), theme::dim())));
-    if matches!(n.kind, NodeKind::Shell | NodeKind::Agent) {
-        let mut spans = vec![Span::raw(format!(" {}", tally(n)))];
-        if let Some(at) = n.runs.last_at {
-            spans.push(Span::raw(format!(" · latest {} ago", fmt_age(at, now))));
-        }
-        spans.push(Span::styled(format!(" · past {}", fmt_age(g.since, now)), theme::dim()));
-        lines.push(Line::from(spans));
-    }
-    if let Some((q, asker)) = waiting {
-        lines.push(Line::raw(""));
-        let more = n.waiting.len().saturating_sub(1);
-        lines.extend(
-            super::pane::question_lines(
-                q,
-                asker,
-                firing.filter(|f| f.id == q.chain),
-                None,
-                picked,
-                at,
-                width,
-                now,
-            )
-            .lines,
-        );
-        if more > 0 {
-            lines.push(Line::from(Span::styled(
-                format!(" and {more} more waiting"),
-                theme::dim(),
-            )));
-        }
-    }
-    if let Some(f) = flow {
-        lines.push(Line::raw(""));
-        match serde_json::from_value::<rl_flow::def::FlowDef>(f.def.clone()) {
-            Ok(def) if n.kind == NodeKind::Flow => {
-                lines.extend(super::flows::pane_lines(f, &def, firing, names, now));
-            }
-            _ => lines.push(Line::from(vec![
-                Span::styled(" from ", theme::dim()),
-                Span::raw(format!("flow {}", f.name)),
-            ])),
-        }
-    }
-    let side = |into: bool| -> Vec<Line<'static>> {
-        g.edges
-            .iter()
-            .filter(|e| if into { e.to == n.id } else { e.from == n.id })
-            .filter_map(|e| {
-                let other = g.node(if into { &e.from } else { &e.to })?;
-                let mut label = e.label.clone();
-                if e.count > 0 {
-                    label = if label.is_empty() {
-                        format!("×{}", e.count)
-                    } else {
-                        format!("{label} ×{}", e.count)
-                    };
-                }
-                Some(Line::from(vec![
-                    Span::styled(if into { "  ← " } else { "  → " }, theme::dim()),
-                    Span::styled(format!("{} ", glyph(other.kind)), colour(other.kind)),
-                    Span::raw(other.name.clone()),
-                    Span::styled(
-                        if label.is_empty() {
-                            String::new()
-                        } else {
-                            format!("  {label}")
-                        },
-                        theme::dim(),
-                    ),
-                ]))
-            })
-            .collect()
-    };
-    let (ins, outs) = (side(true), side(false));
-    if !ins.is_empty() || !outs.is_empty() {
-        lines.push(Line::raw(""));
-        lines.extend(ins);
-        lines.extend(outs);
-    }
-    lines
-}
-
-/// The headline over the graph.
-pub fn headline(g: &Graph, kept: usize, filter: &str) -> String {
-    let flows = g.nodes.iter().filter(|n| n.kind == NodeKind::Flow).count();
-    let waiting: usize = g.nodes.iter().map(|n| n.waiting.len()).sum();
-    let mut s = format!("wiring · {flows} flow{}", if flows == 1 { "" } else { "s" });
-    if waiting > 0 {
-        s.push_str(&format!(" · {waiting} waiting"));
-    }
-    if !filter.is_empty() {
-        s.push_str(&format!(" · {kept} of {} · ⌕ {filter}", g.nodes.len()));
-    }
-    s
-}
-
 /// Where the window over the canvas should start so the selected box is in
 /// it, moving as little as it can from where it was.
 pub fn follow(p: &Plan, sel: Option<&str>, was: (usize, usize), w: usize, h: usize) -> (usize, usize) {
@@ -1024,7 +713,8 @@ pub fn follow(p: &Plan, sel: Option<&str>, was: (usize, usize), w: usize, h: usi
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rl_proto::graph::{Edge, Tally};
+    use rl_proto::flow::FlowStatus;
+    use rl_proto::graph::{Edge, NodeKind, Tally};
     use std::path::PathBuf;
 
     fn node(id: &str, kind: NodeKind, name: &str, folder: Option<&str>) -> Node {
@@ -1038,6 +728,7 @@ mod tests {
             next_at: None,
             runs: Tally::default(),
             waiting: vec![],
+            flow: None,
         }
     }
 
@@ -1208,45 +899,6 @@ mod tests {
         assert_eq!(go("shells", Dir::Up).as_deref(), Some("s"));
         // No selection yet: the first node.
         assert_eq!(step(&p, None, Dir::Down).as_deref(), Some("s"));
-    }
-
-    #[test]
-    fn the_pane_says_what_a_node_is_and_what_it_is_wired_to() {
-        let g = weather();
-        let r = g.node("r").unwrap();
-        let text: Vec<String> = pane_lines(&g, r, None, None, None, &[], None, 80, &names(), now())
-            .iter()
-            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
-            .collect();
-        assert_eq!(text[0], " ↻ advisory");
-        assert_eq!(text[1], " flow · relay");
-        assert!(
-            text.iter().any(|l| l == "  ← ❯ check-weather  weather.alert ×3"),
-            "{text:#?}"
-        );
-        assert!(text.iter().any(|l| l == "  → ◇ add a note?  ×3"), "{text:#?}");
-    }
-
-    #[test]
-    fn a_node_is_found_by_the_flow_it_is_or_asks_for() {
-        let g = Graph {
-            since: now(),
-            nodes: vec![
-                node("flow:nightly", NodeKind::Flow, "nightly", Some("/w/relay")),
-                node("ask:nightly", NodeKind::Ask, "ship it?", Some("/w/relay")),
-                node("runs:shell:/w/api", NodeKind::Shell, "shells", Some("/w/api")),
-            ],
-            edges: vec![edge("flow:nightly", "ask:nightly", "", 1)],
-        };
-        let kept = keep(&g, "by:nightly", &names(), &[]);
-        assert!(
-            kept.contains("flow:nightly") && kept.contains("ask:nightly"),
-            "{kept:?}"
-        );
-        assert!(!kept.contains("runs:shell:/w/api"));
-        assert_eq!(flow_name(g.node("ask:nightly").unwrap()), Some("nightly"));
-        assert_eq!(flow_name(g.node("runs:shell:/w/api").unwrap()), None);
-        assert_eq!(headline(&g, 3, ""), "wiring · 1 flow");
     }
 
     #[test]

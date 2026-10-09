@@ -37,6 +37,8 @@ pub enum Place {
     CatchUp,
     /// A name being changed where it stands in the list.
     Rename,
+    /// A flow's pane walked: its steps, then its last firings.
+    Walk,
 }
 
 /// One key and what it does there, in a word or two.
@@ -74,6 +76,7 @@ fn place_keys(at: Place) -> Vec<Key> {
             moves,
             key("⇧↑↓", "reorder"),
             key("enter", "join/open"),
+            key("→ ←", "a flow's steps"),
             cmd(Cmd::Stop, "stop/archive/remove"),
             cmd(Cmd::Pin, "pin"),
             cmd(Cmd::Rename, "rename"),
@@ -88,7 +91,7 @@ fn place_keys(at: Place) -> Vec<Key> {
         // order is the list's to keep, not this lens's.
         Place::Hidden => {
             let mut v = place_keys(Place::List);
-            v.retain(|k| k.what != "reorder" && k.keys != "/hide");
+            v.retain(|k| k.what != "reorder" && k.what != "a flow's steps" && k.keys != "/hide");
             v.insert(1, key("/hide", "brings it back"));
             v
         }
@@ -169,6 +172,11 @@ fn place_keys(at: Place) -> Vec<Key> {
             key("alt ←→", "by word"),
             key("^w ^u ^k", "cut"),
             key("↑↓", "let it go"),
+        ],
+        Place::Walk => vec![
+            key("↑↓", "steps, then firings"),
+            key("enter", "opens it"),
+            key("esc", "back"),
         ],
     }
 }
@@ -292,7 +300,7 @@ mod tests {
     fn the_list_says_its_keys() {
         assert_eq!(
             one_line(Place::List),
-            "↑↓ ^j^k move · ⇧↑↓ reorder · enter join/open · ^x stop/archive/remove · ^t pin · \
+            "↑↓ ^j^k move · ⇧↑↓ reorder · enter join/open · → ← a flow's steps · ^x stop/archive/remove · ^t pin · \
              ^r rename · ^o details · ^f search · ^g graph · tab lens · /hide · /help · ^h"
         );
     }
@@ -375,6 +383,7 @@ mod tests {
             Place::Events,
             Place::CatchUp,
             Place::Rename,
+            Place::Walk,
             Place::Term {
                 wide: false,
                 live: true,
@@ -412,6 +421,7 @@ mod tests {
             Place::Question,
             Place::Hidden,
             Place::Rename,
+            Place::Walk,
         ] {
             let ks = keys(at);
             for width in [160, 120, 80, 60, 40, 30] {
@@ -428,10 +438,10 @@ mod tests {
                 }
             }
         }
-        // The list's keys take one row at 160 columns (less the footer's
-        // indent) and two at 80.
-        assert_eq!(wrap(&keys(Place::List), 158).len(), 1);
-        assert_eq!(wrap(&keys(Place::List), 78).len(), 2);
+        // The list's keys take one row at 182 columns (less the footer's
+        // indent) and two at 100.
+        assert_eq!(wrap(&keys(Place::List), 180).len(), 1);
+        assert_eq!(wrap(&keys(Place::List), 98).len(), 2);
     }
 
     #[test]
@@ -502,6 +512,7 @@ mod tests {
             Place::Graph,
             Place::Events,
             Place::Rename,
+            Place::Walk,
         ] {
             let last = keys(at).pop().unwrap();
             assert_eq!(last.keys, "^h", "{at:?}");

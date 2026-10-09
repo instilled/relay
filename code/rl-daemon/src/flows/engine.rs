@@ -629,6 +629,7 @@ mod tests {
                     status: FiringStatus::Running,
                     started_at: Timestamp::UNIX_EPOCH,
                     ended_at: None,
+                    outcome: None,
                     steps: vec![
                         StepState {
                             name: "probe".into(),

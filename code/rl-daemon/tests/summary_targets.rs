@@ -10,10 +10,12 @@ mod common;
 use common::{Conn, Harness, wait_journal};
 use jiff::{SignedDuration, Timestamp};
 use rl_core::Home;
+use rl_proto::flow::Firing;
 use rl_proto::methods::Digest;
 use rl_proto::types::{Event, Run, Summary};
 use serde_json::json;
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 fn fake_agent() -> PathBuf {
     std::fs::canonicalize(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../fixtures/fake-agent")).unwrap()
@@ -73,6 +75,7 @@ async fn cases() {
     deep_over_a_long_output_is_read_in_parts().await;
     a_dry_run_says_how_many_calls_and_asks_no_one().await;
     a_flows_runs_are_its_steps_runs().await;
+    one_firings_runs_are_its_steps_runs().await;
     a_run_looked_at_just_now_is_told_whole().await;
     a_runs_summary_since_you_looked_stays_once_you_look().await;
     deep_over_a_project_leaves_its_runs_as_they_were().await;
@@ -426,5 +429,59 @@ async fn a_project_moves_on_while_a_run_writes() {
     let k = kept(&mut c, json!({"target": target, "from": from})).await;
     assert_eq!(k.map(|k| k.stale), Some(true));
     let _: serde_json::Value = c.ok("run.stop", json!({"id": r.id, "force": true})).await;
+    h.stop().await;
+}
+
+/// Polls `flow.firings` until the firing `id` of `flow` has ended.
+async fn firing_ended(c: &mut Conn, flow: &str, id: &str) -> Firing {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let fs: Vec<Firing> = c.ok("flow.firings", json!({ "flow": flow })).await;
+        if let Some(f) = fs.into_iter().find(|f| f.id == id && f.ended_at.is_some()) {
+            return f;
+        }
+        assert!(Instant::now() < deadline, "{id} never ended");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+async fn one_firings_runs_are_its_steps_runs() {
+    let Some((h, mut c, _dir, _tmp)) = with_fake_summariser("twice: fine").await else {
+        return;
+    };
+    let dir = h.home.flow_dir("twice");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("flow.md"),
+        "---\nsteps:\n  a:\n    run: echo one\n  b:\n    after: a\n    run: echo two\n---\n",
+    )
+    .unwrap();
+    let _: serde_json::Value = c.ok("flow.reload", json!(null)).await;
+    common::approve(&mut c, "twice").await;
+    let mut done = Vec::new();
+    for _ in 0..2 {
+        let f: Firing = c.ok("flow.run", json!({ "name": "twice" })).await;
+        done.push(firing_ended(&mut c, "twice", &f.id).await);
+    }
+    let first = &done[0];
+    let target = json!({"kind": "firing", "id": first.id});
+    let s: Summary = c.ok("summary.make", json!({"target": target})).await;
+    assert_eq!(
+        (s.calls, s.runs, s.text.as_str()),
+        (1, 2, "twice: fine"),
+        "its two runs, not the next firing's: {s:?}"
+    );
+    assert_eq!(s.target, format!("fi:{}", first.id));
+    assert_eq!(s.from, Some(first.started_at), "all of it");
+    let prompt = std::fs::read_to_string(std::env::var("FAKE_AGENT_PROMPT").unwrap()).unwrap();
+    assert!(prompt.contains("one firing of the flow `twice`"), "{prompt}");
+    let k = kept(&mut c, json!({"target": target})).await;
+    assert_eq!(k.map(|k| k.text), Some(s.text.clone()), "kept, and given back");
+
+    let r = c
+        .call("summary.make", json!({"target": {"kind": "firing", "id": "nope"}}))
+        .await;
+    let msg = r.error.unwrap().message;
+    assert!(msg.contains("no firing nope"), "{msg}");
     h.stop().await;
 }

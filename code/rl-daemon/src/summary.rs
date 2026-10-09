@@ -1,5 +1,5 @@
 //! What happened, said for the person who was not looking: of a run, of a
-//! flow's runs, of a project's, or of everything, over a stretch. Only ever
+//! flow's runs, of one firing's, of a project's, or of everything, over a stretch. Only ever
 //! asked for: `/summary` in the panel, `rl summary`, a flow on
 //! `run.finished`, or the catch-up's top when
 //! `catch_up.summary` is `auto` — the panel and `rl since` ask for it as you
@@ -28,7 +28,7 @@
 //!
 //! The stretch, unless given, is since you last looked: a run's `seen_at`
 //! when it has written or had an event since, else all of it; a flow's, from
-//! the start of its oldest run not seen, else the last day. A project or everything needs one given — the
+//! the start of its oldest run not seen, else the last day; one firing's, all of it. A project or everything needs one given — the
 //! client knows when you were last here. A stretch with nothing in it says so
 //! without asking anyone.
 //!
@@ -568,6 +568,13 @@ async fn over_from(d: &Daemon, t: &SummaryTarget, asked: Option<Timestamp>, now:
             let oldest = d.ledger.call(move |c| runs::oldest_unseen(c, &cause)).await?;
             Ok(oldest.unwrap_or(now - FLOW_STRETCH))
         }
+        SummaryTarget::Firing { id } => {
+            let key = id.clone();
+            match d.ledger.call(move |c| rl_ledger::firings::get(c, &key)).await? {
+                Some(f) => Ok(f.started_at),
+                None => bail!("no firing {id}"),
+            }
+        }
         SummaryTarget::Project { .. } => bail!("a project's summary needs where to start (from)"),
         SummaryTarget::All => bail!("a summary of everything needs where to start (from)"),
         SummaryTarget::Run { .. } => bail!("a run's stretch is its own"),
@@ -584,6 +591,7 @@ async fn in_stretch(d: &Daemon, t: &SummaryTarget, from: Timestamp) -> Result<Ve
         .filter(|r| !matches!(r.cause, Cause::Assistant(_)) && r.ended_at.is_none_or(|e| e >= from))
         .filter(|r| match t {
             SummaryTarget::Flow { name } => matches!(&r.cause, Cause::Flow { flow, .. } if flow == name),
+            SummaryTarget::Firing { id } => r.chain == *id && matches!(r.cause, Cause::Flow { .. }),
             SummaryTarget::Project { workspace } => r.workspace == *workspace,
             SummaryTarget::All => true,
             SummaryTarget::Run { id } => r.id == *id,
@@ -593,10 +601,17 @@ async fn in_stretch(d: &Daemon, t: &SummaryTarget, from: Timestamp) -> Result<Ve
     Ok(runs)
 }
 
-/// What many runs are, for the assistant.
-fn what(t: &SummaryTarget) -> String {
+/// What many runs are, for the assistant; one firing's by its flow, read off its runs.
+fn what(t: &SummaryTarget, runs: &[Run]) -> String {
     match t {
         SummaryTarget::Flow { name } => format!("the flow `{name}`"),
+        SummaryTarget::Firing { .. } => match runs.iter().find_map(|r| match &r.cause {
+            Cause::Flow { flow, .. } => Some(flow),
+            _ => None,
+        }) {
+            Some(flow) => format!("one firing of the flow `{flow}`"),
+            None => "one firing of a flow".into(),
+        },
         SummaryTarget::Project { workspace } => format!("the project {}", display_path(workspace)),
         SummaryTarget::All => "everything Relay ran".into(),
         SummaryTarget::Run { id } => format!("the run {id}"),
@@ -712,7 +727,7 @@ async fn over(d: &Daemon, t: &SummaryTarget, from: Option<Timestamp>, p: &Summar
         }
         lines
     };
-    let what = what(t);
+    let what = what(t, &runs);
     let cwd = match t {
         SummaryTarget::Project { workspace } if workspace.is_dir() => workspace.clone(),
         _ => d.home.path().to_path_buf(),
@@ -756,7 +771,7 @@ fn many_lines(t: &SummaryTarget, runs: &[Run], lines: Vec<String>, now: Timestam
     let mut folds: Vec<((String, PathBuf), Fold)> = Vec::new();
     for (r, line) in runs.iter().zip(lines) {
         let flow = match (&r.cause, t) {
-            (_, SummaryTarget::Flow { .. }) => None,
+            (_, SummaryTarget::Flow { .. } | SummaryTarget::Firing { .. }) => None,
             (Cause::Flow { flow, .. }, _) => Some(flow),
             _ => None,
         };
@@ -1124,6 +1139,19 @@ fn first_line(text: &str) -> String {
 mod tests {
     use super::*;
     use rl_proto::types::{RunKind, RunState};
+
+    #[test]
+    fn a_firing_is_told_as_its_flows() {
+        let at: Timestamp = "2026-09-10T12:00:00Z".parse().unwrap();
+        let mut r = Run::new("r1", RunKind::Command, "brief", vec![], "/w", "/w", at);
+        r.cause = Cause::Flow {
+            flow: "morning-brief".into(),
+            step: "brief".into(),
+        };
+        let t = SummaryTarget::Firing { id: "fi1".into() };
+        assert_eq!(what(&t, &[r]), "one firing of the flow `morning-brief`");
+        assert_eq!(what(&t, &[]), "one firing of a flow");
+    }
 
     #[test]
     fn the_prompt_carries_the_run_its_events_and_its_output() {

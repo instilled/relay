@@ -9,6 +9,8 @@
 //! in the stretch is counted as ran or failed — they are the top without an
 //! assistant; in a line each, what an assistant is handed to write it.
 
+pub mod heads;
+
 use crate::client::Client;
 use crate::digest::since_items;
 use crate::tui::rows::{self, Context, Head, Lens, Row};
@@ -21,7 +23,7 @@ use rl_proto::types::{Cause, Run, RunState, Summary, SummaryTarget};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-/// How many of a flow's runs in the stretch its line shows as marks.
+/// How many of a flow's firings in the stretch its line shows as marks.
 const MARKS: usize = 10;
 
 #[cfg(test)]
@@ -92,6 +94,11 @@ impl<'a> CatchUp<'a> {
         let news: HashSet<&str> = since_items(d).into_iter().map(|i| i.run.id.as_str()).collect();
         let news = |i: &DigestItem| news.contains(i.run.id.as_str());
         let waiting = |i: &DigestItem| matches!(i.run.state, RunState::NeedsInput | RunState::Blocked);
+        // A flow heading the catch-up is told there, not again under its project.
+        let heading: HashSet<&str> = heads::leads(cx.flows, &d.firings, since)
+            .iter()
+            .map(|l| l.flow)
+            .collect();
         let mut projects: Vec<Project<'a>> = Vec::new();
         // Whether the last header's key has been read off a row under it.
         let mut keyed = true;
@@ -121,7 +128,7 @@ impl<'a> CatchUp<'a> {
                 Row::Run(i) if news(i) || waiting(i) => Row::Run(i),
                 Row::Run(_) => continue,
                 Row::Flow(mut f) => {
-                    if !f.runs.iter().any(|i| news(i)) {
+                    if heading.contains(f.name.as_str()) || !f.runs.iter().any(|i| news(i)) {
                         continue;
                     }
                     // Its marks speak for its runs in the stretch; one you
@@ -556,7 +563,8 @@ pub fn text(cu: &CatchUp, top: &[String], now: Timestamp) -> String {
     let mut out = headline(cu.since, now);
     out.push_str("\n\n");
     for l in top {
-        out.push_str(&format!("  {l}\n"));
+        out.push_str(format!("  {l}").trim_end());
+        out.push('\n');
     }
     for p in &cu.projects {
         let lead = if p.rows.is_empty() { '▸' } else { '▾' };
@@ -634,12 +642,13 @@ pub fn row_line(r: &Row, now: Timestamp) -> String {
         ],
         Row::Flow(f) => {
             let last = &f.last().run;
-            vec![
-                format!("{} {}", f.marks(MARKS), f.name),
-                rows::state_words(last.state, last.confidence),
-                f.summary(),
-                ago(f.last().at),
-            ]
+            let mut parts = vec![format!("{} {}", f.marks(MARKS), f.name)];
+            match f.firing {
+                Some(_) => parts.push(crate::tui::flows::stands(f)),
+                None => parts.extend([rows::state_words(last.state, last.confidence), f.summary()]),
+            }
+            parts.push(ago(f.last().at));
+            parts
         }
     };
     parts
@@ -654,6 +663,7 @@ mod tests {
     use super::*;
     use crate::tui::rows::{Lens, Names};
     use rl_proto::decision::{Decision, DecisionOption, DecisionStatus};
+    use rl_proto::flow::{Firing, FiringStatus, StepState, StepStatus};
     use rl_proto::methods::DigestItem;
     use rl_proto::types::{Cause, Confidence, Run, RunKind, RunState, Summary};
     use std::path::{Path, PathBuf};
@@ -721,6 +731,84 @@ mod tests {
 
     const API: &str = "/home/f/api";
     const RELAY: &str = "/home/f/relay";
+
+    #[test]
+    fn a_flow_line_says_its_latest_firing_and_what_it_came_to() {
+        let (mut d, names) = (fixture(), names());
+        d.firings.push(Firing {
+            id: "fi1".into(),
+            flow: "nightly".into(),
+            trigger: "when".into(),
+            event: None,
+            status: FiringStatus::Failed,
+            started_at: now(),
+            ended_at: Some(now()),
+            steps: vec![StepState {
+                name: "probe".into(),
+                status: StepStatus::Failed,
+                run: None,
+                decision: None,
+            }],
+            outcome: Some("disk full".into()),
+        });
+        let cu = build(&d, &names);
+        let flow = cu.projects[0].rows.iter().find(|r| matches!(r, Row::Flow(_))).unwrap();
+        let line = row_line(flow, now());
+        assert!(line.contains("nightly · failed at probe · disk full · "), "{line}");
+    }
+
+    #[test]
+    fn a_flow_heading_the_catch_up_is_not_a_line_under_its_project_too() {
+        let (mut d, names) = (fixture(), names());
+        d.firings.push(Firing {
+            id: "fi1".into(),
+            flow: "nightly".into(),
+            trigger: "when".into(),
+            event: None,
+            status: FiringStatus::Failed,
+            started_at: "2026-10-06T04:00:00Z".parse().unwrap(),
+            ended_at: Some("2026-10-06T04:00:00Z".parse().unwrap()),
+            steps: vec![],
+            outcome: Some("disk full".into()),
+        });
+        let mut flows = flows();
+        flows[0].def["catch_up"] = "top".into();
+        let cu = CatchUp::build(
+            &d,
+            &Context {
+                names: &names,
+                flows: &flows,
+                filter: "",
+                lens: Lens::All,
+                now: now(),
+                relay: None,
+            },
+        );
+        let api = cu.projects.iter().find(|p| p.head.name == "api").unwrap();
+        assert!(
+            !api.rows.iter().any(|r| matches!(r, Row::Flow(_))),
+            "moved to the head, not copied: {:?}",
+            keys(api)
+        );
+        assert_eq!(keys(api), ["q:q1", "r:a1"]);
+        assert_eq!((api.ran, api.failed), (1, 1), "its runs are the head's to tell");
+
+        // Its latest firing from before you left heads nothing: it stays a line.
+        d.firings[0].started_at = "2026-10-05T04:00:00Z".parse().unwrap();
+        d.firings[0].ended_at = d.firings[0].started_at.into();
+        let cu = CatchUp::build(
+            &d,
+            &Context {
+                names: &names,
+                flows: &flows,
+                filter: "",
+                lens: Lens::All,
+                now: now(),
+                relay: None,
+            },
+        );
+        assert!(cu.projects[0].rows.iter().any(|r| matches!(r, Row::Flow(_))));
+    }
 
     fn now() -> Timestamp {
         "2026-10-06T12:00:00Z".parse().unwrap()
@@ -1067,6 +1155,15 @@ mod tests {
         assert!(lines[0].starts_with("while you were away · since "), "{t}");
         assert!(lines[0].ends_with("(12h00m)"), "{t}");
         assert_eq!(lines[2], "  • it went fine", "{t}");
+        let t = text(
+            &cu,
+            &["↻ brief · done".into(), "  line".into(), String::new(), "• fine".into()],
+            now(),
+        );
+        assert!(
+            t.contains("\n  ↻ brief · done\n    line\n\n  • fine\n"),
+            "a blank line has no spaces: {t}"
+        );
         assert!(t.contains("\n▾ api · 3 need you · 4 ran · 2 failed\n"), "{t}");
         assert!(t.contains("\n    ? q1  asks: question q1 · 4h ago  [ok]\n"), "{t}");
         assert!(t.contains("    ✦ a1  title a1 · failed"), "a run by its id: {t}");

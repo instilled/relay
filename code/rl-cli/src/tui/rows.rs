@@ -543,18 +543,28 @@ impl<'a> FlowRow<'a> {
     pub fn summary(&self) -> String {
         self.last().summary.clone()
     }
-    /// One mark per run, oldest first: `·` went well, `×` failed, `○` stopped.
+    /// One mark per firing — a firing's runs share its id as their chain — oldest first, at
+    /// most `n` of the newest: `·` went well, `×` a step failed, `○` one was stopped.
     pub fn marks(&self, n: usize) -> String {
-        self.runs
-            .iter()
-            .take(n)
-            .rev()
-            .map(|i| match i.run.state {
+        let worst = |m: char| match m {
+            '×' => 2,
+            '○' => 1,
+            _ => 0,
+        };
+        let mut firings: Vec<(&str, char)> = Vec::new();
+        for i in &self.runs {
+            let m = match i.run.state {
                 RunState::Failed => '×',
                 RunState::Stopped => '○',
                 _ => '·',
-            })
-            .collect()
+            };
+            match firings.iter_mut().find(|(chain, _)| *chain == i.run.chain) {
+                Some((_, was)) if worst(m) > worst(*was) => *was = m,
+                Some(_) => {}
+                None => firings.push((&i.run.chain, m)),
+            }
+        }
+        firings.iter().take(n).rev().map(|(_, m)| *m).collect()
     }
 }
 
@@ -1325,6 +1335,43 @@ mod tests {
     use rl_proto::decision::{DecisionOption, DecisionStatus};
     use rl_proto::flow::{FiringStatus, StepStatus};
     use rl_proto::types::{Confidence, RunKind, RunState};
+
+    #[test]
+    fn a_flows_marks_are_one_per_firing_and_say_its_worst() {
+        let t: Timestamp = "2026-09-10T11:00:00Z".parse().unwrap();
+        let ran = |id: &str, chain: &str, state: RunState| {
+            let mut r = Run::new(id, RunKind::Command, id, vec![], "/w", "/w", t);
+            r.chain = chain.into();
+            r.state = state;
+            DigestItem {
+                run: r,
+                summary: String::new(),
+                at: t,
+                unseen: false,
+                joined_by: None,
+                emitted: vec![],
+                cwd: None,
+                recap: None,
+            }
+        };
+        // Newest first, as a row keeps them: fi3 stopped; fi2 two steps, well; fi1 a step failed.
+        let items = [
+            ran("c", "fi3", RunState::Stopped),
+            ran("b2", "fi2", RunState::Finished),
+            ran("b1", "fi2", RunState::Finished),
+            ran("a2", "fi1", RunState::Failed),
+            ran("a1", "fi1", RunState::Finished),
+        ];
+        let f = FlowRow {
+            key: "f:x".into(),
+            name: "x".into(),
+            runs: items.iter().collect(),
+            when: None,
+            firing: None,
+        };
+        assert_eq!(f.marks(10), "×·○", "oldest first, each firing's worst step");
+        assert_eq!(f.marks(2), "·○", "the newest firings");
+    }
 
     fn item(id: &str, state: RunState, ws: &str, at: &str, unseen: bool) -> DigestItem {
         let t: Timestamp = at.parse().unwrap();
@@ -2323,6 +2370,7 @@ mod tests {
             status,
             started_at: "2026-09-10T11:00:00Z".parse().unwrap(),
             ended_at: None,
+            outcome: None,
             steps: steps
                 .iter()
                 .map(|(name, status)| rl_proto::flow::StepState {

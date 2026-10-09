@@ -11,7 +11,7 @@ use crate::state;
 use crate::template::{self, Ref};
 use rl_core::time::parse_duration;
 use rl_proto::action::{Action, Task};
-use rl_proto::flow::{DEFAULT_THROTTLE, Filter, Missed, Overlap, StepSpec};
+use rl_proto::flow::{CatchUpPlace, DEFAULT_THROTTLE, Filter, Missed, Overlap, StepSpec};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
@@ -27,6 +27,10 @@ pub struct FlowDef {
     pub overlap: Overlap,
     /// For `on`: a burst within this many seconds is one firing.
     pub throttle_secs: u64,
+    /// `top`: its latest firing since you left heads the catch-up. A def kept before this was
+    /// known has no such key, and reads as none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catch_up: Option<CatchUpPlace>,
     /// In the order they are written.
     pub steps: Vec<Step>,
 }
@@ -167,6 +171,7 @@ pub fn check(name: &str, doc: Doc, known: &dyn Fn(&Path) -> bool) -> Result<Flow
         missed: spec.missed,
         overlap: spec.overlap,
         throttle_secs,
+        catch_up: spec.catch_up,
         steps,
     })
 }

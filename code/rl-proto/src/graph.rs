@@ -6,7 +6,8 @@
 //! about it, never as a box around it. Events are not nodes but the labels on
 //! the edges between the things that raise them and the flows that hear them.
 //!
-//! Every flow is there before anything has fired, and each `on` nothing
+//! Every flow is there before anything has fired, and so are its steps,
+//! wired as the flow writes them; each `on` nothing
 //! raised is a way in. What only the ledger knows — which flow's runs raised
 //! which event, which questions a step asked — is drawn from what happened in
 //! the window, with a count.
@@ -37,7 +38,7 @@ impl Graph {
 pub enum NodeKind {
     /// A flow: `~/.relay/flows/<name>`.
     Flow,
-    /// A flow's question: what its ask steps put to you.
+    /// A flow's ask step, and the questions it put to you.
     Ask,
     /// A shell line or command.
     Shell,
@@ -55,15 +56,16 @@ pub struct Node {
     /// Stable across calls, so a cursor can stay on it.
     pub id: String,
     pub kind: NodeKind,
-    /// A flow's name, a question, an event kind.
+    /// A flow's name, a step's, an event kind.
     pub name: String,
     /// The folder it belongs to; none for a flow with no `in` and what is not in one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub folder: Option<PathBuf>,
-    /// The flow's own state, for a flow and its questions.
+    /// The flow's own state, for a flow and its steps.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<FlowStatus>,
-    /// What starts a flow: `every 30m`, `on run.failed`.
+    /// What starts a flow: `every 30m`, `on run.failed`; what a step runs, or the newest question an
+    /// ask step raised.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub detail: String,
     /// When a flow fires next.
@@ -72,9 +74,12 @@ pub struct Node {
     /// Runs it stands for, in the window.
     #[serde(default, skip_serializing_if = "Tally::is_empty")]
     pub runs: Tally,
-    /// A question's ids still waiting for you, oldest first.
+    /// An ask step's questions still waiting for you, oldest first.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub waiting: Vec<String>,
+    /// The flow it is, or is a step of.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flow: Option<String>,
 }
 
 /// How a node's runs went in the window.
