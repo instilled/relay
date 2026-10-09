@@ -7,7 +7,9 @@
 
 use super::Flows;
 use super::ask::{option_of, question};
-use super::triggers::vars;
+use super::facts::{Facts, Handed};
+use super::path;
+use super::work::Work;
 use crate::action::{expand_home, run_spec};
 use anyhow::{Context, Result, anyhow};
 use jiff::Timestamp;
@@ -15,12 +17,13 @@ use rl_core::Home;
 use rl_core::id::new_id;
 use rl_flow::advance::{Do, Happened, advance, status};
 use rl_flow::def::{Ask, Does, FlowDef, Step};
-use rl_flow::template::{self, Lookup, Ref};
+use rl_flow::state;
+use rl_flow::template::{self, Lookup};
 use rl_ledger::events::NewEvent;
 use rl_ledger::firings::{self, NewFiring};
-use rl_ledger::{decisions, events, flows, runs, session_io};
+use rl_ledger::{events, flows, runs};
 use rl_proto::action::{Action, Task};
-use rl_proto::flow::{Firing, Overlap, StepState, StepStatus};
+use rl_proto::flow::{Firing, Overlap, StepStatus};
 use rl_proto::methods::{DecisionSpec, RunSpec};
 use rl_proto::types::{Cause, Event, Run, event_kind};
 use rusqlite::Connection;
@@ -30,8 +33,6 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use tracing::{info, warn};
 
-/// How much of a step's output is its `out`: the last of it.
-const OUT_MAX: usize = 64 << 10;
 /// Why a step did not start on a folder changed since its yes.
 pub(super) const CHANGED: &str = "the flow changed since its yes";
 /// Why a step did not start once the yes went to a version other than its firing's.
@@ -88,6 +89,8 @@ pub(super) struct Moved {
     pub(super) began: Option<String>,
     /// What to do, each with what it needs, placeholders filled.
     pub(super) todo: Vec<(Do, Ready)>,
+    /// What each step to start is handed of the steps before it.
+    pub(super) handed: BTreeMap<String, Handed>,
 }
 
 /// What one `Do` needs, made ready while the firing is read.
@@ -239,6 +242,8 @@ impl Flows {
     /// Each of what happened, in turn, as [`step`](Self::step) does it.
     pub(super) async fn follow(&self, mut queue: VecDeque<(String, Happened)>) -> Result<()> {
         while let Some((firing, h)) = queue.pop_front() {
+            // What a step appended to `$RELAY_OUT` is its values before anything after it is decided.
+            let h = self.kept(&firing, h).await;
             let (id, home) = (firing.clone(), self.home.clone());
             let Some(m) = self.ledger.call(move |c| moved(c, &home, &id, &h)).await? else {
                 continue;
@@ -341,7 +346,8 @@ impl Flows {
     }
 
     /// What a step's run is started with: no tty and no input, in the firing's chain, the
-    /// flow's folder first on its `PATH` and the firing's names in its env.
+    /// flow's folder first on its `PATH` and the `rl` beside `rld` next ([`super::path`]), the firing's names in its env, its folder made ready
+    /// (`Work::prepare`), and what the steps before it left as `RELAY_V_<step>_<key>`.
     pub(super) fn spec(&self, m: &Moved, step: &str, action: &Action) -> Result<RunSpec> {
         let def = &m.def;
         let at = def.steps.iter().find(|s| s.name == step).context("no such step")?;
@@ -356,19 +362,27 @@ impl Flows {
         let mut spec = run_spec(action, &name, &dir, Some(&cwd), &self.registry, cause, chain)?;
         spec.tty = false;
         spec.input = false;
+        let handed = m.handed.get(step).cloned().unwrap_or_default();
+        let work = Work::of(&self.home, &def.name, &m.firing.id, step);
+        work.prepare(&handed.outs)?;
         let path = std::env::var_os("PATH").unwrap_or_default();
+        let shown = |p: &Path| p.to_string_lossy().into_owned();
         let env = [
             ("RELAY_FLOW", def.name.clone()),
             ("RELAY_FIRING", m.firing.id.clone()),
             ("RELAY_STEP", step.to_string()),
-            ("RELAY_FLOW_DIR", dir.to_string_lossy().into_owned()),
-            ("PATH", format!("{}:{}", dir.display(), path.to_string_lossy())),
+            ("RELAY_FLOW_DIR", shown(&dir)),
+            ("RELAY_WORK", shown(&work.dir)),
+            ("RELAY_IN", shown(&work.input)),
+            ("RELAY_OUT", shown(&work.out)),
+            // When the flow's firing before this one started, whatever fired either: empty on the first.
+            ("RELAY_LAST_FIRING", m.last.map(|t| t.to_string()).unwrap_or_default()),
+            ("PATH", path::step_path(&dir, self.bin.as_deref(), &path)),
         ];
         spec.env.extend(env.map(|(k, v)| (k.to_string(), v)));
-        if m.firing.trigger == "when" {
-            let last = m.last.map(|t| t.to_string()).unwrap_or_default();
-            spec.env.push(("RELAY_LAST_FIRING".into(), last));
-        }
+        // What the steps before it left, a variable each: `$RELAY_V_probe_signature`.
+        spec.env
+            .extend(handed.values.iter().map(|(s, k, v)| (state::env_name(s, k), v.clone())));
         if let Some((e, _)) = &m.event {
             spec.env.push(("RELAY_EVENT_KIND".into(), e.kind.clone()));
             spec.env.push(("RELAY_EVENT_SUMMARY".into(), e.summary.clone()));
@@ -428,7 +442,7 @@ impl Flows {
     }
 
     /// The same, where a firing must move on whatever: a failure is logged, not returned.
-    async fn say(&self, def: &FlowDef, kind: &str, summary: String, data: serde_json::Value) {
+    pub(super) async fn say(&self, def: &FlowDef, kind: &str, summary: String, data: serde_json::Value) {
         if let Err(e) = self.record(def, kind, summary, data).await {
             warn!(flow = def.name, kind, error = %format!("{e:#}"), "recording a flow's event");
         }
@@ -447,7 +461,7 @@ fn moved(c: &Connection, home: &Home, id: &str, h: &Happened) -> Result<Option<M
     }
     let firing = firings::get(c, id)?.context("the firing")?;
     let event = event_of(c, &firing)?;
-    let facts = Facts::new(c, &firing.steps, event.as_ref());
+    let facts = Facts::new(c, &firing, event.as_ref());
     let todo = advance(&def, &mut steps, h, &facts);
     let over = todo.iter().find_map(|d| match d {
         Do::End(s) => Some(*s),
@@ -470,11 +484,15 @@ pub(super) fn def_of(c: &Connection, id: &str) -> Result<Option<FlowDef>> {
 pub(super) fn laid_out(c: &Connection, home: &Home, id: &str, def: FlowDef, todo: Vec<Do>) -> Result<Moved> {
     let firing = firings::get(c, id)?.context("the firing, saved")?;
     let event = event_of(c, &firing)?;
-    let facts = Facts::new(c, &firing.steps, event.as_ref());
+    let facts = Facts::new(c, &firing, event.as_ref());
     let dir = home.flow_dir(&def.name);
+    let mut handed = BTreeMap::new();
     let todo = todo
         .into_iter()
         .map(|d| {
+            if let Do::Start(s) | Do::RunOption(s) = &d {
+                handed.insert(s.clone(), facts.handed(&def, s)?);
+            }
             let ready = match &d {
                 Do::Start(s) => run_of(&def, s).map(|a| Ready::Run(filled(a, &dir, &facts))),
                 Do::RunOption(s) => option_of(c, &def, &firing.steps, s)?.map(|a| Ready::Run(filled(&a, &dir, &facts))),
@@ -493,6 +511,7 @@ pub(super) fn laid_out(c: &Connection, home: &Home, id: &str, def: FlowDef, todo
         last,
         began,
         todo,
+        handed,
     })
 }
 
@@ -542,48 +561,6 @@ fn filled(action: &Action, dir: &Path, facts: &dyn Lookup) -> Result<Action> {
     Ok(a)
 }
 
-/// What a firing's steps left: `{x.out}` from the step's run, `{x.choice}` and `{x.note}`
-/// from its question; and what its event said, `{event.summary}`, `{event.data.x}`.
-struct Facts<'a> {
-    conn: &'a Connection,
-    steps: &'a [StepState],
-    event: Option<BTreeMap<String, String>>,
-}
-
-impl<'a> Facts<'a> {
-    fn new(conn: &'a Connection, steps: &'a [StepState], event: Option<&(Event, Option<Run>)>) -> Self {
-        let event = event.map(|(e, run)| vars(e, run.as_ref()));
-        Self { conn, steps, event }
-    }
-}
-
-impl Lookup for Facts<'_> {
-    fn get(&self, r: &Ref) -> Option<String> {
-        if r.head == "event" {
-            return self.event.as_ref()?.get(&r.rest).cloned();
-        }
-        let s = self.steps.iter().find(|s| s.name == r.head)?;
-        let found = match r.rest.as_str() {
-            "out" => {
-                let run = s.run.as_deref()?;
-                session_io::tail(self.conn, run, OUT_MAX).map(|b| Some(rl_detect::ansi::strip(&b).trim().to_string()))
-            }
-            "choice" | "note" => decisions::get(self.conn, s.decision.as_deref()?).map(|d| {
-                let d = d?;
-                match r.rest.as_str() {
-                    "choice" => (!d.chosen.is_empty()).then(|| d.chosen.join(", ")),
-                    _ => d.note,
-                }
-            }),
-            _ => return None,
-        };
-        found.unwrap_or_else(|e| {
-            warn!(step = s.name, error = %format!("{e:#}"), "reading what a step left");
-            None
-        })
-    }
-}
-
 /// The folder an event happened in: the folder its run ran in, while that is
 /// still there; else the event's workspace, while that is. None when it names
 /// neither.
@@ -598,8 +575,8 @@ pub fn event_folder(event: &Event, run: Option<&Run>) -> Option<PathBuf> {
 mod tests {
     use super::*;
     use rl_ledger::Ledger;
-    use rl_ledger::session_io::Direction;
-    use rl_proto::flow::StepStatus;
+    use rl_ledger::session_io::{self, Direction};
+    use rl_proto::flow::{FiringStatus, StepState, StepStatus};
     use rl_proto::types::RunKind;
 
     fn agent(prompt: &str) -> Action {
@@ -644,21 +621,30 @@ mod tests {
                 runs::insert(c, &run)?;
                 let said = b"\x1b[31m3 new errors\x1b[0m {triage.out}\n\n";
                 session_io::append(c, "r1", Direction::Out, said, Timestamp::UNIX_EPOCH)?;
-                let steps = [
-                    StepState {
-                        name: "probe".into(),
-                        status: StepStatus::Done,
-                        run: Some("r1".into()),
-                        decision: None,
-                    },
-                    StepState {
-                        name: "triage".into(),
-                        status: StepStatus::Pending,
-                        run: None,
-                        decision: None,
-                    },
-                ];
-                let facts = Facts::new(c, &steps, None);
+                let firing = Firing {
+                    id: "f1".into(),
+                    flow: "prod-logs".into(),
+                    trigger: "hand".into(),
+                    event: None,
+                    status: FiringStatus::Running,
+                    started_at: Timestamp::UNIX_EPOCH,
+                    ended_at: None,
+                    steps: vec![
+                        StepState {
+                            name: "probe".into(),
+                            status: StepStatus::Done,
+                            run: Some("r1".into()),
+                            decision: None,
+                        },
+                        StepState {
+                            name: "triage".into(),
+                            status: StepStatus::Pending,
+                            run: None,
+                            decision: None,
+                        },
+                    ],
+                };
+                let facts = Facts::new(c, &firing, None);
                 let shell = Action {
                     run: Some(Task::Shell("echo {probe.out}".into())),
                     ..Default::default()

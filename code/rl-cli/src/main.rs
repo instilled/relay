@@ -101,7 +101,7 @@ enum Cmd {
     Interpret(InterpretArgs),
     /// A recap of a run, live or ended: its agent's own (Claude), its turns (Codex), or `assistants.summary`'s. Kept by the run.
     Summary(SummaryArgs),
-    /// Let the journal of old runs go, as `retention:` says (30d unless set, or --older-than). Runs and events stay.
+    /// Let the journal of old runs go, and their firings' folders, as `retention:` says (30d unless set, or --older-than). Runs and events stay.
     #[command(alias = "gc")]
     Prune(PruneArgs),
     /// Emit a custom event, from a command or plugin; flows that fire `on` it pick it up.
@@ -1467,11 +1467,16 @@ async fn prune(home: &Home, a: PruneArgs, json: bool) -> Result<()> {
         return Ok(());
     }
     let size = rl_daemon_bytes(r.bytes);
-    if r.runs == 0 {
+    let folders = match r.firings {
+        0 => String::new(),
+        1 => " · 1 firing's folder".to_string(),
+        n => format!(" · {n} firings' folders"),
+    };
+    if r.runs == 0 && r.firings == 0 {
         println!("nothing with a journal ended more than {} ago", r.older_than);
     } else if r.dry_run {
         println!(
-            "would drop the journal of {} run{} ended more than {} ago · {size} · {} file{}",
+            "would drop the journal of {} run{} ended more than {} ago · {size} · {} file{}{folders}",
             r.runs,
             if r.runs == 1 { "" } else { "s" },
             r.older_than,
@@ -1480,7 +1485,7 @@ async fn prune(home: &Home, a: PruneArgs, json: bool) -> Result<()> {
         );
     } else {
         println!(
-            "dropped the journal of {} run{} ended more than {} ago · {size} · {} file{} · the runs and their events stay",
+            "dropped the journal of {} run{} ended more than {} ago · {size} · {} file{}{folders} · the runs and their events stay",
             r.runs,
             if r.runs == 1 { "" } else { "s" },
             r.older_than,

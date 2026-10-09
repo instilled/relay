@@ -1,5 +1,6 @@
 //! Firings: each run of a flow, the definition it runs on, and where each of
-//! its steps is — the run a step started, the question it raised.
+//! its steps is — the run a step started, the question it raised,
+//! the values it set.
 
 use crate::{conv, conv_str};
 use anyhow::Result;
@@ -139,6 +140,38 @@ pub fn set_step_decision(conn: &Connection, firing: &str, step: &str, decision: 
     Ok(())
 }
 
+/// Keeps values a step set, each over any it set before under the same key.
+pub fn set_values(conn: &Connection, firing: &str, step: &str, values: &[(String, String)]) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    for (key, value) in values {
+        tx.execute(
+            "INSERT INTO step_values (firing, step, key, value) VALUES (?1, ?2, ?3, ?4) \
+             ON CONFLICT (firing, step, key) DO UPDATE SET value = excluded.value",
+            params![firing, step, key, value],
+        )?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+/// One value a step set.
+pub fn value(conn: &Connection, firing: &str, step: &str, key: &str) -> Result<Option<String>> {
+    Ok(conn
+        .query_row(
+            "SELECT value FROM step_values WHERE firing = ?1 AND step = ?2 AND key = ?3",
+            params![firing, step, key],
+            |r| r.get(0),
+        )
+        .optional()?)
+}
+
+/// Every value a step set, by key.
+pub fn values(conn: &Connection, firing: &str, step: &str) -> Result<BTreeMap<String, String>> {
+    let mut stmt = conn.prepare("SELECT key, value FROM step_values WHERE firing = ?1 AND step = ?2")?;
+    let rows = stmt.query_map(params![firing, step], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    Ok(rows.collect::<std::result::Result<_, _>>()?)
+}
+
 /// The firing and step a run is.
 pub fn by_run(conn: &Connection, run: &str) -> Result<Option<(String, String)>> {
     Ok(conn
@@ -159,6 +192,20 @@ pub fn by_decision(conn: &Connection, decision: &str) -> Result<Option<(String, 
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .optional()?)
+}
+
+/// Which of `ids` are firings of `flow` that ended before `before`: one still open, another
+/// flow's, or no firing at all is not among them.
+pub fn ended_before(conn: &Connection, flow: &str, ids: &[String], before: Timestamp) -> Result<Vec<String>> {
+    let mut stmt =
+        conn.prepare("SELECT 1 FROM firings WHERE id = ?1 AND flow = ?2 AND ended_at IS NOT NULL AND ended_at < ?3")?;
+    let mut gone = Vec::new();
+    for id in ids {
+        if stmt.exists(params![id, flow, to_millis(before)])? {
+            gone.push(id.clone());
+        }
+    }
+    Ok(gone)
 }
 
 /// Every firing not ended, oldest first.
@@ -359,5 +406,77 @@ mod tests {
             Some("{}")
         );
         assert_eq!(ledger.call_blocking(|c| def_json(c, "nope")).unwrap(), None);
+    }
+
+    #[test]
+    fn a_steps_values_are_kept_the_last_said_winning() {
+        let ledger = Ledger::open_in_memory().unwrap();
+        fire(&ledger, "f1", "2026-10-07T10:00:00Z");
+        ledger
+            .call_blocking(|c| {
+                let first = [
+                    ("found".to_string(), "2".to_string()),
+                    ("signature".to_string(), "abc".to_string()),
+                ];
+                set_values(c, "f1", "probe", &first)?;
+                set_values(c, "f1", "probe", &[("found".to_string(), "3".to_string())])
+            })
+            .unwrap();
+        let one =
+            |step: &'static str, key: &'static str| ledger.call_blocking(move |c| value(c, "f1", step, key)).unwrap();
+        assert_eq!(one("probe", "found").as_deref(), Some("3"));
+        assert_eq!(one("probe", "signature").as_deref(), Some("abc"));
+        assert_eq!(one("triage", "found"), None, "a value is its own step's");
+        let all = ledger.call_blocking(|c| values(c, "f1", "probe")).unwrap();
+        assert_eq!(
+            all,
+            BTreeMap::from([
+                ("found".to_string(), "3".to_string()),
+                ("signature".to_string(), "abc".to_string())
+            ])
+        );
+        assert!(ledger.call_blocking(|c| values(c, "f1", "triage")).unwrap().is_empty());
+    }
+
+    #[test]
+    fn only_a_flows_firings_that_ended_before_are_said_to_have() {
+        let ledger = Ledger::open_in_memory().unwrap();
+        fire(&ledger, "old", "2026-10-01T10:00:00Z");
+        fire(&ledger, "open", "2026-10-01T11:00:00Z");
+        fire(&ledger, "new", "2026-10-07T10:00:00Z");
+        ledger
+            .call_blocking(|c| {
+                save(
+                    c,
+                    "old",
+                    &BTreeMap::new(),
+                    FiringStatus::Done,
+                    Some(at("2026-10-01T10:05:00Z")),
+                )?;
+                save(
+                    c,
+                    "new",
+                    &BTreeMap::new(),
+                    FiringStatus::Done,
+                    Some(at("2026-10-07T10:05:00Z")),
+                )
+            })
+            .unwrap();
+        let ids: Vec<String> = ["old", "open", "new", "seen", "notes"].map(String::from).into();
+        let cut = at("2026-10-05T00:00:00Z");
+        let i = ids.clone();
+        assert_eq!(
+            ledger
+                .call_blocking(move |c| ended_before(c, "prod-logs", &i, cut))
+                .unwrap(),
+            ["old"]
+        );
+        assert!(
+            ledger
+                .call_blocking(move |c| ended_before(c, "other", &ids, cut))
+                .unwrap()
+                .is_empty(),
+            "another flow's firing is not this one's"
+        );
     }
 }

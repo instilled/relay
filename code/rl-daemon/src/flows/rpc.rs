@@ -1,12 +1,14 @@
 //! The `flow.*` methods.
 
 use super::engine::{Fired, Refused};
+use super::state::Refusal;
 use crate::router::Router;
 use crate::server::Daemon;
 use rl_ledger::{firings, flows};
 use rl_proto::flow::{
     FiringFilter, Flow, FlowApproval, FlowApprove, FlowErrors, FlowFilter, FlowFirings, FlowList, FlowName, FlowPause,
-    FlowReload, FlowResume, FlowRun,
+    FlowReload, FlowResume, FlowRun, FlowStateGet, FlowStateRead, FlowStateSet, FlowStateWrite, StateFile, StateName,
+    StateValues,
 };
 use rl_proto::rpc::RpcError;
 
@@ -69,6 +71,18 @@ pub fn register(r: &mut Router<Daemon>) {
             }),
         }
     });
+    r.register::<FlowStateSet, _, _>(|d, p: StateValues| async move {
+        d.flows.state_set(&p.run, p.values).await.map_err(refused)
+    });
+    r.register::<FlowStateGet, _, _>(|d, p: StateName| async move {
+        d.flows.state_get(&p.run, &p.name).await.map_err(refused)
+    });
+    r.register::<FlowStateWrite, _, _>(|d, p: StateFile| async move {
+        d.flows.state_write(&p.run, &p.name, p.bytes).await.map_err(refused)
+    });
+    r.register::<FlowStateRead, _, _>(|d, p: StateName| async move {
+        d.flows.state_read(&p.run, &p.name).await.map_err(refused)
+    });
     r.register::<FlowFirings, _, _>(|d, f: FiringFilter| async move {
         d.flows
             .ledger
@@ -121,4 +135,12 @@ fn short(hash: &str) -> String {
 
 fn internal(e: anyhow::Error) -> RpcError {
     RpcError::internal(format!("{e:#}"))
+}
+
+/// A refusal is the step's to fix, said as it is; anything else is Relay's.
+fn refused(e: anyhow::Error) -> RpcError {
+    match e.downcast_ref::<Refusal>() {
+        Some(r) => RpcError::invalid_params(r.to_string()),
+        None => internal(e),
+    }
 }

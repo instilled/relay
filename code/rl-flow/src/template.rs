@@ -38,6 +38,14 @@ pub fn fill(text: &str, lookup: &dyn Lookup) -> String {
     out
 }
 
+/// `text` filled as [`fill`] fills it, or `None` when it names anything `lookup` knows nothing
+/// of — for what must not stand half-filled, such as a question's group.
+pub fn fill_known(text: &str, lookup: &dyn Lookup) -> Option<String> {
+    found(text)
+        .all(|(_, _, r)| lookup.get(&r).is_some())
+        .then(|| fill(text, lookup))
+}
+
 /// `s` as a whole reference's inside, `head.rest`; `None` if it is not one.
 pub(crate) fn parse(s: &str) -> Option<Ref> {
     let (head, rest) = s.split_once('.')?;
@@ -116,6 +124,15 @@ pub(crate) mod tests {
     #[test]
     fn an_unknown_reference_is_left_as_written() {
         assert_eq!(fill("{nope.out}", &map(&[])), "{nope.out}");
+    }
+
+    #[test]
+    fn filled_only_when_every_reference_is_known() {
+        let m = map(&[("probe", "signature", "abc")]);
+        assert_eq!(fill_known("{probe.signature}", &m).as_deref(), Some("abc"));
+        assert_eq!(fill_known("err-{probe.signature}", &m).as_deref(), Some("err-abc"));
+        assert_eq!(fill_known("{probe.signature}-{probe.missing}", &m), None);
+        assert_eq!(fill_known("plain", &m).as_deref(), Some("plain"));
     }
 
     #[test]

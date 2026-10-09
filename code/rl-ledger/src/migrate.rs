@@ -45,6 +45,7 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         "0023_group_owner",
         include_str!("../migrations/0023_group_owner.sql"),
     ),
+    (24, "0024_values", include_str!("../migrations/0024_values.sql")),
 ];
 
 pub fn run(conn: &mut Connection) -> Result<()> {
@@ -108,6 +109,7 @@ mod tests {
                 "runs",
                 "session_io",
                 "sessions",
+                "step_values",
                 "steps",
                 "summaries",
                 "summary_kept",

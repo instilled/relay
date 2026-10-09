@@ -156,6 +156,32 @@ async fn what_was_chosen_is_said_to_what_comes_after() {
 }
 
 #[tokio::test]
+async fn what_was_chosen_reaches_a_later_command_by_its_variables() {
+    let tmp = tempfile::tempdir().unwrap();
+    let md = pager(
+        "  told:\n    after: review\n    \
+         run: 'echo \"$RELAY_V_review_choice: $RELAY_V_review_note\" > \"$RELAY_WORK/told\"'\n",
+    );
+    let Some((h, mut c)) = start(tmp.path(), &[("pager", &md)]).await else {
+        return;
+    };
+    let fired = approve_and_run(&mut c, "pager").await;
+    let f = wait_firing(&mut c, "pager", waiting).await;
+    let d = the_question(&mut c, &f).await;
+    let _: Decision = c
+        .ok(
+            "decision.take",
+            json!({ "id": d.id, "options": ["page"], "note": "now" }),
+        )
+        .await;
+    let f = wait_firing(&mut c, "pager", ended).await;
+    assert_eq!(step(&f, "told").status, StepStatus::Done, "{f:?}");
+    let told = std::fs::read_to_string(h.home.firing_dir("pager", &fired.id).join("told")).unwrap();
+    assert_eq!(told, "page: now\n");
+    h.stop().await;
+}
+
+#[tokio::test]
 async fn an_option_that_does_nothing_ends_done() {
     let tmp = tempfile::tempdir().unwrap();
     let Some((h, mut c)) = start(tmp.path(), &[("pager", &pager(""))]).await else {

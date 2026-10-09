@@ -7,6 +7,7 @@ use crate::cond::{self, Cond};
 use crate::cron::Cron;
 use crate::doc::{Doc, Problem};
 use crate::plan;
+use crate::state;
 use crate::template::{self, Ref};
 use rl_core::time::parse_duration;
 use rl_proto::action::{Action, Task};
@@ -233,7 +234,7 @@ fn step(name: &str, s: &StepSpec, flow: &Flow, said: &mut Vec<String>) -> Option
                 said.push(format!("`{name}`: `{key}` is for an `ask:` step"));
             }
             let action = filled(name, s.action(), flow.sections, said);
-            command(name, &action, flow, said);
+            command(name, name, &action, flow, said);
             prompt_of(&action).inspect(|p| uses_in(p, false, said));
             Does::Run(action)
         }
@@ -255,7 +256,7 @@ fn step(name: &str, s: &StepSpec, flow: &Flow, said: &mut Vec<String>) -> Option
             for (option, action) in &s.options {
                 let label = format!("{name}.{option}");
                 let action = filled(&label, action.clone(), flow.sections, said);
-                command(&label, &action, flow, said);
+                command(name, &label, &action, flow, said);
                 prompt_of(&action).inspect(|p| uses_in(p, true, said));
                 options.push((option.clone(), action));
             }
@@ -351,9 +352,9 @@ fn prompt_of(action: &Action) -> Option<&str> {
     }
 }
 
-/// Refuses a placeholder in what a command line is made of: what a step
-/// left could otherwise become shell.
-fn command(label: &str, action: &Action, flow: &Flow, said: &mut Vec<String>) {
+/// Refuses a placeholder in what a command line is made of: what a step left could otherwise
+/// become shell. `step` is the step it is in; `label` says where (`b`, or `b.ok` for an option).
+fn command(step: &str, label: &str, action: &Action, flow: &Flow, said: &mut Vec<String>) {
     let words: Vec<&String> = match &action.run {
         Some(Task::Shell(line)) => vec![line],
         Some(Task::Argv(argv)) => argv.iter().collect(),
@@ -363,26 +364,28 @@ fn command(label: &str, action: &Action, flow: &Flow, said: &mut Vec<String>) {
     for r in words.iter().flat_map(|w| template::refs(w)) {
         if r.head == "event" || flow.names.contains(r.head.as_str()) {
             said.push(format!(
-                "`{label}`: `{{{}.{}}}` cannot go into a command — {}",
+                "`{label}`: `{{{}.{}}}` cannot go into a command — read `{}`",
                 r.head,
                 r.rest,
-                instead(&r)
+                instead(step, &r)
             ));
         }
     }
 }
 
-/// What to do instead: a command reads the event from its environment; what a
-/// step left reaches only a prompt or a question.
-fn instead(r: &Ref) -> String {
-    let var = match (r.head.as_str(), r.rest.as_str()) {
-        ("event", "summary") => "$RELAY_EVENT_SUMMARY",
-        ("event", "kind") => "$RELAY_EVENT_KIND",
-        ("event", "run") => "$RELAY_EVENT_RUN",
-        ("event", _) => "$RELAY_EVENT",
-        _ => return "what a step left goes into an agent's prompt or an `ask:`".to_string(),
-    };
-    format!("read `{var}`")
+/// The variable a command reads instead: the event's, what a step printed under `$RELAY_IN`, an
+/// ask's own answer in its option, and any other value as `$RELAY_V_<step>_<key>`.
+fn instead(step: &str, r: &Ref) -> String {
+    match (r.head.as_str(), r.rest.as_str()) {
+        ("event", "summary") => "$RELAY_EVENT_SUMMARY".to_string(),
+        ("event", "kind") => "$RELAY_EVENT_KIND".to_string(),
+        ("event", "run") => "$RELAY_EVENT_RUN".to_string(),
+        ("event", _) => "$RELAY_EVENT".to_string(),
+        (head, "out") => format!("$RELAY_IN/{head}.out"),
+        (head, "choice") if head == step => "$RELAY_CHOICE".to_string(),
+        (head, "note") if head == step => "$RELAY_NOTE".to_string(),
+        (head, key) => format!("${}", state::env_name(head, key)),
+    }
 }
 
 /// Whether a `## heading` is some step's, or some ask's option's.

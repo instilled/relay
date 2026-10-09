@@ -9,4 +9,5 @@ pub mod def;
 pub mod doc;
 pub mod hash;
 pub mod plan;
+pub mod state;
 pub mod template;
