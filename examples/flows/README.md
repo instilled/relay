@@ -29,8 +29,7 @@ signed in as you: the scripts read what those accounts can see.
 cp -r examples/flows/prod-logs ~/.relay/flows/logs
 $EDITOR ~/.relay/flows/logs/flow.md      # set the project and folder
 rl add ~/code/my-service                 # the folder its `in:` names, if Relay does not know it
-rl flow reload                           # read ~/.relay/flows again
-rl flow test logs                        # what a firing would do now, starting nothing
+rl flow test logs                        # reads the folder again; what a firing would do, starting nothing
 rl flow approve logs                     # it fires from now on
 ```
 
