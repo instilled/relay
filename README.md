@@ -71,11 +71,13 @@ Opening `rl` shows the same catch-up at the top of the panel.
 A flow is a folder in `~/.relay/flows/<name>` with a `flow.md`: when it runs (`when: every 30m`, or `on:` an event), its steps (scripts, agents and questions to you), and how they wire together. Nothing runs until you approve the folder's exact contents, and a change needs your yes again.
 
 ```sh
-rl flow new logs --from prod-logs --set project=my-gcp-project --in ~/code/api
 rl flow new brief "every weekday at 7:30, sum up yesterday's PRs and chat for me"
-rl flow test logs                         # what would fire it and which steps would run; starts nothing
+rl flow new logs                          # the bare template, in $EDITOR; saving it is your yes
+rl flow test brief                        # what would fire it and which steps would run; starts nothing
 rl flow list
 ```
+
+Two whole flows to copy and adapt are in [examples/flows](examples/flows): `prod-logs` (Google Cloud errors, triaged by an agent, a fix only with your yes) and `morning-brief` (yesterday's chat, Notion and PRs, summed up and posted).
 
 ## For agents
 
