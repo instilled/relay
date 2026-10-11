@@ -2,9 +2,9 @@
 when: "30 7 * * 1-5"
 catch_up: top
 steps:
-  gchat:  { run: gchat.sh, env: { BRIEF_SPACE: "{{space}}" } }
+  gchat:  { run: gchat.sh, env: { BRIEF_SPACE: spaces/AAAA } }  # change: your Chat space
   notion: { run: notion.py }
-  github: { run: github.sh, env: { GITHUB_ORG: "{{org}}" } }
+  github: { run: github.sh, env: { GITHUB_ORG: my-org } }       # change: your GitHub org
   days:   { run: days.sh }
   brief:
     after: [gchat, notion, github, days]
@@ -12,12 +12,12 @@ steps:
   post:
     after: brief
     run: post.sh
-    env: { BRIEF_SPACE: "{{space}}" }
+    env: { BRIEF_SPACE: spaces/AAAA }  # change: the same space
 ---
 
 Weekday mornings at 7:30, a super high-level brief of what each teammate worked on — yesterday,
-or Friday through Sunday on a Monday — from Google Chat, Notion and GitHub ({{org}}). Four scripts
-gather, one agent writes the brief, and post.sh sends it to the Google Chat space {{space}}. It
+or Friday through Sunday on a Monday — from Google Chat, Notion and GitHub (my-org). Four scripts
+gather, one agent writes the brief, and post.sh sends it to the Google Chat space spaces/AAAA. It
 heads your catch-up too. The scripts read as the accounts gws, ntn and gh are signed in to.
 
 ## brief

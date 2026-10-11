@@ -213,12 +213,8 @@ fn command_args(rest: &str, frag: &str, here: &Here) -> Vec<Candidate> {
     let said: Vec<&str> = words.collect();
     let at = said.len();
     match c.cmd {
-        // A new flow's name is the person's; then `--from`, then a template.
-        palette::Cmd::Flow if said.first().copied() == Some("new") => match (at, said.get(2).copied()) {
-            (2, _) => starting(["--from"], frag, Kind::Word),
-            (3, Some("--from")) => starting(crate::flow::templates::ALL.iter().map(|t| t.name), frag, Kind::Word),
-            _ => Vec::new(),
-        },
+        // A new flow's name is the person's, and so are its words.
+        palette::Cmd::Flow if said.first().copied() == Some("new") => Vec::new(),
         palette::Cmd::Flow if at == 1 && said[0] != "reload" => {
             starting(here.names.flows.iter().map(String::as_str), frag, Kind::Word)
         }
@@ -950,9 +946,7 @@ mod tests {
         assert!(at_end("/flow run nightly ", &here).is_empty(), "one flow at a time");
         assert!(at_end("/flow reload ", &here).is_empty(), "reload is every flow");
         assert!(at_end("/flow new ", &here).is_empty(), "a new name is the person's");
-        assert_eq!(at_end("/flow new x --f", &here), ["--from"]);
-        assert_eq!(at_end("/flow new x --from m", &here), ["morning-brief"]);
-        assert!(at_end("/flow new x --from prod-logs ", &here).is_empty());
+        assert!(at_end("/flow new x --f", &here).is_empty(), "and so are its words");
     }
 
     #[test]

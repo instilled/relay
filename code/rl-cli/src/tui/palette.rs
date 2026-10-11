@@ -163,8 +163,8 @@ pub const ALL: &[Command] = &[
         words: &[&[
             "run", "pause", "resume", "approve", "edit", "new", "test", "draft", "reload",
         ]],
-        what: "a flow: the one named, else the one under the cursor · new writes one from words or a \
-               template · edit opens its flow.md, and says yes when it loads · test says what would fire · \
+        what: "a flow: the one named, else the one under the cursor · new writes one from words or the \
+               bare template · edit opens its flow.md, and says yes when it loads · test says what would fire · \
                draft shows one drafted while you were busy",
         cmd: Cmd::Flow,
     },
