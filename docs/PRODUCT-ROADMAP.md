@@ -7,15 +7,23 @@ Goal for v1:
 
 ## Open — in the order they'd be built
 
+The next milestone is one dependable daily loop: start work → leave → get told when needed → come back to the facts → say yes to the next step. Breadth waits for it.
+
+* [ ] every flow on the list — a flow is a row under the flows lens from its yes on, with its trigger and next time, before it ever fired
+* [ ] a flow's own graph, the global graph dropped — a selected flow's steps drawn in its pane (`if` labels, its last firing's marks; what fires it and what it fires); `^g`, `/graph` and the global layout go
+* [ ] modules split — `tui/mod.rs` (~8,800 lines) into drawing, keys and modes, and the daemon glue, its tests beside them; `main.rs` (~1,900) trimmed; behaviour unchanged
+* [ ] facts collector (J6) — what happened when you get back, as facts: git commits + `diff --stat` per run, commands with exit codes, transcript ingestion (Claude/Codex `*.jsonl`), tokens/cost; facts first in the pane and the catch-up, the narrative below
+* [ ] notifications — Slack / mail when a question is raised, a run is blocked or a flow fails, with a quiet setting
+
+Later:
+
 * [ ] a row that needs you shows its question, not the recap — today a waiting Claude/Codex row shows its recap even while it asks for permission (open question from #142)
 * [ ] git workspaces? how to manage these? — needs a brainstorm first: today a worktree registered on its own is its own project and only the main checkout counts its worktrees
-* [ ] decision context — what's/how is the context of a question rendered beyond its summary (what the asking run last printed, the event behind a reaction's question)?
-* [ ] ts plugin subsystem
-* [ ] flows, what the spec left — `rl flow run <name> --step s --firing id` (run one step of a firing again); split `tui/mod.rs` (~8,800 lines)
-* [ ] facts collector (J6) — git commits + `diff --stat` per run, transcript ingestion (Claude/Codex `*.jsonl`), tokens/cost; facts-first run detail (facts on top, narrative below, transcript behind enter)
+* [ ] decision context — what's/how is the context of a question rendered beyond its summary (what the asking run last printed, the event behind an `ask` step)?
+* [ ] `rl flow run <name> --step s --firing id` — run one step of a firing again (in the flows spec, never built)
 * [ ] retention purge of archived runs — today archive is out-of-list only and `rl prune` lets the journal go; actually delete runs past the retention window
 * [ ] worktrees & ref rules — `--worktree`, branch naming, `.relay/config.yaml` ref derivation
-* [ ] notifications — reference notify plugins (Slack / mail on `decision.raised`, `run.blocked`)
+* [ ] ts plugin subsystem — on hold until the daily loop is dependable
 
 ## Done — newest first
 
