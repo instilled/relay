@@ -378,7 +378,7 @@ fn flow_state_outside_a_step_is_refused_without_starting_rld() {
 }
 
 #[test]
-fn flow_new_writes_a_template_filled_and_says_yes() {
+fn flow_new_opens_the_bare_template_and_says_yes() {
     let (Some(rld), Some(session)) = (sibling("rld"), sibling("rl-session")) else {
         eprintln!("skipping: rld / rl-session not built (run `cargo test --workspace`)");
         return;
@@ -391,171 +391,42 @@ fn flow_new_writes_a_template_filled_and_says_yes() {
     let rl = |args: &[&str]| rl(&home, &ws, &rld, &session, args);
     let flows = home.join("flows");
 
-    // Its `in` is a project Relay knows, or it would not load.
-    let (ok, o, e) = out(rl(&["add", ws.to_str().unwrap()]));
-    assert!(ok, "{o}{e}");
-
-    // A blank missing, not on a terminal: said, and nothing written.
-    let (ok, _, e) = out(rl(&["flow", "new", "logs", "--from", "prod-logs"]));
-    assert!(!ok);
-    assert!(
-        e.contains("prod-logs needs --set project=… (the GCP project whose logs are read, like my-prod-project)"),
-        "{e}"
-    );
-    assert!(!flows.join("logs").exists());
-    // A value that would break the file: likewise.
-    let (ok, _, e) = out(rl(&[
-        "flow",
-        "new",
-        "logs",
-        "--from",
-        "prod-logs",
-        "--set",
-        "project=my \"prod\"",
-    ]));
-    assert!(!ok && e.contains("`project`: a blank takes"), "{e}");
-    assert!(!flows.join("logs").exists());
-    let (ok, _, e) = out(rl(&["flow", "new", "logs", "--from", "nope"]));
-    assert!(
-        !ok && e.contains("`nope` is not a template: prod-logs, morning-brief"),
-        "{e}"
-    );
-
-    // Filled, written, opened, left as it is: that is the person's, and gets its yes.
-    let (ok, o, e) = out(rl(&[
-        "flow",
-        "new",
-        "logs",
-        "--from",
-        "prod-logs",
-        "--set",
-        "project=my-prod",
-    ]));
-    assert!(ok, "{o}{e}");
-    assert_eq!(o, "approved logs");
-    let md = std::fs::read_to_string(flows.join("logs/flow.md")).unwrap();
-    assert!(md.contains("GCP_PROJECT: \"my-prod\""), "{md}");
-    assert!(
-        md.contains(&format!("in: \"{}\"", rl_core::display_path(&ws))),
-        "in: the folder here\n{md}"
-    );
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mode = std::fs::metadata(flows.join("logs/new-log-errors.sh"))
-            .unwrap()
-            .permissions()
-            .mode();
-        assert!(mode & 0o111 != 0, "the probe runs: {mode:o}");
-    }
-    let (_, listed, _) = out(rl(&["flow", "list"]));
-    assert!(
-        listed
-            .lines()
-            .any(|l| l.starts_with("logs") && l.contains("  on  ") && l.contains("every 30m")),
-        "{listed}"
-    );
-
-    // Its name is taken now: refused, and the flow there is as it was.
-    let (ok, _, e) = out(rl(&[
-        "flow",
-        "new",
-        "logs",
-        "--from",
-        "prod-logs",
-        "--set",
-        "project=other",
-    ]));
-    assert!(
-        !ok && e.contains("`logs` is a flow already; rl flow edit logs opens it"),
-        "{e}"
-    );
-    assert_eq!(std::fs::read_to_string(flows.join("logs/flow.md")).unwrap(), md);
-
-    // An editor that fails leaves nothing of a new flow behind.
-    let mut failing = rl(&[
-        "flow",
-        "new",
-        "brief",
-        "--from",
-        "morning-brief",
-        "--set",
-        "space=spaces/AAAA1",
-        "--set",
-        "org=acme",
-    ]);
-    failing.env("EDITOR", "false");
-    let (ok, _, _) = out(failing);
-    assert!(!ok);
-    assert!(!flows.join("brief").exists());
-
-    // --go: written and said yes to, no editor.
-    let (ok, o, e) = out(rl(&[
-        "flow",
-        "new",
-        "brief",
-        "--from",
-        "morning-brief",
-        "--set",
-        "space=spaces/AAAA1",
-        "--set",
-        "org=acme",
-        "--go",
-    ]));
-    assert!(ok, "{o}{e}");
-    assert_eq!(o, "approved brief");
-    assert!(flows.join("brief/post.sh").is_file() && flows.join("brief/window.sh").is_file());
-
     // The bare template: not kept unless changed, and --go has nothing to write it from.
     let (ok, o, _) = out(rl(&["flow", "new", "pulse"]));
     assert!(ok && o == "pulse left as the template: not kept", "{o}");
     assert!(!flows.join("pulse").exists());
     let (ok, _, e) = out(rl(&["flow", "new", "pulse", "--go"]));
     assert!(!ok && e.contains("the bare template needs $EDITOR"), "{e}");
+    assert!(!flows.join("pulse").exists());
+
+    // An editor that fails leaves nothing of a new flow behind.
+    let mut failing = rl(&["flow", "new", "pulse"]);
+    failing.env("EDITOR", "false");
+    assert!(!out(failing).0);
+    assert!(!flows.join("pulse").exists());
+
+    // Saved changed: it loads, and gets its yes.
     let mut edit = rl(&["flow", "new", "pulse"]);
     edit.env("EDITOR", adds_a_line(&dir));
     let (ok, o, e) = out(edit);
     assert!(ok, "{o}{e}");
     assert_eq!(o, "approved pulse");
-
-    // In a folder Relay does not know: written, and said not to load, at its line.
-    let elsewhere = dir.join("elsewhere");
-    std::fs::create_dir_all(&elsewhere).unwrap();
-    let (ok, _, e) = out(rl(&[
-        "flow",
-        "new",
-        "far",
-        "--from",
-        "prod-logs",
-        "--set",
-        "project=p",
-        "--in",
-        elsewhere.to_str().unwrap(),
-    ]));
-    assert!(!ok);
-    assert!(e.contains("not loaded: far · flow.md:2") && e.contains("rl add"), "{e}");
-
-    // --in is a template's `in`: refused without --from, and for a template with no `in`.
-    let (ok, _, e) = out(rl(&["flow", "new", "lost", "--in", ws.to_str().unwrap()]));
-    assert!(!ok && e.contains("--from"), "{e}");
-    let (ok, _, e) = out(rl(&[
-        "flow",
-        "new",
-        "lost",
-        "--from",
-        "morning-brief",
-        "--set",
-        "space=spaces/AAAA1",
-        "--set",
-        "org=acme",
-        "--in",
-        ws.to_str().unwrap(),
-    ]));
+    let md = std::fs::read_to_string(flows.join("pulse/flow.md")).unwrap();
+    let (_, listed, _) = out(rl(&["flow", "list"]));
     assert!(
-        !ok && e.contains("--in: `in` is not a blank of morning-brief: space, org"),
+        listed
+            .lines()
+            .any(|l| l.starts_with("pulse") && l.contains("  on  ") && l.contains("every 1h")),
+        "{listed}"
+    );
+
+    // Its name is taken now: refused, and the flow there is as it was.
+    let (ok, _, e) = out(rl(&["flow", "new", "pulse"]));
+    assert!(
+        !ok && e.contains("`pulse` is a flow already; rl flow edit pulse opens it"),
         "{e}"
     );
-    assert!(!flows.join("lost").exists());
+    assert_eq!(std::fs::read_to_string(flows.join("pulse/flow.md")).unwrap(), md);
 
     assert!(out(rl(&["daemon", "stop"])).0);
 }

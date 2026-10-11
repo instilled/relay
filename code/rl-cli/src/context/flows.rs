@@ -1,9 +1,8 @@
 //! The pack's part on flows: what `flow.md` holds, each key of it, `if:`, the placeholders, what
-//! a step may leave and the variables it starts with, the templates, and an example that loads.
+//! a step may leave and the variables it starts with, and an example that loads.
 //! The words are here; which keys there are, the `if:` forms, the variables and an event's names
 //! come from the code, and the tests hold the words to them.
 
-use crate::flow::templates;
 use rl_flow::{cond, state, template};
 use std::fmt::Write;
 
@@ -178,10 +177,6 @@ reaches its firing's state and nothing else. Every step starts with:\n\n",
     for (var, w) in state::STEP_ENV {
         let _ = writeln!(s, "- ${var}: {w}");
     }
-    s.push_str("\n### Templates\n\nFlows Relay ships, for `rl flow new <name> --from <template>`:\n\n");
-    for t in templates::ALL {
-        let _ = writeln!(s, "- {}: {}", t.name, t.about);
-    }
     s.push_str("\n### An example\n\n");
     s.push_str(EXAMPLE);
     s
@@ -317,9 +312,6 @@ mod tests {
             s.contains("$RELAY_V_<step>_<key>"),
             "a value's variable, as state names it"
         );
-        for t in crate::flow::templates::ALL {
-            assert!(s.contains(&format!("- {}: {}", t.name, t.about)), "{}", t.name);
-        }
         for cmd in [
             "rl flow state set",
             "rl flow state get",

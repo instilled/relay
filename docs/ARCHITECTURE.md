@@ -657,8 +657,7 @@ name and its prompt) and `title`; `enter` starts it, and the form is all it does
 written in a form: it is a folder (§6), and `/flow` is how the panel works with one
 (`App::flow_command`). `/flow run|pause|resume|approve <name>` fires it now, stops it firing by
 itself, lets it again, or says yes to its folder as it is; `/flow new <name>` writes a new one as
-`rl flow new` does — the bare template, or `--from <template> key=value…` (its `in` the folder
-under the cursor), opened in `$EDITOR` and said yes to on return; with words after the name it asks
+`rl flow new` does — the bare template, opened in `$EDITOR` and said yes to on return; with words after the name it asks
 the assistant for that flow, and its draft is shown in the pane (`tui/new_flow.rs`) with what
 would stop it loading, at its line: `enter` writes it and says yes, `e` writes it and opens it
 first, `esc` lets it go, and a draft that would not load is not written on enter. The yes is to
@@ -1032,8 +1031,8 @@ started: its `flow.md` goes, and its folder once nothing else is in it (a file t
 before, or what a firing left in `runs/`, stays; `drop_new`). Nothing else is approved for
 you — not a hand edit, not a flow an agent wrote. `rl flow new <name>` writes a new folder and
 opens its `flow.md` the same way (`rl-cli/src/flow/new.rs`): the bare template, kept only once
-saved changed, or a template with its blanks filled (`--from`) — the person's as written, so
-saved unchanged it is kept and said yes to as well. A new flow is written only where nothing is:
+saved changed, or a draft from words — the person's as asked for, so saved unchanged it is kept
+and said yes to as well. A new flow is written only where nothing is:
 a name with a `flow.md` already (even a link) is refused, and each file is opened only to be
 made, never over one or through a link. With no editor between — `--go`, `rl interpret --go`,
 the panel's enter on a draft — one writer does it all (`write_new`): it refuses a `flow.md` that
@@ -1043,20 +1042,19 @@ not answer) takes back exactly the files it wrote, and the folder if that leaves
 draft written with `--go` is shown first, on stderr, JSON or not, and `--json` carries it as
 `flow_md`.
 
-**Templates.** `rl flow new <name> --from prod-logs` or `--from morning-brief` starts from a flow
-Relay ships (`rl-cli/src/flow/templates.rs`; the folders under `rl-cli/templates/`, compiled in),
-shaped as the two flows this design was measured by. What is particular to a person is a blank,
-`{{key}}`, filled when the flow is written: `--set key=value`, asked for on a terminal, `in` from
-`--in` or the folder here; a value may not hold `"`, `\`, `{` or `}`, and nothing is written until
-every blank is good. A template's scripts read their blanks from their step's `env:`
-(`GCP_PROJECT`, `BRIEF_SPACE`, `GITHUB_ORG`), so no one's ids are in one; morning-brief's agent
-writes the brief and `post.sh` sends it, so the agent needs no tool.
+**Examples.** Two example flows are in `examples/flows/`, shaped as the two flows this design was
+measured by: `prod-logs` and `morning-brief`. Relay does not ship them; each is a folder to copy
+into `~/.relay/flows/`, edit where a placeholder stands (`my-gcp-project`, `spaces/AAAA`,
+`my-org`, `~/code/my-service`) and approve. Their scripts read what is particular to a person
+from their step's `env:` (`GCP_PROJECT`, `BRIEF_SPACE`, `GITHUB_ORG`), so no one's ids are in
+one; morning-brief's agent writes the brief and `post.sh` sends it, so the agent needs no tool.
+A test (`rl-cli/tests/examples.rs`) holds them to the code: each loads, its scripts parse under
+`/bin/sh` and bash, and only placeholders are in them.
 
 `rl flow` is the line's way in: `list` (`NAME HASH STATUS WHEN LAST IN`, the hash's first eight;
 then what did not load; `--all` keeps the removed), `edit <name>` (a new name starts from a
-template, gone again if left as it was), `new <name> [words…] [--from <template> [--set k=v…]
-[--in <folder>]] [--go]` (words, or a template; `--set` and `--in` only with `--from`, `--in` only
-for a template with an `in`), `run <name>` (now,
+template, gone again if left as it was), `new <name> [words…] [--go]` (words, or
+the bare template), `run <name>` (now,
 by hand, paused or not, never without its yes), `pause`, `resume`, `approve <name> [<hash>]`, `test <name>
 [--event <id>]` (what would fire it and which steps would run, starting nothing) and `reload`, each
 with `--json`. Behind them are `flow.list`, `flow.errors`, `flow.reload`, `flow.approve`,
@@ -1277,7 +1275,7 @@ holds, each frontmatter and step key (a test holds them to `FlowSpec`'s and `Ste
 as `rl-flow`'s `cond::ALLOWED` says it, the placeholders and the variables a command reads
 instead, what a step may leave (`rl flow state`) and every variable it starts with
 (`rl_flow::state::STEP_ENV`, which a daemon test holds every step to), an event's names
-(`template::EVENT_NAMES`, held to what the daemon fills), the templates, and an example that
+(`template::EVENT_NAMES`, held to what the daemon fills), and an example that
 loads; one line per event kind in `event_kind::ALL` (a kind without words fails a test); `rl
 --help` plus the help of `run`, `flow`, `flow new`, `flow test`, `flow state` and `ask`; what is
 here (the folder and its name, the folders Relay knows, the flows — each by what starts it and
@@ -1583,6 +1581,7 @@ scripts/live                  a live Relay to poke at: its home is live/home, se
 live/seed/                    what reset copies: flows/ (each `in` the workspace) and a ws/
                               workspace (everything else under live/ is throwaway)
 examples/weather-alert/       a flow folder to copy into ~/.relay/flows: a probe, a question
+examples/flows/               prod-logs and morning-brief, example flows to copy, edit and approve
 ```
 
 Sockets normally live in `run/`; a long `$RELAY_HOME` would blow the ~104-byte `sockaddr_un`

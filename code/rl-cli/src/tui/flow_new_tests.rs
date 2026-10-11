@@ -1,4 +1,4 @@
-//! The panel writing flows: `/flow new` from a template and from the bare one, and a drafted flow
+//! The panel writing flows: `/flow new` from the bare template, and a drafted flow
 //! shown, then written with its yes, opened first, or let go. A real `rld` over a fresh home; no
 //! agent is asked — a draft is handed to the panel as the assistant's answer would hand it.
 
@@ -29,30 +29,14 @@ fn on_screen(app: &mut super::App) -> String {
 }
 
 #[tokio::test]
-async fn flow_new_fills_a_template_and_its_save_is_the_yes() {
-    let (tmp, token, mut app, folder) = panel().await;
+async fn flow_new_opens_the_bare_template_and_its_save_is_the_yes() {
+    let (tmp, token, mut app, _) = panel().await;
     let home = rl_core::Home::at(tmp.path().join("h"));
-    // On the project's run: `in` is its folder.
-    app.select(Some("r:run00001".into()));
-    run(&mut app, "/flow new logs --from prod-logs").await;
-    assert_eq!(
-        said(&app),
-        "prod-logs needs project=… (the GCP project whose logs are read, like my-prod-project)"
-    );
-    assert!(
-        app.editor.is_none() && !home.flow_dir("logs").exists(),
-        "nothing written"
-    );
-
-    run(&mut app, "/flow new logs --from prod-logs project=my-prod").await;
+    run(&mut app, "/flow new logs").await;
     let (editing, line) = app.editor.take().expect("the editor is next");
     assert_eq!(line, 1);
-    let md = std::fs::read_to_string(&editing.file).unwrap();
-    assert!(
-        md.contains(&format!("in: \"{}\"", rl_core::display_path(&folder))),
-        "{md}"
-    );
-    // Back from the editor, left as written: it is the person's, it loads, and it has its yes.
+    // Back from the editor, saved changed: it loads, and it has its yes.
+    std::fs::write(&editing.file, HELLO).unwrap();
     app.edited(editing).await;
     assert_eq!(said(&app), "logs approved");
     assert!(app.flows.iter().any(|f| f.name == "logs" && f.approved()));
