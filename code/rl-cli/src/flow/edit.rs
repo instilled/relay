@@ -27,7 +27,7 @@ pub struct Editing {
     pub(super) fresh: bool,
     /// What this edit wrote, as written: a new flow's files, and no one else's.
     pub(super) wrote: Vec<(PathBuf, Vec<u8>)>,
-    /// What was written is the person's — a template they filled, a draft they asked for — so it
+    /// What was written is the person's — a draft they asked for — so it
     /// is kept and said yes to even saved unchanged. The bare template is not.
     pub(super) yours: bool,
 }
@@ -93,7 +93,7 @@ pub fn start_edit(home: &Home, name: &str) -> Result<Editing> {
 /// Back from the editor: every flow read again, and the one edited said yes to only when
 /// `flow.md` was saved changed, the folder before it had its yes (or held nothing), and nothing
 /// else in it changed meanwhile — the yes is to exactly that version, by its hash. A new flow the
-/// person wrote — a filled template, a draft — is said yes to saved unchanged as well. A new flow
+/// person wrote — a draft — is said yes to saved unchanged as well. A new flow
 /// left as the template is the caller's to take away first, before the daemon is reached, so it
 /// goes even when the daemon cannot be (`drop_new`).
 pub async fn finish_edit(rpc: &mut Client, e: Editing) -> Result<(Edited, Reloaded)> {
@@ -135,7 +135,7 @@ pub async fn finish_edit(rpc: &mut Client, e: Editing) -> Result<(Edited, Reload
 
 /// Takes a new flow away as it was written, when nothing since is the person's: this edit wrote
 /// its `flow.md`, and it is untouched. Back from the editor (`unseen` false) only the bare
-/// template goes — a filled template or a draft is the person's; when the editor did not open or
+/// template goes — a draft is the person's; when the editor did not open or
 /// failed (`unseen`), whatever was written goes, for no yes was given to it. Only what the edit
 /// wrote goes (`take_back`): a file the person had there, or what a firing left in `runs/`,
 /// stays, and so does the folder then. Whether it went.

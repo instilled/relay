@@ -3177,7 +3177,7 @@ impl App {
     }
 
     /// `/flow edit <name>`: its `flow.md` in `$EDITOR` once the screen is
-    /// free — a new one from a template, one that did not load at the line
+    /// free — a new one from the bare template, one that did not load at the line
     /// where it broke.
     fn edit_flow(&mut self, name: &str) {
         match crate::flow::start_edit(&self.home, name) {

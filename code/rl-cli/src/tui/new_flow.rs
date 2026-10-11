@@ -1,13 +1,13 @@
 //! A new flow in the panel: what `/flow new …` asks for, and a flow an assistant drafted, shown
 //! before anything is written — its `flow.md`, what would stop it loading, and who drafted it.
 //! The words read, a draft checked and said, and how much of it has been on screen; then the
-//! panel's side (`App::new_flow`, `App::show_draft`, `App::draft_key`): a template written and
-//! opened, and a draft written on `enter`, once its last line has been, by the writer every new
+//! panel's side (`App::new_flow`, `App::show_draft`, `App::draft_key`): the bare template
+//! written and opened, and a draft written on `enter`, once its last line has been, by the writer every new
 //! flow shares (`flow::write_new`).
 
 use super::{App, Mode, Pane, theme};
 use crate::context::Want;
-use crate::flow::{NewFile, templates};
+use crate::flow::NewFile;
 use crossterm::event::KeyCode;
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -18,19 +18,13 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use unicode_width::UnicodeWidthChar;
 
-pub const USAGE: &str = "/flow new <name> [words…] · /flow new <name> --from <template> [key=value…]";
+pub const USAGE: &str = "/flow new <name> [words…]";
 
 /// What `/flow new` asks for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Asked {
     /// The bare template, in `$EDITOR`.
     Bare { name: String },
-    /// A template, its blanks given as `key=value` words.
-    From {
-        name: String,
-        template: String,
-        given: Vec<String>,
-    },
     /// A draft, from the words.
     Words { name: String, words: String },
 }
@@ -38,7 +32,7 @@ pub enum Asked {
 impl Asked {
     pub fn name(&self) -> &str {
         match self {
-            Asked::Bare { name } | Asked::From { name, .. } | Asked::Words { name, .. } => name,
+            Asked::Bare { name } | Asked::Words { name, .. } => name,
         }
     }
 }
@@ -51,29 +45,11 @@ pub fn asked(words: &[&str]) -> Result<Asked, String> {
     let name = name.to_string();
     Ok(match rest {
         [] => Asked::Bare { name },
-        ["--from"] => return Err(format!("/flow new {name} --from which? {}", templates::names())),
-        ["--from", template, given @ ..] => Asked::From {
-            name,
-            template: template.to_string(),
-            given: given.iter().map(|g| g.to_string()).collect(),
-        },
         words => Asked::Words {
             name,
             words: words.join(" "),
         },
     })
-}
-
-/// A template's files as the panel fills them: its blanks from `key=value` words, `in` the folder
-/// `here`; what is missing is said as it would be typed.
-pub fn template_files(template: &str, given: &[String], here: &str) -> Result<Vec<NewFile>, String> {
-    let t = templates::find(template)?;
-    let given = templates::given_in(t, given, here, false)?;
-    let missing = templates::missing(t, &given);
-    if !missing.is_empty() {
-        return Err(templates::needs(t, &missing, ""));
-    }
-    templates::fill(t, &given)
 }
 
 /// A flow an assistant drafted, not written yet.
@@ -289,7 +265,7 @@ fn wrap(lines: Vec<Line<'static>>, width: usize) -> Vec<Line<'static>> {
 }
 
 impl App {
-    /// `/flow new …`: the bare template or a template filled, written and opened in `$EDITOR`
+    /// `/flow new …`: the bare template, written and opened in `$EDITOR`
     /// once the screen is free (and said yes to on return, as `/flow edit` is); or the words to
     /// the assistant, its draft shown when it answers.
     pub(super) fn new_flow(&mut self, words: &[&str]) {
@@ -301,23 +277,16 @@ impl App {
             Ok(name) => name,
             Err(e) => return self.say(format!("{e:#}")),
         };
-        let (files, yours) = match asked {
+        match asked {
             Asked::Words { .. } if self.asking.is_some() => {
                 return self.say("still asking; /stop on its run");
             }
             Asked::Words { words, .. } => {
                 return self.ask(words, Want::Flow { name: name.to_string() });
             }
-            Asked::Bare { .. } => (vec![NewFile::flow_md(crate::flow::TEMPLATE)], false),
-            Asked::From { template, given, .. } => {
-                let here = rl_core::display_path(&self.folder_here());
-                match template_files(&template, &given, &here) {
-                    Ok(files) => (files, true),
-                    Err(e) => return self.say(e),
-                }
-            }
-        };
-        match crate::flow::start_new(&self.home, &name, files, yours) {
+            Asked::Bare { .. } => {}
+        }
+        match crate::flow::start_new(&self.home, &name, vec![NewFile::flow_md(crate::flow::TEMPLATE)], false) {
             Ok(editing) => self.editor = Some((editing, 1)),
             Err(e) => self.say(format!("{e:#}")),
         }
@@ -429,18 +398,6 @@ mod tests {
     fn what_flow_new_asks_for() {
         assert_eq!(asked(&[]).unwrap_err(), USAGE);
         assert_eq!(asked(&["pulse"]).unwrap(), Asked::Bare { name: "pulse".into() });
-        assert_eq!(
-            asked(&["logs", "--from", "prod-logs", "project=p"]).unwrap(),
-            Asked::From {
-                name: "logs".into(),
-                template: "prod-logs".into(),
-                given: vec!["project=p".into()],
-            }
-        );
-        assert_eq!(
-            asked(&["logs", "--from"]).unwrap_err(),
-            "/flow new logs --from which? prod-logs, morning-brief"
-        );
         let brief = asked(&["brief", "what", "my", "team", "did"]).unwrap();
         assert_eq!(
             brief,
@@ -450,12 +407,6 @@ mod tests {
             }
         );
         assert_eq!(brief.name(), "brief");
-        assert_eq!(
-            template_files("prod-logs", &[], "~/w/api").unwrap_err(),
-            "prod-logs needs project=… (the GCP project whose logs are read, like my-prod-project)"
-        );
-        let files = template_files("prod-logs", &["project=p".into()], "~/w/api").unwrap();
-        assert!(String::from_utf8_lossy(&files[0].bytes).contains("in: \"~/w/api\""));
     }
 
     #[test]

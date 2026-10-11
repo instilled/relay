@@ -18,7 +18,6 @@ use rl_proto::flow::{
 mod edit;
 mod new;
 mod state;
-pub mod templates;
 pub mod tested;
 pub use edit::{Edited, Editing, TEMPLATE, drop_new, finish_edit, start_edit};
 pub use new::{NewArgs, NewFile, NewName, check_name, problems, projects, start_new, write_new};
@@ -33,7 +32,7 @@ pub enum FlowCmd {
         #[arg(short, long)]
         all: bool,
     },
-    /// Write a new flow: from plain words (an assistant drafts it), from a template Relay ships (--from), or the bare template; then $EDITOR, and a yes when it loads.
+    /// Write a new flow: from plain words (an assistant drafts it), or the bare template; then $EDITOR, and a yes when it loads.
     New(NewArgs),
     /// Open a flow's flow.md in $VISUAL / $EDITOR; saved, and if it loads, it is approved.
     Edit {
@@ -103,9 +102,8 @@ pub async fn flow(home: &Home, cmd: FlowCmd, json: bool) -> Result<()> {
             }
             if flows.is_empty() {
                 println!(
-                    "no flows ({}); `rl flow new <name>` writes one, `--from {}` from a template",
-                    display_path(&home.flows_dir()),
-                    templates::names().replace(", ", "` or `--from ")
+                    "no flows ({}); `rl flow new <name>` writes one",
+                    display_path(&home.flows_dir())
                 );
             } else {
                 let now = now();

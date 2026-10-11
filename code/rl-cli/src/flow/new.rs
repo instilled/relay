@@ -2,7 +2,6 @@
 //! no editor between, written and said yes to by the one writer every path shares (`write_new`).
 
 use super::edit::{Edited, Editing, TEMPLATE, finish_edit, folder_files, take_back, write_new_file};
-use super::templates;
 use crate::client::Client;
 use crate::context::Want;
 use crate::daemon;
@@ -12,7 +11,6 @@ use rl_core::{Home, display_path};
 use rl_flow::def::valid_name;
 use rl_proto::flow::{Flow, FlowReload};
 use rl_proto::methods::WorkspaceList;
-use std::io::IsTerminal as _;
 use std::path::{Path, PathBuf};
 
 #[derive(clap::Args)]
@@ -20,17 +18,7 @@ pub struct NewArgs {
     /// The new flow's folder in ~/.relay/flows: lowercase letters, digits and dashes.
     pub name: String,
     /// What it should do, in plain words: assistants.interpret drafts its flow.md.
-    #[arg(conflicts_with = "from")]
     pub words: Vec<String>,
-    /// Start from a template Relay ships: prod-logs, morning-brief.
-    #[arg(long, value_name = "TEMPLATE")]
-    pub from: Option<String>,
-    /// A template's blank: --set project=my-prod. Asked for when missing, on a terminal.
-    #[arg(long = "set", value_name = "KEY=VALUE", requires = "from")]
-    pub set: Vec<String>,
-    /// The project a template's flow works in (its `in`); default here.
-    #[arg(long = "in", value_name = "FOLDER", requires = "from")]
-    pub folder: Option<PathBuf>,
     /// Write it and say yes to it without opening $EDITOR.
     #[arg(long)]
     pub go: bool,
@@ -117,8 +105,8 @@ pub async fn projects(rpc: &mut Client) -> Result<Vec<PathBuf>> {
 }
 
 /// A new flow's folder written — `files`, `flow.md` among them, none there before — and its
-/// `flow.md` ready for an editor. `yours`: what was written is the person's (a template they
-/// filled, a draft they asked for), kept and said yes to even saved unchanged; else it is the
+/// `flow.md` ready for an editor. `yours`: what was written is the person's (a draft they
+/// asked for), kept and said yes to even saved unchanged; else it is the
 /// bare template, kept only once changed. Each file is written only where there is none; one that
 /// cannot be leaves nothing of the others.
 pub fn start_new(home: &Home, name: &NewName, files: Vec<NewFile>, yours: bool) -> Result<Editing> {
@@ -196,24 +184,19 @@ pub async fn write_new(
     }
 }
 
-/// `rl flow new`: the bare template, a template filled, or a draft from words — written to a new
+/// `rl flow new`: the bare template, or a draft from words — written to a new
 /// folder, opened in `$EDITOR` and said yes to as an edit is, when it loads; or with `--go`
 /// written and said yes to at once.
 pub async fn new(home: &Home, a: NewArgs, json: bool) -> Result<()> {
-    let folder = match &a.folder {
-        Some(f) => f.clone(),
-        None => std::env::current_dir()?,
-    };
-    let folder = std::fs::canonicalize(&folder).unwrap_or(folder);
     let name = check_name(home, &a.name)?;
-    let (files, yours) = match &a.from {
-        Some(t) => (template_files(t, &a.set, &folder, a.folder.is_some())?, true),
-        None if !a.words.is_empty() => (
-            drafted(home, &name, &folder, &a.words.join(" "), a.go, json).await?,
-            true,
-        ),
-        None if a.go => bail!("--go writes a template or a draft as it is; the bare template needs $EDITOR"),
-        None => (vec![NewFile::flow_md(TEMPLATE)], false),
+    let (files, yours) = if !a.words.is_empty() {
+        let here = std::env::current_dir()?;
+        let here = std::fs::canonicalize(&here).unwrap_or(here);
+        (drafted(home, &name, &here, &a.words.join(" "), a.go, json).await?, true)
+    } else if a.go {
+        bail!("--go writes a draft as it is; the bare template needs $EDITOR");
+    } else {
+        (vec![NewFile::flow_md(TEMPLATE)], false)
     };
     if a.go {
         // A draft's bytes go in the JSON too, as `rl interpret --go --json` gives them.
@@ -259,24 +242,6 @@ async fn drafted(
         eprint!("{}", d.text);
     }
     Ok(vec![NewFile::flow_md(d.text)])
-}
-
-/// A template's files, its blanks from `--set`, `in` from the folder (`named` by `--in`, or here),
-/// and — on a terminal — the rest asked for; off one, what is missing is said.
-fn template_files(name: &str, set: &[String], folder: &Path, named: bool) -> Result<Vec<NewFile>> {
-    let t = templates::find(name).map_err(anyhow::Error::msg)?;
-    let mut given = templates::given_in(t, set, &display_path(folder), named).map_err(anyhow::Error::msg)?;
-    let missing = templates::missing(t, &given);
-    if !missing.is_empty() && !std::io::stdin().is_terminal() {
-        bail!("{}", templates::needs(t, &missing, "--set "));
-    }
-    for b in missing {
-        eprint!("{} (like {}): ", b.what, b.like);
-        let mut line = String::new();
-        std::io::stdin().read_line(&mut line)?;
-        given.insert(b.key.to_string(), line.trim().to_string());
-    }
-    templates::fill(t, &given).map_err(anyhow::Error::msg)
 }
 
 #[cfg(test)]

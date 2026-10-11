@@ -183,8 +183,7 @@ pub fn contract(want: &Want) -> String {
     let after = "Write every line of the answer from the start of the line: the shapes above are \
 indented only to set them apart. A flow is flow.md alone: all after `name:` is written to \
 ~/.relay/flows/<name>/flow.md as it is. It may run commands on this machine and agents, never a \
-script of its own — it has none, and you cannot add one; `rl flow new <name> --from <template>` \
-is how the person starts from one Relay ships. Never invent a folder, an event kind, a key or a \
+script of its own — it has none, and you cannot add one. Never invent a folder, an event kind, a key or a \
 field.\n";
     match want {
         Want::Any => format!(
@@ -303,7 +302,6 @@ mod tests {
             "### if:",
             "### Placeholders",
             "### What a step leaves, and starts with",
-            "### Templates",
             "### An example",
             "## Events",
             "- run.failed:",
