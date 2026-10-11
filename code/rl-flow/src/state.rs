@@ -10,6 +10,32 @@ pub const FILE_MAX: usize = 10 << 20;
 pub const OUT_FILE_MAX: usize = 1 << 20;
 /// What Relay itself says of a step, so no value may be called it.
 pub const RESERVED: &[&str] = &["out", "choice", "note"];
+/// What every step's run starts with set — so `rl flow state` and a script land in their firing
+/// with no arguments — and what each is. The context pack teaches these; a daemon test holds
+/// every step to them.
+pub const STEP_ENV: &[(&str, &str)] = &[
+    ("RELAY_RUN", "the step's run"),
+    ("RELAY_FLOW", "the flow's name"),
+    ("RELAY_FIRING", "the firing's id"),
+    ("RELAY_STEP", "the step's name"),
+    ("RELAY_FLOW_DIR", "the flow's folder, where its own scripts are"),
+    (
+        "RELAY_WORK",
+        "the firing's folder, shared by its steps: a file written there is theirs to read",
+    ),
+    (
+        "RELAY_IN",
+        "a folder holding what each step before printed, as <step>.out",
+    ),
+    (
+        "RELAY_OUT",
+        "a file: each `key=value` line appended to it is a value left for the steps after",
+    ),
+    (
+        "RELAY_LAST_FIRING",
+        "when the flow's firing before this one started, empty on the first: ask a source only for what is new",
+    ),
+];
 /// The most of a key, a name or a line a refusal quotes, in chars.
 const QUOTED_MAX: usize = 80;
 

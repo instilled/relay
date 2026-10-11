@@ -1520,6 +1520,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-util",
+ "unicode-width",
  "vt100",
 ]
 

@@ -23,7 +23,7 @@ use tracing::{debug, info, warn};
 pub const MISSED_AFTER: Duration = Duration::from_secs(120);
 /// Events older than this are history: a daemon that was down does not come
 /// back and fire everything it missed.
-const HORIZON: SignedDuration = SignedDuration::from_secs(300);
+pub(super) const HORIZON: SignedDuration = SignedDuration::from_secs(300);
 
 /// When `def` fires next after `after`, given when it last did. `every` counts
 /// from the last firing, and is never planned in the past: one found unplanned long after it
@@ -172,7 +172,7 @@ impl Flows {
     }
 
     /// The run an event is about, and, for a decision's event, the flow whose step asked.
-    async fn about(&self, e: &Event) -> Result<(Option<Run>, Option<String>)> {
+    pub(super) async fn about(&self, e: &Event) -> Result<(Option<Run>, Option<String>)> {
         let run = e.run.clone();
         let decision = e
             .kind
@@ -541,6 +541,15 @@ mod tests {
         for (k, val) in want {
             assert_eq!(v.get(k).map(String::as_str), Some(val), "{k}");
         }
+        let mut named: Vec<&str> = v
+            .keys()
+            .filter(|k| !k.starts_with("data."))
+            .map(String::as_str)
+            .collect();
+        named.sort();
+        let mut taught = rl_flow::template::EVENT_NAMES.to_vec();
+        taught.sort();
+        assert_eq!(named, taught, "the names the pack teaches are the names an event has");
         assert_eq!(vars(&event("x.y", json!({})), None)["cwd"], "");
     }
 }

@@ -8,6 +8,7 @@ pub mod engine;
 mod facts;
 pub(crate) mod outcome;
 pub(crate) mod path;
+mod preview;
 mod restart;
 pub(crate) mod rpc;
 mod state;

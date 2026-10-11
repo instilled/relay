@@ -2,9 +2,11 @@ use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, Parser, Subcommand};
 use jiff::SignedDuration;
 use rl_cli::client::Client;
+use rl_cli::context::Want;
 use rl_cli::daemon;
 use rl_cli::env::child_env;
 use rl_cli::flow::FlowCmd;
+use rl_cli::interpret::Answer;
 use rl_cli::render;
 use rl_core::time::{now, parse_since};
 use rl_core::{Home, display_path};
@@ -97,7 +99,7 @@ enum Cmd {
     Import,
     /// What Relay tells an agent: the words, events, the flows and folders here, and the answer it wants.
     Context(ContextArgs),
-    /// Plain words to `assistants.interpret`: a run, drafted; `--go` starts it.
+    /// Plain words to `assistants.interpret`: a run or a flow, drafted; `--go` starts the run, or writes the flow and says yes.
     Interpret(InterpretArgs),
     /// A recap of a run, live or ended: its agent's own (Claude), its turns (Codex), or `assistants.summary`'s. Kept by the run.
     Summary(SummaryArgs),
@@ -1524,7 +1526,10 @@ async fn context(home: &Home, a: ContextArgs) -> Result<()> {
     let folder = std::fs::canonicalize(&folder).unwrap_or(folder);
     let mut rpc = daemon::ensure(home, true).await?;
     let here = rl_cli::context::gather(&mut rpc, &folder).await?;
-    print!("{}", rl_cli::context::render(rl_cli::context::help(), &here));
+    print!(
+        "{}",
+        rl_cli::context::render(rl_cli::context::help(), &here, &Want::Any)
+    );
     Ok(())
 }
 
@@ -1539,6 +1544,14 @@ fn help_for_the_pack() -> String {
         if matches!(sub.get_name(), "run" | "flow" | "ask") {
             help.push_str("\n---\n");
             help.push_str(&sub.render_help().to_string());
+        }
+        if sub.get_name() == "flow" {
+            for inner in sub.get_subcommands_mut() {
+                if matches!(inner.get_name(), "new" | "test" | "state") {
+                    help.push_str("\n---\n");
+                    help.push_str(&inner.render_help().to_string());
+                }
+            }
         }
     }
     help
@@ -1560,7 +1573,11 @@ async fn interpret(home: &Home, a: InterpretArgs, json: bool) -> Result<()> {
     if !json {
         eprintln!("asking…");
     }
-    let (draft, out) = rl_cli::interpret::ask(home, &folder, &words).await?;
+    let (answer, out) = rl_cli::interpret::ask(home, &folder, &words, &Want::Any).await?;
+    let draft = match answer {
+        Answer::Run(draft) => draft,
+        Answer::Flow(d) => return rl_cli::interpret::flow_drafted(home, d, &out, &words, a.go, json).await,
+    };
     let form = rl_cli::interpret::form_of(&draft, &folder);
     if json {
         println!(
@@ -1762,6 +1779,18 @@ async fn agents(home: &Home, json: bool) -> Result<()> {
 mod tests {
     use super::*;
     use clap::{CommandFactory, Parser};
+
+    #[test]
+    fn the_flow_state_commands_the_pack_teaches_exist() {
+        let root = Cli::command();
+        let state = root
+            .find_subcommand("flow")
+            .and_then(|f| f.find_subcommand("state"))
+            .expect("rl flow state");
+        for sub in ["set", "get", "write", "read"] {
+            assert!(state.find_subcommand(sub).is_some(), "rl flow state {sub}");
+        }
+    }
 
     #[test]
     fn the_shell_snippets_say_the_folder_percent_encoded() {

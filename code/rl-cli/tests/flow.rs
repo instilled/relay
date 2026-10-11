@@ -242,6 +242,16 @@ fn a_template_is_dropped_however_the_editor_ends() {
     std::fs::create_dir_all(&ws).unwrap();
     let rl = |args: &[&str]| rl(&home, &ws, &rld, &session, args);
 
+    // Taken away before the daemon is reached: one that cannot be started keeps nothing either.
+    for verb in ["new", "edit"] {
+        let mut c = rl(&["flow", verb, "nodaemon"]);
+        c.env("RELAY_RLD_BIN", dir.join("no-rld"));
+        let (ok, o, e) = out(c);
+        assert!(ok, "{o}{e}");
+        assert_eq!(o, "nodaemon left as the template: not kept");
+        assert!(!home.join("flows/nodaemon").exists());
+    }
+
     // An editor that fails, as `:cq` does.
     let mut edit = rl(&["flow", "edit", "aborted"]);
     edit.env("EDITOR", "false");
@@ -261,6 +271,19 @@ fn a_template_is_dropped_however_the_editor_ends() {
         kept.join("runs/f1/probe.out").exists(),
         "what a firing left is not the edit's to drop"
     );
+
+    // A folder holding a script of the person's: the template goes, the script stays, by either
+    // way in.
+    let mine = home.join("flows/mine");
+    std::fs::create_dir_all(&mine).unwrap();
+    std::fs::write(mine.join("probe.sh"), "echo mine\n").unwrap();
+    for args in [["flow", "new", "mine"], ["flow", "edit", "mine"]] {
+        let (ok, o, e) = out(rl(&args));
+        assert!(ok, "{o}{e}");
+        assert_eq!(o, "mine left as the template: not kept");
+        assert!(!mine.join("flow.md").exists(), "{args:?}");
+        assert_eq!(std::fs::read_to_string(mine.join("probe.sh")).unwrap(), "echo mine\n");
+    }
 
     assert!(out(rl(&["daemon", "stop"])).0);
 }
@@ -352,4 +375,244 @@ fn flow_state_outside_a_step_is_refused_without_starting_rld() {
         assert!(e.contains("not in a flow step"), "{args:?}: {e}");
         assert!(!e.contains("rld started"), "nothing to start rld for: {e}");
     }
+}
+
+#[test]
+fn flow_new_writes_a_template_filled_and_says_yes() {
+    let (Some(rld), Some(session)) = (sibling("rld"), sibling("rl-session")) else {
+        eprintln!("skipping: rld / rl-session not built (run `cargo test --workspace`)");
+        return;
+    };
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = std::fs::canonicalize(tmp.path()).unwrap();
+    let home = dir.join("home");
+    let ws = dir.join("proj");
+    std::fs::create_dir_all(&ws).unwrap();
+    let rl = |args: &[&str]| rl(&home, &ws, &rld, &session, args);
+    let flows = home.join("flows");
+
+    // Its `in` is a project Relay knows, or it would not load.
+    let (ok, o, e) = out(rl(&["add", ws.to_str().unwrap()]));
+    assert!(ok, "{o}{e}");
+
+    // A blank missing, not on a terminal: said, and nothing written.
+    let (ok, _, e) = out(rl(&["flow", "new", "logs", "--from", "prod-logs"]));
+    assert!(!ok);
+    assert!(
+        e.contains("prod-logs needs --set project=… (the GCP project whose logs are read, like my-prod-project)"),
+        "{e}"
+    );
+    assert!(!flows.join("logs").exists());
+    // A value that would break the file: likewise.
+    let (ok, _, e) = out(rl(&[
+        "flow",
+        "new",
+        "logs",
+        "--from",
+        "prod-logs",
+        "--set",
+        "project=my \"prod\"",
+    ]));
+    assert!(!ok && e.contains("`project`: a blank takes"), "{e}");
+    assert!(!flows.join("logs").exists());
+    let (ok, _, e) = out(rl(&["flow", "new", "logs", "--from", "nope"]));
+    assert!(
+        !ok && e.contains("`nope` is not a template: prod-logs, morning-brief"),
+        "{e}"
+    );
+
+    // Filled, written, opened, left as it is: that is the person's, and gets its yes.
+    let (ok, o, e) = out(rl(&[
+        "flow",
+        "new",
+        "logs",
+        "--from",
+        "prod-logs",
+        "--set",
+        "project=my-prod",
+    ]));
+    assert!(ok, "{o}{e}");
+    assert_eq!(o, "approved logs");
+    let md = std::fs::read_to_string(flows.join("logs/flow.md")).unwrap();
+    assert!(md.contains("GCP_PROJECT: \"my-prod\""), "{md}");
+    assert!(
+        md.contains(&format!("in: \"{}\"", rl_core::display_path(&ws))),
+        "in: the folder here\n{md}"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(flows.join("logs/new-log-errors.sh"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert!(mode & 0o111 != 0, "the probe runs: {mode:o}");
+    }
+    let (_, listed, _) = out(rl(&["flow", "list"]));
+    assert!(
+        listed
+            .lines()
+            .any(|l| l.starts_with("logs") && l.contains("  on  ") && l.contains("every 30m")),
+        "{listed}"
+    );
+
+    // Its name is taken now: refused, and the flow there is as it was.
+    let (ok, _, e) = out(rl(&[
+        "flow",
+        "new",
+        "logs",
+        "--from",
+        "prod-logs",
+        "--set",
+        "project=other",
+    ]));
+    assert!(
+        !ok && e.contains("`logs` is a flow already; rl flow edit logs opens it"),
+        "{e}"
+    );
+    assert_eq!(std::fs::read_to_string(flows.join("logs/flow.md")).unwrap(), md);
+
+    // An editor that fails leaves nothing of a new flow behind.
+    let mut failing = rl(&[
+        "flow",
+        "new",
+        "brief",
+        "--from",
+        "morning-brief",
+        "--set",
+        "space=spaces/AAAA1",
+        "--set",
+        "org=acme",
+    ]);
+    failing.env("EDITOR", "false");
+    let (ok, _, _) = out(failing);
+    assert!(!ok);
+    assert!(!flows.join("brief").exists());
+
+    // --go: written and said yes to, no editor.
+    let (ok, o, e) = out(rl(&[
+        "flow",
+        "new",
+        "brief",
+        "--from",
+        "morning-brief",
+        "--set",
+        "space=spaces/AAAA1",
+        "--set",
+        "org=acme",
+        "--go",
+    ]));
+    assert!(ok, "{o}{e}");
+    assert_eq!(o, "approved brief");
+    assert!(flows.join("brief/post.sh").is_file() && flows.join("brief/window.sh").is_file());
+
+    // The bare template: not kept unless changed, and --go has nothing to write it from.
+    let (ok, o, _) = out(rl(&["flow", "new", "pulse"]));
+    assert!(ok && o == "pulse left as the template: not kept", "{o}");
+    assert!(!flows.join("pulse").exists());
+    let (ok, _, e) = out(rl(&["flow", "new", "pulse", "--go"]));
+    assert!(!ok && e.contains("the bare template needs $EDITOR"), "{e}");
+    let mut edit = rl(&["flow", "new", "pulse"]);
+    edit.env("EDITOR", adds_a_line(&dir));
+    let (ok, o, e) = out(edit);
+    assert!(ok, "{o}{e}");
+    assert_eq!(o, "approved pulse");
+
+    // In a folder Relay does not know: written, and said not to load, at its line.
+    let elsewhere = dir.join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    let (ok, _, e) = out(rl(&[
+        "flow",
+        "new",
+        "far",
+        "--from",
+        "prod-logs",
+        "--set",
+        "project=p",
+        "--in",
+        elsewhere.to_str().unwrap(),
+    ]));
+    assert!(!ok);
+    assert!(e.contains("not loaded: far · flow.md:2") && e.contains("rl add"), "{e}");
+
+    // --in is a template's `in`: refused without --from, and for a template with no `in`.
+    let (ok, _, e) = out(rl(&["flow", "new", "lost", "--in", ws.to_str().unwrap()]));
+    assert!(!ok && e.contains("--from"), "{e}");
+    let (ok, _, e) = out(rl(&[
+        "flow",
+        "new",
+        "lost",
+        "--from",
+        "morning-brief",
+        "--set",
+        "space=spaces/AAAA1",
+        "--set",
+        "org=acme",
+        "--in",
+        ws.to_str().unwrap(),
+    ]));
+    assert!(
+        !ok && e.contains("--in: `in` is not a blank of morning-brief: space, org"),
+        "{e}"
+    );
+    assert!(!flows.join("lost").exists());
+
+    assert!(out(rl(&["daemon", "stop"])).0);
+}
+
+#[test]
+fn flow_test_says_what_would_fire_and_starts_nothing() {
+    let (Some(rld), Some(session)) = (sibling("rld"), sibling("rl-session")) else {
+        eprintln!("skipping: rld / rl-session not built (run `cargo test --workspace`)");
+        return;
+    };
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = std::fs::canonicalize(tmp.path()).unwrap();
+    let home = dir.join("home");
+    let ws = dir.join("proj");
+    std::fs::create_dir_all(&ws).unwrap();
+    let rl = |args: &[&str]| rl(&home, &ws, &rld, &session, args);
+    let flow = home.join("flows/probe");
+    std::fs::create_dir_all(&flow).unwrap();
+    std::fs::write(
+        flow.join("flow.md"),
+        "---\nwhen: every 30m\nsteps:\n  probe:\n    run: echo found\n  triage:\n    after: probe\n    if: probe.out\n    run: echo triage\n---\n",
+    )
+    .unwrap();
+
+    let (ok, o, e) = out(rl(&["flow", "test", "probe"]));
+    assert!(ok, "{o}{e}");
+    let lines: Vec<&str> = o.lines().collect();
+    assert_eq!(lines[0], "probe · every 30m");
+    assert!(lines[1].starts_with("  held    needs a yes"), "{o}");
+    assert!(lines[2].starts_with("  next    "), "{o}");
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.starts_with("  probe   runs") && l.contains("echo found")),
+        "{o}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.starts_with("  triage  if probe.out") && l.contains("echo triage")),
+        "{o}"
+    );
+    assert_eq!(
+        *lines.last().unwrap(),
+        "started nothing · rl flow run probe fires it now"
+    );
+
+    let (ok, o, _) = out(rl(&["--json", "flow", "test", "probe"]));
+    assert!(ok);
+    let v: serde_json::Value = serde_json::from_str(&o).unwrap();
+    assert_eq!(v["steps"][1]["runs"], serde_json::json!({ "if": ["probe.out"] }));
+
+    // Nothing fired.
+    let (_, listed, _) = out(rl(&["flow", "list"]));
+    assert!(listed.lines().nth(1).is_some_and(|l| l.contains("never")), "{listed}");
+
+    let (ok, _, e) = out(rl(&["flow", "test", "nope"]));
+    assert!(!ok && e.contains("nope"), "{e}");
+    assert!(out(rl(&["daemon", "stop"])).0);
 }

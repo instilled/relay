@@ -86,7 +86,7 @@ flowchart LR
     core["relay-core (shared-core)<br/>Home paths · ids · time"]
     ledger["relay-ledger (shared-ledger)<br/>migrations · runs · events · sessions · session_io · presence"]
     det["relay-detect (shared-detect)<br/>registry · pty · claude · machine · ansi"]
-    flow["rl-flow (pure: no I/O, no tokio)<br/>doc · def · plan · advance · cond · template · cron · hash"]
+    flow["rl-flow (pure: no I/O, no tokio)<br/>doc · def · plan · advance · cond · template · state · preview · cron · hash"]
 
     rl --> proto
     rl --> core
@@ -656,11 +656,25 @@ kind, its run's title and what it said.
 name and its prompt) and `title`; `enter` starts it, and the form is all it does. A flow is not
 written in a form: it is a folder (§6), and `/flow` is how the panel works with one
 (`App::flow_command`). `/flow run|pause|resume|approve <name>` fires it now, stops it firing by
-itself, lets it again, or says yes to its folder as it is; `/flow edit <name>` opens its `flow.md`
+itself, lets it again, or says yes to its folder as it is; `/flow new <name>` writes a new one as
+`rl flow new` does — the bare template, or `--from <template> key=value…` (its `in` the folder
+under the cursor), opened in `$EDITOR` and said yes to on return; with words after the name it asks
+the assistant for that flow, and its draft is shown in the pane (`tui/new_flow.rs`) with what
+would stop it loading, at its line: `enter` writes it and says yes, `e` writes it and opens it
+first, `esc` lets it go, and a draft that would not load is not written on enter. The yes is to
+what was shown: the pane scrolls (`↑↓`, `pgup/pgdn`), enter waits until the draft's last line has
+been on screen and it has been there 300 ms (an enter sooner was typed for what was there
+before, and is let go unsaid), a character that does not print — a tab, a control character,
+one that takes no room or turns the text — is shown as its escape, and a draft written that
+then gets no yes is taken away again, as `write_new` does. The ask line, answered a flow, shows
+its draft the same way. A draft that comes while the keys are another's — a form, a rename,
+words on the line — does not take them: it waits, said in the flash, until `/flow draft` shows
+it, a later one in its place; `/flow edit <name>` opens its `flow.md`
 in `$EDITOR` — at the line it broke on when it did not load, a template when there is no such
 flow yet — and on return reads the flows again and approves that one if it loads (your save is
 the yes), or flashes `not loaded:` with its file and line if it does not; `/flow reload` reads
-them all again, as bare `/reload` does after the shell. On a flow's row, in the list or the
+them all again, as bare `/reload` does after the shell. `/flow test <name>` shows in the pane what
+firing it would do now, until the next key (§6, Trying one). On a flow's row, in the list or the
 catch-up, or a flow's node (or its question's) in the graph, the name can be left out; a name
 typed wins over the row, and with neither the flash asks `which?`.
 
@@ -1010,19 +1024,54 @@ last loaded is another. Writing it through `rl` is the yes, and
 covers no more than was written: an `rl flow edit` or `/flow edit` approves only when `flow.md`
 was saved changed, the folder before the editor opened had its yes (or held nothing yet), and
 nothing else in it changed while the editor was open — the client hashes the folder as it was
-with the saved `flow.md` in it, and says yes to exactly that hash (`rl-cli/src/flow.rs`,
+with the saved `flow.md` in it, and says yes to exactly that hash (`rl-cli/src/flow/edit.rs`,
 `finish_edit`). Otherwise the flows are read again and it is left needing a yes, saying why; an
 edit just to look gives none. A new flow left as the template is not kept, however the editor
-ends: its `flow.md` goes, and its folder once nothing else is in it (what a firing left in
-`runs/` stays). Nothing else is
-approved for you — not a hand edit, not a flow an agent wrote.
+ends — taken away before the daemon is reached, so it goes even when the daemon cannot be
+started: its `flow.md` goes, and its folder once nothing else is in it (a file that was there
+before, or what a firing left in `runs/`, stays; `drop_new`). Nothing else is approved for
+you — not a hand edit, not a flow an agent wrote. `rl flow new <name>` writes a new folder and
+opens its `flow.md` the same way (`rl-cli/src/flow/new.rs`): the bare template, kept only once
+saved changed, or a template with its blanks filled (`--from`) — the person's as written, so
+saved unchanged it is kept and said yes to as well. A new flow is written only where nothing is:
+a name with a `flow.md` already (even a link) is refused, and each file is opened only to be
+made, never over one or through a link. With no editor between — `--go`, `rl interpret --go`,
+the panel's enter on a draft — one writer does it all (`write_new`): it refuses a `flow.md` that
+would not load, saying the first problem at its line, before anything is written; writes; says
+yes as an edit's save does; and when no yes comes (it did not load, it needs one, the daemon did
+not answer) takes back exactly the files it wrote, and the folder if that leaves it empty. A
+draft written with `--go` is shown first, on stderr, JSON or not, and `--json` carries it as
+`flow_md`.
+
+**Templates.** `rl flow new <name> --from prod-logs` or `--from morning-brief` starts from a flow
+Relay ships (`rl-cli/src/flow/templates.rs`; the folders under `rl-cli/templates/`, compiled in),
+shaped as the two flows this design was measured by. What is particular to a person is a blank,
+`{{key}}`, filled when the flow is written: `--set key=value`, asked for on a terminal, `in` from
+`--in` or the folder here; a value may not hold `"`, `\`, `{` or `}`, and nothing is written until
+every blank is good. A template's scripts read their blanks from their step's `env:`
+(`GCP_PROJECT`, `BRIEF_SPACE`, `GITHUB_ORG`), so no one's ids are in one; morning-brief's agent
+writes the brief and `post.sh` sends it, so the agent needs no tool.
 
 `rl flow` is the line's way in: `list` (`NAME HASH STATUS WHEN LAST IN`, the hash's first eight;
 then what did not load; `--all` keeps the removed), `edit <name>` (a new name starts from a
-template, gone again if left as it was), `run <name>` (now,
-by hand, paused or not, never without its yes), `pause`, `resume`, `approve <name> [<hash>]` and `reload`, each
+template, gone again if left as it was), `new <name> [words…] [--from <template> [--set k=v…]
+[--in <folder>]] [--go]` (words, or a template; `--set` and `--in` only with `--from`, `--in` only
+for a template with an `in`), `run <name>` (now,
+by hand, paused or not, never without its yes), `pause`, `resume`, `approve <name> [<hash>]`, `test <name>
+[--event <id>]` (what would fire it and which steps would run, starting nothing) and `reload`, each
 with `--json`. Behind them are `flow.list`, `flow.errors`, `flow.reload`, `flow.approve`,
-`flow.pause`, `flow.resume`, `flow.run` and `flow.firings` (`rl-daemon/src/flows/rpc.rs`).
+`flow.pause`, `flow.resume`, `flow.run`, `flow.test` and `flow.firings` (`rl-daemon/src/flows/rpc.rs`).
+
+**Trying one.** `rl flow test <name> [--event <id>]` and `/flow test`
+(`flow.test`; `rl-daemon/src/flows/preview.rs`, deciding in `rl-flow/src/preview.rs`) read the
+folders again and say what firing it would do now, and start nothing: whether anything would fire
+it by itself (`needs a yes`, `paused`), its next three times, a firing still going and what
+`overlap` would do, whether the event named would fire it and why not (the reactor's own
+`verdict`, and whether it is over five minutes old), and each step — what it does, where it would
+run, and whether it would run, only if (its `if:` and those it waits on, which only a step that
+ran can settle), or not (an `if:` on the event that does not hold, or a step it waits on that would
+not run). A flow with no `on:` is never fired by an event, so an `if:` on the event reads there as
+the engine decides it: never set, event named or not.
 
 **The engine.** A firing is a small state machine in `rld`, decided by pure code
 (`rl-flow/src/advance.rs`) and carried out by the daemon (`rl-daemon/src/flows/engine.rs`). It
@@ -1223,12 +1272,19 @@ happens; holding enter through the guide moves nothing at all, which is a test.
 
 **What an assistant is told** is the context pack (`rl-cli/src/context.rs`, `rl context
 [--in <folder>]`), built from the code so it cannot drift: the words (run, folder, flow,
-question, agent, tag and ref), one line per event kind in `event_kind::ALL` (a kind without
-words fails a test), `rl --help` plus the help of `run`, `flow` and `ask`, what is here (the
-folder and its name, the folders Relay knows, the flows — each by what starts it and where it is
-`in` — and the agents on this machine), and the answer contract: exactly one YAML document,
-`kind: run` then the form's fields. A flow is not drafted yet: the pack says the person writes
-one with `rl flow edit`.
+question, agent, tag and ref); a part on flows (`rl-cli/src/context/flows.rs`) — what `flow.md`
+holds, each frontmatter and step key (a test holds them to `FlowSpec`'s and `StepSpec`'s), `if:`
+as `rl-flow`'s `cond::ALLOWED` says it, the placeholders and the variables a command reads
+instead, what a step may leave (`rl flow state`) and every variable it starts with
+(`rl_flow::state::STEP_ENV`, which a daemon test holds every step to), an event's names
+(`template::EVENT_NAMES`, held to what the daemon fills), the templates, and an example that
+loads; one line per event kind in `event_kind::ALL` (a kind without words fails a test); `rl
+--help` plus the help of `run`, `flow`, `flow new`, `flow test`, `flow state` and `ask`; what is
+here (the folder and its name, the folders Relay knows, the flows — each by what starts it and
+where it is `in` — and the agents on this machine); and the answer contract: one run or one flow
+— `kind: run` then the form's fields, or `kind: flow`, `name:`, then the whole `flow.md` — its
+shapes indented so an echo of the pack is never read as an answer; asked for a flow by name (`rl
+flow new <name> <words>`), only that flow.
 
 **The interpreter** is that pack, the typed words and an ordinary run. The panel's line (§4) and
 `rl interpret <words…> [--in <folder>] [--go]` build the pack on the client (it needs clap's
@@ -1241,13 +1297,27 @@ for it to end — 60 s, then it is stopped and the caller told so — and return
 what it wrote. The client reads the last `kind:` block out of that by hand (`rl-cli/src/
 interpret.rs`: fences and prose around it dropped, `key: value` lines, block and flow lists; not
 a YAML parser, because an agent writes `run: claude fix it: now` and means it) and fills the
-form. In the panel that is the run form `/new` opens, with the assistant's answer in
-it and a line saying who drafted it; `rl interpret` prints the draft with `# by <agent> · run <id>` and does
-nothing, or with `--go` starts the run, `cause: manual`, since the go was yours. An answer of
-another `kind:` is refused by name, and one without a `kind:` is an error that quotes what the
-agent said. Interpretation is a run, so it is in the list, in
-`rl ls --all`, in the journal, and under retention like everything else; nothing about it is
-special except its cause.
+form. In the panel that is the run form `/new` opens, with the assistant's answer in it and a
+line saying who drafted it; `rl interpret` prints the draft with `# by <agent> · run <id>` and
+does nothing, or with `--go` starts the run, `cause: manual`, since the go was yours. An answer
+of another `kind:` is refused by name, and one without a `kind:` is an error that quotes what the
+agent said.
+
+A flow is read from the first `kind: flow` at the start of a line (`interpret::answer`): its
+`name:`, then the text from its `---` line to the end — or, when a fence opened before it, to
+the bare fence that closes that one, what comes after dropped. Fences nest: one with an info
+string (```` ```sh ````) opens a level and a bare one closes it, so a prompt's own code block
+stays whole, and a fence never closed runs to the end. Asked for a flow, the assistant has
+three minutes, not one. `rl interpret` prints a flow with `# by <agent> · run <id>`, its name
+only when it is a flow's name; with `--go` — a new ask, not the draft printed before — it prints
+what it was answered and writes it to `~/.relay/flows/<name>/flow.md` by the one writer
+(`write_new`), saying yes to it as a new flow's save does (Loading and approval, above); its
+`--json` carries the draft as `flow_md`. `rl flow new <name> <words…>` asks for that flow,
+writes the draft, opens it in `$EDITOR` — with `--go` it shows the draft on stderr instead,
+JSON or not — and gives it its yes the same way; a run
+answered there is refused by name. Interpretation is a run, so it is in the list, in `rl ls
+--all`, in the journal, and under retention like everything else; nothing about it is special
+except its cause.
 
 **The summariser** says what happened, for someone who was not looking, in a run, a flow's runs
 (its steps', wherever they ran), one firing's (the runs whose chain it is), a project's, or everything (`summary.make {target: run | flow | firing |
@@ -1525,8 +1595,6 @@ limit, so both sides fall back to the same short hashed directory under the temp
 Named here so the diagrams above are not read as the whole plan — see §7 of the brief for
 phasing.
 
-- **The rest of flows** (`docs/specs/2026-10-07-flows.md`) — Writing it: `rl flow new` and
-  `/flow new` drafted from words, the context pack teaching flows, `rl flow test`, and templates.
 - **Plugins** — `rl-plugin-host` (Bun), the broker, `relay.d.ts`, the manifest/approval flow,
   action keys and the detail tab. Until then, one provisional contract stands in for a piece of
   it — **workspace badges** (`rl-daemon/src/badges.rs`): `workspaces.badges` in `config.yaml`

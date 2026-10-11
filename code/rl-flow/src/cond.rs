@@ -11,7 +11,8 @@ pub enum Cond {
     IsNot(Ref, String),
 }
 
-const ALLOWED: &str = "an if: is `step.key`, `!step.key`, `step.key == value` or `step.key != value`";
+/// What an `if:` may be, as a refusal and the context pack say it.
+pub const ALLOWED: &str = "an if: is `step.key`, `!step.key`, `step.key == value` or `step.key != value`";
 
 /// `probe.out`, `!probe.out`, `review.choice == apply`, `probe.severity != low` (a value may be
 /// quoted). Anything else is refused, saying what is allowed.

@@ -1,5 +1,5 @@
 //! `rl flow`: the flows in `~/.relay/flows` and what they are doing; edit
-//! one (and say yes to it, if it loads), run, pause, resume, approve, reload; and, inside a step,
+//! one (and say yes to it, if it loads), run, pause, resume, approve, test, reload; and, inside a step,
 //! its firing's state.
 
 use crate::client::Client;
@@ -9,15 +9,19 @@ use clap::Subcommand;
 use jiff::Timestamp;
 use rl_core::time::{fmt_age, now};
 use rl_core::{Home, display_path};
-use rl_flow::def::{FlowDef, valid_name};
-use rl_flow::hash;
+use rl_flow::def::FlowDef;
 use rl_proto::flow::{
     Firing, FiringFilter, Flow, FlowApproval, FlowApprove, FlowErrors, FlowFilter, FlowFirings, FlowList, FlowName,
-    FlowPause, FlowReload, FlowResume, FlowRun, NotLoaded, Reloaded,
+    FlowPause, FlowReload, FlowResume, FlowRun, FlowTest, FlowTestParams, Reloaded,
 };
-use std::path::{Path, PathBuf};
 
+mod edit;
+mod new;
 mod state;
+pub mod templates;
+pub mod tested;
+pub use edit::{Edited, Editing, TEMPLATE, drop_new, finish_edit, start_edit};
+pub use new::{NewArgs, NewFile, NewName, check_name, problems, projects, start_new, write_new};
 pub use state::StateCmd;
 
 #[derive(Subcommand)]
@@ -29,7 +33,9 @@ pub enum FlowCmd {
         #[arg(short, long)]
         all: bool,
     },
-    /// Open a flow's flow.md in $VISUAL / $EDITOR (a new one starts from a template); saved, and if it loads, it is approved.
+    /// Write a new flow: from plain words (an assistant drafts it), from a template Relay ships (--from), or the bare template; then $EDITOR, and a yes when it loads.
+    New(NewArgs),
+    /// Open a flow's flow.md in $VISUAL / $EDITOR; saved, and if it loads, it is approved.
     Edit {
         /// The flow's folder in ~/.relay/flows: lowercase letters, digits and dashes.
         name: String,
@@ -47,6 +53,13 @@ pub enum FlowCmd {
         /// the folder is another version now. Without it, the version read now, which is printed.
         hash: Option<String>,
     },
+    /// What firing a flow would do now — what would fire it, which steps would run — starting nothing.
+    Test {
+        name: String,
+        /// An event, by id (rl events): whether it would fire the flow, and what its steps would make of it.
+        #[arg(long)]
+        event: Option<i64>,
+    },
     /// Read ~/.relay/flows again (rld does it on start too).
     Reload,
     /// What a step leaves for the steps after it, and reads of theirs: set, get, write, read. Inside a step only.
@@ -58,12 +71,10 @@ pub enum FlowCmd {
 
 const HEADERS: &[&str] = &["NAME", "HASH", "STATUS", "WHEN", "LAST", "IN"];
 
-/// What `rl flow edit` starts a new flow from.
-const TEMPLATE: &str = "---\nwhen: every 1h\nsteps:\n  first:\n    run: echo hello\n---\n";
-
 pub async fn flow(home: &Home, cmd: FlowCmd, json: bool) -> Result<()> {
     let cmd = match cmd {
         FlowCmd::State { cmd } => return state::state(home, cmd, json).await,
+        FlowCmd::New(a) => return new::new(home, a, json).await,
         cmd => cmd,
     };
     if let FlowCmd::Edit { name } = &cmd {
@@ -92,8 +103,9 @@ pub async fn flow(home: &Home, cmd: FlowCmd, json: bool) -> Result<()> {
             }
             if flows.is_empty() {
                 println!(
-                    "no flows ({}); `rl flow edit <name>` writes one",
-                    display_path(&home.flows_dir())
+                    "no flows ({}); `rl flow new <name>` writes one, `--from {}` from a template",
+                    display_path(&home.flows_dir()),
+                    templates::names().replace(", ", "` or `--from ")
                 );
             } else {
                 let now = now();
@@ -131,6 +143,16 @@ pub async fn flow(home: &Home, cmd: FlowCmd, json: bool) -> Result<()> {
                 println!("approved {} · {}", f.name, short(&f.hash));
             }
         }
+        FlowCmd::Test { name, event } => {
+            let t = rpc.call::<FlowTest>(FlowTestParams { name, event }).await?;
+            if json {
+                println!("{}", serde_json::to_string(&t)?);
+            } else {
+                for l in tested::lines(&t, now()) {
+                    println!("{l}");
+                }
+            }
+        }
         FlowCmd::Reload => {
             let r = rpc.call::<FlowReload>(()).await?;
             if json {
@@ -148,7 +170,7 @@ pub async fn flow(home: &Home, cmd: FlowCmd, json: bool) -> Result<()> {
                 }
             }
         }
-        FlowCmd::Edit { .. } | FlowCmd::State { .. } => unreachable!("handled above"),
+        FlowCmd::Edit { .. } | FlowCmd::New(_) | FlowCmd::State { .. } => unreachable!("handled above"),
     }
     Ok(())
 }
@@ -209,23 +231,44 @@ fn short(hash: &str) -> String {
 /// Opens the flow's `flow.md`, then reads the folder again and says what came of it; one that
 /// did not load, or was saved and is left needing a yes, exits 1.
 async fn edit(home: &Home, name: &str, json: bool) -> Result<()> {
-    let editing = start_edit(home, name)?;
+    in_editor(home, start_edit(home, name)?, json).await
+}
+
+/// `flow.md` in `$EDITOR`, then the edit finished and said. However the editor ends, a new flow
+/// left as the template is not kept: taken away before the daemon is reached, so it goes even
+/// when the daemon cannot be started.
+async fn in_editor(home: &Home, editing: Editing, json: bool) -> Result<()> {
     if let Err(e) = crate::env::open_in_editor(&editing.file, 1) {
-        // However the editor ends, a new flow's template is not left behind.
-        if let Err(dropped) = drop_template(home, &editing) {
-            bail!("{e:#}; and its template is left: {dropped:#}");
+        if let Err(left) = drop_new(home, &editing, true) {
+            bail!("{e:#}; and what was written is left: {left:#}");
         }
         return Err(e);
     }
+    let name = editing.name.clone();
+    if drop_new(home, &editing, false)? {
+        let said = Edited::Dropped.words(&name);
+        if json {
+            println!("{}", serde_json::json!({ "name": name, "kept": false, "said": said }));
+        } else {
+            println!("{said}");
+        }
+        return Ok(());
+    }
     let mut rpc = daemon::ensure(home, !json).await?;
-    let (edited, reloaded) = finish_edit(&mut rpc, home, editing).await?;
-    if let Edited::Approved(f) = &edited {
+    let (edited, reloaded) = finish_edit(&mut rpc, editing).await?;
+    told(&edited, &reloaded, &name, json)
+}
+
+/// What came of an edit or a new flow, said; one that did not load, or was saved and is left
+/// needing a yes, exits 1.
+pub(crate) fn told(edited: &Edited, reloaded: &Reloaded, name: &str, json: bool) -> Result<()> {
+    if let Edited::Approved(f) = edited {
         return said(f, "approved", json);
     }
     if json {
-        println!("{}", serde_json::to_string(&reloaded)?);
+        println!("{}", serde_json::to_string(reloaded)?);
     } else {
-        match &edited {
+        match edited {
             Edited::NotLoaded(said) => {
                 for n in said {
                     eprintln!("not loaded: {n}");
@@ -239,141 +282,6 @@ async fn edit(home: &Home, name: &str, json: bool) -> Result<()> {
         std::process::exit(1)
     }
     Ok(())
-}
-
-/// A flow's `flow.md` about to be edited, and its folder as it was: what a yes after the edit
-/// may cover, and no more.
-pub struct Editing {
-    pub name: String,
-    pub file: PathBuf,
-    /// The folder before the editor opened, a new flow's template in it.
-    before: Vec<(PathBuf, Vec<u8>)>,
-    /// `flow.md` before the editor opened.
-    was: Vec<u8>,
-    /// The folder held nothing before this edit wrote the template.
-    fresh: bool,
-}
-
-/// What came of an edit.
-pub enum Edited {
-    /// Saved, loaded, and approved.
-    Approved(Box<Flow>),
-    /// It did not load, and why.
-    NotLoaded(Vec<NotLoaded>),
-    /// A new flow left as the template: its folder is gone again.
-    Dropped,
-    /// `flow.md` as it was: no yes given, and whether it needs one.
-    Unchanged { needs_yes: bool },
-    /// Saved and loaded, but left needing a yes: why.
-    NeedsYes(&'static str),
-}
-
-impl Edited {
-    /// The line that says it, for the CLI and the panel alike.
-    pub fn words(&self, name: &str) -> String {
-        match self {
-            Edited::Approved(_) => format!("{name} approved"),
-            Edited::NotLoaded(said) => match said.first() {
-                Some(n) => format!("not loaded: {n}"),
-                None => format!("{name} did not load"),
-            },
-            Edited::Dropped => format!("{name} left as the template: not kept"),
-            Edited::Unchanged { needs_yes: false } => "flow.md unchanged: no yes given".into(),
-            Edited::Unchanged { needs_yes: true } => {
-                format!("flow.md unchanged: no yes given · {name} needs one: rl flow approve {name}")
-            }
-            Edited::NeedsYes(why) => format!("{name} needs a yes: {why}; look, then rl flow approve {name}"),
-        }
-    }
-}
-
-/// A flow's `flow.md`, for an editor, and its folder as it is: a new one starts from a template.
-pub fn start_edit(home: &Home, name: &str) -> Result<Editing> {
-    if !valid_name(name) {
-        bail!("`{name}` is not a flow name; use lowercase letters, digits and dashes");
-    }
-    let dir = home.flow_dir(name);
-    let file = dir.join("flow.md");
-    let fresh = folder_files(&dir)?.is_empty();
-    if !file.exists() {
-        std::fs::create_dir_all(&dir)?;
-        std::fs::write(&file, TEMPLATE)?;
-    }
-    Ok(Editing {
-        name: name.to_string(),
-        before: folder_files(&dir)?,
-        was: std::fs::read(&file)?,
-        file,
-        fresh,
-    })
-}
-
-/// Back from the editor: every flow read again, and the one edited said yes to only when
-/// `flow.md` was saved changed, the folder before it had its yes (or held nothing), and nothing
-/// else in it changed meanwhile — the yes is to exactly that version, by its hash. A new flow
-/// left as the template is not kept.
-pub async fn finish_edit(rpc: &mut Client, home: &Home, e: Editing) -> Result<(Edited, Reloaded)> {
-    let now = std::fs::read(&e.file).ok();
-    let untouched = now.as_deref() == Some(e.was.as_slice());
-    if drop_template(home, &e)? {
-        return Ok((Edited::Dropped, rpc.call::<FlowReload>(()).await?));
-    }
-    let reloaded = rpc.call::<FlowReload>(()).await?;
-    let mine: Vec<NotLoaded> = reloaded
-        .not_loaded
-        .iter()
-        .filter(|n| n.flow == e.name)
-        .cloned()
-        .collect();
-    if !mine.is_empty() {
-        return Ok((Edited::NotLoaded(mine), reloaded));
-    }
-    let flows = rpc.call::<FlowList>(FlowFilter { all: false }).await?;
-    let Some(flow) = flows.into_iter().find(|f| f.name == e.name) else {
-        return Ok((Edited::NotLoaded(Vec::new()), reloaded));
-    };
-    let Some(now) = now.filter(|_| !untouched) else {
-        let needs_yes = !flow.approved();
-        return Ok((Edited::Unchanged { needs_yes }, reloaded));
-    };
-    let had_yes = e.fresh || flow.approved_hash.as_deref() == Some(hash::folder(&e.before).as_str());
-    if !had_yes {
-        return Ok((Edited::NeedsYes("its folder changed since its last yes"), reloaded));
-    }
-    let mut edited = e.before;
-    edited.retain(|(p, _)| p != Path::new("flow.md"));
-    edited.push((PathBuf::from("flow.md"), now));
-    let hash = hash::folder(&edited);
-    if flow.hash != hash {
-        let why = "something else in its folder changed while flow.md was open";
-        return Ok((Edited::NeedsYes(why), reloaded));
-    }
-    let f = rpc.call::<FlowApprove>(FlowApproval { name: e.name, hash }).await?;
-    Ok((Edited::Approved(Box::new(f)), reloaded))
-}
-
-/// Drops a new flow's template left as it was, with nothing added beside it: `flow.md` goes, and
-/// the folder too once nothing else is in it — what a firing left in `runs/`, or anything the
-/// hash passes over, stays. Whether it was dropped.
-pub fn drop_template(home: &Home, e: &Editing) -> Result<bool> {
-    let dir = home.flow_dir(&e.name);
-    let untouched = std::fs::read(&e.file).is_ok_and(|now| now == e.was);
-    if !(e.fresh && untouched && folder_files(&dir)? == e.before) {
-        return Ok(false);
-    }
-    std::fs::remove_file(&e.file)?;
-    // Not empty: something not the edit's is there, and stays.
-    let _ = std::fs::remove_dir(&dir);
-    Ok(true)
-}
-
-/// A flow's folder as its hash reads it; an empty one when there is none.
-fn folder_files(dir: &Path) -> Result<Vec<(PathBuf, Vec<u8>)>> {
-    match rl_core::folder::read(dir) {
-        Ok(f) => Ok(f.files),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
-        Err(e) => Err(anyhow::Error::new(e).context(format!("reading {}", dir.display()))),
-    }
 }
 
 /// `NAME HASH STATUS WHEN LAST IN` for one flow, and its latest firing if any.
