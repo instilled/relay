@@ -21,6 +21,8 @@ mod complete;
 mod events;
 mod firings;
 #[cfg(test)]
+mod flow_new_tests;
+#[cfg(test)]
 mod flow_tests;
 pub(crate) mod flows;
 pub mod form;
@@ -28,6 +30,7 @@ mod graph;
 mod input;
 mod line;
 mod mark;
+mod new_flow;
 mod palette;
 mod pane;
 mod query;
@@ -39,11 +42,13 @@ mod screen;
 mod setup;
 mod shortcuts;
 mod term;
+mod tested;
 mod theme;
 
 use crate::attach::client_name;
 use crate::catchup::heads;
 use crate::client::Client;
+use crate::context::Want;
 use anyhow::Result;
 use crossterm::event::{
     DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event, EventStream, KeyCode,
@@ -170,6 +175,9 @@ enum Mode {
         runs: u32,
         calls: u32,
     },
+    /// A flow the assistant drafted, in the pane: `enter` writes it and says yes, `e` opens it in
+    /// `$EDITOR` first, `esc` lets it go.
+    Draft(Box<new_flow::Drafted>),
 }
 
 /// A name being changed in place: the row it is on, what it is the name
@@ -241,7 +249,9 @@ impl Cands {
 struct Asking {
     words: String,
     folder: PathBuf,
-    task: tokio::task::JoinHandle<Result<(crate::interpret::Draft, rl_proto::methods::AssistantOutput)>>,
+    /// What was asked for: whatever fits the words, or a flow by name.
+    want: crate::context::Want,
+    task: tokio::task::JoinHandle<Result<(crate::interpret::Answer, rl_proto::methods::AssistantOutput)>>,
 }
 
 /// A run, a flow, a project or everything being summarised, until the
@@ -293,6 +303,10 @@ struct App {
     /// What the last `/reload` did not load, when it was more than the flash
     /// has room for: listed in the pane until the next key.
     reload_list: Option<Vec<NotLoaded>>,
+    /// What `/flow test` found, as lines, until the next key.
+    tested: Option<Vec<String>>,
+    /// A flow drafted while the keys were another's: shown by `/flow draft`.
+    parked: Option<new_flow::Parked>,
     /// The wiring, fetched while the graph is up.
     graph: Option<rl_proto::graph::Graph>,
     /// The views gone through to reach the one that is up, the list first:
@@ -1149,6 +1163,8 @@ impl App {
             importing: false,
             not_loaded: Vec::new(),
             reload_list: None,
+            tested: None,
+            parked: None,
             asking: None,
             summary: None,
             summarising: None,
@@ -1208,7 +1224,7 @@ impl App {
                                 Ok(()) => self.edited(editing).await,
                                 Err(e) => {
                                     // However the editor ends, a new flow's template is not left behind.
-                                    match crate::flow::drop_template(&self.home, &editing) {
+                                    match crate::flow::drop_new(&self.home, &editing, true) {
                                         Err(left) => self.say(format!("{e:#}; {left:#}")),
                                         Ok(_) => self.say(format!("{e:#}")),
                                     }
@@ -3145,7 +3161,11 @@ impl App {
                     .await
                     .map(|_| format!("{name} approved"))
             }
-            _ => return self.say(format!("/flow {verb}? run, pause, resume, approve, edit or reload")),
+            _ => {
+                return self.say(format!(
+                    "/flow {verb}? run, pause, resume, approve, edit, new, test or reload"
+                ));
+            }
         };
         match done {
             Ok(said) => {
@@ -3176,11 +3196,16 @@ impl App {
 
     /// Back from the editor: every flow read again, and the one edited said
     /// yes to only as `rl flow edit` gives it — saved, loaded, and no more
-    /// than the edit in it; else why not.
+    /// than the edit in it; else why not. A new flow left as the template is taken away first.
     async fn edited(&mut self, editing: crate::flow::Editing) {
         let name = editing.name.clone();
-        match crate::flow::finish_edit(&mut self.rpc, &self.home, editing).await {
-            Ok((edited, _)) => self.say(edited.words(&name)),
+        let said = match crate::flow::drop_new(&self.home, &editing, false) {
+            Ok(true) => Ok(crate::flow::Edited::Dropped),
+            Ok(false) => crate::flow::finish_edit(&mut self.rpc, editing).await.map(|(e, _)| e),
+            Err(e) => Err(e),
+        };
+        match said {
+            Ok(edited) => self.say(edited.words(&name)),
             Err(e) => self.say(format!("edit {name}: {e:#}")),
         }
         self.refresh().await;
@@ -3191,20 +3216,27 @@ impl App {
     async fn flow_command(&mut self, arg: &str) {
         let mut words = arg.split_whitespace();
         let verb = words.next().unwrap_or("");
+        if verb == "new" {
+            let rest: Vec<&str> = words.collect();
+            return self.new_flow(&rest);
+        }
         let named = words.next().map(str::to_string);
         if verb == "reload" {
             return self.reload_flows().await;
         }
-        if !matches!(verb, "run" | "pause" | "resume" | "approve" | "edit") {
-            return self.say("/flow run|pause|resume|approve|edit|reload [name]");
+        if verb == "draft" {
+            return self.show_parked();
+        }
+        if !matches!(verb, "run" | "pause" | "resume" | "approve" | "edit" | "test") {
+            return self.say("/flow run|pause|resume|approve|edit|new|test|draft|reload [name]");
         }
         let Some(name) = named.or_else(|| self.flow_here()) else {
             return self.say(format!("/flow {verb} which? a flow's row, its node, or its name"));
         };
-        if verb == "edit" {
-            self.edit_flow(&name);
-        } else {
-            self.flow_act(verb, name).await;
+        match verb {
+            "edit" => self.edit_flow(&name),
+            "test" => self.test_flow(name).await,
+            _ => self.flow_act(verb, name).await,
         }
     }
 
@@ -3753,27 +3785,43 @@ impl App {
 
     /// `enter` on the ask line: the words go to the assistant as a run; the
     /// panel stays live and the answer comes back through the main loop.
-    fn ask(&mut self, words: String) {
+    fn ask(&mut self, words: String, want: crate::context::Want) {
         if words.trim().is_empty() {
             return;
         }
         let folder = self.folder_here();
         let home = self.home.clone();
-        let (w, f) = (words.clone(), folder.clone());
-        let task = tokio::spawn(async move { crate::interpret::ask(&home, &f, &w).await });
-        self.asking = Some(Asking { words, folder, task });
+        let (w, f, wanted) = (words.clone(), folder.clone(), want.clone());
+        let task = tokio::spawn(async move { crate::interpret::ask(&home, &f, &w, &wanted).await });
+        self.asking = Some(Asking {
+            words,
+            folder,
+            want,
+            task,
+        });
     }
 
     async fn answered(
         &mut self,
         answer: std::result::Result<
-            Result<(crate::interpret::Draft, rl_proto::methods::AssistantOutput)>,
+            Result<(crate::interpret::Answer, rl_proto::methods::AssistantOutput)>,
             tokio::task::JoinError,
         >,
     ) {
         let Some(asking) = self.asking.take() else { return };
         match answer {
-            Ok(Ok((draft, out))) => {
+            Ok(Ok((crate::interpret::Answer::Run(_), out))) if matches!(asking.want, Want::Flow { .. }) => self.say(
+                format!("asked for a flow; {} answered a run (run {})", out.agent, out.run),
+            ),
+            Ok(Ok((crate::interpret::Answer::Flow(d), out))) => {
+                // Asked for a flow by name, the person's name wins the draft's.
+                let name = match asking.want {
+                    Want::Flow { name } => Some(name),
+                    Want::Any => d.name,
+                };
+                self.drafted(name, d.text, out.agent);
+            }
+            Ok(Ok((crate::interpret::Answer::Run(draft), out))) => {
                 let form = crate::interpret::form_of(&draft, &asking.folder)
                     .with_folders(&self.names.paths())
                     .with_agents(&self.agents);
@@ -4026,6 +4074,7 @@ impl App {
         self.flash = None;
         // Like the flash, the list of what a reload did not load lasts one key.
         self.reload_list = None;
+        self.tested = None;
         // A destructive key stays armed only until the very next key: its own
         // second press acts, anything else disarms it. (ctrl-x/ctrl-c re-check
         // and re-arm themselves in `key_list`.)
@@ -4154,6 +4203,10 @@ impl App {
                     Act::Cancel => {}
                     Act::Save => self.save_form(f, area).await,
                 }
+                return Ok(());
+            }
+            Mode::Draft(d) => {
+                self.draft_key(d, k.code).await;
                 return Ok(());
             }
             // `^h` and `esc` are the shortcuts' first, and the name stays; `?`
@@ -4719,7 +4772,7 @@ impl App {
                     self.say("still asking; /stop on its run");
                 } else {
                     self.line.clear();
-                    self.ask(words);
+                    self.ask(words, Want::Any);
                 }
             }
         }
@@ -5006,7 +5059,7 @@ impl App {
                 } else if self.asking.is_some() {
                     self.say("still asking; /stop on its run");
                 } else {
-                    self.ask(arg);
+                    self.ask(arg, Want::Any);
                 }
             }
             palette::Cmd::Filter => {
@@ -5666,7 +5719,7 @@ impl App {
         };
         if plan.boxes.is_empty() {
             let msg = if self.filter.is_empty() {
-                " nothing wired yet · /flow edit <name> writes a flow"
+                " nothing wired yet · /flow new <name> writes a flow"
             } else {
                 " nothing matches"
             };
@@ -5838,6 +5891,16 @@ impl App {
             return;
         }
         let now = Timestamp::now();
+        // A draft, until it is written or let go.
+        if let Mode::Draft(d) = &self.mode {
+            return d.draw(f, area);
+        }
+        // What `/flow test` found, until the next key.
+        if let Some(lines) = &self.tested {
+            let lines: Vec<Line> = lines.iter().map(|l| Line::raw(format!(" {l}"))).collect();
+            f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
+            return;
+        }
         // What a reload just did not load, when there was more than the flash
         // could say: whose, which file and line, and why, until the next key.
         if let Some(list) = &self.reload_list {
@@ -6023,6 +6086,14 @@ impl App {
                 } else {
                     "enter save · tab next field · esc cancel".into()
                 };
+            }
+            Mode::Draft(d) => {
+                if let Some((m, at)) = &self.flash
+                    && at.elapsed() < FLASH
+                {
+                    return m.clone();
+                }
+                return d.hint();
             }
             Mode::Rename(_) => {
                 if let Some((m, at)) = &self.flash
@@ -6794,7 +6865,7 @@ mod tests {
     /// What a test panel's daemon is told beyond `panel()`'s.
     #[derive(Default)]
     struct Setup {
-        /// More of `config.yaml`, after `assistants: summary: fakeai`.
+        /// More of `config.yaml`, after `assistants: {summary: fakeai, interpret: fakeai}`.
         config: &'static str,
         /// `assistants.summary` left out: the first agent here would answer.
         unnamed: bool,
@@ -6897,10 +6968,11 @@ mod tests {
         std::fs::write(home.detect_dir().join("fakeai.yaml"), profile).unwrap();
         std::fs::write(
             home.config_file(),
+            // The interpreter is always `fakeai`: a real `claude` on the PATH is never picked.
             if set.unnamed {
-                set.config.to_string()
+                format!("assistants:\n  interpret: fakeai\n{}", set.config)
             } else {
-                format!("assistants:\n  summary: fakeai\n{}", set.config)
+                format!("assistants:\n  summary: fakeai\n  interpret: fakeai\n{}", set.config)
             },
         )
         .unwrap();
@@ -8642,7 +8714,10 @@ mod tests {
         assert!(!nightly(&app).paused);
 
         run(&mut app, "/flow now").await;
-        assert_eq!(said(&app), "/flow run|pause|resume|approve|edit|reload [name]");
+        assert_eq!(
+            said(&app),
+            "/flow run|pause|resume|approve|edit|new|test|draft|reload [name]"
+        );
         // Its `flow.md` waits for the screen to be given back.
         run(&mut app, "/flow edit").await;
         let home = rl_core::Home::at(tmp.path().join("h"));

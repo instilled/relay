@@ -394,8 +394,7 @@ impl Flows {
         Ok(spec)
     }
 
-    /// Where a step runs: its `in`, else the flow's; with neither, where an `on` firing's
-    /// event happened; else the Relay home.
+    /// Where a step of `firing` runs ([`where_runs`]): only an `on` firing's event counts.
     pub(super) fn cwd(
         &self,
         def: &FlowDef,
@@ -403,13 +402,8 @@ impl Flows {
         firing: &Firing,
         event: Option<&(Event, Option<Run>)>,
     ) -> PathBuf {
-        if let Some(p) = step.in_.as_deref().or(def.in_.as_deref()) {
-            return expand_home(p);
-        }
-        event
-            .filter(|_| firing.trigger == "on")
-            .and_then(|(e, run)| event_folder(e, run.as_ref()))
-            .unwrap_or_else(|| self.home.path().to_path_buf())
+        let event = event.filter(|_| firing.trigger == "on").map(|(e, r)| (e, r.as_ref()));
+        where_runs(def, step, event, self.home.path())
     }
 
     /// One of the flow's own events, in its `in` (as the project is registered: canonical) or
@@ -559,6 +553,17 @@ fn filled(action: &Action, dir: &Path, facts: &dyn Lookup) -> Result<Action> {
         }
     }
     Ok(a)
+}
+
+/// Where a step runs: its `in`, else the flow's; with neither, where `event` (an `on` firing's)
+/// happened; else the Relay home.
+pub(super) fn where_runs(def: &FlowDef, step: &Step, event: Option<(&Event, Option<&Run>)>, home: &Path) -> PathBuf {
+    if let Some(p) = step.in_.as_deref().or(def.in_.as_deref()) {
+        return expand_home(p);
+    }
+    event
+        .and_then(|(e, run)| event_folder(e, run))
+        .unwrap_or_else(|| home.to_path_buf())
 }
 
 /// The folder an event happened in: the folder its run ran in, while that is

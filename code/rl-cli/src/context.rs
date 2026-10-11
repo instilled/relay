@@ -1,7 +1,9 @@
-//! The context pack: what an assistant is told before it drafts a run from
-//! plain words. Built from the code — the event kinds, `rl --help` — so it
+//! The context pack: what an assistant is told before it drafts a run, or a
+//! flow, from plain words. Built from the code — the event kinds, `rl --help` — so it
 //! cannot drift from what Relay does; the prose around it is here, in one
 //! place. `rl context` prints it.
+
+mod flows;
 
 use crate::client::Client;
 use anyhow::Result;
@@ -92,8 +94,7 @@ folder. It has a title, a state (starting, working, idle, needs you, blocked, st
 failed, stopped), tags, and a cause (by hand, a flow's step, a decision).
 - folder: a directory Relay knows; what `in` names.
 - flow: work that starts without the person — on time, on an event, or by hand — as steps, \
-written in ~/.relay/flows/<name>/flow.md.
-  A flow is not drafted here: the person writes one with `rl flow edit <name>`.
+written in ~/.relay/flows/<name>/flow.md (Flows, below, says what one holds).
 - question: something a run or a flow asks the person. Its options are answers; an option \
 can start a run when chosen.
 - agent: an agent CLI (see `agents` below). A `run` line that starts with an agent's name is \
@@ -150,31 +151,74 @@ pub fn events() -> String {
     s
 }
 
-pub fn contract() -> &'static str {
-    "\
-Answer with exactly one YAML document and nothing around it: no prose, no code fence.
-The first key is `kind`; the rest are the fields of that kind, and only those.
-
-kind: run          # something to do now, once
-in: <folder>       # one of the folders listed under Here, or the current one
-run: <a shell line, or an agent's name followed by its prompt>
-title: <a few words, optional>
-
-Prefer the folder the words were typed in. Prefer a shell line for one command, an agent for \
-work that needs judgement. Never invent a folder, an event kind, or a field.
-"
+/// What the person asked the assistant for: whatever fits the words, or a flow by this name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Want {
+    Any,
+    Flow { name: String },
 }
 
-/// The whole pack, in the order an assistant reads it.
-pub fn render(help: &str, here: &Here) -> String {
+/// The answer's shapes, indented so an echo of them is never read as one, and what to prefer.
+pub fn contract(want: &Want) -> String {
+    // Not `"\` and a new line: that would eat the first line's indent.
+    let run = "  kind: run          # something to do now, once
+  in: <folder>       # one of the folders listed under Here, or the current one
+  run: <a shell line, or an agent's name followed by its prompt>
+  title: <a few words, optional>
+";
+    let flow = |name: &str| {
+        format!(
+            "  kind: flow         # work that starts without the person: on time, on an event, or by hand
+  name: {name}
+  ---
+  <its frontmatter, as Flows says>
+  ---
+  <a line or two on what it does>
+
+  ## <each agent step>
+  <its prompt>
+"
+        )
+    };
+    let after = "Write every line of the answer from the start of the line: the shapes above are \
+indented only to set them apart. A flow is flow.md alone: all after `name:` is written to \
+~/.relay/flows/<name>/flow.md as it is. It may run commands on this machine and agents, never a \
+script of its own — it has none, and you cannot add one; `rl flow new <name> --from <template>` \
+is how the person starts from one Relay ships. Never invent a folder, an event kind, a key or a \
+field.\n";
+    match want {
+        Want::Any => format!(
+            "Answer with one run or one flow, and nothing around it: no prose, no code fence. Its \
+first line is its `kind`.\n\n{run}\n{}\n{after}\nPrefer a run for something to do now, once; a \
+flow for something to do again, later, or when something happens. Prefer the folder the words \
+were typed in. Prefer a shell line for one command, an agent for work that needs judgement.\n",
+            flow("<a new flow's name: a-z, 0-9 and ->")
+        ),
+        Want::Flow { name } => format!(
+            "The person asked for a flow named `{name}`. Answer with it, and nothing around it: no \
+prose, no code fence.\n\n{}\n{after}",
+            flow(name)
+        ),
+    }
+}
+
+/// The whole pack, in the order an assistant reads it, for what is wanted.
+pub fn render(help: &str, here: &Here, want: &Want) -> String {
     let mut s = String::new();
-    s.push_str(
+    let drafting = match want {
+        Want::Any => "one run, or one flow,".to_string(),
+        Want::Flow { name } => format!("the flow `{name}`"),
+    };
+    let _ = write!(
+        s,
         "# Relay, for an assistant\n\nRelay keeps a person's agents and long-running work alive, and starts \
-what they wrote down to start on its own. You are drafting one run from what they typed; \
-they will read your draft and press enter, or not. Be exact and short.\n\n",
+what they wrote down to start on its own. You are drafting {drafting} from what they typed; \
+they will read your draft and press enter, or not. Be exact and short.\n\n"
     );
     s.push_str("## Words\n\n");
     s.push_str(vocabulary());
+    s.push_str("\n## Flows\n\n");
+    s.push_str(&flows::section());
     s.push_str("\n## Events (what a flow's `on` can take)\n\n");
     s.push_str(&events());
     s.push_str("\n## The rl command line\n\n```\n");
@@ -211,7 +255,7 @@ they will read your draft and press enter, or not. Be exact and short.\n\n",
         }
     );
     s.push_str("\n## Answer\n\n");
-    s.push_str(contract());
+    s.push_str(&contract(want));
     s
 }
 
@@ -245,13 +289,22 @@ mod tests {
             ],
             agents: vec!["claude".into()],
         };
-        let text = render("rl [OPTIONS] <COMMAND>", &here);
+        let text = render("rl [OPTIONS] <COMMAND>", &here, &Want::Any);
         let order = [
             "# Relay, for an assistant",
             "## Words",
             "- flow: ",
             "~/.relay/flows/<name>/flow.md",
-            "`rl flow edit <name>`",
+            "## Flows",
+            "### The frontmatter",
+            "- when: ",
+            "### A step",
+            "- after: ",
+            "### if:",
+            "### Placeholders",
+            "### What a step leaves, and starts with",
+            "### Templates",
+            "### An example",
             "## Events",
             "- run.failed:",
             "## The rl command line",
@@ -263,7 +316,7 @@ mod tests {
             "- notify · on run.failed · —",
             "agents on this machine: claude",
             "## Answer",
-            "kind: run",
+            "  kind: run",
         ];
         let mut at = 0;
         for needle in order {
@@ -272,8 +325,27 @@ mod tests {
                 .unwrap_or_else(|| panic!("{needle} missing or out of order"));
             at += i;
         }
-        assert_eq!(text.matches("kind: ").count(), 1, "the answer is a run, and only a run");
+        assert!(
+            !text.lines().any(|l| l.starts_with("kind:")),
+            "the shapes are indented: an echo of the pack is never read as an answer"
+        );
         let ask = ask(&text, "run the tests");
         assert!(ask.starts_with(&text) && ask.ends_with("## The words\n\nrun the tests\n"));
+    }
+
+    #[test]
+    fn the_answer_asked_for_is_the_one_shown() {
+        let here = Here::default();
+        let any = render("rl", &here, &Want::Any);
+        assert!(any.contains("  kind: run ") && any.contains("  kind: flow "), "{any}");
+        assert!(any.contains("You are drafting one run, or one flow,"));
+        assert!(!any.contains("A flow is not drafted here"), "it is now");
+        let flow = render("rl", &here, &Want::Flow { name: "brief".into() });
+        assert!(
+            flow.contains("a flow named `brief`") && flow.contains("  name: brief\n"),
+            "{flow}"
+        );
+        assert!(flow.contains("You are drafting the flow `brief`"));
+        assert!(!flow.contains("kind: run"), "a flow was asked for");
     }
 }

@@ -15,6 +15,20 @@ pub trait Lookup {
     fn get(&self, r: &Ref) -> Option<String>;
 }
 
+/// What `{event.<name>}` takes besides `data.<field>`: the event's own, and the run it is about.
+/// The daemon fills each (`flows::triggers::vars`), and a test holds it to this list.
+pub const EVENT_NAMES: &[&str] = &[
+    "kind",
+    "summary",
+    "group",
+    "workspace",
+    "run",
+    "cwd",
+    "title",
+    "cause",
+    "cli",
+];
+
 /// The references in `text`: `{` + head + `.` + rest + `}`, head `[a-z0-9-]+`, rest `[a-z0-9_.-]+`.
 /// Anything else in braces (`{print $1}`, `{}`) is not one.
 pub fn refs(text: &str) -> Vec<Ref> {

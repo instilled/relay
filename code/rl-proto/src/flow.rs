@@ -24,7 +24,9 @@
 //! lists of pairs in the order they are written ([`ordered`]).
 
 mod outcome;
+mod preview;
 pub use outcome::{FiringRef, FlowOutcome, Outcome};
+pub use preview::{EventTest, FlowTest, FlowTestParams, Going, Held, Runs, StepTest, Tested};
 
 use crate::action::{Action, action_struct};
 use crate::methods::Method;

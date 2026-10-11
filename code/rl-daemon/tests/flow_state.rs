@@ -341,3 +341,23 @@ async fn rl_flow_state_adds_nothing_to_a_steps_out() {
     assert_eq!(out, "[]", "a's out is empty");
     h.stop().await;
 }
+
+#[tokio::test]
+async fn a_step_starts_with_every_variable_the_pack_teaches() {
+    let tmp = tempfile::tempdir().unwrap();
+    let md = "---\nsteps:\n  a:\n    run: 'env > \"$RELAY_WORK/env\"'\n---\n";
+    let Some((h, mut c)) = start(tmp.path(), "envs", md).await else {
+        return;
+    };
+    let fired = approve_and_run(&mut c, "envs").await;
+    let f = wait_firing(&mut c, "envs", ended).await;
+    assert_eq!(f.status, FiringStatus::Done, "{f:?}");
+    let env = std::fs::read_to_string(h.home.firing_dir("envs", &fired.id).join("env")).unwrap();
+    for (name, _) in rl_flow::state::STEP_ENV {
+        assert!(
+            env.lines().any(|l| l.starts_with(&format!("{name}="))),
+            "{name} is not set:\n{env}"
+        );
+    }
+    h.stop().await;
+}

@@ -145,6 +145,7 @@ fn place_keys(at: Place) -> Vec<Key> {
             key("/flow pause", ""),
             key("/flow approve", ""),
             key("/flow edit", ""),
+            key("/flow test", ""),
             cmd(Cmd::Graph, "back"),
             key("esc", "back"),
         ],
@@ -317,7 +318,7 @@ mod tests {
         assert!(events.contains("enter its run or flow"), "{events}");
         assert!(events.contains("^g its flow's wiring"), "{events}");
         assert!(
-            graph.contains("/flow run · /flow pause · /flow approve · /flow edit"),
+            graph.contains("/flow run · /flow pause · /flow approve · /flow edit · /flow test"),
             "{graph}"
         );
         assert!(events.contains("^f kind: in: by:"), "{events}");

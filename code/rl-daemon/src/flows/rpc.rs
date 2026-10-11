@@ -2,6 +2,7 @@
 
 use super::engine::{Fired, Refused};
 use super::outcome;
+use super::preview::Untested;
 use super::state::Refusal;
 use crate::router::Router;
 use crate::server::Daemon;
@@ -9,7 +10,7 @@ use rl_ledger::{firings, flows};
 use rl_proto::flow::{
     FiringFilter, FiringRef, Flow, FlowApproval, FlowApprove, FlowErrors, FlowFilter, FlowFirings, FlowList, FlowName,
     FlowOutcome, FlowPause, FlowReload, FlowResume, FlowRun, FlowStateGet, FlowStateRead, FlowStateSet, FlowStateWrite,
-    StateFile, StateName, StateValues,
+    FlowTest, FlowTestParams, StateFile, StateName, StateValues,
 };
 use rl_proto::rpc::RpcError;
 
@@ -71,6 +72,16 @@ pub fn register(r: &mut Router<Daemon>) {
                 None => internal(e),
             }),
         }
+    });
+    r.register::<FlowTest, _, _>(|d, FlowTestParams { name, event }| async move {
+        d.flows
+            .test(&name, event)
+            .await
+            .map_err(|e| match e.downcast_ref::<Untested>() {
+                Some(Untested::Missing) => missing(&d, &name),
+                Some(u @ Untested::NoEvent(_)) => RpcError::invalid_params(u.to_string()),
+                None => internal(e),
+            })
     });
     r.register::<FlowStateSet, _, _>(|d, p: StateValues| async move {
         d.flows.state_set(&p.run, p.values).await.map_err(refused)
