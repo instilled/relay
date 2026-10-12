@@ -330,11 +330,15 @@ pub fn flow_lines(
         }
     };
     let (ok, failed, stopped) = (j.ok(), j.failed(), j.stopped());
-    let mut tally = vec![format!(
-        "{} run{}",
-        j.runs.len(),
-        if j.runs.len() == 1 { "" } else { "s" }
-    )];
+    // No runs here is not never having fired: they may be archived, hidden,
+    // or older than the digest goes back.
+    let fired = shown.is_some() || flow.is_some_and(|f| f.last_fired_at.is_some());
+    let mut tally = vec![match j.runs.len() {
+        0 if fired => "none on the list".to_string(),
+        0 => "never fired".to_string(),
+        1 => "1 run".to_string(),
+        n => format!("{n} runs"),
+    }];
     if ok > 0 {
         tally.push(format!("{ok} ok"));
     }
@@ -345,13 +349,14 @@ pub fn flow_lines(
         tally.push(format!("{stopped} stopped"));
     }
     lines.push(Line::from(vec![
-        Span::raw(" lately   ").dim(),
+        // All the runs the digest has of it, not a day's.
+        Span::raw(" history  ").dim(),
         Span::raw(tally.join(" · ")),
     ]));
     // What the last firing raised, wrapping in the value column.
-    if !j.last().emitted.is_empty() {
+    if let Some(last) = j.last().filter(|i| !i.emitted.is_empty()) {
         let value = width.saturating_sub(VALUE_COL + 1).max(20);
-        for (i, t) in wrap(&signals(&j.last().emitted), value).into_iter().enumerate() {
+        for (i, t) in wrap(&signals(&last.emitted), value).into_iter().enumerate() {
             lines.push(fact(if i == 0 { "signals" } else { "" }, t));
         }
     }
@@ -364,9 +369,11 @@ pub fn flow_lines(
             _ => Span::raw("·"),
         })
         .collect();
-    let mut row = vec![Span::raw("          ")];
-    row.extend(spans);
-    lines.push(Line::from(row));
+    if !spans.is_empty() {
+        let mut row = vec![Span::raw("          ")];
+        row.extend(spans);
+        lines.push(Line::from(row));
+    }
     lines.extend(summary_section(summary, width, now));
     match fp.filter(|p| !p.firings.is_empty()) {
         // Its last firings lead with their own blank line.
