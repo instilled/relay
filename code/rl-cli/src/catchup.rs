@@ -75,7 +75,7 @@ impl<'a> CatchUp<'a> {
     /// The list's rows for the stretch, grouped as the list groups them; what
     /// needs you first, projects that need you first, a project with nothing
     /// new keeps an empty `rows`.
-    pub fn build(d: &'a Digest, cx: &Context<'_>) -> Self {
+    pub fn build(d: &'a Digest, cx: &Context<'_, 'a>) -> Self {
         #[cfg(test)]
         BUILT.with(|b| b.set(b.get() + 1));
         // The whole list, whatever lens it is in now but narrowed by its
@@ -105,16 +105,30 @@ impl<'a> CatchUp<'a> {
         // Questions, and runs pinned or come through, stand above every
         // header on the list; here they go under their project's.
         let mut loose: Vec<Row<'a>> = Vec::new();
+        // Headers the list has only for flows that have not run, outside
+        // every registered folder: nothing happened there.
+        let mut unfired: HashSet<usize> = HashSet::new();
         for row in rows::build(d, &list) {
             if let (false, Some(p), Some(r)) = (keyed, projects.last_mut(), run_of(&row)) {
                 p.key = rows::group_key(r, cx.names, cx.flows);
                 keyed = true;
+            }
+            let quiet = match &row {
+                Row::Group(_) => true,
+                Row::Flow(f) => f.runs.is_empty(),
+                Row::Question(_) | Row::Run(_) => false,
+            };
+            if !quiet && let Some(last) = projects.len().checked_sub(1) {
+                unfired.remove(&last);
             }
             let row = match row {
                 Row::Group(mut h) => {
                     // Its flows' times from now, not from when you left.
                     if !h.is_everywhere() {
                         h.flows = rows::chips(cx.flows, Some(&h.workspace), cx.now);
+                    }
+                    if cx.names.registered(&h.workspace).is_none() {
+                        unfired.insert(projects.len());
                     }
                     let key = h.workspace.to_string_lossy().into_owned();
                     projects.push(Project::new(h, key));
@@ -140,6 +154,9 @@ impl<'a> CatchUp<'a> {
                     } else {
                         f.runs = stretch;
                     }
+                    // It tells what its runs did in the stretch, not how the
+                    // flow stands now — and so reads the same kept (`over`).
+                    f.flow = None;
                     Row::Flow(f)
                 }
             };
@@ -172,6 +189,11 @@ impl<'a> CatchUp<'a> {
             };
             projects[p].rows.push(row);
         }
+        let mut n = 0;
+        projects.retain(|p| {
+            n += 1;
+            !(unfired.contains(&(n - 1)) && p.rows.is_empty())
+        });
         let ran = |i: &DigestItem| i.at >= since;
         let failed = |i: &DigestItem| ran(i) && i.run.state == RunState::Failed;
         for p in &mut projects {
@@ -185,7 +207,7 @@ impl<'a> CatchUp<'a> {
                         p.failed += usize::from(failed(i));
                     }
                     Row::Flow(f) => {
-                        p.need += usize::from(f.last().run.state == RunState::Failed);
+                        p.need += usize::from(f.failed_last());
                         p.ran += f.runs.iter().filter(|i| ran(i)).count();
                         p.failed += f.runs.iter().filter(|i| failed(i)).count();
                     }
@@ -207,7 +229,7 @@ impl<'a> CatchUp<'a> {
     pub fn of(
         d: &'a Digest,
         workspaces: impl IntoIterator<Item = (PathBuf, String)>,
-        flows: &[Flow],
+        flows: &'a [Flow],
         relay: Option<&Path>,
         now: Timestamp,
     ) -> Self {
@@ -381,6 +403,7 @@ impl Kept {
                     runs: runs.iter().map(|n| d.items.get(*n)).collect::<Option<_>>()?,
                     when: when.clone(),
                     firing: d.firings.iter().find(|f| f.flow == *name),
+                    flow: None,
                 }),
             })
         };
@@ -586,7 +609,7 @@ pub fn text(cu: &CatchUp, top: &[String], now: Timestamp) -> String {
 /// The header a question or a run goes under where the list gives it none:
 /// its run's project — `everywhere`, a ref, or its folder — else the
 /// question's folder.
-fn head_of(d: &Digest, cx: &Context<'_>, run: Option<&Run>, ws: &Path) -> Head {
+fn head_of(d: &Digest, cx: &Context<'_, '_>, run: Option<&Run>, ws: &Path) -> Head {
     match run {
         Some(r) if rows::everywhere_run(r, cx.names, cx.flows) => Head::everywhere(),
         Some(r) => rows::head(&r.place_key(), &r.workspace, d, cx),
@@ -598,7 +621,7 @@ fn head_of(d: &Digest, cx: &Context<'_>, run: Option<&Run>, ws: &Path) -> Head {
 fn run_of<'r>(r: &'r Row) -> Option<&'r Run> {
     match r {
         Row::Run(i) => Some(&i.run),
-        Row::Flow(f) => Some(&f.last().run),
+        Row::Flow(f) => f.last().map(|i| &i.run),
         Row::Group(_) | Row::Question(_) => None,
     }
 }
@@ -619,7 +642,7 @@ fn at(r: &Row) -> Option<Timestamp> {
         Row::Group(_) => None,
         Row::Question(q) => Some(q.updated_at),
         Row::Run(i) => Some(i.at),
-        Row::Flow(f) => Some(f.last().at),
+        Row::Flow(f) => f.last().map(|i| i.at),
     }
 }
 
@@ -641,13 +664,14 @@ pub fn row_line(r: &Row, now: Timestamp) -> String {
             ago(i.at),
         ],
         Row::Flow(f) => {
-            let last = &f.last().run;
-            let mut parts = vec![format!("{} {}", f.marks(MARKS), f.name)];
-            match f.firing {
-                Some(_) => parts.push(crate::tui::flows::stands(f)),
-                None => parts.extend([rows::state_words(last.state, last.confidence), f.summary()]),
+            let mut parts = vec![format!("{} {}", f.marks(MARKS), f.name).trim_start().to_string()];
+            match (f.firing, f.last()) {
+                (None, Some(last)) => {
+                    parts.extend([rows::state_words(last.run.state, last.run.confidence), f.summary()]);
+                }
+                _ => parts.push(crate::tui::flows::stands(f, now)),
             }
-            parts.push(ago(f.last().at));
+            parts.extend(f.last().map(|i| ago(i.at)));
             parts
         }
     };
@@ -863,11 +887,13 @@ mod tests {
     }
 
     fn build<'a>(d: &'a Digest, names: &Names) -> CatchUp<'a> {
+        // The rows carry their flows, so these outlive the catch-up.
+        static FLOWS: std::sync::LazyLock<Vec<Flow>> = std::sync::LazyLock::new(flows);
         CatchUp::build(
             d,
             &Context {
                 names,
-                flows: &flows(),
+                flows: &FLOWS,
                 filter: "",
                 lens: Lens::All,
                 now: now(),

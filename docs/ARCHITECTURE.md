@@ -358,8 +358,8 @@ started; a worktree registered on its own is a project of its own, with its bran
 and, at the right edge, the tally of the flows `in` the folder (`2 flows`), with any flow that
 waits for a yes named just before it in amber (`! deploy`), and before that a red `! flows` while
 one of the folder's flows did not load (§6, **Loading and approval**). The rest of a folder's flows
-are the graph's and the project pane's to show. A flow with no `in` belongs to no project, and
-has no row of its own until it runs: the header says those on its line of notes, when there are
+are the graph's and the project pane's to show. A flow with no `in` belongs to no project: the
+header says those on its line of notes, when there are
 any — `↻ 2 everywhere` (on one line, `relay · 3 working · ↻ 2 everywhere`) — in amber when one
 waits for a yes, saying so and where to give it (`↻ 1 everywhere needs a yes · /graph`,
 `rows::everywhere`), and `flows broken` in red beside it while one of theirs, or one whose `in` is
@@ -378,7 +378,14 @@ on-call?`, `running · triage`, `failed at probe · token expired`, `done · *Mo
 thirty seconds is a row, not a screen, and it never grows into one: `→` on it (nothing typed) opens
 it to its latest firing's steps on a line under it — `probe ✓ · triage ✓ · review ?`, a failure red
 (`flows::steps_line`) — and `←` folds it again; `enter` (or `^o`) puts it in
-the pane, as on a project header. A run still going or waiting on you is never folded. The pane
+the pane, as on a project header. A run still going or waiting on you is never folded. A flow has
+its row from its yes on — on, paused, or changed since — before it ever fired: it then says what
+starts it and, on, when it fires next (`every 30m · next in 12m`, `on run.failed`, `paused · every
+30m`, `needs a yes again · every 30m`, a changed one's runs led by the same words), ranks below
+everything that has run, by name, and its pane says `never fired`. Its row keeps every run the digest
+has of it, however long ago it ended, where any other ended run leaves the list after a day
+(`rows::RECENT`). One that never had a yes has no row; a removed one keeps one only while runs of
+its own are on the list. The pane
 holds the flow: `flow · <in> · <status>`, then what starts it — a cron line read back in words
 where it can be (`hourly 08:00–18:00, Mon–Fri`), left as written where it cannot — where it runs,
 whether its folder as it is has a yes, when it fires next and when it last did, its folder, and

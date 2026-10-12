@@ -455,3 +455,54 @@ async fn flow_test_shows_what_would_fire_in_the_pane() {
     assert!(!draw_text(&mut app).contains("started nothing"));
     token.cancel();
 }
+
+#[tokio::test]
+async fn a_flow_with_a_yes_that_never_fired_is_a_row_like_any_flows() {
+    let (tmp, token, mut app, _) = panel().await;
+    flow_in(
+        &tmp,
+        &mut app,
+        "nightly",
+        "---\nwhen: every 1h\nsteps:\n  a:\n    run: echo hello\n---\n",
+    )
+    .await;
+    app.refresh().await;
+    let on_the_list = |app: &super::App| app.rows().iter().any(|r| r.key().as_deref() == Some("f:nightly"));
+    assert!(!on_the_list(&app), "no row before its yes");
+    type_in(&mut app, "/flow approve nightly").await;
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+    app.refresh().await;
+    app.select(Some("f:nightly".into()));
+    assert!(
+        app.selected_flow().is_some_and(|f| f.runs.is_empty()),
+        "its row, not run"
+    );
+    let screen = draw_text(&mut app);
+    let row = screen.lines().find(|l| l.contains("↻ nightly")).expect("its row");
+    assert!(row.contains("every 1h · next in "), "{row}");
+    assert!(!app.hints().contains("^x archives"), "{}", app.hints());
+
+    // Its pane: what starts it, and that it never fired.
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+    let screen = draw_text(&mut app);
+    assert!(screen.contains("never fired"), "{screen}");
+    // Opened with →, it has no firing's steps to show; nothing breaks.
+    press(&mut app, KeyCode::Right, KeyModifiers::NONE).await;
+    draw_text(&mut app);
+    // Nothing to archive, and it says so.
+    let flash = |app: &super::App| app.flash.as_ref().map(|(m, _)| m.clone()).unwrap_or_default();
+    press(&mut app, KeyCode::Char('x'), KeyModifiers::CONTROL).await;
+    assert_eq!(flash(&app), "nothing here to remove");
+    type_in(&mut app, "/archive").await;
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+    assert_eq!(flash(&app), "nothing to archive: nightly has not run");
+    // `/hide` puts it in the hidden lens.
+    app.select(Some("f:nightly".into()));
+    type_in(&mut app, "/hide").await;
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+    app.refresh().await;
+    assert!(!on_the_list(&app), "hidden");
+    app.lens = super::rows::Lens::Hidden;
+    assert!(on_the_list(&app), "in the hidden lens");
+    token.cancel();
+}

@@ -100,12 +100,40 @@ pub fn state_words(f: &Firing) -> String {
 
 /// Where a flow's row says it stands: where its latest firing is, and what that came to —
 /// `waiting at review · page on-call?`, `done · *Morning brief*`; with no firing known, what
-/// its last run came to.
-pub fn stands(f: &FlowRow) -> String {
-    let Some(x) = f.firing else { return f.summary() };
-    match x.outcome.as_deref().filter(|o| !o.is_empty()) {
-        Some(o) => format!("{} · {o}", state_words(x)),
-        None => state_words(x),
+/// its last run came to; before it has run, what starts it (`unfired`). Changed since its
+/// yes, it says first that it needs one again.
+pub fn stands(f: &FlowRow, now: Timestamp) -> String {
+    let said = match (f.firing, f.last()) {
+        (Some(x), _) => match x.outcome.as_deref().filter(|o| !o.is_empty()) {
+            Some(o) => format!("{} · {o}", state_words(x)),
+            None => state_words(x),
+        },
+        (None, Some(i)) => i.summary.clone(),
+        (None, None) => return f.flow.map(|x| unfired(x, now)).unwrap_or_default(),
+    };
+    match f.flow.map(Flow::status) {
+        Some(FlowStatus::NeedsApproval) => format!("{AGAIN} · {said}"),
+        _ => said,
+    }
+}
+
+/// What a flow's row leads with when it has changed since its yes.
+const AGAIN: &str = "needs a yes again";
+
+/// A flow that has not run, as its row says it: what starts it and, on,
+/// when it fires next — `every 30m · next in 12m`, `on run.failed`;
+/// `paused · every 30m`; changed since its yes, `needs a yes again · …`.
+fn unfired(f: &Flow, now: Timestamp) -> String {
+    let when = when_words(&f.when());
+    match f.status() {
+        FlowStatus::On => match f.next_at {
+            Some(t) if t > now => format!("{when} · next in {}", fmt_age(now, t)),
+            Some(_) => format!("{when} · due"),
+            None => when,
+        },
+        FlowStatus::Paused => format!("paused · {when}"),
+        FlowStatus::NeedsApproval => format!("{AGAIN} · {when}"),
+        FlowStatus::Removed => when,
     }
 }
 
@@ -349,6 +377,7 @@ mod tests {
             runs: vec![i],
             when: None,
             firing,
+            flow: None,
         }
     }
 
@@ -356,26 +385,80 @@ mod tests {
     fn a_flows_row_says_where_it_stands_and_what_it_came_to() {
         use FiringStatus as F;
         use StepStatus as S;
+        let now: Timestamp = "2026-09-10T12:00:00Z".parse().unwrap();
         let i = ran("exit 0 · 2s");
         let mut waiting = firing(
             F::Waiting,
             &[("probe", S::Done), ("triage", S::Done), ("review", S::Waiting)],
         );
         waiting.outcome = Some("page on-call?".into());
-        assert_eq!(stands(&row(&i, Some(&waiting))), "waiting at review · page on-call?");
+        assert_eq!(
+            stands(&row(&i, Some(&waiting)), now),
+            "waiting at review · page on-call?"
+        );
         let mut quiet = firing(F::Done, &[("probe", S::Done)]);
         quiet.outcome = Some(String::new());
         assert_eq!(
-            stands(&row(&i, Some(&quiet))),
+            stands(&row(&i, Some(&quiet)), now),
             "done",
             "nothing printed: no dot with nothing after"
         );
         quiet.outcome = None;
-        assert_eq!(stands(&row(&i, Some(&quiet))), "done");
+        assert_eq!(stands(&row(&i, Some(&quiet)), now), "done");
         assert_eq!(
-            stands(&row(&i, None)),
+            stands(&row(&i, None), now),
             "exit 0 · 2s",
             "no firing known: its last run's own line"
+        );
+        // Changed since its yes: it says so first, whatever it last did.
+        let changed = flow(Some("an older hash"), def(None));
+        let again = FlowRow {
+            flow: Some(&changed),
+            ..row(&i, Some(&quiet))
+        };
+        assert_eq!(stands(&again, now), "needs a yes again · done");
+    }
+
+    #[test]
+    fn a_flow_that_has_not_run_says_what_starts_it() {
+        let now: Timestamp = "2026-09-10T12:00:00Z".parse().unwrap();
+        let yes = Some("0123456789abcdef");
+        let says = |f: &Flow| {
+            stands(
+                &FlowRow {
+                    key: "f:prod-logs".into(),
+                    name: "prod-logs".into(),
+                    runs: vec![],
+                    when: None,
+                    firing: None,
+                    flow: Some(f),
+                },
+                now,
+            )
+        };
+        let on = flow(yes, def(None));
+        assert_eq!(says(&on), "at 02:30 · next in 30m");
+        let due = Flow {
+            next_at: Some("2026-09-10T11:59:00Z".parse().unwrap()),
+            ..flow(yes, def(None))
+        };
+        assert_eq!(says(&due), "at 02:30 · due");
+        // On an event only: nothing is next, what starts it is all.
+        let mut event = def(None);
+        event["trigger"] = serde_json::json!({ "when": null, "on": ["run.failed"], "filter": null });
+        let event = Flow {
+            next_at: None,
+            ..flow(yes, event)
+        };
+        assert_eq!(says(&event), "on run.failed");
+        let paused = Flow {
+            paused: true,
+            ..flow(yes, def(None))
+        };
+        assert_eq!(says(&paused), "paused · at 02:30");
+        assert_eq!(
+            says(&flow(Some("an older hash"), def(None))),
+            "needs a yes again · at 02:30"
         );
     }
 

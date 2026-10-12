@@ -13,7 +13,9 @@
 //! grows into one: its firings are in the pane. The row stands in the
 //! project the flow is `in`, wherever its runs ran; a flow with no `in`
 //! stands under `everywhere`. A run still going, or waiting on you, is never
-//! folded.
+//! folded. A flow with a yes has its row from that yes on — what starts it
+//! and when it fires next, before it ever fired — and its row keeps all the
+//! runs the digest has of it, however long ago they ended.
 //!
 //! Before all of it, the questions waiting on you, from every project, oldest
 //! first — what needs you does not hide under a project's name — then pinned
@@ -40,7 +42,8 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-/// Ended runs stay on the list this long.
+/// Ended runs stay on the list this long — but a flow's with a row of its
+/// own, which stay as long as the digest has them.
 pub const RECENT: SignedDuration = SignedDuration::from_hours(24);
 
 /// Which slice of the list you are looking at. Not exclusive: a flow's agent
@@ -507,19 +510,25 @@ pub struct FlowRow<'a> {
     pub key: String,
     pub name: String,
     /// The flow's full run history (not just what a filter happened to
-    /// match), newest first. Invariant: never empty — a `FlowRow` is always
-    /// built with at least the run that first revealed it.
+    /// match), newest first. Empty for a flow with a yes that has not run
+    /// that the digest knows of: its row is there from its yes on.
     pub runs: Vec<&'a DigestItem>,
     /// `every 30m`, `on run.failed` — when the flow is known.
     pub when: Option<String>,
     /// Its latest firing, when the digest has it.
     pub firing: Option<&'a Firing>,
+    /// The flow itself, when it is loaded: what starts it, when it fires
+    /// next, and whether it is on.
+    pub flow: Option<&'a Flow>,
 }
 
+/// Where a flow that has not run ranks: below everything that has.
+const QUIET: u8 = u8::MAX;
+
 impl<'a> FlowRow<'a> {
-    pub fn last(&self) -> &'a DigestItem {
-        debug_assert!(!self.runs.is_empty(), "FlowRow::runs must never be empty");
-        self.runs[0]
+    /// Its newest run; none before it has run.
+    pub fn last(&self) -> Option<&'a DigestItem> {
+        self.runs.first().copied()
     }
     pub fn ok(&self) -> usize {
         self.runs.iter().filter(|i| i.run.state == RunState::Finished).count()
@@ -533,15 +542,20 @@ impl<'a> FlowRow<'a> {
     pub fn unseen(&self) -> bool {
         self.runs.iter().any(|i| i.unseen)
     }
-    /// The flow ranks as its last run did.
+    /// The flow ranks as its last run did; one that has not run, quietest.
     pub fn score(&self) -> u8 {
-        rank::score(&self.last().run)
+        self.last().map_or(QUIET, |i| rank::score(&i.run))
+    }
+    /// Whether its last run failed.
+    pub fn failed_last(&self) -> bool {
+        self.last().is_some_and(|i| i.run.state == RunState::Failed)
     }
     /// What the last run came to, in its own words — `5 feedback rows to
     /// process`, or `exit 1 · 2s` where it failed. The cadence and the tally
-    /// are the pane's; the marks say how it has been going.
+    /// are the pane's; the marks say how it has been going. Nothing before
+    /// it has run.
     pub fn summary(&self) -> String {
-        self.last().summary.clone()
+        self.last().map(|i| i.summary.clone()).unwrap_or_default()
     }
     /// One mark per firing — a firing's runs share its id as their chain — oldest first, at
     /// most `n` of the newest: `·` went well, `×` a step failed, `○` one was stopped.
@@ -582,6 +596,19 @@ pub fn flow_of(r: &Run) -> Option<&str> {
 /// A flow's row key.
 pub fn flow_key(name: &str) -> String {
     format!("f:{name}")
+}
+
+/// Whether a flow has a row of its own, run or not: from its yes on — on,
+/// paused, or changed since — until it is removed.
+fn stands_on_the_list(f: &Flow) -> bool {
+    f.approved_hash.is_some() && f.removed_at.is_none()
+}
+
+/// Whether a flow's row is hidden — by its own `/hide` or its project's —
+/// by the keys `hidden_since` reads for its runs.
+fn flow_hidden(name: &str, flows: &[Flow], hidden: &[Hidden]) -> bool {
+    let keys = [head_key(&flow_group(flows, name)), flow_key(name)];
+    hidden.iter().any(|h| keys.contains(&h.key))
 }
 
 /// Workspace paths → the names they were registered under.
@@ -716,11 +743,12 @@ struct Group<'a> {
     flows: Vec<FlowRow<'a>>,
 }
 
-/// What the list is built from besides the digest.
-pub struct Context<'a> {
+/// What the list is built from besides the digest. The flows live as long
+/// as the rows (`'f`): a flow's row carries its flow.
+pub struct Context<'a, 'f> {
     pub names: &'a Names,
     /// Every flow, for where its row stands and what starts it; may be empty.
-    pub flows: &'a [Flow],
+    pub flows: &'f [Flow],
     pub filter: &'a str,
     /// Which slice of the list to show; questions ignore it.
     pub lens: Lens,
@@ -800,22 +828,33 @@ pub fn named(row: &Row, d: &Digest, names: &Names) -> Named {
             rest: vec![i.run.cli.clone().unwrap_or_default(), path(&i.run.workspace)],
             ..Named::default()
         },
-        Row::Flow(f) => {
-            let r = &f.last().run;
-            Named {
-                title: f.name.clone(),
-                project: names.group(&r.place_key()),
-                summary: f.summary(),
-                rest: vec![r.title.clone(), r.cli.clone().unwrap_or_default(), path(&r.workspace)],
-                ..Named::default()
+        Row::Flow(f) => match f.last() {
+            Some(i) => {
+                let r = &i.run;
+                Named {
+                    title: f.name.clone(),
+                    project: names.group(&r.place_key()),
+                    summary: f.summary(),
+                    rest: vec![r.title.clone(), r.cli.clone().unwrap_or_default(), path(&r.workspace)],
+                    ..Named::default()
+                }
             }
-        }
+            None => Named {
+                title: f.name.clone(),
+                project: f
+                    .flow
+                    .and_then(|x| x.folder.as_deref())
+                    .map_or_else(|| EVERYWHERE.into(), |p| names.workspace(p)),
+                summary: f.when.clone().unwrap_or_default(),
+                ..Named::default()
+            },
+        },
     }
 }
 
 /// Everything on the list, in order, narrowed to what the filter — a search,
 /// see `query` — hits.
-pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
+pub fn build<'a>(d: &'a Digest, cx: &Context<'_, 'a>) -> Vec<Row<'a>> {
     let names = cx.names;
     let now = cx.now;
     let query = Query::parse(cx.filter);
@@ -916,7 +955,10 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
             continue;
         }
         let live = !r.state.is_terminal() || i.unseen || r.ended_at.is_some_and(|t| now.duration_since(t) <= RECENT);
-        if !live {
+        // A flow with a row of its own keeps all the history the digest
+        // has of it, however old: its row is there anyway.
+        let kept = flow_of(r).is_some_and(|name| cx.flows.iter().any(|f| f.name == name && stands_on_the_list(f)));
+        if !live && !kept {
             continue;
         }
         if !cx.lens.keeps(r) {
@@ -955,6 +997,38 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
         let g = group_at(key, &workspace, &mut groups);
         groups[g].runs.push(i);
     }
+    // A flow with a yes has its row whether or not it has run — what starts
+    // it and when it fires next, before it ever did — in the lenses a flow's
+    // row is in, and hidden as its runs would be.
+    if cx.lens != Lens::Agents {
+        for f in cx.flows.iter().filter(|f| stands_on_the_list(f)) {
+            let key = flow_key(&f.name);
+            if flows_acc.iter().any(|acc| acc.key == key) || flow_hidden(&f.name, cx.flows, &d.hidden) != hidden_lens {
+                continue;
+            }
+            let (group_key, workspace) = flow_group(cx.flows, &f.name);
+            let project = if group_key == EVERYWHERE_KEY {
+                EVERYWHERE.to_string()
+            } else {
+                names.group(&group_key)
+            };
+            let hit = query.hits(&Subject {
+                text: vec![&f.name],
+                project: vec![&project, workspace.to_str().unwrap_or("")],
+                kind: vec!["flow"],
+                by: vec![&f.name],
+                ..Subject::default()
+            });
+            flows_acc.push(FlowAcc {
+                key,
+                name: f.name.clone(),
+                group_key,
+                workspace,
+                runs: Vec::new(),
+                hit,
+            });
+        }
+    }
     // Fold each flow into its group now, with its full history, but only if
     // the flow (or one of its own runs) actually matched the filter.
     for acc in flows_acc {
@@ -966,6 +1040,7 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
             key: acc.key,
             when: when_of(&acc.name),
             firing: d.firings.iter().find(|f| f.flow == acc.name),
+            flow: cx.flows.iter().find(|f| f.name == acc.name),
             name: acc.name,
             runs: acc.runs,
         });
@@ -979,8 +1054,13 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
         for f in &mut g.flows {
             f.runs.sort_by_key(|i| std::cmp::Reverse(i.at));
         }
-        g.flows
-            .sort_by(|a, b| a.score().cmp(&b.score()).then_with(|| b.last().at.cmp(&a.last().at)));
+        // One that has not run comes after those that have, by name.
+        g.flows.sort_by(|a, b| {
+            a.score()
+                .cmp(&b.score())
+                .then_with(|| b.last().map(|i| i.at).cmp(&a.last().map(|i| i.at)))
+                .then_with(|| a.name.cmp(&b.name))
+        });
     }
     // Which folders already have a line, so idle projects don't double up.
     let shown: HashSet<PathBuf> = groups.iter().map(|g| g.workspace.clone()).collect();
@@ -1011,17 +1091,17 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
             (_, true) => 1,
             _ => 2,
         };
-        let mut mixed: Vec<(u8, u8, Timestamp, Row<'a>)> = g
+        let mut mixed: Vec<(u8, u8, Option<Timestamp>, Row<'a>)> = g
             .runs
             .into_iter()
             .map(|i| {
                 let s = rank::score(&i.run);
-                (cls(s, live_shell(&i.run)), s, i.at, Row::Run(i))
+                (cls(s, live_shell(&i.run)), s, Some(i.at), Row::Run(i))
             })
             .collect();
         mixed.extend(g.flows.into_iter().map(|f| {
             let s = f.score();
-            (cls(s, false), s, f.last().at, Row::Flow(f))
+            (cls(s, false), s, f.last().map(|i| i.at), Row::Flow(f))
         }));
         mixed.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)).then_with(|| b.2.cmp(&a.2)));
         let mixed: Vec<Row<'a>> = mixed.into_iter().map(|(_, _, _, row)| row).collect();
@@ -1097,7 +1177,7 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
 
 /// A project's header: the group `key` (a ref, or a folder), whose work is
 /// in `workspace`.
-pub fn head(key: &str, workspace: &Path, d: &Digest, cx: &Context<'_>) -> Head {
+pub fn head(key: &str, workspace: &Path, d: &Digest, cx: &Context<'_, '_>) -> Head {
     let names = cx.names;
     Head {
         place: names.place(key, workspace),
@@ -1116,7 +1196,7 @@ pub fn floats(row: &Row) -> bool {
     let needs = |s: RunState| matches!(s, RunState::NeedsInput | RunState::Blocked | RunState::Failed);
     match row {
         Row::Run(i) => needs(i.run.state),
-        Row::Flow(f) => needs(f.last().run.state),
+        Row::Flow(f) => f.last().is_some_and(|i| needs(i.run.state)),
         Row::Group(_) | Row::Question(_) => false,
     }
 }
@@ -1215,7 +1295,7 @@ pub fn counts(rows: &[Row]) -> (usize, usize, usize, usize, usize) {
             }
             Row::Flow(f) => {
                 c.4 += 1;
-                if f.last().run.state == RunState::Failed {
+                if f.failed_last() {
                     c.1 += 1;
                 }
             }
@@ -1368,6 +1448,7 @@ mod tests {
             runs: items.iter().collect(),
             when: None,
             firing: None,
+            flow: None,
         };
         assert_eq!(f.marks(10), "×·○", "oldest first, each firing's worst step");
         assert_eq!(f.marks(2), "·○", "the newest firings");
@@ -1542,7 +1623,7 @@ mod tests {
     fn flows_build<'a>(
         d: &'a Digest,
         names: &Names,
-        flows: &[Flow],
+        flows: &'a [Flow],
         lens: Lens,
         filter: &str,
         now: Timestamp,
@@ -2163,10 +2244,13 @@ mod tests {
     fn with_no_runs_and_no_folders_the_list_is_empty() {
         let now: Timestamp = "2026-09-10T12:00:00Z".parse().unwrap();
         let d = digest(now, vec![], vec![]);
-        let flows = [flow("pulse", None)];
+        let flows = [Flow {
+            approved_hash: None,
+            ..flow("pulse", None)
+        }];
         let rows = flows_build(&d, &Names::default(), &flows, Lens::All, "", now);
-        // Flows or none, nothing stands on the list for them until they
-        // run, so a fresh home says it has nothing running.
+        // A flow waiting for its first yes has no row, so a fresh home says
+        // it has nothing running.
         assert!(rows.is_empty(), "{:?}", keys(&rows));
     }
 
@@ -2279,7 +2363,7 @@ mod tests {
             panic!("no flow row");
         };
         assert_eq!(f.runs.len(), 31);
-        assert_eq!(f.last().run.id, "p29");
+        assert_eq!(f.last().unwrap().run.id, "p29");
         assert_eq!((f.ok(), f.failed(), f.stopped()), (30, 1, 0));
         assert!(f.unseen(), "the failed run is still news");
         assert_eq!(f.when.as_deref(), Some("every 30m"));
@@ -2454,6 +2538,159 @@ mod tests {
     }
 
     #[test]
+    fn a_flow_with_a_yes_has_its_row_before_it_ever_fired() {
+        let now: Timestamp = "2026-09-10T12:00:00Z".parse().unwrap();
+        let relay = "/home/f/relay";
+        let names = Names::new([(PathBuf::from(relay), "relay".to_string())]);
+        let d = digest(now, vec![], vec![]);
+        let nightly = Flow {
+            next_at: Some("2026-09-10T12:12:00Z".parse().unwrap()),
+            ..flow("nightly", Some(relay))
+        };
+        let flows = [nightly.clone()];
+        for lens in [Lens::All, Lens::Flows] {
+            assert_eq!(
+                keys(&flows_build(&d, &names, &flows, lens, "", now)),
+                ["[relay]", "f:nightly"],
+                "{lens:?}"
+            );
+        }
+        assert_eq!(
+            keys(&flows_build(&d, &names, &flows, Lens::Agents, "", now)),
+            ["[relay]"],
+            "not an agent"
+        );
+        let rows = flows_build(&d, &names, &flows, Lens::All, "", now);
+        let Some(Row::Flow(f)) = rows.iter().find(|r| matches!(r, Row::Flow(_))) else {
+            panic!("no flow row");
+        };
+        assert!(f.runs.is_empty() && f.last().is_none());
+        assert_eq!(f.flow.map(|x| x.name.as_str()), Some("nightly"));
+        assert_eq!(flows::stands(f, now), "every 30m · next in 12m");
+        assert_eq!(f.marks(10), "");
+        assert_eq!(counts(&rows), (0, 0, 0, 0, 1));
+
+        // Paused, or changed since its yes, it says so.
+        let says = |x: Flow| {
+            let flows = [x];
+            flows_build(&d, &names, &flows, Lens::All, "", now)
+                .iter()
+                .find_map(|r| match r {
+                    Row::Flow(f) => Some(flows::stands(f, now)),
+                    _ => None,
+                })
+        };
+        let paused = Flow {
+            paused: true,
+            ..nightly.clone()
+        };
+        assert_eq!(says(paused).as_deref(), Some("paused · every 30m"));
+        let changed = Flow {
+            hash: "changed".into(),
+            ..nightly.clone()
+        };
+        assert_eq!(says(changed).as_deref(), Some("needs a yes again · every 30m"));
+
+        // Never said yes to: no row. Removed, with no run of its own still
+        // on the list: none either.
+        let waiting = Flow {
+            approved_hash: None,
+            ..nightly.clone()
+        };
+        assert_eq!(says(waiting), None);
+        let old = fired("old", "nightly", RunState::Finished, "2026-09-07T12:00:00Z", false);
+        let d = digest(now, vec![old], vec![]);
+        let removed = [Flow {
+            removed_at: Some(now),
+            ..nightly
+        }];
+        assert_eq!(
+            keys(&flows_build(&d, &names, &removed, Lens::All, "", now)),
+            ["[relay]"]
+        );
+    }
+
+    #[test]
+    fn a_flows_row_keeps_its_history_however_old() {
+        let now: Timestamp = "2026-09-10T12:00:00Z".parse().unwrap();
+        let relay = "/home/f/relay";
+        let names = Names::new([(PathBuf::from(relay), "relay".to_string())]);
+        let days_ago = "2026-09-07T12:00:00Z";
+        let d = digest(
+            now,
+            vec![
+                fired("old", "pulse", RunState::Failed, days_ago, false),
+                item("hand", RunState::Finished, relay, days_ago, false),
+            ],
+            vec![],
+        );
+        let flows = [flow("pulse", Some(relay))];
+        let rows = flows_build(&d, &names, &flows, Lens::All, "", now);
+        assert_eq!(
+            keys(&rows),
+            ["[relay]", "f:pulse"],
+            "a run by hand that old is off the list"
+        );
+        let Some(Row::Flow(f)) = rows.iter().find(|r| matches!(r, Row::Flow(_))) else {
+            panic!("no flow row");
+        };
+        assert_eq!(f.marks(10), "×", "its run of three days ago");
+        // A flow not loaded now has no row of its own: its old runs go as
+        // any other.
+        assert_eq!(keys(&flows_build(&d, &names, &[], Lens::All, "", now)), ["[relay]"]);
+    }
+
+    #[test]
+    fn a_search_and_hide_take_an_unfired_flows_row_as_any_other() {
+        let now: Timestamp = "2026-09-10T12:00:00Z".parse().unwrap();
+        let relay = "/home/f/relay";
+        let names = Names::new([(PathBuf::from(relay), "relay".to_string())]);
+        let d = digest(now, vec![], vec![]);
+        let flows = [flow("nightly", Some(relay))];
+        let shown = |d: &Digest, lens: Lens, filter: &str| keys(&flows_build(d, &names, &flows, lens, filter, now));
+        assert_eq!(shown(&d, Lens::All, "night"), ["[relay]", "f:nightly"]);
+        assert_eq!(shown(&d, Lens::All, "kind:flow"), ["[relay]", "f:nightly"]);
+        assert_eq!(shown(&d, Lens::All, "by:nightly"), ["[relay]", "f:nightly"]);
+        assert_eq!(shown(&d, Lens::All, "in:relay kind:flow"), ["[relay]", "f:nightly"]);
+        assert_eq!(shown(&d, Lens::All, "kind:agent"), Vec::<String>::new());
+        assert_eq!(shown(&d, Lens::All, "tidy"), Vec::<String>::new());
+
+        // `/hide` on it, or on its project: off the list, in `hidden`.
+        for key in ["f:nightly".to_string(), format!("g:{relay}")] {
+            let mut hidden = d.clone();
+            hidden.hidden = vec![hid(&key, "2026-09-10T11:00:00Z")];
+            assert!(
+                !shown(&hidden, Lens::All, "").contains(&"f:nightly".to_string()),
+                "{key}"
+            );
+            assert_eq!(shown(&hidden, Lens::Hidden, ""), ["[relay]", "f:nightly"], "{key}");
+        }
+        assert_eq!(shown(&d, Lens::Hidden, ""), Vec::<String>::new(), "not hidden");
+    }
+
+    #[test]
+    fn a_flow_that_has_not_run_comes_after_those_that_have() {
+        let now: Timestamp = "2026-09-10T12:00:00Z".parse().unwrap();
+        let relay = "/home/f/relay";
+        let names = Names::new([(PathBuf::from(relay), "relay".to_string())]);
+        let d = digest(
+            now,
+            vec![fired("p1", "pulse", RunState::Finished, "2026-09-10T11:00:00Z", false)],
+            vec![],
+        );
+        let flows = [
+            flow("beta", Some(relay)),
+            flow("pulse", Some(relay)),
+            flow("alpha", Some(relay)),
+        ];
+        assert_eq!(
+            keys(&flows_build(&d, &names, &flows, Lens::All, "", now)),
+            ["[relay]", "f:pulse", "f:alpha", "f:beta"],
+            "what ran first, then the rest by name"
+        );
+    }
+
+    #[test]
     fn words_for_causes_and_askers() {
         assert_eq!(cause_words(&Cause::Manual), "started by hand");
         assert_eq!(
@@ -2515,8 +2752,9 @@ mod tests {
         );
         assert_eq!(texts(&chips(&flows, None, now)), ["↻ pulse 30s"]);
 
-        // On the list: the folder's flows ride its header; those with no
-        // `in` stand nowhere on it until they run.
+        // On the list: the folder's flows ride its header, and each with a
+        // yes has its row under it, run or not; those with no `in` stand
+        // under `everywhere`. One waiting for its first yes has none.
         let d = digest(
             now,
             vec![item("work1", RunState::Working, relay, "2026-09-10T11:59:00Z", false)],
@@ -2535,10 +2773,17 @@ mod tests {
         assert_eq!(
             build_flows(&flows),
             [
+                "[api] ↻ elsewhere",
+                "f:elsewhere",
                 "[relay] ! deploy · ↻ nightly 4h · ↻ tests-failed · ↻ tidy paused",
-                "r:work1"
+                "r:work1",
+                "f:nightly",
+                "f:tests-failed",
+                "f:tidy",
+                "[everywhere] ",
+                "f:pulse"
             ],
-            "no row for the flows with no `in`"
+            "what has run first, then the rest by name"
         );
     }
 
@@ -2769,12 +3014,18 @@ mod tests {
                 "[everywhere]".into(),
                 "f:gchat-mentions".into(),
                 "r:fix".into(),
+                // Its run still going is its own row; the flow has its row
+                // anyway, quiet, until that run ends and folds into it.
+                "f:look-at-it".into(),
             ],
             "outside every project: everywhere, after the projects"
         );
 
         // It answers to its word, as a project answers to its name.
-        assert_eq!(shown("in:everywhere"), ["[everywhere]", "f:gchat-mentions", "r:fix"]);
+        assert_eq!(
+            shown("in:everywhere"),
+            ["[everywhere]", "f:gchat-mentions", "r:fix", "f:look-at-it"]
+        );
 
         // Its header is no folder, and its key says so.
         let rows = flows_build(&d, &names, &flows, Lens::All, "", now);
