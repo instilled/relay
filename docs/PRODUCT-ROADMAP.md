@@ -9,6 +9,7 @@ Goal for v1:
 
 The next milestone is one dependable daily loop: start work → leave → get told when needed → come back to the facts → say yes to the next step. Breadth waits for it.
 
+* [ ] agents started outside Relay, Claude's first — every session `claude agents --json` lists that isn't a Relay run (`claude --bg`, `/background`, one open in another terminal) is a row under its folder's project, marked as Claude's, with its state (working, blocked on a permission prompt or input, done, failed); join hands the terminal to `claude attach`, `/import` still takes one over; a Relay run sent to `/background` links to the session it became. Codex (global hooks, app-server `thread/list`) later; Gemini not
 * [ ] a flow's own graph, the global graph dropped — a selected flow's steps drawn in its pane (`if` labels, its last firing's marks; what fires it and what it fires); `^g`, `/graph` and the global layout go
 * [ ] modules split — `tui/mod.rs` (~8,800 lines) into drawing, keys and modes, and the daemon glue, its tests beside them; `main.rs` (~1,900) trimmed; behaviour unchanged
 * [ ] facts collector (J6) — what happened when you get back, as facts: git commits + `diff --stat` per run, commands with exit codes, transcript ingestion (Claude/Codex `*.jsonl`), tokens/cost; facts first in the pane and the catch-up, the narrative below
