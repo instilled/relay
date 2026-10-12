@@ -172,6 +172,9 @@ impl<'a> CatchUp<'a> {
             };
             projects[p].rows.push(row);
         }
+        // A header outside every registered folder stays only when something
+        // happened under it: not for flows that are merely there, or ran long ago.
+        projects.retain(|p| !p.rows.is_empty() || cx.names.registered(&p.head.workspace).is_some());
         let ran = |i: &DigestItem| i.at >= since;
         let failed = |i: &DigestItem| ran(i) && i.run.state == RunState::Failed;
         for p in &mut projects {
@@ -185,7 +188,7 @@ impl<'a> CatchUp<'a> {
                         p.failed += usize::from(failed(i));
                     }
                     Row::Flow(f) => {
-                        p.need += usize::from(f.last().run.state == RunState::Failed);
+                        p.need += usize::from(f.failed_last());
                         p.ran += f.runs.iter().filter(|i| ran(i)).count();
                         p.failed += f.runs.iter().filter(|i| failed(i)).count();
                     }
@@ -598,7 +601,7 @@ fn head_of(d: &Digest, cx: &Context<'_>, run: Option<&Run>, ws: &Path) -> Head {
 fn run_of<'r>(r: &'r Row) -> Option<&'r Run> {
     match r {
         Row::Run(i) => Some(&i.run),
-        Row::Flow(f) => Some(&f.last().run),
+        Row::Flow(f) => f.last().map(|i| &i.run),
         Row::Group(_) | Row::Question(_) => None,
     }
 }
@@ -619,7 +622,7 @@ fn at(r: &Row) -> Option<Timestamp> {
         Row::Group(_) => None,
         Row::Question(q) => Some(q.updated_at),
         Row::Run(i) => Some(i.at),
-        Row::Flow(f) => Some(f.last().at),
+        Row::Flow(f) => f.last().map(|i| i.at),
     }
 }
 
@@ -641,13 +644,14 @@ pub fn row_line(r: &Row, now: Timestamp) -> String {
             ago(i.at),
         ],
         Row::Flow(f) => {
-            let last = &f.last().run;
-            let mut parts = vec![format!("{} {}", f.marks(MARKS), f.name)];
-            match f.firing {
-                Some(_) => parts.push(crate::tui::flows::stands(f)),
-                None => parts.extend([rows::state_words(last.state, last.confidence), f.summary()]),
+            let mut parts = vec![format!("{} {}", f.marks(MARKS), f.name).trim_start().to_string()];
+            match (f.firing, f.last()) {
+                (None, Some(last)) => {
+                    parts.extend([rows::state_words(last.run.state, last.run.confidence), f.summary()]);
+                }
+                _ => parts.push(crate::tui::flows::stands(f, None, now)),
             }
-            parts.push(ago(f.last().at));
+            parts.extend(f.last().map(|i| ago(i.at)));
             parts
         }
     };
@@ -1074,6 +1078,48 @@ mod tests {
         let relay = cu.projects.iter().find(|p| p.head.name == "relay").unwrap();
         assert!(relay.rows.is_empty(), "writing the top is not what happened");
         assert!(!cu.bullets().iter().any(|b| b.starts_with("relay")));
+    }
+
+    #[test]
+    fn flows_that_did_nothing_in_the_stretch_raise_no_header() {
+        // Two flows with no `in`: one that never ran, one whose only run
+        // failed three days ago and was seen. The list has both, under
+        // `everywhere`; nothing happened there, so the catch-up has no line.
+        let mut old = fired("o1", "pulse", RunState::Failed, "2026-10-03T12:00:00Z");
+        old.unseen = false;
+        let d = Digest {
+            since: "2026-10-06T00:00:00Z".parse().unwrap(),
+            items: vec![old],
+            decisions: vec![],
+            checkouts: vec![],
+            lost: vec![],
+            hidden: vec![],
+            order: vec![],
+            firings: Vec::new(),
+        };
+        let flows: Vec<Flow> = flows()
+            .into_iter()
+            .zip(["pulse", "quiet"])
+            .map(|(f, name)| Flow {
+                name: name.into(),
+                folder: None,
+                ..f
+            })
+            .collect();
+        let cx = Context {
+            names: &names(),
+            flows: &flows,
+            filter: "",
+            lens: Lens::All,
+            now: now(),
+            relay: None,
+        };
+        let on_the_list = rows::build(&d, &cx);
+        assert!(on_the_list.iter().any(|r| r.key().as_deref() == Some("f:quiet")));
+        assert!(on_the_list.iter().any(|r| r.key().as_deref() == Some("f:pulse")));
+        let cu = CatchUp::build(&d, &cx);
+        let heads: Vec<&str> = cu.projects.iter().map(|p| p.head.name.as_str()).collect();
+        assert_eq!(heads, ["api", "relay"], "registered folders only");
     }
 
     #[test]

@@ -1638,11 +1638,10 @@ impl App {
     fn selected_folder(&self) -> Option<PathBuf> {
         match self.selected()? {
             Row::Run(i) => Some(i.run.workspace.clone()),
-            Row::Flow(f) => Some(
-                self.flow_of_row(&f)
-                    .and_then(|x| x.folder.clone())
-                    .unwrap_or_else(|| f.last().run.workspace.clone()),
-            ),
+            Row::Flow(f) => self
+                .flow_of_row(&f)
+                .and_then(|x| x.folder.clone())
+                .or_else(|| f.last().map(|i| i.run.workspace.clone())),
             Row::Question(q) => Some(q.workspace.clone()),
             Row::Group(h) if h.is_everywhere() => None,
             Row::Group(h) => Some(h.workspace.clone()),
@@ -1719,7 +1718,7 @@ impl App {
             View::Work => self
                 .rows()
                 .iter()
-                .map(|r| (r.key(), rows::named(r, &self.digest, &self.names)))
+                .map(|r| (r.key(), rows::named(r, &self.digest, &self.names, &self.flows)))
                 .unzip(),
             View::Graph => {
                 let Some((g, p)) = self.graph_plan() else {
@@ -1738,7 +1737,7 @@ impl App {
             View::CatchUp => self
                 .catch_rows()
                 .iter()
-                .map(|r| (r.key(), rows::named(r, &self.digest, &self.names)))
+                .map(|r| (r.key(), rows::named(r, &self.digest, &self.names, &self.flows)))
                 .unzip(),
         };
         query::ranked(&words, &named)
@@ -2435,6 +2434,9 @@ impl App {
     /// name and run ids rather than `&rows::FlowRow` itself: it borrows from
     /// `self`, and this needs `&mut self` to archive.
     async fn archive_flow(&mut self, name: &str, ids: Vec<String>) {
+        if ids.is_empty() {
+            return self.say(format!("nothing to archive: {name} has not run"));
+        }
         let what = format!("{name} · {} runs", ids.len());
         self.archive(ids, &what).await;
     }
@@ -2507,7 +2509,8 @@ impl App {
     /// armed hint — `None` when there is nothing to remove there.
     fn remove_hint(&self) -> Option<String> {
         if let Some(f) = self.selected_flow() {
-            Some(format!("remove {} · {} runs", f.name, f.runs.len()))
+            // One that has not run has nothing to archive.
+            (!f.runs.is_empty()).then(|| format!("remove {} · {} runs", f.name, f.runs.len()))
         } else if let Some(i) = self.selected_run() {
             if i.run.state.is_terminal() {
                 Some(format!("remove {}", i.run.title))
@@ -5624,13 +5627,14 @@ impl App {
                     )
                 }
                 Row::Flow(f) => {
-                    let last = f.last();
                     let title = Span::raw(fit(&f.name, tw));
                     let title = vec![if f.unseen() { title.bold() } else { title }];
                     // How the last few firings went, oldest first, then where
                     // the latest stands and what it came to; the tally and the
-                    // cadence are the pane's.
-                    let stands = flows::stands(f);
+                    // cadence are the pane's. Before it has run, what starts it.
+                    let flow = self.flow_of_row(f);
+                    let stands = flows::stands(f, flow, now);
+                    let last = f.last().map(|i| i.at).or(flow.and_then(|x| x.last_fired_at));
                     list_line(
                         w,
                         tw,
@@ -5640,7 +5644,7 @@ impl App {
                         &stands,
                         vec![],
                         None,
-                        fmt_age(last.at, now),
+                        last.map(|t| fmt_age(t, now)).unwrap_or_default(),
                     )
                 }
             };
@@ -6248,7 +6252,8 @@ impl App {
                     Some(FlowStatus::NeedsApproval) => "/flow approve · ",
                     _ => "/flow run · ",
                 };
-                format!("enter its firings · {yes}^g its wiring · ^x archives · {pane}")
+                let archives = if f.runs.is_empty() { "" } else { "^x archives · " };
+                format!("enter its firings · {yes}^g its wiring · {archives}{pane}")
             }
             Some(Row::Run(i)) if i.run.state.is_terminal() => {
                 format!("enter output · /summary · ^x archives · ^t pins · {pane}")
