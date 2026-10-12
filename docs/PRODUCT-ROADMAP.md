@@ -9,7 +9,6 @@ Goal for v1:
 
 The next milestone is one dependable daily loop: start work → leave → get told when needed → come back to the facts → say yes to the next step. Breadth waits for it.
 
-* [ ] every flow on the list — a flow is a row under the flows lens from its yes on, with its trigger and next time, before it ever fired
 * [ ] a flow's own graph, the global graph dropped — a selected flow's steps drawn in its pane (`if` labels, its last firing's marks; what fires it and what it fires); `^g`, `/graph` and the global layout go
 * [ ] modules split — `tui/mod.rs` (~8,800 lines) into drawing, keys and modes, and the daemon glue, its tests beside them; `main.rs` (~1,900) trimmed; behaviour unchanged
 * [ ] facts collector (J6) — what happened when you get back, as facts: git commits + `diff --stat` per run, commands with exit codes, transcript ingestion (Claude/Codex `*.jsonl`), tokens/cost; facts first in the pane and the catch-up, the narrative below
@@ -27,6 +26,9 @@ Later:
 
 ## Done — newest first
 
+* [x] every flow on the list — a flow is a row from its yes on, with its trigger and next time (`every 30m · next in 12m`) before it ever fired, `paused` or `needs a yes again` when so; its runs stay on its row whatever their age; the headline still counts only what ran (#160)
+* [x] the templates become examples you copy — `--from`, `--set` and `--in` go; `prod-logs` and `morning-brief` live in `examples/flows` with placeholders and a test that holds them to the code (#158)
+* [x] the README says how to install Relay and use it in five minutes (#157)
 * [x] flows, writing it — `rl flow new <name> [words…]` and `/flow new` from words (the interpreter drafts `flow.md`, shown before its yes), a template (`--from prod-logs`, `--from morning-brief`, blanks by `--set`) or the bare one; `rl flow test` / `/flow test` say what would fire and which steps would run, starting nothing; the context pack teaches flows (#156)
 * [x] every lead in the catch-up keeps its title; flows in the graph no longer look joined; the badge test stops flaking (#155)
 * [x] seeing flows — a firing's outcome on the list, `catch_up: top` heads the catch-up, the flow's pane with its firings, `/summary` on a firing, steps as nodes in the graph; a missed schedule catches up once by default (#154)
