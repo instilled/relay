@@ -330,7 +330,11 @@ pub fn flow_lines(
         }
     };
     let (ok, failed, stopped) = (j.ok(), j.failed(), j.stopped());
+    // No runs here is not never having fired: they may be archived, hidden,
+    // or older than the digest goes back.
+    let fired = shown.is_some() || flow.is_some_and(|f| f.last_fired_at.is_some());
     let mut tally = vec![match j.runs.len() {
+        0 if fired => "none on the list".to_string(),
         0 => "never fired".to_string(),
         1 => "1 run".to_string(),
         n => format!("{n} runs"),
@@ -345,7 +349,8 @@ pub fn flow_lines(
         tally.push(format!("{stopped} stopped"));
     }
     lines.push(Line::from(vec![
-        Span::raw(" lately   ").dim(),
+        // All the runs the digest has of it, not a day's.
+        Span::raw(" history  ").dim(),
         Span::raw(tally.join(" · ")),
     ]));
     // What the last firing raised, wrapping in the value column.

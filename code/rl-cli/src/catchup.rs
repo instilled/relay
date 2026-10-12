@@ -75,7 +75,7 @@ impl<'a> CatchUp<'a> {
     /// The list's rows for the stretch, grouped as the list groups them; what
     /// needs you first, projects that need you first, a project with nothing
     /// new keeps an empty `rows`.
-    pub fn build(d: &'a Digest, cx: &Context<'_, 'a>) -> Self {
+    pub fn build(d: &'a Digest, cx: &Context<'_>) -> Self {
         #[cfg(test)]
         BUILT.with(|b| b.set(b.get() + 1));
         // The whole list, whatever lens it is in now but narrowed by its
@@ -105,30 +105,16 @@ impl<'a> CatchUp<'a> {
         // Questions, and runs pinned or come through, stand above every
         // header on the list; here they go under their project's.
         let mut loose: Vec<Row<'a>> = Vec::new();
-        // Headers the list has only for flows that have not run, outside
-        // every registered folder: nothing happened there.
-        let mut unfired: HashSet<usize> = HashSet::new();
         for row in rows::build(d, &list) {
             if let (false, Some(p), Some(r)) = (keyed, projects.last_mut(), run_of(&row)) {
                 p.key = rows::group_key(r, cx.names, cx.flows);
                 keyed = true;
-            }
-            let quiet = match &row {
-                Row::Group(_) => true,
-                Row::Flow(f) => f.runs.is_empty(),
-                Row::Question(_) | Row::Run(_) => false,
-            };
-            if !quiet && let Some(last) = projects.len().checked_sub(1) {
-                unfired.remove(&last);
             }
             let row = match row {
                 Row::Group(mut h) => {
                     // Its flows' times from now, not from when you left.
                     if !h.is_everywhere() {
                         h.flows = rows::chips(cx.flows, Some(&h.workspace), cx.now);
-                    }
-                    if cx.names.registered(&h.workspace).is_none() {
-                        unfired.insert(projects.len());
                     }
                     let key = h.workspace.to_string_lossy().into_owned();
                     projects.push(Project::new(h, key));
@@ -154,9 +140,6 @@ impl<'a> CatchUp<'a> {
                     } else {
                         f.runs = stretch;
                     }
-                    // It tells what its runs did in the stretch, not how the
-                    // flow stands now — and so reads the same kept (`over`).
-                    f.flow = None;
                     Row::Flow(f)
                 }
             };
@@ -189,11 +172,9 @@ impl<'a> CatchUp<'a> {
             };
             projects[p].rows.push(row);
         }
-        let mut n = 0;
-        projects.retain(|p| {
-            n += 1;
-            !(unfired.contains(&(n - 1)) && p.rows.is_empty())
-        });
+        // A header outside every registered folder stays only when something
+        // happened under it: not for flows that are merely there, or ran long ago.
+        projects.retain(|p| !p.rows.is_empty() || cx.names.registered(&p.head.workspace).is_some());
         let ran = |i: &DigestItem| i.at >= since;
         let failed = |i: &DigestItem| ran(i) && i.run.state == RunState::Failed;
         for p in &mut projects {
@@ -229,7 +210,7 @@ impl<'a> CatchUp<'a> {
     pub fn of(
         d: &'a Digest,
         workspaces: impl IntoIterator<Item = (PathBuf, String)>,
-        flows: &'a [Flow],
+        flows: &[Flow],
         relay: Option<&Path>,
         now: Timestamp,
     ) -> Self {
@@ -403,7 +384,6 @@ impl Kept {
                     runs: runs.iter().map(|n| d.items.get(*n)).collect::<Option<_>>()?,
                     when: when.clone(),
                     firing: d.firings.iter().find(|f| f.flow == *name),
-                    flow: None,
                 }),
             })
         };
@@ -609,7 +589,7 @@ pub fn text(cu: &CatchUp, top: &[String], now: Timestamp) -> String {
 /// The header a question or a run goes under where the list gives it none:
 /// its run's project — `everywhere`, a ref, or its folder — else the
 /// question's folder.
-fn head_of(d: &Digest, cx: &Context<'_, '_>, run: Option<&Run>, ws: &Path) -> Head {
+fn head_of(d: &Digest, cx: &Context<'_>, run: Option<&Run>, ws: &Path) -> Head {
     match run {
         Some(r) if rows::everywhere_run(r, cx.names, cx.flows) => Head::everywhere(),
         Some(r) => rows::head(&r.place_key(), &r.workspace, d, cx),
@@ -669,7 +649,7 @@ pub fn row_line(r: &Row, now: Timestamp) -> String {
                 (None, Some(last)) => {
                     parts.extend([rows::state_words(last.run.state, last.run.confidence), f.summary()]);
                 }
-                _ => parts.push(crate::tui::flows::stands(f, now)),
+                _ => parts.push(crate::tui::flows::stands(f, None, now)),
             }
             parts.extend(f.last().map(|i| ago(i.at)));
             parts
@@ -887,13 +867,11 @@ mod tests {
     }
 
     fn build<'a>(d: &'a Digest, names: &Names) -> CatchUp<'a> {
-        // The rows carry their flows, so these outlive the catch-up.
-        static FLOWS: std::sync::LazyLock<Vec<Flow>> = std::sync::LazyLock::new(flows);
         CatchUp::build(
             d,
             &Context {
                 names,
-                flows: &FLOWS,
+                flows: &flows(),
                 filter: "",
                 lens: Lens::All,
                 now: now(),
@@ -1100,6 +1078,48 @@ mod tests {
         let relay = cu.projects.iter().find(|p| p.head.name == "relay").unwrap();
         assert!(relay.rows.is_empty(), "writing the top is not what happened");
         assert!(!cu.bullets().iter().any(|b| b.starts_with("relay")));
+    }
+
+    #[test]
+    fn flows_that_did_nothing_in_the_stretch_raise_no_header() {
+        // Two flows with no `in`: one that never ran, one whose only run
+        // failed three days ago and was seen. The list has both, under
+        // `everywhere`; nothing happened there, so the catch-up has no line.
+        let mut old = fired("o1", "pulse", RunState::Failed, "2026-10-03T12:00:00Z");
+        old.unseen = false;
+        let d = Digest {
+            since: "2026-10-06T00:00:00Z".parse().unwrap(),
+            items: vec![old],
+            decisions: vec![],
+            checkouts: vec![],
+            lost: vec![],
+            hidden: vec![],
+            order: vec![],
+            firings: Vec::new(),
+        };
+        let flows: Vec<Flow> = flows()
+            .into_iter()
+            .zip(["pulse", "quiet"])
+            .map(|(f, name)| Flow {
+                name: name.into(),
+                folder: None,
+                ..f
+            })
+            .collect();
+        let cx = Context {
+            names: &names(),
+            flows: &flows,
+            filter: "",
+            lens: Lens::All,
+            now: now(),
+            relay: None,
+        };
+        let on_the_list = rows::build(&d, &cx);
+        assert!(on_the_list.iter().any(|r| r.key().as_deref() == Some("f:quiet")));
+        assert!(on_the_list.iter().any(|r| r.key().as_deref() == Some("f:pulse")));
+        let cu = CatchUp::build(&d, &cx);
+        let heads: Vec<&str> = cu.projects.iter().map(|p| p.head.name.as_str()).collect();
+        assert_eq!(heads, ["api", "relay"], "registered folders only");
     }
 
     #[test]

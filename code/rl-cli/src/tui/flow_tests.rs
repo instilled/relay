@@ -506,3 +506,34 @@ async fn a_flow_with_a_yes_that_never_fired_is_a_row_like_any_flows() {
     assert!(on_the_list(&app), "in the hidden lens");
     token.cancel();
 }
+
+#[tokio::test]
+async fn a_flow_whose_runs_were_archived_has_fired_all_the_same() {
+    let (tmp, token, mut app, folder) = panel().await;
+    flow_in(&tmp, &mut app, "prod-logs", "---\nsteps:\n  probe:\n    run: x\n---\n").await;
+    app.refresh().await;
+    type_in(&mut app, "/flow approve prod-logs").await;
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+    fired(
+        &tmp,
+        &folder,
+        "prod-logs",
+        "fire0001",
+        &[("probe", StepStatus::Done, Some("found\r\n"))],
+        FiringStatus::Done,
+    );
+    app.refresh().await;
+    app.select(Some("f:prod-logs".into()));
+    assert!(app.selected_flow().is_some_and(|f| !f.runs.is_empty()));
+    type_in(&mut app, "/archive").await;
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+    app.refresh().await;
+    // Its row stands from its yes; its runs are gone from the list, not its firing.
+    app.select(Some("f:prod-logs".into()));
+    assert!(app.selected_flow().is_some_and(|f| f.runs.is_empty()), "the row stays");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+    let screen = draw_text(&mut app);
+    assert!(screen.contains("none on the list"), "{screen}");
+    assert!(!screen.contains("never fired"), "{screen}");
+    token.cancel();
+}

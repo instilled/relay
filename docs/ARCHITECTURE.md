@@ -382,10 +382,14 @@ the pane, as on a project header. A run still going or waiting on you is never f
 its row from its yes on — on, paused, or changed since — before it ever fired: it then says what
 starts it and, on, when it fires next (`every 30m · next in 12m`, `on run.failed`, `paused · every
 30m`, `needs a yes again · every 30m`, a changed one's runs led by the same words), ranks below
-everything that has run, by name, and its pane says `never fired`. Its row keeps every run the digest
-has of it, however long ago it ended, where any other ended run leaves the list after a day
-(`rows::RECENT`). One that never had a yes has no row; a removed one keeps one only while runs of
-its own are on the list. The pane
+everything that has run, by name — below your own order too, where you kept one — and its pane says
+`never fired` (or, when it has fired but no run of it is on the list, `none on the list`). It is not
+counted in the headline, which says what is moving: a home with only such flows says `nothing
+running`. Its row keeps every run the digest has of it, however long ago it ended, where any other
+ended run leaves the list after a day (`rows::RECENT`); the pane's `history` tallies them all. One
+that never had a yes has no row; a removed one keeps one only while runs of its own are on the
+list. The catch-up shows none of this: a header there outside every registered folder stays only
+when something happened under it. The pane
 holds the flow: `flow · <in> · <status>`, then what starts it — a cron line read back in words
 where it can be (`hourly 08:00–18:00, Mon–Fri`), left as written where it cannot — where it runs,
 whether its folder as it is has a yes, when it fires next and when it last did, its folder, and

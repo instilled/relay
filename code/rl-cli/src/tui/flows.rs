@@ -100,31 +100,41 @@ pub fn state_words(f: &Firing) -> String {
 
 /// Where a flow's row says it stands: where its latest firing is, and what that came to —
 /// `waiting at review · page on-call?`, `done · *Morning brief*`; with no firing known, what
-/// its last run came to; before it has run, what starts it (`unfired`). Changed since its
-/// yes, it says first that it needs one again.
-pub fn stands(f: &FlowRow, now: Timestamp) -> String {
+/// its last run came to; before it has run, what its flow (`flow`, when loaded) says of
+/// itself (`unfired`). Waiting for a yes, it says so first.
+pub fn stands(f: &FlowRow, flow: Option<&Flow>, now: Timestamp) -> String {
     let said = match (f.firing, f.last()) {
         (Some(x), _) => match x.outcome.as_deref().filter(|o| !o.is_empty()) {
             Some(o) => format!("{} · {o}", state_words(x)),
             None => state_words(x),
         },
         (None, Some(i)) => i.summary.clone(),
-        (None, None) => return f.flow.map(|x| unfired(x, now)).unwrap_or_default(),
+        (None, None) => return flow.map(|x| unfired(x, now)).unwrap_or_default(),
     };
-    match f.flow.map(Flow::status) {
-        Some(FlowStatus::NeedsApproval) => format!("{AGAIN} · {said}"),
-        _ => said,
+    match flow.and_then(needs_yes) {
+        Some(yes) => format!("{yes} · {said}"),
+        None => said,
     }
 }
 
-/// What a flow's row leads with when it has changed since its yes.
-const AGAIN: &str = "needs a yes again";
+/// What a flow's row leads with while it waits for a yes: `needs a yes again`
+/// once changed since it had one, `needs a yes` before it ever did.
+fn needs_yes(f: &Flow) -> Option<&'static str> {
+    match (f.status(), &f.approved_hash) {
+        (FlowStatus::NeedsApproval, Some(_)) => Some("needs a yes again"),
+        (FlowStatus::NeedsApproval, None) => Some("needs a yes"),
+        _ => None,
+    }
+}
 
 /// A flow that has not run, as its row says it: what starts it and, on,
 /// when it fires next — `every 30m · next in 12m`, `on run.failed`;
 /// `paused · every 30m`; changed since its yes, `needs a yes again · …`.
 fn unfired(f: &Flow, now: Timestamp) -> String {
     let when = when_words(&f.when());
+    if let Some(yes) = needs_yes(f) {
+        return format!("{yes} · {when}");
+    }
     match f.status() {
         FlowStatus::On => match f.next_at {
             Some(t) if t > now => format!("{when} · next in {}", fmt_age(now, t)),
@@ -132,8 +142,7 @@ fn unfired(f: &Flow, now: Timestamp) -> String {
             None => when,
         },
         FlowStatus::Paused => format!("paused · {when}"),
-        FlowStatus::NeedsApproval => format!("{AGAIN} · {when}"),
-        FlowStatus::Removed => when,
+        FlowStatus::NeedsApproval | FlowStatus::Removed => when,
     }
 }
 
@@ -377,7 +386,6 @@ mod tests {
             runs: vec![i],
             when: None,
             firing,
-            flow: None,
         }
     }
 
@@ -393,30 +401,34 @@ mod tests {
         );
         waiting.outcome = Some("page on-call?".into());
         assert_eq!(
-            stands(&row(&i, Some(&waiting)), now),
+            stands(&row(&i, Some(&waiting)), None, now),
             "waiting at review · page on-call?"
         );
         let mut quiet = firing(F::Done, &[("probe", S::Done)]);
         quiet.outcome = Some(String::new());
         assert_eq!(
-            stands(&row(&i, Some(&quiet)), now),
+            stands(&row(&i, Some(&quiet)), None, now),
             "done",
             "nothing printed: no dot with nothing after"
         );
         quiet.outcome = None;
-        assert_eq!(stands(&row(&i, Some(&quiet)), now), "done");
+        assert_eq!(stands(&row(&i, Some(&quiet)), None, now), "done");
         assert_eq!(
-            stands(&row(&i, None), now),
+            stands(&row(&i, None), None, now),
             "exit 0 · 2s",
             "no firing known: its last run's own line"
         );
         // Changed since its yes: it says so first, whatever it last did.
         let changed = flow(Some("an older hash"), def(None));
-        let again = FlowRow {
-            flow: Some(&changed),
-            ..row(&i, Some(&quiet))
-        };
-        assert_eq!(stands(&again, now), "needs a yes again · done");
+        assert_eq!(
+            stands(&row(&i, Some(&quiet)), Some(&changed), now),
+            "needs a yes again · done"
+        );
+        // Never had one: no `again`.
+        assert_eq!(
+            stands(&row(&i, Some(&quiet)), Some(&flow(None, def(None))), now),
+            "needs a yes · done"
+        );
     }
 
     #[test]
@@ -431,8 +443,8 @@ mod tests {
                     runs: vec![],
                     when: None,
                     firing: None,
-                    flow: Some(f),
                 },
+                Some(f),
                 now,
             )
         };

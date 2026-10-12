@@ -1718,7 +1718,7 @@ impl App {
             View::Work => self
                 .rows()
                 .iter()
-                .map(|r| (r.key(), rows::named(r, &self.digest, &self.names)))
+                .map(|r| (r.key(), rows::named(r, &self.digest, &self.names, &self.flows)))
                 .unzip(),
             View::Graph => {
                 let Some((g, p)) = self.graph_plan() else {
@@ -1737,7 +1737,7 @@ impl App {
             View::CatchUp => self
                 .catch_rows()
                 .iter()
-                .map(|r| (r.key(), rows::named(r, &self.digest, &self.names)))
+                .map(|r| (r.key(), rows::named(r, &self.digest, &self.names, &self.flows)))
                 .unzip(),
         };
         query::ranked(&words, &named)
@@ -5632,8 +5632,9 @@ impl App {
                     // How the last few firings went, oldest first, then where
                     // the latest stands and what it came to; the tally and the
                     // cadence are the pane's. Before it has run, what starts it.
-                    let stands = flows::stands(f, now);
-                    let last = f.last().map(|i| i.at).or(f.flow.and_then(|x| x.last_fired_at));
+                    let flow = self.flow_of_row(f);
+                    let stands = flows::stands(f, flow, now);
+                    let last = f.last().map(|i| i.at).or(flow.and_then(|x| x.last_fired_at));
                     list_line(
                         w,
                         tw,
