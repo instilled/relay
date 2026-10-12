@@ -13,6 +13,7 @@ path = "src/main.rs"
 [dependencies]
 rl-core.workspace = true
 rl-detect.workspace = true
+rl-flow.workspace = true
 rl-proto.workspace = true
 rl-session.workspace = true
 anyhow.workspace = true
@@ -26,6 +27,7 @@ serde.workspace = true
 serde_json.workspace = true
 serde_norway.workspace = true
 tokio.workspace = true
+unicode-width.workspace = true
 vt100.workspace = true
 
 [dev-dependencies]

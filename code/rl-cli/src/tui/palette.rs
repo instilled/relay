@@ -9,31 +9,29 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Cmd {
     Stop,
-    Done,
-    DoneAll,
+    Import,
+    Archive,
     Mark,
-    Watch,
     Join,
+    Resume,
     Shell,
-    Info,
-    Full,
-    Rules,
+    Rename,
+    Pin,
+    Hide,
+    Sort,
+    Pane,
+    Graph,
+    Events,
     Reload,
-    Reindex,
-    Approve,
-    Pause,
+    Flow,
     New,
-    Edit,
-    Editor,
-    Summarise,
+    Summary,
+    Since,
     Ask,
     Filter,
-    LensAll,
-    LensAgents,
-    LensJobs,
-    LensReactions,
-    Gc,
-    AddDir,
+    Lens,
+    Prune,
+    Up,
     Help,
     Quit,
 }
@@ -42,178 +40,201 @@ pub struct Command {
     pub name: &'static str,
     /// What follows the name, for the hint; empty when nothing does.
     pub args: &'static str,
+    /// The words `tab` offers for each argument in turn, when they are a
+    /// fixed set; the hint in `args` says the same words.
+    pub words: &'static [&'static [&'static str]],
     /// One short line: what it does, in plain words.
     pub what: &'static str,
     pub cmd: Cmd,
 }
 
-/// Every command, in the order the palette lists them.
+/// Every command, in the order the palette lists them. One name per act: an
+/// act with a variant takes it as an argument rather than a second command,
+/// and no word means two things (`done` is only ever what `/mark` says).
 pub const ALL: &[Command] = &[
     Command {
         name: "stop",
         args: "",
+        words: &[],
         what: "stop a run that is still going",
         cmd: Cmd::Stop,
     },
     Command {
-        name: "done",
-        args: "",
-        what: "be done with an ended run: out of the panel, kept in the ledger",
-        cmd: Cmd::Done,
-    },
-    Command {
-        name: "done-all",
-        args: "",
-        what: "be done with everything you have seen",
-        cmd: Cmd::DoneAll,
+        name: "archive",
+        args: "[seen]",
+        words: &[&["seen"]],
+        what: "out of the panel, kept in the ledger: an ended run or a flow's, or all you have seen",
+        cmd: Cmd::Archive,
     },
     Command {
         name: "mark",
         args: "done|blocked|working",
+        words: &[&["done", "blocked", "working"]],
         what: "say what a run is really doing",
         cmd: Cmd::Mark,
     },
     Command {
-        name: "watch",
+        name: "import",
         args: "",
-        what: "watch a run's terminal without taking the keyboard",
-        cmd: Cmd::Watch,
+        words: &[],
+        what: "move Claude's own sessions into Relay (claude --bg, and ones in a terminal)",
+        cmd: Cmd::Import,
     },
     Command {
         name: "join",
         args: "",
-        what: "join a run's terminal and take the keyboard",
+        words: &[],
+        what: "take a run's terminal and its keyboard, as enter on it does",
         cmd: Cmd::Join,
+    },
+    Command {
+        name: "resume",
+        args: "[all [commands]]",
+        words: &[&["all"], &["commands"]],
+        what: "pick an ended run back up — its conversation, a fresh shell; all: what a restart took",
+        cmd: Cmd::Resume,
     },
     Command {
         name: "shell",
         args: "",
+        words: &[],
         what: "another shell in this folder",
         cmd: Cmd::Shell,
     },
     Command {
-        name: "info",
+        name: "rename",
         args: "",
-        what: "show or hide the pane of facts beside the list",
-        cmd: Cmd::Info,
+        words: &[],
+        what: "rename what the cursor is on: a folder or a run",
+        cmd: Cmd::Rename,
     },
     Command {
-        name: "full",
+        name: "pin",
         args: "",
-        what: "give the pane the whole screen",
-        cmd: Cmd::Full,
+        words: &[],
+        what: "keep a run at the top of the list, or let it go back",
+        cmd: Cmd::Pin,
     },
     Command {
-        name: "rules",
+        name: "hide",
         args: "",
-        what: "go to the rules of this folder",
-        cmd: Cmd::Rules,
+        words: &[],
+        what: "take a run, a flow or a project off the list, never stopping it; in the hidden lens, bring it back",
+        cmd: Cmd::Hide,
+    },
+    Command {
+        name: "sort",
+        args: "",
+        words: &[],
+        what: "let a project sort itself again, after ⇧↑↓ put its rows in your order",
+        cmd: Cmd::Sort,
+    },
+    Command {
+        name: "pane",
+        args: "[full]",
+        words: &[&["full"]],
+        what: "show or hide the pane beside the list, or give it the whole screen",
+        cmd: Cmd::Pane,
+    },
+    Command {
+        name: "graph",
+        args: "",
+        words: &[],
+        what: "the wiring: every flow, what it runs and what sets it off, across projects",
+        cmd: Cmd::Graph,
+    },
+    Command {
+        name: "events",
+        args: "",
+        words: &[],
+        what: "every event, newest first, and what each set off; enter goes to its run or its flow",
+        cmd: Cmd::Events,
     },
     Command {
         name: "reload",
-        args: "",
-        what: "re-read the rule files from disk",
+        args: "[flows|shell]",
+        words: &[&["flows", "shell"]],
+        what: "read ~/.relay/flows again, or the shell's aliases and functions; both when bare",
         cmd: Cmd::Reload,
     },
     Command {
-        name: "reindex",
-        args: "",
-        what: "re-read the shell's aliases and functions",
-        cmd: Cmd::Reindex,
-    },
-    Command {
-        name: "approve",
-        args: "",
-        what: "approve the selected rule, now that it has changed",
-        cmd: Cmd::Approve,
-    },
-    Command {
-        name: "pause",
-        args: "",
-        what: "pause the selected rule, or let it run again",
-        cmd: Cmd::Pause,
+        name: "flow",
+        args: "run|pause|resume|approve|edit|new|test|draft|reload [name]",
+        words: &[&[
+            "run", "pause", "resume", "approve", "edit", "new", "test", "draft", "reload",
+        ]],
+        what: "a flow: the one named, else the one under the cursor · new writes one from words or the \
+               bare template · edit opens its flow.md, and says yes when it loads · test says what would fire · \
+               draft shows one drafted while you were busy",
+        cmd: Cmd::Flow,
     },
     Command {
         name: "new",
         args: "",
-        what: "write a rule by hand in the form",
+        words: &[],
+        what: "start a run by hand in the form",
         cmd: Cmd::New,
     },
     Command {
-        name: "edit",
-        args: "",
-        what: "edit the selected rule in the form",
-        cmd: Cmd::Edit,
+        name: "summary",
+        args: "[deep] [again] [since]",
+        words: &[&["deep", "again"], &["deep", "again"]],
+        what: "say what happened here since you last looked: a run, a flow, a project, everything (the catch-up's top), a question's asker · deep reads the logs · again makes a new one",
+        cmd: Cmd::Summary,
     },
     Command {
-        name: "editor",
-        args: "",
-        what: "open the selected rule's file in $EDITOR",
-        cmd: Cmd::Editor,
-    },
-    Command {
-        name: "summarise",
-        args: "",
-        what: "ask an assistant what an ended run did",
-        cmd: Cmd::Summarise,
+        name: "since",
+        args: "[when]",
+        words: &[],
+        what: "what happened while you were away, or since when",
+        cmd: Cmd::Since,
     },
     Command {
         name: "ask",
         args: "<words>",
+        words: &[],
         what: "hand plain words to an assistant yourself",
         cmd: Cmd::Ask,
     },
     Command {
         name: "filter",
-        args: "<text>",
-        what: "narrow the list to what matches",
+        args: "[words in: is: kind: by:]",
+        words: &[],
+        what: "narrow the list or graph as you type; esc on the list clears it",
         cmd: Cmd::Filter,
     },
     Command {
-        name: "all",
-        args: "",
-        what: "show the whole list (the lens: also tab)",
-        cmd: Cmd::LensAll,
+        name: "lens",
+        args: "all|agents|flows|hidden",
+        words: &[&["all", "agents", "flows", "hidden"]],
+        what: "show one kind of run inside the projects (tab steps through them)",
+        cmd: Cmd::Lens,
     },
     Command {
-        name: "agents",
+        name: "prune",
         args: "",
-        what: "the lens: only agent runs",
-        cmd: Cmd::LensAgents,
+        words: &[],
+        what: "let the journals of old runs go; the runs and their events stay",
+        cmd: Cmd::Prune,
     },
     Command {
-        name: "jobs",
-        args: "",
-        what: "the lens: only what a schedule started",
-        cmd: Cmd::LensJobs,
-    },
-    Command {
-        name: "reactions",
-        args: "",
-        what: "the lens: only what a rule fired",
-        cmd: Cmd::LensReactions,
-    },
-    Command {
-        name: "gc",
-        args: "",
-        what: "let the journals of old runs go",
-        cmd: Cmd::Gc,
-    },
-    Command {
-        name: "add-dir",
+        name: "up",
         args: "<path>",
-        what: "register a folder as a project, so it shows on the list",
-        cmd: Cmd::AddDir,
+        words: &[],
+        what: "register a folder as a project, as `rl up` does",
+        cmd: Cmd::Up,
     },
     Command {
         name: "help",
         args: "",
-        what: "list these commands",
+        words: &[],
+        what: "list these commands, and the keys for where you are (^h does that too)",
         cmd: Cmd::Help,
     },
     Command {
         name: "quit",
         args: "",
+        words: &[],
         what: "leave the panel",
         cmd: Cmd::Quit,
     },
@@ -246,19 +267,24 @@ pub fn matching(typed: &str) -> Vec<&'static Command> {
     out
 }
 
-/// A finished line: the command it names, and whatever followed it.
 /// The keyboard shortcut for a command, when it has one, for the commands list
-/// — so `^x` and `^c` are discoverable there, not only in the footer. `^x` is
-/// one key over whatever the cursor is on: it stops a run still going and is
-/// done with an ended one, so both `/stop` and `/done` wear it.
+/// — so every key is discoverable there, not only in the footer. `^x` is one
+/// key over whatever the cursor is on: it stops a run still going and archives
+/// an ended one, so both `/stop` and `/archive` wear it.
 pub fn key(cmd: Cmd) -> &'static str {
     match cmd {
         Cmd::Quit => "^c",
-        Cmd::Stop | Cmd::Done => "^x",
+        Cmd::Stop | Cmd::Archive => "^x",
+        Cmd::Rename => "^r",
+        Cmd::Pin => "^t",
+        Cmd::Graph => "^g",
+        Cmd::Pane => "^o",
+        Cmd::Filter => "^f",
         _ => "",
     }
 }
 
+/// A finished line: the command it names, and whatever followed it.
 pub fn parse(line: &str) -> Option<(&'static Command, String)> {
     let line = line.trim();
     let line = line.strip_prefix('/').unwrap_or(line).trim_start();
@@ -280,34 +306,87 @@ pub fn parse(line: &str) -> Option<(&'static Command, String)> {
     }
 }
 
+/// The words a command takes for its argument at `at` (0 the first), when
+/// they are a fixed set there; none otherwise.
+pub fn arg_words(c: &Command, at: usize) -> &'static [&'static str] {
+    c.words.get(at).copied().unwrap_or(&[])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn cmd(name: &str) -> &'static Command {
+        ALL.iter().find(|c| c.name == name).unwrap()
+    }
+
+    #[test]
+    fn each_command_offers_its_argument_words_in_turn() {
+        assert_eq!(
+            arg_words(cmd("flow"), 0),
+            [
+                "run", "pause", "resume", "approve", "edit", "new", "test", "draft", "reload"
+            ]
+        );
+        assert!(arg_words(cmd("flow"), 1).is_empty(), "the flows' names are the panel's");
+        assert_eq!(arg_words(cmd("reload"), 0), ["flows", "shell"]);
+        assert_eq!(arg_words(cmd("archive"), 0), ["seen"]);
+        assert_eq!(arg_words(cmd("pane"), 0), ["full"]);
+        assert_eq!(arg_words(cmd("resume"), 0), ["all"]);
+        assert_eq!(arg_words(cmd("resume"), 1), ["commands"]);
+        assert_eq!(arg_words(cmd("mark"), 0), ["done", "blocked", "working"]);
+        assert_eq!(arg_words(cmd("summary"), 1), ["deep", "again"]);
+        let lenses: Vec<&str> = super::super::rows::Lens::ALL.iter().map(|l| l.label()).collect();
+        assert_eq!(arg_words(cmd("lens"), 0), lenses.as_slice(), "the lenses the list has");
+        assert!(arg_words(cmd("stop"), 0).is_empty(), "nothing follows /stop");
+        assert!(arg_words(cmd("ask"), 0).is_empty(), "free words are not a set");
+    }
+
+    #[test]
+    fn the_hint_says_the_words_tab_offers() {
+        for c in ALL {
+            for (i, set) in c.words.iter().enumerate() {
+                for w in *set {
+                    assert!(
+                        c.args.contains(w),
+                        "/{} offers {w} but its hint {:?} does not say it",
+                        c.name,
+                        c.args
+                    );
+                }
+                assert!(!set.is_empty(), "/{} has an empty set at {i}", c.name);
+            }
+            if !c.words.is_empty() {
+                assert!(!c.args.is_empty(), "/{} takes words but hints none", c.name);
+            }
+        }
+    }
 
     fn names(typed: &str) -> Vec<&'static str> {
         matching(typed).iter().map(|c| c.name).collect()
     }
 
     #[test]
-    fn an_exact_name_beats_a_prefix() {
-        assert_eq!(names("done"), vec!["done", "done-all"]);
-        assert_eq!(names("DONE"), vec!["done", "done-all"]);
+    fn an_exact_name_comes_first() {
+        assert_eq!(names("flow"), vec!["flow"]);
+        assert_eq!(names("FLOW"), vec!["flow"]);
+        // `up` is a name, and sits inside nothing else.
+        assert_eq!(names("up"), vec!["up"]);
     }
 
     #[test]
     fn a_prefix_comes_before_a_name_it_only_sits_inside() {
-        // Only `rules` carries `rule` at all.
-        assert_eq!(names("rule"), vec!["rules"]);
-        // `pa` opens `pause`, and `done-all` has no `pa`.
-        assert_eq!(names("pa"), vec!["pause"]);
+        // `ma` opens `mark` and sits inside `summary`.
+        assert_eq!(names("ma"), vec!["mark", "summary"]);
+        // `re` opens these three, alphabetically.
+        assert_eq!(names("re"), vec!["reload", "rename", "resume"]);
     }
 
     #[test]
     fn a_name_matches_by_what_it_contains_too() {
-        // Nothing starts with `ll`; four names carry it, alphabetically.
-        assert_eq!(names("ll"), vec!["all", "done-all", "full", "shell"]);
-        // `it` opens nothing, and sits inside both of these.
-        assert_eq!(names("it"), vec!["edit", "editor", "quit"]);
+        assert_eq!(names("ll"), vec!["shell"]);
+        // `um` opens nothing, and sits inside both of these.
+        assert_eq!(names("um"), vec!["resume", "summary"]);
     }
 
     #[test]
@@ -330,8 +409,15 @@ mod tests {
     fn a_command_shows_its_key_shortcut_when_it_has_one() {
         assert_eq!(key(Cmd::Quit), "^c");
         assert_eq!(key(Cmd::Stop), "^x");
-        assert_eq!(key(Cmd::Done), "^x");
-        assert_eq!(key(Cmd::Watch), "", "most commands are the slash line, no key");
+        assert_eq!(key(Cmd::Archive), "^x");
+        assert_eq!(key(Cmd::Rename), "^r");
+        assert_eq!(key(Cmd::Pin), "^t");
+        assert_eq!(key(Cmd::Graph), "^g");
+        assert_eq!(key(Cmd::Pane), "^o");
+        assert_eq!(key(Cmd::Shell), "", "a shell is a command, not a key");
+        assert_eq!(key(Cmd::Filter), "^f");
+        assert_eq!(key(Cmd::Lens), "", "most commands are the slash line, no key");
+        assert_eq!(key(Cmd::Events), "", "^e is the line's: the end of it");
     }
 
     #[test]
@@ -355,29 +441,35 @@ mod tests {
         let (c, rest) = parse("/mark   blocked  ").unwrap();
         assert_eq!(c.cmd, Cmd::Mark);
         assert_eq!(rest, "blocked");
+        let (c, rest) = parse("/lens flows").unwrap();
+        assert_eq!(c.cmd, Cmd::Lens);
+        assert_eq!(rest, "flows");
     }
 
     #[test]
     fn a_prefix_that_names_one_command_is_enough() {
-        assert_eq!(parse("/sum").unwrap().0.cmd, Cmd::Summarise);
+        assert_eq!(parse("/sum").unwrap().0.cmd, Cmd::Summary);
         assert_eq!(parse("/q").unwrap().0.cmd, Cmd::Quit);
+        assert_eq!(parse("/ren").unwrap().0.cmd, Cmd::Rename);
+        assert_eq!(parse("/rel").unwrap().0.cmd, Cmd::Reload);
+        assert_eq!(parse("/ev").unwrap().0.cmd, Cmd::Events);
+        assert_eq!(parse("/fl run").unwrap().0.cmd, Cmd::Flow);
+        assert_eq!(parse("/hi").unwrap().0.cmd, Cmd::Hide);
+        assert_eq!(parse("/so").unwrap().0.cmd, Cmd::Sort);
+        assert_eq!(parse("/he").unwrap().0.cmd, Cmd::Help);
         let (c, rest) = parse("/fi this").unwrap();
         assert_eq!(c.cmd, Cmd::Filter);
         assert_eq!(rest, "this");
-        // `f` opens both `full` and `filter`, so it names neither.
-        assert!(parse("/f").is_none());
-    }
-
-    #[test]
-    fn an_exact_name_wins_over_the_longer_one_it_opens() {
-        assert_eq!(parse("/done").unwrap().0.cmd, Cmd::Done);
-        assert_eq!(parse("/done-all").unwrap().0.cmd, Cmd::DoneAll);
     }
 
     #[test]
     fn an_ambiguous_or_unknown_name_is_nothing() {
-        assert!(parse("/d").is_none());
-        assert!(parse("/e").is_none());
+        // `re` opens `reload` and `rename`; `p` opens three.
+        assert!(parse("/re").is_none());
+        assert!(parse("/p").is_none());
+        assert!(parse("/done").is_none(), "gone: /archive, or /mark done");
+        assert!(parse("/approve").is_none(), "gone: /flow approve");
+        assert!(parse("/edit").is_none(), "gone: /flow edit");
         assert!(parse("/nope").is_none());
         assert!(parse("/").is_none());
         assert!(parse("").is_none());

@@ -1,9 +1,8 @@
 //! What to do when something fires.
 //!
 //! One shape, used by everything that can start a run on its own — a
-//! schedule's entry, a decision's option, later a workflow's step — so that
-//! the YAML looks the same wherever it is written and one piece of code turns
-//! it into a `RunSpec`.
+//! decision's option, a flow's step — so that the YAML looks the same
+//! wherever it is written and one piece of code turns it into a `RunSpec`.
 //!
 //! ```yaml
 //! run: "date +%T >> pulse.log"     # a string goes through sh -c
@@ -30,7 +29,9 @@ pub enum Task {
     Shell(String),
     /// argv, no shell involved.
     Argv(Vec<String>),
-    /// An agent CLI with a prompt, run headless.
+    /// An agent CLI with a prompt, run headless. A step of a flow may leave
+    /// the prompt out and take the flow's own; whoever starts the run says
+    /// when there is none to take.
     Agent {
         agent: String,
         prompt: Option<String>,
@@ -64,8 +65,8 @@ impl Task {
 }
 
 /// What the three forms are, said once, for every error message about them.
-const FORMS: &str = "a string (a shell line), a list (argv), or a map with `agent` and `prompt` \
-                     or `prompt_file`";
+const FORMS: &str = "a string (a shell line), a list (argv), or a map with `agent` and, \
+                     usually, `prompt` or `prompt_file`";
 
 impl<'de> Deserialize<'de> for Task {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
@@ -120,7 +121,6 @@ impl<'de> Visitor<'de> for TaskVisitor {
         };
         match (&prompt, &prompt_file) {
             (Some(_), Some(_)) => Err(de::Error::custom("`prompt` or `prompt_file`, not both")),
-            (None, None) => Err(de::Error::custom("an agent needs `prompt` or `prompt_file`")),
             _ => Ok(Task::Agent {
                 agent,
                 prompt,
@@ -204,9 +204,9 @@ impl Action {
 /// Declares a struct that carries the 7 [`Action`] fields — `run`, `cwd`,
 /// `env`, `tags`, `ref`, `title`, `no_tty`, with their serde attributes —
 /// alongside whatever else is its own, plus a `fn action(&self) -> Action`
-/// that assembles them. `DecisionOption`, `ScheduleSpec` and `ReactionSpec`
-/// are all declared through this, so the field list and the mapping onto
-/// `Action` are written once instead of by hand in three places.
+/// that assembles them. `DecisionOption` and `StepSpec` are both declared
+/// through this, so the field list and the mapping onto `Action` are written
+/// once instead of by hand in two places.
 ///
 /// This is not `#[serde(flatten)]`: flatten buffers deserialization through
 /// a generic `Content`, which loses the string-ness of an ambiguous YAML
@@ -248,7 +248,7 @@ macro_rules! action_struct {
         }
 
         impl $name {
-            /// What it starts, as the shape every other kind of rule uses too.
+            /// What it starts, as the shape every other kind of action uses too.
             pub fn action(&self) -> crate::action::Action {
                 crate::action::Action {
                     run: self.run.clone(),
@@ -309,10 +309,24 @@ mod tests {
         assert!(err(serde_json::json!({ "shell": "echo hi" })).contains("no `shell`"));
         assert!(err(serde_json::json!({ "prompt": "hi" })).contains("needs `agent`"));
         assert!(err(serde_json::json!({ "agent": "claude", "prompt": "a", "prompt_file": "b" })).contains("not both"));
-        assert!(err(serde_json::json!({ "agent": "claude" })).contains("needs `prompt`"));
         assert!(err(serde_json::json!([])).contains("empty list"));
         assert!(err(serde_json::json!("  ")).contains("empty"));
         assert!(err(serde_json::json!(7)).contains("a string (a shell line)"));
+    }
+
+    #[test]
+    fn an_agent_may_leave_its_prompt_out() {
+        assert_eq!(
+            task(serde_json::json!({ "agent": "claude" })),
+            Task::Agent {
+                agent: "claude".into(),
+                prompt: None,
+                prompt_file: None,
+                args: vec![],
+            }
+        );
+        let back = serde_json::to_value(task(serde_json::json!({ "agent": "claude", "args": ["-v"] }))).unwrap();
+        assert_eq!(back, serde_json::json!({ "agent": "claude", "args": ["-v"] }));
     }
 
     #[test]

@@ -93,7 +93,7 @@ impl RpcError {
     pub const METHOD_NOT_FOUND: i64 = -32601;
     pub const INVALID_PARAMS: i64 = -32602;
     pub const INTERNAL: i64 = -32603;
-    /// Server-defined: the named run/schedule/plugin does not exist.
+    /// Server-defined: the named run/flow/plugin does not exist.
     pub const NOT_FOUND: i64 = -32004;
     /// Someone else holds what was asked for (a run's keyboard).
     pub const BUSY: i64 = -32005;

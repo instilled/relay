@@ -1,11 +1,9 @@
-//! The terminal screen: a run's live output rendered through a `vt100`
-//! screen, watched first, joined on the first keypress (J7).
+//! The terminal screen: an ended run's output rendered through a `vt100`
+//! screen, to read (J7).
 //!
-//! Two daemon connections at most: the watch connection carries output for
-//! as long as this view lasts — which outlives stepping back to the list, so
-//! coming back is instant and keeps its place — and a join connection is
-//! opened on demand, carrying keystrokes and resizes. That way escalating to
-//! join never restarts the screen, and letting go never loses it.
+//! One daemon connection, a watcher's: it carries the output for as long as
+//! this view lasts, which outlives stepping back to the list, so coming back
+//! is instant and keeps its place.
 
 use crate::attach::client_name;
 use crate::client::Client;
@@ -13,7 +11,7 @@ use rl_core::Home;
 use rl_detect::ansi;
 use rl_proto::methods::{AttachInfo, AttachParams, RunAttach};
 use rl_proto::types::AttachMode;
-use rl_session::proto::{Frame, read_frame};
+use rl_session::proto::{Frame, FrameReader};
 use std::io;
 use tokio::io::BufReader;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
@@ -26,7 +24,10 @@ const SCROLLBACK_ROWS: usize = 10_000;
 pub struct TermView {
     pub id: String,
     pub info: AttachInfo,
-    rd: BufReader<OwnedReadHalf>,
+    /// Cancel-safe: the panel polls this inside a `select!` beside keys,
+    /// the refresh tick and every other source, so a half-read frame has to
+    /// survive losing that race.
+    rd: FrameReader<BufReader<OwnedReadHalf>>,
     _wr: OwnedWriteHalf,
     parser: vt100::Parser,
     /// Draws the box-drawing set as the characters it stands for. `vt100`
@@ -38,11 +39,17 @@ pub struct TermView {
     /// Latest word from the daemon and when it arrived, for the footer.
     pub note: Option<(String, std::time::Instant)>,
     pub ended: Option<i32>,
+    /// The stream went without an exit: the run was not seen to end, so what
+    /// is on screen is the last that was heard, not the last that happened.
+    pub lost: bool,
     /// How far back the view is, in rows; 0 is the live screen.
     scroll: usize,
     /// The watch stream is over. An ended run's output is still worth
     /// reading, so the view stays; there is just nothing more to poll.
     pub over: bool,
+    /// A run on pipes: its bare `\n`s get their `\r`s, or the screen climbs
+    /// down as a staircase.
+    newlines: Option<crate::attach::Newlines>,
 }
 
 impl TermView {
@@ -56,9 +63,12 @@ impl TermView {
                 client: client_name(),
                 scrollback: SCROLLBACK,
                 take: false,
+                terminal: Some(crate::attach::terminal()),
             })
             .await?;
         let (rd, wr) = c.into_parts();
+        let rd = FrameReader::new(rd);
+        let newlines = (!info.tty).then(crate::attach::Newlines::default);
         let (cols, rows) = if info.live && info.cols > 0 {
             (info.cols, info.rows)
         } else {
@@ -74,8 +84,10 @@ impl TermView {
             pane,
             note: None,
             ended: None,
+            lost: false,
             scroll: 0,
             over: false,
+            newlines,
         })
     }
 
@@ -85,12 +97,16 @@ impl TermView {
 
     /// Next frame from the watch connection. `Ok(false)` when the stream is over.
     pub async fn pump(&mut self) -> io::Result<bool> {
-        match read_frame(&mut self.rd).await? {
+        match self.rd.next().await? {
             None => {
                 self.over = true;
                 Ok(false)
             }
             Some(Frame::Output(b)) => {
+                let b = match self.newlines.as_mut() {
+                    Some(n) => n.fix(&b),
+                    None => b,
+                };
                 self.parser.process(&self.graphics.rewrite(&b));
                 // New output must not yank a reader back to the bottom.
                 if self.scroll > 0 {

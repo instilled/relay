@@ -1,8 +1,9 @@
 //! Decisions: questions waiting on a human, and how they were answered.
 //!
-//! One row per question. A `group_key` is unique among open rows, so raising
-//! the same question again replaces the one already waiting instead of piling
-//! another line on top of it.
+//! One row per question. A `group_key` is unique among open rows of one kind of
+//! asker — a flow's ask steps, or everything else — so raising the same question
+//! again replaces the one already waiting instead of piling another line on top
+//! of it, and never takes over the other kind's.
 
 use crate::{conv, conv_str};
 use anyhow::{Result, bail};
@@ -13,23 +14,29 @@ use rl_proto::methods::DecisionFilter;
 use rusqlite::{Connection, OptionalExtension, Row, params, params_from_iter, types::Value};
 use std::path::PathBuf;
 
-const COLS: &str = "id, created_at, updated_at, workspace, run, flow, group_key, title, summary, options_json, \
+const COLS: &str = "id, created_at, updated_at, workspace, run, chain, group_key, title, summary, options_json, \
      multi, status, expires_at, resolved_at, chosen_json, outcomes_json, note";
 const DEFAULT_LIMIT: u32 = 100;
 
 /// Writes a new question. Returns it as stored.
 pub fn insert(conn: &Connection, d: &Decision) -> Result<Decision> {
+    insert_by(conn, d, None)
+}
+
+/// The same, owned by a flow step (`<firing>/<step>`) when `by_step` says so: stored with its
+/// owner in one go, since which group it may share depends on it.
+pub fn insert_by(conn: &Connection, d: &Decision, by_step: Option<&str>) -> Result<Decision> {
     conn.execute(
-        "INSERT INTO decisions (id, created_at, updated_at, workspace, run, flow, group_key, title, summary, \
-         options_json, multi, status, expires_at, resolved_at, chosen_json, outcomes_json, note) \
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
+        "INSERT INTO decisions (id, created_at, updated_at, workspace, run, chain, group_key, title, summary, \
+         options_json, multi, status, expires_at, resolved_at, chosen_json, outcomes_json, note, by_step) \
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)",
         params![
             d.id,
             to_millis(d.created_at),
             to_millis(d.updated_at),
             d.workspace.to_string_lossy(),
             d.run,
-            d.flow,
+            d.chain,
             d.group,
             d.title,
             d.summary,
@@ -41,6 +48,7 @@ pub fn insert(conn: &Connection, d: &Decision) -> Result<Decision> {
             serde_json::to_string(&d.chosen)?,
             serde_json::to_string(&d.outcome_runs)?,
             d.note,
+            by_step,
         ],
     )?;
     get(conn, &d.id)?.ok_or_else(|| anyhow::anyhow!("decision {} vanished", d.id))
@@ -49,13 +57,13 @@ pub fn insert(conn: &Connection, d: &Decision) -> Result<Decision> {
 /// Replaces the wording and options of an open question, keeping its id.
 pub fn restate(conn: &Connection, id: &str, d: &Decision, now: Timestamp) -> Result<Decision> {
     conn.execute(
-        "UPDATE decisions SET updated_at = ?2, run = ?3, flow = ?4, title = ?5, summary = ?6, options_json = ?7, \
+        "UPDATE decisions SET updated_at = ?2, run = ?3, chain = ?4, title = ?5, summary = ?6, options_json = ?7, \
          multi = ?8, expires_at = ?9, workspace = ?10 WHERE id = ?1 AND status = 'open'",
         params![
             id,
             to_millis(now),
             d.run,
-            d.flow,
+            d.chain,
             d.title,
             d.summary,
             serde_json::to_string(&d.options)?,
@@ -78,11 +86,16 @@ pub fn get(conn: &Connection, id: &str) -> Result<Option<Decision>> {
 }
 
 /// The open question of a group, if there is one.
-pub fn open_in_group(conn: &Connection, group: &str) -> Result<Option<Decision>> {
+/// The open question in `group` a flow step asked (`by_step`), or one asked otherwise: a group
+/// holds one of each.
+pub fn open_in_group(conn: &Connection, group: &str, by_step: bool) -> Result<Option<Decision>> {
     Ok(conn
         .query_row(
-            &format!("SELECT {COLS} FROM decisions WHERE group_key = ?1 AND status = 'open'"),
-            params![group],
+            &format!(
+                "SELECT {COLS} FROM decisions \
+                 WHERE group_key = ?1 AND status = 'open' AND (by_step IS NOT NULL) = ?2"
+            ),
+            params![group, by_step],
             from_row,
         )
         .optional()?)
@@ -98,14 +111,23 @@ pub fn list(conn: &Connection, f: &DecisionFilter) -> Result<Vec<Decision>> {
         args.push(run.clone().into());
         sql.push_str(&format!(" AND run = ?{}", args.len()));
     }
-    if let Some(flow) = &f.flow {
-        args.push(flow.clone().into());
-        sql.push_str(&format!(" AND flow = ?{}", args.len()));
+    if let Some(chain) = &f.chain {
+        args.push(chain.clone().into());
+        sql.push_str(&format!(" AND chain = ?{}", args.len()));
     }
     sql.push_str(" ORDER BY created_at DESC, id DESC LIMIT ");
     sql.push_str(&f.limit.unwrap_or(DEFAULT_LIMIT).to_string());
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(params_from_iter(args), from_row)?;
+    Ok(rows.collect::<std::result::Result<_, _>>()?)
+}
+
+/// The open questions asked in one folder, as when its project is removed.
+pub fn open_in(conn: &Connection, workspace: &std::path::Path) -> Result<Vec<Decision>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {COLS} FROM decisions WHERE status = 'open' AND workspace = ?1 ORDER BY created_at, id"
+    ))?;
+    let rows = stmt.query_map(params![workspace.to_string_lossy()], from_row)?;
     Ok(rows.collect::<std::result::Result<_, _>>()?)
 }
 
@@ -161,20 +183,30 @@ pub fn resolve(
     get(conn, id)?.ok_or_else(|| anyhow::anyhow!("decision {id} vanished"))
 }
 
-/// Which reaction raised this question, if one did.
-pub fn by_reaction(conn: &Connection, id: &str) -> Result<Option<String>> {
+/// Which flow step owns this question, as `<firing>/<step>`, if one does: its answer is the
+/// engine's to carry out.
+pub fn by_step(conn: &Connection, id: &str) -> Result<Option<String>> {
     Ok(conn
-        .query_row("SELECT by_reaction FROM decisions WHERE id = ?1", params![id], |r| {
-            r.get(0)
-        })
+        .query_row("SELECT by_step FROM decisions WHERE id = ?1", params![id], |r| r.get(0))
         .optional()?
         .flatten())
 }
 
-/// Records that a reaction is behind a question.
-pub fn set_by_reaction(conn: &Connection, id: &str, name: &str) -> Result<()> {
-    conn.execute("UPDATE decisions SET by_reaction = ?2 WHERE id = ?1", params![id, name])?;
+/// Records that a flow step owns a question.
+pub fn set_by_step(conn: &Connection, id: &str, by: &str) -> Result<()> {
+    conn.execute("UPDATE decisions SET by_step = ?2 WHERE id = ?1", params![id, by])?;
     Ok(())
+}
+
+/// The open question a flow step owns, by `<firing>/<step>`, if there is one.
+pub fn open_by_step(conn: &Connection, by: &str) -> Result<Option<String>> {
+    Ok(conn
+        .query_row(
+            "SELECT id FROM decisions WHERE by_step = ?1 AND status = 'open' ORDER BY rowid DESC LIMIT 1",
+            params![by],
+            |r| r.get(0),
+        )
+        .optional()?)
 }
 
 /// Records the runs an answer started, once they are up.
@@ -206,7 +238,7 @@ fn from_row(row: &Row) -> rusqlite::Result<Decision> {
         updated_at: from_millis(row.get(2)?).map_err(|e| conv(2, e))?,
         workspace: PathBuf::from(row.get::<_, String>(3)?),
         run: row.get(4)?,
-        flow: row.get(5)?,
+        chain: row.get(5)?,
         group: row.get(6)?,
         title: row.get(7)?,
         summary: row.get(8)?,
@@ -232,7 +264,7 @@ mod tests {
             id: id.into(),
             workspace: "/w".into(),
             run: Some("r1".into()),
-            flow: "f1".into(),
+            chain: "f1".into(),
             group: group.map(Into::into),
             title: format!("question {id}"),
             summary: None,
@@ -326,7 +358,7 @@ mod tests {
             .call_blocking(|c| insert(c, &decision("d1", Some("nightly/errors"))))
             .unwrap();
         let open = ledger
-            .call_blocking(|c| open_in_group(c, "nightly/errors"))
+            .call_blocking(|c| open_in_group(c, "nightly/errors", false))
             .unwrap()
             .unwrap();
         assert_eq!(open.id, "d1");
@@ -337,7 +369,21 @@ mod tests {
                 .call_blocking(|c| insert(c, &decision("d2", Some("nightly/errors"))))
                 .is_err()
         );
-        // …but restating the open one is how it is asked again.
+        // …unless a flow step asks it: one of each kind of asker.
+        ledger
+            .call_blocking(|c| insert_by(c, &decision("s1", Some("nightly/errors")), Some("f1/review")))
+            .unwrap();
+        let stepped = ledger
+            .call_blocking(|c| open_in_group(c, "nightly/errors", true))
+            .unwrap()
+            .unwrap();
+        assert_eq!(stepped.id, "s1");
+        assert!(
+            ledger
+                .call_blocking(|c| insert_by(c, &decision("s2", Some("nightly/errors")), Some("f2/review")))
+                .is_err()
+        );
+        // Restating the open one is how it is asked again.
         let mut next = decision("ignored", Some("nightly/errors"));
         next.title = "3 errors, not 2".into();
         let restated = ledger
@@ -390,5 +436,26 @@ mod tests {
             .map(|d| d.id)
             .collect();
         assert_eq!(ids, ["d1"]);
+    }
+
+    #[test]
+    fn a_step_owns_its_question() {
+        let ledger = Ledger::open_in_memory().unwrap();
+        ledger.call_blocking(|c| insert(c, &decision("d1", None))).unwrap();
+        assert_eq!(ledger.call_blocking(|c| by_step(c, "d1")).unwrap(), None);
+        ledger.call_blocking(|c| set_by_step(c, "d1", "f1/review")).unwrap();
+        assert_eq!(
+            ledger.call_blocking(|c| by_step(c, "d1")).unwrap().as_deref(),
+            Some("f1/review")
+        );
+        assert_eq!(ledger.call_blocking(|c| by_step(c, "nope")).unwrap(), None);
+        assert_eq!(
+            ledger
+                .call_blocking(|c| open_by_step(c, "f1/review"))
+                .unwrap()
+                .as_deref(),
+            Some("d1")
+        );
+        assert_eq!(ledger.call_blocking(|c| open_by_step(c, "f1/other")).unwrap(), None);
     }
 }

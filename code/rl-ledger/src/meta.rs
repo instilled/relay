@@ -1,5 +1,5 @@
 //! A handful of key/value rows for the daemon's own bookkeeping: where the
-//! reactor got to in the event stream, and whatever else needs to survive a
+//! flows got to in the event stream, and whatever else needs to survive a
 //! restart without deserving a table.
 
 use anyhow::Result;

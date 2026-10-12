@@ -6,9 +6,11 @@ members = [
   "code/rl-session",
   "code/rl-core",
   "code/rl-detect",
+  "code/rl-flow",
   "code/rl-ledger",
   "code/rl-proto",
 ]
+exclude = ["vendor"]
 
 [workspace.package]
 version = "0.1.0"
@@ -19,6 +21,7 @@ repository = "https://github.com/instilled/relay"
 [workspace.dependencies]
 rl-core = { path = "code/rl-core" }
 rl-detect = { path = "code/rl-detect" }
+rl-flow = { path = "code/rl-flow" }
 rl-ledger = { path = "code/rl-ledger" }
 rl-proto = { path = "code/rl-proto" }
 rl-daemon = { path = "code/rl-daemon" }
@@ -26,7 +29,7 @@ rl-session = { path = "code/rl-session" }
 
 anyhow = "1"
 jiff = { version = "0.2", features = ["serde"] }
-nix = { version = "0.31", features = ["process", "signal", "fs", "hostname"] }
+nix = { version = "0.31", features = ["process", "signal", "fs", "hostname", "term"] }
 portable-pty = "0.9"
 regex = "1"
 rusqlite = { version = "0.40", features = ["bundled"] }
@@ -45,3 +48,13 @@ tokio-util = { version = "0.7", features = ["rt"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tempfile = "3"
+unicode-width = "0.2"
+
+# crossterm 0.29.0 with one change, in its unix key parser: a `CSI ?` sequence
+# ends at its final byte rather than only at a `u` or a `c`. Without it a mode
+# report a run asked the terminal for, answered after the panel took the
+# terminal back, starts a sequence that never ends and every key after it goes
+# into it — the panel draws on and hears nothing. Drop this when a crossterm
+# release carries the fix.
+[patch.crates-io]
+crossterm = { path = "vendor/crossterm" }

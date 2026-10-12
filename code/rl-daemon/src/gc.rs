@@ -1,18 +1,21 @@
-//! Retention: the one thing Relay deletes, and only when told to. The
-//! journal — a run's terminal bytes, its log and sidecar files — goes once
-//! the run has ended longer ago than `retention: 30d` says; the run and its
-//! events stay, and an event says the journal went. `rl gc` does it now,
-//! `rld` does it daily.
+//! Retention: the one thing Relay deletes. The journal — a run's terminal
+//! bytes, its log and sidecar files — goes once the run has ended longer ago
+//! than `retention` says, `30d` unless the file says otherwise; the run and
+//! its events stay, and an event says the journal went. A firing's folder,
+//! `runs/<firing>/`, goes with its runs: when the firing ended as long ago.
+//! `retention: never` keeps every byte. `rl prune` does it now, `rld` does it daily.
 
 use crate::config::Loaded;
 use anyhow::{Context, Result, bail};
 use jiff::Timestamp;
 use rl_core::Home;
 use rl_core::time::parse_duration;
+use rl_flow::def::valid_name;
 use rl_ledger::events::NewEvent;
-use rl_ledger::{Ledger, events, meta, runs, session_io};
+use rl_ledger::{Ledger, events, firings, meta, runs, session_io};
 use rl_proto::methods::GcReport;
 use rl_proto::types::event_kind;
+use std::path::Path;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
@@ -37,8 +40,11 @@ pub async fn run(
     let (spec, from) = match (older_than, retention) {
         (Some(s), _) => (s.to_string(), "asked"),
         (None, Some(s)) => (s.to_string(), "config"),
-        (None, None) => bail!("no retention: `retention: 30d` in config.yaml, or --older-than"),
+        (None, None) => (rl_proto::config::DEFAULT_RETENTION.to_string(), "default"),
     };
+    if rl_proto::config::is_never(&spec) {
+        bail!("retention is `never`: nothing goes. `rl prune --older-than 30d` to let some go anyway");
+    }
     let d = parse_duration(&spec).ok_or_else(|| anyhow::anyhow!("`{spec}` is not a duration (30d, 12h)"))?;
     let now = Timestamp::now();
     let before = now - d;
@@ -90,6 +96,8 @@ pub async fn run(
             "gc: some journal files could not be removed; see prior warnings"
         );
     }
+    let (firings, firing_bytes) = firing_folders(home, ledger, before, dry_run).await?;
+    bytes += firing_bytes;
     Ok(GcReport {
         older_than: spec,
         from: from.into(),
@@ -97,7 +105,72 @@ pub async fn run(
         runs: dropped.len(),
         bytes,
         files,
+        firings,
     })
+}
+
+/// The folders of firings that ended before `before` — `runs/<firing>/` in each flow's folder,
+/// all their steps left — gone with their runs' journals, unless `dry_run`. Only a folder named
+/// for a firing of that flow the ledger knows has ended goes: anything else under `runs/` — a
+/// file or a folder the flow keeps there itself, a firing still open — stays. How many went, and
+/// their bytes.
+async fn firing_folders(home: &Home, ledger: &Ledger, before: Timestamp, dry_run: bool) -> Result<(usize, u64)> {
+    let mut seen: Vec<(String, Vec<String>)> = Vec::new();
+    if let Ok(flows) = std::fs::read_dir(home.flows_dir()) {
+        for flow in flows.flatten() {
+            let name = flow.file_name().to_string_lossy().into_owned();
+            if !valid_name(&name) {
+                continue;
+            }
+            let Ok(entries) = std::fs::read_dir(flow.path().join("runs")) else {
+                continue;
+            };
+            // A link is not followed: only a folder that is one.
+            let ids = entries
+                .flatten()
+                .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect();
+            seen.push((name, ids));
+        }
+    }
+    let gone = ledger
+        .call(move |c| {
+            seen.into_iter()
+                .map(|(flow, ids)| {
+                    let ended = firings::ended_before(c, &flow, &ids, before)?;
+                    Ok((flow, ended))
+                })
+                .collect::<Result<Vec<_>>>()
+        })
+        .await?;
+    let (mut count, mut bytes) = (0usize, 0u64);
+    for (flow, ids) in gone {
+        for id in ids {
+            let dir = home.firing_dir(&flow, &id);
+            let size = size_of(&dir);
+            // One that could not go is not counted: it goes at a later sweep.
+            if !dry_run && let Err(e) = std::fs::remove_dir_all(&dir) {
+                warn!(flow, firing = id, error = %e, "gc: a firing's folder not removed");
+                continue;
+            }
+            bytes += size;
+            count += 1;
+        }
+    }
+    Ok((count, bytes))
+}
+
+/// The bytes of the files under `dir`; a link is not followed.
+fn size_of(dir: &Path) -> u64 {
+    let Ok(entries) = std::fs::read_dir(dir) else { return 0 };
+    entries
+        .flatten()
+        .map(|e| match e.file_type() {
+            Ok(t) if t.is_dir() => size_of(&e.path()),
+            _ => e.metadata().map(|m| m.len()).unwrap_or(0),
+        })
+        .sum()
 }
 
 /// `4.1 MB`, `312 kB`, `88 B`.
@@ -110,17 +183,13 @@ pub fn fmt_bytes(n: u64) -> String {
     }
 }
 
-/// Once a day, when the config says how long the journal is kept.
+/// Once a day, unless the config says the journal is kept for good.
 pub async fn daily(home: Home, ledger: Ledger, config: Arc<RwLock<Loaded>>, shutdown: CancellationToken) {
     loop {
-        let retention = config
-            .read()
-            .unwrap()
-            .config
-            .retention
-            .as_ref()
-            .and_then(|r| r.journal.clone());
-        if let Some(keep) = retention {
+        // Unset is not "never": a journal is kept 30d unless the file says
+        // otherwise, so an old run's terminal bytes do not pile up for good.
+        let keep = config.read().unwrap().config.retention_journal().to_string();
+        if !rl_proto::config::is_never(&keep) {
             let due = match ledger.call(|c| meta::get_i64(c, LAST_AT)).await {
                 Ok(Some(last)) => Timestamp::now().as_millisecond() - last >= DAILY_MS,
                 Ok(None) => true,

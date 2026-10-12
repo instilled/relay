@@ -3,7 +3,6 @@
 //! connections so the `daemon.shutdown` reply gets out.
 
 use crate::router::Router;
-use crate::schedule::Scheduler;
 use crate::supervisor::{self, Supervisor};
 use anyhow::{Context, Result, bail};
 use jiff::Timestamp;
@@ -28,13 +27,14 @@ pub struct Daemon {
     pub home: Home,
     pub ledger: Ledger,
     pub registry: Arc<Registry>,
-    /// `config.yaml` as last read; `config.get` and a rules reload re-read it.
+    /// `config.yaml` as last read; `config.get` re-reads it.
     /// Shared with the daily sweep (`gc`).
     pub config: Arc<std::sync::RwLock<crate::config::Loaded>>,
     pub supervisor: Arc<Supervisor>,
-    pub scheduler: Arc<Scheduler>,
     pub decisions: Arc<crate::decisions::Decisions>,
-    pub reactor: Arc<crate::reactions::Reactor>,
+    pub flows: Arc<crate::flows::Flows>,
+    /// What the configured badges last said of each folder's branch.
+    pub badges: crate::badges::Badges,
     pub started_at: Timestamp,
     pub shutdown: CancellationToken,
 }
@@ -46,6 +46,9 @@ pub struct ServeOptions {
     /// Where `rl` is, for the hook commands CLIs call back with; defaults to
     /// `$RELAY_RL_BIN` or a sibling of `rld`.
     pub rl_bin: Option<PathBuf>,
+    /// The `rl` a flow's steps find first on their `PATH`, linked into `run/bin/`; defaults to
+    /// the one beside `rld`, and with none there a step's `PATH` is left as it was.
+    pub step_rl: Option<PathBuf>,
     /// Detection registry; defaults to the built-ins merged with `$RELAY_HOME/detect/`.
     pub registry: Option<Arc<Registry>>,
 }
@@ -64,6 +67,9 @@ pub async fn serve_with(home: Home, shutdown: CancellationToken, opts: ServeOpti
     std::fs::write(home.daemon_pid(), std::process::id().to_string())?;
     let session_bin = opts.session_bin.unwrap_or_else(supervisor::locate_session_bin);
     let rl_bin = opts.rl_bin.unwrap_or_else(supervisor::locate_rl_bin);
+    // Refreshed at each start, so a step's `rl` is always the one beside the `rld` running it.
+    let step_rl = opts.step_rl.or_else(crate::flows::path::beside_rld);
+    let bin = crate::flows::path::link_rl(&home, step_rl.as_deref());
     info!(socket = %sock_path.display(), pid = std::process::id(), session_bin = %session_bin.display(), "rld listening");
 
     let registry = match opts.registry {
@@ -97,13 +103,13 @@ pub async fn serve_with(home: Home, shutdown: CancellationToken, opts: ServeOpti
         ),
         Err(e) => warn!(error = %e, "reconciling sessions"),
     }
-    let registry2 = registry.clone();
-    let registry3 = registry.clone();
-    let registry4 = registry.clone();
     match crate::config::seed(&home) {
         Ok(true) => info!(file = %home.config_file().display(), "config.yaml seeded"),
         Ok(false) => {}
         Err(e) => warn!(error = %format!("{e:#}"), "config.yaml not seeded"),
+    }
+    if let Err(e) = crate::badges::seed(&home) {
+        warn!(error = %format!("{e:#}"), "badges not seeded");
     }
     let config = crate::config::load(&home);
     match &config.error {
@@ -118,61 +124,50 @@ pub async fn serve_with(home: Home, shutdown: CancellationToken, opts: ServeOpti
         config.clone(),
         shutdown.child_token(),
     ));
-    let scheduler = Arc::new(Scheduler::new(
-        home.clone(),
-        ledger.clone(),
-        supervisor.clone(),
-        registry,
-        shutdown.child_token(),
-    ));
-    // Loaded before the socket answers, so `rl schedule ls` right after
-    // `rl daemon start` already knows when things fire.
-    match scheduler.reload().await {
-        Ok(r) => {
-            for e in &r.errors {
-                warn!(schedule = %e, "schedule not loaded");
-            }
-        }
-        Err(e) => warn!(error = %format!("{e:#}"), "schedules not loaded"),
-    }
-    tokio::spawn(scheduler.clone().serve());
     let decisions = Arc::new(crate::decisions::Decisions::new(
         ledger.clone(),
         supervisor.clone(),
-        registry2,
+        registry.clone(),
         shutdown.child_token(),
     ));
     tokio::spawn(decisions.clone().serve());
-    let reactor = Arc::new(crate::reactions::Reactor::new(
+    let flows = crate::flows::Flows::new(
         home.clone(),
         ledger.clone(),
         supervisor.clone(),
         decisions.clone(),
-        registry3,
+        registry.clone(),
+        bin,
         shutdown.child_token(),
-    ));
-    // Read before the socket answers, so a rule is live as soon as `rld` is.
-    match reactor.reload().await {
-        Ok(r) => {
-            for e in &r.errors {
-                warn!(reaction = %e, "reaction not loaded");
-            }
-        }
-        Err(e) => warn!(error = %format!("{e:#}"), "reactions not loaded"),
+    );
+    // Loaded before the socket answers, so `rl flow list` right after
+    // `rl daemon start` already knows every flow.
+    if let Err(e) = flows.reload().await {
+        warn!(error = %format!("{e:#}"), "flows not loaded");
     }
-    tokio::spawn(reactor.clone().serve());
+    // Where the loop starts reading, settled before anything can fire.
+    if let Err(e) = flows.cursor().await {
+        warn!(error = %format!("{e:#}"), "flows: events cursor");
+    }
+    // Firings carried on from what happened while Relay was away, the runs the
+    // supervisor found ended or lost among it, before anything can fire.
+    if let Err(e) = flows.reconcile().await {
+        warn!(error = %format!("{e:#}"), "flows: carrying firings on");
+    }
+    tokio::spawn(flows.clone().serve());
     let daemon = Arc::new(Daemon {
         home: home.clone(),
         ledger,
-        registry: registry4,
+        registry,
         config: config.clone(),
         supervisor,
-        scheduler,
         decisions,
-        reactor,
+        flows,
+        badges: crate::badges::Badges::new(home.plugins_dir(), crate::badges::EVERY, crate::badges::WAIT),
         started_at: Timestamp::now(),
         shutdown: shutdown.clone(),
     });
+    tokio::spawn(crate::recap::sweep(daemon.clone()));
     let mut router: Router<Daemon> = Router::new();
     crate::handlers::register(&mut router);
     let router = Arc::new(router);

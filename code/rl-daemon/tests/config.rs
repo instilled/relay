@@ -87,10 +87,10 @@ async fn config_is_read_resolved_and_refused_when_wrong() {
     );
 
     // An agent the registry does not know, or a model it cannot pass.
-    std::fs::write(home.config_file(), "assistants:\n  interpret: gemini\n").unwrap();
+    std::fs::write(home.config_file(), "assistants:\n  interpret: aider\n").unwrap();
     let r: ConfigReport = c.ok("config.get", json!(null)).await;
     assert!(
-        r.errors[0].contains("gemini") && r.errors[0].contains("detect/gemini.yaml"),
+        r.errors[0].contains("aider") && r.errors[0].contains("detect/aider.yaml"),
         "{r:?}"
     );
     assert!(r.interpret.is_none());

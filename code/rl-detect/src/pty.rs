@@ -128,6 +128,8 @@ pub struct Heuristics {
     running: Option<(String, Timestamp)>,
     /// Commands finished since they were last drained.
     done: Vec<ShellCommand>,
+    /// The folder a shell last said it was in (OSC 7), until drained.
+    cwd: Option<std::path::PathBuf>,
 }
 
 impl Heuristics {
@@ -145,6 +147,7 @@ impl Heuristics {
             typing: None,
             running: None,
             done: Vec::new(),
+            cwd: None,
         }
     }
 
@@ -162,6 +165,9 @@ impl Heuristics {
         self.pending = bytes[cut..].to_vec();
         let text = self.ansi.strip(&bytes[..cut]);
         self.read_marks(now);
+        if let Some(cwd) = self.ansi.take_cwd() {
+            self.cwd = Some(cwd);
+        }
         self.tail.push_str(&text);
         if self.tail.len() > TAIL_MAX {
             let cut = self.tail.len() - TAIL_MAX;
@@ -242,6 +248,12 @@ impl Heuristics {
         if let Some(typing) = &mut self.typing {
             typing.put(&echo[at..]);
         }
+    }
+
+    /// The folder the run last said it was in, if it has said so since this
+    /// was last called. Draining: only news comes back.
+    pub fn take_cwd(&mut self) -> Option<std::path::PathBuf> {
+        self.cwd.take()
     }
 
     /// The commands that have finished since this was last called. Draining.

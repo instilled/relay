@@ -1,6 +1,6 @@
 [package]
 name = "rl-daemon"
-description = "Relay daemon: run supervisor, scheduler, event ledger, presence, plugin broker"
+description = "Relay daemon: run supervisor, flows, event ledger, presence, plugin broker"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -13,6 +13,7 @@ path = "src/main.rs"
 [dependencies]
 rl-core.workspace = true
 rl-detect.workspace = true
+rl-flow.workspace = true
 rl-ledger.workspace = true
 rl-proto.workspace = true
 rl-session.workspace = true

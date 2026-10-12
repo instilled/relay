@@ -3,24 +3,59 @@
 
 use jiff::Timestamp;
 use rl_core::time::fmt_duration;
+use rl_proto::flow::Firing;
 use rl_proto::methods::DigestItem;
-use rl_proto::types::{Event, Run, RunState};
+use rl_proto::types::{Event, Run, RunState, Signal};
 
-pub fn item(run: Run, last: Option<Event>, joined_by: Option<String>) -> DigestItem {
+pub fn item(
+    run: Run,
+    last: Option<Event>,
+    joined_by: Option<String>,
+    emitted: Vec<Signal>,
+    cwd: Option<std::path::PathBuf>,
+    recap: Option<String>,
+) -> DigestItem {
     let at = last.as_ref().map(|e| e.at).unwrap_or(run.state_at);
-    let summary = summarise(&run, last.as_ref());
+    let summary = summarise(&run, last.as_ref(), &emitted);
     let unseen = unseen(&run, at);
+    // Only Claude's and Codex's rows say their recap; what any other run was
+    // asked about stays in the pane.
+    let recap = recap.filter(|_| crate::transcript::Agent::of(&run).is_some());
     DigestItem {
         summary,
         at,
         unseen,
         joined_by,
+        emitted,
+        cwd,
+        recap,
         run,
     }
 }
 
+/// Each flow's latest firing, with what it came to, for the row that stands for it on the list.
+pub fn firings(c: &rusqlite::Connection) -> anyhow::Result<Vec<Firing>> {
+    let mut out = Vec::new();
+    for f in rl_ledger::flows::list(c, false)? {
+        out.extend(rl_ledger::firings::latest(c, &f.name)?.map(|x| crate::flows::outcome::told(c, x)));
+    }
+    Ok(out)
+}
+
+/// The newest thing a run raised, in its own words.
+pub fn said(emitted: &[Signal]) -> Option<&str> {
+    emitted
+        .iter()
+        .max_by_key(|s| s.at)
+        .map(|s| s.said.as_str())
+        .filter(|s| !s.is_empty())
+}
+
 /// The question, the exit, the last thing said — in that order of interest.
-pub fn summarise(run: &Run, last: Option<&Event>) -> String {
+/// A run that ended well and raised something says what it raised, in its own
+/// words: for a probe that is the whole point, and `exit 0` says nothing. One
+/// that failed keeps its exit, which is the one worth reading.
+pub fn summarise(run: &Run, last: Option<&Event>, emitted: &[Signal]) -> String {
     let detail = last.and_then(|e| {
         e.data
             .as_ref()
@@ -39,9 +74,12 @@ pub fn summarise(run: &Run, last: Option<&Event>) -> String {
                 .map(str::to_string)
                 .or_else(|| run.exit_code.map(|c| format!("exit {c}")))
                 .unwrap_or_else(|| run.state.to_string());
-            match run.ended_at {
-                Some(e) => format!("{how} · {}", fmt_duration(e.duration_since(run.started_at))),
-                None => how,
+            match said(emitted).filter(|_| run.state == RunState::Finished) {
+                Some(s) => s.to_string(),
+                None => match run.ended_at {
+                    Some(e) => format!("{how} · {}", fmt_duration(e.duration_since(run.started_at))),
+                    None => how,
+                },
             }
         }
         RunState::NeedsInput | RunState::Blocked | RunState::Stale => detail.unwrap_or_else(|| run.state.to_string()),
@@ -95,35 +133,114 @@ mod tests {
             Some("Claude needs your permission to use Bash"),
         );
         assert_eq!(
-            summarise(&run(RunState::NeedsInput), Some(&q)),
+            summarise(&run(RunState::NeedsInput), Some(&q), &[]),
             "Claude needs your permission to use Bash"
         );
         let mut done = run(RunState::Finished);
         done.exit_code = Some(0);
         done.ended_at = Some("2026-09-08T10:41:03Z".parse().unwrap());
-        assert_eq!(summarise(&done, None), "exit 0 · 41m03s");
+        assert_eq!(summarise(&done, None, &[]), "exit 0 · 41m03s");
         let mut w = run(RunState::Working);
         w.last_line = Some("Compiling…".into());
         assert_eq!(
-            summarise(&w, Some(&ev("run.started", "started `x`", None))),
+            summarise(&w, Some(&ev("run.started", "started `x`", None)), &[]),
             "Compiling…"
         );
         assert_eq!(
-            summarise(&w, Some(&ev("run.state", "working: tool: Edit", Some("tool: Edit")))),
+            summarise(
+                &w,
+                Some(&ev("run.state", "working: tool: Edit", Some("tool: Edit"))),
+                &[]
+            ),
             "tool: Edit"
         );
-        assert_eq!(summarise(&run(RunState::Idle), None), "idle");
+        assert_eq!(summarise(&run(RunState::Idle), None, &[]), "idle");
         let mut busy = run(RunState::Working);
         busy.detail = Some("tool: Bash".into());
         busy.last_line = Some("$ cargo test".into());
         assert_eq!(
             summarise(
                 &busy,
-                Some(&ev("run.state", "working: session started", Some("session started")))
+                Some(&ev("run.state", "working: session started", Some("session started"))),
+                &[]
             ),
             "tool: Bash",
             "the run's own word beats the last event's"
         );
+    }
+
+    #[test]
+    fn an_ended_run_says_what_it_raised() {
+        let mut done = run(RunState::Finished);
+        done.ended_at = Some("2026-09-08T10:01:00Z".parse().unwrap());
+        done.exit_code = Some(0);
+        let at = |s: &str| -> Timestamp { s.parse().unwrap() };
+        let sig = |kind: &str, count, said: &str, when: &str| Signal {
+            kind: kind.into(),
+            count,
+            said: said.into(),
+            at: at(when),
+        };
+        let raised = [
+            sig("log.issue", 1, "a note", "2026-09-08T10:00:30Z"),
+            sig(
+                "flint.product.new-feedback",
+                5,
+                "5 feedback rows to process",
+                "2026-09-08T10:00:40Z",
+            ),
+        ];
+        // The newest words, not the exit — that is what the probe went for.
+        assert_eq!(summarise(&done, None, &raised), "5 feedback rows to process");
+        assert_eq!(
+            summarise(&done, None, &[]),
+            "exit 0 · 1m00s",
+            "nothing raised, nothing said"
+        );
+        // A firing that failed keeps its exit, which is the one worth reading.
+        let mut bad = done.clone();
+        bad.state = RunState::Failed;
+        bad.exit_code = Some(1);
+        assert_eq!(summarise(&bad, None, &raised), "exit 1 · 1m00s");
+        // A run still going says what it is doing, as before.
+        assert_eq!(summarise(&run(RunState::Idle), None, &raised), "idle");
+    }
+
+    #[test]
+    fn the_digest_carries_each_flows_latest_firing() {
+        use rl_ledger::firings::{NewFiring, insert};
+        use rl_ledger::flows::{Loaded, sync};
+        let ledger = rl_ledger::Ledger::open_in_memory().unwrap();
+        let found = ledger
+            .call_blocking(|c| {
+                let loaded = |name: &str| Loaded {
+                    name: name.into(),
+                    hash: "h".into(),
+                    def_json: "{}".into(),
+                };
+                sync(c, &[loaded("nightly"), loaded("quiet")], Timestamp::UNIX_EPOCH)?;
+                let steps = ["probe".to_string()];
+                for (id, at) in [("f1", "2026-09-08T10:00:00Z"), ("f2", "2026-09-08T11:00:00Z")] {
+                    insert(
+                        c,
+                        &NewFiring {
+                            id,
+                            flow: "nightly",
+                            def_json: "{}",
+                            hash: "h",
+                            trigger: "when",
+                            event: None,
+                            at: at.parse().unwrap(),
+                            steps: &steps,
+                        },
+                    )?;
+                }
+                firings(c)
+            })
+            .unwrap();
+        // The newer of nightly's two; nothing for a flow that never fired.
+        assert_eq!(found.iter().map(|f| f.id.as_str()).collect::<Vec<_>>(), ["f2"]);
+        assert_eq!(found[0].steps.len(), 1);
     }
 
     #[test]

@@ -1,6 +1,7 @@
 //! `~/.relay/` — one place for everything user-level. `RELAY_HOME` overrides
 //! it, which is also how tests stay out of the real one.
 
+pub mod folder;
 pub mod id;
 pub mod time;
 
@@ -50,6 +51,10 @@ impl Home {
     pub fn run_dir(&self) -> PathBuf {
         self.0.join("run")
     }
+    /// `rld`'s own, put on each flow step's `PATH`: only a link to the `rl` beside `rld`.
+    pub fn bin_dir(&self) -> PathBuf {
+        self.run_dir().join("bin")
+    }
     pub fn log_dir(&self) -> PathBuf {
         self.0.join("log")
     }
@@ -95,13 +100,16 @@ impl Home {
     pub fn config_file(&self) -> PathBuf {
         self.0.join("config.yaml")
     }
-    /// User-level schedules, human-edited.
-    pub fn schedules_file(&self) -> PathBuf {
-        self.0.join("schedules.yaml")
+    /// Flows, a folder each: `<name>/flow.md` and the flow's own scripts.
+    pub fn flows_dir(&self) -> PathBuf {
+        self.0.join("flows")
     }
-    /// The user's own reactions: events → actions.
-    pub fn reactions_file(&self) -> PathBuf {
-        self.0.join("reactions.yaml")
+    pub fn flow_dir(&self, name: &str) -> PathBuf {
+        self.flows_dir().join(name)
+    }
+    /// One firing's state: what its steps left for the steps after them.
+    pub fn firing_dir(&self, name: &str, id: &str) -> PathBuf {
+        self.flow_dir(name).join("runs").join(id)
     }
 
     pub fn session_socket(&self, run: &str) -> PathBuf {
@@ -180,6 +188,14 @@ mod tests {
         assert!(home.run_dir().is_dir());
         assert!(home.log_dir().is_dir());
         assert_eq!(home.daemon_socket(), home.run_dir().join("rld.sock"));
+    }
+
+    #[test]
+    fn a_firing_lives_in_its_flow_folder() {
+        let home = Home::at("/h");
+        assert_eq!(home.flows_dir(), Path::new("/h/flows"));
+        assert_eq!(home.flow_dir("pulse"), Path::new("/h/flows/pulse"));
+        assert_eq!(home.firing_dir("pulse", "f1"), Path::new("/h/flows/pulse/runs/f1"));
     }
 
     #[test]

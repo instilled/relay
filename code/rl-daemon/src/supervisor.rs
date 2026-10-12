@@ -61,6 +61,25 @@ const REATTACH_TIMEOUT: Duration = Duration::from_secs(2);
 /// How long shutdown waits for follow tasks to flush.
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// A viewer at the keyboard: who, and from which of their terminals.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Seat {
+    pub client: String,
+    pub terminal: Option<String>,
+}
+
+impl Seat {
+    /// How `self` reads to `other`: by name, and — when it is the same person
+    /// — as their other terminal.
+    pub fn said_to(&self, other: &Seat) -> String {
+        if self.client == other.client && self.terminal != other.terminal {
+            format!("{} in another terminal", self.client)
+        } else {
+            self.client.clone()
+        }
+    }
+}
+
 /// A run whose holder we are attached to right now.
 pub struct Live {
     pub id: String,
@@ -76,9 +95,15 @@ pub struct Live {
     /// The holder's socket, for viewers to open their own connection.
     pub socket: PathBuf,
     /// Who owns the keyboard. Several may watch; one joins.
-    joiner: Mutex<Option<String>>,
+    joiner: Mutex<Option<Seat>>,
     /// Remarks for every attached viewer: joined, left, took over.
     pub notes: broadcast::Sender<String>,
+    /// The pty's own size while a repaint nudge holds it a row smaller, so a
+    /// viewer arriving meanwhile is not told the smaller size is the real one.
+    nudge: Mutex<Option<(u16, u16)>>,
+    /// The folder the run last said it was in (OSC 7), for the list. Kept in
+    /// memory only: a shell says it again at its next prompt.
+    cwd: Mutex<Option<PathBuf>>,
 }
 
 impl Live {
@@ -86,33 +111,62 @@ impl Live {
         *self.current.lock().unwrap()
     }
 
-    pub fn joiner(&self) -> Option<String> {
+    pub fn joiner(&self) -> Option<Seat> {
         self.joiner.lock().unwrap().clone()
     }
 
-    pub fn is_joiner(&self, client: &str) -> bool {
-        self.joiner.lock().unwrap().as_deref() == Some(client)
+    /// Starts a repaint nudge from `size`, unless one is under way: its giving
+    /// the size back repaints for everyone. `true` when this one is ours.
+    pub fn nudge_start(&self, size: (u16, u16)) -> bool {
+        let mut n = self.nudge.lock().unwrap();
+        if n.is_some() {
+            return false;
+        }
+        *n = Some(size);
+        true
     }
 
-    /// Claims the keyboard. `Err(current)` when someone else has it and
-    /// `take` is false; `Ok(Some(previous))` when taken over.
-    pub fn join(&self, client: &str, take: bool) -> Result<Option<String>, String> {
+    /// The size a nudge holds back, while one does.
+    pub fn nudged_size(&self) -> Option<(u16, u16)> {
+        *self.nudge.lock().unwrap()
+    }
+
+    /// The keyboard resized during a nudge: that is the size to give back.
+    pub fn nudge_resized(&self, size: (u16, u16)) {
+        if let Some(s) = self.nudge.lock().unwrap().as_mut() {
+            *s = size;
+        }
+    }
+
+    /// Ends the nudge: the size to give back.
+    pub fn nudge_end(&self) -> Option<(u16, u16)> {
+        self.nudge.lock().unwrap().take()
+    }
+
+    pub fn is_joiner(&self, seat: &Seat) -> bool {
+        self.joiner.lock().unwrap().as_ref() == Some(seat)
+    }
+
+    /// Claims the keyboard. `Err(current)` when another seat has it — another
+    /// person, or another terminal of the same one — and `take` is false;
+    /// `Ok(Some(previous))` when taken over.
+    pub fn join(&self, seat: &Seat, take: bool) -> Result<Option<Seat>, Seat> {
         let mut j = self.joiner.lock().unwrap();
-        match j.as_deref() {
-            Some(cur) if cur == client => Ok(None),
-            Some(cur) if !take => Err(cur.to_string()),
+        match j.as_ref() {
+            Some(cur) if cur == seat => Ok(None),
+            Some(cur) if !take => Err(cur.clone()),
             prev => {
-                let prev = prev.map(String::from);
-                *j = Some(client.to_string());
+                let prev = prev.cloned();
+                *j = Some(seat.clone());
                 Ok(prev)
             }
         }
     }
 
-    /// Releases the keyboard if `client` holds it.
-    pub fn leave(&self, client: &str) -> bool {
+    /// Releases the keyboard if `seat` holds it.
+    pub fn leave(&self, seat: &Seat) -> bool {
         let mut j = self.joiner.lock().unwrap();
-        if j.as_deref() == Some(client) {
+        if j.as_ref() == Some(seat) {
             *j = None;
             true
         } else {
@@ -172,18 +226,34 @@ impl Supervisor {
     }
 
     /// Who holds the keyboard of which run right now.
+    /// The folder each live run last said it was in, where one has.
+    pub fn cwds(&self) -> HashMap<String, PathBuf> {
+        self.live
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|(id, l)| l.cwd.lock().unwrap().clone().map(|c| (id.clone(), c)))
+            .collect()
+    }
+
     pub fn joiners(&self) -> HashMap<String, String> {
         self.live
             .lock()
             .unwrap()
             .iter()
-            .filter_map(|(id, l)| l.joiner().map(|j| (id.clone(), j)))
+            .filter_map(|(id, l)| l.joiner().map(|j| (id.clone(), j.client)))
             .collect()
     }
 
     /// Spawns the holder, records the run, attaches. Returns once the run is
     /// in the ledger with its holder ready.
     pub async fn start(self: &Arc<Self>, spec: RunSpec) -> Result<Run> {
+        self.start_on(spec, None).await
+    }
+
+    /// The same, for a run an event set off: `event` is that event's id, kept
+    /// in the run's `run.started` (`data.event`) so what started it is known.
+    pub async fn start_on(self: &Arc<Self>, spec: RunSpec, event: Option<i64>) -> Result<Run> {
         if spec.argv.is_empty() {
             bail!("argv is empty");
         }
@@ -229,8 +299,8 @@ impl Supervisor {
         run.ref_ = spec.ref_.clone();
         run.tags = spec.tags.clone();
         run.cause = spec.cause.clone();
-        if let Some(f) = &spec.flow {
-            run.flow = f.clone();
+        if let Some(f) = &spec.chain {
+            run.chain = f.clone();
         }
 
         let (cols, rows) = (spec.cols.unwrap_or(DEFAULT_COLS), spec.rows.unwrap_or(DEFAULT_ROWS));
@@ -269,6 +339,7 @@ impl Supervisor {
                 cols,
                 rows,
                 spec.tty,
+                spec.input,
                 &env,
                 env_file.as_deref(),
                 &argv,
@@ -300,13 +371,21 @@ impl Supervisor {
             attached_at: Some(now),
             closed_at: None,
         };
-        let started = NewEvent::for_run(&run, now, event_kind::RUN_STARTED, format!("started `{}`", run.title))
-            .with_data(json!({ "argv": run.argv, "cwd": run.cwd, "tty": hello.tty, "pid": hello.pid, "cli": run.cli }));
+        let mut data = json!({ "argv": run.argv, "cwd": run.cwd, "tty": hello.tty, "pid": hello.pid, "cli": run.cli });
+        if let Some(id) = event {
+            data["event"] = json!(id);
+        }
+        let started =
+            NewEvent::for_run(&run, now, event_kind::RUN_STARTED, format!("started `{}`", run.title)).with_data(data);
         self.ledger
             .call({
                 let run = run.clone();
+                let auto = spec.title.is_none();
                 move |c| {
                     runs::insert(c, &run)?;
+                    if auto {
+                        runs::set_title_auto(c, &run.id)?;
+                    }
                     sessions::insert(c, &row)?;
                     events::append(c, &started)?;
                     Ok(())
@@ -373,7 +452,12 @@ impl Supervisor {
                         })
                         .await?;
                     if gap > 0 {
-                        warn!(id, gap, "output lost while away");
+                        self.trouble(
+                            &run,
+                            format!("{gap} bytes of output were lost while Relay was not running"),
+                            json!({ "bytes": gap }),
+                        )
+                        .await;
                     }
                     info!(
                         id,
@@ -396,7 +480,23 @@ impl Supervisor {
                         info!(id, %why, "holder gone; closing from exit sidecar");
                     } else {
                         report.lost += 1;
-                        warn!(id, %why, "holder gone and no exit recorded");
+                        self.trouble(
+                            &run,
+                            format!("the session holder went without recording an exit ({why})"),
+                            json!({ "why": why }),
+                        )
+                        .await;
+                        // Gone while Relay was not looking — a restart, most
+                        // likely — and so something `run.resume` can pick up.
+                        let ev = NewEvent::for_run(
+                            &run,
+                            Timestamp::now(),
+                            event_kind::RUN_LOST,
+                            format!("{} was lost while Relay was away", run.title),
+                        );
+                        if let Err(e) = self.ledger.call(move |c| events::append(c, &ev)).await {
+                            warn!(error = %e, "recording a lost run");
+                        }
                     }
                     self.finish(&run, false, None, exit).await;
                 }
@@ -426,10 +526,35 @@ impl Supervisor {
         Ok(())
     }
 
+    /// `SIGKILL` when forced. Otherwise what the run leaves on: a shell a
+    /// hang-up, as when its terminal closes — an interactive shell shrugs off
+    /// `SIGTERM`, and hung up it passes that on to what it runs — anything
+    /// else `SIGTERM`.
     pub async fn stop(&self, id: &str, force: bool) -> Result<Run> {
+        let sig = if force {
+            9
+        } else {
+            let run = self
+                .ledger
+                .call({
+                    let id = id.to_string();
+                    move |c| runs::get(c, &id)
+                })
+                .await?;
+            if run.is_some_and(|r| r.is_shell()) { 1 } else { 15 }
+        };
+        self.stop_with(id, sig).await
+    }
+
+    /// Stops a run the way a closed terminal does, with `SIGHUP`: what an
+    /// interactive shell leaves on, where it shrugs off `SIGTERM`.
+    pub async fn hang_up(&self, id: &str) -> Result<Run> {
+        self.stop_with(id, 1).await
+    }
+
+    async fn stop_with(&self, id: &str, sig: i32) -> Result<Run> {
         let live = self.live(id).ok_or_else(|| anyhow!("no live session for run {id}"))?;
         live.stopping.store(true, Ordering::SeqCst);
-        let sig = if force { 9 } else { 15 };
         live.writer
             .lock()
             .await
@@ -502,6 +627,34 @@ impl Supervisor {
         Ok(t)
     }
 
+    /// An agent nobody named takes its first prompt for a title — once: the
+    /// title is Relay's to set only until it has, or until you rename the run
+    /// yourself, which always wins. True when it was named now.
+    /// `cli` stands in for the run's own when it has none.
+    pub async fn name_from_prompt(&self, id: &str, cli: &str, prompt: &str) -> Result<bool> {
+        let (id, cli, prompt) = (id.to_string(), cli.to_string(), prompt.to_string());
+        let named = self
+            .ledger
+            .call({
+                let id = id.clone();
+                move |c| {
+                    let Some(run) = runs::get(c, &id)? else {
+                        return Ok(None);
+                    };
+                    let cli = run.cli.as_deref().unwrap_or(&cli);
+                    match prompt_title(cli, &prompt) {
+                        Some(t) if run.kind == RunKind::Agent && runs::name_once(c, &id, &t)? => Ok(Some(t)),
+                        _ => Ok(None),
+                    }
+                }
+            })
+            .await?;
+        if let Some(title) = &named {
+            info!(id, title, "named for its first prompt");
+        }
+        Ok(named.is_some())
+    }
+
     /// Waits for follow tasks to flush after `shutdown` was cancelled.
     pub async fn drain(&self) {
         self.tasks.close();
@@ -521,6 +674,7 @@ impl Supervisor {
         cols: u16,
         rows: u16,
         tty: bool,
+        input: bool,
         env: &[(String, String)],
         env_file: Option<&Path>,
         argv: &[String],
@@ -542,6 +696,9 @@ impl Supervisor {
         if !tty {
             cmd.arg("--no-tty");
         }
+        if !input {
+            cmd.arg("--no-input");
+        }
         match env_file {
             Some(f) => {
                 cmd.arg("--env-file").arg(f);
@@ -552,6 +709,19 @@ impl Supervisor {
                 }
             }
         }
+        // How long this run waits for a Relay that may never come back: read
+        // now, so an edit takes effect on the next run rather than a restart.
+        let config = crate::config::load(&self.home).config;
+        if let Some(d) = crate::config::reap_after(&config) {
+            cmd.arg("--reap-after").arg(d.as_secs().to_string());
+        }
+        // Zero is "read as fast as the child writes", which is what `off` means.
+        cmd.arg("--settle").arg(
+            crate::config::settle(&config)
+                .unwrap_or_default()
+                .as_millis()
+                .to_string(),
+        );
         cmd.arg("--").args(argv);
         cmd.stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -599,6 +769,8 @@ impl Supervisor {
             current: Mutex::new(Current::from(&run)),
             socket,
             joiner: Mutex::new(None),
+            nudge: Mutex::new(None),
+            cwd: Mutex::new(None),
             notes,
         });
         self.live.lock().unwrap().insert(run.id.clone(), live.clone());
@@ -615,6 +787,8 @@ impl Supervisor {
         let mut heur = Heuristics::new(profile, run.kind, Timestamp::now());
         let mut batch: Vec<u8> = Vec::new();
         let mut exit: Option<Exit> = None;
+        // Why the connection went, when it went without an exit.
+        let mut gone: Option<String> = None;
         let mut flush = tokio::time::interval(JOURNAL_FLUSH);
         flush.tick().await;
         let mut tick = tokio::time::interval(DETECT_TICK);
@@ -636,14 +810,21 @@ impl Supervisor {
                         if !done.is_empty() && run.kind == RunKind::Shell {
                             self.ran(&run, done).await;
                         }
+                        // Where it says it is, as the filesystem has it, so a
+                        // folder reached through a link (`/tmp` on macOS)
+                        // still reads as inside its project.
+                        if let Some(cwd) = heur.take_cwd() {
+                            let cwd = std::fs::canonicalize(&cwd).unwrap_or(cwd);
+                            *live.cwd.lock().unwrap() = Some(cwd);
+                        }
                         if batch.len() >= JOURNAL_BATCH_BYTES {
                             self.flush(&id, &mut batch, heur.last_line(LAST_LINE_MAX)).await;
                         }
                     }
                     Ok(Some(Frame::Exit(e))) => { exit = Some(e); break false; }
                     Ok(Some(_)) => {}
-                    Ok(None) => { warn!(id, "holder closed the connection"); break false; }
-                    Err(e) => { warn!(id, error = %e, "holder connection failed"); break false; }
+                    Ok(None) => { warn!(id, "holder closed the connection"); gone = Some("it closed the connection".to_string()); break false; }
+                    Err(e) => { warn!(id, error = %e, "holder connection failed"); gone = Some(format!("{e}")); break false; }
                 },
                 _ = flush.tick(), if !batch.is_empty() => {
                     self.flush(&id, &mut batch, heur.last_line(LAST_LINE_MAX)).await;
@@ -664,6 +845,18 @@ impl Supervisor {
 
         // No Exit frame: the holder went away. The sidecar may still tell us.
         let exit = exit.or_else(|| read_exit_file(&exit_file).ok().flatten());
+        // Only now is it trouble: a holder that wrote its exit and then closed
+        // did its job, and the sidecar has just been read.
+        if exit.is_none()
+            && let Some(why) = gone
+        {
+            self.trouble(
+                &run,
+                format!("the session holder went without reporting an exit ({why})"),
+                json!({ "why": why }),
+            )
+            .await;
+        }
         let stopping = live.stopping.load(Ordering::SeqCst);
         self.finish(&run, stopping, Some(&live), exit).await;
     }
@@ -740,6 +933,18 @@ impl Supervisor {
     }
 
     /// Records the end of a run and, if we are still attached, releases the holder.
+    /// Something went wrong around a run without ending it. A `warn!` is for
+    /// whoever reads the log later; this is for whoever has the run in front
+    /// of them, so it keeps rather than flashing past.
+    async fn trouble(&self, run: &Run, words: impl Into<String>, data: serde_json::Value) {
+        let words = words.into();
+        warn!(id = %run.id, %words, "run trouble");
+        let ev = NewEvent::for_run(run, Timestamp::now(), event_kind::RUN_TROUBLE, words).with_data(data);
+        if let Err(e) = self.ledger.call(move |c| events::append(c, &ev)).await {
+            warn!(error = %e, "recording run trouble");
+        }
+    }
+
     async fn finish(&self, run: &Run, stopping: bool, live: Option<&Live>, exit: Option<Exit>) {
         let now = Timestamp::now();
         let (state, kind, summary, data) = match &exit {
@@ -823,13 +1028,29 @@ fn said(cmd: &ShellCommand) -> String {
 }
 
 fn default_title(argv: &[String]) -> String {
-    let joined = argv.join(" ");
-    if joined.chars().count() <= TITLE_MAX {
-        joined
+    clip_title(&argv.join(" "))
+}
+
+/// A title no longer than `TITLE_MAX`, cut with `…`.
+fn clip_title(s: &str) -> String {
+    if s.chars().count() <= TITLE_MAX {
+        s.to_string()
     } else {
-        let cut: String = joined.chars().take(TITLE_MAX - 1).collect();
+        let cut: String = s.chars().take(TITLE_MAX - 1).collect();
         format!("{cut}…")
     }
+}
+
+/// What an agent is called for what it was first asked: `claude: add a
+/// recipe import`, the first line of the prompt. Nothing for a prompt with
+/// nothing in it, or a slash command — `/model` or `/clear` says how to run,
+/// not what the run is for, so the title waits for the first real prompt.
+pub fn prompt_title(cli: &str, prompt: &str) -> Option<String> {
+    let first = prompt.trim().lines().next()?.trim();
+    if first.is_empty() || first.starts_with('/') {
+        return None;
+    }
+    Some(clip_title(&format!("{cli}: {first}")))
 }
 
 pub fn locate_session_bin() -> PathBuf {
@@ -838,4 +1059,26 @@ pub fn locate_session_bin() -> PathBuf {
 
 pub fn locate_rl_bin() -> PathBuf {
     rl_core::locate_bin("rl", RL_BIN_ENV)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{TITLE_MAX, prompt_title};
+
+    #[test]
+    fn an_agent_is_named_for_the_first_line_of_what_it_was_asked() {
+        assert_eq!(
+            prompt_title("claude", "  add a recipe import\nwith photos\n").as_deref(),
+            Some("claude: add a recipe import")
+        );
+        assert_eq!(prompt_title("claude", "   \n  "), None, "nothing asked");
+        assert_eq!(
+            prompt_title("claude", "/model opus"),
+            None,
+            "a slash command is not the work"
+        );
+        let long = prompt_title("claude", &"word ".repeat(40)).unwrap();
+        assert_eq!(long.chars().count(), TITLE_MAX);
+        assert!(long.starts_with("claude: word word") && long.ends_with('…'), "{long}");
+    }
 }

@@ -117,6 +117,7 @@ macro_rules! str_enum {
         }
     };
 }
+pub(crate) use str_enum;
 
 str_enum!(RunKind { Agent => "agent", Shell => "shell", Command => "command", Plugin => "plugin" });
 str_enum!(RunState {
@@ -129,19 +130,17 @@ str_enum!(Mark { Done => "done", Blocked => "blocked", Working => "working" });
 str_enum!(AttachMode { Watch => "watch", Join => "join" });
 
 /// Why a run started. Serialised as one string: `manual`,
-/// `schedule:<name>`, `decision:<id>`, `workflow:<name>/<step>`,
-/// `reaction:<name>`.
+/// `decision:<id>`, `flow:<flow>/<step>`, `assistant:<job>`.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum Cause {
     #[default]
     Manual,
-    Schedule(String),
     Decision(String),
-    Workflow {
-        name: String,
+    /// A step of a flow.
+    Flow {
+        flow: String,
         step: String,
     },
-    Reaction(String),
     /// A job Relay handed to an agent (`assistant:interpret`).
     Assistant(String),
 }
@@ -150,10 +149,8 @@ impl std::fmt::Display for Cause {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Cause::Manual => write!(f, "manual"),
-            Cause::Schedule(n) => write!(f, "schedule:{n}"),
             Cause::Decision(id) => write!(f, "decision:{id}"),
-            Cause::Workflow { name, step } => write!(f, "workflow:{name}/{step}"),
-            Cause::Reaction(n) => write!(f, "reaction:{n}"),
+            Cause::Flow { flow, step } => write!(f, "flow:{flow}/{step}"),
             Cause::Assistant(job) => write!(f, "assistant:{job}"),
         }
     }
@@ -170,14 +167,15 @@ impl std::str::FromStr for Cause {
             return Err(format!("bad cause `{s}`"));
         }
         Ok(match kind {
-            "schedule" => Cause::Schedule(rest.into()),
             "decision" => Cause::Decision(rest.into()),
-            "reaction" => Cause::Reaction(rest.into()),
             "assistant" => Cause::Assistant(rest.into()),
-            "workflow" => {
-                let (name, step) = rest.split_once('/').ok_or_else(|| format!("bad cause `{s}`"))?;
-                Cause::Workflow {
-                    name: name.into(),
+            "flow" => {
+                let (flow, step) = rest.split_once('/').ok_or_else(|| format!("bad cause `{s}`"))?;
+                if flow.is_empty() || step.is_empty() {
+                    return Err(format!("bad cause `{s}`"));
+                }
+                Cause::Flow {
+                    flow: flow.into(),
                     step: step.into(),
                 }
             }
@@ -197,6 +195,14 @@ impl<'de> Deserialize<'de> for Cause {
         let s = String::deserialize(d)?;
         s.parse().map_err(serde::de::Error::custom)
     }
+}
+
+/// A folder registered with `rl up`: where a flow may run (`in:`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Workspace {
+    pub path: PathBuf,
+    pub name: String,
+    pub registered_at: Timestamp,
 }
 
 /// The one noun. Everything `rld` starts and owns.
@@ -237,7 +243,7 @@ pub struct Run {
     pub cause: Cause,
     /// The chain it belongs to: its own id when it started one.
     #[serde(default)]
-    pub flow: String,
+    pub chain: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_run: Option<String>,
     /// What an exact source last said it was doing (`tool: Bash`, a mark's
@@ -254,9 +260,26 @@ pub struct Run {
     /// `rl since`, kept in the ledger.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub archived_at: Option<Timestamp>,
+    /// When it was pinned (`run.pin`): kept at the top of the panel, however
+    /// old, until unpinned or archived.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pinned_at: Option<Timestamp>,
+    /// When it was taken off the panel's list (`run.hide`): shown only in the
+    /// `hidden` lens, unless it comes to need you after. Never stopped by it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hidden_at: Option<Timestamp>,
 }
 
+/// The tag that marks a run as a project's warm shell.
+pub const SHELL_TAG: &str = "shell";
+
 impl Run {
+    /// A shell: an interactive one by its profile, or a project's warm shell
+    /// by its tag, whatever its argv resolved to.
+    pub fn is_shell(&self) -> bool {
+        self.kind == RunKind::Shell || self.tags.iter().any(|t| t == SHELL_TAG)
+    }
+
     /// A fresh run in `starting`, everything optional unset.
     pub fn new(
         id: impl Into<String>,
@@ -269,7 +292,7 @@ impl Run {
     ) -> Self {
         let id: String = id.into();
         Self {
-            flow: id.clone(),
+            chain: id.clone(),
             id,
             workspace: workspace.into(),
             kind,
@@ -295,6 +318,8 @@ impl Run {
             last_line: None,
             seen_at: None,
             archived_at: None,
+            pinned_at: None,
+            hidden_at: None,
         }
     }
 
@@ -304,6 +329,40 @@ impl Run {
             .clone()
             .or_else(|| self.branch.clone())
             .unwrap_or_else(|| self.workspace.to_string_lossy().into_owned())
+    }
+
+    /// Where the list files it: under its ref, else its folder. Never its
+    /// branch — a folder is one project whichever branch it is on.
+    pub fn place_key(&self) -> String {
+        self.ref_
+            .clone()
+            .unwrap_or_else(|| self.workspace.to_string_lossy().into_owned())
+    }
+}
+
+/// A folder's git checkout as it stands now, read from its `.git` — not the
+/// branch a run started on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Checkout {
+    pub path: PathBuf,
+    /// The branch checked out; none on a detached HEAD.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    /// The commit, short, when HEAD is detached.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detached: Option<String>,
+    /// Linked worktrees, counted on the main checkout only.
+    #[serde(default)]
+    pub worktrees: usize,
+    /// What the configured badges said of it (`PR #95`), in their order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub badges: Vec<String>,
+}
+
+impl Checkout {
+    /// What HEAD is, in a word: the branch, or the detached commit.
+    pub fn head(&self) -> &str {
+        self.branch.as_deref().or(self.detached.as_deref()).unwrap_or("")
     }
 }
 
@@ -324,20 +383,109 @@ pub struct Event {
 }
 
 /// What an assistant said about an ended run, kept by the run; `s` in the
-/// panel and `rl summarise` make one, the pane shows it under the facts.
+/// panel and `rl summary` make one, the pane shows it under the facts.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Summary {
     pub run: String,
     /// Who wrote it.
     pub agent: String,
-    /// The assistant run that wrote it.
+    /// The assistant run that wrote it; empty when nothing had to be asked
+    /// (the agent's own recap, read from its transcript).
     pub by: String,
     pub at: Timestamp,
     pub text: String,
+    /// The stretch it covers: a duration back from when it was made (`2h`).
+    /// None, the whole run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since: Option<String>,
+    /// Where it came from: `claude recap` (the agent's own), `codex turns`
+    /// (its turns, as facts), or `summarised` (an assistant read the stretch).
+    #[serde(default)]
+    pub source: String,
+    /// How far the run had got when it was made, so asking again with nothing
+    /// new gives this one back.
+    #[serde(default)]
+    pub reach: String,
+    /// Not kept: whether the run has moved on since it was made.
+    #[serde(default)]
+    pub stale: bool,
+    /// What was summarised (`SummaryTarget::key`); empty on a run's own recap
+    /// row.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub target: String,
+    /// Read from the logs, not from the recaps.
+    #[serde(default)]
+    pub deep: bool,
+    /// Where the stretch began; None for a whole run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<Timestamp>,
+    /// How many assistant calls it took.
+    #[serde(default)]
+    pub calls: u32,
+    /// How many runs it covers: one for a run; for a flow, a project or
+    /// everything, those in the stretch.
+    #[serde(default)]
+    pub runs: u32,
+}
+
+/// What a summary is of: a run, a flow's runs, a project's, or everything.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SummaryTarget {
+    Run {
+        id: String,
+    },
+    /// A flow's runs: those of its steps, wherever they ran.
+    Flow {
+        name: String,
+    },
+    /// One firing of a flow: its steps' runs, all of it.
+    Firing {
+        id: String,
+    },
+    Project {
+        workspace: PathBuf,
+    },
+    All,
+}
+
+impl SummaryTarget {
+    /// How it is kept: `r:<id>`, `f:<name>`, `fi:<id>`, `p:<path>`, `all`.
+    pub fn key(&self) -> String {
+        match self {
+            SummaryTarget::Run { id } => format!("r:{id}"),
+            SummaryTarget::Flow { name } => format!("f:{name}"),
+            SummaryTarget::Firing { id } => format!("fi:{id}"),
+            SummaryTarget::Project { workspace } => format!("p:{}", workspace.display()),
+            SummaryTarget::All => "all".into(),
+        }
+    }
+}
+
+/// What a run raised itself (`rl emit`): one kind, how often it came, and
+/// what it last said in its own words.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Signal {
+    pub kind: String,
+    pub count: u32,
+    /// The newest one's summary — what the probe said, not what the wire is
+    /// called.
+    pub said: String,
+    /// When the newest one came.
+    pub at: Timestamp,
 }
 
 /// Event kinds emitted by `rld` itself. Plugins add `plugin.<name>.*`.
 pub mod event_kind {
+    /// The families that are the daemon's own: a command may not `rl emit`
+    /// one, and what a run raised is what falls outside them.
+    pub const OWN: &[&str] = &["run.", "decision.", "flow.", "commit.", "branch."];
+
+    /// Whether a kind belongs to the daemon rather than to what a run raised.
+    pub fn is_own(kind: &str) -> bool {
+        OWN.iter().any(|p| kind.starts_with(p))
+    }
+
     pub const RUN_STARTED: &str = "run.started";
     pub const RUN_STATE: &str = "run.state";
     pub const RUN_NEEDS_INPUT: &str = "run.needs_input";
@@ -348,16 +496,29 @@ pub mod event_kind {
     pub const RUN_STOPPED: &str = "run.stopped";
     pub const COMMIT_LANDED: &str = "commit.landed";
     pub const BRANCH_DONE: &str = "branch.done";
-    pub const SCHEDULE_FIRED: &str = "schedule.fired";
-    pub const SCHEDULE_SKIPPED: &str = "schedule.skipped";
+    /// A flow fired: by hand, on time, or on an event.
+    pub const FLOW_FIRED: &str = "flow.fired";
+    /// A firing is over: done, failed or stopped.
+    pub const FLOW_ENDED: &str = "flow.ended";
+    /// A flow or one of its steps did not run, and why.
+    pub const FLOW_SKIPPED: &str = "flow.skipped";
+    /// What a step left that Relay would not keep (a `$RELAY_OUT` line), and why: the step failed.
+    pub const FLOW_REFUSED: &str = "flow.refused";
     pub const DECISION_RAISED: &str = "decision.raised";
     pub const DECISION_TAKEN: &str = "decision.taken";
     pub const DECISION_DISMISSED: &str = "decision.dismissed";
     pub const DECISION_EXPIRED: &str = "decision.expired";
     pub const PLUGIN_INVOKED: &str = "plugin.invoked";
+    /// Something went wrong around a run without ending it: output lost
+    /// while no daemon was there, a holder connection that failed, a holder
+    /// gone without an exit. A warning that would otherwise only flash.
+    pub const RUN_TROUBLE: &str = "run.trouble";
+    /// Relay came back and the run's holder was gone with no exit on record —
+    /// the machine restarted, most likely. `run.resume` can pick it back up.
+    pub const RUN_LOST: &str = "run.lost";
     /// Retention took a run's journal; the run and its events stay.
     pub const RUN_JOURNAL_DROPPED: &str = "run.journal_dropped";
-    /// An assistant wrote a summary of an ended run (`summaries`).
+    /// A run was recapped: its agent's own, or an assistant's (`summaries`).
     pub const RUN_SUMMARISED: &str = "run.summarised";
 
     /// Every kind above, for anything that lists them.
@@ -370,10 +531,14 @@ pub mod event_kind {
         RUN_FINISHED,
         RUN_FAILED,
         RUN_STOPPED,
+        RUN_TROUBLE,
+        RUN_LOST,
         COMMIT_LANDED,
         BRANCH_DONE,
-        SCHEDULE_FIRED,
-        SCHEDULE_SKIPPED,
+        FLOW_FIRED,
+        FLOW_ENDED,
+        FLOW_SKIPPED,
+        FLOW_REFUSED,
         DECISION_RAISED,
         DECISION_TAKEN,
         DECISION_DISMISSED,
@@ -387,6 +552,55 @@ pub mod event_kind {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_flow_step_is_its_own_cause() {
+        let c: Cause = "flow:prod-logs/triage".parse().unwrap();
+        assert_eq!(
+            c,
+            Cause::Flow {
+                flow: "prod-logs".into(),
+                step: "triage".into()
+            }
+        );
+        assert_eq!(c.to_string(), "flow:prod-logs/triage");
+        assert!("flow:prod-logs".parse::<Cause>().is_err());
+        assert!("flow:/triage".parse::<Cause>().is_err());
+        assert!("flow:prod-logs/".parse::<Cause>().is_err());
+        assert!("workflow:a/b".parse::<Cause>().is_err());
+    }
+
+    #[test]
+    fn the_old_causes_are_refused() {
+        assert!("schedule:x".parse::<Cause>().is_err());
+        assert!("reaction:x".parse::<Cause>().is_err());
+        assert!(serde_json::from_str::<Cause>("\"schedule:nightly\"").is_err());
+    }
+
+    #[test]
+    fn a_target_is_kept_by_a_key_that_says_what_it_is() {
+        assert_eq!(SummaryTarget::Run { id: "ab12".into() }.key(), "r:ab12");
+        let flow = SummaryTarget::Flow { name: "nightly".into() };
+        assert_eq!(flow.key(), "f:nightly");
+        assert_eq!(
+            SummaryTarget::Project {
+                workspace: PathBuf::from("/w/api")
+            }
+            .key(),
+            "p:/w/api"
+        );
+        assert_eq!(SummaryTarget::All.key(), "all");
+    }
+
+    #[test]
+    fn a_firing_is_a_summarys_target_of_its_own() {
+        let t = SummaryTarget::Firing { id: "fi1".into() };
+        assert_eq!(t.key(), "fi:fi1");
+        assert_eq!(
+            serde_json::to_value(&t).unwrap(),
+            serde_json::json!({"kind": "firing", "id": "fi1"})
+        );
+    }
 
     #[test]
     fn enums_roundtrip_as_snake_case() {
@@ -403,7 +617,10 @@ mod tests {
         assert_eq!(r.group_key(), "/w");
         r.branch = Some("b".into());
         assert_eq!(r.group_key(), "b");
+        // The list keeps it with its folder, whatever the branch.
+        assert_eq!(r.place_key(), "/w");
         r.ref_ = Some("notion:X".into());
         assert_eq!(r.group_key(), "notion:X");
+        assert_eq!(r.place_key(), "notion:X");
     }
 }

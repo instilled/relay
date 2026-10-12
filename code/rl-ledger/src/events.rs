@@ -6,7 +6,7 @@ use anyhow::Result;
 use jiff::Timestamp;
 use rl_core::time::{from_millis, to_millis};
 use rl_proto::methods::EventFilter;
-use rl_proto::types::{Event, Run};
+use rl_proto::types::{Event, Run, Signal};
 use rusqlite::{Connection, OptionalExtension, Row, params, params_from_iter, types::Value};
 use std::path::PathBuf;
 
@@ -80,7 +80,20 @@ pub fn list(conn: &Connection, f: &EventFilter) -> Result<Vec<Event>> {
         sql.push_str(&format!(" AND kind IN ({marks})"));
         args.extend(f.kinds.iter().map(|k| Value::from(k.clone())));
     }
-    sql.push_str(" ORDER BY at ASC, id ASC LIMIT ?");
+    if let Some(id) = f.before {
+        sql.push_str(" AND id < ?");
+        args.push(Value::from(id));
+    }
+    if let Some(id) = f.after {
+        sql.push_str(" AND id > ?");
+        args.push(Value::from(id));
+    }
+    // Newest first goes by id alone: the order they were written, which a
+    // `before` cursor pages through without skipping or repeating one.
+    sql.push_str(match f.newest_first {
+        true => " ORDER BY id DESC LIMIT ?",
+        false => " ORDER BY at ASC, id ASC LIMIT ?",
+    });
     args.push(Value::from(f.limit.unwrap_or(DEFAULT_LIMIT) as i64));
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(params_from_iter(args), from_row)?;
@@ -98,7 +111,7 @@ pub fn get(conn: &Connection, id: i64) -> Result<Option<Event>> {
         .optional()?)
 }
 
-/// Events after `id`, oldest first: how the reactor reads the stream.
+/// Events after `id`, oldest first: how flows read the stream.
 pub fn after(conn: &Connection, id: i64, limit: u32) -> Result<Vec<Event>> {
     let mut stmt = conn.prepare(&format!("SELECT {COLS} FROM events WHERE id > ?1 ORDER BY id LIMIT ?2"))?;
     let rows = stmt.query_map(params![id, limit], from_row)?;
@@ -120,6 +133,39 @@ pub fn latest_for_run(conn: &Connection, run: &str) -> Result<Option<Event>> {
     Ok(rows.next().transpose()?)
 }
 
+/// What a run raised itself (`rl emit`): each kind and how often, in the
+/// order they first came. The daemon's own families are left out — those are
+/// its own doing, and the run's state already says them.
+pub fn emitted_for_run(conn: &Connection, run: &str) -> Result<Vec<Signal>> {
+    // Each kind once, counted, with the newest one's own words.
+    let mut stmt = conn.prepare(
+        "SELECT e.kind, c.n, e.summary, e.at FROM events e
+         JOIN (SELECT kind, COUNT(*) n, MAX(id) last_id, MIN(id) first_id
+               FROM events WHERE run = ?1 GROUP BY kind) c ON e.id = c.last_id
+         ORDER BY c.first_id",
+    )?;
+    let rows = stmt.query_map(params![run], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, u32>(1)?,
+            r.get::<_, String>(2)?,
+            r.get::<_, i64>(3)?,
+        ))
+    })?;
+    rows.collect::<std::result::Result<Vec<_>, _>>()?
+        .into_iter()
+        .filter(|(kind, ..)| !rl_proto::types::event_kind::is_own(kind))
+        .map(|(kind, count, said, at)| {
+            Ok(Signal {
+                kind,
+                count,
+                said,
+                at: from_millis(at)?,
+            })
+        })
+        .collect()
+}
+
 fn from_row(row: &Row<'_>) -> rusqlite::Result<Event> {
     let data: Option<String> = row.get(7)?;
     Ok(Event {
@@ -135,4 +181,59 @@ fn from_row(row: &Row<'_>) -> rusqlite::Result<Event> {
             .transpose()
             .map_err(|e| conv(7, e))?,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn what_a_run_raised_leaves_out_the_daemons_own() {
+        let mut c = rusqlite::Connection::open_in_memory().unwrap();
+        crate::migrate::run(&mut c).unwrap();
+        let t: jiff::Timestamp = "2026-09-10T12:00:00Z".parse().unwrap();
+        let r = rl_proto::types::Run::new(
+            "r1",
+            rl_proto::types::RunKind::Command,
+            "probe",
+            vec!["probe".into()],
+            "/w",
+            "/w",
+            t,
+        );
+        crate::runs::insert(&c, &r).unwrap();
+        let ev = |kind: &str| NewEvent {
+            at: t,
+            workspace: PathBuf::from("/w"),
+            run: Some("r1".into()),
+            group_key: "/w".into(),
+            kind: kind.into(),
+            summary: kind.into(),
+            data: None,
+        };
+        for (kind, said) in [
+            ("run.started", "started"),
+            ("flint.product.new-feedback", "2 rows to process"),
+            ("log.issue", "a note"),
+            ("flint.product.new-feedback", "3 rows to process"),
+            ("run.finished", "exit 0"),
+            ("flint.product.new-feedback", "5 rows to process"),
+        ] {
+            let mut e = ev(kind);
+            e.summary = said.into();
+            append(&c, &e).unwrap();
+        }
+        let raised = emitted_for_run(&c, "r1").unwrap();
+        assert_eq!(
+            raised.iter().map(|s| (s.kind.as_str(), s.count)).collect::<Vec<_>>(),
+            [("flint.product.new-feedback", 3), ("log.issue", 1)],
+            "each kind once, in the order they first came"
+        );
+        assert_eq!(
+            raised.iter().map(|s| s.said.as_str()).collect::<Vec<_>>(),
+            ["5 rows to process", "a note"],
+            "the newest one's own words"
+        );
+        assert!(emitted_for_run(&c, "nobody").unwrap().is_empty());
+    }
 }

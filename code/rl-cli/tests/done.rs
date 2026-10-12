@@ -1,4 +1,4 @@
-//! `rl done`: an ended run leaves `rl ls` and `rl since` but stays in the
+//! `rl archive` (and `rl done`, the name it had): an ended run leaves `rl ls` and `rl since` but stays in the
 //! ledger and in `rl ls --all`; a run still going cannot be done with;
 //! `--all` takes everything ended and looked at.
 
@@ -21,6 +21,8 @@ fn done_hides_but_keeps() {
         return;
     };
     let tmp = tempfile::tempdir().unwrap();
+    // `rl since` asks no assistant for its top here.
+    std::fs::write(tmp.path().join("config.yaml"), "catch_up:\n  summary: ask\n").unwrap();
     let run = |args: &[&str]| {
         let out = Command::new(env!("CARGO_BIN_EXE_rl"))
             .args(args)
@@ -74,9 +76,9 @@ fn done_hides_but_keeps() {
 
     // Done with one: gone from ls and since, there with --all, and the
     // ledger still has it.
-    let (ok, out, _) = run(&["done", "seen0001"]);
+    let (ok, out, _) = run(&["archive", "seen0001"]);
     assert!(ok, "{out}");
-    assert_eq!(out.trim(), "1 done");
+    assert_eq!(out.trim(), "1 archived");
     let (_, out, _) = run(&["ls", "--all", "--json"]);
     let v: serde_json::Value = serde_json::from_str(&out).unwrap();
     let ids: Vec<&str> = v
@@ -92,21 +94,22 @@ fn done_hides_but_keeps() {
     assert!(kept.archived_at.is_some());
 
     // A run still going is not something to be done with; a bad id neither.
-    let (ok, _, err) = run(&["done", "going001"]);
+    let (ok, _, err) = run(&["archive", "going001"]);
     assert!(!ok && err.contains("still running"), "{err}");
+    // The old name still answers.
     let (ok, _, err) = run(&["done", "nope0000"]);
     assert!(!ok, "{err}");
-    let (ok, _, err) = run(&["done"]);
+    let (ok, _, err) = run(&["archive"]);
     assert!(!ok && err.contains("say which"), "{err}");
 
     // --all: only what has ended and been looked at. `fresh` has not been.
-    let (ok, out, _) = run(&["done", "--all"]);
+    let (ok, out, _) = run(&["archive", "--all"]);
     assert!(ok);
-    assert_eq!(out.trim(), "0 done");
+    assert_eq!(out.trim(), "0 archived");
     ledger
         .call_blocking(move |c| runs::set_seen(c, &["fresh001".into()], now))
         .unwrap();
-    let (_, out, _) = run(&["done", "--all", "--json"]);
+    let (_, out, _) = run(&["archive", "--seen", "--json"]);
     assert_eq!(out.trim(), r#"{"archived":1}"#);
     let (_, out, _) = run(&["ls", "--all"]);
     assert!(out.contains("fresh001"), "still listed with --all: {out}");

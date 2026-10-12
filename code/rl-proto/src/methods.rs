@@ -2,7 +2,8 @@
 //! result live together so client and server cannot drift.
 
 use crate::decision::{Decision, DecisionOption};
-use crate::types::{AttachMode, Event, Mark, Run, RunKind, RunState};
+use crate::flow::Firing;
+use crate::types::{AttachMode, Checkout, Event, Mark, Run, RunKind, RunState, Signal, SummaryTarget};
 use jiff::Timestamp;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
@@ -67,7 +68,7 @@ pub struct RunFilter {
     pub group: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tag: Option<String>,
-    /// Only runs with this cause, e.g. `schedule:nightly`.
+    /// Only runs with this cause, e.g. `flow:nightly/probe`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cause: Option<String>,
     /// Newest first; default 200.
@@ -119,12 +120,17 @@ pub struct RunSpec {
     pub env: Vec<(String, String)>,
     #[serde(default = "default_true")]
     pub inherit_env: bool,
+    /// Whether the child has input: what is typed at it (default), or none at
+    /// all — end of input at once, for a headless run that must not wait on
+    /// it. A pty always has input.
+    #[serde(default = "default_true")]
+    pub input: bool,
     /// Why this run starts; `manual` unless the daemon's own machinery says.
     #[serde(default)]
     pub cause: crate::types::Cause,
     /// The chain to join; a new one when unset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub flow: Option<String>,
+    pub chain: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -174,9 +180,9 @@ pub struct RunId {
     pub id: String,
 }
 
-/// Emit a custom event into the ledger, from a command or plugin. A reaction
-/// picks it up like any built-in event. Inside a run, `RELAY_RUN` attributes
-/// it to that run's workspace and flow; outside one, the caller names the
+/// Emit a custom event into the ledger, from a command or plugin. A flow with
+/// `on:` picks it up like any built-in event. Inside a run, `RELAY_RUN` attributes
+/// it to that run's workspace and chain; outside one, the caller names the
 /// folder. The kind is the caller's own dotted name (`log.issue`); the
 /// daemon's own kinds (`run.*`, `decision.*`, …) are refused.
 pub struct EventEmit;
@@ -201,7 +207,7 @@ pub struct EventEmitParams {
     /// A one-line summary (default: the kind).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
-    /// Arbitrary structured payload, reachable in a reaction as `{data.<key>}`.
+    /// Arbitrary structured payload, reachable in a flow as `{event.data.<key>}`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data: Option<Value>,
 }
@@ -275,6 +281,10 @@ pub struct AttachParams {
     /// Join even if someone else has: they become a watcher.
     #[serde(default)]
     pub take: bool,
+    /// Which of the client's terminals this is (its process, say): two
+    /// terminals of one person are two seats, and only one has the keyboard.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal: Option<String>,
 }
 
 fn default_scrollback() -> u64 {
@@ -312,6 +322,23 @@ pub struct RunIds {
     pub ids: Vec<String>,
 }
 
+/// Gives a run a new title, in place. A run is titled when it starts and
+/// nothing writes the title afterwards, so a rename is not overwritten. An
+/// empty title undoes the rename: the run goes back to the name Relay gave
+/// it — what it started as, or what its first prompt named it.
+pub struct RunRename;
+impl Method for RunRename {
+    const NAME: &'static str = "run.rename";
+    type Params = RunRenameParams;
+    type Result = crate::types::Run;
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunRenameParams {
+    pub id: String,
+    pub title: String,
+}
+
 /// Done with these runs: out of the panel and `rl since`, kept in the
 /// ledger. Only ended runs are; the result is how many were.
 pub struct RunArchive;
@@ -321,6 +348,88 @@ impl Method for RunArchive {
     type Result = usize;
 }
 
+/// Picks ended runs back up, each as a new run in its folder under its
+/// title: an agent's conversation where its CLI can resume one (`claude
+/// --resume`, `codex resume`), a shell as a fresh shell, a command run again.
+/// The run picked up leaves the list. One outcome per run asked about.
+pub struct RunResume;
+impl Method for RunResume {
+    const NAME: &'static str = "run.resume";
+    type Params = RunResumeParams;
+    type Result = Vec<Resumed>;
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RunResumeParams {
+    #[serde(default)]
+    pub ids: Vec<String>,
+    /// Instead: every run lost in a restart that is still on the list (see
+    /// `Digest::lost`) — agents and shells, and plain commands only when
+    /// `commands` says so, since running one again can do things twice.
+    #[serde(default)]
+    pub lost: bool,
+    #[serde(default)]
+    pub commands: bool,
+    /// The environment the new runs start in, as for `run.start`; empty means
+    /// the daemon's own.
+    #[serde(default)]
+    pub env: Vec<(String, String)>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cols: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rows: Option<u16>,
+}
+
+/// `Resumed::why_not` for a command `lost` left out because `commands` was
+/// not set: running one again can do what it did twice.
+pub const RESUME_LEFT_OUT: &str = "a command is run again only when asked";
+
+/// What became of one run asked to resume.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Resumed {
+    /// The run asked about.
+    pub from: String,
+    pub title: String,
+    /// The run that carries it on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run: Option<crate::types::Run>,
+    /// Why there is none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub why_not: Option<String>,
+}
+
+/// Keeps a run at the top of the panel, or lets it go back among the rest.
+/// Answers with the run as it now stands.
+pub struct RunPin;
+impl Method for RunPin {
+    const NAME: &'static str = "run.pin";
+    type Params = RunPinParams;
+    type Result = crate::types::Run;
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunPinParams {
+    pub id: String,
+    pub pinned: bool,
+}
+
+/// Takes a run off the panel's list, or brings it back: it stays what it is,
+/// going or ended, and shows only in the `hidden` lens — unless it comes to
+/// need you after it was hidden. Hiding again moves the time on, so what came
+/// through goes back. Answers with the run as it now stands.
+pub struct RunHide;
+impl Method for RunHide {
+    const NAME: &'static str = "run.hide";
+    type Params = RunHideParams;
+    type Result = crate::types::Run;
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunHideParams {
+    pub id: String,
+    pub hidden: bool,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RunArchiveParams {
     #[serde(default)]
@@ -328,6 +437,23 @@ pub struct RunArchiveParams {
     /// Instead: everything ended that has been looked at.
     #[serde(default)]
     pub all_seen: bool,
+}
+
+// ---- graph.* ----------------------------------------------------------------
+
+/// The wiring graph over every project: flows, what they run, the questions
+/// they ask, and what set what off since `since` (default: the last 7 days).
+pub struct GraphGet;
+impl Method for GraphGet {
+    const NAME: &'static str = "graph.get";
+    type Params = GraphParams;
+    type Result = crate::graph::Graph;
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct GraphParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since: Option<Timestamp>,
 }
 
 // ---- digest.* ---------------------------------------------------------------
@@ -349,6 +475,77 @@ pub struct DigestParams {
     pub since: Option<Timestamp>,
 }
 
+/// Takes a whole project, or a flow, off the panel's list — or brings it back
+/// — by its row's key: `g:<folder>` a project's header (`g:everywhere` the
+/// flows' runs outside every project), `f:<name>` a flow. Everything under it
+/// is hidden with it, runs that come later too; nothing is stopped or
+/// removed. Answers with everything hidden so.
+pub struct DigestHide;
+impl Method for DigestHide {
+    const NAME: &'static str = "digest.hide";
+    type Params = DigestHideParams;
+    type Result = Vec<Hidden>;
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DigestHideParams {
+    pub key: String,
+    pub hidden: bool,
+}
+
+/// A project or a flow taken off the list, and since when.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Hidden {
+    pub key: String,
+    pub at: Timestamp,
+}
+
+impl Hidden {
+    /// Whether `key` names something `digest.hide` can hide.
+    pub fn valid_key(key: &str) -> bool {
+        key.strip_prefix("g:")
+            .or_else(|| key.strip_prefix("f:"))
+            .is_some_and(|k| !k.is_empty())
+    }
+}
+
+/// Keeps a project's rows in the order given — moved by hand on the panel
+/// (shift-↑/↓) — or, with no rows, lets it sort itself again (`/sort`). The
+/// project is its header's key (`g:<folder>`, `g:everywhere`); the rows are
+/// run (`r:<id>`) and flow (`f:<name>`) keys, first on top.
+/// The order given replaces the one kept, so what has left the list drops
+/// out. Answers with every project's order.
+pub struct DigestOrder;
+impl Method for DigestOrder {
+    const NAME: &'static str = "digest.order";
+    type Params = Order;
+    type Result = Vec<Order>;
+}
+
+/// A project's rows in the order you put them, first on top.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Order {
+    /// The project's header key: `g:<folder>`, or `g:everywhere`.
+    pub group: String,
+    /// Run and flow keys, `r:<id>` and `f:<name>`.
+    #[serde(default)]
+    pub rows: Vec<String>,
+}
+
+impl Order {
+    /// Whether `key` names a project an order can be kept for.
+    pub fn valid_group(key: &str) -> bool {
+        key.strip_prefix("g:").is_some_and(|k| !k.is_empty())
+    }
+
+    /// Whether `key` names a row that can be put in order: a run or a flow.
+    pub fn valid_row(key: &str) -> bool {
+        key.strip_prefix("r:")
+            .or_else(|| key.strip_prefix("f:"))
+            .is_some_and(|k| !k.is_empty())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Digest {
     pub since: Timestamp,
@@ -356,6 +553,22 @@ pub struct Digest {
     /// Everything still waiting on an answer, newest first.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub decisions: Vec<Decision>,
+    /// The git checkout of every folder the list shows that is in one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub checkouts: Vec<Checkout>,
+    /// Runs lost in a restart and still on the list, oldest first: what
+    /// `run.resume` with `lost` would pick up.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lost: Vec<String>,
+    /// The projects and flows taken off the list (`digest.hide`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hidden: Vec<Hidden>,
+    /// The projects whose rows you put in order (`digest.order`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub order: Vec<Order>,
+    /// Each flow's latest firing: where its row says it stands.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub firings: Vec<Firing>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -369,6 +582,19 @@ pub struct DigestItem {
     pub unseen: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub joined_by: Option<String>,
+    /// What the run raised itself (`rl emit`), by kind, in the order they
+    /// first came.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub emitted: Vec<Signal>,
+    /// The folder a live run last said it was in (OSC 7) — a shell's, at its
+    /// prompt. Unknown until it says so; forgotten when the run ends.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<std::path::PathBuf>,
+    /// A Claude or Codex run's latest recap, its first line cut for a row —
+    /// the agent's own, kept as it is written, or one asked for since. The
+    /// whole of it is `summary.get`'s.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recap: Option<String>,
 }
 
 // ---- event.* ----------------------------------------------------------------
@@ -391,9 +617,19 @@ pub struct EventFilter {
     /// Only these kinds. Empty means any.
     #[serde(default)]
     pub kinds: Vec<String>,
-    /// Oldest first; default 500.
+    /// Oldest first, unless `newest_first`; default 500.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<u32>,
+    /// The newest `limit` rather than the oldest, newest first — in the
+    /// order they were written (by id), so a page ends where the next begins.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub newest_first: bool,
+    /// Only events written before this one: the page past one already read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before: Option<i64>,
+    /// Only events written after this one: what came since one already read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after: Option<i64>,
 }
 
 // ---- presence.* -------------------------------------------------------------
@@ -419,96 +655,70 @@ pub struct PresenceInfo {
     pub last_seen_at: Option<Timestamp>,
 }
 
-// ---- schedule.* -------------------------------------------------------------
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct ScheduleFilter {
-    /// Include schedules removed from their file.
-    #[serde(default)]
-    pub all: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ScheduleName {
-    pub name: String,
-    /// `global` or a workspace path; needed when the name is in several.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub scope: Option<String>,
-}
-
-pub struct ScheduleList;
-impl Method for ScheduleList {
-    const NAME: &'static str = "schedule.list";
-    type Params = ScheduleFilter;
-    type Result = Vec<crate::schedule::Schedule>;
-}
-
-/// Fires a schedule now, whatever the clock or its policies say.
-pub struct ScheduleRun;
-impl Method for ScheduleRun {
-    const NAME: &'static str = "schedule.run";
-    type Params = ScheduleName;
-    type Result = crate::types::Run;
-}
-
-pub struct SchedulePause;
-impl Method for SchedulePause {
-    const NAME: &'static str = "schedule.pause";
-    type Params = ScheduleName;
-    type Result = crate::schedule::Schedule;
-}
-
-pub struct ScheduleResume;
-impl Method for ScheduleResume {
-    const NAME: &'static str = "schedule.resume";
-    type Params = ScheduleName;
-    type Result = crate::schedule::Schedule;
-}
-
-/// Re-reads `schedules.yaml`.
-pub struct ScheduleReload;
-impl Method for ScheduleReload {
-    const NAME: &'static str = "schedule.reload";
-    type Params = ();
-    type Result = crate::schedule::ReloadReport;
-}
-
 // ---- workspace.* ------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkspaceUpParams {
     pub path: PathBuf,
-    /// Approve every pending schedule version in it.
-    #[serde(default)]
-    pub approve: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WorkspacePath {
-    pub path: PathBuf,
-}
-
-/// Registers a folder and loads its `.relay/`.
+/// Registers a folder, so flows can run in it (`in:`); registered already,
+/// it is as it was.
 pub struct WorkspaceUp;
 impl Method for WorkspaceUp {
     const NAME: &'static str = "workspace.up";
     type Params = WorkspaceUpParams;
-    type Result = crate::schedule::UpReport;
+    type Result = crate::types::Workspace;
 }
 
 pub struct WorkspaceList;
 impl Method for WorkspaceList {
     const NAME: &'static str = "workspace.list";
     type Params = ();
-    type Result = Vec<crate::schedule::Workspace>;
+    type Result = Vec<crate::types::Workspace>;
 }
 
-/// Unregisters a folder; its schedules stop.
+/// Unregisters a folder: its open questions are dismissed, and flows `in` it
+/// no longer load. The folder need not exist any more, nor have been
+/// registered — a folder the list shows only for its runs is removed by what
+/// the flags do to those. Asked to, it also stops every run still going
+/// there, and archives what has ended.
 pub struct WorkspaceRemove;
 impl Method for WorkspaceRemove {
     const NAME: &'static str = "workspace.remove";
-    type Params = WorkspacePath;
-    type Result = bool;
+    type Params = WorkspaceRemoveParams;
+    type Result = WorkspaceRemoved;
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct WorkspaceRemoveParams {
+    pub path: PathBuf,
+    /// Stop every run in the folder still going — shells, agents, commands —
+    /// and wait (a while, not for ever) for them to end.
+    #[serde(default)]
+    pub stop_runs: bool,
+    /// Archive the folder's ended runs, those just stopped included.
+    #[serde(default)]
+    pub archive_runs: bool,
+}
+
+/// What removing a folder did.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct WorkspaceRemoved {
+    /// The folder as the daemon took it.
+    pub path: PathBuf,
+    /// It was registered, and no longer is.
+    pub removed: bool,
+    /// Runs asked to stop that have ended.
+    pub stopped: usize,
+    /// Runs asked to stop that were still going when the wait ran out, or
+    /// that no holder of this daemon's could be told to stop.
+    #[serde(default)]
+    pub still_running: usize,
+    pub archived: usize,
+    /// Open questions from the folder, dismissed.
+    #[serde(default)]
+    pub dismissed: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -522,14 +732,14 @@ pub struct WorkspaceRename;
 impl Method for WorkspaceRename {
     const NAME: &'static str = "workspace.rename";
     type Params = WorkspaceRenameParams;
-    type Result = crate::schedule::Workspace;
+    type Result = crate::types::Workspace;
 }
 
 // ---- decision.* -------------------------------------------------------------
 
 /// Raises a question and returns it. With a `group`, an open decision with
 /// that key is replaced in place — the same id, the new wording — so a
-/// schedule that asks nightly leaves one line, not thirty.
+/// flow that asks nightly leaves one line, not thirty.
 pub struct DecisionRaise;
 impl Method for DecisionRaise {
     const NAME: &'static str = "decision.raise";
@@ -576,7 +786,7 @@ pub struct DecisionFilter {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub flow: Option<String>,
+    pub chain: Option<String>,
     /// Newest first; default 100.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<u32>,
@@ -595,7 +805,7 @@ pub struct DecisionId {
 }
 
 /// Chooses. Every chosen option that carries an action starts a run
-/// (`cause = decision:<id>`, the decision's flow); the ids come back on the
+/// (`cause = decision:<id>`, the decision's chain); the ids come back on the
 /// decision. Answering twice is refused.
 pub struct DecisionTake;
 impl Method for DecisionTake {
@@ -628,91 +838,6 @@ pub struct DecisionNote {
     pub note: Option<String>,
 }
 
-// ---- rule.* -----------------------------------------------------------------
-
-/// A rule by name. `scope` settles it when the name exists in several,
-/// `kind` when a schedule and a reaction share it.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RuleRef {
-    pub name: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub scope: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub kind: Option<crate::rule::RuleKind>,
-}
-
-/// Every schedule and reaction as one list: what starts work without you.
-pub struct RuleList;
-impl Method for RuleList {
-    const NAME: &'static str = "rule.list";
-    type Params = ScheduleFilter;
-    type Result = Vec<crate::rule::Rule>;
-}
-
-/// Says yes to the current version of one rule; it may fire from now on.
-pub struct RuleApprove;
-impl Method for RuleApprove {
-    const NAME: &'static str = "rule.approve";
-    type Params = RuleRef;
-    type Result = crate::rule::Rule;
-}
-
-// ---- reaction.* -------------------------------------------------------------
-
-pub struct ReactionList;
-impl Method for ReactionList {
-    const NAME: &'static str = "reaction.list";
-    type Params = ScheduleFilter;
-    type Result = Vec<crate::reaction::Reaction>;
-}
-
-pub struct ReactionPause;
-impl Method for ReactionPause {
-    const NAME: &'static str = "reaction.pause";
-    type Params = ScheduleName;
-    type Result = crate::reaction::Reaction;
-}
-
-pub struct ReactionResume;
-impl Method for ReactionResume {
-    const NAME: &'static str = "reaction.resume";
-    type Params = ScheduleName;
-    type Result = crate::reaction::Reaction;
-}
-
-/// Re-reads every `reactions.yaml`.
-pub struct ReactionReload;
-impl Method for ReactionReload {
-    const NAME: &'static str = "reaction.reload";
-    type Params = ();
-    type Result = crate::schedule::ReloadReport;
-}
-
-/// What every rule would do with one event, without doing any of it.
-pub struct ReactionTest;
-impl Method for ReactionTest {
-    const NAME: &'static str = "reaction.test";
-    type Params = EventId;
-    type Result = Vec<ReactionTrial>;
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EventId {
-    pub event: i64,
-}
-
-/// One rule against one event: whether it fires, and why not when it does not.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ReactionTrial {
-    pub reaction: String,
-    pub scope: String,
-    pub fires: bool,
-    pub why: String,
-    /// What it would run, or the question it would ask.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub action: Option<String>,
-}
-
 // ---- agent.* / config.* ------------------------------------------------------
 
 /// An agent CLI the registry knows, and whether it is on this machine.
@@ -730,6 +855,17 @@ pub struct AgentInfo {
     /// How to name a model, if the profile says.
     #[serde(default)]
     pub model_flag: Vec<String>,
+    /// The quick, cheap model the profile suggests for summaries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub small_model: Option<String>,
+    /// Whether the panel offers it: named in the config's `agents`, or that
+    /// list is empty.
+    #[serde(default = "yes")]
+    pub offered: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 impl AgentInfo {
@@ -769,7 +905,13 @@ pub struct ConfigReport {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub interpret: Option<ResolvedAssistant>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub summarise: Option<ResolvedAssistant>,
+    pub summary: Option<ResolvedAssistant>,
+    /// `catch_up.after` as it resolves: a duration, or `off`.
+    #[serde(default)]
+    pub catch_up_after: String,
+    /// `catch_up.summary` as it resolves: `auto` or `ask`.
+    #[serde(default)]
+    pub catch_up_summary: String,
     /// Why the file, or an assistant in it, cannot be used as written.
     #[serde(default)]
     pub errors: Vec<String>,
@@ -779,6 +921,132 @@ pub struct ConfigGet;
 impl Method for ConfigGet {
     const NAME: &'static str = "config.get";
     type Params = ();
+    type Result = ConfigReport;
+}
+
+// ---- import.* ----------------------------------------------------------------
+
+/// A session Claude runs on its own (`claude --bg`, or open in a terminal),
+/// as `claude agents --json` lists it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClaudeSession {
+    /// The conversation: what `claude --resume` takes.
+    pub session_id: String,
+    /// A background session's short id (`claude stop <id>`); none when it
+    /// is open in a terminal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    pub name: String,
+    pub cwd: PathBuf,
+    /// `background` or `interactive`.
+    pub kind: String,
+    /// `busy` or `idle`.
+    pub status: String,
+    /// A background session's `working` or `done`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
+    /// The Relay run that carries it on, once moved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run: Option<String>,
+    /// Not yet mentioned when the panel started.
+    #[serde(default)]
+    pub new: bool,
+}
+
+impl ClaudeSession {
+    /// Open in someone's terminal: that terminal has it, not us.
+    pub fn in_a_terminal(&self) -> bool {
+        self.id.is_none()
+    }
+
+    /// In the middle of a turn: moving it now would cut the turn short.
+    pub fn working(&self) -> bool {
+        self.state.as_deref() == Some("working") || (self.state.is_none() && self.status == "busy")
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ImportListParams {
+    /// Remember these as mentioned, so the next start's hint is only about
+    /// sessions that are new since.
+    #[serde(default)]
+    pub mark: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImportReport {
+    pub sessions: Vec<ClaudeSession>,
+    /// Why there is no list: no `claude` here, or it would not say.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Claude's own sessions, and which of them Relay carries on already.
+pub struct ImportList;
+impl Method for ImportList {
+    const NAME: &'static str = "import.list";
+    type Params = ImportListParams;
+    type Result = ImportReport;
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImportMoveParams {
+    pub session_id: String,
+    /// The environment the resumed session starts with: the caller's.
+    #[serde(default)]
+    pub env: Vec<(String, String)>,
+}
+
+/// Moves a Claude session into Relay: Claude's background process is
+/// stopped (the conversation stays), and `claude --resume` carries it on as
+/// a Relay run in the same folder, which becomes a workspace.
+pub struct ImportMove;
+impl Method for ImportMove {
+    const NAME: &'static str = "import.move";
+    type Params = ImportMoveParams;
+    type Result = crate::types::Run;
+}
+
+// ---- setup.* -----------------------------------------------------------------
+
+/// The setup guide's steps, counted: a release that adds one raises it, and
+/// the panel shows the guide again for what is new.
+pub const SETUP_STEPS: u32 = 3;
+
+/// Where setup stands, and what it starts from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SetupState {
+    /// How many steps were gone through last time; 0 when never.
+    pub seen: u32,
+    pub config: ConfigReport,
+    pub agents: Vec<AgentInfo>,
+}
+
+pub struct SetupGet;
+impl Method for SetupGet {
+    const NAME: &'static str = "setup.get";
+    type Params = ();
+    type Result = SetupState;
+}
+
+/// What setup settled. A field left out leaves that part of `config.yaml`
+/// as it is.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SetupSave {
+    /// Steps gone through, kept so the guide is not shown again for them.
+    pub seen: u32,
+    /// The `agents` the panel offers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agents: Option<Vec<String>>,
+    /// Who summarises and drafts: both `assistants` jobs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assistant: Option<crate::config::Assistant>,
+}
+
+pub struct SetupDone;
+impl Method for SetupDone {
+    const NAME: &'static str = "setup.save";
+    type Params = SetupSave;
     type Result = ConfigReport;
 }
 
@@ -807,6 +1075,9 @@ pub struct GcReport {
     pub bytes: u64,
     /// Log and sidecar files removed (or that would be).
     pub files: usize,
+    /// Firings' folders (`flows/<name>/runs/<firing>/`) removed (or that would be).
+    #[serde(default)]
+    pub firings: usize,
 }
 
 /// Drops the journal of runs ended longer ago than retention says.
@@ -823,7 +1094,7 @@ impl Method for GcRun {
 /// argument, waited for, its output handed back.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AssistantParams {
-    /// `interpret` or `summarise`.
+    /// `interpret` or `summary`.
     pub job: String,
     pub prompt: String,
     pub cwd: PathBuf,
@@ -855,20 +1126,35 @@ impl Method for AssistantRun {
 
 // ---- summary.* --------------------------------------------------------------
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SummaryParams {
-    pub run: String,
-    /// Ask again even when there is a summary kept.
+    pub target: SummaryTarget,
+    /// Read the logs, not the recaps.
+    #[serde(default)]
+    pub deep: bool,
+    /// Where the stretch begins. None: since you last looked (a run's
+    /// seen_at, when it has done anything since, else the whole run; a flow's
+    /// oldest unseen firing on, else the last day); required for a project and
+    /// all — the client knows when you were last here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<Timestamp>,
+    /// Make a new one even when the one kept is up to date.
     #[serde(default)]
     pub again: bool,
+    /// Only say how many assistant calls it would take (`Summary.calls`, text
+    /// empty).
+    #[serde(default)]
+    pub dry: bool,
     /// A duration; a minute when left out.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout: Option<String>,
 }
 
-/// The summary of an ended run: the one kept, or a new one from
-/// `assistants.summarise` (an ordinary assistant run) when there is none or
-/// `again`. Refused for a run still going, and for an assistant's own run.
+/// What happened in a run, a flow's runs, a project's or everything's, over
+/// the stretch from `from`, brief or deep: the one kept while it has not moved
+/// on (unless `again`); else a run's own recap where it has one, or
+/// `assistants.summary` reading the stretch. Refused for an assistant's own
+/// run.
 pub struct SummaryMake;
 impl Method for SummaryMake {
     const NAME: &'static str = "summary.make";
@@ -876,10 +1162,11 @@ impl Method for SummaryMake {
     type Result = crate::types::Summary;
 }
 
-/// The summary kept for a run, if any. Never asks.
+/// The summary kept for a target, if any. Never asks. Of the params, the
+/// target, `deep` and `from` say which; the rest are ignored.
 pub struct SummaryGet;
 impl Method for SummaryGet {
     const NAME: &'static str = "summary.get";
-    type Params = RunId;
+    type Params = SummaryParams;
     type Result = Option<crate::types::Summary>;
 }

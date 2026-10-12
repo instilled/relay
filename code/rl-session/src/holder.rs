@@ -5,10 +5,21 @@
 //! decides who may). After the child exits the holder lingers so a daemon that
 //! was down at the time can still attach, replay the tail and read the exit —
 //! then it goes away on `Close` or after `linger` with nobody attached.
+//!
+//! Its socket is the only way anyone reaches it. When that file is gone — the
+//! Relay home deleted, a test's temporary home cleaned up — no daemon can ever
+//! come back for the run, so the holder hangs up its child and leaves rather
+//! than wait out a linger (or a child) nobody will collect.
+//!
+//! The socket can outlive its daemon, though — a throwaway home left on disk,
+//! a `rld` that never comes back — and then nothing journals the run or knows
+//! its state. So a holder that has had nobody attached at all for `reap_after`
+//! hangs up its child and leaves too. `rld` attaches for as long as it lives,
+//! so this only ever fires when Relay itself is gone.
 
 use crate::backend::{self, Resizer, Spec};
 use crate::exit::{Exit, write_exit_file};
-use crate::proto::{Frame, Hello, read_frame, write_frame};
+use crate::proto::{Frame, FrameReader, Hello, write_frame};
 use crate::ring::Ring;
 use anyhow::{Context, Result};
 use jiff::Timestamp;
@@ -37,6 +48,12 @@ pub struct Config {
     pub spec: Spec,
     /// After the child exits: how long to stay with no clients attached.
     pub linger: Duration,
+    /// How often to check that the socket is still there. Nothing waits on
+    /// an orphaned holder leaving, so this can be slow.
+    pub socket_check: Duration,
+    /// Nobody attached — no daemon, no viewer — for this long: hang up the
+    /// child and leave. `None` waits forever.
+    pub reap_after: Option<Duration>,
 }
 
 struct Shared {
@@ -116,6 +133,10 @@ pub async fn serve(cfg: Config, ready: oneshot::Sender<()>) -> Result<()> {
         cfg.linger,
     ));
     tokio::spawn(watch_signals(ctx.clone()));
+    tokio::spawn(watch_socket(ctx.clone(), cfg.socket.clone(), cfg.socket_check));
+    if let Some(after) = cfg.reap_after {
+        tokio::spawn(watch_alone(ctx.clone(), after));
+    }
 
     loop {
         tokio::select! {
@@ -212,6 +233,46 @@ async fn watch_exit(
     }
 }
 
+/// The socket file removed from under the holder: nobody can reach it again,
+/// so hang up the child and leave.
+async fn watch_socket(ctx: Arc<Ctx>, socket: PathBuf, every: Duration) {
+    loop {
+        tokio::select! {
+            _ = ctx.shutdown.cancelled() => return,
+            _ = tokio::time::sleep(every) => {}
+        }
+        if std::fs::symlink_metadata(&socket).is_err() {
+            info!(socket = %socket.display(), "socket removed; nobody can reach this session");
+            ctx.shutdown.cancel();
+            return;
+        }
+    }
+}
+
+/// Nobody at all for `after` — not even a daemon, which attaches for as long
+/// as it lives: the run is unsupervised and nothing is journaling it, so hang
+/// up the child and leave instead of holding it forever.
+async fn watch_alone(ctx: Arc<Ctx>, after: Duration) {
+    let every = (after / 10).clamp(Duration::from_secs(1), Duration::from_secs(60));
+    let mut alone = Duration::ZERO;
+    loop {
+        tokio::select! {
+            _ = ctx.shutdown.cancelled() => return,
+            _ = tokio::time::sleep(every) => {}
+        }
+        if ctx.clients.load(Ordering::SeqCst) > 0 {
+            alone = Duration::ZERO;
+            continue;
+        }
+        alone += every;
+        if alone >= after {
+            info!(?after, "nobody has been attached for this long; letting the run go");
+            ctx.shutdown.cancel();
+            return;
+        }
+    }
+}
+
 /// SIGTERM/SIGINT to the holder: hang up the child and leave.
 async fn watch_signals(ctx: Arc<Ctx>) {
     use tokio::signal::unix::{SignalKind, signal};
@@ -236,9 +297,9 @@ async fn handle_client(ctx: Arc<Ctx>, stream: UnixStream) {
 
 async fn client_loop(ctx: &Ctx, stream: UnixStream) -> std::io::Result<()> {
     let (rd, mut wr) = stream.into_split();
-    let mut rd = BufReader::new(rd);
+    let mut rd = FrameReader::new(BufReader::new(rd));
 
-    let (replay, from) = match read_frame(&mut rd).await? {
+    let (replay, from) = match rd.next().await? {
         Some(Frame::Attach { replay, from }) => (replay, from),
         _ => return Ok(()),
     };
@@ -275,7 +336,7 @@ async fn client_loop(ctx: &Ctx, stream: UnixStream) -> std::io::Result<()> {
     loop {
         tokio::select! {
             _ = ctx.shutdown.cancelled() => return Ok(()),
-            frame = read_frame(&mut rd) => match frame? {
+            frame = rd.next() => match frame? {
                 None => return Ok(()),
                 Some(Frame::Input(bytes)) => { let _ = ctx.input.send(bytes).await; }
                 Some(Frame::Resize { cols, rows }) => {

@@ -21,6 +21,10 @@ struct Holder {
 
 /// Spawns `rl-session` for `fake-cli` and waits for it to report ready.
 fn start(tty: bool, linger: u64) -> Holder {
+    start_with(tty, linger, &[])
+}
+
+fn start_with(tty: bool, linger: u64, extra: &[&str]) -> Holder {
     let tmp = tempfile::tempdir().unwrap();
     let socket = tmp.path().join("s.sock");
     let exit_file = tmp.path().join("s.exit");
@@ -35,11 +39,14 @@ fn start(tty: bool, linger: u64) -> Holder {
         .arg(tmp.path())
         .arg("--linger")
         .arg(linger.to_string())
+        .arg("--socket-check")
+        .arg("1")
         .arg("--env")
         .arg("RELAY_RUN=test0001");
     if !tty {
         cmd.arg("--no-tty");
     }
+    cmd.args(extra);
     cmd.arg("--").arg(fake_cli());
     // The detached holder keeps stderr for its log, so never `output()` here.
     let log = tmp.path().join("holder.log");
@@ -144,6 +151,62 @@ async fn pty_lifecycle() {
 }
 
 #[tokio::test]
+async fn nobody_for_a_while_lets_the_run_go() {
+    // A throwaway home left on disk: the socket is there, but no daemon will
+    // ever come back for the run.
+    let h = start_with(true, 60, &["--reap-after", "1"]);
+    let (hello, mut s) = attach(&h, true).await;
+    read_until(&mut s, "fake-cli ready").await;
+    // Attached: it stays.
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert!(alive(hello.holder_pid) && alive(hello.pid), "someone is here");
+    drop(s);
+    // Alone: the child is hung up and the holder goes.
+    wait_gone(&h.socket, hello.holder_pid).await;
+    assert!(!alive(hello.pid), "the child went with it");
+}
+
+/// Reads whole frames until `needle` has arrived, and says how many it took.
+async fn count_until(s: &mut Session, needle: &str) -> (usize, String) {
+    let mut acc = String::new();
+    let mut frames = 0;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !acc.contains(needle) {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let frame = tokio::time::timeout(remaining, s.recv())
+            .await
+            .unwrap_or_else(|_| panic!("timed out waiting for {needle:?}; got {acc:?}"))
+            .unwrap();
+        match frame {
+            Some(Frame::Output(b)) => {
+                frames += 1;
+                acc.push_str(&String::from_utf8_lossy(&b));
+            }
+            Some(_) => {}
+            None => panic!("holder closed before {needle:?}; got {acc:?}"),
+        }
+    }
+    (frames, acc)
+}
+
+/// A child writing as fast as it can used to wake the holder once per `printf`
+/// — a wake-up and an allocation for a few bytes — and, because the holder
+/// drained the pty the instant anything landed, the child never met the
+/// backpressure a terminal would have given it. Settling collapses the burst
+/// into a handful of reads.
+#[tokio::test]
+async fn a_burst_of_small_writes_arrives_in_a_few_chunks() {
+    const LINES: usize = 60;
+    let h = start_with(true, 60, &["--settle", "200"]);
+    let (_, mut s) = attach(&h, true).await;
+    read_until(&mut s, "fake-cli ready").await;
+    s.input(format!("burst {LINES}\n")).await.unwrap();
+    let (frames, out) = count_until(&mut s, &format!("tick {LINES}")).await;
+    assert!(out.matches("tick ").count() >= LINES, "every line arrives: {out:?}");
+    assert!(frames <= LINES / 4, "{LINES} writes should not cost {frames} chunks");
+}
+
+#[tokio::test]
 async fn survives_client_going_away_and_replays() {
     let h = start(true, 60);
     let (hello, mut s) = attach(&h, true).await;
@@ -212,6 +275,20 @@ async fn no_tty_uses_pipes() {
     wait_gone(&h.socket, hello.holder_pid).await;
 }
 
+/// With no input, the child's read ends at once: `fake-cli` leaves on its own,
+/// and what is typed goes nowhere without breaking anything.
+#[tokio::test]
+async fn no_input_ends_the_childs_input_at_once() {
+    let h = start_with(false, 60, &["--no-input"]);
+    let (hello, mut s) = attach(&h, true).await;
+    s.input("echo me\n").await.unwrap();
+    let out = read_until(&mut s, "fake-cli ready").await;
+    assert_eq!(read_exit(&mut s).await.code, 0);
+    assert!(!out.contains("echo: echo me"), "{out}");
+    s.close().await.unwrap();
+    wait_gone(&h.socket, hello.holder_pid).await;
+}
+
 #[tokio::test]
 async fn signal_reaches_child() {
     let h = start(true, 60);
@@ -243,6 +320,25 @@ async fn close_hangs_up_a_live_child() {
     read_until(&mut s, "fake-cli ready").await;
     s.close().await.unwrap();
     wait_gone(&h.socket, hello.holder_pid).await;
+    assert!(!alive(hello.pid), "child should have been hung up");
+}
+
+#[tokio::test]
+async fn leaves_when_its_socket_is_removed() {
+    // The Relay home it lived in is gone: no daemon can come back for it, so
+    // it hangs up a child that is still going and leaves, linger or not.
+    let h = start(true, 60);
+    let (hello, mut s) = attach(&h, true).await;
+    read_until(&mut s, "fake-cli ready").await;
+    drop(s);
+    std::fs::remove_file(&h.socket).unwrap();
+    for _ in 0..100 {
+        if !alive(hello.holder_pid) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(!alive(hello.holder_pid), "holder should have left");
     assert!(!alive(hello.pid), "child should have been hung up");
 }
 

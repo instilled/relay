@@ -21,6 +21,8 @@ const BUILTIN: &[(&str, &str)] = &[
     ("claude", include_str!("../../../detect/claude.yaml")),
     ("codex", include_str!("../../../detect/codex.yaml")),
     ("cursor", include_str!("../../../detect/cursor.yaml")),
+    ("gemini", include_str!("../../../detect/gemini.yaml")),
+    ("opencode", include_str!("../../../detect/opencode.yaml")),
     ("sh", include_str!("../../../detect/sh.yaml")),
 ];
 
@@ -34,6 +36,9 @@ struct ProfileFile {
     hooks: Option<HooksFile>,
     headless: Option<Vec<String>>,
     model_flag: Option<Vec<String>>,
+    small_model: Option<String>,
+    icon: Option<String>,
+    color: Option<String>,
     patterns: Option<PatternsFile>,
     timing: Option<TimingFile>,
 }
@@ -80,6 +85,15 @@ impl ProfileFile {
         if over.model_flag.is_some() {
             self.model_flag = over.model_flag;
         }
+        if over.small_model.is_some() {
+            self.small_model = over.small_model;
+        }
+        if over.icon.is_some() {
+            self.icon = over.icon;
+        }
+        if over.color.is_some() {
+            self.color = over.color;
+        }
         if let Some(p) = over.patterns {
             let mine = self.patterns.get_or_insert_with(Default::default);
             if p.needs_input.is_some() {
@@ -121,13 +135,47 @@ pub struct Profile {
     pub interactive_only: bool,
     pub hooks: Option<Hooks>,
     /// Arguments that make the CLI run one prompt and exit (`-p`), for
-    /// scheduled runs.
+    /// headless runs: a flow's agent steps, Relay's own assistants. The prompt
+    /// goes last, or in place of `{prompt}`.
     pub headless: Vec<String>,
     /// The flag that names a model (`--model`); empty when the CLI has none.
     pub model_flag: Vec<String>,
+    /// The quick, cheap model setup offers for summaries, when there is one.
+    pub small_model: Option<String>,
+    /// The glyph its rows wear in place of the plain agent one: one column
+    /// wide under every width table, so the titles after it stay in line.
+    pub icon: Option<String>,
+    /// The colour that glyph is drawn in (`#rrggbb`); none, the foreground.
+    pub color: Option<(u8, u8, u8)>,
     /// Generic patterns first, then the profile's own.
     pub patterns: Patterns,
     pub timing: Timing,
+}
+
+/// Where a headless prompt goes when it does not simply go last: a CLI whose
+/// prompt is the value of a flag (`gemini -p <prompt>`).
+pub const PROMPT: &str = "{prompt}";
+
+/// A headless argv with its prompt: in place of `{prompt}`, else last.
+pub fn with_prompt(mut argv: Vec<String>, prompt: String) -> Vec<String> {
+    match argv.iter().position(|a| a == PROMPT) {
+        Some(i) => argv[i] = prompt,
+        None => argv.push(prompt),
+    }
+    argv
+}
+
+/// The same for a prompt Relay did not write — a flow's, with what its steps left spliced in, or
+/// an option's: last, after `--`, so one that starts with `-` is never read as a flag. In place
+/// of `{prompt}` it is a flag's value, where `--` cannot go, and one that starts with `-` is
+/// refused.
+pub fn with_given_prompt(mut argv: Vec<String>, prompt: String) -> Result<Vec<String>> {
+    if !argv.iter().any(|a| a == PROMPT) {
+        argv.push("--".into());
+    } else if prompt.starts_with('-') {
+        bail!("the prompt starts with `-`, and this agent would read it as a flag");
+    }
+    Ok(with_prompt(argv, prompt))
 }
 
 /// The outcome of looking at an argv.
@@ -217,6 +265,9 @@ impl Registry {
                     }),
                     headless: file.headless.unwrap_or_default(),
                     model_flag: file.model_flag.unwrap_or_default(),
+                    small_model: file.small_model,
+                    icon: file.icon.map(|i| check_icon(&name, i)).transpose()?,
+                    color: file.color.map(|c| parse_color(&name, &c)).transpose()?,
                     patterns,
                     timing,
                     name,
@@ -281,6 +332,28 @@ fn basename(arg: &str) -> &str {
 /// A shell started with nothing but flags, and not `-c`.
 fn is_interactive(argv: &[String]) -> bool {
     argv.iter().skip(1).all(|a| a.starts_with('-') && a != "-c")
+}
+
+/// One character one column wide in the CJK width table too: an ambiguous
+/// one (`◆`, `◎`) is two there, and the title after it would move over.
+fn check_icon(name: &str, icon: String) -> Result<String> {
+    use unicode_width::UnicodeWidthChar;
+    let mut chars = icon.chars();
+    match (chars.next(), chars.next()) {
+        (Some(c), None) if c.width() == Some(1) && c.width_cjk() == Some(1) => Ok(icon),
+        _ => bail!("{name}.yaml: icon `{icon}` is not one character one column wide (✦, ✻, ⬡)"),
+    }
+}
+
+fn parse_color(name: &str, s: &str) -> Result<(u8, u8, u8)> {
+    let hex = s
+        .strip_prefix('#')
+        .filter(|h| h.len() == 6 && h.bytes().all(|b| b.is_ascii_hexdigit()));
+    let Some(h) = hex else {
+        bail!("{name}.yaml: color `{s}` is not #rrggbb")
+    };
+    let byte = |i: usize| u8::from_str_radix(&h[i..i + 2], 16).unwrap();
+    Ok((byte(0), byte(2), byte(4)))
 }
 
 fn compile_patterns(name: &str, base: &Patterns, file: Option<&PatternsFile>) -> Result<Patterns> {
@@ -352,8 +425,10 @@ mod tests {
         let r = Registry::builtin();
         assert_eq!(
             r.names().collect::<Vec<_>>(),
-            ["claude", "codex", "cursor", "generic", "sh"]
+            ["claude", "codex", "cursor", "gemini", "generic", "opencode", "sh"]
         );
+        assert_eq!(r.profile("claude").unwrap().small_model.as_deref(), Some("haiku"));
+        assert_eq!(r.profile("opencode").unwrap().small_model, None);
         let c = r.detect(&argv("/Users/me/.local/bin/claude -p hi")).unwrap();
         assert_eq!((c.name.as_str(), c.kind), ("claude", RunKind::Agent));
         assert_eq!(c.hooks.as_ref().unwrap().dialect, "claude");
@@ -362,6 +437,72 @@ mod tests {
         assert!(r.detect(&argv("make e2e")).is_none());
         assert_eq!(r.generic().timing.idle_after, Duration::from_secs(3));
         assert_eq!(r.profile("sh").unwrap().timing.idle_after, Duration::from_secs(2));
+    }
+
+    #[test]
+    fn agents_wear_their_own_glyph_and_colour() {
+        let r = Registry::builtin();
+        let look = |n: &str| {
+            let p = r.profile(n).unwrap();
+            (p.icon.as_deref(), p.color)
+        };
+        assert_eq!(look("claude"), (Some("✻"), Some((0xD9, 0x77, 0x57))));
+        assert_eq!(look("codex"), (Some("⬡"), None));
+        assert_eq!(look("gemini"), (Some("✧"), Some((0x4C, 0x8D, 0xF6))));
+        assert_eq!(look("cursor"), (Some("❖"), None));
+        assert_eq!(look("opencode"), (Some("⊡"), None));
+        assert_eq!(look("generic"), (None, None));
+    }
+
+    #[test]
+    fn a_user_file_recolours_a_cli_and_a_bad_look_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("codex.yaml"), "color: '#10a37f'\n").unwrap();
+        let r = Registry::load_from(dir.path()).unwrap();
+        let c = r.profile("codex").unwrap();
+        assert_eq!((c.icon.as_deref(), c.color), (Some("⬡"), Some((0x10, 0xA3, 0x7F))));
+        for (bad, says) in [
+            ("icon: ◆", "◆"),
+            ("icon: ab", "ab"),
+            ("icon: 🤖", "🤖"),
+            ("color: teal", "teal"),
+            ("color: '#12345'", "#12345"),
+        ] {
+            std::fs::write(dir.path().join("codex.yaml"), bad).unwrap();
+            let err = format!("{:#}", Registry::load_from(dir.path()).unwrap_err());
+            assert!(err.contains("codex.yaml") && err.contains(says), "{bad}: {err}");
+        }
+    }
+
+    #[test]
+    fn the_prompt_goes_where_the_profile_says() {
+        let r = Registry::builtin();
+        let mut argv = vec!["gemini".to_string()];
+        argv.extend(r.profile("gemini").unwrap().headless.iter().cloned());
+        argv.extend(["-m".into(), "flash-lite".into()]);
+        assert_eq!(
+            with_prompt(argv, "say hi".into()),
+            ["gemini", "-p", "say hi", "-m", "flash-lite"]
+        );
+        assert_eq!(
+            with_prompt(vec!["claude".into(), "-p".into()], "say hi".into()),
+            ["claude", "-p", "say hi"]
+        );
+    }
+
+    #[test]
+    fn a_prompt_relay_did_not_write_goes_after_the_flags_end() {
+        let claude = vec!["claude".to_string(), "-p".into()];
+        assert_eq!(
+            with_given_prompt(claude, "-v please".into()).unwrap(),
+            ["claude", "-p", "--", "-v please"]
+        );
+        let gemini = vec!["gemini".to_string(), "-p".into(), PROMPT.into()];
+        assert_eq!(
+            with_given_prompt(gemini.clone(), "say hi".into()).unwrap(),
+            ["gemini", "-p", "say hi"]
+        );
+        assert!(with_given_prompt(gemini, "-m pro".into()).is_err());
     }
 
     #[test]

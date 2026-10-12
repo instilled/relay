@@ -1,36 +1,35 @@
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, Parser, Subcommand};
+use jiff::SignedDuration;
 use rl_cli::client::Client;
+use rl_cli::context::Want;
 use rl_cli::daemon;
 use rl_cli::env::child_env;
+use rl_cli::flow::FlowCmd;
+use rl_cli::interpret::Answer;
 use rl_cli::render;
 use rl_core::time::{now, parse_since};
 use rl_core::{Home, display_path};
 use rl_proto::decision::{Decision, DecisionOption, DecisionStatus};
+use rl_proto::flow::{FlowFilter, FlowList};
 use rl_proto::methods::{
-    AgentList, ConfigGet, GcParams, GcRun, RuleApprove, RuleList, RuleRef, RunArchive, RunArchiveParams, RunId,
-    SummaryGet, SummaryMake, SummaryParams,
+    AgentList, ConfigGet, GcParams, GcRun, RunArchive, RunArchiveParams, RunHide, RunHideParams, RunResume,
+    RunResumeParams, SummaryGet, SummaryMake, SummaryParams,
 };
 use rl_proto::methods::{
-    DaemonInfo, DigestGet, DigestParams, EventFilter, EventList, PresenceClient, PresenceTouch, RunFilter, RunHook,
-    RunHookParams, RunList, RunMark, RunMarkParams, RunSpec, RunStart, RunStop, RunStopParams,
+    DaemonInfo, DigestGet, DigestHide, DigestHideParams, DigestParams, EventFilter, EventList, PresenceClient,
+    PresenceTouch, RunFilter, RunHook, RunHookParams, RunList, RunMark, RunMarkParams, RunSpec, RunStart, RunStop,
+    RunStopParams,
 };
 use rl_proto::methods::{
     DecisionDismiss, DecisionFilter, DecisionGet, DecisionId, DecisionList, DecisionNote, DecisionRaise, DecisionSpec,
     DecisionTake, DecisionTakeParams,
 };
 use rl_proto::methods::{
-    EventEmit, EventEmitParams, EventId, ReactionList, ReactionPause, ReactionReload, ReactionResume, ReactionTest,
-    ReactionTrial,
+    EventEmit, EventEmitParams, WorkspaceList, WorkspaceRemove, WorkspaceRemoveParams, WorkspaceRemoved, WorkspaceUp,
+    WorkspaceUpParams,
 };
-use rl_proto::methods::{
-    ScheduleFilter, ScheduleList, ScheduleName, SchedulePause, ScheduleReload, ScheduleResume, ScheduleRun,
-    WorkspaceList, WorkspacePath, WorkspaceRemove, WorkspaceUp, WorkspaceUpParams,
-};
-use rl_proto::reaction::{Filter, Reaction, ReactionSpec};
-use rl_proto::rule::{Rule, RuleKind, RuleStatus};
-use rl_proto::schedule::{Schedule, UpReport};
-use rl_proto::types::{AttachMode, Cause, Mark, RunKind, RunState};
+use rl_proto::types::{AttachMode, Cause, Mark, RunKind, RunState, SummaryTarget};
 use serde_json::json;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -38,12 +37,16 @@ use std::time::Duration;
 /// How long `rl hook` gives the daemon before letting the CLI carry on.
 const HOOK_TIMEOUT: Duration = Duration::from_millis(1500);
 
+/// How long `rl daemon stop --with-runs` waits for a holder to hang up after
+/// being asked to go, before moving on to the next run.
+const GOING: Duration = Duration::from_secs(5);
+
 #[derive(Parser)]
 #[command(
     name = "rl",
     version,
     about = "Relay — keeps your agents and long-running work alive",
-    after_help = "Every command starts rld if it is not running, and says so when the one running is another release.\nNothing is deleted on its own: `rl done` puts a run away, `rl ls --all` still has it. `retention: 30d` in config.yaml lets the journal of old runs go (`rl gc`); runs and events stay.\n\nFor agents:\n  rl context    what Relay is, its events and rules, and the answer it wants — read this first\n  rl agents     the agent CLIs on this machine\n  rl --json …   every command, machine-readable"
+    after_help = "Every command starts rld if it is not running, and says so when the one running is another release.\nA run and its events are never deleted: `rl archive` puts a run away, `rl ls --all` still has it. What does go is the journal — the terminal bytes of a run that ended over `retention` ago, 30d unless config.yaml says otherwise (`never` keeps them; `rl prune` runs it now).\n\nFor agents:\n  rl context    what Relay is, its events and flows, and the answer it wants — read this first\n  rl agents     the agent CLIs on this machine\n  rl --json …   every command, machine-readable"
 )]
 struct Cli {
     /// Machine-readable output on every command.
@@ -64,45 +67,46 @@ enum Cmd {
     },
     /// Start a run: a command, or an agent CLI with --agent. Returns immediately with the run id.
     Run(RunArgs),
-    /// Stop a run (SIGTERM; --force for SIGKILL).
+    /// Stop a run (SIGTERM, a shell SIGHUP; --force for SIGKILL).
     Stop(StopArgs),
     /// List runs (active by default).
     Ls(LsArgs),
-    /// Done with a run: out of the panel and `rl since`, kept in the ledger. Ended runs only.
-    Done(DoneArgs),
-    /// What happened while you were away: runs that need you, finished, or moved, grouped.
+    /// Archive a run: out of the panel and `rl since`, kept in the ledger. Ended runs only.
+    #[command(alias = "done")]
+    Archive(ArchiveArgs),
+    /// Take runs, or a project and everything in it, off the panel's list: shown only in its `hidden` lens, unless they come to need you. Nothing is stopped.
+    Hide(HideArgs),
+    /// Bring back what `rl hide` took off the panel's list.
+    Unhide(HideArgs),
+    /// Pick an ended run back up as a new run: an agent's conversation, a fresh shell, a command again.
+    Resume(ResumeArgs),
+    /// What happened while you were away: the panel's catch-up — a summary on top, then each project and what in it needs you, ran or failed.
     Since(SinceArgs),
     /// List ledger events.
     Events(EventsArgs),
-    /// Runs that start on their own: what schedules.yaml says, and when.
-    Schedule {
+    /// Flows: what starts work without you, in ~/.relay/flows. List, edit, run, pause, approve.
+    Flow {
         #[command(subcommand)]
-        cmd: ScheduleCmd,
+        cmd: FlowCmd,
     },
-    /// Rules that answer events: what reactions.yaml says, and whether they fire.
-    React {
-        #[command(subcommand)]
-        cmd: ReactCmd,
-    },
-    /// What starts work without you: every schedule and reaction, one list. Approve, pause, run.
-    Rules(RulesArgs),
-    /// Write a rule into your reactions.yaml: `rl on run.failed -- notify "{summary}"`.
-    On(OnArgs),
-    /// Write a schedule into this folder's schedules.yaml and switch it on: `rl every 30m -- make test`.
-    Every(EveryArgs),
     /// Your defaults (~/.relay/config.yaml) as they stand, each assistant resolved; `edit` opens the file.
     Config(ConfigArgs),
     /// The agent CLIs Relay knows, and which are on this machine.
     Agents,
-    /// What Relay tells an agent: the words, events, rule definitions, what is here, and the answer it wants.
+    /// The setup guide: which agents the panel offers, who writes summaries.
+    Setup,
+    /// Move Claude's own sessions (`claude --bg`) into Relay.
+    Import,
+    /// What Relay tells an agent: the words, events, the flows and folders here, and the answer it wants.
     Context(ContextArgs),
-    /// Plain words to `assistants.interpret`: a run or a rule, drafted; `--go` does it.
+    /// Plain words to `assistants.interpret`: a run or a flow, drafted; `--go` starts the run, or writes the flow and says yes.
     Interpret(InterpretArgs),
-    /// What an ended run did, by `assistants.summarise`: kept by the run, made when there is none.
-    Summarise(SummariseArgs),
-    /// Let the journal of old runs go, as `retention:` in config.yaml says (or --older-than). Runs and events stay.
-    Gc(GcArgs),
-    /// Emit a custom event, from a command or plugin; reactions pick it up.
+    /// A recap of a run, live or ended: its agent's own (Claude), its turns (Codex), or `assistants.summary`'s. Kept by the run.
+    Summary(SummaryArgs),
+    /// Let the journal of old runs go, and their firings' folders, as `retention:` says (30d unless set, or --older-than). Runs and events stay.
+    #[command(alias = "gc")]
+    Prune(PruneArgs),
+    /// Emit a custom event, from a command or plugin; flows that fire `on` it pick it up.
     Emit(EmitArgs),
     /// Ask a human something and carry on: the question waits until answered.
     Ask(AskArgs),
@@ -110,7 +114,8 @@ enum Cmd {
     Decisions(DecisionsArgs),
     /// Answer one: choose an option, or dismiss it.
     Decide(DecideArgs),
-    /// Register this folder as a workspace and load its .relay/: schedules fire once approved.
+    /// Register a folder as a project Relay knows, so flows can run in it.
+    #[command(visible_alias = "add")]
     Up(UpArgs),
     /// Registered folders (see `rl up`).
     Workspace {
@@ -168,148 +173,9 @@ struct HookArgs {
     dialect: String,
 }
 
-#[derive(Subcommand)]
-enum ScheduleCmd {
-    /// List schedules: when they fire next, what they did last.
-    Ls {
-        /// Include schedules removed from the file.
-        #[arg(short, long)]
-        all: bool,
-    },
-    /// Fire a schedule now, whatever the clock or its policies say.
-    Run(ScheduleRef),
-    /// Stop a schedule from firing until resumed.
-    Pause(ScheduleRef),
-    /// Resume a paused schedule; it plans afresh from now.
-    Resume(ScheduleRef),
-    /// Re-read every schedules file (rld does it on start too).
-    Reload,
-}
-
 #[derive(Args)]
-struct ScheduleRef {
-    name: String,
-    /// Which one, when the name exists in several: `global` or a workspace folder.
-    #[arg(long = "in", value_name = "SCOPE")]
-    scope: Option<String>,
-}
-
-#[derive(Subcommand)]
-enum ReactCmd {
-    /// List the rules: what they watch for, and what they do.
-    Ls {
-        /// Include rules removed from the file.
-        #[arg(short, long)]
-        all: bool,
-    },
-    /// What every rule would do with one event, without doing any of it.
-    Test {
-        /// Event id, from `rl events`.
-        event: i64,
-    },
-    /// Stop a rule from firing until resumed.
-    Pause(ScheduleRef),
-    /// Let it fire again.
-    Resume(ScheduleRef),
-    /// Re-read every reactions file (rld does it on start too).
-    Reload,
-}
-
-#[derive(Args)]
-struct RulesArgs {
-    /// Include rules removed from their files.
-    #[arg(short, long)]
-    all: bool,
-    #[command(subcommand)]
-    cmd: Option<RulesCmd>,
-}
-
-#[derive(Subcommand)]
-enum RulesCmd {
-    /// Say yes to a rule's current version; it may fire from now on.
-    Approve(RuleArg),
-    /// Stop a rule from firing until resumed.
-    Pause(RuleArg),
-    /// Let it fire again.
-    Resume(RuleArg),
-    /// Fire a schedule now, whatever the clock says.
-    Run(RuleArg),
-    /// Re-read every schedules and reactions file.
-    Reload,
-}
-
-#[derive(Args)]
-struct RuleArg {
-    name: String,
-    /// Which one, when the name exists in several: `global` or a workspace folder.
-    #[arg(long = "in", value_name = "SCOPE")]
-    scope: Option<String>,
-    /// `schedule` or `reaction`, when both share the name.
-    #[arg(long)]
-    kind: Option<RuleKind>,
-}
-
-#[derive(Args)]
-struct OnArgs {
-    /// The event kind, or a family: `run.failed`, `run.*`, `decision.raised`.
-    kind: String,
-    /// What to run. Everything after `--`; `{summary}`, `{title}`, `{run}` and
-    /// the rest are filled in from the event.
-    #[arg(last = true, required = true)]
-    argv: Vec<String>,
-    /// What to call it (default: from the kind).
-    #[arg(long)]
-    name: Option<String>,
-    /// Only for runs carrying this tag.
-    #[arg(long)]
-    tag: Option<String>,
-    /// Where it runs (default: here).
-    #[arg(long)]
-    cwd: Option<PathBuf>,
-    /// Not again within this long (default: 10s).
-    #[arg(long)]
-    throttle: Option<String>,
-}
-
-#[derive(Args)]
-#[command(
-    override_usage = "rl every <WHEN> [OPTIONS] -- <COMMAND>...\n       rl every <WHEN> --agent <CLI> [OPTIONS] -- <PROMPT>..."
-)]
-struct EveryArgs {
-    /// How often: a duration (`30m`, `4h`) or a cron line (`"0 2 * * *"`).
-    when: String,
-    /// What to run. One word is a shell line; several are argv; with --agent, the prompt.
-    #[arg(last = true, required = true)]
-    argv: Vec<String>,
-    /// Run an agent CLI (claude, codex, …) with the rest as its prompt.
-    #[arg(long)]
-    agent: Option<String>,
-    /// What to call it (default: the command's first word).
-    #[arg(long)]
-    name: Option<String>,
-    /// Which folder's rule it is (default: here).
-    #[arg(long = "in", value_name = "FOLDER")]
-    folder: Option<PathBuf>,
-    /// One of yours, in the home's schedules.yaml, instead of a folder's.
-    #[arg(long, conflicts_with = "folder")]
-    global: bool,
-    /// Where it runs (default: the folder; for --global, here).
-    #[arg(long)]
-    cwd: Option<PathBuf>,
-    /// Title of the runs it starts.
-    #[arg(long)]
-    title: Option<String>,
-    /// A tag on its runs. Repeatable.
-    #[arg(long = "tag")]
-    tags: Vec<String>,
-    /// Rewrite a rule of that name instead of refusing.
-    #[arg(long)]
-    replace: bool,
-}
-
-#[derive(Args)]
-struct GcArgs {
-    /// Runs ended longer ago than this (default: the config's retention).
+struct PruneArgs {
+    /// Runs ended longer ago than this (default: the config's retention, or 30d).
     #[arg(long, value_name = "DURATION")]
     older_than: Option<String>,
     /// Only say what would go.
@@ -331,10 +197,18 @@ struct InterpretArgs {
 }
 
 #[derive(Args)]
-struct SummariseArgs {
-    /// The run.
-    run: String,
-    /// Ask again, even when there is a summary kept.
+struct SummaryArgs {
+    /// What: a run, a folder (its project), `flow:<name>`, `firing:<id>`, or `all`.
+    what: String,
+    /// Only the stretch since: a duration back (30m, 2h), a date or an
+    /// instant (default: a run, since you last looked, if it did anything
+    /// since, else all of it; a flow, since its oldest run you have not
+    /// seen; a project or all, the last day).
+    since: Option<String>,
+    /// Read the logs, not the recaps: slower, and says more.
+    #[arg(long)]
+    deep: bool,
+    /// Make a new one, even when the one kept is up to date.
     #[arg(long)]
     again: bool,
 }
@@ -446,25 +320,37 @@ struct DecideArgs {
 struct UpArgs {
     /// The folder (default: current).
     dir: Option<PathBuf>,
-    /// Approve every pending schedule without asking.
-    #[arg(short, long)]
-    yes: bool,
 }
 
 #[derive(Subcommand)]
 enum WorkspaceCmd {
     /// List registered folders.
     Ls,
-    /// Unregister a folder; its schedules stop.
-    Rm { dir: PathBuf },
+    /// Unregister a folder: flows in it no longer load, its open questions are dismissed.
+    Rm(WorkspaceRmArgs),
+}
+
+#[derive(Args)]
+struct WorkspaceRmArgs {
+    dir: PathBuf,
+    /// Also stop every run still going in it — shells and agents alike.
+    #[arg(long)]
+    stop: bool,
+    /// Also archive its ended runs (those just stopped included).
+    #[arg(long)]
+    archive: bool,
 }
 
 #[derive(Subcommand)]
 enum DaemonCmd {
     /// Start rld if it is not already running.
     Start,
-    /// Ask rld to exit. Running sessions are untouched.
-    Stop,
+    /// Ask rld to exit. Running sessions are untouched unless --with-runs.
+    Stop {
+        /// Stop the runs first, so nothing is left holding a terminal.
+        #[arg(long)]
+        with_runs: bool,
+    },
     /// Show whether rld is running.
     Status,
     /// Stop then start. Running sessions are untouched.
@@ -523,7 +409,7 @@ struct LsArgs {
     /// Only runs carrying this tag.
     #[arg(long)]
     tag: Option<String>,
-    /// Only runs with this cause, e.g. schedule:nightly.
+    /// Only runs with this cause, e.g. flow:nightly/probe.
     #[arg(long, value_name = "CAUSE")]
     cause: Option<String>,
     /// Newest N.
@@ -532,12 +418,33 @@ struct LsArgs {
 }
 
 #[derive(Args)]
-struct DoneArgs {
+struct ArchiveArgs {
     /// Run ids.
     ids: Vec<String>,
-    /// Instead: everything that has ended and been looked at.
-    #[arg(long, conflicts_with = "ids")]
+    /// Instead: everything that has ended and been looked at (the panel's `/archive seen`).
+    #[arg(long, alias = "seen", conflicts_with = "ids")]
     all: bool,
+}
+
+#[derive(Args)]
+struct HideArgs {
+    /// Run ids.
+    ids: Vec<String>,
+    /// A project instead, by its folder: everything in it, runs to come too.
+    #[arg(long, value_name = "DIR", conflicts_with = "ids")]
+    project: Option<PathBuf>,
+}
+
+#[derive(Args)]
+struct ResumeArgs {
+    /// Run ids.
+    ids: Vec<String>,
+    /// Instead: every run lost in a restart that is still on the list — agents and shells.
+    #[arg(long, conflicts_with = "ids")]
+    lost: bool,
+    /// With --lost: plain commands too, run again.
+    #[arg(long, requires = "lost")]
+    commands: bool,
 }
 
 #[derive(Args)]
@@ -581,20 +488,31 @@ async fn main() -> Result<()> {
         Cmd::Run(a) => run(&home, a, cli.json).await,
         Cmd::Stop(a) => stop(&home, a, cli.json).await,
         Cmd::Ls(a) => ls(&home, a, cli.json).await,
-        Cmd::Done(a) => done(&home, a, cli.json).await,
+        Cmd::Archive(a) => archive(&home, a, cli.json).await,
+        Cmd::Hide(a) => hide(&home, a, true, cli.json).await,
+        Cmd::Unhide(a) => hide(&home, a, false, cli.json).await,
+        Cmd::Resume(a) => resume(&home, a, cli.json).await,
         Cmd::Since(a) => since(&home, a, cli.json).await,
         Cmd::Events(a) => events(&home, a, cli.json).await,
-        Cmd::Schedule { cmd } => schedule(&home, cmd, cli.json).await,
-        Cmd::React { cmd } => react(&home, cmd, cli.json).await,
-        Cmd::Rules(a) => rules(&home, a, cli.json).await,
-        Cmd::On(a) => on(&home, a, cli.json).await,
-        Cmd::Every(a) => every(&home, a, cli.json).await,
+        Cmd::Flow { cmd } => rl_cli::flow::flow(&home, cmd, cli.json).await,
         Cmd::Config(a) => config(&home, a, cli.json).await,
         Cmd::Agents => agents(&home, cli.json).await,
+        Cmd::Import => {
+            if !std::io::IsTerminal::is_terminal(&std::io::stdout()) {
+                bail!("rl import asks on the screen and needs a terminal; it moves sessions you pick");
+            }
+            rl_cli::tui::setup(&home, true).await
+        }
+        Cmd::Setup => {
+            if !std::io::IsTerminal::is_terminal(&std::io::stdout()) {
+                bail!("rl setup asks on the screen and needs a terminal; `rl config edit` changes the file");
+            }
+            rl_cli::tui::setup(&home, false).await
+        }
         Cmd::Context(a) => context(&home, a).await,
         Cmd::Interpret(a) => interpret(&home, a, cli.json).await,
-        Cmd::Summarise(a) => summarise(&home, a, cli.json).await,
-        Cmd::Gc(a) => gc(&home, a, cli.json).await,
+        Cmd::Summary(a) => summary(&home, a, cli.json).await,
+        Cmd::Prune(a) => prune(&home, a, cli.json).await,
         Cmd::Emit(a) => emit(&home, a, cli.json).await,
         Cmd::Ask(a) => ask(&home, a, cli.json).await,
         Cmd::Decisions(a) => decisions(&home, a, cli.json).await,
@@ -610,7 +528,7 @@ async fn main() -> Result<()> {
 }
 
 async fn attach(home: &Home, a: AttachArgs, mode: AttachMode) -> Result<()> {
-    let code = rl_cli::attach::attach(
+    let ended = rl_cli::attach::attach(
         home,
         rl_cli::attach::Opts {
             id: a.id,
@@ -620,7 +538,7 @@ async fn attach(home: &Home, a: AttachArgs, mode: AttachMode) -> Result<()> {
         },
     )
     .await?;
-    std::process::exit(code)
+    std::process::exit(ended.code())
 }
 
 async fn mark(home: &Home, a: MarkArgs, json: bool) -> Result<()> {
@@ -712,8 +630,9 @@ async fn run(home: &Home, a: RunArgs, json: bool) -> Result<()> {
         rows,
         env,
         inherit_env: false,
+        input: true,
         cause: Cause::Manual,
-        flow: None,
+        chain: None,
     };
     let run = daemon::ensure(home, !json).await?.call::<RunStart>(spec).await?;
     if json {
@@ -724,123 +643,19 @@ async fn run(home: &Home, a: RunArgs, json: bool) -> Result<()> {
     Ok(())
 }
 
-async fn schedule(home: &Home, cmd: ScheduleCmd, json: bool) -> Result<()> {
-    let mut rpc = daemon::ensure(home, !json).await?;
-    let name = |r: &ScheduleRef| ScheduleName {
-        name: r.name.clone(),
-        scope: r.scope.clone(),
-    };
-    let one = |s: Schedule, json: bool| -> Result<()> {
-        if json {
-            println!("{}", serde_json::to_string(&s)?);
-        } else {
-            println!("{}", render::table(SCHEDULE_HEADERS, &[schedule_row(&s, now())]));
-        }
-        Ok(())
-    };
-    match cmd {
-        ScheduleCmd::Ls { all } => {
-            let list = rpc.call::<ScheduleList>(ScheduleFilter { all }).await?;
-            if json {
-                println!("{}", serde_json::to_string(&list)?);
-            } else if list.is_empty() {
-                println!("no schedules ({})", display_path(&home.schedules_file()));
-            } else {
-                let now = now();
-                let rows: Vec<Vec<String>> = list.iter().map(|s| schedule_row(s, now)).collect();
-                println!("{}", render::table(SCHEDULE_HEADERS, &rows));
-            }
-        }
-        ScheduleCmd::Run(r) => {
-            let run = rpc.call::<ScheduleRun>(name(&r)).await?;
-            if json {
-                println!("{}", serde_json::to_string(&run)?);
-            } else {
-                println!("{}", run.id);
-            }
-        }
-        ScheduleCmd::Pause(r) => one(rpc.call::<SchedulePause>(name(&r)).await?, json)?,
-        ScheduleCmd::Resume(r) => one(rpc.call::<ScheduleResume>(name(&r)).await?, json)?,
-        ScheduleCmd::Reload => {
-            let r = rpc.call::<ScheduleReload>(()).await?;
-            if json {
-                println!("{}", serde_json::to_string(&r)?);
-            } else {
-                println!(
-                    "{} loaded · {} added · {} changed · {} removed",
-                    r.loaded,
-                    r.added.len(),
-                    r.changed.len(),
-                    r.removed.len()
-                );
-                for e in &r.errors {
-                    eprintln!("not loaded: {e}");
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
-const SCHEDULE_HEADERS: &[&str] = &["SCOPE", "NAME", "WHEN", "NEXT", "LAST", "STATE", "ACTION"];
-
 async fn up(home: &Home, a: UpArgs, json: bool) -> Result<()> {
     let path = match a.dir {
         Some(d) => d,
         None => std::env::current_dir()?,
     };
     let mut rpc = daemon::ensure(home, !json).await?;
-    let mut r = rpc
-        .call::<WorkspaceUp>(WorkspaceUpParams {
-            path: path.clone(),
-            approve: a.yes,
-        })
-        .await?;
-    let pending: Vec<String> = r
-        .schedules
-        .iter()
-        .filter(|s| !s.approved())
-        .map(|s| s.name.clone())
-        .collect();
-    if !pending.is_empty() && !json && std::io::IsTerminal::is_terminal(&std::io::stdin()) {
-        print_up(&r);
-        eprint!("approve {} ({})? [y/N] ", pending.len(), pending.join(", "));
-        let mut line = String::new();
-        std::io::stdin().read_line(&mut line)?;
-        if line.trim().eq_ignore_ascii_case("y") {
-            r = rpc
-                .call::<WorkspaceUp>(WorkspaceUpParams {
-                    path: path.clone(),
-                    approve: true,
-                })
-                .await?;
-        }
-    }
+    let w = rpc.call::<WorkspaceUp>(WorkspaceUpParams { path }).await?;
     if json {
-        println!("{}", serde_json::to_string(&r)?);
-        return Ok(());
-    }
-    print_up(&r);
-    if !r.approved.is_empty() {
-        println!("approved: {}", r.approved.join(", "));
-    } else if r.schedules.iter().any(|s| !s.approved()) {
-        println!("not approved; nothing fires until `rl up --yes`");
-    }
-    for e in &r.report.errors {
-        eprintln!("not loaded: {e}");
+        println!("{}", serde_json::to_string(&w)?);
+    } else {
+        println!("workspace {} ({})", w.name, display_path(&w.path));
     }
     Ok(())
-}
-
-fn print_up(r: &UpReport) {
-    println!("workspace {} ({})", r.workspace.name, display_path(&r.workspace.path));
-    if r.schedules.is_empty() {
-        println!("no schedules in .relay/schedules.yaml");
-    } else {
-        let now = now();
-        let rows: Vec<Vec<String>> = r.schedules.iter().map(|s| schedule_row(s, now)).collect();
-        println!("{}", render::table(SCHEDULE_HEADERS, &rows));
-    }
 }
 
 async fn workspace(home: &Home, cmd: WorkspaceCmd, json: bool) -> Result<()> {
@@ -867,51 +682,48 @@ async fn workspace(home: &Home, cmd: WorkspaceCmd, json: bool) -> Result<()> {
                 println!("{}", render::table(&["NAME", "PATH", "REGISTERED"], &rows));
             }
         }
-        WorkspaceCmd::Rm { dir } => {
-            let gone = rpc.call::<WorkspaceRemove>(WorkspacePath { path: dir.clone() }).await?;
+        WorkspaceCmd::Rm(a) => {
+            // The daemon's cwd is not ours: a relative folder is made whole here.
+            let dir = std::path::absolute(&a.dir).unwrap_or_else(|_| a.dir.clone());
+            let r = rpc
+                .call::<WorkspaceRemove>(WorkspaceRemoveParams {
+                    path: dir.clone(),
+                    stop_runs: a.stop,
+                    archive_runs: a.archive,
+                })
+                .await?;
             if json {
-                println!("{}", json!({ "removed": gone }));
-            } else if gone {
-                println!("{} unregistered; its schedules stop", display_path(&dir));
+                println!("{}", serde_json::to_string(&r)?);
             } else {
-                println!("{} was not registered", display_path(&dir));
+                println!("{}", removed_words(&r));
             }
         }
     }
     Ok(())
 }
 
-fn schedule_row(s: &Schedule, now: jiff::Timestamp) -> Vec<String> {
-    let next = match (s.paused || !s.approved(), s.removed_at, s.next_at) {
-        (true, _, _) | (_, Some(_), _) => "—".to_string(),
-        (_, _, Some(t)) if t > now => format!("in {}", rl_core::time::fmt_duration(t.duration_since(now))),
-        (_, _, Some(_)) => "due".to_string(),
-        (_, _, None) => "—".to_string(),
-    };
-    let last = match (s.last_fired_at, &s.last_run) {
-        (Some(t), Some(id)) => format!("{} ago · {id}", rl_core::time::fmt_age(t, now)),
-        _ => "never".to_string(),
-    };
-    let state = if s.removed_at.is_some() {
-        "removed"
-    } else if !s.approved() {
-        "needs approval"
-    } else if s.paused {
-        "paused"
+/// What `rl workspace rm` did, in a line: whether the folder was registered,
+/// then only what was done besides.
+fn removed_words(r: &WorkspaceRemoved) -> String {
+    let mut words = vec![if r.removed {
+        format!("{} unregistered", display_path(&r.path))
     } else {
-        "on"
-    };
-    let action = s.spec.action().label();
-    let action: String = action.chars().take(48).collect();
-    vec![
-        s.scope_label(),
-        s.name.clone(),
-        s.spec.when(),
-        next,
-        last,
-        state.to_string(),
-        action,
-    ]
+        format!("{} was not registered", display_path(&r.path))
+    }];
+    let n = |k: usize, one: &str, many: &str| format!("{k} {}", if k == 1 { one } else { many });
+    if r.stopped > 0 {
+        words.push(format!("stopped {}", n(r.stopped, "run", "runs")));
+    }
+    if r.still_running > 0 {
+        words.push(format!("{} still going", n(r.still_running, "run", "runs")));
+    }
+    if r.archived > 0 {
+        words.push(format!("{} archived", n(r.archived, "run", "runs")));
+    }
+    if r.dismissed > 0 {
+        words.push(format!("{} dismissed", n(r.dismissed, "question", "questions")));
+    }
+    words.join(" · ")
 }
 
 async fn stop(home: &Home, a: StopArgs, json: bool) -> Result<()> {
@@ -928,7 +740,13 @@ async fn stop(home: &Home, a: StopArgs, json: bool) -> Result<()> {
         println!(
             "{} · stop requested ({})",
             run.id,
-            if a.force { "SIGKILL" } else { "SIGTERM" }
+            if a.force {
+                "SIGKILL"
+            } else if run.is_shell() {
+                "SIGHUP"
+            } else {
+                "SIGTERM"
+            }
         );
     }
     Ok(())
@@ -992,9 +810,10 @@ async fn ls(home: &Home, a: LsArgs, json: bool) -> Result<()> {
     Ok(())
 }
 
-async fn done(home: &Home, a: DoneArgs, json: bool) -> Result<()> {
+/// `rl archive` (once `rl done`): the panel's `/archive`, from the line.
+async fn archive(home: &Home, a: ArchiveArgs, json: bool) -> Result<()> {
     if a.ids.is_empty() && !a.all {
-        bail!("say which: `rl done <id>…`, or `rl done --all` for everything ended and seen");
+        bail!("say which: `rl archive <id>…`, or `rl archive --all` for everything ended and seen");
     }
     let n = daemon::ensure(home, !json)
         .await?
@@ -1006,9 +825,77 @@ async fn done(home: &Home, a: DoneArgs, json: bool) -> Result<()> {
     if json {
         println!("{}", json!({ "archived": n }));
     } else if n == 0 && !a.all {
-        bail!("nothing archived: not found, still running, or already done");
+        bail!("nothing archived: not found, still running, or already archived");
     } else {
-        println!("{n} done");
+        println!("{n} archived");
+    }
+    Ok(())
+}
+
+/// `rl hide` and `rl unhide`: the panel's `/hide`, over `run.hide` for runs
+/// and `digest.hide` for a project, which is hidden by its header's key.
+async fn hide(home: &Home, a: HideArgs, hidden: bool, json: bool) -> Result<()> {
+    let verb = if hidden { "hide" } else { "unhide" };
+    let mut rpc = daemon::ensure(home, !json).await?;
+    if let Some(dir) = a.project {
+        let dir = std::fs::canonicalize(&dir).with_context(|| format!("{}: not a folder", dir.display()))?;
+        let key = format!("g:{}", dir.display());
+        let now = rpc.call::<DigestHide>(DigestHideParams { key, hidden }).await?;
+        if json {
+            println!("{}", serde_json::to_string(&now)?);
+        } else {
+            println!("{} {}", if hidden { "hid" } else { "brought back" }, dir.display());
+        }
+        return Ok(());
+    }
+    if a.ids.is_empty() {
+        bail!("say which: `rl {verb} <id>…`, or `rl {verb} --project <dir>`");
+    }
+    let mut out = Vec::new();
+    for id in a.ids {
+        out.push(rpc.call::<RunHide>(RunHideParams { id, hidden }).await?);
+    }
+    if json {
+        println!("{}", serde_json::to_string(&out)?);
+    } else {
+        for r in out {
+            println!("{} · {}", r.id, if hidden { "hidden" } else { "on the list" });
+        }
+    }
+    Ok(())
+}
+
+async fn resume(home: &Home, a: ResumeArgs, json: bool) -> Result<()> {
+    if a.ids.is_empty() && !a.lost {
+        bail!("say which: `rl resume <id>…`, or `rl resume --lost` for what a restart took");
+    }
+    let (cols, rows) = crossterm::terminal::size().map_or((None, None), |(c, r)| (Some(c), Some(r)));
+    let out = daemon::ensure(home, !json)
+        .await?
+        .call::<RunResume>(RunResumeParams {
+            ids: a.ids.clone(),
+            lost: a.lost,
+            commands: a.commands,
+            env: child_env(&[])?,
+            cols,
+            rows,
+        })
+        .await?;
+    if json {
+        println!("{}", serde_json::to_string(&out)?);
+        return Ok(());
+    }
+    if out.is_empty() {
+        println!("nothing to resume");
+    }
+    for r in &out {
+        match (&r.run, &r.why_not) {
+            (Some(new), _) => println!("{}  resumed {} as {}", r.from, r.title, new.id),
+            (None, why) => println!("{}  {}: {}", r.from, r.title, why.as_deref().unwrap_or("not resumed")),
+        }
+    }
+    if !a.ids.is_empty() && out.iter().all(|r| r.run.is_none()) {
+        bail!("nothing resumed");
     }
     Ok(())
 }
@@ -1016,24 +903,82 @@ async fn done(home: &Home, a: DoneArgs, json: bool) -> Result<()> {
 async fn since(home: &Home, a: SinceArgs, json: bool) -> Result<()> {
     let n = now();
     let mut c = daemon::ensure(home, !json).await?;
-    let boundary = match a.since.as_deref() {
-        Some(s) => parse_since(s, n)?,
+    // Bare, it counts from when you last looked — and only then is the top
+    // written by itself, as you come back.
+    let (boundary, came_back) = match a.since.as_deref() {
+        Some(s) => (parse_since(s, n)?, false),
         None => {
             // Looking now; the boundary is the last time we did.
             let me = rl_cli::attach::client_name();
-            c.call::<PresenceTouch>(PresenceClient { client: me })
+            match c
+                .call::<PresenceTouch>(PresenceClient { client: me })
                 .await?
                 .last_seen_at
-                .unwrap_or(n - jiff::SignedDuration::from_hours(24))
+            {
+                Some(last) => (last, true),
+                None => (n - jiff::SignedDuration::from_hours(24), false),
+            }
         }
     };
-    let d = c.call::<DigestGet>(DigestParams { since: Some(boundary) }).await?;
+    // The stretch cut from the list's digest, as the panel cuts it, so the
+    // two never disagree.
+    let d = rl_cli::catchup::stretch(&c.call::<DigestGet>(DigestParams::default()).await?, boundary);
     if json {
         println!("{}", serde_json::to_string(&d)?);
-    } else {
-        print!("{}", rl_cli::digest::text(&d, n));
+        return Ok(());
     }
+    // The catch-up as the panel builds it: the list's rows, grouped as the
+    // list groups them.
+    let workspaces = c.call::<WorkspaceList>(()).await?;
+    let flows = c.call::<FlowList>(FlowFilter::default()).await?;
+    let relay = std::fs::canonicalize(home.path()).unwrap_or_else(|_| home.path().to_path_buf());
+    let cu = rl_cli::catchup::CatchUp::of(
+        &d,
+        workspaces.into_iter().map(|w| (w.path, w.name)),
+        &flows,
+        Some(&relay),
+        n,
+    );
+    // What heads it: each `catch_up: top` flow's latest firing since, all it came to fetched.
+    let leads = rl_cli::catchup::heads::leads(&flows, &d.firings, boundary);
+    let mut outcomes = rl_cli::catchup::heads::Outcomes::default();
+    outcomes
+        .fetch(&mut c, leads.iter().map(|l| l.firing.clone()).collect())
+        .await;
+    let mut top = rl_cli::catchup::heads::text(&leads, &outcomes, n);
+    top.extend(since_top(&mut c, &cu, boundary, came_back).await);
+    print!("{}", rl_cli::catchup::text(&cu, &top, n));
     Ok(())
+}
+
+/// The top `rl since` prints, as `plan_top` says: the one shown, or one
+/// asked for and waited on, or — with neither, or the assistant failing —
+/// the counts.
+async fn since_top(
+    c: &mut Client,
+    cu: &rl_cli::catchup::CatchUp<'_>,
+    from: jiff::Timestamp,
+    came_back: bool,
+) -> Vec<String> {
+    use rl_cli::catchup::{plan_top, top_worthy, written};
+    let plan = plan_top(c, from, cu.has_runs(), came_back, now()).await;
+    let top = match plan.ask {
+        Some(ask) => {
+            eprintln!("writing the top…");
+            match c.call::<SummaryMake>(ask).await {
+                Ok(s) => Some(s).filter(top_worthy),
+                Err(e) => {
+                    eprintln!("the top: {e:#}");
+                    None
+                }
+            }
+        }
+        None => plan.shown,
+    };
+    match top {
+        Some(s) => written(&s),
+        None => cu.counted(),
+    }
 }
 
 async fn events(home: &Home, a: EventsArgs, json: bool) -> Result<()> {
@@ -1045,6 +990,7 @@ async fn events(home: &Home, a: EventsArgs, json: bool) -> Result<()> {
         group: a.group,
         kinds: a.kinds,
         limit: Some(a.limit),
+        ..Default::default()
     };
     let evs = daemon::ensure(home, !json).await?.call::<EventList>(filter).await?;
     if json {
@@ -1072,12 +1018,21 @@ async fn run_daemon(home: &Home, cmd: DaemonCmd, json: bool) -> Result<()> {
                 println!("rld already running · {}", describe(&info));
             }
         }
-        DaemonCmd::Stop => {
+        DaemonCmd::Stop { with_runs } => {
+            let runs = if with_runs {
+                stop_every_run(home, json).await?
+            } else {
+                0
+            };
             let stopped = daemon::stop(home).await?;
             if json {
-                println!("{}", json!({ "stopped": stopped }));
+                println!("{}", json!({ "stopped": stopped, "runs_stopped": runs }));
             } else if stopped {
-                println!("rld stopped");
+                let also = match runs {
+                    0 => String::new(),
+                    n => format!(" · {n} run{} stopped", if n == 1 { "" } else { "s" }),
+                };
+                println!("rld stopped{also}");
             } else {
                 println!("rld was not running");
             }
@@ -1123,7 +1078,7 @@ fn describe(i: &DaemonInfo) -> String {
 }
 
 /// Emit a custom event. Inside a run, `RELAY_RUN` attributes it to that run's
-/// folder and flow; outside one, the folder is `--in` or the cwd.
+/// folder and chain; outside one, the folder is `--in` or the cwd.
 async fn emit(home: &Home, a: EmitArgs, json: bool) -> Result<()> {
     let mut data = serde_json::Map::new();
     if let Some(src) = &a.json_data {
@@ -1238,7 +1193,7 @@ async fn decisions(home: &Home, a: DecisionsArgs, json: bool) -> Result<()> {
         .call::<DecisionList>(DecisionFilter {
             all: a.all,
             run: a.run,
-            flow: None,
+            chain: None,
             limit: Some(a.limit),
         })
         .await?;
@@ -1366,445 +1321,6 @@ fn until(t: jiff::Timestamp, now: jiff::Timestamp) -> String {
     }
 }
 
-const RULE_HEADERS: &[&str] = &["SCOPE", "NAME", "WHEN", "STATUS", "NEXT", "LAST", "DOES"];
-
-fn rule_row(r: &Rule, now: jiff::Timestamp) -> Vec<String> {
-    let next = match (r.status(), r.next_at()) {
-        (RuleStatus::On, Some(t)) if t > now => format!("in {}", rl_core::time::fmt_duration(t.duration_since(now))),
-        (RuleStatus::On, Some(_)) => "due".to_string(),
-        _ => "—".to_string(),
-    };
-    let last = match r.last_fired_at() {
-        Some(t) => format!("{} ago", rl_core::time::fmt_age(t, now)),
-        None => "never".to_string(),
-    };
-    let does: String = r.does().chars().take(48).collect();
-    vec![
-        r.scope_label(),
-        r.name().to_string(),
-        r.when(),
-        r.status().to_string(),
-        next,
-        last,
-        does,
-    ]
-}
-
-/// Which kind a name is, when the caller did not say: the one that has it.
-async fn rule_kind(rpc: &mut Client, a: &RuleArg) -> Result<RuleKind> {
-    if let Some(k) = a.kind {
-        return Ok(k);
-    }
-    let all = rpc.call::<RuleList>(ScheduleFilter { all: false }).await?;
-    let scope_ok = |r: &Rule| match &a.scope {
-        None => true,
-        Some(s) => {
-            r.scope() == s
-                || r.scope_label() == *s
-                || std::fs::canonicalize(s).is_ok_and(|p| p.to_string_lossy() == r.scope())
-        }
-    };
-    let mut kinds: Vec<RuleKind> = all
-        .iter()
-        .filter(|r| r.name() == a.name && scope_ok(r))
-        .map(Rule::kind)
-        .collect();
-    kinds.dedup();
-    match kinds.as_slice() {
-        [k] => Ok(*k),
-        [] => bail!("no rule named `{}`", a.name),
-        _ => bail!("`{}` is both a schedule and a reaction; say which with --kind", a.name),
-    }
-}
-
-async fn rules(home: &Home, a: RulesArgs, json: bool) -> Result<()> {
-    let mut rpc = daemon::ensure(home, !json).await?;
-    let one = |r: Rule, json: bool| -> Result<()> {
-        if json {
-            println!("{}", serde_json::to_string(&r)?);
-        } else {
-            println!("{}", render::table(RULE_HEADERS, &[rule_row(&r, now())]));
-        }
-        Ok(())
-    };
-    let name = |x: &RuleArg| ScheduleName {
-        name: x.name.clone(),
-        scope: x.scope.clone(),
-    };
-    match a.cmd {
-        None => {
-            let mut list = rpc.call::<RuleList>(ScheduleFilter { all: a.all }).await?;
-            list.sort_by(|x, y| {
-                x.is_global()
-                    .cmp(&y.is_global())
-                    .reverse()
-                    .then_with(|| x.scope_label().cmp(&y.scope_label()))
-                    .then_with(|| x.name().cmp(y.name()))
-            });
-            if json {
-                println!("{}", serde_json::to_string(&list)?);
-            } else if list.is_empty() {
-                println!(
-                    "no rules; `rl on` writes one, `rl up` loads a folder's ({}, {})",
-                    display_path(&home.schedules_file()),
-                    display_path(&home.reactions_file())
-                );
-            } else {
-                let now = now();
-                let rows: Vec<Vec<String>> = list.iter().map(|r| rule_row(r, now)).collect();
-                print!("{}", render::table(RULE_HEADERS, &rows));
-                let pending = list.iter().filter(|r| r.status() == RuleStatus::NeedsApproval).count();
-                if pending > 0 {
-                    println!(
-                        "\n{pending} need{} your yes: `rl rules approve <name>`",
-                        if pending == 1 { "s" } else { "" }
-                    );
-                }
-            }
-        }
-        Some(RulesCmd::Approve(x)) => {
-            let r = rpc
-                .call::<RuleApprove>(RuleRef {
-                    name: x.name,
-                    scope: x.scope,
-                    kind: x.kind,
-                })
-                .await?;
-            one(r, json)?;
-        }
-        Some(cmd @ (RulesCmd::Pause(_) | RulesCmd::Resume(_))) => {
-            let pause = matches!(cmd, RulesCmd::Pause(_));
-            let (RulesCmd::Pause(x) | RulesCmd::Resume(x)) = cmd else {
-                unreachable!()
-            };
-            let r = match (rule_kind(&mut rpc, &x).await?, pause) {
-                (RuleKind::Schedule, true) => Rule::Schedule(rpc.call::<SchedulePause>(name(&x)).await?),
-                (RuleKind::Schedule, false) => Rule::Schedule(rpc.call::<ScheduleResume>(name(&x)).await?),
-                (RuleKind::Reaction, true) => Rule::Reaction(rpc.call::<ReactionPause>(name(&x)).await?),
-                (RuleKind::Reaction, false) => Rule::Reaction(rpc.call::<ReactionResume>(name(&x)).await?),
-            };
-            one(r, json)?;
-        }
-        Some(RulesCmd::Run(x)) => {
-            let run = rpc.call::<ScheduleRun>(name(&x)).await?;
-            if json {
-                println!("{}", serde_json::to_string(&run)?);
-            } else {
-                println!("started {} · {}", run.id, run.title);
-            }
-        }
-        Some(RulesCmd::Reload) => {
-            let s = rpc.call::<ScheduleReload>(()).await?;
-            let r = rpc.call::<ReactionReload>(()).await?;
-            if json {
-                println!("{}", json!({ "schedules": s, "reactions": r }));
-            } else {
-                println!("schedules: {}", reload_line(&s));
-                println!("reactions: {}", reload_line(&r));
-                for e in s.errors.iter().chain(r.errors.iter()) {
-                    eprintln!("not loaded: {e}");
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
-fn reload_line(r: &rl_proto::schedule::ReloadReport) -> String {
-    format!(
-        "{} loaded · {} added · {} changed · {} removed",
-        r.loaded,
-        r.added.len(),
-        r.changed.len(),
-        r.removed.len()
-    )
-}
-
-const REACTION_HEADERS: &[&str] = &["SCOPE", "NAME", "ON", "LAST", "STATE", "DOES"];
-
-fn reaction_row(r: &Reaction, now: jiff::Timestamp) -> Vec<String> {
-    let last = match (r.last_fired_at, &r.last_run) {
-        (Some(t), Some(id)) => format!("{} ago · {id}", rl_core::time::fmt_age(t, now)),
-        (Some(t), None) => format!("{} ago", rl_core::time::fmt_age(t, now)),
-        _ => "never".to_string(),
-    };
-    let state = if r.removed_at.is_some() {
-        "removed"
-    } else if !r.approved() {
-        "needs approval"
-    } else if r.paused {
-        "paused"
-    } else {
-        "on"
-    };
-    let does = match &r.spec.ask {
-        Some(ask) => format!("asks: {}", ask.title),
-        None => r.spec.action().label(),
-    };
-    let does: String = does.chars().take(48).collect();
-    vec![
-        r.scope_label(),
-        r.name.clone(),
-        r.spec.when(),
-        last,
-        state.to_string(),
-        does,
-    ]
-}
-
-async fn react(home: &Home, cmd: ReactCmd, json: bool) -> Result<()> {
-    let mut rpc = daemon::ensure(home, !json).await?;
-    let one = |r: Reaction, json: bool| -> Result<()> {
-        if json {
-            println!("{}", serde_json::to_string(&r)?);
-        } else {
-            println!("{}", render::table(REACTION_HEADERS, &[reaction_row(&r, now())]));
-        }
-        Ok(())
-    };
-    match cmd {
-        ReactCmd::Ls { all } => {
-            let list = rpc.call::<ReactionList>(ScheduleFilter { all }).await?;
-            if json {
-                println!("{}", serde_json::to_string(&list)?);
-            } else if list.is_empty() {
-                println!("no reactions ({})", display_path(&home.reactions_file()));
-            } else {
-                let now = now();
-                let rows: Vec<Vec<String>> = list.iter().map(|r| reaction_row(r, now)).collect();
-                println!("{}", render::table(REACTION_HEADERS, &rows));
-            }
-        }
-        ReactCmd::Test { event } => {
-            let trials = rpc.call::<ReactionTest>(EventId { event }).await?;
-            if json {
-                println!("{}", serde_json::to_string(&trials)?);
-            } else if trials.is_empty() {
-                println!("no reactions");
-            } else {
-                println!("{}", render::table(TRIAL_HEADERS, &trial_rows(&trials)));
-            }
-        }
-        ReactCmd::Pause(r) => one(
-            rpc.call::<ReactionPause>(ScheduleName {
-                name: r.name,
-                scope: r.scope,
-            })
-            .await?,
-            json,
-        )?,
-        ReactCmd::Resume(r) => one(
-            rpc.call::<ReactionResume>(ScheduleName {
-                name: r.name,
-                scope: r.scope,
-            })
-            .await?,
-            json,
-        )?,
-        ReactCmd::Reload => {
-            let r = rpc.call::<ReactionReload>(()).await?;
-            if json {
-                println!("{}", serde_json::to_string(&r)?);
-            } else {
-                println!(
-                    "{} loaded · {} added · {} changed · {} removed",
-                    r.loaded,
-                    r.added.len(),
-                    r.changed.len(),
-                    r.removed.len()
-                );
-                for e in &r.errors {
-                    eprintln!("not loaded: {e}");
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
-const TRIAL_HEADERS: &[&str] = &["SCOPE", "NAME", "FIRES", "WHY", "WOULD"];
-
-fn trial_rows(trials: &[ReactionTrial]) -> Vec<Vec<String>> {
-    trials
-        .iter()
-        .map(|t| {
-            vec![
-                t.scope.clone(),
-                t.reaction.clone(),
-                if t.fires { "yes" } else { "no" }.to_string(),
-                t.why.clone(),
-                t.action.clone().unwrap_or_default().chars().take(48).collect(),
-            ]
-        })
-        .collect()
-}
-
-/// `rl on`: append a rule to the user's own reactions.yaml. The file stays
-/// yours — this only adds to the end of it, comments and all.
-async fn on(home: &Home, a: OnArgs, json: bool) -> Result<()> {
-    use rl_proto::action::Task;
-    let name = match a.name {
-        Some(n) => n,
-        None => {
-            let base: String = a
-                .kind
-                .chars()
-                .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-                .collect();
-            format!("on-{}", base.trim_matches('-'))
-        }
-    };
-    rl_cli::rulefile::check_name(&name)?;
-    let cwd = match a.cwd {
-        Some(c) => c,
-        None => std::env::current_dir()?,
-    };
-    let spec = ReactionSpec {
-        on: vec![a.kind],
-        filter: a.tag.map(|tag| Filter {
-            tag: Some(tag),
-            ..Default::default()
-        }),
-        run: Some(Task::Argv(a.argv)),
-        cwd: Some(cwd),
-        throttle: a.throttle,
-        ..Default::default()
-    };
-    let d = rl_cli::rulefile::RuleDraft {
-        kind: RuleKind::Reaction,
-        folder: None,
-        name,
-        body: rl_cli::rulefile::body(&spec, &ReactionSpec::default())?,
-    };
-    let file = rl_cli::rulefile::file(home, d.kind, d.folder.as_deref());
-    let text = std::fs::read_to_string(&file).unwrap_or_default();
-    if rl_cli::rulefile::line_of(&text, rl_cli::rulefile::top(d.kind), &d.name).is_some() {
-        bail!("`{}` is already in {}; edit it there", d.name, display_path(&file));
-    }
-    let mut rpc = daemon::ensure(home, !json).await?;
-    let file = rl_cli::rulefile::install(home, &mut rpc, &d, None, true).await?;
-    let rule = rpc
-        .call::<RuleApprove>(RuleRef {
-            name: d.name.clone(),
-            scope: Some(d.scope()),
-            kind: Some(RuleKind::Reaction),
-        })
-        .await?;
-    if json {
-        println!("{}", serde_json::to_string(&rule)?);
-    } else {
-        println!("  {}:", d.name);
-        for l in &d.body {
-            println!("    {l}");
-        }
-        println!("→ {} · {}", display_path(&file), rule.status());
-    }
-    Ok(())
-}
-
-/// `rl every`: a schedule into this folder's (or your own) schedules.yaml,
-/// loaded and on — the command line is the yes. The file's comments and
-/// other rules stay as they were.
-async fn every(home: &Home, a: EveryArgs, json: bool) -> Result<()> {
-    use rl_proto::action::Task;
-    use rl_proto::schedule::ScheduleSpec;
-    let mut spec = ScheduleSpec::default();
-    let when = a.when.trim();
-    if rl_core::time::parse_duration(when).is_some() {
-        spec.every = Some(when.to_string());
-    } else if when.split_whitespace().count() == 5 {
-        spec.cron = Some(when.to_string());
-    } else {
-        bail!("`{when}` is neither a duration (30m, 4h) nor a cron line (\"0 2 * * *\")");
-    }
-    spec.run = Some(match a.agent {
-        Some(agent) => Task::Agent {
-            agent,
-            prompt: Some(a.argv.join(" ")),
-            prompt_file: None,
-            args: vec![],
-        },
-        None if a.argv.len() == 1 => Task::Shell(a.argv[0].clone()),
-        None => Task::Argv(a.argv.clone()),
-    });
-    let here = std::env::current_dir()?;
-    let folder = if a.global {
-        None
-    } else {
-        let f = a.folder.unwrap_or_else(|| here.clone());
-        Some(std::fs::canonicalize(&f).with_context(|| format!("{}: not a folder", f.display()))?)
-    };
-    spec.cwd = match (a.cwd, &folder) {
-        (Some(c), _) => Some(c),
-        (None, None) => Some(here),
-        (None, Some(_)) => None,
-    };
-    spec.title = a.title;
-    spec.tags = a.tags;
-    let name = match a.name {
-        Some(n) => n,
-        None => {
-            let first = match spec.run.as_ref().unwrap() {
-                Task::Agent { agent, .. } => agent.clone(),
-                Task::Shell(line) => line.split_whitespace().next().unwrap_or_default().to_string(),
-                Task::Argv(v) => v[0].clone(),
-            };
-            let base = std::path::Path::new(&first)
-                .file_name()
-                .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or(first);
-            base.chars()
-                .map(|c| {
-                    if c.is_ascii_alphanumeric() || "._-".contains(c) {
-                        c
-                    } else {
-                        '-'
-                    }
-                })
-                .collect()
-        }
-    };
-    rl_cli::rulefile::check_name(&name)?;
-    let d = rl_cli::rulefile::RuleDraft {
-        kind: RuleKind::Schedule,
-        folder,
-        name,
-        body: rl_cli::rulefile::body(&spec, &ScheduleSpec::default())?,
-    };
-    let file = rl_cli::rulefile::file(home, d.kind, d.folder.as_deref());
-    let text = std::fs::read_to_string(&file).unwrap_or_default();
-    if !a.replace && rl_cli::rulefile::line_of(&text, "schedules", &d.name).is_some() {
-        bail!(
-            "`{}` is already in {}; --replace to rewrite it, or --name for another",
-            d.name,
-            display_path(&file)
-        );
-    }
-    let mut rpc = daemon::ensure(home, !json).await?;
-    let registered = match &d.folder {
-        Some(f) => rpc.call::<WorkspaceList>(()).await?.iter().any(|w| &w.path == f),
-        None => true,
-    };
-    let file = rl_cli::rulefile::install(home, &mut rpc, &d, None, registered).await?;
-    let rule = rpc
-        .call::<RuleApprove>(RuleRef {
-            name: d.name.clone(),
-            scope: Some(d.scope()),
-            kind: Some(RuleKind::Schedule),
-        })
-        .await?;
-    if json {
-        println!("{}", serde_json::to_string(&rule)?);
-    } else {
-        println!("  {}:", d.name);
-        for l in &d.body {
-            println!("    {l}");
-        }
-        println!("→ {} · {}", display_path(&file), rule.status());
-    }
-    Ok(())
-}
-
 /// `rl config`: the file as the daemon reads it, each assistant resolved to
 /// what would run; `rl config edit` opens it first. A file that cannot be
 /// used says why and exits 1.
@@ -1816,7 +1332,7 @@ async fn config(home: &Home, a: ConfigArgs, json: bool) -> Result<()> {
                 &file,
                 "# Your defaults. Keys are added as Relay grows; one it does not know is refused.\n\
                  # assistants:\n#   interpret: claude   # or { agent: claude, model: …, args: [...] }\n\
-                 #   summarise: claude\n",
+                 #   summary: claude\n",
             )?;
         }
         rl_cli::env::open_in_editor(&file, 1)?;
@@ -1827,7 +1343,7 @@ async fn config(home: &Home, a: ConfigArgs, json: bool) -> Result<()> {
     } else {
         let file = display_path(&r.file);
         println!("{file}{}", if r.present { "" } else { "  (absent: all defaults)" });
-        for (job, x) in [("interpret", &r.interpret), ("summarise", &r.summarise)] {
+        for (job, x) in [("interpret", &r.interpret), ("summary", &r.summary)] {
             match x {
                 Some(x) => println!(
                     "assistants.{job:<10} {}  ({}{})",
@@ -1838,9 +1354,60 @@ async fn config(home: &Home, a: ConfigArgs, json: bool) -> Result<()> {
                 None => println!("assistants.{job:<10} —  (no agent on this machine; see `rl agents`)"),
             }
         }
+        match r.config.agents.as_slice() {
+            [] => println!("agents                —  (unset: the panel offers every agent here)"),
+            a => println!("agents                {}  (config; `rl setup` asks)", a.join(", ")),
+        }
         match r.config.retention.as_ref().and_then(|x| x.journal.as_deref()) {
-            Some(d) => println!("retention.journal     {d}  (config; `rl gc` runs it now, rld daily)"),
-            None => println!("retention.journal     —  (unset: nothing is ever deleted)"),
+            Some(d) if rl_proto::config::is_never(d) => {
+                println!("retention.journal     {d}  (config; no journal is ever dropped)")
+            }
+            Some(d) => println!("retention.journal     {d}  (config; `rl prune` runs it now, rld daily)"),
+            None => println!(
+                "retention.journal     {}  (default; the terminal bytes of runs ended longer ago go, `never` keeps them)",
+                rl_proto::config::DEFAULT_RETENTION
+            ),
+        }
+        match r.config.runs.reap_after.as_deref() {
+            Some(s) => {
+                println!("runs.reap_after      {s}  (config; with nobody attached that long, a run stops itself)")
+            }
+            None => println!(
+                "runs.reap_after      {}  (default; `never` keeps a run whatever happens to rld)",
+                rl_proto::config::DEFAULT_REAP
+            ),
+        }
+        match r.config.runs.settle.as_deref() {
+            Some(s) => println!("runs.settle          {s}  (config; a burst of output gathers this long)"),
+            None => println!(
+                "runs.settle          {}  (default; `off` reads as fast as a run writes)",
+                rl_proto::config::DEFAULT_SETTLE
+            ),
+        }
+        println!(
+            "catch_up.after        {}  ({}; away longer than this, the panel opens on what happened; `off` only on /since)",
+            r.catch_up_after,
+            if r.config.catch_up.after.is_some() {
+                "config"
+            } else {
+                "default"
+            }
+        );
+        println!(
+            "catch_up.summary      {}  ({}; `auto` writes the top when you come back after `after`, by assistants.summary; `ask` only on /summary)",
+            r.catch_up_summary,
+            if r.config.catch_up.summary.is_some() {
+                "config"
+            } else {
+                "default"
+            }
+        );
+        match r.config.workspaces.badges.as_slice() {
+            [] => println!("workspaces.badges     —  (unset: a header shows the branch alone; gh-pr adds the open PR)"),
+            b => println!(
+                "workspaces.badges     {}  (config; ~/.relay/plugins first on the PATH)",
+                b.join(", ")
+            ),
         }
         for e in &r.errors {
             eprintln!("not usable: {e}");
@@ -1853,8 +1420,50 @@ async fn config(home: &Home, a: ConfigArgs, json: bool) -> Result<()> {
     }
 }
 
-/// `rl gc`: retention, now.
-async fn gc(home: &Home, a: GcArgs, json: bool) -> Result<()> {
+/// `rl daemon stop --with-runs`: every live run stopped before the daemon
+/// goes, so a throwaway home leaves nothing behind. A run that will not stop
+/// is reported and the rest still go.
+async fn stop_every_run(home: &Home, json: bool) -> Result<usize> {
+    let Some(mut rpc) = daemon::connect_if_running(home).await? else {
+        return Ok(0);
+    };
+    let live: Vec<rl_proto::types::Run> = rpc
+        .call::<RunList>(RunFilter {
+            active_only: true,
+            ..Default::default()
+        })
+        .await?;
+    let mut stopped = 0;
+    for run in live {
+        match rpc
+            .call::<RunStop>(RunStopParams {
+                id: run.id.clone(),
+                force: false,
+            })
+            .await
+        {
+            Ok(_) => stopped += 1,
+            Err(e) if !json => eprintln!("{}: {e:#}", run.title),
+            Err(_) => {}
+        }
+        // A holder lingers after its child so a daemon that was away can
+        // still read the exit. Nobody is coming: ask it to go.
+        let socket = home.session_socket(&run.id);
+        if let Ok((_, mut s)) = rl_session::client::Session::attach(&socket, false).await {
+            let _ = s.close().await;
+            // And stay until it hangs up. Dropping the connection here would
+            // break the holder's own handshake writes mid-flight, its client
+            // task would end on the write error, and the `Close` waiting in
+            // the buffer would never be read — leaving the holder sitting on
+            // its socket for the whole linger.
+            let _ = tokio::time::timeout(GOING, async { while let Ok(Some(_)) = s.recv().await {} }).await;
+        }
+    }
+    Ok(stopped)
+}
+
+/// `rl prune` (once `rl gc`): retention, now — the panel's `/prune`.
+async fn prune(home: &Home, a: PruneArgs, json: bool) -> Result<()> {
     let r = daemon::ensure(home, !json)
         .await?
         .call::<GcRun>(GcParams {
@@ -1867,11 +1476,16 @@ async fn gc(home: &Home, a: GcArgs, json: bool) -> Result<()> {
         return Ok(());
     }
     let size = rl_daemon_bytes(r.bytes);
-    if r.runs == 0 {
+    let folders = match r.firings {
+        0 => String::new(),
+        1 => " · 1 firing's folder".to_string(),
+        n => format!(" · {n} firings' folders"),
+    };
+    if r.runs == 0 && r.firings == 0 {
         println!("nothing with a journal ended more than {} ago", r.older_than);
     } else if r.dry_run {
         println!(
-            "would drop the journal of {} run{} ended more than {} ago · {size} · {} file{}",
+            "would drop the journal of {} run{} ended more than {} ago · {size} · {} file{}{folders}",
             r.runs,
             if r.runs == 1 { "" } else { "s" },
             r.older_than,
@@ -1880,7 +1494,7 @@ async fn gc(home: &Home, a: GcArgs, json: bool) -> Result<()> {
         );
     } else {
         println!(
-            "dropped the journal of {} run{} ended more than {} ago · {size} · {} file{} · the runs and their events stay",
+            "dropped the journal of {} run{} ended more than {} ago · {size} · {} file{}{folders} · the runs and their events stay",
             r.runs,
             if r.runs == 1 { "" } else { "s" },
             r.older_than,
@@ -1912,7 +1526,10 @@ async fn context(home: &Home, a: ContextArgs) -> Result<()> {
     let folder = std::fs::canonicalize(&folder).unwrap_or(folder);
     let mut rpc = daemon::ensure(home, true).await?;
     let here = rl_cli::context::gather(&mut rpc, &folder).await?;
-    print!("{}", rl_cli::context::render(rl_cli::context::help(), &here));
+    print!(
+        "{}",
+        rl_cli::context::render(rl_cli::context::help(), &here, &Want::Any)
+    );
     Ok(())
 }
 
@@ -1924,9 +1541,17 @@ fn help_for_the_pack() -> String {
     let mut root = <Cli as clap::CommandFactory>::command();
     help.push_str(&root.render_long_help().to_string());
     for sub in root.get_subcommands_mut() {
-        if matches!(sub.get_name(), "run" | "every" | "on" | "ask") {
+        if matches!(sub.get_name(), "run" | "flow" | "ask") {
             help.push_str("\n---\n");
             help.push_str(&sub.render_help().to_string());
+        }
+        if sub.get_name() == "flow" {
+            for inner in sub.get_subcommands_mut() {
+                if matches!(inner.get_name(), "new" | "test" | "state") {
+                    help.push_str("\n---\n");
+                    help.push_str(&inner.render_help().to_string());
+                }
+            }
         }
     }
     help
@@ -1942,14 +1567,18 @@ async fn interpret(home: &Home, a: InterpretArgs, json: bool) -> Result<()> {
     let folder = std::fs::canonicalize(&folder).unwrap_or(folder);
     let words = a.words.join(" ");
     if words.trim().is_empty() {
-        bail!("say what: rl interpret \"run the tests every night\"");
+        bail!("say what: rl interpret \"run the tests in api\"");
     }
     daemon::ensure(home, !json).await?;
     if !json {
         eprintln!("asking…");
     }
-    let (draft, out) = rl_cli::interpret::ask(home, &folder, &words, None).await?;
-    let form = rl_cli::interpret::form_of(&draft, &folder, None);
+    let (answer, out) = rl_cli::interpret::ask(home, &folder, &words, &Want::Any).await?;
+    let draft = match answer {
+        Answer::Run(draft) => draft,
+        Answer::Flow(d) => return rl_cli::interpret::flow_drafted(home, d, &out, &words, a.go, json).await,
+    };
+    let form = rl_cli::interpret::form_of(&draft, &folder);
     if json {
         println!(
             "{}",
@@ -1962,14 +1591,7 @@ async fn interpret(home: &Home, a: InterpretArgs, json: bool) -> Result<()> {
         println!("# by {} · run {}", out.agent, out.run);
     }
     if a.go {
-        let known: Vec<PathBuf> = daemon::ensure(home, !json)
-            .await?
-            .call::<WorkspaceList>(())
-            .await?
-            .into_iter()
-            .map(|w| w.path)
-            .collect();
-        let done = rl_cli::interpret::apply(home, &form, |p| known.iter().any(|k| k == p)).await?;
+        let done = rl_cli::interpret::apply(home, &form).await?;
         if !json {
             println!("{done}");
         }
@@ -1979,44 +1601,90 @@ async fn interpret(home: &Home, a: InterpretArgs, json: bool) -> Result<()> {
     Ok(())
 }
 
-async fn summarise(home: &Home, a: SummariseArgs, json: bool) -> Result<()> {
+/// What `rl summary` was asked of: `all`, a folder (a project), a
+/// `flow:<name>`, a `firing:<id>`, else a run.
+fn summary_target(what: &str) -> Result<SummaryTarget> {
+    Ok(if what == "all" {
+        SummaryTarget::All
+    } else if let Some(name) = what.strip_prefix("flow:") {
+        SummaryTarget::Flow { name: name.to_string() }
+    } else if let Some(id) = what.strip_prefix("firing:") {
+        SummaryTarget::Firing { id: id.to_string() }
+    } else if Path::new(what).is_dir() {
+        SummaryTarget::Project {
+            workspace: std::fs::canonicalize(what)?,
+        }
+    } else {
+        SummaryTarget::Run { id: what.to_string() }
+    })
+}
+
+async fn summary(home: &Home, a: SummaryArgs, json: bool) -> Result<()> {
+    let target = summary_target(&a.what)?;
     let mut rpc = daemon::ensure(home, !json).await?;
-    let kept = rpc.call::<SummaryGet>(RunId { id: a.run.clone() }).await?;
-    if !json && (a.again || kept.is_none()) {
+    let from = match a.since.as_deref() {
+        Some(s) => Some(parse_since(s, now())?),
+        // A project or everything has no "since you looked" of its own: the
+        // last day, and presence is not touched.
+        None if matches!(target, SummaryTarget::Project { .. } | SummaryTarget::All) => {
+            Some(now() - SignedDuration::from_hours(24))
+        }
+        None => None,
+    };
+    let ask = |again: bool| SummaryParams {
+        target: target.clone(),
+        deep: a.deep,
+        from,
+        again,
+        dry: false,
+        timeout: None,
+    };
+    let kept = rpc.call::<SummaryGet>(ask(false)).await?;
+    if !json && (a.again || kept.is_none_or(|k| k.stale)) {
         eprintln!("summarising…");
     }
-    let s = rpc
-        .call::<SummaryMake>(SummaryParams {
-            run: a.run,
-            again: a.again,
-            timeout: None,
-        })
-        .await?;
+    let s = rpc.call::<SummaryMake>(ask(a.again)).await?;
     if json {
         println!("{}", serde_json::to_string(&s)?);
     } else {
         println!("{}", s.text);
+        let by = if s.by.is_empty() {
+            String::new()
+        } else {
+            format!(" · its run {}", s.by)
+        };
         println!(
-            "# by {} · {} ago · its run {} · --again asks anew",
-            s.agent,
-            rl_core::time::fmt_age(s.at, now()),
-            s.by
+            "# {}{by} · --again makes a new one",
+            rl_cli::tui::summary_label(&s, now())
         );
     }
     Ok(())
 }
 
-const AGENT_HEADERS: &[&str] = &["AGENT", "BIN", "HEADLESS", "MODEL"];
+const AGENT_HEADERS: &[&str] = &["AGENT", "BIN", "HEADLESS", "MODEL", "OFFERED"];
 
 /// `rl agents`: what the registry knows, and what is here.
 /// zsh: `D` with the last exit and `A` from `precmd`, `C` from `preexec`, and
-/// `B` on the end of the prompt itself, where what you type begins.
-const ZSH_MARKS: &str = r#"# Relay prompt marks (OSC 133), so a project shell can tell one command from
-# the next. In ~/.zshrc:  eval "$(rl shell-init zsh)"
+/// `B` on the end of the prompt itself, where what you type begins. At each
+/// prompt, too, the folder it is in (OSC 7), percent-encoded byte by byte.
+const ZSH_MARKS: &str = r#"# Relay prompt marks (OSC 133) and the folder you are in (OSC 7), so a project
+# shell can tell one command from the next and say where it is.
+# In ~/.zshrc:  eval "$(rl shell-init zsh)"
 if [[ -z ${_relay_marks:-} ]]; then
   _relay_marks=1
   autoload -Uz add-zsh-hook
-  _relay_precmd() { printf '\033]133;D;%s\007\033]133;A\007' "$?" }
+  _relay_cwd() {
+    local LC_ALL=C s=$PWD out= c i
+    for (( i = 1; i <= ${#s}; i++ )); do
+      c=${s[i]}
+      case $c in
+        [-/._~A-Za-z0-9]) out+=$c ;;
+        *) out+=$(printf '%%%02X' "'$c") ;;
+      esac
+    done
+    printf '\033]7;file://%s%s\007' "$HOST" "$out"
+  }
+  _relay_precmd() { printf '\033]133;D;%s\007\033]133;A\007' "$?"; _relay_cwd }
   _relay_preexec() { printf '\033]133;C\007' }
   add-zsh-hook precmd _relay_precmd
   add-zsh-hook preexec _relay_preexec
@@ -2024,13 +1692,27 @@ if [[ -z ${_relay_marks:-} ]]; then
 fi
 "#;
 
-/// bash: the same, with `PROMPT_COMMAND` for `D`/`A` — first, so `$?` is still
-/// the command's — a `DEBUG` trap for `C`, and `B` on the end of `PS1`.
-const BASH_MARKS: &str = r#"# Relay prompt marks (OSC 133), so a project shell can tell one command from
-# the next. In ~/.bashrc:  eval "$(rl shell-init bash)"
+/// bash: the same, with `PROMPT_COMMAND` for `D`/`A` and the folder — first,
+/// so `$?` is still the command's — a `DEBUG` trap for `C`, and `B` on the end
+/// of `PS1`.
+const BASH_MARKS: &str = r#"# Relay prompt marks (OSC 133) and the folder you are in (OSC 7), so a project
+# shell can tell one command from the next and say where it is.
+# In ~/.bashrc:  eval "$(rl shell-init bash)"
 if [ -z "${_relay_marks:-}" ]; then
   _relay_marks=1
-  _relay_precmd() { printf '\033]133;D;%s\007\033]133;A\007' "$?"; }
+  _relay_cwd() {
+    local LC_ALL=C s=$PWD out= c i n
+    for (( i = 0; i < ${#s}; i++ )); do
+      c=${s:i:1}
+      case $c in
+        [-/._~A-Za-z0-9]) out+=$c ;;
+        # A byte past ASCII reads negative in bash 3.2 (macOS's own bash).
+        *) printf -v n '%d' "'$c"; printf -v c '%%%02X' $(( n & 255 )); out+=$c ;;
+      esac
+    done
+    printf '\033]7;file://%s%s\007' "$HOSTNAME" "$out"
+  }
+  _relay_precmd() { printf '\033]133;D;%s\007\033]133;A\007' "$?"; _relay_cwd; }
   PROMPT_COMMAND="_relay_precmd${PROMPT_COMMAND:+;$PROMPT_COMMAND}"
   trap 'printf "\033]133;C\007"' DEBUG
   PS1="$PS1\[\033]133;B\007\]"
@@ -2085,6 +1767,7 @@ async fn agents(home: &Home, json: bool) -> Result<()> {
                 } else {
                     format!("{} <model>", a.model_flag.join(" "))
                 },
+                if a.offered { "yes" } else { "no (config: agents)" }.into(),
             ]
         })
         .collect();
@@ -2096,6 +1779,42 @@ async fn agents(home: &Home, json: bool) -> Result<()> {
 mod tests {
     use super::*;
     use clap::{CommandFactory, Parser};
+
+    #[test]
+    fn the_flow_state_commands_the_pack_teaches_exist() {
+        let root = Cli::command();
+        let state = root
+            .find_subcommand("flow")
+            .and_then(|f| f.find_subcommand("state"))
+            .expect("rl flow state");
+        for sub in ["set", "get", "write", "read"] {
+            assert!(state.find_subcommand(sub).is_some(), "rl flow state {sub}");
+        }
+    }
+
+    #[test]
+    fn the_shell_snippets_say_the_folder_percent_encoded() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("a b&c").join("café");
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        // `/bin/bash` too: on macOS it is bash 3.2, whatever `bash` finds first.
+        for (sh, snippet) in [("bash", BASH_MARKS), ("/bin/bash", BASH_MARKS), ("zsh", ZSH_MARKS)] {
+            let file = tmp.path().join(sh.trim_start_matches("/bin/"));
+            std::fs::write(&file, snippet).unwrap();
+            let script = format!(". '{}'; cd '{}' && _relay_cwd", file.display(), dir.display());
+            let Ok(out) = std::process::Command::new(sh).args(["-c", &script]).output() else {
+                eprintln!("skipping {sh}: not installed");
+                continue;
+            };
+            assert!(out.status.success(), "{sh}: {}", String::from_utf8_lossy(&out.stderr));
+            let text = String::from_utf8_lossy(&out.stdout);
+            assert!(text.contains("a%20b%26c/caf%C3%A9\x07"), "{sh}: {text:?}");
+            let mut s = rl_detect::ansi::Stripper::new();
+            s.strip(&out.stdout);
+            assert_eq!(s.take_cwd(), Some(dir.clone()), "{sh}");
+        }
+    }
 
     #[test]
     fn the_grammar_is_consistent() {

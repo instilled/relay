@@ -7,16 +7,16 @@
 //! connection keeps journaling regardless, so a viewer leaving costs nothing.
 
 use crate::server::Daemon;
-use crate::supervisor::Live;
+use crate::supervisor::{Live, Seat};
 use jiff::Timestamp;
 use rl_ledger::session_io::{self, Direction};
 use rl_ledger::{presence, runs, sessions};
 use rl_proto::methods::{AttachInfo, AttachParams};
 use rl_proto::rpc::RpcError;
 use rl_proto::types::AttachMode;
-use rl_session::client::Session;
+use rl_session::client::{Session, SessionWriter};
 use rl_session::exit::Exit;
-use rl_session::proto::{Frame, read_frame, write_frame};
+use rl_session::proto::{Frame, FrameReader, write_frame};
 use std::io;
 use std::sync::Arc;
 use std::time::Duration;
@@ -28,11 +28,24 @@ use tracing::{debug, info, warn};
 const ATTACH_TIMEOUT: Duration = Duration::from_secs(2);
 /// Scrollback is capped here whatever the viewer asks for.
 const SCROLLBACK_MAX: u64 = 8 << 20;
+/// How long the repaint nudge holds the smaller size: long enough for a busy
+/// app to read it before it is given back — back to back, the two resizes
+/// read as none — and short enough not to be seen.
+const NUDGE_HOLD: Duration = Duration::from_millis(200);
+/// How long after the replay a joiner has to say its size before the run is
+/// nudged anyway: its first `Resize` follows the attach at once, so this only
+/// runs out for one with no terminal to measure.
+const JOIN_SIZE_WAIT: Duration = Duration::from_millis(300);
+/// A run this young when it is joined may not yet be listening for a resize:
+/// Node and Bun agents (Claude Code) set that up half a second or so in, and
+/// one that lands before is lost. So it is nudged once more, this long after
+/// it started.
+const YOUNG: Duration = Duration::from_secs(3);
 
 /// An accepted attach, ready to stream.
 pub struct Attached {
     info: AttachInfo,
-    client: String,
+    seat: Seat,
     joiner: bool,
     tail: Vec<u8>,
     /// `None` for an ended run: the journal is all there is.
@@ -99,7 +112,10 @@ pub async fn attach(d: &Daemon, p: AttachParams) -> Result<Attached, RpcError> {
                 journaled,
                 replay_from: journaled,
             },
-            client: p.client,
+            seat: Seat {
+                client: p.client,
+                terminal: p.terminal,
+            },
             joiner: false,
             tail,
             holder: None,
@@ -113,13 +129,20 @@ pub async fn attach(d: &Daemon, p: AttachParams) -> Result<Attached, RpcError> {
         .live(&id)
         .ok_or_else(|| RpcError::internal(format!("run {id} is alive but this daemon is not attached to it")))?;
     let joiner = p.mode == AttachMode::Join;
+    let seat = Seat {
+        client: p.client.clone(),
+        terminal: p.terminal.clone(),
+    };
     let mut replaced = None;
     if joiner {
-        replaced = live.join(&p.client, p.take).map_err(|current| {
-            RpcError::new(
+        replaced = live.join(&seat, p.take).map_err(|current| {
+            let who = current.said_to(&seat);
+            let mut e = RpcError::new(
                 RpcError::BUSY,
-                format!("{id} is already joined by {current}; `--take` to take over"),
-            )
+                format!("{id} is already joined by {who}; `--take` to take over"),
+            );
+            e.data = Some(serde_json::json!({ "joiner": who }));
+            e
         })?;
     }
     // Subscribe before announcing, so nothing is missed.
@@ -136,12 +159,14 @@ pub async fn attach(d: &Daemon, p: AttachParams) -> Result<Attached, RpcError> {
                     // the run with no joiner at all.
                     Some(old) => {
                         let _ = live.join(old, true);
-                        let _ = live
-                            .notes
-                            .send(format!("{} could not take over; {old} stays joined", p.client));
+                        let _ = live.notes.send(format!(
+                            "{} could not take over; {} stays joined",
+                            p.client,
+                            old.said_to(&seat)
+                        ));
                     }
                     None => {
-                        live.leave(&p.client);
+                        live.leave(&seat);
                     }
                 }
             }
@@ -154,7 +179,11 @@ pub async fn attach(d: &Daemon, p: AttachParams) -> Result<Attached, RpcError> {
     };
     if joiner {
         let what = match replaced {
-            Some(old) if old != p.client => format!("{} took over from {old}", p.client),
+            // Your own other terminal: said so, not you twice.
+            Some(old) if old != seat && old.client == seat.client => {
+                format!("{} took over in another terminal", p.client)
+            }
+            Some(old) if old != seat => format!("{} took over from {}", p.client, old.client),
             _ => format!("{} joined", p.client),
         };
         let _ = live.notes.send(what);
@@ -167,17 +196,32 @@ pub async fn attach(d: &Daemon, p: AttachParams) -> Result<Attached, RpcError> {
             rows: hello.rows,
             tty: hello.tty,
             live: true,
-            joiner: live.joiner(),
+            joiner: live.joiner().map(|j| j.said_to(&seat)),
             journaled,
             replay_from: hello.replay_from,
         },
-        client: p.client,
+        seat,
         joiner,
         tail,
         holder: Some(holder),
         live: Some(live),
         notes: Some(notes),
     })
+}
+
+/// Gives the pty a row less, to be given back at the instant returned; `None`
+/// when another viewer's nudge already holds it. Held a moment, because sent
+/// back to back the two resizes land together, the app reads the size it
+/// already had, and a runtime that only reports a change (Node, Bun: Claude
+/// Code) never repaints. A row rather than a column, as tmux does, so what
+/// the run printed is not wrapped twice.
+async fn nudge(live: &Live, hwr: &mut SessionWriter, size: (u16, u16)) -> io::Result<Option<tokio::time::Instant>> {
+    if !live.nudge_start(size) {
+        return Ok(None);
+    }
+    let (cols, rows) = size;
+    hwr.resize(cols, rows.saturating_sub(1).max(1)).await?;
+    Ok(Some(tokio::time::Instant::now() + NUDGE_HOLD))
 }
 
 /// Streams until the viewer hangs up, the run ends, or the daemon stops.
@@ -211,20 +255,58 @@ where
         return Ok(());
     };
 
+    // The viewer's frames, read cancel-safely: this read shares the loop
+    // below with the holder's output and rld's own shutdown.
+    let mut rd = FrameReader::new(rd);
     let (mut hrd, mut hwr) = holder.split();
     let mut notes_open = true;
-    let mut size = (a.info.cols, a.info.rows);
+    // Another viewer's nudge may be holding the pty a row short: its own
+    // size is the one it will give back.
+    let mut size = live.nudged_size().unwrap_or((a.info.cols, a.info.rows));
+    // When our repaint nudge gives the pty its size back (see `ReplayEnd`).
+    let mut restore: Option<tokio::time::Instant> = None;
+    // A joiner's repaint turns on its first size: `None` until it says one,
+    // then whether that changed the pty's. It may come before the replay has
+    // ended or after; the second of the two decides.
+    let mut first_size: Option<bool> = None;
+    let mut replayed = false;
+    // Until when a joiner that has said no size is waited for.
+    let mut size_wait: Option<tokio::time::Instant> = None;
+    // When a run joined young is nudged once more (see `YOUNG`).
+    let mut again: Option<tokio::time::Instant> = None;
+    // The run ended or rld is stopping: whatever else ended the stream was
+    // the viewer going — a hang-up, or (Linux) a write that finds it gone.
+    let mut over = false;
     let result: io::Result<()> = async {
         loop {
             tokio::select! {
+                _ = async { tokio::time::sleep_until(restore.unwrap()).await }, if restore.is_some() => {
+                    restore = None;
+                    if let Some((cols, rows)) = live.nudge_end() {
+                        hwr.resize(cols, rows).await?;
+                    }
+                }
+                _ = async { tokio::time::sleep_until(again.unwrap()).await }, if again.is_some() => {
+                    again = None;
+                    if live.is_joiner(&a.seat) && restore.is_none() {
+                        restore = nudge(&live, &mut hwr, size).await?;
+                    }
+                }
+                _ = async { tokio::time::sleep_until(size_wait.unwrap()).await }, if size_wait.is_some() => {
+                    size_wait = None;
+                    if live.is_joiner(&a.seat) {
+                        restore = nudge(&live, &mut hwr, size).await?;
+                    }
+                }
                 _ = d.shutdown.cancelled() => {
+                    over = true;
                     write_frame(wr, &Frame::Note("daemon stopping; detached (the run keeps going)".into())).await?;
                     return Ok(());
                 }
-                frame = read_frame(rd) => match frame? {
+                frame = rd.next() => match frame? {
                     None => return Ok(()),
                     Some(Frame::Input(bytes)) => {
-                        if a.joiner && live.is_joiner(&a.client) {
+                        if a.joiner && live.is_joiner(&a.seat) {
                             hwr.input(bytes.clone()).await?;
                             let id = id.clone();
                             let now = Timestamp::now();
@@ -238,11 +320,22 @@ where
                         }
                     }
                     Some(Frame::Resize { cols, rows }) => {
-                        if a.joiner && live.is_joiner(&a.client) {
+                        if a.joiner && live.is_joiner(&a.seat) {
+                            let changed = (cols, rows) != size;
                             size = (cols, rows);
+                            live.nudge_resized(size);
                             hwr.resize(cols, rows).await?;
                             let id = id.clone();
                             let _ = d.ledger.call(move |c| sessions::set_size(c, &id, cols, rows)).await;
+                            // A new size is a repaint by itself. The same one
+                            // is none: that takes the nudge.
+                            if a.info.tty && first_size.is_none() {
+                                first_size = Some(changed);
+                                size_wait = None;
+                                if replayed && !changed {
+                                    restore = nudge(&live, &mut hwr, size).await?;
+                                }
+                            }
                         }
                     }
                     Some(other) => debug!(?other, "ignoring frame from viewer"),
@@ -252,20 +345,41 @@ where
                     Ok(Some(Frame::ReplayEnd)) => {
                         write_frame(wr, &Frame::ReplayEnd).await?;
                         // Replayed bytes were drawn for a screen that is not this
-                        // one: a full-screen app paints at stale cursor positions
-                        // until it repaints. Nudge the pty size so it does now.
-                        if a.info.tty {
-                            let (cols, rows) = size;
-                            hwr.resize(cols.saturating_sub(1).max(1), rows).await?;
-                            hwr.resize(cols, rows).await?;
+                        // one, and a tail of them is not a screen at all: an app
+                        // that only redraws what changed leaves its box and its
+                        // status line out until it repaints. It repaints when
+                        // its size changes — so a joiner at a size the run does
+                        // not have needs nothing more, and one at the size it
+                        // has gets the pty nudged (`nudge`). Which it is, the
+                        // joiner's first `Resize` says.
+                        //
+                        // A watcher is nudged at once, but only when nobody is
+                        // at the keyboard: opening a pane must not jolt a join.
+                        replayed = true;
+                        if a.info.tty && a.joiner && live.is_joiner(&a.seat) {
+                            let age = Timestamp::now().duration_since(a.info.run.started_at);
+                            if let Ok(left) = Duration::try_from(jiff::SignedDuration::try_from(YOUNG).unwrap_or_default() - age)
+                                && !left.is_zero()
+                            {
+                                again = Some(tokio::time::Instant::now() + left);
+                            }
+                            match first_size {
+                                Some(true) => {}
+                                Some(false) => restore = nudge(&live, &mut hwr, size).await?,
+                                None => size_wait = Some(tokio::time::Instant::now() + JOIN_SIZE_WAIT),
+                            }
+                        } else if a.info.tty && live.joiner().is_none() {
+                            restore = nudge(&live, &mut hwr, size).await?;
                         }
                     }
                     Ok(Some(Frame::Exit(e))) => {
+                        over = true;
                         write_frame(wr, &Frame::Exit(e)).await?;
                         return Ok(());
                     }
                     Ok(Some(_)) => {}
                     Ok(None) | Err(_) => {
+                        over = true;
                         write_frame(wr, &Frame::Note("session holder went away".into())).await?;
                         return Ok(());
                     }
@@ -280,9 +394,22 @@ where
     }
     .await;
 
-    if a.joiner && live.leave(&a.client) {
-        let _ = live.notes.send(format!("{} left", a.client));
+    // Gone inside our nudge: the run is not left a row short.
+    if restore.is_some()
+        && let Some(real) = live.nudge_end()
+    {
+        size = real;
+        let _ = hwr.resize(size.0, size.1).await;
     }
-    info!(id, client = %a.client, "viewer detached");
+    // Letting go of a run leaves it a row short, where nobody sees it redraw:
+    // whoever joins next brings a size it does not have, and that one change
+    // is the repaint — not two, as a nudge on the way in would be.
+    if !over && a.info.tty && a.joiner && live.is_joiner(&a.seat) && live.nudged_size().is_none() {
+        let _ = hwr.resize(size.0, size.1.saturating_sub(1).max(1)).await;
+    }
+    if a.joiner && live.leave(&a.seat) {
+        let _ = live.notes.send(format!("{} left", a.seat.client));
+    }
+    info!(id, client = %a.seat.client, "viewer detached");
     result
 }

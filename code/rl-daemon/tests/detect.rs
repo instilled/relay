@@ -230,6 +230,85 @@ async fn hooks_are_exact_and_the_pty_cannot_undo_them() {
 }
 
 #[tokio::test]
+async fn an_agent_nobody_named_is_named_for_its_first_prompt_once() {
+    let Some((tmp, h)) = start() else {
+        return;
+    };
+    let mut c = Conn::open(&h.home).await;
+    let cwd = tmp.path().to_string_lossy().into_owned();
+    let start = |title: Option<&str>| {
+        let mut spec = json!({ "argv": [fake_cli()], "cwd": cwd, "kind": "agent" });
+        if let Some(t) = title {
+            spec["title"] = json!(t);
+        }
+        spec
+    };
+    let prompt = |id: &str, p: &str| {
+        json!({ "id": id, "event": "UserPromptSubmit",
+                "payload": { "hook_event_name": "UserPromptSubmit", "prompt": p } })
+    };
+    let unnamed: Run = c.ok("run.start", start(None)).await;
+    let named: Run = c.ok("run.start", start(Some("the importer"))).await;
+    let renamed: Run = c.ok("run.start", start(None)).await;
+    // Until it is asked anything, it is what was run.
+    assert!(
+        unnamed.title.ends_with("fake-cli") || unnamed.title.ends_with('…'),
+        "{}",
+        unnamed.title
+    );
+
+    // A slash command says how to run, not what for: no name yet.
+    let r: Run = c.ok("run.hook", prompt(&unnamed.id, "/model opus")).await;
+    assert_eq!(r.title, unnamed.title);
+    // The first real prompt names it, by its first line.
+    let r: Run = c
+        .ok("run.hook", prompt(&unnamed.id, "add a recipe import\nfrom any url"))
+        .await;
+    assert_eq!(r.title, "fake-cli: add a recipe import");
+    assert_eq!(r.state, RunState::Working, "the hook still says what it is doing");
+    // Later prompts never rename it.
+    let r: Run = c.ok("run.hook", prompt(&unnamed.id, "now the tests")).await;
+    assert_eq!(r.title, "fake-cli: add a recipe import");
+    // The list reads the new name like any rename.
+    let d: rl_proto::methods::Digest = c.ok("digest.get", json!({})).await;
+    let item = d.items.iter().find(|i| i.run.id == unnamed.id).unwrap();
+    assert_eq!(item.run.title, "fake-cli: add a recipe import");
+
+    // A run you named keeps its name.
+    let r: Run = c.ok("run.hook", prompt(&named.id, "add a recipe import")).await;
+    assert_eq!(r.title, "the importer");
+
+    // A rename by hand wins, before the first prompt and after it.
+    c.ok::<Run>("run.rename", json!({ "id": renamed.id, "title": "mine" }))
+        .await;
+    let r: Run = c.ok("run.hook", prompt(&renamed.id, "add a recipe import")).await;
+    assert_eq!(r.title, "mine");
+    c.ok::<Run>("run.rename", json!({ "id": unnamed.id, "title": "recipes" }))
+        .await;
+    let r: Run = c.ok("run.hook", prompt(&unnamed.id, "and more")).await;
+    assert_eq!(r.title, "recipes");
+
+    // An empty name takes a rename back, to the name Relay gave the run: what
+    // its first prompt named it, or what it started as — and one renamed
+    // before it was asked anything is still named for the next prompt.
+    let r: Run = c.ok("run.rename", json!({ "id": unnamed.id, "title": "" })).await;
+    assert_eq!(r.title, "fake-cli: add a recipe import");
+    let r: Run = c.ok("run.rename", json!({ "id": renamed.id, "title": "  " })).await;
+    assert_eq!(r.title, renamed.title);
+    let r: Run = c.ok("run.hook", prompt(&renamed.id, "fix the importer")).await;
+    assert_eq!(r.title, "fake-cli: fix the importer");
+    c.ok::<Run>("run.rename", json!({ "id": named.id, "title": "x" })).await;
+    let r: Run = c.ok("run.rename", json!({ "id": named.id, "title": "" })).await;
+    assert_eq!(r.title, "the importer");
+
+    for id in [&unnamed.id, &named.id, &renamed.id] {
+        c.ok::<Run>("run.stop", json!({ "id": id })).await;
+        c.wait_terminal(id).await;
+    }
+    h.stop().await;
+}
+
+#[tokio::test]
 async fn claude_runs_get_the_hooks_settings_file() {
     let Some((tmp, h)) = start() else {
         return;

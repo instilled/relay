@@ -3,7 +3,7 @@
 
 mod common;
 
-use common::{Conn, Harness, fake_cli, wait_journal};
+use common::{Conn, Harness, fake_cli, journal, wait_journal};
 use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
 use rl_core::Home;
@@ -26,11 +26,23 @@ struct Viewer {
 impl Viewer {
     /// Attaches a fresh connection; `Err` is the RPC error.
     async fn attach(home: &Home, id: &str, mode: &str, client: &str, take: bool) -> Result<(Value, Self), RpcError> {
+        Self::attach_from(home, id, mode, client, None, take).await
+    }
+
+    /// Attaches from one terminal of the client's.
+    async fn attach_from(
+        home: &Home,
+        id: &str,
+        mode: &str,
+        client: &str,
+        terminal: Option<&str>,
+        take: bool,
+    ) -> Result<(Value, Self), RpcError> {
         let mut c = Conn::open(home).await;
         let res = c
             .call(
                 "run.attach",
-                json!({ "id": id, "mode": mode, "client": client, "take": take, "scrollback": 4096 }),
+                json!({ "id": id, "mode": mode, "client": client, "terminal": terminal, "take": take, "scrollback": 4096 }),
             )
             .await;
         if let Some(e) = res.error {
@@ -126,15 +138,21 @@ async fn watchers_and_one_joiner() {
     // A watcher's keystrokes go nowhere.
     watcher.input("nope\n").await;
 
-    // The joiner: everyone else is told.
+    // The joiner: everyone else is told. It comes once the run is past the
+    // age at which a join nudges it again, and says its size as a terminal
+    // does, so the one nudge is over by the time it asks.
+    past_young().await;
     let (info, mut joiner) = Viewer::attach(&h.home, &run.id, "join", "bob@desk", false)
         .await
         .unwrap();
     assert_eq!(info["joiner"], "bob@desk");
+    resize(&mut joiner, 100, 30).await;
     joiner.until("fake-cli ready").await;
     let frames = watcher.until("fake-cli ready").await;
     let _ = frames;
-    // The post-replay repaint nudge leaves the pty exactly as big as it was.
+    // The post-replay repaint nudge leaves the pty exactly as big as it was,
+    // once it has given the size back.
+    tokio::time::sleep(Duration::from_millis(800)).await;
     joiner.input("size\n").await;
     joiner.until("30 100").await;
     joiner.input("hello\n").await;
@@ -271,6 +289,61 @@ async fn run_input_writes_to_the_pty_without_a_join() {
 }
 
 #[tokio::test]
+async fn two_terminals_of_one_person_are_two_seats() {
+    let tmp = tempfile::tempdir().unwrap();
+    let Some(h) = Harness::on(Home::at(tmp.path())) else {
+        return;
+    };
+    let mut c = Conn::open(&h.home).await;
+    let cwd = tmp.path().to_string_lossy().into_owned();
+    let run: Run = c
+        .ok(
+            "run.start",
+            json!({ "argv": [fake_cli()], "cwd": cwd, "kind": "agent" }),
+        )
+        .await;
+    wait_journal(&h.home, &run.id, "> ").await;
+
+    let (_, mut first) = Viewer::attach_from(&h.home, &run.id, "join", "me@here", Some("111"), false)
+        .await
+        .unwrap();
+    first.until("fake-cli ready").await;
+
+    // The same terminal again is still the same seat.
+    let (info, _again) = Viewer::attach_from(&h.home, &run.id, "join", "me@here", Some("111"), false)
+        .await
+        .unwrap();
+    assert_eq!(info["joiner"], "me@here");
+
+    // Another terminal of mine is refused, and told which.
+    let err = Viewer::attach_from(&h.home, &run.id, "join", "me@here", Some("222"), false)
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(err.code, RpcError::BUSY);
+    assert!(err.message.contains("me@here in another terminal"), "{}", err.message);
+    assert_eq!(err.data.unwrap()["joiner"], "me@here in another terminal");
+
+    // Taking over: the first terminal hears it, and its keys stop counting.
+    let (_, mut second) = Viewer::attach_from(&h.home, &run.id, "join", "me@here", Some("222"), true)
+        .await
+        .unwrap();
+    second.until("fake-cli ready").await;
+    first.input("from the first\n").await;
+    second.input("from the second\n").await;
+    let heard = first.until("echo: from the second").await;
+    assert!(
+        notes(&heard)
+            .iter()
+            .any(|n| n == "me@here took over in another terminal"),
+        "{:?}",
+        notes(&heard)
+    );
+    assert!(!first.seen.contains("echo: from the first"), "{}", first.seen);
+    let _ = c.call("run.stop", json!({ "id": run.id })).await;
+}
+
+#[tokio::test]
 async fn joiner_resizes_the_pty_and_daemon_stop_detaches() {
     let tmp = tempfile::tempdir().unwrap();
     let Some(h) = Harness::on(Home::at(tmp.path())) else {
@@ -312,4 +385,181 @@ async fn joiner_resizes_the_pty_and_daemon_stop_detaches() {
     let row = ledger.call_blocking(move |c| sessions::get(c, &id)).unwrap().unwrap();
     let _ = kill(Pid::from_raw(row.holder_pid as i32), Signal::SIGKILL);
     let _ = kill(Pid::from_raw(row.pid as i32), Signal::SIGKILL);
+}
+
+/// Coming back to a run at the size it has, it still has to repaint: a tail
+/// of replayed bytes is not its screen. The nudge that makes it gives the pty
+/// a row less and then its size back — and it must hold the smaller one long
+/// enough to be read. Sent back to back, the two land together, the app reads
+/// the size it already had, and a runtime that only reports a change (Claude
+/// Code's) never repaints: its box and status line stay missing.
+#[tokio::test]
+async fn a_join_makes_the_run_see_a_resize_it_can_act_on() {
+    let tmp = tempfile::tempdir().unwrap();
+    let Some(h) = Harness::on(Home::at(tmp.path())) else {
+        return;
+    };
+    let mut c = Conn::open(&h.home).await;
+    let cwd = tmp.path().to_string_lossy().into_owned();
+    // Says what size it reads each time the terminal says it changed.
+    let script = r#"trap 'echo "winch $(stty size)"' WINCH; echo ready; while :; do sleep 0.02; done"#;
+    let run: Run = c
+        .ok("run.start", json!({ "argv": ["/bin/sh", "-c", script], "cwd": cwd }))
+        .await;
+    // Listening before anyone comes: the trap is set once it says so.
+    wait_journal(&h.home, &run.id, "ready").await;
+    let (info, mut joiner) = Viewer::attach(&h.home, &run.id, "join", "me@here", false)
+        .await
+        .unwrap();
+    let (cols, rows) = (info["cols"].as_u64().unwrap(), info["rows"].as_u64().unwrap());
+    // The joiner's terminal is the size the run already has.
+    write_frame(
+        &mut joiner.wr,
+        &Frame::Resize {
+            cols: cols as u16,
+            rows: rows as u16,
+        },
+    )
+    .await
+    .unwrap();
+    // A row less, read as such; then the size back.
+    joiner.until(&format!("winch {} {cols}", rows - 1)).await;
+    joiner.until(&format!("winch {rows} {cols}")).await;
+    let _: Run = c.ok("run.stop", json!({ "id": run.id, "force": true })).await;
+    c.wait_terminal(&run.id).await;
+    h.stop().await;
+}
+
+/// Says each size it is told of, and `end` once the test drops a file named
+/// so in its folder: what came before that is everything it was told.
+const SIZES: &str = r#"trap 'echo "winch $(stty size)"' WINCH; echo ready; while :; do sleep 0.02; if [ -e end ]; then rm end; echo end; fi; done"#;
+
+/// Every resize the run heard up to `end`, in order.
+async fn sizes_heard(home: &Home, id: &str, cwd: &std::path::Path) -> Vec<String> {
+    let before = journal(home, id).matches("end").count();
+    std::fs::write(cwd.join("end"), "").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let text = loop {
+        let text = journal(home, id);
+        if text.matches("end").count() > before {
+            break text;
+        }
+        assert!(Instant::now() < deadline, "the run never said end: {text:?}");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    text.lines()
+        .filter_map(|l| l.trim().strip_prefix("winch "))
+        .map(str::to_string)
+        .collect()
+}
+
+/// Past the age at which a join nudges the run once more (`YOUNG` in
+/// `attach.rs`), so a test counting resizes counts only the join's own.
+async fn past_young() {
+    tokio::time::sleep(Duration::from_millis(3200)).await;
+}
+
+async fn resize(v: &mut Viewer, cols: u16, rows: u16) {
+    write_frame(&mut v.wr, &Frame::Resize { cols, rows }).await.unwrap();
+}
+
+/// A joiner at a size the run does not have makes it repaint by that alone:
+/// no nudge on top, so an app that redraws everything on a resize (Claude
+/// Code redraws its whole conversation) does it once, not twice.
+#[tokio::test]
+async fn a_join_at_a_new_size_is_one_repaint() {
+    let tmp = tempfile::tempdir().unwrap();
+    let Some(h) = Harness::on(Home::at(tmp.path())) else {
+        return;
+    };
+    let mut c = Conn::open(&h.home).await;
+    let run: Run = c
+        .ok(
+            "run.start",
+            json!({ "argv": ["/bin/sh", "-c", SIZES], "cwd": tmp.path().to_string_lossy() }),
+        )
+        .await;
+    wait_journal(&h.home, &run.id, "ready").await;
+    past_young().await;
+    let (_, mut joiner) = Viewer::attach(&h.home, &run.id, "join", "me@here", false)
+        .await
+        .unwrap();
+    resize(&mut joiner, 101, 33).await;
+    wait_journal(&h.home, &run.id, "winch 33 101").await;
+    // Past the time a nudge would hold its row and give it back.
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    assert_eq!(sizes_heard(&h.home, &run.id, tmp.path()).await, ["33 101"]);
+    let _: Run = c.ok("run.stop", json!({ "id": run.id, "force": true })).await;
+    c.wait_terminal(&run.id).await;
+    h.stop().await;
+}
+
+/// Letting go leaves the run a row short, so the next join at the old size
+/// is a change — one repaint — and not the same size, which would take two.
+#[tokio::test]
+async fn letting_go_leaves_the_run_a_row_short_for_the_next_join() {
+    let tmp = tempfile::tempdir().unwrap();
+    let Some(h) = Harness::on(Home::at(tmp.path())) else {
+        return;
+    };
+    let mut c = Conn::open(&h.home).await;
+    let run: Run = c
+        .ok(
+            "run.start",
+            json!({ "argv": ["/bin/sh", "-c", SIZES], "cwd": tmp.path().to_string_lossy() }),
+        )
+        .await;
+    wait_journal(&h.home, &run.id, "ready").await;
+    past_young().await;
+    let (_, mut joiner) = Viewer::attach(&h.home, &run.id, "join", "me@here", false)
+        .await
+        .unwrap();
+    resize(&mut joiner, 101, 33).await;
+    wait_journal(&h.home, &run.id, "winch 33 101").await;
+    drop(joiner);
+    wait_journal(&h.home, &run.id, "winch 32 101").await;
+
+    let (info, mut again) = Viewer::attach(&h.home, &run.id, "join", "me@here", false)
+        .await
+        .unwrap();
+    assert_eq!((info["cols"].as_u64(), info["rows"].as_u64()), (Some(101), Some(32)));
+    resize(&mut again, 101, 33).await;
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    assert_eq!(
+        sizes_heard(&h.home, &run.id, tmp.path()).await,
+        ["33 101", "32 101", "33 101"]
+    );
+    let _: Run = c.ok("run.stop", json!({ "id": run.id, "force": true })).await;
+    c.wait_terminal(&run.id).await;
+    h.stop().await;
+}
+
+/// A run joined the moment it starts may not be listening for a resize yet —
+/// Claude Code sets that up half a second in — and one sent before is lost:
+/// it draws for the size it started at, the bottom of the screen empty. So a
+/// run joined young is nudged once more, a few seconds after it started.
+#[tokio::test]
+async fn a_run_joined_before_it_listens_still_hears_its_size() {
+    let tmp = tempfile::tempdir().unwrap();
+    let Some(h) = Harness::on(Home::at(tmp.path())) else {
+        return;
+    };
+    let mut c = Conn::open(&h.home).await;
+    // Listens only after a while, as a Node or Bun app does.
+    let late = r#"sleep 0.8; trap 'echo "winch $(stty size)"' WINCH; echo ready; while :; do sleep 0.02; done"#;
+    let run: Run = c
+        .ok(
+            "run.start",
+            json!({ "argv": ["/bin/sh", "-c", late], "cwd": tmp.path().to_string_lossy() }),
+        )
+        .await;
+    let (_, mut joiner) = Viewer::attach(&h.home, &run.id, "join", "me@here", false)
+        .await
+        .unwrap();
+    resize(&mut joiner, 101, 33).await;
+    wait_journal(&h.home, &run.id, "ready").await;
+    wait_journal(&h.home, &run.id, "winch 33 101").await;
+    let _: Run = c.ok("run.stop", json!({ "id": run.id, "force": true })).await;
+    c.wait_terminal(&run.id).await;
+    h.stop().await;
 }

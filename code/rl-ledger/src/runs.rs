@@ -11,7 +11,7 @@ use std::path::PathBuf;
 
 const COLS: &str = "id, workspace, kind, title, cli, argv_json, cwd, branch, worktree, \"ref\", tags_json, \
     state, source, confidence, state_at, started_at, ended_at, exit_code, cost_json, \
-    cause, flow, parent_run, last_line, seen_at, detail, archived_at";
+    cause, chain, parent_run, last_line, seen_at, detail, archived_at, pinned_at, hidden_at";
 
 const DEFAULT_LIMIT: u32 = 200;
 
@@ -19,9 +19,11 @@ const DEFAULT_LIMIT: u32 = 200;
 /// sync with `RunState::is_terminal()` (checked by a test below).
 const TERMINAL_STATES_SQL: &str = "'finished','failed','stopped'";
 
+/// A run, as it starts. The title it starts with is Relay's own as well
+/// (`relay_title`), for an empty rename to go back to.
 pub fn insert(conn: &Connection, r: &Run) -> Result<()> {
     conn.execute(
-        &format!("INSERT INTO runs ({COLS}) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26)"),
+        &format!("INSERT INTO runs ({COLS}, relay_title) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?4)"),
         params![
             r.id,
             path_str(&r.workspace),
@@ -43,12 +45,14 @@ pub fn insert(conn: &Connection, r: &Run) -> Result<()> {
             r.exit_code,
             r.cost.as_ref().map(serde_json::to_string).transpose()?,
             r.cause.to_string(),
-            r.flow,
+            r.chain,
             r.parent_run,
             r.last_line,
             r.seen_at.map(to_millis),
             r.detail,
             r.archived_at.map(to_millis),
+            r.pinned_at.map(to_millis),
+            r.hidden_at.map(to_millis),
         ],
     )?;
     Ok(())
@@ -138,6 +142,66 @@ pub fn set_detail(conn: &Connection, id: &str, detail: &str) -> Result<()> {
     Ok(())
 }
 
+/// A run's title, given by hand. It is yours from then on: nothing of
+/// Relay's writes the column again (`name_once` leaves it be) — until
+/// `restore_title` gives it back.
+pub fn set_title(conn: &Connection, id: &str, title: &str) -> Result<()> {
+    conn.execute("UPDATE runs SET title = ?2 WHERE id = ?1", params![id, title])?;
+    Ok(())
+}
+
+/// Undoes a rename by hand: the run goes back to the name Relay gave it, and
+/// one Relay has yet to name for its first prompt still will be. False when
+/// there is none to go back to — a run from before Relay kept it — or no
+/// such run.
+pub fn restore_title(conn: &Connection, id: &str) -> Result<bool> {
+    let n = conn.execute(
+        "UPDATE runs SET title = relay_title WHERE id = ?1 AND relay_title IS NOT NULL",
+        params![id],
+    )?;
+    Ok(n == 1)
+}
+
+/// Says a run's title is the one Relay made up for it, nobody having given
+/// it one — so the run may still be named for what it was asked (`name_once`).
+pub fn set_title_auto(conn: &Connection, id: &str) -> Result<()> {
+    conn.execute("UPDATE runs SET title_auto = 1 WHERE id = ?1", params![id])?;
+    Ok(())
+}
+
+/// Names a run Relay titled, once: the title is set only while it is still
+/// Relay's own, and is not Relay's to change after. False when it was not
+/// (named by hand, already named once, or no such run).
+pub fn name_once(conn: &Connection, id: &str, title: &str) -> Result<bool> {
+    let n = conn.execute(
+        "UPDATE runs SET title = ?2, relay_title = ?2, title_auto = 0 \
+         WHERE id = ?1 AND title_auto = 1 AND title IS relay_title",
+        params![id, title],
+    )?;
+    Ok(n == 1)
+}
+
+/// Pins a run (`Some`) or lets it go (`None`). Pinning what is already
+/// pinned keeps the first time, so the pinned band keeps its order.
+pub fn set_pinned(conn: &Connection, id: &str, at: Option<Timestamp>) -> Result<()> {
+    conn.execute(
+        "UPDATE runs SET pinned_at = CASE WHEN ?2 IS NULL THEN NULL ELSE COALESCE(pinned_at, ?2) END WHERE id = ?1",
+        params![id, at.map(to_millis)],
+    )?;
+    Ok(())
+}
+
+/// Takes a run off the panel's list (`Some`, from then) or brings it back
+/// (`None`). Hiding what is already hidden moves the time on: whatever came
+/// through since, because it needed you, goes back.
+pub fn set_hidden(conn: &Connection, id: &str, at: Option<Timestamp>) -> Result<()> {
+    conn.execute(
+        "UPDATE runs SET hidden_at = ?2 WHERE id = ?1",
+        params![id, at.map(to_millis)],
+    )?;
+    Ok(())
+}
+
 pub fn set_last_line(conn: &Connection, id: &str, line: &str) -> Result<()> {
     conn.execute("UPDATE runs SET last_line = ?2 WHERE id = ?1", params![id, line])?;
     Ok(())
@@ -183,34 +247,49 @@ fn from_row(row: &Row<'_>) -> rusqlite::Result<Run> {
             .transpose()
             .map_err(|e| conv(18, e))?,
         cause: row.get::<_, String>(19)?.parse().map_err(|e| conv_str(19, e))?,
-        flow: row.get(20)?,
+        chain: row.get(20)?,
         parent_run: row.get(21)?,
         last_line: row.get(22)?,
         seen_at: optional_from_millis(row.get(23)?, 23, conv)?,
         detail: row.get(24)?,
         archived_at: optional_from_millis(row.get(25)?, 25, conv)?,
+        pinned_at: optional_from_millis(row.get(26)?, 26, conv)?,
+        hidden_at: optional_from_millis(row.get(27)?, 27, conv)?,
     })
 }
 
 /// The digest's candidates: runs with an event at or after `since`, plus
-/// every run still waiting on a human whatever its age.
+/// every run still waiting on a human or pinned, whatever its age.
 pub fn list_for_digest(conn: &Connection, since: Timestamp) -> Result<Vec<Run>> {
     let mut stmt = conn.prepare(&format!(
         "SELECT {COLS} FROM runs WHERE archived_at IS NULL AND (id IN (SELECT DISTINCT run FROM events WHERE at >= ?1 AND run IS NOT NULL) \
-         OR state IN ('needs_input','blocked','failed','stale')) ORDER BY started_at DESC, id DESC LIMIT 1000"
+         OR state IN ('needs_input','blocked','failed','stale') OR pinned_at IS NOT NULL) ORDER BY started_at DESC, id DESC LIMIT 1000"
     ))?;
     let rows = stmt.query_map(params![to_millis(since)], from_row)?;
     Ok(rows.collect::<Result<_, _>>()?)
 }
 
+/// Claude and Codex runs whose own recap may have moved on: waiting on you,
+/// or ended at or after `ended_since`. Never an assistant's own run.
+pub fn recappable(conn: &Connection, ended_since: Timestamp) -> Result<Vec<Run>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {COLS} FROM runs WHERE cli IN ('claude','codex') AND cause NOT LIKE 'assistant:%' \
+         AND archived_at IS NULL AND (state IN ('idle','needs_input','blocked','stale') \
+         OR (state IN ({TERMINAL_STATES_SQL}) AND ended_at >= ?1))"
+    ))?;
+    let rows = stmt.query_map(params![to_millis(ended_since)], from_row)?;
+    Ok(rows.collect::<Result<_, _>>()?)
+}
+
 /// Done with these: out of the panel, kept. Only a run that has ended can
-/// be; the count is how many were.
+/// be; the count is how many were. Archiving a pinned run is letting it go,
+/// so the pin goes with it.
 pub fn archive(conn: &Connection, ids: &[String], at: Timestamp) -> Result<usize> {
     let mut n = 0;
     for id in ids {
         n += conn.execute(
             &format!(
-                "UPDATE runs SET archived_at = ?2 WHERE id = ?1 AND archived_at IS NULL \
+                "UPDATE runs SET archived_at = ?2, pinned_at = NULL WHERE id = ?1 AND archived_at IS NULL \
                  AND state IN ({TERMINAL_STATES_SQL})"
             ),
             params![id, to_millis(at)],
@@ -219,11 +298,71 @@ pub fn archive(conn: &Connection, ids: &[String], at: Timestamp) -> Result<usize
     Ok(n)
 }
 
-/// Done with everything that has ended and been looked at.
+/// Done with everything that has ended in one folder, as when its project is
+/// removed: the runs whose `workspace` is exactly `workspace` (a folder nested
+/// inside is a project of its own) go, pins and all. Runs still going stay.
+pub fn archive_workspace(conn: &Connection, workspace: &std::path::Path, at: Timestamp) -> Result<usize> {
+    Ok(conn.execute(
+        &format!(
+            "UPDATE runs SET archived_at = ?2, pinned_at = NULL WHERE workspace = ?1 AND archived_at IS NULL \
+             AND state IN ({TERMINAL_STATES_SQL})"
+        ),
+        params![path_str(workspace), to_millis(at)],
+    )?)
+}
+
+/// The runs in one folder that have not ended, oldest first.
+pub fn live_in(conn: &Connection, workspace: &std::path::Path) -> Result<Vec<Run>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {COLS} FROM runs WHERE workspace = ?1 AND state NOT IN ({TERMINAL_STATES_SQL}) \
+         ORDER BY started_at, id"
+    ))?;
+    let rows = stmt.query_map(params![path_str(workspace)], from_row)?;
+    Ok(rows.collect::<Result<_, _>>()?)
+}
+
+/// Runs lost in a restart that are still on the list, oldest first: ended,
+/// not archived, and marked `run.lost` when Relay came back without their
+/// holder. Resuming one archives it, so it leaves this list as it is picked up.
+pub fn lost(conn: &Connection) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT r.id FROM runs r WHERE r.archived_at IS NULL AND r.state IN ({TERMINAL_STATES_SQL}) \
+         AND EXISTS (SELECT 1 FROM events e WHERE e.run = r.id AND e.kind = 'run.lost') \
+         ORDER BY r.started_at, r.id"
+    ))?;
+    let ids = stmt.query_map([], |row| row.get::<_, String>(0))?;
+    Ok(ids.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+/// Whether run `id` was marked `run.lost`: gone in a restart, archived since or not.
+pub fn was_lost(conn: &Connection, id: &str) -> Result<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM events WHERE run = ?1 AND kind = 'run.lost')",
+        params![id],
+        |row| row.get(0),
+    )?)
+}
+
+/// The newest run in chain `chain` with cause `cause`: a flow step's, by its firing and
+/// `flow:<flow>/<step>`, archived or not.
+pub fn newest_in_chain(conn: &Connection, chain: &str, cause: &str) -> Result<Option<Run>> {
+    Ok(conn
+        .query_row(
+            &format!(
+                "SELECT {COLS} FROM runs WHERE chain = ?1 AND cause = ?2 ORDER BY started_at DESC, rowid DESC LIMIT 1"
+            ),
+            params![chain, cause],
+            from_row,
+        )
+        .optional()?)
+}
+
+/// Done with everything that has ended and been looked at — except what is
+/// pinned, which was kept on purpose and is only let go by name.
 pub fn archive_seen(conn: &Connection, at: Timestamp) -> Result<usize> {
     Ok(conn.execute(
         &format!(
-            "UPDATE runs SET archived_at = ?1 WHERE archived_at IS NULL AND seen_at IS NOT NULL \
+            "UPDATE runs SET archived_at = ?1 WHERE archived_at IS NULL AND seen_at IS NOT NULL AND pinned_at IS NULL \
              AND state IN ({TERMINAL_STATES_SQL})"
         ),
         params![to_millis(at)],
@@ -237,6 +376,19 @@ pub fn set_seen(conn: &Connection, ids: &[String], at: Timestamp) -> Result<usiz
         n += conn.execute("UPDATE runs SET seen_at = ?2 WHERE id = ?1", params![id, to_millis(at)])?;
     }
     Ok(n)
+}
+
+/// When the oldest run whose cause starts with `cause` that you have not seen
+/// since it ended did start — so a flow's stretch (`flow:<name>/`) has that
+/// run in it; None when every one is seen.
+pub fn oldest_unseen(conn: &Connection, cause: &str) -> Result<Option<Timestamp>> {
+    let ms: Option<i64> = conn.query_row(
+        "SELECT MIN(started_at) FROM runs WHERE substr(cause, 1, length(?1)) = ?1 \
+         AND ended_at IS NOT NULL AND archived_at IS NULL AND (seen_at IS NULL OR seen_at < ended_at)",
+        params![cause],
+        |r| r.get(0),
+    )?;
+    ms.map(from_millis).transpose()
 }
 
 fn path_str(p: &std::path::Path) -> String {
@@ -259,5 +411,91 @@ mod tests {
                 "state {s:?} disagrees with TERMINAL_STATES_SQL"
             );
         }
+    }
+
+    fn test_conn() -> Connection {
+        let mut c = Connection::open_in_memory().unwrap();
+        crate::migrate::run(&mut c).unwrap();
+        c
+    }
+
+    /// A run of `cause` that ended at `ended_at`, 100ms after it started,
+    /// looked at `seen_at`.
+    fn insert_ended(c: &Connection, id: &str, cause: &str, ended_at: Timestamp, seen_at: Option<Timestamp>) {
+        let started = ended_at - jiff::SignedDuration::from_millis(100);
+        let mut r = Run::new(id, rl_proto::types::RunKind::Command, id, vec![], "/w", "/w", started);
+        r.cause = cause.parse().unwrap();
+        r.state = RunState::Finished;
+        r.ended_at = Some(ended_at);
+        r.seen_at = seen_at;
+        insert(c, &r).unwrap();
+    }
+
+    #[test]
+    fn the_oldest_unseen_run_is_where_a_flow_starts() {
+        let c = test_conn();
+        let t = |ms| Timestamp::from_millisecond(ms).unwrap();
+        insert_ended(&c, "a", "flow:nightly/test", t(1_000), None); // unseen
+        insert_ended(&c, "b", "flow:nightly/probe", t(2_000), Some(t(2_500))); // seen
+        insert_ended(&c, "x", "flow:nightly-2/test", t(500), None);
+        assert_eq!(
+            oldest_unseen(&c, "flow:nightly/").unwrap(),
+            Some(t(900)),
+            "when that run started, whichever its step: it is in the stretch"
+        );
+        set_seen(&c, &["a".into()], t(3_000)).unwrap();
+        assert_eq!(oldest_unseen(&c, "flow:nightly/").unwrap(), None);
+    }
+
+    #[test]
+    fn recappable_runs_are_claude_and_codex_waiting_or_just_ended() {
+        let mut c = Connection::open_in_memory().unwrap();
+        crate::migrate::run(&mut c).unwrap();
+        let t: Timestamp = "2026-09-10T12:00:00Z".parse().unwrap();
+        let mk = |id: &str, cli: Option<&str>, state: RunState| {
+            let mut r = Run::new(id, rl_proto::types::RunKind::Agent, id, vec![], "/w", "/w", t);
+            r.cli = cli.map(String::from);
+            r.state = state;
+            r
+        };
+        for r in [
+            mk("idle", Some("claude"), RunState::Idle),
+            mk("asks", Some("codex"), RunState::NeedsInput),
+            mk("busy", Some("claude"), RunState::Working),
+            mk("shell", None, RunState::Idle),
+            mk("gemini", Some("gemini"), RunState::Idle),
+            mk("ended", Some("claude"), RunState::Working),
+            mk("old", Some("claude"), RunState::Working),
+        ] {
+            insert(&c, &r).unwrap();
+        }
+        let mut asked = mk("asked", Some("claude"), RunState::Idle);
+        asked.cause = rl_proto::types::Cause::Assistant("summary".into());
+        insert(&c, &asked).unwrap();
+        finish(
+            &c,
+            "ended",
+            RunState::Finished,
+            Source::Pty,
+            Some(0),
+            "2026-09-10T12:30:00Z".parse().unwrap(),
+        )
+        .unwrap();
+        finish(
+            &c,
+            "old",
+            RunState::Failed,
+            Source::Pty,
+            Some(1),
+            "2026-09-10T11:00:00Z".parse().unwrap(),
+        )
+        .unwrap();
+        let mut ids: Vec<String> = recappable(&c, "2026-09-10T12:20:00Z".parse().unwrap())
+            .unwrap()
+            .into_iter()
+            .map(|r| r.id)
+            .collect();
+        ids.sort();
+        assert_eq!(ids, ["asks", "ended", "idle"]);
     }
 }

@@ -165,7 +165,40 @@ class Player:
             self.play(turn, prompt=line.strip())
 
 
+def agents(argv):
+    """`claude agents --json` and `claude stop <id>`, for Relay's import.
+
+    CLAUDE_PLAYER_AGENTS names a JSON file holding the sessions to report;
+    `stop` drops one from it and appends its id to CLAUDE_PLAYER_STOPPED.
+    """
+    file = os.environ.get("CLAUDE_PLAYER_AGENTS")
+    if not file:
+        return None
+    if argv[:1] == ["agents"]:
+        with open(file) as f:
+            sys.stdout.write(f.read())
+        return 0
+    if argv[:1] == ["stop"] and len(argv) > 1:
+        with open(file) as f:
+            listed = json.load(f)
+        kept = [s for s in listed if s.get("id") != argv[1]]
+        if len(kept) == len(listed):
+            sys.stderr.write(f"no session {argv[1]}\n")
+            return 1
+        with open(file, "w") as f:
+            json.dump(kept, f)
+        stopped = os.environ.get("CLAUDE_PLAYER_STOPPED")
+        if stopped:
+            with open(stopped, "a") as f:
+                f.write(argv[1] + "\n")
+        return 0
+    return None
+
+
 def main():
+    handled = agents(sys.argv[1:])
+    if handled is not None:
+        return handled
     settings, print_mode, _prompt = parse_args(sys.argv[1:])
     fixture = os.environ.get("CLAUDE_PLAYER_FIXTURE") or os.path.join(HERE, "claude-session.jsonl")
     player = Player(load(fixture), Hooks(settings), print_mode)

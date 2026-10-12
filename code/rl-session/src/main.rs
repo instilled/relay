@@ -41,12 +41,29 @@ struct Args {
     /// holder's own is not inherited. `--env` still adds to it.
     #[arg(long, value_name = "FILE")]
     env_file: Option<PathBuf>,
-    /// Pipes instead of a pty (headless/scheduled runs).
+    /// Pipes instead of a pty (headless runs, a flow's steps).
     #[arg(long)]
     no_tty: bool,
+    /// No input for the child: end of input at once (pipes only; a pty
+    /// always has input).
+    #[arg(long)]
+    no_input: bool,
     /// Seconds to stay around after the child exits with no client attached.
     #[arg(long, default_value_t = 86_400)]
     linger: u64,
+    /// Seconds with nobody attached — no daemon, no viewer — after which the
+    /// holder hangs up its child and leaves. 0 waits forever.
+    #[arg(long, default_value_t = 0)]
+    reap_after: u64,
+    /// Milliseconds a reader that has caught up with the child waits before
+    /// reading again, so a burst arrives as one chunk. 0 reads as fast as the
+    /// child writes.
+    #[arg(long, default_value_t = 5)]
+    settle: u64,
+    /// Seconds between checks that the socket is still there; gone, the
+    /// holder leaves. For tests.
+    #[arg(long, default_value_t = 60, hide = true)]
+    socket_check: u64,
     /// Do not detach; log to this terminal. For debugging.
     #[arg(long)]
     foreground: bool,
@@ -83,8 +100,12 @@ fn main() -> Result<()> {
             cols: args.cols,
             rows: args.rows,
             tty: !args.no_tty,
+            input: !args.no_input,
+            settle: Duration::from_millis(args.settle),
         },
         linger: Duration::from_secs(args.linger),
+        socket_check: Duration::from_secs(args.socket_check.max(1)),
+        reap_after: (args.reap_after > 0).then(|| Duration::from_secs(args.reap_after)),
     };
 
     if args.foreground {
@@ -137,7 +158,12 @@ fn init_logging() {
 }
 
 fn run(cfg: Config, mut ready_pipe: Option<std::fs::File>) -> Result<()> {
-    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+    // One child, one socket, a handful of watchers: all of it is waiting on
+    // I/O, and none of it is work to spread. A worker per core only meant a
+    // cross-thread wake-up and a trip through the work-stealing scheduler for
+    // every chunk the child wrote, which cost the holder more than relaying
+    // the bytes did — and left sixteen parked threads behind at rest.
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
     rt.block_on(async move {
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
         let mut task = tokio::spawn(holder::serve(cfg, ready_tx));

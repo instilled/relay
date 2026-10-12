@@ -25,6 +25,16 @@ pub async fn status(home: &Home) -> Result<Option<DaemonInfo>> {
     }
 }
 
+/// A connection when rld is running, `None` when it is not: for what there
+/// is no point starting a daemon for.
+pub async fn connect_if_running(home: &Home) -> Result<Option<Client>> {
+    match Client::connect(home).await {
+        Ok(c) => Ok(Some(c)),
+        Err(e) if e.downcast_ref::<NotRunning>().is_some() => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
 /// Returns the daemon info and whether this call started it.
 pub async fn start(home: &Home) -> Result<(DaemonInfo, bool)> {
     if let Some(info) = status(home).await? {
@@ -120,14 +130,35 @@ pub fn check(info: &DaemonInfo) -> Check {
     }
 }
 
+/// What [`ensure`] says on stderr of the daemon it connects to.
+#[derive(Clone, Copy, PartialEq)]
+enum Say {
+    /// That it started; another release offered a restart, asked on a terminal.
+    Ask,
+    /// That it started; another release noted.
+    Note,
+    /// Nothing: what is printed is not this `rl`'s to add to.
+    Nothing,
+}
+
 /// A connection to a daemon that is there and current: started if it was
 /// not running (one line on stderr says so), and when it is another release
 /// than this `rl`, offered a restart — asked on a terminal when `ask`, only
 /// noted otherwise. Another protocol is refused: `rl daemon restart` is the
 /// way out, and nothing running is lost by it.
 pub async fn ensure(home: &Home, ask: bool) -> Result<Client> {
+    connect(home, if ask { Say::Ask } else { Say::Note }).await
+}
+
+/// As [`ensure`], saying nothing of the daemon: for `rl flow state` inside a step, whose stderr
+/// is the step's out.
+pub async fn ensure_quiet(home: &Home) -> Result<Client> {
+    connect(home, Say::Nothing).await
+}
+
+async fn connect(home: &Home, say: Say) -> Result<Client> {
     let (info, started) = start(home).await?;
-    if started {
+    if started && say != Say::Nothing {
         eprintln!("rld started");
     }
     match check(&info) {
@@ -140,16 +171,20 @@ pub async fn ensure(home: &Home, ask: bool) -> Result<Client> {
         Check::Version { theirs, mine } => {
             let tty = std::io::IsTerminal::is_terminal(&std::io::stdin())
                 && std::io::IsTerminal::is_terminal(&std::io::stderr());
-            if ask && tty {
-                eprint!("rld {theirs} is running, rl is {mine}: restart it? runs survive. [y/N] ");
-                let mut line = String::new();
-                let _ = std::io::stdin().read_line(&mut line);
-                if line.trim().eq_ignore_ascii_case("y") {
-                    restart(home).await?;
-                    eprintln!("rld restarted");
+            match say {
+                Say::Nothing => {}
+                Say::Ask if tty => {
+                    eprint!("rld {theirs} is running, rl is {mine}: restart it? runs survive. [y/N] ");
+                    let mut line = String::new();
+                    let _ = std::io::stdin().read_line(&mut line);
+                    if line.trim().eq_ignore_ascii_case("y") {
+                        restart(home).await?;
+                        eprintln!("rld restarted");
+                    }
                 }
-            } else {
-                eprintln!("note: rld {theirs} is running, rl is {mine}; `rl daemon restart` when convenient");
+                Say::Ask | Say::Note => {
+                    eprintln!("note: rld {theirs} is running, rl is {mine}; `rl daemon restart` when convenient");
+                }
             }
         }
     }

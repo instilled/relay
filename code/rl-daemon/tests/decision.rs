@@ -56,7 +56,7 @@ async fn a_question_outlives_its_run_and_its_answer_starts_the_next_one() {
                 "title": "3 errors in prod",
                 "summary": "NullPointerException in checkout, 3 times since 02:00",
                 "options": [
-                    { "key": "fix", "label": "Open a PR", "run": ["sh", "-c", "echo fixing > fixed.txt"] },
+                    { "key": "fix", "label": "Open a PR", "run": ["sh", "-c", "echo fixing $RELAY_CHOICE: $RELAY_NOTE > fixed.txt"] },
                     { "key": "ignore", "label": "Ignore" },
                 ],
             }),
@@ -64,7 +64,7 @@ async fn a_question_outlives_its_run_and_its_answer_starts_the_next_one() {
         .await;
     assert!(d.status.is_open());
     assert_eq!(d.run.as_deref(), Some(asker.id.as_str()));
-    assert_eq!(d.flow, asker.flow, "the question joins the run's chain");
+    assert_eq!(d.chain, asker.chain, "the question joins the run's chain");
     assert_eq!(d.workspace, asker.workspace);
 
     let open: Vec<Decision> = c.ok("decision.list", json!({})).await;
@@ -83,9 +83,13 @@ async fn a_question_outlives_its_run_and_its_answer_starts_the_next_one() {
     assert_eq!(taken.outcome_runs.len(), 1, "the option did not start");
     let started = c.get(&taken.outcome_runs[0]).await;
     assert_eq!(started.cause, Cause::Decision(d.id.clone()));
-    assert_eq!(started.flow, asker.flow);
+    assert_eq!(started.chain, asker.chain);
     c.wait_terminal(&started.id).await;
-    assert_eq!(std::fs::read_to_string(dir.join("fixed.txt")).unwrap().trim(), "fixing");
+    // The answer's option and note reach the run it starts.
+    assert_eq!(
+        std::fs::read_to_string(dir.join("fixed.txt")).unwrap().trim(),
+        "fixing fix: go on"
+    );
 
     // Answered once. It is off the open list and refuses a second answer.
     assert!(c.ok::<Vec<Decision>>("decision.list", json!({})).await.is_empty());

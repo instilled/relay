@@ -1,13 +1,15 @@
-//! The context pack: what an assistant is told before it drafts a run or a
-//! rule from plain words. Built from the code — the event kinds, the specs'
-//! fields, `rl --help` — so it cannot drift from what Relay does; the prose
-//! around it is here, in one place. `rl context` prints it.
+//! The context pack: what an assistant is told before it drafts a run, or a
+//! flow, from plain words. Built from the code — the event kinds, `rl --help` — so it
+//! cannot drift from what Relay does; the prose around it is here, in one
+//! place. `rl context` prints it.
+
+mod flows;
 
 use crate::client::Client;
 use anyhow::Result;
 use rl_core::display_path;
-use rl_proto::methods::{AgentList, RuleList, ScheduleFilter, WorkspaceList};
-use rl_proto::rule::Rule;
+use rl_proto::flow::{FlowFilter, FlowList};
+use rl_proto::methods::{AgentList, WorkspaceList};
 use rl_proto::types::event_kind;
 use std::fmt::Write;
 use std::path::Path;
@@ -26,22 +28,19 @@ pub fn help() -> &'static str {
 }
 
 /// What is true in `folder`, from the daemon: its name, the folders Relay
-/// knows, its rules and the person's own, the agents on this machine.
+/// knows, the flows, the agents on this machine.
 pub async fn gather(rpc: &mut Client, folder: &Path) -> Result<Here> {
     let workspaces = rpc.call::<WorkspaceList>(()).await?;
-    let rules = rpc.call::<RuleList>(ScheduleFilter { all: false }).await?;
+    let flows = rpc.call::<FlowList>(FlowFilter { all: false }).await?;
     let agents = rpc.call::<AgentList>(()).await?;
     let name = workspaces.iter().find(|w| w.path == folder).map(|w| w.name.clone());
-    let scope_word = |r: &Rule| -> String {
-        if r.is_global() {
-            "yours".into()
-        } else {
-            workspaces
-                .iter()
-                .find(|w| w.path.as_os_str() == r.scope())
-                .map(|w| w.name.clone())
-                .unwrap_or_else(|| display_path(Path::new(r.scope())))
-        }
+    // Where a flow's steps run: the project it is in, by name where it has one.
+    let in_word = |p: &Path| -> String {
+        workspaces
+            .iter()
+            .find(|w| w.path == p)
+            .map(|w| w.name.clone())
+            .unwrap_or_else(|| display_path(p))
     };
     Ok(Here {
         folder: display_path(folder),
@@ -50,16 +49,13 @@ pub async fn gather(rpc: &mut Client, folder: &Path) -> Result<Here> {
             .iter()
             .map(|w| (display_path(&w.path), w.name.clone()))
             .collect(),
-        rules: rules
+        flows: flows
             .iter()
-            .filter(|r| r.is_global() || Path::new(r.scope()) == folder)
-            .map(|r| {
+            .map(|f| {
                 (
-                    scope_word(r),
-                    r.kind().to_string(),
-                    r.name().to_string(),
-                    r.when(),
-                    r.does(),
+                    f.name.clone(),
+                    f.when(),
+                    f.folder.as_deref().map(in_word).unwrap_or_default(),
                 )
             })
             .collect(),
@@ -71,20 +67,9 @@ pub async fn gather(rpc: &mut Client, folder: &Path) -> Result<Here> {
     })
 }
 
-/// The pack, then what is being asked: the rule being edited, as it is,
-/// when there is one; then the words. `editing` is (kind, whose).
-pub fn ask(pack: &str, words: &str, editing: Option<&(String, String)>, yaml: Option<&str>) -> String {
-    let mut s = String::from(pack);
-    if let (Some((kind, whose)), Some(yaml)) = (editing, yaml) {
-        let _ = write!(
-            s,
-            "\n## Editing\n\nThe words are about this {kind} ({whose}), as it stands. Answer with the whole \
-{kind} as it should be afterwards — every field, changed or not — with `kind: {kind}` first and \
-`in` as it is.\n\n```yaml\n{yaml}\n```\n"
-        );
-    }
-    let _ = write!(s, "\n## The words\n\n{words}\n");
-    s
+/// The pack, then the words.
+pub fn ask(pack: &str, words: &str) -> String {
+    format!("{pack}\n## The words\n\n{words}\n")
 }
 
 /// What is true where the words were typed.
@@ -95,8 +80,9 @@ pub struct Here {
     pub name: Option<String>,
     /// Every folder Relay knows: path, name.
     pub folders: Vec<(String, String)>,
-    /// The rules of this folder and the person's own: scope word, kind, name, when, does.
-    pub rules: Vec<(String, String, String, String, String)>,
+    /// Every flow: its name, what starts it, the project it is in (empty
+    /// when it has no `in`).
+    pub flows: Vec<(String, String, String)>,
     /// Agent CLIs on this machine.
     pub agents: Vec<String>,
 }
@@ -105,21 +91,15 @@ pub fn vocabulary() -> &'static str {
     "\
 - run: one thing Relay keeps alive — a shell command, or an agent CLI in a terminal — in a \
 folder. It has a title, a state (starting, working, idle, needs you, blocked, stale, done, \
-failed, stopped), tags, and a cause (by hand, a schedule, a reaction, a decision).
-- folder: a directory Relay knows; what `in` names. `yours` is not a folder: it means the \
-person's own files in ~/.relay, which apply everywhere.
-- rule: what starts work without the person. A schedule fires on time; a reaction fires on an \
-event. A folder's rules live in <folder>/.relay/schedules.yaml and reactions.yaml; the \
-person's own in ~/.relay/schedules.yaml and reactions.yaml.
-- job: a rule's ended runs, read as one line: how often, how many went well, the last outcome.
-- question: something a run or a reaction asks the person. Its options are answers; an \
-option can start a run when chosen.
+failed, stopped), tags, and a cause (by hand, a flow's step, a decision).
+- folder: a directory Relay knows; what `in` names.
+- flow: work that starts without the person — on time, on an event, or by hand — as steps, \
+written in ~/.relay/flows/<name>/flow.md (Flows, below, says what one holds).
+- question: something a run or a flow asks the person. Its options are answers; an option \
+can start a run when chosen.
 - agent: an agent CLI (see `agents` below). A `run` line that starts with an agent's name is \
 that agent with the rest of the line as its prompt. Any other `run` line is a shell line.
 - tag, ref: labels on runs (`ci`, `#123`) for grouping and filtering.
-- when: how often (`every 30m`, a five-field cron line such as `0 2 * * *`), or on what \
-(`on run.failed`, several events separated by spaces). `every …` and cron make a schedule; \
-`on …` makes a reaction.
 "
 }
 
@@ -137,15 +117,27 @@ fn event_words(kind: &str) -> Option<&'static str> {
         event_kind::RUN_STOPPED => "a run was stopped by the person",
         event_kind::COMMIT_LANDED => "a commit landed on a branch Relay watches",
         event_kind::BRANCH_DONE => "a branch was finished (merged or closed)",
-        event_kind::SCHEDULE_FIRED => "a schedule started its run",
-        event_kind::SCHEDULE_SKIPPED => "a schedule did not fire (the previous run still going, or a missed slot)",
+        event_kind::FLOW_FIRED => "a flow fired: by hand, on time or on an event (data: flow, firing, trigger)",
+        event_kind::FLOW_ENDED => "a flow's firing is over (data: flow, firing, status: done, failed or stopped)",
+        event_kind::FLOW_SKIPPED => "a flow, or one of its steps, did not run (data: flow, firing, step, reason)",
+        event_kind::FLOW_REFUSED => {
+            "a step's $RELAY_OUT said something Relay would not keep, so the step failed (data: flow, firing, step, reason)"
+        }
         event_kind::DECISION_RAISED => "a question was put to the person",
         event_kind::DECISION_TAKEN => "the person answered a question",
         event_kind::DECISION_DISMISSED => "the person dismissed a question",
         event_kind::DECISION_EXPIRED => "a question expired, its default taken if it had one",
         event_kind::PLUGIN_INVOKED => "a plugin was run",
+        event_kind::RUN_TROUBLE => {
+            "something went wrong around a run without ending it (output lost while rld was away, a holder that went): the run may be fine, but part of its story is missing"
+        }
+        event_kind::RUN_LOST => {
+            "Relay came back and a run's holder was gone with no exit recorded, most likely a restart; /resume picks it back up"
+        }
         event_kind::RUN_JOURNAL_DROPPED => "retention let a run's terminal bytes go; the run and its events stay",
-        event_kind::RUN_SUMMARISED => "an assistant wrote a summary of an ended run (s in the panel, rl summarise)",
+        event_kind::RUN_SUMMARISED => {
+            "a run was recapped: its agent's own, or an assistant's (/summary in the panel, rl summary)"
+        }
         _ => return None,
     })
 }
@@ -159,102 +151,75 @@ pub fn events() -> String {
     s
 }
 
-pub fn schedule() -> &'static str {
-    "\
-A schedule fires on time. Its fields:
-- every: a duration — 30s, 30m, 4h, 1d. Or instead:
-- cron: five fields, minute hour day-of-month month day-of-week, in the person's local time.
-- run: what it starts — a shell line (a string), argv (a list), or an agent as a map \
-{agent, prompt} (or {agent, prompt_file, args}).
-- cwd: where it runs; a folder's rules run in the folder unless told otherwise; the person's \
-own rules need one.
-- title: what to call its runs.
-- tags: labels on its runs, a list.
-- env: extra environment, a map.
-- ref: a ref its runs belong to.
-- no_tty: true runs it through pipes instead of a terminal (rarely wanted).
-- missed: skip (default) or catch-up-once — what to do about a firing missed while asleep.
-- overlap: skip (default), queue or kill — what to do when the previous run is still going.
-"
+/// What the person asked the assistant for: whatever fits the words, or a flow by this name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Want {
+    Any,
+    Flow { name: String },
 }
 
-pub fn reaction() -> &'static str {
-    "\
-A reaction fires on an event and either runs something or asks the person. Its fields:
-- on: an event kind, or a list of them, or a family (run.*).
-- where: only when the run the event is about matches every field given: tag (carries this \
-tag), cause (its cause starts with this: `schedule:`, `schedule:nightly`, `reaction:`), \
-cli (the agent it runs: claude, codex), group (its group key, exactly), data (fields of the \
-event's payload, each a value or any of a list: `data: { severity: [ERROR, WARNING] } }`).
-- run: what it starts, as for a schedule. Placeholders (below) are filled in from the event.
-- ask: instead of run — a question for the person: title, summary, options (each: key, \
-label, default, and optionally what choosing it runs: run, cwd, tags, title), multi \
-(several answers), group (asking again replaces the open question with this key), expires.
-- cwd, title, tags, env, ref, no_tty: as for a schedule.
-- throttle: not again within this long (default 10s), so a noisy event does not storm.
+/// The answer's shapes, indented so an echo of them is never read as one, and what to prefer.
+pub fn contract(want: &Want) -> String {
+    // Not `"\` and a new line: that would eat the first line's indent.
+    let run = "  kind: run          # something to do now, once
+  in: <folder>       # one of the folders listed under Here, or the current one
+  run: <a shell line, or an agent's name followed by its prompt>
+  title: <a few words, optional>
+";
+    let flow = |name: &str| {
+        format!(
+            "  kind: flow         # work that starts without the person: on time, on an event, or by hand
+  name: {name}
+  ---
+  <its frontmatter, as Flows says>
+  ---
+  <a line or two on what it does>
+
+  ## <each agent step>
+  <its prompt>
 "
+        )
+    };
+    let after = "Write every line of the answer from the start of the line: the shapes above are \
+indented only to set them apart. A flow is flow.md alone: all after `name:` is written to \
+~/.relay/flows/<name>/flow.md as it is. It may run commands on this machine and agents, never a \
+script of its own — it has none, and you cannot add one. Never invent a folder, an event kind, a key or a \
+field.\n";
+    match want {
+        Want::Any => format!(
+            "Answer with one run or one flow, and nothing around it: no prose, no code fence. Its \
+first line is its `kind`.\n\n{run}\n{}\n{after}\nPrefer a run for something to do now, once; a \
+flow for something to do again, later, or when something happens. Prefer the folder the words \
+were typed in. Prefer a shell line for one command, an agent for work that needs judgement.\n",
+            flow("<a new flow's name: a-z, 0-9 and ->")
+        ),
+        Want::Flow { name } => format!(
+            "The person asked for a flow named `{name}`. Answer with it, and nothing around it: no \
+prose, no code fence.\n\n{}\n{after}",
+            flow(name)
+        ),
+    }
 }
 
-pub fn placeholders() -> &'static str {
-    "\
-In a reaction's run or ask, {name} is filled in from the event: {kind}, {summary}, {title} \
-(the run's), {run} (its id), {group}, {workspace}, {cause}, {cli}, and {data.<key>} for what \
-the event carried (for example {data.exit}). A name nothing knows is left as written, so \
-shell braces survive.
-"
-}
-
-pub fn contract() -> &'static str {
-    "\
-Answer with exactly one YAML document and nothing around it: no prose, no code fence.
-The first key is `kind`; the rest are the fields of that kind, and only those.
-
-kind: run          # something to do now, once
-in: <folder>       # one of the folders listed under Here, or the current one
-run: <a shell line, or an agent's name followed by its prompt>
-title: <a few words, optional>
-
-kind: schedule     # something to do on time
-in: <folder, or yours>
-name: <letters, digits, . _ -; short, no spaces>
-when: <every 30m | a cron line>
-run: <as above>
-title: <optional>
-tags: [<optional>]
-cwd: <optional; needed when in: yours>
-
-kind: reaction     # something to do when an event happens
-in: <folder, or yours>
-name: <as above>
-when: on <event> [<event> ...]
-run: <as above>
-title: <optional>
-tags: [<optional>]
-cwd: <optional; needed when in: yours>
-
-Prefer the folder the words were typed in. Prefer a shell line for one command, an agent for \
-work that needs judgement. Never invent a folder, an event kind, or a field.
-"
-}
-
-/// The whole pack, in the order an assistant reads it.
-pub fn render(help: &str, here: &Here) -> String {
+/// The whole pack, in the order an assistant reads it, for what is wanted.
+pub fn render(help: &str, here: &Here, want: &Want) -> String {
     let mut s = String::new();
-    s.push_str(
-        "# Relay, for an assistant\n\nRelay keeps a person's agents and long-running work alive, and lets them \
-write down what should start on its own. You are drafting one thing from what they typed; \
-they will read your draft and press enter, or not. Be exact and short.\n\n",
+    let drafting = match want {
+        Want::Any => "one run, or one flow,".to_string(),
+        Want::Flow { name } => format!("the flow `{name}`"),
+    };
+    let _ = write!(
+        s,
+        "# Relay, for an assistant\n\nRelay keeps a person's agents and long-running work alive, and starts \
+what they wrote down to start on its own. You are drafting {drafting} from what they typed; \
+they will read your draft and press enter, or not. Be exact and short.\n\n"
     );
     s.push_str("## Words\n\n");
     s.push_str(vocabulary());
-    s.push_str("\n## Events (what a reaction can be on)\n\n");
+    s.push_str("\n## Flows\n\n");
+    s.push_str(&flows::section());
+    s.push_str("\n## Events (what a flow's `on` can take)\n\n");
     s.push_str(&events());
-    s.push_str("\n## A schedule\n\n");
-    s.push_str(schedule());
-    s.push_str("\n## A reaction\n\n");
-    s.push_str(reaction());
-    s.push_str("\n## Placeholders\n\n");
-    s.push_str(placeholders());
     s.push_str("\n## The rl command line\n\n```\n");
     s.push_str(help.trim_end());
     s.push_str("\n```\n\n## Here\n\n");
@@ -270,12 +235,13 @@ they will read your draft and press enter, or not. Be exact and short.\n\n",
             let _ = writeln!(s, "- {p}  ({n})");
         }
     }
-    if here.rules.is_empty() {
-        s.push_str("rules: none yet\n");
+    if here.flows.is_empty() {
+        s.push_str("flows: none yet\n");
     } else {
-        s.push_str("rules (scope · kind · name · when · does):\n");
-        for (scope, kind, name, when, does) in &here.rules {
-            let _ = writeln!(s, "- {scope} · {kind} · {name} · {when} · {does}");
+        s.push_str("flows (name · what starts it · in):\n");
+        for (name, when, in_) in &here.flows {
+            let in_ = if in_.is_empty() { "—" } else { in_ };
+            let _ = writeln!(s, "- {name} · {when} · {in_}");
         }
     }
     let _ = writeln!(
@@ -288,30 +254,13 @@ they will read your draft and press enter, or not. Be exact and short.\n\n",
         }
     );
     s.push_str("\n## Answer\n\n");
-    s.push_str(contract());
+    s.push_str(&contract(want));
     s
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rl_proto::action::Task;
-    use rl_proto::decision::DecisionOption;
-    use rl_proto::reaction::{AskSpec, Filter, ReactionSpec};
-    use rl_proto::schedule::ScheduleSpec;
-
-    /// Every serialised key of `v`, at every depth — except inside `env`,
-    /// whose keys are the person's, not fields.
-    fn keys(v: &serde_json::Value, out: &mut Vec<String>) {
-        if let Some(m) = v.as_object() {
-            for (k, v) in m {
-                out.push(k.clone());
-                if k != "env" {
-                    keys(v, out);
-                }
-            }
-        }
-    }
 
     #[test]
     fn every_event_kind_has_words() {
@@ -328,114 +277,44 @@ mod tests {
     }
 
     #[test]
-    fn every_field_of_a_rule_is_explained() {
-        let task = Task::Agent {
-            agent: "claude".into(),
-            prompt: Some("p".into()),
-            prompt_file: Some("f".into()),
-            args: vec!["a".into()],
-        };
-        let mut s = ScheduleSpec {
-            cron: Some("c".into()),
-            every: Some("e".into()),
-            run: Some(task.clone()),
-            cwd: Some("/w".into()),
-            tags: vec!["t".into()],
-            ref_: Some("r".into()),
-            title: Some("t".into()),
-            no_tty: true,
-            ..Default::default()
-        };
-        s.env.insert("K".into(), "v".into());
-        let mut found = Vec::new();
-        keys(&serde_json::to_value(&s).unwrap(), &mut found);
-        let text = schedule();
-        for k in &found {
-            assert!(
-                text.contains(&format!("- {k}:")) || text.contains(k.as_str()),
-                "schedule field `{k}` unexplained"
-            );
-        }
-
-        let mut r = ReactionSpec {
-            on: vec!["run.failed".into()],
-            filter: Some(Filter {
-                tag: Some("t".into()),
-                cause: Some("c".into()),
-                cli: Some("c".into()),
-                group: Some("g".into()),
-                ..Default::default()
-            }),
-            ask: Some(AskSpec {
-                title: "t".into(),
-                summary: Some("s".into()),
-                options: vec![DecisionOption {
-                    key: "k".into(),
-                    label: "l".into(),
-                    default: true,
-                    run: Some(Task::Shell("x".into())),
-                    cwd: Some("/w".into()),
-                    tags: vec!["t".into()],
-                    ref_: Some("r".into()),
-                    title: Some("t".into()),
-                    no_tty: true,
-                    ..Default::default()
-                }],
-                multi: true,
-                group: Some("g".into()),
-                expires: Some("1h".into()),
-            }),
-            run: Some(task),
-            cwd: Some("/w".into()),
-            tags: vec!["t".into()],
-            ref_: Some("r".into()),
-            title: Some("t".into()),
-            no_tty: true,
-            throttle: Some("10s".into()),
-            ..Default::default()
-        };
-        r.env.insert("K".into(), "v".into());
-        let mut found = Vec::new();
-        keys(&serde_json::to_value(&r).unwrap(), &mut found);
-        let text = format!("{}{}", reaction(), schedule());
-        for k in &found {
-            assert!(text.contains(k.as_str()), "reaction field `{k}` unexplained");
-        }
-    }
-
-    #[test]
     fn the_pack_reads_top_to_bottom() {
         let here = Here {
             folder: "~/w/relay".into(),
             name: Some("relay".into()),
             folders: vec![("~/w/relay".into(), "relay".into()), ("~/w/api".into(), "api".into())],
-            rules: vec![(
-                "relay".into(),
-                "schedule".into(),
-                "nightly".into(),
-                "every 4h".into(),
-                "make test".into(),
-            )],
+            flows: vec![
+                ("nightly".into(), "every 4h".into(), "relay".into()),
+                ("notify".into(), "on run.failed".into(), String::new()),
+            ],
             agents: vec!["claude".into()],
         };
-        let text = render("rl [OPTIONS] <COMMAND>", &here);
+        let text = render("rl [OPTIONS] <COMMAND>", &here, &Want::Any);
         let order = [
             "# Relay, for an assistant",
             "## Words",
+            "- flow: ",
+            "~/.relay/flows/<name>/flow.md",
+            "## Flows",
+            "### The frontmatter",
+            "- when: ",
+            "### A step",
+            "- after: ",
+            "### if:",
+            "### Placeholders",
+            "### What a step leaves, and starts with",
+            "### An example",
             "## Events",
             "- run.failed:",
-            "## A schedule",
-            "## A reaction",
-            "## Placeholders",
             "## The rl command line",
             "rl [OPTIONS] <COMMAND>",
             "## Here",
             "folder: ~/w/relay  (relay)",
             "- ~/w/api  (api)",
-            "- relay · schedule · nightly · every 4h · make test",
+            "- nightly · every 4h · relay",
+            "- notify · on run.failed · —",
             "agents on this machine: claude",
             "## Answer",
-            "kind: reaction",
+            "  kind: run",
         ];
         let mut at = 0;
         for needle in order {
@@ -444,5 +323,27 @@ mod tests {
                 .unwrap_or_else(|| panic!("{needle} missing or out of order"));
             at += i;
         }
+        assert!(
+            !text.lines().any(|l| l.starts_with("kind:")),
+            "the shapes are indented: an echo of the pack is never read as an answer"
+        );
+        let ask = ask(&text, "run the tests");
+        assert!(ask.starts_with(&text) && ask.ends_with("## The words\n\nrun the tests\n"));
+    }
+
+    #[test]
+    fn the_answer_asked_for_is_the_one_shown() {
+        let here = Here::default();
+        let any = render("rl", &here, &Want::Any);
+        assert!(any.contains("  kind: run ") && any.contains("  kind: flow "), "{any}");
+        assert!(any.contains("You are drafting one run, or one flow,"));
+        assert!(!any.contains("A flow is not drafted here"), "it is now");
+        let flow = render("rl", &here, &Want::Flow { name: "brief".into() });
+        assert!(
+            flow.contains("a flow named `brief`") && flow.contains("  name: brief\n"),
+            "{flow}"
+        );
+        assert!(flow.contains("You are drafting the flow `brief`"));
+        assert!(!flow.contains("kind: run"), "a flow was asked for");
     }
 }

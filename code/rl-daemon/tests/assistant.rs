@@ -40,12 +40,17 @@ async fn the_assistant_is_a_run_and_answers() {
     let mut c = Conn::open(&home).await;
     let cwd = tmp.path().to_string_lossy().into_owned();
 
+    // The agent reads its input to the end first: it has none, so it goes on
+    // at once instead of waiting out the timeout.
+    // SAFETY: this test binary is alone in its process.
+    unsafe { std::env::set_var("FAKE_AGENT_READS", "1") };
     let out: AssistantOutput = c
         .ok(
             "assistant.run",
-            json!({ "job": "interpret", "prompt": "PACK… run the tests", "cwd": cwd, "title": "interpret: run the tests" }),
+            json!({ "job": "interpret", "prompt": "PACK… run the tests", "cwd": cwd, "title": "interpret: run the tests", "timeout": "10s" }),
         )
         .await;
+    unsafe { std::env::remove_var("FAKE_AGENT_READS") };
     assert_eq!(out.agent, "fakeai");
     assert!(!out.timed_out);
     assert_eq!(out.exit, Some(0));
@@ -94,7 +99,7 @@ async fn the_assistant_is_a_run_and_answers() {
         )
         .await;
     let msg = r.error.unwrap().message;
-    assert!(msg.contains("poem") && msg.contains("interpret, summarise"), "{msg}");
+    assert!(msg.contains("poem") && msg.contains("interpret, summary"), "{msg}");
     std::fs::write(home.config_file(), "assistants:\n  interpret: cursor\n").unwrap();
     let _: serde_json::Value = c.ok("config.get", json!(null)).await;
     let r: Response = c
