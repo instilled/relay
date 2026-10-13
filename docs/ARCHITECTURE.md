@@ -28,13 +28,13 @@ flowchart TB
         sup["supervisor — start · follow · apply · reconcile"]
         flows["flows — flows/*/flow.md → firings: when · on · steps · asks"]
         dec["decisions — questions waiting on a human → runs"]
-        attach["attach — scrollback → replay → live"]
+        attach["attach — the screen drawn afresh (or scrollback → replay) → live"]
         digest["digest — one line per run, and whether it is news"]
         gitm["git — read-only placement: workspace, branch"]
     end
 
     subgraph holder["rl-session — one holder process per run"]
-        h["holder: PTY (or pipes) · ring buffer · exit sidecar<br/>detached with fork + setsid"]
+        h["holder: PTY (or pipes) · ring buffer · screen (headless vt100) · exit sidecar<br/>detached with fork + setsid"]
         child["the child: claude · codex · sh · any command"]
     end
 
@@ -209,10 +209,13 @@ sequenceDiagram
     D-->>V: AttachInfo{cols, rows, tty, live, joiner, journaled, replay_from}
     Note over V,D: after the ok reply the connection stops speaking JSON-RPC —<br/>it carries rl-session frames both ways
 
-    D->>L: read the journal tail
-    D-->>V: Output (scrollback)
-    D->>S: attach with replay, from where the journal stops
-    S-->>D: Output … ReplayEnd
+    D->>L: the journal's length (journaled)
+    D->>S: attach for the screen (a tty run) or with replay from journaled (pipes) — not for an ended run
+    opt pipes, or an ended run
+        D->>L: read the journal tail, ending at journaled
+        D-->>V: Output (scrollback): the journal tail, drawn as a screen for an ended tty run
+    end
+    S-->>D: Output (the screen drawn afresh, or bytes) … ReplayEnd
     D-->>V: Output … ReplayEnd, then live output
 
     V->>D: Input · Resize — the one joiner only, a watcher's are dropped
@@ -220,33 +223,34 @@ sequenceDiagram
     D->>L: session_io.append(in)
 ```
 
-What is replayed is a tail of bytes, not a screen: an app that redraws only what changed (Claude
-Code, and most that diff their own buffer) leaves its box and status line out until it repaints.
-It repaints when its size changes, and an app that redraws everything then (Claude Code redraws
-its whole conversation) should do that once, not twice. So letting go of a run leaves it a row
-short, where nobody sees it redraw, and the next join — at the size it had, or any other — is one
-real change and one repaint. A joiner's first `Resize` says which: a new size needs nothing more.
-Only a joiner at the very size the run has (or one that says none within `JOIN_SIZE_WAIT`), and a
-watcher while nobody is joined, gets the nudge: rld gives the pty a row less, holds that for a
-fifth of a second, and gives the size back (`NUDGE_HOLD`, `rl-daemon/src/attach.rs`). Held,
-because two resizes sent back to back land together, the app reads the size it already had, and a
-runtime that only reports a change (Node, Bun) never repaints. A row rather than a column, as tmux
-does, so what the run printed is not wrapped twice. One nudge per run at a time: while it holds,
-the run keeps its own size on record, a viewer arriving meanwhile starts from that, and the one in
-flight repaints for it too.
+A terminal run's viewer is handed its screen, not bytes. A tail of output bytes starts in the
+middle of a redraw, carries every redraw the app ever made, and an inline app (Gemini CLI, Claude
+Code) that reprints its history on a resize leaves each reprint in it; played into a terminal of
+another size, relative cursor moves land on the wrong lines. So the holder keeps the screen itself
+in a headless terminal fed every byte (`rl-session/src/screen.rs`), and an attach asking for it is
+handed the history above it once, then what is on it now — whole, so the journal's tail is not
+sent and there is no gap to report. Nothing has to make the app repaint, so joining and letting go
+at the size the run has is no resize at all. A pipes run has no screen and gets the journal's tail
+and the holder's replay. An ended terminal run is drawn the same way as a live one, from the
+journal's tail (`Screen::render`).
 
-A run just started is the hard case: a Node or Bun agent listens for a resize only half a second or
-so in, and one that lands before is lost — it draws for the rows it started with. So the panel
-starts a run at the whole terminal, the size its join will hand it (`spawn_size`, `tui/mod.rs`),
-and there is no resize to lose; and a run joined younger than `YOUNG` (three seconds) is nudged
-once more at that age, in case its first one went unheard.
+A run just started is the one case still nudged: a Node or Bun agent listens for a resize only half
+a second or so in, and one that lands before is lost — it draws for the rows it started with. So
+the panel starts a run at the whole terminal, the size its join will hand it (`spawn_size`,
+`tui/mod.rs`), and there is no resize to lose; and a run joined younger than `YOUNG` (three
+seconds) is nudged once at that age, in case its first one went unheard: rld gives the pty a row
+less, holds that for a fifth of a second (`NUDGE_HOLD`, `rl-daemon/src/attach.rs`), and gives the
+joiner's size back. Held, because two resizes sent back to back land together, the app reads the
+size it already had, and a runtime that only reports a change never repaints. A row rather than a
+column, as tmux does, so what the run printed is not wrapped twice.
 
 Every one of those frames is read through `FrameReader`, never a bare `read_frame`. Each hop
 reads inside a `select!` — the viewer against stdin and a ticker, `rld` against the holder and
 its own shutdown — and a plain read holds the bytes it has gathered on the future's stack, so
 losing the race throws them away. The next read then starts in the middle of a payload and takes
-the child's own output for a header: a scrollback replay of a few hundred kilobytes is the frame
-most likely to lose, and the run's text decodes into a length of some billions, which ends the
+the child's own output for a header: a screen or scrollback replay, cut into output frames of up
+to a mebibyte each (`OUTPUT_CHUNK`, which keeps any of them under the reader's limit), is the
+likeliest to lose, and the run's text decodes into a length of some billions, which ends the
 connection. `FrameReader` keeps the partial header and payload in the reader itself, so a
 dropped future costs nothing and the next call carries on where it stopped.
 

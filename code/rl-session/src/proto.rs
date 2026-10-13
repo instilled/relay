@@ -20,6 +20,10 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 /// Largest payload accepted on either side. Output is chunked well below this.
 pub const MAX_PAYLOAD: u32 = 16 * 1024 * 1024;
+/// The most output one frame carries. A screen drawn afresh or a journal's
+/// tail can outgrow `MAX_PAYLOAD` (a wide, tall truecolor screen with its
+/// history runs to tens of megabytes), and the reader would refuse it whole.
+pub const OUTPUT_CHUNK: usize = 1 << 20;
 
 const T_ATTACH: u8 = 0x01;
 const T_INPUT: u8 = 0x02;
@@ -35,11 +39,11 @@ const T_NOTE: u8 = 0x85;
 #[derive(Debug, Clone, PartialEq)]
 pub enum Frame {
     // client → holder
-    /// Must be the first frame on a connection. `replay` asks for the ring
-    /// buffer before live output; `from` is the byte offset (in the child's
-    /// total output) to replay from — `0` means everything the ring still has.
+    /// Must be the first frame on a connection. `replay` says what comes
+    /// before live output; `from` is the byte offset (in the child's total
+    /// output) a byte replay starts at — `0` means everything the ring still has.
     Attach {
-        replay: bool,
+        replay: Replay,
         from: u64,
     },
     Input(Vec<u8>),
@@ -63,6 +67,18 @@ pub enum Frame {
     /// "x joined", "n bytes missing"). Never part of the child's output;
     /// the holder itself does not send these.
     Note(String),
+}
+
+/// What an attach gets before live output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Replay {
+    /// Nothing: live output only.
+    None,
+    /// The ring buffer's bytes from `from`.
+    Bytes,
+    /// A tty run's screen drawn afresh. A pipes run has no screen and
+    /// replays its bytes from `from` instead.
+    Screen,
 }
 
 /// What the holder knows about its session, sent on attach.
@@ -120,14 +136,21 @@ impl Frame {
     fn decode(tag: u8, p: Vec<u8>) -> io::Result<Frame> {
         let bad = |what: &str| io::Error::new(io::ErrorKind::InvalidData, format!("bad {what} frame"));
         Ok(match tag {
-            // A 1-byte payload is an older client: replay from the start.
-            T_ATTACH => Frame::Attach {
-                replay: p.first().copied().unwrap_or(0) != 0,
-                from: p
-                    .get(1..9)
-                    .map(|b| u64::from_be_bytes(b.try_into().unwrap()))
-                    .unwrap_or(0),
-            },
+            T_ATTACH => {
+                if p.len() != 9 {
+                    return Err(bad("attach"));
+                }
+                let replay = match p[0] {
+                    0 => Replay::None,
+                    1 => Replay::Bytes,
+                    2 => Replay::Screen,
+                    _ => return Err(bad("attach")),
+                };
+                Frame::Attach {
+                    replay,
+                    from: u64::from_be_bytes(p[1..9].try_into().unwrap()),
+                }
+            }
             T_INPUT => Frame::Input(p),
             T_RESIZE => {
                 if p.len() != 4 {
@@ -163,6 +186,16 @@ impl Frame {
 pub async fn write_frame<W: AsyncWrite + Unpin>(w: &mut W, f: &Frame) -> io::Result<()> {
     w.write_all(&f.encode()).await?;
     w.flush().await
+}
+
+/// `bytes` as `Output` frames of at most `OUTPUT_CHUNK` each, and nothing at
+/// all for no bytes. A cut can fall inside an escape sequence: whatever reads
+/// the stream already carries a half-read escape from one chunk to the next.
+pub async fn write_output<W: AsyncWrite + Unpin>(w: &mut W, bytes: &[u8]) -> io::Result<()> {
+    for chunk in bytes.chunks(OUTPUT_CHUNK) {
+        write_frame(w, &Frame::Output(chunk.to_vec())).await?;
+    }
+    Ok(())
 }
 
 /// A frame reader that survives a lost `select!`.
@@ -342,10 +375,17 @@ mod tests {
     #[tokio::test]
     async fn every_frame_roundtrips() {
         let frames = vec![
-            Frame::Attach { replay: true, from: 0 },
             Frame::Attach {
-                replay: false,
+                replay: Replay::Bytes,
+                from: 0,
+            },
+            Frame::Attach {
+                replay: Replay::None,
                 from: 12_345_678_901,
+            },
+            Frame::Attach {
+                replay: Replay::Screen,
+                from: 7,
             },
             Frame::Input(b"hello\n".to_vec()),
             Frame::Resize { cols: 220, rows: 51 },
@@ -382,6 +422,59 @@ mod tests {
             assert_eq!(&got, want);
         }
         assert!(read_frame(&mut b).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn an_attach_with_an_unknown_mode_or_a_short_payload_is_refused() {
+        for bad in [
+            &[T_ATTACH, 0, 0, 0, 1, 1][..],
+            &[T_ATTACH, 0, 0, 0, 9, 3, 0, 0, 0, 0, 0, 0, 0, 0],
+        ] {
+            let (mut a, mut b) = tokio::io::duplex(64);
+            a.write_all(bad).await.unwrap();
+            let e = read_frame(&mut b).await.unwrap_err();
+            assert_eq!(e.kind(), io::ErrorKind::InvalidData, "{e}");
+        }
+    }
+
+    /// More output than one frame may carry goes out as several that each
+    /// decode, and they add up to what was written.
+    #[tokio::test]
+    async fn output_past_the_payload_limit_goes_as_several_frames() {
+        let big: Vec<u8> = (0..MAX_PAYLOAD as usize + 3 * OUTPUT_CHUNK / 2)
+            .map(|i| i as u8)
+            .collect();
+        let (mut a, b) = tokio::io::duplex(1 << 16);
+        let writer = {
+            let big = big.clone();
+            tokio::spawn(async move {
+                write_output(&mut a, &big).await.unwrap();
+                write_frame(&mut a, &Frame::ReplayEnd).await.unwrap();
+            })
+        };
+        let mut fr = FrameReader::new(b);
+        let mut got = Vec::new();
+        let mut frames = 0;
+        loop {
+            match fr.next().await.unwrap().unwrap() {
+                Frame::Output(p) => {
+                    assert!(p.len() <= OUTPUT_CHUNK, "a frame of {} bytes", p.len());
+                    got.extend_from_slice(&p);
+                    frames += 1;
+                }
+                Frame::ReplayEnd => break,
+                other => panic!("expected output, got {other:?}"),
+            }
+        }
+        writer.await.unwrap();
+        assert!(frames > 1);
+        assert!(got == big, "the frames add up to what was written");
+
+        // Nothing to say is no frame at all.
+        let (mut a, b) = tokio::io::duplex(64);
+        write_output(&mut a, &[]).await.unwrap();
+        drop(a);
+        assert_eq!(FrameReader::new(b).next().await.unwrap(), None);
     }
 
     #[tokio::test]

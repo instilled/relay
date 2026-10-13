@@ -1,6 +1,6 @@
 //! Client side of the holder protocol — what `rld` (and tests) use.
 
-use crate::proto::{Frame, FrameReader, Hello, write_frame};
+use crate::proto::{Frame, FrameReader, Hello, Replay, write_frame};
 use anyhow::{Context, Result, bail};
 use std::io;
 use std::path::Path;
@@ -30,6 +30,31 @@ impl Session {
     /// (`None`: no replay). `hello.replay_from` says where the replay really
     /// starts if the ring no longer reaches back that far.
     pub async fn attach_from(socket: &Path, from: Option<u64>) -> Result<(Hello, Self)> {
+        Self::open(
+            socket,
+            Frame::Attach {
+                replay: if from.is_some() { Replay::Bytes } else { Replay::None },
+                from: from.unwrap_or(0),
+            },
+        )
+        .await
+    }
+
+    /// Attaches asking for the screen drawn afresh. A pipes run has none and
+    /// replays bytes from `from` instead.
+    pub async fn attach_screen(socket: &Path, from: u64) -> Result<(Hello, Self)> {
+        Self::open(
+            socket,
+            Frame::Attach {
+                replay: Replay::Screen,
+                from,
+            },
+        )
+        .await
+    }
+
+    /// Connects, sends the opening `attach` frame and reads the `Hello`.
+    async fn open(socket: &Path, attach: Frame) -> Result<(Hello, Self)> {
         let stream = UnixStream::connect(socket)
             .await
             .with_context(|| format!("connecting to {}", socket.display()))?;
@@ -38,11 +63,7 @@ impl Session {
             rd: SessionReader(FrameReader::new(BufReader::new(rd))),
             wr: SessionWriter(wr),
         };
-        s.wr.send(&Frame::Attach {
-            replay: from.is_some(),
-            from: from.unwrap_or(0),
-        })
-        .await?;
+        s.wr.send(&attach).await?;
         match s.rd.recv().await? {
             Some(Frame::Hello(h)) => Ok((h, s)),
             other => bail!("expected hello, got {other:?}"),
