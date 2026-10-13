@@ -330,14 +330,17 @@ pub fn register(r: &mut Router<Daemon>) {
     r.register::<DigestOrder, _, _>(|d, p: Order| async move {
         if !Order::valid_group(&p.group) {
             return Err(RpcError::invalid_params(format!(
-                "{:?}: a project is g:<folder>, or g:everywhere",
-                p.group
+                "{:?}: a project is g:<folder>, or g:everywhere; the projects' order is {}",
+                p.group,
+                Order::PROJECTS
             )));
         }
-        if let Some(bad) = p.rows.iter().find(|k| !Order::valid_row(k)) {
-            return Err(RpcError::invalid_params(format!(
-                "{bad:?}: a run is r:<id>, a flow f:<name>"
-            )));
+        if let Some(bad) = p.rows.iter().find(|k| !p.fits(k)) {
+            return Err(RpcError::invalid_params(if p.group == Order::PROJECTS {
+                format!("{bad:?}: a project is g:<folder>")
+            } else {
+                format!("{bad:?}: a run is r:<id>, a flow f:<name>")
+            }));
         }
         d.ledger
             .call(move |c| {

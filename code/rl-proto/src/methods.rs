@@ -510,9 +510,11 @@ impl Hidden {
 }
 
 /// Keeps a project's rows in the order given — moved by hand on the panel
-/// (shift-↑/↓) — or, with no rows, lets it sort itself again (`/sort`). The
-/// project is its header's key (`g:<folder>`, `g:everywhere`); the rows are
-/// run (`r:<id>`) and flow (`f:<name>`) keys, first on top.
+/// (shift-↑/↓) — or, with no rows, lets them go back to the order they came
+/// in (`/sort`). The project is its header's key (`g:<folder>`,
+/// `g:everywhere`); the rows are run (`r:<id>`) and flow (`f:<name>`) keys,
+/// first on top. Under `Order::PROJECTS` it keeps the projects' own order
+/// instead, by their headers' keys (`g:<folder>`; `everywhere` stays last).
 /// The order given replaces the one kept, so what has left the list drops
 /// out. Answers with every project's order.
 pub struct DigestOrder;
@@ -522,19 +524,32 @@ impl Method for DigestOrder {
     type Result = Vec<Order>;
 }
 
-/// A project's rows in the order you put them, first on top.
+/// A project's rows in the order you put them, first on top — or, under
+/// `Order::PROJECTS`, the projects themselves.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Order {
-    /// The project's header key: `g:<folder>`, or `g:everywhere`.
+    /// The project's header key: `g:<folder>`, or `g:everywhere`; or
+    /// `Order::PROJECTS`, for the order of the projects.
     pub group: String,
-    /// Run and flow keys, `r:<id>` and `f:<name>`.
+    /// Run and flow keys, `r:<id>` and `f:<name>`; under `Order::PROJECTS`,
+    /// the projects' header keys, `g:<folder>`.
     #[serde(default)]
     pub rows: Vec<String>,
 }
 
 impl Order {
-    /// Whether `key` names a project an order can be kept for.
+    /// The order the projects stand in on the list: not a project of its
+    /// own, so nothing a header's key could be.
+    pub const PROJECTS: &'static str = "projects";
+
+    /// Whether `key` names what an order can be kept for: a project, or the
+    /// projects themselves.
     pub fn valid_group(key: &str) -> bool {
+        key == Self::PROJECTS || Self::valid_project(key)
+    }
+
+    /// Whether `key` names a project, by its header's key.
+    pub fn valid_project(key: &str) -> bool {
         key.strip_prefix("g:").is_some_and(|k| !k.is_empty())
     }
 
@@ -543,6 +558,41 @@ impl Order {
         key.strip_prefix("r:")
             .or_else(|| key.strip_prefix("f:"))
             .is_some_and(|k| !k.is_empty())
+    }
+
+    /// Whether `key` can stand in this order: a run or a flow in a
+    /// project's, a project in the projects'.
+    pub fn fits(&self, key: &str) -> bool {
+        if self.group == Self::PROJECTS {
+            Self::valid_project(key)
+        } else {
+            Self::valid_row(key)
+        }
+    }
+}
+
+#[cfg(test)]
+mod order_tests {
+    use super::Order;
+
+    #[test]
+    fn the_projects_keep_an_order_of_their_own_by_their_headers() {
+        assert!(Order::valid_group("g:/home/f/relay"));
+        assert!(Order::valid_group(Order::PROJECTS));
+        assert!(!Order::valid_group("g:"));
+        assert!(!Order::valid_group("r:a1"));
+        let projects = Order {
+            group: Order::PROJECTS.into(),
+            rows: vec![],
+        };
+        assert!(projects.fits("g:/home/f/relay"));
+        assert!(!projects.fits("r:a1"));
+        let relay = Order {
+            group: "g:/home/f/relay".into(),
+            rows: vec![],
+        };
+        assert!(relay.fits("r:a1") && relay.fits("f:nightly"));
+        assert!(!relay.fits("g:/home/f/api"));
     }
 }
 

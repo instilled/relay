@@ -296,22 +296,27 @@ another terminal", rather than silently sharing the keyboard. The panel asks bef
 connection journals regardless — so a viewer leaving costs nothing and the run never notices.
 
 The panel (`rl` with no command, `rl-cli/src/tui`) is the same two calls behind one screen. It
-is one list, the width of the screen, built from `digest.get` (`tui/rows.rs`): the questions
-waiting on you first, from every project and each naming its own (`rlux › deploy tonight?`),
-oldest first, so what needs you never hides under a project's name; then pinned runs; then
-grouped by the folder they belong to, the folders in order of name so each keeps its place, and
-inside one runs by attention — until you put a project in your own order: shift-`↑`/`↓` on a run
-or a flow moves it one place up or down inside its project (holding goes on moving it, the cursor
-stays on it), and from then on that project keeps your order rather than sorting itself. What is
-new there enters at its top; what needs you — asking, blocked or failed — floats to its top
-whatever the order, and drops back to where you put it once dealt with. A row never moves out of
-its project, past what floats, or into the questions or the pinned runs; on a header, a question,
-in the graph or `/events` the keys say why and do nothing. `digest.order` keeps a project's whole
-order — its header's key (`g:<folder>`, `g:everywhere`) and its rows' (`r:<id>`, `f:<name>`), in the
-ledger's `row_order` table — and the digest carries it; each move sends the whole of it again,
-built from the list with no search or lens narrowing it, so what a search hides keeps its place
-and what has left the list drops out. `/sort` on a project (its header, or any row in it) lets go
-of the order: it sorts itself again. Shift and an arrow arrive as `CSI 1;2A`/`B` in iTerm2,
+is one list, the width of the screen, built from `digest.get` (`tui/rows.rs`): pinned runs
+first; then grouped by the folder they belong to, the folders in order of name so each keeps its
+place, and inside one the runs and flows in the order they came — a run by when it started, a
+flow by its oldest run on the list — the newest at the bottom. Nothing that happens to a row
+moves it: one that comes to need you says so where it stands (its state in amber, the headline's
+count), rather than jumping the queue. A question waiting on you stands in its project, right
+under the run that asked it, or at the bottom of the project when that run is not on the list.
+Shift-`↑`/`↓` on a run or a flow moves it one place up or down inside its project (holding goes on
+moving it, the cursor stays on it, a question between is passed as nothing), and from then on that
+project keeps your order: every row stands where you put it, whatever comes of it, and what is new
+there enters at its bottom. On a project's header shift-`↑`/`↓` moves the project among the
+projects, which keep that order from then on; a project new to the list enters after them, by
+name, and `everywhere` stays last. A row never moves out of its project or into the pinned runs;
+on `everywhere`, a question, in the graph or `/events` the keys say why and do nothing.
+`digest.order` keeps a project's whole order — its header's key (`g:<folder>`, `g:everywhere`) and
+its rows' (`r:<id>`, `f:<name>`), in the ledger's `row_order` table — and, under the key
+`projects`, the projects' order by their headers' keys; the digest carries them; each move sends
+the whole of it again, built from the list with no search or lens narrowing it, so what a search
+hides keeps its place and what has left the list drops out (a project not shown keeps its place
+among the projects). `/sort` on a project (its header, or any row in it) lets go of its rows'
+order: they go back to the order they came in; where the project stands among the others stays. Shift and an arrow arrive as `CSI 1;2A`/`B` in iTerm2,
 Terminal.app and tmux 3.2 or later; a terminal that does not report shift sends the plain arrow,
 which just moves the cursor. And named — a workspace by the
 name it was registered under, a cause as "flow nightly · probe" or "your answer", never an id.
@@ -381,7 +386,7 @@ it to its latest firing's steps on a line under it — `probe ✓ · triage ✓ 
 the pane, as on a project header. A run still going or waiting on you is never folded. A flow has
 its row from its yes on — on, paused, or changed since — before it ever fired: it then says what
 starts it and, on, when it fires next (`every 30m · next in 12m`, `on run.failed`, `paused · every
-30m`, `needs a yes again · every 30m`, a changed one's runs led by the same words), ranks below
+30m`, `needs a yes again · every 30m`, a changed one's runs led by the same words), stands below
 everything that has run, by name — below your own order too, where you kept one — and its pane says
 `never fired` (or, when it has fired but no run of it is on the list, `none on the list`). It is not
 counted in the headline, which says what is moving: a home with only such flows says `nothing
@@ -428,7 +433,7 @@ length, a slash command skipped. The ledger keeps whether a title is still Relay
 (`runs.title_auto`), so a later prompt never renames it and a rename by hand always wins — until an
 empty one takes it back, after which the first prompt still names a run not yet asked anything. A folder you
 `rl up`'d (`rl add`) is always on the list, even before anything has run there: its header sits in its
-place by name, under every lens — a lens narrows what shows inside projects, never which
+place — by name, or where you moved it — under every lens — a lens narrows what shows inside projects, never which
 projects there are — so you can select
 it, read its stats or open its shell (`/shell`) from the first. `/up <path>` registers a
 folder from the line — the panel's `rl up`, over `workspace.up`, which reads the flows again so one
@@ -436,7 +441,8 @@ folder from the line — the panel's `rl up`, over `workspace.up`, which reads t
 `/archive` on an ended run (or a flow's row) is being done with it — `run.archive` sets `runs.archived_at`,
 the digest leaves it out, `rl ls --all` and the ledger keep it — and `/archive seen` does it for
 everything ended that has been looked at, except what is pinned. `^t` (or `/pin`) pins the run under
-the cursor — `run.pin` sets `runs.pinned_at` — and it stands above every project, in the order
+the cursor — `run.pin` sets `runs.pinned_at` — and it stands above every project (a question it asks
+right under it), in the order
 pinned, named with its folder (`relay › deploy shell`), under every lens and however long ago it
 ended; `^t` again lets it go back, and archiving it by name unpins it. `/hide` takes whatever the
 cursor is on off the list without stopping or removing anything — a run, going or ended (`run.hide`
@@ -445,8 +451,8 @@ registered or not (`digest.hide` keeps the row's key, `g:<folder>` or `f:<name>`
 the ledger's `hidden` table, and the digest carries them). A question is never hidden: it needs you.
 What is hidden shows only in the `hidden` lens, where `/hide` brings it back (a header that is not
 hidden itself brings back what was hidden under it) — unless it comes to need you after it was
-hidden: a run that asks, blocks or fails since then comes through to the top of the list, after
-the questions, named with its folder and marked `hidden` before its summary. `/hide` on it again
+hidden: a run that asks, blocks or fails since then comes through to the top of the list, above
+the pinned runs, named with its folder and marked `hidden` before its summary. `/hide` on it again
 moves the time on and it goes back. Archiving and pruning are as before; `rl hide <id>…` and `rl
 hide --project <dir>` (`rl unhide` the same) do it from a shell. `ctrl-x` is the one keystroke for it, whatever the row,
 and it asks first: the first press arms it and says what a second would do — remove an ended run
@@ -609,7 +615,7 @@ Because letters go into the line, everything that is not typing is a `/` command
 it rather than a command of its own, and no word means two things — `done` is only ever what `/mark`
 says. `enter` on an empty line is the row under the cursor instead — a flow opens, a question comes
 out of the list to be answered by number, a run's terminal opens. Arrows, `home`/`end` and `esc`
-belong to the list, and so do `^j`/`^k` while nothing is typed (down and up, as vi's `j` and `k`), and shift-`↑`/`↓`, which move the row itself inside its project (`/sort` undoes it); `esc` with something typed clears the line first, and `ctrl-c` leaves.
+belong to the list, and so do `^j`/`^k` while nothing is typed (down and up, as vi's `j` and `k`), and shift-`↑`/`↓`, which move the row itself inside its project (`/sort` undoes it), or a project's header among the projects; `esc` with something typed clears the line first, and `ctrl-c` leaves.
 The few keys that are not the list's or the line's each stand for a command, and the command
 list shows them beside it: `^x` stops, archives or removes, `^r` renames, `^t` pins, `^g` opens the graph, `^o` shows or hides the pane,
 `^f` searches.

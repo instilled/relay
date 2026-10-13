@@ -102,8 +102,8 @@ impl<'a> CatchUp<'a> {
         let mut projects: Vec<Project<'a>> = Vec::new();
         // Whether the last header's key has been read off a row under it.
         let mut keyed = true;
-        // Questions, and runs pinned or come through, stand above every
-        // header on the list; here they go under their project's.
+        // Runs pinned or come through, and their questions, stand above
+        // every header on the list; here they go under their project's.
         let mut loose: Vec<Row<'a>> = Vec::new();
         for row in rows::build(d, &list) {
             if let (false, Some(p), Some(r)) = (keyed, projects.last_mut(), run_of(&row)) {
@@ -611,7 +611,7 @@ fn run_of<'r>(r: &'r Row) -> Option<&'r Run> {
 fn tier(r: &Row) -> u8 {
     match r {
         Row::Question(_) => 0,
-        r if rows::floats(r) => 1,
+        r if rows::wants_you(r) => 1,
         _ => 2,
     }
 }
