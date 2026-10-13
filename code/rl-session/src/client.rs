@@ -30,6 +30,34 @@ impl Session {
     /// (`None`: no replay). `hello.replay_from` says where the replay really
     /// starts if the ring no longer reaches back that far.
     pub async fn attach_from(socket: &Path, from: Option<u64>) -> Result<(Hello, Self)> {
+        Self::open(
+            socket,
+            Frame::Attach {
+                replay: from.is_some(),
+                from: from.unwrap_or(0),
+                screen: false,
+            },
+        )
+        .await
+    }
+
+    /// Attaches asking for the screen drawn afresh. A holder that keeps none
+    /// (a pipes run, or one started by an older binary) replays bytes from
+    /// `from` instead, and says so: `hello.screen` is false.
+    pub async fn attach_screen(socket: &Path, from: u64) -> Result<(Hello, Self)> {
+        Self::open(
+            socket,
+            Frame::Attach {
+                replay: true,
+                from,
+                screen: true,
+            },
+        )
+        .await
+    }
+
+    /// Connects, sends the opening `attach` frame and reads the `Hello`.
+    async fn open(socket: &Path, attach: Frame) -> Result<(Hello, Self)> {
         let stream = UnixStream::connect(socket)
             .await
             .with_context(|| format!("connecting to {}", socket.display()))?;
@@ -38,11 +66,7 @@ impl Session {
             rd: SessionReader(FrameReader::new(BufReader::new(rd))),
             wr: SessionWriter(wr),
         };
-        s.wr.send(&Frame::Attach {
-            replay: from.is_some(),
-            from: from.unwrap_or(0),
-        })
-        .await?;
+        s.wr.send(&attach).await?;
         match s.rd.recv().await? {
             Some(Frame::Hello(h)) => Ok((h, s)),
             other => bail!("expected hello, got {other:?}"),

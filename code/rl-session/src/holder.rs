@@ -1,6 +1,8 @@
 //! The holder server: one child, one socket, N attached clients.
 //!
-//! Output flows child → ring buffer → every attached client. Input, resize and
+//! Output flows child → ring buffer (and, for a tty run, a screen) → every
+//! attached client. A client that asks gets the screen drawn afresh instead of
+//! the ring's bytes. Input, resize and
 //! signals flow the other way from whichever client sends them (the daemon
 //! decides who may). After the child exits the holder lingers so a daemon that
 //! was down at the time can still attach, replay the tail and read the exit —
@@ -21,6 +23,7 @@ use crate::backend::{self, Resizer, Spec};
 use crate::exit::{Exit, write_exit_file};
 use crate::proto::{Frame, FrameReader, Hello, write_frame};
 use crate::ring::Ring;
+use crate::screen::Screen;
 use anyhow::{Context, Result};
 use jiff::Timestamp;
 use nix::sys::signal::{Signal, kill};
@@ -64,6 +67,9 @@ struct Shared {
     rows: u16,
     started_at: Timestamp,
     ring: Ring,
+    /// What the run has drawn so far, for a tty run: the ring holds bytes,
+    /// this holds the picture they make.
+    screen: Option<Screen>,
     exit: Option<Exit>,
 }
 
@@ -80,6 +86,7 @@ impl Shared {
             exit: self.exit.clone(),
             total: self.ring.total(),
             replay_from: self.ring.total(),
+            screen: false,
         }
     }
 }
@@ -113,6 +120,7 @@ pub async fn serve(cfg: Config, ready: oneshot::Sender<()>) -> Result<()> {
             rows: cfg.spec.rows,
             started_at: Timestamp::now(),
             ring: Ring::new(RING_CAPACITY),
+            screen: cfg.spec.tty.then(|| Screen::new(cfg.spec.cols, cfg.spec.rows)),
             exit: None,
         }),
         out: out_tx,
@@ -167,8 +175,6 @@ pub async fn serve(cfg: Config, ready: oneshot::Sender<()>) -> Result<()> {
     Ok(())
 }
 
-/// Child output → ring + broadcast, under one lock so an attaching client's
-/// snapshot and subscription line up with no gap and no duplicate.
 /// Signal a run's child, and — when it leads its own process group (a PTY
 /// child, which the pty setsid'd) — that whole group, so a wrapper shell and
 /// everything it spawned go together. A pipe child leads no group of its own,
@@ -179,10 +185,15 @@ fn signal_tree(pid: i32, sig: Signal) {
     let _ = kill(Pid::from_raw(-pid), sig);
 }
 
+/// Child output → ring + screen + broadcast, under one lock so an attaching
+/// client's snapshot and subscription line up with no gap and no duplicate.
 async fn pump_output(ctx: Arc<Ctx>, mut output: mpsc::Receiver<Vec<u8>>) {
     while let Some(chunk) = output.recv().await {
         let mut s = ctx.shared.lock().unwrap();
         s.ring.push(&chunk);
+        if let Some(sc) = s.screen.as_mut() {
+            sc.feed(&chunk);
+        }
         let _ = ctx.out.send(Arc::from(chunk));
     }
     debug!("output pump finished");
@@ -299,8 +310,8 @@ async fn client_loop(ctx: &Ctx, stream: UnixStream) -> std::io::Result<()> {
     let (rd, mut wr) = stream.into_split();
     let mut rd = FrameReader::new(BufReader::new(rd));
 
-    let (replay, from) = match rd.next().await? {
-        Some(Frame::Attach { replay, from }) => (replay, from),
+    let (replay, from, screen) = match rd.next().await? {
+        Some(Frame::Attach { replay, from, screen }) => (replay, from, screen),
         _ => return Ok(()),
     };
 
@@ -308,12 +319,18 @@ async fn client_loop(ctx: &Ctx, stream: UnixStream) -> std::io::Result<()> {
     // The replay starts at `from`, or at the oldest byte the ring still has.
     let mut exit_rx = ctx.exit.subscribe();
     let (mut out_rx, snapshot, hello) = {
-        let s = ctx.shared.lock().unwrap();
+        let mut s = ctx.shared.lock().unwrap();
         let total = s.ring.total();
         let oldest = total - s.ring.len() as u64;
         let start = from.clamp(oldest, total);
         let mut hello = s.hello();
-        let snapshot = if replay {
+        let snapshot = if let (true, Some(sc)) = (screen, s.screen.as_mut()) {
+            // The screen stands in for the bytes: nothing is replayed from the
+            // ring, and live output carries on from `total`.
+            hello.screen = true;
+            hello.replay_from = total;
+            sc.snapshot()
+        } else if replay {
             hello.replay_from = start;
             s.ring.snapshot().split_off((start - oldest) as usize)
         } else {
@@ -323,7 +340,7 @@ async fn client_loop(ctx: &Ctx, stream: UnixStream) -> std::io::Result<()> {
     };
     let mut exit_sent = hello.exit.is_some();
     write_frame(&mut wr, &Frame::Hello(hello.clone())).await?;
-    if replay && !snapshot.is_empty() {
+    if (replay || hello.screen) && !snapshot.is_empty() {
         write_frame(&mut wr, &Frame::Output(snapshot)).await?;
     }
     write_frame(&mut wr, &Frame::ReplayEnd).await?;
@@ -346,6 +363,9 @@ async fn client_loop(ctx: &Ctx, stream: UnixStream) -> std::io::Result<()> {
                         let mut s = ctx.shared.lock().unwrap();
                         s.cols = cols;
                         s.rows = rows;
+                        if let Some(sc) = s.screen.as_mut() {
+                            sc.resize(cols, rows);
+                        }
                     }
                 }
                 Some(Frame::Signal(n)) => match Signal::try_from(n) {
