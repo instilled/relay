@@ -1,16 +1,26 @@
-//! Claude's own sessions: what `claude agents --json` says, asked in the
-//! background (`Outsiders::serve`) and kept here, so a digest only reads
-//! what was last heard and never waits on `claude`.
+//! Claude's own sessions: told by its user-level hook, as Codex's and
+//! Gemini's are (`hooked`), and filled in by asking `claude agents --json`
+//! now and then, in the background (`Outsiders::serve`) — never on a
+//! digest's path.
 //!
-//! Asked only while something is showing the list, and only while the
-//! claude profile's binary is on this machine. A failed ask keeps the last
-//! good list for a grace period, then the list is empty until `claude`
-//! answers again.
+//! A hook cannot say all of it: whether a session is in Claude's
+//! background, its attach `id`, its `name`, its `pid` and when it started;
+//! nor can it tell of a session that began before the hook was there, or
+//! before `rld` was. `claude agents` says those, but costs a Node start
+//! (some 0.13s and 160 MB) each time, so it is asked only with a reason
+//! (`Asker`), and only while something is showing the list:
+//! - the first time the list is wanted in a while;
+//! - when a hook tells of a session the last ask did not list (once for
+//!   each, and no more than once every `BETWEEN`);
+//! - every `BACKGROUND` while one of Claude's background sessions is
+//!   listed: whether Claude runs user-level hooks in those is not
+//!   documented, and this is the safety net;
+//! - every `UNHOOKED` while Claude's user-level hook is not in its
+//!   settings (read once every `RECHECK` at most), as nothing else would
+//!   tell.
 //!
-//! So a digest after a quiet minute has none yet, and a one-off one (`rl
-//! since`) never has them: only a panel, asking every second, keeps the list
-//! filled. Asking `claude` from the digest instead would make every digest
-//! wait on it.
+//! A failed ask leaves the list as it was. Nothing is asked while the
+//! claude profile's binary is not on this machine.
 //!
 //! `rld` spawns no `claude` of its own beyond `claude agents` and `claude
 //! stop`, which are not sessions: every other is a run (see `outside`).
@@ -18,53 +28,77 @@
 use anyhow::{Context, Result, anyhow, bail};
 use jiff::Timestamp;
 use rl_detect::Registry;
+use rl_detect::user_hooks;
 use rl_proto::methods::Outside;
 use serde::Deserialize;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
 /// The profile whose sessions these are.
-pub const AGENT: &str = "claude";
-/// How often `claude agents --json` is asked while the list is showing.
-pub const EVERY: Duration = Duration::from_secs(5);
-/// How long the last good list stands while `claude` fails to answer.
-pub const GRACE: Duration = Duration::from_secs(30);
+pub const AGENT: &str = user_hooks::CLAUDE;
+/// The `kind` Claude gives a session in its background.
+pub const BACKGROUND_KIND: &str = "background";
+/// How often `serve` wakes, to let go of sessions that ended without a
+/// word and to see whether an ask is due.
+pub const TICK: Duration = Duration::from_secs(5);
+/// The least time from one ask to the next that a hook called for.
+pub const BETWEEN: Duration = Duration::from_secs(3);
+/// How often `claude` is asked while a background session is listed.
+pub const BACKGROUND: Duration = Duration::from_secs(60);
+/// How often it is asked while Claude's user-level hook is not there.
+pub const UNHOOKED: Duration = Duration::from_secs(30);
+/// How often Claude's settings are read for the hook, at most.
+pub const RECHECK: Duration = Duration::from_secs(60);
 /// How long one ask may take.
 pub const WAIT: Duration = Duration::from_secs(10);
-/// `RELAY_CLAUDE_SESSIONS=off` keeps `rld` from asking. The repo's
-/// `.cargo/config.toml` sets it for everything cargo runs — the tests, the
-/// `rl` and `rld` they start, and `cargo run` too, where
+/// `RELAY_CLAUDE_SESSIONS=off` keeps `rld` from asking; hooks still tell.
+/// The repo's `.cargo/config.toml` sets it for everything cargo runs — the
+/// tests, the `rl` and `rld` they start, and `cargo run` too, where
 /// `RELAY_CLAUDE_SESSIONS=on cargo run --bin rld` asks anyway (cargo leaves
 /// a variable already set alone). Any other value, or none, asks.
 const OFF: &str = "RELAY_CLAUDE_SESSIONS";
 
-/// How often to ask, how long a list outlives a failure, and how long one
-/// ask may take.
-#[derive(Debug, Clone, Copy)]
+/// When `claude agents` is asked, and how long an ask may take.
+#[derive(Debug, Clone)]
 pub struct Polling {
-    pub every: Duration,
-    pub grace: Duration,
+    pub tick: Duration,
+    pub between: Duration,
+    pub background: Duration,
+    pub unhooked: Duration,
+    pub recheck: Duration,
     pub wait: Duration,
+    /// Claude's user-level settings, where its hook is when `rl setup`
+    /// added it; none, and it is taken as not there.
+    pub settings: Option<PathBuf>,
 }
 
 impl Default for Polling {
     fn default() -> Self {
         Self {
-            every: EVERY,
-            grace: GRACE,
+            tick: TICK,
+            between: BETWEEN,
+            background: BACKGROUND,
+            unhooked: UNHOOKED,
+            recheck: RECHECK,
             wait: WAIT,
+            settings: None,
         }
     }
 }
 
 impl Polling {
-    /// The default, unless `RELAY_CLAUDE_SESSIONS=off`.
+    /// The default, with Claude's settings where this environment places
+    /// them — unless `RELAY_CLAUDE_SESSIONS=off`.
     pub fn from_env() -> Option<Self> {
         match std::env::var(OFF) {
             Ok(v) if v == "off" => None,
-            _ => Some(Self::default()),
+            _ => Some(Self {
+                settings: user_hooks::file(AGENT, |k| std::env::var_os(k)),
+                ..Self::default()
+            }),
         }
     }
 }
@@ -86,72 +120,130 @@ pub(crate) async fn hear(registry: &Registry, wait: Duration) -> Result<Vec<Outs
 }
 
 #[derive(Default)]
-struct List {
-    list: Vec<Outside>,
-    /// When `claude` last answered.
-    heard: Option<Instant>,
-    /// Why it did not, last time, in words that stay put (`error_key`):
-    /// logged only when those change.
+struct Asks {
+    /// When the last ask began.
+    began: Option<Instant>,
+    /// The sessions the last good ask listed, by key.
+    listed: HashSet<String>,
+    /// An ask is called for: the list wanted afresh, or a hook told of a
+    /// session not listed.
+    wanted: bool,
+    /// The sessions not listed that an ask was called for already.
+    called: HashSet<String>,
+    /// Whether Claude's settings had Relay's hook, and when that was read.
+    hooked: Option<(bool, Instant)>,
+    /// Why `claude` was not heard last time, in words that stay put
+    /// (`error_key`): logged only when those change.
     error: Option<String>,
 }
 
-/// Claude's sessions as last heard.
-pub(crate) struct Kept {
+/// When to ask `claude agents`, and what the last ask said.
+pub(crate) struct Asker {
     polling: Polling,
-    kept: Mutex<List>,
+    asks: Mutex<Asks>,
 }
 
-impl Kept {
+impl Asker {
     pub fn new(polling: Polling) -> Self {
         Self {
             polling,
-            kept: Mutex::default(),
+            asks: Mutex::default(),
         }
     }
 
-    pub fn every(&self) -> Duration {
-        self.polling.every
+    pub fn polling(&self) -> &Polling {
+        &self.polling
     }
 
-    pub fn wait(&self) -> Duration {
-        self.polling.wait
+    /// The list is wanted afresh: an ask is called for.
+    pub fn want(&self) {
+        self.asks.lock().unwrap().wanted = true;
     }
 
-    /// The sessions last heard of, if that was within the grace period.
-    pub fn latest(&self) -> Vec<Outside> {
-        let k = self.kept.lock().unwrap();
-        match k.heard {
-            Some(at) if at.elapsed() <= self.polling.grace => k.list.clone(),
-            _ => vec![],
+    /// A hook told of the session `key`: whether that calls for an ask —
+    /// the last one did not list it, and none was called for it yet.
+    pub fn told_of(&self, key: &str) -> bool {
+        let mut a = self.asks.lock().unwrap();
+        if a.listed.contains(key) || !a.called.insert(key.to_string()) {
+            return false;
         }
+        a.wanted = true;
+        true
     }
 
-    /// Keeps what was heard, or says once why nothing was.
-    pub fn keep(&self, heard: Result<Vec<Outside>, NotHeard>) {
-        let mut k = self.kept.lock().unwrap();
-        match heard {
-            Ok(list) => {
-                if k.error.take().is_some() {
-                    info!(sessions = list.len(), "claude sessions: listed again");
-                }
-                if k.list != list {
-                    debug!(sessions = list.len(), "claude sessions changed");
-                }
-                k.list = list;
-                k.heard = Some(Instant::now());
+    /// The session `key` is gone: a hook that tells of it again calls for
+    /// an ask again.
+    pub fn forget(&self, key: &str) {
+        self.asks.lock().unwrap().called.remove(key);
+    }
+
+    /// How long until an ask is due, from `now`, while the list is showing:
+    /// zero when it is due now, `Duration::MAX` when nothing calls for one.
+    /// `background`: whether one of Claude's background sessions is
+    /// listed. Whether Claude's hook is there is read from its settings,
+    /// no more than once every `recheck`.
+    pub fn due_in(&self, now: Instant, background: bool) -> Duration {
+        let p = &self.polling;
+        let mut a = self.asks.lock().unwrap();
+        let hooked = match a.hooked {
+            Some((hooked, at)) if now.saturating_duration_since(at) < p.recheck => hooked,
+            _ => {
+                let hooked = self.read_hooked();
+                a.hooked = Some((hooked, now));
+                hooked
             }
-            Err(NotHeard { missing, why }) => {
-                let why = format!("{why:#}");
-                let key = error_key(&why).to_string();
-                if k.error.as_deref() != Some(key.as_str()) {
-                    if missing {
-                        debug!(error = %why, "claude sessions not listed");
-                    } else {
-                        warn!(error = %why, "claude sessions not listed; the last list stands a while");
-                    }
-                    k.error = Some(key);
-                }
+        };
+        let since = a.began.map(|b| now.saturating_duration_since(b));
+        let after = |every: Duration| since.map_or(Duration::ZERO, |s| every.saturating_sub(s));
+        [
+            a.wanted.then(|| after(p.between)),
+            background.then(|| after(p.background)),
+            (!hooked).then(|| after(p.unhooked)),
+        ]
+        .into_iter()
+        .flatten()
+        .min()
+        .unwrap_or(Duration::MAX)
+    }
+
+    /// Whether Claude's settings have Relay's hook in them, as they read.
+    /// A file that does not read has none that runs.
+    fn read_hooked(&self) -> bool {
+        self.polling
+            .settings
+            .as_deref()
+            .is_some_and(|f| user_hooks::installed(f, AGENT).unwrap_or(false))
+    }
+
+    /// An ask begins now: what called for it is answered.
+    pub fn began(&self, at: Instant) {
+        let mut a = self.asks.lock().unwrap();
+        a.began = Some(at);
+        a.wanted = false;
+    }
+
+    /// What the ask heard: its sessions, by key.
+    pub fn listed(&self, listed: HashSet<String>) {
+        let mut a = self.asks.lock().unwrap();
+        if a.error.take().is_some() {
+            info!(sessions = listed.len(), "claude sessions: listed again");
+        }
+        a.called.retain(|k| !listed.contains(k));
+        a.listed = listed;
+    }
+
+    /// Says once why nothing was heard; the list stands as it was.
+    pub fn not_heard(&self, NotHeard { missing, why }: NotHeard) {
+        let mut a = self.asks.lock().unwrap();
+        let why = format!("{why:#}");
+        let key = error_key(&why).to_string();
+        if a.error.as_deref() != Some(key.as_str()) {
+            if missing {
+                debug!(error = %why, "claude sessions not listed");
+            } else {
+                warn!(error = %why, "claude sessions not listed; the list stands as it was");
             }
+            a.error = Some(key);
         }
     }
 }
@@ -339,14 +431,79 @@ mod tests {
     }
 
     #[test]
-    fn no_claude_here_leaves_the_list_empty() {
-        let kept = Kept::new(Polling::default());
-        kept.keep(Err(NotHeard {
+    fn no_claude_here_is_said_once() {
+        let asker = Asker::new(Polling::default());
+        asker.not_heard(NotHeard {
             missing: true,
             why: anyhow!("`claude` is not on this machine"),
-        }));
-        assert!(kept.latest().is_empty());
-        assert!(kept.kept.lock().unwrap().error.is_some(), "said once, at debug");
+        });
+        assert!(asker.asks.lock().unwrap().error.is_some(), "said once, at debug");
+    }
+
+    const S: Duration = Duration::from_secs(1);
+
+    /// An asker with the default intervals, its hook there or not.
+    fn asker(hooked: bool) -> (tempfile::TempDir, Asker) {
+        let tmp = tempfile::tempdir().unwrap();
+        let settings = tmp.path().join("settings.json");
+        if hooked {
+            user_hooks::install(&settings, AGENT, Path::new("/x/rl")).unwrap();
+        }
+        let asker = Asker::new(Polling {
+            settings: Some(settings),
+            ..Polling::default()
+        });
+        (tmp, asker)
+    }
+
+    #[test]
+    fn with_the_hook_there_it_asks_once_when_wanted_and_then_only_with_a_reason() {
+        let (_tmp, asker) = asker(true);
+        let t0 = Instant::now();
+        assert_eq!(asker.due_in(t0, false), Duration::MAX, "nothing calls for one");
+        asker.want();
+        assert_eq!(asker.due_in(t0, false), Duration::ZERO, "the first in a while: now");
+        asker.began(t0);
+        asker.listed(HashSet::from(["o:claude:a".to_string()]));
+        assert_eq!(asker.due_in(t0 + 50 * S, false), Duration::MAX);
+
+        // A hook tells of one listed: nothing. Of one not: an ask, once,
+        // and not sooner than `BETWEEN` after the last.
+        assert!(!asker.told_of("o:claude:a"));
+        assert!(asker.told_of("o:claude:b"));
+        assert!(!asker.told_of("o:claude:b"), "called for already");
+        assert_eq!(asker.due_in(t0 + S, false), BETWEEN - S);
+        assert_eq!(asker.due_in(t0 + 10 * S, false), Duration::ZERO);
+        asker.began(t0 + 10 * S);
+        asker.listed(HashSet::from(["o:claude:a".to_string()]));
+        assert!(!asker.told_of("o:claude:b"), "asked for it once; not listed still");
+        asker.forget("o:claude:b");
+        assert!(asker.told_of("o:claude:b"), "gone, and told of again");
+
+        // A background session listed: about once a minute.
+        let (_tmp, asker) = self::asker(true);
+        asker.began(t0);
+        assert_eq!(asker.due_in(t0 + 20 * S, true), BACKGROUND - 20 * S);
+        assert_eq!(asker.due_in(t0 + BACKGROUND, true), Duration::ZERO);
+    }
+
+    #[test]
+    fn without_the_hook_it_asks_every_half_minute_and_reads_the_file_once_a_minute() {
+        let (tmp, asker) = asker(false);
+        let t0 = Instant::now();
+        assert_eq!(asker.due_in(t0, false), Duration::ZERO);
+        asker.began(t0);
+        assert_eq!(asker.due_in(t0 + 10 * S, false), UNHOOKED - 10 * S);
+        assert_eq!(asker.due_in(t0 + UNHOOKED, false), Duration::ZERO);
+        // The hook added: not seen until the file is read again.
+        user_hooks::install(&tmp.path().join("settings.json"), AGENT, Path::new("/x/rl")).unwrap();
+        asker.began(t0 + UNHOOKED);
+        assert_eq!(asker.due_in(t0 + RECHECK - S, false), S, "as read at t0: not there");
+        assert_eq!(
+            asker.due_in(t0 + RECHECK + S, false),
+            Duration::MAX,
+            "read again after a minute"
+        );
     }
 
     #[tokio::test]

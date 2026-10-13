@@ -1,8 +1,10 @@
-//! `rl hook codex|gemini <Event>` through the real binaries: outside any run
-//! it puts the agent's own session on the digest, and takes it off when it
-//! ends; under a run it is the run's signal and tags the run, and no
-//! session of the agent's shows. No codex or gemini runs: the hooks are
-//! called as the agents would call them, JSON on stdin.
+//! `rl hook codex|gemini <Event>`, and Claude's `rl hook claude <Event>
+//! --user`, through the real binaries: outside any run it puts the agent's
+//! own session on the digest, and takes it off when it ends; under a run of
+//! that agent's it is the run's signal and tags the run (Claude's `--user`
+//! copy says nothing there, the run's own hook having said it), and no
+//! session of the agent's shows. No real agent runs: the hooks are called as
+//! the agents would call them, JSON on stdin.
 
 use rl_cli::client::Client;
 use rl_core::Home;
@@ -236,6 +238,98 @@ async fn an_agents_own_session_is_told_by_its_hook_and_a_runs_is_not() {
     }
 
     for id in [&id, &wrapper, &command, &claude] {
+        assert!(cmd(&["stop", id]).status().unwrap().success());
+    }
+    assert!(cmd(&["daemon", "stop"]).status().unwrap().success());
+}
+
+#[tokio::test]
+async fn claudes_user_level_hook_tells_of_its_own_sessions_and_never_a_claude_runs() {
+    let (Some(rld), Some(session)) = (sibling("rld"), sibling("rl-session")) else {
+        eprintln!("skipping: rld / rl-session not built (run `cargo test --workspace`)");
+        return;
+    };
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().canonicalize().unwrap();
+    let app = home.join("app");
+    std::fs::create_dir_all(&app).unwrap();
+    let cmd = |args: &[&str]| {
+        let mut c = rl(&home, &rld, &session, args);
+        c.env("CLAUDE_CONFIG_DIR", home.join("claude-config"));
+        c
+    };
+    let payload = |sid: &str, event: &str| {
+        format!(
+            r#"{{"session_id":"{sid}","cwd":"{}","hook_event_name":"{event}","transcript_path":"/t/{sid}.jsonl"}}"#,
+            app.display()
+        )
+    };
+    let user = |run: Option<&str>, sid: &str, event: &str| {
+        let mut c = cmd(&["hook", "claude", event, "--user"]);
+        if let Some(id) = run {
+            c.env("RELAY_RUN", id);
+        }
+        let (ok, out, took) = hook(c, &payload(sid, event));
+        assert!(
+            ok && out.is_empty() && took < Duration::from_secs(2),
+            "{out:?} {took:?}"
+        );
+    };
+    assert!(cmd(&["daemon", "start"]).status().unwrap().success());
+
+    // Outside any run: an idle session of Claude's, until it ends.
+    user(None, "c1", "Stop");
+    let list = outside(&home).await;
+    let c1 = list.iter().find(|s| s.key() == "o:claude:c1").expect("told");
+    assert_eq!(
+        (c1.status.as_str(), c1.kind.as_str(), c1.cwd.as_path()),
+        ("idle", "interactive", app.as_path())
+    );
+    user(None, "c1", "SessionEnd");
+    assert!(outside(&home).await.is_empty());
+
+    // Under a Claude run of Relay's (the stand-in, called `claude`): its
+    // own hook is its signal; the user-level copy changes nothing.
+    let fake = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../fixtures/fake-cli");
+    let bin = home.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::os::unix::fs::symlink(&fake, bin.join("claude")).unwrap();
+    let start = |args: &[&str]| {
+        let out = cmd(args).output().unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    let run_of = |id: &str| {
+        let ls = cmd(&["ls", "--all", "--json"]).output().unwrap();
+        let runs: serde_json::Value = serde_json::from_slice(&ls.stdout).unwrap();
+        runs.as_array().unwrap().iter().find(|r| r["id"] == id).unwrap().clone()
+    };
+    let claude = start(&["run", "--agent", bin.join("claude").to_str().unwrap()]);
+    assert_eq!(run_of(&claude)["cli"], "claude");
+    let before = run_of(&claude);
+    for event in ["SessionStart", "UserPromptSubmit", "Stop"] {
+        user(Some(&claude), "r1", event);
+    }
+    let after = run_of(&claude);
+    assert_eq!(
+        (&after["state"], &after["tags"], &after["title"]),
+        (&before["state"], &before["tags"], &before["title"])
+    );
+    assert!(outside(&home).await.is_empty(), "the run's own, not Claude's");
+
+    // A claude started in a command run of Relay's (a shell's is the same
+    // to it): one of Claude's own.
+    let command = start(&["run", "--", "sh", "-c", "sleep 30"]);
+    let before = run_of(&command);
+    user(Some(&command), "n1", "UserPromptSubmit");
+    let nested = outside(&home).await;
+    assert!(
+        nested.iter().any(|s| s.key() == "o:claude:n1" && s.status == "busy"),
+        "{nested:?}"
+    );
+    assert_eq!(run_of(&command)["state"], before["state"]);
+
+    for id in [&claude, &command] {
         assert!(cmd(&["stop", id]).status().unwrap().success());
     }
     assert!(cmd(&["daemon", "stop"]).status().unwrap().success());

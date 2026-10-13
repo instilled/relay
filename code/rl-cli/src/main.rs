@@ -164,8 +164,9 @@ struct MarkArgs {
 struct HookArgs {
     /// `<agent> <Event>` — the agent whose hook it is (claude, codex,
     /// gemini), then the hook event name, e.g. Notification or Stop — or an
-    /// event alone, which is Claude's. Anything else is taken, and ignored:
-    /// see `rl_cli::hook::words`.
+    /// event alone, which is Claude's; `--user` after them for the copy in
+    /// the user's own settings. Anything else is taken, and ignored: see
+    /// `rl_cli::hook::words`.
     #[arg(trailing_var_arg = true, allow_hyphen_values = true, num_args = 0..)]
     words: Vec<String>,
 }
@@ -565,8 +566,8 @@ async fn mark(home: &Home, a: MarkArgs, json: bool) -> Result<()> {
 /// does not know do nothing, and `rl_cli::hook` swallows any trouble, prints
 /// nothing and gives up within its time.
 async fn hook(home: &Home, words: &[String]) -> Result<()> {
-    if let Some((agent, event)) = rl_cli::hook::words(words) {
-        rl_cli::hook::hook(home, &agent, &event).await;
+    if let Some(words) = rl_cli::hook::words(words) {
+        rl_cli::hook::hook(home, &words).await;
     }
     Ok(())
 }

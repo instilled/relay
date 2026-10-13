@@ -3,10 +3,18 @@
 //!
 //! Under a Relay run (`RELAY_RUN` set) it is that run's signal, posted as
 //! `run.hook`. Outside any run — or inside a run of another kind, which
-//! `rld` answers by leaving the run as it was — a Codex or Gemini hook
+//! `rld` answers by leaving the run as it was — an agent's user-level hook
 //! tells `rld` of one of the agent's own sessions (`outside.hook`), which
-//! the list then shows as theirs; Claude's own are listed by `claude
-//! agents`, so its hook says nothing there.
+//! the list then shows as theirs.
+//!
+//! Claude's user-level hook says `--user` after the event
+//! (`user_hooks::says_user`): a Claude run of Relay's calls both it and the
+//! run's own hook (`rl hook claude <Event>`, from the settings `rld` passes
+//! it), and only the run's own is the run's signal. The `--user` copy is
+//! never posted as `run.hook`; it goes to `rld` as `outside.hook`, with the
+//! run it was called under, and `rld` lets it go when that run is Claude's
+//! own (`user_hooks::foreign`) — one call either way. The run's own hook,
+//! outside any run, says nothing.
 //!
 //! A hook must never slow down or break the agent that called it: all of
 //! it — reading stdin, finding the agent's process, the post — is done
@@ -37,13 +45,26 @@ pub fn args() -> Option<Vec<String>> {
     (args.next()? == "hook").then(|| args.map(|a| a.to_string_lossy().into_owned()).collect())
 }
 
-/// `(agent, event)` from `rl hook`'s words: `<agent> <Event>`, or `<Event>`
-/// alone as written before the agent was named, which is Claude's.
-/// `--dialect <agent>` (or `=<agent>`), the older spelling, names the agent
-/// as well, wherever it stands; naming two that differ is not a shape this
-/// knows. None for any shape it does not know: the hook then does nothing.
-pub fn words(words: &[String]) -> Option<(String, String)> {
+/// What `rl hook` was called with.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Words {
+    pub agent: String,
+    pub event: String,
+    /// `--user`: the copy in the user's own settings, not a run's own
+    /// (`user_hooks::USER`). Only Claude's says it; any agent's may.
+    pub user: bool,
+}
+
+/// What `rl hook` was called with, from its words: `<agent> <Event>`, or
+/// `<Event>` alone as written before the agent was named, which is
+/// Claude's; and `--user`, wherever it stands. `--dialect <agent>` (or
+/// `=<agent>`), the older spelling, names the agent as well, wherever it
+/// stands; naming two that differ is not a shape this knows. None for any
+/// shape it does not know — any other word with a dash — and the hook then
+/// does nothing.
+pub fn words(words: &[String]) -> Option<Words> {
     let mut dialect = None;
+    let mut user = false;
     let mut rest = Vec::new();
     let mut words = words.iter();
     while let Some(w) = words.next() {
@@ -51,25 +72,35 @@ pub fn words(words: &[String]) -> Option<(String, String)> {
             dialect = Some(words.next()?.clone());
         } else if let Some(d) = w.strip_prefix("--dialect=") {
             dialect = Some(d.to_string());
+        } else if w == user_hooks::USER {
+            user = true;
         } else if w.starts_with('-') || w.is_empty() {
             return None;
         } else {
             rest.push(w.clone());
         }
     }
-    match (rest.as_slice(), dialect) {
-        ([event], dialect) => Some((dialect.unwrap_or_else(|| "claude".into()), event.clone())),
-        ([agent, event], Some(d)) if d != *agent => None,
-        ([agent, event], _) => Some((agent.clone(), event.clone())),
-        _ => None,
-    }
+    let (agent, event) = match (rest.as_slice(), dialect) {
+        ([event], dialect) => (dialect.unwrap_or_else(|| user_hooks::CLAUDE.into()), event.clone()),
+        ([agent, event], Some(d)) if d != *agent => return None,
+        ([agent, event], _) => (agent.clone(), event.clone()),
+        _ => return None,
+    };
+    Some(Words { agent, event, user })
 }
 
 /// Does what the hook asks, or nothing, within `WITHIN`. Never fails.
-pub async fn hook(home: &Home, agent: &str, event: &str) {
+pub async fn hook(home: &Home, words: &Words) {
     let deadline = Instant::now() + WITHIN;
+    let (agent, event) = (words.agent.as_str(), words.event.as_str());
     let run = std::env::var("RELAY_RUN").ok().filter(|s| !s.is_empty());
-    if run.is_none() && !user_hooks::AGENTS.contains(&agent) {
+    // Where the agent's user-level copy says so, only that copy tells of
+    // the agent's own sessions, and it is never a run's signal.
+    let marked = user_hooks::says_user(agent);
+    let user = words.user && marked;
+    let tells = user_hooks::AGENTS.contains(&agent) && (user || !marked);
+    let signals = run.is_some() && !user;
+    if !tells && !signals {
         return;
     }
     let Some(raw) = stdin_until(deadline) else { return };
@@ -77,7 +108,7 @@ pub async fn hook(home: &Home, agent: &str, event: &str) {
     let said = async {
         // The daemon first: with none up, nothing else is worth the time.
         let mut rld = Client::connect(home).await?;
-        if let Some(id) = run {
+        if signals && let Some(id) = run {
             let params = RunHookParams {
                 id,
                 dialect: agent.to_string(),
@@ -87,7 +118,7 @@ pub async fn hook(home: &Home, agent: &str, event: &str) {
             let run = rld.call::<RunHook>(params).await?;
             // The run's own word: said. Another agent's, started inside that
             // run (a codex a shell run started), is one of the agent's own.
-            if !user_hooks::AGENTS.contains(&agent) || !user_hooks::foreign(&run, agent) {
+            if !tells || !user_hooks::foreign(&run, agent) {
                 return anyhow::Ok(());
             }
         }
@@ -121,7 +152,8 @@ fn stdin_until(deadline: Instant) -> Option<String> {
 
 /// What an outside session's hook tells `rld`, from its payload: its
 /// session and folder (Gemini also puts them in `GEMINI_SESSION_ID` and
-/// `GEMINI_CWD`, read where the payload lacks them). None without both.
+/// `GEMINI_CWD`, read where the payload lacks them), and the run it was
+/// called under (`RELAY_RUN`). None without both.
 pub fn outside(
     agent: &str,
     event: &str,
@@ -145,6 +177,7 @@ pub fn outside(
         detail: user_hooks::detail(event, payload),
         pid: None,
         transcript_path: field("transcript_path").filter(|t| !t.is_empty()).map(PathBuf::from),
+        run: env("RELAY_RUN").filter(|r| !r.is_empty()),
     })
 }
 
@@ -240,7 +273,8 @@ mod tests {
 
     #[test]
     fn a_hook_names_its_agent_or_is_claudes() {
-        let said = |args: &[&str]| words(&args.iter().map(|a| a.to_string()).collect::<Vec<_>>());
+        let said =
+            |args: &[&str]| words(&args.iter().map(|a| a.to_string()).collect::<Vec<_>>()).map(|w| (w.agent, w.event));
         let pair = |a: &str, e: &str| Some((a.to_string(), e.to_string()));
         assert_eq!(said(&["codex", "Stop"]), pair("codex", "Stop"));
         assert_eq!(said(&["Stop"]), pair("claude", "Stop"));
@@ -257,9 +291,21 @@ mod tests {
             &["-x", "Stop"],
             &["Stop", "--dialect"],
             &[""],
+            &["claude", "Stop", "--users"],
+            &["--user"],
         ] {
             assert_eq!(said(bad), None, "{bad:?}");
         }
+    }
+
+    #[test]
+    fn claudes_user_level_copy_says_so_after_its_event() {
+        let said = |args: &[&str]| words(&args.iter().map(|a| a.to_string()).collect::<Vec<_>>());
+        let w = said(&["claude", "Stop", "--user"]).unwrap();
+        assert_eq!((w.agent.as_str(), w.event.as_str(), w.user), ("claude", "Stop", true));
+        assert!(!said(&["claude", "Stop"]).unwrap().user, "a run's own");
+        assert!(said(&["--user", "Stop"]).unwrap().user, "wherever it stands");
+        assert!(said(&["codex", "Stop", "--user"]).unwrap().user, "taken, and harmless");
     }
 
     #[test]
@@ -328,6 +374,10 @@ mod tests {
             ("s1", Some("/w/app"), Some("shell"), None)
         );
         assert_eq!(p.transcript_path.as_deref(), Some(std::path::Path::new("/t/s1.jsonl")));
+        assert_eq!(p.run, None);
+        let under = |k: &str| (k == "RELAY_RUN").then(|| "r-1".to_string());
+        let p = outside("claude", "Stop", &json!({"session_id": "s1", "cwd": "/w"}), under).unwrap();
+        assert_eq!(p.run.as_deref(), Some("r-1"), "the run it was called under");
         assert!(outside("codex", "Stop", &json!({"cwd": "/w"}), none).is_none());
         assert!(outside("codex", "Stop", &json!({"session_id": "s", "cwd": "w"}), none).is_none());
         assert!(outside("codex", "Stop", &Value::Null, none).is_none());

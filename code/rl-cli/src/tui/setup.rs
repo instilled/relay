@@ -7,8 +7,8 @@
 //! settles goes into `config.yaml`, written by rld; how far it got goes into
 //! the ledger, so the file stays yours.
 //!
-//! The last step writes into an agent's own file: Codex's and Gemini's
-//! hooks, so their sessions started outside Relay show on the list. Only
+//! The last step writes into an agent's own file: Claude's, Codex's and
+//! Gemini's hooks, so their sessions started outside Relay show on the list. Only
 //! what is there already starts picked, and what is added or taken out is
 //! only what you turned on or off, written by `rl` itself
 //! (`rl_detect::user_hooks`) where this environment says the agent looks.
@@ -45,7 +45,7 @@ enum Step {
     Summaries,
     /// Claude's own sessions, moved over to Relay.
     Sessions,
-    /// Codex's and Gemini's own sessions, shown by their hooks.
+    /// The agents' own sessions, shown by their hooks.
     Hooks,
 }
 
@@ -771,7 +771,8 @@ fn display(agent: &str) -> String {
 }
 
 /// Adds or takes out each agent's hooks as the guide settled, in words for
-/// the flash line: what changed, and what codex asks of you after.
+/// the flash line: what changed, and what the agent asks of you after
+/// (`user_hooks::after_install`).
 pub fn hook_them(hooking: &[(Hookable, bool)], rl_bin: &Path) -> String {
     let mut said = Vec::new();
     for (h, on) in hooking {
@@ -782,11 +783,9 @@ pub fn hook_them(hooking: &[(Hookable, bool)], rl_bin: &Path) -> String {
         } else {
             user_hooks::uninstall(&h.file, &h.name)
         };
-        let trust = if h.name == user_hooks::CODEX {
-            " · codex asks you to trust it once: open codex, /hooks"
-        } else {
-            ""
-        };
+        let trust = user_hooks::after_install(&h.name)
+            .map(|a| format!(" · {a}"))
+            .unwrap_or_default();
         said.push(match (done, on) {
             (Err(e), _) => format!("{}: {e:#}", h.name),
             // There and right already: nothing to say.
@@ -1354,8 +1353,9 @@ mod tests {
         assert!(text.contains("esc back to the list"), "{text}");
     }
 
-    /// Codex and Gemini found, their files under a fake home: codex's not
-    /// there yet, gemini's with Relay's hooks in already.
+    /// Claude, Codex and Gemini found, their files under a fake home:
+    /// claude's and codex's not there yet, gemini's with Relay's hooks in
+    /// already.
     fn fake_home() -> (tempfile::TempDir, Vec<Hookable>) {
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path().to_path_buf();
@@ -1372,6 +1372,12 @@ mod tests {
         assert_eq!(
             found,
             [
+                Hookable {
+                    name: "claude".into(),
+                    file: tmp.path().join(".claude/settings.json"),
+                    installed: Ok(false),
+                    warning: None,
+                },
                 Hookable {
                     name: "codex".into(),
                     file: tmp.path().join(".codex/hooks.json"),
@@ -1392,13 +1398,13 @@ mod tests {
         let home = tmp.path().to_path_buf();
         let env = |k: &str| (k == "HOME").then(|| home.clone().into_os_string());
         let again = hookable_in(&state(Config::default()).agents, env);
-        assert!(again[1].installed.as_ref().unwrap_err().contains("left as it was"));
+        assert!(again[2].installed.as_ref().unwrap_err().contains("left as it was"));
         // Codex's own config with hooks inline: said on the row.
         std::fs::create_dir_all(tmp.path().join(".codex")).unwrap();
         std::fs::write(tmp.path().join(".codex/config.toml"), "[[hooks.Stop]]\n").unwrap();
         let again = hookable_in(&state(Config::default()).agents, env);
         assert!(
-            again[0]
+            again[1]
                 .warning
                 .as_deref()
                 .unwrap()
@@ -1483,6 +1489,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(g.steps, [Step::Hooks]);
+        press(&mut g, KeyCode::Down);
         press(&mut g, KeyCode::Char(' '));
         press(&mut g, KeyCode::Down);
         press(&mut g, KeyCode::Char(' '));
@@ -1522,8 +1529,27 @@ mod tests {
     fn hooking_writes_the_files_and_says_what_codex_asks() {
         let (tmp, found) = fake_home();
         let words = hook_them(
-            &[(found[0].clone(), true), (found[1].clone(), false)],
+            &[
+                (found[0].clone(), true),
+                (found[1].clone(), true),
+                (found[2].clone(), false),
+            ],
             Path::new("/opt/rl"),
+        );
+        assert!(
+            words.contains(
+                "claude hooks added to {} · Claude picks it up in sessions started from now on; \
+                 ones already open may ask you to review it in /hooks"
+                    .replace("{}", &rl_core::display_path(&tmp.path().join(".claude/settings.json")))
+                    .as_str()
+            ),
+            "{words}"
+        );
+        let claude = tmp.path().join(".claude/settings.json");
+        assert!(
+            std::fs::read_to_string(&claude)
+                .unwrap()
+                .contains("'/opt/rl' hook claude Notification --user || true")
         );
         assert!(
             words.contains("codex asks you to trust it once: open codex, /hooks"),
@@ -1555,6 +1581,12 @@ mod tests {
         let mut lines = Vec::new();
         g.draw_hooks(&mut lines);
         let said: String = lines.iter().map(|l| l.to_string()).collect::<Vec<_>>().join("\n");
+        assert!(said.contains("[ ] claude"), "{said}");
+        assert!(
+            said.contains("Show Claude sessions started outside Relay? This adds a hook to"),
+            "{said}"
+        );
+        assert!(said.contains(".claude/settings.json"), "{said}");
         assert!(said.contains("[ ] codex"), "{said}");
         assert!(
             said.contains("Show Codex sessions started outside Relay? This adds a hook to"),

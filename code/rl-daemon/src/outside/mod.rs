@@ -2,14 +2,17 @@
 //! are not Relay's runs, kept in memory so a digest only reads what was last
 //! heard and never waits on an agent.
 //!
-//! Each agent is a source: Claude's is asked (`claude agents --json`, in
-//! `claude`) while something is showing the list — a digest within the last
-//! minute, the way badges are; Codex's and Gemini's are told, by the hooks
-//! `rl setup` adds to their user-level files (`hooked`). What a source hears is settled here before
-//! it is kept: each session's project folder, resolved once per session as
-//! a run's would be (`workspace::filed_under`), and when it came to stand as
-//! it does (`state_at`), which brings a hidden one back once it needs you.
-//! Neither is worked out on a digest's path.
+//! Every agent's are told, by the hooks `rl setup` adds to their
+//! user-level files, and kept in one store (`hooked`). Claude's are filled
+//! in by asking `claude agents --json` too (`claude`), only with a reason
+//! and only while something is showing the list — a digest within the last
+//! minute, the way badges are: a hook cannot say whether a session is in
+//! Claude's background, nor tell of one that began before it was there.
+//! What is heard is settled here before it is kept: each session's project
+//! folder, resolved once per session as a run's would be
+//! (`workspace::filed_under`), and when it came to stand as it does
+//! (`state_at`), which brings a hidden one back once it needs you. Neither
+//! is worked out on a digest's path.
 //!
 //! The sessions that are Relay's own runs are left out of the list, as a
 //! digest reads it (`not_relays`): a run is tagged `<agent>-session:<id>`
@@ -63,9 +66,8 @@ pub fn left_open_pid(agent: &str) -> String {
 }
 
 /// What has been settled of a session, by its key: kept from one hearing to
-/// the next, and forgotten once its source says it is gone (`forget`).
+/// the next, and forgotten once it is gone (`forget_one`).
 struct Settled {
-    agent: String,
     /// None while it could not be filed: the panel guesses, and the next
     /// hearing tries again.
     workspace: Option<PathBuf>,
@@ -76,10 +78,11 @@ struct Settled {
 }
 
 pub struct Outsiders {
-    /// Claude's list, and how it is asked for; none, and it is not.
-    claude: claude::Kept,
-    asks_claude: bool,
-    /// The sessions hooks tell of.
+    /// When `claude agents` is asked; none, and it never is.
+    asker: Option<claude::Asker>,
+    /// How often `serve` wakes.
+    tick: Duration,
+    /// The sessions hooks tell of, and asks fill in.
     hooked: hooked::Hooked,
     settled: Mutex<HashMap<String, Settled>>,
     /// The sessions being carried on now, by key (`moving`).
@@ -90,13 +93,13 @@ pub struct Outsiders {
 }
 
 impl Outsiders {
-    /// `claude`: how Claude's list is asked for; none, and it never is,
-    /// while the store itself still serves (other agents' sessions are
-    /// told, not asked).
+    /// `claude`: when `claude agents` is asked; none, and it never is,
+    /// while the store itself still serves: every agent's sessions are
+    /// told by its hooks.
     pub fn new(claude: Option<Polling>) -> Self {
         Self {
-            claude: claude::Kept::new(claude.unwrap_or_default()),
-            asks_claude: claude.is_some(),
+            tick: claude.as_ref().map_or(claude::TICK, |p| p.tick),
+            asker: claude.map(claude::Asker::new),
             hooked: hooked::Hooked::default(),
             settled: Mutex::default(),
             moving: Mutex::default(),
@@ -106,20 +109,19 @@ impl Outsiders {
     }
 
     /// Every agent's sessions as last heard, Relay's own among them: the
-    /// digest leaves those out (`not_relays`). Each source's list joins
-    /// here — Claude's asked one now; ones their hooks tell, as they come.
-    /// Counts as the list showing: the first ask in a while is made now, in
-    /// the background, and a later digest carries what it heard.
+    /// digest leaves those out (`not_relays`). Counts as the list showing:
+    /// the first time in a while, `claude agents` is asked now, in the
+    /// background, and a later digest carries what it heard.
     pub fn latest(&self) -> Vec<Outside> {
         let mut w = self.wanted.lock().unwrap();
         let idle = w.is_none_or(|w| w.elapsed() > SHOWING);
         *w = Some(Instant::now());
-        if idle {
+        if idle && let Some(asker) = &self.asker {
+            asker.want();
             self.wake.notify_one();
         }
-        let mut list = self.claude.latest();
-        list.extend(self.hooked.latest());
-        list
+        drop(w);
+        self.hooked.latest()
     }
 
     /// Holds the session `key` while it is carried on, so a second ask to
@@ -138,14 +140,24 @@ impl Outsiders {
         self.hooked.last(&format!("o:{agent}:{session_id}"))
     }
 
-    /// What an agent's hook told of one of its sessions, outside any run:
-    /// kept, settled as any session is, or let go once it ended.
+    /// What an agent's hook told of one of its sessions, outside any run of
+    /// that agent's: kept, settled as any session is, or let go once it
+    /// ended. A word from under a run that is the agent's own (Claude's
+    /// user-level hook, in a Claude run of Relay's) is that run's, which its
+    /// own hooks have said: let go. Of one of Claude's that the last ask
+    /// did not list, an ask is called for, to fill it in.
     pub async fn told(&self, p: rl_proto::methods::OutsideHookParams, ledger: &Ledger) -> Result<()> {
         if !rl_detect::user_hooks::AGENTS.contains(&p.agent.as_str()) {
             bail!("`{}` sessions are not told by hooks", p.agent);
         }
         if p.session_id.is_empty() || !p.cwd.is_absolute() {
             bail!("a session needs its id and a whole folder");
+        }
+        if let Some(id) = p.run.clone() {
+            let run = ledger.call(move |c| rl_ledger::runs::get(c, &id)).await?;
+            if run.is_some_and(|r| !rl_detect::user_hooks::foreign(&r, &p.agent)) {
+                return Ok(());
+            }
         }
         let transcript = p.transcript_path.clone().filter(|t| t.is_absolute());
         match self.hooked.hear(p) {
@@ -157,9 +169,15 @@ impl Outsiders {
                 }
                 self.settle_one(&mut session, ledger).await;
                 let key = session.key();
+                let agent = session.agent.clone();
                 // Ended while it was settled: the end stands.
                 if !self.hooked.keep(*session, transcript) {
                     self.forget_one(&key);
+                } else if agent == claude::AGENT
+                    && let Some(asker) = &self.asker
+                    && asker.told_of(&key)
+                {
+                    self.wake.notify_one();
                 }
             }
         }
@@ -176,44 +194,107 @@ impl Outsiders {
 
     fn forget_one(&self, key: &str) {
         self.settled.lock().unwrap().remove(key);
+        if let Some(asker) = &self.asker {
+            asker.forget(key);
+        }
     }
 
     fn showing(&self) -> bool {
         self.wanted.lock().unwrap().is_some_and(|w| w.elapsed() <= SHOWING)
     }
 
-    /// Asks the sources that are asked, every `every` while the list is
-    /// showing, until shutdown. Runs whether or not Claude is asked.
+    /// Until shutdown, every `tick` or sooner: lets go of the sessions
+    /// that ended without a word, and, while the list is showing, asks
+    /// `claude agents` when something calls for it (`claude::Asker`). Runs
+    /// whether or not Claude is asked.
     pub async fn serve(self: Arc<Self>, registry: Arc<Registry>, ledger: Ledger, shutdown: CancellationToken) {
+        let mut wait = self.tick;
         loop {
             tokio::select! {
                 _ = shutdown.cancelled() => return,
                 _ = self.wake.notified() => {}
-                _ = tokio::time::sleep(self.claude.every()) => {}
+                _ = tokio::time::sleep(wait) => {}
             }
             self.prune_told();
-            if self.asks_claude && self.showing() {
-                let heard = match claude::hear(&registry, self.claude.wait()).await {
-                    Ok(mut list) => {
-                        for s in &mut list {
-                            self.settle_one(s, &ledger).await;
-                        }
-                        self.forget(claude::AGENT, &list.iter().map(Outside::key).collect());
-                        Ok(list)
-                    }
-                    Err(e) => Err(e),
-                };
-                self.claude.keep(heard);
+            wait = self.tick;
+            let Some(asker) = &self.asker else { continue };
+            if !self.showing() {
+                continue;
+            }
+            let background = self
+                .hooked
+                .any(|s| s.agent == claude::AGENT && s.kind == claude::BACKGROUND_KIND);
+            let due = asker.due_in(Instant::now(), background);
+            if due.is_zero() {
+                self.ask_claude(asker, &registry, &ledger).await;
+            } else {
+                wait = wait.min(due);
             }
         }
     }
 
+    /// Asks `claude agents` once, and takes in what it says (`hooked::merge`).
+    /// Each session listed is filed first, so none is kept without its
+    /// folder; since when it stands as it does is settled once merged, as
+    /// it is a hook's word, where one was heard since, that says how.
+    async fn ask_claude(&self, asker: &claude::Asker, registry: &Registry, ledger: &Ledger) {
+        let began = Instant::now();
+        asker.began(began);
+        match claude::hear(registry, asker.polling().wait).await {
+            Ok(mut list) => {
+                asker.listed(list.iter().map(Outside::key).collect());
+                for s in &mut list {
+                    self.file_one(s, ledger).await;
+                }
+                let merged = self.hooked.merge(claude::AGENT, list, began, hooked::alive);
+                for key in &merged.gone {
+                    debug!(session = %key, "outside: no longer listed");
+                    self.forget_one(key);
+                }
+                for mut s in merged.listed {
+                    self.stand_one(&mut s);
+                    self.hooked.settle(&s);
+                }
+            }
+            Err(e) => asker.not_heard(e),
+        }
+    }
+
     /// One session as just heard, given its project folder and since when
-    /// it has (or has not) wanted you. Its folder is resolved once; one
-    /// that cannot be is left for the panel to guess, and tried again next
-    /// time. First seen, it has stood so since it started, as far as is
-    /// known: a restart of `rld` does not make an old wait new.
+    /// it has (or has not) wanted you (`file_one`, `stand_one`).
     pub async fn settle_one(&self, s: &mut Outside, ledger: &Ledger) {
+        self.file_one(s, ledger).await;
+        self.stand_one(s);
+    }
+
+    /// What was settled of a session, or, first seen, what is known: it has
+    /// stood so since it started, as far as is known — a restart of `rld`
+    /// does not make an old wait new.
+    fn entry<'a>(settled: &'a mut HashMap<String, Settled>, s: &Outside) -> &'a mut Settled {
+        let now = Timestamp::now();
+        settled.entry(s.key()).or_insert_with(|| Settled {
+            workspace: None,
+            wanted: s.wants_you(),
+            at: s.started_at.map_or(now, |t| t.min(now)),
+        })
+    }
+
+    /// Since when a session has (or has not) wanted you, as it now stands.
+    fn stand_one(&self, s: &mut Outside) {
+        let wanted = s.wants_you();
+        let mut settled = self.settled.lock().unwrap();
+        let entry = Self::entry(&mut settled, s);
+        if entry.wanted != wanted {
+            entry.wanted = wanted;
+            entry.at = Timestamp::now();
+        }
+        s.workspace = entry.workspace.clone();
+        s.state_at = Some(entry.at);
+    }
+
+    /// A session's project folder: resolved once; one that cannot be is
+    /// left for the panel to guess, and tried again next time.
+    async fn file_one(&self, s: &mut Outside, ledger: &Ledger) {
         let key = s.key();
         let filed = self
             .settled
@@ -232,33 +313,13 @@ impl Outsiders {
                 }
             }
         };
-        let now = Timestamp::now();
-        let wanted = s.wants_you();
         let mut settled = self.settled.lock().unwrap();
-        let entry = settled.entry(key).or_insert_with(|| Settled {
-            agent: s.agent.clone(),
-            workspace: None,
-            wanted,
-            at: s.started_at.map_or(now, |t| t.min(now)),
-        });
+        let entry = Self::entry(&mut settled, s);
         if entry.workspace.is_none() {
             entry.workspace = found;
         }
-        if entry.wanted != wanted {
-            entry.wanted = wanted;
-            entry.at = now;
-        }
         s.workspace = entry.workspace.clone();
         s.state_at = Some(entry.at);
-    }
-
-    /// Forgets what was settled of `agent`'s sessions but those in `keep`
-    /// (by key): ones its source says are gone.
-    pub fn forget(&self, agent: &str, keep: &HashSet<String>) {
-        self.settled
-            .lock()
-            .unwrap()
-            .retain(|k, s| s.agent != agent || keep.contains(k));
     }
 }
 
@@ -595,6 +656,7 @@ mod tests {
             detail: None,
             pid: None,
             transcript_path: transcript.map(Into::into),
+            run: None,
         };
         store
             .told(tell("SessionStart", Some("/t/one.jsonl")), &ledger)
@@ -655,11 +717,6 @@ mod tests {
         let mut c4 = at("claude", "c", Some("failed"), "");
         store.settle_one(&mut c4, &ledger).await;
         assert_eq!(c4.state_at, blocked, "blocked to failed: still wanting you");
-
-        // Forgetting one agent's gone sessions leaves the others'.
-        store.forget("codex", &HashSet::from([a.key()]));
-        let keys: HashSet<String> = store.settled.lock().unwrap().keys().cloned().collect();
-        assert_eq!(keys, HashSet::from([a.key(), c.key()]));
     }
 
     #[tokio::test]
@@ -676,6 +733,7 @@ mod tests {
                 detail: detail.map(Into::into),
                 pid,
                 transcript_path: None,
+                run: None,
             }
         };
         let one = |key: &str| store.latest().into_iter().find(|s| s.key() == key);
@@ -740,7 +798,7 @@ mod tests {
 
         // What is not a told session is refused, and nothing is kept of it.
         for bad in [
-            tell("claude", "x", "Stop", None, None),
+            tell("cursor", "x", "Stop", None, None),
             tell("codex", "", "Stop", None, None),
             rl_proto::methods::OutsideHookParams {
                 cwd: "rel".into(),
@@ -764,6 +822,7 @@ mod tests {
             detail: None,
             pid,
             transcript_path: None,
+            run: None,
         };
         // A process that has been and gone.
         let mut child = std::process::Command::new("true").spawn().unwrap();
@@ -802,6 +861,7 @@ mod tests {
             detail: detail.map(Into::into),
             pid,
             transcript_path: None,
+            run: None,
         }
     }
 
@@ -1034,5 +1094,178 @@ mod tests {
         assert_eq!(tag("claude"), crate::import::TAG);
         assert_eq!(tag("codex"), "codex-session:");
         assert_eq!(tag("gemini"), "gemini-session:");
+    }
+
+    /// One of Claude's as `claude agents` lists it.
+    fn listed(sid: &str, id: Option<&str>, kind: &str, status: &str, pid: Option<u32>) -> Outside {
+        Outside {
+            id: id.map(Into::into),
+            kind: kind.into(),
+            status: status.into(),
+            name: format!("named {sid}"),
+            started_at: Some("2026-10-13T09:00:00Z".parse().unwrap()),
+            ..session("claude", sid, pid)
+        }
+    }
+
+    #[tokio::test]
+    async fn an_ask_fills_in_a_told_session_and_a_hook_heard_since_keeps_its_state() {
+        let ledger = Ledger::open_in_memory().unwrap();
+        let store = Outsiders::new(None);
+        let me = std::process::id();
+        store
+            .told(told_as("claude", "s", "UserPromptSubmit", None, None), &ledger)
+            .await
+            .unwrap();
+        // Asked a while after the hook: all of it is taken.
+        let began = Instant::now();
+        let merged = store.hooked.merge(
+            "claude",
+            vec![listed("s", Some("bg1"), "background", "idle", Some(me))],
+            began,
+            |_| true,
+        );
+        assert!(merged.gone.is_empty());
+        let s = store.latest().remove(0);
+        assert_eq!(
+            (
+                s.id.as_deref(),
+                s.kind.as_str(),
+                s.name.as_str(),
+                s.pid,
+                s.status.as_str()
+            ),
+            (Some("bg1"), "background", "named s", Some(me), "idle")
+        );
+        assert!(s.started_at.is_some());
+
+        // A hook heard after the next ask began: its word stands, the rest
+        // is filled in still.
+        let began = Instant::now();
+        store
+            .told(
+                told_as("claude", "s", "Notification", Some("permission_prompt"), None),
+                &ledger,
+            )
+            .await
+            .unwrap();
+        store.hooked.merge(
+            "claude",
+            vec![listed("s", Some("bg2"), "background", "busy", Some(me))],
+            began,
+            |_| true,
+        );
+        let s = store.latest().remove(0);
+        assert_eq!(
+            (s.id.as_deref(), s.status.as_str(), s.waiting_for.as_deref()),
+            (Some("bg2"), "waiting", Some("permission prompt"))
+        );
+        assert!(s.wants_you());
+    }
+
+    #[tokio::test]
+    async fn one_only_an_ask_listed_stands_while_listed_and_an_end_ends_it_for_both() {
+        let ledger = Ledger::open_in_memory().unwrap();
+        let store = Outsiders::new(None);
+        let keys = || store.latest().iter().map(Outside::key).collect::<Vec<_>>();
+        store
+            .told(told_as("codex", "c", "Stop", None, None), &ledger)
+            .await
+            .unwrap();
+        store
+            .told(told_as("claude", "told", "Stop", None, None), &ledger)
+            .await
+            .unwrap();
+        // Its process gone: listed still, but with no process to say so.
+        let merged = store.hooked.merge(
+            "claude",
+            vec![
+                listed("asked", Some("b1"), "background", "", Some(4_000_001)),
+                listed("other", None, "interactive", "idle", None),
+            ],
+            Instant::now(),
+            |_| false,
+        );
+        assert_eq!(merged.listed.len(), 2);
+        assert_eq!(store.latest()[0].pid, None, "{:?}", store.latest());
+        assert_eq!(
+            keys(),
+            ["o:claude:asked", "o:claude:other", "o:claude:told", "o:codex:c"]
+        );
+        // Not listed again: one told of by nothing goes; told ones stay.
+        let merged = store.hooked.merge(
+            "claude",
+            vec![listed("other", None, "interactive", "idle", None)],
+            Instant::now(),
+            |_| true,
+        );
+        assert_eq!(merged.gone, ["o:claude:asked"]);
+        assert_eq!(keys(), ["o:claude:other", "o:claude:told", "o:codex:c"]);
+        // Its end, from its hook: gone, and a late listing does not bring
+        // it back.
+        store
+            .told(told_as("claude", "other", "SessionEnd", Some("exit"), None), &ledger)
+            .await
+            .unwrap();
+        store.hooked.merge(
+            "claude",
+            vec![listed("other", None, "interactive", "idle", None)],
+            Instant::now(),
+            |_| true,
+        );
+        assert_eq!(keys(), ["o:claude:told", "o:codex:c"]);
+    }
+
+    #[tokio::test]
+    async fn claudes_user_level_word_under_a_run_of_claudes_is_the_runs_and_let_go() {
+        use rl_proto::types::{Run, RunKind};
+        let ledger = Ledger::open_in_memory().unwrap();
+        let store = Outsiders::new(None);
+        let mut ours = Run::new("r-claude", RunKind::Agent, "x", vec![], "/w", "/w", Timestamp::now());
+        ours.cli = Some("claude".into());
+        let shell = Run::new("r-shell", RunKind::Shell, "x", vec![], "/w", "/w", Timestamp::now());
+        ledger
+            .call(move |c| {
+                rl_ledger::runs::insert(c, &ours)?;
+                rl_ledger::runs::insert(c, &shell)
+            })
+            .await
+            .unwrap();
+        let under = |sid: &str, run: &str| rl_proto::methods::OutsideHookParams {
+            run: Some(run.into()),
+            ..told_as("claude", sid, "Stop", None, None)
+        };
+        store.told(under("ours", "r-claude"), &ledger).await.unwrap();
+        store.told(under("in-shell", "r-shell"), &ledger).await.unwrap();
+        store.told(under("unknown-run", "r-gone"), &ledger).await.unwrap();
+        let keys: Vec<String> = store.latest().iter().map(Outside::key).collect();
+        assert_eq!(keys, ["o:claude:in-shell", "o:claude:unknown-run"]);
+    }
+
+    #[tokio::test]
+    async fn a_hook_of_a_claude_session_not_listed_calls_for_one_ask() {
+        let ledger = Ledger::open_in_memory().unwrap();
+        let store = Outsiders::new(Some(Polling::default()));
+        let asker = store.asker.as_ref().unwrap();
+        let t0 = Instant::now();
+        asker.began(t0);
+        asker.listed(HashSet::from(["o:claude:known".to_string()]));
+        for sid in ["known", "new", "new"] {
+            store
+                .told(told_as("claude", sid, "Stop", None, None), &ledger)
+                .await
+                .unwrap();
+        }
+        store
+            .told(told_as("codex", "x", "Stop", None, None), &ledger)
+            .await
+            .unwrap();
+        assert_eq!(asker.due_in(t0 + claude::BETWEEN, false), Duration::ZERO);
+        asker.began(t0 + claude::BETWEEN);
+        assert_eq!(
+            asker.due_in(t0 + claude::BETWEEN * 2, false),
+            claude::UNHOOKED - claude::BETWEEN,
+            "once: then only the fallback, the hook not being there"
+        );
     }
 }

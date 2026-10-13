@@ -328,6 +328,7 @@ async fn an_idle_one_in_another_terminal_carries_on_as_a_run() {
             detail: None,
             pid: None,
             transcript_path: None,
+            run: None,
         };
         app.rpc.call::<rl_proto::methods::OutsideHook>(hook).await.unwrap();
     }

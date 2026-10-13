@@ -1,12 +1,19 @@
-//! Codex's and Gemini's hooks, set where the user's own are: one command
-//! hook per event, all calling `rl hook <agent> <Event>`.
+//! Agents' own hooks, set where the user's are: one command hook per
+//! event, all calling `rl hook <agent> <Event>` — Claude's with `--user`
+//! after it.
 //!
-//! Unlike Claude's (a settings file `rld` passes to each run it starts),
-//! these live in the agent's user-level file, so every session of that
+//! These live in the agent's user-level file, so every session of that
 //! agent calls them, Relay's runs and the rest alike. `rl hook` tells them
-//! apart by `RELAY_RUN`: a run's hook posts the run's signal (`signal`);
-//! any other tells `rld` of the session (`told`), which keeps it on the
-//! list as one of the agent's own.
+//! apart by `RELAY_RUN`: a Codex or Gemini run's hook posts the run's
+//! signal (`signal`); any other tells `rld` of the session (`told`), which
+//! keeps it on the list as one of the agent's own.
+//!
+//! Claude is the odd one out: Relay's own Claude runs have hooks of their
+//! own already (`claude::settings_json`, passed as `--settings`), which
+//! Claude runs beside these. So Claude's user-level copy says `--user`, and
+//! is never a run's signal: under a Claude run of Relay's, `rld` lets its
+//! word go; under any other run (a claude started in a shell run), or
+//! none, it tells of one of Claude's own sessions.
 //!
 //! Nothing is written but on a yes in `rl setup`. The file stays the
 //! user's: Relay's entries are appended, never anything removed or moved
@@ -15,6 +22,12 @@
 //!
 //! What the agents' docs and source said on 2026-10-13
 //! (`docs/plans/2026-10-13-agent-hooks-notes.md`):
+//! - Claude: `$CLAUDE_CONFIG_DIR/settings.json` (default `~/.claude`), the
+//!   shape of Relay's per-run settings, `timeout` in seconds. Claude reads
+//!   it as a session starts; one already open may ask you to review the
+//!   change in its `/hooks` screen. Uncertain: whether Claude's background
+//!   sessions (`claude --bg`) run user-level hooks at all, which is why
+//!   `rld` still asks `claude agents` now and then while one is listed.
 //! - Codex: `$CODEX_HOME/hooks.json` (default `~/.codex`), `{"hooks":
 //!   {"<Event>": [{"hooks": [{"type": "command", "command", "timeout"
 //!   (seconds), "async"}]}]}}`. A user-level hook runs only once trusted in
@@ -37,17 +50,38 @@ use serde_json::{Map, Value, json};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
+pub const CLAUDE: &str = crate::claude::DIALECT;
 pub const CODEX: &str = "codex";
 pub const GEMINI: &str = "gemini";
 
 /// The agents whose own sessions are learned from their hooks.
-pub const AGENTS: [&str; 2] = [CODEX, GEMINI];
+pub const AGENTS: [&str; 3] = [CLAUDE, CODEX, GEMINI];
+
+/// The word after the event in Claude's user-level hook: it is that copy,
+/// not a run's own (`claude::settings_json`).
+pub const USER: &str = "--user";
+
+/// Whether `agent`'s user-level hook says `USER` after its event: where a
+/// Relay run of the agent's has hooks of its own beside it — Claude's, from
+/// the settings `rld` passes the run — so that the copy in the user's file
+/// is told apart from the run's, and is never the run's signal.
+pub fn says_user(agent: &str) -> bool {
+    agent == CLAUDE
+}
 
 /// The events Relay hooks, by agent: a session's start, a turn's start, a
 /// wait for your approval, a tool done (so a wait you answered is over),
 /// an interrupted turn (codex's), a turn's end, the session's end.
 pub fn events(agent: &str) -> &'static [&'static str] {
     match agent {
+        CLAUDE => &[
+            "SessionStart",
+            "UserPromptSubmit",
+            "Notification",
+            "PostToolUse",
+            "Stop",
+            "SessionEnd",
+        ],
         CODEX => &[
             "SessionStart",
             "UserPromptSubmit",
@@ -72,12 +106,29 @@ pub fn events(agent: &str) -> &'static [&'static str] {
 /// The event that carries the prompt you typed (`prompt` in its payload).
 pub fn prompt_event(agent: &str) -> Option<&'static str> {
     match agent {
-        CODEX => Some("UserPromptSubmit"),
+        CLAUDE | CODEX => Some("UserPromptSubmit"),
         GEMINI => Some("BeforeAgent"),
         _ => None,
     }
 }
 
+/// What the agent asks of you once its hooks are added, if anything: codex
+/// runs a new user-level hook only once you trust it; Claude reads its
+/// settings as a session starts.
+pub fn after_install(agent: &str) -> Option<&'static str> {
+    match agent {
+        CLAUDE => Some(
+            "Claude picks it up in sessions started from now on; ones already open may ask you to review it in /hooks",
+        ),
+        CODEX => Some("codex asks you to trust it once: open codex, /hooks"),
+        _ => None,
+    }
+}
+
+/// Claude's notifications that say how a session stands: it waits for your
+/// approval, or for your next prompt.
+const PERMISSION_PROMPT: &str = "permission_prompt";
+const IDLE_PROMPT: &str = "idle_prompt";
 /// Codex waits this many seconds for a hook; `rl hook` is done well before.
 const CODEX_TIMEOUT_SECS: u32 = 3;
 /// Gemini waits this many milliseconds, and waits it in the agent's loop.
@@ -85,7 +136,8 @@ const GEMINI_TIMEOUT_MS: u32 = 2000;
 /// Gemini's only notification type: a tool waits for your approval.
 const TOOL_PERMISSION: &str = "ToolPermission";
 
-/// What an event says about a Relay run of `agent`'s. None for events that
+/// What an event says about a Relay run of Codex's or Gemini's (a Claude
+/// run's are `claude::signal`'s, from its own hooks). None for events that
 /// carry no state: `SessionStart`, which says nothing of whether a prompt
 /// came with it (and codex may tell it after the prompt's, its hooks being
 /// run in the background), and `SessionEnd`, as the process's exit right
@@ -122,11 +174,8 @@ pub fn signal(agent: &str, event: &str, payload: &Value) -> Option<Signal> {
 /// end a wait for you (needing you → working) or keep a turn working, and
 /// never wakes an idle one.
 pub fn carries_on(agent: &str, event: &str) -> bool {
-    matches!((agent, event), (CODEX, "PostToolUse") | (GEMINI, "AfterTool"))
+    matches!((agent, event), (CLAUDE | CODEX, "PostToolUse") | (GEMINI, "AfterTool"))
 }
-
-/// The agents a run can be, by its `cli`, whose hooks Relay knows.
-const KNOWN: [&str; 3] = [crate::claude::DIALECT, CODEX, GEMINI];
 
 /// Whether `agent`'s hook, carrying `run`'s `RELAY_RUN`, is not that run's:
 /// the agent was started inside it. So when the run is a shell or a
@@ -140,7 +189,7 @@ pub fn foreign(run: &rl_proto::types::Run, agent: &str) -> bool {
         _ => run
             .cli
             .as_deref()
-            .is_some_and(|cli| cli != agent && KNOWN.contains(&cli)),
+            .is_some_and(|cli| cli != agent && AGENTS.contains(&cli)),
     }
 }
 
@@ -185,31 +234,37 @@ pub fn told(agent: &str, event: &str, detail: Option<&str>) -> Told {
         status,
         waiting_for: None,
     };
+    let asks = Told::Stands {
+        status: Outside::WAITING,
+        waiting_for: Some("permission prompt"),
+    };
     match (agent, event) {
-        (CODEX | GEMINI, "SessionStart") => stands(Outside::IDLE),
-        (CODEX, "UserPromptSubmit") | (GEMINI, "BeforeAgent") => stands(Outside::BUSY),
-        (CODEX, "PermissionRequest") => Told::Stands {
-            status: Outside::WAITING,
-            waiting_for: Some("permission prompt"),
-        },
-        (GEMINI, "Notification") if detail == Some(TOOL_PERMISSION) => Told::Stands {
-            status: Outside::WAITING,
-            waiting_for: Some("permission prompt"),
-        },
-        (CODEX, "PostToolUse") | (GEMINI, "AfterTool") => stands(Outside::BUSY),
-        (CODEX, "Stop" | "Interrupt") | (GEMINI, "AfterAgent") => stands(Outside::IDLE),
-        (CODEX | GEMINI, "SessionEnd") => Told::Ended,
+        (CLAUDE | CODEX | GEMINI, "SessionStart") => stands(Outside::IDLE),
+        (CLAUDE | CODEX, "UserPromptSubmit") | (GEMINI, "BeforeAgent") => stands(Outside::BUSY),
+        (CODEX, "PermissionRequest") => asks,
+        (CLAUDE, "Notification") if detail == Some(PERMISSION_PROMPT) => asks,
+        (CLAUDE, "Notification") if detail == Some(IDLE_PROMPT) => stands(Outside::IDLE),
+        (GEMINI, "Notification") if detail == Some(TOOL_PERMISSION) => asks,
+        (CLAUDE | CODEX, "PostToolUse") | (GEMINI, "AfterTool") => stands(Outside::BUSY),
+        (CLAUDE | CODEX, "Stop") | (CODEX, "Interrupt") | (GEMINI, "AfterAgent") => stands(Outside::IDLE),
+        (CLAUDE | CODEX | GEMINI, "SessionEnd") => Told::Ended,
         _ => Told::Nothing,
     }
 }
 
 /// The agent's user-level hooks file, as the agent finds it from this
-/// environment (`env` reads a variable): `$CODEX_HOME/hooks.json` or
+/// environment (`env` reads a variable): `$CLAUDE_CONFIG_DIR/settings.json`
+/// or `~/.claude/settings.json`; `$CODEX_HOME/hooks.json` or
 /// `~/.codex/hooks.json`; `$GEMINI_CLI_HOME/.gemini/settings.json` or
 /// `~/.gemini/settings.json`. None for another agent, or with no home.
 pub fn file(agent: &str, env: impl Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
     let set = |k: &str| env(k).filter(|v| !v.is_empty()).map(PathBuf::from);
     match agent {
+        CLAUDE => Some(
+            set("CLAUDE_CONFIG_DIR")
+                .or_else(|| Some(set("HOME")?.join(".claude")))?
+                .join("settings.json"),
+        ),
         CODEX => Some(
             set("CODEX_HOME")
                 .or_else(|| Some(set("HOME")?.join(".codex")))?
@@ -225,14 +280,21 @@ pub fn file(agent: &str, env: impl Fn(&str) -> Option<OsString>) -> Option<PathB
     }
 }
 
-/// The command an event's hook runs.
+/// The command an event's hook runs. Claude's says `--user` after the
+/// event (`USER`), a word an older `rl` does not know, and so leaves be.
 ///
 /// `|| true`: whatever `rl` does — gone (127), an older one that does not
 /// know these words (clap's 2) — the hook succeeds. Gemini takes exit 2 as
-/// "block", and codex warns on any failure; Relay's hook never does either.
+/// "block", Claude too on some events, and codex warns on any failure;
+/// Relay's hook never does any of it.
 pub fn command(rl_bin: &Path, agent: &str, event: &str) -> String {
     let rl = rl_bin.to_string_lossy().replace('\'', "'\\''");
-    format!("'{rl}' hook {agent} {event}{NEVER_FAILS}")
+    let user = if says_user(agent) {
+        format!(" {USER}")
+    } else {
+        String::new()
+    };
+    format!("'{rl}' hook {agent} {event}{user}{NEVER_FAILS}")
 }
 
 /// What every hook command ends with, so it cannot fail.
@@ -248,6 +310,7 @@ fn entry(agent: &str, event: &str, command: String) -> Value {
             json!({"type": "command", "command": command, "timeout": CODEX_TIMEOUT_SECS})
         }
         CODEX => json!({"type": "command", "command": command, "timeout": CODEX_TIMEOUT_SECS, "async": true}),
+        CLAUDE => json!({"type": "command", "command": command, "timeout": crate::claude::HOOK_TIMEOUT_SECS}),
         _ => json!({"type": "command", "command": command, "timeout": GEMINI_TIMEOUT_MS}),
     };
     json!({ "hooks": [hook] })
@@ -267,13 +330,20 @@ pub fn inline_hooks(hooks_file: &Path) -> bool {
 }
 
 /// Whether `command` is one of Relay's hooks for `agent`: `rl hook <agent>
-/// <Event>`, by whatever path `rl` was installed at.
-/// With or without the `|| true` an older Relay did not write: an install
-/// brings such a one up to date.
+/// <Event>`, by whatever path `rl` was installed at — Claude's only with
+/// `--user` after it, as a run's own (`claude::settings_json`) has no place
+/// in the user's file. With or without the `|| true` an older Relay did
+/// not write: an install brings such a one up to date.
 pub fn is_relays(command: &str, agent: &str) -> bool {
     let mut words: Vec<&str> = command.split_whitespace().collect();
     if words.ends_with(&["||", "true"]) {
         words.truncate(words.len() - 2);
+    }
+    if says_user(agent) {
+        if words.last() != Some(&USER) {
+            return false;
+        }
+        words.pop();
     }
     let n = words.len();
     if n < 4 || words[n - 3] != "hook" || words[n - 2] != agent {
@@ -486,7 +556,10 @@ mod tests {
         assert_eq!(file(CODEX, moved).unwrap(), Path::new("/c/hooks.json"));
         assert_eq!(file(GEMINI, moved).unwrap(), Path::new("/g/.gemini/settings.json"));
         assert_eq!(file(CODEX, env(&[("CODEX_HOME", "")])), None, "empty is unset");
-        assert_eq!(file("claude", home), None);
+        assert_eq!(file(CLAUDE, home).unwrap(), Path::new("/h/.claude/settings.json"));
+        let config = env(&[("HOME", "/h"), ("CLAUDE_CONFIG_DIR", "/cc")]);
+        assert_eq!(file(CLAUDE, config).unwrap(), Path::new("/cc/settings.json"));
+        assert_eq!(file("cursor", home), None);
     }
 
     #[test]
@@ -880,5 +953,132 @@ mod tests {
         let v = doc(&hooks);
         assert_eq!(v["hooks"]["SessionEnd"][0]["hooks"][0].get("async"), None);
         assert_eq!(v["hooks"]["Stop"][0]["hooks"][0]["async"], true);
+    }
+
+    #[test]
+    fn claude_installs_into_an_empty_file_as_its_user_level_copy() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("claude-config/settings.json");
+        assert!(install(&path, CLAUDE, Path::new(RL)).unwrap());
+        let v = doc(&path);
+        let hooks = v["hooks"].as_object().unwrap();
+        assert_eq!(hooks.keys().map(String::as_str).collect::<Vec<_>>(), events(CLAUDE));
+        assert_eq!(
+            hooks["Notification"],
+            json!([{"hooks": [{"type": "command",
+                               "command": "'/opt/relay/bin/rl' hook claude Notification --user || true",
+                               "timeout": 5}]}])
+        );
+        assert!(installed(&path, CLAUDE).unwrap());
+        assert!(!installed(&path, CODEX).unwrap());
+    }
+
+    #[test]
+    fn claude_keeps_every_other_key_and_hook_in_order_and_never_twice() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("settings.json");
+        let mine = r#"{
+  "model": "opus",
+  "hooks": {
+    "PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "guard.sh"}]}],
+    "Stop": [{"hooks": [{"type": "command", "command": "say done"}]}]
+  },
+  "permissions": {"allow": ["Bash(ls)"]}
+}"#;
+        std::fs::write(&path, mine).unwrap();
+        assert!(install(&path, CLAUDE, Path::new(RL)).unwrap());
+        let v = doc(&path);
+        let keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
+        assert_eq!(keys, ["model", "hooks", "permissions"], "nothing moved");
+        let events: Vec<&str> = v["hooks"].as_object().unwrap().keys().map(String::as_str).collect();
+        assert_eq!(
+            events,
+            [
+                "PreToolUse",
+                "Stop",
+                "SessionStart",
+                "UserPromptSubmit",
+                "Notification",
+                "PostToolUse",
+                "SessionEnd"
+            ],
+            "the user's first, in their order"
+        );
+        assert_eq!(v["hooks"]["PreToolUse"][0]["hooks"][0]["command"], "guard.sh");
+        let stop = v["hooks"]["Stop"].as_array().unwrap();
+        assert_eq!(stop.len(), 2);
+        assert_eq!(stop[0]["hooks"][0]["command"], "say done");
+        assert_eq!(
+            stop[1]["hooks"][0]["command"],
+            "'/opt/relay/bin/rl' hook claude Stop --user || true"
+        );
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!install(&path, CLAUDE, Path::new(RL)).unwrap());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), text, "twice: no duplicate");
+
+        // A run's own hook, set there by hand, is not Relay's user-level one:
+        // left, and not taken for it.
+        let mut v = doc(&path);
+        v["hooks"]["Stop"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"hooks": [{"type": "command", "command": "/opt/relay/bin/rl hook claude Stop"}]}));
+        std::fs::write(&path, serde_json::to_string(&v).unwrap()).unwrap();
+        assert!(uninstall(&path, CLAUDE).unwrap());
+        let v = doc(&path);
+        assert_eq!(
+            v["hooks"],
+            json!({
+                "PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "guard.sh"}]}],
+                "Stop": [{"hooks": [{"type": "command", "command": "say done"}]},
+                         {"hooks": [{"type": "command", "command": "/opt/relay/bin/rl hook claude Stop"}]}]
+            })
+        );
+        assert_eq!(v["permissions"], json!({"allow": ["Bash(ls)"]}));
+
+        // One that does not read is refused, and left as it was.
+        std::fs::write(&path, "{ \"hooks\": ").unwrap();
+        assert!(install(&path, CLAUDE, Path::new(RL)).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{ \"hooks\": ");
+    }
+
+    #[test]
+    fn claudes_user_level_hook_is_known_by_its_user_word() {
+        assert!(is_relays("'/opt/my tools/rl' hook claude Stop --user || true", CLAUDE));
+        assert!(is_relays("/usr/local/bin/rl hook claude Notification --user", CLAUDE));
+        assert!(!is_relays("/usr/local/bin/rl hook claude Stop", CLAUDE), "a run's own");
+        assert!(!is_relays("/usr/local/bin/rl hook claude --user || true", CLAUDE));
+        assert!(!is_relays("/usr/local/bin/rl hook codex Stop --user", CLAUDE));
+        assert!(!is_relays("/usr/local/bin/rl hook claude Stop --user", CODEX));
+        assert_eq!(
+            command(Path::new("/x/it's/rl"), CLAUDE, "Stop"),
+            "'/x/it'\\''s/rl' hook claude Stop --user || true"
+        );
+        assert_eq!(
+            command(Path::new("/x/rl"), CODEX, "Stop"),
+            "'/x/rl' hook codex Stop || true"
+        );
+    }
+
+    #[test]
+    fn claudes_events_say_how_its_session_stands() {
+        let stands = |status, waiting_for| Told::Stands { status, waiting_for };
+        assert_eq!(told(CLAUDE, "SessionStart", Some("startup")), stands("idle", None));
+        assert_eq!(told(CLAUDE, "UserPromptSubmit", None), stands("busy", None));
+        assert_eq!(
+            told(CLAUDE, "Notification", Some("permission_prompt")),
+            stands("waiting", Some("permission prompt"))
+        );
+        assert_eq!(told(CLAUDE, "Notification", Some("idle_prompt")), stands("idle", None));
+        assert_eq!(told(CLAUDE, "Notification", Some("auth_success")), Told::Nothing);
+        assert_eq!(told(CLAUDE, "PostToolUse", None), stands("busy", None));
+        assert!(carries_on(CLAUDE, "PostToolUse"));
+        assert_eq!(told(CLAUDE, "Stop", None), stands("idle", None));
+        assert_eq!(told(CLAUDE, "SessionEnd", Some("exit")), Told::Ended);
+        assert_eq!(told(CLAUDE, "Interrupt", None), Told::Nothing, "codex's word");
+        assert_eq!(
+            detail("Notification", &json!({"notification_type": "permission_prompt"})).as_deref(),
+            Some("permission_prompt")
+        );
     }
 }

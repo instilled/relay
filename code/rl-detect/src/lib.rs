@@ -7,8 +7,8 @@
 //!   holder's byte stream. Only ever `guess` or `likely`.
 //! - [`claude`]: exact signals from Claude Code hooks, and the settings file
 //!   that makes Claude send them.
-//! - [`user_hooks`]: Codex's and Gemini's hooks, set in the user's own
-//!   files on a yes, and what their events say.
+//! - [`user_hooks`]: the agents' own hooks (Claude's, Codex's, Gemini's), set in
+//!   the user's own files on a yes, and what their events say.
 //! - [`machine`]: the one place a `(current, signal)` pair becomes a
 //!   transition, where exact signals beat guesses.
 

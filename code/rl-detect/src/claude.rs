@@ -30,7 +30,7 @@ pub const EVENTS: [&str; 6] = [
 
 /// Seconds Claude waits for a hook. `rl hook` gives up on the daemon well
 /// before this.
-const HOOK_TIMEOUT_SECS: u32 = 5;
+pub(crate) const HOOK_TIMEOUT_SECS: u32 = 5;
 
 const DETAIL_MAX: usize = 160;
 

@@ -12,7 +12,7 @@ use rl_proto::rpc::{Id, Request, Response};
 use rl_proto::types::{Run, RunState};
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::BufReader;
@@ -120,11 +120,15 @@ impl Harness {
         Self::start(home, registry, None)
     }
 
-    /// Same, asking `claude agents --json` as `polling` says — whichever
-    /// `claude` is first on `PATH`, so the test puts a fake one there. Every
-    /// other harness never asks.
-    pub fn with_claude(home: Home, polling: rl_daemon::outside::Polling) -> Option<Self> {
-        Self::start(home, None, Some(polling))
+    /// Same, asking `claude agents --json` as `polling` says, of the fake
+    /// `claude` at `claude` (the claude profile's binary, overridden in
+    /// `home`). Every other harness never asks.
+    pub fn with_claude(home: Home, claude: &Path, polling: rl_daemon::outside::Polling) -> Option<Self> {
+        let dir = home.detect_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("claude.yaml"), format!("bins: [\"{}\"]\n", claude.display())).unwrap();
+        let registry = Registry::load(&home).unwrap();
+        Self::start(home, Some(registry), Some(polling))
     }
 
     fn start(

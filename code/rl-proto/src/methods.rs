@@ -243,8 +243,8 @@ fn default_dialect() -> String {
 }
 
 /// One of an agent's own sessions, as its user-level hook told it (`rl hook
-/// <agent> <Event>` outside any Relay run): kept with the sessions Claude's
-/// list gives, keyed `<agent>:<session_id>`.
+/// <agent> <Event>` outside any Relay run of that agent's): kept with the
+/// rest of the agents' own sessions, keyed `o:<agent>:<session_id>`.
 pub struct OutsideHook;
 impl Method for OutsideHook {
     const NAME: &'static str = "outside.hook";
@@ -254,7 +254,7 @@ impl Method for OutsideHook {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OutsideHookParams {
-    /// The profile whose hook it is: `codex`, `gemini`.
+    /// The profile whose hook it is: `claude`, `codex`, `gemini`.
     pub agent: String,
     pub session_id: String,
     pub cwd: PathBuf,
@@ -273,6 +273,12 @@ pub struct OutsideHookParams {
     /// the last word heard.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transcript_path: Option<PathBuf>,
+    /// The Relay run the hook was called under (`RELAY_RUN`), if any: `rld`
+    /// lets the word go when that run is this agent's own, whose hooks have
+    /// said it already, and keeps it when the agent was only started inside
+    /// it (`user_hooks::foreign`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run: Option<String>,
 }
 
 /// A human's word on a run's state, for CLIs with no signals at all.

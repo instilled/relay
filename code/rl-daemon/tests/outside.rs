@@ -1,8 +1,10 @@
 //! Claude's own sessions on the digest: `claude agents --json` asked in the
 //! background, Relay's own runs left out, one a run was sent to pointed at
-//! from that run, the last list kept a while when `claude` stops answering
-//! or hangs. The `claude` here is a shell script in a
-//! tempdir, first on `PATH`: no real agent, no model.
+//! from that run, the list left as it stands when `claude` stops answering
+//! or hangs; and when `claude` is asked at all, which is seldom where its
+//! hook tells. The `claude` here is a shell script in a tempdir, the claude
+//! profile's binary for the test's daemon, that counts its calls: no real
+//! agent, no model.
 
 mod common;
 
@@ -12,7 +14,56 @@ use rl_daemon::outside::{Polling, WENT};
 use rl_proto::methods::Digest;
 use rl_proto::types::Run;
 use serde_json::json;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
+
+/// A fake `claude` in `dir`: `claude agents --json` prints `agents.json`
+/// there and counts itself in `calls`; `fail` there makes it fail, `hang`
+/// makes it hang.
+struct FakeClaude {
+    bin: PathBuf,
+    agents: PathBuf,
+    calls: PathBuf,
+    fail: PathBuf,
+    hang: PathBuf,
+}
+
+impl FakeClaude {
+    fn in_dir(dir: &Path) -> Self {
+        let bin = dir.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let f = Self {
+            bin: bin.join("claude"),
+            agents: dir.join("agents.json"),
+            calls: dir.join("calls"),
+            fail: dir.join("fail"),
+            hang: dir.join("hang"),
+        };
+        let script = format!(
+            "#!/bin/sh\necho . >> '{calls}'\n[ -e '{fail}' ] && {{ echo 'it broke' >&2; exit 1; }}\n[ -e '{hang}' ] && exec sleep 30\n[ \"$1\" = agents ] || exit 2\ncat '{agents}'\n",
+            calls = f.calls.display(),
+            fail = f.fail.display(),
+            hang = f.hang.display(),
+            agents = f.agents.display()
+        );
+        std::fs::write(&f.bin, script).unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&f.bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        f.list(json!([]));
+        f
+    }
+
+    fn list(&self, sessions: serde_json::Value) {
+        std::fs::write(&self.agents, serde_json::to_string(&sessions).unwrap()).unwrap();
+    }
+
+    /// How many times it was called.
+    fn calls(&self) -> usize {
+        std::fs::read_to_string(&self.calls).map_or(0, |t| t.lines().count())
+    }
+}
 
 /// Asks for the digest until `ok` holds of it, or fails after a few seconds.
 async fn digest_until(c: &mut Conn, what: &str, ok: impl Fn(&Digest) -> bool) -> Digest {
@@ -30,37 +81,20 @@ async fn digest_until(c: &mut Conn, what: &str, ok: impl Fn(&Digest) -> bool) ->
 #[tokio::test]
 async fn claudes_sessions_reach_the_digest_less_relays_own() {
     let tmp = tempfile::tempdir().unwrap();
-    let bin = tmp.path().join("bin");
-    std::fs::create_dir_all(&bin).unwrap();
-    let agents = tmp.path().join("agents.json");
-    let fail = tmp.path().join("fail");
-    let hang = tmp.path().join("hang");
-    let script = format!(
-        "#!/bin/sh\n[ -e '{fail}' ] && {{ echo 'it broke' >&2; exit 1; }}\n[ -e '{hang}' ] && exec sleep 30\n[ \"$1\" = agents ] || exit 2\ncat '{agents}'\n",
-        fail = fail.display(),
-        hang = hang.display(),
-        agents = agents.display()
-    );
-    let claude = bin.join("claude");
-    std::fs::write(&claude, script).unwrap();
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
-    let old = std::env::var_os("PATH").unwrap_or_default();
-    let mut paths = vec![bin.clone()];
-    paths.extend(std::env::split_paths(&old));
-    // SAFETY: the only test in this binary; nothing else reads the environment meanwhile.
-    unsafe { std::env::set_var("PATH", std::env::join_paths(paths).unwrap()) };
+    let fake = FakeClaude::in_dir(tmp.path());
+    let (agents, fail, hang) = (fake.agents.clone(), fake.fail.clone(), fake.hang.clone());
 
     let home = Home::at(tmp.path().join("home"));
     std::fs::create_dir_all(home.path()).unwrap();
+    // No hook of Claude's: asked every 100ms while the list shows.
     let polling = Polling {
-        every: Duration::from_millis(100),
-        grace: Duration::from_millis(800),
+        unhooked: Duration::from_millis(100),
+        tick: Duration::from_millis(20),
         wait: Duration::from_millis(200),
+        settings: Some(tmp.path().join("claude-config/settings.json")),
+        ..Polling::default()
     };
-    let Some(h) = Harness::with_claude(home.clone(), polling) else {
+    let Some(h) = Harness::with_claude(home.clone(), &fake.bin, polling) else {
         eprintln!("skipping: rl-session not built (run `cargo test --workspace`)");
         return;
     };
@@ -125,7 +159,7 @@ async fn claudes_sessions_reach_the_digest_less_relays_own() {
             {"pid": 4_000_002, "id": "b1", "cwd": cwd, "kind": "background", "sessionId": "sid-theirs",
              "name": "asset list", "status": "waiting", "waitingFor": "permission prompt", "state": "blocked"},
             {"cwd": cwd, "kind": "background", "state": "done"},
-            {"pid": 4_000_003, "cwd": sub, "kind": "interactive", "sessionId": "sid-sub", "status": "idle"}
+            {"pid": 4_000_003, "cwd": sub, "kind": "interactive", "sessionId": "sid-within", "status": "idle"}
         ]))
         .unwrap(),
     )
@@ -133,13 +167,14 @@ async fn claudes_sessions_reach_the_digest_less_relays_own() {
     let d = digest_until(&mut c, "listed", |d| !d.outside.is_empty()).await;
     assert_eq!(
         d.outside.iter().map(|s| s.session_id.as_str()).collect::<Vec<_>>(),
-        ["sid-theirs", "sid-sub"],
-        "Relay's own are left out, by tag and by pid; the one with no sessionId skipped"
+        ["sid-theirs", "sid-within"],
+        "Relay's own are left out, by tag and by pid; the one with no sessionId skipped; by key"
     );
     let s = &d.outside[0];
     assert_eq!(
         (s.agent.as_str(), s.name.as_str(), s.pid),
-        ("claude", "asset list", Some(4_000_002))
+        ("claude", "asset list", None),
+        "a process that is not there is not kept"
     );
     assert_eq!(s.waiting_for.as_deref(), Some("permission prompt"));
     // Each is filed as a run there would be: a folder in no repo and no
@@ -162,19 +197,26 @@ async fn claudes_sessions_reach_the_digest_less_relays_own() {
     .await;
     assert!(d.outside[0].state_at.is_some_and(|t| t > first), "{:?}", d.outside[0]);
 
-    // `claude` stops answering: the last list stands a while, then goes.
+    // `claude` stops answering: the list stands as it was.
     std::fs::write(&fail, "").unwrap();
-    let broke = Instant::now();
-    let d = digest_until(&mut c, "cleared", |d| d.outside.is_empty()).await;
-    assert!(
-        broke.elapsed() >= Duration::from_millis(500),
-        "kept through the grace period"
-    );
-    assert!(d.outside.is_empty());
+    let broke = fake.calls();
+    while fake.calls() < broke + 3 {
+        let d: Digest = c.ok("digest.get", json!({})).await;
+        assert_eq!(d.outside.len(), 2, "{:?}", d.outside);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
     // And the daemon is still there.
     let _: serde_json::Value = c.ok("daemon.ping", json!(null)).await;
     std::fs::remove_file(&fail).unwrap();
-    digest_until(&mut c, "listed again", |d| !d.outside.is_empty()).await;
+    // One no longer listed goes.
+    let text = std::fs::read_to_string(&agents).unwrap();
+    let mut listed: serde_json::Value = serde_json::from_str(&text).unwrap();
+    listed
+        .as_array_mut()
+        .unwrap()
+        .retain(|s| s["sessionId"] != "sid-within");
+    fake.list(listed);
+    digest_until(&mut c, "one gone", |d| d.outside.len() == 1).await;
 
     // A run of Relay's sent to Claude's background (`/background`): it
     // ended here, and its conversation goes on there, started after it.
@@ -218,10 +260,10 @@ async fn claudes_sessions_reach_the_digest_less_relays_own() {
     assert_eq!((item.summary.as_str(), item.recap.as_deref()), (WENT, None));
 
     // `claude` hangs: every digest still answers at once, from what was
-    // last heard, and the list goes once the grace period is over.
+    // last heard, which stands.
     std::fs::write(&hang, "").unwrap();
-    let hung = Instant::now();
-    loop {
+    let hung = fake.calls();
+    while fake.calls() < hung + 2 {
         let asked = Instant::now();
         let d: Digest = c.ok("digest.get", json!({})).await;
         assert!(
@@ -229,23 +271,143 @@ async fn claudes_sessions_reach_the_digest_less_relays_own() {
             "a digest waited on claude: {:?}",
             asked.elapsed()
         );
-        if d.outside.is_empty() {
-            break;
-        }
-        assert!(
-            hung.elapsed() < Duration::from_secs(10),
-            "never cleared: {:?}",
-            d.outside
-        );
+        assert!(d.outside.iter().any(|s| s.session_id == "sid-went"));
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    assert!(
-        hung.elapsed() >= Duration::from_millis(500),
-        "kept through the grace period"
-    );
     let _: serde_json::Value = c.ok("daemon.ping", json!(null)).await;
 
     let _ = c.call("run.stop", json!({ "id": run.id })).await;
     let _ = c.call("run.stop", json!({ "id": quiet.id })).await;
+    h.stop().await;
+}
+
+/// Quick intervals, Claude's settings in `dir`, its hook there or not.
+fn quick(dir: &Path, hooked: bool) -> Polling {
+    let settings = dir.join("claude-config/settings.json");
+    if hooked {
+        rl_detect::user_hooks::install(&settings, "claude", Path::new("/x/rl")).unwrap();
+    }
+    Polling {
+        tick: Duration::from_millis(20),
+        between: Duration::from_millis(100),
+        background: Duration::from_millis(500),
+        unhooked: Duration::from_millis(300),
+        recheck: Duration::from_millis(100),
+        wait: Duration::from_secs(2),
+        settings: Some(settings),
+    }
+}
+
+/// A daemon asking the fake `claude` in `tmp` as `quick` says.
+async fn asking(tmp: &Path, hooked: bool) -> Option<(FakeClaude, Harness, Conn)> {
+    let fake = FakeClaude::in_dir(tmp);
+    let home = Home::at(tmp.join("home"));
+    std::fs::create_dir_all(home.path()).unwrap();
+    let Some(h) = Harness::with_claude(home.clone(), &fake.bin, quick(tmp, hooked)) else {
+        eprintln!("skipping: rl-session not built (run `cargo test --workspace`)");
+        return None;
+    };
+    let c = Conn::open(&home).await;
+    Some((fake, h, c))
+}
+
+/// Asks for the digest every `every`, `n` times: the list showing.
+async fn show(c: &mut Conn, n: usize, every: Duration) -> Digest {
+    let mut d: Digest = c.ok("digest.get", json!({})).await;
+    for _ in 1..n {
+        tokio::time::sleep(every).await;
+        d = c.ok("digest.get", json!({})).await;
+    }
+    d
+}
+
+/// What Claude's user-level hook posts for `event` of session `sid`.
+fn hook(sid: &str, event: &str, cwd: &Path) -> serde_json::Value {
+    json!({ "agent": "claude", "session_id": sid, "cwd": cwd, "event": event })
+}
+
+#[tokio::test]
+async fn with_its_hook_there_claude_is_asked_once_and_again_only_for_a_session_it_did_not_list() {
+    let tmp = tempfile::tempdir().unwrap();
+    let Some((fake, h, mut c)) = asking(tmp.path(), true).await else {
+        return;
+    };
+    let cwd = tmp.path().canonicalize().unwrap();
+    fake.list(json!([
+        {"cwd": cwd, "kind": "interactive", "sessionId": "s-old", "status": "idle", "name": "from before"}
+    ]));
+    // Ten digests over a second (the panel's every five seconds, quickened):
+    // one ask, for the list first wanted.
+    let d = show(&mut c, 10, Duration::from_millis(100)).await;
+    assert_eq!(fake.calls(), 1);
+    assert_eq!(
+        d.outside.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
+        ["from before"],
+        "one begun before the hook, found by asking"
+    );
+
+    // A hook tells of one not listed: asked once more, to fill it in.
+    fake.list(json!([
+        {"cwd": cwd, "kind": "interactive", "sessionId": "s-old", "status": "idle", "name": "from before"},
+        {"cwd": cwd, "kind": "interactive", "sessionId": "s-new", "status": "busy", "name": "fresh",
+         "pid": std::process::id(), "startedAt": 1_789_821_153_884_i64}
+    ]));
+    let _: serde_json::Value = c.ok("outside.hook", hook("s-new", "SessionStart", &cwd)).await;
+    let _: serde_json::Value = c.ok("outside.hook", hook("s-new", "UserPromptSubmit", &cwd)).await;
+    let d = show(&mut c, 10, Duration::from_millis(100)).await;
+    assert_eq!(fake.calls(), 2, "one more, for both words");
+    let s = d.outside.iter().find(|s| s.session_id == "s-new").expect("told");
+    assert_eq!(
+        (s.name.as_str(), s.pid, s.status.as_str()),
+        ("fresh", Some(std::process::id()), "busy"),
+        "filled in by the ask"
+    );
+    assert!(s.started_at.is_some());
+    // Its words go on coming: nothing more is asked.
+    let _: serde_json::Value = c.ok("outside.hook", hook("s-new", "Stop", &cwd)).await;
+    show(&mut c, 5, Duration::from_millis(100)).await;
+    assert_eq!(fake.calls(), 2);
+    // Its end takes it off, ask or no ask.
+    let _: serde_json::Value = c.ok("outside.hook", hook("s-new", "SessionEnd", &cwd)).await;
+    let d = show(&mut c, 3, Duration::from_millis(100)).await;
+    assert!(!d.outside.iter().any(|s| s.session_id == "s-new"), "{:?}", d.outside);
+    h.stop().await;
+}
+
+#[tokio::test]
+async fn a_background_session_listed_has_claude_asked_now_and_then() {
+    let tmp = tempfile::tempdir().unwrap();
+    let Some((fake, h, mut c)) = asking(tmp.path(), true).await else {
+        return;
+    };
+    let cwd = tmp.path().canonicalize().unwrap();
+    // Told by its hook first, then filled in: in Claude's background.
+    let _: serde_json::Value = c.ok("outside.hook", hook("s-bg", "UserPromptSubmit", &cwd)).await;
+    fake.list(json!([
+        {"id": "bg1", "cwd": cwd, "kind": "background", "sessionId": "s-bg", "status": "busy", "state": "working"}
+    ]));
+    let started = Instant::now();
+    let d = show(&mut c, 26, Duration::from_millis(100)).await;
+    let s = d.outside.iter().find(|s| s.session_id == "s-bg").unwrap();
+    assert_eq!((s.id.as_deref(), s.kind.as_str()), (Some("bg1"), "background"));
+    // At once, then every 500ms: some four or five in 2.5s.
+    let calls = fake.calls();
+    assert!((3..=6).contains(&calls), "{calls} asks in {:?}", started.elapsed());
+    h.stop().await;
+}
+
+#[tokio::test]
+async fn without_its_hook_claude_is_asked_every_little_while_but_only_while_showing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let Some((fake, h, mut c)) = asking(tmp.path(), false).await else {
+        return;
+    };
+    // Nothing showing: nothing asked.
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert_eq!(fake.calls(), 0);
+    // Showing for 1.5s: at once, then every 300ms — some five or six.
+    show(&mut c, 15, Duration::from_millis(100)).await;
+    let calls = fake.calls();
+    assert!((4..=7).contains(&calls), "{calls}");
     h.stop().await;
 }
