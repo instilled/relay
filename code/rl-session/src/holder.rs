@@ -2,9 +2,8 @@
 //!
 //! Output flows child → ring buffer (and, for a tty run, a screen) → every
 //! attached client. A client that asks gets the screen drawn afresh instead of
-//! the ring's bytes. Input, resize and
-//! signals flow the other way from whichever client sends them (the daemon
-//! decides who may). After the child exits the holder lingers so a daemon that
+//! the ring's bytes. Input, resize and signals flow the other way from
+//! whichever client sends them (the daemon decides who may). After the child exits the holder lingers so a daemon that
 //! was down at the time can still attach, replay the tail and read the exit —
 //! then it goes away on `Close` or after `linger` with nobody attached.
 //!
@@ -21,7 +20,7 @@
 
 use crate::backend::{self, Resizer, Spec};
 use crate::exit::{Exit, write_exit_file};
-use crate::proto::{Frame, FrameReader, Hello, write_frame};
+use crate::proto::{Frame, FrameReader, Hello, write_frame, write_output};
 use crate::ring::Ring;
 use crate::screen::Screen;
 use anyhow::{Context, Result};
@@ -340,9 +339,7 @@ async fn client_loop(ctx: &Ctx, stream: UnixStream) -> std::io::Result<()> {
     };
     let mut exit_sent = hello.exit.is_some();
     write_frame(&mut wr, &Frame::Hello(hello.clone())).await?;
-    if (replay || hello.screen) && !snapshot.is_empty() {
-        write_frame(&mut wr, &Frame::Output(snapshot)).await?;
-    }
+    write_output(&mut wr, &snapshot).await?;
     write_frame(&mut wr, &Frame::ReplayEnd).await?;
     if let Some(exit) = hello.exit {
         write_frame(&mut wr, &Frame::Exit(exit)).await?;

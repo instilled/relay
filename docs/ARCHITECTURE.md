@@ -28,13 +28,13 @@ flowchart TB
         sup["supervisor — start · follow · apply · reconcile"]
         flows["flows — flows/*/flow.md → firings: when · on · steps · asks"]
         dec["decisions — questions waiting on a human → runs"]
-        attach["attach — scrollback → replay → live"]
+        attach["attach — the screen drawn afresh (or scrollback → replay) → live"]
         digest["digest — one line per run, and whether it is news"]
         gitm["git — read-only placement: workspace, branch"]
     end
 
     subgraph holder["rl-session — one holder process per run"]
-        h["holder: PTY (or pipes) · ring buffer · exit sidecar<br/>detached with fork + setsid"]
+        h["holder: PTY (or pipes) · ring buffer · screen (headless vt100) · exit sidecar<br/>detached with fork + setsid"]
         child["the child: claude · codex · sh · any command"]
     end
 
@@ -209,11 +209,12 @@ sequenceDiagram
     D-->>V: AttachInfo{cols, rows, tty, live, joiner, journaled, replay_from}
     Note over V,D: after the ok reply the connection stops speaking JSON-RPC —<br/>it carries rl-session frames both ways
 
-    D->>L: read the journal tail
-    opt pipes, or an ended run
-        D-->>V: Output (scrollback): the journal tail, drawn as a screen for a tty run
+    D->>L: the journal's length (journaled)
+    D->>S: attach for the screen (a tty run) or with replay from journaled (pipes) — not for an ended run
+    opt pipes, an older holder, or an ended run
+        D->>L: read the journal tail, ending at journaled
+        D-->>V: Output (scrollback): the journal tail, drawn as a screen for an ended tty run
     end
-    D->>S: attach for the screen (a tty run) or with replay from where the journal stops (pipes)
     S-->>D: Output (the screen drawn afresh, or bytes) … ReplayEnd
     D-->>V: Output … ReplayEnd, then live output
 
@@ -248,8 +249,9 @@ Every one of those frames is read through `FrameReader`, never a bare `read_fram
 reads inside a `select!` — the viewer against stdin and a ticker, `rld` against the holder and
 its own shutdown — and a plain read holds the bytes it has gathered on the future's stack, so
 losing the race throws them away. The next read then starts in the middle of a payload and takes
-the child's own output for a header: a scrollback replay of a few hundred kilobytes is the frame
-most likely to lose, and the run's text decodes into a length of some billions, which ends the
+the child's own output for a header: a screen or scrollback replay, cut into output frames of up
+to a mebibyte each (`OUTPUT_CHUNK`, which keeps any of them under the reader's limit), is the
+likeliest to lose, and the run's text decodes into a length of some billions, which ends the
 connection. `FrameReader` keeps the partial header and payload in the reader itself, so a
 dropped future costs nothing and the next call carries on where it stopped.
 

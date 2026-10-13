@@ -298,7 +298,8 @@ fn default_scrollback() -> u64 {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AttachInfo {
     pub run: Run,
-    /// The pty's size as the holder has it (0×0 for an ended run).
+    /// The pty's size as the holder has it; for an ended run, the last size
+    /// the ledger recorded (0×0 if it has none).
     pub cols: u16,
     pub rows: u16,
     pub tty: bool,
@@ -307,7 +308,8 @@ pub struct AttachInfo {
     /// The current joiner, if any (possibly the caller).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub joiner: Option<String>,
-    /// Output bytes in the journal (where the scrollback ends).
+    /// The journal's length in output bytes: where a pipes run's (or an
+    /// older holder's) byte replay picks up.
     pub journaled: u64,
     /// Where the holder's replay starts; more than `journaled` means a gap.
     /// A screen is whole by itself: for one, this is `journaled`.

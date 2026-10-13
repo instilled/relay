@@ -204,6 +204,9 @@ impl Screen {
 
     /// The window changed size: the snapshot is drawn at the new one, so a
     /// viewer joining after it is handed a screen that fits the app's own.
+    /// `vt100` does not reflow (a shrink drops the bottom rows, a widening
+    /// leaves history at its old width), so this relies on the app repainting
+    /// after a resize, as inline agents do.
     pub fn resize(&mut self, cols: u16, rows: u16) {
         self.parser.screen_mut().set_size(rows.max(1), cols.max(1));
     }
@@ -214,6 +217,11 @@ impl Screen {
     /// it; then the cursor, colours and input modes the app left set.
     /// History rows that were soft-wrapped go out as hard line breaks, so
     /// the viewer's scrollback does not rewrap them.
+    ///
+    /// What `vt100` does not model is not carried: the scroll region, origin
+    /// mode, charset designations, kitty keyboard and focus reporting. An app
+    /// that relies on one draws wrong until its next full redraw, which is
+    /// the accepted cost.
     ///
     /// An app on the alternate screen has its main screen and history drawn
     /// first as well, so they are there when it leaves. `vt100` shows only
@@ -229,7 +237,6 @@ impl Screen {
         let screen = self.parser.screen_mut();
         screen.set_scrollback(usize::MAX);
         let mut at = screen.scrollback();
-        let had_history = at > 0;
         // Oldest first: a viewed page starts `at` rows back.
         while at > 0 {
             screen.set_scrollback(at);
@@ -241,11 +248,10 @@ impl Screen {
             at -= take;
         }
         screen.set_scrollback(0);
-        if had_history {
-            // Up and out of the way, into the viewer's own scrollback,
-            // before the screen is cleared and drawn where they stood.
-            out.extend(std::iter::repeat_n(b'\n', rows.saturating_sub(1) as usize));
-        }
+        // Up and out of the way, into the viewer's own scrollback, before the
+        // screen is cleared and drawn where they stood. With no history too:
+        // what the viewer had on their screen is kept, not cleared away.
+        out.extend(std::iter::repeat_n(b'\n', rows.saturating_sub(1) as usize));
         if alternate {
             out.extend_from_slice(&screen.contents_formatted());
             self.parser.process(b"\x1b[?47h");
@@ -403,6 +409,18 @@ mod tests {
         assert_eq!(p.screen().size(), (8, 30));
         assert!(p.screen().contents().starts_with("abc"));
         assert_eq!(p.screen().cursor_position(), (0, 3));
+    }
+
+    /// A run with no history yet still pushes the viewer's own lines up into
+    /// their scrollback rather than clearing them away.
+    #[test]
+    fn what_the_viewer_had_on_screen_is_kept_above() {
+        let mut s = Screen::new(20, 4);
+        s.feed(b"abc");
+        let mut p = vt100::Parser::new(4, 20, 100);
+        p.process(b"mine 1\r\nmine 2\r\nmine 3\r\n");
+        p.process(&s.snapshot());
+        assert_eq!(shown_parser(&mut p, 20, 4), ["mine 1", "mine 2", "mine 3", "abc"]);
     }
 
     #[test]

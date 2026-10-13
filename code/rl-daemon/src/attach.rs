@@ -19,7 +19,7 @@ use rl_proto::rpc::RpcError;
 use rl_proto::types::AttachMode;
 use rl_session::client::Session;
 use rl_session::exit::Exit;
-use rl_session::proto::{Frame, FrameReader, write_frame};
+use rl_session::proto::{Frame, FrameReader, write_frame, write_output};
 use rl_session::screen::Screen;
 use std::io;
 use std::sync::Arc;
@@ -77,20 +77,21 @@ pub async fn attach(d: &Daemon, p: AttachParams) -> Result<Attached, RpcError> {
 
     let now = Timestamp::now();
     let scrollback = p.scrollback.min(SCROLLBACK_MAX) as usize;
-    let (tail, journaled) = d
+    let journaled = d
         .ledger
         .call({
             let id = id.clone();
             let client = p.client.clone();
             move |c| {
                 presence::touch(c, &client, now)?;
-                Ok((session_io::tail(c, &id, scrollback)?, session_io::out_bytes(c, &id)?))
+                session_io::out_bytes(c, &id)
             }
         })
         .await
         .map_err(RpcError::internal)?;
 
     if run.state.is_terminal() {
+        let tail = journal_tail(d, &id, scrollback, journaled).await?;
         let (cols, rows, tty) = d
             .ledger
             .call({
@@ -103,9 +104,12 @@ pub async fn attach(d: &Daemon, p: AttachParams) -> Result<Attached, RpcError> {
             .map(|s| (s.cols, s.rows, s.tty))
             .unwrap_or((0, 0, false));
         // A terminal run's tail is redraws on redraws: what a viewer wants is
-        // the screen it was left showing.
+        // the screen it was left showing. Drawing megabytes of it through a
+        // terminal is real work, kept off the runtime's own threads.
         let tail = if tty && cols > 0 {
-            Screen::render(&tail, cols, rows)
+            tokio::task::spawn_blocking(move || Screen::render(&tail, cols, rows))
+                .await
+                .map_err(RpcError::internal)?
         } else {
             tail
         };
@@ -156,14 +160,31 @@ pub async fn attach(d: &Daemon, p: AttachParams) -> Result<Attached, RpcError> {
     // Subscribe before announcing, so nothing is missed.
     let notes = live.notes.subscribe();
 
-    let attached = if live.hello.tty {
-        tokio::time::timeout(ATTACH_TIMEOUT, Session::attach_screen(&live.socket, journaled)).await
-    } else {
-        tokio::time::timeout(ATTACH_TIMEOUT, Session::attach_from(&live.socket, Some(journaled))).await
-    };
-    let (hello, holder) = match attached {
-        Ok(Ok(x)) => x,
-        other => {
+    let attached = async {
+        let answered = if live.hello.tty {
+            tokio::time::timeout(ATTACH_TIMEOUT, Session::attach_screen(&live.socket, journaled)).await
+        } else {
+            tokio::time::timeout(ATTACH_TIMEOUT, Session::attach_from(&live.socket, Some(journaled))).await
+        };
+        let (hello, holder) = match answered {
+            Ok(Ok(x)) => x,
+            Ok(Err(e)) => return Err(RpcError::internal(format!("session holder did not answer: {e:#}"))),
+            Err(_) => return Err(RpcError::internal("session holder did not answer: timed out")),
+        };
+        // The screen is whole by itself: the journal's tail would only be
+        // drawn over, so it is not even read. Bytes from a pipes run or an
+        // older holder pick up at `journaled`, where the tail stops.
+        let tail = if hello.screen {
+            Vec::new()
+        } else {
+            journal_tail(d, &id, scrollback, journaled).await?
+        };
+        Ok((hello, holder, tail))
+    }
+    .await;
+    let (hello, holder, tail) = match attached {
+        Ok(x) => x,
+        Err(e) => {
             if joiner {
                 match &replaced {
                     // The take-over didn't go through: put the client we
@@ -182,11 +203,7 @@ pub async fn attach(d: &Daemon, p: AttachParams) -> Result<Attached, RpcError> {
                     }
                 }
             }
-            let why = match other {
-                Ok(Err(e)) => format!("{e:#}"),
-                _ => "timed out".into(),
-            };
-            return Err(RpcError::internal(format!("session holder did not answer: {why}")));
+            return Err(e);
         }
     };
     if joiner {
@@ -200,13 +217,8 @@ pub async fn attach(d: &Daemon, p: AttachParams) -> Result<Attached, RpcError> {
         };
         let _ = live.notes.send(what);
     }
-    // The screen is whole by itself: the journal's tail would only be drawn
-    // over, and nothing is missing between it and live.
-    let (tail, replay_from) = if hello.screen {
-        (Vec::new(), journaled)
-    } else {
-        (tail, hello.replay_from)
-    };
+    // Nothing is missing between a screen and live.
+    let replay_from = if hello.screen { journaled } else { hello.replay_from };
     info!(id, client = %p.client, mode = %p.mode, screen = hello.screen, replay_from, journaled, "viewer attached");
     Ok(Attached {
         info: AttachInfo {
@@ -228,6 +240,23 @@ pub async fn attach(d: &Daemon, p: AttachParams) -> Result<Attached, RpcError> {
     })
 }
 
+/// The last `scrollback` bytes of the run's output that end exactly at
+/// `journaled`. The journal goes on growing while the holder is asked, and
+/// a replay picks up at `journaled`, so whatever was journaled since is read
+/// over and cut off rather than shown twice.
+async fn journal_tail(d: &Daemon, id: &str, scrollback: usize, journaled: u64) -> Result<Vec<u8>, RpcError> {
+    let id = id.to_string();
+    d.ledger
+        .call(move |c| {
+            let since = session_io::out_bytes(c, &id)?.saturating_sub(journaled) as usize;
+            let mut tail = session_io::tail(c, &id, scrollback + since)?;
+            tail.truncate(tail.len().saturating_sub(since));
+            Ok(tail)
+        })
+        .await
+        .map_err(RpcError::internal)
+}
+
 /// Streams until the viewer hangs up, the run ends, or the daemon stops.
 pub async fn stream<R, W>(d: &Daemon, a: Attached, rd: &mut R, wr: &mut W) -> io::Result<()>
 where
@@ -235,9 +264,7 @@ where
     W: AsyncWrite + Unpin,
 {
     let id = a.info.run.id.clone();
-    if !a.tail.is_empty() {
-        write_frame(wr, &Frame::Output(a.tail)).await?;
-    }
+    write_output(wr, &a.tail).await?;
     let gap = a.info.replay_from.saturating_sub(a.info.journaled);
     if gap > 0 {
         write_frame(

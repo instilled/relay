@@ -103,8 +103,9 @@ use rows::SHELL_TAG;
 const EVENT_ASKS: usize = 40;
 /// The most rows the live line grows to before it scrolls within itself.
 const LINE_MAX: u16 = 8;
-/// Recent output replayed when joining a run for real, enough to paint the
-/// screen on arrival. Bytes.
+/// Recent output replayed when joining a pipes run (or an ended one, drawn
+/// from it), enough to paint the screen on arrival. A live terminal run is
+/// drawn from its holder's screen instead. Bytes.
 const JOIN_SCROLLBACK: u64 = 256 * 1024;
 /// Where the header and footer text starts: level with what is typed on the
 /// line, past its `❯ `.

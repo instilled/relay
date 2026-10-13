@@ -217,7 +217,7 @@ Each job: **situation → want → so that**, then the herdr / old-ax baseline, 
 
 **Work to be done.**
 - `enter` on a live run joins its real terminal; `ctrl-\` returns to the list; an ended run's output is read in the pane.
-- Attach via the session holder (J1), replay scrollback, forward resize.
+- Attach via the session holder (J1), draw the run's screen afresh (a pipes run replays scrollback), forward resize.
 - Multi-client: several watchers, one joiner; the joiner is visible to others.
 - Works over ssh with no extra protocol: `ssh box rl`.
 

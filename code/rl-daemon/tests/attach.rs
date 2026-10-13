@@ -139,8 +139,8 @@ async fn watchers_and_one_joiner() {
     watcher.input("nope\n").await;
 
     // The joiner: everyone else is told. It comes once the run is past the
-    // age at which a join nudges it again, and says its size as a terminal
-    // does.
+    // age at which a join is nudged (once, at that age), and says its size as
+    // a terminal does.
     past_young().await;
     let (info, mut joiner) = Viewer::attach(&h.home, &run.id, "join", "bob@desk", false)
         .await
@@ -407,7 +407,7 @@ async fn sizes_heard(home: &Home, id: &str, cwd: &std::path::Path) -> Vec<String
         .collect()
 }
 
-/// Past the age at which a join nudges the run once more (`YOUNG` in
+/// Past the age at which a joined run is nudged once, at that age (`YOUNG` in
 /// `attach.rs`), so a test counting resizes counts only the join's own.
 async fn past_young() {
     tokio::time::sleep(Duration::from_millis(3200)).await;
@@ -451,7 +451,7 @@ async fn a_join_at_a_new_size_is_one_repaint() {
 /// A run joined the moment it starts may not be listening for a resize yet —
 /// Claude Code sets that up half a second in — and one sent before is lost:
 /// it draws for the size it started at, the bottom of the screen empty. So a
-/// run joined young is nudged once more, a few seconds after it started.
+/// run joined young is nudged once, at that age: a few seconds after it started.
 #[tokio::test]
 async fn a_run_joined_before_it_listens_still_hears_its_size() {
     let tmp = tempfile::tempdir().unwrap();
@@ -537,8 +537,7 @@ async fn a_watcher_sees_the_screen_not_every_redraw() {
     assert!(v.seen.contains("n=099"), "{}", v.seen);
     assert!(!v.seen.contains("n=098"), "{}", v.seen);
     let _: Run = c.ok("run.stop", json!({ "id": run.id, "force": true })).await;
-    let done = c.wait_terminal(&run.id).await;
-    let _ = done;
+    c.wait_terminal(&run.id).await;
     // Ended, the same: drawn from the journal, not replayed from it.
     let (info, mut late) = Viewer::attach(&h.home, &run.id, "watch", "ann@laptop", false)
         .await
