@@ -405,7 +405,6 @@ async fn a_screen_attach_draws_the_screen_once() {
         .unwrap();
     read_until(&mut s, "drawn").await;
     let (hello, mut v) = Session::attach_screen(&h.socket, 0).await.unwrap();
-    assert!(hello.screen);
     assert_eq!(hello.replay_from, hello.total);
     let mut drawn = Vec::new();
     loop {
@@ -427,7 +426,6 @@ async fn a_pipes_run_answers_a_screen_attach_with_bytes() {
     s.input(b"echo pi''ped\n".to_vec()).await.unwrap();
     read_until(&mut s, "piped").await;
     let (hello, mut v) = Session::attach_screen(&h.socket, 0).await.unwrap();
-    assert!(!hello.screen);
     assert_eq!(hello.replay_from, 0, "the bytes replay from where it asked");
     assert!(read_until(&mut v, "piped").await.contains("piped"));
 }

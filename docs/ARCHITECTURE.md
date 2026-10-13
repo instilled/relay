@@ -211,7 +211,7 @@ sequenceDiagram
 
     D->>L: the journal's length (journaled)
     D->>S: attach for the screen (a tty run) or with replay from journaled (pipes) — not for an ended run
-    opt pipes, an older holder, or an ended run
+    opt pipes, or an ended run
         D->>L: read the journal tail, ending at journaled
         D-->>V: Output (scrollback): the journal tail, drawn as a screen for an ended tty run
     end
@@ -231,8 +231,7 @@ in a headless terminal fed every byte (`rl-session/src/screen.rs`), and an attac
 handed the history above it once, then what is on it now — whole, so the journal's tail is not
 sent and there is no gap to report. Nothing has to make the app repaint, so joining and letting go
 at the size the run has is no resize at all. A pipes run has no screen and gets the journal's tail
-and the holder's replay; so does a terminal run whose holder predates screens, which answers the
-attach with bytes (`hello.screen` false). An ended terminal run is drawn the same way, from the
+and the holder's replay. An ended terminal run is drawn the same way as a live one, from the
 journal's tail (`Screen::render`).
 
 A run just started is the one case still nudged: a Node or Bun agent listens for a resize only half

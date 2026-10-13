@@ -20,7 +20,7 @@
 
 use crate::backend::{self, Resizer, Spec};
 use crate::exit::{Exit, write_exit_file};
-use crate::proto::{Frame, FrameReader, Hello, write_frame, write_output};
+use crate::proto::{Frame, FrameReader, Hello, Replay, write_frame, write_output};
 use crate::ring::Ring;
 use crate::screen::Screen;
 use anyhow::{Context, Result};
@@ -85,7 +85,6 @@ impl Shared {
             exit: self.exit.clone(),
             total: self.ring.total(),
             replay_from: self.ring.total(),
-            screen: false,
         }
     }
 }
@@ -309,8 +308,8 @@ async fn client_loop(ctx: &Ctx, stream: UnixStream) -> std::io::Result<()> {
     let (rd, mut wr) = stream.into_split();
     let mut rd = FrameReader::new(BufReader::new(rd));
 
-    let (replay, from, screen) = match rd.next().await? {
-        Some(Frame::Attach { replay, from, screen }) => (replay, from, screen),
+    let (replay, from) = match rd.next().await? {
+        Some(Frame::Attach { replay, from }) => (replay, from),
         _ => return Ok(()),
     };
 
@@ -323,13 +322,12 @@ async fn client_loop(ctx: &Ctx, stream: UnixStream) -> std::io::Result<()> {
         let oldest = total - s.ring.len() as u64;
         let start = from.clamp(oldest, total);
         let mut hello = s.hello();
-        let snapshot = if let (true, Some(sc)) = (screen, s.screen.as_mut()) {
+        let snapshot = if let (Replay::Screen, Some(sc)) = (replay, s.screen.as_mut()) {
             // The screen stands in for the bytes: nothing is replayed from the
             // ring, and live output carries on from `total`.
-            hello.screen = true;
             hello.replay_from = total;
             sc.snapshot()
-        } else if replay {
+        } else if replay != Replay::None {
             hello.replay_from = start;
             s.ring.snapshot().split_off((start - oldest) as usize)
         } else {

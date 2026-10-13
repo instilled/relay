@@ -172,9 +172,9 @@ pub async fn attach(d: &Daemon, p: AttachParams) -> Result<Attached, RpcError> {
             Err(_) => return Err(RpcError::internal("session holder did not answer: timed out")),
         };
         // The screen is whole by itself: the journal's tail would only be
-        // drawn over, so it is not even read. Bytes from a pipes run or an
-        // older holder pick up at `journaled`, where the tail stops.
-        let tail = if hello.screen {
+        // drawn over, so it is not even read. A pipes run's bytes pick up at
+        // `journaled`, where the tail stops.
+        let tail = if hello.tty {
             Vec::new()
         } else {
             journal_tail(d, &id, scrollback, journaled).await?
@@ -218,8 +218,8 @@ pub async fn attach(d: &Daemon, p: AttachParams) -> Result<Attached, RpcError> {
         let _ = live.notes.send(what);
     }
     // Nothing is missing between a screen and live.
-    let replay_from = if hello.screen { journaled } else { hello.replay_from };
-    info!(id, client = %p.client, mode = %p.mode, screen = hello.screen, replay_from, journaled, "viewer attached");
+    let replay_from = if hello.tty { journaled } else { hello.replay_from };
+    info!(id, client = %p.client, mode = %p.mode, tty = hello.tty, replay_from, journaled, "viewer attached");
     Ok(Attached {
         info: AttachInfo {
             run,

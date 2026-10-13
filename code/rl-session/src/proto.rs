@@ -39,16 +39,12 @@ const T_NOTE: u8 = 0x85;
 #[derive(Debug, Clone, PartialEq)]
 pub enum Frame {
     // client → holder
-    /// Must be the first frame on a connection. `replay` asks for the ring
-    /// buffer before live output; `from` is the byte offset (in the child's
-    /// total output) to replay from — `0` means everything the ring still has.
-    /// `screen` asks instead for the screen drawn afresh (a tty run's): sent as
-    /// a flag an older holder reads as a plain `replay`, so it answers with bytes
-    /// from `from` and a `Hello` whose `screen` is false.
+    /// Must be the first frame on a connection. `replay` says what comes
+    /// before live output; `from` is the byte offset (in the child's total
+    /// output) a byte replay starts at — `0` means everything the ring still has.
     Attach {
-        replay: bool,
+        replay: Replay,
         from: u64,
-        screen: bool,
     },
     Input(Vec<u8>),
     Resize {
@@ -73,6 +69,18 @@ pub enum Frame {
     Note(String),
 }
 
+/// What an attach gets before live output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Replay {
+    /// Nothing: live output only.
+    None,
+    /// The ring buffer's bytes from `from`.
+    Bytes,
+    /// A tty run's screen drawn afresh. A pipes run has no screen and
+    /// replays its bytes from `from` instead.
+    Screen,
+}
+
 /// What the holder knows about its session, sent on attach.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Hello {
@@ -94,17 +102,13 @@ pub struct Hello {
     /// `from` lost `replay_from - from` bytes to the ring's capacity.
     #[serde(default)]
     pub replay_from: u64,
-    /// The replay that follows is the screen drawn afresh, not bytes.
-    #[serde(default)]
-    pub screen: bool,
 }
 
 impl Frame {
     pub fn encode(&self) -> Vec<u8> {
         let (tag, payload): (u8, Vec<u8>) = match self {
-            Frame::Attach { replay, from, screen } => {
-                // 2 is non-zero on purpose: an older holder reads it as "replay".
-                let mut p = vec![if *screen { 2 } else { *replay as u8 }];
+            Frame::Attach { replay, from } => {
+                let mut p = vec![*replay as u8];
                 p.extend_from_slice(&from.to_be_bytes());
                 (T_ATTACH, p)
             }
@@ -132,16 +136,19 @@ impl Frame {
     fn decode(tag: u8, p: Vec<u8>) -> io::Result<Frame> {
         let bad = |what: &str| io::Error::new(io::ErrorKind::InvalidData, format!("bad {what} frame"));
         Ok(match tag {
-            // A 1-byte payload is an older client: replay from the start.
             T_ATTACH => {
-                let flag = p.first().copied().unwrap_or(0);
+                if p.len() != 9 {
+                    return Err(bad("attach"));
+                }
+                let replay = match p[0] {
+                    0 => Replay::None,
+                    1 => Replay::Bytes,
+                    2 => Replay::Screen,
+                    _ => return Err(bad("attach")),
+                };
                 Frame::Attach {
-                    replay: flag != 0,
-                    from: p
-                        .get(1..9)
-                        .map(|b| u64::from_be_bytes(b.try_into().unwrap()))
-                        .unwrap_or(0),
-                    screen: flag & 2 != 0,
+                    replay,
+                    from: u64::from_be_bytes(p[1..9].try_into().unwrap()),
                 }
             }
             T_INPUT => Frame::Input(p),
@@ -369,14 +376,16 @@ mod tests {
     async fn every_frame_roundtrips() {
         let frames = vec![
             Frame::Attach {
-                replay: true,
+                replay: Replay::Bytes,
                 from: 0,
-                screen: false,
             },
             Frame::Attach {
-                replay: false,
+                replay: Replay::None,
                 from: 12_345_678_901,
-                screen: false,
+            },
+            Frame::Attach {
+                replay: Replay::Screen,
+                from: 7,
             },
             Frame::Input(b"hello\n".to_vec()),
             Frame::Resize { cols: 220, rows: 51 },
@@ -393,7 +402,6 @@ mod tests {
                 exit: None,
                 total: 99,
                 replay_from: 10,
-                screen: true,
             }),
             Frame::Output(vec![0, 1, 2, 255]),
             Frame::ReplayEnd,
@@ -417,47 +425,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn attach_asks_for_the_screen_in_a_way_an_old_holder_reads_as_a_replay() {
-        async fn roundtrip(f: &Frame) -> Frame {
+    async fn an_attach_with_an_unknown_mode_or_a_short_payload_is_refused() {
+        for bad in [
+            &[T_ATTACH, 0, 0, 0, 1, 1][..],
+            &[T_ATTACH, 0, 0, 0, 9, 3, 0, 0, 0, 0, 0, 0, 0, 0],
+        ] {
             let (mut a, mut b) = tokio::io::duplex(64);
-            write_frame(&mut a, f).await.unwrap();
-            read_frame(&mut b).await.unwrap().unwrap()
+            a.write_all(bad).await.unwrap();
+            let e = read_frame(&mut b).await.unwrap_err();
+            assert_eq!(e.kind(), io::ErrorKind::InvalidData, "{e}");
         }
-        let f = Frame::Attach {
-            replay: false,
-            from: 42,
-            screen: true,
-        };
-        let bytes = f.encode();
-        // The flag byte: an old holder reads any non-zero one as "replay".
-        assert_eq!(bytes[5], 2);
-        assert_ne!(bytes[5], 0);
-        assert_eq!(
-            roundtrip(&f).await,
-            Frame::Attach {
-                replay: true,
-                from: 42,
-                screen: true
-            }
-        );
-        let plain = Frame::Attach {
-            replay: true,
-            from: 7,
-            screen: false,
-        };
-        assert_eq!(plain.encode()[5], 1);
-        assert_eq!(roundtrip(&plain).await, plain);
-        // The 1-byte payload of an older client still decodes.
-        let (mut a, mut b) = tokio::io::duplex(64);
-        a.write_all(&[T_ATTACH, 0, 0, 0, 1, 1]).await.unwrap();
-        assert_eq!(
-            read_frame(&mut b).await.unwrap().unwrap(),
-            Frame::Attach {
-                replay: true,
-                from: 0,
-                screen: false
-            }
-        );
     }
 
     /// More output than one frame may carry goes out as several that each

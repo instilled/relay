@@ -308,8 +308,8 @@ pub struct AttachInfo {
     /// The current joiner, if any (possibly the caller).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub joiner: Option<String>,
-    /// The journal's length in output bytes: where a pipes run's (or an
-    /// older holder's) byte replay picks up.
+    /// The journal's length in output bytes: where a pipes run's byte
+    /// replay picks up.
     pub journaled: u64,
     /// Where the holder's replay starts; more than `journaled` means a gap.
     /// A screen is whole by itself: for one, this is `journaled`.

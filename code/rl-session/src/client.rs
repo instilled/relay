@@ -1,6 +1,6 @@
 //! Client side of the holder protocol — what `rld` (and tests) use.
 
-use crate::proto::{Frame, FrameReader, Hello, write_frame};
+use crate::proto::{Frame, FrameReader, Hello, Replay, write_frame};
 use anyhow::{Context, Result, bail};
 use std::io;
 use std::path::Path;
@@ -33,24 +33,21 @@ impl Session {
         Self::open(
             socket,
             Frame::Attach {
-                replay: from.is_some(),
+                replay: if from.is_some() { Replay::Bytes } else { Replay::None },
                 from: from.unwrap_or(0),
-                screen: false,
             },
         )
         .await
     }
 
-    /// Attaches asking for the screen drawn afresh. A holder that keeps none
-    /// (a pipes run, or one started by an older binary) replays bytes from
-    /// `from` instead, and says so: `hello.screen` is false.
+    /// Attaches asking for the screen drawn afresh. A pipes run has none and
+    /// replays bytes from `from` instead.
     pub async fn attach_screen(socket: &Path, from: u64) -> Result<(Hello, Self)> {
         Self::open(
             socket,
             Frame::Attach {
-                replay: true,
+                replay: Replay::Screen,
                 from,
-                screen: true,
             },
         )
         .await
