@@ -3682,7 +3682,8 @@ impl App {
     }
 
     /// Shift-↑/↓: the row under the cursor one place up or down inside its
-    /// project, which keeps that order from then on (`digest.order`). The
+    /// project, which keeps that order from then on (`digest.order`) — or,
+    /// on a header, the project one place up or down among the projects. The
     /// cursor stays on the row, and holding the key goes on moving it. The
     /// order kept comes back at once, so the next press builds on it without
     /// waiting for the list to be fetched again.
@@ -3726,7 +3727,8 @@ impl App {
     }
 
     /// `/sort`: the project under the cursor — its header, or any row in it
-    /// — lets go of the order you put it in and sorts itself again.
+    /// — lets go of the order you put its rows in, and they go back to the
+    /// order they came in. Where the project stands among the others stays.
     async fn sort_project(&mut self) {
         if self.view == View::CatchUp {
             return self.say("/sort sorts on the list · esc goes there");
@@ -3744,11 +3746,13 @@ impl App {
                 })
         };
         let Some((group, name)) = found else {
-            self.say("/sort is for a project: on its header, it lets the project sort itself again");
+            self.say("/sort is for a project: on its header, it puts its rows back in the order they came");
             return;
         };
         if !self.digest.order.iter().any(|o| o.group == group) {
-            self.say(format!("{name} already sorts itself · ⇧↑↓ puts its rows in your order"));
+            self.say(format!(
+                "{name} already stands in the order its rows came · ⇧↑↓ puts them in yours"
+            ));
             return;
         }
         match self
@@ -3762,7 +3766,7 @@ impl App {
             Ok(all) => {
                 self.digest.order = all;
                 self.say(format!(
-                    "{name} sorts itself again · what needs you, then by state and time"
+                    "{name} goes back to the order its rows came in · the newest at the bottom"
                 ));
             }
             Err(e) => self.say(format!("sort: {e:#}")),
@@ -7036,6 +7040,40 @@ mod tests {
         let mut app = super::App::new(&home, rpc, "test".into(), vec![]);
         app.refresh().await;
         (tmp, token, app, folder)
+    }
+
+    #[tokio::test]
+    async fn a_project_moves_up_among_the_projects_and_stays_there() {
+        let (tmp, token, mut app, _folder) = panel().await;
+        let zed = std::fs::canonicalize(tmp.path()).unwrap().join("zed");
+        std::fs::create_dir_all(&zed).unwrap();
+        app.rpc
+            .call::<super::WorkspaceUp>(super::WorkspaceUpParams { path: zed.clone() })
+            .await
+            .unwrap();
+        app.refresh().await;
+        let heads = |app: &super::App| -> Vec<String> {
+            app.rows()
+                .iter()
+                .filter_map(|r| match r {
+                    super::Row::Group(h) => Some(h.name.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(heads(&app), ["api", "zed"], "by name until you move one");
+        let key = format!("g:{}", zed.display());
+        app.select(Some(key.clone()));
+        press(&mut app, KeyCode::Up, KeyModifiers::SHIFT).await;
+        assert_eq!(heads(&app), ["zed", "api"]);
+        assert_eq!(app.sel.as_deref(), Some(key.as_str()), "the cursor goes with it");
+        // The daemon keeps it: fetched again, it stands where you put it.
+        app.refresh().await;
+        assert_eq!(heads(&app), ["zed", "api"]);
+        press(&mut app, KeyCode::Up, KeyModifiers::SHIFT).await;
+        let said = app.flash.as_ref().map(|(m, _)| m.clone()).unwrap_or_default();
+        assert_eq!(said, "already the first project");
+        token.cancel();
     }
 
     /// The cursor on the first header.

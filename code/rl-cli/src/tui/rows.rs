@@ -1,11 +1,16 @@
-//! The one list: questions and runs, ranked by attention, grouped by what
-//! they belong to, and named in words rather than ids and paths.
+//! The one list: questions and runs, grouped by what they belong to, each
+//! where it came and staying there, and named in words rather than ids and
+//! paths.
 //!
 //! A group is a run's ref, else its folder — never its branch: a folder is one
 //! project whichever branch it is on, and its header says which. Groups come in
-//! order of name; inside a group, questions come first,
-//! then runs by attention, newest change first. A workspace path reads as the
-//! name it was registered under.
+//! order of name, until you move one (shift-↑/↓ on its header): then in yours,
+//! and what you have not placed after it by name; `everywhere` comes last.
+//! Inside a group, runs and flows stand in the order they came — a run by when
+//! it started, a flow by its oldest run on the list — the newest at the
+//! bottom; nothing that happens to a row moves it. A question stands right
+//! under the run that asked it, or, that run not being in the group, at the
+//! bottom of it. A workspace path reads as the name it was registered under.
 //!
 //! A flow's step runs, once they have ended, fold into one row per flow —
 //! its name, how the last few went, and where its latest firing stands — so
@@ -17,17 +22,15 @@
 //! and when it fires next, before it ever fired — and its row keeps all the
 //! runs the digest has of it, however long ago they ended.
 //!
-//! Before all of it, the questions waiting on you, from every project, oldest
-//! first — what needs you does not hide under a project's name — then pinned
-//! runs, in the order they were pinned.
+//! Before all of it, pinned runs, in the order they were pinned.
 //!
 //! What you hid (`/hide`: a run, a flow, a project and everything in it) is
 //! off the list and in the `hidden` lens instead — unless it comes to need
-//! you after you hid it: then it comes through, just after the questions.
+//! you after you hid it: then it comes through, above the pinned runs.
 //!
-//! A project whose rows you moved (shift-↑/↓) keeps your order instead of
-//! sorting itself: what is new enters at its top, what needs you floats to
-//! its top until dealt with, and `/sort` lets it sort itself again.
+//! A project whose rows you moved (shift-↑/↓) keeps your order: every row
+//! stands where you put it, whatever comes of it, what is new enters at the
+//! bottom, and `/sort` lets it go back to the order its rows came in.
 
 use super::flows;
 use super::query::{Named, Query, Subject};
@@ -519,9 +522,6 @@ pub struct FlowRow<'a> {
     pub firing: Option<&'a Firing>,
 }
 
-/// Where a flow that has not run ranks: below everything that has.
-const QUIET: u8 = u8::MAX;
-
 impl<'a> FlowRow<'a> {
     /// Its newest run; none before it has run.
     pub fn last(&self) -> Option<&'a DigestItem> {
@@ -538,10 +538,6 @@ impl<'a> FlowRow<'a> {
     }
     pub fn unseen(&self) -> bool {
         self.runs.iter().any(|i| i.unseen)
-    }
-    /// The flow ranks as its last run did; one that has not run, quietest.
-    pub fn score(&self) -> u8 {
-        self.last().map_or(QUIET, |i| rank::score(&i.run))
     }
     /// Whether its last run failed.
     pub fn failed_last(&self) -> bool {
@@ -738,7 +734,14 @@ struct Group<'a> {
     workspace: PathBuf,
     runs: Vec<&'a DigestItem>,
     flows: Vec<FlowRow<'a>>,
+    /// The questions asked in it, each with the key of the row it stands
+    /// under when that row is there.
+    asked: Vec<Asked<'a>>,
 }
+
+/// A question, and the key of the row that asked it: its run's, or the
+/// row of the flow that run folded into, or its firing's flow's.
+type Asked<'a> = (Option<String>, &'a Decision);
 
 /// What the list is built from besides the digest.
 pub struct Context<'a> {
@@ -871,6 +874,7 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
                     workspace: workspace.to_path_buf(),
                     runs: Vec::new(),
                     flows: Vec::new(),
+                    asked: Vec::new(),
                 });
                 groups.len() - 1
             }
@@ -901,36 +905,9 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
     // filter does, as with anything else.
     let mut pinned: Vec<&'a DigestItem> = Vec::new();
     // What you hid is off the list, and only it is in the `hidden` lens; what
-    // of it has come to need you since comes through, after the questions.
+    // of it has come to need you since comes through, above the projects.
     let hidden_lens = cx.lens == Lens::Hidden;
     let mut through: Vec<&'a DigestItem> = Vec::new();
-    // Questions lead the list, whichever project asked them.
-    let mut asked: Vec<&'a Decision> = Vec::new();
-    for q in &d.decisions {
-        let asker = q.run.as_deref().and_then(run_by_id);
-        let key = asker
-            .map(Run::place_key)
-            .unwrap_or_else(|| q.workspace.to_string_lossy().into_owned());
-        let name = names.group(&key);
-        // A flow's question is its firing's: the chain is the firing.
-        let by = firing_of(q, &d.firings)
-            .map(|f| f.flow.as_str())
-            .or(asker.and_then(|r| match &r.cause {
-                Cause::Flow { flow, .. } => Some(flow.as_str()),
-                _ => None,
-            }));
-        let subject = Subject {
-            text: vec![&q.title, q.summary.as_deref().unwrap_or("")],
-            project: vec![&name, q.workspace.to_str().unwrap_or("")],
-            is: vec!["needs"],
-            kind: vec!["question"],
-            by: by.into_iter().collect(),
-            on: asker.and_then(|r| r.branch.as_deref()),
-        };
-        if query.hits(&subject) {
-            asked.push(q);
-        }
-    }
     for i in &d.items {
         let r = &i.run;
         // A summary of everything runs in the Relay home: Relay's doing, not
@@ -1039,34 +1016,58 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
             runs: acc.runs,
         });
     }
+    // A question stands in its project, under the row that asked it — or,
+    // where that run is pinned or has come through, under it there. It
+    // ignores the lens: it is what needs you, whatever slice you are in.
+    let banded: HashSet<&str> = pinned.iter().chain(&through).map(|i| i.run.id.as_str()).collect();
+    let mut band_asked: Vec<Asked<'a>> = Vec::new();
+    for q in &d.decisions {
+        let asker = q.run.as_deref().and_then(run_by_id);
+        let (key, workspace) = match asker {
+            Some(r) => group_of(r, names, cx.flows),
+            None => (q.workspace.to_string_lossy().into_owned(), q.workspace.clone()),
+        };
+        let name = group_name(&key, names);
+        // A flow's question is its firing's: the chain is the firing.
+        let firing = firing_of(q, &d.firings).map(|f| f.flow.as_str());
+        let by = firing.or(asker.and_then(|r| match &r.cause {
+            Cause::Flow { flow, .. } => Some(flow.as_str()),
+            _ => None,
+        }));
+        let subject = Subject {
+            text: vec![&q.title, q.summary.as_deref().unwrap_or("")],
+            project: vec![&name, q.workspace.to_str().unwrap_or("")],
+            is: vec!["needs"],
+            kind: vec!["question"],
+            by: by.into_iter().collect(),
+            on: asker.and_then(|r| r.branch.as_deref()),
+        };
+        if !query.hits(&subject) {
+            continue;
+        }
+        let under = match asker {
+            Some(r) => Some(flow_of(r).map_or_else(|| format!("r:{}", r.id), flow_key)),
+            None => firing.map(flow_key),
+        };
+        if asker.is_some_and(|r| banded.contains(r.id.as_str())) {
+            band_asked.push((under, q));
+            continue;
+        }
+        let g = group_at(key, &workspace, &mut groups);
+        groups[g].asked.push((under, q));
+    }
     for g in &mut groups {
-        g.runs.sort_by(|a, b| {
-            rank::score(&a.run)
-                .cmp(&rank::score(&b.run))
-                .then_with(|| b.at.cmp(&a.at))
-        });
         for f in &mut g.flows {
             f.runs.sort_by_key(|i| std::cmp::Reverse(i.at));
         }
-        // One that has not run comes after those that have, by name.
-        g.flows.sort_by(|a, b| {
-            a.score()
-                .cmp(&b.score())
-                .then_with(|| b.last().map(|i| i.at).cmp(&a.last().map(|i| i.at)))
-                .then_with(|| a.name.cmp(&b.name))
-        });
     }
     // Which folders already have a line, so idle projects don't double up.
     let shown: HashSet<PathBuf> = groups.iter().map(|g| g.workspace.clone()).collect();
     pinned.sort_by_key(|i| (i.run.pinned_at, i.run.id.clone()));
-    asked.sort_by_key(|q| (q.created_at, q.id.clone()));
     through.sort_by_key(|i| (rank::score(&i.run), i.run.state_at, i.run.id.clone()));
-    let mut rows: Vec<Row<'a>> = asked.into_iter().map(Row::Question).collect();
-    rows.extend(through.into_iter().map(Row::Run));
-    rows.extend(pinned.into_iter().map(Row::Run));
-    // Projects in order of name, so each keeps its place as work comes and
-    // goes: what needs you says so with its marks and in the headline, not by
-    // jumping the queue. Each block is a project's header and what is under it.
+    let band: Vec<Row<'a>> = through.into_iter().chain(pinned).map(Row::Run).collect();
+    let mut rows = attach(band, band_asked);
+    // Each block is a project's header and what is under it.
     let mut blocks: Vec<(String, String, Vec<Row<'a>>)> = Vec::new();
     let mut everywhere: Vec<Row<'a>> = Vec::new();
     for g in groups {
@@ -1077,39 +1078,22 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
             head(&g.key, &g.workspace, d, cx)
         };
         let mut block = vec![Row::Group(head)];
-        // Runs and flows share one order: whatever asks for you leads, then the
-        // folder's shells — where you work, rather than something that happens
-        // to be idle — then the rest, newest first.
-        let cls = |score: u8, shell: bool| match (score, shell) {
-            (0, _) => 0u8,
-            (_, true) => 1,
-            _ => 2,
-        };
-        let mut mixed: Vec<(u8, u8, Option<Timestamp>, Row<'a>)> = g
-            .runs
-            .into_iter()
-            .map(|i| {
-                let s = rank::score(&i.run);
-                (cls(s, live_shell(&i.run)), s, Some(i.at), Row::Run(i))
-            })
-            .collect();
-        mixed.extend(g.flows.into_iter().map(|f| {
-            let s = f.score();
-            (cls(s, false), s, f.last().map(|i| i.at), Row::Flow(f))
-        }));
-        mixed.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)).then_with(|| b.2.cmp(&a.2)));
-        let mixed: Vec<Row<'a>> = mixed.into_iter().map(|(_, _, _, row)| row).collect();
-        // Once you have put a project's rows in order, it keeps yours: what
-        // needs you still floats to the top, what is new enters at the top,
-        // and the rest stand where you put them.
+        // Runs and flows share one order, which nothing that happens to a
+        // row changes: the order they came in, the newest at the bottom.
+        let mut mixed: Vec<Row<'a>> = g.runs.into_iter().map(Row::Run).collect();
+        mixed.extend(g.flows.into_iter().map(Row::Flow));
+        mixed.sort_by_cached_key(came);
+        // Once you have put a project's rows in order, it keeps yours: the
+        // rows stand where you put them, and what is new enters at the bottom.
         let kept = block[0]
             .key()
             .and_then(|k| d.order.iter().find(|o| o.group == k))
             .filter(|o| !o.rows.is_empty());
-        match kept {
-            Some(o) => block.extend(in_order(mixed, &o.rows)),
-            None => block.extend(mixed),
-        }
+        let mixed = match kept {
+            Some(o) => in_order(mixed, &o.rows),
+            None => mixed,
+        };
+        block.extend(attach(mixed, g.asked));
         if g.key == EVERYWHERE_KEY {
             everywhere = block;
         } else {
@@ -1159,7 +1143,16 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
         let head = Row::Group(head(&p.to_string_lossy(), &p, d, cx));
         blocks.push((name.to_lowercase(), p.to_string_lossy().into_owned(), vec![head]));
     }
-    blocks.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+    // Projects in the order you put them (shift-↑/↓ on a header), the rest
+    // after them by name — a project new to the list enters at the bottom —
+    // so each keeps its place as work comes and goes: what needs you says
+    // so with its marks and in the headline, not by jumping the queue.
+    let projects = d.order.iter().find(|o| o.group == Order::PROJECTS);
+    let place = |block: &[Row]| {
+        let key = block.first().and_then(Row::key)?;
+        projects?.rows.iter().position(|k| *k == key)
+    };
+    blocks.sort_by_cached_key(|(name, key, block)| (place(block).unwrap_or(usize::MAX), name.clone(), key.clone()));
     rows.extend(blocks.into_iter().flat_map(|(_, _, block)| block));
     // The flows with no `in` are said in the headline (`everywhere`), and the
     // graph is where they are wired. Their rows, and what flows ran outside
@@ -1183,10 +1176,10 @@ pub fn head(key: &str, workspace: &Path, d: &Digest, cx: &Context<'_>) -> Head {
     }
 }
 
-/// Whether a row floats to the top of its project whatever order you put it
-/// in: it asks, is blocked, or failed — a flow whose last run failed too.
-/// Once that is dealt with, it drops back to where you put it.
-pub fn floats(row: &Row) -> bool {
+/// Whether a row wants you: it asks, is blocked, or failed — a flow whose
+/// last run failed too. On the list it stays where it stands and says so;
+/// the catch-up puts it first in its project.
+pub fn wants_you(row: &Row) -> bool {
     let needs = |s: RunState| matches!(s, RunState::NeedsInput | RunState::Blocked | RunState::Failed);
     match row {
         Row::Run(i) => needs(i.run.state),
@@ -1195,65 +1188,104 @@ pub fn floats(row: &Row) -> bool {
     }
 }
 
-/// A flow's row with no runs: quiet, so where an order does not know it yet
-/// it comes last, not first.
-fn unrun(row: &Row) -> bool {
-    matches!(row, Row::Flow(f) if f.runs.is_empty())
+/// Where a row stands in a project you have not put in order: by when it came — a
+/// run when it started, a flow when the oldest run the list has of it
+/// started — the newest at the bottom; a flow that has not run after them,
+/// by name. Nothing that happens to a row afterwards changes it.
+fn came(row: &Row) -> (bool, Option<Timestamp>, String) {
+    match row {
+        Row::Run(i) => (false, Some(i.run.started_at), i.run.id.clone()),
+        Row::Flow(f) => {
+            let first = f.runs.iter().map(|i| i.run.started_at).min();
+            (first.is_none(), first, f.name.clone())
+        }
+        Row::Group(_) | Row::Question(_) => (true, None, String::new()),
+    }
 }
 
-/// A project's rows, sorted as ever, put in the order kept for it: what
-/// floats first, then what the order does not know yet (new since), then the
-/// rest where the order has them, then flows not known to it that have not
-/// run. Each part keeps the sorted order within it.
-fn in_order<'a>(sorted: Vec<Row<'a>>, kept: &[String]) -> Vec<Row<'a>> {
+/// A project's rows, in the order they came, put in the order kept for it:
+/// the rows it knows where it has them, then what it does not know yet —
+/// new since — at the bottom, in the order they came.
+fn in_order<'a>(came: Vec<Row<'a>>, kept: &[String]) -> Vec<Row<'a>> {
     let place = |r: &Row| r.key().and_then(|k| kept.iter().position(|x| *x == k));
-    let (floating, rest): (Vec<Row<'a>>, Vec<Row<'a>>) = sorted.into_iter().partition(floats);
-    let (mut placed, new): (Vec<Row<'a>>, Vec<Row<'a>>) = rest.into_iter().partition(|r| place(r).is_some());
-    let (quiet, new): (Vec<Row<'a>>, Vec<Row<'a>>) = new.into_iter().partition(unrun);
-    placed.sort_by_key(|r| place(r));
-    floating.into_iter().chain(new).chain(placed).chain(quiet).collect()
+    let (mut placed, new): (Vec<Row<'a>>, Vec<Row<'a>>) = came.into_iter().partition(|r| place(r).is_some());
+    placed.sort_by_cached_key(|r| place(r));
+    placed.into_iter().chain(new).collect()
 }
 
-/// A project's rows in the order they stand underneath what floats: what
-/// `in_order` would keep, from the list as it is built with nothing narrowing
-/// it (`full`). Without an order kept, the list's own.
-fn standing(full: &[Row], kept: &[Order], group: &str) -> Vec<String> {
+/// Each question right under the row that asked it, oldest first; one whose
+/// row is not among `rows` at the bottom.
+fn attach<'a>(rows: Vec<Row<'a>>, mut asked: Vec<Asked<'a>>) -> Vec<Row<'a>> {
+    asked.sort_by_key(|(_, q)| (q.created_at, q.id.clone()));
+    let keys: HashSet<String> = rows.iter().filter_map(Row::key).collect();
+    let (under, loose): (Vec<Asked<'a>>, Vec<Asked<'a>>) = asked
+        .into_iter()
+        .partition(|(k, _)| k.as_ref().is_some_and(|k| keys.contains(k)));
+    let mut out = Vec::with_capacity(rows.len() + under.len() + loose.len());
+    for row in rows {
+        let key = row.key();
+        out.push(row);
+        out.extend(under.iter().filter(|(k, _)| *k == key).map(|(_, q)| Row::Question(q)));
+    }
+    out.extend(loose.into_iter().map(|(_, q)| Row::Question(q)));
+    out
+}
+
+/// A project's rows as they stand on the list with nothing narrowing it
+/// (`full`) — the order `in_order` keeps — but for its questions, which
+/// stand under their rows rather than in the order.
+fn standing(full: &[Row], group: &str) -> Vec<String> {
     let Some(head) = full.iter().position(|r| r.key().as_deref() == Some(group)) else {
         return Vec::new();
     };
-    let rows: Vec<&Row> = full[head + 1..]
+    full[head + 1..]
         .iter()
         .take_while(|r| !matches!(r, Row::Group(_)))
-        .collect();
-    let keys: Vec<String> = rows.iter().filter_map(|r| r.key()).collect();
-    match kept.iter().find(|o| o.group == group).filter(|o| !o.rows.is_empty()) {
-        Some(o) => {
-            let new = |quiet: bool| {
-                rows.iter()
-                    .filter(move |r| unrun(r) == quiet)
-                    .filter_map(|r| r.key())
-                    .filter(|k| !o.rows.contains(k))
-            };
-            let placed = o.rows.iter().filter(|k| keys.contains(k)).cloned();
-            new(false).chain(placed).chain(new(true)).collect()
-        }
-        None => keys,
+        .filter(|r| !matches!(r, Row::Question(_)))
+        .filter_map(Row::key)
+        .collect()
+}
+
+/// A project's header's key — not `everywhere`'s, which is not one.
+fn project_key(row: &Row) -> Option<String> {
+    match row {
+        Row::Group(h) if !h.is_everywhere() => row.key(),
+        _ => None,
     }
+}
+
+/// The projects in the order they stand: the order kept for them, what it
+/// has that the list does not show now keeping its place, then those it
+/// does not know, as the list has them (`full`, nothing narrowing it).
+fn projects_standing(full: &[Row], kept: &[Order]) -> Vec<String> {
+    let mut keys: Vec<String> = kept
+        .iter()
+        .find(|o| o.group == Order::PROJECTS)
+        .map(|o| o.rows.clone())
+        .unwrap_or_default();
+    for k in full.iter().filter_map(project_key) {
+        if !keys.contains(&k) {
+            keys.push(k);
+        }
+    }
+    keys
 }
 
 /// The order to keep once the row `key` moves one place up (or down) among
 /// what is `shown`: its project's whole order, from `full` — the list with
 /// nothing narrowing it — so rows a search or a lens leaves out keep theirs.
-/// Rows move only inside their project, and below what floats; a question, a
-/// pinned run, a header, and what needs you stay put, and say why.
+/// Rows move only inside their project, past a question as past nothing; a
+/// header moves among the projects. A question, a pinned run and
+/// `everywhere` stay put, and say why.
 pub fn reorder(shown: &[Row], full: &[Row], kept: &[Order], key: &str, up: bool) -> Result<Order, &'static str> {
     let at = shown
         .iter()
         .position(|r| r.key().as_deref() == Some(key))
         .ok_or("nothing here to move")?;
     match &shown[at] {
-        Row::Group(_) => return Err("a project keeps its place by name · ⇧↑↓ moves the rows inside it"),
-        Row::Question(_) => return Err("a question stays at the top: it needs you"),
+        Row::Group(h) if h.is_everywhere() => return Err("everywhere stays last, below the projects"),
+        Row::Group(_) => return move_project(shown, full, kept, key, up),
+        Row::Question(_) => return Err("a question stays under the run that asked it"),
         Row::Run(_) | Row::Flow(_) => {}
     }
     let Some(head) = shown[..at].iter().rposition(|r| matches!(r, Row::Group(_))) else {
@@ -1263,18 +1295,19 @@ pub fn reorder(shown: &[Row], full: &[Row], kept: &[Order], key: &str, up: bool)
             "it needs you, so it stays at the top until it is dealt with"
         });
     };
-    if floats(&shown[at]) {
-        return Err("it needs you, so it stays at the top of its project until it is dealt with");
+    // The row it passes: the next run or flow, over a question between.
+    let step = |i: usize| if up { i.checked_sub(1) } else { Some(i + 1) };
+    let mut next = step(at);
+    while let Some(Row::Question(_)) = next.and_then(|i| shown.get(i)) {
+        next = next.and_then(step);
     }
-    let next = if up { at.checked_sub(1) } else { Some(at + 1) };
     let other = match next.and_then(|i| shown.get(i)) {
-        Some(r) if floats(r) => return Err("already at the top · what needs you stays above it"),
-        Some(Row::Run(_) | Row::Flow(_)) => shown[next.unwrap_or_default()].key().unwrap_or_default(),
+        Some(r @ (Row::Run(_) | Row::Flow(_))) => r.key().unwrap_or_default(),
         _ if up => return Err("already at the top of its project"),
         _ => return Err("already at the bottom of its project"),
     };
     let group = shown[head].key().unwrap_or_default();
-    let mut rows = standing(full, kept, &group);
+    let mut rows = standing(full, &group);
     rows.retain(|k| k != key);
     let i = rows
         .iter()
@@ -1282,6 +1315,30 @@ pub fn reorder(shown: &[Row], full: &[Row], kept: &[Order], key: &str, up: bool)
         .ok_or("the list moved under it · try again")?;
     rows.insert(if up { i } else { i + 1 }, key.to_string());
     Ok(Order { group, rows })
+}
+
+/// The projects' order once the project `key` moves one place up (or down)
+/// among the projects `shown`, kept whole from `full`.
+fn move_project(shown: &[Row], full: &[Row], kept: &[Order], key: &str, up: bool) -> Result<Order, &'static str> {
+    let heads: Vec<String> = shown.iter().filter_map(project_key).collect();
+    let at = heads.iter().position(|k| k == key).ok_or("nothing here to move")?;
+    let next = if up { at.checked_sub(1) } else { Some(at + 1) };
+    let other = match next.and_then(|i| heads.get(i)) {
+        Some(k) => k.clone(),
+        None if up => return Err("already the first project"),
+        None => return Err("already the last project"),
+    };
+    let mut rows = projects_standing(full, kept);
+    rows.retain(|k| k != key);
+    let i = rows
+        .iter()
+        .position(|k| *k == other)
+        .ok_or("the list moved under it · try again")?;
+    rows.insert(if up { i } else { i + 1 }, key.to_string());
+    Ok(Order {
+        group: Order::PROJECTS.into(),
+        rows,
+    })
 }
 
 /// `(questions, need you, working, finished, flows)` over what the list shows.
@@ -1716,14 +1773,18 @@ mod tests {
         assert_eq!(shown("login api"), ["[api]", "r:agent"]);
         assert_eq!(shown("login web"), Vec::<String>::new());
         // A project's name keeps all of it; an idle project answers to its name.
-        assert_eq!(shown("in:api"), ["q:q1", "[api]", "r:agent"]);
+        assert_eq!(shown("in:api"), ["[api]", "r:agent", "q:q1"]);
         assert_eq!(shown("idle"), ["[idle]"]);
         // Tokens pick by what a thing is, and take no bare project along.
         assert_eq!(shown("is:failed"), ["[web]", "r:failed"]);
         assert_eq!(shown("kind:agent"), ["[api]", "r:agent"]);
-        assert_eq!(shown("kind:question"), ["q:q1"], "a question stands above the projects");
+        assert_eq!(
+            shown("kind:question"),
+            ["[api]", "q:q1"],
+            "a question stands in its project"
+        );
         assert_eq!(shown("by:nightly"), ["[web]", "r:probe"]);
-        assert_eq!(shown("by:tests"), ["q:q1"], "a question by its flow's firing");
+        assert_eq!(shown("by:tests"), ["[api]", "q:q1"], "a question by its flow's firing");
         // A word nothing says finds nothing.
         assert_eq!(shown("global"), Vec::<String>::new());
     }
@@ -1819,15 +1880,14 @@ mod tests {
     fn a_lens_keeps_a_run_by_what_it_is_or_what_started_it() {
         let now: Timestamp = "2026-09-10T12:00:00Z".parse().unwrap();
         let ws = "/home/f/relay";
-        let at = "2026-09-10T11:00:00Z";
-        let agent = item("agent", RunState::Working, ws, at, false);
-        let mut shell = item("shell", RunState::Working, ws, at, false);
+        let agent = item("agent", RunState::Working, ws, "2026-09-10T11:00:00Z", false);
+        let mut shell = item("shell", RunState::Working, ws, "2026-09-10T11:01:00Z", false);
         // What a warm shell really is: the `sh` profile's kind wins over the
         // `Command` hint it was started with. Either way it is not an agent.
         shell.run.kind = RunKind::Shell;
-        let mut probe = item("probe", RunState::Working, ws, at, false);
+        let mut probe = item("probe", RunState::Working, ws, "2026-09-10T11:02:00Z", false);
         probe.run.cause = step_of("nightly");
-        let mut onfail = item("onfail", RunState::Working, ws, at, false);
+        let mut onfail = item("onfail", RunState::Working, ws, "2026-09-10T11:03:00Z", false);
         onfail.run.cause = step_of("on-fail");
         let d = Digest {
             since: now,
@@ -1846,9 +1906,8 @@ mod tests {
                 .filter_map(|r| r.item().map(|i| i.run.id.clone()))
                 .collect::<Vec<_>>()
         };
-        // The shell leads its folder: where you work comes before what merely
-        // runs there. The rest keep the order they were in.
-        assert_eq!(runs(Lens::All), ["shell", "agent", "probe", "onfail"]);
+        // In the order they started, a shell as any other.
+        assert_eq!(runs(Lens::All), ["agent", "shell", "probe", "onfail"]);
         // Agents is by kind, so it keeps the flows' agents too.
         assert_eq!(runs(Lens::Agents), ["agent", "probe", "onfail"]);
         // Flows is by cause.
@@ -1893,15 +1952,15 @@ mod tests {
             (PathBuf::from("/home/f/relay"), "relay".to_string()),
             (PathBuf::from("/home/f/api"), "api".to_string()),
         ]);
-        // In the order they were pinned, after only the questions; a week-old
-        // run stays, and its folder keeps its place by name.
+        // In the order they were pinned, above the projects; a week-old run
+        // stays, and its folder keeps its place by name.
         assert_eq!(
             keys(&build_with(&d, &names, "", now)),
-            ["q:q1", "r:old01", "r:shell", "[api]", "[relay]", "r:fail1"]
+            ["r:old01", "r:shell", "[api]", "[relay]", "r:fail1", "q:q1"]
         );
         // No lens takes a pin away.
         let flows = lens_build(&d, &names, Lens::Flows, now);
-        assert_eq!(&keys(&flows)[..3], ["q:q1", "r:old01", "r:shell"]);
+        assert_eq!(&keys(&flows)[..2], ["r:old01", "r:shell"]);
         // The filter does, and matches a pin by its folder too.
         assert_eq!(keys(&build_with(&d, &names, "api", now)), ["r:old01", "[api]"]);
     }
@@ -1971,8 +2030,8 @@ mod tests {
                 "r:inapi",
                 "[gone]",
                 "[relay]",
-                "f:nightly",
                 "r:mine",
+                "f:nightly",
                 "[scratch]",
                 "r:loose",
             ]
@@ -2032,29 +2091,30 @@ mod tests {
         ]);
         let nightly = [flow("nightly", Some(relay))];
         let all = flows_build(&d, &names, &nightly, Lens::All, "", now);
-        // After the questions, what asks before what failed, then in the
+        // Above the projects, what asks before what failed, then in the
         // order it came; its project stays hidden.
-        assert_eq!(keys(&all), ["q:q1", "r:asks", "r:failed", "r:firing", "[relay]"]);
+        assert_eq!(keys(&all), ["r:asks", "r:failed", "r:firing", "[relay]", "q:q1"]);
         let (_, need, ..) = counts(&all);
         assert_eq!(need, 3, "the headline counts them as needing you");
         // A lens still narrows it, as it would any run that needs you.
         assert_eq!(
             keys(&flows_build(&d, &names, &nightly, Lens::Flows, "", now)),
-            ["q:q1", "r:firing", "[relay]"]
+            ["r:firing", "[relay]", "q:q1"]
         );
         // In the hidden lens they are in their places, not above them: the
-        // run folds into its flow again.
+        // run folds into its flow again, which stands by its run's start. The
+        // question, which ignores the lens, is in its project here too.
         assert_eq!(
             keys(&flows_build(&d, &names, &nightly, Lens::Hidden, "", now)),
             [
-                "q:q1",
                 "[api]",
                 "r:asks",
                 "r:busy",
                 "[relay]",
-                "f:nightly",
                 "r:failed",
-                "r:seen"
+                "r:seen",
+                "f:nightly",
+                "q:q1"
             ]
         );
         // Hiding it again is how it goes back: the time moves on.
@@ -2062,7 +2122,7 @@ mod tests {
         again.items[0].run.hidden_at = Some(t("2026-09-10T11:45:00Z"));
         assert_eq!(
             keys(&flows_build(&again, &names, &nightly, Lens::All, "", now)),
-            ["q:q1", "r:asks", "r:firing", "[relay]"]
+            ["r:asks", "r:firing", "[relay]", "q:q1"]
         );
         let r = &d.items[2].run;
         assert_eq!(hidden_since(r, &names, &[], &d.hidden), Some(t("2026-09-10T10:00:00Z")));
@@ -2113,7 +2173,7 @@ mod tests {
         let names = Names::default();
         let rows = build_with(&d, &names, "", now);
         // Two repos on `main` stay two projects, each named for its folder.
-        assert_eq!(keys(&rows), ["[api]", "r:a1", "r:a2", "[web]", "r:w1"]);
+        assert_eq!(keys(&rows), ["[api]", "r:a2", "r:a1", "[web]", "r:w1"]);
         let head = |n: usize| match &rows[n] {
             Row::Group(h) => checkout_words(h.checkout.as_ref().unwrap()),
             _ => panic!("a header"),
@@ -2155,7 +2215,7 @@ mod tests {
     }
 
     #[test]
-    fn questions_lead_the_list_and_projects_go_by_name() {
+    fn a_question_stands_in_its_project_and_projects_go_by_name() {
         let now: Timestamp = "2026-09-10T12:00:00Z".parse().unwrap();
         let d = Digest {
             since: now,
@@ -2189,11 +2249,11 @@ mod tests {
         let rows = build_with(&d, &names, "", now);
         assert_eq!(
             keys(&rows),
-            ["q:q1", "[api]", "r:blok1", "r:work1", "[relay]", "r:fail1", "r:done1"],
-            "projects by name, however urgent; the question leads the list; api is named by its folder; old01 is gone"
+            ["[api]", "r:work1", "r:blok1", "[relay]", "r:done1", "r:fail1", "q:q1"],
+            "projects by name, however urgent; rows as they came; the question under its run; api is named by its folder; old01 is gone"
         );
         assert_eq!(counts(&rows), (1, 2, 1, 1, 0));
-        match &rows[4] {
+        match &rows[3] {
             Row::Group(h) => assert_eq!((h.name.as_str(), h.place.as_str()), ("relay", "/home/f/relay")),
             _ => panic!("relay's header"),
         }
@@ -2203,7 +2263,7 @@ mod tests {
         );
 
         let rows = build_with(&d, &names, "api", now);
-        assert_eq!(keys(&rows), ["[api]", "r:blok1", "r:work1"]);
+        assert_eq!(keys(&rows), ["[api]", "r:work1", "r:blok1"]);
         assert_eq!(headline(&rows, 0, "api"), "relay · 1 needs you · 1 working · ⌕ api");
         assert_eq!(headline(&[], 0, ""), "relay · nothing running");
     }
@@ -2369,8 +2429,8 @@ mod tests {
         let rows = flows_build(&d, &names, &flows, Lens::All, "", now);
         assert_eq!(
             keys(&rows),
-            ["[relay]", "r:hand", "f:pulse", "r:go"],
-            "finished before working, newest first among equals"
+            ["[relay]", "f:pulse", "r:hand", "r:go"],
+            "in the order they came: a flow by its first run on the list"
         );
         let Some(Row::Flow(f)) = rows.iter().find(|r| matches!(r, Row::Flow(_))) else {
             panic!("no flow row");
@@ -2412,11 +2472,7 @@ mod tests {
             vec![],
         );
         let rows = flows_build(&d2, &names, &flows, Lens::All, "", now);
-        assert_eq!(
-            keys(&rows),
-            ["[relay]", "f:pulse", "r:w"],
-            "failed flow above working run"
-        );
+        assert_eq!(keys(&rows), ["[relay]", "f:pulse", "r:w"], "the flow came first");
         assert_eq!(counts(&rows), (0, 1, 1, 0, 1));
     }
 
@@ -2952,17 +3008,17 @@ mod tests {
     }
 
     #[test]
-    fn a_shell_leads_its_folder_but_never_over_what_asks_for_you() {
+    fn a_shell_stands_where_it_came_as_any_other_row() {
         let now: Timestamp = "2026-09-10T12:00:00Z".parse().unwrap();
         let ws = "/home/f/relay";
         let names = Names::new([(PathBuf::from(ws), "relay".to_string())]);
-        let mut shell = item("shell", RunState::Idle, ws, "2026-09-10T11:00:00Z", false);
+        let mut shell = item("shell", RunState::Idle, ws, "2026-09-10T11:20:00Z", false);
         shell.run.kind = RunKind::Shell;
-        let stale = item("stale", RunState::Stale, ws, "2026-09-10T11:50:00Z", false);
+        let asks = item("asks", RunState::NeedsInput, ws, "2026-09-10T11:10:00Z", false);
         let work = item("work", RunState::Working, ws, "2026-09-10T11:55:00Z", false);
         let d = Digest {
             since: now,
-            items: vec![shell, stale, work],
+            items: vec![work, shell, asks],
             decisions: vec![],
             checkouts: Vec::new(),
             lost: Vec::new(),
@@ -2970,28 +3026,12 @@ mod tests {
             order: Vec::new(),
             firings: Vec::new(),
         };
-        // The shell leads, though both of the others outrank it by state and
-        // both are newer than it.
+        // Neither where you work nor what asks for you jumps ahead: each in
+        // the order it started.
         assert_eq!(
             keys(&build_with(&d, &names, "", now)),
-            ["[relay]", "r:shell", "r:stale", "r:work"]
+            ["[relay]", "r:asks", "r:shell", "r:work"]
         );
-
-        let mut shell = item("shell", RunState::Idle, ws, "2026-09-10T11:00:00Z", false);
-        shell.run.kind = RunKind::Shell;
-        let asks = item("asks", RunState::NeedsInput, ws, "2026-09-10T11:10:00Z", false);
-        let d = Digest {
-            since: now,
-            items: vec![shell, asks],
-            decisions: vec![],
-            checkouts: Vec::new(),
-            lost: Vec::new(),
-            hidden: Vec::new(),
-            order: Vec::new(),
-            firings: Vec::new(),
-        };
-        // Where you work gives way to what wants you.
-        assert_eq!(keys(&build_with(&d, &names, "", now)), ["[relay]", "r:asks", "r:shell"]);
     }
 
     #[test]
@@ -3040,8 +3080,8 @@ mod tests {
                 "f:pulse".into(),
                 // The rest, after the projects, however they sort.
                 "[everywhere]".into(),
-                "f:gchat-mentions".into(),
                 "r:fix".into(),
+                "f:gchat-mentions".into(),
                 // Its run still going is its own row; the flow has its row
                 // anyway, quiet, until that run ends and folds into it.
                 "f:look-at-it".into(),
@@ -3052,7 +3092,7 @@ mod tests {
         // It answers to its word, as a project answers to its name.
         assert_eq!(
             shown("in:everywhere"),
-            ["[everywhere]", "f:gchat-mentions", "r:fix", "f:look-at-it"]
+            ["[everywhere]", "r:fix", "f:gchat-mentions", "f:look-at-it"]
         );
 
         // Its header is no folder, and its key says so.
@@ -3083,8 +3123,9 @@ mod tests {
         assert!(at(&format!("[{home_name}]")) < at("r:hand"));
     }
 
-    /// One project of four runs, sorting itself as ever: what ended first,
-    /// then what is working, newest first, then what is idle.
+    /// One project of four runs, started a minute apart in the order of
+    /// their names (`one` first, `four` last), whatever they came to; and
+    /// another project of one.
     fn four(order: Vec<Order>) -> (Digest, Names) {
         let (api, relay) = ("/home/f/api", "/home/f/relay");
         let d = Digest {
@@ -3117,16 +3158,27 @@ mod tests {
         }]
     }
 
+    /// What becomes of a run later: its state, and when that came.
+    fn comes_to(d: &mut Digest, id: &str, state: RunState, at: &str) {
+        let t: Timestamp = at.parse().unwrap();
+        let i = d.items.iter_mut().find(|i| i.run.id == id).unwrap();
+        i.run.state = state;
+        i.run.state_at = t;
+        i.at = t;
+        i.unseen = true;
+    }
+
     const NOW: &str = "2026-09-10T12:00:00Z";
 
     #[test]
-    fn a_project_sorts_itself_until_you_put_it_in_order() {
+    fn a_project_stands_in_the_order_its_rows_came_until_you_put_it_in_yours() {
         let now: Timestamp = NOW.parse().unwrap();
-        // Nothing kept: the list's own order, as before.
+        // Nothing kept: the order they started in, the newest at the bottom,
+        // whatever state each is in.
         let (d, names) = four(Vec::new());
         assert_eq!(
             keys(&build_with(&d, &names, "", now)),
-            ["[api]", "r:there", "[relay]", "r:four", "r:two", "r:one", "r:three"]
+            ["[api]", "r:there", "[relay]", "r:one", "r:two", "r:three", "r:four"]
         );
         // An order kept for a project is its order; the other project's own
         // is untouched, and an empty one is no order at all.
@@ -3138,7 +3190,7 @@ mod tests {
         let (d, names) = four(kept(&[]));
         assert_eq!(
             keys(&build_with(&d, &names, "", now))[3..],
-            ["r:four", "r:two", "r:one", "r:three"]
+            ["r:one", "r:two", "r:three", "r:four"]
         );
         // What has left the list since is no matter: the rest keep theirs.
         let (d, names) = four(kept(&["r:gone", "r:one", "r:three", "r:two", "r:four"]));
@@ -3149,45 +3201,124 @@ mod tests {
     }
 
     #[test]
-    fn a_new_run_enters_at_the_top_and_what_needs_you_floats_until_dealt_with() {
+    fn a_row_stays_where_it_stands_whatever_comes_of_it() {
         let now: Timestamp = NOW.parse().unwrap();
+        for (order, stands) in [
+            (Vec::new(), ["r:one", "r:two", "r:three", "r:four"]),
+            (
+                kept(&["r:one", "r:three", "r:two", "r:four"]),
+                ["r:one", "r:three", "r:two", "r:four"],
+            ),
+        ] {
+            let (mut d, names) = four(order);
+            // It asks, another fails, another blocks, the last finishes:
+            // each says so where it is, and none of them moves.
+            comes_to(&mut d, "two", RunState::NeedsInput, "2026-09-10T11:50:00Z");
+            comes_to(&mut d, "four", RunState::Failed, "2026-09-10T11:51:00Z");
+            comes_to(&mut d, "three", RunState::Blocked, "2026-09-10T11:52:00Z");
+            comes_to(&mut d, "one", RunState::Finished, "2026-09-10T11:53:00Z");
+            assert_eq!(keys(&build_with(&d, &names, "", now))[3..], stands);
+            // Answered, nothing moves either.
+            comes_to(&mut d, "two", RunState::Working, "2026-09-10T11:55:00Z");
+            assert_eq!(keys(&build_with(&d, &names, "", now))[3..], stands);
+        }
+        // A shell is a row as any other: where it came, not first.
+        let (mut d, names) = four(Vec::new());
+        d.items[2].run.kind = RunKind::Shell;
+        assert_eq!(
+            keys(&build_with(&d, &names, "", now))[3..],
+            ["r:one", "r:two", "r:three", "r:four"]
+        );
+    }
+
+    #[test]
+    fn a_new_run_enters_at_the_bottom() {
+        let now: Timestamp = NOW.parse().unwrap();
+        let new =
+            |d: &mut Digest, id: &str, at: &str| d.items.push(item(id, RunState::Working, "/home/f/relay", at, false));
+        let (mut d, names) = four(Vec::new());
+        new(&mut d, "new", "2026-09-10T11:00:00Z");
+        assert_eq!(
+            keys(&build_with(&d, &names, "", now))[3..],
+            ["r:one", "r:two", "r:three", "r:four", "r:new"]
+        );
+        // Below your order too, in the order they came.
         let (mut d, names) = four(kept(&["r:one", "r:three", "r:two", "r:four"]));
-        d.items.push(item(
-            "new",
-            RunState::Working,
-            "/home/f/relay",
-            "2026-09-10T11:00:00Z",
-            false,
-        ));
+        new(&mut d, "newer", "2026-09-10T11:30:00Z");
+        new(&mut d, "new", "2026-09-10T11:00:00Z");
+        let rows = build_with(&d, &names, "", now);
         assert_eq!(
-            keys(&build_with(&d, &names, "", now))[3..],
-            ["r:new", "r:one", "r:three", "r:two", "r:four"]
+            keys(&rows)[3..],
+            ["r:one", "r:three", "r:two", "r:four", "r:new", "r:newer"]
         );
-        // It asks: it floats above everything in its project, the new one
-        // too — and so does one that fails.
-        let at = |d: &mut Digest, id: &str, state: RunState| {
-            let i = d.items.iter_mut().find(|i| i.run.id == id).unwrap();
-            i.run.state = state;
+        // Moved, it takes its place in your order, and the rest keep theirs.
+        assert_eq!(
+            reorder(&rows, &rows, &d.order, "r:new", true).unwrap().rows,
+            ["r:one", "r:three", "r:two", "r:new", "r:four", "r:newer"]
+        );
+    }
+
+    #[test]
+    fn a_question_stands_under_the_run_that_asked_it() {
+        let now: Timestamp = NOW.parse().unwrap();
+        let relay = "/home/f/relay";
+        let asked = |order: Vec<Order>| {
+            let (mut d, names) = four(order);
+            comes_to(&mut d, "two", RunState::NeedsInput, "2026-09-10T11:00:00Z");
+            d.decisions = vec![
+                // Asked by no run that is on the list: at the bottom of its
+                // project, though it was asked first.
+                question("q0", relay, None, "2026-09-10T09:30:00Z"),
+                question("q1", relay, Some("two"), "2026-09-10T11:00:00Z"),
+                // A folder with nothing else on the list has its header for it.
+                question("q2", "/home/f/web", None, "2026-09-10T11:10:00Z"),
+            ];
+            (d, names)
         };
-        at(&mut d, "two", RunState::NeedsInput);
-        at(&mut d, "four", RunState::Failed);
+        let (d, names) = asked(Vec::new());
+        let rows = build_with(&d, &names, "", now);
+        // No questions above the projects: each in its own.
         assert_eq!(
-            keys(&build_with(&d, &names, "", now))[3..],
-            ["r:two", "r:four", "r:new", "r:one", "r:three"]
+            keys(&rows),
+            [
+                "[api]", "r:there", "[relay]", "r:one", "r:two", "q:q1", "r:three", "r:four", "q:q0", "[web]", "q:q2"
+            ]
         );
-        // Answered, it drops back to where you put it.
-        at(&mut d, "two", RunState::Working);
+        assert_eq!(counts(&rows), (3, 1, 3, 1, 0));
+        // In your order, it goes where its run goes.
+        let (d, names) = asked(kept(&["r:two", "r:one", "r:three", "r:four"]));
+        let rows = build_with(&d, &names, "", now);
         assert_eq!(
-            keys(&build_with(&d, &names, "", now))[3..],
-            ["r:four", "r:new", "r:one", "r:three", "r:two"]
+            keys(&rows)[3..9],
+            ["r:two", "q:q1", "r:one", "r:three", "r:four", "q:q0"]
         );
+        // A row moves past a question as past nothing, and the question is
+        // not part of the order kept.
+        assert_eq!(
+            reorder(&rows, &rows, &d.order, "r:one", true).unwrap().rows,
+            ["r:one", "r:two", "r:three", "r:four"]
+        );
+        assert_eq!(
+            reorder(&rows, &rows, &d.order, "r:two", false).unwrap().rows,
+            ["r:one", "r:two", "r:three", "r:four"]
+        );
+        assert_eq!(
+            reorder(&rows, &rows, &d.order, "r:four", false),
+            Err("already at the bottom of its project")
+        );
+        assert_eq!(
+            reorder(&rows, &rows, &d.order, "q:q1", true),
+            Err("a question stays under the run that asked it")
+        );
+        // A lens leaves its run out, never the question.
+        let flows = lens_build(&d, &names, Lens::Flows, now);
+        assert_eq!(keys(&flows), ["[api]", "[relay]", "q:q0", "q:q1", "[web]", "q:q2"]);
     }
 
     #[test]
     fn a_row_moves_one_place_inside_its_project_and_no_further() {
         let now: Timestamp = NOW.parse().unwrap();
         let (mut d, names) = four(Vec::new());
-        d.decisions = vec![question("q1", "/home/f/relay", None, "2026-09-10T11:00:00Z")];
         let mut pinned = item(
             "pinned",
             RunState::Working,
@@ -3201,66 +3332,135 @@ mod tests {
         assert_eq!(
             keys(&rows),
             [
-                "q:q1", "r:pinned", "[api]", "r:there", "[relay]", "r:four", "r:two", "r:one", "r:three"
+                "r:pinned", "[api]", "r:there", "[relay]", "r:one", "r:two", "r:three", "r:four"
             ]
         );
         let mv = |key: &str, up: bool| reorder(&rows, &rows, &d.order, key, up);
         // From the list's own order, the whole of it is kept.
         assert_eq!(
-            mv("r:one", true).unwrap(),
+            mv("r:two", true).unwrap(),
             Order {
                 group: "g:/home/f/relay".into(),
-                rows: ["r:four", "r:one", "r:two", "r:three"].map(String::from).to_vec(),
+                rows: ["r:two", "r:one", "r:three", "r:four"].map(String::from).to_vec(),
             }
         );
         assert_eq!(
-            mv("r:four", false).unwrap().rows,
-            ["r:two", "r:four", "r:one", "r:three"]
+            mv("r:one", false).unwrap().rows,
+            ["r:two", "r:one", "r:three", "r:four"]
         );
-        // Never out of its project, nor into a band, nor anything but a row.
-        assert_eq!(mv("r:four", true), Err("already at the top of its project"));
-        assert_eq!(mv("r:three", false), Err("already at the bottom of its project"));
+        // Never out of its project, nor into the band, nor anything but a row.
+        assert_eq!(mv("r:one", true), Err("already at the top of its project"));
+        assert_eq!(mv("r:four", false), Err("already at the bottom of its project"));
         assert_eq!(mv("r:there", false), Err("already at the bottom of its project"));
         assert_eq!(mv("r:there", true), Err("already at the top of its project"));
         assert!(mv("r:pinned", false).unwrap_err().starts_with("a pinned run"));
-        assert!(mv("q:q1", false).unwrap_err().starts_with("a question"));
-        assert!(mv("g:/home/f/relay", false).unwrap_err().starts_with("a project keeps"));
         assert_eq!(mv("r:nope", true), Err("nothing here to move"));
 
-        // What needs you neither moves nor is passed.
+        // What needs you moves as anything else, and is passed as anything else.
         let (mut d, names) = four(kept(&["r:one", "r:three", "r:two", "r:four"]));
-        d.items.iter_mut().find(|i| i.run.id == "two").unwrap().run.state = RunState::Blocked;
+        comes_to(&mut d, "two", RunState::Blocked, "2026-09-10T11:00:00Z");
         let rows = build_with(&d, &names, "", now);
-        assert_eq!(keys(&rows)[3..], ["r:two", "r:one", "r:three", "r:four"]);
-        assert!(
-            reorder(&rows, &rows, &d.order, "r:two", false)
-                .unwrap_err()
-                .starts_with("it needs you")
-        );
+        assert_eq!(keys(&rows)[3..], ["r:one", "r:three", "r:two", "r:four"]);
         assert_eq!(
-            reorder(&rows, &rows, &d.order, "r:one", true),
-            Err("already at the top · what needs you stays above it")
+            reorder(&rows, &rows, &d.order, "r:two", true).unwrap().rows,
+            ["r:one", "r:two", "r:three", "r:four"]
         );
-        // A move keeps where the floating one stands underneath.
         assert_eq!(
             reorder(&rows, &rows, &d.order, "r:four", true).unwrap().rows,
-            ["r:one", "r:four", "r:three", "r:two"]
+            ["r:one", "r:three", "r:four", "r:two"]
         );
     }
 
     #[test]
-    fn a_move_in_a_narrowed_list_keeps_what_it_does_not_show() {
+    fn a_project_moves_up_and_down_among_the_projects_and_keeps_its_place() {
         let now: Timestamp = NOW.parse().unwrap();
-        let (mut d, names) = four(kept(&["r:one", "r:three", "r:two", "r:four"]));
-        d.items.iter_mut().find(|i| i.run.id == "three").unwrap().run.kind = RunKind::Command;
-        let full = build_with(&d, &names, "", now);
-        let agents = lens_build(&d, &names, Lens::Agents, now);
-        assert_eq!(keys(&agents)[3..], ["r:one", "r:two", "r:four"]);
-        // `two` goes above `one`, the row shown above it; `three`, not shown,
-        // stays where it was among the rest.
+        let (api, relay, web) = ("g:/home/f/api", "g:/home/f/relay", "g:/home/f/web");
+        let (mut d, _) = four(Vec::new());
+        // A flow's run outside every project: `everywhere`, after them all.
+        let mut fix = item("fix", RunState::Working, "/home/f", "2026-09-10T11:00:00Z", false);
+        fix.run.cause = step_of("look-at-it");
+        d.items.push(fix);
+        let names = |more: &[(&str, &str)]| {
+            let mut all = vec![
+                (PathBuf::from("/home/f/api"), "api".to_string()),
+                (PathBuf::from("/home/f/relay"), "relay".to_string()),
+                (PathBuf::from("/home/f/web"), "web".to_string()),
+            ];
+            all.extend(more.iter().map(|(p, n)| (PathBuf::from(p), n.to_string())));
+            Names::new(all)
+        };
+        let heads = |d: &Digest, names: &Names| -> Vec<String> {
+            keys(&build_with(d, names, "", now))
+                .into_iter()
+                .filter(|k| k.starts_with('['))
+                .collect()
+        };
+        let three = names(&[]);
+        // By name until you move one.
+        assert_eq!(heads(&d, &three), ["[api]", "[relay]", "[web]", "[everywhere]"]);
+        let rows = build_with(&d, &three, "", now);
+        let mv = |key: &str, up: bool| reorder(&rows, &rows, &d.order, key, up);
         assert_eq!(
-            reorder(&agents, &full, &d.order, "r:two", true).unwrap().rows,
-            ["r:two", "r:one", "r:three", "r:four"]
+            mv(relay, true),
+            Ok(Order {
+                group: Order::PROJECTS.into(),
+                rows: [relay, api, web].map(String::from).to_vec(),
+            })
+        );
+        assert_eq!(mv(relay, false).unwrap().rows, [api, web, relay]);
+        assert_eq!(mv(api, true), Err("already the first project"));
+        assert_eq!(mv(web, false), Err("already the last project"));
+        assert_eq!(
+            mv("g:everywhere", true),
+            Err("everywhere stays last, below the projects")
+        );
+
+        // Kept, the projects stand in it, each with what is under it; a
+        // project's own rows keep theirs.
+        d.order = vec![Order {
+            group: Order::PROJECTS.into(),
+            rows: [relay, api, web].map(String::from).to_vec(),
+        }];
+        assert_eq!(
+            keys(&build_with(&d, &three, "", now)),
+            [
+                "[relay]",
+                "r:one",
+                "r:two",
+                "r:three",
+                "r:four",
+                "[api]",
+                "r:there",
+                "[web]",
+                "[everywhere]",
+                "r:fix"
+            ]
+        );
+        // A project the order does not know — new since — enters at the
+        // bottom, by name, however its name sorts; everywhere stays last.
+        let four_of = names(&[("/home/f/aaa", "aaa")]);
+        assert_eq!(
+            heads(&d, &four_of),
+            ["[relay]", "[api]", "[web]", "[aaa]", "[everywhere]"]
+        );
+        // Moving builds on the order kept, and takes the new one into it.
+        let rows = build_with(&d, &four_of, "", now);
+        assert_eq!(
+            reorder(&rows, &rows, &d.order, "g:/home/f/aaa", true).unwrap().rows,
+            [relay, api, "g:/home/f/aaa", web]
+        );
+        // One the list does not show now — hidden, or gone — keeps its place.
+        d.order[0].rows.insert(1, "g:/home/f/gone".into());
+        let rows = build_with(&d, &three, "", now);
+        assert_eq!(
+            reorder(&rows, &rows, &d.order, api, true).unwrap().rows,
+            [api, relay, "g:/home/f/gone", web]
+        );
+        // A search that leaves projects out moves among what it shows.
+        let (shown, full) = (build_with(&d, &three, "in:web", now), build_with(&d, &three, "", now));
+        assert_eq!(
+            reorder(&shown, &full, &d.order, web, true),
+            Err("already the first project")
         );
     }
 
