@@ -3,44 +3,8 @@
 //! last thing it wrote, which is why heuristics built on this stay `likely`
 //! at best.
 
-/// Escape-parsing state carried across calls to [`Stripper::strip`] so a
-/// CSI/OSC sequence split across two PTY reads is still recognized, instead
-/// of the swallowed tail of one chunk (digits, a final letter) leaking into
-/// the next chunk's visible text.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-enum EscState {
-    #[default]
-    None,
-    /// Saw ESC; waiting for the next byte to say what kind of escape this is.
-    Escape,
-    /// Inside `ESC [ … final`, waiting for a final byte in 0x40..=0x7E.
-    Csi,
-    /// Inside `ESC ] … BEL` or `… ESC \`, waiting for the terminator.
-    Osc { prev_was_esc: bool },
-    /// Saw `ESC (` or `ESC )`; waiting for the one byte saying which set.
-    /// `g0` is true for `(`, the set ordinary text is drawn from.
-    Charset { g0: bool },
-}
-
-use rl_session::screen::dec_graphic;
+use rl_session::screen::{EscState, dec_graphic, overrun};
 use std::path::PathBuf;
-
-/// An escape sequence still unterminated after this many bytes is treated as
-/// malformed and abandoned, so a stray, never-terminated ESC doesn't buffer
-/// forever.
-const MAX_PENDING_ESCAPE: usize = 64;
-/// An OSC carries text — a window title, a folder, a link — so it is given
-/// far longer before it is taken for a stray.
-const MAX_PENDING_OSC: usize = 4096;
-
-/// Whether an escape has run on past what its kind is allowed.
-fn overrun(state: &EscState, pending: usize) -> bool {
-    match state {
-        EscState::None => false,
-        EscState::Osc { .. } => pending > MAX_PENDING_OSC,
-        _ => pending > MAX_PENDING_ESCAPE,
-    }
-}
 
 /// A shell's OSC 133 prompt mark: where a prompt was drawn, where what you
 /// typed began, where it started running, and how it came out. Only a shell
@@ -323,6 +287,7 @@ pub fn last_lines(text: &str, n: usize) -> Vec<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rl_session::screen::MAX_PENDING_ESCAPE;
 
     #[test]
     fn last_line_skips_rules_and_borders() {

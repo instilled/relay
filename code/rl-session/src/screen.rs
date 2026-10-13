@@ -10,9 +10,10 @@
 //! on it now.
 
 /// Escape-parsing state carried across chunks so a sequence split across two
-/// PTY reads is still recognised.
+/// PTY reads is still recognised. Shared with rl-detect's stripper so the two
+/// escape machines cannot drift.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-enum EscState {
+pub enum EscState {
     #[default]
     None,
     /// Saw ESC; waiting for the next byte to say what kind of escape this is.
@@ -28,14 +29,15 @@ enum EscState {
 
 /// An escape sequence still unterminated after this many bytes is treated as
 /// malformed and abandoned, so a stray, never-terminated ESC doesn't buffer
-/// forever.
-const MAX_PENDING_ESCAPE: usize = 64;
+/// forever. Shared with rl-detect's stripper.
+pub const MAX_PENDING_ESCAPE: usize = 64;
 /// An OSC carries text (a window title, a folder, a link), so it is given
-/// far longer before it is taken for a stray.
-const MAX_PENDING_OSC: usize = 4096;
+/// far longer before it is taken for a stray. Shared with rl-detect's stripper.
+pub const MAX_PENDING_OSC: usize = 4096;
 
-/// Whether an escape has run on past what its kind is allowed.
-fn overrun(state: &EscState, pending: usize) -> bool {
+/// Whether an escape has run on past what its kind is allowed. Shared with
+/// rl-detect's stripper.
+pub fn overrun(state: &EscState, pending: usize) -> bool {
     match state {
         EscState::None => false,
         EscState::Osc { .. } => pending > MAX_PENDING_OSC,
@@ -81,7 +83,7 @@ pub fn dec_graphic(c: char) -> char {
 /// Rewrites a byte stream so the box-drawing set is drawn rather than spelled,
 /// leaving everything else exactly as it stood — colours, cursor moves and all.
 ///
-/// [`Stripper`] answers what a run's output *said*; this answers what a
+/// `rl_detect::ansi::Stripper` answers what a run's output *said*; this answers what a
 /// terminal would have *shown*, for a screen that draws the bytes itself.
 /// `vt100` hands any escape carrying an intermediate byte to its unhandled
 /// hook, and `ESC ( 0` is one, so without this a ruled-off prompt arrives as
@@ -185,6 +187,8 @@ pub struct Screen {
 }
 
 impl Screen {
+    /// A zero size is clamped to 1: a terminal with no cells cannot be drawn
+    /// on, and the holder may be told one before the window has a size.
     pub fn new(cols: u16, rows: u16) -> Self {
         Self {
             parser: vt100::Parser::new(rows.max(1), cols.max(1), HISTORY_ROWS),
@@ -192,10 +196,14 @@ impl Screen {
         }
     }
 
+    /// Every byte the run writes goes in, in order; an escape split across
+    /// two calls carries over, so reads can be cut anywhere.
     pub fn feed(&mut self, bytes: &[u8]) {
         self.parser.process(&self.graphics.rewrite(bytes));
     }
 
+    /// The window changed size: the snapshot is drawn at the new one, so a
+    /// viewer joining after it is handed a screen that fits the app's own.
     pub fn resize(&mut self, cols: u16, rows: u16) {
         self.parser.screen_mut().set_size(rows.max(1), cols.max(1));
     }
@@ -204,7 +212,18 @@ impl Screen {
     /// first, a line at a time, pushed up out of sight; then the screen
     /// itself, cleared and drawn, on the alternate screen if the app is on
     /// it; then the cursor, colours and input modes the app left set.
+    /// History rows that were soft-wrapped go out as hard line breaks, so
+    /// the viewer's scrollback does not rewrap them.
+    ///
+    /// An app on the alternate screen has its main screen and history drawn
+    /// first as well, so they are there when it leaves. `vt100` shows only
+    /// the alternate grid while it is on, so it is switched off (`?47l` is a
+    /// bare mode toggle: no clear, no cursor save) and back on around them.
     pub fn snapshot(&mut self) -> Vec<u8> {
+        let alternate = self.parser.screen().alternate_screen();
+        if alternate {
+            self.parser.process(b"\x1b[?47l");
+        }
         let mut out = Vec::new();
         let (rows, cols) = self.parser.screen().size();
         let screen = self.parser.screen_mut();
@@ -227,10 +246,14 @@ impl Screen {
             // before the screen is cleared and drawn where they stood.
             out.extend(std::iter::repeat_n(b'\n', rows.saturating_sub(1) as usize));
         }
-        if screen.alternate_screen() {
+        if alternate {
+            out.extend_from_slice(&screen.contents_formatted());
+            self.parser.process(b"\x1b[?47h");
             out.extend_from_slice(b"\x1b[?1049h");
+            out.extend_from_slice(&self.parser.screen().state_formatted());
+        } else {
+            out.extend_from_slice(&screen.state_formatted());
         }
-        out.extend_from_slice(&screen.state_formatted());
         out
     }
 
@@ -274,6 +297,10 @@ mod tests {
     fn shown(bytes: &[u8], cols: u16, rows: u16) -> Vec<String> {
         let mut p = vt100::Parser::new(rows, cols, 10_000);
         p.process(bytes);
+        shown_parser(&mut p, cols, rows)
+    }
+
+    fn shown_parser(p: &mut vt100::Parser, cols: u16, rows: u16) -> Vec<String> {
         let s = p.screen_mut();
         s.set_scrollback(usize::MAX);
         let back = s.scrollback();
@@ -337,15 +364,25 @@ mod tests {
     #[test]
     fn an_alternate_screen_app_is_drawn_on_the_alternate_screen() {
         let mut s = Screen::new(20, 4);
+        for i in 0..10 {
+            s.feed(format!("old {i}\r\n").as_bytes());
+        }
         s.feed(b"shell\r\n\x1b[?1049h\x1b[Hfull screen");
         let snap = s.snapshot();
         let text = String::from_utf8_lossy(&snap);
-        let alt = text.find("\x1b[?1049h").expect("switches to the alternate screen");
+        let alt = text.rfind("\x1b[?1049h").expect("switches to the alternate screen");
         assert!(alt < text.find("full screen").unwrap());
-        let mut p = vt100::Parser::new(4, 20, 0);
+        let mut p = vt100::Parser::new(4, 20, 100);
         p.process(&snap);
         assert!(p.screen().alternate_screen());
         assert!(p.screen().contents().contains("full screen"));
+        // Leaving it brings back what was under it: the shell, and the
+        // history above the shell.
+        p.process(b"\x1b[?1049l");
+        assert!(!p.screen().alternate_screen());
+        assert!(p.screen().contents().contains("shell"));
+        let back = shown_parser(&mut p, 20, 4);
+        assert_eq!(back.first().unwrap(), "old 0");
     }
 
     #[test]
