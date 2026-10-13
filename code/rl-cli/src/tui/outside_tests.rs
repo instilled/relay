@@ -393,6 +393,7 @@ async fn an_idle_one_in_another_terminal_carries_on_as_a_run() {
         .call::<super::RunStop>(rl_proto::methods::RunStopParams {
             id: other.id.clone(),
             force: false,
+            archive: false,
         })
         .await;
     let _ = app
@@ -400,6 +401,7 @@ async fn an_idle_one_in_another_terminal_carries_on_as_a_run() {
         .call::<super::RunStop>(rl_proto::methods::RunStopParams {
             id: run.id.clone(),
             force: false,
+            archive: false,
         })
         .await;
     token.cancel();
