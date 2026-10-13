@@ -122,7 +122,7 @@ Each job: **situation → want → so that**, then the herdr / old-ax baseline, 
 
 **Work to be done.**
 - `rl-session`: a tiny detached process (double-fork, `setsid`) that holds the PTY master for one session and exposes a two-message socket protocol (`attach`, `resize`) plus an output ring buffer. `rld` is a client that attaches on start and re-attaches on restart.
-- Scrollback replay on attach from journaled `session_io`.
+- On attach, a terminal run's screen and history drawn afresh by its holder; journaled `session_io` for pipes and ended runs.
 - `rl daemon restart` / upgrade never touches holder sockets.
 - Command runs (non-PTY) use the same holder with pipes, so a scheduled `cargo test` survives too.
 

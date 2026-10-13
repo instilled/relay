@@ -148,7 +148,7 @@ struct AttachArgs {
     /// Join even if someone else has; they become a watcher.
     #[arg(long)]
     take: bool,
-    /// KiB of scrollback to replay first.
+    /// KiB of journaled output to draw from (an ended or pipes run).
     #[arg(long, default_value_t = 256, value_name = "KIB")]
     scrollback: u64,
 }
