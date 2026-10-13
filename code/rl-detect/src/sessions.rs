@@ -261,8 +261,36 @@ pub(crate) fn compile(name: &str, file: SessionsFile) -> Result<Sessions> {
     Ok(Sessions { hooks, list, attach })
 }
 
+/// Whether `word` may stand in a hook's command as it is: an agent's or an
+/// event's name, written there unquoted and read back word by word
+/// (`user_hooks::is_relays`). No space, no quote, nothing a shell reads.
+fn plain(word: &str) -> bool {
+    !word.is_empty()
+        && word
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
+}
+
+/// Whether every `{` in a `says` template is closed by a `}` before the
+/// next one opens.
+fn closed(template: &str) -> bool {
+    let mut open = false;
+    for c in template.chars() {
+        match c {
+            '{' if open => return false,
+            '{' => open = true,
+            '}' => open = false,
+            _ => {}
+        }
+    }
+    !open
+}
+
 fn compile_hooks(name: &str, h: HooksFile) -> Result<UserHooks> {
     let at = |what: &str| format!("{name}.yaml: sessions.hooks.{what}");
+    if !plain(name) {
+        bail!("{name}.yaml: an agent with hooks is named only with letters, digits, `_`, `.` and `-`");
+    }
     let file = h.file.filter(|f| !f.is_empty());
     let Some(file) = file else {
         bail!("{} is missing: where the hooks file is", at("file"))
@@ -296,10 +324,26 @@ fn compile_hooks(name: &str, h: HooksFile) -> Result<UserHooks> {
     let events = events
         .into_iter()
         .map(|(event, v)| {
-            let said = compile_event(&v).map_err(|e| anyhow::anyhow!("{}: {e}", at(&format!("events.{event}"))))?;
+            let here = at(&format!("events.{event}"));
+            if !plain(&event) {
+                bail!("{here}: an event is named only with letters, digits, `_`, `.` and `-`");
+            }
+            let said = compile_event(&v).map_err(|e| anyhow::anyhow!("{here}: {e}"))?;
             Ok((event, said))
         })
         .collect::<Result<Vec<_>>>()?;
+    let prompts: Vec<&str> = events
+        .iter()
+        .filter(|(_, said)| matches!(said, Event::Says(s) if s.prompt))
+        .map(|(e, _)| e.as_str())
+        .collect();
+    if prompts.len() > 1 {
+        bail!(
+            "{}: only one event carries the prompt typed, not {}",
+            at("events"),
+            prompts.join(" and ")
+        );
+    }
     Ok(UserHooks {
         agent: name.to_string(),
         file,
@@ -323,7 +367,13 @@ fn compile_event(v: &Value) -> Result<Event> {
     let cases = map
         .iter()
         .filter(|(k, _)| *k != "by")
-        .map(|(k, v)| Ok((k.clone(), compile_says(v).map_err(|e| anyhow::anyhow!("{k}: {e}"))?)))
+        .map(|(k, v)| {
+            let said = compile_says(v).map_err(|e| anyhow::anyhow!("{k}: {e}"))?;
+            if said.prompt {
+                bail!("{k}: `prompt` is an event's, not a case's");
+            }
+            Ok((k.clone(), said))
+        })
         .collect::<Result<Vec<_>>>()?;
     Ok(Event::By {
         field: field.to_string(),
@@ -358,6 +408,10 @@ fn compile_says(v: &Value) -> Result<Says> {
             let Some(word) = text("state")? else {
                 bail!("no `state` ({STATES})")
             };
+            let says = text("says")?;
+            if let Some(t) = says.as_deref().filter(|t| !closed(t)) {
+                bail!("`says` `{t}`: a `{{` is not closed");
+            }
             let prompt = match m.get("prompt") {
                 None => false,
                 Some(Value::Bool(b)) => *b,
@@ -368,7 +422,7 @@ fn compile_says(v: &Value) -> Result<Says> {
                 prompt,
                 waiting_for: text("waiting_for")?,
                 detail: text("detail")?,
-                says: text("says")?,
+                says,
             })
         }
         other => bail!("{other} is not a state ({STATES}) nor a map"),
@@ -542,7 +596,11 @@ fn expand(path: &str, env: &impl Fn(&str) -> Option<OsString>) -> Option<PathBuf
 }
 
 /// A payload field's first line, trimmed and clipped; none where it is not
-/// there, or says nothing.
+/// there, or says nothing. An empty or blank one is none too — which is
+/// newer than the words of before profiles: a run's `{"tool_name": ""}`
+/// says `waiting for approval`, not `approve: `; an empty `message`, the
+/// same, not nothing; an empty prompt, or an empty tool done, no detail
+/// rather than `prompt: ` or `tool:  done`.
 fn field_of(payload: &Value, field: &str) -> Option<String> {
     payload
         .get(field)
@@ -716,6 +774,23 @@ mod tests {
             (s.state, s.detail.as_deref()),
             (RunState::Idle, Some("finished responding"))
         );
+        // An empty or blank field says nothing (`field_of`).
+        let words = |h: &UserHooks, event, payload| h.signal(event, &payload).unwrap().detail;
+        assert_eq!(
+            words(&codex, "PermissionRequest", json!({"tool_name": " "})).as_deref(),
+            Some("waiting for approval")
+        );
+        assert_eq!(
+            words(
+                &gemini,
+                "Notification",
+                json!({"notification_type": "ToolPermission", "message": ""})
+            )
+            .as_deref(),
+            Some("waiting for approval")
+        );
+        assert_eq!(words(&codex, "UserPromptSubmit", json!({"prompt": "  "})), None);
+        assert_eq!(words(&codex, "PostToolUse", json!({"tool_name": ""})), None);
         assert!(codex.signal("SessionEnd", &json!({})).is_none());
         assert!(codex.signal("SessionStart", &json!({})).is_none());
         assert!(
@@ -887,11 +962,33 @@ mod tests {
             ),
             (format!("{ok}  attach: [attach]\n"), "{id}"),
             (ok.replace("    events:\n      Stop: idle\n", ""), "events"),
+            (ok.replace("Stop: idle", "Pre Tool: idle"), "Pre Tool"),
+            (ok.replace("Stop: idle", "\"Stop;rm\": idle"), "Stop;rm"),
+            (
+                ok.replace("Stop: idle", "Stop: { state: needs, says: \"approve: {tool\" }"),
+                "not closed",
+            ),
+            (
+                ok.replace(
+                    "Stop: idle",
+                    "Stop: { state: working, prompt: true }\n      Go: { state: working, prompt: true }",
+                ),
+                "Stop and Go",
+            ),
+            (
+                ok.replace("Stop: idle", "Note: { by: kind, a: { state: working, prompt: true } }"),
+                "a case's",
+            ),
         ] {
             std::fs::write(dir.path().join("xagent.yaml"), &bad).unwrap();
             let err = format!("{:#}", crate::Registry::load_from(dir.path()).unwrap_err());
             assert!(err.contains("xagent.yaml") && err.contains(says), "{bad}: {err}");
         }
+        // The agent's own name goes in the command as well.
+        std::fs::remove_file(dir.path().join("xagent.yaml")).unwrap();
+        std::fs::write(dir.path().join("x agent.yaml"), ok).unwrap();
+        let err = format!("{:#}", crate::Registry::load_from(dir.path()).unwrap_err());
+        assert!(err.contains("x agent.yaml") && err.contains("named only"), "{err}");
     }
 
     #[test]

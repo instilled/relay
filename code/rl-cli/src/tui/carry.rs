@@ -1,8 +1,9 @@
 //! Enter on one of an agent's own sessions: one in its agent's background
 //! (Claude's) is opened here, the real terminal handed to what its profile's
-//! `sessions.attach` says (`claude attach <id>`) the way the editor gets it, and nothing is made of it in Relay; one open in another
-//! terminal is carried on here as a Relay run (`import.move`), as the agent's
-//! profile resumes a conversation. What is run, and what is said after, are
+//! `sessions.attach` says (`claude attach <id>`) the way the editor gets
+//! it, and nothing is made of it in Relay; one open in another terminal is
+//! carried on here as a Relay run (`import.move`), as the agent's profile
+//! resumes a conversation. What is run, and what is said after, are
 //! worked out here, apart from the handover, so they read without a terminal.
 
 use super::rows::registry;

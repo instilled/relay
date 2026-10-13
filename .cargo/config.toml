@@ -1,5 +1,6 @@
 [env]
-# Nothing cargo runs (tests, the rl and rld they start, `cargo run`) asks the
-# real `claude agents --json`: see rl-daemon/src/outside/claude.rs.
+# Nothing cargo runs (tests, the rl and rld they start, `cargo run`) asks an
+# agent for its sessions, the real `claude agents --json` among them: see
+# rl-daemon/src/outside/lister.rs.
 # `RELAY_CLAUDE_SESSIONS=on cargo run --bin rld` asks anyway.
 RELAY_CLAUDE_SESSIONS = "off"

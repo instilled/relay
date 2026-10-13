@@ -3,8 +3,9 @@
 //! that names it. Its hooks, called as the agent would call them (`rl hook
 //! fake <Event>`, the payload on stdin), put its session on the digest as
 //! its profile says each event stands; enter on it carries it on as the
-//! profile's `resume` says. That setup offers it, and installs it into its
-//! file, is `rl-cli`'s to test (`tui::setup`).
+//! profile's `resume` says; and under a Relay run of it, the same hooks are
+//! that run's signal, as its profile says. That setup offers it, and
+//! installs it into its file, is `rl-cli`'s to test (`tui::setup`).
 
 mod common;
 
@@ -18,11 +19,12 @@ use std::time::{Duration, Instant};
 use tokio::io::AsyncWriteExt;
 
 /// `fake`'s profile: its own events, named as no built-in agent names
-/// them, and its own way of resuming.
+/// them, and its own way of resuming. Its binary is the fixture, found by
+/// its whole path, and known by its name in a run's argv.
 fn profile(bin: &str) -> String {
     format!(
         r#"kind: agent
-bins: ["{bin}"]
+bins: ["{bin}", "fake-cli"]
 resume: ["--carry-on", "{{session}}"]
 sessions:
   hooks:
@@ -43,11 +45,20 @@ sessions:
 /// `rl hook fake <event>` as the agent runs it, outside any run of
 /// Relay's: it says nothing, and succeeds.
 async fn hook(rl: &Path, home: &Home, event: &str, payload: serde_json::Value) {
-    let mut child = tokio::process::Command::new(rl)
-        .args(["hook", "fake", event])
+    hook_in(rl, home, None, event, payload).await
+}
+
+/// The same, under `run` where there is one (`RELAY_RUN`).
+async fn hook_in(rl: &Path, home: &Home, run: Option<&str>, event: &str, payload: serde_json::Value) {
+    let mut cmd = tokio::process::Command::new(rl);
+    cmd.args(["hook", "fake", event])
         .env("RELAY_HOME", home.path())
         .env_remove("RELAY_RUN")
-        .env_remove(rl_detect::user_hooks::ASKING)
+        .env_remove(rl_detect::user_hooks::ASKING);
+    if let Some(id) = run {
+        cmd.env("RELAY_RUN", id);
+    }
+    let mut child = cmd
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
@@ -140,5 +151,70 @@ async fn an_agent_added_by_its_profile_alone_is_told_of_and_carried_on() {
     until(&mut c, "f1", |s| s.is_none()).await;
 
     let _ = c.call("run.stop", json!({ "id": run.id, "force": true })).await;
+    h.stop().await;
+}
+
+/// The run, as `rld` has it now.
+async fn run_now(c: &mut Conn, id: &str) -> Run {
+    c.ok("run.get", json!({ "id": id })).await
+}
+
+#[tokio::test]
+async fn a_relay_run_of_an_agent_added_by_its_profile_alone_is_told_by_its_hooks() {
+    let Some(rl) = rl_bin() else {
+        eprintln!("skipping: rl not built (run `cargo test --workspace`)");
+        return;
+    };
+    let tmp = tempfile::tempdir().unwrap();
+    let home = Home::at(tmp.path().join("home"));
+    std::fs::create_dir_all(home.detect_dir()).unwrap();
+    std::fs::write(home.detect_dir().join("fake.yaml"), profile(&fake_cli())).unwrap();
+    let Some(h) = Harness::on(home.clone()) else {
+        eprintln!("skipping: rl-session not built (run `cargo test --workspace`)");
+        return;
+    };
+    let mut c = Conn::open(&home).await;
+    let cwd = tmp.path().canonicalize().unwrap();
+    let run: Run = c
+        .ok(
+            "run.start",
+            json!({ "argv": [fake_cli()], "cwd": cwd, "kind": "agent" }),
+        )
+        .await;
+    assert_eq!(run.cli.as_deref(), Some("fake"), "known by its profile");
+    let said = |more: serde_json::Value| {
+        let mut p = json!({ "session_id": "r1", "cwd": cwd });
+        p.as_object_mut().unwrap().extend(more.as_object().unwrap().clone());
+        p
+    };
+    let id = run.id.as_str();
+
+    // Its start: the run is tagged with its session, which never lists.
+    hook_in(&rl, &home, Some(id), "Hello", said(json!({}))).await;
+    let r = run_now(&mut c, id).await;
+    assert!(r.tags.iter().any(|t| t == "fake-session:r1"), "{:?}", r.tags);
+    // A prompt: working, exactly, and named for it.
+    hook_in(
+        &rl,
+        &home,
+        Some(id),
+        "Typed",
+        said(json!({ "prompt": "fix the build" })),
+    )
+    .await;
+    let r = run_now(&mut c, id).await;
+    assert_eq!(
+        (r.state, r.title.as_str()),
+        (rl_proto::types::RunState::Working, "fake: fix the build")
+    );
+    // A wait on you, then the turn's end.
+    hook_in(&rl, &home, Some(id), "Asks", said(json!({ "kind": "permission" }))).await;
+    assert_eq!(run_now(&mut c, id).await.state, rl_proto::types::RunState::NeedsInput);
+    hook_in(&rl, &home, Some(id), "Done", said(json!({}))).await;
+    assert_eq!(run_now(&mut c, id).await.state, rl_proto::types::RunState::Idle);
+    let d: Digest = c.ok("digest.get", json!({})).await;
+    assert!(d.outside.iter().all(|s| s.agent != "fake"), "{:?}", d.outside);
+
+    let _ = c.call("run.stop", json!({ "id": id, "force": true })).await;
     h.stop().await;
 }

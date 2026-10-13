@@ -169,9 +169,14 @@ pub async fn hook(home: &Home, words: &Words) {
 
 /// The profiles, as the panel reads them: the built-ins with yours over
 /// them; the built-ins alone where yours do not load (`rld` says what is
-/// wrong with them).
+/// wrong with them; so does this, under `RELAY_HOOK_DEBUG`).
 fn registry(home: &Home) -> Registry {
-    Registry::load(home).unwrap_or_else(|_| Registry::builtin())
+    Registry::load(home).unwrap_or_else(|e| {
+        if std::env::var_os("RELAY_HOOK_DEBUG").is_some() {
+            eprintln!("rl hook: detection overrides ignored: {e:#}");
+        }
+        Registry::builtin()
+    })
 }
 
 /// All of stdin, if it is all there by `deadline`. The agent writes the

@@ -276,6 +276,10 @@ impl Registry {
         )?;
         let mut profiles = BTreeMap::new();
         for (name, file) in raw {
+            let kind = file.kind.unwrap_or(RunKind::Agent);
+            if file.sessions.is_some() && (kind != RunKind::Agent || name == GENERIC) {
+                bail!("{name}.yaml: sessions: only an agent has sessions of its own");
+            }
             let (patterns, timing) = if name == GENERIC {
                 (base_patterns.clone(), base_timing)
             } else {
@@ -287,7 +291,7 @@ impl Registry {
             profiles.insert(
                 name.clone(),
                 Profile {
-                    kind: file.kind.unwrap_or(RunKind::Agent),
+                    kind,
                     bins: file.bins.unwrap_or_default(),
                     interactive_only: file.interactive_only.unwrap_or(false),
                     hooks: file.hooks.map(|h| Hooks {
@@ -333,13 +337,6 @@ impl Registry {
     /// its profile has them (`sessions.hooks`).
     pub fn user_hooks(&self, name: &str) -> Option<&UserHooks> {
         self.profiles.get(name)?.sessions.as_ref()?.hooks.as_ref()
-    }
-
-    /// Every agent's hooks that tell of its own sessions, in name order.
-    pub fn all_user_hooks(&self) -> impl Iterator<Item = &UserHooks> {
-        self.profiles
-            .values()
-            .filter_map(|p| p.sessions.as_ref()?.hooks.as_ref())
     }
 
     /// The profiles of the agents that list their own sessions themselves
@@ -593,6 +590,21 @@ mod tests {
         // is not a `Command`.
         let x = r.resolve(RunKind::Command, &argv("zsh -i"));
         assert_eq!((x.kind, x.profile.name.as_str()), (RunKind::Shell, "sh"));
+    }
+
+    #[test]
+    fn only_an_agent_has_sessions_of_its_own() {
+        let dir = tempfile::tempdir().unwrap();
+        let block = "sessions:\n  hooks:\n    file: [/x/hooks.json]\n    timeout: 1s\n    events:\n      Stop: idle\n";
+        for (name, head) in [("myshell", "kind: shell\n"), ("generic", "")] {
+            std::fs::write(dir.path().join(format!("{name}.yaml")), format!("{head}{block}")).unwrap();
+            let err = format!("{:#}", Registry::load_from(dir.path()).unwrap_err());
+            assert!(
+                err.contains(&format!("{name}.yaml")) && err.contains("only an agent"),
+                "{err}"
+            );
+            std::fs::remove_file(dir.path().join(format!("{name}.yaml"))).unwrap();
+        }
     }
 
     #[test]
