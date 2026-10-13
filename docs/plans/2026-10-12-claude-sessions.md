@@ -329,3 +329,63 @@ It is asked only:
 - **Tests:**
   - A second `PermissionRequest` for a session with a known pid doesn't run `ps`. Factor the decision so it can be tested without `ps`.
   - A digest with `watching: false` doesn't wake the asker.
+
+### Task 7: each agent's own-session facts live in its profile
+
+The user asked in chat: "can we have a plugabble abstraction for this so we can support other agents?" Today the facts per agent are Rust tables in `rl_detect::user_hooks`, matching on the agent's name. Those tables are `AGENTS`, `events`, `told`, `signal`, `carries_on`, `prompt_event`, `file`, `entry`, `after_install` and `says_user`, along with `claude agents` in `rl-daemon/src/outside/claude.rs` and attach in the panel. They move into each profile's `detect/<agent>.yaml`, under a new `sessions:` block. Code keeps only what is generic.
+
+**The profile block.** It is parsed into `Profile.sessions: Option<Sessions>`, and an agent with none has no own sessions. Every value below is today's, moved, not changed:
+
+```yaml
+sessions:
+  hooks:
+    # The first whose variables are all set wins; `~` is $HOME.
+    file: ["$CODEX_HOME/hooks.json", "~/.codex/hooks.json"]
+    timeout: 3s            # written in the unit the format wants
+    unit: s                # s | ms  (gemini: ms)
+    async: true            # codex only; `SessionEnd` stays synchronous, as today
+    marker: --user         # claude only: tells the user-level copy apart
+    after_install: "codex asks you to trust it once: open codex, /hooks"
+    events:
+      SessionStart: idle
+      UserPromptSubmit: { state: working, prompt: true }     # carries the typed prompt
+      PermissionRequest: { state: needs, waiting_for: "permission prompt", detail: tool_name }
+      PostToolUse: carries-on
+      Interrupt: idle
+      Stop: idle
+      SessionEnd: ended
+  list: { args: [agents, --json], reader: claude-agents }   # claude only
+  attach: [attach, "{id}"]                                   # claude only
+```
+
+**What an event says:**
+- **States:** `idle`, `working`, `needs`, `carries-on` (a tool done: it ends a wait and never wakes an idle session), `ended`, `nothing`.
+- **Narrowing by a payload field:** an event can be narrowed by one field of its payload, as Claude's and Gemini's `Notification` are: `{ by: notification_type, permission_prompt: { state: needs, waiting_for: "permission prompt" }, idle_prompt: idle }`. A value not listed says nothing.
+- **Run signals:** `signal` for Relay's runs is derived from the same table. `working` takes `prompt: <text>` or `tool: <name> done`, `needs` takes its `waiting_for` or the detail, and `idle` says "finished responding", or "interrupted" for an `Interrupt`. Today's signal words must come out unchanged; pin that with the existing tests.
+
+**What stays in code:**
+- **One JSON hook format:** the `hooks.<Event>: [{hooks: [{type: "command", command, timeout}]}]` shape that all three share. Install, uninstall, `is_relays` and `installed` stay as they are, keyed by the profile.
+- **Built-in list readers, named by `reader:`:** only `claude-agents` today, which is `claude::parse`. A profile naming an unknown reader is a load error, with the profile's file in the message.
+- **The rest:** the `rl hook` flow, `foreign`, the store, pruning, carry-on, and the `claude agents` asker's timing. The asker runs for any profile with a `list:` block and a hook installed or not, by the same rules.
+- **The generic per-run hooks of `claude.yaml`:** `hooks: {dialect, args}` and Relay's per-run settings file are unchanged.
+
+**Where the facts are read:**
+- `rl hook`, the hook's own process, needs the agent's event table. It loads the registry as the panel does, from the built-in profiles plus `~/.relay/detect` overrides, as `rl` already does elsewhere, and keeps that load within `WITHIN`.
+- If loading costs more than a few ms, measure it and say so in the report. In that case embed the parsed built-ins at build time, as the registry already embeds `detect/*.yaml`.
+- Every place that lists `AGENTS` asks the registry for the profiles with `sessions.hooks` instead. That covers setup's offer, `handlers.rs`, `outside/mod.rs` and `hook.rs`.
+
+**Proof it is pluggable.** One test adds a made-up agent `fake` purely by profile: a temp `detect/fake.yaml` with a `sessions.hooks` block, and no Rust change. It checks four things:
+- Setup offers it.
+- It installs into its file.
+- `rl hook fake <Event>` puts a `fake` session into the digest with the right state.
+- Enter on that session carries it on with its profile's `resume`.
+
+**Docs.**
+- In `docs/ARCHITECTURE.md`, add a short "Adding an agent" section: what to put in its profile, and when code is needed (another hooks format, a new list reader).
+- Rewrite the `user_hooks.rs` module doc as "the format", with the facts per agent in the profiles.
+- Keep the research notes' facts in the YAML comments, so each one sits beside the value it explains.
+
+**Tests:**
+- Today's `user_hooks` and `hook.rs` tests pass with values read from the profiles.
+- The `fake` agent test above.
+- A profile with a bad `sessions` block fails to load and names its file: an unknown state word, an unknown reader, or `unit` other than s/ms.
