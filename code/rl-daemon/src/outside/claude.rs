@@ -357,14 +357,15 @@ pub(crate) fn claude_bin(registry: &Registry) -> Result<PathBuf> {
 }
 
 /// Runs `claude` with `args`, for no longer than `wait`; its output. Its
-/// hooks, should it fire any, know it for `rld`'s (`user_hooks::ASKING`).
+/// hooks, should it fire any within the next 30s, know it for `rld`'s
+/// (`user_hooks::ASKING`).
 pub(crate) async fn ask(bin: &Path, args: &[&str], wait: Duration) -> Result<String> {
     let out = tokio::time::timeout(
         wait,
         tokio::process::Command::new(bin)
             .args(args)
             // Any hook it fires is not a session to tell of.
-            .env(user_hooks::ASKING, "1")
+            .env(user_hooks::ASKING, user_hooks::asking_since())
             .stdin(std::process::Stdio::null())
             .kill_on_drop(true)
             .output(),

@@ -75,7 +75,7 @@ impl FakeClaude {
 async fn digest_until(c: &mut Conn, what: &str, ok: impl Fn(&Digest) -> bool) -> Digest {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        let d: Digest = c.ok("digest.get", json!({})).await;
+        let d: Digest = c.ok("digest.get", json!({ "watching": true })).await;
         if ok(&d) {
             return d;
         }
@@ -207,7 +207,7 @@ async fn claudes_sessions_reach_the_digest_less_relays_own() {
     std::fs::write(&fail, "").unwrap();
     let broke = fake.calls();
     while fake.calls() < broke + 3 {
-        let d: Digest = c.ok("digest.get", json!({})).await;
+        let d: Digest = c.ok("digest.get", json!({ "watching": true })).await;
         assert_eq!(d.outside.len(), 2, "{:?}", d.outside);
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
@@ -271,7 +271,7 @@ async fn claudes_sessions_reach_the_digest_less_relays_own() {
     let hung = fake.calls();
     while fake.calls() < hung + 2 {
         let asked = Instant::now();
-        let d: Digest = c.ok("digest.get", json!({})).await;
+        let d: Digest = c.ok("digest.get", json!({ "watching": true })).await;
         assert!(
             asked.elapsed() < Duration::from_millis(150),
             "a digest waited on claude: {:?}",
@@ -322,10 +322,10 @@ async fn asking_of(fake: FakeClaude, tmp: &Path, hooked: bool) -> Option<(FakeCl
 
 /// Asks for the digest every `every`, `n` times: the list showing.
 async fn show(c: &mut Conn, n: usize, every: Duration) -> Digest {
-    let mut d: Digest = c.ok("digest.get", json!({})).await;
+    let mut d: Digest = c.ok("digest.get", json!({ "watching": true })).await;
     for _ in 1..n {
         tokio::time::sleep(every).await;
-        d = c.ok("digest.get", json!({})).await;
+        d = c.ok("digest.get", json!({ "watching": true })).await;
     }
     d
 }
@@ -384,6 +384,44 @@ async fn with_its_hook_there_claude_is_asked_once_and_again_only_for_a_session_i
 }
 
 #[tokio::test]
+async fn a_digest_that_is_not_watching_asks_nothing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let Some((fake, h, mut c)) = asking(tmp.path(), true).await else {
+        return;
+    };
+    for _ in 0..5 {
+        let _: Digest = c.ok("digest.get", json!({})).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(fake.calls(), 0, "a one-off digest only reads");
+    // The panel's, watching, is what has it asked.
+    show(&mut c, 3, Duration::from_millis(100)).await;
+    assert_eq!(fake.calls(), 1);
+    h.stop().await;
+}
+
+#[tokio::test]
+async fn a_hook_is_answered_with_wanting_the_pid_only_while_none_is_known() {
+    let tmp = tempfile::tempdir().unwrap();
+    let Some((_fake, h, mut c)) = asking(tmp.path(), true).await else {
+        return;
+    };
+    let cwd = tmp.path().canonicalize().unwrap();
+    let wants = |r: &serde_json::Value| r["wants_pid"].as_bool().unwrap();
+    let said: serde_json::Value = c.ok("outside.hook", hook("s-pid", "SessionStart", &cwd)).await;
+    assert!(wants(&said), "no process known yet");
+    let mut with = hook("s-pid", "SessionStart", &cwd);
+    with["pid"] = json!(std::process::id());
+    let said: serde_json::Value = c.ok("outside.hook", with).await;
+    assert!(!wants(&said), "told it");
+    let said: serde_json::Value = c.ok("outside.hook", hook("s-pid", "PermissionRequest", &cwd)).await;
+    assert!(!wants(&said), "known now, and kept");
+    let said: serde_json::Value = c.ok("outside.hook", hook("s-pid", "SessionEnd", &cwd)).await;
+    assert!(!wants(&said), "over");
+    h.stop().await;
+}
+
+#[tokio::test]
 async fn a_background_session_listed_has_claude_asked_now_and_then() {
     let tmp = tempfile::tempdir().unwrap();
     let Some((fake, h, mut c)) = asking(tmp.path(), true).await else {
@@ -399,7 +437,6 @@ async fn a_background_session_listed_has_claude_asked_now_and_then() {
     let d = show(&mut c, 26, Duration::from_millis(100)).await;
     let s = d.outside.iter().find(|s| s.session_id == "s-bg").unwrap();
     assert_eq!((s.id.as_deref(), s.kind.as_str()), (Some("bg1"), "background"));
-    // At once, then every 500ms: some four or five in 2.5s.
     // At once, then every 500ms: as many as the time taken allows, give
     // or take one.
     let most = (started.elapsed().as_millis() / 500) as usize + 2;

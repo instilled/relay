@@ -180,7 +180,7 @@ async fn agents_sessions_move_into_relay() {
         json!({ "agent": "codex", "session_id": "cx-1", "cwd": cwd, "event": event,
                 "transcript_path": transcript })
     };
-    let _: () = c.ok("outside.hook", told("UserPromptSubmit")).await;
+    let _: serde_json::Value = c.ok("outside.hook", told("UserPromptSubmit")).await;
     let e = c
         .call("import.move", json!({ "agent": "codex", "session_id": "cx-1" }))
         .await
@@ -191,7 +191,7 @@ async fn agents_sessions_move_into_relay() {
         "{}",
         e.message
     );
-    let _: () = c.ok("outside.hook", told("Stop")).await;
+    let _: serde_json::Value = c.ok("outside.hook", told("Stop")).await;
     let just = |e: Option<rl_proto::rpc::RpcError>| {
         let e = e.expect("refused");
         assert!(e.message.contains("just moved in its terminal"), "{}", e.message);
@@ -243,7 +243,7 @@ async fn agents_sessions_move_into_relay() {
     let listed = |d: &Digest| d.outside.iter().find(|s| s.session_id == "cx-1").cloned();
     let d: Digest = c.ok("digest.get", json!({})).await;
     assert!(listed(&d).is_none(), "{:?}", d.outside);
-    let _: () = c.ok("outside.hook", told("UserPromptSubmit")).await;
+    let _: serde_json::Value = c.ok("outside.hook", told("UserPromptSubmit")).await;
     let d: Digest = c.ok("digest.get", json!({})).await;
     let back = listed(&d).expect("at work in its terminal again");
     assert_eq!(back.run.as_deref(), Some(cx.id.as_str()));

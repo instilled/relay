@@ -109,10 +109,14 @@ impl Outsiders {
     }
 
     /// Every agent's sessions as last heard, Relay's own among them: the
-    /// digest leaves those out (`not_relays`). Counts as the list showing:
-    /// the first time in a while, `claude agents` is asked now, in the
-    /// background, and a later digest carries what it heard.
-    pub fn latest(&self) -> Vec<Outside> {
+    /// digest leaves those out (`not_relays`). Where `watching` (the panel's
+    /// digest), counts as the list showing: the first time in a while,
+    /// `claude agents` is asked now, in the background, and a later digest
+    /// carries what it heard. A one-off digest only reads.
+    pub fn latest(&self, watching: bool) -> Vec<Outside> {
+        if !watching {
+            return self.hooked.latest();
+        }
         let mut w = self.wanted.lock().unwrap();
         let idle = w.is_none_or(|w| w.elapsed() > SHOWING);
         *w = Some(Instant::now());
@@ -145,8 +149,9 @@ impl Outsiders {
     /// ended. A word from under a run that is the agent's own (Claude's
     /// user-level hook, in a Claude run of Relay's) is that run's, which its
     /// own hooks have said: let go. Of one of Claude's that the last ask
-    /// did not list, an ask is called for, to fill it in.
-    pub async fn told(&self, p: rl_proto::methods::OutsideHookParams, ledger: &Ledger) -> Result<()> {
+    /// did not list, an ask is called for, to fill it in. Answers whether
+    /// the session is kept with no process known, which the hook then finds.
+    pub async fn told(&self, p: rl_proto::methods::OutsideHookParams, ledger: &Ledger) -> Result<bool> {
         if !rl_detect::user_hooks::AGENTS.contains(&p.agent.as_str()) {
             bail!("`{}` sessions are not told by hooks", p.agent);
         }
@@ -156,10 +161,11 @@ impl Outsiders {
         if let Some(id) = p.run.clone() {
             let run = ledger.call(move |c| rl_ledger::runs::get(c, &id)).await?;
             if run.is_some_and(|r| !rl_detect::user_hooks::foreign(&r, &p.agent)) {
-                return Ok(());
+                return Ok(false);
             }
         }
         let transcript = p.transcript_path.clone().filter(|t| t.is_absolute());
+        let mut wants_pid = false;
         match self.hooked.hear(p) {
             hooked::Said::Ended(key) => self.forget_one(&key),
             hooked::Said::Late => {}
@@ -177,15 +183,18 @@ impl Outsiders {
                 // Ended while it was settled: the end stands.
                 if !self.hooked.keep(*session, transcript, stood) {
                     self.forget_one(&key);
-                } else if agent == claude::AGENT
-                    && let Some(asker) = &self.asker
-                    && asker.told_of(&key)
-                {
-                    self.wake.notify_one();
+                } else {
+                    wants_pid = self.hooked.last(&key).is_some_and(|l| l.session.pid.is_none());
+                    if agent == claude::AGENT
+                        && let Some(asker) = &self.asker
+                        && asker.told_of(&key)
+                    {
+                        self.wake.notify_one();
+                    }
                 }
             }
         }
-        Ok(())
+        Ok(wants_pid)
     }
 
     /// Lets go of the told sessions that ended without saying so.
@@ -740,7 +749,7 @@ mod tests {
                 run: None,
             }
         };
-        let one = |key: &str| store.latest().into_iter().find(|s| s.key() == key);
+        let one = |key: &str| store.latest(true).into_iter().find(|s| s.key() == key);
 
         store
             .told(tell("codex", "c1", "SessionStart", Some("startup"), Some(41)), &ledger)
@@ -811,7 +820,7 @@ mod tests {
         ] {
             assert!(store.told(bad, &ledger).await.is_err());
         }
-        assert_eq!(store.latest().len(), 1);
+        assert_eq!(store.latest(true).len(), 1);
     }
 
     #[tokio::test]
@@ -840,13 +849,13 @@ mod tests {
             .hooked
             .age("o:codex:quiet", hooked::STALE + Duration::from_secs(1));
         store.prune_told();
-        let keys: Vec<String> = store.latest().iter().map(Outside::key).collect();
+        let keys: Vec<String> = store.latest(true).iter().map(Outside::key).collect();
         assert_eq!(keys, ["o:codex:me", "o:codex:recent"]);
         assert!(!store.settled.lock().unwrap().contains_key("o:codex:dead"));
         // A live process, but no word for very long: the pid may not be it.
         store.hooked.age("o:codex:me", hooked::QUIET + Duration::from_secs(1));
         store.prune_told();
-        let keys: Vec<String> = store.latest().iter().map(Outside::key).collect();
+        let keys: Vec<String> = store.latest(true).iter().map(Outside::key).collect();
         assert_eq!(keys, ["o:codex:recent"]);
     }
 
@@ -882,7 +891,7 @@ mod tests {
                 .await
                 .unwrap();
             let key = format!("o:{agent}:s");
-            let one = || store.latest().into_iter().find(|s| s.key() == key).unwrap();
+            let one = || store.latest(true).into_iter().find(|s| s.key() == key).unwrap();
             assert!(one().wants_you());
             store.told(told_as(agent, "s", ran, None, None), &ledger).await.unwrap();
             let s = one();
@@ -893,7 +902,7 @@ mod tests {
             .told(told_as("codex", "s", "Interrupt", None, None), &ledger)
             .await
             .unwrap();
-        let s = store.latest().into_iter().find(|s| s.key() == "o:codex:s").unwrap();
+        let s = store.latest(true).into_iter().find(|s| s.key() == "o:codex:s").unwrap();
         assert_eq!(s.status, "idle");
     }
 
@@ -919,14 +928,14 @@ mod tests {
             .told(told_as("codex", "s", "PermissionRequest", None, None), &ledger)
             .await
             .unwrap();
-        assert!(store.latest().is_empty());
+        assert!(store.latest(true).is_empty());
         assert!(!store.settled.lock().unwrap().contains_key("o:codex:s"));
         // A start (`codex resume`, the same id) brings it back.
         store
             .told(told_as("codex", "s", "SessionStart", Some("resume"), None), &ledger)
             .await
             .unwrap();
-        assert_eq!(store.latest().len(), 1);
+        assert_eq!(store.latest(true).len(), 1);
         // The end is forgotten after a while.
         store
             .told(told_as("codex", "t", "SessionEnd", None, None), &ledger)
@@ -938,7 +947,7 @@ mod tests {
             .told(told_as("codex", "t", "Stop", None, None), &ledger)
             .await
             .unwrap();
-        assert_eq!(store.latest().len(), 2);
+        assert_eq!(store.latest(true).len(), 2);
     }
 
     #[tokio::test]
@@ -970,7 +979,7 @@ mod tests {
             .told(told_as("gemini", "new", "SessionStart", Some("clear"), me), &ledger)
             .await
             .unwrap();
-        let keys: Vec<String> = store.latest().iter().map(Outside::key).collect();
+        let keys: Vec<String> = store.latest(true).iter().map(Outside::key).collect();
         assert_eq!(
             keys,
             ["o:codex:same-pid-other-agent", "o:gemini:elsewhere", "o:gemini:new"]
@@ -982,7 +991,7 @@ mod tests {
     async fn a_tool_done_heard_after_the_turn_ended_does_not_wake_it() {
         let ledger = Ledger::open_in_memory().unwrap();
         let store = Outsiders::new(None);
-        let status = || store.latest()[0].status.clone();
+        let status = || store.latest(true)[0].status.clone();
         store
             .told(told_as("codex", "s", "UserPromptSubmit", None, None), &ledger)
             .await
@@ -1130,7 +1139,7 @@ mod tests {
             |_| true,
         );
         assert!(merged.gone.is_empty());
-        let s = store.latest().remove(0);
+        let s = store.latest(true).remove(0);
         assert_eq!(
             (
                 s.id.as_deref(),
@@ -1159,7 +1168,7 @@ mod tests {
             began,
             |_| true,
         );
-        let s = store.latest().remove(0);
+        let s = store.latest(true).remove(0);
         assert_eq!(
             (s.id.as_deref(), s.status.as_str(), s.waiting_for.as_deref()),
             (Some("bg2"), "waiting", Some("permission prompt"))
@@ -1183,14 +1192,14 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(store.latest()[0].status, "busy");
+        assert_eq!(store.latest(true)[0].status, "busy");
         store.hooked.merge(
             "claude",
             vec![listed("s", Some("b"), "background", "waiting", None)],
             began,
             |_| true,
         );
-        assert_eq!(store.latest()[0].status, "waiting", "the ask's word is the newer");
+        assert_eq!(store.latest(true)[0].status, "waiting", "the ask's word is the newer");
 
         // A turn's end leaves a background session's `failed` as it was.
         store.hooked.merge(
@@ -1206,21 +1215,21 @@ mod tests {
             .told(told_as("claude", "s", "Stop", None, None), &ledger)
             .await
             .unwrap();
-        let s = store.latest().remove(0);
+        let s = store.latest(true).remove(0);
         assert_eq!((s.state.as_deref(), s.wants_you()), (Some("failed"), true));
         // A prompt is newer than it.
         store
             .told(told_as("claude", "s", "UserPromptSubmit", None, None), &ledger)
             .await
             .unwrap();
-        assert_eq!(store.latest()[0].state, None);
+        assert_eq!(store.latest(true)[0].state, None);
     }
 
     #[tokio::test]
     async fn one_only_an_ask_listed_stands_while_listed_and_an_end_ends_it_for_both() {
         let ledger = Ledger::open_in_memory().unwrap();
         let store = Outsiders::new(None);
-        let keys = || store.latest().iter().map(Outside::key).collect::<Vec<_>>();
+        let keys = || store.latest(true).iter().map(Outside::key).collect::<Vec<_>>();
         store
             .told(told_as("codex", "c", "Stop", None, None), &ledger)
             .await
@@ -1240,7 +1249,7 @@ mod tests {
             |_| false,
         );
         assert_eq!(merged.listed.len(), 2);
-        assert_eq!(store.latest()[0].pid, None, "{:?}", store.latest());
+        assert_eq!(store.latest(true)[0].pid, None, "{:?}", store.latest(true));
         assert_eq!(
             keys(),
             ["o:claude:asked", "o:claude:other", "o:claude:told", "o:codex:c"]
@@ -1291,7 +1300,7 @@ mod tests {
         store.told(under("ours", "r-claude"), &ledger).await.unwrap();
         store.told(under("in-shell", "r-shell"), &ledger).await.unwrap();
         store.told(under("unknown-run", "r-gone"), &ledger).await.unwrap();
-        let keys: Vec<String> = store.latest().iter().map(Outside::key).collect();
+        let keys: Vec<String> = store.latest(true).iter().map(Outside::key).collect();
         assert_eq!(keys, ["o:claude:in-shell", "o:claude:unknown-run"]);
     }
 

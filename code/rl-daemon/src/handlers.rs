@@ -66,6 +66,7 @@ pub fn register(r: &mut Router<Daemon>) {
         d.outside
             .told(p, &d.ledger)
             .await
+            .map(|wants_pid| rl_proto::methods::OutsideHookResult { wants_pid })
             .map_err(|e| RpcError::invalid_params(format!("{e:#}")))
     });
     r.register::<ImportMove, _, _>(|d, p: ImportMoveParams| async move {
@@ -433,7 +434,7 @@ pub fn register(r: &mut Router<Daemon>) {
         ))
     });
 
-    r.register::<DigestGet, _, _>(|d, DigestParams { since }| async move {
+    r.register::<DigestGet, _, _>(|d, DigestParams { since, watching }| async move {
         let since = since.unwrap_or(jiff::Timestamp::UNIX_EPOCH);
         let (found, mut recaps, registered) = d
             .ledger
@@ -486,8 +487,9 @@ pub fn register(r: &mut Router<Daemon>) {
             .list(DecisionFilter::default())
             .await
             .map_err(RpcError::internal)?;
-        // Agents' own sessions as last heard: never asked for here.
-        let listed = d.outside.latest();
+        // Agents' own sessions as last heard: asked for only while a panel
+        // is watching.
+        let listed = d.outside.latest(watching);
         let sessions = listed.clone();
         let (lost, hidden, order, firings, (carried, left, was)) = d
             .ledger

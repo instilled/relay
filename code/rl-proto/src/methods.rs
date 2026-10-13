@@ -249,7 +249,30 @@ pub struct OutsideHook;
 impl Method for OutsideHook {
     const NAME: &'static str = "outside.hook";
     type Params = OutsideHookParams;
-    type Result = ();
+    type Result = OutsideHookResult;
+}
+
+/// What `rld` answers a hook with.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct OutsideHookResult {
+    /// Whether `rld` knows no process for that session: the hook then finds
+    /// the agent's and says it once more, with the pid. An older `rld`
+    /// answers with nothing, which reads as false.
+    pub wants_pid: bool,
+}
+
+impl<'de> Deserialize<'de> for OutsideHookResult {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct Said {
+            #[serde(default)]
+            wants_pid: bool,
+        }
+        let said = Option::<Said>::deserialize(d)?;
+        Ok(Self {
+            wants_pid: said.is_some_and(|s| s.wants_pid),
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -524,6 +547,11 @@ impl Method for DigestGet {
 pub struct DigestParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub since: Option<Timestamp>,
+    /// Set by the panel, which keeps the list showing: only then does `rld`
+    /// ask `claude agents`. A one-off digest leaves it false and reads what
+    /// is kept.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub watching: bool,
 }
 
 /// Takes a whole project, or a flow, off the panel's list — or brings it back

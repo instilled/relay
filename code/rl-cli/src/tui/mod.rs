@@ -1529,7 +1529,14 @@ impl App {
         if let Ok(ws) = self.rpc.call::<WorkspaceList>(()).await {
             self.names = Names::new(ws.into_iter().map(|w| (w.path, w.name)));
         }
-        match self.rpc.call::<DigestGet>(DigestParams::default()).await {
+        match self
+            .rpc
+            .call::<DigestGet>(DigestParams {
+                watching: true,
+                ..Default::default()
+            })
+            .await
+        {
             Ok(d) => self.digest = d,
             Err(e) => self.say(format!("daemon: {e:#}")),
         }
@@ -8180,7 +8187,10 @@ mod tests {
         app.refresh().await;
         let own = app
             .rpc
-            .call::<DigestGet>(DigestParams { since: Some(since) })
+            .call::<DigestGet>(DigestParams {
+                since: Some(since),
+                ..Default::default()
+            })
             .await
             .unwrap();
         let ids = |d: &rl_proto::methods::Digest| -> Vec<String> { d.items.iter().map(|i| i.run.id.clone()).collect() };

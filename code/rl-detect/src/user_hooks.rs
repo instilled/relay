@@ -64,8 +64,31 @@ pub const USER: &str = "--user";
 /// Set in the environment of the `claude` that `rld` itself runs
 /// (`claude agents`, `claude stop`): should that fire a user-level hook,
 /// `rl hook` says nothing of it. Otherwise each ask could tell of a new
-/// session, which calls for another ask, and so on.
+/// session, which calls for another ask, and so on. Its value is the Unix
+/// time, in seconds, it was set (`asking_since`): a long-lived process the
+/// `claude` leaves behind (a background supervisor) inherits it, and its
+/// later sessions' hooks must not be silenced for good.
 pub const ASKING: &str = "RELAY_ASKING";
+
+/// How long after `ASKING` was set a hook still takes it for an ask's.
+pub const ASKING_FOR: u64 = 30;
+
+/// What `ASKING` is set to: the time now, in Unix seconds.
+pub fn asking_since() -> String {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+        .to_string()
+}
+
+/// Whether `ASKING`'s `value` (None where it is not set) is that of an ask
+/// going on at `now`, in Unix seconds: a time under `ASKING_FOR` old. A
+/// value that is no time is not.
+pub fn is_asking(value: Option<&str>, now: u64) -> bool {
+    value
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .is_some_and(|set| now.saturating_sub(set) < ASKING_FOR)
+}
 
 /// Whether `agent`'s user-level hook says `USER` after its event: where a
 /// Relay run of the agent's has hooks of its own beside it — Claude's, from
@@ -548,6 +571,20 @@ mod tests {
 
     fn doc(path: &Path) -> Value {
         serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn only_a_fresh_time_is_an_ask_going_on() {
+        assert!(is_asking(Some("1000"), 1000));
+        assert!(is_asking(Some("1000"), 1029));
+        assert!(!is_asking(Some("1000"), 1030));
+        assert!(!is_asking(Some("1000"), 5000));
+        assert!(is_asking(Some("1000"), 999), "a clock a little behind");
+        assert!(!is_asking(Some("1"), 1_800_000_000), "the old value is a time long ago");
+        assert!(!is_asking(Some("yes"), 1000));
+        assert!(!is_asking(Some(""), 1000));
+        assert!(!is_asking(None, 1000));
+        assert!(is_asking(Some(&asking_since()), asking_since().parse().unwrap()));
     }
 
     #[test]

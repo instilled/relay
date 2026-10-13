@@ -17,7 +17,13 @@
 //! outside any run, says nothing.
 //!
 //! A hook called from a `claude` that `rld` runs itself (`claude agents`,
-//! `user_hooks::ASKING` in its environment) does nothing at all.
+//! `user_hooks::ASKING` in its environment, set under 30s ago) does nothing
+//! at all.
+//!
+//! The agent's process is looked for (`ps`) once a session: the word goes
+//! to `rld` without a pid, and only where `rld` answers that it knows none
+//! (`wants_pid`), for an event that is worth it (`asks_pid`), is it said
+//! once more with the pid.
 //!
 //! A hook must never slow down or break the agent that called it: all of
 //! it — reading stdin, finding the agent's process, the post — is done
@@ -96,7 +102,7 @@ pub fn words(words: &[String]) -> Option<Words> {
 pub async fn hook(home: &Home, words: &Words) {
     // `rld`'s own `claude agents`: nothing to tell of, and telling of it
     // would only have `rld` ask again.
-    if std::env::var_os(user_hooks::ASKING).is_some() {
+    if asking() {
         return;
     }
     let deadline = Instant::now() + WITHIN;
@@ -133,10 +139,13 @@ pub async fn hook(home: &Home, words: &Words) {
         let Some(mut params) = outside(agent, event, &payload, |k| std::env::var(k).ok()) else {
             return anyhow::Ok(());
         };
-        if asks_pid(event) {
-            params.pid = agent_pid(agent).await;
+        let told = rld.call::<OutsideHook>(params.clone()).await?;
+        if finds_pid(event, told.wants_pid)
+            && let Some(pid) = agent_pid(agent).await
+        {
+            params.pid = Some(pid);
+            rld.call::<OutsideHook>(params).await?;
         }
-        rld.call::<OutsideHook>(params).await?;
         anyhow::Ok(())
     };
     if let Ok(Err(e)) = tokio::time::timeout_at(deadline, said).await
@@ -187,6 +196,19 @@ pub fn outside(
         transcript_path: field("transcript_path").filter(|t| !t.is_empty()).map(PathBuf::from),
         run: env("RELAY_RUN").filter(|r| !r.is_empty()),
     })
+}
+
+/// Whether `ASKING` says an ask of `rld`'s is going on (`user_hooks::is_asking`).
+fn asking() -> bool {
+    let now = user_hooks::asking_since().parse().unwrap_or(0);
+    user_hooks::is_asking(std::env::var(user_hooks::ASKING).ok().as_deref(), now)
+}
+
+/// Whether to look for the agent's process, after `rld` answered
+/// `wants_pid` to a word on `event`: only where it knows none, and the
+/// event is worth it.
+pub fn finds_pid(event: &str, wants_pid: bool) -> bool {
+    wants_pid && asks_pid(event)
 }
 
 /// Whether `event` is worth finding the agent's process for: a start, or a
@@ -278,6 +300,16 @@ fn names(args: &str, agent: &str) -> bool {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn the_process_is_looked_for_only_where_rld_wants_it_and_the_event_is_worth_it() {
+        assert!(finds_pid("SessionStart", true));
+        assert!(finds_pid("UserPromptSubmit", true));
+        assert!(!finds_pid("SessionStart", false), "known: no ps");
+        assert!(!finds_pid("PermissionRequest", false));
+        assert!(!finds_pid("PermissionRequest", true), "not worth a ps");
+        assert!(!finds_pid("PostToolUse", true));
+    }
 
     #[test]
     fn a_hook_names_its_agent_or_is_claudes() {
