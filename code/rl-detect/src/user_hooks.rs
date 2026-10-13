@@ -61,6 +61,12 @@ pub const AGENTS: [&str; 3] = [CLAUDE, CODEX, GEMINI];
 /// not a run's own (`claude::settings_json`).
 pub const USER: &str = "--user";
 
+/// Set in the environment of the `claude` that `rld` itself runs
+/// (`claude agents`, `claude stop`): should that fire a user-level hook,
+/// `rl hook` says nothing of it. Otherwise each ask could tell of a new
+/// session, which calls for another ask, and so on.
+pub const ASKING: &str = "RELAY_ASKING";
+
 /// Whether `agent`'s user-level hook says `USER` after its event: where a
 /// Relay run of the agent's has hooks of its own beside it — Claude's, from
 /// the settings `rld` passes the run — so that the copy in the user's file

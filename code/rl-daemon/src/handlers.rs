@@ -192,7 +192,7 @@ pub fn register(r: &mut Router<Daemon>) {
 
     r.register::<RunHook, _, _>(|d, p| async move {
         let claude = p.dialect == rl_detect::claude::DIALECT;
-        if !claude && !rl_detect::user_hooks::AGENTS.contains(&p.dialect.as_str()) {
+        if !rl_detect::user_hooks::AGENTS.contains(&p.dialect.as_str()) {
             return Err(RpcError::invalid_params(format!(
                 "unknown hook dialect `{}`",
                 p.dialect

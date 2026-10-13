@@ -30,6 +30,12 @@ struct FakeClaude {
 
 impl FakeClaude {
     fn in_dir(dir: &Path) -> Self {
+        Self::firing(dir, "")
+    }
+
+    /// The same, running `then` (shell) on each call, before it answers:
+    /// a `claude` that fires a hook of its own, say.
+    fn firing(dir: &Path, then: &str) -> Self {
         let bin = dir.join("bin");
         std::fs::create_dir_all(&bin).unwrap();
         let f = Self {
@@ -40,7 +46,7 @@ impl FakeClaude {
             hang: dir.join("hang"),
         };
         let script = format!(
-            "#!/bin/sh\necho . >> '{calls}'\n[ -e '{fail}' ] && {{ echo 'it broke' >&2; exit 1; }}\n[ -e '{hang}' ] && exec sleep 30\n[ \"$1\" = agents ] || exit 2\ncat '{agents}'\n",
+            "#!/bin/sh\necho . >> '{calls}'\n{then}\n[ -e '{fail}' ] && {{ echo 'it broke' >&2; exit 1; }}\n[ -e '{hang}' ] && exec sleep 30\n[ \"$1\" = agents ] || exit 2\ncat '{agents}'\n",
             calls = f.calls.display(),
             fail = f.fail.display(),
             hang = f.hang.display(),
@@ -300,7 +306,10 @@ fn quick(dir: &Path, hooked: bool) -> Polling {
 
 /// A daemon asking the fake `claude` in `tmp` as `quick` says.
 async fn asking(tmp: &Path, hooked: bool) -> Option<(FakeClaude, Harness, Conn)> {
-    let fake = FakeClaude::in_dir(tmp);
+    asking_of(FakeClaude::in_dir(tmp), tmp, hooked).await
+}
+
+async fn asking_of(fake: FakeClaude, tmp: &Path, hooked: bool) -> Option<(FakeClaude, Harness, Conn)> {
     let home = Home::at(tmp.join("home"));
     std::fs::create_dir_all(home.path()).unwrap();
     let Some(h) = Harness::with_claude(home.clone(), &fake.bin, quick(tmp, hooked)) else {
@@ -391,8 +400,11 @@ async fn a_background_session_listed_has_claude_asked_now_and_then() {
     let s = d.outside.iter().find(|s| s.session_id == "s-bg").unwrap();
     assert_eq!((s.id.as_deref(), s.kind.as_str()), (Some("bg1"), "background"));
     // At once, then every 500ms: some four or five in 2.5s.
+    // At once, then every 500ms: as many as the time taken allows, give
+    // or take one.
+    let most = (started.elapsed().as_millis() / 500) as usize + 2;
     let calls = fake.calls();
-    assert!((3..=6).contains(&calls), "{calls} asks in {:?}", started.elapsed());
+    assert!((3..=most).contains(&calls), "{calls} asks in {:?}", started.elapsed());
     h.stop().await;
 }
 
@@ -406,8 +418,48 @@ async fn without_its_hook_claude_is_asked_every_little_while_but_only_while_show
     tokio::time::sleep(Duration::from_millis(400)).await;
     assert_eq!(fake.calls(), 0);
     // Showing for 1.5s: at once, then every 300ms — some five or six.
+    let started = Instant::now();
     show(&mut c, 15, Duration::from_millis(100)).await;
+    let most = (started.elapsed().as_millis() / 300) as usize + 2;
     let calls = fake.calls();
-    assert!((4..=7).contains(&calls), "{calls}");
+    assert!((4..=most).contains(&calls), "{calls} asks in {:?}", started.elapsed());
+    h.stop().await;
+}
+
+#[tokio::test]
+async fn a_hook_that_claude_agents_fires_itself_is_not_a_session_and_asks_nothing() {
+    let Some(rl) = common::rl_bin() else {
+        eprintln!("skipping: rl not built (run `cargo test --workspace`)");
+        return;
+    };
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let cwd = tmp.path().canonicalize().unwrap();
+    // Each `claude agents` fires Claude's user-level hook, as a session
+    // that is new each time would.
+    let fire = |env: &str| {
+        format!(
+            "echo '{{\"session_id\":\"s-'$$'\",\"cwd\":\"{cwd}\"}}' | {env} RELAY_HOME='{home}' '{rl}' hook claude SessionStart --user",
+            cwd = cwd.display(),
+            home = home.display(),
+            rl = rl.display()
+        )
+    };
+    let fake = FakeClaude::firing(tmp.path(), &fire(""));
+    let Some((fake, h, mut c)) = asking_of(fake, tmp.path(), true).await else {
+        return;
+    };
+    let d = show(&mut c, 10, Duration::from_millis(100)).await;
+    assert_eq!(fake.calls(), 1, "asked once, as the list was first wanted");
+    assert!(d.outside.is_empty(), "{:?}", d.outside);
+
+    // The same hook from any other claude tells of its session.
+    let st = std::process::Command::new("sh")
+        .args(["-c", &fire("env -u RELAY_ASKING")])
+        .status()
+        .unwrap();
+    assert!(st.success());
+    let d = show(&mut c, 3, Duration::from_millis(100)).await;
+    assert_eq!(d.outside.len(), 1, "{:?}", d.outside);
     h.stop().await;
 }

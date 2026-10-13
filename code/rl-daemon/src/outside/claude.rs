@@ -71,7 +71,10 @@ pub struct Polling {
     pub recheck: Duration,
     pub wait: Duration,
     /// Claude's user-level settings, where its hook is when `rl setup`
-    /// added it; none, and it is taken as not there.
+    /// added it; none, and it is taken as not there. Placed from `rld`'s
+    /// own environment as it started (`CLAUDE_CONFIG_DIR`, `HOME`): an `rl
+    /// setup` run where that says otherwise writes a file `rld` does not
+    /// read, and `rld` asks every `unhooked` as if there were no hook.
     pub settings: Option<PathBuf>,
 }
 
@@ -130,6 +133,8 @@ struct Asks {
     wanted: bool,
     /// The sessions not listed that an ask was called for already.
     called: HashSet<String>,
+    /// The last ask failed: the next comes later than a hook's would.
+    failed: bool,
     /// Whether Claude's settings had Relay's hook, and when that was read.
     hooked: Option<(bool, Instant)>,
     /// Why `claude` was not heard last time, in words that stay put
@@ -196,7 +201,8 @@ impl Asker {
         let since = a.began.map(|b| now.saturating_duration_since(b));
         let after = |every: Duration| since.map_or(Duration::ZERO, |s| every.saturating_sub(s));
         [
-            a.wanted.then(|| after(p.between)),
+            a.wanted
+                .then(|| after(if a.failed { p.between.max(p.unhooked) } else { p.between })),
             background.then(|| after(p.background)),
             (!hooked).then(|| after(p.unhooked)),
         ]
@@ -222,19 +228,34 @@ impl Asker {
         a.wanted = false;
     }
 
-    /// What the ask heard: its sessions, by key.
+    /// What the ask heard: its sessions, by key. A hook that called for an
+    /// ask while this one was on its way is answered by it, where it
+    /// listed that session.
     pub fn listed(&self, listed: HashSet<String>) {
         let mut a = self.asks.lock().unwrap();
         if a.error.take().is_some() {
             info!(sessions = listed.len(), "claude sessions: listed again");
         }
+        a.failed = false;
         a.called.retain(|k| !listed.contains(k));
+        if a.called.is_empty() {
+            a.wanted = false;
+        }
         a.listed = listed;
     }
 
-    /// Says once why nothing was heard; the list stands as it was.
+    /// Says once why nothing was heard; the list stands as it was. What
+    /// called for the ask still does, so it is tried again — after
+    /// `unhooked` at the least, so a broken `claude` is not asked every few
+    /// seconds — and a hook may call for one again. Not where there is no
+    /// `claude` here at all.
     pub fn not_heard(&self, NotHeard { missing, why }: NotHeard) {
         let mut a = self.asks.lock().unwrap();
+        if !missing {
+            a.wanted = true;
+            a.failed = true;
+            a.called.clear();
+        }
         let why = format!("{why:#}");
         let key = error_key(&why).to_string();
         if a.error.as_deref() != Some(key.as_str()) {
@@ -335,12 +356,15 @@ pub(crate) fn claude_bin(registry: &Registry) -> Result<PathBuf> {
     rl_detect::registry::find_bin(&p.bins).ok_or_else(|| anyhow!("`claude` is not on this machine"))
 }
 
-/// Runs `claude` with `args`, for no longer than `wait`; its output.
+/// Runs `claude` with `args`, for no longer than `wait`; its output. Its
+/// hooks, should it fire any, know it for `rld`'s (`user_hooks::ASKING`).
 pub(crate) async fn ask(bin: &Path, args: &[&str], wait: Duration) -> Result<String> {
     let out = tokio::time::timeout(
         wait,
         tokio::process::Command::new(bin)
             .args(args)
+            // Any hook it fires is not a session to tell of.
+            .env(user_hooks::ASKING, "1")
             .stdin(std::process::Stdio::null())
             .kill_on_drop(true)
             .output(),
@@ -485,6 +509,60 @@ mod tests {
         asker.began(t0);
         assert_eq!(asker.due_in(t0 + 20 * S, true), BACKGROUND - 20 * S);
         assert_eq!(asker.due_in(t0 + BACKGROUND, true), Duration::ZERO);
+    }
+
+    #[test]
+    fn a_failed_ask_is_tried_again_later_but_no_claude_here_is_not() {
+        let (_tmp, asker) = asker(true);
+        let t0 = Instant::now();
+        asker.want();
+        asker.began(t0);
+        asker.not_heard(NotHeard {
+            missing: false,
+            why: anyhow!("`claude agents --json` did not answer in time"),
+        });
+        assert_eq!(
+            asker.due_in(t0 + S, false),
+            UNHOOKED - S,
+            "again, not as soon as a hook's"
+        );
+        asker.began(t0 + UNHOOKED);
+        asker.listed(HashSet::new());
+        assert_eq!(asker.due_in(t0 + UNHOOKED + S, false), Duration::MAX, "heard: done");
+
+        // One a hook called for that failed: the hook may call again.
+        assert!(asker.told_of("o:claude:x"));
+        asker.began(t0 + 2 * UNHOOKED);
+        asker.not_heard(NotHeard {
+            missing: false,
+            why: anyhow!("`claude agents --json` failed: it broke"),
+        });
+        assert!(asker.told_of("o:claude:x"), "it may call for one again");
+        asker.began(t0 + 3 * UNHOOKED);
+        asker.listed(HashSet::from(["o:claude:x".to_string()]));
+        assert_eq!(asker.due_in(t0 + 3 * UNHOOKED + S, false), Duration::MAX);
+
+        // No `claude` here: nothing to try again.
+        let (_tmp, asker) = self::asker(true);
+        asker.want();
+        asker.began(t0);
+        asker.not_heard(NotHeard {
+            missing: true,
+            why: anyhow!("`claude` is not on this machine"),
+        });
+        assert_eq!(asker.due_in(t0 + 10 * UNHOOKED, false), Duration::MAX);
+    }
+
+    #[test]
+    fn a_hook_answered_by_the_ask_on_its_way_calls_for_no_other() {
+        let (_tmp, asker) = asker(true);
+        let t0 = Instant::now();
+        asker.want();
+        asker.began(t0);
+        // Its first word lands while the ask is on its way, which lists it.
+        assert!(asker.told_of("o:claude:new"));
+        asker.listed(HashSet::from(["o:claude:new".to_string()]));
+        assert_eq!(asker.due_in(t0 + S, false), Duration::MAX);
     }
 
     #[test]

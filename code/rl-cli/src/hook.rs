@@ -16,6 +16,9 @@
 //! own (`user_hooks::foreign`) — one call either way. The run's own hook,
 //! outside any run, says nothing.
 //!
+//! A hook called from a `claude` that `rld` runs itself (`claude agents`,
+//! `user_hooks::ASKING` in its environment) does nothing at all.
+//!
 //! A hook must never slow down or break the agent that called it: all of
 //! it — reading stdin, finding the agent's process, the post — is done
 //! within `WITHIN`, or given up on; nothing is printed (some agents feed a
@@ -91,6 +94,11 @@ pub fn words(words: &[String]) -> Option<Words> {
 
 /// Does what the hook asks, or nothing, within `WITHIN`. Never fails.
 pub async fn hook(home: &Home, words: &Words) {
+    // `rld`'s own `claude agents`: nothing to tell of, and telling of it
+    // would only have `rld` ask again.
+    if std::env::var_os(user_hooks::ASKING).is_some() {
+        return;
+    }
     let deadline = Instant::now() + WITHIN;
     let (agent, event) = (words.agent.as_str(), words.event.as_str());
     let run = std::env::var("RELAY_RUN").ok().filter(|s| !s.is_empty());

@@ -82,7 +82,13 @@ pub(crate) struct Merged {
 pub(crate) enum Said {
     /// The session as it stands now, for it to settle and keep; and the
     /// sessions it replaces in its process, gone.
-    Stands { session: Box<Outside>, gone: Vec<String> },
+    /// `stood`: whether the word said how it stands; one that did not
+    /// (a notification of nothing) changes only that it was heard.
+    Stands {
+        session: Box<Outside>,
+        gone: Vec<String>,
+        stood: bool,
+    },
     /// It is over.
     Ended(String),
     /// Late word of a session that ended: nothing.
@@ -154,15 +160,20 @@ impl Hooked {
         // wakes one that has gone idle.
         let wakes =
             known.as_ref().is_some_and(|k| k.status == Outside::IDLE) && user_hooks::carries_on(&p.agent, &p.event);
+        let mut stood = false;
         if let Told::Stands { status, waiting_for } = told
             && !(known.is_some() && start)
             && !wakes
         {
+            stood = true;
+            // A background session's state, as an ask last said it, is
+            // older than a turn begun or a wait: that one stands. A turn's
+            // end leaves a `done` or `failed` as it was.
+            if status != Outside::IDLE {
+                s.state = None;
+            }
             s.status = status.into();
             s.waiting_for = waiting_for.map(Into::into);
-            // A background session's state, as an ask last said it, is
-            // older than this.
-            s.state = None;
         }
         if p.pid.is_some() {
             s.pid = p.pid;
@@ -170,16 +181,17 @@ impl Hooked {
         Said::Stands {
             session: Box::new(s),
             gone,
+            stood,
         }
     }
 
     /// Keeps a session as its hook now leaves it, heard just now, with its
     /// conversation's file where this word named one (else the one known)
     /// — unless it ended while it was being settled. Whether it was kept.
-    /// Of one known, only what a hook says is taken — how it stands, its
-    /// process — and what was settled of it: an ask that filled in the
-    /// rest meanwhile is not undone.
-    pub fn keep(&self, s: Outside, transcript: Option<PathBuf>) -> bool {
+    /// Of one known, only what a hook says is taken — how it stands, where
+    /// the word said (`stood`), its process — and what was settled of it:
+    /// an ask that filled in the rest meanwhile is not undone.
+    pub fn keep(&self, s: Outside, transcript: Option<PathBuf>, stood: bool) -> bool {
         let key = s.key();
         let now = Instant::now();
         let mut k = self.kept.lock().unwrap();
@@ -189,14 +201,19 @@ impl Hooked {
         match k.heard.get_mut(&key) {
             Some(h) => {
                 let was = &mut h.session;
-                was.status = s.status;
-                was.state = s.state;
-                was.waiting_for = s.waiting_for;
+                if stood {
+                    was.status = s.status;
+                    was.state = s.state;
+                    was.waiting_for = s.waiting_for;
+                    was.state_at = s.state_at;
+                    h.told = Some(now);
+                } else {
+                    // Its hook is there, though: not one only an ask knows.
+                    h.told.get_or_insert(now);
+                }
                 was.pid = s.pid.or(was.pid);
                 was.workspace = s.workspace;
-                was.state_at = s.state_at;
                 h.at = now;
-                h.told = Some(now);
                 if transcript.is_some() {
                     h.transcript = transcript;
                 }

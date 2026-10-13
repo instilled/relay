@@ -163,7 +163,11 @@ impl Outsiders {
         match self.hooked.hear(p) {
             hooked::Said::Ended(key) => self.forget_one(&key),
             hooked::Said::Late => {}
-            hooked::Said::Stands { mut session, gone } => {
+            hooked::Said::Stands {
+                mut session,
+                gone,
+                stood,
+            } => {
                 for key in &gone {
                     self.forget_one(key);
                 }
@@ -171,7 +175,7 @@ impl Outsiders {
                 let key = session.key();
                 let agent = session.agent.clone();
                 // Ended while it was settled: the end stands.
-                if !self.hooked.keep(*session, transcript) {
+                if !self.hooked.keep(*session, transcript, stood) {
                     self.forget_one(&key);
                 } else if agent == claude::AGENT
                     && let Some(asker) = &self.asker
@@ -909,7 +913,7 @@ mod tests {
             .told(told_as("codex", "s", "SessionEnd", None, None), &ledger)
             .await
             .unwrap();
-        assert!(!store.hooked.keep(*session, None), "the end stands");
+        assert!(!store.hooked.keep(*session, None, true), "the end stands");
         // A late word after the end: nothing.
         store
             .told(told_as("codex", "s", "PermissionRequest", None, None), &ledger)
@@ -1161,6 +1165,55 @@ mod tests {
             (Some("bg2"), "waiting", Some("permission prompt"))
         );
         assert!(s.wants_you());
+    }
+
+    #[tokio::test]
+    async fn a_word_that_says_nothing_neither_changes_a_session_nor_keeps_an_asks_state_out() {
+        let ledger = Ledger::open_in_memory().unwrap();
+        let store = Outsiders::new(None);
+        store
+            .told(told_as("claude", "s", "UserPromptSubmit", None, None), &ledger)
+            .await
+            .unwrap();
+        let began = Instant::now();
+        store
+            .told(
+                told_as("claude", "s", "Notification", Some("auth_success"), None),
+                &ledger,
+            )
+            .await
+            .unwrap();
+        assert_eq!(store.latest()[0].status, "busy");
+        store.hooked.merge(
+            "claude",
+            vec![listed("s", Some("b"), "background", "waiting", None)],
+            began,
+            |_| true,
+        );
+        assert_eq!(store.latest()[0].status, "waiting", "the ask's word is the newer");
+
+        // A turn's end leaves a background session's `failed` as it was.
+        store.hooked.merge(
+            "claude",
+            vec![Outside {
+                state: Some("failed".into()),
+                ..listed("s", Some("b"), "background", "idle", None)
+            }],
+            Instant::now(),
+            |_| true,
+        );
+        store
+            .told(told_as("claude", "s", "Stop", None, None), &ledger)
+            .await
+            .unwrap();
+        let s = store.latest().remove(0);
+        assert_eq!((s.state.as_deref(), s.wants_you()), (Some("failed"), true));
+        // A prompt is newer than it.
+        store
+            .told(told_as("claude", "s", "UserPromptSubmit", None, None), &ledger)
+            .await
+            .unwrap();
+        assert_eq!(store.latest()[0].state, None);
     }
 
     #[tokio::test]
