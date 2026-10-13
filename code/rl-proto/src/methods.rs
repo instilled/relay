@@ -144,7 +144,9 @@ impl RunKind {
 }
 
 /// Asks a live run to stop: SIGTERM, or SIGKILL with `force`. The run ends in
-/// `stopped`. Returns the run as it is right after the signal is sent.
+/// `stopped`. Returns the run as it is right after the signal is sent. With
+/// `archive` it is also archived once it has ended — killed if it has not
+/// within a grace — so stopping it and taking it off the list is one ask.
 pub struct RunStop;
 impl Method for RunStop {
     const NAME: &'static str = "run.stop";
@@ -157,6 +159,8 @@ pub struct RunStopParams {
     pub id: String,
     #[serde(default)]
     pub force: bool,
+    #[serde(default)]
+    pub archive: bool,
 }
 
 /// Feed bytes to a run's terminal, as if typed — for a warm project shell a

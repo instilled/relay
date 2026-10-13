@@ -2380,15 +2380,19 @@ impl App {
         }
     }
 
-    async fn stop(&mut self, id: String) {
+    /// Asks a live run to stop; with `archive`, the daemon also takes it off
+    /// the list once it has ended (`^x`), so one ask does both.
+    async fn stop(&mut self, id: String, archive: bool) {
         match self
             .rpc
             .call::<RunStop>(RunStopParams {
                 id: id.clone(),
                 force: false,
+                archive,
             })
             .await
         {
+            Ok(_) if archive => self.say("stopping · off the list once it has ended"),
             Ok(_) => self.say("stop requested"),
             Err(e) => self.say(format!("stop: {e:#}")),
         }
@@ -2444,8 +2448,8 @@ impl App {
 
     /// The second `ctrl-x` (the first only armed it): get whatever the cursor
     /// is on out of the list. An ended run, or a flow's runs, are archived
-    /// (reversible: the ledger keeps them); a run still going is stopped, so
-    /// once it has ended another `ctrl-x` archives it; a question is
+    /// (reversible: the ledger keeps them); a run still going is stopped and
+    /// archived as soon as it has ended, killed if it lingers; a question is
     /// dismissed; a project is removed, its runs stopped and archived. Nothing
     /// here is destroyed — that is retention's alone.
     async fn remove_selected(&mut self) {
@@ -2457,7 +2461,7 @@ impl App {
             if i.run.state.is_terminal() {
                 self.archive(vec![id], &title).await;
             } else {
-                self.stop(id).await;
+                self.stop(id, true).await;
             }
         } else if let Some(q) = self.selected_question() {
             self.dismiss(q.id.clone()).await;
@@ -2516,7 +2520,7 @@ impl App {
             if i.run.state.is_terminal() {
                 Some(format!("remove {}", i.run.title))
             } else {
-                Some(format!("stop {}", i.run.title))
+                Some(format!("stop and remove {}", i.run.title))
             }
         } else if let Some(q) = self.selected_question() {
             Some(format!("dismiss {}", q.title))
@@ -4101,7 +4105,7 @@ impl App {
         match std::mem::replace(&mut self.mode, Mode::Normal) {
             Mode::Stop(id) => {
                 if k.code == KeyCode::Char('y') {
-                    self.stop(id).await;
+                    self.stop(id, false).await;
                 }
                 return Ok(());
             }

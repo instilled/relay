@@ -13,6 +13,7 @@ use rl_proto::methods::{WorkspaceRemoveParams, WorkspaceRemoved};
 use rl_proto::types::Workspace;
 use rl_proto::types::{Run, RunKind};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{info, warn};
 
@@ -154,7 +155,14 @@ async fn stop_all(d: &Daemon, path: &Path) -> Result<(usize, usize)> {
         }
     }
     let ids: Vec<String> = live.iter().map(|r| r.id.clone()).collect();
-    let mut going = wait_ended(d, &ids, GRACE).await?;
+    let going = see_ended(d, &ids).await?;
+    Ok((ids.len() - going.len(), going.len()))
+}
+
+/// Gives runs already asked to stop [`GRACE`] to end, kills those that have
+/// not, and waits [`KILLED`] more; returns those still going after all that.
+async fn see_ended(d: &Daemon, ids: &[String]) -> Result<Vec<String>> {
+    let mut going = wait_ended(d, ids, GRACE).await?;
     if !going.is_empty() {
         for id in &going {
             if d.supervisor.live(id).is_some()
@@ -165,7 +173,24 @@ async fn stop_all(d: &Daemon, path: &Path) -> Result<(usize, usize)> {
         }
         going = wait_ended(d, &going, KILLED).await?;
     }
-    Ok((ids.len() - going.len(), going.len()))
+    Ok(going)
+}
+
+/// `run.stop` with `archive`: once the run asked to stop has ended — killed
+/// if it takes past [`GRACE`] — it is archived, the way a removed project's
+/// runs are. One that never ends stays on the list, to be seen.
+pub(crate) async fn archive_once_ended(d: Arc<Daemon>, id: String) {
+    let ids = vec![id.clone()];
+    match see_ended(&d, &ids).await {
+        Ok(going) if going.is_empty() => {
+            let now = time::now();
+            if let Err(e) = d.ledger.call(move |c| runs::archive(c, &ids, now)).await {
+                warn!(id, error = %format!("{e:#}"), "not archived");
+            }
+        }
+        Ok(_) => warn!(id, "did not end; not archived"),
+        Err(e) => warn!(id, error = %format!("{e:#}"), "not archived"),
+    }
 }
 
 /// Polls the ledger until every run in `ids` has ended or `limit` is up;
