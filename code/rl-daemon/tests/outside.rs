@@ -394,8 +394,13 @@ async fn a_digest_that_is_not_watching_asks_nothing() {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     assert_eq!(fake.calls(), 0, "a one-off digest only reads");
-    // The panel's, watching, is what has it asked.
+    // The panel's, watching, is what has it asked: once, however long the
+    // ask takes to come round on a busy machine.
     show(&mut c, 3, Duration::from_millis(100)).await;
+    let by = Instant::now() + Duration::from_secs(10);
+    while fake.calls() == 0 && Instant::now() < by {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
     assert_eq!(fake.calls(), 1);
     h.stop().await;
 }
