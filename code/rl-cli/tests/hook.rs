@@ -39,7 +39,8 @@ fn hooks_and_marks_move_the_run() {
         )
     };
     let hook = |event: &str, run_id: Option<&str>, stdin: &str| {
-        let mut c = base(&["hook", event]);
+        let words: Vec<&str> = std::iter::once("hook").chain(event.split(' ')).collect();
+        let mut c = base(&words);
         if let Some(id) = run_id {
             c.env("RELAY_RUN", id);
         }
@@ -74,7 +75,7 @@ fn hooks_and_marks_move_the_run() {
     let id = out.trim().to_string();
 
     let payload = r#"{"hook_event_name":"Notification","notification_type":"permission_prompt","message":"Claude needs your permission to use Edit"}"#;
-    assert_eq!(hook("Notification", Some(&id), payload), (true, String::new()));
+    assert_eq!(hook("claude Notification", Some(&id), payload), (true, String::new()));
     assert_eq!(state(&id), ("needs_input".into(), "hook".into()));
     let (_, out, _) = run(&["ls"]);
     assert!(out.contains("needs_input  agent"), "exact states carry no mark: {out}");
@@ -82,6 +83,27 @@ fn hooks_and_marks_move_the_run() {
     assert!(
         out.contains("needs input: Claude needs your permission to use Edit"),
         "{out}"
+    );
+
+    // Words it does not know — too many, a flag, `--help`, none — are a
+    // silent no-op too: never exit 2, which Claude takes as "block", and
+    // never a word on stdout.
+    for garbage in [
+        "a b c",
+        "--help",
+        "-x Stop",
+        "claude Stop --what",
+        "",
+        "codex Stop --dialect gemini",
+    ] {
+        assert_eq!(hook(garbage, Some(&id), "{}"), (true, String::new()), "{garbage:?}");
+    }
+    let out = base(&["hook"]).env("RELAY_RUN", &id).output().unwrap();
+    assert!(out.status.success() && out.stdout.is_empty(), "{out:?}");
+    assert_eq!(
+        state(&id),
+        ("needs_input".into(), "hook".into()),
+        "none of it reached the run"
     );
 
     // Garbage on stdin is still a signal-less no-op, not a failure.

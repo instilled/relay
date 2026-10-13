@@ -6,6 +6,12 @@
 //! adds a step; `rl setup` shows all of it whenever you like. What it
 //! settles goes into `config.yaml`, written by rld; how far it got goes into
 //! the ledger, so the file stays yours.
+//!
+//! The last step writes into an agent's own file: Codex's and Gemini's
+//! hooks, so their sessions started outside Relay show on the list. Only
+//! what is there already starts picked, and what is added or taken out is
+//! only what you turned on or off, written by `rl` itself
+//! (`rl_detect::user_hooks`) where this environment says the agent looks.
 
 use super::{Client, mark, theme};
 use anyhow::Result;
@@ -16,11 +22,14 @@ use ratatui::layout::Rect;
 use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
+use rl_detect::user_hooks;
 use rl_proto::config::Assistant;
 use rl_proto::methods::{
-    AgentInfo, ClaudeSession, ImportMove, ImportMoveParams, ImportReport, SETUP_STEPS, SetupDone, SetupSave, SetupState,
+    AgentInfo, ImportMove, ImportMoveParams, ImportReport, Outside, SETUP_STEPS, SetupDone, SetupSave, SetupState,
 };
 use std::collections::HashMap;
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
 
 /// `s` when there is more than one.
 fn plural(n: usize) -> &'static str {
@@ -36,6 +45,67 @@ enum Step {
     Summaries,
     /// Claude's own sessions, moved over to Relay.
     Sessions,
+    /// Codex's and Gemini's own sessions, shown by their hooks.
+    Hooks,
+}
+
+/// Every step, in order: a release adds one at the end.
+const STEPS: [Step; SETUP_STEPS as usize] = [Step::Agents, Step::Summaries, Step::Sessions, Step::Hooks];
+
+/// An agent whose own sessions its hooks can show, here, and where its
+/// hooks file is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Hookable {
+    pub name: String,
+    pub file: PathBuf,
+    /// Whether Relay's hooks are in it; why that cannot be told, where the
+    /// file does not read (and is then left alone).
+    pub installed: Result<bool, String>,
+    /// What the agent will say about it, worth knowing first: codex warns
+    /// at every start when its `config.toml` has hooks too.
+    pub warning: Option<String>,
+}
+
+/// The agents found here whose hooks can show their sessions, each with
+/// its file as this environment places it. Reads the files, writes nothing.
+pub fn hookable(agents: &[AgentInfo]) -> Vec<Hookable> {
+    hookable_in(agents, |k| std::env::var_os(k))
+}
+
+fn hookable_in(agents: &[AgentInfo], env: impl Fn(&str) -> Option<OsString> + Copy) -> Vec<Hookable> {
+    agents
+        .iter()
+        .filter(|a| a.available() && user_hooks::AGENTS.contains(&a.name.as_str()))
+        .filter_map(|a| {
+            let file = user_hooks::file(&a.name, env)?;
+            let installed = user_hooks::installed(&file, &a.name).map_err(|e| format!("{e:#}"));
+            let warning = (a.name == user_hooks::CODEX && user_hooks::inline_hooks(&file))
+                .then(|| "codex will warn at each start: its config.toml has hooks too".to_string());
+            Some(Hookable {
+                name: a.name.clone(),
+                file,
+                installed,
+                warning,
+            })
+        })
+        .collect()
+}
+
+/// One on the hooks screen.
+#[derive(Debug, Clone)]
+struct HookPick {
+    it: Hookable,
+    on: bool,
+}
+
+impl HookPick {
+    fn can(&self) -> bool {
+        self.it.installed.is_ok()
+    }
+
+    fn was(&self) -> bool {
+        self.it.installed == Ok(true)
+    }
 }
 
 /// An agent on the first screen.
@@ -48,7 +118,7 @@ struct Pick {
 /// One of Claude's sessions on the third.
 #[derive(Debug, Clone)]
 struct Session {
-    it: ClaudeSession,
+    it: Outside,
     on: bool,
 }
 
@@ -63,7 +133,7 @@ impl Session {
         if self.it.run.is_some() {
             "in Relay already".into()
         } else if self.it.in_a_terminal() {
-            "open in a terminal · close it there first".into()
+            "open in a terminal · enter on its row carries it on".into()
         } else if self.it.working() {
             "working · moving it stops the turn".into()
         } else {
@@ -82,13 +152,14 @@ pub struct Guide {
     sessions: Vec<Session>,
     /// Why there are no sessions to show, when that is the reason.
     sessions_error: Option<String>,
+    hooks: Vec<HookPick>,
     /// What each agent's `--version` said, as it comes in.
     versions: HashMap<String, String>,
     /// Who could summarise, given the agents picked.
     cursor: usize,
     summariser: Option<Assistant>,
     /// Whether each step was answered (enter) or left (esc), by step.
-    answered: [bool; 3],
+    answered: [bool; SETUP_STEPS as usize],
     /// What the config said, to write only what changed.
     was_agents: Vec<String>,
     was_summariser: Option<Assistant>,
@@ -108,32 +179,39 @@ pub enum Outcome {
 }
 
 impl Guide {
-    /// The whole guide: what is set, and what could be moved over.
-    pub fn new(state: &SetupState, sessions: &ImportReport) -> Self {
-        let mut g = Self::of(state, sessions, vec![Step::Agents, Step::Summaries, Step::Sessions]);
+    /// The whole guide: what is set, what could be moved over, and whose
+    /// hooks could show their sessions (`hookable`). No agent's hooks: no
+    /// screen for them.
+    pub fn new(state: &SetupState, sessions: &ImportReport, hooks: Vec<Hookable>) -> Self {
+        let mut g = Self::of(state, sessions, hooks, STEPS.to_vec());
+        g.steps.retain(|s| *s != Step::Hooks || !g.hooks.is_empty());
         g.enter_step();
         g
     }
 
     /// `/import`, `rl import`: the sessions step on its own.
     pub fn importing(state: &SetupState, sessions: &ImportReport) -> Self {
-        let mut g = Self::of(state, sessions, vec![Step::Sessions]);
+        let mut g = Self::of(state, sessions, vec![], vec![Step::Sessions]);
         g.enter_step();
         g
     }
 
     /// The guide from a release's new steps on: what the last time through
     /// did not ask. Nothing new: `None`.
-    pub fn since(state: &SetupState, sessions: &ImportReport) -> Option<Self> {
-        let steps: Vec<Step> = [Step::Agents, Step::Summaries, Step::Sessions]
+    pub fn since(state: &SetupState, sessions: &ImportReport, hooks: Vec<Hookable>) -> Option<Self> {
+        let steps: Vec<Step> = STEPS
             .into_iter()
             .enumerate()
             .filter(|(i, _)| *i as u32 >= state.seen)
             .map(|(_, s)| s)
             .collect();
-        let mut g = Self::of(state, sessions, steps);
+        let mut g = Self::of(state, sessions, hooks, steps);
         // A step with nothing to show is not worth a screen.
-        g.steps.retain(|s| *s != Step::Sessions || !g.sessions.is_empty());
+        g.steps.retain(|s| match s {
+            Step::Sessions => !g.sessions.is_empty(),
+            Step::Hooks => !g.hooks.is_empty(),
+            _ => true,
+        });
         if g.steps.is_empty() {
             return None;
         }
@@ -141,7 +219,7 @@ impl Guide {
         Some(g)
     }
 
-    fn of(state: &SetupState, sessions: &ImportReport, steps: Vec<Step>) -> Self {
+    fn of(state: &SetupState, sessions: &ImportReport, hooks: Vec<Hookable>, steps: Vec<Step>) -> Self {
         let named = &state.config.config.agents;
         let agents = state
             .agents
@@ -169,10 +247,19 @@ impl Guide {
             agents,
             sessions,
             sessions_error,
+            // Only what is there already starts picked: a hook is only ever
+            // added on a yes.
+            hooks: hooks
+                .into_iter()
+                .map(|it| HookPick {
+                    on: it.installed == Ok(true),
+                    it,
+                })
+                .collect(),
             versions: HashMap::new(),
             cursor: 0,
             summariser: None,
-            answered: [false; 3],
+            answered: [false; SETUP_STEPS as usize],
             was_agents: named.clone(),
             was_summariser: current.clone(),
             done: false,
@@ -204,11 +291,27 @@ impl Guide {
 
     /// The sessions to move, once the guide is through. Only ever what was
     /// picked by hand and then confirmed.
-    pub fn moving(&self) -> Vec<ClaudeSession> {
-        if !self.answered[2] {
+    pub fn moving(&self) -> Vec<Outside> {
+        if !self.answered[Step::Sessions as usize] {
             return vec![];
         }
         self.picked().into_iter().map(|s| s.it.clone()).collect()
+    }
+
+    /// The hooks to add or bring up to date (true) or take out (false),
+    /// once the guide is through and the screen answered: every one left
+    /// on — so one with a stale `rl` or a missing event is put right, and
+    /// one already right is left as it is — and every one turned off. One
+    /// never on is never touched.
+    pub fn hooking(&self) -> Vec<(Hookable, bool)> {
+        if !self.answered[Step::Hooks as usize] {
+            return vec![];
+        }
+        self.hooks
+            .iter()
+            .filter(|h| h.can() && (h.on || h.was()))
+            .map(|h| (h.it.clone(), h.on))
+            .collect()
     }
 
     /// Everyone who could do summaries: the picked agents that are here,
@@ -243,13 +346,14 @@ impl Guide {
             Step::Agents => self.agents.len(),
             Step::Summaries => self.summarisers().len(),
             Step::Sessions => self.sessions.len(),
+            Step::Hooks => self.hooks.len(),
         }
     }
 
     /// Where the cursor starts on a step: the first agent, or the one picked.
     fn enter_step(&mut self) {
         self.cursor = match self.at() {
-            Step::Agents | Step::Sessions => 0,
+            Step::Agents | Step::Sessions | Step::Hooks => 0,
             Step::Summaries => {
                 let all = self.summarisers();
                 if self.summariser.as_ref().is_none_or(|s| !all.contains(s)) {
@@ -327,6 +431,13 @@ impl Guide {
                     p.on = !p.on;
                 }
             }
+            Step::Hooks => {
+                if let Some(h) = self.hooks.get_mut(self.cursor)
+                    && h.can()
+                {
+                    h.on = !h.on;
+                }
+            }
             Step::Summaries => {
                 if let Some(s) = self.summarisers().get(self.cursor) {
                     self.summariser = Some(s.clone());
@@ -391,6 +502,7 @@ impl Guide {
             Step::Summaries => self.draw_summaries(&mut lines),
             Step::Sessions if self.confirm => self.draw_confirm(&mut lines),
             Step::Sessions => self.draw_sessions(&mut lines),
+            Step::Hooks => self.draw_hooks(&mut lines),
         }
         lines.push(Line::raw(""));
         let keys = match self.at() {
@@ -401,6 +513,7 @@ impl Guide {
                 "space picks one · a all · enter leaves them with Claude · ← back · q later"
             }
             Step::Sessions => "space in or out · a all · enter asks once more · esc leaves them · ← back",
+            Step::Hooks => "space yes or no · enter writes what changed · esc leave as it is · ← back · q later",
         };
         lines.push(Line::styled(keys, theme::dim()));
         // Where the screen has room for it and the guide both, the mark
@@ -598,6 +711,114 @@ impl Guide {
     }
 }
 
+impl Guide {
+    fn draw_hooks(&self, lines: &mut Vec<Line<'static>>) {
+        lines.push(Line::styled("Show sessions started outside Relay?", theme::name()));
+        lines.push(Line::styled(
+            "Relay hears of them from the agent's own hooks: a yes adds Relay's to the file named \
+             (or brings them up to date), a no takes them out again. Nothing else in it changes, \
+             though the file is written back in its own layout.",
+            theme::dim(),
+        ));
+        lines.push(Line::raw(""));
+        let width = self.hooks.iter().map(|h| h.it.name.len()).max().unwrap_or(0);
+        for (i, h) in self.hooks.iter().enumerate() {
+            let mark = match (h.can(), h.on) {
+                (false, _) => "   ",
+                (true, true) => "[x]",
+                (true, false) => "[ ]",
+            };
+            let file = rl_core::display_path(&h.it.file);
+            let mut about = match (&h.it.installed, h.on) {
+                (Err(e), _) => e.clone(),
+                (Ok(true), true) => format!("its hooks are in {file}"),
+                (Ok(true), false) => format!("takes Relay's hooks out of {file}"),
+                (Ok(false), _) => format!(
+                    "Show {} sessions started outside Relay? This adds a hook to {file}",
+                    display(&h.it.name)
+                ),
+            };
+            if let Some(w) = &h.it.warning
+                && h.can()
+            {
+                about = format!("{about} · {w}");
+            }
+            let mut spans = vec![
+                Span::raw(if i == self.cursor { "▸ " } else { "  " }),
+                Span::styled(format!("{mark} "), if h.on { theme::accent() } else { theme::dim() }),
+                Span::styled(
+                    format!("{:<width$}   ", h.it.name),
+                    if h.can() { theme::name() } else { theme::dim() },
+                ),
+                Span::styled(about, theme::dim()),
+            ];
+            if i == self.cursor {
+                for s in &mut spans {
+                    s.style = s.style.patch(theme::selected());
+                }
+            }
+            lines.push(Line::from(spans));
+        }
+    }
+}
+
+/// An agent's name as a word: its own capitalised (`Codex`).
+fn display(agent: &str) -> String {
+    let mut c = agent.chars();
+    c.next()
+        .map(|f| f.to_uppercase().chain(c).collect())
+        .unwrap_or_default()
+}
+
+/// Adds or takes out each agent's hooks as the guide settled, in words for
+/// the flash line: what changed, and what codex asks of you after.
+pub fn hook_them(hooking: &[(Hookable, bool)], rl_bin: &Path) -> String {
+    let mut said = Vec::new();
+    for (h, on) in hooking {
+        let file = rl_core::display_path(&h.file);
+        let was = h.installed == Ok(true);
+        let done = if *on {
+            user_hooks::install(&h.file, &h.name, rl_bin)
+        } else {
+            user_hooks::uninstall(&h.file, &h.name)
+        };
+        let trust = if h.name == user_hooks::CODEX {
+            " · codex asks you to trust it once: open codex, /hooks"
+        } else {
+            ""
+        };
+        said.push(match (done, on) {
+            (Err(e), _) => format!("{}: {e:#}", h.name),
+            // There and right already: nothing to say.
+            (Ok(false), _) => continue,
+            (Ok(true), true) if was => format!("{} hooks in {file} brought up to date{trust}", h.name),
+            (Ok(true), true) => format!("{} hooks added to {file}{trust}", h.name),
+            (Ok(true), false) => format!("{} hooks taken out of {file}", h.name),
+        });
+    }
+    said.join(" · ")
+}
+
+/// The `rl` the hooks call: this one, by its name on `PATH` where that is
+/// this very file (a link that outlives a reinstall), else by its own path.
+/// Never another `rl` on `PATH`: an older one would not know the words. A
+/// path that is not whole is none.
+pub fn rl_for_hooks() -> Option<PathBuf> {
+    pick_rl(
+        rl_detect::registry::find_bin(&["rl".to_string()]),
+        std::env::current_exe().ok(),
+    )
+}
+
+fn pick_rl(on_path: Option<PathBuf>, this: Option<PathBuf>) -> Option<PathBuf> {
+    let this = this.filter(|p| p.is_absolute())?;
+    let same = |p: &PathBuf| match (std::fs::canonicalize(p), std::fs::canonicalize(&this)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    };
+    Some(on_path.filter(|p| p.is_absolute() && same(p)).unwrap_or(this))
+}
+
 /// What `<bin> --version` says, first line, for the agents found. Asked
 /// all at once and shown as each comes in; one that hangs is left out.
 fn ask_versions(agents: &[AgentInfo]) -> tokio::sync::mpsc::UnboundedReceiver<(String, String)> {
@@ -649,6 +870,17 @@ pub async fn run(
             let save = guide.save();
             let mut words = said(&save);
             rpc.call::<SetupDone>(save).await?;
+            let hooking = guide.hooking();
+            if !hooking.is_empty() {
+                let hooked = match rl_for_hooks() {
+                    Some(rl) => hook_them(&hooking, &rl),
+                    None => "hooks left as they were: where this rl lives is not known".into(),
+                };
+                words = match words.is_empty() {
+                    true => hooked,
+                    false => format!("{words} · {hooked}"),
+                };
+            }
             let moving = guide.moving();
             if !moving.is_empty() {
                 drop(input);
@@ -676,7 +908,7 @@ pub async fn run(
 
 /// Each session in turn, with the screen saying where it is up to. One
 /// that will not move says why and the rest still go.
-async fn move_them(terminal: &mut ratatui::DefaultTerminal, rpc: &mut Client, moving: &[ClaudeSession]) -> String {
+async fn move_them(terminal: &mut ratatui::DefaultTerminal, rpc: &mut Client, moving: &[Outside]) -> String {
     let mut done: Vec<Line<'static>> = Vec::new();
     let mut ok = 0;
     let mut failed = Vec::new();
@@ -700,8 +932,11 @@ async fn move_them(terminal: &mut ratatui::DefaultTerminal, rpc: &mut Client, mo
         let env = crate::env::child_env(&[]).unwrap_or_default();
         match rpc
             .call::<ImportMove>(ImportMoveParams {
+                agent: s.agent.clone(),
                 session_id: s.session_id.clone(),
                 env,
+                cols: None,
+                rows: None,
             })
             .await
         {
@@ -799,8 +1034,9 @@ mod tests {
         ImportReport::default()
     }
 
-    fn session(name: &str, id: Option<&str>, state: Option<&str>, run: Option<&str>) -> ClaudeSession {
-        ClaudeSession {
+    fn session(name: &str, id: Option<&str>, state: Option<&str>, run: Option<&str>) -> Outside {
+        Outside {
+            agent: "claude".into(),
             session_id: format!("s-{name}"),
             id: id.map(Into::into),
             name: name.into(),
@@ -810,6 +1046,12 @@ mod tests {
             state: state.map(Into::into),
             run: run.map(Into::into),
             new: run.is_none(),
+            pid: None,
+            started_at: None,
+            waiting_for: None,
+            workspace: None,
+            state_at: None,
+            was: None,
         }
     }
 
@@ -849,7 +1091,10 @@ mod tests {
         assert!(g.done);
         let moving: Vec<String> = g.moving().into_iter().map(|s| s.name).collect();
         assert_eq!(moving, ["done-one", "busy-one"]);
-        assert_eq!(g.sessions[2].said(), "open in a terminal · close it there first");
+        assert_eq!(
+            g.sessions[2].said(),
+            "open in a terminal · enter on its row carries it on"
+        );
         assert_eq!(g.sessions[3].said(), "in Relay already");
     }
 
@@ -863,7 +1108,7 @@ mod tests {
             ],
             error: None,
         };
-        let mut g = Guide::new(&state(Config::default()), &sessions);
+        let mut g = Guide::new(&state(Config::default()), &sessions, vec![]);
         for _ in 0..8 {
             press(&mut g, KeyCode::Enter);
         }
@@ -916,18 +1161,18 @@ mod tests {
             sessions: vec![session("done-one", Some("a1"), Some("done"), None)],
             error: None,
         };
-        let g = Guide::since(&st, &sessions).expect("the sessions step is new");
+        let g = Guide::since(&st, &sessions, vec![]).expect("the sessions step is new");
         assert_eq!(g.steps, [Step::Sessions]);
         // Nothing of Claude's: nothing left to ask.
-        assert!(Guide::since(&st, &none()).is_none());
+        assert!(Guide::since(&st, &none(), vec![]).is_none());
         // Never gone through: all of it.
-        let g = Guide::since(&state(Config::default()), &sessions).unwrap();
+        let g = Guide::since(&state(Config::default()), &sessions, vec![]).unwrap();
         assert_eq!(g.steps.len(), 3);
     }
 
     #[test]
     fn the_summaries_step_says_the_catch_up_asks_too_and_how_to_stop_it() {
-        let g = Guide::new(&state(Config::default()), &none());
+        let g = Guide::new(&state(Config::default()), &none(), vec![]);
         let mut lines = Vec::new();
         g.draw_summaries(&mut lines);
         let said: String = lines.iter().map(|l| l.to_string()).collect::<Vec<_>>().join("\n");
@@ -938,7 +1183,7 @@ mod tests {
 
     #[test]
     fn enter_twice_takes_the_defaults() {
-        let mut g = Guide::new(&state(Config::default()), &none());
+        let mut g = Guide::new(&state(Config::default()), &none(), vec![]);
         press(&mut g, KeyCode::Enter);
         press(&mut g, KeyCode::Enter);
         press(&mut g, KeyCode::Enter);
@@ -962,7 +1207,7 @@ mod tests {
 
     #[test]
     fn leaving_claude_out_makes_codex_the_summariser() {
-        let mut g = Guide::new(&state(Config::default()), &none());
+        let mut g = Guide::new(&state(Config::default()), &none(), vec![]);
         press(&mut g, KeyCode::Char(' '));
         press(&mut g, KeyCode::Down);
         press(&mut g, KeyCode::Down);
@@ -980,7 +1225,7 @@ mod tests {
 
     #[test]
     fn esc_leaves_the_file_as_it_is() {
-        let mut g = Guide::new(&state(Config::default()), &none());
+        let mut g = Guide::new(&state(Config::default()), &none(), vec![]);
         press(&mut g, KeyCode::Char(' '));
         press(&mut g, KeyCode::Esc);
         press(&mut g, KeyCode::Esc);
@@ -1001,7 +1246,7 @@ mod tests {
             model: Some("o3".into()),
             args: vec![],
         });
-        let mut g = Guide::new(&state(c), &none());
+        let mut g = Guide::new(&state(c), &none(), vec![]);
         assert_eq!(g.agents.iter().filter(|p| p.on).count(), 1);
         press(&mut g, KeyCode::Enter);
         assert_eq!(
@@ -1020,7 +1265,7 @@ mod tests {
 
     #[test]
     fn back_and_q() {
-        let mut g = Guide::new(&state(Config::default()), &none());
+        let mut g = Guide::new(&state(Config::default()), &none(), vec![]);
         press(&mut g, KeyCode::Enter);
         assert_eq!(g.step, 1);
         press(&mut g, KeyCode::Left);
@@ -1031,7 +1276,7 @@ mod tests {
 
     #[test]
     fn a_missing_agent_cannot_be_picked() {
-        let mut g = Guide::new(&state(Config::default()), &none());
+        let mut g = Guide::new(&state(Config::default()), &none(), vec![]);
         g.cursor = 2;
         press(&mut g, KeyCode::Char(' '));
         assert!(!g.agents[2].on);
@@ -1039,7 +1284,7 @@ mod tests {
 
     #[test]
     fn it_draws() {
-        let g = Guide::new(&state(Config::default()), &none());
+        let g = Guide::new(&state(Config::default()), &none(), vec![]);
         let backend = ratatui::backend::TestBackend::new(90, 16);
         let mut t = ratatui::Terminal::new(backend).unwrap();
         t.draw(|f| g.draw(f)).unwrap();
@@ -1058,7 +1303,7 @@ mod tests {
 
     #[test]
     fn the_mark_stands_above_the_title_where_there_is_room() {
-        let g = Guide::new(&state(Config::default()), &none());
+        let g = Guide::new(&state(Config::default()), &none(), vec![]);
         let backend = ratatui::backend::TestBackend::new(90, 30);
         let mut t = ratatui::Terminal::new(backend).unwrap();
         t.draw(|f| g.draw(f)).unwrap();
@@ -1107,5 +1352,215 @@ mod tests {
         assert!(text.contains("infra-auth"), "{text}");
         assert!(!text.contains("left-alone"), "only what would stop: {text}");
         assert!(text.contains("esc back to the list"), "{text}");
+    }
+
+    /// Codex and Gemini found, their files under a fake home: codex's not
+    /// there yet, gemini's with Relay's hooks in already.
+    fn fake_home() -> (tempfile::TempDir, Vec<Hookable>) {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().to_path_buf();
+        let gemini = home.join(".gemini/settings.json");
+        user_hooks::install(&gemini, "gemini", Path::new("/x/rl")).unwrap();
+        let env = |k: &str| (k == "HOME").then(|| home.clone().into_os_string());
+        let found = hookable_in(&state(Config::default()).agents, env);
+        (tmp, found)
+    }
+
+    #[test]
+    fn the_hookable_agents_are_those_here_with_their_files() {
+        let (tmp, found) = fake_home();
+        assert_eq!(
+            found,
+            [
+                Hookable {
+                    name: "codex".into(),
+                    file: tmp.path().join(".codex/hooks.json"),
+                    installed: Ok(false),
+                    warning: None,
+                },
+                Hookable {
+                    name: "gemini".into(),
+                    file: tmp.path().join(".gemini/settings.json"),
+                    installed: Ok(true),
+                    warning: None,
+                },
+            ]
+        );
+        assert!(!tmp.path().join(".codex").exists(), "looking writes nothing");
+        // One whose file does not read says so, and cannot be picked.
+        std::fs::write(tmp.path().join(".gemini/settings.json"), "{ // mine\n}").unwrap();
+        let home = tmp.path().to_path_buf();
+        let env = |k: &str| (k == "HOME").then(|| home.clone().into_os_string());
+        let again = hookable_in(&state(Config::default()).agents, env);
+        assert!(again[1].installed.as_ref().unwrap_err().contains("left as it was"));
+        // Codex's own config with hooks inline: said on the row.
+        std::fs::create_dir_all(tmp.path().join(".codex")).unwrap();
+        std::fs::write(tmp.path().join(".codex/config.toml"), "[[hooks.Stop]]\n").unwrap();
+        let again = hookable_in(&state(Config::default()).agents, env);
+        assert!(
+            again[0]
+                .warning
+                .as_deref()
+                .unwrap()
+                .contains("config.toml has hooks too")
+        );
+        let g = Guide::new(&state(Config::default()), &none(), again);
+        let mut lines = Vec::new();
+        g.draw_hooks(&mut lines);
+        let said: String = lines.iter().map(|l| l.to_string()).collect::<Vec<_>>().join("\n");
+        assert!(said.contains("codex will warn at each start"), "{said}");
+    }
+
+    #[test]
+    fn the_hooks_call_this_rl_by_its_name_on_the_path_and_never_another() {
+        let tmp = tempfile::tempdir().unwrap();
+        let this = tmp.path().join("cellar/rl-1.2/rl");
+        std::fs::create_dir_all(this.parent().unwrap()).unwrap();
+        std::fs::write(&this, "").unwrap();
+        // On PATH as a link to this very file: the link, which outlives an upgrade.
+        let link = tmp.path().join("bin/rl");
+        std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&this, &link).unwrap();
+        assert_eq!(pick_rl(Some(link.clone()), Some(this.clone())), Some(link));
+        // Another `rl` on PATH (an older install): never it.
+        let other = tmp.path().join("old/rl");
+        std::fs::create_dir_all(other.parent().unwrap()).unwrap();
+        std::fs::write(&other, "").unwrap();
+        assert_eq!(pick_rl(Some(other), Some(this.clone())), Some(this.clone()));
+        assert_eq!(pick_rl(None, Some(this.clone())), Some(this));
+        assert_eq!(pick_rl(None, Some("target/debug/rl".into())), None, "not a whole path");
+        assert_eq!(pick_rl(None, None), None);
+    }
+
+    #[test]
+    fn hooks_left_on_are_brought_up_to_date_and_said_only_when_they_change() {
+        let (tmp, found) = fake_home();
+        let mut g = Guide::new(&state(Config::default()), &none(), found);
+        for _ in 0..8 {
+            press(&mut g, KeyCode::Enter);
+        }
+        // Gemini's were in, pointing at an `rl` since moved.
+        let hooking = g.hooking();
+        let words = hook_them(&hooking, Path::new("/usr/local/bin/rl"));
+        assert_eq!(
+            words,
+            format!(
+                "gemini hooks in {} brought up to date",
+                rl_core::display_path(&tmp.path().join(".gemini/settings.json"))
+            )
+        );
+        let text = std::fs::read_to_string(tmp.path().join(".gemini/settings.json")).unwrap();
+        assert!(text.contains("'/usr/local/bin/rl' hook gemini AfterTool || true") && !text.contains("/x/rl"));
+        // Again: right already, nothing written, nothing said.
+        assert_eq!(hook_them(&hooking, Path::new("/usr/local/bin/rl")), "");
+    }
+
+    #[test]
+    fn a_hook_is_added_only_on_a_yes_and_taken_out_only_on_a_no() {
+        let (_tmp, found) = fake_home();
+        // Enter all the way through: what is there stays, nothing is added.
+        let mut g = Guide::new(&state(Config::default()), &none(), found.clone());
+        assert_eq!(g.steps.len(), 4);
+        for _ in 0..8 {
+            press(&mut g, KeyCode::Enter);
+        }
+        assert!(g.done);
+        let h: Vec<(String, bool)> = g.hooking().into_iter().map(|(h, on)| (h.name, on)).collect();
+        assert_eq!(
+            h,
+            [("gemini".to_string(), true)],
+            "only what was there, to be kept up to date; codex is never added"
+        );
+
+        // Codex on, gemini off.
+        let mut g = Guide::since(
+            &SetupState {
+                seen: 3,
+                ..state(Config::default())
+            },
+            &none(),
+            found.clone(),
+        )
+        .unwrap();
+        assert_eq!(g.steps, [Step::Hooks]);
+        press(&mut g, KeyCode::Char(' '));
+        press(&mut g, KeyCode::Down);
+        press(&mut g, KeyCode::Char(' '));
+        assert!(g.hooking().is_empty(), "nothing until it is answered");
+        press(&mut g, KeyCode::Enter);
+        let h: Vec<(String, bool)> = g.hooking().into_iter().map(|(h, on)| (h.name, on)).collect();
+        assert_eq!(h, [("codex".to_string(), true), ("gemini".to_string(), false)]);
+
+        // Esc leaves both as they are, whatever was toggled.
+        let mut g = Guide::since(
+            &SetupState {
+                seen: 3,
+                ..state(Config::default())
+            },
+            &none(),
+            found,
+        )
+        .unwrap();
+        press(&mut g, KeyCode::Char(' '));
+        press(&mut g, KeyCode::Esc);
+        assert!(g.done && g.hooking().is_empty());
+        // Seen it all, and nothing of anyone's hooks: nothing to ask.
+        assert!(
+            Guide::since(
+                &SetupState {
+                    seen: 3,
+                    ..state(Config::default())
+                },
+                &none(),
+                vec![]
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn hooking_writes_the_files_and_says_what_codex_asks() {
+        let (tmp, found) = fake_home();
+        let words = hook_them(
+            &[(found[0].clone(), true), (found[1].clone(), false)],
+            Path::new("/opt/rl"),
+        );
+        assert!(
+            words.contains("codex asks you to trust it once: open codex, /hooks"),
+            "{words}"
+        );
+        assert!(words.contains("gemini hooks taken out of"), "{words}");
+        let codex = tmp.path().join(".codex/hooks.json");
+        assert!(user_hooks::installed(&codex, "codex").unwrap());
+        assert!(
+            std::fs::read_to_string(&codex)
+                .unwrap()
+                .contains("'/opt/rl' hook codex PermissionRequest || true")
+        );
+        assert!(!user_hooks::installed(&tmp.path().join(".gemini/settings.json"), "gemini").unwrap());
+    }
+
+    #[test]
+    fn the_hooks_screen_names_each_file() {
+        let (_tmp, found) = fake_home();
+        let g = Guide::since(
+            &SetupState {
+                seen: 3,
+                ..state(Config::default())
+            },
+            &none(),
+            found,
+        )
+        .unwrap();
+        let mut lines = Vec::new();
+        g.draw_hooks(&mut lines);
+        let said: String = lines.iter().map(|l| l.to_string()).collect::<Vec<_>>().join("\n");
+        assert!(said.contains("[ ] codex"), "{said}");
+        assert!(
+            said.contains("Show Codex sessions started outside Relay? This adds a hook to"),
+            "{said}"
+        );
+        assert!(said.contains(".codex/hooks.json"), "{said}");
+        assert!(said.contains("[x] gemini"), "{said}");
     }
 }

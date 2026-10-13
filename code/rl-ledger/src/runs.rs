@@ -7,6 +7,7 @@ use rl_core::time::{from_millis, optional_from_millis, to_millis};
 use rl_proto::methods::RunFilter;
 use rl_proto::types::{Confidence, Run, RunState, Source};
 use rusqlite::{Connection, OptionalExtension, Row, params, params_from_iter, types::Value};
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 const COLS: &str = "id, workspace, kind, title, cli, argv_json, cwd, branch, worktree, \"ref\", tags_json, \
@@ -205,6 +206,38 @@ pub fn set_hidden(conn: &Connection, id: &str, at: Option<Timestamp>) -> Result<
 pub fn set_last_line(conn: &Connection, id: &str, line: &str) -> Result<()> {
     conn.execute("UPDATE runs SET last_line = ?2 WHERE id = ?1", params![id, line])?;
     Ok(())
+}
+
+/// Tags a run, unless it has that tag already. True when it was added.
+pub fn add_tag(conn: &Connection, id: &str, tag: &str) -> Result<bool> {
+    let n = conn.execute(
+        "UPDATE runs SET tags_json = json_insert(tags_json, '$[#]', ?2) WHERE id = ?1 \
+         AND NOT EXISTS (SELECT 1 FROM json_each(tags_json) WHERE value = ?2)",
+        params![id, tag],
+    )?;
+    Ok(n > 0)
+}
+
+/// The run that carries each of `tags`, by tag: the newest where several
+/// do, live or ended, archived or not. A tag no run carries is left out.
+pub fn carrying(conn: &Connection, tags: &[String]) -> Result<HashMap<String, String>> {
+    let mut out = HashMap::new();
+    if tags.is_empty() {
+        return Ok(out);
+    }
+    let marks = std::iter::repeat_n("?", tags.len()).collect::<Vec<_>>().join(",");
+    let mut stmt = conn.prepare(&format!(
+        "SELECT t.value, runs.id FROM runs, json_each(runs.tags_json) AS t \
+         WHERE t.value IN ({marks}) ORDER BY runs.started_at DESC, runs.id DESC"
+    ))?;
+    let rows = stmt.query_map(params_from_iter(tags), |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+    })?;
+    for row in rows {
+        let (tag, id) = row?;
+        out.entry(tag).or_insert(id);
+    }
+    Ok(out)
 }
 
 pub fn set_cost(conn: &Connection, id: &str, cost: &serde_json::Value) -> Result<()> {
@@ -429,6 +462,29 @@ mod tests {
         r.ended_at = Some(ended_at);
         r.seen_at = seen_at;
         insert(c, &r).unwrap();
+    }
+
+    #[test]
+    fn a_tag_is_added_once_and_the_run_carrying_it_found() {
+        let c = test_conn();
+        let t = Timestamp::from_millisecond(1_000).unwrap();
+        let mut r = Run::new("a", rl_proto::types::RunKind::Agent, "a", vec![], "/w", "/w", t);
+        r.tags = vec!["shell".into()];
+        insert(&c, &r).unwrap();
+        insert_ended(&c, "b", "manual", t, None);
+        archive(&c, &["b".into()], t).unwrap();
+        assert!(add_tag(&c, "a", "claude-session:s1").unwrap());
+        assert!(!add_tag(&c, "a", "claude-session:s1").unwrap(), "once");
+        assert!(add_tag(&c, "b", "claude-session:s2").unwrap());
+        assert!(!add_tag(&c, "nope", "claude-session:s3").unwrap(), "no such run");
+        assert_eq!(get(&c, "a").unwrap().unwrap().tags, ["shell", "claude-session:s1"]);
+        assert!(add_tag(&c, "b", "claude-session:s1").unwrap());
+        let tags = ["claude-session:s1", "claude-session:s2", "claude-session:s9"].map(String::from);
+        let found = carrying(&c, &tags).unwrap();
+        assert_eq!(found.len(), 2, "none carries s9: {found:?}");
+        assert_eq!(found["claude-session:s1"], "a", "the newer of the two");
+        assert_eq!(found["claude-session:s2"], "b", "archived and ended too");
+        assert!(carrying(&c, &[]).unwrap().is_empty());
     }
 
     #[test]

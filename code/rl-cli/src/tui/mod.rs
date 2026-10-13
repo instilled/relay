@@ -16,6 +16,7 @@
 //! it reads on either theme (see `theme`); the footer is the only chrome (J8).
 //! Nothing on screen is an id.
 
+mod carry;
 mod catchup;
 mod complete;
 mod events;
@@ -31,6 +32,9 @@ mod input;
 mod line;
 mod mark;
 mod new_flow;
+pub(crate) mod outside;
+#[cfg(test)]
+mod outside_tests;
 mod palette;
 mod pane;
 mod query;
@@ -75,7 +79,7 @@ use rl_proto::flow::{
 use rl_proto::methods::{
     AgentList, DecisionDismiss, DecisionGet, DecisionId, DecisionNote, DecisionTake, DecisionTakeParams, Digest,
     DigestGet, DigestHide, DigestHideParams, DigestItem, DigestOrder, DigestParams, EventFilter, EventList, GcParams,
-    GcRun, GraphGet, GraphParams, ImportList, ImportListParams, PresenceClient, PresenceTouch, RunArchive,
+    GcRun, GraphGet, GraphParams, ImportList, ImportListParams, ImportMove, PresenceClient, PresenceTouch, RunArchive,
     RunArchiveParams, RunFilter, RunGet, RunHide, RunHideParams, RunId, RunIds, RunInput, RunInputParams, RunList,
     RunMark, RunMarkParams, RunPin, RunPinParams, RunRename, RunRenameParams, RunResume, RunResumeParams, RunSeen,
     RunSpec, RunStart, RunStop, RunStopParams, SETUP_STEPS, SetupGet, SummaryGet, SummaryMake, SummaryParams,
@@ -255,6 +259,13 @@ struct Asking {
     task: tokio::task::JoinHandle<Result<(crate::interpret::Answer, rl_proto::methods::AssistantOutput)>>,
 }
 
+/// One of an agent's own sessions on its way to being carried on as a run
+/// (`import.move`), until `rld` says how it went: the panel stays live.
+struct Carrying {
+    session: rl_proto::methods::Outside,
+    task: tokio::task::JoinHandle<Result<Run>>,
+}
+
 /// A run, a flow, a project or everything being summarised, until the
 /// assistant answers.
 struct Summarising {
@@ -407,6 +418,13 @@ struct App {
     /// A run to hand the real terminal to (its id, and whether to take the
     /// keyboard from whoever holds it), once ratatui has stepped aside.
     attach: Option<(String, bool)>,
+    /// An agent's own session to hand the real terminal to — `claude attach
+    /// <id>` (`carry`) — once ratatui has stepped aside.
+    attach_outside: Option<Vec<std::ffi::OsString>>,
+    /// Where an agent's binary is, by its profile's name (`carry::bin`).
+    agent_bin: fn(&str) -> Option<PathBuf>,
+    /// An agent's own session being carried on.
+    carrying: Option<Carrying>,
     /// `/import`: the Claude sessions step, once the screen is free for it.
     importing: bool,
     /// The assistant at work on some words: what was asked, where, and the
@@ -575,6 +593,26 @@ fn name_cell(field: &line::Field, from: usize, w: usize) -> (Vec<Span<'static>>,
     (spans, from)
 }
 
+/// `spans` in at most `room` columns, the last cut with `…` where it does
+/// not fit whole, and what comes after it dropped.
+fn cap_spans(spans: Vec<Span<'static>>, room: usize) -> Vec<Span<'static>> {
+    let mut out = Vec::new();
+    let mut left = room;
+    for s in spans {
+        let n = s.width();
+        if n <= left {
+            left -= n;
+            out.push(s);
+        } else {
+            if left > 0 {
+                out.push(Span::styled(fit(&s.content, left), s.style));
+            }
+            break;
+        }
+    }
+    out
+}
+
 /// One row of the list, to the width: icon, title, state, whatever goes
 /// before the summary (who is joined), the summary filling the middle, then
 /// the ref or branch and the age at the right.
@@ -594,6 +632,12 @@ fn list_line(
         Some(r) => format!("{r}  {age:>4}"),
         None => format!("{age:>4}"),
     };
+    // What goes before the summary has the summary's room at most, so a
+    // narrow list still ends in its age.
+    let lead = cap_spans(
+        lead,
+        w.saturating_sub(state_col(tw) + WORD_W + 1 + right.chars().count() + 1),
+    );
     let before: usize = lead.iter().map(Span::width).sum();
     let fixed = state_col(tw) + WORD_W + 1 + before + right.chars().count() + 1;
     // The word, padded out to its column whatever it is made of.
@@ -1003,7 +1047,7 @@ pub async fn setup(home: &Home, only_import: bool) -> Result<()> {
     let guide = if only_import {
         setup::Guide::importing(&state, &sessions)
     } else {
-        setup::Guide::new(&state, &sessions)
+        setup::Guide::new(&state, &sessions, setup::hookable(&state.agents))
     };
     let agents = state.agents.clone();
     let mut terminal = enter_screen();
@@ -1072,7 +1116,14 @@ pub async fn run(home: &Home) -> Result<()> {
             .iter()
             .filter(|s| s.new && s.run.is_none() && !s.in_a_terminal())
             .count();
-        match setup::Guide::since(&state, &sessions) {
+        // The agents' own hooks files are read only when the guide could
+        // ask about them.
+        let hooks = if state.seen < SETUP_STEPS {
+            setup::hookable(&state.agents)
+        } else {
+            vec![]
+        };
+        match setup::Guide::since(&state, &sessions, hooks) {
             Some(guide) if state.seen < SETUP_STEPS => {
                 guided = true;
                 let agents = state.agents.clone();
@@ -1130,6 +1181,7 @@ impl App {
                 hidden: Vec::new(),
                 order: Vec::new(),
                 firings: Vec::new(),
+                outside: vec![],
             },
             names: Names::default(),
             filter: String::new(),
@@ -1161,6 +1213,9 @@ impl App {
             events: Vec::new(),
             editor: None,
             attach: None,
+            attach_outside: None,
+            agent_bin: carry::bin,
+            carrying: None,
             importing: false,
             not_loaded: Vec::new(),
             reload_list: None,
@@ -1275,6 +1330,19 @@ impl App {
                                 Err(e) => self.join_refused(id, &e),
                             }
                         }
+                        if let Some(argv) = self.attach_outside.take() {
+                            // The agent gets the real terminal, as the editor does; the list
+                            // comes back however it ends, and the next poll says how it stands.
+                            drop(input);
+                            leave_screen();
+                            let outcome = carry::attach(&argv);
+                            *terminal = enter_screen();
+                            input = EventStream::new();
+                            self.refresh().await;
+                            if let Err(why) = outcome {
+                                self.say(why);
+                            }
+                        }
                     }
                     Some(Ok(Event::Paste(s))) => self.paste(s, area).await?,
                     Some(Ok(Event::Mouse(m))) => self.mouse(m, area).await?,
@@ -1301,6 +1369,12 @@ impl App {
                         None => std::future::pending().await,
                     }
                 } => self.topped(done).await,
+                done = async {
+                    match &mut self.carrying {
+                        Some(c) => (&mut c.task).await,
+                        None => std::future::pending().await,
+                    }
+                } => self.carried(done).await,
                 gone = async {
                     match &mut self.removing {
                         Some(r) => (&mut r.task).await,
@@ -1622,6 +1696,8 @@ impl App {
             },
             // A question is told by the run that asked it.
             Row::Question(q) => SummaryTarget::Run { id: q.run.clone()? },
+            // An agent's own session is not Relay's to tell.
+            Row::Outside(_) => return None,
         })
     }
 
@@ -1644,6 +1720,7 @@ impl App {
                 .and_then(|x| x.folder.clone())
                 .or_else(|| f.last().map(|i| i.run.workspace.clone())),
             Row::Question(q) => Some(q.workspace.clone()),
+            Row::Outside(c) => Some(c.cwd.clone()),
             Row::Group(h) if h.is_everywhere() => None,
             Row::Group(h) => Some(h.workspace.clone()),
         }
@@ -2843,6 +2920,7 @@ impl App {
         let what = match &row {
             Row::Run(i) => i.run.title.clone(),
             Row::Flow(f) => f.name.clone(),
+            Row::Outside(c) => c.title(),
             Row::Group(h) => h.name.clone(),
             Row::Question(q) => q.title.clone(),
         };
@@ -3620,6 +3698,15 @@ impl App {
                 }
                 f.name.clone()
             }
+            Row::Outside(c) => {
+                let key = c.key();
+                if !back || hidden(&key) {
+                    keys.push(key);
+                } else {
+                    still = Some("its project");
+                }
+                c.title()
+            }
             Row::Group(h) => {
                 let key = rows[at].key().unwrap_or_default();
                 if !back || hidden(&key) {
@@ -3635,6 +3722,7 @@ impl App {
                                 }
                                 ids.extend(f.runs.iter().filter(|i| own_hidden(i)).map(|i| i.run.id.clone()));
                             }
+                            Row::Outside(c) if hidden(&c.key()) => keys.push(c.key()),
                             _ => {}
                         }
                     }
@@ -4446,7 +4534,7 @@ impl App {
         // The events view's `kind:` is an event's; elsewhere, the list's own.
         let kinds = match self.view {
             View::Events => self.feed.kinds(),
-            _ => Vec::new(),
+            _ => rows::list_kinds(),
         };
         (projects, flows, branches, kinds)
     }
@@ -4625,6 +4713,16 @@ impl App {
             self.pane = Pane::Facts;
             self.show_pane = true;
             self.mode = Mode::Answer(id);
+        } else if let Some(Row::Outside(s)) = self.selected() {
+            // An agent's own session: its pane, which says what enter will
+            // do with it; with the pane open on it, enter does it.
+            let s = s.clone();
+            if self.show_pane && self.pane == Pane::Facts {
+                self.enter_outside(&s, area).await;
+            } else {
+                self.pane = Pane::Facts;
+                self.show_pane = true;
+            }
         } else if matches!(self.selected(), Some(Row::Group(_))) {
             // A project header: its flows in the pane; `everywhere`'s, the
             // flows with no `in` and how runs outside every project stand.
@@ -4634,6 +4732,63 @@ impl App {
             self.say("nothing here to open");
         }
         Ok(())
+    }
+
+    /// Enter (or `/join`) on an agent's own session (`carry`): one in
+    /// Claude's background gets the real terminal, handed over by
+    /// `main_loop` once ratatui has stepped aside; one in another terminal
+    /// is carried on here as a run, in the background (`carried` says how it
+    /// went); one carried on already goes to its run.
+    async fn enter_outside(&mut self, s: &rl_proto::methods::Outside, area: Rect) {
+        if let Some(run) = &s.run {
+            self.select(Some(format!("r:{run}")));
+            return self.say(format!("{} is carried on here already: this run", s.title()));
+        }
+        match carry::enter(s, (self.agent_bin)(&s.agent).as_deref()) {
+            Err(why) => self.say(why),
+            Ok(carry::Enter::Attach(argv)) => self.attach_outside = Some(argv),
+            Ok(carry::Enter::CarryOn) => {
+                if let Some(c) = &self.carrying {
+                    return self.say(format!("carrying {} on already", c.session.title()));
+                }
+                let env = match crate::env::child_env(&[]) {
+                    Ok(e) => e,
+                    Err(e) => return self.say(format!("carry on: {e:#}")),
+                };
+                let p = carry::move_params(s, env, spawn_size(area));
+                let home = self.home.clone();
+                let task =
+                    tokio::spawn(
+                        async move { crate::client::Client::connect(&home).await?.call::<ImportMove>(p).await },
+                    );
+                self.carrying = Some(Carrying {
+                    session: s.clone(),
+                    task,
+                });
+            }
+        }
+    }
+
+    /// `rld`'s word on a session being carried on: the run it now is
+    /// becomes the selection, so enter joins it — while the cursor is still
+    /// on the session; moved on meanwhile, it stays where it is, and the run
+    /// is named; or why not.
+    async fn carried(&mut self, done: Result<Result<Run>, tokio::task::JoinError>) {
+        let Some(c) = self.carrying.take() else { return };
+        match done {
+            Ok(Ok(run)) => {
+                let here = self.sel.as_deref() == Some(c.session.key().as_str());
+                self.refresh().await;
+                if here {
+                    self.select(Some(format!("r:{}", run.id)));
+                    self.say(carry::carried_on(&c.session));
+                } else {
+                    self.say(carry::carried_on_there(&c.session, &run.title));
+                }
+            }
+            Ok(Err(e)) => self.say(format!("{e:#}")),
+            Err(e) => self.say(format!("carry on: {e}")),
+        }
     }
 
     /// The run under the cursor, itself: one still going is joined — its
@@ -5030,6 +5185,13 @@ impl App {
                 }
                 other => self.say(format!("resume {other}? on its own, all, or all commands")),
             },
+            palette::Cmd::Join if matches!(self.selected(), Some(Row::Outside(_))) => {
+                // An agent's own session: as enter does, without the pane first.
+                if let Some(Row::Outside(s)) = self.selected() {
+                    let s = s.clone();
+                    self.enter_outside(&s, area).await;
+                }
+            }
             palette::Cmd::Join => match self.selected_run() {
                 Some(i) if !i.run.state.is_terminal() => {
                     // Someone at the keyboard already: asked first, by name.
@@ -5656,6 +5818,29 @@ impl App {
                         last.map(|t| fmt_age(t, now)).unwrap_or_default(),
                     )
                 }
+                // An agent's own session: how it stands in its words, what it
+                // waits on leading the summary — the column has room for a
+                // word, not that — then where it lives.
+                Row::Outside(c) => {
+                    let state = c.run_state();
+                    let waits = outside::waiting_for(c)
+                        .map(|x| vec![Span::styled(format!("{x} · "), theme::needs())])
+                        .unwrap_or_default();
+                    list_line(
+                        w,
+                        tw,
+                        icon_span(rows::outside_icon(c), Some(c.agent.as_str()), rows::outside_ended(c)),
+                        vec![Span::raw(fit(&c.title(), tw))],
+                        vec![Span::styled(
+                            fit(&outside::word(c), WORD_W).trim_end().to_string(),
+                            state_style(state),
+                        )],
+                        &outside::lives(c),
+                        waits,
+                        None,
+                        c.started_at.map(|t| fmt_age(t, now)).unwrap_or_default(),
+                    )
+                }
             };
             if !words.is_empty() {
                 line = light(line, &words);
@@ -5995,6 +6180,7 @@ impl App {
                 area.width as usize,
                 now,
             ),
+            Some(Row::Outside(c)) => outside::pane_lines(c, now),
             Some(Row::Question(q)) => {
                 let asker = q.run.as_deref().and_then(|id| self.run_by_id(id));
                 let at = matches!(&self.mode, Mode::Answer(id) if *id == q.id).then_some(self.answer_at);
@@ -6149,7 +6335,16 @@ impl App {
         if let Some(r) = &self.removing {
             return format!("removing {}… · stopping its runs", r.name);
         }
-        let hints = self.hints();
+        let mut hints = self.hints();
+        // As long as the carry takes, not as long as a flash lasts.
+        if let Some(c) = &self.carrying {
+            let carrying = format!("carrying {} on…", c.session.title());
+            hints = if hints.is_empty() {
+                carrying
+            } else {
+                format!("{carrying} · {hints}")
+            };
+        }
         if self.shortcuts || self.shortcuts_place().is_none() {
             return hints;
         }
@@ -6268,6 +6463,10 @@ impl App {
                 format!("enter output · /summary · ^x archives · ^t pins · {pane}")
             }
             Some(Row::Run(_)) => format!("enter joins it · ^x stops it · ^t pins · {pane}"),
+            Some(Row::Outside(c)) if self.show_pane && self.pane == Pane::Facts => {
+                format!("{} · /hide · {pane}", outside::enter_hint(c))
+            }
+            Some(Row::Outside(_)) => format!("enter its pane · /hide · {pane}"),
             // A flow here that did not load is what `/flow edit` opens, at the line.
             Some(Row::Group(h)) if h.is_everywhere() => {
                 let fix = self.broken_hint(&h);
@@ -6431,6 +6630,7 @@ mod tests {
             hidden: Vec::new(),
             order: Vec::new(),
             firings: Vec::new(),
+            outside: vec![],
         };
         mark_seen(&mut d, &["a".to_string()]);
         assert_eq!(d.items.iter().map(|i| i.unseen).collect::<Vec<_>>(), [false, true]);
@@ -6888,6 +7088,31 @@ mod tests {
         /// `rl-session`, so an assistant's run really runs; without it the
         /// daemon cannot start one.
         session: Option<std::path::PathBuf>,
+        /// More profiles for `detect/`, by name, over the built-ins.
+        profiles: Vec<(&'static str, String)>,
+    }
+
+    /// A panel whose `rld` runs what it starts, with `profiles` over the
+    /// built-ins (an agent's `bins` pointed at a stand-in, say). None (and
+    /// the test says it is skipping) when `rl-session` is not built.
+    pub(super) async fn panel_with_profiles(
+        profiles: Vec<(&'static str, String)>,
+    ) -> Option<(
+        tempfile::TempDir,
+        tokio_util::sync::CancellationToken,
+        super::App,
+        std::path::PathBuf,
+    )> {
+        let Some(session) = session_bin() else {
+            eprintln!("skipping: rl-session not built (run `cargo test --workspace`)");
+            return None;
+        };
+        let setup = Setup {
+            session: Some(session),
+            profiles,
+            ..Default::default()
+        };
+        Some(panel_set(setup, |_, _| vec![]).await)
     }
 
     /// `rl-session` beside this test binary's folder, as `cargo test
@@ -6980,6 +7205,9 @@ mod tests {
             )
         };
         std::fs::write(home.detect_dir().join("fakeai.yaml"), profile).unwrap();
+        for (name, text) in &set.profiles {
+            std::fs::write(home.detect_dir().join(format!("{name}.yaml")), text).unwrap();
+        }
         std::fs::write(
             home.config_file(),
             // The interpreter is always `fakeai`: a real `claude` on the PATH is never picked.
@@ -7199,7 +7427,7 @@ mod tests {
     }
 
     /// The screen as rows of text, drawn at this size.
-    fn screen(app: &mut super::App, w: u16, h: u16) -> Vec<String> {
+    pub(super) fn screen(app: &mut super::App, w: u16, h: u16) -> Vec<String> {
         let mut t = ratatui::Terminal::new(ratatui::backend::TestBackend::new(w, h)).unwrap();
         t.draw(|f| app.draw(f)).unwrap();
         let buf = t.backend().buffer().clone();

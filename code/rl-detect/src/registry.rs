@@ -37,6 +37,7 @@ struct ProfileFile {
     headless: Option<Vec<String>>,
     model_flag: Option<Vec<String>>,
     small_model: Option<String>,
+    resume: Option<Vec<String>>,
     icon: Option<String>,
     color: Option<String>,
     patterns: Option<PatternsFile>,
@@ -87,6 +88,9 @@ impl ProfileFile {
         }
         if over.small_model.is_some() {
             self.small_model = over.small_model;
+        }
+        if over.resume.is_some() {
+            self.resume = over.resume;
         }
         if over.icon.is_some() {
             self.icon = over.icon;
@@ -142,6 +146,10 @@ pub struct Profile {
     pub model_flag: Vec<String>,
     /// The quick, cheap model setup offers for summaries, when there is one.
     pub small_model: Option<String>,
+    /// The arguments that carry one of its conversations on, after its
+    /// binary: `{session}` is the conversation's id (`["--resume",
+    /// "{session}"]`). Empty when Relay does not know how it resumes.
+    pub resume: Vec<String>,
     /// The glyph its rows wear in place of the plain agent one: one column
     /// wide under every width table, so the titles after it stay in line.
     pub icon: Option<String>,
@@ -176,6 +184,21 @@ pub fn with_given_prompt(mut argv: Vec<String>, prompt: String) -> Result<Vec<St
         bail!("the prompt starts with `-`, and this agent would read it as a flag");
     }
     Ok(with_prompt(argv, prompt))
+}
+
+/// Where a conversation's id goes in a profile's `resume`.
+pub const SESSION: &str = "{session}";
+
+impl Profile {
+    /// What carries `session` on: `bin`, then the profile's `resume` with
+    /// the id in place of `{session}`. None when it has no `resume`.
+    pub fn resume_argv(&self, bin: String, session: &str) -> Option<Vec<String>> {
+        if self.resume.is_empty() {
+            return None;
+        }
+        let args = self.resume.iter().map(|a| a.replace(SESSION, session));
+        Some(std::iter::once(bin).chain(args).collect())
+    }
 }
 
 /// The outcome of looking at an argv.
@@ -266,6 +289,7 @@ impl Registry {
                     headless: file.headless.unwrap_or_default(),
                     model_flag: file.model_flag.unwrap_or_default(),
                     small_model: file.small_model,
+                    resume: file.resume.unwrap_or_default(),
                     icon: file.icon.map(|i| check_icon(&name, i)).transpose()?,
                     color: file.color.map(|c| parse_color(&name, &c)).transpose()?,
                     patterns,
@@ -429,6 +453,11 @@ mod tests {
         );
         assert_eq!(r.profile("claude").unwrap().small_model.as_deref(), Some("haiku"));
         assert_eq!(r.profile("opencode").unwrap().small_model, None);
+        let resume = |n: &str| r.profile(n).unwrap().resume_argv(n.into(), "s1");
+        assert_eq!(resume("claude").unwrap(), ["claude", "--resume", "s1"]);
+        assert_eq!(resume("codex").unwrap(), ["codex", "resume", "s1"]);
+        assert_eq!(resume("gemini").unwrap(), ["gemini", "--resume", "s1"]);
+        assert_eq!(resume("opencode"), None);
         let c = r.detect(&argv("/Users/me/.local/bin/claude -p hi")).unwrap();
         assert_eq!((c.name.as_str(), c.kind), ("claude", RunKind::Agent));
         assert_eq!(c.hooks.as_ref().unwrap().dialect, "claude");

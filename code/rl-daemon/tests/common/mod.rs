@@ -117,6 +117,21 @@ impl Harness {
 
     /// Same, with a detection registry of the test's choosing (short timers).
     pub fn with_registry(home: Home, registry: Option<Registry>) -> Option<Self> {
+        Self::start(home, registry, None)
+    }
+
+    /// Same, asking `claude agents --json` as `polling` says — whichever
+    /// `claude` is first on `PATH`, so the test puts a fake one there. Every
+    /// other harness never asks.
+    pub fn with_claude(home: Home, polling: rl_daemon::outside::Polling) -> Option<Self> {
+        Self::start(home, None, Some(polling))
+    }
+
+    fn start(
+        home: Home,
+        registry: Option<Registry>,
+        claude_sessions: Option<rl_daemon::outside::Polling>,
+    ) -> Option<Self> {
         let session_bin = session_bin()?;
         let token = CancellationToken::new();
         let opts = ServeOptions {
@@ -124,6 +139,7 @@ impl Harness {
             rl_bin: Some(PathBuf::from("/usr/local/bin/rl")),
             step_rl: rl_bin(),
             registry: registry.map(Arc::new),
+            claude_sessions,
         };
         let server = tokio::spawn(rl_daemon::serve_with(home.clone(), token.clone(), opts));
         Some(Self { home, token, server })

@@ -35,6 +35,8 @@ pub struct Daemon {
     pub flows: Arc<crate::flows::Flows>,
     /// What the configured badges last said of each folder's branch.
     pub badges: crate::badges::Badges,
+    /// Agents' own sessions, as last heard.
+    pub outside: Arc<crate::outside::Outsiders>,
     pub started_at: Timestamp,
     pub shutdown: CancellationToken,
 }
@@ -51,10 +53,16 @@ pub struct ServeOptions {
     pub step_rl: Option<PathBuf>,
     /// Detection registry; defaults to the built-ins merged with `$RELAY_HOME/detect/`.
     pub registry: Option<Arc<Registry>>,
+    /// How Claude's own sessions are asked for; none, and they are not.
+    pub claude_sessions: Option<crate::outside::Polling>,
 }
 
 pub async fn serve(home: Home, shutdown: CancellationToken) -> Result<()> {
-    serve_with(home, shutdown, ServeOptions::default()).await
+    let opts = ServeOptions {
+        claude_sessions: crate::outside::Polling::from_env(),
+        ..Default::default()
+    };
+    serve_with(home, shutdown, opts).await
 }
 
 /// Runs until `daemon.shutdown` or `shutdown` is cancelled externally.
@@ -155,6 +163,14 @@ pub async fn serve_with(home: Home, shutdown: CancellationToken, opts: ServeOpti
         warn!(error = %format!("{e:#}"), "flows: carrying firings on");
     }
     tokio::spawn(flows.clone().serve());
+    // Served whether or not Claude's list is asked for: other agents'
+    // sessions are told by their hooks.
+    let outside = Arc::new(crate::outside::Outsiders::new(opts.claude_sessions));
+    tokio::spawn(
+        outside
+            .clone()
+            .serve(registry.clone(), ledger.clone(), shutdown.child_token()),
+    );
     let daemon = Arc::new(Daemon {
         home: home.clone(),
         ledger,
@@ -164,6 +180,7 @@ pub async fn serve_with(home: Home, shutdown: CancellationToken, opts: ServeOpti
         decisions,
         flows,
         badges: crate::badges::Badges::new(home.plugins_dir(), crate::badges::EVERY, crate::badges::WAIT),
+        outside,
         started_at: Timestamp::now(),
         shutdown: shutdown.clone(),
     });

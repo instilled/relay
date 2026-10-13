@@ -1,10 +1,14 @@
-# OpenAI Codex CLI. No hook API yet; PTY heuristics only.
+# OpenAI Codex CLI. Its sessions outside Relay, and the exact state of
+# Relay's own codex runs, come from user-level hooks `rl setup` adds to
+# ~/.codex/hooks.json once you say yes (and you trust them once in codex's
+# /hooks). Without them the patterns below are the fallback.
 kind: agent
 bins: [codex]
 icon: "⬡"        # its rows in the panel; one column wide
 headless: [exec]
 model_flag: ["-m"]
 small_model: gpt-5.6-luna   # "fast and affordable"; setup offers it for summaries
+resume: ["resume", "{session}"]
 patterns:
   needs_input:
     - '(?i)allow command\?'

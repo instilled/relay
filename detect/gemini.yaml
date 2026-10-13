@@ -1,5 +1,8 @@
-# Google's Gemini CLI. No hook API yet; PTY heuristics only. Its prompt is
-# the value of -p, so it goes in place of {prompt} rather than at the end.
+# Google's Gemini CLI. Its sessions outside Relay, and the exact state of
+# Relay's own gemini runs, come from user-level hooks `rl setup` adds to
+# ~/.gemini/settings.json once you say yes; without them, the PTY is all
+# there is. Its prompt is the value of -p, so it goes in place of {prompt}
+# rather than at the end.
 kind: agent
 bins: [gemini]
 icon: "✧"        # its rows in the panel; one column wide
@@ -7,3 +10,4 @@ color: "#4c8df6"    # #rrggbb; without one, the foreground
 headless: ["-p", "{prompt}"]
 model_flag: ["-m"]
 small_model: flash-lite   # its own alias for the smallest model
+resume: ["--resume", "{session}"]   # in the session's own folder: gemini keeps them per project

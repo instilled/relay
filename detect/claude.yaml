@@ -11,6 +11,7 @@ hooks:
 headless: ["-p"]
 model_flag: ["--model"]
 small_model: haiku      # what setup offers for summaries: quick and cheap
+resume: ["--resume", "{session}"]   # what carries a conversation on
 patterns:
   needs_input:
     - '(?i)do you want to'
