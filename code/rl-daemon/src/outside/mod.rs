@@ -1297,8 +1297,10 @@ mod tests {
             run: Some(run.into()),
             ..told_as("claude", sid, "Stop", None, None)
         };
-        store.told(under("ours", "r-claude"), &ledger).await.unwrap();
-        store.told(under("in-shell", "r-shell"), &ledger).await.unwrap();
+        let wants = store.told(under("ours", "r-claude"), &ledger).await.unwrap();
+        assert!(!wants, "the run's own: let go, so no ps");
+        let wants = store.told(under("in-shell", "r-shell"), &ledger).await.unwrap();
+        assert!(wants, "kept with no process known");
         store.told(under("unknown-run", "r-gone"), &ledger).await.unwrap();
         let keys: Vec<String> = store.latest(true).iter().map(Outside::key).collect();
         assert_eq!(keys, ["o:claude:in-shell", "o:claude:unknown-run"]);

@@ -200,8 +200,10 @@ pub fn outside(
 
 /// Whether `ASKING` says an ask of `rld`'s is going on (`user_hooks::is_asking`).
 fn asking() -> bool {
-    let now = user_hooks::asking_since().parse().unwrap_or(0);
-    user_hooks::is_asking(std::env::var(user_hooks::ASKING).ok().as_deref(), now)
+    user_hooks::is_asking(
+        std::env::var(user_hooks::ASKING).ok().as_deref(),
+        user_hooks::now_secs(),
+    )
 }
 
 /// Whether to look for the agent's process, after `rld` answered

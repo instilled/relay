@@ -73,21 +73,29 @@ pub const ASKING: &str = "RELAY_ASKING";
 /// How long after `ASKING` was set a hook still takes it for an ask's.
 pub const ASKING_FOR: u64 = 30;
 
-/// What `ASKING` is set to: the time now, in Unix seconds.
-pub fn asking_since() -> String {
+/// How far ahead of `now` a time may be and still be an ask's: a clock a
+/// little behind. Any further is no ask's.
+pub const ASKING_SKEW: u64 = 5;
+
+/// The time now, in Unix seconds.
+pub fn now_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs())
-        .to_string()
+}
+
+/// What `ASKING` is set to: the time now, in Unix seconds.
+pub fn asking_since() -> String {
+    now_secs().to_string()
 }
 
 /// Whether `ASKING`'s `value` (None where it is not set) is that of an ask
-/// going on at `now`, in Unix seconds: a time under `ASKING_FOR` old. A
-/// value that is no time is not.
+/// going on at `now`, in Unix seconds: a time under `ASKING_FOR` old, and
+/// not more than `ASKING_SKEW` ahead. A value that is no time is not.
 pub fn is_asking(value: Option<&str>, now: u64) -> bool {
     value
         .and_then(|v| v.trim().parse::<u64>().ok())
-        .is_some_and(|set| now.saturating_sub(set) < ASKING_FOR)
+        .is_some_and(|set| set <= now + ASKING_SKEW && now.saturating_sub(set) < ASKING_FOR)
 }
 
 /// Whether `agent`'s user-level hook says `USER` after its event: where a
@@ -580,6 +588,9 @@ mod tests {
         assert!(!is_asking(Some("1000"), 1030));
         assert!(!is_asking(Some("1000"), 5000));
         assert!(is_asking(Some("1000"), 999), "a clock a little behind");
+        assert!(is_asking(Some("1005"), 1000));
+        assert!(!is_asking(Some("1006"), 1000), "ahead by more than a skew");
+        assert!(!is_asking(Some("99999999999"), 1000), "a time far ahead never silences");
         assert!(!is_asking(Some("1"), 1_800_000_000), "the old value is a time long ago");
         assert!(!is_asking(Some("yes"), 1000));
         assert!(!is_asking(Some(""), 1000));

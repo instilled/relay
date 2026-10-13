@@ -1439,6 +1439,15 @@ impl Method for SummaryGet {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_hook_answer_of_nothing_or_without_the_word_wants_no_pid() {
+        use super::OutsideHookResult;
+        let read = |v: serde_json::Value| serde_json::from_value::<OutsideHookResult>(v).unwrap().wants_pid;
+        assert!(!read(serde_json::json!(null)));
+        assert!(!read(serde_json::json!({})));
+        assert!(read(serde_json::json!({ "wants_pid": true })));
+    }
+
     use super::*;
 
     #[test]
