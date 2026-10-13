@@ -1,13 +1,15 @@
 //! `row_order` table: a project's rows in the order you put them on the
-//! panel, by the keys of the project's header and of its rows. A project
-//! with nothing here sorts itself.
+//! panel, by the keys of the project's header and of its rows — and, under
+//! `Order::PROJECTS`, the projects in the order you put them, by their
+//! headers' keys. A project with nothing here stands in the order its rows
+//! came; projects with nothing here go by name.
 
 use anyhow::Result;
 use rl_proto::methods::Order;
 use rusqlite::{Connection, params};
 
 /// Keeps `rows` as `group`'s order, first on top, in place of what was kept;
-/// none lets it sort itself again. A row named twice keeps its first place.
+/// none lets it go back to the order its rows came in. A row named twice keeps its first place.
 pub fn set(conn: &mut Connection, group: &str, rows: &[String]) -> Result<()> {
     let tx = conn.transaction()?;
     tx.execute("DELETE FROM row_order WHERE group_key = ?1", params![group])?;
