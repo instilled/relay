@@ -256,12 +256,14 @@ pub struct RunMarkParams {
 /// Attaches this connection to a run's terminal. After the `ok` reply the
 /// connection stops speaking JSON-RPC: it carries `rl-session` frames both
 /// ways — `Output`, `Note`, `ReplayEnd`, `Exit` to the viewer; `Input` and
-/// `Resize` from the joiner (a watcher's are ignored). Scrollback comes first
-/// (the journal's tail), then the holder's replay from exactly where the
-/// journal stops, then live output. Closing the connection detaches. Several
+/// `Resize` from the joiner (a watcher's are ignored). What comes first
+/// depends on the run: a terminal run's screen, drawn afresh by its holder; a
+/// pipes run's journal tail, then the holder's replay from exactly where the
+/// journal stops. Then live output. Closing the connection detaches. Several
 /// watchers, one joiner: a second `join` is refused unless `take` is set,
-/// which turns the previous joiner into a watcher. An ended run replays its
-/// journal and sends `Exit` straight away.
+/// which turns the previous joiner into a watcher. An ended run sends its
+/// journal's tail, drawn as a screen when it was a terminal run, and `Exit`
+/// straight away.
 pub struct RunAttach;
 impl Method for RunAttach {
     const NAME: &'static str = "run.attach";
@@ -275,7 +277,9 @@ pub struct AttachParams {
     pub mode: AttachMode,
     /// Who is looking (`user@host`); shown to other viewers, recorded as presence.
     pub client: String,
-    /// Bytes of journaled scrollback to send first. Default 256 KiB.
+    /// Bytes of journaled output to draw from for an ended run or a pipes
+    /// run; a live terminal run is drawn from the holder's own screen and
+    /// history. Default 256 KiB.
     #[serde(default = "default_scrollback")]
     pub scrollback: u64,
     /// Join even if someone else has: they become a watcher.
@@ -294,7 +298,8 @@ fn default_scrollback() -> u64 {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AttachInfo {
     pub run: Run,
-    /// The pty's size as the holder has it (0×0 for an ended run).
+    /// The pty's size as the holder has it; for an ended run, the last size
+    /// the ledger recorded (0×0 if it has none).
     pub cols: u16,
     pub rows: u16,
     pub tty: bool,
@@ -303,9 +308,11 @@ pub struct AttachInfo {
     /// The current joiner, if any (possibly the caller).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub joiner: Option<String>,
-    /// Output bytes in the journal (where the scrollback ends).
+    /// The journal's length in output bytes: where a pipes run's byte
+    /// replay picks up.
     pub journaled: u64,
     /// Where the holder's replay starts; more than `journaled` means a gap.
+    /// A screen is whole by itself: for one, this is `journaled`.
     pub replay_from: u64,
 }
 
