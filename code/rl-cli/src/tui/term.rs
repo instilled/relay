@@ -8,7 +8,6 @@
 use crate::attach::client_name;
 use crate::client::Client;
 use rl_core::Home;
-use rl_detect::ansi;
 use rl_proto::methods::{AttachInfo, AttachParams, RunAttach};
 use rl_proto::types::AttachMode;
 use rl_session::proto::{Frame, FrameReader};
@@ -33,7 +32,7 @@ pub struct TermView {
     /// Draws the box-drawing set as the characters it stands for. `vt100`
     /// hands `ESC ( 0` to its unhandled hook, so a prompt that rules a line
     /// off would otherwise reach the screen spelling `qqqqqq`.
-    graphics: ansi::Graphics,
+    graphics: rl_session::screen::Graphics,
     /// The area we draw into, for clipping the re-render.
     pane: (u16, u16),
     /// Latest word from the daemon and when it arrived, for the footer.
@@ -77,7 +76,7 @@ impl TermView {
         Ok(Self {
             id: id.to_string(),
             parser: vt100::Parser::new(rows, cols, SCROLLBACK_ROWS),
-            graphics: ansi::Graphics::new(),
+            graphics: rl_session::screen::Graphics::new(),
             info,
             rd,
             _wr: wr,

@@ -7,8 +7,8 @@
 //! It depends on nothing else in Relay so a daemon crash — or upgrade — never
 //! costs a session.
 //!
-//! The library half ([`proto`], [`client`], [`exit`]) is what `rld` links; the
-//! binary half ([`holder`], [`backend`]) is the process itself.
+//! The library half ([`proto`], [`client`], [`exit`], [`screen`]) is what `rld`
+//! links; the binary half ([`holder`], [`backend`]) is the process itself.
 
 pub mod backend;
 pub mod client;
@@ -16,3 +16,4 @@ pub mod exit;
 pub mod holder;
 pub mod proto;
 pub mod ring;
+pub mod screen;

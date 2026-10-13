@@ -1569,6 +1569,7 @@ dependencies = [
  "regex",
  "rl-core",
  "rl-proto",
+ "rl-session",
  "serde",
  "serde_json",
  "serde_norway",
@@ -1633,6 +1634,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "tracing-subscriber",
+ "vt100",
 ]
 
 [[package]]
