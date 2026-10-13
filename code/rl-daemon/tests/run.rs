@@ -141,6 +141,38 @@ async fn a_shell_stops_on_a_hang_up() {
     h.stop().await;
 }
 
+/// `^x` on a run still going: one `run.stop` with `archive` stops it and,
+/// once it has ended, takes it off the list — an agent and a shell alike.
+#[tokio::test]
+async fn stop_with_archive_archives_once_ended() {
+    let Some((tmp, h)) = start() else {
+        return;
+    };
+    let mut c = Conn::open(&h.home).await;
+    let cwd = tmp.path().to_string_lossy().into_owned();
+    for spec in [
+        json!({ "argv": [fake_cli()], "cwd": cwd, "kind": "agent" }),
+        json!({ "argv": ["/bin/sh", "-i"], "kind": "shell", "cwd": cwd }),
+    ] {
+        let run: Run = c.ok("run.start", spec).await;
+        tokio::time::sleep(Duration::from_millis(800)).await;
+        let after: Run = c.ok("run.stop", json!({ "id": run.id, "archive": true })).await;
+        assert!(after.archived_at.is_none(), "not before it has ended");
+        let done = c.wait_terminal(&run.id).await;
+        assert_eq!(done.state, RunState::Stopped, "{}", run.title);
+        let mut archived = false;
+        for _ in 0..100 {
+            if c.get(&run.id).await.archived_at.is_some() {
+                archived = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(archived, "{} archived once ended", run.title);
+    }
+    h.stop().await;
+}
+
 #[tokio::test]
 async fn no_tty_run_captures_both_streams() {
     let Some((tmp, h)) = start() else {
