@@ -244,3 +244,88 @@ As the original Task 3, but per agent:
   - Busy ones are refused, with the per-agent wording: Claude's mentions `/bg`, the others say "wait for it to finish or close it there".
 - **`import::move_one`** generalises or delegates: background Claude sessions are still stopped first.
 - **The pane hint** says `enter: carry it on here (codex resume)` and the like.
+
+---
+
+## Addendum 2 (2026-10-13): dead cheap, one way for every agent
+
+The user asked in chat: "colud we make it dead cheap and same behaviour for gemni and codex?". Measured on this machine:
+- `claude agents --json` costs 0.13s, ~0.12s CPU and a 160 MB Node start per call. Asked every 5s while a panel shows the list, that is 2–3% of a core.
+- `rl hook` costs under 10ms. `ps -A` adds ~30ms, and today it runs on every prompt (`asks_pid`).
+
+So Claude's sessions become told by a user-level hook, as Codex's and Gemini's are. `claude agents` is asked only when there is a reason. Nothing polls on a timer except a cheap fallback.
+
+### Task 5: Claude's sessions told by hooks; `claude agents` only with a reason
+
+**Install, with a yes.**
+- **Where:** `rl setup` (the CLI and the panel's setup guide) offers Claude as it offers Codex and Gemini. The prompt is "Show Claude sessions started outside Relay? This adds a hook to ~/.claude/settings.json".
+  - The file is `$CLAUDE_CONFIG_DIR/settings.json`, else `~/.claude/settings.json`.
+  - It is the same shape as Relay's per-run settings: `hooks.<Event>: [{hooks: [{type: "command", command, timeout}]}]`, with `timeout` in seconds (5).
+  - It merges as Gemini's does: other keys and hooks are kept, the hook is never duplicated, and a file that doesn't parse is refused. Uninstall removes only Relay's entries.
+- **Events:** `SessionStart`, `UserPromptSubmit`, `Notification`, `PostToolUse`, `Stop`, `SessionEnd`.
+- **Command:** `'<rl>' hook claude <Event> --user || true`.
+  - **Why the marker:** Relay's own Claude runs already call `rl hook claude <Event>` from the per-run `--settings` file, and Claude runs both. The trailing `--user` tells `rl hook` this is the user-level copy.
+  - **Older `rl`:** an older `rl` refuses words it doesn't know (`words` returns None), so it does nothing and exits 0.
+  - **Same-file check:** `is_relays` must recognise this form for `claude`. The rule that `rl` comes from PATH only when it is the same file as `current_exe` applies here too.
+- **Message after install:** "Claude picks it up in sessions started from now on; ones already open may ask you to review it in /hooks".
+
+**`rl hook claude <Event> --user`:**
+- **Under `RELAY_RUN`:**
+  - If the run is Claude's own, it does nothing: the per-run hook already said it. It never posts `run.hook` from the user-level copy.
+  - Only if the run is foreign (`user_hooks::foreign`, e.g. a claude started in a Relay shell run) does it tell `rld` of an outside session. Decide this in `rld`: `OutsideHookParams` gains `run: Option<String>`, and `rld` ignores the word when that run is a non-foreign run of this agent. That keeps the hook to one RPC.
+- **Without `RELAY_RUN`:** it posts `outside.hook` as Codex and Gemini do.
+- **How the events read** (`user_hooks::told` for `claude`):
+  - `SessionStart` → idle
+  - `UserPromptSubmit` → busy
+  - `Notification` with `notification_type` `permission_prompt` → waiting, `permission prompt`
+  - `Notification` with `idle_prompt` → idle
+  - `PostToolUse` → carries on (as Codex's)
+  - `Stop` → idle
+  - `SessionEnd` → ended
+- **Agent lists:** Claude joins `user_hooks::AGENTS`. Check every user: `handlers.rs:191`, `outside/mod.rs:144`, `hook.rs`, `setup.rs:78`. Relay's own runs keep their per-run hooks unchanged.
+
+**One store for Claude's sessions: told by hooks, completed by asking.** In `rld`, Claude's sessions come from the hooked store as Codex's and Gemini's do. `claude agents --json` is kept to fill in what a hook cannot say: whether a session is in Claude's background, its attach `id`, its `name`, its `pid` and `startedAt`. It also finds sessions that started before the hook was installed or before `rld` started.
+
+It is asked only:
+1. **When the list is first wanted:** the first panel digest since `rld` started, or since the list last stopped showing for over `SHOWING`.
+2. **When a hook tells of a Claude session the last ask didn't list.** Asks are coalesced, at most one per 3s.
+3. **While the panel shows and a Claude background session is on the list:** once every 60s. Whether Claude runs user hooks inside background sessions is not documented; this is the safety net, and it goes on the manual-check list.
+4. **As a fallback when Claude's user-level hook is not installed:** every 30s while the panel shows. Read "installed" from the file at most once a minute (`user_hooks::installed`), never per tick.
+
+**Merging the two:**
+- An ask's entry fills in `id`, `kind`, `name`, `pid` and `started_at` on the hooked session with the same key.
+- Its state words are taken only if no hook has been heard for that session since the ask began.
+- An asked-only session is kept as told-by-nothing, and goes when its pid dies (`hooked::alive`) or a later ask doesn't list it.
+- A `SessionEnd` removes it from both.
+- Pruning stays per tick and costs a `kill(pid, 0)` per session, nothing more.
+- With `RELAY_CLAUDE_SESSIONS=off`, `claude` is never asked. Hooks still tell.
+
+**Docs:** update the module docs (`outside/mod.rs`, `outside/claude.rs`, `outside/hooked.rs`, `user_hooks.rs`, `hook.rs`) and `docs/ARCHITECTURE.md` to say Claude's sessions are told by hooks, and when `claude agents` is asked.
+
+**Tests** use temp `HOME` and `CLAUDE_CONFIG_DIR`, and a fake `claude` that counts its calls. No real agent runs.
+- **Install:** into an empty file and into one with other hooks and keys (kept, order kept); twice is not duplicated; a malformed file is refused; uninstall keeps the others; `is_relays` knows the `--user` form.
+- **`rl hook claude Stop --user`:**
+  - Without `RELAY_RUN`, it puts an idle Claude session into the digest, and `SessionEnd` removes it.
+  - With `RELAY_RUN` of a Relay Claude run, nothing appears and the run's state isn't touched by it.
+  - With a shell run's `RELAY_RUN`, an outside session appears.
+- **When `claude` is asked:**
+  - With the hook installed and no background session, ten digests over 50s ask `claude` once.
+  - A hook about an unknown Claude session asks once more.
+  - A background session listed makes it ask about once a minute while showing.
+  - Without the hook installed, it asks about every 30s while showing.
+  - Use a short-interval `Polling` in tests, as the existing ones do.
+- **Merging:** an ask fills in `id` and `kind` on a hooked session, and a hook heard after the ask began keeps its own state.
+
+### Task 6: the hook looks for the agent's process once per session; only the panel keeps the list showing
+
+- **`ps` once per session.** `outside.hook`'s result becomes `OutsideHookResult { wants_pid: bool }`: true when `rld` knows no pid for that session.
+  - `rl hook` sends without a pid first. Only when `wants_pid` is true and the event is one `asks_pid` allows does it walk `ps` and send once more, with the pid.
+  - Everything stays inside `WITHIN`.
+  - An older `rld` that returns `null` reads as `wants_pid: false`.
+- **Only the panel keeps the list showing.** `DigestParams` gains `#[serde(default)] watching: bool`.
+  - The panel sets it, and only a watching digest counts as the list showing (`Outsiders::latest` takes the flag).
+  - The catch-up command (`main.rs:910`) and any other one-off digest leave it false, so they read what is kept without making `rld` ask anything.
+  - A one-off digest made while `rld` has never asked may show no Claude sessions; that is fine.
+- **Tests:**
+  - A second `PermissionRequest` for a session with a known pid doesn't run `ps`. Factor the decision so it can be tested without `ps`.
+  - A digest with `watching: false` doesn't wake the asker.
