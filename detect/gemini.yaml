@@ -11,3 +11,32 @@ headless: ["-p", "{prompt}"]
 model_flag: ["-m"]
 small_model: flash-lite   # its own alias for the smallest model
 resume: ["--resume", "{session}"]   # in the session's own folder: gemini keeps them per project
+# Its own sessions, outside Relay (rl-detect/src/sessions.rs says how this
+# block reads). What gemini's docs and source said on 2026-10-13 is beside
+# each value (docs/plans/2026-10-13-agent-hooks-notes.md).
+sessions:
+  hooks:
+    # $GEMINI_CLI_HOME stands for the home: uncertain, inferred from its
+    # source. The first whose variables are all set wins; `~` is $HOME.
+    # Gemini reads its settings with comments allowed; one with comments does
+    # not read for Relay, and is left alone.
+    file: ["$GEMINI_CLI_HOME/.gemini/settings.json", "~/.gemini/settings.json"]
+    # Claude's shape, `timeout` in milliseconds. Hooks run synchronously,
+    # gemini waiting on them in its loop.
+    timeout: 2s
+    unit: ms
+    # It names the session and its folder here too, where the payload does
+    # not.
+    from_env: { session_id: GEMINI_SESSION_ID, cwd: GEMINI_CWD }
+    events:
+      SessionStart: started
+      BeforeAgent: { state: working, prompt: true }
+      # Its only notification type: a tool waits for your approval.
+      Notification:
+        by: notification_type
+        ToolPermission: { state: needs, waiting_for: "permission prompt", says: "{message}" }
+      AfterTool: carries-on
+      AfterAgent: idle
+      # Uncertain: whether it fires when gemini is killed, hence the pid
+      # check in rld.
+      SessionEnd: ended

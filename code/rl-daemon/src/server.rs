@@ -53,7 +53,8 @@ pub struct ServeOptions {
     pub step_rl: Option<PathBuf>,
     /// Detection registry; defaults to the built-ins merged with `$RELAY_HOME/detect/`.
     pub registry: Option<Arc<Registry>>,
-    /// How Claude's own sessions are asked for; none, and they are not.
+    /// How agents that list their own sessions (Claude's) are asked for
+    /// them; none, and none is (`RELAY_CLAUDE_SESSIONS=off`).
     pub claude_sessions: Option<crate::outside::Polling>,
 }
 
@@ -163,14 +164,10 @@ pub async fn serve_with(home: Home, shutdown: CancellationToken, opts: ServeOpti
         warn!(error = %format!("{e:#}"), "flows: carrying firings on");
     }
     tokio::spawn(flows.clone().serve());
-    // Served whether or not Claude's list is asked for: other agents'
-    // sessions are told by their hooks.
-    let outside = Arc::new(crate::outside::Outsiders::new(opts.claude_sessions));
-    tokio::spawn(
-        outside
-            .clone()
-            .serve(registry.clone(), ledger.clone(), shutdown.child_token()),
-    );
+    // Served whether or not any agent's list is asked for: every agent's
+    // sessions are told by its hooks.
+    let outside = Arc::new(crate::outside::Outsiders::new(registry.clone(), opts.claude_sessions));
+    tokio::spawn(outside.clone().serve(ledger.clone(), shutdown.child_token()));
     let daemon = Arc::new(Daemon {
         home: home.clone(),
         ledger,

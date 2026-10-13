@@ -4751,7 +4751,7 @@ impl App {
             self.select(Some(format!("r:{run}")));
             return self.say(format!("{} is carried on here already: this run", s.title()));
         }
-        match carry::enter(s, (self.agent_bin)(&s.agent).as_deref()) {
+        match carry::enter(s, (self.agent_bin)(&s.agent).as_deref(), &carry::attach_args(&s.agent)) {
             Err(why) => self.say(why),
             Ok(carry::Enter::Attach(argv)) => self.attach_outside = Some(argv),
             Ok(carry::Enter::CarryOn) => {

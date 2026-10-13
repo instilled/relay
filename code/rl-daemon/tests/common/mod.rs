@@ -121,12 +121,26 @@ impl Harness {
     }
 
     /// Same, asking `claude agents --json` as `polling` says, of the fake
-    /// `claude` at `claude` (the claude profile's binary, overridden in
-    /// `home`). Every other harness never asks.
-    pub fn with_claude(home: Home, claude: &Path, polling: rl_daemon::outside::Polling) -> Option<Self> {
+    /// `claude` at `claude`, its user-level hooks in `settings` (both the
+    /// claude profile's, overridden in `home`). Every other harness never
+    /// asks.
+    pub fn with_claude(
+        home: Home,
+        claude: &Path,
+        settings: &Path,
+        polling: rl_daemon::outside::Polling,
+    ) -> Option<Self> {
         let dir = home.detect_dir();
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("claude.yaml"), format!("bins: [\"{}\"]\n", claude.display())).unwrap();
+        std::fs::write(
+            dir.join("claude.yaml"),
+            format!(
+                "bins: [\"{}\"]\nsessions:\n  hooks:\n    file: [\"{}\"]\n",
+                claude.display(),
+                settings.display()
+            ),
+        )
+        .unwrap();
         let registry = Registry::load(&home).unwrap();
         Self::start(home, Some(registry), Some(polling))
     }

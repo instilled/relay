@@ -7,8 +7,9 @@
 //! settles goes into `config.yaml`, written by rld; how far it got goes into
 //! the ledger, so the file stays yours.
 //!
-//! The last step writes into an agent's own file: Claude's, Codex's and
-//! Gemini's hooks, so their sessions started outside Relay show on the list. Only
+//! The last step writes into an agent's own file: the hooks of each agent
+//! whose profile has them (`sessions.hooks`: Claude's, Codex's and
+//! Gemini's), so their sessions started outside Relay show on the list. Only
 //! what is there already starts picked, and what is added or taken out is
 //! only what you turned on or off, written by `rl` itself
 //! (`rl_detect::user_hooks`) where this environment says the agent looks.
@@ -22,6 +23,8 @@ use ratatui::layout::Rect;
 use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
+use rl_detect::Registry;
+use rl_detect::sessions::UserHooks;
 use rl_detect::user_hooks;
 use rl_proto::config::Assistant;
 use rl_proto::methods::{
@@ -64,21 +67,29 @@ pub struct Hookable {
     /// What the agent will say about it, worth knowing first: codex warns
     /// at every start when its `config.toml` has hooks too.
     pub warning: Option<String>,
+    /// Its hooks, as its profile has them.
+    pub hooks: UserHooks,
 }
 
-/// The agents found here whose hooks can show their sessions, each with
-/// its file as this environment places it. Reads the files, writes nothing.
+/// The agents found here whose hooks can show their sessions, by their
+/// profiles (`registry`), each with its file as this environment places
+/// it. Reads the files, writes nothing.
 pub fn hookable(agents: &[AgentInfo]) -> Vec<Hookable> {
-    hookable_in(agents, |k| std::env::var_os(k))
+    hookable_in(agents, super::rows::registry(), |k| std::env::var_os(k))
 }
 
-fn hookable_in(agents: &[AgentInfo], env: impl Fn(&str) -> Option<OsString> + Copy) -> Vec<Hookable> {
+fn hookable_in(
+    agents: &[AgentInfo],
+    registry: &Registry,
+    env: impl Fn(&str) -> Option<OsString> + Copy,
+) -> Vec<Hookable> {
     agents
         .iter()
-        .filter(|a| a.available() && user_hooks::AGENTS.contains(&a.name.as_str()))
+        .filter(|a| a.available())
         .filter_map(|a| {
-            let file = user_hooks::file(&a.name, env)?;
-            let installed = user_hooks::installed(&file, &a.name).map_err(|e| format!("{e:#}"));
+            let hooks = registry.user_hooks(&a.name)?;
+            let file = hooks.file(env)?;
+            let installed = user_hooks::installed(&file, hooks).map_err(|e| format!("{e:#}"));
             let warning = (a.name == user_hooks::CODEX && user_hooks::inline_hooks(&file))
                 .then(|| "codex will warn at each start: its config.toml has hooks too".to_string());
             Some(Hookable {
@@ -86,6 +97,7 @@ fn hookable_in(agents: &[AgentInfo], env: impl Fn(&str) -> Option<OsString> + Co
                 file,
                 installed,
                 warning,
+                hooks: hooks.clone(),
             })
         })
         .collect()
@@ -772,18 +784,18 @@ fn display(agent: &str) -> String {
 
 /// Adds or takes out each agent's hooks as the guide settled, in words for
 /// the flash line: what changed, and what the agent asks of you after
-/// (`user_hooks::after_install`).
+/// (its profile's `after_install`).
 pub fn hook_them(hooking: &[(Hookable, bool)], rl_bin: &Path) -> String {
     let mut said = Vec::new();
     for (h, on) in hooking {
         let file = rl_core::display_path(&h.file);
         let was = h.installed == Ok(true);
         let done = if *on {
-            user_hooks::install(&h.file, &h.name, rl_bin)
+            user_hooks::install(&h.file, &h.hooks, rl_bin)
         } else {
-            user_hooks::uninstall(&h.file, &h.name)
+            user_hooks::uninstall(&h.file, &h.hooks)
         };
-        let trust = user_hooks::after_install(&h.name)
+        let trust = (h.hooks.after_install.as_deref())
             .map(|a| format!(" · {a}"))
             .unwrap_or_default();
         said.push(match (done, on) {
@@ -1353,6 +1365,11 @@ mod tests {
         assert!(text.contains("esc back to the list"), "{text}");
     }
 
+    /// An agent's hooks, as its built-in profile has them.
+    fn h(agent: &str) -> UserHooks {
+        Registry::builtin().user_hooks(agent).unwrap().clone()
+    }
+
     /// Claude, Codex and Gemini found, their files under a fake home:
     /// claude's and codex's not there yet, gemini's with Relay's hooks in
     /// already.
@@ -1360,9 +1377,9 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path().to_path_buf();
         let gemini = home.join(".gemini/settings.json");
-        user_hooks::install(&gemini, "gemini", Path::new("/x/rl")).unwrap();
+        user_hooks::install(&gemini, &h("gemini"), Path::new("/x/rl")).unwrap();
         let env = |k: &str| (k == "HOME").then(|| home.clone().into_os_string());
-        let found = hookable_in(&state(Config::default()).agents, env);
+        let found = hookable_in(&state(Config::default()).agents, &Registry::builtin(), env);
         (tmp, found)
     }
 
@@ -1377,18 +1394,21 @@ mod tests {
                     file: tmp.path().join(".claude/settings.json"),
                     installed: Ok(false),
                     warning: None,
+                    hooks: h("claude"),
                 },
                 Hookable {
                     name: "codex".into(),
                     file: tmp.path().join(".codex/hooks.json"),
                     installed: Ok(false),
                     warning: None,
+                    hooks: h("codex"),
                 },
                 Hookable {
                     name: "gemini".into(),
                     file: tmp.path().join(".gemini/settings.json"),
                     installed: Ok(true),
                     warning: None,
+                    hooks: h("gemini"),
                 },
             ]
         );
@@ -1397,12 +1417,12 @@ mod tests {
         std::fs::write(tmp.path().join(".gemini/settings.json"), "{ // mine\n}").unwrap();
         let home = tmp.path().to_path_buf();
         let env = |k: &str| (k == "HOME").then(|| home.clone().into_os_string());
-        let again = hookable_in(&state(Config::default()).agents, env);
+        let again = hookable_in(&state(Config::default()).agents, &Registry::builtin(), env);
         assert!(again[2].installed.as_ref().unwrap_err().contains("left as it was"));
         // Codex's own config with hooks inline: said on the row.
         std::fs::create_dir_all(tmp.path().join(".codex")).unwrap();
         std::fs::write(tmp.path().join(".codex/config.toml"), "[[hooks.Stop]]\n").unwrap();
-        let again = hookable_in(&state(Config::default()).agents, env);
+        let again = hookable_in(&state(Config::default()).agents, &Registry::builtin(), env);
         assert!(
             again[1]
                 .warning
@@ -1557,13 +1577,57 @@ mod tests {
         );
         assert!(words.contains("gemini hooks taken out of"), "{words}");
         let codex = tmp.path().join(".codex/hooks.json");
-        assert!(user_hooks::installed(&codex, "codex").unwrap());
+        assert!(user_hooks::installed(&codex, &h("codex")).unwrap());
         assert!(
             std::fs::read_to_string(&codex)
                 .unwrap()
                 .contains("'/opt/rl' hook codex PermissionRequest || true")
         );
-        assert!(!user_hooks::installed(&tmp.path().join(".gemini/settings.json"), "gemini").unwrap());
+        assert!(!user_hooks::installed(&tmp.path().join(".gemini/settings.json"), &h("gemini")).unwrap());
+    }
+
+    /// An agent added by its profile alone, `fake`: offered, and its hooks
+    /// installed into the file its profile names, as its profile writes
+    /// them. Its hooks telling `rld` of its sessions, and enter carrying one
+    /// on, are `rl-daemon`'s to test (`tests/profile_agent.rs`).
+    #[test]
+    fn an_agent_added_by_its_profile_alone_is_offered_and_hooked() {
+        let tmp = tempfile::tempdir().unwrap();
+        let detect = tmp.path().join("detect");
+        std::fs::create_dir_all(&detect).unwrap();
+        std::fs::write(
+            detect.join("fake.yaml"),
+            "kind: agent\nbins: [fake]\nsessions:\n  hooks:\n    file: [\"$FAKE_HOME/hooks.json\", \"~/.fake/hooks.json\"]\n    \
+             timeout: 750ms\n    unit: ms\n    after_install: \"fake asks nothing\"\n    events:\n      Hello: started\n      Done: idle\n",
+        )
+        .unwrap();
+        let registry = Registry::load_from(&detect).unwrap();
+        let mut agents = state(Config::default()).agents;
+        agents.push(agent("fake", true, None));
+        let home = tmp.path().to_path_buf();
+        let env = |k: &str| (k == "HOME").then(|| home.clone().into_os_string());
+        let found = hookable_in(&agents, &registry, env);
+        let fake = found.iter().find(|h| h.name == "fake").expect("offered");
+        assert_eq!(fake.file, tmp.path().join(".fake/hooks.json"));
+        assert_eq!(fake.installed, Ok(false));
+        let words = hook_them(&[(fake.clone(), true)], Path::new("/opt/rl"));
+        assert!(
+            words.contains("fake hooks added to") && words.contains("fake asks nothing"),
+            "{words}"
+        );
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(tmp.path().join(".fake/hooks.json")).unwrap()).unwrap();
+        assert_eq!(
+            v,
+            serde_json::json!({"hooks": {
+                "Hello": [{"hooks": [{"type": "command", "command": "'/opt/rl' hook fake Hello || true", "timeout": 750}]}],
+                "Done": [{"hooks": [{"type": "command", "command": "'/opt/rl' hook fake Done || true", "timeout": 750}]}]
+            }})
+        );
+        assert!(user_hooks::installed(&tmp.path().join(".fake/hooks.json"), &fake.hooks).unwrap());
+        // Not on this machine: not offered.
+        agents.last_mut().unwrap().bin = None;
+        assert!(hookable_in(&agents, &registry, env).iter().all(|h| h.name != "fake"));
     }
 
     #[test]

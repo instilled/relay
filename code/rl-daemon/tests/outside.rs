@@ -97,10 +97,10 @@ async fn claudes_sessions_reach_the_digest_less_relays_own() {
         unhooked: Duration::from_millis(100),
         tick: Duration::from_millis(20),
         wait: Duration::from_millis(200),
-        settings: Some(tmp.path().join("claude-config/settings.json")),
         ..Polling::default()
     };
-    let Some(h) = Harness::with_claude(home.clone(), &fake.bin, polling) else {
+    let settings = tmp.path().join("claude-config/settings.json");
+    let Some(h) = Harness::with_claude(home.clone(), &fake.bin, &settings, polling) else {
         eprintln!("skipping: rl-session not built (run `cargo test --workspace`)");
         return;
     };
@@ -287,12 +287,18 @@ async fn claudes_sessions_reach_the_digest_less_relays_own() {
     h.stop().await;
 }
 
-/// Quick intervals, Claude's settings in `dir`, its hook there or not.
-fn quick(dir: &Path, hooked: bool) -> Polling {
+/// Claude's settings in `dir`, its hook there or not.
+fn claude_settings(dir: &Path, hooked: bool) -> PathBuf {
     let settings = dir.join("claude-config/settings.json");
     if hooked {
-        rl_detect::user_hooks::install(&settings, "claude", Path::new("/x/rl")).unwrap();
+        let hooks = rl_detect::Registry::builtin().user_hooks("claude").unwrap().clone();
+        rl_detect::user_hooks::install(&settings, &hooks, Path::new("/x/rl")).unwrap();
     }
+    settings
+}
+
+/// Quick intervals.
+fn quick() -> Polling {
     Polling {
         tick: Duration::from_millis(20),
         between: Duration::from_millis(100),
@@ -300,7 +306,7 @@ fn quick(dir: &Path, hooked: bool) -> Polling {
         unhooked: Duration::from_millis(300),
         recheck: Duration::from_millis(100),
         wait: Duration::from_secs(2),
-        settings: Some(settings),
+        ..Polling::default()
     }
 }
 
@@ -312,7 +318,8 @@ async fn asking(tmp: &Path, hooked: bool) -> Option<(FakeClaude, Harness, Conn)>
 async fn asking_of(fake: FakeClaude, tmp: &Path, hooked: bool) -> Option<(FakeClaude, Harness, Conn)> {
     let home = Home::at(tmp.join("home"));
     std::fs::create_dir_all(home.path()).unwrap();
-    let Some(h) = Harness::with_claude(home.clone(), &fake.bin, quick(tmp, hooked)) else {
+    let settings = claude_settings(tmp, hooked);
+    let Some(h) = Harness::with_claude(home.clone(), &fake.bin, &settings, quick()) else {
         eprintln!("skipping: rl-session not built (run `cargo test --workspace`)");
         return None;
     };

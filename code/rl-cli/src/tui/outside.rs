@@ -118,7 +118,10 @@ pub fn enter_words(s: &Outside) -> String {
         return "enter: go to the run that carries it on here".into();
     }
     if !s.in_a_terminal() {
-        return format!("enter: open it here ({} attach)", s.agent);
+        return match super::carry::attach_words(&s.agent) {
+            Some(how) => format!("enter: open it here ({how})"),
+            None => "enter: open it here".into(),
+        };
     }
     if busy_there(s) {
         return busy_words(s).into();

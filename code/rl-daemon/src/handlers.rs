@@ -192,27 +192,32 @@ pub fn register(r: &mut Router<Daemon>) {
     });
 
     r.register::<RunHook, _, _>(|d, p| async move {
+        // Claude's runs report by the hooks `rld` passes them
+        // (`claude::settings_json`); any other agent's, by the user-level
+        // hooks its profile has (`sessions.hooks`).
         let claude = p.dialect == rl_detect::claude::DIALECT;
-        if !rl_detect::user_hooks::AGENTS.contains(&p.dialect.as_str()) {
+        let registry = d.registry.clone();
+        let hooks = registry.user_hooks(&p.dialect).filter(|_| !claude);
+        if !claude && hooks.is_none() {
             return Err(RpcError::invalid_params(format!(
                 "unknown hook dialect `{}`",
                 p.dialect
             )));
         }
-        // Codex's and Gemini's hooks are the user's own, so every one of
-        // their processes calls them: one started inside a run of another
-        // kind (a shell, a Claude run calling `codex exec`) carries that
-        // run's `RELAY_RUN` without being it (`user_hooks::foreign`). Its
-        // word is not that run's; the run comes back untouched, and `rl
-        // hook` tells of the session as one of the agent's own instead.
-        if !claude {
+        // The other agents' hooks are the user's own, so every one of their
+        // processes calls them: one started inside a run of another kind (a
+        // shell, a Claude run calling `codex exec`) carries that run's
+        // `RELAY_RUN` without being it (`user_hooks::foreign`). Its word is
+        // not that run's; the run comes back untouched, and `rl hook` tells
+        // of the session as one of the agent's own instead.
+        if let Some(hooks) = hooks {
             let run = get_run(&d, &p.id).await?;
-            if rl_detect::user_hooks::foreign(&run, &p.dialect) {
+            if rl_detect::user_hooks::foreign(&run, &p.dialect, &registry) {
                 return Ok(run);
             }
             // A tool done only carries a turn on: late (codex's hooks run in
             // the background), it must not wake a run that has gone idle.
-            if rl_detect::user_hooks::carries_on(&p.dialect, &p.event)
+            if hooks.carries_on(&p.event)
                 && !matches!(
                     run.state,
                     rl_proto::types::RunState::NeedsInput | rl_proto::types::RunState::Working
@@ -229,9 +234,25 @@ pub fn register(r: &mut Router<Daemon>) {
                 .await
                 .map_err(internal)?;
         }
+        // What the event says of the run: its state, whether it begins the
+        // session, carries the prompt typed, or ends a turn or waits on you.
+        let (sig, starts, prompted, pauses) = match hooks {
+            Some(h) => (
+                h.signal(&p.event, &p.payload),
+                h.starts(&p.event),
+                h.prompt_event() == Some(p.event.as_str()),
+                h.pauses(&p.event),
+            ),
+            None => (
+                rl_detect::claude::signal(&p.event, &p.payload),
+                p.event == "SessionStart",
+                p.event == "UserPromptSubmit",
+                matches!(p.event.as_str(), "Stop" | "Notification"),
+            ),
+        };
         // The session the run is, so the list never shows it again as the
         // agent's own.
-        if p.event == "SessionStart"
+        if starts
             && let Some(session) = p.payload.get("session_id").and_then(|v| v.as_str())
             && !session.is_empty()
         {
@@ -241,20 +262,10 @@ pub fn register(r: &mut Router<Daemon>) {
                 warn!(run = %p.id, agent = %p.dialect, error = %format!("{e:#}"), "session not tagged");
             }
         }
-        let sig = if claude {
-            rl_detect::claude::signal(&p.event, &p.payload)
-        } else {
-            rl_detect::user_hooks::signal(&p.dialect, &p.event, &p.payload)
-        };
         if let Some(sig) = sig {
             d.supervisor.apply(&p.id, sig).await.map_err(internal)?;
         }
         // An agent you did not name is named for what you first asked it.
-        let prompted = if claude {
-            p.event == "UserPromptSubmit"
-        } else {
-            rl_detect::user_hooks::prompt_event(&p.dialect) == Some(p.event.as_str())
-        };
         if prompted && let Some(prompt) = p.payload.get("prompt").and_then(|v| v.as_str()) {
             d.supervisor
                 .name_from_prompt(&p.id, &p.dialect, prompt)
@@ -264,10 +275,7 @@ pub fn register(r: &mut Router<Daemon>) {
         let run = get_run(&d, &p.id).await?;
         // A turn over, or a wait on you: the agent may have written its
         // recap. Read after the reply, which the hook is waiting on.
-        if matches!(
-            p.event.as_str(),
-            "Stop" | "Notification" | "PermissionRequest" | "AfterAgent"
-        ) {
+        if pauses {
             let (d, run) = (d.clone(), run.clone());
             tokio::spawn(async move {
                 if let Err(e) = crate::recap::pick_up(&d, &run).await {

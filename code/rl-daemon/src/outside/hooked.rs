@@ -1,10 +1,13 @@
-//! The agents' own sessions, as their hooks tell of them: Claude's,
-//! Codex's and Gemini's, each of which calls `rl hook <agent> <Event>` from
-//! the user-level hooks `rl setup` adds (`rl_detect::user_hooks`). A session
-//! is kept as its last event left it, and goes when it ends.
+//! The agents' own sessions, as their hooks tell of them: those of each
+//! agent whose profile has hooks (`sessions.hooks`: Claude's, Codex's and
+//! Gemini's), each of which calls `rl hook <agent> <Event>` from the
+//! user-level hooks `rl setup` adds (`rl_detect::user_hooks`). A session is
+//! kept as its last event left it, as its profile says (`UserHooks::told`),
+//! and goes when it ends.
 //!
-//! Claude's are filled in by what `claude agents` says, when it is asked
-//! (`claude`, `merge`): its kind, attach id, name, process and start, on
+//! An agent that lists its own sessions (Claude's `claude agents`) has them
+//! filled in by what that says, when it is asked (`lister`, `merge`): its
+//! kind, attach id, name, process and start, on
 //! a session a hook told of; and its state too, but only where no hook was
 //! heard of it since the ask began — the hook's word is the newer. A
 //! session only the ask listed is kept as well, told of by nothing, until
@@ -16,8 +19,8 @@
 //! where the hook found it, checked on each of `serve`'s ticks; or, where
 //! it did not, after `STALE` with no word (and even with a process, after
 //! `QUIET`: the process found may not be it).
-//! A session started in a process that held another (`/clear`, `/new`) is
-//! that process's only one: the other goes.
+//! A session started (`started`) in a process that held another (`/clear`,
+//! `/new`) is that process's only one: the other goes.
 //!
 //! Codex runs its hooks in the background, several at once, so they can
 //! arrive out of order. An ended session is remembered for `ENDED`, and an
@@ -25,7 +28,7 @@
 //! not bring it back; only a start does (`codex resume` keeps the id). A
 //! tool done heard after its turn's end does not make it busy again.
 
-use rl_detect::user_hooks::{self, Told};
+use rl_detect::sessions::{Told, UserHooks};
 use rl_proto::methods::{Outside, OutsideHookParams};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -96,15 +99,15 @@ pub(crate) enum Said {
 }
 
 impl Hooked {
-    /// The session as `p` leaves it, or that it ended: the one known,
-    /// changed by the event, or a new one. Not kept yet: `keep` keeps it,
-    /// once settled. A start heard of a session already known says
-    /// nothing new — codex runs its hooks in the background, so a start
-    /// may come after the prompt that followed it.
-    pub fn hear(&self, p: OutsideHookParams) -> Said {
+    /// The session as `p` leaves it, or that it ended, as its agent's
+    /// `hooks` say: the one known, changed by the event, or a new one. Not
+    /// kept yet: `keep` keeps it, once settled. A start heard of a session
+    /// already known says nothing new — codex runs its hooks in the
+    /// background, so a start may come after the prompt that followed it.
+    pub fn hear(&self, p: OutsideHookParams, hooks: &UserHooks) -> Said {
         let key = format!("o:{}:{}", p.agent, p.session_id);
-        let told = user_hooks::told(&p.agent, &p.event, p.detail.as_deref());
-        let start = p.event == "SessionStart";
+        let told = hooks.told(&p.event, p.detail.as_deref());
+        let start = hooks.starts(&p.event);
         let mut k = self.kept.lock().unwrap();
         if told == Told::Ended {
             k.heard.remove(&key);
@@ -158,8 +161,7 @@ impl Hooked {
         });
         // A tool done ends a wait or keeps a turn going; late, it never
         // wakes one that has gone idle.
-        let wakes =
-            known.as_ref().is_some_and(|k| k.status == Outside::IDLE) && user_hooks::carries_on(&p.agent, &p.event);
+        let wakes = known.as_ref().is_some_and(|k| k.status == Outside::IDLE) && hooks.carries_on(&p.event);
         let mut stood = false;
         if let Told::Stands { status, waiting_for } = told
             && !(known.is_some() && start)

@@ -40,7 +40,7 @@ fn claude_bin(d: &Daemon) -> Result<PathBuf> {
 }
 
 async fn ask(bin: &Path, args: &[&str]) -> Result<String> {
-    crate::outside::claude::ask(bin, args, ASK_TIMEOUT).await
+    crate::outside::lister::ask(bin, args, ASK_TIMEOUT).await
 }
 
 /// Claude's sessions now, each with the run that carries it on, if any, and
@@ -60,7 +60,7 @@ pub async fn list(d: &Daemon, p: ImportListParams) -> ImportReport {
 
 async fn sessions(d: &Daemon, mark: bool, wait: Duration) -> Result<Vec<Outside>> {
     let bin = claude_bin(d)?;
-    let listed = crate::outside::claude::ask(&bin, &["agents", "--json"], wait).await?;
+    let listed = crate::outside::lister::ask(&bin, &["agents", "--json"], wait).await?;
     let mut all = crate::outside::claude::parse(&listed)?;
     let listed = all.clone();
     let (carried, was, mentioned) = d

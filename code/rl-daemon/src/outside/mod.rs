@@ -3,11 +3,13 @@
 //! heard and never waits on an agent.
 //!
 //! Every agent's are told, by the hooks `rl setup` adds to their
-//! user-level files, and kept in one store (`hooked`). Claude's are filled
-//! in by asking `claude agents --json` too (`claude`), only with a reason
-//! and only while something is showing the list — a digest within the last
-//! minute, the way badges are: a hook cannot say whether a session is in
-//! Claude's background, nor tell of one that began before it was there.
+//! user-level files, and kept in one store (`hooked`): each agent whose
+//! profile has hooks (`sessions.hooks`). An agent that lists its own
+//! sessions (`sessions.list`: Claude's, `claude agents --json`) has them
+//! filled in by asking it too (`lister`), only with a reason and only while
+//! something is showing the list — a digest within the last minute, the
+//! way badges are: a hook cannot say whether a session is in the agent's
+//! background, nor tell of one that began before it was there.
 //! What is heard is settled here before it is kept: each session's project
 //! folder, resolved once per session as a run's would be
 //! (`workspace::filed_under`), and when it came to stand as it does
@@ -26,8 +28,9 @@
 
 pub mod claude;
 pub mod hooked;
+pub mod lister;
 
-pub use claude::Polling;
+pub use lister::Polling;
 
 use anyhow::{Result, bail};
 use jiff::Timestamp;
@@ -78,8 +81,11 @@ struct Settled {
 }
 
 pub struct Outsiders {
-    /// When `claude agents` is asked; none, and it never is.
-    asker: Option<claude::Asker>,
+    /// What each agent's events say, and which agents list their sessions.
+    registry: Arc<Registry>,
+    /// The agents asked for their sessions, and when; none are while
+    /// asking is off.
+    listers: Vec<lister::Lister>,
     /// How often `serve` wakes.
     tick: Duration,
     /// The sessions hooks tell of, and asks fill in.
@@ -93,13 +99,14 @@ pub struct Outsiders {
 }
 
 impl Outsiders {
-    /// `claude`: when `claude agents` is asked; none, and it never is,
-    /// while the store itself still serves: every agent's sessions are
-    /// told by its hooks.
-    pub fn new(claude: Option<Polling>) -> Self {
+    /// `polling`: when the agents of the `registry` that list their own
+    /// sessions are asked; none, and none ever is, while the store itself
+    /// still serves: every agent's sessions are told by its hooks.
+    pub fn new(registry: Arc<Registry>, polling: Option<Polling>) -> Self {
         Self {
-            tick: claude.as_ref().map_or(claude::TICK, |p| p.tick),
-            asker: claude.map(claude::Asker::new),
+            tick: polling.as_ref().map_or(lister::TICK, |p| p.tick),
+            listers: polling.map_or_else(Vec::new, |p| lister::Lister::all(&registry, &p)),
+            registry,
             hooked: hooked::Hooked::default(),
             settled: Mutex::default(),
             moving: Mutex::default(),
@@ -111,8 +118,9 @@ impl Outsiders {
     /// Every agent's sessions as last heard, Relay's own among them: the
     /// digest leaves those out (`not_relays`). Where `watching` (the panel's
     /// digest), counts as the list showing: the first time in a while,
-    /// `claude agents` is asked now, in the background, and a later digest
-    /// carries what it heard. A one-off digest only reads.
+    /// each agent that lists its sessions is asked now, in the background,
+    /// and a later digest carries what it heard. A one-off digest only
+    /// reads.
     pub fn latest(&self, watching: bool) -> Vec<Outside> {
         if !watching {
             return self.hooked.latest();
@@ -120,8 +128,10 @@ impl Outsiders {
         let mut w = self.wanted.lock().unwrap();
         let idle = w.is_none_or(|w| w.elapsed() > SHOWING);
         *w = Some(Instant::now());
-        if idle && let Some(asker) = &self.asker {
-            asker.want();
+        if idle && !self.listers.is_empty() {
+            for l in &self.listers {
+                l.asker.want();
+            }
             self.wake.notify_one();
         }
         drop(w);
@@ -148,25 +158,27 @@ impl Outsiders {
     /// that agent's: kept, settled as any session is, or let go once it
     /// ended. A word from under a run that is the agent's own (Claude's
     /// user-level hook, in a Claude run of Relay's) is that run's, which its
-    /// own hooks have said: let go. Of one of Claude's that the last ask
-    /// did not list, an ask is called for, to fill it in. Answers whether
-    /// the session is kept with no process known, which the hook then finds.
+    /// own hooks have said: let go. Of one of an agent that lists its
+    /// sessions that the last ask did not list, an ask is called for, to
+    /// fill it in. Answers whether the session is kept with no process
+    /// known, which the hook then finds.
     pub async fn told(&self, p: rl_proto::methods::OutsideHookParams, ledger: &Ledger) -> Result<bool> {
-        if !rl_detect::user_hooks::AGENTS.contains(&p.agent.as_str()) {
+        let registry = self.registry.clone();
+        let Some(hooks) = registry.user_hooks(&p.agent) else {
             bail!("`{}` sessions are not told by hooks", p.agent);
-        }
+        };
         if p.session_id.is_empty() || !p.cwd.is_absolute() {
             bail!("a session needs its id and a whole folder");
         }
         if let Some(id) = p.run.clone() {
             let run = ledger.call(move |c| rl_ledger::runs::get(c, &id)).await?;
-            if run.is_some_and(|r| !rl_detect::user_hooks::foreign(&r, &p.agent)) {
+            if run.is_some_and(|r| !rl_detect::user_hooks::foreign(&r, &p.agent, &registry)) {
                 return Ok(false);
             }
         }
         let transcript = p.transcript_path.clone().filter(|t| t.is_absolute());
         let mut wants_pid = false;
-        match self.hooked.hear(p) {
+        match self.hooked.hear(p, hooks) {
             hooked::Said::Ended(key) => self.forget_one(&key),
             hooked::Said::Late => {}
             hooked::Said::Stands {
@@ -185,9 +197,8 @@ impl Outsiders {
                     self.forget_one(&key);
                 } else {
                     wants_pid = self.hooked.last(&key).is_some_and(|l| l.session.pid.is_none());
-                    if agent == claude::AGENT
-                        && let Some(asker) = &self.asker
-                        && asker.told_of(&key)
+                    if let Some(l) = self.listers.iter().find(|l| l.agent == agent)
+                        && l.asker.told_of(&key)
                     {
                         self.wake.notify_one();
                     }
@@ -207,8 +218,8 @@ impl Outsiders {
 
     fn forget_one(&self, key: &str) {
         self.settled.lock().unwrap().remove(key);
-        if let Some(asker) = &self.asker {
-            asker.forget(key);
+        for l in &self.listers {
+            l.asker.forget(key);
         }
     }
 
@@ -217,10 +228,10 @@ impl Outsiders {
     }
 
     /// Until shutdown, every `tick` or sooner: lets go of the sessions
-    /// that ended without a word, and, while the list is showing, asks
-    /// `claude agents` when something calls for it (`claude::Asker`). Runs
-    /// whether or not Claude is asked.
-    pub async fn serve(self: Arc<Self>, registry: Arc<Registry>, ledger: Ledger, shutdown: CancellationToken) {
+    /// that ended without a word, and, while the list is showing, asks each
+    /// agent that lists its sessions when something calls for it
+    /// (`lister::Asker`). Runs whether or not any is asked.
+    pub async fn serve(self: Arc<Self>, ledger: Ledger, shutdown: CancellationToken) {
         let mut wait = self.tick;
         loop {
             tokio::select! {
@@ -230,36 +241,39 @@ impl Outsiders {
             }
             self.prune_told();
             wait = self.tick;
-            let Some(asker) = &self.asker else { continue };
             if !self.showing() {
                 continue;
             }
-            let background = self
-                .hooked
-                .any(|s| s.agent == claude::AGENT && s.kind == claude::BACKGROUND_KIND);
-            let due = asker.due_in(Instant::now(), background);
-            if due.is_zero() {
-                self.ask_claude(asker, &registry, &ledger).await;
-            } else {
-                wait = wait.min(due);
+            for l in &self.listers {
+                let background = self
+                    .hooked
+                    .any(|s| s.agent == l.agent && s.kind == lister::BACKGROUND_KIND);
+                let due = l.asker.due_in(Instant::now(), background);
+                if due.is_zero() {
+                    self.ask(l, &ledger).await;
+                } else {
+                    wait = wait.min(due);
+                }
             }
         }
     }
 
-    /// Asks `claude agents` once, and takes in what it says (`hooked::merge`).
-    /// Each session listed is filed first, so none is kept without its
-    /// folder; since when it stands as it does is settled once merged, as
-    /// it is a hook's word, where one was heard since, that says how.
-    async fn ask_claude(&self, asker: &claude::Asker, registry: &Registry, ledger: &Ledger) {
+    /// Asks one agent for its sessions once, and takes in what it says
+    /// (`hooked::merge`). Each session listed is filed first, so none is
+    /// kept without its folder; since when it stands as it does is settled
+    /// once merged, as it is a hook's word, where one was heard since, that
+    /// says how.
+    async fn ask(&self, l: &lister::Lister, ledger: &Ledger) {
+        let asker = &l.asker;
         let began = Instant::now();
         asker.began(began);
-        match claude::hear(registry, asker.polling().wait).await {
+        match l.hear(&self.registry, asker.polling().wait).await {
             Ok(mut list) => {
                 asker.listed(list.iter().map(Outside::key).collect());
                 for s in &mut list {
                     self.file_one(s, ledger).await;
                 }
-                let merged = self.hooked.merge(claude::AGENT, list, began, hooked::alive);
+                let merged = self.hooked.merge(&l.agent, list, began, hooked::alive);
                 for key in &merged.gone {
                     debug!(session = %key, "outside: no longer listed");
                     self.forget_one(key);
@@ -505,6 +519,11 @@ pub fn not_relays(
 mod tests {
     use super::*;
 
+    /// A store of the built-in profiles' sessions, asking no agent.
+    fn store() -> Outsiders {
+        Outsiders::new(Arc::new(Registry::builtin()), None)
+    }
+
     fn session(agent: &str, sid: &str, pid: Option<u32>) -> Outside {
         Outside {
             agent: agent.into(),
@@ -649,7 +668,7 @@ mod tests {
 
     #[test]
     fn a_session_is_carried_on_by_one_ask_at_a_time() {
-        let store = Outsiders::new(None);
+        let store = store();
         let held = store.moving("o:codex:s").expect("free");
         assert!(store.moving("o:codex:s").is_none(), "held already");
         assert!(store.moving("o:codex:t").is_some(), "another is free");
@@ -660,7 +679,7 @@ mod tests {
     #[tokio::test]
     async fn a_hook_names_its_conversation_and_the_last_one_named_is_kept() {
         let ledger = Ledger::open_in_memory().unwrap();
-        let store = Outsiders::new(None);
+        let store = store();
         let tell = |event: &str, transcript: Option<&str>| rl_proto::methods::OutsideHookParams {
             agent: "codex".into(),
             session_id: "t1".into(),
@@ -692,7 +711,7 @@ mod tests {
     #[tokio::test]
     async fn one_session_settles_without_its_siblings_and_says_since_when_it_wants_you() {
         let ledger = Ledger::open_in_memory().unwrap();
-        let store = Outsiders::new(None);
+        let store = store();
         let tmp = tempfile::tempdir().unwrap();
         let started: Timestamp = "2026-09-10T11:00:00Z".parse().unwrap();
         let at = |agent: &str, sid: &str, state: Option<&str>, status: &str| Outside {
@@ -735,7 +754,7 @@ mod tests {
     #[tokio::test]
     async fn told_sessions_stand_as_their_last_event_left_them_and_go_when_they_end() {
         let ledger = Ledger::open_in_memory().unwrap();
-        let store = Outsiders::new(None);
+        let store = store();
         let tmp = tempfile::tempdir().unwrap();
         let tell = |agent: &str, sid: &str, event: &str, detail: Option<&str>, pid: Option<u32>| {
             rl_proto::methods::OutsideHookParams {
@@ -826,7 +845,7 @@ mod tests {
     #[tokio::test]
     async fn a_told_session_goes_with_its_process_or_after_long_quiet() {
         let ledger = Ledger::open_in_memory().unwrap();
-        let store = Outsiders::new(None);
+        let store = store();
         let tell = |sid: &str, pid: Option<u32>| rl_proto::methods::OutsideHookParams {
             agent: "codex".into(),
             session_id: sid.into(),
@@ -881,7 +900,7 @@ mod tests {
     #[tokio::test]
     async fn approving_and_the_tool_running_makes_a_session_busy_again() {
         let ledger = Ledger::open_in_memory().unwrap();
-        let store = Outsiders::new(None);
+        let store = store();
         for (agent, wait, wait_detail, ran) in [
             ("codex", "PermissionRequest", Some("shell"), "PostToolUse"),
             ("gemini", "Notification", Some("ToolPermission"), "AfterTool"),
@@ -909,13 +928,15 @@ mod tests {
     #[tokio::test]
     async fn an_ended_session_is_not_brought_back_by_word_sent_before_its_end() {
         let ledger = Ledger::open_in_memory().unwrap();
-        let store = Outsiders::new(None);
+        let store = store();
         store
             .told(told_as("codex", "s", "UserPromptSubmit", None, None), &ledger)
             .await
             .unwrap();
         // Heard, then the end lands while it is still being settled.
-        let hooked::Said::Stands { session, .. } = store.hooked.hear(told_as("codex", "s", "Stop", None, None)) else {
+        let codex = store.registry.user_hooks("codex").unwrap();
+        let hooked::Said::Stands { session, .. } = store.hooked.hear(told_as("codex", "s", "Stop", None, None), codex)
+        else {
             panic!("a session stands");
         };
         store
@@ -953,7 +974,7 @@ mod tests {
     #[tokio::test]
     async fn a_start_in_a_process_ends_the_session_it_held_before() {
         let ledger = Ledger::open_in_memory().unwrap();
-        let store = Outsiders::new(None);
+        let store = store();
         let me = Some(std::process::id());
         store
             .told(told_as("gemini", "old", "PermissionRequest", None, me), &ledger)
@@ -990,7 +1011,7 @@ mod tests {
     #[tokio::test]
     async fn a_tool_done_heard_after_the_turn_ended_does_not_wake_it() {
         let ledger = Ledger::open_in_memory().unwrap();
-        let store = Outsiders::new(None);
+        let store = store();
         let status = || store.latest(true)[0].status.clone();
         store
             .told(told_as("codex", "s", "UserPromptSubmit", None, None), &ledger)
@@ -1124,7 +1145,7 @@ mod tests {
     #[tokio::test]
     async fn an_ask_fills_in_a_told_session_and_a_hook_heard_since_keeps_its_state() {
         let ledger = Ledger::open_in_memory().unwrap();
-        let store = Outsiders::new(None);
+        let store = store();
         let me = std::process::id();
         store
             .told(told_as("claude", "s", "UserPromptSubmit", None, None), &ledger)
@@ -1179,7 +1200,7 @@ mod tests {
     #[tokio::test]
     async fn a_word_that_says_nothing_neither_changes_a_session_nor_keeps_an_asks_state_out() {
         let ledger = Ledger::open_in_memory().unwrap();
-        let store = Outsiders::new(None);
+        let store = store();
         store
             .told(told_as("claude", "s", "UserPromptSubmit", None, None), &ledger)
             .await
@@ -1228,7 +1249,7 @@ mod tests {
     #[tokio::test]
     async fn one_only_an_ask_listed_stands_while_listed_and_an_end_ends_it_for_both() {
         let ledger = Ledger::open_in_memory().unwrap();
-        let store = Outsiders::new(None);
+        let store = store();
         let keys = || store.latest(true).iter().map(Outside::key).collect::<Vec<_>>();
         store
             .told(told_as("codex", "c", "Stop", None, None), &ledger)
@@ -1282,7 +1303,7 @@ mod tests {
     async fn claudes_user_level_word_under_a_run_of_claudes_is_the_runs_and_let_go() {
         use rl_proto::types::{Run, RunKind};
         let ledger = Ledger::open_in_memory().unwrap();
-        let store = Outsiders::new(None);
+        let store = store();
         let mut ours = Run::new("r-claude", RunKind::Agent, "x", vec![], "/w", "/w", Timestamp::now());
         ours.cli = Some("claude".into());
         let shell = Run::new("r-shell", RunKind::Shell, "x", vec![], "/w", "/w", Timestamp::now());
@@ -1309,8 +1330,8 @@ mod tests {
     #[tokio::test]
     async fn a_hook_of_a_claude_session_not_listed_calls_for_one_ask() {
         let ledger = Ledger::open_in_memory().unwrap();
-        let store = Outsiders::new(Some(Polling::default()));
-        let asker = store.asker.as_ref().unwrap();
+        let store = Outsiders::new(Arc::new(Registry::builtin()), Some(Polling::default()));
+        let asker = &store.listers[0].asker;
         let t0 = Instant::now();
         asker.began(t0);
         asker.listed(HashSet::from(["o:claude:known".to_string()]));
@@ -1324,11 +1345,11 @@ mod tests {
             .told(told_as("codex", "x", "Stop", None, None), &ledger)
             .await
             .unwrap();
-        assert_eq!(asker.due_in(t0 + claude::BETWEEN, false), Duration::ZERO);
-        asker.began(t0 + claude::BETWEEN);
+        assert_eq!(asker.due_in(t0 + lister::BETWEEN, false), Duration::ZERO);
+        asker.began(t0 + lister::BETWEEN);
         assert_eq!(
-            asker.due_in(t0 + claude::BETWEEN * 2, false),
-            claude::UNHOOKED - claude::BETWEEN,
+            asker.due_in(t0 + lister::BETWEEN * 2, false),
+            lister::UNHOOKED - lister::BETWEEN,
             "once: then only the fallback, the hook not being there"
         );
     }

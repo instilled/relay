@@ -7,8 +7,11 @@
 //!   holder's byte stream. Only ever `guess` or `likely`.
 //! - [`claude`]: exact signals from Claude Code hooks, and the settings file
 //!   that makes Claude send them.
-//! - [`user_hooks`]: the agents' own hooks (Claude's, Codex's, Gemini's), set in
-//!   the user's own files on a yes, and what their events say.
+//! - [`sessions`]: an agent's own sessions as its profile tells of them: its
+//!   hooks' file and events and what each says, how it lists them, how one
+//!   is opened.
+//! - [`user_hooks`]: the format of those hooks, set in the user's own files
+//!   on a yes.
 //! - [`machine`]: the one place a `(current, signal)` pair becomes a
 //!   transition, where exact signals beat guesses.
 
@@ -17,6 +20,7 @@ pub mod claude;
 pub mod machine;
 pub mod pty;
 pub mod registry;
+pub mod sessions;
 pub mod user_hooks;
 
 pub use machine::{Current, Signal, Transition, step};

@@ -4,6 +4,7 @@
 //! a new name adds a CLI). `generic` is the floor every profile extends.
 
 use crate::pty::{Patterns, Timing};
+use crate::sessions::{Sessions, SessionsFile, UserHooks};
 use anyhow::{Context, Result, bail};
 use regex::Regex;
 use rl_core::Home;
@@ -42,6 +43,7 @@ struct ProfileFile {
     color: Option<String>,
     patterns: Option<PatternsFile>,
     timing: Option<TimingFile>,
+    sessions: Option<SessionsFile>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -107,6 +109,9 @@ impl ProfileFile {
                 mine.idle = p.idle;
             }
         }
+        if let Some(s) = over.sessions {
+            self.sessions.get_or_insert_with(Default::default).merge(s);
+        }
         if let Some(t) = over.timing {
             let mine = self.timing.get_or_insert_with(Default::default);
             if t.idle_after.is_some() {
@@ -158,6 +163,9 @@ pub struct Profile {
     /// Generic patterns first, then the profile's own.
     pub patterns: Patterns,
     pub timing: Timing,
+    /// Its own sessions, outside Relay: how its hooks tell of them, how it
+    /// lists them, how one is opened. None, and it has none on the list.
+    pub sessions: Option<Sessions>,
 }
 
 /// Where a headless prompt goes when it does not simply go last: a CLI whose
@@ -294,6 +302,7 @@ impl Registry {
                     color: file.color.map(|c| parse_color(&name, &c)).transpose()?,
                     patterns,
                     timing,
+                    sessions: file.sessions.map(|s| crate::sessions::compile(&name, s)).transpose()?,
                     name,
                 },
             );
@@ -318,6 +327,27 @@ impl Registry {
         self.profiles
             .values()
             .filter(|p| p.kind == RunKind::Agent && p.name != GENERIC)
+    }
+
+    /// The hooks of the agent `name` that tell of its own sessions, where
+    /// its profile has them (`sessions.hooks`).
+    pub fn user_hooks(&self, name: &str) -> Option<&UserHooks> {
+        self.profiles.get(name)?.sessions.as_ref()?.hooks.as_ref()
+    }
+
+    /// Every agent's hooks that tell of its own sessions, in name order.
+    pub fn all_user_hooks(&self) -> impl Iterator<Item = &UserHooks> {
+        self.profiles
+            .values()
+            .filter_map(|p| p.sessions.as_ref()?.hooks.as_ref())
+    }
+
+    /// The profiles of the agents that list their own sessions themselves
+    /// (`sessions.list`), in name order.
+    pub fn listing(&self) -> impl Iterator<Item = &Profile> {
+        self.profiles
+            .values()
+            .filter(|p| p.sessions.as_ref().is_some_and(|s| s.list.is_some()))
     }
 
     /// Which known CLI `argv` starts, if any.

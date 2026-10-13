@@ -16,3 +16,38 @@ patterns:
     - '(?i)\(y\)es'
   idle:
     - '^\s*[│┃]?\s*›\s*$'
+# Its own sessions, outside Relay (rl-detect/src/sessions.rs says how this
+# block reads). What codex's docs and source said on 2026-10-13 is beside
+# each value (docs/plans/2026-10-13-agent-hooks-notes.md).
+sessions:
+  hooks:
+    # $CODEX_HOME, else ~/.codex. The first whose variables are all set wins;
+    # `~` is $HOME.
+    file: ["$CODEX_HOME/hooks.json", "~/.codex/hooks.json"]
+    # {"hooks": {"<Event>": [{"hooks": [{"type": "command", "command",
+    # "timeout" (seconds), "async"}]}]}}. Codex waits this long; `rl hook` is
+    # done well before.
+    timeout: 3s
+    unit: s
+    # Codex runs it in its background, so it can never hold a turn up; never
+    # the end's, which codex might not wait for as it exits (uncertain). So
+    # hooks arrive out of order, several at once.
+    async: true
+    # A user-level hook runs only once trusted in codex's /hooks screen.
+    # Uncertain: whether the codex installed (0.162) has hooks on by default
+    # ([features] hooks), and whether SessionStart fires before the first
+    # prompt.
+    after_install: "codex asks you to trust it once: open codex, /hooks"
+    events:
+      SessionStart: started
+      UserPromptSubmit: { state: working, prompt: true }
+      PermissionRequest:
+        state: needs
+        waiting_for: "permission prompt"
+        detail: tool_name
+        says: "approve: {tool_name}"
+      PostToolUse: carries-on
+      # A turn you interrupted.
+      Interrupt: { state: idle, says: interrupted }
+      Stop: idle
+      SessionEnd: ended

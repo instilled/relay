@@ -7,13 +7,18 @@
 //! tells `rld` of one of the agent's own sessions (`outside.hook`), which
 //! the list then shows as theirs.
 //!
-//! Claude's user-level hook says `--user` after the event
-//! (`user_hooks::says_user`): a Claude run of Relay's calls both it and the
-//! run's own hook (`rl hook claude <Event>`, from the settings `rld` passes
-//! it), and only the run's own is the run's signal. The `--user` copy is
-//! never posted as `run.hook`; it goes to `rld` as `outside.hook`, with the
-//! run it was called under, and `rld` lets it go when that run is Claude's
-//! own (`user_hooks::foreign`) — one call either way. The run's own hook,
+//! What each agent's events say is in its profile (`sessions.hooks`),
+//! read from the built-in profiles and yours in `$RELAY_HOME/detect`, as
+//! the panel reads them: a hook of an agent with none there tells of no
+//! session.
+//!
+//! Claude's user-level hook says `--user` after the event (its profile's
+//! `marker`): a Claude run of Relay's calls both it and the run's own hook
+//! (`rl hook claude <Event>`, from the settings `rld` passes it), and only
+//! the run's own is the run's signal. The `--user` copy is never posted as
+//! `run.hook`; it goes to `rld` as `outside.hook`, with the run it was
+//! called under, and `rld` lets it go when that run is Claude's own
+//! (`user_hooks::foreign`) — one call either way. The run's own hook,
 //! outside any run, says nothing.
 //!
 //! A hook called from a `claude` that `rld` runs itself (`claude agents`,
@@ -33,6 +38,8 @@
 
 use crate::client::Client;
 use rl_core::Home;
+use rl_detect::Registry;
+use rl_detect::sessions::UserHooks;
 use rl_detect::user_hooks;
 use rl_proto::methods::{OutsideHook, OutsideHookParams, RunHook, RunHookParams};
 use serde_json::Value;
@@ -108,11 +115,13 @@ pub async fn hook(home: &Home, words: &Words) {
     let deadline = Instant::now() + WITHIN;
     let (agent, event) = (words.agent.as_str(), words.event.as_str());
     let run = std::env::var("RELAY_RUN").ok().filter(|s| !s.is_empty());
-    // Where the agent's user-level copy says so, only that copy tells of
+    let registry = registry(home);
+    let hooks = registry.user_hooks(agent);
+    // Where the agent's user-level copy is marked, only that copy tells of
     // the agent's own sessions, and it is never a run's signal.
-    let marked = user_hooks::says_user(agent);
+    let marked = hooks.is_some_and(|h| h.marker.is_some());
     let user = words.user && marked;
-    let tells = user_hooks::AGENTS.contains(&agent) && (user || !marked);
+    let tells = hooks.is_some() && (user || !marked);
     let signals = run.is_some() && !user;
     if !tells && !signals {
         return;
@@ -132,15 +141,18 @@ pub async fn hook(home: &Home, words: &Words) {
             let run = rld.call::<RunHook>(params).await?;
             // The run's own word: said. Another agent's, started inside that
             // run (a codex a shell run started), is one of the agent's own.
-            if !tells || !user_hooks::foreign(&run, agent) {
+            if !tells || !user_hooks::foreign(&run, agent, &registry) {
                 return anyhow::Ok(());
             }
         }
-        let Some(mut params) = outside(agent, event, &payload, |k| std::env::var(k).ok()) else {
+        let Some(hooks) = hooks.filter(|_| tells) else {
+            return anyhow::Ok(());
+        };
+        let Some(mut params) = outside(hooks, event, &payload, |k| std::env::var(k).ok()) else {
             return anyhow::Ok(());
         };
         let told = rld.call::<OutsideHook>(params.clone()).await?;
-        if finds_pid(event, told.wants_pid)
+        if finds_pid(hooks, event, told.wants_pid)
             && let Some(pid) = agent_pid(agent).await
         {
             params.pid = Some(pid);
@@ -153,6 +165,13 @@ pub async fn hook(home: &Home, words: &Words) {
     {
         eprintln!("rl hook: {e:#}");
     }
+}
+
+/// The profiles, as the panel reads them: the built-ins with yours over
+/// them; the built-ins alone where yours do not load (`rld` says what is
+/// wrong with them).
+fn registry(home: &Home) -> Registry {
+    Registry::load(home).unwrap_or_else(|_| Registry::builtin())
 }
 
 /// All of stdin, if it is all there by `deadline`. The agent writes the
@@ -168,30 +187,30 @@ fn stdin_until(deadline: Instant) -> Option<String> {
 }
 
 /// What an outside session's hook tells `rld`, from its payload: its
-/// session and folder (Gemini also puts them in `GEMINI_SESSION_ID` and
-/// `GEMINI_CWD`, read where the payload lacks them), and the run it was
+/// session and folder (read from the variables the agent's profile names,
+/// `from_env`, where the payload lacks them: Gemini's), and the run it was
 /// called under (`RELAY_RUN`). None without both.
 pub fn outside(
-    agent: &str,
+    hooks: &UserHooks,
     event: &str,
     payload: &Value,
     env: impl Fn(&str) -> Option<String>,
 ) -> Option<OutsideHookParams> {
     let field = |k: &str| payload.get(k).and_then(Value::as_str).map(str::to_string);
-    let gemini = |k: &str| env(k).filter(|_| agent == user_hooks::GEMINI);
+    let named = |var: &Option<String>| var.as_deref().and_then(&env);
     let session_id = field("session_id")
-        .or_else(|| gemini("GEMINI_SESSION_ID"))
+        .or_else(|| named(&hooks.from_env.session_id))
         .filter(|s| !s.is_empty())?;
-    let cwd = PathBuf::from(field("cwd").or_else(|| gemini("GEMINI_CWD"))?);
+    let cwd = PathBuf::from(field("cwd").or_else(|| named(&hooks.from_env.cwd))?);
     if !cwd.is_absolute() {
         return None;
     }
     Some(OutsideHookParams {
-        agent: agent.to_string(),
+        agent: hooks.agent.clone(),
         session_id,
         cwd,
         event: event.to_string(),
-        detail: user_hooks::detail(event, payload),
+        detail: hooks.detail(event, payload),
         pid: None,
         transcript_path: field("transcript_path").filter(|t| !t.is_empty()).map(PathBuf::from),
         run: env("RELAY_RUN").filter(|r| !r.is_empty()),
@@ -208,17 +227,12 @@ fn asking() -> bool {
 
 /// Whether to look for the agent's process, after `rld` answered
 /// `wants_pid` to a word on `event`: only where it knows none, and the
-/// event is worth it.
-pub fn finds_pid(event: &str, wants_pid: bool) -> bool {
-    wants_pid && asks_pid(event)
-}
-
-/// Whether `event` is worth finding the agent's process for: a start, or a
-/// prompt (the first word `rld` may hear of a session it did not see
-/// start). The rest — a tool done, above all, which Gemini waits on — do
-/// without `ps`; `rld` keeps the pid it was given.
-pub fn asks_pid(event: &str) -> bool {
-    matches!(event, "SessionStart" | "UserPromptSubmit" | "BeforeAgent")
+/// event is worth it (`UserHooks::asks_pid`: a start, or a prompt, the
+/// first word `rld` may hear of a session it did not see start). The rest —
+/// a tool done, above all, which Gemini waits on — do without `ps`; `rld`
+/// keeps the pid it was given.
+pub fn finds_pid(hooks: &UserHooks, event: &str, wants_pid: bool) -> bool {
+    wants_pid && hooks.asks_pid(event)
 }
 
 /// The agent's process: the nearest of this one's ancestors whose command
@@ -303,14 +317,21 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// An agent's hooks, as its built-in profile has them.
+    fn h(agent: &str) -> UserHooks {
+        Registry::builtin().user_hooks(agent).unwrap().clone()
+    }
+
     #[test]
     fn the_process_is_looked_for_only_where_rld_wants_it_and_the_event_is_worth_it() {
-        assert!(finds_pid("SessionStart", true));
-        assert!(finds_pid("UserPromptSubmit", true));
-        assert!(!finds_pid("SessionStart", false), "known: no ps");
-        assert!(!finds_pid("PermissionRequest", false));
-        assert!(!finds_pid("PermissionRequest", true), "not worth a ps");
-        assert!(!finds_pid("PostToolUse", true));
+        let codex = h("codex");
+        assert!(finds_pid(&codex, "SessionStart", true));
+        assert!(finds_pid(&codex, "UserPromptSubmit", true));
+        assert!(finds_pid(&h("gemini"), "BeforeAgent", true));
+        assert!(!finds_pid(&codex, "SessionStart", false), "known: no ps");
+        assert!(!finds_pid(&codex, "PermissionRequest", false));
+        assert!(!finds_pid(&codex, "PermissionRequest", true), "not worth a ps");
+        assert!(!finds_pid(&codex, "PostToolUse", true));
     }
 
     #[test]
@@ -384,28 +405,11 @@ mod tests {
     }
 
     #[test]
-    fn only_a_start_or_a_prompt_asks_ps() {
-        for e in ["SessionStart", "UserPromptSubmit", "BeforeAgent"] {
-            assert!(asks_pid(e), "{e}");
-        }
-        for e in [
-            "AfterTool",
-            "PostToolUse",
-            "Notification",
-            "PermissionRequest",
-            "Stop",
-            "AfterAgent",
-            "SessionEnd",
-        ] {
-            assert!(!asks_pid(e), "{e}");
-        }
-    }
-
-    #[test]
     fn an_outside_hook_needs_its_session_and_a_whole_folder() {
         let none = |_: &str| None;
+        let (codex, gemini) = (h("codex"), h("gemini"));
         let p = outside(
-            "codex",
+            &codex,
             "PermissionRequest",
             &json!({"session_id": "s1", "cwd": "/w/app", "tool_name": "shell", "hook_event_name": "PermissionRequest", "transcript_path": "/t/s1.jsonl"}),
             none,
@@ -418,21 +422,21 @@ mod tests {
         assert_eq!(p.transcript_path.as_deref(), Some(std::path::Path::new("/t/s1.jsonl")));
         assert_eq!(p.run, None);
         let under = |k: &str| (k == "RELAY_RUN").then(|| "r-1".to_string());
-        let p = outside("claude", "Stop", &json!({"session_id": "s1", "cwd": "/w"}), under).unwrap();
+        let p = outside(&h("claude"), "Stop", &json!({"session_id": "s1", "cwd": "/w"}), under).unwrap();
         assert_eq!(p.run.as_deref(), Some("r-1"), "the run it was called under");
-        assert!(outside("codex", "Stop", &json!({"cwd": "/w"}), none).is_none());
-        assert!(outside("codex", "Stop", &json!({"session_id": "s", "cwd": "w"}), none).is_none());
-        assert!(outside("codex", "Stop", &Value::Null, none).is_none());
+        assert!(outside(&codex, "Stop", &json!({"cwd": "/w"}), none).is_none());
+        assert!(outside(&codex, "Stop", &json!({"session_id": "s", "cwd": "w"}), none).is_none());
+        assert!(outside(&codex, "Stop", &Value::Null, none).is_none());
         // Gemini says them in its environment too.
         let env = |k: &str| match k {
             "GEMINI_SESSION_ID" => Some("g1".to_string()),
             "GEMINI_CWD" => Some("/w/g".to_string()),
             _ => None,
         };
-        let g = outside("gemini", "AfterAgent", &Value::Null, env).unwrap();
+        let g = outside(&gemini, "AfterAgent", &Value::Null, env).unwrap();
         assert_eq!((g.session_id.as_str(), g.cwd.to_str()), ("g1", Some("/w/g")));
         assert!(
-            outside("codex", "Stop", &Value::Null, env).is_none(),
+            outside(&codex, "Stop", &Value::Null, env).is_none(),
             "gemini's, not codex's"
         );
     }
