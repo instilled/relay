@@ -265,12 +265,14 @@ impl Asker {
         .unwrap_or(Duration::MAX)
     }
 
-    /// Whether the agent's hooks file has Relay's hook in it, as it reads.
-    /// A file that does not read has none that runs.
+    /// Whether the agent's hooks file has Relay's hook in it, as it reads,
+    /// and that hook's `rl` is there to run. A file that does not read has
+    /// none that runs; nor does one whose `rl` was moved or taken away,
+    /// whose hooks fail without a word.
     fn read_hooked(&self) -> bool {
         self.hooks
             .as_ref()
-            .is_some_and(|(h, f)| user_hooks::installed(f, h).unwrap_or(false))
+            .is_some_and(|(h, f)| user_hooks::installed_and_runs(f, h).unwrap_or(false))
     }
 
     /// An ask begins now: what called for it is answered.
@@ -403,7 +405,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let hooks = hooks_at(&tmp.path().join("settings.json"));
         if hooked {
-            user_hooks::install(&tmp.path().join("settings.json"), &hooks, Path::new("/x/rl")).unwrap();
+            user_hooks::install(&tmp.path().join("settings.json"), &hooks, Path::new("rl")).unwrap();
         }
         let asker = Asker::new(Polling::default(), Some(hooks));
         (tmp, asker)
@@ -504,13 +506,29 @@ mod tests {
         assert_eq!(asker.due_in(t0 + UNHOOKED, false), Duration::ZERO);
         // The hook added: not seen until the file is read again.
         let settings = tmp.path().join("settings.json");
-        user_hooks::install(&settings, &hooks_at(&settings), Path::new("/x/rl")).unwrap();
+        user_hooks::install(&settings, &hooks_at(&settings), Path::new("rl")).unwrap();
         asker.began(t0 + UNHOOKED);
         assert_eq!(asker.due_in(t0 + RECHECK - S, false), S, "as read at t0: not there");
         assert_eq!(
             asker.due_in(t0 + RECHECK + S, false),
             Duration::MAX,
             "read again after a minute"
+        );
+    }
+
+    #[test]
+    fn a_hook_whose_rl_is_gone_is_asked_for_as_if_it_were_not_there() {
+        let tmp = tempfile::tempdir().unwrap();
+        let settings = tmp.path().join("settings.json");
+        let hooks = hooks_at(&settings);
+        user_hooks::install(&settings, &hooks, &tmp.path().join("moved/rl")).unwrap();
+        let asker = Asker::new(Polling::default(), Some(hooks));
+        let t0 = Instant::now();
+        asker.began(t0);
+        assert_eq!(
+            asker.due_in(t0 + S, false),
+            UNHOOKED - S,
+            "its hooks fail: the fallback"
         );
     }
 

@@ -292,7 +292,8 @@ fn claude_settings(dir: &Path, hooked: bool) -> PathBuf {
     let settings = dir.join("claude-config/settings.json");
     if hooked {
         let hooks = rl_detect::Registry::builtin().user_hooks("claude").unwrap().clone();
-        rl_detect::user_hooks::install(&settings, &hooks, Path::new("/x/rl")).unwrap();
+        // `rl` alone: one that runs, as far as rld can tell.
+        rl_detect::user_hooks::install(&settings, &hooks, Path::new("rl")).unwrap();
     }
     settings
 }

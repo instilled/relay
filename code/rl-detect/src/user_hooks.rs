@@ -118,11 +118,23 @@ const NEVER_FAILS: &str = " || true";
 /// in its background — but not an end's, which the agent might not wait
 /// for as it exits; `rl hook` is done in milliseconds anyway.
 fn entry(hooks: &UserHooks, event: &str, command: String) -> Value {
-    let mut hook = json!({"type": "command", "command": command, "timeout": hooks.timeout});
-    if hooks.background && !hooks.ends(event) {
-        hook["async"] = json!(true);
-    }
+    let mut hook = Map::new();
+    hook.insert("type".into(), json!("command"));
+    set(&mut hook, hooks, event, command);
     json!({ "hooks": [hook] })
+}
+
+/// Sets what Relay writes of its hook on `hook`: the command, the timeout,
+/// and `async` where it runs in the agent's background (`entry`), taken
+/// out where it does not. Anything else on it is left.
+fn set(hook: &mut Map<String, Value>, hooks: &UserHooks, event: &str, command: String) {
+    hook.insert("command".into(), json!(command));
+    hook.insert("timeout".into(), json!(hooks.timeout));
+    if hooks.background && !hooks.ends(event) {
+        hook.insert("async".into(), json!(true));
+    } else {
+        hook.shift_remove("async");
+    }
 }
 
 /// Whether codex's `config.toml` beside its hooks file has hooks of its
@@ -145,23 +157,40 @@ pub fn inline_hooks(hooks_file: &Path) -> bool {
 /// without the `|| true` an older Relay did not write: an install brings
 /// such a one up to date.
 pub fn is_relays(command: &str, hooks: &UserHooks) -> bool {
+    program(command, hooks).is_some()
+}
+
+/// The `rl` a command of Relay's for the agent runs (`is_relays`), as the
+/// shell reads it: `/opt/relay/bin/rl`, or `rl` alone. None for any other
+/// command.
+fn program(command: &str, hooks: &UserHooks) -> Option<String> {
     let mut words: Vec<&str> = command.split_whitespace().collect();
     if words.ends_with(&["||", "true"]) {
         words.truncate(words.len() - 2);
     }
     if let Some(marker) = &hooks.marker {
         if words.last() != Some(&marker.as_str()) {
-            return false;
+            return None;
         }
         words.pop();
     }
     let n = words.len();
     if n < 4 || words[n - 3] != "hook" || words[n - 2] != hooks.agent {
-        return false;
+        return None;
     }
     let program = words[..n - 3].join(" ");
-    let program = program.trim_matches(|c| c == '\'' || c == '"');
-    program.rsplit('/').next() == Some("rl")
+    let program = program.trim_matches(|c| c == '\'' || c == '"').replace("'\\''", "'");
+    (program.rsplit('/').next() == Some("rl")).then_some(program)
+}
+
+/// Whether a command's `rl` would run: `rl` alone, found on the agent's
+/// `PATH` as far as Relay can tell; or a whole path to a file that may be
+/// run.
+fn runs(program: &str) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    program == "rl"
+        || (Path::new(program).is_absolute()
+            && std::fs::metadata(program).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0))
 }
 
 /// The file as it reads: none when it is not there, an error when it is
@@ -190,35 +219,51 @@ fn hooks_of<'a>(doc: &'a mut Map<String, Value>, path: &Path) -> Result<&'a mut 
     }
 }
 
-/// Each command in an event's list of groups, mutably.
-fn commands(groups: &mut [Value]) -> impl Iterator<Item = &mut Value> {
+/// Each hook in an event's list of groups, mutably.
+fn hook_objects(groups: &mut [Value]) -> impl Iterator<Item = &mut Map<String, Value>> {
     groups
         .iter_mut()
         .filter_map(|g| g.get_mut("hooks").and_then(Value::as_array_mut))
         .flatten()
-        .filter_map(|h| h.get_mut("command"))
+        .filter_map(Value::as_object_mut)
 }
 
 /// Whether Relay's hooks are in the file: any of them. A file that is not
 /// there has none; one that does not read is an error.
 pub fn installed(path: &Path, hooks: &UserHooks) -> Result<bool> {
-    let Some(doc) = read(path)? else { return Ok(false) };
-    let Some(Value::Object(events)) = doc.get("hooks") else {
-        return Ok(false);
-    };
-    Ok(events.values().filter_map(Value::as_array).any(|groups| {
-        groups
-            .iter()
+    Ok(relays_programs(path, hooks)?.next().is_some())
+}
+
+/// Whether Relay's hooks are in the file and would run: any of them whose
+/// `rl` is there to run (`runs`). One whose `rl` was moved or taken away
+/// fails without a word (`|| true`), and tells of nothing.
+pub fn installed_and_runs(path: &Path, hooks: &UserHooks) -> Result<bool> {
+    Ok(relays_programs(path, hooks)?.any(|p| runs(&p)))
+}
+
+/// The `rl` of each of Relay's hooks in the file.
+fn relays_programs(path: &Path, hooks: &UserHooks) -> Result<impl Iterator<Item = String>> {
+    let doc = read(path)?.unwrap_or_default();
+    let commands: Vec<String> = match doc.get("hooks") {
+        Some(Value::Object(events)) => events
+            .values()
+            .filter_map(Value::as_array)
+            .flatten()
             .filter_map(|g| g.get("hooks").and_then(Value::as_array))
             .flatten()
             .filter_map(|h| h.get("command").and_then(Value::as_str))
-            .any(|c| is_relays(c, hooks))
-    }))
+            .map(String::from)
+            .collect(),
+        _ => vec![],
+    };
+    let hooks = hooks.clone();
+    Ok(commands.into_iter().filter_map(move |c| program(&c, &hooks)))
 }
 
 /// Adds Relay's hook to each of the agent's events in `path`, creating the
 /// file where it is not there. An event that has Relay's already keeps it,
-/// pointed at this `rl`; nothing else is touched. True when the file
+/// brought up to date: pointed at this `rl`, with the timeout and `async`
+/// the profile says now. Nothing else is touched. True when the file
 /// changed.
 pub fn install(path: &Path, hooks: &UserHooks, rl_bin: &Path) -> Result<bool> {
     let mut doc = read(path)?.unwrap_or_default();
@@ -231,9 +276,12 @@ pub fn install(path: &Path, hooks: &UserHooks, rl_bin: &Path) -> Result<bool> {
             _ => bail!("{}: `hooks.{event}` is not a list; left as it was", path.display()),
         };
         let mut found = false;
-        for c in commands(groups) {
-            if c.as_str().is_some_and(|c| is_relays(c, hooks)) {
-                *c = Value::String(cmd.clone());
+        for h in hook_objects(groups) {
+            if h.get("command")
+                .and_then(Value::as_str)
+                .is_some_and(|c| is_relays(c, hooks))
+            {
+                set(h, hooks, event, cmd.clone());
                 found = true;
             }
         }
@@ -580,6 +628,59 @@ mod tests {
         install(&link, &h(CODEX), Path::new(RL)).unwrap();
         assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
         assert!(installed(&real, &h(CODEX)).unwrap());
+    }
+
+    #[test]
+    fn an_install_brings_the_timeout_and_async_up_to_date_and_keeps_the_rest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("hooks.json");
+        install(&path, &h(CODEX), Path::new(RL)).unwrap();
+        // Written by a Relay whose profile said otherwise, and touched by
+        // the user since.
+        let mut v = doc(&path);
+        v["hooks"]["Stop"][0]["hooks"][0]["timeout"] = json!(10);
+        v["hooks"]["Stop"][0]["hooks"][0]["statusMessage"] = json!("mine");
+        v["hooks"]["SessionEnd"][0]["hooks"][0]["async"] = json!(true);
+        v["hooks"]["Interrupt"][0]["hooks"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("async");
+        std::fs::write(&path, serde_json::to_string(&v).unwrap()).unwrap();
+        assert!(install(&path, &h(CODEX), Path::new(RL)).unwrap());
+        let v = doc(&path);
+        assert_eq!(
+            v["hooks"]["Stop"][0]["hooks"][0],
+            json!({"type": "command", "command": "'/opt/relay/bin/rl' hook codex Stop || true",
+                   "timeout": 3, "async": true, "statusMessage": "mine"})
+        );
+        assert_eq!(v["hooks"]["SessionEnd"][0]["hooks"][0].get("async"), None);
+        assert_eq!(v["hooks"]["Interrupt"][0]["hooks"][0]["async"], true);
+        assert!(!install(&path, &h(CODEX), Path::new(RL)).unwrap(), "up to date now");
+    }
+
+    #[test]
+    fn a_hook_whose_rl_is_gone_is_there_but_does_not_run() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("settings.json");
+        let rl = tmp.path().join("it's here/rl");
+        std::fs::create_dir_all(rl.parent().unwrap()).unwrap();
+        std::fs::write(&rl, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&rl, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let claude = h(CLAUDE);
+        install(&path, &claude, &rl).unwrap();
+        assert!(installed(&path, &claude).unwrap() && installed_and_runs(&path, &claude).unwrap());
+        // Not to be run: there, but not running.
+        std::fs::set_permissions(&rl, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(!installed_and_runs(&path, &claude).unwrap());
+        // Gone: the same.
+        std::fs::remove_file(&rl).unwrap();
+        assert!(installed(&path, &claude).unwrap(), "still in the file");
+        assert!(!installed_and_runs(&path, &claude).unwrap());
+        // `rl` alone, found on the agent's PATH as far as Relay knows.
+        install(&path, &claude, Path::new("rl")).unwrap();
+        assert!(installed_and_runs(&path, &claude).unwrap());
+        assert!(!installed_and_runs(&tmp.path().join("none.json"), &claude).unwrap());
     }
 
     #[test]

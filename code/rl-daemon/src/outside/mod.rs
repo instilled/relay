@@ -7,7 +7,8 @@
 //! profile has hooks (`sessions.hooks`). An agent that lists its own
 //! sessions (`sessions.list`: Claude's, `claude agents --json`) has them
 //! filled in by asking it too (`lister`), only with a reason and only while
-//! something is showing the list — a digest within the last minute, the
+//! something is showing the list — a panel's digest (`watching`) within
+//! the last minute, the
 //! way badges are: a hook cannot say whether a session is in the agent's
 //! background, nor tell of one that began before it was there.
 //! What is heard is settled here before it is kept: each session's project
@@ -157,8 +158,8 @@ impl Outsiders {
     /// What an agent's hook told of one of its sessions, outside any run of
     /// that agent's: kept, settled as any session is, or let go once it
     /// ended. A word from under a run that is the agent's own (Claude's
-    /// user-level hook, in a Claude run of Relay's) is that run's, which its
-    /// own hooks have said: let go. Of one of an agent that lists its
+    /// user-level hook, in a live Claude run of Relay's) is that run's,
+    /// which its own hooks have said: let go. Of one of an agent that lists its
     /// sessions that the last ask did not list, an ask is called for, to
     /// fill it in. Answers whether the session is kept with no process
     /// known, which the hook then finds.
@@ -172,7 +173,13 @@ impl Outsiders {
         }
         if let Some(id) = p.run.clone() {
             let run = ledger.call(move |c| rl_ledger::runs::get(c, &id)).await?;
-            if run.is_some_and(|r| !rl_detect::user_hooks::foreign(&r, &p.agent, &registry)) {
+            // Only while that run lives: a process it left behind (Claude's
+            // background supervisor, should it keep the environment it was
+            // started in) carries its `RELAY_RUN` on, and the sessions it
+            // hosts later are not the run's. A late word of the ended run's
+            // own session is harmless: its end only ends it, and any other
+            // is hidden by the run's tag (`not_relays`).
+            if run.is_some_and(|r| !r.state.is_terminal() && !rl_detect::user_hooks::foreign(&r, &p.agent, &registry)) {
                 return Ok(false);
             }
         }
@@ -1306,10 +1313,16 @@ mod tests {
         let store = store();
         let mut ours = Run::new("r-claude", RunKind::Agent, "x", vec![], "/w", "/w", Timestamp::now());
         ours.cli = Some("claude".into());
+        // One that has ended, whose `RELAY_RUN` a process it left behind
+        // (Claude's background supervisor) still carries.
+        let mut ended = Run::new("r-ended", RunKind::Agent, "x", vec![], "/w", "/w", Timestamp::now());
+        ended.cli = Some("claude".into());
+        ended.state = rl_proto::types::RunState::Finished;
         let shell = Run::new("r-shell", RunKind::Shell, "x", vec![], "/w", "/w", Timestamp::now());
         ledger
             .call(move |c| {
                 rl_ledger::runs::insert(c, &ours)?;
+                rl_ledger::runs::insert(c, &ended)?;
                 rl_ledger::runs::insert(c, &shell)
             })
             .await
@@ -1323,8 +1336,13 @@ mod tests {
         let wants = store.told(under("in-shell", "r-shell"), &ledger).await.unwrap();
         assert!(wants, "kept with no process known");
         store.told(under("unknown-run", "r-gone"), &ledger).await.unwrap();
+        let wants = store.told(under("after-its-run", "r-ended"), &ledger).await.unwrap();
+        assert!(wants, "an ended run's: kept, one of Claude's own");
         let keys: Vec<String> = store.latest(true).iter().map(Outside::key).collect();
-        assert_eq!(keys, ["o:claude:in-shell", "o:claude:unknown-run"]);
+        assert_eq!(
+            keys,
+            ["o:claude:after-its-run", "o:claude:in-shell", "o:claude:unknown-run"]
+        );
     }
 
     #[tokio::test]
