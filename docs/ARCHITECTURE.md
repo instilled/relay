@@ -460,10 +460,11 @@ the pinned runs, named with its folder and marked `hidden` before its summary. `
 moves the time on and it goes back. Archiving and pruning are as before; `rl hide <id>…` and `rl
 hide --project <dir>` (`rl unhide` the same) do it from a shell. `ctrl-x` is the one keystroke for it, whatever the row,
 and it asks first: the first press arms it and says what a second would do — remove an ended run
-or a flow's runs, stop one still going, dismiss a question, remove a project — and the second press does it, while any other
+or a flow's runs, stop and remove one still going, dismiss a question, remove a project — and the second press does it, while any other
 key disarms it, so nothing goes on a single slip (the way an agent view confirms a delete). `ctrl-c`
-is the same for leaving: once to ask, again to quit. A run still going is stopped, and a `ctrl-x`
-once it has ended removes it. On a project's header the first press counts what would go
+is the same for leaving: once to ask, again to quit. A run still going is stopped over `run.stop`
+with `archive`, and the daemon archives it once it has ended — killed if it lingers, as a removed
+project's runs are — so one `^x ^x` takes it off the list. On a project's header the first press counts what would go
 (`press ^x again to remove relay · stops 2 · archives 7 ended runs`), and the second removes the
 project over `workspace.remove` — unregistered, every run still going there stopped (a shell hung up
 on, anything else sent `SIGTERM`, whatever is left after a few seconds killed), its ended runs

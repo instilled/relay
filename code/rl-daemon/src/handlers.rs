@@ -167,11 +167,15 @@ pub fn register(r: &mut Router<Daemon>) {
     });
 
     r.register::<RunStart, _, _>(|d, spec| async move { d.supervisor.start(spec).await.map_err(internal) });
-    r.register::<RunStop, _, _>(|d, RunStopParams { id, force }| async move {
+    r.register::<RunStop, _, _>(|d, RunStopParams { id, force, archive }| async move {
         if d.supervisor.live(&id).is_none() {
             return Err(RpcError::not_found("live run", &id));
         }
-        d.supervisor.stop(&id, force).await.map_err(internal)
+        let run = d.supervisor.stop(&id, force).await.map_err(internal)?;
+        if archive {
+            tokio::spawn(crate::workspace::archive_once_ended(d.clone(), id));
+        }
+        Ok(run)
     });
     r.register::<rl_proto::methods::RunInput, _, _>(|d, p: rl_proto::methods::RunInputParams| async move {
         if d.supervisor.live(&p.id).is_none() {

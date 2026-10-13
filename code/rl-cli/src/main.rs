@@ -732,6 +732,7 @@ async fn stop(home: &Home, a: StopArgs, json: bool) -> Result<()> {
         .call::<RunStop>(RunStopParams {
             id: a.id,
             force: a.force,
+            archive: false,
         })
         .await?;
     if json {
@@ -1439,6 +1440,7 @@ async fn stop_every_run(home: &Home, json: bool) -> Result<usize> {
             .call::<RunStop>(RunStopParams {
                 id: run.id.clone(),
                 force: false,
+                archive: false,
             })
             .await
         {
