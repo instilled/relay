@@ -1381,24 +1381,35 @@ impl App {
                         Some(t) if !t.over => t.pump().await,
                         _ => std::future::pending().await,
                     }
-                } => match more {
-                    Ok(true) => {}
-                    Ok(false) => {
-                        // An ended run's output is still worth reading, so the
-                        // view stays; there is just nothing more to poll. A
-                        // stream that went without an exit is worth reading
-                        // most of all — throwing it away used to take the last
-                        // thing the run said, at the one moment it mattered.
-                        if self.term.as_ref().is_some_and(|t| t.ended.is_none()) {
-                            let words = self.lost_words();
-                            if let Some(t) = self.term.as_mut() {
-                                t.lost = true;
+                } => {
+                    // The pump above woke us on one frame; an inline agent's
+                    // repaint (Gemini climbs the screen rewriting a line at a
+                    // time) is a burst of them. Take in the whole burst now,
+                    // so the one redraw below shows a finished frame rather
+                    // than each half-erased step of it, which read as flicker.
+                    let more = match more {
+                        Ok(true) => self.term.as_mut().map_or(Ok(true), TermView::drain_ready),
+                        done => done,
+                    };
+                    match more {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            // An ended run's output is still worth reading, so the
+                            // view stays; there is just nothing more to poll. A
+                            // stream that went without an exit is worth reading
+                            // most of all — throwing it away used to take the last
+                            // thing the run said, at the one moment it mattered.
+                            if self.term.as_ref().is_some_and(|t| t.ended.is_none()) {
+                                let words = self.lost_words();
+                                if let Some(t) = self.term.as_mut() {
+                                    t.lost = true;
+                                }
+                                self.say(words);
                             }
-                            self.say(words);
                         }
+                        Err(e) => { self.say(format!("stream: {e}")); self.close_term(); }
                     }
-                    Err(e) => { self.say(format!("stream: {e}")); self.close_term(); }
-                },
+                }
             }
         }
         Ok(())
