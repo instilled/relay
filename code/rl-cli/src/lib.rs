@@ -8,6 +8,7 @@ pub mod daemon;
 pub mod digest;
 pub mod env;
 pub mod flow;
+pub mod held;
 pub mod hook;
 pub mod interpret;
 pub mod rank;

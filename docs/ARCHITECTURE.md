@@ -295,9 +295,10 @@ they came. They come from `rld`'s store (`rl-daemon/src/outside/`), never from a
   (`/background`) says `was <title>`, and the run `went to Claude's background`.
 - **Gone** on `SessionEnd`, when its process is (checked every 5s), or after long silence.
 
-Enter attaches to a Claude background session (`claude attach <id>`, the terminal handed over as
-for a live run) and carries an idle one in another terminal on here as a Relay run, with its
-profile's `resume`; a busy one is refused, saying why.
+Enter attaches to a Claude background session: `claude attach <id>` runs under a pty of the
+panel's (`held.rs`), the terminal passed through as for a joined run, so `ctrl-\` lets go of it
+and the session goes on. Enter carries an idle one in another terminal on here as a Relay run,
+with its profile's `resume`; a busy one is refused, saying why.
 
 **Adding an agent** is a profile: `detect/<agent>.yaml` (built in, or in `$RELAY_HOME/detect`)
 with `bins`, `resume` and a `sessions:` block — the hooks file, `timeout` and its `unit`, each

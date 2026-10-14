@@ -1,13 +1,13 @@
 //! Enter on one of an agent's own sessions: one in its agent's background
-//! (Claude's) is opened here, the real terminal handed to what its profile's
-//! `sessions.attach` says (`claude attach <id>`) the way the editor gets
-//! it, and nothing is made of it in Relay; one open in another terminal is
+//! (Claude's) is opened here, what its profile's `sessions.attach` says
+//! (`claude attach <id>`) run with the terminal passed through, as a joined
+//! run's is (`held`), and nothing is made of it in Relay; one open in another terminal is
 //! carried on here as a Relay run (`import.move`), as the agent's profile
 //! resumes a conversation. What is run, and what is said after, are
 //! worked out here, apart from the handover, so they read without a terminal.
 
 use super::rows::registry;
-use nix::sys::signal::{SaFlags, SigAction, SigHandler, SigSet, Signal, sigaction};
+use crate::held::Back;
 use rl_proto::methods::{ImportMoveParams, Outside};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 /// What enter does with a session.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Enter {
-    /// Hands the terminal to this command line: `claude attach <id>`.
+    /// Passes the terminal through to this command line: `claude attach <id>`.
     Attach(Vec<OsString>),
     /// Asks `rld` to carry it on as a run.
     CarryOn,
@@ -59,62 +59,42 @@ pub fn attach_words(agent: &str) -> Option<String> {
     words(agent, &attach_args(agent), rl_detect::sessions::ID)
 }
 
-/// Runs `argv` on the terminal as it is, until it lets go; why, where it
-/// would not start or ended badly. Its output is the terminal's, so what is
-/// said is how it ended, named by its first two words: `claude attach: exit
-/// code 1`.
-///
-/// It shares the panel's process group, and the terminal is cooked until it
-/// sets it raw, and again once it gives it back: a ^C or ^\ then is for it,
-/// not for the panel. So, as `system(3)` does, the panel ignores SIGINT and
-/// SIGQUIT while it waits, and the child has them back as they come.
-pub fn attach(argv: &[OsString]) -> Result<(), String> {
-    use std::os::unix::process::CommandExt;
+/// Runs `argv` with the terminal passed through, until it lets go or is let
+/// go of (`ctrl-\`); what is said after, or why, where it would not start
+/// or ended badly. Its output is the terminal's, so what is said is how it
+/// ended, named by its first two words: `claude attach: exit code 1`.
+pub async fn attach(argv: &[OsString]) -> Result<Option<String>, String> {
     let (bin, args) = argv.split_first().ok_or("nothing to run")?;
     let program = Path::new(bin).file_name().unwrap_or(bin.as_os_str()).to_string_lossy();
     let what = match args.first() {
         Some(a) => format!("{program} {}", a.to_string_lossy()),
         None => program.into_owned(),
     };
-    let mut cmd = std::process::Command::new(bin);
-    cmd.args(args);
-    // SAFETY: between fork and exec only `sigaction` runs, which is
-    // async-signal-safe, and nothing is allocated.
-    unsafe {
-        cmd.pre_exec(|| {
-            for sig in QUIET {
-                set(sig, SigHandler::SigDfl).map_err(std::io::Error::from)?;
-            }
-            Ok(())
-        });
-    }
-    let was: Vec<_> = QUIET
-        .iter()
-        .map(|&sig| (sig, set(sig, SigHandler::SigIgn).ok()))
-        .collect();
-    let status = cmd.status();
-    for (sig, old) in was {
-        if let Some(old) = old {
-            // SAFETY: puts back the disposition that was there before.
-            let _ = unsafe { sigaction(sig, &old) };
-        }
-    }
-    let status = status.map_err(|e| format!("{what}: {e}"))?;
-    match status.code() {
-        Some(0) => Ok(()),
-        Some(code) => Err(format!("{what}: exit code {code}")),
-        None => Err(format!("{what}: ended by a signal")),
-    }
+    let name = std::iter::once(what.clone())
+        .chain(args.iter().skip(1).map(|a| a.to_string_lossy().into_owned()))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let back = crate::held::hold(&strings(argv), &name)
+        .await
+        .map_err(|e| format!("{what}: {e:#}"))?;
+    said(&what, back)
 }
 
-/// The signals a keyboard sends that the panel leaves to the child.
-const QUIET: [Signal; 2] = [Signal::SIGINT, Signal::SIGQUIT];
+/// `argv` as the pty takes it.
+fn strings(argv: &[OsString]) -> Vec<String> {
+    argv.iter().map(|a| a.to_string_lossy().into_owned()).collect()
+}
 
-/// Sets `sig`'s handler to `h`, plainly; what it was.
-fn set(sig: Signal, h: SigHandler) -> nix::Result<SigAction> {
-    let action = SigAction::new(h, SaFlags::empty(), SigSet::empty());
-    // SAFETY: only ignore or default: no handler of ours runs.
-    unsafe { sigaction(sig, &action) }
+/// What is said once `what` gave the terminal back as `back`.
+fn said(what: &str, back: Back) -> Result<Option<String>, String> {
+    match back {
+        Back::Detached => Ok(Some(format!("left {what}; the session keeps going"))),
+        Back::Ended(e) => match (e.code, e.signal) {
+            (0, _) => Ok(None),
+            (_, Some(_)) => Err(format!("{what}: ended by a signal")),
+            (code, None) => Err(format!("{what}: exit code {code}")),
+        },
+    }
 }
 
 /// What `import.move` is asked, to carry `s` on: with the caller's
@@ -215,68 +195,53 @@ mod tests {
         assert_eq!(attach_words("codex"), None);
     }
 
-    /// The handover sets the process's signals: its tests take turns.
-    static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    fn ended(code: i32, signal: Option<&str>) -> Back {
+        Back::Ended(rl_session::exit::Exit {
+            code,
+            signal: signal.map(String::from),
+            at: jiff::Timestamp::now(),
+        })
+    }
 
-    /// A stand-in `claude` that writes down how it was called, and ends as
-    /// told: the handover runs it as it would the real one.
-    fn fake(dir: &Path, exit: u8) -> PathBuf {
-        let bin = dir.join("claude");
-        let said = dir.join("argv");
+    #[test]
+    fn how_the_terminal_came_back_is_said() {
+        assert_eq!(
+            said("claude attach", Back::Detached),
+            Ok(Some("left claude attach; the session keeps going".into()))
+        );
+        assert_eq!(said("claude attach", ended(0, None)), Ok(None));
+        assert_eq!(
+            said("claude attach", ended(3, None)),
+            Err("claude attach: exit code 3".into())
+        );
+        assert_eq!(
+            said("claude attach", ended(130, Some("SIGINT"))),
+            Err("claude attach: ended by a signal".into())
+        );
+    }
+
+    /// The handover runs a stand-in `claude` as it would the real one: what
+    /// it is called with, and how its ending is said.
+    #[tokio::test]
+    async fn the_handover_runs_claude_attach_and_says_how_it_ended() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bin = tmp.path().join("claude");
+        let said_argv = tmp.path().join("argv");
         std::fs::write(
             &bin,
-            format!("#!/bin/sh\necho \"$@\" > '{}'\nexit {exit}\n", said.display()),
+            format!("#!/bin/sh\necho \"$@\" > '{}'\nexit 3\n", said_argv.display()),
         )
         .unwrap();
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
-        bin
-    }
-
-    #[test]
-    fn the_handover_runs_claude_attach_and_says_how_it_ended() {
-        let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
-        let tmp = tempfile::tempdir().unwrap();
-        let ok = fake(tmp.path(), 0);
-        attach(&attach_argv(&ok, &attach_args("claude"), "a1")).unwrap();
-        assert_eq!(std::fs::read_to_string(tmp.path().join("argv")).unwrap(), "attach a1\n");
-        let bad = tempfile::tempdir().unwrap();
-        let failing = fake(bad.path(), 3);
-        assert_eq!(
-            attach(&attach_argv(&failing, &attach_args("claude"), "a1")).unwrap_err(),
-            "claude attach: exit code 3"
-        );
-        let gone = attach(&attach_argv(
-            &tmp.path().join("gone/claude"),
-            &attach_args("claude"),
-            "a1",
-        ))
-        .unwrap_err();
-        assert!(gone.starts_with("claude attach: "), "{gone}");
-    }
-
-    /// The panel ignores ^C while the child has the terminal; the child does
-    /// not: a shell started with SIGINT ignored could not take it back, so
-    /// one that dies of its own ^C had it as it comes. The panel's own is as
-    /// it was after.
-    #[test]
-    fn a_keyboard_signal_is_the_childs_while_it_has_the_terminal() {
-        let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
-        let handler = |sig| {
-            let was = set(sig, SigHandler::SigIgn).unwrap();
-            unsafe { sigaction(sig, &was) }.unwrap();
-            format!("{:?}", was.handler())
-        };
-        let before = (handler(Signal::SIGINT), handler(Signal::SIGQUIT));
-        let tmp = tempfile::tempdir().unwrap();
-        let bin = tmp.path().join("claude");
-        std::fs::write(&bin, "#!/bin/sh\nkill -INT $$\nexit 0\n").unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
-        assert_eq!(
-            attach(&attach_argv(&bin, &attach_args("claude"), "a1")).unwrap_err(),
-            "claude attach: ended by a signal"
-        );
-        assert_eq!((handler(Signal::SIGINT), handler(Signal::SIGQUIT)), before);
+        let argv = strings(&attach_argv(&bin, &attach_args("claude"), "a1"));
+        let sp = crate::held::start(&argv, (80, 24)).unwrap();
+        let (_keys, k) = tokio::sync::mpsc::channel(1);
+        let (_sizes, z) = tokio::sync::mpsc::channel(1);
+        let back = crate::held::pass(sp, k, z, &mut Vec::new(), &mut Default::default())
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read_to_string(&said_argv).unwrap(), "attach a1\n");
+        assert_eq!(said("claude attach", back), Err("claude attach: exit code 3".into()));
     }
 }

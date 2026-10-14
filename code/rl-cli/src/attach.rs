@@ -108,7 +108,7 @@ impl AltScreen {
 }
 
 /// `ctrl-\`: detach. Nothing interactive we care about uses it.
-const DETACH: u8 = 0x1c;
+pub(crate) const DETACH: u8 = 0x1c;
 const CTRL_C: u8 = 0x03;
 
 /// How often a joined terminal asks how many other runs need you.
@@ -497,7 +497,7 @@ pub fn terminal() -> String {
 
 /// The terminal's window title: status without touching the screen. Empty
 /// hands the title back to the terminal.
-fn title(s: &str) -> String {
+pub(crate) fn title(s: &str) -> String {
     format!("\x1b]0;{s}\x07")
 }
 
@@ -515,7 +515,7 @@ fn dim(s: &str) -> String {
 /// byte meant for the next `EventStream` — but on some platforms the
 /// underlying blocking thread may still be parked in the OS read a moment
 /// longer.
-struct AbortOnDrop<T>(tokio::task::JoinHandle<T>);
+pub(crate) struct AbortOnDrop<T>(pub(crate) tokio::task::JoinHandle<T>);
 
 impl<T> Drop for AbortOnDrop<T> {
     fn drop(&mut self) {
@@ -523,10 +523,10 @@ impl<T> Drop for AbortOnDrop<T> {
     }
 }
 
-struct RawMode;
+pub(crate) struct RawMode;
 
 impl RawMode {
-    fn enable() -> Result<Self> {
+    pub(crate) fn enable() -> Result<Self> {
         crossterm::terminal::enable_raw_mode()?;
         Ok(Self)
     }

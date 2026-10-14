@@ -412,8 +412,8 @@ struct App {
     /// A run to hand the real terminal to (its id, and whether to take the
     /// keyboard from whoever holds it), once ratatui has stepped aside.
     attach: Option<(String, bool)>,
-    /// An agent's own session to hand the real terminal to — `claude attach
-    /// <id>` (`carry`) — once ratatui has stepped aside.
+    /// An agent's own session to pass the terminal through to — `claude
+    /// attach <id>` (`carry`) — once ratatui has stepped aside.
     attach_outside: Option<Vec<std::ffi::OsString>>,
     /// Where an agent's binary is, by its profile's name (`carry::bin`).
     agent_bin: fn(&str) -> Option<PathBuf>,
@@ -1323,16 +1323,19 @@ impl App {
                             }
                         }
                         if let Some(argv) = self.attach_outside.take() {
-                            // The agent gets the real terminal, as the editor does; the list
-                            // comes back however it ends, and the next poll says how it stands.
+                            // The agent gets the terminal passed through, as a joined run
+                            // does, `ctrl-\` letting go; the list comes back however it ends,
+                            // and the next poll says how it stands.
                             drop(input);
                             leave_screen();
-                            let outcome = carry::attach(&argv);
+                            let outcome = carry::attach(&argv).await;
                             *terminal = enter_screen();
                             input = EventStream::new();
                             self.refresh().await;
-                            if let Err(why) = outcome {
-                                self.say(why);
+                            match outcome {
+                                Ok(Some(words)) => self.say(words),
+                                Ok(None) => {}
+                                Err(why) => self.say(why),
                             }
                         }
                     }
