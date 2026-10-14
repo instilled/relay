@@ -7,6 +7,7 @@
 
 use crate::attach::client_name;
 use crate::client::Client;
+use futures::FutureExt;
 use rl_core::Home;
 use rl_proto::methods::{AttachInfo, AttachParams, RunAttach};
 use rl_proto::types::AttachMode;
@@ -98,7 +99,41 @@ impl TermView {
                 self.over = true;
                 Ok(false)
             }
-            Some(Frame::Output(b)) => {
+            Some(frame) => {
+                self.apply(frame);
+                Ok(true)
+            }
+        }
+    }
+
+    /// Takes in every frame already buffered, without awaiting more, and says
+    /// whether the stream is still live, as [`pump`](Self::pump) does. An
+    /// inline agent repaints by climbing the screen and rewriting a line at a
+    /// time — Gemini does this on each keystroke, erasing and redrawing its
+    /// prompt box — and each step arrives as its own frame. Draining the burst
+    /// before the panel redraws means one whole repaint is drawn, not every
+    /// half-erased step of it, which is what showed as flicker. `next` is
+    /// cancel-safe, so a frame still arriving is left whole for the next pump.
+    pub fn drain_ready(&mut self) -> io::Result<bool> {
+        loop {
+            match self.rd.next().now_or_never() {
+                Some(Ok(Some(frame))) => self.apply(frame),
+                Some(Ok(None)) => {
+                    self.over = true;
+                    return Ok(false);
+                }
+                Some(Err(e)) => return Err(e),
+                // Nothing more is sitting in the buffer yet.
+                None => return Ok(true),
+            }
+        }
+    }
+
+    /// Takes one frame into the view: output onto the screen, a note or an
+    /// exit into the footer.
+    fn apply(&mut self, frame: Frame) {
+        match frame {
+            Frame::Output(b) => {
                 let b = match self.newlines.as_mut() {
                     Some(n) => n.fix(&b),
                     None => b,
@@ -108,22 +143,19 @@ impl TermView {
                 if self.scroll > 0 {
                     self.parser.screen_mut().set_scrollback(self.scroll);
                 }
-                Ok(true)
             }
-            Some(Frame::Note(s)) => {
+            Frame::Note(s) => {
                 self.note = Some((s, std::time::Instant::now()));
-                Ok(true)
             }
-            Some(Frame::Exit(e)) => {
+            Frame::Exit(e) => {
                 self.ended = Some(e.code);
                 let how = match &e.signal {
                     Some(s) => format!("run ended ({s}, exit {})", e.code),
                     None => format!("run ended (exit {})", e.code),
                 };
                 self.note = Some((how, std::time::Instant::now()));
-                Ok(true)
             }
-            Some(_) => Ok(true),
+            _ => {}
         }
     }
 
@@ -159,8 +191,88 @@ fn drawn_at(tty: bool, run: (u16, u16), pane: (u16, u16)) -> (u16, u16) {
 }
 
 #[cfg(test)]
+impl TermView {
+    /// A view reading from an arbitrary stream rather than a daemon, for tests.
+    fn piped(rd: OwnedReadHalf, wr: OwnedWriteHalf, cols: u16, rows: u16) -> Self {
+        use rl_proto::types::{Run, RunKind};
+        let now = "2020-01-01T00:00:00Z".parse().unwrap();
+        let run = Run::new("test", RunKind::Agent, "test", vec![], "/w", "/w", now);
+        Self {
+            id: "test".into(),
+            info: AttachInfo {
+                run,
+                cols,
+                rows,
+                tty: true,
+                live: true,
+                joiner: None,
+                journaled: 0,
+                replay_from: 0,
+            },
+            rd: FrameReader::new(BufReader::new(rd)),
+            _wr: wr,
+            parser: vt100::Parser::new(rows, cols, SCROLLBACK_ROWS),
+            graphics: rl_session::screen::Graphics::new(),
+            pane: (cols, rows),
+            note: None,
+            ended: None,
+            lost: false,
+            scroll: 0,
+            over: false,
+            newlines: None,
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
-    use super::drawn_at;
+    use super::*;
+    use tokio::io::AsyncWriteExt;
+
+    /// The flicker fix: an inline agent repaints by rewriting a line over and
+    /// over, each rewrite its own frame. One `drain_ready` takes in the whole
+    /// buffered burst, so the panel draws the finished frame, not a step of it.
+    #[tokio::test]
+    async fn a_burst_of_buffered_frames_is_drained_in_one_pass() {
+        let (a, b) = tokio::net::UnixStream::pair().unwrap();
+        let (a_rd, a_wr) = a.into_split();
+        let (_b_rd, mut b_wr) = b.into_split();
+        let mut view = TermView::piped(a_rd, a_wr, 20, 3);
+
+        // Three repaints of the same line, as an inline agent would send them.
+        for s in ["one", "two", "three"] {
+            let frame = Frame::Output(format!("\r\x1b[2K{s}").into_bytes()).encode();
+            b_wr.write_all(&frame).await.unwrap();
+        }
+        b_wr.flush().await.unwrap();
+
+        // The loop wakes on the first frame, as it does in `main_loop`.
+        assert!(view.pump().await.unwrap(), "stream is live");
+        // The other two are already buffered: one drain takes them both, and
+        // the stream is still open, so nothing more is ready right now.
+        assert!(view.drain_ready().unwrap(), "stream is still live");
+        let row0 = view.screen().rows(0, 20).next().unwrap();
+        assert_eq!(row0.trim_end(), "three", "only the final repaint is left");
+    }
+
+    /// A stream that ends mid-drain is reported over, not swallowed.
+    #[tokio::test]
+    async fn a_drain_that_meets_the_end_says_so() {
+        let (a, b) = tokio::net::UnixStream::pair().unwrap();
+        let (a_rd, a_wr) = a.into_split();
+        let (_b_rd, mut b_wr) = b.into_split();
+        let mut view = TermView::piped(a_rd, a_wr, 20, 3);
+
+        b_wr.write_all(&Frame::Output(b"hi".to_vec()).encode()).await.unwrap();
+        b_wr.flush().await.unwrap();
+        drop(b_wr);
+        drop(_b_rd);
+
+        assert!(view.pump().await.unwrap());
+        assert!(!view.drain_ready().unwrap(), "the end is reached");
+        assert!(view.over);
+        assert_eq!(view.screen().rows(0, 20).next().unwrap().trim_end(), "hi");
+    }
 
     /// An ended terminal run is drawn by rld at the run's size: a pane-sized
     /// screen took the drawing's moves to rows it does not have.
