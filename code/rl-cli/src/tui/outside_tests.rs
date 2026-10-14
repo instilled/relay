@@ -64,24 +64,27 @@ async fn claudes_own_sessions_are_rows_with_a_pane() {
     // The headline counts them: one needs you.
     assert!(screen.contains("1 needs you"), "{screen}");
 
-    // Each opens its pane, saying what enter does with it.
+    // Each one's pane says what enter does with it.
     for (key, enter) in [
         ("o:claude:sess-bg", "enter: open it here (claude attach)"),
         ("o:claude:sess-term", "busy in its terminal"),
         ("o:claude:sess-odd", "enter: open it here (claude attach)"),
     ] {
         app.select(Some(key.into()));
-        // With the pane shut, enter opens it, and does nothing else.
-        app.show_pane = false;
-        assert!(app.hints().contains("enter its pane · /hide"), "{}", app.hints());
-        press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
-        assert!(app.show_pane && app.attach_outside.is_none());
+        app.show_pane = true;
         let screen = draw_text(&mut app);
         // The pane is narrow: the words may wrap after the verb.
         let words = enter.split(" (").next().unwrap_or(enter);
         assert!(screen.contains(words), "{key}: {screen}");
         assert!(screen.contains(&key["o:claude:".len()..]), "{key}: {screen}");
     }
+    // One in its terminal: with the pane shut, enter opens it, and does
+    // nothing else.
+    app.select(Some("o:claude:sess-term".into()));
+    app.show_pane = false;
+    assert!(app.hints().contains("enter its pane · /hide"), "{}", app.hints());
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+    assert!(app.show_pane && app.attach_outside.is_none());
     token.cancel();
 }
 
@@ -213,22 +216,24 @@ fn fake_claude(_: &str) -> Option<std::path::PathBuf> {
     Some("/opt/fake/claude".into())
 }
 
-/// With its pane open, enter on a background session hands the terminal to
-/// `claude attach <id>` — only built here, run by the main loop — and
-/// nothing reaches the ledger; `/join` does the same at once, pane or not.
-/// Where there is no `claude`, it says so.
+/// Enter on a background session, pane open or not, as on a run, passes the
+/// terminal through to `claude attach <id>` — only built here, run by the
+/// main loop — and nothing reaches the ledger; `/join` does the same. Where
+/// there is no `claude`, it says so.
 #[tokio::test]
 async fn enter_or_join_on_a_background_session_attaches_to_it() {
     let (_tmp, token, mut app, folder) = panel().await;
     app.agent_bin = fake_claude;
     app.digest.outside = sessions(&folder);
     app.select(Some("o:claude:sess-bg".into()));
-    app.show_pane = true;
-    assert!(app.hints().contains("enter opens it here · /hide"), "{}", app.hints());
     let runs = app.digest.items.len();
     let attach: Vec<std::ffi::OsString> = vec!["/opt/fake/claude".into(), "attach".into(), "bg".into()];
-    press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
-    assert_eq!(app.attach_outside.take(), Some(attach.clone()));
+    for open in [false, true] {
+        app.show_pane = open;
+        assert!(app.hints().contains("enter opens it here · /hide"), "{}", app.hints());
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+        assert_eq!(app.attach_outside.take(), Some(attach.clone()), "pane open: {open}");
+    }
     assert_eq!(app.digest.items.len(), runs, "nothing made of it in Relay");
 
     app.show_pane = false;
@@ -237,7 +242,6 @@ async fn enter_or_join_on_a_background_session_attaches_to_it() {
     assert_eq!(app.attach_outside.take(), Some(attach), "{}", said(&app));
 
     app.agent_bin = |_| None;
-    press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
     press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
     assert!(app.attach_outside.is_none());
     assert_eq!(said(&app), "claude attach: `claude` is not on this machine");

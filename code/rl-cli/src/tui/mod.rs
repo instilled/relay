@@ -4562,10 +4562,11 @@ impl App {
             self.show_pane = true;
             self.mode = Mode::Answer(id);
         } else if let Some(Row::Outside(s)) = self.selected() {
-            // An agent's own session: its pane, which says what enter will
-            // do with it; with the pane open on it, enter does it.
+            // An agent's own session: opened here or gone to at once, as a
+            // run is joined; one to carry on from its terminal shows its
+            // pane first, which says what enter will do, and then does it.
             let s = s.clone();
-            if self.show_pane && self.pane == Pane::Facts {
+            if outside::enter_at_once(&s) || (self.show_pane && self.pane == Pane::Facts) {
                 self.enter_outside(&s, area).await;
             } else {
                 self.pane = Pane::Facts;
@@ -6221,7 +6222,7 @@ impl App {
                 format!("enter output · /summary · ^x archives · ^t pins · {pane}")
             }
             Some(Row::Run(_)) => format!("enter joins it · ^x stops it · ^t pins · {pane}"),
-            Some(Row::Outside(c)) if self.show_pane && self.pane == Pane::Facts => {
+            Some(Row::Outside(c)) if outside::enter_at_once(c) || (self.show_pane && self.pane == Pane::Facts) => {
                 format!("{} · /hide · {pane}", outside::enter_hint(c))
             }
             Some(Row::Outside(_)) => format!("enter its pane · /hide · {pane}"),

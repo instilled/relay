@@ -156,6 +156,14 @@ pub fn enter_hint(s: &Outside) -> &'static str {
     }
 }
 
+/// Whether enter does it at once, as on a run, pane open or not: opening
+/// one in the background here, or going to the run that carries it on, take
+/// nothing from where it is. Carrying one on from its terminal moves it, so
+/// enter shows its pane first, saying so.
+pub fn enter_at_once(s: &Outside) -> bool {
+    s.run.is_some() || !s.in_a_terminal()
+}
+
 /// What a search's `is:` takes it as, as a run in its state.
 pub fn is_word(s: &Outside) -> &'static str {
     match s.run_state() {
