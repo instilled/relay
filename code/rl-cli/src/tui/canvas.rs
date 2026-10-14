@@ -4,12 +4,17 @@
 use super::theme;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
+use unicode_width::UnicodeWidthChar;
 
 /// Which sides of a cell a line leaves by.
 pub(super) const UP: u8 = 1;
 pub(super) const DOWN: u8 = 2;
 pub(super) const LEFT: u8 = 4;
 pub(super) const RIGHT: u8 = 8;
+
+/// What the cell after a wide character holds: it is the character's second column, and
+/// nothing is drawn there.
+const WIDE: char = '\0';
 
 #[derive(Clone)]
 struct Cell {
@@ -57,9 +62,17 @@ impl Canvas {
         }
     }
 
+    /// `s` from `(x, y)`, a cell to each column it takes: a wide character (CJK, most emoji)
+    /// two.
     pub(super) fn text(&mut self, x: usize, y: usize, s: &str, style: Style) {
-        for (i, ch) in s.chars().enumerate() {
-            self.put(x + i, y, ch, style);
+        let mut x = x;
+        for ch in s.chars() {
+            self.put(x, y, ch, style);
+            if ch.width().unwrap_or(0) > 1 {
+                x += 1;
+                self.put(x, y, WIDE, style);
+            }
+            x += 1;
         }
     }
 
@@ -124,7 +137,7 @@ impl Canvas {
     }
 
     /// Rows `y0..y0+h`, columns `x0..x0+w`, as ratatui lines.
-    pub fn lines(&self, x0: usize, y0: usize, w: usize, h: usize) -> Vec<Line<'static>> {
+    pub(super) fn lines(&self, x0: usize, y0: usize, w: usize, h: usize) -> Vec<Line<'static>> {
         (y0..y0 + h)
             .map(|y| {
                 let mut spans: Vec<Span<'static>> = Vec::new();
@@ -139,7 +152,9 @@ impl Canvas {
                         spans.push(Span::styled(std::mem::take(&mut run), style));
                     }
                     style = st;
-                    run.push(ch);
+                    if ch != WIDE {
+                        run.push(ch);
+                    }
                 }
                 if !run.is_empty() {
                     spans.push(Span::styled(run, style));
@@ -151,10 +166,13 @@ impl Canvas {
 
     /// The whole canvas as plain text, trailing space trimmed; for tests.
     #[cfg(test)]
-    pub fn plain(&self) -> String {
+    pub(super) fn plain(&self) -> String {
         (0..self.h)
             .map(|y| {
-                let row: String = (0..self.w).map(|x| self.cells[y * self.w + x].ch).collect();
+                let row: String = (0..self.w)
+                    .map(|x| self.cells[y * self.w + x].ch)
+                    .filter(|ch| *ch != WIDE)
+                    .collect();
                 row.trim_end().to_string()
             })
             .collect::<Vec<_>>()

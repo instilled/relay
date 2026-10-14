@@ -292,8 +292,9 @@ const FLOW_RUNS: usize = 10;
 const FLOW_MARKS: usize = 40;
 
 /// A flow in the pane: the flow itself — its steps as the firing shown left them, the caret's
-/// lit while walking, and how it is wired among the others (`wired`) — the files that firing's steps wrote, how its runs went, what was said of
-/// it, then its last firings (`fp`, once fetched; else its last runs).
+/// lit while walking, and how it is wired among the others (`wired`) — the files that firing's
+/// steps wrote, how its runs went, what was said of it, then its last firings (`fp`, once
+/// fetched; else its last runs).
 #[allow(clippy::too_many_arguments)]
 pub fn flow_lines(
     j: &FlowRow,

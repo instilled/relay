@@ -233,8 +233,8 @@ fn place(p: &Path, names: &Names) -> String {
     names.registered(p).unwrap_or_else(|| short_path(p))
 }
 
-/// A flow in the pane: what starts it, where it runs, whether it has a yes, when it fires
-/// next and last did; then its wiring — what starts it and the flows among `links` that do,
+/// A flow in the pane: where it runs, whether it has a yes, when it fires next and last did;
+/// then its wiring — what starts it and the flows among `links` that do,
 /// its steps drawn as the latest firing left them (or, before it has fired, as the flow writes
 /// them), and the flows it starts. `at`: the step under the caret, while the pane is walked,
 /// lit. Where the drawing is wider than `width`, the steps are listed instead.
@@ -260,7 +260,6 @@ pub fn pane_lines(
         .dim(),
     ])];
     lines.push(Line::raw(""));
-    lines.push(fact("when", when_words(&f.when())));
     let where_ = match &folder {
         Some(p) => place(p, names),
         None if def.trigger.on.is_empty() => "the Relay home".into(),
@@ -656,7 +655,9 @@ mod tests {
         let s = text(&flow(Some("0123456789abcdef"), def(Some("/w/api"))), Some(&waiting));
         assert!(s.starts_with(" prod-logs  flow · api · on\n\n"), "{s}");
         assert!(
-            s.contains(" when     at 02:30\n in       api\n yes      approved 01234567\n next     in 30m00s\n"),
+            s.contains(
+                " prod-logs  flow · api · on\n\n in       api\n yes      approved 01234567\n next     in 30m00s\n"
+            ),
             "{s}"
         );
         assert!(s.contains(" last     1h ago · waiting at review\n"), "{s}");

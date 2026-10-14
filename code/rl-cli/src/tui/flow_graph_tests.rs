@@ -67,10 +67,20 @@ fn each_box_has_its_last_firings_mark() {
     use StepStatus as S;
     let x = firing(&[("fetch", S::Done), ("summarise", S::Failed), ("approve", S::Waiting)]);
     let c = draw(&fetched(), Some(&x), None).unwrap();
-    let text = c.plain();
-    assert!(text.contains("│ ✓ fetch │"), "{text}");
-    assert!(text.contains("│ × summarise │"), "{text}");
-    assert!(text.contains("│ ? approve   │"), "{text}");
+    assert_eq!(
+        c.plain(),
+        [
+            " ╭─────────╮    ╭─────────────╮",
+            " │ ✓ fetch │─┬─▶│ × summarise │",
+            " ╰─────────╯ │  ╰─────────────╯",
+            "             │",
+            "             │  if fetch.found",
+            "             │  ╭─────────────╮",
+            "             ╰─▶│ ? approve   │",
+            "                ╰─────────────╯",
+        ]
+        .join("\n")
+    );
     let (w, h) = c.size();
     let lines = c.lines(0, 0, w, h);
     assert!(
@@ -137,6 +147,34 @@ fn a_long_name_or_if_is_cut_and_a_chain_runs_level() {
         ]
         .join("\n")
     );
+}
+
+#[test]
+fn a_wide_glyph_in_an_if_takes_two_columns() {
+    use unicode_width::UnicodeWidthStr;
+    let def = flow(
+        "  a:\n    run: x\n  b:\n    after: a\n    if: a.state == \"完了\"\n    run: y\n  \
+         c:\n    after: b\n    run: z\n",
+    );
+    let c = draw(&def, None, None).unwrap();
+    assert_eq!(
+        c.plain(),
+        [
+            "            if a.state == 完了",
+            " ╭─────╮    ╭────────────────╮    ╭─────╮",
+            " │ ○ a │───▶│ ○ b            │───▶│ ○ c │",
+            " ╰─────╯    ╰────────────────╯    ╰─────╯",
+        ]
+        .join("\n")
+    );
+    let (w, h) = c.size();
+    for l in c.lines(0, 0, w, h) {
+        assert_eq!(l.to_string().width(), w, "{l}");
+    }
+    // Cut, a wide glyph that would straddle the edge gives way.
+    let def = flow("  a:\n    run: x\n  b:\n    after: a\n    if: a.state == \"完了完了完了完了完了\"\n    run: y\n");
+    let text = draw(&def, None, None).unwrap().plain();
+    assert!(text.starts_with("            if a.state == 完了完了…\n"), "{text}");
 }
 
 #[test]

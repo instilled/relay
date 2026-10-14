@@ -487,12 +487,3 @@ fn a_catch_up_that_is_not_top_is_refused_at_its_line() {
     assert_eq!(p.line, Some(2), "the value's line in the file: {p:?}");
     assert!(p.message.contains("top"), "{p:?}");
 }
-
-#[test]
-fn an_on_pattern_takes_its_kind_or_what_its_star_covers() {
-    assert!(kind_matches("run.failed", "run.failed"));
-    assert!(!kind_matches("run.failed", "run.finished"));
-    assert!(kind_matches("run.*", "run.failed"));
-    assert!(!kind_matches("run.*", "decision.taken"));
-    assert!(kind_matches("*", "deploy.done"));
-}

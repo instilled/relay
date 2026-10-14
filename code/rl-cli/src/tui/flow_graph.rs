@@ -9,6 +9,7 @@ use ratatui::style::Style;
 use rl_flow::def::FlowDef;
 use rl_proto::flow::{Firing, StepStatus};
 use std::collections::{BTreeSet, HashMap, HashSet};
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 #[cfg(test)]
 #[path = "flow_graph_tests.rs"]
@@ -21,12 +22,20 @@ const LABEL_MAX: usize = 24;
 /// A box's borders, its mark, a space each side of the mark and one after the name.
 const BOX_ROOM: usize = 6;
 
-/// `s`, cut to `room` characters with `…` when longer.
+/// `s`, cut to `room` columns with `…` when wider. Columns, not chars: a wide glyph takes two.
 fn clip(s: &str, room: usize) -> String {
-    if s.chars().count() <= room {
+    if s.width() <= room {
         return s.to_string();
     }
-    let mut t: String = s.chars().take(room.saturating_sub(1)).collect();
+    let mut t = String::new();
+    let mut used = 0;
+    for c in s.chars() {
+        used += c.width().unwrap_or(0);
+        if used + 1 > room {
+            break;
+        }
+        t.push(c);
+    }
     t.push('…');
     t
 }
@@ -155,8 +164,8 @@ pub fn draw(def: &FlowDef, firing: Option<&Firing>, at: Option<usize>) -> Option
         .collect();
     let mut col_w = vec![0; columns];
     for i in 0..steps.len() {
-        let label = labels[i].as_ref().map_or(0, |l| l.chars().count().min(LABEL_MAX));
-        col_w[rank[i]] = col_w[rank[i]].max(names[i].chars().count() + BOX_ROOM).max(label);
+        let label = labels[i].as_ref().map_or(0, |l| l.width().min(LABEL_MAX));
+        col_w[rank[i]] = col_w[rank[i]].max(names[i].width() + BOX_ROOM).max(label);
     }
 
     // Rows: each column's steps stacked as written, the n-th of every column level with the
@@ -227,7 +236,7 @@ pub fn draw(def: &FlowDef, firing: Option<&Firing>, at: Option<usize>) -> Option
             }
         }
         if let Some(l) = &labels[i] {
-            for xx in p.x..p.x + clip(l, col_w[p.rank]).chars().count() {
+            for xx in p.x..p.x + clip(l, col_w[p.rank]).width() {
                 taken.insert((xx, p.y - 1));
             }
         }
