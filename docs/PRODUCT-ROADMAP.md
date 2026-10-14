@@ -10,6 +10,7 @@ Goal for v1:
 The next milestone is one dependable daily loop: start work → leave → get told when needed → come back to the facts → say yes to the next step. Breadth waits for it.
 
 * [ ] a flow's own graph, the global graph dropped — a selected flow's steps drawn in its pane (`if` labels, its last firing's marks; what fires it and what it fires); `^g`, `/graph` and the global layout go
+* [ ] ctrl-\ leaves a Claude background session — enter runs `claude attach` under a PTY of Relay's (as `attach.rs` does for runs), so ctrl-\ detaches back to the panel as for any run, and ^Z / ← still work; the session itself keeps running
 * [ ] modules split — `tui/mod.rs` (~8,800 lines) into drawing, keys and modes, and the daemon glue, its tests beside them; `main.rs` (~1,900) trimmed; behaviour unchanged
 * [ ] facts collector (J6) — what happened when you get back, as facts: git commits + `diff --stat` per run, commands with exit codes, transcript ingestion (Claude/Codex `*.jsonl`), tokens/cost; facts first in the pane and the catch-up, the narrative below
 * [ ] notifications — Slack / mail when a question is raised, a run is blocked or a flow fails, with a quiet setting
