@@ -1,5 +1,5 @@
-//! A `vt100` screen drawn into a ratatui buffer. Watchers see the run at the
-//! holder's size; when the pane is shorter, the rows around the cursor win
+//! A `vt100` screen drawn into a ratatui buffer. The run is drawn at the size
+//! it ran at; when the pane is shorter, the rows around the cursor win
 //! (a full-screen app keeps it at the bottom, a fresh shell at the top), and
 //! the right edge is clipped. Scrolled back, the cursor stops deciding: the
 //! top of the window is what was asked for, and the cursor is not drawn

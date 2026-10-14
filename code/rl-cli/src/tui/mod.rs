@@ -88,12 +88,12 @@ use rl_proto::methods::{
     WorkspaceRemove, WorkspaceRemoveParams, WorkspaceRemoved, WorkspaceRename, WorkspaceRenameParams, WorkspaceUp,
     WorkspaceUpParams,
 };
-use rl_proto::types::{AttachMode, Cause, Event as LedgerEvent, Mark, Run, RunKind, RunState, Summary, SummaryTarget};
+use rl_proto::types::{Cause, Event as LedgerEvent, Mark, Run, RunKind, RunState, Summary, SummaryTarget};
 use rows::{Names, Row, fit};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
-use term::TermView;
+use term::Output;
 
 const REFRESH: Duration = Duration::from_secs(1);
 /// How often an open panel tells presence you are here: a window closed
@@ -109,15 +109,13 @@ use rows::SHELL_TAG;
 const EVENT_ASKS: usize = 40;
 /// The most rows the live line grows to before it scrolls within itself.
 const LINE_MAX: u16 = 8;
-/// Recent output replayed when joining a pipes run (or an ended one, drawn
-/// from it), enough to paint the screen on arrival. A live terminal run is
-/// drawn from its holder's screen instead. Bytes.
-const JOIN_SCROLLBACK: u64 = 256 * 1024;
+/// Recent output asked for when joining a pipes run, and when reading an
+/// ended one's page, enough to paint the screen on arrival. A live terminal
+/// run is drawn from its holder's screen instead. Bytes.
+pub(super) const SCROLLBACK: u64 = 256 * 1024;
 /// Where the header and footer text starts: level with what is typed on the
 /// line, past its `❯ `.
 const TEXT_INDENT: u16 = 2;
-/// Narrower than this, the pane takes the screen instead of sharing it.
-const SPLIT_AT: u16 = 100;
 /// The tall header — the mark, and three lines beside it — wants a screen
 /// at least this tall and this wide; on a smaller one the header is one line.
 const TALL_H: u16 = 24;
@@ -127,10 +125,6 @@ const MARK_GAP: u16 = 3;
 /// The air above the tall header, so the mark does not sit on the screen's
 /// top edge.
 const HEAD_AIR: u16 = 1;
-/// The list's share of a split screen, in percent: two thirds beside a
-/// details pane, half beside a terminal, which needs the width.
-const LIST_SHARE: u16 = 67;
-const LIST_SHARE_TERM: u16 = 50;
 
 /// What the right pane shows for a run.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -341,11 +335,8 @@ struct App {
     /// across re-ranks.
     sel: Option<String>,
     pane: Pane,
-    /// The pane beside the list (`i`); off, the list has the width.
+    /// A subpage is up and has the whole body; off, the list has it.
     show_pane: bool,
-    /// The pane was opened by selecting a question, and goes when the cursor
-    /// moves off it; opened by hand, it stays.
-    auto_pane: bool,
     /// The highlighted choice of the question being answered.
     answer_at: usize,
     /// The flow whose pane is up: its last firings, the one shown, the caret while walked.
@@ -354,9 +345,7 @@ struct App {
     open_flows: HashSet<String>,
     /// What the question pane drew last, so a click can take a choice.
     pane_hit: std::cell::RefCell<PaneHit>,
-    /// The pane alone, full width: a terminal, unless `f` says otherwise.
-    wide: bool,
-    term: Option<TermView>,
+    term: Option<Output>,
     /// Size the terminal was last told about.
     term_size: (u16, u16),
     /// The selected run's recent events.
@@ -861,7 +850,7 @@ fn empty_list(msg: &str, area: Rect, nothing: bool) -> Paragraph<'static> {
 struct Areas {
     head: Rect,
     /// The separators between the sections: under the header, above the line,
-    /// above the footer. Empty in the full-screen terminal.
+    /// above the footer. Empty while a subpage is up.
     seps: Vec<Rect>,
     list: Option<Rect>,
     pane: Option<Rect>,
@@ -875,22 +864,13 @@ struct Areas {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn areas(
-    area: Rect,
-    wide: bool,
-    show_pane: bool,
-    share: u16,
-    form_h: u16,
-    cands_h: u16,
-    line_h: u16,
-    foot_h: u16,
-) -> Areas {
+fn areas(area: Rect, show_pane: bool, form_h: u16, cands_h: u16, line_h: u16, foot_h: u16) -> Areas {
     // The panel runs to the screen's edges, with separators between its sections —
-    // but not in the full-screen terminal, which wants every cell.
-    let chrome = !wide;
+    // but not under a subpage, which wants every cell.
+    let chrome = !show_pane;
     let sep = u16::from(chrome);
     let [head, sep_a, body, form, cands, sep_b, line, sep_c, footer] = Layout::vertical([
-        Constraint::Length(head_h(area, wide)),
+        Constraint::Length(head_h(area, show_pane)),
         Constraint::Length(sep),
         Constraint::Fill(1),
         Constraint::Length(if form_h > 0 { form_h + 1 } else { 0 }),
@@ -904,20 +884,11 @@ fn areas(
     let seps = if chrome { vec![sep_a, sep_b, sep_c] } else { vec![] };
     let form = (form_h > 0).then_some(form);
     let cands = (cands_h > 0).then_some(cands);
-    let (list, pane) = if wide {
-        (None, Some(body))
-    } else if !show_pane {
-        (Some(body), None)
-    } else if area.width < SPLIT_AT {
+    // A subpage has the body to itself, and the list has it otherwise.
+    let (list, pane) = if show_pane {
         (None, Some(body))
     } else {
-        let [l, _, r] = Layout::horizontal([
-            Constraint::Percentage(share),
-            Constraint::Length(1),
-            Constraint::Fill(1),
-        ])
-        .areas(body);
-        (Some(l), Some(r))
+        (Some(body), None)
     };
     Areas {
         head,
@@ -932,22 +903,31 @@ fn areas(
 }
 
 /// How tall the header is: a row of air and the small mark's rows, with
-/// three lines beside it, where the screen has room; one line in the full-screen terminal, which
+/// three lines beside it, where the screen has room; one line under a subpage, which
 /// wants every cell, and on a screen too short or too narrow to spare them.
-fn head_h(area: Rect, wide: bool) -> u16 {
-    if wide || area.height < TALL_H || area.width < TALL_W {
+fn head_h(area: Rect, show_pane: bool) -> u16 {
+    if show_pane || area.height < TALL_H || area.width < TALL_W {
         1
     } else {
         HEAD_AIR + mark::SMALL.len() as u16
     }
 }
 
-/// The size a terminal gets in the pane: the pane's area, less the row that
-/// names the run — or the whole screen, where there is no pane.
-fn term_size(size: Rect, wide: bool, line_h: u16, foot_h: u16) -> (u16, u16) {
-    let a = areas(size, wide, true, LIST_SHARE_TERM, 0, 0, line_h, foot_h);
-    let r = a.pane.unwrap_or(size);
-    (r.width.max(1), r.height.saturating_sub(1).max(1))
+/// A subpage's rows: the one-row header that names it and the body under it.
+/// Where the pane is a single row there is only the body, and no header.
+fn subpage_rows(pane: Rect) -> (Option<Rect>, Rect) {
+    if pane.height <= 1 {
+        return (None, pane);
+    }
+    let [head, body] = Layout::vertical([Constraint::Length(1), Constraint::Fill(1)]).areas(pane);
+    (Some(head), body)
+}
+
+/// The size a terminal gets in a subpage: the body under its header.
+fn term_size(size: Rect, line_h: u16, foot_h: u16) -> (u16, u16) {
+    let a = areas(size, true, 0, 0, line_h, foot_h);
+    let (_, body) = subpage_rows(a.pane.unwrap_or(size));
+    (body.width.max(1), body.height.max(1))
 }
 
 /// Whether this terminal speaks the kitty keyboard protocol — asked once, the
@@ -1194,12 +1174,10 @@ impl App {
             sel: None,
             pane: Pane::Facts,
             show_pane: false,
-            auto_pane: false,
             answer_at: 0,
             flow_pane: Default::default(),
             open_flows: HashSet::new(),
             pane_hit: std::cell::RefCell::default(),
-            wide: false,
             term: None,
             term_size: (0, 0),
             events: Vec::new(),
@@ -1254,7 +1232,7 @@ impl App {
             if self.pane == Pane::Term && self.term.is_some() && size != self.term_size {
                 self.term_size = size;
                 if let Some(t) = &mut self.term {
-                    t.resized(size).await?;
+                    t.relayout(size);
                 }
             }
             tokio::select! {
@@ -1308,9 +1286,8 @@ impl App {
                                 &self.home,
                                 crate::attach::Opts {
                                     id: id_back,
-                                    mode: AttachMode::Join,
                                     take,
-                                    scrollback: JOIN_SCROLLBACK,
+                                    scrollback: SCROLLBACK,
                                 },
                             )
                             .await;
@@ -1376,40 +1353,6 @@ impl App {
                         None => std::future::pending().await,
                     }
                 } => self.removed(gone).await,
-                more = async {
-                    match &mut self.term {
-                        Some(t) if !t.over => t.pump().await,
-                        _ => std::future::pending().await,
-                    }
-                } => {
-                    // The pump above woke us on one frame; an inline agent's
-                    // repaint (Gemini climbs the screen rewriting a line at a
-                    // time) is a burst of them. Take in the whole burst now,
-                    // so the one redraw below shows a finished frame rather
-                    // than each half-erased step of it, which read as flicker.
-                    let more = match more {
-                        Ok(true) => self.term.as_mut().map_or(Ok(true), TermView::drain_ready),
-                        done => done,
-                    };
-                    match more {
-                        Ok(true) => {}
-                        Ok(false) => {
-                            // An ended run's output is still worth reading, so the
-                            // view stays; there is just nothing more to poll. A
-                            // stream that went without an exit is worth reading
-                            // most of all — throwing it away used to take the last
-                            // thing the run said, at the one moment it mattered.
-                            if self.term.as_ref().is_some_and(|t| t.ended.is_none()) {
-                                let words = self.lost_words();
-                                if let Some(t) = self.term.as_mut() {
-                                    t.lost = true;
-                                }
-                                self.say(words);
-                            }
-                        }
-                        Err(e) => { self.say(format!("stream: {e}")); self.close_term(); }
-                    }
-                }
             }
         }
         Ok(())
@@ -1421,7 +1364,7 @@ impl App {
 
     /// The area the terminal draws into.
     fn pane_size(&self, size: Rect) -> (u16, u16) {
-        term_size(size, self.wide, self.line_h(), self.foot_h(size.width))
+        term_size(size, self.line_h(), self.foot_h(size.width))
     }
 
     /// How many rows the live line takes: its own, capped, at least one.
@@ -1482,15 +1425,11 @@ impl App {
         if self.search.is_some() {
             return None;
         }
-        // The same test as the footer's: the tile's keys while the cursor is
-        // on the run it shows.
-        if self.pane == Pane::Term
-            && let Some(t) = &self.term
-            && (self.wide || self.selected_run().is_some_and(|i| i.run.id == t.id))
-        {
+        // The same test as the footer's: the output page's keys while it is up.
+        if self.pane == Pane::Term && self.term.is_some() {
             return Some(shortcuts::Place::Term {
-                wide: self.wide,
-                live: !t.lost && t.ended.is_none(),
+                wide: true,
+                live: false,
             });
         }
         Some(match self.view {
@@ -1840,22 +1779,6 @@ impl App {
             if matches!(self.mode, Mode::Rename(_)) {
                 self.mode = Mode::Normal;
             }
-            // A question is only worth its details: selecting one opens the
-            // pane on it, and moving off closes the pane again — unless it was
-            // open already.
-            let question =
-                matches!(self.view, View::Work | View::CatchUp) && key.as_deref().is_some_and(|k| k.starts_with("q:"));
-            if question {
-                if !self.show_pane {
-                    self.auto_pane = true;
-                    self.show_pane = true;
-                }
-                if self.pane == Pane::Term {
-                    self.leave_term();
-                }
-            } else if self.auto_pane {
-                self.hide_pane();
-            }
             self.sel = key;
             self.picked.clear();
             // A firing picked in a flow's walk lasts while the cursor is on its row: off it, the
@@ -2041,8 +1964,8 @@ impl App {
         self.select(Some(keys[next].clone()));
     }
 
-    /// Back from a join: to the list, with the cursor on the run and no pane
-    /// beside it, and a word on how it went.
+    /// Back from a join: to the list, with the cursor on the run and no page
+    /// over it, and a word on how it went.
     fn back_from_join(&mut self, id: &str, ended: crate::attach::Ended) {
         use crate::attach::Ended;
         let title = self
@@ -2051,16 +1974,13 @@ impl App {
             .unwrap_or_else(|| id.to_string());
         match ended {
             Ended::Closed { .. } => {
-                if let Some(t) = self.term.as_mut().filter(|t| t.id == id) {
-                    t.lost = true;
-                }
                 self.say(self.gone_words(id, &title));
             }
             Ended::Exit { how, .. } => self.say(format!("{title} ended ({how})")),
             Ended::Detached | Ended::Left => self.say(format!("let go of {title} · it keeps going")),
         }
         self.select(Some(format!("r:{id}")));
-        self.hide_pane();
+        self.leave_subpage();
     }
 
     /// A paste, whole: into the line as it came, newlines and all, over a
@@ -2093,18 +2013,7 @@ impl App {
         }
     }
 
-    /// The view goes for good: the stream died, or another run wants it.
-    /// A stream that went without an exit, in words. What rld last said the
-    /// run was is the honest part: it may have failed, or it may be going on
-    /// without us, and those are not the same news.
-    fn lost_words(&self) -> String {
-        let Some(t) = self.term.as_ref() else {
-            return "lost the connection".into();
-        };
-        self.gone_words(&t.id, &t.info.run.title)
-    }
-
-    /// The same, for run `id`, known as `title` if the list no longer has it.
+    /// What became of run `id`, known as `title` if the list no longer has it.
     fn gone_words(&self, id: &str, title: &str) -> String {
         let title = self
             .run_by_id(id)
@@ -2118,49 +2027,22 @@ impl App {
         }
     }
 
-    fn close_term(&mut self) {
-        if self.term.is_some() {
-            self.wide = false;
-        }
-        self.term = None;
-        self.pane = Pane::Facts;
-    }
-
-    /// Stepping back to the list. The view stays open and goes on reading, so
-    /// coming back is instant and lands where it was left.
-    fn leave_term(&mut self) {
-        self.wide = false;
-        self.pane = Pane::Facts;
-    }
-
-    /// Hide the side pane. `pane == Term` must not outlive `show_pane`: a
-    /// stale `Term` with the pane hidden would size and route keys for a tile
-    /// nobody can see — the invariant `leave_term` keeps by always resetting
-    /// to `Facts`.
-    fn hide_pane(&mut self) {
+    /// Leave the subpage for the list, the one way out: the page it was reading is let go, a
+    /// sub-mode inside it (an answer, a walk, a name) ends, and the row stays selected.
+    fn leave_subpage(&mut self) {
         self.show_pane = false;
-        self.auto_pane = false;
-        // Full screen is the pane too: hiding it gives the list back.
-        self.wide = false;
-        if self.pane == Pane::Term {
-            self.pane = Pane::Facts;
+        self.pane = Pane::Facts;
+        self.term = None;
+        if matches!(self.mode, Mode::Answer(_) | Mode::Walk | Mode::Rename(_)) {
+            self.mode = Mode::Normal;
         }
     }
 
-    /// `/pane`, `^o`: the pane beside the list, shown or hidden.
+    /// `/pane`, `^o`: the row's subpage, shown or left.
     fn toggle_pane(&mut self) {
-        self.auto_pane = false;
         if self.show_pane {
-            self.hide_pane();
+            self.leave_subpage();
         } else {
-            self.show_pane = true;
-        }
-    }
-
-    /// `/pane full`: the pane takes the whole screen, or gives it back.
-    fn toggle_full(&mut self) {
-        self.wide = !self.wide;
-        if self.wide {
             self.show_pane = true;
         }
     }
@@ -2229,24 +2111,20 @@ impl App {
         self.open_term_on(id, area).await;
     }
 
-    /// What run `id` printed, in the tile beside the list.
+    /// What run `id` printed, in a page of its own.
     async fn open_term_on(&mut self, id: String, area: Rect) {
-        // Watching is a tile beside the list, not the whole screen: the list
-        // stays, the line stays yours, and `/pane full` pops it big.
         // Still reading this one: back to it, where it was left.
         if self.term.as_ref().is_some_and(|t| t.id == id) {
             self.pane = Pane::Term;
             self.show_pane = true;
-            self.wide = false;
             self.term_size = self.pane_size(area);
             return;
         }
         self.seen(vec![id.clone()]).await;
         self.pane = Pane::Term;
         self.show_pane = true;
-        self.wide = false;
         let size = self.pane_size(area);
-        match TermView::open(&self.home, &id, size).await {
+        match Output::open(&self.home, &id, size).await {
             Ok(t) => {
                 self.term = Some(t);
                 self.term_size = size;
@@ -2620,7 +2498,7 @@ impl App {
             self.go_back();
         } else {
             self.open_view(View::Events);
-            self.close_term();
+            self.leave_subpage();
             // Asked again when the view opens: something may be back.
             self.feed.gone.clear();
             self.fetch_events().await;
@@ -2651,7 +2529,7 @@ impl App {
         self.fetch_leads().await;
         self.write_top(since, came_back).await;
         self.open_view(View::CatchUp);
-        self.close_term();
+        self.leave_subpage();
         self.picked.clear();
         self.events.clear();
         self.settle();
@@ -2791,10 +2669,8 @@ impl App {
         if let Some(k) = &key
             && !self.kept_on_the_list(k, run.as_deref())
         {
-            self.leave_term();
             self.pane = Pane::Facts;
             self.show_pane = true;
-            self.auto_pane = false;
             self.load_pane().await;
             return self.say(format!(
                 "'{what}' ended over a day ago: off the list once seen, so read here"
@@ -3951,7 +3827,7 @@ impl App {
         let shown = self.catch.as_ref().map(|c| c.since.as_millisecond());
         let tops = self.on_top() && shown == from.map(|f| f.as_millisecond());
         if !tops {
-            self.leave_term();
+            self.pane = Pane::Facts;
             self.show_pane = true;
         }
         self.summarising = Some(Summarising {
@@ -4077,6 +3953,15 @@ impl App {
         // in the list takes no room from them, so they stay for it.
         if !matches!(self.mode, Mode::Normal | Mode::Answer(_) | Mode::Rename(_) | Mode::Walk) {
             self.shortcuts = false;
+        }
+        // `ctrl-\` leaves any subpage to the list in one shot, from inside a sub-mode too.
+        if self.show_pane
+            && matches!(self.mode, Mode::Normal | Mode::Answer(_) | Mode::Walk | Mode::Rename(_))
+            && matches!(k.code, KeyCode::Char('\\' | '4'))
+            && k.modifiers.contains(KeyModifiers::CONTROL)
+        {
+            self.leave_subpage();
+            return Ok(());
         }
         match std::mem::replace(&mut self.mode, Mode::Normal) {
             Mode::Stop(id) => {
@@ -4234,14 +4119,14 @@ impl App {
             return Ok(());
         }
         let k = vi_step(k, self.line.is_empty());
-        // Watching, the line still has the keyboard, so you can type the next
-        // thing without leaving the run you are on; taking the keyboard is the
-        // handover to the real terminal (`raw::attach`), never keys here.
+        // Reading a run's page, the line still has the keyboard, so you can type
+        // the next thing without leaving the run you are on; taking the keyboard
+        // is the handover to the real terminal (`raw::attach`), never keys here.
         // An empty line has nothing to complete, so `tab` steps the lens along
         // instead — shift-tab the other way.
         if self.line.is_empty()
             && self.view == View::Work
-            && self.pane != Pane::Term
+            && !self.show_pane
             && matches!(k.code, KeyCode::Tab | KeyCode::BackTab)
         {
             self.cycle_lens(if k.code == KeyCode::BackTab { -1 } else { 1 });
@@ -4252,6 +4137,7 @@ impl App {
         if self.view == View::Work
             && self.line.is_empty()
             && matches!(self.mode, Mode::Normal)
+            && !self.show_pane
             && matches!(k.code, KeyCode::Left | KeyCode::Right)
             && let Some(key) = self.selected_flow().map(|f| f.key.clone())
         {
@@ -4295,34 +4181,29 @@ impl App {
                 self.pick = None;
                 Ok(())
             }
-            // Full screen, the term has the keyboard: the keys scroll it.
-            // `esc` is the one it does not get — that closes the pane, below —
-            // and `^o`, which hides it.
-            _ if self.pane == Pane::Term
-                && self.wide
-                && self.term.is_some()
-                && k.code != KeyCode::Esc
-                && !(k.code == KeyCode::Char('o') && k.modifiers.contains(KeyModifiers::CONTROL)) =>
-            {
-                let page = area.height.saturating_sub(3).max(1);
-                self.watch_key(&k, page);
-                Ok(())
-            }
-            // A tile beside the list: the list keeps the keyboard, `pgup` and
-            // `pgdn` read the tile back, and `esc` goes on to close the pane.
-            _ if self.pane == Pane::Term && self.term.is_some() => {
-                // A page is the tile's own height, not the screen's.
-                let page = self.pane_size(area).1;
-                match k.code {
-                    KeyCode::PageUp | KeyCode::PageDown => {
-                        self.watch_key(&k, page);
-                        Ok(())
-                    }
-                    _ => self.key_list(k).await,
-                }
-            }
+            // A subpage up owns the keyboard: the list is not on screen, so
+            // nothing here moves it.
+            _ if self.show_pane => self.key_subpage(k, area).await,
             _ => self.key_list(k).await,
         }
+    }
+
+    /// A key while a subpage is up, past the line and the sub-modes (an
+    /// answer, a walk), which have taken theirs. The subpage owns the keyboard: output
+    /// scrolls, `esc` leaves (`ctrl-\` leaves from anywhere, `key` has it), and `^c`, `^x`,
+    /// `^r`, `^o` and `^t` are the list's as ever. Everything else — the arrows, a reorder —
+    /// would move a list nobody can see, so it does nothing here.
+    async fn key_subpage(&mut self, k: KeyEvent, area: Rect) -> Result<()> {
+        // A page is the subpage's own height, not the screen's.
+        if self.page_key(&k, self.pane_size(area).1) {
+            return Ok(());
+        }
+        match (k.code, k.modifiers) {
+            (KeyCode::Esc, _) => self.leave_subpage(),
+            (KeyCode::Char('c' | 'x' | 'r' | 'o' | 't'), KeyModifiers::CONTROL) => return self.key_list(k).await,
+            _ => {}
+        }
+        Ok(())
     }
 
     /// `^h`, `?` and `esc`, for the shortcuts, before anything else has them:
@@ -4493,14 +4374,8 @@ impl App {
             (KeyCode::Char('o'), KeyModifiers::CONTROL) => self.toggle_pane(),
             (KeyCode::Char('t'), KeyModifiers::CONTROL) => self.toggle_pin().await,
             (KeyCode::Esc, _) => {
-                // The pane goes first, whatever stands open behind it: it is
-                // the largest thing on screen, so it is what `esc` should
-                // take away. The term view itself lives on, so stepping back
-                // into it stays instant.
-                if self.show_pane {
-                    self.wide = false;
-                    self.hide_pane();
-                } else if !self.filter.is_empty() {
+                // A subpage's `esc` is `key_subpage`'s; here it is the list's.
+                if !self.filter.is_empty() {
                     self.filter.clear();
                     self.settle();
                 } else if self.view == View::Events {
@@ -4540,6 +4415,12 @@ impl App {
 
     /// `enter` on an empty line: whatever the row under the cursor is for.
     async fn enter_row(&mut self, area: Rect) -> Result<()> {
+        // A subpage up has the keyboard: `enter` there is the second step, acting on the row it
+        // opened on, never the list's.
+        if self.show_pane {
+            self.act_in_subpage(area).await;
+            return Ok(());
+        }
         if self.view == View::Events {
             self.events_enter().await;
             return Ok(());
@@ -4553,44 +4434,51 @@ impl App {
             return Ok(());
         }
         if self.selected_flow().is_some() {
-            // A flow never grows into its runs on the list: they are in the pane, and enter
+            // A flow never grows into its runs on the list: they are in its subpage, and enter
             // again walks its steps and its last firings there.
-            let on_it = self.selected_flow().is_some_and(|f| f.name == self.flow_pane.flow);
-            if self.show_pane && self.pane == Pane::Facts && on_it && !self.flow_pane.firings.is_empty() {
-                self.flow_pane.at = 0;
-                self.mode = Mode::Walk;
-            } else {
-                self.pane = Pane::Facts;
-                self.show_pane = true;
-                self.load_pane().await;
-            }
+            self.pane = Pane::Facts;
+            self.show_pane = true;
+            self.load_pane().await;
         } else if let Some(q) = self.selected_question() {
             let id = q.id.clone();
             self.picked.clear();
-            // The choices are in the pane: the arrows walk them from the first.
+            // The choices are in the subpage: the arrows walk them from the first.
             self.answer_at = 0;
             self.pane = Pane::Facts;
             self.show_pane = true;
             self.mode = Mode::Answer(id);
-        } else if let Some(Row::Outside(s)) = self.selected() {
-            // An agent's own session: its pane, which says what enter will
-            // do with it; with the pane open on it, enter does it.
-            let s = s.clone();
-            if self.show_pane && self.pane == Pane::Facts {
-                self.enter_outside(&s, area).await;
-            } else {
-                self.pane = Pane::Facts;
-                self.show_pane = true;
-            }
-        } else if matches!(self.selected(), Some(Row::Group(_))) {
-            // A project header: its flows in the pane; `everywhere`'s, the
-            // flows with no `in` and how runs outside every project stand.
+        } else if matches!(self.selected(), Some(Row::Outside(_) | Row::Group(_))) {
+            // An agent's own session: its subpage, which says what enter will do with it. A
+            // project header: its flows there; `everywhere`'s, the flows with no `in` and how
+            // runs outside every project stand.
             self.pane = Pane::Facts;
             self.show_pane = true;
         } else {
             self.say("nothing here to open");
         }
         Ok(())
+    }
+
+    /// `enter` with a subpage up: a flow's goes on to walk its steps and its last firings, a
+    /// question's to its choices, an agent's own session's does what its subpage says. The rest
+    /// have nothing more to do.
+    async fn act_in_subpage(&mut self, area: Rect) {
+        if self.pane != Pane::Facts {
+            return;
+        }
+        if let Some(f) = self.selected_flow() {
+            if f.name == self.flow_pane.flow && !self.flow_pane.firings.is_empty() {
+                self.flow_pane.at = 0;
+                self.mode = Mode::Walk;
+            }
+        } else if let Some(q) = self.selected_question() {
+            let id = q.id.clone();
+            self.answer_at = 0;
+            self.mode = Mode::Answer(id);
+        } else if let Some(Row::Outside(s)) = self.selected() {
+            let s = s.clone();
+            self.enter_outside(&s, area).await;
+        }
     }
 
     /// Enter (or `/join`) on an agent's own session (`carry`): one in
@@ -5062,8 +4950,7 @@ impl App {
             palette::Cmd::Import => self.importing = true,
             palette::Cmd::Pane => match arg.trim() {
                 "" => self.toggle_pane(),
-                "full" => self.toggle_full(),
-                other => self.say(format!("pane {other}? on its own, or /pane full")),
+                other => self.say(format!("pane {other}? on its own")),
             },
             palette::Cmd::Rename => self.rename_here(),
             palette::Cmd::Pin => self.toggle_pin().await,
@@ -5126,16 +5013,16 @@ impl App {
         Ok(())
     }
 
-    /// Watching a run, or reading an ended one: the few keys the view keeps
-    /// for itself. Everything else has already gone to the line.
-    fn watch_key(&mut self, k: &KeyEvent, page: u16) -> bool {
+    /// Reading an ended run's page: the few keys the page keeps for itself.
+    /// Everything else has already gone to the line.
+    fn page_key(&mut self, k: &KeyEvent, page: u16) -> bool {
         if self.term.is_none() {
             return false;
         }
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         let back = matches!(k.code, KeyCode::Char('\\') | KeyCode::Char('4')) && ctrl;
         if back || k.code == KeyCode::Esc {
-            self.leave_term();
+            self.leave_subpage();
             return true;
         }
         let by = match k.code {
@@ -5175,19 +5062,12 @@ impl App {
             (None, Some(c)) => c.cands.len().min(CANDS) as u16,
             (None, None) => 0,
         };
-        let share = if self.pane == Pane::Term {
-            LIST_SHARE_TERM
-        } else {
-            LIST_SHARE
-        };
         // The footer: the hints, or the keys for here, as many rows as they
         // wrap to.
         let foot = self.foot_lines(f.area().width);
         let a = areas(
             f.area(),
-            self.wide,
             self.show_pane,
-            share,
             form_h,
             cands_h,
             self.line_h(),
@@ -5293,11 +5173,6 @@ impl App {
                 View::Work => self.draw_list(f, list, &rows),
                 View::Events => self.draw_events(f, list),
                 View::CatchUp => self.draw_catch_up(f, list),
-            }
-            if a.pane.is_some() {
-                let x = list.x + list.width;
-                let bar = Rect::new(x, list.y, 1, list.height);
-                f.render_widget(Paragraph::new("│\n".repeat(list.height as usize)).dim(), bar);
             }
         }
         if let Some(pane) = a.pane {
@@ -5862,54 +5737,79 @@ impl App {
         self.draw_window(f, rest, shown, keys, sel_line);
     }
 
+    /// The one row that names a subpage, whatever it is of: `‹ esc` to step
+    /// back, then what it is the page of. A run's says its id and, once its
+    /// output is being read, how it ended.
+    fn subpage_head(&self) -> Line<'static> {
+        let mut spans = vec![Span::styled("‹ esc  ", theme::dim())];
+        let plain = |words: &str| Span::styled(words.to_string(), theme::name());
+        if self.pane == Pane::Term
+            && let Some(t) = &self.term
+        {
+            // Browse away and the page stays on its run, so it has to say which.
+            let title = self
+                .run_by_id(&t.id)
+                .map(|r| r.title.clone())
+                .unwrap_or_else(|| t.title.clone());
+            spans.push(Span::styled(format!("{} · ", t.id), theme::dim()));
+            spans.push(plain(&title));
+            if let Some(code) = t.ended() {
+                spans.push(Span::styled(format!(" · ended ({code})"), theme::dim()));
+            }
+        } else if matches!(self.mode, Mode::Draft(_)) {
+            spans.push(plain("draft"));
+        } else if self.tested.is_some() {
+            spans.push(plain("flow test"));
+        } else if self.reload_list.is_some() {
+            spans.push(plain("not loaded"));
+        } else if self.view == View::Events {
+            spans.push(plain("event"));
+        } else if self.lead_here().is_some() {
+            spans.push(plain("firing"));
+        } else if self.on_top() {
+            spans.push(plain("while you were away"));
+        } else {
+            match self.selected() {
+                Some(Row::Run(i)) => {
+                    spans.push(Span::styled(format!("{} · ", i.run.id), theme::dim()));
+                    spans.push(plain(&i.run.title));
+                }
+                Some(Row::Flow(f)) => spans.push(plain(&f.name)),
+                Some(Row::Outside(c)) => spans.push(plain(&c.title())),
+                Some(Row::Question(_)) => spans.push(plain("question")),
+                Some(Row::Group(h)) if h.is_everywhere() => spans.push(plain(rows::EVERYWHERE)),
+                Some(Row::Group(h)) => spans.push(plain(&self.names.workspace(&h.workspace))),
+                None => {}
+            }
+        }
+        Line::from(spans)
+    }
+
+    /// A subpage: its header on the first row, its page under it.
     fn draw_pane(&mut self, f: &mut Frame, area: Rect) {
+        let (head, body) = subpage_rows(area);
+        if let Some(head) = head {
+            f.render_widget(Paragraph::new(self.subpage_head()), head);
+        }
+        self.draw_subpage_body(f, body);
+    }
+
+    fn draw_subpage_body(&mut self, f: &mut Frame, area: Rect) {
         // Filled in again only if a question is drawn, so a click never takes
         // a choice that is no longer on screen.
         *self.pane_hit.borrow_mut() = PaneHit::default();
         if self.pane == Pane::Term
             && let Some(t) = &self.term
         {
-            // As a tile the term lines up with the facts pane, whose lines
-            // carry a leading space; full screen it fills the pane edge to edge.
-            let area = if self.wide {
-                area
+            let body = area;
+            if t.empty() {
+                f.render_widget(
+                    Paragraph::new(Line::from(Span::raw(" nothing was recorded").dim())),
+                    body,
+                );
             } else {
-                Rect {
-                    x: area.x + 1,
-                    width: area.width.saturating_sub(1),
-                    ..area
-                }
-            };
-            // Whose terminal this is, on the first row: browse away and the
-            // tile stays on its run, so it has to say which one.
-            let (word, style) = if t.lost {
-                ("lost", ratatui::style::Style::default().fg(theme::BAD))
-            } else if t.ended.is_some() {
-                ("ended", theme::dim())
-            } else {
-                ("watching", ratatui::style::Style::default().fg(theme::LIVE))
-            };
-            let title = self
-                .run_by_id(&t.id)
-                .map(|r| r.title.clone())
-                .unwrap_or_else(|| t.info.run.title.clone());
-            let head = Rect { height: 1, ..area };
-            f.render_widget(
-                Paragraph::new(Line::from(vec![
-                    Span::styled(format!("{word} "), style),
-                    Span::styled(
-                        fit(&title, area.width.saturating_sub(word.len() as u16 + 1) as usize),
-                        theme::name(),
-                    ),
-                ])),
-                head,
-            );
-            let body = Rect {
-                y: area.y + 1,
-                height: area.height.saturating_sub(1),
-                ..area
-            };
-            screen::draw(t.screen(), body, f.buffer_mut());
+                screen::draw(t.screen(), body, f.buffer_mut());
+            }
             return;
         }
         let now = Timestamp::now();
@@ -6150,39 +6050,19 @@ impl App {
 
     /// The keys for what the cursor is on, in the footer.
     fn hints(&self) -> String {
-        // The tile's own footer, but only while the cursor is on the run it
-        // shows — browse away and the selected row's actions take over, since
-        // that is what `enter` would act on.
+        // The output page's own footer, while it is up.
         if self.pane == Pane::Term
             && let Some(t) = &self.term
-            && (self.wide || self.selected_run().is_some_and(|i| i.run.id == t.id))
         {
             let mut s = String::new();
             // A full-screen app keeps no lines above its screen: nothing to
             // read back, so the keys are not offered.
-            let back = if t.screen().alternate_screen() {
-                ""
-            } else {
-                " · pgup/pgdn reads back"
-            };
-            if t.lost {
-                s.push_str(&format!("lost · the last that was heard{back} · esc back"));
-            } else if t.ended.is_some() {
-                s.push_str(&format!("ended{back} · esc back"));
-            } else if let Some(who) = &t.info.joiner {
-                s.push_str(&format!(
-                    "watching · {who} is driving · enter takes the terminal · esc back"
-                ));
-            } else {
-                s.push_str(&format!("watching · enter takes the terminal{back} · esc back"));
+            if !t.screen().alternate_screen() {
+                s.push_str("pgup/pgdn reads back · ");
             }
+            s.push_str("esc back · ctrl-\\ list");
             if t.scrolled() > 0 {
                 s.push_str(&format!(" · {} back", t.scrolled()));
-            }
-            if let Some((n, at)) = &t.note
-                && at.elapsed() < FLASH
-            {
-                s.push_str(&format!(" · {n}"));
             }
             return s;
         }
@@ -6474,25 +6354,21 @@ mod tests {
         assert_eq!(head_h(screen(160, 45), false), 6);
         assert_eq!(head_h(screen(100, 30), false), 6);
         assert_eq!(head_h(screen(80, 24), false), 6);
-        // The full-screen terminal wants every cell.
+        // A subpage wants every cell.
         assert_eq!(head_h(screen(160, 45), true), 1);
         // Too short, or too narrow, to spare the rows for the mark.
         assert_eq!(head_h(screen(160, 23), false), 1);
         assert_eq!(head_h(screen(80, 20), false), 1);
         assert_eq!(head_h(screen(79, 45), false), 1);
         // The list starts under the header and its separator, whichever it is.
-        let list = |w, h| {
-            areas(screen(w, h), false, false, super::LIST_SHARE, 0, 0, 1, 1)
-                .list
-                .unwrap()
-        };
+        let list = |w, h| areas(screen(w, h), false, 0, 0, 1, 1).list.unwrap();
         assert_eq!(list(100, 30).y, 7);
         assert_eq!(list(80, 20).y, 2);
     }
 
     #[test]
     fn a_click_under_the_tall_header_finds_its_row() {
-        let a = areas(Rect::new(0, 0, 100, 30), false, false, super::LIST_SHARE, 0, 0, 1, 1);
+        let a = areas(Rect::new(0, 0, 100, 30), false, 0, 0, 1, 1);
         let list = a.list.unwrap();
         let hit = ListHit {
             area: list,
@@ -6508,14 +6384,11 @@ mod tests {
     }
 
     #[test]
-    fn a_terminal_in_the_pane_is_sized_under_the_header_it_has() {
-        // 45 rows, less the header (6) and its separator, the separators above the line
-        // and the footer, the line, the footer, and the row naming the run.
-        assert_eq!(term_size(Rect::new(0, 0, 160, 45), false, 1, 1), (79, 33));
-        // Full screen the header is one line and there are no separators.
-        assert_eq!(term_size(Rect::new(0, 0, 160, 45), true, 1, 1), (160, 41));
-        // A short screen keeps the one-line header beside a tile too.
-        assert_eq!(term_size(Rect::new(0, 0, 80, 20), false, 1, 1), (80, 13));
+    fn a_terminal_in_a_subpage_is_sized_under_the_header_it_has() {
+        // The whole width, and the height less the one-line panel header, the line,
+        // the footer, and the row naming the run.
+        assert_eq!(term_size(Rect::new(0, 0, 160, 45), 1, 1), (160, 41));
+        assert_eq!(term_size(Rect::new(0, 0, 80, 20), 1, 1), (80, 16));
     }
 
     #[test]
@@ -7688,6 +7561,7 @@ mod tests {
         app.refresh().await;
         app.select(Some("q:dec00001".into()));
         app.moved().await;
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
         let mut t = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 40)).unwrap();
         t.draw(|f| app.draw(f)).unwrap();
         let buf = t.backend().buffer().clone();
@@ -7851,6 +7725,92 @@ mod tests {
             "a first open has nothing to catch up on"
         );
         assert_eq!(super::away(Some(now - h(90)), now, None), None, "after: off");
+    }
+
+    /// A panel of two runs with the first selected and its ended output up as a
+    /// subpage, `lines` long.
+    async fn panel_on_output(lines: usize) -> (tempfile::TempDir, tokio_util::sync::CancellationToken, super::App) {
+        let (tmp, token, mut app, _folder) = panel_with_runs(2).await;
+        app.select(Some(RUN.into()));
+        let text: String = (1..=lines).map(|n| format!("line {n}\n")).collect();
+        app.term = Some(super::Output::ended_with("run00001", "make test", &text, 3, (118, 36)));
+        app.pane = super::Pane::Term;
+        app.show_pane = true;
+        (tmp, token, app)
+    }
+
+    #[tokio::test]
+    async fn a_subpage_takes_the_whole_body_and_leaves_no_list_beside_it() {
+        let (_tmp, token, mut app) = panel_on_output(3).await;
+        let screen = draw_text(&mut app);
+        assert!(screen.contains("‹ esc  run00001 · make test · ended (3)"), "{screen}");
+        assert!(screen.contains("line 3"), "{screen}");
+        assert!(!screen.contains('│'), "no divider, no second column: {screen}");
+        assert!(!screen.contains("echo 2"), "the other run's row is not drawn: {screen}");
+        token.cancel();
+    }
+
+    /// A run that ends while you are joined to it: you come back to the list,
+    /// not to a page of a dead join, and the run is the row you are on.
+    #[tokio::test]
+    async fn coming_back_from_a_join_lands_on_the_list() {
+        let (_tmp, token, mut app) = panel_on_output(3).await;
+        assert!(app.show_pane, "a page is up");
+        app.back_from_join(
+            "run00001",
+            crate::attach::Ended::Exit {
+                code: 0,
+                how: "exit 0".into(),
+            },
+        );
+        assert!(!app.show_pane, "the list is back");
+        assert!(app.term.is_none(), "and the page it was reading is let go");
+        assert_eq!(app.sel.as_deref(), Some(RUN), "the run is the row");
+        assert!(draw_text(&mut app).contains("ended (exit 0)"), "a word on how it went");
+        token.cancel();
+    }
+
+    #[tokio::test]
+    async fn a_subpage_draws_at_a_sliver_of_a_screen_without_overflowing() {
+        let (_tmp, token, mut app) = panel_on_output(30).await;
+        // The header is dropped where there is no row to spare for it, and nothing panics.
+        for (w, h) in [(120, 1), (20, 1), (20, 2), (20, 10), (1, 1)] {
+            let mut t = ratatui::Terminal::new(ratatui::backend::TestBackend::new(w, h)).unwrap();
+            t.draw(|f| app.draw(f)).unwrap();
+        }
+        let (head, body) = super::subpage_rows(Rect::new(3, 4, 20, 1));
+        assert_eq!((head, body), (None, Rect::new(3, 4, 20, 1)));
+        let (head, body) = super::subpage_rows(Rect::new(3, 4, 20, 5));
+        assert_eq!((head, body), (Some(Rect::new(3, 4, 20, 1)), Rect::new(3, 5, 20, 4)));
+        // A long head is cut at the screen's edge, not carried past it.
+        let mut t = ratatui::Terminal::new(ratatui::backend::TestBackend::new(20, 10)).unwrap();
+        t.draw(|f| app.draw(f)).unwrap();
+        assert!(buf_has(t.backend().buffer(), "‹ esc  run00001"));
+        token.cancel();
+    }
+
+    #[tokio::test]
+    async fn keys_with_a_subpage_up_do_not_move_the_list_and_scroll_the_output() {
+        let (_tmp, token, mut app) = panel_on_output(100).await;
+        let none = KeyModifiers::NONE;
+        let before = app.sel.clone();
+        for code in [KeyCode::Char('j'), KeyCode::Char('k'), KeyCode::Down, KeyCode::Up] {
+            press(&mut app, code, none).await;
+            assert_eq!(app.sel, before, "{code:?} left the list where it was");
+        }
+        press(&mut app, KeyCode::Char('j'), KeyModifiers::CONTROL).await;
+        assert_eq!(app.sel, before, "^j too");
+        assert!(app.show_pane, "and the subpage is still up");
+        press(&mut app, KeyCode::PageUp, none).await;
+        let back = app.term.as_ref().unwrap().scrolled();
+        assert!(back > 0, "pgup reads back");
+        press(&mut app, KeyCode::PageDown, none).await;
+        assert!(app.term.as_ref().unwrap().scrolled() < back, "pgdn reads forward");
+        assert_eq!(app.sel, before);
+        // The way out still works.
+        press(&mut app, KeyCode::Char('\\'), KeyModifiers::CONTROL).await;
+        assert!(!app.show_pane, "ctrl-backslash leaves");
+        token.cancel();
     }
 
     #[test]
@@ -8070,7 +8030,8 @@ mod tests {
             "the top, the rows, the pane and the footer share one"
         );
         // Narrowed by a search, the top is still told from all of it: one
-        // of each.
+        // of each, on the list.
+        app.leave_subpage();
         app.filter = "echo".into();
         let before = built();
         draw_text(&mut app);
@@ -8109,6 +8070,11 @@ mod tests {
         assert!(app.show_pane && app.pane == super::Pane::Facts, "read in the pane");
         assert!(unseen(&app, "run00002"), "seen only once the catch-up is left");
         assert!(draw_text(&mut app).contains("old"));
+        press(&mut app, KeyCode::Esc, KeyModifiers::NONE).await;
+        assert!(
+            !app.show_pane && app.view == super::View::CatchUp,
+            "esc steps back to the catch-up"
+        );
         // A recent one goes to the list, the cursor on it.
         app.select(Some(RUN.into()));
         press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
@@ -8180,7 +8146,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn landing_on_a_question_in_the_catch_up_opens_its_pane() {
+    async fn landing_on_a_question_in_the_catch_up_opens_nothing_until_enter() {
         let (tmp, token, mut app, folder) = panel().await;
         ask_in(&tmp, &folder);
         app.refresh().await;
@@ -8188,9 +8154,12 @@ mod tests {
         assert!(!app.show_pane, "on the project's line");
         press(&mut app, KeyCode::Down, KeyModifiers::NONE).await;
         assert_eq!(app.sel.as_deref(), Some("q:dec00001"));
-        assert!(app.show_pane, "a question is only worth its details, as on the list");
-        press(&mut app, KeyCode::Down, KeyModifiers::NONE).await;
-        assert!(!app.show_pane, "and off it the pane goes again");
+        assert!(!app.show_pane, "selecting a question opens nothing");
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+        assert!(
+            app.view == super::View::Work && app.sel.as_deref() == Some("q:dec00001"),
+            "enter in the catch-up goes to the row on the list, as for any row"
+        );
         token.cancel();
     }
 
@@ -8499,6 +8468,8 @@ mod tests {
         assert!(app.top.is_none(), "the top is still the counts");
         let frame = draw_text(&mut app);
         assert!(frame.contains("two runs, fine"), "{frame}");
+        app.leave_subpage();
+        let frame = draw_text(&mut app);
         assert!(frame.contains("• api: 2 ran"), "{frame}");
         token.cancel();
     }

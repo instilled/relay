@@ -889,7 +889,6 @@ mod tests {
         assert_eq!(at_end("/rel s", &here), ["shell"], "a name's prefix will do");
         assert!(at_end("/reload shell ", &here).is_empty(), "nothing after shell");
         assert_eq!(at_end("/archive ", &here), ["seen"]);
-        assert_eq!(at_end("/pane ", &here), ["full"]);
         assert_eq!(at_end("/resume ", &here), ["all"]);
         assert_eq!(at_end("/resume all ", &here), ["commands"]);
         assert_eq!(at_end("/lens ", &here), ["all", "agents", "flows", "hidden"]);

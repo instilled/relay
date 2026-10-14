@@ -257,13 +257,10 @@ async fn enter_twice_on_a_flow_walks_its_steps_and_enter_on_one_reads_its_run() 
     assert!(app.show_pane, "enter shows the flow");
     let frame = draw_text(&mut app);
     // The firings in the pane, each a row: the one shown marked, when, where it stands, what it
-    // came to (cut to the pane's width).
+    // came to.
     let row = frame.lines().find(|l| {
-        let Some((_, pane)) = l.rsplit_once('│') else {
-            return false;
-        };
-        let words: Vec<&str> = pane.split_whitespace().collect();
-        matches!(words.as_slice(), ["▸", _when, "done", came_to] if came_to.starts_with("res"))
+        let words: Vec<&str> = l.split_whitespace().collect();
+        matches!(words.as_slice(), ["▸", _when, "done", came_to, ..] if came_to.starts_with("res"))
     });
     assert!(row.is_some(), "a firing's row: {frame}");
     press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
@@ -275,6 +272,33 @@ async fn enter_twice_on_a_flow_walks_its_steps_and_enter_on_one_reads_its_run() 
         Some("fire0001-triage"),
         "the step's run, read in the tile"
     );
+    token.cancel();
+}
+
+/// `esc` inside a walk only ends the walk — `ctrl-\` is the one gesture that means "the list,
+/// now", from however deep in a subpage you are, the same as it detaches a join.
+#[tokio::test]
+async fn ctrl_backslash_leaves_a_walked_flow_for_the_list_in_one_go() {
+    let (tmp, token, mut app, folder) = panel().await;
+    flow_in(&tmp, &mut app, "prod-logs", "---\nsteps:\n  probe:\n    run: x\n---\n").await;
+    fired(
+        &tmp,
+        &folder,
+        "prod-logs",
+        "fire0001",
+        &[("probe", StepStatus::Done, Some("found\r\n"))],
+        FiringStatus::Done,
+    );
+    app.refresh().await;
+    app.select(Some("f:prod-logs".into()));
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+    assert!(app.show_pane && matches!(app.mode, super::Mode::Walk), "walked");
+
+    press(&mut app, KeyCode::Char('\\'), KeyModifiers::CONTROL).await;
+    assert!(!app.show_pane, "the subpage is gone, not just the walk");
+    assert!(matches!(app.mode, super::Mode::Normal), "and the walk with it");
+    assert_eq!(app.sel.as_deref(), Some("f:prod-logs"), "the flow is still the row");
     token.cancel();
 }
 
