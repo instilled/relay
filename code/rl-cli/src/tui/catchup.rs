@@ -282,6 +282,7 @@ fn row(r: &Row, w: usize, now: Timestamp) -> Line<'static> {
         Row::Question(_) => (rows::QUESTION, None, false),
         Row::Run(i) => (rows::icon(&i.run), i.run.cli.as_deref(), i.run.state.is_terminal()),
         Row::Flow(_) => (rows::FLOW, None, false),
+        Row::Outside(c) => (rows::outside_icon(c), Some(c.agent.as_str()), rows::outside_ended(c)),
         Row::Group(h) => return Line::raw(h.name.clone()),
     };
     let right = match r {

@@ -77,7 +77,7 @@ pub const ALL: &[Command] = &[
         name: "import",
         args: "",
         words: &[],
-        what: "move Claude's own sessions into Relay (claude --bg, and ones in a terminal)",
+        what: "move Claude's background sessions into Relay (claude --bg)",
         cmd: Cmd::Import,
     },
     Command {

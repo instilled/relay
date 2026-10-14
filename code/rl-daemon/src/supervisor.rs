@@ -205,6 +205,11 @@ impl Supervisor {
             .collect()
     }
 
+    /// The agent process of each live run: the pid its holder spawned.
+    pub fn pids(&self) -> std::collections::HashSet<u32> {
+        self.live.lock().unwrap().values().map(|l| l.hello.pid).collect()
+    }
+
     pub fn joiners(&self) -> HashMap<String, String> {
         self.live
             .lock()
@@ -230,18 +235,7 @@ impl Supervisor {
         let now = Timestamp::now();
         let id = new_id().context("generating run id")?;
         let place = git::placement(&cwd).await;
-        // A registered workspace containing cwd wins; then the git root; then cwd.
-        let registered = self
-            .ledger
-            .call({
-                let cwd = cwd.clone();
-                move |c| rl_ledger::workspaces::containing(c, &cwd)
-            })
-            .await?
-            .map(|w| w.path);
-        let workspace = registered
-            .or_else(|| place.toplevel.clone())
-            .unwrap_or_else(|| cwd.clone());
+        let workspace = crate::workspace::filed_under(&self.ledger, &cwd, place.toplevel.clone()).await?;
         let title = spec.title.clone().unwrap_or_else(|| default_title(&spec.argv));
 
         // What is this? A known CLI gets its kind, its name, and — where it

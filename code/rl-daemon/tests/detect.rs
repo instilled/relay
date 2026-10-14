@@ -216,7 +216,7 @@ async fn hooks_are_exact_and_the_pty_cannot_undo_them() {
     let bad = c.call("run.mark", json!({ "id": "nope0000", "mark": "done" })).await;
     assert_eq!(bad.error.unwrap().code, RpcError::INTERNAL);
     let bad = c
-        .call("run.hook", json!({ "id": run.id, "dialect": "codex", "event": "Stop" }))
+        .call("run.hook", json!({ "id": run.id, "dialect": "aider", "event": "Stop" }))
         .await;
     assert_eq!(bad.error.unwrap().code, RpcError::INVALID_PARAMS);
 
@@ -360,7 +360,7 @@ async fn claude_runs_get_the_hooks_settings_file() {
         "Stop",
     ] {
         let cmd = hooks[ev][0]["hooks"][0]["command"].as_str().unwrap();
-        assert_eq!(cmd, format!("/usr/local/bin/rl hook {ev}"));
+        assert_eq!(cmd, format!("/usr/local/bin/rl hook claude {ev}"));
     }
     h.stop().await;
 }

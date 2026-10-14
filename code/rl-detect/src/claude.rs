@@ -1,7 +1,9 @@
 //! Claude Code: exact signals from its hooks.
 //!
 //! `rld` writes a settings file with one command hook per event, all calling
-//! `rl hook <Event>`; the `claude` profile passes it as `--settings`, so every
+//! `rl hook claude <Event>` (rewritten on every start, so a file from before
+//! the agent was named is brought up to date; `rl hook <Event>` alone still
+//! means Claude's); the `claude` profile passes it as `--settings`, so every
 //! Claude run under Relay reports back, in any directory, without editing the
 //! project's `.claude/settings.json`. `rl hook` reads the hook's JSON on stdin
 //! and posts it to the daemon with `RELAY_RUN` from its environment.
@@ -28,7 +30,7 @@ pub const EVENTS: [&str; 6] = [
 
 /// Seconds Claude waits for a hook. `rl hook` gives up on the daemon well
 /// before this.
-const HOOK_TIMEOUT_SECS: u32 = 5;
+pub(crate) const HOOK_TIMEOUT_SECS: u32 = 5;
 
 const DETAIL_MAX: usize = 160;
 
@@ -45,7 +47,7 @@ pub fn settings_json(rl_bin: &Path) -> Value {
             let entry = json!([{
                 "hooks": [{
                     "type": "command",
-                    "command": format!("{rl} hook {ev}"),
+                    "command": format!("{rl} hook {DIALECT} {ev}"),
                     "timeout": HOOK_TIMEOUT_SECS,
                 }]
             }]);
@@ -103,7 +105,7 @@ pub fn signal(event: &str, payload: &Value) -> Option<Signal> {
     })
 }
 
-fn clip(s: &str) -> String {
+pub(crate) fn clip(s: &str) -> String {
     let one_line = s.lines().next().unwrap_or("").trim();
     if one_line.chars().count() <= DETAIL_MAX {
         one_line.to_string()
@@ -113,7 +115,7 @@ fn clip(s: &str) -> String {
     }
 }
 
-fn shell_quote(s: &str) -> String {
+pub(crate) fn shell_quote(s: &str) -> String {
     if !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || "/._-+:@%".contains(c)) {
         s.to_string()
     } else {
@@ -133,12 +135,12 @@ mod tests {
         assert_eq!(hooks.len(), EVENTS.len());
         assert_eq!(
             hooks["Notification"][0]["hooks"][0]["command"],
-            "'/opt/my tools/rl' hook Notification"
+            "'/opt/my tools/rl' hook claude Notification"
         );
         assert_eq!(hooks["Stop"][0]["hooks"][0]["timeout"], HOOK_TIMEOUT_SECS);
         assert_eq!(
             settings_json(Path::new("/usr/local/bin/rl"))["hooks"]["Stop"][0]["hooks"][0]["command"],
-            "/usr/local/bin/rl hook Stop"
+            "/usr/local/bin/rl hook claude Stop"
         );
     }
 
