@@ -133,8 +133,13 @@ async fn one_viewer_who_is_the_joiner_and_a_take_over() {
         info["replay_from"], info["journaled"],
         "no gap: replay picks up where the journal ends"
     );
+    // The replay ends, and the joining is noted to every viewer -- this one
+    // included -- so either may come while the screen is being read.
     let frames = joiner.until("fake-cli ready").await;
-    assert!(frames.is_empty() || matches!(frames[0], Frame::ReplayEnd));
+    assert!(
+        frames.iter().all(|f| matches!(f, Frame::ReplayEnd | Frame::Note(_))),
+        "{frames:?}"
+    );
     resize(&mut joiner, 100, 30).await;
     joiner.input("size\n").await;
     joiner.until("30 100").await;
@@ -175,7 +180,11 @@ async fn one_viewer_who_is_the_joiner_and_a_take_over() {
     taker.input("from cat\n").await;
     taker.until("echo: from cat").await;
     let frames = joiner.until("echo: from cat").await;
-    assert_eq!(notes(&frames), ["cat@phone took over from bob@desk"]);
+    assert!(
+        notes(&frames).contains(&"cat@phone took over from bob@desk".to_string()),
+        "{:?}",
+        notes(&frames)
+    );
     assert!(!joiner.seen.contains("echo: from bob"), "{}", joiner.seen);
 
     // The run ends while both are attached: each viewer gets the exit.

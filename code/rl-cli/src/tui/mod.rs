@@ -1964,8 +1964,8 @@ impl App {
         self.select(Some(keys[next].clone()));
     }
 
-    /// Back from a join: to the list, with the cursor on the run and no pane
-    /// beside it, and a word on how it went.
+    /// Back from a join: to the list, with the cursor on the run and no page
+    /// over it, and a word on how it went.
     fn back_from_join(&mut self, id: &str, ended: crate::attach::Ended) {
         use crate::attach::Ended;
         let title = self
@@ -7747,6 +7747,26 @@ mod tests {
         assert!(screen.contains("line 3"), "{screen}");
         assert!(!screen.contains('│'), "no divider, no second column: {screen}");
         assert!(!screen.contains("echo 2"), "the other run's row is not drawn: {screen}");
+        token.cancel();
+    }
+
+    /// A run that ends while you are joined to it: you come back to the list,
+    /// not to a page of a dead join, and the run is the row you are on.
+    #[tokio::test]
+    async fn coming_back_from_a_join_lands_on_the_list() {
+        let (_tmp, token, mut app) = panel_on_output(3).await;
+        assert!(app.show_pane, "a page is up");
+        app.back_from_join(
+            "run00001",
+            crate::attach::Ended::Exit {
+                code: 0,
+                how: "exit 0".into(),
+            },
+        );
+        assert!(!app.show_pane, "the list is back");
+        assert!(app.term.is_none(), "and the page it was reading is let go");
+        assert_eq!(app.sel.as_deref(), Some(RUN), "the run is the row");
+        assert!(draw_text(&mut app).contains("ended (exit 0)"), "a word on how it went");
         token.cancel();
     }
 
