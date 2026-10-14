@@ -891,8 +891,7 @@ mod tests {
         assert_eq!(at_end("/archive ", &here), ["seen"]);
         assert_eq!(at_end("/resume ", &here), ["all"]);
         assert_eq!(at_end("/resume all ", &here), ["commands"]);
-        assert_eq!(at_end("/lens ", &here), ["all", "agents", "flows", "hidden"]);
-        assert_eq!(at_end("/lens a", &here), ["all", "agents"]);
+        assert!(at_end("/flows ", &here).is_empty(), "a toggle takes nothing");
         assert_eq!(at_end("/mark b", &here), ["blocked"]);
         assert!(at_end("/stop ", &here).is_empty(), "a command that takes nothing");
         assert!(at_end("/nope ", &here).is_empty(), "no such command");

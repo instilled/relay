@@ -140,12 +140,12 @@ async fn hide_takes_a_claude_session_off_the_list() {
             .any(|r| r.key().as_deref() == Some("o:claude:sess-bg"))
     };
     assert!(!on_the_list(&app), "hidden");
-    app.lens = super::rows::Lens::Hidden;
-    assert!(on_the_list(&app), "in the hidden lens");
+    app.show_hidden = true;
+    assert!(on_the_list(&app), "back with hidden on");
 
     // It came to need you before it was hidden: it stays hidden. It comes
     // to need you after: it comes through, just after the questions.
-    app.lens = super::rows::Lens::All;
+    app.show_hidden = false;
     let hid = app
         .digest
         .hidden

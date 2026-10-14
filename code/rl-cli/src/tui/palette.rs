@@ -28,7 +28,9 @@ pub enum Cmd {
     Since,
     Ask,
     Filter,
-    Lens,
+    Flows,
+    Agents,
+    Hidden,
     Prune,
     Up,
     Help,
@@ -118,7 +120,7 @@ pub const ALL: &[Command] = &[
         name: "hide",
         args: "",
         words: &[],
-        what: "take a run, a flow or a project off the list, never stopping it; in the hidden lens, bring it back",
+        what: "take a run, a flow or a project off the list, never stopping it; with hidden on, bring it back",
         cmd: Cmd::Hide,
     },
     Command {
@@ -196,11 +198,25 @@ pub const ALL: &[Command] = &[
         cmd: Cmd::Filter,
     },
     Command {
-        name: "lens",
-        args: "all|agents|flows|hidden",
-        words: &[&["all", "agents", "flows", "hidden"]],
-        what: "show one kind of run inside the projects (tab steps through them)",
-        cmd: Cmd::Lens,
+        name: "flows",
+        args: "",
+        words: &[],
+        what: "show or hide flows' runs on the list (f on the list does too)",
+        cmd: Cmd::Flows,
+    },
+    Command {
+        name: "agents",
+        args: "",
+        words: &[],
+        what: "show or hide agents' runs on the list (a on the list does too)",
+        cmd: Cmd::Agents,
+    },
+    Command {
+        name: "hidden",
+        args: "",
+        words: &[],
+        what: "show or hide what you hid, inline in its place (h on the list does too)",
+        cmd: Cmd::Hidden,
     },
     Command {
         name: "prune",
@@ -326,8 +342,7 @@ mod tests {
         assert_eq!(arg_words(cmd("resume"), 1), ["commands"]);
         assert_eq!(arg_words(cmd("mark"), 0), ["done", "blocked", "working"]);
         assert_eq!(arg_words(cmd("summary"), 1), ["deep", "again"]);
-        let lenses: Vec<&str> = super::super::rows::Lens::ALL.iter().map(|l| l.label()).collect();
-        assert_eq!(arg_words(cmd("lens"), 0), lenses.as_slice(), "the lenses the list has");
+        assert!(arg_words(cmd("flows"), 0).is_empty(), "a toggle takes nothing");
         assert!(arg_words(cmd("stop"), 0).is_empty(), "nothing follows /stop");
         assert!(arg_words(cmd("ask"), 0).is_empty(), "free words are not a set");
     }
@@ -358,8 +373,9 @@ mod tests {
 
     #[test]
     fn an_exact_name_comes_first() {
-        assert_eq!(names("flow"), vec!["flow"]);
-        assert_eq!(names("FLOW"), vec!["flow"]);
+        // `flow` is exact; `flows`, the toggle, opens from it and comes after.
+        assert_eq!(names("flow"), vec!["flow", "flows"]);
+        assert_eq!(names("FLOW"), vec!["flow", "flows"]);
         // `up` is a name, and sits inside nothing else.
         assert_eq!(names("up"), vec!["up"]);
     }
@@ -405,7 +421,7 @@ mod tests {
         assert_eq!(key(Cmd::Pane), "^o");
         assert_eq!(key(Cmd::Shell), "", "a shell is a command, not a key");
         assert_eq!(key(Cmd::Filter), "^f");
-        assert_eq!(key(Cmd::Lens), "", "most commands are the slash line, no key");
+        assert_eq!(key(Cmd::Flows), "", "a toggle is the slash line or a letter, no ^key");
         assert_eq!(key(Cmd::Events), "", "^e is the line's: the end of it");
     }
 
@@ -430,9 +446,9 @@ mod tests {
         let (c, rest) = parse("/mark   blocked  ").unwrap();
         assert_eq!(c.cmd, Cmd::Mark);
         assert_eq!(rest, "blocked");
-        let (c, rest) = parse("/lens flows").unwrap();
-        assert_eq!(c.cmd, Cmd::Lens);
-        assert_eq!(rest, "flows");
+        let (c, rest) = parse("/hidden").unwrap();
+        assert_eq!(c.cmd, Cmd::Hidden);
+        assert!(rest.is_empty());
     }
 
     #[test]
@@ -442,8 +458,10 @@ mod tests {
         assert_eq!(parse("/ren").unwrap().0.cmd, Cmd::Rename);
         assert_eq!(parse("/rel").unwrap().0.cmd, Cmd::Reload);
         assert_eq!(parse("/ev").unwrap().0.cmd, Cmd::Events);
-        assert_eq!(parse("/fl run").unwrap().0.cmd, Cmd::Flow);
-        assert_eq!(parse("/hi").unwrap().0.cmd, Cmd::Hide);
+        // `flow`/`flows` and `hide`/`hidden` share a prefix, so the full name
+        // is what names them; it is an exact match, which wins.
+        assert_eq!(parse("/flow run").unwrap().0.cmd, Cmd::Flow);
+        assert_eq!(parse("/hide").unwrap().0.cmd, Cmd::Hide);
         assert_eq!(parse("/so").unwrap().0.cmd, Cmd::Sort);
         assert_eq!(parse("/he").unwrap().0.cmd, Cmd::Help);
         let (c, rest) = parse("/fi this").unwrap();
@@ -456,6 +474,9 @@ mod tests {
         // `re` opens `reload` and `rename`; `p` opens three.
         assert!(parse("/re").is_none());
         assert!(parse("/p").is_none());
+        // The toggles share a prefix with `flow` and `hide`.
+        assert!(parse("/fl").is_none(), "flow and flows");
+        assert!(parse("/hi").is_none(), "hide and hidden");
         assert!(parse("/done").is_none(), "gone: /archive, or /mark done");
         assert!(parse("/approve").is_none(), "gone: /flow approve");
         assert!(parse("/edit").is_none(), "gone: /flow edit");

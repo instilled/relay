@@ -25,8 +25,9 @@
 //! Before all of it, pinned runs, in the order they were pinned.
 //!
 //! What you hid (`/hide`: a run, a flow, a project and everything in it) is
-//! off the list and in the `hidden` lens instead — unless it comes to need
-//! you after you hid it: then it comes through, above the pinned runs.
+//! off the list, back inline only when the `hidden` toggle is on — unless it
+//! comes to need you after you hid it: then it comes through, above the pinned
+//! runs, whenever hidden is off.
 //!
 //! Agents' own sessions — Claude's that `claude agents` lists, and others',
 //! that are not Relay's runs — stand under the project `rld` filed them
@@ -56,42 +57,16 @@ use std::sync::OnceLock;
 /// own, which stay as long as the digest has them.
 pub const RECENT: SignedDuration = SignedDuration::from_hours(24);
 
-/// Which slice of the list you are looking at. Not exclusive: a flow's agent
-/// step is both an agent and a flow's, and shows under either — the lens is the
-/// question you are asking, not a partition. Questions ignore it; they are
-/// what needs you, whatever slice you are in. `hidden` is the one that is a
-/// partition: what you hid, and only that, which no other lens shows.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Lens {
-    #[default]
-    All,
-    Agents,
-    Flows,
-    Hidden,
-}
-
-impl Lens {
-    /// In the order the strip lists them, and cycles through them.
-    pub const ALL: [Lens; 4] = [Lens::All, Lens::Agents, Lens::Flows, Lens::Hidden];
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Lens::All => "all",
-            Lens::Agents => "agents",
-            Lens::Flows => "flows",
-            Lens::Hidden => "hidden",
-        }
-    }
-
-    /// Whether a run belongs in this lens — by what it is (agents) or by what
-    /// started it (a flow's steps). Whether it is hidden is `build`'s to say.
-    fn keeps(self, r: &Run) -> bool {
-        match self {
-            Lens::All | Lens::Hidden => true,
-            Lens::Agents => r.kind == RunKind::Agent,
-            Lens::Flows => matches!(r.cause, Cause::Flow { .. }),
-        }
-    }
+/// Whether a run's kind and cause let it onto the list, given the toggles.
+/// Not exclusive: a flow's agent step is both an agent and a flow's. A plain
+/// run is always shown; an agent run (by kind) when `show_agents`; a flow's
+/// run (by cause) when `show_flows` — a run that is both shows when either is
+/// on, each toggle adding what it is for. Whether it is hidden is `build`'s to
+/// say. Questions ignore all of it: they are what needs you.
+fn keeps(r: &Run, show_agents: bool, show_flows: bool) -> bool {
+    let is_agent = r.kind == RunKind::Agent;
+    let is_flow = matches!(r.cause, Cause::Flow { .. });
+    (!is_agent && !is_flow) || (is_agent && show_agents) || (is_flow && show_flows)
 }
 
 pub enum Row<'a> {
@@ -832,8 +807,12 @@ pub struct Context<'a> {
     /// Every flow, for where its row stands and what starts it; may be empty.
     pub flows: &'a [Flow],
     pub filter: &'a str,
-    /// Which slice of the list to show; questions ignore it.
-    pub lens: Lens,
+    /// The three list toggles. Flows and agents are additive — each on shows
+    /// the runs it is for; off hides them. Hidden is off by default; on, what
+    /// you hid stands inline in its place. Questions ignore all three.
+    pub show_flows: bool,
+    pub show_agents: bool,
+    pub show_hidden: bool,
     pub now: Timestamp,
     /// The Relay home: an assistant's run there — a summary of everything —
     /// is Relay's own, and makes no group on the list.
@@ -1014,13 +993,13 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
         hit: bool,
     }
     let mut flows_acc: Vec<FlowAcc<'a>> = Vec::new();
-    // Pinned runs stand above everything, however old, whatever the lens —
-    // kept on purpose, so neither a day nor a slice takes them away. Only the
+    // Pinned runs stand above everything, however old, whatever the toggles —
+    // kept on purpose, so neither a day nor a toggle takes them away. Only the
     // filter does, as with anything else.
     let mut pinned: Vec<&'a DigestItem> = Vec::new();
-    // What you hid is off the list, and only it is in the `hidden` lens; what
-    // of it has come to need you since comes through, above the projects.
-    let hidden_lens = cx.lens == Lens::Hidden;
+    // What you hid is off the list unless `show_hidden` brings it back inline,
+    // in its place; what of it has come to need you since comes through, above
+    // the projects, whenever hidden is off.
     // By how it ranks, then since when it has needed you, then its key.
     let mut through: Vec<(u8, Option<Timestamp>, String, Row<'a>)> = Vec::new();
     for i in &d.items {
@@ -1030,18 +1009,17 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
         if matches!(r.cause, Cause::Assistant(_)) && cx.relay.is_some_and(|h| r.cwd == h) {
             continue;
         }
-        match hidden_since(r, names, cx.flows, &d.hidden) {
-            Some(since) if !hidden_lens => {
+        if let Some(since) = hidden_since(r, names, cx.flows, &d.hidden) {
+            if !cx.show_hidden {
                 if comes_through(r, since)
-                    && cx.lens.keeps(r)
+                    && keeps(r, cx.show_agents, cx.show_flows)
                     && query.hits(&run_subject(i, &names.group(&r.place_key())))
                 {
                     through.push((rank::score(r), Some(r.state_at), r.id.clone(), Row::Run(i)));
                 }
                 continue;
             }
-            None if hidden_lens => continue,
-            _ => {}
+            // Hidden on: the run stands inline, in its place.
         }
         if r.pinned_at.is_some() {
             if query.hits(&run_subject(i, &names.group(&r.place_key()))) {
@@ -1056,7 +1034,7 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
         if !live && !kept {
             continue;
         }
-        if !cx.lens.keeps(r) {
+        if !keeps(r, cx.show_agents, cx.show_flows) {
             continue;
         }
         let (key, workspace) = group_of(r, names, cx.flows);
@@ -1089,12 +1067,14 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
         groups[g].runs.push(i);
     }
     // A flow with a yes has its row whether or not it has run — what starts
-    // it and when it fires next, before it ever did — in the lenses a flow's
-    // row is in, and hidden as its runs would be.
-    if cx.lens != Lens::Agents {
+    // it and when it fires next, before it ever did — when flows are on, and
+    // hidden as its runs would be.
+    if cx.show_flows {
         for f in cx.flows.iter().filter(|f| stands_on_the_list(f)) {
             let key = flow_key(&f.name);
-            if flows_acc.iter().any(|acc| acc.key == key) || flow_hidden(&f.name, cx.flows, &d.hidden) != hidden_lens {
+            if flows_acc.iter().any(|acc| acc.key == key)
+                || (flow_hidden(&f.name, cx.flows, &d.hidden) && !cx.show_hidden)
+            {
                 continue;
             }
             let (group_key, workspace) = flow_group(cx.flows, &f.name);
@@ -1116,9 +1096,9 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
             });
         }
     }
-    // Agents' own sessions, under their folder's project: agents, so not in
-    // the flows lens; hidden as a flow is, and come through as a run does.
-    if cx.lens != Lens::Flows {
+    // Agents' own sessions, under their folder's project: agents, so shown
+    // when agents are on; hidden as a flow is, and come through as a run does.
+    if cx.show_agents {
         for c in &d.outside {
             let since = outside_hidden_since(c, names, &d.hidden);
             let hidden = since.is_some();
@@ -1127,13 +1107,12 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
             let lives = outside::lives(c);
             let hits = || query.hits(&outside_subject(c, &project, &lives, hidden));
             match since {
-                Some(since) if !hidden_lens => {
+                Some(since) if !cx.show_hidden => {
                     if outside::comes_through(c, since) && hits() {
                         through.push((outside::score(c), c.state_at, c.key(), Row::Outside(c)));
                     }
                     continue;
                 }
-                None if hidden_lens => continue,
                 _ => {}
             }
             if !hits() {
@@ -1160,7 +1139,7 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
     }
     // A question stands in its project, under the row that asked it — or,
     // where that run is pinned or has come through, under it there. It
-    // ignores the lens: it is what needs you, whatever slice you are in.
+    // ignores the toggles: it is what needs you, whatever you are showing.
     let banded: HashSet<&str> = pinned
         .iter()
         .copied()
@@ -1253,19 +1232,26 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
             blocks.push((name.to_lowercase(), g.key, block));
         }
     }
-    // A registered folder is always on the list, under every lens, even before
-    // anything has run there — so you can select it, read its stats, see its
-    // flows or open its shell. A lens narrows what is shown inside projects,
-    // never which projects there are; only the filter takes them away — and
-    // `/hide`, which puts a project's header in the `hidden` lens, registered
-    // or not, and there only.
+    // A registered folder is always on the list, whatever the toggles, even
+    // before anything has run there — so you can select it, read its stats,
+    // see its flows or open its shell. The toggles narrow what is shown inside
+    // projects, never which projects there are; only the filter takes them
+    // away — and `/hide`, which puts a project's header off the list, back
+    // inline only when hidden is on.
     let hidden_heads: Vec<&str> = d.hidden.iter().filter_map(|h| h.key.strip_prefix("g:")).collect();
-    let heads: Vec<PathBuf> = if hidden_lens {
-        hidden_heads
-            .iter()
-            .filter(|k| **k != EVERYWHERE)
-            .map(PathBuf::from)
-            .collect()
+    let heads: Vec<PathBuf> = if cx.show_hidden {
+        // Every registered folder, the hidden ones among them, plus any hidden
+        // folder that is not registered.
+        let mut hs = names.paths();
+        for k in &hidden_heads {
+            if *k != EVERYWHERE {
+                let p = PathBuf::from(*k);
+                if !hs.contains(&p) {
+                    hs.push(p);
+                }
+            }
+        }
+        hs
     } else {
         names
             .paths()
@@ -1273,7 +1259,8 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
             .filter(|p| !hidden_heads.iter().any(|k| Path::new(k) == p))
             .collect()
     };
-    if hidden_lens
+    if cx.show_flows
+        && cx.show_hidden
         && everywhere.is_empty()
         && hidden_heads.contains(&EVERYWHERE)
         && query.hits_project(&[EVERYWHERE], None)
@@ -1310,8 +1297,10 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
     // The flows with no `in` are said in the headline (`everywhere`). Their
     // rows, and what flows ran outside every project, are gathered after the
     // projects, under one `everywhere`, rather than under whatever folder that
-    // was.
-    rows.extend(everywhere);
+    // was — all of it flow content, so only when flows are on.
+    if cx.show_flows {
+        rows.extend(everywhere);
+    }
     rows
 }
 
@@ -1428,7 +1417,7 @@ fn projects_standing(full: &[Row], kept: &[Order]) -> Vec<String> {
 
 /// The order to keep once the row `key` moves one place up (or down) among
 /// what is `shown`: its project's whole order, from `full` — the list with
-/// nothing narrowing it — so rows a search or a lens leaves out keep theirs.
+/// nothing narrowing it — so rows a search or a toggle leaves out keep theirs.
 /// Rows move only inside their project, past a question as past nothing; a
 /// header moves among the projects. A question, a pinned run and
 /// `everywhere` stay put, and say why.
@@ -1816,40 +1805,34 @@ mod tests {
             .collect()
     }
 
+    /// The default toggles: flows and agents on, hidden off.
+    const DEFAULT: (bool, bool, bool) = (true, true, false);
+
     fn build_with<'a>(d: &'a Digest, names: &Names, filter: &str, now: Timestamp) -> Vec<Row<'a>> {
-        build(
-            d,
-            &Context {
-                names,
-                flows: &[],
-                lens: Lens::All,
-                filter,
-                now,
-                relay: None,
-            },
-        )
+        toggles_build(d, names, &[], DEFAULT, filter, now)
     }
 
-    fn lens_build<'a>(d: &'a Digest, names: &Names, lens: Lens, now: Timestamp) -> Vec<Row<'a>> {
-        build(
-            d,
-            &Context {
-                names,
-                flows: &[],
-                lens,
-                filter: "",
-                now,
-                relay: None,
-            },
-        )
+    fn lens_build<'a>(d: &'a Digest, names: &Names, t: (bool, bool, bool), now: Timestamp) -> Vec<Row<'a>> {
+        toggles_build(d, names, &[], t, "", now)
     }
 
-    /// The list as it stands with these flows loaded.
+    /// The list as it stands with these flows loaded, at the default toggles.
     fn flows_build<'a>(
         d: &'a Digest,
         names: &Names,
         flows: &[Flow],
-        lens: Lens,
+        filter: &str,
+        now: Timestamp,
+    ) -> Vec<Row<'a>> {
+        toggles_build(d, names, flows, DEFAULT, filter, now)
+    }
+
+    /// The list with the flows loaded and the toggles `(flows, agents, hidden)`.
+    fn toggles_build<'a>(
+        d: &'a Digest,
+        names: &Names,
+        flows: &[Flow],
+        (show_flows, show_agents, show_hidden): (bool, bool, bool),
         filter: &str,
         now: Timestamp,
     ) -> Vec<Row<'a>> {
@@ -1858,7 +1841,9 @@ mod tests {
             &Context {
                 names,
                 flows,
-                lens,
+                show_flows,
+                show_agents,
+                show_hidden,
                 filter,
                 now,
                 relay: None,
@@ -1977,7 +1962,9 @@ mod tests {
         let cx = |relay: Option<&'static str>| Context {
             names: &names,
             flows: &[],
-            lens: Lens::All,
+            show_flows: true,
+            show_agents: true,
+            show_hidden: false,
             filter: "",
             now,
             relay: relay.map(Path::new),
@@ -2040,18 +2027,22 @@ mod tests {
     }
 
     #[test]
-    fn a_lens_keeps_a_run_by_what_it_is_or_what_started_it() {
+    fn the_toggles_keep_a_run_by_what_it_is_or_what_started_it() {
         let now: Timestamp = "2026-09-10T12:00:00Z".parse().unwrap();
         let ws = "/home/f/relay";
         let agent = item("agent", RunState::Working, ws, "2026-09-10T11:00:00Z", false);
         let mut shell = item("shell", RunState::Working, ws, "2026-09-10T11:01:00Z", false);
         // What a warm shell really is: the `sh` profile's kind wins over the
-        // `Command` hint it was started with. Either way it is not an agent.
+        // `Command` hint it was started with. Either way it is not an agent,
+        // and nothing started it, so it is plain: always on the list.
         shell.run.kind = RunKind::Shell;
+        // A flow's agent step: both an agent and a flow's.
         let mut probe = item("probe", RunState::Working, ws, "2026-09-10T11:02:00Z", false);
         probe.run.cause = step_of("nightly");
+        // A flow's shell step: a flow's, and not an agent.
         let mut onfail = item("onfail", RunState::Working, ws, "2026-09-10T11:03:00Z", false);
         onfail.run.cause = step_of("on-fail");
+        onfail.run.kind = RunKind::Shell;
         let d = Digest {
             since: now,
             items: vec![agent, shell, probe, onfail],
@@ -2064,22 +2055,24 @@ mod tests {
             outside: vec![],
         };
         let names = Names::new([(PathBuf::from(ws), "relay".to_string())]);
-        let runs = |lens| {
-            lens_build(&d, &names, lens, now)
+        let runs = |t| {
+            lens_build(&d, &names, t, now)
                 .iter()
                 .filter_map(|r| r.item().map(|i| i.run.id.clone()))
                 .collect::<Vec<_>>()
         };
-        // In the order they started, a shell as any other.
-        assert_eq!(runs(Lens::All), ["agent", "shell", "probe", "onfail"]);
-        // Agents is by kind, so it keeps the flows' agents too.
-        assert_eq!(runs(Lens::Agents), ["agent", "probe", "onfail"]);
-        // Flows is by cause.
-        assert_eq!(runs(Lens::Flows), ["probe", "onfail"]);
+        // Both on, in the order they started: a shell as any other.
+        assert_eq!(runs((true, true, false)), ["agent", "shell", "probe", "onfail"]);
+        // Agents off drops the lone agent; the plain shell stays, and the
+        // flow's steps stay — they are the flow's.
+        assert_eq!(runs((true, false, false)), ["shell", "probe", "onfail"]);
+        // Flows off drops what is only a flow's; the flow's agent step stays,
+        // as an agent, and the plain shell and the lone agent stay.
+        assert_eq!(runs((false, true, false)), ["agent", "shell", "probe"]);
     }
 
     #[test]
-    fn pinned_runs_stand_above_everything_however_old_whatever_the_lens() {
+    fn pinned_runs_stand_above_everything_however_old_whatever_the_toggles() {
         let now: Timestamp = "2026-09-10T12:00:00Z".parse().unwrap();
         let mut old = item(
             "old01",
@@ -2123,8 +2116,8 @@ mod tests {
             keys(&build_with(&d, &names, "", now)),
             ["r:old01", "r:shell", "[api]", "[relay]", "r:fail1", "q:q1"]
         );
-        // No lens takes a pin away.
-        let flows = lens_build(&d, &names, Lens::Flows, now);
+        // No toggle takes a pin away.
+        let flows = lens_build(&d, &names, (true, false, false), now);
         assert_eq!(&keys(&flows)[..2], ["r:old01", "r:shell"]);
         // The filter does, and matches a pin by its folder too.
         assert_eq!(keys(&build_with(&d, &names, "api", now)), ["r:old01", "[api]"]);
@@ -2138,7 +2131,7 @@ mod tests {
     }
 
     #[test]
-    fn what_you_hid_is_only_in_the_hidden_lens() {
+    fn what_you_hid_shows_inline_when_hidden_is_on() {
         let now: Timestamp = "2026-09-10T12:00:00Z".parse().unwrap();
         let (api, relay, scratch) = ("/home/f/api", "/home/f/relay", "/home/f/scratch");
         let at = "2026-09-10T11:00:00Z";
@@ -2179,30 +2172,34 @@ mod tests {
             (PathBuf::from(relay), "relay".to_string()),
         ]);
         let nightly = [flow("nightly", Some(relay))];
-        let lens = |lens| keys(&flows_build(&d, &names, &nightly, lens, "", now));
-        // Off the list, whatever the lens: the project's header too, the pin
-        // too. Nothing hidden needs you, so nothing comes through.
-        assert_eq!(lens(Lens::All), ["[relay]", "r:kept"]);
-        assert_eq!(lens(Lens::Agents), ["[relay]", "r:kept"]);
-        assert_eq!(lens(Lens::Flows), ["[relay]"]);
-        // The hidden lens is that and only that, laid out the same way: a
-        // hidden project's header, registered or not, even with nothing
-        // under it; the flow folded as ever; a hidden pin in the pinned band.
+        let view = |t| keys(&toggles_build(&d, &names, &nightly, t, "", now));
+        // Hidden off, the default: what you hid is off the list — the project's
+        // header too, the pin too. Nothing hidden needs you, so nothing comes
+        // through. `kept` is an agent, so agents off takes it away.
+        assert_eq!(view((true, true, false)), ["[relay]", "r:kept"]);
+        assert_eq!(view((false, true, false)), ["[relay]", "r:kept"]);
+        assert_eq!(view((true, false, false)), ["[relay]"]);
+        // Hidden on, the hidden rows stand inline in their places, alongside
+        // the kept ones: a hidden project's header, registered or not, even
+        // with nothing under it; the flow folded as ever; a hidden pin in the
+        // pinned band; `kept`, not hidden, among them.
         assert_eq!(
-            lens(Lens::Hidden),
+            view((true, true, true)),
             [
                 "r:pinned",
                 "[api]",
                 "r:inapi",
                 "[gone]",
                 "[relay]",
+                "r:kept",
                 "r:mine",
                 "f:nightly",
                 "[scratch]",
                 "r:loose",
             ]
         );
-        // The search reads the word too.
+        // The search reads the word too: with hidden on, `is:hidden` keeps
+        // only what is hidden.
         assert_eq!(
             keys(&build(
                 &d,
@@ -2210,14 +2207,15 @@ mod tests {
                     names: &names,
                     flows: &nightly,
                     filter: "is:hidden",
-                    lens: Lens::Hidden,
+                    show_flows: true,
+                    show_agents: true,
+                    show_hidden: true,
                     now,
                     relay: None,
                 },
             )),
             ["r:pinned", "[relay]", "r:mine"]
         );
-        assert_eq!(Lens::ALL.last(), Some(&Lens::Hidden), "the lens strip ends in hidden");
     }
 
     #[test]
@@ -2257,22 +2255,23 @@ mod tests {
             (PathBuf::from(relay), "relay".to_string()),
         ]);
         let nightly = [flow("nightly", Some(relay))];
-        let all = flows_build(&d, &names, &nightly, Lens::All, "", now);
+        let all = flows_build(&d, &names, &nightly, "", now);
         // Above the projects, what asks before what failed, then in the
         // order it came; its project stays hidden.
         assert_eq!(keys(&all), ["r:asks", "r:failed", "r:firing", "[relay]", "q:q1"]);
         let (_, need, ..) = counts(&all);
         assert_eq!(need, 3, "the headline counts them as needing you");
-        // A lens still narrows it, as it would any run that needs you.
+        // A toggle still narrows it, as it would any run that needs you:
+        // agents off leaves only the flow's run among those come through.
         assert_eq!(
-            keys(&flows_build(&d, &names, &nightly, Lens::Flows, "", now)),
+            keys(&toggles_build(&d, &names, &nightly, (true, false, false), "", now)),
             ["r:firing", "[relay]", "q:q1"]
         );
-        // In the hidden lens they are in their places, not above them: the
-        // run folds into its flow again, which stands by its run's start. The
-        // question, which ignores the lens, is in its project here too.
+        // With hidden on they are in their places, not above them: the run
+        // folds into its flow again, which stands by its run's start. The
+        // question, which ignores the toggles, is in its project here too.
         assert_eq!(
-            keys(&flows_build(&d, &names, &nightly, Lens::Hidden, "", now)),
+            keys(&toggles_build(&d, &names, &nightly, (true, true, true), "", now)),
             [
                 "[api]",
                 "r:asks",
@@ -2288,7 +2287,7 @@ mod tests {
         let mut again = d.clone();
         again.items[0].run.hidden_at = Some(t("2026-09-10T11:45:00Z"));
         assert_eq!(
-            keys(&flows_build(&again, &names, &nightly, Lens::All, "", now)),
+            keys(&flows_build(&again, &names, &nightly, "", now)),
             ["r:asks", "r:firing", "[relay]", "q:q1"]
         );
         let r = &d.items[2].run;
@@ -2473,9 +2472,9 @@ mod tests {
         }
         // The filter reaches idle projects too.
         assert_eq!(keys(&build_with(&d, &names, "idle", now)), ["[idle]"]);
-        // A lens narrows what is inside projects, never which projects there are:
-        // the idle one and yours stay, even where nothing in them matches.
-        assert_eq!(keys(&lens_build(&d, &names, Lens::Flows, now)), ["[idle]", "[relay]"]);
+        // A toggle narrows what is inside projects, never which projects there
+        // are: the idle one and yours stay, even where nothing in them matches.
+        assert_eq!(keys(&lens_build(&d, &names, (true, false, false), now)), ["[idle]", "[relay]"]);
     }
 
     #[test]
@@ -2486,13 +2485,13 @@ mod tests {
             approved_hash: None,
             ..flow("pulse", None)
         }];
-        let rows = flows_build(&d, &Names::default(), &waiting, Lens::All, "", now);
+        let rows = flows_build(&d, &Names::default(), &waiting, "", now);
         // A flow waiting for its first yes has no row.
         assert!(rows.is_empty(), "{:?}", keys(&rows));
         // One with a yes has its row, but has not done anything: a fresh home
         // still says it has nothing running.
         let flows = [flow("pulse", None)];
-        let rows = flows_build(&d, &Names::default(), &flows, Lens::All, "", now);
+        let rows = flows_build(&d, &Names::default(), &flows, "", now);
         assert_eq!(keys(&rows), ["[everywhere]", "f:pulse"]);
         assert_eq!(headline(&rows, 0, ""), "relay · nothing running");
     }
@@ -2597,7 +2596,7 @@ mod tests {
         let d = digest(now, items, vec![]);
         let names = Names::new([(PathBuf::from("/home/f/relay"), "relay".to_string())]);
         let flows = [flow("pulse", Some("/home/f/relay"))];
-        let rows = flows_build(&d, &names, &flows, Lens::All, "", now);
+        let rows = flows_build(&d, &names, &flows, "", now);
         assert_eq!(
             keys(&rows),
             ["[relay]", "f:pulse", "r:hand", "r:go"],
@@ -2625,11 +2624,11 @@ mod tests {
         );
 
         // Never opened: whatever happens, a flow is one row.
-        let opened_rows = flows_build(&d, &names, &flows, Lens::All, "", now);
+        let opened_rows = flows_build(&d, &names, &flows, "", now);
         assert_eq!(keys(&opened_rows), keys(&rows), "no row grows into its runs");
 
         // The filter finds a flow by its name.
-        let rows = flows_build(&d, &names, &flows, Lens::All, "puls", now);
+        let rows = flows_build(&d, &names, &flows, "puls", now);
         assert_eq!(keys(&rows), ["[relay]", "f:pulse"], "{:?}", keys(&rows));
 
         // A flow whose last run failed ranks as failed and says so.
@@ -2642,7 +2641,7 @@ mod tests {
             ],
             vec![],
         );
-        let rows = flows_build(&d2, &names, &flows, Lens::All, "", now);
+        let rows = flows_build(&d2, &names, &flows, "", now);
         assert_eq!(keys(&rows), ["[relay]", "f:pulse", "r:w"], "the flow came first");
         assert_eq!(counts(&rows), (0, 1, 1, 0, 1));
     }
@@ -2671,7 +2670,7 @@ mod tests {
         let flows = [flow("pulse", Some("/home/f/relay"))];
         // "exit 1" only appears in the failing run's own summary, not in the
         // flow's name ("pulse") or the group name ("relay").
-        let rows = flows_build(&d, &names, &flows, Lens::All, "exit 1", now);
+        let rows = flows_build(&d, &names, &flows, "exit 1", now);
         assert_eq!(keys(&rows), ["[relay]", "f:pulse"], "{:?}", keys(&rows));
         let Some(Row::Flow(f)) = rows.iter().find(|r| matches!(r, Row::Flow(_))) else {
             panic!("no flow row");
@@ -2727,7 +2726,7 @@ mod tests {
         );
         let names = Names::new([(PathBuf::from("/home/f/relay"), "relay".to_string())]);
         let flows = [flow("prod-logs", Some("/home/f/relay"))];
-        let rows = flows_build(&d, &names, &flows, Lens::All, "", now);
+        let rows = flows_build(&d, &names, &flows, "", now);
         let Some(Row::Flow(f)) = rows.iter().find(|r| matches!(r, Row::Flow(_))) else {
             panic!("no flow row: {:?}", keys(&rows));
         };
@@ -2736,7 +2735,7 @@ mod tests {
         assert_eq!(flows::state_words(at), "waiting at review");
         // A flow that has not fired since the digest knew it says nothing.
         let d = digest(now, d.items.clone(), vec![]);
-        let rows = flows_build(&d, &names, &flows, Lens::All, "", now);
+        let rows = flows_build(&d, &names, &flows, "", now);
         assert!(rows.iter().any(|r| matches!(r, Row::Flow(f) if f.firing.is_none())));
     }
 
@@ -2753,26 +2752,26 @@ mod tests {
         ]);
         let flows = [flow("prod-logs", Some(api))];
         assert_eq!(
-            keys(&flows_build(&d, &names, &flows, Lens::All, "", now)),
+            keys(&flows_build(&d, &names, &flows, "", now)),
             ["[api]", "f:prod-logs", "[other]"],
             "under the project it is in, not the folder its run ran in"
         );
         assert_eq!(group_key(&d.items[0].run, &names, &flows), api);
         // Not loaded now, where it is `in` is not known: everywhere.
         assert_eq!(
-            keys(&flows_build(&d, &names, &[], Lens::All, "", now)),
+            keys(&flows_build(&d, &names, &[], "", now)),
             ["[api]", "[other]", "[everywhere]", "f:prod-logs"]
         );
         // With no `in`, everywhere too.
         assert_eq!(
-            keys(&flows_build(&d, &names, &[flow("prod-logs", None)], Lens::All, "", now)),
+            keys(&flows_build(&d, &names, &[flow("prod-logs", None)], "", now)),
             ["[api]", "[other]", "[everywhere]", "f:prod-logs"]
         );
         // Hiding the project it is in hides it with the project.
         let mut hidden = d.clone();
         hidden.hidden = vec![hid(&format!("g:{api}"), "2026-09-10T11:30:00Z")];
         assert_eq!(
-            keys(&flows_build(&hidden, &names, &flows, Lens::All, "", now)),
+            keys(&flows_build(&hidden, &names, &flows, "", now)),
             ["[other]"]
         );
     }
@@ -2788,19 +2787,19 @@ mod tests {
             ..flow("nightly", Some(relay))
         };
         let flows = [nightly.clone()];
-        for lens in [Lens::All, Lens::Flows] {
+        for t in [(true, true, false), (true, false, false)] {
             assert_eq!(
-                keys(&flows_build(&d, &names, &flows, lens, "", now)),
+                keys(&toggles_build(&d, &names, &flows, t, "", now)),
                 ["[relay]", "f:nightly"],
-                "{lens:?}"
+                "{t:?}"
             );
         }
         assert_eq!(
-            keys(&flows_build(&d, &names, &flows, Lens::Agents, "", now)),
+            keys(&toggles_build(&d, &names, &flows, (false, true, false), "", now)),
             ["[relay]"],
-            "not an agent"
+            "flows off"
         );
-        let rows = flows_build(&d, &names, &flows, Lens::All, "", now);
+        let rows = flows_build(&d, &names, &flows, "", now);
         let Some(Row::Flow(f)) = rows.iter().find(|r| matches!(r, Row::Flow(_))) else {
             panic!("no flow row");
         };
@@ -2812,7 +2811,7 @@ mod tests {
         // Paused, or changed since its yes, it says so.
         let says = |x: Flow| {
             let flows = [x];
-            flows_build(&d, &names, &flows, Lens::All, "", now)
+            flows_build(&d, &names, &flows, "", now)
                 .iter()
                 .find_map(|r| match r {
                     Row::Flow(f) => Some(flows::stands(f, flows.first(), now)),
@@ -2844,7 +2843,7 @@ mod tests {
             ..nightly
         }];
         assert_eq!(
-            keys(&flows_build(&d, &names, &removed, Lens::All, "", now)),
+            keys(&flows_build(&d, &names, &removed, "", now)),
             ["[relay]"]
         );
     }
@@ -2864,7 +2863,7 @@ mod tests {
             vec![],
         );
         let flows = [flow("pulse", Some(relay))];
-        let rows = flows_build(&d, &names, &flows, Lens::All, "", now);
+        let rows = flows_build(&d, &names, &flows, "", now);
         assert_eq!(
             keys(&rows),
             ["[relay]", "f:pulse"],
@@ -2876,7 +2875,7 @@ mod tests {
         assert_eq!(f.marks(10), "×", "its run of three days ago");
         // A flow not loaded now has no row of its own: its old runs go as
         // any other.
-        assert_eq!(keys(&flows_build(&d, &names, &[], Lens::All, "", now)), ["[relay]"]);
+        assert_eq!(keys(&flows_build(&d, &names, &[], "", now)), ["[relay]"]);
     }
 
     #[test]
@@ -2886,25 +2885,28 @@ mod tests {
         let names = Names::new([(PathBuf::from(relay), "relay".to_string())]);
         let d = digest(now, vec![], vec![]);
         let flows = [flow("nightly", Some(relay))];
-        let shown = |d: &Digest, lens: Lens, filter: &str| keys(&flows_build(d, &names, &flows, lens, filter, now));
-        assert_eq!(shown(&d, Lens::All, "night"), ["[relay]", "f:nightly"]);
-        assert_eq!(shown(&d, Lens::All, "kind:flow"), ["[relay]", "f:nightly"]);
-        assert_eq!(shown(&d, Lens::All, "by:nightly"), ["[relay]", "f:nightly"]);
-        assert_eq!(shown(&d, Lens::All, "in:relay kind:flow"), ["[relay]", "f:nightly"]);
-        assert_eq!(shown(&d, Lens::All, "kind:agent"), Vec::<String>::new());
-        assert_eq!(shown(&d, Lens::All, "tidy"), Vec::<String>::new());
+        let shown = |d: &Digest, filter: &str| keys(&flows_build(d, &names, &flows, filter, now));
+        let hidden_on = |d: &Digest| keys(&toggles_build(d, &names, &flows, (true, true, true), "", now));
+        assert_eq!(shown(&d, "night"), ["[relay]", "f:nightly"]);
+        assert_eq!(shown(&d, "kind:flow"), ["[relay]", "f:nightly"]);
+        assert_eq!(shown(&d, "by:nightly"), ["[relay]", "f:nightly"]);
+        assert_eq!(shown(&d, "in:relay kind:flow"), ["[relay]", "f:nightly"]);
+        assert_eq!(shown(&d, "kind:agent"), Vec::<String>::new());
+        assert_eq!(shown(&d, "tidy"), Vec::<String>::new());
 
-        // `/hide` on it, or on its project: off the list, in `hidden`.
+        // `/hide` on it, or on its project: off the list, back only with
+        // hidden on.
         for key in ["f:nightly".to_string(), format!("g:{relay}")] {
             let mut hidden = d.clone();
             hidden.hidden = vec![hid(&key, "2026-09-10T11:00:00Z")];
             assert!(
-                !shown(&hidden, Lens::All, "").contains(&"f:nightly".to_string()),
+                !shown(&hidden, "").contains(&"f:nightly".to_string()),
                 "{key}"
             );
-            assert_eq!(shown(&hidden, Lens::Hidden, ""), ["[relay]", "f:nightly"], "{key}");
+            assert_eq!(hidden_on(&hidden), ["[relay]", "f:nightly"], "{key}");
         }
-        assert_eq!(shown(&d, Lens::Hidden, ""), Vec::<String>::new(), "not hidden");
+        // Hidden on with nothing hidden is just the list as it stands.
+        assert_eq!(hidden_on(&d), ["[relay]", "f:nightly"], "nothing hidden");
     }
 
     #[test]
@@ -2923,7 +2925,7 @@ mod tests {
             flow("alpha", Some(relay)),
         ];
         assert_eq!(
-            keys(&flows_build(&d, &names, &flows, Lens::All, "", now)),
+            keys(&flows_build(&d, &names, &flows, "", now)),
             ["[relay]", "f:pulse", "f:alpha", "f:beta"],
             "what ran first, then the rest by name"
         );
@@ -2939,7 +2941,7 @@ mod tests {
             vec![],
         );
         d.order = kept(&["r:work", "f:pulse"]);
-        let rows = flows_build(&d, &names, &flows, Lens::All, "", now);
+        let rows = flows_build(&d, &names, &flows, "", now);
         assert_eq!(keys(&rows), ["[relay]", "r:work", "f:pulse", "f:alpha", "f:beta"]);
         let moved = reorder(&rows, &rows, &d.order, "f:pulse", true).unwrap();
         assert_eq!(moved.rows, ["f:pulse", "r:work", "f:alpha", "f:beta"]);
@@ -3017,7 +3019,7 @@ mod tests {
         );
         let names = Names::new([(relay.into(), "relay".to_string())]);
         let build_flows = |flows: &[Flow]| {
-            flows_build(&d, &names, flows, Lens::All, "", now)
+            flows_build(&d, &names, flows, "", now)
                 .iter()
                 .map(|r| match r {
                     Row::Group(h) => format!("[{}] {}", h.name, texts(&h.flows).join(" · ")),
@@ -3238,7 +3240,7 @@ mod tests {
             flow("pulse", Some(web)),
         ];
         let names = Names::new([(PathBuf::from(relay), "relay".to_string())]);
-        let shown = |filter: &str| keys(&flows_build(&d, &names, &flows, Lens::All, filter, now));
+        let shown = |filter: &str| keys(&flows_build(&d, &names, &flows, filter, now));
         let home_name = Names::default().workspace(Path::new(home));
         assert_eq!(
             shown(""),
@@ -3268,7 +3270,7 @@ mod tests {
         );
 
         // Its header is no folder, and its key says so.
-        let rows = flows_build(&d, &names, &flows, Lens::All, "", now);
+        let rows = flows_build(&d, &names, &flows, "", now);
         let head = rows
             .iter()
             .find_map(|r| match r {
@@ -3483,8 +3485,8 @@ mod tests {
             reorder(&rows, &rows, &d.order, "q:q1", true),
             Err("a question stays under the run that asked it")
         );
-        // A lens leaves its run out, never the question.
-        let flows = lens_build(&d, &names, Lens::Flows, now);
+        // A toggle leaves its run out, never the question.
+        let flows = lens_build(&d, &names, (true, false, false), now);
         assert_eq!(keys(&flows), ["[api]", "[relay]", "q:q0", "q:q1", "[web]", "q:q2"]);
     }
 
@@ -3756,7 +3758,7 @@ mod tests {
         });
         assert!(keys(&build_with(&d, &names, "", now)).is_empty());
         assert_eq!(
-            keys(&lens_build(&d, &names, Lens::Hidden, now)),
+            keys(&lens_build(&d, &names, (true, true, true), now)),
             [
                 "[relay]",
                 "o:claude:sess-after",
@@ -3774,15 +3776,19 @@ mod tests {
         let mut d = digest(now, vec![], vec![]);
         d.outside = vec![claude_in("bg", relay, Some("working"), "busy")];
         assert_eq!(
-            keys(&lens_build(&d, &names, Lens::All, now)),
+            keys(&lens_build(&d, &names, DEFAULT, now)),
             ["[relay]", "o:claude:sess-bg"]
         );
         assert_eq!(
-            keys(&lens_build(&d, &names, Lens::Agents, now)),
-            ["[relay]", "o:claude:sess-bg"]
+            keys(&lens_build(&d, &names, (false, true, false), now)),
+            ["[relay]", "o:claude:sess-bg"],
+            "agents on, flows off: a session shows"
         );
-        assert_eq!(keys(&lens_build(&d, &names, Lens::Flows, now)), ["[relay]"]);
-        assert_eq!(keys(&lens_build(&d, &names, Lens::Hidden, now)), Vec::<String>::new());
+        assert_eq!(
+            keys(&lens_build(&d, &names, (true, false, false), now)),
+            ["[relay]"],
+            "agents off: no session, it is not a flow"
+        );
     }
 
     #[test]
@@ -3843,11 +3849,11 @@ mod tests {
             let mut hidden = d.clone();
             hidden.hidden = vec![hid(&key, "2026-09-10T11:00:00Z")];
             assert!(
-                !keys(&lens_build(&hidden, &names, Lens::All, now)).contains(&"o:claude:sess-bg".to_string()),
+                !keys(&lens_build(&hidden, &names, DEFAULT, now)).contains(&"o:claude:sess-bg".to_string()),
                 "{key}"
             );
             assert_eq!(
-                keys(&lens_build(&hidden, &names, Lens::Hidden, now)),
+                keys(&lens_build(&hidden, &names, (true, true, true), now)),
                 ["[relay]", "o:claude:sess-bg"],
                 "{key}"
             );

@@ -295,8 +295,12 @@ struct App {
     filter: String,
     /// `^f`: the line is searching, and the filter follows what is typed.
     search: Option<Search>,
-    /// Which slice of the list is shown: all, agents, flows or hidden.
-    lens: rows::Lens,
+    /// The three list toggles. Flows and agents are additive and on by
+    /// default — each shows the runs it is for; hidden is off by default and,
+    /// on, stands what you hid inline in its place.
+    show_flows: bool,
+    show_agents: bool,
+    show_hidden: bool,
     view: View,
     /// Every flow: for its row's place and words, the chips on project rows,
     /// and a flow's pane.
@@ -830,7 +834,7 @@ fn home_note(home: &Path, user: Option<&Path>) -> Option<String> {
 }
 
 /// What the list says when it has nothing to show. When nothing is running
-/// at all — no search, no lens — the mark stands full size in the middle of
+/// at all — no search, no toggle — the mark stands full size in the middle of
 /// it with the words under it, where it fits; otherwise the words alone.
 fn empty_list(msg: &str, area: Rect, nothing: bool) -> Paragraph<'static> {
     let words = msg.trim_start();
@@ -1160,7 +1164,9 @@ impl App {
             names: Names::default(),
             filter: String::new(),
             search: None,
-            lens: rows::Lens::All,
+            show_flows: true,
+            show_agents: true,
+            show_hidden: false,
             view: View::Work,
             flows: Vec::new(),
             back: Vec::new(),
@@ -1436,7 +1442,7 @@ impl App {
             View::Events => shortcuts::Place::Events,
             View::CatchUp => shortcuts::Place::CatchUp,
             View::Work if self.selected_question().is_some() => shortcuts::Place::Question,
-            View::Work if self.lens == rows::Lens::Hidden => shortcuts::Place::Hidden,
+            View::Work if self.show_hidden => shortcuts::Place::Hidden,
             View::Work => shortcuts::Place::List,
         })
     }
@@ -1454,19 +1460,39 @@ impl App {
         shortcuts::lines(&shortcuts::keys(at), room)
     }
 
-    /// Move the lens along the strip; the selection settles onto whatever the
-    /// new slice shows.
-    fn cycle_lens(&mut self, by: isize) {
-        let all = rows::Lens::ALL;
-        let at = all.iter().position(|l| *l == self.lens).unwrap_or(0);
-        let n = all.len() as isize;
-        self.set_lens(all[(((at as isize + by) % n + n) % n) as usize]);
+    /// Flip the flows toggle, and settle the selection onto what now shows.
+    fn toggle_flows(&mut self) {
+        self.show_flows = !self.show_flows;
+        self.settle();
     }
 
-    /// Set the lens outright, and settle the selection onto the new slice.
-    fn set_lens(&mut self, lens: rows::Lens) {
-        self.lens = lens;
+    /// Flip the agents toggle, and settle the selection.
+    fn toggle_agents(&mut self) {
+        self.show_agents = !self.show_agents;
         self.settle();
+    }
+
+    /// Flip the hidden toggle, and settle the selection.
+    fn toggle_hidden(&mut self) {
+        self.show_hidden = !self.show_hidden;
+        self.settle();
+    }
+
+    /// The toggles as they stand, as `(flows, agents, hidden)`.
+    fn toggles(&self) -> (bool, bool, bool) {
+        (self.show_flows, self.show_agents, self.show_hidden)
+    }
+
+    /// The toggles back to their default: flows and agents on, hidden off.
+    fn reset_toggles(&mut self) {
+        self.set_toggles((true, true, false));
+    }
+
+    /// Put the toggles to a set, `(flows, agents, hidden)`.
+    fn set_toggles(&mut self, (flows, agents, hidden): (bool, bool, bool)) {
+        self.show_flows = flows;
+        self.show_agents = agents;
+        self.show_hidden = hidden;
     }
 
     async fn refresh(&mut self) {
@@ -1511,13 +1537,15 @@ impl App {
                 .map(|a| a.name)
                 .collect();
         }
-        // A flow gone from the list takes its open steps line with it; one only a search or a lens
-        // hides keeps it, for when it shows again.
+        // A flow gone from the list takes its open steps line with it; one only a search or a
+        // toggle hides keeps it, for when it shows again.
         let all = rows::Context {
             names: &self.names,
             flows: &self.flows,
             filter: "",
-            lens: rows::Lens::All,
+            show_flows: true,
+            show_agents: true,
+            show_hidden: false,
             now: Timestamp::now(),
             relay: Some(&self.relay),
         };
@@ -1604,7 +1632,9 @@ impl App {
                 names: &self.names,
                 flows: &self.flows,
                 filter: &self.filter,
-                lens: self.lens,
+                show_flows: self.show_flows,
+                show_agents: self.show_agents,
+                show_hidden: self.show_hidden,
                 now: Timestamp::now(),
                 relay: Some(&self.relay),
             },
@@ -2556,7 +2586,9 @@ impl App {
             names: &self.names,
             flows: &self.flows,
             filter,
-            lens: rows::Lens::All,
+            show_flows: true,
+            show_agents: true,
+            show_hidden: false,
             now: Timestamp::now(),
             relay: Some(&self.relay),
         };
@@ -2683,9 +2715,9 @@ impl App {
                 if let Some(k) = &key
                     && !self.keys().contains(k)
                 {
-                    // A search or a lens hiding it gives way, as for a run.
+                    // A search or a toggle hiding it gives way, as for a run.
                     self.filter.clear();
-                    self.lens = rows::Lens::All;
+                    self.reset_toggles();
                 }
                 self.select(key);
             }
@@ -2694,8 +2726,8 @@ impl App {
 
     /// Whether the list still has a row once the catch-up is left and what
     /// it showed is seen: the run `run` on a row of its own or in its flow's,
-    /// else the row `key`, in any lens. A run that ended over a day ago,
-    /// unpinned, is the list's only while it is not seen.
+    /// else the row `key`, whatever the toggles. A run that ended over a day
+    /// ago, unpinned, is the list's only while it is not seen.
     fn kept_on_the_list(&self, key: &str, run: Option<&str>) -> bool {
         let mut d = self.digest.clone();
         let seen = self.catch_up_unseen().ids;
@@ -2704,12 +2736,15 @@ impl App {
                 i.unseen = false;
             }
         }
-        [rows::Lens::All, rows::Lens::Hidden].into_iter().any(|lens| {
+        // Everything shown at once: whatever a toggle could reveal is on.
+        [(true, true, false), (true, true, true)].into_iter().any(|(show_flows, show_agents, show_hidden)| {
             let cx = rows::Context {
                 names: &self.names,
                 flows: &self.flows,
                 filter: "",
-                lens,
+                show_flows,
+                show_agents,
+                show_hidden,
                 now: Timestamp::now(),
                 relay: Some(&self.relay),
             };
@@ -2860,7 +2895,7 @@ impl App {
         }
     }
 
-    /// The list, with the cursor on a flow's row. When the lens or the search
+    /// The list, with the cursor on a flow's row. When a toggle or the search
     /// hides it, they give way; when the list has none (a flow with no `in`
     /// and no runs, or not yet approved), the view stays and says so.
     async fn show_flow(&mut self, name: &str) {
@@ -2872,34 +2907,31 @@ impl App {
             _ => self.filter.clone(),
         };
         let is_it = |r: &Row| matches!(r, Row::Flow(f) if f.name == name);
-        let (key, opened) = match self.row_key(&list_filter, self.lens, is_it) {
+        let (key, opened) = match self.row_key(&list_filter, self.toggles(), is_it) {
             Some(k) => (k, None),
             None => match self
-                .row_key("", rows::Lens::All, is_it)
-                .map(|k| (k, rows::Lens::All))
-                .or_else(|| {
-                    self.row_key("", rows::Lens::Hidden, is_it)
-                        .map(|k| (k, rows::Lens::Hidden))
-                }) {
-                Some((k, lens)) => (k, Some(lens)),
+                .row_key("", (true, true, false), is_it)
+                .map(|k| (k, (true, true, false)))
+                .or_else(|| self.row_key("", (true, true, true), is_it).map(|k| (k, (true, true, true)))) {
+                Some((k, t)) => (k, Some(t)),
                 None => return self.say(format!("{name} has no row on the list")),
             },
         };
         self.back_to_list().await;
-        if let Some(lens) = opened {
+        if let Some(t) = opened {
             self.filter.clear();
-            self.lens = lens;
-            self.say(if lens == rows::Lens::Hidden {
-                format!("{name} is hidden: here in the hidden lens, /hide brings it back")
+            self.set_toggles(t);
+            self.say(if t.2 {
+                format!("{name} is hidden: shown here with hidden on, /hide brings it back")
             } else {
-                format!("the search and the lens let go, to show {name}")
+                format!("the search and the toggles let go, to show {name}")
             });
         }
         self.select(Some(key));
     }
 
     /// The list, with the cursor on a run: its own row, or its flow's. When
-    /// the lens or the search hides it, they give way; when the list does
+    /// a toggle or the search hides it, they give way; when the list does
     /// not have it at all, the view stays and says why.
     async fn show_run(&mut self, id: &str) {
         let title = self
@@ -2916,16 +2948,13 @@ impl App {
             View::Events => self.filter_aside.clone(),
             _ => self.filter.clone(),
         };
-        let (key, opened) = match self.list_key(id, &list_filter, self.lens) {
+        let (key, opened) = match self.list_key(id, &list_filter, self.toggles()) {
             Some(k) => (k, None),
             None => match self
-                .list_key(id, "", rows::Lens::All)
-                .map(|k| (k, rows::Lens::All))
-                .or_else(|| {
-                    self.list_key(id, "", rows::Lens::Hidden)
-                        .map(|k| (k, rows::Lens::Hidden))
-                }) {
-                Some((k, lens)) => (k, Some(lens)),
+                .list_key(id, "", (true, true, false))
+                .map(|k| (k, (true, true, false)))
+                .or_else(|| self.list_key(id, "", (true, true, true)).map(|k| (k, (true, true, true)))) {
+                Some((k, t)) => (k, Some(t)),
                 None => {
                     // As it stands now: it may have been put away since it was read.
                     if let Ok(r) = self.rpc.call::<RunGet>(RunId { id: id.to_string() }).await {
@@ -2941,22 +2970,22 @@ impl App {
             },
         };
         self.back_to_list().await;
-        if let Some(lens) = opened {
+        if let Some(t) = opened {
             self.filter.clear();
-            self.lens = lens;
-            self.say(if lens == rows::Lens::Hidden {
-                format!("'{title}' is hidden: here in the hidden lens, /hide brings it back")
+            self.set_toggles(t);
+            self.say(if t.2 {
+                format!("'{title}' is hidden: shown here with hidden on, /hide brings it back")
             } else {
-                format!("the search and the lens let go, to show '{title}'")
+                format!("the search and the toggles let go, to show '{title}'")
             });
         }
         self.select(Some(key));
     }
 
     /// The list's row for a run, as the list would stand with this search
-    /// and lens: its own, or the flow it folds into.
-    fn list_key(&self, id: &str, filter: &str, lens: rows::Lens) -> Option<String> {
-        self.row_key(filter, lens, |r| match r {
+    /// and these toggles: its own, or the flow it folds into.
+    fn list_key(&self, id: &str, filter: &str, toggles: (bool, bool, bool)) -> Option<String> {
+        self.row_key(filter, toggles, |r| match r {
             Row::Run(i) => i.run.id == id,
             Row::Flow(f) => f.runs.iter().any(|i| i.run.id == id),
             _ => false,
@@ -2964,13 +2993,15 @@ impl App {
     }
 
     /// The key of the first row of the list that `is` picks, as the list would
-    /// stand with this search and lens.
-    fn row_key(&self, filter: &str, lens: rows::Lens, is: impl Fn(&Row) -> bool) -> Option<String> {
+    /// stand with this search and these toggles `(flows, agents, hidden)`.
+    fn row_key(&self, filter: &str, (show_flows, show_agents, show_hidden): (bool, bool, bool), is: impl Fn(&Row) -> bool) -> Option<String> {
         let cx = rows::Context {
             names: &self.names,
             flows: &self.flows,
             filter,
-            lens,
+            show_flows,
+            show_agents,
+            show_hidden,
             now: Timestamp::now(),
             relay: Some(&self.relay),
         };
@@ -3414,15 +3445,15 @@ impl App {
 
     /// `/hide`: the row under the cursor off the list — a run, going or
     /// ended; a flow, its firings to come too; a project and everything in it.
-    /// Nothing is stopped or removed. In the `hidden` lens it is the way back:
-    /// the row comes back, and a header that is not hidden itself brings back
-    /// what was hidden under it. A question is never hidden: it needs you.
+    /// Nothing is stopped or removed. With hidden on it is the way back: the
+    /// row comes back, and a header that is not hidden itself brings back what
+    /// was hidden under it. A question is never hidden: it needs you.
     async fn hide(&mut self) {
         // What it hides, and where the cursor goes after, is the list's.
         if self.view == View::CatchUp {
             return self.say("/hide hides on the list · esc goes there");
         }
-        let back = self.lens == rows::Lens::Hidden;
+        let back = self.show_hidden;
         let rows = self.rows();
         let Some(at) = self
             .sel
@@ -3529,7 +3560,7 @@ impl App {
                 Some(w) => format!("brought back {what} · still hidden with {w}"),
                 None => format!("brought back {what}"),
             }),
-            None => self.say(format!("hid {what} · the hidden lens has it")),
+            None => self.say(format!("hid {what} · h on the list shows it")),
         }
         self.refresh().await;
         if self.keys().contains(here.as_ref().unwrap_or(&String::new())) {
@@ -3551,8 +3582,8 @@ impl App {
             View::Events => return self.say("⇧↑↓ moves rows on the list · events stay in the order they came"),
             View::CatchUp => return self.say("⇧↑↓ moves rows on the list · esc goes there"),
         }
-        if self.lens == rows::Lens::Hidden {
-            self.say("the hidden lens keeps the list's order · move it on the list");
+        if self.show_hidden {
+            self.say("with hidden on the list keeps its order · move it with hidden off");
             return;
         }
         let Some(key) = self.sel.clone() else {
@@ -3567,7 +3598,9 @@ impl App {
                     names: &self.names,
                     flows: &self.flows,
                     filter: "",
-                    lens: rows::Lens::All,
+                    show_flows: true,
+                    show_agents: true,
+                    show_hidden: false,
                     now: Timestamp::now(),
                     relay: Some(&self.relay),
                 },
@@ -4093,13 +4126,9 @@ impl App {
                 }
                 line::Act::Cancel => return Ok(()),
                 // What the name does not take lets it go, and then does what
-                // it does on the list: `tab` steps the lens and `^j`/`^k`
-                // move, whatever is typed on the line below.
+                // it does on the list: `^j`/`^k` move, whatever is typed on
+                // the line below.
                 line::Act::Complete | line::Act::Nothing => {
-                    if matches!(k.code, KeyCode::Tab | KeyCode::BackTab) {
-                        self.cycle_lens(if k.code == KeyCode::BackTab { -1 } else { 1 });
-                        return Ok(());
-                    }
                     k = vi_step(k, true);
                 }
             },
@@ -4119,18 +4148,30 @@ impl App {
             return Ok(());
         }
         let k = vi_step(k, self.line.is_empty());
-        // Reading a run's page, the line still has the keyboard, so you can type
-        // the next thing without leaving the run you are on; taking the keyboard
-        // is the handover to the real terminal (`raw::attach`), never keys here.
-        // An empty line has nothing to complete, so `tab` steps the lens along
-        // instead — shift-tab the other way.
+        // On an empty line the list's own letters flip the three toggles —
+        // `f` flows, `a` agents, `h` hidden — taken here, before the line
+        // editor would eat the character.
         if self.line.is_empty()
             && self.view == View::Work
+            && matches!(self.mode, Mode::Normal)
             && !self.show_pane
-            && matches!(k.code, KeyCode::Tab | KeyCode::BackTab)
+            && k.modifiers.is_empty()
         {
-            self.cycle_lens(if k.code == KeyCode::BackTab { -1 } else { 1 });
-            return Ok(());
+            match k.code {
+                KeyCode::Char('f') => {
+                    self.toggle_flows();
+                    return Ok(());
+                }
+                KeyCode::Char('a') => {
+                    self.toggle_agents();
+                    return Ok(());
+                }
+                KeyCode::Char('h') => {
+                    self.toggle_hidden();
+                    return Ok(());
+                }
+                _ => {}
+            }
         }
         // On a flow's row, with nothing typed, → opens it to its latest firing's steps and ←
         // folds it again.
@@ -4989,16 +5030,9 @@ impl App {
                     self.land();
                 }
             }
-            palette::Cmd::Lens => {
-                let want = arg.trim().to_ascii_lowercase();
-                match rows::Lens::ALL.iter().find(|l| l.label() == want) {
-                    Some(l) => self.set_lens(*l),
-                    None => {
-                        let all: Vec<&str> = rows::Lens::ALL.iter().map(|l| l.label()).collect();
-                        self.say(format!("/lens {} · tab steps through them", all.join("|")));
-                    }
-                }
-            }
+            palette::Cmd::Flows => self.toggle_flows(),
+            palette::Cmd::Agents => self.toggle_agents(),
+            palette::Cmd::Hidden => self.toggle_hidden(),
             palette::Cmd::Prune => match self.rpc.call::<GcRun>(GcParams::default()).await {
                 Ok(r) if r.runs == 0 => self.say(format!("nothing with a journal ended over {} ago", r.older_than)),
                 Ok(r) => self.say(format!(
@@ -5136,9 +5170,9 @@ impl App {
             }
         };
         // The header's first line carries three things: its words at the
-        // left, the lens at the right of them, and who you are at the edge.
-        // The lens rides here rather than a row of its own.
-        let lens = (self.view == View::Work).then(|| self.lens_line());
+        // left, the toggles at the right of them, and who you are at the edge.
+        // The toggles ride here rather than a row of their own.
+        let lens = (self.view == View::Work).then(|| self.toggles_line());
         let lens_w = lens.as_ref().map_or(0, |l| l.width() as u16 + 2);
         let [top, below] = Layout::vertical([Constraint::Length(1), Constraint::Fill(1)]).areas(text);
         let [l, lens_area, r] = Layout::horizontal([
@@ -5257,20 +5291,26 @@ impl App {
         f.render_widget(Paragraph::new(foot), footer);
     }
 
-    /// The lens, at the right of the header: the slices of the list, the one
-    /// in force accented, the rest quiet. `tab` on an empty line steps it.
-    fn lens_line(&self) -> Line<'static> {
+    /// The toggles, at the right of the header: `f flows  a agents  h hidden`,
+    /// the ones on accented, the ones off quiet. The letters flip them on an
+    /// empty line.
+    fn toggles_line(&self) -> Line<'static> {
+        let on = theme::accent().add_modifier(Modifier::BOLD);
+        let off = theme::dim();
         let mut spans = Vec::new();
-        for (i, l) in rows::Lens::ALL.iter().enumerate() {
+        for (i, (key, label, lit)) in [
+            ("f", "flows", self.show_flows),
+            ("a", "agents", self.show_agents),
+            ("h", "hidden", self.show_hidden),
+        ]
+        .into_iter()
+        .enumerate()
+        {
             if i > 0 {
-                spans.push(Span::styled(" · ", theme::dim()));
+                spans.push(Span::styled("   ", off));
             }
-            let style = if *l == self.lens {
-                theme::accent().add_modifier(Modifier::BOLD)
-            } else {
-                theme::dim()
-            };
-            spans.push(Span::styled(l.label(), style));
+            let style = if lit { on } else { off };
+            spans.push(Span::styled(format!("{key} {label}"), style));
         }
         Line::from(spans)
     }
@@ -5384,16 +5424,16 @@ impl App {
         // never land on a map left behind by a draw that returned early.
         *self.hit.borrow_mut() = ListHit::default();
         if rows.is_empty() {
-            let msg = if !self.filter.is_empty() {
+            let msg: String = if !self.filter.is_empty() {
                 " nothing matches".into()
-            } else if self.lens == rows::Lens::Hidden {
+            } else if !self.show_flows || !self.show_agents {
+                " nothing here · f flows · a agents · h hidden".into()
+            } else if self.show_hidden {
                 " nothing hidden · /hide takes a row off the list".into()
-            } else if self.lens != rows::Lens::All {
-                format!(" no {} · tab for the rest", self.lens.label())
             } else {
                 " nothing running · rl run -- <command>".into()
             };
-            let nothing = self.filter.is_empty() && self.lens == rows::Lens::All;
+            let nothing = self.filter.is_empty() && self.show_flows && self.show_agents && !self.show_hidden;
             f.render_widget(empty_list(&msg, area, nothing), area);
             return;
         }
@@ -5461,7 +5501,7 @@ impl App {
                     let style = state_style(r.state);
                     // Hidden, and on the list only because it came to need
                     // you: it stands above every folder, and says it is hidden.
-                    let through = self.lens != rows::Lens::Hidden
+                    let through = !self.show_hidden
                         && rows::hidden_since(r, &self.names, &self.flows, &self.digest.hidden).is_some();
                     // A pinned run stands above every folder, so it says
                     // which one it is from.
@@ -6446,7 +6486,7 @@ mod tests {
         let big = shown(true, 60, 20);
         assert!(big.contains("██▀▀████▀▀██"), "{big}");
         assert!(big.contains("nothing running"));
-        // Too small for it, or a lens or a search that came up empty: words.
+        // Too small for it, or a toggle or a search that came up empty: words.
         for s in [shown(true, 60, 9), shown(true, 30, 20), shown(false, 60, 20)] {
             assert!(!s.contains('█'), "{s}");
             assert!(s.starts_with(" nothing running"), "{s}");
@@ -7267,14 +7307,12 @@ mod tests {
         assert_eq!(app.sel.as_deref(), Some(RUN));
         assert_eq!(app.names.workspace(&folder), "shiny");
 
-        // `tab` steps the lens, and lets the name go as well.
+        // `tab` lets the name go, back to the list.
         app.select(Some(format!("g:{}", folder.display())));
         press(&mut app, KeyCode::Char('r'), ctrl).await;
         type_in(&mut app, "x").await;
         press(&mut app, KeyCode::Tab, none).await;
         assert!(renaming(&app).is_none());
-        assert_ne!(app.lens, crate::tui::rows::Lens::All);
-        app.set_lens(crate::tui::rows::Lens::All);
         app.select(Some(format!("g:{}", folder.display())));
         assert_eq!(app.names.workspace(&folder), "shiny");
 
@@ -8164,8 +8202,8 @@ mod tests {
     }
 
     /// `enter` on a line a flow set off, in the events view: its row on the
-    /// list; the search and lens give way when they hide it; and with no row
-    /// at all the view stays and says so.
+    /// list; the search and toggles give way when they hide it; and with no
+    /// row at all the view stays and says so.
     #[tokio::test]
     async fn a_flow_in_the_events_view_is_found_on_the_list_or_said_to_have_no_row() {
         let (_tmp, token, mut app, folder) = panel_of(|folder, now| {
