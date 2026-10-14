@@ -2,6 +2,8 @@
 //! stands, what starts it, where it runs, whether it has a yes, and each of
 //! its steps. Pure.
 
+use super::flow_graph;
+use super::flow_links::{self, Links};
 use super::rows::{FlowRow, Names, short_path};
 use super::theme;
 use jiff::Timestamp;
@@ -9,7 +11,7 @@ use ratatui::style::Stylize;
 use ratatui::text::{Line, Span};
 use rl_core::time::{fmt_age, fmt_duration};
 use rl_flow::def::{Does, FlowDef};
-use rl_proto::flow::{Firing, FiringStatus, Flow, FlowStatus, NotLoaded, Reloaded, StepStatus};
+use rl_proto::flow::{Filter, Firing, FiringStatus, Flow, FlowStatus, Match, NotLoaded, Reloaded, StepStatus};
 use std::path::Path;
 
 /// What starts a flow, in words where they read better than the line it
@@ -20,6 +22,51 @@ pub fn when_words(when: &str) -> String {
         .map(|part| cron_words(part).unwrap_or_else(|| part.to_string()))
         .collect::<Vec<_>>()
         .join(" or ")
+}
+
+/// What starts a flow, whole: its time in words, then its `on` with what its `where` asks
+/// of the run — `every 30m · on run.failed where cause flow:nightly`. With neither, `by hand`.
+pub fn trigger_words(f: &Flow, def: &FlowDef) -> String {
+    let when = f.when();
+    let mut said: Vec<String> = when
+        .split(" or ")
+        .filter(|part| !part.starts_with("on ") && *part != "by hand")
+        .map(when_words)
+        .collect();
+    if !def.trigger.on.is_empty() {
+        let mut on = format!("on {}", def.trigger.on.join(", "));
+        if let Some(w) = def.trigger.filter.as_ref().map(where_words).filter(|w| !w.is_empty()) {
+            on.push_str(&format!(" where {w}"));
+        }
+        said.push(on);
+    }
+    if said.is_empty() {
+        return "by hand".into();
+    }
+    said.join(" · ")
+}
+
+/// A `where` in words, each field it gives: `tag nightly, cause flow:nightly`, a `data` field
+/// by its name — `severity ERROR or WARNING`.
+fn where_words(w: &Filter) -> String {
+    let fields = [
+        ("tag", &w.tag),
+        ("cause", &w.cause),
+        ("cli", &w.cli),
+        ("group", &w.group),
+    ];
+    let mut said: Vec<String> = fields
+        .iter()
+        .filter_map(|(k, v)| v.as_ref().map(|v| format!("{k} {v}")))
+        .collect();
+    for (field, want) in &w.data {
+        let want = match want {
+            Match::One(v) => v.clone(),
+            Match::Any(vs) => vs.join(" or "),
+        };
+        said.push(format!("{field} {want}"));
+    }
+    said.join(", ")
 }
 
 /// A cron line in words: `0 8-18 * * 1-5` → `hourly 08:00–18:00, Mon–Fri`.
@@ -186,16 +233,20 @@ fn place(p: &Path, names: &Names) -> String {
     names.registered(p).unwrap_or_else(|| short_path(p))
 }
 
-/// A flow in the pane: what starts it, where it runs, whether it has a yes,
-/// when it fires next and last did, and each step as the latest firing left
-/// it — or, before it has fired, as the flow writes them. `at`: the step under the caret,
-/// while the pane is walked, lit.
+/// A flow in the pane: where it runs, whether it has a yes, when it fires next and last did;
+/// then its wiring — what starts it and the flows among `links` that do,
+/// its steps drawn as the latest firing left them (or, before it has fired, as the flow writes
+/// them), and the flows it starts. `at`: the step under the caret, while the pane is walked,
+/// lit. Where the drawing is wider than `width`, the steps are listed instead.
+#[allow(clippy::too_many_arguments)]
 pub fn pane_lines(
     f: &Flow,
     def: &FlowDef,
     firing: Option<&Firing>,
     at: Option<usize>,
+    links: &Links,
     names: &Names,
+    width: usize,
     now: Timestamp,
 ) -> Vec<Line<'static>> {
     let folder = f.folder.as_deref();
@@ -209,7 +260,6 @@ pub fn pane_lines(
         .dim(),
     ])];
     lines.push(Line::raw(""));
-    lines.push(fact("when", when_words(&f.when())));
     let where_ = match &folder {
         Some(p) => place(p, names),
         None if def.trigger.on.is_empty() => "the Relay home".into(),
@@ -245,32 +295,88 @@ pub fn pane_lines(
     lines.push(fact("folder", short_path(&f.source)));
     lines.push(Line::raw(""));
     lines.push(Line::from(Span::raw(" steps").dim()));
+    let mut by = trigger_words(f, def);
+    if !links.by.is_empty() {
+        by.push_str(&format!(" ← {}", links.by.join(", ")));
+    }
+    lines.push(link("starts on", by));
+    match flow_graph::draw(def, firing, at).filter(|c| c.size().0 <= width) {
+        Some(c) => {
+            let (w, h) = c.size();
+            lines.extend(c.lines(0, 0, w, h));
+            lines.extend(step_lines(def, firing, None, false));
+        }
+        None => lines.extend(step_lines(def, firing, at, true)),
+    }
+    if !links.starts.is_empty() {
+        lines.push(link("starts", flow_links::starts_words(&links.starts)));
+    }
+    lines
+}
+
+/// A line of what starts a flow or what it starts, its label wider than a fact's.
+fn link(k: &str, v: String) -> Line<'static> {
+    Line::from(vec![Span::raw(format!(" {k:<11} ")).dim(), Span::raw(v)])
+}
+
+/// A line for each step, as the latest firing left it — or, before it has fired, as the flow
+/// writes them: its name, how it stands and what it does. Listed in place of the drawing
+/// (`listed`), each leads with its mark, `at`'s with the caret and lit, and ends with the
+/// steps it comes after and its `if`.
+fn step_lines(def: &FlowDef, firing: Option<&Firing>, at: Option<usize>, listed: bool) -> Vec<Line<'static>> {
     let steps: Vec<(&str, Option<StepStatus>)> = match firing {
         Some(x) => x.steps.iter().map(|s| (s.name.as_str(), Some(s.status))).collect(),
         None => def.steps.iter().map(|s| (s.name.as_str(), None)).collect(),
     };
     let w = steps.iter().map(|(n, _)| n.chars().count()).max().unwrap_or(0);
+    let mut lines = Vec::new();
     for (n, (name, status)) in steps.into_iter().enumerate() {
         let lit = at == Some(n);
-        let does = def.steps.iter().find(|s| s.name == name).map(|s| match &s.does {
-            Does::Run(a) => a.label(),
-            Does::Ask(a) => format!("asks: {}", a.text),
+        let step = def.steps.iter().find(|s| s.name == name);
+        let does = step.map(|s| match &s.does {
+            Does::Run(a) => first_line(&a.label()),
+            Does::Ask(a) => format!("asks: {}", first_line(&a.text)),
         });
-        let mut spans = vec![Span::raw(format!(
-            " {} {} {name:<w$}",
-            if lit { "❯" } else { " " },
-            glyph(status.unwrap_or(StepStatus::Pending))
-        ))];
+        let lead = if listed {
+            format!(
+                " {} {} {name:<w$}",
+                if lit { "❯" } else { " " },
+                glyph(status.unwrap_or(StepStatus::Pending))
+            )
+        } else {
+            format!("   {name:<w$}")
+        };
+        let mut spans = vec![Span::raw(lead)];
         if let Some(s) = status {
             spans.push(Span::raw(format!("  {:<7}", s.as_str())).dim());
         }
         if let Some(d) = does.filter(|d| !d.is_empty()) {
             spans.push(Span::raw(format!("  {d}")).dim());
         }
+        if let Some(s) = step.filter(|_| listed) {
+            if !s.after.is_empty() {
+                spans.push(Span::raw(format!("  after {}", s.after.join(", "))).dim());
+            }
+            if let Some(c) = &s.if_ {
+                spans.push(Span::raw(format!("  if {c}")).dim());
+            }
+        }
         let line = Line::from(spans);
         lines.push(if lit { line.style(theme::selected()) } else { line });
     }
     lines
+}
+
+/// Its first line, with ` …` when there were more: a prompt's words must not
+/// run together, nor crowd out the lines under it.
+fn first_line(text: &str) -> String {
+    let mut lines = text.lines();
+    let first = lines.next().unwrap_or("").trim_end();
+    if lines.any(|l| !l.trim().is_empty()) {
+        format!("{first} …")
+    } else {
+        first.to_string()
+    }
 }
 
 /// What `/reload` says in the flash: how many flows loaded, and what did not
@@ -539,18 +645,21 @@ mod tests {
         })
     }
 
-    #[test]
-    fn a_flow_in_words() {
+    /// The pane's lines for `f` as text, `width` wide, wired as `links` say.
+    fn pane_text(f: &Flow, firing: Option<&Firing>, at: Option<usize>, links: &Links, width: usize) -> String {
         let now: Timestamp = "2026-09-10T12:00:00Z".parse().unwrap();
         let names = Names::new([("/w/api".into(), "api".to_string())]);
-        let text = |f: &Flow, firing: Option<&Firing>| {
-            let d: FlowDef = serde_json::from_value(f.def.clone()).unwrap();
-            pane_lines(f, &d, firing, None, &names, now)
-                .iter()
-                .map(|l| l.to_string())
-                .collect::<Vec<_>>()
-                .join("\n")
-        };
+        let d: FlowDef = serde_json::from_value(f.def.clone()).unwrap();
+        pane_lines(f, &d, firing, at, links, &names, width, now)
+            .iter()
+            .map(|l| l.to_string())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn a_flow_in_words() {
+        let text = |f: &Flow, firing: Option<&Firing>| pane_text(f, firing, None, &Links::default(), 80);
         let waiting = firing(
             FiringStatus::Waiting,
             &[("probe", StepStatus::Done), ("review", StepStatus::Waiting)],
@@ -558,12 +667,22 @@ mod tests {
         let s = text(&flow(Some("0123456789abcdef"), def(Some("/w/api"))), Some(&waiting));
         assert!(s.starts_with(" prod-logs  flow · api · on\n\n"), "{s}");
         assert!(
-            s.contains(" when     at 02:30\n in       api\n yes      approved 01234567\n next     in 30m00s\n"),
+            s.contains(
+                " prod-logs  flow · api · on\n\n in       api\n yes      approved 01234567\n next     in 30m00s\n"
+            ),
             "{s}"
         );
         assert!(s.contains(" last     1h ago · waiting at review\n"), "{s}");
         assert!(
-            s.contains(" steps\n   ✓ probe   done     new-log-errors.sh\n   ? review  waiting  asks: fix it?"),
+            s.ends_with(
+                " steps\n \
+                 starts on   at 02:30\n \
+                 ╭─────────╮    ╭──────────╮\n \
+                 │ ✓ probe │───▶│ ? review │\n \
+                 ╰─────────╯    ╰──────────╯\n   \
+                 probe   done     new-log-errors.sh\n   \
+                 review  waiting  asks: fix it?"
+            ),
             "{s}"
         );
 
@@ -577,9 +696,42 @@ mod tests {
         );
         assert!(!s.contains(" next "), "{s}");
         assert!(
-            s.contains("   ○ probe   new-log-errors.sh\n   ○ review  asks: fix it?"),
+            s.contains(" │ ○ probe │───▶│ ○ review │\n ╰─────────╯    ╰──────────╯\n   probe   new-log-errors.sh\n   review  asks: fix it?"),
             "{s}"
         );
+    }
+
+    #[test]
+    fn a_pane_too_narrow_for_the_drawing_lists_the_steps() {
+        let waiting = firing(
+            FiringStatus::Waiting,
+            &[("probe", StepStatus::Done), ("review", StepStatus::Waiting)],
+        );
+        let mut d = def(None);
+        d["steps"][1]["if_"] = serde_json::json!({ "Set": { "head": "probe", "rest": "found" } });
+        let f = flow(Some("0123456789abcdef"), d);
+        let s = pane_text(&f, Some(&waiting), None, &Links::default(), 29);
+        assert!(
+            s.ends_with(
+                " steps\n \
+                 starts on   at 02:30\n   \
+                 ✓ probe   done     new-log-errors.sh\n   \
+                 ? review  waiting  asks: fix it?  after probe  if probe.found"
+            ),
+            "{s}"
+        );
+        assert!(pane_text(&f, Some(&waiting), None, &Links::default(), 30).contains("│ ✓ probe │"));
+    }
+
+    #[test]
+    fn a_steps_action_shows_its_first_line_only() {
+        assert_eq!(first_line("claude · one line"), "claude · one line");
+        assert_eq!(
+            first_line("claude · from three\nsources, then\nsummarise"),
+            "claude · from three …"
+        );
+        assert_eq!(first_line("trailing\n\n"), "trailing");
+        assert_eq!(first_line(""), "");
     }
 
     #[test]
@@ -592,10 +744,98 @@ mod tests {
             FiringStatus::Waiting,
             &[("probe", StepStatus::Done), ("review", StepStatus::Waiting)],
         );
-        let lines = pane_lines(&f, &d, Some(&x), Some(1), &names, now);
+        // Listed, its line.
+        let lines = pane_lines(&f, &d, Some(&x), Some(1), &Links::default(), &names, 20, now);
         let review = lines.iter().find(|l| l.to_string().contains("? review")).unwrap();
         assert!(review.to_string().starts_with(" ❯ ? review"), "{review}");
         assert_eq!(review.style, theme::selected());
+        // Drawn, its box.
+        let lines = pane_lines(&f, &d, Some(&x), Some(1), &Links::default(), &names, 80, now);
+        let mid = lines.iter().find(|l| l.to_string().contains("│ ? review │")).unwrap();
+        let lit: Vec<&str> = mid
+            .spans
+            .iter()
+            .filter(|s| s.style == theme::selected())
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert_eq!(lit, ["│", "│"], "{mid:?}");
+        assert!(!lines.iter().any(|l| l.style == theme::selected()), "no line lit whole");
+    }
+
+    #[test]
+    fn what_starts_a_flow_in_words() {
+        let words = |trigger: serde_json::Value| {
+            let mut d = def(None);
+            d["trigger"] = trigger;
+            let f = flow(None, d);
+            let d: FlowDef = serde_json::from_value(f.def.clone()).unwrap();
+            trigger_words(&f, &d)
+        };
+        assert_eq!(
+            words(serde_json::json!({ "when": { "Every": 1800 }, "on": [], "filter": null })),
+            "every 30m"
+        );
+        assert_eq!(
+            words(
+                serde_json::json!({ "when": { "Every": 1800 }, "on": ["run.failed", "run.stopped"],
+                                      "filter": { "cause": "flow:nightly" } })
+            ),
+            "every 30m · on run.failed, run.stopped where cause flow:nightly"
+        );
+        assert_eq!(
+            words(serde_json::json!({ "when": null, "on": ["logs.*"],
+                                      "filter": { "tag": "prod", "data": { "severity": ["ERROR", "WARNING"] } } })),
+            "on logs.* where tag prod, severity ERROR or WARNING"
+        );
+        assert_eq!(
+            words(serde_json::json!({ "when": { "Cron": "30 7 * * 1-5" }, "on": [], "filter": null })),
+            "at 07:30, Mon–Fri"
+        );
+        assert_eq!(
+            words(serde_json::json!({ "when": null, "on": [], "filter": null })),
+            "by hand"
+        );
+    }
+
+    #[test]
+    fn the_pane_says_which_flows_start_it_and_which_it_starts() {
+        let links = Links {
+            by: vec!["nightly".into(), "deploy".into()],
+            starts: vec![
+                ("triage".into(), vec!["decision.taken".into()]),
+                ("page".into(), vec!["run.failed".into(), "run.lost".into()]),
+            ],
+        };
+        let s = pane_text(&flow(None, def(None)), None, None, &links, 80);
+        assert!(s.contains("\n starts on   at 02:30 ← nightly, deploy\n"), "{s}");
+        assert!(
+            s.ends_with("\n starts      triage (on decision.taken) · page (on run.failed, run.lost)"),
+            "{s}"
+        );
+        let s = pane_text(&flow(None, def(None)), None, None, &Links::default(), 80);
+        assert!(!s.contains(" starts  "), "nothing it starts, no line: {s}");
+    }
+
+    #[test]
+    fn a_flow_heard_by_another_on_its_failures_says_it_starts_it() {
+        let a = flow(Some("0123456789abcdef"), def(None));
+        let mut d = def(None);
+        d["name"] = "triage".into();
+        d["trigger"] =
+            serde_json::json!({ "when": null, "on": ["run.failed"], "filter": { "cause": "flow:prod-logs" } });
+        let b = Flow {
+            name: "triage".into(),
+            def: d,
+            ..flow(Some("0123456789abcdef"), def(None))
+        };
+        let all = flow_links::wired(&[a.clone(), b.clone()], &[]);
+        let s = pane_text(&a, None, None, &flow_links::links("prod-logs", &all), 80);
+        assert!(s.ends_with("\n starts      triage (on run.failed)"), "{s}");
+        let s = pane_text(&b, None, None, &flow_links::links("triage", &all), 80);
+        assert!(
+            s.contains("\n starts on   on run.failed where cause flow:prod-logs ← prod-logs\n"),
+            "{s}"
+        );
     }
 
     fn not_loaded(flow: &str, line: Option<usize>, message: &str) -> NotLoaded {

@@ -26,7 +26,7 @@ flowchart TB
         flows["flows — flow.md → firings"]
         dec["decisions — questions waiting on you"]
         attach["attach — screen, then live"]
-        digest["digest · summary · recap · graph"]
+        digest["digest · summary · recap"]
     end
 
     subgraph holder["rl-session — one holder per run"]
@@ -94,8 +94,9 @@ flowchart LR
   `backend` and `screen` are the process.
 - `rl-flow` is all the deciding about a flow and none of the doing: `flow.md` parsed and
   checked (`def`), step order (`plan`), what a firing does next (`advance`), `if:` (`cond`),
-  placeholders (`template`), step state rules (`state`), `rl flow test` (`preview`), cron, and the
-  folder hash. `rld` carries out its answers; `rl` uses it to draw a flow.
+  placeholders (`template`), step state rules (`state`), `rl flow test` (`preview`), whether an
+  event reaches a flow's `on` and `where` (`events`, shared by the daemon's trigger check and the
+  pane's links), cron, and the folder hash. `rld` carries out its answers; `rl` uses it to draw a flow.
 - `vendor/crossterm` is crossterm 0.29 with one fix (a `CSI ?` reply no longer swallows the keys
   after it), patched in from the workspace manifest until a release carries it.
 
@@ -247,13 +248,14 @@ sequenceDiagram
   agent; one this machine can run goes to the project's **warm shell** (one persistent `$SHELL -i`
   per folder, written to via `run.input`); anything else goes to the interpreter (§6) and comes
   back as a filled form. The line's right edge says which, before `enter`. Everything else is a
-  `/` command (`tui/palette.rs`) or one of a few chords (`^x ^r ^t ^g ^o ^f`, `^h` for the keys).
+  `/` command (`tui/palette.rs`) or one of a few chords (`^x ^r ^t ^o ^f`, `^h` for the keys).
 - **Enter on a live run** leaves ratatui and pipes the run to the real terminal (`attach.rs`,
   shared with `rl join`); `ctrl-\` lets go. An ended run opens in a `vt100` tile (`tui/term.rs`).
 - **The pane** (`tui/pane.rs`) holds facts for whatever is selected: a run, a flow and its
-  firings, a project, a question and its choices, a summary.
-- **The graph** (`tui/graph.rs`, data from `graph.get`) draws every flow, its steps, and the
-  observed event edges between runs and flows, layered by connection.
+  firings, a project, a question and its choices, a summary. A flow's pane draws its wiring
+  (`tui/flow_graph.rs`): what starts it, its steps as boxes by rank with their `if`s and its
+  last firing's marks, and the flows it starts — worked out from every loaded flow's definition
+  (`tui/flow_links.rs`), with no ledger. Too narrow for the drawing, it lists the steps.
 - **The events view** (`tui/events.rs`) lists the ledger's events newest first, each with what
   it set off, read from causes, never guessed.
 - **The catch-up** (`rl-cli/src/catchup.rs`) opens instead of the list when you were away longer
