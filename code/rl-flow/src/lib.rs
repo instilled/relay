@@ -7,6 +7,7 @@ pub mod cond;
 pub mod cron;
 pub mod def;
 pub mod doc;
+pub mod events;
 pub mod hash;
 pub mod plan;
 pub mod preview;

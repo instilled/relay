@@ -16,8 +16,6 @@ mod store;
 mod triggers;
 mod work;
 
-pub(crate) use triggers::kind_matches;
-
 use crate::decisions::Decisions;
 use crate::supervisor::Supervisor;
 use anyhow::Result;
