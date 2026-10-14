@@ -10,7 +10,7 @@ use super::engine::Fired;
 use anyhow::{Context, Result};
 use jiff::{SignedDuration, Timestamp};
 use rl_flow::cron::Cron;
-use rl_flow::def::{FlowDef, When};
+use rl_flow::def::{FlowDef, When, kind_matches};
 use rl_ledger::{decisions, firings, flows, runs};
 use rl_proto::flow::{Firing, Flow, Missed, Overlap};
 use rl_proto::types::{Cause, Event, Run, event_kind};
@@ -212,14 +212,6 @@ fn def_of(f: &Flow) -> Option<FlowDef> {
 /// Whether `def`'s `on` takes an event of this kind.
 fn hears(def: &FlowDef, kind: &str) -> bool {
     def.trigger.on.iter().any(|p| kind_matches(p, kind))
-}
-
-/// Whether an `on` pattern takes an event of this kind: `run.failed`, `run.*`, `*`.
-pub(crate) fn kind_matches(pattern: &str, kind: &str) -> bool {
-    match pattern.strip_suffix('*') {
-        Some(prefix) => kind.starts_with(prefix),
-        None => pattern == kind,
-    }
 }
 
 /// Why a flow did or did not fire on an event.

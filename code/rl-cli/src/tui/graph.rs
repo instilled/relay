@@ -13,11 +13,13 @@
 //! up a lane of their own in the gap before the target, and into the target
 //! on a row of their own, where the event kinds they carry are written.
 
+use super::canvas::Canvas;
+#[cfg(test)]
+use super::canvas::{DOWN, LEFT, RIGHT, UP};
 use super::rows::Names;
 use super::theme;
 use jiff::Timestamp;
 use ratatui::style::{Modifier, Style};
-use ratatui::text::{Line, Span};
 use rl_proto::flow::FlowStatus;
 use rl_proto::graph::{Graph, Node};
 use rl_proto::types::RunState;
@@ -384,157 +386,6 @@ pub fn plan(g: &Graph, kept: &HashSet<String>, names: &Names, now: Timestamp) ->
         routes,
         width,
         height: loop_at.into_iter().fold(body + 1, usize::max),
-    }
-}
-
-/// Which sides of a cell a line leaves by.
-const UP: u8 = 1;
-const DOWN: u8 = 2;
-const LEFT: u8 = 4;
-const RIGHT: u8 = 8;
-
-#[derive(Clone)]
-struct Cell {
-    ch: char,
-    lines: u8,
-    style: Style,
-}
-
-/// The whole graph, drawn. Read out a window of it with [`Canvas::lines`].
-pub struct Canvas {
-    w: usize,
-    h: usize,
-    cells: Vec<Cell>,
-}
-
-impl Canvas {
-    fn new(w: usize, h: usize) -> Self {
-        let blank = Cell {
-            ch: ' ',
-            lines: 0,
-            style: Style::default(),
-        };
-        Self {
-            w,
-            h,
-            cells: vec![blank; w * h],
-        }
-    }
-
-    fn at(&mut self, x: usize, y: usize) -> Option<&mut Cell> {
-        (x < self.w && y < self.h).then(|| &mut self.cells[y * self.w + x])
-    }
-
-    fn put(&mut self, x: usize, y: usize, ch: char, style: Style) {
-        if let Some(c) = self.at(x, y) {
-            c.ch = ch;
-            c.lines = 0;
-            c.style = style;
-        }
-    }
-
-    fn text(&mut self, x: usize, y: usize, s: &str, style: Style) {
-        for (i, ch) in s.chars().enumerate() {
-            self.put(x + i, y, ch, style);
-        }
-    }
-
-    fn hline(&mut self, x0: usize, x1: usize, y: usize, style: Style) {
-        let (a, b) = (x0.min(x1), x0.max(x1));
-        for x in a..=b {
-            let mut m = 0;
-            if x > a {
-                m |= LEFT;
-            }
-            if x < b {
-                m |= RIGHT;
-            }
-            self.mark(x, y, m, style);
-        }
-    }
-
-    fn vline(&mut self, x: usize, y0: usize, y1: usize, style: Style) {
-        let (a, b) = (y0.min(y1), y0.max(y1));
-        for y in a..=b {
-            let mut m = 0;
-            if y > a {
-                m |= UP;
-            }
-            if y < b {
-                m |= DOWN;
-            }
-            self.mark(x, y, m, style);
-        }
-    }
-
-    fn mark(&mut self, x: usize, y: usize, m: u8, style: Style) {
-        if let Some(c) = self.at(x, y) {
-            c.lines |= m;
-            // A counted edge shows through a merely declared one.
-            if c.style == Style::default() || style != theme::dim() {
-                c.style = style;
-            }
-        }
-    }
-
-    /// Joins every line mark into the box-drawing character it makes.
-    fn join(&mut self) {
-        for c in &mut self.cells {
-            if c.lines == 0 {
-                continue;
-            }
-            c.ch = match c.lines {
-                x if x == LEFT | RIGHT || x == LEFT || x == RIGHT => '─',
-                x if x == UP | DOWN || x == UP || x == DOWN => '│',
-                x if x == DOWN | RIGHT => '╭',
-                x if x == DOWN | LEFT => '╮',
-                x if x == UP | RIGHT => '╰',
-                x if x == UP | LEFT => '╯',
-                x if x == UP | DOWN | RIGHT => '├',
-                x if x == UP | DOWN | LEFT => '┤',
-                x if x == LEFT | RIGHT | DOWN => '┬',
-                x if x == LEFT | RIGHT | UP => '┴',
-                _ => '┼',
-            };
-        }
-    }
-
-    /// Rows `y0..y0+h`, columns `x0..x0+w`, as ratatui lines.
-    pub fn lines(&self, x0: usize, y0: usize, w: usize, h: usize) -> Vec<Line<'static>> {
-        (y0..y0 + h)
-            .map(|y| {
-                let mut spans: Vec<Span<'static>> = Vec::new();
-                let mut run = String::new();
-                let mut style = Style::default();
-                for x in x0..x0 + w {
-                    let (ch, st) = match (x < self.w && y < self.h).then(|| &self.cells[y * self.w + x]) {
-                        Some(c) => (c.ch, c.style),
-                        None => (' ', Style::default()),
-                    };
-                    if st != style && !run.is_empty() {
-                        spans.push(Span::styled(std::mem::take(&mut run), style));
-                    }
-                    style = st;
-                    run.push(ch);
-                }
-                if !run.is_empty() {
-                    spans.push(Span::styled(run, style));
-                }
-                Line::from(spans)
-            })
-            .collect()
-    }
-
-    /// The whole canvas as plain text, trailing space trimmed; for tests.
-    #[cfg(test)]
-    pub fn plain(&self) -> String {
-        (0..self.h)
-            .map(|y| {
-                let row: String = (0..self.w).map(|x| self.cells[y * self.w + x].ch).collect();
-                row.trim_end().to_string()
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
     }
 }
 

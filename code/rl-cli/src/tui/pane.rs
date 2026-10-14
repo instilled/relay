@@ -3,6 +3,7 @@
 //! lines.
 
 use super::firings::{self, FlowPane};
+use super::flow_links::{self, Wired};
 use super::flows;
 use super::rows::{FlowRow, Names, asked_by, cause_words, fit};
 use crate::digest::signals;
@@ -291,12 +292,13 @@ const FLOW_RUNS: usize = 10;
 const FLOW_MARKS: usize = 40;
 
 /// A flow in the pane: the flow itself — its steps as the firing shown left them, the caret's
-/// lit while walking — the files that firing's steps wrote, how its runs went, what was said of
+/// lit while walking, and how it is wired among the others (`wired`) — the files that firing's steps wrote, how its runs went, what was said of
 /// it, then its last firings (`fp`, once fetched; else its last runs).
 #[allow(clippy::too_many_arguments)]
 pub fn flow_lines(
     j: &FlowRow,
     flow: Option<&Flow>,
+    wired: &[Wired],
     fp: Option<&FlowPane>,
     walking: bool,
     summary: Option<&Summary>,
@@ -309,7 +311,8 @@ pub fn flow_lines(
     let loaded = flow.and_then(|f| Some((f, serde_json::from_value::<rl_flow::def::FlowDef>(f.def.clone()).ok()?)));
     let mut lines = match loaded {
         Some((f, def)) => {
-            let mut l = flows::pane_lines(f, &def, shown, at, names, now);
+            let links = flow_links::links(&f.name, wired);
+            let mut l = flows::pane_lines(f, &def, shown, at, &links, names, width, now);
             if let Some(p) = fp.filter(|p| !p.files.is_empty()) {
                 l.push(fact("files", firings::files_words(&p.files)));
             }

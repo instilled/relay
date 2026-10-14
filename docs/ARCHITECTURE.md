@@ -251,7 +251,10 @@ sequenceDiagram
 - **Enter on a live run** leaves ratatui and pipes the run to the real terminal (`attach.rs`,
   shared with `rl join`); `ctrl-\` lets go. An ended run opens in a `vt100` tile (`tui/term.rs`).
 - **The pane** (`tui/pane.rs`) holds facts for whatever is selected: a run, a flow and its
-  firings, a project, a question and its choices, a summary.
+  firings, a project, a question and its choices, a summary. A flow's pane draws its wiring
+  (`tui/flow_graph.rs`): what starts it, its steps as boxes by rank with their `if`s and its
+  last firing's marks, and the flows it starts — worked out from every loaded flow's definition
+  (`tui/flow_links.rs`), with no ledger. Too narrow for the drawing, it lists the steps.
 - **The graph** (`tui/graph.rs`, data from `graph.get`) draws every flow, its steps, and the
   observed event edges between runs and flows, layered by connection.
 - **The events view** (`tui/events.rs`) lists the ledger's events newest first, each with what

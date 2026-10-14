@@ -16,11 +16,14 @@
 //! it reads on either theme (see `theme`); the footer is the only chrome (J8).
 //! Nothing on screen is an id.
 
+mod canvas;
 mod carry;
 mod catchup;
 mod complete;
 mod events;
 mod firings;
+mod flow_graph;
+mod flow_links;
 #[cfg(test)]
 mod flow_new_tests;
 #[cfg(test)]
@@ -6180,6 +6183,7 @@ impl App {
             Some(Row::Flow(f)) => pane::flow_lines(
                 &f,
                 self.flow_of_row(&f),
+                &flow_links::wired(&self.flows, &self.digest.items),
                 Some(&self.flow_pane).filter(|p| p.flow == f.name),
                 matches!(self.mode, Mode::Walk),
                 self.summary_of_row(&Row::Flow(f.clone())),

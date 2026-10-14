@@ -43,6 +43,14 @@ pub struct Trigger {
     pub filter: Option<Filter>,
 }
 
+/// Whether an `on` pattern takes an event of this kind: `run.failed`, `run.*`, `*`.
+pub fn kind_matches(pattern: &str, kind: &str) -> bool {
+    match pattern.strip_suffix('*') {
+        Some(prefix) => kind.starts_with(prefix),
+        None => pattern == kind,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum When {
     /// Seconds between firings.

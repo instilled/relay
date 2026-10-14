@@ -312,7 +312,16 @@ pub fn pane_lines(
         lines.push(Line::raw(""));
         match serde_json::from_value::<rl_flow::def::FlowDef>(f.def.clone()) {
             Ok(def) if n.kind == NodeKind::Flow => {
-                lines.extend(crate::tui::flows::pane_lines(f, &def, firing, None, names, now));
+                lines.extend(crate::tui::flows::pane_lines(
+                    f,
+                    &def,
+                    firing,
+                    None,
+                    &Default::default(),
+                    names,
+                    width,
+                    now,
+                ));
             }
             _ => lines.push(Line::from(vec![
                 Span::styled(" from ", theme::dim()),

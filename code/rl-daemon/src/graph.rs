@@ -10,7 +10,7 @@
 //! flow's `on` takes that nothing raised in the window still shows, as an
 //! event node, so every flow that listens has a way in.
 
-use crate::flows::kind_matches;
+use rl_flow::def::kind_matches;
 use rl_flow::def::{Does, FlowDef};
 use rl_ledger::graph::{AskRow, EventCount, RunRow};
 use rl_proto::action::Task;
