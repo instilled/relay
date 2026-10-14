@@ -93,7 +93,7 @@ use rows::{Names, Row, fit};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
-use term::TermView;
+use term::Output;
 
 const REFRESH: Duration = Duration::from_secs(1);
 /// How often an open panel tells presence you are here: a window closed
@@ -356,7 +356,7 @@ struct App {
     pane_hit: std::cell::RefCell<PaneHit>,
     /// The pane alone, full width: a terminal, unless `f` says otherwise.
     wide: bool,
-    term: Option<TermView>,
+    term: Option<Output>,
     /// Size the terminal was last told about.
     term_size: (u16, u16),
     /// The selected run's recent events.
@@ -1254,7 +1254,7 @@ impl App {
             if self.pane == Pane::Term && self.term.is_some() && size != self.term_size {
                 self.term_size = size;
                 if let Some(t) = &mut self.term {
-                    t.resized(size).await?;
+                    t.relayout(size);
                 }
             }
             tokio::select! {
@@ -1376,40 +1376,6 @@ impl App {
                         None => std::future::pending().await,
                     }
                 } => self.removed(gone).await,
-                more = async {
-                    match &mut self.term {
-                        Some(t) if !t.over => t.pump().await,
-                        _ => std::future::pending().await,
-                    }
-                } => {
-                    // The pump above woke us on one frame; an inline agent's
-                    // repaint (Gemini climbs the screen rewriting a line at a
-                    // time) is a burst of them. Take in the whole burst now,
-                    // so the one redraw below shows a finished frame rather
-                    // than each half-erased step of it, which read as flicker.
-                    let more = match more {
-                        Ok(true) => self.term.as_mut().map_or(Ok(true), TermView::drain_ready),
-                        done => done,
-                    };
-                    match more {
-                        Ok(true) => {}
-                        Ok(false) => {
-                            // An ended run's output is still worth reading, so the
-                            // view stays; there is just nothing more to poll. A
-                            // stream that went without an exit is worth reading
-                            // most of all — throwing it away used to take the last
-                            // thing the run said, at the one moment it mattered.
-                            if self.term.as_ref().is_some_and(|t| t.ended.is_none()) {
-                                let words = self.lost_words();
-                                if let Some(t) = self.term.as_mut() {
-                                    t.lost = true;
-                                }
-                                self.say(words);
-                            }
-                        }
-                        Err(e) => { self.say(format!("stream: {e}")); self.close_term(); }
-                    }
-                }
             }
         }
         Ok(())
@@ -1490,7 +1456,7 @@ impl App {
         {
             return Some(shortcuts::Place::Term {
                 wide: self.wide,
-                live: !t.lost && t.ended.is_none(),
+                live: false,
             });
         }
         Some(match self.view {
@@ -2051,9 +2017,6 @@ impl App {
             .unwrap_or_else(|| id.to_string());
         match ended {
             Ended::Closed { .. } => {
-                if let Some(t) = self.term.as_mut().filter(|t| t.id == id) {
-                    t.lost = true;
-                }
                 self.say(self.gone_words(id, &title));
             }
             Ended::Exit { how, .. } => self.say(format!("{title} ended ({how})")),
@@ -2093,18 +2056,7 @@ impl App {
         }
     }
 
-    /// The view goes for good: the stream died, or another run wants it.
-    /// A stream that went without an exit, in words. What rld last said the
-    /// run was is the honest part: it may have failed, or it may be going on
-    /// without us, and those are not the same news.
-    fn lost_words(&self) -> String {
-        let Some(t) = self.term.as_ref() else {
-            return "lost the connection".into();
-        };
-        self.gone_words(&t.id, &t.info.run.title)
-    }
-
-    /// The same, for run `id`, known as `title` if the list no longer has it.
+    /// What became of run `id`, known as `title` if the list no longer has it.
     fn gone_words(&self, id: &str, title: &str) -> String {
         let title = self
             .run_by_id(id)
@@ -2118,6 +2070,7 @@ impl App {
         }
     }
 
+    /// The view goes for good: another run wants it.
     fn close_term(&mut self) {
         if self.term.is_some() {
             self.wide = false;
@@ -2126,8 +2079,8 @@ impl App {
         self.pane = Pane::Facts;
     }
 
-    /// Stepping back to the list. The view stays open and goes on reading, so
-    /// coming back is instant and lands where it was left.
+    /// Stepping back to the list. The page stays held, so coming back is
+    /// instant and lands where it was left.
     fn leave_term(&mut self) {
         self.wide = false;
         self.pane = Pane::Facts;
@@ -2246,7 +2199,7 @@ impl App {
         self.show_pane = true;
         self.wide = false;
         let size = self.pane_size(area);
-        match TermView::open(&self.home, &id, size).await {
+        match Output::open(&self.home, &id, size).await {
             Ok(t) => {
                 self.term = Some(t);
                 self.term_size = size;
@@ -5880,36 +5833,35 @@ impl App {
                     ..area
                 }
             };
-            // Whose terminal this is, on the first row: browse away and the
-            // tile stays on its run, so it has to say which one.
-            let (word, style) = if t.lost {
-                ("lost", ratatui::style::Style::default().fg(theme::BAD))
-            } else if t.ended.is_some() {
-                ("ended", theme::dim())
-            } else {
-                ("watching", ratatui::style::Style::default().fg(theme::LIVE))
-            };
+            // Whose output this is, on the first row: browse away and the
+            // page stays on its run, so it has to say which one.
             let title = self
                 .run_by_id(&t.id)
                 .map(|r| r.title.clone())
-                .unwrap_or_else(|| t.info.run.title.clone());
+                .unwrap_or_else(|| t.title.clone());
+            let mut spans = vec![
+                Span::styled("‹ esc  ", theme::dim()),
+                Span::styled(format!("{} · ", t.id), theme::dim()),
+                Span::styled(title, theme::name()),
+            ];
+            if let Some(code) = t.ended() {
+                spans.push(Span::styled(format!(" · ended ({code})"), theme::dim()));
+            }
             let head = Rect { height: 1, ..area };
-            f.render_widget(
-                Paragraph::new(Line::from(vec![
-                    Span::styled(format!("{word} "), style),
-                    Span::styled(
-                        fit(&title, area.width.saturating_sub(word.len() as u16 + 1) as usize),
-                        theme::name(),
-                    ),
-                ])),
-                head,
-            );
+            f.render_widget(Paragraph::new(Line::from(spans)), head);
             let body = Rect {
                 y: area.y + 1,
                 height: area.height.saturating_sub(1),
                 ..area
             };
-            screen::draw(t.screen(), body, f.buffer_mut());
+            if t.empty() {
+                f.render_widget(
+                    Paragraph::new(Line::from(Span::raw(" nothing was recorded").dim())),
+                    body,
+                );
+            } else {
+                screen::draw(t.screen(), body, f.buffer_mut());
+            }
             return;
         }
         let now = Timestamp::now();
@@ -6160,29 +6112,12 @@ impl App {
             let mut s = String::new();
             // A full-screen app keeps no lines above its screen: nothing to
             // read back, so the keys are not offered.
-            let back = if t.screen().alternate_screen() {
-                ""
-            } else {
-                " · pgup/pgdn reads back"
-            };
-            if t.lost {
-                s.push_str(&format!("lost · the last that was heard{back} · esc back"));
-            } else if t.ended.is_some() {
-                s.push_str(&format!("ended{back} · esc back"));
-            } else if let Some(who) = &t.info.joiner {
-                s.push_str(&format!(
-                    "watching · {who} is driving · enter takes the terminal · esc back"
-                ));
-            } else {
-                s.push_str(&format!("watching · enter takes the terminal{back} · esc back"));
+            if !t.screen().alternate_screen() {
+                s.push_str("pgup/pgdn reads back · ");
             }
+            s.push_str("esc back · ctrl-\\ list");
             if t.scrolled() > 0 {
                 s.push_str(&format!(" · {} back", t.scrolled()));
-            }
-            if let Some((n, at)) = &t.note
-                && at.elapsed() < FLASH
-            {
-                s.push_str(&format!(" · {n}"));
             }
             return s;
         }
