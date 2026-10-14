@@ -28,18 +28,25 @@
 //! off the list and in the `hidden` lens instead — unless it comes to need
 //! you after you hid it: then it comes through, above the pinned runs.
 //!
+//! Agents' own sessions — Claude's that `claude agents` lists, and others',
+//! that are not Relay's runs — stand under the project `rld` filed them
+//! under, as a run in their folder would be, in the order they came with
+//! its runs. They are agents, not a flow's; `/hide` takes one off the list
+//! as it does a flow, and one that comes to need you comes through.
+//!
 //! A project whose rows you moved (shift-↑/↓) keeps your order: every row
 //! stands where you put it, whatever comes of it, what is new enters at the
 //! bottom, and `/sort` lets it go back to the order its rows came in.
 
 use super::flows;
+use super::outside;
 use super::query::{Named, Query, Subject};
 use crate::rank;
 use jiff::{SignedDuration, Timestamp};
 use rl_core::time::fmt_age;
 use rl_proto::decision::Decision;
 use rl_proto::flow::{Firing, Flow, FlowStatus};
-use rl_proto::methods::{Digest, DigestItem, Hidden, Order};
+use rl_proto::methods::{Digest, DigestItem, Hidden, Order, Outside};
 use rl_proto::types::{Cause, Checkout, Confidence, Run, RunKind, RunState};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -94,6 +101,8 @@ pub enum Row<'a> {
     Run(&'a DigestItem),
     /// A flow's ended runs, as one row.
     Flow(FlowRow<'a>),
+    /// One of an agent's own sessions, not a Relay run.
+    Outside(&'a Outside),
 }
 
 impl<'a> Row<'a> {
@@ -106,6 +115,7 @@ impl<'a> Row<'a> {
             Row::Question(d) => Some(format!("q:{}", d.id)),
             Row::Run(i) => Some(format!("r:{}", i.run.id)),
             Row::Flow(f) => Some(f.key.clone()),
+            Row::Outside(c) => Some(c.key()),
         }
     }
 
@@ -380,22 +390,41 @@ struct Look {
     color: Option<(u8, u8, u8)>,
 }
 
-/// Every CLI's look, by name: the built-in profiles with yours in
-/// `$RELAY_HOME/detect/` over them, read once. Profiles that do not load
-/// leave the built-ins — `rld` is the one that says what is wrong with them.
-fn looks() -> &'static BTreeMap<String, Look> {
-    static LOOKS: OnceLock<BTreeMap<String, Look>> = OnceLock::new();
-    LOOKS.get_or_init(|| {
-        use rl_detect::Registry;
-        let reg = if cfg!(test) {
+/// The profiles: the built-ins with yours in `$RELAY_HOME/detect/` over
+/// them, read once (the built-ins alone under test). Profiles that do not
+/// load leave the built-ins — `rld` is the one that says what is wrong
+/// with them.
+pub(crate) fn registry() -> &'static rl_detect::Registry {
+    use rl_detect::Registry;
+    static REG: OnceLock<Registry> = OnceLock::new();
+    REG.get_or_init(|| {
+        if cfg!(test) {
             Registry::builtin()
         } else {
             rl_core::Home::resolve()
                 .ok()
                 .and_then(|h| Registry::load(&h).ok())
                 .unwrap_or_else(Registry::builtin)
-        };
-        reg.agents()
+        }
+    })
+}
+
+/// What `kind:` takes on the list: `query::KINDS`, and each agent's name
+/// (`kind:codex`: its runs and its own sessions).
+pub fn list_kinds() -> Vec<String> {
+    crate::tui::query::KINDS
+        .iter()
+        .map(|k| k.to_string())
+        .chain(registry().agents().map(|p| p.name.clone()))
+        .collect()
+}
+
+/// Every CLI's look, by name, as its profile (`registry`) has it.
+fn looks() -> &'static BTreeMap<String, Look> {
+    static LOOKS: OnceLock<BTreeMap<String, Look>> = OnceLock::new();
+    LOOKS.get_or_init(|| {
+        registry()
+            .agents()
             .map(|p| {
                 let look = Look {
                     icon: p.icon.clone(),
@@ -446,6 +475,17 @@ pub fn icon(r: &Run) -> &'static str {
     }
 }
 
+/// The icon of one of an agent's own sessions: its agent's glyph, as its
+/// runs wear it.
+pub fn outside_icon(c: &Outside) -> &'static str {
+    looks().get(&c.agent).and_then(|l| l.icon.as_deref()).unwrap_or(AGENT)
+}
+
+/// Whether one of an agent's own sessions has ended, so its icon is quiet.
+pub fn outside_ended(c: &Outside) -> bool {
+    c.run_state().is_terminal()
+}
+
 /// The word in the state column. A shell at rest says nothing there — it is
 /// idle whenever you are not typing, and its icon already says what it is.
 pub fn run_words(r: &Run) -> String {
@@ -491,18 +531,31 @@ pub fn place_parts(place: &str, own: Option<&str>, room: usize) -> (String, Stri
     (String::new(), last.to_string(), own)
 }
 
-/// `s` in exactly `w` columns: padded, or cut with `…`.
+/// `s` in exactly `w` columns as a terminal shows it: padded, or cut with
+/// `…`. Columns, not chars: a wide glyph (CJK, most emoji) takes two, and
+/// one that would straddle the cut gives way to a space.
 pub fn fit(s: &str, w: usize) -> String {
-    let n = s.chars().count();
+    use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+    let n = s.width();
     if n <= w {
-        format!("{s:<w$}")
-    } else if w == 0 {
-        String::new()
-    } else {
-        let mut t: String = s.chars().take(w - 1).collect();
-        t.push('…');
-        t
+        return format!("{s}{}", " ".repeat(w - n));
     }
+    if w == 0 {
+        return String::new();
+    }
+    let mut t = String::new();
+    let mut used = 0;
+    for c in s.chars() {
+        let cw = c.width().unwrap_or(0);
+        if used + cw > w - 1 {
+            break;
+        }
+        used += cw;
+        t.push(c);
+    }
+    t.push('…');
+    t.push_str(&" ".repeat(w - 1 - used));
+    t
 }
 
 /// A flow's runs, folded into one row: what the flow is, how it has been
@@ -604,6 +657,26 @@ fn flow_hidden(name: &str, flows: &[Flow], hidden: &[Hidden]) -> bool {
     hidden.iter().any(|h| keys.contains(&h.key))
 }
 
+/// The group one of an agent's own sessions stands in, as `(key, folder)`:
+/// the folder `rld` filed it under, as a run started in its `cwd` would be
+/// (`workspace`). Where `rld` has not said, a guess: the registered folder
+/// its `cwd` is in, the deepest where they nest, else the `cwd` itself.
+fn outside_group(s: &Outside, names: &Names) -> (String, PathBuf) {
+    let folder = s
+        .workspace
+        .clone()
+        .or_else(|| names.containing(&s.cwd))
+        .unwrap_or_else(|| s.cwd.clone());
+    (folder.to_string_lossy().into_owned(), folder)
+}
+
+/// What hides one of an agent's own sessions — its own `/hide` or its
+/// project's — and since when: the later of them. `None`: it is on the list.
+fn outside_hidden_since(s: &Outside, names: &Names, hidden: &[Hidden]) -> Option<Timestamp> {
+    let keys = [head_key(&outside_group(s, names)), s.key()];
+    hidden.iter().filter(|h| keys.contains(&h.key)).map(|h| h.at).max()
+}
+
 /// Workspace paths → the names they were registered under.
 #[derive(Default, Clone)]
 pub struct Names(HashMap<PathBuf, String>);
@@ -618,6 +691,15 @@ impl Names {
         let mut v: Vec<PathBuf> = self.0.keys().cloned().collect();
         v.sort();
         v
+    }
+
+    /// The registered folder `p` is in, or is: the deepest where they nest.
+    pub fn containing(&self, p: &Path) -> Option<PathBuf> {
+        self.0
+            .keys()
+            .filter(|w| p.starts_with(w))
+            .max_by_key(|w| w.as_os_str().len())
+            .cloned()
     }
 
     /// The name a folder was registered under, if it was.
@@ -734,6 +816,7 @@ struct Group<'a> {
     workspace: PathBuf,
     runs: Vec<&'a DigestItem>,
     flows: Vec<FlowRow<'a>>,
+    outside: Vec<&'a Outside>,
     /// The questions asked in it, each with the key of the row it stands
     /// under when that row is there.
     asked: Vec<Asked<'a>>,
@@ -782,6 +865,12 @@ fn run_subject<'a>(i: &'a DigestItem, project: &'a str) -> Subject<'a> {
         RunKind::Shell => "shell",
         RunKind::Command | RunKind::Plugin => "command",
     }];
+    // `kind:<agent>`: that agent, whoever started it.
+    if r.kind == RunKind::Agent
+        && let Some(cli) = r.cli.as_deref()
+    {
+        kind.push(cli);
+    }
     let by = match &r.cause {
         Cause::Flow { flow, .. } => {
             kind.push("flow");
@@ -796,6 +885,23 @@ fn run_subject<'a>(i: &'a DigestItem, project: &'a str) -> Subject<'a> {
         kind,
         by: by.into_iter().collect(),
         on: r.branch.as_deref(),
+    }
+}
+
+/// What a search matches one of an agent's own sessions on: its name, where
+/// it lives (`lives`), its project and folder, how it stands as a run
+/// would, and that it is an agent, and whose (`kind:claude`, `kind:codex`).
+fn outside_subject<'a>(s: &'a Outside, project: &'a str, lives: &'a str, hidden: bool) -> Subject<'a> {
+    let mut is = vec![outside::is_word(s)];
+    if hidden {
+        is.push("hidden");
+    }
+    Subject {
+        text: vec![&s.name, &s.session_id, lives],
+        project: vec![project, s.cwd.to_str().unwrap_or("")],
+        is,
+        kind: vec!["agent", &s.agent],
+        ..Subject::default()
     }
 }
 
@@ -855,6 +961,13 @@ pub fn named(row: &Row, d: &Digest, names: &Names, flows: &[Flow]) -> Named {
                 ..Named::default()
             },
         },
+        Row::Outside(c) => Named {
+            title: c.title(),
+            project: names.group(&outside_group(c, names).0),
+            summary: outside::lives(c),
+            rest: vec![path(&c.cwd)],
+            ..Named::default()
+        },
     }
 }
 
@@ -874,6 +987,7 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
                     workspace: workspace.to_path_buf(),
                     runs: Vec::new(),
                     flows: Vec::new(),
+                    outside: Vec::new(),
                     asked: Vec::new(),
                 });
                 groups.len() - 1
@@ -907,7 +1021,8 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
     // What you hid is off the list, and only it is in the `hidden` lens; what
     // of it has come to need you since comes through, above the projects.
     let hidden_lens = cx.lens == Lens::Hidden;
-    let mut through: Vec<&'a DigestItem> = Vec::new();
+    // By how it ranks, then since when it has needed you, then its key.
+    let mut through: Vec<(u8, Option<Timestamp>, String, Row<'a>)> = Vec::new();
     for i in &d.items {
         let r = &i.run;
         // A summary of everything runs in the Relay home: Relay's doing, not
@@ -921,7 +1036,7 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
                     && cx.lens.keeps(r)
                     && query.hits(&run_subject(i, &names.group(&r.place_key())))
                 {
-                    through.push(i);
+                    through.push((rank::score(r), Some(r.state_at), r.id.clone(), Row::Run(i)));
                 }
                 continue;
             }
@@ -1001,6 +1116,33 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
             });
         }
     }
+    // Agents' own sessions, under their folder's project: agents, so not in
+    // the flows lens; hidden as a flow is, and come through as a run does.
+    if cx.lens != Lens::Flows {
+        for c in &d.outside {
+            let since = outside_hidden_since(c, names, &d.hidden);
+            let hidden = since.is_some();
+            let (key, workspace) = outside_group(c, names);
+            let project = names.group(&key);
+            let lives = outside::lives(c);
+            let hits = || query.hits(&outside_subject(c, &project, &lives, hidden));
+            match since {
+                Some(since) if !hidden_lens => {
+                    if outside::comes_through(c, since) && hits() {
+                        through.push((outside::score(c), c.state_at, c.key(), Row::Outside(c)));
+                    }
+                    continue;
+                }
+                None if hidden_lens => continue,
+                _ => {}
+            }
+            if !hits() {
+                continue;
+            }
+            let g = group_at(key, &workspace, &mut groups);
+            groups[g].outside.push(c);
+        }
+    }
     // Fold each flow into its group now, with its full history, but only if
     // the flow (or one of its own runs) actually matched the filter.
     for acc in flows_acc {
@@ -1019,7 +1161,12 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
     // A question stands in its project, under the row that asked it — or,
     // where that run is pinned or has come through, under it there. It
     // ignores the lens: it is what needs you, whatever slice you are in.
-    let banded: HashSet<&str> = pinned.iter().chain(&through).map(|i| i.run.id.as_str()).collect();
+    let banded: HashSet<&str> = pinned
+        .iter()
+        .copied()
+        .chain(through.iter().filter_map(|(.., row)| row.item()))
+        .map(|i| i.run.id.as_str())
+        .collect();
     let mut band_asked: Vec<Asked<'a>> = Vec::new();
     for q in &d.decisions {
         let asker = q.run.as_deref().and_then(run_by_id);
@@ -1064,8 +1211,12 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
     // Which folders already have a line, so idle projects don't double up.
     let shown: HashSet<PathBuf> = groups.iter().map(|g| g.workspace.clone()).collect();
     pinned.sort_by_key(|i| (i.run.pinned_at, i.run.id.clone()));
-    through.sort_by_key(|i| (rank::score(&i.run), i.run.state_at, i.run.id.clone()));
-    let band: Vec<Row<'a>> = through.into_iter().chain(pinned).map(Row::Run).collect();
+    through.sort_by(|a, b| (a.0, a.1, &a.2).cmp(&(b.0, b.1, &b.2)));
+    let band: Vec<Row<'a>> = through
+        .into_iter()
+        .map(|(_, _, _, row)| row)
+        .chain(pinned.into_iter().map(Row::Run))
+        .collect();
     let mut rows = attach(band, band_asked);
     // Each block is a project's header and what is under it.
     let mut blocks: Vec<(String, String, Vec<Row<'a>>)> = Vec::new();
@@ -1078,10 +1229,12 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
             head(&g.key, &g.workspace, d, cx)
         };
         let mut block = vec![Row::Group(head)];
-        // Runs and flows share one order, which nothing that happens to a
-        // row changes: the order they came in, the newest at the bottom.
+        // Runs, flows and agents' own sessions share one order, which nothing
+        // that happens to a row changes: the order they came in, the newest at
+        // the bottom.
         let mut mixed: Vec<Row<'a>> = g.runs.into_iter().map(Row::Run).collect();
         mixed.extend(g.flows.into_iter().map(Row::Flow));
+        mixed.extend(g.outside.into_iter().map(Row::Outside));
         mixed.sort_by_cached_key(came);
         // Once you have put a project's rows in order, it keeps yours: the
         // rows stand where you put them, and what is new enters at the bottom.
@@ -1184,6 +1337,7 @@ pub fn wants_you(row: &Row) -> bool {
     match row {
         Row::Run(i) => needs(i.run.state),
         Row::Flow(f) => f.last().is_some_and(|i| needs(i.run.state)),
+        Row::Outside(c) => needs(c.run_state()),
         Row::Group(_) | Row::Question(_) => false,
     }
 }
@@ -1199,6 +1353,7 @@ fn came(row: &Row) -> (bool, Option<Timestamp>, String) {
             let first = f.runs.iter().map(|i| i.run.started_at).min();
             (first.is_none(), first, f.name.clone())
         }
+        Row::Outside(c) => (c.started_at.is_none(), c.started_at, c.key()),
         Row::Group(_) | Row::Question(_) => (true, None, String::new()),
     }
 }
@@ -1286,7 +1441,7 @@ pub fn reorder(shown: &[Row], full: &[Row], kept: &[Order], key: &str, up: bool)
         Row::Group(h) if h.is_everywhere() => return Err("everywhere stays last, below the projects"),
         Row::Group(_) => return move_project(shown, full, kept, key, up),
         Row::Question(_) => return Err("a question stays under the run that asked it"),
-        Row::Run(_) | Row::Flow(_) => {}
+        Row::Run(_) | Row::Flow(_) | Row::Outside(_) => {}
     }
     let Some(head) = shown[..at].iter().rposition(|r| matches!(r, Row::Group(_))) else {
         return Err(if shown[at].item().is_some_and(|i| i.run.pinned_at.is_some()) {
@@ -1302,7 +1457,7 @@ pub fn reorder(shown: &[Row], full: &[Row], kept: &[Order], key: &str, up: bool)
         next = next.and_then(step);
     }
     let other = match next.and_then(|i| shown.get(i)) {
-        Some(r @ (Row::Run(_) | Row::Flow(_))) => r.key().unwrap_or_default(),
+        Some(r @ (Row::Run(_) | Row::Flow(_) | Row::Outside(_))) => r.key().unwrap_or_default(),
         _ if up => return Err("already at the top of its project"),
         _ => return Err("already at the bottom of its project"),
     };
@@ -1342,21 +1497,24 @@ fn move_project(shown: &[Row], full: &[Row], kept: &[Order], key: &str, up: bool
 }
 
 /// `(questions, need you, working, finished, flows)` over what the list shows.
-/// A flow counts once, and as needing you when its last run failed.
+/// A flow counts once, and as needing you when its last run failed; one of
+/// an agent's own session as a run in its state would.
 pub fn counts(rows: &[Row]) -> (usize, usize, usize, usize, usize) {
     let mut c = (0, 0, 0, 0, 0);
+    let by_state = |s: RunState, c: &mut (usize, usize, usize, usize, usize)| {
+        use rl_proto::types::RunState::*;
+        match s {
+            NeedsInput | Blocked | Failed => c.1 += 1,
+            Starting | Working | Stale | Idle => c.2 += 1,
+            Finished | Stopped => c.3 += 1,
+        }
+    };
     for r in rows {
         match r {
             Row::Group(..) => {}
             Row::Question(_) => c.0 += 1,
-            Row::Run(i) => {
-                use rl_proto::types::RunState::*;
-                match i.run.state {
-                    NeedsInput | Blocked | Failed => c.1 += 1,
-                    Starting | Working | Stale | Idle => c.2 += 1,
-                    Finished | Stopped => c.3 += 1,
-                }
-            }
+            Row::Run(i) => by_state(i.run.state, &mut c),
+            Row::Outside(s) => by_state(s.run_state(), &mut c),
             // A flow that has not run is not what is moving: its header says it is there.
             Row::Flow(f) if f.runs.is_empty() => {}
             Row::Flow(f) => {
@@ -1582,6 +1740,7 @@ mod tests {
             hidden: vec![],
             order: vec![],
             firings: Vec::new(),
+            outside: vec![],
         };
         let names = Names::default();
         let now: Timestamp = at.parse().unwrap();
@@ -1603,6 +1762,7 @@ mod tests {
             hidden: Vec::new(),
             order: Vec::new(),
             firings: Vec::new(),
+            outside: vec![],
         };
         assert_eq!(
             lost_note(&d(&[], vec![agent.clone()])),
@@ -1762,6 +1922,7 @@ mod tests {
             hidden: Vec::new(),
             order: Vec::new(),
             firings: vec![asking],
+            outside: vec![],
         };
         let names = Names::new([
             (PathBuf::from(api), "api".to_string()),
@@ -1810,6 +1971,7 @@ mod tests {
             hidden: Vec::new(),
             order: Vec::new(),
             firings: Vec::new(),
+            outside: vec![],
         };
         let names = Names::new([(PathBuf::from(api), "api".to_string())]);
         let cx = |relay: Option<&'static str>| Context {
@@ -1853,6 +2015,7 @@ mod tests {
             hidden: Vec::new(),
             order: Vec::new(),
             firings: Vec::new(),
+            outside: vec![],
         };
         let names = Names::new([
             (PathBuf::from(api), "api".to_string()),
@@ -1898,6 +2061,7 @@ mod tests {
             hidden: Vec::new(),
             order: Vec::new(),
             firings: Vec::new(),
+            outside: vec![],
         };
         let names = Names::new([(PathBuf::from(ws), "relay".to_string())]);
         let runs = |lens| {
@@ -1947,6 +2111,7 @@ mod tests {
             hidden: Vec::new(),
             order: Vec::new(),
             firings: Vec::new(),
+            outside: vec![],
         };
         let names = Names::new([
             (PathBuf::from("/home/f/relay"), "relay".to_string()),
@@ -2007,6 +2172,7 @@ mod tests {
             ],
             order: Vec::new(),
             firings: Vec::new(),
+            outside: vec![],
         };
         let names = Names::new([
             (PathBuf::from(api), "api".to_string()),
@@ -2084,6 +2250,7 @@ mod tests {
             ],
             order: Vec::new(),
             firings: Vec::new(),
+            outside: vec![],
         };
         let names = Names::new([
             (PathBuf::from(api), "api".to_string()),
@@ -2169,6 +2336,7 @@ mod tests {
             hidden: Vec::new(),
             order: Vec::new(),
             firings: Vec::new(),
+            outside: vec![],
         };
         let names = Names::default();
         let rows = build_with(&d, &names, "", now);
@@ -2244,6 +2412,7 @@ mod tests {
             hidden: Vec::new(),
             order: Vec::new(),
             firings: Vec::new(),
+            outside: vec![],
         };
         let names = Names::new([(PathBuf::from("/home/f/relay"), "relay".to_string())]);
         let rows = build_with(&d, &names, "", now);
@@ -2286,6 +2455,7 @@ mod tests {
             hidden: Vec::new(),
             order: Vec::new(),
             firings: Vec::new(),
+            outside: vec![],
         };
         let names = Names::new([
             (PathBuf::from("/home/f/relay"), "relay".to_string()),
@@ -2338,6 +2508,7 @@ mod tests {
             hidden: Vec::new(),
             order: Vec::new(),
             firings,
+            outside: vec![],
         }
     }
 
@@ -3025,6 +3196,7 @@ mod tests {
             hidden: Vec::new(),
             order: Vec::new(),
             firings: Vec::new(),
+            outside: vec![],
         };
         // Neither where you work nor what asks for you jumps ahead: each in
         // the order it started.
@@ -3143,6 +3315,7 @@ mod tests {
             hidden: Vec::new(),
             order,
             firings: Vec::new(),
+            outside: vec![],
         };
         let names = Names::new([
             (PathBuf::from(api), "api".to_string()),
@@ -3473,5 +3646,263 @@ mod tests {
         assert_eq!(fit("abcdef", 5), "abcd…");
         assert_eq!(fit("abcdef", 0), "");
         assert_eq!(fit("héllo wörld", 6), "héllo…");
+        // Wide glyphs take two columns each, padded or cut by columns.
+        use unicode_width::UnicodeWidthStr;
+        assert_eq!(fit("権限", 6), "権限  ");
+        assert_eq!(
+            fit("権限の確認", 6),
+            "権限… ",
+            "a glyph that would straddle the cut gives way"
+        );
+        assert_eq!(fit("権限の確認", 7), "権限の…");
+        assert_eq!(fit("a権限の確認", 4), "a権…");
+        for w in 0..12 {
+            assert_eq!(fit("権限の確認 x", w).width(), w, "{w}");
+        }
+    }
+
+    /// One of Claude's own sessions in `cwd`, as the digest carries it.
+    fn claude_in(id: &str, cwd: &str, state: Option<&str>, status: &str) -> Outside {
+        Outside {
+            cwd: PathBuf::from(cwd),
+            ..outside::session(id, state, status, None)
+        }
+    }
+
+    #[test]
+    fn claudes_own_sessions_stand_under_their_folders_project() {
+        let now: Timestamp = "2026-09-10T12:00:00Z".parse().unwrap();
+        let relay = "/home/f/relay";
+        let names = Names::new([(PathBuf::from(relay), "relay".to_string())]);
+        let mut d = digest(
+            now,
+            vec![item("work", RunState::Working, relay, "2026-09-10T11:30:00Z", false)],
+            vec![],
+        );
+        d.outside = vec![
+            // In the project's folder, and deeper in it — a worktree there.
+            claude_in("bg", relay, Some("working"), "busy"),
+            claude_in("deep", "/home/f/relay/.claude/worktrees/x", None, "idle"),
+            // Outside every registered folder: its own folder's group.
+            claude_in("away", "/home/f/scratch", None, "busy"),
+        ];
+        let rows = build_with(&d, &names, "", now);
+        assert_eq!(
+            keys(&rows),
+            [
+                "[relay]",
+                "o:claude:sess-bg",
+                "o:claude:sess-deep",
+                "r:work",
+                "[scratch]",
+                "o:claude:sess-away"
+            ]
+        );
+        let Some(Row::Group(h)) = rows.iter().find(|r| matches!(r, Row::Group(h) if h.name == "scratch")) else {
+            panic!("no scratch header");
+        };
+        assert_eq!(h.workspace, PathBuf::from("/home/f/scratch"));
+        // A run there would be filed the same way.
+        let run_there = item("r", RunState::Working, "/home/f/scratch", "2026-09-10T11:30:00Z", false);
+        assert_eq!(group_key(&run_there.run, &names, &[]), h.workspace.to_string_lossy());
+    }
+
+    #[test]
+    fn a_session_stands_where_rld_filed_it() {
+        let now: Timestamp = "2026-09-10T12:00:00Z".parse().unwrap();
+        let names = Names::new([(PathBuf::from("/home/f/relay"), "relay".to_string())]);
+        let mut d = digest(now, vec![], vec![]);
+        // Deep in a repo no project registers: under the repo's root, as a
+        // run started there is, not under its own folder.
+        let mut deep = claude_in("deep", "/home/f/tools/src/bin", None, "idle");
+        deep.workspace = Some(PathBuf::from("/home/f/tools"));
+        d.outside = vec![deep, claude_in("guess", "/home/f/relay/sub", None, "idle")];
+        let rows = build_with(&d, &names, "", now);
+        assert_eq!(
+            keys(&rows),
+            ["[relay]", "o:claude:sess-guess", "[tools]", "o:claude:sess-deep"],
+            "filed by rld, else guessed by the registered folder"
+        );
+    }
+
+    #[test]
+    fn a_hidden_session_comes_through_when_it_comes_to_need_you() {
+        let now: Timestamp = "2026-09-10T12:00:00Z".parse().unwrap();
+        let t = |s: &str| -> Timestamp { s.parse().unwrap() };
+        let relay = "/home/f/relay";
+        let names = Names::new([(PathBuf::from(relay), "relay".to_string())]);
+        let session = |id: &str, state: &str, status: &str, at: &str| Outside {
+            state_at: Some(t(at)),
+            ..claude_in(id, relay, Some(state), status)
+        };
+        let mut d = digest(now, vec![], vec![]);
+        d.outside = vec![
+            // Blocked after its project was hidden: comes through.
+            session("after", "blocked", "waiting", "2026-09-10T11:30:00Z"),
+            // Blocked before: stays hidden.
+            session("before", "blocked", "waiting", "2026-09-10T10:30:00Z"),
+            // At work after: nothing needs you.
+            session("busy", "working", "busy", "2026-09-10T11:30:00Z"),
+        ];
+        d.hidden = vec![Hidden {
+            key: format!("g:{relay}"),
+            at: t("2026-09-10T11:00:00Z"),
+        }];
+        assert_eq!(keys(&build_with(&d, &names, "", now)), ["o:claude:sess-after"]);
+        // Its own `/hide`, later than it came to need you: hidden again.
+        d.hidden.push(Hidden {
+            key: "o:claude:sess-after".into(),
+            at: t("2026-09-10T11:45:00Z"),
+        });
+        assert!(keys(&build_with(&d, &names, "", now)).is_empty());
+        assert_eq!(
+            keys(&lens_build(&d, &names, Lens::Hidden, now)),
+            [
+                "[relay]",
+                "o:claude:sess-after",
+                "o:claude:sess-before",
+                "o:claude:sess-busy"
+            ]
+        );
+    }
+
+    #[test]
+    fn claudes_own_sessions_are_agents_not_flows() {
+        let now: Timestamp = "2026-09-10T12:00:00Z".parse().unwrap();
+        let relay = "/home/f/relay";
+        let names = Names::new([(PathBuf::from(relay), "relay".to_string())]);
+        let mut d = digest(now, vec![], vec![]);
+        d.outside = vec![claude_in("bg", relay, Some("working"), "busy")];
+        assert_eq!(
+            keys(&lens_build(&d, &names, Lens::All, now)),
+            ["[relay]", "o:claude:sess-bg"]
+        );
+        assert_eq!(
+            keys(&lens_build(&d, &names, Lens::Agents, now)),
+            ["[relay]", "o:claude:sess-bg"]
+        );
+        assert_eq!(keys(&lens_build(&d, &names, Lens::Flows, now)), ["[relay]"]);
+        assert_eq!(keys(&lens_build(&d, &names, Lens::Hidden, now)), Vec::<String>::new());
+    }
+
+    #[test]
+    fn agents_own_sessions_stand_with_runs_in_the_order_they_came() {
+        let now: Timestamp = "2026-09-10T12:00:00Z".parse().unwrap();
+        let relay = "/home/f/relay";
+        let names = Names::new([(PathBuf::from(relay), "relay".to_string())]);
+        let mut d = digest(
+            now,
+            vec![item("idle", RunState::Idle, relay, "2026-09-10T11:30:00Z", false)],
+            vec![],
+        );
+        let at = |t: &str, c: Outside| Outside {
+            started_at: Some(t.parse().unwrap()),
+            ..c
+        };
+        let blocked = Outside {
+            waiting_for: Some("permission prompt".into()),
+            ..claude_in("blocked", relay, Some("blocked"), "waiting")
+        };
+        d.outside = vec![
+            at("2026-09-10T11:10:00Z", claude_in("done", relay, Some("done"), "")),
+            at(
+                "2026-09-10T11:50:00Z",
+                claude_in("working", relay, Some("working"), "busy"),
+            ),
+            at("2026-09-10T11:20:00Z", blocked),
+            at("2026-09-10T11:40:00Z", claude_in("asks", relay, None, "waiting")),
+        ];
+        let rows = build_with(&d, &names, "", now);
+        assert_eq!(
+            keys(&rows),
+            [
+                "[relay]",
+                "o:claude:sess-done",
+                "o:claude:sess-blocked",
+                "r:idle",
+                "o:claude:sess-asks",
+                "o:claude:sess-working"
+            ],
+            "what needs you does not jump ahead: each in the order it started"
+        );
+        // Those that need you say so where they stand.
+        assert!(wants_you(&rows[2]) && wants_you(&rows[4]) && !wants_you(&rows[5]));
+        // The headline counts them as runs: two need you, one works.
+        assert_eq!(counts(&rows), (0, 2, 2, 1, 0));
+        assert_eq!(headline(&rows, 0, ""), "relay · 2 need you · 2 working · 1 finished");
+    }
+
+    #[test]
+    fn a_claude_session_hides_by_its_own_key_or_its_projects() {
+        let now: Timestamp = "2026-09-10T12:00:00Z".parse().unwrap();
+        let relay = "/home/f/relay";
+        let names = Names::new([(PathBuf::from(relay), "relay".to_string())]);
+        let mut d = digest(now, vec![], vec![]);
+        d.outside = vec![claude_in("bg", relay, Some("working"), "busy")];
+        for key in ["o:claude:sess-bg".to_string(), format!("g:{relay}")] {
+            let mut hidden = d.clone();
+            hidden.hidden = vec![hid(&key, "2026-09-10T11:00:00Z")];
+            assert!(
+                !keys(&lens_build(&hidden, &names, Lens::All, now)).contains(&"o:claude:sess-bg".to_string()),
+                "{key}"
+            );
+            assert_eq!(
+                keys(&lens_build(&hidden, &names, Lens::Hidden, now)),
+                ["[relay]", "o:claude:sess-bg"],
+                "{key}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_search_finds_claudes_own_sessions() {
+        let now: Timestamp = "2026-09-10T12:00:00Z".parse().unwrap();
+        let relay = "/home/f/relay";
+        let names = Names::new([(PathBuf::from(relay), "relay".to_string())]);
+        let mut d = digest(
+            now,
+            vec![item("work", RunState::Working, relay, "2026-09-10T11:30:00Z", false)],
+            vec![],
+        );
+        d.outside = vec![
+            claude_in("bg", relay, Some("blocked"), "waiting"),
+            claude_in("away", "/home/f/scratch", None, "idle"),
+        ];
+        let shown = |f: &str| keys(&build_with(&d, &names, f, now));
+        assert_eq!(
+            shown("kind:claude"),
+            ["[relay]", "o:claude:sess-bg", "[scratch]", "o:claude:sess-away"]
+        );
+        assert_eq!(shown("kind:agent in:relay"), ["[relay]", "o:claude:sess-bg", "r:work"]);
+        assert_eq!(shown("is:needs"), ["[relay]", "o:claude:sess-bg"]);
+        assert_eq!(shown("is:going kind:claude"), ["[scratch]", "o:claude:sess-away"]);
+        assert_eq!(shown("name away"), ["[scratch]", "o:claude:sess-away"]);
+        assert_eq!(shown("scratch"), ["[scratch]", "o:claude:sess-away"]);
+        assert_eq!(shown("kind:flow"), Vec::<String>::new());
+        // `kind:<agent>`: that agent's runs, and its own sessions.
+        let mut both = d.clone();
+        both.items[0].run.cli = Some("codex".into());
+        both.outside.push(Outside {
+            agent: "codex".into(),
+            ..claude_in("cx", relay, None, "busy")
+        });
+        assert_eq!(
+            keys(&build_with(&both, &names, "kind:codex", now)),
+            ["[relay]", "o:codex:sess-cx", "r:work"]
+        );
+        assert!(!keys(&build_with(&both, &names, "kind:claude", now)).contains(&"r:work".to_string()));
+        let kinds = list_kinds();
+        for k in ["agent", "question", "claude", "codex", "gemini"] {
+            assert!(kinds.iter().any(|x| x == k), "{k}: {kinds:?}");
+        }
+        // By its session id, and by where it lives.
+        assert_eq!(shown("sess-aw"), ["[scratch]", "o:claude:sess-away"]);
+        assert_eq!(shown("terminal"), ["[scratch]", "o:claude:sess-away"]);
+        assert_eq!(shown("background"), ["[relay]", "o:claude:sess-bg"]);
+        // The search ranks it by its name.
+        let rows = build_with(&d, &names, "", now);
+        let named: Vec<Named> = rows.iter().map(|r| named(r, &d, &names, &[])).collect();
+        let order = crate::tui::query::ranked(&Query::parse("away").words, &named);
+        assert_eq!(rows[order[0]].key().as_deref(), Some("o:claude:sess-away"));
     }
 }

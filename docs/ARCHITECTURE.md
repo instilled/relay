@@ -238,10 +238,10 @@ sequenceDiagram
 `rl` with no command (`rl-cli/src/tui`) is `digest.get` and `run.attach` behind one screen.
 
 - **The list** (`tui/rows.rs`) is one column: pinned runs, then projects (registered folders,
-  shown before anything runs there), each holding its runs and flows in the order they came; a
-  question sits under the run that asked it. Rows never move by themselves; `⇧↑↓` reorders, kept
-  in `row_order` via `digest.order`. An ended flow's runs fold into one row per flow. `everywhere`
-  holds flows with no `in`. A lens (`all · agents · flows · hidden`) and a search (`tui/query.rs`,
+  shown before anything runs there), each holding its runs, flows and agents' own sessions in the
+  order they came; a question sits under the run that asked it. Rows never move by themselves;
+  `⇧↑↓` reorders, kept in `row_order` via `digest.order`. An ended flow's runs fold into one row
+  per flow. `everywhere` holds flows with no `in`. A lens (`all · agents · flows · hidden`) and a search (`tui/query.rs`,
   words plus `in: is: kind: by: on:` tokens) narrow it.
 - **The line** (`tui/line.rs`) always takes typing. A first word naming an agent starts that
   agent; one this machine can run goes to the project's **warm shell** (one persistent `$SHELL -i`
@@ -261,9 +261,56 @@ sequenceDiagram
   rows cut to the stretch, with a top written by `assistants.summary` when `catch_up.summary:
   auto`, else counted. Flows with `catch_up: top` head it with their latest firing's outcome.
   `rl since` prints the same.
-- **Setup** (`tui/setup.rs`, `rld`'s `setup.rs`) asks which agents to offer, who summarises, and
+- **Setup** (`tui/setup.rs`, `rld`'s `setup.rs`) asks which agents to offer, who summarises,
   whether to move Claude's own background sessions in (`import.rs`; nothing picked by default,
-  since moving one stops it).
+  since moving one stops it), and, per agent with a `sessions:` profile, whether to add Relay's
+  hook to its user-level settings, so its own sessions show (below).
+
+### Agents' own sessions
+
+Sessions an agent CLI runs that Relay did not start are rows too (`Row::Outside`,
+`tui/outside.rs`), under the project a run in their folder would be filed under, in the order
+they came. They come from `rld`'s store (`rl-daemon/src/outside/`), never from a digest's path:
+
+- **Told by hooks.** `rl setup` adds, on a yes, one entry per event to the agent's user-level
+  file (`~/.claude/settings.json`, `~/.codex/hooks.json`, `~/.gemini/settings.json`; the file and
+  events come from the profile). Each calls `'<rl>' hook <agent> <Event> || true` (Claude's with
+  `--user`, to tell it from Relay's per-run hooks). Only Relay's own entries are ever changed, and
+  a file that does not read is left alone. `rl hook` posts `outside.hook` with the session, its
+  folder and the event, or under `RELAY_RUN` the run's signal (`run.hook`); it finishes within
+  1.5s, prints nothing, exits 0, never starts `rld`, and runs `ps` for the agent's pid only when
+  `rld` says it knows none (`wants_pid`).
+- **Filled in by asking, only with a reason.** An agent with a `list:` (Claude's `claude agents
+  --json`, read by `outside/claude.rs`, asked by `outside/lister.rs`) is asked only while a panel
+  is watching (`digest.get{watching}`): when the list is first wanted, for a session a hook told
+  of that it did not list, every 60s while one of Claude's background sessions is listed, and
+  every 30s when its hook is not installed. An ask fills in what a hook cannot say: background,
+  the attach id, the pid. `claude` children `rld` runs carry `RELAY_ASKING`, so their own hooks
+  never feed another ask.
+- **Not Relay's.** A session a run is tagged with (`<agent>-session:<id>`, on `SessionStart`), or
+  whose pid is a live run's, is left out. One left open in its terminal while a run carries it on
+  shows while it works there; a Claude background session an ended run was sent to
+  (`/background`) says `was <title>`, and the run `went to Claude's background`.
+- **Gone** on `SessionEnd`, when its process is (checked every 5s), or after long silence.
+
+Enter attaches to a Claude background session (`claude attach <id>`, the terminal handed over as
+for a live run) and carries an idle one in another terminal on here as a Relay run, with its
+profile's `resume`; a busy one is refused, saying why.
+
+**Adding an agent** is a profile: `detect/<agent>.yaml` (built in, or in `$RELAY_HOME/detect`)
+with `bins`, `resume` and a `sessions:` block — the hooks file, `timeout` and its `unit`, each
+event hooked and the state it says (`started idle working needs carries-on ended nothing`,
+narrowed by one payload field where needed), and optionally `list:` and `attach:`.
+`rl_detect::sessions` reads and checks it, and a bad block fails to load naming its file;
+`rl daemon restart` picks a change up. `rl-daemon/tests/profile_agent.rs` adds a made-up agent
+this way and nothing else. Code is needed only for a hooks file in another shape than the JSON
+the three share (`user_hooks`), a new list reader, or reading its transcript for a recap.
+
+Still to be checked by hand, with a real agent: whether Claude runs user-level hooks in its
+background sessions and keeps the starting session's environment there; that `/background`
+keeps the session id; whether `startedAt` is the process's or the conversation's; how `claude
+attach` exits on a detach; codex's trust prompt for the hook; that the pid is found in real `ps`
+output; and what Gemini's synchronous `AfterTool` hook costs per tool call.
 
 Every run carries `RELAY_RUN` in its environment, so a prompt can mark a Relay shell itself
 (`RPROMPT='${RELAY_RUN:+●}'`); Relay never draws over a run's screen or writes your rc.

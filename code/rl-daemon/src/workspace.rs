@@ -8,7 +8,7 @@
 use crate::server::Daemon;
 use anyhow::{Context, Result, anyhow, bail};
 use rl_core::time;
-use rl_ledger::{decisions, runs, workspaces};
+use rl_ledger::{Ledger, decisions, runs, workspaces};
 use rl_proto::methods::{WorkspaceRemoveParams, WorkspaceRemoved};
 use rl_proto::types::Workspace;
 use rl_proto::types::{Run, RunKind};
@@ -24,6 +24,21 @@ const GRACE: Duration = Duration::from_secs(3);
 const KILLED: Duration = Duration::from_secs(3);
 /// The note a question dismissed this way carries.
 const DISMISS_NOTE: &str = "its project was removed";
+
+/// The project folder something started in `cwd` (canonical) is filed
+/// under: the registered folder containing it wins, the deepest where they
+/// nest; then its checkout's root (`toplevel`, as `git::placement` found
+/// it); then `cwd` itself. A run's, and an agent's own session's.
+pub async fn filed_under(ledger: &Ledger, cwd: &Path, toplevel: Option<PathBuf>) -> Result<PathBuf> {
+    let registered = ledger
+        .call({
+            let cwd = cwd.to_path_buf();
+            move |c| workspaces::containing(c, &cwd)
+        })
+        .await?
+        .map(|w| w.path);
+    Ok(registered.or(toplevel).unwrap_or_else(|| cwd.to_path_buf()))
+}
 
 /// A folder as the ledger keys it: its canonical path, or — once it is gone
 /// from disk — its canonical parent with its own name, or else just as given.

@@ -12,7 +12,7 @@ use rl_proto::rpc::{Id, Request, Response};
 use rl_proto::types::{Run, RunState};
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::BufReader;
@@ -117,6 +117,39 @@ impl Harness {
 
     /// Same, with a detection registry of the test's choosing (short timers).
     pub fn with_registry(home: Home, registry: Option<Registry>) -> Option<Self> {
+        Self::start(home, registry, None)
+    }
+
+    /// Same, asking `claude agents --json` as `polling` says, of the fake
+    /// `claude` at `claude`, its user-level hooks in `settings` (both the
+    /// claude profile's, overridden in `home`). Every other harness never
+    /// asks.
+    pub fn with_claude(
+        home: Home,
+        claude: &Path,
+        settings: &Path,
+        polling: rl_daemon::outside::Polling,
+    ) -> Option<Self> {
+        let dir = home.detect_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("claude.yaml"),
+            format!(
+                "bins: [\"{}\"]\nsessions:\n  hooks:\n    file: [\"{}\"]\n",
+                claude.display(),
+                settings.display()
+            ),
+        )
+        .unwrap();
+        let registry = Registry::load(&home).unwrap();
+        Self::start(home, Some(registry), Some(polling))
+    }
+
+    fn start(
+        home: Home,
+        registry: Option<Registry>,
+        claude_sessions: Option<rl_daemon::outside::Polling>,
+    ) -> Option<Self> {
         let session_bin = session_bin()?;
         let token = CancellationToken::new();
         let opts = ServeOptions {
@@ -124,6 +157,7 @@ impl Harness {
             rl_bin: Some(PathBuf::from("/usr/local/bin/rl")),
             step_rl: rl_bin(),
             registry: registry.map(Arc::new),
+            claude_sessions,
         };
         let server = tokio::spawn(rl_daemon::serve_with(home.clone(), token.clone(), opts));
         Some(Self { home, token, server })

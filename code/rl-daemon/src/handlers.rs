@@ -62,6 +62,13 @@ pub fn register(r: &mut Router<Daemon>) {
         Ok(crate::config::agents(&d.registry, &config))
     });
     r.register::<ImportList, _, _>(|d, p: ImportListParams| async move { Ok(crate::import::list(&d, p).await) });
+    r.register::<OutsideHook, _, _>(|d, p: OutsideHookParams| async move {
+        d.outside
+            .told(p, &d.ledger)
+            .await
+            .map(|wants_pid| rl_proto::methods::OutsideHookResult { wants_pid })
+            .map_err(|e| RpcError::invalid_params(format!("{e:#}")))
+    });
     r.register::<ImportMove, _, _>(|d, p: ImportMoveParams| async move {
         crate::import::move_one(&d, p)
             .await
@@ -185,13 +192,41 @@ pub fn register(r: &mut Router<Daemon>) {
     });
 
     r.register::<RunHook, _, _>(|d, p| async move {
-        if p.dialect != rl_detect::claude::DIALECT {
+        // Claude's runs report by the hooks `rld` passes them
+        // (`claude::settings_json`); any other agent's, by the user-level
+        // hooks its profile has (`sessions.hooks`).
+        let claude = p.dialect == rl_detect::claude::DIALECT;
+        let registry = d.registry.clone();
+        let hooks = registry.user_hooks(&p.dialect).filter(|_| !claude);
+        if !claude && hooks.is_none() {
             return Err(RpcError::invalid_params(format!(
                 "unknown hook dialect `{}`",
                 p.dialect
             )));
         }
-        // Every Claude hook names the session's transcript: where its own recap is.
+        // The other agents' hooks are the user's own, so every one of their
+        // processes calls them: one started inside a run of another kind (a
+        // shell, a Claude run calling `codex exec`) carries that run's
+        // `RELAY_RUN` without being it (`user_hooks::foreign`). Its word is
+        // not that run's; the run comes back untouched, and `rl hook` tells
+        // of the session as one of the agent's own instead.
+        if let Some(hooks) = hooks {
+            let run = get_run(&d, &p.id).await?;
+            if rl_detect::user_hooks::foreign(&run, &p.dialect, &registry) {
+                return Ok(run);
+            }
+            // A tool done only carries a turn on: late (codex's hooks run in
+            // the background), it must not wake a run that has gone idle.
+            if hooks.carries_on(&p.event)
+                && !matches!(
+                    run.state,
+                    rl_proto::types::RunState::NeedsInput | rl_proto::types::RunState::Working
+                )
+            {
+                return Ok(run);
+            }
+        }
+        // Every hook names the session's transcript: where its own recap is.
         if let Some(path) = p.payload.get("transcript_path").and_then(|v| v.as_str()) {
             let (id, path) = (p.id.clone(), path.to_string());
             d.ledger
@@ -199,22 +234,48 @@ pub fn register(r: &mut Router<Daemon>) {
                 .await
                 .map_err(internal)?;
         }
-        if let Some(sig) = rl_detect::claude::signal(&p.event, &p.payload) {
+        // What the event says of the run: its state, whether it begins the
+        // session, carries the prompt typed, or ends a turn or waits on you.
+        let (sig, starts, prompted, pauses) = match hooks {
+            Some(h) => (
+                h.signal(&p.event, &p.payload),
+                h.starts(&p.event),
+                h.prompt_event() == Some(p.event.as_str()),
+                h.pauses(&p.event),
+            ),
+            None => (
+                rl_detect::claude::signal(&p.event, &p.payload),
+                p.event == "SessionStart",
+                p.event == "UserPromptSubmit",
+                matches!(p.event.as_str(), "Stop" | "Notification"),
+            ),
+        };
+        // The session the run is, so the list never shows it again as the
+        // agent's own.
+        if starts
+            && let Some(session) = p.payload.get("session_id").and_then(|v| v.as_str())
+            && !session.is_empty()
+        {
+            // Only the list leans on it: a failure is said, not the hook's.
+            let (id, tag) = (p.id.clone(), format!("{}{session}", crate::outside::tag(&p.dialect)));
+            if let Err(e) = d.ledger.call(move |c| runs::add_tag(c, &id, &tag)).await {
+                warn!(run = %p.id, agent = %p.dialect, error = %format!("{e:#}"), "session not tagged");
+            }
+        }
+        if let Some(sig) = sig {
             d.supervisor.apply(&p.id, sig).await.map_err(internal)?;
         }
         // An agent you did not name is named for what you first asked it.
-        if p.event == "UserPromptSubmit"
-            && let Some(prompt) = p.payload.get("prompt").and_then(|v| v.as_str())
-        {
+        if prompted && let Some(prompt) = p.payload.get("prompt").and_then(|v| v.as_str()) {
             d.supervisor
-                .name_from_prompt(&p.id, rl_detect::claude::DIALECT, prompt)
+                .name_from_prompt(&p.id, &p.dialect, prompt)
                 .await
                 .map_err(internal)?;
         }
         let run = get_run(&d, &p.id).await?;
-        // A turn over, or a wait on you: Claude may have written its recap.
-        // Read after the reply, which the hook is waiting on.
-        if matches!(p.event.as_str(), "Stop" | "Notification") {
+        // A turn over, or a wait on you: the agent may have written its
+        // recap. Read after the reply, which the hook is waiting on.
+        if pauses {
             let (d, run) = (d.clone(), run.clone());
             tokio::spawn(async move {
                 if let Err(e) = crate::recap::pick_up(&d, &run).await {
@@ -317,7 +378,7 @@ pub fn register(r: &mut Router<Daemon>) {
     r.register::<DigestHide, _, _>(|d, p: DigestHideParams| async move {
         if !Hidden::valid_key(&p.key) {
             return Err(RpcError::invalid_params(format!(
-                "{:?}: a project is g:<folder>, a flow f:<name>",
+                "{:?}: a project is g:<folder>, a flow f:<name>, an agent's own session o:<agent>:<session id>",
                 p.key
             )));
         }
@@ -343,7 +404,7 @@ pub fn register(r: &mut Router<Daemon>) {
             return Err(RpcError::invalid_params(if p.group == Order::PROJECTS {
                 format!("{bad:?}: a project is g:<folder>")
             } else {
-                format!("{bad:?}: a run is r:<id>, a flow f:<name>")
+                format!("{bad:?}: a run is r:<id>, a flow f:<name>, an agent's own session o:<agent>:<session id>")
             }));
         }
         d.ledger
@@ -381,7 +442,7 @@ pub fn register(r: &mut Router<Daemon>) {
         ))
     });
 
-    r.register::<DigestGet, _, _>(|d, DigestParams { since }| async move {
+    r.register::<DigestGet, _, _>(|d, DigestParams { since, watching }| async move {
         let since = since.unwrap_or(jiff::Timestamp::UNIX_EPOCH);
         let (found, mut recaps, registered) = d
             .ledger
@@ -420,7 +481,7 @@ pub fn register(r: &mut Router<Daemon>) {
         }
         let joiners = d.supervisor.joiners();
         let mut cwds = d.supervisor.cwds();
-        let items = found
+        let mut items: Vec<_> = found
             .into_iter()
             .map(|(run, e, emitted)| {
                 let joined_by = joiners.get(&run.id).cloned();
@@ -434,18 +495,27 @@ pub fn register(r: &mut Router<Daemon>) {
             .list(DecisionFilter::default())
             .await
             .map_err(RpcError::internal)?;
-        let (lost, hidden, order, firings) = d
+        // Agents' own sessions as last heard: asked for only while a panel
+        // is watching.
+        let listed = d.outside.latest(watching);
+        let sessions = listed.clone();
+        let (lost, hidden, order, firings, (carried, left, was)) = d
             .ledger
-            .call(|c| {
+            .call(move |c| {
+                let carried = crate::outside::carried(c, &sessions)?;
+                let was = crate::outside::went_from(c, &sessions, &carried)?;
                 Ok((
                     runs::lost(c)?,
                     hidden::list(c)?,
                     order::list(c)?,
                     crate::digest::firings(c)?,
+                    (carried, crate::outside::left_open_of(c, &sessions)?, was),
                 ))
             })
             .await
             .map_err(RpcError::internal)?;
+        let outside = crate::outside::not_relays(listed, &carried, &left, &was, &d.supervisor.pids());
+        crate::outside::point_on(&mut items, &outside);
         Ok(Digest {
             since,
             items,
@@ -455,6 +525,7 @@ pub fn register(r: &mut Router<Daemon>) {
             hidden,
             order,
             firings,
+            outside,
         })
     });
 

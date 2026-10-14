@@ -2,8 +2,9 @@
 //! reconcile marks `run.lost` when Relay comes back without their holders.
 //!
 //! Each is carried on as a new run in its folder, under its title and in its
-//! chain: an agent's conversation where its CLI can resume one (`claude
-//! --resume <session>`, `codex resume <session>`), the session named exactly
+//! chain: an agent's conversation where its CLI can resume one, as its
+//! profile's `resume` says (`claude --resume <session>`, `codex resume
+//! <session>`), the session named exactly
 //! by the transcript a hook reported, else the one found by folder and start;
 //! a shell as a fresh shell; a command run again. The run picked up is
 //! archived, so the list shows the one that carries it on, where it stood.
@@ -12,6 +13,7 @@ use crate::server::Daemon;
 use crate::transcript::{self, Agent};
 use anyhow::Result;
 use jiff::Timestamp;
+use rl_detect::Registry;
 use rl_ledger::{order, runs};
 use rl_proto::methods::{Resumed, RunResumeParams, RunSpec};
 use rl_proto::types::{Cause, Run, RunKind};
@@ -57,7 +59,7 @@ async fn one(d: &Daemon, run: &Run, p: &RunResumeParams) -> Resumed {
         },
         _ => None,
     };
-    let argv = match argv_for(run, session.as_deref()) {
+    let argv = match argv_for(run, &d.registry, session.as_deref()) {
         Ok(a) => a,
         Err(why) => return not(&run.id, &run.title, &why),
     };
@@ -147,8 +149,9 @@ fn not(id: &str, title: &str, why: &str) -> Resumed {
 }
 
 /// What picking `run` back up runs, or why nothing can. `session` is its
-/// agent's conversation, where one was found.
-pub fn argv_for(run: &Run, session: Option<&str>) -> Result<Vec<String>, String> {
+/// agent's conversation, where one was found; how it is carried on is its
+/// profile's `resume`.
+pub fn argv_for(run: &Run, registry: &Registry, session: Option<&str>) -> Result<Vec<String>, String> {
     if !run.state.is_terminal() {
         return Err("it is still going".into());
     }
@@ -157,17 +160,20 @@ pub fn argv_for(run: &Run, session: Option<&str>) -> Result<Vec<String>, String>
     };
     match run.kind {
         RunKind::Agent => {
-            let agent = Agent::of(run).ok_or_else(|| {
+            let unknown = || {
                 format!(
                     "Relay does not know how {} resumes a conversation",
                     run.cli.as_deref().unwrap_or("this agent")
                 )
-            })?;
+            };
+            let profile = run
+                .cli
+                .as_deref()
+                .and_then(|c| registry.profile(c))
+                .filter(|p| !p.resume.is_empty())
+                .ok_or_else(unknown)?;
             let session = session.ok_or("its agent left no conversation to resume")?;
-            Ok(match agent {
-                Agent::Claude => vec![bin, "--resume".into(), session.into()],
-                Agent::Codex => vec![bin, "resume".into(), session.into()],
-            })
+            profile.resume_argv(bin, session).ok_or_else(unknown)
         }
         // A shell has nothing to resume but its place; a command runs again.
         RunKind::Shell | RunKind::Command => Ok(run.argv.clone()),
@@ -215,35 +221,47 @@ mod tests {
             &["claude", "--settings", "/h/hooks.json", "fix it"],
             RunState::Failed,
         );
-        assert_eq!(argv_for(&r, Some("8af0")).unwrap(), ["claude", "--resume", "8af0"]);
+        assert_eq!(
+            argv_for(&r, &reg(), Some("8af0")).unwrap(),
+            ["claude", "--resume", "8af0"]
+        );
+    }
+
+    fn reg() -> Registry {
+        Registry::builtin()
     }
 
     #[test]
-    fn codex_is_resumed_by_its_session() {
+    fn codex_and_gemini_are_resumed_by_their_session_as_their_profiles_say() {
         let r = run(RunKind::Agent, Some("codex"), &["codex"], RunState::Failed);
-        assert_eq!(argv_for(&r, Some("01a0")).unwrap(), ["codex", "resume", "01a0"]);
+        assert_eq!(argv_for(&r, &reg(), Some("01a0")).unwrap(), ["codex", "resume", "01a0"]);
+        let g = run(RunKind::Agent, Some("gemini"), &["/opt/gemini"], RunState::Failed);
+        assert_eq!(
+            argv_for(&g, &reg(), Some("u-1")).unwrap(),
+            ["/opt/gemini", "--resume", "u-1"]
+        );
     }
 
     #[test]
     fn an_agent_without_a_conversation_says_so() {
         let r = run(RunKind::Agent, Some("claude"), &["claude"], RunState::Failed);
-        assert!(argv_for(&r, None).unwrap_err().contains("no conversation"));
+        assert!(argv_for(&r, &reg(), None).unwrap_err().contains("no conversation"));
         let other = run(RunKind::Agent, Some("aider"), &["aider"], RunState::Failed);
-        assert!(argv_for(&other, Some("x")).unwrap_err().contains("aider"));
+        assert!(argv_for(&other, &reg(), Some("x")).unwrap_err().contains("aider"));
     }
 
     #[test]
     fn a_shell_or_a_command_starts_again_as_it_was() {
         let sh = run(RunKind::Shell, None, &["/bin/zsh", "-i"], RunState::Failed);
-        assert_eq!(argv_for(&sh, None).unwrap(), ["/bin/zsh", "-i"]);
+        assert_eq!(argv_for(&sh, &reg(), None).unwrap(), ["/bin/zsh", "-i"]);
         let cmd = run(RunKind::Command, None, &["npm", "run", "dev"], RunState::Failed);
-        assert_eq!(argv_for(&cmd, None).unwrap(), ["npm", "run", "dev"]);
+        assert_eq!(argv_for(&cmd, &reg(), None).unwrap(), ["npm", "run", "dev"]);
     }
 
     #[test]
     fn a_run_still_going_is_left_alone() {
         let r = run(RunKind::Shell, None, &["/bin/zsh", "-i"], RunState::Idle);
-        assert!(argv_for(&r, None).unwrap_err().contains("still going"));
+        assert!(argv_for(&r, &reg(), None).unwrap_err().contains("still going"));
     }
 
     #[test]

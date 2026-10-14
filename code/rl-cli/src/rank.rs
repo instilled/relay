@@ -7,7 +7,12 @@ use rl_proto::types::{Run, RunState};
 
 /// Lower is more urgent.
 pub fn score(r: &Run) -> u8 {
-    match r.state {
+    state_score(r.state)
+}
+
+/// What `score` gives a run in this state.
+pub fn state_score(s: RunState) -> u8 {
+    match s {
         RunState::NeedsInput | RunState::Blocked => 0,
         RunState::Failed => 1,
         RunState::Stale => 2,

@@ -39,7 +39,12 @@ futures = "0.3"
 ratatui = "0.30"
 vt100 = "0.16"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# `preserve_order`: `rl setup` adds Relay's hooks to Codex's and Gemini's
+# own JSON files (rl-detect's `user_hooks`) and writes them back with the
+# user's keys in the order they were. Cargo unifies features, so this is
+# workspace-wide: every crate's `serde_json::Map` keeps insertion order,
+# ledger JSON and RPC output too.
+serde_json = { version = "1", features = ["preserve_order"] }
 serde_norway = "0.9"
 sha2 = "0.10"
 thiserror = "2"

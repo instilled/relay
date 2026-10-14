@@ -229,7 +229,8 @@ impl Method for RunHook {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunHookParams {
     pub id: String,
-    /// Which CLI's vocabulary `event` and `payload` use. Only `claude` today.
+    /// Which CLI's vocabulary `event` and `payload` use: `claude`, `codex`
+    /// or `gemini`.
     #[serde(default = "default_dialect")]
     pub dialect: String,
     pub event: String,
@@ -239,6 +240,68 @@ pub struct RunHookParams {
 
 fn default_dialect() -> String {
     "claude".into()
+}
+
+/// One of an agent's own sessions, as its user-level hook told it (`rl hook
+/// <agent> <Event>` outside any Relay run of that agent's): kept with the
+/// rest of the agents' own sessions, keyed `o:<agent>:<session_id>`.
+pub struct OutsideHook;
+impl Method for OutsideHook {
+    const NAME: &'static str = "outside.hook";
+    type Params = OutsideHookParams;
+    type Result = OutsideHookResult;
+}
+
+/// What `rld` answers a hook with.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct OutsideHookResult {
+    /// Whether `rld` knows no process for that session: the hook then finds
+    /// the agent's and says it once more, with the pid. An older `rld`
+    /// answers with nothing, which reads as false.
+    pub wants_pid: bool,
+}
+
+impl<'de> Deserialize<'de> for OutsideHookResult {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct Said {
+            #[serde(default)]
+            wants_pid: bool,
+        }
+        let said = Option::<Said>::deserialize(d)?;
+        Ok(Self {
+            wants_pid: said.is_some_and(|s| s.wants_pid),
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OutsideHookParams {
+    /// The profile whose hook it is: `claude`, `codex`, `gemini`.
+    pub agent: String,
+    pub session_id: String,
+    pub cwd: PathBuf,
+    /// The hook event, in the agent's own words (`PermissionRequest`,
+    /// `Notification`, …).
+    pub event: String,
+    /// What narrows the event: a `Notification`'s type, a permission's
+    /// tool, a start's source, an end's reason.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    /// The agent's process, where the hook found it among its ancestors.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pid: Option<u32>,
+    /// The conversation's file, as the payload names it: a working agent
+    /// writes it all the time, so how recently it changed says more than
+    /// the last word heard.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript_path: Option<PathBuf>,
+    /// The Relay run the hook was called under (`RELAY_RUN`), if any: `rld`
+    /// lets the word go when that run is this agent's own, whose hooks have
+    /// said it already, and keeps it when the agent was only started inside
+    /// it (`user_hooks::foreign`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run: Option<String>,
 }
 
 /// A human's word on a run's state, for CLIs with no signals at all.
@@ -484,13 +547,19 @@ impl Method for DigestGet {
 pub struct DigestParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub since: Option<Timestamp>,
+    /// Set by the panel, which keeps the list showing: only then does `rld`
+    /// ask `claude agents`. A one-off digest leaves it false and reads what
+    /// is kept.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub watching: bool,
 }
 
 /// Takes a whole project, or a flow, off the panel's list — or brings it back
 /// — by its row's key: `g:<folder>` a project's header (`g:everywhere` the
-/// flows' runs outside every project), `f:<name>` a flow. Everything under it
-/// is hidden with it, runs that come later too; nothing is stopped or
-/// removed. Answers with everything hidden so.
+/// flows' runs outside every project), `f:<name>` a flow,
+/// `o:<agent>:<session>` an agent's own session. Everything under it is
+/// hidden with it, runs that come later too; nothing is stopped or removed.
+/// Answers with everything hidden so.
 pub struct DigestHide;
 impl Method for DigestHide {
     const NAME: &'static str = "digest.hide";
@@ -504,7 +573,8 @@ pub struct DigestHideParams {
     pub hidden: bool,
 }
 
-/// A project or a flow taken off the list, and since when.
+/// A project, a flow or an agent's own session taken off the list,
+/// and since when.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Hidden {
     pub key: String,
@@ -517,6 +587,7 @@ impl Hidden {
         key.strip_prefix("g:")
             .or_else(|| key.strip_prefix("f:"))
             .is_some_and(|k| !k.is_empty())
+            || Outside::valid_key(key)
     }
 }
 
@@ -542,8 +613,9 @@ pub struct Order {
     /// The project's header key: `g:<folder>`, or `g:everywhere`; or
     /// `Order::PROJECTS`, for the order of the projects.
     pub group: String,
-    /// Run and flow keys, `r:<id>` and `f:<name>`; under `Order::PROJECTS`,
-    /// the projects' header keys, `g:<folder>`.
+    /// Run, flow and agent session keys, `r:<id>`, `f:<name>` and
+    /// `o:<agent>:<session id>`; under `Order::PROJECTS`, the projects'
+    /// header keys, `g:<folder>`.
     #[serde(default)]
     pub rows: Vec<String>,
 }
@@ -564,15 +636,17 @@ impl Order {
         key.strip_prefix("g:").is_some_and(|k| !k.is_empty())
     }
 
-    /// Whether `key` names a row that can be put in order: a run or a flow.
+    /// Whether `key` names a row that can be put in order: a run, a flow,
+    /// or an agent's own session.
     pub fn valid_row(key: &str) -> bool {
         key.strip_prefix("r:")
             .or_else(|| key.strip_prefix("f:"))
             .is_some_and(|k| !k.is_empty())
+            || Outside::valid_key(key)
     }
 
-    /// Whether `key` can stand in this order: a run or a flow in a
-    /// project's, a project in the projects'.
+    /// Whether `key` can stand in this order: a run, a flow or an agent's
+    /// own session in a project's, a project in the projects'.
     pub fn fits(&self, key: &str) -> bool {
         if self.group == Self::PROJECTS {
             Self::valid_project(key)
@@ -602,7 +676,7 @@ mod order_tests {
             group: "g:/home/f/relay".into(),
             rows: vec![],
         };
-        assert!(relay.fits("r:a1") && relay.fits("f:nightly"));
+        assert!(relay.fits("r:a1") && relay.fits("f:nightly") && relay.fits("o:codex:s1"));
         assert!(!relay.fits("g:/home/f/api"));
     }
 }
@@ -621,7 +695,7 @@ pub struct Digest {
     /// `run.resume` with `lost` would pick up.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub lost: Vec<String>,
-    /// The projects and flows taken off the list (`digest.hide`).
+    /// The projects, flows and agents' own sessions taken off the list (`digest.hide`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hidden: Vec<Hidden>,
     /// The projects whose rows you put in order (`digest.order`).
@@ -630,6 +704,13 @@ pub struct Digest {
     /// Each flow's latest firing: where its row says it stands.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub firings: Vec<Firing>,
+    /// Agents' own sessions as last heard — Claude's as `claude agents
+    /// --json` last listed them — less those that are Relay's runs. Filled
+    /// only while a panel keeps asking: the first digest after a quiet
+    /// minute has none, and empty then does not mean there are none. `rl
+    /// since` does not show them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub outside: Vec<Outside>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -987,34 +1068,138 @@ impl Method for ConfigGet {
 
 // ---- import.* ----------------------------------------------------------------
 
-/// A session Claude runs on its own (`claude --bg`, or open in a terminal),
-/// as `claude agents --json` lists it.
+/// A session an agent CLI runs on its own, not a Relay run: one of Claude's
+/// (`claude --bg`, or open in a terminal, as `claude agents --json` lists
+/// it), or Codex's and Gemini's, as their hooks tell. The import screen
+/// moves Claude's background ones.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ClaudeSession {
-    /// The conversation: what `claude --resume` takes.
+pub struct Outside {
+    /// The agent profile whose session it is: `claude`, `codex`, `gemini`.
+    /// Claude's where not said, as every one was before there were others.
+    #[serde(default = "claude_agent")]
+    pub agent: String,
+    /// The conversation: what the agent's resume takes (`claude --resume`).
     pub session_id: String,
-    /// A background session's short id (`claude stop <id>`); none when it
-    /// is open in a terminal.
+    /// A background session's short id (`claude stop <id>`, `claude attach
+    /// <id>`): Claude's only, and none when it is open in a terminal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
     pub name: String,
     pub cwd: PathBuf,
-    /// `background` or `interactive`.
+    /// `background` or `interactive`; empty when Claude did not say. Only
+    /// what to call it: whether it can be attached to is `id`'s to say.
     pub kind: String,
-    /// `busy` or `idle`.
+    /// `busy`, `waiting` or `idle` while its process lives; empty when it
+    /// does not. Kept as Claude writes it.
     pub status: String,
-    /// A background session's `working` or `done`.
+    /// A background session's `working`, `blocked`, `done`, `failed` or
+    /// `stopped`. Kept as Claude writes it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub state: Option<String>,
-    /// The Relay run that carries it on, once moved.
+    /// Its process, while that lives.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pid: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<Timestamp>,
+    /// What it waits on while `status` is `waiting`: `permission prompt`,
+    /// `input needed`, and the like.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waiting_for: Option<String>,
+    /// The Relay run that carries it on, once moved. On the list, only one
+    /// left open in its terminal and at work there again has one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run: Option<String>,
     /// Not yet mentioned when the panel started.
     #[serde(default)]
     pub new: bool,
+    /// The project folder it stands under, as a run started in its `cwd`
+    /// would: the registered folder containing it, else its checkout's
+    /// root, else its folder. Settled by `rld` once per session; none where
+    /// it was not, and the panel guesses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<PathBuf>,
+    /// When `rld` first saw it stand as it does now: what brings a hidden
+    /// one back once it comes to need you.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state_at: Option<Timestamp>,
+    /// The ended Relay run it went on from: one sent to Claude's background
+    /// (`/background`), which carries the run's session id on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub was: Option<WentFrom>,
 }
 
-impl ClaudeSession {
+/// The Relay run a background session went on from: its id and its title.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WentFrom {
+    pub run: String,
+    pub title: String,
+}
+
+fn claude_agent() -> String {
+    "claude".into()
+}
+
+impl Outside {
+    /// Its row's key: `o:<agent>:<session id>`, what `/hide` and an order
+    /// keep.
+    pub fn key(&self) -> String {
+        format!("o:{}:{}", self.agent, self.session_id)
+    }
+
+    /// What it is called: its name, or — where its agent gave it none —
+    /// the start of its session id.
+    pub fn title(&self) -> String {
+        if self.name.trim().is_empty() {
+            format!("session {}", self.session_id.chars().take(8).collect::<String>())
+        } else {
+            self.name.clone()
+        }
+    }
+
+    /// Whether `key` is such a key, with an agent and a session.
+    pub fn valid_key(key: &str) -> bool {
+        key.strip_prefix("o:")
+            .and_then(|k| k.split_once(':'))
+            .is_some_and(|(agent, session)| !agent.is_empty() && !session.is_empty())
+    }
+
+    /// Whether it wants you, as a run would that asks, is blocked or failed:
+    /// a `blocked` or `failed` state; or, where its state is none Relay
+    /// knows, a `waiting` status. What brings a hidden one back, and what
+    /// its `state_at` marks the start of — a change within it (another
+    /// `waitingFor`, say) is not news.
+    pub fn wants_you(&self) -> bool {
+        matches!(
+            self.run_state(),
+            RunState::Blocked | RunState::Failed | RunState::NeedsInput
+        )
+    }
+
+    /// Its state as a run's would be: by a background session's `state`
+    /// where it is one Relay knows, else by `status` — `busy` working,
+    /// `waiting` needing you, anything else idle. The one place these words
+    /// are read: the list's state and `wants_you` both come from here.
+    pub fn run_state(&self) -> RunState {
+        match self.state.as_deref() {
+            Some("working") => RunState::Working,
+            Some("blocked") => RunState::Blocked,
+            Some("done") => RunState::Finished,
+            Some("failed") => RunState::Failed,
+            Some("stopped") => RunState::Stopped,
+            _ => match self.status.as_str() {
+                Self::BUSY => RunState::Working,
+                Self::WAITING => RunState::NeedsInput,
+                _ => RunState::Idle,
+            },
+        }
+    }
+
+    /// The `status` words, as Claude writes them; a session a hook told of
+    /// is given the same.
+    pub const BUSY: &str = "busy";
+    pub const WAITING: &str = "waiting";
+    pub const IDLE: &str = "idle";
+
     /// Open in someone's terminal: that terminal has it, not us.
     pub fn in_a_terminal(&self) -> bool {
         self.id.is_none()
@@ -1022,7 +1207,16 @@ impl ClaudeSession {
 
     /// In the middle of a turn: moving it now would cut the turn short.
     pub fn working(&self) -> bool {
-        self.state.as_deref() == Some("working") || (self.state.is_none() && self.status == "busy")
+        self.run_state() == RunState::Working
+    }
+
+    /// At work, or waiting on you mid-turn: one in a terminal so is not
+    /// carried on now, and one carried on while left open there shows again.
+    pub fn at_work(&self) -> bool {
+        matches!(
+            self.run_state(),
+            RunState::Working | RunState::NeedsInput | RunState::Blocked
+        )
     }
 }
 
@@ -1036,7 +1230,7 @@ pub struct ImportListParams {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ImportReport {
-    pub sessions: Vec<ClaudeSession>,
+    pub sessions: Vec<Outside>,
     /// Why there is no list: no `claude` here, or it would not say.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
@@ -1052,15 +1246,26 @@ impl Method for ImportList {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImportMoveParams {
+    /// Whose session it is: `claude`, `codex`, `gemini`. Claude's where
+    /// not said, as every one was before there were others.
+    #[serde(default = "claude_agent")]
+    pub agent: String,
     pub session_id: String,
     /// The environment the resumed session starts with: the caller's.
     #[serde(default)]
     pub env: Vec<(String, String)>,
+    /// The terminal it starts on, where the caller knows it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cols: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rows: Option<u16>,
 }
 
-/// Moves a Claude session into Relay: Claude's background process is
-/// stopped (the conversation stays), and `claude --resume` carries it on as
-/// a Relay run in the same folder, which becomes a workspace.
+/// Carries one of an agent's own sessions on as a Relay run, in the same
+/// folder, which becomes a workspace, as the agent's profile resumes it
+/// (`claude --resume`, `codex resume`). A Claude background session is
+/// stopped there first (the conversation stays); one open in a terminal is
+/// carried on only while idle, and that terminal keeps its own.
 pub struct ImportMove;
 impl Method for ImportMove {
     const NAME: &'static str = "import.move";
@@ -1072,7 +1277,7 @@ impl Method for ImportMove {
 
 /// The setup guide's steps, counted: a release that adds one raises it, and
 /// the panel shows the guide again for what is new.
-pub const SETUP_STEPS: u32 = 3;
+pub const SETUP_STEPS: u32 = 4;
 
 /// Where setup stands, and what it starts from.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1230,4 +1435,64 @@ impl Method for SummaryGet {
     const NAME: &'static str = "summary.get";
     type Params = SummaryParams;
     type Result = Option<crate::types::Summary>;
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn a_hook_answer_of_nothing_or_without_the_word_wants_no_pid() {
+        use super::OutsideHookResult;
+        let read = |v: serde_json::Value| serde_json::from_value::<OutsideHookResult>(v).unwrap().wants_pid;
+        assert!(!read(serde_json::json!(null)));
+        assert!(!read(serde_json::json!({})));
+        assert!(read(serde_json::json!({ "wants_pid": true })));
+    }
+
+    use super::*;
+
+    #[test]
+    fn an_agents_own_session_is_keyed_by_its_agent_and_session() {
+        for ok in ["o:claude:s1", "o:codex:019a-77"] {
+            assert!(Hidden::valid_key(ok) && Order::valid_row(ok), "{ok}");
+        }
+        for bad in ["c:s1", "o:claude:", "o::s1", "o:claude", "o:"] {
+            assert!(!Hidden::valid_key(bad) && !Order::valid_row(bad), "{bad}");
+        }
+        assert!(Hidden::valid_key("g:/w") && !Hidden::valid_key("r:x"));
+        assert!(Order::valid_row("r:x") && !Order::valid_row("g:/w"));
+    }
+
+    #[test]
+    fn a_session_with_no_agent_said_is_claudes() {
+        let s: Outside =
+            serde_json::from_str(r#"{"session_id":"s","name":"n","cwd":"/w","kind":"interactive","status":"idle"}"#)
+                .unwrap();
+        assert_eq!((s.agent.as_str(), s.key()), ("claude", "o:claude:s".to_string()));
+        assert_eq!((s.workspace, s.state_at), (None, None));
+    }
+
+    #[test]
+    fn its_state_words_are_read_in_one_place() {
+        let base: Outside =
+            serde_json::from_str(r#"{"session_id":"s","name":"n","cwd":"/w","kind":"interactive","status":"idle"}"#)
+                .unwrap();
+        let at = |state: Option<&str>, status: &str| Outside {
+            state: state.map(Into::into),
+            status: status.into(),
+            ..base.clone()
+        };
+        for (s, working, at_work) in [
+            (at(None, Outside::BUSY), true, true),
+            (at(None, Outside::WAITING), false, true),
+            (at(None, Outside::IDLE), false, false),
+            (at(Some("working"), Outside::IDLE), true, true),
+            (at(Some("blocked"), Outside::WAITING), false, true),
+            (at(Some("done"), Outside::BUSY), false, false),
+            // A state not known yet goes by its status, for both.
+            (at(Some("pondering"), Outside::BUSY), true, true),
+        ] {
+            assert_eq!((s.working(), s.at_work()), (working, at_work), "{s:?}");
+            assert_eq!(s.working(), s.run_state() == RunState::Working, "{s:?}");
+        }
+    }
 }

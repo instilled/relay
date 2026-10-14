@@ -4,6 +4,7 @@
 //! a new name adds a CLI). `generic` is the floor every profile extends.
 
 use crate::pty::{Patterns, Timing};
+use crate::sessions::{Sessions, SessionsFile, UserHooks};
 use anyhow::{Context, Result, bail};
 use regex::Regex;
 use rl_core::Home;
@@ -37,10 +38,12 @@ struct ProfileFile {
     headless: Option<Vec<String>>,
     model_flag: Option<Vec<String>>,
     small_model: Option<String>,
+    resume: Option<Vec<String>>,
     icon: Option<String>,
     color: Option<String>,
     patterns: Option<PatternsFile>,
     timing: Option<TimingFile>,
+    sessions: Option<SessionsFile>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -88,6 +91,9 @@ impl ProfileFile {
         if over.small_model.is_some() {
             self.small_model = over.small_model;
         }
+        if over.resume.is_some() {
+            self.resume = over.resume;
+        }
         if over.icon.is_some() {
             self.icon = over.icon;
         }
@@ -102,6 +108,9 @@ impl ProfileFile {
             if p.idle.is_some() {
                 mine.idle = p.idle;
             }
+        }
+        if let Some(s) = over.sessions {
+            self.sessions.get_or_insert_with(Default::default).merge(s);
         }
         if let Some(t) = over.timing {
             let mine = self.timing.get_or_insert_with(Default::default);
@@ -142,6 +151,10 @@ pub struct Profile {
     pub model_flag: Vec<String>,
     /// The quick, cheap model setup offers for summaries, when there is one.
     pub small_model: Option<String>,
+    /// The arguments that carry one of its conversations on, after its
+    /// binary: `{session}` is the conversation's id (`["--resume",
+    /// "{session}"]`). Empty when Relay does not know how it resumes.
+    pub resume: Vec<String>,
     /// The glyph its rows wear in place of the plain agent one: one column
     /// wide under every width table, so the titles after it stay in line.
     pub icon: Option<String>,
@@ -150,6 +163,9 @@ pub struct Profile {
     /// Generic patterns first, then the profile's own.
     pub patterns: Patterns,
     pub timing: Timing,
+    /// Its own sessions, outside Relay: how its hooks tell of them, how it
+    /// lists them, how one is opened. None, and it has none on the list.
+    pub sessions: Option<Sessions>,
 }
 
 /// Where a headless prompt goes when it does not simply go last: a CLI whose
@@ -176,6 +192,21 @@ pub fn with_given_prompt(mut argv: Vec<String>, prompt: String) -> Result<Vec<St
         bail!("the prompt starts with `-`, and this agent would read it as a flag");
     }
     Ok(with_prompt(argv, prompt))
+}
+
+/// Where a conversation's id goes in a profile's `resume`.
+pub const SESSION: &str = "{session}";
+
+impl Profile {
+    /// What carries `session` on: `bin`, then the profile's `resume` with
+    /// the id in place of `{session}`. None when it has no `resume`.
+    pub fn resume_argv(&self, bin: String, session: &str) -> Option<Vec<String>> {
+        if self.resume.is_empty() {
+            return None;
+        }
+        let args = self.resume.iter().map(|a| a.replace(SESSION, session));
+        Some(std::iter::once(bin).chain(args).collect())
+    }
 }
 
 /// The outcome of looking at an argv.
@@ -245,6 +276,10 @@ impl Registry {
         )?;
         let mut profiles = BTreeMap::new();
         for (name, file) in raw {
+            let kind = file.kind.unwrap_or(RunKind::Agent);
+            if file.sessions.is_some() && (kind != RunKind::Agent || name == GENERIC) {
+                bail!("{name}.yaml: sessions: only an agent has sessions of its own");
+            }
             let (patterns, timing) = if name == GENERIC {
                 (base_patterns.clone(), base_timing)
             } else {
@@ -256,7 +291,7 @@ impl Registry {
             profiles.insert(
                 name.clone(),
                 Profile {
-                    kind: file.kind.unwrap_or(RunKind::Agent),
+                    kind,
                     bins: file.bins.unwrap_or_default(),
                     interactive_only: file.interactive_only.unwrap_or(false),
                     hooks: file.hooks.map(|h| Hooks {
@@ -266,10 +301,12 @@ impl Registry {
                     headless: file.headless.unwrap_or_default(),
                     model_flag: file.model_flag.unwrap_or_default(),
                     small_model: file.small_model,
+                    resume: file.resume.unwrap_or_default(),
                     icon: file.icon.map(|i| check_icon(&name, i)).transpose()?,
                     color: file.color.map(|c| parse_color(&name, &c)).transpose()?,
                     patterns,
                     timing,
+                    sessions: file.sessions.map(|s| crate::sessions::compile(&name, s)).transpose()?,
                     name,
                 },
             );
@@ -294,6 +331,20 @@ impl Registry {
         self.profiles
             .values()
             .filter(|p| p.kind == RunKind::Agent && p.name != GENERIC)
+    }
+
+    /// The hooks of the agent `name` that tell of its own sessions, where
+    /// its profile has them (`sessions.hooks`).
+    pub fn user_hooks(&self, name: &str) -> Option<&UserHooks> {
+        self.profiles.get(name)?.sessions.as_ref()?.hooks.as_ref()
+    }
+
+    /// The profiles of the agents that list their own sessions themselves
+    /// (`sessions.list`), in name order.
+    pub fn listing(&self) -> impl Iterator<Item = &Profile> {
+        self.profiles
+            .values()
+            .filter(|p| p.sessions.as_ref().is_some_and(|s| s.list.is_some()))
     }
 
     /// Which known CLI `argv` starts, if any.
@@ -429,6 +480,11 @@ mod tests {
         );
         assert_eq!(r.profile("claude").unwrap().small_model.as_deref(), Some("haiku"));
         assert_eq!(r.profile("opencode").unwrap().small_model, None);
+        let resume = |n: &str| r.profile(n).unwrap().resume_argv(n.into(), "s1");
+        assert_eq!(resume("claude").unwrap(), ["claude", "--resume", "s1"]);
+        assert_eq!(resume("codex").unwrap(), ["codex", "resume", "s1"]);
+        assert_eq!(resume("gemini").unwrap(), ["gemini", "--resume", "s1"]);
+        assert_eq!(resume("opencode"), None);
         let c = r.detect(&argv("/Users/me/.local/bin/claude -p hi")).unwrap();
         assert_eq!((c.name.as_str(), c.kind), ("claude", RunKind::Agent));
         assert_eq!(c.hooks.as_ref().unwrap().dialect, "claude");
@@ -534,6 +590,21 @@ mod tests {
         // is not a `Command`.
         let x = r.resolve(RunKind::Command, &argv("zsh -i"));
         assert_eq!((x.kind, x.profile.name.as_str()), (RunKind::Shell, "sh"));
+    }
+
+    #[test]
+    fn only_an_agent_has_sessions_of_its_own() {
+        let dir = tempfile::tempdir().unwrap();
+        let block = "sessions:\n  hooks:\n    file: [/x/hooks.json]\n    timeout: 1s\n    events:\n      Stop: idle\n";
+        for (name, head) in [("myshell", "kind: shell\n"), ("generic", "")] {
+            std::fs::write(dir.path().join(format!("{name}.yaml")), format!("{head}{block}")).unwrap();
+            let err = format!("{:#}", Registry::load_from(dir.path()).unwrap_err());
+            assert!(
+                err.contains(&format!("{name}.yaml")) && err.contains("only an agent"),
+                "{err}"
+            );
+            std::fs::remove_file(dir.path().join(format!("{name}.yaml"))).unwrap();
+        }
     }
 
     #[test]

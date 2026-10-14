@@ -8,6 +8,7 @@
 //! header and folds to one line. Counted — only what happened
 //! in the stretch is counted as ran or failed — they are the top without an
 //! assistant; in a line each, what an assistant is handed to write it.
+//! Agents' own sessions are not in it: the list has them.
 
 pub mod heads;
 
@@ -127,6 +128,9 @@ impl<'a> CatchUp<'a> {
                 Row::Run(i) if matches!(i.run.cause, Cause::Assistant(_)) => continue,
                 Row::Run(i) if news(i) || waiting(i) => Row::Run(i),
                 Row::Run(_) => continue,
+                // Agents' own sessions are not news a catch-up tells: what
+                // is open now is the list's.
+                Row::Outside(_) => continue,
                 Row::Flow(mut f) => {
                     if heading.contains(f.name.as_str()) || !f.runs.iter().any(|i| news(i)) {
                         continue;
@@ -155,7 +159,7 @@ impl<'a> CatchUp<'a> {
                     (asker.map(|i| &i.run), q.workspace.as_path())
                 }
                 Row::Run(i) => (Some(&i.run), i.run.workspace.as_path()),
-                Row::Group(_) | Row::Flow(_) => continue,
+                Row::Group(_) | Row::Flow(_) | Row::Outside(_) => continue,
             };
             // Under the header the list would give it: its ref's, else its
             // folder's — not another folder that goes by the same name.
@@ -192,7 +196,7 @@ impl<'a> CatchUp<'a> {
                         p.ran += f.runs.iter().filter(|i| ran(i)).count();
                         p.failed += f.runs.iter().filter(|i| failed(i)).count();
                     }
-                    Row::Group(_) => {}
+                    Row::Group(_) | Row::Outside(_) => {}
                 }
             }
         }
@@ -349,6 +353,7 @@ impl CatchUp<'_> {
                     when: f.when.clone(),
                     runs: f.runs.iter().map(|i| item(i)).collect::<Option<_>>()?,
                 },
+                Row::Outside(_) => return None,
             })
         };
         Kept {
@@ -454,6 +459,7 @@ pub fn stretch(d: &Digest, since: Timestamp) -> Digest {
         hidden: d.hidden.clone(),
         order: d.order.clone(),
         firings: d.firings.clone(),
+        outside: d.outside.clone(),
     }
 }
 
@@ -578,6 +584,7 @@ pub fn text(cu: &CatchUp, top: &[String], now: Timestamp) -> String {
                 Row::Question(q) => format!("\n    {} {}  {line}  [{}]", rows::QUESTION, q.id, q.keys()),
                 Row::Run(i) => format!("\n    {} {}  {line}", rows::icon(&i.run), i.run.id),
                 Row::Flow(_) => format!("\n    {} {line}", rows::FLOW),
+                Row::Outside(c) => format!("\n    {} {line}", rows::outside_icon(c)),
                 Row::Group(_) => continue,
             });
         }
@@ -602,7 +609,7 @@ fn run_of<'r>(r: &'r Row) -> Option<&'r Run> {
     match r {
         Row::Run(i) => Some(&i.run),
         Row::Flow(f) => f.last().map(|i| &i.run),
-        Row::Group(_) | Row::Question(_) => None,
+        Row::Group(_) | Row::Question(_) | Row::Outside(_) => None,
     }
 }
 
@@ -623,6 +630,7 @@ fn at(r: &Row) -> Option<Timestamp> {
         Row::Question(q) => Some(q.updated_at),
         Row::Run(i) => Some(i.at),
         Row::Flow(f) => f.last().map(|i| i.at),
+        Row::Outside(c) => c.started_at,
     }
 }
 
@@ -652,6 +660,12 @@ pub fn row_line(r: &Row, now: Timestamp) -> String {
                 _ => parts.push(crate::tui::flows::stands(f, None, now)),
             }
             parts.extend(f.last().map(|i| ago(i.at)));
+            parts
+        }
+        Row::Outside(c) => {
+            use crate::tui::outside;
+            let mut parts = vec![c.title(), outside::state_words(c), outside::lives(c)];
+            parts.extend(c.started_at.map(ago));
             parts
         }
     };
@@ -838,6 +852,7 @@ mod tests {
             hidden: vec![],
             order: vec![],
             firings: Vec::new(),
+            outside: vec![],
         }
     }
 
@@ -1096,6 +1111,7 @@ mod tests {
             hidden: vec![],
             order: vec![],
             firings: Vec::new(),
+            outside: vec![],
         };
         let flows: Vec<Flow> = flows()
             .into_iter()
@@ -1134,6 +1150,7 @@ mod tests {
             hidden: vec![],
             order: vec![],
             firings: Vec::new(),
+            outside: vec![],
         };
         let names = Names::new([
             (PathBuf::from(one), "app".to_string()),

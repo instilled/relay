@@ -60,6 +60,7 @@ mod tests {
             hidden: vec![],
             order: vec![],
             firings: Vec::new(),
+            outside: vec![],
         };
         let ids: Vec<&str> = since_items(&d).iter().map(|i| i.run.id.as_str()).collect();
         assert_eq!(ids, ["moved", "unseen"]);
