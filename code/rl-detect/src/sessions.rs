@@ -87,6 +87,7 @@ struct HooksFile {
     after_install: Option<String>,
     from_env: Option<FromEnv>,
     events: Option<Map<String, Value>>,
+    settings: Option<Map<String, Value>>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -112,7 +113,17 @@ impl SessionsFile {
             macro_rules! take {
                 ($($f:ident),*) => {$(if h.$f.is_some() { mine.$f = h.$f; })*};
             }
-            take!(file, timeout, unit, background, marker, after_install, from_env, events);
+            take!(
+                file,
+                timeout,
+                unit,
+                background,
+                marker,
+                after_install,
+                from_env,
+                events,
+                settings
+            );
         }
         if over.list.is_some() {
             self.list = over.list;
@@ -174,6 +185,10 @@ pub struct UserHooks {
     pub from_env: FromEnv,
     /// The events hooked, in order, and what each says.
     pub events: Vec<(String, Event)>,
+    /// The agent's own settings set beside the hooks, each by its dotted
+    /// path in the file (`ui.useAlternateBuffer`), in order: what makes it
+    /// draw well under Relay. Set only where the file has no value there.
+    pub settings: Vec<(String, Value)>,
 }
 
 /// What an event says: always the same, or by one field of its payload.
@@ -344,6 +359,23 @@ fn compile_hooks(name: &str, h: HooksFile) -> Result<UserHooks> {
             prompts.join(" and ")
         );
     }
+    let settings = h
+        .settings
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(key, v)| {
+            if key.split('.').any(str::is_empty) {
+                bail!(
+                    "{} `{key}` is not a dotted path (ui.useAlternateBuffer)",
+                    at("settings")
+                );
+            }
+            if key.split('.').next() == Some("hooks") {
+                bail!("{} `{key}`: `hooks` is the hooks', not a setting", at("settings"));
+            }
+            Ok((key, v))
+        })
+        .collect::<Result<Vec<_>>>()?;
     Ok(UserHooks {
         agent: name.to_string(),
         file,
@@ -354,6 +386,7 @@ fn compile_hooks(name: &str, h: HooksFile) -> Result<UserHooks> {
         after_install: h.after_install,
         from_env: h.from_env.unwrap_or_default(),
         events,
+        settings,
     })
 }
 
@@ -905,6 +938,11 @@ mod tests {
             )
         );
         assert_eq!(hooks("gemini").after_install, None);
+        assert_eq!(
+            hooks("gemini").settings,
+            [("ui.useAlternateBuffer".to_string(), json!(true))]
+        );
+        assert!(hooks("claude").settings.is_empty() && hooks("codex").settings.is_empty());
         let timing = |a: &str| {
             let h = hooks(a);
             (h.timeout, h.unit, h.background)
@@ -961,6 +999,8 @@ mod tests {
                 "tea-leaves",
             ),
             (format!("{ok}  attach: [attach]\n"), "{id}"),
+            (format!("{ok}    settings: {{ \"ui..x\": true }}\n"), "ui..x"),
+            (format!("{ok}    settings: {{ hooks.Stop: [] }}\n"), "hooks.Stop"),
             (ok.replace("    events:\n      Stop: idle\n", ""), "events"),
             (ok.replace("Stop: idle", "Pre Tool: idle"), "Pre Tool"),
             (ok.replace("Stop: idle", "\"Stop;rm\": idle"), "Stop;rm"),
