@@ -61,7 +61,7 @@ rl decide <id> yes
 Agents you started outside Relay are on the panel too, under their folder's project: Claude's,
 Codex's and Gemini's, once `rl setup` has added Relay's hook to their user-level settings (Claude's
 are listed without it as well, just less promptly). Enter on one of Claude's background sessions
-opens it here (`claude attach`); enter on one idle in another terminal carries it on here as a
+opens it here (`claude attach`; `ctrl-\` leaves it running, as for a run); enter on one idle in another terminal carries it on here as a
 Relay run.
 
 ## Flows
