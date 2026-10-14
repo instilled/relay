@@ -9,7 +9,6 @@ Goal for v1:
 
 The next milestone is one dependable daily loop: start work → leave → get told when needed → come back to the facts → say yes to the next step. Breadth waits for it.
 
-* [ ] a flow's own graph, the global graph dropped — a selected flow's steps drawn in its pane (`if` labels, its last firing's marks; what fires it and what it fires); `^g`, `/graph` and the global layout go
 * [ ] ctrl-\ leaves a Claude background session — enter runs `claude attach` under a PTY of Relay's (as `attach.rs` does for runs), so ctrl-\ detaches back to the panel as for any run, and ^Z / ← still work; the session itself keeps running
 * [ ] modules split — `tui/mod.rs` (~8,800 lines) into drawing, keys and modes, and the daemon glue, its tests beside them; `main.rs` (~1,900) trimmed; behaviour unchanged
 * [ ] facts collector (J6) — what happened when you get back, as facts: git commits + `diff --stat` per run, commands with exit codes, transcript ingestion (Claude/Codex `*.jsonl`), tokens/cost; facts first in the pane and the catch-up, the narrative below
@@ -27,6 +26,7 @@ Later:
 
 ## Done — newest first
 
+* [x] a flow's own graph, the global graph dropped — a selected flow's pane draws what starts it, its steps by rank with their `if`s and last firing's marks, and the flows it starts (decided by the same `rl_flow::events` the daemon uses); `^g`, `/graph`, `graph.get` and the global layout are gone (#167)
 * [x] agents started outside Relay — Claude's, Codex's and Gemini's own sessions are rows under their folder's project with their state, told by a user-level hook `rl setup` adds on a yes (`claude agents` asked only with a reason); enter attaches to a Claude background session or carries an idle one on as a Relay run; a run sent to `/background` links to the session it became; a new agent is a `sessions:` block in its profile (#164)
 * [x] every flow on the list — a flow is a row from its yes on, with its trigger and next time (`every 30m · next in 12m`) before it ever fired, `paused` or `needs a yes again` when so; its runs stay on its row whatever their age; the headline still counts only what ran (#160)
 * [x] the templates become examples you copy — `--from`, `--set` and `--in` go; `prod-logs` and `morning-brief` live in `examples/flows` with placeholders and a test that holds them to the code (#158)
