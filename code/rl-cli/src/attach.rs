@@ -1,10 +1,10 @@
-//! `rl watch` / `rl join`: this terminal becomes the run's terminal.
+//! `rl join`: this terminal becomes the run's terminal.
 //!
 //! One `run.attach` call, then the connection carries holder frames. On a
 //! real terminal we go raw and forward resizes; piped, we just stream bytes
-//! (so `rl watch <id> | tee log` works). Keys are bytes, never parsed: what
-//! you type is what the child gets. `ctrl-\` detaches a join; `q` leaves a
-//! watch. The run never notices either.
+//! (so `rl join <id> | tee log` works). Keys are bytes, never parsed: what
+//! you type is what the child gets. `ctrl-\` detaches a join; an ended run's
+//! page is left with `q`. The run never notices either.
 //!
 //! Nothing of ours is ever drawn over the run's screen. What we have to say
 //! while it has the terminal — how to let go, how many other runs need you,
@@ -14,7 +14,7 @@ use crate::client::Client;
 use anyhow::{Context, Result};
 use rl_core::Home;
 use rl_proto::methods::{AttachParams, DecisionFilter, DecisionList, RunAttach, RunFilter, RunGet, RunId, RunList};
-use rl_proto::types::{AttachMode, Run, RunState};
+use rl_proto::types::{Run, RunState};
 use rl_session::proto::{Frame, FrameReader, write_frame};
 use std::io::IsTerminal;
 use std::time::Duration;
@@ -119,7 +119,7 @@ const NEED_EVERY: Duration = Duration::from_secs(5);
 pub enum Ended {
     /// `ctrl-\` on a join: the run keeps going.
     Detached,
-    /// `q` on a watch, or a piped join whose input ran out.
+    /// `q` on an ended run's page, or a piped join whose input ran out.
     Left,
     /// The run ended while we were there: its code, and how in words.
     Exit { code: i32, how: String },
@@ -132,7 +132,7 @@ impl Ended {
     /// The process exit code. Leaving on purpose is 0; a run that ended is
     /// its own code; a connection that went without one is the run's code if
     /// rld knows it, and 1 otherwise — never 0, which would read as having
-    /// watched a run finish cleanly.
+    /// seen a run finish cleanly.
     pub fn code(&self) -> i32 {
         match self {
             Ended::Exit { code, .. } => *code,
@@ -144,7 +144,6 @@ impl Ended {
 
 pub struct Opts {
     pub id: String,
-    pub mode: AttachMode,
     pub take: bool,
     /// Bytes.
     pub scrollback: u64,
@@ -157,7 +156,6 @@ pub async fn attach(home: &Home, o: Opts) -> Result<Ended> {
     let info = c
         .call::<RunAttach>(AttachParams {
             id: o.id.clone(),
-            mode: o.mode,
             client: me.clone(),
             scrollback: o.scrollback,
             take: o.take,
@@ -169,33 +167,32 @@ pub async fn attach(home: &Home, o: Opts) -> Result<Ended> {
     // and this read shares a `select!` with stdin and the "who needs you"
     // ticker. Read it cancel-safely or a lost race eats the connection.
     let mut rd = FrameReader::new(rd);
-    let joined = o.mode == AttachMode::Join && info.live;
+    // A live run is joined -- the keyboard is yours -- and an ended one is
+    // read from its journal, with nothing to type into.
+    let joined = info.live;
     let interactive = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
 
     let mut out = tokio::io::stdout();
-    let mut banner = format!("[relay] {} {} · {}", o.mode, info.run.id, info.run.title);
-    if !info.live {
-        banner.push_str(" · ended");
-    } else if joined {
+    let mut banner = if joined {
+        format!("[relay] join {} · {}", info.run.id, info.run.title)
+    } else {
+        format!("[relay] {} · {}", info.run.id, info.run.title)
+    };
+    if joined {
         banner.push_str(" · ctrl-\\ to detach");
     } else {
-        banner.push_str(" · q to leave");
-        if let Some(j) = &info.joiner {
-            banner.push_str(&format!(" · joined by {j}"));
-        }
+        banner.push_str(" · ended");
     }
     // On a terminal the banner is one ordinary line above the session and
     // the window title carries the status from then on; nothing of ours is
     // ever drawn over the run's own screen. Piped, it is all plain lines.
     let mut status = Status {
-        base: format!("relay · {} {}", o.mode, info.run.id),
-        key: if joined {
-            "^\\ lets go"
-        } else if info.live {
-            "q leaves"
+        base: if joined {
+            format!("relay · join {}", info.run.id)
         } else {
-            ""
+            format!("relay · {}", info.run.id)
         },
+        key: if joined { "^\\ lets go" } else { "" },
         need: 0,
         note: None,
     };

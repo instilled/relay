@@ -221,15 +221,17 @@ sequenceDiagram
   headless terminal (`rl-session/src/screen.rs`); a byte tail would start mid-redraw and replay
   every reprint an inline app made. An ended terminal run is drawn the same way from the journal
   (`Screen::render`).
-- **One joiner, many watchers.** The joiner is a seat (`user@host` plus terminal); a second join
-  is refused unless `take`. The supervisor's follow connection journals regardless.
+- **One viewer, who is the joiner.** Attaching to a live run claims its seat (`user@host` plus
+  terminal); a second attach is refused unless `take`, which mutes the one it took over from
+  without cutting its stream. There is no reading over a shoulder: `rl watch` and the wire's
+  attach mode are gone. The supervisor's follow connection journals regardless.
 - **A young run is nudged once.** Node/Bun agents miss a resize in their first half-second, so the
   panel starts runs at the size its join will hand them, and a run joined under three seconds old
   gets one held row-less resize (`attach.rs`, `NUDGE_HOLD`).
 - **Frames are read through `FrameReader`.** Every hop reads inside a `select!`; a bare read loses
   its partial frame when it loses the race, and the next read takes payload for a header.
 - **A stream ending without an exit is not a run ending.** `rl join` asks what became of the run
-  and says so; the panel keeps the last screen, marked `lost`.
+  and says so, and exits with its code, or 1 — never 0, which would read as a clean finish.
 - Taking the terminal back drops input the run's terminal queries left behind (`tui/input.rs`).
 
 ---
@@ -249,13 +251,21 @@ sequenceDiagram
   per folder, written to via `run.input`); anything else goes to the interpreter (§6) and comes
   back as a filled form. The line's right edge says which, before `enter`. Everything else is a
   `/` command (`tui/palette.rs`) or one of a few chords (`^x ^r ^t ^o ^f`, `^h` for the keys).
-- **Enter on a live run** leaves ratatui and pipes the run to the real terminal (`attach.rs`,
-  shared with `rl join`); `ctrl-\` lets go. An ended run opens in a `vt100` tile (`tui/term.rs`).
-- **The pane** (`tui/pane.rs`) holds facts for whatever is selected: a run, a flow and its
-  firings, a project, a question and its choices, a summary. A flow's pane draws its wiring
+- **A row is read by entering it.** `enter` opens the selected row's **subpage**: full width,
+  full height, the list stepped aside, under one header row saying what the page is of and that
+  `esc` leaves. `enter` again acts — a flow's walk, a question's choices, an agent's own session
+  carried on. `esc` steps back one level (a sub-mode first, then the page); `ctrl-\` goes
+  straight to the list from however deep in, the same gesture that detaches a join. `^o` opens
+  and leaves the selected row's page without entering it.
+- **Enter on a live run** is the same move at its fullest: ratatui steps aside and the run gets
+  the real terminal (`attach.rs`, shared with `rl join`), `ctrl-\` lets go. An **ended** run's
+  page is a static render of its journal (`tui/term.rs`): read once to its exit, scrolled, with
+  no holder connection held open.
+- **The pane** (`tui/pane.rs`) is what a subpage draws: facts for whatever is selected — a run, a
+  flow and its firings, a project, a question and its choices, a summary. A flow's page draws its wiring
   (`tui/flow_graph.rs`): what starts it, its steps as boxes by rank with their `if`s and its
   last firing's marks, and the flows it starts — worked out from every loaded flow's definition
-  (`tui/flow_links.rs`), with no ledger. Too narrow for the drawing, it lists the steps.
+  (`tui/flow_links.rs`), with no ledger. At a width too small for the drawing, it lists the steps.
 - **The events view** (`tui/events.rs`) lists the ledger's events newest first, each with what
   it set off, read from causes, never guessed.
 - **The catch-up** (`rl-cli/src/catchup.rs`) opens instead of the list when you were away longer

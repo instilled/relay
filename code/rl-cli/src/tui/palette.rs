@@ -130,9 +130,9 @@ pub const ALL: &[Command] = &[
     },
     Command {
         name: "pane",
-        args: "[full]",
-        words: &[&["full"]],
-        what: "show or hide the pane beside the list, or give it the whole screen",
+        args: "",
+        words: &[],
+        what: "show or hide the row's page, which takes the whole screen",
         cmd: Cmd::Pane,
     },
     Command {
@@ -322,7 +322,6 @@ mod tests {
         assert!(arg_words(cmd("flow"), 1).is_empty(), "the flows' names are the panel's");
         assert_eq!(arg_words(cmd("reload"), 0), ["flows", "shell"]);
         assert_eq!(arg_words(cmd("archive"), 0), ["seen"]);
-        assert_eq!(arg_words(cmd("pane"), 0), ["full"]);
         assert_eq!(arg_words(cmd("resume"), 0), ["all"]);
         assert_eq!(arg_words(cmd("resume"), 1), ["commands"]);
         assert_eq!(arg_words(cmd("mark"), 0), ["done", "blocked", "working"]);

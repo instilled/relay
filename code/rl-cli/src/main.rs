@@ -28,7 +28,7 @@ use rl_proto::methods::{
     EventEmit, EventEmitParams, WorkspaceList, WorkspaceRemove, WorkspaceRemoveParams, WorkspaceRemoved, WorkspaceUp,
     WorkspaceUpParams,
 };
-use rl_proto::types::{AttachMode, Cause, Mark, RunKind, RunState, SummaryTarget};
+use rl_proto::types::{Cause, Mark, RunKind, RunState, SummaryTarget};
 use serde_json::json;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -118,8 +118,6 @@ enum Cmd {
         #[command(subcommand)]
         cmd: WorkspaceCmd,
     },
-    /// See a run's terminal live, read-only. q to leave.
-    Watch(AttachArgs),
     /// Be in a run's terminal: keyboard, resize, the lot. ctrl-\ to detach; the run keeps going.
     Join(AttachArgs),
     /// Say what a run is doing when its CLI cannot: done, blocked or working.
@@ -523,20 +521,18 @@ async fn main() -> Result<()> {
         Cmd::Decide(a) => decide(&home, a, cli.json).await,
         Cmd::Up(a) => up(&home, a, cli.json).await,
         Cmd::Workspace { cmd } => workspace(&home, cmd, cli.json).await,
-        Cmd::Watch(a) => attach(&home, a, AttachMode::Watch).await,
-        Cmd::Join(a) => attach(&home, a, AttachMode::Join).await,
+        Cmd::Join(a) => attach(&home, a).await,
         Cmd::Mark(a) => mark(&home, a, cli.json).await,
         Cmd::ShellInit(a) => shell_init(a),
         Cmd::Hook(a) => hook(&home, &a.words).await,
     }
 }
 
-async fn attach(home: &Home, a: AttachArgs, mode: AttachMode) -> Result<()> {
+async fn attach(home: &Home, a: AttachArgs) -> Result<()> {
     let ended = rl_cli::attach::attach(
         home,
         rl_cli::attach::Opts {
             id: a.id,
-            mode,
             take: a.take,
             scrollback: a.scrollback * 1024,
         },

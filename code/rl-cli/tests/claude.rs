@@ -121,8 +121,8 @@ fn a_recorded_claude_session_reports_through_its_hooks() {
     assert!(evs[2]["summary"].as_str().unwrap().contains("exit 0"), "{}", evs[2]);
 
     // What Claude printed reached the terminal.
-    let (ok, out, _) = run(&["watch", &id]);
-    assert!(ok, "watching an ended run replays it");
+    let (ok, out, _) = run(&["join", &id]);
+    assert!(ok, "an ended run's page replays it");
     assert!(out.contains("⏺ Bash(echo relay-fixture)"), "{out}");
     assert!(out.contains("relay-fixture"), "{out}");
 
