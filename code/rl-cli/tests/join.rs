@@ -118,28 +118,27 @@ fn join_survives_a_daemon_kill() {
     stdin.write_all(&[0x1c]).unwrap();
     assert_eq!(join.wait().unwrap().code(), Some(0));
 
-    // Watching (piped) streams until the run ends, and exits with its code.
-    let mut watch = base(&["watch", &id])
-        .stdin(Stdio::null())
+    // A join the run ends under (piped, nothing typed) streams to the end and
+    // exits with the run's code.
+    let mut still = base(&["join", &id])
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
         .spawn()
         .unwrap();
-    let mut wout = BufReader::new(watch.stdout.take().unwrap());
+    let _held = still.stdin.take().unwrap();
+    let mut sout = BufReader::new(still.stdout.take().unwrap());
     let mut first = String::new();
-    wout.read_line(&mut first).unwrap();
+    sout.read_line(&mut first).unwrap();
     let mut banner = String::new();
-    wout.read_line(&mut banner).unwrap();
-    assert!(
-        banner.contains("[relay] watch") && banner.contains("q to leave"),
-        "{first:?} {banner:?}"
-    );
+    sout.read_line(&mut banner).unwrap();
+    assert!(banner.contains("[relay] join"), "{first:?} {banner:?}");
     assert!(run(&["stop", &id]).0);
-    let st = watch.wait().unwrap();
-    assert_eq!(st.code(), Some(143), "watch exits with the run's code");
+    let st = still.wait().unwrap();
+    assert_eq!(st.code(), Some(143), "a join exits with the run's code");
 
     // An ended run: scrollback, then the exit code, no daemon-side holder.
-    let (ok, out, _) = run(&["watch", &id]);
+    let (ok, out, _) = run(&["join", &id]);
     assert!(!ok);
     assert!(
         out.contains("echo: after the crash") && out.contains("ended (exit 143)"),

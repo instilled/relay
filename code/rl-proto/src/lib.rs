@@ -15,4 +15,4 @@ pub mod rpc;
 pub mod types;
 
 /// Bumped when a message changes shape incompatibly. Reported by `daemon.ping`.
-pub const PROTOCOL_VERSION: u32 = 4;
+pub const PROTOCOL_VERSION: u32 = 5;

@@ -16,7 +16,6 @@ use rl_ledger::session_io::{self, Direction};
 use rl_ledger::{presence, runs, sessions};
 use rl_proto::methods::{AttachInfo, AttachParams};
 use rl_proto::rpc::RpcError;
-use rl_proto::types::AttachMode;
 use rl_session::client::Session;
 use rl_session::exit::Exit;
 use rl_session::proto::{Frame, FrameReader, write_frame, write_output};
@@ -140,23 +139,21 @@ pub async fn attach(d: &Daemon, p: AttachParams) -> Result<Attached, RpcError> {
         .supervisor
         .live(&id)
         .ok_or_else(|| RpcError::internal(format!("run {id} is alive but this daemon is not attached to it")))?;
-    let joiner = p.mode == AttachMode::Join;
     let seat = Seat {
         client: p.client.clone(),
         terminal: p.terminal.clone(),
     };
-    let mut replaced = None;
-    if joiner {
-        replaced = live.join(&seat, p.take).map_err(|current| {
-            let who = current.said_to(&seat);
-            let mut e = RpcError::new(
-                RpcError::BUSY,
-                format!("{id} is already joined by {who}; `--take` to take over"),
-            );
-            e.data = Some(serde_json::json!({ "joiner": who }));
-            e
-        })?;
-    }
+    // Attaching to a live run is joining it: there is no reading it over
+    // someone's shoulder, so the seat is claimed or the attach is refused.
+    let replaced = live.join(&seat, p.take).map_err(|current| {
+        let who = current.said_to(&seat);
+        let mut e = RpcError::new(
+            RpcError::BUSY,
+            format!("{id} is already joined by {who}; `--take` to take over"),
+        );
+        e.data = Some(serde_json::json!({ "joiner": who }));
+        e
+    })?;
     // Subscribe before announcing, so nothing is missed.
     let notes = live.notes.subscribe();
 
@@ -185,28 +182,26 @@ pub async fn attach(d: &Daemon, p: AttachParams) -> Result<Attached, RpcError> {
     let (hello, holder, tail) = match attached {
         Ok(x) => x,
         Err(e) => {
-            if joiner {
-                match &replaced {
-                    // The take-over didn't go through: put the client we
-                    // evicted back in the joiner's seat instead of leaving
-                    // the run with no joiner at all.
-                    Some(old) => {
-                        let _ = live.join(old, true);
-                        let _ = live.notes.send(format!(
-                            "{} could not take over; {} stays joined",
-                            p.client,
-                            old.said_to(&seat)
-                        ));
-                    }
-                    None => {
-                        live.leave(&seat);
-                    }
+            match &replaced {
+                // The take-over didn't go through: put the client we
+                // evicted back in the joiner's seat instead of leaving
+                // the run with no joiner at all.
+                Some(old) => {
+                    let _ = live.join(old, true);
+                    let _ = live.notes.send(format!(
+                        "{} could not take over; {} stays joined",
+                        p.client,
+                        old.said_to(&seat)
+                    ));
+                }
+                None => {
+                    live.leave(&seat);
                 }
             }
             return Err(e);
         }
     };
-    if joiner {
+    {
         let what = match replaced {
             // Your own other terminal: said so, not you twice.
             Some(old) if old != seat && old.client == seat.client => {
@@ -219,7 +214,7 @@ pub async fn attach(d: &Daemon, p: AttachParams) -> Result<Attached, RpcError> {
     }
     // Nothing is missing between a screen and live.
     let replay_from = if hello.tty { journaled } else { hello.replay_from };
-    info!(id, client = %p.client, mode = %p.mode, tty = hello.tty, replay_from, journaled, "viewer attached");
+    info!(id, client = %p.client, tty = hello.tty, replay_from, journaled, "viewer attached");
     Ok(Attached {
         info: AttachInfo {
             run,
@@ -232,7 +227,7 @@ pub async fn attach(d: &Daemon, p: AttachParams) -> Result<Attached, RpcError> {
             replay_from,
         },
         seat,
-        joiner,
+        joiner: true,
         tail,
         holder: Some(holder),
         live: Some(live),

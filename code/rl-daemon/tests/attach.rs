@@ -25,15 +25,14 @@ struct Viewer {
 
 impl Viewer {
     /// Attaches a fresh connection; `Err` is the RPC error.
-    async fn attach(home: &Home, id: &str, mode: &str, client: &str, take: bool) -> Result<(Value, Self), RpcError> {
-        Self::attach_from(home, id, mode, client, None, take).await
+    async fn attach(home: &Home, id: &str, client: &str, take: bool) -> Result<(Value, Self), RpcError> {
+        Self::attach_from(home, id, client, None, take).await
     }
 
     /// Attaches from one terminal of the client's.
     async fn attach_from(
         home: &Home,
         id: &str,
-        mode: &str,
         client: &str,
         terminal: Option<&str>,
         take: bool,
@@ -42,7 +41,7 @@ impl Viewer {
         let res = c
             .call(
                 "run.attach",
-                json!({ "id": id, "mode": mode, "client": client, "terminal": terminal, "take": take, "scrollback": 4096 }),
+                json!({ "id": id, "client": client, "terminal": terminal, "take": take, "scrollback": 4096 }),
             )
             .await;
         if let Some(e) = res.error {
@@ -104,7 +103,7 @@ fn notes(frames: &[Frame]) -> Vec<String> {
 }
 
 #[tokio::test]
-async fn watchers_and_one_joiner() {
+async fn one_viewer_who_is_the_joiner_and_a_take_over() {
     let tmp = tempfile::tempdir().unwrap();
     let Some(h) = Harness::on(Home::at(tmp.path())) else {
         eprintln!("skipping: rl-session not built (run `cargo test --workspace`)");
@@ -120,44 +119,27 @@ async fn watchers_and_one_joiner() {
         .await;
     wait_journal(&h.home, &run.id, "> ").await;
 
-    // A watcher: scrollback from the journal, then the holder's live stream.
-    let (info, mut watcher) = Viewer::attach(&h.home, &run.id, "watch", "ann@laptop", false)
-        .await
-        .unwrap();
+    // Attaching to a live run joins it: scrollback from the journal, then the
+    // holder's live stream, and the keyboard. It comes once the run is past
+    // the age at which a join is nudged (once, at that age), and says its size
+    // as a terminal does.
+    past_young().await;
+    let (info, mut joiner) = Viewer::attach(&h.home, &run.id, "bob@desk", false).await.unwrap();
     assert_eq!(info["live"], true);
     assert_eq!(info["cols"], 100);
-    assert!(info["joiner"].is_null());
+    assert_eq!(info["joiner"], "bob@desk");
     assert!(info["journaled"].as_u64().unwrap() > 0);
     assert_eq!(
         info["replay_from"], info["journaled"],
         "no gap: replay picks up where the journal ends"
     );
-    let frames = watcher.until("fake-cli ready").await;
+    let frames = joiner.until("fake-cli ready").await;
     assert!(frames.is_empty() || matches!(frames[0], Frame::ReplayEnd));
-
-    // A watcher's keystrokes go nowhere.
-    watcher.input("nope\n").await;
-
-    // The joiner: everyone else is told. It comes once the run is past the
-    // age at which a join is nudged (once, at that age), and says its size as
-    // a terminal does.
-    past_young().await;
-    let (info, mut joiner) = Viewer::attach(&h.home, &run.id, "join", "bob@desk", false)
-        .await
-        .unwrap();
-    assert_eq!(info["joiner"], "bob@desk");
     resize(&mut joiner, 100, 30).await;
-    joiner.until("fake-cli ready").await;
-    let frames = watcher.until("fake-cli ready").await;
-    let _ = frames;
     joiner.input("size\n").await;
     joiner.until("30 100").await;
     joiner.input("hello\n").await;
-    let seen_by_joiner = joiner.until("echo: hello").await;
-    let _ = seen_by_joiner;
-    let seen_by_watcher = watcher.until("echo: hello").await;
-    assert_eq!(notes(&seen_by_watcher), ["bob@desk joined"]);
-    assert!(!watcher.seen.contains("echo: nope"), "{}", watcher.seen);
+    joiner.until("echo: hello").await;
 
     // Input is journaled as such.
     let ledger = Ledger::open(&h.home.ledger()).unwrap();
@@ -178,32 +160,27 @@ async fn watchers_and_one_joiner() {
         "joining is presence"
     );
 
-    // A second joiner is refused, unless it takes over.
-    let err = Viewer::attach(&h.home, &run.id, "join", "cat@phone", false)
+    // A second viewer is refused, unless it takes over.
+    let err = Viewer::attach(&h.home, &run.id, "cat@phone", false)
         .await
         .err()
         .unwrap();
     assert_eq!(err.code, RpcError::BUSY);
     assert!(err.message.contains("bob@desk"), "{}", err.message);
-    let (info, mut taker) = Viewer::attach(&h.home, &run.id, "join", "cat@phone", true)
-        .await
-        .unwrap();
+    let (info, mut taker) = Viewer::attach(&h.home, &run.id, "cat@phone", true).await.unwrap();
     assert_eq!(info["joiner"], "cat@phone");
     taker.until("echo: hello").await;
-    // Bob is a watcher now: told so, and muted.
-    let frames = watcher.until("echo: hello").await;
-    let _ = frames;
+    // Bob keeps the stream he is on, told he has lost the keyboard and muted.
     joiner.input("from bob\n").await;
     taker.input("from cat\n").await;
-    let frames = taker.until("echo: from cat").await;
-    let _ = frames;
+    taker.until("echo: from cat").await;
     let frames = joiner.until("echo: from cat").await;
     assert_eq!(notes(&frames), ["cat@phone took over from bob@desk"]);
     assert!(!joiner.seen.contains("echo: from bob"), "{}", joiner.seen);
 
-    // The run ends while everyone is attached: each viewer gets the exit.
+    // The run ends while both are attached: each viewer gets the exit.
     taker.input("exit 4\n").await;
-    for v in [&mut watcher, &mut joiner, &mut taker] {
+    for v in [&mut joiner, &mut taker] {
         v.until("bye").await;
         let exit = loop {
             match v.next().await {
@@ -217,10 +194,9 @@ async fn watchers_and_one_joiner() {
     let done = c.wait_terminal(&run.id).await;
     assert_eq!((done.state, done.exit_code), (RunState::Failed, Some(4)));
 
-    // Ended: scrollback, then the exit, no holder involved.
-    let (info, mut late) = Viewer::attach(&h.home, &run.id, "watch", "ann@laptop", false)
-        .await
-        .unwrap();
+    // Ended: scrollback, then the exit, no holder involved — and no seat to
+    // claim, so anyone may read it.
+    let (info, mut late) = Viewer::attach(&h.home, &run.id, "ann@laptop", false).await.unwrap();
     assert_eq!(info["live"], false);
     let frames = late.until("echo: from cat").await;
     let _ = frames;
@@ -234,10 +210,7 @@ async fn watchers_and_one_joiner() {
     assert_eq!(got_exit.unwrap().code, 4);
     assert!(late.seen.contains("fake-cli ready"), "{}", late.seen);
 
-    let err = Viewer::attach(&h.home, "nope0000", "watch", "x@y", false)
-        .await
-        .err()
-        .unwrap();
+    let err = Viewer::attach(&h.home, "nope0000", "x@y", false).await.err().unwrap();
     assert_eq!(err.code, RpcError::NOT_FOUND);
     h.stop().await;
 }
@@ -267,10 +240,8 @@ async fn run_input_writes_to_the_pty_without_a_join() {
         .await;
     assert!(res.error.is_none(), "run.input: {:?}", res.error);
 
-    // A watcher sees the echo, and the input is on the record as input.
-    let (_info, mut w) = Viewer::attach(&h.home, &run.id, "watch", "ann@laptop", false)
-        .await
-        .unwrap();
+    // A viewer attaching after sees the echo, and the input is on the record as input.
+    let (_info, mut w) = Viewer::attach(&h.home, &run.id, "ann@laptop", false).await.unwrap();
     w.until("echo: hi").await;
     let ledger = Ledger::open(&h.home.ledger()).unwrap();
     let id = run.id.clone();
@@ -301,19 +272,19 @@ async fn two_terminals_of_one_person_are_two_seats() {
         .await;
     wait_journal(&h.home, &run.id, "> ").await;
 
-    let (_, mut first) = Viewer::attach_from(&h.home, &run.id, "join", "me@here", Some("111"), false)
+    let (_, mut first) = Viewer::attach_from(&h.home, &run.id, "me@here", Some("111"), false)
         .await
         .unwrap();
     first.until("fake-cli ready").await;
 
     // The same terminal again is still the same seat.
-    let (info, _again) = Viewer::attach_from(&h.home, &run.id, "join", "me@here", Some("111"), false)
+    let (info, _again) = Viewer::attach_from(&h.home, &run.id, "me@here", Some("111"), false)
         .await
         .unwrap();
     assert_eq!(info["joiner"], "me@here");
 
     // Another terminal of mine is refused, and told which.
-    let err = Viewer::attach_from(&h.home, &run.id, "join", "me@here", Some("222"), false)
+    let err = Viewer::attach_from(&h.home, &run.id, "me@here", Some("222"), false)
         .await
         .err()
         .unwrap();
@@ -322,7 +293,7 @@ async fn two_terminals_of_one_person_are_two_seats() {
     assert_eq!(err.data.unwrap()["joiner"], "me@here in another terminal");
 
     // Taking over: the first terminal hears it, and its keys stop counting.
-    let (_, mut second) = Viewer::attach_from(&h.home, &run.id, "join", "me@here", Some("222"), true)
+    let (_, mut second) = Viewer::attach_from(&h.home, &run.id, "me@here", Some("222"), true)
         .await
         .unwrap();
     second.until("fake-cli ready").await;
@@ -354,9 +325,7 @@ async fn joiner_resizes_the_pty_and_daemon_stop_detaches() {
             json!({ "argv": [fake_cli()], "cwd": cwd, "kind": "agent" }),
         )
         .await;
-    let (_, mut joiner) = Viewer::attach(&h.home, &run.id, "join", "me@here", false)
-        .await
-        .unwrap();
+    let (_, mut joiner) = Viewer::attach(&h.home, &run.id, "me@here", false).await.unwrap();
     write_frame(&mut joiner.wr, &Frame::Resize { cols: 77, rows: 21 })
         .await
         .unwrap();
@@ -435,9 +404,7 @@ async fn a_join_at_a_new_size_is_one_repaint() {
         .await;
     wait_journal(&h.home, &run.id, "ready").await;
     past_young().await;
-    let (_, mut joiner) = Viewer::attach(&h.home, &run.id, "join", "me@here", false)
-        .await
-        .unwrap();
+    let (_, mut joiner) = Viewer::attach(&h.home, &run.id, "me@here", false).await.unwrap();
     resize(&mut joiner, 101, 33).await;
     wait_journal(&h.home, &run.id, "winch 33 101").await;
     // Long enough for any other resize to have been heard.
@@ -467,9 +434,7 @@ async fn a_run_joined_before_it_listens_still_hears_its_size() {
             json!({ "argv": ["/bin/sh", "-c", late], "cwd": tmp.path().to_string_lossy() }),
         )
         .await;
-    let (_, mut joiner) = Viewer::attach(&h.home, &run.id, "join", "me@here", false)
-        .await
-        .unwrap();
+    let (_, mut joiner) = Viewer::attach(&h.home, &run.id, "me@here", false).await.unwrap();
     resize(&mut joiner, 101, 33).await;
     wait_journal(&h.home, &run.id, "ready").await;
     wait_journal(&h.home, &run.id, "winch 33 101").await;
@@ -495,9 +460,7 @@ async fn joining_and_letting_go_at_the_runs_size_is_no_resize() {
         .await;
     wait_journal(&h.home, &run.id, "ready").await;
     past_young().await;
-    let (info, mut joiner) = Viewer::attach(&h.home, &run.id, "join", "me@here", false)
-        .await
-        .unwrap();
+    let (info, mut joiner) = Viewer::attach(&h.home, &run.id, "me@here", false).await.unwrap();
     let (cols, rows) = (
         info["cols"].as_u64().unwrap() as u16,
         info["rows"].as_u64().unwrap() as u16,
@@ -515,7 +478,7 @@ async fn joining_and_letting_go_at_the_runs_size_is_no_resize() {
 /// A watcher coming to a run that redrew one line a hundred times is handed
 /// the line as it stands, once, not every redraw on the way.
 #[tokio::test]
-async fn a_watcher_sees_the_screen_not_every_redraw() {
+async fn a_viewer_sees_the_screen_not_every_redraw() {
     let tmp = tempfile::tempdir().unwrap();
     let Some(h) = Harness::on(Home::at(tmp.path())) else {
         return;
@@ -529,9 +492,7 @@ async fn a_watcher_sees_the_screen_not_every_redraw() {
         )
         .await;
     wait_journal(&h.home, &run.id, "drawn").await;
-    let (info, mut v) = Viewer::attach(&h.home, &run.id, "watch", "ann@laptop", false)
-        .await
-        .unwrap();
+    let (info, mut v) = Viewer::attach(&h.home, &run.id, "ann@laptop", false).await.unwrap();
     assert_eq!(info["live"], true);
     v.until("drawn").await;
     assert!(v.seen.contains("n=099"), "{}", v.seen);
@@ -539,9 +500,7 @@ async fn a_watcher_sees_the_screen_not_every_redraw() {
     let _: Run = c.ok("run.stop", json!({ "id": run.id, "force": true })).await;
     c.wait_terminal(&run.id).await;
     // Ended, the same: drawn from the journal, not replayed from it.
-    let (info, mut late) = Viewer::attach(&h.home, &run.id, "watch", "ann@laptop", false)
-        .await
-        .unwrap();
+    let (info, mut late) = Viewer::attach(&h.home, &run.id, "ann@laptop", false).await.unwrap();
     assert_eq!(info["live"], false);
     late.until("drawn").await;
     assert!(late.seen.contains("n=099"), "{}", late.seen);

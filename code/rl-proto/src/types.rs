@@ -91,14 +91,6 @@ impl Mark {
     }
 }
 
-/// How a viewer attaches: watching is read-only; joining owns the keyboard.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AttachMode {
-    Watch,
-    Join,
-}
-
 macro_rules! str_enum {
     ($t:ty { $($v:ident => $s:literal),+ $(,)? }) => {
         impl $t {
@@ -127,7 +119,6 @@ str_enum!(RunState {
 str_enum!(Source { Hook => "hook", Transcript => "transcript", Git => "git", Pty => "pty", Manual => "manual" });
 str_enum!(Confidence { Guess => "guess", Likely => "likely", Exact => "exact" });
 str_enum!(Mark { Done => "done", Blocked => "blocked", Working => "working" });
-str_enum!(AttachMode { Watch => "watch", Join => "join" });
 
 /// Why a run started. Serialised as one string: `manual`,
 /// `decision:<id>`, `flow:<flow>/<step>`, `assistant:<job>`.

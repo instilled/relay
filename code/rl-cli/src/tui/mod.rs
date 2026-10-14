@@ -88,7 +88,7 @@ use rl_proto::methods::{
     WorkspaceRemove, WorkspaceRemoveParams, WorkspaceRemoved, WorkspaceRename, WorkspaceRenameParams, WorkspaceUp,
     WorkspaceUpParams,
 };
-use rl_proto::types::{AttachMode, Cause, Event as LedgerEvent, Mark, Run, RunKind, RunState, Summary, SummaryTarget};
+use rl_proto::types::{Cause, Event as LedgerEvent, Mark, Run, RunKind, RunState, Summary, SummaryTarget};
 use rows::{Names, Row, fit};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -1286,7 +1286,6 @@ impl App {
                                 &self.home,
                                 crate::attach::Opts {
                                     id: id_back,
-                                    mode: AttachMode::Join,
                                     take,
                                     scrollback: SCROLLBACK,
                                 },

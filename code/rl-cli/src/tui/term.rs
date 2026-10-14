@@ -9,7 +9,6 @@ use crate::attach::client_name;
 use crate::client::Client;
 use rl_core::Home;
 use rl_proto::methods::{AttachParams, RunAttach};
-use rl_proto::types::AttachMode;
 use rl_session::proto::{Frame, FrameReader};
 use tokio::io::BufReader;
 
@@ -45,7 +44,6 @@ impl Output {
         let info = c
             .call::<RunAttach>(AttachParams {
                 id: id.to_string(),
-                mode: AttachMode::Join,
                 client: client_name(),
                 scrollback: super::SCROLLBACK,
                 take: false,
