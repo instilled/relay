@@ -13,7 +13,6 @@ use rl_proto::types::AttachMode;
 use rl_session::proto::{Frame, FrameReader};
 use tokio::io::BufReader;
 
-const SCROLLBACK: u64 = 256 * 1024;
 /// Rows kept above the screen, to read back through. What the daemon sends
 /// carries the run's history above its screen; without somewhere to put it
 /// only the last screenful survived.
@@ -48,7 +47,7 @@ impl Output {
                 id: id.to_string(),
                 mode: AttachMode::Join,
                 client: client_name(),
-                scrollback: SCROLLBACK,
+                scrollback: super::SCROLLBACK,
                 take: false,
                 terminal: Some(crate::attach::terminal()),
             })

@@ -109,10 +109,10 @@ use rows::SHELL_TAG;
 const EVENT_ASKS: usize = 40;
 /// The most rows the live line grows to before it scrolls within itself.
 const LINE_MAX: u16 = 8;
-/// Recent output replayed when joining a pipes run (or an ended one, drawn
-/// from it), enough to paint the screen on arrival. A live terminal run is
-/// drawn from its holder's screen instead. Bytes.
-const JOIN_SCROLLBACK: u64 = 256 * 1024;
+/// Recent output asked for when joining a pipes run, and when reading an
+/// ended one's page, enough to paint the screen on arrival. A live terminal
+/// run is drawn from its holder's screen instead. Bytes.
+pub(super) const SCROLLBACK: u64 = 256 * 1024;
 /// Where the header and footer text starts: level with what is typed on the
 /// line, past its `❯ `.
 const TEXT_INDENT: u16 = 2;
@@ -1288,7 +1288,7 @@ impl App {
                                     id: id_back,
                                     mode: AttachMode::Join,
                                     take,
-                                    scrollback: JOIN_SCROLLBACK,
+                                    scrollback: SCROLLBACK,
                                 },
                             )
                             .await;
@@ -4120,9 +4120,9 @@ impl App {
             return Ok(());
         }
         let k = vi_step(k, self.line.is_empty());
-        // Watching, the line still has the keyboard, so you can type the next
-        // thing without leaving the run you are on; taking the keyboard is the
-        // handover to the real terminal (`raw::attach`), never keys here.
+        // Reading a run's page, the line still has the keyboard, so you can type
+        // the next thing without leaving the run you are on; taking the keyboard
+        // is the handover to the real terminal (`raw::attach`), never keys here.
         // An empty line has nothing to complete, so `tab` steps the lens along
         // instead — shift-tab the other way.
         if self.line.is_empty()
@@ -4196,7 +4196,7 @@ impl App {
     /// would move a list nobody can see, so it does nothing here.
     async fn key_subpage(&mut self, k: KeyEvent, area: Rect) -> Result<()> {
         // A page is the subpage's own height, not the screen's.
-        if self.watch_key(&k, self.pane_size(area).1) {
+        if self.page_key(&k, self.pane_size(area).1) {
             return Ok(());
         }
         match (k.code, k.modifiers) {
@@ -5014,9 +5014,9 @@ impl App {
         Ok(())
     }
 
-    /// Watching a run, or reading an ended one: the few keys the view keeps
-    /// for itself. Everything else has already gone to the line.
-    fn watch_key(&mut self, k: &KeyEvent, page: u16) -> bool {
+    /// Reading an ended run's page: the few keys the page keeps for itself.
+    /// Everything else has already gone to the line.
+    fn page_key(&mut self, k: &KeyEvent, page: u16) -> bool {
         if self.term.is_none() {
             return false;
         }
