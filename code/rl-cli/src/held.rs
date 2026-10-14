@@ -22,6 +22,9 @@ const GRACE: Duration = Duration::from_secs(2);
 /// How long output still on its way is waited for, once the command ended.
 const LAST_WORDS: Duration = Duration::from_millis(200);
 
+/// How long what was typed just before a `ctrl-\` has to be read.
+const TYPED_FIRST: Duration = Duration::from_millis(20);
+
 /// How the terminal came back.
 #[derive(Debug, PartialEq)]
 pub enum Back {
@@ -51,15 +54,20 @@ pub fn start(argv: &[String], size: (u16, u16)) -> Result<Spawned> {
 /// through, until it ends or is let go of. A banner line says how to let
 /// go, and the window title says it while it has the screen; the terminal
 /// is handed back as it was found.
+///
+/// The terminal is raw before anything starts and until it is handed back,
+/// so a ^C or ^\ typed meanwhile is a key, never a signal to the panel.
 pub async fn hold(argv: &[String], name: &str) -> Result<Back> {
-    let size = crossterm::terminal::size().unwrap_or((80, 24));
-    let spawned = start(argv, size)?;
+    use tokio::signal::unix::{SignalKind, signal};
+    // Listened for before the size is read, so no resize falls between.
+    let mut winch = signal(SignalKind::window_change())?;
+    let _raw = RawMode::enable().context("entering raw mode")?;
     let mut out = tokio::io::stdout();
     let banner = format!("\x1b[2m[relay] {name} · ctrl-\\ to detach\x1b[0m\r\n");
     out.write_all(format!("{banner}{}", title(&format!("relay · {name} · ^\\ lets go"))).as_bytes())
         .await?;
     out.flush().await?;
-    let _raw = RawMode::enable().context("entering raw mode")?;
+    let spawned = start(argv, crossterm::terminal::size().unwrap_or((80, 24)))?;
 
     let (keys_tx, keys) = mpsc::channel::<Vec<u8>>(64);
     // As in `attach()`: aborted on the way out, so it never races the
@@ -75,10 +83,6 @@ pub async fn hold(argv: &[String], name: &str) -> Result<Back> {
     }));
     let (sizes_tx, sizes) = mpsc::channel::<(u16, u16)>(4);
     let _sizes = AbortOnDrop(tokio::spawn(async move {
-        use tokio::signal::unix::{SignalKind, signal};
-        let Ok(mut winch) = signal(SignalKind::window_change()) else {
-            return;
-        };
         while winch.recv().await.is_some() {
             if let Ok(size) = crossterm::terminal::size()
                 && sizes_tx.send(size).await.is_err()
@@ -90,22 +94,59 @@ pub async fn hold(argv: &[String], name: &str) -> Result<Back> {
 
     let mut alt = AltScreen::default();
     let back = pass(spawned, keys, sizes, &mut out, &mut alt).await;
-    // However it went, the terminal is handed back.
+    // However it went, the terminal is handed back: what it had on when it
+    // was let go of was never turned off by it, keyboard protocols too.
     let _ = out.write_all(&alt.leave()).await;
+    let _ = out.write_all(KEYBOARD_BACK).await;
     let _ = out.write_all(title("").as_bytes()).await;
     let _ = out.flush().await;
     back
 }
 
+/// Turns off what a command may have asked of the terminal's keyboard and
+/// that `AltScreen::leave` does not: kitty's keyboard flags, xterm's
+/// modifyOtherKeys, synchronized output. A terminal without them ignores it.
+const KEYBOARD_BACK: &[u8] = b"\x1b[<99u\x1b[>4;0m\x1b[?2026l";
+
+/// How the passing through went, before the hang-up.
+enum Went {
+    Ended(Exit),
+    Detached,
+    /// Writing to the terminal failed, or it would not say how it ended.
+    Failed(anyhow::Error),
+}
+
 /// The passing through: what `sp` writes goes to `out`, watched by `alt`;
 /// `keys` go to it up to a `ctrl-\`, which lets go; `sizes` resize its pty.
+/// However it comes back, it has ended: let go of, or gone wrong here, it
+/// is hung up on.
 pub async fn pass(
     mut sp: Spawned,
+    keys: mpsc::Receiver<Vec<u8>>,
+    sizes: mpsc::Receiver<(u16, u16)>,
+    out: &mut (impl AsyncWrite + Unpin),
+    alt: &mut AltScreen,
+) -> Result<Back> {
+    match through(&mut sp, keys, sizes, out, alt).await {
+        Went::Ended(exit) => Ok(Back::Ended(exit)),
+        Went::Detached => {
+            hang_up(sp.pid, &mut sp.exit).await;
+            Ok(Back::Detached)
+        }
+        Went::Failed(e) => {
+            hang_up(sp.pid, &mut sp.exit).await;
+            Err(e)
+        }
+    }
+}
+
+async fn through(
+    sp: &mut Spawned,
     mut keys: mpsc::Receiver<Vec<u8>>,
     mut sizes: mpsc::Receiver<(u16, u16)>,
     out: &mut (impl AsyncWrite + Unpin),
     alt: &mut AltScreen,
-) -> Result<Back> {
+) -> Went {
     let mut keys_open = true;
     let mut sizes_open = true;
     loop {
@@ -113,21 +154,33 @@ pub async fn pass(
             chunk = sp.output.recv() => match chunk {
                 Some(b) => {
                     alt.watch(&b);
-                    out.write_all(&b).await?;
-                    out.flush().await?;
+                    if let Err(e) = write(out, &b).await {
+                        return Went::Failed(e.into());
+                    }
                 }
-                // Its pty closed: it has ended, or is about to.
-                None => return Ok(Back::Ended((&mut sp.exit).await.context("how it ended")?)),
+                // Its pty closed: it has ended, or is about to. One that
+                // goes on without its terminal is not waited for.
+                None => {
+                    return match tokio::time::timeout(GRACE, &mut sp.exit).await {
+                        Ok(Ok(exit)) => Went::Ended(exit),
+                        Ok(Err(e)) => Went::Failed(anyhow::Error::new(e).context("how it ended")),
+                        Err(_) => Went::Failed(anyhow::anyhow!("its terminal closed and it went on")),
+                    };
+                }
             },
             exit = &mut sp.exit => {
-                let exit = exit.context("how it ended")?;
-                // What it wrote last may still be on its way.
-                while let Ok(Some(b)) = tokio::time::timeout(LAST_WORDS, sp.output.recv()).await {
+                // What it wrote last may still be on its way; only a moment
+                // of it, whatever keeps writing.
+                let until = tokio::time::Instant::now() + LAST_WORDS;
+                while let Ok(Some(b)) = tokio::time::timeout_at(until, sp.output.recv()).await {
                     alt.watch(&b);
-                    out.write_all(&b).await?;
+                    let _ = out.write_all(&b).await;
                 }
-                out.flush().await?;
-                return Ok(Back::Ended(exit));
+                let _ = out.flush().await;
+                return match exit {
+                    Ok(exit) => Went::Ended(exit),
+                    Err(e) => Went::Failed(anyhow::Error::new(e).context("how it ended")),
+                };
             }
             k = keys.recv(), if keys_open => match k {
                 None => keys_open = false,
@@ -135,9 +188,10 @@ pub async fn pass(
                     Some(at) => {
                         if at > 0 {
                             let _ = sp.input.send(b[..at].to_vec()).await;
+                            // A moment for it to read what came before.
+                            tokio::time::sleep(TYPED_FIRST).await;
                         }
-                        hang_up(sp.pid, &mut sp.exit).await;
-                        return Ok(Back::Detached);
+                        return Went::Detached;
                     }
                     None => {
                         let _ = sp.input.send(b).await;
@@ -154,12 +208,24 @@ pub async fn pass(
     }
 }
 
+async fn write(out: &mut (impl AsyncWrite + Unpin), b: &[u8]) -> std::io::Result<()> {
+    out.write_all(b).await?;
+    out.flush().await
+}
+
 /// Hangs up on `pid`'s process group, as a closed terminal does, and waits
-/// for it to end; one that will not in `GRACE` is killed.
+/// for it to end; one that will not in `GRACE` is killed. One that has
+/// already ended is left be: its pid may be someone else's by now.
 async fn hang_up(pid: u32, exit: &mut oneshot::Receiver<Exit>) {
-    // The pty made it the leader of its own session and group.
+    use tokio::sync::oneshot::error::TryRecvError;
+    if !matches!(exit.try_recv(), Err(TryRecvError::Empty)) {
+        return;
+    }
+    // The pty made it the leader of its own session and group. A stopped
+    // group hears a hang-up only once it goes on, as the kernel's does.
     let group = Pid::from_raw(pid as i32);
     let _ = killpg(group, Signal::SIGHUP);
+    let _ = killpg(group, Signal::SIGCONT);
     if tokio::time::timeout(GRACE, &mut *exit).await.is_err() {
         let _ = killpg(group, Signal::SIGKILL);
         let _ = exit.await;
@@ -242,8 +308,9 @@ mod tests {
 
     #[tokio::test]
     async fn a_new_size_reaches_its_pty() {
-        let (out, _) = through(sh("read line; stty size"), &[b"\r"], &[(100, 40)]).await;
+        let (out, back) = through(sh("read line; stty size"), &[b"\r"], &[(100, 40)]).await;
         assert!(out.contains("40 100"), "{out}");
+        assert!(matches!(back, Back::Ended(Exit { code: 0, .. })), "{back:?}");
     }
 
     #[test]

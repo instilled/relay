@@ -1,7 +1,7 @@
 //! Enter on one of an agent's own sessions: one in its agent's background
-//! (Claude's) is opened here, the real terminal handed to what its profile's
-//! `sessions.attach` says (`claude attach <id>`) the way the editor gets
-//! it, and nothing is made of it in Relay; one open in another terminal is
+//! (Claude's) is opened here, what its profile's `sessions.attach` says
+//! (`claude attach <id>`) run with the terminal passed through, as a joined
+//! run's is (`held`), and nothing is made of it in Relay; one open in another terminal is
 //! carried on here as a Relay run (`import.move`), as the agent's profile
 //! resumes a conversation. What is run, and what is said after, are
 //! worked out here, apart from the handover, so they read without a terminal.
@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 /// What enter does with a session.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Enter {
-    /// Hands the terminal to this command line: `claude attach <id>`.
+    /// Passes the terminal through to this command line: `claude attach <id>`.
     Attach(Vec<OsString>),
     /// Asks `rld` to carry it on as a run.
     CarryOn,
@@ -74,11 +74,15 @@ pub async fn attach(argv: &[OsString]) -> Result<Option<String>, String> {
         .chain(args.iter().skip(1).map(|a| a.to_string_lossy().into_owned()))
         .collect::<Vec<_>>()
         .join(" ");
-    let argv: Vec<String> = argv.iter().map(|a| a.to_string_lossy().into_owned()).collect();
-    let back = crate::held::hold(&argv, &name)
+    let back = crate::held::hold(&strings(argv), &name)
         .await
         .map_err(|e| format!("{what}: {e:#}"))?;
     said(&what, back)
+}
+
+/// `argv` as the pty takes it.
+fn strings(argv: &[OsString]) -> Vec<String> {
+    argv.iter().map(|a| a.to_string_lossy().into_owned()).collect()
 }
 
 /// What is said once `what` gave the terminal back as `back`.
@@ -214,5 +218,30 @@ mod tests {
             said("claude attach", ended(130, Some("SIGINT"))),
             Err("claude attach: ended by a signal".into())
         );
+    }
+
+    /// The handover runs a stand-in `claude` as it would the real one: what
+    /// it is called with, and how its ending is said.
+    #[tokio::test]
+    async fn the_handover_runs_claude_attach_and_says_how_it_ended() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bin = tmp.path().join("claude");
+        let said_argv = tmp.path().join("argv");
+        std::fs::write(
+            &bin,
+            format!("#!/bin/sh\necho \"$@\" > '{}'\nexit 3\n", said_argv.display()),
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let argv = strings(&attach_argv(&bin, &attach_args("claude"), "a1"));
+        let sp = crate::held::start(&argv, (80, 24)).unwrap();
+        let (_keys, k) = tokio::sync::mpsc::channel(1);
+        let (_sizes, z) = tokio::sync::mpsc::channel(1);
+        let back = crate::held::pass(sp, k, z, &mut Vec::new(), &mut Default::default())
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read_to_string(&said_argv).unwrap(), "attach a1\n");
+        assert_eq!(said("claude attach", back), Err("claude attach: exit code 3".into()));
     }
 }
