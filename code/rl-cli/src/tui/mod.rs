@@ -337,9 +337,6 @@ struct App {
     pane: Pane,
     /// A subpage is up and has the whole body; off, the list has it.
     show_pane: bool,
-    /// The pane was opened by selecting a question, and goes when the cursor
-    /// moves off it; opened by hand, it stays.
-    auto_pane: bool,
     /// The highlighted choice of the question being answered.
     answer_at: usize,
     /// The flow whose pane is up: its last firings, the one shown, the caret while walked.
@@ -1177,7 +1174,6 @@ impl App {
             sel: None,
             pane: Pane::Facts,
             show_pane: false,
-            auto_pane: false,
             answer_at: 0,
             flow_pane: Default::default(),
             open_flows: HashSet::new(),
@@ -1784,22 +1780,6 @@ impl App {
             if matches!(self.mode, Mode::Rename(_)) {
                 self.mode = Mode::Normal;
             }
-            // A question is only worth its details: selecting one opens the
-            // pane on it, and moving off closes the pane again — unless it was
-            // open already.
-            let question =
-                matches!(self.view, View::Work | View::CatchUp) && key.as_deref().is_some_and(|k| k.starts_with("q:"));
-            if question {
-                if !self.show_pane {
-                    self.auto_pane = true;
-                    self.show_pane = true;
-                }
-                if self.pane == Pane::Term {
-                    self.leave_term();
-                }
-            } else if self.auto_pane {
-                self.hide_pane();
-            }
             self.sel = key;
             self.picked.clear();
             // A firing picked in a flow's walk lasts while the cursor is on its row: off it, the
@@ -2001,7 +1981,7 @@ impl App {
             Ended::Detached | Ended::Left => self.say(format!("let go of {title} · it keeps going")),
         }
         self.select(Some(format!("r:{id}")));
-        self.hide_pane();
+        self.leave_subpage();
     }
 
     /// A paste, whole: into the line as it came, newlines and all, over a
@@ -2048,35 +2028,21 @@ impl App {
         }
     }
 
-    /// The view goes for good: another run wants it.
-    fn close_term(&mut self) {
-        self.term = None;
-        self.pane = Pane::Facts;
-    }
-
-    /// Stepping back to the list. The page stays held, so coming back is
-    /// instant and lands where it was left.
-    fn leave_term(&mut self) {
-        self.pane = Pane::Facts;
-    }
-
-    /// Hide the subpage, giving the list back. `pane == Term` must not outlive `show_pane`: a
-    /// stale `Term` with the pane hidden would size and route keys for a page
-    /// nobody can see — the invariant `leave_term` keeps by always resetting
-    /// to `Facts`.
-    fn hide_pane(&mut self) {
+    /// Leave the subpage for the list, the one way out: the page it was reading is let go, a
+    /// sub-mode inside it (an answer, a walk, a name) ends, and the row stays selected.
+    fn leave_subpage(&mut self) {
         self.show_pane = false;
-        self.auto_pane = false;
-        if self.pane == Pane::Term {
-            self.pane = Pane::Facts;
+        self.pane = Pane::Facts;
+        self.term = None;
+        if matches!(self.mode, Mode::Answer(_) | Mode::Walk | Mode::Rename(_)) {
+            self.mode = Mode::Normal;
         }
     }
 
-    /// `/pane`, `^o`: the row's subpage, shown or hidden.
+    /// `/pane`, `^o`: the row's subpage, shown or left.
     fn toggle_pane(&mut self) {
-        self.auto_pane = false;
         if self.show_pane {
-            self.hide_pane();
+            self.leave_subpage();
         } else {
             self.show_pane = true;
         }
@@ -2533,7 +2499,7 @@ impl App {
             self.go_back();
         } else {
             self.open_view(View::Events);
-            self.close_term();
+            self.leave_subpage();
             // Asked again when the view opens: something may be back.
             self.feed.gone.clear();
             self.fetch_events().await;
@@ -2564,7 +2530,7 @@ impl App {
         self.fetch_leads().await;
         self.write_top(since, came_back).await;
         self.open_view(View::CatchUp);
-        self.close_term();
+        self.leave_subpage();
         self.picked.clear();
         self.events.clear();
         self.settle();
@@ -2704,10 +2670,8 @@ impl App {
         if let Some(k) = &key
             && !self.kept_on_the_list(k, run.as_deref())
         {
-            self.leave_term();
             self.pane = Pane::Facts;
             self.show_pane = true;
-            self.auto_pane = false;
             self.load_pane().await;
             return self.say(format!(
                 "'{what}' ended over a day ago: off the list once seen, so read here"
@@ -3864,7 +3828,7 @@ impl App {
         let shown = self.catch.as_ref().map(|c| c.since.as_millisecond());
         let tops = self.on_top() && shown == from.map(|f| f.as_millisecond());
         if !tops {
-            self.leave_term();
+            self.pane = Pane::Facts;
             self.show_pane = true;
         }
         self.summarising = Some(Summarising {
@@ -3990,6 +3954,15 @@ impl App {
         // in the list takes no room from them, so they stay for it.
         if !matches!(self.mode, Mode::Normal | Mode::Answer(_) | Mode::Rename(_) | Mode::Walk) {
             self.shortcuts = false;
+        }
+        // `ctrl-\` leaves any subpage to the list in one shot, from inside a sub-mode too.
+        if self.show_pane
+            && matches!(self.mode, Mode::Normal | Mode::Answer(_) | Mode::Walk | Mode::Rename(_))
+            && matches!(k.code, KeyCode::Char('\\' | '4'))
+            && k.modifiers.contains(KeyModifiers::CONTROL)
+        {
+            self.leave_subpage();
+            return Ok(());
         }
         match std::mem::replace(&mut self.mode, Mode::Normal) {
             Mode::Stop(id) => {
@@ -4217,19 +4190,19 @@ impl App {
     }
 
     /// A key while a subpage is up, past the line and the sub-modes (an
-    /// answer, a walk), which have taken theirs. Output scrolls, `esc` and
-    /// `ctrl-\` leave; the keys that would move the list do nothing, and the
-    /// rest (quitting, say) are the list's as ever.
+    /// answer, a walk), which have taken theirs. The subpage owns the keyboard: output
+    /// scrolls, `esc` leaves (`ctrl-\` leaves from anywhere, `key` has it), and `^c`, `^x`,
+    /// `^r`, `^o` and `^t` are the list's as ever. Everything else — the arrows, a reorder —
+    /// would move a list nobody can see, so it does nothing here.
     async fn key_subpage(&mut self, k: KeyEvent, area: Rect) -> Result<()> {
         // A page is the subpage's own height, not the screen's.
         if self.watch_key(&k, self.pane_size(area).1) {
             return Ok(());
         }
-        let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
-        match k.code {
-            KeyCode::Up | KeyCode::Down | KeyCode::Home | KeyCode::End | KeyCode::PageUp | KeyCode::PageDown => {}
-            KeyCode::Char('\\' | '4') if ctrl => self.hide_pane(),
-            _ => return self.key_list(k).await,
+        match (k.code, k.modifiers) {
+            (KeyCode::Esc, _) => self.leave_subpage(),
+            (KeyCode::Char('c' | 'x' | 'r' | 'o' | 't'), KeyModifiers::CONTROL) => return self.key_list(k).await,
+            _ => {}
         }
         Ok(())
     }
@@ -4402,13 +4375,8 @@ impl App {
             (KeyCode::Char('o'), KeyModifiers::CONTROL) => self.toggle_pane(),
             (KeyCode::Char('t'), KeyModifiers::CONTROL) => self.toggle_pin().await,
             (KeyCode::Esc, _) => {
-                // The pane goes first, whatever stands open behind it: it is
-                // the largest thing on screen, so it is what `esc` should
-                // take away. The term view itself lives on, so stepping back
-                // into it stays instant.
-                if self.show_pane {
-                    self.hide_pane();
-                } else if !self.filter.is_empty() {
+                // A subpage's `esc` is `key_subpage`'s; here it is the list's.
+                if !self.filter.is_empty() {
                     self.filter.clear();
                     self.settle();
                 } else if self.view == View::Events {
@@ -4448,6 +4416,12 @@ impl App {
 
     /// `enter` on an empty line: whatever the row under the cursor is for.
     async fn enter_row(&mut self, area: Rect) -> Result<()> {
+        // A subpage up has the keyboard: `enter` there is the second step, acting on the row it
+        // opened on, never the list's.
+        if self.show_pane {
+            self.act_in_subpage(area).await;
+            return Ok(());
+        }
         if self.view == View::Events {
             self.events_enter().await;
             return Ok(());
@@ -4461,44 +4435,51 @@ impl App {
             return Ok(());
         }
         if self.selected_flow().is_some() {
-            // A flow never grows into its runs on the list: they are in the pane, and enter
+            // A flow never grows into its runs on the list: they are in its subpage, and enter
             // again walks its steps and its last firings there.
-            let on_it = self.selected_flow().is_some_and(|f| f.name == self.flow_pane.flow);
-            if self.show_pane && self.pane == Pane::Facts && on_it && !self.flow_pane.firings.is_empty() {
-                self.flow_pane.at = 0;
-                self.mode = Mode::Walk;
-            } else {
-                self.pane = Pane::Facts;
-                self.show_pane = true;
-                self.load_pane().await;
-            }
+            self.pane = Pane::Facts;
+            self.show_pane = true;
+            self.load_pane().await;
         } else if let Some(q) = self.selected_question() {
             let id = q.id.clone();
             self.picked.clear();
-            // The choices are in the pane: the arrows walk them from the first.
+            // The choices are in the subpage: the arrows walk them from the first.
             self.answer_at = 0;
             self.pane = Pane::Facts;
             self.show_pane = true;
             self.mode = Mode::Answer(id);
-        } else if let Some(Row::Outside(s)) = self.selected() {
-            // An agent's own session: its pane, which says what enter will
-            // do with it; with the pane open on it, enter does it.
-            let s = s.clone();
-            if self.show_pane && self.pane == Pane::Facts {
-                self.enter_outside(&s, area).await;
-            } else {
-                self.pane = Pane::Facts;
-                self.show_pane = true;
-            }
-        } else if matches!(self.selected(), Some(Row::Group(_))) {
-            // A project header: its flows in the pane; `everywhere`'s, the
-            // flows with no `in` and how runs outside every project stand.
+        } else if matches!(self.selected(), Some(Row::Outside(_) | Row::Group(_))) {
+            // An agent's own session: its subpage, which says what enter will do with it. A
+            // project header: its flows there; `everywhere`'s, the flows with no `in` and how
+            // runs outside every project stand.
             self.pane = Pane::Facts;
             self.show_pane = true;
         } else {
             self.say("nothing here to open");
         }
         Ok(())
+    }
+
+    /// `enter` with a subpage up: a flow's goes on to walk its steps and its last firings, a
+    /// question's to its choices, an agent's own session's does what its subpage says. The rest
+    /// have nothing more to do.
+    async fn act_in_subpage(&mut self, area: Rect) {
+        if self.pane != Pane::Facts {
+            return;
+        }
+        if let Some(f) = self.selected_flow() {
+            if f.name == self.flow_pane.flow && !self.flow_pane.firings.is_empty() {
+                self.flow_pane.at = 0;
+                self.mode = Mode::Walk;
+            }
+        } else if let Some(q) = self.selected_question() {
+            let id = q.id.clone();
+            self.answer_at = 0;
+            self.mode = Mode::Answer(id);
+        } else if let Some(Row::Outside(s)) = self.selected() {
+            let s = s.clone();
+            self.enter_outside(&s, area).await;
+        }
     }
 
     /// Enter (or `/join`) on an agent's own session (`carry`): one in
@@ -5042,8 +5023,7 @@ impl App {
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         let back = matches!(k.code, KeyCode::Char('\\') | KeyCode::Char('4')) && ctrl;
         if back || k.code == KeyCode::Esc {
-            self.leave_term();
-            self.hide_pane();
+            self.leave_subpage();
             return true;
         }
         let by = match k.code {
@@ -7582,6 +7562,7 @@ mod tests {
         app.refresh().await;
         app.select(Some("q:dec00001".into()));
         app.moved().await;
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
         let mut t = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 40)).unwrap();
         t.draw(|f| app.draw(f)).unwrap();
         let buf = t.backend().buffer().clone();
@@ -8031,7 +8012,7 @@ mod tests {
         );
         // Narrowed by a search, the top is still told from all of it: one
         // of each, on the list.
-        app.hide_pane();
+        app.leave_subpage();
         app.filter = "echo".into();
         let before = built();
         draw_text(&mut app);
@@ -8070,6 +8051,11 @@ mod tests {
         assert!(app.show_pane && app.pane == super::Pane::Facts, "read in the pane");
         assert!(unseen(&app, "run00002"), "seen only once the catch-up is left");
         assert!(draw_text(&mut app).contains("old"));
+        press(&mut app, KeyCode::Esc, KeyModifiers::NONE).await;
+        assert!(
+            !app.show_pane && app.view == super::View::CatchUp,
+            "esc steps back to the catch-up"
+        );
         // A recent one goes to the list, the cursor on it.
         app.select(Some(RUN.into()));
         press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
@@ -8141,7 +8127,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn landing_on_a_question_in_the_catch_up_opens_its_pane() {
+    async fn landing_on_a_question_in_the_catch_up_opens_nothing_until_enter() {
         let (tmp, token, mut app, folder) = panel().await;
         ask_in(&tmp, &folder);
         app.refresh().await;
@@ -8149,10 +8135,12 @@ mod tests {
         assert!(!app.show_pane, "on the project's line");
         press(&mut app, KeyCode::Down, KeyModifiers::NONE).await;
         assert_eq!(app.sel.as_deref(), Some("q:dec00001"));
-        assert!(app.show_pane, "a question is only worth its details, as on the list");
-        // The subpage has the keys, so the cursor is moved off the question as the list would.
-        app.step(1);
-        assert!(!app.show_pane, "and off it the pane goes again");
+        assert!(!app.show_pane, "selecting a question opens nothing");
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+        assert!(
+            app.view == super::View::Work && app.sel.as_deref() == Some("q:dec00001"),
+            "enter in the catch-up goes to the row on the list, as for any row"
+        );
         token.cancel();
     }
 
@@ -8461,7 +8449,7 @@ mod tests {
         assert!(app.top.is_none(), "the top is still the counts");
         let frame = draw_text(&mut app);
         assert!(frame.contains("two runs, fine"), "{frame}");
-        app.hide_pane();
+        app.leave_subpage();
         let frame = draw_text(&mut app);
         assert!(frame.contains("• api: 2 ran"), "{frame}");
         token.cancel();

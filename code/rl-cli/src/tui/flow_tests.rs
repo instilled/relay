@@ -275,6 +275,33 @@ async fn enter_twice_on_a_flow_walks_its_steps_and_enter_on_one_reads_its_run() 
     token.cancel();
 }
 
+/// `esc` inside a walk only ends the walk — `ctrl-\` is the one gesture that means "the list,
+/// now", from however deep in a subpage you are, the same as it detaches a join.
+#[tokio::test]
+async fn ctrl_backslash_leaves_a_walked_flow_for_the_list_in_one_go() {
+    let (tmp, token, mut app, folder) = panel().await;
+    flow_in(&tmp, &mut app, "prod-logs", "---\nsteps:\n  probe:\n    run: x\n---\n").await;
+    fired(
+        &tmp,
+        &folder,
+        "prod-logs",
+        "fire0001",
+        &[("probe", StepStatus::Done, Some("found\r\n"))],
+        FiringStatus::Done,
+    );
+    app.refresh().await;
+    app.select(Some("f:prod-logs".into()));
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+    assert!(app.show_pane && matches!(app.mode, super::Mode::Walk), "walked");
+
+    press(&mut app, KeyCode::Char('\\'), KeyModifiers::CONTROL).await;
+    assert!(!app.show_pane, "the subpage is gone, not just the walk");
+    assert!(matches!(app.mode, super::Mode::Normal), "and the walk with it");
+    assert_eq!(app.sel.as_deref(), Some("f:prod-logs"), "the flow is still the row");
+    token.cancel();
+}
+
 #[tokio::test]
 async fn summary_on_a_flow_showing_an_older_firing_tells_that_firing() {
     let (tmp, token, mut app, folder) = panel().await;
