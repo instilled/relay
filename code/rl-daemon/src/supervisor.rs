@@ -98,9 +98,6 @@ pub struct Live {
     joiner: Mutex<Option<Seat>>,
     /// Remarks for every attached viewer: joined, left, took over.
     pub notes: broadcast::Sender<String>,
-    /// The pty's own size while a repaint nudge holds it a row smaller, so a
-    /// viewer arriving meanwhile is not told the smaller size is the real one.
-    nudge: Mutex<Option<(u16, u16)>>,
     /// The folder the run last said it was in (OSC 7), for the list. Kept in
     /// memory only: a shell says it again at its next prompt.
     cwd: Mutex<Option<PathBuf>>,
@@ -113,34 +110,6 @@ impl Live {
 
     pub fn joiner(&self) -> Option<Seat> {
         self.joiner.lock().unwrap().clone()
-    }
-
-    /// Starts a repaint nudge from `size`, unless one is under way: its giving
-    /// the size back repaints for everyone. `true` when this one is ours.
-    pub fn nudge_start(&self, size: (u16, u16)) -> bool {
-        let mut n = self.nudge.lock().unwrap();
-        if n.is_some() {
-            return false;
-        }
-        *n = Some(size);
-        true
-    }
-
-    /// The size a nudge holds back, while one does.
-    pub fn nudged_size(&self) -> Option<(u16, u16)> {
-        *self.nudge.lock().unwrap()
-    }
-
-    /// The keyboard resized during a nudge: that is the size to give back.
-    pub fn nudge_resized(&self, size: (u16, u16)) {
-        if let Some(s) = self.nudge.lock().unwrap().as_mut() {
-            *s = size;
-        }
-    }
-
-    /// Ends the nudge: the size to give back.
-    pub fn nudge_end(&self) -> Option<(u16, u16)> {
-        self.nudge.lock().unwrap().take()
     }
 
     pub fn is_joiner(&self, seat: &Seat) -> bool {
@@ -236,6 +205,11 @@ impl Supervisor {
             .collect()
     }
 
+    /// The agent process of each live run: the pid its holder spawned.
+    pub fn pids(&self) -> std::collections::HashSet<u32> {
+        self.live.lock().unwrap().values().map(|l| l.hello.pid).collect()
+    }
+
     pub fn joiners(&self) -> HashMap<String, String> {
         self.live
             .lock()
@@ -261,18 +235,7 @@ impl Supervisor {
         let now = Timestamp::now();
         let id = new_id().context("generating run id")?;
         let place = git::placement(&cwd).await;
-        // A registered workspace containing cwd wins; then the git root; then cwd.
-        let registered = self
-            .ledger
-            .call({
-                let cwd = cwd.clone();
-                move |c| rl_ledger::workspaces::containing(c, &cwd)
-            })
-            .await?
-            .map(|w| w.path);
-        let workspace = registered
-            .or_else(|| place.toplevel.clone())
-            .unwrap_or_else(|| cwd.clone());
+        let workspace = crate::workspace::filed_under(&self.ledger, &cwd, place.toplevel.clone()).await?;
         let title = spec.title.clone().unwrap_or_else(|| default_title(&spec.argv));
 
         // What is this? A known CLI gets its kind, its name, and — where it
@@ -769,7 +732,6 @@ impl Supervisor {
             current: Mutex::new(Current::from(&run)),
             socket,
             joiner: Mutex::new(None),
-            nudge: Mutex::new(None),
             cwd: Mutex::new(None),
             notes,
         });

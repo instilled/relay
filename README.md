@@ -1,6 +1,7 @@
 # Relay
 
-Relay keeps your agents and long-running work alive when you're gone, tells you what they need and what they did, runs recurring work as flows, with your yes where it matters, and is extended by small plugins that run in their own process — plugins that agents can write.
+Relay keeps your agents and long-running work alive while you're gone, tells you what they need
+and what they did, and runs recurring work as flows — with your yes where it matters.
 
 Command: `rl`. Daemon: `rld`.
 
@@ -20,11 +21,12 @@ Command: `rl`. Daemon: `rld`.
  ▸ npm run dev                            working~   ready on :3000
 ```
 
-Relay is early and runs on macOS and Linux. Not built yet: notifications (you find out by opening the panel or `rl since`), and the facts collector (commits, diffs and cost per run). See [the roadmap](docs/PRODUCT-ROADMAP.md).
+Early; macOS and Linux. Not built yet: notifications, plugins, and per-run facts (commits, diffs,
+cost) — see [the roadmap](docs/PRODUCT-ROADMAP.md).
 
 ## Install
 
-You need a recent stable Rust toolchain (CI uses 1.96) and `git`. From a checkout:
+Needs a recent stable Rust (CI uses 1.96) and `git`.
 
 ```sh
 git clone https://github.com/instilled/relay && cd relay
@@ -32,64 +34,58 @@ cargo build --release
 export PATH="$PWD/target/release:$PATH"   # rl, rld and rl-session must stay side by side
 ```
 
-To follow the repo instead, link the dev shims once. They rebuild when the source changes:
+Or link the dev shims, which rebuild when the source changes: `ln -sf "$PWD/scripts/rl" "$PWD/scripts/rld" ~/.local/bin/`.
+
+Everything lives under `~/.relay` (`RELAY_HOME` moves it). Any `rl` command starts `rld`, and runs
+survive `rl daemon restart`.
+
+## Use
 
 ```sh
-ln -sf "$PWD/scripts/rl" "$PWD/scripts/rld" ~/.local/bin/
-```
-
-Relay keeps everything under `~/.relay` (`RELAY_HOME` moves it). Every `rl` command starts `rld` if it isn't running. Runs survive `rl daemon restart`.
-
-## Five minutes with it
-
-```sh
-rl setup                                  # which agent CLIs the panel offers, who writes summaries
-rl up ~/code/api                          # a project Relay knows, listed even before anything runs
-rl                                        # the panel
-```
-
-In the panel, type what you want done and press enter, or start a shell line. `/` lists the commands and `?` the keys. Or from any shell:
-
-```sh
+rl setup                                  # which agents to offer, who writes summaries
+rl up ~/code/api                          # a project Relay knows
+rl                                        # the panel: type a task or a shell line; / for commands, ^h for keys
 rl run --agent claude "make the flaky parser test deterministic"
-rl run -- cargo test                      # any command; it keeps running when you close the terminal
+rl run -- cargo test                      # any command; it outlives the terminal
 ```
 
-Now leave: close the terminal, close the laptop. When you're back:
+Close the laptop. When you're back:
 
 ```sh
-rl since                                  # what happened while you were away, and what needs you
-rl join <run>                             # be in a run's terminal again; ctrl-\ leaves it running
+rl since                                  # what happened, and what needs you (the panel opens on it too)
+rl join <run>                             # back in a run's terminal; ctrl-\ leaves it running
 rl decisions                              # questions waiting on you
 rl decide <id> yes
 ```
 
-Opening `rl` shows the same catch-up at the top of the panel.
+Agents you started outside Relay are on the panel too, under their folder's project: Claude's,
+Codex's and Gemini's, once `rl setup` has added Relay's hook to their user-level settings (Claude's
+are listed without it as well, just less promptly). Enter on one of Claude's background sessions
+opens it here (`claude attach`); enter on one idle in another terminal carries it on here as a
+Relay run.
 
-## Flows: work that starts without you
+## Flows
 
-A flow is a folder in `~/.relay/flows/<name>` with a `flow.md`: when it runs (`when: every 30m`, or `on:` an event), its steps (scripts, agents and questions to you), and how they wire together. Nothing runs until you approve the folder's exact contents, and a change needs your yes again.
+A flow is a folder `~/.relay/flows/<name>/` with a `flow.md`: when it runs (`when: every 30m` or
+`on:` an event), its steps (scripts, agents, questions to you) and how they connect. Nothing runs
+until you approve the folder's exact contents, and any change needs your yes again.
 
 ```sh
-rl flow new brief "every weekday at 7:30, sum up yesterday's PRs and chat for me"
-rl flow new logs                          # the bare template, in $EDITOR; saving it is your yes
-rl flow test brief                        # what would fire it and which steps would run; starts nothing
+rl flow new brief "every weekday at 7:30, sum up yesterday's PRs for me"
+rl flow test brief                        # what would fire and run; starts nothing
 rl flow list
 ```
 
-Two whole flows to copy and adapt are in [examples/flows](examples/flows): `prod-logs` (Google Cloud errors, triaged by an agent, a fix only with your yes) and `morning-brief` (yesterday's chat, Notion and PRs, summed up and posted).
+Two to copy and adapt are in [examples/flows](examples/flows): `prod-logs` and `morning-brief`.
 
 ## For agents
 
-```sh
-rl context    # what Relay is, its events and flows, and the answer it wants — read this first
-rl --json …   # every command, machine-readable
-```
+`rl context` explains Relay to an agent; `rl --json …` makes every command machine-readable.
 
-## More
+## Docs
 
-- [docs/PRODUCT.md](docs/PRODUCT.md) — the product brief: jobs to be done, features, plugin system, architecture, phasing.
-- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — how the tree is wired, as built: processes, crates, run lifecycle, detection, flows.
-- [docs/PRODUCT-ROADMAP.md](docs/PRODUCT-ROADMAP.md) — what's done and what's next.
+- [PRODUCT.md](docs/PRODUCT.md) — what Relay is for, and where it's going.
+- [ARCHITECTURE.md](docs/ARCHITECTURE.md) — how the tree is wired, as built.
+- [PRODUCT-ROADMAP.md](docs/PRODUCT-ROADMAP.md) — done and next.
 
-Relay is a fresh rebuild of [instilled/ax](https://github.com/instilled/ax), which stays archived as the legacy reference.
+Relay is a rebuild of [instilled/ax](https://github.com/instilled/ax), kept archived as the legacy reference.

@@ -8,7 +8,6 @@
 use crate::attach::client_name;
 use crate::client::Client;
 use rl_core::Home;
-use rl_detect::ansi;
 use rl_proto::methods::{AttachInfo, AttachParams, RunAttach};
 use rl_proto::types::AttachMode;
 use rl_session::proto::{Frame, FrameReader};
@@ -17,8 +16,9 @@ use tokio::io::BufReader;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 
 const SCROLLBACK: u64 = 256 * 1024;
-/// Rows kept above the screen, to read back through. The daemon replays
-/// bytes; without somewhere to put them only the last screenful survived.
+/// Rows kept above the screen, to read back through. What the daemon sends
+/// carries the run's history above its screen; without somewhere to put it
+/// only the last screenful survived.
 const SCROLLBACK_ROWS: usize = 10_000;
 
 pub struct TermView {
@@ -33,7 +33,7 @@ pub struct TermView {
     /// Draws the box-drawing set as the characters it stands for. `vt100`
     /// hands `ESC ( 0` to its unhandled hook, so a prompt that rules a line
     /// off would otherwise reach the screen spelling `qqqqqq`.
-    graphics: ansi::Graphics,
+    graphics: rl_session::screen::Graphics,
     /// The area we draw into, for clipping the re-render.
     pane: (u16, u16),
     /// Latest word from the daemon and when it arrived, for the footer.
@@ -69,15 +69,11 @@ impl TermView {
         let (rd, wr) = c.into_parts();
         let rd = FrameReader::new(rd);
         let newlines = (!info.tty).then(crate::attach::Newlines::default);
-        let (cols, rows) = if info.live && info.cols > 0 {
-            (info.cols, info.rows)
-        } else {
-            pane
-        };
+        let (cols, rows) = drawn_at(info.tty, (info.cols, info.rows), pane);
         Ok(Self {
             id: id.to_string(),
             parser: vt100::Parser::new(rows, cols, SCROLLBACK_ROWS),
-            graphics: ansi::Graphics::new(),
+            graphics: rl_session::screen::Graphics::new(),
             info,
             rd,
             _wr: wr,
@@ -151,5 +147,42 @@ impl TermView {
     /// How far back the view is, in rows.
     pub fn scrolled(&self) -> usize {
         self.scroll
+    }
+}
+
+/// The size the view's screen is kept at. A terminal run's, live or ended,
+/// arrives drawn for its own size with cursor moves to absolute places, so
+/// it is kept at that size and the pane clips it; drawn into a smaller one
+/// its rows pile onto the last. A pipes run's lines wrap at the pane.
+fn drawn_at(tty: bool, run: (u16, u16), pane: (u16, u16)) -> (u16, u16) {
+    if tty && run.0 > 0 && run.1 > 0 { run } else { pane }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::drawn_at;
+
+    /// An ended terminal run is drawn by rld at the run's size: a pane-sized
+    /// screen took the drawing's moves to rows it does not have.
+    #[test]
+    fn a_terminal_runs_screen_is_kept_at_the_runs_size() {
+        let run = (100, 30);
+        let pane = (60, 12);
+        assert_eq!(drawn_at(true, run, pane), run);
+        assert_eq!(drawn_at(false, run, pane), pane, "pipes wrap at the pane");
+        assert_eq!(drawn_at(true, (0, 0), pane), pane, "no size known");
+
+        let mut out = Vec::new();
+        for i in 0..30 {
+            out.extend_from_slice(format!("row {i:02}\r\n").as_bytes());
+        }
+        out.extend_from_slice(b"last");
+        let drawn = rl_session::screen::Screen::render(&out, run.0, run.1);
+        let (cols, rows) = drawn_at(true, run, pane);
+        let mut p = vt100::Parser::new(rows, cols, 1000);
+        p.process(&drawn);
+        let shown: Vec<String> = p.screen().rows(0, cols).map(|r| r.trim_end().to_string()).collect();
+        assert_eq!(shown.first().map(String::as_str), Some("row 01"));
+        assert_eq!(shown.last().map(String::as_str), Some("last"));
     }
 }

@@ -77,7 +77,7 @@ pub const ALL: &[Command] = &[
         name: "import",
         args: "",
         words: &[],
-        what: "move Claude's own sessions into Relay (claude --bg, and ones in a terminal)",
+        what: "move Claude's background sessions into Relay (claude --bg)",
         cmd: Cmd::Import,
     },
     Command {
@@ -126,7 +126,7 @@ pub const ALL: &[Command] = &[
         name: "sort",
         args: "",
         words: &[],
-        what: "let a project sort itself again, after ⇧↑↓ put its rows in your order",
+        what: "put a project's rows back in the order they came, after ⇧↑↓ put them in yours",
         cmd: Cmd::Sort,
     },
     Command {

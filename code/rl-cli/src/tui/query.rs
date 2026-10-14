@@ -6,7 +6,9 @@
 //!   must match somewhere;
 //! - `in:` a project, by name or folder;
 //! - `is:` a state — `failed`, `going`, `done`, `stopped`, `needs`, `pinned`, `new`;
-//! - `kind:` what it is — `agent`, `shell`, `command`, `flow`, `question`;
+//! - `kind:` what it is — `agent`, `shell`, `command`, `flow`, `question`; or
+//!   `kind:<agent>` (`claude`, `codex`, `gemini`): that agent's runs and its
+//!   own sessions;
 //!   in the events view, the event's kind (`run.failed`, `run.` for the family);
 //! - `by:` the flow behind it (in the events view, or set off by it);
 //! - `on:` a git branch — the one a run started on, the one a folder is on.
@@ -25,7 +27,7 @@ pub const TOKENS: [&str; 5] = ["in:", "is:", "kind:", "by:", "on:"];
 /// What `is:` takes.
 pub const STATES: [&str; 7] = ["failed", "going", "done", "stopped", "needs", "pinned", "new"];
 
-/// What `kind:` takes.
+/// What `kind:` takes, besides an agent's name (`kind:<agent>`).
 pub const KINDS: [&str; 5] = ["agent", "shell", "command", "flow", "question"];
 
 /// A search, read.
@@ -119,7 +121,8 @@ impl Query {
 
 /// What `tab` offers for the word at the end of a search: the token names, or
 /// a token's values — `in:` the projects, `by:` the flows, `on:` the branches,
-/// `kind:` the `kinds` given (the events view's), else `KINDS`.
+/// `kind:` the `kinds` given (the list's, with the agents' names; the events
+/// view's), else `KINDS`.
 pub fn complete(
     word: &str,
     projects: &[String],

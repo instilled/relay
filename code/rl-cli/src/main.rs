@@ -18,8 +18,7 @@ use rl_proto::methods::{
 };
 use rl_proto::methods::{
     DaemonInfo, DigestGet, DigestHide, DigestHideParams, DigestParams, EventFilter, EventList, PresenceClient,
-    PresenceTouch, RunFilter, RunHook, RunHookParams, RunList, RunMark, RunMarkParams, RunSpec, RunStart, RunStop,
-    RunStopParams,
+    PresenceTouch, RunFilter, RunList, RunMark, RunMarkParams, RunSpec, RunStart, RunStop, RunStopParams,
 };
 use rl_proto::methods::{
     DecisionDismiss, DecisionFilter, DecisionGet, DecisionId, DecisionList, DecisionNote, DecisionRaise, DecisionSpec,
@@ -33,9 +32,6 @@ use rl_proto::types::{AttachMode, Cause, Mark, RunKind, RunState, SummaryTarget}
 use serde_json::json;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
-
-/// How long `rl hook` gives the daemon before letting the CLI carry on.
-const HOOK_TIMEOUT: Duration = Duration::from_millis(1500);
 
 /// How long `rl daemon stop --with-runs` waits for a holder to hang up after
 /// being asked to go, before moving on to the next run.
@@ -130,8 +126,8 @@ enum Cmd {
     Mark(MarkArgs),
     /// Print the prompt-mark snippet for your shell, so a project shell can tell one command from the next.
     ShellInit(ShellInitArgs),
-    /// Called by a CLI's hooks (Claude Code) with the hook's JSON on stdin. Never fails the CLI.
-    #[command(hide = true)]
+    /// Called by an agent CLI's hooks (`rl hook <agent> <Event>`) with the hook's JSON on stdin. Never fails the CLI.
+    #[command(hide = true, disable_help_flag = true)]
     Hook(HookArgs),
 }
 
@@ -148,7 +144,7 @@ struct AttachArgs {
     /// Join even if someone else has; they become a watcher.
     #[arg(long)]
     take: bool,
-    /// KiB of scrollback to replay first.
+    /// KiB of journaled output to draw from (an ended or pipes run).
     #[arg(long, default_value_t = 256, value_name = "KIB")]
     scrollback: u64,
 }
@@ -166,11 +162,13 @@ struct MarkArgs {
 
 #[derive(Args)]
 struct HookArgs {
-    /// The hook event name, e.g. Notification or Stop.
-    event: String,
-    /// The CLI's hook vocabulary (default: claude).
-    #[arg(long, default_value = "claude")]
-    dialect: String,
+    /// `<agent> <Event>` — the agent whose hook it is (claude, codex,
+    /// gemini), then the hook event name, e.g. Notification or Stop — or an
+    /// event alone, which is Claude's; `--user` after them for the copy in
+    /// the user's own settings. Anything else is taken, and ignored: see
+    /// `rl_cli::hook::words`.
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true, num_args = 0..)]
+    words: Vec<String>,
 }
 
 #[derive(Args)]
@@ -474,6 +472,12 @@ struct EventsArgs {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    if let Some(words) = rl_cli::hook::args() {
+        return match Home::resolve() {
+            Ok(home) => hook(&home, &words).await,
+            Err(_) => Ok(()),
+        };
+    }
     let cli = Cli::parse();
     let home = Home::resolve()?;
     rl_cli::context::set_help(help_for_the_pack());
@@ -523,7 +527,7 @@ async fn main() -> Result<()> {
         Cmd::Join(a) => attach(&home, a, AttachMode::Join).await,
         Cmd::Mark(a) => mark(&home, a, cli.json).await,
         Cmd::ShellInit(a) => shell_init(a),
-        Cmd::Hook(a) => hook(&home, a).await,
+        Cmd::Hook(a) => hook(&home, &a.words).await,
     }
 }
 
@@ -558,30 +562,12 @@ async fn mark(home: &Home, a: MarkArgs, json: bool) -> Result<()> {
     Ok(())
 }
 
-/// A hook must never slow down or break the CLI that called it: no run id
-/// means we are not under Relay, and any daemon trouble is swallowed. Nothing
-/// is printed — some CLIs feed hook stdout back to the model.
-async fn hook(home: &Home, a: HookArgs) -> Result<()> {
-    let Some(id) = std::env::var("RELAY_RUN").ok().filter(|s| !s.is_empty()) else {
-        return Ok(());
-    };
-    // The CLI writes the payload and closes the pipe; reading it is quick.
-    let raw = std::io::read_to_string(std::io::stdin()).unwrap_or_default();
-    let payload = serde_json::from_str(&raw).unwrap_or(serde_json::Value::Null);
-    let params = RunHookParams {
-        id,
-        dialect: a.dialect,
-        event: a.event,
-        payload,
-    };
-    let post = async {
-        Client::connect(home).await?.call::<RunHook>(params).await?;
-        anyhow::Ok(())
-    };
-    if let Ok(Err(e)) = tokio::time::timeout(HOOK_TIMEOUT, post).await
-        && std::env::var_os("RELAY_HOOK_DEBUG").is_some()
-    {
-        eprintln!("rl hook: {e:#}");
+/// A hook must never slow down or break the CLI that called it: words it
+/// does not know do nothing, and `rl_cli::hook` swallows any trouble, prints
+/// nothing and gives up within its time.
+async fn hook(home: &Home, words: &[String]) -> Result<()> {
+    if let Some(words) = rl_cli::hook::words(words) {
+        rl_cli::hook::hook(home, &words).await;
     }
     Ok(())
 }
@@ -732,6 +718,7 @@ async fn stop(home: &Home, a: StopArgs, json: bool) -> Result<()> {
         .call::<RunStop>(RunStopParams {
             id: a.id,
             force: a.force,
+            archive: false,
         })
         .await?;
     if json {
@@ -1439,6 +1426,7 @@ async fn stop_every_run(home: &Home, json: bool) -> Result<usize> {
             .call::<RunStop>(RunStopParams {
                 id: run.id.clone(),
                 force: false,
+                archive: false,
             })
             .await
         {
@@ -1789,6 +1777,15 @@ mod tests {
             .expect("rl flow state");
         for sub in ["set", "get", "write", "read"] {
             assert!(state.find_subcommand(sub).is_some(), "rl flow state {sub}");
+        }
+    }
+
+    #[test]
+    fn rl_hook_takes_any_words_through_clap_too() {
+        // `rl --json hook …`, read by clap: it takes any words.
+        match Cli::try_parse_from(["rl", "--json", "hook", "a", "--weird", "-x", "--help"]).map(|c| c.cmd) {
+            Ok(Some(Cmd::Hook(a))) => assert_eq!(a.words, ["a", "--weird", "-x", "--help"]),
+            other => panic!("{:?}", other.err()),
         }
     }
 

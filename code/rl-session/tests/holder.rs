@@ -25,6 +25,11 @@ fn start(tty: bool, linger: u64) -> Holder {
 }
 
 fn start_with(tty: bool, linger: u64, extra: &[&str]) -> Holder {
+    start_argv(tty, linger, extra, &fake_cli())
+}
+
+/// As [`start_with`], running `program` in place of the fake CLI.
+fn start_argv(tty: bool, linger: u64, extra: &[&str], program: &Path) -> Holder {
     let tmp = tempfile::tempdir().unwrap();
     let socket = tmp.path().join("s.sock");
     let exit_file = tmp.path().join("s.exit");
@@ -47,7 +52,7 @@ fn start_with(tty: bool, linger: u64, extra: &[&str]) -> Holder {
         cmd.arg("--no-tty");
     }
     cmd.args(extra);
-    cmd.arg("--").arg(fake_cli());
+    cmd.arg("--").arg(program);
     // The detached holder keeps stderr for its log, so never `output()` here.
     let log = tmp.path().join("holder.log");
     cmd.stdin(Stdio::null())
@@ -386,4 +391,41 @@ async fn refuses_to_start_a_missing_command() {
     assert!(!out.status.success());
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("spawning"), "{err}");
+}
+
+#[tokio::test]
+async fn a_screen_attach_draws_the_screen_once() {
+    let h = start_argv(true, 5, &[], Path::new("/bin/sh"));
+    let (_, mut s) = attach(&h, false).await;
+    // A counter redrawn in place: every value is in the bytes, only the
+    // last is on the screen. The empty quotes keep the echoed command line
+    // from containing the word it waits for.
+    s.input(b"i=0; while [ $i -lt 100 ]; do printf 'n=%03d\\r' $i; i=$((i+1)); done; echo; echo dr''awn\n".to_vec())
+        .await
+        .unwrap();
+    read_until(&mut s, "drawn").await;
+    let (hello, mut v) = Session::attach_screen(&h.socket, 0).await.unwrap();
+    assert_eq!(hello.replay_from, hello.total);
+    let mut drawn = Vec::new();
+    loop {
+        match v.recv().await.unwrap() {
+            Some(Frame::Output(b)) => drawn.extend(b),
+            Some(Frame::ReplayEnd) => break,
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+    let drawn = String::from_utf8_lossy(&drawn);
+    assert!(drawn.contains("n=099"), "{drawn:?}");
+    assert!(!drawn.contains("n=098"), "{drawn:?}");
+}
+
+#[tokio::test]
+async fn a_pipes_run_answers_a_screen_attach_with_bytes() {
+    let h = start_argv(false, 5, &[], Path::new("/bin/sh"));
+    let (_, mut s) = attach(&h, false).await;
+    s.input(b"echo pi''ped\n".to_vec()).await.unwrap();
+    read_until(&mut s, "piped").await;
+    let (hello, mut v) = Session::attach_screen(&h.socket, 0).await.unwrap();
+    assert_eq!(hello.replay_from, 0, "the bytes replay from where it asked");
+    assert!(read_until(&mut v, "piped").await.contains("piped"));
 }

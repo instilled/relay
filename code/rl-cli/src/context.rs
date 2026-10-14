@@ -99,6 +99,9 @@ written in ~/.relay/flows/<name>/flow.md (Flows, below, says what one holds).
 can start a run when chosen.
 - agent: an agent CLI (see `agents` below). A `run` line that starts with an agent's name is \
 that agent with the rest of the line as its prompt. Any other `run` line is a shell line.
+- agent's own session: one an agent CLI runs that Relay did not start. It shows on the panel \
+but is not a run: it emits no events, so no flow's `on:` fires on it, and a `run` line cannot \
+name it.
 - tag, ref: labels on runs (`ci`, `#123`) for grouping and filtering.
 "
 }
@@ -294,6 +297,8 @@ mod tests {
             "## Words",
             "- flow: ",
             "~/.relay/flows/<name>/flow.md",
+            "- agent's own session: ",
+            "is not a run: it emits no events",
             "## Flows",
             "### The frontmatter",
             "- when: ",

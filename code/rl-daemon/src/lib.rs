@@ -13,6 +13,7 @@ pub mod git;
 pub mod graph;
 pub mod handlers;
 pub mod import;
+pub mod outside;
 pub mod recap;
 pub mod resume;
 pub mod router;

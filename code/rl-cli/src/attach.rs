@@ -50,6 +50,63 @@ impl Newlines {
     }
 }
 
+/// Whether the stream has left the terminal on the alternate screen: the
+/// last switch it carried, of `?1049`, `?1047` and `?47`. A screen drawn
+/// for an app that is on it switches the viewer there too, and leaving has
+/// to switch back; leaving with `?1049l` regardless would restore a cursor
+/// never saved on a terminal that was never there. A switch cut across two
+/// chunks is carried over.
+#[derive(Debug, Default)]
+pub struct AltScreen {
+    on: bool,
+    /// An escape begun and not yet ended: the bytes after its ESC.
+    seq: Option<Vec<u8>>,
+}
+
+impl AltScreen {
+    /// Longer than any switch; a sequence that runs past it is not one.
+    const LONGEST: usize = 32;
+
+    pub fn watch(&mut self, b: &[u8]) {
+        for &c in b {
+            if c == 0x1b {
+                self.seq = Some(Vec::new());
+                continue;
+            }
+            let Some(seq) = self.seq.as_mut() else { continue };
+            seq.push(c);
+            let ongoing = match (seq.len(), c) {
+                (1, b'[') | (2, b'?') => true,
+                (n, b'0'..=b'9' | b';') if n > 2 => true,
+                (n, b'h' | b'l') if n > 2 => {
+                    let modes = &seq[2..seq.len() - 1];
+                    if modes
+                        .split(|&m| m == b';')
+                        .any(|m| matches!(m, b"1049" | b"1047" | b"47"))
+                    {
+                        self.on = c == b'h';
+                    }
+                    false
+                }
+                _ => false,
+            };
+            if !ongoing || seq.len() > Self::LONGEST {
+                self.seq = None;
+            }
+        }
+    }
+
+    /// What hands the terminal back as we found it: input modes the run's
+    /// screen may have turned on (mouse reporting, bracketed paste, the
+    /// application cursor and keypad, a hidden cursor, colours) all off, and
+    /// the main screen again if the stream left it on the other.
+    pub fn leave(&self) -> Vec<u8> {
+        let mut out = if self.on { b"\x1b[?1049l".to_vec() } else { Vec::new() };
+        out.extend_from_slice(b"\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?2004l\x1b[?1l\x1b>\x1b[?25h\x1b[m");
+        out
+    }
+}
+
 /// `ctrl-\`: detach. Nothing interactive we care about uses it.
 const DETACH: u8 = 0x1c;
 const CTRL_C: u8 = 0x03;
@@ -108,7 +165,7 @@ pub async fn attach(home: &Home, o: Opts) -> Result<Ended> {
         })
         .await?;
     let (rd, mut wr) = c.into_parts();
-    // The scrollback replay is one frame of up to a few hundred kilobytes,
+    // The screen or scrollback arrives in output frames of up to a mebibyte,
     // and this read shares a `select!` with stdin and the "who needs you"
     // ticker. Read it cancel-safely or a lost race eats the connection.
     let mut rd = FrameReader::new(rd);
@@ -191,102 +248,127 @@ pub async fn attach(home: &Home, o: Opts) -> Result<Ended> {
         None
     };
     let mut every = tokio::time::interval(NEED_EVERY);
+    let mut alt = AltScreen::default();
 
-    loop {
-        tokio::select! {
-            frame = rd.next() => match frame? {
-                Some(Frame::Output(b)) => {
-                    match newlines.as_mut() {
-                        Some(n) => out.write_all(&n.fix(&b)).await?,
-                        None => out.write_all(&b).await?,
-                    }
-                    out.flush().await?;
-                }
-                Some(Frame::Note(s)) => {
-                    if interactive {
-                        status.note = Some(s);
-                        out.write_all(title(&status.line()).as_bytes()).await?;
-                    } else {
-                        out.write_all(dim(&format!("[relay] {s}")).as_bytes()).await?;
-                    }
-                    out.flush().await?;
-                }
-                Some(Frame::Exit(e)) => {
-                    let how = match &e.signal {
-                        Some(s) => format!("{s}, exit {}", e.code),
-                        None => format!("exit {}", e.code),
-                    };
-                    out.write_all(dim(&format!("[relay] run {} ended ({how})", info.run.id)).as_bytes()).await?;
-                    out.write_all(title("").as_bytes()).await?;
-                    out.flush().await?;
-                    return Ok(Ended::Exit { code: e.code, how });
-                }
-                Some(_) => {}
-                None => {
-                    // The stream went without an Exit frame. What that means
-                    // is rld's to say: the run may have failed, or may be
-                    // going on without us. "connection closed" and exit 0
-                    // told a script it had watched a clean ending.
-                    let became = what_became(home, asker.as_mut(), &o.id).await;
-                    let (state, code) = match &became {
-                        Some(r) => (Some(r.state), r.exit_code),
-                        None => (None, None),
-                    };
-                    out.write_all(dim(&format!("[relay] {}", closed_words(&o.id, state))).as_bytes())
-                        .await?;
-                    out.write_all(title("").as_bytes()).await?;
-                    out.flush().await?;
-                    return Ok(Ended::Closed { state, code });
-                }
-            },
-            bytes = stdin_rx.recv(), if stdin_open => match bytes {
-                None => {
-                    stdin_open = false;
-                    if joined {
-                        // Nothing more will be typed: a piped join is over.
-                        return Ok(Ended::Left);
-                    }
-                }
-                Some(bytes) => {
-                    if joined {
-                        if let Some(at) = bytes.iter().position(|&b| b == DETACH) {
-                            if at > 0 {
-                                write_frame(&mut wr, &Frame::Input(bytes[..at].to_vec())).await?;
-                            }
-                            out.write_all(dim("[relay] detached; the run keeps going").as_bytes()).await?;
-                            out.write_all(title("").as_bytes()).await?;
-                            out.flush().await?;
-                            return Ok(Ended::Detached);
+    // Each way out says how, and in which words; the terminal is handed back
+    // below, the same way for all of them.
+    let ended: Result<(Ended, Option<String>)> = async {
+        loop {
+            tokio::select! {
+                frame = rd.next() => match frame? {
+                    Some(Frame::Output(b)) => {
+                        alt.watch(&b);
+                        match newlines.as_mut() {
+                            Some(n) => out.write_all(&n.fix(&b)).await?,
+                            None => out.write_all(&b).await?,
                         }
-                        write_frame(&mut wr, &Frame::Input(bytes)).await?;
-                    } else if bytes.iter().any(|&b| b == b'q' || b == CTRL_C || b == DETACH) {
-                        out.write_all(dim("[relay] left").as_bytes()).await?;
-                        out.write_all(title("").as_bytes()).await?;
-                        out.flush().await?;
-                        return Ok(Ended::Left);
-                    }
-                }
-            },
-            _ = every.tick(), if asker.is_some() => {
-                let c = asker.as_mut().expect("guarded");
-                match need_you(c, &info.run.id).await {
-                    Ok(n) if n != status.need => {
-                        status.need = n;
-                        out.write_all(title(&status.line()).as_bytes()).await?;
                         out.flush().await?;
                     }
-                    Ok(_) => {}
-                    // rld is going; its own note says so. Stop asking.
-                    Err(_) => asker = None,
+                    Some(Frame::Note(s)) => {
+                        if interactive {
+                            status.note = Some(s);
+                            out.write_all(title(&status.line()).as_bytes()).await?;
+                        } else {
+                            out.write_all(dim(&format!("[relay] {s}")).as_bytes()).await?;
+                        }
+                        out.flush().await?;
+                    }
+                    Some(Frame::Exit(e)) => {
+                        let how = match &e.signal {
+                            Some(s) => format!("{s}, exit {}", e.code),
+                            None => format!("exit {}", e.code),
+                        };
+                        let words = format!("[relay] run {} ended ({how})", info.run.id);
+                        return Ok((Ended::Exit { code: e.code, how }, Some(words)));
+                    }
+                    Some(_) => {}
+                    None => {
+                        // The stream went without an Exit frame. What that means
+                        // is rld's to say: the run may have failed, or may be
+                        // going on without us. "connection closed" and exit 0
+                        // told a script it had watched a clean ending.
+                        let became = what_became(home, asker.as_mut(), &o.id).await;
+                        let (state, code) = match &became {
+                            Some(r) => (Some(r.state), r.exit_code),
+                            None => (None, None),
+                        };
+                        let words = format!("[relay] {}", closed_words(&o.id, state));
+                        return Ok((Ended::Closed { state, code }, Some(words)));
+                    }
+                },
+                bytes = stdin_rx.recv(), if stdin_open => match bytes {
+                    None => {
+                        stdin_open = false;
+                        if joined {
+                            // Nothing more will be typed: a piped join is over.
+                            return Ok((Ended::Left, None));
+                        }
+                    }
+                    Some(bytes) => {
+                        if joined {
+                            if let Some(at) = bytes.iter().position(|&b| b == DETACH) {
+                                if at > 0 {
+                                    write_frame(&mut wr, &Frame::Input(bytes[..at].to_vec())).await?;
+                                }
+                                let words = "[relay] detached; the run keeps going".to_string();
+                                return Ok((Ended::Detached, Some(words)));
+                            }
+                            write_frame(&mut wr, &Frame::Input(bytes)).await?;
+                        } else if bytes.iter().any(|&b| b == b'q' || b == CTRL_C || b == DETACH) {
+                            return Ok((Ended::Left, Some("[relay] left".to_string())));
+                        }
+                    }
+                },
+                _ = every.tick(), if asker.is_some() => {
+                    let c = asker.as_mut().expect("guarded");
+                    match need_you(c, &info.run.id).await {
+                        Ok(n) if n != status.need => {
+                            status.need = n;
+                            out.write_all(title(&status.line()).as_bytes()).await?;
+                            out.flush().await?;
+                        }
+                        Ok(_) => {}
+                        // rld is going; its own note says so. Stop asking.
+                        Err(_) => asker = None,
+                    }
                 }
-            }
-            _ = winch.recv() => {
-                if joined && let Ok((cols, rows)) = crossterm::terminal::size() {
-                    write_frame(&mut wr, &Frame::Resize { cols, rows }).await?;
+                _ = winch.recv() => {
+                    if joined && let Ok((cols, rows)) = crossterm::terminal::size() {
+                        write_frame(&mut wr, &Frame::Resize { cols, rows }).await?;
+                    }
                 }
             }
         }
     }
+    .await;
+
+    let back = interactive.then(|| alt.leave());
+    match ended {
+        Ok((ended, words)) => {
+            leave(&mut out, back.as_deref(), words.as_deref()).await?;
+            Ok(ended)
+        }
+        Err(e) => {
+            // Gone wrong, the terminal is still handed back, as far as it
+            // can be; the error is what is said.
+            let _ = leave(&mut out, back.as_deref(), None).await;
+            Err(e)
+        }
+    }
+}
+
+/// The last thing written: the terminal handed back (`back`, on a terminal),
+/// then our words on a line of their own and the window title given back.
+/// The words come after, so they land on the screen the viewer is left on.
+async fn leave(out: &mut tokio::io::Stdout, back: Option<&[u8]>, words: Option<&str>) -> std::io::Result<()> {
+    if let Some(b) = back {
+        out.write_all(b).await?;
+    }
+    if let Some(w) = words {
+        out.write_all(dim(w).as_bytes()).await?;
+        out.write_all(title("").as_bytes()).await?;
+    }
+    out.flush().await
 }
 
 /// What the window title says while a run has the terminal.
@@ -458,7 +540,40 @@ impl Drop for RawMode {
 
 #[cfg(test)]
 mod newline_tests {
-    use super::{Ended, Newlines, Status, closed_words, count_need};
+    use super::{AltScreen, Ended, Newlines, Status, closed_words, count_need};
+
+    /// Leaving always turns the input modes off, and leaves the alternate
+    /// screen only when the stream's last switch put the viewer there.
+    #[test]
+    fn leaving_hands_back_the_screen_the_stream_left_us_on() {
+        const MODES: &[u8] = b"\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?2004l\x1b[?1l\x1b>\x1b[?25h\x1b[m";
+        let mut a = AltScreen::default();
+        assert_eq!(a.leave(), MODES, "never there: no ?1049l");
+        a.watch(b"text\x1b[1;31mred\x1b[?1049h\x1b[Hfull");
+        assert_eq!(a.leave(), [b"\x1b[?1049l".as_slice(), MODES].concat());
+        a.watch(b"\x1b[?1049l");
+        assert_eq!(a.leave(), MODES);
+        // A switch cut across chunks, anywhere in it, is still seen.
+        for cut in 1..b"\x1b[?1049h".len() {
+            let mut a = AltScreen::default();
+            let (x, y) = b"\x1b[?1049h".split_at(cut);
+            a.watch(x);
+            a.watch(y);
+            assert!(a.on, "cut at {cut}");
+        }
+        // The older switches, and one among other modes.
+        let mut a = AltScreen::default();
+        a.watch(b"\x1b[?47h");
+        assert!(a.on);
+        a.watch(b"\x1b[?1047l");
+        assert!(!a.on);
+        a.watch(b"\x1b[?25;1049h");
+        assert!(a.on);
+        // Not a switch: another private mode, a plain CSI with the digits.
+        let mut a = AltScreen::default();
+        a.watch(b"\x1b[?2004h\x1b[1049h\x1b[?10490h");
+        assert!(!a.on);
+    }
     use rl_proto::types::RunState;
 
     /// Leaving on purpose is the only thing that may exit 0. A stream that
