@@ -45,6 +45,7 @@ survive `rl daemon restart`.
 rl setup                                  # which agents to offer, who writes summaries
 rl up ~/code/api                          # a project Relay knows
 rl                                        # the panel: type a task or a shell line; / for commands, ^h for keys
+                                          # enter reads the row you are on, esc comes back, ctrl-\ leaves any page
 rl run --agent claude "make the flaky parser test deterministic"
 rl run -- cargo test                      # any command; it outlives the terminal
 ```
