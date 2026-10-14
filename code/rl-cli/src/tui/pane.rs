@@ -479,9 +479,7 @@ pub fn project_lines(
     // The flows in it, told the same way the header's chips are.
     lines.extend(flows_section(flows, Some(workspace), now));
     lines.push(Line::raw(""));
-    lines.push(Line::from(
-        Span::raw(format!(" ^g shows its wiring{} · ^r renames", fix_hint(broken))).dim(),
-    ));
+    lines.push(Line::from(Span::raw(format!(" ^r renames{}", fix_hint(broken))).dim()));
     lines
 }
 
@@ -513,10 +511,13 @@ pub fn everywhere_lines(
     lines.extend(runs_facts(mine, now));
     lines.extend(summary_section(summary, width, now));
     lines.extend(flows_section(flows, None, now));
-    lines.push(Line::raw(""));
-    lines.push(Line::from(
-        Span::raw(format!(" ^g shows their wiring{}", fix_hint(broken))).dim(),
-    ));
+    let fix = fix_hint(broken);
+    if !fix.is_empty() {
+        lines.push(Line::raw(""));
+        lines.push(Line::from(
+            Span::raw(format!(" {}", fix.trim_start_matches(" · "))).dim(),
+        ));
+    }
     lines
 }
 

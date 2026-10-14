@@ -30,7 +30,6 @@ mod flow_new_tests;
 mod flow_tests;
 pub(crate) mod flows;
 pub mod form;
-mod graph;
 mod input;
 mod line;
 mod mark;
@@ -82,12 +81,12 @@ use rl_proto::flow::{
 use rl_proto::methods::{
     AgentList, DecisionDismiss, DecisionGet, DecisionId, DecisionNote, DecisionTake, DecisionTakeParams, Digest,
     DigestGet, DigestHide, DigestHideParams, DigestItem, DigestOrder, DigestParams, EventFilter, EventList, GcParams,
-    GcRun, GraphGet, GraphParams, ImportList, ImportListParams, ImportMove, PresenceClient, PresenceTouch, RunArchive,
-    RunArchiveParams, RunFilter, RunGet, RunHide, RunHideParams, RunId, RunIds, RunInput, RunInputParams, RunList,
-    RunMark, RunMarkParams, RunPin, RunPinParams, RunRename, RunRenameParams, RunResume, RunResumeParams, RunSeen,
-    RunSpec, RunStart, RunStop, RunStopParams, SETUP_STEPS, SetupGet, SummaryGet, SummaryMake, SummaryParams,
-    WorkspaceList, WorkspaceRemove, WorkspaceRemoveParams, WorkspaceRemoved, WorkspaceRename, WorkspaceRenameParams,
-    WorkspaceUp, WorkspaceUpParams,
+    GcRun, ImportList, ImportListParams, ImportMove, PresenceClient, PresenceTouch, RunArchive, RunArchiveParams,
+    RunFilter, RunGet, RunHide, RunHideParams, RunId, RunIds, RunInput, RunInputParams, RunList, RunMark,
+    RunMarkParams, RunPin, RunPinParams, RunRename, RunRenameParams, RunResume, RunResumeParams, RunSeen, RunSpec,
+    RunStart, RunStop, RunStopParams, SETUP_STEPS, SetupGet, SummaryGet, SummaryMake, SummaryParams, WorkspaceList,
+    WorkspaceRemove, WorkspaceRemoveParams, WorkspaceRemoved, WorkspaceRename, WorkspaceRenameParams, WorkspaceUp,
+    WorkspaceUpParams,
 };
 use rl_proto::types::{AttachMode, Cause, Event as LedgerEvent, Mark, Run, RunKind, RunState, Summary, SummaryTarget};
 use rows::{Names, Row, fit};
@@ -144,8 +143,6 @@ enum Pane {
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum View {
     Work,
-    /// The wiring graph, over every project.
-    Graph,
     /// Every event, newest first, and what each set off (`/events`).
     Events,
     /// What happened while you were away: what the panel opens on after a
@@ -161,8 +158,6 @@ enum Mode {
     Mark(String),
     /// `n` pressed: `y` dismisses this question.
     Dismiss(String),
-    /// `enter` on a flow's node: `y` fires this flow now.
-    Fire(String),
     /// A run being written down, by hand or drafted for you.
     Form(Box<Form>),
     /// A question taken out of the list: its options, answered by number.
@@ -302,7 +297,7 @@ struct App {
     me: String,
     digest: Digest,
     names: Names,
-    /// A search the list and the graph are narrowed to; see `query`.
+    /// A search the list is narrowed to; see `query`.
     filter: String,
     /// `^f`: the line is searching, and the filter follows what is typed.
     search: Option<Search>,
@@ -310,7 +305,7 @@ struct App {
     lens: rows::Lens,
     view: View,
     /// Every flow: for its row's place and words, the chips on project rows,
-    /// and the graph's pane.
+    /// and a flow's pane.
     flows: Vec<Flow>,
     /// What did not load at the last reload: a red `! flows` on the header
     /// of the project it was in, the headline's `flows broken` for the rest.
@@ -322,20 +317,16 @@ struct App {
     tested: Option<Vec<String>>,
     /// A flow drafted while the keys were another's: shown by `/flow draft`.
     parked: Option<new_flow::Parked>,
-    /// The wiring, fetched while the graph is up.
-    graph: Option<rl_proto::graph::Graph>,
     /// The views gone through to reach the one that is up, the list first:
     /// going back walks them.
     back: Vec<View>,
     /// Each view's selection while another is up.
     kept: HashMap<View, Option<String>>,
     /// The events view's search while another view is up, or the list's
-    /// and the graph's while it is: `kind:` means another thing there.
+    /// while it is: `kind:` means another thing there.
     filter_aside: String,
     /// What the events view has read of the ledger.
     feed: events::Feed,
-    /// Where the window over the graph starts, column and row.
-    graph_at: std::cell::Cell<(usize, usize)>,
     /// Which of a folder's shells a shell line goes to, and the one the
     /// arrows step from. A folder is absent until you step; the entry is
     /// ignored once that shell has ended.
@@ -1192,12 +1183,10 @@ impl App {
             lens: rows::Lens::All,
             view: View::Work,
             flows: Vec::new(),
-            graph: None,
             back: Vec::new(),
             kept: HashMap::new(),
             filter_aside: String::new(),
             feed: events::Feed::default(),
-            graph_at: std::cell::Cell::new((0, 0)),
             shell_at: HashMap::new(),
             scroll: std::cell::Cell::new(0),
             list_h: std::cell::Cell::new(0),
@@ -1491,7 +1480,6 @@ impl App {
             });
         }
         Some(match self.view {
-            View::Graph => shortcuts::Place::Graph,
             View::Events => shortcuts::Place::Events,
             View::CatchUp => shortcuts::Place::CatchUp,
             View::Work if self.selected_question().is_some() => shortcuts::Place::Question,
@@ -1559,12 +1547,6 @@ impl App {
             _ => self.catch = None,
         }
         self.fetch_leads().await;
-        if self.view == View::Graph {
-            match self.rpc.call::<GraphGet>(GraphParams::default()).await {
-                Ok(g) => self.graph = Some(g),
-                Err(e) => self.say(format!("daemon: {e:#}")),
-            }
-        }
         // Which CLIs are agents decides how a line reads and what it offers:
         // the ones here that the config has the panel offer. Asked once.
         if self.agents.is_empty()
@@ -1759,7 +1741,6 @@ impl App {
     fn keys(&self) -> Vec<String> {
         match self.view {
             View::Work => self.rows().into_iter().filter_map(|r| r.key()).collect(),
-            View::Graph => self.graph_plan().map(|(_, p)| p.order()).unwrap_or_default(),
             View::Events => self.event_items().iter().flat_map(|i| i.keys()).collect(),
             View::CatchUp => self
                 .lead_keys()
@@ -1768,13 +1749,6 @@ impl App {
                 .chain(self.catch_rows().into_iter().filter_map(|r| r.key()))
                 .collect(),
         }
-    }
-
-    /// The graph as the filter leaves it, laid out.
-    fn graph_plan(&self) -> Option<(&rl_proto::graph::Graph, graph::Plan)> {
-        let g = self.graph.as_ref()?;
-        let kept = graph::keep(g, &self.filter, &self.names, &self.digest.checkouts);
-        Some((g, graph::plan(g, &kept, &self.names, Timestamp::now())))
     }
 
     /// Keeps the selection on something that exists: the first row, when
@@ -1808,15 +1782,6 @@ impl App {
                 .iter()
                 .map(|r| (r.key(), rows::named(r, &self.digest, &self.names, &self.flows)))
                 .unzip(),
-            View::Graph => {
-                let Some((g, p)) = self.graph_plan() else {
-                    return vec![];
-                };
-                p.order()
-                    .into_iter()
-                    .filter_map(|id| g.node(&id).map(|n| (Some(id.clone()), graph::named(n, &self.names))))
-                    .unzip()
-            }
             View::Events => self
                 .event_items()
                 .iter()
@@ -1895,7 +1860,7 @@ impl App {
         let rows = match self.view {
             View::Work => self.rows(),
             View::CatchUp => self.catch_rows(),
-            View::Graph | View::Events => return None,
+            View::Events => return None,
         };
         let key = self.sel.as_ref()?;
         rows.into_iter().find(|r| r.key().as_ref() == Some(key))
@@ -1920,72 +1885,11 @@ impl App {
     }
 
     /// The question the line answers: the one under the cursor on the list
-    /// or in the catch-up, or the first one waiting at the node under it in
-    /// the graph.
+    /// or in the catch-up.
     fn question_here(&self) -> Option<&Decision> {
         match self.view {
             View::Work | View::CatchUp => self.selected_question(),
-            View::Graph => {
-                let n = self.selected_node()?;
-                n.waiting
-                    .iter()
-                    .find_map(|id| self.digest.decisions.iter().find(|d| &d.id == id))
-            }
             View::Events => None,
-        }
-    }
-
-    /// The node under the cursor in the graph.
-    fn selected_node(&self) -> Option<&rl_proto::graph::Node> {
-        if self.view != View::Graph {
-            return None;
-        }
-        self.graph.as_ref()?.node(self.sel.as_deref()?)
-    }
-
-    /// An arrow in the graph: along the wiring, or within a column.
-    fn graph_step(&mut self, dir: graph::Dir) {
-        let next = self
-            .graph_plan()
-            .and_then(|(_, p)| graph::step(&p, self.sel.as_deref(), dir));
-        if next.is_some() {
-            self.select(next);
-        }
-    }
-
-    /// `enter` on a node: answer the question waiting there, run a flow
-    /// now, or else show what the node is.
-    fn graph_enter(&mut self) {
-        let Some(n) = self.selected_node() else {
-            return;
-        };
-        let waiting = n
-            .waiting
-            .iter()
-            .find(|id| self.digest.decisions.iter().any(|d| &d.id == *id))
-            .cloned();
-        let flow = match n.kind {
-            rl_proto::graph::NodeKind::Flow => self.flow_of_node(n).map(|f| {
-                let fires = matches!(f.status(), FlowStatus::On | FlowStatus::Paused);
-                (fires, f.name.clone())
-            }),
-            _ => None,
-        };
-        if let Some(id) = waiting {
-            self.picked.clear();
-            self.pane = Pane::Facts;
-            self.show_pane = true;
-            self.answer_at = 0;
-            self.mode = Mode::Answer(id);
-        } else if let Some((fires, name)) = flow {
-            if fires {
-                self.mode = Mode::Fire(name);
-            } else {
-                self.say(format!("{name} needs a yes first: /flow approve"));
-            }
-        } else {
-            self.pane = Pane::Facts;
-            self.show_pane = !self.show_pane;
         }
     }
 
@@ -1994,19 +1898,10 @@ impl App {
         self.flows.iter().find(|x| x.name == f.name)
     }
 
-    /// The flow a graph node is, or is a step of.
-    fn flow_of_node(&self, n: &rl_proto::graph::Node) -> Option<&Flow> {
-        let name = n.flow.as_deref()?;
-        self.flows.iter().find(|f| f.name == name)
-    }
-
     /// The flow under the cursor: a flow's row, on the list or in the
-    /// catch-up, or a node in the graph that is a flow, or is a step of one.
+    /// catch-up.
     fn flow_here(&self) -> Option<String> {
-        if let Some(f) = self.selected_flow() {
-            return Some(f.name.to_string());
-        }
-        self.selected_node().and_then(graph::flow_name).map(str::to_string)
+        self.selected_flow().map(|f| f.name.to_string())
     }
 
     fn run_by_id(&self, id: &str) -> Option<&Run> {
@@ -2376,22 +2271,13 @@ impl App {
         {
             Ok(d) => {
                 self.picked.clear();
-                // In the graph the cursor goes on to what the answer runs, a
-                // node there; in the list, to the run it started.
-                let next_node = (self.view == View::Graph && d.chosen.len() == 1)
-                    .then(|| self.sel.as_ref().map(|ask| format!("run:{ask}/{}", d.chosen[0])))
-                    .flatten();
                 self.refresh().await;
                 match d.outcome_runs.first() {
                     Some(r) => {
                         let title = self.run_by_id(r).map(|r| r.title.clone()).unwrap_or_default();
                         self.say(format!("{what} → started {title}"));
                         let started = format!("r:{r}");
-                        if self.view == View::Graph {
-                            if next_node.as_ref().is_some_and(|id| self.keys().contains(id)) {
-                                self.select(next_node);
-                            }
-                        } else if self.view == View::Work || self.keys().contains(&started) {
+                        if self.view == View::Work || self.keys().contains(&started) {
                             self.select(Some(started));
                         }
                     }
@@ -2644,51 +2530,6 @@ impl App {
 
     // ---- flows -------------------------------------------------------------
 
-    /// `/graph` and `^g`: into the wiring, or back to the list, each keeping
-    /// its own place. From a flow or a project, the graph opens on the flow
-    /// that stands there; from anywhere else — an empty list too — on the
-    /// graph's own first node. The flows with no `in` and no runs have no
-    /// row, so this is where they are reached.
-    async fn toggle_graph(&mut self) {
-        let target = self.flow_target();
-        if self.view == View::Graph {
-            self.go_back();
-        } else {
-            self.open_view(View::Graph);
-            self.close_term();
-        }
-        self.picked.clear();
-        self.events.clear();
-        self.refresh().await;
-        if self.view == View::Graph
-            && let Some(t) = target
-            && self.keys().contains(&t)
-        {
-            self.select(Some(t));
-        }
-    }
-
-    /// The flow the list's cursor stands on, as its graph node: a flow's
-    /// row's, else the first of the flows a header carries — whatever waits
-    /// for a yes first.
-    fn flow_target(&self) -> Option<String> {
-        if self.view == View::Events {
-            return self.event_flow();
-        }
-        if !matches!(self.view, View::Work | View::CatchUp) {
-            return None;
-        }
-        let name = match self.selected()? {
-            Row::Flow(f) => f.name,
-            Row::Group(h) => {
-                let scope = (!h.is_everywhere()).then_some(h.workspace.as_path());
-                rows::chips(&self.flows, scope, Timestamp::now()).first()?.name.clone()
-            }
-            _ => return None,
-        };
-        Some(format!("flow:{name}"))
-    }
-
     // ---- the views ---------------------------------------------------------
 
     /// Puts another view up, keeping this one's selection for when it comes
@@ -2910,9 +2751,8 @@ impl App {
         self.seen(shown.ids).await;
     }
 
-    /// `enter` in the catch-up: the row on the list, with the cursor on it
-    /// (`^g` from there is a flow's node in the graph). A row the list lets
-    /// go of once it is seen — it ended over a day ago — is read here
+    /// `enter` in the catch-up: the row on the list, with the cursor on it.
+    /// A row the list lets go of once it is seen — it ended over a day ago — is read here
     /// instead, in the pane, and seen only once the catch-up is left.
     async fn catch_up_enter(&mut self) {
         // A firing heading it is read where it stands: all of it, in the pane.
@@ -3120,32 +2960,28 @@ impl App {
         events::target(&self.event_items(), key)
     }
 
-    /// The flow the line under the cursor stands for, as its graph node: the
-    /// one behind what it set off, or behind its run.
-    fn event_flow(&self) -> Option<String> {
-        let name = match self.event_target()? {
-            events::Target::Flow(name) => name,
-            events::Target::Run(id) => match &self.feed.runs.get(&id)?.cause {
-                Cause::Flow { flow, .. } => flow.clone(),
-                _ => return None,
-            },
-        };
-        Some(format!("flow:{name}"))
-    }
-
     /// `enter` in the events view: an event goes to its run on the list, a
-    /// line a flow set off to that flow in the graph (as `^g` there does).
+    /// line a flow set off to that flow's row.
     async fn events_enter(&mut self) {
         match self.event_target() {
             Some(events::Target::Run(id)) => self.show_run(&id).await,
-            Some(events::Target::Flow(name)) => {
-                if self.flows.iter().any(|f| f.name == name) {
-                    self.toggle_graph().await;
-                } else {
-                    self.say(format!("{name} is not a flow any more"));
-                }
-            }
+            Some(events::Target::Flow(name)) => self.show_flow(&name).await,
             None => self.say("nothing here to open"),
+        }
+    }
+
+    /// The list, with the cursor on a flow's row, when it has one: a flow
+    /// with no `in` and no runs has none, and the view stays and says so.
+    async fn show_flow(&mut self, name: &str) {
+        if !self.flows.iter().any(|f| f.name == name) {
+            return self.say(format!("{name} is not a flow any more"));
+        }
+        self.back_to_list().await;
+        let key = rows::flow_key(name);
+        if self.keys().contains(&key) {
+            self.select(Some(key));
+        } else {
+            self.say(format!("{name} has no row on the list"));
         }
     }
 
@@ -3327,7 +3163,7 @@ impl App {
             return self.say("/flow run|pause|resume|approve|edit|new|test|draft|reload [name]");
         }
         let Some(name) = named.or_else(|| self.flow_here()) else {
-            return self.say(format!("/flow {verb} which? a flow's row, its node, or its name"));
+            return self.say(format!("/flow {verb} which? a flow's row or its name"));
         };
         match verb {
             "edit" => self.edit_flow(&name),
@@ -3793,7 +3629,6 @@ impl App {
     async fn reorder(&mut self, up: bool) {
         match self.view {
             View::Work => {}
-            View::Graph => return self.say("⇧↑↓ moves rows on the list · the graph lays itself out"),
             View::Events => return self.say("⇧↑↓ moves rows on the list · events stay in the order they came"),
             View::CatchUp => return self.say("⇧↑↓ moves rows on the list · esc goes there"),
         }
@@ -4219,12 +4054,6 @@ impl App {
                 }
                 return Ok(());
             }
-            Mode::Fire(name) => {
-                if k.code == KeyCode::Char('y') {
-                    self.flow_act("run", name).await;
-                }
-                return Ok(());
-            }
             Mode::SummaryCost { .. } => {
                 if let Some(p) = self.summary_ask.take()
                     && k.code == KeyCode::Char('y')
@@ -4373,20 +4202,6 @@ impl App {
             && matches!(k.code, KeyCode::Tab | KeyCode::BackTab)
         {
             self.cycle_lens(if k.code == KeyCode::BackTab { -1 } else { 1 });
-            return Ok(());
-        }
-        // In the graph, with nothing typed, left and right follow the wiring
-        // rather than move a cursor through an empty line.
-        if self.view == View::Graph
-            && self.line.is_empty()
-            && matches!(self.mode, Mode::Normal)
-            && matches!(k.code, KeyCode::Left | KeyCode::Right)
-        {
-            self.graph_step(if k.code == KeyCode::Left {
-                graph::Dir::Left
-            } else {
-                graph::Dir::Right
-            });
             return Ok(());
         }
         // On a flow's row, with nothing typed, → opens it to its latest firing's steps and ←
@@ -4633,7 +4448,6 @@ impl App {
             }
             (KeyCode::Char('r'), KeyModifiers::CONTROL) => self.rename_here(),
             (KeyCode::Char('o'), KeyModifiers::CONTROL) => self.toggle_pane(),
-            (KeyCode::Char('g'), KeyModifiers::CONTROL) => self.toggle_graph().await,
             (KeyCode::Char('t'), KeyModifiers::CONTROL) => self.toggle_pin().await,
             (KeyCode::Esc, _) => {
                 // The pane goes first, whatever stands open behind it: it is
@@ -4646,16 +4460,12 @@ impl App {
                 } else if !self.filter.is_empty() {
                     self.filter.clear();
                     self.settle();
-                } else if self.view == View::Graph {
-                    self.toggle_graph().await;
                 } else if self.view == View::Events {
                     self.toggle_events().await;
                 } else if self.view == View::CatchUp {
                     self.back_to_list().await;
                 }
             }
-            (KeyCode::Down, _) if self.view == View::Graph => self.graph_step(graph::Dir::Down),
-            (KeyCode::Up, _) if self.view == View::Graph => self.graph_step(graph::Dir::Up),
             (KeyCode::Down, _) => {
                 self.step(1);
                 self.moved().await;
@@ -4687,10 +4497,6 @@ impl App {
 
     /// `enter` on an empty line: whatever the row under the cursor is for.
     async fn enter_row(&mut self, area: Rect) -> Result<()> {
-        if self.view == View::Graph {
-            self.graph_enter();
-            return Ok(());
-        }
         if self.view == View::Events {
             self.events_enter().await;
             return Ok(());
@@ -5220,7 +5026,6 @@ impl App {
             palette::Cmd::Pin => self.toggle_pin().await,
             palette::Cmd::Hide => self.hide().await,
             palette::Cmd::Sort => self.sort_project().await,
-            palette::Cmd::Graph => self.toggle_graph().await,
             palette::Cmd::Events => self.toggle_events().await,
             palette::Cmd::Shell => self.new_shell(area).await,
             palette::Cmd::Reload => match arg.trim() {
@@ -5357,14 +5162,6 @@ impl App {
             .count();
         let title = match self.view {
             View::Work => rows::headline(&rows, news, &self.filter),
-            View::Graph => match &self.graph {
-                Some(g) => graph::headline(
-                    g,
-                    graph::keep(g, &self.filter, &self.names, &self.digest.checkouts).len(),
-                    &self.filter,
-                ),
-                None => "wiring".into(),
-            },
             View::Events => events::headline(self.event_items().len(), &self.feed, &self.filter),
             View::CatchUp => match &self.catch {
                 Some(c) => catchup::headline(c.since, Timestamp::now()),
@@ -5382,9 +5179,8 @@ impl App {
             notes.push(Span::styled(note, theme::needs()));
         }
         // The flows with no `in` have no header of their own to ride, so the
-        // headline says them, amber when one waits for a yes. The graph shows
-        // them wired, and it is where that yes is given. One of theirs that
-        // did not load is said beside them, in red.
+        // headline says them, amber when one waits for a yes. One of theirs
+        // that did not load is said beside them, in red.
         if self.view == View::Work {
             let chips = rows::chips(&self.flows, None, Timestamp::now());
             for (words, tone) in rows::global_parts(&chips, !self.broken_in(None).is_empty()) {
@@ -5452,7 +5248,6 @@ impl App {
         if let Some(list) = a.list {
             match self.view {
                 View::Work => self.draw_list(f, list, &rows),
-                View::Graph => self.draw_graph(f, list),
                 View::Events => self.draw_events(f, list),
                 View::CatchUp => self.draw_catch_up(f, list),
             }
@@ -5917,30 +5712,6 @@ impl App {
         };
     }
 
-    /// The wiring, a window of it at a time, following the selection.
-    fn draw_graph(&self, f: &mut Frame, area: Rect) {
-        // Until the mouse knows the graph, it must not act on the list's map.
-        *self.hit.borrow_mut() = ListHit::default();
-        let Some((g, plan)) = self.graph_plan() else {
-            f.render_widget(Paragraph::new(" reading the wiring…").dim(), area);
-            return;
-        };
-        if plan.boxes.is_empty() {
-            let msg = if self.filter.is_empty() {
-                " nothing wired yet · /flow new <name> writes a flow"
-            } else {
-                " nothing matches"
-            };
-            f.render_widget(Paragraph::new(msg).dim(), area);
-            return;
-        }
-        let (w, h) = (area.width as usize, area.height as usize);
-        let at = graph::follow(&plan, self.sel.as_deref(), self.graph_at.get(), w, h);
-        self.graph_at.set(at);
-        let canvas = graph::draw(g, &plan, &self.names, self.sel.as_deref(), Timestamp::now());
-        f.render_widget(Paragraph::new(canvas.lines(at.0, at.1, w, h)), area);
-    }
-
     /// The events, newest first, a window of them following the selection.
     fn draw_events(&self, f: &mut Frame, area: Rect) {
         self.list_h.set(area.height);
@@ -6117,33 +5888,6 @@ impl App {
             f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
             return;
         }
-        if let (Some(g), Some(n)) = (self.graph.as_ref(), self.selected_node()) {
-            let flow = self.flow_of_node(n);
-            let firing = flow.and_then(|f| self.digest.firings.iter().find(|x| x.flow == f.name));
-            // The one being answered, or else the first still waiting.
-            let asking = match &self.mode {
-                Mode::Answer(id) => Some(id.as_str()),
-                _ => n.waiting.first().map(String::as_str),
-            };
-            let q = asking
-                .and_then(|id| self.digest.decisions.iter().find(|d| d.id == id))
-                .map(|q| (q, q.run.as_deref().and_then(|r| self.run_by_id(r))));
-            let at = matches!(self.mode, Mode::Answer(_)).then_some(self.answer_at);
-            let lines = graph::pane_lines(
-                g,
-                n,
-                flow,
-                firing,
-                q,
-                &self.picked,
-                at,
-                area.width as usize,
-                &self.names,
-                now,
-            );
-            f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
-            return;
-        }
         if self.view == View::Events {
             let items = self.event_items();
             let lines = match self.sel.as_deref().and_then(|k| events::item_of(&items, k)) {
@@ -6261,7 +6005,6 @@ impl App {
                     .unwrap_or_default();
                 return format!("dismiss {t}? y / any key");
             }
-            Mode::Fire(name) => return format!("run {name} now? y / any key"),
             Mode::SummaryCost { runs, calls } => {
                 let (runs, calls) = (*runs, *calls);
                 return match self.summary_ask.as_ref().map(|p| &p.target) {
@@ -6400,34 +6143,6 @@ impl App {
             }
             return s;
         }
-        if self.view == View::Graph {
-            let pane = if self.show_pane {
-                "^o hides details"
-            } else {
-                "^o details"
-            };
-            let mut s = String::new();
-            if self.selected_node().is_some_and(|n| !n.waiting.is_empty()) {
-                s.push_str("enter or `1 and a note` on the line answers it · ");
-            } else if let Some(n) = self.selected_node()
-                && let Some(f) = self.flow_of_node(n)
-            {
-                // `enter` runs the flow from its own node; its question's only
-                // shows. A removed flow has nothing to run, pause or approve.
-                let runs = n.kind == rl_proto::graph::NodeKind::Flow;
-                s.push_str(match f.status() {
-                    FlowStatus::NeedsApproval => "/flow approve · ",
-                    FlowStatus::Paused if runs => "enter runs it now · /flow resume · ",
-                    FlowStatus::Paused => "/flow resume · ",
-                    FlowStatus::On if runs => "enter runs it now · /flow pause · ",
-                    FlowStatus::On => "/flow pause · ",
-                    FlowStatus::Removed => "",
-                });
-                s.push_str("/flow edit · ");
-            }
-            s.push_str(&format!("←→ follows the wiring · {pane} · ^g back"));
-            return s;
-        }
         if self.view == View::Events {
             let pane = if self.show_pane {
                 "^o hides details"
@@ -6436,7 +6151,7 @@ impl App {
             };
             let go = match self.event_target() {
                 Some(events::Target::Run(_)) => "enter its run on the list · ",
-                Some(events::Target::Flow(_)) => "enter its flow in the graph · ",
+                Some(events::Target::Flow(_)) => "enter its flow on the list · ",
                 None => "",
             };
             return format!("{go}^f kind: in: by: · {pane} · esc back");
@@ -6468,7 +6183,7 @@ impl App {
                     _ => "/flow run · ",
                 };
                 let archives = if f.runs.is_empty() { "" } else { "^x archives · " };
-                format!("enter its firings · {yes}^g its wiring · {archives}{pane}")
+                format!("enter its firings · {yes}{archives}{pane}")
             }
             Some(Row::Run(i)) if i.run.state.is_terminal() => {
                 format!("enter output · /summary · ^x archives · ^t pins · {pane}")
@@ -6481,11 +6196,11 @@ impl App {
             // A flow here that did not load is what `/flow edit` opens, at the line.
             Some(Row::Group(h)) if h.is_everywhere() => {
                 let fix = self.broken_hint(&h);
-                format!("enter its stats · ^g the wiring · {fix}{pane}")
+                format!("enter its stats · {fix}{pane}")
             }
             Some(Row::Group(h)) => {
                 let fix = self.broken_hint(&h);
-                format!("enter its stats · /shell · ^g its wiring · {fix}^r renames · ^x removes · {pane}")
+                format!("enter its stats · /shell · {fix}^r renames · ^x removes · {pane}")
             }
             _ => String::new(),
         }
@@ -6778,10 +6493,10 @@ mod tests {
         assert_eq!(rest.spans[2].style, theme::needs(), "a note keeps its tone");
         let [first, ..] = said.lines(Some("/tmp/x"));
         assert_eq!(text(&first), format!("relay {v} · /tmp/x"));
-        // The graph's headline leads with its own word, and keeps it.
-        let said = Said::new("wiring · 3 flows".into(), vec![]);
+        // The events view's headline leads with its own word, and keeps it.
+        let said = Said::new("events · 3".into(), vec![]);
         let [_, tally, rest] = said.lines(None);
-        assert_eq!(text(&tally), "wiring · 3 flows");
+        assert_eq!(text(&tally), "events · 3");
         assert_eq!(
             tally.spans[0].style,
             theme::accent().add_modifier(ratatui::style::Modifier::BOLD)
@@ -8456,7 +8171,7 @@ mod tests {
         })
         .await;
         // The flow is in the project: its row is there, the list is still
-        // where enter goes, and `^g` from there is its node in the graph.
+        // where enter goes.
         app.flows.push(rl_proto::flow::Flow {
             name: "nightly".into(),
             hash: "h".into(),
@@ -8486,7 +8201,6 @@ mod tests {
         );
         drop(cu);
         app.select(Some(flow.clone()));
-        assert_eq!(app.flow_target().as_deref(), Some("flow:nightly"));
         assert!(app.hints().starts_with("enter it on the list"), "{}", app.hints());
         press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
         assert!(app.view == super::View::Work, "the list has flow rows of its own");
@@ -8861,17 +8575,17 @@ mod tests {
         );
         press(&mut app, KeyCode::Esc, KeyModifiers::NONE).await;
         assert!(app.view == super::View::Work);
-        // From the graph too; bare, since you were last here.
+        // From the events view too; bare, since you were last here.
         let left = nine_hours_ago();
         app.left = Some(left);
-        app.toggle_graph().await;
-        assert!(app.view == super::View::Graph);
+        app.toggle_events().await;
+        assert!(app.view == super::View::Events);
         type_in(&mut app, "/since").await;
         press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
         assert!(app.view == super::View::CatchUp);
         assert_eq!(app.catch.as_ref().unwrap().since, left);
         press(&mut app, KeyCode::Esc, KeyModifiers::NONE).await;
-        assert!(app.view == super::View::Work, "esc goes to the list, not the graph");
+        assert!(app.view == super::View::Work, "esc goes to the list, not the events");
         type_in(&mut app, "/since soon").await;
         press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
         assert!(app.view == super::View::Work, "a stretch it cannot read opens nothing");
@@ -8942,8 +8656,7 @@ mod tests {
     }
 
     /// `/flow` acts on the one named after its verb, else on the flow under
-    /// the cursor; with neither it says what it needs. In the graph, enter on
-    /// a flow offers to run it.
+    /// the cursor; with neither it says what it needs.
     #[tokio::test]
     async fn flow_commands_act_on_the_one_named_else_the_flow_here() {
         let (tmp, token, mut app, _folder) = panel_of(|folder, now| {
@@ -8984,7 +8697,7 @@ mod tests {
 
         app.select(Some(RUN.into()));
         run(&mut app, "/flow pause").await;
-        assert_eq!(said(&app), "/flow pause which? a flow's row, its node, or its name");
+        assert_eq!(said(&app), "/flow pause which? a flow's row or its name");
         run(&mut app, "/flow approve nightly").await;
         assert_eq!(said(&app), "nightly approved");
         assert!(nightly(&app).approved());
@@ -9034,33 +8747,8 @@ mod tests {
         assert!(said(&app).starts_with("not loaded: broken · flow.md"), "{}", said(&app));
         assert!(app.flows.iter().all(|f| f.name != "broken"));
 
-        // In the graph, enter on a flow with its yes offers to run it, and `y` does.
-        app.toggle_graph().await;
-        app.select(Some("flow:nightly".into()));
-        press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
-        assert!(matches!(&app.mode, super::Mode::Fire(n) if n == "nightly"));
-        assert_eq!(app.footer(200), "run nightly now? y / any key");
-        press(&mut app, KeyCode::Char('y'), KeyModifiers::NONE).await;
+        run(&mut app, "/flow run nightly").await;
         assert!(said(&app).starts_with("fired nightly · firing "), "{}", said(&app));
-        assert!(matches!(app.mode, super::Mode::Normal));
-        // One without its yes says so, and offers nothing to run.
-        std::fs::create_dir_all(home.flow_dir("fresh")).unwrap();
-        std::fs::write(
-            home.flow_dir("fresh").join("flow.md"),
-            "---\nsteps:\n  first:\n    run: echo hi\n---\n",
-        )
-        .unwrap();
-        run(&mut app, "/flow reload").await;
-        app.select(Some("flow:fresh".into()));
-        assert!(
-            app.hints().starts_with("/flow approve · /flow edit · "),
-            "{}",
-            app.hints()
-        );
-        press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
-        assert_eq!(said(&app), "fresh needs a yes first: /flow approve");
-        assert!(matches!(app.mode, super::Mode::Normal));
-        app.toggle_graph().await;
         app.select(Some(RUN.into()));
         run(&mut app, "/flow edit not_a_name").await;
         assert_eq!(

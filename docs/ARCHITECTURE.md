@@ -26,7 +26,7 @@ flowchart TB
         flows["flows — flow.md → firings"]
         dec["decisions — questions waiting on you"]
         attach["attach — screen, then live"]
-        digest["digest · summary · recap · graph"]
+        digest["digest · summary · recap"]
     end
 
     subgraph holder["rl-session — one holder per run"]
@@ -247,7 +247,7 @@ sequenceDiagram
   agent; one this machine can run goes to the project's **warm shell** (one persistent `$SHELL -i`
   per folder, written to via `run.input`); anything else goes to the interpreter (§6) and comes
   back as a filled form. The line's right edge says which, before `enter`. Everything else is a
-  `/` command (`tui/palette.rs`) or one of a few chords (`^x ^r ^t ^g ^o ^f`, `^h` for the keys).
+  `/` command (`tui/palette.rs`) or one of a few chords (`^x ^r ^t ^o ^f`, `^h` for the keys).
 - **Enter on a live run** leaves ratatui and pipes the run to the real terminal (`attach.rs`,
   shared with `rl join`); `ctrl-\` lets go. An ended run opens in a `vt100` tile (`tui/term.rs`).
 - **The pane** (`tui/pane.rs`) holds facts for whatever is selected: a run, a flow and its
@@ -255,8 +255,6 @@ sequenceDiagram
   (`tui/flow_graph.rs`): what starts it, its steps as boxes by rank with their `if`s and its
   last firing's marks, and the flows it starts — worked out from every loaded flow's definition
   (`tui/flow_links.rs`), with no ledger. Too narrow for the drawing, it lists the steps.
-- **The graph** (`tui/graph.rs`, data from `graph.get`) draws every flow, its steps, and the
-  observed event edges between runs and flows, layered by connection.
 - **The events view** (`tui/events.rs`) lists the ledger's events newest first, each with what
   it set off, read from causes, never guessed.
 - **The catch-up** (`rl-cli/src/catchup.rs`) opens instead of the list when you were away longer

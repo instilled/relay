@@ -1307,10 +1307,10 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
     };
     blocks.sort_by_cached_key(|(name, key, block)| (place(block).unwrap_or(usize::MAX), name.clone(), key.clone()));
     rows.extend(blocks.into_iter().flat_map(|(_, _, block)| block));
-    // The flows with no `in` are said in the headline (`everywhere`), and the
-    // graph is where they are wired. Their rows, and what flows ran outside
-    // every project, are gathered after the projects, under one
-    // `everywhere`, rather than under whatever folder that was.
+    // The flows with no `in` are said in the headline (`everywhere`). Their
+    // rows, and what flows ran outside every project, are gathered after the
+    // projects, under one `everywhere`, rather than under whatever folder that
+    // was.
     rows.extend(everywhere);
     rows
 }
@@ -1562,8 +1562,8 @@ pub fn everywhere(chips: &[Chip]) -> Option<(String, bool)> {
     match waiting {
         0 => {}
         // All of them wait: the count already says how many.
-        n if n == chips.len() => s.push_str(&format!(" {} a yes · /graph", need(n))),
-        n => s.push_str(&format!(" · {n} {} a yes · /graph", need(n))),
+        n if n == chips.len() => s.push_str(&format!(" {} a yes", need(n))),
+        n => s.push_str(&format!(" · {n} {} a yes", need(n))),
     }
     Some((s, waiting > 0))
 }
@@ -2531,11 +2531,11 @@ mod tests {
         // One waiting, and it is all there is: the count already says which.
         assert_eq!(
             say(std::slice::from_ref(&waiting)),
-            Some(("↻ 1 everywhere needs a yes · /graph".into(), true))
+            Some(("↻ 1 everywhere needs a yes".into(), true))
         );
         assert_eq!(
             say(&[pulse, nightly, notify, waiting]),
-            Some(("↻ 4 everywhere · 1 needs a yes · /graph".into(), true))
+            Some(("↻ 4 everywhere · 1 needs a yes".into(), true))
         );
     }
 

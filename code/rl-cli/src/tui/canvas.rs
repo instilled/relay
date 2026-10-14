@@ -76,38 +76,10 @@ impl Canvas {
         }
     }
 
-    pub(super) fn hline(&mut self, x0: usize, x1: usize, y: usize, style: Style) {
-        let (a, b) = (x0.min(x1), x0.max(x1));
-        for x in a..=b {
-            let mut m = 0;
-            if x > a {
-                m |= LEFT;
-            }
-            if x < b {
-                m |= RIGHT;
-            }
-            self.mark(x, y, m, style);
-        }
-    }
-
-    pub(super) fn vline(&mut self, x: usize, y0: usize, y1: usize, style: Style) {
-        let (a, b) = (y0.min(y1), y0.max(y1));
-        for y in a..=b {
-            let mut m = 0;
-            if y > a {
-                m |= UP;
-            }
-            if y < b {
-                m |= DOWN;
-            }
-            self.mark(x, y, m, style);
-        }
-    }
-
     pub(super) fn mark(&mut self, x: usize, y: usize, m: u8, style: Style) {
         if let Some(c) = self.at(x, y) {
             c.lines |= m;
-            // A counted edge shows through a merely declared one.
+            // A coloured line shows through a dim one.
             if c.style == Style::default() || style != theme::dim() {
                 c.style = style;
             }
