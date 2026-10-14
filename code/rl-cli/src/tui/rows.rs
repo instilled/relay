@@ -1562,8 +1562,8 @@ pub fn everywhere(chips: &[Chip]) -> Option<(String, bool)> {
     match waiting {
         0 => {}
         // All of them wait: the count already says how many.
-        n if n == chips.len() => s.push_str(&format!(" {} a yes", need(n))),
-        n => s.push_str(&format!(" · {n} {} a yes", need(n))),
+        n if n == chips.len() => s.push_str(&format!(" {} a yes · /flow approve", need(n))),
+        n => s.push_str(&format!(" · {n} {} a yes · /flow approve", need(n))),
     }
     Some((s, waiting > 0))
 }
@@ -2531,11 +2531,11 @@ mod tests {
         // One waiting, and it is all there is: the count already says which.
         assert_eq!(
             say(std::slice::from_ref(&waiting)),
-            Some(("↻ 1 everywhere needs a yes".into(), true))
+            Some(("↻ 1 everywhere needs a yes · /flow approve".into(), true))
         );
         assert_eq!(
             say(&[pulse, nightly, notify, waiting]),
-            Some(("↻ 4 everywhere · 1 needs a yes".into(), true))
+            Some(("↻ 4 everywhere · 1 needs a yes · /flow approve".into(), true))
         );
     }
 

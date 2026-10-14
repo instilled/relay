@@ -2970,19 +2970,42 @@ impl App {
         }
     }
 
-    /// The list, with the cursor on a flow's row, when it has one: a flow
-    /// with no `in` and no runs has none, and the view stays and says so.
+    /// The list, with the cursor on a flow's row. When the lens or the search
+    /// hides it, they give way; when the list has none (a flow with no `in`
+    /// and no runs, or not yet approved), the view stays and says so.
     async fn show_flow(&mut self, name: &str) {
         if !self.flows.iter().any(|f| f.name == name) {
             return self.say(format!("{name} is not a flow any more"));
         }
+        let list_filter = match self.view {
+            View::Events => self.filter_aside.clone(),
+            _ => self.filter.clone(),
+        };
+        let is_it = |r: &Row| matches!(r, Row::Flow(f) if f.name == name);
+        let (key, opened) = match self.row_key(&list_filter, self.lens, is_it) {
+            Some(k) => (k, None),
+            None => match self
+                .row_key("", rows::Lens::All, is_it)
+                .map(|k| (k, rows::Lens::All))
+                .or_else(|| {
+                    self.row_key("", rows::Lens::Hidden, is_it)
+                        .map(|k| (k, rows::Lens::Hidden))
+                }) {
+                Some((k, lens)) => (k, Some(lens)),
+                None => return self.say(format!("{name} has no row on the list")),
+            },
+        };
         self.back_to_list().await;
-        let key = rows::flow_key(name);
-        if self.keys().contains(&key) {
-            self.select(Some(key));
-        } else {
-            self.say(format!("{name} has no row on the list"));
+        if let Some(lens) = opened {
+            self.filter.clear();
+            self.lens = lens;
+            self.say(if lens == rows::Lens::Hidden {
+                format!("{name} is hidden: here in the hidden lens, /hide brings it back")
+            } else {
+                format!("the search and the lens let go, to show {name}")
+            });
         }
+        self.select(Some(key));
     }
 
     /// The list, with the cursor on a run: its own row, or its flow's. When
@@ -3043,6 +3066,16 @@ impl App {
     /// The list's row for a run, as the list would stand with this search
     /// and lens: its own, or the flow it folds into.
     fn list_key(&self, id: &str, filter: &str, lens: rows::Lens) -> Option<String> {
+        self.row_key(filter, lens, |r| match r {
+            Row::Run(i) => i.run.id == id,
+            Row::Flow(f) => f.runs.iter().any(|i| i.run.id == id),
+            _ => false,
+        })
+    }
+
+    /// The key of the first row of the list that `is` picks, as the list would
+    /// stand with this search and lens.
+    fn row_key(&self, filter: &str, lens: rows::Lens, is: impl Fn(&Row) -> bool) -> Option<String> {
         let cx = rows::Context {
             names: &self.names,
             flows: &self.flows,
@@ -3053,11 +3086,7 @@ impl App {
         };
         rows::build(&self.digest, &cx)
             .iter()
-            .find(|r| match r {
-                Row::Run(i) => i.run.id == id,
-                Row::Flow(f) => f.runs.iter().any(|i| i.run.id == id),
-                _ => false,
-            })
+            .find(|r| is(r))
             .and_then(|r| r.key())
     }
 
@@ -8148,6 +8177,77 @@ mod tests {
         assert!(app.show_pane, "a question is only worth its details, as on the list");
         press(&mut app, KeyCode::Down, KeyModifiers::NONE).await;
         assert!(!app.show_pane, "and off it the pane goes again");
+        token.cancel();
+    }
+
+    /// `enter` on a line a flow set off, in the events view: its row on the
+    /// list; the search and lens give way when they hide it; and with no row
+    /// at all the view stays and says so.
+    #[tokio::test]
+    async fn a_flow_in_the_events_view_is_found_on_the_list_or_said_to_have_no_row() {
+        let (_tmp, token, mut app, folder) = panel_of(|folder, now| {
+            let mut r = rl_proto::types::Run::new(
+                "run00002",
+                rl_proto::types::RunKind::Command,
+                "nightly",
+                vec!["sh".into(), "-c".into(), "true".into()],
+                folder,
+                folder,
+                now,
+            );
+            r.cause = rl_proto::types::Cause::Flow {
+                flow: "nightly".into(),
+                step: "probe".into(),
+            };
+            vec![r]
+        })
+        .await;
+        let flow = |name: &str, approved: bool| rl_proto::flow::Flow {
+            name: name.into(),
+            hash: "h".into(),
+            def: serde_json::json!({ "in_": folder, "trigger": { "when": { "Every": 3600 }, "on": [] } }),
+            source: format!("/h/flows/{name}").into(),
+            folder: Some(folder.clone()),
+            paused: false,
+            approved_hash: approved.then(|| "h".to_string()),
+            last_fired_at: None,
+            next_at: None,
+            removed_at: None,
+        };
+        // A refresh reloads the flows from the daemon, which has none here.
+        let load = |app: &mut super::App| {
+            app.flows = vec![flow("nightly", true), {
+                let mut unseen = flow("ghost", false);
+                unseen.def = serde_json::json!({ "trigger": { "when": { "Every": 3600 }, "on": [] } });
+                unseen.folder = None;
+                unseen
+            }];
+        };
+
+        let said = |app: &super::App| app.flash.as_ref().map(|(m, _)| m.clone()).unwrap_or_default();
+        app.toggle_events().await;
+        load(&mut app);
+        assert!(app.view == super::View::Events);
+        app.show_flow("nightly").await;
+        assert!(app.view == super::View::Work);
+        assert_eq!(app.sel.as_deref(), Some("f:nightly"));
+
+        // A search that hides the row gives way, and says so.
+        app.filter = "zzz-nothing".into();
+        app.toggle_events().await;
+        load(&mut app);
+        app.show_flow("nightly").await;
+        assert!(app.view == super::View::Work);
+        assert!(app.filter.is_empty());
+        assert_eq!(app.sel.as_deref(), Some("f:nightly"));
+        assert!(said(&app).contains("let go"), "{}", said(&app));
+
+        // With no row at all, the events view is still up.
+        app.toggle_events().await;
+        load(&mut app);
+        app.show_flow("ghost").await;
+        assert!(app.view == super::View::Events, "the view stays");
+        assert_eq!(said(&app), "ghost has no row on the list");
         token.cancel();
     }
 

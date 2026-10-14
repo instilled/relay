@@ -334,8 +334,8 @@ fn step_lines(def: &FlowDef, firing: Option<&Firing>, at: Option<usize>, listed:
         let lit = at == Some(n);
         let step = def.steps.iter().find(|s| s.name == name);
         let does = step.map(|s| match &s.does {
-            Does::Run(a) => a.label(),
-            Does::Ask(a) => format!("asks: {}", a.text),
+            Does::Run(a) => first_line(&a.label()),
+            Does::Ask(a) => format!("asks: {}", first_line(&a.text)),
         });
         let lead = if listed {
             format!(
@@ -365,6 +365,18 @@ fn step_lines(def: &FlowDef, firing: Option<&Firing>, at: Option<usize>, listed:
         lines.push(if lit { line.style(theme::selected()) } else { line });
     }
     lines
+}
+
+/// Its first line, with ` …` when there were more: a prompt's words must not
+/// run together, nor crowd out the lines under it.
+fn first_line(text: &str) -> String {
+    let mut lines = text.lines();
+    let first = lines.next().unwrap_or("").trim_end();
+    if lines.any(|l| !l.trim().is_empty()) {
+        format!("{first} …")
+    } else {
+        first.to_string()
+    }
 }
 
 /// What `/reload` says in the flash: how many flows loaded, and what did not
@@ -709,6 +721,17 @@ mod tests {
             "{s}"
         );
         assert!(pane_text(&f, Some(&waiting), None, &Links::default(), 30).contains("│ ✓ probe │"));
+    }
+
+    #[test]
+    fn a_steps_action_shows_its_first_line_only() {
+        assert_eq!(first_line("claude · one line"), "claude · one line");
+        assert_eq!(
+            first_line("claude · from three\nsources, then\nsummarise"),
+            "claude · from three …"
+        );
+        assert_eq!(first_line("trailing\n\n"), "trailing");
+        assert_eq!(first_line(""), "");
     }
 
     #[test]

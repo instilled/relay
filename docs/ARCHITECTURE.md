@@ -94,8 +94,9 @@ flowchart LR
   `backend` and `screen` are the process.
 - `rl-flow` is all the deciding about a flow and none of the doing: `flow.md` parsed and
   checked (`def`), step order (`plan`), what a firing does next (`advance`), `if:` (`cond`),
-  placeholders (`template`), step state rules (`state`), `rl flow test` (`preview`), cron, and the
-  folder hash. `rld` carries out its answers; `rl` uses it to draw a flow.
+  placeholders (`template`), step state rules (`state`), `rl flow test` (`preview`), whether an
+  event reaches a flow's `on` and `where` (`events`, shared by the daemon's trigger check and the
+  pane's links), cron, and the folder hash. `rld` carries out its answers; `rl` uses it to draw a flow.
 - `vendor/crossterm` is crossterm 0.29 with one fix (a `CSI ?` reply no longer swallows the keys
   after it), patched in from the workspace manifest until a release carries it.
 
