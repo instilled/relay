@@ -1,5 +1,5 @@
 //! What a search says: plain words, and a few `name:value` tokens that pick
-//! by what a thing is rather than what it is called. The list and the graph
+//! by what a thing is rather than what it is called. The list and the events view
 //! both narrow to what it hits.
 //!
 //! - words match anywhere — title, project, CLI, summary — and every word
@@ -50,8 +50,7 @@ pub struct Subject<'a> {
     pub project: Vec<&'a str>,
     /// Its states, from `STATES`.
     pub is: Vec<&'static str>,
-    /// What it is, from `KINDS` (or a graph node's own kinds, or an
-    /// event's).
+    /// What it is, from `KINDS` (or an event's).
     pub kind: Vec<&'a str>,
     /// The flows behind it.
     pub by: Vec<&'a str>,
@@ -80,10 +79,6 @@ impl Query {
             }
         }
         q
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.words.is_empty() && self.within.is_empty() && self.on.is_empty() && !self.picks_rows()
     }
 
     /// Whether it asks about what things are — state, kind, flow — which a
@@ -315,7 +310,8 @@ mod tests {
         let q = Query::parse("is: api");
         assert_eq!(q.words, ["api"]);
         assert!(!q.picks_rows());
-        assert!(Query::parse("is:").is_empty());
+        let bare = Query::parse("is:");
+        assert!(bare.words.is_empty() && bare.within.is_empty() && bare.on.is_empty() && !bare.picks_rows());
         assert!(
             Query::parse("where:x").words == ["where:x"],
             "an unknown name is a word"

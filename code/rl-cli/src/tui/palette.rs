@@ -20,7 +20,6 @@ pub enum Cmd {
     Hide,
     Sort,
     Pane,
-    Graph,
     Events,
     Reload,
     Flow,
@@ -137,13 +136,6 @@ pub const ALL: &[Command] = &[
         cmd: Cmd::Pane,
     },
     Command {
-        name: "graph",
-        args: "",
-        words: &[],
-        what: "the wiring: every flow, what it runs and what sets it off, across projects",
-        cmd: Cmd::Graph,
-    },
-    Command {
         name: "events",
         args: "",
         words: &[],
@@ -200,7 +192,7 @@ pub const ALL: &[Command] = &[
         name: "filter",
         args: "[words in: is: kind: by:]",
         words: &[],
-        what: "narrow the list or graph as you type; esc on the list clears it",
+        what: "narrow the list as you type; esc on the list clears it",
         cmd: Cmd::Filter,
     },
     Command {
@@ -277,7 +269,6 @@ pub fn key(cmd: Cmd) -> &'static str {
         Cmd::Stop | Cmd::Archive => "^x",
         Cmd::Rename => "^r",
         Cmd::Pin => "^t",
-        Cmd::Graph => "^g",
         Cmd::Pane => "^o",
         Cmd::Filter => "^f",
         _ => "",
@@ -412,7 +403,6 @@ mod tests {
         assert_eq!(key(Cmd::Archive), "^x");
         assert_eq!(key(Cmd::Rename), "^r");
         assert_eq!(key(Cmd::Pin), "^t");
-        assert_eq!(key(Cmd::Graph), "^g");
         assert_eq!(key(Cmd::Pane), "^o");
         assert_eq!(key(Cmd::Shell), "", "a shell is a command, not a key");
         assert_eq!(key(Cmd::Filter), "^f");

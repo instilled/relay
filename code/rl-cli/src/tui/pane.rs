@@ -3,6 +3,7 @@
 //! lines.
 
 use super::firings::{self, FlowPane};
+use super::flow_links::{self, Wired};
 use super::flows;
 use super::rows::{FlowRow, Names, asked_by, cause_words, fit};
 use crate::digest::signals;
@@ -291,12 +292,14 @@ const FLOW_RUNS: usize = 10;
 const FLOW_MARKS: usize = 40;
 
 /// A flow in the pane: the flow itself — its steps as the firing shown left them, the caret's
-/// lit while walking — the files that firing's steps wrote, how its runs went, what was said of
-/// it, then its last firings (`fp`, once fetched; else its last runs).
+/// lit while walking, and how it is wired among the others (`wired`) — the files that firing's
+/// steps wrote, how its runs went, what was said of it, then its last firings (`fp`, once
+/// fetched; else its last runs).
 #[allow(clippy::too_many_arguments)]
 pub fn flow_lines(
     j: &FlowRow,
     flow: Option<&Flow>,
+    wired: &[Wired],
     fp: Option<&FlowPane>,
     walking: bool,
     summary: Option<&Summary>,
@@ -309,7 +312,8 @@ pub fn flow_lines(
     let loaded = flow.and_then(|f| Some((f, serde_json::from_value::<rl_flow::def::FlowDef>(f.def.clone()).ok()?)));
     let mut lines = match loaded {
         Some((f, def)) => {
-            let mut l = flows::pane_lines(f, &def, shown, at, names, now);
+            let links = flow_links::links(&f.name, wired);
+            let mut l = flows::pane_lines(f, &def, shown, at, &links, names, width, now);
             if let Some(p) = fp.filter(|p| !p.files.is_empty()) {
                 l.push(fact("files", firings::files_words(&p.files)));
             }
@@ -475,9 +479,7 @@ pub fn project_lines(
     // The flows in it, told the same way the header's chips are.
     lines.extend(flows_section(flows, Some(workspace), now));
     lines.push(Line::raw(""));
-    lines.push(Line::from(
-        Span::raw(format!(" ^g shows its wiring{} · ^r renames", fix_hint(broken))).dim(),
-    ));
+    lines.push(Line::from(Span::raw(format!(" ^r renames{}", fix_hint(broken))).dim()));
     lines
 }
 
@@ -509,10 +511,13 @@ pub fn everywhere_lines(
     lines.extend(runs_facts(mine, now));
     lines.extend(summary_section(summary, width, now));
     lines.extend(flows_section(flows, None, now));
-    lines.push(Line::raw(""));
-    lines.push(Line::from(
-        Span::raw(format!(" ^g shows their wiring{}", fix_hint(broken))).dim(),
-    ));
+    let fix = fix_hint(broken);
+    if !fix.is_empty() {
+        lines.push(Line::raw(""));
+        lines.push(Line::from(
+            Span::raw(format!(" {}", fix.trim_start_matches(" · "))).dim(),
+        ));
+    }
     lines
 }
 

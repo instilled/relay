@@ -1,5 +1,5 @@
 //! `^h`: the keys for where you are, in the footer in place of its few hints
-//! — the list's, the graph's, the events view's, the catch-up's, a
+//! — the list's, the events view's, the catch-up's, a
 //! question's, a name being changed's. `^h` again or `esc` puts them away.
 //! `^h` is a chord, so it works with words on the line too; on an empty line
 //! `?` does the same. With words on the line `?` is only a character: a
@@ -29,8 +29,6 @@ pub enum Place {
     /// A run's terminal, watched: beside the list, or the whole screen;
     /// still going, so there is a keyboard to take, or ended.
     Term { wide: bool, live: bool },
-    /// The wiring graph.
-    Graph,
     /// `/events`.
     Events,
     /// What happened while you were away.
@@ -82,7 +80,6 @@ fn place_keys(at: Place) -> Vec<Key> {
             cmd(Cmd::Rename, "rename"),
             cmd(Cmd::Pane, "details"),
             cmd(Cmd::Filter, "search"),
-            cmd(Cmd::Graph, "graph"),
             key("tab", "lens"),
             key("/hide", ""),
             help,
@@ -102,7 +99,6 @@ fn place_keys(at: Place) -> Vec<Key> {
             cmd(Cmd::Stop, "not this"),
             cmd(Cmd::Pane, "details"),
             cmd(Cmd::Filter, "search"),
-            cmd(Cmd::Graph, "graph"),
             key("tab", "lens"),
             help,
         ],
@@ -135,27 +131,12 @@ fn place_keys(at: Place) -> Vec<Key> {
             v.push(help);
             v
         }
-        Place::Graph => vec![
-            moves,
-            key("←→", "follow the wiring"),
-            key("enter", "answer/run/details"),
-            cmd(Cmd::Pane, "details"),
-            cmd(Cmd::Filter, "search"),
-            key("/flow run", ""),
-            key("/flow pause", ""),
-            key("/flow approve", ""),
-            key("/flow edit", ""),
-            key("/flow test", ""),
-            cmd(Cmd::Graph, "back"),
-            key("esc", "back"),
-        ],
         Place::Events => vec![
             moves,
             key("pgup/pgdn", "page"),
             key("enter", "its run or flow"),
             cmd(Cmd::Filter, "kind: in: by:"),
             cmd(Cmd::Pane, "details"),
-            cmd(Cmd::Graph, "its flow's wiring"),
             key("esc", "back"),
         ],
         Place::CatchUp => vec![
@@ -302,32 +283,21 @@ mod tests {
         assert_eq!(
             one_line(Place::List),
             "↑↓ ^j^k move · ⇧↑↓ reorder · enter join/open · → ← a flow's steps · ^x stop/archive/remove · ^t pin · \
-             ^r rename · ^o details · ^f search · ^g graph · tab lens · /hide · /help · ^h"
+             ^r rename · ^o details · ^f search · tab lens · /hide · /help · ^h"
         );
     }
 
     #[test]
     fn each_place_has_its_own_keys() {
-        let graph = one_line(Place::Graph);
-        assert!(graph.contains("←→ follow the wiring"), "{graph}");
-        assert!(graph.contains("^g back") && graph.contains("esc back"), "{graph}");
-        assert!(!graph.contains("tab lens"), "the graph has no lens: {graph}");
-        assert!(!graph.contains("reorder"), "{graph}");
-
         let events = one_line(Place::Events);
         assert!(events.contains("enter its run or flow"), "{events}");
-        assert!(events.contains("^g its flow's wiring"), "{events}");
-        assert!(
-            graph.contains("/flow run · /flow pause · /flow approve · /flow edit · /flow test"),
-            "{graph}"
-        );
         assert!(events.contains("^f kind: in: by:"), "{events}");
         assert!(!events.contains("←→"), "{events}");
 
         assert_eq!(
             one_line(Place::Hidden),
             "↑↓ ^j^k move · /hide brings it back · enter join/open · ^x stop/archive/remove · \
-             ^t pin · ^r rename · ^o details · ^f search · ^g graph · tab lens · /help · ^h"
+             ^t pin · ^r rename · ^o details · ^f search · tab lens · /help · ^h"
         );
 
         assert_eq!(
@@ -380,7 +350,6 @@ mod tests {
             Place::List,
             Place::Hidden,
             Place::Question,
-            Place::Graph,
             Place::Events,
             Place::CatchUp,
             Place::Rename,
@@ -396,7 +365,6 @@ mod tests {
             (Cmd::Rename, "^r"),
             (Cmd::Pane, "^o"),
             (Cmd::Filter, "^f"),
-            (Cmd::Graph, "^g"),
         ];
         for (c, k) in ours {
             assert_eq!(palette::key(c), k, "the palette moved {c:?}");
@@ -416,7 +384,6 @@ mod tests {
     fn a_narrow_terminal_wraps_between_keys_and_cuts_none() {
         for at in [
             Place::List,
-            Place::Graph,
             Place::Events,
             Place::CatchUp,
             Place::Question,
@@ -510,7 +477,6 @@ mod tests {
             Place::Question,
             Place::Answer { n: 2, multi: false },
             Place::Term { wide: true, live: true },
-            Place::Graph,
             Place::Events,
             Place::Rename,
             Place::Walk,

@@ -11,6 +11,7 @@ use anyhow::{Context, Result};
 use jiff::{SignedDuration, Timestamp};
 use rl_flow::cron::Cron;
 use rl_flow::def::{FlowDef, When};
+use rl_flow::events::{self, Offered, OfferedRun};
 use rl_ledger::{decisions, firings, flows, runs};
 use rl_proto::flow::{Firing, Flow, Missed, Overlap};
 use rl_proto::types::{Cause, Event, Run, event_kind};
@@ -152,7 +153,7 @@ impl Flows {
         let listening: Vec<(&Flow, FlowDef)> = all
             .iter()
             .filter_map(|f| def_of(f).map(|d| (f, d)))
-            .filter(|(_, d)| hears(d, &e.kind))
+            .filter(|(_, d)| events::hears(&d.trigger, &e.kind))
             .collect();
         if listening.is_empty() {
             return Ok(());
@@ -209,19 +210,6 @@ fn def_of(f: &Flow) -> Option<FlowDef> {
         .ok()
 }
 
-/// Whether `def`'s `on` takes an event of this kind.
-fn hears(def: &FlowDef, kind: &str) -> bool {
-    def.trigger.on.iter().any(|p| kind_matches(p, kind))
-}
-
-/// Whether an `on` pattern takes an event of this kind: `run.failed`, `run.*`, `*`.
-pub(crate) fn kind_matches(pattern: &str, kind: &str) -> bool {
-    match pattern.strip_suffix('*') {
-        Some(prefix) => kind.starts_with(prefix),
-        None => pattern == kind,
-    }
-}
-
 /// Why a flow did or did not fire on an event.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Verdict {
@@ -248,7 +236,7 @@ pub fn verdict(
     by_step: Option<&str>,
     now: Timestamp,
 ) -> Verdict {
-    if !hears(def, &e.kind) {
+    if !events::hears(&def.trigger, &e.kind) {
         return Verdict::NotThisKind;
     }
     if !f.approved() {
@@ -264,30 +252,18 @@ pub fn verdict(
         return Verdict::ItsOwnDoing;
     }
     if let Some(w) = &def.trigger.filter {
-        if let Some(tag) = &w.tag
-            && run.is_none_or(|r| !r.tags.iter().any(|t| t == tag))
-        {
-            return Verdict::Filtered("tag".into());
-        }
-        if let Some(cause) = &w.cause
-            && run.is_none_or(|r| !r.cause.to_string().starts_with(cause))
-        {
-            return Verdict::Filtered("cause".into());
-        }
-        if let Some(cli) = &w.cli
-            && run.is_none_or(|r| r.cli.as_deref() != Some(cli))
-        {
-            return Verdict::Filtered("cli".into());
-        }
-        if let Some(group) = &w.group
-            && &e.group_key != group
-        {
-            return Verdict::Filtered("group".into());
-        }
-        for (field, want) in &w.data {
-            if event_field(e, field).is_none_or(|got| !want.matches(&got)) {
-                return Verdict::Filtered(format!("data.{field}"));
-            }
+        let data = |field: &str| Some(event_field(e, field));
+        let offered = Offered {
+            run: run.map(|r| OfferedRun {
+                cause: r.cause.to_string(),
+                tags: Some(&r.tags),
+                cli: Some(r.cli.as_deref()),
+            }),
+            group: Some(&e.group_key),
+            data: &data,
+        };
+        if let Err(field) = events::passes(w, &offered) {
+            return Verdict::Filtered(field);
         }
     }
     let gap = SignedDuration::from_secs(i64::try_from(def.throttle_secs).unwrap_or(i64::MAX));

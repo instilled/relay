@@ -359,7 +359,7 @@ pub fn named(it: &Item) -> Named {
 pub enum Target {
     /// A run, on the list.
     Run(String),
-    /// A flow, by name, in the graph.
+    /// A flow, by name, on the list.
     Flow(String),
 }
 
