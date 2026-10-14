@@ -83,6 +83,22 @@ impl Output {
         }
     }
 
+    /// An ended run's page, as the daemon would have sent it, for the
+    /// panel's tests to put up.
+    #[cfg(test)]
+    pub(super) fn ended_with(id: &str, title: &str, text: &str, code: i32, pane: (u16, u16)) -> Self {
+        let mut o = Self::new(id, title, false, (0, 0), pane);
+        o.ingest([
+            Frame::Output(text.as_bytes().to_vec()),
+            Frame::Exit(rl_session::exit::Exit {
+                code,
+                signal: None,
+                at: jiff::Timestamp::now(),
+            }),
+        ]);
+        o
+    }
+
     /// Takes in what the daemon sent: output is drawn, the exit is
     /// remembered, and anything after the exit is ignored.
     fn ingest(&mut self, frames: impl IntoIterator<Item = Frame>) {

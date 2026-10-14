@@ -257,13 +257,10 @@ async fn enter_twice_on_a_flow_walks_its_steps_and_enter_on_one_reads_its_run() 
     assert!(app.show_pane, "enter shows the flow");
     let frame = draw_text(&mut app);
     // The firings in the pane, each a row: the one shown marked, when, where it stands, what it
-    // came to (cut to the pane's width).
+    // came to.
     let row = frame.lines().find(|l| {
-        let Some((_, pane)) = l.rsplit_once('│') else {
-            return false;
-        };
-        let words: Vec<&str> = pane.split_whitespace().collect();
-        matches!(words.as_slice(), ["▸", _when, "done", came_to] if came_to.starts_with("res"))
+        let words: Vec<&str> = l.split_whitespace().collect();
+        matches!(words.as_slice(), ["▸", _when, "done", came_to, ..] if came_to.starts_with("res"))
     });
     assert!(row.is_some(), "a firing's row: {frame}");
     press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
