@@ -14,7 +14,7 @@ pub mod heads;
 
 use crate::client::Client;
 use crate::digest::since_items;
-use crate::tui::rows::{self, Context, Head, Lens, Row};
+use crate::tui::rows::{self, Context, Head, Row};
 use jiff::Timestamp;
 use rl_core::time::{fmt_age, fmt_duration, fmt_when};
 use rl_proto::decision::Decision;
@@ -79,7 +79,7 @@ impl<'a> CatchUp<'a> {
     pub fn build(d: &'a Digest, cx: &Context<'_>) -> Self {
         #[cfg(test)]
         BUILT.with(|b| b.set(b.get() + 1));
-        // The whole list, whatever lens it is in now but narrowed by its
+        // The whole list, whatever the toggles are now but narrowed by its
         // search, with its day of ended runs counted back from when you left
         // rather than from now, so a long stretch keeps what ended early in
         // it.
@@ -87,7 +87,9 @@ impl<'a> CatchUp<'a> {
             names: cx.names,
             flows: cx.flows,
             filter: cx.filter,
-            lens: Lens::All,
+            show_flows: true,
+            show_agents: true,
+            show_hidden: false,
             now: d.since,
             relay: cx.relay,
         };
@@ -225,7 +227,9 @@ impl<'a> CatchUp<'a> {
                 names: &names,
                 flows,
                 filter: "",
-                lens: Lens::All,
+                show_flows: true,
+                show_agents: true,
+                show_hidden: false,
                 now,
                 relay,
             },
@@ -679,7 +683,7 @@ pub fn row_line(r: &Row, now: Timestamp) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tui::rows::{Lens, Names};
+    use crate::tui::rows::Names;
     use rl_proto::decision::{Decision, DecisionOption, DecisionStatus};
     use rl_proto::flow::{Firing, FiringStatus, StepState, StepStatus};
     use rl_proto::methods::DigestItem;
@@ -797,7 +801,9 @@ mod tests {
                 names: &names,
                 flows: &flows,
                 filter: "",
-                lens: Lens::All,
+                show_flows: true,
+                show_agents: true,
+                show_hidden: false,
                 now: now(),
                 relay: None,
             },
@@ -820,7 +826,9 @@ mod tests {
                 names: &names,
                 flows: &flows,
                 filter: "",
-                lens: Lens::All,
+                show_flows: true,
+                show_agents: true,
+                show_hidden: false,
                 now: now(),
                 relay: None,
             },
@@ -888,7 +896,9 @@ mod tests {
                 names,
                 flows: &flows(),
                 filter: "",
-                lens: Lens::All,
+                show_flows: true,
+                show_agents: true,
+                show_hidden: false,
                 now: now(),
                 relay: None,
             },
@@ -1126,7 +1136,9 @@ mod tests {
             names: &names(),
             flows: &flows,
             filter: "",
-            lens: Lens::All,
+            show_flows: true,
+            show_agents: true,
+            show_hidden: false,
             now: now(),
             relay: None,
         };

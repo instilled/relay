@@ -19,7 +19,7 @@ use ratatui::text::{Line, Span};
 pub enum Place {
     /// The list.
     List,
-    /// The list in the `hidden` lens, where `/hide` brings a row back.
+    /// The list with hidden rows shown, where `/hide` brings a row back.
     Hidden,
     /// The list with a question under the cursor.
     Question,
@@ -80,12 +80,14 @@ fn place_keys(at: Place) -> Vec<Key> {
             cmd(Cmd::Rename, "rename"),
             cmd(Cmd::Pane, "details"),
             cmd(Cmd::Filter, "search"),
-            key("tab", "lens"),
+            key("f", "flows"),
+            key("a", "agents"),
+            key("h", "hidden"),
             key("/hide", ""),
             help,
         ],
         // The list's own keys, but for the one that brings a row back; the
-        // order is the list's to keep, not this lens's.
+        // order is the list's to keep, not hidden's.
         Place::Hidden => {
             let mut v = place_keys(Place::List);
             v.retain(|k| k.what != "reorder" && k.what != "a flow's steps" && k.keys != "/hide");
@@ -99,7 +101,9 @@ fn place_keys(at: Place) -> Vec<Key> {
             cmd(Cmd::Stop, "not this"),
             cmd(Cmd::Pane, "details"),
             cmd(Cmd::Filter, "search"),
-            key("tab", "lens"),
+            key("f", "flows"),
+            key("a", "agents"),
+            key("h", "hidden"),
             help,
         ],
         Place::Answer { n, multi } => {
@@ -283,7 +287,7 @@ mod tests {
         assert_eq!(
             one_line(Place::List),
             "↑↓ ^j^k move · ⇧↑↓ reorder · enter join/open · → ← a flow's steps · ^x stop/archive/remove · ^t pin · \
-             ^r rename · ^o details · ^f search · tab lens · /hide · /help · ^h"
+             ^r rename · ^o details · ^f search · f flows · a agents · h hidden · /hide · /help · ^h"
         );
     }
 
@@ -297,7 +301,7 @@ mod tests {
         assert_eq!(
             one_line(Place::Hidden),
             "↑↓ ^j^k move · /hide brings it back · enter join/open · ^x stop/archive/remove · \
-             ^t pin · ^r rename · ^o details · ^f search · tab lens · /help · ^h"
+             ^t pin · ^r rename · ^o details · ^f search · f flows · a agents · h hidden · /help · ^h"
         );
 
         assert_eq!(
@@ -406,9 +410,8 @@ mod tests {
                 }
             }
         }
-        // The list's keys take one row at 182 columns (less the footer's
-        // indent) and two at 100.
-        assert_eq!(wrap(&keys(Place::List), 180).len(), 1);
+        // The list's keys take one row at a wide terminal and two at 100.
+        assert_eq!(wrap(&keys(Place::List), 200).len(), 1);
         assert_eq!(wrap(&keys(Place::List), 98).len(), 2);
     }
 

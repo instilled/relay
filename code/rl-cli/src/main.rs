@@ -70,7 +70,7 @@ enum Cmd {
     /// Archive a run: out of the panel and `rl since`, kept in the ledger. Ended runs only.
     #[command(alias = "done")]
     Archive(ArchiveArgs),
-    /// Take runs, or a project and everything in it, off the panel's list: shown only in its `hidden` lens, unless they come to need you. Nothing is stopped.
+    /// Take runs, or a project and everything in it, off the panel's list: shown again only with its hidden toggle on, unless they come to need you. Nothing is stopped.
     Hide(HideArgs),
     /// Bring back what `rl hide` took off the panel's list.
     Unhide(HideArgs),
