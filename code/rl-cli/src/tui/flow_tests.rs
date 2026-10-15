@@ -520,14 +520,14 @@ async fn a_flow_with_a_yes_that_never_fired_is_a_row_like_any_flows() {
     type_in(&mut app, "/archive").await;
     press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
     assert_eq!(flash(&app), "nothing to archive: nightly has not run");
-    // `/hide` puts it in the hidden lens.
+    // `/hide` takes it off the list.
     app.select(Some("f:nightly".into()));
     type_in(&mut app, "/hide").await;
     press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
     app.refresh().await;
     assert!(!on_the_list(&app), "hidden");
-    app.lens = super::rows::Lens::Hidden;
-    assert!(on_the_list(&app), "in the hidden lens");
+    app.show_hidden = true;
+    assert!(on_the_list(&app), "back with hidden on");
     token.cancel();
 }
 
