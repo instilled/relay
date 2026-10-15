@@ -175,6 +175,20 @@ enum Mode {
     /// A flow the assistant drafted, in the pane: `enter` writes it and says yes, `e` opens it in
     /// `$EDITOR` first, `esc` lets it go.
     Draft(Box<new_flow::Drafted>),
+    /// `^x` on a project: taking a whole project down is not a double-press
+    /// you can slip on — you type `DELETE` and `enter`, `esc` keeps it.
+    Confirm(Box<Confirming>),
+}
+
+/// A project waiting on you to confirm its removal by typing `DELETE`: the
+/// folder and name to remove, a line of what it will take, and what is typed
+/// so far. Only the exact word, then `enter`, removes it.
+struct Confirming {
+    workspace: PathBuf,
+    name: String,
+    /// `remove api · stops 2 · archives 7 ended runs` — what removal does.
+    plan: String,
+    field: line::Field,
 }
 
 /// A name being changed in place: the row it is on, what it is the name
@@ -2379,6 +2393,26 @@ impl App {
         self.start_removal(folder, name);
     }
 
+    /// `^x` on a project's header: open the typed confirm. Taking a whole
+    /// project down archives all its runs, so it is not armed and fired by a
+    /// second keypress — a stray or laggy `^x` cannot do it; you type `DELETE`.
+    fn confirm_remove_project(&mut self) {
+        if self.removing.is_some() {
+            return self.say("still removing a project; a moment");
+        }
+        let Some(Row::Group(h)) = self.selected() else {
+            return self.say("nothing here to remove");
+        };
+        let (workspace, name) = (h.workspace.clone(), h.name.clone());
+        let plan = remove::arm(&remove::Plan::of(&name, &workspace, &self.digest.items));
+        self.mode = Mode::Confirm(Box::new(Confirming {
+            workspace,
+            name,
+            plan,
+            field: line::Field::selected(""),
+        }));
+    }
+
     /// Hands the removal to the daemon on a connection of its own, so the
     /// panel keeps drawing while the project's runs are stopped.
     fn start_removal(&mut self, folder: PathBuf, name: String) {
@@ -4132,6 +4166,24 @@ impl App {
                     k = vi_step(k, true);
                 }
             },
+            // Removing a project: only the exact word removes it; a key the
+            // field ignores (a stray `^x` among them) keeps the prompt up, and
+            // `esc` keeps the project.
+            Mode::Confirm(mut c) => {
+                match c.field.key(&k) {
+                    line::Act::Submit => {
+                        if c.field.text() == "DELETE" {
+                            self.remove_project(c.workspace, c.name);
+                        } else {
+                            self.say(format!("type DELETE to remove {} · esc keeps it", c.name));
+                            self.mode = Mode::Confirm(c);
+                        }
+                    }
+                    line::Act::Cancel => self.say(format!("{} kept", c.name)),
+                    _ => self.mode = Mode::Confirm(c),
+                }
+                return Ok(());
+            }
             Mode::Normal => {}
         }
         if (k.code, k.modifiers) == (KeyCode::Char('f'), KeyModifiers::CONTROL) {
@@ -4400,6 +4452,10 @@ impl App {
             (KeyCode::Char('x'), KeyModifiers::CONTROL) => {
                 if self.flow_in_catch_up() {
                     self.say(Self::FLOW_ON_THE_LIST);
+                } else if !self.on_everywhere() && matches!(self.selected(), Some(Row::Group(_))) {
+                    // A project is not armed and fired by a second keypress: a
+                    // stray or laggy ^x must not take a whole project down.
+                    self.confirm_remove_project();
                 } else if armed == Some(Arm::Remove) {
                     self.remove_selected().await;
                 } else if let Some(what) = self.remove_hint() {
@@ -5281,6 +5337,13 @@ impl App {
             // The line waits under a name being changed, quiet and with no
             // caret: the keys are the name's.
             Mode::Rename(_) => f.render_widget(Paragraph::new(format!("❯ {}", self.line.text())).dim(), a.line),
+            // Removing a project: what is typed stands on the line with a
+            // caret, so you see the word form.
+            Mode::Confirm(ref c) => {
+                let mut spans = vec![Span::raw("❯ ")];
+                spans.extend(theme::with_caret(c.field.text(), c.field.cursor(), Style::default()));
+                f.render_widget(Paragraph::new(Line::from(spans)), a.line);
+            }
             _ => {}
         }
         let footer = Rect {
@@ -6038,6 +6101,14 @@ impl App {
                     return m.clone();
                 }
                 return "enter saves · esc cancels".into();
+            }
+            Mode::Confirm(c) => {
+                if let Some((m, at)) = &self.flash
+                    && at.elapsed() < FLASH
+                {
+                    return m.clone();
+                }
+                return format!("{} · type DELETE then enter · esc keeps it", c.plan);
             }
             Mode::Normal => {}
         }
@@ -7021,6 +7092,54 @@ mod tests {
             super::Mode::Rename(r) => Some((r.field.text().to_string(), r.field.is_selected())),
             _ => None,
         }
+    }
+
+    /// The project name and the word typed so far, when a delete confirm is up.
+    fn confirming(app: &super::App) -> Option<(String, String)> {
+        match &app.mode {
+            super::Mode::Confirm(c) => Some((c.name.clone(), c.field.text().to_string())),
+            _ => None,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_project_is_removed_only_by_typing_delete() {
+        let (_tmp, token, mut app, folder) = panel().await;
+        let ctrl = KeyModifiers::CONTROL;
+        let none = KeyModifiers::NONE;
+        app.select(Some(format!("g:{}", folder.display())));
+        // ^x on a project opens a typed confirm, not an armed double-press.
+        press(&mut app, KeyCode::Char('x'), ctrl).await;
+        assert_eq!(confirming(&app), Some(("api".into(), String::new())));
+        assert!(app.removing.is_none(), "nothing removed yet");
+        assert!(app.arm.is_none(), "no armed removal to slip on");
+        // A stray second ^x is a key the prompt ignores: the project stands.
+        press(&mut app, KeyCode::Char('x'), ctrl).await;
+        assert!(app.removing.is_none(), "a double ^x cannot take a project down");
+        assert!(confirming(&app).is_some(), "still asking");
+        // The wrong word, even on enter, does not remove it.
+        type_in(&mut app, "delete").await;
+        assert_eq!(confirming(&app).map(|(_, t)| t), Some("delete".into()));
+        press(&mut app, KeyCode::Enter, none).await;
+        assert!(app.removing.is_none(), "only the exact word removes it");
+        assert!(confirming(&app).is_some(), "it keeps asking");
+        // esc keeps the project.
+        press(&mut app, KeyCode::Esc, none).await;
+        assert!(confirming(&app).is_none());
+        assert!(app.removing.is_none());
+        token.cancel();
+    }
+
+    #[tokio::test]
+    async fn typing_delete_removes_the_project() {
+        let (_tmp, token, mut app, folder) = panel().await;
+        app.select(Some(format!("g:{}", folder.display())));
+        press(&mut app, KeyCode::Char('x'), KeyModifiers::CONTROL).await;
+        type_in(&mut app, "DELETE").await;
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+        assert!(app.removing.is_some(), "the exact word starts the removal");
+        assert!(matches!(app.mode, super::Mode::Normal), "the prompt is done");
+        token.cancel();
     }
 
     fn title(app: &super::App) -> String {
