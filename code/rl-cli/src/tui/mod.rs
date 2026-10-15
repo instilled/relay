@@ -688,17 +688,18 @@ fn header_with(place: Vec<Span<'static>>, h: &rows::Head, w: usize, tw: usize, b
     let col = state_col(tw);
     let mut l = place;
     let width = |l: &[Span]| l.iter().map(Span::width).sum::<usize>();
-    // The tally at the right edge is the honest total; a flow that waits for a
-    // yes is named beside it, since that one is yours to give.
+    // The tally at the right edge is the honest total of the flows defined
+    // here; before it, in amber, a hint when something that needs you is off
+    // the list — hidden, or a toggle dropped it — so nothing urgent is buried.
     let mut right: Vec<Span<'static>> = Vec::new();
-    // A flow here that did not load comes before anything waiting for a yes,
-    // in red: what is loaded is not what its folder says.
+    // A flow here that did not load comes first, in red: what is loaded is not
+    // what its folder says.
     if broken {
         right.push(Span::styled(rows::BROKEN_CHIP, theme::bad()));
         right.push(Span::raw("  "));
     }
-    for c in h.flows.iter().filter(|c| c.needs_yes()) {
-        right.push(Span::styled(c.text(), theme::needs()));
+    if let Some(hint) = rows::needs_hint(h.attention) {
+        right.push(Span::styled(hint, theme::needs()));
         right.push(Span::raw("  "));
     }
     let count = group_count(&h.flows);
@@ -6560,6 +6561,7 @@ mod tests {
             own: own.map(Into::into),
             flows,
             checkout,
+            attention: 0,
         };
         let a = header_line(
             &head("~/Projects/flint-platform", None, Some(co("main", 24)), vec![]),
@@ -6597,8 +6599,9 @@ mod tests {
         assert_eq!(b.width(), w);
         assert!(b.to_string().ends_with("1 flow"));
 
-        // A folder whose flow did not load says so in red, before a flow
-        // waiting for a yes in amber; the tally still ends at the edge.
+        // A folder whose flow did not load says so in red; the flow count
+        // (every flow defined there, waiting-for-a-yes ones among them) still
+        // ends at the edge — the waiting flows are rows now, not header chips.
         let waiting = Chip {
             name: "deploy".into(),
             status: FlowStatus::NeedsApproval,
@@ -6611,7 +6614,7 @@ mod tests {
             tw,
             true,
         );
-        assert!(broken.to_string().ends_with("! flows  ! deploy  2 flows"), "{broken}");
+        assert!(broken.to_string().ends_with("! flows  2 flows"), "{broken}");
         assert_eq!(broken.width(), w);
         let red = broken.spans.iter().find(|s| s.content == "! flows").unwrap();
         assert_eq!(red.style, crate::tui::theme::bad());
@@ -6621,6 +6624,16 @@ mod tests {
         let alone = header_line(&head("~/tmp/foodai", None, None, vec![]), w, tw, true);
         assert!(alone.to_string().ends_with("! flows"), "{alone}");
         assert_eq!(alone.width(), w);
+
+        // Something that needs you is off the list: the header hints in amber,
+        // before the flow count, and the line still ends at the edge.
+        let mut hinted = head("~/tmp/foodai", None, Some(co("main", 0)), vec![chip()]);
+        hinted.attention = 2;
+        let line = header_line(&hinted, w, tw, false);
+        assert!(line.to_string().ends_with("! 2 need you  1 flow"), "{line}");
+        assert_eq!(line.width(), w);
+        let amber = line.spans.iter().find(|s| s.content == "! 2 need you").unwrap();
+        assert_eq!(amber.style, crate::tui::theme::needs());
 
         // A run's state word starts where a header's checkout does, and every
         // title in the same column, whatever icon it wears.
@@ -8238,9 +8251,12 @@ mod tests {
         // A refresh reloads the flows from the daemon, which has none here.
         let load = |app: &mut super::App| {
             app.flows = vec![flow("nightly", true), {
+                // Loaded but removed: it is still a flow, so it has no row on
+                // the list — every flow not removed does.
                 let mut unseen = flow("ghost", false);
                 unseen.def = serde_json::json!({ "trigger": { "when": { "Every": 3600 }, "on": [] } });
                 unseen.folder = None;
+                unseen.removed_at = Some("2020-01-01T00:00:00Z".parse().unwrap());
                 unseen
             }];
         };
