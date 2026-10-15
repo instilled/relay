@@ -21,6 +21,12 @@
 //! started in a shell run), or none, it tells of one of the agent's own
 //! sessions.
 //!
+//! Beside the hooks, a profile may name settings of the agent's own that
+//! make it draw well under Relay (`UserHooks::settings`, Gemini's
+//! alternate buffer). They are set with the hooks where the file has no
+//! value there, never over one, and stay when the hooks are taken out:
+//! they are the agent's, not Relay's.
+//!
 //! Nothing is written but on a yes in `rl setup`. The file stays the
 //! user's: Relay's entries are appended, never anything removed or moved
 //! but Relay's own (`is_relays`), and a file that does not read is never
@@ -289,11 +295,53 @@ pub fn install(path: &Path, hooks: &UserHooks, rl_bin: &Path) -> Result<bool> {
             groups.push(entry(hooks, event, cmd));
         }
     }
+    for (key, value) in &hooks.settings {
+        settle(&mut doc, key, value);
+    }
     if doc == before {
         return Ok(false);
     }
     write(path, &doc)?;
     Ok(true)
+}
+
+/// The profile's settings the file has no value for yet, by their dotted
+/// paths: what an install would set. All of them for a file that is not
+/// there yet; an error for one that does not read.
+pub fn unset<'a>(path: &Path, hooks: &'a UserHooks) -> Result<Vec<&'a str>> {
+    let doc = read(path)?.unwrap_or_default();
+    Ok(hooks
+        .settings
+        .iter()
+        .filter(|(key, _)| at(&doc, key).is_none())
+        .map(|(key, _)| key.as_str())
+        .collect())
+}
+
+/// The value at a dotted path, if every step on the way is an object.
+fn at<'a>(doc: &'a Map<String, Value>, key: &str) -> Option<&'a Value> {
+    let mut steps = key.split('.');
+    let mut here = doc.get(steps.next()?)?;
+    for step in steps {
+        here = here.as_object()?.get(step)?;
+    }
+    Some(here)
+}
+
+/// Sets `value` at the dotted path `key` where nothing is there, making
+/// the objects on the way. A value already there is the user's and is left,
+/// as is a path that runs into something not an object.
+fn settle(doc: &mut Map<String, Value>, key: &str, value: &Value) {
+    let steps: Vec<&str> = key.split('.').collect();
+    let (last, way) = steps.split_last().expect("a path has a step");
+    let mut here = doc;
+    for step in way {
+        match here.entry(*step).or_insert_with(|| Value::Object(Map::new())) {
+            Value::Object(m) => here = m,
+            _ => return,
+        }
+    }
+    here.entry(*last).or_insert_with(|| value.clone());
 }
 
 /// Takes Relay's hooks for the agent out of `path`: only commands that are
@@ -465,7 +513,11 @@ mod tests {
         assert!(install(&path, &gemini, Path::new("/opt/my tools/rl")).unwrap());
         let v = doc(&path);
         let keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
-        assert_eq!(keys, ["theme", "hooks", "general"], "nothing moved");
+        assert_eq!(
+            keys,
+            ["theme", "hooks", "general", "ui"],
+            "nothing moved; its setting last"
+        );
         assert_eq!(v["general"], json!({"vimMode": true}));
         assert_eq!(v["hooks"]["BeforeTool"][0]["hooks"][0]["command"], "check.sh");
         let after = v["hooks"]["AfterAgent"].as_array().unwrap();
@@ -892,5 +944,43 @@ mod tests {
             command(Path::new("/x/rl"), &codex, "Stop"),
             "'/x/rl' hook codex Stop || true"
         );
+    }
+
+    #[test]
+    fn an_install_sets_the_agents_own_settings_where_the_user_has_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join(".gemini/settings.json");
+        let gemini = h("gemini");
+        assert_eq!(unset(&file, &gemini).unwrap(), ["ui.useAlternateBuffer"]);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, r#"{"ui": {"theme": "Default"}}"#).unwrap();
+        assert!(install(&file, &gemini, Path::new(RL)).unwrap());
+        assert_eq!(
+            doc(&file)["ui"],
+            json!({"theme": "Default", "useAlternateBuffer": true})
+        );
+        assert!(unset(&file, &gemini).unwrap().is_empty());
+        assert!(!install(&file, &gemini, Path::new(RL)).unwrap(), "nothing more to do");
+        // Taking the hooks out leaves the setting: it is gemini's.
+        assert!(uninstall(&file, &gemini).unwrap());
+        assert_eq!(doc(&file)["ui"]["useAlternateBuffer"], json!(true));
+        assert!(doc(&file).get("hooks").is_none());
+    }
+
+    #[test]
+    fn a_setting_the_user_has_is_left_as_it_is() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("settings.json");
+        let gemini = h("gemini");
+        std::fs::write(&file, r#"{"ui": {"useAlternateBuffer": false}}"#).unwrap();
+        assert!(unset(&file, &gemini).unwrap().is_empty());
+        install(&file, &gemini, Path::new(RL)).unwrap();
+        assert_eq!(doc(&file)["ui"]["useAlternateBuffer"], json!(false));
+        // A path that runs into something else is not forced through.
+        std::fs::write(&file, r#"{"ui": "plain"}"#).unwrap();
+        assert_eq!(unset(&file, &gemini).unwrap(), ["ui.useAlternateBuffer"]);
+        install(&file, &gemini, Path::new(RL)).unwrap();
+        assert_eq!(doc(&file)["ui"], json!("plain"));
+        assert!(installed(&file, &gemini).unwrap(), "the hooks went in all the same");
     }
 }

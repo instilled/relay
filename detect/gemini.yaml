@@ -40,3 +40,8 @@ sessions:
       # Uncertain: whether it fires when gemini is killed, hence the pid
       # check in rld.
       SessionEnd: ended
+    # Its own settings, set with the hooks where the file has none. In the
+    # alternate buffer gemini redraws its whole screen rather than reprinting
+    # its history inline, so a run you watch or join again draws cleanly.
+    settings:
+      ui.useAlternateBuffer: true
