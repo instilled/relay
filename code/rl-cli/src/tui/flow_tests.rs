@@ -492,7 +492,7 @@ async fn a_flow_with_a_yes_that_never_fired_is_a_row_like_any_flows() {
     .await;
     app.refresh().await;
     let on_the_list = |app: &super::App| app.rows().iter().any(|r| r.key().as_deref() == Some("f:nightly"));
-    assert!(!on_the_list(&app), "no row before its yes");
+    assert!(on_the_list(&app), "a row even before its yes");
     type_in(&mut app, "/flow approve nightly").await;
     press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
     app.refresh().await;

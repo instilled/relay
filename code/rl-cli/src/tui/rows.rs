@@ -119,6 +119,10 @@ pub struct Head {
     pub flows: Vec<Chip>,
     /// The folder's git checkout, when it is in one.
     pub checkout: Option<Checkout>,
+    /// How many of the project's items need you but are off the list now —
+    /// hidden, or a toggle dropped them. The header hints at them so nothing
+    /// urgent is silently buried; `0` when everything that needs you is shown.
+    pub attention: usize,
 }
 
 impl Head {
@@ -131,6 +135,7 @@ impl Head {
             own: None,
             flows: Vec::new(),
             checkout: None,
+            attention: 0,
         }
     }
 
@@ -619,10 +624,11 @@ pub fn flow_key(name: &str) -> String {
     format!("f:{name}")
 }
 
-/// Whether a flow has a row of its own, run or not: from its yes on — on,
-/// paused, or changed since — until it is removed.
+/// Whether a flow has a row of its own, run or not: every flow defined now —
+/// waiting for its first yes, on, paused, or changed since — until it is
+/// removed. Its row is where you see it and act on it, not a header chip.
 fn stands_on_the_list(f: &Flow) -> bool {
-    f.approved_hash.is_some() && f.removed_at.is_none()
+    f.removed_at.is_none()
 }
 
 /// Whether a flow's row is hidden — by its own `/hide` or its project's —
@@ -1002,6 +1008,10 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
     // the projects, whenever hidden is off.
     // By how it ranks, then since when it has needed you, then its key.
     let mut through: Vec<(u8, Option<Timestamp>, String, Row<'a>)> = Vec::new();
+    // Per project (by its group key), how many of its items need you but are
+    // off the list now — hidden and not come through, or a toggle dropped
+    // them. Its header hints at them, so nothing urgent is silently buried.
+    let mut buried: HashMap<String, usize> = HashMap::new();
     for i in &d.items {
         let r = &i.run;
         // A summary of everything runs in the Relay home: Relay's doing, not
@@ -1016,6 +1026,10 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
                     && query.hits(&run_subject(i, &names.group(&r.place_key())))
                 {
                     through.push((rank::score(r), Some(r.state_at), r.id.clone(), Row::Run(i)));
+                } else if !comes_through(r, since) && r.state.needs_attention() {
+                    // Hidden while it already needed you, so it does not come
+                    // through: its project hints it is there.
+                    *buried.entry(group_of(r, names, cx.flows).0).or_insert(0) += 1;
                 }
                 continue;
             }
@@ -1035,6 +1049,11 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
             continue;
         }
         if !keeps(r, cx.show_agents, cx.show_flows) {
+            // A toggle takes it off the list; if it needs you, its project
+            // hints it is still there.
+            if r.state.needs_attention() {
+                *buried.entry(group_of(r, names, cx.flows).0).or_insert(0) += 1;
+            }
             continue;
         }
         let (key, workspace) = group_of(r, names, cx.flows);
@@ -1110,6 +1129,8 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
                 Some(since) if !cx.show_hidden => {
                     if outside::comes_through(c, since) && hits() {
                         through.push((outside::score(c), c.state_at, c.key(), Row::Outside(c)));
+                    } else if !outside::comes_through(c, since) && c.run_state().needs_attention() {
+                        *buried.entry(key).or_insert(0) += 1;
                     }
                     continue;
                 }
@@ -1120,6 +1141,14 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
             }
             let g = group_at(key, &workspace, &mut groups);
             groups[g].outside.push(c);
+        }
+    } else {
+        // Agents off: an agent's own session that needs you is off the list,
+        // so its project hints it is there.
+        for c in &d.outside {
+            if c.run_state().needs_attention() {
+                *buried.entry(outside_group(c, names).0).or_insert(0) += 1;
+            }
         }
     }
     // Fold each flow into its group now, with its full history, but only if
@@ -1205,7 +1234,9 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
         let head = if g.key == EVERYWHERE_KEY {
             Head::everywhere()
         } else {
-            head(&g.key, &g.workspace, d, cx)
+            let mut h = head(&g.key, &g.workspace, d, cx);
+            h.attention = buried.get(&g.key).copied().unwrap_or(0);
+            h
         };
         let mut block = vec![Row::Group(head)];
         // Runs, flows and agents' own sessions share one order, which nothing
@@ -1280,8 +1311,9 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
         ) {
             continue;
         }
-        let head = Row::Group(head(&p.to_string_lossy(), &p, d, cx));
-        blocks.push((name.to_lowercase(), p.to_string_lossy().into_owned(), vec![head]));
+        let mut h = head(&p.to_string_lossy(), &p, d, cx);
+        h.attention = buried.get(&p.to_string_lossy().into_owned()).copied().unwrap_or(0);
+        blocks.push((name.to_lowercase(), p.to_string_lossy().into_owned(), vec![Row::Group(h)]));
     }
     // Projects in the order you put them (shift-↑/↓ on a header), the rest
     // after them by name — a project new to the list enters at the bottom —
@@ -1315,7 +1347,15 @@ pub fn head(key: &str, workspace: &Path, d: &Digest, cx: &Context<'_>) -> Head {
         own: names.own(key, workspace),
         flows: chips(cx.flows, Some(workspace), cx.now),
         checkout: checkout_of(&d.checkouts, workspace).cloned(),
+        attention: 0,
     }
+}
+
+/// The amber hint on a project's header: how many of its items need you but
+/// are off the list now — hidden, or a toggle dropped them. `! 2 need you`;
+/// nothing when none are buried, so the header stays quiet until something is.
+pub fn needs_hint(attention: usize) -> Option<String> {
+    (attention > 0).then(|| format!("! {attention} need{} you", if attention == 1 { "s" } else { "" }))
 }
 
 /// Whether a row wants you: it asks, is blocked, or failed — a flow whose
@@ -1803,6 +1843,16 @@ mod tests {
                 other => other.key().unwrap(),
             })
             .collect()
+    }
+
+    /// The header of the project called `name`, among the built rows.
+    fn head_of<'a>(rows: &'a [Row], name: &str) -> &'a Head {
+        rows.iter()
+            .find_map(|r| match r {
+                Row::Group(h) if h.name == name => Some(h),
+                _ => None,
+            })
+            .expect("a project header")
     }
 
     /// The default toggles: flows and agents on, hidden off.
@@ -2486,8 +2536,8 @@ mod tests {
             ..flow("pulse", None)
         }];
         let rows = flows_build(&d, &Names::default(), &waiting, "", now);
-        // A flow waiting for its first yes has no row.
-        assert!(rows.is_empty(), "{:?}", keys(&rows));
+        // A flow waiting for its first yes still has a row, under everywhere.
+        assert_eq!(keys(&rows), ["[everywhere]", "f:pulse"]);
         // One with a yes has its row, but has not done anything: a fresh home
         // still says it has nothing running.
         let flows = [flow("pulse", None)];
@@ -2829,13 +2879,13 @@ mod tests {
         };
         assert_eq!(says(changed).as_deref(), Some("needs a yes again · every 30m"));
 
-        // Never said yes to: no row. Removed, with no run of its own still
-        // on the list: none either.
+        // Never said yes to: still a row, where you approve it — it says so.
+        // Removed, with no run of its own still on the list: no row.
         let waiting = Flow {
             approved_hash: None,
             ..nightly.clone()
         };
-        assert_eq!(says(waiting), None);
+        assert_eq!(says(waiting).as_deref(), Some("needs a yes · every 30m"));
         let old = fired("old", "nightly", RunState::Finished, "2026-09-07T12:00:00Z", false);
         let d = digest(now, vec![old], vec![]);
         let removed = [Flow {
@@ -2846,6 +2896,76 @@ mod tests {
             keys(&flows_build(&d, &names, &removed, "", now)),
             ["[relay]"]
         );
+    }
+
+    #[test]
+    fn every_defined_flow_stands_as_a_row_even_before_a_yes() {
+        let now: Timestamp = "2026-09-10T12:00:00Z".parse().unwrap();
+        let relay = "/home/f/relay";
+        let names = Names::new([(PathBuf::from(relay), "relay".to_string())]);
+        let d = digest(now, vec![], vec![]);
+        // A flow still waiting for its first yes: it has a row of its own —
+        // that is where you see it and approve it, not a header chip.
+        let waiting = [Flow {
+            approved_hash: None,
+            ..flow("deploy", Some(relay))
+        }];
+        let rows = flows_build(&d, &names, &waiting, "", now);
+        assert_eq!(keys(&rows), ["[relay]", "f:deploy"]);
+        // Flows off takes it away like any flow row.
+        assert_eq!(
+            keys(&toggles_build(&d, &names, &waiting, (false, true, false), "", now)),
+            ["[relay]"]
+        );
+        // The row says it needs a yes, with what starts it.
+        let Some(Row::Flow(f)) = rows.iter().find(|r| matches!(r, Row::Flow(_))) else {
+            panic!("no flow row");
+        };
+        assert_eq!(flows::stands(f, waiting.first(), now), "needs a yes · every 30m");
+    }
+
+    #[test]
+    fn a_project_hints_when_something_hidden_needs_you() {
+        let now: Timestamp = "2026-09-10T12:00:00Z".parse().unwrap();
+        let relay = "/home/f/relay";
+        let names = Names::new([(PathBuf::from(relay), "relay".to_string())]);
+        // Hidden once it had already failed, so it stays off the list and does
+        // not come through — it is genuinely buried.
+        let mut failed = item("failed", RunState::Failed, relay, "2026-09-10T11:00:00Z", false);
+        failed.run.hidden_at = Some("2026-09-10T11:30:00Z".parse().unwrap());
+        let working = item("work", RunState::Working, relay, "2026-09-10T11:40:00Z", false);
+        let d = digest(now, vec![failed, working], vec![]);
+        let rows = build_with(&d, &names, "", now);
+        assert!(!keys(&rows).contains(&"r:failed".to_string()), "the failed run is off the list");
+        assert_eq!(head_of(&rows, "relay").attention, 1, "the header hints that one needs you");
+        // Hidden on: it stands inline, so nothing is buried and no hint.
+        let shown = toggles_build(&d, &names, &[], (true, true, true), "", now);
+        assert_eq!(head_of(&shown, "relay").attention, 0);
+    }
+
+    #[test]
+    fn agents_off_hints_a_needy_agent_on_its_project() {
+        let now: Timestamp = "2026-09-10T12:00:00Z".parse().unwrap();
+        let relay = "/home/f/relay";
+        let names = Names::new([(PathBuf::from(relay), "relay".to_string())]);
+        // An agent waiting on you, recent so it is live.
+        let needy = item("ask", RunState::NeedsInput, relay, "2026-09-10T11:50:00Z", false);
+        let d = digest(now, vec![needy], vec![]);
+        // Agents on: it shows, nothing buried.
+        let on = toggles_build(&d, &names, &[], (true, true, false), "", now);
+        assert!(keys(&on).contains(&"r:ask".to_string()));
+        assert_eq!(head_of(&on, "relay").attention, 0);
+        // Agents off: it is off the list, and the header hints.
+        let off = toggles_build(&d, &names, &[], (true, false, false), "", now);
+        assert!(!keys(&off).contains(&"r:ask".to_string()));
+        assert_eq!(head_of(&off, "relay").attention, 1);
+    }
+
+    #[test]
+    fn the_hint_says_how_many_need_you() {
+        assert_eq!(needs_hint(0), None);
+        assert_eq!(needs_hint(1).as_deref(), Some("! 1 needs you"));
+        assert_eq!(needs_hint(3).as_deref(), Some("! 3 need you"));
     }
 
     #[test]
@@ -3009,9 +3129,10 @@ mod tests {
         );
         assert_eq!(texts(&chips(&flows, None, now)), ["↻ pulse 30s"]);
 
-        // On the list: the folder's flows ride its header, and each with a
-        // yes has its row under it, run or not; those with no `in` stand
-        // under `everywhere`. One waiting for its first yes has none.
+        // On the list: the folder's flows ride its header as the tally, and
+        // every flow defined has its row under it, run or not — the one
+        // waiting for its first yes among them; those with no `in` stand
+        // under `everywhere`.
         let d = digest(
             now,
             vec![item("work1", RunState::Working, relay, "2026-09-10T11:59:00Z", false)],
@@ -3034,6 +3155,7 @@ mod tests {
                 "f:elsewhere",
                 "[relay] ! deploy · ↻ nightly 4h · ↻ tests-failed · ↻ tidy paused",
                 "r:work1",
+                "f:deploy",
                 "f:nightly",
                 "f:tests-failed",
                 "f:tidy",
