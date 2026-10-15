@@ -67,6 +67,9 @@ pub struct Hookable {
     /// What the agent will say about it, worth knowing first: codex warns
     /// at every start when its `config.toml` has hooks too.
     pub warning: Option<String>,
+    /// The agent's own settings its profile sets with the hooks that the
+    /// file has no value for yet (`user_hooks::unset`), by dotted path.
+    pub unset: Vec<String>,
     /// Its hooks, as its profile has them.
     pub hooks: UserHooks,
 }
@@ -92,11 +95,16 @@ fn hookable_in(
             let installed = user_hooks::installed(&file, hooks).map_err(|e| format!("{e:#}"));
             let warning = (a.name == user_hooks::CODEX && user_hooks::inline_hooks(&file))
                 .then(|| "codex will warn at each start: its config.toml has hooks too".to_string());
+            // A file that does not read says so through `installed`.
+            let unset = user_hooks::unset(&file, hooks)
+                .map(|keys| keys.into_iter().map(String::from).collect())
+                .unwrap_or_default();
             Some(Hookable {
                 name: a.name.clone(),
                 file,
                 installed,
                 warning,
+                unset,
                 hooks: hooks.clone(),
             })
         })
@@ -750,6 +758,9 @@ impl Guide {
                     display(&h.it.name)
                 ),
             };
+            if h.can() && h.on && !h.it.unset.is_empty() {
+                about = format!("{about} · and sets {}", h.it.unset.join(", "));
+            }
             if let Some(w) = &h.it.warning
                 && h.can()
             {
@@ -795,9 +806,14 @@ pub fn hook_them(hooking: &[(Hookable, bool)], rl_bin: &Path) -> String {
         } else {
             user_hooks::uninstall(&h.file, &h.hooks)
         };
+        let set = if *on && !h.unset.is_empty() {
+            format!(" · {} set", h.unset.join(", "))
+        } else {
+            String::new()
+        };
         let trust = (h.hooks.after_install.as_deref())
-            .map(|a| format!(" · {a}"))
-            .unwrap_or_default();
+            .map(|a| format!("{set} · {a}"))
+            .unwrap_or(set);
         said.push(match (done, on) {
             (Err(e), _) => format!("{}: {e:#}", h.name),
             // There and right already: nothing to say.
@@ -1394,6 +1410,7 @@ mod tests {
                     file: tmp.path().join(".claude/settings.json"),
                     installed: Ok(false),
                     warning: None,
+                    unset: vec![],
                     hooks: h("claude"),
                 },
                 Hookable {
@@ -1401,6 +1418,7 @@ mod tests {
                     file: tmp.path().join(".codex/hooks.json"),
                     installed: Ok(false),
                     warning: None,
+                    unset: vec![],
                     hooks: h("codex"),
                 },
                 Hookable {
@@ -1408,6 +1426,7 @@ mod tests {
                     file: tmp.path().join(".gemini/settings.json"),
                     installed: Ok(true),
                     warning: None,
+                    unset: vec![],
                     hooks: h("gemini"),
                 },
             ]
@@ -1435,6 +1454,18 @@ mod tests {
         g.draw_hooks(&mut lines);
         let said: String = lines.iter().map(|l| l.to_string()).collect::<Vec<_>>().join("\n");
         assert!(said.contains("codex will warn at each start"), "{said}");
+        // Gemini's own setting, not there yet: said on its row while it is on.
+        std::fs::write(tmp.path().join(".gemini/settings.json"), "{}").unwrap();
+        let again = hookable_in(&state(Config::default()).agents, &Registry::builtin(), env);
+        assert_eq!(again[2].unset, ["ui.useAlternateBuffer"]);
+        let mut g = Guide::new(&state(Config::default()), &none(), again);
+        for p in &mut g.hooks {
+            p.on = true;
+        }
+        let mut lines = Vec::new();
+        g.draw_hooks(&mut lines);
+        let said: String = lines.iter().map(|l| l.to_string()).collect::<Vec<_>>().join("\n");
+        assert!(said.contains("and sets ui.useAlternateBuffer"), "{said}");
     }
 
     #[test]
