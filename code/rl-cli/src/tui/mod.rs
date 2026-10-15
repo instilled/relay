@@ -309,11 +309,12 @@ struct App {
     filter: String,
     /// `^f`: the line is searching, and the filter follows what is typed.
     search: Option<Search>,
-    /// The three list toggles. Flows and agents are additive and on by
+    /// The list toggles. Flows, agents and shells are additive and on by
     /// default — each shows the runs it is for; hidden is off by default and,
     /// on, stands what you hid inline in its place.
     show_flows: bool,
     show_agents: bool,
+    show_shells: bool,
     show_hidden: bool,
     view: View,
     /// Every flow: for its row's place and words, the chips on project rows,
@@ -1181,6 +1182,7 @@ impl App {
             search: None,
             show_flows: true,
             show_agents: true,
+            show_shells: true,
             show_hidden: false,
             view: View::Work,
             flows: Vec::new(),
@@ -1487,26 +1489,33 @@ impl App {
         self.settle();
     }
 
+    /// Flip the shells toggle, and settle the selection.
+    fn toggle_shells(&mut self) {
+        self.show_shells = !self.show_shells;
+        self.settle();
+    }
+
     /// Flip the hidden toggle, and settle the selection.
     fn toggle_hidden(&mut self) {
         self.show_hidden = !self.show_hidden;
         self.settle();
     }
 
-    /// The toggles as they stand, as `(flows, agents, hidden)`.
-    fn toggles(&self) -> (bool, bool, bool) {
-        (self.show_flows, self.show_agents, self.show_hidden)
+    /// The toggles as they stand, as `(flows, agents, shells, hidden)`.
+    fn toggles(&self) -> (bool, bool, bool, bool) {
+        (self.show_flows, self.show_agents, self.show_shells, self.show_hidden)
     }
 
-    /// The toggles back to their default: flows and agents on, hidden off.
+    /// The toggles back to their default: flows, agents and shells on, hidden off.
     fn reset_toggles(&mut self) {
-        self.set_toggles((true, true, false));
+        self.set_toggles((true, true, true, false));
     }
 
-    /// Put the toggles to a set, `(flows, agents, hidden)`.
-    fn set_toggles(&mut self, (flows, agents, hidden): (bool, bool, bool)) {
+    /// Put the toggles to a set, `(flows, agents, shells, hidden)`.
+    fn set_toggles(&mut self, (flows, agents, shells, hidden): (bool, bool, bool, bool)) {
         self.show_flows = flows;
         self.show_agents = agents;
+        self.show_shells = shells;
         self.show_hidden = hidden;
     }
 
@@ -1560,6 +1569,7 @@ impl App {
             filter: "",
             show_flows: true,
             show_agents: true,
+            show_shells: true,
             show_hidden: false,
             now: Timestamp::now(),
             relay: Some(&self.relay),
@@ -1649,6 +1659,7 @@ impl App {
                 filter: &self.filter,
                 show_flows: self.show_flows,
                 show_agents: self.show_agents,
+                show_shells: self.show_shells,
                 show_hidden: self.show_hidden,
                 now: Timestamp::now(),
                 relay: Some(&self.relay),
@@ -2623,6 +2634,7 @@ impl App {
             filter,
             show_flows: true,
             show_agents: true,
+            show_shells: true,
             show_hidden: false,
             now: Timestamp::now(),
             relay: Some(&self.relay),
@@ -2772,24 +2784,27 @@ impl App {
             }
         }
         // Everything shown at once: whatever a toggle could reveal is on.
-        [(true, true, false), (true, true, true)].into_iter().any(|(show_flows, show_agents, show_hidden)| {
-            let cx = rows::Context {
-                names: &self.names,
-                flows: &self.flows,
-                filter: "",
-                show_flows,
-                show_agents,
-                show_hidden,
-                now: Timestamp::now(),
-                relay: Some(&self.relay),
-            };
-            rows::build(&d, &cx).iter().any(|r| match (run, r) {
-                (Some(id), Row::Run(i)) => i.run.id == id,
-                (Some(id), Row::Flow(f)) => f.runs.iter().any(|i| i.run.id == id),
-                (Some(_), _) => false,
-                (None, r) => r.key().as_deref() == Some(key),
-            })
-        })
+        [(true, true, true, false), (true, true, true, true)].into_iter().any(
+            |(show_flows, show_agents, show_shells, show_hidden)| {
+                let cx = rows::Context {
+                    names: &self.names,
+                    flows: &self.flows,
+                    filter: "",
+                    show_flows,
+                    show_agents,
+                    show_shells,
+                    show_hidden,
+                    now: Timestamp::now(),
+                    relay: Some(&self.relay),
+                };
+                rows::build(&d, &cx).iter().any(|r| match (run, r) {
+                    (Some(id), Row::Run(i)) => i.run.id == id,
+                    (Some(id), Row::Flow(f)) => f.runs.iter().any(|i| i.run.id == id),
+                    (Some(_), _) => false,
+                    (None, r) => r.key().as_deref() == Some(key),
+                })
+            },
+        )
     }
 
     fn event_items(&self) -> Vec<events::Item<'_>> {
@@ -2945,9 +2960,12 @@ impl App {
         let (key, opened) = match self.row_key(&list_filter, self.toggles(), is_it) {
             Some(k) => (k, None),
             None => match self
-                .row_key("", (true, true, false), is_it)
-                .map(|k| (k, (true, true, false)))
-                .or_else(|| self.row_key("", (true, true, true), is_it).map(|k| (k, (true, true, true)))) {
+                .row_key("", (true, true, true, false), is_it)
+                .map(|k| (k, (true, true, true, false)))
+                .or_else(|| {
+                    self.row_key("", (true, true, true, true), is_it)
+                        .map(|k| (k, (true, true, true, true)))
+                }) {
                 Some((k, t)) => (k, Some(t)),
                 None => return self.say(format!("{name} has no row on the list")),
             },
@@ -2956,7 +2974,7 @@ impl App {
         if let Some(t) = opened {
             self.filter.clear();
             self.set_toggles(t);
-            self.say(if t.2 {
+            self.say(if t.3 {
                 format!("{name} is hidden: shown here with hidden on, /hide brings it back")
             } else {
                 format!("the search and the toggles let go, to show {name}")
@@ -2986,9 +3004,12 @@ impl App {
         let (key, opened) = match self.list_key(id, &list_filter, self.toggles()) {
             Some(k) => (k, None),
             None => match self
-                .list_key(id, "", (true, true, false))
-                .map(|k| (k, (true, true, false)))
-                .or_else(|| self.list_key(id, "", (true, true, true)).map(|k| (k, (true, true, true)))) {
+                .list_key(id, "", (true, true, true, false))
+                .map(|k| (k, (true, true, true, false)))
+                .or_else(|| {
+                    self.list_key(id, "", (true, true, true, true))
+                        .map(|k| (k, (true, true, true, true)))
+                }) {
                 Some((k, t)) => (k, Some(t)),
                 None => {
                     // As it stands now: it may have been put away since it was read.
@@ -3008,7 +3029,7 @@ impl App {
         if let Some(t) = opened {
             self.filter.clear();
             self.set_toggles(t);
-            self.say(if t.2 {
+            self.say(if t.3 {
                 format!("'{title}' is hidden: shown here with hidden on, /hide brings it back")
             } else {
                 format!("the search and the toggles let go, to show '{title}'")
@@ -3019,7 +3040,7 @@ impl App {
 
     /// The list's row for a run, as the list would stand with this search
     /// and these toggles: its own, or the flow it folds into.
-    fn list_key(&self, id: &str, filter: &str, toggles: (bool, bool, bool)) -> Option<String> {
+    fn list_key(&self, id: &str, filter: &str, toggles: (bool, bool, bool, bool)) -> Option<String> {
         self.row_key(filter, toggles, |r| match r {
             Row::Run(i) => i.run.id == id,
             Row::Flow(f) => f.runs.iter().any(|i| i.run.id == id),
@@ -3028,14 +3049,20 @@ impl App {
     }
 
     /// The key of the first row of the list that `is` picks, as the list would
-    /// stand with this search and these toggles `(flows, agents, hidden)`.
-    fn row_key(&self, filter: &str, (show_flows, show_agents, show_hidden): (bool, bool, bool), is: impl Fn(&Row) -> bool) -> Option<String> {
+    /// stand with this search and these toggles `(flows, agents, shells, hidden)`.
+    fn row_key(
+        &self,
+        filter: &str,
+        (show_flows, show_agents, show_shells, show_hidden): (bool, bool, bool, bool),
+        is: impl Fn(&Row) -> bool,
+    ) -> Option<String> {
         let cx = rows::Context {
             names: &self.names,
             flows: &self.flows,
             filter,
             show_flows,
             show_agents,
+            show_shells,
             show_hidden,
             now: Timestamp::now(),
             relay: Some(&self.relay),
@@ -3635,6 +3662,7 @@ impl App {
                     filter: "",
                     show_flows: true,
                     show_agents: true,
+                    show_shells: true,
                     show_hidden: false,
                     now: Timestamp::now(),
                     relay: Some(&self.relay),
@@ -4201,9 +4229,9 @@ impl App {
             return Ok(());
         }
         let k = vi_step(k, self.line.is_empty());
-        // On an empty line the list's own letters flip the three toggles —
-        // `f` flows, `a` agents, `h` hidden — taken here, before the line
-        // editor would eat the character.
+        // On an empty line the list's own letters flip the toggles — `f`
+        // flows, `a` agents, `s` shells, `h` hidden — taken here, before the
+        // line editor would eat the character.
         if self.line.is_empty()
             && self.view == View::Work
             && matches!(self.mode, Mode::Normal)
@@ -4217,6 +4245,10 @@ impl App {
                 }
                 KeyCode::Char('a') => {
                     self.toggle_agents();
+                    return Ok(());
+                }
+                KeyCode::Char('s') => {
+                    self.toggle_shells();
                     return Ok(());
                 }
                 KeyCode::Char('h') => {
@@ -4545,9 +4577,14 @@ impl App {
             self.pane = Pane::Facts;
             self.show_pane = true;
             self.mode = Mode::Answer(id);
-        } else if matches!(self.selected(), Some(Row::Outside(_) | Row::Group(_))) {
-            // An agent's own session: its subpage, which says what enter will do with it. A
-            // project header: its flows there; `everywhere`'s, the flows with no `in` and how
+        } else if let Some(Row::Outside(s)) = self.selected() {
+            // An agent's own session: enter attaches to it straight away — hands over the
+            // terminal, carries it on, or goes to its run — the way `/join` does, without the
+            // pane first. The pane is still a `^o`/`/pane` away.
+            let s = s.clone();
+            self.enter_outside(&s, area).await;
+        } else if matches!(self.selected(), Some(Row::Group(_))) {
+            // A project header: its flows there; `everywhere`'s, the flows with no `in` and how
             // runs outside every project stand.
             self.pane = Pane::Facts;
             self.show_pane = true;
@@ -5067,6 +5104,16 @@ impl App {
                 other => self.say(format!("reload {other}? flows or shell, or both on its own")),
             },
             palette::Cmd::Flow => self.flow_command(&arg).await,
+            palette::Cmd::Edit => {
+                // The flow under the cursor, by name — `/flow edit` without the
+                // name, opening its `flow.md` in `$EDITOR`.
+                if let Some(f) = self.selected_flow() {
+                    let name = f.name.clone();
+                    self.edit_flow(&name);
+                } else {
+                    self.say("nothing here to edit · select a flow");
+                }
+            }
             palette::Cmd::New => self.new_run_form(),
             palette::Cmd::Summary => self.summary(&arg).await,
             palette::Cmd::Since => self.since(&arg).await,
@@ -5089,6 +5136,7 @@ impl App {
             }
             palette::Cmd::Flows => self.toggle_flows(),
             palette::Cmd::Agents => self.toggle_agents(),
+            palette::Cmd::Shells => self.toggle_shells(),
             palette::Cmd::Hidden => self.toggle_hidden(),
             palette::Cmd::Prune => match self.rpc.call::<GcRun>(GcParams::default()).await {
                 Ok(r) if r.runs == 0 => self.say(format!("nothing with a journal ended over {} ago", r.older_than)),
@@ -5228,8 +5276,9 @@ impl App {
         };
         // The header's first line carries three things: its words at the
         // left, the toggles at the right of them, and who you are at the edge.
-        // The toggles ride here rather than a row of their own.
-        let lens = (self.view == View::Work).then(|| self.toggles_line());
+        // The toggles ride here rather than a row of their own; a subpage has
+        // no list to filter, so they stand down while it is up.
+        let lens = (self.view == View::Work && !self.show_pane).then(|| self.toggles_line());
         let lens_w = lens.as_ref().map_or(0, |l| l.width() as u16 + 2);
         let [top, below] = Layout::vertical([Constraint::Length(1), Constraint::Fill(1)]).areas(text);
         let [l, lens_area, r] = Layout::horizontal([
@@ -5355,27 +5404,33 @@ impl App {
         f.render_widget(Paragraph::new(foot), footer);
     }
 
-    /// The toggles, at the right of the header: `f flows  a agents  h hidden`,
-    /// the ones on accented, the ones off quiet. The letters flip them on an
-    /// empty line.
+    /// The toggles, at the right of the header, compact: a glyph and its key
+    /// for each kind — `✦a` agents, `⚑f` flows, `❯s` shells — then a `│` and
+    /// `◌h` hidden, the kinds apart from the hidden axis. On is accented and
+    /// bold, off is quiet. The letters flip them on an empty line.
     fn toggles_line(&self) -> Line<'static> {
         let on = theme::accent().add_modifier(Modifier::BOLD);
         let off = theme::dim();
         let mut spans = Vec::new();
-        for (i, (key, label, lit)) in [
-            ("f", "flows", self.show_flows),
-            ("a", "agents", self.show_agents),
-            ("h", "hidden", self.show_hidden),
+        for (i, (glyph, key, lit)) in [
+            ("✦", "a", self.show_agents),
+            ("⚑", "f", self.show_flows),
+            ("❯", "s", self.show_shells),
         ]
         .into_iter()
         .enumerate()
         {
             if i > 0 {
-                spans.push(Span::styled("   ", off));
+                spans.push(Span::styled("  ", off));
             }
             let style = if lit { on } else { off };
-            spans.push(Span::styled(format!("{key} {label}"), style));
+            spans.push(Span::styled(format!("{glyph}{key}"), style));
         }
+        // Hidden is a different axis — what you hid, not a kind — so a divider
+        // sets it apart.
+        spans.push(Span::styled("  │  ", off));
+        let style = if self.show_hidden { on } else { off };
+        spans.push(Span::styled("◌h", style));
         Line::from(spans)
     }
 
@@ -5490,8 +5545,8 @@ impl App {
         if rows.is_empty() {
             let msg: String = if !self.filter.is_empty() {
                 " nothing matches".into()
-            } else if !self.show_flows || !self.show_agents {
-                " nothing here · f flows · a agents · h hidden".into()
+            } else if !self.show_flows || !self.show_agents || !self.show_shells {
+                " nothing here · f flows · a agents · s shells · h hidden".into()
             } else if self.show_hidden {
                 " nothing hidden · /hide takes a row off the list".into()
             } else {
@@ -6218,16 +6273,13 @@ impl App {
                     _ => "/flow run · ",
                 };
                 let archives = if f.runs.is_empty() { "" } else { "^x archives · " };
-                format!("enter its firings · {yes}{archives}{pane}")
+                format!("enter its firings · {yes}/edit · {archives}{pane}")
             }
             Some(Row::Run(i)) if i.run.state.is_terminal() => {
                 format!("enter output · /summary · ^x archives · ^t pins · {pane}")
             }
             Some(Row::Run(_)) => format!("enter joins it · ^x stops it · ^t pins · {pane}"),
-            Some(Row::Outside(c)) if self.show_pane && self.pane == Pane::Facts => {
-                format!("{} · /hide · {pane}", outside::enter_hint(c))
-            }
-            Some(Row::Outside(_)) => format!("enter its pane · /hide · {pane}"),
+            Some(Row::Outside(c)) => format!("{} · /hide · {pane}", outside::enter_hint(c)),
             // A flow here that did not load is what `/flow edit` opens, at the line.
             Some(Row::Group(h)) if h.is_everywhere() => {
                 let fix = self.broken_hint(&h);
@@ -9014,6 +9066,81 @@ mod tests {
             "`not_a_name` is not a flow name; use lowercase letters, digits and dashes"
         );
         assert!(app.editor.is_none());
+        token.cancel();
+    }
+
+    #[tokio::test]
+    async fn edit_opens_the_selected_flows_file() {
+        let (tmp, token, mut app, _folder) = panel_of(|folder, now| {
+            let mut r = rl_proto::types::Run::new(
+                "run00002",
+                rl_proto::types::RunKind::Command,
+                "probe",
+                vec!["true".into()],
+                folder,
+                folder,
+                now,
+            );
+            r.cause = rl_proto::types::Cause::Flow {
+                flow: "nightly".into(),
+                step: "probe".into(),
+            };
+            vec![r]
+        })
+        .await;
+        let ledger = rl_ledger::Ledger::open(&rl_core::Home::at(tmp.path().join("h")).ledger()).unwrap();
+        ledger
+            .call_blocking(|c| {
+                let loaded = rl_ledger::flows::Loaded {
+                    name: "nightly".into(),
+                    hash: "h".into(),
+                    def_json: "{}".into(),
+                };
+                rl_ledger::flows::sync(c, &[loaded], jiff::Timestamp::now())
+            })
+            .unwrap();
+        app.refresh().await;
+        let said = |app: &super::App| app.flash.as_ref().map(|(m, _)| m.clone()).unwrap_or_default();
+        async fn run(app: &mut super::App, line: &str) {
+            type_in(app, line).await;
+            press(app, KeyCode::Enter, KeyModifiers::NONE).await;
+        }
+
+        // On a flow's row, `/edit` opens its `flow.md` — no name needed.
+        app.select(Some("f:nightly".into()));
+        run(&mut app, "/edit").await;
+        let home = rl_core::Home::at(tmp.path().join("h"));
+        let (editing, line) = app.editor.take().expect("the editor is next");
+        let file = home.flow_dir("nightly").join("flow.md");
+        assert_eq!((editing.name.as_str(), &editing.file, line), ("nightly", &file, 1));
+
+        // Off a flow — on a run — there is nothing to edit, and it says so.
+        app.select(Some(RUN.into()));
+        run(&mut app, "/edit").await;
+        assert!(app.editor.is_none());
+        assert_eq!(said(&app), "nothing here to edit · select a flow");
+        token.cancel();
+    }
+
+    #[tokio::test]
+    async fn the_filter_bar_is_compact_glyphs() {
+        let (_tmp, token, app, _folder) = panel().await;
+        // A glyph and its key for each kind, then a divider and hidden.
+        assert_eq!(app.toggles_line().to_string(), "✦a  ⚑f  ❯s  │  ◌h");
+        token.cancel();
+    }
+
+    #[tokio::test]
+    async fn s_and_slash_shells_flip_the_shells_toggle() {
+        let (_tmp, token, mut app, _folder) = panel().await;
+        assert!(app.show_shells, "shells on by default");
+        // `s` on an empty line flips it off.
+        press(&mut app, KeyCode::Char('s'), KeyModifiers::NONE).await;
+        assert!(!app.show_shells);
+        // `/shells` flips it back on.
+        type_in(&mut app, "/shells").await;
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+        assert!(app.show_shells);
         token.cancel();
     }
 
