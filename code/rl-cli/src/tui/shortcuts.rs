@@ -82,6 +82,7 @@ fn place_keys(at: Place) -> Vec<Key> {
             cmd(Cmd::Filter, "search"),
             key("f", "flows"),
             key("a", "agents"),
+            key("s", "shells"),
             key("h", "hidden"),
             key("/hide", ""),
             help,
@@ -103,6 +104,7 @@ fn place_keys(at: Place) -> Vec<Key> {
             cmd(Cmd::Filter, "search"),
             key("f", "flows"),
             key("a", "agents"),
+            key("s", "shells"),
             key("h", "hidden"),
             help,
         ],
@@ -287,7 +289,7 @@ mod tests {
         assert_eq!(
             one_line(Place::List),
             "↑↓ ^j^k move · ⇧↑↓ reorder · enter join/open · → ← a flow's steps · ^x stop/archive/remove · ^t pin · \
-             ^r rename · ^o details · ^f search · f flows · a agents · h hidden · /hide · /help · ^h"
+             ^r rename · ^o details · ^f search · f flows · a agents · s shells · h hidden · /hide · /help · ^h"
         );
     }
 
@@ -301,7 +303,7 @@ mod tests {
         assert_eq!(
             one_line(Place::Hidden),
             "↑↓ ^j^k move · /hide brings it back · enter join/open · ^x stop/archive/remove · \
-             ^t pin · ^r rename · ^o details · ^f search · f flows · a agents · h hidden · /help · ^h"
+             ^t pin · ^r rename · ^o details · ^f search · f flows · a agents · s shells · h hidden · /help · ^h"
         );
 
         assert_eq!(
@@ -412,7 +414,7 @@ mod tests {
         }
         // The list's keys take one row at a wide terminal and two at 100.
         assert_eq!(wrap(&keys(Place::List), 200).len(), 1);
-        assert_eq!(wrap(&keys(Place::List), 98).len(), 2);
+        assert_eq!(wrap(&keys(Place::List), 100).len(), 2);
     }
 
     #[test]

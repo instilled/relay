@@ -23,6 +23,7 @@ pub enum Cmd {
     Events,
     Reload,
     Flow,
+    Edit,
     New,
     Summary,
     Since,
@@ -30,6 +31,7 @@ pub enum Cmd {
     Filter,
     Flows,
     Agents,
+    Shells,
     Hidden,
     Prune,
     Up,
@@ -163,6 +165,13 @@ pub const ALL: &[Command] = &[
         cmd: Cmd::Flow,
     },
     Command {
+        name: "edit",
+        args: "",
+        words: &[],
+        what: "open the flow under the cursor in $EDITOR (its flow.md, as /flow edit does)",
+        cmd: Cmd::Edit,
+    },
+    Command {
         name: "new",
         args: "",
         words: &[],
@@ -210,6 +219,13 @@ pub const ALL: &[Command] = &[
         words: &[],
         what: "show or hide agents' runs on the list (a on the list does too)",
         cmd: Cmd::Agents,
+    },
+    Command {
+        name: "shells",
+        args: "",
+        words: &[],
+        what: "show or hide shell runs on the list (s on the list does too)",
+        cmd: Cmd::Shells,
     },
     Command {
         name: "hidden",
@@ -390,7 +406,7 @@ mod tests {
 
     #[test]
     fn a_name_matches_by_what_it_contains_too() {
-        assert_eq!(names("ll"), vec!["shell"]);
+        assert_eq!(names("ll"), vec!["shell", "shells"]);
         // `um` opens nothing, and sits inside both of these.
         assert_eq!(names("um"), vec!["resume", "summary"]);
     }
@@ -474,12 +490,12 @@ mod tests {
         // `re` opens `reload` and `rename`; `p` opens three.
         assert!(parse("/re").is_none());
         assert!(parse("/p").is_none());
-        // The toggles share a prefix with `flow` and `hide`.
+        // The toggles share a prefix with `flow`, `hide` and `shell`.
         assert!(parse("/fl").is_none(), "flow and flows");
         assert!(parse("/hi").is_none(), "hide and hidden");
+        assert!(parse("/sh").is_none(), "shell and shells");
         assert!(parse("/done").is_none(), "gone: /archive, or /mark done");
         assert!(parse("/approve").is_none(), "gone: /flow approve");
-        assert!(parse("/edit").is_none(), "gone: /flow edit");
         assert!(parse("/nope").is_none());
         assert!(parse("/").is_none());
         assert!(parse("").is_none());
