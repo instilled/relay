@@ -111,7 +111,7 @@ impl Decisions {
                 let id = id.clone();
                 let r = self
                     .ledger
-                    .call(move |c| runs::get(c, &id))
+                    .call_read(move |c| runs::get(c, &id))
                     .await?
                     .ok_or_else(|| anyhow!("no run {}", spec.run.as_deref().unwrap_or_default()))?;
                 (Some(r.id.clone()), r.chain.clone(), r.workspace.clone())
@@ -154,7 +154,7 @@ impl Decisions {
             Some(g) => {
                 let g = g.clone();
                 self.ledger
-                    .call(move |c| decisions::open_in_group(c, &g, stepped))
+                    .call_read(move |c| decisions::open_in_group(c, &g, stepped))
                     .await?
             }
             None => None,
@@ -210,12 +210,12 @@ impl Decisions {
     }
 
     pub async fn list(&self, f: DecisionFilter) -> Result<Vec<Decision>> {
-        self.ledger.call(move |c| decisions::list(c, &f)).await
+        self.ledger.call_read(move |c| decisions::list(c, &f)).await
     }
 
     pub async fn get(&self, id: &str) -> Result<Option<Decision>> {
         let id = id.to_string();
-        self.ledger.call(move |c| decisions::get(c, &id)).await
+        self.ledger.call_read(move |c| decisions::get(c, &id)).await
     }
 
     /// Chooses. Every chosen option that carries an action starts a run.
@@ -265,7 +265,7 @@ impl Decisions {
             .await?;
 
         let i = d.id.clone();
-        let by_step = self.ledger.call(move |c| decisions::by_step(c, &i)).await?;
+        let by_step = self.ledger.call_read(move |c| decisions::by_step(c, &i)).await?;
         let mut started = Vec::new();
         for key in keys.iter().filter(|_| by_step.is_none()) {
             let Some(opt) = d.option(key) else { continue };
@@ -336,7 +336,7 @@ impl Decisions {
 
     /// Questions whose time is up: the default option is taken, or they expire.
     pub async fn sweep(&self, now: Timestamp) -> Result<usize> {
-        let due = self.ledger.call(move |c| decisions::due(c, now)).await?;
+        let due = self.ledger.call_read(move |c| decisions::due(c, now)).await?;
         let mut n = 0;
         for d in due {
             let outcome = match d.default_option() {
@@ -365,7 +365,7 @@ impl Decisions {
     pub async fn serve(self: Arc<Self>) {
         loop {
             let now = Timestamp::now();
-            let nap = match self.ledger.call(|c| decisions::next_expiry(c)).await {
+            let nap = match self.ledger.call_read(decisions::next_expiry).await {
                 Ok(Some(t)) if t > now => t.duration_since(now).unsigned_abs().min(IDLE),
                 Ok(Some(_)) => Duration::ZERO,
                 Ok(None) => IDLE,
@@ -399,7 +399,7 @@ impl Decisions {
         let e = match &d.run {
             Some(id) => {
                 let id = id.clone();
-                match self.ledger.call(move |c| runs::get(c, &id)).await? {
+                match self.ledger.call_read(move |c| runs::get(c, &id)).await? {
                     Some(r) => NewEvent {
                         group_key: r.group_key(),
                         ..e

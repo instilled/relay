@@ -146,7 +146,7 @@ fn whole(t: Timestamp) -> Timestamp {
 
 async fn load(d: &Daemon, id: &str) -> Result<Option<Run>> {
     let id = id.to_string();
-    d.ledger.call(move |c| runs::get(c, &id)).await
+    d.ledger.call_read(move |c| runs::get(c, &id)).await
 }
 
 /// Where a run's stretch begins: as asked; else when you last looked at it,
@@ -163,7 +163,7 @@ async fn moved_since_seen(d: &Daemon, run: &Run) -> Result<bool> {
     let after = seen + SignedDuration::from_millis(1);
     let id = run.id.clone();
     d.ledger
-        .call(move |c| {
+        .call_read(move |c| {
             if !session_io::tail_since(c, &id, after, 1)?.is_empty() {
                 return Ok(true);
             }
@@ -192,7 +192,7 @@ async fn run_stretch(d: &Daemon, run: &Run, asked: Option<Timestamp>) -> Result<
 /// The recap kept for a run, marked stale when it has moved on since.
 async fn run_kept(d: &Daemon, run: &str) -> Result<Option<Summary>> {
     let id = run.to_string();
-    let Some(mut s) = d.ledger.call(move |c| summaries::get(c, &id)).await? else {
+    let Some(mut s) = d.ledger.call_read(move |c| summaries::get(c, &id)).await? else {
         return Ok(None);
     };
     s.target = SummaryTarget::Run { id: run.to_string() }.key();
@@ -211,7 +211,7 @@ async fn run_kept(d: &Daemon, run: &str) -> Result<Option<Summary>> {
 async fn run_latest(d: &Daemon, id: &str, run: Option<&Run>) -> Result<Option<Summary>> {
     let whole = run_kept(d, id).await?;
     let key = SummaryTarget::Run { id: id.to_string() }.key();
-    let since = d.ledger.call(move |c| kept::latest(c, &key, false)).await?;
+    let since = d.ledger.call_read(move |c| kept::latest(c, &key, false)).await?;
     let Some(mut s) = since.filter(|s| whole.as_ref().is_none_or(|w| s.at > w.at)) else {
         return Ok(whole);
     };
@@ -225,7 +225,7 @@ async fn run_latest(d: &Daemon, id: &str, run: Option<&Run>) -> Result<Option<Su
 /// The one kept in `summary_kept`, with the run it is of, if any.
 async fn kept_of(d: &Daemon, t: &SummaryTarget, deep: bool, from: Option<Timestamp>) -> Result<Option<Summary>> {
     let key = t.key();
-    let found = d.ledger.call(move |c| kept::get(c, &key, deep, from)).await?;
+    let found = d.ledger.call_read(move |c| kept::get(c, &key, deep, from)).await?;
     Ok(found.map(|mut s| {
         if let SummaryTarget::Run { id } = t {
             s.run = id.clone();
@@ -238,7 +238,7 @@ async fn kept_of(d: &Daemon, t: &SummaryTarget, deep: bool, from: Option<Timesta
 /// its folder and start and remembered.
 pub(crate) async fn locate(d: &Daemon, run: &Run) -> Result<Option<PathBuf>> {
     let id = run.id.clone();
-    if let Some(p) = d.ledger.call(move |c| summaries::transcript(c, &id)).await? {
+    if let Some(p) = d.ledger.call_read(move |c| summaries::transcript(c, &id)).await? {
         return Ok(Some(p));
     }
     let (Some(agent), Some(home)) = (Agent::of(run), std::env::var_os("HOME")) else {
@@ -263,7 +263,7 @@ async fn reach(d: &Daemon, run: &Run, transcript: Option<&Path>) -> Result<Strin
         return Ok(format!("t:{len}"));
     }
     let id = run.id.clone();
-    let seq = d.ledger.call(move |c| session_io::last_seq(c, &id)).await?;
+    let seq = d.ledger.call_read(move |c| session_io::last_seq(c, &id)).await?;
     Ok(format!("o:{seq}"))
 }
 
@@ -281,7 +281,7 @@ async fn many_reach(d: &Daemon, runs: &[Run]) -> Result<String> {
     let ids: Vec<String> = runs.iter().map(|r| r.id.clone()).collect();
     let out = d
         .ledger
-        .call(move |c| ids.iter().map(|id| session_io::last_seq(c, id)).sum::<Result<i64>>())
+        .call_read(move |c| ids.iter().map(|id| session_io::last_seq(c, id)).sum::<Result<i64>>())
         .await?;
     Ok(format!("n:{}:{last}:{out}", runs.len()))
 }
@@ -380,7 +380,7 @@ async fn output(d: &Daemon, run: &Run, from: Option<Timestamp>, max: usize) -> R
     let id = run.id.clone();
     let bytes = d
         .ledger
-        .call(move |c| match from {
+        .call_read(move |c| match from {
             Some(f) => session_io::tail_since(c, &id, f, max),
             None => session_io::tail(c, &id, max),
         })
@@ -392,7 +392,7 @@ async fn output(d: &Daemon, run: &Run, from: Option<Timestamp>, max: usize) -> R
 async fn run_events(d: &Daemon, run: &Run, from: Option<Timestamp>, limit: u32) -> Result<Vec<Event>> {
     let id = run.id.clone();
     d.ledger
-        .call(move |c| {
+        .call_read(move |c| {
             events::list(
                 c,
                 &EventFilter {
@@ -565,12 +565,12 @@ async fn over_from(d: &Daemon, t: &SummaryTarget, asked: Option<Timestamp>, now:
     match t {
         SummaryTarget::Flow { name } => {
             let cause = format!("flow:{name}/");
-            let oldest = d.ledger.call(move |c| runs::oldest_unseen(c, &cause)).await?;
+            let oldest = d.ledger.call_read(move |c| runs::oldest_unseen(c, &cause)).await?;
             Ok(oldest.unwrap_or(now - FLOW_STRETCH))
         }
         SummaryTarget::Firing { id } => {
             let key = id.clone();
-            match d.ledger.call(move |c| rl_ledger::firings::get(c, &key)).await? {
+            match d.ledger.call_read(move |c| rl_ledger::firings::get(c, &key)).await? {
                 Some(f) => Ok(f.started_at),
                 None => bail!("no firing {id}"),
             }
@@ -585,7 +585,7 @@ async fn over_from(d: &Daemon, t: &SummaryTarget, asked: Option<Timestamp>, now:
 /// moved in it or are still going, never an assistant's own; by folder, then
 /// as they started.
 async fn in_stretch(d: &Daemon, t: &SummaryTarget, from: Timestamp) -> Result<Vec<Run>> {
-    let found = d.ledger.call(move |c| runs::list_for_digest(c, from)).await?;
+    let found = d.ledger.call_read(move |c| runs::list_for_digest(c, from)).await?;
     let mut runs: Vec<Run> = found
         .into_iter()
         .filter(|r| !matches!(r.cause, Cause::Assistant(_)) && r.ended_at.is_none_or(|e| e >= from))
@@ -636,7 +636,7 @@ fn heading(t: &SummaryTarget, r: &Run, now: Timestamp) -> String {
 async fn brief_lines(d: &Daemon, runs: &[Run]) -> Result<Vec<String>> {
     let runs = runs.to_vec();
     d.ledger
-        .call(move |c| {
+        .call_read(move |c| {
             let ids: Vec<String> = runs.iter().map(|r| r.id.clone()).collect();
             let recaps = summaries::lines(c, &ids)?;
             runs.iter()

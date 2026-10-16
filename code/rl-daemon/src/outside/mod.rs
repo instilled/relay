@@ -172,7 +172,7 @@ impl Outsiders {
             bail!("a session needs its id and a whole folder");
         }
         if let Some(id) = p.run.clone() {
-            let run = ledger.call(move |c| rl_ledger::runs::get(c, &id)).await?;
+            let run = ledger.call_read(move |c| rl_ledger::runs::get(c, &id)).await?;
             // Only while that run lives: a process it left behind (Claude's
             // background supervisor, should it keep the environment it was
             // started in) carries its `RELAY_RUN` on, and the sessions it
