@@ -28,14 +28,14 @@ pub fn register(r: &mut Router<Daemon>) {
 
     r.register::<RunList, _, _>(|d, filter| async move {
         d.ledger
-            .call(move |c| runs::list(c, &filter))
+            .call_read(move |c| runs::list(c, &filter))
             .await
             .map_err(RpcError::internal)
     });
     r.register::<RunGet, _, _>(|d, RunId { id }| async move {
         let found = d
             .ledger
-            .call({
+            .call_read({
                 let id = id.clone();
                 move |c| runs::get(c, &id)
             })
@@ -77,7 +77,7 @@ pub fn register(r: &mut Router<Daemon>) {
     r.register::<SetupGet, _, _>(|d, ()| async move {
         let seen = d
             .ledger
-            .call(|c| rl_ledger::meta::get_i64(c, crate::setup::SEEN))
+            .call_read(|c| rl_ledger::meta::get_i64(c, crate::setup::SEEN))
             .await
             .map_err(internal)?
             .unwrap_or(0);
@@ -420,7 +420,7 @@ pub fn register(r: &mut Router<Daemon>) {
         let since = since.unwrap_or(jiff::Timestamp::UNIX_EPOCH);
         let (found, mut recaps, registered) = d
             .ledger
-            .call(move |c| {
+            .call_read(move |c| {
                 let found = runs::list_for_digest(c, since)?
                     .into_iter()
                     .map(|r| {
@@ -475,7 +475,7 @@ pub fn register(r: &mut Router<Daemon>) {
         let sessions = listed.clone();
         let (lost, hidden, order, firings, (carried, left, was)) = d
             .ledger
-            .call(move |c| {
+            .call_read(move |c| {
                 let carried = crate::outside::carried(c, &sessions)?;
                 let was = crate::outside::went_from(c, &sessions, &carried)?;
                 Ok((
@@ -505,7 +505,7 @@ pub fn register(r: &mut Router<Daemon>) {
 
     r.register::<EventList, _, _>(|d, filter| async move {
         d.ledger
-            .call(move |c| events::list(c, &filter))
+            .call_read(move |c| events::list(c, &filter))
             .await
             .map_err(RpcError::internal)
     });
@@ -600,7 +600,7 @@ fn internal(e: anyhow::Error) -> RpcError {
 async fn get_run(d: &Daemon, id: &str) -> Result<rl_proto::types::Run, RpcError> {
     let found = d
         .ledger
-        .call({
+        .call_read({
             let id = id.to_string();
             move |c| runs::get(c, &id)
         })

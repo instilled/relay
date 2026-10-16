@@ -75,7 +75,7 @@ pub async fn run(d: &Daemon, p: AssistantParams) -> Result<AssistantOutput> {
     let ended = loop {
         let found = d
             .ledger
-            .call({
+            .call_read({
                 let id = id.clone();
                 move |c| runs::get(c, &id)
             })
@@ -89,7 +89,7 @@ pub async fn run(d: &Daemon, p: AssistantParams) -> Result<AssistantOutput> {
                 tokio::time::sleep(Duration::from_millis(300)).await;
                 break d
                     .ledger
-                    .call({
+                    .call_read({
                         let id = id.clone();
                         move |c| runs::get(c, &id)
                     })
@@ -102,7 +102,7 @@ pub async fn run(d: &Daemon, p: AssistantParams) -> Result<AssistantOutput> {
     };
     let bytes = d
         .ledger
-        .call({
+        .call_read({
             let id = id.clone();
             move |c| session_io::tail(c, &id, OUTPUT_MAX)
         })

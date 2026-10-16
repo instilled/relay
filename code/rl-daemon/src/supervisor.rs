@@ -364,7 +364,7 @@ impl Supervisor {
     /// the holder is alive, resuming the journal from exactly where it stopped;
     /// otherwise close the run from its exit sidecar, or as lost.
     pub async fn reconcile(self: &Arc<Self>) -> Result<Reconciled> {
-        let open = self.ledger.call(|c| sessions::list_open(c)).await?;
+        let open = self.ledger.call_read(sessions::list_open).await?;
         let mut report = Reconciled::default();
         for row in open {
             let id = row.run.clone();

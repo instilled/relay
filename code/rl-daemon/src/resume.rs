@@ -25,7 +25,7 @@ pub const RESUMES: &str = "resumes:";
 /// that cannot be resumed says why and the rest go on.
 pub async fn resume(d: &Daemon, p: RunResumeParams) -> Result<Vec<Resumed>> {
     let ids = if p.lost {
-        d.ledger.call(|c| runs::lost(c)).await?
+        d.ledger.call_read(runs::lost).await?
     } else {
         p.ids.clone()
     };

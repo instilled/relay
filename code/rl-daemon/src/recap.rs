@@ -100,7 +100,7 @@ pub async fn pick_up(d: &Daemon, run: &Run) -> Result<bool> {
 pub async fn sweep(d: Arc<Daemon>) {
     loop {
         let ended = Timestamp::now() - AFTER_END;
-        match d.ledger.call(move |c| runs::recappable(c, ended)).await {
+        match d.ledger.call_read(move |c| runs::recappable(c, ended)).await {
             Ok(found) => {
                 for run in found {
                     if let Err(e) = pick_up(&d, &run).await {
