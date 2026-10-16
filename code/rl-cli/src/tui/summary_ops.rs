@@ -1,0 +1,280 @@
+//! `impl App` — the summaries & assistant Q&A cluster, lifted out of `mod.rs` verbatim.
+//! See `tui/mod.rs` for the `App` struct these methods belong to.
+
+use super::*;
+
+impl App {
+    /// What `/summary` on the selected row is of: everything on the
+    /// catch-up's top; a question's, the run that asked it.
+    pub(super) fn summary_target(&self) -> Option<SummaryTarget> {
+        if let Some(l) = self.lead_here() {
+            return Some(SummaryTarget::Firing {
+                id: l.firing.id.clone(),
+            });
+        }
+        if self.on_top() {
+            return Some(SummaryTarget::All);
+        }
+        self.target_of(&self.selected()?)
+    }
+
+    /// What a summary of `row` is of: a run; a flow's runs, wherever they
+    /// ran; a project; everything, on the `everywhere` header.
+    pub(super) fn target_of(&self, row: &Row) -> Option<SummaryTarget> {
+        Some(match row {
+            Row::Run(i) => SummaryTarget::Run { id: i.run.id.clone() },
+            // An older firing picked in its pane is what is told; else the flow.
+            Row::Flow(f) => match self.flow_pane.picked_firing().filter(|x| x.flow == f.name) {
+                Some(x) => SummaryTarget::Firing { id: x.id.clone() },
+                None => SummaryTarget::Flow { name: f.name.clone() },
+            },
+            Row::Group(h) if h.is_everywhere() => SummaryTarget::All,
+            Row::Group(h) => SummaryTarget::Project {
+                workspace: h.workspace.clone(),
+            },
+            // A question is told by the run that asked it.
+            Row::Question(q) => SummaryTarget::Run { id: q.run.clone()? },
+            // An agent's own session is not Relay's to tell.
+            Row::Outside(_) => return None,
+        })
+    }
+
+    /// The summary kept of `row`, when the one loaded is of it.
+    pub(super) fn summary_of_row(&self, row: &Row) -> Option<&Summary> {
+        let s = self.summary.as_ref()?;
+        match self.target_of(row)? {
+            SummaryTarget::Run { id } => (s.run == id).then_some(s),
+            t => (s.target == t.key()).then_some(s),
+        }
+    }
+
+    /// `enter` on the ask line: the words go to the assistant as a run; the
+    /// panel stays live and the answer comes back through the main loop.
+    pub(super) fn ask(&mut self, words: String, want: crate::context::Want) {
+        if words.trim().is_empty() {
+            return;
+        }
+        let folder = self.folder_here();
+        let home = self.home.clone();
+        let (w, f, wanted) = (words.clone(), folder.clone(), want.clone());
+        let task = tokio::spawn(async move { crate::interpret::ask(&home, &f, &w, &wanted).await });
+        self.asking = Some(Asking {
+            words,
+            folder,
+            want,
+            task,
+        });
+    }
+
+    pub(super) async fn answered(
+        &mut self,
+        answer: std::result::Result<
+            Result<(crate::interpret::Answer, rl_proto::methods::AssistantOutput)>,
+            tokio::task::JoinError,
+        >,
+    ) {
+        let Some(asking) = self.asking.take() else { return };
+        match answer {
+            Ok(Ok((crate::interpret::Answer::Run(_), out))) if matches!(asking.want, Want::Flow { .. }) => self.say(
+                format!("asked for a flow; {} answered a run (run {})", out.agent, out.run),
+            ),
+            Ok(Ok((crate::interpret::Answer::Flow(d), out))) => {
+                // Asked for a flow by name, the person's name wins the draft's.
+                let name = match asking.want {
+                    Want::Flow { name } => Some(name),
+                    Want::Any => d.name,
+                };
+                self.drafted(name, d.text, out.agent);
+            }
+            Ok(Ok((crate::interpret::Answer::Run(draft), out))) => {
+                let form = crate::interpret::form_of(&draft, &asking.folder)
+                    .with_folders(&self.names.paths())
+                    .with_agents(&self.agents);
+                self.mode = Mode::Form(Box::new(form));
+                self.say(format!(
+                    "{} drafted this from \"{}\" · enter does it · esc does not",
+                    out.agent, asking.words
+                ));
+            }
+            Ok(Err(e)) => self.say(format!("{e:#}")),
+            Err(e) => self.say(format!("asking: {e}")),
+        }
+        self.refresh().await;
+    }
+
+    /// `/summary [deep] [stretch]`: what happened in the row under the
+    /// cursor — a run, a flow's runs, a project's, or everything on the
+    /// `everywhere` header — brief from the recaps or deep from the logs,
+    /// since you last looked unless a stretch is typed. Deep over more than
+    /// one assistant call says how many first and waits for `y`.
+    pub(super) async fn summary(&mut self, arg: &str) {
+        if let Some(s) = &self.summarising {
+            self.say(format!("still summarising `{}`; ^x on its run stops it", s.title));
+            return;
+        }
+        if self.on_top() && self.topping.is_some() {
+            self.say("the top is still being written; /summary on a row meanwhile");
+            return;
+        }
+        let Some(target) = self.summary_target() else {
+            self.say(if self.selected_question().is_some() {
+                "this question has no run to summarise"
+            } else {
+                "/summary works on a run, a flow, a project, everything or a question"
+            });
+            return;
+        };
+        if let SummaryTarget::Run { id } = &target
+            && self
+                .run_by_id(id)
+                .is_some_and(|r| matches!(r.cause, Cause::Assistant(_)))
+        {
+            self.say("an assistant's own run; nothing to summarise");
+            return;
+        }
+        let now = Timestamp::now();
+        let SummaryArgs {
+            deep,
+            again,
+            from: typed,
+        } = match summary_args(arg, now) {
+            Ok(a) => a,
+            Err(e) => {
+                self.say(format!("{e:#}"));
+                return;
+            }
+        };
+        // A run's own stretch is the daemon's to say (since you looked at
+        // it); a flow's, from the firing you had not seen when the cursor
+        // landed on it, else the daemon's; a project's and everything's,
+        // since you were here.
+        let from = match target {
+            SummaryTarget::Project { .. } | SummaryTarget::All => Some(
+                typed
+                    .or(self.away_since)
+                    .unwrap_or(now - SignedDuration::from_hours(24)),
+            ),
+            SummaryTarget::Flow { .. } if typed.is_none() => {
+                self.sel.as_ref().and_then(|k| self.unseen_from.get(k)).copied()
+            }
+            _ => typed,
+        };
+        let params = SummaryParams {
+            target,
+            deep,
+            from,
+            again,
+            dry: false,
+            timeout: None,
+        };
+        if deep {
+            let dry = SummaryParams {
+                dry: true,
+                ..params.clone()
+            };
+            match self.rpc.call::<SummaryMake>(dry).await {
+                Ok(d) if d.calls > 1 => {
+                    self.summary_ask = Some(params);
+                    self.mode = Mode::SummaryCost {
+                        runs: d.runs,
+                        calls: d.calls,
+                    };
+                    return;
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    self.say(format!("{e:#}"));
+                    return;
+                }
+            }
+        }
+        self.summary_start(params);
+    }
+
+    /// Hands `params` to the summariser; the answer lands in the pane through
+    /// the main loop.
+    pub(super) fn summary_start(&mut self, params: SummaryParams) {
+        // A flow's note of where its unseen firings began is used once asked.
+        if let Some(k) = &self.sel
+            && params.from.is_some()
+            && self.unseen_from.get(k) == params.from.as_ref()
+        {
+            self.unseen_from.remove(k);
+        }
+        let title = match &params.target {
+            SummaryTarget::Run { id } => self
+                .run_by_id(id)
+                .map(|r| r.title.clone())
+                .unwrap_or_else(|| id.clone()),
+            SummaryTarget::Flow { name } => format!("flow {name}"),
+            SummaryTarget::Firing { id } => match self.digest.firings.iter().find(|f| f.id == *id) {
+                Some(f) => format!("a firing of {}", f.flow),
+                None => "a firing".into(),
+            },
+            SummaryTarget::Project { workspace } => self.names.workspace(workspace),
+            SummaryTarget::All => "everything".into(),
+        };
+        let (target, deep, from) = (params.target.clone(), params.deep, params.from);
+        let home = self.home.clone();
+        let task = tokio::spawn(async move {
+            let mut rpc = Client::connect(&home).await?;
+            rpc.call::<SummaryMake>(params).await
+        });
+        // The summary is in the details, not over a terminal being watched:
+        // that stays open, a step away. The top's is in the top — when it is
+        // over the stretch the catch-up shows; over another, it is the pane's.
+        let shown = self.catch.as_ref().map(|c| c.since.as_millisecond());
+        let tops = self.on_top() && shown == from.map(|f| f.as_millisecond());
+        if !tops {
+            self.pane = Pane::Facts;
+            self.show_pane = true;
+        }
+        self.summarising = Some(Summarising {
+            target,
+            title,
+            deep,
+            from,
+            task,
+        });
+    }
+
+    pub(super) async fn summarised(&mut self, done: std::result::Result<Result<Summary>, tokio::task::JoinError>) {
+        let Some(s) = self.summarising.take() else { return };
+        match done {
+            Ok(Ok(summary)) => {
+                let what = match s.target {
+                    SummaryTarget::Run { .. } => "recap",
+                    _ => "summary",
+                };
+                self.say(format!(
+                    "{what} of `{}` · {}",
+                    s.title,
+                    pane::recap_label(&summary, Timestamp::now())
+                ));
+                self.made.insert(s.target.key(), summary.clone());
+                self.top_from(&s, &summary);
+                if self.summary_target().as_ref() == Some(&s.target) {
+                    self.summary = Some(summary);
+                }
+            }
+            Ok(Err(e)) => self.say(format!("{e:#}")),
+            Err(e) => self.say(format!("summarising: {e}")),
+        }
+        self.refresh().await;
+    }
+
+    /// `/since [stretch]`: the catch-up over the stretch typed, else since
+    /// you were last here, else the last day — from any view; `esc` goes to
+    /// the list.
+    pub(super) async fn since(&mut self, arg: &str) {
+        let now = Timestamp::now();
+        let since = match arg.trim() {
+            "" => self.left.unwrap_or(now - SignedDuration::from_hours(24)),
+            typed => match rl_core::time::parse_since(typed, now) {
+                Ok(t) => t,
+                Err(e) => return self.say(format!("{e:#}")),
+            },
+        };
+        self.open_catch_up(since, false).await;
+    }
+}
