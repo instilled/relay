@@ -96,6 +96,15 @@ impl Home {
     pub fn ledger(&self) -> PathBuf {
         self.0.join("ledger.db")
     }
+    /// Where a run's terminal bytes are journaled now: an append-only file per
+    /// direction under `io/<run>/`, out of the ledger so `ledger.db` stays
+    /// small. The ledger keeps only where each chunk sits in these files.
+    pub fn io_dir(&self) -> PathBuf {
+        self.0.join("io")
+    }
+    pub fn session_io_dir(&self, run: &str) -> PathBuf {
+        self.io_dir().join(run)
+    }
     /// Your defaults, human-edited; absent means all defaults.
     pub fn config_file(&self) -> PathBuf {
         self.0.join("config.yaml")
@@ -137,6 +146,7 @@ impl Home {
             self.detect_dir(),
             self.hooks_dir(),
             self.socket_dir(),
+            self.io_dir(),
         ] {
             std::fs::create_dir_all(&d).with_context(|| format!("creating {}", d.display()))?;
         }
@@ -188,6 +198,21 @@ mod tests {
         assert!(home.run_dir().is_dir());
         assert!(home.log_dir().is_dir());
         assert_eq!(home.daemon_socket(), home.run_dir().join("rld.sock"));
+    }
+
+    #[test]
+    fn a_runs_terminal_bytes_live_under_io() {
+        let home = Home::at("/h");
+        assert_eq!(home.io_dir(), Path::new("/h/io"));
+        assert_eq!(home.session_io_dir("r1"), Path::new("/h/io/r1"));
+    }
+
+    #[test]
+    fn ensure_dirs_makes_the_io_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = Home::at(tmp.path().join("relay"));
+        home.ensure_dirs().unwrap();
+        assert!(home.io_dir().is_dir());
     }
 
     #[test]

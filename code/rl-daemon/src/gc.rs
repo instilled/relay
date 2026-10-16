@@ -52,6 +52,9 @@ pub async fn run(
         .call(move |c| {
             let rows = session_io::drop_ended_before(c, before, dry_run)?;
             if !dry_run {
+                // Clear any journal dir a crash left behind for a run that is
+                // wholly gone from the ledger.
+                session_io::orphan_sweep(c)?;
                 for (id, bytes) in &rows {
                     if let Some(r) = runs::get(c, id)? {
                         let mut e = NewEvent::for_run(
