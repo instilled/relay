@@ -31,7 +31,7 @@ const DISMISS_NOTE: &str = "its project was removed";
 /// it); then `cwd` itself. A run's, and an agent's own session's.
 pub async fn filed_under(ledger: &Ledger, cwd: &Path, toplevel: Option<PathBuf>) -> Result<PathBuf> {
     let registered = ledger
-        .call({
+        .call_read({
             let cwd = cwd.to_path_buf();
             move |c| workspaces::containing(c, &cwd)
         })
@@ -83,7 +83,7 @@ pub async fn up(d: &Daemon, path: &Path) -> Result<Workspace> {
 }
 
 pub async fn list(d: &Daemon) -> Result<Vec<Workspace>> {
-    d.ledger.call(|c| workspaces::list(c)).await
+    d.ledger.call_read(workspaces::list).await
 }
 
 /// Renames a registered folder (any spelling of its path), keeping
@@ -109,7 +109,7 @@ pub async fn remove(d: &Daemon, p: WorkspaceRemoveParams) -> Result<WorkspaceRem
 
     let asked = {
         let p2 = path.clone();
-        d.ledger.call(move |c| decisions::open_in(c, &p2)).await?
+        d.ledger.call_read(move |c| decisions::open_in(c, &p2)).await?
     };
     let mut dismissed = 0;
     for q in asked {
@@ -151,7 +151,7 @@ pub async fn remove(d: &Daemon, p: WorkspaceRemoveParams) -> Result<WorkspaceRem
 async fn stop_all(d: &Daemon, path: &Path) -> Result<(usize, usize)> {
     let live: Vec<Run> = {
         let p2 = path.to_path_buf();
-        d.ledger.call(move |c| runs::live_in(c, &p2)).await?
+        d.ledger.call_read(move |c| runs::live_in(c, &p2)).await?
     };
     if live.is_empty() {
         return Ok((0, 0));
@@ -216,7 +216,7 @@ async fn wait_ended(d: &Daemon, ids: &[String], limit: Duration) -> Result<Vec<S
         let going: Vec<String> = {
             let ids = ids.to_vec();
             d.ledger
-                .call(move |c| {
+                .call_read(move |c| {
                     let mut going = Vec::new();
                     for id in ids {
                         if runs::get(c, &id)?.is_some_and(|r| !r.state.is_terminal()) {

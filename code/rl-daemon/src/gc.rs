@@ -138,7 +138,7 @@ async fn firing_folders(home: &Home, ledger: &Ledger, before: Timestamp, dry_run
         }
     }
     let gone = ledger
-        .call(move |c| {
+        .call_read(move |c| {
             seen.into_iter()
                 .map(|(flow, ids)| {
                     let ended = firings::ended_before(c, &flow, &ids, before)?;
@@ -193,7 +193,7 @@ pub async fn daily(home: Home, ledger: Ledger, config: Arc<RwLock<Loaded>>, shut
         // otherwise, so an old run's terminal bytes do not pile up for good.
         let keep = config.read().unwrap().config.retention_journal().to_string();
         if !rl_proto::config::is_never(&keep) {
-            let due = match ledger.call(|c| meta::get_i64(c, LAST_AT)).await {
+            let due = match ledger.call_read(|c| meta::get_i64(c, LAST_AT)).await {
                 Ok(Some(last)) => Timestamp::now().as_millisecond() - last >= DAILY_MS,
                 Ok(None) => true,
                 Err(e) => {

@@ -66,7 +66,7 @@ pub async fn attach(d: &Daemon, p: AttachParams) -> Result<Attached, RpcError> {
     let id = p.id.clone();
     let run = d
         .ledger
-        .call({
+        .call_read({
             let id = id.clone();
             move |c| runs::get(c, &id)
         })
@@ -93,7 +93,7 @@ pub async fn attach(d: &Daemon, p: AttachParams) -> Result<Attached, RpcError> {
         let tail = journal_tail(d, &id, scrollback, journaled).await?;
         let (cols, rows, tty) = d
             .ledger
-            .call({
+            .call_read({
                 let id = id.clone();
                 move |c| sessions::get(c, &id)
             })
@@ -242,7 +242,7 @@ pub async fn attach(d: &Daemon, p: AttachParams) -> Result<Attached, RpcError> {
 async fn journal_tail(d: &Daemon, id: &str, scrollback: usize, journaled: u64) -> Result<Vec<u8>, RpcError> {
     let id = id.to_string();
     d.ledger
-        .call(move |c| {
+        .call_read(move |c| {
             let since = session_io::out_bytes(c, &id)?.saturating_sub(journaled) as usize;
             let mut tail = session_io::tail(c, &id, scrollback + since)?;
             tail.truncate(tail.len().saturating_sub(since));

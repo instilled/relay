@@ -65,7 +65,7 @@ async fn sessions(d: &Daemon, mark: bool, wait: Duration) -> Result<Vec<Outside>
     let listed = all.clone();
     let (carried, was, mentioned) = d
         .ledger
-        .call(move |c| {
+        .call_read(move |c| {
             let carried = crate::outside::carried(c, &listed)?;
             let was = crate::outside::went_from(c, &listed, &carried)?;
             let mentioned: HashSet<String> = meta::get(c, MENTIONED)?
@@ -177,7 +177,7 @@ async fn the_one(d: &Daemon, p: &ImportMoveParams) -> Result<(Outside, Option<Re
         .ok_or_else(|| anyhow!("{} has no session {} now", p.agent, p.session_id))?;
     let mut s = last.session;
     let listed = vec![s.clone()];
-    let carried = d.ledger.call(move |c| crate::outside::carried(c, &listed)).await?;
+    let carried = d.ledger.call_read(move |c| crate::outside::carried(c, &listed)).await?;
     s.run = carried.get(&s.key()).cloned();
     let written = last
         .transcript
