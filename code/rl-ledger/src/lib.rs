@@ -24,8 +24,12 @@ pub mod workspaces;
 
 use anyhow::{Context, Result, anyhow};
 use rusqlite::Connection;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
+
+/// Tells apart the journal dirs of the many in-memory ledgers a test run opens.
+static MEM_IO: AtomicU64 = AtomicU64::new(0);
 
 type Job = Box<dyn FnOnce(&mut Connection) + Send + 'static>;
 
@@ -40,19 +44,29 @@ impl Ledger {
             std::fs::create_dir_all(dir)?;
         }
         let conn = Connection::open(path).with_context(|| format!("opening {}", path.display()))?;
-        Self::from_connection(conn)
+        // Journal files sit beside `ledger.db`, in `io/` under the same home.
+        let io_root = path.parent().map(|p| p.join("io")).unwrap_or_else(|| PathBuf::from("io"));
+        Self::from_connection(conn, &io_root)
     }
 
     pub fn open_in_memory() -> Result<Self> {
-        Self::from_connection(Connection::open_in_memory()?)
+        let io_root = std::env::temp_dir().join(format!(
+            "rl-io-mem-{}-{}",
+            std::process::id(),
+            MEM_IO.fetch_add(1, Ordering::Relaxed)
+        ));
+        Self::from_connection(Connection::open_in_memory()?, &io_root)
     }
 
-    fn from_connection(mut conn: Connection) -> Result<Self> {
+    fn from_connection(mut conn: Connection, io_root: &Path) -> Result<Self> {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         conn.pragma_update(None, "busy_timeout", 5000)?;
         migrate::run(&mut conn)?;
+        // So any `&Connection` can find the journal files without a path
+        // threaded through every caller.
+        meta::set(&conn, session_io::IO_ROOT_KEY, &io_root.to_string_lossy())?;
         let (tx, rx) = mpsc::channel::<Job>();
         std::thread::Builder::new()
             .name("rl-ledger".into())
