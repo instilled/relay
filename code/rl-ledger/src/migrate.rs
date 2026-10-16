@@ -46,6 +46,11 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         include_str!("../migrations/0023_group_owner.sql"),
     ),
     (24, "0024_values", include_str!("../migrations/0024_values.sql")),
+    (
+        25,
+        "0025_session_io_files",
+        include_str!("../migrations/0025_session_io_files.sql"),
+    ),
 ];
 
 pub fn run(conn: &mut Connection) -> Result<()> {
@@ -204,5 +209,20 @@ mod tests {
         assert!(!columns.iter().any(|c| c == "by_reaction"), "{columns:?}");
         let broken = col("SELECT \"table\" FROM pragma_foreign_key_check");
         assert!(broken.is_empty(), "{broken:?}");
+    }
+
+    #[test]
+    fn session_io_keeps_only_where_bytes_sit() {
+        let mut c = Connection::open_in_memory().unwrap();
+        run(&mut c).unwrap();
+        let cols: Vec<String> = c
+            .prepare("SELECT name FROM pragma_table_info('session_io')")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(cols, ["run", "seq", "direction", "pos", "len", "ts"]);
+        assert!(!cols.iter().any(|c| c == "data"), "the bytes live on disk now");
     }
 }
