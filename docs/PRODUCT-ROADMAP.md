@@ -9,10 +9,10 @@ Goal for v1:
 
 The next milestone is one dependable daily loop: start work → leave → get told when needed → come back to the facts → say yes to the next step. Breadth waits for it.
 
-* [ ] ctrl-\ leaves a Claude background session — enter runs `claude attach` under a PTY of Relay's (as `attach.rs` does for runs), so ctrl-\ detaches back to the panel as for any run, and ^Z / ← still work; the session itself keeps running
-* [ ] modules split — `tui/mod.rs` (~8,800 lines) into drawing, keys and modes, and the daemon glue, its tests beside them; `main.rs` (~1,900) trimmed; behaviour unchanged
+* [ ] notifications (J3) — the flow that stops to ask you: when a scheduled, unattended flow reaches an `ask`/decision step while you are away (`decision.waiting`), a Slack / mail alert carries the question — project, flow, the one-line summary, the options — deep-links back to the panel, and (reach) takes a yes/no in place so the flow goes on without you opening Relay. The first-class trigger is a decision raised, not a bare failure (a failure is often transient or retried); dedup is keyed on the decision, not the firing, so a flow asking every 30m alerts once, with a per-flow / per-project quiet setting
+* [ ] pane redesign — full-width subpages, no side column, the watch tile dropped; absorbs the `drawing`/`pane` cluster deliberately held out of the god-module split, so it is rewritten once not split-then-rewritten; lands before the facts collector so J6's surface is built on the new pane
 * [ ] facts collector (J6) — what happened when you get back, as facts: git commits + `diff --stat` per run, commands with exit codes, transcript ingestion (Claude/Codex `*.jsonl`), tokens/cost; facts first in the pane and the catch-up, the narrative below
-* [ ] notifications — Slack / mail when a question is raised, a run is blocked or a flow fails, with a quiet setting
+* [ ] ctrl-\ leaves a Claude background session — enter runs `claude attach` under a PTY of Relay's (as `attach.rs` does for runs), so ctrl-\ detaches back to the panel as for any run, and ^Z / ← still work; the session itself keeps running (small, independent — any time)
 
 Later:
 
@@ -22,10 +22,13 @@ Later:
 * [ ] `rl flow run <name> --step s --firing id` — run one step of a firing again (in the flows spec, never built)
 * [ ] retention purge of archived runs — today archive is out-of-list only and `rl prune` lets the journal go; actually delete runs past the retention window
 * [ ] worktrees & ref rules — `--worktree`, branch naming, `.relay/config.yaml` ref derivation
+* [ ] trim `main.rs` (~1,900 lines) — the CLI entry split by command group, tests beside them, behaviour unchanged (the other half of the old "modules split" item)
 * [ ] ts plugin subsystem — on hold until the daily loop is dependable
 
 ## Done — newest first
 
+* [x] the TUI god module split — `impl App` (176 methods, ~5k lines) distributed by pure code motion into sibling child modules of `tui/` (`select`, `act`, `flow_ops`, `catch_ops`, `feed_ops`, `summary_ops`, `join`, `shell_ops`, `keys`), and the row library `rows.rs` (~4.1k lines) split into a `rows/` folder (`model`/`group`/`name`/`word`/`build`/`order`, tests beside them); `tui/mod.rs` went 9,206 → 5,991 lines, behaviour unchanged; the `drawing`/`pane` cluster is held back to fold into the pane redesign, and `main.rs` is still to trim (#178, #179, #180, #182; CI unbroken in #181)
+* [x] reads off the single writer, bytes off the ledger — a 4-connection read-only WAL pool beside the writer carries the display / query surface (digest, events, summaries, scrollback, lookups) while the flow engine and supervisor stay on the writer for ordering; a run's terminal bytes leave SQLite for per-run append-only files under `~/.relay/io/<run>/{out,in,note}.log`, the `session_io` table keeping only `(run, seq, direction, pos, len, ts)` (#176, #177)
 * [x] a flow's own graph, the global graph dropped — a selected flow's pane draws what starts it, its steps by rank with their `if`s and last firing's marks, and the flows it starts (decided by the same `rl_flow::events` the daemon uses); `^g`, `/graph`, `graph.get` and the global layout are gone (#167)
 * [x] agents started outside Relay — Claude's, Codex's and Gemini's own sessions are rows under their folder's project with their state, told by a user-level hook `rl setup` adds on a yes (`claude agents` asked only with a reason); enter attaches to a Claude background session or carries an idle one on as a Relay run; a run sent to `/background` links to the session it became; a new agent is a `sessions:` block in its profile (#164)
 * [x] every flow on the list — a flow is a row from its yes on, with its trigger and next time (`every 30m · next in 12m`) before it ever fired, `paused` or `needs a yes again` when so; its runs stay on its row whatever their age; the headline still counts only what ran (#160)
