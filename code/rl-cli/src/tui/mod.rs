@@ -16,21 +16,27 @@
 //! it reads on either theme (see `theme`); the footer is the only chrome (J8).
 //! Nothing on screen is an id.
 
+mod act;
 mod canvas;
 mod carry;
+mod catch_ops;
 mod catchup;
 mod complete;
 mod events;
+mod feed_ops;
 mod firings;
 mod flow_graph;
 mod flow_links;
 #[cfg(test)]
 mod flow_new_tests;
+mod flow_ops;
 #[cfg(test)]
 mod flow_tests;
 pub(crate) mod flows;
 pub mod form;
 mod input;
+mod join;
+mod keys;
 mod line;
 mod mark;
 mod new_flow;
@@ -41,15 +47,9 @@ mod palette;
 mod pane;
 mod query;
 mod remove;
-mod act;
 mod select;
-mod join;
-mod keys;
 mod shell_ops;
 mod summary_ops;
-mod catch_ops;
-mod feed_ops;
-mod flow_ops;
 
 pub use pane::{recap_label, summary_label};
 pub(crate) mod rows;
