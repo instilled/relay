@@ -197,7 +197,10 @@ impl App {
         self.removing = Some(Removing { name, task });
     }
 
-    pub(super) async fn removed(&mut self, done: std::result::Result<Result<WorkspaceRemoved>, tokio::task::JoinError>) {
+    pub(super) async fn removed(
+        &mut self,
+        done: std::result::Result<Result<WorkspaceRemoved>, tokio::task::JoinError>,
+    ) {
         let Some(r) = self.removing.take() else { return };
         match done {
             Ok(Ok(out)) => self.say(remove::done(&r.name, &out)),

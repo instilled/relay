@@ -54,7 +54,10 @@ impl Ledger {
         }
         let conn = Connection::open(path).with_context(|| format!("opening {}", path.display()))?;
         // Journal files sit beside `ledger.db`, in `io/` under the same home.
-        let io_root = path.parent().map(|p| p.join("io")).unwrap_or_else(|| PathBuf::from("io"));
+        let io_root = path
+            .parent()
+            .map(|p| p.join("io"))
+            .unwrap_or_else(|| PathBuf::from("io"));
         Self::from_connection(conn, &io_root, Some(path))
     }
 
@@ -100,11 +103,9 @@ impl Ledger {
         let (tx, rx) = mpsc::channel::<ReadJob>();
         let rx = Arc::new(Mutex::new(rx));
         for i in 0..READERS {
-            let conn = Connection::open_with_flags(
-                path,
-                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-            )
-            .with_context(|| format!("opening {} read-only", path.display()))?;
+            let conn =
+                Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX)
+                    .with_context(|| format!("opening {} read-only", path.display()))?;
             conn.pragma_update(None, "busy_timeout", 5000)?;
             conn.pragma_update(None, "query_only", "ON")?;
             let rx = rx.clone();

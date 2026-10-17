@@ -1025,22 +1025,22 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
         if matches!(r.cause, Cause::Assistant(_)) && cx.relay.is_some_and(|h| r.cwd == h) {
             continue;
         }
-        if let Some(since) = hidden_since(r, names, cx.flows, &d.hidden) {
-            if !cx.show_hidden {
-                if comes_through(r, since)
-                    && keeps(r, cx.show_agents, cx.show_flows, cx.show_shells)
-                    && query.hits(&run_subject(i, &names.group(&r.place_key())))
-                {
-                    through.push((rank::score(r), Some(r.state_at), r.id.clone(), Row::Run(i)));
-                } else if !comes_through(r, since) && r.state.needs_attention() {
-                    // Hidden while it already needed you, so it does not come
-                    // through: its project hints it is there.
-                    *buried.entry(group_of(r, names, cx.flows).0).or_insert(0) += 1;
-                }
-                continue;
+        if let Some(since) = hidden_since(r, names, cx.flows, &d.hidden)
+            && !cx.show_hidden
+        {
+            if comes_through(r, since)
+                && keeps(r, cx.show_agents, cx.show_flows, cx.show_shells)
+                && query.hits(&run_subject(i, &names.group(&r.place_key())))
+            {
+                through.push((rank::score(r), Some(r.state_at), r.id.clone(), Row::Run(i)));
+            } else if !comes_through(r, since) && r.state.needs_attention() {
+                // Hidden while it already needed you, so it does not come
+                // through: its project hints it is there.
+                *buried.entry(group_of(r, names, cx.flows).0).or_insert(0) += 1;
             }
-            // Hidden on: the run stands inline, in its place.
+            continue;
         }
+        // Hidden on: the run stands inline, in its place.
         if r.pinned_at.is_some() {
             if query.hits(&run_subject(i, &names.group(&r.place_key()))) {
                 pinned.push(i);
