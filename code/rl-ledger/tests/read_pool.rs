@@ -55,5 +55,8 @@ fn in_memory_reads_fall_back_to_the_writer() {
     // so it still sees what was written.
     let l = Ledger::open_in_memory().unwrap();
     l.call_blocking(|c| meta::set(c, "k", "v")).unwrap();
-    assert_eq!(l.call_read_blocking(|c| meta::get(c, "k")).unwrap(), Some("v".to_string()));
+    assert_eq!(
+        l.call_read_blocking(|c| meta::get(c, "k")).unwrap(),
+        Some("v".to_string())
+    );
 }

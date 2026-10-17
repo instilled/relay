@@ -207,10 +207,13 @@ pub fn drop_ended_before(conn: &Connection, before: Timestamp, dry_run: bool) ->
     let runs = stmt
         .query_map(params![to_millis(before)], |r| r.get::<_, String>(0))?
         .collect::<std::result::Result<Vec<_>, _>>()?;
-    let out: Vec<(String, u64)> = runs.into_iter().map(|run| {
-        let bytes = run_bytes(&root, &run);
-        (run, bytes)
-    }).collect();
+    let out: Vec<(String, u64)> = runs
+        .into_iter()
+        .map(|run| {
+            let bytes = run_bytes(&root, &run);
+            (run, bytes)
+        })
+        .collect();
     if !dry_run {
         for (run, _) in &out {
             match fs::remove_dir_all(root.join(run)) {
@@ -283,7 +286,10 @@ mod tests {
         assert_eq!(append(&conn, "aaaaaaaa", Direction::In, b"x", now).unwrap(), 2);
         assert_eq!(append(&conn, "aaaaaaaa", Direction::Out, b"world", now).unwrap(), 3);
         // The out stream is one contiguous file; the row is only an index.
-        assert_eq!(std::fs::read(dir.path().join("aaaaaaaa/out.log")).unwrap(), b"hello world");
+        assert_eq!(
+            std::fs::read(dir.path().join("aaaaaaaa/out.log")).unwrap(),
+            b"hello world"
+        );
         let chunks = read(&conn, "aaaaaaaa", 0, 10).unwrap();
         assert_eq!(chunks.len(), 3);
         assert_eq!(chunks[0].data, b"hello ");
@@ -331,7 +337,10 @@ mod tests {
         append(&conn, "aaaaaaaa", Direction::Out, b"late", t1).unwrap();
         assert_eq!(tail_since(&conn, "aaaaaaaa", t1, 1024).unwrap(), b"late");
         assert_eq!(tail_since(&conn, "aaaaaaaa", t0, 1024).unwrap(), b"earlylate");
-        assert_eq!(tail_since(&conn, "aaaaaaaa", t1 + SignedDuration::from_secs(10), 1024).unwrap(), b"");
+        assert_eq!(
+            tail_since(&conn, "aaaaaaaa", t1 + SignedDuration::from_secs(10), 1024).unwrap(),
+            b""
+        );
     }
 
     #[test]
@@ -360,7 +369,11 @@ mod tests {
         assert!(!root.join("old00001").exists(), "dir and bytes gone");
         assert_eq!(last_seq(&conn, "old00001").unwrap(), 0, "rows gone too");
         assert_eq!(out_bytes(&conn, "new00001").unwrap(), 5);
-        assert_eq!(out_bytes(&conn, "live0001").unwrap(), 5, "a run still going is never touched");
+        assert_eq!(
+            out_bytes(&conn, "live0001").unwrap(),
+            5,
+            "a run still going is never touched"
+        );
         assert!(drop_ended_before(&conn, cut, false).unwrap().is_empty());
     }
 
