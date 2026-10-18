@@ -531,6 +531,42 @@ pub fn register(r: &mut Router<Daemon>) {
             .map_err(RpcError::internal)
     });
 
+    r.register::<LeadPost, _, _>(|d, p| async move {
+        if p.source.is_empty() || p.source == crate::report::BUILTIN_SOURCE {
+            return Err(RpcError::invalid_params(format!(
+                "source {:?} is reserved or empty; choose your own source name",
+                crate::report::BUILTIN_SOURCE
+            )));
+        }
+        let band: rl_proto::lead::Band = p.band.parse().map_err(RpcError::invalid_params)?;
+        let now = jiff::Timestamp::now();
+        let lead = rl_proto::lead::Lead {
+            source: p.source,
+            key: p.key,
+            band,
+            title: p.title,
+            summary: p.summary,
+            scope: p.scope,
+            action: p.action,
+            status: rl_proto::lead::LeadStatus::Open,
+            at: now,
+            expires_at: p.ttl_secs.map(|s| now + std::time::Duration::from_secs(s)),
+        };
+        d.ledger
+            .call(move |c| rl_ledger::leads::post(c, &lead))
+            .await
+            .map_err(RpcError::internal)?;
+        Ok(())
+    });
+
+    r.register::<LeadClear, _, _>(|d, p| async move {
+        d.ledger
+            .call(move |c| rl_ledger::leads::clear(c, &p.source, &p.key))
+            .await
+            .map_err(RpcError::internal)?;
+        Ok(())
+    });
+
     r.register::<EventEmit, _, _>(|d, p| async move {
         emit_kind_ok(&p.kind).map_err(RpcError::invalid_params)?;
         let now = time::now();

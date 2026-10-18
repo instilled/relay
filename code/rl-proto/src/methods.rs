@@ -184,6 +184,46 @@ pub struct RunId {
     pub id: String,
 }
 
+/// Post (or refresh) a lead on the report, from a flow, command or plugin.
+/// Keyed by `(source, key)`; the source `relay` is reserved for built-ins.
+pub struct LeadPost;
+impl Method for LeadPost {
+    const NAME: &'static str = "lead.post";
+    type Params = LeadPostParams;
+    type Result = ();
+}
+
+/// Withdraw a lead the caller posted earlier.
+pub struct LeadClear;
+impl Method for LeadClear {
+    const NAME: &'static str = "lead.clear";
+    type Params = LeadClearParams;
+    type Result = ();
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LeadPostParams {
+    pub source: String,
+    pub key: String,
+    /// `needs_you`, `changed` or `fyi` (parsed by the daemon).
+    pub band: String,
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttl_secs: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LeadClearParams {
+    pub source: String,
+    pub key: String,
+}
+
 /// Emit a custom event into the ledger, from a command or plugin. A flow with
 /// `on:` picks it up like any built-in event. Inside a run, `RELAY_RUN` attributes
 /// it to that run's workspace and chain; outside one, the caller names the
@@ -1446,6 +1486,25 @@ impl Method for SummaryGet {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn lead_params_round_trip() {
+        use super::LeadPostParams;
+        let p = LeadPostParams {
+            source: "feedback".into(),
+            key: "triage".into(),
+            band: "needs_you".into(),
+            title: "5 to triage".into(),
+            summary: None,
+            scope: None,
+            action: Some("claude -p 'triage'".into()),
+            ttl_secs: Some(1800),
+        };
+        let s = serde_json::to_string(&p).unwrap();
+        let back: LeadPostParams = serde_json::from_str(&s).unwrap();
+        assert_eq!(p.source, back.source);
+        assert_eq!(back.ttl_secs, Some(1800));
+    }
+
     #[test]
     fn a_hook_answer_of_nothing_or_without_the_word_wants_no_pid() {
         use super::OutsideHookResult;
