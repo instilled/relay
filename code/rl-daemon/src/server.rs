@@ -33,6 +33,8 @@ pub struct Daemon {
     pub supervisor: Arc<Supervisor>,
     pub decisions: Arc<crate::decisions::Decisions>,
     pub flows: Arc<crate::flows::Flows>,
+    /// Sweeps expired user leads; the seat for the push hook.
+    pub leads: Arc<crate::leads::Leads>,
     /// What the configured badges last said of each folder's branch.
     pub badges: crate::badges::Badges,
     /// Agents' own sessions, as last heard.
@@ -164,6 +166,8 @@ pub async fn serve_with(home: Home, shutdown: CancellationToken, opts: ServeOpti
         warn!(error = %format!("{e:#}"), "flows: carrying firings on");
     }
     tokio::spawn(flows.clone().serve());
+    let leads = crate::leads::Leads::new(ledger.clone(), shutdown.child_token());
+    tokio::spawn(leads.clone().serve());
     // Served whether or not any agent's list is asked for: every agent's
     // sessions are told by its hooks.
     let outside = Arc::new(crate::outside::Outsiders::new(registry.clone(), opts.claude_sessions));
@@ -176,6 +180,7 @@ pub async fn serve_with(home: Home, shutdown: CancellationToken, opts: ServeOpti
         supervisor,
         decisions,
         flows,
+        leads,
         badges: crate::badges::Badges::new(home.plugins_dir(), crate::badges::EVERY, crate::badges::WAIT),
         outside,
         started_at: Timestamp::now(),

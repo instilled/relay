@@ -49,6 +49,25 @@ pub fn event_rows(events: &[Event], now: Timestamp) -> Vec<Vec<String>> {
 
 pub const EVENT_HEADERS: [&str; 5] = ["AT", "KIND", "RUN", "GROUP", "SUMMARY"];
 
+pub const LEAD_HEADERS: [&str; 4] = ["SOURCE", "WHEN", "LEAD", "ACTION"];
+
+pub fn lead_rows(leads: &[rl_proto::lead::Lead], now: Timestamp) -> Vec<Vec<String>> {
+    leads
+        .iter()
+        .map(|l| {
+            vec![
+                l.source.clone(),
+                fmt_clock(l.at, now),
+                match &l.summary {
+                    Some(s) => format!("{} — {s}", l.title),
+                    None => l.title.clone(),
+                },
+                l.action.clone().unwrap_or_default(),
+            ]
+        })
+        .collect()
+}
+
 /// `14:03:22` today, `Sep 07 14:03` otherwise. Local time.
 pub fn fmt_clock(t: Timestamp, now: Timestamp) -> String {
     let tz = TimeZone::system();
@@ -91,6 +110,28 @@ pub fn table(headers: &[&str], rows: &[Vec<String>]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lead_rows_show_source_and_title() {
+        use rl_proto::lead::{Band, Lead, LeadStatus};
+        let now = Timestamp::now();
+        let leads = vec![Lead {
+            source: "mobile developer".into(),
+            key: "pr:412".into(),
+            band: Band::NeedsYou,
+            title: "review requested on #412".into(),
+            summary: None,
+            scope: None,
+            action: Some("rl decide d1".into()),
+            status: LeadStatus::Open,
+            at: now,
+            expires_at: None,
+        }];
+        let rows = lead_rows(&leads, now);
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].iter().any(|c| c.contains("mobile developer")));
+        assert!(rows[0].iter().any(|c| c.contains("review requested on #412")));
+    }
 
     #[test]
     fn labels_mark_guesses() {

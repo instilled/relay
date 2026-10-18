@@ -10,9 +10,10 @@ pub mod codec;
 pub mod config;
 pub mod decision;
 pub mod flow;
+pub mod lead;
 pub mod methods;
 pub mod rpc;
 pub mod types;
 
 /// Bumped when a message changes shape incompatibly. Reported by `daemon.ping`.
-pub const PROTOCOL_VERSION: u32 = 5;
+pub const PROTOCOL_VERSION: u32 = 6;
