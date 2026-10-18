@@ -5,7 +5,7 @@ use crate::conv;
 use anyhow::Result;
 use jiff::Timestamp;
 use rl_core::time::{from_millis, optional_from_millis, to_millis};
-use rl_proto::lead::{Lead, LeadStatus};
+use rl_proto::lead::{Band, Lead, LeadStatus};
 use rusqlite::{Connection, Row, params};
 use std::path::PathBuf;
 
@@ -82,7 +82,7 @@ fn from_row(row: &Row) -> rusqlite::Result<Lead> {
     Ok(Lead {
         source: row.get(0)?,
         key: row.get(1)?,
-        band: band.parse().map_err(|e| crate::conv_str(2, e))?,
+        band: band.parse().unwrap_or(Band::Happened),
         title: row.get(3)?,
         summary: row.get(4)?,
         scope: row.get::<_, Option<String>>(5)?.map(PathBuf::from),
@@ -98,7 +98,7 @@ mod tests {
     use super::*;
     use crate::Ledger;
     use jiff::SignedDuration;
-    use rl_proto::lead::{Band, Lead, LeadStatus};
+    use rl_proto::lead::LeadStatus;
 
     fn lead(source: &str, key: &str, band: Band, at: Timestamp) -> Lead {
         Lead {
@@ -113,6 +113,19 @@ mod tests {
             at,
             expires_at: None,
         }
+    }
+
+    #[test]
+    fn list_tolerates_corrupt_band() {
+        let led = Ledger::open_in_memory().unwrap();
+        let now = Timestamp::now();
+        led.call_blocking(move |c| post(c, &lead("feedback", "triage", Band::NeedsYou, now)))
+            .unwrap();
+        led.call_blocking(|c| Ok(c.execute("UPDATE leads SET band = 'bogus'", [])?))
+            .unwrap();
+        let out = led.call_blocking(move |c| list(c, now)).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].band, Band::Happened);
     }
 
     #[test]

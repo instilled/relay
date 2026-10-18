@@ -205,7 +205,7 @@ impl Method for LeadClear {
 pub struct LeadPostParams {
     pub source: String,
     pub key: String,
-    /// `needs_you`, `changed` or `fyi` (parsed by the daemon).
+    /// `needs_you`, `live` or `happened` (parsed by the daemon).
     pub band: String,
     pub title: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
