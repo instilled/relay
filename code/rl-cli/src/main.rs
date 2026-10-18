@@ -29,6 +29,7 @@ use rl_proto::methods::{
     WorkspaceUpParams,
 };
 use rl_proto::methods::{LeadClear, LeadClearParams, LeadPost, LeadPostParams};
+use rl_proto::methods::{ReportGet, ReportParams};
 use rl_proto::types::{Cause, Mark, RunKind, RunState, SummaryTarget};
 use serde_json::json;
 use std::path::{Path, PathBuf};
@@ -81,6 +82,8 @@ enum Cmd {
     Since(SinceArgs),
     /// List ledger events.
     Events(EventsArgs),
+    /// What happened, what's live, and what needs you — the report.
+    Report(ReportArgs),
     /// Flows: what starts work without you, in ~/.relay/flows. List, edit, run, pause, approve.
     Flow {
         #[command(subcommand)]
@@ -498,6 +501,15 @@ struct SinceArgs {
 }
 
 #[derive(Args)]
+struct ReportArgs {
+    /// Limit to a folder (and its children).
+    scope: Option<PathBuf>,
+    /// How far back the `happened` band reaches: a duration (2h), a date or an RFC 3339 instant. Default 24h.
+    #[arg(long)]
+    since: Option<String>,
+}
+
+#[derive(Args)]
 struct EventsArgs {
     /// Only events after this point: a duration (8h), a date (2026-09-08) or an RFC 3339 instant.
     #[arg(long)]
@@ -544,6 +556,7 @@ async fn main() -> Result<()> {
         Cmd::Resume(a) => resume(&home, a, cli.json).await,
         Cmd::Since(a) => since(&home, a, cli.json).await,
         Cmd::Events(a) => events(&home, a, cli.json).await,
+        Cmd::Report(a) => report(&home, a, cli.json).await,
         Cmd::Flow { cmd } => rl_cli::flow::flow(&home, cmd, cli.json).await,
         Cmd::Config(a) => config(&home, a, cli.json).await,
         Cmd::Agents => agents(&home, cli.json).await,
@@ -1034,6 +1047,40 @@ async fn events(home: &Home, a: EventsArgs, json: bool) -> Result<()> {
             "{}",
             render::table(&render::EVENT_HEADERS, &render::event_rows(&evs, n))
         );
+    }
+    Ok(())
+}
+
+async fn report(home: &Home, a: ReportArgs, json: bool) -> Result<()> {
+    let n = now();
+    let since = a.since.as_deref().map(|s| parse_since(s, n)).transpose()?;
+    let scope = a.scope.map(|p| p.canonicalize().unwrap_or(p));
+    let rep = daemon::ensure(home, !json)
+        .await?
+        .call::<ReportGet>(ReportParams { scope, since })
+        .await?;
+    if json {
+        println!("{}", serde_json::to_string(&rep)?);
+        return Ok(());
+    }
+    let mut printed = false;
+    for (heading, leads) in [
+        ("needs you", &rep.needs_you),
+        ("live", &rep.live),
+        ("happened", &rep.happened),
+    ] {
+        if leads.is_empty() {
+            continue;
+        }
+        if printed {
+            println!();
+        }
+        println!("{heading}");
+        print!("{}", render::table(&render::LEAD_HEADERS, &render::lead_rows(leads, n)));
+        printed = true;
+    }
+    if !printed {
+        println!("nothing to report");
     }
     Ok(())
 }
@@ -1941,6 +1988,18 @@ mod tests {
                 assert_eq!(a.ttl_secs, Some(1800));
             }
             _ => panic!("expected lead post"),
+        }
+    }
+
+    #[test]
+    fn report_parses() {
+        let cli = Cli::try_parse_from(["rl", "report", "/tmp/x", "--since", "2h"]).unwrap();
+        match cli.cmd {
+            Some(Cmd::Report(a)) => {
+                assert_eq!(a.scope, Some(PathBuf::from("/tmp/x")));
+                assert_eq!(a.since.as_deref(), Some("2h"));
+            }
+            _ => panic!("expected report"),
         }
     }
 
