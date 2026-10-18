@@ -12,9 +12,14 @@ use std::path::Path;
 /// The source every built-in lead carries. Reserved — user leads may not use it.
 pub const BUILTIN_SOURCE: &str = "relay";
 
+/// How long a run may sit needing a human before it stops being news. Past
+/// this, a Failed/Blocked/NeedsInput run drops out of the report entirely
+/// rather than piling up in needs-you forever. Tunable.
+const STALE_NEEDS_YOU: jiff::SignedDuration = jiff::SignedDuration::from_secs(7 * 24 * 3600);
+
 /// Relay's own state as leads: open decisions, runs by state, flow firings.
 /// Computed, never stored, so it tracks the truth and self-clears.
-pub fn project_builtins(decisions: &[Decision], runs: &[Run], firings: &[Firing]) -> Vec<Lead> {
+pub fn project_builtins(decisions: &[Decision], runs: &[Run], firings: &[Firing], now: Timestamp) -> Vec<Lead> {
     let mut out = Vec::new();
 
     for d in decisions.iter().filter(|d| d.status == DecisionStatus::Open) {
@@ -44,6 +49,11 @@ pub fn project_builtins(decisions: &[Decision], runs: &[Run], firings: &[Firing]
         } else {
             Band::Live
         };
+        // A run that has needed a human longer than STALE_NEEDS_YOU is no
+        // longer news; drop it rather than let it sit in needs-you forever.
+        if band == Band::NeedsYou && now.duration_since(r.state_at) > STALE_NEEDS_YOU {
+            continue;
+        }
         out.push(Lead {
             source: BUILTIN_SOURCE.into(),
             key: format!("run:{}", r.id),
@@ -122,6 +132,48 @@ mod tests {
     use rl_proto::types::{RunKind, RunState};
 
     use std::path::{Path, PathBuf};
+    use std::time::Duration;
+
+    fn ts(s: &str) -> Timestamp {
+        s.parse().unwrap()
+    }
+
+    fn run_in_state(id: &str, state: RunState, state_at: Timestamp) -> Run {
+        let mut r = test_run(id, state);
+        r.state_at = state_at;
+        r
+    }
+
+    fn open_decision(id: &str, created_at: Timestamp) -> Decision {
+        let mut d = test_decision(id, "old question");
+        d.created_at = created_at;
+        d
+    }
+
+    #[test]
+    fn stale_needs_you_run_is_dropped() {
+        let now = ts("2026-10-18T00:00:00Z");
+        let old = run_in_state("r1", RunState::Failed, now - Duration::from_secs(8 * 24 * 3600));
+        let leads = project_builtins(&[], &[old], &[], now);
+        assert!(leads.is_empty(), "a run failed 8 days ago is stale, not news");
+    }
+
+    #[test]
+    fn recent_needs_you_run_is_kept() {
+        let now = ts("2026-10-18T00:00:00Z");
+        let fresh = run_in_state("r1", RunState::Failed, now - Duration::from_secs(60));
+        let leads = project_builtins(&[], &[fresh], &[], now);
+        assert_eq!(leads.len(), 1);
+        assert_eq!(leads[0].band, Band::NeedsYou);
+    }
+
+    #[test]
+    fn aging_never_drops_decisions_or_firings() {
+        let now = ts("2026-10-18T00:00:00Z");
+        let d = open_decision("d1", now - Duration::from_secs(30 * 24 * 3600));
+        let leads = project_builtins(&[d], &[], &[], now);
+        assert_eq!(leads.len(), 1, "an old open decision is still needs-you");
+    }
 
     fn mk(band: Band, key: &str, at: Timestamp, scope: Option<&str>) -> Lead {
         Lead {
@@ -199,7 +251,7 @@ mod tests {
     #[test]
     fn open_decision_is_needs_you_with_decide_action() {
         let d = test_decision("d1", "approve the task?");
-        let leads = project_builtins(&[d], &[], &[]);
+        let leads = project_builtins(&[d], &[], &[], Timestamp::now());
         assert_eq!(leads.len(), 1);
         assert_eq!(leads[0].band, Band::NeedsYou);
         assert_eq!(leads[0].source, "relay");
@@ -221,7 +273,7 @@ mod tests {
         ];
         for (state, want) in cases {
             let r = test_run("r1", state);
-            let leads = project_builtins(&[], &[r], &[]);
+            let leads = project_builtins(&[], &[r], &[], Timestamp::now());
             assert_eq!(leads.len(), 1, "{state:?} should project one lead");
             assert_eq!(leads[0].band, want, "{state:?}");
             assert_eq!(leads[0].key, "run:r1");
@@ -232,7 +284,7 @@ mod tests {
     fn resting_shell_is_not_projected() {
         let shell = test_shell("sh1", RunState::Idle);
         assert!(
-            project_builtins(&[], &[shell], &[]).is_empty(),
+            project_builtins(&[], &[shell], &[], Timestamp::now()).is_empty(),
             "an idle shell is not news"
         );
     }
@@ -241,8 +293,14 @@ mod tests {
     fn firing_band_by_whether_it_ended() {
         let live = test_firing("f1", None);
         let done = test_firing("f2", Some(Timestamp::now()));
-        assert_eq!(project_builtins(&[], &[], &[live])[0].band, Band::Live);
-        assert_eq!(project_builtins(&[], &[], &[done])[0].band, Band::Happened);
+        assert_eq!(
+            project_builtins(&[], &[], &[live], Timestamp::now())[0].band,
+            Band::Live
+        );
+        assert_eq!(
+            project_builtins(&[], &[], &[done], Timestamp::now())[0].band,
+            Band::Happened
+        );
     }
 
     fn test_decision(id: &str, title: &str) -> Decision {
