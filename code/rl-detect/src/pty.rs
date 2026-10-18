@@ -110,6 +110,10 @@ pub struct Timing {
 pub struct Heuristics {
     /// Agents and shells sit at prompts; commands do not.
     prompts: bool,
+    /// A shell run: its own prompt is not a question.
+    shell: bool,
+    /// Whether the shell itself owns the terminal foreground; `None` = unknown.
+    shell_fg: Option<bool>,
     patterns: Patterns,
     timing: Timing,
     tail: String,
@@ -136,6 +140,8 @@ impl Heuristics {
     pub fn new(profile: &Profile, kind: RunKind, now: Timestamp) -> Self {
         Self {
             prompts: kind != RunKind::Command,
+            shell: kind == RunKind::Shell,
+            shell_fg: None,
             patterns: profile.patterns.clone(),
             timing: profile.timing,
             tail: String::new(),
@@ -283,6 +289,12 @@ impl Heuristics {
         None
     }
 
+    /// Records whether the shell itself owns the terminal foreground (at its
+    /// prompt) or a child program does.
+    pub fn set_foreground(&mut self, shell_owns_foreground: bool) {
+        self.shell_fg = Some(shell_owns_foreground);
+    }
+
     /// Reads the last lines: a question beats a prompt beats nothing.
     fn classify(&self) -> Signal {
         let mut lines = Vec::new();
@@ -291,6 +303,10 @@ impl Heuristics {
             if !is_decoration(line) {
                 break;
             }
+        }
+        if self.shell && self.shell_fg == Some(true) {
+            // The shell is at its own prompt: nothing is asking anything.
+            return Signal::pty(RunState::Idle, Confidence::Likely, lines.first().map(|l| l.to_string()));
         }
         for line in &lines {
             if self.patterns.needs_input.iter().any(|re| re.is_match(line)) {
@@ -329,6 +345,40 @@ mod tests {
 
     fn t(secs: f64) -> Timestamp {
         Timestamp::UNIX_EPOCH + SignedDuration::from_secs_f64(secs)
+    }
+
+    fn shell_run(fg: Option<bool>, kind: RunKind, out: &[u8]) -> RunState {
+        let reg = Registry::builtin();
+        let mut h = Heuristics::new(reg.generic(), kind, t(0.0));
+        if let Some(fg) = fg {
+            h.set_foreground(fg);
+        }
+        h.output(out, t(1.0));
+        h.tick(t(4.5)).unwrap().state
+    }
+
+    #[test]
+    fn shell_owning_foreground_is_idle_not_needs_input() {
+        let s = shell_run(Some(true), RunKind::Shell, b"Continue? [y/N] ");
+        assert_eq!(s, RunState::Idle);
+    }
+
+    #[test]
+    fn shell_with_child_in_foreground_can_still_need_input() {
+        let s = shell_run(Some(false), RunKind::Shell, b"Password: ");
+        assert_eq!(s, RunState::NeedsInput);
+    }
+
+    #[test]
+    fn non_shell_run_ignores_foreground() {
+        let s = shell_run(Some(true), RunKind::Agent, b"Continue? [y/N] ");
+        assert_eq!(s, RunState::NeedsInput);
+    }
+
+    #[test]
+    fn unknown_foreground_preserves_todays_behavior() {
+        let s = shell_run(None, RunKind::Shell, b"Continue? [y/N] ");
+        assert_eq!(s, RunState::NeedsInput);
     }
 
     #[test]
