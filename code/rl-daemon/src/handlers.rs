@@ -416,6 +416,27 @@ pub fn register(r: &mut Router<Daemon>) {
             .map_err(RpcError::internal)
     });
 
+    r.register::<ReportGet, _, _>(|d, p: ReportParams| async move {
+        let now = jiff::Timestamp::now();
+        // Default the happened window to the last 24h when no `since` is given.
+        let since = p
+            .since
+            .unwrap_or_else(|| now - std::time::Duration::from_secs(24 * 3600));
+        let scope = p.scope;
+        d.ledger
+            .call_read(move |c| {
+                // Open-only by default.
+                let decisions = rl_ledger::decisions::list(c, &DecisionFilter::default())?;
+                let runs = runs::list_for_digest(c, since)?;
+                let firings = crate::digest::firings(c)?;
+                let stored = rl_ledger::leads::list(c, now)?;
+                let builtins = crate::report::project_builtins(&decisions, &runs, &firings);
+                Ok(crate::report::assemble(builtins, stored, scope.as_deref(), since, now))
+            })
+            .await
+            .map_err(RpcError::internal)
+    });
+
     r.register::<DigestGet, _, _>(|d, DigestParams { since, watching }| async move {
         let since = since.unwrap_or(jiff::Timestamp::UNIX_EPOCH);
         let (found, mut recaps, registered) = d

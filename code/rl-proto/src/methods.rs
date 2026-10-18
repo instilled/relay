@@ -512,6 +512,31 @@ pub struct RunArchiveParams {
     pub all_seen: bool,
 }
 
+// ---- report.* ---------------------------------------------------------------
+
+pub struct ReportGet;
+impl Method for ReportGet {
+    const NAME: &'static str = "report.get";
+    type Params = ReportParams;
+    type Result = Report;
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ReportParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since: Option<Timestamp>,
+}
+
+/// The report: leads in three bands. needs-you is pinned; happened is bounded by `since`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Report {
+    pub needs_you: Vec<crate::lead::Lead>,
+    pub live: Vec<crate::lead::Lead>,
+    pub happened: Vec<crate::lead::Lead>,
+}
+
 // ---- digest.* ---------------------------------------------------------------
 
 /// Every run that had an event at or after `since` (default: everything),

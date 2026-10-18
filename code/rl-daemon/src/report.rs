@@ -1,10 +1,13 @@
 //! Projecting Relay's own state into leads, and assembling the report. Pure
 //! functions over data the handler reads; no ledger, no I/O, so they test flat.
 
+use jiff::Timestamp;
 use rl_proto::decision::{Decision, DecisionStatus};
 use rl_proto::flow::Firing;
 use rl_proto::lead::{Band, Lead, LeadStatus};
+use rl_proto::methods::Report;
 use rl_proto::types::Run;
+use std::path::Path;
 
 /// The source every built-in lead carries. Reserved — user leads may not use it.
 pub const BUILTIN_SOURCE: &str = "relay";
@@ -77,12 +80,121 @@ pub fn project_builtins(decisions: &[Decision], runs: &[Run], firings: &[Firing]
     out
 }
 
+/// Merge built-in and stored leads into the three bands. needs-you and live are
+/// shown whatever their age; happened is bounded by `since`. Anything expired or
+/// out of scope is dropped. Each band is newest-first.
+pub fn assemble(
+    builtins: Vec<Lead>,
+    stored: Vec<Lead>,
+    scope: Option<&Path>,
+    since: Timestamp,
+    now: Timestamp,
+) -> Report {
+    let mut report = Report::default();
+    for lead in builtins.into_iter().chain(stored) {
+        if lead.expires_at.is_some_and(|e| e <= now) {
+            continue;
+        }
+        if let Some(s) = scope {
+            match &lead.scope {
+                Some(p) if p.starts_with(s) => {}
+                _ => continue,
+            }
+        }
+        match lead.band {
+            Band::NeedsYou => report.needs_you.push(lead),
+            Band::Live => report.live.push(lead),
+            Band::Happened if lead.at >= since => report.happened.push(lead),
+            Band::Happened => {}
+        }
+    }
+    for band in [&mut report.needs_you, &mut report.live, &mut report.happened] {
+        band.sort_by_key(|l| std::cmp::Reverse(l.at));
+    }
+    report
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use jiff::Timestamp;
     use rl_proto::flow::FiringStatus;
     use rl_proto::types::{RunKind, RunState};
+
+    use std::path::{Path, PathBuf};
+
+    fn mk(band: Band, key: &str, at: Timestamp, scope: Option<&str>) -> Lead {
+        Lead {
+            source: "relay".into(),
+            key: key.into(),
+            band,
+            title: key.into(),
+            summary: None,
+            scope: scope.map(PathBuf::from),
+            action: None,
+            status: LeadStatus::Open,
+            at,
+            expires_at: None,
+        }
+    }
+
+    #[test]
+    fn since_bounds_only_happened() {
+        let now = Timestamp::now();
+        let old = now - std::time::Duration::from_secs(3600);
+        let builtins = vec![
+            mk(Band::NeedsYou, "decision:old", old, None),
+            mk(Band::Live, "run:old", old, None),
+            mk(Band::Happened, "run:recent", now, None),
+            mk(Band::Happened, "run:stale", old, None),
+        ];
+        let since = now - std::time::Duration::from_secs(600);
+        let r = assemble(builtins, vec![], None, since, now);
+        assert_eq!(r.needs_you.len(), 1);
+        assert_eq!(r.live.len(), 1);
+        assert_eq!(
+            r.happened.len(),
+            1,
+            "old happened is bounded out, needs-you/live are not"
+        );
+        assert_eq!(r.happened[0].key, "run:recent");
+    }
+
+    #[test]
+    fn expired_dropped_defensively() {
+        let now = Timestamp::now();
+        let mut l = mk(Band::NeedsYou, "x", now, None);
+        l.expires_at = Some(now - std::time::Duration::from_secs(1));
+        let r = assemble(vec![], vec![l], None, now - std::time::Duration::from_secs(10), now);
+        assert!(r.needs_you.is_empty());
+    }
+
+    #[test]
+    fn scope_filters_by_path_prefix() {
+        let now = Timestamp::now();
+        let a = mk(Band::Live, "run:a", now, Some("/home/me/proj-a"));
+        let b = mk(Band::Live, "run:b", now, Some("/home/me/proj-b"));
+        let r = assemble(vec![a, b], vec![], Some(Path::new("/home/me/proj-a")), now, now);
+        assert_eq!(r.live.len(), 1);
+        assert_eq!(r.live[0].key, "run:a");
+    }
+
+    #[test]
+    fn bands_sorted_newest_first_within() {
+        let now = Timestamp::now();
+        let older = now - std::time::Duration::from_secs(100);
+        let r = assemble(
+            vec![
+                mk(Band::Happened, "old", older, None),
+                mk(Band::Happened, "new", now, None),
+            ],
+            vec![],
+            None,
+            older - std::time::Duration::from_secs(10),
+            now,
+        );
+        assert_eq!(r.happened[0].key, "new", "newest first");
+    }
 
     #[test]
     fn open_decision_is_needs_you_with_decide_action() {
