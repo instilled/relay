@@ -14,6 +14,7 @@ pub mod handlers;
 pub mod import;
 pub mod outside;
 pub mod recap;
+pub mod report;
 pub mod resume;
 pub mod router;
 pub mod server;
