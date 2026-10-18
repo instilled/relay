@@ -28,6 +28,8 @@ use rl_proto::methods::{
     EventEmit, EventEmitParams, WorkspaceList, WorkspaceRemove, WorkspaceRemoveParams, WorkspaceRemoved, WorkspaceUp,
     WorkspaceUpParams,
 };
+use rl_proto::methods::{LeadClear, LeadClearParams, LeadPost, LeadPostParams};
+use rl_proto::methods::{ReportGet, ReportParams};
 use rl_proto::types::{Cause, Mark, RunKind, RunState, SummaryTarget};
 use serde_json::json;
 use std::path::{Path, PathBuf};
@@ -80,6 +82,8 @@ enum Cmd {
     Since(SinceArgs),
     /// List ledger events.
     Events(EventsArgs),
+    /// What happened, what's live, and what needs you — the report.
+    Report(ReportArgs),
     /// Flows: what starts work without you, in ~/.relay/flows. List, edit, run, pause, approve.
     Flow {
         #[command(subcommand)]
@@ -117,6 +121,11 @@ enum Cmd {
     Workspace {
         #[command(subcommand)]
         cmd: WorkspaceCmd,
+    },
+    /// Post or clear a lead on the report, from a flow or a script.
+    Lead {
+        #[command(subcommand)]
+        cmd: LeadCmd,
     },
     /// Be in a run's terminal: keyboard, resize, the lot. ctrl-\ to detach; the run keeps going.
     Join(AttachArgs),
@@ -319,6 +328,48 @@ struct UpArgs {
 }
 
 #[derive(Subcommand)]
+enum LeadCmd {
+    /// Raise or refresh a lead; re-posting the same --source/--key refreshes it.
+    Post(LeadPostArgs),
+    /// Clear a lead you posted.
+    Clear(LeadClearArgs),
+}
+
+#[derive(Args)]
+struct LeadPostArgs {
+    /// Your source name — the thing raising leads (e.g. `feedback`, `gh`). Not `relay`.
+    #[arg(long)]
+    source: String,
+    /// This lead's stable id within the source (e.g. `pr:412`).
+    #[arg(long)]
+    key: String,
+    /// needs_you | live | happened.
+    #[arg(long)]
+    band: String,
+    #[arg(long)]
+    title: String,
+    #[arg(long)]
+    summary: Option<String>,
+    /// The folder this is about.
+    #[arg(long = "in", value_name = "DIR")]
+    in_: Option<PathBuf>,
+    /// How to act on it — a command to run or a thing to open.
+    #[arg(long)]
+    action: Option<String>,
+    /// Expire the lead after this many seconds if not refreshed or cleared.
+    #[arg(long = "ttl", value_name = "SECS")]
+    ttl_secs: Option<u64>,
+}
+
+#[derive(Args)]
+struct LeadClearArgs {
+    #[arg(long)]
+    source: String,
+    #[arg(long)]
+    key: String,
+}
+
+#[derive(Subcommand)]
 enum WorkspaceCmd {
     /// List registered folders.
     Ls,
@@ -450,6 +501,15 @@ struct SinceArgs {
 }
 
 #[derive(Args)]
+struct ReportArgs {
+    /// Limit to a folder (and its children).
+    scope: Option<PathBuf>,
+    /// How far back the `happened` band reaches: a duration (2h), a date or an RFC 3339 instant. Default 24h.
+    #[arg(long)]
+    since: Option<String>,
+}
+
+#[derive(Args)]
 struct EventsArgs {
     /// Only events after this point: a duration (8h), a date (2026-09-08) or an RFC 3339 instant.
     #[arg(long)]
@@ -496,6 +556,7 @@ async fn main() -> Result<()> {
         Cmd::Resume(a) => resume(&home, a, cli.json).await,
         Cmd::Since(a) => since(&home, a, cli.json).await,
         Cmd::Events(a) => events(&home, a, cli.json).await,
+        Cmd::Report(a) => report(&home, a, cli.json).await,
         Cmd::Flow { cmd } => rl_cli::flow::flow(&home, cmd, cli.json).await,
         Cmd::Config(a) => config(&home, a, cli.json).await,
         Cmd::Agents => agents(&home, cli.json).await,
@@ -521,6 +582,7 @@ async fn main() -> Result<()> {
         Cmd::Decide(a) => decide(&home, a, cli.json).await,
         Cmd::Up(a) => up(&home, a, cli.json).await,
         Cmd::Workspace { cmd } => workspace(&home, cmd, cli.json).await,
+        Cmd::Lead { cmd } => lead(&home, cmd, cli.json).await,
         Cmd::Join(a) => attach(&home, a).await,
         Cmd::Mark(a) => mark(&home, a, cli.json).await,
         Cmd::ShellInit(a) => shell_init(a),
@@ -989,6 +1051,40 @@ async fn events(home: &Home, a: EventsArgs, json: bool) -> Result<()> {
     Ok(())
 }
 
+async fn report(home: &Home, a: ReportArgs, json: bool) -> Result<()> {
+    let n = now();
+    let since = a.since.as_deref().map(|s| parse_since(s, n)).transpose()?;
+    let scope = a.scope.map(|p| p.canonicalize().unwrap_or(p));
+    let rep = daemon::ensure(home, !json)
+        .await?
+        .call::<ReportGet>(ReportParams { scope, since })
+        .await?;
+    if json {
+        println!("{}", serde_json::to_string(&rep)?);
+        return Ok(());
+    }
+    let mut printed = false;
+    for (heading, leads) in [
+        ("needs you", &rep.needs_you),
+        ("live", &rep.live),
+        ("happened", &rep.happened),
+    ] {
+        if leads.is_empty() {
+            continue;
+        }
+        if printed {
+            println!();
+        }
+        println!("{heading}");
+        print!("{}", render::table(&render::LEAD_HEADERS, &render::lead_rows(leads, n)));
+        printed = true;
+    }
+    if !printed {
+        println!("nothing to report");
+    }
+    Ok(())
+}
+
 async fn run_daemon(home: &Home, cmd: DaemonCmd, json: bool) -> Result<()> {
     match cmd {
         DaemonCmd::Start => {
@@ -1099,6 +1195,36 @@ async fn emit(home: &Home, a: EmitArgs, json: bool) -> Result<()> {
         data: (!data.is_empty()).then_some(serde_json::Value::Object(data)),
     };
     daemon::ensure(home, !json).await?.call::<EventEmit>(params).await?;
+    Ok(())
+}
+
+/// `rl lead post` / `rl lead clear`: raise, refresh or clear a lead on the report.
+async fn lead(home: &Home, cmd: LeadCmd, json: bool) -> Result<()> {
+    let mut client = daemon::ensure(home, !json).await?;
+    match cmd {
+        LeadCmd::Post(a) => {
+            let scope = a.in_.map(|p| p.canonicalize().unwrap_or(p));
+            let params = LeadPostParams {
+                source: a.source,
+                key: a.key,
+                band: a.band,
+                title: a.title,
+                summary: a.summary,
+                scope,
+                action: a.action,
+                ttl_secs: a.ttl_secs,
+            };
+            client.call::<LeadPost>(params).await?;
+        }
+        LeadCmd::Clear(a) => {
+            client
+                .call::<LeadClear>(LeadClearParams {
+                    source: a.source,
+                    key: a.key,
+                })
+                .await?;
+        }
+    }
     Ok(())
 }
 
@@ -1835,6 +1961,52 @@ mod tests {
         assert_eq!(a.data, ["severity=ERROR"]);
         assert_eq!(a.json_data.as_deref(), Some("-"));
         assert!(cli.json, "the global --json still reads as a bool");
+    }
+
+    #[test]
+    fn lead_post_parses() {
+        let cli = Cli::try_parse_from([
+            "rl",
+            "lead",
+            "post",
+            "--source",
+            "feedback",
+            "--key",
+            "triage",
+            "--band",
+            "needs_you",
+            "--title",
+            "5 to triage",
+            "--ttl",
+            "1800",
+        ])
+        .unwrap();
+        match cli.cmd {
+            Some(Cmd::Lead { cmd: LeadCmd::Post(a) }) => {
+                assert_eq!(a.source, "feedback");
+                assert_eq!(a.band, "needs_you");
+                assert_eq!(a.ttl_secs, Some(1800));
+            }
+            _ => panic!("expected lead post"),
+        }
+    }
+
+    #[test]
+    fn report_parses() {
+        let cli = Cli::try_parse_from(["rl", "report", "/tmp/x", "--since", "2h"]).unwrap();
+        match cli.cmd {
+            Some(Cmd::Report(a)) => {
+                assert_eq!(a.scope, Some(PathBuf::from("/tmp/x")));
+                assert_eq!(a.since.as_deref(), Some("2h"));
+            }
+            _ => panic!("expected report"),
+        }
+    }
+
+    #[test]
+    fn lead_clear_parses() {
+        let cli = Cli::try_parse_from(["rl", "lead", "clear", "--source", "feedback", "--key", "triage"]).unwrap();
+        assert!(matches!(cli.cmd, Some(Cmd::Lead { cmd: LeadCmd::Clear(_) })));
     }
 
     #[test]

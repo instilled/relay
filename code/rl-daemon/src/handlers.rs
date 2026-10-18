@@ -416,6 +416,27 @@ pub fn register(r: &mut Router<Daemon>) {
             .map_err(RpcError::internal)
     });
 
+    r.register::<ReportGet, _, _>(|d, p: ReportParams| async move {
+        let now = jiff::Timestamp::now();
+        // Default the happened window to the last 24h when no `since` is given.
+        let since = p
+            .since
+            .unwrap_or_else(|| now - std::time::Duration::from_secs(24 * 3600));
+        let scope = p.scope;
+        d.ledger
+            .call_read(move |c| {
+                // Open-only by default.
+                let decisions = rl_ledger::decisions::list(c, &DecisionFilter::default())?;
+                let runs = runs::list_for_digest(c, since)?;
+                let firings = crate::digest::firings(c)?;
+                let stored = rl_ledger::leads::list(c, now)?;
+                let builtins = crate::report::project_builtins(&decisions, &runs, &firings);
+                Ok(crate::report::assemble(builtins, stored, scope.as_deref(), since, now))
+            })
+            .await
+            .map_err(RpcError::internal)
+    });
+
     r.register::<DigestGet, _, _>(|d, DigestParams { since, watching }| async move {
         let since = since.unwrap_or(jiff::Timestamp::UNIX_EPOCH);
         let (found, mut recaps, registered) = d
@@ -508,6 +529,43 @@ pub fn register(r: &mut Router<Daemon>) {
             .call_read(move |c| events::list(c, &filter))
             .await
             .map_err(RpcError::internal)
+    });
+
+    r.register::<LeadPost, _, _>(|d, p| async move {
+        if p.source.is_empty() || p.source == crate::report::BUILTIN_SOURCE {
+            return Err(RpcError::invalid_params(format!(
+                "source {:?} is reserved or empty; choose your own source name",
+                crate::report::BUILTIN_SOURCE
+            )));
+        }
+        let band: rl_proto::lead::Band = p.band.parse().map_err(RpcError::invalid_params)?;
+        let now = jiff::Timestamp::now();
+        let lead = rl_proto::lead::Lead {
+            source: p.source,
+            key: p.key,
+            band,
+            title: p.title,
+            summary: p.summary,
+            scope: p.scope,
+            action: p.action,
+            status: rl_proto::lead::LeadStatus::Open,
+            at: now,
+            expires_at: p.ttl_secs.map(|s| now + std::time::Duration::from_secs(s)),
+        };
+        d.ledger
+            .call(move |c| rl_ledger::leads::post(c, &lead))
+            .await
+            .map_err(RpcError::internal)?;
+        d.leads.wake.notify_one();
+        Ok(())
+    });
+
+    r.register::<LeadClear, _, _>(|d, p| async move {
+        d.ledger
+            .call(move |c| rl_ledger::leads::clear(c, &p.source, &p.key))
+            .await
+            .map_err(RpcError::internal)?;
+        Ok(())
     });
 
     r.register::<EventEmit, _, _>(|d, p| async move {
