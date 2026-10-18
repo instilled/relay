@@ -12,6 +12,7 @@ pub mod gc;
 pub mod git;
 pub mod handlers;
 pub mod import;
+mod leads;
 pub mod outside;
 pub mod recap;
 pub mod report;

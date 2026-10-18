@@ -556,6 +556,7 @@ pub fn register(r: &mut Router<Daemon>) {
             .call(move |c| rl_ledger::leads::post(c, &lead))
             .await
             .map_err(RpcError::internal)?;
+        d.leads.wake.notify_one();
         Ok(())
     });
 
