@@ -7,6 +7,7 @@ use rl_proto::flow::Firing;
 use rl_proto::lead::{Band, Lead, LeadStatus};
 use rl_proto::methods::Report;
 use rl_proto::types::Run;
+use std::collections::HashMap;
 use std::path::Path;
 
 /// The source every built-in lead carries. Reserved — user leads may not use it.
@@ -14,7 +15,13 @@ pub const BUILTIN_SOURCE: &str = "relay";
 
 /// Relay's own state as leads: open decisions, runs by state, flow firings.
 /// Computed, never stored, so it tracks the truth and self-clears.
-pub fn project_builtins(decisions: &[Decision], runs: &[Run], firings: &[Firing]) -> Vec<Lead> {
+/// A run's summary is its recap (as the overview shows), else none.
+pub fn project_builtins(
+    decisions: &[Decision],
+    runs: &[Run],
+    firings: &[Firing],
+    recaps: &HashMap<String, String>,
+) -> Vec<Lead> {
     let mut out = Vec::new();
 
     for d in decisions.iter().filter(|d| d.status == DecisionStatus::Open) {
@@ -49,7 +56,7 @@ pub fn project_builtins(decisions: &[Decision], runs: &[Run], firings: &[Firing]
             key: format!("run:{}", r.id),
             band,
             title: r.title.clone(),
-            summary: r.last_line.clone(),
+            summary: recaps.get(&r.id).cloned(),
             scope: Some(r.workspace.clone()),
             action: None, // acting on a run lead is step 2
             status: LeadStatus::Open,
@@ -199,7 +206,7 @@ mod tests {
     #[test]
     fn open_decision_is_needs_you_with_decide_action() {
         let d = test_decision("d1", "approve the task?");
-        let leads = project_builtins(&[d], &[], &[]);
+        let leads = project_builtins(&[d], &[], &[], &HashMap::new());
         assert_eq!(leads.len(), 1);
         assert_eq!(leads[0].band, Band::NeedsYou);
         assert_eq!(leads[0].source, "relay");
@@ -221,7 +228,7 @@ mod tests {
         ];
         for (state, want) in cases {
             let r = test_run("r1", state);
-            let leads = project_builtins(&[], &[r], &[]);
+            let leads = project_builtins(&[], &[r], &[], &HashMap::new());
             assert_eq!(leads.len(), 1, "{state:?} should project one lead");
             assert_eq!(leads[0].band, want, "{state:?}");
             assert_eq!(leads[0].key, "run:r1");
@@ -229,10 +236,21 @@ mod tests {
     }
 
     #[test]
+    fn run_summary_is_the_recap_never_last_line() {
+        let mut r = test_run("r1", RunState::Working);
+        r.last_line = Some("Checking for updates...".into());
+        let recaps = HashMap::from([("r1".to_string(), "Refactored the parser".to_string())]);
+        let with = project_builtins(&[], &[r.clone()], &[], &recaps);
+        assert_eq!(with[0].summary.as_deref(), Some("Refactored the parser"));
+        let without = project_builtins(&[], &[r], &[], &HashMap::new());
+        assert_eq!(without[0].summary, None);
+    }
+
+    #[test]
     fn resting_shell_is_not_projected() {
         let shell = test_shell("sh1", RunState::Idle);
         assert!(
-            project_builtins(&[], &[shell], &[]).is_empty(),
+            project_builtins(&[], &[shell], &[], &HashMap::new()).is_empty(),
             "an idle shell is not news"
         );
     }
@@ -241,8 +259,11 @@ mod tests {
     fn firing_band_by_whether_it_ended() {
         let live = test_firing("f1", None);
         let done = test_firing("f2", Some(Timestamp::now()));
-        assert_eq!(project_builtins(&[], &[], &[live])[0].band, Band::Live);
-        assert_eq!(project_builtins(&[], &[], &[done])[0].band, Band::Happened);
+        assert_eq!(project_builtins(&[], &[], &[live], &HashMap::new())[0].band, Band::Live);
+        assert_eq!(
+            project_builtins(&[], &[], &[done], &HashMap::new())[0].band,
+            Band::Happened
+        );
     }
 
     fn test_decision(id: &str, title: &str) -> Decision {

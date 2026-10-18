@@ -430,7 +430,9 @@ pub fn register(r: &mut Router<Daemon>) {
                 let runs = runs::list_for_digest(c, since)?;
                 let firings = crate::digest::firings(c)?;
                 let stored = rl_ledger::leads::list(c, now)?;
-                let builtins = crate::report::project_builtins(&decisions, &runs, &firings);
+                let ids: Vec<String> = runs.iter().map(|r| r.id.clone()).collect();
+                let recaps = rl_ledger::summaries::lines(c, &ids)?;
+                let builtins = crate::report::project_builtins(&decisions, &runs, &firings, &recaps);
                 Ok(crate::report::assemble(builtins, stored, scope.as_deref(), since, now))
             })
             .await
