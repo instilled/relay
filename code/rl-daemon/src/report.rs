@@ -6,16 +6,18 @@ use rl_proto::decision::{Decision, DecisionStatus};
 use rl_proto::flow::Firing;
 use rl_proto::lead::{Band, Lead, LeadStatus};
 use rl_proto::methods::Report;
-use rl_proto::types::Run;
+use rl_proto::types::{Run, RunState};
 use std::path::Path;
 
 /// The source every built-in lead carries. Reserved — user leads may not use it.
 pub const BUILTIN_SOURCE: &str = "relay";
 
-/// How long a run may sit needing a human before it stops being news. Past
-/// this, a Failed/Blocked/NeedsInput run drops out of the report entirely
-/// rather than piling up in needs-you forever. Tunable.
-const STALE_NEEDS_YOU: jiff::SignedDuration = jiff::SignedDuration::from_secs(7 * 24 * 3600);
+/// How long a *failed* run stays in needs-you before it ages out of the
+/// report. A failure already happened — it is not something you can still act
+/// on — so an old one stops being news and drops (it remains in the overview
+/// and ledger as history). A genuinely-*waiting* run (Blocked / NeedsInput) is
+/// never aged out: it still needs you, however long you were away. Tunable.
+const STALE_FAILED: jiff::SignedDuration = jiff::SignedDuration::from_secs(14 * 24 * 3600);
 
 /// Relay's own state as leads: open decisions, runs by state, flow firings.
 /// Computed, never stored, so it tracks the truth and self-clears.
@@ -49,9 +51,12 @@ pub fn project_builtins(decisions: &[Decision], runs: &[Run], firings: &[Firing]
         } else {
             Band::Live
         };
-        // A run that has needed a human longer than STALE_NEEDS_YOU is no
-        // longer news; drop it rather than let it sit in needs-you forever.
-        if band == Band::NeedsYou && now.duration_since(r.state_at) > STALE_NEEDS_YOU {
+        // A failure that happened longer ago than STALE_FAILED is no longer
+        // news — drop it rather than let old failures pile up in needs-you.
+        // Only Failed ages out: a Blocked/NeedsInput run genuinely waiting on a
+        // human is kept whatever its age, so nothing you owe an answer to can
+        // silently vanish while you are away.
+        if band == Band::NeedsYou && r.state == RunState::Failed && now.duration_since(r.state_at) > STALE_FAILED {
             continue;
         }
         out.push(Lead {
@@ -151,15 +156,18 @@ mod tests {
     }
 
     #[test]
-    fn stale_needs_you_run_is_dropped() {
+    fn stale_failed_run_is_dropped() {
         let now = ts("2026-10-18T00:00:00Z");
-        let old = run_in_state("r1", RunState::Failed, now - Duration::from_secs(8 * 24 * 3600));
+        let old = run_in_state("r1", RunState::Failed, now - Duration::from_secs(15 * 24 * 3600));
         let leads = project_builtins(&[], &[old], &[], now);
-        assert!(leads.is_empty(), "a run failed 8 days ago is stale, not news");
+        assert!(
+            leads.is_empty(),
+            "a run that failed 15 days ago is stale history, not news"
+        );
     }
 
     #[test]
-    fn recent_needs_you_run_is_kept() {
+    fn recent_failed_run_is_kept() {
         let now = ts("2026-10-18T00:00:00Z");
         let fresh = run_in_state("r1", RunState::Failed, now - Duration::from_secs(60));
         let leads = project_builtins(&[], &[fresh], &[], now);
@@ -168,11 +176,30 @@ mod tests {
     }
 
     #[test]
+    fn stale_waiting_runs_are_never_dropped() {
+        // The vacation case: something genuinely waiting on a human must not
+        // vanish from the report however long you were away. Only Failed ages.
+        let now = ts("2026-10-18T00:00:00Z");
+        let long_ago = now - Duration::from_secs(60 * 24 * 3600);
+        let blocked = run_in_state("r1", RunState::Blocked, long_ago);
+        let needs_input = run_in_state("r2", RunState::NeedsInput, long_ago);
+        let leads = project_builtins(&[], &[blocked, needs_input], &[], now);
+        assert_eq!(leads.len(), 2, "a 60-day-old Blocked/NeedsInput run still needs you");
+        assert!(leads.iter().all(|l| l.band == Band::NeedsYou));
+    }
+
+    #[test]
     fn aging_never_drops_decisions_or_firings() {
         let now = ts("2026-10-18T00:00:00Z");
-        let d = open_decision("d1", now - Duration::from_secs(30 * 24 * 3600));
-        let leads = project_builtins(&[d], &[], &[], now);
-        assert_eq!(leads.len(), 1, "an old open decision is still needs-you");
+        let old = now - Duration::from_secs(60 * 24 * 3600);
+        let d = open_decision("d1", old);
+        let f = test_firing("f1", Some(old)); // an old, ended firing
+        let leads = project_builtins(&[d], &[], &[f], now);
+        assert_eq!(
+            leads.len(),
+            2,
+            "an old open decision and an old firing are never aged out"
+        );
     }
 
     fn mk(band: Band, key: &str, at: Timestamp, scope: Option<&str>) -> Lead {
