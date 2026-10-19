@@ -6,15 +6,22 @@ use rl_proto::decision::{Decision, DecisionStatus};
 use rl_proto::flow::Firing;
 use rl_proto::lead::{Band, Lead, LeadStatus};
 use rl_proto::methods::Report;
-use rl_proto::types::Run;
+use rl_proto::types::{Run, RunState};
 use std::path::Path;
 
 /// The source every built-in lead carries. Reserved — user leads may not use it.
 pub const BUILTIN_SOURCE: &str = "relay";
 
+/// How long a *failed* run stays in needs-you before it ages out of the
+/// report. A failure already happened — it is not something you can still act
+/// on — so an old one stops being news and drops (it remains in the overview
+/// and ledger as history). A genuinely-*waiting* run (Blocked / NeedsInput) is
+/// never aged out: it still needs you, however long you were away. Tunable.
+const STALE_FAILED: jiff::SignedDuration = jiff::SignedDuration::from_secs(14 * 24 * 3600);
+
 /// Relay's own state as leads: open decisions, runs by state, flow firings.
 /// Computed, never stored, so it tracks the truth and self-clears.
-pub fn project_builtins(decisions: &[Decision], runs: &[Run], firings: &[Firing]) -> Vec<Lead> {
+pub fn project_builtins(decisions: &[Decision], runs: &[Run], firings: &[Firing], now: Timestamp) -> Vec<Lead> {
     let mut out = Vec::new();
 
     for d in decisions.iter().filter(|d| d.status == DecisionStatus::Open) {
@@ -44,6 +51,14 @@ pub fn project_builtins(decisions: &[Decision], runs: &[Run], firings: &[Firing]
         } else {
             Band::Live
         };
+        // A failure that happened longer ago than STALE_FAILED is no longer
+        // news — drop it rather than let old failures pile up in needs-you.
+        // Only Failed ages out: a Blocked/NeedsInput run genuinely waiting on a
+        // human is kept whatever its age, so nothing you owe an answer to can
+        // silently vanish while you are away.
+        if band == Band::NeedsYou && r.state == RunState::Failed && now.duration_since(r.state_at) > STALE_FAILED {
+            continue;
+        }
         out.push(Lead {
             source: BUILTIN_SOURCE.into(),
             key: format!("run:{}", r.id),
@@ -81,8 +96,9 @@ pub fn project_builtins(decisions: &[Decision], runs: &[Run], firings: &[Firing]
 }
 
 /// Merge built-in and stored leads into the three bands. needs-you and live are
-/// shown whatever their age; happened is bounded by `since`. Anything expired or
-/// out of scope is dropped. Each band is newest-first.
+/// shown whatever their age here (project_builtins has already aged old *failed*
+/// runs out upstream); happened is bounded by `since`. Anything expired or out of
+/// scope is dropped. Each band is newest-first.
 pub fn assemble(
     builtins: Vec<Lead>,
     stored: Vec<Lead>,
@@ -122,6 +138,84 @@ mod tests {
     use rl_proto::types::{RunKind, RunState};
 
     use std::path::{Path, PathBuf};
+    use std::time::Duration;
+
+    fn ts(s: &str) -> Timestamp {
+        s.parse().unwrap()
+    }
+
+    fn run_in_state(id: &str, state: RunState, state_at: Timestamp) -> Run {
+        let mut r = test_run(id, state);
+        r.state_at = state_at;
+        r
+    }
+
+    fn open_decision(id: &str, created_at: Timestamp) -> Decision {
+        let mut d = test_decision(id, "old question");
+        d.created_at = created_at;
+        d
+    }
+
+    #[test]
+    fn stale_failed_run_is_dropped() {
+        let now = ts("2026-10-18T00:00:00Z");
+        let old = run_in_state("r1", RunState::Failed, now - Duration::from_secs(15 * 24 * 3600));
+        let leads = project_builtins(&[], &[old], &[], now);
+        assert!(
+            leads.is_empty(),
+            "a run that failed 15 days ago is stale history, not news"
+        );
+    }
+
+    #[test]
+    fn recent_failed_run_is_kept() {
+        let now = ts("2026-10-18T00:00:00Z");
+        let fresh = run_in_state("r1", RunState::Failed, now - Duration::from_secs(60));
+        let leads = project_builtins(&[], &[fresh], &[], now);
+        assert_eq!(leads.len(), 1);
+        assert_eq!(leads[0].band, Band::NeedsYou);
+    }
+
+    #[test]
+    fn failed_run_just_under_cutoff_is_kept() {
+        // Pins the 14-day cutoff itself: quietly shrinking it back (e.g. to 7
+        // days) would drop this and fail the test.
+        let now = ts("2026-10-18T00:00:00Z");
+        let r = run_in_state("r1", RunState::Failed, now - Duration::from_secs(13 * 24 * 3600));
+        let leads = project_builtins(&[], &[r], &[], now);
+        assert_eq!(
+            leads.len(),
+            1,
+            "a run that failed 13 days ago is still within the 14-day window"
+        );
+    }
+
+    #[test]
+    fn stale_waiting_runs_are_never_dropped() {
+        // The vacation case: something genuinely waiting on a human must not
+        // vanish from the report however long you were away. Only Failed ages.
+        let now = ts("2026-10-18T00:00:00Z");
+        let long_ago = now - Duration::from_secs(60 * 24 * 3600);
+        let blocked = run_in_state("r1", RunState::Blocked, long_ago);
+        let needs_input = run_in_state("r2", RunState::NeedsInput, long_ago);
+        let leads = project_builtins(&[], &[blocked, needs_input], &[], now);
+        assert_eq!(leads.len(), 2, "a 60-day-old Blocked/NeedsInput run still needs you");
+        assert!(leads.iter().all(|l| l.band == Band::NeedsYou));
+    }
+
+    #[test]
+    fn aging_never_drops_decisions_or_firings() {
+        let now = ts("2026-10-18T00:00:00Z");
+        let old = now - Duration::from_secs(60 * 24 * 3600);
+        let d = open_decision("d1", old);
+        let f = test_firing("f1", Some(old)); // an old, ended firing
+        let leads = project_builtins(&[d], &[], &[f], now);
+        assert_eq!(
+            leads.len(),
+            2,
+            "an old open decision and an old firing are never aged out"
+        );
+    }
 
     fn mk(band: Band, key: &str, at: Timestamp, scope: Option<&str>) -> Lead {
         Lead {
@@ -199,7 +293,7 @@ mod tests {
     #[test]
     fn open_decision_is_needs_you_with_decide_action() {
         let d = test_decision("d1", "approve the task?");
-        let leads = project_builtins(&[d], &[], &[]);
+        let leads = project_builtins(&[d], &[], &[], Timestamp::now());
         assert_eq!(leads.len(), 1);
         assert_eq!(leads[0].band, Band::NeedsYou);
         assert_eq!(leads[0].source, "relay");
@@ -221,7 +315,7 @@ mod tests {
         ];
         for (state, want) in cases {
             let r = test_run("r1", state);
-            let leads = project_builtins(&[], &[r], &[]);
+            let leads = project_builtins(&[], &[r], &[], Timestamp::now());
             assert_eq!(leads.len(), 1, "{state:?} should project one lead");
             assert_eq!(leads[0].band, want, "{state:?}");
             assert_eq!(leads[0].key, "run:r1");
@@ -232,7 +326,7 @@ mod tests {
     fn resting_shell_is_not_projected() {
         let shell = test_shell("sh1", RunState::Idle);
         assert!(
-            project_builtins(&[], &[shell], &[]).is_empty(),
+            project_builtins(&[], &[shell], &[], Timestamp::now()).is_empty(),
             "an idle shell is not news"
         );
     }
@@ -241,8 +335,14 @@ mod tests {
     fn firing_band_by_whether_it_ended() {
         let live = test_firing("f1", None);
         let done = test_firing("f2", Some(Timestamp::now()));
-        assert_eq!(project_builtins(&[], &[], &[live])[0].band, Band::Live);
-        assert_eq!(project_builtins(&[], &[], &[done])[0].band, Band::Happened);
+        assert_eq!(
+            project_builtins(&[], &[], &[live], Timestamp::now())[0].band,
+            Band::Live
+        );
+        assert_eq!(
+            project_builtins(&[], &[], &[done], Timestamp::now())[0].band,
+            Band::Happened
+        );
     }
 
     fn test_decision(id: &str, title: &str) -> Decision {

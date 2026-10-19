@@ -35,6 +35,7 @@ const T_OUTPUT: u8 = 0x82;
 const T_REPLAY_END: u8 = 0x83;
 const T_EXIT: u8 = 0x84;
 const T_NOTE: u8 = 0x85;
+const T_FOREGROUND: u8 = 0x86;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Frame {
@@ -67,6 +68,9 @@ pub enum Frame {
     /// "x joined", "n bytes missing"). Never part of the child's output;
     /// the holder itself does not send these.
     Note(String),
+    /// Whether the shell itself owns the terminal foreground (nothing else
+    /// is running in front of it). Holder to client; sent on change.
+    Foreground(bool),
 }
 
 /// What an attach gets before live output.
@@ -125,6 +129,7 @@ impl Frame {
             Frame::ReplayEnd => (T_REPLAY_END, Vec::new()),
             Frame::Exit(e) => (T_EXIT, serde_json::to_vec(e).expect("exit serialises")),
             Frame::Note(s) => (T_NOTE, s.as_bytes().to_vec()),
+            Frame::Foreground(b) => (T_FOREGROUND, vec![*b as u8]),
         };
         let mut out = Vec::with_capacity(5 + payload.len());
         out.push(tag);
@@ -173,6 +178,12 @@ impl Frame {
             T_REPLAY_END => Frame::ReplayEnd,
             T_EXIT => Frame::Exit(serde_json::from_slice(&p).map_err(|_| bad("exit"))?),
             T_NOTE => Frame::Note(String::from_utf8_lossy(&p).into_owned()),
+            T_FOREGROUND => {
+                if p.len() != 1 {
+                    return Err(bad("foreground"));
+                }
+                Frame::Foreground(p[0] != 0)
+            }
             other => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -309,6 +320,16 @@ pub async fn read_frame<R: AsyncRead + Unpin>(r: &mut R) -> io::Result<Option<Fr
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn foreground_frame_round_trips() {
+        for b in [true, false] {
+            let f = Frame::Foreground(b);
+            let bytes = f.encode();
+            let got = Frame::decode(bytes[0], bytes[5..].to_vec()).unwrap();
+            assert_eq!(got, Frame::Foreground(b));
+        }
+    }
 
     /// The bug this type exists for: a big frame read inside a `select!`
     /// that loses to a ticker. `read_frame` drops what it had read along

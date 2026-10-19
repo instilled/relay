@@ -262,6 +262,65 @@ async fn late_attach_sees_exit() {
     wait_gone(&h.socket, hello.holder_pid).await;
 }
 
+/// Reads frames until the first foreground frame arrives, returning its value.
+async fn read_foreground(s: &mut Session) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        match tokio::time::timeout(remaining, s.recv())
+            .await
+            .expect("timed out waiting for a foreground frame")
+            .unwrap()
+        {
+            Some(Frame::Foreground(b)) => return b,
+            Some(Frame::Exit(e)) => panic!("exited before a foreground frame: {e:?}"),
+            Some(_) => {}
+            None => panic!("holder closed before a foreground frame"),
+        }
+    }
+}
+
+/// A tty run reports the foreground state to every client that attaches: the
+/// fake CLI rests owning its own terminal, so the first thing a client learns
+/// after the replay is `Foreground(true)`.
+#[tokio::test]
+async fn a_tty_attach_learns_the_foreground_state() {
+    let h = start(true, 60);
+    let (hello, mut s) = attach(&h, true).await;
+    assert!(hello.tty);
+    assert!(read_foreground(&mut s).await, "a resting shell owns its own terminal");
+    s.input("exit\n").await.unwrap();
+    assert_eq!(read_exit(&mut s).await.code, 0);
+    s.close().await.unwrap();
+    wait_gone(&h.socket, hello.holder_pid).await;
+}
+
+/// A pipe run has no terminal to read a foreground group from, so a client is
+/// never sent a foreground frame — not on attach, not ever.
+#[tokio::test]
+async fn a_pipes_run_never_frames_foreground() {
+    let h = start(false, 60);
+    let (hello, mut s) = attach(&h, true).await;
+    assert!(!hello.tty);
+    read_until(&mut s, "fake-cli ready").await;
+    s.input("exit\n").await.unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        match tokio::time::timeout(remaining, s.recv())
+            .await
+            .expect("timed out draining a pipe run")
+            .unwrap()
+        {
+            Some(Frame::Foreground(_)) => panic!("a pipe run must not frame foreground"),
+            Some(Frame::Exit(_)) | None => break,
+            Some(_) => {}
+        }
+    }
+    s.close().await.unwrap();
+    wait_gone(&h.socket, hello.holder_pid).await;
+}
+
 #[tokio::test]
 async fn no_tty_uses_pipes() {
     let h = start(false, 60);
