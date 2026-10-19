@@ -430,7 +430,7 @@ pub fn register(r: &mut Router<Daemon>) {
                 let runs = runs::list_for_digest(c, since)?;
                 let firings = crate::digest::firings(c)?;
                 let stored = rl_ledger::leads::list(c, now)?;
-                let builtins = crate::report::project_builtins(&decisions, &runs, &firings);
+                let builtins = crate::report::project_builtins(&decisions, &runs, &firings, now);
                 Ok(crate::report::assemble(builtins, stored, scope.as_deref(), since, now))
             })
             .await

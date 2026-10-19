@@ -784,6 +784,9 @@ impl Supervisor {
                         }
                     }
                     Ok(Some(Frame::Exit(e))) => { exit = Some(e); break false; }
+                    // Whether the shell owns the terminal; the next detect tick
+                    // classifies with it.
+                    Ok(Some(Frame::Foreground(shell_fg))) => heur.set_foreground(shell_fg),
                     Ok(Some(_)) => {}
                     Ok(None) => { warn!(id, "holder closed the connection"); gone = Some("it closed the connection".to_string()); break false; }
                     Err(e) => { warn!(id, error = %e, "holder connection failed"); gone = Some(format!("{e}")); break false; }

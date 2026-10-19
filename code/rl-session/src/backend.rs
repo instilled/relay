@@ -74,12 +74,19 @@ pub struct Spec {
 
 pub type Resizer = Arc<dyn Fn(u16, u16) -> Result<()> + Send + Sync>;
 
+/// Reads the terminal's foreground process group: `Some(true)` when the shell
+/// itself owns it, `Some(false)` when a child program does, `None` when it
+/// can't be read.
+pub type Foreground = Arc<dyn Fn() -> Option<bool> + Send + Sync>;
+
 pub struct Spawned {
     pub pid: u32,
     pub output: mpsc::Receiver<Vec<u8>>,
     pub input: mpsc::Sender<Vec<u8>>,
     pub exit: oneshot::Receiver<Exit>,
     pub resize: Resizer,
+    /// Terminal-foreground probe; `None` without a pty.
+    pub foreground: Option<Foreground>,
 }
 
 pub fn spawn(spec: &Spec) -> Result<Spawned> {
@@ -172,6 +179,16 @@ fn spawn_pty(spec: &Spec) -> Result<Spawned> {
         let _ = exit_tx.send(exit);
     })?;
 
+    let fg_master = master.clone();
+    let foreground: Foreground = Arc::new(move || {
+        let m = fg_master.lock().ok()?;
+        let fd = m.as_raw_fd()?;
+        // SAFETY: the fd is owned by the master we hold locked for this call.
+        let borrowed = unsafe { std::os::fd::BorrowedFd::borrow_raw(fd) };
+        let fg = nix::unistd::tcgetpgrp(borrowed).ok()?;
+        Some(fg.as_raw() == pid as i32)
+    });
+
     let resize: Resizer = Arc::new(move |cols, rows| {
         master
             .lock()
@@ -191,6 +208,7 @@ fn spawn_pty(spec: &Spec) -> Result<Spawned> {
         input: in_tx,
         exit: exit_rx,
         resize,
+        foreground: Some(foreground),
     })
 }
 
@@ -296,6 +314,7 @@ fn spawn_pipes(spec: &Spec) -> Result<Spawned> {
         input: in_tx,
         exit: exit_rx,
         resize,
+        foreground: None,
     })
 }
 

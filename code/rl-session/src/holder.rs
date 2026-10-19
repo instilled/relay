@@ -33,7 +33,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::io::BufReader;
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::{broadcast, mpsc, oneshot, watch};
+use tokio::sync::{Notify, broadcast, mpsc, oneshot, watch};
+use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
@@ -41,6 +42,11 @@ use tracing::{debug, info, warn};
 pub const RING_CAPACITY: usize = 1 << 20;
 /// Output chunks a slow client may fall behind before it is dropped.
 const BROADCAST_CAPACITY: usize = 4096;
+/// How often the foreground probe is sampled while a run is active.
+const FG_POLL: Duration = Duration::from_secs(1);
+/// Consecutive samples with no change and no output before the foreground
+/// watcher parks on the next output chunk — a resting shell then costs nothing.
+const FG_QUIET_SAMPLES: u32 = 8;
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -97,6 +103,14 @@ struct Ctx {
     resize: Resizer,
     clients: AtomicUsize,
     shutdown: CancellationToken,
+    /// Whether the shell itself owns the terminal foreground. `Some` only for a
+    /// run that can report it (a tty run); `None` otherwise, and then clients
+    /// are never sent a foreground frame. Starts `true`: a fresh shell rests at
+    /// its own prompt.
+    fg: Option<watch::Sender<bool>>,
+    /// Pulsed once per output chunk, so the foreground watcher can park deeply
+    /// while the run is quiet and wake the moment the child writes again.
+    output_wake: Arc<Notify>,
 }
 
 /// Serves until `Close`, SIGTERM, or the linger timeout after exit. `ready`
@@ -109,6 +123,10 @@ pub async fn serve(cfg: Config, ready: oneshot::Sender<()>) -> Result<()> {
 
     let (out_tx, _) = broadcast::channel(BROADCAST_CAPACITY);
     let (exit_tx, _) = watch::channel(None);
+    // The foreground probe moves into `watch_foreground`; the channel exists
+    // only when there is one to poll.
+    let foreground = spawned.foreground;
+    let fg = foreground.as_ref().map(|_| watch::channel(true).0);
     let ctx = Arc::new(Ctx {
         shared: Mutex::new(Shared {
             id: cfg.id.clone(),
@@ -127,6 +145,8 @@ pub async fn serve(cfg: Config, ready: oneshot::Sender<()>) -> Result<()> {
         resize: spawned.resize,
         clients: AtomicUsize::new(0),
         shutdown: CancellationToken::new(),
+        fg,
+        output_wake: Arc::new(Notify::new()),
     });
     let _ = ready.send(());
 
@@ -138,6 +158,9 @@ pub async fn serve(cfg: Config, ready: oneshot::Sender<()>) -> Result<()> {
         cfg.exit_file.clone(),
         cfg.linger,
     ));
+    if let Some(probe) = foreground {
+        tokio::spawn(watch_foreground(ctx.clone(), probe));
+    }
     tokio::spawn(watch_signals(ctx.clone()));
     tokio::spawn(watch_socket(ctx.clone(), cfg.socket.clone(), cfg.socket_check));
     if let Some(after) = cfg.reap_after {
@@ -193,8 +216,90 @@ async fn pump_output(ctx: Arc<Ctx>, mut output: mpsc::Receiver<Vec<u8>>) {
             sc.feed(&chunk);
         }
         let _ = ctx.out.send(Arc::from(chunk));
+        drop(s);
+        // Wake the foreground watcher: it parks on this while the run is quiet.
+        ctx.output_wake.notify_one();
     }
     debug!("output pump finished");
+}
+
+/// Polls the terminal-foreground probe and publishes `ctx.fg` on change, so an
+/// attached daemon can tell a shell resting at its own prompt from one with a
+/// child program in front of it.
+///
+/// The cost is kept near zero when nothing is happening. With no client there
+/// is nobody to classify, so it does not poll at all. With a client it samples
+/// once a second, but a shell that has sat unchanged for a while is deep-idle:
+/// the watcher stops sampling and parks on the next output chunk, waking only
+/// when the child writes again. Spawned only for a run whose probe exists, so
+/// `ctx.fg` is always `Some` here.
+async fn watch_foreground(ctx: Arc<Ctx>, probe: backend::Foreground) {
+    let Some(fg) = ctx.fg.as_ref() else { return };
+    let mut poll = tokio::time::interval(FG_POLL);
+    poll.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    // Did a chunk arrive since the last sample? If so the run is not quiet,
+    // so the deep-idle park is held off even when the value itself hasn't moved.
+    let mut saw_output = false;
+    let mut quiet: u32 = 0;
+    loop {
+        if ctx.shutdown.is_cancelled() {
+            return;
+        }
+
+        // No client: nobody is classifying. Don't touch the probe; wait for one
+        // to attach, re-checking cheaply. A client attaching produces no output,
+        // so this can't park on `output_wake`.
+        while ctx.clients.load(Ordering::SeqCst) == 0 {
+            tokio::select! {
+                _ = ctx.shutdown.cancelled() => return,
+                _ = tokio::time::sleep(FG_POLL) => {}
+            }
+        }
+
+        // Deep idle: the value has held and no output has flowed for a while.
+        // Stop sampling and park until the child writes again — zero syscalls
+        // and zero wakeups until then.
+        if quiet >= FG_QUIET_SAMPLES {
+            tokio::select! {
+                _ = ctx.shutdown.cancelled() => return,
+                _ = ctx.output_wake.notified() => {}
+            }
+            quiet = 0;
+            saw_output = true;
+            poll.reset();
+            continue;
+        }
+
+        // Active: sample about once a second. Output chunks that land between
+        // ticks wake us only to note that the run is not quiet; the fixed
+        // interval keeps sampling to ~1 Hz even under a steady stream.
+        tokio::select! {
+            _ = ctx.shutdown.cancelled() => return,
+            _ = ctx.output_wake.notified() => {
+                saw_output = true;
+                continue;
+            }
+            _ = poll.tick() => {}
+        }
+
+        let changed = match probe() {
+            // Publish only on a real change; a `None` leaves the last value be.
+            Some(v) => fg.send_if_modified(|cur| {
+                let diff = *cur != v;
+                if diff {
+                    *cur = v;
+                }
+                diff
+            }),
+            None => false,
+        };
+        if changed || saw_output {
+            quiet = 0;
+        } else {
+            quiet = quiet.saturating_add(1);
+        }
+        saw_output = false;
+    }
 }
 
 async fn watch_exit(
@@ -343,6 +448,18 @@ async fn client_loop(ctx: &Ctx, stream: UnixStream) -> std::io::Result<()> {
         write_frame(&mut wr, &Frame::Exit(exit)).await?;
     }
 
+    // Foreground: a tty run has a channel, a pipe run does not. Tell a freshly
+    // attached client the current state once, then follow it on every change.
+    let mut fg_rx = match ctx.fg.as_ref() {
+        Some(tx) => {
+            let rx = tx.subscribe();
+            let cur = *rx.borrow();
+            write_frame(&mut wr, &Frame::Foreground(cur)).await?;
+            Some(rx)
+        }
+        None => None,
+    };
+
     let pid = ctx.shared.lock().unwrap().pid as i32;
     let mut out_open = true;
     loop {
@@ -378,6 +495,17 @@ async fn client_loop(ctx: &Ctx, stream: UnixStream) -> std::io::Result<()> {
                 }
                 Err(broadcast::error::RecvError::Closed) => out_open = false,
             },
+            fg = async { fg_rx.as_mut().unwrap().changed().await }, if fg_rx.is_some() => {
+                match fg {
+                    Ok(()) => {
+                        let v = *fg_rx.as_ref().unwrap().borrow();
+                        write_frame(&mut wr, &Frame::Foreground(v)).await?;
+                    }
+                    // The sender lives in `Ctx` for the holder's life, so this
+                    // only happens if the run is tearing down: stop following it.
+                    Err(_) => fg_rx = None,
+                }
+            }
             changed = exit_rx.changed(), if !exit_sent => {
                 if changed.is_err() { exit_sent = true; continue; }
                 let exit = exit_rx.borrow().clone();
