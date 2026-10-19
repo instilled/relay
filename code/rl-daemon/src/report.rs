@@ -96,8 +96,9 @@ pub fn project_builtins(decisions: &[Decision], runs: &[Run], firings: &[Firing]
 }
 
 /// Merge built-in and stored leads into the three bands. needs-you and live are
-/// shown whatever their age; happened is bounded by `since`. Anything expired or
-/// out of scope is dropped. Each band is newest-first.
+/// shown whatever their age here (project_builtins has already aged old *failed*
+/// runs out upstream); happened is bounded by `since`. Anything expired or out of
+/// scope is dropped. Each band is newest-first.
 pub fn assemble(
     builtins: Vec<Lead>,
     stored: Vec<Lead>,
@@ -173,6 +174,20 @@ mod tests {
         let leads = project_builtins(&[], &[fresh], &[], now);
         assert_eq!(leads.len(), 1);
         assert_eq!(leads[0].band, Band::NeedsYou);
+    }
+
+    #[test]
+    fn failed_run_just_under_cutoff_is_kept() {
+        // Pins the 14-day cutoff itself: quietly shrinking it back (e.g. to 7
+        // days) would drop this and fail the test.
+        let now = ts("2026-10-18T00:00:00Z");
+        let r = run_in_state("r1", RunState::Failed, now - Duration::from_secs(13 * 24 * 3600));
+        let leads = project_builtins(&[], &[r], &[], now);
+        assert_eq!(
+            leads.len(),
+            1,
+            "a run that failed 13 days ago is still within the 14-day window"
+        );
     }
 
     #[test]
