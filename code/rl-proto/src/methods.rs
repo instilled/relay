@@ -653,6 +653,14 @@ impl Method for DigestOrder {
     type Result = Vec<Order>;
 }
 
+/// A lead source tagged with a co-worker or team name. Every lead from the
+/// source inherits the tag.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceTag {
+    pub source: String,
+    pub tag: String,
+}
+
 /// A project's rows in the order you put them, first on top — or, under
 /// `Order::PROJECTS`, the projects themselves.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

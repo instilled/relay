@@ -21,6 +21,7 @@ pub mod runs;
 pub mod session_io;
 pub mod sessions;
 pub mod summaries;
+pub mod tags;
 pub mod workspaces;
 
 use anyhow::{Context, Result, anyhow};
