@@ -21,6 +21,27 @@ impl App {
         self.refresh().await;
     }
 
+    /// `/report`: the board in the list's place; `/report` again or `esc` goes back.
+    pub(super) async fn open_report(&mut self) {
+        if self.view == View::Report {
+            self.go_back();
+        } else {
+            self.open_view(View::Report);
+            self.leave_subpage();
+            self.fetch_report().await;
+        }
+        self.picked.clear();
+        self.events.clear();
+    }
+
+    /// The report as the daemon has it now. When the view opens and on the tick.
+    pub(super) async fn fetch_report(&mut self) {
+        match self.rpc.call::<ReportGet>(ReportParams::default()).await {
+            Ok(r) => self.report = Some(r),
+            Err(e) => self.say(format!("daemon: {e:#}")),
+        }
+    }
+
     pub(super) fn event_items(&self) -> Vec<events::Item<'_>> {
         events::build(&self.feed, &self.names, &self.filter)
     }

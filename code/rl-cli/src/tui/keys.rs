@@ -576,7 +576,7 @@ impl App {
                     self.settle();
                 } else if self.view == View::Events {
                     self.toggle_events().await;
-                } else if self.view == View::CatchUp {
+                } else if self.view == View::CatchUp || self.view == View::Report {
                     self.back_to_list().await;
                 }
             }
@@ -1031,6 +1031,7 @@ impl App {
             palette::Cmd::Hide => self.hide().await,
             palette::Cmd::Sort => self.sort_project().await,
             palette::Cmd::Events => self.toggle_events().await,
+            palette::Cmd::Report => self.open_report().await,
             palette::Cmd::Shell => self.new_shell(area).await,
             palette::Cmd::Reload => match arg.trim() {
                 "flows" => self.reload_flows().await,

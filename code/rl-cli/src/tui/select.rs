@@ -58,6 +58,7 @@ impl App {
         match self.view {
             View::Work => self.rows().into_iter().filter_map(|r| r.key()).collect(),
             View::Events => self.event_items().iter().flat_map(|i| i.keys()).collect(),
+            View::Report => Vec::new(),
             View::CatchUp => self
                 .lead_keys()
                 .into_iter()
@@ -93,6 +94,7 @@ impl App {
             return vec![];
         }
         let (keys, named): (Vec<Option<String>>, Vec<query::Named>) = match self.view {
+            View::Report => return vec![],
             View::Work => self
                 .rows()
                 .iter()
@@ -160,7 +162,7 @@ impl App {
         let rows = match self.view {
             View::Work => self.rows(),
             View::CatchUp => self.catch_rows(),
-            View::Events => return None,
+            View::Events | View::Report => return None,
         };
         let key = self.sel.as_ref()?;
         rows.into_iter().find(|r| r.key().as_ref() == Some(key))
@@ -189,7 +191,7 @@ impl App {
     pub(super) fn question_here(&self) -> Option<&Decision> {
         match self.view {
             View::Work | View::CatchUp => self.selected_question(),
-            View::Events => None,
+            View::Events | View::Report => None,
         }
     }
 

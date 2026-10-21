@@ -91,12 +91,12 @@ use rl_proto::flow::{
 use rl_proto::methods::{
     AgentList, DecisionDismiss, DecisionGet, DecisionId, DecisionNote, DecisionTake, DecisionTakeParams, Digest,
     DigestGet, DigestHide, DigestHideParams, DigestItem, DigestOrder, DigestParams, EventFilter, EventList, GcParams,
-    GcRun, ImportList, ImportListParams, ImportMove, PresenceClient, PresenceTouch, RunArchive, RunArchiveParams,
-    RunFilter, RunGet, RunHide, RunHideParams, RunId, RunIds, RunInput, RunInputParams, RunList, RunMark,
-    RunMarkParams, RunPin, RunPinParams, RunRename, RunRenameParams, RunResume, RunResumeParams, RunSeen, RunSpec,
-    RunStart, RunStop, RunStopParams, SETUP_STEPS, SetupGet, SummaryGet, SummaryMake, SummaryParams, WorkspaceList,
-    WorkspaceRemove, WorkspaceRemoveParams, WorkspaceRemoved, WorkspaceRename, WorkspaceRenameParams, WorkspaceUp,
-    WorkspaceUpParams,
+    GcRun, ImportList, ImportListParams, ImportMove, PresenceClient, PresenceTouch, ReportGet, ReportParams,
+    RunArchive, RunArchiveParams, RunFilter, RunGet, RunHide, RunHideParams, RunId, RunIds, RunInput, RunInputParams,
+    RunList, RunMark, RunMarkParams, RunPin, RunPinParams, RunRename, RunRenameParams, RunResume, RunResumeParams,
+    RunSeen, RunSpec, RunStart, RunStop, RunStopParams, SETUP_STEPS, SetupGet, SummaryGet, SummaryMake, SummaryParams,
+    WorkspaceList, WorkspaceRemove, WorkspaceRemoveParams, WorkspaceRemoved, WorkspaceRename, WorkspaceRenameParams,
+    WorkspaceUp, WorkspaceUpParams,
 };
 use rl_proto::types::{Cause, Event as LedgerEvent, Mark, Run, RunKind, RunState, Summary, SummaryTarget};
 use rows::{Names, Row, fit};
@@ -152,6 +152,8 @@ enum View {
     /// What happened while you were away: what the panel opens on after a
     /// while gone (`catch_up.after`).
     CatchUp,
+    /// The work-and-teams board (`/report`).
+    Report,
 }
 
 enum Mode {
@@ -414,6 +416,8 @@ struct App {
     /// list's digest cut to what happened since it starts, again on each
     /// refresh. The list's own stays as it is.
     catch: Option<Digest>,
+    /// The report as last fetched, while its view is up.
+    report: Option<rl_proto::methods::Report>,
     /// While a frame is drawn, the catch-ups built for it, by the search
     /// each is narrowed by: built once a draw, and let go when it ends.
     drawn: std::cell::RefCell<Option<Vec<(String, crate::catchup::Kept)>>>,
@@ -1237,6 +1241,7 @@ impl App {
             left: None,
             presence_at: None,
             catch: None,
+            report: None,
             drawn: std::cell::RefCell::default(),
             unseen_from: HashMap::new(),
             removing: None,
@@ -1468,6 +1473,7 @@ impl App {
         Some(match self.view {
             View::Events => shortcuts::Place::Events,
             View::CatchUp => shortcuts::Place::CatchUp,
+            View::Report => shortcuts::Place::Report,
             View::Work if self.selected_question().is_some() => shortcuts::Place::Question,
             View::Work if self.show_hidden => shortcuts::Place::Hidden,
             View::Work => shortcuts::Place::List,
@@ -1560,6 +1566,9 @@ impl App {
             _ => self.catch = None,
         }
         self.fetch_leads().await;
+        if self.view == View::Report {
+            self.fetch_report().await;
+        }
         // Which CLIs are agents decides how a line reads and what it offers:
         // the ones here that the config has the panel offer. Asked once.
         if self.agents.is_empty()
@@ -2015,6 +2024,7 @@ impl App {
                 Some(c) => catchup::headline(c.since, Timestamp::now()),
                 None => "while you were away".into(),
             },
+            View::Report => "report".into(),
         };
         let mut notes = Vec::new();
         if self.view == View::CatchUp {
@@ -2099,6 +2109,7 @@ impl App {
                 View::Work => self.draw_list(f, list, &rows),
                 View::Events => self.draw_events(f, list),
                 View::CatchUp => self.draw_catch_up(f, list),
+                View::Report => self.draw_report(f, list),
             }
         }
         if let Some(pane) = a.pane {
@@ -2680,6 +2691,17 @@ impl App {
             shown.push(line);
         }
         self.draw_window(f, rest, shown, keys, sel_line);
+    }
+
+    /// The report: its lanes from the top.
+    fn draw_report(&self, f: &mut Frame, area: Rect) {
+        self.list_h.set(area.height);
+        *self.hit.borrow_mut() = ListHit::default();
+        let lines = match &self.report {
+            Some(rep) => report::report_lines(rep, area.width as usize, Timestamp::now()),
+            None => vec![Line::from(Span::raw(" loading report…").dim())],
+        };
+        f.render_widget(Paragraph::new(lines), area);
     }
 
     /// The one row that names a subpage, whatever it is of: `‹ esc` to step
@@ -4849,6 +4871,40 @@ mod tests {
         app.tick().await;
         let after = app.rpc.call::<PresenceTouch>(me()).await.unwrap().last_seen_at;
         assert!(after.is_some_and(|t| t <= looked), "{after:?}");
+        token.cancel();
+    }
+
+    #[tokio::test]
+    async fn the_report_view_draws_its_lanes_and_esc_goes_to_the_list() {
+        let (_tmp, token, mut app, _folder) = panel().await;
+        app.open_report().await;
+        assert!(app.view == super::View::Report);
+        assert!(app.report.is_some(), "fetched when it opened");
+        // Seeded, so the lanes do not depend on what the daemon has to say.
+        let lead = |band, title: &str| rl_proto::lead::Lead {
+            source: "claude".into(),
+            key: title.into(),
+            band,
+            title: title.into(),
+            summary: None,
+            scope: Some("/p/relay".into()),
+            action: None,
+            status: rl_proto::lead::LeadStatus::Open,
+            at: jiff::Timestamp::now(),
+            expires_at: None,
+        };
+        app.report = Some(rl_proto::methods::Report {
+            needs_you: vec![lead(rl_proto::lead::Band::NeedsYou, "approve the deploy")],
+            live: vec![lead(rl_proto::lead::Band::Live, "tests running")],
+            happened: vec![],
+            tags: vec![],
+        });
+        let frame = draw_text(&mut app);
+        assert!(frame.contains("relay"), "{frame}");
+        assert!(frame.contains("1 needs · 1 live · 0 done"), "{frame}");
+        assert!(frame.contains("approve the deploy"), "{frame}");
+        press(&mut app, KeyCode::Esc, KeyModifiers::NONE).await;
+        assert!(app.view == super::View::Work);
         token.cancel();
     }
 

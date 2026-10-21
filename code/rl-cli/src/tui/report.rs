@@ -5,8 +5,15 @@
 
 use std::collections::{HashMap, HashSet};
 
+use jiff::Timestamp;
+use ratatui::style::Stylize;
+use ratatui::text::{Line, Span};
 use rl_proto::lead::{Band, Lead};
 use rl_proto::methods::Report;
+
+use super::rows::fit;
+use super::theme;
+use crate::render::fmt_clock;
 
 pub struct Row<'a> {
     pub lead: &'a Lead,
@@ -85,10 +92,96 @@ pub fn lanes(report: &Report) -> Vec<Lane<'_>> {
     out
 }
 
+/// The lead column never gets narrower than this; the columns to its right give way first.
+const LEAD_FLOOR: usize = 20;
+const WHEN_W: usize = 12;
+const PROJECT_W: usize = 14;
+const SOURCE_W: usize = 12;
+
+/// The report as lines for a body `width` columns wide: per lane a header with its
+/// tally, a dim rule, then a row per lead. Rendering only; `lanes()` did the grouping.
+pub fn report_lines(report: &Report, width: usize, now: Timestamp) -> Vec<Line<'static>> {
+    let lanes = lanes(report);
+    if lanes.is_empty() {
+        return vec![Line::from(Span::raw(" nothing to report").dim())];
+    }
+    // Columns right of the lead, added in the order they matter; the lead keeps its floor.
+    let avail = width.saturating_sub(3);
+    let mut used = 0;
+    let mut take = |w: usize| {
+        let fits = avail.saturating_sub(used + 2 + w) >= LEAD_FLOOR;
+        if fits {
+            used += 2 + w;
+        }
+        fits
+    };
+    let show_source = take(SOURCE_W);
+    let show_project = take(PROJECT_W);
+    let show_when = take(WHEN_W);
+    let lead_w = avail.saturating_sub(used);
+    let mut out = Vec::new();
+    for (n, lane) in lanes.iter().enumerate() {
+        if n > 0 {
+            out.push(Line::raw(""));
+        }
+        let tally = format!("{} needs · {} live · {} done", lane.needs, lane.live, lane.done);
+        let team = if lane.is_team { "  team" } else { "" };
+        let name_w = width.saturating_sub(tally.chars().count() + team.chars().count() + 5);
+        let name = fit(&lane.name, name_w.min(lane.name.chars().count()).max(1));
+        let mut spans = vec![Span::raw(" "), Span::styled(name.trim_end().to_string(), theme::name())];
+        if lane.is_team {
+            spans.push(Span::styled(team, theme::dim()));
+        }
+        spans.push(Span::styled(format!("  {tally}"), theme::dim()));
+        out.push(Line::from(spans));
+        out.push(Line::from(Span::raw("─".repeat(width)).dim()));
+        for row in &lane.rows {
+            let l = row.lead;
+            let (glyph, gstyle) = match l.band {
+                Band::NeedsYou => ("⚠", theme::needs()),
+                Band::Live => ("•", theme::name()),
+                Band::Happened => ("✓", theme::dim()),
+            };
+            let text = match &l.summary {
+                Some(s) => format!("{} — {s}", l.title),
+                None => l.title.clone(),
+            };
+            let body = if l.band == Band::Happened {
+                theme::dim()
+            } else {
+                theme::name()
+            };
+            let mut spans = vec![
+                Span::raw(" "),
+                Span::styled(glyph, gstyle),
+                Span::raw(" "),
+                Span::styled(fit(&text, lead_w), body),
+            ];
+            let dim = |t: String| Span::styled(format!("  {t}"), theme::dim());
+            if show_source {
+                spans.push(dim(fit(&l.source, SOURCE_W)));
+            }
+            if show_project {
+                let base = l
+                    .scope
+                    .as_ref()
+                    .and_then(|p| p.file_name())
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                spans.push(dim(fit(&base, PROJECT_W)));
+            }
+            if show_when {
+                spans.push(dim(format!("{:>w$}", fmt_clock(l.at, now), w = WHEN_W)));
+            }
+            out.push(Line::from(spans));
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use jiff::Timestamp;
     use rl_proto::lead::LeadStatus;
     use rl_proto::methods::SourceTag;
 
@@ -109,6 +202,61 @@ mod tests {
             at,
             expires_at: None,
         }
+    }
+
+    fn text(l: &Line<'_>) -> String {
+        l.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    fn sample() -> Report {
+        Report {
+            needs_you: vec![mk_lead(
+                "claude",
+                "a very long lead title that will certainly not fit in a narrow column of any kind",
+                Band::NeedsYou,
+                Some("/p/relay"),
+                ts(1_700_000_000),
+            )],
+            live: vec![],
+            happened: vec![mk_lead(
+                "claude",
+                "done",
+                Band::Happened,
+                Some("/p/relay"),
+                ts(1_600_000_000),
+            )],
+            tags: vec![],
+        }
+    }
+
+    #[test]
+    fn report_lines_head_each_lane_with_its_tally_and_cut_long_leads() {
+        let ls: Vec<String> = report_lines(&sample(), 80, ts(1_700_000_100))
+            .iter()
+            .map(text)
+            .collect();
+        assert!(
+            ls[0].contains("relay") && ls[0].contains("1 needs · 0 live · 1 done"),
+            "{ls:?}"
+        );
+        assert!(ls[1].starts_with('─'));
+        assert!(ls[2].contains('⚠') && ls[2].contains('…'), "{ls:?}");
+        assert!(ls.iter().all(|l| l.chars().count() <= 80), "{ls:?}");
+        assert!(ls[2].contains("claude") && ls[2].contains("relay"), "{ls:?}");
+    }
+
+    #[test]
+    fn report_lines_drop_the_when_column_when_narrow_but_keep_the_lead() {
+        let now = ts(1_700_000_100);
+        let wide: Vec<String> = report_lines(&sample(), 80, now).iter().map(text).collect();
+        let narrow: Vec<String> = report_lines(&sample(), 40, now).iter().map(text).collect();
+        assert!(narrow[2].contains("a very long"), "{narrow:?}");
+        assert!(narrow.iter().all(|l| l.chars().count() <= 40), "{narrow:?}");
+        let clock = fmt_clock(ts(1_700_000_000), now);
+        assert!(
+            wide[2].contains(&clock) && !narrow[2].contains(&clock),
+            "{wide:?} {narrow:?}"
+        );
     }
 
     #[test]
