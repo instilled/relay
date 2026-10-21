@@ -222,6 +222,20 @@ impl Method for LeadClear {
     type Result = ();
 }
 
+/// Hide a lead from the report; a re-post by its source will not bring it back.
+pub struct LeadDismiss;
+impl Method for LeadDismiss {
+    const NAME: &'static str = "lead.dismiss";
+    type Params = LeadDismissParams;
+    type Result = ();
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LeadDismissParams {
+    pub source: String,
+    pub key: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LeadPostParams {
     pub source: String,

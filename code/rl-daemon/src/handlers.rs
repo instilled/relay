@@ -570,6 +570,14 @@ pub fn register(r: &mut Router<Daemon>) {
         Ok(())
     });
 
+    r.register::<LeadDismiss, _, _>(|d, p| async move {
+        d.ledger
+            .call(move |c| rl_ledger::leads::dismiss(c, &p.source, &p.key))
+            .await
+            .map_err(RpcError::internal)?;
+        Ok(())
+    });
+
     r.register::<TagSet, _, _>(|d, p| async move {
         if p.source.is_empty() || p.tag.is_empty() {
             return Err(RpcError::invalid_params("source and tag must be non-empty".to_string()));

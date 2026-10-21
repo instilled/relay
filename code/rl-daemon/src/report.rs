@@ -118,7 +118,7 @@ pub fn assemble(
 ) -> Report {
     let mut report = Report::default();
     for lead in builtins.into_iter().chain(stored) {
-        if lead.expires_at.is_some_and(|e| e <= now) {
+        if lead.expires_at.is_some_and(|e| e <= now) || lead.status == LeadStatus::Dismissed {
             continue;
         }
         if let Some(s) = scope {
@@ -225,6 +225,15 @@ mod tests {
             2,
             "an old open decision and an old firing are never aged out"
         );
+    }
+
+    #[test]
+    fn assemble_drops_dismissed_leads() {
+        let now = Timestamp::now();
+        let mut l = mk(Band::NeedsYou, "triage", now, None);
+        l.status = LeadStatus::Dismissed;
+        let report = assemble(vec![], vec![l], None, now - std::time::Duration::from_secs(3600), now);
+        assert!(report.needs_you.is_empty());
     }
 
     fn mk(band: Band, key: &str, at: Timestamp, scope: Option<&str>) -> Lead {
