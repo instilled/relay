@@ -91,12 +91,12 @@ use rl_proto::flow::{
 use rl_proto::methods::{
     AgentList, DecisionDismiss, DecisionGet, DecisionId, DecisionNote, DecisionTake, DecisionTakeParams, Digest,
     DigestGet, DigestHide, DigestHideParams, DigestItem, DigestOrder, DigestParams, EventFilter, EventList, GcParams,
-    GcRun, ImportList, ImportListParams, ImportMove, PresenceClient, PresenceTouch, ReportGet, ReportParams,
-    RunArchive, RunArchiveParams, RunFilter, RunGet, RunHide, RunHideParams, RunId, RunIds, RunInput, RunInputParams,
-    RunList, RunMark, RunMarkParams, RunPin, RunPinParams, RunRename, RunRenameParams, RunResume, RunResumeParams,
-    RunSeen, RunSpec, RunStart, RunStop, RunStopParams, SETUP_STEPS, SetupGet, SummaryGet, SummaryMake, SummaryParams,
-    WorkspaceList, WorkspaceRemove, WorkspaceRemoveParams, WorkspaceRemoved, WorkspaceRename, WorkspaceRenameParams,
-    WorkspaceUp, WorkspaceUpParams,
+    GcRun, ImportList, ImportListParams, ImportMove, LeadDismiss, LeadDismissParams, PresenceClient, PresenceTouch,
+    ReportGet, ReportParams, RunArchive, RunArchiveParams, RunFilter, RunGet, RunHide, RunHideParams, RunId, RunIds,
+    RunInput, RunInputParams, RunList, RunMark, RunMarkParams, RunPin, RunPinParams, RunRename, RunRenameParams,
+    RunResume, RunResumeParams, RunSeen, RunSpec, RunStart, RunStop, RunStopParams, SETUP_STEPS, SetupGet, SourceTag,
+    SummaryGet, SummaryMake, SummaryParams, TagClear, TagClearParams, TagSet, WorkspaceList, WorkspaceRemove,
+    WorkspaceRemoveParams, WorkspaceRemoved, WorkspaceRename, WorkspaceRenameParams, WorkspaceUp, WorkspaceUpParams,
 };
 use rl_proto::types::{Cause, Event as LedgerEvent, Mark, Run, RunKind, RunState, Summary, SummaryTarget};
 use rows::{Names, Row, fit};
@@ -190,6 +190,14 @@ enum Mode {
     /// `^x` on a project: taking a whole project down is not a double-press
     /// you can slip on — you type `DELETE` and `enter`, `esc` keeps it.
     Confirm(Box<Confirming>),
+    /// `t` on a report row: the tag to give its source, typed; empty clears it.
+    Tag(Box<Tagging>),
+}
+
+/// A source being tagged from the report: who, and the tag typed so far.
+struct Tagging {
+    source: String,
+    field: line::Field,
 }
 
 /// A project waiting on you to confirm its removal by typing `DELETE`: the
@@ -418,6 +426,13 @@ struct App {
     catch: Option<Digest>,
     /// The report as last fetched, while its view is up.
     report: Option<rl_proto::methods::Report>,
+    /// The report's cursor: an index into its lead rows in drawn order.
+    report_sel: usize,
+    /// The first line of the report on screen, kept so the board scrolls only as far as the
+    /// cursor needs.
+    report_top: std::cell::Cell<usize>,
+    /// The last report fetch failed: said once, not again on every tick.
+    report_failed: bool,
     /// While a frame is drawn, the catch-ups built for it, by the search
     /// each is narrowed by: built once a draw, and let go when it ends.
     drawn: std::cell::RefCell<Option<Vec<(String, crate::catchup::Kept)>>>,
@@ -1242,6 +1257,9 @@ impl App {
             presence_at: None,
             catch: None,
             report: None,
+            report_sel: 0,
+            report_top: std::cell::Cell::new(0),
+            report_failed: false,
             drawn: std::cell::RefCell::default(),
             unseen_from: HashMap::new(),
             removing: None,
@@ -2191,6 +2209,11 @@ impl App {
                 spans.extend(theme::with_caret(c.field.text(), c.field.cursor(), Style::default()));
                 f.render_widget(Paragraph::new(Line::from(spans)), a.line);
             }
+            Mode::Tag(ref t) => {
+                let mut spans = vec![Span::raw("❯ ")];
+                spans.extend(theme::with_caret(t.field.text(), t.field.cursor(), Style::default()));
+                f.render_widget(Paragraph::new(Line::from(spans)), a.line);
+            }
             _ => {}
         }
         let footer = Rect {
@@ -2697,11 +2720,26 @@ impl App {
     fn draw_report(&self, f: &mut Frame, area: Rect) {
         self.list_h.set(area.height);
         *self.hit.borrow_mut() = ListHit::default();
-        let lines = match &self.report {
-            Some(rep) => report::report_lines(rep, area.width as usize, Timestamp::now()),
-            None => vec![Line::from(Span::raw(" loading report…").dim())],
+        let (lines, sel_line) = match &self.report {
+            Some(rep) => report::report_view(rep, area.width as usize, Timestamp::now(), Some(self.report_sel)),
+            None => (vec![Line::from(Span::raw(" loading report…").dim())], None),
         };
-        f.render_widget(Paragraph::new(lines), area);
+        // Scroll only as far as keeps the cursor row in view.
+        let h = area.height as usize;
+        let mut top = self.report_top.get().min(lines.len().saturating_sub(h));
+        if let Some(at) = sel_line {
+            if at < top {
+                top = at;
+            } else if h > 0 && at >= top + h {
+                top = at + 1 - h;
+            }
+            // The lane head and rule above the first row belong with it.
+            if top > 0 && top <= 2 && at < 3 {
+                top = 0;
+            }
+        }
+        self.report_top.set(top);
+        f.render_widget(Paragraph::new(lines).scroll((top as u16, 0)), area);
     }
 
     /// The one row that names a subpage, whatever it is of: `‹ esc` to step
@@ -2965,6 +3003,14 @@ impl App {
                     return m.clone();
                 }
                 return "enter saves · esc cancels".into();
+            }
+            Mode::Tag(t) => {
+                if let Some((m, at)) = &self.flash
+                    && at.elapsed() < FLASH
+                {
+                    return m.clone();
+                }
+                return format!("tag {} · enter saves · empty clears · esc cancels", t.source);
             }
             Mode::Confirm(c) => {
                 if let Some((m, at)) = &self.flash
@@ -4905,6 +4951,131 @@ mod tests {
         assert!(frame.contains("approve the deploy"), "{frame}");
         press(&mut app, KeyCode::Esc, KeyModifiers::NONE).await;
         assert!(app.view == super::View::Work);
+        token.cancel();
+    }
+
+    fn report_lead(source: &str, key: &str, band: rl_proto::lead::Band) -> rl_proto::lead::Lead {
+        rl_proto::lead::Lead {
+            source: source.into(),
+            key: key.into(),
+            band,
+            title: key.into(),
+            summary: None,
+            scope: Some("/p/relay".into()),
+            action: None,
+            status: rl_proto::lead::LeadStatus::Open,
+            at: jiff::Timestamp::now(),
+            expires_at: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn enter_on_a_run_lead_opens_that_run_on_the_list() {
+        let (_tmp, token, mut app, _folder) = panel().await;
+        app.open_report().await;
+        app.report = Some(rl_proto::methods::Report {
+            needs_you: vec![],
+            live: vec![report_lead("shell", "run:run00001", rl_proto::lead::Band::Live)],
+            happened: vec![],
+            tags: vec![],
+        });
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+        assert!(app.view == super::View::Work);
+        assert_eq!(app.sel.as_deref(), Some(RUN));
+        token.cancel();
+    }
+
+    #[tokio::test]
+    async fn the_report_cursor_moves_over_its_rows_and_stays_on_the_board() {
+        let (_tmp, token, mut app, _folder) = panel().await;
+        app.open_report().await;
+        app.report = Some(rl_proto::methods::Report {
+            needs_you: vec![report_lead("claude", "a", rl_proto::lead::Band::NeedsYou)],
+            live: vec![report_lead("claude", "b", rl_proto::lead::Band::Live)],
+            happened: vec![],
+            tags: vec![],
+        });
+        app.report_sel = 0;
+        press(&mut app, KeyCode::Down, KeyModifiers::NONE).await;
+        assert_eq!(app.report_sel, 1);
+        press(&mut app, KeyCode::Down, KeyModifiers::NONE).await;
+        assert_eq!(app.report_sel, 1, "held to the last row");
+        press(&mut app, KeyCode::Up, KeyModifiers::NONE).await;
+        assert_eq!(app.report_sel, 0);
+        assert!(app.view == super::View::Report);
+        token.cancel();
+    }
+
+    #[tokio::test]
+    async fn t_tags_the_rows_source_and_empty_clears_it() {
+        use rl_proto::methods::LeadPostParams;
+        let (_tmp, token, mut app, _folder) = panel().await;
+        app.rpc
+            .call::<rl_proto::methods::LeadPost>(LeadPostParams {
+                source: "claude".into(),
+                key: "k1".into(),
+                band: "live".into(),
+                title: "working".into(),
+                summary: None,
+                scope: None,
+                action: None,
+                ttl_secs: None,
+            })
+            .await
+            .unwrap();
+        app.open_report().await;
+        app.report_sel = 0;
+        press(&mut app, KeyCode::Char('t'), KeyModifiers::NONE).await;
+        assert!(matches!(app.mode, super::Mode::Tag(_)));
+        for c in "dev".chars() {
+            press(&mut app, KeyCode::Char(c), KeyModifiers::NONE).await;
+        }
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+        assert!(matches!(app.mode, super::Mode::Normal));
+        let tags = &app.report.as_ref().unwrap().tags;
+        assert!(tags.iter().any(|t| t.source == "claude" && t.tag == "dev"), "{tags:?}");
+        // Empty clears.
+        app.tag_selected("").await;
+        assert!(app.report.as_ref().unwrap().tags.is_empty());
+        app.tag_selected("ops").await;
+        assert_eq!(app.report.as_ref().unwrap().tags[0].tag, "ops");
+        token.cancel();
+    }
+
+    #[tokio::test]
+    async fn d_dismisses_the_selected_lead_and_the_board_forgets_it() {
+        use rl_proto::methods::LeadPostParams;
+        let (_tmp, token, mut app, _folder) = panel().await;
+        app.rpc
+            .call::<rl_proto::methods::LeadPost>(LeadPostParams {
+                source: "claude".into(),
+                key: "k1".into(),
+                band: "live".into(),
+                title: "working".into(),
+                summary: None,
+                scope: None,
+                action: None,
+                ttl_secs: None,
+            })
+            .await
+            .unwrap();
+        app.open_report().await;
+        let has = |a: &super::App| {
+            a.report
+                .as_ref()
+                .unwrap()
+                .live
+                .iter()
+                .any(|l| l.source == "claude" && l.key == "k1")
+        };
+        assert!(has(&app));
+        let at = super::report::flat_leads(app.report.as_ref().unwrap())
+            .iter()
+            .position(|l| l.key == "k1")
+            .unwrap();
+        app.report_sel = at;
+        press(&mut app, KeyCode::Char('d'), KeyModifiers::NONE).await;
+        assert!(!has(&app), "dismissed and fetched again");
         token.cancel();
     }
 

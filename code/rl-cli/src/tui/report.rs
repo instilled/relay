@@ -101,10 +101,31 @@ const SOURCE_W: usize = 12;
 /// The report as lines for a body `width` columns wide: per lane a header with its
 /// tally, a dim rule, then a row per lead. Rendering only; `lanes()` did the grouping.
 pub fn report_lines(report: &Report, width: usize, now: Timestamp) -> Vec<Line<'static>> {
+    report_view(report, width, now, None).0
+}
+
+/// The lead rows in the order they are drawn, across lanes: what the cursor walks.
+pub fn flat_leads(report: &Report) -> Vec<&Lead> {
+    lanes(report)
+        .into_iter()
+        .flat_map(|l| l.rows.into_iter().map(|r| r.lead))
+        .collect()
+}
+
+/// `report_lines`, with row number `sel` (in `flat_leads` order) highlighted; and the line it
+/// landed on, so the caller can scroll to it.
+pub fn report_view(
+    report: &Report,
+    width: usize,
+    now: Timestamp,
+    sel: Option<usize>,
+) -> (Vec<Line<'static>>, Option<usize>) {
     let lanes = lanes(report);
     if lanes.is_empty() {
-        return vec![Line::from(Span::raw(" nothing to report").dim())];
+        return (vec![Line::from(Span::raw(" nothing to report").dim())], None);
     }
+    let mut at = 0usize;
+    let mut sel_line = None;
     // Columns right of the lead, added in the order they matter; the lead keeps its floor.
     let avail = width.saturating_sub(3);
     let mut used = 0;
@@ -115,8 +136,8 @@ pub fn report_lines(report: &Report, width: usize, now: Timestamp) -> Vec<Line<'
         }
         fits
     };
-    let show_source = take(SOURCE_W);
     let show_project = take(PROJECT_W);
+    let show_source = take(SOURCE_W);
     let show_when = take(WHEN_W);
     let lead_w = avail.saturating_sub(used);
     let mut out = Vec::new();
@@ -158,9 +179,6 @@ pub fn report_lines(report: &Report, width: usize, now: Timestamp) -> Vec<Line<'
                 Span::styled(fit(&text, lead_w), body),
             ];
             let dim = |t: String| Span::styled(format!("  {t}"), theme::dim());
-            if show_source {
-                spans.push(dim(fit(&l.source, SOURCE_W)));
-            }
             if show_project {
                 let base = l
                     .scope
@@ -170,13 +188,22 @@ pub fn report_lines(report: &Report, width: usize, now: Timestamp) -> Vec<Line<'
                     .unwrap_or_default();
                 spans.push(dim(fit(&base, PROJECT_W)));
             }
+            if show_source {
+                spans.push(dim(fit(&l.source, SOURCE_W)));
+            }
             if show_when {
                 spans.push(dim(format!("{:>w$}", fmt_clock(l.at, now), w = WHEN_W)));
             }
-            out.push(Line::from(spans));
+            let mut line = Line::from(spans);
+            if sel == Some(at) {
+                line = line.style(theme::selected());
+                sel_line = Some(out.len());
+            }
+            at += 1;
+            out.push(line);
         }
     }
-    out
+    (out, sel_line)
 }
 
 #[cfg(test)]
@@ -243,6 +270,18 @@ mod tests {
         assert!(ls[2].contains('⚠') && ls[2].contains('…'), "{ls:?}");
         assert!(ls.iter().all(|l| l.chars().count() <= 80), "{ls:?}");
         assert!(ls[2].contains("claude") && ls[2].contains("relay"), "{ls:?}");
+        // project before co-worker, as in the mock
+        assert!(ls[2].find("relay") < ls[2].find("claude"), "{ls:?}");
+    }
+
+    #[test]
+    fn report_view_marks_the_selected_row_and_says_which_line() {
+        let r = sample();
+        let (lines, at) = report_view(&r, 80, ts(1_700_000_100), Some(1));
+        assert_eq!(at, Some(3), "second lead row, past a head and a rule");
+        assert_eq!(lines[3].style, theme::selected());
+        assert_ne!(lines[2].style, theme::selected());
+        assert_eq!(flat_leads(&r).len(), 2);
     }
 
     #[test]
