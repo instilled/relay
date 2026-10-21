@@ -535,11 +535,10 @@ pub fn register(r: &mut Router<Daemon>) {
     });
 
     r.register::<LeadPost, _, _>(|d, p| async move {
-        if p.source.is_empty() || p.source == crate::report::BUILTIN_SOURCE {
-            return Err(RpcError::invalid_params(format!(
-                "source {:?} is reserved or empty; choose your own source name",
-                crate::report::BUILTIN_SOURCE
-            )));
+        if p.source.is_empty() || p.source == crate::report::MY_WORK {
+            return Err(RpcError::invalid_params(
+                "source must be non-empty and not \"my work\" (reserved)".to_string(),
+            ));
         }
         let band: rl_proto::lead::Band = p.band.parse().map_err(RpcError::invalid_params)?;
         let now = jiff::Timestamp::now();
