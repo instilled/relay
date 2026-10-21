@@ -47,6 +47,7 @@ mod palette;
 mod pane;
 mod query;
 mod remove;
+pub mod report;
 mod select;
 mod shell_ops;
 mod summary_ops;
