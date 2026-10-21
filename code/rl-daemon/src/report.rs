@@ -5,7 +5,7 @@ use jiff::Timestamp;
 use rl_proto::decision::{Decision, DecisionStatus};
 use rl_proto::flow::Firing;
 use rl_proto::lead::{Band, Lead, LeadStatus};
-use rl_proto::methods::Report;
+use rl_proto::methods::{Dismissal, Report};
 use rl_proto::types::{Run, RunKind, RunState};
 use std::path::Path;
 
@@ -140,6 +140,17 @@ pub fn assemble(
     report
 }
 
+/// Drops every lead the user dismissed, by (source, key), from all three bands.
+/// Works on built-in leads too, which are never stored.
+pub fn drop_dismissed(report: &mut Report, dismissed: &[Dismissal]) {
+    let hidden: std::collections::HashSet<(&str, &str)> =
+        dismissed.iter().map(|d| (d.source.as_str(), d.key.as_str())).collect();
+    let keep = |l: &Lead| !hidden.contains(&(l.source.as_str(), l.key.as_str()));
+    report.needs_you.retain(keep);
+    report.live.retain(keep);
+    report.happened.retain(keep);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -234,6 +245,45 @@ mod tests {
         l.status = LeadStatus::Dismissed;
         let report = assemble(vec![], vec![l], None, now - std::time::Duration::from_secs(3600), now);
         assert!(report.needs_you.is_empty());
+    }
+
+    #[test]
+    fn drop_dismissed_removes_matching_leads_from_all_bands() {
+        let now = Timestamp::now();
+        let mut builtin = mk(Band::Live, "run:1", now, None);
+        builtin.source = "claude".into();
+        let mut stored = mk(Band::NeedsYou, "triage", now, None);
+        stored.source = "feedback".into();
+        let mut happened = mk(Band::Happened, "run:2", now, None);
+        happened.source = "claude".into();
+        let keeper = mk(Band::NeedsYou, "keep", now, None);
+        let mut report = assemble(
+            vec![builtin, happened],
+            vec![stored, keeper],
+            None,
+            now - std::time::Duration::from_secs(3600),
+            now,
+        );
+        let dismissed = |s: &str, k: &str| Dismissal {
+            source: s.into(),
+            key: k.into(),
+        };
+        drop_dismissed(
+            &mut report,
+            &[
+                dismissed("claude", "run:1"),
+                dismissed("feedback", "triage"),
+                dismissed("claude", "run:2"),
+            ],
+        );
+        let all: Vec<_> = report
+            .needs_you
+            .iter()
+            .chain(&report.live)
+            .chain(&report.happened)
+            .map(|l| (l.source.as_str(), l.key.as_str()))
+            .collect();
+        assert_eq!(all, vec![("relay", "keep")]);
     }
 
     fn mk(band: Band, key: &str, at: Timestamp, scope: Option<&str>) -> Lead {

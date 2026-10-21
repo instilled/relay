@@ -434,6 +434,8 @@ pub fn register(r: &mut Router<Daemon>) {
                 let tags = rl_ledger::tags::list(c)?;
                 let mut report = crate::report::assemble(builtins, stored, scope.as_deref(), since, now);
                 report.tags = tags;
+                let dismissed = rl_ledger::dismissals::list(c)?;
+                crate::report::drop_dismissed(&mut report, &dismissed);
                 Ok(report)
             })
             .await
@@ -571,8 +573,13 @@ pub fn register(r: &mut Router<Daemon>) {
     });
 
     r.register::<LeadDismiss, _, _>(|d, p| async move {
+        let now = jiff::Timestamp::now();
         d.ledger
-            .call(move |c| rl_ledger::leads::dismiss(c, &p.source, &p.key))
+            .call(move |c| {
+                // Stored-lead status, plus the overlay that also covers built-ins.
+                rl_ledger::leads::dismiss(c, &p.source, &p.key)?;
+                rl_ledger::dismissals::add(c, &p.source, &p.key, now)
+            })
             .await
             .map_err(RpcError::internal)?;
         Ok(())

@@ -57,6 +57,7 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         "0027_source_tags",
         include_str!("../migrations/0027_source_tags.sql"),
     ),
+    (28, "0028_dismissals", include_str!("../migrations/0028_dismissals.sql")),
 ];
 
 pub fn run(conn: &mut Connection) -> Result<()> {
@@ -110,6 +111,7 @@ mod tests {
             tables,
             [
                 "decisions",
+                "dismissals",
                 "events",
                 "firings",
                 "flows",

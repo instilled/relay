@@ -699,6 +699,14 @@ pub struct SourceTag {
     pub tag: String,
 }
 
+/// A lead the user dismissed from the report, by identity. Hides built-in
+/// (computed) leads as well as stored ones.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Dismissal {
+    pub source: String,
+    pub key: String,
+}
+
 /// A project's rows in the order you put them, first on top — or, under
 /// `Order::PROJECTS`, the projects themselves.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -7,6 +7,7 @@
 //! over `&Connection` in their own modules so they unit-test without the thread.
 
 pub mod decisions;
+pub mod dismissals;
 pub mod events;
 pub mod firings;
 pub mod flows;
