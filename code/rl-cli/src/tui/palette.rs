@@ -21,6 +21,7 @@ pub enum Cmd {
     Sort,
     Pane,
     Events,
+    Report,
     Reload,
     Flow,
     Edit,
@@ -145,6 +146,13 @@ pub const ALL: &[Command] = &[
         words: &[],
         what: "every event, newest first, and what each set off; enter goes to its run or its flow",
         cmd: Cmd::Events,
+    },
+    Command {
+        name: "report",
+        args: "",
+        words: &[],
+        what: "the work and teams board: what needs you, what is live, what finished, by lane",
+        cmd: Cmd::Report,
     },
     Command {
         name: "reload",
@@ -400,8 +408,8 @@ mod tests {
     fn a_prefix_comes_before_a_name_it_only_sits_inside() {
         // `ma` opens `mark` and sits inside `summary`.
         assert_eq!(names("ma"), vec!["mark", "summary"]);
-        // `re` opens these three, alphabetically.
-        assert_eq!(names("re"), vec!["reload", "rename", "resume"]);
+        // `re` opens these four, alphabetically.
+        assert_eq!(names("re"), vec!["reload", "rename", "report", "resume"]);
     }
 
     #[test]

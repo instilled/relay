@@ -33,6 +33,8 @@ pub enum Place {
     Events,
     /// What happened while you were away.
     CatchUp,
+    /// `/report`.
+    Report,
     /// A name being changed where it stands in the list.
     Rename,
     /// A flow's pane walked: its steps, then its last firings.
@@ -145,6 +147,7 @@ fn place_keys(at: Place) -> Vec<Key> {
             cmd(Cmd::Pane, "details"),
             key("esc", "back"),
         ],
+        Place::Report => vec![key("esc", "the list")],
         Place::CatchUp => vec![
             key("↑↓", "move"),
             key("enter", "go to it"),

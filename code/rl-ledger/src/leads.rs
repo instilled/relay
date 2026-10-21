@@ -19,7 +19,8 @@ pub fn post(conn: &Connection, l: &Lead) -> Result<()> {
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9, ?10)
          ON CONFLICT(source, key) DO UPDATE SET
             band = excluded.band, title = excluded.title, summary = excluded.summary,
-            scope = excluded.scope, action = excluded.action, status = excluded.status,
+            scope = excluded.scope, action = excluded.action,
+            status = CASE WHEN leads.status = 'dismissed' THEN 'dismissed' ELSE excluded.status END,
             updated_at = excluded.updated_at, expires_at = excluded.expires_at",
         params![
             l.source,
@@ -33,6 +34,15 @@ pub fn post(conn: &Connection, l: &Lead) -> Result<()> {
             to_millis(l.at),
             l.expires_at.map(to_millis),
         ],
+    )?;
+    Ok(())
+}
+
+/// Hide a lead from the report. Missing is not an error.
+pub fn dismiss(conn: &Connection, source: &str, key: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE leads SET status = 'dismissed' WHERE source = ?1 AND key = ?2",
+        params![source, key],
     )?;
     Ok(())
 }
@@ -153,6 +163,22 @@ mod tests {
         assert_eq!(out.len(), 1, "same (source,key) is one lead, not two");
         assert_eq!(out[0].band, Band::NeedsYou);
         assert_eq!(out[0].title, "review requested on #412");
+    }
+
+    #[test]
+    fn post_does_not_resurrect_a_dismissed_lead() {
+        let led = Ledger::open_in_memory().unwrap();
+        let now = Timestamp::now();
+        let l = lead("feedback", "triage", Band::NeedsYou, now);
+        led.call_blocking({
+            let l = l.clone();
+            move |c| post(c, &l)
+        })
+        .unwrap();
+        led.call_blocking(|c| dismiss(c, "feedback", "triage")).unwrap();
+        led.call_blocking(move |c| post(c, &l)).unwrap(); // source re-emits
+        let got = led.call_blocking(move |c| list(c, now)).unwrap();
+        assert_eq!(got[0].status, LeadStatus::Dismissed, "re-emit must not un-dismiss");
     }
 
     #[test]

@@ -5,12 +5,22 @@ use jiff::Timestamp;
 use rl_proto::decision::{Decision, DecisionStatus};
 use rl_proto::flow::Firing;
 use rl_proto::lead::{Band, Lead, LeadStatus};
-use rl_proto::methods::Report;
-use rl_proto::types::{Run, RunState};
+use rl_proto::methods::{Dismissal, Report};
+use rl_proto::types::{Run, RunKind, RunState};
 use std::path::Path;
 
-/// The source every built-in lead carries. Reserved — user leads may not use it.
-pub const BUILTIN_SOURCE: &str = "relay";
+/// Built-in leads that belong to no co-worker sit here until tagged.
+pub const MY_WORK: &str = "my work";
+
+/// The co-worker a run lead belongs to: its detected CLI, else its kind.
+fn run_source(r: &Run) -> String {
+    r.cli.clone().unwrap_or_else(|| match r.kind {
+        RunKind::Shell => "shell".into(),
+        RunKind::Command => "command".into(),
+        RunKind::Plugin => "plugin".into(),
+        RunKind::Agent => "agent".into(),
+    })
+}
 
 /// How long a *failed* run stays in needs-you before it ages out of the
 /// report. A failure already happened — it is not something you can still act
@@ -26,7 +36,7 @@ pub fn project_builtins(decisions: &[Decision], runs: &[Run], firings: &[Firing]
 
     for d in decisions.iter().filter(|d| d.status == DecisionStatus::Open) {
         out.push(Lead {
-            source: BUILTIN_SOURCE.into(),
+            source: MY_WORK.into(),
             key: format!("decision:{}", d.id),
             band: Band::NeedsYou,
             title: d.title.clone(),
@@ -60,7 +70,7 @@ pub fn project_builtins(decisions: &[Decision], runs: &[Run], firings: &[Firing]
             continue;
         }
         out.push(Lead {
-            source: BUILTIN_SOURCE.into(),
+            source: run_source(r),
             key: format!("run:{}", r.id),
             band,
             title: r.title.clone(),
@@ -79,7 +89,7 @@ pub fn project_builtins(decisions: &[Decision], runs: &[Run], firings: &[Firing]
             None => (Band::Live, f.started_at),
         };
         out.push(Lead {
-            source: BUILTIN_SOURCE.into(),
+            source: f.flow.clone(),
             key: format!("firing:{}", f.id),
             band,
             title: format!("flow {}", f.flow),
@@ -108,7 +118,7 @@ pub fn assemble(
 ) -> Report {
     let mut report = Report::default();
     for lead in builtins.into_iter().chain(stored) {
-        if lead.expires_at.is_some_and(|e| e <= now) {
+        if lead.expires_at.is_some_and(|e| e <= now) || lead.status == LeadStatus::Dismissed {
             continue;
         }
         if let Some(s) = scope {
@@ -128,6 +138,17 @@ pub fn assemble(
         band.sort_by_key(|l| std::cmp::Reverse(l.at));
     }
     report
+}
+
+/// Drops every lead the user dismissed, by (source, key), from all three bands.
+/// Works on built-in leads too, which are never stored.
+pub fn drop_dismissed(report: &mut Report, dismissed: &[Dismissal]) {
+    let hidden: std::collections::HashSet<(&str, &str)> =
+        dismissed.iter().map(|d| (d.source.as_str(), d.key.as_str())).collect();
+    let keep = |l: &Lead| !hidden.contains(&(l.source.as_str(), l.key.as_str()));
+    report.needs_you.retain(keep);
+    report.live.retain(keep);
+    report.happened.retain(keep);
 }
 
 #[cfg(test)]
@@ -217,6 +238,54 @@ mod tests {
         );
     }
 
+    #[test]
+    fn assemble_drops_dismissed_leads() {
+        let now = Timestamp::now();
+        let mut l = mk(Band::NeedsYou, "triage", now, None);
+        l.status = LeadStatus::Dismissed;
+        let report = assemble(vec![], vec![l], None, now - std::time::Duration::from_secs(3600), now);
+        assert!(report.needs_you.is_empty());
+    }
+
+    #[test]
+    fn drop_dismissed_removes_matching_leads_from_all_bands() {
+        let now = Timestamp::now();
+        let mut builtin = mk(Band::Live, "run:1", now, None);
+        builtin.source = "claude".into();
+        let mut stored = mk(Band::NeedsYou, "triage", now, None);
+        stored.source = "feedback".into();
+        let mut happened = mk(Band::Happened, "run:2", now, None);
+        happened.source = "claude".into();
+        let keeper = mk(Band::NeedsYou, "keep", now, None);
+        let mut report = assemble(
+            vec![builtin, happened],
+            vec![stored, keeper],
+            None,
+            now - std::time::Duration::from_secs(3600),
+            now,
+        );
+        let dismissed = |s: &str, k: &str| Dismissal {
+            source: s.into(),
+            key: k.into(),
+        };
+        drop_dismissed(
+            &mut report,
+            &[
+                dismissed("claude", "run:1"),
+                dismissed("feedback", "triage"),
+                dismissed("claude", "run:2"),
+            ],
+        );
+        let all: Vec<_> = report
+            .needs_you
+            .iter()
+            .chain(&report.live)
+            .chain(&report.happened)
+            .map(|l| (l.source.as_str(), l.key.as_str()))
+            .collect();
+        assert_eq!(all, vec![("relay", "keep")]);
+    }
+
     fn mk(band: Band, key: &str, at: Timestamp, scope: Option<&str>) -> Lead {
         Lead {
             source: "relay".into(),
@@ -296,7 +365,7 @@ mod tests {
         let leads = project_builtins(&[d], &[], &[], Timestamp::now());
         assert_eq!(leads.len(), 1);
         assert_eq!(leads[0].band, Band::NeedsYou);
-        assert_eq!(leads[0].source, "relay");
+        assert_eq!(leads[0].source, MY_WORK);
         assert_eq!(leads[0].key, "decision:d1");
         assert_eq!(leads[0].action.as_deref(), Some("rl decide d1"));
     }
@@ -343,6 +412,36 @@ mod tests {
             project_builtins(&[], &[], &[done], Timestamp::now())[0].band,
             Band::Happened
         );
+    }
+
+    #[test]
+    fn run_lead_source_is_the_cli() {
+        let mut r = test_run("r1", RunState::Working);
+        r.cli = Some("claude".into());
+        let leads = project_builtins(&[], &[r], &[], Timestamp::now());
+        assert_eq!(leads[0].source, "claude");
+    }
+
+    #[test]
+    fn run_without_cli_sources_to_its_kind() {
+        let mut r = test_run("r1", RunState::Working);
+        r.cli = None;
+        r.kind = RunKind::Command;
+        let leads = project_builtins(&[], &[r], &[], Timestamp::now());
+        assert_eq!(leads[0].source, "command");
+        let mut a = test_run("r2", RunState::Working);
+        a.cli = None;
+        assert_eq!(project_builtins(&[], &[a], &[], Timestamp::now())[0].source, "agent");
+        let mut sh = test_shell("r3", RunState::Failed);
+        sh.cli = None;
+        assert_eq!(project_builtins(&[], &[sh], &[], Timestamp::now())[0].source, "shell");
+    }
+
+    #[test]
+    fn firing_lead_source_is_its_flow_name() {
+        let f = test_firing("f1", None);
+        let leads = project_builtins(&[], &[], &[f], Timestamp::now());
+        assert_eq!(leads[0].source, "triage");
     }
 
     fn test_decision(id: &str, title: &str) -> Decision {

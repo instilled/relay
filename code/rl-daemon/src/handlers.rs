@@ -431,7 +431,12 @@ pub fn register(r: &mut Router<Daemon>) {
                 let firings = crate::digest::firings(c)?;
                 let stored = rl_ledger::leads::list(c, now)?;
                 let builtins = crate::report::project_builtins(&decisions, &runs, &firings, now);
-                Ok(crate::report::assemble(builtins, stored, scope.as_deref(), since, now))
+                let tags = rl_ledger::tags::list(c)?;
+                let mut report = crate::report::assemble(builtins, stored, scope.as_deref(), since, now);
+                report.tags = tags;
+                let dismissed = rl_ledger::dismissals::list(c)?;
+                crate::report::drop_dismissed(&mut report, &dismissed);
+                Ok(report)
             })
             .await
             .map_err(RpcError::internal)
@@ -532,11 +537,10 @@ pub fn register(r: &mut Router<Daemon>) {
     });
 
     r.register::<LeadPost, _, _>(|d, p| async move {
-        if p.source.is_empty() || p.source == crate::report::BUILTIN_SOURCE {
-            return Err(RpcError::invalid_params(format!(
-                "source {:?} is reserved or empty; choose your own source name",
-                crate::report::BUILTIN_SOURCE
-            )));
+        if p.source.is_empty() || p.source == crate::report::MY_WORK {
+            return Err(RpcError::invalid_params(
+                "source must be non-empty and not \"my work\" (reserved)".to_string(),
+            ));
         }
         let band: rl_proto::lead::Band = p.band.parse().map_err(RpcError::invalid_params)?;
         let now = jiff::Timestamp::now();
@@ -566,6 +570,36 @@ pub fn register(r: &mut Router<Daemon>) {
             .await
             .map_err(RpcError::internal)?;
         Ok(())
+    });
+
+    r.register::<LeadDismiss, _, _>(|d, p| async move {
+        let now = jiff::Timestamp::now();
+        d.ledger
+            .call(move |c| {
+                // Stored-lead status, plus the overlay that also covers built-ins.
+                rl_ledger::leads::dismiss(c, &p.source, &p.key)?;
+                rl_ledger::dismissals::add(c, &p.source, &p.key, now)
+            })
+            .await
+            .map_err(RpcError::internal)?;
+        Ok(())
+    });
+
+    r.register::<TagSet, _, _>(|d, p| async move {
+        if p.source.is_empty() || p.tag.is_empty() {
+            return Err(RpcError::invalid_params("source and tag must be non-empty".to_string()));
+        }
+        d.ledger
+            .call(move |c| rl_ledger::tags::set(c, &p.source, &p.tag))
+            .await
+            .map_err(RpcError::internal)
+    });
+
+    r.register::<TagClear, _, _>(|d, p| async move {
+        d.ledger
+            .call(move |c| rl_ledger::tags::clear(c, &p.source))
+            .await
+            .map_err(RpcError::internal)
     });
 
     r.register::<EventEmit, _, _>(|d, p| async move {

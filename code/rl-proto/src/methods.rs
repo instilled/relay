@@ -193,12 +193,47 @@ impl Method for LeadPost {
     type Result = ();
 }
 
+/// Tag a source (replacing any earlier tag); the report groups leads by it.
+pub struct TagSet;
+impl Method for TagSet {
+    const NAME: &'static str = "tag.set";
+    type Params = SourceTag;
+    type Result = ();
+}
+
+/// Remove a source's tag.
+pub struct TagClear;
+impl Method for TagClear {
+    const NAME: &'static str = "tag.clear";
+    type Params = TagClearParams;
+    type Result = ();
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TagClearParams {
+    pub source: String,
+}
+
 /// Withdraw a lead the caller posted earlier.
 pub struct LeadClear;
 impl Method for LeadClear {
     const NAME: &'static str = "lead.clear";
     type Params = LeadClearParams;
     type Result = ();
+}
+
+/// Hide a lead from the report; a re-post by its source will not bring it back.
+pub struct LeadDismiss;
+impl Method for LeadDismiss {
+    const NAME: &'static str = "lead.dismiss";
+    type Params = LeadDismissParams;
+    type Result = ();
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LeadDismissParams {
+    pub source: String,
+    pub key: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -575,6 +610,9 @@ pub struct Report {
     pub needs_you: Vec<crate::lead::Lead>,
     pub live: Vec<crate::lead::Lead>,
     pub happened: Vec<crate::lead::Lead>,
+    /// The source -> tag overlay the TUI groups leads by.
+    #[serde(default)]
+    pub tags: Vec<SourceTag>,
 }
 
 // ---- digest.* ---------------------------------------------------------------
@@ -651,6 +689,22 @@ impl Method for DigestOrder {
     const NAME: &'static str = "digest.order";
     type Params = Order;
     type Result = Vec<Order>;
+}
+
+/// A lead source tagged with a co-worker or team name. Every lead from the
+/// source inherits the tag.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceTag {
+    pub source: String,
+    pub tag: String,
+}
+
+/// A lead the user dismissed from the report, by identity. Hides built-in
+/// (computed) leads as well as stored ones.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Dismissal {
+    pub source: String,
+    pub key: String,
 }
 
 /// A project's rows in the order you put them, first on top — or, under
