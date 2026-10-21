@@ -30,6 +30,7 @@ use rl_proto::methods::{
 };
 use rl_proto::methods::{LeadClear, LeadClearParams, LeadPost, LeadPostParams};
 use rl_proto::methods::{ReportGet, ReportParams};
+use rl_proto::methods::{SourceTag, TagClear, TagClearParams, TagSet};
 use rl_proto::types::{Cause, Mark, RunKind, RunState, SummaryTarget};
 use serde_json::json;
 use std::path::{Path, PathBuf};
@@ -67,6 +68,8 @@ enum Cmd {
     Run(RunArgs),
     /// Stop a run (SIGTERM, a shell SIGHUP; --force for SIGKILL).
     Stop(StopArgs),
+    /// Tag a lead source with a co-worker or team name (--clear removes it).
+    Tag(TagArgs),
     /// List runs (active by default).
     Ls(LsArgs),
     /// Archive a run: out of the panel and `rl since`, kept in the ledger. Ended runs only.
@@ -327,6 +330,17 @@ struct UpArgs {
     dir: Option<PathBuf>,
 }
 
+#[derive(Args)]
+struct TagArgs {
+    /// The lead source (a co-worker, flow, or `rl lead --source` name).
+    source: String,
+    /// The co-worker/team name to file it under. Omit with --clear.
+    name: Option<String>,
+    /// Remove the tag on this source instead of setting one.
+    #[arg(long)]
+    clear: bool,
+}
+
 #[derive(Subcommand)]
 enum LeadCmd {
     /// Raise or refresh a lead; re-posting the same --source/--key refreshes it.
@@ -583,6 +597,7 @@ async fn main() -> Result<()> {
         Cmd::Up(a) => up(&home, a, cli.json).await,
         Cmd::Workspace { cmd } => workspace(&home, cmd, cli.json).await,
         Cmd::Lead { cmd } => lead(&home, cmd, cli.json).await,
+        Cmd::Tag(a) => tag(&home, a, cli.json).await,
         Cmd::Join(a) => attach(&home, a).await,
         Cmd::Mark(a) => mark(&home, a, cli.json).await,
         Cmd::ShellInit(a) => shell_init(a),
@@ -1224,6 +1239,19 @@ async fn lead(home: &Home, cmd: LeadCmd, json: bool) -> Result<()> {
                 })
                 .await?;
         }
+    }
+    Ok(())
+}
+
+/// `rl tag <source> <name>` / `rl tag --clear <source>`: file a lead source's
+/// leads under a co-worker or team on the report.
+async fn tag(home: &Home, a: TagArgs, json: bool) -> Result<()> {
+    let mut client = daemon::ensure(home, !json).await?;
+    if a.clear {
+        client.call::<TagClear>(TagClearParams { source: a.source }).await?;
+    } else {
+        let tag = a.name.ok_or_else(|| anyhow!("give a name, or pass --clear"))?;
+        client.call::<TagSet>(SourceTag { source: a.source, tag }).await?;
     }
     Ok(())
 }

@@ -21,6 +21,126 @@ impl App {
         self.refresh().await;
     }
 
+    /// `/report`: the board in the list's place; `/report` again or `esc` goes back.
+    pub(super) async fn open_report(&mut self) {
+        if self.view == View::Report {
+            self.go_back();
+        } else {
+            self.open_view(View::Report);
+            self.leave_subpage();
+            self.fetch_report().await;
+        }
+        self.picked.clear();
+        self.events.clear();
+    }
+
+    /// The report as the daemon has it now. When the view opens and on the tick.
+    pub(super) async fn fetch_report(&mut self) {
+        match self.rpc.call::<ReportGet>(ReportParams::default()).await {
+            Ok(r) => {
+                self.report_failed = false;
+                self.report_sel = self.report_sel.min(report::flat_leads(&r).len().saturating_sub(1));
+                self.report = Some(r);
+            }
+            // The last good board stays; the trouble is said once, not every tick.
+            Err(e) => {
+                if !self.report_failed {
+                    self.say(format!("daemon: {e:#}"));
+                }
+                self.report_failed = true;
+            }
+        }
+    }
+
+    /// The lead under the report's cursor.
+    fn report_lead(&self) -> Option<rl_proto::lead::Lead> {
+        let rep = self.report.as_ref()?;
+        report::flat_leads(rep).get(self.report_sel).map(|l| (*l).clone())
+    }
+
+    /// Move the report's cursor by `by` rows, held to the board.
+    pub(super) fn report_step(&mut self, by: isize) {
+        let n = self.report.as_ref().map_or(0, |r| report::flat_leads(r).len());
+        if n > 0 {
+            self.report_sel = (self.report_sel as isize + by).clamp(0, n as isize - 1) as usize;
+        }
+    }
+
+    /// `enter` on a report row: open what it is about. A run opens on the list; a question
+    /// is selected there. Other leads have nothing to open here.
+    pub(super) async fn act_selected(&mut self) {
+        let Some(lead) = self.report_lead() else {
+            return self.say("nothing here to open");
+        };
+        match lead.key.split_once(':') {
+            Some(("run", id)) => self.show_run(id).await,
+            Some(("decision", id)) => {
+                self.back_to_list().await;
+                let key = format!("q:{id}");
+                if self.keys().contains(&key) {
+                    self.select(Some(key));
+                } else {
+                    self.say("that question is not on the list");
+                }
+            }
+            _ => self.say(format!("'{}' has nothing to open", lead.title)),
+        }
+    }
+
+    /// `d` on a report row: dismissed (built-in or stored alike), and the board asked again.
+    pub(super) async fn dismiss_selected(&mut self) {
+        let Some(lead) = self.report_lead() else {
+            return self.say("nothing here to dismiss");
+        };
+        let p = LeadDismissParams {
+            source: lead.source,
+            key: lead.key,
+        };
+        match self.rpc.call::<LeadDismiss>(p).await {
+            Ok(()) => {
+                self.say("dismissed");
+                self.fetch_report().await;
+            }
+            Err(e) => self.say(format!("dismiss: {e:#}")),
+        }
+    }
+
+    /// `t` on a report row: ask for the tag to give the row's source.
+    pub(super) fn tag_prompt(&mut self) {
+        let Some(lead) = self.report_lead() else {
+            return self.say("nothing here to tag");
+        };
+        let was = self
+            .report
+            .as_ref()
+            .and_then(|r| r.tags.iter().find(|t| t.source == lead.source))
+            .map(|t| t.tag.clone())
+            .unwrap_or_default();
+        self.mode = Mode::Tag(Box::new(Tagging {
+            source: lead.source,
+            field: line::Field::selected(was),
+        }));
+    }
+
+    /// Give `source` the tag `name`; an empty name clears it.
+    pub(super) async fn tag_source(&mut self, source: String, name: &str) {
+        let name = name.trim();
+        let done = if name.is_empty() {
+            self.rpc.call::<TagClear>(TagClearParams { source }).await
+        } else {
+            self.rpc
+                .call::<TagSet>(SourceTag {
+                    source,
+                    tag: name.to_string(),
+                })
+                .await
+        };
+        match done {
+            Ok(()) => self.fetch_report().await,
+            Err(e) => self.say(format!("tag: {e:#}")),
+        }
+    }
+
     pub(super) fn event_items(&self) -> Vec<events::Item<'_>> {
         events::build(&self.feed, &self.names, &self.filter)
     }

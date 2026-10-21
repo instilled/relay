@@ -279,6 +279,19 @@ impl App {
                 }
                 return Ok(());
             }
+            // The tag for a report row's source: `enter` saves (empty clears), `esc` lets it go.
+            Mode::Tag(mut t) => {
+                match t.field.key(&k) {
+                    line::Act::Submit => {
+                        // The source captured when the prompt opened: a refresh may have moved
+                        // the cursor to another row since.
+                        self.tag_source(t.source.clone(), t.field.text()).await;
+                    }
+                    line::Act::Cancel => {}
+                    _ => self.mode = Mode::Tag(t),
+                }
+                return Ok(());
+            }
             Mode::Normal => {}
         }
         if (k.code, k.modifiers) == (KeyCode::Char('f'), KeyModifiers::CONTROL) {
@@ -319,6 +332,20 @@ impl App {
                 }
                 KeyCode::Char('h') => {
                     self.toggle_hidden();
+                    return Ok(());
+                }
+                _ => {}
+            }
+        }
+        // On the report, with nothing typed, `t` tags the row's source and `d` dismisses its lead.
+        if self.line.is_empty() && self.view == View::Report && !self.show_pane && k.modifiers.is_empty() {
+            match k.code {
+                KeyCode::Char('t') => {
+                    self.tag_prompt();
+                    return Ok(());
+                }
+                KeyCode::Char('d') => {
+                    self.dismiss_selected().await;
                     return Ok(());
                 }
                 _ => {}
@@ -536,6 +563,22 @@ impl App {
             self.reorder(up).await;
             return Ok(());
         }
+        if self.view == View::Report {
+            let page = self.list_h.get().saturating_sub(2).max(1) as isize;
+            let by = match k.code {
+                KeyCode::Down => Some(1),
+                KeyCode::Up => Some(-1),
+                KeyCode::PageDown => Some(page),
+                KeyCode::PageUp => Some(-page),
+                KeyCode::Home => Some(isize::MIN / 2),
+                KeyCode::End => Some(isize::MAX / 2),
+                _ => None,
+            };
+            if let Some(by) = by {
+                self.report_step(by);
+                return Ok(());
+            }
+        }
         if self.view == View::Events && self.events_step(k.code).await {
             return Ok(());
         }
@@ -576,7 +619,7 @@ impl App {
                     self.settle();
                 } else if self.view == View::Events {
                     self.toggle_events().await;
-                } else if self.view == View::CatchUp {
+                } else if self.view == View::CatchUp || self.view == View::Report {
                     self.back_to_list().await;
                 }
             }
@@ -623,6 +666,10 @@ impl App {
         }
         if self.view == View::CatchUp {
             self.catch_up_enter().await;
+            return Ok(());
+        }
+        if self.view == View::Report {
+            self.act_selected().await;
             return Ok(());
         }
         if self.selected_run().is_some() {
@@ -1031,6 +1078,7 @@ impl App {
             palette::Cmd::Hide => self.hide().await,
             palette::Cmd::Sort => self.sort_project().await,
             palette::Cmd::Events => self.toggle_events().await,
+            palette::Cmd::Report => self.open_report().await,
             palette::Cmd::Shell => self.new_shell(area).await,
             palette::Cmd::Reload => match arg.trim() {
                 "flows" => self.reload_flows().await,
