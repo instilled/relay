@@ -193,6 +193,27 @@ impl Method for LeadPost {
     type Result = ();
 }
 
+/// Tag a source (replacing any earlier tag); the report groups leads by it.
+pub struct TagSet;
+impl Method for TagSet {
+    const NAME: &'static str = "tag.set";
+    type Params = SourceTag;
+    type Result = ();
+}
+
+/// Remove a source's tag.
+pub struct TagClear;
+impl Method for TagClear {
+    const NAME: &'static str = "tag.clear";
+    type Params = TagClearParams;
+    type Result = ();
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TagClearParams {
+    pub source: String,
+}
+
 /// Withdraw a lead the caller posted earlier.
 pub struct LeadClear;
 impl Method for LeadClear {
@@ -575,6 +596,9 @@ pub struct Report {
     pub needs_you: Vec<crate::lead::Lead>,
     pub live: Vec<crate::lead::Lead>,
     pub happened: Vec<crate::lead::Lead>,
+    /// The source -> tag overlay the TUI groups leads by.
+    #[serde(default)]
+    pub tags: Vec<SourceTag>,
 }
 
 // ---- digest.* ---------------------------------------------------------------

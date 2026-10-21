@@ -431,7 +431,10 @@ pub fn register(r: &mut Router<Daemon>) {
                 let firings = crate::digest::firings(c)?;
                 let stored = rl_ledger::leads::list(c, now)?;
                 let builtins = crate::report::project_builtins(&decisions, &runs, &firings, now);
-                Ok(crate::report::assemble(builtins, stored, scope.as_deref(), since, now))
+                let tags = rl_ledger::tags::list(c)?;
+                let mut report = crate::report::assemble(builtins, stored, scope.as_deref(), since, now);
+                report.tags = tags;
+                Ok(report)
             })
             .await
             .map_err(RpcError::internal)
@@ -566,6 +569,23 @@ pub fn register(r: &mut Router<Daemon>) {
             .await
             .map_err(RpcError::internal)?;
         Ok(())
+    });
+
+    r.register::<TagSet, _, _>(|d, p| async move {
+        if p.source.is_empty() || p.tag.is_empty() {
+            return Err(RpcError::invalid_params("source and tag must be non-empty".to_string()));
+        }
+        d.ledger
+            .call(move |c| rl_ledger::tags::set(c, &p.source, &p.tag))
+            .await
+            .map_err(RpcError::internal)
+    });
+
+    r.register::<TagClear, _, _>(|d, p| async move {
+        d.ledger
+            .call(move |c| rl_ledger::tags::clear(c, &p.source))
+            .await
+            .map_err(RpcError::internal)
     });
 
     r.register::<EventEmit, _, _>(|d, p| async move {
