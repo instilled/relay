@@ -122,15 +122,8 @@ impl App {
         }));
     }
 
-    /// Give the selected row's source the tag `name`; an empty name clears it.
-    pub(super) async fn tag_selected(&mut self, name: &str) {
-        let Some(lead) = self.report_lead() else {
-            return self.say("nothing here to tag");
-        };
-        self.tag_source(lead.source, name).await;
-    }
-
-    async fn tag_source(&mut self, source: String, name: &str) {
+    /// Give `source` the tag `name`; an empty name clears it.
+    pub(super) async fn tag_source(&mut self, source: String, name: &str) {
         let name = name.trim();
         let done = if name.is_empty() {
             self.rpc.call::<TagClear>(TagClearParams { source }).await

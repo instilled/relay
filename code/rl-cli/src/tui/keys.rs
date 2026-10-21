@@ -283,8 +283,9 @@ impl App {
             Mode::Tag(mut t) => {
                 match t.field.key(&k) {
                     line::Act::Submit => {
-                        // The prompt is modal, so the cursor is still on the row it opened on.
-                        self.tag_selected(t.field.text()).await;
+                        // The source captured when the prompt opened: a refresh may have moved
+                        // the cursor to another row since.
+                        self.tag_source(t.source.clone(), t.field.text()).await;
                     }
                     line::Act::Cancel => {}
                     _ => self.mode = Mode::Tag(t),

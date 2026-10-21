@@ -5027,6 +5027,8 @@ mod tests {
         app.report_sel = 0;
         press(&mut app, KeyCode::Char('t'), KeyModifiers::NONE).await;
         assert!(matches!(app.mode, super::Mode::Tag(_)));
+        // A refresh while typing may move the cursor off the row; the tag is still the opened one's.
+        app.report_sel = 99;
         for c in "dev".chars() {
             press(&mut app, KeyCode::Char(c), KeyModifiers::NONE).await;
         }
@@ -5035,9 +5037,9 @@ mod tests {
         let tags = &app.report.as_ref().unwrap().tags;
         assert!(tags.iter().any(|t| t.source == "claude" && t.tag == "dev"), "{tags:?}");
         // Empty clears.
-        app.tag_selected("").await;
+        app.tag_source("claude".into(), "").await;
         assert!(app.report.as_ref().unwrap().tags.is_empty());
-        app.tag_selected("ops").await;
+        app.tag_source("claude".into(), "ops").await;
         assert_eq!(app.report.as_ref().unwrap().tags[0].tag, "ops");
         token.cancel();
     }
