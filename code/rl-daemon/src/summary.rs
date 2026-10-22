@@ -47,7 +47,7 @@ use jiff::{SignedDuration, Timestamp};
 use rl_core::display_path;
 use rl_core::time::{fmt_duration, fmt_when};
 use rl_ledger::events::NewEvent;
-use rl_ledger::{events, kept, runs, session_io, summaries};
+use rl_ledger::{Ledger, events, kept, runs, session_io, summaries};
 use rl_proto::methods::{AssistantParams, EventFilter, SummaryParams};
 use rl_proto::types::{Cause, Event, Run, RunState, Summary, SummaryTarget, event_kind};
 use std::fmt::Write as _;
@@ -237,8 +237,13 @@ async fn kept_of(d: &Daemon, t: &SummaryTarget, deep: bool, from: Option<Timesta
 /// The agent's session file for a run: the one a hook named, else found by
 /// its folder and start and remembered.
 pub(crate) async fn locate(d: &Daemon, run: &Run) -> Result<Option<PathBuf>> {
+    locate_in(&d.ledger, run).await
+}
+
+/// [`locate`], for callers that hold the ledger but not the daemon.
+pub(crate) async fn locate_in(ledger: &Ledger, run: &Run) -> Result<Option<PathBuf>> {
     let id = run.id.clone();
-    if let Some(p) = d.ledger.call_read(move |c| summaries::transcript(c, &id)).await? {
+    if let Some(p) = ledger.call_read(move |c| summaries::transcript(c, &id)).await? {
         return Ok(Some(p));
     }
     let (Some(agent), Some(home)) = (Agent::of(run), std::env::var_os("HOME")) else {
@@ -251,7 +256,7 @@ pub(crate) async fn locate(d: &Daemon, run: &Run) -> Result<Option<PathBuf>> {
     };
     if let Some(p) = &found {
         let (id, path) = (run.id.clone(), p.to_string_lossy().into_owned());
-        d.ledger.call(move |c| summaries::set_transcript(c, &id, &path)).await?;
+        ledger.call(move |c| summaries::set_transcript(c, &id, &path)).await?;
     }
     Ok(found)
 }
