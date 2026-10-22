@@ -228,6 +228,7 @@ mod tests {
             status: LeadStatus::Open,
             at,
             expires_at: None,
+            facts: None,
         }
     }
 

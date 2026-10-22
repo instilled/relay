@@ -62,7 +62,7 @@ pub enum LeadStatus {
 }
 
 /// A single thing worth your attention, from one source.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Lead {
     /// Who raised it — a flow name, an `rl lead` source, or `relay` for built-ins.
     pub source: String,
@@ -83,6 +83,9 @@ pub struct Lead {
     pub at: Timestamp,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<Timestamp>,
+    /// A finished run's frozen facts — set only on built-in run leads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub facts: Option<crate::RunFacts>,
 }
 
 #[cfg(test)]
@@ -118,6 +121,7 @@ mod tests {
             status: LeadStatus::Open,
             at: Timestamp::now(),
             expires_at: None,
+            facts: None,
         };
         let s = serde_json::to_string(&l).unwrap();
         let back: Lead = serde_json::from_str(&s).unwrap();

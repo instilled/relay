@@ -4938,6 +4938,7 @@ mod tests {
             status: rl_proto::lead::LeadStatus::Open,
             at: jiff::Timestamp::now(),
             expires_at: None,
+            facts: None,
         };
         app.report = Some(rl_proto::methods::Report {
             needs_you: vec![lead(rl_proto::lead::Band::NeedsYou, "approve the deploy")],
@@ -4966,6 +4967,7 @@ mod tests {
             status: rl_proto::lead::LeadStatus::Open,
             at: jiff::Timestamp::now(),
             expires_at: None,
+            facts: None,
         }
     }
 
