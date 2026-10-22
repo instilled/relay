@@ -88,6 +88,19 @@ pub async fn delta(cwd: &Path, from: &str, to: &str) -> DiffStat {
     stat
 }
 
+/// The one-line subjects of the commits in `from..to`, newest first. Empty
+/// when not a repo, either commit is unknown, or `from == to`.
+pub async fn log(cwd: &Path, from: &str, to: &str) -> Vec<String> {
+    if from == to {
+        return Vec::new();
+    }
+    let range = format!("{from}..{to}");
+    git(cwd, &["log", "--oneline", &range])
+        .await
+        .map(|s| s.lines().map(str::to_string).collect())
+        .unwrap_or_default()
+}
+
 /// Whether `branch` has an upstream that already holds `HEAD`. Reads local
 /// refs only — no fetch — so it is as fresh as the last one. `false` on any failure.
 pub async fn pushed(cwd: &Path, branch: &str) -> bool {

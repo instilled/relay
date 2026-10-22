@@ -878,11 +878,12 @@ impl Supervisor {
                     let summary = said(cmd);
                     events::append(
                         c,
-                        &NewEvent::for_run(&run, now, "shell.command", summary.clone()).with_data(json!({
-                            "command": cmd.text,
-                            "exit": cmd.exit,
-                            "ms": cmd.took.as_millis() as i64,
-                        })),
+                        &NewEvent::for_run(&run, now, rl_proto::types::event_kind::SHELL_COMMAND, summary.clone())
+                            .with_data(json!({
+                                "command": cmd.text,
+                                "exit": cmd.exit,
+                                "ms": cmd.took.as_millis() as i64,
+                            })),
                     )?;
                     newest = Some(summary);
                 }

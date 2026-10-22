@@ -477,6 +477,8 @@ pub mod event_kind {
         OWN.iter().any(|p| kind.starts_with(p))
     }
 
+    /// A command a shell run finished; `data.exit` is its status when known.
+    pub const SHELL_COMMAND: &str = "shell.command";
     pub const RUN_STARTED: &str = "run.started";
     pub const RUN_STATE: &str = "run.state";
     pub const RUN_NEEDS_INPUT: &str = "run.needs_input";
