@@ -116,6 +116,11 @@ pub fn register(r: &mut Router<Daemon>) {
             .await
             .map_err(|e| RpcError::invalid_params(format!("{e:#}")))
     });
+    r.register::<FactsStructure, _, _>(|d, p: FactsStructureParams| async move {
+        crate::facts::structure(&d, &p.run)
+            .await
+            .map_err(|e| RpcError::invalid_params(format!("{e:#}")))
+    });
     r.register::<SummaryGet, _, _>(|d, p: SummaryParams| async move {
         crate::summary::get(&d, &p)
             .await

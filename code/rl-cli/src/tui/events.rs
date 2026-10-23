@@ -50,6 +50,8 @@ pub struct Feed {
     pub questions: HashMap<String, Decision>,
     /// Asked for and not there: not asked for again.
     pub gone: HashSet<String>,
+    /// The facts of runs opened from the report, with their recap split once asked.
+    pub facts: HashMap<String, rl_proto::RunFacts>,
 }
 
 impl Feed {

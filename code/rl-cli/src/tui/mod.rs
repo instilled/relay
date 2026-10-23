@@ -2882,6 +2882,7 @@ impl App {
                 i,
                 &self.events,
                 self.summary_of_row(&Row::Run(i)),
+                self.feed.facts.get(&i.run.id),
                 &self.names,
                 area.width as usize,
                 now,

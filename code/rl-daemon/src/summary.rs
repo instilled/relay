@@ -412,7 +412,7 @@ async fn run_events(d: &Daemon, run: &Run, from: Option<Timestamp>, limit: u32) 
 }
 
 /// Where the assistant runs for a run: its folder, if it is still there.
-fn run_cwd(d: &Daemon, run: &Run) -> PathBuf {
+pub(crate) fn run_cwd(d: &Daemon, run: &Run) -> PathBuf {
     if run.cwd.is_dir() {
         run.cwd.clone()
     } else if run.workspace.is_dir() {

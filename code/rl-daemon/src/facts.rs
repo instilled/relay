@@ -1,13 +1,14 @@
 //! A run's frozen local facts: what it did, read from git, its transcript and
 //! Relay's own events over its window. No assistant is called.
 
-use crate::{git, summary, transcript};
-use anyhow::Result;
+use crate::server::Daemon;
+use crate::{assistant, git, summary, transcript};
+use anyhow::{Result, bail};
 use jiff::Timestamp;
 use rl_ledger::events::{self, NewEvent};
 use rl_ledger::{Ledger, facts as store};
 use rl_proto::RunFacts;
-use rl_proto::methods::EventFilter;
+use rl_proto::methods::{AssistantParams, EventFilter};
 use rl_proto::types::{Event, Run, event_kind};
 use std::time::Duration;
 
@@ -43,6 +44,94 @@ pub async fn collect(ledger: &Ledger, run: &Run, start_head: Option<&str>, end_h
     }
     facts.errors = count_errors(&shell_events(ledger, run).await);
     facts
+}
+
+/// The prompt that splits a recap; its three labels are what `split_structured` reads.
+const STRUCTURE_PROMPT: &str = "Split this recap of an agent's run into three parts. Answer with exactly \
+these three labelled sections, each a few plain lines, and nothing else:\n\
+Worked on:\nOpen questions:\nNext:\n\
+Write `none` under a section with nothing to say. The recap:\n\n";
+
+/// A run's facts with its recap split into worked-on / questions / next, the
+/// only assistant call of the report, made on an explicit drill-in. Stored
+/// facts come back unchanged, and no one is asked, when there are none, when
+/// `assistants.summary` is not set, when there is no recap, or when the split
+/// is already kept. Never called from `collect` or the sweep.
+pub async fn structure(d: &Daemon, run: &str) -> Result<RunFacts> {
+    let id = run.to_string();
+    let Some(mut facts) = d.ledger.call_read(move |c| store::get(c, &id)).await? else {
+        return Ok(RunFacts {
+            run: run.to_string(),
+            ..RunFacts::default()
+        });
+    };
+    let on = d.config.read().unwrap().config.assistants.summary.is_some();
+    let recap = facts.recap.clone().filter(|r| !r.trim().is_empty());
+    let Some(recap) = recap.filter(|_| on && facts.worked_on.is_none()) else {
+        return Ok(facts);
+    };
+    let id = run.to_string();
+    let found = d.ledger.call_read(move |c| rl_ledger::runs::get(c, &id)).await?;
+    let cwd = match &found {
+        Some(r) => summary::run_cwd(d, r),
+        None => d.home.path().to_path_buf(),
+    };
+    let out = assistant::run(
+        d,
+        AssistantParams {
+            job: "summary".into(),
+            prompt: format!("{STRUCTURE_PROMPT}{recap}"),
+            cwd,
+            title: format!("structure: {run}"),
+            timeout: None,
+        },
+    )
+    .await?;
+    if out.timed_out {
+        bail!("{} did not answer in time; its run is {}", out.agent, out.run);
+    }
+    let (worked_on, questions, next) = split_structured(&summary::clean(&out.output));
+    if worked_on.is_none() && questions.is_none() && next.is_none() {
+        bail!("{} gave no sections; its run is {}", out.agent, out.run);
+    }
+    // Something was said, so the split counts as made and is not asked again.
+    facts.worked_on = Some(worked_on.unwrap_or_default());
+    facts.questions = questions;
+    facts.next = next;
+    let kept = facts.clone();
+    d.ledger.call(move |c| store::set(c, &kept)).await?;
+    Ok(facts)
+}
+
+/// Reads an answer with the sections `Worked on:`, `Open questions:`, `Next:`
+/// (any case, optionally bulleted, headed or bold); a section missing or
+/// saying only `none` is `None`.
+pub(crate) fn split_structured(answer: &str) -> (Option<String>, Option<String>, Option<String>) {
+    const HEADS: [(&str, usize); 3] = [("worked on", 0), ("open questions", 1), ("next", 2)];
+    let mut parts: [Vec<&str>; 3] = Default::default();
+    let mut at: Option<usize> = None;
+    for line in answer.lines() {
+        let bare = line.trim().trim_start_matches(['#', '*', '-', ' ']);
+        let lower = bare.to_ascii_lowercase();
+        let hit = HEADS.iter().find_map(|(label, i)| {
+            lower.strip_prefix(label)?;
+            let after = bare[label.len()..].trim_start_matches(['*', ' ']);
+            Some((*i, after.strip_prefix(':')?.trim_start_matches(['*', ' '])))
+        });
+        match (hit, at) {
+            (Some((i, rest)), _) => {
+                at = Some(i);
+                parts[i].push(rest);
+            }
+            (None, Some(i)) => parts[i].push(line),
+            (None, None) => {}
+        }
+    }
+    let [w, q, n] = parts.map(|lines| {
+        let text = lines.join("\n").trim().to_string();
+        (!text.is_empty() && !text.eq_ignore_ascii_case("none")).then_some(text)
+    });
+    (w, q, n)
 }
 
 /// The one-line subjects of the commits a run landed, newest first.
@@ -166,6 +255,29 @@ mod tests {
         assert!(within(t, Some(t)));
         assert!(!within(t + Duration::from_secs(1), Some(t)));
         assert!(within(t + Duration::from_secs(1), None));
+    }
+}
+
+#[cfg(test)]
+mod split_tests {
+    use super::split_structured;
+
+    #[test]
+    fn split_structured_parses_three_sections() {
+        let a = "Worked on:\nFixed the search index.\nAdded a test.\n\nOpen questions:\n- Keep the old flag?\n\nNext:\nShip it.";
+        let (w, q, n) = split_structured(a);
+        assert_eq!(w.as_deref(), Some("Fixed the search index.\nAdded a test."));
+        assert_eq!(q.as_deref(), Some("- Keep the old flag?"));
+        assert_eq!(n.as_deref(), Some("Ship it."));
+    }
+
+    #[test]
+    fn a_missing_or_none_section_is_none_and_labels_may_be_dressed() {
+        let (w, q, n) = split_structured("**Worked on:** the parser\n## Next:\nnone");
+        assert_eq!(w.as_deref(), Some("the parser"));
+        assert_eq!(q, None);
+        assert_eq!(n, None);
+        assert_eq!(split_structured("no labels here"), (None, None, None));
     }
 }
 
