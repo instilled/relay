@@ -14,6 +14,7 @@ use rl_proto::types::Run;
 use serde_json::Value;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 /// The agents whose session files Relay can read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -150,6 +151,57 @@ fn entries(text: &str) -> impl Iterator<Item = (Timestamp, Value)> + '_ {
 
 fn within(at: Timestamp, from: Option<Timestamp>) -> bool {
     from.is_none_or(|f| at >= f)
+}
+
+/// Tokens a session spent, in and out. Tokens only; no dollars.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Usage {
+    pub tokens_in: u64,
+    pub tokens_out: u64,
+}
+
+/// The tokens spent by entries at or after `since` (all of them for `None`).
+/// Claude's are on assistant messages, its cache reads and writes counted as
+/// input; Codex's are on `token_count` events, one call's worth each. An entry
+/// with none counts for nothing.
+pub fn usage(body: &str, since: Option<Timestamp>) -> Usage {
+    let mut sum = Usage::default();
+    let n = |v: &Value, key: &str| v.get(key).and_then(Value::as_u64).unwrap_or(0);
+    for (_, v) in entries(body).filter(|(at, _)| within(*at, since)) {
+        if let Some(u) = v.pointer("/message/usage") {
+            sum.tokens_in +=
+                n(u, "input_tokens") + n(u, "cache_creation_input_tokens") + n(u, "cache_read_input_tokens");
+            sum.tokens_out += n(u, "output_tokens");
+        } else if v.pointer("/payload/type").and_then(Value::as_str) == Some("token_count")
+            && let Some(u) = v.pointer("/payload/info/last_token_usage")
+        {
+            sum.tokens_in += n(u, "input_tokens");
+            sum.tokens_out += n(u, "output_tokens");
+        }
+    }
+    sum
+}
+
+/// Seconds of activity across the entries at or after `since`: the gaps
+/// between consecutive entries, leaving out any longer than `gap` as idle.
+/// `None` when fewer than two entries fall in the window.
+pub fn active_span(body: &str, since: Option<Timestamp>, gap: Duration) -> Option<u64> {
+    let mut times: Vec<Timestamp> = entries(body)
+        .map(|(at, _)| at)
+        .filter(|at| within(*at, since))
+        .collect();
+    if times.len() < 2 {
+        return None;
+    }
+    times.sort();
+    let gap = SignedDuration::try_from(gap).unwrap_or(SignedDuration::MAX);
+    let secs = times
+        .windows(2)
+        .map(|w| w[1].duration_since(w[0]))
+        .filter(|d| *d <= gap)
+        .map(|d| d.as_secs())
+        .sum::<i64>();
+    Some(secs as u64)
 }
 
 /// The agent's own recap.
@@ -608,5 +660,50 @@ not json
             None,
             "a session from before the run is not its own"
         );
+    }
+
+    #[test]
+    fn usage_sums_in_window() {
+        let t = r#"{"type":"assistant","timestamp":"2026-09-17T09:00:00Z","message":{"usage":{"input_tokens":1,"cache_creation_input_tokens":1,"cache_read_input_tokens":1,"output_tokens":1}}}
+{"type":"assistant","timestamp":"2026-09-17T10:00:00Z","message":{"usage":{"input_tokens":10,"cache_creation_input_tokens":20,"cache_read_input_tokens":30,"output_tokens":5}}}
+{"type":"user","timestamp":"2026-09-17T10:01:00Z","message":{"content":"hi"}}
+{"type":"assistant","timestamp":"2026-09-17T10:02:00Z","message":{"usage":{"input_tokens":2,"output_tokens":7}}}
+"#;
+        assert_eq!(
+            usage(t, Some(at("2026-09-17T09:30:00Z"))),
+            Usage {
+                tokens_in: 62,
+                tokens_out: 12
+            }
+        );
+        assert_eq!(usage(t, None).tokens_in, 65);
+        let c = r#"{"timestamp":"2026-09-17T09:00:00Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"output_tokens":9}}}}
+{"timestamp":"2026-09-17T09:01:00Z","type":"event_msg","payload":{"type":"token_count","info":null}}
+"#;
+        assert_eq!(
+            usage(c, None),
+            Usage {
+                tokens_in: 100,
+                tokens_out: 9
+            }
+        );
+    }
+
+    #[test]
+    fn active_span_collapses_idle_gaps() {
+        let t = r#"{"timestamp":"2026-09-17T10:00:00Z"}
+{"timestamp":"2026-09-17T10:00:10Z"}
+{"timestamp":"2026-09-17T12:00:10Z"}
+{"timestamp":"2026-09-17T12:00:15Z"}
+"#;
+        let gap = Duration::from_secs(120);
+        assert_eq!(active_span(t, None, gap), Some(15));
+        assert_eq!(active_span(t, Some(at("2026-09-17T12:00:00Z")), gap), Some(5));
+    }
+
+    #[test]
+    fn active_span_needs_two_points() {
+        let t = "{\"timestamp\":\"2026-09-17T10:00:00Z\"}\n";
+        assert_eq!(active_span(t, None, Duration::from_secs(120)), None);
     }
 }

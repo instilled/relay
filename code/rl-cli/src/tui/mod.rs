@@ -45,6 +45,7 @@ pub(crate) mod outside;
 mod outside_tests;
 mod palette;
 mod pane;
+pub mod prose;
 mod query;
 mod remove;
 pub mod report;
@@ -433,6 +434,8 @@ struct App {
     report_top: std::cell::Cell<usize>,
     /// The last report fetch failed: said once, not again on every tick.
     report_failed: bool,
+    /// The report view shows the prose digest instead of the board (`p` toggles).
+    report_prose: bool,
     /// While a frame is drawn, the catch-ups built for it, by the search
     /// each is narrowed by: built once a draw, and let go when it ends.
     drawn: std::cell::RefCell<Option<Vec<(String, crate::catchup::Kept)>>>,
@@ -1260,6 +1263,7 @@ impl App {
             report_sel: 0,
             report_top: std::cell::Cell::new(0),
             report_failed: false,
+            report_prose: false,
             drawn: std::cell::RefCell::default(),
             unseen_from: HashMap::new(),
             removing: None,
@@ -2720,6 +2724,16 @@ impl App {
     fn draw_report(&self, f: &mut Frame, area: Rect) {
         self.list_h.set(area.height);
         *self.hit.borrow_mut() = ListHit::default();
+        if self.report_prose
+            && let Some(rep) = &self.report
+        {
+            let lines: Vec<Line> = prose::prose(rep, Timestamp::now())
+                .lines()
+                .map(|l| Line::from(format!(" {l}")))
+                .collect();
+            f.render_widget(Paragraph::new(lines).wrap(ratatui::widgets::Wrap { trim: false }), area);
+            return;
+        }
         let (lines, sel_line) = match &self.report {
             Some(rep) => report::report_view(rep, area.width as usize, Timestamp::now(), Some(self.report_sel)),
             None => (vec![Line::from(Span::raw(" loading report…").dim())], None),
@@ -2868,6 +2882,7 @@ impl App {
                 i,
                 &self.events,
                 self.summary_of_row(&Row::Run(i)),
+                self.feed.facts.get(&i.run.id),
                 &self.names,
                 area.width as usize,
                 now,
@@ -4938,6 +4953,7 @@ mod tests {
             status: rl_proto::lead::LeadStatus::Open,
             at: jiff::Timestamp::now(),
             expires_at: None,
+            facts: None,
         };
         app.report = Some(rl_proto::methods::Report {
             needs_you: vec![lead(rl_proto::lead::Band::NeedsYou, "approve the deploy")],
@@ -4954,6 +4970,30 @@ mod tests {
         token.cancel();
     }
 
+    #[tokio::test]
+    async fn report_view_toggles_to_prose() {
+        let (_tmp, token, mut app, _folder) = panel().await;
+        app.open_report().await;
+        let mut lead = report_lead("claude", "a", rl_proto::lead::Band::NeedsYou);
+        lead.title = "approve the deploy".into();
+        app.report = Some(rl_proto::methods::Report {
+            needs_you: vec![lead],
+            live: vec![],
+            happened: vec![],
+            tags: vec![],
+        });
+        let board = draw_text(&mut app);
+        assert!(board.contains("1 needs · 0 live · 0 done"), "{board}");
+        press(&mut app, KeyCode::Char('p'), KeyModifiers::NONE).await;
+        assert!(app.report_prose);
+        let prose = draw_text(&mut app);
+        assert!(prose.contains("approve the deploy"), "{prose}");
+        assert!(!prose.contains("1 needs · 0 live · 0 done"), "{prose}");
+        press(&mut app, KeyCode::Char('p'), KeyModifiers::NONE).await;
+        assert!(!app.report_prose);
+        token.cancel();
+    }
+
     fn report_lead(source: &str, key: &str, band: rl_proto::lead::Band) -> rl_proto::lead::Lead {
         rl_proto::lead::Lead {
             source: source.into(),
@@ -4966,6 +5006,7 @@ mod tests {
             status: rl_proto::lead::LeadStatus::Open,
             at: jiff::Timestamp::now(),
             expires_at: None,
+            facts: None,
         }
     }
 
@@ -5078,6 +5119,45 @@ mod tests {
         app.report_sel = at;
         press(&mut app, KeyCode::Char('d'), KeyModifiers::NONE).await;
         assert!(!has(&app), "dismissed and fetched again");
+        token.cancel();
+    }
+
+    #[tokio::test]
+    async fn prose_mode_ignores_board_dismiss_tag_and_cursor_keys() {
+        use rl_proto::methods::LeadPostParams;
+        let (_tmp, token, mut app, _folder) = panel().await;
+        for key in ["k1", "k2"] {
+            app.rpc
+                .call::<rl_proto::methods::LeadPost>(LeadPostParams {
+                    source: "claude".into(),
+                    key: key.into(),
+                    band: "live".into(),
+                    title: "working".into(),
+                    summary: None,
+                    scope: None,
+                    action: None,
+                    ttl_secs: None,
+                })
+                .await
+                .unwrap();
+        }
+        app.open_report().await;
+        let count = |a: &super::App| super::report::flat_leads(a.report.as_ref().unwrap()).len();
+        let before = count(&app);
+        app.report_sel = 0;
+        press(&mut app, KeyCode::Char('p'), KeyModifiers::NONE).await;
+        assert!(app.report_prose);
+        press(&mut app, KeyCode::Char('d'), KeyModifiers::NONE).await;
+        press(&mut app, KeyCode::Char('t'), KeyModifiers::NONE).await;
+        press(&mut app, KeyCode::Down, KeyModifiers::NONE).await;
+        assert_eq!(count(&app), before, "nothing dismissed");
+        assert!(matches!(app.mode, super::Mode::Normal), "no tag prompt");
+        assert_eq!(app.report_sel, 0, "cursor held");
+        // Back on the board the same keys act.
+        press(&mut app, KeyCode::Char('p'), KeyModifiers::NONE).await;
+        assert!(!app.report_prose);
+        press(&mut app, KeyCode::Char('d'), KeyModifiers::NONE).await;
+        assert_eq!(count(&app), before - 1);
         token.cancel();
     }
 

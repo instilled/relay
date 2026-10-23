@@ -101,6 +101,9 @@ pub struct Live {
     /// The folder the run last said it was in (OSC 7), for the list. Kept in
     /// memory only: a shell says it again at its next prompt.
     cwd: Mutex<Option<PathBuf>>,
+    /// `HEAD` of the run's folder when it started, so the end can tell what it
+    /// committed. Memory only: a run re-attached after a restart has none.
+    start_head: Option<String>,
 }
 
 impl Live {
@@ -235,6 +238,7 @@ impl Supervisor {
         let now = Timestamp::now();
         let id = new_id().context("generating run id")?;
         let place = git::placement(&cwd).await;
+        let start_head = git::head(&cwd).await;
         let workspace = crate::workspace::filed_under(&self.ledger, &cwd, place.toplevel.clone()).await?;
         let title = spec.title.clone().unwrap_or_else(|| default_title(&spec.argv));
 
@@ -356,7 +360,7 @@ impl Supervisor {
             })
             .await?;
         info!(id = %id, pid = hello.pid, kind = %run.kind, cli = run.cli.as_deref().unwrap_or("-"), title = %run.title, "run started");
-        self.follow(run.clone(), hello, session, socket, exit_file);
+        self.follow(run.clone(), hello, session, socket, exit_file, start_head);
         Ok(run)
     }
 
@@ -429,7 +433,7 @@ impl Supervisor {
                         resume_at = hello.replay_from,
                         "re-attached"
                     );
-                    self.follow(run, hello, session, row.socket.clone(), row.exit_file.clone());
+                    self.follow(run, hello, session, row.socket.clone(), row.exit_file.clone(), None);
                     report.reattached += 1;
                 }
                 other => {
@@ -719,7 +723,15 @@ fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
 
 impl Supervisor {
     /// Registers the run as live and starts following its holder.
-    fn follow(self: &Arc<Self>, run: Run, hello: Hello, session: Session, socket: PathBuf, exit_file: PathBuf) {
+    fn follow(
+        self: &Arc<Self>,
+        run: Run,
+        hello: Hello,
+        session: Session,
+        socket: PathBuf,
+        exit_file: PathBuf,
+        start_head: Option<String>,
+    ) {
         let (rd, wr) = session.split();
         let (out_tx, _) = broadcast::channel(OUTPUT_BROADCAST);
         let (notes, _) = broadcast::channel(NOTES_BROADCAST);
@@ -733,6 +745,7 @@ impl Supervisor {
             socket,
             joiner: Mutex::new(None),
             cwd: Mutex::new(None),
+            start_head,
             notes,
         });
         self.live.lock().unwrap().insert(run.id.clone(), live.clone());
@@ -878,11 +891,12 @@ impl Supervisor {
                     let summary = said(cmd);
                     events::append(
                         c,
-                        &NewEvent::for_run(&run, now, "shell.command", summary.clone()).with_data(json!({
-                            "command": cmd.text,
-                            "exit": cmd.exit,
-                            "ms": cmd.took.as_millis() as i64,
-                        })),
+                        &NewEvent::for_run(&run, now, rl_proto::types::event_kind::SHELL_COMMAND, summary.clone())
+                            .with_data(json!({
+                                "command": cmd.text,
+                                "exit": cmd.exit,
+                                "ms": cmd.took.as_millis() as i64,
+                            })),
                     )?;
                     newest = Some(summary);
                 }
@@ -971,6 +985,15 @@ impl Supervisor {
             warn!(error = %e, "recording run end");
         }
         info!(id = %run.id, state = %state, %summary, "run ended");
+        // Freeze what the run did. Reading git and the transcript happens
+        // outside any ledger transaction, and a failure here never un-ends
+        // the run.
+        let mut ended = run.clone();
+        ended.ended_at = Some(ended_at);
+        let start_head = live.and_then(|l| l.start_head.as_deref());
+        if let Err(e) = crate::facts::record(&self.ledger, &ended, start_head).await {
+            warn!(id = %run.id, error = %e, "collecting run facts");
+        }
         // Everything is journaled; the holder can go.
         if let Some(live) = live
             && let Err(e) = live.writer.lock().await.close().await

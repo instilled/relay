@@ -521,6 +521,9 @@ struct ReportArgs {
     /// How far back the `happened` band reaches: a duration (2h), a date or an RFC 3339 instant. Default 24h.
     #[arg(long)]
     since: Option<String>,
+    /// Print the report as a short prose narrative instead of tables.
+    #[arg(long)]
+    prose: bool,
 }
 
 #[derive(Args)]
@@ -1076,6 +1079,10 @@ async fn report(home: &Home, a: ReportArgs, json: bool) -> Result<()> {
         .await?;
     if json {
         println!("{}", serde_json::to_string(&rep)?);
+        return Ok(());
+    }
+    if a.prose {
+        print!("{}", rl_cli::tui::prose::prose(&rep, n));
         return Ok(());
     }
     let mut printed = false;

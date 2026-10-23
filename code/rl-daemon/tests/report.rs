@@ -19,6 +19,7 @@ async fn a_posted_lead_appears_in_the_report_under_its_band() {
         status: LeadStatus::Open,
         at: now,
         expires_at: None,
+        facts: None,
     };
     let posted = lead.clone();
     ledger.call(move |c| rl_ledger::leads::post(c, &posted)).await.unwrap();

@@ -74,6 +74,7 @@ mod tests {
             status: LeadStatus::Open,
             at: now,
             expires_at: Some(now - std::time::Duration::from_secs(1)),
+            facts: None,
         };
         ledger.call(move |c| rl_ledger::leads::post(c, &l)).await.unwrap();
         let token = tokio_util::sync::CancellationToken::new();

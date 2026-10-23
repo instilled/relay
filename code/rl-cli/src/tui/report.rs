@@ -98,6 +98,43 @@ const WHEN_W: usize = 12;
 const PROJECT_W: usize = 14;
 const SOURCE_W: usize = 12;
 
+/// The one fact a run row leads with, by the kind of lead it is: an agent's churn, time and
+/// commits; a shell's health; a flow's firing. Empty until the run's facts are frozen.
+/// The kind comes from the lead's key and source, as the daemon builds them (`firing:` is a
+/// flow, a `shell`-sourced `run:` is a shell run, any other run is an agent).
+/// A flow's decision count is not on the lead, so a flow says only `fired`.
+pub(crate) fn headline(lead: &Lead) -> String {
+    let Some(f) = &lead.facts else {
+        return String::new();
+    };
+    if lead.key.starts_with("firing:") {
+        return "fired".into();
+    }
+    if lead.source == "shell" {
+        return match f.errors {
+            0 => "ok".into(),
+            1 => "1 error".into(),
+            n => format!("{n} errors"),
+        };
+    }
+    let mut parts = Vec::new();
+    if f.added > 0 || f.removed > 0 {
+        parts.push(format!("+{}/−{}", f.added, f.removed));
+    }
+    if let Some(m) = f.active_secs.map(|s| s / 60).filter(|m| *m > 0) {
+        parts.push(format!("{m}m"));
+    }
+    match f.commits {
+        0 => {}
+        1 => parts.push("1 commit".into()),
+        n => parts.push(format!("{n} commits")),
+    }
+    parts.join(" · ")
+}
+
+/// The title never gives up more than this to the headline beside it.
+const TITLE_MIN: usize = 12;
+
 /// The report as lines for a body `width` columns wide: per lane a header with its
 /// tally, a dim rule, then a row per lead. Rendering only; `lanes()` did the grouping.
 pub fn report_lines(report: &Report, width: usize, now: Timestamp) -> Vec<Line<'static>> {
@@ -172,12 +209,17 @@ pub fn report_view(
             } else {
                 theme::name()
             };
-            let mut spans = vec![
-                Span::raw(" "),
-                Span::styled(glyph, gstyle),
-                Span::raw(" "),
-                Span::styled(fit(&text, lead_w), body),
-            ];
+            // The headline shares the lead cell: the title keeps TITLE_MIN, the headline
+            // takes what it needs of the rest (cut with `…`), so the width budget holds.
+            let head = headline(l);
+            let head_w = head.chars().count().min(lead_w.saturating_sub(TITLE_MIN + 2));
+            let mut spans = vec![Span::raw(" "), Span::styled(glyph, gstyle), Span::raw(" ")];
+            if head_w >= 2 {
+                spans.push(Span::styled(fit(&text, lead_w - head_w - 2), body));
+                spans.push(Span::styled(format!("  {}", fit(&head, head_w)), theme::dim()));
+            } else {
+                spans.push(Span::styled(fit(&text, lead_w), body));
+            }
             let dim = |t: String| Span::styled(format!("  {t}"), theme::dim());
             if show_project {
                 let base = l
@@ -228,11 +270,75 @@ mod tests {
             status: LeadStatus::Open,
             at,
             expires_at: None,
+            facts: None,
         }
     }
 
     fn text(l: &Line<'_>) -> String {
         l.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    fn facts(f: impl FnOnce(&mut rl_proto::facts::RunFacts)) -> Option<rl_proto::facts::RunFacts> {
+        let mut x = rl_proto::facts::RunFacts::default();
+        f(&mut x);
+        Some(x)
+    }
+
+    #[test]
+    fn agent_headline_from_facts() {
+        let mut l = mk_lead("claude", "run:r1", Band::Happened, None, ts(1));
+        l.facts = facts(|f| {
+            f.added = 180;
+            f.removed = 40;
+            f.active_secs = Some(840);
+            f.commits = 3;
+        });
+        assert_eq!(headline(&l), "+180/−40 · 14m · 3 commits");
+    }
+
+    #[test]
+    fn agent_headline_omits_zero_clauses() {
+        let mut l = mk_lead("claude", "run:r1", Band::Happened, None, ts(1));
+        l.facts = facts(|f| f.commits = 2);
+        assert_eq!(headline(&l), "2 commits");
+        l.facts = facts(|f| f.active_secs = Some(30));
+        assert_eq!(headline(&l), "");
+    }
+
+    #[test]
+    fn shell_headline_errors() {
+        let mut l = mk_lead("shell", "run:r1", Band::Happened, None, ts(1));
+        l.facts = facts(|f| f.errors = 2);
+        assert_eq!(headline(&l), "2 errors");
+        l.facts = facts(|_| {});
+        assert_eq!(headline(&l), "ok");
+    }
+
+    #[test]
+    fn flow_headline_is_fired() {
+        let mut l = mk_lead("triage", "firing:f1", Band::Happened, None, ts(1));
+        l.facts = facts(|_| {});
+        assert_eq!(headline(&l), "fired");
+    }
+
+    #[test]
+    fn headline_absent_facts_is_empty() {
+        let l = mk_lead("claude", "run:r1", Band::Happened, None, ts(1));
+        assert_eq!(headline(&l), "");
+    }
+
+    #[test]
+    fn headline_shows_on_the_row_within_the_width() {
+        let mut r = sample();
+        r.happened[0].facts = facts(|f| {
+            f.added = 180;
+            f.removed = 40;
+            f.commits = 3;
+        });
+        let ls: Vec<String> = report_lines(&r, 80, ts(1_700_000_100)).iter().map(text).collect();
+        let row = ls.iter().find(|l| l.contains('✓')).unwrap();
+        assert!(row.contains("+180/−40"), "{ls:?}");
+        assert!(ls.iter().all(|l| l.chars().count() <= 80), "{ls:?}");
     }
 
     fn sample() -> Report {

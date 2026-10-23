@@ -133,6 +133,53 @@ fn said(key: &str, s: &Summary, width: usize, now: Timestamp) -> Vec<Line<'stati
     lines
 }
 
+/// A run's frozen facts as the report's drill-in reads them: what it did, what it cost, and
+/// its recap split into worked on / open questions / next (once asked for). A blank line
+/// first; nothing for a run with no facts.
+pub(super) fn facts_section(facts: Option<&rl_proto::RunFacts>, width: usize) -> Vec<Line<'static>> {
+    let Some(f) = facts else { return Vec::new() };
+    let value = width.saturating_sub(VALUE_COL + 1).max(20);
+    let mut lines = vec![Line::raw("")];
+    let mut work = Vec::new();
+    if f.commits > 0 {
+        work.push(format!("{} commit{}", f.commits, if f.commits == 1 { "" } else { "s" }));
+    }
+    if f.files > 0 {
+        work.push(format!("{} files +{}/−{}", f.files, f.added, f.removed));
+    }
+    if f.pushed {
+        work.push("pushed".into());
+    }
+    if !work.is_empty() {
+        lines.push(fact("work", work.join(" · ")));
+    }
+    if !f.top_paths.is_empty() {
+        lines.push(fact("paths", f.top_paths.join(", ")));
+    }
+    let mut cost = Vec::new();
+    if let Some(m) = f.active_secs.map(|s| s / 60).filter(|m| *m > 0) {
+        cost.push(format!("{m}m active"));
+    }
+    if let (Some(i), Some(o)) = (f.tokens_in, f.tokens_out) {
+        cost.push(format!("{i} in / {o} out tokens"));
+    }
+    if f.errors > 0 {
+        cost.push(format!("{} errors", f.errors));
+    }
+    if !cost.is_empty() {
+        lines.push(fact("cost", cost.join(" · ")));
+    }
+    for (key, text) in [("worked", &f.worked_on), ("asks", &f.questions), ("next", &f.next)] {
+        let Some(text) = text.as_deref().filter(|t| !t.is_empty()) else {
+            continue;
+        };
+        for (i, l) in text.lines().flat_map(|l| wrap(l, value)).enumerate() {
+            lines.push(fact(if i == 0 { key } else { "" }, l));
+        }
+    }
+    if lines.len() == 1 { Vec::new() } else { lines }
+}
+
 /// What a flow, a project or everything was said to have done, kept from
 /// the last `/summary` over it; else how to ask. A blank line first.
 pub(super) fn summary_section(summary: Option<&Summary>, width: usize, now: Timestamp) -> Vec<Line<'static>> {
@@ -177,6 +224,7 @@ pub fn run_lines(
     item: &DigestItem,
     events: &[Event],
     summary: Option<&Summary>,
+    facts: Option<&rl_proto::RunFacts>,
     names: &Names,
     width: usize,
     now: Timestamp,
@@ -272,6 +320,7 @@ pub fn run_lines(
             .dim(),
         ));
     }
+    lines.extend(facts_section(facts, width));
     lines.push(Line::raw(""));
     lines.push(Line::from(Span::raw(" lately").dim()));
     if events.is_empty() {
@@ -765,6 +814,28 @@ mod tests {
     }
 
     #[test]
+    fn a_runs_facts_show_the_split_once_it_is_made() {
+        let mut f = rl_proto::RunFacts {
+            commits: 2,
+            active_secs: Some(600),
+            recap: Some("did things".into()),
+            ..Default::default()
+        };
+        let before = text(&facts_section(Some(&f), 80));
+        assert!(
+            before.contains("2 commits") && before.contains("10m active"),
+            "{before}"
+        );
+        assert!(!before.contains("worked"), "{before}");
+        f.worked_on = Some("the index".into());
+        f.questions = Some("keep the flag?".into());
+        f.next = Some("ship".into());
+        let after = text(&facts_section(Some(&f), 80));
+        assert!(after.contains("the index") && after.contains("keep the flag?") && after.contains("ship"));
+        assert!(facts_section(None, 80).is_empty());
+    }
+
+    #[test]
     fn a_run_reads_as_words() {
         let now: Timestamp = "2026-09-10T12:00:00Z".parse().unwrap();
         let t: Timestamp = "2026-09-10T11:00:00Z".parse().unwrap();
@@ -811,7 +882,7 @@ mod tests {
             ],
         };
         let names = Names::new([("/home/f/relay".into(), "relay".to_string())]);
-        let s = text(&run_lines(&item, &[], None, &names, 80, now));
+        let s = text(&run_lines(&item, &[], None, None, &names, 80, now));
         assert!(s.starts_with(" nightly tests\n failed  1h · via"), "{s}");
         assert!(s.contains(" why      flow nightly · tests · started"), "{s}");
         assert!(s.contains(" where    relay\n"), "{s}");
@@ -855,7 +926,7 @@ mod tests {
             summary: "the session holder went without reporting an exit (it closed the connection)".into(),
             ..quiet.clone()
         };
-        let s = text(&run_lines(&item, &[quiet, older, newer], None, &names, 100, now));
+        let s = text(&run_lines(&item, &[quiet, older, newer], None, None, &names, 100, now));
         assert!(
             s.contains(" trouble  the session holder went without reporting an exit"),
             "the latest one, as a fact: {s}"
@@ -879,9 +950,9 @@ mod tests {
             calls: 0,
             runs: 1,
         };
-        let s = text(&run_lines(&item, &[], Some(&summary), &names, 80, now));
+        let s = text(&run_lines(&item, &[], Some(&summary), None, &names, 80, now));
         // Narrow, the recap wraps under its own column.
-        let narrow = text(&run_lines(&item, &[], Some(&summary), &names, 40, now));
+        let narrow = text(&run_lines(&item, &[], Some(&summary), None, &names, 40, now));
         assert!(
             narrow.contains("\n          The parser test failed on an\n          empty file.\n"),
             "{narrow}"
