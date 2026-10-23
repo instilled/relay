@@ -434,6 +434,8 @@ struct App {
     report_top: std::cell::Cell<usize>,
     /// The last report fetch failed: said once, not again on every tick.
     report_failed: bool,
+    /// The report view shows the prose digest instead of the board (`p` toggles).
+    report_prose: bool,
     /// While a frame is drawn, the catch-ups built for it, by the search
     /// each is narrowed by: built once a draw, and let go when it ends.
     drawn: std::cell::RefCell<Option<Vec<(String, crate::catchup::Kept)>>>,
@@ -1261,6 +1263,7 @@ impl App {
             report_sel: 0,
             report_top: std::cell::Cell::new(0),
             report_failed: false,
+            report_prose: false,
             drawn: std::cell::RefCell::default(),
             unseen_from: HashMap::new(),
             removing: None,
@@ -2721,6 +2724,16 @@ impl App {
     fn draw_report(&self, f: &mut Frame, area: Rect) {
         self.list_h.set(area.height);
         *self.hit.borrow_mut() = ListHit::default();
+        if self.report_prose
+            && let Some(rep) = &self.report
+        {
+            let lines: Vec<Line> = prose::prose(rep, Timestamp::now())
+                .lines()
+                .map(|l| Line::from(format!(" {l}")))
+                .collect();
+            f.render_widget(Paragraph::new(lines).wrap(ratatui::widgets::Wrap { trim: false }), area);
+            return;
+        }
         let (lines, sel_line) = match &self.report {
             Some(rep) => report::report_view(rep, area.width as usize, Timestamp::now(), Some(self.report_sel)),
             None => (vec![Line::from(Span::raw(" loading report…").dim())], None),
@@ -4953,6 +4966,30 @@ mod tests {
         assert!(frame.contains("approve the deploy"), "{frame}");
         press(&mut app, KeyCode::Esc, KeyModifiers::NONE).await;
         assert!(app.view == super::View::Work);
+        token.cancel();
+    }
+
+    #[tokio::test]
+    async fn report_view_toggles_to_prose() {
+        let (_tmp, token, mut app, _folder) = panel().await;
+        app.open_report().await;
+        let mut lead = report_lead("claude", "a", rl_proto::lead::Band::NeedsYou);
+        lead.title = "approve the deploy".into();
+        app.report = Some(rl_proto::methods::Report {
+            needs_you: vec![lead],
+            live: vec![],
+            happened: vec![],
+            tags: vec![],
+        });
+        let board = draw_text(&mut app);
+        assert!(board.contains("1 needs · 0 live · 0 done"), "{board}");
+        press(&mut app, KeyCode::Char('p'), KeyModifiers::NONE).await;
+        assert!(app.report_prose);
+        let prose = draw_text(&mut app);
+        assert!(prose.contains("approve the deploy"), "{prose}");
+        assert!(!prose.contains("1 needs · 0 live · 0 done"), "{prose}");
+        press(&mut app, KeyCode::Char('p'), KeyModifiers::NONE).await;
+        assert!(!app.report_prose);
         token.cancel();
     }
 

@@ -337,9 +337,13 @@ impl App {
                 _ => {}
             }
         }
-        // On the report, with nothing typed, `t` tags the row's source and `d` dismisses its lead.
+        // On the report, with nothing typed, `t` tags the row's source, `d` dismisses its lead and `p` flips board/prose.
         if self.line.is_empty() && self.view == View::Report && !self.show_pane && k.modifiers.is_empty() {
             match k.code {
+                KeyCode::Char('p') => {
+                    self.report_prose = !self.report_prose;
+                    return Ok(());
+                }
                 KeyCode::Char('t') => {
                     self.tag_prompt();
                     return Ok(());
