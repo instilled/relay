@@ -5123,6 +5123,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn prose_mode_ignores_board_dismiss_tag_and_cursor_keys() {
+        use rl_proto::methods::LeadPostParams;
+        let (_tmp, token, mut app, _folder) = panel().await;
+        for key in ["k1", "k2"] {
+            app.rpc
+                .call::<rl_proto::methods::LeadPost>(LeadPostParams {
+                    source: "claude".into(),
+                    key: key.into(),
+                    band: "live".into(),
+                    title: "working".into(),
+                    summary: None,
+                    scope: None,
+                    action: None,
+                    ttl_secs: None,
+                })
+                .await
+                .unwrap();
+        }
+        app.open_report().await;
+        let count = |a: &super::App| super::report::flat_leads(a.report.as_ref().unwrap()).len();
+        let before = count(&app);
+        app.report_sel = 0;
+        press(&mut app, KeyCode::Char('p'), KeyModifiers::NONE).await;
+        assert!(app.report_prose);
+        press(&mut app, KeyCode::Char('d'), KeyModifiers::NONE).await;
+        press(&mut app, KeyCode::Char('t'), KeyModifiers::NONE).await;
+        press(&mut app, KeyCode::Down, KeyModifiers::NONE).await;
+        assert_eq!(count(&app), before, "nothing dismissed");
+        assert!(matches!(app.mode, super::Mode::Normal), "no tag prompt");
+        assert_eq!(app.report_sel, 0, "cursor held");
+        // Back on the board the same keys act.
+        press(&mut app, KeyCode::Char('p'), KeyModifiers::NONE).await;
+        assert!(!app.report_prose);
+        press(&mut app, KeyCode::Char('d'), KeyModifiers::NONE).await;
+        assert_eq!(count(&app), before - 1);
+        token.cancel();
+    }
+
+    #[tokio::test]
     async fn the_catch_up_shows_and_esc_goes_to_the_list() {
         use jiff::{SignedDuration, Timestamp};
         let (_tmp, token, mut app, _folder) = panel().await;
