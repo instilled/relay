@@ -103,7 +103,7 @@ const SOURCE_W: usize = 12;
 /// The kind comes from the lead's key and source, as the daemon builds them (`firing:` is a
 /// flow, a `shell`-sourced `run:` is a shell run, any other run is an agent).
 /// A flow's decision count is not on the lead, so a flow says only `fired`.
-fn headline(lead: &Lead) -> String {
+pub(crate) fn headline(lead: &Lead) -> String {
     let Some(f) = &lead.facts else {
         return String::new();
     };

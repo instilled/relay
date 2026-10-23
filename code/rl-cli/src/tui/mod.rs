@@ -45,6 +45,7 @@ pub(crate) mod outside;
 mod outside_tests;
 mod palette;
 mod pane;
+pub mod prose;
 mod query;
 mod remove;
 pub mod report;
