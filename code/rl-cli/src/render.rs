@@ -126,6 +126,7 @@ mod tests {
             status: LeadStatus::Open,
             at: now,
             expires_at: None,
+            facts: None,
         }];
         let rows = lead_rows(&leads, now);
         assert_eq!(rows.len(), 1);

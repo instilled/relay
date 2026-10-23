@@ -337,9 +337,15 @@ impl App {
                 _ => {}
             }
         }
-        // On the report, with nothing typed, `t` tags the row's source and `d` dismisses its lead.
+        // On the report, with nothing typed, `t` tags the row's source, `d` dismisses its lead and `p` flips board/prose.
         if self.line.is_empty() && self.view == View::Report && !self.show_pane && k.modifiers.is_empty() {
             match k.code {
+                KeyCode::Char('p') => {
+                    self.report_prose = !self.report_prose;
+                    return Ok(());
+                }
+                // The board's rows are not on screen in prose: `t`, `d` and the cursor leave them be.
+                KeyCode::Char('t' | 'd') if self.report_prose => return Ok(()),
                 KeyCode::Char('t') => {
                     self.tag_prompt();
                     return Ok(());
@@ -563,7 +569,7 @@ impl App {
             self.reorder(up).await;
             return Ok(());
         }
-        if self.view == View::Report {
+        if self.view == View::Report && !self.report_prose {
             let page = self.list_h.get().saturating_sub(2).max(1) as isize;
             let by = match k.code {
                 KeyCode::Down => Some(1),
@@ -669,7 +675,9 @@ impl App {
             return Ok(());
         }
         if self.view == View::Report {
-            self.act_selected().await;
+            if !self.report_prose {
+                self.act_selected().await;
+            }
             return Ok(());
         }
         if self.selected_run().is_some() {

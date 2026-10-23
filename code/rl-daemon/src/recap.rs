@@ -16,7 +16,8 @@ use crate::summary;
 use crate::transcript::{self, Agent};
 use anyhow::Result;
 use jiff::{SignedDuration, Timestamp};
-use rl_ledger::{runs, summaries};
+use rl_ledger::{facts, runs, summaries};
+use rl_proto::RunFacts;
 use rl_proto::types::{Cause, Run, Summary};
 use std::sync::Arc;
 use std::time::Duration;
@@ -86,13 +87,30 @@ pub async fn pick_up(d: &Daemon, run: &Run) -> Result<bool> {
     d.ledger
         .call(move |c| {
             let kept = match &made {
-                Some(s) if !s.text.is_empty() => summaries::put_newer(c, s)?,
+                Some(s) if !s.text.is_empty() => {
+                    let kept = summaries::put_newer(c, s)?;
+                    if kept {
+                        let mut f = facts::get(c, &s.run)?.unwrap_or_else(|| RunFacts {
+                            run: s.run.clone(),
+                            ..Default::default()
+                        });
+                        merge_recap(&mut f, &s.text);
+                        f.at = Timestamp::now();
+                        facts::set(c, &f)?;
+                    }
+                    kept
+                }
                 _ => false,
             };
             summaries::set_read_to(c, &id, &path, to)?;
             Ok(kept)
         })
         .await
+}
+
+/// Folds a kept recap into a run's facts, leaving every hard fact as it is.
+pub(crate) fn merge_recap(facts: &mut RunFacts, recap: &str) {
+    facts.recap = Some(recap.to_string());
 }
 
 /// Until shutdown: every few seconds, the runs whose recap may have moved on,
@@ -114,5 +132,23 @@ pub async fn sweep(d: Arc<Daemon>) {
             _ = d.shutdown.cancelled() => return,
             _ = tokio::time::sleep(EVERY) => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recap_refresh_keeps_hard_facts() {
+        let mut f = RunFacts {
+            commits: 3,
+            added: 50,
+            ..Default::default()
+        };
+        merge_recap(&mut f, "did the thing");
+        assert_eq!(f.recap.as_deref(), Some("did the thing"));
+        assert_eq!(f.commits, 3);
+        assert_eq!(f.added, 50);
     }
 }

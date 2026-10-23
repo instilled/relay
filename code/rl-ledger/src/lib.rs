@@ -9,6 +9,7 @@
 pub mod decisions;
 pub mod dismissals;
 pub mod events;
+pub mod facts;
 pub mod firings;
 pub mod flows;
 pub mod hidden;
