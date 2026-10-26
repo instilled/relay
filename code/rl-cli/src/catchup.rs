@@ -542,7 +542,13 @@ pub fn auto_top(r: &ConfigReport, since: Timestamp, came_back: bool, now: Timest
             .catch_up
             .after()
             .is_some_and(|after| now.duration_since(since) > after);
-    away && r.config.catch_up.auto_summary() && r.summary.as_ref().is_some_and(|a| a.available && a.source == "config")
+    away && r.config.catch_up.auto_summary() && named_summariser(r)
+}
+
+/// Whether an assistant was named for summaries (`assistants.summary`, as
+/// setup writes it) and is here.
+pub fn named_summariser(r: &ConfigReport) -> bool {
+    r.summary.as_ref().is_some_and(|a| a.available && a.source == "config")
 }
 
 /// The top as the assistant wrote it, a line each, and last who wrote it and

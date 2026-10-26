@@ -5,6 +5,7 @@ pub mod catchup;
 pub mod client;
 pub mod context;
 pub mod daemon;
+pub mod depth;
 pub mod digest;
 pub mod env;
 pub mod flow;
