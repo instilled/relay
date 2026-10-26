@@ -15,30 +15,7 @@ impl Brief {
     /// Reads text with the sections `Worked on:`, `Open questions:`, `Next:`
     /// (any case, optionally bulleted, headed or bold).
     pub fn parse(text: &str) -> Brief {
-        const HEADS: [(&str, usize); 3] = [("worked on", 0), ("open questions", 1), ("next", 2)];
-        let mut parts: [Vec<&str>; 3] = Default::default();
-        let mut at: Option<usize> = None;
-        for line in text.lines() {
-            let bare = line.trim().trim_start_matches(['#', '*', '-', ' ']);
-            let lower = bare.to_ascii_lowercase();
-            let hit = HEADS.iter().find_map(|(label, i)| {
-                lower.strip_prefix(label)?;
-                let after = bare[label.len()..].trim_start_matches(['*', ' ']);
-                Some((*i, after.strip_prefix(':')?.trim_start_matches(['*', ' '])))
-            });
-            match (hit, at) {
-                (Some((i, rest)), _) => {
-                    at = Some(i);
-                    parts[i].push(rest);
-                }
-                (None, Some(i)) => parts[i].push(line),
-                (None, None) => {}
-            }
-        }
-        let [worked_on, questions, next] = parts.map(|lines| {
-            let text = lines.join("\n").trim().to_string();
-            (!text.is_empty() && !text.eq_ignore_ascii_case("none")).then_some(text)
-        });
+        let ([worked_on, questions, next], _) = scan(text);
         Brief {
             worked_on,
             questions,
@@ -46,10 +23,47 @@ impl Brief {
         }
     }
 
+    /// Whether `text` carries any of the three labels, even if every part
+    /// under them says `none`. Plain prose is not labelled.
+    pub fn is_labelled(text: &str) -> bool {
+        scan(text).1
+    }
+
     /// Whether no part has anything in it.
     pub fn is_empty(&self) -> bool {
         self.worked_on.is_none() && self.questions.is_none() && self.next.is_none()
     }
+}
+
+/// The three parts of `text`, and whether any label was seen.
+fn scan(text: &str) -> ([Option<String>; 3], bool) {
+    const HEADS: [(&str, usize); 3] = [("worked on", 0), ("open questions", 1), ("next", 2)];
+    let mut parts: [Vec<&str>; 3] = Default::default();
+    let mut at: Option<usize> = None;
+    let mut labelled = false;
+    for line in text.lines() {
+        let bare = line.trim().trim_start_matches(['#', '*', '-', ' ']);
+        let lower = bare.to_ascii_lowercase();
+        let hit = HEADS.iter().find_map(|(label, i)| {
+            lower.strip_prefix(label)?;
+            let after = bare[label.len()..].trim_start_matches(['*', ' ']);
+            Some((*i, after.strip_prefix(':')?.trim_start_matches(['*', ' '])))
+        });
+        match (hit, at) {
+            (Some((i, rest)), _) => {
+                labelled = true;
+                at = Some(i);
+                parts[i].push(rest);
+            }
+            (None, Some(i)) => parts[i].push(line),
+            (None, None) => {}
+        }
+    }
+    let parts = parts.map(|lines| {
+        let text = lines.join("\n").trim().to_string();
+        (!text.is_empty() && !text.eq_ignore_ascii_case("none")).then_some(text)
+    });
+    (parts, labelled)
 }
 
 #[cfg(test)]
@@ -78,5 +92,14 @@ mod tests {
     fn no_labels_is_empty() {
         assert!(Brief::parse("no labels here").is_empty());
         assert_eq!(Brief::parse("no labels here"), Brief::default());
+    }
+
+    #[test]
+    fn is_labelled_sees_a_label_even_when_every_part_is_none() {
+        assert!(Brief::is_labelled("Worked on: none\nOpen questions: none\nNext: none"));
+        assert!(Brief::is_labelled("## **Next:** ship it"));
+        assert!(!Brief::is_labelled("We did the work. Next: ship it, then rest."));
+        assert!(!Brief::is_labelled("Nothing labelled here"));
+        assert!(!Brief::is_labelled(""));
     }
 }

@@ -34,30 +34,6 @@ pub fn put(conn: &Connection, s: &Summary) -> Result<()> {
     Ok(())
 }
 
-/// Keeps `s` unless the one kept is as new or newer: an agent's recap picked
-/// up as it is written never replaces one asked for since. Whether it was
-/// kept.
-pub fn put_newer(conn: &Connection, s: &Summary) -> Result<bool> {
-    let n = conn.execute(
-        "INSERT INTO summaries (run, agent, by_run, at, text, since, source, reach)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-         ON CONFLICT(run) DO UPDATE SET agent = excluded.agent, by_run = excluded.by_run, at = excluded.at,
-           text = excluded.text, since = excluded.since, source = excluded.source, reach = excluded.reach
-         WHERE summaries.at < excluded.at",
-        params![
-            s.run,
-            s.agent,
-            s.by,
-            to_millis(s.at),
-            s.text,
-            s.since,
-            s.source,
-            s.reach
-        ],
-    )?;
-    Ok(n > 0)
-}
-
 /// The line of each of these runs' recaps, cut for a row: one query per
 /// table for the whole list. A run's written recap if it has one, else its
 /// seed — the agent's own. "Nothing new" is not a recap.
@@ -106,16 +82,7 @@ fn first_line(text: &str) -> Option<String> {
         Some(p) => p,
         None => {
             // Labelled, but every part `none`: no line, not a raw label.
-            let first = text
-                .lines()
-                .map(|l| l.trim().trim_start_matches(['#', '*', '-', ' ']).to_ascii_lowercase());
-            let labelled = first.into_iter().any(|l| {
-                ["worked on", "open questions", "next"].iter().any(|h| {
-                    l.strip_prefix(h)
-                        .is_some_and(|r| r.trim_start_matches(['*', ' ']).starts_with(':'))
-                })
-            });
-            if labelled {
+            if Brief::is_labelled(text) {
                 return None;
             }
             text.to_string()
@@ -321,27 +288,6 @@ mod tests {
             calls: 0,
             runs: 1,
         }
-    }
-
-    #[test]
-    fn a_recap_picked_up_never_replaces_a_newer_one() {
-        let c = ledger();
-        assert!(put_newer(&c, &recap("r1", "2026-09-10T12:05:00Z", "First.")).unwrap());
-        assert!(put_newer(&c, &recap("r1", "2026-09-10T12:10:00Z", "Second.")).unwrap());
-        // One asked for after it stays over an older recap read again.
-        let asked = Summary {
-            agent: "haiku".into(),
-            by: "a1".into(),
-            source: "summarised".into(),
-            ..recap("r1", "2026-09-10T12:20:00Z", "Asked for.")
-        };
-        put(&c, &asked).unwrap();
-        assert!(!put_newer(&c, &recap("r1", "2026-09-10T12:10:00Z", "Second.")).unwrap());
-        assert!(!put_newer(&c, &recap("r1", "2026-09-10T12:20:00Z", "Same moment.")).unwrap());
-        assert_eq!(get(&c, "r1").unwrap().unwrap(), asked);
-        // A recap written after it does.
-        assert!(put_newer(&c, &recap("r1", "2026-09-10T12:30:00Z", "Third.")).unwrap());
-        assert_eq!(get(&c, "r1").unwrap().unwrap().text, "Third.");
     }
 
     #[test]

@@ -74,7 +74,9 @@ impl App {
         };
         match lead.key.split_once(':') {
             Some(("run", id)) => {
-                self.structure_run(id, lead.facts).await;
+                if let Some(facts) = lead.facts {
+                    self.feed.facts.insert(id.to_string(), facts);
+                }
                 self.show_run(id).await;
             }
             Some(("decision", id)) => {
@@ -88,25 +90,6 @@ impl App {
             }
             _ => self.say(format!("'{}' has nothing to open", lead.title)),
         }
-    }
-
-    /// Opening a run from the report: its facts are kept to show in the run's pane, and, if it
-    /// has a recap not yet split, the daemon is asked to split it (it asks an assistant only
-    /// when `assistants.summary` is set, and only once per run). The one call of the report
-    /// that can reach an assistant; it is made here, on the open, never on the board.
-    async fn structure_run(&mut self, id: &str, facts: Option<rl_proto::RunFacts>) {
-        let Some(mut facts) = facts else { return };
-        if self.feed.facts.get(id).is_some_and(|kept| kept.worked_on.is_some()) {
-            return;
-        }
-        if facts.recap.as_deref().is_some_and(|r| !r.trim().is_empty()) && facts.worked_on.is_none() {
-            let p = rl_proto::methods::FactsStructureParams { run: id.to_string() };
-            match self.rpc.call::<rl_proto::methods::FactsStructure>(p).await {
-                Ok(split) => facts = split,
-                Err(e) => self.say(format!("split: {e:#}")),
-            }
-        }
-        self.feed.facts.insert(id.to_string(), facts);
     }
 
     /// `d` on a report row: dismissed (built-in or stored alike), and the board asked again.

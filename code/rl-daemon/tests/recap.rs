@@ -1,7 +1,8 @@
 //! The agent's own recap, kept as it is written: Claude's from the transcript
 //! its hook names, when a turn ends or it waits, and on from there as it
-//! grows; Codex's last turn from its rollout. No assistant is asked; the
-//! digest carries each row's first line, and only Claude's and Codex's.
+//! grows; Codex's last turn from its rollout. The digest carries each row's
+//! first line, and only Claude's and Codex's. One test asks the fake summariser
+//! for a brief, to show a seed is never the kept brief.
 
 mod common;
 
@@ -237,6 +238,11 @@ async fn claudes_recap_is_kept_as_it_writes_it() {
         let _: serde_json::Value = c.ok("run.stop", json!({ "id": id, "force": true })).await;
     }
     h.stop().await;
+    // SAFETY: as above.
+    unsafe {
+        std::env::remove_var("FAKE_AGENT_ANSWER");
+        std::env::remove_var("FAKE_AGENT_READS");
+    }
 }
 
 #[tokio::test]

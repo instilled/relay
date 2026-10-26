@@ -18,23 +18,7 @@ fn clause(lead: &Lead) -> String {
             Some(a) => format!("{} ({a})", lead.title),
             None => lead.title.clone(),
         },
-        Band::Live => lead.title.clone(),
-        Band::Happened => {
-            let f = lead.facts.as_ref();
-            let words = f
-                .and_then(|f| f.recap.as_deref().or(f.worked_on.as_deref()))
-                .map(str::trim)
-                .filter(|s| !s.is_empty());
-            let mut s = words.map_or_else(|| lead.title.clone(), str::to_string);
-            if let Some(next) = f
-                .and_then(|f| f.next.as_deref())
-                .map(str::trim)
-                .filter(|n| !n.is_empty())
-            {
-                s.push_str(&format!(", next: {next}"));
-            }
-            s
-        }
+        Band::Live | Band::Happened => lead.title.clone(),
     };
     if head.is_empty() {
         detail

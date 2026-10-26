@@ -32,13 +32,5 @@ pub struct RunFacts {
     #[serde(default)]
     pub errors: u32,
     #[serde(default)]
-    pub recap: Option<String>,
-    #[serde(default)]
-    pub worked_on: Option<String>,
-    #[serde(default)]
-    pub questions: Option<String>,
-    #[serde(default)]
-    pub next: Option<String>,
-    #[serde(default)]
     pub at: Timestamp,
 }

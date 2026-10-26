@@ -716,12 +716,7 @@ fn part_line(text: &str) -> Option<String> {
     let text = match part.as_deref() {
         Some(p) => p,
         // Labelled, but every part `none`: no line, not a raw label.
-        None if ["worked on:", "open questions:", "next:"]
-            .iter()
-            .any(|l| text.to_ascii_lowercase().contains(l)) =>
-        {
-            return None;
-        }
+        None if Brief::is_labelled(text) => return None,
         None => text,
     };
     text.lines().map(str::trim).find(|l| !l.is_empty()).map(str::to_string)
