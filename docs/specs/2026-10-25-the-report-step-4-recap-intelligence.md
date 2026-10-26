@@ -106,8 +106,10 @@ What changes:
   `catch_up.summary: auto` coming back makes those calls without asking; `auto` is your opt-in
   to that, and `ask` shows the count.
 - **Deep gets the facts and the seed** next to the whole stretch.
-- **Without `assistants.summary`**, nothing is generated. A run is told down the ladder: the
-  agent's own recap, else the raw tail, else facts only.
+- **Without `assistants.summary`.** Today, unset means the first agent available. An explicit
+  `/summary` or `rl summary` keeps that. The report's own writing on open needs a **named**
+  summariser, as the catch-up's auto top does. With none, or no assistant at all, a run is told
+  down the ladder: the agent's own recap, else the raw tail, else facts only.
 
 ## The seed and the sweep
 
@@ -116,7 +118,8 @@ when a turn ends or the run waits on you, so the list's row and the needs-you te
 something to show live, with no call.
 
 What it keeps is now the **seed**: kept apart from a generated recap, and never given back as
-one. A generated recap, once there, wins over the seed everywhere. Until then the seed is what
+one. Today both share one `summaries` row, and a later seed overwrites a generated recap there,
+so the seed gets its own table. A generated recap, once there, wins over the seed everywhere. Until then the seed is what
 the row shows, as today.
 
 Step 3's `merge_recap`, which folds the recap into `run_facts`, goes.
@@ -170,10 +173,9 @@ Step 3's `merge_recap`, which folds the recap into `run_facts`, goes.
   the ladder (seed, tail, facts). `p` and `enter` still go to any depth at any time.
 - **Per-run reads use each run's own stretch** (from `seen_at`, else the whole run), never the
   report's moving `since`, so what is kept matches the next time and a second look is free.
-- **The drill-in** (`enter` on a run) shows the run's recap at the depth its own stretch calls
-  for, at least brief. A stretch's length is now − its start (`seen_at`, else `started_at`). A
-  run you have not seen in three days gets a deep read; a deep read of a short run is still one
-  call.
+- **The drill-in** (`enter` on a run) shows the recap the report wrote for it, at the report's
+  depth, with no extra call. With none written, `/summary` (or `/summary deep`) asks, as
+  today.
 - **The prose** keeps today's client-side layout (`tui/prose.rs`: needs you · live · happened,
   grouped by co-worker), with each happened run's generated text in place of step 3's
   `recap`/`worked_on` clause: its brief from 2h to 2 days, its deep read past 2 days. There is no
