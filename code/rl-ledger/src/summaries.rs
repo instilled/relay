@@ -1,5 +1,6 @@
-//! `summaries` table: a recap of a run, live or ended — the agent's own, or an
-//! assistant's account — one per run, replaced when a newer one is made.
+//! `summaries` table: a recap of a run, live or ended — an assistant's
+//! account, or "nothing new" — one per run, replaced when a newer one is
+//! made. The agent's own recap is a seed (`recap_seeds`), read as a fallback.
 //! `transcripts`: the agent's own session file for a run, once known, and how
 //! far into it the agent's recap has been read.
 
@@ -49,7 +50,7 @@ pub fn lines(conn: &Connection, runs: &[String]) -> Result<HashMap<String, Strin
                 LINE_MAX * 4
             ),
             format!(
-                "SELECT run, substr(text, 1, {}) FROM recap_seeds WHERE run IN ({marks})",
+                "SELECT run, substr(text, 1, {}) FROM recap_seeds WHERE source != 'nothing new' AND run IN ({marks})",
                 LINE_MAX * 4
             ),
         ] {

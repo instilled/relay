@@ -9,7 +9,10 @@ CREATE TABLE recap_seeds (
   source  TEXT NOT NULL,
   reach   TEXT NOT NULL
 );
--- Seeds so far lived in `summaries` with no assistant run behind them.
+-- Seeds so far lived in `summaries` with no assistant run behind them. The
+-- engine's own "nothing new" results have none either, but they are written
+-- results, not seeds: they stay.
 INSERT INTO recap_seeds (run, agent, at, text, source, reach)
-  SELECT run, agent, at, text, source, reach FROM summaries WHERE by_run = '';
-DELETE FROM summaries WHERE by_run = '';
+  SELECT run, agent, at, text, source, reach FROM summaries
+  WHERE by_run = '' AND source != 'nothing new';
+DELETE FROM summaries WHERE by_run = '' AND source != 'nothing new';

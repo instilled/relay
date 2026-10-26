@@ -130,7 +130,7 @@ pub async fn make(d: &Daemon, p: SummaryParams) -> Result<Summary> {
             if p.deep {
                 run_deep(d, &run, from, &p).await
             } else {
-                run_brief(d, &run, from, &p).await
+                run_brief(d, &run, from, &p, Say::OnTheRun).await
             }
         }
         t => over(d, t, from, &p).await,
@@ -454,8 +454,9 @@ pub(crate) fn run_cwd(d: &Daemon, run: &Run) -> PathBuf {
 }
 
 /// A run, brief: the one kept while it has not moved on, unless `again`;
-/// else a new one from the cheapest source that has one.
-async fn run_brief(d: &Daemon, run: &Run, from: Option<Timestamp>, p: &SummaryParams) -> Result<Summary> {
+/// else a new one from the cheapest source that has one. `say` is whether a
+/// new one is news on the run.
+async fn run_brief(d: &Daemon, run: &Run, from: Option<Timestamp>, p: &SummaryParams, say: Say) -> Result<Summary> {
     let file = locate(d, run).await?;
     let reach = reach(d, run, file.as_deref()).await?;
     if !p.again {
@@ -495,7 +496,7 @@ async fn run_brief(d: &Daemon, run: &Run, from: Option<Timestamp>, p: &SummaryPa
     };
     if material.trim().is_empty() {
         nothing(&mut made);
-        return done(d, Some(run), made, p.dry).await;
+        return done(d, Some(run), made, p.dry, say).await;
     }
     made.source = source.into();
     made.calls = 1;
@@ -516,7 +517,7 @@ async fn run_brief(d: &Daemon, run: &Run, from: Option<Timestamp>, p: &SummaryPa
     );
     let a = ask(d, run_cwd(d, run), &run.title, prompt, p).await?;
     (made.agent, made.by, made.text) = (a.agent, a.by, a.text);
-    keep(d, Some(run), made).await
+    keep(d, Some(run), made, say).await
 }
 
 /// A run's deep read kept for this stretch, while the run has not moved on.
@@ -556,7 +557,7 @@ async fn run_deep(d: &Daemon, run: &Run, from: Option<Timestamp>, p: &SummaryPar
     };
     if material.trim().is_empty() {
         nothing(&mut made);
-        return done(d, Some(run), made, p.dry).await;
+        return done(d, Some(run), made, p.dry, Say::OnTheRun).await;
     }
     let parts = parts(&material);
     let n = parts.len();
@@ -607,7 +608,7 @@ async fn run_deep(d: &Daemon, run: &Run, from: Option<Timestamp>, p: &SummaryPar
         format!("read in {n} parts")
     };
     (made.agent, made.by, made.text) = (a.agent, a.by, a.text);
-    keep(d, Some(run), made).await
+    keep(d, Some(run), made, Say::OnTheRun).await
 }
 
 /// Where many runs' stretch begins: as asked; for a flow, the start of its
@@ -739,7 +740,7 @@ async fn over(d: &Daemon, t: &SummaryTarget, from: Option<Timestamp>, p: &Summar
     made.runs = runs.len() as u32;
     if runs.is_empty() {
         nothing(&mut made);
-        return done(d, None, made, p.dry).await;
+        return done(d, None, made, p.dry, Say::OnTheRun).await;
     }
     // Each run is read on its own stretch (since it was last seen, else all
     // of it), not the over's, so what is kept matches the next look at it.
@@ -759,10 +760,11 @@ async fn over(d: &Daemon, t: &SummaryTarget, from: Option<Timestamp>, p: &Summar
             };
             // What it would cost: nothing for one kept (a kept one carries
             // the call that wrote it, so it is asked of the dry run).
-            briefed += run_brief(d, r, own, &ask).await?.calls;
+            briefed += run_brief(d, r, own, &ask, Say::Quietly).await?.calls;
             if !p.dry {
                 ask.dry = false;
-                let s = run_brief(d, r, own, &ask)
+                // Read for the over, not news on the run.
+                let s = run_brief(d, r, own, &ask, Say::Quietly)
                     .await
                     .with_context(|| format!("briefing `{}`", r.title))?;
                 told.push(brief_line(d, r, &s).await?);
@@ -828,7 +830,7 @@ async fn over(d: &Daemon, t: &SummaryTarget, from: Option<Timestamp>, p: &Summar
     made.calls += calls;
     made.source = format!("over {} run{}", runs.len(), if runs.len() == 1 { "" } else { "s" });
     (made.agent, made.by, made.text) = (a.agent, a.by, a.text);
-    keep(d, None, made).await
+    keep(d, None, made, Say::OnTheRun).await
 }
 
 /// The most lines many runs are told by, brief; past it the rest are
@@ -1041,18 +1043,27 @@ async fn ask(d: &Daemon, cwd: PathBuf, of: &str, prompt: String, p: &SummaryPara
 }
 
 /// One made without asking anyone: kept, unless it was only a dry run.
-async fn done(d: &Daemon, run: Option<&Run>, s: Summary, dry: bool) -> Result<Summary> {
+async fn done(d: &Daemon, run: Option<&Run>, s: Summary, dry: bool, say: Say) -> Result<Summary> {
     if dry {
         return Ok(dry_of(s));
     }
-    keep(d, run, s).await
+    keep(d, run, s, say).await
+}
+
+/// Whether a run's new brief recap is news on the run.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Say {
+    /// Asked of the run: said on it as a `run.summarised` event.
+    OnTheRun,
+    /// Made on the way to a summary of many runs: kept, said on no run.
+    Quietly,
 }
 
 /// Keeps a summary — a run's brief recap of the whole of it by the run, and
-/// said on the run as a `run.summarised` event; anything else by what, how
-/// deep and from when, said on no run, so reading runs for a catch-up is not
-/// news on them.
-async fn keep(d: &Daemon, run: Option<&Run>, s: Summary) -> Result<Summary> {
+/// said on the run as a `run.summarised` event unless made `Quietly`;
+/// anything else by what, how deep and from when, said on no run, so reading
+/// runs for a catch-up is not news on them.
+async fn keep(d: &Daemon, run: Option<&Run>, s: Summary, say: Say) -> Result<Summary> {
     let run = run.filter(|_| !s.deep && s.from.is_none()).cloned();
     d.ledger
         .call({
@@ -1061,8 +1072,10 @@ async fn keep(d: &Daemon, run: Option<&Run>, s: Summary) -> Result<Summary> {
                 match &run {
                     Some(run) => {
                         summaries::put(c, &s)?;
-                        let e = NewEvent::for_run(run, s.at, event_kind::RUN_SUMMARISED, first_line(&s.text));
-                        events::append(c, &e)?;
+                        if say == Say::OnTheRun {
+                            let e = NewEvent::for_run(run, s.at, event_kind::RUN_SUMMARISED, first_line(&s.text));
+                            events::append(c, &e)?;
+                        }
                     }
                     None => kept::put(c, &s)?,
                 }

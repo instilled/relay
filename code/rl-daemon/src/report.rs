@@ -7,7 +7,7 @@ use rl_proto::decision::{Decision, DecisionStatus};
 use rl_proto::flow::Firing;
 use rl_proto::lead::{Band, Lead, LeadStatus};
 use rl_proto::methods::{Dismissal, Report};
-use rl_proto::types::{Run, RunKind, RunState};
+use rl_proto::types::{Cause, Run, RunKind, RunState};
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -32,13 +32,16 @@ fn run_source(r: &Run) -> String {
 const STALE_FAILED: jiff::SignedDuration = jiff::SignedDuration::from_secs(14 * 24 * 3600);
 
 /// Relay's own state as leads: open decisions, runs by state, flow firings.
-/// Computed, never stored, so it tracks the truth and self-clears.
+/// Computed, never stored, so it tracks the truth and self-clears. `recaps`
+/// is each run's recap line (written, else the agent's own): a happened run
+/// is told by it before its raw output tail.
 pub fn project_builtins(
     decisions: &[Decision],
     runs: &[Run],
     firings: &[Firing],
     now: Timestamp,
     facts: &HashMap<String, RunFacts>,
+    recaps: &HashMap<String, String>,
 ) -> Vec<Lead> {
     let mut out = Vec::new();
 
@@ -59,6 +62,11 @@ pub fn project_builtins(
     }
 
     for r in runs {
+        // The assistant's own runs (a recap being written) are Relay's work
+        // on your runs, not news of their own.
+        if matches!(r.cause, Cause::Assistant(_)) {
+            continue;
+        }
         // A shell at rest is not news — it is idle whenever you are not typing.
         if r.is_shell() && !r.state.needs_attention() && !r.state.is_terminal() {
             continue;
@@ -78,12 +86,17 @@ pub fn project_builtins(
         if band == Band::NeedsYou && r.state == RunState::Failed && now.duration_since(r.state_at) > STALE_FAILED {
             continue;
         }
+        // The ladder past a written recap: the agent's own, then the tail.
+        let summary = match band {
+            Band::Happened => recaps.get(&r.id).cloned().or_else(|| r.last_line.clone()),
+            _ => r.last_line.clone(),
+        };
         out.push(Lead {
             source: run_source(r),
             key: format!("run:{}", r.id),
             band,
             title: r.title.clone(),
-            summary: r.last_line.clone(),
+            summary,
             scope: Some(r.workspace.clone()),
             action: None, // acting on a run lead is step 2
             status: LeadStatus::Open,
@@ -201,17 +214,73 @@ mod tests {
                 ..Default::default()
             },
         );
-        let leads = project_builtins(&[], &[with, without], &[], Timestamp::now(), &facts);
+        let leads = project_builtins(
+            &[],
+            &[with, without],
+            &[],
+            Timestamp::now(),
+            &facts,
+            &Default::default(),
+        );
         let find = |k: &str| leads.iter().find(|l| l.key == k).unwrap();
         assert_eq!(find("run:r1").facts.as_ref().unwrap().commits, 3);
         assert!(find("run:r2").facts.is_none());
     }
 
     #[test]
+    fn the_assistants_own_runs_are_not_leads() {
+        let mut summariser = test_run("a1", RunState::Finished);
+        summariser.cause = Cause::Assistant("summary".into());
+        summariser.title = "summary: fix".into();
+        let mine = test_run("r1", RunState::Finished);
+        let leads = project_builtins(
+            &[],
+            &[summariser, mine],
+            &[],
+            Timestamp::now(),
+            &Default::default(),
+            &Default::default(),
+        );
+        let keys: Vec<&str> = leads.iter().map(|l| l.key.as_str()).collect();
+        assert_eq!(keys, ["run:r1"]);
+    }
+
+    #[test]
+    fn a_happened_run_is_told_by_its_recap_before_its_tail() {
+        let mut seeded = test_run("r1", RunState::Finished);
+        seeded.last_line = Some("$ cargo test".into());
+        let mut bare = test_run("r2", RunState::Finished);
+        bare.last_line = Some("done.".into());
+        let mut live = test_run("r3", RunState::Working);
+        live.last_line = Some("compiling".into());
+        let recaps: HashMap<String, String> = [
+            ("r1".to_string(), "Fixed the search.".to_string()),
+            ("r3".to_string(), "Halfway.".to_string()),
+        ]
+        .into();
+        let leads = project_builtins(
+            &[],
+            &[seeded, bare, live],
+            &[],
+            Timestamp::now(),
+            &Default::default(),
+            &recaps,
+        );
+        let find = |k: &str| leads.iter().find(|l| l.key == k).unwrap();
+        assert_eq!(find("run:r1").summary.as_deref(), Some("Fixed the search."));
+        assert_eq!(find("run:r2").summary.as_deref(), Some("done."), "no recap: the tail");
+        assert_eq!(
+            find("run:r3").summary.as_deref(),
+            Some("compiling"),
+            "a live run: its tail"
+        );
+    }
+
+    #[test]
     fn stale_failed_run_is_dropped() {
         let now = ts("2026-10-18T00:00:00Z");
         let old = run_in_state("r1", RunState::Failed, now - Duration::from_secs(15 * 24 * 3600));
-        let leads = project_builtins(&[], &[old], &[], now, &Default::default());
+        let leads = project_builtins(&[], &[old], &[], now, &Default::default(), &Default::default());
         assert!(
             leads.is_empty(),
             "a run that failed 15 days ago is stale history, not news"
@@ -222,7 +291,7 @@ mod tests {
     fn recent_failed_run_is_kept() {
         let now = ts("2026-10-18T00:00:00Z");
         let fresh = run_in_state("r1", RunState::Failed, now - Duration::from_secs(60));
-        let leads = project_builtins(&[], &[fresh], &[], now, &Default::default());
+        let leads = project_builtins(&[], &[fresh], &[], now, &Default::default(), &Default::default());
         assert_eq!(leads.len(), 1);
         assert_eq!(leads[0].band, Band::NeedsYou);
     }
@@ -233,7 +302,7 @@ mod tests {
         // days) would drop this and fail the test.
         let now = ts("2026-10-18T00:00:00Z");
         let r = run_in_state("r1", RunState::Failed, now - Duration::from_secs(13 * 24 * 3600));
-        let leads = project_builtins(&[], &[r], &[], now, &Default::default());
+        let leads = project_builtins(&[], &[r], &[], now, &Default::default(), &Default::default());
         assert_eq!(
             leads.len(),
             1,
@@ -249,7 +318,14 @@ mod tests {
         let long_ago = now - Duration::from_secs(60 * 24 * 3600);
         let blocked = run_in_state("r1", RunState::Blocked, long_ago);
         let needs_input = run_in_state("r2", RunState::NeedsInput, long_ago);
-        let leads = project_builtins(&[], &[blocked, needs_input], &[], now, &Default::default());
+        let leads = project_builtins(
+            &[],
+            &[blocked, needs_input],
+            &[],
+            now,
+            &Default::default(),
+            &Default::default(),
+        );
         assert_eq!(leads.len(), 2, "a 60-day-old Blocked/NeedsInput run still needs you");
         assert!(leads.iter().all(|l| l.band == Band::NeedsYou));
     }
@@ -260,7 +336,7 @@ mod tests {
         let old = now - Duration::from_secs(60 * 24 * 3600);
         let d = open_decision("d1", old);
         let f = test_firing("f1", Some(old)); // an old, ended firing
-        let leads = project_builtins(&[d], &[], &[f], now, &Default::default());
+        let leads = project_builtins(&[d], &[], &[f], now, &Default::default(), &Default::default());
         assert_eq!(
             leads.len(),
             2,
@@ -393,7 +469,14 @@ mod tests {
     #[test]
     fn open_decision_is_needs_you_with_decide_action() {
         let d = test_decision("d1", "approve the task?");
-        let leads = project_builtins(&[d], &[], &[], Timestamp::now(), &Default::default());
+        let leads = project_builtins(
+            &[d],
+            &[],
+            &[],
+            Timestamp::now(),
+            &Default::default(),
+            &Default::default(),
+        );
         assert_eq!(leads.len(), 1);
         assert_eq!(leads[0].band, Band::NeedsYou);
         assert_eq!(leads[0].source, MY_WORK);
@@ -415,7 +498,14 @@ mod tests {
         ];
         for (state, want) in cases {
             let r = test_run("r1", state);
-            let leads = project_builtins(&[], &[r], &[], Timestamp::now(), &Default::default());
+            let leads = project_builtins(
+                &[],
+                &[r],
+                &[],
+                Timestamp::now(),
+                &Default::default(),
+                &Default::default(),
+            );
             assert_eq!(leads.len(), 1, "{state:?} should project one lead");
             assert_eq!(leads[0].band, want, "{state:?}");
             assert_eq!(leads[0].key, "run:r1");
@@ -426,7 +516,15 @@ mod tests {
     fn resting_shell_is_not_projected() {
         let shell = test_shell("sh1", RunState::Idle);
         assert!(
-            project_builtins(&[], &[shell], &[], Timestamp::now(), &Default::default()).is_empty(),
+            project_builtins(
+                &[],
+                &[shell],
+                &[],
+                Timestamp::now(),
+                &Default::default(),
+                &Default::default()
+            )
+            .is_empty(),
             "an idle shell is not news"
         );
     }
@@ -436,11 +534,27 @@ mod tests {
         let live = test_firing("f1", None);
         let done = test_firing("f2", Some(Timestamp::now()));
         assert_eq!(
-            project_builtins(&[], &[], &[live], Timestamp::now(), &Default::default())[0].band,
+            project_builtins(
+                &[],
+                &[],
+                &[live],
+                Timestamp::now(),
+                &Default::default(),
+                &Default::default()
+            )[0]
+            .band,
             Band::Live
         );
         assert_eq!(
-            project_builtins(&[], &[], &[done], Timestamp::now(), &Default::default())[0].band,
+            project_builtins(
+                &[],
+                &[],
+                &[done],
+                Timestamp::now(),
+                &Default::default(),
+                &Default::default()
+            )[0]
+            .band,
             Band::Happened
         );
     }
@@ -449,7 +563,14 @@ mod tests {
     fn run_lead_source_is_the_cli() {
         let mut r = test_run("r1", RunState::Working);
         r.cli = Some("claude".into());
-        let leads = project_builtins(&[], &[r], &[], Timestamp::now(), &Default::default());
+        let leads = project_builtins(
+            &[],
+            &[r],
+            &[],
+            Timestamp::now(),
+            &Default::default(),
+            &Default::default(),
+        );
         assert_eq!(leads[0].source, "claude");
     }
 
@@ -458,18 +579,41 @@ mod tests {
         let mut r = test_run("r1", RunState::Working);
         r.cli = None;
         r.kind = RunKind::Command;
-        let leads = project_builtins(&[], &[r], &[], Timestamp::now(), &Default::default());
+        let leads = project_builtins(
+            &[],
+            &[r],
+            &[],
+            Timestamp::now(),
+            &Default::default(),
+            &Default::default(),
+        );
         assert_eq!(leads[0].source, "command");
         let mut a = test_run("r2", RunState::Working);
         a.cli = None;
         assert_eq!(
-            project_builtins(&[], &[a], &[], Timestamp::now(), &Default::default())[0].source,
+            project_builtins(
+                &[],
+                &[a],
+                &[],
+                Timestamp::now(),
+                &Default::default(),
+                &Default::default()
+            )[0]
+            .source,
             "agent"
         );
         let mut sh = test_shell("r3", RunState::Failed);
         sh.cli = None;
         assert_eq!(
-            project_builtins(&[], &[sh], &[], Timestamp::now(), &Default::default())[0].source,
+            project_builtins(
+                &[],
+                &[sh],
+                &[],
+                Timestamp::now(),
+                &Default::default(),
+                &Default::default()
+            )[0]
+            .source,
             "shell"
         );
     }
@@ -477,7 +621,14 @@ mod tests {
     #[test]
     fn firing_lead_source_is_its_flow_name() {
         let f = test_firing("f1", None);
-        let leads = project_builtins(&[], &[], &[f], Timestamp::now(), &Default::default());
+        let leads = project_builtins(
+            &[],
+            &[],
+            &[f],
+            Timestamp::now(),
+            &Default::default(),
+            &Default::default(),
+        );
         assert_eq!(leads[0].source, "triage");
     }
 

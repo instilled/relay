@@ -519,6 +519,11 @@ async fn over_brief_writes_each_runs_brief_then_joins() {
             .ok("summary.get", json!({ "target": { "kind": "run", "id": r.id } }))
             .await;
         assert!(k.text.starts_with("Worked on:"), "{k:?}");
+        // Read for the over, not news on the run: no `run.summarised`.
+        let evs: Vec<Event> = c
+            .ok("event.list", json!({ "run": r.id, "kinds": ["run.summarised"] }))
+            .await;
+        assert!(evs.is_empty(), "{evs:?}");
     }
     // The same again: the join is kept, and no run is asked again.
     let again: Summary = c.ok("summary.make", make.clone()).await;

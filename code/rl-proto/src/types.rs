@@ -511,7 +511,8 @@ pub mod event_kind {
     pub const RUN_LOST: &str = "run.lost";
     /// Retention took a run's journal; the run and its events stay.
     pub const RUN_JOURNAL_DROPPED: &str = "run.journal_dropped";
-    /// A run was recapped: its agent's own, or an assistant's (`summaries`).
+    /// An assistant wrote a run's recap (`summaries`); the agent's own is a
+    /// seed and is not said.
     pub const RUN_SUMMARISED: &str = "run.summarised";
 
     /// Every kind above, for anything that lists them.

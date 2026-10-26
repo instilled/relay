@@ -229,6 +229,37 @@ mod tests {
         assert!(broken.is_empty(), "{broken:?}");
     }
 
+    /// 0030 moves the agent's own recaps out to `recap_seeds`; the engine's
+    /// "nothing new" results carry no assistant run either, but are written
+    /// results and stay.
+    #[test]
+    fn seeds_move_out_and_nothing_new_stays() {
+        let mut c = Connection::open_in_memory().unwrap();
+        run_to(&mut c, 29).unwrap();
+        c.execute_batch(
+            "INSERT INTO runs (id, workspace, kind, title, argv_json, cwd, state, source, confidence, state_at, started_at, cause)
+               VALUES ('seeded', '/w', 'agent', 'fix', '[]', '/w', 'finished', 'relay', 'exact', 1, 1, 'manual'),
+                      ('quiet', '/w', 'agent', 'fix', '[]', '/w', 'finished', 'relay', 'exact', 1, 1, 'manual'),
+                      ('written', '/w', 'agent', 'fix', '[]', '/w', 'finished', 'relay', 'exact', 1, 1, 'manual');
+             INSERT INTO summaries (run, agent, by_run, at, text, source, reach)
+               VALUES ('seeded', 'claude', '', 1, 'Fixed it.', 'claude recap', 't:4'),
+                      ('quiet', 'relay', '', 1, 'Nothing to go on yet.', 'nothing new', ''),
+                      ('written', 'claude', 'a1', 1, 'Worked on: it', 'summarised', 'o:1');",
+        )
+        .unwrap();
+        run_to(&mut c, 30).unwrap();
+        let col = |sql: &str| -> Vec<String> {
+            c.prepare(sql)
+                .unwrap()
+                .query_map([], |r| r.get(0))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
+        };
+        assert_eq!(col("SELECT run FROM recap_seeds"), ["seeded"]);
+        assert_eq!(col("SELECT run FROM summaries ORDER BY run"), ["quiet", "written"]);
+    }
+
     #[test]
     fn session_io_keeps_only_where_bytes_sit() {
         let mut c = Connection::open_in_memory().unwrap();
