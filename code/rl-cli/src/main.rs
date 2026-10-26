@@ -219,6 +219,9 @@ struct SummaryArgs {
     /// Make a new one, even when the one kept is up to date.
     #[arg(long)]
     again: bool,
+    /// Over many runs: go on even when it takes more than a few assistant calls.
+    #[arg(long)]
+    yes: bool,
 }
 
 #[derive(Args)]
@@ -1113,12 +1116,20 @@ async fn report_briefs(
     if left.is_empty() || !rl_cli::catchup::named_summariser(&cfg) {
         return Ok((briefs, None));
     }
-    let (mut asks, mut calls) = (Vec::new(), 0);
+    // One that cannot even be counted is a fault: said once, and not asked.
+    let (mut asks, mut calls, mut said) = (Vec::new(), 0, false);
     for (id, p) in left {
         let dry = SummaryParams { dry: true, ..p.clone() };
-        if let Ok(x) = c.call::<SummaryMake>(dry).await {
-            calls += x.calls;
-            asks.push((id, p));
+        match c.call::<SummaryMake>(dry).await {
+            Ok(x) => {
+                calls += x.calls;
+                asks.push((id, p));
+            }
+            Err(e) if !said => {
+                said = true;
+                eprintln!("recap: {e:#}");
+            }
+            Err(_) => {}
         }
     }
     if asks.is_empty() {
@@ -1157,7 +1168,10 @@ async fn report(home: &Home, a: ReportArgs, json: bool) -> Result<()> {
     }
     if a.prose {
         let (briefs, more) = report_briefs(&mut c, &rep, since.unwrap_or(n), n, a.yes).await?;
-        print!("{}", rl_cli::tui::prose::prose(&rep, &briefs, since, n));
+        print!(
+            "{}",
+            rl_cli::tui::prose::prose(&rep, &briefs, since.map(|s| n.duration_since(s)))
+        );
         if let Some((runs, calls)) = more {
             println!("# {runs} more recaps would take {calls} calls · --yes writes them");
         }
@@ -1862,6 +1876,27 @@ async fn summary(home: &Home, a: SummaryArgs, json: bool) -> Result<()> {
         dry: false,
         timeout: None,
     };
+    // Over many runs it can fan out: the count first, and on only with --yes.
+    if !a.yes && !matches!(target, SummaryTarget::Run { .. }) {
+        let dry = rpc
+            .call::<SummaryMake>(SummaryParams {
+                dry: true,
+                ..ask(a.again)
+            })
+            .await?;
+        if dry.calls > rl_cli::depth::ASK_OVER {
+            let s = if dry.runs == 1 { "" } else { "s" };
+            if json {
+                println!("{}", serde_json::to_string(&dry)?);
+            } else {
+                println!(
+                    "# a summary over {} run{s} would take {} calls · --yes writes it",
+                    dry.runs, dry.calls
+                );
+            }
+            return Ok(());
+        }
+    }
     let kept = rpc.call::<SummaryGet>(ask(false)).await?;
     if !json && (a.again || kept.is_none_or(|k| k.stale)) {
         eprintln!("summarising…");
@@ -2101,6 +2136,23 @@ mod tests {
                 assert_eq!(a.ttl_secs, Some(1800));
             }
             _ => panic!("expected lead post"),
+        }
+    }
+
+    #[test]
+    fn summary_takes_yes() {
+        let cli = Cli::try_parse_from(["rl", "summary", "all", "2d", "--deep", "--yes"]).unwrap();
+        match cli.cmd {
+            Some(Cmd::Summary(a)) => {
+                assert_eq!(a.what, "all");
+                assert_eq!(a.since.as_deref(), Some("2d"));
+                assert!(a.deep && a.yes && !a.again);
+            }
+            _ => panic!("expected summary"),
+        }
+        match Cli::try_parse_from(["rl", "summary", "all"]).unwrap().cmd {
+            Some(Cmd::Summary(a)) => assert!(!a.yes),
+            _ => panic!("expected summary"),
         }
     }
 

@@ -215,7 +215,12 @@ pub fn report_view(
                 Band::Live => ("•", theme::name()),
                 Band::Happened => ("✓", theme::dim()),
             };
-            let text = match &l.summary {
+            // A happened run with its brief under it is not told twice: the
+            // row's line (its recap's, else its tail) gives way to the brief.
+            let brief = (l.band == Band::Happened)
+                .then(|| written(briefs, l).filter(|s| !s.deep))
+                .flatten();
+            let text = match l.summary.as_ref().filter(|_| brief.is_none()) {
                 Some(s) => format!("{} — {s}", l.title),
                 None => l.title.clone(),
             };
@@ -258,9 +263,7 @@ pub fn report_view(
             }
             at += 1;
             out.push(line);
-            if l.band == Band::Happened
-                && let Some(s) = written(briefs, l).filter(|s| !s.deep)
-            {
+            if let Some(s) = brief {
                 let b = Brief::parse(&s.text);
                 for (label, part) in [
                     ("worked  ", &b.worked_on),
@@ -538,7 +541,10 @@ pub(crate) mod tests {
         let r = Report {
             needs_you: vec![],
             live: vec![],
-            happened: vec![mk_lead("claude", "run:r1", Band::Happened, Some("/p/relay"), ts(5))],
+            happened: vec![Lead {
+                summary: Some("the parser".into()),
+                ..mk_lead("claude", "run:r1", Band::Happened, Some("/p/relay"), ts(5))
+            }],
             tags: vec![],
         };
         let mut briefs = HashMap::new();
@@ -549,6 +555,11 @@ pub(crate) mod tests {
         let (lines, at) = report_view(&r, 80, ts(10), Some(0), &briefs);
         let ls: Vec<String> = lines.iter().map(text).collect();
         let row = ls.iter().position(|l| l.contains('✓')).unwrap();
+        assert_eq!(
+            ls.iter().filter(|l| l.contains("the parser")).count(),
+            1,
+            "told once, by the brief: {ls:?}"
+        );
         assert!(ls[row + 1].contains("worked  the parser"), "{ls:?}");
         assert!(ls[row + 2].contains("next    tests"), "{ls:?}");
         assert!(!ls.iter().any(|l| l.contains("asks")), "{ls:?}");

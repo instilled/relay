@@ -29,35 +29,50 @@ impl App {
         } else {
             self.open_view(View::Report);
             self.leave_subpage();
-            self.fetch_report().await;
             self.brief_report().await;
         }
         self.picked.clear();
         self.events.clear();
     }
 
-    /// As the report opens, its happened runs' recaps, as deep as time away
-    /// calls for (`depth`): up to `brief_after` none; past it a brief each;
-    /// past `deep_after` a deep read each, and the prose up first. Kept ones
-    /// are taken as they are; the rest are written on a task of their own —
-    /// only by the assistant named for summaries, and asked first over
-    /// `ASK_OVER` calls unless `report.summary: auto`. Once an open, never on
-    /// the tick.
+    /// How long you were away before this panel opened: fixed for the
+    /// session, however long it stays up. None: the first open.
+    pub(super) fn away(&self) -> Option<SignedDuration> {
+        self.left.map(|l| self.opened_at.duration_since(l))
+    }
+
+    /// As the report opens: the board, and its happened runs' recaps as deep
+    /// as time away calls for (`depth`) — up to `brief_after` none; past it
+    /// a brief each, and the board from when you left; past `deep_after` a
+    /// deep read each, and the prose up first. What is kept and what the rest
+    /// would cost is asked on a task of its own, so the board is up at once;
+    /// the rest are written there too — only by the assistant named for
+    /// summaries, and asked first over `ASK_OVER` calls unless
+    /// `report.summary: auto`. Once an open, never on the tick.
     pub(super) async fn brief_report(&mut self) {
-        use crate::depth::{ASK_OVER, Depth, depth};
+        use crate::depth::{Depth, depth};
         self.stop_briefing();
         self.report_ask = None;
-        let Ok(cfg) = self.rpc.call::<ConfigGet>(()).await else {
+        self.report_said = false;
+        self.report_since = None;
+        let cfg = self.rpc.call::<ConfigGet>(()).await.ok();
+        let d = match (&cfg, self.away()) {
+            (Some(cfg), Some(away)) => depth(away, &cfg.config.report),
+            _ => Depth::Headline,
+        };
+        if d != Depth::Headline {
+            self.report_since = self.left;
+        }
+        self.fetch_report().await;
+        let Some(cfg) = cfg.filter(|_| d != Depth::Headline) else {
             return;
         };
-        let now = Timestamp::now();
-        self.report_depth = depth(now.duration_since(self.left.unwrap_or(now)), &cfg.config.report);
-        if self.report_depth == Depth::Headline {
-            return;
-        }
-        let deep = self.report_depth == Depth::Deep;
+        let deep = d == Depth::Deep;
         if deep {
             self.report_prose = true;
+        }
+        if !crate::catchup::named_summariser(&cfg) {
+            return;
         }
         let runs: Vec<String> = self
             .report
@@ -65,97 +80,50 @@ impl App {
             .flat_map(|r| &r.happened)
             .filter_map(|l| l.key.strip_prefix("run:").map(str::to_string))
             .collect();
-        let mut left = Vec::new();
-        for id in runs {
-            let params = SummaryParams {
-                target: SummaryTarget::Run { id: id.clone() },
-                deep,
-                from: None,
-                again: false,
-                dry: false,
-                timeout: None,
-            };
-            // A seed (the agent's own recap, `by` empty) is not one written:
-            // the run still wants its brief.
-            match self.rpc.call::<SummaryGet>(params.clone()).await {
-                Ok(Some(s)) if !s.by.is_empty() && !s.stale => {
-                    self.briefs.insert(id, s);
-                }
-                _ => left.push(params),
-            }
-        }
-        if left.is_empty() || !crate::catchup::named_summariser(&cfg) {
+        if runs.is_empty() {
             return;
         }
-        // What each would cost; one that cannot be written (an assistant's
-        // own run, say) is left out, not asked about.
-        let (mut asks, mut calls) = (Vec::new(), 0);
-        for p in left {
-            let dry = SummaryParams { dry: true, ..p.clone() };
-            if let Ok(d) = self.rpc.call::<SummaryMake>(dry).await {
-                calls += d.calls;
-                asks.push(p);
-            }
-        }
-        if asks.is_empty() {
-            return;
-        }
-        if calls > ASK_OVER && !cfg.config.report.auto_summary() {
-            self.mode = Mode::ReportCost {
-                runs: asks.len() as u32,
-                calls,
-            };
-            self.report_ask = Some(asks);
-            return;
-        }
-        self.start_briefing(asks);
+        self.start_briefing(BriefJob::Plan {
+            runs,
+            deep,
+            auto: cfg.config.report.auto_summary(),
+        });
     }
 
-    /// Writes the report's recaps, `params` one after another on a task of
-    /// its own, each down the channel as it lands. One already on its way is
-    /// let go first.
-    pub(super) fn start_briefing(&mut self, params: Vec<SummaryParams>) {
+    /// Sets the report's briefing going on a task of its own, each recap down
+    /// the channel as it lands. One already on its way is let go first.
+    pub(super) fn start_briefing(&mut self, job: BriefJob) {
         self.stop_briefing();
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        let home = self.home.clone();
-        let task = tokio::spawn(async move {
-            let run = |p: &SummaryParams| match &p.target {
-                SummaryTarget::Run { id } => id.clone(),
-                _ => String::new(),
-            };
-            let mut rpc = match Client::connect(&home).await {
-                Ok(c) => c,
-                Err(e) => {
-                    if let Some(p) = params.first() {
-                        let _ = tx.send((run(p), Err(e)));
-                    }
-                    return;
-                }
-            };
-            for p in params {
-                let id = run(&p);
-                let r = rpc.call::<SummaryMake>(p).await;
-                if tx.send((id, r)).is_err() {
-                    return;
-                }
-            }
-        });
-        self.briefing = Some(Briefing { rx, task, said: false });
+        let task = tokio::spawn(brief(self.home.clone(), job, tx));
+        self.briefing = Some(Briefing { rx, task });
     }
 
-    /// A recap the report's briefing wrote: the board's from now on. One that
-    /// failed is said, once a briefing.
-    pub(super) fn briefed(&mut self, run: String, r: Result<Summary>) {
-        match r {
-            Ok(s) => {
-                self.briefs.insert(run, s);
+    /// What the report's briefing sent: a recap, the board's from now on (one
+    /// that failed is said, once an open); or the cost of the rest, asked
+    /// about before any is written.
+    pub(super) fn briefed(&mut self, b: Briefed) {
+        match b {
+            Briefed::Recap(run, Ok(s)) => {
+                self.briefs.insert(run, *s);
             }
-            Err(e) => {
-                if let Some(b) = self.briefing.as_mut()
-                    && !b.said
-                {
-                    b.said = true;
+            Briefed::Recap(_, Err(e)) => {
+                if !self.report_said {
+                    self.report_said = true;
                     self.say(format!("recap: {e:#}"));
+                }
+            }
+            Briefed::Cost(asks, calls) => {
+                let runs = asks.len() as u32;
+                if self.view == View::Report && matches!(self.mode, Mode::Normal) {
+                    self.mode = Mode::ReportCost { runs, calls };
+                    self.report_ask = Some(asks);
+                } else {
+                    // Busy with something else: not asked over it.
+                    let s = if runs == 1 { "" } else { "s" };
+                    self.say(format!(
+                        "{runs} recap{s} would take {calls} calls · open the report again to write them"
+                    ));
                 }
             }
         }
@@ -168,9 +136,14 @@ impl App {
         }
     }
 
-    /// The report as the daemon has it now. When the view opens and on the tick.
+    /// The report as the daemon has it now, from where this open starts it.
+    /// When the view opens and on the tick.
     pub(super) async fn fetch_report(&mut self) {
-        match self.rpc.call::<ReportGet>(ReportParams::default()).await {
+        let p = ReportParams {
+            since: self.report_since,
+            ..Default::default()
+        };
+        match self.rpc.call::<ReportGet>(p).await {
             Ok(r) => {
                 self.report_failed = false;
                 self.report_sel = self.report_sel.min(report::flat_leads(&r).len().saturating_sub(1));
@@ -419,6 +392,78 @@ impl App {
             Some(events::Target::Run(id)) => self.show_run(&id).await,
             Some(events::Target::Flow(name)) => self.show_flow(&name).await,
             None => self.say("nothing here to open"),
+        }
+    }
+}
+
+/// The report's briefing, on its own connection: nothing here waits on the
+/// panel, and the panel waits on none of it.
+async fn brief(home: Home, job: BriefJob, tx: tokio::sync::mpsc::UnboundedSender<Briefed>) {
+    use crate::depth::ASK_OVER;
+    let run = |p: &SummaryParams| match &p.target {
+        SummaryTarget::Run { id } => id.clone(),
+        _ => String::new(),
+    };
+    let mut rpc = match Client::connect(&home).await {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = tx.send(Briefed::Recap(String::new(), Err(e)));
+            return;
+        }
+    };
+    let asks = match job {
+        BriefJob::Write(asks) => asks,
+        BriefJob::Plan { runs, deep, auto } => {
+            let mut left = Vec::new();
+            for id in runs {
+                let params = SummaryParams {
+                    target: SummaryTarget::Run { id: id.clone() },
+                    deep,
+                    from: None,
+                    again: false,
+                    dry: false,
+                    timeout: None,
+                };
+                // A seed (the agent's own recap, `by` empty) is not one
+                // written: the run still wants its brief.
+                match rpc.call::<SummaryGet>(params.clone()).await {
+                    Ok(Some(s)) if !s.by.is_empty() && !s.stale => {
+                        if tx.send(Briefed::Recap(id, Ok(Box::new(s)))).is_err() {
+                            return;
+                        }
+                    }
+                    _ => left.push(params),
+                }
+            }
+            // What each would cost; one that cannot even be counted is a
+            // fault, said, and not asked.
+            let (mut asks, mut calls) = (Vec::new(), 0);
+            for p in left {
+                let dry = SummaryParams { dry: true, ..p.clone() };
+                match rpc.call::<SummaryMake>(dry).await {
+                    Ok(d) => {
+                        calls += d.calls;
+                        asks.push(p);
+                    }
+                    Err(e) => {
+                        if tx.send(Briefed::Recap(run(&p), Err(e))).is_err() {
+                            return;
+                        }
+                    }
+                }
+            }
+            if calls > ASK_OVER && !auto {
+                let _ = tx.send(Briefed::Cost(asks, calls));
+                return;
+            }
+            asks
+        }
+    };
+    for p in asks {
+        let id = run(&p);
+        let r = rpc.call::<SummaryMake>(p).await;
+        if tx.send(Briefed::Recap(id, r.map(Box::new))).is_err() {
+            return;
         }
     }
 }

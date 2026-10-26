@@ -156,7 +156,7 @@ impl App {
                 if let Some(ps) = self.report_ask.take()
                     && k.code == KeyCode::Char('y')
                 {
-                    self.start_briefing(ps);
+                    self.start_briefing(BriefJob::Write(ps));
                 }
                 return Ok(());
             }

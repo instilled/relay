@@ -179,9 +179,9 @@ enum Mode {
     /// `^r`: a run's or a project's name being changed where it stands, in
     /// the list.
     Rename(Box<Renaming>),
-    /// `/summary deep` over more than one assistant call: how many runs it
-    /// reads and how many calls that takes. `y` asks (`App::summary_ask`),
-    /// anything else lets it be.
+    /// `/summary deep` over more than one assistant call, or a brief over
+    /// many runs past `ASK_OVER`: how many runs it reads and how many calls
+    /// that takes. `y` asks (`App::summary_ask`), anything else lets it be.
     SummaryCost {
         runs: u32,
         calls: u32,
@@ -313,13 +313,31 @@ struct Summarising {
     task: tokio::task::JoinHandle<Result<Summary>>,
 }
 
-/// The report's recaps being written, one run after another on a task of its
-/// own: each lands down `rx` as it is made, keyed by its run.
+/// The report's recaps on a task of their own: first what is kept and what
+/// the rest would cost, then — straight on, or once `y` says so — written one
+/// run after another. Each lands down `rx` as it comes.
 struct Briefing {
-    rx: tokio::sync::mpsc::UnboundedReceiver<(String, Result<Summary>)>,
+    rx: tokio::sync::mpsc::UnboundedReceiver<Briefed>,
     task: tokio::task::JoinHandle<()>,
-    /// A recap failed and that was said: once a briefing, not once a run.
-    said: bool,
+}
+
+/// What the report's briefing sends back.
+enum Briefed {
+    /// A run's recap — kept, or just written — or why it could not be.
+    Recap(String, Result<Box<Summary>>),
+    /// Over `ASK_OVER` calls: what each run would ask, and the calls in all.
+    /// Nothing is written until `y`.
+    Cost(Vec<SummaryParams>, u32),
+}
+
+/// What the report's briefing is set to do.
+enum BriefJob {
+    /// These happened runs: what is kept, then what the rest would cost —
+    /// written straight on unless that is over `ASK_OVER` calls and not
+    /// `auto`, when the cost is sent back and nothing written.
+    Plan { runs: Vec<String>, deep: bool, auto: bool },
+    /// These, already agreed to: written.
+    Write(Vec<SummaryParams>),
 }
 
 /// The catch-up's top as the cursor knows it: above its first project, where
@@ -422,7 +440,7 @@ struct App {
     /// The keys of the leads the catch-up drew last, the ones the room let it show; until it is
     /// drawn, all of them. The cursor stops only on these.
     leads_shown: std::cell::RefCell<Option<Vec<String>>>,
-    /// `/summary deep` waiting on `y`: what it would ask.
+    /// A `/summary` waiting on `y` (`Mode::SummaryCost`): what it would ask.
     summary_ask: Option<SummaryParams>,
     /// The last summary made of each target (`SummaryTarget::key`) while the
     /// panel is open: which stretch and depth the pane asks the kept one
@@ -435,6 +453,9 @@ struct App {
     /// When you were last here before this open, as presence said: where a
     /// bare `/since` starts. None: the first open.
     left: Option<Timestamp>,
+    /// When this panel opened: time away is `opened_at − left`, fixed for
+    /// the session however long the panel stays up.
+    opened_at: Timestamp,
     /// When this panel last told presence you are here: on open, then on
     /// the tick once a minute, and as it closes.
     presence_at: Option<Instant>,
@@ -460,8 +481,12 @@ struct App {
     briefing: Option<Briefing>,
     /// The report's recaps waiting on `y`: what each run would ask.
     report_ask: Option<Vec<SummaryParams>>,
-    /// How deep the report went this open, by how long you were away.
-    report_depth: crate::depth::Depth,
+    /// Where the report's happened band starts this open: when you left,
+    /// once time away calls for recaps; else None, the daemon's last day.
+    report_since: Option<Timestamp>,
+    /// A recap of the report's failed and that was said: once an open, not
+    /// once a run.
+    report_said: bool,
     /// While a frame is drawn, the catch-ups built for it, by the search
     /// each is narrowed by: built once a draw, and let go when it ends.
     drawn: std::cell::RefCell<Option<Vec<(String, crate::catchup::Kept)>>>,
@@ -1146,6 +1171,7 @@ pub async fn run(home: &Home) -> Result<()> {
     // and a bare `/since`.
     app.away_since = prev;
     app.left = prev;
+    app.opened_at = Timestamp::now();
     app.presence_at = Some(Instant::now());
     app.refresh().await;
 
@@ -1283,6 +1309,7 @@ impl App {
             made: HashMap::new(),
             away_since: None,
             left: None,
+            opened_at: Timestamp::now(),
             presence_at: None,
             catch: None,
             report: None,
@@ -1293,7 +1320,8 @@ impl App {
             briefs: HashMap::new(),
             briefing: None,
             report_ask: None,
-            report_depth: crate::depth::Depth::Headline,
+            report_since: None,
+            report_said: false,
             drawn: std::cell::RefCell::default(),
             unseen_from: HashMap::new(),
             removing: None,
@@ -1437,7 +1465,7 @@ impl App {
                         None => std::future::pending().await,
                     }
                 } => match got {
-                    Some((run, r)) => self.briefed(run, r),
+                    Some(b) => self.briefed(b),
                     None => self.briefing = None,
                 },
                 done = async {
@@ -2768,7 +2796,7 @@ impl App {
         if self.report_prose
             && let Some(rep) = &self.report
         {
-            let lines: Vec<Line> = prose::prose(rep, &self.briefs, self.left, Timestamp::now())
+            let lines: Vec<Line> = prose::prose(rep, &self.briefs, self.away())
                 .lines()
                 .map(|l| Line::from(format!(" {l}")))
                 .collect();
@@ -3017,13 +3045,16 @@ impl App {
             }
             Mode::SummaryCost { runs, calls } => {
                 let (runs, calls) = (*runs, *calls);
-                return match self.summary_ask.as_ref().map(|p| &p.target) {
+                let ask = self.summary_ask.as_ref();
+                let deep = ask.is_some_and(|p| p.deep);
+                return match ask.map(|p| &p.target) {
                     Some(SummaryTarget::Run { id }) => {
                         format!("deep read of {} in parts · {calls} calls · y / any key", title_of(id))
                     }
                     _ => {
                         let s = if runs == 1 { "" } else { "s" };
-                        format!("deep over {runs} run{s} · {calls} calls · y / any key")
+                        let what = if deep { "deep" } else { "summary" };
+                        format!("{what} over {runs} run{s} · {calls} calls · y / any key")
                     }
                 };
             }
@@ -4558,6 +4589,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_brief_over_many_runs_says_the_count_first() {
+        let (_tmp, token, mut app, _folder) = panel_with_runs(4).await;
+        select_header(&mut app);
+        type_in(&mut app, "/summary").await;
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+        assert!(
+            matches!(app.mode, super::Mode::SummaryCost { runs: 4, calls: 5 }),
+            "four briefs and one to join"
+        );
+        assert!(
+            app.footer(120).starts_with("summary over 4 runs · 5 calls · y"),
+            "{}",
+            app.footer(120)
+        );
+        assert!(app.summarising.is_none(), "nothing asked before y");
+        press(&mut app, KeyCode::Char('y'), KeyModifiers::NONE).await;
+        let s = app.summarising.as_ref().expect("y asks");
+        assert!(!s.deep && matches!(s.target, SummaryTarget::Project { .. }));
+        token.cancel();
+    }
+
+    #[tokio::test]
     async fn a_deep_read_says_what_it_costs() {
         let (tmp, token, mut app, _folder) = panel().await;
         // One run, long enough to be read in three parts and joined.
@@ -4767,13 +4820,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn brief_over_a_project_asks_nothing_first() {
-        let (_tmp, token, mut app, folder) = panel_with_runs(3).await;
+    async fn brief_over_a_few_runs_asks_nothing_first() {
+        let (_tmp, token, mut app, folder) = panel_with_runs(2).await;
         select_header(&mut app);
         type_in(&mut app, "/summary").await;
         press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
         assert!(matches!(app.mode, super::Mode::Normal));
-        let s = app.summarising.as_ref().expect("brief is one call: straight on");
+        let s = app
+            .summarising
+            .as_ref()
+            .expect("two briefs and the join, within ASK_OVER: straight on");
         assert_eq!(s.target, SummaryTarget::Project { workspace: folder });
         assert!(!s.deep);
         token.cancel();
@@ -5091,18 +5147,18 @@ mod tests {
         Some(panel_set(setup, echo_runs(n)).await)
     }
 
-    /// Away from the panel since `ago` before now.
+    /// Away from the panel for `ago` before it opened.
     fn left_ago(app: &mut super::App, ago: jiff::SignedDuration) {
-        app.left = Some(jiff::Timestamp::now() - ago);
+        app.left = Some(app.opened_at - ago);
     }
 
-    /// Hands each recap the report's briefing writes to the panel, as the
+    /// Hands everything the report's briefing sends to the panel, as the
     /// main loop would, until it is done.
     async fn wait_briefed(app: &mut super::App) {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
         while let Some(b) = app.briefing.as_mut() {
             match b.rx.try_recv() {
-                Ok((run, r)) => app.briefed(run, r),
+                Ok(m) => app.briefed(m),
                 Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => app.briefing = None,
                 Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
                     assert!(std::time::Instant::now() < deadline, "the recaps never came");
@@ -5167,6 +5223,7 @@ mod tests {
         };
         left_ago(&mut app, jiff::SignedDuration::from_hours(3));
         app.open_report().await;
+        wait_briefed(&mut app).await;
         assert!(
             matches!(app.mode, super::Mode::ReportCost { runs: 5, calls: 5 }),
             "five briefs, a call each, asked first"
@@ -5190,6 +5247,7 @@ mod tests {
         };
         left_ago(&mut app, jiff::SignedDuration::from_hours(3));
         app.open_report().await;
+        wait_briefed(&mut app).await;
         assert!(matches!(app.mode, super::Mode::ReportCost { .. }));
         press(&mut app, KeyCode::Esc, KeyModifiers::NONE).await;
         assert!(matches!(app.mode, super::Mode::Normal));
@@ -5206,6 +5264,12 @@ mod tests {
         };
         left_ago(&mut app, jiff::SignedDuration::from_hours(3));
         app.open_report().await;
+        // While it is still counting, the tick does not start it again.
+        let planning = app.briefing.as_ref().expect("counting").task.id();
+        app.refresh().await;
+        assert_eq!(app.briefing.as_ref().map(|b| b.task.id()), Some(planning));
+        wait_briefed(&mut app).await;
+        assert!(matches!(app.mode, super::Mode::ReportCost { .. }));
         press(&mut app, KeyCode::Char('y'), KeyModifiers::NONE).await;
         let id = app.briefing.as_ref().expect("y writes them").task.id();
         app.refresh().await;
@@ -5239,6 +5303,111 @@ mod tests {
         assert!(app.flash.is_none(), "{:?}", app.flash);
         let frame = draw_text(&mut app);
         assert!(frame.contains("make test") && frame.contains("echo 2"), "{frame}");
+        token.cancel();
+    }
+
+    #[tokio::test]
+    async fn time_away_is_fixed_when_the_panel_opened() {
+        let Some((_tmp, token, mut app, _folder)) = report_with_fake_summariser(2, false).await else {
+            return;
+        };
+        // Away ten minutes, then the panel up for three hours: still ten
+        // minutes away, so nothing is written.
+        app.opened_at = jiff::Timestamp::now() - jiff::SignedDuration::from_hours(3);
+        left_ago(&mut app, jiff::SignedDuration::from_mins(10));
+        app.open_report().await;
+        assert!(app.briefing.is_none(), "ten minutes away calls for nothing");
+        assert!(app.report_since.is_none(), "the board's last day");
+        let rep = app.report.as_ref().unwrap();
+        let p = super::prose::prose(rep, &app.briefs, app.away());
+        assert!(p.starts_with("While you were out (10m):"), "{p}");
+        token.cancel();
+    }
+
+    #[tokio::test]
+    async fn the_report_reaches_back_to_when_you_left() {
+        let older = |folder: &std::path::Path, now: jiff::Timestamp| {
+            vec![rl_proto::types::Run::new(
+                "run00002",
+                rl_proto::types::RunKind::Command,
+                "yesterday's build",
+                vec!["make".into()],
+                folder,
+                folder,
+                now - jiff::SignedDuration::from_hours(30),
+            )]
+        };
+        let setup = Setup {
+            unnamed: true,
+            ..Default::default()
+        };
+        let (_tmp, token, mut app, _folder) = panel_set(setup, older).await;
+        let happened = |app: &super::App| -> Vec<String> {
+            app.report
+                .iter()
+                .flat_map(|r| &r.happened)
+                .map(|l| l.key.clone())
+                .collect()
+        };
+        // Within two hours away: the last day, and the build is not in it.
+        left_ago(&mut app, jiff::SignedDuration::from_mins(30));
+        app.open_report().await;
+        assert!(
+            !happened(&app).contains(&"run:run00002".to_string()),
+            "{:?}",
+            happened(&app)
+        );
+        app.open_report().await;
+        // Three days away: everything since you left, on the tick too.
+        left_ago(&mut app, jiff::SignedDuration::from_hours(72));
+        app.open_report().await;
+        assert!(
+            happened(&app).contains(&"run:run00002".to_string()),
+            "{:?}",
+            happened(&app)
+        );
+        app.refresh().await;
+        assert!(
+            happened(&app).contains(&"run:run00002".to_string()),
+            "the tick keeps it"
+        );
+        token.cancel();
+    }
+
+    #[tokio::test]
+    async fn opening_the_report_counts_on_a_task_of_its_own() {
+        let Some((_tmp, token, mut app, _folder)) = report_with_fake_summariser(5, false).await else {
+            return;
+        };
+        left_ago(&mut app, jiff::SignedDuration::from_hours(3));
+        app.open_report().await;
+        // Back at once: the board is up, nothing kept or counted yet — that
+        // is the briefing's to send.
+        assert!(app.report.as_ref().is_some_and(|r| r.happened.len() == 5));
+        assert!(app.briefing.is_some(), "counting on its own task");
+        assert!(matches!(app.mode, super::Mode::Normal), "not asked yet");
+        assert!(app.report_ask.is_none() && app.briefs.is_empty());
+        wait_briefed(&mut app).await;
+        assert!(matches!(app.mode, super::Mode::ReportCost { runs: 5, calls: 5 }));
+        token.cancel();
+    }
+
+    #[tokio::test]
+    async fn a_recap_that_cannot_be_counted_is_said_once_an_open() {
+        let Some((_tmp, token, mut app, _folder)) = report_with_fake_summariser(1, false).await else {
+            return;
+        };
+        app.open_report().await;
+        app.flash = None;
+        app.start_briefing(super::BriefJob::Plan {
+            runs: vec!["nope1".into(), "nope2".into()],
+            deep: false,
+            auto: false,
+        });
+        wait_briefed(&mut app).await;
+        let said = app.flash.as_ref().map(|(m, _)| m.clone()).unwrap_or_default();
+        assert!(said.starts_with("recap:") && said.contains("nope1"), "{said}");
+        assert!(!said.contains("nope2"), "said once, not once a run: {said}");
         token.cancel();
     }
 
