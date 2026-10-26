@@ -1,7 +1,8 @@
 //! The agent's own recap, kept as it is written: Claude's from the transcript
 //! its hook names, when a turn ends or it waits, and on from there as it
-//! grows; Codex's last turn from its rollout. No assistant is asked; the
-//! digest carries each row's first line, and only Claude's and Codex's.
+//! grows; Codex's last turn from its rollout. The digest carries each row's
+//! first line, and only Claude's and Codex's. One test asks the fake summariser
+//! for a brief, to show a seed is never the kept brief.
 
 mod common;
 
@@ -9,6 +10,7 @@ use common::{Conn, Harness};
 use jiff::{SignedDuration, Timestamp};
 use rl_core::Home;
 use rl_ledger::{Ledger, summaries};
+use rl_proto::brief::Brief;
 use rl_proto::methods::{Digest, DigestItem};
 use rl_proto::types::{Run, Summary};
 use serde_json::json;
@@ -61,6 +63,29 @@ async fn claudes_recap_is_kept_as_it_writes_it() {
     let tmp = tempfile::tempdir().unwrap();
     let home = Home::at(tmp.path().join("home"));
     home.ensure_dirs().unwrap();
+    // The assistant a written recap needs: a stand-in answering in three parts.
+    let fake = std::fs::canonicalize(Path::new(env!("CARGO_MANIFEST_DIR")).join("../fixtures/fake-agent")).unwrap();
+    std::fs::create_dir_all(home.detect_dir()).unwrap();
+    std::fs::write(
+        home.detect_dir().join("fakeai.yaml"),
+        format!(
+            "kind: agent\nbins: [\"{}\"]\nheadless: [\"--headless\"]\n",
+            fake.display()
+        ),
+    )
+    .unwrap();
+    std::fs::write(home.config_file(), "assistants:\n  summary: fakeai\n").unwrap();
+    let answer = tmp.path().join("answer.txt");
+    std::fs::write(
+        &answer,
+        "Worked on: Fixed the search.\nOpen questions: none\nNext: Commit it.\n",
+    )
+    .unwrap();
+    // SAFETY: this is the only test in this binary that asks an assistant.
+    unsafe {
+        std::env::set_var("FAKE_AGENT_ANSWER", &answer);
+        std::env::set_var("FAKE_AGENT_READS", "1");
+    }
     let Some(h) = Harness::on(home.clone()) else {
         eprintln!("skipping: rl-session not built");
         return;
@@ -88,7 +113,10 @@ async fn claudes_recap_is_kept_as_it_writes_it() {
     let old = Timestamp::now() - SignedDuration::from_hours(3);
     std::fs::write(
         &transcript,
-        away(old, "Old news.")
+        format!(
+            "{{\"type\":\"assistant\",\"timestamp\":\"{}\",\"message\":{{\"content\":[{{\"type\":\"text\",\"text\":\"I fixed the search index.\"}}]}}}}\n",
+            Timestamp::now()
+        ) + &away(old, "Old news.")
             + &away(
                 Timestamp::now(),
                 "Search fixed; nothing committed. Next: say commit. (disable recaps in /config)",
@@ -114,11 +142,16 @@ async fn claudes_recap_is_kept_as_it_writes_it() {
     };
     assert_eq!(read, std::fs::metadata(&transcript).unwrap().len());
 
-    // `/summary` sees the same one, without asking anyone.
-    let made: Summary = c
-        .ok("summary.make", json!({ "target": { "kind": "run", "id": run.id } }))
-        .await;
-    assert_eq!(made, s);
+    // It is a seed: the pane's `summary.get` shows it, but nothing is written.
+    assert!(
+        ledger
+            .call_blocking({
+                let id = run.id.clone();
+                move |c| summaries::get(c, &id)
+            })
+            .unwrap()
+            .is_none()
+    );
 
     // The digest carries it, as a row's line; a shell's summary is its own.
     {
@@ -167,9 +200,96 @@ async fn claudes_recap_is_kept_as_it_writes_it() {
     let d: Digest = c.ok("digest.get", json!({})).await;
     assert_eq!(by_id(&d, &run.id).recap.as_deref(), Some("Merged."), "its first line");
 
+    // `/summary` writes a recap — an assistant is asked, the agent's own
+    // being its seed. What is written is what `get` gives from then on; the
+    // seed stays where it was, and is never taken for a written one.
+    let made: Summary = c
+        .ok("summary.make", json!({ "target": { "kind": "run", "id": run.id } }))
+        .await;
+    assert!(!made.by.is_empty(), "written by an assistant: {made:?}");
+    assert_eq!(made.source, "claude");
+    assert_eq!(
+        made.text,
+        "Worked on: Fixed the search.\nOpen questions: none\nNext: Commit it."
+    );
+    assert!(Brief::parse(&made.text).worked_on.is_some());
+    let got: Summary = c
+        .ok("summary.get", json!({ "target": { "kind": "run", "id": run.id } }))
+        .await;
+    assert_eq!(
+        (got.by.as_str(), got.text.as_str()),
+        (made.by.as_str(), made.text.as_str())
+    );
+    let id = run.id.clone();
+    let (seed, unwritten, written) = ledger
+        .call_blocking(move |c| {
+            let n = |sql: &str| c.query_row(sql, [&id], |r| r.get::<_, i64>(0));
+            Ok((
+                rl_ledger::seeds::get(c, &id)?,
+                n("SELECT count(*) FROM summaries WHERE run = ?1 AND by_run = ''")?,
+                n("SELECT count(*) FROM summaries WHERE run = ?1 AND by_run != ''")?,
+            ))
+        })
+        .unwrap();
+    assert_eq!(seed.map(|s| s.text).as_deref(), Some("Merged.\nNothing left."));
+    assert_eq!((unwritten, written), (0, 1), "no seed posing as a written recap");
+
     for id in [&run.id, &shell.id] {
         let _: serde_json::Value = c.ok("run.stop", json!({ "id": id, "force": true })).await;
     }
+    h.stop().await;
+    // SAFETY: as above.
+    unsafe {
+        std::env::remove_var("FAKE_AGENT_ANSWER");
+        std::env::remove_var("FAKE_AGENT_READS");
+    }
+}
+
+#[tokio::test]
+async fn a_picked_up_recap_is_a_seed_not_a_summary() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = Home::at(tmp.path().join("home"));
+    home.ensure_dirs().unwrap();
+    let Some(h) = Harness::on(home.clone()) else {
+        eprintln!("skipping: rl-session not built");
+        return;
+    };
+    let mut c = Conn::open(&home).await;
+    let dir = std::fs::canonicalize(tmp.path()).unwrap();
+    let bin = stand_in(&dir, "claude");
+    let run: Run = c
+        .ok(
+            "run.start",
+            json!({ "argv": [bin], "cwd": dir, "title": "fix search", "kind": "agent" }),
+        )
+        .await;
+    let transcript = dir.join("session.jsonl");
+    std::fs::write(&transcript, away(Timestamp::now(), "Search fixed.")).unwrap();
+    let _: Run = c
+        .ok(
+            "run.hook",
+            json!({ "id": run.id, "event": "Stop", "payload": { "transcript_path": transcript } }),
+        )
+        .await;
+    wait_recap(&mut c, &run.id, "Search fixed.").await;
+
+    let ledger = Ledger::open(&home.ledger()).unwrap();
+    let id = run.id.clone();
+    let (seed, written, facts) = ledger
+        .call_blocking(move |c| {
+            Ok((
+                rl_ledger::seeds::get(c, &id)?,
+                summaries::get(c, &id)?,
+                rl_ledger::facts::get(c, &id)?,
+            ))
+        })
+        .unwrap();
+    let seed = seed.expect("the recap is a seed");
+    assert_eq!((seed.text.as_str(), seed.by.as_str()), ("Search fixed.", ""));
+    assert!(written.is_none(), "nothing written");
+    assert!(facts.is_none(), "the run's facts are untouched");
+
+    let _: serde_json::Value = c.ok("run.stop", json!({ "id": run.id, "force": true })).await;
     h.stop().await;
 }
 

@@ -152,6 +152,14 @@ impl App {
                 }
                 return Ok(());
             }
+            Mode::ReportCost { .. } => {
+                if let Some(ps) = self.report_ask.take()
+                    && k.code == KeyCode::Char('y')
+                {
+                    self.start_briefing(BriefJob::Write(ps));
+                }
+                return Ok(());
+            }
             Mode::Mark(id) => {
                 let mark = match k.code {
                     KeyCode::Char('d') => Some(Mark::Done),
@@ -626,6 +634,7 @@ impl App {
                 } else if self.view == View::Events {
                     self.toggle_events().await;
                 } else if self.view == View::CatchUp || self.view == View::Report {
+                    self.stop_briefing();
                     self.back_to_list().await;
                 }
             }

@@ -99,7 +99,7 @@ async fn a_project_brief_is_one_call_over_its_runs_lines() {
     }
     let target = json!({"kind": "project", "workspace": dir});
     let s: Summary = c.ok("summary.make", json!({"target": target, "from": from})).await;
-    assert_eq!(s.calls, 1);
+    assert_eq!(s.calls, 3, "a brief for each of the two runs, and one to join them");
     assert!(s.text.contains("two runs"), "{s:?}");
     assert_eq!((s.target.clone(), s.from), (format!("p:{}", dir.display()), Some(from)));
     let prompt = std::fs::read_to_string(std::env::var("FAKE_AGENT_PROMPT").unwrap()).unwrap();
@@ -224,7 +224,12 @@ async fn a_dry_run_says_how_many_calls_and_asks_no_one() {
             json!({"target": {"kind": "all"}, "from": from, "dry": true}),
         )
         .await;
-    assert_eq!((brief.calls, brief.text.as_str()), (1, ""));
+    // A brief of each run with something in it (the quiet one costs nothing), and one to join.
+    assert_eq!((brief.calls, brief.text.as_str()), (4, ""));
+    assert!(
+        !std::path::Path::new(&prompt).exists(),
+        "a dry brief asked no one either"
+    );
     h.stop().await;
 }
 
@@ -257,7 +262,7 @@ async fn a_flows_runs_are_its_steps_runs() {
     // No stretch given: from its oldest run not yet looked at.
     let target = json!({"kind": "flow", "name": "nightly"});
     let s: Summary = c.ok("summary.make", json!({"target": target})).await;
-    assert_eq!((s.calls, s.text.as_str()), (1, "nightly: fine"), "{s:?}");
+    assert_eq!((s.calls, s.text.as_str()), (2, "nightly: fine"), "{s:?}");
     assert_eq!(s.from, Some(r.started_at), "the unseen run is in the stretch");
     assert_eq!(s.target, "f:nightly");
     let prompt = std::fs::read_to_string(std::env::var("FAKE_AGENT_PROMPT").unwrap()).unwrap();
@@ -468,7 +473,7 @@ async fn one_firings_runs_are_its_steps_runs() {
     let s: Summary = c.ok("summary.make", json!({"target": target})).await;
     assert_eq!(
         (s.calls, s.runs, s.text.as_str()),
-        (1, 2, "twice: fine"),
+        (3, 2, "twice: fine"),
         "its two runs, not the next firing's: {s:?}"
     );
     assert_eq!(s.target, format!("fi:{}", first.id));

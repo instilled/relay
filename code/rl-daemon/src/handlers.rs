@@ -116,11 +116,6 @@ pub fn register(r: &mut Router<Daemon>) {
             .await
             .map_err(|e| RpcError::invalid_params(format!("{e:#}")))
     });
-    r.register::<FactsStructure, _, _>(|d, p: FactsStructureParams| async move {
-        crate::facts::structure(&d, &p.run)
-            .await
-            .map_err(|e| RpcError::invalid_params(format!("{e:#}")))
-    });
     r.register::<SummaryGet, _, _>(|d, p: SummaryParams| async move {
         crate::summary::get(&d, &p)
             .await
@@ -437,7 +432,8 @@ pub fn register(r: &mut Router<Daemon>) {
                 let stored = rl_ledger::leads::list(c, now)?;
                 let ids: Vec<String> = runs.iter().map(|r| r.id.to_string()).collect();
                 let facts = rl_ledger::facts::get_many(c, &ids)?;
-                let builtins = crate::report::project_builtins(&decisions, &runs, &firings, now, &facts);
+                let recaps = rl_ledger::summaries::lines(c, &ids)?;
+                let builtins = crate::report::project_builtins(&decisions, &runs, &firings, now, &facts, &recaps);
                 let tags = rl_ledger::tags::list(c)?;
                 let mut report = crate::report::assemble(builtins, stored, scope.as_deref(), since, now);
                 report.tags = tags;

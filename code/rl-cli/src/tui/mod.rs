@@ -90,14 +90,15 @@ use rl_proto::flow::{
     FlowPause, FlowReload, FlowResume, FlowRun, FlowStatus, NotLoaded,
 };
 use rl_proto::methods::{
-    AgentList, DecisionDismiss, DecisionGet, DecisionId, DecisionNote, DecisionTake, DecisionTakeParams, Digest,
-    DigestGet, DigestHide, DigestHideParams, DigestItem, DigestOrder, DigestParams, EventFilter, EventList, GcParams,
-    GcRun, ImportList, ImportListParams, ImportMove, LeadDismiss, LeadDismissParams, PresenceClient, PresenceTouch,
-    ReportGet, ReportParams, RunArchive, RunArchiveParams, RunFilter, RunGet, RunHide, RunHideParams, RunId, RunIds,
-    RunInput, RunInputParams, RunList, RunMark, RunMarkParams, RunPin, RunPinParams, RunRename, RunRenameParams,
-    RunResume, RunResumeParams, RunSeen, RunSpec, RunStart, RunStop, RunStopParams, SETUP_STEPS, SetupGet, SourceTag,
-    SummaryGet, SummaryMake, SummaryParams, TagClear, TagClearParams, TagSet, WorkspaceList, WorkspaceRemove,
-    WorkspaceRemoveParams, WorkspaceRemoved, WorkspaceRename, WorkspaceRenameParams, WorkspaceUp, WorkspaceUpParams,
+    AgentList, ConfigGet, DecisionDismiss, DecisionGet, DecisionId, DecisionNote, DecisionTake, DecisionTakeParams,
+    Digest, DigestGet, DigestHide, DigestHideParams, DigestItem, DigestOrder, DigestParams, EventFilter, EventList,
+    GcParams, GcRun, ImportList, ImportListParams, ImportMove, LeadDismiss, LeadDismissParams, PresenceClient,
+    PresenceTouch, ReportGet, ReportParams, RunArchive, RunArchiveParams, RunFilter, RunGet, RunHide, RunHideParams,
+    RunId, RunIds, RunInput, RunInputParams, RunList, RunMark, RunMarkParams, RunPin, RunPinParams, RunRename,
+    RunRenameParams, RunResume, RunResumeParams, RunSeen, RunSpec, RunStart, RunStop, RunStopParams, SETUP_STEPS,
+    SetupGet, SourceTag, SummaryGet, SummaryMake, SummaryParams, TagClear, TagClearParams, TagSet, WorkspaceList,
+    WorkspaceRemove, WorkspaceRemoveParams, WorkspaceRemoved, WorkspaceRename, WorkspaceRenameParams, WorkspaceUp,
+    WorkspaceUpParams,
 };
 use rl_proto::types::{Cause, Event as LedgerEvent, Mark, Run, RunKind, RunState, Summary, SummaryTarget};
 use rows::{Names, Row, fit};
@@ -178,10 +179,17 @@ enum Mode {
     /// `^r`: a run's or a project's name being changed where it stands, in
     /// the list.
     Rename(Box<Renaming>),
-    /// `/summary deep` over more than one assistant call: how many runs it
-    /// reads and how many calls that takes. `y` asks (`App::summary_ask`),
-    /// anything else lets it be.
+    /// `/summary deep` over more than one assistant call, or a brief over
+    /// many runs past `ASK_OVER`: how many runs it reads and how many calls
+    /// that takes. `y` asks (`App::summary_ask`), anything else lets it be.
     SummaryCost {
+        runs: u32,
+        calls: u32,
+    },
+    /// The report opened after long away, its recaps over `ASK_OVER` calls:
+    /// how many runs and calls. `y` writes them (`App::report_ask`), anything
+    /// else lets them be.
+    ReportCost {
         runs: u32,
         calls: u32,
     },
@@ -305,6 +313,33 @@ struct Summarising {
     task: tokio::task::JoinHandle<Result<Summary>>,
 }
 
+/// The report's recaps on a task of their own: first what is kept and what
+/// the rest would cost, then — straight on, or once `y` says so — written one
+/// run after another. Each lands down `rx` as it comes.
+struct Briefing {
+    rx: tokio::sync::mpsc::UnboundedReceiver<Briefed>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+/// What the report's briefing sends back.
+enum Briefed {
+    /// A run's recap — kept, or just written — or why it could not be.
+    Recap(String, Result<Box<Summary>>),
+    /// Over `ASK_OVER` calls: what each run would ask, and the calls in all.
+    /// Nothing is written until `y`.
+    Cost(Vec<SummaryParams>, u32),
+}
+
+/// What the report's briefing is set to do.
+enum BriefJob {
+    /// These happened runs: what is kept, then what the rest would cost —
+    /// written straight on unless that is over `ASK_OVER` calls and not
+    /// `auto`, when the cost is sent back and nothing written.
+    Plan { runs: Vec<String>, deep: bool, auto: bool },
+    /// These, already agreed to: written.
+    Write(Vec<SummaryParams>),
+}
+
 /// The catch-up's top as the cursor knows it: above its first project, where
 /// `/summary` is of everything in the stretch.
 const TOP: &str = "top";
@@ -405,7 +440,7 @@ struct App {
     /// The keys of the leads the catch-up drew last, the ones the room let it show; until it is
     /// drawn, all of them. The cursor stops only on these.
     leads_shown: std::cell::RefCell<Option<Vec<String>>>,
-    /// `/summary deep` waiting on `y`: what it would ask.
+    /// A `/summary` waiting on `y` (`Mode::SummaryCost`): what it would ask.
     summary_ask: Option<SummaryParams>,
     /// The last summary made of each target (`SummaryTarget::key`) while the
     /// panel is open: which stretch and depth the pane asks the kept one
@@ -418,6 +453,9 @@ struct App {
     /// When you were last here before this open, as presence said: where a
     /// bare `/since` starts. None: the first open.
     left: Option<Timestamp>,
+    /// When this panel opened: time away is `opened_at − left`, fixed for
+    /// the session however long the panel stays up.
+    opened_at: Timestamp,
     /// When this panel last told presence you are here: on open, then on
     /// the tick once a minute, and as it closes.
     presence_at: Option<Instant>,
@@ -436,6 +474,19 @@ struct App {
     report_failed: bool,
     /// The report view shows the prose digest instead of the board (`p` toggles).
     report_prose: bool,
+    /// The recaps the report has for its happened runs, by run id: kept ones
+    /// and those it wrote. Kept across opens, so they come back free.
+    briefs: HashMap<String, Summary>,
+    /// The report's recaps on their way (`brief_report`).
+    briefing: Option<Briefing>,
+    /// The report's recaps waiting on `y`: what each run would ask.
+    report_ask: Option<Vec<SummaryParams>>,
+    /// Where the report's happened band starts this open: when you left,
+    /// once time away calls for recaps; else None, the daemon's last day.
+    report_since: Option<Timestamp>,
+    /// A recap of the report's failed and that was said: once an open, not
+    /// once a run.
+    report_said: bool,
     /// While a frame is drawn, the catch-ups built for it, by the search
     /// each is narrowed by: built once a draw, and let go when it ends.
     drawn: std::cell::RefCell<Option<Vec<(String, crate::catchup::Kept)>>>,
@@ -1120,6 +1171,7 @@ pub async fn run(home: &Home) -> Result<()> {
     // and a bare `/since`.
     app.away_since = prev;
     app.left = prev;
+    app.opened_at = Timestamp::now();
     app.presence_at = Some(Instant::now());
     app.refresh().await;
 
@@ -1257,6 +1309,7 @@ impl App {
             made: HashMap::new(),
             away_since: None,
             left: None,
+            opened_at: Timestamp::now(),
             presence_at: None,
             catch: None,
             report: None,
@@ -1264,6 +1317,11 @@ impl App {
             report_top: std::cell::Cell::new(0),
             report_failed: false,
             report_prose: false,
+            briefs: HashMap::new(),
+            briefing: None,
+            report_ask: None,
+            report_since: None,
+            report_said: false,
             drawn: std::cell::RefCell::default(),
             unseen_from: HashMap::new(),
             removing: None,
@@ -1401,6 +1459,15 @@ impl App {
                         None => std::future::pending().await,
                     }
                 } => self.topped(done).await,
+                got = async {
+                    match &mut self.briefing {
+                        Some(b) => b.rx.recv().await,
+                        None => std::future::pending().await,
+                    }
+                } => match got {
+                    Some(b) => self.briefed(b),
+                    None => self.briefing = None,
+                },
                 done = async {
                     match &mut self.carrying {
                         Some(c) => (&mut c.task).await,
@@ -1912,6 +1979,8 @@ impl App {
             });
         }
         self.select(Some(key));
+        // The recap made for the row is loaded whether or not the cursor moved.
+        self.load_pane().await;
     }
 
     // ---- the form ----------------------------------------------------------
@@ -2727,7 +2796,7 @@ impl App {
         if self.report_prose
             && let Some(rep) = &self.report
         {
-            let lines: Vec<Line> = prose::prose(rep, Timestamp::now())
+            let lines: Vec<Line> = prose::prose(rep, &self.briefs, self.away())
                 .lines()
                 .map(|l| Line::from(format!(" {l}")))
                 .collect();
@@ -2735,7 +2804,13 @@ impl App {
             return;
         }
         let (lines, sel_line) = match &self.report {
-            Some(rep) => report::report_view(rep, area.width as usize, Timestamp::now(), Some(self.report_sel)),
+            Some(rep) => report::report_view(
+                rep,
+                area.width as usize,
+                Timestamp::now(),
+                Some(self.report_sel),
+                &self.briefs,
+            ),
             None => (vec![Line::from(Span::raw(" loading report…").dim())], None),
         };
         // Scroll only as far as keeps the cursor row in view.
@@ -2970,15 +3045,22 @@ impl App {
             }
             Mode::SummaryCost { runs, calls } => {
                 let (runs, calls) = (*runs, *calls);
-                return match self.summary_ask.as_ref().map(|p| &p.target) {
+                let ask = self.summary_ask.as_ref();
+                let deep = ask.is_some_and(|p| p.deep);
+                return match ask.map(|p| &p.target) {
                     Some(SummaryTarget::Run { id }) => {
                         format!("deep read of {} in parts · {calls} calls · y / any key", title_of(id))
                     }
                     _ => {
                         let s = if runs == 1 { "" } else { "s" };
-                        format!("deep over {runs} run{s} · {calls} calls · y / any key")
+                        let what = if deep { "deep" } else { "summary" };
+                        format!("{what} over {runs} run{s} · {calls} calls · y / any key")
                     }
                 };
+            }
+            Mode::ReportCost { runs, calls } => {
+                let s = if *runs == 1 { "" } else { "s" };
+                return format!("write {runs} recap{s} · {calls} calls · y / any key");
             }
             Mode::Mark(id) => return format!("mark {}: d done · b blocked · w working · esc", title_of(id)),
             Mode::Walk => return "↑↓ steps, then firings · enter joins a step, or shows a firing · esc".into(),
@@ -3730,23 +3812,7 @@ mod tests {
         super::App,
         std::path::PathBuf,
     ) {
-        panel_of(move |folder, now| {
-            (2..=n)
-                .map(|i| {
-                    let echo = format!("echo {i}");
-                    rl_proto::types::Run::new(
-                        format!("run{i:05}"),
-                        rl_proto::types::RunKind::Command,
-                        &echo,
-                        vec!["sh".into(), "-c".into(), echo.clone()],
-                        folder,
-                        folder,
-                        now,
-                    )
-                })
-                .collect()
-        })
-        .await
+        panel_of(echo_runs(n)).await
     }
 
     /// `panel()`, with the ended runs `more` gives (in the project's folder,
@@ -4523,6 +4589,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_brief_over_many_runs_says_the_count_first() {
+        let (_tmp, token, mut app, _folder) = panel_with_runs(4).await;
+        select_header(&mut app);
+        type_in(&mut app, "/summary").await;
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+        assert!(
+            matches!(app.mode, super::Mode::SummaryCost { runs: 4, calls: 5 }),
+            "four briefs and one to join"
+        );
+        assert!(
+            app.footer(120).starts_with("summary over 4 runs · 5 calls · y"),
+            "{}",
+            app.footer(120)
+        );
+        assert!(app.summarising.is_none(), "nothing asked before y");
+        press(&mut app, KeyCode::Char('y'), KeyModifiers::NONE).await;
+        let s = app.summarising.as_ref().expect("y asks");
+        assert!(!s.deep && matches!(s.target, SummaryTarget::Project { .. }));
+        token.cancel();
+    }
+
+    #[tokio::test]
     async fn a_deep_read_says_what_it_costs() {
         let (tmp, token, mut app, _folder) = panel().await;
         // One run, long enough to be read in three parts and joined.
@@ -4732,13 +4820,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn brief_over_a_project_asks_nothing_first() {
-        let (_tmp, token, mut app, folder) = panel_with_runs(3).await;
+    async fn brief_over_a_few_runs_asks_nothing_first() {
+        let (_tmp, token, mut app, folder) = panel_with_runs(2).await;
         select_header(&mut app);
         type_in(&mut app, "/summary").await;
         press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
         assert!(matches!(app.mode, super::Mode::Normal));
-        let s = app.summarising.as_ref().expect("brief is one call: straight on");
+        let s = app
+            .summarising
+            .as_ref()
+            .expect("two briefs and the join, within ASK_OVER: straight on");
         assert_eq!(s.target, SummaryTarget::Project { workspace: folder });
         assert!(!s.deep);
         token.cancel();
@@ -5010,6 +5101,316 @@ mod tests {
         }
     }
 
+    /// `n` ended runs, `make test` then `sh -c 'echo 2'` and on, as
+    /// `panel_with_runs` has them.
+    fn echo_runs(n: usize) -> impl FnOnce(&std::path::Path, jiff::Timestamp) -> Vec<rl_proto::types::Run> {
+        move |folder, now| {
+            (2..=n)
+                .map(|i| {
+                    let echo = format!("echo {i}");
+                    rl_proto::types::Run::new(
+                        format!("run{i:05}"),
+                        rl_proto::types::RunKind::Command,
+                        &echo,
+                        vec!["sh".into(), "-c".into(), echo.clone()],
+                        folder,
+                        folder,
+                        now,
+                    )
+                })
+                .collect()
+        }
+    }
+
+    /// A panel with `n` ended runs, each a happened lead on the report, whose
+    /// summariser, `fake-agent`, really runs and answers. None when
+    /// `rl-session` is not built.
+    async fn report_with_fake_summariser(
+        n: usize,
+        unnamed: bool,
+    ) -> Option<(
+        tempfile::TempDir,
+        tokio_util::sync::CancellationToken,
+        super::App,
+        std::path::PathBuf,
+    )> {
+        let Some(session) = session_bin() else {
+            eprintln!("skipping: rl-session not built (run `cargo test --workspace`)");
+            return None;
+        };
+        let setup = Setup {
+            answer: Some("Worked on: the tests\nOpen questions: none\nNext: none"),
+            session: Some(session),
+            unnamed,
+            ..Default::default()
+        };
+        Some(panel_set(setup, echo_runs(n)).await)
+    }
+
+    /// Away from the panel for `ago` before it opened.
+    fn left_ago(app: &mut super::App, ago: jiff::SignedDuration) {
+        app.left = Some(app.opened_at - ago);
+    }
+
+    /// Hands everything the report's briefing sends to the panel, as the
+    /// main loop would, until it is done.
+    async fn wait_briefed(app: &mut super::App) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while let Some(b) = app.briefing.as_mut() {
+            match b.rx.try_recv() {
+                Ok(m) => app.briefed(m),
+                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => app.briefing = None,
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
+                    assert!(std::time::Instant::now() < deadline, "the recaps never came");
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn opening_the_report_after_three_hours_writes_briefs() {
+        let Some((_tmp, token, mut app, _folder)) = report_with_fake_summariser(2, false).await else {
+            return;
+        };
+        left_ago(&mut app, jiff::SignedDuration::from_hours(3));
+        app.open_report().await;
+        assert!(app.briefing.is_some(), "two briefs are two calls: straight on");
+        assert!(matches!(app.mode, super::Mode::Normal));
+        wait_briefed(&mut app).await;
+        let mut ids: Vec<&String> = app.briefs.keys().collect();
+        ids.sort();
+        assert_eq!(ids, ["run00001", "run00002"]);
+        assert!(app.briefs.values().all(|s| !s.deep), "briefs, not deep reads");
+        assert!(app.briefs.values().all(|s| !s.by.is_empty()), "written, not seeds");
+        assert!(!app.report_prose, "a brief stays on the board");
+        assert!(app.flash.is_none(), "{:?}", app.flash);
+        token.cancel();
+    }
+
+    #[tokio::test]
+    async fn opening_the_report_within_two_hours_writes_nothing() {
+        let Some((_tmp, token, mut app, _folder)) = report_with_fake_summariser(2, false).await else {
+            return;
+        };
+        left_ago(&mut app, jiff::SignedDuration::from_hours(1));
+        app.open_report().await;
+        assert!(app.briefing.is_none());
+        assert!(app.briefs.is_empty());
+        assert!(!app.report_prose);
+        token.cancel();
+    }
+
+    #[tokio::test]
+    async fn opening_the_report_after_three_days_opens_the_prose_with_deep_reads() {
+        let Some((_tmp, token, mut app, _folder)) = report_with_fake_summariser(2, false).await else {
+            return;
+        };
+        left_ago(&mut app, jiff::SignedDuration::from_hours(72));
+        app.open_report().await;
+        assert!(app.report_prose, "away that long, it opens in prose");
+        assert!(app.briefing.is_some());
+        wait_briefed(&mut app).await;
+        assert_eq!(app.briefs.len(), 2);
+        assert!(app.briefs.values().all(|s| s.deep), "deep reads");
+        token.cancel();
+    }
+
+    #[tokio::test]
+    async fn many_recaps_ask_first() {
+        let Some((_tmp, token, mut app, _folder)) = report_with_fake_summariser(5, false).await else {
+            return;
+        };
+        left_ago(&mut app, jiff::SignedDuration::from_hours(3));
+        app.open_report().await;
+        wait_briefed(&mut app).await;
+        assert!(
+            matches!(app.mode, super::Mode::ReportCost { runs: 5, calls: 5 }),
+            "five briefs, a call each, asked first"
+        );
+        assert!(
+            app.footer(120).starts_with("write 5 recaps · 5 calls · y"),
+            "{}",
+            app.footer(120)
+        );
+        assert!(app.briefing.is_none(), "nothing asked before y");
+        press(&mut app, KeyCode::Char('y'), KeyModifiers::NONE).await;
+        assert!(matches!(app.mode, super::Mode::Normal));
+        assert!(app.report_ask.is_none());
+        assert!(app.briefing.is_some(), "y writes them");
+        assert!(app.view == super::View::Report);
+        token.cancel();
+
+        // Any other key lets it be, and the report stays up.
+        let Some((_tmp, token, mut app, _folder)) = report_with_fake_summariser(5, false).await else {
+            return;
+        };
+        left_ago(&mut app, jiff::SignedDuration::from_hours(3));
+        app.open_report().await;
+        wait_briefed(&mut app).await;
+        assert!(matches!(app.mode, super::Mode::ReportCost { .. }));
+        press(&mut app, KeyCode::Esc, KeyModifiers::NONE).await;
+        assert!(matches!(app.mode, super::Mode::Normal));
+        assert!(app.report_ask.is_none());
+        assert!(app.briefing.is_none(), "any other key asks no one");
+        assert!(app.view == super::View::Report);
+        token.cancel();
+    }
+
+    #[tokio::test]
+    async fn the_refresh_tick_does_not_restart_the_briefing() {
+        let Some((_tmp, token, mut app, _folder)) = report_with_fake_summariser(5, false).await else {
+            return;
+        };
+        left_ago(&mut app, jiff::SignedDuration::from_hours(3));
+        app.open_report().await;
+        // While it is still counting, the tick does not start it again.
+        let planning = app.briefing.as_ref().expect("counting").task.id();
+        app.refresh().await;
+        assert_eq!(app.briefing.as_ref().map(|b| b.task.id()), Some(planning));
+        wait_briefed(&mut app).await;
+        assert!(matches!(app.mode, super::Mode::ReportCost { .. }));
+        press(&mut app, KeyCode::Char('y'), KeyModifiers::NONE).await;
+        let id = app.briefing.as_ref().expect("y writes them").task.id();
+        app.refresh().await;
+        app.refresh().await;
+        assert_eq!(
+            app.briefing.as_ref().map(|b| b.task.id()),
+            Some(id),
+            "the same briefing"
+        );
+        assert!(
+            !matches!(app.mode, super::Mode::ReportCost { .. }),
+            "the tick never asks again"
+        );
+        // Closing the report lets it go; nothing is said for it.
+        press(&mut app, KeyCode::Esc, KeyModifiers::NONE).await;
+        assert!(app.view == super::View::Work);
+        assert!(app.briefing.is_none());
+        token.cancel();
+    }
+
+    #[tokio::test]
+    async fn no_named_summariser_writes_nothing_and_says_nothing() {
+        let Some((_tmp, token, mut app, _folder)) = report_with_fake_summariser(2, true).await else {
+            return;
+        };
+        left_ago(&mut app, jiff::SignedDuration::from_hours(3));
+        app.flash = None;
+        app.open_report().await;
+        assert!(app.briefing.is_none(), "no one named, no one asked");
+        assert!(matches!(app.mode, super::Mode::Normal));
+        assert!(app.flash.is_none(), "{:?}", app.flash);
+        let frame = draw_text(&mut app);
+        assert!(frame.contains("make test") && frame.contains("echo 2"), "{frame}");
+        token.cancel();
+    }
+
+    #[tokio::test]
+    async fn time_away_is_fixed_when_the_panel_opened() {
+        let Some((_tmp, token, mut app, _folder)) = report_with_fake_summariser(2, false).await else {
+            return;
+        };
+        // Away ten minutes, then the panel up for three hours: still ten
+        // minutes away, so nothing is written.
+        app.opened_at = jiff::Timestamp::now() - jiff::SignedDuration::from_hours(3);
+        left_ago(&mut app, jiff::SignedDuration::from_mins(10));
+        app.open_report().await;
+        assert!(app.briefing.is_none(), "ten minutes away calls for nothing");
+        assert!(app.report_since.is_none(), "the board's last day");
+        let rep = app.report.as_ref().unwrap();
+        let p = super::prose::prose(rep, &app.briefs, app.away());
+        assert!(p.starts_with("While you were out (10m):"), "{p}");
+        token.cancel();
+    }
+
+    #[tokio::test]
+    async fn the_report_reaches_back_to_when_you_left() {
+        let older = |folder: &std::path::Path, now: jiff::Timestamp| {
+            vec![rl_proto::types::Run::new(
+                "run00002",
+                rl_proto::types::RunKind::Command,
+                "yesterday's build",
+                vec!["make".into()],
+                folder,
+                folder,
+                now - jiff::SignedDuration::from_hours(30),
+            )]
+        };
+        let setup = Setup {
+            unnamed: true,
+            ..Default::default()
+        };
+        let (_tmp, token, mut app, _folder) = panel_set(setup, older).await;
+        let happened = |app: &super::App| -> Vec<String> {
+            app.report
+                .iter()
+                .flat_map(|r| &r.happened)
+                .map(|l| l.key.clone())
+                .collect()
+        };
+        // Within two hours away: the last day, and the build is not in it.
+        left_ago(&mut app, jiff::SignedDuration::from_mins(30));
+        app.open_report().await;
+        assert!(
+            !happened(&app).contains(&"run:run00002".to_string()),
+            "{:?}",
+            happened(&app)
+        );
+        app.open_report().await;
+        // Three days away: everything since you left, on the tick too.
+        left_ago(&mut app, jiff::SignedDuration::from_hours(72));
+        app.open_report().await;
+        assert!(
+            happened(&app).contains(&"run:run00002".to_string()),
+            "{:?}",
+            happened(&app)
+        );
+        app.refresh().await;
+        assert!(
+            happened(&app).contains(&"run:run00002".to_string()),
+            "the tick keeps it"
+        );
+        token.cancel();
+    }
+
+    #[tokio::test]
+    async fn opening_the_report_counts_on_a_task_of_its_own() {
+        let Some((_tmp, token, mut app, _folder)) = report_with_fake_summariser(5, false).await else {
+            return;
+        };
+        left_ago(&mut app, jiff::SignedDuration::from_hours(3));
+        app.open_report().await;
+        // Back at once: the board is up, nothing kept or counted yet — that
+        // is the briefing's to send.
+        assert!(app.report.as_ref().is_some_and(|r| r.happened.len() == 5));
+        assert!(app.briefing.is_some(), "counting on its own task");
+        assert!(matches!(app.mode, super::Mode::Normal), "not asked yet");
+        assert!(app.report_ask.is_none() && app.briefs.is_empty());
+        wait_briefed(&mut app).await;
+        assert!(matches!(app.mode, super::Mode::ReportCost { runs: 5, calls: 5 }));
+        token.cancel();
+    }
+
+    #[tokio::test]
+    async fn a_recap_that_cannot_be_counted_is_said_once_an_open() {
+        let Some((_tmp, token, mut app, _folder)) = report_with_fake_summariser(1, false).await else {
+            return;
+        };
+        app.open_report().await;
+        app.flash = None;
+        app.start_briefing(super::BriefJob::Plan {
+            runs: vec!["nope1".into(), "nope2".into()],
+            deep: false,
+            auto: false,
+        });
+        wait_briefed(&mut app).await;
+        let said = app.flash.as_ref().map(|(m, _)| m.clone()).unwrap_or_default();
+        assert!(said.starts_with("recap:") && said.contains("nope1"), "{said}");
+        assert!(!said.contains("nope2"), "said once, not once a run: {said}");
+        token.cancel();
+    }
+
     #[tokio::test]
     async fn enter_on_a_run_lead_opens_that_run_on_the_list() {
         let (_tmp, token, mut app, _folder) = panel().await;
@@ -5023,6 +5424,30 @@ mod tests {
         press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
         assert!(app.view == super::View::Work);
         assert_eq!(app.sel.as_deref(), Some(RUN));
+        token.cancel();
+    }
+
+    #[tokio::test]
+    async fn enter_on_a_briefed_run_shows_its_brief_in_the_pane() {
+        let (_tmp, token, mut app, _folder) = panel().await;
+        app.open_report().await;
+        app.report = Some(rl_proto::methods::Report {
+            needs_you: vec![],
+            live: vec![],
+            happened: vec![report_lead("shell", "run:run00001", rl_proto::lead::Band::Happened)],
+            tags: vec![],
+        });
+        app.briefs.insert(
+            "run00001".into(),
+            crate::tui::report::tests::summary_of(
+                "run00001",
+                "Worked on: the parser\nOpen questions: none\nNext: tests",
+            ),
+        );
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+        press(&mut app, KeyCode::Char('o'), KeyModifiers::CONTROL).await;
+        let t = draw_text(&mut app);
+        assert!(t.contains("the parser"), "{t}");
         token.cancel();
     }
 

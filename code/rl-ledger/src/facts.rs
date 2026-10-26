@@ -57,12 +57,9 @@ mod tests {
             pushed: true,
             active_secs: Some(900),
             tokens_in: Some(1000),
+            tokens_cached: Some(4000),
             tokens_out: Some(250),
             errors: 1,
-            recap: Some("did a thing".into()),
-            worked_on: Some("the thing".into()),
-            questions: Some("which one?".into()),
-            next: Some("ship it".into()),
             at: jiff::Timestamp::from_second(1_700_000_000).unwrap(),
         }
     }

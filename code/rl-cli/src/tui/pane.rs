@@ -133,12 +133,10 @@ fn said(key: &str, s: &Summary, width: usize, now: Timestamp) -> Vec<Line<'stati
     lines
 }
 
-/// A run's frozen facts as the report's drill-in reads them: what it did, what it cost, and
-/// its recap split into worked on / open questions / next (once asked for). A blank line
-/// first; nothing for a run with no facts.
-pub(super) fn facts_section(facts: Option<&rl_proto::RunFacts>, width: usize) -> Vec<Line<'static>> {
+/// A run's frozen facts as the report's drill-in reads them: what it did and what it cost.
+/// A blank line first; nothing for a run with no facts.
+pub(super) fn facts_section(facts: Option<&rl_proto::RunFacts>) -> Vec<Line<'static>> {
     let Some(f) = facts else { return Vec::new() };
-    let value = width.saturating_sub(VALUE_COL + 1).max(20);
     let mut lines = vec![Line::raw("")];
     let mut work = Vec::new();
     if f.commits > 0 {
@@ -161,21 +159,18 @@ pub(super) fn facts_section(facts: Option<&rl_proto::RunFacts>, width: usize) ->
         cost.push(format!("{m}m active"));
     }
     if let (Some(i), Some(o)) = (f.tokens_in, f.tokens_out) {
-        cost.push(format!("{i} in / {o} out tokens"));
+        let cached = f
+            .tokens_cached
+            .filter(|c| *c > 0)
+            .map(|c| format!(" · {c} cached"))
+            .unwrap_or_default();
+        cost.push(format!("{i} in{cached} · {o} out tokens"));
     }
     if f.errors > 0 {
         cost.push(format!("{} errors", f.errors));
     }
     if !cost.is_empty() {
         lines.push(fact("cost", cost.join(" · ")));
-    }
-    for (key, text) in [("worked", &f.worked_on), ("asks", &f.questions), ("next", &f.next)] {
-        let Some(text) = text.as_deref().filter(|t| !t.is_empty()) else {
-            continue;
-        };
-        for (i, l) in text.lines().flat_map(|l| wrap(l, value)).enumerate() {
-            lines.push(fact(if i == 0 { key } else { "" }, l));
-        }
     }
     if lines.len() == 1 { Vec::new() } else { lines }
 }
@@ -320,7 +315,7 @@ pub fn run_lines(
             .dim(),
         ));
     }
-    lines.extend(facts_section(facts, width));
+    lines.extend(facts_section(facts));
     lines.push(Line::raw(""));
     lines.push(Line::from(Span::raw(" lately").dim()));
     if events.is_empty() {
@@ -814,25 +809,29 @@ mod tests {
     }
 
     #[test]
-    fn a_runs_facts_show_the_split_once_it_is_made() {
-        let mut f = rl_proto::RunFacts {
+    fn a_runs_facts_show_its_work_and_cost() {
+        let f = rl_proto::RunFacts {
             commits: 2,
             active_secs: Some(600),
-            recap: Some("did things".into()),
             ..Default::default()
         };
-        let before = text(&facts_section(Some(&f), 80));
-        assert!(
-            before.contains("2 commits") && before.contains("10m active"),
-            "{before}"
-        );
-        assert!(!before.contains("worked"), "{before}");
-        f.worked_on = Some("the index".into());
-        f.questions = Some("keep the flag?".into());
-        f.next = Some("ship".into());
-        let after = text(&facts_section(Some(&f), 80));
-        assert!(after.contains("the index") && after.contains("keep the flag?") && after.contains("ship"));
-        assert!(facts_section(None, 80).is_empty());
+        let shown = text(&facts_section(Some(&f)));
+        assert!(shown.contains("2 commits") && shown.contains("10m active"), "{shown}");
+        assert!(facts_section(None).is_empty());
+    }
+
+    #[test]
+    fn the_cost_line_splits_fresh_cached_and_out() {
+        let mut f = rl_proto::RunFacts {
+            tokens_in: Some(18),
+            tokens_out: Some(11),
+            ..Default::default()
+        };
+        assert!(text(&facts_section(Some(&f))).contains("18 in · 11 out tokens"));
+        f.tokens_cached = Some(0);
+        assert!(text(&facts_section(Some(&f))).contains("18 in · 11 out tokens"));
+        f.tokens_cached = Some(2015);
+        assert!(text(&facts_section(Some(&f))).contains("18 in · 2015 cached · 11 out tokens"));
     }
 
     #[test]

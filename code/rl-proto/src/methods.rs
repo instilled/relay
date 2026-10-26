@@ -1538,23 +1538,6 @@ impl Method for SummaryGet {
     type Result = Option<crate::types::Summary>;
 }
 
-/// Params of `facts.structure`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FactsStructureParams {
-    pub run: String,
-}
-
-/// A run's facts with its recap split into worked-on / questions / next. The
-/// split is made by `assistants.summary` once, on the first ask, then kept;
-/// with no assistant set, no recap, or the split already kept, the stored
-/// facts come back as they are and no one is asked.
-pub struct FactsStructure;
-impl Method for FactsStructure {
-    const NAME: &'static str = "facts.structure";
-    type Params = FactsStructureParams;
-    type Result = crate::RunFacts;
-}
-
 #[cfg(test)]
 mod tests {
     #[test]
