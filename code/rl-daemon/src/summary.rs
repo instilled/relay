@@ -5,14 +5,11 @@
 //! `catch_up.summary` is `auto` — the panel and `rl since` ask for it as you
 //! come back.
 //!
-//! Brief, a run is told from the cheapest source that has one:
-//! - Claude writes its own recap into its transcript; the latest in the
-//!   stretch is taken as it stands, no assistant asked;
-//! - Codex keeps no recap, but its turns say what it last said and did: with
-//!   `assistants.summary` set, an assistant condenses them, else they are
-//!   the recap as facts;
-//! - anything else — and Claude with no recap in the stretch — is read by
-//!   `assistants.summary`: what was said, or the end of the output.
+//! Brief, a run is always written by `assistants.summary`, in three parts
+//! (`Worked on:`, `Open questions:`, `Next:`), from the bounded tail of what
+//! was said (Claude, Codex, Gemini) or of its output, the run's frozen facts
+//! once it has ended, and the agent's own recap — kept apart as a seed — when
+//! it wrote one in the stretch.
 //!
 //! Deep, a run is always read by the assistant, all of the stretch: Claude's
 //! messages and tool calls, Codex's turns, or the whole output, with Relay's
@@ -47,7 +44,8 @@ use jiff::{SignedDuration, Timestamp};
 use rl_core::display_path;
 use rl_core::time::{fmt_duration, fmt_when};
 use rl_ledger::events::NewEvent;
-use rl_ledger::{Ledger, events, kept, runs, seeds, session_io, summaries};
+use rl_ledger::{Ledger, events, facts, kept, runs, seeds, session_io, summaries};
+use rl_proto::facts::RunFacts;
 use rl_proto::methods::{AssistantParams, EventFilter, SummaryParams};
 use rl_proto::types::{Cause, Event, Run, RunState, Summary, SummaryTarget, event_kind};
 use std::fmt::Write as _;
@@ -414,20 +412,31 @@ async fn output(d: &Daemon, run: &Run, from: Option<Timestamp>, max: usize) -> R
     Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
-/// Relay's events for a run over the stretch, at most `limit`.
-async fn run_events(d: &Daemon, run: &Run, from: Option<Timestamp>, limit: u32) -> Result<Vec<Event>> {
+/// What Relay knows of a run besides what it said: its events over the stretch
+/// (at most `limit`), its frozen facts once it has ended, and the agent's own
+/// recap when it was written within the stretch — all in one ledger read.
+async fn run_context(
+    d: &Daemon,
+    run: &Run,
+    from: Option<Timestamp>,
+    limit: u32,
+) -> Result<(Vec<Event>, Option<RunFacts>, Option<Summary>)> {
     let id = run.id.clone();
+    let ended = run.ended_at.is_some();
     d.ledger
         .call_read(move |c| {
-            events::list(
+            let evs = events::list(
                 c,
                 &EventFilter {
-                    run: Some(id),
+                    run: Some(id.clone()),
                     since: from,
                     limit: Some(limit),
                     ..Default::default()
                 },
-            )
+            )?;
+            let facts = if ended { facts::get(c, &id)? } else { None };
+            let seed = seeds::get(c, &id)?.filter(|s| from.is_none_or(|f| s.at >= f));
+            Ok((evs, facts, seed))
         })
         .await
 }
@@ -459,31 +468,26 @@ async fn run_brief(d: &Daemon, run: &Run, from: Option<Timestamp>, p: &SummaryPa
     }
     let body = read_body(file.as_deref()).await;
     let mut made = blank(&p.target, &run.id, false, from, reach);
-    // What an assistant would read, when the agent's own record does not do.
-    let (heading, material) = match (Agent::of(run), body) {
-        (Some(Agent::Claude), Some(body)) => {
-            if let Some(r) = transcript::claude_recap(&body, from) {
-                made.agent = "claude".into();
-                made.source = "claude recap".into();
-                made.text = r.text;
-                return done(d, Some(run), made, p.dry).await;
-            }
-            ("What was said".to_string(), transcript::claude_messages(&body, from))
-        }
-        (Some(Agent::Gemini), Some(body)) => ("What was said".to_string(), transcript::gemini_messages(&body, from)),
-        (Some(Agent::Codex), Some(body)) => {
-            let turns = transcript::codex_turns(&body, from);
-            let asked = d.config.read().unwrap().config.assistants.summary.is_some();
-            if !turns.is_empty() && !asked {
-                made.agent = "codex".into();
-                made.source = "codex turns".into();
-                made.text = transcript::codex_line(&turns);
-                return done(d, Some(run), made, p.dry).await;
-            }
-            made.source = "codex turns".into();
-            ("Its turns".to_string(), transcript::codex_facts(&turns))
-        }
+    // What the assistant reads: the agent's own record of the stretch, else
+    // the end of the run's output.
+    let (source, heading, material) = match (Agent::of(run), body) {
+        (Some(Agent::Claude), Some(body)) => (
+            "claude",
+            "What was said".to_string(),
+            transcript::claude_messages(&body, from),
+        ),
+        (Some(Agent::Gemini), Some(body)) => (
+            "gemini",
+            "What was said".to_string(),
+            transcript::gemini_messages(&body, from),
+        ),
+        (Some(Agent::Codex), Some(body)) => (
+            "codex",
+            "Its turns".to_string(),
+            transcript::codex_facts(&transcript::codex_turns(&body, from)),
+        ),
         _ => (
+            "output",
             format!("Its output (the end of it, at most {} KB)", OUTPUT_TAIL / 1024),
             output(d, run, from, OUTPUT_TAIL).await?,
         ),
@@ -492,16 +496,24 @@ async fn run_brief(d: &Daemon, run: &Run, from: Option<Timestamp>, p: &SummaryPa
         nothing(&mut made);
         return done(d, Some(run), made, p.dry).await;
     }
+    made.source = source.into();
     made.calls = 1;
     if p.dry {
         return Ok(made);
     }
-    let evs = run_events(d, run, from, EVENTS_BRIEF).await?;
-    let prompt = prompt(run, from, Some(&evs), &heading, tail_of(&material, OUTPUT_TAIL), false);
+    let (evs, facts, seed) = run_context(d, run, from, EVENTS_BRIEF).await?;
+    let seed = seed.as_ref().map(|s| s.text.as_str());
+    let prompt = prompt(
+        run,
+        from,
+        Some(&evs),
+        facts.as_ref(),
+        seed,
+        &heading,
+        tail_of(&material, OUTPUT_TAIL),
+        false,
+    );
     let a = ask(d, run_cwd(d, run), &run.title, prompt, p).await?;
-    if made.source.is_empty() {
-        made.source = "summarised".into();
-    }
     (made.agent, made.by, made.text) = (a.agent, a.by, a.text);
     keep(d, Some(run), made).await
 }
@@ -551,14 +563,15 @@ async fn run_deep(d: &Daemon, run: &Run, from: Option<Timestamp>, p: &SummaryPar
     if p.dry {
         return Ok(made);
     }
-    let evs = run_events(d, run, from, EVENTS_DEEP).await?;
+    let (evs, facts, seed) = run_context(d, run, from, EVENTS_DEEP).await?;
+    let seed = seed.as_ref().map(|s| s.text.as_str());
     let cwd = run_cwd(d, run);
     let a = if n == 1 {
         ask(
             d,
             cwd,
             &run.title,
-            prompt(run, from, Some(&evs), &heading, parts[0], true),
+            prompt(run, from, Some(&evs), facts.as_ref(), seed, &heading, parts[0], true),
             p,
         )
         .await?
@@ -566,8 +579,17 @@ async fn run_deep(d: &Daemon, run: &Run, from: Option<Timestamp>, p: &SummaryPar
         let mut said = Vec::with_capacity(n);
         for (i, part) in parts.iter().enumerate() {
             let at = format!("Part {} of {n}", i + 1);
-            let evs = (i == 0).then_some(evs.as_slice());
-            let q = prompt(run, from, evs, &format!("{at}: {heading}"), part, true);
+            let first = i == 0;
+            let q = prompt(
+                run,
+                from,
+                first.then_some(evs.as_slice()),
+                facts.as_ref().filter(|_| first),
+                seed.filter(|_| first),
+                &format!("{at}: {heading}"),
+                part,
+                true,
+            );
             let a = ask(d, cwd.clone(), &run.title, q, p)
                 .await
                 .with_context(|| format!("part {} of {n}", i + 1))?;
@@ -1015,10 +1037,13 @@ async fn keep(d: &Daemon, run: Option<&Run>, s: Summary) -> Result<Summary> {
 /// What the agent is asked of a run: the run as Relay knows it, the stretch,
 /// its events (when given), what it said or wrote, then the ask — brief or
 /// deep.
+#[allow(clippy::too_many_arguments)]
 pub fn prompt(
     run: &Run,
     from: Option<Timestamp>,
     events: Option<&[Event]>,
+    facts: Option<&RunFacts>,
+    seed: Option<&str>,
     heading: &str,
     material: &str,
     deep: bool,
@@ -1040,10 +1065,14 @@ pub fn prompt(
     } else {
         let _ = writeln!(
             s,
-            "You are summarising {stretch} for the person who started it, who has not read its output. \
-             Answer in plain prose, three sentences at most: what it did, what changed, and what is \
-             left or went wrong. No headings, lists, YAML or preamble; do not repeat the command. If \
-             nothing happened, say so in one sentence.\n"
+            "You are briefing the person who started {stretch} and is coming back to it; they have not \
+             read its output. Answer in exactly three labelled parts, each on its own line, in this \
+             order, each one or two sentences, and `none` when there is nothing to say:\n\
+             Worked on: what it did and what changed\n\
+             Open questions: what needs the person's decision or is unresolved\n\
+             Next: what to do next\n\
+             Ground it in the facts below; where the agent's own recap disagrees with them, trust the \
+             facts. No other headings, lists, YAML or preamble; do not repeat the command.\n"
         );
     }
     let _ = writeln!(s, "## The run\n");
@@ -1097,6 +1126,53 @@ pub fn prompt(
         for l in &said[from..] {
             let _ = writeln!(s, "{l}");
         }
+    }
+    if let Some(f) = facts {
+        let _ = writeln!(s, "\n## The facts\n");
+        let commits: Vec<&Event> = events
+            .unwrap_or_default()
+            .iter()
+            .filter(|e| e.kind == event_kind::COMMIT_LANDED)
+            .collect();
+        if commits.is_empty() {
+            let _ = writeln!(s, "commits: {}", f.commits);
+        } else {
+            let _ = writeln!(s, "commits: {}", f.commits.max(commits.len() as u32));
+            for e in &commits {
+                let _ = writeln!(s, "- {}", e.summary);
+            }
+        }
+        let _ = writeln!(
+            s,
+            "changes: +{}/\u{2212}{} across {} files",
+            f.added, f.removed, f.files
+        );
+        if !f.top_paths.is_empty() {
+            let _ = writeln!(s, "top paths: {}", f.top_paths.join(", "));
+        }
+        let _ = writeln!(s, "errors: {}", f.errors);
+        match (&f.branch, f.pushed) {
+            (Some(b), true) => {
+                let _ = writeln!(s, "branch: {b} (pushed)");
+            }
+            (Some(b), false) => {
+                let _ = writeln!(s, "branch: {b} (not pushed)");
+            }
+            (None, _) => {}
+        }
+        if let Some(t) = f.active_secs {
+            let _ = writeln!(s, "active time: {}", fmt_duration(SignedDuration::from_secs(t as i64)));
+        }
+        if let (Some(i), Some(c), Some(o)) = (f.tokens_in, f.tokens_cached, f.tokens_out) {
+            let _ = writeln!(s, "tokens: {i} fresh, {c} cached, {o} out");
+        }
+    }
+    if let Some(seed) = seed {
+        let _ = writeln!(
+            s,
+            "\n## Its own recap\n\nThe agent's own words about what it did; check them against the rest.\n\n````\n{}\n````",
+            seed.trim_end()
+        );
     }
     let _ = writeln!(s, "\n## {heading}\n");
     if material.trim().is_empty() {
@@ -1217,6 +1293,8 @@ mod tests {
             &r,
             None,
             Some(&[e]),
+            None,
+            None,
             "Its output (the end of it, at most 64 KB)",
             "test parser ... FAILED\n",
             false,
@@ -1229,9 +1307,9 @@ mod tests {
         assert!(p.contains("run.failed  exit 2"), "{p}");
         assert!(p.contains("````\ntest parser ... FAILED\n````"), "{p}");
         assert!(p.contains("## Its output (the end of it, at most 64 KB)\n"), "{p}");
-        assert!(p.contains("three sentences at most"), "{p}");
+        assert!(!p.contains("## The facts") && !p.contains("## Its own recap"), "{p}");
         let from: Timestamp = "2026-09-10T09:00:00Z".parse().unwrap();
-        let p = prompt(&r, Some(from), Some(&[]), "What was said", "", false);
+        let p = prompt(&r, Some(from), Some(&[]), None, None, "What was said", "", false);
         assert!(p.contains("(no events)") && p.contains("(nothing)"), "{p}");
         assert!(p.contains("what happened since ") && p.contains(" in one run"), "{p}");
         assert!(
@@ -1239,13 +1317,79 @@ mod tests {
             "{p}"
         );
         // Deep, it is asked for more; a later part has no events of its own.
-        let p = prompt(&r, None, None, "Part 2 of 3: Its output", "more\n", true);
+        let p = prompt(&r, None, None, None, None, "Part 2 of 3: Its output", "more\n", true);
         assert!(
             p.contains("what changed where") && p.contains("## Part 2 of 3: Its output\n"),
             "{p}"
         );
         assert!(!p.contains("## What happened"), "{p}");
         assert_eq!(tail_of("aébc", 3), "bc", "on a character boundary");
+    }
+
+    #[test]
+    fn the_brief_asks_for_three_labelled_parts() {
+        let t: Timestamp = "2026-09-10T11:00:00Z".parse().unwrap();
+        let r = Run::new("r1", RunKind::Command, "t", vec![], "/w", "/w", t);
+        let p = prompt(&r, None, None, None, None, "Its output", "x\n", false);
+        for label in ["Worked on:", "Open questions:", "Next:", "none"] {
+            assert!(p.contains(label), "{label}: {p}");
+        }
+    }
+
+    #[test]
+    fn the_facts_and_the_seed_are_sections_of_the_prompt() {
+        let t: Timestamp = "2026-09-10T11:00:00Z".parse().unwrap();
+        let r = Run::new("r1", RunKind::Command, "t", vec![], "/w", "/w", t);
+        let f = RunFacts {
+            commits: 3,
+            added: 180,
+            removed: 40,
+            files: 4,
+            top_paths: vec!["auth/".into()],
+            branch: Some("fix".into()),
+            pushed: false,
+            active_secs: Some(600),
+            tokens_in: Some(10),
+            tokens_cached: Some(20),
+            tokens_out: Some(5),
+            errors: 2,
+            ..Default::default()
+        };
+        let landed = Event {
+            id: 1,
+            at: t,
+            workspace: "/w".into(),
+            run: Some("r1".into()),
+            group_key: "g".into(),
+            kind: event_kind::COMMIT_LANDED.into(),
+            summary: "fix the index".into(),
+            data: None,
+        };
+        let p = prompt(
+            &r,
+            None,
+            Some(&[landed]),
+            Some(&f),
+            Some("All done."),
+            "Its output",
+            "x\n",
+            false,
+        );
+        for want in [
+            "## The facts",
+            "commits: 3\n- fix the index",
+            "+180/\u{2212}40 across 4 files",
+            "top paths: auth/",
+            "errors: 2",
+            "branch: fix (not pushed)",
+            "10 fresh, 20 cached, 5 out",
+            "## Its own recap",
+            "All done.",
+        ] {
+            assert!(p.contains(want), "{want}: {p}");
+        }
+        let p = prompt(&r, None, None, Some(&f), None, "Its output", "x\n", false);
+        assert!(p.contains("commits: 3\nchanges"), "the count alone: {p}");
     }
 
     #[test]
@@ -1534,7 +1678,7 @@ mod tests {
                 data: None,
             })
             .collect();
-        let p = prompt(&r, None, Some(&evs), "Its output", "out\n", true);
+        let p = prompt(&r, None, Some(&evs), None, None, "Its output", "out\n", true);
         let happened = &p[p.find("## What happened").unwrap()..p.find("## Its output").unwrap()];
         assert!(happened.len() <= EVENTS_BYTES + 64, "{}", happened.len());
         assert!(happened.contains("earlier left out)\n"), "{happened}");

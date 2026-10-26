@@ -95,12 +95,32 @@ pub fn lines(conn: &Connection, runs: &[String]) -> Result<HashMap<String, Strin
     Ok(out)
 }
 
-/// A recap's line for a row: its `Worked on:` part without the label when it
-/// has one, else the first line with anything on it — at most `LINE_MAX`
-/// characters.
+/// A recap's line for a row: when it has labelled parts, the first of
+/// `Worked on:`, `Next:`, `Open questions:` that has anything, without its
+/// label (a raw label is never shown); else the first line with anything on
+/// it — at most `LINE_MAX` characters.
 fn first_line(text: &str) -> Option<String> {
     let brief = Brief::parse(text);
-    let text = brief.worked_on.as_deref().unwrap_or(text);
+    let part = brief.worked_on.or(brief.next).or(brief.questions);
+    let text = match part {
+        Some(p) => p,
+        None => {
+            // Labelled, but every part `none`: no line, not a raw label.
+            let first = text
+                .lines()
+                .map(|l| l.trim().trim_start_matches(['#', '*', '-', ' ']).to_ascii_lowercase());
+            let labelled = first.into_iter().any(|l| {
+                ["worked on", "open questions", "next"].iter().any(|h| {
+                    l.strip_prefix(h)
+                        .is_some_and(|r| r.trim_start_matches(['*', ' ']).starts_with(':'))
+                })
+            });
+            if labelled {
+                return None;
+            }
+            text.to_string()
+        }
+    };
     let line = text.lines().map(str::trim).find(|l| !l.is_empty())?;
     if line.chars().count() <= LINE_MAX {
         return Some(line.to_string());
@@ -200,6 +220,30 @@ mod tests {
     use super::*;
     use jiff::Timestamp;
     use rl_proto::types::{Run, RunKind};
+
+    #[test]
+    fn a_line_is_a_part_never_a_raw_label() {
+        let line = |t: &str| first_line(t);
+        assert_eq!(
+            line("Worked on: the parser\nNext: tests").as_deref(),
+            Some("the parser")
+        );
+        assert_eq!(
+            line("Worked on: none\nOpen questions: keep the flag?\nNext: ship it").as_deref(),
+            Some("ship it"),
+            "next before questions"
+        );
+        assert_eq!(
+            line("Worked on: none\nOpen questions: keep the flag?\nNext: none").as_deref(),
+            Some("keep the flag?")
+        );
+        assert_eq!(line("Worked on: none\nOpen questions: none\nNext: none"), None);
+        assert_eq!(
+            line("\nSearch fixed.\nNothing else.").as_deref(),
+            Some("Search fixed."),
+            "no label: the first line"
+        );
+    }
 
     #[test]
     fn one_per_run_the_latest_kept() {
@@ -305,7 +349,7 @@ mod tests {
         let c = ledger();
         put(
             &c,
-            &recap("r1", "2026-09-10T12:05:00Z", "\n  Fixed the search.  \nNext: commit."),
+            &recap("r1", "2026-09-10T12:05:00Z", "\n  Fixed the search.  \nThen commit."),
         )
         .unwrap();
         put(&c, &recap("r2", "2026-09-10T12:05:00Z", &"word ".repeat(100))).unwrap();

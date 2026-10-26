@@ -9,6 +9,7 @@ use common::{Conn, Harness};
 use jiff::{SignedDuration, Timestamp};
 use rl_core::Home;
 use rl_ledger::{Ledger, summaries};
+use rl_proto::brief::Brief;
 use rl_proto::methods::{Digest, DigestItem};
 use rl_proto::types::{Run, Summary};
 use serde_json::json;
@@ -61,6 +62,29 @@ async fn claudes_recap_is_kept_as_it_writes_it() {
     let tmp = tempfile::tempdir().unwrap();
     let home = Home::at(tmp.path().join("home"));
     home.ensure_dirs().unwrap();
+    // The assistant a written recap needs: a stand-in answering in three parts.
+    let fake = std::fs::canonicalize(Path::new(env!("CARGO_MANIFEST_DIR")).join("../fixtures/fake-agent")).unwrap();
+    std::fs::create_dir_all(home.detect_dir()).unwrap();
+    std::fs::write(
+        home.detect_dir().join("fakeai.yaml"),
+        format!(
+            "kind: agent\nbins: [\"{}\"]\nheadless: [\"--headless\"]\n",
+            fake.display()
+        ),
+    )
+    .unwrap();
+    std::fs::write(home.config_file(), "assistants:\n  summary: fakeai\n").unwrap();
+    let answer = tmp.path().join("answer.txt");
+    std::fs::write(
+        &answer,
+        "Worked on: Fixed the search.\nOpen questions: none\nNext: Commit it.\n",
+    )
+    .unwrap();
+    // SAFETY: this is the only test in this binary that asks an assistant.
+    unsafe {
+        std::env::set_var("FAKE_AGENT_ANSWER", &answer);
+        std::env::set_var("FAKE_AGENT_READS", "1");
+    }
     let Some(h) = Harness::on(home.clone()) else {
         eprintln!("skipping: rl-session not built");
         return;
@@ -88,7 +112,10 @@ async fn claudes_recap_is_kept_as_it_writes_it() {
     let old = Timestamp::now() - SignedDuration::from_hours(3);
     std::fs::write(
         &transcript,
-        away(old, "Old news.")
+        format!(
+            "{{\"type\":\"assistant\",\"timestamp\":\"{}\",\"message\":{{\"content\":[{{\"type\":\"text\",\"text\":\"I fixed the search index.\"}}]}}}}\n",
+            Timestamp::now()
+        ) + &away(old, "Old news.")
             + &away(
                 Timestamp::now(),
                 "Search fixed; nothing committed. Next: say commit. (disable recaps in /config)",
@@ -172,12 +199,39 @@ async fn claudes_recap_is_kept_as_it_writes_it() {
     let d: Digest = c.ok("digest.get", json!({})).await;
     assert_eq!(by_id(&d, &run.id).recap.as_deref(), Some("Merged."), "its first line");
 
-    // `/summary` still reads the agent's own recap without asking anyone.
+    // `/summary` writes a recap — an assistant is asked, the agent's own
+    // being its seed. What is written is what `get` gives from then on; the
+    // seed stays where it was, and is never taken for a written one.
     let made: Summary = c
         .ok("summary.make", json!({ "target": { "kind": "run", "id": run.id } }))
         .await;
-    assert_eq!(made.text, "Merged.\nNothing left.");
-    assert_eq!((made.source.as_str(), made.by.as_str()), ("claude recap", ""));
+    assert!(!made.by.is_empty(), "written by an assistant: {made:?}");
+    assert_eq!(made.source, "claude");
+    assert_eq!(
+        made.text,
+        "Worked on: Fixed the search.\nOpen questions: none\nNext: Commit it."
+    );
+    assert!(Brief::parse(&made.text).worked_on.is_some());
+    let got: Summary = c
+        .ok("summary.get", json!({ "target": { "kind": "run", "id": run.id } }))
+        .await;
+    assert_eq!(
+        (got.by.as_str(), got.text.as_str()),
+        (made.by.as_str(), made.text.as_str())
+    );
+    let id = run.id.clone();
+    let (seed, unwritten, written) = ledger
+        .call_blocking(move |c| {
+            let n = |sql: &str| c.query_row(sql, [&id], |r| r.get::<_, i64>(0));
+            Ok((
+                rl_ledger::seeds::get(c, &id)?,
+                n("SELECT count(*) FROM summaries WHERE run = ?1 AND by_run = ''")?,
+                n("SELECT count(*) FROM summaries WHERE run = ?1 AND by_run != ''")?,
+            ))
+        })
+        .unwrap();
+    assert_eq!(seed.map(|s| s.text).as_deref(), Some("Merged.\nNothing left."));
+    assert_eq!((unwritten, written), (0, 1), "no seed posing as a written recap");
 
     for id in [&run.id, &shell.id] {
         let _: serde_json::Value = c.ok("run.stop", json!({ "id": id, "force": true })).await;
