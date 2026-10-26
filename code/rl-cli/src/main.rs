@@ -524,6 +524,9 @@ struct ReportArgs {
     /// Print the report as a short prose narrative instead of tables.
     #[arg(long)]
     prose: bool,
+    /// With --prose: write the recaps that would take more than a few assistant calls, without asking.
+    #[arg(long)]
+    yes: bool,
 }
 
 #[derive(Args)]
@@ -1069,20 +1072,95 @@ async fn events(home: &Home, a: EventsArgs, json: bool) -> Result<()> {
     Ok(())
 }
 
+/// The recap of each happened run, at the depth the time away calls for: kept ones as they
+/// are, the rest written when a summariser is named and the cost allows (a few calls, `--yes`
+/// or `report.summary: auto`). Over the limit it writes none and says how many it left.
+async fn report_briefs(
+    c: &mut Client,
+    rep: &rl_proto::methods::Report,
+    since: jiff::Timestamp,
+    n: jiff::Timestamp,
+    yes: bool,
+) -> Result<(
+    std::collections::HashMap<String, rl_proto::types::Summary>,
+    Option<(usize, u32)>,
+)> {
+    use rl_cli::depth::{ASK_OVER, Depth, depth};
+    let mut briefs = std::collections::HashMap::new();
+    let cfg = c.call::<ConfigGet>(()).await?;
+    let d = depth(n.duration_since(since), &cfg.config.report);
+    if d == Depth::Headline {
+        return Ok((briefs, None));
+    }
+    let mut left = Vec::new();
+    for id in rep.happened.iter().filter_map(|l| l.key.strip_prefix("run:")) {
+        let p = SummaryParams {
+            target: SummaryTarget::Run { id: id.to_string() },
+            deep: d == Depth::Deep,
+            from: None,
+            again: false,
+            dry: false,
+            timeout: None,
+        };
+        // A seed (the agent's own recap, `by` empty) is not one written.
+        match c.call::<SummaryGet>(p.clone()).await {
+            Ok(Some(s)) if !s.by.is_empty() && !s.stale => {
+                briefs.insert(id.to_string(), s);
+            }
+            _ => left.push((id.to_string(), p)),
+        }
+    }
+    if left.is_empty() || !rl_cli::catchup::named_summariser(&cfg) {
+        return Ok((briefs, None));
+    }
+    let (mut asks, mut calls) = (Vec::new(), 0);
+    for (id, p) in left {
+        let dry = SummaryParams { dry: true, ..p.clone() };
+        if let Ok(x) = c.call::<SummaryMake>(dry).await {
+            calls += x.calls;
+            asks.push((id, p));
+        }
+    }
+    if asks.is_empty() {
+        return Ok((briefs, None));
+    }
+    if calls > ASK_OVER && !yes && !cfg.config.report.auto_summary() {
+        return Ok((briefs, Some((asks.len(), calls))));
+    }
+    for (id, p) in asks {
+        if let Ok(s) = c.call::<SummaryMake>(p).await {
+            briefs.insert(id, s);
+        }
+    }
+    Ok((briefs, None))
+}
+
 async fn report(home: &Home, a: ReportArgs, json: bool) -> Result<()> {
     let n = now();
-    let since = a.since.as_deref().map(|s| parse_since(s, n)).transpose()?;
+    let mut since = a.since.as_deref().map(|s| parse_since(s, n)).transpose()?;
     let scope = a.scope.map(|p| p.canonicalize().unwrap_or(p));
-    let rep = daemon::ensure(home, !json)
-        .await?
-        .call::<ReportGet>(ReportParams { scope, since })
-        .await?;
+    let mut c = daemon::ensure(home, !json).await?;
+    // The prose counts from when you last looked, as `rl since` does.
+    if a.prose && !json && since.is_none() {
+        let me = rl_cli::attach::client_name();
+        since = Some(
+            c.call::<PresenceTouch>(PresenceClient { client: me })
+                .await?
+                .last_seen_at
+                .unwrap_or(n - jiff::SignedDuration::from_hours(24)),
+        );
+    }
+    let rep = c.call::<ReportGet>(ReportParams { scope, since }).await?;
     if json {
         println!("{}", serde_json::to_string(&rep)?);
         return Ok(());
     }
     if a.prose {
-        print!("{}", rl_cli::tui::prose::prose(&rep, n));
+        let (briefs, more) = report_briefs(&mut c, &rep, since.unwrap_or(n), n, a.yes).await?;
+        print!("{}", rl_cli::tui::prose::prose(&rep, &briefs, since, n));
+        if let Some((runs, calls)) = more {
+            println!("# {runs} more recaps would take {calls} calls · --yes writes them");
+        }
         return Ok(());
     }
     let mut printed = false;
@@ -2028,6 +2106,7 @@ mod tests {
 
     #[test]
     fn report_parses() {
+        assert!(Cli::try_parse_from(["rl", "report", "--prose", "--yes"]).is_ok());
         let cli = Cli::try_parse_from(["rl", "report", "/tmp/x", "--since", "2h"]).unwrap();
         match cli.cmd {
             Some(Cmd::Report(a)) => {

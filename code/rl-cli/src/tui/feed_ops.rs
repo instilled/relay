@@ -208,6 +208,10 @@ impl App {
         };
         match lead.key.split_once(':') {
             Some(("run", id)) => {
+                // What the report wrote is what the pane shows, with no extra call.
+                if let Some(s) = report::written(&self.briefs, &lead).cloned() {
+                    self.made.insert(SummaryTarget::Run { id: id.to_string() }.key(), s);
+                }
                 if let Some(facts) = lead.facts {
                     self.feed.facts.insert(id.to_string(), facts);
                 }

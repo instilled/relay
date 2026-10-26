@@ -8,8 +8,10 @@ use std::collections::{HashMap, HashSet};
 use jiff::Timestamp;
 use ratatui::style::Stylize;
 use ratatui::text::{Line, Span};
+use rl_proto::brief::Brief;
 use rl_proto::lead::{Band, Lead};
 use rl_proto::methods::Report;
+use rl_proto::types::Summary;
 
 use super::rows::fit;
 use super::theme;
@@ -132,13 +134,25 @@ pub(crate) fn headline(lead: &Lead) -> String {
     parts.join(" · ")
 }
 
+/// The recap written for a run's lead, when there is one that still holds: a stale one
+/// is as good as absent, so the row falls to its own line.
+pub(crate) fn written<'a>(briefs: &'a HashMap<String, Summary>, lead: &Lead) -> Option<&'a Summary> {
+    let id = lead.key.strip_prefix("run:")?;
+    briefs.get(id).filter(|s| !s.stale)
+}
+
 /// The title never gives up more than this to the headline beside it.
 const TITLE_MIN: usize = 12;
 
 /// The report as lines for a body `width` columns wide: per lane a header with its
 /// tally, a dim rule, then a row per lead. Rendering only; `lanes()` did the grouping.
-pub fn report_lines(report: &Report, width: usize, now: Timestamp) -> Vec<Line<'static>> {
-    report_view(report, width, now, None).0
+pub fn report_lines(
+    report: &Report,
+    width: usize,
+    now: Timestamp,
+    briefs: &HashMap<String, Summary>,
+) -> Vec<Line<'static>> {
+    report_view(report, width, now, None, briefs).0
 }
 
 /// The lead rows in the order they are drawn, across lanes: what the cursor walks.
@@ -156,6 +170,7 @@ pub fn report_view(
     width: usize,
     now: Timestamp,
     sel: Option<usize>,
+    briefs: &HashMap<String, Summary>,
 ) -> (Vec<Line<'static>>, Option<usize>) {
     let lanes = lanes(report);
     if lanes.is_empty() {
@@ -243,13 +258,31 @@ pub fn report_view(
             }
             at += 1;
             out.push(line);
+            if l.band == Band::Happened
+                && let Some(s) = written(briefs, l).filter(|s| !s.deep)
+            {
+                let b = Brief::parse(&s.text);
+                for (label, part) in [
+                    ("worked  ", &b.worked_on),
+                    ("asks    ", &b.questions),
+                    ("next    ", &b.next),
+                ] {
+                    if let Some(t) = part {
+                        let t = t.split_whitespace().collect::<Vec<_>>().join(" ");
+                        out.push(Line::from(Span::styled(
+                            fit(&format!("     {label}{t}"), width),
+                            theme::dim(),
+                        )));
+                    }
+                }
+            }
         }
     }
     (out, sel_line)
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use rl_proto::lead::LeadStatus;
     use rl_proto::methods::SourceTag;
@@ -335,7 +368,10 @@ mod tests {
             f.removed = 40;
             f.commits = 3;
         });
-        let ls: Vec<String> = report_lines(&r, 80, ts(1_700_000_100)).iter().map(text).collect();
+        let ls: Vec<String> = report_lines(&r, 80, ts(1_700_000_100), &HashMap::new())
+            .iter()
+            .map(text)
+            .collect();
         let row = ls.iter().find(|l| l.contains('✓')).unwrap();
         assert!(row.contains("+180/−40"), "{ls:?}");
         assert!(ls.iter().all(|l| l.chars().count() <= 80), "{ls:?}");
@@ -364,7 +400,7 @@ mod tests {
 
     #[test]
     fn report_lines_head_each_lane_with_its_tally_and_cut_long_leads() {
-        let ls: Vec<String> = report_lines(&sample(), 80, ts(1_700_000_100))
+        let ls: Vec<String> = report_lines(&sample(), 80, ts(1_700_000_100), &HashMap::new())
             .iter()
             .map(text)
             .collect();
@@ -383,7 +419,7 @@ mod tests {
     #[test]
     fn report_view_marks_the_selected_row_and_says_which_line() {
         let r = sample();
-        let (lines, at) = report_view(&r, 80, ts(1_700_000_100), Some(1));
+        let (lines, at) = report_view(&r, 80, ts(1_700_000_100), Some(1), &HashMap::new());
         assert_eq!(at, Some(3), "second lead row, past a head and a rule");
         assert_eq!(lines[3].style, theme::selected());
         assert_ne!(lines[2].style, theme::selected());
@@ -393,8 +429,14 @@ mod tests {
     #[test]
     fn report_lines_drop_the_when_column_when_narrow_but_keep_the_lead() {
         let now = ts(1_700_000_100);
-        let wide: Vec<String> = report_lines(&sample(), 80, now).iter().map(text).collect();
-        let narrow: Vec<String> = report_lines(&sample(), 40, now).iter().map(text).collect();
+        let wide: Vec<String> = report_lines(&sample(), 80, now, &HashMap::new())
+            .iter()
+            .map(text)
+            .collect();
+        let narrow: Vec<String> = report_lines(&sample(), 40, now, &HashMap::new())
+            .iter()
+            .map(text)
+            .collect();
         assert!(narrow[2].contains("a very long"), "{narrow:?}");
         assert!(narrow.iter().all(|l| l.chars().count() <= 40), "{narrow:?}");
         let clock = fmt_clock(ts(1_700_000_000), now);
@@ -470,5 +512,49 @@ mod tests {
             happened: vec![mk_lead("agent", "x", Band::Happened, None, ts(1))],
         };
         assert_eq!(lanes(&r)[0].name, "my work");
+    }
+
+    pub(crate) fn summary_of(run: &str, text: &str) -> Summary {
+        Summary {
+            run: run.into(),
+            agent: "claude".into(),
+            by: "a1".into(),
+            at: ts(1),
+            text: text.into(),
+            since: None,
+            source: "summarised".into(),
+            reach: String::new(),
+            stale: false,
+            target: String::new(),
+            deep: false,
+            from: None,
+            calls: 1,
+            runs: 1,
+        }
+    }
+
+    #[test]
+    fn a_happened_rows_brief_shows_under_it() {
+        let r = Report {
+            needs_you: vec![],
+            live: vec![],
+            happened: vec![mk_lead("claude", "run:r1", Band::Happened, Some("/p/relay"), ts(5))],
+            tags: vec![],
+        };
+        let mut briefs = HashMap::new();
+        briefs.insert(
+            "r1".to_string(),
+            summary_of("r1", "Worked on: the parser\nOpen questions: none\nNext: tests"),
+        );
+        let (lines, at) = report_view(&r, 80, ts(10), Some(0), &briefs);
+        let ls: Vec<String> = lines.iter().map(text).collect();
+        let row = ls.iter().position(|l| l.contains('✓')).unwrap();
+        assert!(ls[row + 1].contains("worked  the parser"), "{ls:?}");
+        assert!(ls[row + 2].contains("next    tests"), "{ls:?}");
+        assert!(!ls.iter().any(|l| l.contains("asks")), "{ls:?}");
+        assert_eq!(at, Some(row));
+        briefs.get_mut("r1").unwrap().stale = true;
+        let none = report_lines(&r, 80, ts(10), &briefs);
+        assert!(!none.iter().map(text).any(|l| l.contains("worked")));
     }
 }

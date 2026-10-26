@@ -1951,6 +1951,8 @@ impl App {
             });
         }
         self.select(Some(key));
+        // The recap made for the row is loaded whether or not the cursor moved.
+        self.load_pane().await;
     }
 
     // ---- the form ----------------------------------------------------------
@@ -2766,7 +2768,7 @@ impl App {
         if self.report_prose
             && let Some(rep) = &self.report
         {
-            let lines: Vec<Line> = prose::prose(rep, Timestamp::now())
+            let lines: Vec<Line> = prose::prose(rep, &self.briefs, self.left, Timestamp::now())
                 .lines()
                 .map(|l| Line::from(format!(" {l}")))
                 .collect();
@@ -2774,7 +2776,13 @@ impl App {
             return;
         }
         let (lines, sel_line) = match &self.report {
-            Some(rep) => report::report_view(rep, area.width as usize, Timestamp::now(), Some(self.report_sel)),
+            Some(rep) => report::report_view(
+                rep,
+                area.width as usize,
+                Timestamp::now(),
+                Some(self.report_sel),
+                &self.briefs,
+            ),
             None => (vec![Line::from(Span::raw(" loading report…").dim())], None),
         };
         // Scroll only as far as keeps the cursor row in view.
@@ -5247,6 +5255,30 @@ mod tests {
         press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
         assert!(app.view == super::View::Work);
         assert_eq!(app.sel.as_deref(), Some(RUN));
+        token.cancel();
+    }
+
+    #[tokio::test]
+    async fn enter_on_a_briefed_run_shows_its_brief_in_the_pane() {
+        let (_tmp, token, mut app, _folder) = panel().await;
+        app.open_report().await;
+        app.report = Some(rl_proto::methods::Report {
+            needs_you: vec![],
+            live: vec![],
+            happened: vec![report_lead("shell", "run:run00001", rl_proto::lead::Band::Happened)],
+            tags: vec![],
+        });
+        app.briefs.insert(
+            "run00001".into(),
+            crate::tui::report::tests::summary_of(
+                "run00001",
+                "Worked on: the parser\nOpen questions: none\nNext: tests",
+            ),
+        );
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+        press(&mut app, KeyCode::Char('o'), KeyModifiers::CONTROL).await;
+        let t = draw_text(&mut app);
+        assert!(t.contains("the parser"), "{t}");
         token.cancel();
     }
 
