@@ -6,6 +6,7 @@
 //! the daemon.
 
 pub mod action;
+pub mod brief;
 pub mod codec;
 pub mod config;
 pub mod decision;
@@ -19,4 +20,4 @@ pub mod types;
 pub use facts::RunFacts;
 
 /// Bumped when a message changes shape incompatibly. Reported by `daemon.ping`.
-pub const PROTOCOL_VERSION: u32 = 8;
+pub const PROTOCOL_VERSION: u32 = 9;

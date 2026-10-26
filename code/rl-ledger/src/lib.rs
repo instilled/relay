@@ -20,6 +20,7 @@ pub mod migrate;
 pub mod order;
 pub mod presence;
 pub mod runs;
+pub mod seeds;
 pub mod session_io;
 pub mod sessions;
 pub mod summaries;

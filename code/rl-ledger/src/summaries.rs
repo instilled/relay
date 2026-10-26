@@ -1,10 +1,12 @@
-//! `summaries` table: a recap of a run, live or ended — the agent's own, or an
-//! assistant's account — one per run, replaced when a newer one is made.
+//! `summaries` table: a recap of a run, live or ended — an assistant's
+//! account, or "nothing new" — one per run, replaced when a newer one is
+//! made. The agent's own recap is a seed (`recap_seeds`), read as a fallback.
 //! `transcripts`: the agent's own session file for a run, once known, and how
 //! far into it the agent's recap has been read.
 
 use anyhow::Result;
 use rl_core::time::{from_millis, to_millis};
+use rl_proto::brief::Brief;
 use rl_proto::types::Summary;
 use rusqlite::{Connection, OptionalExtension, params, params_from_iter};
 use std::collections::HashMap;
@@ -33,56 +35,60 @@ pub fn put(conn: &Connection, s: &Summary) -> Result<()> {
     Ok(())
 }
 
-/// Keeps `s` unless the one kept is as new or newer: an agent's recap picked
-/// up as it is written never replaces one asked for since. Whether it was
-/// kept.
-pub fn put_newer(conn: &Connection, s: &Summary) -> Result<bool> {
-    let n = conn.execute(
-        "INSERT INTO summaries (run, agent, by_run, at, text, since, source, reach)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-         ON CONFLICT(run) DO UPDATE SET agent = excluded.agent, by_run = excluded.by_run, at = excluded.at,
-           text = excluded.text, since = excluded.since, source = excluded.source, reach = excluded.reach
-         WHERE summaries.at < excluded.at",
-        params![
-            s.run,
-            s.agent,
-            s.by,
-            to_millis(s.at),
-            s.text,
-            s.since,
-            s.source,
-            s.reach
-        ],
-    )?;
-    Ok(n > 0)
-}
-
-/// The first line of each of these runs' recaps, cut for a row: one query
-/// for the whole list. "Nothing new" is not a recap.
+/// The line of each of these runs' recaps, cut for a row: one query per
+/// table for the whole list. A run's written recap if it has one, else its
+/// seed — the agent's own. "Nothing new" is not a recap.
 pub fn lines(conn: &Connection, runs: &[String]) -> Result<HashMap<String, String>> {
     let mut out = HashMap::new();
     // Well under what SQLite takes as parameters in one statement.
     for chunk in runs.chunks(500) {
         let marks = std::iter::repeat_n("?", chunk.len()).collect::<Vec<_>>().join(",");
-        let mut stmt = conn.prepare(&format!(
-            "SELECT run, substr(text, 1, {}) FROM summaries WHERE source != 'nothing new' AND run IN ({marks})",
-            LINE_MAX * 4
-        ))?;
-        let rows = stmt.query_map(params_from_iter(chunk), |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-        })?;
-        for row in rows {
-            let (run, text) = row?;
-            if let Some(line) = first_line(&text) {
-                out.insert(run, line);
+        for sql in [
+            // Written ones first; a seed only fills in where none was.
+            format!(
+                "SELECT run, substr(text, 1, {}) FROM summaries WHERE source != 'nothing new' AND run IN ({marks})",
+                LINE_MAX * 4
+            ),
+            format!(
+                "SELECT run, substr(text, 1, {}) FROM recap_seeds WHERE source != 'nothing new' AND run IN ({marks})",
+                LINE_MAX * 4
+            ),
+        ] {
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt.query_map(params_from_iter(chunk), |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })?;
+            for row in rows {
+                let (run, text) = row?;
+                if out.contains_key(&run) {
+                    continue;
+                }
+                if let Some(line) = first_line(&text) {
+                    out.insert(run, line);
+                }
             }
         }
     }
     Ok(out)
 }
 
-/// A recap's first line with anything on it, at most `LINE_MAX` characters.
+/// A recap's line for a row: when it has labelled parts, the first of
+/// `Worked on:`, `Next:`, `Open questions:` that has anything, without its
+/// label (a raw label is never shown); else the first line with anything on
+/// it — at most `LINE_MAX` characters.
 fn first_line(text: &str) -> Option<String> {
+    let brief = Brief::parse(text);
+    let part = brief.worked_on.or(brief.next).or(brief.questions);
+    let text = match part {
+        Some(p) => p,
+        None => {
+            // Labelled, but every part `none`: no line, not a raw label.
+            if Brief::is_labelled(text) {
+                return None;
+            }
+            text.to_string()
+        }
+    };
     let line = text.lines().map(str::trim).find(|l| !l.is_empty())?;
     if line.chars().count() <= LINE_MAX {
         return Some(line.to_string());
@@ -184,6 +190,30 @@ mod tests {
     use rl_proto::types::{Run, RunKind};
 
     #[test]
+    fn a_line_is_a_part_never_a_raw_label() {
+        let line = |t: &str| first_line(t);
+        assert_eq!(
+            line("Worked on: the parser\nNext: tests").as_deref(),
+            Some("the parser")
+        );
+        assert_eq!(
+            line("Worked on: none\nOpen questions: keep the flag?\nNext: ship it").as_deref(),
+            Some("ship it"),
+            "next before questions"
+        );
+        assert_eq!(
+            line("Worked on: none\nOpen questions: keep the flag?\nNext: none").as_deref(),
+            Some("keep the flag?")
+        );
+        assert_eq!(line("Worked on: none\nOpen questions: none\nNext: none"), None);
+        assert_eq!(
+            line("\nSearch fixed.\nNothing else.").as_deref(),
+            Some("Search fixed."),
+            "no label: the first line"
+        );
+    }
+
+    #[test]
     fn one_per_run_the_latest_kept() {
         let mut c = Connection::open_in_memory().unwrap();
         crate::migrate::run(&mut c).unwrap();
@@ -262,32 +292,11 @@ mod tests {
     }
 
     #[test]
-    fn a_recap_picked_up_never_replaces_a_newer_one() {
-        let c = ledger();
-        assert!(put_newer(&c, &recap("r1", "2026-09-10T12:05:00Z", "First.")).unwrap());
-        assert!(put_newer(&c, &recap("r1", "2026-09-10T12:10:00Z", "Second.")).unwrap());
-        // One asked for after it stays over an older recap read again.
-        let asked = Summary {
-            agent: "haiku".into(),
-            by: "a1".into(),
-            source: "summarised".into(),
-            ..recap("r1", "2026-09-10T12:20:00Z", "Asked for.")
-        };
-        put(&c, &asked).unwrap();
-        assert!(!put_newer(&c, &recap("r1", "2026-09-10T12:10:00Z", "Second.")).unwrap());
-        assert!(!put_newer(&c, &recap("r1", "2026-09-10T12:20:00Z", "Same moment.")).unwrap());
-        assert_eq!(get(&c, "r1").unwrap().unwrap(), asked);
-        // A recap written after it does.
-        assert!(put_newer(&c, &recap("r1", "2026-09-10T12:30:00Z", "Third.")).unwrap());
-        assert_eq!(get(&c, "r1").unwrap().unwrap().text, "Third.");
-    }
-
-    #[test]
     fn the_list_gets_each_recaps_first_line_in_one_go() {
         let c = ledger();
         put(
             &c,
-            &recap("r1", "2026-09-10T12:05:00Z", "\n  Fixed the search.  \nNext: commit."),
+            &recap("r1", "2026-09-10T12:05:00Z", "\n  Fixed the search.  \nThen commit."),
         )
         .unwrap();
         put(&c, &recap("r2", "2026-09-10T12:05:00Z", &"word ".repeat(100))).unwrap();

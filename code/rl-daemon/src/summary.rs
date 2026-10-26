@@ -5,14 +5,11 @@
 //! `catch_up.summary` is `auto` — the panel and `rl since` ask for it as you
 //! come back.
 //!
-//! Brief, a run is told from the cheapest source that has one:
-//! - Claude writes its own recap into its transcript; the latest in the
-//!   stretch is taken as it stands, no assistant asked;
-//! - Codex keeps no recap, but its turns say what it last said and did: with
-//!   `assistants.summary` set, an assistant condenses them, else they are
-//!   the recap as facts;
-//! - anything else — and Claude with no recap in the stretch — is read by
-//!   `assistants.summary`: what was said, or the end of the output.
+//! Brief, a run is always written by `assistants.summary`, in three parts
+//! (`Worked on:`, `Open questions:`, `Next:`), from the bounded tail of what
+//! was said (Claude, Codex, Gemini) or of its output, the run's frozen facts
+//! once it has ended, and the agent's own recap — kept apart as a seed — when
+//! it wrote one in the stretch.
 //!
 //! Deep, a run is always read by the assistant, all of the stretch: Claude's
 //! messages and tool calls, Codex's turns, or the whole output, with Relay's
@@ -47,7 +44,9 @@ use jiff::{SignedDuration, Timestamp};
 use rl_core::display_path;
 use rl_core::time::{fmt_duration, fmt_when};
 use rl_ledger::events::NewEvent;
-use rl_ledger::{Ledger, events, kept, runs, session_io, summaries};
+use rl_ledger::{Ledger, events, facts, kept, runs, seeds, session_io, summaries};
+use rl_proto::brief::Brief;
+use rl_proto::facts::RunFacts;
 use rl_proto::methods::{AssistantParams, EventFilter, SummaryParams};
 use rl_proto::types::{Cause, Event, Run, RunState, Summary, SummaryTarget, event_kind};
 use std::fmt::Write as _;
@@ -92,7 +91,11 @@ pub async fn get(d: &Daemon, p: &SummaryParams) -> Result<Option<Summary>> {
                     }
                     Ok(Some(s))
                 }
-                None if !p.deep && p.from.is_none() => run_latest(d, id, run.as_ref()).await,
+                None if !p.deep && p.from.is_none() => match run_latest(d, id, run.as_ref()).await? {
+                    Some(s) => Ok(Some(s)),
+                    // Nothing written: the agent's own recap, for display.
+                    None => run_seed(d, id, run.as_ref()).await,
+                },
                 None => Ok(None),
             }
         }
@@ -127,7 +130,7 @@ pub async fn make(d: &Daemon, p: SummaryParams) -> Result<Summary> {
             if p.deep {
                 run_deep(d, &run, from, &p).await
             } else {
-                run_brief(d, &run, from, &p).await
+                run_brief(d, &run, from, &p, Say::OnTheRun).await
             }
         }
         t => over(d, t, from, &p).await,
@@ -205,6 +208,22 @@ async fn run_kept(d: &Daemon, run: &str) -> Result<Option<Summary>> {
     Ok(Some(s))
 }
 
+/// The agent's own recap of a run (`recap_seeds`), marked stale when the run
+/// has moved on since. Shown when nothing was written; never kept as a brief.
+async fn run_seed(d: &Daemon, run: &str, found: Option<&Run>) -> Result<Option<Summary>> {
+    let id = run.to_string();
+    let Some(mut s) = d.ledger.call_read(move |c| seeds::get(c, &id)).await? else {
+        return Ok(None);
+    };
+    s.target = SummaryTarget::Run { id: run.to_string() }.key();
+    if let Some(r) = found
+        && !s.reach.is_empty()
+    {
+        s.stale = run_reach(d, r).await? != s.reach;
+    }
+    Ok(Some(s))
+}
+
 /// The newest brief one said of a run over any stretch: its recap of the
 /// whole of it (`summaries`), or one since you looked (`summary_kept`) —
 /// marked stale when it has moved on since.
@@ -253,6 +272,7 @@ pub(crate) async fn locate_in(ledger: &Ledger, run: &Run) -> Result<Option<PathB
     let found = match agent {
         Agent::Claude => transcript::find_claude(&home, &run.cwd, run.started_at),
         Agent::Codex => transcript::find_codex(&home, &run.cwd, run.started_at),
+        Agent::Gemini => transcript::find_gemini(&home, &run.cwd, run.started_at),
     };
     if let Some(p) = &found {
         let (id, path) = (run.id.clone(), p.to_string_lossy().into_owned());
@@ -393,20 +413,31 @@ async fn output(d: &Daemon, run: &Run, from: Option<Timestamp>, max: usize) -> R
     Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
-/// Relay's events for a run over the stretch, at most `limit`.
-async fn run_events(d: &Daemon, run: &Run, from: Option<Timestamp>, limit: u32) -> Result<Vec<Event>> {
+/// What Relay knows of a run besides what it said: its events over the stretch
+/// (at most `limit`), its frozen facts once it has ended, and the agent's own
+/// recap when it was written within the stretch — all in one ledger read.
+async fn run_context(
+    d: &Daemon,
+    run: &Run,
+    from: Option<Timestamp>,
+    limit: u32,
+) -> Result<(Vec<Event>, Option<RunFacts>, Option<Summary>)> {
     let id = run.id.clone();
+    let ended = run.ended_at.is_some();
     d.ledger
         .call_read(move |c| {
-            events::list(
+            let evs = events::list(
                 c,
                 &EventFilter {
-                    run: Some(id),
+                    run: Some(id.clone()),
                     since: from,
                     limit: Some(limit),
                     ..Default::default()
                 },
-            )
+            )?;
+            let facts = if ended { facts::get(c, &id)? } else { None };
+            let seed = seeds::get(c, &id)?.filter(|s| from.is_none_or(|f| s.at >= f));
+            Ok((evs, facts, seed))
         })
         .await
 }
@@ -423,8 +454,9 @@ pub(crate) fn run_cwd(d: &Daemon, run: &Run) -> PathBuf {
 }
 
 /// A run, brief: the one kept while it has not moved on, unless `again`;
-/// else a new one from the cheapest source that has one.
-async fn run_brief(d: &Daemon, run: &Run, from: Option<Timestamp>, p: &SummaryParams) -> Result<Summary> {
+/// else a new one from the cheapest source that has one. `say` is whether a
+/// new one is news on the run.
+async fn run_brief(d: &Daemon, run: &Run, from: Option<Timestamp>, p: &SummaryParams, say: Say) -> Result<Summary> {
     let file = locate(d, run).await?;
     let reach = reach(d, run, file.as_deref()).await?;
     if !p.again {
@@ -438,50 +470,54 @@ async fn run_brief(d: &Daemon, run: &Run, from: Option<Timestamp>, p: &SummaryPa
     }
     let body = read_body(file.as_deref()).await;
     let mut made = blank(&p.target, &run.id, false, from, reach);
-    // What an assistant would read, when the agent's own record does not do.
-    let (heading, material) = match (Agent::of(run), body) {
-        (Some(Agent::Claude), Some(body)) => {
-            if let Some(r) = transcript::claude_recap(&body, from) {
-                made.agent = "claude".into();
-                made.source = "claude recap".into();
-                made.text = r.text;
-                return done(d, Some(run), made, p.dry).await;
-            }
-            ("What was said".to_string(), transcript::claude_messages(&body, from))
-        }
-        (Some(Agent::Codex), Some(body)) => {
-            let turns = transcript::codex_turns(&body, from);
-            let asked = d.config.read().unwrap().config.assistants.summary.is_some();
-            if !turns.is_empty() && !asked {
-                made.agent = "codex".into();
-                made.source = "codex turns".into();
-                made.text = transcript::codex_line(&turns);
-                return done(d, Some(run), made, p.dry).await;
-            }
-            made.source = "codex turns".into();
-            ("Its turns".to_string(), transcript::codex_facts(&turns))
-        }
+    // What the assistant reads: the agent's own record of the stretch, else
+    // the end of the run's output.
+    let (source, heading, material) = match (Agent::of(run), body) {
+        (Some(Agent::Claude), Some(body)) => (
+            "claude",
+            "What was said".to_string(),
+            transcript::claude_messages(&body, from),
+        ),
+        (Some(Agent::Gemini), Some(body)) => (
+            "gemini",
+            "What was said".to_string(),
+            transcript::gemini_messages(&body, from),
+        ),
+        (Some(Agent::Codex), Some(body)) => (
+            "codex",
+            "Its turns".to_string(),
+            transcript::codex_facts(&transcript::codex_turns(&body, from)),
+        ),
         _ => (
+            "output",
             format!("Its output (the end of it, at most {} KB)", OUTPUT_TAIL / 1024),
             output(d, run, from, OUTPUT_TAIL).await?,
         ),
     };
     if material.trim().is_empty() {
         nothing(&mut made);
-        return done(d, Some(run), made, p.dry).await;
+        return done(d, Some(run), made, p.dry, say).await;
     }
+    made.source = source.into();
     made.calls = 1;
     if p.dry {
         return Ok(made);
     }
-    let evs = run_events(d, run, from, EVENTS_BRIEF).await?;
-    let prompt = prompt(run, from, Some(&evs), &heading, tail_of(&material, OUTPUT_TAIL), false);
+    let (evs, facts, seed) = run_context(d, run, from, EVENTS_BRIEF).await?;
+    let seed = seed.as_ref().map(|s| s.text.as_str());
+    let prompt = prompt(
+        run,
+        from,
+        Some(&evs),
+        facts.as_ref(),
+        seed,
+        &heading,
+        tail_of(&material, OUTPUT_TAIL),
+        false,
+    );
     let a = ask(d, run_cwd(d, run), &run.title, prompt, p).await?;
-    if made.source.is_empty() {
-        made.source = "summarised".into();
-    }
     (made.agent, made.by, made.text) = (a.agent, a.by, a.text);
-    keep(d, Some(run), made).await
+    keep(d, Some(run), made, say).await
 }
 
 /// A run's deep read kept for this stretch, while the run has not moved on.
@@ -513,11 +549,15 @@ async fn run_deep(d: &Daemon, run: &Run, from: Option<Timestamp>, p: &SummaryPar
             "Its turns".to_string(),
             transcript::codex_facts(&transcript::codex_turns(&body, from)),
         ),
+        (Some(Agent::Gemini), Some(body)) => (
+            "What was said and done".to_string(),
+            transcript::gemini_story(&body, from),
+        ),
         _ => ("Its output".to_string(), output(d, run, from, usize::MAX).await?),
     };
     if material.trim().is_empty() {
         nothing(&mut made);
-        return done(d, Some(run), made, p.dry).await;
+        return done(d, Some(run), made, p.dry, Say::OnTheRun).await;
     }
     let parts = parts(&material);
     let n = parts.len();
@@ -525,14 +565,15 @@ async fn run_deep(d: &Daemon, run: &Run, from: Option<Timestamp>, p: &SummaryPar
     if p.dry {
         return Ok(made);
     }
-    let evs = run_events(d, run, from, EVENTS_DEEP).await?;
+    let (evs, facts, seed) = run_context(d, run, from, EVENTS_DEEP).await?;
+    let seed = seed.as_ref().map(|s| s.text.as_str());
     let cwd = run_cwd(d, run);
     let a = if n == 1 {
         ask(
             d,
             cwd,
             &run.title,
-            prompt(run, from, Some(&evs), &heading, parts[0], true),
+            prompt(run, from, Some(&evs), facts.as_ref(), seed, &heading, parts[0], true),
             p,
         )
         .await?
@@ -540,8 +581,17 @@ async fn run_deep(d: &Daemon, run: &Run, from: Option<Timestamp>, p: &SummaryPar
         let mut said = Vec::with_capacity(n);
         for (i, part) in parts.iter().enumerate() {
             let at = format!("Part {} of {n}", i + 1);
-            let evs = (i == 0).then_some(evs.as_slice());
-            let q = prompt(run, from, evs, &format!("{at}: {heading}"), part, true);
+            let first = i == 0;
+            let q = prompt(
+                run,
+                from,
+                first.then_some(evs.as_slice()),
+                facts.as_ref().filter(|_| first),
+                seed.filter(|_| first),
+                &format!("{at}: {heading}"),
+                part,
+                true,
+            );
             let a = ask(d, cwd.clone(), &run.title, q, p)
                 .await
                 .with_context(|| format!("part {} of {n}", i + 1))?;
@@ -558,7 +608,7 @@ async fn run_deep(d: &Daemon, run: &Run, from: Option<Timestamp>, p: &SummaryPar
         format!("read in {n} parts")
     };
     (made.agent, made.by, made.text) = (a.agent, a.by, a.text);
-    keep(d, Some(run), made).await
+    keep(d, Some(run), made, Say::OnTheRun).await
 }
 
 /// Where many runs' stretch begins: as asked; for a flow, the start of its
@@ -637,33 +687,45 @@ fn heading(t: &SummaryTarget, r: &Run, now: Timestamp) -> String {
     }
 }
 
-/// Each run's line as the list says it: its recap, else where it stands.
-async fn brief_lines(d: &Daemon, runs: &[Run]) -> Result<Vec<String>> {
-    let runs = runs.to_vec();
-    d.ledger
-        .call_read(move |c| {
-            let ids: Vec<String> = runs.iter().map(|r| r.id.clone()).collect();
-            let recaps = summaries::lines(c, &ids)?;
-            runs.iter()
-                .map(|r| {
-                    let line = match recaps.get(&r.id) {
-                        Some(l) => l.clone(),
-                        None => {
-                            let last = events::latest_for_run(c, &r.id)?;
-                            let emitted = events::emitted_for_run(c, &r.id)?;
-                            crate::digest::summarise(r, last.as_ref(), &emitted)
-                        }
-                    };
-                    Ok(format!("{} · {line}", r.state))
-                })
-                .collect()
-        })
-        .await
+/// A run's line among many, brief: its written brief's first part (never a
+/// raw label), else where it stands.
+async fn brief_line(d: &Daemon, r: &Run, brief: &Summary) -> Result<String> {
+    let line = if brief.source == "nothing new" {
+        None
+    } else {
+        part_line(&brief.text)
+    };
+    let line = match line {
+        Some(l) => l,
+        None => {
+            let id = r.id.clone();
+            let (last, emitted) = d
+                .ledger
+                .call_read(move |c| Ok((events::latest_for_run(c, &id)?, events::emitted_for_run(c, &id)?)))
+                .await?;
+            crate::digest::summarise(r, last.as_ref(), &emitted)
+        }
+    };
+    Ok(format!("{} · {line}", r.state))
 }
 
-/// A flow's, a project's or everything's runs: one call over their lines,
-/// brief; deep, each run's deep read first (kept ones as they are), then one
-/// call to join them.
+/// The first of a brief's parts that has anything, without its label; else
+/// the first line with anything on it. None when every part is `none`.
+fn part_line(text: &str) -> Option<String> {
+    let b = Brief::parse(text);
+    let part = b.worked_on.or(b.next).or(b.questions);
+    let text = match part.as_deref() {
+        Some(p) => p,
+        // Labelled, but every part `none`: no line, not a raw label.
+        None if Brief::is_labelled(text) => return None,
+        None => text,
+    };
+    text.lines().map(str::trim).find(|l| !l.is_empty()).map(str::to_string)
+}
+
+/// A flow's, a project's or everything's runs: each run's brief first (a kept
+/// one as it is), or its deep read; then one call to join them. Each is read
+/// on the run's own stretch, so what is kept matches the next look.
 async fn over(d: &Daemon, t: &SummaryTarget, from: Option<Timestamp>, p: &SummaryParams) -> Result<Summary> {
     let now = now();
     let from = over_from(d, t, from, now).await?;
@@ -678,50 +740,77 @@ async fn over(d: &Daemon, t: &SummaryTarget, from: Option<Timestamp>, p: &Summar
     made.runs = runs.len() as u32;
     if runs.is_empty() {
         nothing(&mut made);
-        return done(d, None, made, p.dry).await;
+        return done(d, None, made, p.dry, Say::OnTheRun).await;
     }
-    // A run that began in the stretch is read whole, so its deep read is the
-    // one kept for it.
-    let stretch = |r: &Run| (r.started_at < from).then_some(from);
+    // Each run is read on its own stretch (since it was last seen, else all
+    // of it), not the over's, so what is kept matches the next look at it.
     let lines = if !p.deep {
+        // Each run's brief, a kept one costing nothing; and one to join them.
+        let mut told = Vec::with_capacity(runs.len());
+        let mut briefed = 0;
+        for r in &runs {
+            let own = run_stretch(d, r, None).await?;
+            let mut ask = SummaryParams {
+                target: SummaryTarget::Run { id: r.id.clone() },
+                deep: false,
+                from: own,
+                again: false,
+                dry: true,
+                timeout: p.timeout.clone(),
+            };
+            // What it would cost: nothing for one kept (a kept one carries
+            // the call that wrote it, so it is asked of the dry run).
+            briefed += run_brief(d, r, own, &ask, Say::Quietly).await?.calls;
+            if !p.dry {
+                ask.dry = false;
+                // Read for the over, not news on the run.
+                let s = run_brief(d, r, own, &ask, Say::Quietly)
+                    .await
+                    .with_context(|| format!("briefing `{}`", r.title))?;
+                told.push(brief_line(d, r, &s).await?);
+            }
+        }
+        made.calls = briefed;
         if p.dry {
-            made.calls = 1;
+            made.calls += 1;
             return Ok(made);
         }
-        many_lines(t, &runs, brief_lines(d, &runs).await?, now)
+        many_lines(t, &runs, told, now)
     } else if p.dry {
         // Each run as its own deep read would cost — none for one kept or
         // with nothing in it, its parts and their join for a long one — and
         // one to join them.
         let mut calls = 1;
         for r in &runs {
+            let own = run_stretch(d, r, None).await?;
             let dry = SummaryParams {
                 target: SummaryTarget::Run { id: r.id.clone() },
                 deep: true,
-                from: stretch(r),
+                from: own,
                 again: false,
                 dry: true,
                 timeout: None,
             };
-            calls += run_deep(d, r, stretch(r), &dry).await?.calls;
+            calls += run_deep(d, r, own, &dry).await?.calls;
         }
         made.calls = calls;
         return Ok(made);
     } else {
         let mut lines = Vec::with_capacity(runs.len());
         for r in &runs {
-            let s = match deep_kept(d, r, stretch(r)).await? {
+            let own = run_stretch(d, r, None).await?;
+            let s = match deep_kept(d, r, own).await? {
                 Some(k) => k,
                 None => {
                     let fresh = SummaryParams {
                         target: SummaryTarget::Run { id: r.id.clone() },
                         deep: true,
-                        from: stretch(r),
+                        from: own,
                         again: true,
                         dry: false,
                         timeout: p.timeout.clone(),
                     };
-                    let s = run_deep(d, r, stretch(r), &fresh)
+                    let s = run_deep(d, r, own, &fresh)
                         .await
                         .with_context(|| format!("reading `{}`", r.title))?;
                     made.calls += s.calls;
@@ -741,7 +830,7 @@ async fn over(d: &Daemon, t: &SummaryTarget, from: Option<Timestamp>, p: &Summar
     made.calls += calls;
     made.source = format!("over {} run{}", runs.len(), if runs.len() == 1 { "" } else { "s" });
     (made.agent, made.by, made.text) = (a.agent, a.by, a.text);
-    keep(d, None, made).await
+    keep(d, None, made, Say::OnTheRun).await
 }
 
 /// The most lines many runs are told by, brief; past it the rest are
@@ -954,18 +1043,27 @@ async fn ask(d: &Daemon, cwd: PathBuf, of: &str, prompt: String, p: &SummaryPara
 }
 
 /// One made without asking anyone: kept, unless it was only a dry run.
-async fn done(d: &Daemon, run: Option<&Run>, s: Summary, dry: bool) -> Result<Summary> {
+async fn done(d: &Daemon, run: Option<&Run>, s: Summary, dry: bool, say: Say) -> Result<Summary> {
     if dry {
         return Ok(dry_of(s));
     }
-    keep(d, run, s).await
+    keep(d, run, s, say).await
+}
+
+/// Whether a run's new brief recap is news on the run.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Say {
+    /// Asked of the run: said on it as a `run.summarised` event.
+    OnTheRun,
+    /// Made on the way to a summary of many runs: kept, said on no run.
+    Quietly,
 }
 
 /// Keeps a summary — a run's brief recap of the whole of it by the run, and
-/// said on the run as a `run.summarised` event; anything else by what, how
-/// deep and from when, said on no run, so reading runs for a catch-up is not
-/// news on them.
-async fn keep(d: &Daemon, run: Option<&Run>, s: Summary) -> Result<Summary> {
+/// said on the run as a `run.summarised` event unless made `Quietly`;
+/// anything else by what, how deep and from when, said on no run, so reading
+/// runs for a catch-up is not news on them.
+async fn keep(d: &Daemon, run: Option<&Run>, s: Summary, say: Say) -> Result<Summary> {
     let run = run.filter(|_| !s.deep && s.from.is_none()).cloned();
     d.ledger
         .call({
@@ -974,8 +1072,10 @@ async fn keep(d: &Daemon, run: Option<&Run>, s: Summary) -> Result<Summary> {
                 match &run {
                     Some(run) => {
                         summaries::put(c, &s)?;
-                        let e = NewEvent::for_run(run, s.at, event_kind::RUN_SUMMARISED, first_line(&s.text));
-                        events::append(c, &e)?;
+                        if say == Say::OnTheRun {
+                            let e = NewEvent::for_run(run, s.at, event_kind::RUN_SUMMARISED, first_line(&s.text));
+                            events::append(c, &e)?;
+                        }
                     }
                     None => kept::put(c, &s)?,
                 }
@@ -989,10 +1089,13 @@ async fn keep(d: &Daemon, run: Option<&Run>, s: Summary) -> Result<Summary> {
 /// What the agent is asked of a run: the run as Relay knows it, the stretch,
 /// its events (when given), what it said or wrote, then the ask — brief or
 /// deep.
+#[allow(clippy::too_many_arguments)]
 pub fn prompt(
     run: &Run,
     from: Option<Timestamp>,
     events: Option<&[Event]>,
+    facts: Option<&RunFacts>,
+    seed: Option<&str>,
     heading: &str,
     material: &str,
     deep: bool,
@@ -1014,10 +1117,19 @@ pub fn prompt(
     } else {
         let _ = writeln!(
             s,
-            "You are summarising {stretch} for the person who started it, who has not read its output. \
-             Answer in plain prose, three sentences at most: what it did, what changed, and what is \
-             left or went wrong. No headings, lists, YAML or preamble; do not repeat the command. If \
-             nothing happened, say so in one sentence.\n"
+            "You are briefing the person who started {stretch} and is coming back to it; they have not \
+             read its output. Answer in exactly three labelled parts, each on its own line, in this \
+             order, each one or two sentences, and `none` when there is nothing to say:\n\
+             Worked on: what it did and what changed\n\
+             Open questions: what needs the person's decision or is unresolved\n\
+             Next: what to do next\n\
+             {}No other headings, lists, YAML or preamble; do not repeat the command.\n",
+            if facts.is_some() {
+                "Ground it in the facts below; where the agent's own recap disagrees with them, trust \
+                 the facts. "
+            } else {
+                ""
+            }
         );
     }
     let _ = writeln!(s, "## The run\n");
@@ -1071,6 +1183,53 @@ pub fn prompt(
         for l in &said[from..] {
             let _ = writeln!(s, "{l}");
         }
+    }
+    if let Some(f) = facts {
+        let _ = writeln!(s, "\n## The facts\n");
+        let commits: Vec<&Event> = events
+            .unwrap_or_default()
+            .iter()
+            .filter(|e| e.kind == event_kind::COMMIT_LANDED)
+            .collect();
+        if commits.is_empty() {
+            let _ = writeln!(s, "commits: {}", f.commits);
+        } else {
+            let _ = writeln!(s, "commits: {}", f.commits.max(commits.len() as u32));
+            for e in &commits {
+                let _ = writeln!(s, "- {}", e.summary);
+            }
+        }
+        let _ = writeln!(
+            s,
+            "changes: +{}/\u{2212}{} across {} files",
+            f.added, f.removed, f.files
+        );
+        if !f.top_paths.is_empty() {
+            let _ = writeln!(s, "top paths: {}", f.top_paths.join(", "));
+        }
+        let _ = writeln!(s, "errors: {}", f.errors);
+        match (&f.branch, f.pushed) {
+            (Some(b), true) => {
+                let _ = writeln!(s, "branch: {b} (pushed)");
+            }
+            (Some(b), false) => {
+                let _ = writeln!(s, "branch: {b} (not pushed)");
+            }
+            (None, _) => {}
+        }
+        if let Some(t) = f.active_secs {
+            let _ = writeln!(s, "active time: {}", fmt_duration(SignedDuration::from_secs(t as i64)));
+        }
+        if let (Some(i), Some(c), Some(o)) = (f.tokens_in, f.tokens_cached, f.tokens_out) {
+            let _ = writeln!(s, "tokens: {i} fresh, {c} cached, {o} out");
+        }
+    }
+    if let Some(seed) = seed {
+        let _ = writeln!(
+            s,
+            "\n## Its own recap\n\nThe agent's own words about what it did; check them against the rest.\n\n````\n{}\n````",
+            seed.trim_end()
+        );
     }
     let _ = writeln!(s, "\n## {heading}\n");
     if material.trim().is_empty() {
@@ -1191,6 +1350,8 @@ mod tests {
             &r,
             None,
             Some(&[e]),
+            None,
+            None,
             "Its output (the end of it, at most 64 KB)",
             "test parser ... FAILED\n",
             false,
@@ -1203,9 +1364,9 @@ mod tests {
         assert!(p.contains("run.failed  exit 2"), "{p}");
         assert!(p.contains("````\ntest parser ... FAILED\n````"), "{p}");
         assert!(p.contains("## Its output (the end of it, at most 64 KB)\n"), "{p}");
-        assert!(p.contains("three sentences at most"), "{p}");
+        assert!(!p.contains("## The facts") && !p.contains("## Its own recap"), "{p}");
         let from: Timestamp = "2026-09-10T09:00:00Z".parse().unwrap();
-        let p = prompt(&r, Some(from), Some(&[]), "What was said", "", false);
+        let p = prompt(&r, Some(from), Some(&[]), None, None, "What was said", "", false);
         assert!(p.contains("(no events)") && p.contains("(nothing)"), "{p}");
         assert!(p.contains("what happened since ") && p.contains(" in one run"), "{p}");
         assert!(
@@ -1213,13 +1374,83 @@ mod tests {
             "{p}"
         );
         // Deep, it is asked for more; a later part has no events of its own.
-        let p = prompt(&r, None, None, "Part 2 of 3: Its output", "more\n", true);
+        let p = prompt(&r, None, None, None, None, "Part 2 of 3: Its output", "more\n", true);
         assert!(
             p.contains("what changed where") && p.contains("## Part 2 of 3: Its output\n"),
             "{p}"
         );
         assert!(!p.contains("## What happened"), "{p}");
         assert_eq!(tail_of("aébc", 3), "bc", "on a character boundary");
+    }
+
+    #[test]
+    fn the_brief_asks_for_three_labelled_parts() {
+        let t: Timestamp = "2026-09-10T11:00:00Z".parse().unwrap();
+        let r = Run::new("r1", RunKind::Command, "t", vec![], "/w", "/w", t);
+        let p = prompt(&r, None, None, None, None, "Its output", "x\n", false);
+        for label in ["Worked on:", "Open questions:", "Next:", "none"] {
+            assert!(p.contains(label), "{label}: {p}");
+        }
+        assert!(!p.contains("Ground it in the facts"), "no facts section follows: {p}");
+        let f = RunFacts::default();
+        let p = prompt(&r, None, None, Some(&f), None, "Its output", "x\n", false);
+        assert!(p.contains("Ground it in the facts below"), "{p}");
+    }
+
+    #[test]
+    fn the_facts_and_the_seed_are_sections_of_the_prompt() {
+        let t: Timestamp = "2026-09-10T11:00:00Z".parse().unwrap();
+        let r = Run::new("r1", RunKind::Command, "t", vec![], "/w", "/w", t);
+        let f = RunFacts {
+            commits: 3,
+            added: 180,
+            removed: 40,
+            files: 4,
+            top_paths: vec!["auth/".into()],
+            branch: Some("fix".into()),
+            pushed: false,
+            active_secs: Some(600),
+            tokens_in: Some(10),
+            tokens_cached: Some(20),
+            tokens_out: Some(5),
+            errors: 2,
+            ..Default::default()
+        };
+        let landed = Event {
+            id: 1,
+            at: t,
+            workspace: "/w".into(),
+            run: Some("r1".into()),
+            group_key: "g".into(),
+            kind: event_kind::COMMIT_LANDED.into(),
+            summary: "fix the index".into(),
+            data: None,
+        };
+        let p = prompt(
+            &r,
+            None,
+            Some(&[landed]),
+            Some(&f),
+            Some("All done."),
+            "Its output",
+            "x\n",
+            false,
+        );
+        for want in [
+            "## The facts",
+            "commits: 3\n- fix the index",
+            "+180/\u{2212}40 across 4 files",
+            "top paths: auth/",
+            "errors: 2",
+            "branch: fix (not pushed)",
+            "10 fresh, 20 cached, 5 out",
+            "## Its own recap",
+            "All done.",
+        ] {
+            assert!(p.contains(want), "{want}: {p}");
+        }
+        let p = prompt(&r, None, None, Some(&f), None, "Its output", "x\n", false);
+        assert!(p.contains("commits: 3\nchanges"), "the count alone: {p}");
     }
 
     #[test]
@@ -1508,7 +1739,7 @@ mod tests {
                 data: None,
             })
             .collect();
-        let p = prompt(&r, None, Some(&evs), "Its output", "out\n", true);
+        let p = prompt(&r, None, Some(&evs), None, None, "Its output", "out\n", true);
         let happened = &p[p.find("## What happened").unwrap()..p.find("## Its output").unwrap()];
         assert!(happened.len() <= EVENTS_BYTES + 64, "{}", happened.len());
         assert!(happened.contains("earlier left out)\n"), "{happened}");

@@ -26,17 +26,11 @@ pub struct RunFacts {
     #[serde(default)]
     pub tokens_in: Option<u64>,
     #[serde(default)]
+    pub tokens_cached: Option<u64>,
+    #[serde(default)]
     pub tokens_out: Option<u64>,
     #[serde(default)]
     pub errors: u32,
-    #[serde(default)]
-    pub recap: Option<String>,
-    #[serde(default)]
-    pub worked_on: Option<String>,
-    #[serde(default)]
-    pub questions: Option<String>,
-    #[serde(default)]
-    pub next: Option<String>,
     #[serde(default)]
     pub at: Timestamp,
 }

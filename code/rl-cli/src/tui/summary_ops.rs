@@ -167,13 +167,17 @@ impl App {
             dry: false,
             timeout: None,
         };
-        if deep {
+        // What it would cost, first, when it could fan out: a deep read (in
+        // parts), or a brief over many runs (one each, and the join).
+        let over = !matches!(params.target, SummaryTarget::Run { .. });
+        if deep || over {
             let dry = SummaryParams {
                 dry: true,
                 ..params.clone()
             };
+            let ask_over = if deep { 1 } else { crate::depth::ASK_OVER };
             match self.rpc.call::<SummaryMake>(dry).await {
-                Ok(d) if d.calls > 1 => {
+                Ok(d) if d.calls > ask_over => {
                     self.summary_ask = Some(params);
                     self.mode = Mode::SummaryCost {
                         runs: d.runs,
