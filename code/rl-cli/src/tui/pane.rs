@@ -161,7 +161,12 @@ pub(super) fn facts_section(facts: Option<&rl_proto::RunFacts>, width: usize) ->
         cost.push(format!("{m}m active"));
     }
     if let (Some(i), Some(o)) = (f.tokens_in, f.tokens_out) {
-        cost.push(format!("{i} in / {o} out tokens"));
+        let cached = f
+            .tokens_cached
+            .filter(|c| *c > 0)
+            .map(|c| format!(" · {c} cached"))
+            .unwrap_or_default();
+        cost.push(format!("{i} in{cached} · {o} out tokens"));
     }
     if f.errors > 0 {
         cost.push(format!("{} errors", f.errors));
@@ -833,6 +838,20 @@ mod tests {
         let after = text(&facts_section(Some(&f), 80));
         assert!(after.contains("the index") && after.contains("keep the flag?") && after.contains("ship"));
         assert!(facts_section(None, 80).is_empty());
+    }
+
+    #[test]
+    fn the_cost_line_splits_fresh_cached_and_out() {
+        let mut f = rl_proto::RunFacts {
+            tokens_in: Some(18),
+            tokens_out: Some(11),
+            ..Default::default()
+        };
+        assert!(text(&facts_section(Some(&f), 120)).contains("18 in · 11 out tokens"));
+        f.tokens_cached = Some(0);
+        assert!(text(&facts_section(Some(&f), 120)).contains("18 in · 11 out tokens"));
+        f.tokens_cached = Some(2015);
+        assert!(text(&facts_section(Some(&f), 120)).contains("18 in · 2015 cached · 11 out tokens"));
     }
 
     #[test]

@@ -12,6 +12,7 @@
 use jiff::{SignedDuration, Timestamp};
 use rl_proto::types::Run;
 use serde_json::Value;
+use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -153,31 +154,53 @@ fn within(at: Timestamp, from: Option<Timestamp>) -> bool {
     from.is_none_or(|f| at >= f)
 }
 
-/// Tokens a session spent, in and out. Tokens only; no dollars.
+/// Tokens a session spent: fresh input, cached input and output. Tokens only;
+/// no dollars. `tokens_in` is the fresh part, so the three do not overlap.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Usage {
     pub tokens_in: u64,
+    pub tokens_cached: u64,
     pub tokens_out: u64,
 }
 
 /// The tokens spent by entries at or after `since` (all of them for `None`).
-/// Claude's are on assistant messages, its cache reads and writes counted as
-/// input; Codex's are on `token_count` events, one call's worth each. An entry
-/// with none counts for nothing.
+/// Claude repeats a message's usage on every entry it streams in, so each
+/// message id counts once, its last usage winning; an entry with no id counts
+/// on its own. Fresh is input plus cache writes, cached is cache reads. Codex's
+/// are on `token_count` events, one call's worth each, its input including the
+/// cached part. An entry with none counts for nothing.
 pub fn usage(body: &str, since: Option<Timestamp>) -> Usage {
     let mut sum = Usage::default();
     let n = |v: &Value, key: &str| v.get(key).and_then(Value::as_u64).unwrap_or(0);
-    for (_, v) in entries(body).filter(|(at, _)| within(*at, since)) {
+    // Claude's usage per message id; the key is the entry's position when it has no id.
+    let mut claude: HashMap<String, Usage> = HashMap::new();
+    for (i, (_, v)) in entries(body).filter(|(at, _)| within(*at, since)).enumerate() {
         if let Some(u) = v.pointer("/message/usage") {
-            sum.tokens_in +=
-                n(u, "input_tokens") + n(u, "cache_creation_input_tokens") + n(u, "cache_read_input_tokens");
-            sum.tokens_out += n(u, "output_tokens");
+            let key = v
+                .pointer("/message/id")
+                .and_then(Value::as_str)
+                .map_or_else(|| format!("#{i}"), str::to_string);
+            claude.insert(
+                key,
+                Usage {
+                    tokens_in: n(u, "input_tokens") + n(u, "cache_creation_input_tokens"),
+                    tokens_cached: n(u, "cache_read_input_tokens"),
+                    tokens_out: n(u, "output_tokens"),
+                },
+            );
         } else if v.pointer("/payload/type").and_then(Value::as_str) == Some("token_count")
             && let Some(u) = v.pointer("/payload/info/last_token_usage")
         {
-            sum.tokens_in += n(u, "input_tokens");
+            let cached = n(u, "cached_input_tokens");
+            sum.tokens_in += n(u, "input_tokens").saturating_sub(cached);
+            sum.tokens_cached += cached;
             sum.tokens_out += n(u, "output_tokens");
         }
+    }
+    for u in claude.values() {
+        sum.tokens_in += u.tokens_in;
+        sum.tokens_cached += u.tokens_cached;
+        sum.tokens_out += u.tokens_out;
     }
     sum
 }
@@ -672,11 +695,12 @@ not json
         assert_eq!(
             usage(t, Some(at("2026-09-17T09:30:00Z"))),
             Usage {
-                tokens_in: 62,
+                tokens_in: 62 - 30,
+                tokens_cached: 30,
                 tokens_out: 12
             }
         );
-        assert_eq!(usage(t, None).tokens_in, 65);
+        assert_eq!(usage(t, None).tokens_in, 34);
         let c = r#"{"timestamp":"2026-09-17T09:00:00Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"output_tokens":9}}}}
 {"timestamp":"2026-09-17T09:01:00Z","type":"event_msg","payload":{"type":"token_count","info":null}}
 "#;
@@ -684,9 +708,34 @@ not json
             usage(c, None),
             Usage {
                 tokens_in: 100,
+                tokens_cached: 0,
                 tokens_out: 9
             }
         );
+    }
+
+    #[test]
+    fn usage_counts_a_repeated_claude_message_once() {
+        // three entries, one message id "m1", same usage on each; one more message "m2"
+        let body = [
+            r#"{"timestamp":"2026-10-01T10:00:00Z","message":{"id":"m1","usage":{"input_tokens":10,"cache_creation_input_tokens":5,"cache_read_input_tokens":1000,"output_tokens":7}}}"#,
+            r#"{"timestamp":"2026-10-01T10:00:01Z","message":{"id":"m1","usage":{"input_tokens":10,"cache_creation_input_tokens":5,"cache_read_input_tokens":1000,"output_tokens":7}}}"#,
+            r#"{"timestamp":"2026-10-01T10:00:02Z","message":{"id":"m1","usage":{"input_tokens":10,"cache_creation_input_tokens":5,"cache_read_input_tokens":1000,"output_tokens":9}}}"#,
+            r#"{"timestamp":"2026-10-01T10:01:00Z","message":{"id":"m2","usage":{"input_tokens":3,"cache_creation_input_tokens":0,"cache_read_input_tokens":1015,"output_tokens":2}}}"#,
+        ]
+        .join("\n");
+        let u = usage(&body, None);
+        assert_eq!(
+            (u.tokens_in, u.tokens_cached, u.tokens_out),
+            (15 + 3, 1000 + 1015, 9 + 2)
+        );
+    }
+
+    #[test]
+    fn codex_cached_input_is_not_fresh() {
+        let body = r#"{"timestamp":"2026-10-01T10:00:00Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":9841,"cached_input_tokens":4736,"output_tokens":71}}}}"#;
+        let u = usage(body, None);
+        assert_eq!((u.tokens_in, u.tokens_cached, u.tokens_out), (9841 - 4736, 4736, 71));
     }
 
     #[test]

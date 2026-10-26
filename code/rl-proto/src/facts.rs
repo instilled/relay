@@ -26,6 +26,8 @@ pub struct RunFacts {
     #[serde(default)]
     pub tokens_in: Option<u64>,
     #[serde(default)]
+    pub tokens_cached: Option<u64>,
+    #[serde(default)]
     pub tokens_out: Option<u64>,
     #[serde(default)]
     pub errors: u32,

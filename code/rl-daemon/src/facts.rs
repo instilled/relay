@@ -39,6 +39,7 @@ pub async fn collect(ledger: &Ledger, run: &Run, start_head: Option<&str>, end_h
         let since = Some(run.started_at);
         let usage = transcript::usage(&body, since);
         facts.tokens_in = Some(usage.tokens_in);
+        facts.tokens_cached = Some(usage.tokens_cached);
         facts.tokens_out = Some(usage.tokens_out);
         facts.active_secs = transcript::active_span(&body, since, GAP);
     }
