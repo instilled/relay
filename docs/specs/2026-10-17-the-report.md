@@ -168,7 +168,7 @@ so the push tells you to come back; the yes is still Relay's to take.
 
 ## How it's built
 
-Five steps, one PR each, under this one spec. Each plugs into shapes that already exist.
+Six steps, one PR each, under this one spec. Each plugs into shapes that already exist.
 
 0. **This spec.**
 1. **The lead model, the `post`/`clear` verb, the built-in projection, and `rl report`.**
@@ -184,8 +184,16 @@ Five steps, one PR each, under this one spec. Each plugs into shapes that alread
 3. **The facts collector (J6).** The deterministic facts that enrich the *happened* band:
    git commits and `diff --stat` per run, commands with their exit codes, transcript
    ingestion (Claude/Codex `*.jsonl`), tokens and cost.
-4. **The push hook.** Fire-a-plugin-command on needs-you changes; dedup on key; the quiet
+4. **Recap intelligence.** `summary.rs` as the one recap engine, recaps written from the
+   session for every model, depth by time away. Added once step 3's real data showed missing
+   recaps and wrong token counts; spec
+   `docs/specs/2026-10-25-the-report-step-4-recap-intelligence.md`.
+5. **The push hook.** Fire-a-plugin-command on needs-you changes; dedup on key; the quiet
    setting; one or two example notifier plugins.
+
+After the arc: **audio** (a plugin voices the prose), then **the briefer**, an assistant that
+briefs you and escalates what matters beyond the needs-you band. Cheap signals decide when it
+looks; it judges only what they flag, and reaches you through the push. See the roadmap.
 
 The co-worker layer (tagging sources, grouping) rides on step 1's model and step 2's pane; it
 needs no new source-side anything.
