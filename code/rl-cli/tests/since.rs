@@ -192,7 +192,7 @@ fn since_has_the_top_written_only_as_you_come_back() {
     assert!(text.contains("\n  # by fakeai · from 1 run\n"), "{text}");
     assert!(text.contains(&format!(" {id}  say hi")), "the tree under it: {text}");
     assert!(err.contains("writing the top…"), "{err}");
-    assert_eq!(asked(), 1);
+    assert_eq!(asked(), 2, "the run's brief, then the join");
 }
 
 /// A `catch_up: top` flow whose first source failed while a later one went fine heads `rl since`

@@ -458,3 +458,102 @@ async fn a_shell_run_is_briefed_from_its_output() {
     h.stop().await;
     unset_fake();
 }
+
+/// How many times the assistant has run: its own runs in the ledger.
+fn assistant_runs(ledger: &Ledger) -> usize {
+    ledger
+        .call_blocking(|c| {
+            rl_ledger::runs::list(
+                c,
+                &rl_proto::methods::RunFilter {
+                    archived: true,
+                    limit: Some(1000),
+                    ..Default::default()
+                },
+            )
+        })
+        .unwrap()
+        .iter()
+        .filter(|r| matches!(r.cause, Cause::Assistant(_)))
+        .count()
+}
+
+/// Three ended shell runs that said something each, and a time before them.
+async fn three_shell_runs(c: &mut Conn, f: &Fake, h: &Harness) -> (Vec<Run>, jiff::Timestamp) {
+    let from = jiff::Timestamp::now() - jiff::SignedDuration::from_mins(5);
+    let cwd = f.tmp.path().to_string_lossy().into_owned();
+    let mut runs = Vec::new();
+    for t in ["a", "b", "c"] {
+        let run: Run = c
+            .ok(
+                "run.start",
+                json!({ "argv": ["sh", "-c", format!("echo said-{t}")], "cwd": cwd, "title": t }),
+            )
+            .await;
+        c.wait_terminal(&run.id).await;
+        wait_journal(&h.home, &run.id, &format!("said-{t}")).await;
+        runs.push(run);
+    }
+    (runs, from)
+}
+
+#[tokio::test]
+async fn over_brief_writes_each_runs_brief_then_joins() {
+    let _env = ENV.lock().await;
+    let f = fake_home();
+    let Some(h) = Harness::on(f.home.clone()) else {
+        eprintln!("skipping: rl-session not built");
+        unset_fake();
+        return;
+    };
+    let mut c = Conn::open(&f.home).await;
+    let ledger = Ledger::open(&f.home.ledger()).unwrap();
+    let (runs, from) = three_shell_runs(&mut c, &f, &h).await;
+    let make = json!({ "target": { "kind": "all" }, "from": from });
+    let s: Summary = c.ok("summary.make", make.clone()).await;
+    assert_eq!((s.calls, s.runs), (4, 3), "{s:?}");
+    assert_eq!(assistant_runs(&ledger), 4, "three briefs and the join");
+    // Each run's own brief is kept for it.
+    for r in &runs {
+        let k: Summary = c
+            .ok("summary.get", json!({ "target": { "kind": "run", "id": r.id } }))
+            .await;
+        assert!(k.text.starts_with("Worked on:"), "{k:?}");
+    }
+    // The same again: the join is kept, and no run is asked again.
+    let again: Summary = c.ok("summary.make", make.clone()).await;
+    assert_eq!(assistant_runs(&ledger), 4, "nothing new: {again:?}");
+    // Re-joining (`again`) asks once, and the kept briefs are reused.
+    let mut redo = make.clone();
+    redo["again"] = json!(true);
+    let s: Summary = c.ok("summary.make", redo).await;
+    assert_eq!(s.calls, 1, "{s:?}");
+    assert_eq!(assistant_runs(&ledger), 5, "only the join was asked");
+    h.stop().await;
+    unset_fake();
+}
+
+#[tokio::test]
+async fn over_dry_counts_one_per_unkept_run_plus_the_join() {
+    let _env = ENV.lock().await;
+    let f = fake_home();
+    let Some(h) = Harness::on(f.home.clone()) else {
+        eprintln!("skipping: rl-session not built");
+        unset_fake();
+        return;
+    };
+    let mut c = Conn::open(&f.home).await;
+    let (runs, from) = three_shell_runs(&mut c, &f, &h).await;
+    let dry = json!({ "target": { "kind": "all" }, "from": from, "dry": true });
+    let s: Summary = c.ok("summary.make", dry.clone()).await;
+    assert_eq!((s.calls, s.runs), (4, 3), "{s:?}");
+    assert!(s.text.is_empty());
+    // One run's brief kept: one call fewer.
+    let _: Summary = c
+        .ok("summary.make", json!({ "target": { "kind": "run", "id": runs[0].id } }))
+        .await;
+    let s: Summary = c.ok("summary.make", dry).await;
+    assert_eq!((s.calls, s.runs), (3, 3), "{s:?}");
+    h.stop().await;
+    unset_fake();
+}

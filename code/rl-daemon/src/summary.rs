@@ -45,6 +45,7 @@ use rl_core::display_path;
 use rl_core::time::{fmt_duration, fmt_when};
 use rl_ledger::events::NewEvent;
 use rl_ledger::{Ledger, events, facts, kept, runs, seeds, session_io, summaries};
+use rl_proto::brief::Brief;
 use rl_proto::facts::RunFacts;
 use rl_proto::methods::{AssistantParams, EventFilter, SummaryParams};
 use rl_proto::types::{Cause, Event, Run, RunState, Summary, SummaryTarget, event_kind};
@@ -685,33 +686,50 @@ fn heading(t: &SummaryTarget, r: &Run, now: Timestamp) -> String {
     }
 }
 
-/// Each run's line as the list says it: its recap, else where it stands.
-async fn brief_lines(d: &Daemon, runs: &[Run]) -> Result<Vec<String>> {
-    let runs = runs.to_vec();
-    d.ledger
-        .call_read(move |c| {
-            let ids: Vec<String> = runs.iter().map(|r| r.id.clone()).collect();
-            let recaps = summaries::lines(c, &ids)?;
-            runs.iter()
-                .map(|r| {
-                    let line = match recaps.get(&r.id) {
-                        Some(l) => l.clone(),
-                        None => {
-                            let last = events::latest_for_run(c, &r.id)?;
-                            let emitted = events::emitted_for_run(c, &r.id)?;
-                            crate::digest::summarise(r, last.as_ref(), &emitted)
-                        }
-                    };
-                    Ok(format!("{} · {line}", r.state))
-                })
-                .collect()
-        })
-        .await
+/// A run's line among many, brief: its written brief's first part (never a
+/// raw label), else where it stands.
+async fn brief_line(d: &Daemon, r: &Run, brief: &Summary) -> Result<String> {
+    let line = if brief.source == "nothing new" {
+        None
+    } else {
+        part_line(&brief.text)
+    };
+    let line = match line {
+        Some(l) => l,
+        None => {
+            let id = r.id.clone();
+            let (last, emitted) = d
+                .ledger
+                .call_read(move |c| Ok((events::latest_for_run(c, &id)?, events::emitted_for_run(c, &id)?)))
+                .await?;
+            crate::digest::summarise(r, last.as_ref(), &emitted)
+        }
+    };
+    Ok(format!("{} · {line}", r.state))
 }
 
-/// A flow's, a project's or everything's runs: one call over their lines,
-/// brief; deep, each run's deep read first (kept ones as they are), then one
-/// call to join them.
+/// The first of a brief's parts that has anything, without its label; else
+/// the first line with anything on it. None when every part is `none`.
+fn part_line(text: &str) -> Option<String> {
+    let b = Brief::parse(text);
+    let part = b.worked_on.or(b.next).or(b.questions);
+    let text = match part.as_deref() {
+        Some(p) => p,
+        // Labelled, but every part `none`: no line, not a raw label.
+        None if ["worked on:", "open questions:", "next:"]
+            .iter()
+            .any(|l| text.to_ascii_lowercase().contains(l)) =>
+        {
+            return None;
+        }
+        None => text,
+    };
+    text.lines().map(str::trim).find(|l| !l.is_empty()).map(str::to_string)
+}
+
+/// A flow's, a project's or everything's runs: each run's brief first (a kept
+/// one as it is), or its deep read; then one call to join them. Each is read
+/// on the run's own stretch, so what is kept matches the next look.
 async fn over(d: &Daemon, t: &SummaryTarget, from: Option<Timestamp>, p: &SummaryParams) -> Result<Summary> {
     let now = now();
     let from = over_from(d, t, from, now).await?;
@@ -728,48 +746,74 @@ async fn over(d: &Daemon, t: &SummaryTarget, from: Option<Timestamp>, p: &Summar
         nothing(&mut made);
         return done(d, None, made, p.dry).await;
     }
-    // A run that began in the stretch is read whole, so its deep read is the
-    // one kept for it.
-    let stretch = |r: &Run| (r.started_at < from).then_some(from);
+    // Each run is read on its own stretch (since it was last seen, else all
+    // of it), not the over's, so what is kept matches the next look at it.
     let lines = if !p.deep {
+        // Each run's brief, a kept one costing nothing; and one to join them.
+        let mut told = Vec::with_capacity(runs.len());
+        let mut briefed = 0;
+        for r in &runs {
+            let own = run_stretch(d, r, None).await?;
+            let mut ask = SummaryParams {
+                target: SummaryTarget::Run { id: r.id.clone() },
+                deep: false,
+                from: own,
+                again: false,
+                dry: true,
+                timeout: p.timeout.clone(),
+            };
+            // What it would cost: nothing for one kept (a kept one carries
+            // the call that wrote it, so it is asked of the dry run).
+            briefed += run_brief(d, r, own, &ask).await?.calls;
+            if !p.dry {
+                ask.dry = false;
+                let s = run_brief(d, r, own, &ask)
+                    .await
+                    .with_context(|| format!("briefing `{}`", r.title))?;
+                told.push(brief_line(d, r, &s).await?);
+            }
+        }
+        made.calls = briefed;
         if p.dry {
-            made.calls = 1;
+            made.calls += 1;
             return Ok(made);
         }
-        many_lines(t, &runs, brief_lines(d, &runs).await?, now)
+        many_lines(t, &runs, told, now)
     } else if p.dry {
         // Each run as its own deep read would cost — none for one kept or
         // with nothing in it, its parts and their join for a long one — and
         // one to join them.
         let mut calls = 1;
         for r in &runs {
+            let own = run_stretch(d, r, None).await?;
             let dry = SummaryParams {
                 target: SummaryTarget::Run { id: r.id.clone() },
                 deep: true,
-                from: stretch(r),
+                from: own,
                 again: false,
                 dry: true,
                 timeout: None,
             };
-            calls += run_deep(d, r, stretch(r), &dry).await?.calls;
+            calls += run_deep(d, r, own, &dry).await?.calls;
         }
         made.calls = calls;
         return Ok(made);
     } else {
         let mut lines = Vec::with_capacity(runs.len());
         for r in &runs {
-            let s = match deep_kept(d, r, stretch(r)).await? {
+            let own = run_stretch(d, r, None).await?;
+            let s = match deep_kept(d, r, own).await? {
                 Some(k) => k,
                 None => {
                     let fresh = SummaryParams {
                         target: SummaryTarget::Run { id: r.id.clone() },
                         deep: true,
-                        from: stretch(r),
+                        from: own,
                         again: true,
                         dry: false,
                         timeout: p.timeout.clone(),
                     };
-                    let s = run_deep(d, r, stretch(r), &fresh)
+                    let s = run_deep(d, r, own, &fresh)
                         .await
                         .with_context(|| format!("reading `{}`", r.title))?;
                     made.calls += s.calls;
@@ -1071,8 +1115,13 @@ pub fn prompt(
              Worked on: what it did and what changed\n\
              Open questions: what needs the person's decision or is unresolved\n\
              Next: what to do next\n\
-             Ground it in the facts below; where the agent's own recap disagrees with them, trust the \
-             facts. No other headings, lists, YAML or preamble; do not repeat the command.\n"
+             {}No other headings, lists, YAML or preamble; do not repeat the command.\n",
+            if facts.is_some() {
+                "Ground it in the facts below; where the agent's own recap disagrees with them, trust \
+                 the facts. "
+            } else {
+                ""
+            }
         );
     }
     let _ = writeln!(s, "## The run\n");
@@ -1334,6 +1383,10 @@ mod tests {
         for label in ["Worked on:", "Open questions:", "Next:", "none"] {
             assert!(p.contains(label), "{label}: {p}");
         }
+        assert!(!p.contains("Ground it in the facts"), "no facts section follows: {p}");
+        let f = RunFacts::default();
+        let p = prompt(&r, None, None, Some(&f), None, "Its output", "x\n", false);
+        assert!(p.contains("Ground it in the facts below"), "{p}");
     }
 
     #[test]
