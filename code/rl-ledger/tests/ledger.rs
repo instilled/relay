@@ -433,3 +433,80 @@ fn file_ledger_survives_reopen() {
         2
     );
 }
+
+fn recap_of(run: &str, by: &str, at: &str, text: &str) -> rl_proto::types::Summary {
+    rl_proto::types::Summary {
+        run: run.into(),
+        agent: "claude".into(),
+        by: by.into(),
+        at: ts(at),
+        text: text.into(),
+        since: None,
+        source: if by.is_empty() { "claude recap" } else { "summarised" }.into(),
+        reach: "t:10".into(),
+        stale: false,
+        target: String::new(),
+        deep: false,
+        from: None,
+        calls: 0,
+        runs: 1,
+    }
+}
+
+#[test]
+fn a_later_seed_never_replaces_a_written_recap() {
+    use rl_ledger::{seeds, summaries};
+    let l = Ledger::open_in_memory().unwrap();
+    l.call_blocking(|c| {
+        runs::insert(c, &run("r9", "2026-09-08T10:00:00Z"))?;
+        summaries::put(
+            c,
+            &recap_of("r9", "r9", "2026-09-08T11:00:00Z", "Written by an assistant."),
+        )?;
+        assert!(seeds::put_newer(
+            c,
+            &recap_of("r9", "", "2026-09-08T11:01:00Z", "The agent's own words.")
+        )?);
+        assert_eq!(summaries::get(c, "r9")?.unwrap().text, "Written by an assistant.");
+        let ids = ["r9".to_string()];
+        assert_eq!(summaries::lines(c, &ids)?["r9"], "Written by an assistant.");
+        assert_eq!(seeds::get(c, "r9")?.unwrap().text, "The agent's own words.");
+        // An older seed does not replace a newer one.
+        assert!(!seeds::put_newer(
+            c,
+            &recap_of("r9", "", "2026-09-08T10:30:00Z", "Older.")
+        )?);
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
+fn lines_fall_back_to_the_seed_and_strip_the_label() {
+    use rl_ledger::{seeds, summaries};
+    let l = Ledger::open_in_memory().unwrap();
+    l.call_blocking(|c| {
+        for id in ["r1", "r2"] {
+            runs::insert(c, &run(id, "2026-09-08T10:00:00Z"))?;
+        }
+        seeds::put_newer(
+            c,
+            &recap_of("r1", "", "2026-09-08T11:00:00Z", "\nFixed the search.\nMore."),
+        )?;
+        summaries::put(
+            c,
+            &recap_of(
+                "r2",
+                "a1",
+                "2026-09-08T11:00:00Z",
+                "Worked on: the parser\nOpen questions: none\nNext: tests",
+            ),
+        )?;
+        let ids = ["r1".to_string(), "r2".to_string()];
+        let got = summaries::lines(c, &ids)?;
+        assert_eq!(got["r1"], "Fixed the search.");
+        assert_eq!(got["r2"], "the parser");
+        Ok(())
+    })
+    .unwrap();
+}

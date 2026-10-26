@@ -47,7 +47,7 @@ use jiff::{SignedDuration, Timestamp};
 use rl_core::display_path;
 use rl_core::time::{fmt_duration, fmt_when};
 use rl_ledger::events::NewEvent;
-use rl_ledger::{Ledger, events, kept, runs, session_io, summaries};
+use rl_ledger::{Ledger, events, kept, runs, seeds, session_io, summaries};
 use rl_proto::methods::{AssistantParams, EventFilter, SummaryParams};
 use rl_proto::types::{Cause, Event, Run, RunState, Summary, SummaryTarget, event_kind};
 use std::fmt::Write as _;
@@ -92,7 +92,11 @@ pub async fn get(d: &Daemon, p: &SummaryParams) -> Result<Option<Summary>> {
                     }
                     Ok(Some(s))
                 }
-                None if !p.deep && p.from.is_none() => run_latest(d, id, run.as_ref()).await,
+                None if !p.deep && p.from.is_none() => match run_latest(d, id, run.as_ref()).await? {
+                    Some(s) => Ok(Some(s)),
+                    // Nothing written: the agent's own recap, for display.
+                    None => run_seed(d, id, run.as_ref()).await,
+                },
                 None => Ok(None),
             }
         }
@@ -201,6 +205,22 @@ async fn run_kept(d: &Daemon, run: &str) -> Result<Option<Summary>> {
         && !s.reach.is_empty()
     {
         s.stale = run_reach(d, &r).await? != s.reach;
+    }
+    Ok(Some(s))
+}
+
+/// The agent's own recap of a run (`recap_seeds`), marked stale when the run
+/// has moved on since. Shown when nothing was written; never kept as a brief.
+async fn run_seed(d: &Daemon, run: &str, found: Option<&Run>) -> Result<Option<Summary>> {
+    let id = run.to_string();
+    let Some(mut s) = d.ledger.call_read(move |c| seeds::get(c, &id)).await? else {
+        return Ok(None);
+    };
+    s.target = SummaryTarget::Run { id: run.to_string() }.key();
+    if let Some(r) = found
+        && !s.reach.is_empty()
+    {
+        s.stale = run_reach(d, r).await? != s.reach;
     }
     Ok(Some(s))
 }

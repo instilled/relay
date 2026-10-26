@@ -114,11 +114,16 @@ async fn claudes_recap_is_kept_as_it_writes_it() {
     };
     assert_eq!(read, std::fs::metadata(&transcript).unwrap().len());
 
-    // `/summary` sees the same one, without asking anyone.
-    let made: Summary = c
-        .ok("summary.make", json!({ "target": { "kind": "run", "id": run.id } }))
-        .await;
-    assert_eq!(made, s);
+    // It is a seed: the pane's `summary.get` shows it, but nothing is written.
+    assert!(
+        ledger
+            .call_blocking({
+                let id = run.id.clone();
+                move |c| summaries::get(c, &id)
+            })
+            .unwrap()
+            .is_none()
+    );
 
     // The digest carries it, as a row's line; a shell's summary is its own.
     {
@@ -167,9 +172,64 @@ async fn claudes_recap_is_kept_as_it_writes_it() {
     let d: Digest = c.ok("digest.get", json!({})).await;
     assert_eq!(by_id(&d, &run.id).recap.as_deref(), Some("Merged."), "its first line");
 
+    // `/summary` still reads the agent's own recap without asking anyone.
+    let made: Summary = c
+        .ok("summary.make", json!({ "target": { "kind": "run", "id": run.id } }))
+        .await;
+    assert_eq!(made.text, "Merged.\nNothing left.");
+    assert_eq!((made.source.as_str(), made.by.as_str()), ("claude recap", ""));
+
     for id in [&run.id, &shell.id] {
         let _: serde_json::Value = c.ok("run.stop", json!({ "id": id, "force": true })).await;
     }
+    h.stop().await;
+}
+
+#[tokio::test]
+async fn a_picked_up_recap_is_a_seed_not_a_summary() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = Home::at(tmp.path().join("home"));
+    home.ensure_dirs().unwrap();
+    let Some(h) = Harness::on(home.clone()) else {
+        eprintln!("skipping: rl-session not built");
+        return;
+    };
+    let mut c = Conn::open(&home).await;
+    let dir = std::fs::canonicalize(tmp.path()).unwrap();
+    let bin = stand_in(&dir, "claude");
+    let run: Run = c
+        .ok(
+            "run.start",
+            json!({ "argv": [bin], "cwd": dir, "title": "fix search", "kind": "agent" }),
+        )
+        .await;
+    let transcript = dir.join("session.jsonl");
+    std::fs::write(&transcript, away(Timestamp::now(), "Search fixed.")).unwrap();
+    let _: Run = c
+        .ok(
+            "run.hook",
+            json!({ "id": run.id, "event": "Stop", "payload": { "transcript_path": transcript } }),
+        )
+        .await;
+    wait_recap(&mut c, &run.id, "Search fixed.").await;
+
+    let ledger = Ledger::open(&home.ledger()).unwrap();
+    let id = run.id.clone();
+    let (seed, written, facts) = ledger
+        .call_blocking(move |c| {
+            Ok((
+                rl_ledger::seeds::get(c, &id)?,
+                summaries::get(c, &id)?,
+                rl_ledger::facts::get(c, &id)?,
+            ))
+        })
+        .unwrap();
+    let seed = seed.expect("the recap is a seed");
+    assert_eq!((seed.text.as_str(), seed.by.as_str()), ("Search fixed.", ""));
+    assert!(written.is_none(), "nothing written");
+    assert!(facts.is_none(), "the run's facts are untouched");
+
+    let _: serde_json::Value = c.ok("run.stop", json!({ "id": run.id, "force": true })).await;
     h.stop().await;
 }
 

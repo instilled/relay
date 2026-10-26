@@ -5,6 +5,7 @@
 
 use anyhow::Result;
 use rl_core::time::{from_millis, to_millis};
+use rl_proto::brief::Brief;
 use rl_proto::types::Summary;
 use rusqlite::{Connection, OptionalExtension, params, params_from_iter};
 use std::collections::HashMap;
@@ -57,32 +58,49 @@ pub fn put_newer(conn: &Connection, s: &Summary) -> Result<bool> {
     Ok(n > 0)
 }
 
-/// The first line of each of these runs' recaps, cut for a row: one query
-/// for the whole list. "Nothing new" is not a recap.
+/// The line of each of these runs' recaps, cut for a row: one query per
+/// table for the whole list. A run's written recap if it has one, else its
+/// seed — the agent's own. "Nothing new" is not a recap.
 pub fn lines(conn: &Connection, runs: &[String]) -> Result<HashMap<String, String>> {
     let mut out = HashMap::new();
     // Well under what SQLite takes as parameters in one statement.
     for chunk in runs.chunks(500) {
         let marks = std::iter::repeat_n("?", chunk.len()).collect::<Vec<_>>().join(",");
-        let mut stmt = conn.prepare(&format!(
-            "SELECT run, substr(text, 1, {}) FROM summaries WHERE source != 'nothing new' AND run IN ({marks})",
-            LINE_MAX * 4
-        ))?;
-        let rows = stmt.query_map(params_from_iter(chunk), |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-        })?;
-        for row in rows {
-            let (run, text) = row?;
-            if let Some(line) = first_line(&text) {
-                out.insert(run, line);
+        for sql in [
+            // Written ones first; a seed only fills in where none was.
+            format!(
+                "SELECT run, substr(text, 1, {}) FROM summaries WHERE source != 'nothing new' AND run IN ({marks})",
+                LINE_MAX * 4
+            ),
+            format!(
+                "SELECT run, substr(text, 1, {}) FROM recap_seeds WHERE run IN ({marks})",
+                LINE_MAX * 4
+            ),
+        ] {
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt.query_map(params_from_iter(chunk), |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })?;
+            for row in rows {
+                let (run, text) = row?;
+                if out.contains_key(&run) {
+                    continue;
+                }
+                if let Some(line) = first_line(&text) {
+                    out.insert(run, line);
+                }
             }
         }
     }
     Ok(out)
 }
 
-/// A recap's first line with anything on it, at most `LINE_MAX` characters.
+/// A recap's line for a row: its `Worked on:` part without the label when it
+/// has one, else the first line with anything on it — at most `LINE_MAX`
+/// characters.
 fn first_line(text: &str) -> Option<String> {
+    let brief = Brief::parse(text);
+    let text = brief.worked_on.as_deref().unwrap_or(text);
     let line = text.lines().map(str::trim).find(|l| !l.is_empty())?;
     if line.chars().count() <= LINE_MAX {
         return Some(line.to_string());

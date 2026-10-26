@@ -6,6 +6,7 @@
 //! the daemon.
 
 pub mod action;
+pub mod brief;
 pub mod codec;
 pub mod config;
 pub mod decision;
