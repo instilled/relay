@@ -253,6 +253,7 @@ pub(crate) async fn locate_in(ledger: &Ledger, run: &Run) -> Result<Option<PathB
     let found = match agent {
         Agent::Claude => transcript::find_claude(&home, &run.cwd, run.started_at),
         Agent::Codex => transcript::find_codex(&home, &run.cwd, run.started_at),
+        Agent::Gemini => transcript::find_gemini(&home, &run.cwd, run.started_at),
     };
     if let Some(p) = &found {
         let (id, path) = (run.id.clone(), p.to_string_lossy().into_owned());
@@ -449,6 +450,7 @@ async fn run_brief(d: &Daemon, run: &Run, from: Option<Timestamp>, p: &SummaryPa
             }
             ("What was said".to_string(), transcript::claude_messages(&body, from))
         }
+        (Some(Agent::Gemini), Some(body)) => ("What was said".to_string(), transcript::gemini_messages(&body, from)),
         (Some(Agent::Codex), Some(body)) => {
             let turns = transcript::codex_turns(&body, from);
             let asked = d.config.read().unwrap().config.assistants.summary.is_some();
@@ -512,6 +514,10 @@ async fn run_deep(d: &Daemon, run: &Run, from: Option<Timestamp>, p: &SummaryPar
         (Some(Agent::Codex), Some(body)) => (
             "Its turns".to_string(),
             transcript::codex_facts(&transcript::codex_turns(&body, from)),
+        ),
+        (Some(Agent::Gemini), Some(body)) => (
+            "What was said and done".to_string(),
+            transcript::gemini_story(&body, from),
         ),
         _ => ("Its output".to_string(), output(d, run, from, usize::MAX).await?),
     };

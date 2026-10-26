@@ -50,6 +50,8 @@ pub async fn pick_up(d: &Daemon, run: &Run) -> Result<bool> {
     let (word, source) = match agent {
         Agent::Claude => ("away_summary", "claude recap"),
         Agent::Codex => ("task_complete", "codex turn"),
+        // Gemini keeps no recap word to look for.
+        Agent::Gemini => return Ok(false),
     };
     let read = tokio::task::spawn_blocking({
         let file = file.clone();
@@ -66,6 +68,7 @@ pub async fn pick_up(d: &Daemon, run: &Run) -> Result<bool> {
     let recap = match agent {
         Agent::Claude => transcript::claude_recap(&text, since),
         Agent::Codex => transcript::codex_recap(&text, since),
+        Agent::Gemini => None,
     };
     let made = recap.map(|r| Summary {
         run: run.id.clone(),

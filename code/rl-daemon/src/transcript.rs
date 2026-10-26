@@ -22,6 +22,7 @@ use std::time::Duration;
 pub enum Agent {
     Claude,
     Codex,
+    Gemini,
 }
 
 impl Agent {
@@ -29,6 +30,7 @@ impl Agent {
         match run.cli.as_deref() {
             Some("claude") => Some(Agent::Claude),
             Some("codex") => Some(Agent::Codex),
+            Some("gemini") => Some(Agent::Gemini),
             _ => None,
         }
     }
@@ -95,6 +97,31 @@ pub fn find_codex(home: &Path, cwd: &Path, started: Timestamp) -> Option<PathBuf
     best.map(|(_, p)| p)
 }
 
+/// The Gemini chat a run most likely wrote: `projects.json` names the folder
+/// under `tmp/` a working directory's chats go to, and the newest
+/// `session-*.jsonl` there touched since the run started is taken. Folders
+/// named by a hash, from older installs, are not looked into.
+pub fn find_gemini(home: &Path, cwd: &Path, started: Timestamp) -> Option<PathBuf> {
+    let root = home.join(".gemini");
+    let map: Value = serde_json::from_str(&std::fs::read_to_string(root.join("projects.json")).ok()?).ok()?;
+    let name = map.get("projects")?.get(cwd.to_str()?)?.as_str()?;
+    let since = std::time::SystemTime::from(started - SLACK);
+    std::fs::read_dir(root.join("tmp").join(name).join("chats"))
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.extension().is_some_and(|x| x == "jsonl")
+                && p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with("session-"))
+        })
+        .filter_map(|p| Some((std::fs::metadata(&p).ok()?.modified().ok()?, p)))
+        .filter(|(m, _)| *m >= since)
+        .max_by_key(|(m, _)| *m)
+        .map(|(_, p)| p)
+}
+
 /// A rollout's first line: the folder it ran in and when it started.
 fn codex_meta(p: &Path) -> Option<(PathBuf, Timestamp)> {
     use std::io::BufRead;
@@ -118,7 +145,7 @@ fn codex_meta(p: &Path) -> Option<(PathBuf, Timestamp)> {
 
 /// The conversation a session file holds, as its agent's CLI names it to
 /// resume it: Claude's is the file's own name, Codex's the id its first line
-/// records.
+/// records, Gemini's the `sessionId` of its header record.
 pub fn session_id(agent: Agent, p: &Path) -> Option<String> {
     match agent {
         Agent::Claude => Some(p.file_stem()?.to_str()?.to_string()),
@@ -128,6 +155,14 @@ pub fn session_id(agent: Agent, p: &Path) -> Option<String> {
             let mut first = String::new();
             std::io::BufReader::new(f).read_line(&mut first).ok()?;
             codex_id(&first)
+        }
+        Agent::Gemini => {
+            use std::io::BufRead;
+            let f = std::fs::File::open(p).ok()?;
+            let mut first = String::new();
+            std::io::BufReader::new(f).read_line(&mut first).ok()?;
+            let v: Value = serde_json::from_str(&first).ok()?;
+            Some(v.get("sessionId")?.as_str()?.to_string())
         }
     }
 }
@@ -168,12 +203,16 @@ pub struct Usage {
 /// message id counts once, its last usage winning; an entry with no id counts
 /// on its own. Fresh is input plus cache writes, cached is cache reads. Codex's
 /// are on `token_count` events, one call's worth each, its input including the
-/// cached part. An entry with none counts for nothing.
+/// cached part; Gemini's on each `gemini` record's `tokens`, its input including
+/// the cached part too, a message counted once as Claude's is. An entry with none counts for nothing.
 pub fn usage(body: &str, since: Option<Timestamp>) -> Usage {
     let mut sum = Usage::default();
     let n = |v: &Value, key: &str| v.get(key).and_then(Value::as_u64).unwrap_or(0);
     // Claude's usage per message id; the key is the entry's position when it has no id.
     let mut claude: HashMap<String, Usage> = HashMap::new();
+    // Gemini's, per record id: the file is an append log that rewrites a message
+    // in place, so the last record of an id is the one that counts.
+    let mut gemini: HashMap<String, Usage> = HashMap::new();
     for (i, (_, v)) in entries(body).filter(|(at, _)| within(*at, since)).enumerate() {
         if let Some(u) = v.pointer("/message/usage") {
             let key = v
@@ -188,6 +227,22 @@ pub fn usage(body: &str, since: Option<Timestamp>) -> Usage {
                     tokens_out: n(u, "output_tokens"),
                 },
             );
+        } else if v.get("type").and_then(Value::as_str) == Some("gemini")
+            && let Some(u) = v.get("tokens").filter(|t| t.is_object())
+        {
+            let key = v
+                .get("id")
+                .and_then(Value::as_str)
+                .map_or_else(|| format!("#{i}"), str::to_string);
+            let cached = n(u, "cached");
+            gemini.insert(
+                key,
+                Usage {
+                    tokens_in: n(u, "input").saturating_sub(cached),
+                    tokens_cached: cached,
+                    tokens_out: n(u, "output"),
+                },
+            );
         } else if v.pointer("/payload/type").and_then(Value::as_str) == Some("token_count")
             && let Some(u) = v.pointer("/payload/info/last_token_usage")
         {
@@ -197,7 +252,7 @@ pub fn usage(body: &str, since: Option<Timestamp>) -> Usage {
             sum.tokens_out += n(u, "output_tokens");
         }
     }
-    for u in claude.values() {
+    for u in claude.values().chain(gemini.values()) {
         sum.tokens_in += u.tokens_in;
         sum.tokens_cached += u.tokens_cached;
         sum.tokens_out += u.tokens_out;
@@ -363,6 +418,67 @@ fn claude_said(text: &str, from: Option<Timestamp>, tools: bool) -> String {
                     let _ = writeln!(out, "{at} the tool failed: {}", cut(&said, TOOL_LINE));
                 }
                 _ => {}
+            }
+        }
+    }
+    out
+}
+
+/// What was said in a Gemini session at or after `from`, a line a message:
+/// what you typed and what Gemini wrote back, each message once.
+pub fn gemini_messages(text: &str, from: Option<Timestamp>) -> String {
+    gemini_said(text, from, false)
+}
+
+/// What was said and done in a Gemini session at or after `from`: the
+/// messages, and a line for each tool call — its name and the start of its
+/// arguments.
+pub fn gemini_story(text: &str, from: Option<Timestamp>) -> String {
+    gemini_said(text, from, true)
+}
+
+fn gemini_said(text: &str, from: Option<Timestamp>, tools: bool) -> String {
+    // One record per id, the last; they stay in the order the ids first appeared.
+    let mut order: Vec<String> = Vec::new();
+    let mut last: HashMap<String, (Timestamp, Value)> = HashMap::new();
+    for (i, (at, v)) in entries(text).enumerate() {
+        let key = v
+            .get("id")
+            .and_then(Value::as_str)
+            .map_or_else(|| format!("#{i}"), str::to_string);
+        if last.insert(key.clone(), (at, v)).is_none() {
+            order.push(key);
+        }
+    }
+    let mut out = String::new();
+    for (at, v) in order
+        .iter()
+        .filter_map(|k| last.get(k))
+        .filter(|(at, _)| within(*at, from))
+    {
+        let who = match v.get("type").and_then(Value::as_str) {
+            Some("user") => "you",
+            Some("gemini") => "gemini",
+            _ => continue,
+        };
+        let said = match v.get("content") {
+            Some(Value::String(s)) => s.clone(),
+            Some(Value::Array(parts)) => parts
+                .iter()
+                .filter_map(|p| p.get("text").and_then(Value::as_str))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            _ => String::new(),
+        };
+        let said = said.trim();
+        if !said.is_empty() {
+            let _ = writeln!(out, "{at} {who}: {said}");
+        }
+        if tools && let Some(calls) = v.get("toolCalls").and_then(Value::as_array) {
+            for c in calls {
+                let name = c.get("name").and_then(Value::as_str).unwrap_or("a tool");
+                let args = c.get("args").map(Value::to_string).unwrap_or_default();
+                let _ = writeln!(out, "{at} gemini used {name}: {}", cut(&args, TOOL_LINE));
             }
         }
     }
@@ -754,5 +870,115 @@ not json
     fn active_span_needs_two_points() {
         let t = "{\"timestamp\":\"2026-09-17T10:00:00Z\"}\n";
         assert_eq!(active_span(t, None, Duration::from_secs(120)), None);
+    }
+
+    /// A synthetic Gemini file: a header, a message rewritten in place, a second
+    /// message, a user turn and an update record.
+    const GEMINI: &str = concat!(
+        r#"{"sessionId":"5d1e-aa","projectHash":"h","startTime":"2026-09-17T10:00:00Z","lastUpdated":"2026-09-17T10:00:00Z","kind":"main"}"#,
+        "\n",
+        r#"{"id":"u1","timestamp":"2026-09-17T10:00:01Z","type":"user","content":[{"text":"fix the parser"}]}"#,
+        "\n",
+        r#"{"id":"g1","timestamp":"2026-09-17T10:00:02Z","type":"gemini","content":"looking","tokens":{"input":100,"output":5,"cached":40,"thoughts":0,"tool":0,"total":105}}"#,
+        "\n",
+        r#"{"$set":{"lastUpdated":"2026-09-17T10:00:03Z"}}"#,
+        "\n",
+        r#"{"id":"g1","timestamp":"2026-09-17T10:00:03Z","type":"gemini","content":"fixed it","toolCalls":[{"name":"edit_file","args":{"path":"a.rs"}}],"tokens":{"input":120,"output":9,"cached":40,"thoughts":0,"tool":0,"total":129}}"#,
+        "\n",
+        r#"{"id":"g2","timestamp":"2026-09-17T10:00:04Z","type":"gemini","content":"done","tokens":{"input":50,"output":2,"cached":0,"thoughts":0,"tool":0,"total":52}}"#,
+        "\n",
+    );
+
+    #[test]
+    fn gemini_usage_keeps_the_last_record_per_message() {
+        let u = usage(GEMINI, None);
+        assert_eq!((u.tokens_in, u.tokens_cached, u.tokens_out), (80 + 50, 40, 9 + 2));
+    }
+
+    #[test]
+    fn gemini_messages_say_each_message_once() {
+        let m = gemini_messages(GEMINI, None);
+        assert_eq!(m.matches("gemini:").count(), 2, "{m}");
+        assert!(m.contains("you: fix the parser"), "{m}");
+        assert!(m.contains("gemini: fixed it"), "{m}");
+        assert!(!m.contains("looking"), "{m}");
+        assert!(!m.contains("edit_file"), "{m}");
+        let s = gemini_story(GEMINI, None);
+        assert!(s.contains("gemini: fixed it"), "{s}");
+        assert!(s.contains("edit_file") && s.contains("a.rs"), "{s}");
+        let late = gemini_messages(GEMINI, Some(at("2026-09-17T10:00:04Z")));
+        assert!(late.contains("done") && !late.contains("fixed it"), "{late}");
+    }
+
+    #[test]
+    fn gemini_session_is_named_by_its_header() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("session-x.jsonl");
+        std::fs::write(&p, GEMINI).unwrap();
+        assert_eq!(session_id(Agent::Gemini, &p).as_deref(), Some("5d1e-aa"));
+    }
+
+    #[test]
+    fn find_gemini_reads_the_project_map() {
+        let home = tempfile::tempdir().unwrap();
+        let g = home.path().join(".gemini");
+        let chats = g.join("tmp").join("relay").join("chats");
+        std::fs::create_dir_all(&chats).unwrap();
+        std::fs::write(
+            g.join("projects.json"),
+            r#"{"projects":{"/w/app":"relay","/w/other":"else"}}"#,
+        )
+        .unwrap();
+        let now = std::time::SystemTime::now();
+        let old = chats.join("session-1-old.jsonl");
+        let new = chats.join("session-2-new.jsonl");
+        for (p, ago) in [(&old, 30), (&new, 5)] {
+            std::fs::write(p, GEMINI).unwrap();
+            let f = std::fs::File::options().write(true).open(p).unwrap();
+            f.set_modified(now - Duration::from_secs(ago)).unwrap();
+        }
+        std::fs::write(chats.join("notes.txt"), "x").unwrap();
+        let started = Timestamp::now() - SignedDuration::from_secs(60);
+        assert_eq!(find_gemini(home.path(), Path::new("/w/app"), started), Some(new));
+        assert_eq!(
+            find_gemini(
+                home.path(),
+                Path::new("/w/app"),
+                Timestamp::now() + SignedDuration::from_hours(1)
+            ),
+            None,
+            "touched before the run started"
+        );
+    }
+
+    #[test]
+    fn find_gemini_without_a_project_map_is_none() {
+        let home = tempfile::tempdir().unwrap();
+        let started = Timestamp::now() - SignedDuration::from_secs(60);
+        assert_eq!(find_gemini(home.path(), Path::new("/w/app"), started), None);
+        std::fs::create_dir_all(home.path().join(".gemini")).unwrap();
+        std::fs::write(home.path().join(".gemini/projects.json"), "not json").unwrap();
+        assert_eq!(find_gemini(home.path(), Path::new("/w/app"), started), None);
+        std::fs::write(
+            home.path().join(".gemini/projects.json"),
+            r#"{"projects":{"/w/x":"x"}}"#,
+        )
+        .unwrap();
+        assert_eq!(find_gemini(home.path(), Path::new("/w/app"), started), None);
+    }
+
+    #[test]
+    fn agent_of_knows_gemini() {
+        let mut r = Run::new(
+            "ab12",
+            rl_proto::types::RunKind::Agent,
+            "t",
+            vec![],
+            PathBuf::from("/w"),
+            PathBuf::from("/w"),
+            at("2026-09-23T10:00:00Z"),
+        );
+        r.cli = Some("gemini".into());
+        assert_eq!(Agent::of(&r), Some(Agent::Gemini));
     }
 }
