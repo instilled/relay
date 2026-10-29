@@ -61,9 +61,11 @@ the rest. The report reads the queue now; the push (step 5) and the briefer read
   instructions to make it report: no `ASK:`/`DONE:` markers, no injected wording. Only what the
   agent already sends and writes is read.
 - **Anti-goal: content in the queue.** No message text, no summary, no facts are copied into an
-  item. They are read from the session and git when shown, so there is one truth.
-- **Anti-goal: a session's end as a rest.** A process exiting (closed, killed, crashed) does not
-  queue anything by itself; the run's existing end handling and `run_facts` stay as they are.
+  item. They are read from the session and git when shown, so there is one truth. Hints are tags,
+  not content.
+- **A session's end is a hint, not a rest.** A process exiting adds `stopped` (or `failed`) to the
+  session's item, queueing it as *finished* if it was not queued, so a run that died while you
+  were away still reaches you. The run's existing end handling and `run_facts` stay as they are.
 - **Anti-goal: a missed ask.** When the reply can't be read either way, it counts as *asks*. A
   finished session shown as waiting costs a glance; a waiting one shown as finished stays stuck.
 - **No push, no channel.** Still step 5.
@@ -78,6 +80,15 @@ One table, `review_queue` (a new migration). One row per session:
 - **kind**: `asks` or `finished`, as of its latest rest;
 - **how**: what said so: `permission` (a permission or tool-approval hook), `reply` (the
   turn-end hook, read from the final message), or `screen` (no hook; see *Runs without hooks*);
+- **hints**: a few tags, never text, so a reader can sort and word an item without opening the
+  session:
+  - `question`: its reply asked something;
+  - `permission`: it waits on an approval;
+  - `stopped`: the session ended (closed or killed) since *from*;
+  - `failed`: it ended with a non-zero exit or crashed;
+  - `unsure`: *asks* only because the reply couldn't be read either way.
+
+  The set is closed and grows by a spec change, not by the builder;
 - **at**: its latest rest;
 - **rests**: how many times it came to rest since *from*;
 - **from**: where your last review left off: the time, the HEAD (for what changed in git), and
@@ -200,6 +211,8 @@ which now pick the layout only.
 - **Hooks win over the screen**, with a short grace.
 - **What changed is git since your last review**; tokens and active time stay with `run_facts`.
 - **Sources beyond runs come in 4c.**
+- **The hint set:** `question`, `permission`, `stopped`, `failed`, `unsure`. A session's end
+  queues it with `stopped`/`failed` if it wasn't queued.
 
 ## Open questions — to settle in the plan
 
