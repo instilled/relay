@@ -1,6 +1,6 @@
-# The report, step 4b — the review queue
+# The report, step 4b — the review queue and the inbox
 
-Status: design, for review · 2026-10-29
+Status: design, for review · 2026-10-30
 
 ## Why
 
@@ -22,21 +22,32 @@ to write it up. Reading the first real recaps showed that this is the long way r
 - **A question in a reply is invisible.** A turn that ends on "should I also prune the
   branches?" is `Stop: idle`, the same as a finished one. Only permission prompts show as
   needs-you, so a run that asked you something in words reads as done.
+- **Three layouts by time away read badly.** The board, the blocks and the prose each answer
+  the same question differently, and none gives an overview by team and a way into one item at
+  the same time.
 
 This step adds a **review queue**: one item per session that has come to rest since you last
 reviewed it, *asking* or *finished*. An item is a **pointer**, not content: which session, what
 kind of rest, when, and from where in its log you have not looked. Readers go to the session for
-the rest. The report reads the queue now; the push (step 5) and the briefer read it later.
+the rest.
+
+And it makes the report **one layout, an inbox**: a list of teams on the left, a reading pane on
+the right. Time away only picks where it opens. The push (step 5) and the briefer read the same
+queue later.
+
+Mockups: the "Relay report mockups" canvas, artboards 5 (a team selected) and 6 (all teams
+selected) and 4 (one item opened). Artboards 1–3 are the retired per-time-away layouts.
 
 ## The scenarios this sharpens
 
-- **Back after lunch.** The board shows each queued session: `finished · +180/−40 · 3 commits`
-  and its last message's first line, read from the log and git as the board draws.
-- **Back the next morning.** Each queued session shows its last message (trimmed) and what
-  changed since you last reviewed it, however many turns that took. Sessions that asked you
-  something in words sit in needs-you, with the question.
-- **Back after the weekend.** The prose walks the queue, session by session. A deep read of any
-  item reads its log from where you last looked, made when asked, never on open.
+- **Back after lunch.** The report opens on the first item that needs you. Its question is in
+  the reading pane; `r` answers it, `x` moves on.
+- **Back the next morning.** The report opens on *All teams*: one block per team with what moved
+  and what waits. The NEEDS YOU strip lists every ask across teams; `j`/`k` through it clears
+  them without opening a team.
+- **Back after the weekend.** The same, and `w` gives the written summary: prose walking the
+  queue, nothing generated. A deep read of any item or team is `p`, made when asked, never on
+  open.
 
 ## Goals
 
@@ -46,14 +57,16 @@ the rest. The report reads the queue now; the push (step 5) and the briefer read
   it never adds a second.
 - **A pointer.** The item keeps what is needed to find and read the session again, and nothing
   of what it said.
-- **Reviewing clears it.** Opening the item, attaching to the session, or answering it clears
-  the item and moves its *from* to now. When the session comes to rest again, it is queued
-  again.
+- **Reviewing clears it.** Marking it reviewed (`x`), attaching to the session, or answering it
+  clears the item and moves its *from* to now. When the session comes to rest again, it is
+  queued again.
 - **Asks or finished.** Every item is one of the two (see *Telling asks from finished*).
 - **Questions in words count as needs-you.** A session whose item is *asks* is waiting on you,
   whether it asked through a permission prompt or in its reply.
 - **One queue for every source.** Each item names its source; this step fills it from Relay's
   agent and shell runs, and later steps add the rest (see *Sources*).
+- **One report layout.** The inbox, by team, at any time away.
+- **Nothing urgent hides in a team.** Every *asks* item is visible without opening its team.
 
 ## Non-goals and anti-goals
 
@@ -63,6 +76,8 @@ the rest. The report reads the queue now; the push (step 5) and the briefer read
 - **Anti-goal: content in the queue.** No message text, no summary, no facts are copied into an
   item. They are read from the session and git when shown, so there is one truth. Hints are tags,
   not content.
+- **Anti-goal: an assistant call to draw the report.** Team summaries, gists and the written
+  summary are built from the queue, the logs and git by templates. Only `p` calls an assistant.
 - **A session's end is a hint, not a rest.** A process exiting adds `stopped` (or `failed`) to the
   session's item, queueing it as *finished* if it was not queued, so a run that died while you
   were away still reaches you. The run's existing end handling and `run_facts` stay as they are.
@@ -106,6 +121,8 @@ When an item is shown, the reader goes to the session:
   *asks* what it wants to run (the run's `waiting_for`). For a shell run, the screen's last lines.
 - **What changed**: git since *from*'s HEAD: commits (subjects), `+X/−Y`, files, branch and
   pushed.
+- **The log since you looked**: the turns in the session's log after *from*, one line each (who,
+  when, first line).
 - **A deep read**: `summary.rs` over the log from *from* to now, when asked (`/summary deep`,
   `p` on an item). It is kept as today, so asking twice costs once.
 
@@ -152,19 +169,90 @@ A hooked run gets screen guesses too (`supervisor::apply` takes both). Hooks win
 queues only when no hook for that run follows within a short grace (the builder picks it; tens of
 seconds).
 
-## What the report does with it
+## The report: an inbox
 
-- **The board:** the needs-you band is the queued sessions whose kind is *asks*. Every queued
-  session shows its kind, what changed, and its last message's first line.
-- **Under ~2h away:** the board.
-- **~2h to ~2 days:** under each queued session, its last message trimmed (first paragraph,
-  capped) and what changed, with "N turns" when it rested more than once. An *asks* leads with
-  the question. A message that says nothing ("Done.") shows what changed alone.
-- **Over ~2 days:** the prose (`tui/prose.rs`, today's layout, by co-worker), walking the queue.
-  Nothing is generated.
-- **The drill-in** (`enter`): the session's log from *from*, and its deep read when asked.
-- **Reviewing:** `enter` on an item, attaching to its run, or sending it a prompt clears it.
-  Seeing it on the board does not.
+One layout at any time away: a header, a list pane on the left, a reading pane on the right, and
+a key line at the bottom.
+
+**Teams** are today's lanes (`tui/report.rs`): a run's tag, else its project's folder name, else
+"my work". Teams are arbitrary and can be many; nothing is hard-coded to a set.
+
+**The header:** how long you were away, since when, how many items to review, how many runs are
+working.
+
+### The list pane
+
+From the top:
+
+1. **All teams**, pinned. Its second line: needs you · failed · to review · commits, across
+   teams.
+2. **NEEDS YOU**, a strip with every *asks* item across teams, one line each:
+   `team · session name` and its hint chip (`question`, `permission`, `unsure`). Oldest first.
+   Hidden when empty.
+3. **TEAMS**, one summary row per team that has a queued item or a working run:
+   - its name;
+   - its counts: needs you, failed, done, working, commits (zeros left out);
+   - a one-line **gist**, built by a template from its items: what waits first, then what
+     failed, then the latest finished, by session name and git state ("auth migration done, not
+     pushed; nightly e2e failed"). Never the agent's words.
+
+   Sorted by urgency: teams with needs-you first, then failed, then to review, then by latest
+   rest. Name breaks ties.
+
+The list pane never shows every item of every team. A team's items show when you step into it.
+
+**Inside a team** (`enter` on a team row): the list pane shows that team's items, grouped
+needs you → failed → done → working, newest first within a group. Each item: a mark (`●` asks,
+`✕` failed, `✓` done, `◐` working), the session name, the time of its rest (or how long it has
+worked), and a second line: hint chips, then `+X/−Y · N commits` and the last message's first
+line. `esc` goes back to the teams.
+
+### The reading pane
+
+It shows whatever is selected:
+
+- **All teams:** one block per team, in the list's order: its name, to review, working,
+  `+X/−Y`, commits, and a line on what moved and what waits (the gist, longer).
+- **A team:** a *since you looked* block (a templated paragraph from the team's items and git,
+  with its totals), then its items as rows under NEEDS YOU, DONE (failed first) and WORKING:
+  mark, name, `+X/−Y` and the last message's first line, time.
+- **An item** (from the NEEDS YOU strip or inside a team): the item view.
+  - *Asks:* a box with the last message, the question picked out; for a permission, what it
+    wants to run.
+  - *Finished:* the last message, trimmed (first paragraph, capped). A message that says nothing
+    ("Done.") shows what changed alone.
+  - *Changed since you looked:* git since *from*.
+  - *Deep read:* the kept one if there is one, else "not made, `p` reads the log".
+  - *The log since you looked*, filling the rest.
+  - A title line: team · name, the agent, the branch, "N turns since HH:MM" when it rested
+    more than once.
+
+### Keys
+
+| Key | On a team / All teams | On an item |
+|---|---|---|
+| `j` / `k` | move | move |
+| `enter` | step into the team | attach to the session (clears it) |
+| `esc` | — | back to the teams |
+| `r` | — | reply: send the session a prompt (clears it) |
+| `x` | mark every item of the team reviewed | mark it reviewed, move to the next |
+| `p` | read the team deeply | read it deeply |
+| `w` | the written summary | the written summary |
+
+Selecting something only shows it; it never clears an item.
+
+### Where it opens
+
+Time away picks only the starting selection:
+
+- under `report.brief_after` (~2h) with something in NEEDS YOU: the first item in the strip;
+- otherwise: *All teams*.
+
+### The written summary
+
+`w` swaps the reading pane for prose (`tui/prose.rs`): needs you first, then each team in the
+list's order, walking its items with their counts, git and the last message's first line.
+Built from the queue and git; nothing is generated. `w` again goes back.
 
 ## Sources
 
@@ -184,12 +272,13 @@ place. This step fills `run`. Later:
 - Planning recaps on report open: the background task, the count-first guard
   (`Mode::ReportCost`, `ASK_OVER`) and `report.summary: auto | ask`.
 - The need for a named summariser to see what happened.
+- The three layouts by time away: the board, the blocks, and the prose as a layout (it stays as
+  `w`). `report.deep_after` goes; `report.brief_after` only picks where the inbox opens.
 - Whether the recap sweep and its seeds stay (for the list row's live line) or go, the plan
-  settles once the board reads the last message from the log.
+  settles once the inbox reads the last message from the log.
 
 What stays: `summary.rs` for deep reads, `/summary`, `rl summary`, catch-up and flows;
-`run_facts` frozen at the end; the depth thresholds (`report.brief_after`, `report.deep_after`),
-which now pick the layout only.
+`run_facts` frozen at the end; the lanes in `tui/report.rs`, as the teams.
 
 ## Constraints
 
@@ -200,12 +289,22 @@ which now pick the layout only.
 - CI gates verified locally: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets
   -- -D warnings`, `cargo test --workspace`.
 - Tests use synthetic hook payloads and logs for each agent, never real session content.
+- The look follows the canvas: the existing TUI theme, amber for asks, blue for done, red for
+  failed, green for working.
 
 ## My calls (not discussed; check these)
 
-- **The prose over 2 days walks the queue, with no deep read made on open.** This reverses step
-  4's "generate on open". A deep read is `/summary deep`, or `p` on an item.
-- **Reviewing** is `enter`, attaching, or sending a prompt; seeing it on the board is not.
+- **The written summary walks the queue, with no deep read made on open.** This reverses step
+  4's "generate on open". A deep read is `/summary deep`, or `p`.
+- **Reviewing** is `x`, attaching, or replying; selecting an item to read it is not. `x` on a
+  team clears all its items.
+- **Where it opens:** the first ask when you were away under ~2h, else *All teams*.
+- **The NEEDS YOU strip** lists *asks* only; failed runs show in their team's counts and gist,
+  not in the strip.
+- **Teams are the existing lanes**, and a team row shows only when it has a queued item or a
+  working run.
+- **Gists and team blocks are templates**, by session name and git state, never the agent's
+  words.
 - **Only turn-end and permission hooks queue**; `idle_prompt` and `Interrupt` don't;
   `elicitation_dialog` is *asks*.
 - **Hooks win over the screen**, with a short grace.
@@ -221,4 +320,6 @@ which now pick the layout only.
 - **Claude's `last_assistant_message`** on `Stop`: always present, or read the log.
 - **The log position in *from*** for each agent's log, so a deep read starts where you left off.
 - **The trim** for a line and a block.
-- **The sweep:** keep it for the list row's live line, or retire it.
+- **The sweep:** keep it for the live line of a working item, or retire it.
+- **Narrow terminals:** below what width the reading pane stacks under the list, or the list
+  hides while an item is open.
