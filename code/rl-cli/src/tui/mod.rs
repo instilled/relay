@@ -519,6 +519,10 @@ struct App {
     picked: Vec<usize>,
     /// The live line at the foot; typing is the panel's resting state.
     line: line::Line,
+    /// `shift-tab` said the line is the other thing from what it reads as — words for the
+    /// assistant, not a shell line, or the other way round (`line::flip`). Until the line is sent
+    /// or emptied.
+    flipped: bool,
     /// The agents the registry knows (`agent.list`), read once.
     agents: Vec<String>,
     /// The directories of $PATH, for completing the first word.
@@ -1327,6 +1331,7 @@ impl App {
             removing: None,
             picked: Vec::new(),
             line: line::Line::default(),
+            flipped: false,
             agents: Vec::new(),
             path_dirs: complete::path_dirs(),
             aliases,
@@ -2356,13 +2361,7 @@ impl App {
             return vec![Line::from(spans)];
         }
         let folder = self.folder_here();
-        let what = {
-            // Runnable where it will run: a `./build.sh` in the folder the
-            // warm shell has `cd`'d into is a shell line.
-            let at = self.line_folder(self.line.text());
-            let here = self.here(&at);
-            line::what(self.line.text(), &self.agents, &|h| complete::runnable(h, &here))
-        };
+        let what = self.line_what();
         let answer = self.question_here().and_then(|q| pane::answer_of(q, self.line.text()));
         // A glyph and a colour say what `enter` will do: teal when it will run
         // something here, dim when the words are only asked or a command.
@@ -2388,7 +2387,14 @@ impl App {
                 line::What::Ask(_) => ("…", " asks the assistant".into(), theme::dim()),
             },
         };
-        let hint = format!("{glyph}{tail}");
+        // Which way `shift-tab` turns it.
+        let turn = match (&answer, &what) {
+            (Some(_), _) | (None, line::What::Empty | line::What::Slash(_)) => "",
+            _ if self.flipped => " · ⇧tab as read",
+            (None, line::What::Ask(_)) => " · ⇧tab runs it",
+            (None, _) => " · ⇧tab asks",
+        };
+        let hint = format!("{glyph}{tail}{turn}");
         let text = self.line.text();
         let cursor = self.line.cursor();
         // Rows and their byte offsets; the caret rides the row the cursor is in.
@@ -4439,6 +4445,31 @@ mod tests {
         press(&mut app, KeyCode::Delete, none).await;
         press(&mut app, KeyCode::Enter, none).await;
         assert_eq!(app.names.workspace(&folder), "proj", "its folder's own name");
+        token.cancel();
+    }
+
+    /// `shift-tab` on a line read wrong turns it round — the hint says so — and the turn lasts only
+    /// as long as the line: emptied, it is read as typed again.
+    #[tokio::test]
+    async fn shift_tab_turns_a_shell_line_into_words_and_back() {
+        let none = KeyModifiers::NONE;
+        let (_tmp, token, mut app, _) = panel().await;
+        type_in(&mut app, "ls the failing tests").await;
+        assert!(matches!(app.line_what(), super::line::What::Shell(_)), "ls runs here");
+        assert!(draw_text(&mut app).contains("⇧tab asks"));
+        press(&mut app, KeyCode::BackTab, none).await;
+        assert_eq!(app.line_what(), super::line::What::Ask("ls the failing tests".into()));
+        let screen = draw_text(&mut app);
+        assert!(screen.contains("asks the assistant · ⇧tab as read"), "{screen}");
+        press(&mut app, KeyCode::BackTab, none).await;
+        assert!(matches!(app.line_what(), super::line::What::Shell(_)), "and back");
+        press(&mut app, KeyCode::BackTab, none).await;
+        press(&mut app, KeyCode::Esc, none).await;
+        type_in(&mut app, "ls").await;
+        assert!(
+            matches!(app.line_what(), super::line::What::Shell(_)),
+            "a new line is read afresh"
+        );
         token.cancel();
     }
 
