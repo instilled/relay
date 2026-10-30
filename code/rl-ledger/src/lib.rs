@@ -19,6 +19,7 @@ pub mod meta;
 pub mod migrate;
 pub mod order;
 pub mod presence;
+pub mod review_queue;
 pub mod runs;
 pub mod seeds;
 pub mod session_io;

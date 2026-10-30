@@ -259,6 +259,9 @@ pub struct Run {
     /// `hidden` lens, unless it comes to need you after. Never stopped by it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hidden_at: Option<Timestamp>,
+    /// The repo's HEAD when it began, if it ran in one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_head: Option<String>,
 }
 
 /// The tag that marks a run as a project's warm shell.
@@ -311,6 +314,7 @@ impl Run {
             archived_at: None,
             pinned_at: None,
             hidden_at: None,
+            start_head: None,
         }
     }
 
