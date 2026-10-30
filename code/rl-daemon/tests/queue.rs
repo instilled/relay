@@ -9,8 +9,9 @@ use common::{Conn, Harness};
 use jiff::Timestamp;
 use rl_core::Home;
 use rl_ledger::{Ledger, review_queue};
+use rl_proto::methods::AssistantOutput;
 use rl_proto::queue::{Hint, How, QueueItem, RestKind};
-use rl_proto::types::{Run, RunState};
+use rl_proto::types::{Cause, Run, RunState};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -275,5 +276,49 @@ async fn gemini_after_agent_reads_prompt_response() {
     .await;
     let i = queued(&home, &run.id).await;
     assert_eq!(said(&i), (RestKind::Finished, How::Reply, vec![]));
+    h.stop().await;
+}
+
+#[tokio::test]
+async fn an_assistant_run_queues_nothing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = Home::at(tmp.path().join("home"));
+    home.ensure_dirs().unwrap();
+    // Relay's own assistant: a stand-in agent profile, named for a job.
+    let fake = std::fs::canonicalize(Path::new(env!("CARGO_MANIFEST_DIR")).join("../fixtures/fake-agent")).unwrap();
+    std::fs::write(
+        home.detect_dir().join("fakeai.yaml"),
+        format!(
+            "kind: agent\nbins: [\"{}\"]\nheadless: [\"--headless\"]\n",
+            fake.display()
+        ),
+    )
+    .unwrap();
+    std::fs::write(home.config_file(), "assistants:\n  interpret: fakeai\n").unwrap();
+    let Some(h) = Harness::on(home.clone()) else {
+        eprintln!("skipping: rl-session not built");
+        return;
+    };
+    let mut c = Conn::open(&home).await;
+    // SAFETY: the only test in this binary that runs the fake agent; the
+    // others never read it.
+    unsafe { std::env::set_var("FAKE_AGENT_READS", "1") };
+    let out: AssistantOutput = c
+        .ok(
+            "assistant.run",
+            json!({ "job": "interpret", "prompt": "run the tests", "cwd": tmp.path(), "title": "interpret", "timeout": "10s" }),
+        )
+        .await;
+    let run = c.get(&out.run).await;
+    assert_eq!(run.cause, Cause::Assistant("interpret".into()));
+    hook(
+        &mut c,
+        &run,
+        "claude",
+        "Stop",
+        json!({ "last_assistant_message": "Should I run them?" }),
+    )
+    .await;
+    not_queued(&home, &run.id).await;
     h.stop().await;
 }

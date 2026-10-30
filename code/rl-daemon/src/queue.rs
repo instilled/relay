@@ -7,9 +7,10 @@ use crate::transcript::{self, Agent};
 use crate::{rest, summary};
 use anyhow::Result;
 use rl_core::time;
+use rl_detect::claude::DIALECT as CLAUDE;
 use rl_ledger::review_queue;
 use rl_proto::queue::{Hint, How, RestKind};
-use rl_proto::types::Run;
+use rl_proto::types::{Cause, Run};
 use serde_json::Value;
 
 /// How a hook says a run came to rest.
@@ -28,9 +29,9 @@ pub fn hook_rest(dialect: &str, event: &str, payload: &Value) -> Option<HookRest
     let field = |k: &str| payload.get(k).and_then(Value::as_str);
     let said = |k: &str| field(k).filter(|m| !m.trim().is_empty()).map(str::to_string);
     match (dialect, event) {
-        ("claude" | "codex", "Stop") => Some(HookRest::TurnEnd(said("last_assistant_message"))),
+        (CLAUDE | "codex", "Stop") => Some(HookRest::TurnEnd(said("last_assistant_message"))),
         ("gemini", "AfterAgent") => Some(HookRest::TurnEnd(said("prompt_response"))),
-        ("claude", "Notification")
+        (CLAUDE, "Notification")
             if matches!(
                 field("notification_type"),
                 Some("permission_prompt" | "elicitation_dialog")
@@ -47,8 +48,12 @@ pub fn hook_rest(dialect: &str, event: &str, payload: &Value) -> Option<HookRest
 }
 
 /// Queues `run` at its rest. A turn's end whose hook carries no message is
-/// told by the last one in the run's log.
+/// told by the last one in the run's log. Relay's own assistant runs are
+/// never queued: there is nothing in them to review.
 pub async fn record(d: &Daemon, run: &Run, rest: HookRest) -> Result<()> {
+    if matches!(run.cause, Cause::Assistant(_)) {
+        return Ok(());
+    }
     let (kind, how, hints) = match rest {
         HookRest::Permission => (RestKind::Asks, How::Permission, vec![Hint::Permission]),
         HookRest::TurnEnd(said) => {
