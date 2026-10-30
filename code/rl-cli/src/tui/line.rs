@@ -328,6 +328,18 @@ pub fn what(line: &str, agents: &[String], runnable: &dyn Fn(&str) -> bool) -> W
     What::Ask(line.to_string())
 }
 
+/// What a line means the other way round, once `shift-tab` has said the reading was wrong: a
+/// shell line is words for the assistant, and words — or an agent and its prompt — a shell line,
+/// the whole `line` as typed. A command or nothing stays what it is.
+pub fn flip(what: What, line: &str) -> What {
+    let line = line.trim().to_string();
+    match what {
+        What::Shell(_) | What::Agent { .. } => What::Ask(line),
+        What::Ask(_) => What::Shell(line),
+        w => w,
+    }
+}
+
 /// One wrapping pair of double or single quotes off a prompt.
 fn unquote(s: &str) -> &str {
     s.strip_prefix('"')
@@ -928,5 +940,20 @@ mod tests {
             "trimmed"
         );
         assert_eq!(what("héllo 🌍", &agents(), &nothing_runs), What::Ask("héllo 🌍".into()));
+    }
+
+    #[test]
+    fn flipped_a_shell_line_is_words_and_words_a_shell_line() {
+        let runs_make = |w: &str| w == "make";
+        let flipped = |l: &str| flip(what(l, &agents(), &runs_make), l);
+        assert_eq!(flipped("make it nightly"), What::Ask("make it nightly".into()));
+        assert_eq!(flipped(" deploy.sh --dry "), What::Shell("deploy.sh --dry".into()));
+        assert_eq!(
+            flipped(r#"claude "fix it""#),
+            What::Ask(r#"claude "fix it""#.into()),
+            "an agent's line, whole"
+        );
+        assert_eq!(flipped("/new"), What::Slash("new".into()), "a command stays one");
+        assert_eq!(flipped("  "), What::Empty);
     }
 }

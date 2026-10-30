@@ -386,11 +386,23 @@ impl App {
             self.walk_cands(if k.code == KeyCode::Down { 1 } else { -1 });
             return Ok(());
         }
+        // `shift-tab` on something typed: it is the other thing from what it reads as.
+        if k.code == KeyCode::BackTab && !self.line.is_empty() {
+            if self.line.text().trim_start().starts_with('/') {
+                self.say("a command is a command");
+            } else {
+                self.flipped = !self.flipped;
+            }
+            return Ok(());
+        }
         // The line takes the keyboard first; what it leaves, the list has.
         match self.line.key(&k) {
             line::Act::Typing => {
                 self.completing = None;
                 self.pick = None;
+                if self.line.is_empty() {
+                    self.flipped = false;
+                }
                 Ok(())
             }
             // With a candidate highlighted, tab and enter take it; otherwise
@@ -410,6 +422,7 @@ impl App {
             line::Act::Submit => self.submit(area).await,
             line::Act::Cancel if !self.line.is_empty() => {
                 self.line.clear();
+                self.flipped = false;
                 self.completing = None;
                 self.pick = None;
                 Ok(())
@@ -773,6 +786,21 @@ impl App {
         complete::line_folder(text, &self.agents, &folder, cwd.as_deref())
     }
 
+    /// What the line at the foot means: as it reads, or the other way round once `shift-tab` has
+    /// said so (`flipped`).
+    pub(super) fn line_what(&self) -> line::What {
+        // Runnable where it will run: a `./build.sh` in the folder the
+        // warm shell has `cd`'d into is a shell line.
+        let at = self.line_folder(self.line.text());
+        let here = self.here(&at);
+        let what = line::what(self.line.text(), &self.agents, &|h| complete::runnable(h, &here));
+        if self.flipped {
+            line::flip(what, self.line.text())
+        } else {
+            what
+        }
+    }
+
     /// `enter` on the line: what it says. Nothing typed, the row instead.
     pub(super) async fn submit(&mut self, area: Rect) -> Result<()> {
         self.completing = None;
@@ -787,13 +815,8 @@ impl App {
             return Ok(());
         }
         let folder = self.folder_here();
-        let what = {
-            // Runnable where it will run: a `./build.sh` in the folder the
-            // warm shell has `cd`'d into is a shell line.
-            let at = self.line_folder(self.line.text());
-            let here = self.here(&at);
-            line::what(self.line.text(), &self.agents, &|h| complete::runnable(h, &here))
-        };
+        let what = self.line_what();
+        self.flipped = false;
         match what {
             line::What::Empty => return self.enter_row(area).await,
             line::What::Slash(rest) => return self.command(&rest, area).await,
