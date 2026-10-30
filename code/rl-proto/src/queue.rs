@@ -140,6 +140,15 @@ pub struct Changed {
     pub pushed: bool,
 }
 
+/// One message of a session's log: when, who said it, and its first line.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LogLine {
+    pub at: Timestamp,
+    /// `you`, or the agent's name.
+    pub who: String,
+    pub text: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

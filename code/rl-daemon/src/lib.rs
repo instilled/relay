@@ -17,6 +17,7 @@ mod leads;
 pub mod outside;
 pub mod recap;
 pub mod report;
+pub mod rest;
 pub mod resume;
 pub mod router;
 pub mod server;

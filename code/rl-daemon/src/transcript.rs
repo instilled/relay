@@ -10,6 +10,7 @@
 //! directories.
 
 use jiff::{SignedDuration, Timestamp};
+use rl_proto::queue::LogLine;
 use rl_proto::types::Run;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -438,38 +439,14 @@ pub fn gemini_story(text: &str, from: Option<Timestamp>) -> String {
 }
 
 fn gemini_said(text: &str, from: Option<Timestamp>, tools: bool) -> String {
-    // One record per id, the last; they stay in the order the ids first appeared.
-    let mut order: Vec<String> = Vec::new();
-    let mut last: HashMap<String, (Timestamp, Value)> = HashMap::new();
-    for (i, (at, v)) in entries(text).enumerate() {
-        let key = v
-            .get("id")
-            .and_then(Value::as_str)
-            .map_or_else(|| format!("#{i}"), str::to_string);
-        if last.insert(key.clone(), (at, v)).is_none() {
-            order.push(key);
-        }
-    }
     let mut out = String::new();
-    for (at, v) in order
-        .iter()
-        .filter_map(|k| last.get(k))
-        .filter(|(at, _)| within(*at, from))
-    {
+    for (at, v) in gemini_records(text, from) {
         let who = match v.get("type").and_then(Value::as_str) {
             Some("user") => "you",
             Some("gemini") => "gemini",
             _ => continue,
         };
-        let said = match v.get("content") {
-            Some(Value::String(s)) => s.clone(),
-            Some(Value::Array(parts)) => parts
-                .iter()
-                .filter_map(|p| p.get("text").and_then(Value::as_str))
-                .collect::<Vec<_>>()
-                .join("\n"),
-            _ => String::new(),
-        };
+        let said = gemini_content(&v);
         let said = said.trim();
         if !said.is_empty() {
             let _ = writeln!(out, "{at} {who}: {said}");
@@ -483,6 +460,121 @@ fn gemini_said(text: &str, from: Option<Timestamp>, tools: bool) -> String {
         }
     }
     out
+}
+
+/// A Gemini session's records at or after `from`: one per id, the last,
+/// in the order the ids first appeared.
+fn gemini_records(text: &str, from: Option<Timestamp>) -> Vec<(Timestamp, Value)> {
+    let mut order: Vec<String> = Vec::new();
+    let mut last: HashMap<String, (Timestamp, Value)> = HashMap::new();
+    for (i, (at, v)) in entries(text).enumerate() {
+        let key = v
+            .get("id")
+            .and_then(Value::as_str)
+            .map_or_else(|| format!("#{i}"), str::to_string);
+        if last.insert(key.clone(), (at, v)).is_none() {
+            order.push(key);
+        }
+    }
+    order
+        .iter()
+        .filter_map(|k| last.remove(k))
+        .filter(|(at, _)| within(*at, from))
+        .collect()
+}
+
+fn gemini_content(v: &Value) -> String {
+    match v.get("content") {
+        Some(Value::String(s)) => s.clone(),
+        Some(Value::Array(parts)) => parts
+            .iter()
+            .filter_map(|p| p.get("text").and_then(Value::as_str))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => String::new(),
+    }
+}
+
+/// Each message of a Claude session at or after `from`, whole: when, who, and
+/// its text blocks joined. Tool traffic and records without text are left out.
+fn claude_records(text: &str, from: Option<Timestamp>) -> Vec<(Timestamp, &'static str, String)> {
+    let mut out = Vec::new();
+    for (at, v) in entries(text).filter(|(at, _)| within(*at, from)) {
+        if v.get("isMeta").and_then(Value::as_bool) == Some(true)
+            || v.get("isCompactSummary").and_then(Value::as_bool) == Some(true)
+            || v.get("isSidechain").and_then(Value::as_bool) == Some(true)
+        {
+            continue;
+        }
+        let who = match v.get("type").and_then(Value::as_str) {
+            Some("user") => "you",
+            Some("assistant") => "claude",
+            _ => continue,
+        };
+        let said = match v.pointer("/message/content") {
+            Some(Value::String(s)) => s.trim().to_string(),
+            Some(Value::Array(blocks)) => blocks
+                .iter()
+                .filter(|b| b.get("type").and_then(Value::as_str) == Some("text"))
+                .filter_map(|b| b.get("text").and_then(Value::as_str))
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>()
+                .join("\n"),
+            _ => String::new(),
+        };
+        if !said.is_empty() {
+            out.push((at, who, said));
+        }
+    }
+    out
+}
+
+/// What the agent last said, whole: the text of its final message.
+pub fn last_message(agent: Agent, text: &str) -> Option<String> {
+    match agent {
+        Agent::Claude => claude_records(text, None)
+            .into_iter()
+            .rfind(|(_, who, _)| *who == "claude")
+            .map(|(_, _, said)| said),
+        Agent::Codex => codex_turns(text, None).pop().map(|t| t.message),
+        Agent::Gemini => gemini_records(text, None)
+            .into_iter()
+            .rfind(|(_, v)| v.get("type").and_then(Value::as_str) == Some("gemini"))
+            .map(|(_, v)| gemini_content(&v).trim().to_string()),
+    }
+}
+
+/// The messages of a session at or after `from`, oldest first, one line each:
+/// when, who, and the first line of what was said.
+pub fn log_lines(agent: Agent, text: &str, from: Option<Timestamp>) -> Vec<LogLine> {
+    let line = |at, who: &str, said: &str| LogLine {
+        at,
+        who: who.to_string(),
+        text: said.trim().lines().next().unwrap_or_default().to_string(),
+    };
+    match agent {
+        Agent::Claude => claude_records(text, from)
+            .iter()
+            .map(|(at, who, said)| line(*at, who, said))
+            .collect(),
+        Agent::Codex => codex_turns(text, from)
+            .iter()
+            .map(|t| line(t.at, "codex", &t.message))
+            .collect(),
+        Agent::Gemini => gemini_records(text, from)
+            .iter()
+            .filter_map(|(at, v)| {
+                let who = match v.get("type").and_then(Value::as_str)? {
+                    "user" => "you",
+                    "gemini" => "gemini",
+                    _ => return None,
+                };
+                let said = gemini_content(v);
+                (!said.trim().is_empty()).then(|| line(*at, who, &said))
+            })
+            .collect(),
+    }
 }
 
 fn json_text(s: &str) -> Value {
@@ -908,6 +1000,61 @@ not json
         assert!(s.contains("edit_file") && s.contains("a.rs"), "{s}");
         let late = gemini_messages(GEMINI, Some(at("2026-09-17T10:00:04Z")));
         assert!(late.contains("done") && !late.contains("fixed it"), "{late}");
+    }
+
+    #[test]
+    fn last_message_reads_each_agent() {
+        let claude = concat!(
+            r#"{"type":"assistant","timestamp":"2026-09-17T10:01:00Z","message":{"content":[{"type":"text","text":"first"}]}}"#,
+            "\n",
+            r#"{"type":"assistant","timestamp":"2026-09-17T10:02:00Z","message":{"content":[{"type":"text","text":"second"},{"type":"text","text":"part"}]}}"#,
+            "\n",
+            r#"{"type":"assistant","timestamp":"2026-09-17T10:03:00Z","message":{"content":[{"type":"tool_use","name":"Bash"}]}}"#,
+            "\n",
+            r#"{"type":"user","timestamp":"2026-09-17T10:04:00Z","message":{"content":"thanks"}}"#,
+            "\n",
+        );
+        assert_eq!(last_message(Agent::Claude, claude).as_deref(), Some("second\npart"));
+        assert_eq!(last_message(Agent::Claude, "").as_deref(), None);
+        assert_eq!(
+            last_message(Agent::Codex, CODEX).as_deref(),
+            Some("Fixed the parser.\nDetails follow.")
+        );
+        // GEMINI repeats id g1; the last record per id wins, and g2 is last.
+        assert_eq!(last_message(Agent::Gemini, GEMINI).as_deref(), Some("done"));
+        let again = format!(
+            "{GEMINI}{}\n",
+            r#"{"id":"g2","timestamp":"2026-09-17T10:00:05Z","type":"gemini","content":"done, really"}"#
+        );
+        assert_eq!(last_message(Agent::Gemini, &again).as_deref(), Some("done, really"));
+    }
+
+    #[test]
+    fn log_lines_start_at_from() {
+        let text = concat!(
+            r#"{"type":"user","timestamp":"2026-09-17T10:00:00Z","message":{"content":"before"}}"#,
+            "\n",
+            r#"{"type":"user","timestamp":"2026-09-17T10:10:00Z","message":{"content":"fix it\nplease"}}"#,
+            "\n",
+            r#"{"type":"assistant","timestamp":"2026-09-17T10:20:00Z","message":{"content":[{"type":"text","text":"Fixed.\nAll green."}]}}"#,
+            "\n",
+        );
+        let lines = log_lines(Agent::Claude, text, Some(at("2026-09-17T10:05:00Z")));
+        assert_eq!(lines.len(), 2);
+        assert_eq!((lines[0].who.as_str(), lines[0].text.as_str()), ("you", "fix it"));
+        assert_eq!(lines[0].at, at("2026-09-17T10:10:00Z"));
+        assert_eq!((lines[1].who.as_str(), lines[1].text.as_str()), ("claude", "Fixed."));
+        assert_eq!(log_lines(Agent::Claude, text, None).len(), 3);
+        let g = log_lines(Agent::Gemini, GEMINI, None);
+        assert_eq!(
+            g.iter().map(|l| l.who.as_str()).collect::<Vec<_>>(),
+            ["you", "gemini", "gemini"]
+        );
+        let c = log_lines(Agent::Codex, CODEX, None);
+        assert_eq!(
+            (c.len(), c[1].who.as_str(), c[1].text.as_str()),
+            (2, "codex", "Fixed the parser.")
+        );
     }
 
     #[test]
