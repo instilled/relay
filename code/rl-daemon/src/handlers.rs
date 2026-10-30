@@ -250,6 +250,21 @@ pub fn register(r: &mut Router<Daemon>) {
                 matches!(p.event.as_str(), "Stop" | "Notification"),
             ),
         };
+        // Codex's hooks run in its background: a turn's end that arrives
+        // after the next prompt's is the old turn's, and says nothing of the
+        // run now.
+        if let Some(turn) = p.payload.get("turn_id").and_then(|v| v.as_str()) {
+            let late = {
+                let mut turns = d.turns.lock().unwrap();
+                if prompted {
+                    turns.insert(p.id.clone(), turn.to_string());
+                }
+                p.dialect == "codex" && p.event == "Stop" && turns.get(&p.id).is_some_and(|latest| latest != turn)
+            };
+            if late {
+                return get_run(&d, &p.id).await;
+            }
+        }
         // The session the run is, so the list never shows it again as the
         // agent's own.
         if starts
@@ -280,6 +295,16 @@ pub fn register(r: &mut Router<Daemon>) {
             tokio::spawn(async move {
                 if let Err(e) = crate::recap::pick_up(&d, &run).await {
                     warn!(run = %run.id, error = %format!("{e:#}"), "recap not picked up");
+                }
+            });
+        }
+        // A turn's end or a wait on your approval queues the run for review,
+        // off the hook's clock: telling its kind may read the log.
+        if let Some(rest) = crate::queue::hook_rest(&p.dialect, &p.event, &p.payload) {
+            let (d, run) = (d.clone(), run.clone());
+            tokio::spawn(async move {
+                if let Err(e) = crate::queue::record(&d, &run, rest).await {
+                    warn!(run = %run.id, error = %format!("{e:#}"), "run not queued");
                 }
             });
         }

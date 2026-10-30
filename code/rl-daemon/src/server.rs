@@ -39,6 +39,10 @@ pub struct Daemon {
     pub badges: crate::badges::Badges,
     /// Agents' own sessions, as last heard.
     pub outside: Arc<crate::outside::Outsiders>,
+    /// Each run's latest prompt, by the `turn_id` its hook gave: Codex's
+    /// hooks arrive out of order, and a turn's end is the run's only while
+    /// its turn is the latest.
+    pub turns: std::sync::Mutex<std::collections::HashMap<String, String>>,
     pub started_at: Timestamp,
     pub shutdown: CancellationToken,
 }
@@ -183,6 +187,7 @@ pub async fn serve_with(home: Home, shutdown: CancellationToken, opts: ServeOpti
         leads,
         badges: crate::badges::Badges::new(home.plugins_dir(), crate::badges::EVERY, crate::badges::WAIT),
         outside,
+        turns: Default::default(),
         started_at: Timestamp::now(),
         shutdown: shutdown.clone(),
     });
