@@ -7,6 +7,7 @@ use rl_proto::decision::{Decision, DecisionStatus};
 use rl_proto::flow::Firing;
 use rl_proto::lead::{Band, Lead, LeadStatus};
 use rl_proto::methods::{Dismissal, Report};
+use rl_proto::queue::{LeadRest, QueueItem, RestKind};
 use rl_proto::types::{Cause, Run, RunKind, RunState};
 use std::collections::HashMap;
 use std::path::Path;
@@ -24,24 +25,18 @@ fn run_source(r: &Run) -> String {
     })
 }
 
-/// How long a *failed* run stays in needs-you before it ages out of the
-/// report. A failure already happened — it is not something you can still act
-/// on — so an old one stops being news and drops (it remains in the overview
-/// and ledger as history). A genuinely-*waiting* run (Blocked / NeedsInput) is
-/// never aged out: it still needs you, however long you were away. Tunable.
-const STALE_FAILED: jiff::SignedDuration = jiff::SignedDuration::from_secs(14 * 24 * 3600);
-
 /// Relay's own state as leads: open decisions, runs by state, flow firings.
 /// Computed, never stored, so it tracks the truth and self-clears. `recaps`
 /// is each run's recap line (written, else the agent's own): a happened run
-/// is told by it before its raw output tail.
+/// is told by it before its raw output tail. `queue` is each queued run's
+/// item, by its id: it bands the run and rides on its lead.
 pub fn project_builtins(
     decisions: &[Decision],
     runs: &[Run],
     firings: &[Firing],
-    now: Timestamp,
     facts: &HashMap<String, RunFacts>,
     recaps: &HashMap<String, String>,
+    queue: &HashMap<String, QueueItem>,
 ) -> Vec<Lead> {
     let mut out = Vec::new();
 
@@ -58,6 +53,7 @@ pub fn project_builtins(
             at: d.created_at,
             expires_at: d.expires_at,
             facts: None,
+            rest: None,
         });
     }
 
@@ -67,25 +63,16 @@ pub fn project_builtins(
         if matches!(r.cause, Cause::Assistant(_)) {
             continue;
         }
-        // A shell at rest is not news — it is idle whenever you are not typing.
-        if r.is_shell() && !r.state.needs_attention() && !r.state.is_terminal() {
-            continue;
-        }
-        let band = if r.state.needs_attention() {
-            Band::NeedsYou
-        } else if r.state.is_terminal() {
-            Band::Happened
-        } else {
-            Band::Live
+        // The queue says what is news: a run that asks, or one that finished
+        // and waits to be looked at. Past that, only a run at work is shown;
+        // one at rest or ended with nothing queued has been reviewed.
+        let item = queue.get(&r.id);
+        let band = match item.map(|i| i.kind) {
+            Some(RestKind::Asks) => Band::NeedsYou,
+            _ if matches!(r.state, RunState::Working | RunState::Starting) => Band::Live,
+            Some(RestKind::Finished) => Band::Happened,
+            None => continue,
         };
-        // A failure that happened longer ago than STALE_FAILED is no longer
-        // news — drop it rather than let old failures pile up in needs-you.
-        // Only Failed ages out: a Blocked/NeedsInput run genuinely waiting on a
-        // human is kept whatever its age, so nothing you owe an answer to can
-        // silently vanish while you are away.
-        if band == Band::NeedsYou && r.state == RunState::Failed && now.duration_since(r.state_at) > STALE_FAILED {
-            continue;
-        }
         // The ladder past a written recap: the agent's own, then the tail.
         let summary = match band {
             Band::Happened => recaps.get(&r.id).cloned().or_else(|| r.last_line.clone()),
@@ -100,9 +87,14 @@ pub fn project_builtins(
             scope: Some(r.workspace.clone()),
             action: None, // acting on a run lead is step 2
             status: LeadStatus::Open,
-            at: r.state_at,
+            at: item.map_or(r.state_at, |i| i.at),
             expires_at: None,
             facts: facts.get(&r.id).cloned(),
+            rest: item.map(|i| LeadRest {
+                item: i.clone(),
+                last: None,
+                changed: None,
+            }),
         });
     }
 
@@ -123,6 +115,7 @@ pub fn project_builtins(
             at,
             expires_at: None,
             facts: None,
+            rest: None,
         });
     }
 
@@ -130,9 +123,8 @@ pub fn project_builtins(
 }
 
 /// Merge built-in and stored leads into the three bands. needs-you and live are
-/// shown whatever their age here (project_builtins has already aged old *failed*
-/// runs out upstream); happened is bounded by `since`. Anything expired or out of
-/// scope is dropped. Each band is newest-first.
+/// shown whatever their age; happened is bounded by `since`. Anything expired
+/// or out of scope is dropped. Each band is newest-first.
 pub fn assemble(
     builtins: Vec<Lead>,
     stored: Vec<Lead>,
@@ -180,6 +172,7 @@ mod tests {
     use super::*;
     use jiff::Timestamp;
     use rl_proto::flow::FiringStatus;
+    use rl_proto::queue::How;
     use rl_proto::types::{RunKind, RunState};
 
     use std::path::{Path, PathBuf};
@@ -201,6 +194,27 @@ mod tests {
         d
     }
 
+    /// The queue as the handler reads it: one item per run, by its id.
+    fn queued(items: &[(&str, RestKind)]) -> HashMap<String, QueueItem> {
+        items
+            .iter()
+            .map(|(id, kind)| {
+                let item = QueueItem {
+                    source: "run".into(),
+                    reference: id.to_string(),
+                    kind: *kind,
+                    how: How::Reply,
+                    hints: Vec::new(),
+                    at: ts("2026-10-18T00:00:00Z"),
+                    rests: 1,
+                    from: ts("2026-10-17T00:00:00Z"),
+                    from_head: None,
+                };
+                (id.to_string(), item)
+            })
+            .collect()
+    }
+
     #[test]
     fn a_happened_run_lead_carries_its_facts() {
         let with = test_run("r1", RunState::Finished);
@@ -218,9 +232,9 @@ mod tests {
             &[],
             &[with, without],
             &[],
-            Timestamp::now(),
             &facts,
             &Default::default(),
+            &queued(&[("r1", RestKind::Finished), ("r2", RestKind::Finished)]),
         );
         let find = |k: &str| leads.iter().find(|l| l.key == k).unwrap();
         assert_eq!(find("run:r1").facts.as_ref().unwrap().commits, 3);
@@ -237,9 +251,9 @@ mod tests {
             &[],
             &[summariser, mine],
             &[],
-            Timestamp::now(),
             &Default::default(),
             &Default::default(),
+            &queued(&[("a1", RestKind::Finished), ("r1", RestKind::Finished)]),
         );
         let keys: Vec<&str> = leads.iter().map(|l| l.key.as_str()).collect();
         assert_eq!(keys, ["run:r1"]);
@@ -262,9 +276,9 @@ mod tests {
             &[],
             &[seeded, bare, live],
             &[],
-            Timestamp::now(),
             &Default::default(),
             &recaps,
+            &queued(&[("r1", RestKind::Finished), ("r2", RestKind::Finished)]),
         );
         let find = |k: &str| leads.iter().find(|l| l.key == k).unwrap();
         assert_eq!(find("run:r1").summary.as_deref(), Some("Fixed the search."));
@@ -277,57 +291,79 @@ mod tests {
     }
 
     #[test]
-    fn stale_failed_run_is_dropped() {
-        let now = ts("2026-10-18T00:00:00Z");
-        let old = run_in_state("r1", RunState::Failed, now - Duration::from_secs(15 * 24 * 3600));
-        let leads = project_builtins(&[], &[old], &[], now, &Default::default(), &Default::default());
-        assert!(
-            leads.is_empty(),
-            "a run that failed 15 days ago is stale history, not news"
-        );
-    }
-
-    #[test]
-    fn recent_failed_run_is_kept() {
-        let now = ts("2026-10-18T00:00:00Z");
-        let fresh = run_in_state("r1", RunState::Failed, now - Duration::from_secs(60));
-        let leads = project_builtins(&[], &[fresh], &[], now, &Default::default(), &Default::default());
+    fn an_asks_item_puts_the_run_in_needs_you() {
+        let idle = test_run("r1", RunState::Idle);
+        let queue = queued(&[("r1", RestKind::Asks)]);
+        let leads = project_builtins(&[], &[idle], &[], &Default::default(), &Default::default(), &queue);
         assert_eq!(leads.len(), 1);
         assert_eq!(leads[0].band, Band::NeedsYou);
+        let rest = leads[0].rest.as_ref().unwrap();
+        assert_eq!(rest.item, queue["r1"]);
+        assert_eq!(leads[0].at, queue["r1"].at, "at its rest");
     }
 
     #[test]
-    fn failed_run_just_under_cutoff_is_kept() {
-        // Pins the 14-day cutoff itself: quietly shrinking it back (e.g. to 7
-        // days) would drop this and fail the test.
-        let now = ts("2026-10-18T00:00:00Z");
-        let r = run_in_state("r1", RunState::Failed, now - Duration::from_secs(13 * 24 * 3600));
-        let leads = project_builtins(&[], &[r], &[], now, &Default::default(), &Default::default());
-        assert_eq!(
-            leads.len(),
-            1,
-            "a run that failed 13 days ago is still within the 14-day window"
+    fn a_finished_item_is_happened_with_its_rest() {
+        let ended = test_run("r1", RunState::Finished);
+        let failed = test_run("r2", RunState::Failed);
+        // A shell at rest is news once it is queued: it finished something.
+        let shell = test_shell("sh1", RunState::Idle);
+        let queue = queued(&[
+            ("r1", RestKind::Finished),
+            ("r2", RestKind::Finished),
+            ("sh1", RestKind::Finished),
+        ]);
+        let leads = project_builtins(
+            &[],
+            &[ended, failed, shell],
+            &[],
+            &Default::default(),
+            &Default::default(),
+            &queue,
         );
+        assert_eq!(leads.len(), 3);
+        for l in &leads {
+            assert_eq!(l.band, Band::Happened, "{}", l.key);
+            let id = l.key.strip_prefix("run:").unwrap();
+            assert_eq!(l.rest.as_ref().unwrap().item, queue[id]);
+        }
     }
 
     #[test]
-    fn stale_waiting_runs_are_never_dropped() {
-        // The vacation case: something genuinely waiting on a human must not
-        // vanish from the report however long you were away. Only Failed ages.
+    fn a_reviewed_finished_run_leaves_the_report() {
+        // Nothing queued for them: each was reviewed, or never came to rest.
+        let runs = [
+            test_run("r1", RunState::Finished),
+            test_run("r2", RunState::Failed),
+            test_run("r3", RunState::Stopped),
+            test_run("r4", RunState::Idle),
+            test_run("r5", RunState::NeedsInput),
+        ];
+        let leads = project_builtins(
+            &[],
+            &runs,
+            &[],
+            &Default::default(),
+            &Default::default(),
+            &Default::default(),
+        );
+        assert!(leads.is_empty(), "{leads:?}");
+    }
+
+    #[test]
+    fn an_old_asks_item_is_never_dropped() {
+        // The vacation case: something waiting on a human must not vanish
+        // from the report however long you were away.
         let now = ts("2026-10-18T00:00:00Z");
         let long_ago = now - Duration::from_secs(60 * 24 * 3600);
         let blocked = run_in_state("r1", RunState::Blocked, long_ago);
-        let needs_input = run_in_state("r2", RunState::NeedsInput, long_ago);
-        let leads = project_builtins(
-            &[],
-            &[blocked, needs_input],
-            &[],
-            now,
-            &Default::default(),
-            &Default::default(),
-        );
-        assert_eq!(leads.len(), 2, "a 60-day-old Blocked/NeedsInput run still needs you");
-        assert!(leads.iter().all(|l| l.band == Band::NeedsYou));
+        let mut queue = queued(&[("r1", RestKind::Asks)]);
+        queue.get_mut("r1").unwrap().at = long_ago;
+        let leads = project_builtins(&[], &[blocked], &[], &Default::default(), &Default::default(), &queue);
+        assert_eq!(leads.len(), 1);
+        assert_eq!(leads[0].band, Band::NeedsYou);
+        let r = assemble(leads, vec![], None, now - Duration::from_secs(3600), now);
+        assert_eq!(r.needs_you.len(), 1);
     }
 
     #[test]
@@ -336,7 +372,14 @@ mod tests {
         let old = now - Duration::from_secs(60 * 24 * 3600);
         let d = open_decision("d1", old);
         let f = test_firing("f1", Some(old)); // an old, ended firing
-        let leads = project_builtins(&[d], &[], &[f], now, &Default::default(), &Default::default());
+        let leads = project_builtins(
+            &[d],
+            &[],
+            &[f],
+            &Default::default(),
+            &Default::default(),
+            &Default::default(),
+        );
         assert_eq!(
             leads.len(),
             2,
@@ -405,6 +448,7 @@ mod tests {
             at,
             expires_at: None,
             facts: None,
+            rest: None,
         }
     }
 
@@ -473,7 +517,7 @@ mod tests {
             &[d],
             &[],
             &[],
-            Timestamp::now(),
+            &Default::default(),
             &Default::default(),
             &Default::default(),
         );
@@ -485,30 +529,26 @@ mod tests {
     }
 
     #[test]
-    fn run_state_maps_to_band() {
+    fn a_working_run_is_live_whatever_it_finished() {
         let cases = [
-            (RunState::NeedsInput, Band::NeedsYou),
-            (RunState::Blocked, Band::NeedsYou),
-            (RunState::Failed, Band::NeedsYou),
-            (RunState::Working, Band::Live),
-            (RunState::Starting, Band::Live),
-            (RunState::Idle, Band::Live),
-            (RunState::Finished, Band::Happened),
-            (RunState::Stopped, Band::Happened),
+            (RunState::Working, None, Band::Live),
+            (RunState::Starting, None, Band::Live),
+            (RunState::Working, Some(RestKind::Finished), Band::Live),
+            (RunState::Working, Some(RestKind::Asks), Band::NeedsYou),
         ];
-        for (state, want) in cases {
-            let r = test_run("r1", state);
+        for (state, kind, want) in cases {
+            let queue = kind.map(|k| queued(&[("r1", k)])).unwrap_or_default();
             let leads = project_builtins(
                 &[],
-                &[r],
+                &[test_run("r1", state)],
                 &[],
-                Timestamp::now(),
                 &Default::default(),
                 &Default::default(),
+                &queue,
             );
-            assert_eq!(leads.len(), 1, "{state:?} should project one lead");
-            assert_eq!(leads[0].band, want, "{state:?}");
-            assert_eq!(leads[0].key, "run:r1");
+            assert_eq!(leads.len(), 1, "{state:?} {kind:?} should project one lead");
+            assert_eq!(leads[0].band, want, "{state:?} {kind:?}");
+            assert_eq!(leads[0].rest.is_some(), kind.is_some());
         }
     }
 
@@ -520,7 +560,7 @@ mod tests {
                 &[],
                 &[shell],
                 &[],
-                Timestamp::now(),
+                &Default::default(),
                 &Default::default(),
                 &Default::default()
             )
@@ -538,7 +578,7 @@ mod tests {
                 &[],
                 &[],
                 &[live],
-                Timestamp::now(),
+                &Default::default(),
                 &Default::default(),
                 &Default::default()
             )[0]
@@ -550,7 +590,7 @@ mod tests {
                 &[],
                 &[],
                 &[done],
-                Timestamp::now(),
+                &Default::default(),
                 &Default::default(),
                 &Default::default()
             )[0]
@@ -567,7 +607,7 @@ mod tests {
             &[],
             &[r],
             &[],
-            Timestamp::now(),
+            &Default::default(),
             &Default::default(),
             &Default::default(),
         );
@@ -583,7 +623,7 @@ mod tests {
             &[],
             &[r],
             &[],
-            Timestamp::now(),
+            &Default::default(),
             &Default::default(),
             &Default::default(),
         );
@@ -595,21 +635,21 @@ mod tests {
                 &[],
                 &[a],
                 &[],
-                Timestamp::now(),
+                &Default::default(),
                 &Default::default(),
                 &Default::default()
             )[0]
             .source,
             "agent"
         );
-        let mut sh = test_shell("r3", RunState::Failed);
+        let mut sh = test_shell("r3", RunState::Working);
         sh.cli = None;
         assert_eq!(
             project_builtins(
                 &[],
                 &[sh],
                 &[],
-                Timestamp::now(),
+                &Default::default(),
                 &Default::default(),
                 &Default::default()
             )[0]
@@ -625,7 +665,7 @@ mod tests {
             &[],
             &[],
             &[f],
-            Timestamp::now(),
+            &Default::default(),
             &Default::default(),
             &Default::default(),
         );

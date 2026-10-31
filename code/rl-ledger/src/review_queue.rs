@@ -168,6 +168,19 @@ pub fn get(conn: &Connection, source: &str, reference: &str) -> Result<Option<Qu
         .optional()?)
 }
 
+/// Where the session's unreviewed stretch begins — queued or not: its time,
+/// and the HEAD then. `None` when it never came to rest.
+pub fn from(conn: &Connection, source: &str, reference: &str) -> Result<Option<(Timestamp, Option<String>)>> {
+    let row: Option<(i64, Option<String>)> = conn
+        .query_row(
+            "SELECT from_at, from_head FROM review_queue WHERE source = ?1 AND ref = ?2",
+            params![source, reference],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    row.map(|(at, head)| Ok((from_millis(at)?, head))).transpose()
+}
+
 /// When, and how, the session last came to rest — reviewed or not.
 pub fn last_rest(conn: &Connection, source: &str, reference: &str) -> Result<Option<(Timestamp, How)>> {
     let row: Option<(i64, String)> = conn
@@ -327,6 +340,12 @@ mod tests {
         );
         assert!(led.call_blocking(|c| list(c)).unwrap().is_empty());
         assert!(led.call_blocking(|c| get(c, "run", "r1")).unwrap().is_none());
+        assert_eq!(
+            led.call_blocking(|c| from(c, "run", "r1")).unwrap(),
+            Some((t(5), Some("def".to_string()))),
+            "reviewed, it still says where the next stretch begins"
+        );
+        assert_eq!(led.call_blocking(|c| from(c, "run", "r2")).unwrap(), None);
         led.call_blocking(|c| {
             rest(
                 c,

@@ -16,6 +16,7 @@ pub mod import;
 mod leads;
 pub mod outside;
 pub mod queue;
+pub mod reading;
 pub mod recap;
 pub mod report;
 pub mod rest;

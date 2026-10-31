@@ -127,6 +127,7 @@ mod tests {
             at: now,
             expires_at: None,
             facts: None,
+            rest: None,
         }];
         let rows = lead_rows(&leads, now);
         assert_eq!(rows.len(), 1);

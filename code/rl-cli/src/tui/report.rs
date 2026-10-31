@@ -307,6 +307,7 @@ pub(crate) mod tests {
             at,
             expires_at: None,
             facts: None,
+            rest: None,
         }
     }
 

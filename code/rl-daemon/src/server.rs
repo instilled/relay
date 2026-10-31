@@ -43,6 +43,8 @@ pub struct Daemon {
     /// hooks arrive out of order, and a turn's end is the run's only while
     /// its turn is the latest.
     pub turns: std::sync::Mutex<std::collections::HashMap<String, String>>,
+    /// What was last read for the queue's items, kept until it moves.
+    pub reading: crate::reading::Reading,
     pub started_at: Timestamp,
     pub shutdown: CancellationToken,
 }
@@ -192,6 +194,7 @@ pub async fn serve_with(home: Home, shutdown: CancellationToken, opts: ServeOpti
         badges: crate::badges::Badges::new(home.plugins_dir(), crate::badges::EVERY, crate::badges::WAIT),
         outside,
         turns: Default::default(),
+        reading: Default::default(),
         started_at: Timestamp::now(),
         shutdown: shutdown.clone(),
     });

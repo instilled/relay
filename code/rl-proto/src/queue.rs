@@ -149,6 +149,29 @@ pub struct LogLine {
     pub text: String,
 }
 
+/// A run lead's place in the queue, with what is read from the session for
+/// it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LeadRest {
+    pub item: QueueItem,
+    /// What the agent last said, its first paragraph; a shell's last lines.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last: Option<String>,
+    /// Git since the item's `from`; `None` with no repo.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub changed: Option<Changed>,
+}
+
+/// One item read whole: its log since `from`, and what changed in git.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ItemView {
+    pub log: Vec<LogLine>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub changed: Option<Changed>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

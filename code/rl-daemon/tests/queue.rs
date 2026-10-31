@@ -11,8 +11,9 @@ use common::{Conn, Harness, fake_cli};
 use jiff::Timestamp;
 use rl_core::Home;
 use rl_ledger::{Ledger, review_queue};
-use rl_proto::methods::AssistantOutput;
-use rl_proto::queue::{Hint, How, QueueItem, RestKind};
+use rl_proto::lead::{Band, Lead};
+use rl_proto::methods::{AssistantOutput, QueueReviewed, Report};
+use rl_proto::queue::{Hint, How, ItemView, QueueItem, RestKind};
 use rl_proto::types::{Cause, Run, RunState, Source};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
@@ -524,5 +525,126 @@ async fn start_head_is_kept() {
         assert_eq!(kept.start_head, want, "{}", cwd.display());
         let _: Run = c.ok("run.stop", json!({ "id": run.id })).await;
     }
+    h.stop().await;
+}
+
+/// One assistant message of a Claude session file, said at `at`.
+fn claude_line(at: Timestamp, text: &str) -> String {
+    format!(
+        "{{\"type\":\"assistant\",\"timestamp\":\"{at}\",\"message\":{{\"content\":[{{\"type\":\"text\",\"text\":{}}}]}}}}\n",
+        serde_json::to_string(text).unwrap()
+    )
+}
+
+/// Every run lead in the report, by key.
+async fn run_leads(c: &mut Conn) -> Vec<Lead> {
+    let report: Report = c.ok("report.get", json!({})).await;
+    report
+        .needs_you
+        .into_iter()
+        .chain(report.live)
+        .chain(report.happened)
+        .filter(|l| l.key.starts_with("run:"))
+        .collect()
+}
+
+#[tokio::test]
+async fn review_clears_and_report_drops_it() {
+    let Some(Setup {
+        _tmp,
+        dir,
+        home,
+        h,
+        mut c,
+        run,
+    }) = setup("claude").await
+    else {
+        return;
+    };
+    let transcript = dir.join("session.jsonl");
+    std::fs::write(&transcript, claude_line(Timestamp::now(), "Fixed it.\n\nThe details.")).unwrap();
+    hook(&mut c, &run, "claude", "Stop", json!({ "transcript_path": transcript })).await;
+    let i = queued(&home, &run.id).await;
+
+    let leads = run_leads(&mut c).await;
+    let lead = leads.iter().find(|l| l.key == format!("run:{}", run.id)).unwrap();
+    assert_eq!(lead.band, Band::Happened);
+    let rest = lead.rest.as_ref().unwrap();
+    assert_eq!(rest.item, i);
+    assert_eq!(rest.last.as_deref(), Some("Fixed it."), "its first paragraph");
+    assert_eq!(rest.changed, None, "no repo, nothing said of git");
+
+    let done: QueueReviewed = c.ok("queue.review", json!({ "runs": [run.id] })).await;
+    assert_eq!(done.cleared, 1);
+    assert_eq!(item(&home, &run.id), None);
+    assert!(run_leads(&mut c).await.is_empty(), "a reviewed run at rest is not news");
+    let again: QueueReviewed = c.ok("queue.review", json!({ "runs": [run.id] })).await;
+    assert_eq!(again.cleared, 0, "nothing left to clear");
+    h.stop().await;
+}
+
+#[tokio::test]
+async fn typing_into_a_run_reviews_it() {
+    let Some(Setup {
+        _tmp,
+        home,
+        h,
+        mut c,
+        run,
+        ..
+    }) = setup("claude").await
+    else {
+        return;
+    };
+    hook(
+        &mut c,
+        &run,
+        "claude",
+        "Stop",
+        json!({ "last_assistant_message": "Should I push?" }),
+    )
+    .await;
+    queued(&home, &run.id).await;
+    let _: () = c
+        .ok("run.input", json!({ "id": run.id, "bytes": b"yes\n".to_vec() }))
+        .await;
+    assert_eq!(item(&home, &run.id), None, "answered: reviewed");
+    h.stop().await;
+}
+
+#[tokio::test]
+async fn item_view_reads_the_log_since_from() {
+    let Some(Setup {
+        _tmp,
+        dir,
+        home,
+        h,
+        mut c,
+        run,
+    }) = setup("claude").await
+    else {
+        return;
+    };
+    let transcript = dir.join("session.jsonl");
+    let before = run.started_at - Duration::from_secs(3600);
+    std::fs::write(
+        &transcript,
+        claude_line(before, "Old news.") + &claude_line(Timestamp::now(), "Fixed it."),
+    )
+    .unwrap();
+    hook(&mut c, &run, "claude", "Stop", json!({ "transcript_path": transcript })).await;
+    queued(&home, &run.id).await;
+    let texts = |v: &ItemView| v.log.iter().map(|l| l.text.clone()).collect::<Vec<_>>();
+    let view: ItemView = c.ok("queue.item", json!({ "run": run.id })).await;
+    assert_eq!(texts(&view), ["Fixed it."], "since the run's start");
+    assert_eq!((view.changed, view.branch), (None, None), "no repo");
+
+    let _: QueueReviewed = c.ok("queue.review", json!({ "runs": [run.id] })).await;
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let mut more = std::fs::read_to_string(&transcript).unwrap();
+    more += &claude_line(Timestamp::now(), "Next.");
+    std::fs::write(&transcript, more).unwrap();
+    let view: ItemView = c.ok("queue.item", json!({ "run": run.id })).await;
+    assert_eq!(texts(&view), ["Next."], "since the review");
     h.stop().await;
 }

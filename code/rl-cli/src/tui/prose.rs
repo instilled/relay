@@ -131,6 +131,7 @@ mod tests {
             at: Timestamp::from_second(1).unwrap(),
             expires_at: None,
             facts: None,
+            rest: None,
         }
     }
 

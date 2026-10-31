@@ -236,6 +236,39 @@ pub struct LeadDismissParams {
     pub key: String,
 }
 
+/// You looked at these runs: their items leave the queue, and the next
+/// stretch of each begins now, from its repo's HEAD.
+pub struct QueueReview;
+impl Method for QueueReview {
+    const NAME: &'static str = "queue.review";
+    type Params = QueueReviewParams;
+    type Result = QueueReviewed;
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueueReviewParams {
+    pub runs: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueueReviewed {
+    /// How many were queued.
+    pub cleared: u32,
+}
+
+/// One run read since you last looked: its log and what changed in git.
+pub struct QueueItemGet;
+impl Method for QueueItemGet {
+    const NAME: &'static str = "queue.item";
+    type Params = QueueItemParams;
+    type Result = crate::queue::ItemView;
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueueItemParams {
+    pub run: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LeadPostParams {
     pub source: String,

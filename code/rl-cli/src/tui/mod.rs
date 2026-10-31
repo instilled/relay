@@ -4002,6 +4002,9 @@ mod tests {
                         let said = format!("{} said this\r\n", run.title);
                         session_io::append(c, &run.id, session_io::Direction::Out, said.as_bytes(), at)?;
                         runs::finish(c, &run.id, RunState::Finished, Source::Pty, Some(0), at)?;
+                        // Its end queues it for review, as the supervisor's does.
+                        let stopped = rl_proto::queue::Hint::Stopped;
+                        rl_ledger::review_queue::end(c, "run", &run.id, stopped, at, at, None)?;
                     }
                     Ok(())
                 }
@@ -5045,6 +5048,7 @@ mod tests {
             at: jiff::Timestamp::now(),
             expires_at: None,
             facts: None,
+            rest: None,
         };
         app.report = Some(rl_proto::methods::Report {
             needs_you: vec![lead(rl_proto::lead::Band::NeedsYou, "approve the deploy")],
@@ -5098,6 +5102,7 @@ mod tests {
             at: jiff::Timestamp::now(),
             expires_at: None,
             facts: None,
+            rest: None,
         }
     }
 
