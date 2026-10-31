@@ -202,9 +202,9 @@ pub const ALL: &[Command] = &[
     },
     Command {
         name: "ask",
-        args: "<words>",
+        args: "[words]",
         words: &[],
-        what: "hand plain words to an assistant yourself",
+        what: "hand plain words to an assistant yourself; alone, its proposal again",
         cmd: Cmd::Ask,
     },
     Command {

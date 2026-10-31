@@ -194,11 +194,10 @@ async fn a_draft_with_no_yes_in_a_folder_of_yours_leaves_only_what_was_yours() {
 }
 
 /// The assistant answering what `want` asked with `HELLO`, named `name` by the draft.
-async fn answer_flow(app: &mut super::App, folder: &std::path::Path, want: Want, name: &str) {
+async fn answer_flow(app: &mut super::App, _folder: &std::path::Path, want: Want, name: &str) {
     use crate::interpret::{Answer, FlowDraft};
     app.asking = Some(super::Asking {
         words: "say hello".into(),
-        folder: folder.to_path_buf(),
         want,
         task: tokio::spawn(async { anyhow::bail!("not asked") }),
     });

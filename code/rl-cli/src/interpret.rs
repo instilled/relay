@@ -257,6 +257,24 @@ pub fn form_of(d: &Draft, origin: &Path) -> Form {
     f
 }
 
+/// The words for a change to a run proposed: what was asked first and since, the run proposed for
+/// it, and the change — the last words — so the answer is the whole run again, changed.
+pub fn changing(asked: &[String], d: &Draft) -> String {
+    let (last, before) = asked.split_last().expect("words asked");
+    let mut s = String::from("Asked before:\n");
+    for w in before {
+        s.push_str(&format!("- {w}\n"));
+    }
+    s.push_str("\nProposed for it:\n\n");
+    for l in d.lines() {
+        s.push_str(&format!("  {l}\n"));
+    }
+    s.push_str(&format!(
+        "\nChange it: {last}\n\nAnswer with the whole run, changed, in the same shape.\n"
+    ));
+    s
+}
+
 /// Asks the interpreter: the pack for `folder` and what is wanted, then the words. What comes
 /// back, read, with the run that said it. A whole flow takes longer to write than a run: three
 /// minutes rather than the assistant's one.
@@ -385,6 +403,20 @@ mod tests {
             Answer::Run(d) => d,
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn a_change_is_asked_with_what_was_asked_and_proposed() {
+        let d = run("kind: run\nrun: cargo test\ntitle: tests\n");
+        let asked = ["run the tests".to_string(), "only the failing ones".to_string()];
+        let words = changing(&asked, &d);
+        assert!(words.contains("- run the tests\n"), "{words}");
+        assert!(words.contains("  run: cargo test\n"), "the draft: {words}");
+        assert!(words.contains("Change it: only the failing ones\n"), "{words}");
+        assert!(
+            !words.contains("- only the failing ones"),
+            "the change is not asked before: {words}"
+        );
     }
 
     #[test]

@@ -386,6 +386,15 @@ impl App {
             self.walk_cands(if k.code == KeyCode::Down { 1 } else { -1 });
             return Ok(());
         }
+        // `^e` on an empty line with a proposal up: it, as the run form.
+        if k.code == KeyCode::Char('e')
+            && k.modifiers == KeyModifiers::CONTROL
+            && self.line.is_empty()
+            && self.proposal_shown().is_some()
+        {
+            self.edit_proposal();
+            return Ok(());
+        }
         // `shift-tab` on something typed: it is the other thing from what it reads as.
         if k.code == KeyCode::BackTab && !self.line.is_empty() {
             if self.line.text().trim_start().starts_with('/') {
@@ -793,7 +802,15 @@ impl App {
         // warm shell has `cd`'d into is a shell line.
         let at = self.line_folder(self.line.text());
         let here = self.here(&at);
-        let what = line::what(self.line.text(), &self.agents, &|h| complete::runnable(h, &here));
+        let mut what = line::what(self.line.text(), &self.agents, &|h| complete::runnable(h, &here));
+        // With a proposal up, words change it: a first word that runs is still one of them,
+        // unless a bang says otherwise.
+        if self.proposal_shown().is_some()
+            && !self.line.text().trim_start().starts_with('!')
+            && matches!(what, line::What::Shell(_) | line::What::Agent { .. })
+        {
+            what = line::What::Ask(self.line.text().trim().to_string());
+        }
         if self.flipped {
             line::flip(what, self.line.text())
         } else {
@@ -818,6 +835,7 @@ impl App {
         let what = self.line_what();
         self.flipped = false;
         match what {
+            line::What::Empty if self.proposal_shown().is_some() => self.go_proposal(area).await,
             line::What::Empty => return self.enter_row(area).await,
             line::What::Slash(rest) => return self.command(&rest, area).await,
             line::What::Shell(cmd) => {
@@ -1146,7 +1164,9 @@ impl App {
             palette::Cmd::Since => self.since(&arg).await,
             palette::Cmd::Ask => {
                 if arg.trim().is_empty() {
-                    self.say("/ask what? plain words, and the assistant drafts it");
+                    if !self.show_proposal() {
+                        self.say("/ask what? plain words, and the assistant drafts it");
+                    }
                 } else if self.asking.is_some() {
                     self.say("still asking; /stop on its run");
                 } else {
