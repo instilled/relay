@@ -86,6 +86,9 @@ pub struct Lead {
     /// A finished run's frozen facts — set only on built-in run leads.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub facts: Option<crate::RunFacts>,
+    /// A run lead's queue item, set while it waits to be reviewed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rest: Option<crate::queue::LeadRest>,
 }
 
 #[cfg(test)]
@@ -122,6 +125,7 @@ mod tests {
             at: Timestamp::now(),
             expires_at: None,
             facts: None,
+            rest: None,
         };
         let s = serde_json::to_string(&l).unwrap();
         let back: Lead = serde_json::from_str(&s).unwrap();

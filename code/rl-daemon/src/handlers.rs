@@ -6,7 +6,9 @@ use rl_core::time;
 use rl_ledger::{events, hidden, order, presence, runs};
 use rl_proto::PROTOCOL_VERSION;
 use rl_proto::methods::*;
+use rl_proto::queue::{ItemView, QueueItem};
 use rl_proto::rpc::RpcError;
+use std::collections::HashMap;
 use tracing::{info, warn};
 
 pub fn register(r: &mut Router<Daemon>) {
@@ -188,7 +190,27 @@ pub fn register(r: &mut Router<Daemon>) {
         if d.supervisor.live(&p.id).is_none() {
             return Err(RpcError::not_found("live run", &p.id));
         }
-        d.supervisor.input(&p.id, p.bytes).await.map_err(internal)
+        d.supervisor.input(&p.id, p.bytes).await.map_err(internal)?;
+        // Typing into a run is looking at it: its item leaves the queue. The
+        // bytes are delivered by now, so a review that fails is told to the
+        // log, never as a reply that failed.
+        let reviewed = async {
+            let id = p.id.clone();
+            let queued = d
+                .ledger
+                .call_read(move |c| rl_ledger::review_queue::get(c, "run", &id))
+                .await
+                .map_err(internal)?
+                .is_some();
+            if queued {
+                review(&d, &get_run(&d, &p.id).await?).await?;
+            }
+            Ok::<_, RpcError>(())
+        };
+        if let Err(e) = reviewed.await {
+            warn!(run = %p.id, error = %e.message, "typed into, but not marked reviewed");
+        }
+        Ok(())
     });
 
     r.register::<RunHook, _, _>(|d, p| async move {
@@ -250,6 +272,21 @@ pub fn register(r: &mut Router<Daemon>) {
                 matches!(p.event.as_str(), "Stop" | "Notification"),
             ),
         };
+        // Codex's hooks run in its background: a turn's end that arrives
+        // after the next prompt's is the old turn's, and says nothing of the
+        // run now.
+        if let Some(turn) = p.payload.get("turn_id").and_then(|v| v.as_str()) {
+            let late = {
+                let mut turns = d.turns.lock().unwrap();
+                if prompted {
+                    turns.insert(p.id.clone(), turn.to_string());
+                }
+                p.dialect == "codex" && p.event == "Stop" && turns.get(&p.id).is_some_and(|latest| latest != turn)
+            };
+            if late {
+                return get_run(&d, &p.id).await;
+            }
+        }
         // The session the run is, so the list never shows it again as the
         // agent's own.
         if starts
@@ -280,6 +317,16 @@ pub fn register(r: &mut Router<Daemon>) {
             tokio::spawn(async move {
                 if let Err(e) = crate::recap::pick_up(&d, &run).await {
                     warn!(run = %run.id, error = %format!("{e:#}"), "recap not picked up");
+                }
+            });
+        }
+        // A turn's end or a wait on your approval queues the run for review,
+        // off the hook's clock: telling its kind may read the log.
+        if let Some(rest) = crate::queue::hook_rest(&p.dialect, &p.event, &p.payload) {
+            let (d, run) = (d.clone(), run.clone());
+            tokio::spawn(async move {
+                if let Err(e) = crate::queue::record(&d, &run, rest).await {
+                    warn!(run = %run.id, error = %format!("{e:#}"), "run not queued");
                 }
             });
         }
@@ -423,26 +470,106 @@ pub fn register(r: &mut Router<Daemon>) {
             .since
             .unwrap_or_else(|| now - std::time::Duration::from_secs(24 * 3600));
         let scope = p.scope;
-        d.ledger
+        let (mut report, runs) = d
+            .ledger
             .call_read(move |c| {
                 // Open-only by default.
                 let decisions = rl_ledger::decisions::list(c, &DecisionFilter::default())?;
-                let runs = runs::list_for_digest(c, since)?;
+                let mut runs = runs::list_for_digest(c, since)?;
                 let firings = crate::digest::firings(c)?;
                 let stored = rl_ledger::leads::list(c, now)?;
+                // A queued run waits until it is reviewed, however long ago
+                // it last moved.
+                let queue: HashMap<String, QueueItem> = rl_ledger::review_queue::list(c)?
+                    .into_iter()
+                    .filter(|i| i.source == "run")
+                    .map(|i| (i.reference.clone(), i))
+                    .collect();
+                for id in queue.keys() {
+                    if !runs.iter().any(|r| &r.id == id)
+                        && let Some(r) = runs::get(c, id)?
+                        && r.archived_at.is_none()
+                    {
+                        runs.push(r);
+                    }
+                }
                 let ids: Vec<String> = runs.iter().map(|r| r.id.to_string()).collect();
                 let facts = rl_ledger::facts::get_many(c, &ids)?;
                 let recaps = rl_ledger::summaries::lines(c, &ids)?;
-                let builtins = crate::report::project_builtins(&decisions, &runs, &firings, now, &facts, &recaps);
+                let builtins = crate::report::project_builtins(&decisions, &runs, &firings, &facts, &recaps, &queue);
                 let tags = rl_ledger::tags::list(c)?;
                 let mut report = crate::report::assemble(builtins, stored, scope.as_deref(), since, now);
                 report.tags = tags;
                 let dismissed = rl_ledger::dismissals::list(c)?;
                 crate::report::drop_dismissed(&mut report, &dismissed);
-                Ok(report)
+                let runs: HashMap<String, rl_proto::types::Run> = runs.into_iter().map(|r| (r.id.clone(), r)).collect();
+                Ok((report, runs))
             })
             .await
-            .map_err(RpcError::internal)
+            .map_err(RpcError::internal)?;
+        // What each queued run last said and changed, read from the session.
+        // A run at work is past its item's message: it is not read.
+        let mut queued = Vec::new();
+        for lead in report
+            .needs_you
+            .iter_mut()
+            .chain(&mut report.live)
+            .chain(&mut report.happened)
+        {
+            let live = lead.band == rl_proto::lead::Band::Live;
+            let Some(rest) = lead.rest.as_mut() else { continue };
+            let Some(run) = runs.get(&rest.item.reference) else {
+                continue;
+            };
+            if !live {
+                rest.last = crate::reading::last(&d, run, rest.item.how).await.unwrap_or_else(|e| {
+                    warn!(run = %run.id, error = %format!("{e:#}"), "last message not read");
+                    None
+                });
+            }
+            rest.changed = d.reading.changed(&run.cwd, rest.item.from_head.as_deref()).await;
+            queued.push((run, rest.item.from_head.clone()));
+        }
+        d.reading
+            .prune(queued.iter().map(|(run, from)| (*run, from.as_deref())));
+        Ok(report)
+    });
+
+    r.register::<QueueReview, _, _>(|d, p: QueueReviewParams| async move {
+        // Every run known first: a review of one nobody knows clears nothing.
+        let mut found = Vec::with_capacity(p.runs.len());
+        for id in &p.runs {
+            found.push(get_run(&d, id).await?);
+        }
+        let mut cleared = 0;
+        for run in &found {
+            cleared += u32::from(review(&d, run).await?);
+        }
+        Ok(QueueReviewed { cleared })
+    });
+
+    r.register::<QueueItemGet, _, _>(|d, p: QueueItemParams| async move {
+        let run = get_run(&d, &p.run).await?;
+        let id = run.id.clone();
+        let (item, from) = d
+            .ledger
+            .call_read(move |c| {
+                Ok((
+                    rl_ledger::review_queue::get(c, "run", &id)?,
+                    rl_ledger::review_queue::from(c, "run", &id)?,
+                ))
+            })
+            .await
+            .map_err(internal)?;
+        // Since you last looked; a run never queued, since its start.
+        let (from, from_head) = from.unwrap_or_else(|| (run.started_at, run.start_head.clone()));
+        let at = item.map_or(run.state_at, |i| i.at);
+        let log = crate::reading::log(&d, &run, from, at).await.map_err(internal)?;
+        Ok(ItemView {
+            log,
+            changed: d.reading.changed(&run.cwd, from_head.as_deref()).await,
+            branch: crate::git::placement(&run.cwd).await.branch,
+        })
     });
 
     r.register::<DigestGet, _, _>(|d, DigestParams { since, watching }| async move {
@@ -559,6 +686,7 @@ pub fn register(r: &mut Router<Daemon>) {
             at: now,
             expires_at: p.ttl_secs.map(|s| now + std::time::Duration::from_secs(s)),
             facts: None,
+            rest: None,
         };
         d.ledger
             .call(move |c| rl_ledger::leads::post(c, &lead))
@@ -660,6 +788,21 @@ pub fn register(r: &mut Router<Daemon>) {
             last_seen_at: previous,
         })
     });
+
+    r.register::<PresenceGet, _, _>(|d, PresenceClient { client }| async move {
+        let last = d
+            .ledger
+            .call_read({
+                let client = client.clone();
+                move |c| presence::get(c, &client)
+            })
+            .await
+            .map_err(RpcError::internal)?;
+        Ok(PresenceInfo {
+            client,
+            last_seen_at: last,
+        })
+    });
 }
 
 /// A kind a command may `rl emit`: a dotted, lowercase name of its own, each
@@ -691,6 +834,17 @@ fn emit_kind_ok(kind: &str) -> Result<(), String> {
 /// via `{:#}`, rather than just the top-level message.
 fn internal(e: anyhow::Error) -> RpcError {
     RpcError::internal(format!("{e:#}"))
+}
+
+/// You looked at `run`: its item leaves the queue, and its next stretch
+/// begins now, from its repo's HEAD. False when nothing was queued.
+async fn review(d: &Daemon, run: &rl_proto::types::Run) -> Result<bool, RpcError> {
+    let head = crate::git::head(&run.cwd).await;
+    let id = run.id.clone();
+    d.ledger
+        .call(move |c| rl_ledger::review_queue::review(c, "run", &id, time::now(), head.as_deref()))
+        .await
+        .map_err(RpcError::internal)
 }
 
 async fn get_run(d: &Daemon, id: &str) -> Result<rl_proto::types::Run, RpcError> {

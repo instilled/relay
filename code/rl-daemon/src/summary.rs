@@ -268,12 +268,14 @@ pub(crate) async fn locate_in(ledger: &Ledger, run: &Run) -> Result<Option<PathB
     let (Some(agent), Some(home)) = (Agent::of(run), std::env::var_os("HOME")) else {
         return Ok(None);
     };
-    let home = PathBuf::from(home);
-    let found = match agent {
-        Agent::Claude => transcript::find_claude(&home, &run.cwd, run.started_at),
-        Agent::Codex => transcript::find_codex(&home, &run.cwd, run.started_at),
-        Agent::Gemini => transcript::find_gemini(&home, &run.cwd, run.started_at),
-    };
+    // A search of the agent's session folders: off the async thread.
+    let (home, cwd, started) = (PathBuf::from(home), run.cwd.clone(), run.started_at);
+    let found = tokio::task::spawn_blocking(move || match agent {
+        Agent::Claude => transcript::find_claude(&home, &cwd, started),
+        Agent::Codex => transcript::find_codex(&home, &cwd, started),
+        Agent::Gemini => transcript::find_gemini(&home, &cwd, started),
+    })
+    .await?;
     if let Some(p) = &found {
         let (id, path) = (run.id.clone(), p.to_string_lossy().into_owned());
         ledger.call(move |c| summaries::set_transcript(c, &id, &path)).await?;

@@ -139,7 +139,7 @@ fn event_words(kind: &str) -> Option<&'static str> {
         }
         event_kind::RUN_JOURNAL_DROPPED => "retention let a run's terminal bytes go; the run and its events stay",
         event_kind::RUN_SUMMARISED => {
-            "an assistant wrote a run's recap (/summary in the panel, rl summary, or opening the report after time away)"
+            "an assistant wrote a run's recap (/summary in the panel, rl summary, or p in the report)"
         }
         _ => return None,
     })
