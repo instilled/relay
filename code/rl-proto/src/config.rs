@@ -20,9 +20,7 @@
 //!   summary: auto                # `auto`: the top is written when you come back after `after`,
 //!                                # by assistants.summary · `ask`: only on /summary
 //! report:
-//!   brief_after: 2h              # away longer than this, the report writes a brief; up to it, the headline
-//!   deep_after: 2d               # away longer than this, it reads deep
-//!   summary: ask                 # `auto`: it writes without asking · `ask`: asks first when that takes many calls
+//!   brief_after: 2h              # back within this, the report opens on what needs you; else on all teams
 //! ```
 
 use serde::{Deserialize, Serialize};
@@ -56,45 +54,26 @@ pub struct Config {
     pub report: ReportConfig,
 }
 
-/// How deep the report tells you what happened: the headline alone up to
-/// `brief_after`, a written brief past it, a deep read past `deep_after`.
-/// Named `ReportConfig` so it does not clash with `methods::Report`.
+/// Where the report opens: on the first thing that needs you when you were
+/// away less than `brief_after`, else on all the teams. Named `ReportConfig` so it does not clash with `methods::Report`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReportConfig {
-    /// Away longer than this, the report writes a brief. Unset: `2h`.
+    /// Away less than this, the report opens on what needs you. Unset: `2h`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub brief_after: Option<String>,
-    /// Away longer than this, the report reads deep. Unset: `2d`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub deep_after: Option<String>,
-    /// `auto`: the report writes without asking · `ask`: it asks first when
-    /// that takes many calls. Unset: `ask`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub summary: Option<String>,
 }
 
 impl ReportConfig {
     pub const DEFAULT_BRIEF_AFTER: &str = "2h";
-    pub const DEFAULT_DEEP_AFTER: &str = "2d";
 
     pub fn is_empty(&self) -> bool {
-        self.brief_after.is_none() && self.deep_after.is_none() && self.summary.is_none()
+        self.brief_after.is_none()
     }
 
     /// What the file says, or the default when unset or not a duration.
     pub fn brief_after(&self) -> jiff::SignedDuration {
         Self::duration(self.brief_after.as_deref(), Self::DEFAULT_BRIEF_AFTER)
-    }
-
-    pub fn deep_after(&self) -> jiff::SignedDuration {
-        Self::duration(self.deep_after.as_deref(), Self::DEFAULT_DEEP_AFTER)
-    }
-
-    /// Whether the report writes without asking: only when the file says
-    /// `auto`.
-    pub fn auto_summary(&self) -> bool {
-        self.summary.as_deref().is_some_and(|s| s.eq_ignore_ascii_case("auto"))
     }
 
     fn duration(said: Option<&str>, default: &str) -> jiff::SignedDuration {
@@ -360,16 +339,10 @@ mod tests {
     fn report_keys_parse_and_default() {
         let c: Config = serde_json::from_str("{}").unwrap();
         assert_eq!(c.report.brief_after(), SignedDuration::from_hours(2));
-        assert_eq!(c.report.deep_after(), SignedDuration::from_hours(48));
-        assert!(!c.report.auto_summary());
-        let c: Config =
-            serde_json::from_str(r#"{"report":{"brief_after":"30m","deep_after":"1d","summary":"auto"}}"#).unwrap();
+        let c: Config = serde_json::from_str(r#"{"report":{"brief_after":"30m"}}"#).unwrap();
         assert_eq!(c.report.brief_after(), SignedDuration::from_mins(30));
-        assert_eq!(c.report.deep_after(), SignedDuration::from_hours(24));
-        assert!(c.report.auto_summary());
-        let c: Config = serde_json::from_str(r#"{"report":{"brief_after":"soon","summary":"ask"}}"#).unwrap();
+        let c: Config = serde_json::from_str(r#"{"report":{"brief_after":"soon"}}"#).unwrap();
         assert_eq!(c.report.brief_after(), SignedDuration::from_hours(2));
-        assert!(!c.report.auto_summary());
     }
 
     #[test]

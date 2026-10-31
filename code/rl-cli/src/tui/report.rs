@@ -1,10 +1,6 @@
-//! The report drawn: the inbox's list pane and reading pane, as lines; and the
-//! lanes the prose still walks.
-//!
-//! `Lane`/`Row` borrow from the `Report` (cheap; the renderer holds the report
-//! for the frame anyway).
+//! The report drawn: the inbox's list pane and reading pane, as lines.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::ops::Range;
 
 use jiff::Timestamp;
@@ -12,7 +8,7 @@ use jiff::tz::TimeZone;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use rl_core::time::{fmt_age, fmt_when};
-use rl_proto::lead::{Band, Lead};
+use rl_proto::lead::Lead;
 use rl_proto::methods::Report;
 use rl_proto::queue::{Changed, Hint, ItemView, RestKind};
 use rl_proto::types::Summary;
@@ -21,22 +17,6 @@ use super::inbox::{Inbox, Mark, Sel, Team, mark, to_review};
 use super::pane::wrap;
 use super::rows::fit;
 use super::theme;
-
-pub struct Row<'a> {
-    pub lead: &'a Lead,
-}
-
-pub struct Lane<'a> {
-    /// The tag, or the project basename, or "my work".
-    pub name: String,
-    /// More than one distinct source lands in this lane.
-    pub is_team: bool,
-    pub needs: usize,
-    pub live: usize,
-    pub done: usize,
-    /// Ordered needs -> live -> happened, newest first within a band.
-    pub rows: Vec<Row<'a>>,
-}
 
 pub(crate) fn lane_name(lead: &Lead, tags: &HashMap<&str, &str>) -> String {
     if let Some(tag) = tags.get(lead.source.as_str()) {
@@ -48,89 +28,6 @@ pub(crate) fn lane_name(lead: &Lead, tags: &HashMap<&str, &str>) -> String {
         .map(|n| n.to_string_lossy().into_owned())
         .filter(|n| !n.is_empty())
         .unwrap_or_else(|| "my work".to_string())
-}
-
-pub fn lanes(report: &Report) -> Vec<Lane<'_>> {
-    let tags: HashMap<&str, &str> = report
-        .tags
-        .iter()
-        .map(|t| (t.source.as_str(), t.tag.as_str()))
-        .collect();
-    let mut by_name: HashMap<String, (Lane<'_>, HashSet<&str>)> = HashMap::new();
-    let all = report.needs_you.iter().chain(&report.live).chain(&report.happened);
-    for lead in all {
-        let name = lane_name(lead, &tags);
-        let (lane, sources) = by_name.entry(name.clone()).or_insert_with(|| {
-            let lane = Lane {
-                name,
-                is_team: false,
-                needs: 0,
-                live: 0,
-                done: 0,
-                rows: Vec::new(),
-            };
-            (lane, HashSet::new())
-        });
-        match lead.band {
-            Band::NeedsYou => lane.needs += 1,
-            Band::Live => lane.live += 1,
-            Band::Happened => lane.done += 1,
-        }
-        sources.insert(lead.source.as_str());
-        lane.rows.push(Row { lead });
-    }
-    let mut out: Vec<Lane<'_>> = by_name
-        .into_values()
-        .map(|(mut lane, sources)| {
-            lane.is_team = sources.len() > 1;
-            lane.rows
-                .sort_by(|a, b| (a.lead.band.rank(), b.lead.at).cmp(&(b.lead.band.rank(), a.lead.at)));
-            lane
-        })
-        .collect();
-    let newest = |l: &Lane<'_>| l.rows.iter().map(|r| r.lead.at).max();
-    // Name is the final tiebreak so the order is deterministic.
-    out.sort_by(|a, b| {
-        (b.needs > 0)
-            .cmp(&(a.needs > 0))
-            .then_with(|| newest(b).cmp(&newest(a)))
-            .then_with(|| a.name.cmp(&b.name))
-    });
-    out
-}
-
-/// The one fact a run row leads with, by the kind of lead it is: an agent's churn, time and
-/// commits; a shell's health; a flow's firing. Empty until the run's facts are frozen.
-/// The kind comes from the lead's key and source, as the daemon builds them (`firing:` is a
-/// flow, a `shell`-sourced `run:` is a shell run, any other run is an agent).
-/// A flow's decision count is not on the lead, so a flow says only `fired`.
-pub(crate) fn headline(lead: &Lead) -> String {
-    let Some(f) = &lead.facts else {
-        return String::new();
-    };
-    if lead.key.starts_with("firing:") {
-        return "fired".into();
-    }
-    if lead.source == "shell" {
-        return match f.errors {
-            0 => "ok".into(),
-            1 => "1 error".into(),
-            n => format!("{n} errors"),
-        };
-    }
-    let mut parts = Vec::new();
-    if f.added > 0 || f.removed > 0 {
-        parts.push(format!("+{}/−{}", f.added, f.removed));
-    }
-    if let Some(m) = f.active_secs.map(|s| s / 60).filter(|m| *m > 0) {
-        parts.push(format!("{m}m"));
-    }
-    match f.commits {
-        0 => {}
-        1 => parts.push("1 commit".into()),
-        n => parts.push(format!("{n} commits")),
-    }
-    parts.join(" · ")
 }
 
 /// The recap written for a run's lead, when there is one that still holds: a stale one
@@ -160,14 +57,14 @@ fn glyph(m: Mark) -> (&'static str, Style) {
     }
 }
 
-fn commits(n: u32) -> String {
+pub(crate) fn commits(n: u32) -> String {
     match n {
         1 => "1 commit".into(),
         n => format!("{n} commits"),
     }
 }
 
-fn needs_you(n: usize) -> String {
+pub(crate) fn needs_you(n: usize) -> String {
     match n {
         1 => "1 needs you".into(),
         n => format!("{n} need you"),
@@ -175,7 +72,7 @@ fn needs_you(n: usize) -> String {
 }
 
 /// `+X/−Y · N commits` over the leads that work in a repo; `None` when none does.
-fn git(leads: &[&Lead]) -> Option<String> {
+pub(crate) fn git(leads: &[&Lead]) -> Option<String> {
     let changed: Vec<&Changed> = leads.iter().filter_map(|l| l.rest.as_ref()?.changed.as_ref()).collect();
     if changed.is_empty() {
         return None;
@@ -187,7 +84,7 @@ fn git(leads: &[&Lead]) -> Option<String> {
 }
 
 /// What the session last said: its rest's message, else the lead's own line.
-fn last(lead: &Lead) -> Option<&str> {
+pub(crate) fn last(lead: &Lead) -> Option<&str> {
     lead.rest
         .as_ref()
         .and_then(|r| r.last.as_deref())
@@ -196,7 +93,7 @@ fn last(lead: &Lead) -> Option<&str> {
 }
 
 /// A line trim's source: the first line with anything on it.
-fn first_line(text: &str) -> &str {
+pub(crate) fn first_line(text: &str) -> &str {
     text.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("")
 }
 
@@ -738,8 +635,7 @@ fn item_page(
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use rl_proto::lead::LeadStatus;
-    use rl_proto::methods::SourceTag;
+    use rl_proto::lead::{Band, LeadStatus};
 
     fn ts(n: i64) -> Timestamp {
         Timestamp::from_second(n).unwrap()
@@ -766,121 +662,15 @@ pub(crate) mod tests {
         l.spans.iter().map(|s| s.content.as_ref()).collect()
     }
 
-    fn facts(f: impl FnOnce(&mut rl_proto::facts::RunFacts)) -> Option<rl_proto::facts::RunFacts> {
-        let mut x = rl_proto::facts::RunFacts::default();
-        f(&mut x);
-        Some(x)
-    }
-
     #[test]
-    fn agent_headline_from_facts() {
-        let mut l = mk_lead("claude", "run:r1", Band::Happened, None, ts(1));
-        l.facts = facts(|f| {
-            f.added = 180;
-            f.removed = 40;
-            f.active_secs = Some(840);
-            f.commits = 3;
-        });
-        assert_eq!(headline(&l), "+180/−40 · 14m · 3 commits");
-    }
-
-    #[test]
-    fn agent_headline_omits_zero_clauses() {
-        let mut l = mk_lead("claude", "run:r1", Band::Happened, None, ts(1));
-        l.facts = facts(|f| f.commits = 2);
-        assert_eq!(headline(&l), "2 commits");
-        l.facts = facts(|f| f.active_secs = Some(30));
-        assert_eq!(headline(&l), "");
-    }
-
-    #[test]
-    fn shell_headline_errors() {
-        let mut l = mk_lead("shell", "run:r1", Band::Happened, None, ts(1));
-        l.facts = facts(|f| f.errors = 2);
-        assert_eq!(headline(&l), "2 errors");
-        l.facts = facts(|_| {});
-        assert_eq!(headline(&l), "ok");
-    }
-
-    #[test]
-    fn flow_headline_is_fired() {
-        let mut l = mk_lead("triage", "firing:f1", Band::Happened, None, ts(1));
-        l.facts = facts(|_| {});
-        assert_eq!(headline(&l), "fired");
-    }
-
-    #[test]
-    fn headline_absent_facts_is_empty() {
-        let l = mk_lead("claude", "run:r1", Band::Happened, None, ts(1));
-        assert_eq!(headline(&l), "");
-    }
-
-    #[test]
-    fn untagged_lead_lands_under_its_project_basename() {
-        let r = Report {
-            happened: vec![],
-            needs_you: vec![],
-            live: vec![mk_lead(
-                "shell",
-                "r1",
-                Band::Live,
-                Some("/Users/x/Projects/relay"),
-                ts(1),
-            )],
-            tags: vec![],
-        };
-        let ls = lanes(&r);
-        assert_eq!(ls[0].name, "relay");
-        assert!(!ls[0].is_team);
-    }
-
-    #[test]
-    fn tag_moves_every_band_of_a_source_into_one_lane() {
-        let r = Report {
-            needs_you: vec![mk_lead("claude", "a", Band::NeedsYou, Some("/p/relay"), ts(3))],
-            live: vec![mk_lead("claude", "b", Band::Live, Some("/p/relay"), ts(2))],
-            happened: vec![mk_lead("codex", "c", Band::Happened, Some("/p/relay"), ts(1))],
-            tags: vec![
-                SourceTag {
-                    source: "claude".into(),
-                    tag: "dev".into(),
-                },
-                SourceTag {
-                    source: "codex".into(),
-                    tag: "dev".into(),
-                },
-            ],
-        };
-        let ls = lanes(&r);
-        assert_eq!(ls.len(), 1);
-        assert_eq!(ls[0].name, "dev");
-        assert!(ls[0].is_team);
-        assert_eq!(ls[0].rows.len(), 3);
-        assert_eq!(ls[0].rows[0].lead.band, Band::NeedsYou);
-        assert_eq!((ls[0].needs, ls[0].live, ls[0].done), (1, 1, 1));
-    }
-
-    #[test]
-    fn needs_bearing_lanes_sort_first() {
-        let r = Report {
-            needs_you: vec![mk_lead("claude", "a", Band::NeedsYou, Some("/p/relay"), ts(1))],
-            live: vec![mk_lead("shell", "b", Band::Live, Some("/p/ops"), ts(9))],
-            happened: vec![],
-            tags: vec![],
-        };
-        let ls = lanes(&r);
-        assert_eq!(ls[0].name, "relay");
-    }
-
-    #[test]
-    fn scopeless_lead_falls_to_my_work() {
-        let r = Report {
-            needs_you: vec![],
-            live: vec![],
-            tags: vec![],
-            happened: vec![mk_lead("agent", "x", Band::Happened, None, ts(1))],
-        };
-        assert_eq!(lanes(&r)[0].name, "my work");
+    fn a_team_is_its_tag_else_its_folder_else_my_work() {
+        let tags = HashMap::from([("claude", "dev")]);
+        let tagged = mk_lead("claude", "a", Band::NeedsYou, Some("/p/relay"), ts(1));
+        assert_eq!(lane_name(&tagged, &tags), "dev");
+        let untagged = mk_lead("shell", "b", Band::Live, Some("/Users/x/Projects/relay"), ts(1));
+        assert_eq!(lane_name(&untagged, &tags), "relay");
+        let scopeless = mk_lead("agent", "c", Band::Happened, None, ts(1));
+        assert_eq!(lane_name(&scopeless, &tags), "my work");
     }
 
     pub(crate) fn summary_of(run: &str, text: &str) -> Summary {

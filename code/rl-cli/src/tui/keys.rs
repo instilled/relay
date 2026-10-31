@@ -156,14 +156,6 @@ impl App {
                 }
                 return Ok(());
             }
-            Mode::ReportCost { .. } => {
-                if let Some(ps) = self.report_ask.take()
-                    && k.code == KeyCode::Char('y')
-                {
-                    self.start_briefing(BriefJob::Write(ps));
-                }
-                return Ok(());
-            }
             Mode::Mark(id) => {
                 let mark = match k.code {
                     KeyCode::Char('d') => Some(Mark::Done),
@@ -363,11 +355,11 @@ impl App {
         if self.line.is_empty() && self.view == View::Report && !self.show_pane && k.modifiers.is_empty() {
             match k.code {
                 KeyCode::Char('w') => {
-                    self.report_prose = !self.report_prose;
+                    self.report_written = !self.report_written;
                     return Ok(());
                 }
                 // The inbox is not on screen in prose: its letters leave it be.
-                KeyCode::Char('j' | 'k' | 'r' | 'x' | 'p' | 't') if self.report_prose => return Ok(()),
+                KeyCode::Char('j' | 'k' | 'r' | 'x' | 'p' | 't') if self.report_written => return Ok(()),
                 KeyCode::Char('j') => {
                     self.report_step(1).await;
                     return Ok(());
@@ -607,7 +599,7 @@ impl App {
             self.reorder(up).await;
             return Ok(());
         }
-        if self.view == View::Report && !self.report_prose {
+        if self.view == View::Report && !self.report_written {
             let page = self.list_h.get().saturating_sub(2).max(1) as isize;
             let by = match k.code {
                 KeyCode::Down => Some(1),
@@ -663,10 +655,9 @@ impl App {
                     self.settle();
                 } else if self.view == View::Events {
                     self.toggle_events().await;
-                } else if self.view == View::Report && !self.report_prose && self.report_back() {
+                } else if self.view == View::Report && !self.report_written && self.report_back() {
                     // A step back within the inbox.
                 } else if self.view == View::CatchUp || self.view == View::Report {
-                    self.stop_briefing();
                     self.back_to_list().await;
                 }
             }
@@ -716,7 +707,7 @@ impl App {
             return Ok(());
         }
         if self.view == View::Report {
-            if !self.report_prose {
+            if !self.report_written {
                 self.report_enter(area.width >= report::INBOX_SPLIT_W).await;
             }
             return Ok(());

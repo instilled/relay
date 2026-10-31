@@ -175,7 +175,7 @@ impl App {
                 dry: true,
                 ..params.clone()
             };
-            let ask_over = if deep { 1 } else { crate::depth::ASK_OVER };
+            let ask_over = if deep { 1 } else { crate::cost::ASK_OVER };
             match self.rpc.call::<SummaryMake>(dry).await {
                 Ok(d) if d.calls > ask_over => {
                     self.summary_ask = Some(params);
