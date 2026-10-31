@@ -67,12 +67,13 @@ pub fn project_builtins(
         // state: the band does not wait for the queue. Past that the queue
         // says what is news; a run at rest or ended with nothing queued has
         // been reviewed. A run that carried on keeps its item until its next
-        // rest.
+        // rest. An ask that ended waits on no one: it happened.
         let item = queue.get(&r.id);
-        let band = match (r.state, item.map(|i| i.kind)) {
+        let band = match (r.state, item) {
             (RunState::Working | RunState::Starting, _) => Band::Live,
-            (RunState::NeedsInput | RunState::Blocked, _) | (_, Some(RestKind::Asks)) => Band::NeedsYou,
-            (_, Some(RestKind::Finished)) => Band::Happened,
+            (RunState::NeedsInput | RunState::Blocked, _) => Band::NeedsYou,
+            (_, Some(i)) if i.kind == RestKind::Asks && !i.ended() => Band::NeedsYou,
+            (_, Some(_)) => Band::Happened,
             (_, None) => continue,
         };
         // The ladder past a written recap: the agent's own, then the tail.
@@ -160,11 +161,12 @@ pub fn assemble(
 }
 
 /// Drops every lead the user dismissed, by (source, key), from all three bands.
-/// Works on built-in leads too, which are never stored.
+/// Works on built-in leads too, which are never stored. A queued run is never
+/// dropped: its item is news until it is reviewed, whatever was dismissed.
 pub fn drop_dismissed(report: &mut Report, dismissed: &[Dismissal]) {
     let hidden: std::collections::HashSet<(&str, &str)> =
         dismissed.iter().map(|d| (d.source.as_str(), d.key.as_str())).collect();
-    let keep = |l: &Lead| !hidden.contains(&(l.source.as_str(), l.key.as_str()));
+    let keep = |l: &Lead| l.rest.is_some() || !hidden.contains(&(l.source.as_str(), l.key.as_str()));
     report.needs_you.retain(keep);
     report.live.retain(keep);
     report.happened.retain(keep);
@@ -175,7 +177,7 @@ mod tests {
     use super::*;
     use jiff::Timestamp;
     use rl_proto::flow::FiringStatus;
-    use rl_proto::queue::How;
+    use rl_proto::queue::{Hint, How};
     use rl_proto::types::{RunKind, RunState};
 
     use std::path::{Path, PathBuf};
@@ -303,6 +305,25 @@ mod tests {
         let rest = leads[0].rest.as_ref().unwrap();
         assert_eq!(rest.item, queue["r1"]);
         assert_eq!(leads[0].at, queue["r1"].at, "at its rest");
+    }
+
+    #[test]
+    fn an_ended_ask_is_happened() {
+        // The run stopped or failed while it asked: nothing waits on you now.
+        for hint in [Hint::Stopped, Hint::Failed] {
+            let mut queue = queued(&[("r1", RestKind::Asks)]);
+            queue.get_mut("r1").unwrap().hints = vec![Hint::Question, hint];
+            let leads = project_builtins(
+                &[],
+                &[test_run("r1", RunState::Stopped)],
+                &[],
+                &Default::default(),
+                &Default::default(),
+                &queue,
+            );
+            assert_eq!(leads[0].band, Band::Happened, "{hint:?}");
+            assert_eq!(leads[0].rest.as_ref().unwrap().item.hints, [Hint::Question, hint]);
+        }
     }
 
     #[test]
@@ -472,6 +493,27 @@ mod tests {
             .map(|l| (l.source.as_str(), l.key.as_str()))
             .collect();
         assert_eq!(all, vec![("relay", "keep")]);
+    }
+
+    #[test]
+    fn a_dismissal_never_hides_a_queued_run() {
+        // Dismissed once, it came to rest again: the item is news.
+        let now = Timestamp::now();
+        let leads = project_builtins(
+            &[],
+            &[test_run("r1", RunState::Finished)],
+            &[],
+            &Default::default(),
+            &Default::default(),
+            &queued(&[("r1", RestKind::Finished)]),
+        );
+        let mut report = assemble(leads, vec![], None, now - Duration::from_secs(3600), now);
+        let dismissed = Dismissal {
+            source: "agent".into(),
+            key: "run:r1".into(),
+        };
+        drop_dismissed(&mut report, &[dismissed]);
+        assert_eq!(report.happened.len(), 1);
     }
 
     fn mk(band: Band, key: &str, at: Timestamp, scope: Option<&str>) -> Lead {

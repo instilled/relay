@@ -128,6 +128,14 @@ pub struct QueueItem {
     pub from_head: Option<String>,
 }
 
+impl QueueItem {
+    /// Whether the session ended, stopped or failed: an ask that ended no
+    /// longer waits on you.
+    pub fn ended(&self) -> bool {
+        self.hints.iter().any(|h| matches!(h, Hint::Stopped | Hint::Failed))
+    }
+}
+
 /// What a stretch of work changed in its repo.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Changed {

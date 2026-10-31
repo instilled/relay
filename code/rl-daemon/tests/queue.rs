@@ -680,3 +680,38 @@ async fn a_permission_ask_is_told_by_what_it_asks() {
     );
     h.stop().await;
 }
+
+#[tokio::test]
+async fn a_working_run_keeps_its_item_but_not_its_old_message() {
+    let Some(Setup {
+        _tmp,
+        dir,
+        home,
+        h,
+        mut c,
+        run,
+    }) = setup("claude").await
+    else {
+        return;
+    };
+    let transcript = dir.join("session.jsonl");
+    std::fs::write(&transcript, claude_line(Timestamp::now(), "Fixed it.")).unwrap();
+    hook(&mut c, &run, "claude", "Stop", json!({ "transcript_path": transcript })).await;
+    let i = queued(&home, &run.id).await;
+    let working = hook(
+        &mut c,
+        &run,
+        "claude",
+        "UserPromptSubmit",
+        json!({ "hook_event_name": "UserPromptSubmit", "prompt": "carry on" }),
+    )
+    .await;
+    assert_eq!(working.state, RunState::Working);
+    let leads = run_leads(&mut c).await;
+    let lead = leads.iter().find(|l| l.key == format!("run:{}", run.id)).unwrap();
+    assert_eq!(lead.band, Band::Live);
+    let rest = lead.rest.as_ref().unwrap();
+    assert_eq!(rest.item, i, "it keeps its item until its next rest");
+    assert_eq!(rest.last, None, "at work: what it said last is old");
+    h.stop().await;
+}

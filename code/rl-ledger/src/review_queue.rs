@@ -181,7 +181,9 @@ pub fn from(conn: &Connection, source: &str, reference: &str) -> Result<Option<(
     row.map(|(at, head)| Ok((from_millis(at)?, head))).transpose()
 }
 
-/// When, and how, the session last came to rest — reviewed or not.
+/// When, and how, the session last came to rest — reviewed or not. The time
+/// is that of the last rest, never of the review: a review moves `from`, not
+/// `at`.
 pub fn last_rest(conn: &Connection, source: &str, reference: &str) -> Result<Option<(Timestamp, How)>> {
     let row: Option<(i64, String)> = conn
         .query_row(

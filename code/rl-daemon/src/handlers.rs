@@ -191,16 +191,24 @@ pub fn register(r: &mut Router<Daemon>) {
             return Err(RpcError::not_found("live run", &p.id));
         }
         d.supervisor.input(&p.id, p.bytes).await.map_err(internal)?;
-        // Typing into a run is looking at it: its item leaves the queue.
-        let id = p.id.clone();
-        let queued = d
-            .ledger
-            .call_read(move |c| rl_ledger::review_queue::get(c, "run", &id))
-            .await
-            .map_err(internal)?
-            .is_some();
-        if queued {
-            review(&d, &get_run(&d, &p.id).await?).await?;
+        // Typing into a run is looking at it: its item leaves the queue. The
+        // bytes are delivered by now, so a review that fails is told to the
+        // log, never as a reply that failed.
+        let reviewed = async {
+            let id = p.id.clone();
+            let queued = d
+                .ledger
+                .call_read(move |c| rl_ledger::review_queue::get(c, "run", &id))
+                .await
+                .map_err(internal)?
+                .is_some();
+            if queued {
+                review(&d, &get_run(&d, &p.id).await?).await?;
+            }
+            Ok::<_, RpcError>(())
+        };
+        if let Err(e) = reviewed.await {
+            warn!(run = %p.id, error = %e.message, "typed into, but not marked reviewed");
         }
         Ok(())
     });
@@ -500,22 +508,30 @@ pub fn register(r: &mut Router<Daemon>) {
             .await
             .map_err(RpcError::internal)?;
         // What each queued run last said and changed, read from the session.
+        // A run at work is past its item's message: it is not read.
+        let mut queued = Vec::new();
         for lead in report
             .needs_you
             .iter_mut()
             .chain(&mut report.live)
             .chain(&mut report.happened)
         {
+            let live = lead.band == rl_proto::lead::Band::Live;
             let Some(rest) = lead.rest.as_mut() else { continue };
             let Some(run) = runs.get(&rest.item.reference) else {
                 continue;
             };
-            rest.last = crate::reading::last(&d, run, rest.item.how).await.unwrap_or_else(|e| {
-                warn!(run = %run.id, error = %format!("{e:#}"), "last message not read");
-                None
-            });
+            if !live {
+                rest.last = crate::reading::last(&d, run, rest.item.how).await.unwrap_or_else(|e| {
+                    warn!(run = %run.id, error = %format!("{e:#}"), "last message not read");
+                    None
+                });
+            }
             rest.changed = d.reading.changed(&run.cwd, rest.item.from_head.as_deref()).await;
+            queued.push((run, rest.item.from_head.clone()));
         }
+        d.reading
+            .prune(queued.iter().map(|(run, from)| (*run, from.as_deref())));
         Ok(report)
     });
 
