@@ -67,7 +67,7 @@ pub struct Inbox<'a> {
     /// Every ask, oldest first.
     pub needs: Vec<&'a Lead>,
     pub teams: Vec<Team<'a>>,
-    /// Failed and done runs waiting to be looked over.
+    /// Everything waiting for your review: queued items and decisions.
     pub to_review: usize,
     pub working: usize,
     pub commits: Option<u32>,
@@ -97,10 +97,6 @@ pub fn inbox(report: &Report) -> Inbox<'_> {
     let mut by_name: HashMap<String, Vec<&Lead>> = HashMap::new();
     let all = report.needs_you.iter().chain(&report.live).chain(&report.happened);
     for lead in all {
-        // A finished lead that is not queued has been looked over.
-        if lead.band == Band::Happened && lead.rest.is_none() {
-            continue;
-        }
         by_name.entry(lane_name(lead, &tags)).or_default().push(lead);
     }
     let mut teams: Vec<Team<'_>> = by_name
@@ -143,7 +139,11 @@ pub fn inbox(report: &Report) -> Inbox<'_> {
     needs.sort_by(|a, b| a.at.cmp(&b.at).then(a.key.cmp(&b.key)));
     Inbox {
         needs,
-        to_review: teams.iter().map(|t| t.failed + t.done).sum(),
+        to_review: teams
+            .iter()
+            .flat_map(|t| &t.items)
+            .filter(|l| mark(l) != Mark::Working && (l.rest.is_some() || mark(l) == Mark::Asks))
+            .count(),
         working: teams.iter().map(|t| t.working).sum(),
         commits: sum_commits(teams.iter().flat_map(|t| &t.items).copied()),
         teams,
@@ -293,7 +293,7 @@ mod tests {
         );
         let i = inbox(&r);
         assert_eq!(names(&i), ["zed", "broke", "newest", "alpha", "beta", "live"]);
-        assert_eq!((i.to_review, i.working), (4, 1));
+        assert_eq!((i.to_review, i.working), (5, 1));
     }
 
     #[test]
@@ -316,16 +316,21 @@ mod tests {
         let i = inbox(&r);
         assert_eq!(i.needs.len(), 1);
         assert_eq!(i.teams[0].needs, 1);
+        assert_eq!(i.to_review, 1);
     }
 
     #[test]
-    fn a_team_with_only_reviewed_runs_is_absent() {
+    fn a_firing_without_a_rest_stays_as_a_done_item() {
         let r = report(
             vec![],
             vec![],
-            vec![lead("old", Band::Happened, "/p/a", 1), done("d", "/p/b", 2)],
+            vec![lead("flow", Band::Happened, "/p/a", 1), done("d", "/p/b", 2)],
         );
-        assert_eq!(names(&inbox(&r)), ["b"]);
+        let i = inbox(&r);
+        assert_eq!(names(&i), ["b", "a"]);
+        assert_eq!((i.teams[1].done, i.teams[1].gist.as_str()), (1, "flow done"));
+        // only the queued item waits for review
+        assert_eq!(i.to_review, 1);
     }
 
     #[test]
