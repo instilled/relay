@@ -84,6 +84,10 @@ impl App {
             r.field.paste(&s);
             return Ok(());
         }
+        if let Mode::Reply(r) = &mut self.mode {
+            r.field.paste(&s);
+            return Ok(());
+        }
         if matches!(self.mode, Mode::Normal) {
             self.line.insert(&s);
             self.completing = None;
@@ -96,7 +100,14 @@ impl App {
         Ok(())
     }
 
-    pub(super) async fn key(&mut self, mut k: KeyEvent, area: Rect) -> Result<()> {
+    pub(super) async fn key(&mut self, k: KeyEvent, area: Rect) -> Result<()> {
+        let done = self.key_in(k, area).await;
+        // Leaving a subpage is not async; what it looked at is reviewed here.
+        self.flush_reviews().await;
+        done
+    }
+
+    async fn key_in(&mut self, mut k: KeyEvent, area: Rect) -> Result<()> {
         self.flash = None;
         // Like the flash, the list of what a reload did not load lasts one key.
         self.reload_list = None;
@@ -149,14 +160,6 @@ impl App {
                     && k.code == KeyCode::Char('y')
                 {
                     self.summary_start(p);
-                }
-                return Ok(());
-            }
-            Mode::ReportCost { .. } => {
-                if let Some(ps) = self.report_ask.take()
-                    && k.code == KeyCode::Char('y')
-                {
-                    self.start_briefing(BriefJob::Write(ps));
                 }
                 return Ok(());
             }
@@ -300,6 +303,15 @@ impl App {
                 }
                 return Ok(());
             }
+            // A reply to a report item: `enter` sends it to the session, `esc` lets it go.
+            Mode::Reply(mut r) => {
+                match r.field.key(&k) {
+                    line::Act::Submit => self.send_reply(r.run.clone(), r.field.text()).await,
+                    line::Act::Cancel => {}
+                    _ => self.mode = Mode::Reply(r),
+                }
+                return Ok(());
+            }
             Mode::Normal => {}
         }
         if (k.code, k.modifiers) == (KeyCode::Char('f'), KeyModifiers::CONTROL) {
@@ -345,21 +357,38 @@ impl App {
                 _ => {}
             }
         }
-        // On the report, with nothing typed, `t` tags the row's source, `d` dismisses its lead and `p` flips board/prose.
+        // On the report, with nothing typed, the inbox's letters: `j`/`k` move, `r` replies,
+        // `x` marks reviewed, `p` reads deeply, `t` tags, and `w` flips to the written summary.
         if self.line.is_empty() && self.view == View::Report && !self.show_pane && k.modifiers.is_empty() {
             match k.code {
-                KeyCode::Char('p') => {
-                    self.report_prose = !self.report_prose;
+                KeyCode::Char('w') => {
+                    self.report_written = !self.report_written;
                     return Ok(());
                 }
-                // The board's rows are not on screen in prose: `t`, `d` and the cursor leave them be.
-                KeyCode::Char('t' | 'd') if self.report_prose => return Ok(()),
+                // The inbox is not on screen in prose: its letters leave it be.
+                KeyCode::Char('j' | 'k' | 'r' | 'x' | 'p' | 't') if self.report_written => return Ok(()),
+                KeyCode::Char('j') => {
+                    self.report_step(1).await;
+                    return Ok(());
+                }
+                KeyCode::Char('k') => {
+                    self.report_step(-1).await;
+                    return Ok(());
+                }
+                KeyCode::Char('r') => {
+                    self.reply_prompt();
+                    return Ok(());
+                }
+                KeyCode::Char('x') => {
+                    self.review_selected().await;
+                    return Ok(());
+                }
+                KeyCode::Char('p') => {
+                    self.deep_read_selected().await;
+                    return Ok(());
+                }
                 KeyCode::Char('t') => {
                     self.tag_prompt();
-                    return Ok(());
-                }
-                KeyCode::Char('d') => {
-                    self.dismiss_selected().await;
                     return Ok(());
                 }
                 _ => {}
@@ -599,7 +628,7 @@ impl App {
             self.reorder(up).await;
             return Ok(());
         }
-        if self.view == View::Report && !self.report_prose {
+        if self.view == View::Report && !self.report_written {
             let page = self.list_h.get().saturating_sub(2).max(1) as isize;
             let by = match k.code {
                 KeyCode::Down => Some(1),
@@ -611,7 +640,7 @@ impl App {
                 _ => None,
             };
             if let Some(by) = by {
-                self.report_step(by);
+                self.report_step(by).await;
                 return Ok(());
             }
         }
@@ -655,8 +684,9 @@ impl App {
                     self.settle();
                 } else if self.view == View::Events {
                     self.toggle_events().await;
+                } else if self.view == View::Report && !self.report_written && self.report_back() {
+                    // A step back within the inbox.
                 } else if self.view == View::CatchUp || self.view == View::Report {
-                    self.stop_briefing();
                     self.back_to_list().await;
                 }
             }
@@ -706,8 +736,8 @@ impl App {
             return Ok(());
         }
         if self.view == View::Report {
-            if !self.report_prose {
-                self.act_selected().await;
+            if !self.report_written {
+                self.report_enter(area.width >= report::INBOX_SPLIT_W).await;
             }
             return Ok(());
         }

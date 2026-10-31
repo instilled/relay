@@ -56,10 +56,8 @@ pub const SEED: &str = "\
 #   summary: auto        # auto: the top is written when you come back after `after`, by assistants.summary
 #                        # ask: only on /summary
 #
-# report:                # how deep the report goes, by how long you were away
-#   brief_after: 2h      # away longer than this, a written brief; up to it, the headline only
-#   deep_after: 2d       # away longer than this, a deep read
-#   summary: ask         # auto: it writes without asking · ask: asks first when that takes many calls
+# report:                # where the report opens, by how long you were away
+#   brief_after: 2h      # back within this, on what needs you; else on all teams
 ";
 
 /// Writes the seed when there is no file yet. Never touches one that exists.
@@ -324,12 +322,7 @@ mod tests {
 
     #[test]
     fn the_seed_documents_the_report_keys() {
-        for key in [
-            "# report:",
-            "#   brief_after: 2h",
-            "#   deep_after: 2d",
-            "#   summary: ask",
-        ] {
+        for key in ["# report:", "#   brief_after: 2h"] {
             assert!(SEED.lines().any(|l| l.starts_with(key)), "{key}");
         }
     }

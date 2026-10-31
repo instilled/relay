@@ -257,10 +257,12 @@ async fn enter_twice_on_a_flow_walks_its_steps_and_enter_on_one_reads_its_run() 
     assert!(app.show_pane, "enter shows the flow");
     let frame = draw_text(&mut app);
     // The firings in the pane, each a row: the one shown marked, when, where it stands, what it
-    // came to.
+    // came to. "When" is one to three words ("14:05", "Fri 23:29", "Oct 30 10:00"), depending on
+    // how the fixture's hour-ago firing falls against the clock's midnight.
     let row = frame.lines().find(|l| {
         let words: Vec<&str> = l.split_whitespace().collect();
-        matches!(words.as_slice(), ["▸", _when, "done", came_to, ..] if came_to.starts_with("res"))
+        words.first() == Some(&"▸")
+            && (2..=4).any(|i| words.get(i) == Some(&"done") && words.get(i + 1).is_some_and(|w| w.starts_with("res")))
     });
     assert!(row.is_some(), "a firing's row: {frame}");
     press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;

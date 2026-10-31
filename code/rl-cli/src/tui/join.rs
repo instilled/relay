@@ -72,7 +72,10 @@ impl App {
         let size = self.pane_size(area);
         match Output::open(&self.home, &id, size).await {
             Ok(t) => {
-                self.term = Some(t);
+                // The one read before is left: looked at.
+                if let Some(was) = self.term.replace(t) {
+                    self.read_terms.push(was.id);
+                }
                 self.term_size = size;
             }
             Err(e) => {

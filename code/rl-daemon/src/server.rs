@@ -39,6 +39,12 @@ pub struct Daemon {
     pub badges: crate::badges::Badges,
     /// Agents' own sessions, as last heard.
     pub outside: Arc<crate::outside::Outsiders>,
+    /// Each run's latest prompt, by the `turn_id` its hook gave: Codex's
+    /// hooks arrive out of order, and a turn's end is the run's only while
+    /// its turn is the latest.
+    pub turns: std::sync::Mutex<std::collections::HashMap<String, String>>,
+    /// What was last read for the queue's items, kept until it moves.
+    pub reading: crate::reading::Reading,
     pub started_at: Timestamp,
     pub shutdown: CancellationToken,
 }
@@ -58,6 +64,9 @@ pub struct ServeOptions {
     /// How agents that list their own sessions (Claude's) are asked for
     /// them; none, and none is (`RELAY_CLAUDE_SESSIONS=off`).
     pub claude_sessions: Option<crate::outside::Polling>,
+    /// How long a rest read off a run's screen waits for its hook; defaults
+    /// to [`supervisor::SCREEN_GRACE`].
+    pub screen_grace: Option<std::time::Duration>,
 }
 
 pub async fn serve(home: Home, shutdown: CancellationToken) -> Result<()> {
@@ -104,6 +113,7 @@ pub async fn serve_with(home: Home, shutdown: CancellationToken, opts: ServeOpti
         session_bin,
         registry.clone(),
         shutdown.child_token(),
+        opts.screen_grace.unwrap_or(supervisor::SCREEN_GRACE),
     ));
     match supervisor.reconcile().await {
         Ok(r) => info!(
@@ -183,6 +193,8 @@ pub async fn serve_with(home: Home, shutdown: CancellationToken, opts: ServeOpti
         leads,
         badges: crate::badges::Badges::new(home.plugins_dir(), crate::badges::EVERY, crate::badges::WAIT),
         outside,
+        turns: Default::default(),
+        reading: Default::default(),
         started_at: Timestamp::now(),
         shutdown: shutdown.clone(),
     });

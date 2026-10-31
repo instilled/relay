@@ -101,6 +101,7 @@ fn from_row(row: &Row) -> rusqlite::Result<Lead> {
         at: from_millis(row.get(8)?).map_err(|e| conv(8, e))?,
         expires_at: optional_from_millis(row.get(9)?, 9, conv)?,
         facts: None,
+        rest: None,
     })
 }
 
@@ -124,6 +125,7 @@ mod tests {
             at,
             expires_at: None,
             facts: None,
+            rest: None,
         }
     }
 

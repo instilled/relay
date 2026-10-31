@@ -158,6 +158,8 @@ impl Harness {
             step_rl: rl_bin(),
             registry: registry.map(Arc::new),
             claude_sessions,
+            // A screen's rest waits this long for a hook, not half a minute.
+            screen_grace: Some(Duration::from_millis(300)),
         };
         let server = tokio::spawn(rl_daemon::serve_with(home.clone(), token.clone(), opts));
         Some(Self { home, token, server })
