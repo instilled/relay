@@ -71,15 +71,20 @@ impl App {
                 Err(_) => rl_proto::config::ReportConfig::default().brief_after(),
             };
             self.inbox_sel = inbox::opening(&inbox::inbox(rep), self.away(), after);
+            // `fetch_report` read nothing: the selection was all the teams then.
             self.load_item().await;
         }
     }
 
-    /// The report as the daemon has it now.
+    /// The report as the daemon has it now, back to when you left (`inbox::window`).
     /// When the view opens and on the tick. The selection stays where it was while it is
     /// still there; gone, it moves to what came after it.
     pub(super) async fn fetch_report(&mut self) {
-        match self.rpc.call::<ReportGet>(ReportParams::default()).await {
+        let p = ReportParams {
+            since: Some(inbox::window(self.left, Timestamp::now())),
+            ..Default::default()
+        };
+        match self.rpc.call::<ReportGet>(p).await {
             Ok(r) => {
                 self.report_failed = false;
                 let was = self.report.replace(r);

@@ -123,8 +123,13 @@ pub fn prose(report: &Report, away: Option<SignedDuration>) -> String {
             .iter()
             .find(|t| t.items.iter().any(|x| x.key == l.key))
             .map_or("", |t| t.name.as_str());
+        let team = if team.is_empty() {
+            String::new()
+        } else {
+            format!(" ({team})")
+        };
         paragraphs.push(format!(
-            "Needs you: {} ({team}) {}, waiting since {}.",
+            "Needs you: {}{team} {}, waiting since {}.",
             l.title,
             asks(l),
             fmt_when(l.at, now)
@@ -136,17 +141,13 @@ pub fn prose(report: &Report, away: Option<SignedDuration>) -> String {
             .items
             .iter()
             .filter(|l| mark(l) != Mark::Asks)
-            .map(|l| clause(l))
+            .map(|l| clause(l).trim_end_matches('.').to_string())
             .collect();
         let mut p = format!("{}: {}.", t.name, counts(t));
         if !clauses.is_empty() {
             let said = clauses.join("; ");
-            // A last line that ends a sentence already keeps its own stop.
-            let stop = if said.ends_with(['.', '?', '!', '…']) {
-                ""
-            } else {
-                "."
-            };
+            // One stop at the end, unless the last line ends on its own.
+            let stop = if said.ends_with(['?', '!', '…']) { "" } else { "." };
             p.push_str(&format!(" {said}{stop}"));
         }
         paragraphs.push(p);
@@ -234,7 +235,7 @@ mod tests {
             lead("docs build", Band::Happened, "/p/docs", 15),
             RestKind::Finished,
             &[Hint::Failed],
-            "mdbook exited 1",
+            "mdbook exited 1.",
             None,
         );
         let r = report(

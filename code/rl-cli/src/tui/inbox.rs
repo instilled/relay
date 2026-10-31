@@ -179,6 +179,13 @@ pub fn gist(team_items: &[&Lead]) -> String {
     clauses.join("; ")
 }
 
+/// How far back the report's happened band reaches: to when you left, and
+/// never less than a day. The panel and `rl report` both ask for this.
+pub fn window(left: Option<Timestamp>, now: Timestamp) -> Timestamp {
+    let day = now - SignedDuration::from_hours(24);
+    left.map_or(day, |l| l.min(day))
+}
+
 /// Where the inbox opens: on the first ask when you were away less than
 /// `brief_after`, else on all the teams.
 pub fn opening(inbox: &Inbox, away: Option<SignedDuration>, brief_after: SignedDuration) -> Sel {
@@ -406,6 +413,19 @@ mod tests {
         );
         let i = inbox(&r);
         assert_eq!(i.commits, Some(5));
+    }
+
+    #[test]
+    fn the_window_reaches_back_to_when_you_left_and_never_less_than_a_day() {
+        let now = ts(10 * 86_400);
+        let day = ts(9 * 86_400);
+        assert_eq!(window(None, now), day);
+        assert_eq!(window(Some(ts(10 * 86_400 - 600)), now), day, "back soon: a day");
+        assert_eq!(
+            window(Some(ts(7 * 86_400)), now),
+            ts(7 * 86_400),
+            "three days: all of them"
+        );
     }
 
     #[test]

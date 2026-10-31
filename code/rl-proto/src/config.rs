@@ -49,13 +49,14 @@ pub struct Config {
     /// What the panel says when you come back after a while.
     #[serde(default, skip_serializing_if = "CatchUp::is_empty")]
     pub catch_up: CatchUp,
-    /// How deep the report goes, by how long you were away.
+    /// Where the report opens, by how long you were away.
     #[serde(default, skip_serializing_if = "ReportConfig::is_empty")]
     pub report: ReportConfig,
 }
 
 /// Where the report opens: on the first thing that needs you when you were
-/// away less than `brief_after`, else on all the teams. Named `ReportConfig` so it does not clash with `methods::Report`.
+/// away less than `brief_after`, else on all the teams. Named `ReportConfig`
+/// so it does not clash with `methods::Report`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReportConfig {

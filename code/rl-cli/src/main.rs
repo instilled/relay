@@ -1073,27 +1073,35 @@ async fn events(home: &Home, a: EventsArgs, json: bool) -> Result<()> {
 /// The written summary, as the report's `w` shows it; `--json` the report itself.
 async fn report(home: &Home, a: ReportArgs, json: bool) -> Result<()> {
     let n = now();
-    let mut since = a.since.as_deref().map(|s| parse_since(s, n)).transpose()?;
+    let said = a.since.as_deref().map(|s| parse_since(s, n)).transpose()?;
     let scope = a.scope.map(|p| p.canonicalize().unwrap_or(p));
     let mut c = daemon::ensure(home, !json).await?;
-    // It counts from when you last looked, as `rl since` does.
-    if !json && since.is_none() {
-        let me = rl_cli::attach::client_name();
-        since = Some(
-            c.call::<PresenceTouch>(PresenceClient { client: me })
+    // `--since` as said; else from when you last looked, as `rl since` does, and as far back
+    // as the panel's report reaches (`inbox::window`).
+    let (away_from, since) = match said {
+        Some(s) => (Some(s), s),
+        None => {
+            let me = rl_cli::attach::client_name();
+            let left = c
+                .call::<PresenceTouch>(PresenceClient { client: me })
                 .await?
-                .last_seen_at
-                .unwrap_or(n - jiff::SignedDuration::from_hours(24)),
-        );
-    }
-    let rep = c.call::<ReportGet>(ReportParams { scope, since }).await?;
+                .last_seen_at;
+            (left, rl_cli::tui::inbox::window(left, n))
+        }
+    };
+    let rep = c
+        .call::<ReportGet>(ReportParams {
+            scope,
+            since: Some(since),
+        })
+        .await?;
     if json {
         println!("{}", serde_json::to_string(&rep)?);
         return Ok(());
     }
     print!(
         "{}",
-        rl_cli::tui::prose::prose(&rep, since.map(|s| n.duration_since(s)))
+        rl_cli::tui::prose::prose(&rep, away_from.map(|s| n.duration_since(s)))
     );
     Ok(())
 }

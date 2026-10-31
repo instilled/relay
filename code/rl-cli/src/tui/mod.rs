@@ -5611,10 +5611,8 @@ mod tests {
             .collect()
     }
 
-    #[tokio::test]
-    async fn the_report_reaches_back_to_when_you_left() {
-        let (_tmp, token, mut app, _folder) = panel_with_an_old_run().await;
-        // Reviewed: nothing of it is queued any more.
+    /// Reviews yesterday's build: nothing of it is queued any more.
+    async fn review_the_old_run(app: &mut super::App) {
         let done = app
             .rpc
             .call::<rl_proto::methods::QueueReview>(rl_proto::methods::QueueReviewParams {
@@ -5623,6 +5621,69 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(done.cleared, 1);
+    }
+
+    /// A flow that fired and ended 30 hours ago: a happened lead with no
+    /// queue item, so the window alone keeps it.
+    fn fired_yesterday(app: &super::App) {
+        use rl_ledger::firings::{NewFiring, insert, save};
+        let at = jiff::Timestamp::now() - jiff::SignedDuration::from_hours(30);
+        let ledger = rl_ledger::Ledger::open(&app.home.ledger()).unwrap();
+        ledger
+            .call_blocking(move |c| {
+                let loaded = rl_ledger::flows::Loaded {
+                    name: "nightly".into(),
+                    hash: "h".into(),
+                    def_json: "{}".into(),
+                };
+                rl_ledger::flows::sync(c, &[loaded], at)?;
+                let steps = ["probe".to_string()];
+                let firing = NewFiring {
+                    id: "fi1",
+                    flow: "nightly",
+                    def_json: "{}",
+                    hash: "h",
+                    trigger: "when",
+                    event: None,
+                    at,
+                    steps: &steps,
+                };
+                insert(c, &firing)?;
+                let done = [("probe".to_string(), rl_proto::flow::StepStatus::Done)];
+                save(
+                    c,
+                    "fi1",
+                    &done.into_iter().collect(),
+                    rl_proto::flow::FiringStatus::Done,
+                    Some(at),
+                )
+            })
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_report_reaches_back_to_when_you_left() {
+        let (_tmp, token, mut app, _folder) = panel().await;
+        fired_yesterday(&app);
+        let firing = "firing:fi1".to_string();
+        // Back within the day: it is past the window.
+        left_ago(&mut app, jiff::SignedDuration::from_mins(30));
+        app.open_report().await;
+        assert!(!happened(&app).contains(&firing), "{:?}", happened(&app));
+        app.go_back();
+        // Three days away: the window reaches back to when you left, on the tick too.
+        left_ago(&mut app, jiff::SignedDuration::from_hours(72));
+        app.open_report().await;
+        assert!(happened(&app).contains(&firing), "{:?}", happened(&app));
+        app.refresh().await;
+        assert!(happened(&app).contains(&firing), "the tick keeps it");
+        token.cancel();
+    }
+
+    #[tokio::test]
+    async fn back_soon_the_report_keeps_a_day() {
+        let (_tmp, token, mut app, _folder) = panel_with_an_old_run().await;
+        review_the_old_run(&mut app).await;
         // Within two hours away: the last day, and the build is not in it.
         left_ago(&mut app, jiff::SignedDuration::from_mins(30));
         app.open_report().await;
