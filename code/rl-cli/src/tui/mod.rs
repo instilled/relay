@@ -45,6 +45,9 @@ pub(crate) mod outside;
 mod outside_tests;
 mod palette;
 mod pane;
+mod proposal;
+#[cfg(test)]
+mod proposal_tests;
 pub mod prose;
 mod query;
 mod remove;
@@ -288,7 +291,6 @@ impl Cands {
 /// Words handed to the assistant, until it answers.
 struct Asking {
     words: String,
-    folder: PathBuf,
     /// What was asked for: whatever fits the words, or a flow by name.
     want: crate::context::Want,
     task: tokio::task::JoinHandle<Result<(crate::interpret::Answer, rl_proto::methods::AssistantOutput)>>,
@@ -515,6 +517,8 @@ struct App {
     /// The assistant at work on some words: what was asked, where, and the
     /// task waiting for the answer.
     asking: Option<Asking>,
+    /// A run the assistant was asked for, in the pane: while it is asked, then what it proposed.
+    proposal: Option<proposal::Proposal>,
     /// Options marked so far on a multi-choice question.
     picked: Vec<usize>,
     /// The live line at the foot; typing is the panel's resting state.
@@ -1303,6 +1307,7 @@ impl App {
             tested: None,
             parked: None,
             asking: None,
+            proposal: None,
             summary: None,
             summarising: None,
             topping: None,
@@ -1769,6 +1774,9 @@ impl App {
     /// Leave the subpage for the list, the one way out: the page it was reading is let go, a
     /// sub-mode inside it (an answer, a walk, a name) ends, and the row stays selected.
     fn leave_subpage(&mut self) {
+        if self.proposal_shown().is_some() {
+            self.leave_proposal();
+        }
         self.show_pane = false;
         self.pane = Pane::Facts;
         self.term = None;
@@ -2384,6 +2392,9 @@ impl App {
                     theme::accent(),
                 ),
                 line::What::Agent { agent, .. } => ("✦", format!(" {agent} here"), theme::accent()),
+                line::What::Ask(_) if self.proposal_shown().is_some() => {
+                    ("…", " changes the proposal".into(), theme::dim())
+                }
                 line::What::Ask(_) => ("…", " asks the assistant".into(), theme::dim()),
             },
         };
@@ -2858,6 +2869,8 @@ impl App {
             }
         } else if matches!(self.mode, Mode::Draft(_)) {
             spans.push(plain("draft"));
+        } else if self.proposal_shown().is_some() {
+            spans.push(plain("proposal"));
         } else if self.tested.is_some() {
             spans.push(plain("flow test"));
         } else if self.reload_list.is_some() {
@@ -2916,6 +2929,12 @@ impl App {
         // A draft, until it is written or let go.
         if let Mode::Draft(d) = &self.mode {
             return d.draw(f, area);
+        }
+        // A run asked for, while it is asked and once it is proposed.
+        if let Some(p) = self.proposal_shown() {
+            let lines = p.lines(&self.names.workspace(&p.folder), Instant::now());
+            f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
+            return;
         }
         // What `/flow test` found, until the next key.
         if let Some(lines) = &self.tested {

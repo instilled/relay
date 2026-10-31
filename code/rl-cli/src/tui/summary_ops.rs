@@ -56,14 +56,18 @@ impl App {
         }
         let folder = self.folder_here();
         let home = self.home.clone();
-        let (w, f, wanted) = (words.clone(), folder.clone(), want.clone());
+        // Outside a flow, the pane opens on it at once — and words with a proposal up change it.
+        let sent = match want {
+            Want::Any => self.propose(words.clone()),
+            Want::Flow { .. } => words.clone(),
+        };
+        let folder = match (&want, &self.proposal) {
+            (Want::Any, Some(p)) => p.folder.clone(),
+            _ => folder,
+        };
+        let (w, f, wanted) = (sent, folder, want.clone());
         let task = tokio::spawn(async move { crate::interpret::ask(&home, &f, &w, &wanted).await });
-        self.asking = Some(Asking {
-            words,
-            folder,
-            want,
-            task,
-        });
+        self.asking = Some(Asking { words, want, task });
     }
 
     pub(super) async fn answered(
@@ -79,6 +83,10 @@ impl App {
                 format!("asked for a flow; {} answered a run (run {})", out.agent, out.run),
             ),
             Ok(Ok((crate::interpret::Answer::Flow(d), out))) => {
+                // A flow where a run was asked: shown as a flow draft is, the proposal let go.
+                if self.proposal.take().is_some_and(|p| p.shown) {
+                    self.show_pane = false;
+                }
                 // Asked for a flow by name, the person's name wins the draft's.
                 let name = match asking.want {
                     Want::Flow { name } => Some(name),
@@ -86,16 +94,9 @@ impl App {
                 };
                 self.drafted(name, d.text, out.agent);
             }
-            Ok(Ok((crate::interpret::Answer::Run(draft), out))) => {
-                let form = crate::interpret::form_of(&draft, &asking.folder)
-                    .with_folders(&self.names.paths())
-                    .with_agents(&self.agents);
-                self.mode = Mode::Form(Box::new(form));
-                self.say(format!(
-                    "{} drafted this from \"{}\" · enter does it · esc does not",
-                    out.agent, asking.words
-                ));
-            }
+            Ok(Ok((crate::interpret::Answer::Run(draft), out))) => self.proposed(draft, out.agent),
+            Ok(Err(e)) if matches!(asking.want, Want::Any) => self.not_proposed(format!("{e:#}")),
+            Err(e) if matches!(asking.want, Want::Any) => self.not_proposed(format!("asking: {e}")),
             Ok(Err(e)) => self.say(format!("{e:#}")),
             Err(e) => self.say(format!("asking: {e}")),
         }
