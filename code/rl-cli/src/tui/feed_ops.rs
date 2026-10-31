@@ -41,6 +41,23 @@ impl App {
         self.left.map(|l| self.opened_at.duration_since(l))
     }
 
+    /// The report's header: how long you were away and since when, what waits for your
+    /// review and what is working. Time away is left out while it is not known.
+    pub(super) fn report_head(&self) -> String {
+        let Some(rep) = &self.report else {
+            return "report".into();
+        };
+        let i = inbox::inbox(rep);
+        let mut parts = Vec::new();
+        if let Some(left) = self.left {
+            parts.push(format!("away {}", fmt_age(left, self.opened_at)));
+            parts.push(format!("since {}", rl_core::time::fmt_when(left, Timestamp::now())));
+        }
+        parts.push(format!("{} to review", i.to_review));
+        parts.push(format!("{} working", i.working));
+        parts.join(" · ")
+    }
+
     /// As the report opens: the board, and its happened runs' recaps as deep
     /// as time away calls for (`depth`) — up to `brief_after` none; past it
     /// a brief each, and the board from when you left; past `deep_after` a
@@ -63,7 +80,20 @@ impl App {
         if d != Depth::Headline {
             self.report_since = self.left;
         }
+        self.inbox_inside = None;
+        self.inbox_sel = inbox::Sel::All;
+        self.report_open = false;
+        self.item_view = None;
         self.fetch_report().await;
+        // Time away picks where it opens, and only that.
+        if let Some(rep) = &self.report {
+            let after = match &cfg {
+                Some(cfg) => cfg.config.report.brief_after(),
+                None => rl_proto::config::ReportConfig::default().brief_after(),
+            };
+            self.inbox_sel = inbox::opening(&inbox::inbox(rep), self.away(), after);
+            self.load_item().await;
+        }
         let Some(cfg) = cfg.filter(|_| d != Depth::Headline) else {
             return;
         };
@@ -137,7 +167,8 @@ impl App {
     }
 
     /// The report as the daemon has it now, from where this open starts it.
-    /// When the view opens and on the tick.
+    /// When the view opens and on the tick. The selection stays where it was while it is
+    /// still there; gone, it moves to what came after it.
     pub(super) async fn fetch_report(&mut self) {
         let p = ReportParams {
             since: self.report_since,
@@ -146,8 +177,9 @@ impl App {
         match self.rpc.call::<ReportGet>(p).await {
             Ok(r) => {
                 self.report_failed = false;
-                self.report_sel = self.report_sel.min(report::flat_leads(&r).len().saturating_sub(1));
-                self.report = Some(r);
+                let was = self.report.replace(r);
+                self.keep_selection(was.as_ref());
+                self.load_item().await;
             }
             // The last good board stays; the trouble is said once, not every tick.
             Err(e) => {
@@ -159,37 +191,145 @@ impl App {
         }
     }
 
-    /// The lead under the report's cursor.
-    fn report_lead(&self) -> Option<rl_proto::lead::Lead> {
-        let rep = self.report.as_ref()?;
-        report::flat_leads(rep).get(self.report_sel).map(|l| (*l).clone())
+    /// The selection, held over a new report: kept while it is still there; gone, the next
+    /// in the order it was in that still is, else its team, else all the teams.
+    fn keep_selection(&mut self, was: Option<&rl_proto::methods::Report>) {
+        let Some(rep) = &self.report else { return };
+        let now = inbox::inbox(rep);
+        let inside = self.inbox_inside.as_deref();
+        if inbox::order(&now, inside).contains(&self.inbox_sel) {
+            return;
+        }
+        let then = was.map(inbox::inbox);
+        let old = then.as_ref().map(|i| inbox::order(i, inside)).unwrap_or_default();
+        let after = old.iter().skip_while(|s| **s != self.inbox_sel).skip(1);
+        let here = inbox::order(&now, inside);
+        if let Some(next) = after.into_iter().find(|s| here.contains(s)) {
+            self.inbox_sel = next.clone();
+            return;
+        }
+        // Its team, from the list of teams; or, failing that, all of them.
+        let team = match (&self.inbox_sel, &then) {
+            (inbox::Sel::Item(key), Some(i)) => i
+                .teams
+                .iter()
+                .find(|t| t.items.iter().any(|l| l.key == *key))
+                .map(|t| t.name.clone()),
+            _ => None,
+        };
+        self.inbox_inside = None;
+        self.inbox_sel = match team {
+            Some(name) if now.teams.iter().any(|t| t.name == name) => inbox::Sel::Team(name),
+            _ => inbox::Sel::All,
+        };
     }
 
-    /// Move the report's cursor by `by` rows, held to the board.
-    pub(super) fn report_step(&mut self, by: isize) {
-        let n = self.report.as_ref().map_or(0, |r| report::flat_leads(r).len());
-        if n > 0 {
-            self.report_sel = (self.report_sel as isize + by).clamp(0, n as isize - 1) as usize;
+    /// The selected item read whole, once a selection: asked when it changes, never again
+    /// for the same one. Reading it reviews nothing.
+    pub(super) async fn load_item(&mut self) {
+        let inbox::Sel::Item(key) = &self.inbox_sel else {
+            return;
+        };
+        if self.item_view.as_ref().is_some_and(|(k, _)| k == key) {
+            return;
+        }
+        let key = key.clone();
+        // Only a run has a session to read; anything else has no log to show.
+        let view = match key.strip_prefix("run:") {
+            Some(id) => match self
+                .rpc
+                .call::<QueueItemGet>(QueueItemParams { run: id.to_string() })
+                .await
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    self.say(format!("read: {e:#}"));
+                    Default::default()
+                }
+            },
+            None => Default::default(),
+        };
+        self.item_view = Some((key, view));
+    }
+
+    /// The lead the inbox has selected: the item, or a team's first; none on all the teams.
+    fn inbox_lead(&self) -> Option<rl_proto::lead::Lead> {
+        let rep = self.report.as_ref()?;
+        let all = || rep.needs_you.iter().chain(&rep.live).chain(&rep.happened);
+        match &self.inbox_sel {
+            inbox::Sel::Item(key) => all().find(|l| l.key == *key).cloned(),
+            inbox::Sel::Team(name) => {
+                let i = inbox::inbox(rep);
+                let team = i.teams.iter().find(|t| t.name == *name)?;
+                team.items.first().map(|l| (*l).clone())
+            }
+            inbox::Sel::All => None,
         }
     }
 
-    /// `enter` on a report row: open what it is about. A run opens on the list; a question
-    /// is selected there. Other leads have nothing to open here.
+    /// `j`/`k` and the arrows: `by` steps along the inbox's order, held to its ends.
+    pub(super) async fn report_step(&mut self, by: isize) {
+        let Some(rep) = &self.report else { return };
+        let order = inbox::order(&inbox::inbox(rep), self.inbox_inside.as_deref());
+        if order.is_empty() {
+            return;
+        }
+        let at = order.iter().position(|s| *s == self.inbox_sel).unwrap_or(0);
+        let to = (at as isize).saturating_add(by).clamp(0, order.len() as isize - 1) as usize;
+        self.inbox_sel = order[to].clone();
+        self.load_item().await;
+    }
+
+    /// `enter` on the inbox: into a team, its first item selected; on an item, its session
+    /// taken over the terminal (a question goes to its row on the list). Below
+    /// `INBOX_SPLIT_W` the reading pane is one pane of its own: the first `enter` opens it,
+    /// the next does the rest.
+    pub(super) async fn report_enter(&mut self, wide: bool) {
+        if !wide && !self.report_open {
+            self.report_open = true;
+            return;
+        }
+        match self.inbox_sel.clone() {
+            inbox::Sel::All => {}
+            inbox::Sel::Team(name) => {
+                self.report_open = false;
+                let first = self
+                    .report
+                    .as_ref()
+                    .and_then(|r| inbox::order(&inbox::inbox(r), Some(&name)).into_iter().next());
+                self.inbox_inside = Some(name);
+                if let Some(first) = first {
+                    self.inbox_sel = first;
+                }
+                self.load_item().await;
+            }
+            inbox::Sel::Item(key) => match key.strip_prefix("run:") {
+                Some(id) => self.attach = Some((id.to_string(), false)),
+                None => self.act_selected().await,
+            },
+        }
+    }
+
+    /// `esc` on the inbox: the reading pane closed, below `INBOX_SPLIT_W`; out of a team,
+    /// onto its row; at the top, back to the list. False when it went back to the list.
+    pub(super) fn report_back(&mut self) -> bool {
+        if self.report_open {
+            self.report_open = false;
+        } else if let Some(name) = self.inbox_inside.take() {
+            self.inbox_sel = inbox::Sel::Team(name);
+        } else {
+            return false;
+        }
+        true
+    }
+
+    /// `enter` on a lead with no session to take over: a question is selected on the list.
+    /// Other leads have nothing to open here.
     pub(super) async fn act_selected(&mut self) {
-        let Some(lead) = self.report_lead() else {
+        let Some(lead) = self.inbox_lead() else {
             return self.say("nothing here to open");
         };
         match lead.key.split_once(':') {
-            Some(("run", id)) => {
-                // What the report wrote is what the pane shows, with no extra call.
-                if let Some(s) = report::written(&self.briefs, &lead).cloned() {
-                    self.made.insert(SummaryTarget::Run { id: id.to_string() }.key(), s);
-                }
-                if let Some(facts) = lead.facts {
-                    self.feed.facts.insert(id.to_string(), facts);
-                }
-                self.show_run(id).await;
-            }
             Some(("decision", id)) => {
                 self.back_to_list().await;
                 let key = format!("q:{id}");
@@ -203,27 +343,141 @@ impl App {
         }
     }
 
-    /// `d` on a report row: dismissed (built-in or stored alike), and the board asked again.
-    pub(super) async fn dismiss_selected(&mut self) {
-        let Some(lead) = self.report_lead() else {
-            return self.say("nothing here to dismiss");
+    /// `x`: the item reviewed (a lead with no item, dismissed), and the next one selected;
+    /// on a team, every queued item of it. The board is asked again.
+    pub(super) async fn review_selected(&mut self) {
+        let Some(rep) = &self.report else { return };
+        let i = inbox::inbox(rep);
+        let next = inbox::order(&i, self.inbox_inside.as_deref())
+            .into_iter()
+            .skip_while(|s| *s != self.inbox_sel)
+            .nth(1);
+        let (runs, lead): (Vec<String>, _) = match &self.inbox_sel {
+            inbox::Sel::All => (Vec::new(), None),
+            inbox::Sel::Team(name) => {
+                let items = i.teams.iter().filter(|t| t.name == *name).flat_map(|t| &t.items);
+                let queued = items.filter(|l| l.rest.is_some());
+                (queued.filter_map(|l| run_of(l)).collect(), None)
+            }
+            inbox::Sel::Item(key) => match i.teams.iter().flat_map(|t| &t.items).find(|l| l.key == *key) {
+                Some(l) if l.rest.is_some() => (run_of(l).into_iter().collect(), None),
+                Some(l) => (Vec::new(), Some((*l).clone())),
+                None => (Vec::new(), None),
+            },
         };
-        let p = LeadDismissParams {
-            source: lead.source,
-            key: lead.key,
+        let done = match lead {
+            Some(lead) => {
+                let p = LeadDismissParams {
+                    source: lead.source,
+                    key: lead.key,
+                };
+                self.rpc.call::<LeadDismiss>(p).await.map(|()| "dismissed".to_string())
+            }
+            None if runs.is_empty() => return self.say("nothing here waits for review"),
+            None => {
+                let n = runs.len();
+                let said = if n == 1 {
+                    "reviewed".into()
+                } else {
+                    format!("{n} reviewed")
+                };
+                self.rpc
+                    .call::<QueueReview>(QueueReviewParams { runs })
+                    .await
+                    .map(|_| said)
+            }
         };
-        match self.rpc.call::<LeadDismiss>(p).await {
-            Ok(()) => {
-                self.say("dismissed");
+        match done {
+            Ok(said) => {
+                self.say(said);
+                if let Some(next) = next {
+                    self.inbox_sel = next;
+                }
                 self.fetch_report().await;
             }
-            Err(e) => self.say(format!("dismiss: {e:#}")),
+            Err(e) => self.say(format!("review: {e:#}")),
         }
     }
 
-    /// `t` on a report row: ask for the tag to give the row's source.
+    /// `r` on an item: a prompt for its session, typed on the line.
+    pub(super) fn reply_prompt(&mut self) {
+        let Some(lead) = self
+            .inbox_lead()
+            .filter(|_| matches!(self.inbox_sel, inbox::Sel::Item(_)))
+        else {
+            return self.say("r replies to an item");
+        };
+        let Some(id) = lead.key.strip_prefix("run:") else {
+            return self.say(format!("'{}' has no session to reply to", lead.title));
+        };
+        self.mode = Mode::Reply(Box::new(Replying {
+            run: id.to_string(),
+            title: lead.title,
+            field: line::Field::selected(""),
+        }));
+    }
+
+    /// The reply sent, as if typed and `enter` pressed. Typing to a run reviews it, the
+    /// daemon's side.
+    pub(super) async fn send_reply(&mut self, run: String, text: &str) {
+        if text.trim().is_empty() {
+            return;
+        }
+        let mut bytes = text.as_bytes().to_vec();
+        bytes.push(b'\r');
+        match self.rpc.call::<RunInput>(RunInputParams { id: run, bytes }).await {
+            Ok(()) => {
+                self.say("sent");
+                self.fetch_report().await;
+            }
+            Err(e) => self.say(format!("reply: {e:#}")),
+        }
+    }
+
+    /// `p` on an item: a deep read of its session since you last looked, from the log; what
+    /// it would cost is asked first over one call. It lands in the reading pane.
+    pub(super) async fn deep_read_selected(&mut self) {
+        if !matches!(self.inbox_sel, inbox::Sel::Item(_)) {
+            return self.say("open an item to read it deeply");
+        }
+        if let Some(s) = &self.summarising {
+            return self.say(format!("still summarising `{}`; ^x on its run stops it", s.title));
+        }
+        let Some(lead) = self.inbox_lead() else { return };
+        let Some(id) = lead.key.strip_prefix("run:") else {
+            return self.say(format!("'{}' has no session to read", lead.title));
+        };
+        let params = SummaryParams {
+            target: SummaryTarget::Run { id: id.to_string() },
+            deep: true,
+            from: lead.rest.as_ref().map(|r| r.item.from),
+            again: false,
+            dry: false,
+            timeout: None,
+        };
+        let dry = SummaryParams {
+            dry: true,
+            ..params.clone()
+        };
+        match self.rpc.call::<SummaryMake>(dry).await {
+            Ok(d) if d.calls > 1 => {
+                self.summary_ask = Some(params);
+                self.mode = Mode::SummaryCost {
+                    runs: d.runs,
+                    calls: d.calls,
+                };
+            }
+            Ok(_) => {
+                self.say(format!("reading {} deeply…", lead.title));
+                self.summary_start(params);
+            }
+            Err(e) => self.say(format!("{e:#}")),
+        }
+    }
+
+    /// `t` on the inbox: ask for the tag to give the selected item's source, or its team's.
     pub(super) fn tag_prompt(&mut self) {
-        let Some(lead) = self.report_lead() else {
+        let Some(lead) = self.inbox_lead() else {
             return self.say("nothing here to tag");
         };
         let was = self
@@ -394,6 +648,11 @@ impl App {
             None => self.say("nothing here to open"),
         }
     }
+}
+
+/// The run a lead is of, by its key.
+fn run_of(lead: &rl_proto::lead::Lead) -> Option<String> {
+    lead.key.strip_prefix("run:").map(str::to_string)
 }
 
 /// The report's briefing, on its own connection: nothing here waits on the

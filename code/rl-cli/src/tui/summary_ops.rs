@@ -227,9 +227,10 @@ impl App {
         // The summary is in the details, not over a terminal being watched:
         // that stays open, a step away. The top's is in the top — when it is
         // over the stretch the catch-up shows; over another, it is the pane's.
+        // The report's is in its reading pane.
         let shown = self.catch.as_ref().map(|c| c.since.as_millisecond());
         let tops = self.on_top() && shown == from.map(|f| f.as_millisecond());
-        if !tops {
+        if !tops && self.view != View::Report {
             self.pane = Pane::Facts;
             self.show_pane = true;
         }
@@ -256,6 +257,12 @@ impl App {
                     pane::recap_label(&summary, Timestamp::now())
                 ));
                 self.made.insert(s.target.key(), summary.clone());
+                // A run's deep read is the report's too: its reading pane shows it.
+                if let SummaryTarget::Run { id } = &s.target
+                    && summary.deep
+                {
+                    self.briefs.insert(id.clone(), summary.clone());
+                }
                 self.top_from(&s, &summary);
                 if self.summary_target().as_ref() == Some(&s.target) {
                     self.summary = Some(summary);

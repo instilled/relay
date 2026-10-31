@@ -147,7 +147,15 @@ fn place_keys(at: Place) -> Vec<Key> {
             cmd(Cmd::Pane, "details"),
             key("esc", "back"),
         ],
-        Place::Report => vec![key("esc", "the list")],
+        Place::Report => vec![
+            key("j/k", "move"),
+            key("enter", "open/attach"),
+            key("r", "reply"),
+            key("x", "reviewed"),
+            key("p", "read deeply"),
+            key("w", "written"),
+            key("esc", "back"),
+        ],
         Place::CatchUp => vec![
             key("↑↓", "move"),
             key("enter", "go to it"),

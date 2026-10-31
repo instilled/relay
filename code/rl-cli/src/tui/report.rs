@@ -1,10 +1,11 @@
 //! The report drawn: the inbox's list pane and reading pane, as lines; and the
-//! lanes the prose and the board's cursor still walk.
+//! lanes the prose still walks.
 //!
 //! `Lane`/`Row` borrow from the `Report` (cheap; the renderer holds the report
 //! for the frame anyway).
 
 use std::collections::{HashMap, HashSet};
+use std::ops::Range;
 
 use jiff::Timestamp;
 use jiff::tz::TimeZone;
@@ -13,7 +14,7 @@ use ratatui::text::{Line, Span};
 use rl_core::time::{fmt_age, fmt_when};
 use rl_proto::lead::{Band, Lead};
 use rl_proto::methods::Report;
-use rl_proto::queue::{Changed, Hint, ItemView};
+use rl_proto::queue::{Changed, Hint, ItemView, RestKind};
 use rl_proto::types::Summary;
 
 use super::inbox::{Inbox, Mark, Sel, Team, mark, to_review};
@@ -137,14 +138,6 @@ pub(crate) fn headline(lead: &Lead) -> String {
 pub(crate) fn written<'a>(briefs: &'a HashMap<String, Summary>, lead: &Lead) -> Option<&'a Summary> {
     let id = lead.key.strip_prefix("run:")?;
     briefs.get(id).filter(|s| !s.stale)
-}
-
-/// The lead rows in the order they are drawn, across lanes: what the cursor walks.
-pub fn flat_leads(report: &Report) -> Vec<&Lead> {
-    lanes(report)
-        .into_iter()
-        .flat_map(|l| l.rows.into_iter().map(|r| r.lead))
-        .collect()
 }
 
 /// Two panes from this many columns; one below.
@@ -302,14 +295,53 @@ fn lit(mut line: Line<'static>, width: usize) -> Line<'static> {
     line.style(theme::selected())
 }
 
-/// Adds a block of lines, lit through when it is the selection; `at` says where it starts.
-fn put(out: &mut Vec<Line<'static>>, at: &mut Option<usize>, block: Vec<Line<'static>>, on: bool, width: usize) {
+/// Where the selection sits among the list pane's lines: its block, and the heading of the
+/// section it is in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Picked {
+    pub head: usize,
+    pub lines: Range<usize>,
+}
+
+/// Adds a block of lines under the heading at `head`, lit through when it is the selection;
+/// `at` says where it is.
+fn put(
+    out: &mut Vec<Line<'static>>,
+    at: &mut Option<Picked>,
+    head: usize,
+    block: Vec<Line<'static>>,
+    on: bool,
+    width: usize,
+) {
     if on {
-        *at = Some(out.len());
+        let start = out.len();
         out.extend(block.into_iter().map(|l| lit(l, width)));
+        *at = Some(Picked {
+            head,
+            lines: start..out.len(),
+        });
     } else {
         out.extend(block);
     }
+}
+
+/// The first of `len` lines to show in `height` rows, moved from `top` only as far as keeps
+/// the whole selection in view, and its section's heading too where that fits.
+pub fn scroll(top: usize, height: usize, len: usize, picked: Option<&Picked>) -> usize {
+    let mut top = top.min(len.saturating_sub(height));
+    if let Some(p) = picked {
+        if p.lines.end > top + height {
+            top = p.lines.end.saturating_sub(height);
+        }
+        // A block taller than the pane shows from its start.
+        if p.lines.start < top {
+            top = p.lines.start;
+        }
+        if p.head < top && p.lines.end <= p.head + height {
+            top = p.head;
+        }
+    }
+    top
 }
 
 fn dim(t: impl Into<String>) -> Span<'static> {
@@ -354,15 +386,15 @@ fn item_rows(l: &Lead, width: usize, now: Timestamp) -> Vec<Line<'static>> {
     vec![spread(top, dim(when(l, now)), width), clip(sub, width)]
 }
 
-/// The list pane, `width` columns wide, and the line its selection starts on. Outside a
-/// team: All teams, the NEEDS YOU strip, then a summary per team. Inside one: its items.
+/// The list pane, `width` columns wide, and where its selection is. Outside a team: All
+/// teams, the NEEDS YOU strip, then a summary per team. Inside one: its items.
 pub fn list_lines(
     inbox: &Inbox,
     sel: &Sel,
     inside: Option<&str>,
     width: usize,
     now: Timestamp,
-) -> (Vec<Line<'static>>, Option<usize>) {
+) -> (Vec<Line<'static>>, Option<Picked>) {
     let mut out = Vec::new();
     let mut at = None;
     let picked = |l: &Lead| matches!(sel, Sel::Item(k) if *k == l.key);
@@ -373,7 +405,7 @@ pub fn list_lines(
         ));
         let team = inbox.teams.iter().find(|t| t.name == name);
         for l in team.map_or(&[][..], |t| &t.items[..]) {
-            put(&mut out, &mut at, item_rows(l, width, now), picked(l), width);
+            put(&mut out, &mut at, 0, item_rows(l, width, now), picked(l), width);
         }
         return (out, at);
     }
@@ -392,9 +424,10 @@ pub fn list_lines(
         clip(vec![Span::styled(" ≡ All teams", theme::name())], width),
         clip(tally, width),
     ];
-    put(&mut out, &mut at, all, *sel == Sel::All, width);
+    put(&mut out, &mut at, 0, all, *sel == Sel::All, width);
     if !inbox.needs.is_empty() {
         out.push(Line::raw(""));
+        let head = out.len();
         out.push(clip(
             vec![Span::styled(
                 format!(" NEEDS YOU · {}", inbox.needs.len()),
@@ -420,10 +453,11 @@ pub fn list_lines(
                 Some(h) => spread(left, chip(*h), width),
                 None => clip(left, width),
             };
-            put(&mut out, &mut at, vec![line], picked(l), width);
+            put(&mut out, &mut at, head, vec![line], picked(l), width);
         }
     }
     out.push(Line::raw(""));
+    let head = out.len();
     out.push(clip(vec![dim(format!(" TEAMS · {}", inbox.teams.len()))], width));
     for t in &inbox.teams {
         let mut counts = vec![Span::raw("   ")];
@@ -434,7 +468,7 @@ pub fn list_lines(
             clip(vec![dim(format!("   {}", t.gist))], width),
         ];
         let on = matches!(sel, Sel::Team(n) if *n == t.name);
-        put(&mut out, &mut at, block, on, width);
+        put(&mut out, &mut at, head, block, on, width);
     }
     (out, at)
 }
@@ -639,7 +673,15 @@ fn item_page(
     // An ask's message in a box with its question picked out; anything else's alone.
     let boxed = m == Mark::Asks && width >= 10;
     let inner = if boxed { width - 5 } else { width.saturating_sub(1) };
-    let said = last(l).map(|t| block(t, inner)).unwrap_or_default();
+    // A finished message that says nothing ("Done.") gives way to what changed, when git
+    // has something to say; with no repo it stands.
+    let says_nothing = rest.is_some_and(|r| r.item.kind == RestKind::Finished)
+        && changed.is_some()
+        && last(l).is_some_and(|t| t.split_whitespace().count() <= 3);
+    let said = match last(l) {
+        Some(t) if !says_nothing => block(t, inner),
+        _ => Vec::new(),
+    };
     let styled = |t: &str| if t.contains('?') { theme::name() } else { Style::new() };
     if boxed {
         out.push(dim(format!(" ┌{}┐", "─".repeat(width - 3))).into());
@@ -1035,7 +1077,13 @@ pub(crate) mod tests {
         assert!(t[teams + 4].contains("▸ docs"), "{t:#?}");
         assert!(t[teams + 5].contains("1 failed · 1 done") && !t[teams + 5].contains("commit"));
         // The selected team is lit through its three lines, and its first is said.
-        assert_eq!(at, Some(teams + 4));
+        assert_eq!(
+            at,
+            Some(Picked {
+                head: teams,
+                lines: teams + 4..teams + 7
+            })
+        );
         assert!(ls[teams + 4..teams + 7].iter().all(|l| l.style == theme::selected()));
         assert_ne!(ls[teams + 3].style, theme::selected());
     }
@@ -1077,7 +1125,42 @@ pub(crate) mod tests {
         for gone in ["nightly", "docs summary", "All teams", "NEEDS YOU", "TEAMS"] {
             assert!(!t.iter().any(|l| l.contains(gone)), "{gone}: {t:#?}");
         }
-        assert_eq!(at, Some(3));
+        assert_eq!(at, Some(Picked { head: 0, lines: 3..5 }));
+    }
+
+    #[test]
+    fn the_list_keeps_the_whole_selection_and_its_heading_in_view() {
+        let now = ts(6_000);
+        let mut r = board(false);
+        r.happened.extend((0..8).map(|n| {
+            let scope = format!("/p/team{n}");
+            queued(
+                mk_lead("codex", &format!("run:t{n}"), Band::Happened, Some(&scope), ts(100 + n)),
+                RestKind::Finished,
+                &[],
+                "Done.",
+                None,
+            )
+        }));
+        let i = inbox(&r);
+        let last = i.teams.last().unwrap().name.clone();
+        let (ls, at) = list_lines(&i, &Sel::Team(last), None, 52, now);
+        let at = at.unwrap();
+        let h = 8;
+        assert!(ls.len() > h, "taller than the pane");
+        // From the top, the last team's three lines come into view, all of them.
+        let top = scroll(0, h, ls.len(), Some(&at));
+        assert!(top <= at.lines.start && at.lines.end <= top + h, "{top} {at:?}");
+        assert_eq!(top, at.lines.end - h, "only as far as needed");
+        // Back up at the strip, its heading comes along where it fits.
+        let (ls, at) = list_lines(&i, &Sel::Item("run:a1".into()), None, 52, now);
+        let at = at.unwrap();
+        let top = scroll(ls.len(), h, ls.len(), Some(&at));
+        assert_eq!(top, at.head, "{at:?}");
+        assert!(texts(&ls)[top].contains("NEEDS YOU"));
+        // A block taller than the pane shows from its start.
+        let tall = Picked { head: 0, lines: 10..20 };
+        assert_eq!(scroll(0, 4, 30, Some(&tall)), 10);
     }
 
     #[test]
@@ -1179,5 +1262,32 @@ pub(crate) mod tests {
         assert!(t[changed + 1].contains("not pushed"), "{t:#?}");
         assert!(t[changed + 2].contains("fix the parser"), "{t:#?}");
         assert!(t.iter().any(|l| l.contains("reading…")), "no view yet: {t:#?}");
+    }
+
+    #[test]
+    fn a_message_that_says_nothing_shows_what_changed_alone() {
+        let mut r = board(true);
+        r.happened[0].rest.as_mut().unwrap().last = Some("Done.".into());
+        let read = |r: &Report, key: &str| {
+            let i = inbox(r);
+            texts(&reading_lines(
+                r,
+                &i,
+                &Sel::Item(key.into()),
+                None,
+                &HashMap::new(),
+                80,
+                ts(6_000),
+            ))
+        };
+        let t = read(&r, "run:d1");
+        let done = t.iter().position(|l| l.contains("DONE · ")).unwrap();
+        assert!(t[done + 1].is_empty(), "nothing said, straight to what changed: {t:#?}");
+        assert!(t[done + 2].contains("CHANGED SINCE YOU LOOKED"), "{t:#?}");
+        assert!(!t.iter().any(|l| l.trim() == "Done."), "{t:#?}");
+        // With no repo, it is all there is: it stands.
+        let t = read(&r, "run:d2");
+        assert!(t.iter().any(|l| l.trim() == "Done."), "{t:#?}");
+        assert!(!t.iter().any(|l| l.contains("CHANGED")), "{t:#?}");
     }
 }

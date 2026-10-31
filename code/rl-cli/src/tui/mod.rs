@@ -94,12 +94,12 @@ use rl_proto::methods::{
     AgentList, ConfigGet, DecisionDismiss, DecisionGet, DecisionId, DecisionNote, DecisionTake, DecisionTakeParams,
     Digest, DigestGet, DigestHide, DigestHideParams, DigestItem, DigestOrder, DigestParams, EventFilter, EventList,
     GcParams, GcRun, ImportList, ImportListParams, ImportMove, LeadDismiss, LeadDismissParams, PresenceClient,
-    PresenceTouch, ReportGet, ReportParams, RunArchive, RunArchiveParams, RunFilter, RunGet, RunHide, RunHideParams,
-    RunId, RunIds, RunInput, RunInputParams, RunList, RunMark, RunMarkParams, RunPin, RunPinParams, RunRename,
-    RunRenameParams, RunResume, RunResumeParams, RunSeen, RunSpec, RunStart, RunStop, RunStopParams, SETUP_STEPS,
-    SetupGet, SourceTag, SummaryGet, SummaryMake, SummaryParams, TagClear, TagClearParams, TagSet, WorkspaceList,
-    WorkspaceRemove, WorkspaceRemoveParams, WorkspaceRemoved, WorkspaceRename, WorkspaceRenameParams, WorkspaceUp,
-    WorkspaceUpParams,
+    PresenceTouch, QueueItemGet, QueueItemParams, QueueReview, QueueReviewParams, ReportGet, ReportParams, RunArchive,
+    RunArchiveParams, RunFilter, RunGet, RunHide, RunHideParams, RunId, RunIds, RunInput, RunInputParams, RunList,
+    RunMark, RunMarkParams, RunPin, RunPinParams, RunRename, RunRenameParams, RunResume, RunResumeParams, RunSeen,
+    RunSpec, RunStart, RunStop, RunStopParams, SETUP_STEPS, SetupGet, SourceTag, SummaryGet, SummaryMake,
+    SummaryParams, TagClear, TagClearParams, TagSet, WorkspaceList, WorkspaceRemove, WorkspaceRemoveParams,
+    WorkspaceRemoved, WorkspaceRename, WorkspaceRenameParams, WorkspaceUp, WorkspaceUpParams,
 };
 use rl_proto::types::{Cause, Event as LedgerEvent, Mark, Run, RunKind, RunState, Summary, SummaryTarget};
 use rows::{Names, Row, fit};
@@ -202,6 +202,16 @@ enum Mode {
     Confirm(Box<Confirming>),
     /// `t` on a report row: the tag to give its source, typed; empty clears it.
     Tag(Box<Tagging>),
+    /// `r` on a report item: a prompt for its session, typed; `enter` sends it.
+    Reply(Box<Replying>),
+}
+
+/// A session being replied to from the report: its run, what it is called, and what is
+/// typed so far.
+struct Replying {
+    run: String,
+    title: String,
+    field: line::Field,
 }
 
 /// A source being tagged from the report: who, and the tag typed so far.
@@ -466,8 +476,6 @@ struct App {
     catch: Option<Digest>,
     /// The report as last fetched, while its view is up.
     report: Option<rl_proto::methods::Report>,
-    /// The report's cursor: an index into its lead rows in drawn order.
-    report_sel: usize,
     /// The first line of the report on screen, kept so the board scrolls only as far as the
     /// cursor needs.
     report_top: std::cell::Cell<usize>,
@@ -477,6 +485,8 @@ struct App {
     inbox_inside: Option<String>,
     /// One pane, below `INBOX_SPLIT_W`: it shows the reading pane, not the list.
     report_open: bool,
+    /// The selected item read whole (`queue.item`), by lead key: asked once a selection.
+    item_view: Option<(String, rl_proto::queue::ItemView)>,
     /// The last report fetch failed: said once, not again on every tick.
     report_failed: bool,
     /// The report view shows the prose digest instead of the board (`p` toggles).
@@ -1320,11 +1330,11 @@ impl App {
             presence_at: None,
             catch: None,
             report: None,
-            report_sel: 0,
             report_top: std::cell::Cell::new(0),
             inbox_sel: inbox::Sel::All,
             inbox_inside: None,
             report_open: false,
+            item_view: None,
             report_failed: false,
             report_prose: false,
             briefs: HashMap::new(),
@@ -1404,6 +1414,12 @@ impl App {
                             }
                         }
                         if let Some((id, take)) = self.attach.take() {
+                            // Attaching is looking: the run's item leaves the queue, whichever
+                            // way in it was.
+                            let review = QueueReviewParams { runs: vec![id.clone()] };
+                            if let Err(e) = self.rpc.call::<QueueReview>(review).await {
+                                self.say(format!("review: {e:#}"));
+                            }
                             let id_back = id.clone();
                             // The run gets the real terminal, the same handover the editor
                             // uses and the same passthrough `rl join` uses — a real terminal,
@@ -2125,7 +2141,7 @@ impl App {
                 Some(c) => catchup::headline(c.since, Timestamp::now()),
                 None => "while you were away".into(),
             },
-            View::Report => "report".into(),
+            View::Report => self.report_head(),
         };
         let mut notes = Vec::new();
         if self.view == View::CatchUp {
@@ -2295,6 +2311,11 @@ impl App {
             Mode::Tag(ref t) => {
                 let mut spans = vec![Span::raw("❯ ")];
                 spans.extend(theme::with_caret(t.field.text(), t.field.cursor(), Style::default()));
+                f.render_widget(Paragraph::new(Line::from(spans)), a.line);
+            }
+            Mode::Reply(ref r) => {
+                let mut spans = vec![Span::raw("❯ ")];
+                spans.extend(theme::with_caret(r.field.text(), r.field.cursor(), Style::default()));
                 f.render_widget(Paragraph::new(Line::from(spans)), a.line);
             }
             _ => {}
@@ -2819,8 +2840,12 @@ impl App {
         };
         let inbox = inbox::inbox(rep);
         let now = Timestamp::now();
-        // The item's log is not read yet; until it is, the reading pane says so.
-        let reading = |w: u16| report::reading_lines(rep, &inbox, &self.inbox_sel, None, &self.briefs, w as usize, now);
+        // The item's log, once it is read; until then the reading pane says so.
+        let view = match (&self.inbox_sel, &self.item_view) {
+            (inbox::Sel::Item(key), Some((k, v))) if k == key => Some(v),
+            _ => None,
+        };
+        let reading = |w: u16| report::reading_lines(rep, &inbox, &self.inbox_sel, view, &self.briefs, w as usize, now);
         if area.width >= report::INBOX_SPLIT_W {
             let [list, rule, read] = Layout::horizontal([
                 Constraint::Length(report::list_w(area.width)),
@@ -2847,16 +2872,13 @@ impl App {
     /// The inbox's list pane, scrolled only as far as keeps the selection in view.
     fn draw_inbox_list(&self, f: &mut Frame, area: Rect, inbox: &inbox::Inbox, now: Timestamp) {
         let inside = self.inbox_inside.as_deref();
-        let (lines, sel_line) = report::list_lines(inbox, &self.inbox_sel, inside, area.width as usize, now);
-        let h = area.height as usize;
-        let mut top = self.report_top.get().min(lines.len().saturating_sub(h));
-        if let Some(at) = sel_line {
-            if at < top {
-                top = at;
-            } else if h > 0 && at >= top + h {
-                top = at + 1 - h;
-            }
-        }
+        let (lines, picked) = report::list_lines(inbox, &self.inbox_sel, inside, area.width as usize, now);
+        let top = report::scroll(
+            self.report_top.get(),
+            area.height as usize,
+            lines.len(),
+            picked.as_ref(),
+        );
         self.report_top.set(top);
         f.render_widget(Paragraph::new(lines).scroll((top as u16, 0)), area);
     }
@@ -3138,6 +3160,14 @@ impl App {
                     return m.clone();
                 }
                 return format!("tag {} · enter saves · empty clears · esc cancels", t.source);
+            }
+            Mode::Reply(r) => {
+                if let Some((m, at)) = &self.flash
+                    && at.elapsed() < FLASH
+                {
+                    return m.clone();
+                }
+                return format!("reply to {} · enter sends · esc cancels", r.title);
             }
             Mode::Confirm(c) => {
                 if let Some((m, at)) = &self.flash
@@ -3873,6 +3903,8 @@ mod tests {
         session: Option<std::path::PathBuf>,
         /// More profiles for `detect/`, by name, over the built-ins.
         profiles: Vec<(&'static str, String)>,
+        /// How long a screen's rest waits for a hook; None, the daemon's own.
+        grace: Option<std::time::Duration>,
     }
 
     /// A panel whose `rld` runs what it starts, with `profiles` over the
@@ -4047,6 +4079,7 @@ mod tests {
             token.clone(),
             rl_daemon::ServeOptions {
                 session_bin: set.session,
+                screen_grace: set.grace,
                 ..Default::default()
             },
         ));
@@ -5109,12 +5142,12 @@ mod tests {
         });
         let board = draw_text(&mut app);
         assert!(board.contains("NEEDS YOU · 1"), "{board}");
-        press(&mut app, KeyCode::Char('p'), KeyModifiers::NONE).await;
+        press(&mut app, KeyCode::Char('w'), KeyModifiers::NONE).await;
         assert!(app.report_prose);
         let prose = draw_text(&mut app);
         assert!(prose.contains("approve the deploy"), "{prose}");
         assert!(!prose.contains("NEEDS YOU · 1"), "{prose}");
-        press(&mut app, KeyCode::Char('p'), KeyModifiers::NONE).await;
+        press(&mut app, KeyCode::Char('w'), KeyModifiers::NONE).await;
         assert!(!app.report_prose);
         token.cancel();
     }
@@ -5186,8 +5219,15 @@ mod tests {
         token.cancel();
     }
 
+    /// A key in a frame `w` columns wide.
+    async fn press_in(app: &mut super::App, code: KeyCode, w: u16) {
+        app.key(KeyEvent::new(code, KeyModifiers::NONE), Rect::new(0, 0, w, 30))
+            .await
+            .unwrap();
+    }
+
     #[tokio::test]
-    async fn narrow_shows_one_pane_and_enter_opens_the_reading_pane() {
+    async fn narrow_enter_opens_the_reading_pane_then_attaches_and_esc_closes_it() {
         let (_tmp, token, mut app, _folder) = panel().await;
         app.open_report().await;
         app.report = Some(inbox_report());
@@ -5195,12 +5235,305 @@ mod tests {
         let list = screen(&mut app, 80, 30).join("\n");
         assert!(list.contains("All teams") && list.contains("TEAMS"), "{list}");
         assert!(!list.contains("ASKS ·"), "the list alone: {list}");
-        app.report_open = true;
+        press_in(&mut app, KeyCode::Enter, 80).await;
+        assert!(app.report_open);
+        assert!(app.attach.is_none(), "the first enter only shows it");
         let read = screen(&mut app, 80, 30).join("\n");
         assert!(read.contains("ASKS ·") && read.contains("Should I prune"), "{read}");
         assert!(
             !read.contains("All teams") && !read.contains("TEAMS ·"),
             "the reading pane alone: {read}"
+        );
+        press_in(&mut app, KeyCode::Esc, 80).await;
+        assert!(!app.report_open);
+        assert!(app.view == super::View::Report, "esc closed the pane, not the report");
+        let list = screen(&mut app, 80, 30).join("\n");
+        assert!(list.contains("All teams"), "{list}");
+        // Open, then enter again: its session is taken over the terminal.
+        press_in(&mut app, KeyCode::Enter, 80).await;
+        press_in(&mut app, KeyCode::Enter, 80).await;
+        assert_eq!(app.attach, Some(("a1".to_string(), false)));
+        // On a team: the pane, then into the team, one pane again.
+        app.attach = None;
+        app.report_open = false;
+        app.inbox_sel = super::inbox::Sel::Team("docs".into());
+        press_in(&mut app, KeyCode::Enter, 80).await;
+        assert!(app.report_open);
+        press_in(&mut app, KeyCode::Enter, 80).await;
+        assert!(!app.report_open);
+        assert_eq!(app.inbox_inside.as_deref(), Some("docs"));
+        assert_eq!(app.inbox_sel, super::inbox::Sel::Item("run:d1".into()));
+        token.cancel();
+    }
+
+    #[tokio::test]
+    async fn j_and_k_walk_the_strip_and_teams() {
+        use super::inbox::Sel;
+        let (_tmp, token, mut app, _folder) = panel().await;
+        app.open_report().await;
+        app.report = Some(inbox_report());
+        app.inbox_sel = Sel::All;
+        let mut walked = vec![];
+        for _ in 0..4 {
+            press(&mut app, KeyCode::Char('j'), KeyModifiers::NONE).await;
+            walked.push(app.inbox_sel.clone());
+        }
+        assert_eq!(
+            walked,
+            [
+                Sel::Item("run:a1".into()),
+                Sel::Team("relay".into()),
+                Sel::Team("docs".into()),
+                Sel::Team("docs".into()),
+            ],
+            "the strip, then the teams, held at the end"
+        );
+        assert!(app.line.is_empty(), "nothing typed");
+        press(&mut app, KeyCode::Char('k'), KeyModifiers::NONE).await;
+        assert_eq!(app.inbox_sel, Sel::Team("relay".into()));
+        press(&mut app, KeyCode::Up, KeyModifiers::NONE).await;
+        assert_eq!(app.inbox_sel, Sel::Item("run:a1".into()));
+        press(&mut app, KeyCode::Down, KeyModifiers::NONE).await;
+        assert_eq!(app.inbox_sel, Sel::Team("relay".into()));
+        press(&mut app, KeyCode::Home, KeyModifiers::NONE).await;
+        assert_eq!(app.inbox_sel, Sel::All);
+        // Selecting an item reads it, and only that.
+        press(&mut app, KeyCode::Char('j'), KeyModifiers::NONE).await;
+        assert_eq!(app.item_view.as_ref().map(|(k, _)| k.as_str()), Some("run:a1"));
+        assert!(app.view == super::View::Report);
+        token.cancel();
+    }
+
+    #[tokio::test]
+    async fn enter_steps_into_a_team_and_esc_comes_back() {
+        use super::inbox::Sel;
+        let (_tmp, token, mut app, _folder) = panel().await;
+        app.open_report().await;
+        app.report = Some(inbox_report());
+        app.inbox_sel = Sel::Team("relay".into());
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+        assert_eq!(app.inbox_inside.as_deref(), Some("relay"));
+        assert_eq!(app.inbox_sel, Sel::Item("run:a1".into()), "its first item");
+        assert!(!app.report_open, "wide, both panes are up");
+        let frame = draw_text(&mut app);
+        assert!(frame.contains("‹ relay"), "{frame}");
+        // Inside, j/k walk its items alone.
+        press(&mut app, KeyCode::Char('j'), KeyModifiers::NONE).await;
+        assert_eq!(app.inbox_sel, Sel::Item("run:a1".into()));
+        press(&mut app, KeyCode::Esc, KeyModifiers::NONE).await;
+        assert_eq!(app.inbox_inside, None);
+        assert_eq!(app.inbox_sel, Sel::Team("relay".into()), "back on its row");
+        assert!(app.view == super::View::Report);
+        press(&mut app, KeyCode::Esc, KeyModifiers::NONE).await;
+        assert!(app.view == super::View::Work, "at the top, back to the list");
+        token.cancel();
+    }
+
+    #[tokio::test]
+    async fn enter_on_an_item_attaches_to_its_run() {
+        let (_tmp, token, mut app, _folder) = panel().await;
+        app.open_report().await;
+        app.inbox_sel = super::inbox::Sel::Item("run:run00001".into());
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+        assert_eq!(app.attach, Some(("run00001".to_string(), false)));
+        assert!(app.view == super::View::Report);
+        token.cancel();
+    }
+
+    /// The runs waiting in the review queue, read off the ledger.
+    fn queue(app: &super::App) -> Vec<String> {
+        let ledger = rl_ledger::Ledger::open(&app.home.ledger()).unwrap();
+        let items = ledger.call_blocking(|c| rl_ledger::review_queue::list(c)).unwrap();
+        items.into_iter().map(|i| i.reference).collect()
+    }
+
+    #[tokio::test]
+    async fn x_on_an_item_reviews_it_and_moves_on() {
+        use super::inbox::Sel;
+        let (_tmp, token, mut app, _folder) = panel_with_runs(2).await;
+        app.open_report().await;
+        app.inbox_sel = Sel::Team("proj".into());
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+        assert_eq!(app.inbox_sel, Sel::Item("run:run00001".into()));
+        press(&mut app, KeyCode::Char('x'), KeyModifiers::NONE).await;
+        assert_eq!(queue(&app), ["run00002"]);
+        assert_eq!(app.inbox_sel, Sel::Item("run:run00002".into()), "the next one");
+        press(&mut app, KeyCode::Char('x'), KeyModifiers::NONE).await;
+        assert!(queue(&app).is_empty());
+        // Nothing left in the team: it is gone, and so is the way into it.
+        assert_eq!((app.inbox_sel.clone(), app.inbox_inside.clone()), (Sel::All, None));
+        token.cancel();
+    }
+
+    #[tokio::test]
+    async fn x_on_a_team_reviews_all_of_it() {
+        use super::inbox::Sel;
+        let (_tmp, token, mut app, _folder) = panel_with_runs(3).await;
+        app.open_report().await;
+        app.inbox_sel = Sel::Team("proj".into());
+        press(&mut app, KeyCode::Char('x'), KeyModifiers::NONE).await;
+        assert!(queue(&app).is_empty(), "{:?}", queue(&app));
+        assert_eq!(app.inbox_sel, Sel::All);
+        token.cancel();
+    }
+
+    #[tokio::test]
+    async fn the_refresh_keeps_the_selection() {
+        use super::inbox::Sel;
+        let (_tmp, token, mut app, _folder) = panel_with_runs(3).await;
+        app.open_report().await;
+        app.inbox_sel = Sel::Team("proj".into());
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+        press(&mut app, KeyCode::Char('j'), KeyModifiers::NONE).await;
+        let picked = Sel::Item("run:run00002".into());
+        assert_eq!(app.inbox_sel, picked);
+        app.fetch_report().await;
+        app.fetch_report().await;
+        assert_eq!(app.inbox_sel, picked);
+        assert_eq!(app.inbox_inside.as_deref(), Some("proj"));
+        // Reviewed elsewhere, it leaves the report: the next one is selected.
+        app.rpc
+            .call::<super::QueueReview>(super::QueueReviewParams {
+                runs: vec!["run00002".into()],
+            })
+            .await
+            .unwrap();
+        app.fetch_report().await;
+        assert_eq!(app.inbox_sel, Sel::Item("run:run00003".into()));
+        assert_eq!(app.inbox_inside.as_deref(), Some("proj"));
+        token.cancel();
+    }
+
+    #[tokio::test]
+    async fn r_sends_the_reply_and_reviews() {
+        let Some(session) = session_bin() else {
+            eprintln!("skipping: rl-session not built (run `cargo test --workspace`)");
+            return;
+        };
+        let setup = Setup {
+            session: Some(session),
+            unnamed: true,
+            // A prompt idle within 300ms, and its rest counted 300ms on.
+            profiles: vec![("sh", "timing:\n  idle_after: 300ms\n".into())],
+            grace: Some(std::time::Duration::from_millis(300)),
+            ..Default::default()
+        };
+        let (_tmp, token, mut app, folder) = panel_set(setup, |_, _| vec![]).await;
+        let spec = super::RunSpec {
+            argv: vec!["/bin/sh".into(), "-i".into()],
+            kind: super::RunKind::Shell,
+            cwd: folder,
+            title: Some("sh".into()),
+            ref_: None,
+            tags: vec![],
+            tty: true,
+            cols: Some(80),
+            rows: Some(24),
+            env: crate::env::child_env(&[]).unwrap(),
+            inherit_env: false,
+            input: true,
+            cause: super::Cause::Manual,
+            chain: None,
+        };
+        let id = app.rpc.call::<super::RunStart>(spec).await.unwrap().id;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        while !queue(&app).contains(&id) {
+            assert!(std::time::Instant::now() < deadline, "the shell never came to rest");
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        app.open_report().await;
+        app.inbox_inside = Some("proj".into());
+        app.inbox_sel = super::inbox::Sel::Item(format!("run:{id}"));
+        press(&mut app, KeyCode::Char('r'), KeyModifiers::NONE).await;
+        assert!(matches!(app.mode, super::Mode::Reply(_)));
+        assert!(app.footer(120).starts_with("reply to sh"), "{}", app.footer(120));
+        type_in(&mut app, "echo hi").await;
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+        assert!(matches!(app.mode, super::Mode::Normal));
+        assert!(!queue(&app).contains(&id), "typing to it reviewed it");
+        let said = |app: &super::App| {
+            let ledger = rl_ledger::Ledger::open(&app.home.ledger()).unwrap();
+            let id = id.clone();
+            let out = ledger
+                .call_blocking(move |c| rl_ledger::session_io::tail(c, &id, 1 << 20))
+                .unwrap();
+            String::from_utf8_lossy(&out).into_owned()
+        };
+        while !said(&app).lines().any(|l| l.trim() == "hi") {
+            assert!(std::time::Instant::now() < deadline, "no hi: {:?}", said(&app));
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        let _ = app
+            .rpc
+            .call::<super::RunStop>(super::RunStopParams {
+                id: id.clone(),
+                force: true,
+                archive: false,
+            })
+            .await;
+        token.cancel();
+    }
+
+    #[tokio::test]
+    async fn typing_letters_outside_the_report_still_types() {
+        let (_tmp, token, mut app, _folder) = panel().await;
+        assert!(app.view == super::View::Work);
+        type_in(&mut app, "jkxrwp").await;
+        assert_eq!(app.line.text(), "jkxrwp");
+        // On the report, once something is typed, they type too.
+        app.line.clear();
+        app.open_report().await;
+        type_in(&mut app, "/jk").await;
+        assert_eq!(app.line.text(), "/jk");
+        token.cancel();
+    }
+
+    #[tokio::test]
+    async fn the_report_header_says_time_away_and_what_waits() {
+        let (_tmp, token, mut app, _folder) = panel().await;
+        app.open_report().await;
+        app.report = Some(inbox_report());
+        let header = |app: &mut super::App| {
+            let frame = draw_text(app);
+            let line = frame.lines().find(|l| l.contains("to review · ")).map(str::to_string);
+            (line.unwrap_or_default(), frame)
+        };
+        let (head, frame) = header(&mut app);
+        assert!(head.contains(" 2 to review · 0 working"), "{frame}");
+        assert!(!head.contains("away"), "not known: {frame}");
+        left_ago(&mut app, jiff::SignedDuration::from_hours(14));
+        let (head, frame) = header(&mut app);
+        assert!(head.contains("away 14h · since "), "{frame}");
+        assert!(head.contains(" · 2 to review · 0 working"), "{frame}");
+        token.cancel();
+    }
+
+    #[tokio::test]
+    async fn a_long_list_keeps_the_selected_team_in_view() {
+        let (_tmp, token, mut app, _folder) = panel().await;
+        app.open_report().await;
+        let mut rep = inbox_report();
+        for n in 0..12 {
+            let mut l = report_lead("claude", &format!("run:t{n}"), rl_proto::lead::Band::Happened);
+            l.scope = Some(format!("/p/team{n:02}").into());
+            l.title = format!("job {n}");
+            rep.happened.push(l);
+        }
+        app.report = Some(rep);
+        let (last, job) = {
+            let i = super::inbox::inbox(app.report.as_ref().unwrap());
+            let t = i.teams.last().unwrap();
+            (t.name.clone(), t.items[0].title.clone())
+        };
+        for _ in 0..20 {
+            press(&mut app, KeyCode::Char('j'), KeyModifiers::NONE).await;
+        }
+        assert_eq!(app.inbox_sel, super::inbox::Sel::Team(last.clone()));
+        let s = screen(&mut app, 80, 16).join("\n");
+        assert!(s.contains(&format!("▸ {last}")), "{s}");
+        assert!(
+            s.contains(&format!("{job} done")),
+            "its gist, the block's last line: {s}"
         );
         token.cancel();
     }
@@ -5564,67 +5897,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn enter_on_a_run_lead_opens_that_run_on_the_list() {
-        let (_tmp, token, mut app, _folder) = panel().await;
-        app.open_report().await;
-        app.report = Some(rl_proto::methods::Report {
-            needs_you: vec![],
-            live: vec![report_lead("shell", "run:run00001", rl_proto::lead::Band::Live)],
-            happened: vec![],
-            tags: vec![],
-        });
-        press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
-        assert!(app.view == super::View::Work);
-        assert_eq!(app.sel.as_deref(), Some(RUN));
-        token.cancel();
-    }
-
-    #[tokio::test]
-    async fn enter_on_a_briefed_run_shows_its_brief_in_the_pane() {
-        let (_tmp, token, mut app, _folder) = panel().await;
-        app.open_report().await;
-        app.report = Some(rl_proto::methods::Report {
-            needs_you: vec![],
-            live: vec![],
-            happened: vec![report_lead("shell", "run:run00001", rl_proto::lead::Band::Happened)],
-            tags: vec![],
-        });
-        app.briefs.insert(
-            "run00001".into(),
-            crate::tui::report::tests::summary_of(
-                "run00001",
-                "Worked on: the parser\nOpen questions: none\nNext: tests",
-            ),
-        );
-        press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
-        press(&mut app, KeyCode::Char('o'), KeyModifiers::CONTROL).await;
-        let t = draw_text(&mut app);
-        assert!(t.contains("the parser"), "{t}");
-        token.cancel();
-    }
-
-    #[tokio::test]
-    async fn the_report_cursor_moves_over_its_rows_and_stays_on_the_board() {
-        let (_tmp, token, mut app, _folder) = panel().await;
-        app.open_report().await;
-        app.report = Some(rl_proto::methods::Report {
-            needs_you: vec![report_lead("claude", "a", rl_proto::lead::Band::NeedsYou)],
-            live: vec![report_lead("claude", "b", rl_proto::lead::Band::Live)],
-            happened: vec![],
-            tags: vec![],
-        });
-        app.report_sel = 0;
-        press(&mut app, KeyCode::Down, KeyModifiers::NONE).await;
-        assert_eq!(app.report_sel, 1);
-        press(&mut app, KeyCode::Down, KeyModifiers::NONE).await;
-        assert_eq!(app.report_sel, 1, "held to the last row");
-        press(&mut app, KeyCode::Up, KeyModifiers::NONE).await;
-        assert_eq!(app.report_sel, 0);
-        assert!(app.view == super::View::Report);
-        token.cancel();
-    }
-
-    #[tokio::test]
     async fn t_tags_the_rows_source_and_empty_clears_it() {
         use rl_proto::methods::LeadPostParams;
         let (_tmp, token, mut app, _folder) = panel().await;
@@ -5642,11 +5914,11 @@ mod tests {
             .await
             .unwrap();
         app.open_report().await;
-        app.report_sel = 0;
+        app.inbox_sel = super::inbox::Sel::Item("k1".into());
         press(&mut app, KeyCode::Char('t'), KeyModifiers::NONE).await;
         assert!(matches!(app.mode, super::Mode::Tag(_)));
         // A refresh while typing may move the cursor off the row; the tag is still the opened one's.
-        app.report_sel = 99;
+        app.inbox_sel = super::inbox::Sel::All;
         for c in "dev".chars() {
             press(&mut app, KeyCode::Char(c), KeyModifiers::NONE).await;
         }
@@ -5663,7 +5935,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn d_dismisses_the_selected_lead_and_the_board_forgets_it() {
+    async fn x_dismisses_a_lead_with_no_item_and_the_board_forgets_it() {
         use rl_proto::methods::LeadPostParams;
         let (_tmp, token, mut app, _folder) = panel().await;
         app.rpc
@@ -5689,18 +5961,14 @@ mod tests {
                 .any(|l| l.source == "claude" && l.key == "k1")
         };
         assert!(has(&app));
-        let at = super::report::flat_leads(app.report.as_ref().unwrap())
-            .iter()
-            .position(|l| l.key == "k1")
-            .unwrap();
-        app.report_sel = at;
-        press(&mut app, KeyCode::Char('d'), KeyModifiers::NONE).await;
+        app.inbox_sel = super::inbox::Sel::Item("k1".into());
+        press(&mut app, KeyCode::Char('x'), KeyModifiers::NONE).await;
         assert!(!has(&app), "dismissed and fetched again");
         token.cancel();
     }
 
     #[tokio::test]
-    async fn prose_mode_ignores_board_dismiss_tag_and_cursor_keys() {
+    async fn prose_mode_ignores_the_inbox_keys() {
         use rl_proto::methods::LeadPostParams;
         let (_tmp, token, mut app, _folder) = panel().await;
         for key in ["k1", "k2"] {
@@ -5719,21 +5987,27 @@ mod tests {
                 .unwrap();
         }
         app.open_report().await;
-        let count = |a: &super::App| super::report::flat_leads(a.report.as_ref().unwrap()).len();
+        let count = |a: &super::App| {
+            let r = a.report.as_ref().unwrap();
+            r.needs_you.len() + r.live.len() + r.happened.len()
+        };
         let before = count(&app);
-        app.report_sel = 0;
-        press(&mut app, KeyCode::Char('p'), KeyModifiers::NONE).await;
+        let k1 = super::inbox::Sel::Item("k1".into());
+        app.inbox_sel = k1.clone();
+        press(&mut app, KeyCode::Char('w'), KeyModifiers::NONE).await;
         assert!(app.report_prose);
-        press(&mut app, KeyCode::Char('d'), KeyModifiers::NONE).await;
-        press(&mut app, KeyCode::Char('t'), KeyModifiers::NONE).await;
+        for c in ['x', 't', 'r', 'p', 'j'] {
+            press(&mut app, KeyCode::Char(c), KeyModifiers::NONE).await;
+        }
         press(&mut app, KeyCode::Down, KeyModifiers::NONE).await;
         assert_eq!(count(&app), before, "nothing dismissed");
-        assert!(matches!(app.mode, super::Mode::Normal), "no tag prompt");
-        assert_eq!(app.report_sel, 0, "cursor held");
+        assert!(matches!(app.mode, super::Mode::Normal), "no prompt");
+        assert_eq!(app.inbox_sel, k1, "cursor held");
+        assert!(app.line.is_empty(), "nothing typed");
         // Back on the board the same keys act.
-        press(&mut app, KeyCode::Char('p'), KeyModifiers::NONE).await;
+        press(&mut app, KeyCode::Char('w'), KeyModifiers::NONE).await;
         assert!(!app.report_prose);
-        press(&mut app, KeyCode::Char('d'), KeyModifiers::NONE).await;
+        press(&mut app, KeyCode::Char('x'), KeyModifiers::NONE).await;
         assert_eq!(count(&app), before - 1);
         token.cancel();
     }
@@ -6347,6 +6621,46 @@ mod tests {
         let frame = draw_text(&mut app);
         assert!(frame.contains("Both ran, both fine."), "{frame}");
         assert!(frame.contains("deep"), "{frame}");
+        token.cancel();
+    }
+
+    #[tokio::test]
+    async fn p_reads_an_item_deeply_into_the_reading_pane() {
+        let Some((_tmp, token, mut app, _folder)) = report_with_fake_summariser(1, false).await else {
+            return;
+        };
+        app.open_report().await;
+        press(&mut app, KeyCode::Char('p'), KeyModifiers::NONE).await;
+        let said = app.flash.as_ref().map(|(m, _)| m.clone()).unwrap_or_default();
+        assert_eq!(said, "open an item to read it deeply");
+        assert!(app.summarising.is_none());
+        let from = {
+            let rep = app.report.as_ref().unwrap();
+            rep.happened
+                .iter()
+                .find(|l| l.key == "run:run00001")
+                .unwrap()
+                .rest
+                .as_ref()
+                .unwrap()
+                .item
+                .from
+        };
+        app.inbox_inside = Some("proj".into());
+        app.inbox_sel = super::inbox::Sel::Item("run:run00001".into());
+        press(&mut app, KeyCode::Char('p'), KeyModifiers::NONE).await;
+        let s = app
+            .summarising
+            .as_ref()
+            .expect("a deep read, under one call: straight on");
+        assert_eq!(s.target, SummaryTarget::Run { id: "run00001".into() });
+        assert_eq!((s.deep, s.from), (true, Some(from)), "deep, since the item's from");
+        assert!(!app.show_pane, "the report's reading pane has it, not a subpage");
+        wait_summarised(&mut app).await;
+        assert!(app.briefs.get("run00001").is_some_and(|b| b.deep));
+        let frame = draw_text(&mut app);
+        assert!(frame.contains("Worked on: the tests"), "{frame}");
+        assert!(!frame.contains("not made"), "{frame}");
         token.cancel();
     }
 
