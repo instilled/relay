@@ -134,13 +134,18 @@ impl App {
         };
     }
 
-    /// The selected item read whole, once a selection: asked when it changes, never again
-    /// for the same one. Reading it reviews nothing.
+    /// The selected item read whole, once a selection: asked when it changes or comes to
+    /// rest again, never again for the same rest. Reading it reviews nothing.
     pub(super) async fn load_item(&mut self) {
         let inbox::Sel::Item(key) = &self.inbox_sel else {
+            self.item_view = None;
             return;
         };
-        if self.item_view.as_ref().is_some_and(|(k, _)| k == key) {
+        let rest = self
+            .inbox_lead()
+            .and_then(|l| l.rest)
+            .map(|r| (r.item.at, r.item.rests));
+        if self.item_view.as_ref().is_some_and(|v| v.key == *key && v.rest == rest) {
             return;
         }
         let key = key.clone();
@@ -159,7 +164,7 @@ impl App {
             },
             None => Default::default(),
         };
-        self.item_view = Some((key, view));
+        self.item_view = Some(ItemRead { key, rest, view });
     }
 
     /// The lead the inbox has selected: the item, or a team's first; none on all the teams.
@@ -227,6 +232,7 @@ impl App {
             self.report_open = false;
         } else if let Some(name) = self.inbox_inside.take() {
             self.inbox_sel = inbox::Sel::Team(name);
+            self.item_view = None;
         } else {
             return false;
         }
@@ -253,8 +259,9 @@ impl App {
         }
     }
 
-    /// `x`: the item reviewed (a lead with no item, dismissed), and the next one selected;
-    /// on a team, every queued item of it. The board is asked again.
+    /// `x`: the item reviewed (a decision or a firing, dismissed), and the next one
+    /// selected; on a team, every queued item of it. The board is asked again. A run with
+    /// no item yet is never dismissed: it would hide its next rest.
     pub(super) async fn review_selected(&mut self) {
         let Some(rep) = &self.report else { return };
         let i = inbox::inbox(rep);
@@ -271,6 +278,7 @@ impl App {
             }
             inbox::Sel::Item(key) => match i.teams.iter().flat_map(|t| &t.items).find(|l| l.key == *key) {
                 Some(l) if l.rest.is_some() => (run_of(l).into_iter().collect(), None),
+                Some(l) if run_of(l).is_some() => return self.say("nothing to review yet"),
                 Some(l) => (Vec::new(), Some((*l).clone())),
                 None => (Vec::new(), None),
             },
@@ -320,6 +328,11 @@ impl App {
         let Some(id) = lead.key.strip_prefix("run:") else {
             return self.say(format!("'{}' has no session to reply to", lead.title));
         };
+        let ended = lead.rest.as_ref().is_some_and(|r| r.item.ended())
+            || self.run_by_id(id).is_some_and(|r| r.state.is_terminal());
+        if ended {
+            return self.say("the run has ended");
+        }
         self.mode = Mode::Reply(Box::new(Replying {
             run: id.to_string(),
             title: lead.title,

@@ -100,7 +100,14 @@ impl App {
         Ok(())
     }
 
-    pub(super) async fn key(&mut self, mut k: KeyEvent, area: Rect) -> Result<()> {
+    pub(super) async fn key(&mut self, k: KeyEvent, area: Rect) -> Result<()> {
+        let done = self.key_in(k, area).await;
+        // Leaving a subpage is not async; what it looked at is reviewed here.
+        self.flush_reviews().await;
+        done
+    }
+
+    async fn key_in(&mut self, mut k: KeyEvent, area: Rect) -> Result<()> {
         self.flash = None;
         // Like the flash, the list of what a reload did not load lasts one key.
         self.reload_list = None;

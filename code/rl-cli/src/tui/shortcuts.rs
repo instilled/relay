@@ -153,6 +153,7 @@ fn place_keys(at: Place) -> Vec<Key> {
             key("r", "reply"),
             key("x", "reviewed"),
             key("p", "read deeply"),
+            key("t", "tag"),
             key("w", "written"),
             key("esc", "back"),
         ],
@@ -301,6 +302,14 @@ mod tests {
             one_line(Place::List),
             "↑↓ ^j^k move · ⇧↑↓ reorder · enter join/open · → ← a flow's steps · ^x stop/archive/remove · ^t pin · \
              ^r rename · ^o details · ^f search · f flows · a agents · s shells · h hidden · /hide · /help · ^h"
+        );
+    }
+
+    #[test]
+    fn the_report_says_its_keys() {
+        assert_eq!(
+            one_line(Place::Report),
+            "j/k move · enter open/attach · r reply · x reviewed · p read deeply · t tag · w written · esc back · ^h"
         );
     }
 

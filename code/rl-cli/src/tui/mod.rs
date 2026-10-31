@@ -329,6 +329,16 @@ struct Shown {
     from: Vec<(String, Timestamp)>,
 }
 
+/// The selected item read whole (`queue.item`), and what it was read for.
+struct ItemRead {
+    /// The lead's key.
+    key: String,
+    /// The rest it was read at, `(at, rests)`: a new rest reads it again.
+    /// `None` for a lead with no item.
+    rest: Option<(Timestamp, u32)>,
+    view: rl_proto::queue::ItemView,
+}
+
 struct App {
     home: Home,
     /// The Relay home as runs' folders are recorded: canonical. An
@@ -398,6 +408,9 @@ struct App {
     /// What the question pane drew last, so a click can take a choice.
     pane_hit: std::cell::RefCell<PaneHit>,
     term: Option<Output>,
+    /// Runs whose terminal was read here and then left: reading is looking, and their
+    /// review is sent once the key that left is handled (`flush_reviews`).
+    read_terms: Vec<String>,
     /// Size the terminal was last told about.
     term_size: (u16, u16),
     /// The selected run's recent events.
@@ -451,8 +464,8 @@ struct App {
     inbox_inside: Option<String>,
     /// One pane, below `INBOX_SPLIT_W`: it shows the reading pane, not the list.
     report_open: bool,
-    /// The selected item read whole (`queue.item`), by lead key: asked once a selection.
-    item_view: Option<(String, rl_proto::queue::ItemView)>,
+    /// The selected item read whole (`queue.item`): asked once a selection and rest.
+    item_view: Option<ItemRead>,
     /// The last report fetch failed: said once, not again on every tick.
     report_failed: bool,
     /// The report shows the written summary instead of the inbox (`w` toggles).
@@ -1259,6 +1272,7 @@ impl App {
             open_flows: HashSet::new(),
             pane_hit: std::cell::RefCell::default(),
             term: None,
+            read_terms: Vec::new(),
             term_size: (0, 0),
             events: Vec::new(),
             editor: None,
@@ -1367,11 +1381,9 @@ impl App {
                         }
                         if let Some((id, take)) = self.attach.take() {
                             // Attaching is looking: the run's item leaves the queue, whichever
-                            // way in it was.
-                            let review = QueueReviewParams { runs: vec![id.clone()] };
-                            if let Err(e) = self.rpc.call::<QueueReview>(review).await {
-                                self.say(format!("review: {e:#}"));
-                            }
+                            // way in it was — and again once you let go, for what it did
+                            // while you watched.
+                            self.review_runs(vec![id.clone()]).await;
                             let id_back = id.clone();
                             // The run gets the real terminal, the same handover the editor
                             // uses and the same passthrough `rl join` uses — a real terminal,
@@ -1389,6 +1401,7 @@ impl App {
                             .await;
                             *terminal = enter_screen();
                             input = EventStream::new();
+                            self.review_runs(vec![id.clone()]).await;
                             self.refresh().await;
                             match outcome {
                                 Ok(ended) => self.back_from_join(&id, ended),
@@ -1735,10 +1748,28 @@ impl App {
     fn leave_subpage(&mut self) {
         self.show_pane = false;
         self.pane = Pane::Facts;
-        self.term = None;
+        if let Some(t) = self.term.take() {
+            self.read_terms.push(t.id);
+        }
         if matches!(self.mode, Mode::Answer(_) | Mode::Walk | Mode::Rename(_)) {
             self.mode = Mode::Normal;
         }
+    }
+
+    /// Runs looked at: their items leave the review queue.
+    async fn review_runs(&mut self, runs: Vec<String>) {
+        if runs.is_empty() {
+            return;
+        }
+        if let Err(e) = self.rpc.call::<QueueReview>(QueueReviewParams { runs }).await {
+            self.say(format!("review: {e:#}"));
+        }
+    }
+
+    /// The terminals read and left since the last key: their runs reviewed.
+    async fn flush_reviews(&mut self) {
+        let runs = std::mem::take(&mut self.read_terms);
+        self.review_runs(runs).await;
     }
 
     /// `/pane`, `^o`: the row's subpage, shown or left.
@@ -2785,7 +2816,7 @@ impl App {
         let now = Timestamp::now();
         // The item's log, once it is read; until then the reading pane says so.
         let view = match (&self.inbox_sel, &self.item_view) {
-            (inbox::Sel::Item(key), Some((k, v))) if k == key => Some(v),
+            (inbox::Sel::Item(key), Some(read)) if read.key == *key => Some(&read.view),
             _ => None,
         };
         let reading = |w: u16| report::reading_lines(rep, &inbox, &self.inbox_sel, view, &self.briefs, w as usize, now);
@@ -5238,7 +5269,7 @@ mod tests {
         assert_eq!(app.inbox_sel, Sel::All);
         // Selecting an item reads it, and only that.
         press(&mut app, KeyCode::Char('j'), KeyModifiers::NONE).await;
-        assert_eq!(app.item_view.as_ref().map(|(k, _)| k.as_str()), Some("run:a1"));
+        assert_eq!(app.item_view.as_ref().map(|v| v.key.as_str()), Some("run:a1"));
         assert!(app.view == super::View::Report);
         token.cancel();
     }
@@ -5313,6 +5344,82 @@ mod tests {
         press(&mut app, KeyCode::Char('x'), KeyModifiers::NONE).await;
         assert!(queue(&app).is_empty(), "{:?}", queue(&app));
         assert_eq!(app.inbox_sel, Sel::All);
+        token.cancel();
+    }
+
+    #[tokio::test]
+    async fn x_on_a_working_item_dismisses_nothing() {
+        let (_tmp, token, mut app, _folder) = panel().await;
+        app.open_report().await;
+        let working = report_lead("claude", "run:w1", rl_proto::lead::Band::Live);
+        app.report = Some(rl_proto::methods::Report {
+            needs_you: vec![],
+            live: vec![working],
+            happened: vec![],
+            tags: vec![],
+        });
+        app.inbox_inside = Some("relay".into());
+        app.inbox_sel = super::inbox::Sel::Item("run:w1".into());
+        press(&mut app, KeyCode::Char('x'), KeyModifiers::NONE).await;
+        assert_eq!(app.flashing(), Some("nothing to review yet"));
+        let ledger = rl_ledger::Ledger::open(&app.home.ledger()).unwrap();
+        let dismissed = ledger.call_blocking(|c| rl_ledger::dismissals::list(c)).unwrap();
+        assert!(dismissed.is_empty(), "a run is never dismissed: {dismissed:?}");
+        token.cancel();
+    }
+
+    #[tokio::test]
+    async fn leaving_a_read_terminal_reviews_its_run() {
+        let (_tmp, token, mut app) = panel_on_output(3).await;
+        assert_eq!(queue(&app), ["run00001", "run00002"]);
+        press(&mut app, KeyCode::Esc, KeyModifiers::NONE).await;
+        assert!(app.term.is_none());
+        assert_eq!(queue(&app), ["run00002"], "read: reviewed");
+        token.cancel();
+    }
+
+    #[tokio::test]
+    async fn a_new_rest_reads_the_item_again_and_leaving_it_drops_it() {
+        use super::inbox::Sel;
+        let (_tmp, token, mut app, _folder) = panel().await;
+        app.open_report().await;
+        app.report = Some(inbox_report());
+        app.inbox_sel = Sel::Item("run:a1".into());
+        app.load_item().await;
+        let stamp = |app: &super::App| app.item_view.as_ref().map(|v| (v.key.clone(), v.rest));
+        let first = stamp(&app).unwrap();
+        assert_eq!(first.0, "run:a1");
+        // It came to rest again: the same key, a new rest.
+        let rest = app.report.as_mut().unwrap().needs_you[0].rest.as_mut().unwrap();
+        rest.item.at += jiff::SignedDuration::from_secs(60);
+        rest.item.rests += 1;
+        app.load_item().await;
+        let again = stamp(&app).unwrap();
+        assert_eq!(again.0, "run:a1");
+        assert_ne!(again.1, first.1, "read again for the new rest");
+        press(&mut app, KeyCode::Char('j'), KeyModifiers::NONE).await;
+        assert!(matches!(app.inbox_sel, Sel::Team(_)));
+        assert!(app.item_view.is_none(), "off the item, its read is dropped");
+        token.cancel();
+    }
+
+    #[tokio::test]
+    async fn an_ended_ask_is_done_and_r_says_the_run_has_ended() {
+        use super::inbox::{Mark, Sel, mark};
+        let (_tmp, token, mut app, _folder) = panel_with_runs(1).await;
+        app.open_report().await;
+        let rep = app.report.as_ref().unwrap();
+        let lead = rep.happened.iter().find(|l| l.key == "run:run00001").unwrap();
+        assert_eq!(mark(lead), Mark::Done);
+        let mut ended_ask = lead.clone();
+        ended_ask.band = rl_proto::lead::Band::NeedsYou;
+        ended_ask.rest.as_mut().unwrap().item.kind = rl_proto::queue::RestKind::Asks;
+        assert_eq!(mark(&ended_ask), Mark::Done, "it stopped: nothing waits on you");
+        app.inbox_inside = Some("proj".into());
+        app.inbox_sel = Sel::Item("run:run00001".into());
+        press(&mut app, KeyCode::Char('r'), KeyModifiers::NONE).await;
+        assert!(matches!(app.mode, super::Mode::Normal));
+        assert_eq!(app.flashing(), Some("the run has ended"));
         token.cancel();
     }
 

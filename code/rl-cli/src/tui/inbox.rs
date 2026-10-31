@@ -30,8 +30,11 @@ pub enum Mark {
     Working,
 }
 
+/// An ask whose run then stopped or failed waits on no one: it is done, or
+/// failed.
 pub fn mark(lead: &Lead) -> Mark {
-    if lead.band == Band::NeedsYou {
+    let ended = lead.rest.as_ref().is_some_and(|r| r.item.ended());
+    if lead.band == Band::NeedsYou && !ended {
         Mark::Asks
     } else if hinted(lead, Hint::Failed) {
         Mark::Failed
