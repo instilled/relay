@@ -869,8 +869,9 @@ impl Supervisor {
         }
     }
 
-    /// Queues `run` as the screen saw it at `at`, after the grace, unless a
-    /// hook has queued it since. Relay's own assistant runs are never queued.
+    /// Queues `run` as the screen saw it at `at`, after the grace, unless it
+    /// has since been queued (by a hook, or by its end), ended, or gone back
+    /// to work. Relay's own assistant runs are never queued.
     fn screen_rest(&self, run: &Run, kind: RestKind, at: Timestamp) {
         if matches!(run.cause, Cause::Assistant(_)) {
             return;
@@ -880,14 +881,16 @@ impl Supervisor {
         tokio::spawn(async move {
             tokio::select! {
                 _ = tokio::time::sleep(grace) => {}
+                // A rest still in its grace is let go with the daemon.
                 _ = shutdown.cancelled() => return,
             }
             let r = ledger
                 .call(move |c| {
-                    if let Some((last, how)) = review_queue::last_rest(c, "run", &id)?
-                        && last >= at
-                        && how != How::Screen
-                    {
+                    let resting = runs::get(c, &id)?.is_some_and(|r| {
+                        r.ended_at.is_none() && matches!(r.state, RunState::NeedsInput | RunState::Idle)
+                    });
+                    let since = review_queue::last_rest(c, "run", &id)?.is_some_and(|(last, _)| last >= at);
+                    if !resting || since {
                         return Ok(());
                     }
                     review_queue::rest(c, "run", &id, kind, How::Screen, &[], at, start, head.as_deref())

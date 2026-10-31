@@ -139,13 +139,6 @@ pub fn finish(
     Ok(n == 1)
 }
 
-/// The repo's HEAD when the run began, for the review queue's "changed"
-/// facts. Written once, after the run is inserted.
-pub fn set_start_head(conn: &Connection, id: &str, head: &str) -> Result<()> {
-    conn.execute("UPDATE runs SET start_head = ?2 WHERE id = ?1", params![id, head])?;
-    Ok(())
-}
-
 pub fn set_detail(conn: &Connection, id: &str, detail: &str) -> Result<()> {
     conn.execute("UPDATE runs SET detail = ?2 WHERE id = ?1", params![id, detail])?;
     Ok(())

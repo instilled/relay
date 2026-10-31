@@ -365,6 +365,36 @@ async fn a_shell_that_goes_idle_queues_finished_by_screen() {
 }
 
 #[tokio::test]
+async fn an_end_inside_the_grace_wins() {
+    let Some((_tmp, dir, home, h)) = quick() else {
+        return;
+    };
+    let mut c = Conn::open(&home).await;
+    let run: Run = c
+        .ok(
+            "run.start",
+            json!({ "argv": ["/bin/sh", "-i"], "cwd": dir, "kind": "shell" }),
+        )
+        .await;
+    c.wait_state(&run.id, RunState::Idle).await;
+    let _: Run = c.ok("run.stop", json!({ "id": run.id })).await;
+    let ended = c.wait_terminal(&run.id).await;
+    let i = queued(&home, &run.id).await;
+    // Past the grace, the screen's rest is not counted over the end.
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    let i2 = item(&home, &run.id).unwrap();
+    assert_eq!(i2, i, "the screen's rest changed nothing");
+    assert_eq!(said(&i), (RestKind::Finished, How::Screen, vec![Hint::Stopped]));
+    assert_eq!(i.rests, 1);
+    assert_eq!(
+        i.at.as_millisecond(),
+        ended.ended_at.unwrap().as_millisecond(),
+        "at the end"
+    );
+    h.stop().await;
+}
+
+#[tokio::test]
 async fn a_hook_inside_the_grace_wins() {
     let Some((_tmp, dir, home, h)) = quick() else {
         return;
