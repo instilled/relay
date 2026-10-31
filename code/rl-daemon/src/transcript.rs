@@ -540,8 +540,9 @@ pub fn last_message(agent: Agent, text: &str) -> Option<String> {
         Agent::Codex => codex_turns(text, None).pop().map(|t| t.message),
         Agent::Gemini => gemini_records(text, None)
             .into_iter()
-            .rfind(|(_, v)| v.get("type").and_then(Value::as_str) == Some("gemini"))
-            .map(|(_, v)| gemini_content(&v).trim().to_string()),
+            .filter(|(_, v)| v.get("type").and_then(Value::as_str) == Some("gemini"))
+            .map(|(_, v)| gemini_content(&v).trim().to_string())
+            .rfind(|said| !said.is_empty()),
     }
 }
 
@@ -1027,6 +1028,11 @@ not json
             r#"{"id":"g2","timestamp":"2026-09-17T10:00:05Z","type":"gemini","content":"done, really"}"#
         );
         assert_eq!(last_message(Agent::Gemini, &again).as_deref(), Some("done, really"));
+        let empty = format!(
+            "{again}{}\n",
+            r#"{"id":"g3","timestamp":"2026-09-17T10:00:06Z","type":"gemini","content":"  "}"#
+        );
+        assert_eq!(last_message(Agent::Gemini, &empty).as_deref(), Some("done, really"));
     }
 
     #[test]
