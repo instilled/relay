@@ -1,21 +1,25 @@
-//! The report as lanes: leads grouped by the work or team they belong to.
+//! The report drawn: the inbox's list pane and reading pane, as lines; and the
+//! lanes the prose and the board's cursor still walk.
 //!
-//! Pure grouping and ordering, no rendering. `Lane`/`Row` borrow from the
-//! `Report` (cheap; the renderer holds the report for the frame anyway).
+//! `Lane`/`Row` borrow from the `Report` (cheap; the renderer holds the report
+//! for the frame anyway).
 
 use std::collections::{HashMap, HashSet};
 
 use jiff::Timestamp;
-use ratatui::style::Stylize;
+use jiff::tz::TimeZone;
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use rl_proto::brief::Brief;
+use rl_core::time::{fmt_age, fmt_when};
 use rl_proto::lead::{Band, Lead};
 use rl_proto::methods::Report;
+use rl_proto::queue::{Changed, Hint, ItemView};
 use rl_proto::types::Summary;
 
+use super::inbox::{Inbox, Mark, Sel, Team, mark, to_review};
+use super::pane::wrap;
 use super::rows::fit;
 use super::theme;
-use crate::render::fmt_clock;
 
 pub struct Row<'a> {
     pub lead: &'a Lead,
@@ -94,12 +98,6 @@ pub fn lanes(report: &Report) -> Vec<Lane<'_>> {
     out
 }
 
-/// The lead column never gets narrower than this; the columns to its right give way first.
-const LEAD_FLOOR: usize = 20;
-const WHEN_W: usize = 12;
-const PROJECT_W: usize = 14;
-const SOURCE_W: usize = 12;
-
 /// The one fact a run row leads with, by the kind of lead it is: an agent's churn, time and
 /// commits; a shell's health; a flow's firing. Empty until the run's facts are frozen.
 /// The kind comes from the lead's key and source, as the daemon builds them (`firing:` is a
@@ -141,20 +139,6 @@ pub(crate) fn written<'a>(briefs: &'a HashMap<String, Summary>, lead: &Lead) -> 
     briefs.get(id).filter(|s| !s.stale)
 }
 
-/// The title never gives up more than this to the headline beside it.
-const TITLE_MIN: usize = 12;
-
-/// The report as lines for a body `width` columns wide: per lane a header with its
-/// tally, a dim rule, then a row per lead. Rendering only; `lanes()` did the grouping.
-pub fn report_lines(
-    report: &Report,
-    width: usize,
-    now: Timestamp,
-    briefs: &HashMap<String, Summary>,
-) -> Vec<Line<'static>> {
-    report_view(report, width, now, None, briefs).0
-}
-
 /// The lead rows in the order they are drawn, across lanes: what the cursor walks.
 pub fn flat_leads(report: &Report) -> Vec<&Lead> {
     lanes(report)
@@ -163,125 +147,550 @@ pub fn flat_leads(report: &Report) -> Vec<&Lead> {
         .collect()
 }
 
-/// `report_lines`, with row number `sel` (in `flat_leads` order) highlighted; and the line it
-/// landed on, so the caller can scroll to it.
-pub fn report_view(
-    report: &Report,
+/// Two panes from this many columns; one below.
+pub const INBOX_SPLIT_W: u16 = 100;
+
+/// The list pane's width in a frame `w` columns wide.
+pub fn list_w(w: u16) -> u16 {
+    (u32::from(w) * 36 / 100).clamp(34, 52) as u16
+}
+
+/// A block trim: at most this many wrapped lines.
+const BLOCK_LINES: usize = 6;
+
+fn glyph(m: Mark) -> (&'static str, Style) {
+    match m {
+        Mark::Asks => ("●", theme::needs()),
+        Mark::Failed => ("✕", theme::bad()),
+        Mark::Done => ("✓", theme::dim()),
+        Mark::Working => ("◐", Style::new().fg(theme::LIVE)),
+    }
+}
+
+fn commits(n: u32) -> String {
+    match n {
+        1 => "1 commit".into(),
+        n => format!("{n} commits"),
+    }
+}
+
+fn needs_you(n: usize) -> String {
+    match n {
+        1 => "1 needs you".into(),
+        n => format!("{n} need you"),
+    }
+}
+
+/// `+X/−Y · N commits` over the leads that work in a repo; `None` when none does.
+fn git(leads: &[&Lead]) -> Option<String> {
+    let changed: Vec<&Changed> = leads.iter().filter_map(|l| l.rest.as_ref()?.changed.as_ref()).collect();
+    if changed.is_empty() {
+        return None;
+    }
+    let (a, r, c) = changed
+        .iter()
+        .fold((0, 0, 0), |(a, r, c), x| (a + x.added, r + x.removed, c + x.commits));
+    Some(format!("+{a}/−{r} · {}", commits(c)))
+}
+
+/// What the session last said: its rest's message, else the lead's own line.
+fn last(lead: &Lead) -> Option<&str> {
+    lead.rest
+        .as_ref()
+        .and_then(|r| r.last.as_deref())
+        .or(lead.summary.as_deref())
+        .filter(|t| !t.trim().is_empty())
+}
+
+/// A line trim's source: the first line with anything on it.
+fn first_line(text: &str) -> &str {
+    text.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("")
+}
+
+/// The time of an item's rest, or how long it has worked.
+fn when(lead: &Lead, now: Timestamp) -> String {
+    match mark(lead) {
+        Mark::Working => fmt_age(lead.at, now),
+        _ => fmt_when(lead.at, now),
+    }
+}
+
+fn clock(t: Timestamp) -> String {
+    t.to_zoned(TimeZone::system()).strftime("%H:%M").to_string()
+}
+
+fn chip(h: Hint) -> Span<'static> {
+    let style = match h {
+        Hint::Question | Hint::Permission => theme::needs(),
+        Hint::Failed => theme::bad(),
+        Hint::Stopped | Hint::Unsure => theme::dim(),
+    };
+    Span::styled(h.as_str(), style)
+}
+
+fn chips(lead: &Lead) -> Vec<Span<'static>> {
+    let hints = lead.rest.as_ref().map_or(&[][..], |r| &r.item.hints[..]);
+    let mut out = Vec::new();
+    for h in hints {
+        if !out.is_empty() {
+            out.push(Span::raw(" "));
+        }
+        out.push(chip(*h));
+    }
+    out
+}
+
+/// Parts joined by a dim ` · `, empty ones left out.
+fn joined(parts: Vec<Vec<Span<'static>>>) -> Vec<Span<'static>> {
+    let mut out = Vec::new();
+    for p in parts.into_iter().filter(|p| !p.is_empty()) {
+        if !out.is_empty() {
+            out.push(Span::styled(" · ", theme::dim()));
+        }
+        out.extend(p);
+    }
+    out
+}
+
+/// A count as a part: left out when zero.
+fn count(n: usize, words: String, style: Style) -> Vec<Span<'static>> {
+    if n == 0 {
+        Vec::new()
+    } else {
+        vec![Span::styled(words, style)]
+    }
+}
+
+/// `spans` cut to `width` columns, the one across the edge ending in `…`.
+fn clip(spans: Vec<Span<'static>>, width: usize) -> Line<'static> {
+    let mut out = Vec::new();
+    let mut used = 0;
+    for s in spans {
+        let w = s.width();
+        if used + w <= width {
+            used += w;
+            out.push(s);
+            continue;
+        }
+        if width > used {
+            out.push(Span::styled(fit(&s.content, width - used), s.style));
+        }
+        break;
+    }
+    Line::from(out)
+}
+
+/// `left` and `right` on a line `width` wide, `right` against the edge; the left gives way.
+fn spread(left: Vec<Span<'static>>, right: Span<'static>, width: usize) -> Line<'static> {
+    let rw = right.width();
+    if rw + 2 > width {
+        return clip(left, width);
+    }
+    let mut line = clip(left, width - rw - 2);
+    let pad = width - rw - line.width();
+    line.spans.push(Span::raw(" ".repeat(pad)));
+    line.spans.push(right);
+    line
+}
+
+/// The selected line: filled to the edge and lit.
+fn lit(mut line: Line<'static>, width: usize) -> Line<'static> {
+    let short = width.saturating_sub(line.width());
+    if short > 0 {
+        line.spans.push(Span::raw(" ".repeat(short)));
+    }
+    line.style(theme::selected())
+}
+
+/// Adds a block of lines, lit through when it is the selection; `at` says where it starts.
+fn put(out: &mut Vec<Line<'static>>, at: &mut Option<usize>, block: Vec<Line<'static>>, on: bool, width: usize) {
+    if on {
+        *at = Some(out.len());
+        out.extend(block.into_iter().map(|l| lit(l, width)));
+    } else {
+        out.extend(block);
+    }
+}
+
+fn dim(t: impl Into<String>) -> Span<'static> {
+    Span::styled(t.into(), theme::dim())
+}
+
+fn team_of<'a>(inbox: &'a Inbox, key: &str) -> Option<&'a Team<'a>> {
+    inbox.teams.iter().find(|t| t.items.iter().any(|l| l.key == key))
+}
+
+/// A team's counts: needs you, failed, done, working, then commits where there is git.
+fn team_counts(t: &Team) -> Vec<Span<'static>> {
+    joined(vec![
+        count(t.needs, needs_you(t.needs), theme::needs()),
+        count(t.failed, format!("{} failed", t.failed), theme::bad()),
+        count(t.done, format!("{} done", t.done), theme::dim()),
+        count(
+            t.working,
+            format!("{} working", t.working),
+            Style::new().fg(theme::LIVE),
+        ),
+        t.commits.map(|c| vec![dim(commits(c))]).unwrap_or_default(),
+    ])
+}
+
+/// An item's two lines in the list: its mark, name and time; then its hint chips,
+/// git where there is one, and the last message's first line.
+fn item_rows(l: &Lead, width: usize, now: Timestamp) -> Vec<Line<'static>> {
+    let (g, gs) = glyph(mark(l));
+    let top = vec![
+        Span::raw(" "),
+        Span::styled(g, gs),
+        Span::raw(" "),
+        Span::styled(l.title.clone(), theme::name()),
+    ];
+    let mut sub = vec![Span::raw("   ")];
+    sub.extend(joined(vec![
+        chips(l),
+        git(&[l]).map(|g| vec![dim(g)]).unwrap_or_default(),
+        last(l).map(|t| vec![dim(first_line(t))]).unwrap_or_default(),
+    ]));
+    vec![spread(top, dim(when(l, now)), width), clip(sub, width)]
+}
+
+/// The list pane, `width` columns wide, and the line its selection starts on. Outside a
+/// team: All teams, the NEEDS YOU strip, then a summary per team. Inside one: its items.
+pub fn list_lines(
+    inbox: &Inbox,
+    sel: &Sel,
+    inside: Option<&str>,
     width: usize,
     now: Timestamp,
-    sel: Option<usize>,
-    briefs: &HashMap<String, Summary>,
 ) -> (Vec<Line<'static>>, Option<usize>) {
-    let lanes = lanes(report);
-    if lanes.is_empty() {
-        return (vec![Line::from(Span::raw(" nothing to report").dim())], None);
-    }
-    let mut at = 0usize;
-    let mut sel_line = None;
-    // Columns right of the lead, added in the order they matter; the lead keeps its floor.
-    let avail = width.saturating_sub(3);
-    let mut used = 0;
-    let mut take = |w: usize| {
-        let fits = avail.saturating_sub(used + 2 + w) >= LEAD_FLOOR;
-        if fits {
-            used += 2 + w;
-        }
-        fits
-    };
-    let show_project = take(PROJECT_W);
-    let show_source = take(SOURCE_W);
-    let show_when = take(WHEN_W);
-    let lead_w = avail.saturating_sub(used);
     let mut out = Vec::new();
-    for (n, lane) in lanes.iter().enumerate() {
-        if n > 0 {
-            out.push(Line::raw(""));
+    let mut at = None;
+    let picked = |l: &Lead| matches!(sel, Sel::Item(k) if *k == l.key);
+    if let Some(name) = inside {
+        out.push(clip(
+            vec![dim(" ‹ "), Span::styled(name.to_string(), theme::name())],
+            width,
+        ));
+        let team = inbox.teams.iter().find(|t| t.name == name);
+        for l in team.map_or(&[][..], |t| &t.items[..]) {
+            put(&mut out, &mut at, item_rows(l, width, now), picked(l), width);
         }
-        let tally = format!("{} needs · {} live · {} done", lane.needs, lane.live, lane.done);
-        let team = if lane.is_team { "  team" } else { "" };
-        let name_w = width.saturating_sub(tally.chars().count() + team.chars().count() + 5);
-        let name = fit(&lane.name, name_w.min(lane.name.chars().count()).max(1));
-        let mut spans = vec![Span::raw(" "), Span::styled(name.trim_end().to_string(), theme::name())];
-        if lane.is_team {
-            spans.push(Span::styled(team, theme::dim()));
+        return (out, at);
+    }
+    let failed: usize = inbox.teams.iter().map(|t| t.failed).sum();
+    let mut tally = joined(vec![
+        count(inbox.needs.len(), needs_you(inbox.needs.len()), theme::needs()),
+        count(failed, format!("{failed} failed"), theme::bad()),
+        count(inbox.to_review, format!("{} to review", inbox.to_review), theme::dim()),
+        inbox.commits.map(|c| vec![dim(commits(c))]).unwrap_or_default(),
+    ]);
+    if tally.is_empty() {
+        tally.push(dim("nothing to review"));
+    }
+    tally.insert(0, Span::raw("   "));
+    let all = vec![
+        clip(vec![Span::styled(" ≡ All teams", theme::name())], width),
+        clip(tally, width),
+    ];
+    put(&mut out, &mut at, all, *sel == Sel::All, width);
+    if !inbox.needs.is_empty() {
+        out.push(Line::raw(""));
+        out.push(clip(
+            vec![Span::styled(
+                format!(" NEEDS YOU · {}", inbox.needs.len()),
+                theme::needs(),
+            )],
+            width,
+        ));
+        for l in &inbox.needs {
+            let team = team_of(inbox, &l.key).map_or("", |t| t.name.as_str());
+            let left = vec![
+                Span::raw(" "),
+                Span::styled("●", theme::needs()),
+                Span::raw(" "),
+                Span::styled(format!("{team} · {}", l.title), theme::name()),
+            ];
+            let ask = l.rest.as_ref().and_then(|r| {
+                r.item
+                    .hints
+                    .iter()
+                    .find(|h| matches!(h, Hint::Question | Hint::Permission | Hint::Unsure))
+            });
+            let line = match ask {
+                Some(h) => spread(left, chip(*h), width),
+                None => clip(left, width),
+            };
+            put(&mut out, &mut at, vec![line], picked(l), width);
         }
-        spans.push(Span::styled(format!("  {tally}"), theme::dim()));
-        out.push(Line::from(spans));
-        out.push(Line::from(Span::raw("─".repeat(width)).dim()));
-        for row in &lane.rows {
-            let l = row.lead;
-            let (glyph, gstyle) = match l.band {
-                Band::NeedsYou => ("⚠", theme::needs()),
-                Band::Live => ("•", theme::name()),
-                Band::Happened => ("✓", theme::dim()),
-            };
-            // A happened run with its brief under it is not told twice: the
-            // row's line (its recap's, else its tail) gives way to the brief.
-            let brief = (l.band == Band::Happened)
-                .then(|| written(briefs, l).filter(|s| !s.deep))
-                .flatten();
-            let text = match l.summary.as_ref().filter(|_| brief.is_none()) {
-                Some(s) => format!("{} — {s}", l.title),
-                None => l.title.clone(),
-            };
-            let body = if l.band == Band::Happened {
-                theme::dim()
-            } else {
-                theme::name()
-            };
-            // The headline shares the lead cell: the title keeps TITLE_MIN, the headline
-            // takes what it needs of the rest (cut with `…`), so the width budget holds.
-            let head = headline(l);
-            let head_w = head.chars().count().min(lead_w.saturating_sub(TITLE_MIN + 2));
-            let mut spans = vec![Span::raw(" "), Span::styled(glyph, gstyle), Span::raw(" ")];
-            if head_w >= 2 {
-                spans.push(Span::styled(fit(&text, lead_w - head_w - 2), body));
-                spans.push(Span::styled(format!("  {}", fit(&head, head_w)), theme::dim()));
-            } else {
-                spans.push(Span::styled(fit(&text, lead_w), body));
+    }
+    out.push(Line::raw(""));
+    out.push(clip(vec![dim(format!(" TEAMS · {}", inbox.teams.len()))], width));
+    for t in &inbox.teams {
+        let mut counts = vec![Span::raw("   ")];
+        counts.extend(team_counts(t));
+        let block = vec![
+            clip(vec![dim(" ▸ "), Span::styled(t.name.clone(), theme::name())], width),
+            clip(counts, width),
+            clip(vec![dim(format!("   {}", t.gist))], width),
+        ];
+        let on = matches!(sel, Sel::Team(n) if *n == t.name);
+        put(&mut out, &mut at, block, on, width);
+    }
+    (out, at)
+}
+
+/// `text` wrapped to `width` after an `indent`, as lines of `style`.
+fn wrapped(text: &str, indent: &str, width: usize, style: Style) -> Vec<Line<'static>> {
+    let w = width.saturating_sub(indent.chars().count()).max(1);
+    text.lines()
+        .flat_map(|l| wrap(l.trim(), w))
+        .filter(|l| !l.is_empty())
+        .map(|l| Line::from(vec![Span::raw(indent.to_string()), Span::styled(l, style)]))
+        .collect()
+}
+
+/// A block trim: the text's lines wrapped to `width`, at most `BLOCK_LINES`, the last
+/// marked `…` when it was cut.
+fn block(text: &str, width: usize) -> Vec<String> {
+    let mut lines: Vec<String> = text
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .flat_map(|l| wrap(l.trim(), width))
+        .collect();
+    if lines.len() > BLOCK_LINES {
+        lines.truncate(BLOCK_LINES);
+        let cut = &mut lines[BLOCK_LINES - 1];
+        if cut.chars().count() >= width {
+            cut.pop();
+        }
+        cut.push('…');
+    }
+    lines
+}
+
+fn label(words: impl Into<String>, style: Style) -> Line<'static> {
+    Line::from(Span::styled(format!(" {}", words.into()), style))
+}
+
+/// The reading pane, `width` columns wide: whatever `sel` is.
+pub fn reading_lines(
+    report: &Report,
+    inbox: &Inbox,
+    sel: &Sel,
+    view: Option<&ItemView>,
+    briefs: &HashMap<String, Summary>,
+    width: usize,
+    now: Timestamp,
+) -> Vec<Line<'static>> {
+    let lines = match sel {
+        Sel::All => all_page(inbox, width),
+        Sel::Team(name) => match inbox.teams.iter().find(|t| t.name == *name) {
+            Some(t) => team_page(t, width, now),
+            None => vec![label("gone from the report", theme::dim())],
+        },
+        Sel::Item(key) => {
+            let lead = report
+                .needs_you
+                .iter()
+                .chain(&report.live)
+                .chain(&report.happened)
+                .find(|l| l.key == *key);
+            match lead {
+                Some(l) => item_page(l, inbox, view, briefs, width, now),
+                None => vec![label("gone from the report", theme::dim())],
             }
-            let dim = |t: String| Span::styled(format!("  {t}"), theme::dim());
-            if show_project {
-                let base = l
-                    .scope
-                    .as_ref()
-                    .and_then(|p| p.file_name())
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_default();
-                spans.push(dim(fit(&base, PROJECT_W)));
-            }
-            if show_source {
-                spans.push(dim(fit(&l.source, SOURCE_W)));
-            }
-            if show_when {
-                spans.push(dim(format!("{:>w$}", fmt_clock(l.at, now), w = WHEN_W)));
-            }
-            let mut line = Line::from(spans);
-            if sel == Some(at) {
-                line = line.style(theme::selected());
-                sel_line = Some(out.len());
-            }
-            at += 1;
-            out.push(line);
-            if let Some(s) = brief {
-                let b = Brief::parse(&s.text);
-                for (label, part) in [
-                    ("worked  ", &b.worked_on),
-                    ("asks    ", &b.questions),
-                    ("next    ", &b.next),
-                ] {
-                    if let Some(t) = part {
-                        let t = t.split_whitespace().collect::<Vec<_>>().join(" ");
-                        out.push(Line::from(Span::styled(
-                            fit(&format!("     {label}{t}"), width),
-                            theme::dim(),
-                        )));
-                    }
-                }
+        }
+    };
+    lines.into_iter().map(|l| clip(l.spans, width)).collect()
+}
+
+/// To review, working and git, the zeros left out.
+fn team_tally(t: &Team) -> Vec<Span<'static>> {
+    let review = to_review(&t.items);
+    joined(vec![
+        count(review, format!("{review} to review"), theme::dim()),
+        count(t.working, format!("{} working", t.working), theme::dim()),
+        git(&t.items).map(|g| vec![dim(g)]).unwrap_or_default(),
+    ])
+}
+
+fn headed(name: &str, tally: Vec<Span<'static>>) -> Line<'static> {
+    let mut spans = vec![Span::raw(" "), Span::styled(name.to_string(), theme::name())];
+    if !tally.is_empty() {
+        spans.push(dim(" · "));
+        spans.extend(tally);
+    }
+    Line::from(spans)
+}
+
+/// All teams: a block per team, in the list's order.
+fn all_page(inbox: &Inbox, width: usize) -> Vec<Line<'static>> {
+    if inbox.teams.is_empty() {
+        return vec![label("nothing to report", theme::dim())];
+    }
+    let mut out = vec![label("All teams", theme::name())];
+    for t in &inbox.teams {
+        out.push(Line::raw(""));
+        out.push(headed(&t.name, team_tally(t)));
+        out.extend(wrapped(&t.gist, "   ", width, Style::new()));
+    }
+    out
+}
+
+/// A team: what happened since you looked, then its items by group.
+fn team_page(t: &Team, width: usize, now: Timestamp) -> Vec<Line<'static>> {
+    let mut out = vec![headed(&t.name, team_tally(t)), Line::raw("")];
+    out.push(label("SINCE YOU LOOKED", theme::dim()));
+    let said: Vec<String> = [
+        (t.done, "done"),
+        (t.failed, "failed"),
+        (t.needs, "ask"),
+        (t.working, "working"),
+    ]
+    .into_iter()
+    .filter(|(n, _)| *n > 0)
+    .map(|(n, w)| format!("{n} {w}"))
+    .collect();
+    if !said.is_empty() {
+        out.extend(wrapped(&format!("{}.", said.join(", ")), " ", width, Style::new()));
+    }
+    if let Some(g) = git(&t.items) {
+        out.push(Line::from(vec![Span::raw(" "), dim(g)]));
+    }
+    out.extend(wrapped(&t.gist, " ", width, Style::new()));
+    let title_w = (width / 3).clamp(12, 28);
+    for (head, style, marks) in [
+        ("NEEDS YOU", theme::needs(), &[Mark::Asks][..]),
+        ("DONE", theme::dim(), &[Mark::Failed, Mark::Done][..]),
+        ("WORKING", Style::new().fg(theme::LIVE), &[Mark::Working][..]),
+    ] {
+        let items: Vec<&Lead> = t.items.iter().copied().filter(|l| marks.contains(&mark(l))).collect();
+        if items.is_empty() {
+            continue;
+        }
+        out.push(Line::raw(""));
+        out.push(label(format!("{head} · {}", items.len()), style));
+        for l in items {
+            let (g, gs) = glyph(mark(l));
+            let what: Vec<String> = [
+                git(&[l]).map(|g| g.split(" · ").next().unwrap_or("").to_string()),
+                last(l).map(|t| first_line(t).to_string()),
+            ]
+            .into_iter()
+            .flatten()
+            .collect();
+            let left = vec![
+                Span::raw(" "),
+                Span::styled(g, gs),
+                Span::raw(" "),
+                Span::styled(fit(&l.title, title_w), theme::name()),
+                Span::raw("  "),
+                dim(what.join(" · ")),
+            ];
+            out.push(spread(left, dim(when(l, now)), width));
+        }
+    }
+    out
+}
+
+/// An item: who and where, what it said, what changed, the deep read, and the log.
+fn item_page(
+    l: &Lead,
+    inbox: &Inbox,
+    view: Option<&ItemView>,
+    briefs: &HashMap<String, Summary>,
+    width: usize,
+    now: Timestamp,
+) -> Vec<Line<'static>> {
+    let team = team_of(inbox, &l.key).map_or("", |t| t.name.as_str());
+    let mut out = vec![Line::from(vec![
+        Span::raw(" "),
+        Span::styled(format!("{team} · {}", l.title), theme::name()),
+    ])];
+    let rest = l.rest.as_ref();
+    let changed = view
+        .and_then(|v| v.changed.as_ref())
+        .or(rest.and_then(|r| r.changed.as_ref()));
+    let branch = view
+        .and_then(|v| v.branch.clone())
+        .or_else(|| changed.and_then(|c| c.branch.clone()));
+    let mut who = vec![l.source.clone()];
+    who.extend(branch);
+    if let Some(i) = rest.map(|r| &r.item).filter(|i| i.rests > 1) {
+        who.push(format!("{} turns since {}", i.rests, fmt_when(i.from, now)));
+    }
+    out.push(Line::from(vec![Span::raw(" "), dim(who.join(" · "))]));
+    out.push(Line::raw(""));
+
+    let m = mark(l);
+    let (head, style) = match m {
+        Mark::Asks => ("ASKS", theme::needs()),
+        Mark::Failed => ("FAILED", theme::bad()),
+        Mark::Done => ("DONE", theme::dim()),
+        Mark::Working => ("WORKING", Style::new().fg(theme::LIVE)),
+    };
+    let mut heading = vec![Span::styled(format!(" {head} · {}", when(l, now)), style)];
+    let hints = chips(l);
+    if !hints.is_empty() {
+        heading.push(Span::raw("  "));
+        heading.extend(hints);
+    }
+    out.push(Line::from(heading));
+    // An ask's message in a box with its question picked out; anything else's alone.
+    let boxed = m == Mark::Asks && width >= 10;
+    let inner = if boxed { width - 5 } else { width.saturating_sub(1) };
+    let said = last(l).map(|t| block(t, inner)).unwrap_or_default();
+    let styled = |t: &str| if t.contains('?') { theme::name() } else { Style::new() };
+    if boxed {
+        out.push(dim(format!(" ┌{}┐", "─".repeat(width - 3))).into());
+        for t in &said {
+            out.push(Line::from(vec![
+                dim(" │ "),
+                Span::styled(fit(t, inner), styled(t)),
+                dim(" │"),
+            ]));
+        }
+        out.push(dim(format!(" └{}┘", "─".repeat(width - 3))).into());
+    } else {
+        out.extend(
+            said.iter()
+                .map(|t| Line::from(vec![Span::raw(" "), Span::styled(t.clone(), styled(t))])),
+        );
+    }
+
+    if let Some(c) = changed {
+        out.push(Line::raw(""));
+        out.push(label("CHANGED SINCE YOU LOOKED", theme::dim()));
+        let mut facts = vec![format!("+{}/−{} · {}", c.added, c.removed, commits(c.commits))];
+        facts.push(if c.pushed { "pushed".into() } else { "not pushed".into() });
+        out.push(Line::raw(format!(" {}", facts.join(" · "))));
+        out.extend(c.subjects.iter().map(|s| Line::from(dim(format!("   {s}")))));
+    }
+
+    out.push(Line::raw(""));
+    out.push(label("DEEP READ", theme::dim()));
+    match written(briefs, l).filter(|s| s.deep) {
+        Some(s) => out.extend(wrapped(&s.text, " ", width, Style::new())),
+        None => out.push(Line::from(dim(" not made · p reads the log"))),
+    }
+
+    out.push(Line::raw(""));
+    out.push(label("LOG SINCE YOU LOOKED", theme::dim()));
+    match view {
+        None => out.push(Line::from(dim(" reading…"))),
+        Some(v) if v.log.is_empty() => out.push(Line::from(dim(" nothing since"))),
+        Some(v) => {
+            for e in &v.log {
+                let who = if e.who == "you" { theme::name() } else { theme::dim() };
+                out.push(Line::from(vec![
+                    dim(format!(" {}  ", clock(e.at))),
+                    Span::styled(fit(&e.who, 8), who),
+                    Span::raw(format!("  {}", first_line(&e.text))),
+                ]));
             }
         }
     }
-    (out, sel_line)
+    out
 }
 
 #[cfg(test)]
@@ -362,92 +771,6 @@ pub(crate) mod tests {
     fn headline_absent_facts_is_empty() {
         let l = mk_lead("claude", "run:r1", Band::Happened, None, ts(1));
         assert_eq!(headline(&l), "");
-    }
-
-    #[test]
-    fn headline_shows_on_the_row_within_the_width() {
-        let mut r = sample();
-        r.happened[0].facts = facts(|f| {
-            f.added = 180;
-            f.removed = 40;
-            f.commits = 3;
-        });
-        let ls: Vec<String> = report_lines(&r, 80, ts(1_700_000_100), &HashMap::new())
-            .iter()
-            .map(text)
-            .collect();
-        let row = ls.iter().find(|l| l.contains('✓')).unwrap();
-        assert!(row.contains("+180/−40"), "{ls:?}");
-        assert!(ls.iter().all(|l| l.chars().count() <= 80), "{ls:?}");
-    }
-
-    fn sample() -> Report {
-        Report {
-            needs_you: vec![mk_lead(
-                "claude",
-                "a very long lead title that will certainly not fit in a narrow column of any kind",
-                Band::NeedsYou,
-                Some("/p/relay"),
-                ts(1_700_000_000),
-            )],
-            live: vec![],
-            happened: vec![mk_lead(
-                "claude",
-                "done",
-                Band::Happened,
-                Some("/p/relay"),
-                ts(1_600_000_000),
-            )],
-            tags: vec![],
-        }
-    }
-
-    #[test]
-    fn report_lines_head_each_lane_with_its_tally_and_cut_long_leads() {
-        let ls: Vec<String> = report_lines(&sample(), 80, ts(1_700_000_100), &HashMap::new())
-            .iter()
-            .map(text)
-            .collect();
-        assert!(
-            ls[0].contains("relay") && ls[0].contains("1 needs · 0 live · 1 done"),
-            "{ls:?}"
-        );
-        assert!(ls[1].starts_with('─'));
-        assert!(ls[2].contains('⚠') && ls[2].contains('…'), "{ls:?}");
-        assert!(ls.iter().all(|l| l.chars().count() <= 80), "{ls:?}");
-        assert!(ls[2].contains("claude") && ls[2].contains("relay"), "{ls:?}");
-        // project before co-worker, as in the mock
-        assert!(ls[2].find("relay") < ls[2].find("claude"), "{ls:?}");
-    }
-
-    #[test]
-    fn report_view_marks_the_selected_row_and_says_which_line() {
-        let r = sample();
-        let (lines, at) = report_view(&r, 80, ts(1_700_000_100), Some(1), &HashMap::new());
-        assert_eq!(at, Some(3), "second lead row, past a head and a rule");
-        assert_eq!(lines[3].style, theme::selected());
-        assert_ne!(lines[2].style, theme::selected());
-        assert_eq!(flat_leads(&r).len(), 2);
-    }
-
-    #[test]
-    fn report_lines_drop_the_when_column_when_narrow_but_keep_the_lead() {
-        let now = ts(1_700_000_100);
-        let wide: Vec<String> = report_lines(&sample(), 80, now, &HashMap::new())
-            .iter()
-            .map(text)
-            .collect();
-        let narrow: Vec<String> = report_lines(&sample(), 40, now, &HashMap::new())
-            .iter()
-            .map(text)
-            .collect();
-        assert!(narrow[2].contains("a very long"), "{narrow:?}");
-        assert!(narrow.iter().all(|l| l.chars().count() <= 40), "{narrow:?}");
-        let clock = fmt_clock(ts(1_700_000_000), now);
-        assert!(
-            wide[2].contains(&clock) && !narrow[2].contains(&clock),
-            "{wide:?} {narrow:?}"
-        );
     }
 
     #[test]
@@ -537,36 +860,324 @@ pub(crate) mod tests {
         }
     }
 
-    #[test]
-    fn a_happened_rows_brief_shows_under_it() {
-        let r = Report {
-            needs_you: vec![],
-            live: vec![],
-            happened: vec![Lead {
-                summary: Some("the parser".into()),
-                ..mk_lead("claude", "run:r1", Band::Happened, Some("/p/relay"), ts(5))
-            }],
+    use super::super::inbox::{Sel, inbox};
+    use rl_proto::queue::{Changed, Hint, How, ItemView, LeadRest, LogLine, QueueItem, RestKind};
+
+    fn queued(mut l: Lead, kind: RestKind, hints: &[Hint], last: &str, changed: Option<Changed>) -> Lead {
+        l.rest = Some(LeadRest {
+            item: QueueItem {
+                source: "run".into(),
+                reference: l.key.clone(),
+                kind,
+                how: How::Reply,
+                hints: hints.to_vec(),
+                at: l.at,
+                rests: 3,
+                from: ts(1_000),
+                from_head: None,
+            },
+            last: Some(last.into()),
+            changed,
+        });
+        l
+    }
+
+    fn titled(mut l: Lead, title: &str) -> Lead {
+        l.title = title.into();
+        l
+    }
+
+    fn git(added: u64, removed: u64, commits: u32) -> Option<Changed> {
+        Some(Changed {
+            commits,
+            added,
+            removed,
+            subjects: vec!["fix the parser".into()],
+            branch: Some("main".into()),
+            pushed: false,
+        })
+    }
+
+    /// Two teams: relay with an ask, a done item in git and a working run;
+    /// docs with a failed item and a done one, no repo.
+    fn board(relay_git: bool) -> Report {
+        let g = |a, r, c| if relay_git { git(a, r, c) } else { None };
+        Report {
+            needs_you: vec![titled(
+                queued(
+                    mk_lead("claude", "run:a1", Band::NeedsYou, Some("/p/relay"), ts(5_000)),
+                    RestKind::Asks,
+                    &[Hint::Question],
+                    "Removed 23 worktrees and their branches, none with uncommitted work.\nShould I prune the stale local branches too?",
+                    None,
+                ),
+                "clean worktrees with a title long enough to need cutting in any narrow pane",
+            )],
+            live: vec![titled(
+                mk_lead("claude", "run:w1", Band::Live, Some("/p/relay"), ts(4_000)),
+                "review-queue spike",
+            )],
+            happened: vec![
+                titled(
+                    queued(
+                        mk_lead("claude", "run:d1", Band::Happened, Some("/p/relay"), ts(3_000)),
+                        RestKind::Finished,
+                        &[],
+                        "All eight review findings fixed, gates green, and a very long tail of words after that",
+                        g(412, 96, 3),
+                    ),
+                    "report step 4 fixes",
+                ),
+                titled(
+                    queued(
+                        mk_lead("codex", "run:f1", Band::Happened, Some("/p/docs"), ts(2_000)),
+                        RestKind::Finished,
+                        &[Hint::Failed],
+                        "The nightly checks broke in the checkout spec",
+                        None,
+                    ),
+                    "nightly checks",
+                ),
+                titled(
+                    queued(
+                        mk_lead("codex", "run:d2", Band::Happened, Some("/p/docs"), ts(1_500)),
+                        RestKind::Finished,
+                        &[],
+                        "Done.",
+                        None,
+                    ),
+                    "docs summary",
+                ),
+            ],
             tags: vec![],
-        };
+        }
+    }
+
+    fn texts(ls: &[Line<'_>]) -> Vec<String> {
+        ls.iter().map(text).collect()
+    }
+
+    fn sels() -> Vec<Sel> {
+        vec![
+            Sel::All,
+            Sel::Team("relay".into()),
+            Sel::Team("docs".into()),
+            Sel::Item("run:a1".into()),
+            Sel::Item("run:d1".into()),
+            Sel::Item("run:f1".into()),
+            Sel::Item("run:w1".into()),
+        ]
+    }
+
+    fn view() -> ItemView {
+        ItemView {
+            log: vec![
+                LogLine {
+                    at: ts(4_900),
+                    who: "you".into(),
+                    text: "clean up the worktrees that are merged\nand more".into(),
+                },
+                LogLine {
+                    at: ts(5_000),
+                    who: "claude".into(),
+                    text: "Should I prune them too?".into(),
+                },
+            ],
+            changed: None,
+            branch: None,
+        }
+    }
+
+    #[test]
+    fn list_lines_fit_the_width() {
+        let now = ts(6_000);
+        let r = board(true);
+        let i = inbox(&r);
+        for width in [40, 52] {
+            for inside in [None, Some("relay"), Some("docs")] {
+                for sel in sels() {
+                    let (ls, _) = list_lines(&i, &sel, inside, width, now);
+                    let ls = texts(&ls);
+                    assert!(
+                        ls.iter().all(|l| l.chars().count() <= width),
+                        "{width} {inside:?} {ls:#?}"
+                    );
+                }
+            }
+            for sel in sels() {
+                let v = view();
+                let ls = texts(&reading_lines(&r, &i, &sel, Some(&v), &HashMap::new(), width, now));
+                assert!(ls.iter().all(|l| l.chars().count() <= width), "{width} {sel:?} {ls:#?}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_list_heads_with_all_teams_then_needs_you_then_teams() {
+        let r = board(true);
+        let i = inbox(&r);
+        let (ls, at) = list_lines(&i, &Sel::Team("docs".into()), None, 52, ts(6_000));
+        let t = texts(&ls);
+        assert!(t[0].contains("≡ All teams"), "{t:#?}");
+        assert!(t[1].contains("1 needs you") && t[1].contains("1 failed"), "{t:#?}");
+        assert!(t[1].contains("4 to review") && t[1].contains("3 commits"), "{t:#?}");
+        let needs = t.iter().position(|l| l.contains("NEEDS YOU · 1")).unwrap();
+        assert!(t[needs + 1].contains("● relay · clean worktrees"), "{t:#?}");
+        assert!(t[needs + 1].trim_end().ends_with("question"), "{t:#?}");
+        let teams = t.iter().position(|l| l.contains("TEAMS · 2")).unwrap();
+        assert!(teams > needs);
+        assert!(t[teams + 1].contains("▸ relay"), "{t:#?}");
+        let counts = &t[teams + 2];
+        assert!(
+            counts.contains("1 needs you · 1 done · 1 working · 3 commits"),
+            "{t:#?}"
+        );
+        assert!(t[teams + 4].contains("▸ docs"), "{t:#?}");
+        assert!(t[teams + 5].contains("1 failed · 1 done") && !t[teams + 5].contains("commit"));
+        // The selected team is lit through its three lines, and its first is said.
+        assert_eq!(at, Some(teams + 4));
+        assert!(ls[teams + 4..teams + 7].iter().all(|l| l.style == theme::selected()));
+        assert_ne!(ls[teams + 3].style, theme::selected());
+    }
+
+    #[test]
+    fn no_git_draws_no_git() {
+        let now = ts(6_000);
+        let r = board(false);
+        let i = inbox(&r);
+        let mut all = Vec::new();
+        for inside in [None, Some("relay"), Some("docs")] {
+            for sel in sels() {
+                all.extend(texts(&list_lines(&i, &sel, inside, 52, now).0));
+            }
+        }
+        for sel in sels() {
+            let v = view();
+            all.extend(texts(&reading_lines(&r, &i, &sel, Some(&v), &HashMap::new(), 80, now)));
+        }
+        for bad in ["+", "commits", "CHANGED", "git", "main", "pushed"] {
+            assert!(!all.iter().any(|l| l.contains(bad)), "{bad}: {all:#?}");
+        }
+    }
+
+    #[test]
+    fn inside_a_team_lists_its_items_only() {
+        let r = board(true);
+        let i = inbox(&r);
+        let (ls, at) = list_lines(&i, &Sel::Item("run:d1".into()), Some("relay"), 52, ts(6_000));
+        let t = texts(&ls);
+        assert!(t[0].starts_with(" ‹ relay"), "{t:#?}");
+        assert_eq!(t.len(), 1 + 3 * 2, "a back line, then two lines an item: {t:#?}");
+        assert!(t[1].contains("● clean worktrees"), "{t:#?}");
+        assert!(t[2].contains("question") && t[2].contains("Removed 23"), "{t:#?}");
+        assert!(t[3].contains("✓ report step 4 fixes"), "{t:#?}");
+        assert!(t[4].contains("+412/−96 · 3 commits · All eight"), "{t:#?}");
+        assert!(t[5].contains("◐ review-queue spike"), "{t:#?}");
+        assert!(t[5].trim_end().ends_with("33m"), "worked for, not when: {t:#?}");
+        for gone in ["nightly", "docs summary", "All teams", "NEEDS YOU", "TEAMS"] {
+            assert!(!t.iter().any(|l| l.contains(gone)), "{gone}: {t:#?}");
+        }
+        assert_eq!(at, Some(3));
+    }
+
+    #[test]
+    fn all_teams_reads_a_block_per_team_in_the_lists_order() {
+        let r = board(true);
+        let i = inbox(&r);
+        let t = texts(&reading_lines(&r, &i, &Sel::All, None, &HashMap::new(), 80, ts(6_000)));
+        let relay = t.iter().position(|l| l.starts_with(" relay")).unwrap();
+        let docs = t.iter().position(|l| l.starts_with(" docs")).unwrap();
+        assert!(relay < docs, "{t:#?}");
+        assert!(
+            t[relay].contains("2 to review · 1 working · +412/−96 · 3 commits"),
+            "{t:#?}"
+        );
+        assert!(t[relay + 1].contains("clean worktrees"), "the gist: {t:#?}");
+        assert!(t[docs].contains("2 to review") && !t[docs].contains('+'), "{t:#?}");
+    }
+
+    #[test]
+    fn a_team_reads_since_you_looked_then_its_groups() {
+        let r = board(true);
+        let i = inbox(&r);
+        let sel = Sel::Team("relay".into());
+        let t = texts(&reading_lines(&r, &i, &sel, None, &HashMap::new(), 80, ts(6_000)));
+        let since = t.iter().position(|l| l.contains("SINCE YOU LOOKED")).unwrap();
+        assert!(t[since + 1].contains("1 done, 1 ask, 1 working."), "{t:#?}");
+        assert!(t[since + 2].contains("+412/−96 · 3 commits"), "{t:#?}");
+        let at = |w: &str| t.iter().position(|l| l.contains(w)).unwrap();
+        assert!(
+            at("NEEDS YOU · 1") < at("DONE · 1") && at("DONE · 1") < at("WORKING · 1"),
+            "{t:#?}"
+        );
+        assert!(t[at("DONE · 1") + 1].contains("+412/−96"), "{t:#?}");
+    }
+
+    #[test]
+    fn an_ask_reads_boxed_with_its_question_picked_out() {
+        let r = board(true);
+        let i = inbox(&r);
+        let v = view();
         let mut briefs = HashMap::new();
-        briefs.insert(
-            "r1".to_string(),
-            summary_of("r1", "Worked on: the parser\nOpen questions: none\nNext: tests"),
+        let ls = reading_lines(&r, &i, &Sel::Item("run:a1".into()), Some(&v), &briefs, 80, ts(6_000));
+        let t = texts(&ls);
+        assert!(t[0].contains("relay · clean worktrees"), "{t:#?}");
+        assert!(t[1].contains("claude") && t[1].contains("3 turns since"), "{t:#?}");
+        let asks = t.iter().position(|l| l.contains("ASKS · ")).unwrap();
+        assert!(t[asks + 1].contains('┌'), "{t:#?}");
+        let q = t.iter().position(|l| l.contains("Should I prune")).unwrap();
+        assert!(t[q].starts_with(" │ ") && t[q].ends_with(" │"), "{t:#?}");
+        assert!(
+            ls[q]
+                .spans
+                .iter()
+                .any(|s| s.content.contains("Should") && s.style == theme::name())
         );
-        let (lines, at) = report_view(&r, 80, ts(10), Some(0), &briefs);
-        let ls: Vec<String> = lines.iter().map(text).collect();
-        let row = ls.iter().position(|l| l.contains('✓')).unwrap();
-        assert_eq!(
-            ls.iter().filter(|l| l.contains("the parser")).count(),
-            1,
-            "told once, by the brief: {ls:?}"
-        );
-        assert!(ls[row + 1].contains("worked  the parser"), "{ls:?}");
-        assert!(ls[row + 2].contains("next    tests"), "{ls:?}");
-        assert!(!ls.iter().any(|l| l.contains("asks")), "{ls:?}");
-        assert_eq!(at, Some(row));
-        briefs.get_mut("r1").unwrap().stale = true;
-        let none = report_lines(&r, 80, ts(10), &briefs);
-        assert!(!none.iter().map(text).any(|l| l.contains("worked")));
+        assert!(!t.iter().any(|l| l.contains("CHANGED")), "no git on the ask: {t:#?}");
+        assert!(t.iter().any(|l| l.contains("not made · p reads the log")), "{t:#?}");
+        let log = t.iter().position(|l| l.contains("LOG SINCE YOU LOOKED")).unwrap();
+        assert!(t[log + 1].contains("you") && t[log + 1].contains("clean up the worktrees"));
+        assert!(!t[log + 1].contains("and more"), "first line only: {t:#?}");
+        let mut deep = summary_of("a1", "It cleaned the worktrees and waits on the branches.");
+        deep.deep = true;
+        briefs.insert("a1".into(), deep);
+        let t = texts(&reading_lines(
+            &r,
+            &i,
+            &Sel::Item("run:a1".into()),
+            Some(&v),
+            &briefs,
+            80,
+            ts(6_000),
+        ));
+        assert!(t.iter().any(|l| l.contains("It cleaned the worktrees")), "{t:#?}");
+        assert!(!t.iter().any(|l| l.contains("not made")), "{t:#?}");
+    }
+
+    #[test]
+    fn a_finished_item_reads_its_last_and_what_changed() {
+        let mut r = board(true);
+        let long = (0..40).map(|n| format!("word{n}")).collect::<Vec<_>>().join(" ");
+        r.happened[0].rest.as_mut().unwrap().last = Some(long);
+        let i = inbox(&r);
+        let t = texts(&reading_lines(
+            &r,
+            &i,
+            &Sel::Item("run:d1".into()),
+            None,
+            &HashMap::new(),
+            40,
+            ts(6_000),
+        ));
+        assert!(t[1].contains("main"), "the branch: {t:#?}");
+        let done = t.iter().position(|l| l.contains("DONE · ")).unwrap();
+        let changed = t.iter().position(|l| l.contains("CHANGED SINCE YOU LOOKED")).unwrap();
+        let block = &t[done + 1..changed];
+        assert!(!block.iter().any(|l| l.contains('┌')), "no box: {t:#?}");
+        assert_eq!(block.iter().filter(|l| l.contains("word")).count(), 6, "capped: {t:#?}");
+        assert!(t[changed + 1].contains("+412/−96 · 3 commits"), "{t:#?}");
+        assert!(t[changed + 1].contains("not pushed"), "{t:#?}");
+        assert!(t[changed + 2].contains("fix the parser"), "{t:#?}");
+        assert!(t.iter().any(|l| l.contains("reading…")), "no view yet: {t:#?}");
     }
 }

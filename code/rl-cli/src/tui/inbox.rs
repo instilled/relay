@@ -139,15 +139,19 @@ pub fn inbox(report: &Report) -> Inbox<'_> {
     needs.sort_by(|a, b| a.at.cmp(&b.at).then(a.key.cmp(&b.key)));
     Inbox {
         needs,
-        to_review: teams
-            .iter()
-            .flat_map(|t| &t.items)
-            .filter(|l| mark(l) != Mark::Working && (l.rest.is_some() || mark(l) == Mark::Asks))
-            .count(),
+        to_review: teams.iter().map(|t| to_review(&t.items)).sum(),
         working: teams.iter().map(|t| t.working).sum(),
         commits: sum_commits(teams.iter().flat_map(|t| &t.items).copied()),
         teams,
     }
+}
+
+/// How many of `items` wait for your review: queued items and decisions.
+pub fn to_review(items: &[&Lead]) -> usize {
+    items
+        .iter()
+        .filter(|l| mark(l) != Mark::Working && (l.rest.is_some() || mark(l) == Mark::Asks))
+        .count()
 }
 
 /// A team in a line: who asks, what failed or stopped, what finished.

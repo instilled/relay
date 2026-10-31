@@ -471,6 +471,12 @@ struct App {
     /// The first line of the report on screen, kept so the board scrolls only as far as the
     /// cursor needs.
     report_top: std::cell::Cell<usize>,
+    /// What the inbox's list pane has selected.
+    inbox_sel: inbox::Sel,
+    /// The team the list pane has stepped into, if any.
+    inbox_inside: Option<String>,
+    /// One pane, below `INBOX_SPLIT_W`: it shows the reading pane, not the list.
+    report_open: bool,
     /// The last report fetch failed: said once, not again on every tick.
     report_failed: bool,
     /// The report view shows the prose digest instead of the board (`p` toggles).
@@ -1316,6 +1322,9 @@ impl App {
             report: None,
             report_sel: 0,
             report_top: std::cell::Cell::new(0),
+            inbox_sel: inbox::Sel::All,
+            inbox_inside: None,
+            report_open: false,
             report_failed: false,
             report_prose: false,
             briefs: HashMap::new(),
@@ -2790,7 +2799,7 @@ impl App {
         self.draw_window(f, rest, shown, keys, sel_line);
     }
 
-    /// The report: its lanes from the top.
+    /// The report as an inbox: the list pane and, when wide enough, the reading pane beside it.
     fn draw_report(&self, f: &mut Frame, area: Rect) {
         self.list_h.set(area.height);
         *self.hit.borrow_mut() = ListHit::default();
@@ -2804,17 +2813,41 @@ impl App {
             f.render_widget(Paragraph::new(lines).wrap(ratatui::widgets::Wrap { trim: false }), area);
             return;
         }
-        let (lines, sel_line) = match &self.report {
-            Some(rep) => report::report_view(
-                rep,
-                area.width as usize,
-                Timestamp::now(),
-                Some(self.report_sel),
-                &self.briefs,
-            ),
-            None => (vec![Line::from(Span::raw(" loading report…").dim())], None),
+        let Some(rep) = &self.report else {
+            f.render_widget(Paragraph::new(Line::from(Span::raw(" loading report…").dim())), area);
+            return;
         };
-        // Scroll only as far as keeps the cursor row in view.
+        let inbox = inbox::inbox(rep);
+        let now = Timestamp::now();
+        // The item's log is not read yet; until it is, the reading pane says so.
+        let reading = |w: u16| report::reading_lines(rep, &inbox, &self.inbox_sel, None, &self.briefs, w as usize, now);
+        if area.width >= report::INBOX_SPLIT_W {
+            let [list, rule, read] = Layout::horizontal([
+                Constraint::Length(report::list_w(area.width)),
+                Constraint::Length(1),
+                Constraint::Fill(1),
+            ])
+            .areas(area);
+            // A column of air between the list and the rule.
+            let list = Rect {
+                width: list.width.saturating_sub(1),
+                ..list
+            };
+            self.draw_inbox_list(f, list, &inbox, now);
+            let bar = vec![Line::raw("│"); rule.height as usize];
+            f.render_widget(Paragraph::new(bar).dim(), rule);
+            f.render_widget(Paragraph::new(reading(read.width)), read);
+        } else if self.report_open {
+            f.render_widget(Paragraph::new(reading(area.width)), area);
+        } else {
+            self.draw_inbox_list(f, area, &inbox, now);
+        }
+    }
+
+    /// The inbox's list pane, scrolled only as far as keeps the selection in view.
+    fn draw_inbox_list(&self, f: &mut Frame, area: Rect, inbox: &inbox::Inbox, now: Timestamp) {
+        let inside = self.inbox_inside.as_deref();
+        let (lines, sel_line) = report::list_lines(inbox, &self.inbox_sel, inside, area.width as usize, now);
         let h = area.height as usize;
         let mut top = self.report_top.get().min(lines.len().saturating_sub(h));
         if let Some(at) = sel_line {
@@ -2822,10 +2855,6 @@ impl App {
                 top = at;
             } else if h > 0 && at >= top + h {
                 top = at + 1 - h;
-            }
-            // The lane head and rule above the first row belong with it.
-            if top > 0 && top <= 2 && at < 3 {
-                top = 0;
             }
         }
         self.report_top.set(top);
@@ -5031,7 +5060,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_report_view_draws_its_lanes_and_esc_goes_to_the_list() {
+    async fn the_report_view_draws_its_inbox_and_esc_goes_to_the_list() {
         let (_tmp, token, mut app, _folder) = panel().await;
         app.open_report().await;
         assert!(app.view == super::View::Report);
@@ -5058,8 +5087,8 @@ mod tests {
             tags: vec![],
         });
         let frame = draw_text(&mut app);
-        assert!(frame.contains("relay"), "{frame}");
-        assert!(frame.contains("1 needs · 1 live · 0 done"), "{frame}");
+        assert!(frame.contains("▸ relay"), "{frame}");
+        assert!(frame.contains("1 needs you · 1 working"), "{frame}");
         assert!(frame.contains("approve the deploy"), "{frame}");
         press(&mut app, KeyCode::Esc, KeyModifiers::NONE).await;
         assert!(app.view == super::View::Work);
@@ -5079,14 +5108,100 @@ mod tests {
             tags: vec![],
         });
         let board = draw_text(&mut app);
-        assert!(board.contains("1 needs · 0 live · 0 done"), "{board}");
+        assert!(board.contains("NEEDS YOU · 1"), "{board}");
         press(&mut app, KeyCode::Char('p'), KeyModifiers::NONE).await;
         assert!(app.report_prose);
         let prose = draw_text(&mut app);
         assert!(prose.contains("approve the deploy"), "{prose}");
-        assert!(!prose.contains("1 needs · 0 live · 0 done"), "{prose}");
+        assert!(!prose.contains("NEEDS YOU · 1"), "{prose}");
         press(&mut app, KeyCode::Char('p'), KeyModifiers::NONE).await;
         assert!(!app.report_prose);
+        token.cancel();
+    }
+
+    /// A report with an ask in relay and a finished item in docs, both queued.
+    fn inbox_report() -> rl_proto::methods::Report {
+        use rl_proto::queue::{Hint, How, LeadRest, QueueItem, RestKind};
+        let queued = |key: &str, band, scope: &str, kind, hints: Vec<Hint>, last: &str| {
+            let mut l = report_lead("claude", key, band);
+            l.scope = Some(scope.into());
+            l.rest = Some(LeadRest {
+                item: QueueItem {
+                    source: "run".into(),
+                    reference: key.into(),
+                    kind,
+                    how: How::Reply,
+                    hints,
+                    at: l.at,
+                    rests: 1,
+                    from: l.at,
+                    from_head: None,
+                },
+                last: Some(last.into()),
+                changed: None,
+            });
+            l
+        };
+        rl_proto::methods::Report {
+            needs_you: vec![queued(
+                "run:a1",
+                rl_proto::lead::Band::NeedsYou,
+                "/p/relay",
+                RestKind::Asks,
+                vec![Hint::Question],
+                "Should I prune the branches?",
+            )],
+            live: vec![],
+            happened: vec![queued(
+                "run:d1",
+                rl_proto::lead::Band::Happened,
+                "/p/docs",
+                RestKind::Finished,
+                vec![],
+                "Wrote the guide.",
+            )],
+            tags: vec![],
+        }
+    }
+
+    #[tokio::test]
+    async fn the_inbox_draws_two_panes_when_wide() {
+        let (_tmp, token, mut app, _folder) = panel().await;
+        app.open_report().await;
+        app.report = Some(inbox_report());
+        let frame = draw_text(&mut app);
+        for want in ["All teams", "NEEDS YOU", "TEAMS", "▸ relay", "▸ docs"] {
+            assert!(frame.contains(want), "{want}: {frame}");
+        }
+        // The reading pane, right of the rule, has a block per team.
+        let right: Vec<&str> = frame
+            .lines()
+            .filter_map(|l| l.split_once('│').map(|(_, r)| r))
+            .collect();
+        assert!(
+            right.iter().any(|r| r.contains("relay") && r.contains("1 to review")),
+            "{frame}"
+        );
+        assert!(right.iter().any(|r| r.contains("docs")), "{frame}");
+        token.cancel();
+    }
+
+    #[tokio::test]
+    async fn narrow_shows_one_pane_and_enter_opens_the_reading_pane() {
+        let (_tmp, token, mut app, _folder) = panel().await;
+        app.open_report().await;
+        app.report = Some(inbox_report());
+        app.inbox_sel = super::inbox::Sel::Item("run:a1".into());
+        let list = screen(&mut app, 80, 30).join("\n");
+        assert!(list.contains("All teams") && list.contains("TEAMS"), "{list}");
+        assert!(!list.contains("ASKS ·"), "the list alone: {list}");
+        app.report_open = true;
+        let read = screen(&mut app, 80, 30).join("\n");
+        assert!(read.contains("ASKS ·") && read.contains("Should I prune"), "{read}");
+        assert!(
+            !read.contains("All teams") && !read.contains("TEAMS ·"),
+            "the reading pane alone: {read}"
+        );
         token.cancel();
     }
 
