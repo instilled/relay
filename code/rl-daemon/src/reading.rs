@@ -9,7 +9,7 @@ use crate::transcript::{self, Agent};
 use anyhow::Result;
 use jiff::Timestamp;
 use rl_ledger::session_io;
-use rl_proto::queue::{Changed, LogLine};
+use rl_proto::queue::{Changed, How, LogLine};
 use rl_proto::types::Run;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -70,9 +70,15 @@ impl Reading {
     }
 }
 
-/// What `run` last said, its first paragraph: the agent's last message in
-/// its log, else the last lines of its output.
-pub async fn last(d: &Daemon, run: &Run) -> Result<Option<String>> {
+/// What `run` last said, its first paragraph: for a permission it waits on,
+/// what it asks to do; else the agent's last message in its log, else the
+/// last lines of its output.
+pub async fn last(d: &Daemon, run: &Run, how: How) -> Result<Option<String>> {
+    if how == How::Permission
+        && let Some(detail) = &run.detail
+    {
+        return Ok(Some(detail.clone()));
+    }
     if let Some(agent) = Agent::of(run)
         && let Some(file) = summary::locate(d, run).await?
         && let Ok(meta) = std::fs::metadata(&file)

@@ -467,17 +467,27 @@ pub fn register(r: &mut Router<Daemon>) {
             .call_read(move |c| {
                 // Open-only by default.
                 let decisions = rl_ledger::decisions::list(c, &DecisionFilter::default())?;
-                let runs = runs::list_for_digest(c, since)?;
+                let mut runs = runs::list_for_digest(c, since)?;
                 let firings = crate::digest::firings(c)?;
                 let stored = rl_ledger::leads::list(c, now)?;
-                let ids: Vec<String> = runs.iter().map(|r| r.id.to_string()).collect();
-                let facts = rl_ledger::facts::get_many(c, &ids)?;
-                let recaps = rl_ledger::summaries::lines(c, &ids)?;
+                // A queued run waits until it is reviewed, however long ago
+                // it last moved.
                 let queue: HashMap<String, QueueItem> = rl_ledger::review_queue::list(c)?
                     .into_iter()
                     .filter(|i| i.source == "run")
                     .map(|i| (i.reference.clone(), i))
                     .collect();
+                for id in queue.keys() {
+                    if !runs.iter().any(|r| &r.id == id)
+                        && let Some(r) = runs::get(c, id)?
+                        && r.archived_at.is_none()
+                    {
+                        runs.push(r);
+                    }
+                }
+                let ids: Vec<String> = runs.iter().map(|r| r.id.to_string()).collect();
+                let facts = rl_ledger::facts::get_many(c, &ids)?;
+                let recaps = rl_ledger::summaries::lines(c, &ids)?;
                 let builtins = crate::report::project_builtins(&decisions, &runs, &firings, &facts, &recaps, &queue);
                 let tags = rl_ledger::tags::list(c)?;
                 let mut report = crate::report::assemble(builtins, stored, scope.as_deref(), since, now);
@@ -500,7 +510,7 @@ pub fn register(r: &mut Router<Daemon>) {
             let Some(run) = runs.get(&rest.item.reference) else {
                 continue;
             };
-            rest.last = crate::reading::last(&d, run).await.unwrap_or_else(|e| {
+            rest.last = crate::reading::last(&d, run, rest.item.how).await.unwrap_or_else(|e| {
                 warn!(run = %run.id, error = %format!("{e:#}"), "last message not read");
                 None
             });

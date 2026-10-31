@@ -648,3 +648,35 @@ async fn item_view_reads_the_log_since_from() {
     assert_eq!(texts(&view), ["Next."], "since the review");
     h.stop().await;
 }
+
+#[tokio::test]
+async fn a_permission_ask_is_told_by_what_it_asks() {
+    let Some(Setup {
+        _tmp,
+        home,
+        h,
+        mut c,
+        run,
+        ..
+    }) = setup("claude").await
+    else {
+        return;
+    };
+    hook(
+        &mut c,
+        &run,
+        "claude",
+        "Notification",
+        json!({ "notification_type": "permission_prompt", "message": "Claude needs your permission to use Bash" }),
+    )
+    .await;
+    queued(&home, &run.id).await;
+    let leads = run_leads(&mut c).await;
+    let lead = leads.iter().find(|l| l.key == format!("run:{}", run.id)).unwrap();
+    assert_eq!(lead.band, Band::NeedsYou);
+    assert_eq!(
+        lead.rest.as_ref().unwrap().last.as_deref(),
+        Some("Claude needs your permission to use Bash")
+    );
+    h.stop().await;
+}

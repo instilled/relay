@@ -5329,8 +5329,13 @@ mod tests {
         token.cancel();
     }
 
-    #[tokio::test]
-    async fn the_report_reaches_back_to_when_you_left() {
+    /// A panel with one more run, yesterday's build, ended 30 hours ago.
+    async fn panel_with_an_old_run() -> (
+        tempfile::TempDir,
+        tokio_util::sync::CancellationToken,
+        super::App,
+        std::path::PathBuf,
+    ) {
         let older = |folder: &std::path::Path, now: jiff::Timestamp| {
             vec![rl_proto::types::Run::new(
                 "run00002",
@@ -5346,14 +5351,29 @@ mod tests {
             unnamed: true,
             ..Default::default()
         };
-        let (_tmp, token, mut app, _folder) = panel_set(setup, older).await;
-        let happened = |app: &super::App| -> Vec<String> {
-            app.report
-                .iter()
-                .flat_map(|r| &r.happened)
-                .map(|l| l.key.clone())
-                .collect()
-        };
+        panel_set(setup, older).await
+    }
+
+    fn happened(app: &super::App) -> Vec<String> {
+        app.report
+            .iter()
+            .flat_map(|r| &r.happened)
+            .map(|l| l.key.clone())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn the_report_reaches_back_to_when_you_left() {
+        let (_tmp, token, mut app, _folder) = panel_with_an_old_run().await;
+        // Reviewed: nothing of it is queued any more.
+        let done = app
+            .rpc
+            .call::<rl_proto::methods::QueueReview>(rl_proto::methods::QueueReviewParams {
+                runs: vec!["run00002".into()],
+            })
+            .await
+            .unwrap();
+        assert_eq!(done.cleared, 1);
         // Within two hours away: the last day, and the build is not in it.
         left_ago(&mut app, jiff::SignedDuration::from_mins(30));
         app.open_report().await;
@@ -5362,9 +5382,20 @@ mod tests {
             "{:?}",
             happened(&app)
         );
-        app.open_report().await;
-        // Three days away: everything since you left, on the tick too.
-        left_ago(&mut app, jiff::SignedDuration::from_hours(72));
+        assert!(
+            happened(&app).contains(&"run:run00001".to_string()),
+            "{:?}",
+            happened(&app)
+        );
+        token.cancel();
+    }
+
+    #[tokio::test]
+    async fn an_unreviewed_old_run_stays_whatever_the_window() {
+        let (_tmp, token, mut app, _folder) = panel_with_an_old_run().await;
+        // Within two hours away the window is the last day, but the build
+        // waits to be reviewed: it stays, on the tick too.
+        left_ago(&mut app, jiff::SignedDuration::from_mins(30));
         app.open_report().await;
         assert!(
             happened(&app).contains(&"run:run00002".to_string()),

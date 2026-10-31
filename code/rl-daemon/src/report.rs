@@ -63,15 +63,17 @@ pub fn project_builtins(
         if matches!(r.cause, Cause::Assistant(_)) {
             continue;
         }
-        // The queue says what is news: a run that asks, or one that finished
-        // and waits to be looked at. Past that, only a run at work is shown;
-        // one at rest or ended with nothing queued has been reviewed.
+        // A run at work is live and one waiting on you needs you, by its
+        // state: the band does not wait for the queue. Past that the queue
+        // says what is news; a run at rest or ended with nothing queued has
+        // been reviewed. A run that carried on keeps its item until its next
+        // rest.
         let item = queue.get(&r.id);
-        let band = match item.map(|i| i.kind) {
-            Some(RestKind::Asks) => Band::NeedsYou,
-            _ if matches!(r.state, RunState::Working | RunState::Starting) => Band::Live,
-            Some(RestKind::Finished) => Band::Happened,
-            None => continue,
+        let band = match (r.state, item.map(|i| i.kind)) {
+            (RunState::Working | RunState::Starting, _) => Band::Live,
+            (RunState::NeedsInput | RunState::Blocked, _) | (_, Some(RestKind::Asks)) => Band::NeedsYou,
+            (_, Some(RestKind::Finished)) => Band::Happened,
+            (_, None) => continue,
         };
         // The ladder past a written recap: the agent's own, then the tail.
         let summary = match band {
@@ -123,8 +125,9 @@ pub fn project_builtins(
 }
 
 /// Merge built-in and stored leads into the three bands. needs-you and live are
-/// shown whatever their age; happened is bounded by `since`. Anything expired
-/// or out of scope is dropped. Each band is newest-first.
+/// shown whatever their age; happened is bounded by `since`, but for a queued
+/// run, which waits until it is reviewed. Anything expired or out of scope is
+/// dropped. Each band is newest-first.
 pub fn assemble(
     builtins: Vec<Lead>,
     stored: Vec<Lead>,
@@ -146,7 +149,7 @@ pub fn assemble(
         match lead.band {
             Band::NeedsYou => report.needs_you.push(lead),
             Band::Live => report.live.push(lead),
-            Band::Happened if lead.at >= since => report.happened.push(lead),
+            Band::Happened if lead.at >= since || lead.rest.is_some() => report.happened.push(lead),
             Band::Happened => {}
         }
     }
@@ -337,7 +340,7 @@ mod tests {
             test_run("r2", RunState::Failed),
             test_run("r3", RunState::Stopped),
             test_run("r4", RunState::Idle),
-            test_run("r5", RunState::NeedsInput),
+            test_run("r5", RunState::Stale),
         ];
         let leads = project_builtins(
             &[],
@@ -348,6 +351,42 @@ mod tests {
             &Default::default(),
         );
         assert!(leads.is_empty(), "{leads:?}");
+    }
+
+    #[test]
+    fn a_waiting_run_needs_you_before_it_is_queued() {
+        // Inside the screen's grace there is no item yet: its state says.
+        for state in [RunState::NeedsInput, RunState::Blocked] {
+            let leads = project_builtins(
+                &[],
+                &[test_run("r1", state)],
+                &[],
+                &Default::default(),
+                &Default::default(),
+                &Default::default(),
+            );
+            assert_eq!(leads.len(), 1, "{state:?}");
+            assert_eq!(leads[0].band, Band::NeedsYou, "{state:?}");
+            assert!(leads[0].rest.is_none());
+        }
+    }
+
+    #[test]
+    fn a_queued_happened_lead_is_not_bounded_by_since() {
+        // An item waits until it is reviewed, however long ago it rested.
+        let now = ts("2026-10-18T00:00:00Z");
+        let mut queue = queued(&[("r1", RestKind::Finished)]);
+        queue.get_mut("r1").unwrap().at = now - Duration::from_secs(3 * 24 * 3600);
+        let leads = project_builtins(
+            &[],
+            &[test_run("r1", RunState::Finished)],
+            &[],
+            &Default::default(),
+            &Default::default(),
+            &queue,
+        );
+        let r = assemble(leads, vec![], None, now - Duration::from_secs(3600), now);
+        assert_eq!(r.happened.len(), 1);
     }
 
     #[test]
@@ -529,12 +568,12 @@ mod tests {
     }
 
     #[test]
-    fn a_working_run_is_live_whatever_it_finished() {
+    fn a_working_run_is_live_whatever_its_item() {
         let cases = [
             (RunState::Working, None, Band::Live),
             (RunState::Starting, None, Band::Live),
             (RunState::Working, Some(RestKind::Finished), Band::Live),
-            (RunState::Working, Some(RestKind::Asks), Band::NeedsYou),
+            (RunState::Working, Some(RestKind::Asks), Band::Live),
         ];
         for (state, kind, want) in cases {
             let queue = kind.map(|k| queued(&[("r1", k)])).unwrap_or_default();
