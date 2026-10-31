@@ -788,6 +788,21 @@ pub fn register(r: &mut Router<Daemon>) {
             last_seen_at: previous,
         })
     });
+
+    r.register::<PresenceGet, _, _>(|d, PresenceClient { client }| async move {
+        let last = d
+            .ledger
+            .call_read({
+                let client = client.clone();
+                move |c| presence::get(c, &client)
+            })
+            .await
+            .map_err(RpcError::internal)?;
+        Ok(PresenceInfo {
+            client,
+            last_seen_at: last,
+        })
+    });
 }
 
 /// A kind a command may `rl emit`: a dotted, lowercase name of its own, each

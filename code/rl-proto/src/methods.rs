@@ -919,6 +919,15 @@ impl Method for PresenceTouch {
     type Result = PresenceInfo;
 }
 
+/// When a client last looked, without saying it looks now: for what reads
+/// the report without being a look at it (`rl report --json`).
+pub struct PresenceGet;
+impl Method for PresenceGet {
+    const NAME: &'static str = "presence.get";
+    type Params = PresenceClient;
+    type Result = PresenceInfo;
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PresenceClient {
     pub client: String,

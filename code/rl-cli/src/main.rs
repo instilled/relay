@@ -18,7 +18,7 @@ use rl_proto::methods::{
 };
 use rl_proto::methods::{
     DaemonInfo, DigestGet, DigestHide, DigestHideParams, DigestParams, EventFilter, EventList, PresenceClient,
-    PresenceTouch, RunFilter, RunList, RunMark, RunMarkParams, RunSpec, RunStart, RunStop, RunStopParams,
+    PresenceGet, PresenceTouch, RunFilter, RunList, RunMark, RunMarkParams, RunSpec, RunStart, RunStop, RunStopParams,
 };
 use rl_proto::methods::{
     DecisionDismiss, DecisionFilter, DecisionGet, DecisionId, DecisionList, DecisionNote, DecisionRaise, DecisionSpec,
@@ -1077,15 +1077,20 @@ async fn report(home: &Home, a: ReportArgs, json: bool) -> Result<()> {
     let scope = a.scope.map(|p| p.canonicalize().unwrap_or(p));
     let mut c = daemon::ensure(home, !json).await?;
     // `--since` as said; else from when you last looked, as `rl since` does, and as far back
-    // as the panel's report reaches (`inbox::window`).
+    // as the panel's report reaches (`inbox::window`). Only the summary read here is a look:
+    // `--json` reads when you were last here and leaves it.
     let (away_from, since) = match said {
         Some(s) => (Some(s), s),
         None => {
-            let me = rl_cli::attach::client_name();
-            let left = c
-                .call::<PresenceTouch>(PresenceClient { client: me })
-                .await?
-                .last_seen_at;
+            let me = PresenceClient {
+                client: rl_cli::attach::client_name(),
+            };
+            let left = if json {
+                c.call::<PresenceGet>(me).await?
+            } else {
+                c.call::<PresenceTouch>(me).await?
+            }
+            .last_seen_at;
             (left, rl_cli::tui::inbox::window(left, n))
         }
     };

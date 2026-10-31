@@ -59,6 +59,18 @@ fn rl_report_prints_the_written_summary() {
     );
     assert_eq!(paras.last().copied(), Some("relay: 1 needs you."), "{out}");
 
+    // Only a plain `rl report` is looking: `--since` and `--json` leave when
+    // you were last here as it was.
+    let (ok, out, err) = rl(&["report", "--json"]);
+    assert!(ok, "{out}{err}");
+    let seen = || {
+        let ledger = rl_ledger::Ledger::open(&rl_core::Home::at(home.clone()).ledger()).unwrap();
+        ledger.call_blocking(|c| rl_ledger::presence::latest(c)).unwrap()
+    };
+    assert_eq!(seen(), None, "--since and --json touch nothing");
+    assert!(rl(&["report"]).0);
+    assert!(seen().is_some(), "a plain report is looking");
+
     // The flags of the retired prose are gone.
     let (ok, _, _) = rl(&["report", "--prose"]);
     assert!(!ok);
