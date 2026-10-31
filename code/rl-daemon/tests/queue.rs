@@ -1,17 +1,19 @@
 //! A run's agent says, by its hook, that its turn is over or that it waits on
 //! you: the run is queued for review, asking or finished by what it last
 //! said. Hooks that say neither queue nothing, nor does a Codex turn's end
-//! that arrives after the next prompt.
+//! that arrives after the next prompt. A run with no hook is queued by its
+//! screen, unless a hook follows within the grace; its end adds `stopped`
+//! or `failed`.
 
 mod common;
 
-use common::{Conn, Harness};
+use common::{Conn, Harness, fake_cli};
 use jiff::Timestamp;
 use rl_core::Home;
 use rl_ledger::{Ledger, review_queue};
 use rl_proto::methods::AssistantOutput;
 use rl_proto::queue::{Hint, How, QueueItem, RestKind};
-use rl_proto::types::{Cause, Run, RunState};
+use rl_proto::types::{Cause, Run, RunState, Source};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -19,8 +21,12 @@ use std::time::{Duration, Instant};
 /// A stand-in agent: what makes a run Claude's, Codex's or Gemini's is the
 /// binary's name.
 fn stand_in(dir: &Path, name: &str) -> PathBuf {
+    stand_in_doing(dir, name, "sleep 30")
+}
+
+fn stand_in_doing(dir: &Path, name: &str, script: &str) -> PathBuf {
     let bin = dir.join(name);
-    std::fs::write(&bin, "#!/bin/sh\nsleep 30\n").unwrap();
+    std::fs::write(&bin, format!("#!/bin/sh\n{script}\n")).unwrap();
     std::fs::set_permissions(&bin, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
     bin
 }
@@ -320,5 +326,173 @@ async fn an_assistant_run_queues_nothing() {
     )
     .await;
     not_queued(&home, &run.id).await;
+    h.stop().await;
+}
+
+/// A daemon whose screen reads a prompt as idle within 300ms; `None` when
+/// `rl-session` is not built.
+fn quick() -> Option<(tempfile::TempDir, PathBuf, Home, Harness)> {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = Home::at(tmp.path().join("home"));
+    home.ensure_dirs().unwrap();
+    let registry = Harness::quick_registry(&home);
+    let Some(h) = Harness::with_registry(home.clone(), Some(registry)) else {
+        eprintln!("skipping: rl-session not built");
+        return None;
+    };
+    let dir = std::fs::canonicalize(tmp.path()).unwrap();
+    Some((tmp, dir, home, h))
+}
+
+#[tokio::test]
+async fn a_shell_that_goes_idle_queues_finished_by_screen() {
+    let Some((_tmp, dir, home, h)) = quick() else {
+        return;
+    };
+    let mut c = Conn::open(&home).await;
+    let run: Run = c
+        .ok(
+            "run.start",
+            json!({ "argv": ["/bin/sh", "-i"], "cwd": dir, "kind": "shell" }),
+        )
+        .await;
+    let idle = c.wait_state(&run.id, RunState::Idle).await;
+    let i = queued(&home, &run.id).await;
+    assert_eq!(said(&i), (RestKind::Finished, How::Screen, vec![]));
+    assert!(i.at <= idle.state_at, "at the rest, not after the grace");
+    let _: Run = c.ok("run.stop", json!({ "id": run.id })).await;
+    h.stop().await;
+}
+
+#[tokio::test]
+async fn a_hook_inside_the_grace_wins() {
+    let Some((_tmp, dir, home, h)) = quick() else {
+        return;
+    };
+    let mut c = Conn::open(&home).await;
+    let bin = stand_in_doing(&dir, "claude", "printf '> '; sleep 30");
+    let run: Run = c
+        .ok("run.start", json!({ "argv": [bin], "cwd": dir, "kind": "agent" }))
+        .await;
+    let idle = c.wait_state(&run.id, RunState::Idle).await;
+    assert_eq!(idle.source, Source::Pty, "the screen saw it first");
+    hook(
+        &mut c,
+        &run,
+        "claude",
+        "Stop",
+        json!({ "last_assistant_message": "Done." }),
+    )
+    .await;
+    let i = queued(&home, &run.id).await;
+    assert_eq!(said(&i), (RestKind::Finished, How::Reply, vec![]));
+    // Past the grace, the screen's rest is still not counted.
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    let i = item(&home, &run.id).unwrap();
+    assert_eq!((i.how, i.rests), (How::Reply, 1));
+    let _: Run = c.ok("run.stop", json!({ "id": run.id })).await;
+    h.stop().await;
+}
+
+#[tokio::test]
+async fn a_failed_run_is_queued_failed() {
+    let Some((_tmp, dir, home, h)) = quick() else {
+        return;
+    };
+    let mut c = Conn::open(&home).await;
+    let run: Run = c
+        .ok(
+            "run.start",
+            json!({ "argv": ["sh", "-c", "sleep 0.2; exit 3"], "cwd": dir, "kind": "command" }),
+        )
+        .await;
+    let ended = c.wait_terminal(&run.id).await;
+    assert_eq!(ended.state, RunState::Failed);
+    let i = queued(&home, &run.id).await;
+    assert_eq!(said(&i), (RestKind::Finished, How::Screen, vec![Hint::Failed]));
+    h.stop().await;
+}
+
+#[tokio::test]
+async fn a_killed_run_is_stopped() {
+    let Some(Setup {
+        _tmp,
+        home,
+        h,
+        mut c,
+        run,
+        ..
+    }) = setup("claude").await
+    else {
+        return;
+    };
+    hook(
+        &mut c,
+        &run,
+        "claude",
+        "Stop",
+        json!({ "last_assistant_message": "Should I push?" }),
+    )
+    .await;
+    queued(&home, &run.id).await;
+    let _: Run = c.ok("run.stop", json!({ "id": run.id })).await;
+    assert_eq!(c.wait_terminal(&run.id).await.state, RunState::Stopped);
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let i = loop {
+        let i = item(&home, &run.id).unwrap();
+        if i.hints.contains(&Hint::Stopped) {
+            break i;
+        }
+        assert!(Instant::now() < deadline, "never stopped: {i:?}");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    assert_eq!(
+        said(&i),
+        (RestKind::Asks, How::Reply, vec![Hint::Question, Hint::Stopped])
+    );
+    h.stop().await;
+}
+
+#[tokio::test]
+async fn start_head_is_kept() {
+    let Some((_tmp, dir, home, h)) = quick() else {
+        return;
+    };
+    let git = |repo: &Path, args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .current_dir(repo)
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {out:?}");
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    };
+    let repo = dir.join("repo");
+    let plain = dir.join("plain");
+    std::fs::create_dir_all(&repo).unwrap();
+    std::fs::create_dir_all(&plain).unwrap();
+    git(&repo, &["init", "-q"]);
+    git(&repo, &["commit", "-q", "--allow-empty", "-m", "first"]);
+    let head = git(&repo, &["rev-parse", "HEAD"]);
+
+    let mut c = Conn::open(&home).await;
+    let ledger = Ledger::open(&home.ledger()).unwrap();
+    for (cwd, want) in [(&repo, Some(head)), (&plain, None)] {
+        let run: Run = c
+            .ok(
+                "run.start",
+                json!({ "argv": [fake_cli()], "cwd": cwd, "kind": "agent" }),
+            )
+            .await;
+        assert_eq!(run.start_head, want);
+        let id = run.id.clone();
+        let kept = ledger
+            .call_blocking(move |c| rl_ledger::runs::get(c, &id))
+            .unwrap()
+            .unwrap();
+        assert_eq!(kept.start_head, want, "{}", cwd.display());
+        let _: Run = c.ok("run.stop", json!({ "id": run.id })).await;
+    }
     h.stop().await;
 }

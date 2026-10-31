@@ -62,6 +62,9 @@ pub struct ServeOptions {
     /// How agents that list their own sessions (Claude's) are asked for
     /// them; none, and none is (`RELAY_CLAUDE_SESSIONS=off`).
     pub claude_sessions: Option<crate::outside::Polling>,
+    /// How long a rest read off a run's screen waits for its hook; defaults
+    /// to [`supervisor::SCREEN_GRACE`].
+    pub screen_grace: Option<std::time::Duration>,
 }
 
 pub async fn serve(home: Home, shutdown: CancellationToken) -> Result<()> {
@@ -108,6 +111,7 @@ pub async fn serve_with(home: Home, shutdown: CancellationToken, opts: ServeOpti
         session_bin,
         registry.clone(),
         shutdown.child_token(),
+        opts.screen_grace.unwrap_or(supervisor::SCREEN_GRACE),
     ));
     match supervisor.reconcile().await {
         Ok(r) => info!(

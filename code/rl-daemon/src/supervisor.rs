@@ -21,9 +21,10 @@ use rl_detect::{Current, Registry, Signal, Transition, claude, step};
 use rl_ledger::events::NewEvent;
 use rl_ledger::session_io::Direction;
 use rl_ledger::sessions::SessionRow;
-use rl_ledger::{Ledger, events, runs, session_io, sessions};
+use rl_ledger::{Ledger, events, review_queue, runs, session_io, sessions};
 use rl_proto::methods::RunSpec;
-use rl_proto::types::{Confidence, Run, RunKind, RunState, Source, event_kind};
+use rl_proto::queue::{Hint, How, RestKind};
+use rl_proto::types::{Cause, Confidence, Run, RunKind, RunState, Source, event_kind};
 use rl_session::client::{Session, SessionReader, SessionWriter};
 use rl_session::exit::{Exit, read_exit_file};
 use rl_session::proto::{Frame, Hello};
@@ -60,6 +61,8 @@ const NOTES_BROADCAST: usize = 64;
 const REATTACH_TIMEOUT: Duration = Duration::from_secs(2);
 /// How long shutdown waits for follow tasks to flush.
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
+/// How long a rest read off the screen waits for a hook to say it first.
+pub const SCREEN_GRACE: Duration = Duration::from_secs(30);
 
 /// A viewer at the keyboard: who, and from which of their terminals.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -157,6 +160,8 @@ pub struct Supervisor {
     /// leaving every run exactly as it is.
     shutdown: CancellationToken,
     tasks: TaskTracker,
+    /// [`SCREEN_GRACE`], but for tests.
+    screen_grace: Duration,
 }
 
 /// What [`Supervisor::reconcile`] found.
@@ -177,6 +182,7 @@ impl Supervisor {
         session_bin: PathBuf,
         registry: Arc<Registry>,
         shutdown: CancellationToken,
+        screen_grace: Duration,
     ) -> Self {
         Self {
             home,
@@ -186,6 +192,7 @@ impl Supervisor {
             live: Mutex::new(HashMap::new()),
             shutdown,
             tasks: TaskTracker::new(),
+            screen_grace,
         }
     }
 
@@ -266,6 +273,7 @@ impl Supervisor {
         run.ref_ = spec.ref_.clone();
         run.tags = spec.tags.clone();
         run.cause = spec.cause.clone();
+        run.start_head = start_head.clone();
         if let Some(f) = &spec.chain {
             run.chain = f.clone();
         }
@@ -777,7 +785,7 @@ impl Supervisor {
                         let _ = live.output.send(Arc::from(bytes.as_slice()));
                         batch.extend_from_slice(&bytes);
                         let sig = heur.output(&bytes, Timestamp::now());
-                        self.consider(&live, sig).await;
+                        self.consider(&run, &live, sig).await;
                         // Drained whatever the run is, so marks cannot pile
                         // up on one that would never file them; only a shell's
                         // are worth keeping.
@@ -809,7 +817,7 @@ impl Supervisor {
                 }
                 _ = tick.tick() => {
                     if let Some(sig) = heur.tick(Timestamp::now()) {
-                        self.consider(&live, sig).await;
+                        self.consider(&run, &live, sig).await;
                     }
                 }
             }
@@ -840,14 +848,55 @@ impl Supervisor {
     }
 
     /// A PTY signal from the follow task: skipped cheaply when the mirror
-    /// says it would change nothing.
-    async fn consider(&self, live: &Live, sig: Signal) {
+    /// says it would change nothing. One that brings the run to rest queues
+    /// it, once the grace is over with no hook saying so first.
+    async fn consider(&self, run: &Run, live: &Live, sig: Signal) {
         if step(live.current(), &sig).is_none() {
             return;
         }
-        if let Err(e) = self.apply(&live.id, sig).await {
-            warn!(id = %live.id, error = %format!("{e:#}"), "applying pty signal");
+        let at = Timestamp::now();
+        match self.apply(&live.id, sig).await {
+            Ok(Some(t)) if t.source == Source::Pty && t.changed() => {
+                let kind = match t.state {
+                    RunState::NeedsInput => RestKind::Asks,
+                    RunState::Idle => RestKind::Finished,
+                    _ => return,
+                };
+                self.screen_rest(run, kind, at);
+            }
+            Ok(_) => {}
+            Err(e) => warn!(id = %live.id, error = %format!("{e:#}"), "applying pty signal"),
         }
+    }
+
+    /// Queues `run` as the screen saw it at `at`, after the grace, unless a
+    /// hook has queued it since. Relay's own assistant runs are never queued.
+    fn screen_rest(&self, run: &Run, kind: RestKind, at: Timestamp) {
+        if matches!(run.cause, Cause::Assistant(_)) {
+            return;
+        }
+        let (ledger, shutdown, grace) = (self.ledger.clone(), self.shutdown.clone(), self.screen_grace);
+        let (id, start, head) = (run.id.clone(), run.started_at, run.start_head.clone());
+        tokio::spawn(async move {
+            tokio::select! {
+                _ = tokio::time::sleep(grace) => {}
+                _ = shutdown.cancelled() => return,
+            }
+            let r = ledger
+                .call(move |c| {
+                    if let Some((last, how)) = review_queue::last_rest(c, "run", &id)?
+                        && last >= at
+                        && how != How::Screen
+                    {
+                        return Ok(());
+                    }
+                    review_queue::rest(c, "run", &id, kind, How::Screen, &[], at, start, head.as_deref())
+                })
+                .await;
+            if let Err(e) = r {
+                warn!(error = %e, "queueing a screen rest");
+            }
+        });
     }
 
     async fn flush(&self, id: &str, batch: &mut Vec<u8>, last: Option<String>) {
@@ -983,6 +1032,23 @@ impl Supervisor {
             .await;
         if let Err(e) = r {
             warn!(error = %e, "recording run end");
+        }
+        // The end is a hint on its queued item, or queues it as finished.
+        // Relay's own assistant runs are never queued.
+        if !matches!(run.cause, Cause::Assistant(_)) {
+            let hint = if state == RunState::Failed {
+                Hint::Failed
+            } else {
+                Hint::Stopped
+            };
+            let (id, start, head) = (run.id.clone(), run.started_at, run.start_head.clone());
+            if let Err(e) = self
+                .ledger
+                .call(move |c| review_queue::end(c, "run", &id, hint, ended_at, start, head.as_deref()))
+                .await
+            {
+                warn!(id = %run.id, error = %e, "queueing a run's end");
+            }
         }
         info!(id = %run.id, state = %state, %summary, "run ended");
         // Freeze what the run did. Reading git and the transcript happens
