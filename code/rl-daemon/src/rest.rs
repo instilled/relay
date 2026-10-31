@@ -107,7 +107,7 @@ mod tests {
     }
 
     #[test]
-    fn which_asks() {
+    fn which_opening_the_paragraph_asks() {
         assert_eq!(kind("Which of the two do you prefer."), (ASKS.0, ASKS.1()));
     }
 
