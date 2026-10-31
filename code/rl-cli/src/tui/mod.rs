@@ -34,6 +34,7 @@ mod flow_ops;
 mod flow_tests;
 pub(crate) mod flows;
 pub mod form;
+pub mod inbox;
 mod input;
 mod join;
 mod keys;

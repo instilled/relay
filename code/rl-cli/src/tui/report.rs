@@ -33,7 +33,7 @@ pub struct Lane<'a> {
     pub rows: Vec<Row<'a>>,
 }
 
-fn lane_name(lead: &Lead, tags: &HashMap<&str, &str>) -> String {
+pub(crate) fn lane_name(lead: &Lead, tags: &HashMap<&str, &str>) -> String {
     if let Some(tag) = tags.get(lead.source.as_str()) {
         return (*tag).to_string();
     }
