@@ -72,6 +72,9 @@ pub struct Drafted {
     seen_end: Cell<bool>,
     /// When it was first drawn: an enter sooner than `SETTLE` after was meant for something else.
     pub(super) drawn: Cell<Option<Instant>>,
+    /// Words asked since did not reach it — the ask failed, or was answered with no flow: it is
+    /// drawn dim, as an older one, and is no one's yes until an answer takes its place.
+    pub older: bool,
 }
 
 /// How long a draft is on screen before enter writes it: a key typed for what was there before
@@ -107,6 +110,7 @@ impl Drafted {
             page: Cell::new(0),
             seen_end: Cell::new(false),
             drawn: Cell::new(None),
+            older: false,
         }
     }
 
@@ -153,7 +157,14 @@ impl Drafted {
     /// that fits is seen at once.
     pub fn draw(&self, head: Vec<Line<'static>>, f: &mut Frame, area: Rect) {
         let mut lines = head;
-        lines.extend(self.lines());
+        if self.older {
+            lines.extend(self.lines().into_iter().map(|l| {
+                let spans = l.spans.into_iter().map(|s| Span::styled(s.content, theme::dim()));
+                Line::from(spans.collect::<Vec<_>>())
+            }));
+        } else {
+            lines.extend(self.lines());
+        }
         let rows = wrap(lines, area.width as usize);
         let page = area.height as usize;
         let top = self.top.get().min(rows.len().saturating_sub(page));
@@ -210,9 +221,9 @@ impl Drafted {
     /// What the keys do, for the footer: the scroll keys first while it is taller than the pane.
     pub fn hint(&self) -> String {
         let keys = if self.ready() {
-            "enter writes it and says yes · ^e opens it in $EDITOR first · esc lets it go"
+            "type changes it · enter writes it and says yes · ^e opens it in $EDITOR first · esc lets it go"
         } else {
-            "it would not load · ^e opens it in $EDITOR · esc lets it go"
+            "it would not load · type changes it · ^e opens it in $EDITOR · esc lets it go"
         };
         if self.rows.get() > self.page.get() {
             format!("↑↓ pgup/pgdn read it · {keys}")
@@ -337,7 +348,7 @@ mod tests {
         assert!(text.contains(&"     run: echo hello".to_string()), "{text:#?}");
         assert_eq!(
             ok.hint(),
-            "enter writes it and says yes · ^e opens it in $EDITOR first · esc lets it go"
+            "type changes it · enter writes it and says yes · ^e opens it in $EDITOR first · esc lets it go"
         );
 
         let bad = Drafted::new(
@@ -356,7 +367,7 @@ mod tests {
         );
         assert_eq!(
             bad.hint(),
-            "it would not load · ^e opens it in $EDITOR · esc lets it go"
+            "it would not load · type changes it · ^e opens it in $EDITOR · esc lets it go"
         );
         let lines: Vec<String> = bad.lines().iter().map(|l| l.to_string()).collect();
         assert_eq!(
@@ -415,7 +426,7 @@ mod tests {
         assert!(!tall.seen(), "its end is below");
         assert_eq!(
             tall.hint(),
-            "↑↓ pgup/pgdn read it · enter writes it and says yes · ^e opens it in $EDITOR first · esc lets it go"
+            "↑↓ pgup/pgdn read it · type changes it · enter writes it and says yes · ^e opens it in $EDITOR first · esc lets it go"
         );
         assert!(tall.scroll(KeyCode::Down) && tall.scroll(KeyCode::PageDown));
         assert!(!tall.scroll(KeyCode::Enter), "not a scroll key");

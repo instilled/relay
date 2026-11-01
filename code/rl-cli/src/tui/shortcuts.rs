@@ -39,10 +39,11 @@ pub enum Place {
     Rename,
     /// A flow's pane walked: its steps, then its last firings.
     Walk,
-    /// A project's overview: its flows, and `+ new flow`.
-    Overview,
-    /// A flow proposed in the pane, new or a change.
-    FlowProposal,
+    /// A project's overview: its flows, and `+ new flow`; whether the cursor is on one of
+    /// them, where words typed are a flow's.
+    Overview { words: bool },
+    /// A flow proposed in the pane, new or a change; whether it is still being asked.
+    FlowProposal { asking: bool },
 }
 
 /// One key and what it does there, in a word or two.
@@ -174,16 +175,23 @@ fn place_keys(at: Place) -> Vec<Key> {
             key("^w ^u ^k", "cut"),
             key("↑↓", "let it go"),
         ],
-        Place::Overview => vec![
-            key("↑↓", "moves"),
-            key("enter", "opens"),
-            key("→ ←", "its steps"),
-            key("^e", "edits"),
-            key("type", "changes it / makes one"),
-            key("/summary", ""),
-            key("esc", "the list"),
-        ],
-        Place::FlowProposal => vec![
+        Place::Overview { words } => {
+            let mut v = vec![
+                key("↑↓", "moves"),
+                key("enter", "opens"),
+                key("→ ←", "its steps"),
+                key("^e", "edits"),
+            ];
+            if words {
+                v.push(key("type", "changes it / makes one"));
+            }
+            v.push(key("/summary", ""));
+            v.push(key("esc", "the list"));
+            v
+        }
+        // Asked, and not answered yet: the one key there is.
+        Place::FlowProposal { asking: true } => vec![key("esc", "leaves it asking")],
+        Place::FlowProposal { asking: false } => vec![
             key("type", "changes it"),
             key("enter", "saves"),
             key("^e", "opens in $EDITOR"),
@@ -354,14 +362,23 @@ mod tests {
         );
 
         assert_eq!(
-            one_line(Place::Overview),
+            one_line(Place::Overview { words: true }),
             "↑↓ moves · enter opens · → ← its steps · ^e edits · type changes it / makes one · \
              /summary · esc the list · ^h"
         );
+        // On the top row words are not a flow's: no word of typing.
+        assert_eq!(
+            one_line(Place::Overview { words: false }),
+            "↑↓ moves · enter opens · → ← its steps · ^e edits · /summary · esc the list · ^h"
+        );
 
         assert_eq!(
-            one_line(Place::FlowProposal),
+            one_line(Place::FlowProposal { asking: false }),
             "type changes it · enter saves · ^e opens in $EDITOR · ↑↓ reads · esc drops · ^h"
+        );
+        assert_eq!(
+            one_line(Place::FlowProposal { asking: true }),
+            "esc leaves it asking · ^h"
         );
 
         let question = one_line(Place::Question);
@@ -444,8 +461,10 @@ mod tests {
             Place::Hidden,
             Place::Rename,
             Place::Walk,
-            Place::Overview,
-            Place::FlowProposal,
+            Place::Overview { words: true },
+            Place::Overview { words: false },
+            Place::FlowProposal { asking: false },
+            Place::FlowProposal { asking: true },
         ] {
             let ks = keys(at);
             for width in [160, 120, 80, 60, 40, 30] {
@@ -535,8 +554,10 @@ mod tests {
             Place::Events,
             Place::Rename,
             Place::Walk,
-            Place::Overview,
-            Place::FlowProposal,
+            Place::Overview { words: true },
+            Place::Overview { words: false },
+            Place::FlowProposal { asking: false },
+            Place::FlowProposal { asking: true },
         ] {
             let last = keys(at).pop().unwrap();
             assert_eq!(last.keys, "^h", "{at:?}");

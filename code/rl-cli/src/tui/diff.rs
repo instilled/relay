@@ -99,6 +99,39 @@ mod tests {
     }
 
     #[test]
+    fn a_run_of_lines_replaced_goes_whole_then_comes_whole() {
+        assert_eq!(
+            lines("a\nb\nc\nd\n", "a\nX\nY\nZ\nd\n"),
+            vec![
+                (Same, "a"),
+                (Gone, "b"),
+                (Gone, "c"),
+                (Added, "X"),
+                (Added, "Y"),
+                (Added, "Z"),
+                (Same, "d")
+            ]
+        );
+    }
+
+    #[test]
+    fn blank_lines_are_lines() {
+        // One kept, one gone, one come: each blank line counted where it stands.
+        assert_eq!(
+            lines("a\n\nb\n\nc\n", "a\n\nb\nc\n\n"),
+            vec![
+                (Same, "a"),
+                (Same, ""),
+                (Same, "b"),
+                (Gone, ""),
+                (Same, "c"),
+                (Added, "")
+            ]
+        );
+        assert_eq!(lines("a\n", "\na\n"), vec![(Added, ""), (Same, "a")]);
+    }
+
+    #[test]
     fn a_carriage_return_is_the_lines_own() {
         assert_eq!(lines("a\n", "a\r\n"), vec![(Gone, "a"), (Added, "a\r")]);
         assert_eq!(lines("\n", "\n"), vec![(Same, "")]);

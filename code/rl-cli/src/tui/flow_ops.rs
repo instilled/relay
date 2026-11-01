@@ -93,8 +93,12 @@ impl App {
 
     /// Back from the editor: every flow read again, and the one edited said
     /// yes to only as `rl flow edit` gives it — saved, loaded, and no more
-    /// than the edit in it; else why not. A new flow left as the template is taken away first.
+    /// than the edit in it; else why not. A new flow left as the template is taken away first; a
+    /// change proposed in the pane is the proposal's to settle (`edited_change`).
     pub(super) async fn edited(&mut self, editing: crate::flow::Editing) {
+        if let Some(p) = self.editing_change.take() {
+            return self.edited_change(editing, p).await;
+        }
         let name = editing.name.clone();
         let said = match crate::flow::drop_new(&self.home, &editing, false) {
             Ok(true) => Ok(crate::flow::Edited::Dropped),

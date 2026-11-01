@@ -568,3 +568,68 @@ async fn write_changed_refuses_what_would_not_load() {
     assert_eq!(std::fs::read_to_string(md).unwrap(), base);
     token.cancel();
 }
+
+#[tokio::test]
+async fn write_changed_puts_back_what_the_daemon_would_not_load() {
+    let (tmp, home, token, mut rpc, base) = approved_pulse().await;
+    // A project the panel was told of and the daemon was not: it checks, and the daemon says no.
+    let elsewhere = std::fs::canonicalize(tmp.path()).unwrap().join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    let text = base.replace("---\nwhen", &format!("---\nin: {}\nwhen", elsewhere.display()));
+    let edited = rl_cli::flow::write_changed(&mut rpc, &home, "pulse", &base, &text, &[elsewhere])
+        .await
+        .unwrap();
+    assert!(
+        matches!(edited, rl_cli::flow::Edited::NotLoaded(_)),
+        "{}",
+        edited.words("pulse")
+    );
+    let md = home.flow_dir("pulse").join("flow.md");
+    assert_eq!(std::fs::read_to_string(md).unwrap(), base, "put back");
+    // Read back as it was: loaded, with its yes.
+    let flows = rpc
+        .call::<rl_proto::flow::FlowList>(rl_proto::flow::FlowFilter { all: false })
+        .await
+        .unwrap();
+    let pulse = flows.iter().find(|f| f.name == "pulse").expect("loaded");
+    assert!(pulse.approved());
+    token.cancel();
+}
+
+#[tokio::test]
+async fn start_changed_writes_the_change_for_the_editor() {
+    let (_tmp, home, token, mut rpc, base) = approved_pulse().await;
+    let text = base.replace("every 1d", "every 2d");
+    let editing = rl_cli::flow::start_changed(&home, "pulse", &base, &text).unwrap();
+    let md = home.flow_dir("pulse").join("flow.md");
+    assert_eq!(editing.file, md);
+    assert_eq!(std::fs::read_to_string(&md).unwrap(), text);
+    // Saved as it was written, it is still a change to what was there: the editor's yes.
+    let (edited, _) = rl_cli::flow::finish_edit(&mut rpc, editing.clone()).await.unwrap();
+    assert!(
+        matches!(edited, rl_cli::flow::Edited::Approved(_)),
+        "{}",
+        edited.words("pulse")
+    );
+    // And what it was can be put back.
+    rl_cli::flow::restore(&editing, &base).unwrap();
+    assert_eq!(std::fs::read_to_string(&md).unwrap(), base);
+    token.cancel();
+}
+
+#[tokio::test]
+async fn start_changed_refuses_a_moved_base() {
+    let (_tmp, home, token, _rpc, base) = approved_pulse().await;
+    let md = home.flow_dir("pulse").join("flow.md");
+    let moved = base.replace("echo hello", "echo moved");
+    std::fs::write(&md, &moved).unwrap();
+    let Err(e) = rl_cli::flow::start_changed(&home, "pulse", &base, "anything") else {
+        panic!("opened over a flow.md changed since it was asked");
+    };
+    assert_eq!(
+        format!("{e:#}"),
+        "pulse's flow.md changed since it was asked · type to ask again"
+    );
+    assert_eq!(std::fs::read_to_string(&md).unwrap(), moved);
+    token.cancel();
+}

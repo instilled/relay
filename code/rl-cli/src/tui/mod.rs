@@ -502,9 +502,10 @@ struct App {
     /// `/flow edit`: the flow being edited, and the line of its `flow.md` to
     /// open the editor at once the screen is given back.
     editor: Option<(crate::flow::Editing, usize)>,
-    /// What a changed flow's `flow.md` was asked of, while the change is in the editor: put back
-    /// should the editor never open.
-    editing_base: Option<String>,
+    /// The flow proposal for a change, while the change is in the editor: what its `flow.md` was
+    /// asked of goes back, and the proposal comes up again, unless the editor saves a change that
+    /// loads.
+    editing_change: Option<flow_proposal::FlowProposal>,
     /// A run to hand the real terminal to (its id, and whether to take the
     /// keyboard from whoever holds it), once ratatui has stepped aside.
     attach: Option<(String, bool)>,
@@ -1319,7 +1320,7 @@ impl App {
             asking: None,
             proposal: None,
             flow_proposal: None,
-            editing_base: None,
+            editing_change: None,
             summary: None,
             summarising: None,
             overview: None,
@@ -1387,19 +1388,24 @@ impl App {
                             let outcome = crate::env::open_in_editor(&editing.file, line);
                             *terminal = enter_screen();
                             input = EventStream::new();
-                            let base = self.editing_base.take();
                             match outcome {
                                 Ok(()) => self.edited(editing).await,
                                 Err(e) => {
-                                    // However the editor ends, a new flow's template is not left
-                                    // behind, nor a change proposed in a flow's place unseen.
-                                    let left = match base {
-                                        Some(base) => crate::flow::restore(&editing, &base),
+                                    // However the editor ends, a change proposed is not left in
+                                    // a flow's place unseen — what it was goes back, and so does
+                                    // the proposal — nor a new flow's template left behind.
+                                    let why = format!("{e:#}");
+                                    let left = match self.editing_change.take() {
+                                        Some(p) => {
+                                            let text =
+                                                p.draft.as_ref().map(|d| d.text.clone()).unwrap_or_default();
+                                            self.change_back(&editing, p, text, Some(why.clone())).await
+                                        }
                                         None => crate::flow::drop_new(&self.home, &editing, true).map(|_| ()),
                                     };
                                     match left {
-                                        Err(left) => self.say(format!("{e:#}; {left:#}")),
-                                        Ok(()) => self.say(format!("{e:#}")),
+                                        Err(left) => self.say(format!("{why}; {left:#}")),
+                                        Ok(()) => self.say(why),
                                     }
                                 }
                             }
@@ -1578,8 +1584,10 @@ impl App {
             return None;
         }
         // A flow proposed takes the keys while it is up, wherever it was asked from.
-        if self.flow_proposal_shown().is_some() {
-            return Some(shortcuts::Place::FlowProposal);
+        if let Some(p) = self.flow_proposal_shown() {
+            return Some(shortcuts::Place::FlowProposal {
+                asking: p.since.is_some(),
+            });
         }
         // The same test as the footer's: the output page's keys while it is up.
         if self.pane == Pane::Term && self.term.is_some() {
@@ -1593,7 +1601,9 @@ impl App {
             View::CatchUp => shortcuts::Place::CatchUp,
             View::Report => shortcuts::Place::Report,
             View::Overview if self.selected_question().is_some() => shortcuts::Place::Question,
-            View::Overview => shortcuts::Place::Overview,
+            View::Overview => shortcuts::Place::Overview {
+                words: self.overview_words_for().is_some(),
+            },
             View::Work if self.selected_question().is_some() => shortcuts::Place::Question,
             View::Work if self.show_hidden => shortcuts::Place::Hidden,
             View::Work => shortcuts::Place::List,

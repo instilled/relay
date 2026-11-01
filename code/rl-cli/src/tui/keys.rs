@@ -943,7 +943,7 @@ impl App {
                     self.line.clear();
                     self.refine_flow(words);
                 } else if self.overview_words(words.clone()) {
-                    self.line.clear();
+                    // Taken: the line is cleared only when a proposal starts.
                 } else {
                     self.line.clear();
                     self.ask(words, Want::Any);

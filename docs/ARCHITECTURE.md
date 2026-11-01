@@ -409,8 +409,9 @@ path and byte but `runs/`); a flow runs only while its approved hash equals the 
 change asks again. The hash is checked again before a firing and before each step starts, so a
 firing waiting four hours on a question never runs a script changed meanwhile, and a firing runs
 the definition and version it began with. `rl flow approve` says yes to one hash; `rl flow edit`
-and `rl flow new` approve only exactly what was saved (`rl-cli/src/flow/edit.rs`, `new.rs`);
-nothing an agent wrote is approved for you.
+and `rl flow new` approve only exactly what was saved (`rl-cli/src/flow/edit.rs`, `new.rs`), and
+so does `enter` on a flow proposed in the panel's pane, once its draft has been on screen to its
+end (`flow::write_new`, `flow::write_changed`); nothing an agent wrote is approved for you.
 
 **The engine** is pure decisions (`rl-flow/src/advance.rs`) carried out by `rl-daemon/src/flows/
 engine.rs`, under one lock. A pending step starts when all its `after` are `done` and its `if:`

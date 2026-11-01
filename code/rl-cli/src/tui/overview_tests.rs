@@ -820,3 +820,113 @@ async fn a_change_proposal_does_not_move_on_cursor_moves() {
     assert!(app.flow_proposal_shown().is_some(), "still up");
     token.cancel();
 }
+
+/// The draft in the pane on screen a moment, to its end, and `enter`.
+async fn saved(app: &mut super::App) {
+    super::flow_proposal_tests::on_screen(app);
+    press(app, KeyCode::Enter, KeyModifiers::NONE).await;
+}
+
+#[tokio::test]
+async fn words_on_a_flow_answered_and_entered_change_it_and_the_cursor_stays_on_it() {
+    let (tmp, token, mut app, folder) = panel().await;
+    flow_in(&tmp, &mut app, "alpha", &md_in(&folder)).await;
+    flow_in(&tmp, &mut app, "hello", &md_in(&folder)).await;
+    app.refresh().await;
+    approve(&mut app, "hello").await;
+    enter_project(&mut app, &folder).await;
+    app.select(Some("f:hello".into()));
+    type_in(&mut app, "say why").await;
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+    unasked(&mut app);
+    let changed = format!("{}\nSays why.\n", md_in(&folder));
+    answer_md(&mut app, None, &changed).await;
+    saved(&mut app).await;
+    assert_eq!(said(&app), "hello approved");
+    let md = app.home.flow_dir("hello").join("flow.md");
+    assert_eq!(std::fs::read_to_string(md).unwrap(), changed);
+    assert!(app.flows.iter().any(|f| f.name == "hello" && f.approved()));
+    assert!(app.view == View::Overview && app.flow_proposal.is_none() && !app.show_pane);
+    assert_eq!(app.sel.as_deref(), Some("f:hello"));
+    app.settle();
+    assert_eq!(app.sel.as_deref(), Some("f:hello"));
+    token.cancel();
+}
+
+#[tokio::test]
+async fn words_on_new_flow_answered_and_entered_make_it_and_the_cursor_lands_on_it() {
+    let (tmp, token, mut app, folder) = panel().await;
+    flow_in(&tmp, &mut app, "alpha", &md_in(&folder)).await;
+    app.refresh().await;
+    enter_project(&mut app, &folder).await;
+    app.select(Some(NEW_FLOW.into()));
+    type_in(&mut app, "probe it").await;
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+    unasked(&mut app);
+    answer_md(&mut app, Some("zeta"), &md_in(&folder)).await;
+    saved(&mut app).await;
+    assert_eq!(said(&app), "zeta approved");
+    assert!(app.home.flow_dir("zeta").join("flow.md").exists());
+    assert!(app.view == View::Overview && app.flow_proposal.is_none());
+    assert_eq!(app.sel.as_deref(), Some("f:zeta"));
+    // The next tick's fix-up leaves it there.
+    app.settle();
+    assert_eq!(app.sel.as_deref(), Some("f:zeta"));
+    token.cancel();
+}
+
+#[tokio::test]
+async fn a_new_flow_in_another_place_says_where_it_went() {
+    let (tmp, token, mut app, folder) = panel().await;
+    flow_in(&tmp, &mut app, "alpha", &md_in(&folder)).await;
+    app.refresh().await;
+    enter_project(&mut app, &folder).await;
+    app.select(Some(NEW_FLOW.into()));
+    type_in(&mut app, "probe it").await;
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+    unasked(&mut app);
+    // The answer has no `in`: the flow is everywhere's, not this project's.
+    answer_md(&mut app, Some("loose"), "---\nsteps:\n  probe:\n    run: x\n---\n").await;
+    saved(&mut app).await;
+    assert_eq!(said(&app), "loose approved · it is in everywhere");
+    assert!(app.view == View::Overview);
+    assert!(app.sel.as_ref().is_some_and(|k| app.keys().contains(k)));
+    token.cancel();
+}
+
+#[tokio::test]
+async fn words_on_a_flow_whose_file_cant_be_read_stay_on_the_line() {
+    let (tmp, token, mut app, folder) = panel().await;
+    flow_in(&tmp, &mut app, "hello", &md_in(&folder)).await;
+    app.refresh().await;
+    enter_project(&mut app, &folder).await;
+    app.select(Some("f:hello".into()));
+    std::fs::remove_file(app.home.flow_dir("hello").join("flow.md")).unwrap();
+    type_in(&mut app, "every 2h").await;
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+    assert!(
+        said(&app).starts_with("hello's flow.md can't be read: "),
+        "{}",
+        said(&app)
+    );
+    assert_eq!(app.line.text(), "every 2h", "the words are kept");
+    assert!(app.flow_proposal.is_none() && app.asking.is_none());
+    token.cancel();
+}
+
+#[tokio::test]
+async fn typing_is_a_flows_only_on_a_flow_or_new_flow() {
+    let (tmp, token, mut app, folder) = panel().await;
+    flow_in(&tmp, &mut app, "hello", &md_in(&folder)).await;
+    app.refresh().await;
+    enter_project(&mut app, &folder).await;
+    let place = |words| Some(super::shortcuts::Place::Overview { words });
+    app.select(Some("f:hello".into()));
+    assert_eq!(app.shortcuts_place(), place(true));
+    app.select(Some(NEW_FLOW.into()));
+    assert_eq!(app.shortcuts_place(), place(true));
+    // On no flow, words are words as anywhere.
+    app.select(None);
+    assert_eq!(app.shortcuts_place(), place(false));
+    token.cancel();
+}

@@ -165,8 +165,9 @@ impl App {
 
     /// Words typed in the overview, taken for a flow when the cursor is on one: on a flow, a
     /// change to it, asked of its `flow.md` as it is now; on `+ new flow`, a new one in the
-    /// project. Either way proposed in the pane. Whether they were taken; elsewhere, or with a
-    /// proposal up, they are not, and go on as words anywhere do.
+    /// project. Either way proposed in the pane, and the line cleared for it; a `flow.md` that
+    /// can't be read is said, and the words stay on the line. Whether they were taken; elsewhere,
+    /// or with a proposal up, they are not, and go on as words anywhere do.
     pub(super) fn overview_words(&mut self, words: String) -> bool {
         if self.flow_proposal_shown().is_some() || self.proposal_shown().is_some() {
             return false;
@@ -176,11 +177,15 @@ impl App {
         };
         let Some(name) = name else {
             let folder = self.overview.as_ref().and_then(Scope::folder).map(Path::to_path_buf);
+            self.line.clear();
             self.propose_flow(Aim::New { named: None, folder }, words);
             return true;
         };
         match std::fs::read_to_string(self.home.flow_dir(&name).join("flow.md")) {
-            Ok(base) => self.propose_flow(Aim::Change { name, base }, words),
+            Ok(base) => {
+                self.line.clear();
+                self.propose_flow(Aim::Change { name, base }, words);
+            }
             Err(e) => self.say(format!("{name}'s flow.md can't be read: {e}")),
         }
         true

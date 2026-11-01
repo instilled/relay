@@ -560,22 +560,245 @@ async fn ctrl_e_opens_the_proposal_in_the_editor() {
     let (editing, _) = app.editor.take().expect("the editor is next");
     assert_eq!(editing.file, home.flow_dir("later").join("flow.md"));
     assert!(app.flow_proposal.is_none() && !app.show_pane);
-    assert!(app.editing_base.is_none());
+    assert!(app.editing_change.is_none());
     app.edited(editing).await;
     assert_eq!(said(&app), "later approved");
 
-    // A change: its `flow.md` holds what was proposed, and what it was is kept to put back.
-    let base = hello_there(&mut app, &home).await;
-    ask_for(&mut app, change(&base), "every 2h");
-    answer(&mut app, &ANSWER.replace("every 1h", "every 2h")).await;
-    press(&mut app, KeyCode::Char('e'), KeyModifiers::CONTROL).await;
-    let (editing, _) = app.editor.take().expect("the editor is next");
+    // A change: its `flow.md` holds what was proposed, and the proposal is kept aside, with what
+    // it was asked of, to put back.
+    let (editing, base) = change_in_editor(&mut app, &home).await;
     assert_eq!(editing.name, "hello");
     let md = home.flow_dir("hello").join("flow.md");
     assert!(std::fs::read_to_string(&md).unwrap().contains("every 2h"));
-    assert_eq!(app.editing_base.as_deref(), Some(base.as_str()));
-    // The editor never opened: put back as it was asked of.
-    crate::flow::restore(&editing, &base).unwrap();
+    let kept = app.editing_change.as_ref().expect("kept aside");
+    assert_eq!(kept.aim, change(&base));
+    assert!(app.flow_proposal.is_none() && !app.show_pane);
+    token.cancel();
+}
+
+/// `hello` there, a change to it proposed — `every 2h` — and `^e` on it: the editor next, the
+/// file it opens, and `hello`'s `flow.md` as it was asked of.
+async fn change_in_editor(app: &mut super::App, home: &rl_core::Home) -> (crate::flow::Editing, String) {
+    let base = hello_there(app, home).await;
+    ask_for(app, change(&base), "every 2h");
+    answer_md(app, None, &HELLO.replace("every 1h", "every 2h")).await;
+    on_screen(app);
+    press(app, KeyCode::Char('e'), KeyModifiers::CONTROL).await;
+    let (editing, _) = app.editor.take().expect("the editor is next");
+    (editing, base)
+}
+
+/// A client whose daemon hangs up on it: every call fails. Its home, kept while it is used.
+async fn hung_up() -> (tempfile::TempDir, crate::client::Client) {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = rl_core::Home::at(tmp.path());
+    let sock = home.daemon_socket();
+    std::fs::create_dir_all(sock.parent().unwrap()).unwrap();
+    let listener = tokio::net::UnixListener::bind(&sock).unwrap();
+    tokio::spawn(async move {
+        while let Ok((s, _)) = listener.accept().await {
+            drop(s);
+        }
+    });
+    let rpc = crate::client::Client::connect(&home).await.unwrap();
+    (tmp, rpc)
+}
+
+/// `hello`, as the daemon has it now.
+fn hello(app: &super::App) -> &rl_proto::flow::Flow {
+    app.flows.iter().find(|f| f.name == "hello").expect("hello is there")
+}
+
+#[tokio::test]
+async fn a_change_saved_changed_in_the_editor_is_said_yes_to() {
+    let (tmp, token, mut app, _) = panel().await;
+    let home = rl_core::Home::at(tmp.path().join("h"));
+    let (editing, _) = change_in_editor(&mut app, &home).await;
+    let mine = HELLO.replace("every 1h", "every 3h");
+    std::fs::write(&editing.file, &mine).unwrap();
+    app.edited(editing).await;
+    assert_eq!(said(&app), "hello approved");
+    assert_eq!(
+        std::fs::read_to_string(home.flow_dir("hello").join("flow.md")).unwrap(),
+        mine
+    );
+    assert!(hello(&app).approved());
+    assert!(app.flow_proposal.is_none() && app.editing_change.is_none());
+    token.cancel();
+}
+
+#[tokio::test]
+async fn a_change_left_as_proposed_in_the_editor_is_no_yes() {
+    let (tmp, token, mut app, _) = panel().await;
+    let home = rl_core::Home::at(tmp.path().join("h"));
+    let (editing, base) = change_in_editor(&mut app, &home).await;
+    let md = editing.file.clone();
+    // The editor quit without saving: the file is as proposed.
+    app.edited(editing).await;
+    assert_eq!(said(&app), "nothing saved · back in the proposal: enter saves it");
+    assert_eq!(std::fs::read_to_string(&md).unwrap(), base, "put back");
+    assert!(hello(&app).approved(), "the flow as it was, with its yes");
+    let p = app.flow_proposal_shown().expect("back in the pane");
+    assert_eq!(p.aim, change(&base));
+    let d = p.draft.as_ref().unwrap();
+    assert!(d.text.contains("every 2h") && d.ready(), "the proposal as it was");
+    // And `enter` is its yes.
+    let screen = on_screen(&mut app);
+    assert!(screen.contains(" + when: every 2h"), "{screen}");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+    assert_eq!(said(&app), "hello approved");
+    assert!(std::fs::read_to_string(&md).unwrap().contains("every 2h"));
+    token.cancel();
+}
+
+#[tokio::test]
+async fn a_change_that_would_not_load_in_the_editor_puts_the_flow_back() {
+    let (tmp, token, mut app, _) = panel().await;
+    let home = rl_core::Home::at(tmp.path().join("h"));
+    let (editing, base) = change_in_editor(&mut app, &home).await;
+    let md = editing.file.clone();
+    let broken = HELLO.replace("every 1h", "every now and then");
+    std::fs::write(&md, &broken).unwrap();
+    app.edited(editing).await;
+    assert_eq!(said(&app), "hello kept as it was · what you wrote is in the proposal");
+    assert_eq!(std::fs::read_to_string(&md).unwrap(), base, "put back");
+    assert!(hello(&app).approved(), "loaded as it was, with its yes");
+    assert!(!app.not_loaded.iter().any(|n| n.flow == "hello"), "read back as it was");
+    let p = app.flow_proposal_shown().expect("back in the pane");
+    assert_eq!(p.aim, change(&base));
+    assert!(
+        p.error.as_deref().is_some_and(|e| e.starts_with("not loaded: ")),
+        "{:?}",
+        p.error
+    );
+    let d = p.draft.as_ref().unwrap();
+    assert_eq!(d.text, broken, "what was written is the draft");
+    assert!(!d.ready(), "and it says why it would not load");
+    let screen = on_screen(&mut app);
+    assert!(screen.contains("✗ not loaded: "), "{screen}");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+    assert!(said(&app).starts_with("it would not load: "), "{}", said(&app));
     assert_eq!(std::fs::read_to_string(&md).unwrap(), base);
+    token.cancel();
+}
+
+#[tokio::test]
+async fn a_change_the_daemon_cannot_take_puts_the_flow_back() {
+    let (tmp, token, mut app, _) = panel().await;
+    let home = rl_core::Home::at(tmp.path().join("h"));
+    let (editing, base) = change_in_editor(&mut app, &home).await;
+    let md = editing.file.clone();
+    let mine = HELLO.replace("every 1h", "every 3h");
+    std::fs::write(&md, &mine).unwrap();
+    // No daemon to say yes.
+    let (_gone, rpc) = hung_up().await;
+    app.rpc = rpc;
+    app.edited(editing).await;
+    assert_eq!(said(&app), "hello kept as it was · what you wrote is in the proposal");
+    assert_eq!(std::fs::read_to_string(&md).unwrap(), base, "put back");
+    let p = app.flow_proposal_shown().expect("back in the pane");
+    assert!(
+        p.error.as_deref().is_some_and(|e| e.starts_with("edit hello: ")),
+        "{:?}",
+        p.error
+    );
+    assert_eq!(p.draft.as_ref().unwrap().text, mine);
+    token.cancel();
+}
+
+#[tokio::test]
+async fn a_change_needing_a_yes_after_the_editor_keeps_its_text() {
+    let (tmp, token, mut app, _) = panel().await;
+    let home = rl_core::Home::at(tmp.path().join("h"));
+    let base = hello_there(&mut app, &home).await;
+    // Something in its folder since its yes: no yes comes with an edit.
+    std::fs::write(home.flow_dir("hello").join("notes.txt"), "mine\n").unwrap();
+    ask_for(&mut app, change(&base), "every 2h");
+    answer_md(&mut app, None, &HELLO.replace("every 1h", "every 2h")).await;
+    on_screen(&mut app);
+    press(&mut app, KeyCode::Char('e'), KeyModifiers::CONTROL).await;
+    let (editing, _) = app.editor.take().expect("the editor is next");
+    let mine = HELLO.replace("every 1h", "every 3h");
+    std::fs::write(&editing.file, &mine).unwrap();
+    app.edited(editing).await;
+    assert_eq!(
+        said(&app),
+        "hello needs a yes: its folder changed since its last yes; look, then rl flow approve hello"
+    );
+    assert_eq!(
+        std::fs::read_to_string(home.flow_dir("hello").join("flow.md")).unwrap(),
+        mine
+    );
+    assert!(app.flow_proposal.is_none());
+    token.cancel();
+}
+
+#[tokio::test]
+async fn a_refine_that_comes_to_nothing_leaves_the_draft_older() {
+    let (tmp, token, mut app, _) = panel().await;
+    let home = rl_core::Home::at(tmp.path().join("h"));
+    proposed(&mut app, "hello", HELLO).await;
+    run(&mut app, "only weekdays").await;
+    unasked(&mut app);
+    app.answered(Ok(Err(anyhow::anyhow!("fakeai took too long")))).await;
+    let d = app.flow_proposal.as_ref().unwrap().draft.as_ref().unwrap();
+    assert!(d.older, "the words did not reach it");
+    let screen = on_screen(&mut app);
+    assert!(screen.contains("✗ fakeai took too long"), "{screen}");
+    assert!(
+        screen.contains("the last words were not taken · type again, or esc"),
+        "the footer: {screen}"
+    );
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+    assert_eq!(said(&app), "the last words were not taken · type again, or esc");
+    assert!(!home.flow_dir("hello").exists(), "no yes to the older one");
+    press(&mut app, KeyCode::Char('e'), KeyModifiers::CONTROL).await;
+    assert!(app.editor.is_none(), "nor opened for one");
+    // An answer that takes the words: a draft again, and its yes.
+    run(&mut app, "only weekdays").await;
+    unasked(&mut app);
+    answer_md(&mut app, Some("hello"), HELLO).await;
+    assert!(!app.flow_proposal.as_ref().unwrap().draft.as_ref().unwrap().older);
+    on_screen(&mut app);
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+    assert_eq!(said(&app), "hello approved");
+    token.cancel();
+}
+
+#[tokio::test]
+async fn new_words_for_a_flow_say_an_earlier_draft_goes() {
+    let (_tmp, token, mut app, _) = panel().await;
+    proposed(&mut app, "hello", HELLO).await;
+    // A run's output over it, then words for another flow.
+    app.open_term_on("run00001".into(), super::tests::AREA).await;
+    run(&mut app, "/flow new bye say bye").await;
+    unasked(&mut app);
+    assert_eq!(said(&app), "the earlier flow proposal was let go");
+    assert_eq!(app.flow_proposal_shown().unwrap().asked, ["say bye"]);
+    token.cancel();
+}
+
+#[tokio::test]
+async fn while_asked_the_only_key_is_esc() {
+    let (_tmp, token, mut app, _) = panel().await;
+    ask_for(
+        &mut app,
+        Aim::New {
+            named: None,
+            folder: None,
+        },
+        "say hello",
+    );
+    assert_eq!(
+        app.shortcuts_place(),
+        Some(super::shortcuts::Place::FlowProposal { asking: true })
+    );
+    answer(&mut app, ANSWER).await;
+    assert_eq!(
+        app.shortcuts_place(),
+        Some(super::shortcuts::Place::FlowProposal { asking: false })
+    );
+    let screen = on_screen(&mut app);
+    assert!(screen.contains("type changes it · enter writes it"), "{screen}");
     token.cancel();
 }

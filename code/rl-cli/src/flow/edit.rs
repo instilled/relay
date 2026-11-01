@@ -167,19 +167,26 @@ pub async fn write_changed(
         Ok((edited, _)) => Ok(edited),
         Err(e) => {
             restore(&written, base)?;
+            // The daemon may have read the new text before it failed: it reads the old back.
+            let _ = rpc.call::<FlowReload>(()).await;
             Err(e)
         }
     }
 }
 
 /// A flow's `flow.md` changed to `text`, ready for an editor — `^e` on a change proposed: the
-/// person reads it there, and saving it, changed or not, is their yes (`finish_edit`). Only while
-/// the file is still `base`. A caller whose editor does not open, or fails, writes `base` back
-/// (`restore`): no yes was given to the change.
+/// person reads it there, and saving it is their yes (`finish_edit`). Only while the file is
+/// still `base`, and a write that fails puts `base` back. A caller whose editor does not open,
+/// fails, or leaves `text` as it was, writes `base` back (`restore`): no yes was given to the
+/// change.
 pub fn start_changed(home: &Home, name: &str, base: &str, text: &str) -> Result<Editing> {
     as_asked(home, name, base)?;
     let mut editing = start_edit(home, name)?;
-    std::fs::write(&editing.file, text).with_context(|| format!("writing {}", editing.file.display()))?;
+    if let Err(e) = std::fs::write(&editing.file, text) {
+        // Half written is no flow: what it was asked of goes back.
+        restore(&editing, base)?;
+        return Err(anyhow::Error::new(e).context(format!("writing {}", editing.file.display())));
+    }
     // `was` stays the old text: what the editor saves is a change to it.
     editing.yours = true;
     Ok(editing)

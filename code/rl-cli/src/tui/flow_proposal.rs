@@ -8,18 +8,25 @@
 use super::new_flow::{Drafted, shown};
 use super::{App, Asking, Pane, View, rows, theme};
 use crate::context::Want;
-use crate::flow::NewFile;
+use crate::flow::{Edited, NewFile};
 use crate::interpret::Answer;
 use anyhow::Result;
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
+use rl_proto::flow::FlowReload;
 use std::path::PathBuf;
 use std::time::Instant;
 
 /// What the dots say while the assistant is at it, one a second.
 const DOTS: [&str; 3] = ["·  ", "·· ", "···"];
+
+/// Said of a draft the last words did not reach: it is not what was asked for now.
+const OLDER: &str = "the last words were not taken · type again, or esc";
+
+/// Said when a flow proposal with a draft in it makes way for another.
+const LET_GO: &str = "the earlier flow proposal was let go";
 
 /// What the words are for.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -121,6 +128,7 @@ impl FlowProposal {
     pub fn hint(&self) -> String {
         match &self.draft {
             _ if self.since.is_some() => "esc leaves it asking".into(),
+            Some(d) if d.older => OLDER.into(),
             Some(d) => d.hint(),
             None => "type to ask again · esc drops it".into(),
         }
@@ -144,9 +152,13 @@ impl App {
         }
         let mut p = FlowProposal::new(aim, vec![words], true);
         p.since = Some(Instant::now());
-        self.flow_proposal = Some(p);
+        let was = self.flow_proposal.replace(p);
         self.show_flow_proposal();
         self.ask_flow();
+        // A draft out of sight goes for these words: said, as it goes.
+        if was.is_some_and(|p| p.draft.is_some()) {
+            self.say(LET_GO);
+        }
     }
 
     /// More words with the flow proposal up: asked again, with the text they change.
@@ -264,7 +276,13 @@ impl App {
                 format!("asking: {e}")
             }
         };
-        const LET_GO: &str = "the earlier flow proposal was let go";
+        // A draft from before these words is not what they asked for: no yes to it, until an
+        // answer that takes them.
+        if let Some(d) = p.draft.as_mut()
+            && p.error.is_some()
+        {
+            d.older = true;
+        }
         if !(p.shown && up) {
             p.shown = false;
             self.say(if let_go { format!("{said} · {LET_GO}") } else { said });
@@ -336,6 +354,9 @@ impl App {
         let Some(d) = &p.draft else {
             return self.say("nothing proposed yet · type to ask again");
         };
+        if d.older {
+            return self.say(OLDER);
+        }
         // Typed for what was there before it came: not its yes, and nothing said.
         if d.settling(Instant::now()) {
             return;
@@ -372,9 +393,7 @@ impl App {
             Ok(said) => {
                 self.close_flow_proposal();
                 self.refresh().await;
-                if self.view == View::Overview {
-                    self.select(Some(rows::flow_key(&name)));
-                }
+                let said = self.onto_saved(&name, said);
                 // Said last: a refresh that fails says so, and this is what matters.
                 self.say(said);
             }
@@ -399,9 +418,33 @@ impl App {
         }
     }
 
+    /// A flow just written from the proposal: the cursor on it, in the overview — after the
+    /// refresh has settled the cursor, so nothing moves it off again. One whose `in` is another
+    /// project is not here to land on: `said` says where it went.
+    fn onto_saved(&mut self, name: &str, said: String) -> String {
+        if self.view != View::Overview {
+            return said;
+        }
+        let key = rows::flow_key(name);
+        if self.keys().contains(&key) {
+            self.select(Some(key));
+            return said;
+        }
+        let Some(flow) = self.flows.iter().find(|f| f.name == name) else {
+            return said;
+        };
+        let project = match &flow.folder {
+            Some(p) => self.names.workspace(p),
+            None => rows::EVERYWHERE.to_string(),
+        };
+        format!("{said} · it is in {project}")
+    }
+
     /// `^e` on an empty line with the flow proposal up: it, written and opened in `$EDITOR`, and
     /// said yes to on return as an edit is — a new flow's folder taken away again if the editor
-    /// never opens, a change's `flow.md` put back as it was asked of.
+    /// never opens. A change is kept aside meanwhile (`editing_change`): unless the editor saves a
+    /// change that loads, its `flow.md` goes back as it was asked of, and the proposal comes up
+    /// again (`edited_change`).
     pub(super) fn edit_flow_proposal(&mut self) {
         let Some(p) = self.flow_proposal_shown() else { return };
         if p.since.is_some() {
@@ -410,23 +453,81 @@ impl App {
         let Some(d) = &p.draft else {
             return self.say("nothing proposed yet · type to ask again");
         };
+        if d.older {
+            return self.say(OLDER);
+        }
         let opened = match &p.aim {
             Aim::New { .. } => crate::flow::check_name(&self.home, &d.name).and_then(|name| {
                 crate::flow::start_new(&self.home, &name, vec![NewFile::flow_md(d.text.clone())], true)
             }),
             Aim::Change { name, base } => crate::flow::start_changed(&self.home, name, base, &d.text),
         };
-        let base = match &p.aim {
-            Aim::Change { base, .. } => Some(base.clone()),
-            Aim::New { .. } => None,
-        };
+        let change = matches!(p.aim, Aim::Change { .. });
         match opened {
             Ok(editing) => {
                 self.editor = Some((editing, 1));
-                self.editing_base = base;
+                self.editing_change = if change { self.flow_proposal.take() } else { None };
                 self.close_flow_proposal();
             }
             Err(e) => self.say(format!("{e:#}")),
         }
+    }
+
+    /// Back from `$EDITOR` with a change proposed in it. Saved changed, loaded and said yes to:
+    /// done. Left needing a yes (`NeedsYes`): kept, as `/flow edit` keeps it. Left as proposed —
+    /// the editor quit without saving — is no yes: what the flow was goes back, and the proposal
+    /// with it, for `enter`. Anything else — what would not load, or no daemon to say yes — the
+    /// same, the editor's text the draft now, and why over it.
+    pub(super) async fn edited_change(&mut self, editing: crate::flow::Editing, p: FlowProposal) {
+        let name = editing.name.clone();
+        let proposed = p.draft.as_ref().map(|d| d.text.clone()).unwrap_or_default();
+        let now = std::fs::read_to_string(&editing.file).ok();
+        if now.as_deref() == Some(proposed.as_str()) {
+            let said = match self.change_back(&editing, p, proposed, None).await {
+                Ok(()) => "nothing saved · back in the proposal: enter saves it".to_string(),
+                Err(e) => format!("{e:#}"),
+            };
+            return self.say(said);
+        }
+        let text = now.unwrap_or(proposed);
+        let why = match crate::flow::finish_edit(&mut self.rpc, editing.clone()).await {
+            Ok((e @ (Edited::Approved(_) | Edited::NeedsYes(_)), _)) => {
+                self.say(e.words(&name));
+                return self.refresh().await;
+            }
+            Ok((e, _)) => e.words(&name),
+            Err(e) => format!("edit {name}: {e:#}"),
+        };
+        let said = match self.change_back(&editing, p, text, Some(why)).await {
+            Ok(()) => format!("{name} kept as it was · what you wrote is in the proposal"),
+            Err(e) => format!("{e:#}"),
+        };
+        self.say(said);
+    }
+
+    /// A change in the editor that was not said yes to, undone: `flow.md` back as the proposal
+    /// was asked of, the daemon asked to read it again when it is up, and the proposal up once
+    /// more with `text` as its draft and `why` over it.
+    pub(super) async fn change_back(
+        &mut self,
+        editing: &crate::flow::Editing,
+        mut p: FlowProposal,
+        text: String,
+        why: Option<String>,
+    ) -> Result<()> {
+        let Aim::Change { name, base } = p.aim.clone() else {
+            return Ok(());
+        };
+        let left = crate::flow::restore(editing, &base);
+        let _ = self.rpc.call::<FlowReload>(()).await;
+        self.refresh().await;
+        let agent = p.draft.as_ref().map(|d| d.agent.clone()).unwrap_or_default();
+        let known = self.names.paths();
+        p.draft = Some(Drafted::new(Some(name), text, agent, &known, &|_| None).with_base(base));
+        p.error = why;
+        p.since = None;
+        self.flow_proposal = Some(p);
+        self.show_flow_proposal();
+        left
     }
 }
