@@ -793,6 +793,7 @@ impl App {
                 overview::Scope::Project(h.workspace.clone())
             };
             self.open_overview(scope, None);
+            self.fetch_overview_top().await;
             // Not `moved`: opening the overview alone does not mark the flow it lands on seen.
             self.load_pane().await;
         } else {

@@ -72,6 +72,20 @@ impl App {
         self.select(Some(at));
     }
 
+    /// What was last said of the overview's project, fetched for its top whichever row the
+    /// cursor is on. `everywhere`'s top has none.
+    pub(super) async fn fetch_overview_top(&mut self) {
+        let Some(folder) = self.overview.as_ref().and_then(Scope::folder) else {
+            return;
+        };
+        let target = SummaryTarget::Project {
+            workspace: folder.to_path_buf(),
+        };
+        if let Some(Some(s)) = self.kept_summary(target).await {
+            self.overview_said = Some(s);
+        }
+    }
+
     /// Back from the overview to the list, on the line it was opened from.
     pub(super) async fn leave_overview(&mut self) {
         self.overview = None;

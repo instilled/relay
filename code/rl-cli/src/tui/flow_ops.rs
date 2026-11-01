@@ -17,6 +17,7 @@ impl App {
         self.back_to_list().await;
         self.select(Some(scope.line_key()));
         self.open_overview(scope, Some(key.clone()));
+        self.fetch_overview_top().await;
         if self.sel.as_ref() != Some(&key) && !self.filter.is_empty() {
             self.filter.clear();
             self.select(Some(key.clone()));

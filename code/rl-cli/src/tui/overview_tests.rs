@@ -623,3 +623,25 @@ async fn a_catch_up_over_the_overview_leaves_for_the_list() {
     assert!(app.overview.is_none());
     token.cancel();
 }
+
+#[tokio::test]
+async fn a_kept_project_summary_shows_at_the_top_when_the_overview_opens_on_a_flow() {
+    let (tmp, token, mut app, folder) = panel().await;
+    flow_in(&tmp, &mut app, "alpha", &md_in(&folder)).await;
+    app.refresh().await;
+    let away = jiff::Timestamp::now() - jiff::SignedDuration::from_hours(1);
+    let target = SummaryTarget::Project {
+        workspace: folder.clone(),
+    };
+    let mut kept = said_of(&target, "- the deploy went out");
+    kept.from = Some(away);
+    let ledger = rl_ledger::Ledger::open(&rl_core::Home::at(tmp.path().join("h")).ledger()).unwrap();
+    ledger.call_blocking(move |c| rl_ledger::kept::put(c, &kept)).unwrap();
+    app.away_since = Some(away);
+    enter_project(&mut app, &folder).await;
+    assert_eq!(app.sel.as_deref(), Some("f:alpha"));
+    let frame = draw_text(&mut app);
+    assert!(frame.contains("the deploy went out"), "{frame}");
+    assert!(!frame.contains("no summary yet"), "{frame}");
+    token.cancel();
+}

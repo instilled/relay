@@ -1721,31 +1721,8 @@ impl App {
         }
         let Some(target) = self.summary_target() else { return };
         let made = self.made.get(&target.key()).cloned();
-        let (deep, from) = match (&made, &target) {
-            (Some(m), _) => (m.deep, m.from),
-            (None, SummaryTarget::Project { .. } | SummaryTarget::All) => (false, self.away_since),
-            (None, SummaryTarget::Flow { .. }) => {
-                (false, self.sel.as_ref().and_then(|k| self.unseen_from.get(k)).copied())
-            }
-            (None, _) => (false, None),
-        };
-        // A project or everything with no stretch has nothing kept for it.
-        let needs_from = matches!(target, SummaryTarget::Project { .. } | SummaryTarget::All);
-        let kept = if needs_from && from.is_none() {
-            None
-        } else {
-            let ask = SummaryParams {
-                target,
-                deep,
-                from,
-                again: false,
-                dry: false,
-                timeout: None,
-            };
-            match self.rpc.call::<SummaryGet>(ask).await {
-                Ok(s) => s,
-                Err(_) => return,
-            }
+        let Some(kept) = self.kept_summary(target).await else {
+            return;
         };
         // The overview's top is its project's, wherever the cursor goes next.
         if let Some(s) = kept
@@ -1755,6 +1732,33 @@ impl App {
             self.overview_said = Some(s.clone());
         }
         self.summary = kept.or(made);
+    }
+
+    /// The summary kept of `target`, over the stretch and depth last made of it here, else its
+    /// default one. `Some(None)`: nothing kept; `None`: rld could not be asked.
+    async fn kept_summary(&mut self, target: SummaryTarget) -> Option<Option<Summary>> {
+        let (deep, from) = match (self.made.get(&target.key()), &target) {
+            (Some(m), _) => (m.deep, m.from),
+            (None, SummaryTarget::Project { .. } | SummaryTarget::All) => (false, self.away_since),
+            (None, SummaryTarget::Flow { .. }) => {
+                (false, self.sel.as_ref().and_then(|k| self.unseen_from.get(k)).copied())
+            }
+            (None, _) => (false, None),
+        };
+        // A project or everything with no stretch has nothing kept for it.
+        let needs_from = matches!(target, SummaryTarget::Project { .. } | SummaryTarget::All);
+        if needs_from && from.is_none() {
+            return Some(None);
+        }
+        let ask = SummaryParams {
+            target,
+            deep,
+            from,
+            again: false,
+            dry: false,
+            timeout: None,
+        };
+        self.rpc.call::<SummaryGet>(ask).await.ok()
     }
 
     // ---- the list ----------------------------------------------------------
