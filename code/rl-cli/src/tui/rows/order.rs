@@ -183,12 +183,12 @@ pub(crate) fn move_project(
     })
 }
 
-/// `(questions, need you, working, finished, flows)` over what the list shows.
-/// A flow counts once, and as needing you when its last run failed; one of
-/// an agent's own session as a run in its state would.
-pub fn counts(rows: &[Row]) -> (usize, usize, usize, usize, usize) {
-    let mut c = (0, 0, 0, 0, 0);
-    let by_state = |s: RunState, c: &mut (usize, usize, usize, usize, usize)| {
+/// `(questions, need you, working, finished)` over what the list shows. The
+/// list has no flow rows; `flows_need` adds what the flows want. One of an
+/// agent's own session counts as a run in its state would.
+pub fn counts(rows: &[Row]) -> (usize, usize, usize, usize) {
+    let mut c = (0, 0, 0, 0);
+    let by_state = |s: RunState, c: &mut (usize, usize, usize, usize)| {
         use rl_proto::types::RunState::*;
         match s {
             NeedsInput | Blocked | Failed => c.1 += 1,
@@ -202,14 +202,8 @@ pub fn counts(rows: &[Row]) -> (usize, usize, usize, usize, usize) {
             Row::Question(_) => c.0 += 1,
             Row::Run(i) => by_state(i.run.state, &mut c),
             Row::Outside(s) => by_state(s.run_state(), &mut c),
-            // A flow that has not run is not what is moving: its header says it is there.
-            Row::Flow(f) if f.runs.is_empty() => {}
-            Row::Flow(f) => {
-                c.4 += 1;
-                if f.failed_last() {
-                    c.1 += 1;
-                }
-            }
+            // Only the catch-up has flow rows; a flow that has not run is not what is moving.
+            Row::Flow(f) => c.1 += usize::from(f.failed_last()),
         }
     }
     c
@@ -235,32 +229,50 @@ pub fn lost_note(d: &Digest) -> Option<String> {
     Some(format!("{} lost in a restart · {how}", d.lost.len()))
 }
 
+/// How many flows, in every folder and with none, want you: a yes, an
+/// answer, or a failure unseen. The headline adds them to what needs you.
+pub fn flows_need(flows: &[Flow], d: &Digest) -> usize {
+    flows
+        .iter()
+        .filter(|f| f.removed_at.is_none() && flow_needs(f, d))
+        .count()
+}
+
 /// The flows with no `in`, as the headline says them: how many there are —
-/// `↻ 2 everywhere` — and, when any waits for a yes, that it does and where
-/// to give it. `chips` are those ones (`chips(flows, None, ..)`); the flag
-/// says one is waiting, which is drawn amber. Nothing when there are none.
-pub fn everywhere(chips: &[Chip]) -> Option<(String, bool)> {
-    if chips.is_empty() {
+/// `↻ 2 everywhere` — then the rest of the tally as a project's line says it,
+/// except that the one flow that needs you is named: `· pulse needs you`.
+/// The flag says one needs you, which is drawn amber. Nothing when there are none.
+pub fn everywhere(flows: &[Flow], d: &Digest) -> Option<(String, bool)> {
+    let t = tally(flows, None, d);
+    if t.total == 0 {
         return None;
     }
-    let waiting = chips.iter().filter(|c| c.needs_yes()).count();
-    let mut s = format!("{FLOW} {} everywhere", chips.len());
-    let need = |n: usize| if n == 1 { "needs" } else { "need" };
-    match waiting {
-        0 => {}
-        // All of them wait: the count already says how many.
-        n if n == chips.len() => s.push_str(&format!(" {} a yes · /flow approve", need(n))),
-        n => s.push_str(&format!(" · {n} {} a yes · /flow approve", need(n))),
+    let words = t.words();
+    let mut rest: Vec<&str> = words.split(" · ").skip(1).collect();
+    let mut needing = flows
+        .iter()
+        .filter(|f| f.removed_at.is_none() && f.folder.is_none() && flow_needs(f, d));
+    let named = match (needing.next(), needing.next()) {
+        (Some(f), None) => Some(format!("{} needs you", f.name)),
+        _ => None,
+    };
+    if let (Some(n), Some(last)) = (&named, rest.last_mut()) {
+        *last = n;
     }
-    Some((s, waiting > 0))
+    let mut s = format!("{FLOW} {} everywhere", t.total);
+    for r in rest {
+        s.push_str(" · ");
+        s.push_str(r);
+    }
+    Some((s, t.needs > 0))
 }
 
 /// What the headline says of the flows with no `in`, piece by piece: the
-/// tally (`everywhere`), amber when one waits for a yes, then — when a flow
+/// tally (`everywhere`), amber when one needs you, then — when a flow
 /// of theirs did not load — `flows broken` in red beside it.
-pub fn global_parts(chips: &[Chip], broken: bool) -> Vec<(String, Tone)> {
+pub fn global_parts(flows: &[Flow], d: &Digest, broken: bool) -> Vec<(String, Tone)> {
     let mut out = Vec::new();
-    if let Some((note, waiting)) = everywhere(chips) {
+    if let Some((note, waiting)) = everywhere(flows, d) {
         out.push((note, if waiting { Tone::Needs } else { Tone::Plain }));
     }
     if broken {
@@ -269,9 +281,11 @@ pub fn global_parts(chips: &[Chip], broken: bool) -> Vec<(String, Tone)> {
     out
 }
 
-/// The header line: what needs you first, then what is moving.
-pub fn headline(rows: &[Row], news: usize, filter: &str) -> String {
-    let (asked, need, working, fin, flows) = counts(rows);
+/// The header line: what needs you first, then what is moving. The flows
+/// that need you (`flows_need`) are among those that do.
+pub fn headline(rows: &[Row], news: usize, filter: &str, flows_need: usize) -> String {
+    let (asked, need, working, fin) = counts(rows);
+    let need = need + flows_need;
     let mut parts = Vec::new();
     if asked > 0 {
         parts.push(format!("{asked} to decide"));
@@ -284,9 +298,6 @@ pub fn headline(rows: &[Row], news: usize, filter: &str) -> String {
     }
     if fin > 0 {
         parts.push(format!("{fin} finished"));
-    }
-    if flows > 0 {
-        parts.push(format!("{flows} flow{}", if flows == 1 { "" } else { "s" }));
     }
     if news > 0 {
         parts.push(format!("{news} new"));

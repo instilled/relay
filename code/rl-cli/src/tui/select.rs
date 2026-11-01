@@ -11,7 +11,7 @@ impl App {
                 names: &self.names,
                 flows: &self.flows,
                 filter: &self.filter,
-                show_flows: self.show_flows,
+                show_flows: false,
                 show_agents: self.show_agents,
                 show_shells: self.show_shells,
                 show_hidden: self.show_hidden,
@@ -259,7 +259,7 @@ impl App {
     }
 
     /// Whether the list still has a row once the catch-up is left and what
-    /// it showed is seen: the run `run` on a row of its own or in its flow's,
+    /// it showed is seen: the run `run` on a row of its own,
     /// else the row `key`, whatever the toggles. A run that ended over a day
     /// ago, unpinned, is the list's only while it is not seen.
     pub(super) fn kept_on_the_list(&self, key: &str, run: Option<&str>) -> bool {
@@ -271,13 +271,14 @@ impl App {
             }
         }
         // Everything shown at once: whatever a toggle could reveal is on.
-        [(true, true, true, false), (true, true, true, true)].into_iter().any(
-            |(show_flows, show_agents, show_shells, show_hidden)| {
+        [(true, true, false), (true, true, true)]
+            .into_iter()
+            .any(|(show_agents, show_shells, show_hidden)| {
                 let cx = rows::Context {
                     names: &self.names,
                     flows: &self.flows,
                     filter: "",
-                    show_flows,
+                    show_flows: false,
                     show_agents,
                     show_shells,
                     show_hidden,
@@ -286,37 +287,31 @@ impl App {
                 };
                 rows::build(&d, &cx).iter().any(|r| match (run, r) {
                     (Some(id), Row::Run(i)) => i.run.id == id,
-                    (Some(id), Row::Flow(f)) => f.runs.iter().any(|i| i.run.id == id),
                     (Some(_), _) => false,
                     (None, r) => r.key().as_deref() == Some(key),
                 })
-            },
-        )
+            })
     }
 
     /// The list's row for a run, as the list would stand with this search
-    /// and these toggles: its own, or the flow it folds into.
-    pub(super) fn list_key(&self, id: &str, filter: &str, toggles: (bool, bool, bool, bool)) -> Option<String> {
-        self.row_key(filter, toggles, |r| match r {
-            Row::Run(i) => i.run.id == id,
-            Row::Flow(f) => f.runs.iter().any(|i| i.run.id == id),
-            _ => false,
-        })
+    /// and these toggles: its own.
+    pub(super) fn list_key(&self, id: &str, filter: &str, toggles: (bool, bool, bool)) -> Option<String> {
+        self.row_key(filter, toggles, |r| matches!(r, Row::Run(i) if i.run.id == id))
     }
 
     /// The key of the first row of the list that `is` picks, as the list would
-    /// stand with this search and these toggles `(flows, agents, shells, hidden)`.
+    /// stand with this search and these toggles `(agents, shells, hidden)`.
     pub(super) fn row_key(
         &self,
         filter: &str,
-        (show_flows, show_agents, show_shells, show_hidden): (bool, bool, bool, bool),
+        (show_agents, show_shells, show_hidden): (bool, bool, bool),
         is: impl Fn(&Row) -> bool,
     ) -> Option<String> {
         let cx = rows::Context {
             names: &self.names,
             flows: &self.flows,
             filter,
-            show_flows,
+            show_flows: false,
             show_agents,
             show_shells,
             show_hidden,

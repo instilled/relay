@@ -30,7 +30,6 @@ pub enum Cmd {
     Since,
     Ask,
     Filter,
-    Flows,
     Agents,
     Shells,
     Hidden,
@@ -174,9 +173,9 @@ pub const ALL: &[Command] = &[
     },
     Command {
         name: "edit",
-        args: "",
+        args: "[flow]",
         words: &[],
-        what: "open the flow under the cursor in $EDITOR (its flow.md, as /flow edit does)",
+        what: "open a flow in $EDITOR (its flow.md, as /flow edit does) — the one named, else the one under the cursor",
         cmd: Cmd::Edit,
     },
     Command {
@@ -213,13 +212,6 @@ pub const ALL: &[Command] = &[
         words: &[],
         what: "narrow the list as you type; esc on the list clears it",
         cmd: Cmd::Filter,
-    },
-    Command {
-        name: "flows",
-        args: "",
-        words: &[],
-        what: "show or hide flows' runs on the list (f on the list does too)",
-        cmd: Cmd::Flows,
     },
     Command {
         name: "agents",
@@ -366,7 +358,7 @@ mod tests {
         assert_eq!(arg_words(cmd("resume"), 1), ["commands"]);
         assert_eq!(arg_words(cmd("mark"), 0), ["done", "blocked", "working"]);
         assert_eq!(arg_words(cmd("summary"), 1), ["deep", "again"]);
-        assert!(arg_words(cmd("flows"), 0).is_empty(), "a toggle takes nothing");
+        assert!(arg_words(cmd("agents"), 0).is_empty(), "a toggle takes nothing");
         assert!(arg_words(cmd("stop"), 0).is_empty(), "nothing follows /stop");
         assert!(arg_words(cmd("ask"), 0).is_empty(), "free words are not a set");
     }
@@ -397,9 +389,9 @@ mod tests {
 
     #[test]
     fn an_exact_name_comes_first() {
-        // `flow` is exact; `flows`, the toggle, opens from it and comes after.
-        assert_eq!(names("flow"), vec!["flow", "flows"]);
-        assert_eq!(names("FLOW"), vec!["flow", "flows"]);
+        // `flow` is exact; nothing else opens from it.
+        assert_eq!(names("flow"), vec!["flow"]);
+        assert_eq!(names("FLOW"), vec!["flow"]);
         // `up` is a name, and sits inside nothing else.
         assert_eq!(names("up"), vec!["up"]);
     }
@@ -445,7 +437,7 @@ mod tests {
         assert_eq!(key(Cmd::Pane), "^o");
         assert_eq!(key(Cmd::Shell), "", "a shell is a command, not a key");
         assert_eq!(key(Cmd::Filter), "^f");
-        assert_eq!(key(Cmd::Flows), "", "a toggle is the slash line or a letter, no ^key");
+        assert_eq!(key(Cmd::Agents), "", "a toggle is the slash line or a letter, no ^key");
         assert_eq!(key(Cmd::Events), "", "^e is the line's: the end of it");
     }
 
@@ -482,8 +474,8 @@ mod tests {
         assert_eq!(parse("/ren").unwrap().0.cmd, Cmd::Rename);
         assert_eq!(parse("/rel").unwrap().0.cmd, Cmd::Reload);
         assert_eq!(parse("/ev").unwrap().0.cmd, Cmd::Events);
-        // `flow`/`flows` and `hide`/`hidden` share a prefix, so the full name
-        // is what names them; it is an exact match, which wins.
+        // `hide`/`hidden` share a prefix, so the full name is what names
+        // them; it is an exact match, which wins.
         assert_eq!(parse("/flow run").unwrap().0.cmd, Cmd::Flow);
         assert_eq!(parse("/hide").unwrap().0.cmd, Cmd::Hide);
         assert_eq!(parse("/so").unwrap().0.cmd, Cmd::Sort);
@@ -498,8 +490,7 @@ mod tests {
         // `re` opens `reload` and `rename`; `p` opens three.
         assert!(parse("/re").is_none());
         assert!(parse("/p").is_none());
-        // The toggles share a prefix with `flow`, `hide` and `shell`.
-        assert!(parse("/fl").is_none(), "flow and flows");
+        // The toggles share a prefix with `hide` and `shell`.
         assert!(parse("/hi").is_none(), "hide and hidden");
         assert!(parse("/sh").is_none(), "shell and shells");
         assert!(parse("/done").is_none(), "gone: /archive, or /mark done");

@@ -76,13 +76,11 @@ fn place_keys(at: Place) -> Vec<Key> {
             moves,
             key("⇧↑↓", "reorder"),
             key("enter", "join/open"),
-            key("→ ←", "a flow's steps"),
             cmd(Cmd::Stop, "stop/archive/remove"),
             cmd(Cmd::Pin, "pin"),
             cmd(Cmd::Rename, "rename"),
             cmd(Cmd::Pane, "details"),
             cmd(Cmd::Filter, "search"),
-            key("f", "flows"),
             key("a", "agents"),
             key("s", "shells"),
             key("h", "hidden"),
@@ -93,7 +91,7 @@ fn place_keys(at: Place) -> Vec<Key> {
         // order is the list's to keep, not hidden's.
         Place::Hidden => {
             let mut v = place_keys(Place::List);
-            v.retain(|k| k.what != "reorder" && k.what != "a flow's steps" && k.keys != "/hide");
+            v.retain(|k| k.what != "reorder" && k.keys != "/hide");
             v.insert(1, key("/hide", "brings it back"));
             v
         }
@@ -104,7 +102,6 @@ fn place_keys(at: Place) -> Vec<Key> {
             cmd(Cmd::Stop, "not this"),
             cmd(Cmd::Pane, "details"),
             cmd(Cmd::Filter, "search"),
-            key("f", "flows"),
             key("a", "agents"),
             key("s", "shells"),
             key("h", "hidden"),
@@ -300,8 +297,8 @@ mod tests {
     fn the_list_says_its_keys() {
         assert_eq!(
             one_line(Place::List),
-            "↑↓ ^j^k move · ⇧↑↓ reorder · enter join/open · → ← a flow's steps · ^x stop/archive/remove · ^t pin · \
-             ^r rename · ^o details · ^f search · f flows · a agents · s shells · h hidden · /hide · /help · ^h"
+            "↑↓ ^j^k move · ⇧↑↓ reorder · enter join/open · ^x stop/archive/remove · ^t pin · \
+             ^r rename · ^o details · ^f search · a agents · s shells · h hidden · /hide · /help · ^h"
         );
     }
 
@@ -323,7 +320,7 @@ mod tests {
         assert_eq!(
             one_line(Place::Hidden),
             "↑↓ ^j^k move · /hide brings it back · enter join/open · ^x stop/archive/remove · \
-             ^t pin · ^r rename · ^o details · ^f search · f flows · a agents · s shells · h hidden · /help · ^h"
+             ^t pin · ^r rename · ^o details · ^f search · a agents · s shells · h hidden · /help · ^h"
         );
 
         assert_eq!(

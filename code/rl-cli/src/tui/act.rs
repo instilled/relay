@@ -493,7 +493,7 @@ impl App {
                     names: &self.names,
                     flows: &self.flows,
                     filter: "",
-                    show_flows: true,
+                    show_flows: false,
                     show_agents: true,
                     show_shells: true,
                     show_hidden: false,
