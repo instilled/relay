@@ -464,7 +464,7 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
     // away — and `/hide`, which puts a project's header off the list, back
     // inline only when hidden is on.
     let hidden_heads: Vec<&str> = d.hidden.iter().filter_map(|h| h.key.strip_prefix("g:")).collect();
-    let heads: Vec<PathBuf> = if cx.show_hidden {
+    let mut heads: Vec<PathBuf> = if cx.show_hidden {
         // Every registered folder, the hidden ones among them, plus any hidden
         // folder that is not registered.
         let mut hs = names.paths();
@@ -484,6 +484,13 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
             .filter(|p| !hidden_heads.iter().any(|k| Path::new(k) == p))
             .collect()
     };
+    // A folder a parked flow is `in` keeps a line for it, registered or not, unless hidden.
+    for p in cx.parked.iter().filter_map(|p| p.in_.as_ref()) {
+        let hidden = hidden_heads.iter().any(|k| Path::new(k) == p);
+        if !heads.contains(p) && (cx.show_hidden || !hidden) {
+            heads.push(p.clone());
+        }
+    }
     if cx.show_flows
         && cx.show_hidden
         && everywhere.is_empty()
@@ -530,13 +537,16 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
     // under whatever folder that was — all of it flow content, so only when
     // flows are on. With them off the line stands alone, while there is a
     // flow with no `in`, unless it is hidden or a search takes it away.
-    let loose = tally(cx.flows, None, d);
+    let loose = FlowTally {
+        parked: parked_in(cx.parked, None),
+        ..tally(cx.flows, None, d)
+    };
     if cx.show_flows {
         if let Some(Row::Group(h)) = everywhere.first_mut() {
             h.tally = loose;
         }
         rows.extend(everywhere);
-    } else if loose.total > 0
+    } else if (loose.total > 0 || loose.parked > 0)
         && (cx.show_hidden || !hidden_heads.contains(&EVERYWHERE))
         && query.hits_project(&[EVERYWHERE], None)
     {
@@ -557,8 +567,16 @@ pub fn head(key: &str, workspace: &Path, d: &Digest, cx: &Context<'_>) -> Head {
         workspace: workspace.to_path_buf(),
         name: names.group(key),
         own: names.own(key, workspace),
-        tally: tally(cx.flows, Some(workspace), d),
+        tally: FlowTally {
+            parked: parked_in(cx.parked, Some(workspace)),
+            ..tally(cx.flows, Some(workspace), d)
+        },
         checkout: checkout_of(&d.checkouts, workspace).cloned(),
         attention: 0,
     }
+}
+
+/// How many parked flows are `in` the scope: a folder, or none for `everywhere`.
+fn parked_in(parked: &[Parked], scope: Option<&Path>) -> usize {
+    parked.iter().filter(|p| p.in_.as_deref() == scope).count()
 }

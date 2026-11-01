@@ -86,13 +86,19 @@ pub struct FlowTally {
     pub running: usize,
     /// Those that want you: a yes, an answer, or a failure unseen.
     pub needs: usize,
+    /// Those parked, not among the rest: the line stands for them, and says how many.
+    pub parked: usize,
 }
 
 impl FlowTally {
-    /// `3 flows · 1 running · 1 needs you`; the zero parts left out; empty with no flows.
+    /// `3 flows · 1 running · 1 needs you`; the zero parts left out; with none but parked ones,
+    /// `2 parked`; empty with no flows.
     pub fn words(&self) -> String {
         if self.total == 0 {
-            return String::new();
+            return match self.parked {
+                0 => String::new(),
+                n => format!("{n} parked"),
+            };
         }
         let mut s = format!("{} flow{}", self.total, if self.total == 1 { "" } else { "s" });
         if self.running > 0 {
@@ -205,6 +211,8 @@ pub struct Context<'a> {
     pub names: &'a Names,
     /// Every flow, for where its row stands and what starts it; may be empty.
     pub flows: &'a [Flow],
+    /// The parked flows; may be empty. A scope with any keeps its line, saying how many.
+    pub parked: &'a [Parked],
     pub filter: &'a str,
     /// The list toggles. Flows, agents and shells are additive — each on
     /// shows the runs it is for; off hides them. Hidden is off by default;

@@ -86,6 +86,7 @@ impl<'a> CatchUp<'a> {
         let list = Context {
             names: cx.names,
             flows: cx.flows,
+            parked: cx.parked,
             filter: cx.filter,
             show_flows: true,
             show_agents: true,
@@ -223,6 +224,7 @@ impl<'a> CatchUp<'a> {
             &Context {
                 names: &names,
                 flows,
+                parked: &[],
                 filter: "",
                 show_flows: true,
                 show_agents: true,
@@ -811,6 +813,7 @@ mod tests {
                 show_hidden: false,
                 now: now(),
                 relay: None,
+                parked: &[],
             },
         );
         let api = cu.projects.iter().find(|p| p.head.name == "api").unwrap();
@@ -837,6 +840,7 @@ mod tests {
                 show_hidden: false,
                 now: now(),
                 relay: None,
+                parked: &[],
             },
         );
         assert!(cu.projects[0].rows.iter().any(|r| matches!(r, Row::Flow(_))));
@@ -908,6 +912,7 @@ mod tests {
                 show_hidden: false,
                 now: now(),
                 relay: None,
+                parked: &[],
             },
         )
     }
@@ -1149,6 +1154,7 @@ mod tests {
             show_hidden: false,
             now: now(),
             relay: None,
+            parked: &[],
         };
         let on_the_list = rows::build(&d, &cx);
         assert!(on_the_list.iter().any(|r| r.key().as_deref() == Some("f:quiet")));

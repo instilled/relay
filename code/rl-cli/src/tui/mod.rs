@@ -383,8 +383,8 @@ struct App {
     /// What was last said of the overview's project, as fetched with the cursor on nothing in
     /// it: its top keeps it while the cursor is on a flow.
     overview_said: Option<Summary>,
-    /// The parked flows, every scope's: fetched as the overview opens, after a park or an unpark,
-    /// and as the overview is refreshed; the overview counts its own.
+    /// The parked flows, every scope's: fetched with the flows on each refresh, and as the
+    /// overview opens. A line stands for a scope that has only these; the overview counts its own.
     parked: Vec<Parked>,
     /// Whether the overview's `parked: N` line has its flows folded out under it.
     parked_open: bool,
@@ -568,9 +568,11 @@ struct App {
 }
 
 /// What a second press of a destructive key would do.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum Arm {
-    Remove,
+    /// `^x`, armed on the row under the cursor then, by its key: the second press acts only
+    /// while the cursor is still there.
+    Remove(Option<String>),
     Quit,
 }
 
@@ -1707,10 +1709,9 @@ impl App {
         if self.view == View::Report {
             self.fetch_report().await;
         }
-        // The overview's parked flows, while it is up: the list has no use for them.
-        if self.view == View::Overview {
-            self.fetch_parked().await;
-        }
+        // The parked flows, with the flows: a scope whose flows are all parked keeps its line
+        // for them, and the overview counts its own.
+        self.fetch_parked().await;
         // Which CLIs are agents decides how a line reads and what it offers:
         // the ones here that the config has the panel offer. Asked once.
         if self.agents.is_empty()
@@ -3739,6 +3740,7 @@ mod tests {
             total,
             running: 0,
             needs,
+            parked: 0,
         }
     }
 

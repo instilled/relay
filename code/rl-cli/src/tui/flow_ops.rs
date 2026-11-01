@@ -77,13 +77,36 @@ impl App {
     /// `_<name>`, its runs archived and its yes taken. One firing, or waiting on a question, is
     /// not: the daemon says why, and that is said as it is.
     pub(super) async fn park_flow(&mut self, name: &str) {
+        let key = rows::flow_key(name);
+        // On it in the overview, where the cursor goes once it is gone: the next flow down, else
+        // `+ new flow`. Its page, if up, is closed back to the overview.
+        let (next, its_page) = if self.view == View::Overview && self.sel.as_deref() == Some(key.as_str()) {
+            let keys = self.keys();
+            let next = keys
+                .iter()
+                .skip_while(|k| **k != key)
+                .skip(1)
+                .find(|k| k.starts_with("f:"))
+                .cloned()
+                .unwrap_or_else(|| NEW_FLOW.to_string());
+            let page = self.show_pane && self.flow_proposal_shown().is_none() && self.proposal_shown().is_none();
+            (Some(next), page)
+        } else {
+            (None, false)
+        };
         match self.rpc.call::<FlowPark>(FlowName { name: name.into() }).await {
-            Ok(_) => {
-                // The overview's refresh fetches the parked flows again, its `parked: N` with them.
+            Ok(p) => {
+                if its_page {
+                    self.leave_subpage();
+                }
+                // The refresh fetches the parked flows again, the overview's `parked: N` with them.
                 self.refresh().await;
-                self.say(format!(
-                    "{name} parked · its runs archived · /flow unpark {name} brings it back"
-                ));
+                if let Some(next) = next.filter(|k| self.keys().contains(k)) {
+                    self.select(Some(next));
+                    self.load_pane().await;
+                }
+                let runs = if p.archived > 0 { " · its runs archived" } else { "" };
+                self.say(format!("{name} parked{runs} · /flow unpark {name} brings it back"));
             }
             Err(e) => self.say(told(&e)),
         }

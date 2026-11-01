@@ -169,6 +169,7 @@ impl App {
                 show_hidden: true,
                 now: Timestamp::now(),
                 relay: Some(&self.relay),
+                parked: &self.parked,
             },
         );
         // Each flow with the questions right under it, as `(needs you, name, rows)`.

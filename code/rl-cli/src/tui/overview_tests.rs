@@ -949,10 +949,8 @@ async fn ctrl_x_twice_on_a_flow_parks_it() {
     assert_eq!(said(&app), "press ^x again to park hello");
     assert!(app.home.flow_dir("hello").exists(), "only armed");
     press(&mut app, KeyCode::Char('x'), KeyModifiers::CONTROL).await;
-    assert_eq!(
-        said(&app),
-        "hello parked · its runs archived · /flow unpark hello brings it back"
-    );
+    // It never ran: nothing of it was archived, and nothing is said of it.
+    assert_eq!(said(&app), "hello parked · /flow unpark hello brings it back");
     assert!(!app.keys().iter().any(|k| k == "f:hello"), "{:?}", app.keys());
     assert_eq!(app.keys(), [NEW_FLOW, PARKED]);
     let frame = draw_text(&mut app);
@@ -1079,10 +1077,8 @@ async fn flow_park_and_unpark_commands() {
     app.select(Some("f:hello".into()));
     type_in(&mut app, "/flow park").await;
     press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
-    assert_eq!(
-        said(&app),
-        "hello parked · its runs archived · /flow unpark hello brings it back"
-    );
+    // It never ran: nothing of it was archived, and nothing is said of it.
+    assert_eq!(said(&app), "hello parked · /flow unpark hello brings it back");
     assert!(flows.join("_hello").is_dir());
     // By name, twice more: each to a folder of its own.
     for n in [2, 3] {
@@ -1137,5 +1133,104 @@ async fn slash_archive_on_a_flow_still_archives_its_runs() {
     assert!(app.home.flow_dir("hello").is_dir(), "not parked");
     assert!(app.parked.is_empty());
     assert!(app.keys().iter().any(|k| k == "f:hello"));
+    token.cancel();
+}
+
+#[tokio::test]
+async fn parking_a_flow_from_its_page_closes_it_and_moves_on() {
+    let (tmp, token, mut app, folder) = panel().await;
+    for name in ["hello", "zeta"] {
+        flow_in(&tmp, &mut app, name, &md_in(&folder)).await;
+        app.refresh().await;
+        approve(&mut app, name).await;
+    }
+    fired(
+        &tmp,
+        &folder,
+        "hello",
+        "fire0001",
+        &[("probe", StepStatus::Done, Some("found\r\n"))],
+        FiringStatus::Done,
+    );
+    app.refresh().await;
+    enter_project(&mut app, &folder).await;
+    assert_eq!(app.keys(), ["f:hello", "f:zeta", NEW_FLOW]);
+    app.select(Some("f:hello".into()));
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+    assert!(app.show_pane, "its page");
+    press(&mut app, KeyCode::Char('x'), KeyModifiers::CONTROL).await;
+    press(&mut app, KeyCode::Char('x'), KeyModifiers::CONTROL).await;
+    assert_eq!(
+        said(&app),
+        "hello parked · its runs archived · /flow unpark hello brings it back"
+    );
+    assert!(!app.show_pane, "back to the overview");
+    assert_eq!(app.sel.as_deref(), Some("f:zeta"), "the next flow down");
+    // The last flow parked: `+ new flow`.
+    press(&mut app, KeyCode::Char('x'), KeyModifiers::CONTROL).await;
+    press(&mut app, KeyCode::Char('x'), KeyModifiers::CONTROL).await;
+    assert_eq!(said(&app), "zeta parked · /flow unpark zeta brings it back");
+    assert_eq!(app.sel.as_deref(), Some(NEW_FLOW));
+    token.cancel();
+}
+
+#[tokio::test]
+async fn ctrl_x_armed_on_one_line_does_nothing_once_the_cursor_moved() {
+    let (tmp, token, mut app, folder) = panel().await;
+    flow_in(&tmp, &mut app, "alpha", &md_in(&folder)).await;
+    flow_in(&tmp, &mut app, "hello", &md_in(&folder)).await;
+    app.refresh().await;
+    enter_project(&mut app, &folder).await;
+    app.select(Some("f:hello".into()));
+    press(&mut app, KeyCode::Char('x'), KeyModifiers::CONTROL).await;
+    assert_eq!(said(&app), "press ^x again to park hello");
+    // A refresh moves the cursor between the presses.
+    app.select(Some("f:alpha".into()));
+    press(&mut app, KeyCode::Char('x'), KeyModifiers::CONTROL).await;
+    assert_eq!(said(&app), "the line moved · ^x again");
+    assert!(app.arm.is_none());
+    assert!(app.home.flow_dir("alpha").is_dir() && app.home.flow_dir("hello").is_dir());
+    // A run's arm the same: on the list, armed on the run, then off it.
+    press(&mut app, KeyCode::Esc, KeyModifiers::NONE).await;
+    app.select(Some("r:run00001".into()));
+    press(&mut app, KeyCode::Char('x'), KeyModifiers::CONTROL).await;
+    assert!(app.arm.is_some(), "{}", said(&app));
+    app.select(Some(format!("g:{}", folder.display())));
+    press(&mut app, KeyCode::Char('x'), KeyModifiers::CONTROL).await;
+    assert_eq!(said(&app), "the line moved · ^x again");
+    assert!(app.digest.items.iter().any(|i| i.run.id == "run00001"), "not archived");
+    token.cancel();
+}
+
+#[tokio::test]
+async fn a_scope_whose_flows_are_all_parked_keeps_its_line() {
+    let (tmp, token, mut app, _folder) = panel().await;
+    let other = std::fs::canonicalize(tmp.path()).unwrap().join("other");
+    std::fs::create_dir_all(&other).unwrap();
+    flow_in(&tmp, &mut app, "loose", "---\nsteps:\n  probe:\n    run: x\n---\n").await;
+    flow_in(&tmp, &mut app, "there", &md_in(&other)).await;
+    app.refresh().await;
+    for name in ["loose", "there"] {
+        app.rpc.call::<FlowPark>(FlowName { name: name.into() }).await.unwrap();
+    }
+    // On the list, from a refresh alone: no overview fetched them.
+    app.refresh().await;
+    assert!(app.view == View::Work);
+    let other_line = format!("g:{}", other.display());
+    let keys = app.keys();
+    assert!(keys.iter().any(|k| k == "g:everywhere"), "{keys:?}");
+    assert!(keys.contains(&other_line), "an unregistered `in` too: {keys:?}");
+    let frame = draw_text(&mut app);
+    let line = frame.lines().find(|l| l.contains("everywhere")).expect("its line");
+    assert!(line.contains("1 parked"), "{line}");
+    // And its overview has them.
+    app.select(Some("g:everywhere".into()));
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+    assert_eq!(app.keys(), [NEW_FLOW, PARKED]);
+    press(&mut app, KeyCode::Esc, KeyModifiers::NONE).await;
+    app.select(Some(other_line));
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+    assert_eq!(app.overview, Some(Scope::Project(other.clone())));
+    assert_eq!(app.keys(), [NEW_FLOW, PARKED]);
     token.cancel();
 }

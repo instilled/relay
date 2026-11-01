@@ -500,6 +500,7 @@ impl App {
                     show_hidden: false,
                     now: Timestamp::now(),
                     relay: Some(&self.relay),
+                    parked: &self.parked,
                 },
             );
             rows::reorder(&shown, &full, &self.digest.order, &key, up)

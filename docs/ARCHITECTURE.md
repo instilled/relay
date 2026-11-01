@@ -253,8 +253,10 @@ sequenceDiagram
   flows are parked, `parked: N` (`PARKED`): `enter` folds them out under it (`parked:<folder>`),
   and `enter` on one brings it back, the cursor on it needing a yes. `^x` twice on a flow parks it
   (`/flow park`, `/flow unpark <name|folder>` too); `/archive` on a flow still archives only its
-  runs. The parked list (`flow.parked`) is fetched as the overview opens, after a park or an
-  unpark, and as it refreshes, never for the list. Words typed there
+  runs. The parked list (`flow.parked`) is fetched with the flows on each refresh: a scope whose
+  flows are all parked keeps its line on the list (`N parked`, through `rows::Context::parked`),
+  `everywhere`'s and an unregistered `in`'s too, so its `parked: N` stays in reach. `^x`'s arm
+  holds the row it was armed on, and a cursor moved since disarms it. Words typed there
   are for the flow under the cursor (`App::overview_words`): on a flow they ask for a change to it,
   against its `flow.md` as it is then; on `+ new flow`, for a new one `in` the project (none for
   everywhere's). A first word that would run is still one of the words, unless a bang says
