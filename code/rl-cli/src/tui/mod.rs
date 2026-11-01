@@ -2118,7 +2118,7 @@ impl App {
             })
             .count();
         let title = match self.view {
-            View::Work => rows::headline(&rows, news, &self.filter),
+            View::Work => rows::headline(&rows, news, &self.filter, rows::flows_need(&self.flows, &self.digest)),
             View::Events => events::headline(self.event_items().len(), &self.feed, &self.filter),
             View::CatchUp => match &self.catch {
                 Some(c) => catchup::headline(c.since, Timestamp::now()),
@@ -2140,8 +2140,8 @@ impl App {
         // headline says them, amber when one waits for a yes. One of theirs
         // that did not load is said beside them, in red.
         if self.view == View::Work {
-            let tally = rows::tally(&self.flows, None, &self.digest);
-            for (words, tone) in rows::global_parts(tally, !self.broken_in(None).is_empty()) {
+            let broken = !self.broken_in(None).is_empty();
+            for (words, tone) in rows::global_parts(&self.flows, &self.digest, broken) {
                 notes.push(match tone {
                     rows::Tone::Plain => Span::raw(words),
                     rows::Tone::Needs => Span::styled(words, theme::needs()),
@@ -6314,6 +6314,13 @@ mod tests {
         app.show_flow("ghost").await;
         assert!(app.view == super::View::Events, "the view stays");
         assert_eq!(said(&app), "ghost runs everywhere; the headline counts it");
+        // A search that hides the project's line lets go, as it does for a run.
+        app.filter_aside = "zzzz".into();
+        app.show_flow("nightly").await;
+        assert!(app.view == super::View::Work);
+        assert!(app.filter.is_empty(), "the search let go: {:?}", app.filter);
+        assert_eq!(app.sel, Some(format!("g:{}", folder.display())));
+        assert_eq!(said(&app), "the search lets go, to show nightly on its project's line");
         token.cancel();
     }
 
@@ -6464,7 +6471,7 @@ mod tests {
         app.select(Some(RUN.into()));
         run(&mut app, "/edit").await;
         assert!(app.editor.is_none());
-        assert_eq!(said(&app), "nothing here to edit · select a flow");
+        assert_eq!(said(&app), "nothing here to edit · name a flow: /edit <flow>");
         token.cancel();
     }
 
@@ -6980,7 +6987,7 @@ mod tests {
 
         app.select(Some(RUN.into()));
         run(&mut app, "/flow pause").await;
-        assert_eq!(said(&app), "/flow pause which? a flow's row or its name");
+        assert_eq!(said(&app), "/flow pause which? name it: /flow pause <flow>");
         run(&mut app, "/flow approve nightly").await;
         assert_eq!(said(&app), "nightly approved");
         assert!(nightly(&app).approved());

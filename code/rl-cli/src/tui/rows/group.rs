@@ -144,7 +144,7 @@ pub fn flow_needs(f: &Flow, d: &Digest) -> bool {
     f.status() == FlowStatus::NeedsApproval
         || d.items.iter().filter(mine).any(|i| match i.run.state {
             RunState::NeedsInput | RunState::Blocked => true,
-            RunState::Failed => i.unseen,
+            RunState::Failed => i.unseen && !got_past(f, i, d),
             _ => false,
         })
         || d.decisions.iter().any(|q| {
@@ -153,6 +153,17 @@ pub fn flow_needs(f: &Flow, d: &Digest) -> bool {
                     .as_ref()
                     .is_some_and(|id| d.items.iter().filter(mine).any(|i| &i.run.id == id))
         })
+}
+
+/// Whether the flow has run well since a failed run of it: a later one that
+/// finished, by when it ended. With no flow rows, that is how a failure is let go.
+fn got_past(f: &Flow, failed: &DigestItem, d: &Digest) -> bool {
+    let when = |i: &DigestItem| i.run.ended_at.unwrap_or(i.at);
+    d.items.iter().any(|i| {
+        i.run.state == RunState::Finished
+            && matches!(&i.run.cause, Cause::Flow { flow, .. } if *flow == f.name)
+            && when(i) > when(failed)
+    })
 }
 
 /// Which flow an ended run folds into, if any.

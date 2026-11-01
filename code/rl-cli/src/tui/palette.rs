@@ -173,9 +173,9 @@ pub const ALL: &[Command] = &[
     },
     Command {
         name: "edit",
-        args: "",
+        args: "[flow]",
         words: &[],
-        what: "open the flow under the cursor in $EDITOR (its flow.md, as /flow edit does)",
+        what: "open a flow in $EDITOR (its flow.md, as /flow edit does) — the one named, else the one under the cursor",
         cmd: Cmd::Edit,
     },
     Command {

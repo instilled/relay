@@ -19,12 +19,24 @@ impl App {
             _ => self.filter.clone(),
         };
         let is_it = |r: &Row| matches!(r, Row::Group(h) if h.workspace == folder);
-        let Some(key) = self.row_key(&list_filter, self.toggles(), is_it) else {
-            return self.say(format!("{name}'s project is not on the list now"));
+        // The search gives way, as `show_run`'s does; a hidden project does not.
+        let (key, cleared) = match self.row_key(&list_filter, self.toggles(), is_it) {
+            Some(k) => (k, false),
+            None => match self.row_key("", self.toggles(), is_it) {
+                Some(k) => (k, true),
+                None => return self.say(format!("{name}'s project is not on the list now")),
+            },
         };
         self.back_to_list().await;
+        if cleared {
+            self.filter.clear();
+        }
         self.select(Some(key));
-        self.say(format!("{name} is counted on its project's line"));
+        self.say(if cleared {
+            format!("the search lets go, to show {name} on its project's line")
+        } else {
+            format!("{name} is counted on its project's line")
+        });
     }
 
     /// `/flow run|pause|resume|approve <name>`: the daemon's, then one line
@@ -129,7 +141,7 @@ impl App {
             return self.say("/flow run|pause|resume|approve|edit|new|test|draft|reload [name]");
         }
         let Some(name) = named.or_else(|| self.flow_here()) else {
-            return self.say(format!("/flow {verb} which? a flow's row or its name"));
+            return self.say(format!("/flow {verb} which? name it: /flow {verb} <flow>"));
         };
         match verb {
             "edit" => self.edit_flow(&name),

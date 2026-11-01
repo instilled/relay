@@ -881,20 +881,20 @@ fn a_question_stands_in_its_project_and_projects_go_by_name() {
         ["[api]", "r:work1", "r:blok1", "[relay]", "r:done1", "r:fail1", "q:q1"],
         "projects by name, however urgent; rows as they came; the question under its run; api is named by its folder; old01 is gone"
     );
-    assert_eq!(counts(&rows), (1, 2, 1, 1, 0));
+    assert_eq!(counts(&rows), (1, 2, 1, 1));
     match &rows[3] {
         Row::Group(h) => assert_eq!((h.name.as_str(), h.place.as_str()), ("relay", "/home/f/relay")),
         _ => panic!("relay's header"),
     }
     assert_eq!(
-        headline(&rows, 2, ""),
+        headline(&rows, 2, "", 0),
         "relay · 1 to decide · 2 need you · 1 working · 1 finished · 2 new"
     );
 
     let rows = build_with(&d, &names, "api", now);
     assert_eq!(keys(&rows), ["[api]", "r:work1", "r:blok1"]);
-    assert_eq!(headline(&rows, 0, "api"), "relay · 1 needs you · 1 working · ⌕ api");
-    assert_eq!(headline(&[], 0, ""), "relay · nothing running");
+    assert_eq!(headline(&rows, 0, "api", 0), "relay · 1 needs you · 1 working · ⌕ api");
+    assert_eq!(headline(&[], 0, "", 0), "relay · nothing running");
 }
 
 #[test]
@@ -957,7 +957,7 @@ fn with_no_runs_and_no_folders_the_list_is_empty() {
     let flows = [flow("pulse", None)];
     let rows = flows_build(&d, &Names::default(), &flows, "", now);
     assert_eq!(keys(&rows), ["[everywhere]", "f:pulse"]);
-    assert_eq!(headline(&rows, 0, ""), "relay · nothing running");
+    assert_eq!(headline(&rows, 0, "", 0), "relay · nothing running");
 }
 
 /// The list's digest: these runs and firings, and nothing else.
@@ -1020,13 +1020,71 @@ fn a_project_line_tallies_its_flows_and_what_needs_you() {
     assert_eq!(tally_of(vec![failed(false)], vec![]).needs, 1);
     let asked = question("q1", relay, Some("c1"), "2026-09-10T11:30:00Z");
     assert_eq!(tally_of(vec![failed(false)], vec![asked]).needs, 2);
+
+    // A failure the flow has since got past (a later run ended well) no longer lights the line.
+    let well = fired("c2", "c", RunState::Finished, "2026-09-10T11:30:00Z", false);
+    assert_eq!(tally_of(vec![failed(true), well], vec![]).needs, 1);
+    let before = fired("c0", "c", RunState::Finished, "2026-09-10T10:30:00Z", false);
+    assert_eq!(
+        tally_of(vec![before, failed(true)], vec![]).needs,
+        2,
+        "an older good run does not"
+    );
+
+    // Each of these puts a flow in needs on its own.
+    let needs = |name: &str, items: Vec<DigestItem>, decisions: Vec<Decision>, firings: Vec<Firing>| {
+        let mut d = digest(now, items, firings);
+        d.decisions = decisions;
+        flow_needs(&flow(name, Some(relay)), &d)
+    };
+    let nothing = || needs("d", vec![], vec![], vec![]);
+    assert!(!nothing(), "nothing open, nothing needed");
+    let firing_d = Firing {
+        id: "fi9".into(),
+        flow: "d".into(),
+        ..firing(FiringStatus::Waiting, &[])
+    };
+    let ask = question("fi9", relay, None, "2026-09-10T11:30:00Z");
+    assert!(
+        needs("d", vec![], vec![ask], vec![firing_d]),
+        "a question owned by its firing"
+    );
+    let at = "2026-09-10T11:00:00Z";
+    let asking = fired("d1", "d", RunState::NeedsInput, at, false);
+    assert!(needs("d", vec![asking], vec![], vec![]), "a run asking");
+    let blocked = fired("d1", "d", RunState::Blocked, at, false);
+    assert!(needs("d", vec![blocked], vec![], vec![]), "a run blocked");
+}
+
+#[test]
+fn the_headline_counts_a_flow_that_needs_you() {
+    let now: Timestamp = "2026-09-10T12:00:00Z".parse().unwrap();
+    let mut d = digest(
+        now,
+        vec![],
+        vec![Firing {
+            id: "fi9".into(),
+            flow: "pulse".into(),
+            ..firing(FiringStatus::Waiting, &[])
+        }],
+    );
+    d.decisions = vec![question("fi9", "/home/f/relay", None, "2026-09-10T11:30:00Z")];
+    let flows = [flow("pulse", None), flow("nightly", Some("/home/f/relay"))];
+    let n = flows_need(&flows, &d);
+    assert_eq!(n, 1);
+    assert_eq!(headline(&[], 0, "", n), "relay · 1 needs you");
+    assert_eq!(headline(&[], 0, "", 0), "relay · nothing running");
+    // Beside the rest that needs you, it is one more.
+    let q = question("q", "/w", None, "2026-09-10T11:30:00Z");
+    let rows = [Row::Question(&q)];
+    assert_eq!(headline(&rows, 0, "", 2), "relay · 1 to decide · 2 need you");
 }
 
 #[test]
 fn the_headline_says_the_flows_with_no_in_and_a_yes_they_wait_for() {
     let now: Timestamp = "2026-09-10T12:00:00Z".parse().unwrap();
     let d = digest(now, vec![], vec![]);
-    let say = |flows: &[Flow]| everywhere(tally(flows, None, &d));
+    let say = |flows: &[Flow]| everywhere(flows, &d);
     let (pulse, nightly, notify) = (flow("pulse", None), flow("nightly", None), flow("notify", None));
     let waiting = Flow {
         approved_hash: None,
@@ -1041,18 +1099,38 @@ fn the_headline_says_the_flows_with_no_in_and_a_yes_they_wait_for() {
     );
     assert_eq!(
         say(std::slice::from_ref(&waiting)),
-        Some(("↻ 1 everywhere · 1 needs you".into(), true))
+        Some(("↻ 1 everywhere · deploy needs you".into(), true))
     );
     let all = say(&[pulse, nightly, notify, waiting]).unwrap();
-    assert_eq!(all, ("↻ 4 everywhere · 1 needs you".into(), true));
+    assert_eq!(all, ("↻ 4 everywhere · deploy needs you".into(), true));
     assert!(!all.0.contains("/flow approve"));
+}
+
+#[test]
+fn the_headline_names_the_one_flow_with_no_in_that_needs_you() {
+    let now: Timestamp = "2026-09-10T12:00:00Z".parse().unwrap();
+    let d = digest(now, vec![], vec![]);
+    let waiting = |n: &str| Flow {
+        approved_hash: None,
+        ..flow(n, None)
+    };
+    let say = |flows: &[Flow]| everywhere(flows, &d).unwrap();
+    assert_eq!(
+        say(&[flow("nightly", None), waiting("pulse")]),
+        ("↻ 2 everywhere · pulse needs you".into(), true)
+    );
+    // With more than one, the count.
+    assert_eq!(
+        say(&[waiting("pulse"), waiting("deploy")]),
+        ("↻ 2 everywhere · 2 needs you".into(), true)
+    );
 }
 
 #[test]
 fn the_headline_says_a_flow_did_not_load_beside_them() {
     let now: Timestamp = "2026-09-10T12:00:00Z".parse().unwrap();
     let d = digest(now, vec![], vec![]);
-    let parts = |flows: &[Flow], broken| global_parts(tally(flows, None, &d), broken);
+    let parts = |flows: &[Flow], broken| global_parts(flows, &d, broken);
     let flows = [flow("pulse", None), flow("nightly", None)];
     assert_eq!(parts(&flows, false), [("↻ 2 everywhere".to_string(), Tone::Plain)]);
     assert_eq!(
@@ -1128,11 +1206,8 @@ fn a_flows_runs_are_one_row() {
     );
     assert_eq!(f.marks(31).chars().filter(|c| *c == '×').count(), 1);
     assert!(f.marks(31).starts_with('×'), "oldest first: {}", f.marks(31));
-    assert_eq!(counts(&rows), (0, 0, 1, 1, 1));
-    assert_eq!(
-        headline(&rows, 1, ""),
-        "relay · 1 working · 1 finished · 1 flow · 1 new"
-    );
+    assert_eq!(counts(&rows), (0, 0, 1, 1));
+    assert_eq!(headline(&rows, 1, "", 0), "relay · 1 working · 1 finished · 1 new");
 
     // Never opened: whatever happens, a flow is one row.
     let opened_rows = flows_build(&d, &names, &flows, "", now);
@@ -1158,7 +1233,7 @@ fn a_flows_runs_are_one_row() {
         ["[relay]", "r:w", "f:pulse"],
         "failed, it still stands under the runs"
     );
-    assert_eq!(counts(&rows), (0, 1, 1, 0, 1));
+    assert_eq!(counts(&rows), (0, 1, 1, 0));
 }
 
 #[test]
@@ -1318,7 +1393,7 @@ fn a_flow_with_a_yes_has_its_row_before_it_ever_fired() {
     assert!(f.runs.is_empty() && f.last().is_none());
     assert_eq!(flows::stands(f, flows.first(), now), "every 30m · next in 12m");
     assert_eq!(f.marks(10), "");
-    assert_eq!(counts(&rows), (0, 0, 0, 0, 0));
+    assert_eq!(counts(&rows), (0, 0, 0, 0));
 
     // Paused, or changed since its yes, it says so.
     let says = |x: Flow| {
@@ -2091,7 +2166,7 @@ fn a_question_stands_under_the_run_that_asked_it() {
             "[api]", "r:there", "[relay]", "r:one", "r:two", "q:q1", "r:three", "r:four", "q:q0", "[web]", "q:q2"
         ]
     );
-    assert_eq!(counts(&rows), (3, 1, 3, 1, 0));
+    assert_eq!(counts(&rows), (3, 1, 3, 1));
     // In your order, it goes where its run goes.
     let (d, names) = asked(kept(&["r:two", "r:one", "r:three", "r:four"]));
     let rows = build_with(&d, &names, "", now);
@@ -2469,8 +2544,8 @@ fn agents_own_sessions_stand_with_runs_in_the_order_they_came() {
     // Those that need you say so where they stand.
     assert!(wants_you(&rows[2]) && wants_you(&rows[4]) && !wants_you(&rows[5]));
     // The headline counts them as runs: two need you, one works.
-    assert_eq!(counts(&rows), (0, 2, 2, 1, 0));
-    assert_eq!(headline(&rows, 0, ""), "relay · 2 need you · 2 working · 1 finished");
+    assert_eq!(counts(&rows), (0, 2, 2, 1));
+    assert_eq!(headline(&rows, 0, "", 0), "relay · 2 need you · 2 working · 1 finished");
 }
 
 #[test]

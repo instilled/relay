@@ -1176,13 +1176,16 @@ impl App {
             },
             palette::Cmd::Flow => self.flow_command(&arg).await,
             palette::Cmd::Edit => {
-                // The flow under the cursor, by name — `/flow edit` without the
-                // name, opening its `flow.md` in `$EDITOR`.
-                if let Some(f) = self.selected_flow() {
+                // The flow named, else the one under the cursor (the catch-up's
+                // flow row) — `/flow edit`, opening its `flow.md` in `$EDITOR`.
+                let named = arg.trim();
+                if !named.is_empty() {
+                    self.edit_flow(named);
+                } else if let Some(f) = self.selected_flow() {
                     let name = f.name.clone();
                     self.edit_flow(&name);
                 } else {
-                    self.say("nothing here to edit · select a flow");
+                    self.say("nothing here to edit · name a flow: /edit <flow>");
                 }
             }
             palette::Cmd::New => self.new_run_form(),
