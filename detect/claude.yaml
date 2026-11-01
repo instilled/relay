@@ -56,6 +56,8 @@ sessions:
   # attach id, name, process and start. Uncertain: whether background
   # sessions (claude --bg) run user-level hooks at all, which is why rld
   # still asks now and then while one is listed.
-  list: { args: [agents, --json], reader: claude-agents }
+  # `--all`: without it, a background session that is done and has no process
+  # left is not listed, though `claude agents` still shows it.
+  list: { args: [agents, --json, --all], reader: claude-agents }
   # Enter on one in Claude's background opens it here.
   attach: [attach, "{id}"]
