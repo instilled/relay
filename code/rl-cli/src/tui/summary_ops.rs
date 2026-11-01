@@ -15,6 +15,17 @@ impl App {
         if self.on_top() {
             return Some(SummaryTarget::All);
         }
+        if self.view == View::Overview {
+            // On `+ new flow`, or on nothing: the project's. Everywhere's is not a summary of
+            // its own (`All` is the catch-up's), so it has none.
+            let Some(row) = self.selected() else {
+                return match self.overview.as_ref()? {
+                    overview::Scope::Project(p) => Some(SummaryTarget::Project { workspace: p.clone() }),
+                    overview::Scope::Everywhere => None,
+                };
+            };
+            return self.target_of(&row);
+        }
         self.target_of(&self.selected()?)
     }
 
@@ -120,6 +131,8 @@ impl App {
         let Some(target) = self.summary_target() else {
             self.say(if self.selected_question().is_some() {
                 "this question has no run to summarise"
+            } else if self.view == View::Overview {
+                "/summary works on a flow here"
             } else {
                 "/summary works on a run, a flow, a project, everything or a question"
             });
@@ -231,7 +244,9 @@ impl App {
         // The report's is in its reading pane.
         let shown = self.catch.as_ref().map(|c| c.since.as_millisecond());
         let tops = self.on_top() && shown == from.map(|f| f.as_millisecond());
-        if !tops && self.view != View::Report {
+        // The overview's own is in its top.
+        let in_top = self.view == View::Overview && self.overview.as_ref().is_some_and(|o| o.target() == target);
+        if !tops && !in_top && self.view != View::Report {
             self.pane = Pane::Facts;
             self.show_pane = true;
         }
@@ -240,6 +255,7 @@ impl App {
             title,
             deep,
             from,
+            since: Instant::now(),
             task,
         });
     }

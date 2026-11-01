@@ -2,6 +2,7 @@
 //! flow's row opened to its steps. A real `rld` over a fresh home, each firing written into its
 //! ledger as the engine leaves one — nothing runs, no agent is asked.
 
+use super::View;
 use super::tests::{draw_text, nine_hours_ago, panel, press, type_in};
 use crossterm::event::{KeyCode, KeyModifiers};
 use rl_proto::flow::{FiringStatus, FlowReload, StepStatus};
@@ -9,7 +10,7 @@ use rl_proto::types::SummaryTarget;
 use std::path::Path;
 
 /// The flow `name` written into the panel's home as `md`, and read.
-async fn flow_in(tmp: &tempfile::TempDir, app: &mut super::App, name: &str, md: &str) {
+pub(super) async fn flow_in(tmp: &tempfile::TempDir, app: &mut super::App, name: &str, md: &str) {
     let dir = rl_core::Home::at(tmp.path().join("h")).flow_dir(name);
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("flow.md"), md).unwrap();
@@ -19,7 +20,7 @@ async fn flow_in(tmp: &tempfile::TempDir, app: &mut super::App, name: &str, md: 
 /// A firing `id` of `flow` from an hour ago, as the engine leaves one: each step `(name, status,
 /// what its run printed)` — a step that printed has a run, started and ended, in `folder`, its
 /// chain the firing's — and the firing `status`, ended unless it still runs or waits.
-fn fired(
+pub(super) fn fired(
     tmp: &tempfile::TempDir,
     folder: &Path,
     flow: &str,
@@ -254,5 +255,333 @@ async fn flow_test_shows_what_would_fire_in_the_pane() {
     // The next key puts it away, as it does a reload's list.
     press(&mut app, KeyCode::Down, KeyModifiers::NONE).await;
     assert!(!draw_text(&mut app).contains("started nothing"));
+    token.cancel();
+}
+
+/// The list's line of the project the flow `name` is in — `everywhere`'s for one with no `in`.
+pub(super) fn line_of(app: &super::App, name: &str) -> String {
+    match app
+        .flows
+        .iter()
+        .find(|f| f.name == name)
+        .and_then(|f| f.folder.as_ref())
+    {
+        Some(p) => format!("g:{}", p.display()),
+        None => "g:everywhere".into(),
+    }
+}
+
+/// The flow `name` under the cursor in its project's overview, opened from its line on the list.
+pub(super) async fn in_overview(app: &mut super::App, name: &str) {
+    app.back_to_list().await;
+    app.select(Some(line_of(app, name)));
+    press(app, KeyCode::Enter, KeyModifiers::NONE).await;
+    assert!(app.view == View::Overview, "its overview");
+    app.select(Some(format!("f:{name}")));
+    assert!(app.selected_flow().is_some(), "{name} is a row there: {:?}", app.keys());
+}
+
+#[tokio::test]
+async fn enter_twice_on_a_flow_walks_its_steps_and_enter_on_one_reads_its_run() {
+    let (tmp, token, mut app, folder) = panel().await;
+    flow_in(
+        &tmp,
+        &mut app,
+        "prod-logs",
+        "---\nsteps:\n  probe:\n    run: x\n  triage:\n    after: probe\n    run: y\n---\n",
+    )
+    .await;
+    fired(
+        &tmp,
+        &folder,
+        "prod-logs",
+        "fire0001",
+        &[
+            ("probe", StepStatus::Done, Some("3x connection reset\r\n")),
+            ("triage", StepStatus::Done, Some("restart the api pod\r\n")),
+        ],
+        FiringStatus::Done,
+    );
+    app.refresh().await;
+    in_overview(&mut app, "prod-logs").await;
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+    assert!(app.show_pane, "enter shows the flow");
+    let frame = draw_text(&mut app);
+    // The firings in the pane, each a row: the one shown marked, when, where it stands, what it
+    // came to. "When" is one to three words ("14:05", "Fri 23:29", "Oct 30 10:00"), depending on
+    // how the fixture's hour-ago firing falls against the clock's midnight.
+    let row = frame.lines().find(|l| {
+        let words: Vec<&str> = l.split_whitespace().collect();
+        words.first() == Some(&"▸")
+            && (2..=4).any(|i| words.get(i) == Some(&"done") && words.get(i + 1).is_some_and(|w| w.starts_with("res")))
+    });
+    assert!(row.is_some(), "a firing's row: {frame}");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+    assert!(matches!(app.mode, super::Mode::Walk), "again: its steps, walked");
+    press(&mut app, KeyCode::Down, KeyModifiers::NONE).await;
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+    assert_eq!(
+        app.term.as_ref().map(|t| t.id.as_str()),
+        Some("fire0001-triage"),
+        "the step's run, read in the tile"
+    );
+    token.cancel();
+}
+
+/// `esc` inside a walk only ends the walk — `ctrl-\` is the one gesture that means "the list,
+/// now", from however deep in a subpage you are, the same as it detaches a join.
+#[tokio::test]
+async fn ctrl_backslash_leaves_a_walked_flow_for_the_list_in_one_go() {
+    let (tmp, token, mut app, folder) = panel().await;
+    flow_in(&tmp, &mut app, "prod-logs", "---\nsteps:\n  probe:\n    run: x\n---\n").await;
+    fired(
+        &tmp,
+        &folder,
+        "prod-logs",
+        "fire0001",
+        &[("probe", StepStatus::Done, Some("found\r\n"))],
+        FiringStatus::Done,
+    );
+    app.refresh().await;
+    in_overview(&mut app, "prod-logs").await;
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+    assert!(app.show_pane && matches!(app.mode, super::Mode::Walk), "walked");
+
+    press(&mut app, KeyCode::Char('\\'), KeyModifiers::CONTROL).await;
+    assert!(!app.show_pane, "the subpage is gone, not just the walk");
+    assert!(matches!(app.mode, super::Mode::Normal), "and the walk with it");
+    assert!(app.view == View::Work, "the list, past the overview");
+    assert_eq!(
+        app.sel,
+        Some(line_of(&app, "prod-logs")),
+        "on the line the overview was opened from"
+    );
+    token.cancel();
+}
+
+#[tokio::test]
+async fn summary_on_a_flow_showing_an_older_firing_tells_that_firing() {
+    let (tmp, token, mut app, folder) = panel().await;
+    flow_in(&tmp, &mut app, "prod-logs", "---\nsteps:\n  probe:\n    run: x\n---\n").await;
+    for id in ["fire0001", "fire0002"] {
+        fired(
+            &tmp,
+            &folder,
+            "prod-logs",
+            id,
+            &[("probe", StepStatus::Done, Some("found\r\n"))],
+            FiringStatus::Done,
+        );
+    }
+    app.refresh().await;
+    in_overview(&mut app, "prod-logs").await;
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+    assert_eq!(
+        app.summary_target(),
+        Some(SummaryTarget::Flow {
+            name: "prod-logs".into()
+        })
+    );
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+    // probe, then the firings, newest first: the older is the third stop.
+    press(&mut app, KeyCode::Down, KeyModifiers::NONE).await;
+    press(&mut app, KeyCode::Down, KeyModifiers::NONE).await;
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+    press(&mut app, KeyCode::Esc, KeyModifiers::NONE).await;
+    let older = app.flow_pane.shown().map(|f| f.id.clone()).unwrap();
+    assert_eq!(app.summary_target(), Some(SummaryTarget::Firing { id: older }));
+    token.cancel();
+}
+
+/// On `prod-logs` in its overview, walked to its older firing and shown it: enter (the pane,
+/// unless shown), enter (the walk), down past probe and the latest, enter.
+async fn pick_older(app: &mut super::App) {
+    app.select(Some("f:prod-logs".into()));
+    if !app.show_pane {
+        press(app, KeyCode::Enter, KeyModifiers::NONE).await;
+    }
+    press(app, KeyCode::Enter, KeyModifiers::NONE).await;
+    assert!(matches!(app.mode, super::Mode::Walk));
+    press(app, KeyCode::Down, KeyModifiers::NONE).await;
+    press(app, KeyCode::Down, KeyModifiers::NONE).await;
+    press(app, KeyCode::Enter, KeyModifiers::NONE).await;
+    assert!(app.flow_pane.picked.is_some(), "the older one shown");
+}
+
+#[tokio::test]
+async fn the_firing_picked_goes_when_the_cursor_leaves_the_row() {
+    let (tmp, token, mut app, folder) = panel().await;
+    flow_in(&tmp, &mut app, "prod-logs", "---\nsteps:\n  probe:\n    run: x\n---\n").await;
+    for id in ["fire0001", "fire0002"] {
+        fired(
+            &tmp,
+            &folder,
+            "prod-logs",
+            id,
+            &[("probe", StepStatus::Done, Some("found\r\n"))],
+            FiringStatus::Done,
+        );
+    }
+    app.refresh().await;
+    let flow = || SummaryTarget::Flow {
+        name: "prod-logs".into(),
+    };
+    // esc ends the walk; the pick stays while the cursor is on the row.
+    in_overview(&mut app, "prod-logs").await;
+    pick_older(&mut app).await;
+    press(&mut app, KeyCode::Esc, KeyModifiers::NONE).await;
+    assert!(!matches!(app.mode, super::Mode::Walk));
+    assert!(app.flow_pane.picked.is_some());
+
+    // Off the flow and back: the latest is the flow's again.
+    app.select(Some(super::NEW_FLOW.into()));
+    app.select(Some("f:prod-logs".into()));
+    assert_eq!(app.flow_pane.picked, None);
+    assert_eq!(app.summary_target(), Some(flow()));
+    token.cancel();
+}
+
+#[tokio::test]
+async fn right_opens_a_flows_row_to_its_latest_firings_steps_and_left_folds_it() {
+    let (tmp, token, mut app, folder) = panel().await;
+    flow_in(
+        &tmp,
+        &mut app,
+        "prod-logs",
+        "---\nsteps:\n  probe:\n    run: x\n  triage:\n    after: probe\n    run: y\n  review:\n    after: triage\n    ask: ok?\n    options: { ok: {} }\n---\n",
+    )
+    .await;
+    fired(
+        &tmp,
+        &folder,
+        "prod-logs",
+        "fire0001",
+        &[
+            ("probe", StepStatus::Done, Some("3x connection reset\r\n")),
+            ("triage", StepStatus::Done, Some("restart the api pod\r\n")),
+            ("review", StepStatus::Waiting, None),
+        ],
+        FiringStatus::Waiting,
+    );
+    app.refresh().await;
+    in_overview(&mut app, "prod-logs").await;
+    let steps = "probe ✓ · triage ✓ · review ?";
+    assert!(!draw_text(&mut app).contains(steps));
+    press(&mut app, KeyCode::Right, KeyModifiers::NONE).await;
+    assert!(draw_text(&mut app).contains(steps), "→ opens it");
+    press(&mut app, KeyCode::Left, KeyModifiers::NONE).await;
+    assert!(!draw_text(&mut app).contains(steps), "← folds it");
+    // On a row that is not a flow, → does nothing.
+    app.select(Some(super::NEW_FLOW.into()));
+    assert!(app.selected_flow().is_none(), "+ new flow is selected");
+    let before = draw_text(&mut app);
+    press(&mut app, KeyCode::Right, KeyModifiers::NONE).await;
+    assert_eq!(draw_text(&mut app), before);
+    assert!(app.open_flows.is_empty());
+    app.select(Some("f:prod-logs".into()));
+    // With words on the line, the arrows are the line's.
+    type_in(&mut app, "ab").await;
+    press(&mut app, KeyCode::Right, KeyModifiers::NONE).await;
+    assert!(!draw_text(&mut app).contains(steps));
+    token.cancel();
+}
+
+#[tokio::test]
+async fn a_flow_opened_stays_open_while_a_search_hides_it() {
+    let (tmp, token, mut app, folder) = panel().await;
+    flow_in(&tmp, &mut app, "prod-logs", "---\nsteps:\n  probe:\n    run: x\n---\n").await;
+    fired(
+        &tmp,
+        &folder,
+        "prod-logs",
+        "fire0001",
+        &[("probe", StepStatus::Done, Some("found\r\n"))],
+        FiringStatus::Done,
+    );
+    app.refresh().await;
+    in_overview(&mut app, "prod-logs").await;
+    press(&mut app, KeyCode::Right, KeyModifiers::NONE).await;
+    assert!(draw_text(&mut app).contains("probe ✓"), "→ opens it");
+    app.filter = "nothing-like-it".into();
+    app.refresh().await;
+    assert!(!draw_text(&mut app).contains("prod-logs"), "the search hides it");
+    app.filter.clear();
+    app.refresh().await;
+    assert!(draw_text(&mut app).contains("probe ✓"), "still open");
+    token.cancel();
+}
+
+#[tokio::test]
+async fn a_flow_with_a_yes_that_never_fired_is_a_row_like_any_flows() {
+    let (tmp, token, mut app, _) = panel().await;
+    flow_in(
+        &tmp,
+        &mut app,
+        "nightly",
+        "---\nwhen: every 1h\nsteps:\n  a:\n    run: echo hello\n---\n",
+    )
+    .await;
+    app.refresh().await;
+    in_overview(&mut app, "nightly").await;
+    type_in(&mut app, "/flow approve nightly").await;
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+    app.refresh().await;
+    app.select(Some("f:nightly".into()));
+    assert!(
+        app.selected_flow().is_some_and(|f| f.runs.is_empty()),
+        "its row, not run"
+    );
+    let screen = draw_text(&mut app);
+    let row = screen.lines().find(|l| l.contains("↻ nightly")).expect("its row");
+    assert!(row.contains("every 1h · next in "), "{row}");
+    assert!(!app.hints().contains("^x archives"), "{}", app.hints());
+
+    // Its pane: what starts it, and that it never fired.
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+    let screen = draw_text(&mut app);
+    assert!(screen.contains("never fired"), "{screen}");
+    press(&mut app, KeyCode::Esc, KeyModifiers::NONE).await;
+    // Opened with →, it has no firing's steps to show; nothing breaks.
+    press(&mut app, KeyCode::Right, KeyModifiers::NONE).await;
+    draw_text(&mut app);
+    // Nothing to archive, and it says so.
+    let flash = |app: &super::App| app.flash.as_ref().map(|(m, _)| m.clone()).unwrap_or_default();
+    press(&mut app, KeyCode::Char('x'), KeyModifiers::CONTROL).await;
+    assert_eq!(flash(&app), "nothing here to remove");
+    type_in(&mut app, "/archive").await;
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+    assert_eq!(flash(&app), "nothing to archive: nightly has not run");
+    token.cancel();
+}
+
+#[tokio::test]
+async fn a_flow_whose_runs_were_archived_has_fired_all_the_same() {
+    let (tmp, token, mut app, folder) = panel().await;
+    flow_in(&tmp, &mut app, "prod-logs", "---\nsteps:\n  probe:\n    run: x\n---\n").await;
+    app.refresh().await;
+    type_in(&mut app, "/flow approve prod-logs").await;
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+    fired(
+        &tmp,
+        &folder,
+        "prod-logs",
+        "fire0001",
+        &[("probe", StepStatus::Done, Some("found\r\n"))],
+        FiringStatus::Done,
+    );
+    app.refresh().await;
+    in_overview(&mut app, "prod-logs").await;
+    assert!(app.selected_flow().is_some_and(|f| !f.runs.is_empty()));
+    type_in(&mut app, "/archive").await;
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+    app.refresh().await;
+    // Its row stands from its yes; its runs are gone from the list, not its firing.
+    app.select(Some("f:prod-logs".into()));
+    assert!(app.selected_flow().is_some_and(|f| f.runs.is_empty()), "the row stays");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+    let screen = draw_text(&mut app);
+    assert!(screen.contains("none on the list"), "{screen}");
+    assert!(!screen.contains("never fired"), "{screen}");
     token.cancel();
 }

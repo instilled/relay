@@ -361,7 +361,7 @@ pub fn named(it: &Item) -> Named {
 pub enum Target {
     /// A run, on the list.
     Run(String),
-    /// A flow, by name, on the list.
+    /// A flow, by name, in its project's overview.
     Flow(String),
 }
 

@@ -4,39 +4,26 @@
 use super::*;
 
 impl App {
-    /// The list, with the cursor on the flow's project line, which tallies it
-    /// (the list has no flow rows). A flow with no `in` has no such line: the
-    /// headline counts it, and the view stays.
+    /// The flow, found from elsewhere (the events, the catch-up): its
+    /// project's overview — `everywhere`'s, with no `in` — with the cursor on
+    /// it, opened from the project's line on the list, where `esc` goes back
+    /// to. A search that hides it there lets go, as `show_run`'s does.
     pub(super) async fn show_flow(&mut self, name: &str) {
-        let Some(flow) = self.flows.iter().find(|f| f.name == name) else {
+        let Some(flow) = self.flows.iter().find(|f| f.name == name && f.removed_at.is_none()) else {
             return self.say(format!("{name} is not a flow any more"));
         };
-        let Some(folder) = flow.folder.clone() else {
-            return self.say(format!("{name} runs everywhere; the headline counts it"));
-        };
-        let list_filter = match self.view {
-            View::Events => self.filter_aside.clone(),
-            _ => self.filter.clone(),
-        };
-        let is_it = |r: &Row| matches!(r, Row::Group(h) if h.workspace == folder);
-        // The search gives way, as `show_run`'s does; a hidden project does not.
-        let (key, cleared) = match self.row_key(&list_filter, self.toggles(), is_it) {
-            Some(k) => (k, false),
-            None => match self.row_key("", self.toggles(), is_it) {
-                Some(k) => (k, true),
-                None => return self.say(format!("{name}'s project is not on the list now")),
-            },
-        };
+        let scope = overview::Scope::of(flow);
+        let key = rows::flow_key(name);
         self.back_to_list().await;
-        if cleared {
+        self.select(Some(scope.line_key()));
+        self.open_overview(scope, Some(key.clone()));
+        self.fetch_overview_top().await;
+        if self.sel.as_ref() != Some(&key) && !self.filter.is_empty() {
             self.filter.clear();
+            self.select(Some(key.clone()));
+            self.say(format!("the search lets go, to show {name}"));
         }
-        self.select(Some(key));
-        self.say(if cleared {
-            format!("the search lets go, to show {name} on its project's line")
-        } else {
-            format!("{name} is counted on its project's line")
-        });
+        self.moved().await;
     }
 
     /// `/flow run|pause|resume|approve <name>`: the daemon's, then one line

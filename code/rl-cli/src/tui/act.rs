@@ -105,8 +105,8 @@ impl App {
     }
 
     /// Whether the cursor is on a flow in the catch-up, which holds only the
-    /// stretch's runs: archiving it is the list's, where it holds them all
-    /// (`FLOW_ON_THE_LIST`).
+    /// stretch's runs: archiving it is its project's overview's, where it
+    /// holds them all (`FLOW_ON_THE_LIST`).
     pub(super) fn flow_in_catch_up(&self) -> bool {
         self.view == View::CatchUp && self.selected_flow().is_some()
     }
@@ -475,7 +475,9 @@ impl App {
         match self.view {
             View::Work => {}
             View::Events => return self.say("⇧↑↓ moves rows on the list · events stay in the order they came"),
-            View::CatchUp | View::Report => return self.say("⇧↑↓ moves rows on the list · esc goes there"),
+            View::CatchUp | View::Report | View::Overview => {
+                return self.say("⇧↑↓ moves rows on the list · esc goes there");
+            }
         }
         if self.show_hidden {
             self.say("with hidden on the list keeps its order · move it with hidden off");
