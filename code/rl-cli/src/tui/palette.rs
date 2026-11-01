@@ -189,7 +189,7 @@ pub const ALL: &[Command] = &[
         name: "summary",
         args: "[deep] [again] [since]",
         words: &[&["deep", "again"], &["deep", "again"]],
-        what: "say what happened here since you last looked: a run, a flow, a project, everything (the catch-up's top), a question's asker · deep reads the logs · again makes a new one",
+        what: "say what happened here since you last looked: a run, a flow, a project (also from its overview), everything (the catch-up's top), a question's asker · deep reads the logs · again makes a new one",
         cmd: Cmd::Summary,
     },
     Command {

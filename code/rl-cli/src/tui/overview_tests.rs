@@ -4,9 +4,10 @@
 use super::flow_tests::{fired, flow_in};
 use super::overview::Scope;
 use super::tests::{draw_text, panel, press, type_in};
-use super::{NEW_FLOW, View};
+use super::{NEW_FLOW, Summarising, View};
 use crossterm::event::{KeyCode, KeyModifiers};
 use rl_proto::flow::{FiringStatus, FlowApproval, FlowApprove, StepStatus};
+use rl_proto::types::{Summary, SummaryTarget};
 use std::path::Path;
 
 /// A flow `in` the folder: one step that runs nothing much.
@@ -302,5 +303,103 @@ async fn the_everywhere_line_stands_when_a_flow_has_no_in_and_enter_opens_its_ov
     assert_eq!(app.keys(), ["f:loose", NEW_FLOW]);
     press(&mut app, KeyCode::Esc, KeyModifiers::NONE).await;
     assert_eq!(app.sel, Some(everywhere));
+    token.cancel();
+}
+
+/// A summary kept of `target`, saying `text`.
+fn said_of(target: &SummaryTarget, text: &str) -> Summary {
+    Summary {
+        run: String::new(),
+        agent: "fakeai".into(),
+        by: "run09999".into(),
+        at: jiff::Timestamp::now(),
+        text: text.into(),
+        since: None,
+        source: "summarised".into(),
+        reach: String::new(),
+        stale: false,
+        target: target.key(),
+        deep: false,
+        from: None,
+        calls: 1,
+        runs: 1,
+    }
+}
+
+#[tokio::test]
+async fn summary_on_new_flow_in_the_overview_tells_the_project() {
+    let (_tmp, token, mut app, folder) = panel().await;
+    enter_project(&mut app, &folder).await;
+    assert!(app.on_new_flow());
+    assert_eq!(app.summary_target(), Some(SummaryTarget::Project { workspace: folder }));
+    token.cancel();
+}
+
+#[tokio::test]
+async fn a_project_summary_made_shows_at_the_overviews_top() {
+    let (_tmp, token, mut app, folder) = panel().await;
+    enter_project(&mut app, &folder).await;
+    let target = SummaryTarget::Project { workspace: folder };
+    app.made
+        .insert(target.key(), said_of(&target, "- the build went green"));
+    let frame = draw_text(&mut app);
+    assert!(frame.contains("the build went green"), "{frame}");
+    assert!(!frame.contains("no summary yet"), "{frame}");
+    token.cancel();
+}
+
+#[tokio::test]
+async fn summarising_the_project_says_so_at_the_top() {
+    let (_tmp, token, mut app, folder) = panel().await;
+    enter_project(&mut app, &folder).await;
+    let target = SummaryTarget::Project { workspace: folder };
+    app.summarising = Some(Summarising {
+        target: target.clone(),
+        title: "proj".into(),
+        deep: false,
+        from: None,
+        since: std::time::Instant::now(),
+        task: tokio::spawn(std::future::pending()),
+    });
+    let frame = draw_text(&mut app);
+    assert!(frame.contains("summarising"), "{frame}");
+    token.cancel();
+}
+
+#[tokio::test]
+async fn starting_a_project_summary_in_the_overview_does_not_open_the_pane() {
+    let (_tmp, token, mut app, folder) = panel().await;
+    enter_project(&mut app, &folder).await;
+    app.summary_start(rl_proto::methods::SummaryParams {
+        target: SummaryTarget::Project { workspace: folder },
+        deep: false,
+        from: None,
+        again: false,
+        dry: false,
+        timeout: None,
+    });
+    assert!(app.summarising.is_some());
+    assert!(!app.show_pane);
+    token.cancel();
+}
+
+#[tokio::test]
+async fn everywheres_top_has_no_summary() {
+    let (tmp, token, mut app, _folder) = panel().await;
+    flow_in(&tmp, &mut app, "loose", "---\nsteps:\n  probe:\n    run: x\n---\n").await;
+    app.refresh().await;
+    app.select(Some("g:everywhere".into()));
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+    app.made.insert(
+        SummaryTarget::All.key(),
+        said_of(&SummaryTarget::All, "- every project's news"),
+    );
+    let frame = draw_text(&mut app);
+    assert!(!frame.contains("every project's news"), "{frame}");
+    assert!(!frame.contains("/summary writes it"), "{frame}");
+    assert!(frame.contains("flows with no in"), "{frame}");
+    // And /summary on nothing here targets nothing.
+    app.select(Some(NEW_FLOW.into()));
+    assert_eq!(app.summary_target(), None);
     token.cancel();
 }

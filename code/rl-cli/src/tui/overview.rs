@@ -46,7 +46,7 @@ impl Scope {
     }
 
     /// What `/summary` of it is of, as its line's would be.
-    fn target(&self) -> SummaryTarget {
+    pub(super) fn target(&self) -> SummaryTarget {
         match self {
             Scope::Project(p) => SummaryTarget::Project { workspace: p.clone() },
             Scope::Everywhere => SummaryTarget::All,
@@ -153,7 +153,15 @@ impl App {
         let Some(scope) = &self.overview else {
             return vec![];
         };
-        let target = scope.target();
+        let Some(folder) = scope.folder() else {
+            return vec![Line::styled(
+                " flows with no in · runs outside every project",
+                theme::dim(),
+            )];
+        };
+        let target = SummaryTarget::Project {
+            workspace: folder.to_path_buf(),
+        };
         let key = target.key();
         let now = Timestamp::now();
         // The one loaded with the cursor's row, else the last one made here.

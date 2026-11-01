@@ -245,8 +245,12 @@ sequenceDiagram
   they came; a question sits under the run that asked it. Flows are not on the list: the project
   line tallies them (how many, how many running, and in amber the ones that need you), an
   `everywhere` line after the projects tallies those with no `in`, and the headline counts every
-  flow that needs you. `enter` on a project's line (or `everywhere`'s) opens its overview
-  (`tui/overview.rs`): its flows as rows, each opening its page, and `+ new flow`. Rows never move by themselves; `⇧↑↓` reorders the
+  flow that needs you. `enter` on a project's line (or `everywhere`'s) opens its overview:
+  `View::Overview` over a `Scope` (`Project(folder)` or `Everywhere`), `tui/overview.rs`. It has the
+  project's last summary on top (`/summary` there, on `+ new flow` or a flow, writes it; everywhere has
+  none), then its flows as rows (those that need you first, then by name, each with its open questions
+  under it), each opening its page, and a last row, `+ new flow` (`NEW_FLOW`), which puts `flow new` on
+  the line. Flows are reached only there, and from the catch-up and the events. Rows never move by themselves; `⇧↑↓` reorders the
   runs, kept in `row_order` via `digest.order`. Toggles (`a` agents, `s` shells, `h` hidden) and a
   search (`tui/query.rs`, words plus `in: is: kind: by: on:` tokens) narrow it.
 - **The line** (`tui/line.rs`) always takes typing. A first word naming an agent starts that
