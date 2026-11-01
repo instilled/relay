@@ -545,10 +545,10 @@ async fn a_flow_with_a_yes_that_never_fired_is_a_row_like_any_flows() {
     // Opened with →, it has no firing's steps to show; nothing breaks.
     press(&mut app, KeyCode::Right, KeyModifiers::NONE).await;
     draw_text(&mut app);
-    // Nothing to archive, and it says so.
+    // `^x` would park it, run or not; `/archive` has nothing to archive, and says so.
     let flash = |app: &super::App| app.flash.as_ref().map(|(m, _)| m.clone()).unwrap_or_default();
     press(&mut app, KeyCode::Char('x'), KeyModifiers::CONTROL).await;
-    assert_eq!(flash(&app), "nothing here to remove");
+    assert_eq!(flash(&app), "press ^x again to park nightly");
     type_in(&mut app, "/archive").await;
     press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
     assert_eq!(flash(&app), "nothing to archive: nightly has not run");

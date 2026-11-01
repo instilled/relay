@@ -1,6 +1,6 @@
 //! `rl flow`: the flows in `~/.relay/flows` and what they are doing; edit
-//! one (and say yes to it, if it loads), run, pause, resume, approve, test, reload; and, inside a step,
-//! its firing's state.
+//! one (and say yes to it, if it loads), run, pause, resume, approve, test, reload, park and bring
+//! back; and, inside a step, its firing's state.
 
 use crate::client::Client;
 use crate::{daemon, render};
@@ -12,7 +12,8 @@ use rl_core::{Home, display_path};
 use rl_flow::def::FlowDef;
 use rl_proto::flow::{
     Firing, FiringFilter, Flow, FlowApproval, FlowApprove, FlowErrors, FlowFilter, FlowFirings, FlowList, FlowName,
-    FlowPause, FlowReload, FlowResume, FlowRun, FlowTest, FlowTestParams, Reloaded,
+    FlowPark, FlowParkedList, FlowPause, FlowReload, FlowResume, FlowRun, FlowTest, FlowTestParams, FlowUnpark, Parked,
+    ParkedName, Reloaded,
 };
 
 mod edit;
@@ -61,6 +62,15 @@ pub enum FlowCmd {
     },
     /// Read ~/.relay/flows again (rld does it on start too).
     Reload,
+    /// Put a flow away: its folder renamed _<name>, its runs archived, its yes taken. Refused while it fires.
+    Park { name: String },
+    /// Bring a parked flow back under its name, needing a yes: by name, its newest parked folder; or a folder, `_nightly.2`.
+    Unpark {
+        #[arg(value_name = "NAME|FOLDER")]
+        what: String,
+    },
+    /// The parked flows: folder, name, and when each was parked.
+    Parked,
     /// What a step leaves for the steps after it, and reads of theirs: set, get, write, read. Inside a step only.
     State {
         #[command(subcommand)]
@@ -168,9 +178,64 @@ pub async fn flow(home: &Home, cmd: FlowCmd, json: bool) -> Result<()> {
                 }
             }
         }
+        FlowCmd::Park { name } => {
+            let p = rpc.call::<FlowPark>(named(name)).await?;
+            if json {
+                println!("{}", serde_json::to_string(&p)?);
+            } else {
+                let runs = if p.archived == 1 { "run" } else { "runs" };
+                println!("{} parked as {} · {} {runs} archived", p.name, p.folder, p.archived);
+            }
+        }
+        FlowCmd::Unpark { what } => {
+            let parked = if what.starts_with('_') {
+                Vec::new()
+            } else {
+                rpc.call::<FlowParkedList>(()).await?
+            };
+            let Some(folder) = parked_folder(&parked, &what) else {
+                bail!("nothing parked as {what} · rl flow parked lists them");
+            };
+            let f = rpc.call::<FlowUnpark>(ParkedName { folder }).await?;
+            if json {
+                println!("{}", serde_json::to_string(&f)?);
+            } else {
+                println!("{} back · it needs a yes: rl flow approve {}", f.name, f.name);
+            }
+        }
+        FlowCmd::Parked => {
+            let parked = rpc.call::<FlowParkedList>(()).await?;
+            if json {
+                println!("{}", serde_json::to_string(&parked)?);
+            } else if parked.is_empty() {
+                println!("nothing parked");
+            } else {
+                let now = now();
+                for p in &parked {
+                    let mut line = format!("{}  {}  {} ago", p.folder, p.name, fmt_age(p.at, now));
+                    if let Some(i) = &p.in_ {
+                        line.push_str(&format!("  in {}", display_path(i)));
+                    }
+                    println!("{line}");
+                }
+            }
+        }
         FlowCmd::Edit { .. } | FlowCmd::New(_) | FlowCmd::State { .. } => unreachable!("handled above"),
     }
     Ok(())
+}
+
+/// The folder `unpark` brings back: one named as a folder (`_nightly.2`) is itself; a flow's
+/// name is its newest parked folder in `parked`. None when nothing is parked under the name.
+pub fn parked_folder(parked: &[Parked], what: &str) -> Option<String> {
+    if what.starts_with('_') {
+        return Some(what.to_string());
+    }
+    parked
+        .iter()
+        .filter(|p| p.name == what)
+        .max_by_key(|p| p.at)
+        .map(|p| p.folder.clone())
 }
 
 /// One line for a flow that was changed, or the flow itself as JSON.

@@ -249,7 +249,12 @@ sequenceDiagram
   `View::Overview` over a `Scope` (`Project(folder)` or `Everywhere`), `tui/overview.rs`. It has the
   project's last summary on top (`/summary` there, on `+ new flow` or a flow, writes it; everywhere has
   none), then its flows as rows (those that need you first, then by name, each with its open questions
-  under it), each opening its page, and a last row, `+ new flow` (`NEW_FLOW`). Words typed there
+  under it), each opening its page, and a row `+ new flow` (`NEW_FLOW`). Last, when any of its
+  flows are parked, `parked: N` (`PARKED`): `enter` folds them out under it (`parked:<folder>`),
+  and `enter` on one brings it back, the cursor on it needing a yes. `^x` twice on a flow parks it
+  (`/flow park`, `/flow unpark <name|folder>` too); `/archive` on a flow still archives only its
+  runs. The parked list (`flow.parked`) is fetched as the overview opens, after a park or an
+  unpark, and as it refreshes, never for the list. Words typed there
   are for the flow under the cursor (`App::overview_words`): on a flow they ask for a change to it,
   against its `flow.md` as it is then; on `+ new flow`, for a new one `in` the project (none for
   everywhere's). A first word that would run is still one of the words, unless a bang says
@@ -435,7 +440,8 @@ comes back needing a yes, even with its folder as it was.
 
 **`rl flow`**: `list`, `new <name> [words…] [--go]`, `edit`, `run`, `pause`, `resume`,
 `approve`, `test` (what would fire and which steps would run, starting nothing; `flows/
-preview.rs`), `reload`. Example flows to copy are in `examples/flows/`, held to the code by
+preview.rs`), `reload`, `park <name>`, `unpark <name|folder>` (a name brings back its newest
+parked folder) and `parked`. Example flows to copy are in `examples/flows/`, held to the code by
 `rl-cli/tests/examples.rs`.
 
 ### Decisions

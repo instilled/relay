@@ -418,10 +418,10 @@ impl App {
         }
     }
 
-    /// A flow just written from the proposal: the cursor on it, in the overview — after the
-    /// refresh has settled the cursor, so nothing moves it off again. One whose `in` is another
-    /// project is not here to land on: `said` says where it went.
-    fn onto_saved(&mut self, name: &str, said: String) -> String {
+    /// A flow just written from the proposal, or brought back from parked: the cursor on it, in
+    /// the overview — after the refresh has settled the cursor, so nothing moves it off again. One
+    /// whose `in` is another project is not here to land on: `said` says where it went.
+    pub(super) fn onto_saved(&mut self, name: &str, said: String) -> String {
         if self.view != View::Overview {
             return said;
         }

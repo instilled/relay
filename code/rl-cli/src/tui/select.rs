@@ -72,6 +72,7 @@ impl App {
                 .into_iter()
                 .filter_map(|r| r.key())
                 .chain(std::iter::once(NEW_FLOW.to_string()))
+                .chain(self.parked_keys())
                 .collect(),
             View::CatchUp => self
                 .lead_keys()

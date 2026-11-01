@@ -98,7 +98,8 @@ use rl_core::time::fmt_age;
 use rl_proto::decision::Decision;
 use rl_proto::flow::{
     Firing, FiringFilter, Flow, FlowApproval, FlowApprove, FlowErrors, FlowFilter, FlowFirings, FlowList, FlowName,
-    FlowPause, FlowReload, FlowResume, FlowRun, FlowStatus, NotLoaded,
+    FlowPark, FlowParkedList, FlowPause, FlowReload, FlowResume, FlowRun, FlowStatus, FlowUnpark, NotLoaded, Parked,
+    ParkedName,
 };
 use rl_proto::methods::{
     AgentList, ConfigGet, DecisionDismiss, DecisionGet, DecisionId, DecisionNote, DecisionTake, DecisionTakeParams,
@@ -335,6 +336,10 @@ const TOP: &str = "top";
 /// The overview's last line, `+ new flow`, as the cursor knows it.
 const NEW_FLOW: &str = "+new";
 
+/// The overview's `parked: N` line, under `+ new flow`, as the cursor knows it. The parked flows
+/// folded out under it are `parked:<folder>`.
+const PARKED: &str = "+parked";
+
 /// What the catch-up showed that was not seen yet: the runs, and where each
 /// flow's firings not seen start, by its row key.
 #[derive(Default)]
@@ -378,6 +383,11 @@ struct App {
     /// What was last said of the overview's project, as fetched with the cursor on nothing in
     /// it: its top keeps it while the cursor is on a flow.
     overview_said: Option<Summary>,
+    /// The parked flows, every scope's: fetched as the overview opens, after a park or an unpark,
+    /// and as the overview is refreshed; the overview counts its own.
+    parked: Vec<Parked>,
+    /// Whether the overview's `parked: N` line has its flows folded out under it.
+    parked_open: bool,
     /// Every flow: for its row's place and words, the chips on project rows,
     /// and a flow's pane.
     flows: Vec<Flow>,
@@ -1325,6 +1335,8 @@ impl App {
             summarising: None,
             overview: None,
             overview_said: None,
+            parked: Vec::new(),
+            parked_open: false,
             topping: None,
             top: None,
             outcomes: Default::default(),
@@ -1695,6 +1707,10 @@ impl App {
         if self.view == View::Report {
             self.fetch_report().await;
         }
+        // The overview's parked flows, while it is up: the list has no use for them.
+        if self.view == View::Overview {
+            self.fetch_parked().await;
+        }
         // Which CLIs are agents decides how a line reads and what it offers:
         // the ones here that the config has the panel offer. Asked once.
         if self.agents.is_empty()
@@ -1918,8 +1934,12 @@ impl App {
         }
     }
 
-    /// What `^x` or `/archive` on a flow in the catch-up says.
-    const FLOW_ON_THE_LIST: &'static str = "^x archives a flow's runs in its project · enter goes there";
+    /// What `^x` on a flow in the catch-up says: a flow is parked in its project's overview.
+    const FLOW_ON_THE_LIST: &'static str = "^x in its project's overview parks it · enter goes there";
+
+    /// What `/archive` on a flow in the catch-up says: the catch-up holds only the stretch's runs,
+    /// its project's overview holds them all.
+    const FLOW_RUNS_THERE: &'static str = "/archive archives a flow's runs in its project · enter goes there";
 
     // ---- flows -------------------------------------------------------------
 
@@ -3336,18 +3356,22 @@ impl App {
                         Some(FlowStatus::NeedsApproval) => "/flow approve · ",
                         _ => "/flow run · ",
                     };
-                    let archives = if f.runs.is_empty() { "" } else { "^x archives · " };
                     // Its page up: `esc` is back to the overview.
                     if self.show_pane {
                         format!(
-                            "type changes it · enter its firings · {yes}^e edits · {archives}/summary · {pane} · esc back"
+                            "type changes it · enter its firings · {yes}^e edits · ^x parks · /summary · {pane} · esc back"
                         )
                     } else {
                         format!(
-                            "type changes it · enter its firings · {yes}^e edits · {archives}/summary · esc the list"
+                            "type changes it · enter its firings · {yes}^e edits · ^x parks · /summary · esc the list"
                         )
                     }
                 }
+                None if self.on_parked_line() => {
+                    let what = if self.parked_open { "hides them" } else { "shows them" };
+                    format!("enter {what} · esc the list")
+                }
+                None if self.parked_here().is_some() => "enter brings it back · esc the list".into(),
                 _ => "esc the list".into(),
             };
         }
@@ -6157,8 +6181,8 @@ mod tests {
         type_in(&mut app, "/sort").await;
         press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
         assert_eq!(said(&app), "/sort sorts on the list · esc goes there");
-        // A flow here holds only the stretch's runs: archiving them is its
-        // project's overview's, where it holds them all.
+        // A flow here holds only the stretch's runs: parking it, or archiving
+        // them, is its project's overview's, where it holds them all.
         let flow = app
             .catch_rows()
             .iter()
@@ -6169,16 +6193,13 @@ mod tests {
             .expect("the nightly flow");
         app.select(Some(flow));
         press(&mut app, KeyCode::Char('x'), KeyModifiers::CONTROL).await;
-        assert_eq!(
-            said(&app),
-            "^x archives a flow's runs in its project · enter goes there"
-        );
+        assert_eq!(said(&app), "^x in its project's overview parks it · enter goes there");
         assert!(app.arm.is_none());
         type_in(&mut app, "/archive").await;
         press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
         assert_eq!(
             said(&app),
-            "^x archives a flow's runs in its project · enter goes there"
+            "/archive archives a flow's runs in its project · enter goes there"
         );
         assert!(app.digest.items.iter().any(|i| i.run.id == "run00002"), "not archived");
         // What acts on the row itself acts here: ^t pins the run under the
@@ -7232,7 +7253,7 @@ mod tests {
         run(&mut app, "/flow now").await;
         assert_eq!(
             said(&app),
-            "/flow run|pause|resume|approve|edit|new|test|draft|reload [name]"
+            "/flow run|pause|resume|approve|edit|new|test|draft|park|unpark|reload [name]"
         );
         // Its `flow.md` waits for the screen to be given back.
         run(&mut app, "/flow edit nightly").await;

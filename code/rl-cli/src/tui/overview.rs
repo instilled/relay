@@ -1,6 +1,7 @@
 //! `impl App` — a project's overview: `enter` on its line on the list. What was said of the
 //! project on top, its flows below as rows (those that need you first, then by name, each with
-//! its open questions under it), and a last line, `+ new flow`. `esc` goes back to its line.
+//! its open questions under it), and a line, `+ new flow`; last, when any of its flows are parked,
+//! `parked: N`, which `enter` folds them out under. `esc` goes back to its line.
 //! See `tui/mod.rs` for the `App` struct these methods belong to.
 
 use super::flow_proposal::Aim;
@@ -38,6 +39,11 @@ impl Scope {
         }
     }
 
+    /// Whether a parked flow is this scope's: its `in` the project, or none for `everywhere`.
+    fn holds(&self, p: &Parked) -> bool {
+        p.in_.as_deref() == self.folder()
+    }
+
     /// Whether `h` is this scope's line on the list.
     fn is(&self, h: &rows::Head) -> bool {
         match self {
@@ -61,6 +67,7 @@ impl App {
     pub(super) fn open_overview(&mut self, scope: Scope, at: Option<String>) {
         if self.overview.as_ref() != Some(&scope) {
             self.overview_said = None;
+            self.parked_open = false;
         }
         self.overview = Some(scope);
         self.open_view(View::Overview);
@@ -74,8 +81,9 @@ impl App {
     }
 
     /// What was last said of the overview's project, fetched for its top whichever row the
-    /// cursor is on. `everywhere`'s top has none.
+    /// cursor is on, and the flows parked, for its last line. `everywhere`'s top has none.
     pub(super) async fn fetch_overview_top(&mut self) {
+        self.fetch_parked().await;
         let Some(folder) = self.overview.as_ref().and_then(Scope::folder) else {
             return;
         };
@@ -85,6 +93,53 @@ impl App {
         if let Some(Some(s)) = self.kept_summary(target).await {
             self.overview_said = Some(s);
         }
+    }
+
+    /// The parked flows, every scope's, as the daemon finds them in `~/.relay/flows`. Ones that
+    /// can't be had leave the last ones standing.
+    pub(super) async fn fetch_parked(&mut self) {
+        if let Ok(p) = self.rpc.call::<FlowParkedList>(()).await {
+            self.parked = p;
+        }
+        if self.parked_in_scope().is_empty() {
+            self.parked_open = false;
+        }
+    }
+
+    /// The overview's parked flows: those whose `in` is its project, or, `everywhere`'s, none.
+    pub(super) fn parked_in_scope(&self) -> Vec<&Parked> {
+        let Some(scope) = &self.overview else {
+            return vec![];
+        };
+        self.parked.iter().filter(|p| scope.holds(p)).collect()
+    }
+
+    /// The keys after `+ new flow`: `parked: N` when there are any, and its flows under it
+    /// while it is open.
+    pub(super) fn parked_keys(&self) -> Vec<String> {
+        let parked = self.parked_in_scope();
+        if parked.is_empty() {
+            return vec![];
+        }
+        let mut keys = vec![PARKED.to_string()];
+        if self.parked_open {
+            keys.extend(parked.iter().map(|p| parked_key(&p.folder)));
+        }
+        keys
+    }
+
+    /// Whether the cursor is on the overview's `parked: N`.
+    pub(super) fn on_parked_line(&self) -> bool {
+        self.view == View::Overview && self.sel.as_deref() == Some(PARKED)
+    }
+
+    /// The folder of the parked flow under the cursor, in the overview.
+    pub(super) fn parked_here(&self) -> Option<String> {
+        if self.view != View::Overview {
+            return None;
+        }
+        let folder = self.sel.as_deref()?.strip_prefix(PARKED_ROW)?;
+        Some(folder.to_string())
     }
 
     /// Back from the overview to the list, on the line it was opened from.
@@ -274,8 +329,9 @@ impl App {
         )
     }
 
-    /// The overview: its top, a blank line, its rows as the list draws them, and `+ new flow`,
-    /// a window of them following the selection.
+    /// The overview: its top, a blank line, its rows as the list draws them, `+ new flow`, and
+    /// `parked: N` with its flows under it while it is open, a window of them following the
+    /// selection.
     pub(super) fn draw_overview(&self, f: &mut Frame, area: Rect) {
         self.list_h.set(area.height);
         *self.hit.borrow_mut() = ListHit::default();
@@ -288,19 +344,55 @@ impl App {
         let mut sel_line = lines.len() + row_sel;
         lines.extend(row_lines);
         keys.extend(row_keys);
-        let mut new = Line::from(" + new flow");
         if self.on_new_flow() {
-            let short = w.saturating_sub(new.width());
-            if short > 0 {
-                new.spans.push(Span::raw(" ".repeat(short)));
-            }
-            new = new.style(theme::selected().patch(theme::accent()));
             sel_line = lines.len();
-        } else {
-            new = new.style(theme::dim());
         }
-        lines.push(new);
+        lines.push(self.overview_line(" + new flow".into(), self.on_new_flow(), w));
         keys.push(Some(NEW_FLOW.to_string()));
+        let parked = self.parked_in_scope();
+        if !parked.is_empty() {
+            let fold = if self.parked_open { "▾" } else { "▸" };
+            let line = format!(" parked: {} {fold}", parked.len());
+            if self.on_parked_line() {
+                sel_line = lines.len();
+            }
+            lines.push(self.overview_line(line, self.on_parked_line(), w));
+            keys.push(Some(PARKED.to_string()));
+        }
+        if self.parked_open {
+            let now = Timestamp::now();
+            let here = self.parked_here();
+            for p in parked {
+                let line = format!("   {}  parked {} ago · {}", p.name, fmt_age(p.at, now), p.folder);
+                let on = here.as_deref() == Some(p.folder.as_str());
+                if on {
+                    sel_line = lines.len();
+                }
+                lines.push(self.overview_line(line, on, w));
+                keys.push(Some(parked_key(&p.folder)));
+            }
+        }
         self.draw_window(f, area, lines, keys, sel_line);
     }
+
+    /// One of the overview's own lines, past its rows: dim, or lit to the edge under the cursor.
+    fn overview_line(&self, text: String, on: bool, w: usize) -> Line<'static> {
+        let mut line = Line::from(text);
+        if !on {
+            return line.style(theme::dim());
+        }
+        let short = w.saturating_sub(line.width());
+        if short > 0 {
+            line.spans.push(Span::raw(" ".repeat(short)));
+        }
+        line.style(theme::selected().patch(theme::accent()))
+    }
+}
+
+/// The start of a parked flow's key under `parked: N`; its folder follows.
+const PARKED_ROW: &str = "parked:";
+
+/// A parked flow's key under `parked: N`: `parked:_nightly`.
+fn parked_key(folder: &str) -> String {
+    format!("{PARKED_ROW}{folder}")
 }

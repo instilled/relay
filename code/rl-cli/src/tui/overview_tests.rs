@@ -6,10 +6,10 @@ use super::flow_proposal_tests::{answer_md, said, unasked};
 use super::flow_tests::{fired, flow_in};
 use super::overview::Scope;
 use super::tests::{draw_text, panel, press, type_in};
-use super::{NEW_FLOW, Summarising, View, line};
+use super::{NEW_FLOW, PARKED, Summarising, View, line};
 use crate::context::Want;
 use crossterm::event::{KeyCode, KeyModifiers};
-use rl_proto::flow::{FiringStatus, FlowApproval, FlowApprove, StepStatus};
+use rl_proto::flow::{FiringStatus, FlowApproval, FlowApprove, FlowName, FlowPark, FlowStatus, StepStatus};
 use rl_proto::types::{Summary, SummaryTarget};
 use std::path::Path;
 
@@ -928,5 +928,214 @@ async fn typing_is_a_flows_only_on_a_flow_or_new_flow() {
     // On no flow, words are words as anywhere.
     app.select(None);
     assert_eq!(app.shortcuts_place(), place(false));
+    token.cancel();
+}
+
+/// `name` parked by the daemon, and the panel told, as `^x` twice leaves it.
+async fn parked(app: &mut super::App, name: &str) {
+    app.rpc.call::<FlowPark>(FlowName { name: name.into() }).await.unwrap();
+    app.refresh().await;
+    app.fetch_parked().await;
+}
+
+#[tokio::test]
+async fn ctrl_x_twice_on_a_flow_parks_it() {
+    let (tmp, token, mut app, folder) = panel().await;
+    flow_in(&tmp, &mut app, "hello", &md_in(&folder)).await;
+    app.refresh().await;
+    enter_project(&mut app, &folder).await;
+    app.select(Some("f:hello".into()));
+    press(&mut app, KeyCode::Char('x'), KeyModifiers::CONTROL).await;
+    assert_eq!(said(&app), "press ^x again to park hello");
+    assert!(app.home.flow_dir("hello").exists(), "only armed");
+    press(&mut app, KeyCode::Char('x'), KeyModifiers::CONTROL).await;
+    assert_eq!(
+        said(&app),
+        "hello parked · its runs archived · /flow unpark hello brings it back"
+    );
+    assert!(!app.keys().iter().any(|k| k == "f:hello"), "{:?}", app.keys());
+    assert_eq!(app.keys(), [NEW_FLOW, PARKED]);
+    let frame = draw_text(&mut app);
+    assert!(frame.contains("parked: 1"), "{frame}");
+    token.cancel();
+}
+
+#[tokio::test]
+async fn the_parked_line_counts_only_this_scopes_flows() {
+    let (tmp, token, mut app, folder) = panel().await;
+    let other = std::fs::canonicalize(tmp.path()).unwrap().join("other");
+    std::fs::create_dir_all(&other).unwrap();
+    flow_in(&tmp, &mut app, "here", &md_in(&folder)).await;
+    flow_in(&tmp, &mut app, "there", &md_in(&other)).await;
+    flow_in(&tmp, &mut app, "loose", "---\nsteps:\n  probe:\n    run: x\n---\n").await;
+    for name in ["here", "there", "loose"] {
+        parked(&mut app, name).await;
+    }
+    // One left with no `in`, so the `everywhere` line stands.
+    flow_in(&tmp, &mut app, "stays", "---\nsteps:\n  probe:\n    run: x\n---\n").await;
+    app.refresh().await;
+    enter_project(&mut app, &folder).await;
+    let names = |app: &super::App| app.parked_in_scope().iter().map(|p| p.name.clone()).collect::<Vec<_>>();
+    assert_eq!(names(&app), ["here"]);
+    let frame = draw_text(&mut app);
+    assert!(frame.contains("parked: 1"), "{frame}");
+    // Everywhere's is the one with no `in`.
+    press(&mut app, KeyCode::Esc, KeyModifiers::NONE).await;
+    app.select(Some("g:everywhere".into()));
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+    assert_eq!(app.overview, Some(Scope::Everywhere));
+    assert_eq!(names(&app), ["loose"]);
+    let frame = draw_text(&mut app);
+    assert!(frame.contains("parked: 1"), "{frame}");
+    token.cancel();
+}
+
+#[tokio::test]
+async fn no_parked_line_with_none_parked() {
+    let (tmp, token, mut app, folder) = panel().await;
+    flow_in(&tmp, &mut app, "hello", &md_in(&folder)).await;
+    app.refresh().await;
+    enter_project(&mut app, &folder).await;
+    assert_eq!(app.keys(), ["f:hello", NEW_FLOW]);
+    let frame = draw_text(&mut app);
+    assert!(!frame.contains("parked:"), "{frame}");
+    token.cancel();
+}
+
+#[tokio::test]
+async fn enter_on_parked_folds_them_out_and_in() {
+    let (tmp, token, mut app, folder) = panel().await;
+    flow_in(&tmp, &mut app, "hello", &md_in(&folder)).await;
+    parked(&mut app, "hello").await;
+    enter_project(&mut app, &folder).await;
+    app.select(Some(PARKED.into()));
+    // Neither the line nor its flows take words, nor `^x`.
+    assert!(!app.words_only());
+    press(&mut app, KeyCode::Char('x'), KeyModifiers::CONTROL).await;
+    assert_eq!(said(&app), "already parked");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+    assert_eq!(app.keys(), [NEW_FLOW, PARKED, "parked:_hello"]);
+    let frame = draw_text(&mut app);
+    assert!(frame.contains("parked: 1 ▾"), "{frame}");
+    let row = frame.lines().find(|l| l.contains("hello  parked ")).expect("its row");
+    assert!(row.contains("_hello"), "{row}");
+    app.select(Some("parked:_hello".into()));
+    assert!(!app.words_only());
+    press(&mut app, KeyCode::Char('x'), KeyModifiers::CONTROL).await;
+    assert_eq!(said(&app), "already parked");
+    app.select(Some(PARKED.into()));
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+    assert_eq!(app.keys(), [NEW_FLOW, PARKED]);
+    let frame = draw_text(&mut app);
+    assert!(!frame.contains("hello  parked "), "{frame}");
+    token.cancel();
+}
+
+#[tokio::test]
+async fn enter_on_a_parked_flow_unparks_it() {
+    let (tmp, token, mut app, folder) = panel().await;
+    flow_in(&tmp, &mut app, "alpha", &md_in(&folder)).await;
+    flow_in(&tmp, &mut app, "hello", &md_in(&folder)).await;
+    parked(&mut app, "hello").await;
+    enter_project(&mut app, &folder).await;
+    app.select(Some(PARKED.into()));
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+    app.select(Some("parked:_hello".into()));
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+    assert_eq!(said(&app), "hello back · it needs a yes: enter on it");
+    assert_eq!(app.sel.as_deref(), Some("f:hello"));
+    let hello = app.flows.iter().find(|f| f.name == "hello").expect("a flow again");
+    assert_eq!(hello.status(), FlowStatus::NeedsApproval);
+    assert!(!app.keys().iter().any(|k| k == PARKED), "{:?}", app.keys());
+    app.settle();
+    assert_eq!(app.sel.as_deref(), Some("f:hello"));
+    token.cancel();
+}
+
+#[tokio::test]
+async fn a_flow_unparked_into_another_place_says_where_it_went() {
+    let (tmp, token, mut app, folder) = panel().await;
+    flow_in(&tmp, &mut app, "loose", "---\nsteps:\n  probe:\n    run: x\n---\n").await;
+    parked(&mut app, "loose").await;
+    enter_project(&mut app, &folder).await;
+    type_in(&mut app, "/flow unpark loose").await;
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+    assert_eq!(
+        said(&app),
+        "loose back · it needs a yes: enter on it · it is in everywhere"
+    );
+    assert!(app.view == View::Overview);
+    token.cancel();
+}
+
+#[tokio::test]
+async fn flow_park_and_unpark_commands() {
+    let (tmp, token, mut app, folder) = panel().await;
+    let flows = app.home.flows_dir();
+    flow_in(&tmp, &mut app, "hello", &md_in(&folder)).await;
+    app.refresh().await;
+    enter_project(&mut app, &folder).await;
+    // On the flow, `/flow park` parks it.
+    app.select(Some("f:hello".into()));
+    type_in(&mut app, "/flow park").await;
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+    assert_eq!(
+        said(&app),
+        "hello parked · its runs archived · /flow unpark hello brings it back"
+    );
+    assert!(flows.join("_hello").is_dir());
+    // By name, twice more: each to a folder of its own.
+    for n in [2, 3] {
+        flow_in(&tmp, &mut app, "hello", &md_in(&folder)).await;
+        app.refresh().await;
+        type_in(&mut app, "/flow park hello").await;
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+        assert!(flows.join(format!("_hello.{n}")).is_dir(), "{}", said(&app));
+    }
+    // A name brings back its newest.
+    type_in(&mut app, "/flow unpark hello").await;
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+    assert_eq!(said(&app), "hello back · it needs a yes: enter on it");
+    assert!(!flows.join("_hello.3").exists() && flows.join("hello").is_dir());
+    assert!(flows.join("_hello").is_dir() && flows.join("_hello.2").is_dir());
+    // A folder brings back that one.
+    type_in(&mut app, "/flow park hello").await;
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+    type_in(&mut app, "/flow unpark _hello.2").await;
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+    assert_eq!(said(&app), "hello back · it needs a yes: enter on it");
+    assert!(!flows.join("_hello.2").exists() && flows.join("hello").is_dir());
+    assert!(flows.join("_hello").is_dir() && flows.join("_hello.3").is_dir());
+    // Nothing parked by a name says so.
+    type_in(&mut app, "/flow unpark nope").await;
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+    assert_eq!(said(&app), "nothing parked as nope · rl flow parked lists them");
+    token.cancel();
+}
+
+#[tokio::test]
+async fn slash_archive_on_a_flow_still_archives_its_runs() {
+    let (tmp, token, mut app, folder) = panel().await;
+    flow_in(&tmp, &mut app, "hello", &md_in(&folder)).await;
+    app.refresh().await;
+    approve(&mut app, "hello").await;
+    fired(
+        &tmp,
+        &folder,
+        "hello",
+        "fire0001",
+        &[("probe", StepStatus::Done, Some("found\r\n"))],
+        FiringStatus::Done,
+    );
+    app.refresh().await;
+    enter_project(&mut app, &folder).await;
+    app.select(Some("f:hello".into()));
+    assert!(app.selected_flow().is_some_and(|f| !f.runs.is_empty()));
+    type_in(&mut app, "/archive").await;
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+    assert_eq!(said(&app), "archived hello · 1 runs");
+    assert!(app.home.flow_dir("hello").is_dir(), "not parked");
+    assert!(app.parked.is_empty());
+    assert!(app.keys().iter().any(|k| k == "f:hello"));
     token.cancel();
 }
