@@ -131,8 +131,11 @@ impl FlowProposal {
 
 impl App {
     /// The flow proposal, when it is the subpage up.
+    /// Only while it is what the pane shows: under a run's output it is not, and takes no key.
     pub(super) fn flow_proposal_shown(&self) -> Option<&FlowProposal> {
-        self.flow_proposal.as_ref().filter(|p| p.shown && self.show_pane)
+        self.flow_proposal
+            .as_ref()
+            .filter(|p| p.shown && self.show_pane && self.pane == Pane::Facts)
     }
 
     /// Words for a flow — a new one, or a change to one there: the pane opens on them at once,
@@ -210,30 +213,18 @@ impl App {
     }
 
     /// What the assistant answered words for a flow, into the pane: a draft, checked; or why
-    /// not. Said in a word when the pane is not up — it never pops up, nor takes a key.
+    /// not. Said in a word when the pane is not up — it never pops up, nor takes a key. With no
+    /// flow proposal to land in, it is let be. `let_go`: an earlier flow proposal made way for
+    /// this one, and is said to have.
     pub(super) fn flow_answered(
         &mut self,
-        want: Want,
-        words: String,
         answer: std::result::Result<Result<(Answer, rl_proto::methods::AssistantOutput)>, tokio::task::JoinError>,
+        let_go: bool,
     ) {
-        let up = self.show_pane;
+        let up = self.show_pane && self.pane == Pane::Facts;
         let home = self.home.clone();
         let known = self.names.paths();
-        let p = self.flow_proposal.get_or_insert_with(|| {
-            let aim = match want {
-                Want::Flow { name } => Aim::New {
-                    named: Some(name),
-                    folder: None,
-                },
-                Want::NewFlow { folder } => Aim::New { named: None, folder },
-                Want::Any => Aim::New {
-                    named: None,
-                    folder: None,
-                },
-            };
-            FlowProposal::new(aim, vec![words], false)
-        });
+        let Some(p) = self.flow_proposal.as_mut() else { return };
         p.since = None;
         let said = match answer {
             Ok(Ok((Answer::Flow(d), out))) => {
@@ -275,15 +266,19 @@ impl App {
                 format!("asking: {e}")
             }
         };
+        const LET_GO: &str = "the earlier flow proposal was let go";
         if !(p.shown && up) {
             p.shown = false;
-            self.say(said);
+            self.say(if let_go { format!("{said} · {LET_GO}") } else { said });
+        } else if let_go {
+            self.say(LET_GO);
         }
     }
 
     /// A flow answered where a run was asked: the run proposal becomes a flow proposal, its words
-    /// and whether it was up carried over, `in` where it was asked.
-    pub(super) fn run_proposal_to_flow(&mut self, words: &str) {
+    /// and whether it was up carried over, `in` where it was asked. Whether an earlier flow
+    /// proposal with a draft in it was let go for it.
+    pub(super) fn run_proposal_to_flow(&mut self, words: &str) -> bool {
         let (asked, shown, folder) = match self.proposal.take() {
             Some(p) => (p.asked, p.shown, p.folder),
             None => (vec![words.to_string()], false, self.folder_here()),
@@ -292,7 +287,8 @@ impl App {
             named: None,
             folder: Some(folder),
         };
-        self.flow_proposal = Some(FlowProposal::new(aim, asked, shown));
+        let was = self.flow_proposal.replace(FlowProposal::new(aim, asked, shown));
+        was.is_some_and(|p| p.draft.is_some())
     }
 
     /// `/flow draft`: the flow proposal, back in the pane.
@@ -385,8 +381,19 @@ impl App {
                 self.say(said);
             }
             Err(e) => {
-                let why = format!("{e:#}");
+                let mut why = format!("{e:#}");
+                let home = self.home.clone();
                 if let Some(p) = self.flow_proposal.as_mut() {
+                    // The flow moved under it: what it was asked of is what is there now, and
+                    // the draft against the old goes, so the next words ask from the file.
+                    if let Aim::Change { name, base } = &mut p.aim
+                        && let Ok(now) = std::fs::read_to_string(home.flow_dir(name).join("flow.md"))
+                        && now != *base
+                    {
+                        *base = now;
+                        p.draft = None;
+                        why = format!("{name}'s flow.md changed since it was asked · type to ask again");
+                    }
                     p.error = Some(why.clone());
                 }
                 self.say(why);

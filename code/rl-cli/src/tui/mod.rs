@@ -1778,6 +1778,17 @@ impl App {
     /// What the `everywhere` header says to a project's action.
     const NOT_A_PROJECT: &'static str = "everywhere is not a project";
 
+    /// Another subpage opened over a proposal, run or flow: it waits unshown — its keys none of
+    /// its own — until `/ask` or `/flow draft` brings it back.
+    fn cover_proposals(&mut self) {
+        if let Some(p) = self.proposal.as_mut() {
+            p.shown = false;
+        }
+        if let Some(p) = self.flow_proposal.as_mut() {
+            p.shown = false;
+        }
+    }
+
     /// Leave the subpage for the list, the one way out: the page it was reading is let go, a
     /// sub-mode inside it (an answer, a walk, a name) ends, and the row stays selected.
     fn leave_subpage(&mut self) {

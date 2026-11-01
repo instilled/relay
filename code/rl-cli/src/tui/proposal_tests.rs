@@ -133,3 +133,21 @@ async fn an_ask_that_fails_says_why_in_the_pane() {
     assert!(screen.contains("type to ask again"), "{screen}");
     token.cancel();
 }
+
+#[tokio::test]
+async fn a_runs_output_over_it_takes_its_keys() {
+    let (_tmp, token, mut app, _) = panel().await;
+    ask(&mut app, "say hi");
+    answer(&mut app, "echo hi").await;
+    assert!(app.proposal_shown().is_some());
+    app.open_term_on("run00001".into(), super::tests::AREA).await;
+    assert!(app.proposal_shown().is_none());
+    press(&mut app, KeyCode::Char('e'), KeyModifiers::CONTROL).await;
+    assert!(!matches!(app.mode, super::Mode::Form(_)), "^e is not the proposal's");
+    press(&mut app, KeyCode::Esc, KeyModifiers::NONE).await;
+    assert!(
+        app.proposal.as_ref().is_some_and(|p| p.draft.is_some()),
+        "esc left the output; the proposal waits for /ask"
+    );
+    token.cancel();
+}

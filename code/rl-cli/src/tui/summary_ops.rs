@@ -97,12 +97,12 @@ impl App {
         let Some(asking) = self.asking.take() else { return };
         match answer {
             // Asked for a flow: whatever came, into its pane.
-            answer if !matches!(asking.want, Want::Any) => self.flow_answered(asking.want, asking.words, answer),
+            answer if !matches!(asking.want, Want::Any) => self.flow_answered(answer, false),
             // A flow where a run was asked: the run proposal becomes the flow's.
             Ok(Ok((crate::interpret::Answer::Flow(d), out))) => {
-                self.run_proposal_to_flow(&asking.words);
+                let let_go = self.run_proposal_to_flow(&asking.words);
                 let answer = Ok(Ok((crate::interpret::Answer::Flow(d), out)));
-                self.flow_answered(Want::NewFlow { folder: None }, asking.words, answer);
+                self.flow_answered(answer, let_go);
             }
             Ok(Ok((crate::interpret::Answer::Run(draft), out))) => self.proposed(draft, out.agent),
             Ok(Err(e)) => self.not_proposed(format!("{e:#}")),
@@ -245,6 +245,7 @@ impl App {
         let in_top = self.view == View::Overview && self.overview.as_ref().is_some_and(|o| o.target() == target);
         if !tops && !in_top && self.view != View::Report {
             self.pane = Pane::Facts;
+            self.cover_proposals();
             self.show_pane = true;
         }
         self.summarising = Some(Summarising {

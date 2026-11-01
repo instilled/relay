@@ -127,7 +127,9 @@ fn fact(k: &str, v: String) -> Line<'static> {
 impl App {
     /// The proposal, when it is the subpage up.
     pub(super) fn proposal_shown(&self) -> Option<&Proposal> {
-        self.proposal.as_ref().filter(|p| p.shown && self.show_pane)
+        self.proposal
+            .as_ref()
+            .filter(|p| p.shown && self.show_pane && self.pane == Pane::Facts)
     }
 
     /// Words for the assistant, outside a flow: the pane opens on them at once. With a proposal

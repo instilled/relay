@@ -779,6 +779,7 @@ impl App {
             // A flow's row in the overview never grows into its runs: they are in its page, and
             // enter again walks its steps and its last firings there.
             self.pane = Pane::Facts;
+            self.cover_proposals();
             self.show_pane = true;
             self.load_pane().await;
         } else if let Some(q) = self.selected_question() {
@@ -787,6 +788,7 @@ impl App {
             // The choices are in the subpage: the arrows walk them from the first.
             self.answer_at = 0;
             self.pane = Pane::Facts;
+            self.cover_proposals();
             self.show_pane = true;
             self.mode = Mode::Answer(id);
         } else if let Some(Row::Outside(s)) = self.selected() {

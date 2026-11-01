@@ -146,6 +146,7 @@ impl App {
                 self.say(flows::reload_note(&r));
                 if r.not_loaded.len() > 1 {
                     self.pane = Pane::Facts;
+                    self.cover_proposals();
                     self.show_pane = true;
                     self.reload_list = Some(r.not_loaded);
                 }

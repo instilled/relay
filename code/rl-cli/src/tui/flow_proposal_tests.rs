@@ -283,6 +283,82 @@ async fn a_change_whose_flow_moved_is_not_saved() {
         screen.contains("✗ hello's flow.md changed since it was asked"),
         "{screen}"
     );
+    // What it is asked of is the file as it is now, and the draft against the old one is gone.
+    let p = app.flow_proposal.as_ref().unwrap();
+    assert!(p.draft.is_none());
+    let now = std::fs::read_to_string(&md).unwrap();
+    assert_eq!(p.aim, change(&now));
+    // More words ask again, from it.
+    run(&mut app, "every 2h").await;
+    unasked(&mut app);
+    let (sent, _, _, _) = app.flow_asking().unwrap();
+    assert!(sent.contains("  Says hi.\n"), "{sent}");
+    assert!(!sent.contains("every 2h\n  steps"), "not the old draft: {sent}");
+    token.cancel();
+}
+
+#[tokio::test]
+async fn another_subpage_over_the_proposal_takes_its_keys() {
+    let (tmp, token, mut app, _) = panel().await;
+    let home = rl_core::Home::at(tmp.path().join("h"));
+    proposed(&mut app, "hello", HELLO).await;
+    on_screen(&mut app);
+    assert!(app.flow_proposal_shown().is_some());
+    // A run's output, over it: the keys are the output's.
+    app.open_term_on("run00001".into(), super::tests::AREA).await;
+    assert!(app.flow_proposal_shown().is_none());
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+    assert!(!home.flow_dir("hello").exists(), "enter wrote nothing");
+    press(&mut app, KeyCode::Char('e'), KeyModifiers::CONTROL).await;
+    assert!(app.editor.is_none(), "^e opened nothing");
+    press(&mut app, KeyCode::Esc, KeyModifiers::NONE).await;
+    assert!(
+        app.flow_proposal.as_ref().is_some_and(|p| p.draft.is_some()),
+        "esc left the output, not the proposal"
+    );
+    run(&mut app, "/flow draft").await;
+    assert!(draw_text(&mut app).contains("hello  drafted by fakeai"));
+    token.cancel();
+}
+
+#[tokio::test]
+async fn an_answer_with_no_flow_proposal_to_land_in_is_let_be() {
+    let (_tmp, token, mut app, _) = panel().await;
+    app.asking = Some(super::Asking {
+        words: "every 2h".into(),
+        want: Want::Flow { name: "hello".into() },
+        task: tokio::spawn(async { anyhow::bail!("not asked") }),
+    });
+    answer(&mut app, ANSWER).await;
+    assert!(app.flow_proposal.is_none());
+    token.cancel();
+}
+
+#[tokio::test]
+async fn a_flow_answered_to_plain_words_lets_an_earlier_one_go_and_says_so() {
+    let (_tmp, token, mut app, _) = panel().await;
+    // One answered while it was left: it waits, unshown.
+    ask_for(
+        &mut app,
+        Aim::New {
+            named: None,
+            folder: None,
+        },
+        "say hello",
+    );
+    press(&mut app, KeyCode::Esc, KeyModifiers::NONE).await;
+    answer(&mut app, ANSWER).await;
+    // Plain words, answered with a flow: it takes the earlier one's place.
+    app.propose("say bye every hour".into());
+    app.asking = Some(super::Asking {
+        words: "say bye every hour".into(),
+        want: Want::Any,
+        task: tokio::spawn(async { anyhow::bail!("not asked") }),
+    });
+    answer(&mut app, &ANSWER.replace("name: hello", "name: bye")).await;
+    assert_eq!(said(&app), "the earlier flow proposal was let go");
+    let d = app.flow_proposal_shown().and_then(|p| p.draft.as_ref()).unwrap();
+    assert_eq!(d.name, "bye");
     token.cancel();
 }
 

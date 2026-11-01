@@ -16,6 +16,7 @@ impl App {
             Ok(t) => {
                 self.tested = Some(crate::flow::tested::lines(&t, Timestamp::now()));
                 self.pane = Pane::Facts;
+                self.cover_proposals();
                 self.show_pane = true;
                 self.say(format!("{name}: what would fire · started nothing"));
             }
