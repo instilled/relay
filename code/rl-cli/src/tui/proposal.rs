@@ -127,7 +127,9 @@ fn fact(k: &str, v: String) -> Line<'static> {
 impl App {
     /// The proposal, when it is the subpage up.
     pub(super) fn proposal_shown(&self) -> Option<&Proposal> {
-        self.proposal.as_ref().filter(|p| p.shown && self.show_pane)
+        self.proposal
+            .as_ref()
+            .filter(|p| p.shown && self.show_pane && self.pane == Pane::Facts)
     }
 
     /// Words for the assistant, outside a flow: the pane opens on them at once. With a proposal
@@ -147,6 +149,10 @@ impl App {
                 words
             }
         };
+        // One proposal up at a time: a flow's waits for `/flow draft`.
+        if let Some(f) = self.flow_proposal.as_mut() {
+            f.shown = false;
+        }
         self.show_pane = true;
         self.pane = Pane::Facts;
         self.term = None;
@@ -185,6 +191,9 @@ impl App {
     pub(super) fn show_proposal(&mut self) -> bool {
         let Some(p) = self.proposal.as_mut() else { return false };
         p.shown = true;
+        if let Some(f) = self.flow_proposal.as_mut() {
+            f.shown = false;
+        }
         self.show_pane = true;
         self.pane = Pane::Facts;
         self.term = None;

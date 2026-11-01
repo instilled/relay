@@ -249,8 +249,15 @@ sequenceDiagram
   `View::Overview` over a `Scope` (`Project(folder)` or `Everywhere`), `tui/overview.rs`. It has the
   project's last summary on top (`/summary` there, on `+ new flow` or a flow, writes it; everywhere has
   none), then its flows as rows (those that need you first, then by name, each with its open questions
-  under it), each opening its page, and a last row, `+ new flow` (`NEW_FLOW`), which puts `/flow new ` on
-  the line. Flows are reached only there, and from the catch-up and the events. Rows never move by themselves; `⇧↑↓` reorders the
+  under it), each opening its page, and a last row, `+ new flow` (`NEW_FLOW`). Words typed there
+  are for the flow under the cursor (`App::overview_words`): on a flow they ask for a change to it,
+  against its `flow.md` as it is then; on `+ new flow`, for a new one `in` the project (none for
+  everywhere's). A first word that would run is still one of the words, unless a bang says
+  otherwise. The **flow proposal** (`tui/flow_proposal.rs`) opens in the pane at once while it is
+  asked, then shows the flow drafted — whole, or a change line by line against the one it changes:
+  more words change it, `enter` writes it and says yes, `^e` opens it in `$EDITOR`, `esc` lets it
+  go. `esc` while it is still asked leaves it asking, unshown, and `/flow draft` brings it back.
+  Flows are reached only there, and from the catch-up and the events. Rows never move by themselves; `⇧↑↓` reorders the
   runs, kept in `row_order` via `digest.order`. Toggles (`a` agents, `s` shells, `h` hidden) and a
   search (`tui/query.rs`, words plus `in: is: kind: by: on:` tokens) narrow it.
 - **The line** (`tui/line.rs`) always takes typing. A first word naming an agent starts that
@@ -402,8 +409,9 @@ path and byte but `runs/`); a flow runs only while its approved hash equals the 
 change asks again. The hash is checked again before a firing and before each step starts, so a
 firing waiting four hours on a question never runs a script changed meanwhile, and a firing runs
 the definition and version it began with. `rl flow approve` says yes to one hash; `rl flow edit`
-and `rl flow new` approve only exactly what was saved (`rl-cli/src/flow/edit.rs`, `new.rs`);
-nothing an agent wrote is approved for you.
+and `rl flow new` approve only exactly what was saved (`rl-cli/src/flow/edit.rs`, `new.rs`), and
+so does `enter` on a flow proposed in the panel's pane, once its draft has been on screen to its
+end (`flow::write_new`, `flow::write_changed`); nothing an agent wrote is approved for you.
 
 **The engine** is pure decisions (`rl-flow/src/advance.rs`) carried out by `rl-daemon/src/flows/
 engine.rs`, under one lock. A pending step starts when all its `after` are `done` and its `if:`

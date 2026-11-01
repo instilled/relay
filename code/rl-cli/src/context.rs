@@ -12,7 +12,7 @@ use rl_proto::flow::{FlowFilter, FlowList};
 use rl_proto::methods::{AgentList, WorkspaceList};
 use rl_proto::types::event_kind;
 use std::fmt::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 /// `rl --help` and the help of the commands a draft becomes, rendered by the
@@ -154,11 +154,13 @@ pub fn events() -> String {
     s
 }
 
-/// What the person asked the assistant for: whatever fits the words, or a flow by this name.
+/// What the person asked the assistant for: whatever fits the words, a flow by this name, or a
+/// new flow the assistant names — in `folder`, when the words were typed on a project.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Want {
     Any,
     Flow { name: String },
+    NewFlow { folder: Option<PathBuf> },
 }
 
 /// The answer's shapes, indented so an echo of them is never read as one, and what to prefer.
@@ -201,6 +203,20 @@ were typed in. Prefer a shell line for one command, an agent for work that needs
 prose, no code fence.\n\n{}\n{after}",
             flow(name)
         ),
+        Want::NewFlow { folder } => {
+            let in_ = match folder {
+                Some(f) => format!(
+                    "Name it, and set its in: {}, unless the words name another folder.",
+                    display_path(f)
+                ),
+                None => "Name it; it has no in: it works in no one project.".to_string(),
+            };
+            format!(
+                "The person asked for a new flow. Answer with it, and nothing around it: no prose, no \
+code fence.\n\n{}\n{in_}\n\n{after}",
+                flow("<a new flow's name: a-z, 0-9 and ->")
+            )
+        }
     }
 }
 
@@ -210,6 +226,7 @@ pub fn render(help: &str, here: &Here, want: &Want) -> String {
     let drafting = match want {
         Want::Any => "one run, or one flow,".to_string(),
         Want::Flow { name } => format!("the flow `{name}`"),
+        Want::NewFlow { .. } => "a new flow".to_string(),
     };
     let _ = write!(
         s,
@@ -350,5 +367,19 @@ mod tests {
         );
         assert!(flow.contains("You are drafting the flow `brief`"));
         assert!(!flow.contains("kind: run"), "a flow was asked for");
+    }
+
+    #[test]
+    fn a_new_flow_is_named_by_the_assistant() {
+        let at = contract(&Want::NewFlow {
+            folder: Some("/w".into()),
+        });
+        assert!(at.contains("name: <a new flow's name: a-z, 0-9 and ->"), "{at}");
+        assert!(at.contains("its in: /w"), "{at}");
+        assert!(!at.contains("kind: run"), "a flow was asked for: {at}");
+        let nowhere = contract(&Want::NewFlow { folder: None });
+        assert!(nowhere.contains("it has no in"), "{nowhere}");
+        let pack = render("rl", &Here::default(), &Want::NewFlow { folder: None });
+        assert!(pack.contains("You are drafting a new flow"), "{pack}");
     }
 }

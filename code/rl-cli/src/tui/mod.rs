@@ -22,6 +22,7 @@ mod carry;
 mod catch_ops;
 mod catchup;
 mod complete;
+mod diff;
 mod events;
 mod feed_ops;
 mod firings;
@@ -30,6 +31,9 @@ mod flow_links;
 #[cfg(test)]
 mod flow_new_tests;
 mod flow_ops;
+mod flow_proposal;
+#[cfg(test)]
+mod flow_proposal_tests;
 #[cfg(test)]
 mod flow_tests;
 pub(crate) mod flows;
@@ -196,9 +200,6 @@ enum Mode {
         runs: u32,
         calls: u32,
     },
-    /// A flow the assistant drafted, in the pane: `enter` writes it and says yes, `e` opens it in
-    /// `$EDITOR` first, `esc` lets it go.
-    Draft(Box<new_flow::Drafted>),
     /// `^x` on a project: taking a whole project down is not a double-press
     /// you can slip on — you type `DELETE` and `enter`, `esc` keeps it.
     Confirm(Box<Confirming>),
@@ -388,8 +389,6 @@ struct App {
     reload_list: Option<Vec<NotLoaded>>,
     /// What `/flow test` found, as lines, until the next key.
     tested: Option<Vec<String>>,
-    /// A flow drafted while the keys were another's: shown by `/flow draft`.
-    parked: Option<new_flow::Parked>,
     /// The views gone through to reach the one that is up, the list first:
     /// going back walks them.
     back: Vec<View>,
@@ -503,6 +502,10 @@ struct App {
     /// `/flow edit`: the flow being edited, and the line of its `flow.md` to
     /// open the editor at once the screen is given back.
     editor: Option<(crate::flow::Editing, usize)>,
+    /// The flow proposal for a change, while the change is in the editor: what its `flow.md` was
+    /// asked of goes back, and the proposal comes up again, unless the editor saves a change that
+    /// loads.
+    editing_change: Option<flow_proposal::FlowProposal>,
     /// A run to hand the real terminal to (its id, and whether to take the
     /// keyboard from whoever holds it), once ratatui has stepped aside.
     attach: Option<(String, bool)>,
@@ -520,6 +523,9 @@ struct App {
     asking: Option<Asking>,
     /// A run the assistant was asked for, in the pane: while it is asked, then what it proposed.
     proposal: Option<proposal::Proposal>,
+    /// A flow the assistant was asked for, new or changed, in the pane: while it is asked, then
+    /// what it proposed.
+    flow_proposal: Option<flow_proposal::FlowProposal>,
     /// Options marked so far on a multi-choice question.
     picked: Vec<usize>,
     /// The live line at the foot; typing is the panel's resting state.
@@ -1311,9 +1317,10 @@ impl App {
             not_loaded: Vec::new(),
             reload_list: None,
             tested: None,
-            parked: None,
             asking: None,
             proposal: None,
+            flow_proposal: None,
+            editing_change: None,
             summary: None,
             summarising: None,
             overview: None,
@@ -1384,10 +1391,24 @@ impl App {
                             match outcome {
                                 Ok(()) => self.edited(editing).await,
                                 Err(e) => {
-                                    // However the editor ends, a new flow's template is not left behind.
-                                    match crate::flow::drop_new(&self.home, &editing, true) {
-                                        Err(left) => self.say(format!("{e:#}; {left:#}")),
-                                        Ok(_) => self.say(format!("{e:#}")),
+                                    // However the editor ends, a change proposed is not left in
+                                    // a flow's place unseen — what it was goes back, and so does
+                                    // the proposal — nor a new flow's template left behind.
+                                    let why = format!("{e:#}");
+                                    let left = match self.editing_change.take() {
+                                        Some(p) => {
+                                            // What the editor saved before it failed is the
+                                            // person's, and comes back; else the draft.
+                                            let text = std::fs::read_to_string(&editing.file).unwrap_or_else(|_| {
+                                                p.draft.as_ref().map(|d| d.text.clone()).unwrap_or_default()
+                                            });
+                                            self.change_back(&editing, p, text, Some(why.clone())).await
+                                        }
+                                        None => crate::flow::drop_new(&self.home, &editing, true).map(|_| ()),
+                                    };
+                                    match left {
+                                        Err(left) => self.say(format!("{why}; {left:#}")),
+                                        Ok(()) => self.say(why),
                                     }
                                 }
                             }
@@ -1565,6 +1586,12 @@ impl App {
         if self.search.is_some() {
             return None;
         }
+        // A flow proposed takes the keys while it is up, wherever it was asked from.
+        if let Some(p) = self.flow_proposal_shown() {
+            return Some(shortcuts::Place::FlowProposal {
+                asking: p.since.is_some(),
+            });
+        }
         // The same test as the footer's: the output page's keys while it is up.
         if self.pane == Pane::Term && self.term.is_some() {
             return Some(shortcuts::Place::Term {
@@ -1577,7 +1604,9 @@ impl App {
             View::CatchUp => shortcuts::Place::CatchUp,
             View::Report => shortcuts::Place::Report,
             View::Overview if self.selected_question().is_some() => shortcuts::Place::Question,
-            View::Overview => shortcuts::Place::Overview,
+            View::Overview => shortcuts::Place::Overview {
+                words: self.overview_words_for().is_some(),
+            },
             View::Work if self.selected_question().is_some() => shortcuts::Place::Question,
             View::Work if self.show_hidden => shortcuts::Place::Hidden,
             View::Work => shortcuts::Place::List,
@@ -1766,10 +1795,23 @@ impl App {
     /// What the `everywhere` header says to a project's action.
     const NOT_A_PROJECT: &'static str = "everywhere is not a project";
 
+    /// Another subpage opened over a proposal, run or flow: it waits unshown — its keys none of
+    /// its own — until `/ask` or `/flow draft` brings it back.
+    fn cover_proposals(&mut self) {
+        if let Some(p) = self.proposal.as_mut() {
+            p.shown = false;
+        }
+        if let Some(p) = self.flow_proposal.as_mut() {
+            p.shown = false;
+        }
+    }
+
     /// Leave the subpage for the list, the one way out: the page it was reading is let go, a
     /// sub-mode inside it (an answer, a walk, a name) ends, and the row stays selected.
     fn leave_subpage(&mut self) {
-        if self.proposal_shown().is_some() {
+        if self.flow_proposal_shown().is_some() {
+            self.leave_flow_proposal();
+        } else if self.proposal_shown().is_some() {
             self.leave_proposal();
         }
         self.show_pane = false;
@@ -2410,10 +2452,14 @@ impl App {
                     theme::accent(),
                 ),
                 line::What::Agent { agent, .. } => ("✦", format!(" {agent} here"), theme::accent()),
-                line::What::Ask(_) if self.proposal_shown().is_some() => {
+                line::What::Ask(_) if self.proposal_shown().is_some() || self.flow_proposal_shown().is_some() => {
                     ("…", " changes the proposal".into(), theme::dim())
                 }
-                line::What::Ask(_) => ("…", " asks the assistant".into(), theme::dim()),
+                line::What::Ask(_) => match self.overview_words_for() {
+                    Some(Some(name)) => ("…", format!(" changes {name}"), theme::dim()),
+                    Some(None) => ("…", " makes a new flow".into(), theme::dim()),
+                    None => ("…", " asks the assistant".into(), theme::dim()),
+                },
             },
         };
         // Which way `shift-tab` turns it.
@@ -2912,8 +2958,8 @@ impl App {
             if let Some(code) = t.ended() {
                 spans.push(Span::styled(format!(" · ended ({code})"), theme::dim()));
             }
-        } else if matches!(self.mode, Mode::Draft(_)) {
-            spans.push(plain("draft"));
+        } else if self.flow_proposal_shown().is_some() {
+            spans.push(plain("flow proposal"));
         } else if self.proposal_shown().is_some() {
             spans.push(plain("proposal"));
         } else if self.tested.is_some() {
@@ -2971,9 +3017,9 @@ impl App {
             return;
         }
         let now = Timestamp::now();
-        // A draft, until it is written or let go.
-        if let Mode::Draft(d) = &self.mode {
-            return d.draw(f, area);
+        // A flow asked for, while it is asked and once it is proposed.
+        if let Some(p) = self.flow_proposal_shown() {
+            return p.draw(f, area, Instant::now());
         }
         // A run asked for, while it is asked and once it is proposed.
         if let Some(p) = self.proposal_shown() {
@@ -3151,14 +3197,6 @@ impl App {
                     "enter save · tab next field · esc cancel".into()
                 };
             }
-            Mode::Draft(d) => {
-                if let Some((m, at)) = &self.flash
-                    && at.elapsed() < FLASH
-                {
-                    return m.clone();
-                }
-                return d.hint();
-            }
             Mode::Rename(_) => {
                 if let Some((m, at)) = &self.flash
                     && at.elapsed() < FLASH
@@ -3206,6 +3244,9 @@ impl App {
             return format!(
                 "type to narrow · tab completes {tokens}, or next match · ↑↓ move · enter keeps · esc puts back"
             );
+        }
+        if let Some(p) = self.flow_proposal_shown() {
+            return p.hint();
         }
         if let Some(a) = &self.asking {
             return format!("asking about \"{}\"… · its run is in the list · /stop there", a.words);
@@ -3284,7 +3325,7 @@ impl App {
         }
         if self.view == View::Overview {
             if self.on_new_flow() {
-                return "enter writes one · esc the list".into();
+                return "type what it should do · esc the list".into();
             }
             return match self.selected() {
                 Some(Row::Question(_)) => {
@@ -3298,9 +3339,13 @@ impl App {
                     let archives = if f.runs.is_empty() { "" } else { "^x archives · " };
                     // Its page up: `esc` is back to the overview.
                     if self.show_pane {
-                        format!("enter its firings · {yes}^e edits · {archives}/summary · {pane} · esc back")
+                        format!(
+                            "type changes it · enter its firings · {yes}^e edits · {archives}/summary · {pane} · esc back"
+                        )
                     } else {
-                        format!("enter its firings · {yes}^e edits · {archives}/summary · esc the list")
+                        format!(
+                            "type changes it · enter its firings · {yes}^e edits · {archives}/summary · esc the list"
+                        )
                     }
                 }
                 _ => "esc the list".into(),
