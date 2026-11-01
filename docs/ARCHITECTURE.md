@@ -247,8 +247,10 @@ sequenceDiagram
   `everywhere` line after the projects tallies those with no `in`, and the headline counts every
   flow that needs you. `enter` on a project's line (or `everywhere`'s) opens its overview:
   `View::Overview` over a `Scope` (`Project(folder)` or `Everywhere`), `tui/overview.rs`. It has the
-  project's last summary on top (`/summary` there, on `+ new flow` or a flow, writes it; everywhere has
-  none), then its flows as rows (those that need you first, then by name, each with its open questions
+  project's summary on top (everywhere has none). Opening it writes that summary when none kept
+  is current (up to date, or written in the last 15 minutes), with `catch_up.summary: auto` and a
+  named summariser, one at a time and not asked again in a session after it fails; `/summary` there,
+  on `+ new flow` or a flow, writes it when asked, then its flows as rows (those that need you first, then by name, each with its open questions
   under it), each opening its page, and a row `+ new flow` (`NEW_FLOW`). Last, when any of its
   flows are parked, `parked: N` (`PARKED`): `enter` folds them out under it (`parked:<folder>`),
   and `enter` on one brings it back, the cursor on it needing a yes. `^x` twice on a flow parks it
@@ -470,7 +472,8 @@ colour); `assistants` maps Relay's own jobs to them:
   (`rl-daemon/src/summary.rs`). Brief takes the cheapest source: Claude's own `away_summary`
   recap, Codex's turns, else an assistant reading the stretch. Deep reads everything, in 48 KB
   parts joined by further calls; `dry` counts calls first. Results are kept in `summaries` and
-  `summary_kept` and reused until what they cover moves on. Agents' own recaps are picked up as
+  `summary_kept` and reused until what they cover moves on. `summary.get` with no `from` for a
+  project or everything gives the newest kept. Agents' own recaps are picked up as
   written (`recap.rs`), with no one asked. The daemon never calls an assistant on its own — every
   call is a client's.
 

@@ -1809,7 +1809,8 @@ impl App {
             }
             (None, _) => (false, None),
         };
-        // A project or everything with no stretch has nothing kept for it.
+        // A project or everything with no stretch has none to ask for here: the daemon would give the
+        // newest kept, and this wants the one kept from there.
         let needs_from = matches!(target, SummaryTarget::Project { .. } | SummaryTarget::All);
         if needs_from && from.is_none() {
             return Some(None);

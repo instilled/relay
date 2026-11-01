@@ -149,7 +149,11 @@ impl App {
         match done {
             Ok(Ok(summary)) => {
                 let key = o.target.key();
-                self.made.insert(key.clone(), summary.clone());
+                // A deep one made of the project by `/summary` stays its `made`: the brief shows
+                // in the top, not over it.
+                if !self.made.get(&key).is_some_and(|m| m.deep) {
+                    self.made.insert(key.clone(), summary.clone());
+                }
                 if self.overview.as_ref().map(Scope::target).as_ref() == Some(&o.target) {
                     self.overview_said = Some(summary.clone());
                 }

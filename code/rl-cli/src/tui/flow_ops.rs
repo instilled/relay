@@ -142,7 +142,18 @@ impl App {
                 let said = self.onto_saved(&flow.name, said);
                 self.say(said);
             }
-            Err(e) => self.say(told(&e)),
+            Err(e) => {
+                // The folder may be back under its name and not have loaded: what is parked and
+                // what is loaded are read again either way.
+                self.refresh().await;
+                let said = match crate::flow::came_back_unloaded(folder, &self.parked, &told(&e)) {
+                    Some((name, why)) => {
+                        format!("{name} is back in flows/{name} but did not load: {why} · ^e on it, or /flow reload")
+                    }
+                    None => told(&e),
+                };
+                self.say(said);
+            }
         }
     }
 

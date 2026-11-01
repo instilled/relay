@@ -548,9 +548,25 @@ pub fn project_ask(workspace: &Path, from: Timestamp) -> SummaryParams {
 /// and how long one kept over another stretch stands for it before it is written again.
 pub const OVERVIEW_STRETCH: SignedDuration = SignedDuration::from_hours(24);
 
+/// How long a summary kept of a project stands for its overview though it has moved on since:
+/// runs going on keep moving it, and writing the top again at every open would be asking at every
+/// `esc` and `enter`.
+pub const OVERVIEW_FRESH: SignedDuration = SignedDuration::from_mins(15);
+
+/// Whether a kept summary stands for the overview: while it is up to date, or, though it has
+/// moved on, written less than `OVERVIEW_FRESH` ago. `within` is how old it may be at most for an
+/// up-to-date one found by another stretch (`OVERVIEW_STRETCH`), or None for one of this stretch.
+fn kept_current(k: &Summary, now: Timestamp, within: Option<SignedDuration>) -> bool {
+    let age = now.duration_since(k.at);
+    if age < OVERVIEW_FRESH {
+        return true;
+    }
+    !k.stale && within.is_none_or(|w| age <= w)
+}
+
 /// A project's top, as its overview opens: the summary kept of it from `from` while it is up to
-/// date; with none kept from there, the newest kept of it from anywhere, while it is up to date
-/// and written within `OVERVIEW_STRETCH`. Else, when it writes itself (`auto_project_top`), one
+/// date or written less than `OVERVIEW_FRESH` ago; with none kept from there, the newest kept of
+/// it from anywhere, while it is that and written within `OVERVIEW_STRETCH`. Else, when it writes itself (`auto_project_top`), one
 /// to ask for, with the one kept, moved on or old, shown until it lands; else the one kept, or
 /// none.
 pub async fn plan_project_top(rpc: &mut Client, workspace: &Path, from: Timestamp) -> TopPlan {
@@ -558,7 +574,7 @@ pub async fn plan_project_top(rpc: &mut Client, workspace: &Path, from: Timestam
     let exact = rpc.call::<SummaryGet>(ask.clone()).await.ok().flatten();
     let (kept, current) = match exact {
         Some(k) => {
-            let current = !k.stale;
+            let current = kept_current(&k, Timestamp::now(), None);
             (Some(k), current)
         }
         None => {
@@ -569,7 +585,7 @@ pub async fn plan_project_top(rpc: &mut Client, workspace: &Path, from: Timestam
             let k = rpc.call::<SummaryGet>(newest).await.ok().flatten();
             let current = k
                 .as_ref()
-                .is_some_and(|k| !k.stale && Timestamp::now().duration_since(k.at) <= OVERVIEW_STRETCH);
+                .is_some_and(|k| kept_current(k, Timestamp::now(), Some(OVERVIEW_STRETCH)));
             (k, current)
         }
     };
@@ -1344,6 +1360,48 @@ mod tests {
         s.deep = true;
         s.stale = true;
         assert_eq!(top_label(&s), "deep · by haiku · from 1 run · moved on since");
+    }
+
+    /// A summary kept `ago` back, moved on since or not.
+    fn kept(ago: SignedDuration, stale: bool) -> Summary {
+        Summary {
+            run: String::new(),
+            agent: "haiku".into(),
+            by: "x1".into(),
+            at: Timestamp::now() - ago,
+            text: "• fine".into(),
+            since: None,
+            source: "summarised".into(),
+            reach: String::new(),
+            stale,
+            target: "project:/p".into(),
+            deep: false,
+            from: None,
+            calls: 1,
+            runs: 2,
+        }
+    }
+
+    #[test]
+    fn a_summary_moved_on_stands_for_the_overview_for_fifteen_minutes() {
+        let now = Timestamp::now();
+        let young = kept(SignedDuration::from_mins(14), true);
+        assert!(kept_current(&young, now, None), "a minute short of the floor");
+        assert!(kept_current(&young, now, Some(OVERVIEW_STRETCH)));
+        let old = kept(SignedDuration::from_mins(16), true);
+        assert!(!kept_current(&old, now, None), "past it, written again");
+        assert!(!kept_current(&old, now, Some(OVERVIEW_STRETCH)));
+    }
+
+    #[test]
+    fn a_summary_up_to_date_stands_as_before() {
+        let now = Timestamp::now();
+        let day = SignedDuration::from_hours(23);
+        assert!(kept_current(&kept(day, false), now, None));
+        assert!(kept_current(&kept(day, false), now, Some(OVERVIEW_STRETCH)));
+        let older = kept(SignedDuration::from_hours(25), false);
+        assert!(kept_current(&older, now, None), "of its own stretch, any age");
+        assert!(!kept_current(&older, now, Some(OVERVIEW_STRETCH)));
     }
 
     /// What `config.get` says: the summariser named (`config`) or not, and `catch_up`'s

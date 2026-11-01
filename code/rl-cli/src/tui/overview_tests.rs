@@ -1321,8 +1321,9 @@ async fn a_fresh_kept_summary_is_shown_not_rewritten() {
 async fn a_stale_kept_summary_is_shown_while_a_new_one_is_written() {
     let (tmp, token, mut app, folder) = panel().await;
     let from = jiff::Timestamp::now() - jiff::SignedDuration::from_hours(1);
-    // Kept before the project's run: moved on since.
-    keep(&tmp, &folder, from, "", "- the deploy went out");
+    // Kept before the project's run: moved on since, and long enough ago to be written again.
+    let at = jiff::Timestamp::now() - jiff::SignedDuration::from_mins(16);
+    keep_at(&tmp, &folder, from, "", "- the deploy went out", at);
     app.away_since = Some(from);
     enter_project(&mut app, &folder).await;
     let o = app.overviewing.as_ref().expect("moved on: a new one is asked");
@@ -1331,6 +1332,23 @@ async fn a_stale_kept_summary_is_shown_while_a_new_one_is_written() {
     let progress = frame.find("summarising… ").unwrap_or_else(|| panic!("{frame}"));
     let old = frame.find("the deploy went out").unwrap_or_else(|| panic!("{frame}"));
     assert!(progress < old, "{frame}");
+    token.cancel();
+}
+
+#[tokio::test]
+async fn a_stale_summary_kept_a_minute_ago_is_shown_not_rewritten() {
+    let (tmp, token, mut app, folder) = panel().await;
+    let from = jiff::Timestamp::now() - jiff::SignedDuration::from_hours(1);
+    let at = jiff::Timestamp::now() - jiff::SignedDuration::from_mins(1);
+    keep_at(&tmp, &folder, from, "", "- the deploy went out", at);
+    app.away_since = Some(from);
+    enter_project(&mut app, &folder).await;
+    assert!(
+        app.overviewing.is_none(),
+        "moved on, but kept a minute ago: no one is asked"
+    );
+    let frame = draw_text(&mut app);
+    assert!(frame.contains("the deploy went out"), "{frame}");
     token.cancel();
 }
 
@@ -1555,5 +1573,48 @@ async fn landing_leaves_a_deep_summary_in_the_subpage() {
         app.overview_said.as_ref().map(|s| s.text.as_str()),
         Some(brief.text.as_str())
     );
+    token.cancel();
+}
+
+#[tokio::test]
+async fn a_deep_summary_made_of_the_project_is_not_replaced_by_the_brief() {
+    let Some((_tmp, token, mut app, folder)) = panel_with_fake_summariser("- the build went green").await else {
+        return;
+    };
+    let target = SummaryTarget::Project {
+        workspace: folder.clone(),
+    };
+    let mut deep = said_of(&target, "- every detail");
+    deep.deep = true;
+    app.made.insert(target.key(), deep);
+    enter_project(&mut app, &folder).await;
+    wait_overviewed(&mut app).await;
+    let kept = app.made.get(&target.key()).expect("still made");
+    assert!(kept.deep && kept.text.contains("every detail"), "{kept:?}");
+    let said = app.overview_said.as_ref().expect("the brief is its top");
+    assert!(said.text.contains("the build went green"), "{said:?}");
+    token.cancel();
+}
+
+#[tokio::test]
+async fn an_unpark_whose_folder_came_back_but_did_not_load_says_so_and_reads_again() {
+    let (tmp, token, mut app, folder) = panel().await;
+    flow_in(&tmp, &mut app, "hello", &md_in(&folder)).await;
+    parked(&mut app, "hello").await;
+    std::fs::write(
+        app.home.flows_dir().join("_hello").join("flow.md"),
+        "---\nsteps: [\n---\n",
+    )
+    .unwrap();
+    enter_project(&mut app, &folder).await;
+    type_in(&mut app, "/flow unpark hello").await;
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+    let said = said(&app);
+    assert!(
+        said.starts_with("hello is back in flows/hello but did not load: "),
+        "{said}"
+    );
+    assert!(said.ends_with(" · ^e on it, or /flow reload"), "{said}");
+    assert!(app.parked.is_empty(), "no longer listed as parked: {:?}", app.parked);
     token.cancel();
 }
