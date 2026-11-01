@@ -81,17 +81,74 @@ impl App {
     }
 
     /// What was last said of the overview's project, fetched for its top whichever row the
-    /// cursor is on, and the flows parked, for its last line. `everywhere`'s top has none.
+    /// cursor is on, and the flows parked, for its last line. With none kept that is current, a
+    /// new one is asked for on a task of its own, as `plan_project_top` says; one already being
+    /// written of the project, by this or by `/summary`, is left to land. `everywhere`'s top has
+    /// none.
     pub(super) async fn fetch_overview_top(&mut self) {
         self.fetch_parked().await;
-        let Some(folder) = self.overview.as_ref().and_then(Scope::folder) else {
+        let Some(folder) = self.overview.as_ref().and_then(Scope::folder).map(Path::to_path_buf) else {
             return;
         };
         let target = SummaryTarget::Project {
-            workspace: folder.to_path_buf(),
+            workspace: folder.clone(),
         };
-        if let Some(Some(s)) = self.kept_summary(target).await {
+        let from = self.overview_stretch(&target);
+        let plan = crate::catchup::plan_project_top(&mut self.rpc, &folder, from).await;
+        if let Some(s) = plan.shown {
             self.overview_said = Some(s);
+        }
+        let Some(params) = plan.ask else { return };
+        let writing = |s: &Option<Summarising>| s.as_ref().is_some_and(|s| s.target == target);
+        if writing(&self.overviewing) || writing(&self.summarising) {
+            return;
+        }
+        // Another project's, asked as its overview opened, gives way.
+        if let Some(o) = self.overviewing.take() {
+            o.task.abort();
+        }
+        let home = self.home.clone();
+        let task = tokio::spawn(async move {
+            let mut rpc = Client::connect(&home).await?;
+            rpc.call::<SummaryMake>(params).await
+        });
+        self.overviewing = Some(Summarising {
+            title: self.names.workspace(&folder),
+            target,
+            deep: false,
+            from: Some(from),
+            since: Instant::now(),
+            task,
+        });
+    }
+
+    /// Where the overview's summary of `target` starts: where the last one made of it here did,
+    /// so the one it made is found again; else since you were last here; else the last day.
+    fn overview_stretch(&self, target: &SummaryTarget) -> Timestamp {
+        self.made
+            .get(&target.key())
+            .and_then(|m| m.from)
+            .or(self.away_since)
+            .unwrap_or_else(|| Timestamp::now() - OVERVIEW_STRETCH)
+    }
+
+    /// The overview's summary landed: kept as the last made of its project, and its top while
+    /// the overview is still on it. Failing, a word says why.
+    pub(super) fn overviewed(&mut self, done: std::result::Result<Result<Summary>, tokio::task::JoinError>) {
+        let Some(o) = self.overviewing.take() else { return };
+        match done {
+            Ok(Ok(summary)) => {
+                self.made.insert(o.target.key(), summary.clone());
+                if self.overview.as_ref().map(Scope::target).as_ref() == Some(&o.target) {
+                    self.overview_said = Some(summary.clone());
+                }
+                if self.summary_target().as_ref() == Some(&o.target) {
+                    self.summary = Some(summary);
+                }
+            }
+            Ok(Err(e)) => self.say(format!("the summary: {e:#}")),
+            Err(e) if e.is_cancelled() => {}
+            Err(e) => self.say(format!("the summary: {e}")),
         }
     }
 
@@ -294,9 +351,13 @@ impl App {
         };
         let key = target.key();
         let now = Timestamp::now();
-        // A new one being written: it says so above the one it will replace.
+        // A new one being written, asked with `/summary` or as the overview opened: it says so
+        // above the one it will replace.
         let mut lines = Vec::new();
-        if let Some(s) = self.summarising.as_ref().filter(|s| s.target == target) {
+        let writing = [&self.summarising, &self.overviewing]
+            .into_iter()
+            .find_map(|s| s.as_ref().filter(|s| s.target == target));
+        if let Some(s) = writing {
             let secs = s.since.elapsed().as_secs();
             lines.push(Line::styled(format!(" summarising… {secs}s"), theme::accent()));
         }
@@ -389,6 +450,10 @@ impl App {
         line.style(theme::selected().patch(theme::accent()))
     }
 }
+
+/// How far back a project's overview summary reaches when it opens with nothing to start from:
+/// no summary made of it here, and no time you were last here.
+const OVERVIEW_STRETCH: SignedDuration = SignedDuration::from_hours(24);
 
 /// The start of a parked flow's key under `parked: N`; its folder follows.
 const PARKED_ROW: &str = "parked:";

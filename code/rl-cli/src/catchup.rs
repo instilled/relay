@@ -529,6 +529,44 @@ pub async fn plan_top(rpc: &mut Client, since: Timestamp, has_runs: bool, came_b
     }
 }
 
+/// What a project's top is asked for over its stretch from `from`: brief, as the overview shows
+/// it, and one kept that is current given back rather than written again.
+pub fn project_ask(workspace: &Path, from: Timestamp) -> SummaryParams {
+    SummaryParams {
+        target: SummaryTarget::Project {
+            workspace: workspace.to_path_buf(),
+        },
+        deep: false,
+        from: Some(from),
+        again: false,
+        dry: false,
+        timeout: None,
+    }
+}
+
+/// A project's top, as its overview opens: the summary kept of it from `from` while it is up to
+/// date; else, when it writes itself (`auto_project_top`), one to ask for, with the one kept,
+/// moved on, shown until it lands; else the one kept, moved on or not, or none.
+pub async fn plan_project_top(rpc: &mut Client, workspace: &Path, from: Timestamp) -> TopPlan {
+    let ask = project_ask(workspace, from);
+    let kept = rpc.call::<SummaryGet>(ask.clone()).await.ok().flatten();
+    if kept.as_ref().is_some_and(|k| !k.stale) {
+        return TopPlan { shown: kept, ask: None };
+    }
+    let writes = rpc.call::<ConfigGet>(()).await.is_ok_and(|r| auto_project_top(&r));
+    TopPlan {
+        shown: kept,
+        ask: writes.then_some(ask),
+    }
+}
+
+/// Whether a project's top writes itself as its overview opens: as the catch-up's does
+/// (`auto_top`), with `catch_up.summary: auto` and by the assistant you named for summaries, but
+/// whatever the time away — opening the overview is asking to look.
+pub fn auto_project_top(r: &ConfigReport) -> bool {
+    r.config.catch_up.auto_summary() && named_summariser(r)
+}
+
 /// Whether the top writes itself: only as you come back (`came_back`) after
 /// longer away than `catch_up.after`, with `catch_up.summary: auto`, and by
 /// the assistant you named for summaries (`assistants.summary`, as setup
@@ -1285,29 +1323,32 @@ mod tests {
         assert_eq!(top_label(&s), "deep · by haiku · from 1 run · moved on since");
     }
 
+    /// What `config.get` says: the summariser named (`config`) or not, and `catch_up`'s
+    /// `summary` and `after`.
+    fn report(source: &str, summary: Option<&str>, after: Option<&str>) -> ConfigReport {
+        use rl_proto::methods::ResolvedAssistant;
+        let mut config = rl_proto::config::Config::default();
+        config.catch_up.summary = summary.map(String::from);
+        config.catch_up.after = after.map(String::from);
+        ConfigReport {
+            file: PathBuf::from("/h/config.yaml"),
+            present: true,
+            config,
+            interpret: None,
+            summary: Some(ResolvedAssistant {
+                agent: "haiku".into(),
+                source: source.into(),
+                argv: vec![],
+                available: true,
+            }),
+            catch_up_after: String::new(),
+            catch_up_summary: String::new(),
+            errors: vec![],
+        }
+    }
+
     #[test]
     fn the_top_writes_itself_only_as_you_come_back_and_by_the_assistant_you_named() {
-        use rl_proto::methods::{ConfigReport, ResolvedAssistant};
-        let report = |source: &str, summary: Option<&str>, after: Option<&str>| {
-            let mut config = rl_proto::config::Config::default();
-            config.catch_up.summary = summary.map(String::from);
-            config.catch_up.after = after.map(String::from);
-            ConfigReport {
-                file: PathBuf::from("/h/config.yaml"),
-                present: true,
-                config,
-                interpret: None,
-                summary: Some(ResolvedAssistant {
-                    agent: "haiku".into(),
-                    source: source.into(),
-                    argv: vec![],
-                    available: true,
-                }),
-                catch_up_after: String::new(),
-                catch_up_summary: String::new(),
-                errors: vec![],
-            }
-        };
         let now = now();
         let two_days = now - jiff::SignedDuration::from_hours(48);
         let hour = now - jiff::SignedDuration::from_hours(1);
@@ -1327,5 +1368,38 @@ mod tests {
         let mut gone = report("config", None, None);
         gone.summary.as_mut().unwrap().available = false;
         assert!(!auto_top(&gone, two_days, true, now), "not on this machine");
+    }
+
+    #[test]
+    fn a_projects_top_writes_itself_whatever_the_time_away_by_the_assistant_you_named() {
+        assert!(auto_project_top(&report("config", None, None)), "auto, named");
+        assert!(
+            auto_project_top(&report("config", None, Some("off"))),
+            "time away does not come into it"
+        );
+        assert!(
+            !auto_project_top(&report("default", None, None)),
+            "the first agent here is never asked by itself"
+        );
+        assert!(!auto_project_top(&report("config", Some("ask"), None)));
+        let mut gone = report("config", None, None);
+        gone.summary.as_mut().unwrap().available = false;
+        assert!(!auto_project_top(&gone), "not on this machine");
+    }
+
+    #[test]
+    fn a_projects_top_is_asked_of_the_project_brief_from_where_given() {
+        let from = now() - jiff::SignedDuration::from_hours(24);
+        let ask = project_ask(Path::new("/w/api"), from);
+        assert_eq!(
+            ask.target,
+            SummaryTarget::Project {
+                workspace: PathBuf::from("/w/api")
+            }
+        );
+        assert_eq!(
+            (ask.deep, ask.from, ask.again, ask.dry),
+            (false, Some(from), false, false)
+        );
     }
 }

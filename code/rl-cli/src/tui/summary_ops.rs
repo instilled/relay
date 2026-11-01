@@ -135,6 +135,11 @@ impl App {
             });
             return;
         };
+        // The one asked as the overview opened is still on its way.
+        if let Some(o) = self.overviewing.as_ref().filter(|o| o.target == target) {
+            self.say(format!("still summarising {}", o.title));
+            return;
+        }
         if let SummaryTarget::Run { id } = &target
             && self
                 .run_by_id(id)

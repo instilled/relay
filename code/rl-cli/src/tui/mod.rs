@@ -383,6 +383,9 @@ struct App {
     /// What was last said of the overview's project, as fetched with the cursor on nothing in
     /// it: its top keeps it while the cursor is on a flow.
     overview_said: Option<Summary>,
+    /// The assistant at work on a project's summary, asked as its overview opened with none kept
+    /// that is current: apart from `/summary`, and left to land when the overview is left.
+    overviewing: Option<Summarising>,
     /// The parked flows, every scope's: fetched with the flows on each refresh, and as the
     /// overview opens. A line stands for a scope that has only these; the overview counts its own.
     parked: Vec<Parked>,
@@ -1337,6 +1340,7 @@ impl App {
             summarising: None,
             overview: None,
             overview_said: None,
+            overviewing: None,
             parked: Vec::new(),
             parked_open: false,
             topping: None,
@@ -1516,6 +1520,12 @@ impl App {
                         None => std::future::pending().await,
                     }
                 } => self.topped(done).await,
+                done = async {
+                    match &mut self.overviewing {
+                        Some(s) => (&mut s.task).await,
+                        None => std::future::pending().await,
+                    }
+                } => self.overviewed(done),
                 done = async {
                     match &mut self.carrying {
                         Some(c) => (&mut c.task).await,
@@ -3975,20 +3985,20 @@ mod tests {
 
     /// What a test panel's daemon is told beyond `panel()`'s.
     #[derive(Default)]
-    struct Setup {
+    pub(super) struct Setup {
         /// More of `config.yaml`, after `assistants: {summary: fakeai, interpret: fakeai}`.
-        config: &'static str,
+        pub(super) config: &'static str,
         /// `assistants.summary` left out: the first agent here would answer.
-        unnamed: bool,
+        pub(super) unnamed: bool,
         /// What `fakeai` answers; None, the fixture's own draft.
-        answer: Option<&'static str>,
+        pub(super) answer: Option<&'static str>,
         /// `rl-session`, so an assistant's run really runs; without it the
         /// daemon cannot start one.
-        session: Option<std::path::PathBuf>,
+        pub(super) session: Option<std::path::PathBuf>,
         /// More profiles for `detect/`, by name, over the built-ins.
-        profiles: Vec<(&'static str, String)>,
+        pub(super) profiles: Vec<(&'static str, String)>,
         /// How long a screen's rest waits for a hook; None, the daemon's own.
-        grace: Option<std::time::Duration>,
+        pub(super) grace: Option<std::time::Duration>,
     }
 
     /// A panel whose `rld` runs what it starts, with `profiles` over the
@@ -4024,7 +4034,7 @@ mod tests {
     /// A panel whose summariser, `fake-agent`, really runs and answers
     /// `answer`. None (and the test says it is skipping) when `rl-session`
     /// is not built.
-    async fn panel_with_fake_summariser(
+    pub(super) async fn panel_with_fake_summariser(
         answer: &'static str,
     ) -> Option<(
         tempfile::TempDir,
@@ -4047,7 +4057,7 @@ mod tests {
     /// `panel()` with more of the config: `fakeai` is the summariser, run by
     /// whatever `rl-session` the daemon finds (none, as a rule, so it fails
     /// to start) — what is asserted is what was asked, not the answer.
-    async fn panel_with_config(
+    pub(super) async fn panel_with_config(
         config: &'static str,
     ) -> (
         tempfile::TempDir,
@@ -4062,7 +4072,7 @@ mod tests {
         panel_set(setup, |_, _| vec![]).await
     }
 
-    async fn panel_set(
+    pub(super) async fn panel_set(
         set: Setup,
         more: impl FnOnce(&std::path::Path, jiff::Timestamp) -> Vec<rl_proto::types::Run>,
     ) -> (

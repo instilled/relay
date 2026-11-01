@@ -5,7 +5,7 @@ use super::flow_proposal::Aim;
 use super::flow_proposal_tests::{answer_md, said, unasked};
 use super::flow_tests::{fired, flow_in};
 use super::overview::Scope;
-use super::tests::{draw_text, panel, press, type_in};
+use super::tests::{Setup, draw_text, panel, panel_set, panel_with_config, panel_with_fake_summariser, press, type_in};
 use super::{NEW_FLOW, PARKED, Summarising, View, line};
 use crate::context::Want;
 use crossterm::event::{KeyCode, KeyModifiers};
@@ -93,7 +93,8 @@ async fn esc_leaves_the_overview_for_the_project_line() {
 
 #[tokio::test]
 async fn the_overview_draws_its_top_its_flows_and_new_flow() {
-    let (tmp, token, mut app, folder) = panel().await;
+    // Nothing kept, and nothing written by itself: the top says how to have it.
+    let (tmp, token, mut app, folder) = panel_with_config("catch_up:\n  summary: ask\n").await;
     flow_in(&tmp, &mut app, "alpha", &md_in(&folder)).await;
     flow_in(&tmp, &mut app, "zulu", &md_in(&folder)).await;
     app.refresh().await;
@@ -1232,5 +1233,171 @@ async fn a_scope_whose_flows_are_all_parked_keeps_its_line() {
     press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
     assert_eq!(app.overview, Some(Scope::Project(other.clone())));
     assert_eq!(app.keys(), [NEW_FLOW, PARKED]);
+    token.cancel();
+}
+
+/// Hands the overview's summary, once it is written, to the panel as the main loop would.
+async fn wait_overviewed(app: &mut super::App) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while let Some(o) = app.overviewing.as_mut() {
+        if o.task.is_finished() {
+            let done = (&mut o.task).await;
+            app.overviewed(done);
+            return;
+        }
+        assert!(std::time::Instant::now() < deadline, "the summary never came");
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}
+
+/// A summary of the project kept from `from`, saying `text`, reaching `reach`: kept as it is, or
+/// moved on since when the runs from `from` reach further.
+fn keep(tmp: &tempfile::TempDir, folder: &Path, from: jiff::Timestamp, reach: &str, text: &str) {
+    let target = SummaryTarget::Project {
+        workspace: folder.to_path_buf(),
+    };
+    let mut kept = said_of(&target, text);
+    kept.from = Some(from);
+    kept.reach = reach.into();
+    let ledger = rl_ledger::Ledger::open(&rl_core::Home::at(tmp.path().join("h")).ledger()).unwrap();
+    ledger.call_blocking(move |c| rl_ledger::kept::put(c, &kept)).unwrap();
+}
+
+#[tokio::test]
+async fn opening_writes_the_summary_when_none_is_kept() {
+    let Some((_tmp, token, mut app, folder)) = panel_with_fake_summariser("- the build went green").await else {
+        return;
+    };
+    enter_project(&mut app, &folder).await;
+    let o = app.overviewing.as_ref().expect("auto, and named: it is written");
+    assert_eq!(
+        o.target,
+        SummaryTarget::Project {
+            workspace: folder.clone()
+        }
+    );
+    assert_eq!((o.title.as_str(), o.deep), ("api", false));
+    let frame = draw_text(&mut app);
+    assert!(frame.contains("summarising… "), "{frame}");
+    assert!(!frame.contains("no summary yet"), "{frame}");
+    wait_overviewed(&mut app).await;
+    let frame = draw_text(&mut app);
+    assert!(frame.contains("the build went green"), "{frame}");
+    assert!(!frame.contains("summarising… "), "{frame}");
+    let said = app.overview_said.as_ref().expect("its top");
+    assert!(said.text.contains("the build went green"), "{said:?}");
+    token.cancel();
+}
+
+#[tokio::test]
+async fn a_fresh_kept_summary_is_shown_not_rewritten() {
+    let (tmp, token, mut app, folder) = panel().await;
+    // From after the project's one run: nothing since, so the one kept reaches all there is.
+    let from = jiff::Timestamp::now();
+    keep(&tmp, &folder, from, "n:0:0:0", "- nothing moved");
+    app.away_since = Some(from);
+    enter_project(&mut app, &folder).await;
+    assert!(app.overviewing.is_none(), "kept and current: no one is asked");
+    let frame = draw_text(&mut app);
+    assert!(frame.contains("nothing moved"), "{frame}");
+    assert!(!frame.contains("summarising"), "{frame}");
+    token.cancel();
+}
+
+#[tokio::test]
+async fn a_stale_kept_summary_is_shown_while_a_new_one_is_written() {
+    let (tmp, token, mut app, folder) = panel().await;
+    let from = jiff::Timestamp::now() - jiff::SignedDuration::from_hours(1);
+    // Kept before the project's run: moved on since.
+    keep(&tmp, &folder, from, "", "- the deploy went out");
+    app.away_since = Some(from);
+    enter_project(&mut app, &folder).await;
+    let o = app.overviewing.as_ref().expect("moved on: a new one is asked");
+    assert_eq!(o.from, Some(from));
+    let frame = draw_text(&mut app);
+    let progress = frame.find("summarising… ").unwrap_or_else(|| panic!("{frame}"));
+    let old = frame.find("the deploy went out").unwrap_or_else(|| panic!("{frame}"));
+    assert!(progress < old, "{frame}");
+    token.cancel();
+}
+
+#[tokio::test]
+async fn no_auto_no_write() {
+    let (_tmp, token, mut app, folder) = panel_with_config("catch_up:\n  summary: ask\n").await;
+    enter_project(&mut app, &folder).await;
+    assert!(app.overviewing.is_none(), "summary: ask");
+    let frame = draw_text(&mut app);
+    assert!(frame.contains(" no summary yet · /summary writes it"), "{frame}");
+    token.cancel();
+    let setup = Setup {
+        unnamed: true,
+        ..Default::default()
+    };
+    let (_tmp, token, mut app, folder) = panel_set(setup, |_, _| vec![]).await;
+    enter_project(&mut app, &folder).await;
+    assert!(app.overviewing.is_none(), "no assistant named for summaries");
+    let frame = draw_text(&mut app);
+    assert!(frame.contains(" no summary yet · /summary writes it"), "{frame}");
+    token.cancel();
+}
+
+#[tokio::test]
+async fn reopening_while_writing_starts_no_second() {
+    let (_tmp, token, mut app, folder) = panel().await;
+    enter_project(&mut app, &folder).await;
+    let asked = app.overviewing.as_ref().expect("written on open").since;
+    press(&mut app, KeyCode::Esc, KeyModifiers::NONE).await;
+    assert!(app.view == View::Work);
+    assert!(app.overviewing.is_some(), "leaving lets it go on");
+    enter_project(&mut app, &folder).await;
+    assert_eq!(app.overviewing.as_ref().map(|o| o.since), Some(asked), "the same one");
+    // And `/summary` of the project waits for it.
+    assert!(app.on_new_flow());
+    type_in(&mut app, "/summary").await;
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+    assert!(app.summarising.is_none());
+    let said = app.flash.as_ref().map(|(m, _)| m.clone()).unwrap_or_default();
+    assert_eq!(said, "still summarising api");
+    token.cancel();
+}
+
+#[tokio::test]
+async fn a_summary_landing_after_leaving_is_kept_not_shown() {
+    let Some((_tmp, token, mut app, folder)) = panel_with_fake_summariser("- the build went green").await else {
+        return;
+    };
+    enter_project(&mut app, &folder).await;
+    assert!(app.overviewing.is_some());
+    press(&mut app, KeyCode::Esc, KeyModifiers::NONE).await;
+    wait_overviewed(&mut app).await;
+    let key = SummaryTarget::Project {
+        workspace: folder.clone(),
+    }
+    .key();
+    assert!(
+        app.made
+            .get(&key)
+            .is_some_and(|s| s.text.contains("the build went green"))
+    );
+    assert!(app.overview_said.is_none(), "not the overview's top: it was left");
+    enter_project(&mut app, &folder).await;
+    assert!(app.overviewing.is_none(), "kept: no one is asked again");
+    let frame = draw_text(&mut app);
+    assert!(frame.contains("the build went green"), "{frame}");
+    token.cancel();
+}
+
+#[tokio::test]
+async fn everywhere_writes_nothing() {
+    let (tmp, token, mut app, _folder) = panel().await;
+    flow_in(&tmp, &mut app, "loose", "---\nsteps:\n  probe:\n    run: x\n---\n").await;
+    app.refresh().await;
+    app.select(Some("g:everywhere".into()));
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+    assert_eq!(app.overview, Some(Scope::Everywhere));
+    assert!(app.overviewing.is_none());
+    let frame = draw_text(&mut app);
+    assert!(frame.contains("flows with no in"), "{frame}");
+    assert!(!frame.contains("summarising"), "{frame}");
     token.cancel();
 }
