@@ -536,24 +536,31 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
     // what flows ran outside every project, are gathered under it rather than
     // under whatever folder that was — all of it flow content, so only when
     // flows are on. With them off the line stands alone, while there is a
-    // flow with no `in`, unless it is hidden or a search takes it away.
+    // flow with no `in`, unless it is hidden or a search takes it away; with
+    // them on and nothing under it, it stands the same while its flows are
+    // all parked.
     let loose = FlowTally {
         parked: parked_in(cx.parked, None),
         ..tally(cx.flows, None, d)
     };
+    let alone = |with: bool| {
+        with && (cx.show_hidden || !hidden_heads.contains(&EVERYWHERE)) && query.hits_project(&[EVERYWHERE], None)
+    };
+    let line = Row::Group(Head {
+        tally: loose,
+        ..Head::everywhere()
+    });
     if cx.show_flows {
         if let Some(Row::Group(h)) = everywhere.first_mut() {
             h.tally = loose;
         }
-        rows.extend(everywhere);
-    } else if (loose.total > 0 || loose.parked > 0)
-        && (cx.show_hidden || !hidden_heads.contains(&EVERYWHERE))
-        && query.hits_project(&[EVERYWHERE], None)
-    {
-        rows.push(Row::Group(Head {
-            tally: loose,
-            ..Head::everywhere()
-        }));
+        if everywhere.is_empty() && alone(loose.parked > 0) {
+            rows.push(line);
+        } else {
+            rows.extend(everywhere);
+        }
+    } else if alone(loose.total > 0 || loose.parked > 0) {
+        rows.push(line);
     }
     rows
 }

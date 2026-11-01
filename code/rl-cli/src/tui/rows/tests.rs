@@ -2672,3 +2672,34 @@ fn a_search_finds_claudes_own_sessions() {
     let order = crate::tui::query::ranked(&Query::parse("away").words, &named);
     assert_eq!(rows[order[0]].key().as_deref(), Some("o:claude:sess-away"));
 }
+
+#[test]
+fn with_the_flows_on_the_everywhere_line_stands_while_its_flows_are_all_parked() {
+    let now: Timestamp = "2026-09-10T12:00:00Z".parse().unwrap();
+    let d = digest(now, vec![], vec![]);
+    let names = Names::default();
+    let parked = [rl_proto::flow::Parked {
+        name: "pulse".into(),
+        folder: "_pulse".into(),
+        at: now,
+        archived: 0,
+        in_: None,
+    }];
+    let cx = |filter: &'static str| Context {
+        names: &names,
+        flows: &[],
+        parked: &parked,
+        show_flows: true,
+        show_agents: true,
+        show_shells: true,
+        show_hidden: false,
+        filter,
+        now,
+        relay: None,
+    };
+    let rows = build(&d, &cx(""));
+    assert_eq!(keys(&rows), ["[everywhere]"]);
+    assert_eq!(head_of(&rows, EVERYWHERE).tally.parked, 1);
+    // A search for something else takes it away, as with the flows off.
+    assert!(keys(&build(&d, &cx("zzzz"))).is_empty());
+}

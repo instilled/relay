@@ -386,6 +386,12 @@ struct App {
     /// The assistant at work on a project's summary, asked as its overview opened with none kept
     /// that is current: apart from `/summary`, and left to land when the overview is left.
     overviewing: Option<Summarising>,
+    /// The project the overview is on, waiting to be written while `overviewing` is another's:
+    /// asked once that one lands.
+    overview_next: Option<SummaryTarget>,
+    /// The projects (`SummaryTarget::key`) whose summary failed as the overview opened: not
+    /// asked again by itself this session, until a `/summary` of one.
+    overview_failed: HashSet<String>,
     /// The parked flows, every scope's: fetched with the flows on each refresh, and as the
     /// overview opens. A line stands for a scope that has only these; the overview counts its own.
     parked: Vec<Parked>,
@@ -1341,6 +1347,8 @@ impl App {
             overview: None,
             overview_said: None,
             overviewing: None,
+            overview_next: None,
+            overview_failed: HashSet::new(),
             parked: Vec::new(),
             parked_open: false,
             topping: None,
@@ -1525,7 +1533,7 @@ impl App {
                         Some(s) => (&mut s.task).await,
                         None => std::future::pending().await,
                     }
-                } => self.overviewed(done),
+                } => self.overviewed(done).await,
                 done = async {
                     match &mut self.carrying {
                         Some(c) => (&mut c.task).await,

@@ -1242,7 +1242,7 @@ async fn wait_overviewed(app: &mut super::App) {
     while let Some(o) = app.overviewing.as_mut() {
         if o.task.is_finished() {
             let done = (&mut o.task).await;
-            app.overviewed(done);
+            app.overviewed(done).await;
             return;
         }
         assert!(std::time::Instant::now() < deadline, "the summary never came");
@@ -1253,11 +1253,24 @@ async fn wait_overviewed(app: &mut super::App) {
 /// A summary of the project kept from `from`, saying `text`, reaching `reach`: kept as it is, or
 /// moved on since when the runs from `from` reach further.
 fn keep(tmp: &tempfile::TempDir, folder: &Path, from: jiff::Timestamp, reach: &str, text: &str) {
+    keep_at(tmp, folder, from, reach, text, jiff::Timestamp::now());
+}
+
+/// `keep`, as written at `at`.
+fn keep_at(
+    tmp: &tempfile::TempDir,
+    folder: &Path,
+    from: jiff::Timestamp,
+    reach: &str,
+    text: &str,
+    at: jiff::Timestamp,
+) {
     let target = SummaryTarget::Project {
         workspace: folder.to_path_buf(),
     };
     let mut kept = said_of(&target, text);
     kept.from = Some(from);
+    kept.at = at;
     kept.reach = reach.into();
     let ledger = rl_ledger::Ledger::open(&rl_core::Home::at(tmp.path().join("h")).ledger()).unwrap();
     ledger.call_blocking(move |c| rl_ledger::kept::put(c, &kept)).unwrap();
@@ -1399,5 +1412,148 @@ async fn everywhere_writes_nothing() {
     let frame = draw_text(&mut app);
     assert!(frame.contains("flows with no in"), "{frame}");
     assert!(!frame.contains("summarising"), "{frame}");
+    token.cancel();
+}
+
+/// A second project, `zed`, registered beside `api`: its folder.
+async fn zed(tmp: &tempfile::TempDir, app: &mut super::App) -> std::path::PathBuf {
+    let zed = std::fs::canonicalize(tmp.path()).unwrap().join("zed");
+    std::fs::create_dir_all(&zed).unwrap();
+    app.rpc
+        .call::<super::WorkspaceUp>(super::WorkspaceUpParams { path: zed.clone() })
+        .await
+        .unwrap();
+    app.refresh().await;
+    zed
+}
+
+#[tokio::test]
+async fn another_projects_waits_for_the_one_being_written_then_starts() {
+    let Some((tmp, token, mut app, folder)) = panel_with_fake_summariser("- the build went green").await else {
+        return;
+    };
+    let other = zed(&tmp, &mut app).await;
+    enter_project(&mut app, &folder).await;
+    let asked = app.overviewing.as_ref().expect("api's is written").since;
+    press(&mut app, KeyCode::Esc, KeyModifiers::NONE).await;
+    enter_project(&mut app, &other).await;
+    let o = app.overviewing.as_ref().expect("api's goes on");
+    assert_eq!((o.since, o.title.as_str()), (asked, "api"), "not aborted, not replaced");
+    let zed_target = SummaryTarget::Project {
+        workspace: other.clone(),
+    };
+    assert_eq!(app.overview_next.as_ref(), Some(&zed_target), "zed's waits");
+    let frame = draw_text(&mut app);
+    assert!(frame.contains(" summarising api… · this one next"), "{frame}");
+    wait_overviewed(&mut app).await;
+    let api = SummaryTarget::Project { workspace: folder }.key();
+    assert!(app.made.contains_key(&api), "api's landed into made");
+    let o = app.overviewing.as_ref().expect("zed's starts once api's lands");
+    assert_eq!(o.target, zed_target);
+    assert!(app.overview_next.is_none());
+    token.cancel();
+}
+
+#[tokio::test]
+async fn a_failed_write_is_not_asked_again_until_a_summary_there() {
+    let Some((_tmp, token, mut app, folder)) = panel_with_fake_summariser("").await else {
+        return;
+    };
+    enter_project(&mut app, &folder).await;
+    wait_overviewed(&mut app).await;
+    let said = app.flash.as_ref().map(|(m, _)| m.clone()).unwrap_or_default();
+    assert!(said.starts_with("the summary: "), "{said}");
+    press(&mut app, KeyCode::Esc, KeyModifiers::NONE).await;
+    app.flash = None;
+    enter_project(&mut app, &folder).await;
+    assert!(app.overviewing.is_none(), "not asked again by itself");
+    assert!(app.flash.is_none(), "and said once");
+    // A `/summary` there lets it be asked again.
+    let target = SummaryTarget::Project {
+        workspace: folder.clone(),
+    };
+    app.summary_start(rl_proto::methods::SummaryParams {
+        target: target.clone(),
+        deep: false,
+        from: Some(jiff::Timestamp::now() - jiff::SignedDuration::from_hours(24)),
+        again: false,
+        dry: false,
+        timeout: None,
+    });
+    assert!(!app.overview_failed.contains(&target.key()));
+    token.cancel();
+}
+
+#[tokio::test]
+async fn a_second_open_finds_the_one_made_and_writes_nothing() {
+    let Some((_tmp, token, mut app, folder)) = panel_with_fake_summariser("- the build went green").await else {
+        return;
+    };
+    enter_project(&mut app, &folder).await;
+    wait_overviewed(&mut app).await;
+    assert!(app.overviewing.is_none());
+    press(&mut app, KeyCode::Esc, KeyModifiers::NONE).await;
+    enter_project(&mut app, &folder).await;
+    assert!(app.overviewing.is_none(), "made this session: nothing written");
+    assert!(draw_text(&mut app).contains("the build went green"));
+    token.cancel();
+}
+
+#[tokio::test]
+async fn a_current_one_kept_over_another_stretch_stands_for_a_day() {
+    let (tmp, token, mut app, folder) = panel().await;
+    // Kept from after the project's run, by an earlier session: nothing since.
+    let earlier = jiff::Timestamp::now();
+    keep(&tmp, &folder, earlier, "n:0:0:0", "- nothing moved");
+    // This session starts from elsewhere: none kept from there.
+    app.away_since = Some(earlier + jiff::SignedDuration::from_mins(1));
+    enter_project(&mut app, &folder).await;
+    assert!(app.overviewing.is_none(), "the newest kept is current: no one is asked");
+    assert!(draw_text(&mut app).contains("nothing moved"));
+    token.cancel();
+
+    // Written more than a day ago, it is shown while a new one is written.
+    let (tmp, token, mut app, folder) = panel().await;
+    let earlier = jiff::Timestamp::now();
+    let old = earlier - jiff::SignedDuration::from_hours(25);
+    keep_at(&tmp, &folder, earlier, "n:0:0:0", "- nothing moved", old);
+    app.away_since = Some(earlier + jiff::SignedDuration::from_mins(1));
+    enter_project(&mut app, &folder).await;
+    assert!(app.overviewing.is_some(), "over a day old: written again");
+    assert!(draw_text(&mut app).contains("nothing moved"));
+    token.cancel();
+}
+
+#[tokio::test]
+async fn landing_leaves_a_deep_summary_in_the_subpage() {
+    let (_tmp, token, mut app, folder) = panel_with_config("catch_up:\n  summary: ask\n").await;
+    enter_project(&mut app, &folder).await;
+    assert!(app.on_new_flow());
+    let target = SummaryTarget::Project {
+        workspace: folder.clone(),
+    };
+    let mut deep = said_of(&target, "- read closely");
+    deep.deep = true;
+    app.summary = Some(deep);
+    let brief = said_of(&target, "- the build went green");
+    let landed = brief.clone();
+    app.overviewing = Some(Summarising {
+        target: target.clone(),
+        title: "api".into(),
+        deep: false,
+        from: None,
+        since: std::time::Instant::now(),
+        task: tokio::spawn(async move { Ok(landed) }),
+    });
+    wait_overviewed(&mut app).await;
+    assert!(app.summary.as_ref().is_some_and(|s| s.deep), "the deep one stays");
+    assert_eq!(
+        app.made.get(&target.key()).map(|s| s.text.as_str()),
+        Some(brief.text.as_str())
+    );
+    assert_eq!(
+        app.overview_said.as_ref().map(|s| s.text.as_str()),
+        Some(brief.text.as_str())
+    );
     token.cancel();
 }

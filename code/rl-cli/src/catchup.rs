@@ -15,7 +15,7 @@ pub mod heads;
 use crate::client::Client;
 use crate::digest::since_items;
 use crate::tui::rows::{self, Context, Head, Row};
-use jiff::Timestamp;
+use jiff::{SignedDuration, Timestamp};
 use rl_core::time::{fmt_age, fmt_duration, fmt_when};
 use rl_proto::decision::Decision;
 use rl_proto::flow::Flow;
@@ -544,13 +544,36 @@ pub fn project_ask(workspace: &Path, from: Timestamp) -> SummaryParams {
     }
 }
 
+/// How far back a project's overview summary reaches when it opens with nothing to start from,
+/// and how long one kept over another stretch stands for it before it is written again.
+pub const OVERVIEW_STRETCH: SignedDuration = SignedDuration::from_hours(24);
+
 /// A project's top, as its overview opens: the summary kept of it from `from` while it is up to
-/// date; else, when it writes itself (`auto_project_top`), one to ask for, with the one kept,
-/// moved on, shown until it lands; else the one kept, moved on or not, or none.
+/// date; with none kept from there, the newest kept of it from anywhere, while it is up to date
+/// and written within `OVERVIEW_STRETCH`. Else, when it writes itself (`auto_project_top`), one
+/// to ask for, with the one kept, moved on or old, shown until it lands; else the one kept, or
+/// none.
 pub async fn plan_project_top(rpc: &mut Client, workspace: &Path, from: Timestamp) -> TopPlan {
     let ask = project_ask(workspace, from);
-    let kept = rpc.call::<SummaryGet>(ask.clone()).await.ok().flatten();
-    if kept.as_ref().is_some_and(|k| !k.stale) {
+    let exact = rpc.call::<SummaryGet>(ask.clone()).await.ok().flatten();
+    let (kept, current) = match exact {
+        Some(k) => {
+            let current = !k.stale;
+            (Some(k), current)
+        }
+        None => {
+            let newest = SummaryParams {
+                from: None,
+                ..ask.clone()
+            };
+            let k = rpc.call::<SummaryGet>(newest).await.ok().flatten();
+            let current = k
+                .as_ref()
+                .is_some_and(|k| !k.stale && Timestamp::now().duration_since(k.at) <= OVERVIEW_STRETCH);
+            (k, current)
+        }
+    };
+    if current {
         return TopPlan { shown: kept, ask: None };
     }
     let writes = rpc.call::<ConfigGet>(()).await.is_ok_and(|r| auto_project_top(&r));
