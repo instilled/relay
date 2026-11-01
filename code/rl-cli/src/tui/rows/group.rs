@@ -3,20 +3,18 @@
 use super::*;
 
 /// Whether a run's kind and cause let it onto the list, given the toggles.
-/// Not exclusive: a flow's agent step is both an agent and a flow's. A run
-/// that is none of agent, shell or flow is always shown; an agent run (by
-/// kind) when `show_agents`; a shell run (by kind) when `show_shells`; a
-/// flow's run (by cause) when `show_flows` — a run that is more than one shows
-/// when any of its toggles is on, each adding what it is for. Whether it is
-/// hidden is `build`'s to say. Questions ignore all of it: they are what needs you.
+/// A flow's run (by cause) is the flow's, whatever its kind: it shows when
+/// `show_flows`, and then only. Any other run: one that is neither agent nor
+/// shell is always shown; an agent run (by kind) when `show_agents`; a shell
+/// run (by kind) when `show_shells`. Whether it is hidden is `build`'s to say.
+/// Questions ignore all of it: they are what needs you.
 pub(crate) fn keeps(r: &Run, show_agents: bool, show_flows: bool, show_shells: bool) -> bool {
+    if matches!(r.cause, Cause::Flow { .. }) {
+        return show_flows;
+    }
     let is_agent = r.kind == RunKind::Agent;
-    let is_flow = matches!(r.cause, Cause::Flow { .. });
     let is_shell = r.is_shell();
-    (!is_agent && !is_flow && !is_shell)
-        || (is_agent && show_agents)
-        || (is_flow && show_flows)
-        || (is_shell && show_shells)
+    (!is_agent && !is_shell) || (is_agent && show_agents) || (is_shell && show_shells)
 }
 
 /// The group a flow's row stands in, as `(key, folder)`: the folder it is

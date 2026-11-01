@@ -447,12 +447,51 @@ fn the_toggles_keep_a_run_by_what_it_is_or_what_started_it() {
     // the flow's steps stay — the agent step as a flow's, the shell step
     // as a shell.
     assert_eq!(runs((true, false, true, false)), ["shell", "probe", "onfail"]);
-    // Flows off, with agents and shells on, keeps everything: the agent
-    // step shows as an agent, the shell step as a shell.
-    assert_eq!(runs((false, true, true, false)), ["agent", "shell", "probe", "onfail"]);
-    // Shells off drops the plain shell and the flow's shell step; the
-    // agents — the lone one and the flow's step — stay.
-    assert_eq!(runs((false, true, false, false)), ["agent", "probe"]);
+    // Flows off drops both flow steps, however agents and shells are set:
+    // a flow's run is the flow's, whatever its kind.
+    assert_eq!(runs((false, true, true, false)), ["agent", "shell"]);
+    // Shells off drops the plain shell; the flow's steps are the flow's.
+    assert_eq!(runs((false, true, false, false)), ["agent"]);
+}
+
+#[test]
+fn with_flows_off_no_flow_run_nor_its_question_is_on_the_list() {
+    let now: Timestamp = "2026-09-10T12:00:00Z".parse().unwrap();
+    let ws = "/home/f/relay";
+    // A flow's agent step that is asking, a plain run, and the question.
+    let mut a1 = fired("a1", "pulse", RunState::NeedsInput, "2026-09-10T11:00:00Z", true);
+    a1.run.kind = RunKind::Agent;
+    let mut d = digest(
+        now,
+        vec![a1, item("w", RunState::Working, ws, "2026-09-10T11:01:00Z", false)],
+        vec![],
+    );
+    d.decisions = vec![question("q1", ws, Some("a1"), "2026-09-10T11:02:00Z")];
+    let names = Names::new([(PathBuf::from(ws), "relay".to_string())]);
+    let flows = [flow("pulse", Some(ws))];
+    let rows = toggles_build(&d, &names, &flows, (false, true, true, false), "", now);
+    assert_eq!(keys(&rows), ["[relay]", "r:w"]);
+}
+
+#[test]
+fn with_flows_off_a_pinned_or_come_through_flow_run_is_not_in_the_band() {
+    let now: Timestamp = "2026-09-10T12:00:00Z".parse().unwrap();
+    let ws = "/home/f/relay";
+    let mut pinned = fired("pin", "pulse", RunState::Finished, "2026-09-10T11:00:00Z", false);
+    pinned.run.pinned_at = Some("2026-09-10T11:05:00Z".parse().unwrap());
+    // Hidden earlier, since failed: it would come through.
+    let mut back = fired("back", "pulse", RunState::Failed, "2026-09-10T11:30:00Z", true);
+    back.run.hidden_at = Some("2026-09-10T10:00:00Z".parse().unwrap());
+    let d = digest(now, vec![pinned, back], vec![]);
+    let names = Names::new([(PathBuf::from(ws), "relay".to_string())]);
+    let flows = [flow("pulse", Some(ws))];
+    let on = keys(&toggles_build(&d, &names, &flows, (true, true, true, false), "", now));
+    assert!(
+        on.contains(&"r:pin".to_string()) && on.contains(&"r:back".to_string()),
+        "{on:?}"
+    );
+    let off = keys(&toggles_build(&d, &names, &flows, (false, true, true, false), "", now));
+    assert!(!off.iter().any(|k| k == "r:pin" || k == "r:back"), "{off:?}");
 }
 
 #[test]

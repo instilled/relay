@@ -216,7 +216,9 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
         }
         // Hidden on: the run stands inline, in its place.
         if r.pinned_at.is_some() {
-            if query.hits(&run_subject(i, &names.group(&r.place_key()))) {
+            // Pinned stands above the agents and shells toggles, but a flow's
+            // run is the flow's: with flows off it is not on the list.
+            if (cx.show_flows || flow_of(r).is_none()) && query.hits(&run_subject(i, &names.group(&r.place_key()))) {
                 pinned.push(i);
             }
             continue;
@@ -369,6 +371,10 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
             Cause::Flow { flow, .. } => Some(flow.as_str()),
             _ => None,
         }));
+        // With flows off, a flow's question is not on the list either.
+        if !cx.show_flows && by.is_some() {
+            continue;
+        }
         let subject = Subject {
             text: vec![&q.title, q.summary.as_deref().unwrap_or("")],
             project: vec![&name, q.workspace.to_str().unwrap_or("")],
