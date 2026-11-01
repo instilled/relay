@@ -1397,8 +1397,11 @@ impl App {
                                     let why = format!("{e:#}");
                                     let left = match self.editing_change.take() {
                                         Some(p) => {
-                                            let text =
-                                                p.draft.as_ref().map(|d| d.text.clone()).unwrap_or_default();
+                                            // What the editor saved before it failed is the
+                                            // person's, and comes back; else the draft.
+                                            let text = std::fs::read_to_string(&editing.file).unwrap_or_else(|_| {
+                                                p.draft.as_ref().map(|d| d.text.clone()).unwrap_or_default()
+                                            });
                                             self.change_back(&editing, p, text, Some(why.clone())).await
                                         }
                                         None => crate::flow::drop_new(&self.home, &editing, true).map(|_| ()),
