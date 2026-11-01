@@ -147,6 +147,10 @@ impl App {
                 words
             }
         };
+        // One proposal up at a time: a flow's waits for `/flow draft`.
+        if let Some(f) = self.flow_proposal.as_mut() {
+            f.shown = false;
+        }
         self.show_pane = true;
         self.pane = Pane::Facts;
         self.term = None;
@@ -185,6 +189,9 @@ impl App {
     pub(super) fn show_proposal(&mut self) -> bool {
         let Some(p) = self.proposal.as_mut() else { return false };
         p.shown = true;
+        if let Some(f) = self.flow_proposal.as_mut() {
+            f.shown = false;
+        }
         self.show_pane = true;
         self.pane = Pane::Facts;
         self.term = None;

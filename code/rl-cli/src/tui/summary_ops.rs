@@ -59,26 +59,32 @@ impl App {
         }
     }
 
-    /// `enter` on the ask line: the words go to the assistant as a run; the
-    /// panel stays live and the answer comes back through the main loop.
+    /// `enter` on the ask line: the words go to the assistant — outside a flow, the run proposal's
+    /// pane open on them at once; for a flow, the flow proposal's. The panel stays live and the
+    /// answer comes back through the main loop.
     pub(super) fn ask(&mut self, words: String, want: crate::context::Want) {
         if words.trim().is_empty() {
             return;
         }
-        let folder = self.folder_here();
-        let home = self.home.clone();
-        // Outside a flow, the pane opens on it at once — and words with a proposal up change it.
-        let sent = match want {
-            Want::Any => self.propose(words.clone()),
-            Want::Flow { .. } | Want::NewFlow { .. } => words.clone(),
-        };
-        let folder = match (&want, &self.proposal) {
-            (Want::Any, Some(p)) => p.folder.clone(),
-            _ => folder,
-        };
-        let (w, f, wanted) = (sent, folder, want.clone());
-        let task = tokio::spawn(async move { crate::interpret::ask(&home, &f, &w, &wanted).await });
-        self.asking = Some(Asking { words, want, task });
+        match want {
+            Want::Any => {
+                // Words with a proposal up change it.
+                let sent = self.propose(words.clone());
+                let folder = match &self.proposal {
+                    Some(p) => p.folder.clone(),
+                    None => self.folder_here(),
+                };
+                self.spawn_ask(sent, folder, Want::Any, words);
+            }
+            Want::Flow { name } => self.propose_flow(
+                flow_proposal::Aim::New {
+                    named: Some(name),
+                    folder: None,
+                },
+                words,
+            ),
+            Want::NewFlow { folder } => self.propose_flow(flow_proposal::Aim::New { named: None, folder }, words),
+        }
     }
 
     pub(super) async fn answered(
@@ -90,31 +96,17 @@ impl App {
     ) {
         let Some(asking) = self.asking.take() else { return };
         match answer {
-            Ok(Ok((crate::interpret::Answer::Run(_), out)))
-                if matches!(asking.want, Want::Flow { .. } | Want::NewFlow { .. }) =>
-            {
-                self.say(format!(
-                    "asked for a flow; {} answered a run (run {})",
-                    out.agent, out.run
-                ))
-            }
+            // Asked for a flow: whatever came, into its pane.
+            answer if !matches!(asking.want, Want::Any) => self.flow_answered(asking.want, asking.words, answer),
+            // A flow where a run was asked: the run proposal becomes the flow's.
             Ok(Ok((crate::interpret::Answer::Flow(d), out))) => {
-                // A flow where a run was asked: shown as a flow draft is, the proposal let go.
-                if self.proposal.take().is_some_and(|p| p.shown) {
-                    self.show_pane = false;
-                }
-                // Asked for a flow by name, the person's name wins the draft's.
-                let name = match asking.want {
-                    Want::Flow { name } => Some(name),
-                    Want::Any | Want::NewFlow { .. } => d.name,
-                };
-                self.drafted(name, d.text, out.agent);
+                self.run_proposal_to_flow(&asking.words);
+                let answer = Ok(Ok((crate::interpret::Answer::Flow(d), out)));
+                self.flow_answered(Want::NewFlow { folder: None }, asking.words, answer);
             }
             Ok(Ok((crate::interpret::Answer::Run(draft), out))) => self.proposed(draft, out.agent),
-            Ok(Err(e)) if matches!(asking.want, Want::Any) => self.not_proposed(format!("{e:#}")),
-            Err(e) if matches!(asking.want, Want::Any) => self.not_proposed(format!("asking: {e}")),
-            Ok(Err(e)) => self.say(format!("{e:#}")),
-            Err(e) => self.say(format!("asking: {e}")),
+            Ok(Err(e)) => self.not_proposed(format!("{e:#}")),
+            Err(e) => self.not_proposed(format!("asking: {e}")),
         }
         self.refresh().await;
     }

@@ -122,7 +122,7 @@ impl App {
             return self.reload_flows().await;
         }
         if verb == "draft" {
-            return self.show_parked();
+            return self.show_flow_proposal();
         }
         if !matches!(verb, "run" | "pause" | "resume" | "approve" | "edit" | "test") {
             return self.say("/flow run|pause|resume|approve|edit|new|test|draft|reload [name]");

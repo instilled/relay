@@ -250,10 +250,6 @@ impl App {
                 }
                 return Ok(());
             }
-            Mode::Draft(d) => {
-                self.draft_key(d, k.code).await;
-                return Ok(());
-            }
             // `^h` and `esc` are the shortcuts' first, and the name stays; `?`
             // is a character of it.
             Mode::Rename(r) if self.shortcut_key(&k, false) => {
@@ -416,6 +412,15 @@ impl App {
             self.walk_cands(if k.code == KeyCode::Down { 1 } else { -1 });
             return Ok(());
         }
+        // `^e` on an empty line with a flow proposed: it, in `$EDITOR`.
+        if k.code == KeyCode::Char('e')
+            && k.modifiers == KeyModifiers::CONTROL
+            && self.line.is_empty()
+            && self.flow_proposal_shown().is_some()
+        {
+            self.edit_flow_proposal();
+            return Ok(());
+        }
         // `^e` on an empty line with a proposal up: it, as the run form.
         if k.code == KeyCode::Char('e')
             && k.modifiers == KeyModifiers::CONTROL
@@ -491,6 +496,12 @@ impl App {
     pub(super) async fn key_subpage(&mut self, k: KeyEvent, area: Rect) -> Result<()> {
         // A page is the subpage's own height, not the screen's.
         if self.page_key(&k, self.pane_size(area).1) {
+            return Ok(());
+        }
+        // A flow proposed reads down a row or a page at a time.
+        if let Some(d) = self.flow_proposal_shown().and_then(|p| p.draft.as_ref())
+            && d.scroll(k.code)
+        {
             return Ok(());
         }
         match (k.code, k.modifiers) {
@@ -861,7 +872,7 @@ impl App {
         let mut what = line::what(self.line.text(), &self.agents, &|h| complete::runnable(h, &here));
         // With a proposal up, words change it: a first word that runs is still one of them,
         // unless a bang says otherwise.
-        if self.proposal_shown().is_some()
+        if (self.proposal_shown().is_some() || self.flow_proposal_shown().is_some())
             && !self.line.text().trim_start().starts_with('!')
             && matches!(what, line::What::Shell(_) | line::What::Agent { .. })
         {
@@ -891,6 +902,7 @@ impl App {
         let what = self.line_what();
         self.flipped = false;
         match what {
+            line::What::Empty if self.flow_proposal_shown().is_some() => self.save_flow_proposal().await,
             line::What::Empty if self.proposal_shown().is_some() => self.go_proposal(area).await,
             line::What::Empty => return self.enter_row(area).await,
             line::What::Slash(rest) => return self.command(&rest, area).await,
@@ -919,6 +931,9 @@ impl App {
             line::What::Ask(words) => {
                 if self.asking.is_some() {
                     self.say("still asking; /stop on its run");
+                } else if self.flow_proposal_shown().is_some() {
+                    self.line.clear();
+                    self.refine_flow(words);
                 } else {
                     self.line.clear();
                     self.ask(words, Want::Any);
@@ -1228,6 +1243,8 @@ impl App {
                     }
                 } else if self.asking.is_some() {
                     self.say("still asking; /stop on its run");
+                } else if self.flow_proposal_shown().is_some() {
+                    self.refine_flow(arg);
                 } else {
                     self.ask(arg, Want::Any);
                 }

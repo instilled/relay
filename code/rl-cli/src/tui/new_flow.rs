@@ -1,12 +1,12 @@
 //! A new flow in the panel: what `/flow new …` asks for, and a flow an assistant drafted, shown
-//! before anything is written — its `flow.md`, what would stop it loading, and who drafted it.
-//! The words read, a draft checked and said, and how much of it has been on screen; then the
-//! panel's side (`App::new_flow`, `App::show_draft`, `App::draft_key`): the bare template
-//! written and opened, and a draft written on `enter`, once its last line has been, by the writer every new
-//! flow shares (`flow::write_new`).
+//! before anything is written — its `flow.md`, or what it changes of one there, what would stop
+//! it loading, and who drafted it. The words read, a draft checked and said, and how much of it
+//! has been on screen; then the panel's side (`App::new_flow`): the bare template written and
+//! opened, or the words asked of the assistant, its answer in the flow proposal's pane.
 
-use super::{App, Mode, Pane, theme};
-use crate::context::Want;
+use super::diff::{self, Tag};
+use super::flow_proposal::Aim;
+use super::{App, theme};
 use crate::flow::NewFile;
 use crossterm::event::KeyCode;
 use ratatui::Frame;
@@ -60,6 +60,9 @@ pub struct Drafted {
     pub agent: String,
     /// Why it would not load, each at its line; none, and enter may write it.
     pub problems: Vec<String>,
+    /// The flow's `flow.md` as it was asked of, when this is a change to it: drawn as what goes
+    /// and what comes.
+    base: Option<String>,
     /// The first screen row shown.
     top: Cell<usize>,
     /// Its rows and the pane's, as last drawn: how far it scrolls, and a page.
@@ -74,14 +77,6 @@ pub struct Drafted {
 /// How long a draft is on screen before enter writes it: a key typed for what was there before
 /// it came is not its yes.
 const SETTLE: Duration = Duration::from_millis(300);
-
-/// A flow drafted while the keys were another's — a form, a rename, words being typed — kept
-/// until `/flow draft` shows it.
-pub struct Parked {
-    name: Option<String>,
-    text: String,
-    agent: String,
-}
 
 impl Drafted {
     /// `text` as `name`'s `flow.md`, checked as a reload checks a flow: `known` is the projects
@@ -106,12 +101,19 @@ impl Drafted {
             text,
             agent,
             problems,
+            base: None,
             top: Cell::new(0),
             rows: Cell::new(0),
             page: Cell::new(0),
             seen_end: Cell::new(false),
             drawn: Cell::new(None),
         }
+    }
+
+    /// A change to a flow whose `flow.md` was `base`: drawn against it.
+    pub fn with_base(mut self, base: String) -> Self {
+        self.base = Some(base);
+        self
     }
 
     /// Whether it came on screen too lately, at `now`, for an enter to be its yes — or is not on
@@ -146,11 +148,13 @@ impl Drafted {
         true
     }
 
-    /// The pane, from the row scrolled to: each line broken at the pane's width, so what is
-    /// drawn is counted, and the end said seen once its last row has been drawn. One that fits
-    /// is seen at once.
-    pub fn draw(&self, f: &mut Frame, area: Rect) {
-        let rows = wrap(self.lines(), area.width as usize);
+    /// The pane, `head` over it, from the row scrolled to: each line broken at the pane's width,
+    /// so what is drawn is counted, and the end said seen once its last row has been drawn. One
+    /// that fits is seen at once.
+    pub fn draw(&self, head: Vec<Line<'static>>, f: &mut Frame, area: Rect) {
+        let mut lines = head;
+        lines.extend(self.lines());
+        let rows = wrap(lines, area.width as usize);
         let page = area.height as usize;
         let top = self.top.get().min(rows.len().saturating_sub(page));
         self.top.set(top);
@@ -167,7 +171,8 @@ impl Drafted {
     }
 
     /// The pane: whose it is and where it would go, what would stop it loading, then `flow.md` —
-    /// every line of it, a character that does not print shown as its escape.
+    /// every line of it, a character that does not print shown as its escape; for a change, every
+    /// line of it against the one it changes, ` - ` what goes and ` + ` what comes.
     pub fn lines(&self) -> Vec<Line<'static>> {
         let name = if self.name.is_empty() {
             "(unnamed)".to_string()
@@ -185,6 +190,17 @@ impl Drafted {
             v.push(Line::from(Span::styled(format!(" ! {}", shown(p)), theme::bad())));
         }
         v.push(Line::raw(""));
+        if let Some(base) = &self.base {
+            v.extend(diff::lines(base, &self.text).into_iter().map(|(tag, l)| {
+                let (mark, style) = match tag {
+                    Tag::Same => ("   ", theme::dim()),
+                    Tag::Gone => (" - ", theme::bad()),
+                    Tag::Added => (" + ", theme::accent()),
+                };
+                Line::from(Span::styled(format!("{mark}{}", shown(l)), style))
+            }));
+            return v;
+        }
         // Split at `\n` alone: a `\r` before one is the draft's, and shown.
         let text = self.text.strip_suffix('\n').unwrap_or(&self.text);
         v.extend(text.split('\n').map(|l| Line::raw(format!(" {}", shown(l)))));
@@ -194,9 +210,9 @@ impl Drafted {
     /// What the keys do, for the footer: the scroll keys first while it is taller than the pane.
     pub fn hint(&self) -> String {
         let keys = if self.ready() {
-            "enter writes it and says yes · e opens it in $EDITOR first · esc lets it go"
+            "enter writes it and says yes · ^e opens it in $EDITOR first · esc lets it go"
         } else {
-            "it would not load · e opens it in $EDITOR · esc lets it go"
+            "it would not load · ^e opens it in $EDITOR · esc lets it go"
         };
         if self.rows.get() > self.page.get() {
             format!("↑↓ pgup/pgdn read it · {keys}")
@@ -209,7 +225,7 @@ impl Drafted {
 /// A line as it is written, a character that does not print — a control character, a tab among
 /// them, or one that is not seen or turns the text around — as its escape (`\t`, `\r`,
 /// `\u{1b}`).
-fn shown(s: &str) -> String {
+pub(super) fn shown(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
         if c.is_control() || unseen(c) {
@@ -267,7 +283,7 @@ fn wrap(lines: Vec<Line<'static>>, width: usize) -> Vec<Line<'static>> {
 impl App {
     /// `/flow new …`: the bare template, written and opened in `$EDITOR`
     /// once the screen is free (and said yes to on return, as `/flow edit` is); or the words to
-    /// the assistant, its draft shown when it answers.
+    /// the assistant, in the flow proposal's pane, the name the person gave winning the draft's.
     pub(super) fn new_flow(&mut self, words: &[&str]) {
         let asked = match asked(words) {
             Ok(a) => a,
@@ -277,114 +293,17 @@ impl App {
             Ok(name) => name,
             Err(e) => return self.say(format!("{e:#}")),
         };
-        match asked {
-            Asked::Words { .. } if self.asking.is_some() => {
-                return self.say("still asking; /stop on its run");
-            }
-            Asked::Words { words, .. } => {
-                return self.ask(words, Want::Flow { name: name.to_string() });
-            }
-            Asked::Bare { .. } => {}
+        if let Asked::Words { words, .. } = asked {
+            let aim = Aim::New {
+                named: Some(name.to_string()),
+                folder: None,
+            };
+            return self.propose_flow(aim, words);
         }
         match crate::flow::start_new(&self.home, &name, vec![NewFile::flow_md(crate::flow::TEMPLATE)], false) {
             Ok(editing) => self.editor = Some((editing, 1)),
             Err(e) => self.say(format!("{e:#}")),
         }
-    }
-
-    /// A flow the assistant answered: shown, when the keys are free — nothing open, nothing typed
-    /// on the line; else parked, said, and shown by `/flow draft`, so no key meant for what was
-    /// there is taken as its yes. A newer draft replaces a parked one, shown or parked.
-    pub(super) fn drafted(&mut self, name: Option<String>, text: String, agent: String) {
-        if matches!(self.mode, Mode::Normal) && self.line.is_empty() {
-            self.parked = None;
-            return self.show_draft(name, text, agent);
-        }
-        let named = name.as_deref().map_or("a flow".to_string(), shown);
-        self.say(format!("{named} drafted · /flow draft shows it"));
-        self.parked = Some(Parked { name, text, agent });
-    }
-
-    /// `/flow draft`: the draft parked while the keys were another's, shown.
-    pub(super) fn show_parked(&mut self) {
-        match self.parked.take() {
-            Some(p) => self.show_draft(p.name, p.text, p.agent),
-            None => self.say("no draft waiting · /flow new <name> <words> asks for one"),
-        }
-    }
-
-    /// A flow the assistant drafted, shown in the pane until enter writes it, `e` opens it, or esc
-    /// lets it go. Checked as a reload would check it, against the projects Relay knows.
-    pub(super) fn show_draft(&mut self, name: Option<String>, text: String, agent: String) {
-        let home = self.home.clone();
-        let taken = |n: &str| crate::flow::check_name(&home, n).err().map(|e| format!("{e:#}"));
-        let d = Drafted::new(name, text, agent, &self.names.paths(), &taken);
-        self.say(format!(
-            "{} drafted {}",
-            d.agent,
-            if d.name.is_empty() { "a flow" } else { d.name.as_str() }
-        ));
-        self.mode = Mode::Draft(Box::new(d));
-        self.pane = Pane::Facts;
-        self.show_pane = true;
-    }
-
-    /// A key while a draft is shown: the scroll keys read it, enter writes it — once it would
-    /// load and its end has been on screen — `e` opens it first, esc lets it go.
-    pub(super) async fn draft_key(&mut self, d: Box<Drafted>, key: KeyCode) {
-        match key {
-            code if d.scroll(code) => self.mode = Mode::Draft(d),
-            // Typed for what was there before it came: not its yes, and nothing said.
-            KeyCode::Enter if d.settling(Instant::now()) => self.mode = Mode::Draft(d),
-            KeyCode::Enter if !d.ready() => {
-                self.say(format!("it would not load: {} · e opens it in $EDITOR", d.problems[0]));
-                self.mode = Mode::Draft(d);
-            }
-            // The yes is to what was shown: none until its end has been.
-            KeyCode::Enter if !d.seen() => {
-                self.say("the end is below · ↓ to read it");
-                self.mode = Mode::Draft(d);
-            }
-            KeyCode::Enter => self.write_draft(*d, false).await,
-            KeyCode::Char('e') => self.write_draft(*d, true).await,
-            KeyCode::Esc => self.say("draft let go: nothing written"),
-            _ => self.mode = Mode::Draft(d),
-        }
-    }
-
-    /// The draft written to its folder and said yes to at once (`flow::write_new`), or (`edit`)
-    /// opened in `$EDITOR` first and said yes to on return, as a new flow's save is. Not said yes
-    /// to, what was written is taken away again, and the draft stays shown.
-    async fn write_draft(&mut self, d: Drafted, edit: bool) {
-        let files = vec![NewFile::flow_md(d.text.clone())];
-        let name = match crate::flow::check_name(&self.home, &d.name) {
-            Ok(name) => name,
-            Err(e) => {
-                self.say(format!("{e:#}"));
-                return self.mode = Mode::Draft(Box::new(d));
-            }
-        };
-        if edit {
-            match crate::flow::start_new(&self.home, &name, files, true) {
-                Ok(editing) => self.editor = Some((editing, 1)),
-                Err(e) => {
-                    self.say(format!("{e:#}"));
-                    self.mode = Mode::Draft(Box::new(d));
-                }
-            }
-            return;
-        }
-        let known = self.names.paths();
-        let said = match crate::flow::write_new(&mut self.rpc, &self.home, &name, files, &known).await {
-            Ok(_) => format!("{name} approved"),
-            Err(e) => {
-                self.mode = Mode::Draft(Box::new(d));
-                format!("{e:#}")
-            }
-        };
-        self.refresh().await;
-        // Said last: a refresh that fails says so, and this is what matters.
-        self.say(said);
     }
 }
 
@@ -418,7 +337,7 @@ mod tests {
         assert!(text.contains(&"     run: echo hello".to_string()), "{text:#?}");
         assert_eq!(
             ok.hint(),
-            "enter writes it and says yes · e opens it in $EDITOR first · esc lets it go"
+            "enter writes it and says yes · ^e opens it in $EDITOR first · esc lets it go"
         );
 
         let bad = Drafted::new(
@@ -435,7 +354,10 @@ mod tests {
                 "flow.md:4 · `a` comes after `nope`, which is no step",
             ]
         );
-        assert_eq!(bad.hint(), "it would not load · e opens it in $EDITOR · esc lets it go");
+        assert_eq!(
+            bad.hint(),
+            "it would not load · ^e opens it in $EDITOR · esc lets it go"
+        );
         let lines: Vec<String> = bad.lines().iter().map(|l| l.to_string()).collect();
         assert_eq!(
             lines[1],
@@ -468,7 +390,7 @@ mod tests {
     /// `d` drawn on a `w`×`h` screen, its rows.
     fn drawn(d: &Drafted, w: u16, h: u16) -> Vec<String> {
         let mut t = ratatui::Terminal::new(ratatui::backend::TestBackend::new(w, h)).unwrap();
-        t.draw(|f| d.draw(f, f.area())).unwrap();
+        t.draw(|f| d.draw(Vec::new(), f, f.area())).unwrap();
         let buf = t.backend().buffer().clone();
         (0..h)
             .map(|y| (0..w).map(|x| buf[(x, y)].symbol().to_string()).collect())
@@ -493,7 +415,7 @@ mod tests {
         assert!(!tall.seen(), "its end is below");
         assert_eq!(
             tall.hint(),
-            "↑↓ pgup/pgdn read it · enter writes it and says yes · e opens it in $EDITOR first · esc lets it go"
+            "↑↓ pgup/pgdn read it · enter writes it and says yes · ^e opens it in $EDITOR first · esc lets it go"
         );
         assert!(tall.scroll(KeyCode::Down) && tall.scroll(KeyCode::PageDown));
         assert!(!tall.scroll(KeyCode::Enter), "not a scroll key");

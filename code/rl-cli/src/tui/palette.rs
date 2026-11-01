@@ -168,7 +168,7 @@ pub const ALL: &[Command] = &[
         ]],
         what: "a flow: the one named, else the one under the cursor · new writes one from words or the \
                bare template · edit opens its flow.md, and says yes when it loads · test says what would fire · \
-               draft shows one drafted while you were busy",
+               draft brings back the flow proposal",
         cmd: Cmd::Flow,
     },
     Command {

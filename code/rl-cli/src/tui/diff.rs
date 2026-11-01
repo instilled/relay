@@ -2,6 +2,14 @@
 //! that go, and the ones that come. A longest common run of lines, found the plain way — a flow
 //! is short, so the table of every pair of lines costs nothing worth saving.
 
+/// `s`'s lines, split at `\n` alone: a `\r` before one is the text's, kept to be shown.
+fn split(s: &str) -> Vec<&str> {
+    match s.strip_suffix('\n').unwrap_or(s) {
+        "" if !s.starts_with('\n') => Vec::new(),
+        s => s.split('\n').collect(),
+    }
+}
+
 /// What became of a line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Tag {
@@ -16,8 +24,8 @@ pub(super) enum Tag {
 /// `old` to `new`, a line at a time, in order. Where a run of lines is replaced, the ones that go
 /// come before the ones that come in their place. A last `\n` makes no empty line of its own.
 pub(super) fn lines<'a>(old: &'a str, new: &'a str) -> Vec<(Tag, &'a str)> {
-    let a: Vec<&str> = old.lines().collect();
-    let b: Vec<&str> = new.lines().collect();
+    let a = split(old);
+    let b = split(new);
     // `kept[i][j]`: how many lines `a[i..]` and `b[j..]` can keep in common.
     let mut kept = vec![vec![0usize; b.len() + 1]; a.len() + 1];
     for i in (0..a.len()).rev() {
@@ -88,5 +96,11 @@ mod tests {
     fn a_last_newline_makes_no_empty_line() {
         assert_eq!(lines("a\n", "a"), vec![(Same, "a")]);
         assert_eq!(lines("a\n", "a\nb\n"), vec![(Same, "a"), (Added, "b")]);
+    }
+
+    #[test]
+    fn a_carriage_return_is_the_lines_own() {
+        assert_eq!(lines("a\n", "a\r\n"), vec![(Gone, "a"), (Added, "a\r")]);
+        assert_eq!(lines("\n", "\n"), vec![(Same, "")]);
     }
 }
