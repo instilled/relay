@@ -122,6 +122,39 @@ pub fn chips(flows: &[Flow], scope: Option<&Path>, now: Timestamp) -> Vec<Chip> 
     out
 }
 
+/// The flows `in` one folder (`None`: those with no `in`), tallied from the digest.
+pub fn tally(flows: &[Flow], scope: Option<&Path>, d: &Digest) -> FlowTally {
+    let mut out = FlowTally::default();
+    for f in flows
+        .iter()
+        .filter(|f| f.removed_at.is_none() && f.folder.as_deref() == scope)
+    {
+        out.total += 1;
+        let live = |s| matches!(s, FiringStatus::Running | FiringStatus::Waiting);
+        out.running += usize::from(d.firings.iter().any(|g| g.flow == f.name && live(g.status)));
+        out.needs += usize::from(flow_needs(f, d));
+    }
+    out
+}
+
+/// Whether one flow needs you: it waits for a yes; a question is open from
+/// its firing or one of its runs; a run wants you; or a run failed unseen.
+pub fn flow_needs(f: &Flow, d: &Digest) -> bool {
+    let mine = |i: &&DigestItem| matches!(&i.run.cause, Cause::Flow { flow, .. } if *flow == f.name);
+    f.status() == FlowStatus::NeedsApproval
+        || d.items.iter().filter(mine).any(|i| match i.run.state {
+            RunState::NeedsInput | RunState::Blocked => true,
+            RunState::Failed => i.unseen,
+            _ => false,
+        })
+        || d.decisions.iter().any(|q| {
+            firing_of(q, &d.firings).is_some_and(|g| g.flow == f.name)
+                || q.run
+                    .as_ref()
+                    .is_some_and(|id| d.items.iter().filter(mine).any(|i| &i.run.id == id))
+        })
+}
+
 /// Which flow an ended run folds into, if any.
 pub fn flow_of(r: &Run) -> Option<&str> {
     if !r.state.is_terminal() {

@@ -794,11 +794,16 @@ fn header_with(place: Vec<Span<'static>>, h: &rows::Head, w: usize, tw: usize, b
         right.push(Span::styled(hint, theme::needs()));
         right.push(Span::raw("  "));
     }
-    let count = group_count(&h.flows);
+    let count = h.tally.words();
     if count.is_empty() {
         right.pop();
     } else {
-        right.push(Span::styled(count, theme::dim()));
+        let tone = if h.tally.needs > 0 {
+            theme::needs()
+        } else {
+            theme::dim()
+        };
+        right.push(Span::styled(count, tone));
     }
     if let Some(c) = &h.checkout {
         let at = col.max(width(&l) + 2);
@@ -2144,8 +2149,8 @@ impl App {
         // headline says them, amber when one waits for a yes. One of theirs
         // that did not load is said beside them, in red.
         if self.view == View::Work {
-            let chips = rows::chips(&self.flows, None, Timestamp::now());
-            for (words, tone) in rows::global_parts(&chips, !self.broken_in(None).is_empty()) {
+            let tally = rows::tally(&self.flows, None, &self.digest);
+            for (words, tone) in rows::global_parts(tally, !self.broken_in(None).is_empty()) {
                 notes.push(match tone {
                     rows::Tone::Plain => Span::raw(words),
                     rows::Tone::Needs => Span::styled(words, theme::needs()),
@@ -3329,16 +3334,6 @@ struct SummaryArgs {
     from: Option<Timestamp>,
 }
 
-/// A group header's right-edge tally: how many flows are `in` the folder, in
-/// words; empty when there are none.
-fn group_count(flows: &[rows::Chip]) -> String {
-    match flows.len() {
-        0 => String::new(),
-        1 => "1 flow".into(),
-        n => format!("{n} flows"),
-    }
-}
-
 /// The word for a failed join: the one that matters is someone else holding
 /// the keyboard, which `/join` can take.
 /// Who holds the keyboard, when that is why a join was refused.
@@ -3416,13 +3411,12 @@ fn reorder_step(k: &KeyEvent) -> Option<bool> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ListHit, Said, areas, cand_window, empty_list, group_count, head_h, hit_row, home_note, mark_seen,
-        reorder_step, spawn_size, term_size, vi_step, viewport,
+        ListHit, Said, areas, cand_window, empty_list, head_h, hit_row, home_note, mark_seen, reorder_step, spawn_size,
+        term_size, vi_step, viewport,
     };
-    use crate::tui::rows::Chip;
+    use crate::tui::rows::FlowTally;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::layout::Rect;
-    use rl_proto::flow::FlowStatus;
     use rl_proto::types::SummaryTarget;
 
     #[test]
@@ -3640,19 +3634,12 @@ mod tests {
         assert_eq!(cand_window(20, 6, Some(0)), 0);
     }
 
-    fn chip() -> Chip {
-        Chip {
-            name: "x".into(),
-            status: FlowStatus::On,
-            due: None,
+    fn flows(total: usize, needs: usize) -> FlowTally {
+        FlowTally {
+            total,
+            running: 0,
+            needs,
         }
-    }
-
-    #[test]
-    fn the_header_count_says_its_flows_and_pluralises() {
-        assert_eq!(group_count(&[]), "");
-        assert_eq!(group_count(&[chip()]), "1 flow");
-        assert_eq!(group_count(&[chip(), chip(), chip()]), "3 flows");
     }
 
     /// The column a piece of text starts at on a drawn line, counting cells.
@@ -3683,23 +3670,28 @@ mod tests {
             worktrees: n,
             badges: vec![],
         };
-        let head = |place: &str, own: Option<&str>, checkout, flows| Head {
+        let head = |place: &str, own: Option<&str>, checkout, tally| Head {
             place: place.into(),
             workspace: "/w".into(),
             name: "w".into(),
             own: own.map(Into::into),
-            flows,
+            tally,
             checkout,
             attention: 0,
         };
         let a = header_line(
-            &head("~/Projects/flint-platform", None, Some(co("main", 24)), vec![]),
+            &head(
+                "~/Projects/flint-platform",
+                None,
+                Some(co("main", 24)),
+                FlowTally::default(),
+            ),
             w,
             tw,
             false,
         );
         let b = header_line(
-            &head("~/tmp/foodai", Some("food"), Some(co("a-long-branch", 4)), vec![chip()]),
+            &head("~/tmp/foodai", Some("food"), Some(co("a-long-branch", 4)), flows(1, 0)),
             w,
             tw,
             false,
@@ -3709,7 +3701,7 @@ mod tests {
                 "~/Downloads/some/very/deep/folder/Finance & Real Estate",
                 None,
                 Some(co("main", 0)),
-                vec![],
+                FlowTally::default(),
             ),
             w,
             tw,
@@ -3731,32 +3723,27 @@ mod tests {
         // A folder whose flow did not load says so in red; the flow count
         // (every flow defined there, waiting-for-a-yes ones among them) still
         // ends at the edge — the waiting flows are rows now, not header chips.
-        let waiting = Chip {
-            name: "deploy".into(),
-            status: FlowStatus::NeedsApproval,
-            ..chip()
-        };
-        let flows = vec![waiting, chip()];
-        let broken = header_line(
-            &head("~/tmp/foodai", None, Some(co("main", 0)), flows.clone()),
-            w,
-            tw,
-            true,
-        );
+        let two = flows(2, 0);
+        let broken = header_line(&head("~/tmp/foodai", None, Some(co("main", 0)), two), w, tw, true);
         assert!(broken.to_string().ends_with("! flows  2 flows"), "{broken}");
         assert_eq!(broken.width(), w);
         let red = broken.spans.iter().find(|s| s.content == "! flows").unwrap();
         assert_eq!(red.style, crate::tui::theme::bad());
-        let fine = header_line(&head("~/tmp/foodai", None, Some(co("main", 0)), flows), w, tw, false);
+        let fine = header_line(&head("~/tmp/foodai", None, Some(co("main", 0)), two), w, tw, false);
         assert!(!fine.to_string().contains("! flows"), "{fine}");
+        // A flow that needs you lights the tally amber.
+        let lit = header_line(&head("~/tmp/foodai", None, None, flows(2, 1)), w, tw, false);
+        assert!(lit.to_string().ends_with("2 flows · 1 needs you"), "{lit}");
+        let amber = lit.spans.iter().find(|s| s.content == "2 flows · 1 needs you").unwrap();
+        assert_eq!(amber.style, crate::tui::theme::needs());
         // Nothing else on it: the chip alone, at the edge.
-        let alone = header_line(&head("~/tmp/foodai", None, None, vec![]), w, tw, true);
+        let alone = header_line(&head("~/tmp/foodai", None, None, FlowTally::default()), w, tw, true);
         assert!(alone.to_string().ends_with("! flows"), "{alone}");
         assert_eq!(alone.width(), w);
 
         // Something that needs you is off the list: the header hints in amber,
         // before the flow count, and the line still ends at the edge.
-        let mut hinted = head("~/tmp/foodai", None, Some(co("main", 0)), vec![chip()]);
+        let mut hinted = head("~/tmp/foodai", None, Some(co("main", 0)), flows(1, 0));
         hinted.attention = 2;
         let line = header_line(&hinted, w, tw, false);
         assert!(line.to_string().ends_with("! 2 need you  1 flow"), "{line}");

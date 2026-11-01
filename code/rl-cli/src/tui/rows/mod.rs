@@ -46,7 +46,7 @@ use crate::rank;
 use jiff::{SignedDuration, Timestamp};
 use rl_core::time::fmt_age;
 use rl_proto::decision::Decision;
-use rl_proto::flow::{Firing, Flow, FlowStatus};
+use rl_proto::flow::{Firing, FiringStatus, Flow, FlowStatus};
 use rl_proto::methods::{Digest, DigestItem, Hidden, Order, Outside};
 use rl_proto::types::{Cause, Checkout, Confidence, Run, RunKind, RunState};
 use std::collections::{BTreeMap, HashMap, HashSet};

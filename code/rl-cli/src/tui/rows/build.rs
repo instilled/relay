@@ -543,7 +543,7 @@ pub fn head(key: &str, workspace: &Path, d: &Digest, cx: &Context<'_>) -> Head {
         workspace: workspace.to_path_buf(),
         name: names.group(key),
         own: names.own(key, workspace),
-        flows: chips(cx.flows, Some(workspace), cx.now),
+        tally: tally(cx.flows, Some(workspace), d),
         checkout: checkout_of(&d.checkouts, workspace).cloned(),
         attention: 0,
     }

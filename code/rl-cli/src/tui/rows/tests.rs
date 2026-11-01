@@ -973,9 +973,57 @@ fn digest(now: Timestamp, items: Vec<DigestItem>, firings: Vec<Firing>) -> Diges
 }
 
 #[test]
+fn a_flow_tally_in_words() {
+    let t = |total, running, needs| FlowTally { total, running, needs }.words();
+    assert_eq!(t(3, 1, 1), "3 flows · 1 running · 1 needs you");
+    assert_eq!(t(1, 0, 0), "1 flow");
+    assert_eq!(t(2, 0, 2), "2 flows · 2 needs you");
+    assert_eq!(t(0, 0, 0), "");
+}
+
+#[test]
+fn a_project_line_tallies_its_flows_and_what_needs_you() {
+    let now: Timestamp = "2026-09-10T12:00:00Z".parse().unwrap();
+    let relay = "/home/f/relay";
+    let flows = vec![
+        flow("a", Some(relay)),
+        Flow {
+            approved_hash: None,
+            ..flow("b", Some(relay))
+        },
+        flow("c", Some(relay)),
+        flow("x", None),
+    ];
+    let running = Firing {
+        flow: "a".into(),
+        ..firing(FiringStatus::Running, &[])
+    };
+    let failed = |unseen| fired("c1", "c", RunState::Failed, "2026-09-10T11:00:00Z", unseen);
+    let names = Names::new([(relay.into(), "relay".to_string())]);
+    let tally_of = |items: Vec<DigestItem>, decisions: Vec<Decision>| {
+        let mut d = digest(now, items, vec![running.clone()]);
+        d.decisions = decisions;
+        let rows = toggles_build(&d, &names, &flows, (false, true, true, false), "", now);
+        head_of(&rows, "relay").tally
+    };
+    assert_eq!(
+        tally_of(vec![failed(true)], vec![]),
+        FlowTally {
+            total: 3,
+            running: 1,
+            needs: 2
+        }
+    );
+    assert_eq!(tally_of(vec![failed(false)], vec![]).needs, 1);
+    let asked = question("q1", relay, Some("c1"), "2026-09-10T11:30:00Z");
+    assert_eq!(tally_of(vec![failed(false)], vec![asked]).needs, 2);
+}
+
+#[test]
 fn the_headline_says_the_flows_with_no_in_and_a_yes_they_wait_for() {
     let now: Timestamp = "2026-09-10T12:00:00Z".parse().unwrap();
-    let say = |flows: &[Flow]| everywhere(&chips(flows, None, now));
+    let d = digest(now, vec![], vec![]);
+    let say = |flows: &[Flow]| everywhere(tally(flows, None, &d));
     let (pulse, nightly, notify) = (flow("pulse", None), flow("nightly", None), flow("notify", None));
     let waiting = Flow {
         approved_hash: None,
@@ -988,21 +1036,20 @@ fn the_headline_says_the_flows_with_no_in_and_a_yes_they_wait_for() {
         say(&[pulse.clone(), nightly.clone(), notify.clone()]),
         Some(("↻ 3 everywhere".into(), false))
     );
-    // One waiting, and it is all there is: the count already says which.
     assert_eq!(
         say(std::slice::from_ref(&waiting)),
-        Some(("↻ 1 everywhere needs a yes · /flow approve".into(), true))
+        Some(("↻ 1 everywhere · 1 needs you".into(), true))
     );
-    assert_eq!(
-        say(&[pulse, nightly, notify, waiting]),
-        Some(("↻ 4 everywhere · 1 needs a yes · /flow approve".into(), true))
-    );
+    let all = say(&[pulse, nightly, notify, waiting]).unwrap();
+    assert_eq!(all, ("↻ 4 everywhere · 1 needs you".into(), true));
+    assert!(!all.0.contains("/flow approve"));
 }
 
 #[test]
 fn the_headline_says_a_flow_did_not_load_beside_them() {
     let now: Timestamp = "2026-09-10T12:00:00Z".parse().unwrap();
-    let parts = |flows: &[Flow], broken| global_parts(&chips(flows, None, now), broken);
+    let d = digest(now, vec![], vec![]);
+    let parts = |flows: &[Flow], broken| global_parts(tally(flows, None, &d), broken);
     let flows = [flow("pulse", None), flow("nightly", None)];
     assert_eq!(parts(&flows, false), [("↻ 2 everywhere".to_string(), Tone::Plain)]);
     assert_eq!(
@@ -1603,7 +1650,7 @@ fn a_groups_header_carries_the_flows_in_its_folder() {
         flows_build(&d, &names, flows, "", now)
             .iter()
             .map(|r| match r {
-                Row::Group(h) => format!("[{}] {}", h.name, texts(&h.flows).join(" · ")),
+                Row::Group(h) => format!("[{}] {}", h.name, h.tally.words()),
                 other => other.key().unwrap(),
             })
             .collect::<Vec<_>>()
@@ -1611,9 +1658,9 @@ fn a_groups_header_carries_the_flows_in_its_folder() {
     assert_eq!(
         build_flows(&flows),
         [
-            "[api] ↻ elsewhere",
+            "[api] 1 flow",
             "f:elsewhere",
-            "[relay] ! deploy · ↻ nightly 4h · ↻ tests-failed · ↻ tidy paused",
+            "[relay] 4 flows · 1 needs you",
             "r:work1",
             "f:deploy",
             "f:nightly",

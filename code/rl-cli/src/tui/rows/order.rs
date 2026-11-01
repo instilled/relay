@@ -236,31 +236,28 @@ pub fn lost_note(d: &Digest) -> Option<String> {
 }
 
 /// The flows with no `in`, as the headline says them: how many there are —
-/// `↻ 2 everywhere` — and, when any waits for a yes, that it does and where
-/// to give it. `chips` are those ones (`chips(flows, None, ..)`); the flag
-/// says one is waiting, which is drawn amber. Nothing when there are none.
-pub fn everywhere(chips: &[Chip]) -> Option<(String, bool)> {
-    if chips.is_empty() {
+/// `↻ 2 everywhere` — then the rest of the tally as a project's line says it.
+/// The flag says one needs you, which is drawn amber. Nothing when there are none.
+pub fn everywhere(t: FlowTally) -> Option<(String, bool)> {
+    if t.total == 0 {
         return None;
     }
-    let waiting = chips.iter().filter(|c| c.needs_yes()).count();
-    let mut s = format!("{FLOW} {} everywhere", chips.len());
-    let need = |n: usize| if n == 1 { "needs" } else { "need" };
-    match waiting {
-        0 => {}
-        // All of them wait: the count already says how many.
-        n if n == chips.len() => s.push_str(&format!(" {} a yes · /flow approve", need(n))),
-        n => s.push_str(&format!(" · {n} {} a yes · /flow approve", need(n))),
+    let words = t.words();
+    let rest = words.split_once(" · ").map_or("", |(_, r)| r);
+    let mut s = format!("{FLOW} {} everywhere", t.total);
+    if !rest.is_empty() {
+        s.push_str(" · ");
+        s.push_str(rest);
     }
-    Some((s, waiting > 0))
+    Some((s, t.needs > 0))
 }
 
 /// What the headline says of the flows with no `in`, piece by piece: the
-/// tally (`everywhere`), amber when one waits for a yes, then — when a flow
+/// tally (`everywhere`), amber when one needs you, then — when a flow
 /// of theirs did not load — `flows broken` in red beside it.
-pub fn global_parts(chips: &[Chip], broken: bool) -> Vec<(String, Tone)> {
+pub fn global_parts(t: FlowTally, broken: bool) -> Vec<(String, Tone)> {
     let mut out = Vec::new();
-    if let Some((note, waiting)) = everywhere(chips) {
+    if let Some((note, waiting)) = everywhere(t) {
         out.push((note, if waiting { Tone::Needs } else { Tone::Plain }));
     }
     if broken {

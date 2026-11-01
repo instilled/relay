@@ -115,11 +115,7 @@ impl<'a> CatchUp<'a> {
                 keyed = true;
             }
             let row = match row {
-                Row::Group(mut h) => {
-                    // Its flows' times from now, not from when you left.
-                    if !h.is_everywhere() {
-                        h.flows = rows::chips(cx.flows, Some(&h.workspace), cx.now);
-                    }
+                Row::Group(h) => {
                     let key = h.workspace.to_string_lossy().into_owned();
                     projects.push(Project::new(h, key));
                     keyed = false;
