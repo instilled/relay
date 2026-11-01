@@ -4,42 +4,27 @@
 use super::*;
 
 impl App {
-    /// The list, with the cursor on a flow's row. When a toggle or the search
-    /// hides it, they give way; when the list has none (a flow with no `in`
-    /// and no runs, or not yet approved), the view stays and says so.
+    /// The list, with the cursor on the flow's project line, which tallies it
+    /// (the list has no flow rows). A flow with no `in` has no such line: the
+    /// headline counts it, and the view stays.
     pub(super) async fn show_flow(&mut self, name: &str) {
-        if !self.flows.iter().any(|f| f.name == name) {
+        let Some(flow) = self.flows.iter().find(|f| f.name == name) else {
             return self.say(format!("{name} is not a flow any more"));
-        }
+        };
+        let Some(folder) = flow.folder.clone() else {
+            return self.say(format!("{name} runs everywhere; the headline counts it"));
+        };
         let list_filter = match self.view {
             View::Events => self.filter_aside.clone(),
             _ => self.filter.clone(),
         };
-        let is_it = |r: &Row| matches!(r, Row::Flow(f) if f.name == name);
-        let (key, opened) = match self.row_key(&list_filter, self.toggles(), is_it) {
-            Some(k) => (k, None),
-            None => match self
-                .row_key("", (true, true, false), is_it)
-                .map(|k| (k, (true, true, false)))
-                .or_else(|| {
-                    self.row_key("", (true, true, true), is_it)
-                        .map(|k| (k, (true, true, true)))
-                }) {
-                Some((k, t)) => (k, Some(t)),
-                None => return self.say(format!("{name} has no row on the list")),
-            },
+        let is_it = |r: &Row| matches!(r, Row::Group(h) if h.workspace == folder);
+        let Some(key) = self.row_key(&list_filter, self.toggles(), is_it) else {
+            return self.say(format!("{name}'s project is not on the list now"));
         };
         self.back_to_list().await;
-        if let Some(t) = opened {
-            self.filter.clear();
-            self.set_toggles(t);
-            self.say(if t.2 {
-                format!("{name} is hidden: shown here with hidden on, /hide brings it back")
-            } else {
-                format!("the search and the toggles let go, to show {name}")
-            });
-        }
         self.select(Some(key));
+        self.say(format!("{name} is counted on its project's line"));
     }
 
     /// `/flow run|pause|resume|approve <name>`: the daemon's, then one line

@@ -246,8 +246,7 @@ sequenceDiagram
   line tallies them (how many, how many running, and in amber the ones that need you), and the
   `everywhere` line tallies those with no `in`. Rows never move by themselves; `⇧↑↓` reorders the
   runs, kept in `row_order` via `digest.order`. Toggles (`a` agents, `s` shells, `h` hidden) and a
-  search (`tui/query.rs`,
-  words plus `in: is: kind: by: on:` tokens) narrow it.
+  search (`tui/query.rs`, words plus `in: is: kind: by: on:` tokens) narrow it.
 - **The line** (`tui/line.rs`) always takes typing. A first word naming an agent starts that
   agent; one this machine can run goes to the project's **warm shell** (one persistent `$SHELL -i`
   per folder, written to via `run.input`); anything else goes to the interpreter (§6), and the run

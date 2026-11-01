@@ -3258,6 +3258,7 @@ impl App {
         if self.view == View::CatchUp {
             let go = match self.selected() {
                 Some(Row::Question(_)) => "`1 and a note` on the line answers it · enter it on the list · ",
+                Some(Row::Flow(_)) => "enter its project on the list · ",
                 Some(_) => "enter it on the list · ",
                 None => "",
             };
@@ -4545,11 +4546,43 @@ mod tests {
 
     #[tokio::test]
     async fn each_row_says_what_its_summary_is_of() {
-        let (_tmp, token, mut app, folder) = panel().await;
+        use rl_proto::types::{Cause, Run, RunKind};
+        let (_tmp, token, mut app, folder) = panel_of(|folder, now| {
+            let step = |id: &str, name: &str, at: &std::path::Path| {
+                let mut r = Run::new(id, RunKind::Command, name, vec!["true".into()], at, at, now);
+                r.cause = Cause::Flow {
+                    flow: name.into(),
+                    step: "probe".into(),
+                };
+                r
+            };
+            let elsewhere = folder.parent().unwrap().join("elsewhere");
+            vec![
+                step("run00002", "tidy", folder),
+                step("run00003", "nightly", &elsewhere),
+            ]
+        })
+        .await;
         app.select(Some(RUN.into()));
         assert_eq!(app.summary_target(), Some(SummaryTarget::Run { id: "run00001".into() }));
         app.select(Some(format!("g:{}", folder.display())));
         assert_eq!(app.summary_target(), Some(SummaryTarget::Project { workspace: folder }));
+        // In the catch-up, a flow's row's summary is of the flow of that name.
+        app.open_catch_up(nine_hours_ago(), true).await;
+        app.select(catch_flow_key(&app, "tidy"));
+        assert_eq!(app.summary_target(), Some(SummaryTarget::Flow { name: "tidy".into() }));
+        app.select(catch_flow_key(&app, "nightly"));
+        assert_eq!(
+            app.summary_target(),
+            Some(SummaryTarget::Flow { name: "nightly".into() })
+        );
+        // The list has no `everywhere` line, but the catch-up has one.
+        app.select(Some("g:everywhere".into()));
+        assert_eq!(
+            app.summary_target(),
+            Some(SummaryTarget::All),
+            "everywhere is everything"
+        );
         token.cancel();
     }
 
@@ -6173,6 +6206,14 @@ mod tests {
         app.digest.items.iter().any(|i| i.run.id == id && i.unseen)
     }
 
+    /// The catch-up's row for the flow `name`: the list has none, the catch-up does.
+    fn catch_flow_key(app: &super::App, name: &str) -> Option<String> {
+        app.catch_rows().iter().find_map(|r| match r {
+            super::Row::Flow(f) if f.name == name => Some(f.key.clone()),
+            _ => None,
+        })
+    }
+
     #[tokio::test]
     async fn a_number_answers_a_question_in_the_catch_up() {
         let (tmp, token, mut app, folder) = panel().await;
@@ -6212,10 +6253,11 @@ mod tests {
         token.cancel();
     }
 
-    /// `enter` on a line a flow set off, in the events view: the list has no
-    /// flow rows, so the view stays and says so.
+    /// `enter` on a line a flow set off, in the events view: the flow's
+    /// project line on the list, which tallies it; with no `in`, the view
+    /// stays and says the headline counts it.
     #[tokio::test]
-    async fn a_flow_in_the_events_view_is_said_to_have_no_row_on_the_list() {
+    async fn a_flow_in_the_events_view_is_found_on_its_project_line() {
         let (_tmp, token, mut app, folder) = panel_of(|folder, now| {
             let mut r = rl_proto::types::Run::new(
                 "run00002",
@@ -6261,18 +6303,22 @@ mod tests {
         app.toggle_events().await;
         load(&mut app);
         assert!(app.view == super::View::Events);
-        // The list has no flow rows: the view stays and says so, loaded or not.
+        // The list has no flow rows: its project's line, which tallies it.
         app.show_flow("nightly").await;
-        assert!(app.view == super::View::Events, "the view stays");
-        assert_eq!(said(&app), "nightly has no row on the list");
+        assert!(app.view == super::View::Work);
+        assert_eq!(app.sel, Some(format!("g:{}", folder.display())));
+        assert_eq!(said(&app), "nightly is counted on its project's line");
+        // With no `in` there is no such line: the events view is still up.
+        app.toggle_events().await;
+        load(&mut app);
         app.show_flow("ghost").await;
         assert!(app.view == super::View::Events, "the view stays");
-        assert_eq!(said(&app), "ghost has no row on the list");
+        assert_eq!(said(&app), "ghost runs everywhere; the headline counts it");
         token.cancel();
     }
 
     #[tokio::test]
-    async fn enter_on_a_flow_in_the_catch_up_stays_there_the_list_having_no_flow_rows() {
+    async fn enter_on_a_flow_in_the_catch_up_goes_to_its_project_line_on_the_list() {
         let (_tmp, token, mut app, folder) = panel_of(|folder, now| {
             let mut r = rl_proto::types::Run::new(
                 "run00002",
@@ -6290,8 +6336,8 @@ mod tests {
             vec![r]
         })
         .await;
-        // The flow is in the project: its row is there, the list is still
-        // where enter goes.
+        // The flow is in the project: its row is there, and its project's line
+        // on the list is where enter goes.
         app.flows.push(rl_proto::flow::Flow {
             name: "nightly".into(),
             hash: "h".into(),
@@ -6321,9 +6367,149 @@ mod tests {
         );
         drop(cu);
         app.select(Some(flow.clone()));
-        assert!(app.hints().starts_with("enter it on the list"), "{}", app.hints());
+        assert!(
+            app.hints().starts_with("enter its project on the list"),
+            "{}",
+            app.hints()
+        );
         press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
-        assert!(app.view == super::View::CatchUp, "the list has no flow rows to go to");
+        assert!(app.view == super::View::Work);
+        assert_eq!(app.sel, Some(format!("g:{}", folder.display())), "its project's line");
+        assert!(!unseen(&app, "run00002"));
+        token.cancel();
+    }
+
+    #[tokio::test]
+    async fn a_flows_summary_starts_at_the_run_you_had_not_seen() {
+        use rl_proto::types::{Cause, Run, RunKind};
+        let (_tmp, token, mut app, _folder) = panel_of(|folder, now| {
+            let firing = |id: &str, hours| {
+                let at = now - jiff::SignedDuration::from_hours(hours);
+                let mut r = Run::new(id, RunKind::Command, "tidy", vec!["true".into()], folder, folder, at);
+                r.cause = Cause::Flow {
+                    flow: "tidy".into(),
+                    step: "probe".into(),
+                };
+                r
+            };
+            vec![firing("run00002", 2), firing("run00003", 1)]
+        })
+        .await;
+        let oldest = app.run_by_id("run00002").unwrap().started_at;
+        app.open_catch_up(nine_hours_ago(), true).await;
+        // Looked at on its row there, its firings are seen.
+        app.select(catch_flow_key(&app, "tidy"));
+        app.saw_selected().await;
+        assert_eq!(app.unseen_from.len(), 1, "it remembers where the unseen began");
+        type_in(&mut app, "/summary").await;
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+        let s = app.summarising.as_ref().expect("asked");
+        assert!(matches!(s.target, SummaryTarget::Flow { .. }), "{:?}", s.target);
+        assert_eq!(
+            s.from,
+            Some(oldest),
+            "since the firing you had not seen, not the last day"
+        );
+        assert!(app.unseen_from.is_empty(), "used once asked");
+        token.cancel();
+    }
+
+    #[tokio::test]
+    async fn edit_opens_the_catch_ups_selected_flows_file() {
+        let (tmp, token, mut app, _folder) = panel_of(|folder, now| {
+            let mut r = rl_proto::types::Run::new(
+                "run00002",
+                rl_proto::types::RunKind::Command,
+                "probe",
+                vec!["true".into()],
+                folder,
+                folder,
+                now,
+            );
+            r.cause = rl_proto::types::Cause::Flow {
+                flow: "nightly".into(),
+                step: "probe".into(),
+            };
+            vec![r]
+        })
+        .await;
+        let ledger = rl_ledger::Ledger::open(&rl_core::Home::at(tmp.path().join("h")).ledger()).unwrap();
+        ledger
+            .call_blocking(|c| {
+                let loaded = rl_ledger::flows::Loaded {
+                    name: "nightly".into(),
+                    hash: "h".into(),
+                    def_json: "{}".into(),
+                };
+                rl_ledger::flows::sync(c, &[loaded], jiff::Timestamp::now())
+            })
+            .unwrap();
+        app.refresh().await;
+        let said = |app: &super::App| app.flash.as_ref().map(|(m, _)| m.clone()).unwrap_or_default();
+        async fn run(app: &mut super::App, line: &str) {
+            type_in(app, line).await;
+            press(app, KeyCode::Enter, KeyModifiers::NONE).await;
+        }
+
+        // On a flow's row, `/edit` opens its `flow.md` — no name needed.
+        app.open_catch_up(nine_hours_ago(), true).await;
+        app.select(catch_flow_key(&app, "nightly"));
+        run(&mut app, "/edit").await;
+        let home = rl_core::Home::at(tmp.path().join("h"));
+        let (editing, line) = app.editor.take().expect("the editor is next");
+        let file = home.flow_dir("nightly").join("flow.md");
+        assert_eq!((editing.name.as_str(), &editing.file, line), ("nightly", &file, 1));
+
+        // Off a flow — on a run — there is nothing to edit, and it says so.
+        app.select(Some(RUN.into()));
+        run(&mut app, "/edit").await;
+        assert!(app.editor.is_none());
+        assert_eq!(said(&app), "nothing here to edit · select a flow");
+        token.cancel();
+    }
+
+    #[tokio::test]
+    async fn a_flow_stands_in_its_project_however_its_in_is_spelled() {
+        let (tmp, token, mut app, folder) = panel_of(|folder, now| {
+            let mut r = rl_proto::types::Run::new(
+                "run00002",
+                rl_proto::types::RunKind::Command,
+                "probe",
+                vec!["true".into()],
+                folder,
+                folder,
+                now,
+            );
+            r.cause = rl_proto::types::Cause::Flow {
+                flow: "nightly".into(),
+                step: "probe".into(),
+            };
+            vec![r]
+        })
+        .await;
+        // Not the project's own path: the temp folder as given (a link on
+        // macOS), and a trailing slash.
+        let spelled = format!("{}/proj/", tmp.path().display());
+        let dir = rl_core::Home::at(tmp.path().join("h")).flow_dir("nightly");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("flow.md"),
+            format!("---\nin: {spelled}\nsteps:\n  probe:\n    run: x\n---\n"),
+        )
+        .unwrap();
+        app.rpc.call::<rl_proto::flow::FlowReload>(()).await.unwrap();
+        app.refresh().await;
+        // Under the project itself, counted on its line, and no second header.
+        let rows = app.rows();
+        let heads: Vec<_> = rows
+            .iter()
+            .filter_map(|r| match r {
+                super::Row::Group(h) if h.workspace == folder => Some(h.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(heads.len(), 1, "one header for the project");
+        assert_eq!(heads[0].tally.total, 1, "the flow is counted there");
         token.cancel();
     }
 
@@ -6799,17 +6985,21 @@ mod tests {
         assert_eq!(said(&app), "nightly approved");
         assert!(nightly(&app).approved());
 
-        // The list has no flow rows, so a name is always needed.
-        run(&mut app, "/flow pause nightly").await;
+        // On its row in the catch-up, no name is needed.
+        app.open_catch_up(nine_hours_ago(), true).await;
+        app.select(catch_flow_key(&app, "nightly"));
+        assert_eq!(app.flow_here().as_deref(), Some("nightly"));
+        run(&mut app, "/flow pause").await;
         assert_eq!(said(&app), "nightly paused");
         assert!(nightly(&app).paused);
-        run(&mut app, "/flow resume nightly").await;
+        run(&mut app, "/flow resume").await;
         assert_eq!(said(&app), "nightly resumed");
         assert!(!nightly(&app).paused);
-        // `other` is asked for, nightly left be.
+        // A name typed wins over the row: `other` is asked for, nightly left be.
         run(&mut app, "/flow pause other").await;
         assert!(said(&app).starts_with("pause other: "), "{}", said(&app));
         assert!(!nightly(&app).paused);
+        app.back_to_list().await;
 
         run(&mut app, "/flow now").await;
         assert_eq!(

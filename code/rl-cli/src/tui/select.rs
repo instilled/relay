@@ -259,7 +259,7 @@ impl App {
     }
 
     /// Whether the list still has a row once the catch-up is left and what
-    /// it showed is seen: the run `run` on a row of its own or in its flow's,
+    /// it showed is seen: the run `run` on a row of its own,
     /// else the row `key`, whatever the toggles. A run that ended over a day
     /// ago, unpinned, is the list's only while it is not seen.
     pub(super) fn kept_on_the_list(&self, key: &str, run: Option<&str>) -> bool {
@@ -287,7 +287,6 @@ impl App {
                 };
                 rows::build(&d, &cx).iter().any(|r| match (run, r) {
                     (Some(id), Row::Run(i)) => i.run.id == id,
-                    (Some(id), Row::Flow(f)) => f.runs.iter().any(|i| i.run.id == id),
                     (Some(_), _) => false,
                     (None, r) => r.key().as_deref() == Some(key),
                 })
@@ -295,13 +294,9 @@ impl App {
     }
 
     /// The list's row for a run, as the list would stand with this search
-    /// and these toggles: its own, or the flow it folds into.
+    /// and these toggles: its own.
     pub(super) fn list_key(&self, id: &str, filter: &str, toggles: (bool, bool, bool)) -> Option<String> {
-        self.row_key(filter, toggles, |r| match r {
-            Row::Run(i) => i.run.id == id,
-            Row::Flow(f) => f.runs.iter().any(|i| i.run.id == id),
-            _ => false,
-        })
+        self.row_key(filter, toggles, |r| matches!(r, Row::Run(i) if i.run.id == id))
     }
 
     /// The key of the first row of the list that `is` picks, as the list would
