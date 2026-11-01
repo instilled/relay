@@ -241,15 +241,16 @@ sequenceDiagram
 `rl` with no command (`rl-cli/src/tui`) is `digest.get` and `run.attach` behind one screen.
 
 - **The list** (`tui/rows.rs`) is one column: pinned runs, then projects (registered folders,
-  shown before anything runs there), each holding its runs, flows and agents' own sessions in the
-  order they came; a question sits under the run that asked it. Rows never move by themselves;
-  `⇧↑↓` reorders, kept in `row_order` via `digest.order`. An ended flow's runs fold into one row
-  per flow. `everywhere` holds flows with no `in`. A lens (`all · agents · flows · hidden`) and a search (`tui/query.rs`,
+  shown before anything runs there), each holding its runs and agents' own sessions in the order
+  they came, then its flows by name at the bottom; a question sits under the run that asked it.
+  Rows never move by themselves; `⇧↑↓` reorders the runs, kept in `row_order` via `digest.order`
+  — flows do not move. An ended flow's runs fold into one row per flow. `everywhere` holds flows with no `in`. A lens (`all · agents · flows · hidden`) and a search (`tui/query.rs`,
   words plus `in: is: kind: by: on:` tokens) narrow it.
 - **The line** (`tui/line.rs`) always takes typing. A first word naming an agent starts that
   agent; one this machine can run goes to the project's **warm shell** (one persistent `$SHELL -i`
-  per folder, written to via `run.input`); anything else goes to the interpreter (§6) and comes
-  back as a filled form. The line's right edge says which, before `enter`. Everything else is a
+  per folder, written to via `run.input`); anything else goes to the interpreter (§6), and the run
+  it proposes comes back in the pane (`tui/proposal.rs`) to run, change with more words, or edit as
+  the form. The line's right edge says which, before `enter`; `⇧tab` turns a misread line round. Everything else is a
   `/` command (`tui/palette.rs`) or one of a few chords (`^x ^r ^t ^o ^f`, `^h` for the keys).
 - **A row is read by entering it.** `enter` opens the selected row's **subpage**: full width,
   full height, the list stepped aside, under one header row saying what the page is of and that

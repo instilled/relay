@@ -109,9 +109,9 @@ pub(crate) fn projects_standing(full: &[Row], kept: &[Order]) -> Vec<String> {
 /// The order to keep once the row `key` moves one place up (or down) among
 /// what is `shown`: its project's whole order, from `full` — the list with
 /// nothing narrowing it — so rows a search or a toggle leaves out keep theirs.
-/// Rows move only inside their project, past a question as past nothing; a
-/// header moves among the projects. A question, a pinned run and
-/// `everywhere` stay put, and say why.
+/// Rows move only inside their project, past a question as past nothing, and
+/// above its flows; a header moves among the projects. A question, a flow, a
+/// pinned run and `everywhere` stay put, and say why.
 pub fn reorder(shown: &[Row], full: &[Row], kept: &[Order], key: &str, up: bool) -> Result<Order, &'static str> {
     let at = shown
         .iter()
@@ -121,7 +121,8 @@ pub fn reorder(shown: &[Row], full: &[Row], kept: &[Order], key: &str, up: bool)
         Row::Group(h) if h.is_everywhere() => return Err("everywhere stays last, below the projects"),
         Row::Group(_) => return move_project(shown, full, kept, key, up),
         Row::Question(_) => return Err("a question stays under the run that asked it"),
-        Row::Run(_) | Row::Flow(_) | Row::Outside(_) => {}
+        Row::Flow(_) => return Err("flows stay at the bottom of their project, by name"),
+        Row::Run(_) | Row::Outside(_) => {}
     }
     let Some(head) = shown[..at].iter().rposition(|r| matches!(r, Row::Group(_))) else {
         return Err(if shown[at].item().is_some_and(|i| i.run.pinned_at.is_some()) {
@@ -130,14 +131,14 @@ pub fn reorder(shown: &[Row], full: &[Row], kept: &[Order], key: &str, up: bool)
             "it needs you, so it stays at the top until it is dealt with"
         });
     };
-    // The row it passes: the next run or flow, over a question between.
+    // The row it passes: the next run, over a question between; a flow is the bottom.
     let step = |i: usize| if up { i.checked_sub(1) } else { Some(i + 1) };
     let mut next = step(at);
     while let Some(Row::Question(_)) = next.and_then(|i| shown.get(i)) {
         next = next.and_then(step);
     }
     let other = match next.and_then(|i| shown.get(i)) {
-        Some(r @ (Row::Run(_) | Row::Flow(_) | Row::Outside(_))) => r.key().unwrap_or_default(),
+        Some(r @ (Row::Run(_) | Row::Outside(_))) => r.key().unwrap_or_default(),
         _ if up => return Err("already at the top of its project"),
         _ => return Err("already at the bottom of its project"),
     };

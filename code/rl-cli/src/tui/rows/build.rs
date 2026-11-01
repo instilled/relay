@@ -419,11 +419,10 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
             h
         };
         let mut block = vec![Row::Group(head)];
-        // Runs, flows and agents' own sessions share one order, which nothing
-        // that happens to a row changes: the order they came in, the newest at
-        // the bottom.
+        // Runs and agents' own sessions share one order, which nothing that
+        // happens to a row changes: the order they came in, the newest at the
+        // bottom.
         let mut mixed: Vec<Row<'a>> = g.runs.into_iter().map(Row::Run).collect();
-        mixed.extend(g.flows.into_iter().map(Row::Flow));
         mixed.extend(g.outside.into_iter().map(Row::Outside));
         mixed.sort_by_cached_key(came);
         // Once you have put a project's rows in order, it keeps yours: the
@@ -432,10 +431,17 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
             .key()
             .and_then(|k| d.order.iter().find(|o| o.group == k))
             .filter(|o| !o.rows.is_empty());
-        let mixed = match kept {
+        let mut mixed = match kept {
             Some(o) => in_order(mixed, &o.rows),
             None => mixed,
         };
+        // Its flows under all of that, by name: what stands there, below what moves.
+        let mut flows: Vec<Row<'a>> = g.flows.into_iter().map(Row::Flow).collect();
+        flows.sort_by_cached_key(|r| match r {
+            Row::Flow(f) => f.name.clone(),
+            _ => String::new(),
+        });
+        mixed.extend(flows);
         block.extend(attach(mixed, g.asked));
         if g.key == EVERYWHERE_KEY {
             everywhere = block;
