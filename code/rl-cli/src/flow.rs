@@ -19,7 +19,7 @@ mod edit;
 mod new;
 mod state;
 pub mod tested;
-pub use edit::{Edited, Editing, TEMPLATE, drop_new, finish_edit, start_edit};
+pub use edit::{Edited, Editing, TEMPLATE, drop_new, finish_edit, restore, start_changed, start_edit, write_changed};
 pub use new::{NewArgs, NewFile, NewName, check_name, problems, projects, start_new, write_new};
 pub use state::StateCmd;
 

@@ -70,7 +70,7 @@ impl App {
         // Outside a flow, the pane opens on it at once — and words with a proposal up change it.
         let sent = match want {
             Want::Any => self.propose(words.clone()),
-            Want::Flow { .. } => words.clone(),
+            Want::Flow { .. } | Want::NewFlow { .. } => words.clone(),
         };
         let folder = match (&want, &self.proposal) {
             (Want::Any, Some(p)) => p.folder.clone(),
@@ -90,9 +90,14 @@ impl App {
     ) {
         let Some(asking) = self.asking.take() else { return };
         match answer {
-            Ok(Ok((crate::interpret::Answer::Run(_), out))) if matches!(asking.want, Want::Flow { .. }) => self.say(
-                format!("asked for a flow; {} answered a run (run {})", out.agent, out.run),
-            ),
+            Ok(Ok((crate::interpret::Answer::Run(_), out)))
+                if matches!(asking.want, Want::Flow { .. } | Want::NewFlow { .. }) =>
+            {
+                self.say(format!(
+                    "asked for a flow; {} answered a run (run {})",
+                    out.agent, out.run
+                ))
+            }
             Ok(Ok((crate::interpret::Answer::Flow(d), out))) => {
                 // A flow where a run was asked: shown as a flow draft is, the proposal let go.
                 if self.proposal.take().is_some_and(|p| p.shown) {
@@ -101,7 +106,7 @@ impl App {
                 // Asked for a flow by name, the person's name wins the draft's.
                 let name = match asking.want {
                     Want::Flow { name } => Some(name),
-                    Want::Any => d.name,
+                    Want::Any | Want::NewFlow { .. } => d.name,
                 };
                 self.drafted(name, d.text, out.agent);
             }

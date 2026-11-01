@@ -2,6 +2,7 @@
 //! what was saved loads, the folder had its yes before (or held nothing), and nothing else in it
 //! changed meanwhile — to exactly that version, by its hash.
 
+use super::new::problems;
 use crate::client::Client;
 use anyhow::{Context as _, Result, bail};
 use rl_core::Home;
@@ -131,6 +132,75 @@ pub async fn finish_edit(rpc: &mut Client, e: Editing) -> Result<(Edited, Reload
     }
     let f = rpc.call::<FlowApprove>(FlowApproval { name: e.name, hash }).await?;
     Ok((Edited::Approved(Box::new(f)), reloaded))
+}
+
+/// A flow's `flow.md` changed to `text` — words typed on it, answered — and said yes to as an
+/// edit is, with no editor between: only while the file is still `base`, what the change was
+/// asked of, and only when `text` loads. What does not load, or cannot be said yes to for want
+/// of the daemon, leaves `base` back in place; a yes the folder's state withholds (`NeedsYes`)
+/// keeps the text, as `rl flow edit` does.
+pub async fn write_changed(
+    rpc: &mut Client,
+    home: &Home,
+    name: &str,
+    base: &str,
+    text: &str,
+    known: &[PathBuf],
+) -> Result<Edited> {
+    as_asked(home, name, base)?;
+    if let Some(first) = problems(name, text, known).first() {
+        bail!("{name} would not load: {first}");
+    }
+    let editing = start_edit(home, name)?;
+    let written = editing.clone();
+    if let Err(e) = std::fs::write(&editing.file, text) {
+        restore(&written, base)?;
+        return Err(anyhow::Error::new(e).context(format!("writing {}", editing.file.display())));
+    }
+    match finish_edit(rpc, editing).await {
+        Ok((Edited::NotLoaded(said), _)) => {
+            restore(&written, base)?;
+            // The daemon reads it back as it was, when it is up.
+            let _ = rpc.call::<FlowReload>(()).await;
+            Ok(Edited::NotLoaded(said))
+        }
+        Ok((edited, _)) => Ok(edited),
+        Err(e) => {
+            restore(&written, base)?;
+            Err(e)
+        }
+    }
+}
+
+/// A flow's `flow.md` changed to `text`, ready for an editor — `^e` on a change proposed: the
+/// person reads it there, and saving it, changed or not, is their yes (`finish_edit`). Only while
+/// the file is still `base`. A caller whose editor does not open, or fails, writes `base` back
+/// (`restore`): no yes was given to the change.
+pub fn start_changed(home: &Home, name: &str, base: &str, text: &str) -> Result<Editing> {
+    as_asked(home, name, base)?;
+    let mut editing = start_edit(home, name)?;
+    std::fs::write(&editing.file, text).with_context(|| format!("writing {}", editing.file.display()))?;
+    // `was` stays the old text: what the editor saves is a change to it.
+    editing.yours = true;
+    Ok(editing)
+}
+
+/// A changed `flow.md` put back as it was asked of: `base`.
+pub fn restore(e: &Editing, base: &str) -> Result<()> {
+    std::fs::write(&e.file, base).with_context(|| format!("writing {} back", e.file.display()))
+}
+
+/// A flow by a flow's name, its `flow.md` still `base`: what a change was asked of is what it
+/// would be written over.
+fn as_asked(home: &Home, name: &str, base: &str) -> Result<()> {
+    if !valid_name(name) {
+        bail!("`{name}` is not a flow name; use lowercase letters, digits and dashes");
+    }
+    let now = std::fs::read_to_string(home.flow_dir(name).join("flow.md")).ok();
+    if now.as_deref() != Some(base) {
+        bail!("{name}'s flow.md changed since it was asked · type to ask again");
+    }
+    Ok(())
 }
 
 /// Takes a new flow away as it was written, when nothing since is the person's: this edit wrote

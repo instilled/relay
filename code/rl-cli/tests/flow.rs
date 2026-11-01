@@ -487,3 +487,84 @@ fn flow_test_says_what_would_fire_and_starts_nothing() {
     assert!(!ok && e.contains("nope"), "{e}");
     assert!(out(rl(&["daemon", "stop"])).0);
 }
+
+/// A daemon in this process, on a throwaway home, and a client of it; a flow `pulse` written to
+/// it and said yes to, and its `flow.md` as written.
+async fn approved_pulse() -> (
+    tempfile::TempDir,
+    rl_core::Home,
+    tokio_util::sync::CancellationToken,
+    rl_cli::client::Client,
+    String,
+) {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = rl_core::Home::at(tmp.path());
+    let token = tokio_util::sync::CancellationToken::new();
+    tokio::spawn(rl_daemon::serve_with(
+        home.clone(),
+        token.clone(),
+        rl_daemon::ServeOptions::default(),
+    ));
+    let mut rpc = loop {
+        match rl_cli::client::Client::connect(&home).await {
+            Ok(c) => break c,
+            Err(_) => tokio::time::sleep(Duration::from_millis(20)).await,
+        }
+    };
+    let base = "---\nwhen: every 1d\nsteps:\n  first:\n    run: echo hello\n---\n".to_string();
+    let name = rl_cli::flow::check_name(&home, "pulse").unwrap();
+    let files = vec![rl_cli::flow::NewFile::flow_md(base.as_str())];
+    rl_cli::flow::write_new(&mut rpc, &home, &name, files, &[])
+        .await
+        .unwrap();
+    (tmp, home, token, rpc, base)
+}
+
+#[tokio::test]
+async fn write_changed_approves_a_changed_flow() {
+    let (_tmp, home, token, mut rpc, base) = approved_pulse().await;
+    let text = base.replace("every 1d", "every 2d");
+    let edited = rl_cli::flow::write_changed(&mut rpc, &home, "pulse", &base, &text, &[])
+        .await
+        .unwrap();
+    assert!(
+        matches!(edited, rl_cli::flow::Edited::Approved(_)),
+        "{}",
+        edited.words("pulse")
+    );
+    let md = home.flow_dir("pulse").join("flow.md");
+    assert_eq!(std::fs::read_to_string(md).unwrap(), text);
+    token.cancel();
+}
+
+#[tokio::test]
+async fn write_changed_refuses_a_moved_base() {
+    let (_tmp, home, token, mut rpc, base) = approved_pulse().await;
+    let md = home.flow_dir("pulse").join("flow.md");
+    let moved = base.replace("echo hello", "echo moved");
+    std::fs::write(&md, &moved).unwrap();
+    let text = base.replace("every 1d", "every 2d");
+    let Err(e) = rl_cli::flow::write_changed(&mut rpc, &home, "pulse", &base, &text, &[]).await else {
+        panic!("written over a flow.md changed since it was asked");
+    };
+    assert_eq!(
+        format!("{e:#}"),
+        "pulse's flow.md changed since it was asked · type to ask again"
+    );
+    assert_eq!(std::fs::read_to_string(&md).unwrap(), moved);
+    token.cancel();
+}
+
+#[tokio::test]
+async fn write_changed_refuses_what_would_not_load() {
+    let (_tmp, home, token, mut rpc, base) = approved_pulse().await;
+    let text = base.replace("every 1d", "every now and then");
+    let Err(e) = rl_cli::flow::write_changed(&mut rpc, &home, "pulse", &base, &text, &[]).await else {
+        panic!("written what would not load");
+    };
+    let e = format!("{e:#}");
+    assert!(e.starts_with("pulse would not load: "), "{e}");
+    let md = home.flow_dir("pulse").join("flow.md");
+    assert_eq!(std::fs::read_to_string(md).unwrap(), base);
+    token.cancel();
+}

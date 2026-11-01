@@ -22,6 +22,9 @@ mod carry;
 mod catch_ops;
 mod catchup;
 mod complete;
+// Read by nothing yet: the pane that shows a flow's change proposed comes next.
+#[allow(dead_code)]
+mod diff;
 mod events;
 mod feed_ops;
 mod firings;
