@@ -176,12 +176,8 @@ pub fn check(name: &str, doc: Doc, known: &dyn Fn(&Path) -> bool) -> Result<Flow
     })
 }
 
-/// `[a-z0-9][a-z0-9-]*`: a flow's folder, or a step a placeholder can name.
-pub fn valid_name(name: &str) -> bool {
-    let mut chars = name.chars();
-    let word = |c: char| c.is_ascii_lowercase() || c.is_ascii_digit();
-    chars.next().is_some_and(word) && chars.all(|c| word(c) || c == '-')
-}
+/// Kept with the wire's types, where a parked folder's name is read back too.
+pub use rl_proto::flow::valid_name;
 
 /// One step checked, what is wrong with it pushed to `said`. `None` when it
 /// cannot be made at all.

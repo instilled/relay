@@ -426,6 +426,13 @@ questions or events; `throttle` collapses bursts; events older than five minutes
 Flows talk to each other only through events — Relay's own or `rl emit`'s (the daemon's own
 families are refused).
 
+**Parking** (`flows/park.rs`): `flow.park` puts a flow away without losing it. Refused while a
+firing of it is open, it renames the folder `_<name>` (`_<name>.2`, `.3`… while that is taken;
+nothing is overwritten), archives the flow's ended runs (cause `flow:<name>/`), takes its yes and
+reads the flows again. A `_` folder is parked: no flow can be called that, so it never loads, and
+`flow.parked` lists them. `flow.unpark` renames one back, refused while a flow has its name; it
+comes back needing a yes, even with its folder as it was.
+
 **`rl flow`**: `list`, `new <name> [words…] [--go]`, `edit`, `run`, `pause`, `resume`,
 `approve`, `test` (what would fire and which steps would run, starting nothing; `flows/
 preview.rs`), `reload`. Example flows to copy are in `examples/flows/`, held to the code by
