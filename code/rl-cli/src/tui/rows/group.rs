@@ -3,20 +3,18 @@
 use super::*;
 
 /// Whether a run's kind and cause let it onto the list, given the toggles.
-/// Not exclusive: a flow's agent step is both an agent and a flow's. A run
-/// that is none of agent, shell or flow is always shown; an agent run (by
-/// kind) when `show_agents`; a shell run (by kind) when `show_shells`; a
-/// flow's run (by cause) when `show_flows` — a run that is more than one shows
-/// when any of its toggles is on, each adding what it is for. Whether it is
-/// hidden is `build`'s to say. Questions ignore all of it: they are what needs you.
+/// A flow's run (by cause) is the flow's, whatever its kind: it shows when
+/// `show_flows`, and then only. Any other run: one that is neither agent nor
+/// shell is always shown; an agent run (by kind) when `show_agents`; a shell
+/// run (by kind) when `show_shells`. Whether it is hidden is `build`'s to say.
+/// Questions ignore all of it: they are what needs you.
 pub(crate) fn keeps(r: &Run, show_agents: bool, show_flows: bool, show_shells: bool) -> bool {
+    if matches!(r.cause, Cause::Flow { .. }) {
+        return show_flows;
+    }
     let is_agent = r.kind == RunKind::Agent;
-    let is_flow = matches!(r.cause, Cause::Flow { .. });
     let is_shell = r.is_shell();
-    (!is_agent && !is_flow && !is_shell)
-        || (is_agent && show_agents)
-        || (is_flow && show_flows)
-        || (is_shell && show_shells)
+    (!is_agent && !is_shell) || (is_agent && show_agents) || (is_shell && show_shells)
 }
 
 /// The group a flow's row stands in, as `(key, folder)`: the folder it is
@@ -122,6 +120,50 @@ pub fn chips(flows: &[Flow], scope: Option<&Path>, now: Timestamp) -> Vec<Chip> 
         .collect();
     out.sort_by(|a, b| b.needs_yes().cmp(&a.needs_yes()).then_with(|| a.name.cmp(&b.name)));
     out
+}
+
+/// The flows `in` one folder (`None`: those with no `in`), tallied from the digest.
+pub fn tally(flows: &[Flow], scope: Option<&Path>, d: &Digest) -> FlowTally {
+    let mut out = FlowTally::default();
+    for f in flows
+        .iter()
+        .filter(|f| f.removed_at.is_none() && f.folder.as_deref() == scope)
+    {
+        out.total += 1;
+        let live = |s| matches!(s, FiringStatus::Running | FiringStatus::Waiting);
+        out.running += usize::from(d.firings.iter().any(|g| g.flow == f.name && live(g.status)));
+        out.needs += usize::from(flow_needs(f, d));
+    }
+    out
+}
+
+/// Whether one flow needs you: it waits for a yes; a question is open from
+/// its firing or one of its runs; a run wants you; or a run failed unseen.
+pub fn flow_needs(f: &Flow, d: &Digest) -> bool {
+    let mine = |i: &&DigestItem| matches!(&i.run.cause, Cause::Flow { flow, .. } if *flow == f.name);
+    f.status() == FlowStatus::NeedsApproval
+        || d.items.iter().filter(mine).any(|i| match i.run.state {
+            RunState::NeedsInput | RunState::Blocked => true,
+            RunState::Failed => i.unseen && !got_past(f, i, d),
+            _ => false,
+        })
+        || d.decisions.iter().any(|q| {
+            firing_of(q, &d.firings).is_some_and(|g| g.flow == f.name)
+                || q.run
+                    .as_ref()
+                    .is_some_and(|id| d.items.iter().filter(mine).any(|i| &i.run.id == id))
+        })
+}
+
+/// Whether the flow has run well since a failed run of it: a later one that
+/// finished, by when it ended. With no flow rows, that is how a failure is let go.
+fn got_past(f: &Flow, failed: &DigestItem, d: &Digest) -> bool {
+    let when = |i: &DigestItem| i.run.ended_at.unwrap_or(i.at);
+    d.items.iter().any(|i| {
+        i.run.state == RunState::Finished
+            && matches!(&i.run.cause, Cause::Flow { flow, .. } if *flow == f.name)
+            && when(i) > when(failed)
+    })
 }
 
 /// Which flow an ended run folds into, if any.

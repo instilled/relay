@@ -328,8 +328,8 @@ impl App {
             return Ok(());
         }
         let k = vi_step(k, self.line.is_empty());
-        // On an empty line the list's own letters flip the toggles — `f`
-        // flows, `a` agents, `s` shells, `h` hidden — taken here, before the
+        // On an empty line the list's own letters flip the toggles — `a`
+        // agents, `s` shells, `h` hidden — taken here, before the
         // line editor would eat the character.
         if self.line.is_empty()
             && self.view == View::Work
@@ -338,10 +338,6 @@ impl App {
             && k.modifiers.is_empty()
         {
             match k.code {
-                KeyCode::Char('f') => {
-                    self.toggle_flows();
-                    return Ok(());
-                }
                 KeyCode::Char('a') => {
                     self.toggle_agents();
                     return Ok(());
@@ -1180,13 +1176,16 @@ impl App {
             },
             palette::Cmd::Flow => self.flow_command(&arg).await,
             palette::Cmd::Edit => {
-                // The flow under the cursor, by name — `/flow edit` without the
-                // name, opening its `flow.md` in `$EDITOR`.
-                if let Some(f) = self.selected_flow() {
+                // The flow named, else the one under the cursor (the catch-up's
+                // flow row) — `/flow edit`, opening its `flow.md` in `$EDITOR`.
+                let named = arg.trim();
+                if !named.is_empty() {
+                    self.edit_flow(named);
+                } else if let Some(f) = self.selected_flow() {
                     let name = f.name.clone();
                     self.edit_flow(&name);
                 } else {
-                    self.say("nothing here to edit · select a flow");
+                    self.say("nothing here to edit · name a flow: /edit <flow>");
                 }
             }
             palette::Cmd::New => self.new_run_form(),
@@ -1211,7 +1210,6 @@ impl App {
                     self.land();
                 }
             }
-            palette::Cmd::Flows => self.toggle_flows(),
             palette::Cmd::Agents => self.toggle_agents(),
             palette::Cmd::Shells => self.toggle_shells(),
             palette::Cmd::Hidden => self.toggle_hidden(),

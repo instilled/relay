@@ -48,8 +48,8 @@ pub struct Head {
     /// The name it goes by where that is not its folder's own — a ref, or a
     /// folder registered (or renamed) under another name.
     pub own: Option<String>,
-    /// The flows `in` that folder, needing a yes first, then by name.
-    pub flows: Vec<Chip>,
+    /// The flows `in` that folder, in three numbers.
+    pub tally: FlowTally,
     /// The folder's git checkout, when it is in one.
     pub checkout: Option<Checkout>,
     /// How many of the project's items need you but are off the list now —
@@ -66,7 +66,7 @@ impl Head {
             workspace: PathBuf::new(),
             name: EVERYWHERE.into(),
             own: None,
-            flows: Vec::new(),
+            tally: FlowTally::default(),
             checkout: None,
             attention: 0,
         }
@@ -75,6 +75,33 @@ impl Head {
     /// Whether this is the `everywhere` group, which has no folder to act on.
     pub fn is_everywhere(&self) -> bool {
         self.workspace.as_os_str().is_empty()
+    }
+}
+
+/// A project's flows in three numbers, as its line says them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FlowTally {
+    pub total: usize,
+    /// Those with a firing under way.
+    pub running: usize,
+    /// Those that want you: a yes, an answer, or a failure unseen.
+    pub needs: usize,
+}
+
+impl FlowTally {
+    /// `3 flows · 1 running · 1 needs you`; the zero parts left out; empty with no flows.
+    pub fn words(&self) -> String {
+        if self.total == 0 {
+            return String::new();
+        }
+        let mut s = format!("{} flow{}", self.total, if self.total == 1 { "" } else { "s" });
+        if self.running > 0 {
+            s.push_str(&format!(" · {} running", self.running));
+        }
+        if self.needs > 0 {
+            s.push_str(&format!(" · {} needs you", self.needs));
+        }
+        s
     }
 }
 

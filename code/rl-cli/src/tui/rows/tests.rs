@@ -189,8 +189,11 @@ fn head_of<'a>(rows: &'a [Row], name: &str) -> &'a Head {
         .expect("a project header")
 }
 
-/// The default toggles: flows and agents on, hidden off.
-const DEFAULT: (bool, bool, bool, bool) = (true, true, true, false);
+/// The list's toggles `(flows, agents, shells, hidden)`: no flows, the rest on, hidden off.
+const DEFAULT: (bool, bool, bool, bool) = (false, true, true, false);
+
+/// `DEFAULT` with the flows on, as the catch-up has them.
+const FLOWS_ON: (bool, bool, bool, bool) = (true, true, true, false);
 
 fn build_with<'a>(d: &'a Digest, names: &Names, filter: &str, now: Timestamp) -> Vec<Row<'a>> {
     toggles_build(d, names, &[], DEFAULT, filter, now)
@@ -200,9 +203,9 @@ fn lens_build<'a>(d: &'a Digest, names: &Names, t: (bool, bool, bool, bool), now
     toggles_build(d, names, &[], t, "", now)
 }
 
-/// The list as it stands with these flows loaded, at the default toggles.
+/// The list as the catch-up builds it, flows on, with these flows loaded.
 fn flows_build<'a>(d: &'a Digest, names: &Names, flows: &[Flow], filter: &str, now: Timestamp) -> Vec<Row<'a>> {
-    toggles_build(d, names, flows, DEFAULT, filter, now)
+    toggles_build(d, names, flows, FLOWS_ON, filter, now)
 }
 
 /// The list with the flows loaded and the toggles `(flows, agents, shells, hidden)`.
@@ -293,7 +296,7 @@ fn a_search_narrows_by_words_and_by_what_things_are() {
         (PathBuf::from(web), "web".to_string()),
         (PathBuf::from("/home/f/idle"), "idle".to_string()),
     ]);
-    let shown = |f: &str| keys(&build_with(&d, &names, f, now));
+    let shown = |f: &str| keys(&flows_build(&d, &names, &[], f, now));
     // Every word somewhere: the title and the project both count.
     assert_eq!(shown("login api"), ["[api]", "r:agent"]);
     assert_eq!(shown("login web"), Vec::<String>::new());
@@ -447,12 +450,78 @@ fn the_toggles_keep_a_run_by_what_it_is_or_what_started_it() {
     // the flow's steps stay — the agent step as a flow's, the shell step
     // as a shell.
     assert_eq!(runs((true, false, true, false)), ["shell", "probe", "onfail"]);
-    // Flows off, with agents and shells on, keeps everything: the agent
-    // step shows as an agent, the shell step as a shell.
-    assert_eq!(runs((false, true, true, false)), ["agent", "shell", "probe", "onfail"]);
-    // Shells off drops the plain shell and the flow's shell step; the
-    // agents — the lone one and the flow's step — stay.
-    assert_eq!(runs((false, true, false, false)), ["agent", "probe"]);
+    // Flows off drops both flow steps, however agents and shells are set:
+    // a flow's run is the flow's, whatever its kind.
+    assert_eq!(runs((false, true, true, false)), ["agent", "shell"]);
+    // Shells off drops the plain shell; the flow's steps are the flow's.
+    assert_eq!(runs((false, true, false, false)), ["agent"]);
+}
+
+#[test]
+fn with_flows_off_no_flow_run_nor_its_question_is_on_the_list() {
+    let now: Timestamp = "2026-09-10T12:00:00Z".parse().unwrap();
+    let ws = "/home/f/relay";
+    // A flow's agent step that is asking, a plain run, and the question.
+    let mut a1 = fired("a1", "pulse", RunState::NeedsInput, "2026-09-10T11:00:00Z", true);
+    a1.run.kind = RunKind::Agent;
+    let mut d = digest(
+        now,
+        vec![a1, item("w", RunState::Working, ws, "2026-09-10T11:01:00Z", false)],
+        vec![],
+    );
+    d.decisions = vec![question("q1", ws, Some("a1"), "2026-09-10T11:02:00Z")];
+    let names = Names::new([(PathBuf::from(ws), "relay".to_string())]);
+    let flows = [flow("pulse", Some(ws))];
+    let rows = toggles_build(&d, &names, &flows, (false, true, true, false), "", now);
+    assert_eq!(keys(&rows), ["[relay]", "r:w"]);
+}
+
+#[test]
+fn with_flows_off_a_pinned_or_come_through_flow_run_is_not_in_the_band() {
+    let now: Timestamp = "2026-09-10T12:00:00Z".parse().unwrap();
+    let ws = "/home/f/relay";
+    let mut pinned = fired("pin", "pulse", RunState::Finished, "2026-09-10T11:00:00Z", false);
+    pinned.run.pinned_at = Some("2026-09-10T11:05:00Z".parse().unwrap());
+    // Hidden earlier, since failed: it would come through.
+    let mut back = fired("back", "pulse", RunState::Failed, "2026-09-10T11:30:00Z", true);
+    back.run.hidden_at = Some("2026-09-10T10:00:00Z".parse().unwrap());
+    // A live pinned one too: not terminal, so `flow_of` does not know it.
+    let mut live = fired("live", "pulse", RunState::NeedsInput, "2026-09-10T11:40:00Z", true);
+    live.run.pinned_at = Some("2026-09-10T11:45:00Z".parse().unwrap());
+    let d = digest(now, vec![pinned, back, live], vec![]);
+    let names = Names::new([(PathBuf::from(ws), "relay".to_string())]);
+    let flows = [flow("pulse", Some(ws))];
+    let on = keys(&toggles_build(&d, &names, &flows, (true, true, true, false), "", now));
+    for k in ["r:pin", "r:back", "r:live"] {
+        assert!(on.contains(&k.to_string()), "{on:?}");
+    }
+    let off = keys(&toggles_build(&d, &names, &flows, (false, true, true, false), "", now));
+    assert!(
+        !off.iter().any(|k| ["r:pin", "r:back", "r:live"].contains(&k.as_str())),
+        "{off:?}"
+    );
+}
+
+#[test]
+fn with_flows_off_a_flow_run_that_needs_you_is_not_hinted_on_its_project() {
+    let now: Timestamp = "2026-09-10T12:00:00Z".parse().unwrap();
+    let ws = "/home/f/relay";
+    let asking = fired("a1", "pulse", RunState::NeedsInput, "2026-09-10T11:00:00Z", true);
+    let mut hid_ = fired("a2", "pulse", RunState::NeedsInput, "2026-09-10T11:10:00Z", true);
+    hid_.run.hidden_at = Some("2026-09-10T11:20:00Z".parse().unwrap());
+    let d = digest(
+        now,
+        vec![
+            asking,
+            hid_,
+            item("w", RunState::Working, ws, "2026-09-10T11:01:00Z", false),
+        ],
+        vec![],
+    );
+    let names = Names::new([(PathBuf::from(ws), "relay".to_string())]);
+    let flows = [flow("pulse", Some(ws))];
+    let rows = toggles_build(&d, &names, &flows, (false, true, true, false), "", now);
+    assert_eq!(head_of(&rows, "relay").attention, 0);
 }
 
 #[test]
@@ -812,20 +881,20 @@ fn a_question_stands_in_its_project_and_projects_go_by_name() {
         ["[api]", "r:work1", "r:blok1", "[relay]", "r:done1", "r:fail1", "q:q1"],
         "projects by name, however urgent; rows as they came; the question under its run; api is named by its folder; old01 is gone"
     );
-    assert_eq!(counts(&rows), (1, 2, 1, 1, 0));
+    assert_eq!(counts(&rows), (1, 2, 1, 1));
     match &rows[3] {
         Row::Group(h) => assert_eq!((h.name.as_str(), h.place.as_str()), ("relay", "/home/f/relay")),
         _ => panic!("relay's header"),
     }
     assert_eq!(
-        headline(&rows, 2, ""),
+        headline(&rows, 2, "", 0),
         "relay · 1 to decide · 2 need you · 1 working · 1 finished · 2 new"
     );
 
     let rows = build_with(&d, &names, "api", now);
     assert_eq!(keys(&rows), ["[api]", "r:work1", "r:blok1"]);
-    assert_eq!(headline(&rows, 0, "api"), "relay · 1 needs you · 1 working · ⌕ api");
-    assert_eq!(headline(&[], 0, ""), "relay · nothing running");
+    assert_eq!(headline(&rows, 0, "api", 0), "relay · 1 needs you · 1 working · ⌕ api");
+    assert_eq!(headline(&[], 0, "", 0), "relay · nothing running");
 }
 
 #[test]
@@ -888,7 +957,7 @@ fn with_no_runs_and_no_folders_the_list_is_empty() {
     let flows = [flow("pulse", None)];
     let rows = flows_build(&d, &Names::default(), &flows, "", now);
     assert_eq!(keys(&rows), ["[everywhere]", "f:pulse"]);
-    assert_eq!(headline(&rows, 0, ""), "relay · nothing running");
+    assert_eq!(headline(&rows, 0, "", 0), "relay · nothing running");
 }
 
 /// The list's digest: these runs and firings, and nothing else.
@@ -907,9 +976,115 @@ fn digest(now: Timestamp, items: Vec<DigestItem>, firings: Vec<Firing>) -> Diges
 }
 
 #[test]
+fn a_flow_tally_in_words() {
+    let t = |total, running, needs| FlowTally { total, running, needs }.words();
+    assert_eq!(t(3, 1, 1), "3 flows · 1 running · 1 needs you");
+    assert_eq!(t(1, 0, 0), "1 flow");
+    assert_eq!(t(2, 0, 2), "2 flows · 2 needs you");
+    assert_eq!(t(0, 0, 0), "");
+}
+
+#[test]
+fn a_project_line_tallies_its_flows_and_what_needs_you() {
+    let now: Timestamp = "2026-09-10T12:00:00Z".parse().unwrap();
+    let relay = "/home/f/relay";
+    let flows = vec![
+        flow("a", Some(relay)),
+        Flow {
+            approved_hash: None,
+            ..flow("b", Some(relay))
+        },
+        flow("c", Some(relay)),
+        flow("x", None),
+    ];
+    let running = Firing {
+        flow: "a".into(),
+        ..firing(FiringStatus::Running, &[])
+    };
+    let failed = |unseen| fired("c1", "c", RunState::Failed, "2026-09-10T11:00:00Z", unseen);
+    let names = Names::new([(relay.into(), "relay".to_string())]);
+    let tally_of = |items: Vec<DigestItem>, decisions: Vec<Decision>| {
+        let mut d = digest(now, items, vec![running.clone()]);
+        d.decisions = decisions;
+        let rows = toggles_build(&d, &names, &flows, (false, true, true, false), "", now);
+        head_of(&rows, "relay").tally
+    };
+    assert_eq!(
+        tally_of(vec![failed(true)], vec![]),
+        FlowTally {
+            total: 3,
+            running: 1,
+            needs: 2
+        }
+    );
+    assert_eq!(tally_of(vec![failed(false)], vec![]).needs, 1);
+    let asked = question("q1", relay, Some("c1"), "2026-09-10T11:30:00Z");
+    assert_eq!(tally_of(vec![failed(false)], vec![asked]).needs, 2);
+
+    // A failure the flow has since got past (a later run ended well) no longer lights the line.
+    let well = fired("c2", "c", RunState::Finished, "2026-09-10T11:30:00Z", false);
+    assert_eq!(tally_of(vec![failed(true), well], vec![]).needs, 1);
+    let before = fired("c0", "c", RunState::Finished, "2026-09-10T10:30:00Z", false);
+    assert_eq!(
+        tally_of(vec![before, failed(true)], vec![]).needs,
+        2,
+        "an older good run does not"
+    );
+
+    // Each of these puts a flow in needs on its own.
+    let needs = |name: &str, items: Vec<DigestItem>, decisions: Vec<Decision>, firings: Vec<Firing>| {
+        let mut d = digest(now, items, firings);
+        d.decisions = decisions;
+        flow_needs(&flow(name, Some(relay)), &d)
+    };
+    let nothing = || needs("d", vec![], vec![], vec![]);
+    assert!(!nothing(), "nothing open, nothing needed");
+    let firing_d = Firing {
+        id: "fi9".into(),
+        flow: "d".into(),
+        ..firing(FiringStatus::Waiting, &[])
+    };
+    let ask = question("fi9", relay, None, "2026-09-10T11:30:00Z");
+    assert!(
+        needs("d", vec![], vec![ask], vec![firing_d]),
+        "a question owned by its firing"
+    );
+    let at = "2026-09-10T11:00:00Z";
+    let asking = fired("d1", "d", RunState::NeedsInput, at, false);
+    assert!(needs("d", vec![asking], vec![], vec![]), "a run asking");
+    let blocked = fired("d1", "d", RunState::Blocked, at, false);
+    assert!(needs("d", vec![blocked], vec![], vec![]), "a run blocked");
+}
+
+#[test]
+fn the_headline_counts_a_flow_that_needs_you() {
+    let now: Timestamp = "2026-09-10T12:00:00Z".parse().unwrap();
+    let mut d = digest(
+        now,
+        vec![],
+        vec![Firing {
+            id: "fi9".into(),
+            flow: "pulse".into(),
+            ..firing(FiringStatus::Waiting, &[])
+        }],
+    );
+    d.decisions = vec![question("fi9", "/home/f/relay", None, "2026-09-10T11:30:00Z")];
+    let flows = [flow("pulse", None), flow("nightly", Some("/home/f/relay"))];
+    let n = flows_need(&flows, &d);
+    assert_eq!(n, 1);
+    assert_eq!(headline(&[], 0, "", n), "relay · 1 needs you");
+    assert_eq!(headline(&[], 0, "", 0), "relay · nothing running");
+    // Beside the rest that needs you, it is one more.
+    let q = question("q", "/w", None, "2026-09-10T11:30:00Z");
+    let rows = [Row::Question(&q)];
+    assert_eq!(headline(&rows, 0, "", 2), "relay · 1 to decide · 2 need you");
+}
+
+#[test]
 fn the_headline_says_the_flows_with_no_in_and_a_yes_they_wait_for() {
     let now: Timestamp = "2026-09-10T12:00:00Z".parse().unwrap();
-    let say = |flows: &[Flow]| everywhere(&chips(flows, None, now));
+    let d = digest(now, vec![], vec![]);
+    let say = |flows: &[Flow]| everywhere(flows, &d);
     let (pulse, nightly, notify) = (flow("pulse", None), flow("nightly", None), flow("notify", None));
     let waiting = Flow {
         approved_hash: None,
@@ -922,21 +1097,40 @@ fn the_headline_says_the_flows_with_no_in_and_a_yes_they_wait_for() {
         say(&[pulse.clone(), nightly.clone(), notify.clone()]),
         Some(("↻ 3 everywhere".into(), false))
     );
-    // One waiting, and it is all there is: the count already says which.
     assert_eq!(
         say(std::slice::from_ref(&waiting)),
-        Some(("↻ 1 everywhere needs a yes · /flow approve".into(), true))
+        Some(("↻ 1 everywhere · deploy needs you".into(), true))
     );
+    let all = say(&[pulse, nightly, notify, waiting]).unwrap();
+    assert_eq!(all, ("↻ 4 everywhere · deploy needs you".into(), true));
+    assert!(!all.0.contains("/flow approve"));
+}
+
+#[test]
+fn the_headline_names_the_one_flow_with_no_in_that_needs_you() {
+    let now: Timestamp = "2026-09-10T12:00:00Z".parse().unwrap();
+    let d = digest(now, vec![], vec![]);
+    let waiting = |n: &str| Flow {
+        approved_hash: None,
+        ..flow(n, None)
+    };
+    let say = |flows: &[Flow]| everywhere(flows, &d).unwrap();
     assert_eq!(
-        say(&[pulse, nightly, notify, waiting]),
-        Some(("↻ 4 everywhere · 1 needs a yes · /flow approve".into(), true))
+        say(&[flow("nightly", None), waiting("pulse")]),
+        ("↻ 2 everywhere · pulse needs you".into(), true)
+    );
+    // With more than one, the count.
+    assert_eq!(
+        say(&[waiting("pulse"), waiting("deploy")]),
+        ("↻ 2 everywhere · 2 needs you".into(), true)
     );
 }
 
 #[test]
 fn the_headline_says_a_flow_did_not_load_beside_them() {
     let now: Timestamp = "2026-09-10T12:00:00Z".parse().unwrap();
-    let parts = |flows: &[Flow], broken| global_parts(&chips(flows, None, now), broken);
+    let d = digest(now, vec![], vec![]);
+    let parts = |flows: &[Flow], broken| global_parts(flows, &d, broken);
     let flows = [flow("pulse", None), flow("nightly", None)];
     assert_eq!(parts(&flows, false), [("↻ 2 everywhere".to_string(), Tone::Plain)]);
     assert_eq!(
@@ -1012,11 +1206,8 @@ fn a_flows_runs_are_one_row() {
     );
     assert_eq!(f.marks(31).chars().filter(|c| *c == '×').count(), 1);
     assert!(f.marks(31).starts_with('×'), "oldest first: {}", f.marks(31));
-    assert_eq!(counts(&rows), (0, 0, 1, 1, 1));
-    assert_eq!(
-        headline(&rows, 1, ""),
-        "relay · 1 working · 1 finished · 1 flow · 1 new"
-    );
+    assert_eq!(counts(&rows), (0, 0, 1, 1));
+    assert_eq!(headline(&rows, 1, "", 0), "relay · 1 working · 1 finished · 1 new");
 
     // Never opened: whatever happens, a flow is one row.
     let opened_rows = flows_build(&d, &names, &flows, "", now);
@@ -1042,7 +1233,7 @@ fn a_flows_runs_are_one_row() {
         ["[relay]", "r:w", "f:pulse"],
         "failed, it still stands under the runs"
     );
-    assert_eq!(counts(&rows), (0, 1, 1, 0, 1));
+    assert_eq!(counts(&rows), (0, 1, 1, 0));
 }
 
 #[test]
@@ -1202,7 +1393,7 @@ fn a_flow_with_a_yes_has_its_row_before_it_ever_fired() {
     assert!(f.runs.is_empty() && f.last().is_none());
     assert_eq!(flows::stands(f, flows.first(), now), "every 30m · next in 12m");
     assert_eq!(f.marks(10), "");
-    assert_eq!(counts(&rows), (0, 0, 0, 0, 0));
+    assert_eq!(counts(&rows), (0, 0, 0, 0));
 
     // Paused, or changed since its yes, it says so.
     let says = |x: Flow| {
@@ -1537,7 +1728,7 @@ fn a_groups_header_carries_the_flows_in_its_folder() {
         flows_build(&d, &names, flows, "", now)
             .iter()
             .map(|r| match r {
-                Row::Group(h) => format!("[{}] {}", h.name, texts(&h.flows).join(" · ")),
+                Row::Group(h) => format!("[{}] {}", h.name, h.tally.words()),
                 other => other.key().unwrap(),
             })
             .collect::<Vec<_>>()
@@ -1545,9 +1736,9 @@ fn a_groups_header_carries_the_flows_in_its_folder() {
     assert_eq!(
         build_flows(&flows),
         [
-            "[api] ↻ elsewhere",
+            "[api] 1 flow",
             "f:elsewhere",
-            "[relay] ! deploy · ↻ nightly 4h · ↻ tests-failed · ↻ tidy paused",
+            "[relay] 4 flows · 1 needs you",
             "r:work1",
             "f:deploy",
             "f:nightly",
@@ -1802,7 +1993,7 @@ fn a_flows_runs_outside_every_project_are_everywhere() {
 
     // A flow not loaded now leaves its row everywhere: where it is `in`
     // is not known. A run by hand keeps its folder.
-    let bare = keys(&build_with(&d, &names, "", now));
+    let bare = keys(&flows_build(&d, &names, &[], "", now));
     let at = |k: &str| {
         bare.iter()
             .position(|x| x == k)
@@ -1975,7 +2166,7 @@ fn a_question_stands_under_the_run_that_asked_it() {
             "[api]", "r:there", "[relay]", "r:one", "r:two", "q:q1", "r:three", "r:four", "q:q0", "[web]", "q:q2"
         ]
     );
-    assert_eq!(counts(&rows), (3, 1, 3, 1, 0));
+    assert_eq!(counts(&rows), (3, 1, 3, 1));
     // In your order, it goes where its run goes.
     let (d, names) = asked(kept(&["r:two", "r:one", "r:three", "r:four"]));
     let rows = build_with(&d, &names, "", now);
@@ -2081,7 +2272,7 @@ fn a_project_moves_up_and_down_among_the_projects_and_keeps_its_place() {
         Names::new(all)
     };
     let heads = |d: &Digest, names: &Names| -> Vec<String> {
-        keys(&build_with(d, names, "", now))
+        keys(&flows_build(d, names, &[], "", now))
             .into_iter()
             .filter(|k| k.starts_with('['))
             .collect()
@@ -2089,7 +2280,7 @@ fn a_project_moves_up_and_down_among_the_projects_and_keeps_its_place() {
     let three = names(&[]);
     // By name until you move one.
     assert_eq!(heads(&d, &three), ["[api]", "[relay]", "[web]", "[everywhere]"]);
-    let rows = build_with(&d, &three, "", now);
+    let rows = flows_build(&d, &three, &[], "", now);
     let mv = |key: &str, up: bool| reorder(&rows, &rows, &d.order, key, up);
     assert_eq!(
         mv(relay, true),
@@ -2113,7 +2304,7 @@ fn a_project_moves_up_and_down_among_the_projects_and_keeps_its_place() {
         rows: [relay, api, web].map(String::from).to_vec(),
     }];
     assert_eq!(
-        keys(&build_with(&d, &three, "", now)),
+        keys(&flows_build(&d, &three, &[], "", now)),
         [
             "[relay]",
             "r:one",
@@ -2135,20 +2326,23 @@ fn a_project_moves_up_and_down_among_the_projects_and_keeps_its_place() {
         ["[relay]", "[api]", "[web]", "[aaa]", "[everywhere]"]
     );
     // Moving builds on the order kept, and takes the new one into it.
-    let rows = build_with(&d, &four_of, "", now);
+    let rows = flows_build(&d, &four_of, &[], "", now);
     assert_eq!(
         reorder(&rows, &rows, &d.order, "g:/home/f/aaa", true).unwrap().rows,
         [relay, api, "g:/home/f/aaa", web]
     );
     // One the list does not show now — hidden, or gone — keeps its place.
     d.order[0].rows.insert(1, "g:/home/f/gone".into());
-    let rows = build_with(&d, &three, "", now);
+    let rows = flows_build(&d, &three, &[], "", now);
     assert_eq!(
         reorder(&rows, &rows, &d.order, api, true).unwrap().rows,
         [api, relay, "g:/home/f/gone", web]
     );
     // A search that leaves projects out moves among what it shows.
-    let (shown, full) = (build_with(&d, &three, "in:web", now), build_with(&d, &three, "", now));
+    let (shown, full) = (
+        flows_build(&d, &three, &[], "in:web", now),
+        flows_build(&d, &three, &[], "", now),
+    );
     assert_eq!(
         reorder(&shown, &full, &d.order, web, true),
         Err("already the first project")
@@ -2350,8 +2544,8 @@ fn agents_own_sessions_stand_with_runs_in_the_order_they_came() {
     // Those that need you say so where they stand.
     assert!(wants_you(&rows[2]) && wants_you(&rows[4]) && !wants_you(&rows[5]));
     // The headline counts them as runs: two need you, one works.
-    assert_eq!(counts(&rows), (0, 2, 2, 1, 0));
-    assert_eq!(headline(&rows, 0, ""), "relay · 2 need you · 2 working · 1 finished");
+    assert_eq!(counts(&rows), (0, 2, 2, 1));
+    assert_eq!(headline(&rows, 0, "", 0), "relay · 2 need you · 2 working · 1 finished");
 }
 
 #[test]

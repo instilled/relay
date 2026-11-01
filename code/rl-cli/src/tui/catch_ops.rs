@@ -154,6 +154,12 @@ impl App {
         let Some(row) = self.selected() else {
             return self.say("nothing here to open");
         };
+        // The list has no flow rows: a flow goes to its project's line.
+        if let Row::Flow(f) = &row {
+            let name = f.name.clone();
+            drop(row);
+            return self.show_flow(&name).await;
+        }
         let key = row.key();
         let run = row.item().map(|i| i.run.id.clone());
         let what = match &row {
