@@ -2,6 +2,7 @@
 //! `+ new flow` last; `esc` goes back to the line. A real `rld` over a fresh home.
 
 use super::flow_tests::{fired, flow_in};
+use super::overview::Scope;
 use super::tests::{draw_text, panel, press, type_in};
 use super::{NEW_FLOW, View};
 use crossterm::event::{KeyCode, KeyModifiers};
@@ -64,9 +65,9 @@ async fn everywheres_overview_has_the_flows_with_no_in() {
     flow_in(&tmp, &mut app, "loose", "---\nsteps:\n  probe:\n    run: x\n---\n").await;
     flow_in(&tmp, &mut app, "homed", &md_in(&folder)).await;
     app.refresh().await;
-    // The list has no `everywhere` line with flows off: its overview is opened as a flow found
-    // elsewhere opens it.
-    app.open_overview(super::overview::Scope::Everywhere, None);
+    app.select(Some("g:everywhere".into()));
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+    assert_eq!(app.overview, Some(Scope::Everywhere));
     assert!(app.view == View::Overview);
     assert_eq!(app.keys(), ["f:loose", NEW_FLOW]);
     token.cancel();
@@ -185,5 +186,121 @@ async fn the_flow_under_the_cursor_going_away_moves_the_cursor() {
     app.flows.clear();
     app.settle();
     assert_eq!(app.sel.as_deref(), Some(NEW_FLOW));
+    token.cancel();
+}
+
+#[tokio::test]
+async fn enter_on_a_flow_opens_its_page_and_esc_comes_back_to_the_overview() {
+    let (tmp, token, mut app, folder) = panel().await;
+    flow_in(&tmp, &mut app, "alpha", &md_in(&folder)).await;
+    app.refresh().await;
+    enter_project(&mut app, &folder).await;
+    app.select(Some("f:alpha".into()));
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+    assert!(app.show_pane, "its page");
+    press(&mut app, KeyCode::Esc, KeyModifiers::NONE).await;
+    assert!(!app.show_pane && app.view == View::Overview, "back in the overview");
+    assert_eq!(app.sel.as_deref(), Some("f:alpha"));
+    press(&mut app, KeyCode::Esc, KeyModifiers::NONE).await;
+    assert!(app.view == View::Work);
+    assert_eq!(app.sel, Some(format!("g:{}", folder.display())));
+    token.cancel();
+}
+
+#[tokio::test]
+async fn enter_on_new_flow_puts_flow_new_on_the_line() {
+    let (_tmp, token, mut app, folder) = panel().await;
+    enter_project(&mut app, &folder).await;
+    assert!(app.on_new_flow());
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+    assert_eq!(app.line.text(), "/flow new ");
+    token.cancel();
+}
+
+#[tokio::test]
+async fn ctrl_e_on_a_flow_opens_its_file() {
+    let (tmp, token, mut app, folder) = panel().await;
+    flow_in(&tmp, &mut app, "alpha", &md_in(&folder)).await;
+    app.refresh().await;
+    enter_project(&mut app, &folder).await;
+    app.select(Some("f:alpha".into()));
+    press(&mut app, KeyCode::Char('e'), KeyModifiers::CONTROL).await;
+    let (editing, _) = app.editor.take().expect("the editor is next");
+    let file = rl_core::Home::at(tmp.path().join("h"))
+        .flow_dir("alpha")
+        .join("flow.md");
+    assert_eq!((editing.name.as_str(), &editing.file), ("alpha", &file));
+    token.cancel();
+}
+
+#[tokio::test]
+async fn show_flow_opens_its_projects_overview_on_it() {
+    let (tmp, token, mut app, folder) = panel().await;
+    flow_in(&tmp, &mut app, "alpha", &md_in(&folder)).await;
+    flow_in(&tmp, &mut app, "zulu", &md_in(&folder)).await;
+    app.refresh().await;
+    app.toggle_events().await;
+    assert!(app.view == View::Events);
+    app.show_flow("zulu").await;
+    assert!(app.view == View::Overview);
+    assert_eq!(app.overview, Some(Scope::Project(folder.clone())));
+    assert_eq!(app.sel.as_deref(), Some("f:zulu"));
+    // esc: the list, on the project's line.
+    press(&mut app, KeyCode::Esc, KeyModifiers::NONE).await;
+    assert!(app.view == View::Work);
+    assert_eq!(app.sel, Some(format!("g:{}", folder.display())));
+    // A search that hides it there lets go.
+    app.toggle_events().await;
+    app.filter_aside = "zzzz".into();
+    app.show_flow("zulu").await;
+    assert!(app.view == View::Overview);
+    assert!(app.filter.is_empty(), "the search let go: {:?}", app.filter);
+    assert_eq!(app.sel.as_deref(), Some("f:zulu"));
+    token.cancel();
+}
+
+#[tokio::test]
+async fn show_flow_for_a_flow_with_no_in_opens_everywhere() {
+    let (tmp, token, mut app, folder) = panel().await;
+    flow_in(&tmp, &mut app, "loose", "---\nsteps:\n  probe:\n    run: x\n---\n").await;
+    flow_in(&tmp, &mut app, "homed", &md_in(&folder)).await;
+    app.refresh().await;
+    app.toggle_events().await;
+    app.show_flow("loose").await;
+    assert!(app.view == View::Overview);
+    assert_eq!(app.overview, Some(Scope::Everywhere));
+    assert_eq!(app.sel.as_deref(), Some("f:loose"));
+    token.cancel();
+}
+
+#[tokio::test]
+async fn the_everywhere_line_stands_when_a_flow_has_no_in_and_enter_opens_its_overview() {
+    let (tmp, token, mut app, folder) = panel().await;
+    let everywhere = "g:everywhere".to_string();
+    flow_in(&tmp, &mut app, "homed", &md_in(&folder)).await;
+    app.refresh().await;
+    assert!(!app.keys().contains(&everywhere), "no flow with no in: no line");
+    flow_in(&tmp, &mut app, "loose", "---\nsteps:\n  probe:\n    run: x\n---\n").await;
+    app.refresh().await;
+    assert!(app.keys().contains(&everywhere), "{:?}", app.keys());
+    // Its tally at the edge: loose waits for its yes.
+    let line = super::tests::screen(&mut app, 120, 40)
+        .into_iter()
+        .find(|l| l.starts_with("everywhere"))
+        .expect("its line");
+    assert!(line.contains("1 flow · 1 needs you"), "{line}");
+    // The headline does not say them twice; with the line searched away, it says them.
+    let named = "↻ 1 everywhere · loose needs you";
+    assert!(!draw_text(&mut app).contains(named));
+    app.filter = "zzzz".into();
+    assert!(draw_text(&mut app).contains(named), "{}", draw_text(&mut app));
+    app.filter.clear();
+    app.select(Some(everywhere.clone()));
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+    assert!(app.view == View::Overview);
+    assert_eq!(app.overview, Some(Scope::Everywhere));
+    assert_eq!(app.keys(), ["f:loose", NEW_FLOW]);
+    press(&mut app, KeyCode::Esc, KeyModifiers::NONE).await;
+    assert_eq!(app.sel, Some(everywhere));
     token.cancel();
 }

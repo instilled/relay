@@ -524,12 +524,26 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
     };
     blocks.sort_by_cached_key(|(name, key, block)| (place(block).unwrap_or(usize::MAX), name.clone(), key.clone()));
     rows.extend(blocks.into_iter().flat_map(|(_, _, block)| block));
-    // The flows with no `in` are said in the headline (`everywhere`). Their
-    // rows, and what flows ran outside every project, are gathered after the
-    // projects, under one `everywhere`, rather than under whatever folder that
-    // was — all of it flow content, so only when flows are on.
+    // The flows with no `in` are `everywhere`'s, and its line, after the
+    // projects, tallies them as a project's line does its own. Their rows, and
+    // what flows ran outside every project, are gathered under it rather than
+    // under whatever folder that was — all of it flow content, so only when
+    // flows are on. With them off the line stands alone, while there is a
+    // flow with no `in`, unless it is hidden or a search takes it away.
+    let loose = tally(cx.flows, None, d);
     if cx.show_flows {
+        if let Some(Row::Group(h)) = everywhere.first_mut() {
+            h.tally = loose;
+        }
         rows.extend(everywhere);
+    } else if loose.total > 0
+        && (cx.show_hidden || !hidden_heads.contains(&EVERYWHERE))
+        && query.hits_project(&[EVERYWHERE], None)
+    {
+        rows.push(Row::Group(Head {
+            tally: loose,
+            ..Head::everywhere()
+        }));
     }
     rows
 }

@@ -21,6 +21,22 @@ impl Scope {
         }
     }
 
+    /// The scope a flow is in: its project, or `everywhere` with no `in`.
+    pub(super) fn of(flow: &Flow) -> Self {
+        match &flow.folder {
+            Some(p) => Scope::Project(p.clone()),
+            None => Scope::Everywhere,
+        }
+    }
+
+    /// The key of its line on the list.
+    pub(super) fn line_key(&self) -> String {
+        match self {
+            Scope::Project(p) => format!("g:{}", p.display()),
+            Scope::Everywhere => format!("g:{}", rows::EVERYWHERE),
+        }
+    }
+
     /// Whether `h` is this scope's line on the list.
     fn is(&self, h: &rows::Head) -> bool {
         match self {
@@ -51,6 +67,14 @@ impl App {
             .or_else(|| keys.first().cloned())
             .unwrap_or_else(|| NEW_FLOW.to_string());
         self.select(Some(at));
+    }
+
+    /// Back from the overview to the list, on the line it was opened from.
+    pub(super) async fn leave_overview(&mut self) {
+        self.overview = None;
+        self.go_back();
+        self.settle();
+        self.load_pane().await;
     }
 
     /// The overview's rows: its project's flows, each followed by its open questions. Those

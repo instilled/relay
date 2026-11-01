@@ -243,8 +243,10 @@ sequenceDiagram
 - **The list** (`tui/rows.rs`) is one column: pinned runs, then projects (registered folders,
   shown before anything runs there), each holding its runs and agents' own sessions in the order
   they came; a question sits under the run that asked it. Flows are not on the list: the project
-  line tallies them (how many, how many running, and in amber the ones that need you), and the
-  headline tallies those with no `in` (`↻ 2 everywhere`) and counts every flow that needs you. Rows never move by themselves; `⇧↑↓` reorders the
+  line tallies them (how many, how many running, and in amber the ones that need you), an
+  `everywhere` line after the projects tallies those with no `in`, and the headline counts every
+  flow that needs you. `enter` on a project's line (or `everywhere`'s) opens its overview
+  (`tui/overview.rs`): its flows as rows, each opening its page, and `+ new flow`. Rows never move by themselves; `⇧↑↓` reorders the
   runs, kept in `row_order` via `digest.order`. Toggles (`a` agents, `s` shells, `h` hidden) and a
   search (`tui/query.rs`, words plus `in: is: kind: by: on:` tokens) narrow it.
 - **The line** (`tui/line.rs`) always takes typing. A first word naming an agent starts that
