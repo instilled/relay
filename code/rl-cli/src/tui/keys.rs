@@ -684,6 +684,12 @@ impl App {
                     // A step back within the inbox.
                 } else if self.view == View::CatchUp || self.view == View::Report {
                     self.back_to_list().await;
+                } else if self.view == View::Overview {
+                    // Back to the project's line it was opened from.
+                    self.overview = None;
+                    self.go_back();
+                    self.settle();
+                    self.load_pane().await;
                 }
             }
             (KeyCode::Down, _) => {
@@ -761,11 +767,16 @@ impl App {
             // pane first. The pane is still a `^o`/`/pane` away.
             let s = s.clone();
             self.enter_outside(&s, area).await;
-        } else if matches!(self.selected(), Some(Row::Group(_))) {
-            // A project header: its flows there; `everywhere`'s, the flows with no `in` and how
-            // runs outside every project stand.
-            self.pane = Pane::Facts;
-            self.show_pane = true;
+        } else if let Some(Row::Group(h)) = self.selected() {
+            // A project's line: its overview, its flows under what was said of it; `everywhere`'s,
+            // the flows with no `in`.
+            let scope = if h.is_everywhere() {
+                overview::Scope::Everywhere
+            } else {
+                overview::Scope::Project(h.workspace.clone())
+            };
+            self.open_overview(scope, None);
+            self.moved().await;
         } else {
             self.say("nothing here to open");
         }

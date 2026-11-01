@@ -475,7 +475,9 @@ impl App {
         match self.view {
             View::Work => {}
             View::Events => return self.say("⇧↑↓ moves rows on the list · events stay in the order they came"),
-            View::CatchUp | View::Report => return self.say("⇧↑↓ moves rows on the list · esc goes there"),
+            View::CatchUp | View::Report | View::Overview => {
+                return self.say("⇧↑↓ moves rows on the list · esc goes there");
+            }
         }
         if self.show_hidden {
             self.say("with hidden on the list keeps its order · move it with hidden off");

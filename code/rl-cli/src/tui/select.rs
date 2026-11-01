@@ -59,6 +59,12 @@ impl App {
             View::Work => self.rows().into_iter().filter_map(|r| r.key()).collect(),
             View::Events => self.event_items().iter().flat_map(|i| i.keys()).collect(),
             View::Report => Vec::new(),
+            View::Overview => self
+                .overview_rows()
+                .into_iter()
+                .filter_map(|r| r.key())
+                .chain(std::iter::once(NEW_FLOW.to_string()))
+                .collect(),
             View::CatchUp => self
                 .lead_keys()
                 .into_iter()
@@ -107,6 +113,11 @@ impl App {
                 .unzip(),
             View::CatchUp => self
                 .catch_rows()
+                .iter()
+                .map(|r| (r.key(), rows::named(r, &self.digest, &self.names, &self.flows)))
+                .unzip(),
+            View::Overview => self
+                .overview_rows()
                 .iter()
                 .map(|r| (r.key(), rows::named(r, &self.digest, &self.names, &self.flows)))
                 .unzip(),
@@ -162,6 +173,7 @@ impl App {
         let rows = match self.view {
             View::Work => self.rows(),
             View::CatchUp => self.catch_rows(),
+            View::Overview => self.overview_rows(),
             View::Events | View::Report => return None,
         };
         let key = self.sel.as_ref()?;
@@ -190,7 +202,7 @@ impl App {
     /// or in the catch-up.
     pub(super) fn question_here(&self) -> Option<&Decision> {
         match self.view {
-            View::Work | View::CatchUp => self.selected_question(),
+            View::Work | View::CatchUp | View::Overview => self.selected_question(),
             View::Events | View::Report => None,
         }
     }

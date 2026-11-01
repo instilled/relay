@@ -240,6 +240,7 @@ impl App {
             title,
             deep,
             from,
+            since: Instant::now(),
             task,
         });
     }

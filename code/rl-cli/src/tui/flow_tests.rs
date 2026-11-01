@@ -9,7 +9,7 @@ use rl_proto::types::SummaryTarget;
 use std::path::Path;
 
 /// The flow `name` written into the panel's home as `md`, and read.
-async fn flow_in(tmp: &tempfile::TempDir, app: &mut super::App, name: &str, md: &str) {
+pub(super) async fn flow_in(tmp: &tempfile::TempDir, app: &mut super::App, name: &str, md: &str) {
     let dir = rl_core::Home::at(tmp.path().join("h")).flow_dir(name);
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("flow.md"), md).unwrap();
@@ -19,7 +19,7 @@ async fn flow_in(tmp: &tempfile::TempDir, app: &mut super::App, name: &str, md: 
 /// A firing `id` of `flow` from an hour ago, as the engine leaves one: each step `(name, status,
 /// what its run printed)` — a step that printed has a run, started and ended, in `folder`, its
 /// chain the firing's — and the firing `status`, ended unless it still runs or waits.
-fn fired(
+pub(super) fn fired(
     tmp: &tempfile::TempDir,
     folder: &Path,
     flow: &str,

@@ -216,6 +216,7 @@ impl App {
             title: "everything".into(),
             deep: false,
             from: Some(since),
+            since: Instant::now(),
             task,
         });
     }

@@ -44,6 +44,9 @@ mod new_flow;
 pub(crate) mod outside;
 #[cfg(test)]
 mod outside_tests;
+mod overview;
+#[cfg(test)]
+mod overview_tests;
 mod palette;
 mod pane;
 mod proposal;
@@ -160,6 +163,9 @@ enum View {
     CatchUp,
     /// The work-and-teams board (`/report`).
     Report,
+    /// A project's flows under what was said of it, and `+ new flow` (`enter` on its line); which
+    /// project is `App::overview`.
+    Overview,
 }
 
 enum Mode {
@@ -316,12 +322,17 @@ struct Summarising {
     title: String,
     deep: bool,
     from: Option<Timestamp>,
+    /// When it was asked: the overview's top says how long it has been.
+    since: Instant,
     task: tokio::task::JoinHandle<Result<Summary>>,
 }
 
 /// The catch-up's top as the cursor knows it: above its first project, where
 /// `/summary` is of everything in the stretch.
 const TOP: &str = "top";
+
+/// The overview's last line, `+ new flow`, as the cursor knows it.
+const NEW_FLOW: &str = "+new";
 
 /// What the catch-up showed that was not seen yet: the runs, and where each
 /// flow's firings not seen start, by its row key.
@@ -361,6 +372,8 @@ struct App {
     show_shells: bool,
     show_hidden: bool,
     view: View,
+    /// The project the overview is of, while it is up or on the way back to it.
+    overview: Option<overview::Scope>,
     /// Every flow: for its row's place and words, the chips on project rows,
     /// and a flow's pane.
     flows: Vec<Flow>,
@@ -1300,6 +1313,7 @@ impl App {
             proposal: None,
             summary: None,
             summarising: None,
+            overview: None,
             topping: None,
             top: None,
             outcomes: Default::default(),
@@ -1558,6 +1572,8 @@ impl App {
             View::Events => shortcuts::Place::Events,
             View::CatchUp => shortcuts::Place::CatchUp,
             View::Report => shortcuts::Place::Report,
+            View::Overview if self.selected_question().is_some() => shortcuts::Place::Question,
+            View::Overview => shortcuts::Place::Overview,
             View::Work if self.selected_question().is_some() => shortcuts::Place::Question,
             View::Work if self.show_hidden => shortcuts::Place::Hidden,
             View::Work => shortcuts::Place::List,
@@ -1906,6 +1922,7 @@ impl App {
         }
         self.saw_catch_up().await;
         self.back.clear();
+        self.overview = None;
         self.switch_to(View::Work);
         self.picked.clear();
         self.events.clear();
@@ -2125,9 +2142,10 @@ impl App {
                 None => "while you were away".into(),
             },
             View::Report => self.report_head(),
+            View::Overview => self.overview_headline(),
         };
         let mut notes = Vec::new();
-        if self.view == View::CatchUp {
+        if matches!(self.view, View::CatchUp | View::Overview) {
             notes.push(Span::styled("esc to the list", theme::dim()));
         }
         // What a restart took waits on you like anything else that does.
@@ -2210,6 +2228,7 @@ impl App {
                 View::Events => self.draw_events(f, list),
                 View::CatchUp => self.draw_catch_up(f, list),
                 View::Report => self.draw_report(f, list),
+                View::Overview => self.draw_overview(f, list),
             }
         }
         if let Some(pane) = a.pane {
@@ -2463,8 +2482,14 @@ impl App {
             f.render_widget(empty_list(&msg, area, nothing), area);
             return;
         }
+        let (lines, keys, sel_line) = self.row_lines(rows, area.width as usize);
+        self.draw_window(f, area, lines, keys, sel_line);
+    }
+
+    /// The list's rows as lines `w` wide, a row to a line and a flow opened with `→` to two:
+    /// the lines, the row each line belongs to (for the mouse), and the selected row's line.
+    fn row_lines(&self, rows: &[Row], w: usize) -> (Vec<Line<'static>>, Vec<Option<String>>, usize) {
         let now = Timestamp::now();
-        let w = area.width as usize;
         // Columns: icon, title, state, the summary to the edge, ref and age
         // at the right — the title column is the screen's share, bounded.
         let tw = (w * 35 / 100).clamp(14, 44);
@@ -2654,7 +2679,7 @@ impl App {
                 keys.push(row.key());
             }
         }
-        self.draw_window(f, area, lines, keys, sel_line);
+        (lines, keys, sel_line)
     }
 
     /// Lines in the list's place, a window of them following the selection;
@@ -3255,6 +3280,25 @@ impl App {
         if self.on_top() {
             return format!("/summary [deep] [again] writes it · {pane} · esc the list");
         }
+        if self.view == View::Overview {
+            if self.on_new_flow() {
+                return "enter writes one · esc the list".into();
+            }
+            return match self.selected() {
+                Some(Row::Question(_)) => {
+                    format!("enter or `1 and a note` on the line answers it · ^x not this · {pane}")
+                }
+                Some(Row::Flow(f)) => {
+                    let yes = match self.flow_of_row(&f).map(Flow::status) {
+                        Some(FlowStatus::NeedsApproval) => "/flow approve · ",
+                        _ => "/flow run · ",
+                    };
+                    let archives = if f.runs.is_empty() { "" } else { "^x archives · " };
+                    format!("enter its firings · {yes}^e edits · {archives}/summary · esc the list")
+                }
+                _ => "esc the list".into(),
+            };
+        }
         if self.view == View::CatchUp {
             let go = match self.selected() {
                 Some(Row::Question(_)) => "`1 and a note` on the line answers it · enter it on the list · ",
@@ -3282,11 +3326,11 @@ impl App {
             // A flow here that did not load is what `/flow edit` opens, at the line.
             Some(Row::Group(h)) if h.is_everywhere() => {
                 let fix = self.broken_hint(&h);
-                format!("enter its stats · {fix}{pane}")
+                format!("enter its flows · {fix}{pane}")
             }
             Some(Row::Group(h)) => {
                 let fix = self.broken_hint(&h);
-                format!("enter its stats · /shell · {fix}^r renames · ^x removes · {pane}")
+                format!("enter its flows · /shell · {fix}^r renames · ^x removes · {pane}")
             }
             _ => String::new(),
         }
