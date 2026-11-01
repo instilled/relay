@@ -275,6 +275,28 @@ pub fn changing(asked: &[String], d: &Draft) -> String {
     s
 }
 
+/// The words for a change to a flow: what was asked first and since, its `flow.md` as it is now,
+/// and the change — the last words — so the answer is the whole flow again, changed.
+pub fn changing_flow(asked: &[String], text: &str) -> String {
+    let (last, before) = asked.split_last().expect("words asked");
+    let mut s = String::new();
+    if !before.is_empty() {
+        s.push_str("Asked before:\n");
+        for w in before {
+            s.push_str(&format!("- {w}\n"));
+        }
+        s.push('\n');
+    }
+    s.push_str("Its flow.md now:\n\n");
+    for l in text.lines() {
+        s.push_str(&format!("  {l}\n"));
+    }
+    s.push_str(&format!(
+        "\nChange it: {last}\n\nAnswer with the whole flow, changed, in the same shape.\n"
+    ));
+    s
+}
+
 /// Asks the interpreter: the pack for `folder` and what is wanted, then the words. What comes
 /// back, read, with the run that said it. A whole flow takes longer to write than a run: three
 /// minutes rather than the assistant's one.
@@ -284,7 +306,7 @@ pub async fn ask(home: &Home, folder: &Path, words: &str, want: &Want) -> Result
     let pack = context::render(context::help(), &here, want);
     let prompt = context::ask(&pack, words);
     let title = format!("interpret: {}", words.chars().take(48).collect::<String>());
-    let timeout = matches!(want, Want::Flow { .. }).then(|| "3m".to_string());
+    let timeout = matches!(want, Want::Flow { .. } | Want::NewFlow { .. }).then(|| "3m".to_string());
     let out = rpc
         .call::<AssistantRun>(AssistantParams {
             job: "interpret".into(),
@@ -403,6 +425,21 @@ mod tests {
             Answer::Run(d) => d,
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn changing_flow_carries_the_text_and_the_change() {
+        let asked = ["every day".to_string(), "only weekdays".to_string()];
+        let words = changing_flow(&asked, "---\nwhen: every 1d\n---\n");
+        assert!(words.contains("- every day\n"), "{words}");
+        assert!(words.contains("  when: every 1d\n"), "the flow, indented: {words}");
+        assert!(words.contains("Change it: only weekdays\n"), "{words}");
+        assert!(
+            words.ends_with("Answer with the whole flow, changed, in the same shape.\n"),
+            "{words}"
+        );
+        let once = changing_flow(&asked[1..], "---\nwhen: every 1d\n---\n");
+        assert!(!once.contains("Asked before:"), "nothing was: {once}");
     }
 
     #[test]

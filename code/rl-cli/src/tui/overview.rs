@@ -3,6 +3,7 @@
 //! its open questions under it), and a last line, `+ new flow`. `esc` goes back to its line.
 //! See `tui/mod.rs` for the `App` struct these methods belong to.
 
+use super::flow_proposal::Aim;
 use super::*;
 
 /// What an overview is of: a project's folder, or `everywhere`, the flows with no `in`.
@@ -160,6 +161,47 @@ impl App {
     /// Whether the cursor is on the overview's `+ new flow`.
     pub(super) fn on_new_flow(&self) -> bool {
         self.view == View::Overview && self.sel.as_deref() == Some(NEW_FLOW)
+    }
+
+    /// Words typed in the overview, taken for a flow when the cursor is on one: on a flow, a
+    /// change to it, asked of its `flow.md` as it is now; on `+ new flow`, a new one in the
+    /// project. Either way proposed in the pane, and the line cleared for it; a `flow.md` that
+    /// can't be read is said, and the words stay on the line. Whether they were taken; elsewhere,
+    /// or with a proposal up, they are not, and go on as words anywhere do.
+    pub(super) fn overview_words(&mut self, words: String) -> bool {
+        if self.flow_proposal_shown().is_some() || self.proposal_shown().is_some() {
+            return false;
+        }
+        let Some(name) = self.overview_words_for() else {
+            return false;
+        };
+        let Some(name) = name else {
+            let folder = self.overview.as_ref().and_then(Scope::folder).map(Path::to_path_buf);
+            self.line.clear();
+            self.propose_flow(Aim::New { named: None, folder }, words);
+            return true;
+        };
+        match std::fs::read_to_string(self.home.flow_dir(&name).join("flow.md")) {
+            Ok(base) => {
+                self.line.clear();
+                self.propose_flow(Aim::Change { name, base }, words);
+            }
+            Err(e) => self.say(format!("{name}'s flow.md can't be read: {e}")),
+        }
+        true
+    }
+
+    /// What words typed in the overview would be taken for: a change to the flow under the
+    /// cursor (its name), or a new flow on `+ new flow` (none). Outside the overview, or on
+    /// another row, nothing: they are words as anywhere.
+    pub(super) fn overview_words_for(&self) -> Option<Option<String>> {
+        if self.view != View::Overview {
+            return None;
+        }
+        if self.on_new_flow() {
+            return Some(None);
+        }
+        self.selected_flow().map(|f| Some(f.name.to_string()))
     }
 
     /// The overview's headline: the project's name, and how its flows stand.

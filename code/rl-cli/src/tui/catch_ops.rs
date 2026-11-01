@@ -147,6 +147,7 @@ impl App {
         // A firing heading it is read where it stands: all of it, in the pane.
         if self.lead_here().is_some() {
             self.pane = Pane::Facts;
+            self.cover_proposals();
             self.show_pane = true;
             self.load_pane().await;
             return;
@@ -173,6 +174,7 @@ impl App {
             && !self.kept_on_the_list(k, run.as_deref())
         {
             self.pane = Pane::Facts;
+            self.cover_proposals();
             self.show_pane = true;
             self.load_pane().await;
             return self.say(format!(

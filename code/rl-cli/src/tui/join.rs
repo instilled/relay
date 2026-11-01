@@ -62,12 +62,14 @@ impl App {
         // Still reading this one: back to it, where it was left.
         if self.term.as_ref().is_some_and(|t| t.id == id) {
             self.pane = Pane::Term;
+            self.cover_proposals();
             self.show_pane = true;
             self.term_size = self.pane_size(area);
             return;
         }
         self.seen(vec![id.clone()]).await;
         self.pane = Pane::Term;
+        self.cover_proposals();
         self.show_pane = true;
         let size = self.pane_size(area);
         match Output::open(&self.home, &id, size).await {
