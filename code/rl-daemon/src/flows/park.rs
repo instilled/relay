@@ -7,7 +7,7 @@ use anyhow::{Context, Result};
 use jiff::Timestamp;
 use rl_flow::doc;
 use rl_ledger::{firings, flows, runs};
-use rl_proto::flow::{Parked, parked_name, valid_name};
+use rl_proto::flow::{FiringStatus, Parked, parked_name, valid_name};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -17,8 +17,10 @@ use std::time::SystemTime;
 pub enum Unmoved {
     /// There is no flow folder by that name.
     Missing(String),
-    /// A firing of it is still open.
+    /// A firing of it has a run going.
     Firing(String),
+    /// Its open firing is waiting: on a question, or a lost step.
+    Waiting(String),
     /// The folder is not one parking makes.
     NotParked(String),
     /// A flow has the name it would come back as.
@@ -30,6 +32,7 @@ impl fmt::Display for Unmoved {
         match self {
             Unmoved::Missing(name) => write!(f, "no flow `{name}`"),
             Unmoved::Firing(name) => write!(f, "{name} is firing · /stop its run, then park it"),
+            Unmoved::Waiting(name) => write!(f, "{name} is waiting on a question · answer or /stop it, then park it"),
             Unmoved::NotParked(folder) => write!(f, "{folder} is not a parked flow"),
             Unmoved::Taken(name) => write!(f, "a flow named {name} is there now · park or rename it first"),
         }
@@ -49,12 +52,24 @@ impl Flows {
             return Err(Unmoved::Missing(name.to_string()).into());
         }
         let n = name.to_string();
-        let firing = self
+        let open = self
             .ledger
-            .call(move |c| Ok(firings::open(c)?.into_iter().any(|f| f.flow == n)))
+            .call(move |c| {
+                Ok(firings::open(c)?
+                    .into_iter()
+                    .filter(|f| f.flow == n)
+                    .collect::<Vec<_>>())
+            })
             .await?;
-        if firing {
-            return Err(Unmoved::Firing(name.to_string()).into());
+        if !open.is_empty() {
+            let waiting = open.iter().all(|f| f.status == FiringStatus::Waiting);
+            let name = name.to_string();
+            return Err(if waiting {
+                Unmoved::Waiting(name)
+            } else {
+                Unmoved::Firing(name)
+            }
+            .into());
         }
         let dir = self.home.flows_dir();
         let folder = free_folder(&dir, name);
@@ -62,18 +77,19 @@ impl Flows {
         std::fs::rename(&from, &to).with_context(|| format!("renaming {} to {}", from.display(), to.display()))?;
         let at = touched(&to);
         let n = name.to_string();
+        // The yes is taken first: of the two it is the one that must not be left behind.
         let archived = self
             .ledger
             .call(move |c| {
-                let archived = runs::archive_flow_runs(c, &n, Timestamp::now())?;
                 flows::unapprove(c, &n)?;
-                Ok(archived)
+                runs::archive_flow_runs(c, &n, Timestamp::now())
             })
-            .await
-            .with_context(|| format!("{name} is parked as {folder}, but its runs and its yes are as they were"))?;
-        self.reload()
-            .await
-            .with_context(|| format!("{name} is parked as {folder}, but the flows were not read again"))?;
+            .await;
+        // Read again whatever became of that, so a flow whose folder is gone is never left loaded.
+        let reloaded = self.reload().await;
+        let archived = archived
+            .with_context(|| format!("{name} is parked as {folder}, but its runs or its yes are as they were"))?;
+        reloaded.with_context(|| format!("{name} is parked as {folder}, but the flows were not read again"))?;
         Ok(Parked {
             name: name.to_string(),
             in_: read_in(&to),
@@ -86,6 +102,8 @@ impl Flows {
     /// Brings the flow parked in `folder` back under its name, and reads the flows again. The
     /// name it comes back as.
     pub async fn unpark(&self, folder: &str) -> Result<String> {
+        // Held as `park` holds it, so a park of a new flow by that name cannot slip in between.
+        let _going = self.going.lock().await;
         let dir = self.home.flows_dir();
         let from = dir.join(folder);
         let Some(name) = parked_name(folder).filter(|_| from.is_dir()) else {

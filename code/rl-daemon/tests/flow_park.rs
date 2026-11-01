@@ -4,7 +4,8 @@
 mod common;
 use common::{Conn, Harness};
 use rl_core::Home;
-use rl_proto::flow::{Firing, Flow, Parked, Reloaded, StepStatus};
+use rl_ledger::Ledger;
+use rl_proto::flow::{Firing, FiringStatus, Flow, Parked, Reloaded, StepStatus};
 use rl_proto::types::Run;
 use serde_json::json;
 use std::path::Path;
@@ -143,6 +144,61 @@ async fn park_refuses_while_firing() {
 
     let _: Run = c.ok("run.stop", json!({ "id": run })).await;
     wait_firing(&mut c, "hello", |f| f.ended_at.is_some()).await;
+    h.stop().await;
+}
+
+#[tokio::test]
+async fn park_refuses_while_waiting_on_a_question() {
+    let tmp = tempfile::tempdir().unwrap();
+    let md = "---\nsteps:\n  a:\n    ask: go on?\n    options: { ok: {} }\n---\n";
+    let Some((h, mut c)) = start(tmp.path(), &[("hello", md)]).await else {
+        return;
+    };
+    common::approve(&mut c, "hello").await;
+    let _: Firing = c.ok("flow.run", json!({ "name": "hello" })).await;
+    wait_firing(&mut c, "hello", |f| f.status == FiringStatus::Waiting).await;
+
+    let said = refused(&mut c, "flow.park", json!({ "name": "hello" })).await;
+    assert!(
+        said.ends_with("hello is waiting on a question · answer or /stop it, then park it"),
+        "{said}"
+    );
+    assert!(h.home.flow_dir("hello").join("flow.md").is_file(), "nothing renamed");
+    h.stop().await;
+}
+
+/// The ledger refuses what parking writes after the rename: the flow is read again all the
+/// same, so it is not left loaded with its folder gone, and the error says it is parked.
+#[tokio::test]
+async fn park_reads_the_flows_again_when_the_ledger_fails_after_the_rename() {
+    let tmp = tempfile::tempdir().unwrap();
+    let Some((h, mut c)) = start(tmp.path(), &[("hello", HELLO)]).await else {
+        return;
+    };
+    run_to_its_end(&mut c, "hello").await;
+    let ledger = Ledger::open(&h.home.ledger()).unwrap();
+    ledger
+        .call_blocking(|db| {
+            db.execute_batch(
+                "CREATE TRIGGER no_archive BEFORE UPDATE ON runs BEGIN SELECT RAISE(ABORT, 'injected'); END",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+    let said = refused(&mut c, "flow.park", json!({ "name": "hello" })).await;
+    assert!(said.contains("hello is parked as _hello"), "{said}");
+    assert!(h.home.flows_dir().join("_hello/flow.md").is_file());
+    assert!(
+        listed(&mut c).await.iter().all(|f| f.name != "hello"),
+        "not left loaded"
+    );
+
+    ledger
+        .call_blocking(|db| Ok(db.execute_batch("DROP TRIGGER no_archive")?))
+        .unwrap();
+    let back: Flow = c.ok("flow.unpark", json!({ "folder": "_hello" })).await;
+    assert!(!back.approved(), "the yes was taken before the archive failed");
     h.stop().await;
 }
 
