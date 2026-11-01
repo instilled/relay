@@ -328,8 +328,8 @@ impl App {
             return Ok(());
         }
         let k = vi_step(k, self.line.is_empty());
-        // On an empty line the list's own letters flip the toggles — `f`
-        // flows, `a` agents, `s` shells, `h` hidden — taken here, before the
+        // On an empty line the list's own letters flip the toggles — `a`
+        // agents, `s` shells, `h` hidden — taken here, before the
         // line editor would eat the character.
         if self.line.is_empty()
             && self.view == View::Work
@@ -338,10 +338,6 @@ impl App {
             && k.modifiers.is_empty()
         {
             match k.code {
-                KeyCode::Char('f') => {
-                    self.toggle_flows();
-                    return Ok(());
-                }
                 KeyCode::Char('a') => {
                     self.toggle_agents();
                     return Ok(());
@@ -1211,7 +1207,6 @@ impl App {
                     self.land();
                 }
             }
-            palette::Cmd::Flows => self.toggle_flows(),
             palette::Cmd::Agents => self.toggle_agents(),
             palette::Cmd::Shells => self.toggle_shells(),
             palette::Cmd::Hidden => self.toggle_hidden(),

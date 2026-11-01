@@ -19,11 +19,11 @@ impl App {
         let (key, opened) = match self.row_key(&list_filter, self.toggles(), is_it) {
             Some(k) => (k, None),
             None => match self
-                .row_key("", (true, true, true, false), is_it)
-                .map(|k| (k, (true, true, true, false)))
+                .row_key("", (true, true, false), is_it)
+                .map(|k| (k, (true, true, false)))
                 .or_else(|| {
-                    self.row_key("", (true, true, true, true), is_it)
-                        .map(|k| (k, (true, true, true, true)))
+                    self.row_key("", (true, true, true), is_it)
+                        .map(|k| (k, (true, true, true)))
                 }) {
                 Some((k, t)) => (k, Some(t)),
                 None => return self.say(format!("{name} has no row on the list")),
@@ -33,7 +33,7 @@ impl App {
         if let Some(t) = opened {
             self.filter.clear();
             self.set_toggles(t);
-            self.say(if t.3 {
+            self.say(if t.2 {
                 format!("{name} is hidden: shown here with hidden on, /hide brings it back")
             } else {
                 format!("the search and the toggles let go, to show {name}")

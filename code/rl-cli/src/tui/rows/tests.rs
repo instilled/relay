@@ -189,8 +189,11 @@ fn head_of<'a>(rows: &'a [Row], name: &str) -> &'a Head {
         .expect("a project header")
 }
 
-/// The default toggles: flows and agents on, hidden off.
-const DEFAULT: (bool, bool, bool, bool) = (true, true, true, false);
+/// The list's toggles `(flows, agents, shells, hidden)`: no flows, the rest on, hidden off.
+const DEFAULT: (bool, bool, bool, bool) = (false, true, true, false);
+
+/// `DEFAULT` with the flows on, as the catch-up has them.
+const FLOWS_ON: (bool, bool, bool, bool) = (true, true, true, false);
 
 fn build_with<'a>(d: &'a Digest, names: &Names, filter: &str, now: Timestamp) -> Vec<Row<'a>> {
     toggles_build(d, names, &[], DEFAULT, filter, now)
@@ -200,9 +203,9 @@ fn lens_build<'a>(d: &'a Digest, names: &Names, t: (bool, bool, bool, bool), now
     toggles_build(d, names, &[], t, "", now)
 }
 
-/// The list as it stands with these flows loaded, at the default toggles.
+/// The list as the catch-up builds it, flows on, with these flows loaded.
 fn flows_build<'a>(d: &'a Digest, names: &Names, flows: &[Flow], filter: &str, now: Timestamp) -> Vec<Row<'a>> {
-    toggles_build(d, names, flows, DEFAULT, filter, now)
+    toggles_build(d, names, flows, FLOWS_ON, filter, now)
 }
 
 /// The list with the flows loaded and the toggles `(flows, agents, shells, hidden)`.
@@ -293,7 +296,7 @@ fn a_search_narrows_by_words_and_by_what_things_are() {
         (PathBuf::from(web), "web".to_string()),
         (PathBuf::from("/home/f/idle"), "idle".to_string()),
     ]);
-    let shown = |f: &str| keys(&build_with(&d, &names, f, now));
+    let shown = |f: &str| keys(&flows_build(&d, &names, &[], f, now));
     // Every word somewhere: the title and the project both count.
     assert_eq!(shown("login api"), ["[api]", "r:agent"]);
     assert_eq!(shown("login web"), Vec::<String>::new());
@@ -1915,7 +1918,7 @@ fn a_flows_runs_outside_every_project_are_everywhere() {
 
     // A flow not loaded now leaves its row everywhere: where it is `in`
     // is not known. A run by hand keeps its folder.
-    let bare = keys(&build_with(&d, &names, "", now));
+    let bare = keys(&flows_build(&d, &names, &[], "", now));
     let at = |k: &str| {
         bare.iter()
             .position(|x| x == k)
@@ -2194,7 +2197,7 @@ fn a_project_moves_up_and_down_among_the_projects_and_keeps_its_place() {
         Names::new(all)
     };
     let heads = |d: &Digest, names: &Names| -> Vec<String> {
-        keys(&build_with(d, names, "", now))
+        keys(&flows_build(d, names, &[], "", now))
             .into_iter()
             .filter(|k| k.starts_with('['))
             .collect()
@@ -2202,7 +2205,7 @@ fn a_project_moves_up_and_down_among_the_projects_and_keeps_its_place() {
     let three = names(&[]);
     // By name until you move one.
     assert_eq!(heads(&d, &three), ["[api]", "[relay]", "[web]", "[everywhere]"]);
-    let rows = build_with(&d, &three, "", now);
+    let rows = flows_build(&d, &three, &[], "", now);
     let mv = |key: &str, up: bool| reorder(&rows, &rows, &d.order, key, up);
     assert_eq!(
         mv(relay, true),
@@ -2226,7 +2229,7 @@ fn a_project_moves_up_and_down_among_the_projects_and_keeps_its_place() {
         rows: [relay, api, web].map(String::from).to_vec(),
     }];
     assert_eq!(
-        keys(&build_with(&d, &three, "", now)),
+        keys(&flows_build(&d, &three, &[], "", now)),
         [
             "[relay]",
             "r:one",
@@ -2248,20 +2251,23 @@ fn a_project_moves_up_and_down_among_the_projects_and_keeps_its_place() {
         ["[relay]", "[api]", "[web]", "[aaa]", "[everywhere]"]
     );
     // Moving builds on the order kept, and takes the new one into it.
-    let rows = build_with(&d, &four_of, "", now);
+    let rows = flows_build(&d, &four_of, &[], "", now);
     assert_eq!(
         reorder(&rows, &rows, &d.order, "g:/home/f/aaa", true).unwrap().rows,
         [relay, api, "g:/home/f/aaa", web]
     );
     // One the list does not show now — hidden, or gone — keeps its place.
     d.order[0].rows.insert(1, "g:/home/f/gone".into());
-    let rows = build_with(&d, &three, "", now);
+    let rows = flows_build(&d, &three, &[], "", now);
     assert_eq!(
         reorder(&rows, &rows, &d.order, api, true).unwrap().rows,
         [api, relay, "g:/home/f/gone", web]
     );
     // A search that leaves projects out moves among what it shows.
-    let (shown, full) = (build_with(&d, &three, "in:web", now), build_with(&d, &three, "", now));
+    let (shown, full) = (
+        flows_build(&d, &three, &[], "in:web", now),
+        flows_build(&d, &three, &[], "", now),
+    );
     assert_eq!(
         reorder(&shown, &full, &d.order, web, true),
         Err("already the first project")

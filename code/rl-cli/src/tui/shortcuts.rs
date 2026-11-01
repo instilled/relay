@@ -82,7 +82,6 @@ fn place_keys(at: Place) -> Vec<Key> {
             cmd(Cmd::Rename, "rename"),
             cmd(Cmd::Pane, "details"),
             cmd(Cmd::Filter, "search"),
-            key("f", "flows"),
             key("a", "agents"),
             key("s", "shells"),
             key("h", "hidden"),
@@ -104,7 +103,6 @@ fn place_keys(at: Place) -> Vec<Key> {
             cmd(Cmd::Stop, "not this"),
             cmd(Cmd::Pane, "details"),
             cmd(Cmd::Filter, "search"),
-            key("f", "flows"),
             key("a", "agents"),
             key("s", "shells"),
             key("h", "hidden"),
@@ -301,7 +299,7 @@ mod tests {
         assert_eq!(
             one_line(Place::List),
             "↑↓ ^j^k move · ⇧↑↓ reorder · enter join/open · → ← a flow's steps · ^x stop/archive/remove · ^t pin · \
-             ^r rename · ^o details · ^f search · f flows · a agents · s shells · h hidden · /hide · /help · ^h"
+             ^r rename · ^o details · ^f search · a agents · s shells · h hidden · /hide · /help · ^h"
         );
     }
 
@@ -323,7 +321,7 @@ mod tests {
         assert_eq!(
             one_line(Place::Hidden),
             "↑↓ ^j^k move · /hide brings it back · enter join/open · ^x stop/archive/remove · \
-             ^t pin · ^r rename · ^o details · ^f search · f flows · a agents · s shells · h hidden · /help · ^h"
+             ^t pin · ^r rename · ^o details · ^f search · a agents · s shells · h hidden · /help · ^h"
         );
 
         assert_eq!(

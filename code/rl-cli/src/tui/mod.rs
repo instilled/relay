@@ -354,10 +354,9 @@ struct App {
     filter: String,
     /// `^f`: the line is searching, and the filter follows what is typed.
     search: Option<Search>,
-    /// The list toggles. Flows, agents and shells are additive and on by
+    /// The list toggles. Agents and shells are additive and on by
     /// default — each shows the runs it is for; hidden is off by default and,
     /// on, stands what you hid inline in its place.
-    show_flows: bool,
     show_agents: bool,
     show_shells: bool,
     show_hidden: bool,
@@ -1263,7 +1262,6 @@ impl App {
             names: Names::default(),
             filter: String::new(),
             search: None,
-            show_flows: true,
             show_agents: true,
             show_shells: true,
             show_hidden: false,
@@ -1579,12 +1577,6 @@ impl App {
         shortcuts::lines(&shortcuts::keys(at), room)
     }
 
-    /// Flip the flows toggle, and settle the selection onto what now shows.
-    fn toggle_flows(&mut self) {
-        self.show_flows = !self.show_flows;
-        self.settle();
-    }
-
     /// Flip the agents toggle, and settle the selection.
     fn toggle_agents(&mut self) {
         self.show_agents = !self.show_agents;
@@ -1603,19 +1595,18 @@ impl App {
         self.settle();
     }
 
-    /// The toggles as they stand, as `(flows, agents, shells, hidden)`.
-    fn toggles(&self) -> (bool, bool, bool, bool) {
-        (self.show_flows, self.show_agents, self.show_shells, self.show_hidden)
+    /// The toggles as they stand, as `(agents, shells, hidden)`.
+    fn toggles(&self) -> (bool, bool, bool) {
+        (self.show_agents, self.show_shells, self.show_hidden)
     }
 
-    /// The toggles back to their default: flows, agents and shells on, hidden off.
+    /// The toggles back to their default: agents and shells on, hidden off.
     fn reset_toggles(&mut self) {
-        self.set_toggles((true, true, true, false));
+        self.set_toggles((true, true, false));
     }
 
-    /// Put the toggles to a set, `(flows, agents, shells, hidden)`.
-    fn set_toggles(&mut self, (flows, agents, shells, hidden): (bool, bool, bool, bool)) {
-        self.show_flows = flows;
+    /// Put the toggles to a set, `(agents, shells, hidden)`.
+    fn set_toggles(&mut self, (agents, shells, hidden): (bool, bool, bool)) {
         self.show_agents = agents;
         self.show_shells = shells;
         self.show_hidden = hidden;
@@ -1965,11 +1956,11 @@ impl App {
         let (key, opened) = match self.list_key(id, &list_filter, self.toggles()) {
             Some(k) => (k, None),
             None => match self
-                .list_key(id, "", (true, true, true, false))
-                .map(|k| (k, (true, true, true, false)))
+                .list_key(id, "", (true, true, false))
+                .map(|k| (k, (true, true, false)))
                 .or_else(|| {
-                    self.list_key(id, "", (true, true, true, true))
-                        .map(|k| (k, (true, true, true, true)))
+                    self.list_key(id, "", (true, true, true))
+                        .map(|k| (k, (true, true, true)))
                 }) {
                 Some((k, t)) => (k, Some(t)),
                 None => {
@@ -1990,7 +1981,7 @@ impl App {
         if let Some(t) = opened {
             self.filter.clear();
             self.set_toggles(t);
-            self.say(if t.3 {
+            self.say(if t.2 {
                 format!("'{title}' is hidden: shown here with hidden on, /hide brings it back")
             } else {
                 format!("the search and the toggles let go, to show '{title}'")
@@ -2321,20 +2312,16 @@ impl App {
     }
 
     /// The toggles, at the right of the header, compact: a glyph and its key
-    /// for each kind — `✦a` agents, `⚑f` flows, `❯s` shells — then a `│` and
+    /// for each kind — `✦a` agents, `❯s` shells — then a `│` and
     /// `◌h` hidden, the kinds apart from the hidden axis. On is accented and
     /// bold, off is quiet. The letters flip them on an empty line.
     fn toggles_line(&self) -> Line<'static> {
         let on = theme::accent().add_modifier(Modifier::BOLD);
         let off = theme::dim();
         let mut spans = Vec::new();
-        for (i, (glyph, key, lit)) in [
-            ("✦", "a", self.show_agents),
-            ("⚑", "f", self.show_flows),
-            ("❯", "s", self.show_shells),
-        ]
-        .into_iter()
-        .enumerate()
+        for (i, (glyph, key, lit)) in [("✦", "a", self.show_agents), ("❯", "s", self.show_shells)]
+            .into_iter()
+            .enumerate()
         {
             if i > 0 {
                 spans.push(Span::styled("  ", off));
@@ -2465,14 +2452,14 @@ impl App {
         if rows.is_empty() {
             let msg: String = if !self.filter.is_empty() {
                 " nothing matches".into()
-            } else if !self.show_flows || !self.show_agents || !self.show_shells {
-                " nothing here · f flows · a agents · s shells · h hidden".into()
+            } else if !self.show_agents || !self.show_shells {
+                " nothing here · a agents · s shells · h hidden".into()
             } else if self.show_hidden {
                 " nothing hidden · /hide takes a row off the list".into()
             } else {
                 " nothing running · rl run -- <command>".into()
             };
-            let nothing = self.filter.is_empty() && self.show_flows && self.show_agents && !self.show_hidden;
+            let nothing = self.filter.is_empty() && self.show_agents && !self.show_hidden;
             f.render_widget(empty_list(&msg, area, nothing), area);
             return;
         }
@@ -4558,47 +4545,11 @@ mod tests {
 
     #[tokio::test]
     async fn each_row_says_what_its_summary_is_of() {
-        use rl_proto::types::{Cause, Run, RunKind};
-        let (_tmp, token, mut app, folder) = panel_of(|folder, now| {
-            let step = |id: &str, name: &str, at: &std::path::Path| {
-                let mut r = Run::new(id, RunKind::Command, name, vec!["true".into()], at, at, now);
-                r.cause = Cause::Flow {
-                    flow: name.into(),
-                    step: "probe".into(),
-                };
-                r
-            };
-            let elsewhere = folder.parent().unwrap().join("elsewhere");
-            vec![
-                step("run00002", "tidy", folder),
-                step("run00003", "nightly", &elsewhere),
-            ]
-        })
-        .await;
+        let (_tmp, token, mut app, folder) = panel().await;
         app.select(Some(RUN.into()));
         assert_eq!(app.summary_target(), Some(SummaryTarget::Run { id: "run00001".into() }));
-        let flow_key = |app: &super::App, name: &str| {
-            app.rows().iter().find_map(|r| match r {
-                super::Row::Flow(f) if f.name == name => Some(f.key.clone()),
-                _ => None,
-            })
-        };
-        // A flow's row's summary is of the flow of that name.
-        app.select(flow_key(&app, "tidy"));
-        assert_eq!(app.summary_target(), Some(SummaryTarget::Flow { name: "tidy".into() }));
-        app.select(flow_key(&app, "nightly"));
-        assert_eq!(
-            app.summary_target(),
-            Some(SummaryTarget::Flow { name: "nightly".into() })
-        );
         app.select(Some(format!("g:{}", folder.display())));
         assert_eq!(app.summary_target(), Some(SummaryTarget::Project { workspace: folder }));
-        app.select(Some("g:everywhere".into()));
-        assert_eq!(
-            app.summary_target(),
-            Some(SummaryTarget::All),
-            "everywhere is everything"
-        );
         token.cancel();
     }
 
@@ -4719,44 +4670,6 @@ mod tests {
             "{}",
             app.footer(120)
         );
-        token.cancel();
-    }
-
-    #[tokio::test]
-    async fn a_flows_summary_starts_at_the_run_you_had_not_seen() {
-        use rl_proto::types::{Cause, Run, RunKind};
-        let (_tmp, token, mut app, _folder) = panel_of(|folder, now| {
-            let firing = |id: &str, hours| {
-                let at = now - jiff::SignedDuration::from_hours(hours);
-                let mut r = Run::new(id, RunKind::Command, "tidy", vec!["true".into()], folder, folder, at);
-                r.cause = Cause::Flow {
-                    flow: "tidy".into(),
-                    step: "probe".into(),
-                };
-                r
-            };
-            vec![firing("run00002", 2), firing("run00003", 1)]
-        })
-        .await;
-        let oldest = app.run_by_id("run00002").unwrap().started_at;
-        let key = app.rows().iter().find_map(|r| match r {
-            super::Row::Flow(f) if f.name == "tidy" => Some(f.key.clone()),
-            _ => None,
-        });
-        // The cursor lands on it: that is looking, and its firings are seen.
-        app.select(key);
-        app.moved().await;
-        assert!(app.selected_flow().is_some_and(|f| !f.unseen()));
-        type_in(&mut app, "/summary").await;
-        press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
-        let s = app.summarising.as_ref().expect("asked");
-        assert!(matches!(s.target, SummaryTarget::Flow { .. }), "{:?}", s.target);
-        assert_eq!(
-            s.from,
-            Some(oldest),
-            "since the firing you had not seen, not the last day"
-        );
-        assert!(app.unseen_from.is_empty(), "used once asked");
         token.cancel();
     }
 
@@ -6299,11 +6212,10 @@ mod tests {
         token.cancel();
     }
 
-    /// `enter` on a line a flow set off, in the events view: its row on the
-    /// list; the search and toggles give way when they hide it; and with no
-    /// row at all the view stays and says so.
+    /// `enter` on a line a flow set off, in the events view: the list has no
+    /// flow rows, so the view stays and says so.
     #[tokio::test]
-    async fn a_flow_in_the_events_view_is_found_on_the_list_or_said_to_have_no_row() {
+    async fn a_flow_in_the_events_view_is_said_to_have_no_row_on_the_list() {
         let (_tmp, token, mut app, folder) = panel_of(|folder, now| {
             let mut r = rl_proto::types::Run::new(
                 "run00002",
@@ -6336,8 +6248,7 @@ mod tests {
         // A refresh reloads the flows from the daemon, which has none here.
         let load = |app: &mut super::App| {
             app.flows = vec![flow("nightly", true), {
-                // Loaded but removed: it is still a flow, so it has no row on
-                // the list — every flow not removed does.
+                // Loaded but removed: still a flow, with no row anywhere.
                 let mut unseen = flow("ghost", false);
                 unseen.def = serde_json::json!({ "trigger": { "when": { "Every": 3600 }, "on": [] } });
                 unseen.folder = None;
@@ -6350,23 +6261,10 @@ mod tests {
         app.toggle_events().await;
         load(&mut app);
         assert!(app.view == super::View::Events);
+        // The list has no flow rows: the view stays and says so, loaded or not.
         app.show_flow("nightly").await;
-        assert!(app.view == super::View::Work);
-        assert_eq!(app.sel.as_deref(), Some("f:nightly"));
-
-        // A search that hides the row gives way, and says so.
-        app.filter = "zzz-nothing".into();
-        app.toggle_events().await;
-        load(&mut app);
-        app.show_flow("nightly").await;
-        assert!(app.view == super::View::Work);
-        assert!(app.filter.is_empty());
-        assert_eq!(app.sel.as_deref(), Some("f:nightly"));
-        assert!(said(&app).contains("let go"), "{}", said(&app));
-
-        // With no row at all, the events view is still up.
-        app.toggle_events().await;
-        load(&mut app);
+        assert!(app.view == super::View::Events, "the view stays");
+        assert_eq!(said(&app), "nightly has no row on the list");
         app.show_flow("ghost").await;
         assert!(app.view == super::View::Events, "the view stays");
         assert_eq!(said(&app), "ghost has no row on the list");
@@ -6374,7 +6272,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn enter_on_a_flow_in_the_catch_up_goes_to_its_row_on_the_list() {
+    async fn enter_on_a_flow_in_the_catch_up_stays_there_the_list_having_no_flow_rows() {
         let (_tmp, token, mut app, folder) = panel_of(|folder, now| {
             let mut r = rl_proto::types::Run::new(
                 "run00002",
@@ -6425,9 +6323,7 @@ mod tests {
         app.select(Some(flow.clone()));
         assert!(app.hints().starts_with("enter it on the list"), "{}", app.hints());
         press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
-        assert!(app.view == super::View::Work, "the list has flow rows of its own");
-        assert_eq!(app.sel.as_deref(), Some(flow.as_str()));
-        assert!(!unseen(&app, "run00002"));
+        assert!(app.view == super::View::CatchUp, "the list has no flow rows to go to");
         token.cancel();
     }
 
@@ -6856,69 +6752,6 @@ mod tests {
         token.cancel();
     }
 
-    #[tokio::test]
-    async fn a_flows_row_says_where_its_latest_firing_stands() {
-        use rl_ledger::firings::{NewFiring, insert, save};
-        use rl_proto::flow::{FiringStatus, StepStatus};
-        let (tmp, token, mut app, _folder) = panel_of(|folder, now| {
-            let mut r = rl_proto::types::Run::new(
-                "run00002",
-                rl_proto::types::RunKind::Command,
-                "probe",
-                vec!["true".into()],
-                folder,
-                folder,
-                now,
-            );
-            r.cause = rl_proto::types::Cause::Flow {
-                flow: "nightly".into(),
-                step: "probe".into(),
-            };
-            vec![r]
-        })
-        .await;
-        let ledger = rl_ledger::Ledger::open(&rl_core::Home::at(tmp.path().join("h")).ledger()).unwrap();
-        ledger
-            .call_blocking(|c| {
-                let loaded = rl_ledger::flows::Loaded {
-                    name: "nightly".into(),
-                    hash: "h".into(),
-                    def_json: "{}".into(),
-                };
-                rl_ledger::flows::sync(c, &[loaded], jiff::Timestamp::now())?;
-                let steps = ["probe".to_string(), "review".to_string()];
-                insert(
-                    c,
-                    &NewFiring {
-                        id: "fi1",
-                        flow: "nightly",
-                        def_json: "{}",
-                        hash: "h",
-                        trigger: "when",
-                        event: None,
-                        at: jiff::Timestamp::now(),
-                        steps: &steps,
-                    },
-                )?;
-                let at = [
-                    ("probe".to_string(), StepStatus::Done),
-                    ("review".to_string(), StepStatus::Waiting),
-                ];
-                save(c, "fi1", &at.into_iter().collect(), FiringStatus::Waiting, None)
-            })
-            .unwrap();
-        app.refresh().await;
-        let mut t = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 40)).unwrap();
-        t.draw(|f| app.draw(f)).unwrap();
-        let buf = t.backend().buffer().clone();
-        let row = (0..40)
-            .map(|y| (0..120).map(|x| buf[(x, y)].symbol().to_string()).collect::<String>())
-            .find(|l| l.contains("↻ nightly"))
-            .expect("the flow's row");
-        assert!(row.contains("waiting at review"), "{row}");
-        token.cancel();
-    }
-
     /// `/flow` acts on the one named after its verb, else on the flow under
     /// the cursor; with neither it says what it needs.
     #[tokio::test]
@@ -6966,16 +6799,14 @@ mod tests {
         assert_eq!(said(&app), "nightly approved");
         assert!(nightly(&app).approved());
 
-        // On its row, no name is needed.
-        app.select(Some("f:nightly".into()));
-        assert_eq!(app.flow_here().as_deref(), Some("nightly"));
-        run(&mut app, "/flow pause").await;
+        // The list has no flow rows, so a name is always needed.
+        run(&mut app, "/flow pause nightly").await;
         assert_eq!(said(&app), "nightly paused");
         assert!(nightly(&app).paused);
-        run(&mut app, "/flow resume").await;
+        run(&mut app, "/flow resume nightly").await;
         assert_eq!(said(&app), "nightly resumed");
         assert!(!nightly(&app).paused);
-        // A name typed wins over the row: `other` is asked for, nightly left be.
+        // `other` is asked for, nightly left be.
         run(&mut app, "/flow pause other").await;
         assert!(said(&app).starts_with("pause other: "), "{}", said(&app));
         assert!(!nightly(&app).paused);
@@ -6986,7 +6817,7 @@ mod tests {
             "/flow run|pause|resume|approve|edit|new|test|draft|reload [name]"
         );
         // Its `flow.md` waits for the screen to be given back.
-        run(&mut app, "/flow edit").await;
+        run(&mut app, "/flow edit nightly").await;
         let home = rl_core::Home::at(tmp.path().join("h"));
         let (editing, line) = app.editor.take().expect("the editor is next");
         let file = home.flow_dir("nightly").join("flow.md");
@@ -7024,63 +6855,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn edit_opens_the_selected_flows_file() {
-        let (tmp, token, mut app, _folder) = panel_of(|folder, now| {
-            let mut r = rl_proto::types::Run::new(
-                "run00002",
-                rl_proto::types::RunKind::Command,
-                "probe",
-                vec!["true".into()],
-                folder,
-                folder,
-                now,
-            );
-            r.cause = rl_proto::types::Cause::Flow {
-                flow: "nightly".into(),
-                step: "probe".into(),
-            };
-            vec![r]
-        })
-        .await;
-        let ledger = rl_ledger::Ledger::open(&rl_core::Home::at(tmp.path().join("h")).ledger()).unwrap();
-        ledger
-            .call_blocking(|c| {
-                let loaded = rl_ledger::flows::Loaded {
-                    name: "nightly".into(),
-                    hash: "h".into(),
-                    def_json: "{}".into(),
-                };
-                rl_ledger::flows::sync(c, &[loaded], jiff::Timestamp::now())
-            })
-            .unwrap();
-        app.refresh().await;
-        let said = |app: &super::App| app.flash.as_ref().map(|(m, _)| m.clone()).unwrap_or_default();
-        async fn run(app: &mut super::App, line: &str) {
-            type_in(app, line).await;
-            press(app, KeyCode::Enter, KeyModifiers::NONE).await;
-        }
-
-        // On a flow's row, `/edit` opens its `flow.md` — no name needed.
-        app.select(Some("f:nightly".into()));
-        run(&mut app, "/edit").await;
-        let home = rl_core::Home::at(tmp.path().join("h"));
-        let (editing, line) = app.editor.take().expect("the editor is next");
-        let file = home.flow_dir("nightly").join("flow.md");
-        assert_eq!((editing.name.as_str(), &editing.file, line), ("nightly", &file, 1));
-
-        // Off a flow — on a run — there is nothing to edit, and it says so.
-        app.select(Some(RUN.into()));
-        run(&mut app, "/edit").await;
-        assert!(app.editor.is_none());
-        assert_eq!(said(&app), "nothing here to edit · select a flow");
-        token.cancel();
-    }
-
-    #[tokio::test]
     async fn the_filter_bar_is_compact_glyphs() {
         let (_tmp, token, app, _folder) = panel().await;
         // A glyph and its key for each kind, then a divider and hidden.
-        assert_eq!(app.toggles_line().to_string(), "✦a  ⚑f  ❯s  │  ◌h");
+        assert_eq!(app.toggles_line().to_string(), "✦a  ❯s  │  ◌h");
         token.cancel();
     }
 
@@ -7099,8 +6877,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_flows_row_stands_in_its_project_however_its_in_is_spelled() {
-        let (tmp, token, mut app, folder) = panel_of(|folder, now| {
+    async fn the_list_has_no_flows_and_f_types_on_the_line() {
+        let (tmp, token, mut app, _folder) = panel_of(|folder, now| {
             let mut r = rl_proto::types::Run::new(
                 "run00002",
                 rl_proto::types::RunKind::Command,
@@ -7117,36 +6895,28 @@ mod tests {
             vec![r]
         })
         .await;
-        // Not the project's own path: the temp folder as given (a link on
-        // macOS), and a trailing slash.
-        let spelled = format!("{}/proj/", tmp.path().display());
         let dir = rl_core::Home::at(tmp.path().join("h")).flow_dir("nightly");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join("flow.md"),
-            format!("---\nin: {spelled}\nsteps:\n  probe:\n    run: x\n---\n"),
+            format!(
+                "---\nin: {}/proj\nsteps:\n  probe:\n    run: x\n---\n",
+                tmp.path().display()
+            ),
         )
         .unwrap();
         app.rpc.call::<rl_proto::flow::FlowReload>(()).await.unwrap();
         app.refresh().await;
-        let rows = app.rows();
-        let at = rows
-            .iter()
-            .position(|r| matches!(r, super::Row::Flow(_)))
-            .expect("the flow's row");
-        let head = rows[..at].iter().rev().find_map(|r| match r {
-            super::Row::Group(h) => Some(h.clone()),
-            _ => None,
-        });
-        assert_eq!(
-            head.map(|h| h.workspace),
-            Some(folder.clone()),
-            "under the project itself"
+        assert!(!app.flows.is_empty(), "the flow is loaded");
+        assert!(
+            !app.rows().iter().any(|r| matches!(r, super::Row::Flow(_))),
+            "no flow row on the list"
         );
-        let headers = rows
-            .iter()
-            .filter(|r| matches!(r, super::Row::Group(h) if h.workspace == folder));
-        assert_eq!(headers.count(), 1, "and no second header beside it");
+        assert!(!screen(&mut app, 120, 40).iter().any(|l| l.contains("nightly")));
+        let toggles = app.toggles();
+        press(&mut app, KeyCode::Char('f'), KeyModifiers::NONE).await;
+        assert_eq!(app.line.text(), "f", "f types");
+        assert_eq!(app.toggles(), toggles);
         token.cancel();
     }
 
