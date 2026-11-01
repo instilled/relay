@@ -403,3 +403,223 @@ async fn everywheres_top_has_no_summary() {
     assert_eq!(app.summary_target(), None);
     token.cancel();
 }
+
+#[tokio::test]
+async fn opening_the_overview_does_not_mark_its_first_flow_seen() {
+    let (tmp, token, mut app, folder) = panel().await;
+    flow_in(&tmp, &mut app, "alpha", &md_in(&folder)).await;
+    flow_in(&tmp, &mut app, "zulu", &md_in(&folder)).await;
+    app.refresh().await;
+    approve(&mut app, "alpha").await;
+    approve(&mut app, "zulu").await;
+    fired(
+        &tmp,
+        &folder,
+        "alpha",
+        "fire0001",
+        &[("probe", StepStatus::Failed, Some("boom\r\n"))],
+        FiringStatus::Failed,
+    );
+    app.refresh().await;
+    let needs = |app: &super::App| {
+        let f = app.flows.iter().find(|f| f.name == "alpha").unwrap();
+        super::rows::flow_needs(f, &app.digest)
+    };
+    assert!(needs(&app), "a failed run unseen: it needs you");
+    enter_project(&mut app, &folder).await;
+    assert_eq!(app.sel.as_deref(), Some("f:alpha"));
+    app.refresh().await;
+    assert!(needs(&app), "opening the overview alone does not clear it");
+    // Moving off it and back onto it is looking at it.
+    press(&mut app, KeyCode::Down, KeyModifiers::NONE).await;
+    press(&mut app, KeyCode::Up, KeyModifiers::NONE).await;
+    assert_eq!(app.sel.as_deref(), Some("f:alpha"));
+    app.refresh().await;
+    assert!(!needs(&app), "landed on, it is seen");
+    token.cancel();
+}
+
+#[tokio::test]
+async fn a_question_from_a_live_flow_run_stands_under_its_flow() {
+    use rl_proto::decision::{Decision, DecisionOption, DecisionStatus};
+    use rl_proto::methods::DigestItem;
+    use rl_proto::types::{Cause, Run, RunKind};
+    let (tmp, token, mut app, folder) = panel().await;
+    flow_in(&tmp, &mut app, "alpha", &md_in(&folder)).await;
+    flow_in(&tmp, &mut app, "zulu", &md_in(&folder)).await;
+    app.refresh().await;
+    approve(&mut app, "alpha").await;
+    approve(&mut app, "zulu").await;
+    enter_project(&mut app, &folder).await;
+    // A step of alpha's, still going, asks.
+    let now = jiff::Timestamp::now();
+    let mut r = Run::new(
+        "run07777",
+        RunKind::Command,
+        "alpha · probe",
+        vec![],
+        &folder,
+        &folder,
+        now,
+    );
+    r.cause = Cause::Flow {
+        flow: "alpha".into(),
+        step: "probe".into(),
+    };
+    app.digest.items.push(DigestItem {
+        run: r,
+        summary: String::new(),
+        at: now,
+        unseen: false,
+        joined_by: None,
+        emitted: vec![],
+        cwd: None,
+        recap: None,
+    });
+    app.digest.decisions.push(Decision {
+        id: "dec00002".into(),
+        workspace: folder.clone(),
+        run: Some("run07777".into()),
+        chain: "run07777".into(),
+        group: None,
+        title: "go on?".into(),
+        summary: None,
+        options: vec![DecisionOption {
+            key: "ok".into(),
+            ..Default::default()
+        }],
+        multi: false,
+        status: DecisionStatus::Open,
+        created_at: now,
+        updated_at: now,
+        expires_at: None,
+        resolved_at: None,
+        chosen: vec![],
+        outcome_runs: vec![],
+        note: None,
+    });
+    let keys = app.keys();
+    let at = keys.iter().position(|k| k == "f:alpha").expect("alpha is there");
+    assert_eq!(keys.get(at + 1).map(String::as_str), Some("q:dec00002"), "{keys:?}");
+    assert_eq!(keys.iter().filter(|k| k.starts_with("r:")).count(), 0, "{keys:?}");
+    token.cancel();
+}
+
+#[tokio::test]
+async fn the_line_in_an_overview_on_new_flow_is_in_the_projects_folder() {
+    let (_tmp, token, mut app, folder) = panel().await;
+    enter_project(&mut app, &folder).await;
+    assert!(app.on_new_flow());
+    assert_eq!(app.folder_here(), folder);
+    token.cancel();
+}
+
+#[tokio::test]
+async fn summarising_again_shows_the_progress_above_the_old_text() {
+    let (_tmp, token, mut app, folder) = panel().await;
+    enter_project(&mut app, &folder).await;
+    let target = SummaryTarget::Project { workspace: folder };
+    app.made
+        .insert(target.key(), said_of(&target, "- the build went green"));
+    app.summarising = Some(Summarising {
+        target: target.clone(),
+        title: "proj".into(),
+        deep: false,
+        from: None,
+        since: std::time::Instant::now(),
+        task: tokio::spawn(std::future::pending()),
+    });
+    let frame = draw_text(&mut app);
+    let progress = frame.find("summarising… ").unwrap_or_else(|| panic!("{frame}"));
+    let old = frame.find("the build went green").unwrap_or_else(|| panic!("{frame}"));
+    assert!(progress < old, "{frame}");
+    token.cancel();
+}
+
+#[tokio::test]
+async fn the_kept_project_summary_stays_at_the_top_with_a_flow_selected() {
+    let (tmp, token, mut app, folder) = panel().await;
+    flow_in(&tmp, &mut app, "alpha", &md_in(&folder)).await;
+    app.refresh().await;
+    let away = jiff::Timestamp::now() - jiff::SignedDuration::from_hours(1);
+    let target = SummaryTarget::Project {
+        workspace: folder.clone(),
+    };
+    let mut kept = said_of(&target, "- the deploy went out");
+    kept.from = Some(away);
+    let ledger = rl_ledger::Ledger::open(&rl_core::Home::at(tmp.path().join("h")).ledger()).unwrap();
+    ledger.call_blocking(move |c| rl_ledger::kept::put(c, &kept)).unwrap();
+    app.away_since = Some(away);
+    enter_project(&mut app, &folder).await;
+    app.select(Some(NEW_FLOW.into()));
+    app.moved().await;
+    assert!(
+        draw_text(&mut app).contains("the deploy went out"),
+        "{}",
+        draw_text(&mut app)
+    );
+    press(&mut app, KeyCode::Up, KeyModifiers::NONE).await;
+    assert_eq!(app.sel.as_deref(), Some("f:alpha"));
+    let frame = draw_text(&mut app);
+    assert!(frame.contains("the deploy went out"), "{frame}");
+    assert!(!frame.contains("no summary yet"), "{frame}");
+    token.cancel();
+}
+
+#[tokio::test]
+async fn a_flows_page_in_the_overview_says_esc_back() {
+    let (tmp, token, mut app, folder) = panel().await;
+    flow_in(&tmp, &mut app, "alpha", &md_in(&folder)).await;
+    app.refresh().await;
+    enter_project(&mut app, &folder).await;
+    assert!(app.hints().ends_with("esc the list"), "{}", app.hints());
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+    assert!(app.show_pane);
+    let hints = app.hints();
+    assert!(hints.contains("^o hides details"), "{hints}");
+    assert!(hints.ends_with("esc back"), "{hints}");
+    token.cancel();
+}
+
+#[tokio::test]
+async fn ctrl_backslash_in_the_overview_goes_to_the_list() {
+    let (tmp, token, mut app, folder) = panel().await;
+    flow_in(&tmp, &mut app, "alpha", &md_in(&folder)).await;
+    app.refresh().await;
+    enter_project(&mut app, &folder).await;
+    assert!(!app.show_pane);
+    press(&mut app, KeyCode::Char('\\'), KeyModifiers::CONTROL).await;
+    assert!(app.view == View::Work);
+    assert!(app.overview.is_none());
+    assert_eq!(app.sel, Some(format!("g:{}", folder.display())));
+    token.cancel();
+}
+
+#[tokio::test]
+async fn the_events_view_from_the_overview_comes_back_to_it() {
+    let (tmp, token, mut app, folder) = panel().await;
+    flow_in(&tmp, &mut app, "alpha", &md_in(&folder)).await;
+    app.refresh().await;
+    enter_project(&mut app, &folder).await;
+    app.toggle_events().await;
+    assert!(app.view == View::Events);
+    press(&mut app, KeyCode::Esc, KeyModifiers::NONE).await;
+    assert!(app.view == View::Overview);
+    assert_eq!(app.overview, Some(Scope::Project(folder.clone())));
+    assert_eq!(app.sel.as_deref(), Some("f:alpha"));
+    token.cancel();
+}
+
+#[tokio::test]
+async fn a_catch_up_over_the_overview_leaves_for_the_list() {
+    let (tmp, token, mut app, folder) = panel().await;
+    flow_in(&tmp, &mut app, "alpha", &md_in(&folder)).await;
+    app.refresh().await;
+    enter_project(&mut app, &folder).await;
+    app.open_catch_up(super::tests::nine_hours_ago(), false).await;
+    assert!(app.view == View::CatchUp);
+    press(&mut app, KeyCode::Esc, KeyModifiers::NONE).await;
+    assert!(app.view == View::Work);
+    assert!(app.overview.is_none());
+    token.cancel();
+}

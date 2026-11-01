@@ -58,6 +58,9 @@ impl App {
     /// Puts `scope`'s overview up, the list's cursor kept for when it comes back. The cursor
     /// lands on `at` when it is one of its rows, else on its first flow, else on `+ new flow`.
     pub(super) fn open_overview(&mut self, scope: Scope, at: Option<String>) {
+        if self.overview.as_ref() != Some(&scope) {
+            self.overview_said = None;
+        }
         self.overview = Some(scope);
         self.open_view(View::Overview);
         self.leave_subpage();
@@ -100,6 +103,9 @@ impl App {
         );
         // Each flow with the questions right under it, as `(needs you, name, rows)`.
         let mut blocks: Vec<(bool, String, Vec<Row<'_>>)> = Vec::new();
+        // A live run's question is filed under the run, which is not a row here: it goes under
+        // the run's flow, once every flow has its block.
+        let mut stray: Vec<(&str, Row<'_>)> = Vec::new();
         let mut inside = false;
         let mut under_flow = false;
         for r in all {
@@ -118,7 +124,19 @@ impl App {
                         b.push(Row::Question(q));
                     }
                 }
+                Row::Question(q) => {
+                    under_flow = false;
+                    let asker = q.run.as_deref().and_then(|id| self.run_by_id(id));
+                    if let Some(Cause::Flow { flow, .. }) = asker.map(|r| &r.cause) {
+                        stray.push((flow.as_str(), Row::Question(q)));
+                    }
+                }
                 _ => under_flow = false,
+            }
+        }
+        for (flow, q) in stray {
+            if let Some((.., b)) = blocks.iter_mut().find(|(_, name, _)| name == flow) {
+                b.push(q);
             }
         }
         blocks.sort_by(|a, b| (!a.0, &a.1).cmp(&(!b.0, &b.1)));
@@ -164,21 +182,40 @@ impl App {
         };
         let key = target.key();
         let now = Timestamp::now();
-        // The one loaded with the cursor's row, else the last one made here.
+        // A new one being written: it says so above the one it will replace.
+        let mut lines = Vec::new();
+        if let Some(s) = self.summarising.as_ref().filter(|s| s.target == target) {
+            let secs = s.since.elapsed().as_secs();
+            lines.push(Line::styled(format!(" summarising… {secs}s"), theme::accent()));
+        }
+        // The one loaded with the cursor's row, else the last one made here, else the one
+        // loaded when the cursor was on nothing here.
         let kept = self
             .summary
             .as_ref()
             .filter(|s| s.target == key)
-            .or_else(|| self.made.get(&key));
-        if let Some(s) = kept {
+            .or_else(|| self.made.get(&key))
+            .or_else(|| self.overview_said.as_ref().filter(|s| s.target == key));
+        match kept {
             // Its own blank line first is the overview's to place.
-            return pane::summary_section(Some(s), width, now).into_iter().skip(1).collect();
+            Some(s) => lines.extend(pane::summary_section(Some(s), width, now).into_iter().skip(1)),
+            None if lines.is_empty() => {
+                lines.push(Line::styled(" no summary yet · /summary writes it", theme::dim()));
+            }
+            None => {}
         }
-        if let Some(s) = self.summarising.as_ref().filter(|s| s.target == target) {
-            let secs = s.since.elapsed().as_secs();
-            return vec![Line::styled(format!(" summarising… {secs}s"), theme::accent())];
-        }
-        vec![Line::styled(" no summary yet · /summary writes it", theme::dim())]
+        lines
+    }
+
+    /// The key of what the overview's top says, the project's; `everywhere`'s has none.
+    pub(super) fn overview_target_key(&self) -> Option<String> {
+        let folder = self.overview.as_ref()?.folder()?;
+        Some(
+            SummaryTarget::Project {
+                workspace: folder.to_path_buf(),
+            }
+            .key(),
+        )
     }
 
     /// The overview: its top, a blank line, its rows as the list draws them, and `+ new flow`,

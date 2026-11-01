@@ -374,6 +374,9 @@ struct App {
     view: View,
     /// The project the overview is of, while it is up or on the way back to it.
     overview: Option<overview::Scope>,
+    /// What was last said of the overview's project, as fetched with the cursor on nothing in
+    /// it: its top keeps it while the cursor is on a flow.
+    overview_said: Option<Summary>,
     /// Every flow: for its row's place and words, the chips on project rows,
     /// and a flow's pane.
     flows: Vec<Flow>,
@@ -1314,6 +1317,7 @@ impl App {
             summary: None,
             summarising: None,
             overview: None,
+            overview_said: None,
             topping: None,
             top: None,
             outcomes: Default::default(),
@@ -1743,6 +1747,13 @@ impl App {
                 Err(_) => return,
             }
         };
+        // The overview's top is its project's, wherever the cursor goes next.
+        if let Some(s) = kept
+            .as_ref()
+            .filter(|s| self.overview_target_key().as_ref() == Some(&s.target))
+        {
+            self.overview_said = Some(s.clone());
+        }
         self.summary = kept.or(made);
     }
 
@@ -1862,7 +1873,7 @@ impl App {
     }
 
     /// What `^x` or `/archive` on a flow in the catch-up says.
-    const FLOW_ON_THE_LIST: &'static str = "^x archives a flow's runs on the list · esc goes there";
+    const FLOW_ON_THE_LIST: &'static str = "^x archives a flow's runs in its project · enter goes there";
 
     // ---- flows -------------------------------------------------------------
 
@@ -3281,7 +3292,12 @@ impl App {
                         _ => "/flow run · ",
                     };
                     let archives = if f.runs.is_empty() { "" } else { "^x archives · " };
-                    format!("enter its firings · {yes}^e edits · {archives}/summary · esc the list")
+                    // Its page up: `esc` is back to the overview.
+                    if self.show_pane {
+                        format!("enter its firings · {yes}^e edits · {archives}/summary · {pane} · esc back")
+                    } else {
+                        format!("enter its firings · {yes}^e edits · {archives}/summary · esc the list")
+                    }
                 }
                 _ => "esc the list".into(),
             };
@@ -6092,8 +6108,8 @@ mod tests {
         type_in(&mut app, "/sort").await;
         press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
         assert_eq!(said(&app), "/sort sorts on the list · esc goes there");
-        // A flow here holds only the stretch's runs: archiving them is the
-        // list's, where it holds them all.
+        // A flow here holds only the stretch's runs: archiving them is its
+        // project's overview's, where it holds them all.
         let flow = app
             .catch_rows()
             .iter()
@@ -6104,11 +6120,17 @@ mod tests {
             .expect("the nightly flow");
         app.select(Some(flow));
         press(&mut app, KeyCode::Char('x'), KeyModifiers::CONTROL).await;
-        assert_eq!(said(&app), "^x archives a flow's runs on the list · esc goes there");
+        assert_eq!(
+            said(&app),
+            "^x archives a flow's runs in its project · enter goes there"
+        );
         assert!(app.arm.is_none());
         type_in(&mut app, "/archive").await;
         press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
-        assert_eq!(said(&app), "^x archives a flow's runs on the list · esc goes there");
+        assert_eq!(
+            said(&app),
+            "^x archives a flow's runs in its project · enter goes there"
+        );
         assert!(app.digest.items.iter().any(|i| i.run.id == "run00002"), "not archived");
         // What acts on the row itself acts here: ^t pins the run under the
         // cursor.

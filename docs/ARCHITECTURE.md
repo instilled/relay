@@ -249,7 +249,7 @@ sequenceDiagram
   `View::Overview` over a `Scope` (`Project(folder)` or `Everywhere`), `tui/overview.rs`. It has the
   project's last summary on top (`/summary` there, on `+ new flow` or a flow, writes it; everywhere has
   none), then its flows as rows (those that need you first, then by name, each with its open questions
-  under it), each opening its page, and a last row, `+ new flow` (`NEW_FLOW`), which puts `flow new` on
+  under it), each opening its page, and a last row, `+ new flow` (`NEW_FLOW`), which puts `/flow new ` on
   the line. Flows are reached only there, and from the catch-up and the events. Rows never move by themselves; `⇧↑↓` reorders the
   runs, kept in `row_order` via `digest.order`. Toggles (`a` agents, `s` shells, `h` hidden) and a
   search (`tui/query.rs`, words plus `in: is: kind: by: on:` tokens) narrow it.

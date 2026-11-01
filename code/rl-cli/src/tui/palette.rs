@@ -122,7 +122,7 @@ pub const ALL: &[Command] = &[
         name: "hide",
         args: "",
         words: &[],
-        what: "take a run, a flow or a project off the list, never stopping it; with hidden on, bring it back",
+        what: "take a run or a project off the list, never stopping it; with hidden on, bring it back",
         cmd: Cmd::Hide,
     },
     Command {

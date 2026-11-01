@@ -127,8 +127,9 @@ impl App {
         if !matches!(self.mode, Mode::Normal | Mode::Answer(_) | Mode::Rename(_) | Mode::Walk) {
             self.shortcuts = false;
         }
-        // `ctrl-\` leaves any subpage to the list in one shot, from inside a sub-mode too.
-        if self.show_pane
+        // `ctrl-\` leaves any subpage to the list in one shot, from inside a sub-mode too, and
+        // the overview, page or not.
+        if (self.show_pane || self.view == View::Overview)
             && matches!(self.mode, Mode::Normal | Mode::Answer(_) | Mode::Walk | Mode::Rename(_))
             && matches!(k.code, KeyCode::Char('\\' | '4'))
             && k.modifiers.contains(KeyModifiers::CONTROL)
@@ -792,7 +793,8 @@ impl App {
                 overview::Scope::Project(h.workspace.clone())
             };
             self.open_overview(scope, None);
-            self.moved().await;
+            // Not `moved`: opening the overview alone does not mark the flow it lands on seen.
+            self.load_pane().await;
         } else {
             self.say("nothing here to open");
         }

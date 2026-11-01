@@ -22,9 +22,17 @@ impl App {
     }
 
     /// The folder the selected row's work is in. The `everywhere` header has
-    /// none: what is under it ran in folders of all sorts.
+    /// none: what is under it ran in folders of all sorts. In an overview with
+    /// no row under the cursor, the project's.
     pub(super) fn selected_folder(&self) -> Option<PathBuf> {
-        match self.selected()? {
+        let Some(row) = self.selected() else {
+            // In an overview with nothing under the cursor (`+ new flow`): its project's.
+            return match self.view {
+                View::Overview => self.overview.as_ref().and_then(|s| s.folder()).map(Path::to_path_buf),
+                _ => None,
+            };
+        };
+        match row {
             Row::Run(i) => Some(i.run.workspace.clone()),
             Row::Flow(f) => self
                 .flow_of_row(&f)
