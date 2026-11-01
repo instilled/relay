@@ -482,16 +482,43 @@ fn with_flows_off_a_pinned_or_come_through_flow_run_is_not_in_the_band() {
     // Hidden earlier, since failed: it would come through.
     let mut back = fired("back", "pulse", RunState::Failed, "2026-09-10T11:30:00Z", true);
     back.run.hidden_at = Some("2026-09-10T10:00:00Z".parse().unwrap());
-    let d = digest(now, vec![pinned, back], vec![]);
+    // A live pinned one too: not terminal, so `flow_of` does not know it.
+    let mut live = fired("live", "pulse", RunState::NeedsInput, "2026-09-10T11:40:00Z", true);
+    live.run.pinned_at = Some("2026-09-10T11:45:00Z".parse().unwrap());
+    let d = digest(now, vec![pinned, back, live], vec![]);
     let names = Names::new([(PathBuf::from(ws), "relay".to_string())]);
     let flows = [flow("pulse", Some(ws))];
     let on = keys(&toggles_build(&d, &names, &flows, (true, true, true, false), "", now));
-    assert!(
-        on.contains(&"r:pin".to_string()) && on.contains(&"r:back".to_string()),
-        "{on:?}"
-    );
+    for k in ["r:pin", "r:back", "r:live"] {
+        assert!(on.contains(&k.to_string()), "{on:?}");
+    }
     let off = keys(&toggles_build(&d, &names, &flows, (false, true, true, false), "", now));
-    assert!(!off.iter().any(|k| k == "r:pin" || k == "r:back"), "{off:?}");
+    assert!(
+        !off.iter().any(|k| ["r:pin", "r:back", "r:live"].contains(&k.as_str())),
+        "{off:?}"
+    );
+}
+
+#[test]
+fn with_flows_off_a_flow_run_that_needs_you_is_not_hinted_on_its_project() {
+    let now: Timestamp = "2026-09-10T12:00:00Z".parse().unwrap();
+    let ws = "/home/f/relay";
+    let asking = fired("a1", "pulse", RunState::NeedsInput, "2026-09-10T11:00:00Z", true);
+    let mut hid_ = fired("a2", "pulse", RunState::NeedsInput, "2026-09-10T11:10:00Z", true);
+    hid_.run.hidden_at = Some("2026-09-10T11:20:00Z".parse().unwrap());
+    let d = digest(
+        now,
+        vec![
+            asking,
+            hid_,
+            item("w", RunState::Working, ws, "2026-09-10T11:01:00Z", false),
+        ],
+        vec![],
+    );
+    let names = Names::new([(PathBuf::from(ws), "relay".to_string())]);
+    let flows = [flow("pulse", Some(ws))];
+    let rows = toggles_build(&d, &names, &flows, (false, true, true, false), "", now);
+    assert_eq!(head_of(&rows, "relay").attention, 0);
 }
 
 #[test]

@@ -194,6 +194,8 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
     let mut buried: HashMap<String, usize> = HashMap::new();
     for i in &d.items {
         let r = &i.run;
+        // With flows off a flow's run is not on the list, nor hinted on its project.
+        let flow_run = matches!(r.cause, Cause::Flow { .. });
         // A summary of everything runs in the Relay home: Relay's doing, not
         // a project of yours. `rl ls --all` and the events have it.
         if matches!(r.cause, Cause::Assistant(_)) && cx.relay.is_some_and(|h| r.cwd == h) {
@@ -207,7 +209,7 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
                 && query.hits(&run_subject(i, &names.group(&r.place_key())))
             {
                 through.push((rank::score(r), Some(r.state_at), r.id.clone(), Row::Run(i)));
-            } else if !comes_through(r, since) && r.state.needs_attention() {
+            } else if !comes_through(r, since) && r.state.needs_attention() && (cx.show_flows || !flow_run) {
                 // Hidden while it already needed you, so it does not come
                 // through: its project hints it is there.
                 *buried.entry(group_of(r, names, cx.flows).0).or_insert(0) += 1;
@@ -218,7 +220,7 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
         if r.pinned_at.is_some() {
             // Pinned stands above the agents and shells toggles, but a flow's
             // run is the flow's: with flows off it is not on the list.
-            if (cx.show_flows || flow_of(r).is_none()) && query.hits(&run_subject(i, &names.group(&r.place_key()))) {
+            if (cx.show_flows || !flow_run) && query.hits(&run_subject(i, &names.group(&r.place_key()))) {
                 pinned.push(i);
             }
             continue;
@@ -233,7 +235,7 @@ pub fn build<'a>(d: &'a Digest, cx: &Context<'_>) -> Vec<Row<'a>> {
         if !keeps(r, cx.show_agents, cx.show_flows, cx.show_shells) {
             // A toggle takes it off the list; if it needs you, its project
             // hints it is still there.
-            if r.state.needs_attention() {
+            if r.state.needs_attention() && (cx.show_flows || !flow_run) {
                 *buried.entry(group_of(r, names, cx.flows).0).or_insert(0) += 1;
             }
             continue;
