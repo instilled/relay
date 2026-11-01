@@ -22,7 +22,7 @@
 //!       PostToolUse: carries-on
 //!       Stop: idle
 //!       SessionEnd: ended
-//!   list: { args: [agents, --json], reader: claude-agents }
+//!   list: { args: [agents, --json, --all], reader: claude-agents }
 //!   attach: [attach, "{id}"]
 //! ```
 //!
@@ -967,7 +967,7 @@ mod tests {
         assert_eq!(
             claude.list,
             Some(List {
-                args: vec!["agents".into(), "--json".into()],
+                args: vec!["agents".into(), "--json".into(), "--all".into()],
                 reader: "claude-agents".into()
             })
         );

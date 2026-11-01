@@ -1,6 +1,7 @@
-//! Claude's own sessions, as `claude agents --json` lists them: the
-//! `claude-agents` reader a profile's `sessions.list` names (`lister`),
-//! asked of the claude profile's binary. Claude's is the one listing there
+//! Claude's own sessions, as `claude agents --json --all` lists them (the
+//! done ones too, as `claude agents` shows them): the `claude-agents`
+//! reader a profile's `sessions.list` names (`lister`), asked of the claude
+//! profile's binary. Claude's is the one listing there
 //! is today; `/import` asks it too, to move Claude's background sessions
 //! over.
 //!

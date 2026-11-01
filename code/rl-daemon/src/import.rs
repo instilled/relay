@@ -60,7 +60,7 @@ pub async fn list(d: &Daemon, p: ImportListParams) -> ImportReport {
 
 async fn sessions(d: &Daemon, mark: bool, wait: Duration) -> Result<Vec<Outside>> {
     let bin = claude_bin(d)?;
-    let listed = crate::outside::lister::ask(&bin, &["agents", "--json"], wait).await?;
+    let listed = crate::outside::lister::ask(&bin, &["agents", "--json", "--all"], wait).await?;
     let mut all = crate::outside::claude::parse(&listed)?;
     let listed = all.clone();
     let (carried, was, mentioned) = d
