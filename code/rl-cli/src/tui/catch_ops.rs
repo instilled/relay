@@ -154,7 +154,7 @@ impl App {
         let Some(row) = self.selected() else {
             return self.say("nothing here to open");
         };
-        // The list has no flow rows: a flow goes to its project's line.
+        // The list has no flow rows: a flow opens in its project's overview.
         if let Row::Flow(f) = &row {
             let name = f.name.clone();
             drop(row);
@@ -216,6 +216,7 @@ impl App {
             title: "everything".into(),
             deep: false,
             from: Some(since),
+            since: Instant::now(),
             task,
         });
     }

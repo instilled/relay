@@ -127,13 +127,18 @@ impl App {
         if !matches!(self.mode, Mode::Normal | Mode::Answer(_) | Mode::Rename(_) | Mode::Walk) {
             self.shortcuts = false;
         }
-        // `ctrl-\` leaves any subpage to the list in one shot, from inside a sub-mode too.
-        if self.show_pane
+        // `ctrl-\` leaves any subpage to the list in one shot, from inside a sub-mode too, and
+        // the overview, page or not.
+        if (self.show_pane || self.view == View::Overview)
             && matches!(self.mode, Mode::Normal | Mode::Answer(_) | Mode::Walk | Mode::Rename(_))
             && matches!(k.code, KeyCode::Char('\\' | '4'))
             && k.modifiers.contains(KeyModifiers::CONTROL)
         {
             self.leave_subpage();
+            // From a flow's page in the overview, past the overview too.
+            if self.view == View::Overview {
+                self.back_to_list().await;
+            }
             return Ok(());
         }
         match std::mem::replace(&mut self.mode, Mode::Normal) {
@@ -390,9 +395,9 @@ impl App {
                 _ => {}
             }
         }
-        // On a flow's row, with nothing typed, → opens it to its latest firing's steps and ←
-        // folds it again.
-        if self.view == View::Work
+        // On a flow's row in the overview, with nothing typed, → opens it to its latest firing's
+        // steps and ← folds it again.
+        if self.view == View::Overview
             && self.line.is_empty()
             && matches!(self.mode, Mode::Normal)
             && !self.show_pane
@@ -418,6 +423,16 @@ impl App {
             && self.proposal_shown().is_some()
         {
             self.edit_proposal();
+            return Ok(());
+        }
+        // `^e` on an empty line on a flow's row in the overview: its `flow.md`, as `/flow edit`.
+        if k.code == KeyCode::Char('e')
+            && k.modifiers == KeyModifiers::CONTROL
+            && self.line.is_empty()
+            && self.view == View::Overview
+            && let Some(name) = self.flow_here()
+        {
+            self.edit_flow(&name);
             return Ok(());
         }
         // `shift-tab` on something typed: it is the other thing from what it reads as.
@@ -684,6 +699,8 @@ impl App {
                     // A step back within the inbox.
                 } else if self.view == View::CatchUp || self.view == View::Report {
                     self.back_to_list().await;
+                } else if self.view == View::Overview {
+                    self.leave_overview().await;
                 }
             }
             (KeyCode::Down, _) => {
@@ -737,13 +754,19 @@ impl App {
             }
             return Ok(());
         }
+        if self.on_new_flow() {
+            // A new flow is drafted from the line, as `/flow new` does.
+            let draft = "/flow new ";
+            self.line.set_with_cursor(draft, draft.len());
+            return Ok(());
+        }
         if self.selected_run().is_some() {
             self.open_run(area).await;
             return Ok(());
         }
         if self.selected_flow().is_some() {
-            // A flow never grows into its runs on the list: they are in its subpage, and enter
-            // again walks its steps and its last firings there.
+            // A flow's row in the overview never grows into its runs: they are in its page, and
+            // enter again walks its steps and its last firings there.
             self.pane = Pane::Facts;
             self.show_pane = true;
             self.load_pane().await;
@@ -761,11 +784,18 @@ impl App {
             // pane first. The pane is still a `^o`/`/pane` away.
             let s = s.clone();
             self.enter_outside(&s, area).await;
-        } else if matches!(self.selected(), Some(Row::Group(_))) {
-            // A project header: its flows there; `everywhere`'s, the flows with no `in` and how
-            // runs outside every project stand.
-            self.pane = Pane::Facts;
-            self.show_pane = true;
+        } else if let Some(Row::Group(h)) = self.selected() {
+            // A project's line: its overview, its flows under what was said of it; `everywhere`'s,
+            // the flows with no `in`.
+            let scope = if h.is_everywhere() {
+                overview::Scope::Everywhere
+            } else {
+                overview::Scope::Project(h.workspace.clone())
+            };
+            self.open_overview(scope, None);
+            self.fetch_overview_top().await;
+            // Not `moved`: opening the overview alone does not mark the flow it lands on seen.
+            self.load_pane().await;
         } else {
             self.say("nothing here to open");
         }

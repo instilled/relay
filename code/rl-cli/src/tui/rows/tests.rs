@@ -1057,6 +1057,44 @@ fn a_project_line_tallies_its_flows_and_what_needs_you() {
 }
 
 #[test]
+fn the_everywhere_line_stands_with_its_tally_when_a_flow_has_no_in() {
+    let now: Timestamp = "2026-09-10T12:00:00Z".parse().unwrap();
+    let d = digest(now, vec![], vec![]);
+    let names = Names::default();
+    let loose = [
+        flow("pulse", None),
+        Flow {
+            approved_hash: None,
+            ..flow("deploy", None)
+        },
+    ];
+    let rows = toggles_build(&d, &names, &loose, DEFAULT, "", now);
+    // No runs under it, and the list has no flow rows: only its line.
+    assert_eq!(keys(&rows), ["[everywhere]"]);
+    assert_eq!(
+        head_of(&rows, EVERYWHERE).tally,
+        FlowTally {
+            total: 2,
+            running: 0,
+            needs: 1
+        }
+    );
+    // A flow `in` a folder, or one removed, is not everywhere's.
+    let homed = [flow("pulse", Some("/home/f/relay")), {
+        let mut gone = flow("old", None);
+        gone.removed_at = Some(now);
+        gone
+    }];
+    assert!(keys(&toggles_build(&d, &names, &homed, DEFAULT, "", now)).is_empty());
+    assert!(keys(&toggles_build(&d, &names, &[], DEFAULT, "", now)).is_empty());
+    // A search for something else takes it away, as it does a project's line.
+    assert!(keys(&toggles_build(&d, &names, &loose, DEFAULT, "zzzz", now)).is_empty());
+    // With the flows on (the catch-up) its line carries the tally too.
+    let rows = flows_build(&d, &names, &loose, "", now);
+    assert_eq!(head_of(&rows, EVERYWHERE).tally.total, 2);
+}
+
+#[test]
 fn the_headline_counts_a_flow_that_needs_you() {
     let now: Timestamp = "2026-09-10T12:00:00Z".parse().unwrap();
     let mut d = digest(
@@ -1744,7 +1782,7 @@ fn a_groups_header_carries_the_flows_in_its_folder() {
             "f:nightly",
             "f:tests-failed",
             "f:tidy",
-            "[everywhere] ",
+            "[everywhere] 1 flow",
             "f:pulse"
         ],
         "what has run first, then the rest by name"

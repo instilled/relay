@@ -39,6 +39,8 @@ pub enum Place {
     Rename,
     /// A flow's pane walked: its steps, then its last firings.
     Walk,
+    /// A project's overview: its flows, and `+ new flow`.
+    Overview,
 }
 
 /// One key and what it does there, in a word or two.
@@ -169,6 +171,14 @@ fn place_keys(at: Place) -> Vec<Key> {
             key("alt ←→", "by word"),
             key("^w ^u ^k", "cut"),
             key("↑↓", "let it go"),
+        ],
+        Place::Overview => vec![
+            key("↑↓", "moves"),
+            key("enter", "opens"),
+            key("→ ←", "its steps"),
+            key("^e", "edits"),
+            key("/summary", ""),
+            key("esc", "the list"),
         ],
         Place::Walk => vec![
             key("↑↓", "steps, then firings"),
@@ -333,6 +343,11 @@ mod tests {
             "↑↓ move · enter go to it · 1-9 answers · /summary [deep] · esc the list · ^h"
         );
 
+        assert_eq!(
+            one_line(Place::Overview),
+            "↑↓ moves · enter opens · → ← its steps · ^e edits · /summary · esc the list · ^h"
+        );
+
         let question = one_line(Place::Question);
         assert!(question.contains("enter its choices"), "{question}");
         assert!(question.contains("1-9 ↵ answers"), "{question}");
@@ -413,6 +428,7 @@ mod tests {
             Place::Hidden,
             Place::Rename,
             Place::Walk,
+            Place::Overview,
         ] {
             let ks = keys(at);
             for width in [160, 120, 80, 60, 40, 30] {
