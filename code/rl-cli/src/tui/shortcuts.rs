@@ -41,6 +41,8 @@ pub enum Place {
     Walk,
     /// A project's overview: its flows, and `+ new flow`.
     Overview,
+    /// A flow proposed in the pane, new or a change.
+    FlowProposal,
 }
 
 /// One key and what it does there, in a word or two.
@@ -177,8 +179,16 @@ fn place_keys(at: Place) -> Vec<Key> {
             key("enter", "opens"),
             key("→ ←", "its steps"),
             key("^e", "edits"),
+            key("type", "changes it / makes one"),
             key("/summary", ""),
             key("esc", "the list"),
+        ],
+        Place::FlowProposal => vec![
+            key("type", "changes it"),
+            key("enter", "saves"),
+            key("^e", "opens in $EDITOR"),
+            key("↑↓", "reads"),
+            key("esc", "drops"),
         ],
         Place::Walk => vec![
             key("↑↓", "steps, then firings"),
@@ -345,7 +355,13 @@ mod tests {
 
         assert_eq!(
             one_line(Place::Overview),
-            "↑↓ moves · enter opens · → ← its steps · ^e edits · /summary · esc the list · ^h"
+            "↑↓ moves · enter opens · → ← its steps · ^e edits · type changes it / makes one · \
+             /summary · esc the list · ^h"
+        );
+
+        assert_eq!(
+            one_line(Place::FlowProposal),
+            "type changes it · enter saves · ^e opens in $EDITOR · ↑↓ reads · esc drops · ^h"
         );
 
         let question = one_line(Place::Question);
@@ -429,6 +445,7 @@ mod tests {
             Place::Rename,
             Place::Walk,
             Place::Overview,
+            Place::FlowProposal,
         ] {
             let ks = keys(at);
             for width in [160, 120, 80, 60, 40, 30] {
@@ -518,6 +535,8 @@ mod tests {
             Place::Events,
             Place::Rename,
             Place::Walk,
+            Place::Overview,
+            Place::FlowProposal,
         ] {
             let last = keys(at).pop().unwrap();
             assert_eq!(last.keys, "^h", "{at:?}");

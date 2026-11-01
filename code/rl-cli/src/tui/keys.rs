@@ -766,9 +766,8 @@ impl App {
             return Ok(());
         }
         if self.on_new_flow() {
-            // A new flow is drafted from the line, as `/flow new` does.
-            let draft = "/flow new ";
-            self.line.set_with_cursor(draft, draft.len());
+            // A new flow is asked for in words, typed on its row.
+            self.say("type what the new flow should do, then enter");
             return Ok(());
         }
         if self.selected_run().is_some() {
@@ -872,9 +871,9 @@ impl App {
         let at = self.line_folder(self.line.text());
         let here = self.here(&at);
         let mut what = line::what(self.line.text(), &self.agents, &|h| complete::runnable(h, &here));
-        // With a proposal up, words change it: a first word that runs is still one of them,
-        // unless a bang says otherwise.
-        if (self.proposal_shown().is_some() || self.flow_proposal_shown().is_some())
+        // Where words change something, a first word that runs is still one of them, unless a
+        // bang says otherwise.
+        if self.words_only()
             && !self.line.text().trim_start().starts_with('!')
             && matches!(what, line::What::Shell(_) | line::What::Agent { .. })
         {
@@ -885,6 +884,13 @@ impl App {
         } else {
             what
         }
+    }
+
+    /// Whether the line is read as words whatever its first word: with a proposal up, run or
+    /// flow, words change it; in the overview on a flow or `+ new flow`, they change the flow or
+    /// make one.
+    pub(super) fn words_only(&self) -> bool {
+        self.proposal_shown().is_some() || self.flow_proposal_shown().is_some() || self.overview_words_for().is_some()
     }
 
     /// `enter` on the line: what it says. Nothing typed, the row instead.
@@ -936,6 +942,8 @@ impl App {
                 } else if self.flow_proposal_shown().is_some() {
                     self.line.clear();
                     self.refine_flow(words);
+                } else if self.overview_words(words.clone()) {
+                    self.line.clear();
                 } else {
                     self.line.clear();
                     self.ask(words, Want::Any);

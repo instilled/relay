@@ -31,8 +31,6 @@ pub enum Aim {
         folder: Option<PathBuf>,
     },
     /// A change to the flow `name`, whose `flow.md` was `base` when it was asked.
-    // Asked for by nothing yet but the tests: the overview's words, which ask for it, come next.
-    #[allow(dead_code)]
     Change { name: String, base: String },
 }
 

@@ -1577,6 +1577,10 @@ impl App {
         if self.search.is_some() {
             return None;
         }
+        // A flow proposed takes the keys while it is up, wherever it was asked from.
+        if self.flow_proposal_shown().is_some() {
+            return Some(shortcuts::Place::FlowProposal);
+        }
         // The same test as the footer's: the output page's keys while it is up.
         if self.pane == Pane::Term && self.term.is_some() {
             return Some(shortcuts::Place::Term {
@@ -2438,7 +2442,11 @@ impl App {
                 line::What::Ask(_) if self.proposal_shown().is_some() || self.flow_proposal_shown().is_some() => {
                     ("…", " changes the proposal".into(), theme::dim())
                 }
-                line::What::Ask(_) => ("…", " asks the assistant".into(), theme::dim()),
+                line::What::Ask(_) => match self.overview_words_for() {
+                    Some(Some(name)) => ("…", format!(" changes {name}"), theme::dim()),
+                    Some(None) => ("…", " makes a new flow".into(), theme::dim()),
+                    None => ("…", " asks the assistant".into(), theme::dim()),
+                },
             },
         };
         // Which way `shift-tab` turns it.
@@ -3304,7 +3312,7 @@ impl App {
         }
         if self.view == View::Overview {
             if self.on_new_flow() {
-                return "enter writes one · esc the list".into();
+                return "type what it should do · esc the list".into();
             }
             return match self.selected() {
                 Some(Row::Question(_)) => {
@@ -3318,9 +3326,13 @@ impl App {
                     let archives = if f.runs.is_empty() { "" } else { "^x archives · " };
                     // Its page up: `esc` is back to the overview.
                     if self.show_pane {
-                        format!("enter its firings · {yes}^e edits · {archives}/summary · {pane} · esc back")
+                        format!(
+                            "type changes it · enter its firings · {yes}^e edits · {archives}/summary · {pane} · esc back"
+                        )
                     } else {
-                        format!("enter its firings · {yes}^e edits · {archives}/summary · esc the list")
+                        format!(
+                            "type changes it · enter its firings · {yes}^e edits · {archives}/summary · esc the list"
+                        )
                     }
                 }
                 _ => "esc the list".into(),

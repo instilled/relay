@@ -1,10 +1,13 @@
 //! A project's overview: `enter` on its line opens its flows, under what was said of it, with
 //! `+ new flow` last; `esc` goes back to the line. A real `rld` over a fresh home.
 
+use super::flow_proposal::Aim;
+use super::flow_proposal_tests::{answer_md, said, unasked};
 use super::flow_tests::{fired, flow_in};
 use super::overview::Scope;
 use super::tests::{draw_text, panel, press, type_in};
-use super::{NEW_FLOW, Summarising, View};
+use super::{NEW_FLOW, Summarising, View, line};
+use crate::context::Want;
 use crossterm::event::{KeyCode, KeyModifiers};
 use rl_proto::flow::{FiringStatus, FlowApproval, FlowApprove, StepStatus};
 use rl_proto::types::{Summary, SummaryTarget};
@@ -111,30 +114,15 @@ async fn the_overview_draws_its_top_its_flows_and_new_flow() {
     token.cancel();
 }
 
-#[tokio::test]
-async fn a_flows_question_stands_under_it_and_the_line_answers_it() {
+/// A question `dec00001`, open, asked by the firing `chain`: its one option `ok`.
+fn asked_of(tmp: &tempfile::TempDir, folder: &Path, chain: &str) {
     use rl_proto::decision::{Decision, DecisionOption, DecisionStatus};
-    let (tmp, token, mut app, folder) = panel().await;
-    flow_in(&tmp, &mut app, "alpha", &md_in(&folder)).await;
-    flow_in(&tmp, &mut app, "zulu", &md_in(&folder)).await;
-    app.refresh().await;
-    approve(&mut app, "alpha").await;
-    approve(&mut app, "zulu").await;
-    fired(
-        &tmp,
-        &folder,
-        "alpha",
-        "fire0001",
-        &[("probe", StepStatus::Waiting, None)],
-        FiringStatus::Waiting,
-    );
-    // The firing's question: its chain is the firing.
     let now = jiff::Timestamp::now();
     let asked = Decision {
         id: "dec00001".into(),
-        workspace: folder.clone(),
+        workspace: folder.to_path_buf(),
         run: None,
-        chain: "fire0001".into(),
+        chain: chain.into(),
         group: None,
         title: "ship it?".into(),
         summary: None,
@@ -156,6 +144,25 @@ async fn a_flows_question_stands_under_it_and_the_line_answers_it() {
     ledger
         .call_blocking(move |c| rl_ledger::decisions::insert(c, &asked))
         .unwrap();
+}
+
+#[tokio::test]
+async fn a_flows_question_stands_under_it_and_the_line_answers_it() {
+    let (tmp, token, mut app, folder) = panel().await;
+    flow_in(&tmp, &mut app, "alpha", &md_in(&folder)).await;
+    flow_in(&tmp, &mut app, "zulu", &md_in(&folder)).await;
+    app.refresh().await;
+    approve(&mut app, "alpha").await;
+    approve(&mut app, "zulu").await;
+    fired(
+        &tmp,
+        &folder,
+        "alpha",
+        "fire0001",
+        &[("probe", StepStatus::Waiting, None)],
+        FiringStatus::Waiting,
+    );
+    asked_of(&tmp, &folder, "fire0001");
     app.refresh().await;
     enter_project(&mut app, &folder).await;
     let keys = app.keys();
@@ -209,12 +216,14 @@ async fn enter_on_a_flow_opens_its_page_and_esc_comes_back_to_the_overview() {
 }
 
 #[tokio::test]
-async fn enter_on_new_flow_puts_flow_new_on_the_line() {
+async fn enter_on_new_flow_says_to_type() {
     let (_tmp, token, mut app, folder) = panel().await;
     enter_project(&mut app, &folder).await;
     assert!(app.on_new_flow());
     press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
-    assert_eq!(app.line.text(), "/flow new ");
+    assert_eq!(said(&app), "type what the new flow should do, then enter");
+    assert!(app.line.is_empty());
+    assert!(app.flow_proposal.is_none());
     token.cancel();
 }
 
@@ -643,5 +652,171 @@ async fn a_kept_project_summary_shows_at_the_top_when_the_overview_opens_on_a_fl
     let frame = draw_text(&mut app);
     assert!(frame.contains("the deploy went out"), "{frame}");
     assert!(!frame.contains("no summary yet"), "{frame}");
+    token.cancel();
+}
+
+/// The overview of `folder` open on its flow `hello`, and the words typed and entered there: the
+/// ask let go before it reaches the daemon.
+async fn words_on_hello(tmp: &tempfile::TempDir, app: &mut super::App, folder: &Path, words: &str) {
+    flow_in(tmp, app, "hello", &md_in(folder)).await;
+    app.refresh().await;
+    enter_project(app, folder).await;
+    app.select(Some("f:hello".into()));
+    type_in(app, words).await;
+    press(app, KeyCode::Enter, KeyModifiers::NONE).await;
+    unasked(app);
+}
+
+/// What the flow proposal is for, if there is one.
+fn aim(app: &super::App) -> Option<Aim> {
+    app.flow_proposal.as_ref().map(|p| p.aim.clone())
+}
+
+#[tokio::test]
+async fn words_on_a_flow_change_it() {
+    let (tmp, token, mut app, folder) = panel().await;
+    words_on_hello(&tmp, &mut app, &folder, "every 2h").await;
+    let base = std::fs::read_to_string(app.home.flow_dir("hello").join("flow.md")).unwrap();
+    assert_eq!(
+        aim(&app),
+        Some(Aim::Change {
+            name: "hello".into(),
+            base
+        })
+    );
+    assert_eq!(app.asking.as_ref().unwrap().want, Want::Flow { name: "hello".into() });
+    assert!(app.flow_proposal_shown().is_some(), "up in the pane");
+    assert!(app.line.is_empty());
+    token.cancel();
+}
+
+#[tokio::test]
+async fn words_on_new_flow_make_one_in_the_project() {
+    let (_tmp, token, mut app, folder) = panel().await;
+    enter_project(&mut app, &folder).await;
+    assert!(app.on_new_flow());
+    type_in(&mut app, "say hello hourly").await;
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+    unasked(&mut app);
+    assert_eq!(
+        aim(&app),
+        Some(Aim::New {
+            named: None,
+            folder: Some(folder.clone())
+        })
+    );
+    assert_eq!(
+        app.asking.as_ref().unwrap().want,
+        Want::NewFlow {
+            folder: Some(folder.clone())
+        }
+    );
+    assert!(app.line.is_empty());
+    token.cancel();
+}
+
+#[tokio::test]
+async fn words_on_new_flow_everywhere_have_no_folder() {
+    let (tmp, token, mut app, _folder) = panel().await;
+    flow_in(&tmp, &mut app, "loose", "---\nsteps:\n  probe:\n    run: x\n---\n").await;
+    app.refresh().await;
+    app.select(Some("g:everywhere".into()));
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+    app.select(Some(NEW_FLOW.into()));
+    type_in(&mut app, "say hello hourly").await;
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+    unasked(&mut app);
+    assert_eq!(
+        aim(&app),
+        Some(Aim::New {
+            named: None,
+            folder: None
+        })
+    );
+    assert_eq!(app.asking.as_ref().unwrap().want, Want::NewFlow { folder: None });
+    token.cancel();
+}
+
+#[tokio::test]
+async fn a_runnable_first_word_is_still_words() {
+    let (tmp, token, mut app, folder) = panel().await;
+    flow_in(&tmp, &mut app, "hello", &md_in(&folder)).await;
+    app.refresh().await;
+    enter_project(&mut app, &folder).await;
+    app.select(Some("f:hello".into()));
+    // A bang still runs it.
+    type_in(&mut app, "!ls").await;
+    assert!(matches!(app.line_what(), line::What::Shell(_)), "{:?}", app.line_what());
+    app.line.clear();
+    type_in(&mut app, "ls only on weekdays").await;
+    assert_eq!(app.line_what(), line::What::Ask("ls only on weekdays".into()));
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+    unasked(&mut app);
+    assert!(matches!(aim(&app), Some(Aim::Change { name, .. }) if name == "hello"));
+    token.cancel();
+}
+
+#[tokio::test]
+async fn a_question_line_still_answers() {
+    let (tmp, token, mut app, folder) = panel().await;
+    flow_in(&tmp, &mut app, "alpha", &md_in(&folder)).await;
+    app.refresh().await;
+    approve(&mut app, "alpha").await;
+    fired(
+        &tmp,
+        &folder,
+        "alpha",
+        "fire0001",
+        &[("probe", StepStatus::Waiting, None)],
+        FiringStatus::Waiting,
+    );
+    asked_of(&tmp, &folder, "fire0001");
+    app.refresh().await;
+    enter_project(&mut app, &folder).await;
+    app.select(Some("q:dec00001".into()));
+    type_in(&mut app, "1 ok").await;
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+    assert!(
+        !app.digest.decisions.iter().any(|d| d.id == "dec00001"),
+        "answered from the line"
+    );
+    assert!(app.flow_proposal.is_none(), "and nothing proposed");
+    assert!(app.asking.is_none());
+    token.cancel();
+}
+
+#[tokio::test]
+async fn the_line_hint_says_what_words_do() {
+    let (tmp, token, mut app, folder) = panel().await;
+    flow_in(&tmp, &mut app, "hello", &md_in(&folder)).await;
+    app.refresh().await;
+    enter_project(&mut app, &folder).await;
+    app.select(Some("f:hello".into()));
+    type_in(&mut app, "every 2h").await;
+    let screen = draw_text(&mut app);
+    assert!(screen.contains("… changes hello"), "{screen}");
+    app.select(Some(NEW_FLOW.into()));
+    let screen = draw_text(&mut app);
+    assert!(screen.contains("… makes a new flow"), "{screen}");
+    token.cancel();
+}
+
+#[tokio::test]
+async fn a_change_proposal_does_not_move_on_cursor_moves() {
+    let (tmp, token, mut app, folder) = panel().await;
+    flow_in(&tmp, &mut app, "alpha", &md_in(&folder)).await;
+    words_on_hello(&tmp, &mut app, &folder, "every 2h").await;
+    assert_eq!(app.keys(), ["f:alpha", "f:hello", NEW_FLOW]);
+    for code in [KeyCode::Down, KeyCode::Up, KeyCode::Up] {
+        press(&mut app, code, KeyModifiers::NONE).await;
+        assert_eq!(app.sel.as_deref(), Some("f:hello"), "while it is asked");
+    }
+    answer_md(&mut app, None, &format!("{}\nEvery two hours.\n", md_in(&folder))).await;
+    assert!(app.flow_proposal_shown().is_some());
+    for code in [KeyCode::Down, KeyCode::Up, KeyCode::Up] {
+        press(&mut app, code, KeyModifiers::NONE).await;
+        assert_eq!(app.sel.as_deref(), Some("f:hello"), "once it is proposed");
+    }
+    assert!(app.flow_proposal_shown().is_some(), "still up");
     token.cancel();
 }
