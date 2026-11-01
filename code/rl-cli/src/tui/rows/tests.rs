@@ -994,8 +994,8 @@ fn a_flows_runs_are_one_row() {
     let rows = flows_build(&d, &names, &flows, "", now);
     assert_eq!(
         keys(&rows),
-        ["[relay]", "f:pulse", "r:hand", "r:go"],
-        "in the order they came: a flow by its first run on the list"
+        ["[relay]", "r:hand", "r:go", "f:pulse"],
+        "the runs in the order they came, the flow under them"
     );
     let Some(Row::Flow(f)) = rows.iter().find(|r| matches!(r, Row::Flow(_))) else {
         panic!("no flow row");
@@ -1037,7 +1037,11 @@ fn a_flows_runs_are_one_row() {
         vec![],
     );
     let rows = flows_build(&d2, &names, &flows, "", now);
-    assert_eq!(keys(&rows), ["[relay]", "f:pulse", "r:w"], "the flow came first");
+    assert_eq!(
+        keys(&rows),
+        ["[relay]", "r:w", "f:pulse"],
+        "failed, it still stands under the runs"
+    );
     assert_eq!(counts(&rows), (0, 1, 1, 0, 1));
 }
 
@@ -1414,7 +1418,7 @@ fn a_search_and_hide_take_an_unfired_flows_row_as_any_other() {
 }
 
 #[test]
-fn a_flow_that_has_not_run_comes_after_those_that_have() {
+fn every_flow_stands_at_the_bottom_of_its_project_by_name_and_stays_there() {
     let now: Timestamp = "2026-09-10T12:00:00Z".parse().unwrap();
     let relay = "/home/f/relay";
     let names = Names::new([(PathBuf::from(relay), "relay".to_string())]);
@@ -1430,12 +1434,12 @@ fn a_flow_that_has_not_run_comes_after_those_that_have() {
     ];
     assert_eq!(
         keys(&flows_build(&d, &names, &flows, "", now)),
-        ["[relay]", "f:pulse", "f:alpha", "f:beta"],
-        "what ran first, then the rest by name"
+        ["[relay]", "f:alpha", "f:beta", "f:pulse"],
+        "by name, whether or not they ran"
     );
 
-    // In an order you kept, where it is new it still comes last, not first
-    // as what is new to the order otherwise does — and moving a row keeps it there.
+    // Under the runs, whatever order was kept — one that names a flow above a run among it —
+    // and a flow does not move, nor a run down past the last of the runs.
     let mut d = digest(
         now,
         vec![
@@ -1444,11 +1448,17 @@ fn a_flow_that_has_not_run_comes_after_those_that_have() {
         ],
         vec![],
     );
-    d.order = kept(&["r:work", "f:pulse"]);
+    d.order = kept(&["f:pulse", "r:work"]);
     let rows = flows_build(&d, &names, &flows, "", now);
-    assert_eq!(keys(&rows), ["[relay]", "r:work", "f:pulse", "f:alpha", "f:beta"]);
-    let moved = reorder(&rows, &rows, &d.order, "f:pulse", true).unwrap();
-    assert_eq!(moved.rows, ["f:pulse", "r:work", "f:alpha", "f:beta"]);
+    assert_eq!(keys(&rows), ["[relay]", "r:work", "f:alpha", "f:beta", "f:pulse"]);
+    assert_eq!(
+        reorder(&rows, &rows, &d.order, "f:pulse", true),
+        Err("flows stay at the bottom of their project, by name")
+    );
+    assert_eq!(
+        reorder(&rows, &rows, &d.order, "r:work", false),
+        Err("already at the bottom of its project")
+    );
 }
 
 #[test]
