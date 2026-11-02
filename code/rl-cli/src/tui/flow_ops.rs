@@ -7,7 +7,7 @@ impl App {
     /// The flow, found from elsewhere (the events, the catch-up): its
     /// project's overview — `everywhere`'s, with no `in` — with the cursor on
     /// it, opened from the project's line on the list, where `esc` goes back
-    /// to. A search that hides it there lets go, as `show_run`'s does.
+    /// to. The list's search is set aside while the overview is up.
     pub(super) async fn show_flow(&mut self, name: &str) {
         let Some(flow) = self.flows.iter().find(|f| f.name == name && f.removed_at.is_none()) else {
             return self.say(format!("{name} is not a flow any more"));
@@ -16,13 +16,8 @@ impl App {
         let key = rows::flow_key(name);
         self.back_to_list().await;
         self.select(Some(scope.line_key()));
-        self.open_overview(scope, Some(key.clone()));
+        self.open_overview(scope, Some(key));
         self.fetch_overview_top().await;
-        if self.sel.as_ref() != Some(&key) && !self.filter.is_empty() {
-            self.filter.clear();
-            self.select(Some(key.clone()));
-            self.say(format!("the search lets go, to show {name}"));
-        }
         self.moved().await;
     }
 

@@ -260,13 +260,16 @@ async fn show_flow_opens_its_projects_overview_on_it() {
     press(&mut app, KeyCode::Esc, KeyModifiers::NONE).await;
     assert!(app.view == View::Work);
     assert_eq!(app.sel, Some(format!("g:{}", folder.display())));
-    // A search that hides it there lets go.
+    // A list search is set aside while the overview is up, and given back on esc.
     app.toggle_events().await;
     app.filter_aside = "zzzz".into();
     app.show_flow("zulu").await;
     assert!(app.view == View::Overview);
-    assert!(app.filter.is_empty(), "the search let go: {:?}", app.filter);
+    assert!(app.filter.is_empty(), "the overview opens unsearched: {:?}", app.filter);
     assert_eq!(app.sel.as_deref(), Some("f:zulu"));
+    press(&mut app, KeyCode::Esc, KeyModifiers::NONE).await;
+    assert!(app.view == View::Work);
+    assert_eq!(app.filter, "zzzz");
     token.cancel();
 }
 
@@ -446,6 +449,87 @@ async fn opening_the_overview_does_not_mark_its_first_flow_seen() {
     assert_eq!(app.sel.as_deref(), Some("f:alpha"));
     app.refresh().await;
     assert!(!needs(&app), "landed on, it is seen");
+    token.cancel();
+}
+
+#[tokio::test]
+async fn opening_the_overview_on_a_flow_notes_where_its_unseen_began() {
+    let (tmp, token, mut app, folder) = panel().await;
+    flow_in(&tmp, &mut app, "alpha", &md_in(&folder)).await;
+    flow_in(&tmp, &mut app, "zulu", &md_in(&folder)).await;
+    app.refresh().await;
+    approve(&mut app, "alpha").await;
+    approve(&mut app, "zulu").await;
+    fired(
+        &tmp,
+        &folder,
+        "alpha",
+        "fire0001",
+        &[("probe", StepStatus::Failed, Some("boom\r\n"))],
+        FiringStatus::Failed,
+    );
+    app.refresh().await;
+    let needs = |app: &super::App| {
+        let f = app.flows.iter().find(|f| f.name == "alpha").unwrap();
+        super::rows::flow_needs(f, &app.digest)
+    };
+    // An older note, say a catch-up's: opening on alpha writes over it.
+    app.unseen_from.insert(
+        "f:alpha".into(),
+        jiff::Timestamp::now() - jiff::SignedDuration::from_hours(240),
+    );
+    enter_project(&mut app, &folder).await;
+    assert_eq!(app.sel.as_deref(), Some("f:alpha"));
+    let began = app
+        .digest
+        .items
+        .iter()
+        .find(|i| matches!(&i.run.cause, rl_proto::types::Cause::Flow { flow, .. } if flow == "alpha"))
+        .expect("alpha's run")
+        .run
+        .started_at;
+    assert_eq!(app.unseen_from["f:alpha"], began);
+    app.refresh().await;
+    assert!(needs(&app), "noted, not marked seen");
+    token.cancel();
+}
+
+#[tokio::test]
+async fn a_list_search_stays_on_the_list() {
+    let (tmp, token, mut app, folder) = panel().await;
+    flow_in(&tmp, &mut app, "alpha", &md_in(&folder)).await;
+    app.refresh().await;
+    app.filter = "zzzz".into();
+    app.select(Some(format!("g:{}", folder.display())));
+    // `enter` cannot reach a line the search hides: opened directly.
+    app.open_overview(Scope::Project(folder.clone()), None);
+    assert!(app.filter.is_empty(), "the overview opens unsearched: {:?}", app.filter);
+    assert_eq!(app.keys(), ["f:alpha", NEW_FLOW]);
+    assert_eq!(app.sel.as_deref(), Some("f:alpha"));
+    // One esc leaves, and the list has its search back.
+    press(&mut app, KeyCode::Esc, KeyModifiers::NONE).await;
+    assert!(app.view == View::Work);
+    assert_eq!(app.filter, "zzzz");
+    token.cancel();
+}
+
+#[tokio::test]
+async fn a_summary_over_another_stretch_leaves_the_overviews_alone() {
+    let Some((_tmp, token, mut app, folder)) = panel_with_fake_summariser("- the build went green").await else {
+        return;
+    };
+    let now = jiff::Timestamp::now();
+    let away = now - jiff::SignedDuration::from_hours(1);
+    app.away_since = Some(away);
+    let target = SummaryTarget::Project {
+        workspace: folder.clone(),
+    };
+    let mut three = said_of(&target, "- three days");
+    three.from = Some(now - jiff::SignedDuration::from_hours(72));
+    app.made.insert(target.key(), three);
+    enter_project(&mut app, &folder).await;
+    let o = app.overviewing.as_ref().expect("a new one is asked");
+    assert_eq!(o.from, Some(away), "the overview's own stretch, not /summary's");
     token.cancel();
 }
 

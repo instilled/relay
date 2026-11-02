@@ -69,6 +69,10 @@ impl App {
             self.overview_said = None;
             self.parked_open = false;
         }
+        if self.view != View::Overview {
+            self.list_search = Some(std::mem::take(&mut self.filter));
+            self.search = None;
+        }
         self.overview = Some(scope);
         self.open_view(View::Overview);
         self.leave_subpage();
@@ -78,6 +82,7 @@ impl App {
             .or_else(|| keys.first().cloned())
             .unwrap_or_else(|| NEW_FLOW.to_string());
         self.select(Some(at));
+        let _ = self.note_unseen_from();
     }
 
     /// What was last said of the overview's project, fetched for its top whichever row the
@@ -133,9 +138,9 @@ impl App {
     /// Where the overview's summary of `target` starts: where the last one made of it here did,
     /// so the one it made is found again; else since you were last here; else the last day.
     fn overview_stretch(&self, target: &SummaryTarget) -> Timestamp {
-        self.made
+        self.overview_from
             .get(&target.key())
-            .and_then(|m| m.from)
+            .copied()
             .or(self.away_since)
             .unwrap_or_else(|| Timestamp::now() - crate::catchup::OVERVIEW_STRETCH)
     }
@@ -149,6 +154,9 @@ impl App {
         match done {
             Ok(Ok(summary)) => {
                 let key = o.target.key();
+                if let Some(f) = summary.from {
+                    self.overview_from.insert(key.clone(), f);
+                }
                 // A deep one made of the project by `/summary` stays its `made`: the brief shows
                 // in the top, not over it.
                 if !self.made.get(&key).is_some_and(|m| m.deep) {
@@ -230,10 +238,18 @@ impl App {
 
     /// Back from the overview to the list, on the line it was opened from.
     pub(super) async fn leave_overview(&mut self) {
-        self.overview = None;
+        self.overview_closed();
         self.go_back();
         self.settle();
         self.load_pane().await;
+    }
+
+    /// The overview is let go of: the list's search, set aside while it was up, given back.
+    pub(super) fn overview_closed(&mut self) {
+        self.overview = None;
+        if let Some(f) = self.list_search.take() {
+            self.filter = f;
+        }
     }
 
     /// The overview's rows: its project's flows, each followed by its open questions. Those

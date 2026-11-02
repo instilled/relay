@@ -416,6 +416,8 @@ struct App {
     /// The events view's search while another view is up, or the list's
     /// while it is: `kind:` means another thing there.
     filter_aside: String,
+    /// The list's search while the overview is up: it opens unsearched, and leaving gives it back.
+    list_search: Option<String>,
     /// What the events view has read of the ledger.
     feed: events::Feed,
     /// Which of a folder's shells a shell line goes to, and the one the
@@ -471,6 +473,9 @@ struct App {
     /// panel is open: which stretch and depth the pane asks the kept one
     /// for, and what it shows if none is kept.
     made: HashMap<String, Summary>,
+    /// Where the overview's own top of each project started, by `SummaryTarget::key`, so it is
+    /// found again; `/summary`'s stretch is not its.
+    overview_from: HashMap<String, Timestamp>,
     /// Where a project's or everything's `/summary` starts with no stretch
     /// typed: when you were last here before this open, or while a catch-up
     /// is up, where its stretch starts. None: the last day.
@@ -513,7 +518,7 @@ struct App {
     drawn: std::cell::RefCell<Option<Vec<(String, crate::catchup::Kept)>>>,
     /// Where a flow row's `/summary` starts with no stretch typed, by row key:
     /// when its oldest firing not seen started, noted as the cursor lands on
-    /// it — landing marks them seen, so the daemon could no longer tell.
+    /// it, the overview's opening too — landing marks them seen, so the daemon could no longer tell.
     /// Kept until used, or until the row has firings not seen again.
     unseen_from: HashMap<String, Timestamp>,
     /// A project on its way out (`^x` twice on its header).
@@ -1313,6 +1318,7 @@ impl App {
             back: Vec::new(),
             kept: HashMap::new(),
             filter_aside: String::new(),
+            list_search: None,
             feed: events::Feed::default(),
             shell_at: HashMap::new(),
             scroll: std::cell::Cell::new(0),
@@ -1357,6 +1363,7 @@ impl App {
             leads_shown: Default::default(),
             summary_ask: None,
             made: HashMap::new(),
+            overview_from: HashMap::new(),
             away_since: None,
             left: None,
             opened_at: Timestamp::now(),
@@ -2005,8 +2012,8 @@ impl App {
         }
         self.saw_catch_up().await;
         self.back.clear();
-        self.overview = None;
         self.switch_to(View::Work);
+        self.overview_closed();
         self.picked.clear();
         self.events.clear();
         self.refresh().await;
@@ -6429,13 +6436,12 @@ mod tests {
         app.show_flow("ghost").await;
         assert!(app.view == super::View::Events, "the view stays");
         assert_eq!(said(&app), "ghost is not a flow any more");
-        // A search that hides it there lets go, as it does for a run.
+        // A list search is set aside while the overview is up.
         app.filter_aside = "zzzz".into();
         app.show_flow("nightly").await;
         assert!(app.view == super::View::Overview);
-        assert!(app.filter.is_empty(), "the search let go: {:?}", app.filter);
+        assert!(app.filter.is_empty(), "the overview opens unsearched: {:?}", app.filter);
         assert_eq!(app.sel.as_deref(), Some("f:nightly"));
-        assert_eq!(said(&app), "the search lets go, to show nightly");
         token.cancel();
     }
 
