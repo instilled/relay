@@ -6,7 +6,7 @@
 use super::tests::{draw_text, panel, panel_with_profiles, press, type_in};
 use crate::context::Want;
 use crossterm::event::{KeyCode, KeyModifiers};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 fn said(app: &super::App) -> String {
     app.flash.as_ref().map(|(m, _)| m.clone()).unwrap_or_default()
@@ -91,6 +91,47 @@ async fn words_typed_with_it_up_change_it_even_when_they_start_with_a_command() 
     token.cancel();
 }
 
+/// The answer there long enough for an `esc` to be meant for it, without the test waiting.
+fn settled(app: &mut super::App) {
+    if let Some(p) = app.proposal.as_mut() {
+        p.landed = p.landed.map(|_| Instant::now() - Duration::from_secs(1));
+    }
+}
+
+#[tokio::test]
+async fn an_esc_just_as_the_run_is_proposed_is_let_be() {
+    let (_tmp, token, mut app, _) = panel().await;
+    ask(&mut app, "say hi");
+    answer(&mut app, "echo hi").await;
+    press(&mut app, KeyCode::Esc, KeyModifiers::NONE).await;
+    assert!(app.proposal.is_some(), "the answer kept");
+    assert!(app.show_pane, "still up");
+    assert!(!said(&app).starts_with("dropped it"), "{}", said(&app));
+    settled(&mut app);
+    press(&mut app, KeyCode::Esc, KeyModifiers::NONE).await;
+    assert_eq!(said(&app), "dropped it");
+    assert!(app.proposal.is_none());
+    token.cancel();
+}
+
+#[tokio::test]
+async fn an_esc_just_as_the_ask_fails_is_let_be() {
+    let (_tmp, token, mut app, _) = panel().await;
+    ask(&mut app, "say hi");
+    app.answered(Ok(Err(anyhow::anyhow!("the assistant fell over")))).await;
+    assert!(
+        app.proposal.as_ref().is_some_and(|p| p.error.is_some()),
+        "an error answer"
+    );
+    press(&mut app, KeyCode::Esc, KeyModifiers::NONE).await;
+    assert!(app.proposal.is_some(), "the answer kept");
+    assert!(app.show_pane, "still up");
+    settled(&mut app);
+    press(&mut app, KeyCode::Esc, KeyModifiers::NONE).await;
+    assert!(app.proposal.is_none(), "{}", said(&app));
+    token.cancel();
+}
+
 #[tokio::test]
 async fn esc_leaves_it_asking_and_ask_brings_it_back_then_esc_drops_it() {
     let (_tmp, token, mut app, _) = panel().await;
@@ -103,6 +144,7 @@ async fn esc_leaves_it_asking_and_ask_brings_it_back_then_esc_drops_it() {
     type_in(&mut app, "/ask").await;
     press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
     assert!(draw_text(&mut app).contains("run      echo hi"));
+    settled(&mut app);
     press(&mut app, KeyCode::Esc, KeyModifiers::NONE).await;
     assert!(app.proposal.is_none() && !app.show_pane);
     assert_eq!(said(&app), "dropped it");

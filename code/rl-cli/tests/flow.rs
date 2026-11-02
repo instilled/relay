@@ -544,6 +544,34 @@ fn flow_park_lists_and_unparks() {
     assert!(!ok && e.contains("nothing parked as hello"), "{e}");
     let (ok, _, e) = out(rl(&["flow", "unpark", "_nope"]));
     assert!(!ok && e.contains("_nope is not a parked flow"), "{e}");
+
+    // Back but not loaded: why it did not, with its file and line, and exit 1; as JSON, the answer.
+    for json in [false, true] {
+        let (ok, o, e) = out(rl(&["flow", "park", "hello"]));
+        assert!(ok, "{o}{e}");
+        std::fs::write(home.join("flows/_hello/flow.md"), "---\nsteps: [\n---\n").unwrap();
+        if json {
+            let (ok, o, e) = out(rl(&["--json", "flow", "unpark", "hello"]));
+            assert!(ok, "{o}{e}");
+            let v: serde_json::Value = serde_json::from_str(&o).unwrap();
+            assert_eq!(v["name"], "hello");
+            assert!(v.get("flow").is_none(), "{o}");
+            assert!(v["problem"].as_str().unwrap().contains("flow.md:"), "{o}");
+        } else {
+            let (ok, _, e) = out(rl(&["flow", "unpark", "hello"]));
+            assert!(!ok, "{e}");
+            assert!(
+                e.contains("hello is back in flows/hello but did not load: ")
+                    && e.contains("flow.md:")
+                    && e.contains(" · rl flow edit hello, or rl flow reload"),
+                "{e}"
+            );
+        }
+        assert!(flow.join("flow.md").is_file());
+        std::fs::write(flow.join("flow.md"), "---\nsteps:\n  a:\n    run: echo hello\n---\n").unwrap();
+        let (ok, o, e) = out(rl(&["flow", "reload"]));
+        assert!(ok, "{o}{e}");
+    }
     assert!(out(rl(&["daemon", "stop"])).0);
 }
 

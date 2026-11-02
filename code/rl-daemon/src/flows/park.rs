@@ -7,7 +7,7 @@ use anyhow::{Context, Result};
 use jiff::Timestamp;
 use rl_flow::doc;
 use rl_ledger::{firings, flows, runs};
-use rl_proto::flow::{FiringStatus, Parked, parked_name, valid_name};
+use rl_proto::flow::{FiringStatus, Parked, StepStatus, parked_name, valid_name};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -19,8 +19,10 @@ pub enum Unmoved {
     Missing(String),
     /// A firing of it has a run going.
     Firing(String),
-    /// Its open firing is waiting: on a question, or a lost step.
+    /// Its open firing is waiting on a question.
     Waiting(String),
+    /// Its open firing is waiting on a step whose run was lost while `rld` was down.
+    Lost { name: String, step: String },
     /// The folder is not one parking makes.
     NotParked(String),
     /// A flow has the name it would come back as.
@@ -33,6 +35,10 @@ impl fmt::Display for Unmoved {
             Unmoved::Missing(name) => write!(f, "no flow `{name}`"),
             Unmoved::Firing(name) => write!(f, "{name} is firing · /stop its run, then park it"),
             Unmoved::Waiting(name) => write!(f, "{name} is waiting on a question · answer or /stop it, then park it"),
+            Unmoved::Lost { name, step } => write!(
+                f,
+                "{name} is waiting on its lost step {step} · /resume its run or /stop it, then park it"
+            ),
             Unmoved::NotParked(folder) => write!(f, "{folder} is not a parked flow"),
             Unmoved::Taken(name) => write!(f, "a flow named {name} is there now · park or rename it first"),
         }
@@ -64,10 +70,19 @@ impl Flows {
         if !open.is_empty() {
             let waiting = open.iter().all(|f| f.status == FiringStatus::Waiting);
             let name = name.to_string();
-            return Err(if waiting {
-                Unmoved::Waiting(name)
-            } else {
-                Unmoved::Firing(name)
+            if !waiting {
+                return Err(Unmoved::Firing(name).into());
+            }
+            // A question is said first, as the overview says it; else a lost step, by its name.
+            let steps = || open.iter().flat_map(|f| &f.steps);
+            let asked = steps().any(|s| s.status == StepStatus::Waiting);
+            let lost = steps().find(|s| s.status == StepStatus::Lost);
+            return Err(match lost.filter(|_| !asked) {
+                Some(s) => Unmoved::Lost {
+                    name,
+                    step: s.name.clone(),
+                },
+                None => Unmoved::Waiting(name),
             }
             .into());
         }

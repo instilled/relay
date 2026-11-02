@@ -99,7 +99,7 @@ use rl_proto::decision::Decision;
 use rl_proto::flow::{
     Firing, FiringFilter, Flow, FlowApproval, FlowApprove, FlowErrors, FlowFilter, FlowFirings, FlowList, FlowName,
     FlowPark, FlowParkedList, FlowPause, FlowReload, FlowResume, FlowRun, FlowStatus, FlowUnpark, NotLoaded, Parked,
-    ParkedName,
+    ParkedName, Unparked,
 };
 use rl_proto::methods::{
     AgentList, ConfigGet, DecisionDismiss, DecisionGet, DecisionId, DecisionNote, DecisionTake, DecisionTakeParams,
@@ -416,6 +416,8 @@ struct App {
     /// The events view's search while another view is up, or the list's
     /// while it is: `kind:` means another thing there.
     filter_aside: String,
+    /// The list's search while the overview is up: it opens unsearched, and leaving gives it back.
+    list_search: Option<String>,
     /// What the events view has read of the ledger.
     feed: events::Feed,
     /// Which of a folder's shells a shell line goes to, and the one the
@@ -469,8 +471,12 @@ struct App {
     summary_ask: Option<SummaryParams>,
     /// The last summary made of each target (`SummaryTarget::key`) while the
     /// panel is open: which stretch and depth the pane asks the kept one
-    /// for, and what it shows if none is kept.
+    /// for, and what it shows if none is kept. The overview's stretch does
+    /// not read it: that is `overview_from`.
     made: HashMap<String, Summary>,
+    /// Where the overview's own top of each project started, by `SummaryTarget::key`, so it is
+    /// found again; `/summary`'s stretch is not its.
+    overview_from: HashMap<String, Timestamp>,
     /// Where a project's or everything's `/summary` starts with no stretch
     /// typed: when you were last here before this open, or while a catch-up
     /// is up, where its stretch starts. None: the last day.
@@ -513,7 +519,7 @@ struct App {
     drawn: std::cell::RefCell<Option<Vec<(String, crate::catchup::Kept)>>>,
     /// Where a flow row's `/summary` starts with no stretch typed, by row key:
     /// when its oldest firing not seen started, noted as the cursor lands on
-    /// it — landing marks them seen, so the daemon could no longer tell.
+    /// it, the overview's opening too — landing marks them seen, so the daemon could no longer tell.
     /// Kept until used, or until the row has firings not seen again.
     unseen_from: HashMap<String, Timestamp>,
     /// A project on its way out (`^x` twice on its header).
@@ -1313,6 +1319,7 @@ impl App {
             back: Vec::new(),
             kept: HashMap::new(),
             filter_aside: String::new(),
+            list_search: None,
             feed: events::Feed::default(),
             shell_at: HashMap::new(),
             scroll: std::cell::Cell::new(0),
@@ -1357,6 +1364,7 @@ impl App {
             leads_shown: Default::default(),
             summary_ask: None,
             made: HashMap::new(),
+            overview_from: HashMap::new(),
             away_since: None,
             left: None,
             opened_at: Timestamp::now(),
@@ -2005,8 +2013,8 @@ impl App {
         }
         self.saw_catch_up().await;
         self.back.clear();
-        self.overview = None;
         self.switch_to(View::Work);
+        self.overview_closed();
         self.picked.clear();
         self.events.clear();
         self.refresh().await;
@@ -3410,7 +3418,7 @@ impl App {
                 format!("enter output · /summary · ^x archives · ^t pins · {pane}")
             }
             Some(Row::Run(_)) => format!("enter joins it · ^x stops it · ^t pins · {pane}"),
-            Some(Row::Outside(c)) => format!("{} · /hide · {pane}", outside::enter_hint(c)),
+            Some(Row::Outside(c)) => format!("{} · {} · {pane}", outside::enter_hint(c), self.x_hides_hint()),
             // A flow here that did not load is what `/flow edit` opens, at the line.
             Some(Row::Group(h)) if h.is_everywhere() => {
                 let fix = self.broken_hint(&h);
@@ -3418,9 +3426,26 @@ impl App {
             }
             Some(Row::Group(h)) => {
                 let fix = self.broken_hint(&h);
-                format!("enter its flows · /shell · {fix}^r renames · ^x removes · {pane}")
+                // A folder that is no project, with no run of relay's in it, has nothing to
+                // remove: `^x` hides it.
+                let x = if self.hides_on_x().is_some() {
+                    self.x_hides_hint()
+                } else {
+                    "^x removes"
+                };
+                format!("enter its flows · /shell · {fix}^r renames · {x} · {pane}")
             }
             _ => String::new(),
+        }
+    }
+
+    /// The hint for a row `^x` hides — none, when it is hidden already and on
+    /// the list only because hidden rows are shown.
+    fn x_hides_hint(&self) -> &'static str {
+        if self.shown_though_hidden() {
+            "/hide brings it back"
+        } else {
+            "^x hides"
         }
     }
 }
@@ -6429,13 +6454,12 @@ mod tests {
         app.show_flow("ghost").await;
         assert!(app.view == super::View::Events, "the view stays");
         assert_eq!(said(&app), "ghost is not a flow any more");
-        // A search that hides it there lets go, as it does for a run.
+        // A list search is set aside while the overview is up.
         app.filter_aside = "zzzz".into();
         app.show_flow("nightly").await;
         assert!(app.view == super::View::Overview);
-        assert!(app.filter.is_empty(), "the search let go: {:?}", app.filter);
+        assert!(app.filter.is_empty(), "the overview opens unsearched: {:?}", app.filter);
         assert_eq!(app.sel.as_deref(), Some("f:nightly"));
-        assert_eq!(said(&app), "the search lets go, to show nightly");
         token.cancel();
     }
 

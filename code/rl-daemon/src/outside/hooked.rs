@@ -329,19 +329,27 @@ impl Hooked {
         list
     }
 
-    /// Lets go of the sessions that ended without a word: a process gone
-    /// (`alive` says whether a pid still is), nothing heard for `QUIET`,
-    /// or no process known and nothing heard for `STALE`. Their keys. And
-    /// forgets the ends older than `ENDED`.
-    pub fn prune(&self, now: Instant, alive: impl Fn(u32) -> bool) -> Vec<String> {
+    /// Lets go of the sessions that ended without a word, and returns their
+    /// keys. A session goes when its folder is gone (`here` says whether a
+    /// folder is still there); when its process is gone (`alive` says
+    /// whether a pid still is) or nothing was heard from it for `QUIET`;
+    /// or, with no process known, when nothing was heard for `STALE`. The
+    /// ends older than `ENDED` are forgotten too.
+    pub fn prune(
+        &self,
+        now: Instant,
+        alive: impl Fn(u32) -> bool,
+        here: impl Fn(&std::path::Path) -> bool,
+    ) -> Vec<String> {
         let mut gone = Vec::new();
         let mut k = self.kept.lock().unwrap();
         k.heard.retain(|key, h| {
             let quiet = now.saturating_duration_since(h.at);
-            let stands = match h.session.pid {
-                Some(pid) => quiet < QUIET && alive(pid),
-                None => quiet < STALE,
-            };
+            let stands = here(&h.session.cwd)
+                && match h.session.pid {
+                    Some(pid) => quiet < QUIET && alive(pid),
+                    None => quiet < STALE,
+                };
             if !stands {
                 gone.push(key.clone());
             }

@@ -246,6 +246,13 @@ impl App {
     }
 
     pub(super) async fn saw_selected(&mut self) {
+        let ids = self.note_unseen_from();
+        self.seen(ids).await;
+    }
+
+    /// Where the flow under the cursor's unseen runs begin, noted for its `/summary`: the cursor
+    /// on it may mark them seen, after which the daemon could not tell. Their ids.
+    pub(super) fn note_unseen_from(&mut self) -> Vec<String> {
         let mut from = None;
         let ids: Vec<String> = match self.selected() {
             Some(Row::Run(i)) if i.unseen => vec![i.run.id.clone()],
@@ -263,7 +270,7 @@ impl App {
         if let Some((key, at)) = from {
             self.unseen_from.insert(key, at);
         }
-        self.seen(ids).await;
+        ids
     }
 
     pub(super) fn step(&mut self, by: isize) {

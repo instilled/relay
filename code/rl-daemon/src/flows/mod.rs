@@ -54,6 +54,9 @@ pub struct Flows {
     /// Held while a firing is moved on, so a run's end is never read before
     /// the run is recorded as its step's.
     pub(crate) going: tokio::sync::Mutex<()>,
+    /// Held for a whole reload, read to sync, so a reload that read the folders before a rename
+    /// can never sync after one that read them since. Taken after `going`, never before it.
+    pub(crate) reloading: tokio::sync::Mutex<()>,
     /// Rung when what is loaded changes, so the loop looks again.
     pub(crate) wake: Notify,
     pub(crate) shutdown: CancellationToken,
@@ -81,6 +84,7 @@ impl Flows {
             registry,
             bin,
             going: tokio::sync::Mutex::new(()),
+            reloading: tokio::sync::Mutex::new(()),
             wake: Notify::new(),
             shutdown,
             broken: Mutex::new(Vec::new()),

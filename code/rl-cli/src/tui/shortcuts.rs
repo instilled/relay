@@ -81,7 +81,7 @@ fn place_keys(at: Place) -> Vec<Key> {
             moves,
             key("⇧↑↓", "reorder"),
             key("enter", "join/open"),
-            cmd(Cmd::Stop, "stop/archive/remove"),
+            cmd(Cmd::Stop, "stop/archive/remove/hide"),
             cmd(Cmd::Pin, "pin"),
             cmd(Cmd::Rename, "rename"),
             cmd(Cmd::Pane, "details"),
@@ -326,7 +326,7 @@ mod tests {
     fn the_list_says_its_keys() {
         assert_eq!(
             one_line(Place::List),
-            "↑↓ ^j^k move · ⇧↑↓ reorder · enter join/open · ^x stop/archive/remove · ^t pin · \
+            "↑↓ ^j^k move · ⇧↑↓ reorder · enter join/open · ^x stop/archive/remove/hide · ^t pin · \
              ^r rename · ^o details · ^f search · a agents · s shells · h hidden · /hide · /help · ^h"
         );
     }
@@ -348,7 +348,7 @@ mod tests {
 
         assert_eq!(
             one_line(Place::Hidden),
-            "↑↓ ^j^k move · /hide brings it back · enter join/open · ^x stop/archive/remove · \
+            "↑↓ ^j^k move · /hide brings it back · enter join/open · ^x stop/archive/remove/hide · \
              ^t pin · ^r rename · ^o details · ^f search · a agents · s shells · h hidden · /help · ^h"
         );
 
