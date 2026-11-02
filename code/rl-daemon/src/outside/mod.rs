@@ -217,7 +217,7 @@ impl Outsiders {
 
     /// Lets go of the told sessions that ended without saying so.
     fn prune_told(&self) {
-        for key in self.hooked.prune(Instant::now(), hooked::alive) {
+        for key in self.hooked.prune(Instant::now(), hooked::alive, |p| p.is_dir()) {
             debug!(session = %key, "outside: a told session is gone");
             self.forget_one(&key);
         }
@@ -883,6 +883,31 @@ mod tests {
         store.prune_told();
         let keys: Vec<String> = store.latest(true).iter().map(Outside::key).collect();
         assert_eq!(keys, ["o:codex:recent"]);
+    }
+
+    #[tokio::test]
+    async fn a_told_session_in_a_folder_gone_goes() {
+        let ledger = Ledger::open_in_memory().unwrap();
+        let store = store();
+        let tmp = tempfile::tempdir().unwrap();
+        let gone = tmp.path().join("gone");
+        std::fs::create_dir(&gone).unwrap();
+        let tell = |sid: &str, cwd: std::path::PathBuf| rl_proto::methods::OutsideHookParams {
+            agent: "codex".into(),
+            session_id: sid.into(),
+            cwd,
+            event: "Stop".into(),
+            detail: None,
+            pid: Some(std::process::id()),
+            transcript_path: None,
+            run: None,
+        };
+        store.told(tell("gone", gone.clone()), &ledger).await.unwrap();
+        store.told(tell("here", "/".into()), &ledger).await.unwrap();
+        std::fs::remove_dir(&gone).unwrap();
+        store.prune_told();
+        let keys: Vec<String> = store.latest(true).iter().map(Outside::key).collect();
+        assert_eq!(keys, ["o:codex:here"]);
     }
 
     fn told_as(
