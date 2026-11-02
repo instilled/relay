@@ -27,6 +27,8 @@ impl Flows {
     /// a changed one waiting for a yes; one that does not load is left out
     /// and said; one that cannot be read stays as it last loaded.
     pub async fn reload(&self) -> Result<Reloaded> {
+        // First, before a folder is read: a reload that read them before a
+        // park's rename and synced after it would list the parked flow again.
         let _reading = self.reloading.lock().await;
         let dir = self.home.flows_dir();
         std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;

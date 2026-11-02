@@ -138,9 +138,9 @@ impl App {
                 let said = self.onto_saved(&flow.name, said);
                 self.say(said);
             }
-            Ok(Unparked { name, problem, .. }) => {
+            Ok(u) => {
                 self.refresh().await;
-                let why = problem.as_deref().unwrap_or("not loaded");
+                let (name, why) = (&u.name, u.why());
                 self.say(format!(
                     "{name} is back in flows/{name} but did not load: {why} · ^e on it, or /flow reload"
                 ));

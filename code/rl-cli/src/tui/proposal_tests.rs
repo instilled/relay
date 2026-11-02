@@ -115,6 +115,24 @@ async fn an_esc_just_as_the_run_is_proposed_is_let_be() {
 }
 
 #[tokio::test]
+async fn an_esc_just_as_the_ask_fails_is_let_be() {
+    let (_tmp, token, mut app, _) = panel().await;
+    ask(&mut app, "say hi");
+    app.answered(Ok(Err(anyhow::anyhow!("the assistant fell over")))).await;
+    assert!(
+        app.proposal.as_ref().is_some_and(|p| p.error.is_some()),
+        "an error answer"
+    );
+    press(&mut app, KeyCode::Esc, KeyModifiers::NONE).await;
+    assert!(app.proposal.is_some(), "the answer kept");
+    assert!(app.show_pane, "still up");
+    settled(&mut app);
+    press(&mut app, KeyCode::Esc, KeyModifiers::NONE).await;
+    assert!(app.proposal.is_none(), "{}", said(&app));
+    token.cancel();
+}
+
+#[tokio::test]
 async fn esc_leaves_it_asking_and_ask_brings_it_back_then_esc_drops_it() {
     let (_tmp, token, mut app, _) = panel().await;
     ask(&mut app, "say hi");

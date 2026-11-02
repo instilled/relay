@@ -146,8 +146,7 @@ impl App {
         } else if self.on_everywhere() {
             self.say(format!("{} · nothing to remove", Self::NOT_A_PROJECT));
         } else if self.hides_on_x().is_some() {
-            let key = self.selected().and_then(|r| r.key()).unwrap_or_default();
-            if self.show_hidden && self.digest.hidden.iter().any(|h| h.key == key) {
+            if self.shown_though_hidden() {
                 // With hidden on, `/hide` would bring it back: `^x` is not that.
                 self.say("already hidden · /hide brings it back");
             } else {
@@ -220,16 +219,34 @@ impl App {
     }
 
     /// The row under the cursor, when `^x` hides it rather than removes it: a
-    /// session of Claude's own, or a header whose folder is no project (the
-    /// daemon has nothing to remove there). Its title, for the hint.
-    fn hides_on_x(&self) -> Option<String> {
+    /// session of Claude's own, or a header whose folder is no project and
+    /// holds nothing of relay's — no run, only sessions of Claude's (the
+    /// daemon has nothing to remove there). Its title, for the hint. Hiding
+    /// is the list's: elsewhere (the catch-up) `^x` does what it always did.
+    pub(super) fn hides_on_x(&self) -> Option<String> {
+        if self.view != View::Work {
+            return None;
+        }
         match self.selected()? {
             Row::Outside(c) => Some(c.title()),
-            Row::Group(h) if !h.is_everywhere() && self.names.registered(&h.workspace).is_none() => {
+            Row::Group(h)
+                if !h.is_everywhere()
+                    && self.names.registered(&h.workspace).is_none()
+                    && !self.digest.items.iter().any(|i| i.run.workspace == h.workspace) =>
+            {
                 Some(h.name.clone())
             }
             _ => None,
         }
+    }
+
+    /// Whether the row under the cursor is hidden and on the list only
+    /// because hidden rows are shown: `^x` has nothing more to hide there.
+    pub(super) fn shown_though_hidden(&self) -> bool {
+        let Some(key) = self.selected().and_then(|r| r.key()) else {
+            return false;
+        };
+        self.show_hidden && self.digest.hidden.iter().any(|h| h.key == key)
     }
 
     /// What a second `ctrl-x` would do to the row under the cursor, for the

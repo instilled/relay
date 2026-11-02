@@ -692,7 +692,8 @@ impl App {
                     self.say(Self::FLOW_ON_THE_LIST);
                 } else if self.on_parked_line() || self.parked_here().is_some() {
                     self.say("already parked");
-                } else if matches!(self.selected(), Some(Row::Group(h)) if !h.is_everywhere() && self.names.registered(&h.workspace).is_some())
+                } else if matches!(self.selected(), Some(Row::Group(h)) if !h.is_everywhere())
+                    && self.hides_on_x().is_none()
                 {
                     // A project is not armed and fired by a second keypress: a
                     // stray or laggy ^x must not take a whole project down.

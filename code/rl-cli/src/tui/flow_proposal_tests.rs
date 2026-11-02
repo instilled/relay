@@ -429,6 +429,30 @@ async fn an_esc_just_as_the_answer_lands_is_let_be() {
 }
 
 #[tokio::test]
+async fn an_esc_just_as_an_error_answer_lands_is_let_be() {
+    let (_tmp, token, mut app, _) = panel().await;
+    ask_for(
+        &mut app,
+        Aim::New {
+            named: None,
+            folder: None,
+        },
+        "say hello",
+    );
+    app.answered(Ok(Err(anyhow::anyhow!("the assistant fell over")))).await;
+    assert!(app.flow_proposal_shown().is_some(), "the error up");
+    press(&mut app, KeyCode::Esc, KeyModifiers::NONE).await;
+    assert!(app.flow_proposal.is_some(), "the answer kept");
+    assert!(app.show_pane, "still up");
+    if let Some(p) = app.flow_proposal.as_mut() {
+        p.landed = Some(Instant::now() - Duration::from_secs(1));
+    }
+    press(&mut app, KeyCode::Esc, KeyModifiers::NONE).await;
+    assert!(app.flow_proposal.is_none(), "{}", said(&app));
+    token.cancel();
+}
+
+#[tokio::test]
 async fn esc_once_answered_drops_it() {
     let (tmp, token, mut app, _) = panel().await;
     let home = rl_core::Home::at(tmp.path().join("h"));

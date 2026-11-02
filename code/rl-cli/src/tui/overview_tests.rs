@@ -514,6 +514,43 @@ async fn a_list_search_stays_on_the_list() {
 }
 
 #[tokio::test]
+async fn a_list_search_comes_back_after_events_over_the_overview() {
+    let (tmp, token, mut app, folder) = panel().await;
+    flow_in(&tmp, &mut app, "alpha", &md_in(&folder)).await;
+    app.refresh().await;
+    app.filter = "zzzz".into();
+    app.open_overview(Scope::Project(folder.clone()), None);
+    app.toggle_events().await;
+    assert!(app.view == View::Events);
+    press(&mut app, KeyCode::Esc, KeyModifiers::NONE).await;
+    assert!(app.view == View::Overview);
+    assert!(app.filter.is_empty(), "the overview still unsearched: {:?}", app.filter);
+    press(&mut app, KeyCode::Esc, KeyModifiers::NONE).await;
+    assert!(app.view == View::Work);
+    assert_eq!(app.filter, "zzzz");
+    assert!(app.list_search.is_none(), "given back once");
+    token.cancel();
+}
+
+#[tokio::test]
+async fn a_list_search_comes_back_after_a_catch_up_over_the_overview() {
+    let (tmp, token, mut app, folder) = panel().await;
+    flow_in(&tmp, &mut app, "alpha", &md_in(&folder)).await;
+    app.refresh().await;
+    app.filter = "zzzz".into();
+    app.open_overview(Scope::Project(folder.clone()), None);
+    app.open_catch_up(super::tests::nine_hours_ago(), false).await;
+    assert!(app.view == View::CatchUp);
+    // `back_to_list`, from the catch-up over the overview.
+    press(&mut app, KeyCode::Esc, KeyModifiers::NONE).await;
+    assert!(app.view == View::Work);
+    assert!(app.overview.is_none());
+    assert_eq!(app.filter, "zzzz");
+    assert!(app.list_search.is_none(), "given back once");
+    token.cancel();
+}
+
+#[tokio::test]
 async fn a_summary_over_another_stretch_leaves_the_overviews_alone() {
     let Some((_tmp, token, mut app, folder)) = panel_with_fake_summariser("- the build went green").await else {
         return;

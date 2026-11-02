@@ -62,7 +62,7 @@ pub enum FlowCmd {
     },
     /// Read ~/.relay/flows again (rld does it on start too).
     Reload,
-    /// Put a flow away: its folder renamed _<name>, its runs archived, its yes taken. Refused while it fires or waits on a question.
+    /// Put a flow away: its folder renamed _<name>, its runs archived, its yes taken. Refused while it fires, waits on a question or waits on a lost step.
     Park { name: String },
     /// Bring a parked flow back under its name, needing a yes: by name, its newest parked folder; or a folder, `_nightly.2`.
     Unpark {
@@ -202,7 +202,7 @@ pub async fn flow(home: &Home, cmd: FlowCmd, json: bool) -> Result<()> {
             } else if let Some(f) = &u.flow {
                 println!("{} back · it needs a yes: rl flow approve {}", f.name, f.name);
             } else {
-                let (name, why) = (&u.name, u.problem.as_deref().unwrap_or("not loaded"));
+                let (name, why) = (&u.name, u.why());
                 bail!(
                     "{name} is back in flows/{name} but did not load: {why} · rl flow edit {name}, or rl flow reload"
                 );

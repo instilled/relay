@@ -327,7 +327,8 @@ they came. They come from `rld`'s store (`rl-daemon/src/outside/`), never from a
   whose pid is a live run's, is left out. One left open in its terminal while a run carries it on
   shows while it works there; a Claude background session an ended run was sent to
   (`/background`) says `was <title>`, and the run `went to Claude's background`.
-- **Gone** on `SessionEnd`, when its process is (checked every 5s), or after long silence.
+- **Gone** on `SessionEnd`, when its process is (checked every 5s), when its folder is, or after
+  long silence.
 
 Enter attaches to a Claude background session: `claude attach <id>` runs under a pty of the
 panel's (`held.rs`), the terminal passed through as for a joined run, so `ctrl-\` lets go of it
@@ -436,11 +437,15 @@ Flows talk to each other only through events — Relay's own or `rl emit`'s (the
 families are refused).
 
 **Parking** (`flows/park.rs`): `flow.park` puts a flow away without losing it. Refused while a
-firing of it is open, it renames the folder `_<name>` (`_<name>.2`, `.3`… while that is taken;
-nothing is overwritten), archives the flow's ended runs (cause `flow:<name>/`), takes its yes and
-reads the flows again. A `_` folder is parked: no flow can be called that, so it never loads, and
+firing of it is open — waiting on a question, or on a lost step (`/resume its run or /stop it`)
+— it renames the folder `_<name>` (`_<name>.2`, `.3`… while that is taken; nothing is
+overwritten), archives the flow's ended runs (cause `flow:<name>/`), takes its yes and reads the
+flows again. A `_` folder is parked: no flow can be called that, so it never loads, and
 `flow.parked` lists them. `flow.unpark` renames one back, refused while a flow has its name; it
-comes back needing a yes, even with its folder as it was.
+comes back needing a yes, even with its folder as it was. It answers `Unparked { name, flow,
+problem }` rather than an error: `flow` is the flow as loaded, or `None` with `problem` saying
+why it did not load. Reloads of the flows are serialized by `Flows.reloading`, taken before the
+folders are read, so a reload racing a park cannot list it again.
 
 **`rl flow`**: `list`, `new <name> [words…] [--go]`, `edit`, `run`, `pause`, `resume`,
 `approve`, `test` (what would fire and which steps would run, starting nothing; `flows/

@@ -112,7 +112,7 @@ pub fn register(r: &mut Router<Daemon>) {
             .into_iter()
             .find(|n| n.flow == name)
             .map(|n| n.to_string())
-            .or(Some("not loaded".into()));
+            .or(Some(Unparked::NO_REASON.into()));
         Ok(Unparked {
             name,
             flow: None,

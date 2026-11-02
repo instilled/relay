@@ -329,11 +329,12 @@ impl Hooked {
         list
     }
 
-    /// Lets go of the sessions that ended without a word: a process gone
-    /// (`alive` says whether a pid still is), nothing heard for `QUIET`,
-    /// or no process known and nothing heard for `STALE`, or its folder
-    /// gone (`here` says whether a folder is). Their keys. And forgets the
-    /// ends older than `ENDED`.
+    /// Lets go of the sessions that ended without a word, and returns their
+    /// keys. A session goes when its folder is gone (`here` says whether a
+    /// folder is still there); when its process is gone (`alive` says
+    /// whether a pid still is) or nothing was heard from it for `QUIET`;
+    /// or, with no process known, when nothing was heard for `STALE`. The
+    /// ends older than `ENDED` are forgotten too.
     pub fn prune(
         &self,
         now: Instant,

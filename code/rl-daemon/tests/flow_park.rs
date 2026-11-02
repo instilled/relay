@@ -386,29 +386,46 @@ async fn unpark_of_a_folder_that_does_not_load_says_why_in_its_answer() {
 }
 
 /// Reloads from another connection never sync a folder list read before a park's rename after
-/// the park's own reload: once parked, the flow is not listed.
+/// the park's own reload: once parked, the flow is not listed — not right after, and not once a
+/// reload in flight then has landed.
 #[tokio::test]
 async fn a_reload_racing_a_park_never_leaves_it_listed() {
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     let tmp = tempfile::tempdir().unwrap();
     let Some((h, mut c)) = start(tmp.path(), &[("hello", HELLO)]).await else {
         return;
     };
     let stop = Arc::new(AtomicBool::new(false));
+    // Reloads the other connection has had answered.
+    let done = Arc::new(AtomicU64::new(0));
     let mut other = Conn::open(&h.home).await;
     let looping = {
-        let stop = stop.clone();
+        let (stop, done) = (stop.clone(), done.clone());
         tokio::spawn(async move {
             while !stop.load(Ordering::Relaxed) {
                 let _: Reloaded = other.ok("flow.reload", json!(null)).await;
+                done.fetch_add(1, Ordering::SeqCst);
             }
         })
     };
+    let names = |flows: Vec<Flow>| flows.into_iter().map(|f| f.name).collect::<Vec<_>>();
     for i in 0..25 {
         let _: Parked = c.ok("flow.park", json!({ "name": "hello" })).await;
-        let names: Vec<String> = listed(&mut c).await.into_iter().map(|f| f.name).collect();
-        assert!(!names.iter().any(|n| n == "hello"), "round {i}: {names:?}");
+        let after = done.load(Ordering::SeqCst);
+        let now = names(listed(&mut c).await);
+        assert!(!now.iter().any(|n| n == "hello"), "round {i}: {now:?}");
+        // The reload in flight when the park returned has landed, and one begun after it: a
+        // stale sync of the folders read before the rename would show by now.
+        let waited = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while done.load(Ordering::SeqCst) < after + 2 {
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            }
+        })
+        .await;
+        assert!(waited.is_ok(), "round {i}: the other connection stopped reloading");
+        let later = names(listed(&mut c).await);
+        assert!(!later.iter().any(|n| n == "hello"), "round {i}, later: {later:?}");
         let _: Unparked = c.ok("flow.unpark", json!({ "folder": "_hello" })).await;
     }
     stop.store(true, Ordering::Relaxed);

@@ -629,6 +629,16 @@ pub struct Unparked {
     pub problem: Option<String>,
 }
 
+impl Unparked {
+    /// What is said after "did not load: " when the reload named no reason.
+    pub const NO_REASON: &'static str = "no reason given";
+
+    /// Why it did not load: its `problem`, else `NO_REASON`.
+    pub fn why(&self) -> &str {
+        self.problem.as_deref().unwrap_or(Self::NO_REASON)
+    }
+}
+
 /// Brings a parked flow back under its name, needing a yes. Refused while a flow has that name;
 /// back but not loaded is an answer, saying why.
 pub struct FlowUnpark;

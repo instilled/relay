@@ -62,8 +62,10 @@ impl Scope {
 }
 
 impl App {
-    /// Puts `scope`'s overview up, the list's cursor kept for when it comes back. The cursor
-    /// lands on `at` when it is one of its rows, else on its first flow, else on `+ new flow`.
+    /// Puts `scope`'s overview up, the list's cursor kept for when it comes back, and the list's
+    /// search set aside (`list_search`) to be given back on the way out; the overview opens
+    /// unsearched. The cursor lands on `at` when it is one of its rows, else on its first flow,
+    /// else on `+ new flow`.
     pub(super) fn open_overview(&mut self, scope: Scope, at: Option<String>) {
         if self.overview.as_ref() != Some(&scope) {
             self.overview_said = None;
@@ -135,8 +137,9 @@ impl App {
         });
     }
 
-    /// Where the overview's summary of `target` starts: where the last one made of it here did,
-    /// so the one it made is found again; else since you were last here; else the last day.
+    /// Where the overview's summary of `target` starts: where the last one the overview made of
+    /// it did (`overview_from`), so that one is found again — a `/summary` made of it is not
+    /// read; else since you were last here; else the last day.
     fn overview_stretch(&self, target: &SummaryTarget) -> Timestamp {
         self.overview_from
             .get(&target.key())

@@ -471,7 +471,8 @@ struct App {
     summary_ask: Option<SummaryParams>,
     /// The last summary made of each target (`SummaryTarget::key`) while the
     /// panel is open: which stretch and depth the pane asks the kept one
-    /// for, and what it shows if none is kept.
+    /// for, and what it shows if none is kept. The overview's stretch does
+    /// not read it: that is `overview_from`.
     made: HashMap<String, Summary>,
     /// Where the overview's own top of each project started, by `SummaryTarget::key`, so it is
     /// found again; `/summary`'s stretch is not its.
@@ -3417,7 +3418,7 @@ impl App {
                 format!("enter output · /summary · ^x archives · ^t pins · {pane}")
             }
             Some(Row::Run(_)) => format!("enter joins it · ^x stops it · ^t pins · {pane}"),
-            Some(Row::Outside(c)) => format!("{} · ^x hides · {pane}", outside::enter_hint(c)),
+            Some(Row::Outside(c)) => format!("{} · {} · {pane}", outside::enter_hint(c), self.x_hides_hint()),
             // A flow here that did not load is what `/flow edit` opens, at the line.
             Some(Row::Group(h)) if h.is_everywhere() => {
                 let fix = self.broken_hint(&h);
@@ -3425,15 +3426,26 @@ impl App {
             }
             Some(Row::Group(h)) => {
                 let fix = self.broken_hint(&h);
-                // A folder that is no project has nothing to remove: `^x` hides it.
-                let x = if self.names.registered(&h.workspace).is_some() {
-                    "removes"
+                // A folder that is no project, with no run of relay's in it, has nothing to
+                // remove: `^x` hides it.
+                let x = if self.hides_on_x().is_some() {
+                    self.x_hides_hint()
                 } else {
-                    "hides"
+                    "^x removes"
                 };
-                format!("enter its flows · /shell · {fix}^r renames · ^x {x} · {pane}")
+                format!("enter its flows · /shell · {fix}^r renames · {x} · {pane}")
             }
             _ => String::new(),
+        }
+    }
+
+    /// The hint for a row `^x` hides — none, when it is hidden already and on
+    /// the list only because hidden rows are shown.
+    fn x_hides_hint(&self) -> &'static str {
+        if self.shown_though_hidden() {
+            "/hide brings it back"
+        } else {
+            "^x hides"
         }
     }
 }
