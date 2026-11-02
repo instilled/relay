@@ -505,6 +505,9 @@ impl App {
             return Ok(());
         }
         match (k.code, k.modifiers) {
+            // An esc typed to leave a proposal still asking, just as its answer came: let be,
+            // said nothing, as enter's guard says nothing.
+            (KeyCode::Esc, _) if self.proposal_just_landed() => {}
             (KeyCode::Esc, _) => self.leave_subpage(),
             (KeyCode::Char('c' | 'x' | 'r' | 'o' | 't'), KeyModifiers::CONTROL) => return self.key_list(k).await,
             _ => {}
@@ -689,7 +692,8 @@ impl App {
                     self.say(Self::FLOW_ON_THE_LIST);
                 } else if self.on_parked_line() || self.parked_here().is_some() {
                     self.say("already parked");
-                } else if !self.on_everywhere() && matches!(self.selected(), Some(Row::Group(_))) {
+                } else if matches!(self.selected(), Some(Row::Group(h)) if !h.is_everywhere() && self.names.registered(&h.workspace).is_some())
+                {
                     // A project is not armed and fired by a second keypress: a
                     // stray or laggy ^x must not take a whole project down.
                     self.confirm_remove_project();

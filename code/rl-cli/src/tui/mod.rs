@@ -3417,7 +3417,7 @@ impl App {
                 format!("enter output · /summary · ^x archives · ^t pins · {pane}")
             }
             Some(Row::Run(_)) => format!("enter joins it · ^x stops it · ^t pins · {pane}"),
-            Some(Row::Outside(c)) => format!("{} · /hide · {pane}", outside::enter_hint(c)),
+            Some(Row::Outside(c)) => format!("{} · ^x hides · {pane}", outside::enter_hint(c)),
             // A flow here that did not load is what `/flow edit` opens, at the line.
             Some(Row::Group(h)) if h.is_everywhere() => {
                 let fix = self.broken_hint(&h);
@@ -3425,7 +3425,13 @@ impl App {
             }
             Some(Row::Group(h)) => {
                 let fix = self.broken_hint(&h);
-                format!("enter its flows · /shell · {fix}^r renames · ^x removes · {pane}")
+                // A folder that is no project has nothing to remove: `^x` hides it.
+                let x = if self.names.registered(&h.workspace).is_some() {
+                    "removes"
+                } else {
+                    "hides"
+                };
+                format!("enter its flows · /shell · {fix}^r renames · ^x {x} · {pane}")
             }
             _ => String::new(),
         }

@@ -10,8 +10,9 @@ use ratatui::text::{Line, Span};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-/// An `enter` sooner than this after the draft came was typed for what was there before it.
-const SETTLE: Duration = Duration::from_millis(300);
+/// An `enter` sooner than this after the draft came was typed for what was there before it; an
+/// `esc` that soon after any answer, for the wait.
+pub(super) const SETTLE: Duration = Duration::from_millis(300);
 
 /// What the dots say while the assistant is at it, one a second.
 const DOTS: [&str; 3] = ["·  ", "·· ", "···"];
@@ -26,6 +27,8 @@ pub struct Proposal {
     pub draft: Option<(Draft, String, Instant)>,
     /// When it was last asked, while it is; none once it answered.
     pub since: Option<Instant>,
+    /// When the last answer came, whatever it was.
+    pub landed: Option<Instant>,
     /// Why the last ask, or the last `enter`, came to nothing.
     pub error: Option<String>,
     /// Whether it is the subpage now: `esc` leaves it, still asking, and `/ask` brings it back.
@@ -39,6 +42,7 @@ impl Proposal {
             asked: vec![words],
             draft: None,
             since: Some(Instant::now()),
+            landed: None,
             error: None,
             shown: true,
         }
@@ -49,6 +53,11 @@ impl Proposal {
         self.draft
             .as_ref()
             .is_some_and(|(_, _, at)| now.duration_since(*at) < SETTLE)
+    }
+
+    /// Whether an `esc` now would be one typed before the answer came.
+    pub fn just_landed(&self, now: Instant) -> bool {
+        self.landed.is_some_and(|at| now.duration_since(at) < SETTLE)
     }
 
     /// The page: the words asked, where it stands, what was proposed, the keys.
@@ -164,8 +173,10 @@ impl App {
         let p = self
             .proposal
             .get_or_insert_with(|| Proposal::new(PathBuf::new(), String::new()));
-        p.draft = Some((d, agent.clone(), Instant::now()));
+        let now = Instant::now();
+        p.draft = Some((d, agent.clone(), now));
         p.since = None;
+        p.landed = Some(now);
         p.error = None;
         if !(p.shown && self.show_pane) {
             p.shown = false;
@@ -178,6 +189,7 @@ impl App {
         match self.proposal.as_mut() {
             Some(p) => {
                 p.since = None;
+                p.landed = Some(Instant::now());
                 p.error = Some(why.clone());
                 if !(p.shown && self.show_pane) {
                     self.say(why);
@@ -185,6 +197,13 @@ impl App {
             }
             None => self.say(why),
         }
+    }
+
+    /// An esc sooner than SETTLE after the shown proposal's answer came was typed for the wait.
+    pub(super) fn proposal_just_landed(&self) -> bool {
+        let now = Instant::now();
+        self.flow_proposal_shown().is_some_and(|p| p.just_landed(now))
+            || self.proposal_shown().is_some_and(|p| p.just_landed(now))
     }
 
     /// `/ask` with no words: the proposal, back in the pane.

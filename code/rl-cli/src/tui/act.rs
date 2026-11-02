@@ -127,7 +127,8 @@ impl App {
     /// is on out of the list. A flow, in its overview, is parked (reversible:
     /// `/flow unpark`); an ended run is archived (reversible: the ledger keeps
     /// it); a run still going is stopped and archived as soon as it has ended,
-    /// killed if it lingers; a question is dismissed; a project is removed, its
+    /// killed if it lingers; a question is dismissed; a session of Claude's, or
+    /// a header whose folder is no project, is hidden; a project is removed, its
     /// runs stopped and archived. Nothing here is destroyed — that is
     /// retention's alone.
     pub(super) async fn remove_selected(&mut self) {
@@ -144,6 +145,14 @@ impl App {
             self.dismiss(q.id.clone()).await;
         } else if self.on_everywhere() {
             self.say(format!("{} · nothing to remove", Self::NOT_A_PROJECT));
+        } else if self.hides_on_x().is_some() {
+            let key = self.selected().and_then(|r| r.key()).unwrap_or_default();
+            if self.show_hidden && self.digest.hidden.iter().any(|h| h.key == key) {
+                // With hidden on, `/hide` would bring it back: `^x` is not that.
+                self.say("already hidden · /hide brings it back");
+            } else {
+                self.hide_as(false).await;
+            }
         } else if let Some(Row::Group(h)) = self.selected() {
             let (folder, name) = (h.workspace.clone(), h.name.clone());
             self.remove_project(folder, name);
@@ -210,6 +219,19 @@ impl App {
         self.refresh().await;
     }
 
+    /// The row under the cursor, when `^x` hides it rather than removes it: a
+    /// session of Claude's own, or a header whose folder is no project (the
+    /// daemon has nothing to remove there). Its title, for the hint.
+    fn hides_on_x(&self) -> Option<String> {
+        match self.selected()? {
+            Row::Outside(c) => Some(c.title()),
+            Row::Group(h) if !h.is_everywhere() && self.names.registered(&h.workspace).is_none() => {
+                Some(h.name.clone())
+            }
+            _ => None,
+        }
+    }
+
     /// What a second `ctrl-x` would do to the row under the cursor, for the
     /// armed hint — `None` when there is nothing to remove there.
     pub(super) fn remove_hint(&self) -> Option<String> {
@@ -225,6 +247,8 @@ impl App {
             Some(format!("dismiss {}", q.title))
         } else if self.on_everywhere() {
             None
+        } else if let Some(t) = self.hides_on_x() {
+            Some(format!("hide {t}"))
         } else if let Some(Row::Group(h)) = self.selected() {
             Some(remove::arm(&remove::Plan::of(
                 &h.name,
@@ -343,11 +367,15 @@ impl App {
     /// row comes back, and a header that is not hidden itself brings back what
     /// was hidden under it. A question is never hidden: it needs you.
     pub(super) async fn hide(&mut self) {
+        self.hide_as(self.show_hidden).await;
+    }
+
+    /// `/hide`'s work: `back` brings the row back rather than hiding it.
+    async fn hide_as(&mut self, back: bool) {
         // What it hides, and where the cursor goes after, is the list's.
         if self.view == View::CatchUp {
             return self.say("/hide hides on the list · esc goes there");
         }
-        let back = self.show_hidden;
         let rows = self.rows();
         let Some(at) = self
             .sel

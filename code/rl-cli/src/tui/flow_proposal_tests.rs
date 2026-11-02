@@ -79,12 +79,17 @@ pub(super) async fn proposed(app: &mut super::App, name: &str, text: &str) {
     answer_md(app, Some(name), text).await;
 }
 
-/// The screen drawn, and the draft on it there long enough for an enter to be its yes — as if the
-/// person had looked a moment, without the test waiting.
+/// The screen drawn, and the draft on it there long enough for an enter to be its yes, and an esc
+/// its no — as if the person had looked a moment, without the test waiting.
 pub(super) fn on_screen(app: &mut super::App) -> String {
     let screen = draw_text(app);
-    if let Some(d) = app.flow_proposal.as_ref().and_then(|p| p.draft.as_ref()) {
-        d.drawn.set(Some(Instant::now() - Duration::from_secs(1)));
+    if let Some(p) = app.flow_proposal.as_mut() {
+        if let Some(d) = p.draft.as_ref() {
+            d.drawn.set(Some(Instant::now() - Duration::from_secs(1)));
+        }
+        if p.landed.is_some() {
+            p.landed = Some(Instant::now() - Duration::from_secs(1));
+        }
     }
     screen
 }
@@ -406,10 +411,29 @@ async fn esc_while_asking_leaves_it_asking() {
 }
 
 #[tokio::test]
+async fn an_esc_just_as_the_answer_lands_is_let_be() {
+    let (_tmp, token, mut app, _) = panel().await;
+    proposed(&mut app, "hello", HELLO).await;
+    press(&mut app, KeyCode::Esc, KeyModifiers::NONE).await;
+    assert!(app.flow_proposal.is_some(), "the answer kept");
+    assert!(app.show_pane, "still up");
+    assert!(!said(&app).starts_with("dropped it"), "{}", said(&app));
+    // A moment on, esc is meant for what is there.
+    if let Some(p) = app.flow_proposal.as_mut() {
+        p.landed = Some(Instant::now() - Duration::from_secs(1));
+    }
+    press(&mut app, KeyCode::Esc, KeyModifiers::NONE).await;
+    assert_eq!(said(&app), "dropped it · nothing written");
+    assert!(app.flow_proposal.is_none());
+    token.cancel();
+}
+
+#[tokio::test]
 async fn esc_once_answered_drops_it() {
     let (tmp, token, mut app, _) = panel().await;
     let home = rl_core::Home::at(tmp.path().join("h"));
     proposed(&mut app, "hello", HELLO).await;
+    on_screen(&mut app);
     press(&mut app, KeyCode::Esc, KeyModifiers::NONE).await;
     assert_eq!(said(&app), "dropped it · nothing written");
     assert!(app.flow_proposal.is_none() && !app.show_pane);
