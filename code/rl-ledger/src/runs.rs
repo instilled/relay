@@ -346,6 +346,19 @@ pub fn archive_workspace(conn: &Connection, workspace: &std::path::Path, at: Tim
     )?)
 }
 
+/// Done with everything of one flow's that has ended, as when it is parked: the runs whose
+/// cause is `flow:<flow>/<step>` go, pins and all. Compared by prefix with its `/`, so
+/// `nightly`'s are never `nightly-2`'s. Runs still going stay.
+pub fn archive_flow_runs(conn: &Connection, flow: &str, at: Timestamp) -> Result<usize> {
+    Ok(conn.execute(
+        &format!(
+            "UPDATE runs SET archived_at = ?2, pinned_at = NULL WHERE substr(cause, 1, length(?1)) = ?1 \
+             AND archived_at IS NULL AND state IN ({TERMINAL_STATES_SQL})"
+        ),
+        params![format!("flow:{flow}/"), to_millis(at)],
+    )?)
+}
+
 /// The runs in one folder that have not ended, oldest first.
 pub fn live_in(conn: &Connection, workspace: &std::path::Path) -> Result<Vec<Run>> {
     let mut stmt = conn.prepare(&format!(
@@ -503,6 +516,35 @@ mod tests {
         );
         set_seen(&c, &["a".into()], t(3_000)).unwrap();
         assert_eq!(oldest_unseen(&c, "flow:nightly/").unwrap(), None);
+    }
+
+    #[test]
+    fn archive_flow_runs_takes_only_its_flows_ended_runs() {
+        let c = test_conn();
+        let t = |ms| Timestamp::from_millisecond(ms).unwrap();
+        insert_ended(&c, "ended", "flow:nightly/a", t(1_000), None);
+        let mut going = Run::new(
+            "going",
+            rl_proto::types::RunKind::Command,
+            "going",
+            vec![],
+            "/w",
+            "/w",
+            t(1_000),
+        );
+        going.cause = "flow:nightly/b".parse().unwrap();
+        going.state = RunState::Working;
+        insert(&c, &going).unwrap();
+        insert_ended(&c, "other", "flow:nightly-2/a", t(1_000), None);
+        insert_ended(&c, "before", "flow:nightly/c", t(1_000), None);
+        archive(&c, &["before".into()], t(1_500)).unwrap();
+
+        assert_eq!(archive_flow_runs(&c, "nightly", t(2_000)).unwrap(), 1);
+        let archived = |id: &str| get(&c, id).unwrap().unwrap().archived_at;
+        assert_eq!(archived("ended"), Some(t(2_000)));
+        assert_eq!(archived("going"), None, "still going");
+        assert_eq!(archived("other"), None, "nightly-2's, not nightly's");
+        assert_eq!(archived("before"), Some(t(1_500)), "archived already, left as it was");
     }
 
     #[test]

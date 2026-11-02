@@ -2,6 +2,7 @@
 
 use super::engine::{Fired, Refused};
 use super::outcome;
+use super::park::Unmoved;
 use super::preview::Untested;
 use super::state::Refusal;
 use crate::router::Router;
@@ -9,8 +10,8 @@ use crate::server::Daemon;
 use rl_ledger::{firings, flows};
 use rl_proto::flow::{
     FiringFilter, FiringRef, Flow, FlowApproval, FlowApprove, FlowErrors, FlowFilter, FlowFirings, FlowList, FlowName,
-    FlowOutcome, FlowPause, FlowReload, FlowResume, FlowRun, FlowStateGet, FlowStateRead, FlowStateSet, FlowStateWrite,
-    FlowTest, FlowTestParams, StateFile, StateName, StateValues,
+    FlowOutcome, FlowPark, FlowParkedList, FlowPause, FlowReload, FlowResume, FlowRun, FlowStateGet, FlowStateRead,
+    FlowStateSet, FlowStateWrite, FlowTest, FlowTestParams, FlowUnpark, ParkedName, StateFile, StateName, StateValues,
 };
 use rl_proto::rpc::RpcError;
 
@@ -83,6 +84,19 @@ pub fn register(r: &mut Router<Daemon>) {
                 None => internal(e),
             })
     });
+    r.register::<FlowPark, _, _>(|d, FlowName { name }| async move {
+        d.flows.park(&name).await.map_err(|e| unmoved(&d, e))
+    });
+    r.register::<FlowUnpark, _, _>(|d, ParkedName { folder }| async move {
+        let name = d.flows.unpark(&folder).await.map_err(|e| unmoved(&d, e))?;
+        let back = get(&d, &name).await?;
+        // Back, but not loaded: why it did not is the answer.
+        if back.removed_at.is_some() {
+            return Err(missing(&d, &name));
+        }
+        Ok(back)
+    });
+    r.register::<FlowParkedList, _, _>(|d, ()| async move { d.flows.parked().map_err(internal) });
     r.register::<FlowStateSet, _, _>(|d, p: StateValues| async move {
         d.flows.state_set(&p.run, p.values).await.map_err(refused)
     });
@@ -157,6 +171,16 @@ fn short(hash: &str) -> String {
 
 fn internal(e: anyhow::Error) -> RpcError {
     RpcError::internal(format!("{e:#}"))
+}
+
+/// A flow not parked or brought back: no such flow is [`missing`], the rest are the asker's to
+/// fix, said as they are; anything else is Relay's.
+fn unmoved(d: &Daemon, e: anyhow::Error) -> RpcError {
+    match e.downcast_ref::<Unmoved>() {
+        Some(Unmoved::Missing(name)) => missing(d, name),
+        Some(u) => RpcError::invalid_params(u.to_string()),
+        None => internal(e),
+    }
 }
 
 /// A refusal is the step's to fix, said as it is; anything else is Relay's.

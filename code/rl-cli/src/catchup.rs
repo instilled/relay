@@ -15,7 +15,7 @@ pub mod heads;
 use crate::client::Client;
 use crate::digest::since_items;
 use crate::tui::rows::{self, Context, Head, Row};
-use jiff::Timestamp;
+use jiff::{SignedDuration, Timestamp};
 use rl_core::time::{fmt_age, fmt_duration, fmt_when};
 use rl_proto::decision::Decision;
 use rl_proto::flow::Flow;
@@ -86,6 +86,7 @@ impl<'a> CatchUp<'a> {
         let list = Context {
             names: cx.names,
             flows: cx.flows,
+            parked: cx.parked,
             filter: cx.filter,
             show_flows: true,
             show_agents: true,
@@ -223,6 +224,7 @@ impl<'a> CatchUp<'a> {
             &Context {
                 names: &names,
                 flows,
+                parked: &[],
                 filter: "",
                 show_flows: true,
                 show_agents: true,
@@ -527,6 +529,83 @@ pub async fn plan_top(rpc: &mut Client, since: Timestamp, has_runs: bool, came_b
     }
 }
 
+/// What a project's top is asked for over its stretch from `from`: brief, as the overview shows
+/// it, and one kept that is current given back rather than written again.
+pub fn project_ask(workspace: &Path, from: Timestamp) -> SummaryParams {
+    SummaryParams {
+        target: SummaryTarget::Project {
+            workspace: workspace.to_path_buf(),
+        },
+        deep: false,
+        from: Some(from),
+        again: false,
+        dry: false,
+        timeout: None,
+    }
+}
+
+/// How far back a project's overview summary reaches when it opens with nothing to start from,
+/// and how long one kept over another stretch stands for it before it is written again.
+pub const OVERVIEW_STRETCH: SignedDuration = SignedDuration::from_hours(24);
+
+/// How long a summary kept of a project stands for its overview though it has moved on since:
+/// runs going on keep moving it, and writing the top again at every open would be asking at every
+/// `esc` and `enter`.
+pub const OVERVIEW_FRESH: SignedDuration = SignedDuration::from_mins(15);
+
+/// Whether a kept summary stands for the overview: while it is up to date, or, though it has
+/// moved on, written less than `OVERVIEW_FRESH` ago. `within` is how old it may be at most for an
+/// up-to-date one found by another stretch (`OVERVIEW_STRETCH`), or None for one of this stretch.
+fn kept_current(k: &Summary, now: Timestamp, within: Option<SignedDuration>) -> bool {
+    let age = now.duration_since(k.at);
+    if age < OVERVIEW_FRESH {
+        return true;
+    }
+    !k.stale && within.is_none_or(|w| age <= w)
+}
+
+/// A project's top, as its overview opens: the summary kept of it from `from` while it is up to
+/// date or written less than `OVERVIEW_FRESH` ago; with none kept from there, the newest kept of
+/// it from anywhere, while it is that and written within `OVERVIEW_STRETCH`. Else, when it writes itself (`auto_project_top`), one
+/// to ask for, with the one kept, moved on or old, shown until it lands; else the one kept, or
+/// none.
+pub async fn plan_project_top(rpc: &mut Client, workspace: &Path, from: Timestamp) -> TopPlan {
+    let ask = project_ask(workspace, from);
+    let exact = rpc.call::<SummaryGet>(ask.clone()).await.ok().flatten();
+    let (kept, current) = match exact {
+        Some(k) => {
+            let current = kept_current(&k, Timestamp::now(), None);
+            (Some(k), current)
+        }
+        None => {
+            let newest = SummaryParams {
+                from: None,
+                ..ask.clone()
+            };
+            let k = rpc.call::<SummaryGet>(newest).await.ok().flatten();
+            let current = k
+                .as_ref()
+                .is_some_and(|k| kept_current(k, Timestamp::now(), Some(OVERVIEW_STRETCH)));
+            (k, current)
+        }
+    };
+    if current {
+        return TopPlan { shown: kept, ask: None };
+    }
+    let writes = rpc.call::<ConfigGet>(()).await.is_ok_and(|r| auto_project_top(&r));
+    TopPlan {
+        shown: kept,
+        ask: writes.then_some(ask),
+    }
+}
+
+/// Whether a project's top writes itself as its overview opens: as the catch-up's does
+/// (`auto_top`), with `catch_up.summary: auto` and by the assistant you named for summaries, but
+/// whatever the time away — opening the overview is asking to look.
+pub fn auto_project_top(r: &ConfigReport) -> bool {
+    r.config.catch_up.auto_summary() && named_summariser(r)
+}
+
 /// Whether the top writes itself: only as you come back (`came_back`) after
 /// longer away than `catch_up.after`, with `catch_up.summary: auto`, and by
 /// the assistant you named for summaries (`assistants.summary`, as setup
@@ -811,6 +890,7 @@ mod tests {
                 show_hidden: false,
                 now: now(),
                 relay: None,
+                parked: &[],
             },
         );
         let api = cu.projects.iter().find(|p| p.head.name == "api").unwrap();
@@ -837,6 +917,7 @@ mod tests {
                 show_hidden: false,
                 now: now(),
                 relay: None,
+                parked: &[],
             },
         );
         assert!(cu.projects[0].rows.iter().any(|r| matches!(r, Row::Flow(_))));
@@ -908,6 +989,7 @@ mod tests {
                 show_hidden: false,
                 now: now(),
                 relay: None,
+                parked: &[],
             },
         )
     }
@@ -1149,6 +1231,7 @@ mod tests {
             show_hidden: false,
             now: now(),
             relay: None,
+            parked: &[],
         };
         let on_the_list = rows::build(&d, &cx);
         assert!(on_the_list.iter().any(|r| r.key().as_deref() == Some("f:quiet")));
@@ -1279,29 +1362,74 @@ mod tests {
         assert_eq!(top_label(&s), "deep · by haiku · from 1 run · moved on since");
     }
 
+    /// A summary kept `ago` back, moved on since or not.
+    fn kept(ago: SignedDuration, stale: bool) -> Summary {
+        Summary {
+            run: String::new(),
+            agent: "haiku".into(),
+            by: "x1".into(),
+            at: Timestamp::now() - ago,
+            text: "• fine".into(),
+            since: None,
+            source: "summarised".into(),
+            reach: String::new(),
+            stale,
+            target: "project:/p".into(),
+            deep: false,
+            from: None,
+            calls: 1,
+            runs: 2,
+        }
+    }
+
+    #[test]
+    fn a_summary_moved_on_stands_for_the_overview_for_fifteen_minutes() {
+        let now = Timestamp::now();
+        let young = kept(SignedDuration::from_mins(14), true);
+        assert!(kept_current(&young, now, None), "a minute short of the floor");
+        assert!(kept_current(&young, now, Some(OVERVIEW_STRETCH)));
+        let old = kept(SignedDuration::from_mins(16), true);
+        assert!(!kept_current(&old, now, None), "past it, written again");
+        assert!(!kept_current(&old, now, Some(OVERVIEW_STRETCH)));
+    }
+
+    #[test]
+    fn a_summary_up_to_date_stands_as_before() {
+        let now = Timestamp::now();
+        let day = SignedDuration::from_hours(23);
+        assert!(kept_current(&kept(day, false), now, None));
+        assert!(kept_current(&kept(day, false), now, Some(OVERVIEW_STRETCH)));
+        let older = kept(SignedDuration::from_hours(25), false);
+        assert!(kept_current(&older, now, None), "of its own stretch, any age");
+        assert!(!kept_current(&older, now, Some(OVERVIEW_STRETCH)));
+    }
+
+    /// What `config.get` says: the summariser named (`config`) or not, and `catch_up`'s
+    /// `summary` and `after`.
+    fn report(source: &str, summary: Option<&str>, after: Option<&str>) -> ConfigReport {
+        use rl_proto::methods::ResolvedAssistant;
+        let mut config = rl_proto::config::Config::default();
+        config.catch_up.summary = summary.map(String::from);
+        config.catch_up.after = after.map(String::from);
+        ConfigReport {
+            file: PathBuf::from("/h/config.yaml"),
+            present: true,
+            config,
+            interpret: None,
+            summary: Some(ResolvedAssistant {
+                agent: "haiku".into(),
+                source: source.into(),
+                argv: vec![],
+                available: true,
+            }),
+            catch_up_after: String::new(),
+            catch_up_summary: String::new(),
+            errors: vec![],
+        }
+    }
+
     #[test]
     fn the_top_writes_itself_only_as_you_come_back_and_by_the_assistant_you_named() {
-        use rl_proto::methods::{ConfigReport, ResolvedAssistant};
-        let report = |source: &str, summary: Option<&str>, after: Option<&str>| {
-            let mut config = rl_proto::config::Config::default();
-            config.catch_up.summary = summary.map(String::from);
-            config.catch_up.after = after.map(String::from);
-            ConfigReport {
-                file: PathBuf::from("/h/config.yaml"),
-                present: true,
-                config,
-                interpret: None,
-                summary: Some(ResolvedAssistant {
-                    agent: "haiku".into(),
-                    source: source.into(),
-                    argv: vec![],
-                    available: true,
-                }),
-                catch_up_after: String::new(),
-                catch_up_summary: String::new(),
-                errors: vec![],
-            }
-        };
         let now = now();
         let two_days = now - jiff::SignedDuration::from_hours(48);
         let hour = now - jiff::SignedDuration::from_hours(1);
@@ -1321,5 +1449,38 @@ mod tests {
         let mut gone = report("config", None, None);
         gone.summary.as_mut().unwrap().available = false;
         assert!(!auto_top(&gone, two_days, true, now), "not on this machine");
+    }
+
+    #[test]
+    fn a_projects_top_writes_itself_whatever_the_time_away_by_the_assistant_you_named() {
+        assert!(auto_project_top(&report("config", None, None)), "auto, named");
+        assert!(
+            auto_project_top(&report("config", None, Some("off"))),
+            "time away does not come into it"
+        );
+        assert!(
+            !auto_project_top(&report("default", None, None)),
+            "the first agent here is never asked by itself"
+        );
+        assert!(!auto_project_top(&report("config", Some("ask"), None)));
+        let mut gone = report("config", None, None);
+        gone.summary.as_mut().unwrap().available = false;
+        assert!(!auto_project_top(&gone), "not on this machine");
+    }
+
+    #[test]
+    fn a_projects_top_is_asked_of_the_project_brief_from_where_given() {
+        let from = now() - jiff::SignedDuration::from_hours(24);
+        let ask = project_ask(Path::new("/w/api"), from);
+        assert_eq!(
+            ask.target,
+            SummaryTarget::Project {
+                workspace: PathBuf::from("/w/api")
+            }
+        );
+        assert_eq!(
+            (ask.deep, ask.from, ask.again, ask.dry),
+            (false, Some(from), false, false)
+        );
     }
 }

@@ -181,6 +181,7 @@ fn place_keys(at: Place) -> Vec<Key> {
                 key("enter", "opens"),
                 key("→ ←", "its steps"),
                 key("^e", "edits"),
+                key("^x", "parks a flow"),
             ];
             if words {
                 v.push(key("type", "changes it / makes one"));
@@ -363,13 +364,13 @@ mod tests {
 
         assert_eq!(
             one_line(Place::Overview { words: true }),
-            "↑↓ moves · enter opens · → ← its steps · ^e edits · type changes it / makes one · \
-             /summary · esc the list · ^h"
+            "↑↓ moves · enter opens · → ← its steps · ^e edits · ^x parks a flow · \
+             type changes it / makes one · /summary · esc the list · ^h"
         );
         // On the top row words are not a flow's: no word of typing.
         assert_eq!(
             one_line(Place::Overview { words: false }),
-            "↑↓ moves · enter opens · → ← its steps · ^e edits · /summary · esc the list · ^h"
+            "↑↓ moves · enter opens · → ← its steps · ^e edits · ^x parks a flow · /summary · esc the list · ^h"
         );
 
         assert_eq!(

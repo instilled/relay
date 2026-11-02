@@ -86,6 +86,26 @@ impl Match {
     }
 }
 
+/// `[a-z0-9][a-z0-9-]*`: a flow's folder, or a step a placeholder can name.
+pub fn valid_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    let word = |c: char| c.is_ascii_lowercase() || c.is_ascii_digit();
+    chars.next().is_some_and(word) && chars.all(|c| word(c) || c == '-')
+}
+
+/// The flow a parked folder holds: `_nightly` and `_nightly.2` are both `nightly`'s. `None` for
+/// any other folder. A name never holds a `.`, so what is between the `_` and the first `.` is
+/// the name, whatever dashes it has.
+pub fn parked_name(folder: &str) -> Option<&str> {
+    let rest = folder.strip_prefix('_')?;
+    let (name, n) = match rest.split_once('.') {
+        Some((name, n)) => (name, Some(n)),
+        None => (rest, None),
+    };
+    let numbered = n.is_none_or(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
+    (numbered && valid_name(name)).then_some(name)
+}
+
 /// What to do about a time that passed while asleep or down. By default it is made up, once.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -565,6 +585,53 @@ impl Method for FlowFirings {
     type Result = Vec<Firing>;
 }
 
+/// A parked folder, by its name in `~/.relay/flows`: `_nightly`, `_nightly.2`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ParkedName {
+    pub folder: String,
+}
+
+/// A flow put away: its folder renamed `_<name>` (`_<name>.2` while that is taken), so it no
+/// longer loads, its runs archived and its yes taken.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Parked {
+    pub name: String,
+    /// The folder's name now: `_nightly`, `_nightly.2`.
+    pub folder: String,
+    /// When it was parked: the folder's time as of the rename.
+    pub at: Timestamp,
+    /// How many of its runs parking archived; 0 in a list.
+    pub archived: usize,
+    /// Its `in`, resolved as a flow's is, when its `flow.md` can still be read.
+    #[serde(default, rename = "in", skip_serializing_if = "Option::is_none")]
+    pub in_: Option<PathBuf>,
+}
+
+/// Parks a flow: its folder renamed `_<name>`, its ended runs archived, its yes taken. Refused
+/// while it is firing.
+pub struct FlowPark;
+impl Method for FlowPark {
+    const NAME: &'static str = "flow.park";
+    type Params = FlowName;
+    type Result = Parked;
+}
+
+/// Brings a parked flow back under its name, needing a yes. Refused while a flow has that name.
+pub struct FlowUnpark;
+impl Method for FlowUnpark {
+    const NAME: &'static str = "flow.unpark";
+    type Params = ParkedName;
+    type Result = Flow;
+}
+
+/// The parked folders, by name and then by when.
+pub struct FlowParkedList;
+impl Method for FlowParkedList {
+    const NAME: &'static str = "flow.parked";
+    type Params = ();
+    type Result = Vec<Parked>;
+}
+
 /// What a step asks of its firing's state: by the run it is called in (`$RELAY_RUN`), and a name.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StateName {
@@ -804,6 +871,16 @@ mod tests {
         assert_eq!(n.at(), "flow.md:3:5");
         n.line = None;
         assert_eq!(n.at(), "flow.md");
+    }
+
+    #[test]
+    fn a_parked_folder_gives_back_its_flows_name() {
+        assert_eq!(parked_name("_foo"), Some("foo"));
+        assert_eq!(parked_name("_foo.2"), Some("foo"));
+        assert_eq!(parked_name("_foo-bar.12"), Some("foo-bar"));
+        for not in ["foo", "_", "_Foo", "__foo", "_foo.", "_foo.x", "_foo.2.3"] {
+            assert_eq!(parked_name(not), None, "{not}");
+        }
     }
 
     #[test]

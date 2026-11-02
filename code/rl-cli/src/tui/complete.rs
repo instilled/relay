@@ -203,7 +203,7 @@ pub fn candidates(line: &str, cursor: usize, here: &Here) -> Vec<Candidate> {
 
 /// A `/` command's argument: the words it takes there, `/filter`'s search
 /// tokens and their values, `/up`'s folders, `/flow`'s flows after its verb
-/// (any but `reload`, which is every flow's). `rest` is the line after the
+/// (any but `reload`, which is every flow's, and `unpark`, whose are parked). `rest` is the line after the
 /// slash, up to the word being typed.
 fn command_args(rest: &str, frag: &str, here: &Here) -> Vec<Candidate> {
     let mut words = rest.split_whitespace();
@@ -215,7 +215,8 @@ fn command_args(rest: &str, frag: &str, here: &Here) -> Vec<Candidate> {
     match c.cmd {
         // A new flow's name is the person's, and so are its words.
         palette::Cmd::Flow if said.first().copied() == Some("new") => Vec::new(),
-        palette::Cmd::Flow if at == 1 && said[0] != "reload" => {
+        // `unpark`'s are parked, not among the flows.
+        palette::Cmd::Flow if at == 1 && !matches!(said[0], "reload" | "unpark") => {
             starting(here.names.flows.iter().map(String::as_str), frag, Kind::Word)
         }
         palette::Cmd::Filter => {
@@ -934,7 +935,7 @@ mod tests {
         assert_eq!(
             at_end("/flow ", &here),
             [
-                "run", "pause", "resume", "approve", "edit", "new", "test", "draft", "reload"
+                "run", "pause", "resume", "approve", "edit", "new", "test", "draft", "park", "unpark", "reload"
             ]
         );
         assert_eq!(at_end("/flow re", &here), ["resume", "reload"]);

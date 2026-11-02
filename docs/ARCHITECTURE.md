@@ -247,9 +247,18 @@ sequenceDiagram
   `everywhere` line after the projects tallies those with no `in`, and the headline counts every
   flow that needs you. `enter` on a project's line (or `everywhere`'s) opens its overview:
   `View::Overview` over a `Scope` (`Project(folder)` or `Everywhere`), `tui/overview.rs`. It has the
-  project's last summary on top (`/summary` there, on `+ new flow` or a flow, writes it; everywhere has
-  none), then its flows as rows (those that need you first, then by name, each with its open questions
-  under it), each opening its page, and a last row, `+ new flow` (`NEW_FLOW`). Words typed there
+  project's summary on top (everywhere has none). Opening it writes that summary when none kept
+  is current (up to date, or written in the last 15 minutes), with `catch_up.summary: auto` and a
+  named summariser, one at a time and not asked again in a session after it fails; `/summary` there,
+  on `+ new flow` or a flow, writes it when asked, then its flows as rows (those that need you first, then by name, each with its open questions
+  under it), each opening its page, and a row `+ new flow` (`NEW_FLOW`). Last, when any of its
+  flows are parked, `parked: N` (`PARKED`): `enter` folds them out under it (`parked:<folder>`),
+  and `enter` on one brings it back, the cursor on it needing a yes. `^x` twice on a flow parks it
+  (`/flow park`, `/flow unpark <name|folder>` too); `/archive` on a flow still archives only its
+  runs. The parked list (`flow.parked`) is fetched with the flows on each refresh: a scope whose
+  flows are all parked keeps its line on the list (`N parked`, through `rows::Context::parked`),
+  `everywhere`'s and an unregistered `in`'s too, so its `parked: N` stays in reach. `^x`'s arm
+  holds the row it was armed on, and a cursor moved since disarms it. Words typed there
   are for the flow under the cursor (`App::overview_words`): on a flow they ask for a change to it,
   against its `flow.md` as it is then; on `+ new flow`, for a new one `in` the project (none for
   everywhere's). A first word that would run is still one of the words, unless a bang says
@@ -426,9 +435,17 @@ questions or events; `throttle` collapses bursts; events older than five minutes
 Flows talk to each other only through events — Relay's own or `rl emit`'s (the daemon's own
 families are refused).
 
+**Parking** (`flows/park.rs`): `flow.park` puts a flow away without losing it. Refused while a
+firing of it is open, it renames the folder `_<name>` (`_<name>.2`, `.3`… while that is taken;
+nothing is overwritten), archives the flow's ended runs (cause `flow:<name>/`), takes its yes and
+reads the flows again. A `_` folder is parked: no flow can be called that, so it never loads, and
+`flow.parked` lists them. `flow.unpark` renames one back, refused while a flow has its name; it
+comes back needing a yes, even with its folder as it was.
+
 **`rl flow`**: `list`, `new <name> [words…] [--go]`, `edit`, `run`, `pause`, `resume`,
 `approve`, `test` (what would fire and which steps would run, starting nothing; `flows/
-preview.rs`), `reload`. Example flows to copy are in `examples/flows/`, held to the code by
+preview.rs`), `reload`, `park <name>`, `unpark <name|folder>` (a name brings back its newest
+parked folder) and `parked`. Example flows to copy are in `examples/flows/`, held to the code by
 `rl-cli/tests/examples.rs`.
 
 ### Decisions
@@ -455,7 +472,8 @@ colour); `assistants` maps Relay's own jobs to them:
   (`rl-daemon/src/summary.rs`). Brief takes the cheapest source: Claude's own `away_summary`
   recap, Codex's turns, else an assistant reading the stretch. Deep reads everything, in 48 KB
   parts joined by further calls; `dry` counts calls first. Results are kept in `summaries` and
-  `summary_kept` and reused until what they cover moves on. Agents' own recaps are picked up as
+  `summary_kept` and reused until what they cover moves on. `summary.get` with no `from` for a
+  project or everything gives the newest kept. Agents' own recaps are picked up as
   written (`recap.rs`), with no one asked. The daemon never calls an assistant on its own — every
   call is a client's.
 

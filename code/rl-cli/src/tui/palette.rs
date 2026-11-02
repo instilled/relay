@@ -162,13 +162,14 @@ pub const ALL: &[Command] = &[
     },
     Command {
         name: "flow",
-        args: "run|pause|resume|approve|edit|new|test|draft|reload [name]",
+        args: "run|pause|resume|approve|edit|new|test|draft|park|unpark|reload [name]",
         words: &[&[
-            "run", "pause", "resume", "approve", "edit", "new", "test", "draft", "reload",
+            "run", "pause", "resume", "approve", "edit", "new", "test", "draft", "park", "unpark", "reload",
         ]],
         what: "a flow: the one named, else the one under the cursor · new proposes one from words, in the \
                pane, or writes the bare template · edit opens its flow.md, and says yes when it loads · test says what would fire · \
-               draft brings back the flow proposal",
+               draft brings back the flow proposal · park puts it away, its folder _<name> and its runs archived · \
+               unpark brings one back by name, or by its _ folder, needing a yes",
         cmd: Cmd::Flow,
     },
     Command {
@@ -348,7 +349,7 @@ mod tests {
         assert_eq!(
             arg_words(cmd("flow"), 0),
             [
-                "run", "pause", "resume", "approve", "edit", "new", "test", "draft", "reload"
+                "run", "pause", "resume", "approve", "edit", "new", "test", "draft", "park", "unpark", "reload"
             ]
         );
         assert!(arg_words(cmd("flow"), 1).is_empty(), "the flows' names are the panel's");

@@ -1543,8 +1543,8 @@ pub struct SummaryParams {
     pub deep: bool,
     /// Where the stretch begins. None: since you last looked (a run's
     /// seen_at, when it has done anything since, else the whole run; a flow's
-    /// oldest unseen firing on, else the last day); required for a project and
-    /// all — the client knows when you were last here.
+    /// oldest unseen firing on, else the last day); for a project and all, `make`
+    /// needs it (the client knows when you were last here), and `get` without it gives the newest kept.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from: Option<Timestamp>,
     /// Make a new one even when the one kept is up to date.
