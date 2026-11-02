@@ -50,6 +50,8 @@ pub struct FlowProposal {
     pub draft: Option<Drafted>,
     /// When it was last asked, while it is; none once it answered.
     pub since: Option<Instant>,
+    /// When the last answer came, whatever it was.
+    pub landed: Option<Instant>,
     /// Why the last ask, or the last `enter`, came to nothing.
     pub error: Option<String>,
     /// Whether it is the subpage now: `esc` leaves it, still asking, and `/flow draft` brings it
@@ -58,12 +60,19 @@ pub struct FlowProposal {
 }
 
 impl FlowProposal {
+    /// Whether an `esc` now would be one typed before the answer came.
+    pub fn just_landed(&self, now: Instant) -> bool {
+        self.landed
+            .is_some_and(|at| now.duration_since(at) < super::proposal::SETTLE)
+    }
+
     fn new(aim: Aim, asked: Vec<String>, shown: bool) -> Self {
         Self {
             aim,
             asked,
             draft: None,
             since: None,
+            landed: None,
             error: None,
             shown,
         }
@@ -236,6 +245,7 @@ impl App {
         let known = self.names.paths();
         let Some(p) = self.flow_proposal.as_mut() else { return };
         p.since = None;
+        p.landed = Some(Instant::now());
         let said = match answer {
             Ok(Ok((Answer::Flow(d), out))) => {
                 let name = match &p.aim {

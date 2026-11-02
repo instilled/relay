@@ -55,9 +55,15 @@ pub fn arm(p: &Plan) -> String {
 }
 
 /// The flash once it is done: `removed relay · stopped 2 · 7 runs archived`.
-/// Only what happened is said.
+/// Only what happened is said: a folder the daemon did not have registered
+/// was not a project.
 pub fn done(name: &str, r: &WorkspaceRemoved) -> String {
-    let mut words = vec![format!("removed {name}")];
+    let first = if r.removed {
+        format!("removed {name}")
+    } else {
+        format!("{name} was not a project")
+    };
+    let mut words = vec![first];
     if r.stopped > 0 {
         words.push(format!("stopped {}", r.stopped));
     }
@@ -69,6 +75,9 @@ pub fn done(name: &str, r: &WorkspaceRemoved) -> String {
     }
     if r.dismissed > 0 {
         words.push(format!("{} dismissed", count(r.dismissed, "question", "questions")));
+    }
+    if !r.removed && words.len() == 1 {
+        words.push("nothing removed".into());
     }
     words.join(" · ")
 }
@@ -148,7 +157,18 @@ mod tests {
             still_running: 1,
             ..Default::default()
         };
-        assert_eq!(done("relay", &stubborn), "removed relay · stopped 1 · 1 still going");
-        assert_eq!(done("relay", &WorkspaceRemoved::default()), "removed relay");
+        assert_eq!(
+            done("relay", &stubborn),
+            "relay was not a project · stopped 1 · 1 still going"
+        );
+        assert_eq!(
+            done("relay", &WorkspaceRemoved::default()),
+            "relay was not a project · nothing removed"
+        );
+        let bare = WorkspaceRemoved {
+            removed: true,
+            ..Default::default()
+        };
+        assert_eq!(done("relay", &bare), "removed relay");
     }
 }

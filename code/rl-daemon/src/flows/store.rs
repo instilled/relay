@@ -27,6 +27,9 @@ impl Flows {
     /// a changed one waiting for a yes; one that does not load is left out
     /// and said; one that cannot be read stays as it last loaded.
     pub async fn reload(&self) -> Result<Reloaded> {
+        // First, before a folder is read: a reload that read them before a
+        // park's rename and synced after it would list the parked flow again.
+        let _reading = self.reloading.lock().await;
         let dir = self.home.flows_dir();
         std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
         let ignore = dir.join(".gitignore");
@@ -215,6 +218,51 @@ fn read(folder: &Path, name: &str, known: &BTreeSet<PathBuf>) -> Read {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A reload waits for the one going: it never reads the folders while another is still to sync.
+    #[tokio::test]
+    async fn a_reload_waits_for_the_one_going() {
+        use crate::flows::Flows;
+        use rl_core::Home;
+        use rl_ledger::Ledger;
+        use std::sync::Arc;
+        use tokio_util::sync::CancellationToken;
+        let tmp = tempfile::tempdir().unwrap();
+        let home = Home::at(tmp.path().join("home"));
+        std::fs::create_dir_all(home.flows_dir()).unwrap();
+        let ledger = Ledger::open(&home.ledger()).unwrap();
+        let registry = Arc::new(rl_detect::Registry::builtin());
+        let token = CancellationToken::new();
+        let supervisor = Arc::new(crate::supervisor::Supervisor::new(
+            home.clone(),
+            ledger.clone(),
+            PathBuf::from("rl-session"),
+            registry.clone(),
+            token.child_token(),
+            std::time::Duration::from_secs(1),
+        ));
+        let decisions = Arc::new(crate::decisions::Decisions::new(
+            ledger.clone(),
+            supervisor.clone(),
+            registry.clone(),
+            token.child_token(),
+        ));
+        let flows = Flows::new(home, ledger, supervisor, decisions, registry, None, token.child_token());
+
+        let held = flows.reloading.lock().await;
+        let other = tokio::spawn({
+            let flows = flows.clone();
+            async move { flows.reload().await.map(|_| ()) }
+        });
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(!other.is_finished(), "a reload ran while another held the lock");
+        drop(held);
+        other.await.unwrap().unwrap();
+        token.cancel();
+    }
 
     #[cfg(unix)]
     #[test]

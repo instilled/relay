@@ -74,7 +74,7 @@ async fn claudes_own_sessions_are_rows_with_a_pane() {
         // With the pane shut, the footer says what enter will do — not "open
         // its pane", since enter now attaches straight away.
         app.show_pane = false;
-        assert!(app.hints().contains("/hide"), "{}", app.hints());
+        assert!(app.hints().contains("^x hides"), "{}", app.hints());
         assert!(!app.hints().contains("enter its pane"), "{}", app.hints());
         // The pane, once up, says it too.
         app.show_pane = true;
@@ -118,6 +118,143 @@ async fn a_wide_glyph_wait_still_leaves_a_narrow_row_its_age() {
             .unwrap_or_else(|| panic!("no row at {w}:\n{}", rows.join("\n")));
         assert!(row.trim_end().ends_with("5m"), "{w}: {row:?}");
     }
+    token.cancel();
+}
+
+#[tokio::test]
+async fn ctrl_x_twice_hides_an_outside_session() {
+    let (_tmp, token, mut app, folder) = panel().await;
+    app.digest.outside = sessions(&folder);
+    app.select(Some("o:claude:sess-bg".into()));
+    press(&mut app, KeyCode::Char('x'), KeyModifiers::CONTROL).await;
+    assert_eq!(
+        app.flash.as_ref().map(|(m, _)| m.as_str()),
+        Some("press ^x again to hide tidy the docs")
+    );
+    press(&mut app, KeyCode::Char('x'), KeyModifiers::CONTROL).await;
+    assert!(
+        app.digest.hidden.iter().any(|h| h.key == "o:claude:sess-bg"),
+        "{:?} {:?}",
+        app.digest.hidden,
+        app.flash
+    );
+    token.cancel();
+}
+
+#[tokio::test]
+async fn ctrl_x_on_a_header_that_is_no_project_hides_it() {
+    let (_tmp, token, mut app, folder) = panel().await;
+    app.digest.outside = sessions(&folder);
+    app.select(Some("g:/nowhere/scratch".into()));
+    assert_eq!(app.sel.as_deref(), Some("g:/nowhere/scratch"), "on its header");
+    app.show_pane = false;
+    assert!(app.hints().contains("^x hides"), "{}", app.hints());
+    press(&mut app, KeyCode::Char('x'), KeyModifiers::CONTROL).await;
+    assert!(!matches!(app.mode, super::Mode::Confirm(_)), "no DELETE to type");
+    press(&mut app, KeyCode::Char('x'), KeyModifiers::CONTROL).await;
+    assert!(!matches!(app.mode, super::Mode::Confirm(_)), "no DELETE to type");
+    assert!(
+        app.digest.hidden.iter().any(|h| h.key == "g:/nowhere/scratch"),
+        "{:?} {:?}",
+        app.digest.hidden,
+        app.flash
+    );
+    token.cancel();
+}
+
+/// A run of relay's in `/nowhere/scratch`, ended just now.
+fn scratch_run() -> rl_proto::methods::DigestItem {
+    use rl_proto::types::{Run, RunKind, RunState};
+    let now = jiff::Timestamp::now();
+    let mut run = Run::new(
+        "run0scr1",
+        RunKind::Command,
+        "scratch work",
+        vec![],
+        "/nowhere/scratch",
+        "/nowhere/scratch",
+        now,
+    );
+    run.state = RunState::Finished;
+    run.state_at = now;
+    rl_proto::methods::DigestItem {
+        run,
+        at: now,
+        summary: String::new(),
+        unseen: true,
+        joined_by: None,
+        emitted: vec![],
+        cwd: None,
+        recap: None,
+    }
+}
+
+#[tokio::test]
+async fn ctrl_x_on_a_header_that_is_no_project_but_holds_a_run_asks_for_delete() {
+    let (_tmp, token, mut app, folder) = panel().await;
+    app.digest.outside = sessions(&folder);
+    app.digest.items.push(scratch_run());
+    app.select(Some("g:/nowhere/scratch".into()));
+    assert_eq!(app.sel.as_deref(), Some("g:/nowhere/scratch"), "on its header");
+    app.show_pane = false;
+    // A run of relay's is under it: `workspace.remove` stops and archives it.
+    assert!(app.hints().contains("^x removes"), "{}", app.hints());
+    press(&mut app, KeyCode::Char('x'), KeyModifiers::CONTROL).await;
+    assert!(matches!(app.mode, super::Mode::Confirm(_)), "DELETE to type");
+    assert!(app.digest.hidden.is_empty(), "{:?}", app.digest.hidden);
+    token.cancel();
+}
+
+#[tokio::test]
+async fn ctrl_x_on_a_header_in_the_catch_up_does_not_arm_a_hide() {
+    let (_tmp, token, mut app, folder) = panel().await;
+    app.digest.outside = sessions(&folder);
+    app.digest.items.push(scratch_run());
+    app.open_catch_up(super::tests::nine_hours_ago(), false).await;
+    assert!(app.view == super::View::CatchUp);
+    app.select(Some("g:/nowhere/scratch".into()));
+    assert_eq!(app.sel.as_deref(), Some("g:/nowhere/scratch"), "on its header");
+    press(&mut app, KeyCode::Char('x'), KeyModifiers::CONTROL).await;
+    let flash = app.flash.as_ref().map(|(m, _)| m.clone()).unwrap_or_default();
+    assert!(!flash.contains("hide"), "{flash}");
+    assert!(matches!(app.mode, super::Mode::Confirm(_)), "DELETE to type: {flash}");
+    token.cancel();
+}
+
+#[tokio::test]
+async fn an_already_hidden_row_shown_does_not_say_ctrl_x_hides() {
+    let (_tmp, token, mut app, folder) = panel().await;
+    app.digest.outside = sessions(&folder);
+    app.select(Some("o:claude:sess-bg".into()));
+    type_in(&mut app, "/hide").await;
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+    app.digest.outside = sessions(&folder);
+    app.show_hidden = true;
+    app.show_pane = false;
+    app.select(Some("o:claude:sess-bg".into()));
+    let hints = app.hints();
+    assert!(!hints.contains("^x hides"), "{hints}");
+    assert!(hints.contains("/hide brings it back"), "{hints}");
+    token.cancel();
+}
+
+#[tokio::test]
+async fn ctrl_x_with_hidden_on_does_not_bring_it_back() {
+    let (_tmp, token, mut app, folder) = panel().await;
+    app.digest.outside = sessions(&folder);
+    app.select(Some("o:claude:sess-bg".into()));
+    type_in(&mut app, "/hide").await;
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+    app.digest.outside = sessions(&folder);
+    app.show_hidden = true;
+    app.select(Some("o:claude:sess-bg".into()));
+    press(&mut app, KeyCode::Char('x'), KeyModifiers::CONTROL).await;
+    press(&mut app, KeyCode::Char('x'), KeyModifiers::CONTROL).await;
+    assert_eq!(
+        app.flash.as_ref().map(|(m, _)| m.as_str()),
+        Some("already hidden · /hide brings it back")
+    );
+    assert!(app.digest.hidden.iter().any(|h| h.key == "o:claude:sess-bg"));
     token.cancel();
 }
 
@@ -230,7 +367,11 @@ async fn enter_or_join_on_a_background_session_attaches_to_it() {
 
     // With its pane open, enter attaches.
     app.show_pane = true;
-    assert!(app.hints().contains("enter opens it here · /hide"), "{}", app.hints());
+    assert!(
+        app.hints().contains("enter opens it here · ^x hides"),
+        "{}",
+        app.hints()
+    );
     press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
     assert_eq!(app.attach_outside.take(), Some(attach.clone()));
     assert_eq!(app.digest.items.len(), runs, "nothing made of it in Relay");

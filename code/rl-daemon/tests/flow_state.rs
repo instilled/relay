@@ -49,8 +49,12 @@ fn ended(f: &Firing) -> bool {
     f.ended_at.is_some()
 }
 
+/// Waiting on a question: the step waiting has it.
 fn waiting(f: &Firing) -> bool {
     f.status == FiringStatus::Waiting
+        && f.steps
+            .iter()
+            .any(|s| s.status == StepStatus::Waiting && s.decision.is_some())
 }
 
 fn step<'a>(f: &'a Firing, name: &str) -> &'a StepState {

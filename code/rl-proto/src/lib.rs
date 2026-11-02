@@ -21,4 +21,4 @@ pub mod types;
 pub use facts::RunFacts;
 
 /// Bumped when a message changes shape incompatibly. Reported by `daemon.ping`.
-pub const PROTOCOL_VERSION: u32 = 10;
+pub const PROTOCOL_VERSION: u32 = 11;
