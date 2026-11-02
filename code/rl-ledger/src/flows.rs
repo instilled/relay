@@ -126,6 +126,16 @@ pub fn approve(conn: &Connection, name: &str, hash: &str) -> Result<bool> {
     Ok(n == 1)
 }
 
+/// Takes the yes back, whatever version it was to: as a flow is parked, so that coming back it
+/// needs one again even with its folder as it was ([`sync`] gives a yes back otherwise).
+pub fn unapprove(conn: &Connection, name: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE flows SET approved_hash = NULL, next_at = NULL WHERE name = ?1",
+        params![name],
+    )?;
+    Ok(())
+}
+
 /// False when there is no such flow.
 pub fn set_paused(conn: &Connection, name: &str, paused: bool) -> Result<bool> {
     let n = conn.execute(
@@ -257,5 +267,31 @@ mod tests {
         );
         assert!(!ledger.call_blocking(|c| approve(c, "nope", "h1")).unwrap());
         assert!(ledger.call_blocking(|c| get(c, "nope")).unwrap().is_none());
+    }
+
+    #[test]
+    fn unapprove_clears_the_yes() {
+        let ledger = Ledger::open_in_memory().unwrap();
+        let now: Timestamp = "2026-10-07T10:00:00Z".parse().unwrap();
+        ledger
+            .call_blocking(move |c| {
+                sync(c, &[loaded("a", "h1")], now)?;
+                assert!(approve(c, "a", "h1")?);
+                unapprove(c, "a")
+            })
+            .unwrap();
+        let a = ledger.call_blocking(|c| get(c, "a")).unwrap().unwrap();
+        assert_eq!(a.approved_hash, None);
+        assert_eq!(a.status(), FlowStatus::NeedsApproval);
+
+        // Gone and back with the very folder said yes to: still no yes.
+        let s = ledger
+            .call_blocking(move |c| {
+                sync(c, &[], now)?;
+                sync(c, &[loaded("a", "h1")], now)
+            })
+            .unwrap();
+        assert_eq!(s.added, ["a"]);
+        assert!(!ledger.call_blocking(|c| get(c, "a")).unwrap().unwrap().approved());
     }
 }

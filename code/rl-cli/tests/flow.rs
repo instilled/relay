@@ -488,6 +488,65 @@ fn flow_test_says_what_would_fire_and_starts_nothing() {
     assert!(out(rl(&["daemon", "stop"])).0);
 }
 
+#[test]
+fn flow_park_lists_and_unparks() {
+    let (Some(rld), Some(session)) = (sibling("rld"), sibling("rl-session")) else {
+        eprintln!("skipping: rld / rl-session not built (run `cargo test --workspace`)");
+        return;
+    };
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = std::fs::canonicalize(tmp.path()).unwrap();
+    let home = dir.join("home");
+    let ws = dir.join("proj");
+    std::fs::create_dir_all(&ws).unwrap();
+    let rl = |args: &[&str]| rl(&home, &ws, &rld, &session, args);
+    let flow = home.join("flows/hello");
+    std::fs::create_dir_all(&flow).unwrap();
+    std::fs::write(flow.join("flow.md"), "---\nsteps:\n  a:\n    run: echo hello\n---\n").unwrap();
+
+    // One run of it, ended, for parking to archive.
+    let (ok, o, e) = out(rl(&["flow", "approve", "hello"]));
+    assert!(ok, "{o}{e}");
+    let (ok, o, e) = out(rl(&["flow", "run", "hello"]));
+    assert!(ok, "{o}{e}");
+    let until = Instant::now() + Duration::from_secs(30);
+    loop {
+        let (_, listed, _) = out(rl(&["flow", "list"]));
+        if listed.lines().nth(1).is_some_and(|l| l.contains("done ")) {
+            break;
+        }
+        assert!(Instant::now() < until, "the firing did not finish:\n{listed}");
+        std::thread::sleep(Duration::from_millis(200));
+    }
+
+    let (ok, o, e) = out(rl(&["flow", "park", "hello"]));
+    assert!(ok, "{o}{e}");
+    assert_eq!(o, "hello parked as _hello · 1 run archived");
+    assert!(home.join("flows/_hello").is_dir() && !flow.exists());
+
+    let (ok, o, e) = out(rl(&["flow", "parked"]));
+    assert!(ok, "{o}{e}");
+    assert!(o.starts_with("_hello  hello  ") && o.contains(" ago"), "{o}");
+    let (ok, o, _) = out(rl(&["--json", "flow", "parked"]));
+    assert!(ok);
+    let v: serde_json::Value = serde_json::from_str(&o).unwrap();
+    assert_eq!(v[0]["folder"], "_hello");
+
+    let (ok, o, e) = out(rl(&["flow", "unpark", "hello"]));
+    assert!(ok, "{o}{e}");
+    assert_eq!(o, "hello back · it needs a yes: rl flow approve hello");
+    assert!(flow.join("flow.md").is_file());
+    let (ok, o, _) = out(rl(&["flow", "parked"]));
+    assert!(ok && o == "nothing parked", "{o}");
+
+    // Nothing parked by that name, or a folder that is not one: said, and exit 1.
+    let (ok, _, e) = out(rl(&["flow", "unpark", "hello"]));
+    assert!(!ok && e.contains("nothing parked as hello"), "{e}");
+    let (ok, _, e) = out(rl(&["flow", "unpark", "_nope"]));
+    assert!(!ok && e.contains("_nope is not a parked flow"), "{e}");
+    assert!(out(rl(&["daemon", "stop"])).0);
+}
+
 /// A daemon in this process, on a throwaway home, and a client of it; a flow `pulse` written to
 /// it and said yes to, and its `flow.md` as written.
 async fn approved_pulse() -> (

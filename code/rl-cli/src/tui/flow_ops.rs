@@ -60,7 +60,7 @@ impl App {
             }
             _ => {
                 return self.say(format!(
-                    "/flow {verb}? run, pause, resume, approve, edit, new, test or reload"
+                    "/flow {verb}? run, pause, resume, approve, edit, new, test, park, unpark or reload"
                 ));
             }
         };
@@ -70,6 +70,90 @@ impl App {
                 self.refresh().await;
             }
             Err(e) => self.say(format!("{verb} {name}: {e:#}")),
+        }
+    }
+
+    /// `^x` twice on a flow in the overview, and `/flow park`: the flow put away, its folder
+    /// `_<name>`, its runs archived and its yes taken. One firing, or waiting on a question, is
+    /// not: the daemon says why, and that is said as it is.
+    pub(super) async fn park_flow(&mut self, name: &str) {
+        let key = rows::flow_key(name);
+        // On it in the overview, where the cursor goes once it is gone: the next flow down, else
+        // `+ new flow`. Its page, if up, is closed back to the overview.
+        let (next, its_page) = if self.view == View::Overview && self.sel.as_deref() == Some(key.as_str()) {
+            let keys = self.keys();
+            let next = keys
+                .iter()
+                .skip_while(|k| **k != key)
+                .skip(1)
+                .find(|k| k.starts_with("f:"))
+                .cloned()
+                .unwrap_or_else(|| NEW_FLOW.to_string());
+            let page = self.show_pane && self.flow_proposal_shown().is_none() && self.proposal_shown().is_none();
+            (Some(next), page)
+        } else {
+            (None, false)
+        };
+        match self.rpc.call::<FlowPark>(FlowName { name: name.into() }).await {
+            Ok(p) => {
+                if its_page {
+                    self.leave_subpage();
+                }
+                // The refresh fetches the parked flows again, the overview's `parked: N` with them.
+                self.refresh().await;
+                if let Some(next) = next.filter(|k| self.keys().contains(k)) {
+                    self.select(Some(next));
+                    self.load_pane().await;
+                }
+                let runs = if p.archived > 0 { " · its runs archived" } else { "" };
+                self.say(format!("{name} parked{runs} · /flow unpark {name} brings it back"));
+            }
+            Err(e) => self.say(told(&e)),
+        }
+    }
+
+    /// `/flow unpark <name|folder>`: a folder (`_nightly.2`) is brought back as it is; a name, its
+    /// newest parked folder, from the list as it is now.
+    async fn unpark_named(&mut self, what: &str) {
+        if !what.starts_with('_') {
+            self.fetch_parked().await;
+        }
+        match crate::flow::parked_folder(&self.parked, what) {
+            Some(folder) => self.unpark(&folder).await,
+            None => self.say(format!("nothing parked as {what} · rl flow parked lists them")),
+        }
+    }
+
+    /// `enter` on a parked flow, and `/flow unpark`: the folder back under the flow's name,
+    /// needing a yes, and the cursor on it in the overview. One whose `in` is another project is
+    /// not here to land on: the flash says where it went.
+    pub(super) async fn unpark(&mut self, folder: &str) {
+        let back = self
+            .rpc
+            .call::<FlowUnpark>(ParkedName {
+                folder: folder.to_string(),
+            })
+            .await;
+        match back {
+            Ok(flow) => {
+                self.refresh().await;
+                let said = format!("{} back · it needs a yes: enter on it", flow.name);
+                // Said last: a refresh that fails says so, and this is what matters.
+                let said = self.onto_saved(&flow.name, said);
+                self.say(said);
+            }
+            Err(e) => {
+                // The folder may be back under its name and not have loaded: what is parked and
+                // what is loaded are read again either way.
+                self.refresh().await;
+                let said = match crate::flow::came_back_unloaded(folder, &self.parked, &told(&e)) {
+                    Some((name, why)) => {
+                        format!("{name} is back in flows/{name} but did not load: {why} · ^e on it, or /flow reload")
+                    }
+                    None => told(&e),
+                };
+                self.say(said);
+            }
         }
     }
 
@@ -128,8 +212,14 @@ impl App {
         if verb == "draft" {
             return self.show_flow_proposal();
         }
-        if !matches!(verb, "run" | "pause" | "resume" | "approve" | "edit" | "test") {
-            return self.say("/flow run|pause|resume|approve|edit|new|test|draft|reload [name]");
+        if verb == "unpark" {
+            let Some(what) = named.or_else(|| self.parked_here()) else {
+                return self.say("/flow unpark which? name it: /flow unpark <flow> · its folder for an older one");
+            };
+            return self.unpark_named(&what).await;
+        }
+        if !matches!(verb, "run" | "pause" | "resume" | "approve" | "edit" | "test" | "park") {
+            return self.say("/flow run|pause|resume|approve|edit|new|test|draft|park|unpark|reload [name]");
         }
         let Some(name) = named.or_else(|| self.flow_here()) else {
             return self.say(format!("/flow {verb} which? name it: /flow {verb} <flow>"));
@@ -137,6 +227,7 @@ impl App {
         match verb {
             "edit" => self.edit_flow(&name),
             "test" => self.test_flow(name).await,
+            "park" => self.park_flow(&name).await,
             _ => self.flow_act(verb, name).await,
         }
     }
@@ -191,5 +282,13 @@ impl App {
             .first()
             .map(|n| format!("/flow edit {} · ", n.flow))
             .unwrap_or_default()
+    }
+}
+
+/// What the daemon said in refusing, as it said it; anything else as it came.
+fn told(e: &anyhow::Error) -> String {
+    match e.downcast_ref::<rl_proto::rpc::RpcError>() {
+        Some(r) => r.message.clone(),
+        None => format!("{e:#}"),
     }
 }

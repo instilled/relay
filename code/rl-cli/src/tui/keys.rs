@@ -679,16 +679,24 @@ impl App {
                 }
             }
             (KeyCode::Char('x'), KeyModifiers::CONTROL) => {
-                if self.flow_in_catch_up() {
+                if let Some(Arm::Remove(at)) = &armed
+                    && *at != self.sel
+                {
+                    // Armed on one row, the cursor on another since (a refresh moved it): the
+                    // second press must not act on what it was never armed for.
+                    self.say("the line moved · ^x again");
+                } else if self.flow_in_catch_up() {
                     self.say(Self::FLOW_ON_THE_LIST);
+                } else if self.on_parked_line() || self.parked_here().is_some() {
+                    self.say("already parked");
                 } else if !self.on_everywhere() && matches!(self.selected(), Some(Row::Group(_))) {
                     // A project is not armed and fired by a second keypress: a
                     // stray or laggy ^x must not take a whole project down.
                     self.confirm_remove_project();
-                } else if armed == Some(Arm::Remove) {
+                } else if matches!(armed, Some(Arm::Remove(_))) {
                     self.remove_selected().await;
                 } else if let Some(what) = self.remove_hint() {
-                    self.arm = Some(Arm::Remove);
+                    self.arm = Some(Arm::Remove(self.sel.clone()));
                     self.flash = Some((format!("press ^x again to {what}"), Instant::now()));
                 } else if self.on_everywhere() {
                     self.say(format!("{} · nothing to remove", Self::NOT_A_PROJECT));
@@ -768,6 +776,15 @@ impl App {
         if self.on_new_flow() {
             // A new flow is asked for in words, typed on its row.
             self.say("type what the new flow should do, then enter");
+            return Ok(());
+        }
+        if self.on_parked_line() {
+            // The parked flows fold out under their line, and back in.
+            self.parked_open = !self.parked_open;
+            return Ok(());
+        }
+        if let Some(folder) = self.parked_here() {
+            self.unpark(&folder).await;
             return Ok(());
         }
         if self.selected_run().is_some() {
@@ -1125,7 +1142,7 @@ impl App {
                 "seen" | "all" => self.archive_seen().await,
                 "" => {
                     if self.flow_in_catch_up() {
-                        self.say(Self::FLOW_ON_THE_LIST);
+                        self.say(Self::FLOW_RUNS_THERE);
                     } else if let Some(f) = self.selected_flow() {
                         let ids: Vec<String> = f.runs.iter().map(|i| i.run.id.clone()).collect();
                         self.archive_flow(&f.name, ids).await;

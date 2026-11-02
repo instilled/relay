@@ -105,14 +105,14 @@ impl App {
     }
 
     /// Whether the cursor is on a flow in the catch-up, which holds only the
-    /// stretch's runs: archiving it is its project's overview's, where it
-    /// holds them all (`FLOW_ON_THE_LIST`).
+    /// stretch's runs: parking it, or archiving its runs, is its project's
+    /// overview's, where it holds them all (`FLOW_ON_THE_LIST`, `FLOW_RUNS_THERE`).
     pub(super) fn flow_in_catch_up(&self) -> bool {
         self.view == View::CatchUp && self.selected_flow().is_some()
     }
 
     /// Archives a flow's runs, however they ended: out of the list, kept in
-    /// the ledger. Shared by `^x` (`remove_selected`) and `/archive`. Takes the
+    /// the ledger, the flow left as it is. `/archive`'s; `^x` parks the flow. Takes the
     /// name and run ids rather than `&rows::FlowRow` itself: it borrows from
     /// `self`, and this needs `&mut self` to archive.
     pub(super) async fn archive_flow(&mut self, name: &str, ids: Vec<String>) {
@@ -124,15 +124,15 @@ impl App {
     }
 
     /// The second `ctrl-x` (the first only armed it): get whatever the cursor
-    /// is on out of the list. An ended run, or a flow's runs, are archived
-    /// (reversible: the ledger keeps them); a run still going is stopped and
-    /// archived as soon as it has ended, killed if it lingers; a question is
-    /// dismissed; a project is removed, its runs stopped and archived. Nothing
-    /// here is destroyed — that is retention's alone.
+    /// is on out of the list. A flow, in its overview, is parked (reversible:
+    /// `/flow unpark`); an ended run is archived (reversible: the ledger keeps
+    /// it); a run still going is stopped and archived as soon as it has ended,
+    /// killed if it lingers; a question is dismissed; a project is removed, its
+    /// runs stopped and archived. Nothing here is destroyed — that is
+    /// retention's alone.
     pub(super) async fn remove_selected(&mut self) {
-        if let Some(f) = self.selected_flow() {
-            let ids: Vec<String> = f.runs.iter().map(|i| i.run.id.clone()).collect();
-            self.archive_flow(&f.name, ids).await;
+        if let Some(name) = self.flow_here() {
+            self.park_flow(&name).await;
         } else if let Some(i) = self.selected_run() {
             let (id, title) = (i.run.id.clone(), i.run.title.clone());
             if i.run.state.is_terminal() {
@@ -213,9 +213,8 @@ impl App {
     /// What a second `ctrl-x` would do to the row under the cursor, for the
     /// armed hint — `None` when there is nothing to remove there.
     pub(super) fn remove_hint(&self) -> Option<String> {
-        if let Some(f) = self.selected_flow() {
-            // One that has not run has nothing to archive.
-            (!f.runs.is_empty()).then(|| format!("remove {} · {} runs", f.name, f.runs.len()))
+        if let Some(name) = self.flow_here() {
+            Some(format!("park {name}"))
         } else if let Some(i) = self.selected_run() {
             if i.run.state.is_terminal() {
                 Some(format!("remove {}", i.run.title))
@@ -501,6 +500,7 @@ impl App {
                     show_hidden: false,
                     now: Timestamp::now(),
                     relay: Some(&self.relay),
+                    parked: &self.parked,
                 },
             );
             rows::reorder(&shown, &full, &self.digest.order, &key, up)

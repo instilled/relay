@@ -1,6 +1,7 @@
 //! `impl App` — a project's overview: `enter` on its line on the list. What was said of the
 //! project on top, its flows below as rows (those that need you first, then by name, each with
-//! its open questions under it), and a last line, `+ new flow`. `esc` goes back to its line.
+//! its open questions under it), and a line, `+ new flow`; last, when any of its flows are parked,
+//! `parked: N`, which `enter` folds them out under. `esc` goes back to its line.
 //! See `tui/mod.rs` for the `App` struct these methods belong to.
 
 use super::flow_proposal::Aim;
@@ -38,6 +39,11 @@ impl Scope {
         }
     }
 
+    /// Whether a parked flow is this scope's: its `in` the project, or none for `everywhere`.
+    fn holds(&self, p: &Parked) -> bool {
+        p.in_.as_deref() == self.folder()
+    }
+
     /// Whether `h` is this scope's line on the list.
     fn is(&self, h: &rows::Head) -> bool {
         match self {
@@ -61,6 +67,7 @@ impl App {
     pub(super) fn open_overview(&mut self, scope: Scope, at: Option<String>) {
         if self.overview.as_ref() != Some(&scope) {
             self.overview_said = None;
+            self.parked_open = false;
         }
         self.overview = Some(scope);
         self.open_view(View::Overview);
@@ -74,17 +81,151 @@ impl App {
     }
 
     /// What was last said of the overview's project, fetched for its top whichever row the
-    /// cursor is on. `everywhere`'s top has none.
+    /// cursor is on, and the flows parked, for its last line; and a new one asked for when it is
+    /// to be written (`write_overview_top`). `everywhere`'s top has none.
     pub(super) async fn fetch_overview_top(&mut self) {
-        let Some(folder) = self.overview.as_ref().and_then(Scope::folder) else {
+        self.fetch_parked().await;
+        self.write_overview_top().await;
+    }
+
+    /// The overview's top as `plan_project_top` says: the one shown, and with none kept that is
+    /// current, a new one asked for on a task of its own. One at a time: one already being
+    /// written of the project, by this or by `/summary`, is left to land; while another
+    /// project's is written, this one is next, asked once that one lands. One that failed here
+    /// is not asked again until a `/summary` of the project.
+    pub(super) async fn write_overview_top(&mut self) {
+        self.overview_next = None;
+        let Some(folder) = self.overview.as_ref().and_then(Scope::folder).map(Path::to_path_buf) else {
             return;
         };
         let target = SummaryTarget::Project {
-            workspace: folder.to_path_buf(),
+            workspace: folder.clone(),
         };
-        if let Some(Some(s)) = self.kept_summary(target).await {
+        let from = self.overview_stretch(&target);
+        let plan = crate::catchup::plan_project_top(&mut self.rpc, &folder, from).await;
+        if let Some(s) = plan.shown {
             self.overview_said = Some(s);
         }
+        let Some(params) = plan.ask else { return };
+        let writing = |s: &Option<Summarising>| s.as_ref().is_some_and(|s| s.target == target);
+        if self.overview_failed.contains(&target.key()) || writing(&self.overviewing) || writing(&self.summarising) {
+            return;
+        }
+        if self.overviewing.is_some() {
+            self.overview_next = Some(target);
+            return;
+        }
+        let home = self.home.clone();
+        let task = tokio::spawn(async move {
+            let mut rpc = Client::connect(&home).await?;
+            rpc.call::<SummaryMake>(params).await
+        });
+        self.overviewing = Some(Summarising {
+            title: self.names.workspace(&folder),
+            target,
+            deep: false,
+            from: Some(from),
+            since: Instant::now(),
+            task,
+        });
+    }
+
+    /// Where the overview's summary of `target` starts: where the last one made of it here did,
+    /// so the one it made is found again; else since you were last here; else the last day.
+    fn overview_stretch(&self, target: &SummaryTarget) -> Timestamp {
+        self.made
+            .get(&target.key())
+            .and_then(|m| m.from)
+            .or(self.away_since)
+            .unwrap_or_else(|| Timestamp::now() - crate::catchup::OVERVIEW_STRETCH)
+    }
+
+    /// The overview's summary landed: kept as the last made of its project, its top while the
+    /// overview is still on it, and the subpage's unless that shows a deep one or another
+    /// stretch. Failing, a word says why, and it is not asked again by itself. Then the project
+    /// the overview is on, when it was next, is asked for.
+    pub(super) async fn overviewed(&mut self, done: std::result::Result<Result<Summary>, tokio::task::JoinError>) {
+        let Some(o) = self.overviewing.take() else { return };
+        match done {
+            Ok(Ok(summary)) => {
+                let key = o.target.key();
+                // A deep one made of the project by `/summary` stays its `made`: the brief shows
+                // in the top, not over it.
+                if !self.made.get(&key).is_some_and(|m| m.deep) {
+                    self.made.insert(key.clone(), summary.clone());
+                }
+                if self.overview.as_ref().map(Scope::target).as_ref() == Some(&o.target) {
+                    self.overview_said = Some(summary.clone());
+                }
+                let other = self
+                    .summary
+                    .as_ref()
+                    .is_some_and(|s| s.target == key && (s.deep || s.from != summary.from));
+                if self.summary_target().as_ref() == Some(&o.target) && !other {
+                    self.summary = Some(summary);
+                }
+            }
+            Ok(Err(e)) => {
+                self.overview_failed.insert(o.target.key());
+                self.say(format!("the summary: {e:#}"));
+            }
+            Err(e) if e.is_cancelled() => {}
+            Err(e) => {
+                self.overview_failed.insert(o.target.key());
+                self.say(format!("the summary: {e}"));
+            }
+        }
+        let next = self.overview_next.take();
+        if next.is_some() && next == self.overview.as_ref().map(Scope::target) {
+            self.write_overview_top().await;
+        }
+    }
+
+    /// The parked flows, every scope's, as the daemon finds them in `~/.relay/flows`. Ones that
+    /// can't be had leave the last ones standing.
+    pub(super) async fn fetch_parked(&mut self) {
+        if let Ok(p) = self.rpc.call::<FlowParkedList>(()).await {
+            self.parked = p;
+        }
+        if self.parked_in_scope().is_empty() {
+            self.parked_open = false;
+        }
+    }
+
+    /// The overview's parked flows: those whose `in` is its project, or, `everywhere`'s, none.
+    pub(super) fn parked_in_scope(&self) -> Vec<&Parked> {
+        let Some(scope) = &self.overview else {
+            return vec![];
+        };
+        self.parked.iter().filter(|p| scope.holds(p)).collect()
+    }
+
+    /// The keys after `+ new flow`: `parked: N` when there are any, and its flows under it
+    /// while it is open.
+    pub(super) fn parked_keys(&self) -> Vec<String> {
+        let parked = self.parked_in_scope();
+        if parked.is_empty() {
+            return vec![];
+        }
+        let mut keys = vec![PARKED.to_string()];
+        if self.parked_open {
+            keys.extend(parked.iter().map(|p| parked_key(&p.folder)));
+        }
+        keys
+    }
+
+    /// Whether the cursor is on the overview's `parked: N`.
+    pub(super) fn on_parked_line(&self) -> bool {
+        self.view == View::Overview && self.sel.as_deref() == Some(PARKED)
+    }
+
+    /// The folder of the parked flow under the cursor, in the overview.
+    pub(super) fn parked_here(&self) -> Option<String> {
+        if self.view != View::Overview {
+            return None;
+        }
+        let folder = self.sel.as_deref()?.strip_prefix(PARKED_ROW)?;
+        Some(folder.to_string())
     }
 
     /// Back from the overview to the list, on the line it was opened from.
@@ -114,6 +255,7 @@ impl App {
                 show_hidden: true,
                 now: Timestamp::now(),
                 relay: Some(&self.relay),
+                parked: &self.parked,
             },
         );
         // Each flow with the questions right under it, as `(needs you, name, rows)`.
@@ -238,11 +380,24 @@ impl App {
         };
         let key = target.key();
         let now = Timestamp::now();
-        // A new one being written: it says so above the one it will replace.
+        // A new one being written, asked with `/summary` or as the overview opened: it says so
+        // above the one it will replace.
         let mut lines = Vec::new();
-        if let Some(s) = self.summarising.as_ref().filter(|s| s.target == target) {
+        let writing = [&self.summarising, &self.overviewing]
+            .into_iter()
+            .find_map(|s| s.as_ref().filter(|s| s.target == target));
+        if let Some(s) = writing {
             let secs = s.since.elapsed().as_secs();
             lines.push(Line::styled(format!(" summarising… {secs}s"), theme::accent()));
+        }
+        // Another project's being written first: this one is next.
+        if self.overview_next.as_ref() == Some(&target)
+            && let Some(o) = &self.overviewing
+        {
+            lines.push(Line::styled(
+                format!(" summarising {}… · this one next", o.title),
+                theme::dim(),
+            ));
         }
         // The one loaded with the cursor's row, else the last one made here, else the one
         // loaded when the cursor was on nothing here.
@@ -274,8 +429,9 @@ impl App {
         )
     }
 
-    /// The overview: its top, a blank line, its rows as the list draws them, and `+ new flow`,
-    /// a window of them following the selection.
+    /// The overview: its top, a blank line, its rows as the list draws them, `+ new flow`, and
+    /// `parked: N` with its flows under it while it is open, a window of them following the
+    /// selection.
     pub(super) fn draw_overview(&self, f: &mut Frame, area: Rect) {
         self.list_h.set(area.height);
         *self.hit.borrow_mut() = ListHit::default();
@@ -288,19 +444,55 @@ impl App {
         let mut sel_line = lines.len() + row_sel;
         lines.extend(row_lines);
         keys.extend(row_keys);
-        let mut new = Line::from(" + new flow");
         if self.on_new_flow() {
-            let short = w.saturating_sub(new.width());
-            if short > 0 {
-                new.spans.push(Span::raw(" ".repeat(short)));
-            }
-            new = new.style(theme::selected().patch(theme::accent()));
             sel_line = lines.len();
-        } else {
-            new = new.style(theme::dim());
         }
-        lines.push(new);
+        lines.push(self.overview_line(" + new flow".into(), self.on_new_flow(), w));
         keys.push(Some(NEW_FLOW.to_string()));
+        let parked = self.parked_in_scope();
+        if !parked.is_empty() {
+            let fold = if self.parked_open { "▾" } else { "▸" };
+            let line = format!(" parked: {} {fold}", parked.len());
+            if self.on_parked_line() {
+                sel_line = lines.len();
+            }
+            lines.push(self.overview_line(line, self.on_parked_line(), w));
+            keys.push(Some(PARKED.to_string()));
+        }
+        if self.parked_open {
+            let now = Timestamp::now();
+            let here = self.parked_here();
+            for p in parked {
+                let line = format!("   {}  parked {} ago · {}", p.name, fmt_age(p.at, now), p.folder);
+                let on = here.as_deref() == Some(p.folder.as_str());
+                if on {
+                    sel_line = lines.len();
+                }
+                lines.push(self.overview_line(line, on, w));
+                keys.push(Some(parked_key(&p.folder)));
+            }
+        }
         self.draw_window(f, area, lines, keys, sel_line);
     }
+
+    /// One of the overview's own lines, past its rows: dim, or lit to the edge under the cursor.
+    fn overview_line(&self, text: String, on: bool, w: usize) -> Line<'static> {
+        let mut line = Line::from(text);
+        if !on {
+            return line.style(theme::dim());
+        }
+        let short = w.saturating_sub(line.width());
+        if short > 0 {
+            line.spans.push(Span::raw(" ".repeat(short)));
+        }
+        line.style(theme::selected().patch(theme::accent()))
+    }
+}
+
+/// The start of a parked flow's key under `parked: N`; its folder follows.
+const PARKED_ROW: &str = "parked:";
+
+/// A parked flow's key under `parked: N`: `parked:_nightly`.
+fn parked_key(folder: &str) -> String {
+    format!("{PARKED_ROW}{folder}")
 }

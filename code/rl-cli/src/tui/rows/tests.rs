@@ -229,6 +229,7 @@ fn toggles_build<'a>(
             filter,
             now,
             relay: None,
+            parked: &[],
         },
     )
 }
@@ -344,6 +345,7 @@ fn a_summary_of_everything_is_not_a_project_of_its_own() {
     let cx = |relay: Option<&'static str>| Context {
         names: &names,
         flows: &[],
+        parked: &[],
         show_flows: true,
         show_agents: true,
         show_shells: true,
@@ -666,6 +668,7 @@ fn what_you_hid_shows_inline_when_hidden_is_on() {
                 show_hidden: true,
                 now,
                 relay: None,
+                parked: &[],
             },
         )),
         ["r:pinned", "[relay]", "r:mine"]
@@ -977,7 +980,15 @@ fn digest(now: Timestamp, items: Vec<DigestItem>, firings: Vec<Firing>) -> Diges
 
 #[test]
 fn a_flow_tally_in_words() {
-    let t = |total, running, needs| FlowTally { total, running, needs }.words();
+    let t = |total, running, needs| {
+        FlowTally {
+            total,
+            running,
+            needs,
+            parked: 0,
+        }
+        .words()
+    };
     assert_eq!(t(3, 1, 1), "3 flows · 1 running · 1 needs you");
     assert_eq!(t(1, 0, 0), "1 flow");
     assert_eq!(t(2, 0, 2), "2 flows · 2 needs you");
@@ -1014,7 +1025,8 @@ fn a_project_line_tallies_its_flows_and_what_needs_you() {
         FlowTally {
             total: 3,
             running: 1,
-            needs: 2
+            needs: 2,
+            parked: 0
         }
     );
     assert_eq!(tally_of(vec![failed(false)], vec![]).needs, 1);
@@ -1076,7 +1088,8 @@ fn the_everywhere_line_stands_with_its_tally_when_a_flow_has_no_in() {
         FlowTally {
             total: 2,
             running: 0,
-            needs: 1
+            needs: 1,
+            parked: 0
         }
     );
     // A flow `in` a folder, or one removed, is not everywhere's.
@@ -2658,4 +2671,35 @@ fn a_search_finds_claudes_own_sessions() {
     let named: Vec<Named> = rows.iter().map(|r| named(r, &d, &names, &[])).collect();
     let order = crate::tui::query::ranked(&Query::parse("away").words, &named);
     assert_eq!(rows[order[0]].key().as_deref(), Some("o:claude:sess-away"));
+}
+
+#[test]
+fn with_the_flows_on_the_everywhere_line_stands_while_its_flows_are_all_parked() {
+    let now: Timestamp = "2026-09-10T12:00:00Z".parse().unwrap();
+    let d = digest(now, vec![], vec![]);
+    let names = Names::default();
+    let parked = [rl_proto::flow::Parked {
+        name: "pulse".into(),
+        folder: "_pulse".into(),
+        at: now,
+        archived: 0,
+        in_: None,
+    }];
+    let cx = |filter: &'static str| Context {
+        names: &names,
+        flows: &[],
+        parked: &parked,
+        show_flows: true,
+        show_agents: true,
+        show_shells: true,
+        show_hidden: false,
+        filter,
+        now,
+        relay: None,
+    };
+    let rows = build(&d, &cx(""));
+    assert_eq!(keys(&rows), ["[everywhere]"]);
+    assert_eq!(head_of(&rows, EVERYWHERE).tally.parked, 1);
+    // A search for something else takes it away, as with the flows off.
+    assert!(keys(&build(&d, &cx("zzzz"))).is_empty());
 }

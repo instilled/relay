@@ -98,7 +98,8 @@ use rl_core::time::fmt_age;
 use rl_proto::decision::Decision;
 use rl_proto::flow::{
     Firing, FiringFilter, Flow, FlowApproval, FlowApprove, FlowErrors, FlowFilter, FlowFirings, FlowList, FlowName,
-    FlowPause, FlowReload, FlowResume, FlowRun, FlowStatus, NotLoaded,
+    FlowPark, FlowParkedList, FlowPause, FlowReload, FlowResume, FlowRun, FlowStatus, FlowUnpark, NotLoaded, Parked,
+    ParkedName,
 };
 use rl_proto::methods::{
     AgentList, ConfigGet, DecisionDismiss, DecisionGet, DecisionId, DecisionNote, DecisionTake, DecisionTakeParams,
@@ -335,6 +336,10 @@ const TOP: &str = "top";
 /// The overview's last line, `+ new flow`, as the cursor knows it.
 const NEW_FLOW: &str = "+new";
 
+/// The overview's `parked: N` line, under `+ new flow`, as the cursor knows it. The parked flows
+/// folded out under it are `parked:<folder>`.
+const PARKED: &str = "+parked";
+
 /// What the catch-up showed that was not seen yet: the runs, and where each
 /// flow's firings not seen start, by its row key.
 #[derive(Default)]
@@ -378,6 +383,20 @@ struct App {
     /// What was last said of the overview's project, as fetched with the cursor on nothing in
     /// it: its top keeps it while the cursor is on a flow.
     overview_said: Option<Summary>,
+    /// The assistant at work on a project's summary, asked as its overview opened with none kept
+    /// that is current: apart from `/summary`, and left to land when the overview is left.
+    overviewing: Option<Summarising>,
+    /// The project the overview is on, waiting to be written while `overviewing` is another's:
+    /// asked once that one lands.
+    overview_next: Option<SummaryTarget>,
+    /// The projects (`SummaryTarget::key`) whose summary failed as the overview opened: not
+    /// asked again by itself this session, until a `/summary` of one.
+    overview_failed: HashSet<String>,
+    /// The parked flows, every scope's: fetched with the flows on each refresh, and as the
+    /// overview opens. A line stands for a scope that has only these; the overview counts its own.
+    parked: Vec<Parked>,
+    /// Whether the overview's `parked: N` line has its flows folded out under it.
+    parked_open: bool,
     /// Every flow: for its row's place and words, the chips on project rows,
     /// and a flow's pane.
     flows: Vec<Flow>,
@@ -558,9 +577,11 @@ struct App {
 }
 
 /// What a second press of a destructive key would do.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum Arm {
-    Remove,
+    /// `^x`, armed on the row under the cursor then, by its key: the second press acts only
+    /// while the cursor is still there.
+    Remove(Option<String>),
     Quit,
 }
 
@@ -1325,6 +1346,11 @@ impl App {
             summarising: None,
             overview: None,
             overview_said: None,
+            overviewing: None,
+            overview_next: None,
+            overview_failed: HashSet::new(),
+            parked: Vec::new(),
+            parked_open: false,
             topping: None,
             top: None,
             outcomes: Default::default(),
@@ -1502,6 +1528,12 @@ impl App {
                         None => std::future::pending().await,
                     }
                 } => self.topped(done).await,
+                done = async {
+                    match &mut self.overviewing {
+                        Some(s) => (&mut s.task).await,
+                        None => std::future::pending().await,
+                    }
+                } => self.overviewed(done).await,
                 done = async {
                     match &mut self.carrying {
                         Some(c) => (&mut c.task).await,
@@ -1695,6 +1727,9 @@ impl App {
         if self.view == View::Report {
             self.fetch_report().await;
         }
+        // The parked flows, with the flows: a scope whose flows are all parked keeps its line
+        // for them, and the overview counts its own.
+        self.fetch_parked().await;
         // Which CLIs are agents decides how a line reads and what it offers:
         // the ones here that the config has the panel offer. Asked once.
         if self.agents.is_empty()
@@ -1774,7 +1809,8 @@ impl App {
             }
             (None, _) => (false, None),
         };
-        // A project or everything with no stretch has nothing kept for it.
+        // A project or everything with no stretch has none to ask for here: the daemon would give the
+        // newest kept, and this wants the one kept from there.
         let needs_from = matches!(target, SummaryTarget::Project { .. } | SummaryTarget::All);
         if needs_from && from.is_none() {
             return Some(None);
@@ -1918,8 +1954,12 @@ impl App {
         }
     }
 
-    /// What `^x` or `/archive` on a flow in the catch-up says.
-    const FLOW_ON_THE_LIST: &'static str = "^x archives a flow's runs in its project · enter goes there";
+    /// What `^x` on a flow in the catch-up says: a flow is parked in its project's overview.
+    const FLOW_ON_THE_LIST: &'static str = "^x in its project's overview parks it · enter goes there";
+
+    /// What `/archive` on a flow in the catch-up says: the catch-up holds only the stretch's runs,
+    /// its project's overview holds them all.
+    const FLOW_RUNS_THERE: &'static str = "/archive archives a flow's runs in its project · enter goes there";
 
     // ---- flows -------------------------------------------------------------
 
@@ -3336,18 +3376,22 @@ impl App {
                         Some(FlowStatus::NeedsApproval) => "/flow approve · ",
                         _ => "/flow run · ",
                     };
-                    let archives = if f.runs.is_empty() { "" } else { "^x archives · " };
                     // Its page up: `esc` is back to the overview.
                     if self.show_pane {
                         format!(
-                            "type changes it · enter its firings · {yes}^e edits · {archives}/summary · {pane} · esc back"
+                            "type changes it · enter its firings · {yes}^e edits · ^x parks · /summary · {pane} · esc back"
                         )
                     } else {
                         format!(
-                            "type changes it · enter its firings · {yes}^e edits · {archives}/summary · esc the list"
+                            "type changes it · enter its firings · {yes}^e edits · ^x parks · /summary · esc the list"
                         )
                     }
                 }
+                None if self.on_parked_line() => {
+                    let what = if self.parked_open { "hides them" } else { "shows them" };
+                    format!("enter {what} · esc the list")
+                }
+                None if self.parked_here().is_some() => "enter brings it back · esc the list".into(),
                 _ => "esc the list".into(),
             };
         }
@@ -3715,6 +3759,7 @@ mod tests {
             total,
             running: 0,
             needs,
+            parked: 0,
         }
     }
 
@@ -3949,20 +3994,20 @@ mod tests {
 
     /// What a test panel's daemon is told beyond `panel()`'s.
     #[derive(Default)]
-    struct Setup {
+    pub(super) struct Setup {
         /// More of `config.yaml`, after `assistants: {summary: fakeai, interpret: fakeai}`.
-        config: &'static str,
+        pub(super) config: &'static str,
         /// `assistants.summary` left out: the first agent here would answer.
-        unnamed: bool,
+        pub(super) unnamed: bool,
         /// What `fakeai` answers; None, the fixture's own draft.
-        answer: Option<&'static str>,
+        pub(super) answer: Option<&'static str>,
         /// `rl-session`, so an assistant's run really runs; without it the
         /// daemon cannot start one.
-        session: Option<std::path::PathBuf>,
+        pub(super) session: Option<std::path::PathBuf>,
         /// More profiles for `detect/`, by name, over the built-ins.
-        profiles: Vec<(&'static str, String)>,
+        pub(super) profiles: Vec<(&'static str, String)>,
         /// How long a screen's rest waits for a hook; None, the daemon's own.
-        grace: Option<std::time::Duration>,
+        pub(super) grace: Option<std::time::Duration>,
     }
 
     /// A panel whose `rld` runs what it starts, with `profiles` over the
@@ -3998,7 +4043,7 @@ mod tests {
     /// A panel whose summariser, `fake-agent`, really runs and answers
     /// `answer`. None (and the test says it is skipping) when `rl-session`
     /// is not built.
-    async fn panel_with_fake_summariser(
+    pub(super) async fn panel_with_fake_summariser(
         answer: &'static str,
     ) -> Option<(
         tempfile::TempDir,
@@ -4021,7 +4066,7 @@ mod tests {
     /// `panel()` with more of the config: `fakeai` is the summariser, run by
     /// whatever `rl-session` the daemon finds (none, as a rule, so it fails
     /// to start) — what is asserted is what was asked, not the answer.
-    async fn panel_with_config(
+    pub(super) async fn panel_with_config(
         config: &'static str,
     ) -> (
         tempfile::TempDir,
@@ -4036,7 +4081,7 @@ mod tests {
         panel_set(setup, |_, _| vec![]).await
     }
 
-    async fn panel_set(
+    pub(super) async fn panel_set(
         set: Setup,
         more: impl FnOnce(&std::path::Path, jiff::Timestamp) -> Vec<rl_proto::types::Run>,
     ) -> (
@@ -6157,8 +6202,8 @@ mod tests {
         type_in(&mut app, "/sort").await;
         press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
         assert_eq!(said(&app), "/sort sorts on the list · esc goes there");
-        // A flow here holds only the stretch's runs: archiving them is its
-        // project's overview's, where it holds them all.
+        // A flow here holds only the stretch's runs: parking it, or archiving
+        // them, is its project's overview's, where it holds them all.
         let flow = app
             .catch_rows()
             .iter()
@@ -6169,16 +6214,13 @@ mod tests {
             .expect("the nightly flow");
         app.select(Some(flow));
         press(&mut app, KeyCode::Char('x'), KeyModifiers::CONTROL).await;
-        assert_eq!(
-            said(&app),
-            "^x archives a flow's runs in its project · enter goes there"
-        );
+        assert_eq!(said(&app), "^x in its project's overview parks it · enter goes there");
         assert!(app.arm.is_none());
         type_in(&mut app, "/archive").await;
         press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
         assert_eq!(
             said(&app),
-            "^x archives a flow's runs in its project · enter goes there"
+            "/archive archives a flow's runs in its project · enter goes there"
         );
         assert!(app.digest.items.iter().any(|i| i.run.id == "run00002"), "not archived");
         // What acts on the row itself acts here: ^t pins the run under the
@@ -7232,7 +7274,7 @@ mod tests {
         run(&mut app, "/flow now").await;
         assert_eq!(
             said(&app),
-            "/flow run|pause|resume|approve|edit|new|test|draft|reload [name]"
+            "/flow run|pause|resume|approve|edit|new|test|draft|park|unpark|reload [name]"
         );
         // Its `flow.md` waits for the screen to be given back.
         run(&mut app, "/flow edit nightly").await;

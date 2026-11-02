@@ -17,6 +17,7 @@ impl App {
                 show_hidden: self.show_hidden,
                 now: Timestamp::now(),
                 relay: Some(&self.relay),
+                parked: &self.parked,
             },
         )
     }
@@ -72,6 +73,7 @@ impl App {
                 .into_iter()
                 .filter_map(|r| r.key())
                 .chain(std::iter::once(NEW_FLOW.to_string()))
+                .chain(self.parked_keys())
                 .collect(),
             View::CatchUp => self
                 .lead_keys()
@@ -304,6 +306,7 @@ impl App {
                     show_hidden,
                     now: Timestamp::now(),
                     relay: Some(&self.relay),
+                    parked: &self.parked,
                 };
                 rows::build(&d, &cx).iter().any(|r| match (run, r) {
                     (Some(id), Row::Run(i)) => i.run.id == id,
@@ -337,6 +340,7 @@ impl App {
             show_hidden,
             now: Timestamp::now(),
             relay: Some(&self.relay),
+            parked: &self.parked,
         };
         rows::build(&self.digest, &cx)
             .iter()

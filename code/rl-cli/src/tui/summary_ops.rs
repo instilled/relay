@@ -135,6 +135,11 @@ impl App {
             });
             return;
         };
+        // The one asked as the overview opened is still on its way.
+        if let Some(o) = self.overviewing.as_ref().filter(|o| o.target == target) {
+            self.say(format!("still summarising {}", o.title));
+            return;
+        }
         if let SummaryTarget::Run { id } = &target
             && self
                 .run_by_id(id)
@@ -229,6 +234,8 @@ impl App {
             SummaryTarget::Project { workspace } => self.names.workspace(workspace),
             SummaryTarget::All => "everything".into(),
         };
+        // Asked for by hand, a project whose summary failed as its overview opened may be again.
+        self.overview_failed.remove(&params.target.key());
         let (target, deep, from) = (params.target.clone(), params.deep, params.from);
         let home = self.home.clone();
         let task = tokio::spawn(async move {

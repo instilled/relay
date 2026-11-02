@@ -70,7 +70,9 @@ const FLOW_STRETCH: SignedDuration = SignedDuration::from_hours(24);
 /// The one kept for the target, depth and stretch, marked stale when what it
 /// covers has moved on since. A run's default stretch, brief, with nothing
 /// kept for it gives back the newest said of the run — its recap, or one
-/// since you looked — so looking at it again does not hide what was said.
+/// since you looked — so looking at it again does not hide what was said. A
+/// project or everything asked with no stretch gives back the newest kept of
+/// it, whatever its start, marked stale over that start.
 pub async fn get(d: &Daemon, p: &SummaryParams) -> Result<Option<Summary>> {
     let from = p.from.map(whole);
     match &p.target {
@@ -100,12 +102,22 @@ pub async fn get(d: &Daemon, p: &SummaryParams) -> Result<Option<Summary>> {
             }
         }
         t => {
-            // A project or everything with no stretch has nothing kept for it.
-            let Ok(from) = over_from(d, t, from, now()).await else {
+            // A project or everything with no stretch asked: the newest kept of it, whatever its
+            // start, moved on or not over that start.
+            let found = match over_from(d, t, from, now()).await {
+                Ok(from) => kept_of(d, t, p.deep, Some(from)).await?,
+                Err(_) if matches!(t, SummaryTarget::Project { .. } | SummaryTarget::All) => {
+                    let key = t.key();
+                    let deep = p.deep;
+                    d.ledger.call_read(move |c| kept::latest(c, &key, deep)).await?
+                }
+                Err(_) => return Ok(None),
+            };
+            let Some(mut s) = found else {
                 return Ok(None);
             };
-            let Some(mut s) = kept_of(d, t, p.deep, Some(from)).await? else {
-                return Ok(None);
+            let Some(from) = s.from else {
+                return Ok(Some(s));
             };
             s.stale = many_reach(d, &in_stretch(d, t, from).await?).await? != s.reach;
             Ok(Some(s))

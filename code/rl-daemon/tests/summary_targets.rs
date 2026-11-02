@@ -115,6 +115,13 @@ async fn a_project_brief_is_one_call_over_its_runs_lines() {
         .await;
     assert_ne!(again.by, s.by);
 
+    // Asked with no start: the newest kept, from where it started, current over it.
+    let newest = kept(&mut c, json!({"target": target})).await;
+    assert_eq!(
+        newest.map(|k| (k.by, k.from, k.stale)),
+        Some((again.by.clone(), Some(from), false))
+    );
+
     // A project's needs where to start.
     let r = c.call("summary.make", json!({"target": target})).await;
     let msg = r.error.unwrap().message;

@@ -56,6 +56,7 @@ impl App {
             show_hidden: false,
             now: Timestamp::now(),
             relay: Some(&self.relay),
+            parked: &self.parked,
         };
         let cu = crate::catchup::CatchUp::build(d, &cx);
         if let Some(kept) = self.drawn.borrow_mut().as_mut() {
