@@ -196,22 +196,16 @@ pub async fn flow(home: &Home, cmd: FlowCmd, json: bool) -> Result<()> {
             let Some(folder) = parked_folder(&parked, &what) else {
                 bail!("nothing parked as {what} · rl flow parked lists them");
             };
-            let f = match rpc.call::<FlowUnpark>(ParkedName { folder: folder.clone() }).await {
-                Ok(f) => f,
-                Err(e) => {
-                    let now = rpc.call::<FlowParkedList>(()).await.unwrap_or_default();
-                    return match came_back_unloaded(&folder, &now, &format!("{e:#}")) {
-                        Some((name, why)) => bail!(
-                            "{name} is back in flows/{name} but did not load: {why} · rl flow edit {name}, or rl flow reload"
-                        ),
-                        None => Err(e),
-                    };
-                }
-            };
+            let u = rpc.call::<FlowUnpark>(ParkedName { folder }).await?;
             if json {
-                println!("{}", serde_json::to_string(&f)?);
-            } else {
+                println!("{}", serde_json::to_string(&u)?);
+            } else if let Some(f) = &u.flow {
                 println!("{} back · it needs a yes: rl flow approve {}", f.name, f.name);
+            } else {
+                let (name, why) = (&u.name, u.problem.as_deref().unwrap_or("not loaded"));
+                bail!(
+                    "{name} is back in flows/{name} but did not load: {why} · rl flow edit {name}, or rl flow reload"
+                );
             }
         }
         FlowCmd::Parked => {
@@ -247,18 +241,6 @@ pub fn parked_folder(parked: &[Parked], what: &str) -> Option<String> {
         .filter(|p| p.name == what)
         .max_by_key(|p| p.at)
         .map(|p| p.folder.clone())
-}
-
-/// An unpark that failed after the folder was renamed back: the flow's name and why it did not
-/// load, from the refusal `e` and the parked list read since. None when the folder is still parked
-/// (nothing moved) or the refusal is another.
-pub fn came_back_unloaded(folder: &str, parked: &[Parked], e: &str) -> Option<(String, String)> {
-    let name = rl_proto::flow::parked_name(folder)?;
-    if parked.iter().any(|p| p.folder == folder) {
-        return None;
-    }
-    let (_, why) = e.split_once(" did not load: ")?;
-    Some((name.to_string(), why.to_string()))
 }
 
 /// One line for a flow that was changed, or the flow itself as JSON.

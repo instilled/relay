@@ -99,7 +99,7 @@ use rl_proto::decision::Decision;
 use rl_proto::flow::{
     Firing, FiringFilter, Flow, FlowApproval, FlowApprove, FlowErrors, FlowFilter, FlowFirings, FlowList, FlowName,
     FlowPark, FlowParkedList, FlowPause, FlowReload, FlowResume, FlowRun, FlowStatus, FlowUnpark, NotLoaded, Parked,
-    ParkedName,
+    ParkedName, Unparked,
 };
 use rl_proto::methods::{
     AgentList, ConfigGet, DecisionDismiss, DecisionGet, DecisionId, DecisionNote, DecisionTake, DecisionTakeParams,

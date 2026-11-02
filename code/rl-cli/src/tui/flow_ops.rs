@@ -134,25 +134,25 @@ impl App {
                 folder: folder.to_string(),
             })
             .await;
+        // What is parked and what is loaded are read again whatever came of it, and said last: a
+        // refresh that fails says so, and this is what matters.
         match back {
-            Ok(flow) => {
+            Ok(Unparked { flow: Some(flow), .. }) => {
                 self.refresh().await;
                 let said = format!("{} back · it needs a yes: enter on it", flow.name);
-                // Said last: a refresh that fails says so, and this is what matters.
                 let said = self.onto_saved(&flow.name, said);
                 self.say(said);
             }
-            Err(e) => {
-                // The folder may be back under its name and not have loaded: what is parked and
-                // what is loaded are read again either way.
+            Ok(Unparked { name, problem, .. }) => {
                 self.refresh().await;
-                let said = match crate::flow::came_back_unloaded(folder, &self.parked, &told(&e)) {
-                    Some((name, why)) => {
-                        format!("{name} is back in flows/{name} but did not load: {why} · ^e on it, or /flow reload")
-                    }
-                    None => told(&e),
-                };
-                self.say(said);
+                let why = problem.as_deref().unwrap_or("not loaded");
+                self.say(format!(
+                    "{name} is back in flows/{name} but did not load: {why} · ^e on it, or /flow reload"
+                ));
+            }
+            Err(e) => {
+                self.refresh().await;
+                self.say(told(&e));
             }
         }
     }

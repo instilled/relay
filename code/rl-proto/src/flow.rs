@@ -616,12 +616,26 @@ impl Method for FlowPark {
     type Result = Parked;
 }
 
-/// Brings a parked flow back under its name, needing a yes. Refused while a flow has that name.
+/// A parked flow back under its name: loaded, or why not.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Unparked {
+    /// The name it came back as.
+    pub name: String,
+    /// The flow as loaded; none when it came back and did not load.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flow: Option<Flow>,
+    /// Why it did not load, with its file and line, as the reload said.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub problem: Option<String>,
+}
+
+/// Brings a parked flow back under its name, needing a yes. Refused while a flow has that name;
+/// back but not loaded is an answer, saying why.
 pub struct FlowUnpark;
 impl Method for FlowUnpark {
     const NAME: &'static str = "flow.unpark";
     type Params = ParkedName;
-    type Result = Flow;
+    type Result = Unparked;
 }
 
 /// The parked folders, by name and then by when.

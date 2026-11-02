@@ -5,7 +5,7 @@ mod common;
 use common::{Conn, Harness};
 use rl_core::Home;
 use rl_ledger::Ledger;
-use rl_proto::flow::{Firing, FiringStatus, Flow, Parked, Reloaded, StepStatus};
+use rl_proto::flow::{Firing, FiringStatus, Flow, Parked, Reloaded, StepStatus, Unparked};
 use rl_proto::types::Run;
 use serde_json::json;
 use std::path::Path;
@@ -167,6 +167,40 @@ async fn park_refuses_while_waiting_on_a_question() {
     h.stop().await;
 }
 
+/// A step lost while `rld` was down leaves its firing waiting too: the refusal says so, not that
+/// it is waiting on a question.
+#[cfg(unix)]
+#[tokio::test]
+async fn park_refuses_while_a_step_is_lost() {
+    let tmp = tempfile::tempdir().unwrap();
+    let md = "---\nsteps:\n  a:\n    run: sleep 30\n---\n";
+    let Some((h, mut c)) = start(tmp.path(), &[("hello", md)]).await else {
+        return;
+    };
+    common::approve(&mut c, "hello").await;
+    let _: Firing = c.ok("flow.run", json!({ "name": "hello" })).await;
+    let f = wait_firing(&mut c, "hello", |f| f.steps[0].run.is_some()).await;
+    let old = f.steps[0].run.clone().unwrap();
+    drop(c);
+    let home = h.home.clone();
+    h.stop().await;
+
+    common::kill_holder(&home, &old, true).await;
+
+    let h = Harness::on(home).unwrap();
+    let mut c = Conn::open(&h.home).await;
+    wait_firing(&mut c, "hello", |f| f.steps[0].status == StepStatus::Lost).await;
+
+    let said = refused(&mut c, "flow.park", json!({ "name": "hello" })).await;
+    assert!(
+        said.ends_with("hello is waiting on its lost step a · /resume its run or /stop it, then park it"),
+        "{said}"
+    );
+    assert!(h.home.flow_dir("hello").join("flow.md").is_file(), "nothing renamed");
+    assert!(!h.home.flows_dir().join("_hello").exists());
+    h.stop().await;
+}
+
 /// The ledger refuses what parking writes after the rename: the flow is read again all the
 /// same, so it is not left loaded with its folder gone, and the error says it is parked.
 #[tokio::test]
@@ -197,8 +231,11 @@ async fn park_reads_the_flows_again_when_the_ledger_fails_after_the_rename() {
     ledger
         .call_blocking(|db| Ok(db.execute_batch("DROP TRIGGER no_archive")?))
         .unwrap();
-    let back: Flow = c.ok("flow.unpark", json!({ "folder": "_hello" })).await;
-    assert!(!back.approved(), "the yes was taken before the archive failed");
+    let back: Unparked = c.ok("flow.unpark", json!({ "folder": "_hello" })).await;
+    assert!(
+        !back.flow.unwrap().approved(),
+        "the yes was taken before the archive failed"
+    );
     h.stop().await;
 }
 
@@ -236,7 +273,10 @@ async fn unpark_brings_it_back_needing_a_yes() {
     assert!(yes.approved());
     let _: Parked = c.ok("flow.park", json!({ "name": "hello" })).await;
 
-    let back: Flow = c.ok("flow.unpark", json!({ "folder": "_hello" })).await;
+    let u: Unparked = c.ok("flow.unpark", json!({ "folder": "_hello" })).await;
+    assert_eq!(u.name, "hello");
+    assert_eq!(u.problem, None);
+    let back = u.flow.expect("it loaded");
     assert_eq!(back.name, "hello");
     assert_eq!(back.hash, yes.hash, "the very folder said yes to");
     assert!(!back.approved(), "and still it needs a yes: {back:?}");
@@ -323,5 +363,55 @@ async fn parked_lists_in_from_the_frontmatter() {
     assert_eq!(all[0].in_.as_deref(), Some(ws.as_path()));
     let wire = serde_json::to_value(&all[0]).unwrap();
     assert_eq!(wire["in"], json!(ws), "said as `in`, as a flow file says it");
+    h.stop().await;
+}
+
+#[tokio::test]
+async fn unpark_of_a_folder_that_does_not_load_says_why_in_its_answer() {
+    let tmp = tempfile::tempdir().unwrap();
+    let Some((h, mut c)) = start(tmp.path(), &[("hello", HELLO)]).await else {
+        return;
+    };
+    let _: Parked = c.ok("flow.park", json!({ "name": "hello" })).await;
+    let flows = h.home.flows_dir();
+    std::fs::write(flows.join("_hello/flow.md"), "---\nsteps: [\n---\n").unwrap();
+
+    let u: Unparked = c.ok("flow.unpark", json!({ "folder": "_hello" })).await;
+    assert_eq!(u.name, "hello");
+    assert!(u.flow.is_none(), "{u:?}");
+    let why = u.problem.expect("why it did not load");
+    assert!(why.contains("flow.md:"), "{why}");
+    assert!(flows.join("hello/flow.md").is_file(), "it is back all the same");
+    h.stop().await;
+}
+
+/// Reloads from another connection never sync a folder list read before a park's rename after
+/// the park's own reload: once parked, the flow is not listed.
+#[tokio::test]
+async fn a_reload_racing_a_park_never_leaves_it_listed() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let tmp = tempfile::tempdir().unwrap();
+    let Some((h, mut c)) = start(tmp.path(), &[("hello", HELLO)]).await else {
+        return;
+    };
+    let stop = Arc::new(AtomicBool::new(false));
+    let mut other = Conn::open(&h.home).await;
+    let looping = {
+        let stop = stop.clone();
+        tokio::spawn(async move {
+            while !stop.load(Ordering::Relaxed) {
+                let _: Reloaded = other.ok("flow.reload", json!(null)).await;
+            }
+        })
+    };
+    for i in 0..25 {
+        let _: Parked = c.ok("flow.park", json!({ "name": "hello" })).await;
+        let names: Vec<String> = listed(&mut c).await.into_iter().map(|f| f.name).collect();
+        assert!(!names.iter().any(|n| n == "hello"), "round {i}: {names:?}");
+        let _: Unparked = c.ok("flow.unpark", json!({ "folder": "_hello" })).await;
+    }
+    stop.store(true, Ordering::Relaxed);
+    looping.await.unwrap();
     h.stop().await;
 }

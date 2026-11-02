@@ -12,6 +12,7 @@ use rl_proto::flow::{
     FiringFilter, FiringRef, Flow, FlowApproval, FlowApprove, FlowErrors, FlowFilter, FlowFirings, FlowList, FlowName,
     FlowOutcome, FlowPark, FlowParkedList, FlowPause, FlowReload, FlowResume, FlowRun, FlowStateGet, FlowStateRead,
     FlowStateSet, FlowStateWrite, FlowTest, FlowTestParams, FlowUnpark, ParkedName, StateFile, StateName, StateValues,
+    Unparked,
 };
 use rl_proto::rpc::RpcError;
 
@@ -89,12 +90,34 @@ pub fn register(r: &mut Router<Daemon>) {
     });
     r.register::<FlowUnpark, _, _>(|d, ParkedName { folder }| async move {
         let name = d.flows.unpark(&folder).await.map_err(|e| unmoved(&d, e))?;
-        let back = get(&d, &name).await?;
-        // Back, but not loaded: why it did not is the answer.
-        if back.removed_at.is_some() {
-            return Err(missing(&d, &name));
+        let n = name.clone();
+        let back = d
+            .flows
+            .ledger
+            .call(move |c| flows::get(c, &n))
+            .await
+            .map_err(internal)?
+            .filter(|f| f.removed_at.is_none());
+        if let Some(f) = back {
+            return Ok(Unparked {
+                name,
+                flow: Some(d.flows.shown(f)),
+                problem: None,
+            });
         }
-        Ok(back)
+        // Back, but not loaded: why it did not is the answer.
+        let problem = d
+            .flows
+            .not_loaded()
+            .into_iter()
+            .find(|n| n.flow == name)
+            .map(|n| n.to_string())
+            .or(Some("not loaded".into()));
+        Ok(Unparked {
+            name,
+            flow: None,
+            problem,
+        })
     });
     r.register::<FlowParkedList, _, _>(|d, ()| async move { d.flows.parked().map_err(internal) });
     r.register::<FlowStateSet, _, _>(|d, p: StateValues| async move {
