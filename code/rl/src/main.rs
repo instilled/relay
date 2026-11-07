@@ -4,12 +4,13 @@ use rl::{cmd, hook};
 use rl_core::Home;
 use std::path::PathBuf;
 
-/// Relay: list, attach and run shells for any agent.
+/// Relay: list, attach and run shells for any agent. With no command, the
+/// list.
 #[derive(Parser)]
 #[command(name = "rl-new", version)]
 struct Cli {
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
 }
 
 #[derive(Subcommand)]
@@ -60,7 +61,14 @@ async fn main() {
 
 async fn run(cli: Cli) -> Result<()> {
     let home = Home::resolve()?;
-    match cli.command {
+    let Some(command) = cli.command else {
+        use std::io::IsTerminal;
+        if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+            anyhow::bail!("the list needs a terminal · rl-new ls lists sessions as text");
+        }
+        return rl::tui::run(&home).await;
+    };
+    match command {
         Command::New {
             harness,
             cwd,

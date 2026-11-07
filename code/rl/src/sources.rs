@@ -66,6 +66,19 @@ pub struct NativeRow {
     pub pr: Option<Pr>,
 }
 
+/// What lists a harness's own background sessions: its adapter. Asked from a
+/// background task while the list is open, so `list` may block (it runs the
+/// harness's CLI); an error keeps what it said last.
+pub trait NativeLister: Send + Sync {
+    fn list(&self) -> anyhow::Result<Vec<NativeRow>>;
+}
+
+/// The harnesses' listers the list asks. None yet: the adapters come with
+/// the harnesses' own sessions.
+pub fn native_listers() -> Vec<Box<dyn NativeLister>> {
+    Vec::new()
+}
+
 /// One row on the list.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Row {

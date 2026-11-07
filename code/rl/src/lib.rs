@@ -12,3 +12,4 @@ pub mod rows;
 pub mod sources;
 pub mod spawn;
 pub mod store;
+pub mod tui;

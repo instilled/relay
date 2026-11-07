@@ -31,6 +31,8 @@ rl-session = { path = "code/rl-session" }
 anyhow = "1"
 jiff = { version = "0.2", features = ["serde"] }
 nix = { version = "0.31", features = ["process", "signal", "fs", "hostname", "term"] }
+# The list watches `sessions/` and `state/` while it is open.
+notify = "8.2"
 portable-pty = "0.9"
 regex = "1"
 rusqlite = { version = "0.40", features = ["bundled"] }
