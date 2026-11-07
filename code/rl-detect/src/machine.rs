@@ -12,46 +12,9 @@
 //! 5. Anything else is a transition.
 
 use rl_proto::types::{Confidence, Run, RunState, Source, event_kind};
-use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-/// Evidence about a run, from one source, at one confidence.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Signal {
-    pub state: RunState,
-    pub source: Source,
-    pub confidence: Confidence,
-    /// What was seen: the question text, the tool name, the prompt line.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub detail: Option<String>,
-}
-
-impl Signal {
-    pub fn pty(state: RunState, confidence: Confidence, detail: Option<String>) -> Self {
-        Self {
-            state,
-            source: Source::Pty,
-            confidence,
-            detail,
-        }
-    }
-    pub fn hook(state: RunState, detail: Option<String>) -> Self {
-        Self {
-            state,
-            source: Source::Hook,
-            confidence: Confidence::Exact,
-            detail,
-        }
-    }
-    pub fn manual(state: RunState, detail: Option<String>) -> Self {
-        Self {
-            state,
-            source: Source::Manual,
-            confidence: Confidence::Exact,
-            detail,
-        }
-    }
-}
+pub use rl_core::state::Signal;
 
 /// What the ledger says right now.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

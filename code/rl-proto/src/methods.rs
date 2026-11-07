@@ -96,7 +96,7 @@ impl Method for RunStart {
 pub struct RunSpec {
     pub argv: Vec<String>,
     /// `command` unless the caller says otherwise (`--agent` → `agent`).
-    #[serde(default = "RunKind::default_command")]
+    #[serde(default = "default_command_kind")]
     pub kind: RunKind,
     pub cwd: PathBuf,
     /// Defaults to the argv joined.
@@ -137,10 +137,8 @@ fn default_true() -> bool {
     true
 }
 
-impl RunKind {
-    fn default_command() -> Self {
-        RunKind::Command
-    }
+fn default_command_kind() -> RunKind {
+    RunKind::Command
 }
 
 /// Asks a live run to stop: SIGTERM, or SIGKILL with `force`. The run ends in
