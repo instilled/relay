@@ -41,9 +41,15 @@ pub fn keys(at: Place) -> Vec<Key> {
 fn place_keys(at: Place) -> Vec<Key> {
     match at {
         Place::List => vec![
+            key("enter", "attach"),
+            key("n", "new"),
             key("↑↓ ^j^k", "move"),
             key("pgup/pgdn home/end", "page"),
             key("^f", "search"),
+            key("^x ^x", "stop/remove/hide"),
+            key("^r", "rename"),
+            key("^t", "pin"),
+            key("⇧↑↓", "reorder"),
             key("a", "agents"),
             key("s", "shells"),
             key("h", "hidden"),
@@ -166,8 +172,9 @@ mod tests {
     fn the_list_says_its_keys() {
         assert_eq!(
             one_line(Place::List),
-            "↑↓ ^j^k move · pgup/pgdn home/end page · ^f search · a agents · s shells · h hidden · \
-             ^s by project/state · ^c ^c quit · ^h"
+            "enter attach · n new · ↑↓ ^j^k move · pgup/pgdn home/end page · ^f search · \
+             ^x ^x stop/remove/hide · ^r rename · ^t pin · ⇧↑↓ reorder · a agents · s shells · \
+             h hidden · ^s by project/state · ^c ^c quit · ^h"
         );
     }
 
@@ -187,7 +194,7 @@ mod tests {
                 assert!(width_of(&t) <= width, "at {width}: {t:?} is too wide");
             }
         }
-        assert_eq!(wrap(&ks, 200).len(), 1);
+        assert_eq!(wrap(&ks, 300).len(), 1);
     }
 
     #[test]

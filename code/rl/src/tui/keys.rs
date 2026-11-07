@@ -1,6 +1,6 @@
 //! `impl App` — what the keys, the mouse and a paste do on the list.
 
-use super::app::{App, Arm, Search};
+use super::app::{App, Arm, Mode, Search};
 use super::draw::hit_row;
 use super::{line, shortcuts};
 use crate::query;
@@ -19,12 +19,27 @@ pub fn vi_step(k: KeyEvent) -> KeyEvent {
     }
 }
 
+/// `⇧↑` and `⇧↓` move the line under the cursor: up is `true`.
+pub fn reorder_step(k: &KeyEvent) -> Option<bool> {
+    match (k.code, k.modifiers) {
+        (KeyCode::Up, KeyModifiers::SHIFT) => Some(true),
+        (KeyCode::Down, KeyModifiers::SHIFT) => Some(false),
+        _ => None,
+    }
+}
+
 impl App {
     pub fn key(&mut self, k: KeyEvent) {
         self.flash = None;
         // A key armed by its first press stays armed only until the very next
         // key: its own second press acts, anything else disarms it.
         let armed = self.arm.take();
+        // A name being typed, or the form, has every key until it is done.
+        match self.mode {
+            Mode::Rename(_) => return self.key_rename(k),
+            Mode::Form(_) => return self.key_form(k),
+            Mode::List => {}
+        }
         if (k.code, k.modifiers) == (KeyCode::Char('f'), KeyModifiers::CONTROL) {
             match self.search.take() {
                 Some(_) => {}
@@ -52,6 +67,7 @@ impl App {
                 KeyCode::Char('a') => return self.toggle_agents(),
                 KeyCode::Char('s') => return self.toggle_shells(),
                 KeyCode::Char('h') => return self.toggle_hidden(),
+                KeyCode::Char('n') => return self.open_form(),
                 _ => {}
             }
         }
@@ -167,10 +183,18 @@ impl App {
         self.land();
     }
 
-    /// What is not typed: moving about, and backing out.
+    /// What is not typed: moving about, backing out, and acting on the line
+    /// under the cursor.
     fn key_list(&mut self, k: KeyEvent, armed: Option<Arm>) {
         let page = self.list_h.get().saturating_sub(2).max(1) as isize;
+        if let Some(up) = reorder_step(&k) {
+            return self.reorder(up);
+        }
         match (k.code, k.modifiers) {
+            (KeyCode::Enter, _) => self.enter(),
+            (KeyCode::Char('x'), KeyModifiers::CONTROL) => self.key_x(armed),
+            (KeyCode::Char('r'), KeyModifiers::CONTROL) => self.rename_here(),
+            (KeyCode::Char('t'), KeyModifiers::CONTROL) => self.toggle_pin(),
             (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
                 if armed == Some(Arm::Quit) {
                     self.quit = true;
@@ -218,14 +242,20 @@ impl App {
 
     /// A paste goes into the search, as one line; elsewhere nothing takes it.
     pub fn paste(&mut self, s: &str) {
-        let Some(search) = self.search.as_mut() else {
-            return;
-        };
         let s: String = s
             .chars()
             .map(|c| if matches!(c, '\n' | '\r' | '\t') { ' ' } else { c })
             .filter(|c| !c.is_control())
             .collect();
+        // A name or the form's field being typed takes it first.
+        match &mut self.mode {
+            Mode::Rename(r) => return r.line.insert(&s),
+            Mode::Form(f) => return f.paste(&s),
+            Mode::List => {}
+        }
+        let Some(search) = self.search.as_mut() else {
+            return;
+        };
         search.line.insert(&s);
         let now = search.line.text().trim().to_string();
         if now != self.filter {

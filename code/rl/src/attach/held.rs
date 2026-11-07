@@ -204,7 +204,8 @@ fn nudge_in(hello: &Hello) -> Option<tokio::time::Instant> {
     (!left.is_zero()).then(|| tokio::time::Instant::now() + left)
 }
 
-fn exit_words(name: &str, e: &Exit) -> (Ended, String) {
+/// How a session ended, and the line that says so.
+pub fn exit_words(name: &str, e: &Exit) -> (Ended, String) {
     let how = match &e.signal {
         Some(s) => format!("{s}, exit {}", e.code),
         None => format!("exit {}", e.code),

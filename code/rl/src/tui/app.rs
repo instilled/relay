@@ -2,18 +2,21 @@
 //! and where the cursor, the search and the footer stand.
 
 use super::draw::ListHit;
+use super::form::Form;
 use super::line;
 use crate::badges::{self, Badges};
 use crate::config::{Config, Grouping, ListPrefs};
 use crate::git::{self, Checkouts};
 use crate::rows::{self, Context, Line};
 use crate::sources::{self, NativeRow, Row};
-use crate::store::{sessions, state};
+use crate::store::sessions::{self, Meta};
+use crate::store::state;
 use anyhow::Result;
 use jiff::Timestamp;
 use rl_core::Home;
 use std::cell::{Cell, RefCell};
 use std::time::{Duration, Instant};
+use tokio::task::JoinSet;
 
 /// How long a word in the footer stands.
 pub const FLASH: Duration = Duration::from_secs(4);
@@ -22,6 +25,65 @@ pub const FLASH: Duration = Duration::from_secs(4);
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Arm {
     Quit,
+    /// `^x`, on the line with this key.
+    Remove(Option<String>),
+}
+
+/// What has the keys besides the list itself (and the search, which is
+/// `App::search`).
+pub enum Mode {
+    List,
+    /// `^r`: a name typed where it stands.
+    Rename(Renaming),
+    /// `n`: a new session.
+    Form(Form),
+}
+
+/// `^r` under way: the line's key, what is typed, the name it had, and its
+/// own name — what an empty one goes back to.
+pub struct Renaming {
+    pub key: String,
+    pub line: line::Line,
+    pub was: String,
+    pub own: String,
+}
+
+/// What `enter` hands the terminal to, once the list has let go of it.
+pub struct Hand {
+    pub to: To,
+    /// What it is called on the list, for the words after.
+    pub title: String,
+    /// Its line, for the cursor after.
+    pub key: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum To {
+    /// A Relay-held session, straight to its holder.
+    Held(Box<Meta>),
+    /// A harness's own attach command, run on a pty here.
+    Argv(Vec<String>),
+}
+
+/// What background work (a stop, a start) came to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Done {
+    /// For the footer.
+    pub said: String,
+    /// The line the cursor goes to, if it is there.
+    pub select: Option<String>,
+    /// A row gone for good, whose name, pin, hide and place go with it.
+    pub forget: Option<String>,
+}
+
+impl Done {
+    pub fn said(s: impl Into<String>) -> Done {
+        Done {
+            said: s.into(),
+            select: None,
+            forget: None,
+        }
+    }
 }
 
 /// `^f`: the search being typed, and the filter it started from — what `esc`
@@ -44,6 +106,11 @@ pub struct App {
     /// What the list is narrowed to (`query`).
     pub filter: String,
     pub search: Option<Search>,
+    pub mode: Mode,
+    /// Set by `enter`: what the terminal goes to next (`main_loop`).
+    pub hand: Option<Hand>,
+    /// Stops and starts under way.
+    pub work: JoinSet<Done>,
     /// The line under the cursor, by key.
     pub sel: Option<String>,
     /// Where the list's window starts, as last drawn.
@@ -74,6 +141,9 @@ impl App {
             badges,
             filter: String::new(),
             search: None,
+            mode: Mode::List,
+            hand: None,
+            work: JoinSet::new(),
             sel: None,
             scroll: Cell::new(0),
             hit: RefCell::default(),

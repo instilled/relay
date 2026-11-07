@@ -3,7 +3,7 @@
 //! saturated accent per state, on the terminal's own foreground so it reads
 //! on either theme (see `theme`). Nothing on screen is an id.
 
-use super::app::App;
+use super::app::{App, Mode};
 use super::{mark, shortcuts, theme};
 use crate::config::Grouping;
 use crate::git::checkout_words;
@@ -444,6 +444,13 @@ impl App {
     /// under a flash if there is one, else the one row of hints.
     pub fn foot_lines(&self, width: u16) -> Vec<Line<'static>> {
         let room = width.saturating_sub(TEXT_INDENT).max(1) as usize;
+        if let Mode::Form(form) = &self.mode {
+            let mut lines = form.lines();
+            if let Some(m) = self.flashing() {
+                lines[0] = Line::from(m.to_string()).dim();
+            }
+            return lines;
+        }
         if !self.shortcuts || self.search.is_some() {
             return vec![Line::from(self.footer(room)).dim()];
         }
@@ -459,6 +466,9 @@ impl App {
         if let Some(m) = self.flashing() {
             return m.to_string();
         }
+        if matches!(self.mode, Mode::Rename(_)) {
+            return "type a name · enter keeps it · empty goes back to its own · esc cancels".into();
+        }
         if self.search.is_some() {
             return "type to narrow · tab completes in: is: kind: on:, or next match · ↑↓ move · \
                     enter keeps · esc puts back"
@@ -468,7 +478,7 @@ impl App {
             Grouping::Project => "^s by state",
             Grouping::State => "^s by project",
         };
-        let mut hints = vec!["↑↓ move", "^f search"];
+        let mut hints = vec!["enter attaches", "n new", "^x stop/hide", "^f search"];
         if !self.filter.is_empty() {
             hints.push("esc clears the search");
         }
@@ -527,6 +537,21 @@ impl App {
                 }
                 ListLine::Session(r) => self.session_line(r, &names, w, tw, now),
             };
+            // A name being typed stands where the name goes, the caret in it.
+            if let Mode::Rename(rn) = &self.mode
+                && rn.key == key
+            {
+                let mut spans = match line {
+                    ListLine::Session(r) => icon_span(rows::icon(r), Some(&r.harness), r.state.is_terminal()),
+                    ListLine::Group(_) => vec![],
+                };
+                let room = w.saturating_sub(spans.iter().map(Span::width).sum());
+                spans.extend(cap_spans(
+                    theme::with_caret(rn.line.text(), rn.line.cursor(), Style::default()),
+                    room,
+                ));
+                drawn = Line::from(spans);
+            }
             if !words.is_empty() {
                 drawn = light(drawn, &words);
             }

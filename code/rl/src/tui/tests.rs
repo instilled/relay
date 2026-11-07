@@ -293,3 +293,207 @@ async fn a_click_puts_the_cursor_on_its_line() {
     });
     assert_eq!(app.sel.as_deref(), Some("n:claude:ab12cd34"));
 }
+
+fn shift(app: &mut App, code: KeyCode) {
+    app.key(KeyEvent::new(code, KeyModifiers::SHIFT));
+}
+
+/// The cursor on the line with this key.
+fn on(app: &mut App, key: &str) {
+    assert!(app.keys().iter().any(|k| k == key), "{key} not in {:?}", app.keys());
+    app.select(Some(key.to_string()));
+}
+
+const NATIVE: &str = "n:claude:ab12cd34";
+const HELD: &str = "r:shop-sh";
+
+#[tokio::test]
+async fn ctrl_r_writes_a_name_and_an_empty_one_goes_back() {
+    let f = fixture();
+    let mut app = list(&f).await;
+    on(&mut app, HELD);
+    ctrl(&mut app, 'r');
+    assert!(shown(&app).contains("enter keeps it"), "the footer says how");
+    ctrl(&mut app, 'u');
+    typed(&mut app, "build box");
+    assert!(shown(&app).contains("build box"), "typed where it stands");
+    press(&mut app, KeyCode::Enter);
+    let names = Config::load(&f.home).unwrap().list.names;
+    assert_eq!(names.get(HELD).map(String::as_str), Some("build box"));
+    assert!(row_of(&shown(&app), "build box").contains("done"));
+    assert_eq!(app.sel.as_deref(), Some(HELD));
+    // Empty goes back to its own.
+    ctrl(&mut app, 'r');
+    ctrl(&mut app, 'u');
+    press(&mut app, KeyCode::Enter);
+    assert!(!Config::load(&f.home).unwrap().list.names.contains_key(HELD));
+    assert!(shown(&app).contains("shop-sh"));
+    // Esc keeps what was.
+    ctrl(&mut app, 'r');
+    typed(&mut app, "zzz");
+    press(&mut app, KeyCode::Esc);
+    assert!(!shown(&app).contains("shop-shzzz"));
+    assert!(Config::load(&f.home).unwrap().list.names.is_empty());
+}
+
+#[tokio::test]
+async fn ctrl_r_renames_a_project_but_not_a_harnesss_own_session() {
+    let f = fixture();
+    let mut app = list(&f).await;
+    on(&mut app, NATIVE);
+    ctrl(&mut app, 'r');
+    assert!(matches!(app.mode, super::app::Mode::List));
+    assert!(shown(&app).contains("claude names its own sessions"));
+    let head = format!("g:{}", f.repo.display());
+    on(&mut app, &head);
+    ctrl(&mut app, 'r');
+    ctrl(&mut app, 'u');
+    typed(&mut app, "the shop");
+    press(&mut app, KeyCode::Enter);
+    let names = Config::load(&f.home).unwrap().list.names;
+    assert_eq!(names.get(&head).map(String::as_str), Some("the shop"));
+    assert!(row_of(&shown(&app), "⎇ trunk").contains("the shop"));
+}
+
+#[tokio::test]
+async fn ctrl_t_pins_to_the_top_band_and_again_lets_it_go() {
+    let f = fixture();
+    let mut app = list(&f).await;
+    on(&mut app, NATIVE);
+    ctrl(&mut app, 't');
+    assert_eq!(Config::load(&f.home).unwrap().list.pins, [NATIVE]);
+    let s = shown(&app);
+    assert!(s.find("fix the login").unwrap() < s.find("⎇ trunk").unwrap(), "{s}");
+    assert_eq!(app.keys()[0], NATIVE, "first on the list");
+    assert_eq!(app.sel.as_deref(), Some(NATIVE), "the cursor goes with it");
+    ctrl(&mut app, 't');
+    assert!(Config::load(&f.home).unwrap().list.pins.is_empty());
+    let s = shown(&app);
+    assert!(s.find("⎇ trunk").unwrap() < s.find("fix the login").unwrap(), "{s}");
+}
+
+#[tokio::test]
+async fn shift_down_swaps_two_rows_and_keeps_it() {
+    let f = fixture();
+    let mut app = list(&f).await;
+    let head = format!("g:{}", f.repo.display());
+    assert_eq!(app.keys(), [head.as_str(), HELD, NATIVE]);
+    on(&mut app, HELD);
+    shift(&mut app, KeyCode::Down);
+    assert_eq!(app.keys(), [head.as_str(), NATIVE, HELD]);
+    assert_eq!(app.sel.as_deref(), Some(HELD), "the cursor stays on it");
+    let order = Config::load(&f.home).unwrap().list.order;
+    assert_eq!(order.len(), 1);
+    assert_eq!(order[0].group, head);
+    assert_eq!(order[0].rows, [NATIVE, HELD]);
+    // A list opened again has it so.
+    assert_eq!(list(&f).await.keys(), [head.as_str(), NATIVE, HELD]);
+    shift(&mut app, KeyCode::Down);
+    assert!(shown(&app).contains("already at the bottom of its project"));
+    shift(&mut app, KeyCode::Up);
+    assert_eq!(app.keys(), [head.as_str(), HELD, NATIVE]);
+}
+
+#[tokio::test]
+async fn ctrl_x_twice_hides_a_harnesss_own_session_and_again_brings_it_back() {
+    let f = fixture();
+    let mut app = list(&f).await;
+    on(&mut app, NATIVE);
+    ctrl(&mut app, 'x');
+    assert!(shown(&app).contains("press ^x again to hide fix the login"));
+    assert!(Config::load(&f.home).unwrap().list.hidden.is_empty(), "not yet");
+    ctrl(&mut app, 'x');
+    assert!(app.keys().iter().all(|k| k != NATIVE));
+    assert!(shown(&app).contains("hid fix the login"));
+    let hidden = Config::load(&f.home).unwrap().list.hidden;
+    assert_eq!(hidden.len(), 1);
+    assert_eq!(hidden[0].key, NATIVE);
+    assert_eq!(app.sel.as_deref(), Some(HELD), "the cursor on the line before");
+    // With hidden on it is there, and ^x twice brings it back.
+    press(&mut app, KeyCode::Char('h'));
+    on(&mut app, NATIVE);
+    ctrl(&mut app, 'x');
+    assert!(shown(&app).contains("press ^x again to bring back fix the login"));
+    ctrl(&mut app, 'x');
+    assert!(Config::load(&f.home).unwrap().list.hidden.is_empty());
+}
+
+#[tokio::test]
+async fn ctrl_x_is_disarmed_by_any_other_key() {
+    let f = fixture();
+    let mut app = list(&f).await;
+    on(&mut app, NATIVE);
+    ctrl(&mut app, 'x');
+    press(&mut app, KeyCode::Up);
+    press(&mut app, KeyCode::Down);
+    ctrl(&mut app, 'x');
+    assert!(shown(&app).contains("press ^x again"), "armed afresh, not fired");
+    assert!(Config::load(&f.home).unwrap().list.hidden.is_empty());
+}
+
+#[tokio::test]
+async fn ctrl_x_twice_removes_an_ended_held_session_and_what_was_kept_for_it() {
+    let f = fixture();
+    let mut app = list(&f).await;
+    on(&mut app, HELD);
+    ctrl(&mut app, 't');
+    ctrl(&mut app, 'x');
+    assert!(shown(&app).contains("press ^x again to remove shop-sh"));
+    ctrl(&mut app, 'x');
+    app.finish().await;
+    assert!(!f.home.session_dir("shop-sh").exists());
+    let s = shown(&app);
+    assert!(s.contains("removed shop-sh"), "{s}");
+    assert!(app.keys().iter().all(|k| k != HELD), "{s}");
+    assert!(
+        Config::load(&f.home).unwrap().list.pins.is_empty(),
+        "its pin goes with it"
+    );
+}
+
+#[tokio::test]
+async fn enter_hands_a_held_session_over_and_says_a_native_one_cannot_yet() {
+    let f = fixture();
+    let mut app = list(&f).await;
+    on(&mut app, HELD);
+    press(&mut app, KeyCode::Enter);
+    let hand = app.hand.take().expect("handed over");
+    assert_eq!(hand.key, HELD);
+    assert!(matches!(&hand.to, super::app::To::Held(m) if m.name == "shop-sh"));
+    on(&mut app, NATIVE);
+    press(&mut app, KeyCode::Enter);
+    assert!(app.hand.is_none());
+    assert!(shown(&app).contains("can't be attached from the list yet"));
+}
+
+#[tokio::test]
+async fn n_opens_the_form_in_the_project_and_esc_puts_it_away() {
+    let f = fixture();
+    let mut app = list(&f).await;
+    on(&mut app, NATIVE);
+    press(&mut app, KeyCode::Char('n'));
+    let s = shown(&app);
+    assert!(s.contains("new session"), "{s}");
+    assert!(row_of(&s, "  folder  ").contains("shop"), "{s}");
+    assert!(row_of(&s, "harness").contains("shell"), "{s}");
+    // Letters are the form's now.
+    press(&mut app, KeyCode::Char('a'));
+    assert!(Config::load(&f.home).unwrap().list.show_agents);
+    press(&mut app, KeyCode::Esc);
+    assert!(!shown(&app).contains("new session"));
+}
+
+#[test]
+fn coming_back_from_an_attach_says_how_it_went() {
+    use crate::attach::Ended;
+    assert_eq!(
+        super::back_words("shop-sh", &Ended::Detached),
+        "let go of shop-sh · it keeps going"
+    );
+    let exit = Ended::Exit {
+        code: 1,
+        how: "exit 1".into(),
+    };
+    assert_eq!(super::back_words("shop-sh", &exit), "shop-sh ended (exit 1)");
+    assert!(super::back_words("shop-sh", &Ended::Closed).starts_with("lost the connection"));
+}

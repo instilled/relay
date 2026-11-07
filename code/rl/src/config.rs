@@ -107,7 +107,7 @@ fn default_badges() -> Vec<String> {
 }
 
 /// Every agent in the home's registry whose binary is on `PATH`.
-fn found_harnesses(home: &Home) -> Vec<String> {
+pub fn found_harnesses(home: &Home) -> Vec<String> {
     let registry = Registry::load(home).unwrap_or_else(|_| Registry::builtin());
     registry
         .agents()

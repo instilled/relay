@@ -8,13 +8,16 @@
 //! Layout: the header, the list, the toggles line (where a search is typed),
 //! and the footer's hints; how things stand rides the window's title too.
 
+mod act;
 mod app;
 mod draw;
+mod form;
 mod input;
 mod keys;
 mod line;
 mod live;
 mod mark;
+mod remove;
 mod select;
 mod shortcuts;
 mod theme;
@@ -23,9 +26,10 @@ mod theme;
 mod tests;
 
 pub use app::App;
+use app::{Hand, To};
 
 use crate::store::sessions;
-use crate::{badges, sources};
+use crate::{attach, badges, sources};
 use anyhow::Result;
 use crossterm::event::{
     DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event, EventStream,
@@ -87,7 +91,20 @@ impl App {
             }
             tokio::select! {
                 ev = input.next() => match ev {
-                    Some(Ok(Event::Key(k))) if k.kind != KeyEventKind::Release => self.key(input::typed(k)),
+                    Some(Ok(Event::Key(k))) if k.kind != KeyEventKind::Release => {
+                        self.key(input::typed(k));
+                        if let Some(hand) = self.hand.take() {
+                            // The session gets the real terminal, passed
+                            // through; the list comes back when it lets go.
+                            drop(input);
+                            leave_screen();
+                            let words = hand_over(&self.home, &hand).await;
+                            *terminal = enter_screen();
+                            input = EventStream::new();
+                            title.clear();
+                            self.back(&hand.key, words);
+                        }
+                    }
                     Some(Ok(Event::Mouse(m))) => self.mouse(m),
                     Some(Ok(Event::Paste(s))) => self.paste(&s),
                     Some(Ok(_)) => {}
@@ -109,9 +126,39 @@ impl App {
                     let rows = native.rows();
                     self.set_native(rows);
                 }
+                Some(done) = self.work.join_next(), if !self.work.is_empty() => match done {
+                    Ok(d) => self.done(d),
+                    Err(e) => self.say(format!("{e}")),
+                },
             }
         }
         Ok(())
+    }
+}
+
+/// The terminal handed to what `enter` asked for, until it is let go of or
+/// ends; then what came of it, in words for the footer.
+async fn hand_over(home: &Home, hand: &Hand) -> String {
+    let title = &hand.title;
+    match &hand.to {
+        To::Held(meta) => match attach::held::attach(home, meta).await {
+            Ok(ended) => back_words(title, &ended),
+            Err(e) => format!("attach {title}: {e:#}"),
+        },
+        To::Argv(argv) => match attach::native::hold(argv, title).await {
+            Ok(attach::native::Back::Detached) => back_words(title, &attach::Ended::Detached),
+            Ok(attach::native::Back::Ended(exit)) => back_words(title, &attach::held::exit_words(title, &exit).0),
+            Err(e) => format!("attach {title}: {e:#}"),
+        },
+    }
+}
+
+/// What the footer says once an attach is over.
+pub fn back_words(title: &str, ended: &attach::Ended) -> String {
+    match ended {
+        attach::Ended::Detached | attach::Ended::Left => format!("let go of {title} · it keeps going"),
+        attach::Ended::Exit { how, .. } => format!("{title} ended ({how})"),
+        attach::Ended::Closed => format!("lost the connection to {title} · it may still be going"),
     }
 }
 
