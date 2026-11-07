@@ -190,7 +190,7 @@ pub fn sweep(home: &Home) {
             }
         };
         if gone {
-            let _ = std::fs::remove_dir_all(&held.dir);
+            discard(&held.dir, &held.meta);
         }
     }
 }
@@ -207,13 +207,29 @@ pub fn remove(home: &Home, name: &str) -> Result<()> {
         Err(e) if e.kind() == io::ErrorKind::NotFound => bail!("no such session: {name}"),
         Err(e) => return Err(e.into()),
     };
-    if let Some(meta) = meta
-        && status_of(&dir, &meta) == Status::Live
+    if let Some(meta) = &meta
+        && status_of(&dir, meta) == Status::Live
     {
         bail!("{name} is still running; stop it first");
     }
+    if let Some(m) = &meta {
+        discard_socket(&dir, m);
+    }
     std::fs::remove_dir_all(&dir)?;
     Ok(())
+}
+
+/// Deletes a session's folder, and its socket when that lives elsewhere (the
+/// long-home fallback from `Home::session_socket_for`).
+fn discard(dir: &Path, meta: &Meta) {
+    discard_socket(dir, meta);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+fn discard_socket(dir: &Path, meta: &Meta) {
+    if !meta.socket.starts_with(dir) {
+        let _ = std::fs::remove_file(&meta.socket);
+    }
 }
 
 #[cfg(test)]
@@ -347,5 +363,27 @@ mod tests {
         assert!(!lost.exists());
         assert!(remove(&home, "lost").is_err());
         assert!(remove(&home, "../x").is_err());
+    }
+
+    #[test]
+    fn remove_and_sweep_delete_a_socket_outside_the_folder() {
+        let (t, home) = home();
+        let far = |n: &str| t.path().join(format!("{n}.sock"));
+        let with_far_socket = |name: &str, pid: Option<u32>| {
+            let (name, dir) = claim(&home, name).unwrap();
+            let m = meta(&name, far(&name), pid);
+            write_meta(&dir, &m).unwrap();
+            std::fs::write(&m.socket, b"").unwrap();
+            dir
+        };
+        let removed = with_far_socket("removed", None);
+        remove(&home, "removed").unwrap();
+        assert!(!removed.exists());
+        assert!(!far("removed").exists());
+
+        let swept = with_far_socket("swept", Some(dead_pid()));
+        sweep(&home);
+        assert!(!swept.exists());
+        assert!(!far("swept").exists());
     }
 }
