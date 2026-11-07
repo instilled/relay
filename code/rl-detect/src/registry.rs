@@ -3,13 +3,13 @@
 //! field by field (a user file named like a built-in overrides those fields;
 //! a new name adds a CLI). `generic` is the floor every profile extends.
 
-use crate::pty::{Patterns, Timing};
 use crate::sessions::{Sessions, SessionsFile, UserHooks};
 use anyhow::{Context, Result, bail};
 use regex::Regex;
 use rl_core::Home;
 use rl_core::time::parse_duration;
 use rl_proto::types::RunKind;
+use rl_session::detect::heuristics::{Patterns, Timing};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::path::Path;

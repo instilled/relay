@@ -1628,6 +1628,7 @@ dependencies = [
  "jiff",
  "nix 0.31.3",
  "portable-pty",
+ "regex",
  "rl-core",
  "serde",
  "serde_json",
