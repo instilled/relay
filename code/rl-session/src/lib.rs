@@ -5,6 +5,9 @@
 //! `--no-tty`), keeps a ring buffer of recent output (and, for a tty run, the
 //! screen it draws, for an attach that asks), and serves a tiny
 //! framed protocol on a Unix socket: attach, input, resize, signal, close.
+//! It also works out its own run state (the [`detect`] heuristics, kept in a
+//! state file), so nothing needs a daemon to know whether a run is working or
+//! waiting on input.
 //! It depends on nothing else in Relay so a daemon crash — or upgrade — never
 //! costs a session.
 //!

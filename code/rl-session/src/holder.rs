@@ -12,6 +12,11 @@
 //! come back for the run, so the holder hangs up its child and leaves rather
 //! than wait out a linger (or a child) nobody will collect.
 //!
+//! The holder also knows its own state. Given a detect spec it feeds the output
+//! (and the foreground probe) to a tracker, which works out whether the run is
+//! working, idle, stale or waiting on input, and keeps the answer in a state
+//! file — so a reader needs no daemon, and no client attached, to learn it.
+//!
 //! The socket can outlive its daemon, though — a throwaway home left on disk,
 //! a `rld` that never comes back — and then nothing journals the run or knows
 //! its state. So a holder that has had nobody attached at all for `reap_after`
@@ -19,14 +24,19 @@
 //! so this only ever fires when Relay itself is gone.
 
 use crate::backend::{self, Resizer, Spec};
+use crate::detect::heuristics::{Patterns, Timing};
+use crate::detect::tracker::Tracker;
 use crate::exit::{Exit, write_exit_file};
 use crate::proto::{Frame, FrameReader, Hello, Replay, write_frame, write_output};
 use crate::ring::Ring;
 use crate::screen::Screen;
+use crate::state::write_state_file;
 use anyhow::{Context, Result};
 use jiff::Timestamp;
 use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
+use rl_core::state::RunKind;
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -47,6 +57,10 @@ const FG_POLL: Duration = Duration::from_secs(1);
 /// Consecutive samples with no change and no output before the foreground
 /// watcher parks on the next output chunk — a resting shell then costs nothing.
 const FG_QUIET_SAMPLES: u32 = 8;
+/// How often the tracker's clocks (idle, stale) are checked.
+pub const STATE_TICK: Duration = Duration::from_millis(250);
+/// How often a changed state is written to the state file.
+pub const STATE_FLUSH: Duration = Duration::from_millis(500);
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -62,6 +76,11 @@ pub struct Config {
     /// Nobody attached — no daemon, no viewer — for this long: hang up the
     /// child and leave. `None` waits forever.
     pub reap_after: Option<Duration>,
+    /// What the holder works out its own run state with. `None`: it does not.
+    pub detect: Option<(Patterns, Timing, RunKind)>,
+    /// Where the run state is kept, as it changes. Without `detect` nothing
+    /// is written.
+    pub state_file: Option<PathBuf>,
 }
 
 struct Shared {
@@ -111,6 +130,9 @@ struct Ctx {
     /// Pulsed once per output chunk, so the foreground watcher can park deeply
     /// while the run is quiet and wake the moment the child writes again.
     output_wake: Arc<Notify>,
+    /// The holder's own answer to "what state is this run in?". Locked after
+    /// `shared`, never before.
+    tracker: Option<Mutex<Tracker>>,
 }
 
 /// Serves until `Close`, SIGTERM, or the linger timeout after exit. `ready`
@@ -147,6 +169,10 @@ pub async fn serve(cfg: Config, ready: oneshot::Sender<()>) -> Result<()> {
         shutdown: CancellationToken::new(),
         fg,
         output_wake: Arc::new(Notify::new()),
+        tracker: cfg
+            .detect
+            .clone()
+            .map(|(patterns, timing, kind)| Mutex::new(Tracker::new(patterns, timing, kind, Timestamp::now()))),
     });
     let _ = ready.send(());
 
@@ -160,6 +186,9 @@ pub async fn serve(cfg: Config, ready: oneshot::Sender<()>) -> Result<()> {
     ));
     if let Some(probe) = foreground {
         tokio::spawn(watch_foreground(ctx.clone(), probe));
+    }
+    if ctx.tracker.is_some() {
+        tokio::spawn(watch_state(ctx.clone(), cfg.state_file.clone()));
     }
     tokio::spawn(watch_signals(ctx.clone()));
     tokio::spawn(watch_socket(ctx.clone(), cfg.socket.clone(), cfg.socket_check));
@@ -215,6 +244,9 @@ async fn pump_output(ctx: Arc<Ctx>, mut output: mpsc::Receiver<Vec<u8>>) {
         if let Some(sc) = s.screen.as_mut() {
             sc.feed(&chunk);
         }
+        if let Some(t) = &ctx.tracker {
+            t.lock().unwrap().output(&chunk, Timestamp::now());
+        }
         let _ = ctx.out.send(Arc::from(chunk));
         drop(s);
         // Wake the foreground watcher: it parks on this while the run is quiet.
@@ -227,8 +259,9 @@ async fn pump_output(ctx: Arc<Ctx>, mut output: mpsc::Receiver<Vec<u8>>) {
 /// attached daemon can tell a shell resting at its own prompt from one with a
 /// child program in front of it.
 ///
-/// The cost is kept near zero when nothing is happening. With no client there
-/// is nobody to classify, so it does not poll at all. With a client it samples
+/// The cost is kept near zero when nothing is happening. With no client and no
+/// tracker there is nobody to classify, so it does not poll at all; a tracker
+/// needs the value whether or not anyone is attached. Otherwise it samples
 /// once a second, but a shell that has sat unchanged for a while is deep-idle:
 /// the watcher stops sampling and parks on the next output chunk, waking only
 /// when the child writes again. Spawned only for a run whose probe exists, so
@@ -246,10 +279,10 @@ async fn watch_foreground(ctx: Arc<Ctx>, probe: backend::Foreground) {
             return;
         }
 
-        // No client: nobody is classifying. Don't touch the probe; wait for one
-        // to attach, re-checking cheaply. A client attaching produces no output,
-        // so this can't park on `output_wake`.
-        while ctx.clients.load(Ordering::SeqCst) == 0 {
+        // No client and no tracker: nobody is classifying. Don't touch the
+        // probe; wait for a client to attach, re-checking cheaply. A client
+        // attaching produces no output, so this can't park on `output_wake`.
+        while ctx.tracker.is_none() && ctx.clients.load(Ordering::SeqCst) == 0 {
             tokio::select! {
                 _ = ctx.shutdown.cancelled() => return,
                 _ = tokio::time::sleep(FG_POLL) => {}
@@ -282,7 +315,13 @@ async fn watch_foreground(ctx: Arc<Ctx>, probe: backend::Foreground) {
             _ = poll.tick() => {}
         }
 
-        let changed = match probe() {
+        let sample = probe();
+        if let (Some(v), Some(t)) = (sample, &ctx.tracker) {
+            // The tracker drops a repeat itself; telling it every sample also
+            // gives it the first value, which is the one that never "changes".
+            t.lock().unwrap().foreground(v);
+        }
+        let changed = match sample {
             // Publish only on a real change; a `None` leaves the last value be.
             Some(v) => fg.send_if_modified(|cur| {
                 let diff = *cur != v;
@@ -299,6 +338,48 @@ async fn watch_foreground(ctx: Arc<Ctx>, probe: backend::Foreground) {
             quiet = quiet.saturating_add(1);
         }
         saw_output = false;
+    }
+}
+
+/// Keeps the tracker's clocks running and its state on disk: ticks every
+/// [`STATE_TICK`], writes a changed state every [`STATE_FLUSH`], and once more
+/// when the child has exited (the file is then left as it is). A write that
+/// fails is logged once per kind of error and never stops the holder.
+async fn watch_state(ctx: Arc<Ctx>, path: Option<PathBuf>) {
+    let Some(tracker) = ctx.tracker.as_ref() else { return };
+    let mut exit = ctx.exit.subscribe();
+    let mut tick = tokio::time::interval(STATE_TICK);
+    tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    let mut last_flush = tokio::time::Instant::now();
+    let mut warned = HashSet::new();
+    let mut flush = |tracker: &Mutex<Tracker>| {
+        let Some(path) = &path else { return };
+        let dirty = tracker.lock().unwrap().take_dirty();
+        if let Some(s) = dirty
+            && let Err(e) = write_state_file(path, &s)
+            && warned.insert(e.kind())
+        {
+            warn!(error = %e, path = %path.display(), "writing state file");
+        }
+    };
+    loop {
+        tokio::select! {
+            _ = ctx.shutdown.cancelled() => return,
+            changed = exit.changed() => {
+                // Exited (or the sender is gone): the last word, then done.
+                if changed.is_err() || exit.borrow().is_some() {
+                    flush(tracker);
+                    return;
+                }
+            }
+            _ = tick.tick() => {
+                tracker.lock().unwrap().tick(Timestamp::now());
+                if last_flush.elapsed() >= STATE_FLUSH {
+                    last_flush = tokio::time::Instant::now();
+                    flush(tracker);
+                }
+            }
+        }
     }
 }
 
