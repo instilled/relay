@@ -187,8 +187,8 @@ pub async fn serve(cfg: Config, ready: oneshot::Sender<()>) -> Result<()> {
     if let Some(probe) = foreground {
         tokio::spawn(watch_foreground(ctx.clone(), probe));
     }
-    if ctx.tracker.is_some() {
-        tokio::spawn(watch_state(ctx.clone(), cfg.state_file.clone()));
+    if let (Some(path), true) = (cfg.state_file.clone(), ctx.tracker.is_some()) {
+        tokio::spawn(watch_state(ctx.clone(), path));
     }
     tokio::spawn(watch_signals(ctx.clone()));
     tokio::spawn(watch_socket(ctx.clone(), cfg.socket.clone(), cfg.socket_check));
@@ -343,28 +343,43 @@ async fn watch_foreground(ctx: Arc<Ctx>, probe: backend::Foreground) {
 
 /// Keeps the tracker's clocks running and its state on disk: ticks every
 /// [`STATE_TICK`], writes a changed state every [`STATE_FLUSH`], and once more
-/// when the child has exited (the file is then left as it is). A write that
-/// fails is logged once per kind of error and never stops the holder.
-async fn watch_state(ctx: Arc<Ctx>, path: Option<PathBuf>) {
+/// when the child has exited or the holder is shutting down (the file is then
+/// left as it is). A write that fails is logged once per kind of error, kept
+/// and tried again at the next flush; it never stops the holder.
+async fn watch_state(ctx: Arc<Ctx>, path: PathBuf) {
     let Some(tracker) = ctx.tracker.as_ref() else { return };
     let mut exit = ctx.exit.subscribe();
     let mut tick = tokio::time::interval(STATE_TICK);
     tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let mut last_flush = tokio::time::Instant::now();
     let mut warned = HashSet::new();
+    // The newest snapshot not yet on disk.
+    let mut pending = None;
     let mut flush = |tracker: &Mutex<Tracker>| {
-        let Some(path) = &path else { return };
-        let dirty = tracker.lock().unwrap().take_dirty();
-        if let Some(s) = dirty
-            && let Err(e) = write_state_file(path, &s)
-            && warned.insert(e.kind())
-        {
-            warn!(error = %e, path = %path.display(), "writing state file");
+        pending = tracker.lock().unwrap().take_dirty().or(pending.take());
+        if let Some(s) = &pending {
+            match write_state_file(&path, s) {
+                Ok(()) => pending = None,
+                Err(e) => {
+                    if warned.insert(e.kind()) {
+                        warn!(error = %e, path = %path.display(), "writing state file");
+                    }
+                }
+            }
         }
     };
+    // The child may have exited before this task first ran: `changed()` would
+    // never fire for a value already there.
+    if exit.borrow().is_some() {
+        flush(tracker);
+        return;
+    }
     loop {
         tokio::select! {
-            _ = ctx.shutdown.cancelled() => return,
+            _ = ctx.shutdown.cancelled() => {
+                flush(tracker);
+                return;
+            }
             changed = exit.changed() => {
                 // Exited (or the sender is gone): the last word, then done.
                 if changed.is_err() || exit.borrow().is_some() {

@@ -498,10 +498,15 @@ use rl_session::state::{StateFile, read_state_file};
 /// Spawns `rl-session` running `argv` with `--detect`/`--state-file`; nobody
 /// attaches. Returns the holder and the state file's path.
 fn start_detecting(tty: bool, argv: &[&str], spec: &DetectSpec) -> (Holder, PathBuf) {
+    start_detecting_at(tty, argv, spec, "s.state.json")
+}
+
+/// As [`start_detecting`], with the state file at `state_rel` under the run's directory.
+fn start_detecting_at(tty: bool, argv: &[&str], spec: &DetectSpec, state_rel: &str) -> (Holder, PathBuf) {
     let tmp = tempfile::tempdir().unwrap();
     let socket = tmp.path().join("s.sock");
     let exit_file = tmp.path().join("s.exit");
-    let state = tmp.path().join("s.state.json");
+    let state = tmp.path().join(state_rel);
     let detect = tmp.path().join("detect.json");
     std::fs::write(&detect, serde_json::to_vec(spec).unwrap()).unwrap();
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_rl-session"));
@@ -629,6 +634,25 @@ async fn unwritable_state_file_does_not_stop_the_holder() {
     let (_hello, mut s) = attach(&h, true).await;
     read_until(&mut s, "fake-cli ready").await;
     assert!(!missing.exists());
+}
+
+#[tokio::test]
+async fn a_failed_state_write_is_retried() {
+    // The directory appears only after the first writes have failed. The run
+    // is quiet by then (a question, no more output), so only a retry of the
+    // kept snapshot can put its state on disk.
+    let sp = spec(RunKind::Agent, &[r"\[y/N\]"], 100, 600_000);
+    let (_h, state) = start_detecting_at(
+        false,
+        &["sh", "-c", r#"printf "Continue? [y/N] "; sleep 30"#],
+        &sp,
+        "later/state.json",
+    );
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert!(!state.exists());
+    std::fs::create_dir(state.parent().unwrap()).unwrap();
+    let s = wait_state(&state, |s| s.state == RunState::NeedsInput).await;
+    assert_eq!(s.detail.as_deref(), Some("Continue? [y/N]"));
 }
 
 #[tokio::test]
