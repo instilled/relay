@@ -479,7 +479,7 @@ async fn ctrl_x_twice_removes_an_ended_held_session_and_what_was_kept_for_it() {
 }
 
 #[tokio::test]
-async fn enter_hands_a_held_session_over_and_says_a_native_one_cannot_yet() {
+async fn enter_hands_a_held_session_over_and_a_native_one_to_its_harness() {
     let f = fixture();
     let mut app = list(&f).await;
     on(&mut app, HELD);
@@ -489,8 +489,109 @@ async fn enter_hands_a_held_session_over_and_says_a_native_one_cannot_yet() {
     assert!(matches!(&hand.to, super::app::To::Held(m) if m.name == "shop-sh"));
     on(&mut app, NATIVE);
     press(&mut app, KeyCode::Enter);
-    assert!(app.hand.is_none());
-    assert!(shown(&app).contains("can't be attached from the list yet"));
+    let hand = app.hand.take().expect("handed over");
+    assert_eq!(hand.key, NATIVE);
+    let super::app::To::Argv(argv) = &hand.to else {
+        panic!("{:?}", hand.to);
+    };
+    assert_eq!(argv[1..], ["attach", "ab12cd34"], "claude attach <id>");
+}
+
+/// What the harness's stand-in was last run with in `dir` (`sources`).
+fn ran_in(dir: &Path) -> Vec<String> {
+    std::fs::read_to_string(dir.join("argv"))
+        .unwrap_or_default()
+        .lines()
+        .map(String::from)
+        .collect()
+}
+
+#[tokio::test]
+async fn the_form_starts_claude_in_its_own_background_and_the_cursor_waits_for_it() {
+    let f = fixture();
+    std::fs::write(f.home.config_json(), r#"{"badges": [], "harnesses": ["claude"]}"#).unwrap();
+    let mut app = list(&f).await;
+    on(&mut app, NATIVE);
+    press(&mut app, KeyCode::Char('n'));
+    assert!(row_of(&shown(&app), "harness").contains("claude"));
+    press(&mut app, KeyCode::Tab);
+    press(&mut app, KeyCode::Tab);
+    typed(&mut app, "fix the login");
+    press(&mut app, KeyCode::Enter);
+    app.finish().await;
+    assert_eq!(ran_in(&f.repo), ["--bg", "fix the login"], "run in the folder chosen");
+    assert!(
+        sessions::list(&f.home).iter().all(|h| h.meta.harness != "claude"),
+        "not one Relay holds"
+    );
+    assert!(shown(&app).contains("started claude 0a1b2c3d in its background"));
+    // Not listed yet: the harness is asked now, and the cursor goes to it
+    // once it is.
+    let new = "n:claude:0a1b2c3d";
+    assert_eq!(app.awaiting.as_deref(), Some(new));
+    assert!(app.ask_native);
+    let mut started = waiting(&f.repo);
+    started.id = "0a1b2c3d".into();
+    started.session_id = "s-new".into();
+    app.set_native(vec![waiting(&f.repo), started]);
+    assert_eq!(app.sel.as_deref(), Some(new));
+    assert_eq!(app.awaiting, None);
+}
+
+/// A Claude session open in another terminal, as its hooks told of it.
+fn hooked(f: &Fixture, sid: &str, state: crate::store::state::Said) {
+    use crate::store::state::{self, HookState};
+    let s = HookState {
+        agent: "claude".into(),
+        session_id: sid.into(),
+        cwd: f.repo.clone(),
+        state,
+        detail: None,
+        pid: None,
+        transcript_path: None,
+        started: None,
+        at: Timestamp::now(),
+    };
+    state::write(&state::path(&f.home, "claude", sid).unwrap(), &s).unwrap();
+}
+
+#[tokio::test]
+async fn enter_carries_an_idle_claude_on_in_its_background_and_attaches() {
+    use crate::store::state::Said;
+    let f = fixture();
+    hooked(&f, "c-idle", Said::Idle);
+    hooked(&f, "c-busy", Said::Busy);
+    let mut app = list(&f).await;
+    on(&mut app, "o:claude:c-busy");
+    press(&mut app, KeyCode::Enter);
+    assert!(app.work.is_empty() && app.hand.is_none());
+    assert!(shown(&app).contains("busy in its own terminal"));
+
+    on(&mut app, "o:claude:c-idle");
+    press(&mut app, KeyCode::Enter);
+    app.finish().await;
+    assert_eq!(ran_in(&f.repo), ["--resume", "c-idle", "--bg"], "in its folder");
+    let hand = app.hand.take().expect("handed over");
+    assert_eq!(hand.key, "n:claude:0a1b2c3d");
+    let super::app::To::Argv(argv) = &hand.to else {
+        panic!("{:?}", hand.to);
+    };
+    assert_eq!(argv[1..], ["attach", "0a1b2c3d"], "attached by the new id");
+}
+
+#[tokio::test]
+async fn a_pull_request_reads_as_its_number() {
+    let f = fixture();
+    let mut app = list(&f).await;
+    let mut pr = waiting(&f.repo);
+    pr.pr = Some(crate::sources::Pr {
+        number: 1358,
+        href: "https://x/pull/1358".into(),
+    });
+    app.set_native(vec![pr]);
+    let s = shown(&app);
+    assert!(row_of(&s, "fix the login").contains("#1358"), "{s}");
+    assert!(app.prs.is_empty(), "the badges off: gh is not asked");
 }
 
 #[tokio::test]

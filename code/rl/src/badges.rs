@@ -7,6 +7,9 @@
 //! a later refresh carries the answer; a new branch is a new question. Nothing
 //! runs unless something is showing the list, and one folder is never asked
 //! twice at once.
+//!
+//! A pull request a harness's session opened is asked of the same way, by
+//! `gh pr view <url> --json state`: what colours its `#N` on the list.
 
 use crate::git::Checkout;
 use rl_core::Home;
@@ -59,6 +62,9 @@ pub struct Badges {
     every: Duration,
     wait: Duration,
     kept: Arc<Mutex<HashMap<Key, Kept>>>,
+    /// What `gh` said of each pull request, by its URL.
+    prs: Arc<Mutex<HashMap<String, Kept>>>,
+    gh: PathBuf,
 }
 
 impl Badges {
@@ -68,7 +74,38 @@ impl Badges {
             every,
             wait,
             kept: Arc::default(),
+            prs: Arc::default(),
+            gh: PathBuf::from("gh"),
         }
+    }
+
+    /// The same, asking this `gh`.
+    pub fn with_gh(mut self, gh: PathBuf) -> Self {
+        self.gh = gh;
+        self
+    }
+
+    /// How the pull request at `href` stands as `gh` last said — `OPEN`,
+    /// `MERGED`, `CLOSED` — asking again when due. Nothing until it has
+    /// said, and nothing where `gh` is not here or would not say.
+    pub fn pr_state(&self, href: &str) -> Option<String> {
+        let mut kept = self.prs.lock().unwrap();
+        let k = kept.entry(href.to_string()).or_default();
+        if !k.asking && k.at.is_none_or(|t| t.elapsed() >= self.every) {
+            k.asking = true;
+            let (all, gh, wait, href) = (self.prs.clone(), self.gh.clone(), self.wait, href.to_string());
+            tokio::spawn(async move {
+                let said = ask_gh(&gh, &href, wait).await;
+                if let Some(k) = all.lock().unwrap().get_mut(&href) {
+                    *k = Kept {
+                        said: said.into_iter().collect(),
+                        at: Some(Instant::now()),
+                        asking: false,
+                    };
+                }
+            });
+        }
+        k.said.first().cloned()
     }
 
     /// What `commands` last said of a checkout, asking again when due. A
@@ -137,6 +174,24 @@ async fn ask(cmd: &str, dir: &Path, branch: &str, plugins: &Path, wait: Duration
     let text = String::from_utf8_lossy(&out.stdout);
     let line = text.lines().map(str::trim).find(|l| !l.is_empty())?;
     Some(line.chars().take(LONGEST).collect())
+}
+
+/// `gh pr view <href> --json state`'s word, or nothing.
+async fn ask_gh(gh: &Path, href: &str, wait: Duration) -> Option<String> {
+    let child = Command::new(gh)
+        .args(["pr", "view", href, "--json", "state", "--jq", ".state"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .output();
+    let out = tokio::time::timeout(wait, child).await.ok()?.ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let word = text.lines().map(str::trim).find(|l| !l.is_empty())?;
+    Some(word.to_ascii_uppercase())
 }
 
 #[cfg(test)]
@@ -227,6 +282,45 @@ mod tests {
         // A detached HEAD, or no badges set: nothing asked.
         assert!(b.of(&checkout(&dir, None), &cmds).is_empty());
         assert!(b.of(&main, &[]).is_empty());
+    }
+
+    async fn pr_said(b: &Badges, href: &str) -> Option<String> {
+        b.pr_state(href);
+        let end = Instant::now() + Duration::from_secs(60);
+        while b.prs.lock().unwrap().values().any(|k| k.asking) {
+            assert!(Instant::now() < end, "gh never answered");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        b.pr_state(href)
+    }
+
+    #[tokio::test]
+    async fn a_pull_requests_state_is_asked_of_gh_and_kept() {
+        let tmp = tempfile::tempdir().unwrap();
+        let gh = tmp.path().join("gh");
+        let count = tmp.path().join("count");
+        std::fs::write(
+            &gh,
+            format!(
+                "#!/bin/sh\necho x >> {}\n[ \"$1 $2 $4 $5 $6 $7\" = 'pr view --json state --jq .state' ] || exit 2\ncase \"$3\" in */9) echo merged ;; *) exit 1 ;; esac\n",
+                count.display()
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let b = Badges::new(tmp.path().into(), Duration::from_secs(3600), WAIT).with_gh(gh);
+        assert_eq!(b.pr_state("https://x/pull/9"), None, "nothing until it has said");
+        assert_eq!(pr_said(&b, "https://x/pull/9").await.as_deref(), Some("MERGED"));
+        assert_eq!(pr_said(&b, "https://x/pull/10").await, None, "gh would not say");
+        let asked = std::fs::read_to_string(&count).unwrap().lines().count();
+        assert_eq!(asked, 2, "kept, not asked again before it is due");
+        // No gh here at all: no colour, and no error.
+        let none = Badges::new(tmp.path().into(), Duration::from_secs(3600), WAIT).with_gh(tmp.path().join("no-gh"));
+        assert_eq!(pr_said(&none, "https://x/pull/9").await, None);
     }
 
     #[tokio::test]

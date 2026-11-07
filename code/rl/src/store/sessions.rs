@@ -20,6 +20,9 @@ const EXIT: &str = "exit";
 const STATE: &str = "state.json";
 /// What the agent's own hooks last said, written by `rl hook`.
 pub const HOOK: &str = "hook.json";
+/// Left in a session's folder by a stop, before its holder is asked to
+/// close: however it then exits, it was stopped.
+pub const STOPPED: &str = "stopped";
 /// A folder with no `meta.json` younger than this is a claim in progress.
 const CLAIM_GRACE: Duration = Duration::from_secs(10);
 /// A lost session whose holder pid was never recorded is swept after this.
@@ -101,6 +104,21 @@ impl Held {
             (_, None) => None,
         }
     }
+
+    /// How it ended, `e` being its exit: stopped where a stop was asked of
+    /// it, whatever its code; else as the exit says (`ended_state`).
+    pub fn ended_state(&self, e: &Exit) -> RunState {
+        if self.dir.join(STOPPED).exists() {
+            RunState::Stopped
+        } else {
+            crate::sources::ended_state(e)
+        }
+    }
+}
+
+/// Says in its folder that the session was asked to stop.
+pub fn mark_stopped(dir: &Path) -> io::Result<()> {
+    rl_core::atomic::write(&dir.join(STOPPED), b"")
 }
 
 pub fn write_meta(dir: &Path, meta: &Meta) -> io::Result<()> {

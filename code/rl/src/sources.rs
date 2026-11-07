@@ -12,6 +12,7 @@ use rl_detect::registry::find_bin;
 use rl_session::exit::Exit;
 use std::collections::HashSet;
 use std::path::PathBuf;
+use std::sync::OnceLock;
 
 /// Where a row came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,44 +29,16 @@ pub enum Attach {
     Held(String),
     /// Run this, in the terminal, to attach to the harness's own session.
     Argv(Vec<String>),
-    /// Run this to carry the conversation on, then attach.
-    CarryOn(Vec<String>),
+    /// Run this to carry the conversation on, then attach: in the
+    /// harness's own background (`background`), else held by Relay.
+    CarryOn {
+        argv: Vec<String>,
+        background: bool,
+    },
     None,
 }
 
-/// A pull request a session opened.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Pr {
-    pub number: u64,
-    pub href: String,
-}
-
-/// A harness's own words for how one of its sessions stands, and the
-/// `RunState` it maps to — for grouping and the icon only.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NativeState {
-    pub words: String,
-    pub state: RunState,
-}
-
-/// One of a harness's own background sessions, as its adapter lists it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NativeRow {
-    pub harness: String,
-    /// The harness's id for it, what attaching takes.
-    pub id: String,
-    /// Its conversation's id, what hooks tell of.
-    pub session_id: String,
-    pub name: String,
-    pub cwd: PathBuf,
-    pub state: NativeState,
-    pub summary: Option<String>,
-    pub started: Option<Timestamp>,
-    pub ended: Option<Timestamp>,
-    /// When it came to stand as it does.
-    pub at: Option<Timestamp>,
-    pub pr: Option<Pr>,
-}
+pub use rl_detect::adapter::{Adapter, NativeRow, NativeState, Pr};
 
 /// What lists a harness's own background sessions: its adapter. Asked from a
 /// background task while the list is open, so `list` may block (it runs the
@@ -74,10 +47,66 @@ pub trait NativeLister: Send + Sync {
     fn list(&self) -> anyhow::Result<Vec<NativeRow>>;
 }
 
-/// The harnesses' listers the list asks. None yet: the adapters come with
-/// the harnesses' own sessions.
+/// An adapter, as a lister.
+struct Listing(&'static dyn Adapter);
+
+impl NativeLister for Listing {
+    fn list(&self) -> anyhow::Result<Vec<NativeRow>> {
+        self.0.list()
+    }
+}
+
+/// Every adapter the profiles name, and whether its harness is on this
+/// machine. Made once.
+fn known() -> &'static [(Box<dyn Adapter>, bool)] {
+    static KNOWN: OnceLock<Vec<(Box<dyn Adapter>, bool)>> = OnceLock::new();
+    KNOWN.get_or_init(|| rl_detect::adapter::adapters(registry(), adapter_bin))
+}
+
+/// The harness an adapter runs: the one on this machine.
+#[cfg(not(test))]
+fn adapter_bin(bins: &[String]) -> Option<PathBuf> {
+    find_bin(bins)
+}
+
+/// The tests never run a real harness, but a stand-in: a script that writes
+/// its arguments to `argv` in the folder it is run in, and says a session id
+/// (`0a1b2c3d`) when asked to start one in the background.
+#[cfg(test)]
+fn adapter_bin(_: &[String]) -> Option<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    static BIN: OnceLock<PathBuf> = OnceLock::new();
+    let bin = BIN.get_or_init(|| {
+        let dir = tempfile::Builder::new()
+            .prefix("rl-test-bins")
+            .tempdir()
+            .unwrap()
+            .keep();
+        let bin = dir.join("stand-in");
+        let script =
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > argv\ncase \" $* \" in *' --bg '*) echo 'started 0a1b2c3d';; esac\n";
+        std::fs::write(&bin, script).unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        bin
+    });
+    Some(bin.clone())
+}
+
+/// The adapter of `harness`'s own background sessions, if it has one.
+pub fn adapter(harness: &str) -> Option<&'static dyn Adapter> {
+    known()
+        .iter()
+        .find(|(a, _)| a.harness() == harness)
+        .map(|(a, _)| a.as_ref())
+}
+
+/// The listers the list asks: the adapters of the harnesses on this machine.
 pub fn native_listers() -> Vec<Box<dyn NativeLister>> {
-    Vec::new()
+    known()
+        .iter()
+        .filter(|(_, found)| *found)
+        .map(|(a, _)| Box::new(Listing(a.as_ref())) as Box<dyn NativeLister>)
+        .collect()
 }
 
 /// One row on the list.
@@ -151,7 +180,7 @@ fn held_row(h: &Held) -> Row {
             Some(c) => (c.state, c.confidence, c.at),
             None => (RunState::Starting, Confidence::Exact, m.started),
         },
-        Status::Ended(e) => (ended_state(e), Confidence::Exact, e.at),
+        Status::Ended(e) => (h.ended_state(e), Confidence::Exact, e.at),
         Status::Lost => (RunState::Stale, Confidence::Exact, m.started),
     };
     let live_shell =
@@ -188,18 +217,36 @@ fn held_row(h: &Held) -> Row {
     }
 }
 
+/// What carries on a conversation open in another terminal: the harness's
+/// own background where it has one, else a session Relay holds. Only one at
+/// rest — one busy or waiting there is still in use.
+fn carry_on(h: &HookState) -> Attach {
+    if h.state != Said::Idle {
+        return Attach::None;
+    }
+    if let Some(argv) = adapter(&h.agent).and_then(|a| a.carry_on_argv(&h.session_id)) {
+        return Attach::CarryOn { argv, background: true };
+    }
+    registry()
+        .profile(&h.agent)
+        .and_then(|p| {
+            let bin = find_bin(&p.bins)
+                .map(|b| b.to_string_lossy().into_owned())
+                .or_else(|| p.bins.first().cloned())?;
+            p.resume_argv(bin, &h.session_id)
+        })
+        .map_or(Attach::None, |argv| Attach::CarryOn {
+            argv,
+            background: false,
+        })
+}
+
 fn hooked_row(h: &HookState) -> Row {
     let state = match h.state {
         Said::Idle => RunState::Idle,
         Said::Busy => RunState::Working,
         Said::Waiting => RunState::NeedsInput,
     };
-    let carry_on = registry().profile(&h.agent).and_then(|p| {
-        let bin = find_bin(&p.bins)
-            .map(|b| b.to_string_lossy().into_owned())
-            .or_else(|| p.bins.first().cloned())?;
-        p.resume_argv(bin, &h.session_id)
-    });
     Row {
         key: format!("o:{}:{}", h.agent, h.session_id),
         source: Source::Hooked,
@@ -213,7 +260,7 @@ fn hooked_row(h: &HookState) -> Row {
         ended: None,
         state_at: Some(h.at),
         pr: None,
-        attach: carry_on.map_or(Attach::None, Attach::CarryOn),
+        attach: carry_on(h),
         kind: RunKind::Agent,
     }
 }
@@ -232,8 +279,7 @@ fn native_row(n: &NativeRow) -> Row {
         ended: n.ended,
         state_at: n.at,
         pr: n.pr.clone(),
-        // The adapter's attach argv is wired in with the adapters.
-        attach: Attach::None,
+        attach: adapter(&n.harness).map_or(Attach::None, |a| Attach::Argv(a.attach_argv(&n.id))),
         kind: RunKind::Agent,
     }
 }
@@ -413,12 +459,87 @@ mod tests {
         assert_eq!(r.name, "session 01234567");
         assert_eq!((r.state, r.words.as_str()), (RunState::Idle, "idle"));
         assert_eq!(r.summary.as_deref(), Some("done"));
-        let Attach::CarryOn(argv) = &r.attach else {
+        // Claude has a background of its own: it carries on there.
+        let Attach::CarryOn { argv, background } = &r.attach else {
             panic!("{:?}", r.attach);
         };
-        assert_eq!(argv[1..], ["--resume", "0123456789"]);
-        let r = rows(&[], &[hook("nobody", "x", Said::Busy, None)], &[]).remove(0);
+        assert!(background);
+        assert_eq!(argv[1..], ["--resume", "0123456789", "--bg"]);
+        // Gemini has none: Relay holds it.
+        let r = rows(&[], &[hook("gemini", "g-1", Said::Idle, None)], &[]).remove(0);
+        let Attach::CarryOn { argv, background } = &r.attach else {
+            panic!("{:?}", r.attach);
+        };
+        assert!(!background);
+        assert_eq!(argv[1..], ["--resume", "g-1"]);
+        // One busy or waiting in its own terminal is still in use there.
+        for said in [Said::Busy, Said::Waiting] {
+            let r = rows(&[], &[hook("claude", "c", said, None)], &[]).remove(0);
+            assert_eq!(r.attach, Attach::None, "{said:?}");
+        }
+        let r = rows(&[], &[hook("nobody", "x", Said::Idle, None)], &[]).remove(0);
         assert_eq!(r.attach, Attach::None, "no profile, no way to carry it on");
+    }
+
+    #[test]
+    fn a_native_row_attaches_through_its_harness() {
+        let r = rows(&[], &[], &[native("s-1")]).remove(0);
+        let Attach::Argv(argv) = &r.attach else {
+            panic!("{:?}", r.attach);
+        };
+        assert_eq!(argv[1..], ["attach", "ab12cd34"]);
+        let mut codex = native("s-2");
+        codex.harness = "codex".into();
+        assert_eq!(rows(&[], &[], &[codex]).remove(0).attach, Attach::None, "no adapter");
+    }
+
+    #[test]
+    fn claudes_listing_and_its_hooks_name_one_session_alike() {
+        // As recorded: carried on into another conversation, which its
+        // hooks tell of.
+        let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../fixtures/claude-native");
+        let listed = std::fs::read_to_string(fixtures.join("agents.json")).unwrap();
+        let native = rl_detect::claude_native::rows(&listed, Some(&fixtures.join("jobs"))).unwrap();
+        let hooked = [
+            hook("claude", "2132ce0a-647c-43a1-9c71-fa758bc20c12", Said::Waiting, None),
+            hook("claude", "0f0f0f0f-0000-4000-8000-000000000000", Said::Busy, None),
+        ];
+        let rows = rows(&[], &hooked, &native);
+        let hooked: Vec<&str> = rows
+            .iter()
+            .filter(|r| r.source == Source::Hooked)
+            .map(|r| r.key.as_str())
+            .collect();
+        assert_eq!(
+            hooked,
+            ["o:claude:0f0f0f0f-0000-4000-8000-000000000000"],
+            "the background one stands once, as Claude lists it"
+        );
+        let r = rows.iter().find(|r| r.key == "n:claude:4a088e61").unwrap();
+        assert_eq!((r.words.as_str(), r.state), ("needs input", RunState::NeedsInput));
+    }
+
+    #[test]
+    fn a_session_asked_to_stop_reads_stopped_however_it_exits() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ended = |code| {
+            let mut h = held(
+                "a",
+                RunKind::Shell,
+                Status::Ended(Exit {
+                    code,
+                    signal: None,
+                    at: at(300),
+                }),
+            );
+            h.dir = tmp.path().to_path_buf();
+            rows(&[h], &[], &[]).remove(0).state
+        };
+        assert_eq!(ended(1), RunState::Failed, "no stop asked: as its code says");
+        crate::store::sessions::mark_stopped(tmp.path()).unwrap();
+        assert!(!tmp.path().join("stopped.tmp").exists(), "written whole");
+        assert_eq!(ended(1), RunState::Stopped, "zsh says 1 on a hang-up");
+        assert_eq!(ended(0), RunState::Stopped);
     }
 
     #[test]

@@ -24,6 +24,8 @@
 //!       SessionEnd: ended
 //!   list: { args: [agents, --json, --all], reader: claude-agents }
 //!   attach: [attach, "{id}"]
+//!   start: [--bg]
+//!   name: [-n, "{name}"]
 //! ```
 //!
 //! What an event says is a state word, or the same in a map with more:
@@ -65,6 +67,9 @@ pub const READERS: [&str; 1] = ["claude-agents"];
 /// Where a session's attach id goes in a profile's `attach`.
 pub const ID: &str = "{id}";
 
+/// Where a session's name goes in a profile's `name`.
+pub const NAME: &str = "{name}";
+
 /// The `sessions:` block as written. Everything optional so files can be
 /// merged, field by field, a user's over a built-in.
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -73,6 +78,8 @@ pub(crate) struct SessionsFile {
     hooks: Option<HooksFile>,
     list: Option<ListFile>,
     attach: Option<Vec<String>>,
+    start: Option<Vec<String>>,
+    name: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -131,6 +138,12 @@ impl SessionsFile {
         if over.attach.is_some() {
             self.attach = over.attach;
         }
+        if over.start.is_some() {
+            self.start = over.start;
+        }
+        if over.name.is_some() {
+            self.name = over.name;
+        }
     }
 }
 
@@ -144,6 +157,12 @@ pub struct Sessions {
     /// The arguments that open one in its own background here, after its
     /// binary: `{id}` is the session's attach id. Empty where it has none.
     pub attach: Vec<String>,
+    /// The arguments that start one in its own background, after its
+    /// binary (`[--bg]`); a prompt goes last. Empty where it has no
+    /// background: Relay holds its sessions.
+    pub start: Vec<String>,
+    /// What names one it starts, after `start`: `{name}` is the name.
+    pub name: Vec<String>,
 }
 
 /// How an agent lists its own sessions: its binary with `args`, read by
@@ -273,7 +292,18 @@ pub(crate) fn compile(name: &str, file: SessionsFile) -> Result<Sessions> {
     if !attach.is_empty() && !attach.iter().any(|a| a.contains(ID)) {
         bail!("{name}.yaml: sessions.attach says nowhere where the id goes ({ID})");
     }
-    Ok(Sessions { hooks, list, attach })
+    let start = file.start.unwrap_or_default();
+    let named = file.name.unwrap_or_default();
+    if !named.is_empty() && !named.iter().any(|a| a.contains(NAME)) {
+        bail!("{name}.yaml: sessions.name says nowhere where the name goes ({NAME})");
+    }
+    Ok(Sessions {
+        hooks,
+        list,
+        attach,
+        start,
+        name: named,
+    })
 }
 
 /// Whether `word` may stand in a hook's command as it is: an agent's or an
@@ -972,6 +1002,8 @@ mod tests {
             })
         );
         assert_eq!(claude.attach, ["attach", ID]);
+        assert_eq!(claude.start, ["--bg"]);
+        assert_eq!(claude.name, ["-n", NAME]);
         assert!(r.profile("codex").unwrap().sessions.as_ref().unwrap().list.is_none());
         assert!(r.profile("cursor").unwrap().sessions.is_none());
     }

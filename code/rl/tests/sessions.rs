@@ -101,6 +101,24 @@ fn new_ls_stop_rm() {
 }
 
 #[test]
+fn a_stopped_session_reads_stopped_whatever_its_code() {
+    let Some(env) = Env::new() else { return };
+    let cwd = env.dir("hup");
+    // As zsh does: a hang-up, and it exits 1.
+    let script = "trap 'exit 1' HUP; while :; do sleep 1; done";
+    let (ok, name, err) = env.rl(&cwd, &["new", "--name-only", "--", "sh", "-c", script]);
+    assert!(ok, "{err}");
+    let (ok, _, err) = env.rl(&cwd, &["stop", &name]);
+    assert!(ok, "{err}");
+    let dir = env.home().join("sessions").join(&name);
+    let exit: serde_json::Value = serde_json::from_slice(&std::fs::read(dir.join("exit")).unwrap()).unwrap();
+    assert_eq!(exit["code"], 1, "{exit}");
+    assert!(dir.join("stopped").is_file(), "the stop said so in its folder");
+    let row = env.ls().into_iter().find(|r| r["name"] == name).unwrap();
+    assert_eq!(row["state"], "stopped", "{row}");
+}
+
+#[test]
 fn two_in_one_folder_get_distinct_names() {
     let Some(env) = Env::new() else { return };
     let cwd = env.dir("twin");

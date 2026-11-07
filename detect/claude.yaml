@@ -61,3 +61,8 @@ sessions:
   list: { args: [agents, --json, --all], reader: claude-agents }
   # Enter on one in Claude's background opens it here.
   attach: [attach, "{id}"]
+  # A new one starts in Claude's background (it prints its id and returns),
+  # named if you name it; the prompt goes last. Carrying one on from another
+  # terminal is `resume` above, then this: `claude --resume <id> --bg`.
+  start: [--bg]
+  name: [-n, "{name}"]

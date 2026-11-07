@@ -8,7 +8,7 @@ use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use rl_core::Home;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{Notify, mpsc, watch};
 
 /// A change under `sessions/` or `state/`, said once per change the system
 /// reports; the list gathers them (`DEBOUNCE`) before it reads again.
@@ -51,9 +51,10 @@ impl Watch {
 }
 
 /// The harnesses' own sessions, asked for every `every` in the background,
-/// for as long as this is kept.
+/// for as long as this is kept — and at once when `ask_now` says.
 pub struct Native {
     rx: watch::Receiver<Vec<NativeRow>>,
+    ask: Arc<Notify>,
     _task: Option<AbortOnDrop<()>>,
 }
 
@@ -63,16 +64,21 @@ impl Native {
     /// none, nothing runs.
     pub fn start(listers: Vec<Box<dyn NativeLister>>, every: Duration) -> Native {
         let (tx, rx) = watch::channel(Vec::new());
+        let ask = Arc::new(Notify::new());
         if listers.is_empty() {
-            return Native { rx, _task: None };
+            return Native { rx, ask, _task: None };
         }
         let listers: Arc<Vec<Box<dyn NativeLister>>> = Arc::new(listers);
+        let asked_now = ask.clone();
         let task = tokio::spawn(async move {
             let mut kept: Vec<Vec<NativeRow>> = vec![Vec::new(); listers.len()];
             let mut tick = tokio::time::interval(every);
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
-                tick.tick().await;
+                tokio::select! {
+                    _ = tick.tick() => {}
+                    () = asked_now.notified() => {}
+                }
                 let asked = listers.clone();
                 let Ok(said) =
                     tokio::task::spawn_blocking(move || asked.iter().map(|l| l.list().ok()).collect::<Vec<_>>()).await
@@ -96,8 +102,15 @@ impl Native {
         });
         Native {
             rx,
+            ask,
             _task: Some(AbortOnDrop(task)),
         }
+    }
+
+    /// Asks the listers now, not at the next tick: a session was just
+    /// started in a harness's background.
+    pub fn ask_now(&self) {
+        self.ask.notify_one();
     }
 
     /// Once the rows have changed since they were last taken. Never, with
@@ -190,6 +203,30 @@ mod tests {
             then,
             "nothing runs once the list is closed"
         );
+    }
+
+    #[tokio::test]
+    async fn asked_now_it_does_not_wait_for_the_tick() {
+        let said = Arc::new(Mutex::new(Some(vec![row("a")])));
+        let asked = Arc::new(AtomicUsize::new(0));
+        let native = Native::start(
+            vec![Box::new(Told(said.clone(), asked.clone()))],
+            Duration::from_secs(3600),
+        );
+        let count = |n: usize| {
+            let asked = asked.clone();
+            async move {
+                while asked.load(Ordering::SeqCst) < n {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            }
+        };
+        // The first tick is at once; the next an hour on.
+        tokio::time::timeout(Duration::from_secs(5), count(1)).await.unwrap();
+        native.ask_now();
+        tokio::time::timeout(Duration::from_secs(5), count(2))
+            .await
+            .expect("asked at once");
     }
 
     #[tokio::test]

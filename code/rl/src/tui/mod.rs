@@ -91,20 +91,7 @@ impl App {
             }
             tokio::select! {
                 ev = input.next() => match ev {
-                    Some(Ok(Event::Key(k))) if k.kind != KeyEventKind::Release => {
-                        self.key(input::typed(k));
-                        if let Some(hand) = self.hand.take() {
-                            // The session gets the real terminal, passed
-                            // through; the list comes back when it lets go.
-                            drop(input);
-                            leave_screen();
-                            let words = hand_over(&self.home, &hand).await;
-                            *terminal = enter_screen();
-                            input = EventStream::new();
-                            title.clear();
-                            self.back(&hand.key, words);
-                        }
-                    }
+                    Some(Ok(Event::Key(k))) if k.kind != KeyEventKind::Release => self.key(input::typed(k)),
                     Some(Ok(Event::Mouse(m))) => self.mouse(m),
                     Some(Ok(Event::Paste(s))) => self.paste(&s),
                     Some(Ok(_)) => {}
@@ -130,6 +117,21 @@ impl App {
                     Ok(d) => self.done(d),
                     Err(e) => self.say(format!("{e}")),
                 },
+            }
+            if std::mem::take(&mut self.ask_native) {
+                native.ask_now();
+            }
+            // A key, or a conversation carried on, gives the terminal away:
+            // the session gets it, passed through; the list comes back when
+            // it lets go.
+            if let Some(hand) = self.hand.take() {
+                drop(input);
+                leave_screen();
+                let words = hand_over(&self.home, &hand).await;
+                *terminal = enter_screen();
+                input = EventStream::new();
+                title.clear();
+                self.back(&hand.key, words);
             }
         }
         Ok(())

@@ -52,6 +52,18 @@ pub fn state(s: RunState) -> Style {
     }
 }
 
+/// A pull request's `#N`, by how it stands as `gh` says (`OPEN`, `MERGED`,
+/// `CLOSED`): green open, purple merged, red closed; quiet where nothing
+/// says.
+pub fn pr(state: Option<&str>) -> Style {
+    match state {
+        Some("OPEN") => Style::default().fg(ACCENT),
+        Some("MERGED") => Style::default().fg(STALE),
+        Some("CLOSED") => Style::default().fg(BAD),
+        _ => dim(),
+    }
+}
+
 /// The selected row: a band of its own — deep teal under near-white, both
 /// stated outright so it reads the same on a light terminal and a dark one.
 /// Reverse video, which this used to use, borrows whatever colours the row

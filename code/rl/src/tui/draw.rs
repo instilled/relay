@@ -151,21 +151,17 @@ pub fn list_line(
     word: Vec<Span<'static>>,
     summary: &str,
     lead: Vec<Span<'static>>,
-    aside: Option<&str>,
+    aside: Option<Span<'static>>,
     age: String,
 ) -> Line<'static> {
-    let right = match aside {
-        Some(r) => format!("{r}  {age:>4}"),
-        None => format!("{age:>4}"),
-    };
+    let age = format!("{age:>4}");
+    let aside_w = aside.as_ref().map_or(0, |a| a.width() + 2);
+    let right_w = aside_w + age.chars().count();
     // What goes before the summary has the summary's room at most, so a
     // narrow list still ends in its age.
-    let lead = cap_spans(
-        lead,
-        w.saturating_sub(state_col(tw) + WORD_W + 1 + right.chars().count() + 1),
-    );
+    let lead = cap_spans(lead, w.saturating_sub(state_col(tw) + WORD_W + 1 + right_w + 1));
     let before: usize = lead.iter().map(Span::width).sum();
-    let fixed = state_col(tw) + WORD_W + 1 + before + right.chars().count() + 1;
+    let fixed = state_col(tw) + WORD_W + 1 + before + right_w + 1;
     // The word, padded out to its column whatever it is made of.
     let used: usize = word.iter().map(Span::width).sum();
     let mut spans = icon;
@@ -175,7 +171,12 @@ pub fn list_line(
     spans.push(Span::raw(" ".repeat(WORD_W.saturating_sub(used) + 1)));
     spans.extend(lead);
     spans.push(Span::raw(fit(summary, w.saturating_sub(fixed))).dim());
-    spans.push(Span::raw(format!(" {right}")).dim());
+    spans.push(Span::raw(" "));
+    if let Some(a) = aside {
+        spans.push(a);
+        spans.push(Span::raw("  "));
+    }
+    spans.push(Span::raw(age).dim());
     Line::from(spans)
 }
 
@@ -586,7 +587,13 @@ impl App {
         };
         let place = (rows::live_shell(r) && r.summary.is_none()).then(|| rows::shell_place(&r.cwd, &project));
         let summary = place.as_deref().or(r.summary.as_deref()).unwrap_or("");
-        let pr = r.pr.as_ref().map(|pr| format!("#{}", pr.number));
+        // `#N`, coloured by how it stands where `gh` said.
+        let pr = r.pr.as_ref().map(|pr| {
+            Span::styled(
+                format!("#{}", pr.number),
+                theme::pr(self.prs.get(&pr.href).map(String::as_str)),
+            )
+        });
         let word = fit(&r.words, WORD_W).trim_end().to_string();
         list_line(
             w,
@@ -600,7 +607,7 @@ impl App {
             } else {
                 vec![]
             },
-            pr.as_deref(),
+            pr,
             r.started
                 .or(r.state_at)
                 .map(|t| fmt_age(t, r.ended.unwrap_or(now)))

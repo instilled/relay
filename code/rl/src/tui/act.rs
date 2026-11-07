@@ -11,25 +11,34 @@ use super::remove::{self, Removal};
 use crate::cmd;
 use crate::config::{Hidden, ListPrefs};
 use crate::rows::{self, Context, Line, Names};
-use crate::sources::{Attach, Source};
+use crate::sources::{self, Adapter, Attach, Source};
 use crate::spawn::{self, Start};
 use crate::store::sessions;
+use anyhow::anyhow;
 use crossterm::event::{KeyCode, KeyEvent};
 use jiff::Timestamp;
+use rl_detect::adapter;
 use std::path::PathBuf;
 
 /// The size a session starts at when the list cannot say its own.
 const DEFAULT_SIZE: (u16, u16) = (120, 32);
 
-/// Carrying a harness's own conversation on, here, before attaching: what
-/// it runs, and then the argv that attaches to it. The adapters do it; until
-/// they are here, it says so.
-pub fn carry_on(argv: &[String]) -> Result<Vec<String>, String> {
-    let what = argv
-        .first()
-        .and_then(|b| std::path::Path::new(b).file_name())
-        .map_or_else(|| "harness's".into(), |n| n.to_string_lossy().into_owned());
-    Err(format!("carrying on from the list comes with the {what} adapter"))
+/// Runs `argv`, which starts or carries on a session in `a`'s harness's own
+/// background, in `cwd`; the id of the session it says it began.
+async fn in_background(a: &'static dyn Adapter, argv: Vec<String>, cwd: PathBuf) -> anyhow::Result<String> {
+    tokio::task::spawn_blocking(move || {
+        let printed = adapter::run(&argv, Some(&cwd), false, adapter::START_WAIT)?;
+        a.started_id(&printed).ok_or_else(|| {
+            let said = printed.lines().find(|l| !l.trim().is_empty()).unwrap_or("nothing");
+            anyhow!("{} said no session id: {said}", a.harness())
+        })
+    })
+    .await?
+}
+
+/// A native row's key.
+fn native_key(a: &dyn Adapter, id: &str) -> String {
+    format!("n:{}:{id}", a.harness())
 }
 
 impl App {
@@ -48,6 +57,7 @@ impl App {
         };
         let names = Names::new(&self.config.list.names);
         let (title, key) = (names.title(r).to_string(), r.key.clone());
+        let (harness, cwd, source, state) = (r.harness.clone(), r.cwd.clone(), r.source, r.state);
         let to = match &r.attach {
             Attach::Held(name) => {
                 let name = name.clone();
@@ -60,16 +70,83 @@ impl App {
                 }
             }
             Attach::Argv(argv) => To::Argv(argv.clone()),
-            Attach::CarryOn(argv) => match carry_on(argv) {
-                Ok(argv) => To::Argv(argv),
-                Err(why) => return self.say(why),
-            },
+            Attach::CarryOn { argv, background } => {
+                let argv = argv.clone();
+                return self.carry_on(argv, *background, &harness, cwd, title);
+            }
+            Attach::None if source == Source::Hooked => {
+                let how = if state == rl_core::state::RunState::Working {
+                    "busy"
+                } else {
+                    "waiting on you"
+                };
+                return self.say(format!(
+                    "{title} is {how} in its own terminal · enter carries it on here once it is idle"
+                ));
+            }
             Attach::None => {
-                let harness = r.harness.clone();
                 return self.say(format!("{harness}'s own sessions can't be attached from the list yet"));
             }
         };
         self.hand = Some(Hand { to, title, key });
+    }
+
+    /// Carries a conversation open in another terminal on, in the background,
+    /// then attaches to it: in the harness's own background (`background`),
+    /// else as a session Relay holds.
+    fn carry_on(&mut self, argv: Vec<String>, background: bool, harness: &str, cwd: PathBuf, title: String) {
+        self.say(format!("carrying {title} on…"));
+        if background {
+            let Some(a) = sources::adapter(harness) else {
+                return self.say(format!("{harness} has no background here"));
+            };
+            self.work.spawn(async move {
+                match in_background(a, argv, cwd).await {
+                    Ok(id) => {
+                        let key = native_key(a, &id);
+                        Done {
+                            said: format!("{title} carries on in {}'s background", a.harness()),
+                            select: Some(key.clone()),
+                            forget: None,
+                            hand: Some(Hand {
+                                to: To::Argv(a.attach_argv(&id)),
+                                title,
+                                key,
+                            }),
+                        }
+                    }
+                    Err(e) => Done::said(format!("carry {title} on: {e:#}")),
+                }
+            });
+            return;
+        }
+        let home = self.home.clone();
+        let (cols, rows) = crossterm::terminal::size().unwrap_or(DEFAULT_SIZE);
+        self.work.spawn(async move {
+            let start = Start {
+                harness: None,
+                cwd,
+                argv,
+                cols,
+                rows,
+            };
+            match spawn::start(&home, start).await {
+                Ok(meta) => {
+                    let key = format!("r:{}", meta.name);
+                    Done {
+                        said: format!("{title} carries on as {}", meta.name),
+                        select: Some(key.clone()),
+                        forget: None,
+                        hand: Some(Hand {
+                            title: meta.name.clone(),
+                            to: To::Held(Box::new(meta)),
+                            key,
+                        }),
+                    }
+                }
+                Err(e) => Done::said(format!("carry {title} on: {e:#}")),
+            }
+        });
     }
 
     /// The words once the terminal is back from an attach, and the cursor
@@ -79,6 +156,10 @@ impl App {
         self.say(words);
         if self.keys().iter().any(|k| k == key) {
             self.select(Some(key.to_string()));
+        } else if key.starts_with("n:") {
+            // Carried on into a harness's background, not listed yet.
+            self.awaiting = Some(key.to_string());
+            self.ask_native = true;
         }
     }
 
@@ -120,10 +201,30 @@ impl App {
     }
 
     /// Starts what the form describes, in the background; the cursor goes
-    /// to it once it is there.
+    /// to it once it is there. A harness with a background of its own starts
+    /// it there, not held by Relay.
     fn start(&mut self, d: form::Draft) {
         let what = d.harness.clone().unwrap_or_else(|| form::SHELL.into());
         self.say(format!("starting {what}…"));
+        let own = d.harness.as_deref().and_then(sources::adapter).and_then(|a| {
+            let prompt = d.argv.first().map(String::as_str);
+            Some((a, a.start_argv(None, prompt)?))
+        });
+        if let Some((a, argv)) = own {
+            let cwd = d.cwd.clone();
+            self.work.spawn(async move {
+                match in_background(a, argv, cwd).await {
+                    Ok(id) => Done {
+                        said: format!("started {what} {id} in its background · enter attaches"),
+                        select: Some(native_key(a, &id)),
+                        forget: None,
+                        hand: None,
+                    },
+                    Err(e) => Done::said(format!("start {what}: {e:#}")),
+                }
+            });
+            return;
+        }
         let home = self.home.clone();
         let (cols, rows) = crossterm::terminal::size().unwrap_or(DEFAULT_SIZE);
         self.work.spawn(async move {
@@ -139,6 +240,7 @@ impl App {
                     said: format!("started {} · enter attaches", meta.name),
                     select: Some(format!("r:{}", meta.name)),
                     forget: None,
+                    hand: None,
                 },
                 Err(e) => Done::said(format!("start {what}: {e:#}")),
             }
@@ -146,7 +248,9 @@ impl App {
     }
 
     /// What background work came to: the list read again, and the cursor
-    /// where it said.
+    /// where it said — once that line is there, where it is not yet: a
+    /// session in a harness's background is listed when the harness is next
+    /// asked, which is now. The terminal goes where it said, if anywhere.
     pub fn done(&mut self, d: Done) {
         if let Some(key) = &d.forget {
             let key = key.clone();
@@ -154,10 +258,16 @@ impl App {
         }
         self.reload();
         self.say(d.said);
-        if let Some(k) = d.select
-            && self.keys().contains(&k)
-        {
-            self.select(Some(k));
+        if let Some(k) = d.select {
+            if self.keys().contains(&k) {
+                self.select(Some(k));
+            } else if k.starts_with("n:") {
+                self.awaiting = Some(k);
+                self.ask_native = true;
+            }
+        }
+        if d.hand.is_some() {
+            self.hand = d.hand;
         }
     }
 
@@ -220,6 +330,7 @@ impl App {
                             said: format!("removed {title}"),
                             select: next,
                             forget: Some(format!("r:{name}")),
+                            hand: None,
                         },
                         Err(e) => Done::said(format!("remove {title}: {e:#}")),
                     }

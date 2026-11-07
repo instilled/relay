@@ -1,6 +1,5 @@
 //! The `new | ls | stop | rm` commands.
 
-use crate::sources::ended_state;
 use crate::spawn::{self, Start};
 use crate::store::sessions::{self, Held, Status};
 use anyhow::{Result, bail};
@@ -67,7 +66,7 @@ fn terminal_size() -> (u16, u16) {
 fn state_word(h: &Held) -> Option<String> {
     match &h.status {
         Status::Live => h.current().map(|c| c.state.to_string()),
-        Status::Ended(e) => Some(ended_state(e).to_string()),
+        Status::Ended(e) => Some(h.ended_state(e).to_string()),
         Status::Lost => Some("lost".into()),
     }
 }
@@ -140,9 +139,18 @@ pub async fn stop(home: &Home, name: &str) -> Result<()> {
         Status::Lost => bail!("{name} is lost: its holder is not answering"),
         Status::Live => {}
     }
-    let (_, mut session) = Session::attach(&held.meta.socket, false).await?;
-    session.close().await?;
-    drop(session);
+    // Said before it is asked, so however it exits it reads stopped.
+    sessions::mark_stopped(&held.dir)?;
+    let closed = async {
+        let (_, mut session) = Session::attach(&held.meta.socket, false).await?;
+        session.close().await?;
+        anyhow::Ok(())
+    }
+    .await;
+    if let Err(e) = closed {
+        let _ = std::fs::remove_file(held.dir.join(sessions::STOPPED));
+        return Err(e);
+    }
     let exit = held.dir.join("exit");
     let deadline = Instant::now() + STOP_WAIT;
     while !matches!(read_exit_file(&exit), Ok(Some(_))) {

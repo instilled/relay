@@ -13,10 +13,14 @@
 //!   is opened.
 //! - [`user_hooks`]: the format of those hooks, set in the user's own files
 //!   on a yes.
+//! - [`adapter`]: a harness's own background sessions — listed, attached,
+//!   started and carried on through it; [`claude_native`] is Claude's.
 //! - [`machine`]: the one place a `(current, signal)` pair becomes a
 //!   transition, where exact signals beat guesses.
 
+pub mod adapter;
 pub mod claude;
+pub mod claude_native;
 pub mod machine;
 pub mod registry;
 pub mod sessions;

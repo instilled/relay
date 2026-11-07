@@ -1,0 +1,23 @@
+{
+ "state": "blocked",
+ "detail": "the summary of 4a088e61",
+ "tempo": "blocked",
+ "needs": "what 4a088e61 needs",
+ "children": [
+  {
+   "id": "flint-visual-product-roadmap.html",
+   "href": "https://x/frame/0",
+   "kind": "frame",
+   "title": "a title"
+  }
+ ],
+ "name": "Product Capability Rework",
+ "sessionId": "4a088e61-d08a-4e6d-843b-613ce32c11d0",
+ "resumeSessionId": "2132ce0a-647c-43a1-9c71-fa758bc20c12",
+ "daemonShort": "4a088e61",
+ "cwd": "/w/flint-os-product",
+ "createdAt": "2026-11-06T12:27:02.164Z",
+ "updatedAt": "2026-11-07T16:54:34.077Z",
+ "firstTerminalAt": "2026-11-06T12:29:42.012Z",
+ "backend": "daemon"
+}

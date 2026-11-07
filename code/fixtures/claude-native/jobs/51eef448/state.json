@@ -1,0 +1,22 @@
+{
+ "state": "done",
+ "detail": "the summary of 51eef448",
+ "tempo": "idle",
+ "children": [
+  {
+   "id": "1358",
+   "href": "https://github.com/acme/flint-platform/pull/1358",
+   "kind": "pr"
+  }
+ ],
+ "name": "commenting",
+ "sessionId": "51eef448-aac2-4594-8744-5069c430df1a",
+ "resumeSessionId": "51eef448-aac2-4594-8744-5069c430df1a",
+ "daemonShort": "51eef448",
+ "cwd": "/w/flint-platform",
+ "createdAt": "2026-11-07T13:54:01.729Z",
+ "updatedAt": "2026-11-07T23:28:25.847Z",
+ "firstTerminalAt": "2026-11-07T13:54:43.713Z",
+ "backend": "daemon",
+ "lastTerminalAt": "2026-11-07T23:28:25.847Z"
+}

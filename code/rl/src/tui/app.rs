@@ -15,6 +15,7 @@ use anyhow::Result;
 use jiff::Timestamp;
 use rl_core::Home;
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use tokio::task::JoinSet;
 
@@ -49,6 +50,7 @@ pub struct Renaming {
 }
 
 /// What `enter` hands the terminal to, once the list has let go of it.
+#[derive(Debug, Clone, PartialEq)]
 pub struct Hand {
     pub to: To,
     /// What it is called on the list, for the words after.
@@ -65,15 +67,17 @@ pub enum To {
     Argv(Vec<String>),
 }
 
-/// What background work (a stop, a start) came to.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// What background work (a stop, a start, a carry-on) came to.
+#[derive(Debug, Clone, PartialEq)]
 pub struct Done {
     /// For the footer.
     pub said: String,
-    /// The line the cursor goes to, if it is there.
+    /// The line the cursor goes to, once it is there.
     pub select: Option<String>,
     /// A row gone for good, whose name, pin, hide and place go with it.
     pub forget: Option<String>,
+    /// What the terminal goes to now: a conversation carried on.
+    pub hand: Option<Hand>,
 }
 
 impl Done {
@@ -82,6 +86,7 @@ impl Done {
             said: s.into(),
             select: None,
             forget: None,
+            hand: None,
         }
     }
 }
@@ -103,6 +108,13 @@ pub struct App {
     /// The checkouts of the projects' folders.
     pub checkouts: Checkouts,
     badges: Badges,
+    /// How each row's pull request stands, by its URL, as `gh` last said.
+    pub prs: HashMap<String, String>,
+    /// A line the cursor goes to once it is on the list: a session just
+    /// started in a harness's background, not listed yet.
+    pub awaiting: Option<String>,
+    /// The harnesses are to be asked for their sessions now (`main_loop`).
+    pub ask_native: bool,
     /// What the list is narrowed to (`query`).
     pub filter: String,
     pub search: Option<Search>,
@@ -139,6 +151,9 @@ impl App {
             native: Vec::new(),
             checkouts: Checkouts::new(),
             badges,
+            prs: HashMap::new(),
+            awaiting: None,
+            ask_native: false,
             filter: String::new(),
             search: None,
             mode: Mode::List,
@@ -176,12 +191,34 @@ impl App {
             self.regit();
         }
         self.settle();
+        if let Some(k) = self.awaiting.take() {
+            if self.keys().contains(&k) {
+                self.select(Some(k));
+            } else {
+                self.awaiting = Some(k);
+            }
+        }
     }
 
     /// The projects' checkouts again, and what their badges last said.
     pub fn regit(&mut self) {
         let folders = rows::project_folders(&self.rows, &self.config.list);
         self.checkouts = git::checkouts(&folders, &self.badges, &self.config.badges);
+        // The pull requests' states, the badges' way: none asked with the
+        // badges off.
+        if self.config.badges.is_empty() {
+            return;
+        }
+        let hrefs: Vec<String> = self
+            .rows
+            .iter()
+            .filter_map(|r| r.pr.as_ref())
+            .map(|p| p.href.clone())
+            .collect();
+        self.prs = hrefs
+            .into_iter()
+            .filter_map(|h| self.badges.pr_state(&h).map(|s| (h, s)))
+            .collect();
     }
 
     /// The native rows, as their listers now say.
