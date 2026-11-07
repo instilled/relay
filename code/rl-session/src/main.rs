@@ -9,6 +9,7 @@ use clap::Parser;
 use nix::sys::signal::{SigHandler, Signal, signal};
 use nix::unistd::{ForkResult, dup2_stdin, dup2_stdout, fork, pipe, setsid};
 use rl_session::backend::Spec;
+use rl_session::detect::spec::DetectSpec;
 use rl_session::holder::{self, Config};
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
@@ -64,6 +65,14 @@ struct Args {
     /// holder leaves. For tests.
     #[arg(long, default_value_t = 60, hide = true)]
     socket_check: u64,
+    /// A JSON `DetectSpec`: the patterns and timings the holder works out its
+    /// own run state with.
+    #[arg(long, value_name = "FILE")]
+    detect: Option<PathBuf>,
+    /// Where to keep the run state (JSON), rewritten as it changes. Needs
+    /// `--detect`.
+    #[arg(long, requires = "detect")]
+    state_file: Option<PathBuf>,
     /// Do not detach; log to this terminal. For debugging.
     #[arg(long)]
     foreground: bool,
@@ -88,6 +97,16 @@ fn main() -> Result<()> {
             .with_context(|| format!("--env {kv}: expected KEY=VALUE"))?;
         env.push((k.to_string(), v.to_string()));
     }
+    let detect = match &args.detect {
+        Some(f) => {
+            let bytes = std::fs::read(f).with_context(|| format!("reading {}", f.display()))?;
+            let spec: DetectSpec =
+                serde_json::from_slice(&bytes).with_context(|| format!("{}: not a detect spec", f.display()))?;
+            let (patterns, timing) = spec.compile().with_context(|| format!("{}", f.display()))?;
+            Some((patterns, timing, spec.kind))
+        }
+        None => None,
+    };
     let cfg = Config {
         id: args.id,
         socket: args.socket,
@@ -106,6 +125,8 @@ fn main() -> Result<()> {
         linger: Duration::from_secs(args.linger),
         socket_check: Duration::from_secs(args.socket_check.max(1)),
         reap_after: (args.reap_after > 0).then(|| Duration::from_secs(args.reap_after)),
+        detect,
+        state_file: args.state_file,
     };
 
     if args.foreground {

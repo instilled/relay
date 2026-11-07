@@ -3,7 +3,7 @@
 //! last thing it wrote, which is why heuristics built on this stay `likely`
 //! at best.
 
-use rl_session::screen::{EscState, dec_graphic, overrun};
+use crate::screen::{EscState, dec_graphic, overrun};
 use std::path::PathBuf;
 
 /// A shell's OSC 133 prompt mark: where a prompt was drawn, where what you
@@ -287,7 +287,7 @@ pub fn last_lines(text: &str, n: usize) -> Vec<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rl_session::screen::MAX_PENDING_ESCAPE;
+    use crate::screen::MAX_PENDING_ESCAPE;
 
     #[test]
     fn last_line_skips_rules_and_borders() {

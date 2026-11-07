@@ -17,6 +17,7 @@ clap.workspace = true
 jiff.workspace = true
 nix.workspace = true
 portable-pty.workspace = true
+regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

@@ -5,70 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::PathBuf;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RunKind {
-    Agent,
-    Shell,
-    Command,
-    Plugin,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RunState {
-    Starting,
-    Working,
-    Idle,
-    NeedsInput,
-    Blocked,
-    Stale,
-    Finished,
-    Failed,
-    Stopped,
-}
-
-impl RunState {
-    /// Every variant, for anything that needs to enumerate them.
-    pub const ALL: &'static [Self] = &[
-        Self::Starting,
-        Self::Working,
-        Self::Idle,
-        Self::NeedsInput,
-        Self::Blocked,
-        Self::Stale,
-        Self::Finished,
-        Self::Failed,
-        Self::Stopped,
-    ];
-
-    pub fn is_terminal(self) -> bool {
-        matches!(self, Self::Finished | Self::Failed | Self::Stopped)
-    }
-    /// Something is waiting on a human.
-    pub fn needs_attention(self) -> bool {
-        matches!(self, Self::NeedsInput | Self::Blocked | Self::Failed)
-    }
-}
-
-/// Where a state transition came from. Principle 3: signals over scraping.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Source {
-    Hook,
-    Transcript,
-    Git,
-    Pty,
-    Manual,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Confidence {
-    Guess,
-    Likely,
-    Exact,
-}
+pub use rl_core::state::{Confidence, RunKind, RunState, Source};
 
 /// What `rl mark` may say. `done` is "nothing more for me here": the run
 /// goes `idle`, not to a terminal state — the process is still alive and its
@@ -91,33 +28,8 @@ impl Mark {
     }
 }
 
-macro_rules! str_enum {
-    ($t:ty { $($v:ident => $s:literal),+ $(,)? }) => {
-        impl $t {
-            pub fn as_str(self) -> &'static str {
-                match self { $(Self::$v => $s),+ }
-            }
-        }
-        impl std::str::FromStr for $t {
-            type Err = String;
-            fn from_str(s: &str) -> Result<Self, String> {
-                match s { $($s => Ok(Self::$v),)+ other => Err(format!("unknown {}: {other}", stringify!($t))) }
-            }
-        }
-        impl std::fmt::Display for $t {
-            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str(self.as_str()) }
-        }
-    };
-}
-pub(crate) use str_enum;
+pub(crate) use rl_core::str_enum;
 
-str_enum!(RunKind { Agent => "agent", Shell => "shell", Command => "command", Plugin => "plugin" });
-str_enum!(RunState {
-    Starting => "starting", Working => "working", Idle => "idle", NeedsInput => "needs_input",
-    Blocked => "blocked", Stale => "stale", Finished => "finished", Failed => "failed", Stopped => "stopped",
-});
-str_enum!(Source { Hook => "hook", Transcript => "transcript", Git => "git", Pty => "pty", Manual => "manual" });
-str_enum!(Confidence { Guess => "guess", Likely => "likely", Exact => "exact" });
 str_enum!(Mark { Done => "done", Blocked => "blocked", Working => "working" });
 
 /// Why a run started. Serialised as one string: `manual`,

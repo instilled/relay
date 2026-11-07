@@ -24,7 +24,10 @@ impl Exit {
 
 /// Written atomically (tmp + rename) so a reader never sees a partial file.
 pub fn write_exit_file(path: &Path, exit: &Exit) -> io::Result<()> {
-    let tmp = path.with_extension("tmp");
+    let tmp = path.with_file_name(format!(
+        "{}.tmp",
+        path.file_name().unwrap_or_default().to_string_lossy()
+    ));
     std::fs::write(&tmp, serde_json::to_vec(exit)?)?;
     std::fs::rename(&tmp, path)
 }
@@ -70,6 +73,6 @@ mod tests {
         };
         write_exit_file(&p, &e).unwrap();
         assert_eq!(read_exit_file(&p).unwrap(), Some(e));
-        assert!(!p.with_extension("tmp").exists());
+        assert!(!tmp.path().join("k7x2m9qa.exit.tmp").exists());
     }
 }

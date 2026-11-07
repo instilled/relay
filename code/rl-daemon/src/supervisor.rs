@@ -767,7 +767,7 @@ impl Supervisor {
     async fn attached(self: Arc<Self>, run: Run, live: Arc<Live>, mut rd: SessionReader, exit_file: PathBuf) {
         let id = run.id.clone();
         let profile = self.registry.resolve(run.kind, &run.argv).profile;
-        let mut heur = Heuristics::new(profile, run.kind, Timestamp::now());
+        let mut heur = Heuristics::new(profile.patterns.clone(), profile.timing, run.kind, Timestamp::now());
         let mut batch: Vec<u8> = Vec::new();
         let mut exit: Option<Exit> = None;
         // Why the connection went, when it went without an exit.

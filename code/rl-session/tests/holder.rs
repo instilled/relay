@@ -488,3 +488,182 @@ async fn a_pipes_run_answers_a_screen_attach_with_bytes() {
     assert_eq!(hello.replay_from, 0, "the bytes replay from where it asked");
     assert!(read_until(&mut v, "piped").await.contains("piped"));
 }
+
+// --- the holder's own state, with nobody attached ---------------------------
+
+use rl_core::state::{RunKind, RunState};
+use rl_session::detect::spec::DetectSpec;
+use rl_session::state::{StateFile, read_state_file};
+
+/// Spawns `rl-session` running `argv` with `--detect`/`--state-file`; nobody
+/// attaches. Returns the holder and the state file's path.
+fn start_detecting(tty: bool, argv: &[&str], spec: &DetectSpec) -> (Holder, PathBuf) {
+    start_detecting_at(tty, argv, spec, "s.state.json")
+}
+
+/// As [`start_detecting`], with the state file at `state_rel` under the run's directory.
+fn start_detecting_at(tty: bool, argv: &[&str], spec: &DetectSpec, state_rel: &str) -> (Holder, PathBuf) {
+    let tmp = tempfile::tempdir().unwrap();
+    let socket = tmp.path().join("s.sock");
+    let exit_file = tmp.path().join("s.exit");
+    let state = tmp.path().join(state_rel);
+    let detect = tmp.path().join("detect.json");
+    std::fs::write(&detect, serde_json::to_vec(spec).unwrap()).unwrap();
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rl-session"));
+    cmd.arg("--id")
+        .arg("test0001")
+        .arg("--socket")
+        .arg(&socket)
+        .arg("--exit-file")
+        .arg(&exit_file)
+        .arg("--cwd")
+        .arg(tmp.path())
+        .arg("--linger")
+        .arg("60")
+        .arg("--socket-check")
+        .arg("1")
+        .arg("--detect")
+        .arg(&detect)
+        .arg("--state-file")
+        .arg(&state);
+    if !tty {
+        cmd.arg("--no-tty");
+    }
+    cmd.arg("--").args(argv);
+    let log = tmp.path().join("holder.log");
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(std::fs::File::create(&log).unwrap());
+    let status = cmd.status().unwrap();
+    assert!(
+        status.success(),
+        "rl-session did not become ready: {}",
+        std::fs::read_to_string(&log).unwrap_or_default()
+    );
+    (
+        Holder {
+            socket,
+            exit_file,
+            _tmp: tmp,
+        },
+        state,
+    )
+}
+
+fn spec(kind: RunKind, needs_input: &[&str], idle_ms: u64, stale_ms: u64) -> DetectSpec {
+    DetectSpec {
+        kind,
+        needs_input: needs_input.iter().map(|s| s.to_string()).collect(),
+        idle: vec![],
+        idle_after_ms: idle_ms,
+        stale_after_ms: stale_ms,
+    }
+}
+
+/// Polls the state file every 50 ms, up to 10 s, until `pred` holds.
+async fn wait_state(path: &Path, pred: impl Fn(&StateFile) -> bool) -> StateFile {
+    let mut last = None;
+    for _ in 0..200 {
+        if let Ok(Some(s)) = read_state_file(path) {
+            if pred(&s) {
+                return s;
+            }
+            last = Some(s);
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("state never matched; last seen {last:?}");
+}
+
+#[tokio::test]
+async fn state_advances_with_nobody_attached() {
+    let sp = spec(RunKind::Agent, &[r"\[y/N\]"], 200, 600_000);
+    let (_h, state) = start_detecting(false, &["sh", "-c", r#"printf "Continue? [y/N] "; sleep 30"#], &sp);
+    let s = wait_state(&state, |s| s.state == RunState::NeedsInput).await;
+    assert_eq!(s.detail.as_deref(), Some("Continue? [y/N]"));
+}
+
+#[tokio::test]
+async fn a_quiet_worker_goes_stale_with_nobody_attached() {
+    let sp = spec(RunKind::Command, &[], 200, 500);
+    let (_h, state) = start_detecting(false, &["sh", "-c", "echo working; sleep 30"], &sp);
+    wait_state(&state, |s| s.state == RunState::Stale).await;
+}
+
+#[tokio::test]
+async fn resting_shell_reads_idle_with_nobody_attached() {
+    // The pattern would match the PS1; the shell owning the foreground must win.
+    let sp = spec(RunKind::Shell, &[r"\$\s*$"], 200, 600_000);
+    let (_h, state) = start_detecting(true, &["/bin/sh", "-i"], &sp);
+    let s = wait_state(&state, |s| s.state == RunState::Idle && s.foreground == Some(true)).await;
+    assert_eq!(s.foreground, Some(true));
+}
+
+#[tokio::test]
+async fn exit_leaves_state_and_exit_files() {
+    let sp = spec(RunKind::Command, &[], 200, 600_000);
+    let (h, state) = start_detecting(false, &["sh", "-c", "echo bye; exit 3"], &sp);
+    for _ in 0..200 {
+        if h.exit_file.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(read_exit_file(&h.exit_file).unwrap().unwrap().code, 3);
+    let s = wait_state(&state, |s| s.last_line.as_deref() == Some("bye")).await;
+    assert_eq!(s.last_line.as_deref(), Some("bye"));
+}
+
+#[tokio::test]
+async fn unwritable_state_file_does_not_stop_the_holder() {
+    let tmp = tempfile::tempdir().unwrap();
+    let missing = tmp.path().join("missing-dir").join("state.json");
+    let detect = tmp.path().join("detect.json");
+    let sp = spec(RunKind::Command, &[], 200, 600_000);
+    std::fs::write(&detect, serde_json::to_vec(&sp).unwrap()).unwrap();
+    let h = start_with(
+        true,
+        60,
+        &[
+            "--detect",
+            detect.to_str().unwrap(),
+            "--state-file",
+            missing.to_str().unwrap(),
+        ],
+    );
+    let (_hello, mut s) = attach(&h, true).await;
+    read_until(&mut s, "fake-cli ready").await;
+    assert!(!missing.exists());
+}
+
+#[tokio::test]
+async fn a_failed_state_write_is_retried() {
+    // The directory appears only after the first writes have failed. The run
+    // is quiet by then (a question, no more output), so only a retry of the
+    // kept snapshot can put its state on disk.
+    let sp = spec(RunKind::Agent, &[r"\[y/N\]"], 100, 600_000);
+    let (_h, state) = start_detecting_at(
+        false,
+        &["sh", "-c", r#"printf "Continue? [y/N] "; sleep 30"#],
+        &sp,
+        "later/state.json",
+    );
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert!(!state.exists());
+    std::fs::create_dir(state.parent().unwrap()).unwrap();
+    let s = wait_state(&state, |s| s.state == RunState::NeedsInput).await;
+    assert_eq!(s.detail.as_deref(), Some("Continue? [y/N]"));
+}
+
+#[tokio::test]
+async fn without_detect_no_state_file_appears() {
+    let h = start(true, 5);
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let dir = h.socket.parent().unwrap();
+    let stray: Vec<_> = std::fs::read_dir(dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name().to_string_lossy().contains("state"))
+        .collect();
+    assert!(stray.is_empty(), "unexpected {stray:?}");
+}
