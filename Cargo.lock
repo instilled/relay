@@ -1531,6 +1531,8 @@ dependencies = [
  "anyhow",
  "jiff",
  "nix 0.31.3",
+ "serde",
+ "serde_json",
  "tempfile",
 ]
 
