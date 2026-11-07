@@ -68,6 +68,11 @@ mod tests {
         };
         write_exit_file(&p, &e).unwrap();
         assert_eq!(read_exit_file(&p).unwrap(), Some(e));
-        assert!(!tmp.path().join("k7x2m9qa.exit.tmp").exists());
+        assert!(
+            std::fs::read_dir(tmp.path())
+                .unwrap()
+                .flatten()
+                .all(|e| !e.file_name().to_string_lossy().ends_with(".tmp"))
+        );
     }
 }

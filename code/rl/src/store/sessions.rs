@@ -166,10 +166,19 @@ fn age(path: &Path) -> Duration {
         .unwrap_or_default()
 }
 
+/// Whether a connect shows a holder there: it connected, or its backlog is
+/// full (EAGAIN: busy, not gone).
+fn answers(connect: &io::Result<UnixStream>) -> bool {
+    match connect {
+        Ok(_) => true,
+        Err(e) => e.kind() == io::ErrorKind::WouldBlock,
+    }
+}
+
 fn status_of(dir: &Path, meta: &Meta) -> Status {
     if let Ok(Some(exit)) = read_exit_file(&dir.join(EXIT)) {
         Status::Ended(exit)
-    } else if UnixStream::connect(&meta.socket).is_ok() {
+    } else if answers(&UnixStream::connect(&meta.socket)) {
         Status::Live
     } else {
         Status::Lost
@@ -225,8 +234,22 @@ pub(crate) fn pid_alive(pid: u32) -> bool {
 }
 
 /// Removes lost sessions whose holder is gone: its pid is dead, or was never
-/// recorded and the session is older than a minute.
+/// recorded and the session is older than a minute; and folders left without
+/// a `meta.json` past the claim grace.
 pub fn sweep(home: &Home) {
+    // A folder that never got its `meta.json` and is past the claim grace
+    // was abandoned.
+    if let Ok(rd) = std::fs::read_dir(home.sessions_dir()) {
+        for entry in rd.flatten() {
+            let dir = entry.path();
+            if dir.is_dir()
+                && matches!(read_meta(&dir), Err(e) if e.kind() == io::ErrorKind::NotFound)
+                && age(&dir) >= CLAIM_GRACE
+            {
+                let _ = std::fs::remove_dir_all(&dir);
+            }
+        }
+    }
     for held in list(home) {
         if held.status != Status::Lost {
             continue;
@@ -410,6 +433,37 @@ mod tests {
 
         std::fs::remove_file(dir.join(STATE)).unwrap();
         assert_eq!(current().unwrap().state, RunState::NeedsInput, "a word alone stands");
+    }
+
+    #[test]
+    fn a_full_backlog_still_counts_as_a_holder() {
+        assert!(answers(&Err(io::ErrorKind::WouldBlock.into())));
+        assert!(!answers(&Err(io::ErrorKind::NotFound.into())));
+        assert!(!answers(&Err(io::ErrorKind::ConnectionRefused.into())));
+    }
+
+    #[test]
+    fn a_spawning_session_is_lost_and_kept_by_the_grace() {
+        let (_t, home) = home();
+        let (name, dir) = claim(&home, "spawning").unwrap();
+        let mut m = meta(&name, dir.join("sock"), None);
+        m.started = Timestamp::now();
+        write_meta(&dir, &m).unwrap();
+        assert_eq!(list(&home)[0].status, Status::Lost);
+        sweep(&home);
+        assert!(dir.exists(), "inside the 60 s grace");
+    }
+
+    #[test]
+    fn sweep_removes_old_folders_without_meta_and_spares_young_ones() {
+        let (_t, home) = home();
+        let (_, young) = claim(&home, "young").unwrap();
+        let (_, old) = claim(&home, "old").unwrap();
+        let back = std::time::SystemTime::now() - Duration::from_secs(30);
+        std::fs::File::open(&old).unwrap().set_modified(back).unwrap();
+        sweep(&home);
+        assert!(young.exists());
+        assert!(!old.exists());
     }
 
     #[test]

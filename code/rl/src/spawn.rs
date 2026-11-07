@@ -16,6 +16,10 @@ use std::process::Stdio;
 /// Names the holder binary's override, as the old daemon did.
 pub const SESSION_BIN_ENV: &str = "RELAY_SESSION_BIN";
 
+/// The harness a session runs, in its holder's environment: so a hook can
+/// tell the session's own agent from one run inside it (`rl hook`).
+pub const AGENT_ENV: &str = "RELAY_SESSION_AGENT";
+
 pub struct Start {
     /// A registry profile name; its binary leads the argv.
     pub harness: Option<String>,
@@ -109,9 +113,28 @@ pub async fn start(home: &Home, start: Start) -> Result<Meta> {
         .unwrap_or_default();
     let (name, dir) = sessions::claim(home, &sessions::base_name(&folder, &plan.harness))?;
     let socket = home.session_socket_for(&name);
-    match launch(home, &name, &dir, &socket, &cwd, &plan, &start).await {
+    // Written before the holder starts, so a session mid-spawn is a Lost one
+    // with a start time (`sweep` leaves it a minute), never an unknown folder.
+    let meta = Meta {
+        name: name.clone(),
+        harness: plan.harness.clone(),
+        kind: plan.kind,
+        cwd: cwd.clone(),
+        argv: plan.argv.clone(),
+        started: Timestamp::now(),
+        socket: socket.clone(),
+        holder_pid: None,
+        native_id: None,
+    };
+    let mut holder_pid = None;
+    let launched = match sessions::write_meta(&dir, &meta) {
+        Ok(()) => launch(home, meta, &dir, &plan, &start, &mut holder_pid).await,
+        Err(e) => Err(e.into()),
+    };
+    match launched {
         Ok(meta) => Ok(meta),
         Err(e) => {
+            stop_holder(&socket, holder_pid).await;
             let _ = std::fs::remove_file(&socket);
             let _ = std::fs::remove_dir_all(&dir);
             Err(e)
@@ -119,15 +142,28 @@ pub async fn start(home: &Home, start: Start) -> Result<Meta> {
     }
 }
 
+/// A holder that may have started when its session did not: asked to close if
+/// its socket answers, else sent SIGTERM if its pid is known.
+async fn stop_holder(socket: &Path, pid: Option<u32>) {
+    if let Ok((_, mut session)) = Session::attach(socket, false).await
+        && session.close().await.is_ok()
+    {
+        return;
+    }
+    if let Some(pid) = pid.and_then(|p| i32::try_from(p).ok()) {
+        let _ = nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), nix::sys::signal::Signal::SIGTERM);
+    }
+}
+
 async fn launch(
     home: &Home,
-    name: &str,
+    mut meta: Meta,
     dir: &Path,
-    socket: &Path,
-    cwd: &Path,
     plan: &Plan<'_>,
     start: &Start,
+    holder_pid: &mut Option<u32>,
 ) -> Result<Meta> {
+    let (name, socket, cwd) = (meta.name.clone(), meta.socket.clone(), meta.cwd.clone());
     let detect = dir.join("detect.json");
     let spec = DetectSpec::from_parts(plan.kind, &plan.profile.patterns, plan.profile.timing);
     rl_core::atomic::write_json(&detect, &spec)?;
@@ -137,9 +173,9 @@ async fn launch(
     let bin = rl_core::locate_bin("rl-session", SESSION_BIN_ENV);
     let status = tokio::process::Command::new(&bin)
         .arg("--id")
-        .arg(name)
+        .arg(&name)
         .arg("--socket")
-        .arg(socket)
+        .arg(&socket)
         .arg("--exit-file")
         .arg(dir.join("exit"))
         .arg("--state-file")
@@ -147,13 +183,15 @@ async fn launch(
         .arg("--detect")
         .arg(&detect)
         .arg("--cwd")
-        .arg(cwd)
+        .arg(&cwd)
         .arg("--cols")
         .arg(start.cols.to_string())
         .arg("--rows")
         .arg(start.rows.to_string())
         .arg("--env")
         .arg(format!("RELAY_SESSION={name}"))
+        .arg("--env")
+        .arg(format!("{AGENT_ENV}={}", plan.harness))
         .arg("--env")
         .arg(format!("{}={}", rl_core::HOME_ENV, home.path().display()))
         .arg("--")
@@ -170,19 +208,24 @@ async fn launch(
     }
 
     // One look at the holder, for its pid; then let go.
-    let (hello, session) = Session::attach(socket, false).await?;
+    let (hello, session) = Session::attach(&socket, false).await?;
     drop(session);
-    let meta = Meta {
-        name: name.to_string(),
-        harness: plan.harness.clone(),
-        kind: plan.kind,
-        cwd: cwd.to_path_buf(),
-        argv: plan.argv.clone(),
-        started: Timestamp::now(),
-        socket: socket.to_path_buf(),
-        holder_pid: Some(hello.holder_pid),
-        native_id: None,
-    };
+    *holder_pid = Some(hello.holder_pid);
+    meta.holder_pid = *holder_pid;
     sessions::write_meta(dir, &meta)?;
     Ok(meta)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_holder_that_never_answered_is_sent_sigterm_by_pid() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut child = std::process::Command::new("sleep").arg("60").spawn().unwrap();
+        stop_holder(&tmp.path().join("no-socket"), Some(child.id())).await;
+        let status = child.wait().unwrap();
+        assert!(!status.success(), "ended by the signal: {status}");
+    }
 }

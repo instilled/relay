@@ -81,6 +81,18 @@ pub fn list(home: &Home, now: Timestamp) -> Vec<HookState> {
     list_with(home, now, pid_alive)
 }
 
+fn modified(path: &Path) -> Option<std::time::SystemTime> {
+    std::fs::metadata(path).and_then(|m| m.modified()).ok()
+}
+
+/// Deletes a stale file unless it was written since it was read: a hook may
+/// have just spoken for the session.
+fn remove_if_unchanged(path: &Path, seen: Option<std::time::SystemTime>) {
+    if seen.is_some() && modified(path) == seen {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
 fn list_with(home: &Home, now: Timestamp, alive: impl Fn(u32) -> bool) -> Vec<HookState> {
     let mut out = Vec::new();
     let Ok(agents) = std::fs::read_dir(home.state_dir()) else {
@@ -95,11 +107,10 @@ fn list_with(home: &Home, now: Timestamp, alive: impl Fn(u32) -> bool) -> Vec<Ho
             if path.extension().is_none_or(|e| e != "json") {
                 continue;
             }
+            let seen = modified(&path);
             match read(&path) {
                 Ok(Some(s)) if stands(&s, now, &alive) => out.push(s),
-                Ok(Some(_)) => {
-                    let _ = std::fs::remove_file(&path);
-                }
+                Ok(Some(_)) => remove_if_unchanged(&path, seen),
                 Ok(None) => {}
                 Err(e) => tracing::debug!(path = %path.display(), "skipping state file: {e}"),
             }
@@ -151,6 +162,25 @@ mod tests {
         for p in [dead, quiet, stale, no_folder] {
             assert!(!p.exists(), "{}", p.display());
         }
+    }
+
+    #[test]
+    fn a_stale_file_written_since_it_was_read_is_kept() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = Home::at(tmp.path().join("relay"));
+        let p = put(&home, "s", tmp.path(), None, Timestamp::now());
+        let seen = modified(&p);
+        let later = seen.unwrap() + std::time::Duration::from_secs(5);
+        std::fs::File::options()
+            .write(true)
+            .open(&p)
+            .unwrap()
+            .set_modified(later)
+            .unwrap();
+        remove_if_unchanged(&p, seen);
+        assert!(p.exists(), "a hook wrote since");
+        remove_if_unchanged(&p, modified(&p));
+        assert!(!p.exists());
     }
 
     #[test]

@@ -131,7 +131,13 @@ pub async fn stop(home: &Home, name: &str) -> Result<()> {
         bail!("no such session: {name}");
     };
     match held.status {
-        Status::Ended(_) => return Ok(()),
+        // The holder lingers after its session ends; let it go.
+        Status::Ended(_) => {
+            if let Ok((_, mut session)) = Session::attach(&held.meta.socket, false).await {
+                let _ = session.close().await;
+            }
+            return Ok(());
+        }
         Status::Lost => bail!("{name} is lost: its holder is not answering"),
         Status::Live => {}
     }

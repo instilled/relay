@@ -125,3 +125,58 @@ fn a_failing_argv_leaves_no_folder() {
     let left = std::fs::read_dir(&sessions).map(|d| d.count()).unwrap_or(0);
     assert_eq!(left, 0, "{err}");
 }
+
+#[test]
+fn meta_is_there_before_the_holder_starts_and_a_failed_start_leaves_nothing() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::tempdir().unwrap();
+    let marker = tmp.path().join("marker");
+    let fake = tmp.path().join("fake-session");
+    // Records what the session folder held when the holder started (its
+    // `--exit-file` argument sits in that folder), then fails.
+    std::fs::write(
+        &fake,
+        format!(
+            "#!/bin/sh\nwhile [ $# -gt 0 ]; do [ \"$1\" = --exit-file ] && f=\"$2\"; shift; done\n\
+             cat \"$(dirname \"$f\")/meta.json\" > {}\necho boom >&2\nexit 1\n",
+            marker.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let cwd = tmp.path().join("proj");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_rl-new"))
+        .args(["new", "--", "sleep", "30"])
+        .current_dir(&cwd)
+        .env("RELAY_HOME", tmp.path().join("relay"))
+        .env("HOME", tmp.path())
+        .env("RELAY_SESSION_BIN", &fake)
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let meta: serde_json::Value = serde_json::from_slice(&std::fs::read(&marker).unwrap()).unwrap();
+    assert_eq!(meta["name"], "proj-sleep");
+    assert!(meta.get("holder_pid").is_none(), "no pid yet: {meta}");
+    assert!(meta["started"].is_string());
+    let sessions = tmp.path().join("relay/sessions");
+    assert_eq!(std::fs::read_dir(&sessions).map(|d| d.count()).unwrap_or(0), 0);
+}
+
+#[test]
+fn stopping_an_ended_session_lets_its_lingering_holder_go() {
+    let Some(env) = Env::new() else { return };
+    let cwd = env.dir("done");
+    let (ok, name, err) = env.rl(&cwd, &["new", "--name-only", "--", "sh", "-c", "exit 0"]);
+    assert!(ok, "{err}");
+    let exit = env.home().join("sessions").join(&name).join("exit");
+    wait_for("the exit file", || exit.is_file());
+    let pid = env.ls().into_iter().find(|r| r["name"] == name).unwrap()["holder_pid"]
+        .as_i64()
+        .unwrap() as i32;
+    let alive = || nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None).is_ok();
+    assert!(alive(), "the holder lingers after its session ends");
+    let (ok, _, err) = env.rl(&cwd, &["stop", &name]);
+    assert!(ok, "{err}");
+    wait_for("the holder to go", || !alive());
+}

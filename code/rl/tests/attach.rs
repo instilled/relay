@@ -151,3 +151,70 @@ async fn an_ended_session_is_read_from_its_exit_file() {
     assert_eq!(ended.code(), 3);
     assert!(words.contains("ended (exit 3)"), "{words}");
 }
+
+#[tokio::test]
+async fn a_holder_killed_mid_attach_ends_it_as_closed_not_an_error() {
+    let Some(env) = Env::new() else { return };
+    let meta = env.start("sleep 30").await;
+    let pid = nix::unistd::Pid::from_raw(meta.holder_pid.unwrap() as i32);
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGKILL).unwrap();
+    });
+    // Typing and resizing go on after the holder is gone.
+    let r = run(&meta, &[b"x", b"y"], &[(100, 40)], Some((80, 24))).await;
+    assert_eq!(r.ended, Ended::Closed);
+}
+
+#[tokio::test]
+async fn an_ended_session_whose_holder_lingers_is_attached_to_and_the_exit_file_speaks_once_it_is_gone() {
+    use rl::attach::held::{Opened, open};
+    let Some(env) = Env::new() else { return };
+    let meta = env.start("echo last-screen; exit 3").await;
+    let dir = env.home.session_dir(&meta.name);
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !dir.join("exit").is_file() {
+        assert!(std::time::Instant::now() < deadline, "no exit file");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let Opened::Holder(hello, session) = open(&dir, &meta).await.unwrap() else {
+        panic!("the holder lingers; the socket answers");
+    };
+    let r = {
+        let (_keep_open, stdin) = tokio::io::duplex(64);
+        let (_sizes_tx, sizes) = mpsc::channel(1);
+        let mut out = Vec::new();
+        let view = View {
+            name: &meta.name,
+            interactive: false,
+            size: None,
+        };
+        let ended = tokio::time::timeout(
+            Duration::from_secs(10),
+            drive(session, &hello, stdin, &mut out, sizes, view),
+        )
+        .await
+        .expect("came back")
+        .unwrap();
+        (ended, String::from_utf8_lossy(&out).into_owned())
+    };
+    assert!(r.1.contains("last-screen"), "{}", r.1);
+    assert!(matches!(r.0, Ended::Exit { code: 3, .. }), "{:?}", r.0);
+
+    // Let the holder go; then only the exit file is left to say.
+    stop(&meta).await;
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        match open(&dir, &meta).await.unwrap() {
+            Opened::Over(ended, words) => {
+                assert!(matches!(ended, Ended::Exit { code: 3, .. }), "{ended:?}");
+                assert!(words.contains("ended (exit 3)"), "{words}");
+                break;
+            }
+            Opened::Holder(..) => {
+                assert!(std::time::Instant::now() < deadline, "the holder never left");
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        }
+    }
+}

@@ -5,10 +5,11 @@
 //! from the built-in profiles and yours in `$RELAY_HOME/detect`: a hook of
 //! an agent with none there tells of no session.
 //!
-//! Where the word goes. Under a session Relay holds (`RELAY_SESSION` set) it
-//! is that session's own: `sessions/<name>/hook.json`. Otherwise it is one of
-//! the agent's own sessions: `state/<agent>/<session_id>.json`. `ended`
-//! removes the file.
+//! Where the word goes. Under a session Relay holds (`RELAY_SESSION` set) and
+//! the call is of the agent that session runs (`RELAY_SESSION_AGENT`) it is
+//! that session's own: `sessions/<name>/hook.json`. Otherwise (an agent run
+//! inside a held shell, say) it is one of the agent's own sessions:
+//! `state/<agent>/<session_id>.json`. `ended` removes the file.
 //!
 //! Claude's user-level hook says `--user` after the event (its profile's
 //! `marker`): a Claude session of Relay's calls both it and the session's own
@@ -126,19 +127,35 @@ fn target(home: &Home, hooks: &UserHooks, words: &Words, held: Option<&str>) -> 
     }
 }
 
+/// The held session this call is the own word of: `RELAY_SESSION`, when the
+/// call is of the agent that session runs (`RELAY_SESSION_AGENT`). An agent
+/// started inside a held shell is not that session's.
+fn held_session(session: Option<String>, session_agent: Option<String>, agent: &str) -> Option<String> {
+    session
+        .filter(|s| !s.is_empty())
+        .filter(|_| session_agent.as_deref() == Some(agent))
+}
+
 /// Does what the hook asks, or nothing, within `WITHIN`. Never fails.
 pub async fn hook(home: &Home, words: &Words) {
+    let deadline = Instant::now() + WITHIN;
     // Relay's own `claude agents`: nothing to tell of.
     if asking() {
+        drain(deadline);
         return;
     }
-    let deadline = Instant::now() + WITHIN;
     let registry = registry(home);
     let Some(hooks) = registry.user_hooks(&words.agent) else {
+        drain(deadline);
         return;
     };
-    let held = std::env::var("RELAY_SESSION").ok().filter(|s| !s.is_empty());
+    let held = held_session(
+        std::env::var("RELAY_SESSION").ok(),
+        std::env::var(crate::spawn::AGENT_ENV).ok(),
+        &words.agent,
+    );
     let Some(target) = target(home, hooks, words, held.as_deref()) else {
+        drain(deadline);
         return;
     };
     let Some(raw) = stdin_until(deadline) else { return };
@@ -154,7 +171,12 @@ pub async fn hook(home: &Home, words: &Words) {
                 state::path(home, &hooks.agent, &word.session_id).ok_or_else(|| io::Error::other("bad id"))?
             }
         };
-        let known = state::read(&path).ok().flatten();
+        // A held session's agent that went on to another conversation
+        // (`/resume`) starts afresh.
+        let known = state::read(&path)
+            .ok()
+            .flatten()
+            .filter(|k| !matches!(target, Target::Held(_)) || k.session_id == word.session_id);
         let pid = if known.as_ref().is_none_or(|k| k.pid.is_none()) && hooks.asks_pid(&words.event) {
             agent_pid(&words.agent).await
         } else {
@@ -305,6 +327,12 @@ fn stdin_until(deadline: Instant) -> Option<String> {
         let _ = tx.send(std::io::read_to_string(std::io::stdin()).unwrap_or_default());
     });
     rx.recv_timeout(deadline.saturating_duration_since(Instant::now())).ok()
+}
+
+/// Reads stdin to its end (or `deadline`) and drops it, so an agent writing
+/// its payload to a hook that has nothing to do with it is not left blocked.
+fn drain(deadline: Instant) {
+    let _ = stdin_until(deadline);
 }
 
 /// Whether `ASKING` says an ask of Relay's is going on (`user_hooks::is_asking`).
@@ -510,6 +538,20 @@ mod tests {
         assert_eq!(target(&home, &codex, &w("codex", false), None), Some(Target::Own));
         assert_eq!(target(&home, &codex, &w("codex", false), Some("x")), held);
         assert_eq!(target(&home, &codex, &w("codex", false), Some("nope")), None);
+    }
+
+    #[test]
+    fn only_the_held_sessions_own_agent_speaks_for_it() {
+        let s = |v: &str| Some(v.to_string());
+        assert_eq!(held_session(s("x"), s("claude"), "claude"), s("x"));
+        assert_eq!(
+            held_session(s("x"), s("sh"), "claude"),
+            None,
+            "claude inside a held shell"
+        );
+        assert_eq!(held_session(s("x"), None, "claude"), None);
+        assert_eq!(held_session(s(""), s("claude"), "claude"), None);
+        assert_eq!(held_session(None, s("claude"), "claude"), None);
     }
 
     #[test]

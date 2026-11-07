@@ -2,8 +2,10 @@
 //!
 //! The loop ([`drive`]) runs over any stdin/stdout and an injectable stream of
 //! window sizes; [`attach`] wraps it in the real terminal (raw mode, SIGWINCH).
-//! A session that has already ended is not connected to: its exit file says
-//! how it ended.
+//! A session that has ended is still attached to while its holder lingers
+//! (the last screen can be seen); its exit file speaks only once the socket
+//! is gone. Errors from the holder's side end the attach as `Closed`; only
+//! the terminal's own can fail it.
 
 use super::{AbortOnDrop, AltScreen, Ended, RawMode, dim, split_detach, title};
 use crate::store::sessions::Meta;
@@ -63,9 +65,6 @@ pub async fn drive(
             .await?;
     }
     out.flush().await?;
-    if let Some((cols, rows)) = size {
-        wr.resize(cols, rows).await?;
-    }
 
     let (stdin_tx, mut stdin_rx) = mpsc::channel::<Vec<u8>>(64);
     // Aborted on every exit from this function (see `AbortOnDrop`), so the
@@ -88,9 +87,23 @@ pub async fn drive(
     let mut restore: Option<tokio::time::Instant> = None;
 
     let ended: Result<(Ended, Option<String>)> = async {
+        // The holder going away is how a session ends, not a failure: each
+        // call to it that fails ends the attach as `Closed`.
+        macro_rules! holder {
+            ($e:expr) => {
+                if $e.is_err() {
+                    return Ok((Ended::Closed, None));
+                }
+            };
+        }
+        if let Some((cols, rows)) = size {
+            holder!(wr.resize(cols, rows).await);
+        }
         loop {
             tokio::select! {
-                frame = rd.recv() => match frame? {
+                frame = rd.recv() => match frame {
+                    Err(_) => return Ok((Ended::Closed, None)),
+                    Ok(frame) => match frame {
                     Some(Frame::Output(b)) => {
                         alt.watch(&b);
                         out.write_all(&b).await?;
@@ -113,6 +126,7 @@ pub async fn drive(
                     // The stream went without an Exit frame; the caller reads
                     // the exit file to say what became of the session.
                     None => return Ok((Ended::Closed, None)),
+                    },
                 },
                 bytes = stdin_rx.recv(), if stdin_open => match bytes {
                     // Nothing more will be typed: a piped attach is over.
@@ -123,7 +137,7 @@ pub async fn drive(
                     Some(bytes) => {
                         let (typed, detach) = split_detach(&bytes);
                         if !typed.is_empty() {
-                            wr.input(typed).await?;
+                            holder!(wr.input(typed).await);
                         }
                         if detach {
                             let words = format!("[relay] detached; {} keeps going", view.name);
@@ -134,7 +148,7 @@ pub async fn drive(
                 new = resizes.recv(), if resizes_open => match new {
                     Some((cols, rows)) => {
                         size = Some((cols, rows));
-                        wr.resize(cols, rows).await?;
+                        holder!(wr.resize(cols, rows).await);
                     }
                     None => resizes_open = false,
                 },
@@ -143,14 +157,14 @@ pub async fn drive(
                     if let Some((cols, rows)) = size {
                         // A row rather than a column, as tmux does, so what the
                         // session printed is not wrapped twice.
-                        wr.resize(cols, rows.saturating_sub(1).max(1)).await?;
+                        holder!(wr.resize(cols, rows.saturating_sub(1).max(1)).await);
                         restore = Some(tokio::time::Instant::now() + NUDGE_HOLD);
                     }
                 }
                 _ = async { tokio::time::sleep_until(restore.unwrap()).await }, if restore.is_some() => {
                     restore = None;
                     if let Some((cols, rows)) = size {
-                        wr.resize(cols, rows).await?;
+                        holder!(wr.resize(cols, rows).await);
                     }
                 }
             }
@@ -235,27 +249,41 @@ async fn settled_exit(dir: &Path, name: &str) -> Option<(Ended, String)> {
     }
 }
 
-/// Attaches this terminal to the session until detached or it ends. A session
-/// that has ended is not connected to: its exit file says how it ended.
+/// What an attach finds.
+pub enum Opened {
+    /// The holder answers: its session may be running or ended and lingering.
+    Holder(Box<Hello>, Session),
+    /// The holder is gone and the exit file says how the session ended.
+    Over(Ended, String),
+}
+
+/// Connects to the holder, whether its session is running or has ended and
+/// lingers; the exit file speaks only where the socket is gone.
+///
+/// `attach_screen` draws the screen afresh from the holder's emulator; for a
+/// session without one it replays bytes from the start instead.
+pub async fn open(dir: &Path, meta: &Meta) -> Result<Opened> {
+    match Session::attach_screen(&meta.socket, 0).await {
+        Ok((hello, session)) => Ok(Opened::Holder(Box::new(hello), session)),
+        Err(e) => match from_exit_file(dir, &meta.name) {
+            Some((ended, words)) => Ok(Opened::Over(ended, words)),
+            None => Err(e).with_context(|| format!("{} is not answering", meta.name)),
+        },
+    }
+}
+
+/// Attaches this terminal to the session until detached or it ends. One that
+/// has ended but whose holder lingers is attached to as any other: its last
+/// screen shows, and it is left with ctrl-\.
 pub async fn attach(home: &Home, meta: &Meta) -> Result<Ended> {
     let dir = home.session_dir(&meta.name);
     let mut out = tokio::io::stdout();
-    if let Some((ended, words)) = from_exit_file(&dir, &meta.name) {
-        out.write_all(dim(&words).as_bytes()).await?;
-        out.flush().await?;
-        return Ok(ended);
-    }
-    // `attach_screen` draws the screen afresh from the holder's emulator; for
-    // a session without one it replays bytes from the start instead.
-    let (hello, session) = match Session::attach_screen(&meta.socket, 0).await {
-        Ok(ok) => ok,
-        Err(e) => {
-            if let Some((ended, words)) = from_exit_file(&dir, &meta.name) {
-                out.write_all(dim(&words).as_bytes()).await?;
-                out.flush().await?;
-                return Ok(ended);
-            }
-            return Err(e).with_context(|| format!("{} is not answering", meta.name));
+    let (hello, session) = match open(&dir, meta).await? {
+        Opened::Holder(hello, session) => (*hello, session),
+        Opened::Over(ended, words) => {
+            out.write_all(dim(&words).as_bytes()).await?;
+            out.flush().await?;
+            return Ok(ended);
         }
     };
 

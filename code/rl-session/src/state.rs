@@ -53,6 +53,11 @@ mod tests {
         };
         write_state_file(&p, &s).unwrap();
         assert_eq!(read_state_file(&p).unwrap(), Some(s));
-        assert!(!tmp.path().join("state.json.tmp").exists());
+        assert!(
+            std::fs::read_dir(tmp.path())
+                .unwrap()
+                .flatten()
+                .all(|e| !e.file_name().to_string_lossy().ends_with(".tmp"))
+        );
     }
 }

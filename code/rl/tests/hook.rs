@@ -29,6 +29,7 @@ impl Env {
         cmd.arg("hook")
             .args(args)
             .env_remove("RELAY_SESSION")
+            .env_remove("RELAY_SESSION_AGENT")
             .env_remove("RELAY_ASKING")
             .env("RELAY_HOME", self.home())
             .env("HOME", self.tmp.path())
@@ -107,10 +108,42 @@ fn under_a_held_session_the_word_goes_to_its_folder() {
     e.hook(
         &["claude", "UserPromptSubmit"],
         e.payload("s1"),
-        &[("RELAY_SESSION", "x")],
+        &[("RELAY_SESSION", "x"), ("RELAY_SESSION_AGENT", "claude")],
     );
     assert_eq!(read(&dir.join("hook.json"))["state"], "busy");
     assert!(!e.home().join("state").exists());
+}
+
+#[test]
+fn an_agent_inside_a_held_shell_reports_as_its_own_session() {
+    let e = Env::new();
+    let dir = e.home().join("sessions/x");
+    std::fs::create_dir_all(&dir).unwrap();
+    // The held session runs a shell; the claude started in it is not the
+    // session's: its `--user` copy tells, and its own copy says nothing.
+    let held_shell = [("RELAY_SESSION", "x"), ("RELAY_SESSION_AGENT", "sh")];
+    e.hook(&["claude", "UserPromptSubmit", "--user"], e.payload("s1"), &held_shell);
+    assert_eq!(read(&e.state("claude", "s1"))["state"], "busy");
+    assert!(!dir.join("hook.json").exists());
+    e.hook(&["claude", "Stop"], e.payload("s2"), &held_shell);
+    assert!(!e.state("claude", "s2").exists());
+    assert!(!dir.join("hook.json").exists());
+}
+
+#[test]
+fn a_held_session_that_moves_to_another_conversation_starts_afresh() {
+    let e = Env::new();
+    let dir = e.home().join("sessions/x");
+    std::fs::create_dir_all(&dir).unwrap();
+    let held = [("RELAY_SESSION", "x"), ("RELAY_SESSION_AGENT", "claude")];
+    let mut p = e.payload("s1");
+    p["transcript_path"] = json!("/t/s1.jsonl");
+    e.hook(&["claude", "UserPromptSubmit"], p, &held);
+    e.hook(&["claude", "SessionStart"], e.payload("s2"), &held);
+    let v = read(&dir.join("hook.json"));
+    assert_eq!(v["session_id"], "s2");
+    assert_eq!(v["state"], "idle");
+    assert!(v.get("transcript_path").is_none(), "{v}");
 }
 
 #[test]
@@ -121,7 +154,7 @@ fn under_a_held_session_the_user_copy_is_ignored() {
     e.hook(
         &["claude", "UserPromptSubmit", "--user"],
         e.payload("s1"),
-        &[("RELAY_SESSION", "x")],
+        &[("RELAY_SESSION", "x"), ("RELAY_SESSION_AGENT", "claude")],
     );
     assert!(!dir.join("hook.json").exists());
     assert!(!e.home().join("state").exists());
@@ -161,4 +194,14 @@ fn a_later_word_changes_the_state_and_keeps_the_rest() {
     let v = read(&e.state("claude", "s1"));
     assert_eq!(v["state"], "idle");
     assert_eq!(v["transcript_path"], "/t/s1.jsonl");
+}
+
+#[test]
+fn a_hook_with_nothing_to_do_still_reads_the_whole_payload() {
+    let e = Env::new();
+    let mut p = e.payload("s1");
+    // Bigger than a pipe holds: an unread one would fail the agent's write.
+    p["blob"] = json!("x".repeat(512 * 1024));
+    e.hook(&["nobody", "Stop"], p.clone(), &[]);
+    e.hook(&["claude", "Stop"], p, &[]);
 }
