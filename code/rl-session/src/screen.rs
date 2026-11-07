@@ -83,7 +83,7 @@ pub fn dec_graphic(c: char) -> char {
 /// Rewrites a byte stream so the box-drawing set is drawn rather than spelled,
 /// leaving everything else exactly as it stood — colours, cursor moves and all.
 ///
-/// `rl_detect::ansi::Stripper` answers what a run's output *said*; this answers what a
+/// `crate::detect::ansi::Stripper` answers what a run's output *said*; this answers what a
 /// terminal would have *shown*, for a screen that draws the bytes itself.
 /// `vt100` hands any escape carrying an intermediate byte to its unhandled
 /// hook, and `ESC ( 0` is one, so without this a ruled-off prompt arrives as

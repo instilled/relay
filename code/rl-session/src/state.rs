@@ -22,7 +22,10 @@ pub struct StateFile {
 
 /// Written atomically (tmp + rename) so a reader never sees a partial file.
 pub fn write_state_file(path: &Path, s: &StateFile) -> io::Result<()> {
-    let tmp = path.with_extension("tmp");
+    let tmp = path.with_file_name(format!(
+        "{}.tmp",
+        path.file_name().unwrap_or_default().to_string_lossy()
+    ));
     std::fs::write(&tmp, serde_json::to_vec(s)?)?;
     std::fs::rename(&tmp, path)
 }
@@ -43,7 +46,7 @@ mod tests {
     #[test]
     fn a_state_file_round_trips_and_a_missing_one_is_none() {
         let tmp = tempfile::tempdir().unwrap();
-        let p = tmp.path().join("k7x2m9qa.state");
+        let p = tmp.path().join("state.json");
         assert_eq!(read_state_file(&p).unwrap(), None);
         let s = StateFile {
             state: RunState::NeedsInput,
@@ -55,6 +58,6 @@ mod tests {
         };
         write_state_file(&p, &s).unwrap();
         assert_eq!(read_state_file(&p).unwrap(), Some(s));
-        assert!(!p.with_extension("tmp").exists());
+        assert!(!tmp.path().join("state.json.tmp").exists());
     }
 }

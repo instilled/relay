@@ -8,7 +8,7 @@
 //! It also works out its own run state (the [`detect`] heuristics, kept in a
 //! state file), so nothing needs a daemon to know whether a run is working or
 //! waiting on input.
-//! It depends on nothing else in Relay so a daemon crash — or upgrade — never
+//! It depends on nothing in Relay but `rl-core` so a daemon crash — or upgrade — never
 //! costs a session.
 //!
 //! The library half ([`proto`], [`client`], [`exit`], [`screen`], [`detect`]) is what `rld`

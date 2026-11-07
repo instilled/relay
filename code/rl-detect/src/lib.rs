@@ -3,8 +3,9 @@
 //!
 //! - [`registry`]: which CLI is this (`detect/*.yaml`, user-overridable), and
 //!   what signals does it offer.
-//! - [`pty`] (in `rl-session`, where the holder runs it): the floor — output-idle timers and prompt-line patterns over the
-//!   holder's byte stream. Only ever `guess` or `likely`.
+//! - [`pty`] (in `rl-session`, where the holder runs it): the floor —
+//!   output-idle timers and prompt-line patterns over the holder's byte
+//!   stream. Only ever `guess` or `likely`.
 //! - [`claude`]: exact signals from Claude Code hooks, and the settings file
 //!   that makes Claude send them.
 //! - [`sessions`]: an agent's own sessions as its profile tells of them: its
@@ -17,7 +18,6 @@
 
 pub mod claude;
 pub mod machine;
-
 pub mod registry;
 pub mod sessions;
 pub mod user_hooks;

@@ -130,8 +130,8 @@ struct Ctx {
     /// Pulsed once per output chunk, so the foreground watcher can park deeply
     /// while the run is quiet and wake the moment the child writes again.
     output_wake: Arc<Notify>,
-    /// The holder's own answer to "what state is this run in?". Locked after
-    /// `shared`, never before.
+    /// The holder's own answer to "what state is this run in?". Never locked
+    /// while `shared` is held.
     tracker: Option<Mutex<Tracker>>,
 }
 
@@ -244,11 +244,13 @@ async fn pump_output(ctx: Arc<Ctx>, mut output: mpsc::Receiver<Vec<u8>>) {
         if let Some(sc) = s.screen.as_mut() {
             sc.feed(&chunk);
         }
+        let chunk: Arc<[u8]> = Arc::from(chunk);
+        let _ = ctx.out.send(chunk.clone());
+        drop(s);
+        // The tracker is its own lock, taken once the shared one is let go.
         if let Some(t) = &ctx.tracker {
             t.lock().unwrap().output(&chunk, Timestamp::now());
         }
-        let _ = ctx.out.send(Arc::from(chunk));
-        drop(s);
         // Wake the foreground watcher: it parks on this while the run is quiet.
         ctx.output_wake.notify_one();
     }

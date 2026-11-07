@@ -3,7 +3,7 @@
 //! silence much longer while working means stale.
 //!
 //! Nothing here is ever `exact`. A run whose CLI offers real signals keeps
-//! these from touching its state (see `rl_detect::machine`).
+//! these from touching its state (see the daemon's state machine).
 
 use super::ansi;
 use jiff::Timestamp;
