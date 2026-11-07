@@ -4,7 +4,14 @@ use super::*;
 
 /// What a search matches a row on: its words, its project, how it stands,
 /// and what it is — an agent, and whose (`kind:claude`).
-pub fn subject<'a>(r: &'a Row, title: &'a str, project: &'a str, pinned: bool, hidden: bool) -> Subject<'a> {
+pub fn subject<'a>(
+    r: &'a Row,
+    title: &'a str,
+    project: &'a str,
+    on: Option<&'a str>,
+    pinned: bool,
+    hidden: bool,
+) -> Subject<'a> {
     let mut is = vec![is_word(r.state)];
     if pinned {
         is.push("pinned");
@@ -25,7 +32,7 @@ pub fn subject<'a>(r: &'a Row, title: &'a str, project: &'a str, pinned: bool, h
         project: vec![project, r.cwd.to_str().unwrap_or("")],
         is,
         kind,
-        on: None,
+        on,
     }
 }
 
@@ -49,9 +56,15 @@ pub fn named(line: &Line, names: &Names) -> Named {
     }
 }
 
-/// A project's header.
-pub fn head(folder: &Path, names: &Names, attention: usize) -> Head {
+/// The branch a project's folder is on, if it is in a repo and on one.
+fn branch_of<'a>(checkouts: &'a Checkouts, project: &Path) -> Option<&'a str> {
+    checkouts.get(project)?.branch.as_deref()
+}
+
+/// A project's header, with its folder's checkout when there is one.
+pub fn head(folder: &Path, names: &Names, checkouts: &Checkouts, attention: usize) -> Head {
     Head {
+        checkout: checkouts.get(folder).cloned().map(Box::new),
         key: head_key(folder),
         place: short_path(folder),
         workspace: folder.to_path_buf(),
@@ -91,7 +104,17 @@ pub fn build<'a>(rows: &'a [Row], cx: &Context<'_>) -> Vec<Line<'a>> {
         let project_name = names.workspace(&project);
         let since = hidden_since(r, &project, &prefs.hidden);
         let is_pinned = cx.pinned(r);
-        let hits = || query.hits(&subject(r, names.title(r), &project_name, is_pinned, since.is_some()));
+        let on = branch_of(cx.checkouts, &project);
+        let hits = || {
+            query.hits(&subject(
+                r,
+                names.title(r),
+                &project_name,
+                on,
+                is_pinned,
+                since.is_some(),
+            ))
+        };
         let kept = keeps(r, prefs.show_agents, prefs.show_shells);
         if let Some(since) = since
             && !prefs.show_hidden
@@ -158,7 +181,7 @@ fn by_project<'a>(
     let mut blocks: Vec<(String, String, Vec<Line<'a>>)> = Vec::new();
     let shown: Vec<PathBuf> = groups.iter().map(|(f, _)| f.clone()).collect();
     for (folder, mut rows) in groups {
-        let h = head(&folder, &names, attention(&folder));
+        let h = head(&folder, &names, cx.checkouts, attention(&folder));
         // The order they came in, which nothing that happens to a row
         // changes — until you put the project's rows in order: then yours,
         // and what is new enters at the bottom.
@@ -195,8 +218,11 @@ fn by_project<'a>(
         if shown.contains(&p) {
             continue;
         }
-        let h = head(&p, &names, attention(&p));
-        if !query.hits_project(&[&h.name, &h.place, p.to_str().unwrap_or("")], None) {
+        let h = head(&p, &names, cx.checkouts, attention(&p));
+        if !query.hits_project(
+            &[&h.name, &h.place, p.to_str().unwrap_or("")],
+            branch_of(cx.checkouts, &p),
+        ) {
             continue;
         }
         blocks.push((h.name.to_lowercase(), h.key.clone(), vec![Line::Group(h)]));

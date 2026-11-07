@@ -180,3 +180,27 @@ fn stopping_an_ended_session_lets_its_lingering_holder_go() {
     assert!(ok, "{err}");
     wait_for("the holder to go", || !alive());
 }
+
+#[test]
+fn removing_an_ended_session_closes_its_lingering_holder_first() {
+    let Some(env) = Env::new() else { return };
+    let cwd = env.dir("done");
+    let (ok, name, err) = env.rl(&cwd, &["new", "--name-only", "--", "sh", "-c", "exit 0"]);
+    assert!(ok, "{err}");
+    let dir = env.home().join("sessions").join(&name);
+    wait_for("the exit file", || dir.join("exit").is_file());
+    let pid = env.ls().into_iter().find(|r| r["name"] == name).unwrap()["holder_pid"]
+        .as_i64()
+        .unwrap() as i32;
+    let alive = || nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None).is_ok();
+    assert!(alive(), "the holder lingers after its session ends");
+    let (ok, _, err) = env.rl(&cwd, &["rm", &name]);
+    assert!(ok, "{err}");
+    assert!(!dir.exists());
+    // Closed by rm, not left to find its socket gone: a moment, not a poll for ever.
+    let until = Instant::now() + Duration::from_secs(2);
+    while alive() && Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(!alive(), "the holder went with the session");
+}

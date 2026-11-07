@@ -87,6 +87,8 @@ pub struct Head {
     pub attention: usize,
     /// The heading it is, grouped by state.
     pub heading: Option<Heading>,
+    /// The folder's checkout, when it is in a repo.
+    pub checkout: Option<Box<Checkout>>,
 }
 
 impl Head {
@@ -99,6 +101,7 @@ impl Head {
             own: None,
             attention,
             heading: Some(h),
+            checkout: None,
         }
     }
 
@@ -113,6 +116,8 @@ impl Head {
 pub struct Context<'a> {
     pub prefs: &'a ListPrefs,
     pub filter: &'a str,
+    /// The checkouts of the projects' folders, by folder (`git::checkouts`).
+    pub checkouts: &'a Checkouts,
 }
 
 impl Context<'_> {

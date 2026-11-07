@@ -1,8 +1,10 @@
 //! The `rl` binary's library: the plain-file session store and what is built on it.
 
 pub mod attach;
+pub mod badges;
 pub mod cmd;
 pub mod config;
+pub mod git;
 pub mod hook;
 pub mod query;
 pub mod rank;

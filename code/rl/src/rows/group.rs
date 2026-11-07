@@ -14,9 +14,24 @@ pub fn keeps(r: &Row, show_agents: bool, show_shells: bool) -> bool {
 }
 
 /// The project a row stands under: the folder you named that its folder is
-/// in, the deepest where they nest, else its own folder.
+/// in, the deepest where they nest; else its repository's root (a linked
+/// worktree is a root of its own); else its own folder.
 pub fn project_of(r: &Row, names: &Names) -> PathBuf {
-    names.containing(&r.cwd).unwrap_or_else(|| r.cwd.clone())
+    names
+        .containing(&r.cwd)
+        .or_else(|| crate::git::toplevel(&r.cwd))
+        .unwrap_or_else(|| r.cwd.clone())
+}
+
+/// The folders the list will have projects for: those its rows stand under
+/// and those you named. What `git::checkouts` is asked about.
+pub fn project_folders(rows: &[Row], prefs: &ListPrefs) -> Vec<PathBuf> {
+    let names = Names::new(&prefs.names);
+    let mut folders: Vec<PathBuf> = rows.iter().map(|r| project_of(r, &names)).collect();
+    folders.extend(names.paths());
+    folders.sort();
+    folders.dedup();
+    folders
 }
 
 /// A project's header key: `g:<folder>`, what hides it and orders it.

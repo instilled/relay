@@ -5,7 +5,9 @@
 //! By project (the default), a group is a row's folder — never its branch: a
 //! folder is one project whichever branch it is on, and its header says
 //! which. A row stands under the folder you named (`names`, `g:<folder>`)
-//! that its folder is in, the deepest where they nest, else under its own.
+//! that its folder is in, the deepest where they nest, else under its
+//! repository's root (a linked worktree is a root of its own), else under its
+//! own folder. A project's header carries its folder's checkout.
 //! Groups come in order of name, until you move one (shift-↑/↓ on its
 //! header): then in yours, and what you have not placed after it by name.
 //! Inside a group, rows stand in the order they came — by when each started,
@@ -28,6 +30,7 @@
 //! the bottom.
 
 use crate::config::{Grouping, Hidden, ListPrefs, Order};
+use crate::git::{Checkout, Checkouts};
 use crate::query::{Named, Query, Subject};
 use crate::rank;
 use crate::sources::Row;

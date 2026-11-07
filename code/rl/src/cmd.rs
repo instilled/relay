@@ -133,9 +133,7 @@ pub async fn stop(home: &Home, name: &str) -> Result<()> {
     match held.status {
         // The holder lingers after its session ends; let it go.
         Status::Ended(_) => {
-            if let Ok((_, mut session)) = Session::attach(&held.meta.socket, false).await {
-                let _ = session.close().await;
-            }
+            let_go(&held).await;
             return Ok(());
         }
         Status::Lost => bail!("{name} is lost: its holder is not answering"),
@@ -171,6 +169,21 @@ pub async fn attach(home: &Home, name: &str) -> Result<()> {
     }
 }
 
-pub fn rm(home: &Home, name: &str) -> Result<()> {
+/// Asks the holder of an ended session, if its socket still answers, to
+/// exit now rather than linger.
+async fn let_go(held: &Held) {
+    if let Ok((_, mut session)) = Session::attach(&held.meta.socket, false).await {
+        let _ = session.close().await;
+    }
+}
+
+/// Removes an ended session. A holder that still lingers is closed first, so
+/// it exits now and not whenever it next notices its socket is gone.
+pub async fn rm(home: &Home, name: &str) -> Result<()> {
+    if let Some(held) = sessions::list(home).into_iter().find(|h| h.meta.name == name)
+        && matches!(held.status, Status::Ended(_))
+    {
+        let_go(&held).await;
+    }
     sessions::remove(home, name)
 }

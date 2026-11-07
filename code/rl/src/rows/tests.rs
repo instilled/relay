@@ -78,7 +78,18 @@ fn keys(lines: &[Line]) -> Vec<String> {
 }
 
 fn build_with<'a>(rows: &'a [Row], prefs: &ListPrefs, filter: &str) -> Vec<Line<'a>> {
-    build(rows, &Context { prefs, filter })
+    build_in(rows, prefs, filter, &Checkouts::new())
+}
+
+fn build_in<'a>(rows: &'a [Row], prefs: &ListPrefs, filter: &str, checkouts: &Checkouts) -> Vec<Line<'a>> {
+    build(
+        rows,
+        &Context {
+            prefs,
+            filter,
+            checkouts,
+        },
+    )
 }
 
 /// The list with the toggles `(agents, shells, hidden)`.
@@ -1033,4 +1044,100 @@ fn words_and_columns() {
     for w in 0..12 {
         assert_eq!(fit("権限の確認 x", w).width(), w, "{w}");
     }
+}
+
+fn co(path: &str, branch: &str, worktrees: usize, badges: &[&str]) -> Checkout {
+    Checkout {
+        path: path.into(),
+        branch: Some(branch.into()),
+        detached: None,
+        worktrees,
+        badges: badges.iter().map(|b| b.to_string()).collect(),
+    }
+}
+
+#[test]
+fn a_header_says_its_folders_branch_worktrees_and_badge() {
+    let rows = [
+        row("a1", RunState::Working, "/home/f/api", "2026-09-10T11:50:00Z"),
+        row("a2", RunState::Working, "/home/f/api", "2026-09-10T11:40:00Z"),
+        row("w1", RunState::Working, "/home/f/web", "2026-09-10T11:30:00Z"),
+        row("x1", RunState::Working, "/home/f/plain", "2026-09-10T11:20:00Z"),
+    ];
+    let checkouts: Checkouts = [
+        ("/home/f/api".into(), co("/home/f/api", "main", 2, &["PR #95"])),
+        ("/home/f/web".into(), co("/home/f/web", "main", 0, &[])),
+    ]
+    .into();
+    let lines = build_in(&rows, &ListPrefs::default(), "", &checkouts);
+    let words = |name: &str| {
+        head_of(&lines, name)
+            .checkout
+            .as_ref()
+            .map(|c| crate::git::checkout_words(c))
+    };
+    assert_eq!(words("api").as_deref(), Some("⎇ main · PR #95 · 2 worktrees"));
+    assert_eq!(words("web").as_deref(), Some("⎇ main"));
+    assert_eq!(words("plain"), None, "a folder outside a repo has no branch line");
+}
+
+#[test]
+fn on_matches_the_branch_a_projects_folder_is_on() {
+    let rows = [
+        row("a1", RunState::Working, "/home/f/api", "2026-09-10T11:50:00Z"),
+        row("w1", RunState::Working, "/home/f/web", "2026-09-10T11:30:00Z"),
+    ];
+    let checkouts: Checkouts = [
+        ("/home/f/api".into(), co("/home/f/api", "feat/search", 0, &[])),
+        ("/home/f/web".into(), co("/home/f/web", "main", 0, &[])),
+    ]
+    .into();
+    let on = |q: &str| keys(&build_in(&rows, &ListPrefs::default(), q, &checkouts));
+    assert_eq!(on("on:search"), ["[api]", "r:a1"]);
+    assert_eq!(on("on:main"), ["[web]", "r:w1"]);
+    assert!(on("on:nope").is_empty());
+    // A named folder with nothing in it is found by its branch too.
+    let p = prefs(&[("/home/f/web", "web")]);
+    let only_api = [rows[0].clone()];
+    assert_eq!(keys(&build_in(&only_api, &p, "on:main", &checkouts)), ["[web]"]);
+}
+
+#[test]
+fn a_row_stands_under_the_named_folder_else_its_repo_root_else_its_own_folder() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    // A repo with folders inside, a linked worktree (its `.git` a file) in
+    // another place, and a plain folder.
+    let repo = root.join("repo");
+    std::fs::create_dir_all(repo.join(".git")).unwrap();
+    std::fs::create_dir_all(repo.join("src/deep")).unwrap();
+    let wt = root.join("repo-feat");
+    std::fs::create_dir_all(wt.join("src")).unwrap();
+    std::fs::write(wt.join(".git"), "gitdir: elsewhere\n").unwrap();
+    let plain = root.join("plain/sub");
+    std::fs::create_dir_all(&plain).unwrap();
+    let at = |id: &str, cwd: &Path| row(id, RunState::Working, cwd.to_str().unwrap(), "2026-09-10T11:50:00Z");
+    let rows = [
+        at("deep", &repo.join("src/deep")),
+        at("top", &repo),
+        at("wt", &wt.join("src")),
+        at("plain", &plain),
+    ];
+    let lines = build_with(&rows, &ListPrefs::default(), "");
+    assert_eq!(
+        keys(&lines),
+        ["[repo]", "r:deep", "r:top", "[repo-feat]", "r:wt", "[sub]", "r:plain"],
+        "the worktree is its own project; a plain folder is its own"
+    );
+    assert_eq!(head_of(&lines, "repo").workspace, repo);
+    assert_eq!(head_of(&lines, "repo-feat").workspace, wt);
+    let mut folders = vec![plain, repo, wt];
+    folders.sort();
+    assert_eq!(project_folders(&rows, &ListPrefs::default()), folders);
+
+    // A folder you named, above the repo, wins over the repo's root.
+    let p = prefs(&[(root.to_str().unwrap(), "all")]);
+    let lines = build_with(&rows, &p, "");
+    let heads = lines.iter().filter(|l| matches!(l, Line::Group(_))).count();
+    assert_eq!((keys(&lines)[0].as_str(), heads), ("[all]", 1));
 }

@@ -70,6 +70,6 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Ls { json } => cmd::ls(&home, json),
         Command::Attach { name } => cmd::attach(&home, &name).await,
         Command::Stop { name } => cmd::stop(&home, &name).await,
-        Command::Rm { name } => cmd::rm(&home, &name),
+        Command::Rm { name } => cmd::rm(&home, &name).await,
     }
 }
