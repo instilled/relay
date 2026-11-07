@@ -1,36 +1,43 @@
 # Relay Product Roadmap
 
-Goal for v1:
+Goal for v1 (2026-11-07): **`claude agents`, but for every harness, plus shells, plus messaging
+between agents.** One list in the terminal you already use of every agent session — Claude's and
+Codex's own background sessions shown 1:1 as their agents views show them, Relay-held sessions for
+harnesses without a background mode and for shells, agents in other terminals from hooks — attach
+full-screen, ctrl-\ back to the list. No daemon: `rl`, `rl-session` holders and plain files.
+Spec: `docs/specs/2026-11-07-slim-relay.md`.
 
-* UC1: i want to check notion via api (cli client) periodically for new feedback log items, e.g. 1h. if it has output claude should work on it and trigger a skill then surface recommendations to me i can accept or reject.   
-* UC2: i want to check google cloud logs. on error / warn i want to trigger claude to analyse and create a notion task if i approve
+The earlier v1 goals (flows for Notion feedback and GCP logs) and everything open below them — the
+report arc, the briefer, the co-worker layer, notifications, the pane redesign — are dropped.
 
 ## Open — in the order they'd be built
 
-The next milestone is one dependable daily loop: start work → leave → get told when needed → come back to the facts → say yes to the next step. Breadth waits for it.
+One worktree and one PR off `main` per step; `main` stays green throughout. The new `code/rl` is
+built beside the old crates and takes over in step 5.
 
-**The report** is the arc that carries it — one attention inbox of *leads* (needs-you / live / happened) from any source, grouped by the co-worker doing the work. It folds together what used to be three separate items: notifications becomes its push hook, the facts collector (J6) enriches its *happened* band, and the pane redesign is where it lives. Spec: `docs/specs/2026-10-17-the-report.md`. Built in order, one PR each:
-
-* [x] report · step 1 — the lead model, the `rl lead post`/`clear` verb (extending `rl emit`), the built-in projection (open decisions, needs-you/live/happened runs & flows computed from `decisions`/`runs`/`events`), and `rl report [scope] [since]` as text. Pure backend + CLI, fully testable with no UI; ships *come back* as text and opens every external source at once. A background task in `serve_with` maintains leads and later drives the push (#183, #184)
-* [x] report · step 2 — the pane redesign, with the report rendered in it: full-width subpages, no side column, the watch tile dropped; needs-you / live / happened grouped by co-worker; acting on a lead and focusing the pane on one (both genuinely new — nothing today takes a target into `tui::run`). Absorbs the `drawing`/`pane` cluster held out of the god-module split, so it is rewritten once not split-then-rewritten (#185)
-* [x] report · step 3 — the facts collector (J6): the deterministic facts that enrich *happened* — git commits + `diff --stat` per run, commands with exit codes, transcript ingestion (Claude/Codex `*.jsonl`), tokens; and the prose digest, `rl report --prose` and the pane's `p` (#186)
-* [ ] report · step 4 — recap intelligence: `summary.rs` becomes the one recap engine and the report reads it; recaps written from the session (bounded tail + the run's facts, the agent's own recap as a seed) for every model, Gemini read too; depth by time away (under 2h the headline, to 2 days a brief in three parts, past that a deep read as prose), generated as the report opens behind a count-first guard; tokens counted once per message as fresh / cached / out; step 3's `FactsStructure` and recap merge retired. Spec: `docs/specs/2026-10-25-the-report-step-4-recap-intelligence.md`
-* [ ] report · step 5 — the push hook: fire a plugin command from `~/.relay/plugins/` (the `badges.rs` mechanism) when the needs-you band gains a lead; dedup keyed on the lead's `key`; a per-source / global quiet setting; one or two example notifier plugins. One-way — the push tells you to come back; the yes stays Relay's. Payloads: needs-you carries the agent's own last question, a finished run its headline. Leave room for an escalation from the briefer, not only a band change. The channel is decided here
-* [ ] report · audio — a plugin voices `rl report --prose` (macOS `say` or a real TTS), the push hook's fire-a-command mechanism; once the prose reads right
-* [ ] the briefer — an assistant that briefs you and surfaces or escalates what matters, beyond the mechanical needs-you band: an agent going in circles, the same test failing again, tokens burning with nothing committed, a risky step ahead, a needs-you left for hours. Cheap deterministic signals decide when to look; the assistant judges only what they flag (so fifty agents still cost nothing at rest); it reads step 4's recaps and facts and escalates through step 5's push, and briefs through the prose and audio
-* [ ] the co-worker layer — tag a source with a free-form role (*mobile developer*, *researcher*, …) in rl, a persisted user-side overlay like reorder/rename/hide; the report groups by it. Rides on step 1's model and step 2's pane; no source-side change
-* [ ] ctrl-\ leaves a Claude background session — enter runs `claude attach` under a PTY of Relay's (as `attach.rs` does for runs), so ctrl-\ detaches back to the panel as for any run, and ^Z / ← still work; the session itself keeps running (small, independent — any time)
+* [ ] slim · step 1 — the holder knows itself: `rl-session` works out its own state (working /
+  needs input / idle, last line, foreground; moved in from `rl-detect`) and keeps
+  `~/.relay/sessions/<name>/{state.json,exit}` beside its socket; `--no-tty` goes
+* [ ] slim · step 2 — `code/rl`, daemonless: the file store (`sessions/`, `state/`, `config.json`,
+  atomic writes, names claimed by folder), `rl new | ls | attach | stop` on Relay-held agents and
+  shells straight to the holder, `rl hook` writing state files
+* [ ] slim · step 3 — the list: today's grouping by project (manual order, new at the bottom,
+  `! N need you`) and by state (`^s`), filters `a`/`s`/`h`, `^f` search, today's keys, project
+  headers with their git line and badges; live by file watch, polling only while open
+* [ ] slim · step 4 — native sessions 1:1: the Claude adapter (`claude agents --all` rows with
+  their own name, state, `detail`, age and PR label; `claude attach`; an idle outside session
+  carried on with `--resume --bg`), then Codex (`codex agents` rows via the app-server; Relay-held
+  if its sessions can't be attached one by one); other-terminal agents from hooks
+* [ ] slim · step 5 — the switch: the workspace becomes `rl-core`, `rl-session`, `rl-detect`, `rl`;
+  `rl-daemon`, `rl-proto`, `rl-ledger`, `rl-flow`, `rl-cli` and `rld` deleted; README,
+  ARCHITECTURE and PRODUCT rewritten; examples/flows gone
+* [ ] slim · step 6 — messaging: `rl mcp`, a stdio MCP server with `send` / `who` / `inbox` over
+  `~/.relay/mail/<address>/`, pull only; `rl setup` registers it with each harness beside the hooks
 
 Later:
 
-* [ ] a row that needs you shows its question, not the recap — today a waiting Claude/Codex row shows its recap even while it asks for permission (open question from #142)
-* [ ] git workspaces? how to manage these? — needs a brainstorm first: today a worktree registered on its own is its own project and only the main checkout counts its worktrees
-* [ ] decision context — what's/how is the context of a question rendered beyond its summary (what the asking run last printed, the event behind an `ask` step)?
-* [ ] `rl flow run <name> --step s --firing id` — run one step of a firing again (in the flows spec, never built)
-* [ ] retention purge of archived runs — today archive is out-of-list only and `rl prune` lets the journal go; actually delete runs past the retention window
-* [ ] worktrees & ref rules — `--worktree`, branch naming, `.relay/config.yaml` ref derivation
-* [ ] trim `main.rs` (~1,900 lines) — the CLI entry split by command group, tests beside them, behaviour unchanged (the other half of the old "modules split" item)
-* [ ] ts plugin subsystem — on hold until the daily loop is dependable
+* [ ] peek and reply from the list without attaching (as `claude agents`' space)
+* [ ] socket paths that can't overflow macOS's ~104 bytes, if short names don't suffice
 
 ## Done — newest first
 
