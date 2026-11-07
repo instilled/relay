@@ -2,10 +2,11 @@
 //! There is no registry: the folders are the truth, and a session's liveness is
 //! read from its files and its socket.
 
+use super::state::{self, HookState, Said};
 use anyhow::{Result, bail};
 use jiff::Timestamp;
 use rl_core::Home;
-use rl_core::state::RunKind;
+use rl_core::state::{Confidence, RunKind, RunState};
 use rl_session::exit::{Exit, read_exit_file};
 use rl_session::state::{StateFile, read_state_file};
 use serde::{Deserialize, Serialize};
@@ -17,6 +18,8 @@ use std::time::Duration;
 const META: &str = "meta.json";
 const EXIT: &str = "exit";
 const STATE: &str = "state.json";
+/// What the agent's own hooks last said, written by `rl hook`.
+pub const HOOK: &str = "hook.json";
 /// A folder with no `meta.json` younger than this is a claim in progress.
 const CLAIM_GRACE: Duration = Duration::from_secs(10);
 /// A lost session whose holder pid was never recorded is swept after this.
@@ -53,7 +56,43 @@ pub struct Held {
     pub meta: Meta,
     pub status: Status,
     pub state: Option<StateFile>,
+    pub hook: Option<HookState>,
     pub dir: PathBuf,
+}
+
+/// How a live session stands, whichever file says so.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Current {
+    pub state: RunState,
+    pub detail: Option<String>,
+    /// Whether the agent said so itself (a hook), not the holder's reading of
+    /// the screen.
+    pub exact: bool,
+}
+
+impl Held {
+    /// The effective state: a `hook.json` newer than `state.json` wins, and is
+    /// exact; else `state.json`, at the confidence the holder gave it. None
+    /// where neither is there.
+    pub fn current(&self) -> Option<Current> {
+        match (&self.hook, &self.state) {
+            (Some(h), s) if s.as_ref().is_none_or(|s| h.at > s.at) => Some(Current {
+                state: match h.state {
+                    Said::Idle => RunState::Idle,
+                    Said::Busy => RunState::Working,
+                    Said::Waiting => RunState::NeedsInput,
+                },
+                detail: h.detail.clone(),
+                exact: true,
+            }),
+            (_, Some(s)) => Some(Current {
+                state: s.state,
+                detail: s.detail.clone(),
+                exact: s.confidence == Confidence::Exact,
+            }),
+            (_, None) => None,
+        }
+    }
 }
 
 pub fn write_meta(dir: &Path, meta: &Meta) -> io::Result<()> {
@@ -151,10 +190,12 @@ pub fn list(home: &Home) -> Vec<Held> {
         };
         let status = status_of(&dir, &meta);
         let state = read_state_file(&dir.join(STATE)).ok().flatten();
+        let hook = state::read(&dir.join(HOOK)).ok().flatten();
         out.push(Held {
             meta,
             status,
             state,
+            hook,
             dir,
         });
     }
@@ -162,7 +203,7 @@ pub fn list(home: &Home) -> Vec<Held> {
     out
 }
 
-fn pid_alive(pid: u32) -> bool {
+pub(crate) fn pid_alive(pid: u32) -> bool {
     use nix::errno::Errno;
     use nix::sys::signal::kill;
     use nix::unistd::Pid;
@@ -319,6 +360,48 @@ mod tests {
         assert_eq!(by("lost").status, Status::Lost);
         assert_eq!(by("live").status, Status::Live);
         assert!(by("live").state.is_none());
+    }
+
+    #[test]
+    fn a_newer_hook_word_wins_over_the_holders_reading() {
+        let (_t, home) = home();
+        let (dir, _) = session(&home, "a", None);
+        let at = |s: i64| Timestamp::from_second(s).unwrap();
+        let hook = |state, s| HookState {
+            agent: "claude".into(),
+            session_id: "s".into(),
+            cwd: "/tmp".into(),
+            state,
+            detail: Some("permission prompt".into()),
+            pid: None,
+            transcript_path: None,
+            at: at(s),
+        };
+        let seen = |s| StateFile {
+            state: RunState::Working,
+            confidence: Confidence::Likely,
+            detail: None,
+            last_line: None,
+            foreground: None,
+            at: at(s),
+        };
+        let current = || list(&home).remove(0).current();
+
+        assert_eq!(current(), None);
+        rl_core::atomic::write_json(&dir.join(STATE), &seen(100)).unwrap();
+        let c = current().unwrap();
+        assert_eq!((c.state, c.exact), (RunState::Working, false));
+
+        rl_core::atomic::write_json(&dir.join(HOOK), &hook(Said::Waiting, 101)).unwrap();
+        let c = current().unwrap();
+        assert_eq!((c.state, c.exact), (RunState::NeedsInput, true));
+        assert_eq!(c.detail.as_deref(), Some("permission prompt"));
+
+        rl_core::atomic::write_json(&dir.join(HOOK), &hook(Said::Waiting, 99)).unwrap();
+        assert_eq!(current().unwrap().state, RunState::Working, "the older word loses");
+
+        std::fs::remove_file(dir.join(STATE)).unwrap();
+        assert_eq!(current().unwrap().state, RunState::NeedsInput, "a word alone stands");
     }
 
     #[test]

@@ -65,11 +65,7 @@ fn terminal_size() -> (u16, u16) {
 /// What `ls` shows for a session: the state word the holder wrote, or how it ended.
 fn state_word(h: &Held) -> Option<String> {
     match &h.status {
-        Status::Live => h.state.as_ref().and_then(|s| {
-            serde_json::to_value(s.state)
-                .ok()
-                .and_then(|v| v.as_str().map(str::to_string))
-        }),
+        Status::Live => h.current().map(|c| c.state.to_string()),
         Status::Ended(e) => Some(if e.code == 0 { "finished" } else { "failed" }.into()),
         Status::Lost => Some("lost".into()),
     }

@@ -1,6 +1,6 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use rl::cmd;
+use rl::{cmd, hook};
 use rl_core::Home;
 use std::path::PathBuf;
 
@@ -44,6 +44,14 @@ enum Command {
 
 #[tokio::main]
 async fn main() {
+    // `rl hook` is read before clap reads anything: a hook never fails the
+    // agent that called it, nor prints.
+    if let Some(words) = hook::args() {
+        if let (Some(words), Ok(home)) = (hook::words(&words), Home::resolve()) {
+            hook::hook(&home, &words).await;
+        }
+        return;
+    }
     if let Err(e) = run(Cli::parse()).await {
         eprintln!("rl: {e:#}");
         std::process::exit(1);

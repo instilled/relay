@@ -2,5 +2,6 @@
 
 pub mod attach;
 pub mod cmd;
+pub mod hook;
 pub mod spawn;
 pub mod store;
