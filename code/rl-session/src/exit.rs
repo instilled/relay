@@ -24,12 +24,7 @@ impl Exit {
 
 /// Written atomically (tmp + rename) so a reader never sees a partial file.
 pub fn write_exit_file(path: &Path, exit: &Exit) -> io::Result<()> {
-    let tmp = path.with_file_name(format!(
-        "{}.tmp",
-        path.file_name().unwrap_or_default().to_string_lossy()
-    ));
-    std::fs::write(&tmp, serde_json::to_vec(exit)?)?;
-    std::fs::rename(&tmp, path)
+    rl_core::atomic::write_json(path, exit)
 }
 
 /// `Ok(None)` when the file does not exist yet.

@@ -1,6 +1,7 @@
 //! `~/.relay/` — one place for everything user-level. `RELAY_HOME` overrides
 //! it, which is also how tests stay out of the real one.
 
+pub mod atomic;
 pub mod folder;
 pub mod id;
 pub mod state;
@@ -15,6 +16,8 @@ pub const HOME_ENV: &str = "RELAY_HOME";
 const SUN_PATH_MAX: usize = 104;
 /// Room for `/session-xxxxxxxx.sock` style names on top of the directory.
 const SOCKET_NAME_BUDGET: usize = 24;
+/// A session socket path must be shorter than this to stay inline.
+const SOCKET_PATH_LIMIT: usize = 100;
 
 unsafe extern "C" {
     #[link_name = "getuid"]
@@ -81,9 +84,56 @@ impl Home {
         if run.as_os_str().len() + SOCKET_NAME_BUDGET < SUN_PATH_MAX {
             return run;
         }
+        self.short_socket_dir()
+    }
+    /// `$TMPDIR/rl-{uid}-{fnv1a(home)}`: short and per-home.
+    fn short_socket_dir(&self) -> PathBuf {
         let hash = fnv1a(self.0.as_os_str().as_encoded_bytes());
         let uid = unsafe { libc_getuid() };
         std::env::temp_dir().join(format!("rl-{uid}-{hash:08x}"))
+    }
+    pub fn sessions_dir(&self) -> PathBuf {
+        self.0.join("sessions")
+    }
+    pub fn session_dir(&self, name: &str) -> PathBuf {
+        self.sessions_dir().join(name)
+    }
+    pub fn state_dir(&self) -> PathBuf {
+        self.0.join("state")
+    }
+    pub fn mail_dir(&self) -> PathBuf {
+        self.0.join("mail")
+    }
+    pub fn config_json(&self) -> PathBuf {
+        self.0.join("config.json")
+    }
+    /// `sessions/<name>/sock`, unless that is too long for `sockaddr_un`:
+    /// then `<short socket dir>/<name>.sock` (the directory is created, 0700).
+    pub fn session_socket_for(&self, name: &str) -> PathBuf {
+        let inline = self.session_dir(name).join("sock");
+        if inline.as_os_str().len() < SOCKET_PATH_LIMIT {
+            return inline;
+        }
+        let dir = self.short_socket_dir();
+        let _ = std::fs::create_dir_all(&dir);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+        }
+        dir.join(format!("{name}.sock"))
+    }
+    /// Creates `sessions/`, `state/` and `mail/` (0700). Idempotent.
+    pub fn ensure_store(&self) -> std::io::Result<()> {
+        for d in [self.sessions_dir(), self.state_dir(), self.mail_dir()] {
+            std::fs::create_dir_all(&d)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o700))?;
+            }
+        }
+        Ok(())
     }
     pub fn daemon_socket(&self) -> PathBuf {
         self.socket_dir().join("rld.sock")
@@ -236,5 +286,39 @@ mod tests {
         let _ = std::fs::remove_dir(sock.parent().unwrap());
         assert_eq!(sock, Home::at(&long).daemon_socket(), "must be deterministic");
         assert_ne!(sock, Home::at(long.join("y")).daemon_socket(), "must differ per home");
+    }
+
+    #[test]
+    fn a_short_home_keeps_the_socket_in_the_session_dir() {
+        let home = Home::at("/h");
+        assert_eq!(home.sessions_dir(), Path::new("/h/sessions"));
+        assert_eq!(home.state_dir(), Path::new("/h/state"));
+        assert_eq!(home.mail_dir(), Path::new("/h/mail"));
+        assert_eq!(home.config_json(), Path::new("/h/config.json"));
+        assert_eq!(home.session_socket_for("a"), Path::new("/h/sessions/a/sock"));
+    }
+
+    #[test]
+    fn a_long_home_gets_a_short_socket_under_the_fallback_dir() {
+        // Distinct from the other long-home test so their dirs don't race.
+        let long = PathBuf::from("/tmp").join("z".repeat(120));
+        let home = Home::at(&long);
+        let sock = home.session_socket_for("a");
+        assert!(sock.as_os_str().len() < SUN_PATH_MAX, "{}", sock.display());
+        assert!(sock.starts_with(home.short_socket_dir()));
+        assert_eq!(sock.file_name().unwrap(), "a.sock");
+        assert!(sock.parent().unwrap().is_dir());
+        let _ = std::fs::remove_dir(sock.parent().unwrap());
+    }
+
+    #[test]
+    fn ensure_store_makes_the_three_dirs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = Home::at(tmp.path().join("relay"));
+        home.ensure_store().unwrap();
+        home.ensure_store().unwrap();
+        for d in [home.sessions_dir(), home.state_dir(), home.mail_dir()] {
+            assert!(d.is_dir());
+        }
     }
 }

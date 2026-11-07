@@ -22,12 +22,7 @@ pub struct StateFile {
 
 /// Written atomically (tmp + rename) so a reader never sees a partial file.
 pub fn write_state_file(path: &Path, s: &StateFile) -> io::Result<()> {
-    let tmp = path.with_file_name(format!(
-        "{}.tmp",
-        path.file_name().unwrap_or_default().to_string_lossy()
-    ));
-    std::fs::write(&tmp, serde_json::to_vec(s)?)?;
-    std::fs::rename(&tmp, path)
+    rl_core::atomic::write_json(path, s)
 }
 
 /// `Ok(None)` when the file does not exist yet.
