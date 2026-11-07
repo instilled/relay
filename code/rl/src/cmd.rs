@@ -153,6 +153,22 @@ pub async fn stop(home: &Home, name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Attaches this terminal to a session; the process exits with how it ended.
+pub async fn attach(home: &Home, name: &str) -> Result<()> {
+    sessions::sweep(home);
+    let Some(held) = sessions::list(home).into_iter().find(|h| h.meta.name == name) else {
+        bail!("no such session: {name}");
+    };
+    if held.status == Status::Lost {
+        bail!("{name} is lost: its holder is not answering");
+    }
+    let ended = crate::attach::held::attach(home, &held.meta).await?;
+    match ended.code() {
+        0 => Ok(()),
+        code => std::process::exit(code),
+    }
+}
+
 pub fn rm(home: &Home, name: &str) -> Result<()> {
     sessions::remove(home, name)
 }
