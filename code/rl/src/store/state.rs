@@ -38,6 +38,10 @@ pub struct HookState {
     pub pid: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transcript_path: Option<PathBuf>,
+    /// When the first word came: where its age runs from. Files written
+    /// before this was kept have none; their `at` stands in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started: Option<Timestamp>,
     /// When the last word came.
     pub at: Timestamp,
 }
@@ -134,6 +138,7 @@ mod tests {
             detail: None,
             pid,
             transcript_path: None,
+            started: None,
             at,
         };
         write(&p, &s).unwrap();

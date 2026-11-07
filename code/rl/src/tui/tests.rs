@@ -221,7 +221,11 @@ async fn the_cursor_walks_the_lines_and_stops_at_the_ends() {
     let mut app = list(&f).await;
     let keys = app.keys();
     assert_eq!(keys.len(), 3, "{keys:?}");
-    assert_eq!(app.sel.as_ref(), Some(&keys[0]));
+    assert_eq!(app.sel.as_ref(), Some(&keys[1]), "opens on a session, not the header");
+    press(&mut app, KeyCode::Up);
+    assert_eq!(app.sel.as_ref(), Some(&keys[0]), "the header is there to move to");
+    app.reload();
+    assert_eq!(app.sel.as_ref(), Some(&keys[0]), "and stays while it exists");
     press(&mut app, KeyCode::Down);
     assert_eq!(app.sel.as_ref(), Some(&keys[1]));
     ctrl(&mut app, 'j');
@@ -238,6 +242,29 @@ async fn the_cursor_walks_the_lines_and_stops_at_the_ends() {
     shown(&app);
     press(&mut app, KeyCode::PageUp);
     assert_eq!(app.sel.as_ref(), Some(&keys[0]));
+}
+
+#[tokio::test]
+async fn the_cursor_lands_on_a_session_when_the_list_opens_and_when_its_line_is_gone() {
+    let f = fixture();
+    let mut app = list(&f).await;
+    let first_row = |app: &App| app.lines().iter().find_map(|l| l.row().map(|r| r.key.clone()));
+    assert_eq!(app.sel, first_row(&app));
+    assert!(app.selected().unwrap().row().is_some());
+    app.select(Some("gone".into()));
+    app.reload();
+    assert_eq!(app.sel, first_row(&app), "after a refresh that lost it");
+    let drawn = shown(&app);
+    assert!(drawn.contains("shop-sh"), "{drawn}");
+}
+
+#[tokio::test]
+async fn a_finished_rows_age_is_frozen_from_its_start_to_its_end() {
+    let f = fixture();
+    let app = list(&f).await;
+    let s = shown(&app);
+    // Started 5 minutes ago, ended a minute in: 1m, not the 4m since it ended.
+    assert!(row_of(&s, "shop-sh").trim_end().ends_with("1m"), "{s}");
 }
 
 #[tokio::test]

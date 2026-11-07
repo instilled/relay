@@ -1,5 +1,6 @@
 //! The `new | ls | stop | rm` commands.
 
+use crate::sources::ended_state;
 use crate::spawn::{self, Start};
 use crate::store::sessions::{self, Held, Status};
 use anyhow::{Result, bail};
@@ -66,7 +67,7 @@ fn terminal_size() -> (u16, u16) {
 fn state_word(h: &Held) -> Option<String> {
     match &h.status {
         Status::Live => h.current().map(|c| c.state.to_string()),
-        Status::Ended(e) => Some(if e.code == 0 { "finished" } else { "failed" }.into()),
+        Status::Ended(e) => Some(ended_state(e).to_string()),
         Status::Lost => Some("lost".into()),
     }
 }

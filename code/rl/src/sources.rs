@@ -9,6 +9,7 @@ use crate::store::state::{HookState, Said};
 use jiff::Timestamp;
 use rl_core::state::{Confidence, RunKind, RunState};
 use rl_detect::registry::find_bin;
+use rl_session::exit::Exit;
 use std::collections::HashSet;
 use std::path::PathBuf;
 
@@ -128,6 +129,21 @@ pub fn rows(held: &[Held], hooked: &[HookState], native: &[NativeRow]) -> Vec<Ro
         .collect()
 }
 
+/// How an ended session ended: stopped when a hang-up or kill took it (the
+/// signal is named, or the shell under it died by one and said `128 + n`),
+/// finished on 0, failed on any other code. The one place this is decided.
+pub fn ended_state(e: &Exit) -> RunState {
+    // SIGHUP, SIGINT, SIGKILL, SIGTERM: what stopping a session sends.
+    let stopped_by_code = matches!(e.code, 129 | 130 | 137 | 143);
+    if e.signal.is_some() || stopped_by_code {
+        RunState::Stopped
+    } else if e.code == 0 {
+        RunState::Finished
+    } else {
+        RunState::Failed
+    }
+}
+
 fn held_row(h: &Held) -> Row {
     let m = &h.meta;
     let (state, confidence, at) = match &h.status {
@@ -135,16 +151,7 @@ fn held_row(h: &Held) -> Row {
             Some(c) => (c.state, c.confidence, c.at),
             None => (RunState::Starting, Confidence::Exact, m.started),
         },
-        Status::Ended(e) => {
-            let state = if e.signal.is_some() {
-                RunState::Stopped
-            } else if e.code == 0 {
-                RunState::Finished
-            } else {
-                RunState::Failed
-            };
-            (state, Confidence::Exact, e.at)
-        }
+        Status::Ended(e) => (ended_state(e), Confidence::Exact, e.at),
         Status::Lost => (RunState::Stale, Confidence::Exact, m.started),
     };
     let live_shell =
@@ -202,7 +209,7 @@ fn hooked_row(h: &HookState) -> Row {
         state,
         words: state_words(state, Confidence::Exact),
         summary: h.detail.clone(),
-        started: None,
+        started: Some(h.started.unwrap_or(h.at)),
         ended: None,
         state_at: Some(h.at),
         pr: None,
@@ -271,6 +278,7 @@ mod tests {
             detail: detail.map(Into::into),
             pid: None,
             transcript_path: None,
+            started: None,
             at: at(200),
         }
     }
@@ -411,5 +419,50 @@ mod tests {
         assert_eq!(argv[1..], ["--resume", "0123456789"]);
         let r = rows(&[], &[hook("nobody", "x", Said::Busy, None)], &[]).remove(0);
         assert_eq!(r.attach, Attach::None, "no profile, no way to carry it on");
+    }
+
+    #[test]
+    fn how_an_ended_session_ended_is_decided_in_one_place() {
+        let exit = |code, signal: Option<&str>| Exit {
+            code,
+            signal: signal.map(Into::into),
+            at: at(300),
+        };
+        assert_eq!(ended_state(&exit(0, None)), RunState::Finished);
+        assert_eq!(ended_state(&exit(1, None)), RunState::Failed);
+        assert_eq!(ended_state(&exit(2, None)), RunState::Failed);
+        for s in ["SIGHUP", "SIGTERM", "SIGKILL", "SIGINT"] {
+            assert_eq!(ended_state(&exit(129, Some(s))), RunState::Stopped, "{s}");
+        }
+        // A shell that took the hang-up and exited by it says only the code.
+        assert_eq!(ended_state(&exit(129, None)), RunState::Stopped);
+        assert!(!wants_you_state(ended_state(&exit(129, Some("SIGHUP")))));
+        assert_eq!(ended_state(&exit(129, Some("SIGHUP"))).to_string(), "stopped");
+    }
+
+    fn wants_you_state(s: RunState) -> bool {
+        crate::rows::wants(s)
+    }
+
+    #[test]
+    fn age_runs_from_the_start_and_stops_when_it_ends() {
+        let mut ended = held(
+            "a",
+            RunKind::Agent,
+            Status::Ended(Exit {
+                code: 0,
+                signal: None,
+                at: at(160),
+            }),
+        );
+        ended.meta.started = at(100);
+        let r = rows(&[ended], &[], &[]).remove(0);
+        assert_eq!((r.started, r.ended), (Some(at(100)), Some(at(160))));
+        // A hooked row runs from its first word; an old file without one, from its last.
+        let mut first = hook("claude", "s", Said::Busy, None);
+        first.started = Some(at(150));
+        assert_eq!(rows(&[], &[first], &[]).remove(0).started, Some(at(150)));
+        let old = hook("claude", "s", Said::Busy, None);
+        assert_eq!(rows(&[], &[old], &[]).remove(0).started, Some(at(200)));
     }
 }

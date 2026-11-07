@@ -601,7 +601,10 @@ impl App {
                 vec![]
             },
             pr.as_deref(),
-            r.state_at.or(r.started).map(|t| fmt_age(t, now)).unwrap_or_default(),
+            r.started
+                .or(r.state_at)
+                .map(|t| fmt_age(t, r.ended.unwrap_or(now)))
+                .unwrap_or_default(),
         )
     }
 

@@ -11,13 +11,20 @@ impl App {
         self.lines().iter().map(Line::key).collect()
     }
 
-    /// Keeps the cursor on something that is there: the first line, when it
-    /// has to move.
+    /// Keeps the cursor on something that is there: the first session, when
+    /// it has to move (a header only if there is no session), so `enter`
+    /// does something on open.
     pub fn settle(&mut self) {
-        let keys = self.keys();
-        if self.sel.as_ref().is_none_or(|k| !keys.contains(k)) {
-            self.sel = keys.into_iter().next();
+        let lines = self.lines();
+        if self.sel.as_ref().is_some_and(|k| lines.iter().any(|l| l.key() == *k)) {
+            return;
         }
+        let first = lines
+            .iter()
+            .find(|l| l.row().is_some())
+            .or(lines.first())
+            .map(Line::key);
+        self.sel = first;
     }
 
     pub fn select(&mut self, key: Option<String>) {
