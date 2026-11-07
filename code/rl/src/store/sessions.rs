@@ -68,6 +68,10 @@ pub struct Current {
     /// Whether the agent said so itself (a hook), not the holder's reading of
     /// the screen.
     pub exact: bool,
+    /// How sure: `Exact` for a hook's word, else the holder's.
+    pub confidence: Confidence,
+    /// When it came to stand so.
+    pub at: Timestamp,
 }
 
 impl Held {
@@ -84,11 +88,15 @@ impl Held {
                 },
                 detail: h.detail.clone(),
                 exact: true,
+                confidence: Confidence::Exact,
+                at: h.at,
             }),
             (_, Some(s)) => Some(Current {
                 state: s.state,
                 detail: s.detail.clone(),
                 exact: s.confidence == Confidence::Exact,
+                confidence: s.confidence,
+                at: s.at,
             }),
             (_, None) => None,
         }
