@@ -26,6 +26,7 @@
 //!   attach: [attach, "{id}"]
 //!   start: [--bg]
 //!   name: [-n, "{name}"]
+//!   stop: [stop, "{id}"]
 //! ```
 //!
 //! What an event says is a state word, or the same in a map with more:
@@ -84,6 +85,7 @@ pub(crate) struct SessionsFile {
     attach: Option<Vec<String>>,
     start: Option<Vec<String>>,
     name: Option<Vec<String>>,
+    stop: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -148,6 +150,9 @@ impl SessionsFile {
         if over.name.is_some() {
             self.name = over.name;
         }
+        if over.stop.is_some() {
+            self.stop = over.stop;
+        }
     }
 }
 
@@ -167,6 +172,9 @@ pub struct Sessions {
     pub start: Vec<String>,
     /// What names one it starts, after `start`: `{name}` is the name.
     pub name: Vec<String>,
+    /// The arguments that stop one in its own background, after its
+    /// binary: `{id}` is its attach id. Empty where it has no way to.
+    pub stop: Vec<String>,
 }
 
 /// How an agent lists its own sessions: its binary with `args`, read by
@@ -306,12 +314,17 @@ pub(crate) fn compile(name: &str, file: SessionsFile) -> Result<Sessions> {
     if !named.is_empty() && !named.iter().any(|a| a.contains(NAME)) {
         bail!("{name}.yaml: sessions.name says nowhere where the name goes ({NAME})");
     }
+    let stop = file.stop.unwrap_or_default();
+    if !stop.is_empty() && !stop.iter().any(|a| a.contains(ID)) {
+        bail!("{name}.yaml: sessions.stop says nowhere where the id goes ({ID})");
+    }
     Ok(Sessions {
         hooks,
         list,
         attach,
         start,
         name: named,
+        stop,
     })
 }
 
@@ -1013,6 +1026,7 @@ mod tests {
         assert_eq!(claude.attach, ["attach", ID]);
         assert_eq!(claude.start, ["--bg"]);
         assert_eq!(claude.name, ["-n", NAME]);
+        assert_eq!(claude.stop, ["stop", ID]);
         let codex = r.profile("codex").unwrap().sessions.as_ref().unwrap();
         assert_eq!(
             codex.list,
@@ -1023,6 +1037,7 @@ mod tests {
         );
         assert!(codex.attach.is_empty(), "its adapter attaches by resuming");
         assert!(codex.start.is_empty(), "no background start: Relay holds it");
+        assert!(codex.stop.is_empty(), "nothing stops a thread from outside it");
         assert!(r.profile("gemini").unwrap().sessions.as_ref().unwrap().list.is_none());
         assert!(r.profile("cursor").unwrap().sessions.is_none());
     }
@@ -1050,6 +1065,7 @@ mod tests {
                 "tea-leaves",
             ),
             (format!("{ok}  attach: [attach]\n"), "{id}"),
+            (format!("{ok}  stop: [stop]\n"), "sessions.stop"),
             (format!("{ok}    settings: {{ \"ui..x\": true }}\n"), "ui..x"),
             (format!("{ok}    settings: {{ hooks.Stop: [] }}\n"), "hooks.Stop"),
             (ok.replace("    events:\n      Stop: idle\n", ""), "events"),

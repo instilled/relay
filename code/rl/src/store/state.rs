@@ -38,10 +38,8 @@ pub struct HookState {
     pub pid: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transcript_path: Option<PathBuf>,
-    /// When the first word came: where its age runs from. Files written
-    /// before this was kept have none; their `at` stands in.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub started: Option<Timestamp>,
+    /// When the first word came: where its age runs from.
+    pub started: Timestamp,
     /// When the last word came.
     pub at: Timestamp,
 }
@@ -138,7 +136,7 @@ mod tests {
             detail: None,
             pid,
             transcript_path: None,
-            started: None,
+            started: at,
             at,
         };
         write(&p, &s).unwrap();
@@ -203,6 +201,18 @@ mod tests {
             .collect();
         assert_eq!(ids, ["me"]);
         assert!(!p.exists() && me.exists());
+    }
+
+    #[test]
+    fn a_file_without_its_first_word_does_not_read() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("s.json");
+        let old = r#"{"agent":"claude","session_id":"s","cwd":"/w","state":"idle","at":"2026-11-07T10:00:00Z"}"#;
+        std::fs::write(&p, old).unwrap();
+        assert!(read(&p).is_err(), "no `started`: not a file of ours");
+        let new = old.replace(r#""at""#, r#""started":"2026-11-07T09:00:00Z","at""#);
+        std::fs::write(&p, new).unwrap();
+        assert!(read(&p).unwrap().is_some());
     }
 
     #[test]

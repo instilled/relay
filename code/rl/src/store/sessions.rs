@@ -424,7 +424,7 @@ mod tests {
             detail: Some("permission prompt".into()),
             pid: None,
             transcript_path: None,
-            started: None,
+            started: at(0),
             at: at(s),
         };
         let seen = |s| StateFile {

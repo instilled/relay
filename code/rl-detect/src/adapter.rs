@@ -10,11 +10,28 @@
 use crate::Registry;
 use anyhow::{Context, Result, anyhow, bail};
 use jiff::Timestamp;
+use nix::sys::signal::{Signal, killpg};
+use nix::unistd::Pid;
 use rl_core::state::RunState;
+use std::collections::HashSet;
 use std::io::Read;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::{Duration, Instant};
+
+/// Which of a run's pipes some bytes came from.
+#[derive(Debug, Clone, Copy)]
+enum Pipe {
+    Out,
+    Err,
+}
+
+/// How often a run looks whether it has exited.
+const TICK: Duration = Duration::from_millis(20);
+/// How long a run's pipes are read once it has exited.
+const AFTER_EXIT: Duration = Duration::from_millis(200);
 
 /// A pull request a session opened.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -65,15 +82,60 @@ pub trait Adapter: Send + Sync {
     /// What carries the conversation `session_id` on in its background.
     /// None: it has no background to carry it on in.
     fn carry_on_argv(&self, session_id: &str) -> Option<Vec<String>>;
-    /// The id of the session a start or a carry-on said it began, in what
-    /// it printed.
-    fn started_id(&self, printed: &str) -> Option<String>;
+    /// What stops its session `id`. None: nothing here stops one.
+    fn stop_argv(&self, id: &str) -> Option<Vec<String>>;
+    /// The ids a start or a carry-on may have said it began, in what it
+    /// printed, the likeliest first. Only its listing says which it is
+    /// (`start`).
+    fn started_ids(&self, printed: &str) -> Vec<String>;
 }
 
 /// How long a list may take.
 pub const LIST_WAIT: Duration = Duration::from_secs(10);
 /// How long a start or a carry-on may take to say its id.
 pub const START_WAIT: Duration = Duration::from_secs(30);
+/// How long a session a start began has to come onto its harness's list.
+pub const LISTED_WAIT: Duration = Duration::from_secs(10);
+/// How often the harness is asked meanwhile.
+const LISTED_EVERY: Duration = Duration::from_millis(250);
+
+/// Runs `argv`, which starts or carries on a session in `a`'s harness's own
+/// background, in `cwd`, and says the id of the session it began — once the
+/// harness lists it, never on what it printed alone: a background session
+/// not among `before` (the ids its last listing had), in `cwd`, by an id it
+/// printed. The listing is asked for up to `listed`. Nothing listed so is
+/// an error in the words it printed last.
+pub fn start(
+    a: &dyn Adapter,
+    argv: &[String],
+    cwd: &Path,
+    before: &HashSet<String>,
+    listed: Duration,
+) -> Result<String> {
+    let printed = run(argv, Some(cwd), false, START_WAIT)?;
+    let ids = a.started_ids(&printed);
+    let deadline = Instant::now() + listed;
+    loop {
+        if !ids.is_empty()
+            && let Ok(rows) = a.list()
+            && let Some(id) = ids
+                .iter()
+                .find(|id| !before.contains(*id) && rows.iter().any(|r| r.id == **id && same_dir(&r.cwd, cwd)))
+        {
+            return Ok(id.clone());
+        }
+        if ids.is_empty() || Instant::now() >= deadline {
+            let last = printed.lines().rev().find(|l| !l.trim().is_empty());
+            bail!("{}", last.map_or("it printed nothing", str::trim));
+        }
+        std::thread::sleep(LISTED_EVERY);
+    }
+}
+
+/// Whether two paths name one folder, through links.
+fn same_dir(a: &Path, b: &Path) -> bool {
+    a == b || matches!((a.canonicalize(), b.canonicalize()), (Ok(x), Ok(y)) if x == y)
+}
 
 /// The adapters of every profile in `registry` whose `sessions.list` names
 /// a reader there is an adapter for. Its binary is the one `find` finds of
@@ -125,32 +187,74 @@ pub fn run(argv: &[String], cwd: Option<&Path>, asking: bool, wait: Duration) ->
     if asking {
         cmd.env(crate::user_hooks::ASKING, crate::user_hooks::asking_since());
     }
+    // A group of its own, so what it starts goes with it when it hangs.
+    cmd.process_group(0);
     let mut child = cmd.spawn().with_context(|| format!("running `{what}`"))?;
-    let read = |r: Option<Box<dyn Read + Send>>| {
+    // Each pipe read on a thread of its own, its bytes sent as they come and
+    // `None` at its end: nothing here waits on a read, only on the channel.
+    let (tx, rx) = mpsc::channel::<(Pipe, Option<Vec<u8>>)>();
+    let read = |which: Pipe, r: Option<Box<dyn Read + Send>>| {
+        let tx = tx.clone();
         std::thread::spawn(move || {
-            let mut s = Vec::new();
             if let Some(mut r) = r {
-                let _ = r.read_to_end(&mut s);
+                let mut buf = [0u8; 8192];
+                while let Ok(n @ 1..) = r.read(&mut buf) {
+                    if tx.send((which, Some(buf[..n].to_vec()))).is_err() {
+                        return;
+                    }
+                }
             }
-            String::from_utf8_lossy(&s).into_owned()
-        })
+            let _ = tx.send((which, None));
+        });
     };
-    let out = read(child.stdout.take().map(|o| Box::new(o) as _));
-    let err = read(child.stderr.take().map(|e| Box::new(e) as _));
+    read(Pipe::Out, child.stdout.take().map(|o| Box::new(o) as _));
+    read(Pipe::Err, child.stderr.take().map(|e| Box::new(e) as _));
+    drop(tx);
     let deadline = Instant::now() + wait;
-    let status = loop {
-        if let Some(s) = child.try_wait()? {
-            break s;
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    let mut open = 2;
+    let mut status = None;
+    // Once it has exited, what it printed is in the pipes or never will be:
+    // something it left running may hold them open (a daemon it started),
+    // which is no reason to wait.
+    let mut until = deadline;
+    while open > 0 || status.is_none() {
+        let now = Instant::now();
+        if status.is_none() {
+            if let Some(s) = child.try_wait()? {
+                status = Some(s);
+                until = until.min(now + AFTER_EXIT);
+                continue;
+            }
+            if now >= deadline {
+                let _ = killpg(Pid::from_raw(child.id() as i32), Signal::SIGKILL);
+                let _ = child.kill();
+                let _ = child.wait();
+                bail!("`{what}` did not answer in {}s", wait.as_secs());
+            }
+        } else if now >= until {
+            break;
         }
-        if Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            bail!("`{what}` did not answer in {}s", wait.as_secs());
+        let left = until.saturating_duration_since(now).min(TICK);
+        if open == 0 {
+            std::thread::sleep(left);
+            continue;
         }
-        std::thread::sleep(Duration::from_millis(20));
+        match rx.recv_timeout(left) {
+            Ok((which, Some(bytes))) => match which {
+                Pipe::Out => out.extend(bytes),
+                Pipe::Err => err.extend(bytes),
+            },
+            Ok((_, None)) => open -= 1,
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => open = 0,
+        }
+    }
+    let Some(status) = status else {
+        bail!("`{what}` did not answer in {}s", wait.as_secs());
     };
-    let out = out.join().unwrap_or_default();
-    let err = err.join().unwrap_or_default();
+    let out = String::from_utf8_lossy(&out).into_owned();
+    let err = String::from_utf8_lossy(&err).into_owned();
     if !status.success() {
         bail!("`{what}` failed: {}", err.lines().next().unwrap_or("no reason given"));
     }
@@ -179,6 +283,126 @@ mod tests {
         let e = run(&sh("sleep 5"), None, false, Duration::from_millis(200)).unwrap_err();
         assert!(e.to_string().contains("did not answer"), "{e}");
         assert!(at.elapsed() < Duration::from_secs(4), "given up at the wait");
+    }
+
+    #[test]
+    fn a_run_whose_child_leaves_its_output_open_still_returns() {
+        let sh = |s: &str| vec!["sh".to_string(), "-c".into(), s.into()];
+        // It has said its word and gone; what it left behind holds the pipe.
+        let at = Instant::now();
+        let said = run(&sh("sleep 3 & echo hi"), None, false, Duration::from_secs(2)).unwrap();
+        assert_eq!(said, "hi\n");
+        assert!(at.elapsed() < Duration::from_secs(2), "{:?}", at.elapsed());
+        // It hangs, and what it started with it: both go at the wait.
+        let tmp = tempfile::tempdir().unwrap();
+        let pid = tmp.path().join("pid");
+        let at = Instant::now();
+        let script = format!("sleep 20 & echo $! > '{}'; wait", pid.display());
+        let e = run(&sh(&script), None, false, Duration::from_millis(500)).unwrap_err();
+        assert!(e.to_string().contains("did not answer"), "{e}");
+        assert!(at.elapsed() < Duration::from_secs(3), "{:?}", at.elapsed());
+        let pid: i32 = std::fs::read_to_string(&pid).unwrap().trim().parse().unwrap();
+        let gone = (0..50).any(|_| {
+            std::thread::sleep(Duration::from_millis(20));
+            nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None).is_err()
+        });
+        assert!(gone, "its whole group is killed");
+    }
+
+    /// Lists what it is told to, one answer per ask, the last kept; takes
+    /// every word of eight letters for an id it may have started.
+    struct Scripted(std::sync::Mutex<Vec<Result<Vec<NativeRow>, String>>>);
+
+    impl Adapter for Scripted {
+        fn harness(&self) -> &str {
+            "fake"
+        }
+        fn list(&self) -> Result<Vec<NativeRow>> {
+            let mut said = self.0.lock().unwrap();
+            let next = if said.len() > 1 {
+                said.remove(0)
+            } else {
+                said[0].clone()
+            };
+            next.map_err(|e| anyhow!(e))
+        }
+        fn attach_argv(&self, id: &str) -> Vec<String> {
+            vec!["fake".into(), id.into()]
+        }
+        fn start_argv(&self, _: Option<&str>, _: Option<&str>) -> Option<Vec<String>> {
+            None
+        }
+        fn carry_on_argv(&self, _: &str) -> Option<Vec<String>> {
+            None
+        }
+        fn stop_argv(&self, _: &str) -> Option<Vec<String>> {
+            None
+        }
+        fn started_ids(&self, printed: &str) -> Vec<String> {
+            printed
+                .split_whitespace()
+                .filter(|w| w.len() == 8)
+                .map(String::from)
+                .collect()
+        }
+    }
+
+    fn listed(id: &str, cwd: &Path) -> NativeRow {
+        NativeRow {
+            harness: "fake".into(),
+            id: id.into(),
+            session_id: format!("s-{id}"),
+            name: id.into(),
+            cwd: cwd.into(),
+            state: NativeState {
+                words: "working".into(),
+                state: RunState::Working,
+            },
+            summary: None,
+            started: None,
+            ended: None,
+            at: None,
+            pr: None,
+        }
+    }
+
+    #[test]
+    fn a_started_id_is_only_one_the_harness_then_lists_new_in_its_folder() {
+        let tmp = tempfile::tempdir().unwrap();
+        let here = tmp.path();
+        let elsewhere = Path::new("/elsewhere");
+        let echo = |s: &str| vec!["echo".to_string(), s.into()];
+        let before: HashSet<String> = ["old00001".to_string()].into();
+        // What it printed names one already there, one in another folder,
+        // and the new one, which shows on the third ask.
+        let a = Scripted(std::sync::Mutex::new(vec![
+            Ok(vec![listed("old00001", here)]),
+            Err("no answer".into()),
+            Ok(vec![
+                listed("old00001", here),
+                listed("away0001", elsewhere),
+                listed("new00001", here),
+            ]),
+        ]));
+        let id = start(&a, &echo("old00001 away0001 new00001"), here, &before, LISTED_WAIT).unwrap();
+        assert_eq!(id, "new00001");
+        // Nothing listed it: the error is what it printed last.
+        let a = Scripted(std::sync::Mutex::new(vec![Ok(vec![listed("old00001", here)])]));
+        let at = Instant::now();
+        let printed = "echo started old00001; echo 'not logged in'";
+        let e = start(
+            &a,
+            &["sh".into(), "-c".into(), printed.into()],
+            here,
+            &before,
+            Duration::from_millis(600),
+        )
+        .unwrap_err();
+        assert_eq!(e.to_string(), "not logged in");
+        assert!(at.elapsed() < Duration::from_secs(3));
+        // No id in what it printed at all: said at once.
+        let e = start(&a, &echo("no such session"), here, &before, LISTED_WAIT).unwrap_err();
+        assert_eq!(e.to_string(), "no such session");
     }
 
     #[test]

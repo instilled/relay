@@ -1678,6 +1678,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "jiff",
+ "nix 0.31.3",
  "regex",
  "rl-core",
  "rl-proto",

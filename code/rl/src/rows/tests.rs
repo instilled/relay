@@ -21,7 +21,9 @@ fn row(id: &str, state: RunState, cwd: &str, at: &str) -> Row {
         state_at: Some(t(at)),
         pr: None,
         attach: Attach::Held(id.into()),
+        stop: None,
         kind: RunKind::Agent,
+        repo: crate::git::toplevel(Path::new(cwd)),
     }
 }
 
@@ -347,7 +349,13 @@ fn what_you_hid_comes_through_when_it_comes_to_need_you() {
     assert_eq!(head_of(&all, "relay").attention, 1);
     assert_eq!(counts(&all).0, 2, "the headline counts them as needing you");
     // A toggle still narrows it, as it would any row that needs you.
-    assert_eq!(keys(&toggled(&rows, &p, (false, true, false))), ["[relay]"]);
+    let off = toggled(&rows, &p, (false, true, false));
+    assert_eq!(keys(&off), ["[relay]"]);
+    assert_eq!(
+        head_of(&off, "relay").attention,
+        2,
+        "what would come through is still hinted on its project"
+    );
     // With hidden on they are in their places, not above them.
     assert_eq!(
         keys(&toggled(&rows, &p, (true, true, true))),

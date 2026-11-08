@@ -155,6 +155,22 @@ async fn a_project_stands_with_its_git_line_over_a_held_and_a_native_row() {
 }
 
 #[tokio::test]
+async fn a_row_says_its_harness_before_its_state_at_80_columns() {
+    let f = fixture();
+    let app = list(&f).await;
+    let s = screen(&app, 80, 24).join("\n");
+    let native = row_of(&s, "fix the login");
+    let held = row_of(&s, "shop-sh");
+    let col = |line: &str, t: &str| line[..line.find(t).unwrap()].chars().count();
+    assert!(native.contains(" claude needs input"), "{native}");
+    assert!(held.contains(" sh "), "{held}");
+    // The harness ends the title's column; the state starts where it did.
+    assert_eq!(col(native, "needs input"), col(held, "done"), "{s}");
+    assert_eq!(col(native, "claude") + 7, col(native, "needs input"), "{native}");
+    assert!(native.contains("asks which"), "the summary still has room: {native}");
+}
+
+#[tokio::test]
 async fn a_hides_the_agents_hints_on_the_header_and_is_kept() {
     let f = fixture();
     let mut app = list(&f).await;
@@ -422,10 +438,35 @@ async fn shift_down_swaps_two_rows_and_keeps_it() {
 }
 
 #[tokio::test]
-async fn ctrl_x_twice_hides_a_harnesss_own_session_and_again_brings_it_back() {
+async fn ctrl_x_twice_stops_a_harnesss_own_session_through_it() {
     let f = fixture();
     let mut app = list(&f).await;
     on(&mut app, NATIVE);
+    assert!(shown(&app).contains("^x stop"), "the hint says what ^x does here");
+    ctrl(&mut app, 'x');
+    assert!(shown(&app).contains("press ^x again to stop fix the login"));
+    assert!(ran_in(&f.repo).is_empty(), "not on the first press");
+    ctrl(&mut app, 'x');
+    app.finish().await;
+    assert_eq!(ran_in(&f.repo), ["stop", "ab12cd34"], "claude stop <id>, in its folder");
+    assert!(shown(&app).contains("stopped fix the login"));
+    assert!(app.ask_native, "the list asks claude again at once");
+    assert!(Config::load(&f.home).unwrap().list.hidden.is_empty(), "not hidden");
+}
+
+#[tokio::test]
+async fn ctrl_x_twice_hides_a_harnesss_own_session_and_again_brings_it_back() {
+    let f = fixture();
+    let mut app = list(&f).await;
+    // Done: nothing to stop.
+    let mut done = waiting(&f.repo);
+    done.state = NativeState {
+        words: "completed".into(),
+        state: RunState::Finished,
+    };
+    app.set_native(vec![done]);
+    on(&mut app, NATIVE);
+    assert!(shown(&app).contains("^x hide"));
     ctrl(&mut app, 'x');
     assert!(shown(&app).contains("press ^x again to hide fix the login"));
     assert!(Config::load(&f.home).unwrap().list.hidden.is_empty(), "not yet");
@@ -549,7 +590,7 @@ fn hooked(f: &Fixture, sid: &str, state: crate::store::state::Said) {
         detail: None,
         pid: None,
         transcript_path: None,
-        started: None,
+        started: Timestamp::now(),
         at: Timestamp::now(),
     };
     state::write(&state::path(&f.home, "claude", sid).unwrap(), &s).unwrap();
@@ -609,6 +650,93 @@ async fn n_opens_the_form_in_the_project_and_esc_puts_it_away() {
     assert!(Config::load(&f.home).unwrap().list.show_agents);
     press(&mut app, KeyCode::Esc);
     assert!(!shown(&app).contains("new session"));
+}
+
+#[tokio::test]
+async fn an_idle_claude_is_not_carried_on_before_claude_has_listed_its_own() {
+    use crate::store::state::Said;
+    let f = fixture();
+    hooked(&f, "c-idle", Said::Idle);
+    let mut app = App::new(f.home.clone()).unwrap();
+    on(&mut app, "o:claude:c-idle");
+    press(&mut app, KeyCode::Enter);
+    assert!(app.work.is_empty() && app.hand.is_none());
+    assert!(shown(&app).contains("waiting for claude to list its own sessions"));
+    assert!(ran_in(&f.repo).is_empty(), "nothing started");
+    // It has answered, without it: now it is carried on.
+    app.set_native(vec![]);
+    on(&mut app, "o:claude:c-idle");
+    press(&mut app, KeyCode::Enter);
+    app.finish().await;
+    assert_eq!(ran_in(&f.repo), ["--resume", "c-idle", "--bg"]);
+}
+
+#[tokio::test]
+async fn a_lister_that_does_not_answer_says_so_and_its_rows_stay() {
+    let f = fixture();
+    let mut app = list(&f).await;
+    let since = Timestamp::now();
+    let mut said = app.native.clone();
+    said.failing = vec![super::live::Failing {
+        harness: "claude".into(),
+        error: "`claude agents` did not answer in 10s".into(),
+        since: Some(since),
+    }];
+    app.heard(said);
+    let at = since
+        .to_zoned(jiff::tz::TimeZone::system())
+        .strftime("%H:%M")
+        .to_string();
+    let s = shown(&app);
+    assert!(
+        s.contains(&format!("claude agents did not answer in 10s · showing {at}")),
+        "{s}"
+    );
+    assert!(app.keys().iter().any(|k| k == NATIVE), "what it said last stands");
+    // It answers again: the footer is the hints again.
+    let mut said = app.native.clone();
+    said.failing.clear();
+    app.heard(said);
+    assert!(!shown(&app).contains("did not answer"));
+}
+
+#[tokio::test]
+async fn a_start_that_came_to_nothing_waits_for_no_line() {
+    let f = fixture();
+    let mut app = list(&f).await;
+    app.awaiting = Some("n:claude:0a1b2c3d".into());
+    app.done(super::app::Done::gave_up("start claude: not logged in"));
+    assert_eq!(app.awaiting, None);
+    assert!(shown(&app).contains("start claude: not logged in"));
+}
+
+#[tokio::test]
+async fn a_carry_on_done_while_the_form_is_open_does_not_take_the_terminal() {
+    let f = fixture();
+    let mut app = list(&f).await;
+    press(&mut app, KeyCode::Char('n'));
+    app.done(super::app::Done {
+        hand: Some(super::app::Hand {
+            to: super::app::To::Argv(vec!["claude".into(), "attach".into(), "ab12cd34".into()]),
+            title: "fix the login".into(),
+            key: NATIVE.into(),
+        }),
+        ..super::app::Done::said("fix the login carries on in claude's background")
+    });
+    assert!(app.hand.is_none(), "the form keeps the keys");
+    assert!(shown(&app).contains("fix the login carries on · enter on it attaches"));
+    assert!(matches!(app.mode, super::app::Mode::Form(_)));
+}
+
+#[tokio::test]
+async fn a_broken_config_json_is_never_written_over() {
+    let f = fixture();
+    let mut app = list(&f).await;
+    std::fs::write(f.home.config_json(), "{ broken").unwrap();
+    press(&mut app, KeyCode::Char('a'));
+    assert_eq!(std::fs::read_to_string(f.home.config_json()).unwrap(), "{ broken");
+    assert!(shown(&app).contains("not kept: config.json does not read"));
+    assert!(!app.prefs().show_agents, "the change stands on this list");
 }
 
 #[test]

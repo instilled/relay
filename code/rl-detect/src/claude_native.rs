@@ -36,6 +36,7 @@ pub struct Claude {
     start: Vec<String>,
     name: Vec<String>,
     resume: Vec<String>,
+    stop: Vec<String>,
     /// Claude's config folder, where it is not the environment's.
     config: Option<PathBuf>,
 }
@@ -53,6 +54,7 @@ impl Claude {
             start: s.start.clone(),
             name: s.name.clone(),
             resume: profile.resume.clone(),
+            stop: s.stop.clone(),
             config: None,
         })
     }
@@ -126,18 +128,42 @@ impl Adapter for Claude {
         Some(self.argv(resume.iter().chain(&self.start)))
     }
 
-    fn started_id(&self, printed: &str) -> Option<String> {
-        started_id(printed)
+    fn stop_argv(&self, id: &str) -> Option<Vec<String>> {
+        if self.stop.is_empty() {
+            return None;
+        }
+        let args: Vec<String> = self.stop.iter().map(|a| a.replace(ID, id)).collect();
+        Some(self.argv(&args))
+    }
+
+    fn started_ids(&self, printed: &str) -> Vec<String> {
+        started_ids(printed)
     }
 }
 
-/// The short id `claude --bg` prints, wherever it says it: the first word
-/// of eight hex digits.
-pub fn started_id(printed: &str) -> Option<String> {
-    printed
-        .split(|c: char| !c.is_ascii_alphanumeric())
-        .find(|w| w.len() == 8 && w.chars().all(|c| c.is_ascii_hexdigit()))
-        .map(str::to_ascii_lowercase)
+/// The ids `claude --bg` may have printed for what it started: the word
+/// after `attach ` first, where it says how to attach, then every word of
+/// eight hex digits. Which it is, only the listing says.
+pub fn started_ids(printed: &str) -> Vec<String> {
+    let word = |s: &str| {
+        s.split(|c: char| !c.is_ascii_alphanumeric() && c != '-')
+            .next()
+            .filter(|w| !w.is_empty())
+            .map(str::to_ascii_lowercase)
+    };
+    let mut ids: Vec<String> = printed
+        .match_indices("attach ")
+        .filter_map(|(at, a)| word(&printed[at + a.len()..]))
+        .collect();
+    ids.extend(
+        printed
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .filter(|w| w.len() == 8 && w.chars().all(|c| c.is_ascii_hexdigit()))
+            .map(str::to_ascii_lowercase),
+    );
+    let mut seen = std::collections::HashSet::new();
+    ids.retain(|i| seen.insert(i.clone()));
+    ids
 }
 
 /// An entry of `claude agents --json`, as Claude writes it.
@@ -179,8 +205,7 @@ pub struct Job {
     pub resume_session_id: Option<String>,
     #[serde(default)]
     pub created_at: Option<Timestamp>,
-    #[serde(default)]
-    pub updated_at: Option<Timestamp>,
+    /// When it last ended — finished, failed or stopped.
     #[serde(default)]
     pub last_terminal_at: Option<Timestamp>,
 }
@@ -208,6 +233,41 @@ pub fn parse(text: &str) -> Result<Vec<Listed>> {
         .collect())
 }
 
+/// How much of the end of a job's `timeline.jsonl` is read for its last
+/// entry: the file only grows, to megabytes.
+const TIMELINE_TAIL: u64 = 64 * 1024;
+
+/// An entry of `jobs/<id>/timeline.jsonl`: when it came.
+#[derive(Deserialize)]
+struct Entry {
+    at: Timestamp,
+}
+
+/// When the last entry of `jobs/<id>/timeline.jsonl` came — when the job
+/// came to stand as it does — read from the file's end only.
+pub fn last_entry_at(jobs: &Path, id: &str) -> Option<Timestamp> {
+    use std::io::{Read, Seek, SeekFrom};
+    if id.is_empty() || id.contains(['/', '\\', '.']) {
+        return None;
+    }
+    let mut f = std::fs::File::open(jobs.join(id).join("timeline.jsonl")).ok()?;
+    let from = f.metadata().ok()?.len().saturating_sub(TIMELINE_TAIL);
+    f.seek(SeekFrom::Start(from)).ok()?;
+    let mut tail = Vec::new();
+    f.read_to_end(&mut tail).ok()?;
+    let text = String::from_utf8_lossy(&tail);
+    let mut lines: Vec<&str> = text.lines().collect();
+    if from > 0 && !lines.is_empty() {
+        // Cut into by where the read began.
+        lines.remove(0);
+    }
+    lines
+        .iter()
+        .rev()
+        .find_map(|l| serde_json::from_str::<Entry>(l).ok())
+        .map(|e| e.at)
+}
+
 /// `jobs/<id>/state.json`, where it is there and reads.
 pub fn job(jobs: &Path, id: &str) -> Option<Job> {
     if id.is_empty() || id.contains(['/', '\\', '.']) {
@@ -223,7 +283,8 @@ pub fn rows(text: &str, jobs: Option<&Path>) -> Result<Vec<NativeRow>> {
         .into_iter()
         .map(|l| {
             let j = jobs.and_then(|d| job(d, &l.id));
-            row(l, j)
+            let last = jobs.and_then(|d| last_entry_at(d, &l.id));
+            row(l, j, last)
         })
         .collect())
 }
@@ -249,11 +310,11 @@ pub fn state(state: Option<&str>, status: Option<&str>, process: bool) -> Native
     }
 }
 
-/// A listed session, with what its job file says.
-pub fn row(l: Listed, job: Option<Job>) -> NativeRow {
+/// A listed session, with what its job file says and when its timeline's
+/// last entry came (`last`).
+pub fn row(l: Listed, job: Option<Job>, last: Option<Timestamp>) -> NativeRow {
     let j = job.unwrap_or_default();
     let said = l.state.as_deref().or(j.state.as_deref());
-    let done = said == Some("done");
     let st = state(said, l.status.as_deref(), l.pid.is_some());
     let named = |n: &Option<String>| n.clone().filter(|n| !n.trim().is_empty() && !n.starts_with("<<"));
     let name = named(&l.name).or_else(|| named(&j.name)).unwrap_or_else(|| {
@@ -270,7 +331,8 @@ pub fn row(l: Listed, job: Option<Job>) -> NativeRow {
     let started = j
         .created_at
         .or_else(|| l.started_at.and_then(|ms| Timestamp::from_millisecond(ms).ok()));
-    let ended = j.last_terminal_at.filter(|_| done);
+    // Its age stops when it did, however it ended.
+    let ended = j.last_terminal_at.filter(|_| st.state.is_terminal());
     NativeRow {
         harness: crate::user_hooks::CLAUDE.into(),
         session_id: j.resume_session_id.filter(|s| !s.is_empty()).unwrap_or(l.session_id),
@@ -281,7 +343,7 @@ pub fn row(l: Listed, job: Option<Job>) -> NativeRow {
         summary: j.detail.filter(|d| !d.trim().is_empty()),
         started,
         ended,
-        at: ended.or(j.updated_at).or(started),
+        at: ended.or(last),
         pr,
     }
 }
@@ -344,6 +406,13 @@ mod tests {
         assert_eq!(r.summary.as_deref(), Some("the summary of 8af077cd"));
         assert_eq!(r.started, Some(at("2026-08-19T15:38:47.165Z")), "from when it was made");
         assert_eq!(r.ended, None);
+        assert_eq!(
+            r.at,
+            Some(at("2026-11-03T20:33:40.508Z")),
+            "when its timeline last said something, not when its file was touched"
+        );
+        let untimed = rows.iter().find(|r| r.id == "5286f002").unwrap();
+        assert_eq!(untimed.at, None, "no timeline, nothing to say since when");
         // Carried on in another conversation: the one its hooks tell of.
         let carried = &rows[1];
         assert_eq!(carried.session_id, "2132ce0a-647c-43a1-9c71-fa758bc20c12");
@@ -403,6 +472,58 @@ mod tests {
     }
 
     #[test]
+    fn its_age_stops_however_it_ended() {
+        let listed = |state: &str, pid: Option<u32>| Listed {
+            id: "b1".into(),
+            session_id: "s1".into(),
+            name: None,
+            cwd: "/w".into(),
+            kind: Some(BACKGROUND.into()),
+            state: Some(state.into()),
+            status: None,
+            pid,
+            started_at: None,
+        };
+        let ended_at = at("2026-11-06T12:25:21.449Z");
+        let job = Job {
+            last_terminal_at: Some(ended_at),
+            ..Job::default()
+        };
+        for state in ["done", "failed", "stopped"] {
+            let r = row(listed(state, None), Some(job.clone()), None);
+            assert_eq!((r.ended, r.at), (Some(ended_at), Some(ended_at)), "{state}");
+        }
+        // Done, its process still up: at rest, not ended.
+        let r = row(
+            listed("done", Some(7)),
+            Some(job.clone()),
+            Some(at("2026-11-07T00:00:00Z")),
+        );
+        assert_eq!((r.ended, r.at), (None, Some(at("2026-11-07T00:00:00Z"))));
+        let r = row(listed("working", Some(7)), Some(job), None);
+        assert_eq!(r.ended, None, "an earlier end is not this run's");
+    }
+
+    #[test]
+    fn the_timeline_is_read_from_its_end() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("b1");
+        std::fs::create_dir_all(&dir).unwrap();
+        // Longer than what is read of it, its last line not an entry.
+        let filler = format!(
+            "{{\"at\":\"2026-01-01T00:00:00Z\",\"detail\":\"{}\"}}\n",
+            "x".repeat(1000)
+        );
+        let mut text = filler.repeat(100);
+        text.push_str("{\"at\":\"2026-11-07T10:00:00Z\",\"state\":\"working\"}\n");
+        text.push_str("not json\n");
+        std::fs::write(dir.join("timeline.jsonl"), text).unwrap();
+        assert_eq!(last_entry_at(tmp.path(), "b1"), Some(at("2026-11-07T10:00:00Z")));
+        assert_eq!(last_entry_at(tmp.path(), "none"), None);
+        assert_eq!(last_entry_at(tmp.path(), "../b1"), None);
+    }
+
+    #[test]
     fn the_pr_is_the_first_one_it_opened() {
         let rows = rows(&listed(), Some(&fixtures().join("jobs"))).unwrap();
         let pr = |id: &str| rows.iter().find(|r| r.id == id).unwrap().pr.clone();
@@ -428,12 +549,14 @@ mod tests {
         );
         assert_eq!(c.start_argv(Some(" "), Some("")).unwrap(), ["claude", "--bg"]);
         assert_eq!(c.carry_on_argv("s-1").unwrap(), ["claude", "--resume", "s-1", "--bg"]);
+        assert_eq!(c.stop_argv("ab12cd34").unwrap(), ["claude", "stop", "ab12cd34"]);
+        // What it says to attach to goes first, then any other likely word.
         assert_eq!(
-            started_id("started 9be483ad · claude attach 9be483ad\n").as_deref(),
-            Some("9be483ad")
+            started_ids("build deadbeef from cafe0001 · claude attach 9be483ad\n"),
+            ["9be483ad", "deadbeef", "cafe0001"]
         );
-        assert_eq!(started_id("Session ABCDEF12 started").as_deref(), Some("abcdef12"));
-        assert_eq!(started_id("no id here, 1234567 or 123456789"), None);
+        assert_eq!(started_ids("Session ABCDEF12 started"), ["abcdef12"]);
+        assert!(started_ids("no id here, 1234567 or 123456789").is_empty());
     }
 
     #[test]

@@ -4,9 +4,12 @@
 
 use crate::attach::AbortOnDrop;
 use crate::sources::{NativeLister, NativeRow};
+use jiff::Timestamp;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use rl_core::Home;
+use std::collections::BTreeSet;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::sync::{Notify, mpsc, watch};
 
@@ -50,28 +53,65 @@ impl Watch {
     }
 }
 
+/// What the harnesses' listers last said, all told.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Said {
+    /// Their sessions, as each last listed them.
+    pub rows: Vec<NativeRow>,
+    /// The harnesses whose lister has answered at least once.
+    pub answered: BTreeSet<String>,
+    /// The listers whose last ask failed, while it is their last word.
+    pub failing: Vec<Failing>,
+}
+
+/// A lister whose last ask failed: what its rows still show is from `since`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Failing {
+    pub harness: String,
+    pub error: String,
+    /// When it last answered; never, if it has not.
+    pub since: Option<Timestamp>,
+}
+
+/// One lister's last word.
+#[derive(Clone, Default)]
+struct Kept {
+    rows: Vec<NativeRow>,
+    answered: Option<Timestamp>,
+    error: Option<String>,
+}
+
 /// The harnesses' own sessions, asked for every `every` in the background,
-/// for as long as this is kept — and at once when `ask_now` says.
+/// for as long as this is kept — and at once when `ask_now` says; not while
+/// it is paused.
 pub struct Native {
-    rx: watch::Receiver<Vec<NativeRow>>,
+    rx: watch::Receiver<Said>,
     ask: Arc<Notify>,
+    paused: Arc<AtomicBool>,
     _task: Option<AbortOnDrop<()>>,
 }
 
 impl Native {
     /// Asks each lister now and then every `every`, one after the other, off
-    /// the async threads. A lister that fails keeps what it said last. With
-    /// none, nothing runs.
+    /// the async threads. A lister that fails keeps what it said last, and
+    /// says why until it answers again. With none, nothing runs.
     pub fn start(listers: Vec<Box<dyn NativeLister>>, every: Duration) -> Native {
-        let (tx, rx) = watch::channel(Vec::new());
+        let (tx, rx) = watch::channel(Said::default());
         let ask = Arc::new(Notify::new());
+        let paused = Arc::new(AtomicBool::new(false));
         if listers.is_empty() {
-            return Native { rx, ask, _task: None };
+            return Native {
+                rx,
+                ask,
+                paused,
+                _task: None,
+            };
         }
         let listers: Arc<Vec<Box<dyn NativeLister>>> = Arc::new(listers);
         let asked_now = ask.clone();
+        let held = paused.clone();
         let task = tokio::spawn(async move {
-            let mut kept: Vec<Vec<NativeRow>> = vec![Vec::new(); listers.len()];
+            let mut kept: Vec<Kept> = vec![Kept::default(); listers.len()];
             let mut tick = tokio::time::interval(every);
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
@@ -79,18 +119,51 @@ impl Native {
                     _ = tick.tick() => {}
                     () = asked_now.notified() => {}
                 }
+                if held.load(Ordering::SeqCst) {
+                    continue;
+                }
                 let asked = listers.clone();
-                let Ok(said) =
-                    tokio::task::spawn_blocking(move || asked.iter().map(|l| l.list().ok()).collect::<Vec<_>>()).await
+                let Ok(said) = tokio::task::spawn_blocking(move || {
+                    asked
+                        .iter()
+                        .map(|l| l.list().map_err(|e| format!("{e:#}")))
+                        .collect::<Vec<_>>()
+                })
+                .await
                 else {
                     continue;
                 };
+                let now = Timestamp::now();
                 for (k, s) in kept.iter_mut().zip(said) {
-                    if let Some(rows) = s {
-                        *k = rows;
+                    match s {
+                        Ok(rows) => {
+                            k.rows = rows;
+                            k.answered = Some(now);
+                            k.error = None;
+                        }
+                        Err(e) => k.error = Some(e),
                     }
                 }
-                let all = kept.concat();
+                let all = Said {
+                    rows: kept.iter().flat_map(|k| k.rows.clone()).collect(),
+                    answered: listers
+                        .iter()
+                        .zip(&kept)
+                        .filter(|(_, k)| k.answered.is_some())
+                        .map(|(l, _)| l.harness().to_string())
+                        .collect(),
+                    failing: listers
+                        .iter()
+                        .zip(&kept)
+                        .filter_map(|(l, k)| {
+                            Some(Failing {
+                                harness: l.harness().to_string(),
+                                error: k.error.clone()?,
+                                since: k.answered,
+                            })
+                        })
+                        .collect(),
+                };
                 tx.send_if_modified(|now| {
                     let changed = *now != all;
                     if changed {
@@ -103,6 +176,7 @@ impl Native {
         Native {
             rx,
             ask,
+            paused,
             _task: Some(AbortOnDrop(task)),
         }
     }
@@ -113,6 +187,18 @@ impl Native {
         self.ask.notify_one();
     }
 
+    /// No asking while the terminal is a session's: what the harness's CLI
+    /// does then is not to run beside it.
+    pub fn pause(&self) {
+        self.paused.store(true, Ordering::SeqCst);
+    }
+
+    /// Asking again, at once.
+    pub fn resume(&self) {
+        self.paused.store(false, Ordering::SeqCst);
+        self.ask_now();
+    }
+
     /// Once the rows have changed since they were last taken. Never, with
     /// nothing to ask.
     pub async fn changed(&mut self) {
@@ -121,8 +207,8 @@ impl Native {
         }
     }
 
-    /// The rows, as last said.
-    pub fn rows(&mut self) -> Vec<NativeRow> {
+    /// What they last said.
+    pub fn said(&mut self) -> Said {
         self.rx.borrow_and_update().clone()
     }
 }
@@ -158,6 +244,10 @@ mod tests {
     struct Told(Arc<Mutex<Option<Vec<NativeRow>>>>, Arc<AtomicUsize>);
 
     impl NativeLister for Told {
+        fn harness(&self) -> &str {
+            "claude"
+        }
+
         fn list(&self) -> anyhow::Result<Vec<NativeRow>> {
             self.1.fetch_add(1, Ordering::SeqCst);
             self.0
@@ -179,20 +269,31 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(5), native.changed())
             .await
             .unwrap();
-        assert_eq!(native.rows(), vec![row("a")]);
-        // It fails: what it said last stands.
+        let first = native.said();
+        assert_eq!(first.rows, vec![row("a")]);
+        assert!(first.answered.contains("claude") && first.failing.is_empty());
+        // It fails: what it said last stands, and why it is not newer.
         *said.lock().unwrap() = None;
-        let before = asked.load(Ordering::SeqCst);
-        while asked.load(Ordering::SeqCst) < before + 2 {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        assert_eq!(native.rows(), vec![row("a")]);
-        // It says something new.
+        tokio::time::timeout(Duration::from_secs(5), native.changed())
+            .await
+            .unwrap();
+        let failed = native.said();
+        assert_eq!(failed.rows, vec![row("a")]);
+        assert!(failed.answered.contains("claude"), "it has answered before");
+        assert_eq!(failed.failing.len(), 1);
+        assert_eq!(
+            (failed.failing[0].harness.as_str(), failed.failing[0].error.as_str()),
+            ("claude", "no answer")
+        );
+        assert!(failed.failing[0].since.is_some(), "since its last answer");
+        // It says something new: the failure is over.
         *said.lock().unwrap() = Some(vec![row("b")]);
         tokio::time::timeout(Duration::from_secs(5), native.changed())
             .await
             .unwrap();
-        assert_eq!(native.rows(), vec![row("b")]);
+        let again = native.said();
+        assert_eq!(again.rows, vec![row("b")]);
+        assert!(again.failing.is_empty());
         // Dropped, it asks no more.
         drop(native);
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -230,6 +331,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_lister_that_never_answered_is_not_answered() {
+        let said = Arc::new(Mutex::new(None));
+        let asked = Arc::new(AtomicUsize::new(0));
+        let mut native = Native::start(
+            vec![Box::new(Told(said.clone(), asked.clone()))],
+            Duration::from_millis(20),
+        );
+        tokio::time::timeout(Duration::from_secs(5), native.changed())
+            .await
+            .unwrap();
+        let s = native.said();
+        assert!(s.answered.is_empty() && s.rows.is_empty());
+        assert_eq!(s.failing[0].since, None, "nothing shown is from it");
+    }
+
+    #[tokio::test]
+    async fn paused_it_asks_nothing_and_resumed_it_asks_at_once() {
+        let said = Arc::new(Mutex::new(Some(vec![row("a")])));
+        let asked = Arc::new(AtomicUsize::new(0));
+        let native = Native::start(
+            vec![Box::new(Told(said.clone(), asked.clone()))],
+            Duration::from_millis(20),
+        );
+        while asked.load(Ordering::SeqCst) < 1 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        native.pause();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let then = asked.load(Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert_eq!(asked.load(Ordering::SeqCst), then, "nothing asked while attached");
+        native.resume();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while asked.load(Ordering::SeqCst) <= then {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("asked again");
+    }
+
+    #[tokio::test]
     async fn with_no_listers_nothing_is_asked_and_nothing_changes() {
         let mut native = Native::start(Vec::new(), Duration::from_millis(10));
         assert!(
@@ -237,7 +380,7 @@ mod tests {
                 .await
                 .is_err()
         );
-        assert!(native.rows().is_empty());
+        assert_eq!(native.said(), Said::default());
     }
 
     #[tokio::test]

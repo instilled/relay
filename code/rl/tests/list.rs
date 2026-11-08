@@ -99,11 +99,15 @@ async fn ctrl_x_twice_stops_a_live_held_shell() {
     assert_eq!(status(&f.home, &name), Some(Status::Live), "not on the first press");
     ctrl(&mut app, 'x');
     app.finish().await;
-    assert!(
-        matches!(status(&f.home, &name), Some(Status::Ended(_))),
-        "{:?}",
-        status(&f.home, &name)
-    );
+    // The holder writes its exit once the shell has gone, which under load
+    // takes a while.
+    let ended = || matches!(status(&f.home, &name), Some(Status::Ended(_)));
+    let by = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    while !ended() && std::time::Instant::now() < by {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(ended(), "{:?}", status(&f.home, &name));
+    app.reload();
     assert!(
         app.flashing().is_some_and(|m| m.starts_with("stopped")),
         "{:?}",

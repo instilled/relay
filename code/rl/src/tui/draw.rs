@@ -9,13 +9,14 @@ use crate::config::Grouping;
 use crate::git::checkout_words;
 use crate::query;
 use crate::rows::{self, COMMAND, Head, Line as ListLine, Names, SHELL, fit};
-use crate::sources::Row;
+use crate::sources::{Row, Source};
 use jiff::Timestamp;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
+use rl_core::state::RunState;
 use rl_core::time::fmt_age;
 use std::path::Path;
 
@@ -35,6 +36,8 @@ const HEAD_AIR: u16 = 1;
 pub const ICON_W: usize = 3;
 /// The state column's width: `needs you~`, and a harness's `needs input`, fit.
 pub const WORD_W: usize = 11;
+/// The room a row's harness has, at the end of the title's column.
+pub const HARNESS_W: usize = 7;
 
 /// The first of `n` lines to show in a window `h` tall so that line `sel` is
 /// visible and not under an edge marker: when the window starts past the
@@ -475,16 +478,46 @@ impl App {
                     enter keeps · esc puts back"
                 .into();
         }
+        if let Some(why) = self.native_failing() {
+            return why;
+        }
         let by = match self.prefs().grouping {
             Grouping::Project => "^s by state",
             Grouping::State => "^s by project",
         };
-        let mut hints = vec!["enter attaches", "n new", "^x stop/hide", "^f search"];
+        let mut hints = vec!["enter attaches", "n new", self.x_hint(), "^f search"];
         if !self.filter.is_empty() {
             hints.push("esc clears the search");
         }
         hints.push(by);
         shortcuts::with_hint(hints.join(" · "), width)
+    }
+
+    /// A harness's lister that did not answer, while that is its last word:
+    /// what went wrong, and from when what its rows show is.
+    fn native_failing(&self) -> Option<String> {
+        let f = self.native.failing.first()?;
+        let shown = match f.since {
+            Some(at) => format!(
+                "showing {}",
+                at.to_zoned(jiff::tz::TimeZone::system()).strftime("%H:%M")
+            ),
+            None => format!("nothing of {}'s listed yet", f.harness),
+        };
+        Some(format!("{} · {shown}", f.error.replace('`', "")))
+    }
+
+    /// What `^x` does to the line under the cursor, in the hints' words.
+    fn x_hint(&self) -> &'static str {
+        match self.selected() {
+            Some(ListLine::Session(r)) => match r.source {
+                Source::Held if r.state.is_terminal() || r.state == RunState::Stale => "^x remove",
+                Source::Held => "^x stop",
+                Source::Native if r.stop.is_some() => "^x stop",
+                _ => "^x hide",
+            },
+            _ => "^x hide",
+        }
     }
 
     fn draw_list(&self, f: &mut Frame, area: Rect, lines: &[ListLine]) {
@@ -595,11 +628,17 @@ impl App {
             )
         });
         let word = fit(&r.words, WORD_W).trim_end().to_string();
+        // The harness at the end of the title's column, quiet: the state
+        // column stays where a header's checkout starts.
+        let harness = HARNESS_W.min(tw / 3);
         list_line(
             w,
             tw,
             icon_span(rows::icon(r), Some(&r.harness), r.state.is_terminal()),
-            vec![Span::raw(fit(&title, tw))],
+            vec![
+                Span::raw(fit(&title, tw - harness)),
+                Span::styled(format!(" {}", fit(&r.harness, harness - 1)), theme::dim()),
+            ],
             vec![Span::styled(word, theme::state(r.state))],
             summary,
             if through {

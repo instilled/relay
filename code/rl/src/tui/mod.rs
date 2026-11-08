@@ -110,8 +110,8 @@ impl App {
                     self.regit();
                 }
                 () = native.changed() => {
-                    let rows = native.rows();
-                    self.set_native(rows);
+                    let said = native.said();
+                    self.heard(said);
                 }
                 Some(done) = self.work.join_next(), if !self.work.is_empty() => match done {
                     Ok(d) => self.done(d),
@@ -123,11 +123,13 @@ impl App {
             }
             // A key, or a conversation carried on, gives the terminal away:
             // the session gets it, passed through; the list comes back when
-            // it lets go.
+            // it lets go. The harnesses are not asked meanwhile.
             if let Some(hand) = self.hand.take() {
                 drop(input);
                 leave_screen();
+                native.pause();
                 let words = hand_over(&self.home, &hand).await;
+                native.resume();
                 *terminal = enter_screen();
                 input = EventStream::new();
                 title.clear();

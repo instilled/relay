@@ -66,3 +66,5 @@ sessions:
   # terminal is `resume` above, then this: `claude --resume <id> --bg`.
   start: [--bg]
   name: [-n, "{name}"]
+  # ^x on one still going stops it (`claude stop <id>`); never `claude rm`.
+  stop: [stop, "{id}"]

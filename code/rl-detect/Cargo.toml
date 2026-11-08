@@ -11,6 +11,7 @@ rl-core.workspace = true
 rl-proto.workspace = true
 rl-session.workspace = true
 anyhow.workspace = true
+nix.workspace = true
 jiff.workspace = true
 regex.workspace = true
 serde.workspace = true

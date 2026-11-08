@@ -15,11 +15,12 @@ pub fn keeps(r: &Row, show_agents: bool, show_shells: bool) -> bool {
 
 /// The project a row stands under: the folder you named that its folder is
 /// in, the deepest where they nest; else its repository's root (a linked
-/// worktree is a root of its own); else its own folder.
+/// worktree is a root of its own), as read with the rows (`Row::repo`);
+/// else its own folder.
 pub fn project_of(r: &Row, names: &Names) -> PathBuf {
     names
         .containing(&r.cwd)
-        .or_else(|| crate::git::toplevel(&r.cwd))
+        .or_else(|| r.repo.clone())
         .unwrap_or_else(|| r.cwd.clone())
 }
 

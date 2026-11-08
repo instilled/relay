@@ -10,7 +10,7 @@ use jiff::Timestamp;
 use rl_core::state::{Confidence, RunKind, RunState};
 use rl_detect::registry::find_bin;
 use rl_session::exit::Exit;
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
@@ -44,6 +44,8 @@ pub use rl_detect::adapter::{Adapter, NativeRow, NativeState, Pr};
 /// background task while the list is open, so `list` may block (it runs the
 /// harness's CLI); an error keeps what it said last.
 pub trait NativeLister: Send + Sync {
+    /// The harness whose sessions it lists: `claude`.
+    fn harness(&self) -> &str;
     fn list(&self) -> anyhow::Result<Vec<NativeRow>>;
 }
 
@@ -51,6 +53,10 @@ pub trait NativeLister: Send + Sync {
 struct Listing(&'static dyn Adapter);
 
 impl NativeLister for Listing {
+    fn harness(&self) -> &str {
+        self.0.harness()
+    }
+
     fn list(&self) -> anyhow::Result<Vec<NativeRow>> {
         self.0.list()
     }
@@ -58,38 +64,88 @@ impl NativeLister for Listing {
 
 /// Every adapter the profiles name, and whether its harness is on this
 /// machine. Made once.
+#[cfg(not(test))]
 fn known() -> &'static [(Box<dyn Adapter>, bool)] {
     static KNOWN: OnceLock<Vec<(Box<dyn Adapter>, bool)>> = OnceLock::new();
-    KNOWN.get_or_init(|| rl_detect::adapter::adapters(registry(), adapter_bin))
+    KNOWN.get_or_init(|| rl_detect::adapter::adapters(registry(), find_bin))
 }
 
-/// The harness an adapter runs: the one on this machine.
-#[cfg(not(test))]
-fn adapter_bin(bins: &[String]) -> Option<PathBuf> {
-    find_bin(bins)
-}
-
-/// The tests never run a real harness, but a stand-in: a script that writes
-/// its arguments to `argv` in the folder it is run in, and says a session id
-/// (`0a1b2c3d`) when asked to start one in the background.
+/// The tests never run a real harness, but a stand-in
+/// (`fixtures/stand-in-harness`), and its listing is theirs (`StandIn`).
 #[cfg(test)]
-fn adapter_bin(_: &[String]) -> Option<PathBuf> {
-    use std::os::unix::fs::PermissionsExt;
-    static BIN: OnceLock<PathBuf> = OnceLock::new();
-    let bin = BIN.get_or_init(|| {
-        let dir = tempfile::Builder::new()
-            .prefix("rl-test-bins")
-            .tempdir()
-            .unwrap()
-            .keep();
-        let bin = dir.join("stand-in");
-        let script =
-            "#!/bin/sh\nprintf '%s\\n' \"$@\" > argv\ncase \" $* \" in *' --bg '*) echo 'started 0a1b2c3d';; esac\n";
-        std::fs::write(&bin, script).unwrap();
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
-        bin
-    });
-    Some(bin.clone())
+fn known() -> &'static [(Box<dyn Adapter>, bool)] {
+    static KNOWN: OnceLock<Vec<(Box<dyn Adapter>, bool)>> = OnceLock::new();
+    KNOWN.get_or_init(|| {
+        let bin = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../fixtures/stand-in-harness"));
+        rl_detect::adapter::adapters(registry(), |_| Some(bin.clone()))
+            .into_iter()
+            .map(|(a, found)| (Box::new(StandIn(a)) as Box<dyn Adapter>, found))
+            .collect()
+    })
+}
+
+/// A harness's adapter run on the stand-in: what it starts in its
+/// background (`0a1b2c3d`, in the folder the stand-in says) is listed as
+/// working there from then on.
+#[cfg(test)]
+struct StandIn(Box<dyn Adapter>);
+
+#[cfg(test)]
+static STARTED: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+
+#[cfg(test)]
+impl Adapter for StandIn {
+    fn harness(&self) -> &str {
+        self.0.harness()
+    }
+
+    fn list(&self) -> anyhow::Result<Vec<NativeRow>> {
+        let started = STARTED.lock().unwrap();
+        Ok(started
+            .iter()
+            .map(|cwd| NativeRow {
+                harness: self.harness().into(),
+                id: "0a1b2c3d".into(),
+                session_id: "s-0a1b2c3d".into(),
+                name: "started".into(),
+                cwd: cwd.clone(),
+                state: NativeState {
+                    words: "working".into(),
+                    state: RunState::Working,
+                },
+                summary: None,
+                started: None,
+                ended: None,
+                at: None,
+                pr: None,
+            })
+            .collect())
+    }
+
+    fn attach_argv(&self, id: &str) -> Vec<String> {
+        self.0.attach_argv(id)
+    }
+
+    fn start_argv(&self, name: Option<&str>, prompt: Option<&str>) -> Option<Vec<String>> {
+        self.0.start_argv(name, prompt)
+    }
+
+    fn carry_on_argv(&self, session_id: &str) -> Option<Vec<String>> {
+        self.0.carry_on_argv(session_id)
+    }
+
+    fn stop_argv(&self, id: &str) -> Option<Vec<String>> {
+        self.0.stop_argv(id)
+    }
+
+    fn started_ids(&self, printed: &str) -> Vec<String> {
+        if let Some((_, rest)) = printed.split_once(" in ")
+            && let Some((dir, _)) = rest.split_once(" · ")
+        {
+            STARTED.lock().unwrap().push(PathBuf::from(dir));
+        }
+        self.0.started_ids(printed)
+    }
 }
 
 /// The adapter of `harness`'s own background sessions, if it has one.
@@ -129,14 +185,23 @@ pub struct Row {
     pub state_at: Option<Timestamp>,
     pub pr: Option<Pr>,
     pub attach: Attach,
+    /// What stops it, where it is a harness's own session still going and
+    /// its harness has a way to.
+    pub stop: Option<Vec<String>>,
     pub kind: RunKind,
+    /// The root of the repository its folder is in, as read when the rows
+    /// were (`git::toplevel`).
+    pub repo: Option<PathBuf>,
 }
 
 /// Every row, held first, then hooked, then native. A session never stands
 /// twice: a hooked one that a native row or a Relay-held session already
 /// is, nor a native one Relay holds (a held `codex` runs its thread in
-/// Codex's daemon, which lists it).
-pub fn rows(held: &[Held], hooked: &[HookState], native: &[NativeRow]) -> Vec<Row> {
+/// Codex's daemon, which lists it). `answered`: the harnesses whose adapter
+/// has listed its sessions at least once — until then, a hooked row of one
+/// may be among them, and is not carried on. Each folder's repository is
+/// looked for once.
+pub fn rows(held: &[Held], hooked: &[HookState], native: &[NativeRow], answered: &BTreeSet<String>) -> Vec<Row> {
     let held_ids: HashSet<&str> = held
         .iter()
         .flat_map(|h| {
@@ -156,16 +221,25 @@ pub fn rows(held: &[Held], hooked: &[HookState], native: &[NativeRow]) -> Vec<Ro
         .copied()
         .chain(native.iter().map(|n| n.session_id.as_str()))
         .collect();
-    held.iter()
+    let mut rows: Vec<Row> = held
+        .iter()
         .map(held_row)
         .chain(
             hooked
                 .iter()
                 .filter(|h| !taken.contains(h.session_id.as_str()))
-                .map(hooked_row),
+                .map(|h| hooked_row(h, answered)),
         )
         .chain(native.into_iter().map(native_row))
-        .collect()
+        .collect();
+    let mut repos: HashMap<PathBuf, Option<PathBuf>> = HashMap::new();
+    for r in &mut rows {
+        r.repo = repos
+            .entry(r.cwd.clone())
+            .or_insert_with(|| crate::git::toplevel(&r.cwd))
+            .clone();
+    }
+    rows
 }
 
 /// How an ended session ended: stopped when a hang-up or kill took it (the
@@ -223,18 +297,27 @@ fn held_row(h: &Held) -> Row {
         state_at: Some(at),
         pr: None,
         attach: Attach::Held(m.name.clone()),
+        stop: None,
         kind: m.kind,
+        repo: None,
     }
 }
 
 /// What carries on a conversation open in another terminal: the harness's
 /// own background where it has one, else a session Relay holds. Only one at
-/// rest — one busy or waiting there is still in use.
-fn carry_on(h: &HookState) -> Attach {
+/// rest — one busy or waiting there is still in use — and, where the
+/// harness has a background, only once it has said what runs there
+/// (`answered`): carried on while it already runs there, it would run twice.
+fn carry_on(h: &HookState, answered: &BTreeSet<String>) -> Attach {
     if h.state != Said::Idle {
         return Attach::None;
     }
-    if let Some(argv) = adapter(&h.agent).and_then(|a| a.carry_on_argv(&h.session_id)) {
+    if let Some(a) = adapter(&h.agent)
+        && let Some(argv) = a.carry_on_argv(&h.session_id)
+    {
+        if !answered.contains(a.harness()) {
+            return Attach::None;
+        }
         return Attach::CarryOn { argv, background: true };
     }
     registry()
@@ -251,7 +334,7 @@ fn carry_on(h: &HookState) -> Attach {
         })
 }
 
-fn hooked_row(h: &HookState) -> Row {
+fn hooked_row(h: &HookState, answered: &BTreeSet<String>) -> Row {
     let state = match h.state {
         Said::Idle => RunState::Idle,
         Said::Busy => RunState::Working,
@@ -266,12 +349,14 @@ fn hooked_row(h: &HookState) -> Row {
         state,
         words: state_words(state, Confidence::Exact),
         summary: h.detail.clone(),
-        started: Some(h.started.unwrap_or(h.at)),
+        started: Some(h.started),
         ended: None,
         state_at: Some(h.at),
         pr: None,
-        attach: carry_on(h),
+        attach: carry_on(h, answered),
+        stop: None,
         kind: RunKind::Agent,
+        repo: None,
     }
 }
 
@@ -290,7 +375,11 @@ fn native_row(n: &NativeRow) -> Row {
         state_at: n.at,
         pr: n.pr.clone(),
         attach: adapter(&n.harness).map_or(Attach::None, |a| Attach::Argv(a.attach_argv(&n.id))),
+        stop: adapter(&n.harness)
+            .filter(|_| !n.state.state.is_terminal())
+            .and_then(|a| a.stop_argv(&n.id)),
         kind: RunKind::Agent,
+        repo: None,
     }
 }
 
@@ -303,6 +392,12 @@ mod tests {
 
     fn at(s: i64) -> Timestamp {
         Timestamp::from_second(s).unwrap()
+    }
+
+    /// The rows, every adapter having answered.
+    fn rows(held: &[Held], hooked: &[HookState], native: &[NativeRow]) -> Vec<Row> {
+        let all = known().iter().map(|(a, _)| a.harness().to_string()).collect();
+        super::rows(held, hooked, native, &all)
     }
 
     fn held(name: &str, kind: RunKind, status: Status) -> Held {
@@ -334,7 +429,7 @@ mod tests {
             detail: detail.map(Into::into),
             pid: None,
             transcript_path: None,
-            started: None,
+            started: at(150),
             at: at(200),
         }
     }
@@ -492,6 +587,59 @@ mod tests {
     }
 
     #[test]
+    fn a_hooked_row_is_not_carried_on_before_its_harness_has_said_what_runs_in_its_background() {
+        let hooked = [
+            hook("claude", "c-1", Said::Idle, None),
+            hook("gemini", "g-1", Said::Idle, None),
+        ];
+        let none = BTreeSet::new();
+        let r = super::rows(&[], &hooked, &[], &none);
+        assert_eq!(r[0].attach, Attach::None, "claude may run it already");
+        assert!(
+            matches!(r[1].attach, Attach::CarryOn { background: false, .. }),
+            "gemini has no background"
+        );
+        let claude: BTreeSet<String> = ["claude".to_string()].into();
+        let r = super::rows(&[], &hooked, &[], &claude);
+        assert!(matches!(r[0].attach, Attach::CarryOn { background: true, .. }));
+    }
+
+    #[test]
+    fn a_native_session_still_going_stops_through_its_harness() {
+        let r = rows(&[], &[], &[native("s-1")]).remove(0);
+        assert_eq!(
+            r.stop.as_deref().map(|a| &a[1..]),
+            Some(&["stop".to_string(), "ab12cd34".into()][..])
+        );
+        let mut done = native("s-1");
+        done.state = NativeState {
+            words: "completed".into(),
+            state: RunState::Finished,
+        };
+        assert_eq!(rows(&[], &[], &[done]).remove(0).stop, None, "nothing left to stop");
+        let mut codex = native("t-1");
+        codex.harness = "codex".into();
+        assert_eq!(rows(&[], &[], &[codex]).remove(0).stop, None, "codex has no stop");
+        let h = held("a", RunKind::Agent, Status::Live);
+        assert_eq!(rows(&[h], &[], &[]).remove(0).stop, None, "Relay's own stop it");
+    }
+
+    #[test]
+    fn each_row_knows_its_repository() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        let mut in_repo = hook("gemini", "g-1", Said::Busy, None);
+        in_repo.cwd = repo.join("src");
+        let mut plain = hook("gemini", "g-2", Said::Busy, None);
+        plain.cwd = tmp.path().to_path_buf();
+        let r = rows(&[], &[in_repo, plain], &[]);
+        assert_eq!(r[0].repo.as_deref(), Some(repo.as_path()));
+        assert_eq!(r[1].repo, None);
+    }
+
+    #[test]
     fn a_native_row_attaches_through_its_harness() {
         let r = rows(&[], &[], &[native("s-1")]).remove(0);
         let Attach::Argv(argv) = &r.attach else {
@@ -612,11 +760,9 @@ mod tests {
         ended.meta.started = at(100);
         let r = rows(&[ended], &[], &[]).remove(0);
         assert_eq!((r.started, r.ended), (Some(at(100)), Some(at(160))));
-        // A hooked row runs from its first word; an old file without one, from its last.
+        // A hooked row runs from its first word, not its last.
         let mut first = hook("claude", "s", Said::Busy, None);
-        first.started = Some(at(150));
-        assert_eq!(rows(&[], &[first], &[]).remove(0).started, Some(at(150)));
-        let old = hook("claude", "s", Said::Busy, None);
-        assert_eq!(rows(&[], &[old], &[]).remove(0).started, Some(at(200)));
+        first.started = at(120);
+        assert_eq!(rows(&[], &[first], &[]).remove(0).started, Some(at(120)));
     }
 }

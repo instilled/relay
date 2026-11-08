@@ -1,8 +1,10 @@
 //! `^x` twice, in words: what the second press does to the line under the
 //! cursor, said by the first. A session Relay holds that is still going is
-//! stopped; one that has ended is removed; anything else — a session an
-//! agent's hooks told of, one of a harness's own, a project — is hidden, as
-//! nothing of it is Relay's to stop or remove. One already hidden and shown
+//! stopped; one that has ended is removed. One of a harness's own still
+//! going is stopped by its harness, where it has a way to (`claude stop`;
+//! nothing here ever removes one). Anything else — a session an agent's
+//! hooks told of, one of a harness's own that has ended or that it cannot
+//! stop, a project — is hidden. One already hidden and shown
 //! only because hidden is on (or because it came through) is brought back.
 //! Pure, so what you are told can be tested on its own.
 
@@ -10,12 +12,19 @@ use crate::config::ListPrefs;
 use crate::rows::{self, Line, Names};
 use crate::sources::{Attach, Source};
 use crate::store::sessions::Status;
+use std::path::PathBuf;
 
 /// What a second `^x` will do.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Removal {
     /// A Relay-held session still going: closed.
     Stop { name: String, title: String },
+    /// One of a harness's own still going: this run, in its folder, stops it.
+    StopNative {
+        argv: Vec<String>,
+        cwd: PathBuf,
+        title: String,
+    },
     /// A Relay-held session that has ended (or whose holder is lost): its
     /// folder removed.
     Remove { name: String, title: String },
@@ -29,7 +38,7 @@ impl Removal {
     /// The armed hint's words, after "press ^x again to".
     pub fn hint(&self) -> String {
         match self {
-            Removal::Stop { title, .. } => format!("stop {title}"),
+            Removal::Stop { title, .. } | Removal::StopNative { title, .. } => format!("stop {title}"),
             Removal::Remove { title, .. } => format!("remove {title}"),
             Removal::Hide { title, .. } => format!("hide {title}"),
             Removal::Unhide { title, .. } => format!("bring back {title}"),
@@ -62,6 +71,17 @@ pub fn plan(line: &Line, prefs: &ListPrefs, status: impl Fn(&str) -> Option<Stat
                     }),
                     None => Err(format!("{title} is gone already")),
                 };
+            }
+            // One hidden and shown is brought back first.
+            if r.source == Source::Native
+                && !hidden(&r.key)
+                && let Some(argv) = &r.stop
+            {
+                return Ok(Removal::StopNative {
+                    argv: argv.clone(),
+                    cwd: r.cwd.clone(),
+                    title,
+                });
             }
             if !hidden(&r.key) {
                 let project = rows::project_of(r, &names);
@@ -111,7 +131,9 @@ mod tests {
                 Source::Held => Attach::Held(name),
                 _ => Attach::None,
             },
+            stop: None,
             kind: RunKind::Agent,
+            repo: None,
         }
     }
 
@@ -192,6 +214,28 @@ mod tests {
         assert!(matches!(
             plan(&Line::Session(&o), &prefs, |_| None).unwrap(),
             Removal::Unhide { .. }
+        ));
+    }
+
+    #[test]
+    fn a_harnesss_own_session_still_going_is_stopped_by_it_and_one_ended_hidden() {
+        let prefs = ListPrefs::default();
+        let mut n = row("n:claude:a1", Source::Native);
+        n.stop = Some(vec!["claude".into(), "stop".into(), "a1".into()]);
+        let stop = plan(&Line::Session(&n), &prefs, |_| None).unwrap();
+        assert_eq!(stop.hint(), "stop a1");
+        assert_eq!(
+            stop,
+            Removal::StopNative {
+                argv: vec!["claude".into(), "stop".into(), "a1".into()],
+                cwd: "/w/api".into(),
+                title: "a1".into()
+            }
+        );
+        n.stop = None;
+        assert!(matches!(
+            plan(&Line::Session(&n), &prefs, |_| None).unwrap(),
+            Removal::Hide { .. }
         ));
     }
 

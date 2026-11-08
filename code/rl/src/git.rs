@@ -30,9 +30,17 @@ impl Checkout {
 pub type Checkouts = BTreeMap<PathBuf, Checkout>;
 
 /// The folder at or above `dir` that holds a `.git` — a directory, or the
-/// file a linked worktree has — so a worktree is a root of its own.
+/// file a linked worktree has — so a worktree is a root of its own. One at
+/// `$HOME` itself is a dotfiles repo, not a project's: passed over.
 pub fn toplevel(dir: &Path) -> Option<PathBuf> {
-    dir.ancestors().find(|d| d.join(".git").exists()).map(Path::to_path_buf)
+    let home = std::env::var_os("HOME").filter(|h| !h.is_empty()).map(PathBuf::from);
+    toplevel_under(dir, home.as_deref())
+}
+
+fn toplevel_under(dir: &Path, home: Option<&Path>) -> Option<PathBuf> {
+    dir.ancestors()
+        .find(|d| Some(*d) != home && d.join(".git").exists())
+        .map(Path::to_path_buf)
 }
 
 /// A folder's checkout as it stands, read from the files under `.git`.
@@ -41,7 +49,7 @@ pub fn toplevel(dir: &Path) -> Option<PathBuf> {
 /// counted on the main checkout only, and one whose folder is gone does not
 /// count.
 pub fn checkout(dir: &Path) -> Option<Checkout> {
-    let dot = dir.ancestors().map(|d| d.join(".git")).find(|g| g.exists())?;
+    let dot = toplevel(dir)?.join(".git");
     let (gitdir, main) = if dot.is_dir() {
         (dot, true)
     } else {
@@ -196,6 +204,15 @@ mod tests {
         std::fs::write(wt.join(".git"), "gitdir: /elsewhere\n").unwrap();
         assert_eq!(toplevel(&wt), Some(wt));
         assert_eq!(toplevel(&root.join("nowhere")), None);
+        // A dotfiles repo at home is no project's root.
+        let home = root.join("home");
+        std::fs::create_dir_all(home.join(".git")).unwrap();
+        std::fs::create_dir_all(home.join("src/x")).unwrap();
+        assert_eq!(toplevel_under(&home.join("src/x"), Some(&home)), None);
+        assert_eq!(toplevel_under(&home, Some(&home)), None);
+        assert_eq!(toplevel_under(&home.join("src/x"), None), Some(home.clone()));
+        std::fs::create_dir_all(home.join("src/.git")).unwrap();
+        assert_eq!(toplevel_under(&home.join("src/x"), Some(&home)), Some(home.join("src")));
     }
 
     #[test]

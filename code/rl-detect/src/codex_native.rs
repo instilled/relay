@@ -99,8 +99,15 @@ impl Adapter for Codex {
         None
     }
 
-    fn started_id(&self, _: &str) -> Option<String> {
+    /// None: the app-server's `turn/interrupt` stops a turn, not a session,
+    /// and `thread/unsubscribe` only lets go of it; nothing stops a thread
+    /// from outside it.
+    fn stop_argv(&self, _: &str) -> Option<Vec<String>> {
         None
+    }
+
+    fn started_ids(&self, _: &str) -> Vec<String> {
+        Vec::new()
     }
 }
 
@@ -687,7 +694,8 @@ mod tests {
         );
         assert_eq!(c.start_argv(Some("x"), Some("y")), None, "Relay holds what it starts");
         assert_eq!(c.carry_on_argv("s"), None);
-        assert_eq!(c.started_id("anything"), None);
+        assert!(c.started_ids("anything").is_empty());
+        assert_eq!(c.stop_argv("t"), None, "nothing stops a thread from outside");
     }
 
     fn script(dir: &Path, body: &str) -> PathBuf {

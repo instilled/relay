@@ -1,0 +1,10 @@
+#!/bin/sh
+# The stand-in `rl`'s tests run for a harness with a background of its own
+# (`sources::adapter_bin`), never the real one. It writes what it was run
+# with to `argv` in the folder it is run in; asked to start one in the
+# background, it says `0a1b2c3d`, where, and how to attach. What it lists is
+# the tests' to say (`sources::StandIn`).
+printf '%s\n' "$@" > argv
+case " $* " in
+*' --bg '*) echo "started 0a1b2c3d in $PWD · claude attach 0a1b2c3d" ;;
+esac

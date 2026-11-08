@@ -119,13 +119,14 @@ pub fn build<'a>(rows: &'a [Row], cx: &Context<'_>) -> Vec<Line<'a>> {
         if let Some(since) = since
             && !prefs.show_hidden
         {
-            if comes_through(r, since) {
-                if kept && hits() {
+            if comes_through(r, since) && kept {
+                if hits() {
                     through.push((rank::score(r), r.state_at, r.key.clone(), r));
                 }
             } else if wants(r.state) {
                 // Hidden while it already needed you, so it does not come
-                // through: its project hints it is there.
+                // through — or it would, but a toggle takes it off: its
+                // project hints it is there.
                 bury(&project, r);
             }
             continue;

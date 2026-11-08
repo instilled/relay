@@ -4,11 +4,12 @@
 use super::draw::ListHit;
 use super::form::Form;
 use super::line;
+use super::live::Said;
 use crate::badges::{self, Badges};
 use crate::config::{Config, Grouping, ListPrefs};
 use crate::git::{self, Checkouts};
 use crate::rows::{self, Context, Line};
-use crate::sources::{self, NativeRow, Row};
+use crate::sources::{self, Row};
 use crate::store::sessions::{self, Meta};
 use crate::store::state;
 use anyhow::Result;
@@ -78,6 +79,12 @@ pub struct Done {
     pub forget: Option<String>,
     /// What the terminal goes to now: a conversation carried on.
     pub hand: Option<Hand>,
+    /// A start in a harness's background came to nothing: the cursor waits
+    /// for no new line.
+    pub gave_up: bool,
+    /// The harnesses are to be asked for their sessions now: one of them
+    /// changed.
+    pub ask_native: bool,
 }
 
 impl Done {
@@ -87,6 +94,16 @@ impl Done {
             select: None,
             forget: None,
             hand: None,
+            gave_up: false,
+            ask_native: false,
+        }
+    }
+
+    /// A start in a harness's background that came to nothing, and why.
+    pub fn gave_up(s: impl Into<String>) -> Done {
+        Done {
+            gave_up: true,
+            ..Done::said(s)
         }
     }
 }
@@ -104,7 +121,7 @@ pub struct App {
     /// Every row, as the files and the harnesses last said.
     pub rows: Vec<Row>,
     /// The harnesses' own sessions, as their listers last said.
-    pub native: Vec<NativeRow>,
+    pub native: Said,
     /// The checkouts of the projects' folders.
     pub checkouts: Checkouts,
     badges: Badges,
@@ -148,7 +165,7 @@ impl App {
             home,
             config,
             rows: Vec::new(),
-            native: Vec::new(),
+            native: Said::default(),
             checkouts: Checkouts::new(),
             badges,
             prs: HashMap::new(),
@@ -182,7 +199,7 @@ impl App {
     pub fn reload(&mut self) {
         let held = sessions::list(&self.home);
         let hooked = state::list(&self.home, Timestamp::now());
-        self.rows = sources::rows(&held, &hooked, &self.native);
+        self.rows = sources::rows(&held, &hooked, &self.native.rows, &self.native.answered);
         let folders = rows::project_folders(&self.rows, &self.config.list);
         if folders
             .iter()
@@ -221,10 +238,24 @@ impl App {
             .collect();
     }
 
-    /// The native rows, as their listers now say.
-    pub fn set_native(&mut self, native: Vec<NativeRow>) {
-        self.native = native;
+    /// What the harnesses' listers now say.
+    pub fn heard(&mut self, said: Said) {
+        self.native = said;
         self.reload();
+    }
+
+    /// The native rows, as if every lister had answered with them.
+    #[cfg(test)]
+    pub fn set_native(&mut self, rows: Vec<crate::sources::NativeRow>) {
+        let answered = sources::native_listers()
+            .iter()
+            .map(|l| l.harness().to_string())
+            .collect();
+        self.heard(Said {
+            rows,
+            answered,
+            failing: Vec::new(),
+        });
     }
 
     /// The list as it stands: its lines, narrowed by the filter.
@@ -246,15 +277,22 @@ impl App {
 
     /// Changes the list's prefs and keeps them in `config.json`: read again
     /// first, so what another list kept meanwhile stays, then changed and
-    /// written. What does not write is said in the footer; the change stands
-    /// on this list either way.
+    /// written. A file that does not read is never written over: the change
+    /// stands on this list only, and the footer says why. What does not
+    /// write is said there too.
     pub fn change_prefs(&mut self, change: impl FnOnce(&mut ListPrefs)) {
-        if let Ok(now) = Config::load(&self.home) {
-            self.config = now;
-        }
-        change(&mut self.config.list);
-        if let Err(e) = self.config.save(&self.home) {
-            self.say(format!("config.json: {e:#}"));
+        match Config::load(&self.home) {
+            Ok(now) => {
+                self.config = now;
+                change(&mut self.config.list);
+                if let Err(e) = self.config.save(&self.home) {
+                    self.say(format!("config.json: {e:#}"));
+                }
+            }
+            Err(e) => {
+                change(&mut self.config.list);
+                self.say(format!("not kept: config.json does not read ({e:#})"));
+            }
         }
         self.settle();
     }

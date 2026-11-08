@@ -269,7 +269,7 @@ fn hear(
         detail: None,
         pid: None,
         transcript_path: None,
-        started: Some(now),
+        started: now,
         at: now,
     });
     if let Told::Stands { status, waiting_for } = told
@@ -452,10 +452,10 @@ mod tests {
     fn the_first_word_is_kept_as_the_start() {
         let (codex, now) = (h("codex"), Timestamp::now());
         let first = stands(hear(&codex, "UserPromptSubmit", word("s"), None, None, now));
-        assert_eq!(first.started, Some(now));
+        assert_eq!(first.started, now);
         let later = now + jiff::SignedDuration::from_secs(30);
         let next = stands(hear(&codex, "UserPromptSubmit", word("s"), Some(first), None, later));
-        assert_eq!((next.started, next.at), (Some(now), later));
+        assert_eq!((next.started, next.at), (now, later));
     }
 
     #[test]
