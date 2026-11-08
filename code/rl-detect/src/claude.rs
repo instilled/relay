@@ -1,17 +1,13 @@
-//! Claude Code: exact signals from its hooks.
+//! Claude Code: the hooks of a session Relay holds.
 //!
-//! `rld` writes a settings file with one command hook per event, all calling
-//! `rl hook claude <Event>` (rewritten on every start, so a file from before
-//! the agent was named is brought up to date; `rl hook <Event>` alone still
-//! means Claude's); the `claude` profile passes it as `--settings`, so every
-//! Claude run under Relay reports back, in any directory, without editing the
-//! project's `.claude/settings.json`. `rl hook` reads the hook's JSON on stdin
-//! and posts it to the daemon with `RELAY_RUN` from its environment.
+//! `rl new` writes a settings file with one command hook per event, all
+//! calling `rl hook claude <Event>` (rewritten on every start); the `claude` profile passes it as `--settings`, so
+//! every Claude session Relay holds reports back, in any directory, without
+//! editing the project's `.claude/settings.json`. `rl hook` reads the hook's
+//! JSON on stdin and writes the session's state file.
 
-use crate::Signal;
 use anyhow::{Context, Result};
 use rl_core::Home;
-use rl_proto::types::{Confidence, RunState, Source};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 
@@ -28,8 +24,7 @@ pub const EVENTS: [&str; 6] = [
     "Stop",
 ];
 
-/// Seconds Claude waits for a hook. `rl hook` gives up on the daemon well
-/// before this.
+/// Seconds Claude waits for a hook. `rl hook` is done well before this.
 pub(crate) const HOOK_TIMEOUT_SECS: u32 = 5;
 
 const DETAIL_MAX: usize = 160;
@@ -63,46 +58,9 @@ pub fn write_settings(home: &Home, rl_bin: &Path) -> Result<PathBuf> {
     let text = serde_json::to_string_pretty(&settings_json(rl_bin))? + "\n";
     if std::fs::read_to_string(&path).ok().as_deref() != Some(&text) {
         std::fs::create_dir_all(path.parent().unwrap())?;
-        std::fs::write(&path, text).with_context(|| format!("writing {}", path.display()))?;
+        rl_core::atomic::write(&path, text.as_bytes()).with_context(|| format!("writing {}", path.display()))?;
     }
     Ok(path)
-}
-
-/// What a hook event says about the run. `None` for events that carry no
-/// state (unknown kinds, informational notifications).
-pub fn signal(event: &str, payload: &Value) -> Option<Signal> {
-    let s = |k: &str| payload.get(k).and_then(Value::as_str).map(|v| clip(v.trim()));
-    Some(match event {
-        // Up, but a session without a prompt waits at its input box; whether
-        // it is working is for UserPromptSubmit to say, or the PTY to guess.
-        "SessionStart" => Signal {
-            state: RunState::Working,
-            source: Source::Hook,
-            confidence: Confidence::Guess,
-            detail: Some("session started".into()),
-        },
-        "UserPromptSubmit" => Signal::hook(RunState::Working, s("prompt").map(|p| format!("prompt: {p}"))),
-        "PreToolUse" => Signal::hook(RunState::Working, s("tool_name").map(|t| format!("tool: {t}"))),
-        "PostToolUse" => Signal::hook(RunState::Working, s("tool_name").map(|t| format!("tool: {t} done"))),
-        "Stop" => Signal::hook(RunState::Idle, Some("finished responding".into())),
-        "Notification" => {
-            let message = s("message");
-            let kind = s("notification_type").unwrap_or_default();
-            let lower = message.as_deref().unwrap_or("").to_ascii_lowercase();
-            match kind.as_str() {
-                "permission_prompt" | "elicitation_dialog" => Signal::hook(RunState::NeedsInput, message),
-                "idle_prompt" => Signal::hook(RunState::Idle, message),
-                "auth_success" => return None,
-                // Older Claude Code versions send no type: read the message.
-                "" if lower.contains("permission") || lower.contains("approve") => {
-                    Signal::hook(RunState::NeedsInput, message)
-                }
-                "" if lower.contains("waiting for your input") => Signal::hook(RunState::Idle, message),
-                _ => return None,
-            }
-        }
-        _ => return None,
-    })
 }
 
 pub(crate) fn clip(s: &str) -> String {
@@ -126,7 +84,6 @@ pub(crate) fn shell_quote(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rl_proto::types::{Confidence, Source};
 
     #[test]
     fn settings_have_one_hook_per_event() {
@@ -155,42 +112,5 @@ mod tests {
         assert_eq!(std::fs::metadata(&p).unwrap().modified().unwrap(), m1);
         write_settings(&home, Path::new("/y/rl")).unwrap();
         assert!(std::fs::read_to_string(&p).unwrap().contains("/y/rl hook"));
-    }
-
-    #[test]
-    fn events_map_to_states() {
-        let s = signal(
-            "Notification",
-            &json!({"notification_type": "permission_prompt", "message": "Claude needs your permission to use Bash"}),
-        )
-        .unwrap();
-        assert_eq!(
-            (s.state, s.source, s.confidence),
-            (RunState::NeedsInput, Source::Hook, Confidence::Exact)
-        );
-        assert_eq!(s.detail.as_deref(), Some("Claude needs your permission to use Bash"));
-        assert_eq!(
-            signal("Notification", &json!({"message": "Claude needs your permission"}))
-                .unwrap()
-                .state,
-            RunState::NeedsInput
-        );
-        assert_eq!(
-            signal(
-                "Notification",
-                &json!({"notification_type": "idle_prompt", "message": "x"})
-            )
-            .unwrap()
-            .state,
-            RunState::Idle
-        );
-        assert!(signal("Notification", &json!({"notification_type": "auth_success"})).is_none());
-        assert_eq!(signal("Stop", &json!({})).unwrap().state, RunState::Idle);
-        let s = signal("PreToolUse", &json!({"tool_name": "Bash"})).unwrap();
-        assert_eq!((s.state, s.detail.as_deref()), (RunState::Working, Some("tool: Bash")));
-        let s = signal("UserPromptSubmit", &json!({"prompt": "fix the build\nplease"})).unwrap();
-        assert_eq!(s.detail.as_deref(), Some("prompt: fix the build"));
-        assert!(signal("PreCompact", &json!({})).is_none());
-        assert!(signal("SessionEnd", &json!({})).is_none());
     }
 }

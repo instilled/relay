@@ -1,27 +1,22 @@
 //! The holder server: one child, one socket, N attached clients.
 //!
-//! Output flows child → ring buffer (and, for a tty run, a screen) → every
-//! attached client. A client that asks gets the screen drawn afresh instead of
-//! the ring's bytes. Input, resize and signals flow the other way from
-//! whichever client sends them (the daemon decides who may). After the child exits the holder lingers so a daemon that
-//! was down at the time can still attach, replay the tail and read the exit —
-//! then it goes away on `Close` or after `linger` with nobody attached.
+//! Output flows child → ring buffer and screen → every attached client. A
+//! client that asks gets the screen drawn afresh instead of the ring's bytes.
+//! Input, resize and signals flow the other way from whichever client sends
+//! them. After the child exits the holder lingers so a client that was away
+//! at the time can still attach, replay the tail and read the exit — then it
+//! goes away on `Close` or after `linger` with nobody attached.
 //!
 //! Its socket is the only way anyone reaches it. When that file is gone — the
-//! Relay home deleted, a test's temporary home cleaned up — no daemon can ever
+//! Relay home deleted, a test's temporary home cleaned up — nobody can ever
 //! come back for the run, so the holder hangs up its child and leaves rather
 //! than wait out a linger (or a child) nobody will collect.
 //!
 //! The holder also knows its own state. Given a detect spec it feeds the output
 //! (and the foreground probe) to a tracker, which works out whether the run is
 //! working, idle, stale or waiting on input, and keeps the answer in a state
-//! file — so a reader needs no daemon, and no client attached, to learn it.
+//! file — so a reader needs no client attached to learn it.
 //!
-//! The socket can outlive its daemon, though — a throwaway home left on disk,
-//! a `rld` that never comes back — and then nothing journals the run or knows
-//! its state. So a holder that has had nobody attached at all for `reap_after`
-//! hangs up its child and leaves too. `rld` attaches for as long as it lives,
-//! so this only ever fires when Relay itself is gone.
 
 use crate::backend::{self, Resizer, Spec};
 use crate::detect::heuristics::{Patterns, Timing};
@@ -73,9 +68,6 @@ pub struct Config {
     /// How often to check that the socket is still there. Nothing waits on
     /// an orphaned holder leaving, so this can be slow.
     pub socket_check: Duration,
-    /// Nobody attached — no daemon, no viewer — for this long: hang up the
-    /// child and leave. `None` waits forever.
-    pub reap_after: Option<Duration>,
     /// What the holder works out its own run state with. `None`: it does not.
     pub detect: Option<(Patterns, Timing, RunKind)>,
     /// Where the run state is kept, as it changes. Without `detect` nothing
@@ -86,14 +78,13 @@ pub struct Config {
 struct Shared {
     id: String,
     pid: u32,
-    tty: bool,
     cols: u16,
     rows: u16,
     started_at: Timestamp,
     ring: Ring,
-    /// What the run has drawn so far, for a tty run: the ring holds bytes,
-    /// this holds the picture they make.
-    screen: Option<Screen>,
+    /// What the run has drawn so far: the ring holds bytes, this holds the
+    /// picture they make.
+    screen: Screen,
     exit: Option<Exit>,
 }
 
@@ -105,11 +96,8 @@ impl Shared {
             holder_pid: std::process::id(),
             cols: self.cols,
             rows: self.rows,
-            tty: self.tty,
             started_at: self.started_at,
             exit: self.exit.clone(),
-            total: self.ring.total(),
-            replay_from: self.ring.total(),
         }
     }
 }
@@ -122,11 +110,9 @@ struct Ctx {
     resize: Resizer,
     clients: AtomicUsize,
     shutdown: CancellationToken,
-    /// Whether the shell itself owns the terminal foreground. `Some` only for a
-    /// run that can report it (a tty run); `None` otherwise, and then clients
-    /// are never sent a foreground frame. Starts `true`: a fresh shell rests at
-    /// its own prompt.
-    fg: Option<watch::Sender<bool>>,
+    /// Whether the shell itself owns the terminal foreground. Starts `true`: a
+    /// fresh shell rests at its own prompt.
+    fg: watch::Sender<bool>,
     /// Pulsed once per output chunk, so the foreground watcher can park deeply
     /// while the run is quiet and wake the moment the child writes again.
     output_wake: Arc<Notify>,
@@ -141,24 +127,20 @@ pub async fn serve(cfg: Config, ready: oneshot::Sender<()>) -> Result<()> {
     let _ = std::fs::remove_file(&cfg.socket);
     let listener = UnixListener::bind(&cfg.socket).with_context(|| format!("binding {}", cfg.socket.display()))?;
     let spawned = backend::spawn(&cfg.spec)?;
-    info!(id = %cfg.id, pid = spawned.pid, tty = cfg.spec.tty, argv = ?cfg.spec.argv, "session started");
+    info!(id = %cfg.id, pid = spawned.pid, argv = ?cfg.spec.argv, "session started");
 
     let (out_tx, _) = broadcast::channel(BROADCAST_CAPACITY);
     let (exit_tx, _) = watch::channel(None);
-    // The foreground probe moves into `watch_foreground`; the channel exists
-    // only when there is one to poll.
-    let foreground = spawned.foreground;
-    let fg = foreground.as_ref().map(|_| watch::channel(true).0);
+    let (fg, _) = watch::channel(true);
     let ctx = Arc::new(Ctx {
         shared: Mutex::new(Shared {
             id: cfg.id.clone(),
             pid: spawned.pid,
-            tty: cfg.spec.tty,
             cols: cfg.spec.cols,
             rows: cfg.spec.rows,
             started_at: Timestamp::now(),
             ring: Ring::new(RING_CAPACITY),
-            screen: cfg.spec.tty.then(|| Screen::new(cfg.spec.cols, cfg.spec.rows)),
+            screen: Screen::new(cfg.spec.cols, cfg.spec.rows),
             exit: None,
         }),
         out: out_tx,
@@ -184,17 +166,12 @@ pub async fn serve(cfg: Config, ready: oneshot::Sender<()>) -> Result<()> {
         cfg.exit_file.clone(),
         cfg.linger,
     ));
-    if let Some(probe) = foreground {
-        tokio::spawn(watch_foreground(ctx.clone(), probe));
-    }
+    tokio::spawn(watch_foreground(ctx.clone(), spawned.foreground));
     if let (Some(path), true) = (cfg.state_file.clone(), ctx.tracker.is_some()) {
         tokio::spawn(watch_state(ctx.clone(), path));
     }
     tokio::spawn(watch_signals(ctx.clone()));
     tokio::spawn(watch_socket(ctx.clone(), cfg.socket.clone(), cfg.socket_check));
-    if let Some(after) = cfg.reap_after {
-        tokio::spawn(watch_alone(ctx.clone(), after));
-    }
 
     loop {
         tokio::select! {
@@ -225,11 +202,9 @@ pub async fn serve(cfg: Config, ready: oneshot::Sender<()>) -> Result<()> {
     Ok(())
 }
 
-/// Signal a run's child, and — when it leads its own process group (a PTY
-/// child, which the pty setsid'd) — that whole group, so a wrapper shell and
-/// everything it spawned go together. A pipe child leads no group of its own,
-/// so the direct pid is what reaches it and the group signal simply finds
-/// nothing. Both are best-effort.
+/// Signal a run's child and its whole process group (the pty setsid'd it), so
+/// a wrapper shell and everything it spawned go together. Both are
+/// best-effort.
 fn signal_tree(pid: i32, sig: Signal) {
     let _ = kill(Pid::from_raw(pid), sig);
     let _ = kill(Pid::from_raw(-pid), sig);
@@ -241,9 +216,7 @@ async fn pump_output(ctx: Arc<Ctx>, mut output: mpsc::Receiver<Vec<u8>>) {
     while let Some(chunk) = output.recv().await {
         let mut s = ctx.shared.lock().unwrap();
         s.ring.push(&chunk);
-        if let Some(sc) = s.screen.as_mut() {
-            sc.feed(&chunk);
-        }
+        s.screen.feed(&chunk);
         let chunk: Arc<[u8]> = Arc::from(chunk);
         let _ = ctx.out.send(chunk.clone());
         drop(s);
@@ -258,7 +231,7 @@ async fn pump_output(ctx: Arc<Ctx>, mut output: mpsc::Receiver<Vec<u8>>) {
 }
 
 /// Polls the terminal-foreground probe and publishes `ctx.fg` on change, so an
-/// attached daemon can tell a shell resting at its own prompt from one with a
+/// attached client can tell a shell resting at its own prompt from one with a
 /// child program in front of it.
 ///
 /// The cost is kept near zero when nothing is happening. With no client and no
@@ -266,10 +239,9 @@ async fn pump_output(ctx: Arc<Ctx>, mut output: mpsc::Receiver<Vec<u8>>) {
 /// needs the value whether or not anyone is attached. Otherwise it samples
 /// once a second, but a shell that has sat unchanged for a while is deep-idle:
 /// the watcher stops sampling and parks on the next output chunk, waking only
-/// when the child writes again. Spawned only for a run whose probe exists, so
-/// `ctx.fg` is always `Some` here.
+/// when the child writes again.
 async fn watch_foreground(ctx: Arc<Ctx>, probe: backend::Foreground) {
-    let Some(fg) = ctx.fg.as_ref() else { return };
+    let fg = &ctx.fg;
     let mut poll = tokio::time::interval(FG_POLL);
     poll.set_missed_tick_behavior(MissedTickBehavior::Delay);
     // Did a chunk arrive since the last sample? If so the run is not quiet,
@@ -461,30 +433,6 @@ async fn watch_socket(ctx: Arc<Ctx>, socket: PathBuf, every: Duration) {
     }
 }
 
-/// Nobody at all for `after` — not even a daemon, which attaches for as long
-/// as it lives: the run is unsupervised and nothing is journaling it, so hang
-/// up the child and leave instead of holding it forever.
-async fn watch_alone(ctx: Arc<Ctx>, after: Duration) {
-    let every = (after / 10).clamp(Duration::from_secs(1), Duration::from_secs(60));
-    let mut alone = Duration::ZERO;
-    loop {
-        tokio::select! {
-            _ = ctx.shutdown.cancelled() => return,
-            _ = tokio::time::sleep(every) => {}
-        }
-        if ctx.clients.load(Ordering::SeqCst) > 0 {
-            alone = Duration::ZERO;
-            continue;
-        }
-        alone += every;
-        if alone >= after {
-            info!(?after, "nobody has been attached for this long; letting the run go");
-            ctx.shutdown.cancel();
-            return;
-        }
-    }
-}
-
 /// SIGTERM/SIGINT to the holder: hang up the child and leave.
 async fn watch_signals(ctx: Arc<Ctx>) {
     use tokio::signal::unix::{SignalKind, signal};
@@ -511,32 +459,23 @@ async fn client_loop(ctx: &Ctx, stream: UnixStream) -> std::io::Result<()> {
     let (rd, mut wr) = stream.into_split();
     let mut rd = FrameReader::new(BufReader::new(rd));
 
-    let (replay, from) = match rd.next().await? {
-        Some(Frame::Attach { replay, from }) => (replay, from),
+    let replay = match rd.next().await? {
+        Some(Frame::Attach { replay }) => replay,
         _ => return Ok(()),
     };
 
     // Subscribe first, then snapshot under the lock: see pump_output.
-    // The replay starts at `from`, or at the oldest byte the ring still has.
     let mut exit_rx = ctx.exit.subscribe();
     let (mut out_rx, snapshot, hello) = {
         let mut s = ctx.shared.lock().unwrap();
-        let total = s.ring.total();
-        let oldest = total - s.ring.len() as u64;
-        let start = from.clamp(oldest, total);
-        let mut hello = s.hello();
-        let snapshot = if let (Replay::Screen, Some(sc)) = (replay, s.screen.as_mut()) {
-            // The screen stands in for the bytes: nothing is replayed from the
-            // ring, and live output carries on from `total`.
-            hello.replay_from = total;
-            sc.snapshot()
-        } else if replay != Replay::None {
-            hello.replay_from = start;
-            s.ring.snapshot().split_off((start - oldest) as usize)
-        } else {
-            Vec::new()
+        let snapshot = match replay {
+            // The screen stands in for the bytes: nothing is replayed from
+            // the ring.
+            Replay::Screen => s.screen.snapshot(),
+            Replay::Bytes => s.ring.snapshot(),
+            Replay::None => Vec::new(),
         };
-        (ctx.out.subscribe(), snapshot, hello)
+        (ctx.out.subscribe(), snapshot, s.hello())
     };
     let mut exit_sent = hello.exit.is_some();
     write_frame(&mut wr, &Frame::Hello(hello.clone())).await?;
@@ -546,17 +485,11 @@ async fn client_loop(ctx: &Ctx, stream: UnixStream) -> std::io::Result<()> {
         write_frame(&mut wr, &Frame::Exit(exit)).await?;
     }
 
-    // Foreground: a tty run has a channel, a pipe run does not. Tell a freshly
-    // attached client the current state once, then follow it on every change.
-    let mut fg_rx = match ctx.fg.as_ref() {
-        Some(tx) => {
-            let rx = tx.subscribe();
-            let cur = *rx.borrow();
-            write_frame(&mut wr, &Frame::Foreground(cur)).await?;
-            Some(rx)
-        }
-        None => None,
-    };
+    // Foreground: tell a freshly attached client the current state once, then
+    // follow it on every change.
+    let mut fg_rx = ctx.fg.subscribe();
+    let cur = *fg_rx.borrow();
+    write_frame(&mut wr, &Frame::Foreground(cur)).await?;
 
     let pid = ctx.shared.lock().unwrap().pid as i32;
     let mut out_open = true;
@@ -573,9 +506,7 @@ async fn client_loop(ctx: &Ctx, stream: UnixStream) -> std::io::Result<()> {
                         let mut s = ctx.shared.lock().unwrap();
                         s.cols = cols;
                         s.rows = rows;
-                        if let Some(sc) = s.screen.as_mut() {
-                            sc.resize(cols, rows);
-                        }
+                        s.screen.resize(cols, rows);
                     }
                 }
                 Some(Frame::Signal(n)) => match Signal::try_from(n) {
@@ -593,16 +524,12 @@ async fn client_loop(ctx: &Ctx, stream: UnixStream) -> std::io::Result<()> {
                 }
                 Err(broadcast::error::RecvError::Closed) => out_open = false,
             },
-            fg = async { fg_rx.as_mut().unwrap().changed().await }, if fg_rx.is_some() => {
-                match fg {
-                    Ok(()) => {
-                        let v = *fg_rx.as_ref().unwrap().borrow();
-                        write_frame(&mut wr, &Frame::Foreground(v)).await?;
-                    }
-                    // The sender lives in `Ctx` for the holder's life, so this
-                    // only happens if the run is tearing down: stop following it.
-                    Err(_) => fg_rx = None,
-                }
+            // The sender lives in `Ctx` for the holder's life, so this only
+            // fails if the run is tearing down: the client's loop ends then.
+            fg = fg_rx.changed() => {
+                fg.map_err(|_| std::io::ErrorKind::BrokenPipe)?;
+                let v = *fg_rx.borrow();
+                write_frame(&mut wr, &Frame::Foreground(v)).await?;
             }
             changed = exit_rx.changed(), if !exit_sent => {
                 if changed.is_err() { exit_sent = true; continue; }

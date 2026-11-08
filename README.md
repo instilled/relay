@@ -1,28 +1,12 @@
 # Relay
 
-Relay keeps your agents and long-running work alive while you're gone, tells you what they need
-and what they did, and runs recurring work as flows — with your yes where it matters.
+Relay is `claude agents` for every harness. One list of your agent sessions (Claude, Codex, Gemini
+and the like) and your shells, in the terminal you already use. Enter attaches. Agents can send
+each other messages.
 
-Command: `rl`. Daemon: `rld`.
+Command: `rl`. No daemon.
 
-```text
-  ▄     ▄██▄     ▄
- █  █    ██    █  █   relay 0.1.0 · ~/code                             all · agents · flows · hidden
-  ▀    ▄█▀▀█▄    ▀    1 to decide · 1 working · 1 finished
-    ▄▄██▄▄▄▄██▄▄
-    ▀▀  ▀▀▀▀  ▀▀
-──────────────────────────────────────────────────────────────────────────────────────────────────────
- ? api › Deploy api to staging?           to decide  tests pass on main, 3 commits since the last deploy
-
-~/code/api
- ▸ cargo test                             done       exit 0 · 1s
-
-~/code/web
- ▸ npm run dev                            working~   ready on :3000
-```
-
-Early; macOS and Linux. Not built yet: notifications, plugins, and per-run facts (commits, diffs,
-cost) — see [the roadmap](docs/PRODUCT-ROADMAP.md).
+Early; macOS and Linux. Relay calls no model.
 
 ## Install
 
@@ -31,62 +15,133 @@ Needs a recent stable Rust (CI uses 1.96) and `git`.
 ```sh
 git clone https://github.com/instilled/relay && cd relay
 cargo build --release
-export PATH="$PWD/target/release:$PATH"   # rl, rld and rl-session must stay side by side
+export PATH="$PWD/target/release:$PATH"   # rl and rl-session must stay side by side
 ```
 
-Or link the dev shims, which rebuild when the source changes: `ln -sf "$PWD/scripts/rl" "$PWD/scripts/rld" ~/.local/bin/`.
+Or link the dev shim, which rebuilds when the source changes: `ln -sf "$PWD/scripts/rl" ~/.local/bin/`.
 
-Everything lives under `~/.relay` (`RELAY_HOME` moves it). Any `rl` command starts `rld`, and runs
-survive `rl daemon restart`.
+Everything lives under `~/.relay` (`RELAY_HOME` moves it).
 
-## Use
+## First run
 
 ```sh
-rl setup                                  # which agents to offer, who writes summaries
-rl up ~/code/api                          # a project Relay knows
-rl                                        # the panel: type a task or a shell line; / for commands, ^h for keys
-                                          # enter reads the row you are on, esc comes back, ctrl-\ leaves any page
-rl run --agent claude "make the flaky parser test deterministic"
-rl run -- cargo test                      # any command; it outlives the terminal
+rl setup      # hooks and the MCP server, for each harness found on PATH
+rl            # the list
 ```
 
-Close the laptop. When you're back:
+`rl setup` adds Relay's hook to each harness's user-level settings and registers
+`rl mcp --harness <name>` as an MCP server named `relay` (Claude's through `claude mcp add --scope user`,
+so `claude` must be on PATH). It says what it changed, and `nothing to change` on a second run.
+`rl setup --remove` takes both out again, also for a harness no longer installed; `--harness <name>`
+(repeatable) limits it to one.
+Codex asks you to trust the hook once (`/hooks` in codex); Claude may ask you to review it in `/hooks`.
+
+## The list
+
+Rows are agents and shells, under their project folder or under Needs input, Working and Done.
+Claude's and Codex's own background sessions are on it too. `^h` or `?` shows the keys.
+
+| key | does |
+| --- | --- |
+| `enter` | attach |
+| `n` | new session |
+| `↑↓` `^j` `^k` | move |
+| `pgup` `pgdn` `home` `end` | page |
+| `^f` | search |
+| `^x ^x` | stop, then remove or hide |
+| `^r` | rename |
+| `^t` | pin |
+| `⇧↑↓` | reorder |
+| `a` `s` `h` | show agents, shells, hidden |
+| `^s` | group by project or by state |
+| `^c ^c` | quit |
+
+`ctrl-\` leaves an attached session running and comes back to the list.
+
+## Commands
 
 ```sh
-rl since                                  # what happened, and what needs you (the panel opens on it too)
-rl join <run>                             # back in a run's terminal; ctrl-\ leaves it running
-rl decisions                              # questions waiting on you
-rl decide <id> yes
+rl new [--harness claude] [--cwd DIR] [--name-only] [-- ARGV...]   # a shell, or a harness; prints the name
+rl ls [--json]                  # the list, once
+rl attach <name>                # ctrl-\ detaches
+rl stop <name>                  # close a running session
+rl rm <name>                    # remove one that is not running
+rl mcp --harness H              # serve send, who and inbox over stdio (agents call this)
+rl setup [--remove] [--harness H]
 ```
 
-Agents you started outside Relay are on the panel too, under their folder's project: Claude's,
-Codex's and Gemini's, once `rl setup` has added Relay's hook to their user-level settings (Claude's
-are listed without it as well, just less promptly). Enter on one of Claude's background sessions
-opens it here (`claude attach`; `ctrl-\` leaves it running, as for a run); enter on one idle in
-another terminal carries it on here as a Relay run.
+`rl hook <agent> <Event>` is what an agent's hook calls. It is not for you to run.
 
-## Flows
+A session lives in a small holder process (`rl-session`) that keeps its terminal, so closing your
+terminal or the laptop lid costs nothing. Without a daemon, nothing else is running.
 
-A flow is a folder `~/.relay/flows/<name>/` with a `flow.md`: when it runs (`when: every 30m` or
-`on:` an event), its steps (scripts, agents, questions to you) and how they connect. Nothing runs
-until you approve the folder's exact contents, and any change needs your yes again.
+## Files
 
-```sh
-rl flow new brief "every weekday at 7:30, sum up yesterday's PRs for me"
-rl flow test brief                        # what would fire and run; starts nothing
-rl flow list
-```
+`~/.relay`:
 
-Two to copy and adapt are in [examples/flows](examples/flows): `prod-logs` and `morning-brief`.
+| path | holds |
+| --- | --- |
+| `sessions/<name>/` | one held session: `meta.json`, `state.json`, `hook.json`, `exit`, `sock` |
+| `state/<agent>/<session_id>.json` | what an agent's hooks said of a session Relay does not hold |
+| `mail/<key>/` | messages waiting for an agent, one file each (key: a held session's name, else its conversation id) |
+| `config.json` | harnesses offered, badges, how the list stands (grouping, pins, names, order, hidden) |
+| `hooks/` | settings files `rl new` passes to a harness (Claude's `--settings`) |
+| `detect/*.yaml` | your harness profiles |
+| `plugins/gh-pr` | the badge script for project headers |
+
+A socket too long for the OS limit goes under `$TMPDIR/rl-<uid>-<hash>/`.
+
+## Adapters
+
+A harness is a file, `detect/<name>.yaml`. The built-in ones are compiled in (`claude`, `codex`,
+`cursor`, `gemini`, `opencode`, `sh`, with `generic` as the floor under all). Yours in
+`~/.relay/detect/` merge over them field by field; a new name adds a harness.
+
+Keys a profile accepts:
+
+- `kind`: `agent`, `shell`, `command` or `plugin`
+- `bins`: binary names to match
+- `interactive_only`
+- `hooks`: `dialect`, `args` (what `rl new` passes the binary; `{hooks_file}` is the settings file)
+- `resume`: arguments that carry a conversation on, with `{session}`
+- `icon`, `color` (`#rrggbb`)
+- `patterns`: `needs_input`, `idle` (regexes over the screen, the fallback when hooks say nothing)
+- `timing`: `idle_after`, `stale_after`
+- `sessions`: the harness's own sessions
+  - `hooks`: `file`, `timeout`, `unit`, `async`, `marker`, `after_install`, `from_env`, `events`, `settings`
+  - `list`: `args` and `reader` (`claude-agents` or `codex-threads`)
+  - `attach`, `start`, `name`, `stop`: argument lists with `{id}` and `{name}`
+
+Unknown keys are an error. Old keys such as `headless`, `model_flag`, `small_model` and `says` no
+longer load; remove them. See `detect/claude.yaml` and `detect/codex.yaml` for worked examples.
 
 ## For agents
 
-`rl context` explains Relay to an agent; `rl --json …` makes every command machine-readable.
+`rl mcp` is a stdio MCP server with three tools:
+
+- `who`: the list's rows, one line each (`address (title) · harness · state · folder`), you marked. The title is the one you gave the row with `^r`.
+- `send(to, text, from?)`: leave a message for another agent, by address, title or conversation id. An unknown address is an error with close matches.
+- `inbox(as?)`: take your waiting messages, oldest first. They are deleted as they are read.
+
+Your address is found in this order: `RELAY_SESSION`, when the held session runs the harness the
+server was started for (`RELAY_SESSION_AGENT`, so an agent started in a held shell is not the shell),
+else (Claude) `CLAUDE_CODE_SESSION_ID` matched against the list, else you pass `from` or `as`
+yourself. Codex has no automatic address yet, so it passes them.
+
+## Known limits
+
+Not verified against the live CLIs:
+
+- What `claude --bg` prints. Relay takes the first 8-hex word as the session id; if there is none, the start says so.
+- `claude stop <id>` from `^x`.
+- That `codex resume <id>` rejoins a thread the Codex app-server has loaded, and when a thread counts as loaded.
+- The Gemini MCP entry (`mcpServers.relay` in its `settings.json`).
+- `claude agents` state mapping against its own screen.
 
 ## Docs
 
-- [PRODUCT.md](docs/PRODUCT.md) — what Relay is for, and where it's going.
-- [ARCHITECTURE.md](docs/ARCHITECTURE.md) — how the tree is wired, as built.
-- [PRODUCT-ROADMAP.md](docs/PRODUCT-ROADMAP.md) — done and next.
+- [PRODUCT.md](docs/PRODUCT.md): what Relay is for.
+- [ARCHITECTURE.md](docs/ARCHITECTURE.md): how the tree is wired, as built.
+- [PRODUCT-ROADMAP.md](docs/PRODUCT-ROADMAP.md): done and next.
 
 Relay is a rebuild of [instilled/ax](https://github.com/instilled/ax), kept archived as the legacy reference.

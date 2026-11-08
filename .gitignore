@@ -7,9 +7,6 @@
 
 # runtime state, in case RELAY_HOME points into the repo
 *.log
-*.db
-*.db-wal
-*.db-shm
 *.sock
 
 # editors
@@ -22,7 +19,3 @@
 *~
 
 .DS_Store
-
-# the live test home: throwaway, except its seed
-/live/*
-!/live/seed/

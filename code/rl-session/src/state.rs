@@ -8,6 +8,7 @@ use std::io;
 use std::path::Path;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct StateFile {
     pub state: RunState,
     pub confidence: Confidence,
@@ -22,12 +23,7 @@ pub struct StateFile {
 
 /// Written atomically (tmp + rename) so a reader never sees a partial file.
 pub fn write_state_file(path: &Path, s: &StateFile) -> io::Result<()> {
-    let tmp = path.with_file_name(format!(
-        "{}.tmp",
-        path.file_name().unwrap_or_default().to_string_lossy()
-    ));
-    std::fs::write(&tmp, serde_json::to_vec(s)?)?;
-    std::fs::rename(&tmp, path)
+    rl_core::atomic::write_json(path, s)
 }
 
 /// `Ok(None)` when the file does not exist yet.
@@ -58,6 +54,23 @@ mod tests {
         };
         write_state_file(&p, &s).unwrap();
         assert_eq!(read_state_file(&p).unwrap(), Some(s));
-        assert!(!tmp.path().join("state.json.tmp").exists());
+        assert!(
+            std::fs::read_dir(tmp.path())
+                .unwrap()
+                .flatten()
+                .all(|e| !e.file_name().to_string_lossy().ends_with(".tmp"))
+        );
+    }
+
+    #[test]
+    fn a_state_file_with_a_field_it_does_not_know_does_not_read() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("state.json");
+        std::fs::write(
+            &p,
+            r#"{"state":"idle","confidence":"likely","at":"1970-01-01T00:00:00Z","extra":1}"#,
+        )
+        .unwrap();
+        assert!(read_state_file(&p).is_err());
     }
 }

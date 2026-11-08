@@ -1,0 +1,16 @@
+{
+ "state": "done",
+ "detail": "the summary of a8b1e728",
+ "tempo": "idle",
+ "children": null,
+ "name": "<<placeholder>>",
+ "sessionId": "a8b1e728-4671-4524-b188-e7da795d7e29",
+ "resumeSessionId": "0d06b838-b757-43b9-92e8-228e87a0a937",
+ "daemonShort": "a8b1e728",
+ "cwd": "/w/flint-agent-marketplace-internal",
+ "createdAt": "2026-08-18T07:28:44.205Z",
+ "updatedAt": "2026-10-21T12:43:04.788Z",
+ "firstTerminalAt": "2026-08-18T08:04:05.974Z",
+ "lastTerminalAt": "2026-09-18T15:52:17.177Z",
+ "backend": "daemon"
+}

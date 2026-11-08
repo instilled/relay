@@ -7,8 +7,8 @@ use crate::sessions::{Sessions, SessionsFile, UserHooks};
 use anyhow::{Context, Result, bail};
 use regex::Regex;
 use rl_core::Home;
+use rl_core::state::RunKind;
 use rl_core::time::parse_duration;
-use rl_proto::types::RunKind;
 use rl_session::detect::heuristics::{Patterns, Timing};
 use serde::Deserialize;
 use std::collections::BTreeMap;
@@ -35,9 +35,6 @@ struct ProfileFile {
     bins: Option<Vec<String>>,
     interactive_only: Option<bool>,
     hooks: Option<HooksFile>,
-    headless: Option<Vec<String>>,
-    model_flag: Option<Vec<String>>,
-    small_model: Option<String>,
     resume: Option<Vec<String>>,
     icon: Option<String>,
     color: Option<String>,
@@ -82,15 +79,6 @@ impl ProfileFile {
         if over.hooks.is_some() {
             self.hooks = over.hooks;
         }
-        if over.headless.is_some() {
-            self.headless = over.headless;
-        }
-        if over.model_flag.is_some() {
-            self.model_flag = over.model_flag;
-        }
-        if over.small_model.is_some() {
-            self.small_model = over.small_model;
-        }
         if over.resume.is_some() {
             self.resume = over.resume;
         }
@@ -130,7 +118,7 @@ pub struct Hooks {
     /// Only `claude` exists today.
     pub dialect: String,
     /// Inserted after `argv[0]`; `{hooks_file}` is replaced with the settings
-    /// file `rld` writes for that dialect.
+    /// file `rl new` writes for that dialect.
     pub args: Vec<String>,
 }
 
@@ -143,14 +131,6 @@ pub struct Profile {
     /// script). Shells.
     pub interactive_only: bool,
     pub hooks: Option<Hooks>,
-    /// Arguments that make the CLI run one prompt and exit (`-p`), for
-    /// headless runs: a flow's agent steps, Relay's own assistants. The prompt
-    /// goes last, or in place of `{prompt}`.
-    pub headless: Vec<String>,
-    /// The flag that names a model (`--model`); empty when the CLI has none.
-    pub model_flag: Vec<String>,
-    /// The quick, cheap model setup offers for summaries, when there is one.
-    pub small_model: Option<String>,
     /// The arguments that carry one of its conversations on, after its
     /// binary: `{session}` is the conversation's id (`["--resume",
     /// "{session}"]`). Empty when Relay does not know how it resumes.
@@ -168,32 +148,6 @@ pub struct Profile {
     pub sessions: Option<Sessions>,
 }
 
-/// Where a headless prompt goes when it does not simply go last: a CLI whose
-/// prompt is the value of a flag (`gemini -p <prompt>`).
-pub const PROMPT: &str = "{prompt}";
-
-/// A headless argv with its prompt: in place of `{prompt}`, else last.
-pub fn with_prompt(mut argv: Vec<String>, prompt: String) -> Vec<String> {
-    match argv.iter().position(|a| a == PROMPT) {
-        Some(i) => argv[i] = prompt,
-        None => argv.push(prompt),
-    }
-    argv
-}
-
-/// The same for a prompt Relay did not write — a flow's, with what its steps left spliced in, or
-/// an option's: last, after `--`, so one that starts with `-` is never read as a flag. In place
-/// of `{prompt}` it is a flag's value, where `--` cannot go, and one that starts with `-` is
-/// refused.
-pub fn with_given_prompt(mut argv: Vec<String>, prompt: String) -> Result<Vec<String>> {
-    if !argv.iter().any(|a| a == PROMPT) {
-        argv.push("--".into());
-    } else if prompt.starts_with('-') {
-        bail!("the prompt starts with `-`, and this agent would read it as a flag");
-    }
-    Ok(with_prompt(argv, prompt))
-}
-
 /// Where a conversation's id goes in a profile's `resume`.
 pub const SESSION: &str = "{session}";
 
@@ -207,14 +161,6 @@ impl Profile {
         let args = self.resume.iter().map(|a| a.replace(SESSION, session));
         Some(std::iter::once(bin).chain(args).collect())
     }
-}
-
-/// The outcome of looking at an argv.
-#[derive(Debug, Clone)]
-pub struct Resolved<'a> {
-    pub kind: RunKind,
-    pub cli: Option<String>,
-    pub profile: &'a Profile,
 }
 
 #[derive(Debug)]
@@ -298,9 +244,6 @@ impl Registry {
                         dialect: h.dialect,
                         args: h.args,
                     }),
-                    headless: file.headless.unwrap_or_default(),
-                    model_flag: file.model_flag.unwrap_or_default(),
-                    small_model: file.small_model,
                     resume: file.resume.unwrap_or_default(),
                     icon: file.icon.map(|i| check_icon(&name, i)).transpose()?,
                     color: file.color.map(|c| parse_color(&name, &c)).transpose()?,
@@ -353,26 +296,6 @@ impl Registry {
         self.profiles.values().find(|p| {
             p.name != GENERIC && p.bins.iter().any(|b| b == bin) && (!p.interactive_only || is_interactive(argv))
         })
-    }
-
-    /// Kind and cli for a run: the caller's hint (`--agent`) wins over what
-    /// the registry sees; a plain command that starts a known CLI becomes
-    /// that CLI's kind. Unknown argv gets the generic profile.
-    pub fn resolve(&self, hint: RunKind, argv: &[String]) -> Resolved<'_> {
-        match self.detect(argv) {
-            Some(p) => Resolved {
-                kind: if hint == RunKind::Command { p.kind } else { hint },
-                cli: Some(p.name.clone()),
-                profile: p,
-            },
-            None => Resolved {
-                kind: hint,
-                cli: (hint == RunKind::Agent)
-                    .then(|| argv.first().map(|a| basename(a).to_string()))
-                    .flatten(),
-                profile: self.generic(),
-            },
-        }
     }
 }
 
@@ -478,8 +401,6 @@ mod tests {
             r.names().collect::<Vec<_>>(),
             ["claude", "codex", "cursor", "gemini", "generic", "opencode", "sh"]
         );
-        assert_eq!(r.profile("claude").unwrap().small_model.as_deref(), Some("haiku"));
-        assert_eq!(r.profile("opencode").unwrap().small_model, None);
         let resume = |n: &str| r.profile(n).unwrap().resume_argv(n.into(), "s1");
         assert_eq!(resume("claude").unwrap(), ["claude", "--resume", "s1"]);
         assert_eq!(resume("codex").unwrap(), ["codex", "resume", "s1"]);
@@ -531,65 +452,12 @@ mod tests {
     }
 
     #[test]
-    fn the_prompt_goes_where_the_profile_says() {
-        let r = Registry::builtin();
-        let mut argv = vec!["gemini".to_string()];
-        argv.extend(r.profile("gemini").unwrap().headless.iter().cloned());
-        argv.extend(["-m".into(), "flash-lite".into()]);
-        assert_eq!(
-            with_prompt(argv, "say hi".into()),
-            ["gemini", "-p", "say hi", "-m", "flash-lite"]
-        );
-        assert_eq!(
-            with_prompt(vec!["claude".into(), "-p".into()], "say hi".into()),
-            ["claude", "-p", "say hi"]
-        );
-    }
-
-    #[test]
-    fn a_prompt_relay_did_not_write_goes_after_the_flags_end() {
-        let claude = vec!["claude".to_string(), "-p".into()];
-        assert_eq!(
-            with_given_prompt(claude, "-v please".into()).unwrap(),
-            ["claude", "-p", "--", "-v please"]
-        );
-        let gemini = vec!["gemini".to_string(), "-p".into(), PROMPT.into()];
-        assert_eq!(
-            with_given_prompt(gemini.clone(), "say hi".into()).unwrap(),
-            ["gemini", "-p", "say hi"]
-        );
-        assert!(with_given_prompt(gemini, "-m pro".into()).is_err());
-    }
-
-    #[test]
     fn shells_only_when_interactive() {
         let r = Registry::builtin();
         assert_eq!(r.detect(&argv("bash")).unwrap().kind, RunKind::Shell);
         assert_eq!(r.detect(&argv("zsh -l")).unwrap().kind, RunKind::Shell);
         assert!(r.detect(&argv("sh -c echo")).is_none());
         assert!(r.detect(&argv("bash script.sh")).is_none());
-    }
-
-    #[test]
-    fn resolve_respects_the_hint_and_names_the_cli() {
-        let r = Registry::builtin();
-        let x = r.resolve(RunKind::Command, &argv("claude"));
-        assert_eq!((x.kind, x.cli.as_deref()), (RunKind::Agent, Some("claude")));
-        let x = r.resolve(RunKind::Command, &argv("make test"));
-        assert_eq!(
-            (x.kind, x.cli.as_deref(), x.profile.name.as_str()),
-            (RunKind::Command, None, "generic")
-        );
-        let x = r.resolve(RunKind::Agent, &argv("/opt/bin/fake-cli hi"));
-        assert_eq!((x.kind, x.cli.as_deref()), (RunKind::Agent, Some("fake-cli")));
-        let x = r.resolve(RunKind::Agent, &argv("sh -c x"));
-        assert_eq!(x.kind, RunKind::Agent, "--agent wins");
-        // A warm shell is started with a `Command` hint and `$SHELL -i` for
-        // argv, so the profile's kind is what it ends up with. It matters:
-        // `Heuristics` turns prompt and idle detection on for everything that
-        // is not a `Command`.
-        let x = r.resolve(RunKind::Command, &argv("zsh -i"));
-        assert_eq!((x.kind, x.profile.name.as_str()), (RunKind::Shell, "sh"));
     }
 
     #[test]

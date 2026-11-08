@@ -1,8 +1,7 @@
-//! Spawning the child: a PTY by default, plain pipes with `--no-tty`. Both
-//! produce the same [`Spawned`] handle so the holder never cares which.
+//! Spawning the child on a PTY, as a [`Spawned`] handle.
 //!
-//! The PTY and pipe readers are blocking, so each lives on its own thread and
-//! hands chunks to the async side over a channel.
+//! The PTY reader is blocking, so it lives on its own thread and hands chunks
+//! to the async side over a channel.
 //!
 //! A reader that has caught up waits `settle` before reading again. Nothing is
 //! held back — what was read is already on its way — but the next read finds a
@@ -63,10 +62,6 @@ pub struct Spec {
     pub inherit_env: bool,
     pub cols: u16,
     pub rows: u16,
-    pub tty: bool,
-    /// Whether the child reads what is typed (pipes only); without, its input
-    /// is `/dev/null` and what is typed goes nowhere.
-    pub input: bool,
     /// How long a reader that has caught up waits before reading again; zero
     /// reads as fast as the child writes.
     pub settle: Duration,
@@ -85,18 +80,14 @@ pub struct Spawned {
     pub input: mpsc::Sender<Vec<u8>>,
     pub exit: oneshot::Receiver<Exit>,
     pub resize: Resizer,
-    /// Terminal-foreground probe; `None` without a pty.
-    pub foreground: Option<Foreground>,
+    /// Terminal-foreground probe.
+    pub foreground: Foreground,
 }
 
 pub fn spawn(spec: &Spec) -> Result<Spawned> {
     if spec.argv.is_empty() {
         anyhow::bail!("argv must not be empty");
     }
-    if spec.tty { spawn_pty(spec) } else { spawn_pipes(spec) }
-}
-
-fn spawn_pty(spec: &Spec) -> Result<Spawned> {
     let pty = native_pty_system();
     let size = PtySize {
         rows: spec.rows,
@@ -150,7 +141,7 @@ fn spawn_pty(spec: &Spec) -> Result<Spawned> {
         let exit = match child.wait() {
             Ok(st) => match st.signal().map(pty_signal_number) {
                 // portable-pty renders signals as "Terminated: 15"; normalise
-                // to the same shape the pipe backend produces.
+                // to `128 + n` and the signal's name.
                 Some(Some(sig)) => Exit {
                     code: 128 + sig,
                     signal: Some(signal_name(sig)),
@@ -208,7 +199,7 @@ fn spawn_pty(spec: &Spec) -> Result<Spawned> {
         input: in_tx,
         exit: exit_rx,
         resize,
-        foreground: Some(foreground),
+        foreground,
     })
 }
 
@@ -234,90 +225,6 @@ fn pty_signal_number(s: &str) -> Option<i32> {
         })
 }
 
-fn spawn_pipes(spec: &Spec) -> Result<Spawned> {
-    use std::process::{Command, Stdio};
-
-    let mut cmd = Command::new(&spec.argv[0]);
-    if !spec.inherit_env {
-        cmd.env_clear();
-    }
-    cmd.args(&spec.argv[1..])
-        .current_dir(&spec.cwd)
-        .envs(spec.env.iter().map(|(k, v)| (k, v)))
-        .stdin(if spec.input { Stdio::piped() } else { Stdio::null() })
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut child = cmd.spawn().with_context(|| format!("spawning {:?}", spec.argv))?;
-    let pid = child.id();
-    let mut stdin = child.stdin.take();
-    let stdout = child.stdout.take().context("stdout")?;
-    let stderr = child.stderr.take().context("stderr")?;
-
-    let (out_tx, out_rx) = mpsc::channel::<Vec<u8>>(OUTPUT_QUEUE);
-    for (name, r) in [
-        ("stdout", Box::new(stdout) as Box<dyn Read + Send>),
-        ("stderr", Box::new(stderr)),
-    ] {
-        let (tx, settle) = (out_tx.clone(), spec.settle);
-        std::thread::Builder::new()
-            .name(format!("pipe-{name}"))
-            .spawn(move || pump(r, tx, settle, name))?;
-    }
-    drop(out_tx);
-
-    let (in_tx, mut in_rx) = mpsc::channel::<Vec<u8>>(OUTPUT_QUEUE);
-    std::thread::Builder::new().name("pipe-write".into()).spawn(move || {
-        while let Some(bytes) = in_rx.blocking_recv() {
-            let Some(stdin) = stdin.as_mut() else {
-                continue;
-            };
-            if stdin.write_all(&bytes).and_then(|_| stdin.flush()).is_err() {
-                break;
-            }
-        }
-    })?;
-
-    let (exit_tx, exit_rx) = oneshot::channel();
-    std::thread::Builder::new().name("pipe-wait".into()).spawn(move || {
-        use std::os::unix::process::ExitStatusExt;
-        let exit = match child.wait() {
-            Ok(st) => match (st.code(), st.signal()) {
-                (Some(code), _) => Exit {
-                    code,
-                    signal: None,
-                    at: Timestamp::now(),
-                },
-                (None, Some(sig)) => Exit {
-                    code: 128 + sig,
-                    signal: Some(signal_name(sig)),
-                    at: Timestamp::now(),
-                },
-                (None, None) => Exit {
-                    code: -1,
-                    signal: None,
-                    at: Timestamp::now(),
-                },
-            },
-            Err(_) => Exit {
-                code: -1,
-                signal: None,
-                at: Timestamp::now(),
-            },
-        };
-        let _ = exit_tx.send(exit);
-    })?;
-
-    let resize: Resizer = Arc::new(|_, _| Ok(()));
-    Ok(Spawned {
-        pid,
-        output: out_rx,
-        input: in_tx,
-        exit: exit_rx,
-        resize,
-        foreground: None,
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -341,17 +248,8 @@ mod tests {
             inherit_env: true,
             cols: 80,
             rows: 24,
-            tty: true,
-            input: true,
             settle: Duration::ZERO,
         };
-        match spawn(&spec) {
-            Ok(_) => panic!("empty argv must be rejected"),
-            Err(e) => assert!(e.to_string().contains("argv must not be empty")),
-        }
-
-        // Same check applies on the non-tty (plain pipes) path.
-        let spec = Spec { tty: false, ..spec };
         match spawn(&spec) {
             Ok(_) => panic!("empty argv must be rejected"),
             Err(e) => assert!(e.to_string().contains("argv must not be empty")),

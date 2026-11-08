@@ -13,8 +13,8 @@
 #   RELAY_CI_IMAGE=rust:1.96       the toolchain image
 #   RELAY_CI_PLATFORM=linux/amd64  the architecture CI runs (slow: emulated)
 #
-# Why a container and not just `cargo test`: the suites spawn a daemon over a
-# unix socket and hand runs a pty, and macOS and Linux part ways on both —
+# Why a container and not just `cargo test`: the suites spawn session holders
+# on unix sockets and hand them a pty, and macOS and Linux part ways on both —
 # a suite can pass here and fail there. The build stays out of the repo's own
 # target/, which holds macOS artifacts, so the two never mix: the container
 # keeps its target directory and cargo registry in named volumes, which makes

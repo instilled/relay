@@ -1,0 +1,12 @@
+#!/bin/sh
+# A Relay badge: the open pull request for the branch a folder is on, as
+# `PR #95` (or `PR #95 draft`); nothing when there is none, when `gh` is not
+# there or not signed in, or when the folder is not on GitHub.
+#
+# Relay runs it in the folder with RELAY_BRANCH set (config.json:
+# `"badges": ["gh-pr"]`). Edit freely: Relay writes it only when
+# it is missing.
+command -v gh >/dev/null 2>&1 || exit 0
+[ -n "$RELAY_BRANCH" ] || exit 0
+exec gh pr view "$RELAY_BRANCH" --json number,state,isDraft \
+  --jq 'select(.state == "OPEN") | "PR #\(.number)" + (if .isDraft then " draft" else "" end)' 2>/dev/null

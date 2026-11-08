@@ -1,6 +1,7 @@
-# Claude Code. Exact state comes from its hooks: rld passes an extra settings
-# file (--settings) so every run under Relay reports back without touching
-# the project's own .claude/settings.json. The patterns are only the fallback.
+# Claude Code. Exact state comes from its hooks: `rl new` passes an extra
+# settings file (--settings) so every session Relay holds reports back without
+# touching the project's own .claude/settings.json. The patterns are only the
+# fallback.
 kind: agent
 bins: [claude]
 icon: "✻"        # its rows in the panel; one column wide
@@ -8,9 +9,8 @@ color: "#d97757"    # #rrggbb; without one, the foreground
 hooks:
   dialect: claude
   args: ["--settings", "{hooks_file}"]
-headless: ["-p"]
-model_flag: ["--model"]
-small_model: haiku      # what setup offers for summaries: quick and cheap
+# `{session}` is the conversation's own id (what hooks tell of); `{id}` below
+# is the id `claude agents` lists a background session by. They differ.
 resume: ["--resume", "{session}"]   # what carries a conversation on
 patterns:
   needs_input:
@@ -33,9 +33,9 @@ sessions:
     # The shape of Relay's per-run settings, `timeout` in seconds.
     timeout: 5s
     unit: s
-    # Relay's own Claude runs have hooks of their own already (--settings,
-    # above), which Claude runs beside these: this copy says --user after its
-    # event, and is never a run's signal.
+    # The Claude sessions Relay holds have hooks of their own already
+    # (--settings, above), which Claude runs beside these: this copy says
+    # --user after its event, and is let go under a held session.
     marker: --user
     # Claude reads it as a session starts; one already open may ask you to
     # review the change in its /hooks screen.
@@ -54,10 +54,17 @@ sessions:
       SessionEnd: ended
   # What a hook cannot say: whether a session is in Claude's background, its
   # attach id, name, process and start. Uncertain: whether background
-  # sessions (claude --bg) run user-level hooks at all, which is why rld
-  # still asks now and then while one is listed.
+  # sessions (claude --bg) run user-level hooks at all, which is why the list
+  # asks Claude while one is listed.
   # `--all`: without it, a background session that is done and has no process
   # left is not listed, though `claude agents` still shows it.
   list: { args: [agents, --json, --all], reader: claude-agents }
   # Enter on one in Claude's background opens it here.
   attach: [attach, "{id}"]
+  # A new one starts in Claude's background (it prints its id and returns),
+  # named if you name it; the prompt goes last. Carrying one on from another
+  # terminal is `resume` above, then this: `claude --resume <id> --bg`.
+  start: [--bg]
+  name: [-n, "{name}"]
+  # ^x on one still going stops it (`claude stop <id>`); never `claude rm`.
+  stop: [stop, "{id}"]

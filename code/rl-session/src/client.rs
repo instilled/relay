@@ -1,4 +1,4 @@
-//! Client side of the holder protocol — what `rld` (and tests) use.
+//! Client side of the holder protocol — what `rl` (and tests) use.
 
 use crate::proto::{Frame, FrameReader, Hello, Replay, write_frame};
 use anyhow::{Context, Result, bail};
@@ -13,9 +13,8 @@ pub struct Session {
     wr: SessionWriter,
 }
 
-/// Cancel-safe: `rld` reads holder frames inside a `select!` on both the
-/// viewer path and the follow loop, and a half-read frame must survive
-/// losing that race — see [`FrameReader`].
+/// Cancel-safe: `rl attach` reads holder frames inside a `select!`, and a
+/// half-read frame must survive losing that race — see [`FrameReader`].
 pub struct SessionReader(FrameReader<BufReader<OwnedReadHalf>>);
 pub struct SessionWriter(OwnedWriteHalf);
 
@@ -23,34 +22,13 @@ impl Session {
     /// Connects and attaches. With `replay`, the first `Output` frames replay
     /// the ring buffer up to `ReplayEnd`.
     pub async fn attach(socket: &Path, replay: bool) -> Result<(Hello, Self)> {
-        Self::attach_from(socket, if replay { Some(0) } else { None }).await
+        let replay = if replay { Replay::Bytes } else { Replay::None };
+        Self::open(socket, Frame::Attach { replay }).await
     }
 
-    /// Attaches and replays from byte offset `from` of the child's output
-    /// (`None`: no replay). `hello.replay_from` says where the replay really
-    /// starts if the ring no longer reaches back that far.
-    pub async fn attach_from(socket: &Path, from: Option<u64>) -> Result<(Hello, Self)> {
-        Self::open(
-            socket,
-            Frame::Attach {
-                replay: if from.is_some() { Replay::Bytes } else { Replay::None },
-                from: from.unwrap_or(0),
-            },
-        )
-        .await
-    }
-
-    /// Attaches asking for the screen drawn afresh. A pipes run has none and
-    /// replays bytes from `from` instead.
-    pub async fn attach_screen(socket: &Path, from: u64) -> Result<(Hello, Self)> {
-        Self::open(
-            socket,
-            Frame::Attach {
-                replay: Replay::Screen,
-                from,
-            },
-        )
-        .await
+    /// Attaches asking for the screen drawn afresh.
+    pub async fn attach_screen(socket: &Path) -> Result<(Hello, Self)> {
+        Self::open(socket, Frame::Attach { replay: Replay::Screen }).await
     }
 
     /// Connects, sends the opening `attach` frame and reads the `Hello`.

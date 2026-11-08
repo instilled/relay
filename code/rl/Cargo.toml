@@ -1,0 +1,29 @@
+[package]
+name = "rl"
+description = "Relay: agent-agnostic list, attach and shells"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+rl-core.workspace = true
+rl-detect.workspace = true
+rl-session.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+jiff.workspace = true
+crossterm.workspace = true
+futures.workspace = true
+nix.workspace = true
+notify.workspace = true
+ratatui.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+unicode-width.workspace = true
+toml_edit.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

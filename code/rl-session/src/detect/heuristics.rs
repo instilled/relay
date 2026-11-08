@@ -2,8 +2,8 @@
 //! long enough means the last lines get read for a prompt or a question;
 //! silence much longer while working means stale.
 //!
-//! Nothing here is ever `exact`. A run whose CLI offers real signals keeps
-//! these from touching its state (see the daemon's state machine).
+//! Nothing here is ever `exact`: a session whose agent has hooks is told of
+//! by them (`rl hook`), and these are only the floor.
 
 use super::ansi;
 use jiff::Timestamp;
