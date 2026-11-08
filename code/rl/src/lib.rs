@@ -6,6 +6,7 @@ pub mod cmd;
 pub mod config;
 pub mod git;
 pub mod hook;
+pub mod mcp;
 pub mod query;
 pub mod rank;
 pub mod rows;

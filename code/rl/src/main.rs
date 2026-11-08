@@ -41,6 +41,8 @@ enum Command {
     Stop { name: String },
     /// Remove a session that is not running.
     Rm { name: String },
+    /// Serve send, who and inbox to an agent over stdio (an MCP server).
+    Mcp,
 }
 
 #[tokio::main]
@@ -79,5 +81,7 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Attach { name } => cmd::attach(&home, &name).await,
         Command::Stop { name } => cmd::stop(&home, &name).await,
         Command::Rm { name } => cmd::rm(&home, &name).await,
+        // Blocks on stdin; the adapters it asks block too.
+        Command::Mcp => tokio::task::spawn_blocking(move || rl::mcp::run(&home)).await?,
     }
 }
