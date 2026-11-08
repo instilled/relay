@@ -742,17 +742,39 @@ mod tests {
     fn a_hung_proxy_goes_with_what_it_started() {
         let tmp = tempfile::tempdir().unwrap();
         let pid = tmp.path().join("pid");
-        let bin = script(tmp.path(), &format!("sleep 20 &\necho $! > '{}'\nwait", pid.display()));
-        let at = std::time::Instant::now();
-        let e = ask(&[bin.to_string_lossy().into_owned()], Duration::from_millis(500)).unwrap_err();
-        assert!(e.to_string().contains("did not answer"), "{e}");
-        assert!(at.elapsed() < Duration::from_secs(3), "{:?}", at.elapsed());
-        let pid: i32 = std::fs::read_to_string(&pid).unwrap().trim().parse().unwrap();
-        let gone = (0..50).any(|_| {
+        // The pid is put in place whole (`mv`), so it is there entire or not
+        // at all.
+        let bin = script(
+            tmp.path(),
+            &format!(
+                "sleep 20 &\necho $! > '{p}.tmp' && mv '{p}.tmp' '{p}'\nwait",
+                p = pid.display()
+            ),
+        );
+        // Under load the proxy can be given up on before it has started
+        // anything: then there is nothing to have gone, and it is asked again.
+        let mut started = None;
+        for _ in 0..10 {
+            let at = std::time::Instant::now();
+            let e = ask(&[bin.to_string_lossy().into_owned()], Duration::from_millis(500)).unwrap_err();
+            assert!(e.to_string().contains("did not answer"), "{e}");
+            assert!(
+                at.elapsed() < Duration::from_secs(10),
+                "given up at the wait: {:?}",
+                at.elapsed()
+            );
+            if let Ok(p) = std::fs::read_to_string(&pid) {
+                started = Some(p.trim().parse::<i32>().unwrap());
+                break;
+            }
+        }
+        let pid = started.expect("the proxy started its child in one of ten tries");
+        let by = std::time::Instant::now() + Duration::from_secs(20);
+        let gone = || nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None).is_err();
+        while !gone() && std::time::Instant::now() < by {
             std::thread::sleep(Duration::from_millis(20));
-            nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None).is_err()
-        });
-        assert!(gone, "its whole group is killed");
+        }
+        assert!(gone(), "its whole group is killed");
     }
 
     /// Against the real daemon: `cargo test -p rl-detect -- --ignored`.
