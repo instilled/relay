@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Once;
 
 fn session_bin() -> Option<PathBuf> {
-    let p = PathBuf::from(env!("CARGO_BIN_EXE_rl-new")).with_file_name("rl-session");
+    let p = PathBuf::from(env!("CARGO_BIN_EXE_rl")).with_file_name("rl-session");
     p.is_file().then_some(p)
 }
 

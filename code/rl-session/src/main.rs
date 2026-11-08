@@ -1,4 +1,4 @@
-//! `rl-session`: spawned by `rld`, never by hand.
+//! `rl-session`: spawned by `rl`, never by hand.
 //!
 //! Detaches by forking: the child calls `setsid`, binds the socket and starts
 //! the command; the parent waits for a one-line readiness message on a pipe
@@ -25,7 +25,7 @@ struct Args {
     /// Unix socket to serve on.
     #[arg(long)]
     socket: PathBuf,
-    /// Where to record the child's exit (JSON), for a daemon that was away.
+    /// Where to record the child's exit (JSON), for whoever was not attached.
     #[arg(long)]
     exit_file: Option<PathBuf>,
     /// Working directory for the child.
@@ -42,17 +42,10 @@ struct Args {
     /// holder's own is not inherited. `--env` still adds to it.
     #[arg(long, value_name = "FILE")]
     env_file: Option<PathBuf>,
-    /// Pipes instead of a pty (headless runs, a flow's steps).
-    #[arg(long)]
-    no_tty: bool,
-    /// No input for the child: end of input at once (pipes only; a pty
-    /// always has input).
-    #[arg(long)]
-    no_input: bool,
     /// Seconds to stay around after the child exits with no client attached.
     #[arg(long, default_value_t = 86_400)]
     linger: u64,
-    /// Seconds with nobody attached — no daemon, no viewer — after which the
+    /// Seconds with nobody attached after which the
     /// holder hangs up its child and leaves. 0 waits forever.
     #[arg(long, default_value_t = 0)]
     reap_after: u64,
@@ -118,8 +111,6 @@ fn main() -> Result<()> {
             inherit_env: args.env_file.is_none(),
             cols: args.cols,
             rows: args.rows,
-            tty: !args.no_tty,
-            input: !args.no_input,
             settle: Duration::from_millis(args.settle),
         },
         linger: Duration::from_secs(args.linger),

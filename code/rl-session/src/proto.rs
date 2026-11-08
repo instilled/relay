@@ -20,7 +20,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 /// Largest payload accepted on either side. Output is chunked well below this.
 pub const MAX_PAYLOAD: u32 = 16 * 1024 * 1024;
-/// The most output one frame carries. A screen drawn afresh or a journal's
+/// The most output one frame carries. A screen drawn afresh or the ring's
 /// tail can outgrow `MAX_PAYLOAD` (a wide, tall truecolor screen with its
 /// history runs to tens of megabytes), and the reader would refuse it whole.
 pub const OUTPUT_CHUNK: usize = 1 << 20;
@@ -34,7 +34,6 @@ const T_HELLO: u8 = 0x81;
 const T_OUTPUT: u8 = 0x82;
 const T_REPLAY_END: u8 = 0x83;
 const T_EXIT: u8 = 0x84;
-const T_NOTE: u8 = 0x85;
 const T_FOREGROUND: u8 = 0x86;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -64,10 +63,6 @@ pub enum Frame {
     ReplayEnd,
     /// The child has exited. Sent once per connection, after any output.
     Exit(Exit),
-    /// A remark from whoever is relaying the stream (`rld` to a viewer:
-    /// "x joined", "n bytes missing"). Never part of the child's output;
-    /// the holder itself does not send these.
-    Note(String),
     /// Whether the shell itself owns the terminal foreground (nothing else
     /// is running in front of it). Holder to client; sent on change.
     Foreground(bool),
@@ -80,8 +75,7 @@ pub enum Replay {
     None,
     /// The ring buffer's bytes from `from`.
     Bytes,
-    /// A tty run's screen drawn afresh. A pipes run has no screen and
-    /// replays its bytes from `from` instead.
+    /// The run's screen drawn afresh; `from` is not read.
     Screen,
 }
 
@@ -128,7 +122,6 @@ impl Frame {
             Frame::Output(b) => (T_OUTPUT, b.clone()),
             Frame::ReplayEnd => (T_REPLAY_END, Vec::new()),
             Frame::Exit(e) => (T_EXIT, serde_json::to_vec(e).expect("exit serialises")),
-            Frame::Note(s) => (T_NOTE, s.as_bytes().to_vec()),
             Frame::Foreground(b) => (T_FOREGROUND, vec![*b as u8]),
         };
         let mut out = Vec::with_capacity(5 + payload.len());
@@ -177,7 +170,6 @@ impl Frame {
             T_OUTPUT => Frame::Output(p),
             T_REPLAY_END => Frame::ReplayEnd,
             T_EXIT => Frame::Exit(serde_json::from_slice(&p).map_err(|_| bad("exit"))?),
-            T_NOTE => Frame::Note(String::from_utf8_lossy(&p).into_owned()),
             T_FOREGROUND => {
                 if p.len() != 1 {
                     return Err(bad("foreground"));
@@ -431,7 +423,6 @@ mod tests {
                 signal: Some("SIGTERM".into()),
                 at: Timestamp::UNIX_EPOCH,
             }),
-            Frame::Note("fabio@mac joined".into()),
         ];
         let (mut a, mut b) = tokio::io::duplex(1 << 16);
         for f in &frames {

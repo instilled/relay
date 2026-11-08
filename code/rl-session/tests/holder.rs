@@ -1,4 +1,4 @@
-//! The holder through its real binary and the client library, no daemon.
+//! The holder through its real binary and the client library.
 
 use nix::sys::signal::kill;
 use nix::unistd::Pid;
@@ -20,16 +20,16 @@ struct Holder {
 }
 
 /// Spawns `rl-session` for `fake-cli` and waits for it to report ready.
-fn start(tty: bool, linger: u64) -> Holder {
-    start_with(tty, linger, &[])
+fn start(linger: u64) -> Holder {
+    start_with(linger, &[])
 }
 
-fn start_with(tty: bool, linger: u64, extra: &[&str]) -> Holder {
-    start_argv(tty, linger, extra, &fake_cli())
+fn start_with(linger: u64, extra: &[&str]) -> Holder {
+    start_argv(linger, extra, &fake_cli())
 }
 
 /// As [`start_with`], running `program` in place of the fake CLI.
-fn start_argv(tty: bool, linger: u64, extra: &[&str], program: &Path) -> Holder {
+fn start_argv(linger: u64, extra: &[&str], program: &Path) -> Holder {
     let tmp = tempfile::tempdir().unwrap();
     let socket = tmp.path().join("s.sock");
     let exit_file = tmp.path().join("s.exit");
@@ -47,10 +47,7 @@ fn start_argv(tty: bool, linger: u64, extra: &[&str], program: &Path) -> Holder 
         .arg("--socket-check")
         .arg("1")
         .arg("--env")
-        .arg("RELAY_RUN=test0001");
-    if !tty {
-        cmd.arg("--no-tty");
-    }
+        .arg("RELAY_SESSION=test0001");
     cmd.args(extra);
     cmd.arg("--").arg(program);
     // The detached holder keeps stderr for its log, so never `output()` here.
@@ -128,7 +125,7 @@ async fn wait_gone(path: &Path, pid: u32) {
 
 #[tokio::test]
 async fn pty_lifecycle() {
-    let h = start(true, 60);
+    let h = start(60);
     let (hello, mut s) = attach(&h, true).await;
     assert!(hello.tty);
     assert_eq!(hello.id, "test0001");
@@ -157,9 +154,9 @@ async fn pty_lifecycle() {
 
 #[tokio::test]
 async fn nobody_for_a_while_lets_the_run_go() {
-    // A throwaway home left on disk: the socket is there, but no daemon will
+    // A throwaway home left on disk: the socket is there, but nobody will
     // ever come back for the run.
-    let h = start_with(true, 60, &["--reap-after", "1"]);
+    let h = start_with(60, &["--reap-after", "1"]);
     let (hello, mut s) = attach(&h, true).await;
     read_until(&mut s, "fake-cli ready").await;
     // Attached: it stays.
@@ -202,7 +199,7 @@ async fn count_until(s: &mut Session, needle: &str) -> (usize, String) {
 #[tokio::test]
 async fn a_burst_of_small_writes_arrives_in_a_few_chunks() {
     const LINES: usize = 60;
-    let h = start_with(true, 60, &["--settle", "200"]);
+    let h = start_with(60, &["--settle", "200"]);
     let (_, mut s) = attach(&h, true).await;
     read_until(&mut s, "fake-cli ready").await;
     s.input(format!("burst {LINES}\n")).await.unwrap();
@@ -213,12 +210,12 @@ async fn a_burst_of_small_writes_arrives_in_a_few_chunks() {
 
 #[tokio::test]
 async fn survives_client_going_away_and_replays() {
-    let h = start(true, 60);
+    let h = start(60);
     let (hello, mut s) = attach(&h, true).await;
     read_until(&mut s, "fake-cli ready").await;
     s.input("hi\n").await.unwrap();
     read_until(&mut s, "echo: hi").await;
-    drop(s); // the daemon dies
+    drop(s); // the client goes away
 
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(alive(hello.pid), "child must outlive its client");
@@ -246,7 +243,7 @@ async fn survives_client_going_away_and_replays() {
 
 #[tokio::test]
 async fn late_attach_sees_exit() {
-    let h = start(true, 60);
+    let h = start(60);
     let (hello, mut s) = attach(&h, true).await;
     read_until(&mut s, "fake-cli ready").await;
     s.input("exit 5\n").await.unwrap();
@@ -280,12 +277,12 @@ async fn read_foreground(s: &mut Session) -> bool {
     }
 }
 
-/// A tty run reports the foreground state to every client that attaches: the
+/// A run reports the foreground state to every client that attaches: the
 /// fake CLI rests owning its own terminal, so the first thing a client learns
 /// after the replay is `Foreground(true)`.
 #[tokio::test]
 async fn a_tty_attach_learns_the_foreground_state() {
-    let h = start(true, 60);
+    let h = start(60);
     let (hello, mut s) = attach(&h, true).await;
     assert!(hello.tty);
     assert!(read_foreground(&mut s).await, "a resting shell owns its own terminal");
@@ -295,67 +292,9 @@ async fn a_tty_attach_learns_the_foreground_state() {
     wait_gone(&h.socket, hello.holder_pid).await;
 }
 
-/// A pipe run has no terminal to read a foreground group from, so a client is
-/// never sent a foreground frame — not on attach, not ever.
-#[tokio::test]
-async fn a_pipes_run_never_frames_foreground() {
-    let h = start(false, 60);
-    let (hello, mut s) = attach(&h, true).await;
-    assert!(!hello.tty);
-    read_until(&mut s, "fake-cli ready").await;
-    s.input("exit\n").await.unwrap();
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        match tokio::time::timeout(remaining, s.recv())
-            .await
-            .expect("timed out draining a pipe run")
-            .unwrap()
-        {
-            Some(Frame::Foreground(_)) => panic!("a pipe run must not frame foreground"),
-            Some(Frame::Exit(_)) | None => break,
-            Some(_) => {}
-        }
-    }
-    s.close().await.unwrap();
-    wait_gone(&h.socket, hello.holder_pid).await;
-}
-
-#[tokio::test]
-async fn no_tty_uses_pipes() {
-    let h = start(false, 60);
-    let (hello, mut s) = attach(&h, true).await;
-    assert!(!hello.tty);
-    read_until(&mut s, "fake-cli ready").await;
-    s.input("size\n").await.unwrap();
-    read_until(&mut s, "no tty").await;
-    s.resize(10, 10).await.unwrap(); // no-op, must not break anything
-    s.input("still\n").await.unwrap();
-    read_until(&mut s, "echo: still").await;
-    s.input("exit\n").await.unwrap();
-    assert_eq!(read_exit(&mut s).await.code, 0);
-    assert_eq!(read_exit_file(&h.exit_file).unwrap().unwrap().code, 0);
-    s.close().await.unwrap();
-    wait_gone(&h.socket, hello.holder_pid).await;
-}
-
-/// With no input, the child's read ends at once: `fake-cli` leaves on its own,
-/// and what is typed goes nowhere without breaking anything.
-#[tokio::test]
-async fn no_input_ends_the_childs_input_at_once() {
-    let h = start_with(false, 60, &["--no-input"]);
-    let (hello, mut s) = attach(&h, true).await;
-    s.input("echo me\n").await.unwrap();
-    let out = read_until(&mut s, "fake-cli ready").await;
-    assert_eq!(read_exit(&mut s).await.code, 0);
-    assert!(!out.contains("echo: echo me"), "{out}");
-    s.close().await.unwrap();
-    wait_gone(&h.socket, hello.holder_pid).await;
-}
-
 #[tokio::test]
 async fn signal_reaches_child() {
-    let h = start(true, 60);
+    let h = start(60);
     let (hello, mut s) = attach(&h, true).await;
     read_until(&mut s, "fake-cli ready").await;
     s.signal(15).await.unwrap();
@@ -368,7 +307,7 @@ async fn signal_reaches_child() {
 
 #[tokio::test]
 async fn lingers_then_leaves() {
-    let h = start(true, 1);
+    let h = start(1);
     let (hello, mut s) = attach(&h, true).await;
     read_until(&mut s, "fake-cli ready").await;
     s.input("exit\n").await.unwrap();
@@ -379,7 +318,7 @@ async fn lingers_then_leaves() {
 
 #[tokio::test]
 async fn close_hangs_up_a_live_child() {
-    let h = start(true, 60);
+    let h = start(60);
     let (hello, mut s) = attach(&h, true).await;
     read_until(&mut s, "fake-cli ready").await;
     s.close().await.unwrap();
@@ -389,9 +328,9 @@ async fn close_hangs_up_a_live_child() {
 
 #[tokio::test]
 async fn leaves_when_its_socket_is_removed() {
-    // The Relay home it lived in is gone: no daemon can come back for it, so
+    // The Relay home it lived in is gone: nobody can come back for it, so
     // it hangs up a child that is still going and leaves, linger or not.
-    let h = start(true, 60);
+    let h = start(60);
     let (hello, mut s) = attach(&h, true).await;
     read_until(&mut s, "fake-cli ready").await;
     drop(s);
@@ -408,7 +347,7 @@ async fn leaves_when_its_socket_is_removed() {
 
 #[tokio::test]
 async fn replay_from_an_offset() {
-    let h = start(false, 60); // pipes: byte-exact output
+    let h = start(60);
     let (hello, mut s) = attach(&h, true).await;
     // The child may have printed its banner before we attached; from 0 we
     // get all of it either way.
@@ -418,11 +357,12 @@ async fn replay_from_an_offset() {
     read_until(&mut s, "echo: hi").await;
     drop(s);
 
-    // Everything after the banner, and nothing of it.
-    let banner = "fake-cli ready\n".len() as u64;
+    // Everything after the banner (the pty ends its line with `\r\n`), and
+    // nothing of it.
+    let banner = "fake-cli ready\r\n".len() as u64;
     let (hello2, mut s) = Session::attach_from(&h.socket, Some(banner)).await.unwrap();
     assert_eq!(hello2.replay_from, banner);
-    assert_eq!(hello2.total, banner + "> echo: hi\n> ".len() as u64);
+    assert!(hello2.total > banner);
     let replayed = read_until(&mut s, "echo: hi").await;
     assert!(!replayed.contains("ready"), "{replayed:?}");
 
@@ -454,7 +394,7 @@ async fn refuses_to_start_a_missing_command() {
 
 #[tokio::test]
 async fn a_screen_attach_draws_the_screen_once() {
-    let h = start_argv(true, 5, &[], Path::new("/bin/sh"));
+    let h = start_argv(5, &[], Path::new("/bin/sh"));
     let (_, mut s) = attach(&h, false).await;
     // A counter redrawn in place: every value is in the bytes, only the
     // last is on the screen. The empty quotes keep the echoed command line
@@ -478,17 +418,6 @@ async fn a_screen_attach_draws_the_screen_once() {
     assert!(!drawn.contains("n=098"), "{drawn:?}");
 }
 
-#[tokio::test]
-async fn a_pipes_run_answers_a_screen_attach_with_bytes() {
-    let h = start_argv(false, 5, &[], Path::new("/bin/sh"));
-    let (_, mut s) = attach(&h, false).await;
-    s.input(b"echo pi''ped\n".to_vec()).await.unwrap();
-    read_until(&mut s, "piped").await;
-    let (hello, mut v) = Session::attach_screen(&h.socket, 0).await.unwrap();
-    assert_eq!(hello.replay_from, 0, "the bytes replay from where it asked");
-    assert!(read_until(&mut v, "piped").await.contains("piped"));
-}
-
 // --- the holder's own state, with nobody attached ---------------------------
 
 use rl_core::state::{RunKind, RunState};
@@ -497,12 +426,12 @@ use rl_session::state::{StateFile, read_state_file};
 
 /// Spawns `rl-session` running `argv` with `--detect`/`--state-file`; nobody
 /// attaches. Returns the holder and the state file's path.
-fn start_detecting(tty: bool, argv: &[&str], spec: &DetectSpec) -> (Holder, PathBuf) {
-    start_detecting_at(tty, argv, spec, "s.state.json")
+fn start_detecting(argv: &[&str], spec: &DetectSpec) -> (Holder, PathBuf) {
+    start_detecting_at(argv, spec, "s.state.json")
 }
 
 /// As [`start_detecting`], with the state file at `state_rel` under the run's directory.
-fn start_detecting_at(tty: bool, argv: &[&str], spec: &DetectSpec, state_rel: &str) -> (Holder, PathBuf) {
+fn start_detecting_at(argv: &[&str], spec: &DetectSpec, state_rel: &str) -> (Holder, PathBuf) {
     let tmp = tempfile::tempdir().unwrap();
     let socket = tmp.path().join("s.sock");
     let exit_file = tmp.path().join("s.exit");
@@ -526,9 +455,6 @@ fn start_detecting_at(tty: bool, argv: &[&str], spec: &DetectSpec, state_rel: &s
         .arg(&detect)
         .arg("--state-file")
         .arg(&state);
-    if !tty {
-        cmd.arg("--no-tty");
-    }
     cmd.arg("--").args(argv);
     let log = tmp.path().join("holder.log");
     cmd.stdin(Stdio::null())
@@ -578,7 +504,7 @@ async fn wait_state(path: &Path, pred: impl Fn(&StateFile) -> bool) -> StateFile
 #[tokio::test]
 async fn state_advances_with_nobody_attached() {
     let sp = spec(RunKind::Agent, &[r"\[y/N\]"], 200, 600_000);
-    let (_h, state) = start_detecting(false, &["sh", "-c", r#"printf "Continue? [y/N] "; sleep 30"#], &sp);
+    let (_h, state) = start_detecting(&["sh", "-c", r#"printf "Continue? [y/N] "; sleep 30"#], &sp);
     let s = wait_state(&state, |s| s.state == RunState::NeedsInput).await;
     assert_eq!(s.detail.as_deref(), Some("Continue? [y/N]"));
 }
@@ -586,7 +512,7 @@ async fn state_advances_with_nobody_attached() {
 #[tokio::test]
 async fn a_quiet_worker_goes_stale_with_nobody_attached() {
     let sp = spec(RunKind::Command, &[], 200, 500);
-    let (_h, state) = start_detecting(false, &["sh", "-c", "echo working; sleep 30"], &sp);
+    let (_h, state) = start_detecting(&["sh", "-c", "echo working; sleep 30"], &sp);
     wait_state(&state, |s| s.state == RunState::Stale).await;
 }
 
@@ -594,7 +520,7 @@ async fn a_quiet_worker_goes_stale_with_nobody_attached() {
 async fn resting_shell_reads_idle_with_nobody_attached() {
     // The pattern would match the PS1; the shell owning the foreground must win.
     let sp = spec(RunKind::Shell, &[r"\$\s*$"], 200, 600_000);
-    let (_h, state) = start_detecting(true, &["/bin/sh", "-i"], &sp);
+    let (_h, state) = start_detecting(&["/bin/sh", "-i"], &sp);
     let s = wait_state(&state, |s| s.state == RunState::Idle && s.foreground == Some(true)).await;
     assert_eq!(s.foreground, Some(true));
 }
@@ -602,7 +528,7 @@ async fn resting_shell_reads_idle_with_nobody_attached() {
 #[tokio::test]
 async fn exit_leaves_state_and_exit_files() {
     let sp = spec(RunKind::Command, &[], 200, 600_000);
-    let (h, state) = start_detecting(false, &["sh", "-c", "echo bye; exit 3"], &sp);
+    let (h, state) = start_detecting(&["sh", "-c", "echo bye; exit 3"], &sp);
     for _ in 0..200 {
         if h.exit_file.exists() {
             break;
@@ -622,7 +548,6 @@ async fn unwritable_state_file_does_not_stop_the_holder() {
     let sp = spec(RunKind::Command, &[], 200, 600_000);
     std::fs::write(&detect, serde_json::to_vec(&sp).unwrap()).unwrap();
     let h = start_with(
-        true,
         60,
         &[
             "--detect",
@@ -643,7 +568,6 @@ async fn a_failed_state_write_is_retried() {
     // kept snapshot can put its state on disk.
     let sp = spec(RunKind::Agent, &[r"\[y/N\]"], 100, 600_000);
     let (_h, state) = start_detecting_at(
-        false,
         &["sh", "-c", r#"printf "Continue? [y/N] "; sleep 30"#],
         &sp,
         "later/state.json",
@@ -657,7 +581,7 @@ async fn a_failed_state_write_is_retried() {
 
 #[tokio::test]
 async fn without_detect_no_state_file_appears() {
-    let h = start(true, 5);
+    let h = start(5);
     tokio::time::sleep(Duration::from_secs(1)).await;
     let dir = h.socket.parent().unwrap();
     let stray: Vec<_> = std::fs::read_dir(dir)

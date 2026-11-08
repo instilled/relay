@@ -4,7 +4,7 @@
 //! by asking it (`list`), and opened where it runs in its own background
 //! (`attach`). The facts per agent are all here, read from its profile;
 //! what is the same for every agent is code: the hooks file's format
-//! (`user_hooks`), `rl hook`, and the store in `rld`.
+//! (`user_hooks`) and `rl hook`.
 //!
 //! ```yaml
 //! sessions:
@@ -18,7 +18,7 @@
 //!       SessionStart: started
 //!       UserPromptSubmit: { state: working, prompt: true }
 //!       PermissionRequest: { state: needs, waiting_for: "permission prompt",
-//!                            detail: tool_name, says: "approve: {tool_name}" }
+//!                            detail: tool_name }
 //!       PostToolUse: carries-on
 //!       Stop: idle
 //!       SessionEnd: ended
@@ -39,35 +39,30 @@
 //!   and never wakes an idle session.
 //! - `prompt: true`: the payload's `prompt` is the one you typed, which
 //!   names a run of the agent's that has no name yet.
-//! - `detail`: the payload field `rld` is told along with the event.
-//! - `says`: what a Relay run's state says, `{field}` standing for a
-//!   payload field's first line. Without it, a prompt's says `prompt:
-//!   {prompt}`, a tool done `tool: {tool_name} done`, `idle` `finished
-//!   responding`, and `needs` `waiting for approval`, as it does too where
-//!   a field it names is not there.
+//! - `detail`: the payload field `rl hook` keeps along with the event.
 //!
 //! An event can be narrowed by one field of its payload: `{ by:
 //! notification_type, permission_prompt: needs, idle_prompt: idle }`. A
 //! value not listed says nothing.
 
-use crate::Signal;
 use crate::claude::clip;
 use anyhow::{Result, bail};
 use rl_core::time::parse_duration;
-use rl_proto::methods::Outside;
-use rl_proto::types::RunState;
 use serde::Deserialize;
 use serde_json::{Map, Value};
 use std::ffi::OsString;
 use std::path::PathBuf;
 
-/// The list readers `rld` has, by the name a profile's `list.reader` gives:
-/// each reads one agent's own listing of its sessions.
-pub const READERS: [&str; 1] = ["claude-agents"];
+/// The list readers Relay has, by the name a profile's `list.reader` gives:
+/// each is an adapter's (`adapter::adapters`), reading one agent's own
+/// listing of its sessions.
+pub const READERS: [&str; 2] = [crate::claude_native::READER, crate::codex_native::READER];
 
-/// The readers only `rl`'s adapters have (`adapter::adapters`): a profile
-/// may name these too, and `rld` lists nothing for it.
-pub const ADAPTER_READERS: [&str; 1] = [crate::codex_native::READER];
+/// How one of an agent's own sessions stands, in the words `Told::Stands`
+/// says: it waits for a prompt, works, or waits on you.
+pub const IDLE: &str = "idle";
+pub const BUSY: &str = "busy";
+pub const WAITING: &str = "waiting";
 
 /// Where a session's attach id goes in a profile's `attach`.
 pub const ID: &str = "{id}";
@@ -178,7 +173,7 @@ pub struct Sessions {
 }
 
 /// How an agent lists its own sessions: its binary with `args`, read by
-/// one of `rld`'s `READERS`.
+/// one of the `READERS`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct List {
     pub args: Vec<String>,
@@ -235,7 +230,6 @@ pub struct Says {
     pub prompt: bool,
     pub waiting_for: Option<String>,
     pub detail: Option<String>,
-    pub says: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -269,7 +263,7 @@ impl State {
 /// What an event says about one of an agent's own sessions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Told<'a> {
-    /// It stands so now: a `status` word (`Outside::BUSY` and the rest),
+    /// It stands so now: a `status` word (`IDLE`, `BUSY`, `WAITING`),
     /// and what it waits on, if anything.
     Stands {
         status: &'static str,
@@ -289,15 +283,10 @@ pub const MARKER: &str = "--user";
 pub(crate) fn compile(name: &str, file: SessionsFile) -> Result<Sessions> {
     let hooks = file.hooks.map(|h| compile_hooks(name, h)).transpose()?;
     let list = match file.list {
-        Some(l) if !READERS.iter().chain(&ADAPTER_READERS).any(|r| *r == l.reader) => bail!(
+        Some(l) if !READERS.contains(&l.reader.as_str()) => bail!(
             "{name}.yaml: sessions.list.reader `{}` is not a reader Relay has ({})",
             l.reader,
-            READERS
-                .iter()
-                .chain(&ADAPTER_READERS)
-                .copied()
-                .collect::<Vec<_>>()
-                .join(", ")
+            READERS.join(", ")
         ),
         Some(l) => Some(List {
             args: l.args,
@@ -336,21 +325,6 @@ fn plain(word: &str) -> bool {
         && word
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
-}
-
-/// Whether every `{` in a `says` template is closed by a `}` before the
-/// next one opens.
-fn closed(template: &str) -> bool {
-    let mut open = false;
-    for c in template.chars() {
-        match c {
-            '{' if open => return false,
-            '{' => open = true,
-            '}' => open = false,
-            _ => {}
-        }
-    }
-    !open
 }
 
 fn compile_hooks(name: &str, h: HooksFile) -> Result<UserHooks> {
@@ -474,7 +448,6 @@ fn compile_says(v: &Value) -> Result<Says> {
             prompt: false,
             waiting_for: None,
             detail: None,
-            says: None,
         }),
         Value::Object(m) => {
             let text = |k: &str| -> Result<Option<String>> {
@@ -486,17 +459,13 @@ fn compile_says(v: &Value) -> Result<Says> {
             };
             if let Some(k) = m
                 .keys()
-                .find(|k| !["state", "prompt", "waiting_for", "detail", "says"].contains(&k.as_str()))
+                .find(|k| !["state", "prompt", "waiting_for", "detail"].contains(&k.as_str()))
             {
                 bail!("`{k}` is not something an event says");
             }
             let Some(word) = text("state")? else {
                 bail!("no `state` ({STATES})")
             };
-            let says = text("says")?;
-            if let Some(t) = says.as_deref().filter(|t| !closed(t)) {
-                bail!("`says` `{t}`: a `{{` is not closed");
-            }
             let prompt = match m.get("prompt") {
                 None => false,
                 Some(Value::Bool(b)) => *b,
@@ -507,7 +476,6 @@ fn compile_says(v: &Value) -> Result<Says> {
                 prompt,
                 waiting_for: text("waiting_for")?,
                 detail: text("detail")?,
-                says,
             })
         }
         other => bail!("{other} is not a state ({STATES}) nor a map"),
@@ -565,12 +533,6 @@ impl UserHooks {
         self.states(event).any(|s| s == State::CarriesOn)
     }
 
-    /// Whether `event` ends a turn, or waits on you: where the agent may
-    /// have written its recap.
-    pub fn pauses(&self, event: &str) -> bool {
-        self.states(event).any(|s| matches!(s, State::Idle | State::Needs))
-    }
-
     /// The event that carries the prompt you typed (`prompt` in its payload).
     pub fn prompt_event(&self) -> Option<&str> {
         self.events
@@ -580,13 +542,13 @@ impl UserHooks {
     }
 
     /// Whether `event` is worth finding the agent's process for: a start,
-    /// or a prompt (the first word `rld` may hear of a session it did not
-    /// see start).
+    /// or a prompt (the first word `rl hook` may hear of a session it did
+    /// not see start).
     pub fn asks_pid(&self, event: &str) -> bool {
         self.starts(event) || self.prompt_event() == Some(event)
     }
 
-    /// The word from a payload that goes to `rld` with its event: the field
+    /// The word from a payload that `rl hook` keeps with its event: the field
     /// it is narrowed by, else its `detail`.
     pub fn detail(&self, event: &str, payload: &Value) -> Option<String> {
         let field = match self.event(event)? {
@@ -607,41 +569,15 @@ impl UserHooks {
             waiting_for: None,
         };
         match s.state {
-            State::Started | State::Idle => stands(Outside::IDLE),
-            State::Working | State::CarriesOn => stands(Outside::BUSY),
+            State::Started | State::Idle => stands(IDLE),
+            State::Working | State::CarriesOn => stands(BUSY),
             State::Needs => Told::Stands {
-                status: Outside::WAITING,
+                status: WAITING,
                 waiting_for: s.waiting_for.as_deref(),
             },
             State::Ended => Told::Ended,
             State::Nothing => Told::Nothing,
         }
-    }
-
-    /// What `event` says about a Relay run of the agent's. None where its
-    /// hooks carry a marker (a Claude run's are `claude::signal`'s, from
-    /// its own hooks), and for events that carry no run state: a start,
-    /// which says nothing of whether a prompt came with it (and codex may
-    /// tell it after the prompt's, its hooks being run in the background),
-    /// and an end, as the process's exit right after it is the exact
-    /// signal.
-    pub fn signal(&self, event: &str, payload: &Value) -> Option<Signal> {
-        if self.marker.is_some() {
-            return None;
-        }
-        let s = self.says(event, |field| field_of(payload, field))?;
-        let says = |default: Option<&str>| s.says.as_deref().or(default).and_then(|t| render(t, payload));
-        let (state, detail) = match s.state {
-            State::Working => (RunState::Working, says(s.prompt.then_some("prompt: {prompt}"))),
-            State::CarriesOn => (RunState::Working, says(Some("tool: {tool_name} done"))),
-            State::Needs => (
-                RunState::NeedsInput,
-                says(None).or_else(|| Some("waiting for approval".into())),
-            ),
-            State::Idle => (RunState::Idle, says(Some("finished responding"))),
-            State::Started | State::Ended | State::Nothing => return None,
-        };
-        Some(Signal::hook(state, detail))
     }
 
     /// The agent's hooks file, as the agent finds it from this environment
@@ -681,11 +617,7 @@ fn expand(path: &str, env: &impl Fn(&str) -> Option<OsString>) -> Option<PathBuf
 }
 
 /// A payload field's first line, trimmed and clipped; none where it is not
-/// there, or says nothing. An empty or blank one is none too — which is
-/// newer than the words of before profiles: a run's `{"tool_name": ""}`
-/// says `waiting for approval`, not `approve: `; an empty `message`, the
-/// same, not nothing; an empty prompt, or an empty tool done, no detail
-/// rather than `prompt: ` or `tool:  done`.
+/// there, or says nothing: an empty or blank one is none too.
 fn field_of(payload: &Value, field: &str) -> Option<String> {
     payload
         .get(field)
@@ -694,26 +626,10 @@ fn field_of(payload: &Value, field: &str) -> Option<String> {
         .filter(|v| !v.is_empty())
 }
 
-/// `template` with each `{field}` in it as the payload has it; none where
-/// one is not there.
-fn render(template: &str, payload: &Value) -> Option<String> {
-    let mut out = String::new();
-    let mut rest = template;
-    while let Some(open) = rest.find('{') {
-        let close = rest[open..].find('}')? + open;
-        out.push_str(&rest[..open]);
-        out.push_str(&field_of(payload, &rest[open + 1..close])?);
-        rest = &rest[close + 1..];
-    }
-    out.push_str(rest);
-    Some(out)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::Registry;
-    use rl_proto::types::{Confidence, Source};
     use serde_json::json;
     use std::path::Path;
 
@@ -814,93 +730,15 @@ mod tests {
     }
 
     #[test]
-    fn events_say_how_a_relay_run_stands() {
-        let (codex, gemini) = (hooks("codex"), hooks("gemini"));
-        let s = codex
-            .signal("PermissionRequest", &json!({"tool_name": "shell"}))
-            .unwrap();
-        assert_eq!(
-            (s.state, s.source, s.confidence, s.detail.as_deref()),
-            (
-                RunState::NeedsInput,
-                Source::Hook,
-                Confidence::Exact,
-                Some("approve: shell")
-            )
-        );
-        let s = codex.signal("PermissionRequest", &json!({})).unwrap();
-        assert_eq!(s.detail.as_deref(), Some("waiting for approval"));
-        let s = gemini.signal("BeforeAgent", &json!({"prompt": "fix it\nnow"})).unwrap();
-        assert_eq!(
-            (s.state, s.detail.as_deref()),
-            (RunState::Working, Some("prompt: fix it"))
-        );
-        let s = codex.signal("UserPromptSubmit", &json!({})).unwrap();
-        assert_eq!((s.state, s.detail), (RunState::Working, None));
-        let s = gemini
-            .signal(
-                "Notification",
-                &json!({"notification_type": "ToolPermission", "message": "Allow?"}),
-            )
-            .unwrap();
-        assert_eq!((s.state, s.detail.as_deref()), (RunState::NeedsInput, Some("Allow?")));
-        let s = gemini
-            .signal("Notification", &json!({"notification_type": "ToolPermission"}))
-            .unwrap();
-        assert_eq!(s.detail.as_deref(), Some("waiting for approval"));
-        assert!(gemini.signal("Notification", &json!({})).is_none());
-        let s = codex.signal("Stop", &json!({})).unwrap();
-        assert_eq!(
-            (s.state, s.detail.as_deref()),
-            (RunState::Idle, Some("finished responding"))
-        );
-        let s = gemini.signal("AfterAgent", &json!({})).unwrap();
-        assert_eq!(
-            (s.state, s.detail.as_deref()),
-            (RunState::Idle, Some("finished responding"))
-        );
-        // An empty or blank field says nothing (`field_of`).
-        let words = |h: &UserHooks, event, payload| h.signal(event, &payload).unwrap().detail;
-        assert_eq!(
-            words(&codex, "PermissionRequest", json!({"tool_name": " "})).as_deref(),
-            Some("waiting for approval")
-        );
-        assert_eq!(
-            words(
-                &gemini,
-                "Notification",
-                json!({"notification_type": "ToolPermission", "message": ""})
-            )
-            .as_deref(),
-            Some("waiting for approval")
-        );
-        assert_eq!(words(&codex, "UserPromptSubmit", json!({"prompt": "  "})), None);
-        assert_eq!(words(&codex, "PostToolUse", json!({"tool_name": ""})), None);
-        assert!(codex.signal("SessionEnd", &json!({})).is_none());
-        assert!(codex.signal("SessionStart", &json!({})).is_none());
-        assert!(
-            hooks("claude").signal("Stop", &json!({})).is_none(),
-            "Claude's are claude::signal's"
-        );
-        assert_eq!(codex.prompt_event(), Some("UserPromptSubmit"));
-        assert_eq!(gemini.prompt_event(), Some("BeforeAgent"));
-    }
-
-    #[test]
     fn a_tool_that_ran_ends_the_wait_and_an_interrupt_ends_the_turn() {
-        // A run: approve, then the tool runs — working again, exactly.
+        // Approve, then the tool runs: working again.
         for (agent, ran) in [("codex", "PostToolUse"), ("gemini", "AfterTool")] {
             let h = hooks(agent);
             assert!(h.event_names().any(|e| e == ran), "{agent} hooks {ran}");
-            let s = h.signal(ran, &json!({"tool_name": "shell"})).unwrap();
-            assert_eq!(
-                (s.state, s.confidence, s.detail.as_deref()),
-                (RunState::Working, Confidence::Exact, Some("tool: shell done"))
-            );
             assert_eq!(
                 h.told(ran, None),
                 Told::Stands {
-                    status: "busy",
+                    status: BUSY,
                     waiting_for: None
                 }
             );
@@ -908,12 +746,10 @@ mod tests {
         }
         let codex = hooks("codex");
         assert!(!codex.carries_on("AfterTool") && !codex.carries_on("UserPromptSubmit"));
-        let s = codex.signal("Interrupt", &json!({})).unwrap();
-        assert_eq!((s.state, s.detail.as_deref()), (RunState::Idle, Some("interrupted")));
         assert_eq!(
             codex.told("Interrupt", None),
             Told::Stands {
-                status: "idle",
+                status: IDLE,
                 waiting_for: None
             }
         );
@@ -1035,7 +871,7 @@ mod tests {
                 reader: "codex-threads".into()
             })
         );
-        assert!(codex.attach.is_empty(), "its adapter attaches by resuming");
+        assert_eq!(codex.attach, ["resume", ID], "attaching to a thread is resuming it");
         assert!(codex.start.is_empty(), "no background start: Relay holds it");
         assert!(codex.stop.is_empty(), "nothing stops a thread from outside it");
         assert!(r.profile("gemini").unwrap().sessions.as_ref().unwrap().list.is_none());
@@ -1071,10 +907,6 @@ mod tests {
             (ok.replace("    events:\n      Stop: idle\n", ""), "events"),
             (ok.replace("Stop: idle", "Pre Tool: idle"), "Pre Tool"),
             (ok.replace("Stop: idle", "\"Stop;rm\": idle"), "Stop;rm"),
-            (
-                ok.replace("Stop: idle", "Stop: { state: needs, says: \"approve: {tool\" }"),
-                "not closed",
-            ),
             (
                 ok.replace(
                     "Stop: idle",

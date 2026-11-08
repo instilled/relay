@@ -64,10 +64,6 @@ impl RunState {
     pub fn is_terminal(self) -> bool {
         matches!(self, Self::Finished | Self::Failed | Self::Stopped)
     }
-    /// Something is waiting on a human.
-    pub fn needs_attention(self) -> bool {
-        matches!(self, Self::NeedsInput | Self::Blocked | Self::Failed)
-    }
 }
 
 /// Where a state transition came from. Principle 3: signals over scraping.
@@ -109,22 +105,6 @@ impl Signal {
             detail,
         }
     }
-    pub fn hook(state: RunState, detail: Option<String>) -> Self {
-        Self {
-            state,
-            source: Source::Hook,
-            confidence: Confidence::Exact,
-            detail,
-        }
-    }
-    pub fn manual(state: RunState, detail: Option<String>) -> Self {
-        Self {
-            state,
-            source: Source::Manual,
-            confidence: Confidence::Exact,
-            detail,
-        }
-    }
 }
 
 str_enum!(RunKind { Agent => "agent", Shell => "shell", Command => "command", Plugin => "plugin" });
@@ -145,6 +125,6 @@ mod tests {
         assert_eq!(serde_json::to_string(&RunKind::Shell).unwrap(), "\"shell\"");
         let s = Signal::pty(RunState::Idle, Confidence::Likely, Some("$ ".into()));
         assert_eq!(s.source, Source::Pty);
-        assert!(RunState::Failed.needs_attention() && RunState::Stopped.is_terminal());
+        assert!(RunState::Stopped.is_terminal() && !RunState::NeedsInput.is_terminal());
     }
 }

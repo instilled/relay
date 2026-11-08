@@ -1,27 +1,7 @@
-//! Timestamps are `jiff::Timestamp` everywhere in memory and on the wire
-//! (RFC 3339), and epoch milliseconds in the ledger.
+//! Timestamps are `jiff::Timestamp` everywhere in memory and on disk
+//! (RFC 3339).
 
-use anyhow::{Context, Result};
-use jiff::{SignedDuration, Timestamp, civil::Date, tz::TimeZone};
-
-pub fn now() -> Timestamp {
-    Timestamp::now()
-}
-
-/// Accepts a relative duration (`30m`, `8h`, `2d`, `1h30m`), a date
-/// (`2026-09-08`, local midnight) or an RFC 3339 instant.
-pub fn parse_since(s: &str, now: Timestamp) -> Result<Timestamp> {
-    let s = s.trim();
-    if let Some(d) = parse_duration(s) {
-        return Ok(now - d);
-    }
-    if let Ok(date) = s.parse::<Date>() {
-        let zoned = date.to_zoned(TimeZone::system()).context("local midnight")?;
-        return Ok(zoned.timestamp());
-    }
-    s.parse::<Timestamp>()
-        .with_context(|| format!("`{s}` is not a duration (8h), date (2026-09-08) or RFC 3339 instant"))
-}
+use jiff::{SignedDuration, Timestamp};
 
 /// `500ms`, `30m`, `8h`, `2d`, `1h30m`. `None` for anything else.
 pub fn parse_duration(s: &str) -> Option<SignedDuration> {
@@ -71,19 +51,6 @@ pub fn fmt_age(from: Timestamp, now: Timestamp) -> String {
     }
 }
 
-/// `22:14` today, `Fri 18:40` this week, `Sep 07 18:40` before. Local time.
-pub fn fmt_when(t: Timestamp, now: Timestamp) -> String {
-    let tz = TimeZone::system();
-    let (z, n) = (t.to_zoned(tz.clone()), now.to_zoned(tz));
-    if z.date() == n.date() {
-        z.strftime("%H:%M").to_string()
-    } else if now.duration_since(t) < SignedDuration::from_hours(6 * 24) {
-        z.strftime("%a %H:%M").to_string()
-    } else {
-        z.strftime("%b %d %H:%M").to_string()
-    }
-}
-
 /// `41m03s`, `1h12m`, `3d4h` — for durations shown as facts.
 pub fn fmt_duration(d: SignedDuration) -> String {
     let secs = d.as_secs().max(0);
@@ -96,59 +63,21 @@ pub fn fmt_duration(d: SignedDuration) -> String {
     }
 }
 
-pub fn to_millis(t: Timestamp) -> i64 {
-    t.as_millisecond()
-}
-
-pub fn from_millis(ms: i64) -> Result<Timestamp> {
-    Timestamp::from_millisecond(ms).with_context(|| format!("timestamp {ms}ms out of range"))
-}
-
-/// Converts an optional epoch-millis column (as read from a row at `idx`) to
-/// an optional `Timestamp`, mapping a conversion failure through `conv` so
-/// row mappers can stay inside their own error type.
-pub fn optional_from_millis<E>(
-    ms: Option<i64>,
-    idx: usize,
-    conv: impl FnOnce(usize, anyhow::Error) -> E,
-) -> Result<Option<Timestamp>, E> {
-    ms.map(from_millis).transpose().map_err(|e| conv(idx, e))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn durations() {
-        let now = "2026-09-08T12:00:00Z".parse::<Timestamp>().unwrap();
-        assert_eq!(
-            parse_since("30m", now).unwrap(),
-            "2026-09-08T11:30:00Z".parse().unwrap()
-        );
-        assert_eq!(
-            parse_since("1h30m", now).unwrap(),
-            "2026-09-08T10:30:00Z".parse().unwrap()
-        );
-        assert_eq!(parse_since("2d", now).unwrap(), "2026-09-06T12:00:00Z".parse().unwrap());
+        assert_eq!(parse_duration("30m"), Some(SignedDuration::from_mins(30)));
+        assert_eq!(parse_duration("1h30m"), Some(SignedDuration::from_mins(90)));
+        assert_eq!(parse_duration("2d"), Some(SignedDuration::from_hours(48)));
         assert_eq!(parse_duration("500ms"), Some(SignedDuration::from_millis(500)));
         assert_eq!(parse_duration("1m500ms"), Some(SignedDuration::from_millis(60_500)));
-        assert!(parse_since("m", now).is_err());
-        assert!(parse_since("5x", now).is_err());
-        assert!(parse_since("garbage", now).is_err());
-    }
-
-    #[test]
-    fn instants_and_dates() {
-        let now = now();
-        assert_eq!(
-            parse_since("2026-09-08T10:00:00Z", now).unwrap(),
-            "2026-09-08T10:00:00Z".parse().unwrap()
-        );
-        let d = parse_since("2026-09-08", now).unwrap();
-        // Local midnight is within a day either side of UTC midnight.
-        let utc_midnight = "2026-09-08T00:00:00Z".parse::<Timestamp>().unwrap();
-        assert!(d.duration_since(utc_midnight).abs() <= SignedDuration::from_hours(14));
+        assert_eq!(parse_duration("m"), None);
+        assert_eq!(parse_duration("5x"), None);
+        assert_eq!(parse_duration("5"), None);
+        assert_eq!(parse_duration("garbage"), None);
     }
 
     #[test]

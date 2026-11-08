@@ -7,7 +7,7 @@ use std::path::PathBuf;
 /// Relay: list, attach and run shells for any agent. With no command, the
 /// list.
 #[derive(Parser)]
-#[command(name = "rl-new", version)]
+#[command(name = "rl", version)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
@@ -64,7 +64,7 @@ async fn run(cli: Cli) -> Result<()> {
     let Some(command) = cli.command else {
         use std::io::IsTerminal;
         if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
-            anyhow::bail!("the list needs a terminal · rl-new ls lists sessions as text");
+            anyhow::bail!("the list needs a terminal · rl ls lists sessions as text");
         }
         return rl::tui::run(&home).await;
     };

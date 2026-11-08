@@ -38,6 +38,7 @@ pub fn seed(home: &Home) -> anyhow::Result<()> {
     if file.exists() {
         return Ok(());
     }
+    std::fs::create_dir_all(home.plugins_dir())?;
     rl_core::atomic::write(&file, GH_PR.as_bytes())?;
     #[cfg(unix)]
     {
@@ -345,8 +346,7 @@ mod tests {
     #[test]
     fn the_shipped_badge_is_seeded_once_and_then_yours() {
         let tmp = tempfile::tempdir().unwrap();
-        let home = Home::at(tmp.path().to_path_buf());
-        home.ensure_dirs().unwrap();
+        let home = Home::at(tmp.path().join("relay"));
         seed(&home).unwrap();
         let file = home.plugins_dir().join("gh-pr");
         assert_eq!(std::fs::read_to_string(&file).unwrap(), GH_PR);

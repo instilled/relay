@@ -10,15 +10,15 @@
 //! handshake, and one text frame per message. With no daemon running the
 //! proxy cannot connect, and Codex has no sessions of its own to list.
 //!
-//! Enter on one runs the profile's `resume` with the thread's id (`codex
-//! resume <id>`), which opens it through the same daemon: the app-server
-//! rejoins a thread that is running, so attaching to one is resuming it.
-//! (The profile's `sessions.attach` stays empty while `rl-cli`, which
-//! reads it, is still here.) Codex has no background start, so what Relay
-//! starts or carries on for it, Relay holds.
+//! Enter on one runs the profile's `sessions.attach` with the thread's id
+//! (`codex resume <id>`), which opens it through the same daemon: the
+//! app-server rejoins a thread that is running, so attaching to one is
+//! resuming it. Codex has no background start, so what Relay starts or
+//! carries on for it, Relay holds.
 
 use crate::adapter::{Adapter, NativeRow, NativeState};
-use crate::registry::{Profile, SESSION};
+use crate::registry::Profile;
+use crate::sessions::ID;
 use anyhow::{Context, Result, anyhow, bail};
 use jiff::Timestamp;
 use rl_core::state::RunState;
@@ -46,8 +46,8 @@ pub struct Codex {
     harness: String,
     bin: String,
     list: Vec<String>,
-    /// The profile's `resume`: `{session}` is the thread's id.
-    resume: Vec<String>,
+    /// The profile's `sessions.attach`: `{id}` is the thread's id.
+    attach: Vec<String>,
 }
 
 impl Codex {
@@ -59,7 +59,7 @@ impl Codex {
             harness: profile.name.clone(),
             bin: bin.to_string_lossy().into_owned(),
             list: s.list.as_ref()?.args.clone(),
-            resume: profile.resume.clone(),
+            attach: s.attach.clone(),
         })
     }
 
@@ -87,7 +87,7 @@ impl Adapter for Codex {
     }
 
     fn attach_argv(&self, id: &str) -> Vec<String> {
-        let args: Vec<String> = self.resume.iter().map(|a| a.replace(SESSION, id)).collect();
+        let args: Vec<String> = self.attach.iter().map(|a| a.replace(ID, id)).collect();
         self.argv(&args)
     }
 

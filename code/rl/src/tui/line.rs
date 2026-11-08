@@ -291,7 +291,7 @@ mod tests {
     #[test]
     fn multi_byte_text_survives_every_editing_key() {
         let mut l = Line::default();
-        press(&mut l, "héllo 🌍 wörld");
+        press(&mut l, "héllo 🌍 wörd");
         assert_eq!(l.cursor(), l.text().len());
         assert!(l.text().is_char_boundary(l.cursor()));
         // Back over the emoji word and retype it.
@@ -299,8 +299,8 @@ mod tests {
         assert_eq!(l.text(), "héllo 🌍 ");
         l.key(&ctrl('w'));
         assert_eq!(l.text(), "héllo ");
-        press(&mut l, "wörld");
-        assert_eq!(l.text(), "héllo wörld");
+        press(&mut l, "wörd");
+        assert_eq!(l.text(), "héllo wörd");
 
         // Left over a two-byte char, then insert before it.
         let mut l = Line::default();

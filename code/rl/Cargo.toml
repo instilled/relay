@@ -6,10 +6,6 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
-[[bin]]
-name = "rl-new"
-path = "src/main.rs"
-
 [dependencies]
 rl-core.workspace = true
 rl-detect.workspace = true

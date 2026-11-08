@@ -1,11 +1,11 @@
-//! `rl-new new | ls | stop | rm` against the real `rl-session` holder.
+//! `rl new | ls | stop | rm` against the real `rl-session` holder.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
 fn session_bin() -> Option<PathBuf> {
-    let p = PathBuf::from(env!("CARGO_BIN_EXE_rl-new")).with_file_name("rl-session");
+    let p = PathBuf::from(env!("CARGO_BIN_EXE_rl")).with_file_name("rl-session");
     p.is_file().then_some(p)
 }
 
@@ -37,7 +37,7 @@ impl Env {
     }
 
     fn rl(&self, cwd: &Path, args: &[&str]) -> (bool, String, String) {
-        let out = Command::new(env!("CARGO_BIN_EXE_rl-new"))
+        let out = Command::new(env!("CARGO_BIN_EXE_rl"))
             .args(args)
             .current_dir(cwd)
             .env("RELAY_HOME", self.home())
@@ -164,7 +164,7 @@ fn meta_is_there_before_the_holder_starts_and_a_failed_start_leaves_nothing() {
     std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
     let cwd = tmp.path().join("proj");
     std::fs::create_dir_all(&cwd).unwrap();
-    let out = Command::new(env!("CARGO_BIN_EXE_rl-new"))
+    let out = Command::new(env!("CARGO_BIN_EXE_rl"))
         .args(["new", "--", "sleep", "30"])
         .current_dir(&cwd)
         .env("RELAY_HOME", tmp.path().join("relay"))

@@ -1,6 +1,6 @@
 [package]
 name = "rl-detect"
-description = "Relay run-state detection: CLI registry, PTY heuristics, hook ingestion, the state machine"
+description = "Relay detection: CLI registry, agent hooks, harness adapters"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,7 +8,6 @@ repository.workspace = true
 
 [dependencies]
 rl-core.workspace = true
-rl-proto.workspace = true
 rl-session.workspace = true
 anyhow.workspace = true
 nix.workspace = true

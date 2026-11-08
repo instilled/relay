@@ -114,10 +114,6 @@ pub async fn drive(
                             again = nudge_in(hello);
                         }
                     }
-                    Some(Frame::Note(s)) if !view.interactive => {
-                        out.write_all(dim(&format!("[relay] {s}")).as_bytes()).await?;
-                        out.flush().await?;
-                    }
                     Some(Frame::Exit(e)) => {
                         let (ended, words) = exit_words(view.name, &e);
                         return Ok((ended, Some(words)));

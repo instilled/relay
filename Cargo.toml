@@ -2,14 +2,9 @@
 resolver = "3"
 members = [
   "code/rl",
-  "code/rl-cli",
-  "code/rl-daemon",
   "code/rl-session",
   "code/rl-core",
   "code/rl-detect",
-  "code/rl-flow",
-  "code/rl-ledger",
-  "code/rl-proto",
 ]
 exclude = ["vendor"]
 
@@ -22,10 +17,6 @@ repository = "https://github.com/instilled/relay"
 [workspace.dependencies]
 rl-core = { path = "code/rl-core" }
 rl-detect = { path = "code/rl-detect" }
-rl-flow = { path = "code/rl-flow" }
-rl-ledger = { path = "code/rl-ledger" }
-rl-proto = { path = "code/rl-proto" }
-rl-daemon = { path = "code/rl-daemon" }
 rl-session = { path = "code/rl-session" }
 
 anyhow = "1"
@@ -35,7 +26,6 @@ nix = { version = "0.31", features = ["process", "signal", "fs", "hostname", "te
 notify = "8.2"
 portable-pty = "0.9"
 regex = "1"
-rusqlite = { version = "0.40", features = ["bundled"] }
 clap = { version = "4.5", features = ["derive"] }
 crossterm = { version = "0.29", features = ["event-stream"] }
 futures = "0.3"
@@ -45,12 +35,9 @@ serde = { version = "1", features = ["derive"] }
 # `preserve_order`: `rl setup` adds Relay's hooks to Codex's and Gemini's
 # own JSON files (rl-detect's `user_hooks`) and writes them back with the
 # user's keys in the order they were. Cargo unifies features, so this is
-# workspace-wide: every crate's `serde_json::Map` keeps insertion order,
-# ledger JSON and RPC output too.
+# workspace-wide: every crate's `serde_json::Map` keeps insertion order.
 serde_json = { version = "1", features = ["preserve_order"] }
 serde_norway = "0.9"
-sha2 = "0.10"
-thiserror = "2"
 tokio = { version = "1", features = ["io-std", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 tracing = "0.1"

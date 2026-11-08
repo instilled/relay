@@ -1,4 +1,4 @@
-//! `rl-new hook <agent> <Event>` writes state files, with the hook's JSON on stdin.
+//! `rl hook <agent> <Event>` writes state files, with the hook's JSON on stdin.
 
 use serde_json::{Value, json};
 use std::io::Write;
@@ -25,7 +25,7 @@ impl Env {
     }
 
     fn hook(&self, args: &[&str], payload: Value, env: &[(&str, &str)]) -> std::process::Output {
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_rl-new"));
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_rl"));
         cmd.arg("hook")
             .args(args)
             .env_remove("RELAY_SESSION")

@@ -13,7 +13,7 @@ use rl_session::detect::spec::DetectSpec;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
-/// Names the holder binary's override, as the old daemon did.
+/// Names the holder binary's override.
 pub const SESSION_BIN_ENV: &str = "RELAY_SESSION_BIN";
 
 /// The harness a session runs, in its holder's environment: so a hook can

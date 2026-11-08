@@ -10,16 +10,15 @@
 //! agent whose hooks are written another way would need that way here.
 //!
 //! These live in the agent's user-level file, so every session of that
-//! agent calls them, Relay's runs and the rest alike. `rl hook` tells them
-//! apart by `RELAY_RUN`: a run's hook posts the run's signal
-//! (`UserHooks::signal`); any other tells `rld` of the session
-//! (`UserHooks::told`), which keeps it on the list as one of the agent's
-//! own. Where a Relay run of the agent's has hooks of its own beside these
-//! (Claude's, `claude::settings_json`, passed as `--settings`), the marker
-//! tells this copy apart, and it is never a run's signal: under a run of
-//! that agent's, `rld` lets its word go; under any other run (a claude
-//! started in a shell run), or none, it tells of one of the agent's own
-//! sessions.
+//! agent calls them, Relay's held sessions and the rest alike. `rl hook`
+//! tells them apart by `RELAY_SESSION`: under a session Relay holds of that
+//! agent's, the word is that session's; any other is one of the agent's
+//! own (`UserHooks::told`), which keeps it on the list. Where a held
+//! session of the agent's has hooks of its own beside these (Claude's,
+//! `claude::settings_json`, passed as `--settings`), the marker tells this
+//! copy apart: under a held session of that agent's it is let go; under
+//! any other (a claude started in a held shell), or none, it tells of one
+//! of the agent's own sessions.
 //!
 //! Beside the hooks, a profile may name settings of the agent's own that
 //! make it draw well under Relay (`UserHooks::settings`, Gemini's
@@ -32,7 +31,6 @@
 //! but Relay's own (`is_relays`), and a file that does not read is never
 //! rewritten.
 
-use crate::Registry;
 use crate::sessions::UserHooks;
 use anyhow::{Context, Result, bail};
 use serde_json::{Map, Value, json};
@@ -48,7 +46,7 @@ pub const CODEX: &str = "codex";
 /// (`claude::settings_json`).
 pub const USER: &str = crate::sessions::MARKER;
 
-/// Set in the environment of the `claude` that `rld` itself runs
+/// Set in the environment of the `claude` that Relay itself runs
 /// (`claude agents`, `claude stop`): should that fire a user-level hook,
 /// `rl hook` says nothing of it. Otherwise each ask could tell of a new
 /// session, which calls for another ask, and so on. Its value is the Unix
@@ -83,23 +81,6 @@ pub fn is_asking(value: Option<&str>, now: u64) -> bool {
     value
         .and_then(|v| v.trim().parse::<u64>().ok())
         .is_some_and(|set| set <= now + ASKING_SKEW && now.saturating_sub(set) < ASKING_FOR)
-}
-
-/// Whether `agent`'s hook, carrying `run`'s `RELAY_RUN`, is not that run's:
-/// the agent was started inside it. So when the run is a shell or a
-/// command, or another agent whose hooks the `registry` knows (a Claude run
-/// calling `codex exec`). An agent run of a CLI Relay does not know, or
-/// none named, may be this agent by another name (`npx @openai/codex`):
-/// its hooks are its own.
-pub fn foreign(run: &rl_proto::types::Run, agent: &str, registry: &Registry) -> bool {
-    use rl_proto::types::RunKind;
-    match run.kind {
-        RunKind::Shell | RunKind::Command | RunKind::Plugin => true,
-        _ => run
-            .cli
-            .as_deref()
-            .is_some_and(|cli| cli != agent && registry.user_hooks(cli).is_some()),
-    }
 }
 
 /// The command an event's hook runs: with the agent's marker after the
@@ -442,6 +423,7 @@ fn write(path: &Path, doc: &Map<String, Value>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Registry;
 
     const RL: &str = "/opt/relay/bin/rl";
 
@@ -551,35 +533,6 @@ mod tests {
             after[1]["hooks"][0]["command"],
             "'/opt/relay/bin/rl' hook gemini AfterAgent || true"
         );
-    }
-
-    #[test]
-    fn a_hook_is_foreign_to_a_shell_a_command_or_another_known_agent_only() {
-        use rl_proto::types::{Run, RunKind};
-        let reg = Registry::builtin();
-        let run = |kind, cli: Option<&str>| {
-            let mut r = Run::new(
-                "r1",
-                kind,
-                "t",
-                vec!["x".into()],
-                "/w",
-                "/w",
-                "2026-10-13T10:00:00Z".parse().unwrap(),
-            );
-            r.cli = cli.map(Into::into);
-            r
-        };
-        assert!(foreign(&run(RunKind::Shell, None), CODEX, &reg));
-        assert!(foreign(&run(RunKind::Command, None), CODEX, &reg));
-        assert!(foreign(&run(RunKind::Agent, Some("claude")), CODEX, &reg));
-        assert!(foreign(&run(RunKind::Agent, Some("gemini")), CODEX, &reg));
-        assert!(!foreign(&run(RunKind::Agent, Some("codex")), CODEX, &reg));
-        // A wrapper Relay does not know (`npx @openai/codex`), or none named:
-        // the hooks are the run's own. So is a known agent with no hooks.
-        assert!(!foreign(&run(RunKind::Agent, Some("npx")), CODEX, &reg));
-        assert!(!foreign(&run(RunKind::Agent, None), "gemini", &reg));
-        assert!(!foreign(&run(RunKind::Agent, Some("cursor")), CODEX, &reg));
     }
 
     #[test]

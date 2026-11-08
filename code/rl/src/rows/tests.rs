@@ -1038,7 +1038,7 @@ fn words_and_columns() {
     assert_eq!(fit("abc", 5), "abc  ");
     assert_eq!(fit("abcdef", 5), "abcd…");
     assert_eq!(fit("abcdef", 0), "");
-    assert_eq!(fit("héllo wörld", 6), "héllo…");
+    assert_eq!(fit("héllo wörd", 6), "héllo…");
     // Wide glyphs take two columns each, padded or cut by columns.
     use unicode_width::UnicodeWidthStr;
     assert_eq!(fit("権限", 6), "権限  ");

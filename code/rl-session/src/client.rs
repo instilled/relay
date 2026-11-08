@@ -1,4 +1,4 @@
-//! Client side of the holder protocol — what `rld` (and tests) use.
+//! Client side of the holder protocol — what `rl` (and tests) use.
 
 use crate::proto::{Frame, FrameReader, Hello, Replay, write_frame};
 use anyhow::{Context, Result, bail};
@@ -13,9 +13,8 @@ pub struct Session {
     wr: SessionWriter,
 }
 
-/// Cancel-safe: `rld` reads holder frames inside a `select!` on both the
-/// viewer path and the follow loop, and a half-read frame must survive
-/// losing that race — see [`FrameReader`].
+/// Cancel-safe: `rl attach` reads holder frames inside a `select!`, and a
+/// half-read frame must survive losing that race — see [`FrameReader`].
 pub struct SessionReader(FrameReader<BufReader<OwnedReadHalf>>);
 pub struct SessionWriter(OwnedWriteHalf);
 
@@ -40,8 +39,7 @@ impl Session {
         .await
     }
 
-    /// Attaches asking for the screen drawn afresh. A pipes run has none and
-    /// replays bytes from `from` instead.
+    /// Attaches asking for the screen drawn afresh; `from` is not read.
     pub async fn attach_screen(socket: &Path, from: u64) -> Result<(Hello, Self)> {
         Self::open(
             socket,

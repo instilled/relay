@@ -1,4 +1,4 @@
-//! How a child ended, and the sidecar file that records it so `rld` learns
+//! How a child ended, and the sidecar file that records it so `rl` learns
 //! the outcome even if it was not running at the time.
 
 use jiff::Timestamp;

@@ -44,8 +44,6 @@ pub fn start(argv: &[String], size: (u16, u16)) -> Result<Spawned> {
         inherit_env: true,
         cols: size.0,
         rows: size.1,
-        tty: true,
-        input: true,
         settle: Duration::ZERO,
     })
 }
