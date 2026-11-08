@@ -167,6 +167,9 @@ Taken from the task reports; none is exercised by the tests.
 - That `codex resume <id>` attaches to a thread the app-server has loaded, and when a thread stays loaded.
 - The Gemini MCP entry format.
 - Whether `claude --bg` sessions run user-level hooks (why the list asks `claude agents`).
+- Checked live on codex 0.167, against handing a held Codex session to its daemon on detach: a
+  thread stays loaded in the shared app-server only while a TUI holds it, and is gone within a
+  minute of the TUI's exit. So a held Codex session stays held.
 - Antigravity's screen (`agy`): its profile has no patterns or hooks of its own; only `agy --help`
   was read (`-i` is `--prompt-interactive`).
 

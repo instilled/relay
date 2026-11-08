@@ -155,6 +155,10 @@ Not verified against the live CLIs:
 - The Gemini MCP entry (`mcpServers.relay` in its `settings.json`).
 - `claude agents` state mapping against its own screen.
 - Antigravity (`agy`): no hooks and no screen patterns of its own yet, so its state is the generic guess.
+- A Codex session Relay holds stays Relay's when you detach. Its thread can't be left with Codex's
+  own daemon. Checked on codex 0.167: the daemon lists a TUI's thread as loaded while the TUI runs
+  and for a few seconds after it exits, but not a minute later. A hand-off would leave a row that
+  vanishes. `codex resume <id>` still finds the saved conversation.
 
 ## Docs
 
