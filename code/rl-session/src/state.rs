@@ -8,6 +8,7 @@ use std::io;
 use std::path::Path;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct StateFile {
     pub state: RunState,
     pub confidence: Confidence,
@@ -59,5 +60,17 @@ mod tests {
                 .flatten()
                 .all(|e| !e.file_name().to_string_lossy().ends_with(".tmp"))
         );
+    }
+
+    #[test]
+    fn a_state_file_with_a_field_it_does_not_know_does_not_read() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("state.json");
+        std::fs::write(
+            &p,
+            r#"{"state":"idle","confidence":"likely","at":"1970-01-01T00:00:00Z","extra":1}"#,
+        )
+        .unwrap();
+        assert!(read_state_file(&p).is_err());
     }
 }

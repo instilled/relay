@@ -157,6 +157,7 @@ async fn ask(cmd: &str, dir: &Path, branch: &str, plugins: &Path, wait: Duration
         None => plugins.as_os_str().to_owned(),
     };
     let child = Command::new("sh")
+        .process_group(0)
         .arg("-c")
         .arg(cmd)
         .current_dir(dir)
@@ -167,8 +168,17 @@ async fn ask(cmd: &str, dir: &Path, branch: &str, plugins: &Path, wait: Duration
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .kill_on_drop(true)
-        .output();
-    let out = tokio::time::timeout(wait, child).await.ok()?.ok()?;
+        .spawn()
+        .ok()?;
+    let group = child.id();
+    let Ok(out) = tokio::time::timeout(wait, child.wait_with_output()).await else {
+        // Its group goes too: what the plugin started would outlive `sh`.
+        if let Some(g) = group.and_then(|g| i32::try_from(g).ok()) {
+            let _ = nix::sys::signal::killpg(nix::unistd::Pid::from_raw(g), nix::sys::signal::Signal::SIGKILL);
+        }
+        return None;
+    };
+    let out = out.ok()?;
     if !out.status.success() {
         return None;
     }
@@ -341,6 +351,25 @@ mod tests {
             at.elapsed() < Duration::from_secs(30),
             "given up at the wait, not at its end"
         );
+    }
+
+    #[tokio::test]
+    async fn a_command_that_takes_too_long_takes_what_it_started_with_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pid = tmp.path().join("pid");
+        let script = format!("sleep 20 & echo $! > '{}'; wait", pid.display());
+        let said = ask(&script, tmp.path(), "main", tmp.path(), Duration::from_millis(500)).await;
+        assert_eq!(said, None);
+        let pid: i32 = std::fs::read_to_string(&pid).unwrap().trim().parse().unwrap();
+        let mut gone = false;
+        for _ in 0..50 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            if nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None).is_err() {
+                gone = true;
+                break;
+            }
+        }
+        assert!(gone, "its whole group is killed");
     }
 
     #[test]

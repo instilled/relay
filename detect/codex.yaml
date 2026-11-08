@@ -5,6 +5,8 @@
 kind: agent
 bins: [codex]
 icon: "⬡"        # its rows in the panel; one column wide
+# `{session}` is the conversation's id; `{id}` (in `sessions`) is the id the
+# daemon lists a thread by.
 resume: ["resume", "{session}"]
 patterns:
   needs_input:

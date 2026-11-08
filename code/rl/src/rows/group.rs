@@ -9,7 +9,7 @@ pub fn keeps(r: &Row, show_agents: bool, show_shells: bool) -> bool {
     match r.kind {
         RunKind::Agent => show_agents,
         RunKind::Shell => show_shells,
-        RunKind::Command | RunKind::Plugin => true,
+        RunKind::Command => true,
     }
 }
 

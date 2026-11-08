@@ -30,7 +30,6 @@ pub enum RunKind {
     Agent,
     Shell,
     Command,
-    Plugin,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -70,11 +69,7 @@ impl RunState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Source {
-    Hook,
-    Transcript,
-    Git,
     Pty,
-    Manual,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -107,12 +102,12 @@ impl Signal {
     }
 }
 
-str_enum!(RunKind { Agent => "agent", Shell => "shell", Command => "command", Plugin => "plugin" });
+str_enum!(RunKind { Agent => "agent", Shell => "shell", Command => "command" });
 str_enum!(RunState {
     Starting => "starting", Working => "working", Idle => "idle", NeedsInput => "needs_input",
     Blocked => "blocked", Stale => "stale", Finished => "finished", Failed => "failed", Stopped => "stopped",
 });
-str_enum!(Source { Hook => "hook", Transcript => "transcript", Git => "git", Pty => "pty", Manual => "manual" });
+str_enum!(Source { Pty => "pty" });
 str_enum!(Confidence { Guess => "guess", Likely => "likely", Exact => "exact" });
 
 #[cfg(test)]

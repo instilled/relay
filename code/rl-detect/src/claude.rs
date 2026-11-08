@@ -1,9 +1,7 @@
 //! Claude Code: the hooks of a session Relay holds.
 //!
 //! `rl new` writes a settings file with one command hook per event, all
-//! calling `rl hook claude <Event>` (rewritten on every start, so a file from
-//! before the agent was named is brought up to date; `rl hook <Event>` alone
-//! still means Claude's); the `claude` profile passes it as `--settings`, so
+//! calling `rl hook claude <Event>` (rewritten on every start); the `claude` profile passes it as `--settings`, so
 //! every Claude session Relay holds reports back, in any directory, without
 //! editing the project's `.claude/settings.json`. `rl hook` reads the hook's
 //! JSON on stdin and writes the session's state file.
@@ -60,7 +58,7 @@ pub fn write_settings(home: &Home, rl_bin: &Path) -> Result<PathBuf> {
     let text = serde_json::to_string_pretty(&settings_json(rl_bin))? + "\n";
     if std::fs::read_to_string(&path).ok().as_deref() != Some(&text) {
         std::fs::create_dir_all(path.parent().unwrap())?;
-        std::fs::write(&path, text).with_context(|| format!("writing {}", path.display()))?;
+        rl_core::atomic::write(&path, text.as_bytes()).with_context(|| format!("writing {}", path.display()))?;
     }
     Ok(path)
 }

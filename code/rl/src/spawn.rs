@@ -155,6 +155,23 @@ async fn stop_holder(socket: &Path, pid: Option<u32>) {
     }
 }
 
+/// How long `rl-session` may take to start its holder and say so.
+const START_WAIT: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// The exit of `child`, which must come within `wait`; else it is killed.
+async fn wait_started(
+    child: &mut tokio::process::Child,
+    wait: std::time::Duration,
+) -> Result<std::process::ExitStatus> {
+    match tokio::time::timeout(wait, child.wait()).await {
+        Ok(status) => Ok(status?),
+        Err(_) => {
+            let _ = child.kill().await;
+            bail!("did not start in {}s", wait.as_secs_f32());
+        }
+    }
+}
+
 async fn launch(
     home: &Home,
     mut meta: Meta,
@@ -171,7 +188,7 @@ async fn launch(
     let log = dir.join("log");
     let log_file = std::fs::OpenOptions::new().create(true).append(true).open(&log)?;
     let bin = rl_core::locate_bin("rl-session", SESSION_BIN_ENV);
-    let status = tokio::process::Command::new(&bin)
+    let mut child = tokio::process::Command::new(&bin)
         .arg("--id")
         .arg(&name)
         .arg("--socket")
@@ -199,9 +216,13 @@ async fn launch(
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::from(log_file))
-        .status()
-        .await
+        .kill_on_drop(true)
+        .spawn()
         .with_context(|| format!("spawning {}", bin.display()))?;
+    // It forks the holder and exits: a start that hangs is a failed one.
+    let status = wait_started(&mut child, START_WAIT)
+        .await
+        .with_context(|| format!("running {}", bin.display()))?;
     if !status.success() {
         let tail = std::fs::read_to_string(&log).unwrap_or_default();
         bail!("{}", tail.lines().last().unwrap_or("rl-session failed to start"));
@@ -219,6 +240,25 @@ async fn launch(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_start_that_hangs_is_killed_at_the_wait() {
+        let mut child = tokio::process::Command::new("sleep").arg("60").spawn().unwrap();
+        let at = std::time::Instant::now();
+        let e = wait_started(&mut child, std::time::Duration::from_millis(200))
+            .await
+            .unwrap_err();
+        assert!(e.to_string().contains("did not start"), "{e}");
+        assert!(at.elapsed() < std::time::Duration::from_secs(5));
+        assert!(child.try_wait().unwrap().is_some(), "killed");
+        let mut quick = tokio::process::Command::new("true").spawn().unwrap();
+        assert!(
+            wait_started(&mut quick, std::time::Duration::from_secs(60))
+                .await
+                .unwrap()
+                .success()
+        );
+    }
 
     #[tokio::test]
     async fn a_holder_that_never_answered_is_sent_sigterm_by_pid() {

@@ -36,8 +36,7 @@ use anyhow::{Context, Result, bail};
 use serde_json::{Map, Value, json};
 use std::path::{Path, PathBuf};
 
-/// The agent a hook named by its event alone is: Claude's, written before
-/// the agent was named.
+/// Claude.
 pub const CLAUDE: &str = crate::claude::DIALECT;
 /// Codex, whose own `config.toml` may hold hooks too (`inline_hooks`).
 pub const CODEX: &str = "codex";
@@ -84,11 +83,10 @@ pub fn is_asking(value: Option<&str>, now: u64) -> bool {
 }
 
 /// The command an event's hook runs: with the agent's marker after the
-/// event where it has one (`USER`), a word an older `rl` does not know, and
-/// so leaves be.
+/// event where it has one (`USER`).
 ///
-/// `|| true`: whatever `rl` does — gone (127), an older one that does not
-/// know these words (clap's 2) — the hook succeeds. Gemini takes exit 2 as
+/// `|| true`: whatever `rl` does — gone (127), one that refuses these
+/// words (clap's 2) — the hook succeeds. Gemini takes exit 2 as
 /// "block", Claude too on some events, and codex warns on any failure;
 /// Relay's hook never does any of it.
 pub fn command(rl_bin: &Path, hooks: &UserHooks, event: &str) -> String {
@@ -140,9 +138,8 @@ pub fn inline_hooks(hooks_file: &Path) -> bool {
 /// Whether `command` is one of Relay's hooks for the agent: `rl hook
 /// <agent> <Event>`, by whatever path `rl` was installed at — with the
 /// agent's marker after it where it has one, as a run's own
-/// (`claude::settings_json`) has no place in the user's file. With or
-/// without the `|| true` an older Relay did not write: an install brings
-/// such a one up to date.
+/// (`claude::settings_json`) has no place in the user's file, and the
+/// `|| true` every one of Relay's ends with.
 pub fn is_relays(command: &str, hooks: &UserHooks) -> bool {
     program(command, hooks).is_some()
 }
@@ -152,9 +149,10 @@ pub fn is_relays(command: &str, hooks: &UserHooks) -> bool {
 /// command.
 fn program(command: &str, hooks: &UserHooks) -> Option<String> {
     let mut words: Vec<&str> = command.split_whitespace().collect();
-    if words.ends_with(&["||", "true"]) {
-        words.truncate(words.len() - 2);
+    if !words.ends_with(&["||", "true"]) {
+        return None;
     }
+    words.truncate(words.len() - 2);
     if let Some(marker) = &hooks.marker {
         if words.last() != Some(&marker.as_str()) {
             return None;
@@ -525,16 +523,20 @@ mod tests {
             after[1]["hooks"][0]["command"],
             "'/opt/relay/bin/rl' hook gemini AfterAgent || true"
         );
-        // One an older Relay wrote, with no `|| true`: brought up to date, not doubled.
+        // One with no `|| true` is not Relay's: left alone, ours added.
         let mut v = doc(&path);
         v["hooks"]["AfterAgent"][1]["hooks"][0]["command"] = json!("/opt/relay/bin/rl hook gemini AfterAgent");
         std::fs::write(&path, serde_json::to_string(&v).unwrap()).unwrap();
-        assert!(installed(&path, &gemini).unwrap());
+        assert!(!is_relays("/opt/relay/bin/rl hook gemini AfterAgent", &gemini));
         assert!(install(&path, &gemini, Path::new(RL)).unwrap());
         let after = doc(&path)["hooks"]["AfterAgent"].as_array().unwrap().clone();
-        assert_eq!(after.len(), 2);
+        assert_eq!(after.len(), 3);
         assert_eq!(
             after[1]["hooks"][0]["command"],
+            "/opt/relay/bin/rl hook gemini AfterAgent"
+        );
+        assert_eq!(
+            after[2]["hooks"][0]["command"],
             "'/opt/relay/bin/rl' hook gemini AfterAgent || true"
         );
     }
@@ -585,7 +587,7 @@ mod tests {
         v["hooks"]["Stop"][0]["hooks"]
             .as_array_mut()
             .unwrap()
-            .push(json!({"type": "command", "command": "rl hook codex Stop"}));
+            .push(json!({"type": "command", "command": "rl hook codex Stop || true"}));
         std::fs::write(&path, serde_json::to_string(&v).unwrap()).unwrap();
         assert!(uninstall(&path, &codex).unwrap());
         assert_eq!(
@@ -695,12 +697,12 @@ mod tests {
     #[test]
     fn relays_commands_are_known_by_their_words() {
         let (codex, gemini) = (h(CODEX), h("gemini"));
-        assert!(is_relays("/usr/local/bin/rl hook codex Stop", &codex));
-        assert!(is_relays("'/opt/my tools/rl' hook gemini AfterAgent", &gemini));
+        assert!(!is_relays("/usr/local/bin/rl hook codex Stop", &codex), "no `|| true`");
+        assert!(is_relays("/usr/local/bin/rl hook codex Stop || true", &codex));
         assert!(is_relays("'/opt/my tools/rl' hook gemini AfterAgent || true", &gemini));
         assert!(is_relays("'/usr/local/bin/rl' hook codex Stop ||   true  ", &codex));
         assert!(!is_relays("'/usr/local/bin/rl' hook codex || true", &codex));
-        assert!(is_relays("rl hook codex Whatever", &codex));
+        assert!(is_relays("rl hook codex Whatever || true", &codex));
         assert!(!is_relays("/usr/local/bin/rl hook gemini Stop", &codex));
         assert!(!is_relays("/bin/curl hook codex Stop", &codex));
         assert!(!is_relays("rl hook codex", &codex));
@@ -888,11 +890,14 @@ mod tests {
     fn claudes_user_level_hook_is_known_by_its_user_word() {
         let (claude, codex) = (h(CLAUDE), h(CODEX));
         assert!(is_relays("'/opt/my tools/rl' hook claude Stop --user || true", &claude));
-        assert!(is_relays("/usr/local/bin/rl hook claude Notification --user", &claude));
+        assert!(is_relays(
+            "/usr/local/bin/rl hook claude Notification --user || true",
+            &claude
+        ));
         assert!(!is_relays("/usr/local/bin/rl hook claude Stop", &claude), "a run's own");
         assert!(!is_relays("/usr/local/bin/rl hook claude --user || true", &claude));
-        assert!(!is_relays("/usr/local/bin/rl hook codex Stop --user", &claude));
-        assert!(!is_relays("/usr/local/bin/rl hook claude Stop --user", &codex));
+        assert!(!is_relays("/usr/local/bin/rl hook codex Stop --user || true", &claude));
+        assert!(!is_relays("/usr/local/bin/rl hook claude Stop --user || true", &codex));
         assert_eq!(
             command(Path::new("/x/it's/rl"), &claude, "Stop"),
             "'/x/it'\\''s/rl' hook claude Stop --user || true"

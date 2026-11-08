@@ -690,8 +690,6 @@ fn a_row_wears_what_it_is_and_says_how_it_stands() {
     let mut a = row("ag", RunState::Idle, "/w", "2026-09-10T11:00:00Z");
     a.kind = RunKind::Command;
     assert_eq!(icon(&a), COMMAND);
-    a.kind = RunKind::Plugin;
-    assert_eq!(icon(&a), COMMAND);
 }
 
 #[test]

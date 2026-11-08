@@ -17,9 +17,6 @@
 //! working, idle, stale or waiting on input, and keeps the answer in a state
 //! file — so a reader needs no client attached to learn it.
 //!
-//! Given `reap_after`, a holder that has had nobody attached at all for that
-//! long hangs up its child and leaves too. Relay never passes it: a held
-//! session stays until it is stopped.
 
 use crate::backend::{self, Resizer, Spec};
 use crate::detect::heuristics::{Patterns, Timing};
@@ -71,9 +68,6 @@ pub struct Config {
     /// How often to check that the socket is still there. Nothing waits on
     /// an orphaned holder leaving, so this can be slow.
     pub socket_check: Duration,
-    /// Nobody attached for this long: hang up the
-    /// child and leave. `None` waits forever.
-    pub reap_after: Option<Duration>,
     /// What the holder works out its own run state with. `None`: it does not.
     pub detect: Option<(Patterns, Timing, RunKind)>,
     /// Where the run state is kept, as it changes. Without `detect` nothing
@@ -102,11 +96,8 @@ impl Shared {
             holder_pid: std::process::id(),
             cols: self.cols,
             rows: self.rows,
-            tty: true,
             started_at: self.started_at,
             exit: self.exit.clone(),
-            total: self.ring.total(),
-            replay_from: self.ring.total(),
         }
     }
 }
@@ -181,9 +172,6 @@ pub async fn serve(cfg: Config, ready: oneshot::Sender<()>) -> Result<()> {
     }
     tokio::spawn(watch_signals(ctx.clone()));
     tokio::spawn(watch_socket(ctx.clone(), cfg.socket.clone(), cfg.socket_check));
-    if let Some(after) = cfg.reap_after {
-        tokio::spawn(watch_alone(ctx.clone(), after));
-    }
 
     loop {
         tokio::select! {
@@ -445,29 +433,6 @@ async fn watch_socket(ctx: Arc<Ctx>, socket: PathBuf, every: Duration) {
     }
 }
 
-/// Nobody at all for `after`: hang up the child and leave instead of holding
-/// it forever.
-async fn watch_alone(ctx: Arc<Ctx>, after: Duration) {
-    let every = (after / 10).clamp(Duration::from_secs(1), Duration::from_secs(60));
-    let mut alone = Duration::ZERO;
-    loop {
-        tokio::select! {
-            _ = ctx.shutdown.cancelled() => return,
-            _ = tokio::time::sleep(every) => {}
-        }
-        if ctx.clients.load(Ordering::SeqCst) > 0 {
-            alone = Duration::ZERO;
-            continue;
-        }
-        alone += every;
-        if alone >= after {
-            info!(?after, "nobody has been attached for this long; letting the run go");
-            ctx.shutdown.cancel();
-            return;
-        }
-    }
-}
-
 /// SIGTERM/SIGINT to the holder: hang up the child and leave.
 async fn watch_signals(ctx: Arc<Ctx>) {
     use tokio::signal::unix::{SignalKind, signal};
@@ -494,32 +459,23 @@ async fn client_loop(ctx: &Ctx, stream: UnixStream) -> std::io::Result<()> {
     let (rd, mut wr) = stream.into_split();
     let mut rd = FrameReader::new(BufReader::new(rd));
 
-    let (replay, from) = match rd.next().await? {
-        Some(Frame::Attach { replay, from }) => (replay, from),
+    let replay = match rd.next().await? {
+        Some(Frame::Attach { replay }) => replay,
         _ => return Ok(()),
     };
 
     // Subscribe first, then snapshot under the lock: see pump_output.
-    // The replay starts at `from`, or at the oldest byte the ring still has.
     let mut exit_rx = ctx.exit.subscribe();
     let (mut out_rx, snapshot, hello) = {
         let mut s = ctx.shared.lock().unwrap();
-        let total = s.ring.total();
-        let oldest = total - s.ring.len() as u64;
-        let start = from.clamp(oldest, total);
-        let mut hello = s.hello();
-        let snapshot = if replay == Replay::Screen {
-            // The screen stands in for the bytes: nothing is replayed from the
-            // ring, and live output carries on from `total`.
-            hello.replay_from = total;
-            s.screen.snapshot()
-        } else if replay != Replay::None {
-            hello.replay_from = start;
-            s.ring.snapshot().split_off((start - oldest) as usize)
-        } else {
-            Vec::new()
+        let snapshot = match replay {
+            // The screen stands in for the bytes: nothing is replayed from
+            // the ring.
+            Replay::Screen => s.screen.snapshot(),
+            Replay::Bytes => s.ring.snapshot(),
+            Replay::None => Vec::new(),
         };
-        (ctx.out.subscribe(), snapshot, hello)
+        (ctx.out.subscribe(), snapshot, s.hello())
     };
     let mut exit_sent = hello.exit.is_some();
     write_frame(&mut wr, &Frame::Hello(hello.clone())).await?;
@@ -531,8 +487,8 @@ async fn client_loop(ctx: &Ctx, stream: UnixStream) -> std::io::Result<()> {
 
     // Foreground: tell a freshly attached client the current state once, then
     // follow it on every change.
-    let mut fg_rx = Some(ctx.fg.subscribe());
-    let cur = *fg_rx.as_ref().unwrap().borrow();
+    let mut fg_rx = ctx.fg.subscribe();
+    let cur = *fg_rx.borrow();
     write_frame(&mut wr, &Frame::Foreground(cur)).await?;
 
     let pid = ctx.shared.lock().unwrap().pid as i32;
@@ -568,16 +524,12 @@ async fn client_loop(ctx: &Ctx, stream: UnixStream) -> std::io::Result<()> {
                 }
                 Err(broadcast::error::RecvError::Closed) => out_open = false,
             },
-            fg = async { fg_rx.as_mut().unwrap().changed().await }, if fg_rx.is_some() => {
-                match fg {
-                    Ok(()) => {
-                        let v = *fg_rx.as_ref().unwrap().borrow();
-                        write_frame(&mut wr, &Frame::Foreground(v)).await?;
-                    }
-                    // The sender lives in `Ctx` for the holder's life, so this
-                    // only happens if the run is tearing down: stop following it.
-                    Err(_) => fg_rx = None,
-                }
+            // The sender lives in `Ctx` for the holder's life, so this only
+            // fails if the run is tearing down: the client's loop ends then.
+            fg = fg_rx.changed() => {
+                fg.map_err(|_| std::io::ErrorKind::BrokenPipe)?;
+                let v = *fg_rx.borrow();
+                write_frame(&mut wr, &Frame::Foreground(v)).await?;
             }
             changed = exit_rx.changed(), if !exit_sent => {
                 if changed.is_err() { exit_sent = true; continue; }

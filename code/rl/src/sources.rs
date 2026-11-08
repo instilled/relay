@@ -99,7 +99,7 @@ impl Adapter for StandIn {
         self.0.harness()
     }
 
-    fn list(&self) -> anyhow::Result<Vec<NativeRow>> {
+    fn list_within(&self, _: std::time::Duration) -> anyhow::Result<Vec<NativeRow>> {
         let started = STARTED.lock().unwrap();
         Ok(started
             .iter()

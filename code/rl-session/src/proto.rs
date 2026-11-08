@@ -40,11 +40,9 @@ const T_FOREGROUND: u8 = 0x86;
 pub enum Frame {
     // client → holder
     /// Must be the first frame on a connection. `replay` says what comes
-    /// before live output; `from` is the byte offset (in the child's total
-    /// output) a byte replay starts at — `0` means everything the ring still has.
+    /// before live output.
     Attach {
         replay: Replay,
-        from: u64,
     },
     Input(Vec<u8>),
     Resize {
@@ -73,9 +71,9 @@ pub enum Frame {
 pub enum Replay {
     /// Nothing: live output only.
     None,
-    /// The ring buffer's bytes from `from`.
+    /// Everything the ring buffer still has.
     Bytes,
-    /// The run's screen drawn afresh; `from` is not read.
+    /// The run's screen drawn afresh.
     Screen,
 }
 
@@ -88,28 +86,16 @@ pub struct Hello {
     pub holder_pid: u32,
     pub cols: u16,
     pub rows: u16,
-    pub tty: bool,
     pub started_at: Timestamp,
     /// Set when the child already exited before this attach.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exit: Option<Exit>,
-    /// Bytes the child has produced so far; live output continues here.
-    #[serde(default)]
-    pub total: u64,
-    /// Offset the replay starts at. A client that asked for an earlier
-    /// `from` lost `replay_from - from` bytes to the ring's capacity.
-    #[serde(default)]
-    pub replay_from: u64,
 }
 
 impl Frame {
     pub fn encode(&self) -> Vec<u8> {
         let (tag, payload): (u8, Vec<u8>) = match self {
-            Frame::Attach { replay, from } => {
-                let mut p = vec![*replay as u8];
-                p.extend_from_slice(&from.to_be_bytes());
-                (T_ATTACH, p)
-            }
+            Frame::Attach { replay } => (T_ATTACH, vec![*replay as u8]),
             Frame::Input(b) => (T_INPUT, b.clone()),
             Frame::Resize { cols, rows } => {
                 let mut p = cols.to_be_bytes().to_vec();
@@ -135,19 +121,13 @@ impl Frame {
         let bad = |what: &str| io::Error::new(io::ErrorKind::InvalidData, format!("bad {what} frame"));
         Ok(match tag {
             T_ATTACH => {
-                if p.len() != 9 {
-                    return Err(bad("attach"));
-                }
-                let replay = match p[0] {
-                    0 => Replay::None,
-                    1 => Replay::Bytes,
-                    2 => Replay::Screen,
+                let replay = match p.as_slice() {
+                    [0] => Replay::None,
+                    [1] => Replay::Bytes,
+                    [2] => Replay::Screen,
                     _ => return Err(bad("attach")),
                 };
-                Frame::Attach {
-                    replay,
-                    from: u64::from_be_bytes(p[1..9].try_into().unwrap()),
-                }
+                Frame::Attach { replay }
             }
             T_INPUT => Frame::Input(p),
             T_RESIZE => {
@@ -388,18 +368,9 @@ mod tests {
     #[tokio::test]
     async fn every_frame_roundtrips() {
         let frames = vec![
-            Frame::Attach {
-                replay: Replay::Bytes,
-                from: 0,
-            },
-            Frame::Attach {
-                replay: Replay::None,
-                from: 12_345_678_901,
-            },
-            Frame::Attach {
-                replay: Replay::Screen,
-                from: 7,
-            },
+            Frame::Attach { replay: Replay::Bytes },
+            Frame::Attach { replay: Replay::None },
+            Frame::Attach { replay: Replay::Screen },
             Frame::Input(b"hello\n".to_vec()),
             Frame::Resize { cols: 220, rows: 51 },
             Frame::Signal(15),
@@ -410,11 +381,8 @@ mod tests {
                 holder_pid: 41,
                 cols: 80,
                 rows: 24,
-                tty: true,
                 started_at: Timestamp::UNIX_EPOCH,
                 exit: None,
-                total: 99,
-                replay_from: 10,
             }),
             Frame::Output(vec![0, 1, 2, 255]),
             Frame::ReplayEnd,
@@ -439,8 +407,9 @@ mod tests {
     #[tokio::test]
     async fn an_attach_with_an_unknown_mode_or_a_short_payload_is_refused() {
         for bad in [
-            &[T_ATTACH, 0, 0, 0, 1, 1][..],
-            &[T_ATTACH, 0, 0, 0, 9, 3, 0, 0, 0, 0, 0, 0, 0, 0],
+            &[T_ATTACH, 0, 0, 0, 1, 3][..],
+            &[T_ATTACH, 0, 0, 0, 0],
+            &[T_ATTACH, 0, 0, 0, 9, 1, 0, 0, 0, 0, 0, 0, 0, 0],
         ] {
             let (mut a, mut b) = tokio::io::duplex(64);
             a.write_all(bad).await.unwrap();

@@ -7,6 +7,7 @@ use std::io;
 use std::path::Path;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Exit {
     /// Exit code; `128 + signal` when killed by a signal.
     pub code: i32,
@@ -74,5 +75,13 @@ mod tests {
                 .flatten()
                 .all(|e| !e.file_name().to_string_lossy().ends_with(".tmp"))
         );
+    }
+
+    #[test]
+    fn an_exit_file_with_a_field_it_does_not_know_does_not_read() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("x.exit");
+        std::fs::write(&p, r#"{"code":0,"at":"1970-01-01T00:00:00Z","extra":1}"#).unwrap();
+        assert!(read_exit_file(&p).is_err());
     }
 }

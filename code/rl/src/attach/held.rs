@@ -192,9 +192,6 @@ pub async fn drive(
 
 /// How long after the replay a session joined young is nudged, if it is.
 fn nudge_in(hello: &Hello) -> Option<tokio::time::Instant> {
-    if !hello.tty {
-        return None;
-    }
     let age = jiff::Timestamp::now().duration_since(hello.started_at);
     let left = Duration::try_from(jiff::SignedDuration::try_from(YOUNG).ok()? - age).ok()?;
     (!left.is_zero()).then(|| tokio::time::Instant::now() + left)
@@ -257,10 +254,9 @@ pub enum Opened {
 /// Connects to the holder, whether its session is running or has ended and
 /// lingers; the exit file speaks only where the socket is gone.
 ///
-/// `attach_screen` draws the screen afresh from the holder's emulator; for a
-/// session without one it replays bytes from the start instead.
+/// `attach_screen` draws the screen afresh from the holder's emulator.
 pub async fn open(dir: &Path, meta: &Meta) -> Result<Opened> {
-    match Session::attach_screen(&meta.socket, 0).await {
+    match Session::attach_screen(&meta.socket).await {
         Ok((hello, session)) => Ok(Opened::Holder(Box::new(hello), session)),
         Err(e) => match from_exit_file(dir, &meta.name) {
             Some((ended, words)) => Ok(Opened::Over(ended, words)),

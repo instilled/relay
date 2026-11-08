@@ -58,11 +58,14 @@ use std::path::PathBuf;
 /// listing of its sessions.
 pub const READERS: [&str; 2] = [crate::claude_native::READER, crate::codex_native::READER];
 
-/// How one of an agent's own sessions stands, in the words `Told::Stands`
-/// says: it waits for a prompt, works, or waits on you.
-pub const IDLE: &str = "idle";
-pub const BUSY: &str = "busy";
-pub const WAITING: &str = "waiting";
+/// How one of an agent's own sessions stands, as `Told::Stands` says: it
+/// waits for a prompt, works, or waits on you.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Status {
+    Idle,
+    Busy,
+    Waiting,
+}
 
 /// Where a session's attach id goes in a profile's `attach`.
 pub const ID: &str = "{id}";
@@ -263,10 +266,10 @@ impl State {
 /// What an event says about one of an agent's own sessions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Told<'a> {
-    /// It stands so now: a `status` word (`IDLE`, `BUSY`, `WAITING`),
+    /// It stands so now: a `Status`,
     /// and what it waits on, if anything.
     Stands {
-        status: &'static str,
+        status: Status,
         waiting_for: Option<&'a str>,
     },
     /// It is over.
@@ -569,10 +572,10 @@ impl UserHooks {
             waiting_for: None,
         };
         match s.state {
-            State::Started | State::Idle => stands(IDLE),
-            State::Working | State::CarriesOn => stands(BUSY),
+            State::Started | State::Idle => stands(Status::Idle),
+            State::Working | State::CarriesOn => stands(Status::Busy),
             State::Needs => Told::Stands {
-                status: WAITING,
+                status: Status::Waiting,
                 waiting_for: s.waiting_for.as_deref(),
             },
             State::Ended => Told::Ended,
@@ -667,19 +670,19 @@ mod tests {
         let (codex, gemini) = (hooks("codex"), hooks("gemini"));
         assert_eq!(
             codex.told("PermissionRequest", Some("Bash")),
-            stands("waiting", Some("permission prompt"))
+            stands(Status::Waiting, Some("permission prompt"))
         );
         assert_eq!(
             gemini.told("Notification", Some("ToolPermission")),
-            stands("waiting", Some("permission prompt"))
+            stands(Status::Waiting, Some("permission prompt"))
         );
         assert_eq!(gemini.told("Notification", Some("Other")), Told::Nothing);
         assert_eq!(gemini.told("Notification", None), Told::Nothing);
-        assert_eq!(codex.told("UserPromptSubmit", None), stands("busy", None));
-        assert_eq!(gemini.told("BeforeAgent", None), stands("busy", None));
-        assert_eq!(codex.told("Stop", None), stands("idle", None));
-        assert_eq!(gemini.told("AfterAgent", None), stands("idle", None));
-        assert_eq!(gemini.told("SessionStart", Some("startup")), stands("idle", None));
+        assert_eq!(codex.told("UserPromptSubmit", None), stands(Status::Busy, None));
+        assert_eq!(gemini.told("BeforeAgent", None), stands(Status::Busy, None));
+        assert_eq!(codex.told("Stop", None), stands(Status::Idle, None));
+        assert_eq!(gemini.told("AfterAgent", None), stands(Status::Idle, None));
+        assert_eq!(gemini.told("SessionStart", Some("startup")), stands(Status::Idle, None));
         assert_eq!(codex.told("SessionEnd", None), Told::Ended);
         assert_eq!(
             codex.told("BeforeAgent", None),
@@ -707,17 +710,20 @@ mod tests {
     fn claudes_events_say_how_its_session_stands() {
         let stands = |status, waiting_for| Told::Stands { status, waiting_for };
         let claude = hooks("claude");
-        assert_eq!(claude.told("SessionStart", Some("startup")), stands("idle", None));
-        assert_eq!(claude.told("UserPromptSubmit", None), stands("busy", None));
+        assert_eq!(claude.told("SessionStart", Some("startup")), stands(Status::Idle, None));
+        assert_eq!(claude.told("UserPromptSubmit", None), stands(Status::Busy, None));
         assert_eq!(
             claude.told("Notification", Some("permission_prompt")),
-            stands("waiting", Some("permission prompt"))
+            stands(Status::Waiting, Some("permission prompt"))
         );
-        assert_eq!(claude.told("Notification", Some("idle_prompt")), stands("idle", None));
+        assert_eq!(
+            claude.told("Notification", Some("idle_prompt")),
+            stands(Status::Idle, None)
+        );
         assert_eq!(claude.told("Notification", Some("auth_success")), Told::Nothing);
-        assert_eq!(claude.told("PostToolUse", None), stands("busy", None));
+        assert_eq!(claude.told("PostToolUse", None), stands(Status::Busy, None));
         assert!(claude.carries_on("PostToolUse"));
-        assert_eq!(claude.told("Stop", None), stands("idle", None));
+        assert_eq!(claude.told("Stop", None), stands(Status::Idle, None));
         assert_eq!(claude.told("SessionEnd", Some("exit")), Told::Ended);
         assert_eq!(claude.told("Interrupt", None), Told::Nothing, "codex's word");
         assert_eq!(
@@ -738,7 +744,7 @@ mod tests {
             assert_eq!(
                 h.told(ran, None),
                 Told::Stands {
-                    status: BUSY,
+                    status: Status::Busy,
                     waiting_for: None
                 }
             );
@@ -749,7 +755,7 @@ mod tests {
         assert_eq!(
             codex.told("Interrupt", None),
             Told::Stands {
-                status: IDLE,
+                status: Status::Idle,
                 waiting_for: None
             }
         );

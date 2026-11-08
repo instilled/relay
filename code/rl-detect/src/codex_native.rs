@@ -26,6 +26,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
+use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -75,8 +76,8 @@ impl Adapter for Codex {
         &self.harness
     }
 
-    fn list(&self) -> Result<Vec<NativeRow>> {
-        let threads = ask(&self.argv(&self.list), LIST_WAIT)?;
+    fn list_within(&self, wait: Duration) -> Result<Vec<NativeRow>> {
+        let threads = ask(&self.argv(&self.list), wait.min(LIST_WAIT))?;
         Ok(rows(threads)
             .into_iter()
             .map(|mut r| {
@@ -215,7 +216,8 @@ pub fn row(t: Thread) -> NativeRow {
 /// run for Relay's own ask.
 pub fn ask(argv: &[String], wait: Duration) -> Result<Vec<Thread>> {
     let (bin, args) = argv.split_first().ok_or_else(|| anyhow!("nothing to run"))?;
-    let mut child = Command::new(bin)
+    let mut child = Command::new(bin);
+    child
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -223,16 +225,18 @@ pub fn ask(argv: &[String], wait: Duration) -> Result<Vec<Thread>> {
         .env_remove("RELAY_SESSION")
         .env_remove("RELAY_SESSION_AGENT")
         .env(crate::user_hooks::ASKING, crate::user_hooks::asking_since())
-        .spawn()
-        .context("running `codex app-server`")?;
+        // A group of its own, so what it starts goes with it at the wait.
+        .process_group(0);
+    let mut child = child.spawn().context("running `codex app-server`")?;
     let (stdin, stdout) = (child.stdin.take(), child.stdout.take());
     let mut stderr = child.stderr.take();
-    let err = std::thread::spawn(move || {
+    let (err_tx, err_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
         let mut s = String::new();
         if let Some(e) = stderr.as_mut() {
             let _ = e.read_to_string(&mut s);
         }
-        s
+        let _ = err_tx.send(s);
     });
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
@@ -244,9 +248,10 @@ pub fn ask(argv: &[String], wait: Duration) -> Result<Vec<Thread>> {
     });
     let said = rx.recv_timeout(wait);
     // Done or not, the proxy goes: its input closes, and it is killed.
-    let _ = child.kill();
-    let _ = child.wait();
-    let err = err.join().unwrap_or_default();
+    crate::adapter::kill_group(&mut child);
+    // Its stderr has ended with it, or something it left holds the pipe: no
+    // reason to wait long.
+    let err = err_rx.recv_timeout(Duration::from_millis(200)).unwrap_or_default();
     match said {
         Ok(Ok(threads)) => Ok(threads),
         Ok(Err(_)) if err.contains(NO_DAEMON) => Ok(Vec::new()),
@@ -730,6 +735,23 @@ mod tests {
         let e = ask(&[bin.to_string_lossy().into_owned()], Duration::from_millis(300)).unwrap_err();
         assert!(e.to_string().contains("did not answer"), "{e}");
         assert!(at.elapsed() < Duration::from_secs(10), "given up at the wait");
+    }
+
+    #[test]
+    fn a_hung_proxy_goes_with_what_it_started() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pid = tmp.path().join("pid");
+        let bin = script(tmp.path(), &format!("sleep 20 &\necho $! > '{}'\nwait", pid.display()));
+        let at = std::time::Instant::now();
+        let e = ask(&[bin.to_string_lossy().into_owned()], Duration::from_millis(500)).unwrap_err();
+        assert!(e.to_string().contains("did not answer"), "{e}");
+        assert!(at.elapsed() < Duration::from_secs(3), "{:?}", at.elapsed());
+        let pid: i32 = std::fs::read_to_string(&pid).unwrap().trim().parse().unwrap();
+        let gone = (0..50).any(|_| {
+            std::thread::sleep(Duration::from_millis(20));
+            nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None).is_err()
+        });
+        assert!(gone, "its whole group is killed");
     }
 
     /// Against the real daemon: `cargo test -p rl-detect -- --ignored`.

@@ -73,7 +73,11 @@ pub trait Adapter: Send + Sync {
     /// The profile it is the adapter of: `claude`.
     fn harness(&self) -> &str;
     /// Its background sessions, as it lists them.
-    fn list(&self) -> Result<Vec<NativeRow>>;
+    fn list(&self) -> Result<Vec<NativeRow>> {
+        self.list_within(LIST_WAIT)
+    }
+    /// The same, for no longer than `wait`.
+    fn list_within(&self, wait: Duration) -> Result<Vec<NativeRow>>;
     /// What attaches this terminal to the session `id`.
     fn attach_argv(&self, id: &str) -> Vec<String>;
     /// What starts a session in its background, named and prompted if
@@ -116,8 +120,11 @@ pub fn start(
     let ids = a.started_ids(&printed);
     let deadline = Instant::now() + listed;
     loop {
+        // The whole loop, its listings too, is bounded by `listed`.
+        let left = deadline.saturating_duration_since(Instant::now());
         if !ids.is_empty()
-            && let Ok(rows) = a.list()
+            && !left.is_zero()
+            && let Ok(rows) = a.list_within(left.min(LIST_WAIT))
             && let Some(id) = ids
                 .iter()
                 .find(|id| !before.contains(*id) && rows.iter().any(|r| r.id == **id && same_dir(&r.cwd, cwd)))
@@ -157,6 +164,14 @@ pub fn adapters(registry: &Registry, find: impl Fn(&[String]) -> Option<PathBuf>
             Some((adapter, found.is_some()))
         })
         .collect()
+}
+
+/// Kills `child` and everything it started (it leads a group of its own,
+/// `process_group(0)`), and reaps it.
+pub(crate) fn kill_group(child: &mut std::process::Child) {
+    let _ = killpg(Pid::from_raw(child.id() as i32), Signal::SIGKILL);
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 /// Runs `argv` in `cwd` (this process's, without one), its input closed,
@@ -227,9 +242,7 @@ pub fn run(argv: &[String], cwd: Option<&Path>, asking: bool, wait: Duration) ->
                 continue;
             }
             if now >= deadline {
-                let _ = killpg(Pid::from_raw(child.id() as i32), Signal::SIGKILL);
-                let _ = child.kill();
-                let _ = child.wait();
+                kill_group(&mut child);
                 bail!("`{what}` did not answer in {}s", wait.as_secs());
             }
         } else if now >= until {
@@ -317,7 +330,7 @@ mod tests {
         fn harness(&self) -> &str {
             "fake"
         }
-        fn list(&self) -> Result<Vec<NativeRow>> {
+        fn list_within(&self, _: Duration) -> Result<Vec<NativeRow>> {
             let mut said = self.0.lock().unwrap();
             let next = if said.len() > 1 {
                 said.remove(0)
@@ -403,6 +416,48 @@ mod tests {
         // No id in what it printed at all: said at once.
         let e = start(&a, &echo("no such session"), here, &before, LISTED_WAIT).unwrap_err();
         assert_eq!(e.to_string(), "no such session");
+    }
+
+    #[test]
+    fn a_start_waits_no_longer_than_its_deadline_for_a_slow_listing() {
+        struct Slow;
+        impl Adapter for Slow {
+            fn harness(&self) -> &str {
+                "fake"
+            }
+            fn list_within(&self, wait: Duration) -> Result<Vec<NativeRow>> {
+                // Takes whatever it is given, as a hung harness would.
+                std::thread::sleep(wait);
+                Err(anyhow!("no answer"))
+            }
+            fn attach_argv(&self, _: &str) -> Vec<String> {
+                Vec::new()
+            }
+            fn start_argv(&self, _: Option<&str>, _: Option<&str>) -> Option<Vec<String>> {
+                None
+            }
+            fn carry_on_argv(&self, _: &str) -> Option<Vec<String>> {
+                None
+            }
+            fn stop_argv(&self, _: &str) -> Option<Vec<String>> {
+                None
+            }
+            fn started_ids(&self, _: &str) -> Vec<String> {
+                vec!["abcd1234".into()]
+            }
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let at = Instant::now();
+        let e = start(
+            &Slow,
+            &["echo".into(), "abcd1234".into()],
+            tmp.path(),
+            &HashSet::new(),
+            Duration::from_millis(400),
+        )
+        .unwrap_err();
+        assert_eq!(e.to_string(), "abcd1234");
+        assert!(at.elapsed() < Duration::from_secs(2), "{:?}", at.elapsed());
     }
 
     #[test]

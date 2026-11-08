@@ -18,6 +18,7 @@ use jiff::Timestamp;
 use rl_core::state::RunState;
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 /// The reader a profile's `sessions.list` names for this listing.
 pub const READER: &str = "claude-agents";
@@ -89,8 +90,8 @@ impl Adapter for Claude {
         &self.harness
     }
 
-    fn list(&self) -> Result<Vec<NativeRow>> {
-        let text = adapter::run(&self.argv(&self.list), None, true, adapter::LIST_WAIT)?;
+    fn list_within(&self, wait: Duration) -> Result<Vec<NativeRow>> {
+        let text = adapter::run(&self.argv(&self.list), None, true, wait)?;
         let jobs = self.jobs_dir();
         Ok(rows(&text, jobs.as_deref())?
             .into_iter()

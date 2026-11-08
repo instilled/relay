@@ -127,7 +127,6 @@ async fn wait_gone(path: &Path, pid: u32) {
 async fn pty_lifecycle() {
     let h = start(60);
     let (hello, mut s) = attach(&h, true).await;
-    assert!(hello.tty);
     assert_eq!(hello.id, "test0001");
     assert_ne!(hello.pid, hello.holder_pid);
     assert!(alive(hello.pid) && alive(hello.holder_pid));
@@ -150,22 +149,6 @@ async fn pty_lifecycle() {
 
     s.close().await.unwrap();
     wait_gone(&h.socket, hello.holder_pid).await;
-}
-
-#[tokio::test]
-async fn nobody_for_a_while_lets_the_run_go() {
-    // A throwaway home left on disk: the socket is there, but nobody will
-    // ever come back for the run.
-    let h = start_with(60, &["--reap-after", "1"]);
-    let (hello, mut s) = attach(&h, true).await;
-    read_until(&mut s, "fake-cli ready").await;
-    // Attached: it stays.
-    tokio::time::sleep(Duration::from_millis(1500)).await;
-    assert!(alive(hello.holder_pid) && alive(hello.pid), "someone is here");
-    drop(s);
-    // Alone: the child is hung up and the holder goes.
-    wait_gone(&h.socket, hello.holder_pid).await;
-    assert!(!alive(hello.pid), "the child went with it");
 }
 
 /// Reads whole frames until `needle` has arrived, and says how many it took.
@@ -281,10 +264,9 @@ async fn read_foreground(s: &mut Session) -> bool {
 /// fake CLI rests owning its own terminal, so the first thing a client learns
 /// after the replay is `Foreground(true)`.
 #[tokio::test]
-async fn a_tty_attach_learns_the_foreground_state() {
+async fn an_attach_learns_the_foreground_state() {
     let h = start(60);
     let (hello, mut s) = attach(&h, true).await;
-    assert!(hello.tty);
     assert!(read_foreground(&mut s).await, "a resting shell owns its own terminal");
     s.input("exit\n").await.unwrap();
     assert_eq!(read_exit(&mut s).await.code, 0);
@@ -346,38 +328,6 @@ async fn leaves_when_its_socket_is_removed() {
 }
 
 #[tokio::test]
-async fn replay_from_an_offset() {
-    let h = start(60);
-    let (hello, mut s) = attach(&h, true).await;
-    // The child may have printed its banner before we attached; from 0 we
-    // get all of it either way.
-    assert_eq!(hello.replay_from, 0);
-    read_until(&mut s, "fake-cli ready").await;
-    s.input("hi\n").await.unwrap();
-    read_until(&mut s, "echo: hi").await;
-    drop(s);
-
-    // Everything after the banner (the pty ends its line with `\r\n`), and
-    // nothing of it.
-    let banner = "fake-cli ready\r\n".len() as u64;
-    let (hello2, mut s) = Session::attach_from(&h.socket, Some(banner)).await.unwrap();
-    assert_eq!(hello2.replay_from, banner);
-    assert!(hello2.total > banner);
-    let replayed = read_until(&mut s, "echo: hi").await;
-    assert!(!replayed.contains("ready"), "{replayed:?}");
-
-    // Past the end: nothing to replay, and the offset says so.
-    let (hello3, mut w) = Session::attach_from(&h.socket, Some(u64::MAX)).await.unwrap();
-    assert_eq!(hello3.replay_from, hello3.total);
-    s.input("exit\n").await.unwrap();
-    assert_eq!(read_exit(&mut s).await.code, 0);
-    let last = read_exit(&mut w).await;
-    assert_eq!(last.code, 0);
-    s.close().await.unwrap();
-    wait_gone(&h.socket, hello.holder_pid).await;
-}
-
-#[tokio::test]
 async fn refuses_to_start_a_missing_command() {
     let tmp = tempfile::tempdir().unwrap();
     let out = Command::new(env!("CARGO_BIN_EXE_rl-session"))
@@ -403,8 +353,7 @@ async fn a_screen_attach_draws_the_screen_once() {
         .await
         .unwrap();
     read_until(&mut s, "drawn").await;
-    let (hello, mut v) = Session::attach_screen(&h.socket, 0).await.unwrap();
-    assert_eq!(hello.replay_from, hello.total);
+    let (_, mut v) = Session::attach_screen(&h.socket).await.unwrap();
     let mut drawn = Vec::new();
     loop {
         match v.recv().await.unwrap() {

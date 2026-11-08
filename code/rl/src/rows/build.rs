@@ -22,7 +22,7 @@ pub fn subject<'a>(
     let mut kind = vec![match r.kind {
         RunKind::Agent => "agent",
         RunKind::Shell => "shell",
-        RunKind::Command | RunKind::Plugin => "command",
+        RunKind::Command => "command",
     }];
     if r.kind == RunKind::Agent {
         kind.push(&r.harness);

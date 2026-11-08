@@ -35,7 +35,7 @@ use crate::store::state::{self, HookState, Said};
 use jiff::Timestamp;
 use rl_core::Home;
 use rl_detect::Registry;
-use rl_detect::sessions::{Told, UserHooks};
+use rl_detect::sessions::{Status, Told, UserHooks};
 use rl_detect::user_hooks;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -69,38 +69,21 @@ pub struct Words {
     pub user: bool,
 }
 
-/// What `rl hook` was called with, from its words: `<agent> <Event>`, or
-/// `<Event>` alone as written before the agent was named, which is
-/// Claude's; and `--user`, wherever it stands. `--dialect <agent>` (or
-/// `=<agent>`), the older spelling, names the agent as well, wherever it
-/// stands; naming two that differ is not a shape this knows. None for any
-/// shape it does not know — any other word with a dash — and the hook then
+/// What `rl hook` was called with, from its words: exactly `<agent> <Event>`
+/// or `<agent> <Event> --user`. None for any other shape, and the hook then
 /// does nothing.
 pub fn words(words: &[String]) -> Option<Words> {
-    let mut dialect = None;
-    let mut user = false;
-    let mut rest = Vec::new();
-    let mut words = words.iter();
-    while let Some(w) = words.next() {
-        if w == "--dialect" {
-            dialect = Some(words.next()?.clone());
-        } else if let Some(d) = w.strip_prefix("--dialect=") {
-            dialect = Some(d.to_string());
-        } else if w == user_hooks::USER {
-            user = true;
-        } else if w.starts_with('-') || w.is_empty() {
-            return None;
-        } else {
-            rest.push(w.clone());
-        }
-    }
-    let (agent, event) = match (rest.as_slice(), dialect) {
-        ([event], dialect) => (dialect.unwrap_or_else(|| user_hooks::CLAUDE.into()), event.clone()),
-        ([agent, event], Some(d)) if d != *agent => return None,
-        ([agent, event], _) => (agent.clone(), event.clone()),
+    let (agent, event, user) = match words {
+        [agent, event] => (agent, event, false),
+        [agent, event, flag] if flag == user_hooks::USER => (agent, event, true),
         _ => return None,
     };
-    Some(Words { agent, event, user })
+    let word = |w: &String| !w.is_empty() && !w.starts_with('-');
+    (word(agent) && word(event)).then(|| Words {
+        agent: agent.clone(),
+        event: event.clone(),
+        user,
+    })
 }
 
 /// Where a word goes: the held session's folder, or `state/`.
@@ -276,9 +259,9 @@ fn hear(
         && changes
     {
         s.state = match status {
-            "busy" => Said::Busy,
-            "waiting" => Said::Waiting,
-            _ => Said::Idle,
+            Status::Busy => Said::Busy,
+            Status::Waiting => Said::Waiting,
+            Status::Idle => Said::Idle,
         };
         s.detail = (s.state == Said::Waiting)
             .then(|| waiting_for.map(str::to_string).or(word.detail))
@@ -566,27 +549,31 @@ mod tests {
     }
 
     #[test]
-    fn a_hook_names_its_agent_or_is_claudes() {
-        let said =
-            |args: &[&str]| words(&args.iter().map(|a| a.to_string()).collect::<Vec<_>>()).map(|w| (w.agent, w.event));
-        let pair = |a: &str, e: &str| Some((a.to_string(), e.to_string()));
-        assert_eq!(said(&["codex", "Stop"]), pair("codex", "Stop"));
-        assert_eq!(said(&["Stop"]), pair("claude", "Stop"));
-        // `--dialect`, wherever it stands, names the agent; two that differ
-        // are no shape.
-        assert_eq!(said(&["--dialect", "x", "Stop"]), pair("x", "Stop"));
-        assert_eq!(said(&["Stop", "--dialect=x"]), pair("x", "Stop"));
-        assert_eq!(said(&["codex", "Stop", "--dialect", "codex"]), pair("codex", "Stop"));
-        assert_eq!(said(&["codex", "Stop", "--dialect", "gemini"]), None);
+    fn a_hook_is_an_agent_an_event_and_perhaps_user() {
+        let said = |args: &[&str]| {
+            words(&args.iter().map(|a| a.to_string()).collect::<Vec<_>>()).map(|w| (w.agent, w.event, w.user))
+        };
+        let t = |a: &str, e: &str, u: bool| Some((a.to_string(), e.to_string(), u));
+        assert_eq!(said(&["codex", "Stop"]), t("codex", "Stop", false));
+        assert_eq!(said(&["claude", "Stop", "--user"]), t("claude", "Stop", true));
+        assert_eq!(
+            said(&["codex", "Stop", "--user"]),
+            t("codex", "Stop", true),
+            "taken, and harmless"
+        );
         for bad in [
             &[][..],
+            &["Stop"],
             &["a", "b", "c"],
             &["--help"],
             &["-x", "Stop"],
-            &["Stop", "--dialect"],
-            &[""],
+            &["--dialect", "x", "Stop"],
+            &["Stop", "--dialect=x"],
+            &["codex", "Stop", "--dialect", "codex"],
+            &["--user", "Stop"],
+            &["claude", "--user"],
             &["claude", "Stop", "--users"],
-            &["--user"],
+            &[""],
         ] {
             assert_eq!(said(bad), None, "{bad:?}");
         }
@@ -598,8 +585,6 @@ mod tests {
         let w = said(&["claude", "Stop", "--user"]).unwrap();
         assert_eq!((w.agent.as_str(), w.event.as_str(), w.user), ("claude", "Stop", true));
         assert!(!said(&["claude", "Stop"]).unwrap().user, "the session's own");
-        assert!(said(&["--user", "Stop"]).unwrap().user, "wherever it stands");
-        assert!(said(&["codex", "Stop", "--user"]).unwrap().user, "taken, and harmless");
     }
 
     #[test]

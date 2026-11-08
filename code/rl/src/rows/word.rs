@@ -100,7 +100,7 @@ pub fn icon(r: &Row) -> &'static str {
     match r.kind {
         RunKind::Agent => looks().get(&r.harness).and_then(|l| l.icon.as_deref()).unwrap_or(AGENT),
         RunKind::Shell => SHELL,
-        RunKind::Command | RunKind::Plugin => COMMAND,
+        RunKind::Command => COMMAND,
     }
 }
 

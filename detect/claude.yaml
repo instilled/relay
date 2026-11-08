@@ -9,6 +9,8 @@ color: "#d97757"    # #rrggbb; without one, the foreground
 hooks:
   dialect: claude
   args: ["--settings", "{hooks_file}"]
+# `{session}` is the conversation's own id (what hooks tell of); `{id}` below
+# is the id `claude agents` lists a background session by. They differ.
 resume: ["--resume", "{session}"]   # what carries a conversation on
 patterns:
   needs_input:

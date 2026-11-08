@@ -64,7 +64,7 @@ struct Run {
 /// Drives the loop with `typed` sent as stdin (each chunk a moment apart),
 /// holding stdin open after, as a terminal's would be.
 async fn run(meta: &Meta, typed: &[&[u8]], sizes: &[(u16, u16)], size: Option<(u16, u16)>) -> Run {
-    let (hello, session) = Session::attach_screen(&meta.socket, 0).await.unwrap();
+    let (hello, session) = Session::attach_screen(&meta.socket).await.unwrap();
     let (mut stdin_w, stdin_r): (DuplexStream, DuplexStream) = tokio::io::duplex(4096);
     let (sizes_tx, sizes_rx) = mpsc::channel(8);
     let typed: Vec<Vec<u8>> = typed.iter().map(|t| t.to_vec()).collect();
