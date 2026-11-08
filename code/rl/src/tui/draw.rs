@@ -665,12 +665,25 @@ impl App {
         // The harness at the end of the title's column, quiet: the state
         // column stays where a header's checkout starts.
         let harness = HARNESS_W.min(tw / 3);
+        // The colour it picked in its harness, on its name and its icon —
+        // not under the cursor, whose band wins.
+        let picked = r
+            .color
+            .as_deref()
+            .and_then(theme::picked)
+            .filter(|_| self.sel.as_deref() != Some(r.key.as_str()));
+        let mut icon = icon_span(rows::icon(r), Some(&r.harness), r.state.is_terminal());
+        let mut name = Style::default();
+        if let Some(c) = picked {
+            icon[1].style = icon[1].style.fg(c);
+            name = name.fg(c);
+        }
         list_line(
             w,
             tw,
-            icon_span(rows::icon(r), Some(&r.harness), r.state.is_terminal()),
+            icon,
             vec![
-                Span::raw(fit(&title, tw - harness)),
+                Span::styled(fit(&title, tw - harness), name),
                 Span::styled(format!(" {}", fit(&r.harness, harness - 1)), theme::dim()),
             ],
             vec![Span::styled(word, theme::state(r.state))],

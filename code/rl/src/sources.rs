@@ -118,6 +118,7 @@ impl Adapter for StandIn {
                 ended: None,
                 at: None,
                 pr: None,
+                color: None,
             })
             .collect())
     }
@@ -184,6 +185,8 @@ pub struct Row {
     /// come to need you since.
     pub state_at: Option<Timestamp>,
     pub pr: Option<Pr>,
+    /// The colour its harness draws it in, by name (`pink`); none for most.
+    pub color: Option<String>,
     pub attach: Attach,
     /// What stops it, where it is a harness's own session still going and
     /// its harness has a way to.
@@ -296,6 +299,7 @@ fn held_row(h: &Held) -> Row {
         },
         state_at: Some(at),
         pr: None,
+        color: None,
         attach: Attach::Held(m.name.clone()),
         stop: None,
         kind: m.kind,
@@ -353,6 +357,7 @@ fn hooked_row(h: &HookState, answered: &BTreeSet<String>) -> Row {
         ended: None,
         state_at: Some(h.at),
         pr: None,
+        color: None,
         attach: carry_on(h, answered),
         stop: None,
         kind: RunKind::Agent,
@@ -374,6 +379,7 @@ fn native_row(n: &NativeRow) -> Row {
         ended: n.ended,
         state_at: n.at,
         pr: n.pr.clone(),
+        color: n.color.clone(),
         attach: adapter(&n.harness).map_or(Attach::None, |a| Attach::Argv(a.attach_argv(&n.id))),
         stop: adapter(&n.harness)
             .filter(|_| !n.state.state.is_terminal())
@@ -453,6 +459,7 @@ mod tests {
                 number: 12,
                 href: "https://x/pull/12".into(),
             }),
+            color: None,
         }
     }
 

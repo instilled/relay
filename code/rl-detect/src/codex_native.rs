@@ -208,6 +208,7 @@ pub fn row(t: Thread) -> NativeRow {
         ended: None,
         at: second(t.updated_at).or(started),
         pr: None,
+        color: None,
     }
 }
 

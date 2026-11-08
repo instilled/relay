@@ -86,6 +86,7 @@ fn waiting(cwd: &Path) -> NativeRow {
         ended: None,
         at: Some(at),
         pr: None,
+        color: None,
     }
 }
 
@@ -863,4 +864,60 @@ async fn tab_completes_a_harness_word_and_a_path_and_the_ghost_shows_it() {
     assert!(line_row(&app).contains("look at src/"), "{}", line_row(&app));
     press(&mut app, KeyCode::Tab);
     assert_eq!(app.cmd.line.text(), "codex look at src/", "under the row's folder");
+}
+
+/// The cells of the row holding `text`, drawn at 100×30: where `text`
+/// starts, and the buffer.
+fn cells_of(app: &App, text: &str) -> (ratatui::buffer::Buffer, u16, u16) {
+    let mut t = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+    t.draw(|f| app.draw(f)).unwrap();
+    let buf = t.backend().buffer().clone();
+    for y in 0..30 {
+        let row: String = (0..100).map(|x| buf[(x, y)].symbol().to_string()).collect();
+        if let Some(at) = row.find(text) {
+            let x = row[..at].chars().count() as u16;
+            return (buf, x, y);
+        }
+    }
+    panic!("{text:?} is not on the screen");
+}
+
+#[tokio::test]
+async fn a_claude_session_keeps_its_colour_on_the_list_but_not_under_the_cursor() {
+    use ratatui::style::Color;
+    let f = fixture();
+    let mut app = list(&f).await;
+    let mut pink = waiting(&f.repo);
+    pink.color = Some("pink".into());
+    app.set_native(vec![pink]);
+    on(&mut app, HELD);
+    let (buf, x, y) = cells_of(&app, "fix the login");
+    assert_eq!(buf[(x, y)].fg, Color::Indexed(213), "the name, pink");
+    assert_eq!(buf[(1, y)].fg, Color::Indexed(213), "and its icon");
+    // Without one, the name is the foreground's, as ever.
+    app.set_native(vec![waiting(&f.repo)]);
+    on(&mut app, HELD);
+    let (buf, x, y) = cells_of(&app, "fix the login");
+    assert_eq!(buf[(x, y)].fg, Color::Reset);
+    app.set_native(vec![{
+        let mut p = waiting(&f.repo);
+        p.color = Some("pink".into());
+        p
+    }]);
+    on(&mut app, NATIVE);
+    let (buf, x, y) = cells_of(&app, "fix the login");
+    assert_eq!(
+        buf[(x, y)].fg,
+        crate::tui::theme::selected().fg.unwrap(),
+        "the cursor's band wins"
+    );
+    on(&mut app, HELD);
+    ctrl(&mut app, 'f');
+    typed(&mut app, "login");
+    press(&mut app, KeyCode::Enter);
+    let (buf, x, y) = cells_of(&app, "fix the login");
+    assert!(
+        buf[(x + 8, y)].modifier.contains(ratatui::style::Modifier::UNDERLINED),
+        "the search's mark still shows"
+    );
 }
