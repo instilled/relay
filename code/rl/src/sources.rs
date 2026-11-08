@@ -236,7 +236,7 @@ pub fn rows(held: &[Held], hooked: &[HookState], native: &[NativeRow], answered:
     for r in &mut rows {
         r.repo = repos
             .entry(r.cwd.clone())
-            .or_insert_with(|| crate::git::toplevel(&r.cwd))
+            .or_insert_with(|| crate::git::project(&r.cwd))
             .clone();
     }
     rows
@@ -637,6 +637,27 @@ mod tests {
         let r = rows(&[], &[in_repo, plain], &[]);
         assert_eq!(r[0].repo.as_deref(), Some(repo.as_path()));
         assert_eq!(r[1].repo, None);
+    }
+
+    #[test]
+    fn a_row_in_a_worktree_stands_under_its_main_checkout_unless_you_named_the_worktree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().canonicalize().unwrap().join("repo");
+        let entry = repo.join(".git/worktrees/foo");
+        std::fs::create_dir_all(&entry).unwrap();
+        std::fs::write(entry.join("commondir"), "../..\n").unwrap();
+        let wt = repo.join(".claude/worktrees/foo");
+        std::fs::create_dir_all(&wt).unwrap();
+        std::fs::write(wt.join(".git"), format!("gitdir: {}\n", entry.display())).unwrap();
+        let mut in_wt = hook("gemini", "g-1", Said::Busy, None);
+        in_wt.cwd = wt.clone();
+        let r = rows(&[], &[in_wt], &[]);
+        assert_eq!(r[0].repo.as_deref(), Some(repo.as_path()));
+        let none = std::collections::BTreeMap::new();
+        assert_eq!(crate::rows::project_of(&r[0], &crate::rows::Names::new(&none)), repo);
+        // A folder you named still wins.
+        let named = std::collections::BTreeMap::from([(format!("g:{}", wt.display()), "foo".to_string())]);
+        assert_eq!(crate::rows::project_of(&r[0], &crate::rows::Names::new(&named)), wt);
     }
 
     #[test]

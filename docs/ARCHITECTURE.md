@@ -86,7 +86,10 @@ Folders are 0700.
   per list.
 - **List.** Held sessions come from `sessions/`. Hooked-only ones come from `state/`. Claude's and
   Codex's own come from asking them (`sessions.list` in the profile), each with its own timeout;
-  one that fails is skipped. `rows/` merges them and groups them. State comes from, in order, the
+  one that fails is skipped. `rows/` merges them and groups them, each under its project: a
+  folder you named, else its git checkout (`git::project`, read from the files: a linked
+  worktree's `.git` file is followed through its `commondir` to the main checkout; a submodule's,
+  which has none, is a project of its own). State comes from, in order, the
   agent's hooks, the harness's own listing, then regexes over the screen.
 - **Attach.** A held session: `rl` connects to its socket, gets the screen, then live bytes.
   `ctrl-\` detaches. A native one: `rl` runs the profile's `attach` (`claude attach <id>`,

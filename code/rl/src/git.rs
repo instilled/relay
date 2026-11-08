@@ -43,6 +43,46 @@ fn toplevel_under(dir: &Path, home: Option<&Path>) -> Option<PathBuf> {
         .map(Path::to_path_buf)
 }
 
+/// The project a folder belongs to: its `toplevel`, except that a linked
+/// worktree belongs to its main checkout.
+pub fn project(dir: &Path) -> Option<PathBuf> {
+    let top = toplevel(dir)?;
+    Some(main_of(&top).unwrap_or(top))
+}
+
+/// The main checkout of the linked worktree at `top`: its `.git` file names
+/// its entry under the main `.git/worktrees/` (`gitdir:`, relative to the
+/// worktree), whose `commondir` names the common `.git` (relative to the
+/// entry); the project is that folder's parent. None for anything else — a
+/// `.git` folder, or a submodule's file, whose entry has no `commondir`.
+fn main_of(top: &Path) -> Option<PathBuf> {
+    let text = std::fs::read_to_string(top.join(".git")).ok()?;
+    let entry = clean(&top.join(text.trim().strip_prefix("gitdir:")?.trim()));
+    let common = std::fs::read_to_string(entry.join("commondir")).ok()?;
+    let common = clean(&entry.join(common.trim()));
+    if !common.is_dir() {
+        return None;
+    }
+    common.parent().map(Path::to_path_buf)
+}
+
+/// A path with its `.` and `..` worked out by name, links left as they are,
+/// so a project reads the way its folders were named.
+fn clean(p: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for c in p.components() {
+        match c {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 /// A folder's checkout as it stands, read from the files under `.git`.
 /// `None` outside a repo. The folder or any above it may hold the `.git`; a
 /// linked worktree's is a file naming its real one. Linked worktrees are
@@ -187,6 +227,48 @@ mod tests {
         assert_eq!(c.branch, None);
         assert_eq!(c.detached.as_deref().map(str::len), Some(7));
         assert_eq!(c.head(), c.detached.as_deref().unwrap());
+    }
+
+    #[test]
+    fn a_worktree_belongs_to_its_main_checkout_and_a_submodule_stands_alone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        // The main checkout, and a linked worktree inside it, as git lays
+        // them out: `.git/worktrees/foo/{gitdir,commondir}` and the
+        // worktree's `.git` file pointing there.
+        let main = root.join("relay");
+        let entry = main.join(".git/worktrees/foo");
+        std::fs::create_dir_all(&entry).unwrap();
+        let wt = main.join(".claude/worktrees/foo");
+        std::fs::create_dir_all(wt.join("src")).unwrap();
+        std::fs::write(wt.join(".git"), format!("gitdir: {}\n", entry.display())).unwrap();
+        std::fs::write(entry.join("gitdir"), format!("{}\n", wt.join(".git").display())).unwrap();
+        std::fs::write(entry.join("commondir"), "../..\n").unwrap();
+        assert_eq!(project(&wt.join("src")), Some(main.clone()));
+        assert_eq!(project(&wt), Some(main.clone()));
+        assert_eq!(project(&main), Some(main.clone()));
+        // A relative `gitdir:` is the worktree's own.
+        let wt2 = root.join("elsewhere/bar");
+        let entry2 = main.join(".git/worktrees/bar");
+        std::fs::create_dir_all(&entry2).unwrap();
+        std::fs::create_dir_all(&wt2).unwrap();
+        std::fs::write(wt2.join(".git"), "gitdir: ../../relay/.git/worktrees/bar\n").unwrap();
+        std::fs::write(entry2.join("commondir"), "../..\n").unwrap();
+        assert_eq!(project(&wt2), Some(main.clone()));
+        // A submodule's `.git` points into its parent's `.git/modules`, with
+        // no `commondir`: a project of its own.
+        let sub = main.join("vendor/lib");
+        let module = main.join(".git/modules/lib");
+        std::fs::create_dir_all(&module).unwrap();
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(sub.join(".git"), "gitdir: ../../.git/modules/lib\n").unwrap();
+        assert_eq!(project(&sub), Some(sub.clone()));
+        // A `.git` file that names nothing there is its own folder's.
+        let odd = root.join("odd");
+        std::fs::create_dir_all(&odd).unwrap();
+        std::fs::write(odd.join(".git"), "gitdir: /nowhere\n").unwrap();
+        assert_eq!(project(&odd), Some(odd.clone()));
+        assert_eq!(project(&root.join("none")), None);
     }
 
     #[test]
