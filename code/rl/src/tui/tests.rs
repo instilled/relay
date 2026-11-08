@@ -175,10 +175,10 @@ async fn a_row_says_its_harness_before_its_state_at_80_columns() {
 }
 
 #[tokio::test]
-async fn a_hides_the_agents_hints_on_the_header_and_is_kept() {
+async fn ctrl_a_hides_the_agents_hints_on_the_header_and_is_kept() {
     let f = fixture();
     let mut app = list(&f).await;
-    press(&mut app, KeyCode::Char('a'));
+    ctrl(&mut app, 'a');
     let s = shown(&app);
     assert!(!s.contains("fix the login"), "{s}");
     assert!(row_of(&s, "⎇ trunk").contains("! 1 needs you"), "{s}");
@@ -187,7 +187,7 @@ async fn a_hides_the_agents_hints_on_the_header_and_is_kept() {
     // A list opened again opens the same way.
     let again = list(&f).await;
     assert!(!shown(&again).contains("fix the login"));
-    press(&mut app, KeyCode::Char('a'));
+    ctrl(&mut app, 'a');
     assert!(shown(&app).contains("fix the login"));
     assert!(Config::load(&f.home).unwrap().list.show_agents);
 }
@@ -302,16 +302,21 @@ async fn ctrl_c_twice_quits_and_once_only_says_so() {
 }
 
 #[tokio::test]
-async fn ctrl_h_and_a_question_mark_show_the_shortcuts_and_esc_puts_them_away() {
+async fn ctrl_h_and_f1_show_the_shortcuts_esc_puts_them_away_and_a_question_mark_types() {
     let f = fixture();
     let mut app = list(&f).await;
-    assert!(shown(&app).contains("^h shortcuts"));
+    assert!(shown(&app).contains("^h/F1 shortcuts"));
     ctrl(&mut app, 'h');
     assert!(shown(&app).contains("by project/state"));
     press(&mut app, KeyCode::Esc);
     assert!(!shown(&app).contains("by project/state"));
-    press(&mut app, KeyCode::Char('?'));
+    press(&mut app, KeyCode::F(1));
     assert!(shown(&app).contains("by project/state"));
+    press(&mut app, KeyCode::F(1));
+    assert!(!shown(&app).contains("by project/state"));
+    press(&mut app, KeyCode::Char('?'));
+    assert_eq!(app.cmd.line.text(), "?", "a ? is typed");
+    assert!(!app.shortcuts);
 }
 
 #[tokio::test]
@@ -482,7 +487,7 @@ async fn ctrl_x_twice_hides_a_harnesss_own_session_and_again_brings_it_back() {
     assert_eq!(hidden[0].key, NATIVE);
     assert_eq!(app.sel.as_deref(), Some(HELD), "the cursor on the line before");
     // With hidden on it is there, and ^x twice brings it back.
-    press(&mut app, KeyCode::Char('h'));
+    ctrl(&mut app, 'o');
     on(&mut app, NATIVE);
     ctrl(&mut app, 'x');
     assert!(shown(&app).contains("press ^x again to bring back fix the login"));
@@ -718,7 +723,7 @@ async fn a_broken_config_json_is_never_written_over() {
     let f = fixture();
     let mut app = list(&f).await;
     std::fs::write(f.home.config_json(), "{ broken").unwrap();
-    press(&mut app, KeyCode::Char('a'));
+    ctrl(&mut app, 'a');
     assert_eq!(std::fs::read_to_string(f.home.config_json()).unwrap(), "{ broken");
     assert!(shown(&app).contains("not kept: config.json does not read"));
     assert!(!app.prefs().show_agents, "the change stands on this list");
@@ -752,17 +757,17 @@ async fn the_header_carries_the_filters_and_the_grouping_and_the_foot_does_not()
     let mut app = list(&f).await;
     let rows = screen(&app, 100, 30);
     let at = |rows: &[String], t: &str| rows.iter().position(|r| r.contains(t));
-    let head = at(&rows, "✦a").expect("the toggles are on screen");
+    let head = at(&rows, "✦^a").expect("the toggles are on screen");
     assert!(head < 6, "in the header, beside the mark: {}", rows.join("\n"));
-    assert!(rows[head].contains("❯s") && rows[head].contains("◌h") && rows[head].contains("by project ^s"));
+    assert!(rows[head].contains("❯^l") && rows[head].contains("◌^o") && rows[head].contains("by project ^s"));
     assert!(at(&rows, "relay").unwrap() < head && at(&rows, "1 needs you").unwrap() < head);
     for r in &rows[6..] {
         assert!(
-            !r.contains("✦a") && !r.contains("by project"),
+            !r.contains("✦^a") && !r.contains("by project"),
             "no toggles line at the foot: {r}"
         );
     }
-    // `a` dims the agents' mark, where it stands.
+    // `^a` dims the agents' mark, where it stands.
     let mark = |app: &App| {
         let mut t = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
         t.draw(|f| app.draw(f)).unwrap();
@@ -772,7 +777,7 @@ async fn the_header_carries_the_filters_and_the_grouping_and_the_foot_does_not()
         buf[(x, y)].clone()
     };
     assert!(!mark(&app).modifier.contains(Modifier::DIM), "on");
-    press(&mut app, KeyCode::Char('a'));
+    ctrl(&mut app, 'a');
     assert!(mark(&app).modifier.contains(Modifier::DIM), "off");
     // `^s`: by state, said in the header.
     ctrl(&mut app, 's');
@@ -784,9 +789,9 @@ async fn the_header_carries_the_filters_and_the_grouping_and_the_foot_does_not()
     );
     // On a short screen the header is one line, and keeps them.
     let rows = screen(&app, 80, 20);
-    assert!(rows[0].contains("✦a") && rows[0].contains("by state"), "{}", rows[0]);
+    assert!(rows[0].contains("✦^a") && rows[0].contains("by state"), "{}", rows[0]);
     let rows = screen(&app, 60, 20);
-    assert!(rows[0].contains("✦a") && rows[0].contains("by state"), "{}", rows[0]);
+    assert!(rows[0].contains("✦^a") && rows[0].contains("by state"), "{}", rows[0]);
 }
 
 #[tokio::test]
@@ -835,25 +840,41 @@ async fn typing_starts_the_line_in_the_rows_folder() {
 }
 
 #[tokio::test]
-async fn on_an_empty_line_a_s_and_h_still_flip_the_filters() {
+async fn the_filters_are_on_ctrl_keys_and_every_letter_types() {
     let f = fixture();
     let mut app = list(&f).await;
-    for (c, what) in [('a', "agents"), ('s', "shells"), ('h', "hidden")] {
-        press(&mut app, KeyCode::Char(c));
-        assert!(app.cmd.is_empty(), "{c} is not typed");
+    // Plain letters start the line, a, s and h too.
+    typed(&mut app, "ash");
+    assert_eq!(app.cmd.line.text(), "ash");
+    let p = Config::load(&f.home).unwrap().list;
+    assert!(p.show_agents && p.show_shells && !p.show_hidden, "nothing flipped");
+    // ^a ^l ^o flip them, with text on the line or none.
+    for (c, what) in [('a', "agents"), ('l', "shells"), ('o', "hidden")] {
+        ctrl(&mut app, c);
+        assert_eq!(app.cmd.line.text(), "ash", "{c} leaves the line be");
         let p = Config::load(&f.home).unwrap().list;
         let now = match c {
             'a' => !p.show_agents,
-            's' => !p.show_shells,
+            'l' => !p.show_shells,
             _ => p.show_hidden,
         };
         assert!(now, "{what} flipped");
     }
-    // Typed once the line has text.
+    press(&mut app, KeyCode::Esc);
+    ctrl(&mut app, 'a');
+    assert!(Config::load(&f.home).unwrap().list.show_agents, "on an empty line too");
+    // Home and end go to the line's ends; ^a is no longer one of them.
+    typed(&mut app, "make test");
+    press(&mut app, KeyCode::Home);
     typed(&mut app, "x");
-    press(&mut app, KeyCode::Char('a'));
-    assert_eq!(app.cmd.line.text(), "xa");
-    assert!(!Config::load(&f.home).unwrap().list.show_agents, "not flipped back");
+    assert_eq!(app.cmd.line.text(), "xmake test");
+    press(&mut app, KeyCode::End);
+    typed(&mut app, "!");
+    assert_eq!(app.cmd.line.text(), "xmake test!");
+    assert!(
+        !shown(&app).lines().any(|l| l.contains("✦a ")),
+        "the header names the ctrl keys"
+    );
 }
 
 #[tokio::test]
@@ -887,13 +908,12 @@ async fn the_line_says_what_it_would_start() {
         assert!(row.contains(label), "{text}: {row}");
         press(&mut app, KeyCode::Esc);
     }
-    // A harness that is not here is said, and the line kept. On an empty
-    // line `a` flips the agents, so a space comes first.
-    typed(&mut app, " agy hi");
+    // A harness that is not here is said, and the line kept.
+    typed(&mut app, "agy hi");
     assert!(line_row(&app).contains("agent · antigravity (agy not found)"));
     press(&mut app, KeyCode::Enter);
     assert!(app.work.is_empty(), "{:?} {:?}", app.flashing(), app.cmd.line.text());
-    assert_eq!(app.cmd.line.text(), " agy hi");
+    assert_eq!(app.cmd.line.text(), "agy hi");
     assert!(shown(&app).contains("agy is not on PATH"), "{}", shown(&app));
 }
 

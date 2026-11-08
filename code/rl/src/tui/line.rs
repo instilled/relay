@@ -1,6 +1,6 @@
 //! The search's line (`^f`): one line of text, edited where it stands. The
-//! usual editing keys work: `^a` `^e` to the ends, `^u` `^k` to cut to
-//! them, `^w` the word behind (to the last space, as a shell does), and by
+//! usual editing keys work: `^e` to the end (`^a` is the agents' filter;
+//! the command line takes `home` and `end`), `^u` `^k` to cut to them, `^w` the word behind (to the last space, as a shell does), and by
 //! word — alt or ctrl with `←`/`→`, `alt-b`/`alt-f`, `alt-backspace`,
 //! `alt-delete`/`alt-d` — where a word ends at anything that is not a letter
 //! or a digit, so a path stops at its slashes. `↑`/`↓` and `home`/`end` are
@@ -60,6 +60,16 @@ impl Line {
         self.cursor = at;
     }
 
+    /// The cursor to the start.
+    pub fn home(&mut self) {
+        self.cursor = 0;
+    }
+
+    /// The cursor to the end.
+    pub fn end(&mut self) {
+        self.cursor = self.text.len();
+    }
+
     /// Text put in at the cursor, which ends up after it.
     pub fn insert(&mut self, s: &str) {
         self.text.insert_str(self.cursor, s);
@@ -105,7 +115,6 @@ impl Line {
             KeyCode::Char('f') if alt => self.cursor = self.word_right(),
             KeyCode::Left => self.cursor = self.before().unwrap_or(0),
             KeyCode::Right => self.cursor = self.after().unwrap_or(self.text.len()),
-            KeyCode::Char('a') if ctrl => self.cursor = 0,
             KeyCode::Char('e') if ctrl => self.cursor = self.text.len(),
             KeyCode::Char('u') if ctrl => {
                 self.text.drain(..self.cursor);
@@ -230,10 +239,10 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_a_and_ctrl_e_go_to_the_ends() {
+    fn home_and_ctrl_e_go_to_the_ends() {
         let mut l = Line::default();
         press(&mut l, "make test");
-        assert_eq!(l.key(&ctrl('a')), Act::Typing);
+        l.home();
         assert_eq!(l.cursor(), 0);
         press(&mut l, "sudo ");
         assert_eq!(l.text(), "sudo make test");
@@ -245,7 +254,7 @@ mod tests {
     fn ctrl_u_and_ctrl_k_cut_to_the_ends() {
         let mut l = Line::default();
         press(&mut l, "make test");
-        l.key(&ctrl('a'));
+        l.home();
         for _ in 0..5 {
             l.key(&KeyEvent::from(KeyCode::Right));
         }
@@ -254,7 +263,7 @@ mod tests {
 
         let mut l = Line::default();
         press(&mut l, "make test");
-        l.key(&ctrl('a'));
+        l.home();
         for _ in 0..5 {
             l.key(&KeyEvent::from(KeyCode::Right));
         }
@@ -325,7 +334,7 @@ mod tests {
         // Walking right across the emoji lands on boundaries only.
         let mut l = Line::default();
         press(&mut l, "é🌍é");
-        l.key(&ctrl('a'));
+        l.home();
         for _ in 0..4 {
             l.key(&KeyEvent::from(KeyCode::Right));
             assert!(l.text().is_char_boundary(l.cursor()));

@@ -411,8 +411,8 @@ impl App {
         );
     }
 
-    /// The toggles, for the header: a glyph and its key for each kind, `✦a`
-    /// agents, `❯s` shells, then `◌h` hidden and the grouping, each set
+    /// The toggles, for the header: a glyph and its key for each kind, `✦^a`
+    /// agents, `❯^l` shells, then `◌^o` hidden and the grouping, each set
     /// apart. On is accented and bold, off is quiet.
     fn toggle_spans(&self) -> Vec<Span<'static>> {
         let on = theme::accent().add_modifier(Modifier::BOLD);
@@ -424,13 +424,13 @@ impl App {
             Grouping::State => "by state",
         };
         vec![
-            Span::styled("✦a", lit(p.show_agents)),
+            Span::styled("✦^a", lit(p.show_agents)),
             Span::styled("  ", off),
-            Span::styled("❯s", lit(p.show_shells)),
+            Span::styled("❯^l", lit(p.show_shells)),
             // Hidden is a different axis — what you hid, not a kind — and the
             // grouping another again, so a divider sets each apart.
             Span::styled("  │  ", off),
-            Span::styled("◌h", lit(p.show_hidden)),
+            Span::styled("◌^o", lit(p.show_hidden)),
             Span::styled("  │  ", off),
             Span::styled(grouping, theme::accent()),
             Span::styled(" ^s", off),
@@ -585,7 +585,7 @@ impl App {
             let msg: String = if !self.filter.is_empty() {
                 " nothing matches".into()
             } else if !p.show_agents || !p.show_shells {
-                " nothing here · a agents · s shells · h hidden".into()
+                " nothing here · ^a agents · ^l shells · ^o hidden".into()
             } else if p.show_hidden {
                 " nothing hidden".into()
             } else {

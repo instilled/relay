@@ -397,7 +397,7 @@ impl App {
                     p.hidden.retain(|h| h.key != key);
                     p.hidden.push(Hidden { key: key.clone(), at });
                 });
-                self.say(format!("hid {title} · h shows the hidden"));
+                self.say(format!("hid {title} · ^o shows the hidden"));
                 if !self.keys().contains(&key) {
                     self.select(next);
                     self.settle();
@@ -522,7 +522,7 @@ impl App {
     /// project among the projects. The cursor stays on it.
     pub(super) fn reorder(&mut self, up: bool) {
         if self.config.list.show_hidden {
-            return self.say("with hidden on the list keeps its order · h, then move it");
+            return self.say("with hidden on the list keeps its order · ^o, then move it");
         }
         let Some(key) = self.sel.clone() else {
             return self.say("nothing here to move");

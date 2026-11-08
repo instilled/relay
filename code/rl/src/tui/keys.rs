@@ -39,6 +39,16 @@ impl App {
             Mode::Rename(_) => return self.key_rename(k),
             Mode::List => {}
         }
+        // The filters are on ctrl keys, so every letter types: `^a` agents,
+        // `^l` shells, `^o` hidden, whatever is being typed.
+        if k.modifiers == KeyModifiers::CONTROL {
+            match k.code {
+                KeyCode::Char('a') => return self.toggle_agents(),
+                KeyCode::Char('l') => return self.toggle_shells(),
+                KeyCode::Char('o') => return self.toggle_hidden(),
+                _ => {}
+            }
+        }
         if (k.code, k.modifiers) == (KeyCode::Char('f'), KeyModifiers::CONTROL) {
             match self.search.take() {
                 Some(_) => {}
@@ -53,6 +63,18 @@ impl App {
         // The command line, once it has text, has the keys it edits with;
         // the rest are the list's as ever.
         if !self.cmd.is_empty() {
+            // `home` and `end` go to the line's ends while it has text.
+            match k.code {
+                KeyCode::Home | KeyCode::End => {
+                    if k.code == KeyCode::Home {
+                        self.cmd.line.home();
+                    } else {
+                        self.cmd.line.end();
+                    }
+                    return self.retyped();
+                }
+                _ => {}
+            }
             match self.cmd.line.key(&k) {
                 line::Act::Typing => return self.retyped(),
                 line::Act::Submit => return self.run_line(),
@@ -72,20 +94,14 @@ impl App {
             }
             shortcuts::Take::Pass => {}
         }
-        // On an empty line the list's letters are its own; any other key
-        // that types starts the line — a space too, which is how a line
-        // that begins with `a`, `s` or `h` is typed (` ssh host`).
-        if self.cmd.is_empty() && k.modifiers.is_empty() {
-            match k.code {
-                KeyCode::Char('a') => return self.toggle_agents(),
-                KeyCode::Char('s') => return self.toggle_shells(),
-                KeyCode::Char('h') => return self.toggle_hidden(),
-                KeyCode::Char('/') => return self.open_search(),
-                _ => {}
-            }
+        // On an empty line `/` searches; any other key that types starts
+        // the line.
+        if self.cmd.is_empty() && k.modifiers.is_empty() && k.code == KeyCode::Char('/') {
+            return self.open_search();
         }
         if self.cmd.is_empty()
             && let KeyCode::Char(c) = k.code
+            && !c.is_whitespace()
             && !k.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
         {
             self.shortcuts = false;

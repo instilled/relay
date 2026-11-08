@@ -39,7 +39,8 @@ Codex asks you to trust the hook once (`/hooks` in codex); Claude may ask you to
 ## The list
 
 Rows are agents and shells, under their project folder or under Needs input, Working and Done.
-Claude's and Codex's own background sessions are on it too. `^h` or `?` shows the keys.
+Claude's and Codex's own background sessions are on it too. `^h` or `F1` shows the keys (`F1` for
+terminals that send `^h` as backspace).
 
 At the foot of the list is a command line. Type to start a session, in the folder of the row under
 the cursor (else where `rl` was started; the line says which, `relay ❯`):
@@ -51,22 +52,21 @@ the cursor (else where `rl` was started; the line says which, `relay ❯`):
 
 The right end of the line says which it is (`agent · claude`, `shell`, or `agent · antigravity (agy
 not found)`, which will not start). `tab` completes a harness, a program on `PATH`, or a path; the
-best completion stands dim after the cursor, and `tab` again cycles. On an empty line the list's
-own keys work as before; `a`, `s` and `h` flip the filters, so start a line that begins with one of
-them with a space.
+best completion stands dim after the cursor, and `tab` again cycles. Every letter types; the list's
+own keys are ctrl keys, the arrows and `enter`, and `/` on an empty line searches.
 
 | key | does |
 | --- | --- |
 | `enter` | attach (on a line with text: start it) |
-| typing | the command line; `esc` clears it |
+| typing | the command line; `esc` clears it, `home` `end` go to its ends |
 | `↑↓` `^j` `^k` | move |
-| `pgup` `pgdn` `home` `end` | page |
+| `pgup` `pgdn` `home` `end` | page (`home` `end` with nothing typed) |
 | `/` `^f` | search |
 | `^x ^x` | stop, then remove or hide |
 | `^r` | rename |
 | `^t` | pin |
 | `⇧↑↓` | reorder |
-| `a` `s` `h` | show agents, shells, hidden (the header shows which: `✦a ❯s │ ◌h`) |
+| `^a` `^l` `^o` | show agents, shells, hidden (the header shows which: `✦^a ❯^l │ ◌^o`) |
 | `^s` | group by project or by state (the header says which) |
 | `^c ^c` | quit |
 
