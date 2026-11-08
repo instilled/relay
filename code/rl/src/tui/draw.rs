@@ -406,7 +406,14 @@ impl App {
             Grouping::Project => "by project",
             Grouping::State => "by state",
         };
-        let right = vec![
+        let mut right = Vec::new();
+        if self.search.is_none()
+            && let Some(d) = self.detected()
+        {
+            right.push(Span::styled(d.label(), theme::accent()));
+            right.push(Span::styled("  │  ", off));
+        }
+        right.extend([
             Span::styled("✦a", lit(p.show_agents)),
             Span::styled("  ", off),
             Span::styled("❯s", lit(p.show_shells)),
@@ -417,7 +424,7 @@ impl App {
             Span::styled("  │  ", off),
             Span::styled(grouping, theme::accent()),
             Span::styled(" ^s", off),
-        ];
+        ]);
         let mut left = match &self.search {
             Some(s) => {
                 let mut spans = vec![Span::raw(" "), Span::styled("⌕ ", theme::accent())];
@@ -427,12 +434,7 @@ impl App {
                 }
                 spans
             }
-            None if !self.filter.is_empty() => vec![
-                Span::raw(" "),
-                Span::styled("⌕ ", theme::accent()),
-                Span::raw(self.filter.clone()),
-            ],
-            None => vec![],
+            None => self.command_spans(),
         };
         let width = width as usize;
         let rw: usize = right.iter().map(Span::width).sum::<usize>() + 1;
@@ -444,17 +446,46 @@ impl App {
         Line::from(left)
     }
 
+    /// The command line: the folder it starts in, short, then what is
+    /// typed, the caret, and the best completion dim after it. Empty, it
+    /// says what it is for, or the filter in force.
+    fn command_spans(&self) -> Vec<Span<'static>> {
+        let folder = self.line_folder();
+        let place = match folder.file_name() {
+            Some(n) => n.to_string_lossy().into_owned(),
+            None => rows::short_path(&folder),
+        };
+        let mut spans = vec![
+            Span::raw(" "),
+            Span::styled(place, theme::dim()),
+            Span::styled(" ❯ ", theme::accent()),
+        ];
+        let l = &self.cmd.line;
+        match self.cmd.ghost.as_deref() {
+            Some(g) if l.cursor() == l.text().len() && !g.is_empty() => {
+                let mut chars = g.chars();
+                let first = chars.next().map(String::from).unwrap_or_default();
+                spans.push(Span::raw(l.text().to_string()));
+                spans.push(Span::styled(first, theme::dim().add_modifier(Modifier::REVERSED)));
+                spans.push(Span::styled(chars.as_str().to_string(), theme::dim()));
+            }
+            _ => spans.extend(theme::with_caret(l.text(), l.cursor(), Style::default())),
+        }
+        if l.is_empty() {
+            let hint = if self.filter.is_empty() {
+                " a command, or claude/codex/agy and a prompt · / searches".to_string()
+            } else {
+                format!(" ⌕ {} · esc clears", self.filter)
+            };
+            spans.push(Span::styled(hint, theme::dim()));
+        }
+        spans
+    }
+
     /// The footer's rows at this width: the shortcuts where they are up,
     /// under a flash if there is one, else the one row of hints.
     pub fn foot_lines(&self, width: u16) -> Vec<Line<'static>> {
         let room = width.saturating_sub(TEXT_INDENT).max(1) as usize;
-        if let Mode::Form(form) = &self.mode {
-            let mut lines = form.lines();
-            if let Some(m) = self.flashing() {
-                lines[0] = Line::from(m.to_string()).dim();
-            }
-            return lines;
-        }
         if !self.shortcuts || self.search.is_some() {
             return vec![Line::from(self.footer(room)).dim()];
         }
@@ -478,6 +509,9 @@ impl App {
                     enter keeps · esc puts back"
                 .into();
         }
+        if !self.cmd.is_empty() {
+            return "enter starts · tab completes · ↑↓ picks the folder · esc clears".into();
+        }
         if let Some(why) = self.native_failing() {
             return why;
         }
@@ -485,7 +519,7 @@ impl App {
             Grouping::Project => "^s by state",
             Grouping::State => "^s by project",
         };
-        let mut hints = vec!["enter attaches", "n new", self.x_hint(), "^f search"];
+        let mut hints = vec!["enter attaches", "type to start", self.x_hint(), "/ search"];
         if !self.filter.is_empty() {
             hints.push("esc clears the search");
         }
@@ -534,7 +568,7 @@ impl App {
             } else if p.show_hidden {
                 " nothing hidden".into()
             } else {
-                " nothing running · rl new".into()
+                " nothing running · type to start one".into()
             };
             let nothing = self.filter.is_empty() && p.show_agents && p.show_shells && !p.show_hidden;
             f.render_widget(empty_list(&msg, area, nothing), area);

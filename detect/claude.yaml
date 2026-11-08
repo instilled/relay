@@ -4,6 +4,8 @@
 # fallback.
 kind: agent
 bins: [claude]
+words: [claude]   # the list's command line starts it on this first word
+prompt: ["{prompt}"]   # a first prompt goes last, on its own
 icon: "✻"        # its rows in the panel; one column wide
 color: "#d97757"    # #rrggbb; without one, the foreground
 hooks:

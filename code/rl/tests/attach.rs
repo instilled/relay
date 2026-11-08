@@ -47,6 +47,7 @@ impl Env {
                 harness: None,
                 cwd: self.cwd.clone(),
                 argv: vec!["sh".into(), "-c".into(), script.into()],
+                shell: false,
                 cols: 80,
                 rows: 24,
             },

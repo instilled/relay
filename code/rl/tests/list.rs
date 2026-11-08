@@ -71,6 +71,7 @@ async fn sh(home: &Home, cwd: &Path) -> String {
             harness: None,
             cwd: cwd.to_path_buf(),
             argv: vec!["sh".into()],
+            shell: false,
             cols: 80,
             rows: 24,
         },
@@ -122,32 +123,44 @@ async fn ctrl_x_twice_stops_a_live_held_shell() {
 }
 
 #[tokio::test]
-async fn the_form_starts_a_shell_in_the_folder_chosen_and_selects_it() {
+async fn enter_on_a_shell_line_runs_it_in_a_held_shell_that_stays() {
     if !holder() {
         return;
     }
     let f = fixture();
-    let other = f.folder.parent().unwrap().join("api");
-    std::fs::create_dir_all(&other).unwrap();
     let mut app = App::new(f.home.clone()).unwrap();
-    press(&mut app, KeyCode::Char('n'));
-    // A shell is last of the harnesses: one back from the first, round.
-    press(&mut app, KeyCode::Up);
-    press(&mut app, KeyCode::Tab);
-    ctrl(&mut app, 'u');
-    for c in other.display().to_string().chars() {
+    // Nothing on the list: the line starts where `rl` was started.
+    app.started_in = f.folder.clone();
+    for c in "echo made > made.txt".chars() {
         press(&mut app, KeyCode::Char(c));
     }
     press(&mut app, KeyCode::Enter);
+    assert!(app.cmd.is_empty(), "cleared once it is on its way");
     app.finish().await;
     let held = sessions::list(&f.home);
     assert_eq!(held.len(), 1, "{:?}", app.flashing());
     let meta = &held[0].meta;
-    assert_eq!(meta.cwd, other);
-    assert_eq!(meta.kind, rl_core::state::RunKind::Shell);
+    assert_eq!(meta.cwd, f.folder);
+    assert_eq!(meta.kind, rl_core::state::RunKind::Shell, "it reads as a shell");
+    assert_eq!(meta.harness, "sh");
+    assert_eq!(meta.argv[1], "-ic");
+    assert!(
+        meta.argv[2].starts_with("echo made > made.txt\nexec "),
+        "{:?}",
+        meta.argv
+    );
     assert_eq!(app.sel.as_deref(), Some(format!("r:{}", meta.name).as_str()));
     assert!(app.flashing().is_some_and(|m| m.starts_with("started")));
+    // The line ran, and the shell is still there after it.
+    let made = f.folder.join("made.txt");
+    let by = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    while !made.exists() && std::time::Instant::now() < by {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert_eq!(std::fs::read_to_string(&made).unwrap_or_default(), "made\n");
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     let name = meta.name.clone();
+    assert_eq!(status(&f.home, &name), Some(Status::Live), "the shell stays");
     rl::cmd::stop(&f.home, &name).await.unwrap();
     rl::cmd::rm(&f.home, &name).await.unwrap();
 }

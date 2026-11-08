@@ -92,6 +92,9 @@ fn waiting(cwd: &Path) -> NativeRow {
 async fn list(f: &Fixture) -> App {
     let mut app = App::new(f.home.clone()).unwrap();
     app.set_native(vec![waiting(&f.repo)]);
+    // A PATH of its own: claude and codex are here, agy is not.
+    let bin = f.repo.parent().unwrap().join("bin");
+    app.commands = std::cell::OnceCell::from(super::cmdline::bin_dir(&bin, &["claude", "codex", "cat", "make"]));
     app
 }
 
@@ -548,19 +551,16 @@ fn ran_in(dir: &Path) -> Vec<String> {
 }
 
 #[tokio::test]
-async fn the_form_starts_claude_in_its_own_background_and_the_cursor_waits_for_it() {
+async fn the_line_starts_claude_in_its_own_background_and_the_cursor_waits_for_it() {
     let f = fixture();
-    std::fs::write(f.home.config_json(), r#"{"badges": [], "harnesses": ["claude"]}"#).unwrap();
     let mut app = list(&f).await;
     on(&mut app, NATIVE);
-    press(&mut app, KeyCode::Char('n'));
-    assert!(row_of(&shown(&app), "harness").contains("claude"));
-    press(&mut app, KeyCode::Tab);
-    press(&mut app, KeyCode::Tab);
-    typed(&mut app, "fix the login");
+    typed(&mut app, "claude fix the login");
+    assert!(row_of(&shown(&app), "shop ❯").contains("agent · claude"));
     press(&mut app, KeyCode::Enter);
+    assert!(app.cmd.is_empty(), "the line is cleared once it is on its way");
     app.finish().await;
-    assert_eq!(ran_in(&f.repo), ["--bg", "fix the login"], "run in the folder chosen");
+    assert_eq!(ran_in(&f.repo), ["--bg", "fix the login"], "run in the row's folder");
     assert!(
         sessions::list(&f.home).iter().all(|h| h.meta.harness != "claude"),
         "not one Relay holds"
@@ -636,23 +636,6 @@ async fn a_pull_request_reads_as_its_number() {
 }
 
 #[tokio::test]
-async fn n_opens_the_form_in_the_project_and_esc_puts_it_away() {
-    let f = fixture();
-    let mut app = list(&f).await;
-    on(&mut app, NATIVE);
-    press(&mut app, KeyCode::Char('n'));
-    let s = shown(&app);
-    assert!(s.contains("new session"), "{s}");
-    assert!(row_of(&s, "  folder  ").contains("shop"), "{s}");
-    assert!(row_of(&s, "harness").contains("shell"), "{s}");
-    // Letters are the form's now.
-    press(&mut app, KeyCode::Char('a'));
-    assert!(Config::load(&f.home).unwrap().list.show_agents);
-    press(&mut app, KeyCode::Esc);
-    assert!(!shown(&app).contains("new session"));
-}
-
-#[tokio::test]
 async fn an_idle_claude_is_not_carried_on_before_claude_has_listed_its_own() {
     use crate::store::state::Said;
     let f = fixture();
@@ -711,10 +694,11 @@ async fn a_start_that_came_to_nothing_waits_for_no_line() {
 }
 
 #[tokio::test]
-async fn a_carry_on_done_while_the_form_is_open_does_not_take_the_terminal() {
+async fn a_carry_on_done_while_a_name_is_typed_does_not_take_the_terminal() {
     let f = fixture();
     let mut app = list(&f).await;
-    press(&mut app, KeyCode::Char('n'));
+    on(&mut app, HELD);
+    ctrl(&mut app, 'r');
     app.done(super::app::Done {
         hand: Some(super::app::Hand {
             to: super::app::To::Argv(vec!["claude".into(), "attach".into(), "ab12cd34".into()]),
@@ -723,9 +707,9 @@ async fn a_carry_on_done_while_the_form_is_open_does_not_take_the_terminal() {
         }),
         ..super::app::Done::said("fix the login carries on in claude's background")
     });
-    assert!(app.hand.is_none(), "the form keeps the keys");
+    assert!(app.hand.is_none(), "the name keeps the keys");
     assert!(shown(&app).contains("fix the login carries on · enter on it attaches"));
-    assert!(matches!(app.mode, super::app::Mode::Form(_)));
+    assert!(matches!(app.mode, super::app::Mode::Rename(_)));
 }
 
 #[tokio::test]
@@ -752,4 +736,131 @@ fn coming_back_from_an_attach_says_how_it_went() {
     };
     assert_eq!(super::back_words("shop-sh", &exit), "shop-sh ended (exit 1)");
     assert!(super::back_words("shop-sh", &Ended::Closed).starts_with("lost the connection"));
+}
+
+/// The command line's row on the screen.
+fn line_row(app: &App) -> String {
+    row_of(&shown(app), "✦a").to_string()
+}
+
+#[tokio::test]
+async fn typing_starts_the_line_in_the_rows_folder() {
+    let f = fixture();
+    let mut app = list(&f).await;
+    on(&mut app, NATIVE);
+    assert!(line_row(&app).contains("shop ❯"), "where it starts: {}", line_row(&app));
+    typed(&mut app, "make test");
+    assert_eq!(app.cmd.line.text(), "make test");
+    let row = line_row(&app);
+    assert!(row.contains("shop ❯ make test"), "{row}");
+    assert!(row.contains("shell"), "{row}");
+    assert!(shown(&app).contains("enter starts"), "the footer says how");
+    // A letter of the list's types once the line has text.
+    assert!(Config::load(&f.home).unwrap().list.show_agents);
+    // ←, then a letter, goes in where the cursor is; esc clears it all.
+    press(&mut app, KeyCode::Left);
+    typed(&mut app, "s");
+    assert_eq!(app.cmd.line.text(), "make tesst");
+    ctrl(&mut app, 'u');
+    assert_eq!(app.cmd.line.text(), "t");
+    press(&mut app, KeyCode::Delete);
+    assert!(app.cmd.is_empty());
+    typed(&mut app, "ls");
+    press(&mut app, KeyCode::Esc);
+    assert!(app.cmd.is_empty());
+    // Moving on the list still works with text on the line.
+    typed(&mut app, "ls");
+    press(&mut app, KeyCode::Up);
+    assert_eq!(app.sel.as_deref(), Some(HELD));
+    assert_eq!(app.cmd.line.text(), "ls");
+}
+
+#[tokio::test]
+async fn on_an_empty_line_a_s_and_h_still_flip_the_filters() {
+    let f = fixture();
+    let mut app = list(&f).await;
+    for (c, what) in [('a', "agents"), ('s', "shells"), ('h', "hidden")] {
+        press(&mut app, KeyCode::Char(c));
+        assert!(app.cmd.is_empty(), "{c} is not typed");
+        let p = Config::load(&f.home).unwrap().list;
+        let now = match c {
+            'a' => !p.show_agents,
+            's' => !p.show_shells,
+            _ => p.show_hidden,
+        };
+        assert!(now, "{what} flipped");
+    }
+    // Typed once the line has text.
+    typed(&mut app, "x");
+    press(&mut app, KeyCode::Char('a'));
+    assert_eq!(app.cmd.line.text(), "xa");
+    assert!(!Config::load(&f.home).unwrap().list.show_agents, "not flipped back");
+}
+
+#[tokio::test]
+async fn a_slash_on_an_empty_line_opens_the_search() {
+    let f = fixture();
+    let mut app = list(&f).await;
+    press(&mut app, KeyCode::Char('/'));
+    assert!(app.search.is_some());
+    typed(&mut app, "login");
+    assert_eq!(app.filter, "login");
+    assert!(row_of(&shown(&app), "⌕").contains("login"));
+    press(&mut app, KeyCode::Enter);
+    // Mid-line it is a slash.
+    typed(&mut app, "cat src/");
+    assert!(app.search.is_none());
+    assert_eq!(app.cmd.line.text(), "cat src/");
+}
+
+#[tokio::test]
+async fn the_line_says_what_it_would_start() {
+    let f = fixture();
+    let mut app = list(&f).await;
+    for (text, label) in [
+        ("claude fix the login", "agent · claude"),
+        ("codex", "agent · codex"),
+        ("gemini write the docs", "agent · antigravity (agy not found)"),
+        ("make test", "shell"),
+    ] {
+        typed(&mut app, text);
+        let row = line_row(&app);
+        assert!(row.contains(label), "{text}: {row}");
+        press(&mut app, KeyCode::Esc);
+    }
+    // A harness that is not here is said, and the line kept. On an empty
+    // line `a` flips the agents, so a space comes first.
+    typed(&mut app, " agy hi");
+    assert!(line_row(&app).contains("agent · antigravity (agy not found)"));
+    press(&mut app, KeyCode::Enter);
+    assert!(app.work.is_empty(), "{:?} {:?}", app.flashing(), app.cmd.line.text());
+    assert_eq!(app.cmd.line.text(), " agy hi");
+    assert!(shown(&app).contains("agy is not on PATH"), "{}", shown(&app));
+}
+
+#[tokio::test]
+async fn enter_on_an_empty_line_still_attaches() {
+    let f = fixture();
+    let mut app = list(&f).await;
+    on(&mut app, HELD);
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(app.hand.take().expect("handed over").key, HELD);
+    assert!(app.work.is_empty(), "nothing started");
+}
+
+#[tokio::test]
+async fn tab_completes_a_harness_word_and_a_path_and_the_ghost_shows_it() {
+    let f = fixture();
+    std::fs::create_dir_all(f.repo.join("src")).unwrap();
+    let mut app = list(&f).await;
+    on(&mut app, NATIVE);
+    typed(&mut app, "cod");
+    assert_eq!(app.cmd.ghost.as_deref(), Some("ex"));
+    assert!(line_row(&app).contains("shop ❯ codex"), "the ghost: {}", line_row(&app));
+    press(&mut app, KeyCode::Tab);
+    assert_eq!(app.cmd.line.text(), "codex ");
+    typed(&mut app, "look at sr");
+    assert!(line_row(&app).contains("look at src/"), "{}", line_row(&app));
+    press(&mut app, KeyCode::Tab);
+    assert_eq!(app.cmd.line.text(), "codex look at src/", "under the row's folder");
 }

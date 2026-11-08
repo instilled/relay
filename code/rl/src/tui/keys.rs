@@ -34,10 +34,9 @@ impl App {
         // A key armed by its first press stays armed only until the very next
         // key: its own second press acts, anything else disarms it.
         let armed = self.arm.take();
-        // A name being typed, or the form, has every key until it is done.
+        // A name being typed has every key until it is done.
         match self.mode {
             Mode::Rename(_) => return self.key_rename(k),
-            Mode::Form(_) => return self.key_form(k),
             Mode::List => {}
         }
         if (k.code, k.modifiers) == (KeyCode::Char('f'), KeyModifiers::CONTROL) {
@@ -51,6 +50,17 @@ impl App {
             self.key_search(k, armed);
             return;
         }
+        // The command line, once it has text, has the keys it edits with;
+        // the rest are the list's as ever.
+        if !self.cmd.is_empty() {
+            match self.cmd.line.key(&k) {
+                line::Act::Typing => return self.retyped(),
+                line::Act::Submit => return self.run_line(),
+                line::Act::Cancel => return self.cmd.clear(),
+                line::Act::Complete => return self.complete_line(),
+                line::Act::Nothing => {}
+            }
+        }
         match shortcuts::take(self.shortcuts, &k) {
             shortcuts::Take::Toggle => {
                 self.shortcuts = !self.shortcuts;
@@ -62,14 +72,25 @@ impl App {
             }
             shortcuts::Take::Pass => {}
         }
-        if k.modifiers.is_empty() {
+        // On an empty line the list's letters are its own; any other key
+        // that types starts the line — a space too, which is how a line
+        // that begins with `a`, `s` or `h` is typed (` ssh host`).
+        if self.cmd.is_empty() && k.modifiers.is_empty() {
             match k.code {
                 KeyCode::Char('a') => return self.toggle_agents(),
                 KeyCode::Char('s') => return self.toggle_shells(),
                 KeyCode::Char('h') => return self.toggle_hidden(),
-                KeyCode::Char('n') => return self.open_form(),
+                KeyCode::Char('/') => return self.open_search(),
                 _ => {}
             }
+        }
+        if self.cmd.is_empty()
+            && let KeyCode::Char(c) = k.code
+            && !k.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+        {
+            self.shortcuts = false;
+            self.cmd.line.insert(&c.to_string());
+            return self.retyped();
         }
         if (k.code, k.modifiers) == (KeyCode::Char('s'), KeyModifiers::CONTROL) {
             return self.toggle_grouping();
@@ -240,21 +261,29 @@ impl App {
         }
     }
 
-    /// A paste goes into the search, as one line; elsewhere nothing takes it.
+    /// `tab` on the command line: the word under the cursor completed.
+    fn complete_line(&mut self) {
+        let folder = self.line_folder();
+        let cmds = self.commands.get_or_init(super::cmdline::Commands::from_env);
+        self.cmd.complete(&folder, crate::rows::registry(), cmds);
+    }
+
+    /// A paste goes into the search or a name being typed, as one line;
+    /// elsewhere into the command line.
     pub fn paste(&mut self, s: &str) {
         let s: String = s
             .chars()
             .map(|c| if matches!(c, '\n' | '\r' | '\t') { ' ' } else { c })
             .filter(|c| !c.is_control())
             .collect();
-        // A name or the form's field being typed takes it first.
+        // A name being typed takes it first.
         match &mut self.mode {
             Mode::Rename(r) => return r.line.insert(&s),
-            Mode::Form(f) => return f.paste(&s),
             Mode::List => {}
         }
         let Some(search) = self.search.as_mut() else {
-            return;
+            self.cmd.line.insert(&s);
+            return self.retyped();
         };
         search.line.insert(&s);
         let now = search.line.text().trim().to_string();

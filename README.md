@@ -41,13 +41,27 @@ Codex asks you to trust the hook once (`/hooks` in codex); Claude may ask you to
 Rows are agents and shells, under their project folder or under Needs input, Working and Done.
 Claude's and Codex's own background sessions are on it too. `^h` or `?` shows the keys.
 
+At the foot of the list is a command line. Type to start a session, in the folder of the row under
+the cursor (else where `rl` was started; the line says which, `relay ❯`):
+
+- `claude fix the login`, `codex …`, or `agy …` (also `gemini` and `antigravity`, which mean
+  Google Antigravity's `agy`): that agent, the rest of the line its first prompt. Claude starts in
+  its own background (`claude --bg`); the others in a session Relay holds.
+- Anything else is a shell command, run in a shell Relay holds, which stays a shell once it is done.
+
+The right end of the line says which it is (`agent · claude`, `shell`, or `agent · antigravity (agy
+not found)`, which will not start). `tab` completes a harness, a program on `PATH`, or a path; the
+best completion stands dim after the cursor, and `tab` again cycles. On an empty line the list's
+own keys work as before; `a`, `s` and `h` flip the filters, so start a line that begins with one of
+them with a space.
+
 | key | does |
 | --- | --- |
-| `enter` | attach |
-| `n` | new session |
+| `enter` | attach (on a line with text: start it) |
+| typing | the command line; `esc` clears it |
 | `↑↓` `^j` `^k` | move |
 | `pgup` `pgdn` `home` `end` | page |
-| `^f` | search |
+| `/` `^f` | search |
 | `^x ^x` | stop, then remove or hide |
 | `^r` | rename |
 | `^t` | pin |
@@ -93,14 +107,17 @@ A socket too long for the OS limit goes under `$TMPDIR/rl-<uid>-<hash>/`.
 
 ## Adapters
 
-A harness is a file, `detect/<name>.yaml`. The built-in ones are compiled in (`claude`, `codex`,
-`cursor`, `gemini`, `opencode`, `sh`, with `generic` as the floor under all). Yours in
+A harness is a file, `detect/<name>.yaml`. The built-in ones are compiled in (`antigravity`,
+`claude`, `codex`, `cursor`, `gemini`, `opencode`, `sh`, with `generic` as the floor under all). Yours in
 `~/.relay/detect/` merge over them field by field; a new name adds a harness.
 
 Keys a profile accepts:
 
 - `kind`: `agent`, `shell`, `command` or `plugin`
 - `bins`: binary names to match
+- `words`: first words of the list's command line that start it (the first profile by name to
+  claim a word has it)
+- `prompt`: where a first prompt goes, with `{prompt}` (`["-i", "{prompt}"]`); without it, last
 - `interactive_only`
 - `hooks`: `dialect`, `args` (what `rl new` passes the binary; `{hooks_file}` is the settings file)
 - `resume`: arguments that carry a conversation on, with `{session}`
@@ -137,6 +154,7 @@ Not verified against the live CLIs:
 - That `codex resume <id>` rejoins a thread the Codex app-server has loaded, and when a thread counts as loaded.
 - The Gemini MCP entry (`mcpServers.relay` in its `settings.json`).
 - `claude agents` state mapping against its own screen.
+- Antigravity (`agy`): no hooks and no screen patterns of its own yet, so its state is the generic guess.
 
 ## Docs
 

@@ -1,7 +1,7 @@
 //! `^h`: the keys for where you are, in the footer in place of its few hints.
-//! `^h` again or `esc` puts them away; so does `?`, which is never typed
-//! anywhere on the list but in a search, and a search keeps its own keys in
-//! the footer.
+//! `^h` again or `esc` puts them away; so does `?` on an empty command line
+//! (once the line has text, `?` is typed), and a search keeps its own keys
+//! in the footer.
 //!
 //! One table per place, so what the footer says stays what the keys do.
 
@@ -42,10 +42,11 @@ fn place_keys(at: Place) -> Vec<Key> {
     match at {
         Place::List => vec![
             key("enter", "attach"),
-            key("n", "new"),
+            key("type", "start an agent or a shell"),
+            key("tab", "complete"),
             key("↑↓ ^j^k", "move"),
             key("pgup/pgdn home/end", "page"),
-            key("^f", "search"),
+            key("/ ^f", "search"),
             key("^x ^x", "stop/remove/hide"),
             key("^r", "rename"),
             key("^t", "pin"),
@@ -172,7 +173,8 @@ mod tests {
     fn the_list_says_its_keys() {
         assert_eq!(
             one_line(Place::List),
-            "enter attach · n new · ↑↓ ^j^k move · pgup/pgdn home/end page · ^f search · \
+            "enter attach · type start an agent or a shell · tab complete · ↑↓ ^j^k move · \
+             pgup/pgdn home/end page · / ^f search · \
              ^x ^x stop/remove/hide · ^r rename · ^t pin · ⇧↑↓ reorder · a agents · s shells · \
              h hidden · ^s by project/state · ^c ^c quit · ^h"
         );

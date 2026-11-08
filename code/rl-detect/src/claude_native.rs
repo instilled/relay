@@ -11,7 +11,7 @@
 //! --resume <session> --bg`).
 
 use crate::adapter::{self, Adapter, NativeRow, NativeState, Pr};
-use crate::registry::{Profile, SESSION};
+use crate::registry::{PROMPT, Profile, SESSION};
 use crate::sessions::{ID, NAME};
 use anyhow::{Context, Result};
 use jiff::Timestamp;
@@ -38,6 +38,8 @@ pub struct Claude {
     name: Vec<String>,
     resume: Vec<String>,
     stop: Vec<String>,
+    /// Where a first prompt goes, after `start` (the profile's `prompt`).
+    prompt: Vec<String>,
     /// Claude's config folder, where it is not the environment's.
     config: Option<PathBuf>,
 }
@@ -56,6 +58,11 @@ impl Claude {
             name: s.name.clone(),
             resume: profile.resume.clone(),
             stop: s.stop.clone(),
+            prompt: if profile.prompt.is_empty() {
+                vec![PROMPT.to_string()]
+            } else {
+                profile.prompt.clone()
+            },
             config: None,
         })
     }
@@ -116,7 +123,7 @@ impl Adapter for Claude {
             args.extend(self.name.iter().map(|a| a.replace(NAME, n)));
         }
         if let Some(p) = prompt.filter(|p| !p.trim().is_empty()) {
-            args.push(p.to_string());
+            args.extend(self.prompt.iter().map(|a| a.replace(PROMPT, p)));
         }
         Some(self.argv(&args))
     }
