@@ -66,8 +66,8 @@ them with a space.
 | `^r` | rename |
 | `^t` | pin |
 | `⇧↑↓` | reorder |
-| `a` `s` `h` | show agents, shells, hidden |
-| `^s` | group by project or by state |
+| `a` `s` `h` | show agents, shells, hidden (the header shows which: `✦a ❯s │ ◌h`) |
+| `^s` | group by project or by state (the header says which) |
 | `^c ^c` | quit |
 
 `ctrl-\` leaves an attached session running and comes back to the list.

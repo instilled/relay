@@ -219,7 +219,7 @@ async fn a_search_narrows_the_list_and_esc_clears_it() {
     assert!(s.contains("fix the login") && !s.contains("shop-sh"), "{s}");
     assert!(
         row_of(&s, "⌕").contains("login"),
-        "the search is typed on the toggles line: {s}"
+        "the search is typed where the command line was: {s}"
     );
     assert_eq!(
         app.sel.as_deref(),
@@ -739,9 +739,67 @@ fn coming_back_from_an_attach_says_how_it_went() {
     assert!(super::back_words("shop-sh", &Ended::Closed).starts_with("lost the connection"));
 }
 
-/// The command line's row on the screen.
+/// The command line's row on the screen: over the footer's separator.
 fn line_row(app: &App) -> String {
-    row_of(&shown(app), "✦a").to_string()
+    let rows = screen(app, 100, 30);
+    rows[rows.len() - 3].clone()
+}
+
+#[tokio::test]
+async fn the_header_carries_the_filters_and_the_grouping_and_the_foot_does_not() {
+    use ratatui::style::Modifier;
+    let f = fixture();
+    let mut app = list(&f).await;
+    let rows = screen(&app, 100, 30);
+    let at = |rows: &[String], t: &str| rows.iter().position(|r| r.contains(t));
+    let head = at(&rows, "✦a").expect("the toggles are on screen");
+    assert!(head < 6, "in the header, beside the mark: {}", rows.join("\n"));
+    assert!(rows[head].contains("❯s") && rows[head].contains("◌h") && rows[head].contains("by project ^s"));
+    assert!(at(&rows, "relay").unwrap() < head && at(&rows, "1 needs you").unwrap() < head);
+    for r in &rows[6..] {
+        assert!(
+            !r.contains("✦a") && !r.contains("by project"),
+            "no toggles line at the foot: {r}"
+        );
+    }
+    // `a` dims the agents' mark, where it stands.
+    let mark = |app: &App| {
+        let mut t = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+        t.draw(|f| app.draw(f)).unwrap();
+        let buf = t.backend().buffer().clone();
+        let y = head as u16;
+        let x = (0..100).find(|&x| buf[(x, y)].symbol() == "✦").unwrap();
+        buf[(x, y)].clone()
+    };
+    assert!(!mark(&app).modifier.contains(Modifier::DIM), "on");
+    press(&mut app, KeyCode::Char('a'));
+    assert!(mark(&app).modifier.contains(Modifier::DIM), "off");
+    // `^s`: by state, said in the header.
+    ctrl(&mut app, 's');
+    let rows = screen(&app, 100, 30);
+    assert!(
+        rows[..6].iter().any(|r| r.contains("by state ^s")),
+        "{}",
+        rows.join("\n")
+    );
+    // On a short screen the header is one line, and keeps them.
+    let rows = screen(&app, 80, 20);
+    assert!(rows[0].contains("✦a") && rows[0].contains("by state"), "{}", rows[0]);
+    let rows = screen(&app, 60, 20);
+    assert!(rows[0].contains("✦a") && rows[0].contains("by state"), "{}", rows[0]);
+}
+
+#[tokio::test]
+async fn the_search_takes_the_command_lines_place_while_it_is_open() {
+    let f = fixture();
+    let mut app = list(&f).await;
+    assert!(line_row(&app).contains(" ❯ "), "{}", line_row(&app));
+    press(&mut app, KeyCode::Char('/'));
+    typed(&mut app, "login");
+    let row = line_row(&app);
+    assert!(row.contains("⌕ login") && !row.contains(" ❯ "), "{row}");
+    press(&mut app, KeyCode::Esc);
+    assert!(line_row(&app).contains(" ❯ "));
 }
 
 #[tokio::test]

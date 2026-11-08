@@ -1,5 +1,6 @@
-//! Drawing the list: the header, the rows under their headers, the toggles
-//! and the search on their line, and the footer. Colour carries meaning — a
+//! Drawing the list: the header with its toggles, the rows under their
+//! headers, the command line (or the search, while one is open), and the
+//! footer. Colour carries meaning — a
 //! saturated accent per state, on the terminal's own foreground so it reads
 //! on either theme (see `theme`). Nothing on screen is an id.
 
@@ -279,18 +280,18 @@ pub fn empty_list(msg: &str, area: Rect, nothing: bool) -> Paragraph<'static> {
     Paragraph::new(lines).centered()
 }
 
-/// Where things go on screen: the header, the list, the toggles and search
-/// line, the footer, and the separators between them.
+/// Where things go on screen: the header, the list, the command line (the
+/// search, while one is open), the footer, and the separators between them.
 pub struct Areas {
     pub head: Rect,
     pub seps: [Rect; 3],
     pub list: Rect,
-    pub toggles: Rect,
+    pub line: Rect,
     pub footer: Rect,
 }
 
 pub fn areas(area: Rect, foot_h: u16) -> Areas {
-    let [head, sep_a, list, sep_b, toggles, sep_c, footer] = Layout::vertical([
+    let [head, sep_a, list, sep_b, line, sep_c, footer] = Layout::vertical([
         Constraint::Length(head_h(area)),
         Constraint::Length(1),
         Constraint::Fill(1),
@@ -304,7 +305,7 @@ pub fn areas(area: Rect, foot_h: u16) -> Areas {
         head,
         seps: [sep_a, sep_b, sep_c],
         list,
-        toggles,
+        line,
         footer,
     }
 }
@@ -346,7 +347,7 @@ impl App {
             f.render_widget(Paragraph::new("─".repeat(sep.width as usize)).dim(), sep);
         }
         self.draw_list(f, a.list, &lines);
-        f.render_widget(Paragraph::new(self.toggles_line(a.toggles.width)), a.toggles);
+        f.render_widget(Paragraph::new(self.bottom_line(a.line.width)), a.line);
         let footer = Rect {
             x: a.footer.x + TEXT_INDENT,
             width: a.footer.width.saturating_sub(TEXT_INDENT),
@@ -356,16 +357,24 @@ impl App {
     }
 
     /// The header: where there is room the mark stands at the left, under a
-    /// row of air, with the name and the tally beside its middle rows;
-    /// otherwise the headline alone, on one line.
+    /// row of air, with the name, the tally and the toggles beside its middle
+    /// rows; otherwise the headline on one line, the toggles at its right
+    /// end, and the headline cut to leave them room.
     fn draw_head(&self, f: &mut Frame, head: Rect, title: &str) {
+        let toggles = self.toggle_spans();
+        let tw: usize = toggles.iter().map(Span::width).sum();
         if head.height <= 1 {
             let text = Rect {
                 x: head.x + TEXT_INDENT,
-                width: head.width.saturating_sub(TEXT_INDENT),
+                width: head.width.saturating_sub(TEXT_INDENT + 1),
                 ..head
             };
-            f.render_widget(Paragraph::new(Line::from(headline_spans(title))), text);
+            let room = (text.width as usize).saturating_sub(tw + 2);
+            let mut spans = cap_spans(headline_spans(title), room);
+            let used: usize = spans.iter().map(Span::width).sum();
+            spans.push(Span::raw(" ".repeat((text.width as usize).saturating_sub(used + tw))));
+            spans.extend(toggles);
+            f.render_widget(Paragraph::new(Line::from(spans)), text);
             return;
         }
         let mark = Rect {
@@ -383,21 +392,29 @@ impl App {
         ];
         let user = std::env::var_os("HOME");
         if let Some(home) = home_note(self.home.path(), user.as_deref().map(Path::new)) {
-            first.push(Span::styled(format!(" · {home}"), theme::dim()));
+            // Where there is no room for it, the home goes first.
+            let note = Span::styled(format!(" · {home}"), theme::dim());
+            let used: usize = first.iter().map(Span::width).sum();
+            if used + note.width() <= text.width as usize {
+                first.push(note);
+            }
         }
         // The headline leads with the name, which the first line says already.
         let tally = title.strip_prefix(NAME).unwrap_or(title).trim_start_matches(" · ");
         f.render_widget(
-            Paragraph::new(vec![Line::from(first), Line::raw(tally.to_string())]),
+            Paragraph::new(vec![
+                Line::from(first),
+                Line::raw(tally.to_string()),
+                Line::from(cap_spans(toggles, text.width as usize)),
+            ]),
             text,
         );
     }
 
-    /// The toggles line: the search being typed, or the filter in force, at
-    /// the left; at the right the toggles — a glyph and its key for each kind,
-    /// `✦a` agents, `❯s` shells, then `◌h` hidden and the grouping, each set
+    /// The toggles, for the header: a glyph and its key for each kind, `✦a`
+    /// agents, `❯s` shells, then `◌h` hidden and the grouping, each set
     /// apart. On is accented and bold, off is quiet.
-    fn toggles_line(&self, width: u16) -> Line<'static> {
+    fn toggle_spans(&self) -> Vec<Span<'static>> {
         let on = theme::accent().add_modifier(Modifier::BOLD);
         let off = theme::dim();
         let lit = |b: bool| if b { on } else { off };
@@ -406,14 +423,7 @@ impl App {
             Grouping::Project => "by project",
             Grouping::State => "by state",
         };
-        let mut right = Vec::new();
-        if self.search.is_none()
-            && let Some(d) = self.detected()
-        {
-            right.push(Span::styled(d.label(), theme::accent()));
-            right.push(Span::styled("  │  ", off));
-        }
-        right.extend([
+        vec![
             Span::styled("✦a", lit(p.show_agents)),
             Span::styled("  ", off),
             Span::styled("❯s", lit(p.show_shells)),
@@ -424,7 +434,18 @@ impl App {
             Span::styled("  │  ", off),
             Span::styled(grouping, theme::accent()),
             Span::styled(" ^s", off),
-        ]);
+        ]
+    }
+
+    /// The line over the footer: the command line, with at its right what
+    /// it would start; or, while one is open, the search in its place.
+    fn bottom_line(&self, width: u16) -> Line<'static> {
+        let mut right = Vec::new();
+        if self.search.is_none()
+            && let Some(d) = self.detected()
+        {
+            right.push(Span::styled(d.label(), theme::accent()));
+        }
         let mut left = match &self.search {
             Some(s) => {
                 let mut spans = vec![Span::raw(" "), Span::styled("⌕ ", theme::accent())];
@@ -778,11 +799,11 @@ mod tests {
         assert_eq!(head_h(screen(160, 23)), 1);
         assert_eq!(head_h(screen(79, 45)), 1);
         // The list starts under the header and its separator, whichever it is,
-        // and the toggles stand between it and the footer.
+        // and the command line stands between it and the footer.
         let a = areas(screen(100, 30), 1);
-        assert_eq!((a.list.y, a.toggles.y, a.footer.y), (7, 27, 29));
+        assert_eq!((a.list.y, a.line.y, a.footer.y), (7, 27, 29));
         let a = areas(screen(80, 20), 1);
-        assert_eq!((a.list.y, a.toggles.y, a.footer.y), (2, 17, 19));
+        assert_eq!((a.list.y, a.line.y, a.footer.y), (2, 17, 19));
     }
 
     #[test]
