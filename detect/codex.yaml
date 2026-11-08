@@ -51,3 +51,14 @@ sessions:
       Interrupt: { state: idle, says: interrupted }
       Stop: idle
       SessionEnd: ended
+  # Its own sessions are the threads its shared app-server daemon has
+  # loaded. `codex app-server proxy` bridges the daemon's control socket
+  # (a WebSocket, JSON-RPC inside) to stdio; Relay asks it for
+  # `thread/loaded/list`, then `thread/read` of each, and only reads. No
+  # daemon running: no sessions of its own.
+  # Enter on one runs `resume` above with its id, which opens it here
+  # through the same daemon: the daemon rejoins a running thread (its
+  # `thread/resume` says so). No `attach:` here while rl-cli, which would
+  # read it, is still around. Codex has no background start: a new one, or
+  # one carried on, Relay holds.
+  list: { args: [app-server, proxy], reader: codex-threads }

@@ -64,6 +64,10 @@ use std::path::PathBuf;
 /// each reads one agent's own listing of its sessions.
 pub const READERS: [&str; 1] = ["claude-agents"];
 
+/// The readers only `rl`'s adapters have (`adapter::adapters`): a profile
+/// may name these too, and `rld` lists nothing for it.
+pub const ADAPTER_READERS: [&str; 1] = [crate::codex_native::READER];
+
 /// Where a session's attach id goes in a profile's `attach`.
 pub const ID: &str = "{id}";
 
@@ -277,10 +281,15 @@ pub const MARKER: &str = "--user";
 pub(crate) fn compile(name: &str, file: SessionsFile) -> Result<Sessions> {
     let hooks = file.hooks.map(|h| compile_hooks(name, h)).transpose()?;
     let list = match file.list {
-        Some(l) if !READERS.contains(&l.reader.as_str()) => bail!(
+        Some(l) if !READERS.iter().chain(&ADAPTER_READERS).any(|r| *r == l.reader) => bail!(
             "{name}.yaml: sessions.list.reader `{}` is not a reader Relay has ({})",
             l.reader,
-            READERS.join(", ")
+            READERS
+                .iter()
+                .chain(&ADAPTER_READERS)
+                .copied()
+                .collect::<Vec<_>>()
+                .join(", ")
         ),
         Some(l) => Some(List {
             args: l.args,
@@ -1004,7 +1013,17 @@ mod tests {
         assert_eq!(claude.attach, ["attach", ID]);
         assert_eq!(claude.start, ["--bg"]);
         assert_eq!(claude.name, ["-n", NAME]);
-        assert!(r.profile("codex").unwrap().sessions.as_ref().unwrap().list.is_none());
+        let codex = r.profile("codex").unwrap().sessions.as_ref().unwrap();
+        assert_eq!(
+            codex.list,
+            Some(List {
+                args: vec!["app-server".into(), "proxy".into()],
+                reader: "codex-threads".into()
+            })
+        );
+        assert!(codex.attach.is_empty(), "its adapter attaches by resuming");
+        assert!(codex.start.is_empty(), "no background start: Relay holds it");
+        assert!(r.profile("gemini").unwrap().sessions.as_ref().unwrap().list.is_none());
         assert!(r.profile("cursor").unwrap().sessions.is_none());
     }
 

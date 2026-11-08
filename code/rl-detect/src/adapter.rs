@@ -89,6 +89,7 @@ pub fn adapters(registry: &Registry, find: impl Fn(&[String]) -> Option<PathBuf>
             let bin = found.clone().or_else(|| p.bins.first().map(PathBuf::from))?;
             let adapter: Box<dyn Adapter> = match reader {
                 crate::claude_native::READER => Box::new(crate::claude_native::Claude::of(p, bin)?),
+                crate::codex_native::READER => Box::new(crate::codex_native::Codex::of(p, bin)?),
                 _ => return None,
             };
             Some((adapter, found.is_some()))
@@ -181,9 +182,9 @@ mod tests {
     }
 
     #[test]
-    fn claudes_profile_has_an_adapter() {
+    fn claudes_and_codexs_profiles_have_an_adapter() {
         let all = adapters(&Registry::builtin(), crate::registry::find_bin);
         let names: Vec<&str> = all.iter().map(|(a, _)| a.harness()).collect();
-        assert_eq!(names, ["claude"]);
+        assert_eq!(names, ["claude", "codex"]);
     }
 }

@@ -132,10 +132,12 @@ pub struct Row {
     pub kind: RunKind,
 }
 
-/// Every row, held first, then hooked, then native. A hooked session that a
-/// native row or a Relay-held session already is never stands twice.
+/// Every row, held first, then hooked, then native. A session never stands
+/// twice: a hooked one that a native row or a Relay-held session already
+/// is, nor a native one Relay holds (a held `codex` runs its thread in
+/// Codex's daemon, which lists it).
 pub fn rows(held: &[Held], hooked: &[HookState], native: &[NativeRow]) -> Vec<Row> {
-    let taken: HashSet<&str> = held
+    let held_ids: HashSet<&str> = held
         .iter()
         .flat_map(|h| {
             [
@@ -144,6 +146,14 @@ pub fn rows(held: &[Held], hooked: &[HookState], native: &[NativeRow]) -> Vec<Ro
             ]
         })
         .flatten()
+        .collect();
+    let native: Vec<&NativeRow> = native
+        .iter()
+        .filter(|n| !held_ids.contains(n.session_id.as_str()))
+        .collect();
+    let taken: HashSet<&str> = held_ids
+        .iter()
+        .copied()
         .chain(native.iter().map(|n| n.session_id.as_str()))
         .collect();
     held.iter()
@@ -154,7 +164,7 @@ pub fn rows(held: &[Held], hooked: &[HookState], native: &[NativeRow]) -> Vec<Ro
                 .filter(|h| !taken.contains(h.session_id.as_str()))
                 .map(hooked_row),
         )
-        .chain(native.iter().map(native_row))
+        .chain(native.into_iter().map(native_row))
         .collect()
 }
 
@@ -488,9 +498,32 @@ mod tests {
             panic!("{:?}", r.attach);
         };
         assert_eq!(argv[1..], ["attach", "ab12cd34"]);
-        let mut codex = native("s-2");
+        let mut codex = native("01a11d20-8cab-7061-885d-f86e8e313f11");
         codex.harness = "codex".into();
-        assert_eq!(rows(&[], &[], &[codex]).remove(0).attach, Attach::None, "no adapter");
+        codex.id = codex.session_id.clone();
+        let Attach::Argv(argv) = rows(&[], &[], &[codex]).remove(0).attach else {
+            panic!("codex has an adapter");
+        };
+        assert_eq!(argv[1..], ["resume", "01a11d20-8cab-7061-885d-f86e8e313f11"]);
+        let mut nobody = native("s-3");
+        nobody.harness = "nobody".into();
+        assert_eq!(rows(&[], &[], &[nobody]).remove(0).attach, Attach::None, "no adapter");
+    }
+
+    #[test]
+    fn a_codex_thread_relay_holds_stands_once_as_held() {
+        let mut h = held("api-codex", RunKind::Agent, Status::Live);
+        h.meta.harness = "codex".into();
+        h.hook = Some(hook("codex", "t-held", Said::Busy, None));
+        let mut held_thread = native("t-held");
+        held_thread.harness = "codex".into();
+        let mut own = native("t-own");
+        own.harness = "codex".into();
+        own.id = "t-own".into();
+        let hooked = [hook("codex", "t-own", Said::Busy, None)];
+        let rows = rows(&[h], &hooked, &[held_thread, own]);
+        let keys: Vec<&str> = rows.iter().map(|r| r.key.as_str()).collect();
+        assert_eq!(keys, ["r:api-codex", "n:codex:t-own"]);
     }
 
     #[test]
