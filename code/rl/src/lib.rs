@@ -10,6 +10,7 @@ pub mod mcp;
 pub mod query;
 pub mod rank;
 pub mod rows;
+pub mod setup;
 pub mod sources;
 pub mod spawn;
 pub mod store;

@@ -43,6 +43,15 @@ enum Command {
     Rm { name: String },
     /// Serve send, who and inbox to an agent over stdio (an MCP server).
     Mcp,
+    /// Install the hooks and register the MCP server with each harness.
+    Setup {
+        /// Take Relay's hooks and server out again.
+        #[arg(long)]
+        remove: bool,
+        /// Only this harness (repeatable); default: each one found on PATH.
+        #[arg(long = "harness", value_name = "H")]
+        harness: Vec<String>,
+    },
 }
 
 #[tokio::main]
@@ -81,6 +90,7 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Attach { name } => cmd::attach(&home, &name).await,
         Command::Stop { name } => cmd::stop(&home, &name).await,
         Command::Rm { name } => cmd::rm(&home, &name).await,
+        Command::Setup { remove, harness } => rl::setup::main(&home, &harness, remove),
         // Blocks on stdin; the adapters it asks block too.
         Command::Mcp => tokio::task::spawn_blocking(move || rl::mcp::run(&home)).await?,
     }

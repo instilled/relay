@@ -182,7 +182,7 @@ fn runs(program: &str) -> bool {
 
 /// The file as it reads: none when it is not there, an error when it is
 /// there and is not a JSON object.
-fn read(path: &Path) -> Result<Option<Map<String, Value>>> {
+pub fn read(path: &Path) -> Result<Option<Map<String, Value>>> {
     let text = match std::fs::read_to_string(path) {
         Ok(t) => t,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -386,13 +386,17 @@ fn target(path: &Path) -> PathBuf {
 /// followed, so a file kept elsewhere (a dotfiles checkout) is the one
 /// changed. The sibling is made with the file's own permissions from the
 /// start (a new one, the user's alone): settings can hold tokens.
-fn write(path: &Path, doc: &Map<String, Value>) -> Result<()> {
+pub fn write(path: &Path, doc: &Map<String, Value>) -> Result<()> {
+    write_text(path, &(serde_json::to_string_pretty(doc)? + "\n"))
+}
+
+/// `write` for text that is not JSON (Codex's `config.toml`).
+pub fn write_text(path: &Path, text: &str) -> Result<()> {
     use std::io::Write;
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
     let path = target(path);
     let dir = path.parent().context("a file with no folder")?;
     std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-    let text = serde_json::to_string_pretty(doc)? + "\n";
     let name = path.file_name().context("a file with no name")?.to_string_lossy();
     let tmp = dir.join(format!(".{name}.relay-{}", std::process::id()));
     let mode = std::fs::metadata(&path).map_or(0o600, |m| m.permissions().mode() & 0o7777);
