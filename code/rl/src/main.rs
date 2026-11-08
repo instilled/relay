@@ -42,7 +42,11 @@ enum Command {
     /// Remove a session that is not running.
     Rm { name: String },
     /// Serve send, who and inbox to an agent over stdio (an MCP server).
-    Mcp,
+    Mcp {
+        /// The harness that runs it (what `rl setup` registered it with).
+        #[arg(long)]
+        harness: String,
+    },
     /// Install the hooks and register the MCP server with each harness.
     Setup {
         /// Take Relay's hooks and server out again.
@@ -92,6 +96,6 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Rm { name } => cmd::rm(&home, &name).await,
         Command::Setup { remove, harness } => rl::setup::main(&home, &harness, remove),
         // Blocks on stdin; the adapters it asks block too.
-        Command::Mcp => tokio::task::spawn_blocking(move || rl::mcp::run(&home)).await?,
+        Command::Mcp { harness } => tokio::task::spawn_blocking(move || rl::mcp::run(&home, &harness)).await?,
     }
 }

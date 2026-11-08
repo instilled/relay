@@ -29,9 +29,11 @@ rl setup      # hooks and the MCP server, for each harness found on PATH
 rl            # the list
 ```
 
-`rl setup` adds Relay's hook to each harness's user-level settings and registers `rl mcp` as an MCP
-server named `relay`. It says what it changed, and `nothing to change` on a second run.
-`rl setup --remove` takes both out again; `--harness <name>` (repeatable) limits it to one.
+`rl setup` adds Relay's hook to each harness's user-level settings and registers
+`rl mcp --harness <name>` as an MCP server named `relay` (Claude's through `claude mcp add --scope user`,
+so `claude` must be on PATH). It says what it changed, and `nothing to change` on a second run.
+`rl setup --remove` takes both out again, also for a harness no longer installed; `--harness <name>`
+(repeatable) limits it to one.
 Codex asks you to trust the hook once (`/hooks` in codex); Claude may ask you to review it in `/hooks`.
 
 ## The list
@@ -64,7 +66,7 @@ rl ls [--json]                  # the list, once
 rl attach <name>                # ctrl-\ detaches
 rl stop <name>                  # close a running session
 rl rm <name>                    # remove one that is not running
-rl mcp                          # serve send, who and inbox over stdio (agents call this)
+rl mcp --harness H              # serve send, who and inbox over stdio (agents call this)
 rl setup [--remove] [--harness H]
 ```
 
@@ -81,7 +83,7 @@ terminal or the laptop lid costs nothing. Without a daemon, nothing else is runn
 | --- | --- |
 | `sessions/<name>/` | one held session: `meta.json`, `state.json`, `hook.json`, `exit`, `sock` |
 | `state/<agent>/<session_id>.json` | what an agent's hooks said of a session Relay does not hold |
-| `mail/<address>/` | messages waiting for an agent, one file each |
+| `mail/<key>/` | messages waiting for an agent, one file each (key: a held session's name, else its conversation id) |
 | `config.json` | harnesses offered, badges, how the list stands (grouping, pins, names, order, hidden) |
 | `hooks/` | settings files `rl new` passes to a harness (Claude's `--settings`) |
 | `detect/*.yaml` | your harness profiles |
@@ -117,13 +119,14 @@ longer load; remove them. See `detect/claude.yaml` and `detect/codex.yaml` for w
 
 `rl mcp` is a stdio MCP server with three tools:
 
-- `who`: the list's rows, one line each (`address · harness · state · folder`), you marked.
-- `send(to, text, from?)`: leave a message for another agent. An unknown address is an error with close matches.
+- `who`: the list's rows, one line each (`address (title) · harness · state · folder`), you marked. The title is the one you gave the row with `^r`.
+- `send(to, text, from?)`: leave a message for another agent, by address, title or conversation id. An unknown address is an error with close matches.
 - `inbox(as?)`: take your waiting messages, oldest first. They are deleted as they are read.
 
-Your address is found in this order: `RELAY_SESSION` (set on sessions Relay holds), else
-`CLAUDE_CODE_SESSION_ID` matched against the list, else you pass `from` or `as` yourself. Codex has
-no automatic address yet, so it passes them.
+Your address is found in this order: `RELAY_SESSION`, when the held session runs the harness the
+server was started for (`RELAY_SESSION_AGENT`, so an agent started in a held shell is not the shell),
+else (Claude) `CLAUDE_CODE_SESSION_ID` matched against the list, else you pass `from` or `as`
+yourself. Codex has no automatic address yet, so it passes them.
 
 ## Known limits
 
@@ -132,10 +135,8 @@ Not verified against the live CLIs:
 - What `claude --bg` prints. Relay takes the first 8-hex word as the session id; if there is none, the start says so.
 - `claude stop <id>` from `^x`.
 - That `codex resume <id>` rejoins a thread the Codex app-server has loaded, and when a thread counts as loaded.
-- The Gemini MCP entry (`mcpServers.relay` in its `settings.json`), and Claude's `.claude.json` location under `CLAUDE_CONFIG_DIR`.
+- The Gemini MCP entry (`mcpServers.relay` in its `settings.json`).
 - `claude agents` state mapping against its own screen.
-
-`rl setup` edits `~/.claude.json`, which Claude also rewrites; a write at the same moment can lose an update.
 
 ## Docs
 

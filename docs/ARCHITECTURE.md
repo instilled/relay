@@ -65,7 +65,7 @@ and its socket.
 | `sessions/<name>/hook.json` | `rl hook` | what the agent's own hooks last said |
 | `sessions/<name>/exit`, `stopped`, `sock` | holder, `rl stop` | how it ended, that it was stopped, its socket |
 | `state/<agent>/<session_id>.json` | `rl hook` | a session Relay does not hold; removed on `ended` |
-| `mail/<address>/<ns>-<n>-<from>.json` | `rl mcp` | a waiting message; deleted when read |
+| `mail/<key>/<ns>-<pid>-<n>-<from>.json` | `rl mcp` | a waiting message; deleted when read |
 | `config.json` | `rl setup`, the list | harnesses, badges, list preferences. Strict. |
 | `hooks/` | `rl new` | per-run settings passed to a harness |
 | `detect/*.yaml` | you | profile overrides |
@@ -93,8 +93,12 @@ Folders are 0700.
   `sessions.hooks.events` and writes `hook.json` (under a held session, `RELAY_SESSION` set) or
   `state/<agent>/<id>.json`. Claude's user-level hook says `--user` after the event; under a held
   session only the session's own hook is heard, so a call counts once.
-- **Send.** `send` writes a file under `mail/<to>/`. `inbox` reads them oldest first and deletes
-  them. Addresses are cut to one path component, so none escapes `mail/`.
+- **Send.** `send` resolves `to` to a session and writes a file under `mail/<key>/`, the key being
+  what the session keeps while it lives: a held session's name, else its conversation id. `inbox`
+  takes from every key the caller has (its name or ids, and its address), oldest first; each file is
+  claimed by a rename before it is read, so two inboxes never get the same message, and deleted
+  once it parses. Keys are encoded one to one (`[a-z0-9-]` kept, every other byte `%xx`), so none
+  escapes `mail/` and none shares a folder with another, whatever the file system's case.
 
 ## 5. Adapters
 
@@ -128,16 +132,21 @@ Tools: `who`, `send(to, text, from?)`, `inbox(as?)`. A tool failure is an `isErr
 
 The caller's address, in order:
 
-1. `RELAY_SESSION`, set by `rl new` on sessions Relay holds: the session's name.
-2. `CLAUDE_CODE_SESSION_ID`, matched against the session ids on the list.
+1. `RELAY_SESSION`, set by `rl new` on sessions Relay holds: the session's name, taken only when
+   `RELAY_SESSION_AGENT` is the harness the server was started for (`rl mcp --harness <h>`).
+2. For Claude, `CLAUDE_CODE_SESSION_ID`, matched against the session ids on the list.
 3. Otherwise `send` needs `from` and `inbox` needs `as`.
 
 A known caller wins over a passed `from`/`as`. Codex sets no id Relay knows, so it takes step 3.
 Addresses: a held session is its name; a hooked-only one its full session id; a native one its
-name, or the harness id when the name is empty or repeats.
+name, or the harness id when the name is empty or repeats. `send` also takes the row's `^r` title
+or a conversation id. A `send` to a held name asks no harness for its list.
 
-`rl setup` registers it: Claude as `mcpServers.relay` in `~/.claude.json`, Codex as
-`[mcp_servers.relay]` in `config.toml`, Gemini as `mcpServers.relay` in `settings.json`. Hook
+`rl setup` registers `rl mcp --harness <h>`: Claude through `claude mcp add --scope user` (run
+with a timeout in a process group of its own; `~/.claude.json` is only read, to compare and to
+confirm), Codex as `[mcp_servers.relay]` in `config.toml` with `env_vars` for `RELAY_HOME`,
+`RELAY_SESSION` and `RELAY_SESSION_AGENT`, Gemini as `mcpServers.relay` in `settings.json`. Where
+the Relay home is not the default, each entry carries `RELAY_HOME`. Hook
 files are edited in place keeping key order, comments (TOML) and file mode. A file that does not
 parse is left alone and reported.
 
@@ -148,7 +157,7 @@ Taken from the task reports; none is exercised by the tests.
 - What `claude --bg` prints (the first 8-hex word is taken as the id).
 - `claude stop <id>` on a live session.
 - That `codex resume <id>` attaches to a thread the app-server has loaded, and when a thread stays loaded.
-- The Gemini MCP entry format; `.claude.json` under `CLAUDE_CONFIG_DIR`.
+- The Gemini MCP entry format.
 - Whether `claude --bg` sessions run user-level hooks (why the list asks `claude agents`).
 
 Live tests against real CLIs are `#[ignore]`. Tests never touch the real `~/.relay`, `~/.claude`,
