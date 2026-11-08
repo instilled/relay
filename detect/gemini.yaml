@@ -1,15 +1,11 @@
 # Google's Gemini CLI. Its sessions outside Relay, and the exact state of
-# Relay's own gemini runs, come from user-level hooks `rl setup` adds to
-# ~/.gemini/settings.json once you say yes; without them, the PTY is all
-# there is. Its prompt is the value of -p, so it goes in place of {prompt}
-# rather than at the end.
+# the gemini sessions Relay holds, come from user-level hooks `rl setup` adds
+# to ~/.gemini/settings.json once you say yes; without them, the PTY is all
+# there is.
 kind: agent
 bins: [gemini]
 icon: "✧"        # its rows in the panel; one column wide
 color: "#4c8df6"    # #rrggbb; without one, the foreground
-headless: ["-p", "{prompt}"]
-model_flag: ["-m"]
-small_model: flash-lite   # its own alias for the smallest model
 resume: ["--resume", "{session}"]   # in the session's own folder: gemini keeps them per project
 # Its own sessions, outside Relay (rl-detect/src/sessions.rs says how this
 # block reads). What gemini's docs and source said on 2026-10-13 is beside
@@ -34,11 +30,11 @@ sessions:
       # Its only notification type: a tool waits for your approval.
       Notification:
         by: notification_type
-        ToolPermission: { state: needs, waiting_for: "permission prompt", says: "{message}" }
+        ToolPermission: { state: needs, waiting_for: "permission prompt" }
       AfterTool: carries-on
       AfterAgent: idle
       # Uncertain: whether it fires when gemini is killed, hence the pid
-      # check in rld.
+      # check on the list.
       SessionEnd: ended
     # Its own settings, set with the hooks where the file has none. In the
     # alternate buffer gemini redraws its whole screen rather than reprinting

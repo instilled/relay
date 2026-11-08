@@ -1,0 +1,157 @@
+{
+ "state": "blocked",
+ "detail": "the summary of 8af077cd",
+ "tempo": "blocked",
+ "needs": "what 8af077cd needs",
+ "children": [
+  {
+   "id": "282",
+   "href": "https://github.com/acme/flint-platform/pull/282",
+   "kind": "pr"
+  },
+  {
+   "id": "726",
+   "href": "https://github.com/acme/flint-platform/pull/726",
+   "kind": "pr"
+  },
+  {
+   "id": "753",
+   "href": "https://github.com/acme/flint-platform/pull/753",
+   "kind": "pr"
+  },
+  {
+   "id": "asset-onboarding-flow.html",
+   "href": "https://x/frame/3",
+   "kind": "frame",
+   "title": "a title"
+  },
+  {
+   "id": "asset-onboarding-wireframes.html",
+   "href": "https://x/frame/4",
+   "kind": "frame",
+   "title": "a title"
+  },
+  {
+   "id": "mandate-onboarding-wireframes.html",
+   "href": "https://x/frame/5",
+   "kind": "frame",
+   "title": "a title"
+  },
+  {
+   "id": "canvas.json",
+   "href": "https://x/frame/6",
+   "kind": "frame",
+   "title": "a title"
+  },
+  {
+   "id": "canvas.json",
+   "href": "https://x/frame/7",
+   "kind": "frame",
+   "title": "a title"
+  },
+  {
+   "id": "canvas.json",
+   "href": "https://x/frame/8",
+   "kind": "frame",
+   "title": "a title"
+  },
+  {
+   "id": "1035",
+   "href": "https://github.com/acme/flint-platform/pull/1035",
+   "kind": "pr"
+  },
+  {
+   "id": "1040",
+   "href": "https://github.com/acme/flint-platform/pull/1040",
+   "kind": "pr"
+  },
+  {
+   "id": "1042",
+   "href": "https://github.com/acme/flint-platform/pull/1042",
+   "kind": "pr"
+  },
+  {
+   "id": "1045",
+   "href": "https://github.com/acme/flint-platform/pull/1045",
+   "kind": "pr"
+  },
+  {
+   "id": "1057",
+   "href": "https://github.com/acme/flint-platform/pull/1057",
+   "kind": "pr"
+  },
+  {
+   "id": "1058",
+   "href": "https://github.com/acme/flint-platform/pull/1058",
+   "kind": "pr"
+  },
+  {
+   "id": "tsk1623-report.html",
+   "href": "https://x/frame/15",
+   "kind": "frame",
+   "title": "a title"
+  },
+  {
+   "id": "converters.html",
+   "href": "https://x/frame/16",
+   "kind": "frame",
+   "title": "a title"
+  },
+  {
+   "id": "tender-corpus.html",
+   "href": "https://x/frame/17",
+   "kind": "frame",
+   "title": "a title"
+  },
+  {
+   "id": "row-box-check.html",
+   "href": "https://x/frame/18",
+   "kind": "frame",
+   "title": "a title"
+  },
+  {
+   "id": "1114",
+   "href": "https://github.com/acme/flint-platform/pull/1114",
+   "kind": "pr"
+  },
+  {
+   "id": "mandate-reading-summary.html",
+   "href": "https://x/frame/20",
+   "kind": "frame",
+   "title": "a title"
+  },
+  {
+   "id": "mock-register-first.html",
+   "href": "https://x/frame/21",
+   "kind": "frame",
+   "title": "a title"
+  },
+  {
+   "id": "tender-corpus.html",
+   "href": "https://x/frame/22",
+   "kind": "frame",
+   "title": "a title"
+  },
+  {
+   "id": "mandate-erd.html",
+   "href": "https://x/frame/23",
+   "kind": "frame",
+   "title": "a title"
+  },
+  {
+   "id": "mandate-flow.html",
+   "href": "https://x/frame/24",
+   "kind": "frame",
+   "title": "a title"
+  }
+ ],
+ "name": "pf/onb: asset list onboarding",
+ "sessionId": "8af077cd-5fe3-442e-8f19-c93c67918b40",
+ "resumeSessionId": "8af077cd-5fe3-442e-8f19-c93c67918b40",
+ "daemonShort": "8af077cd",
+ "cwd": "/w/flint-platform",
+ "createdAt": "2026-08-19T15:38:47.165Z",
+ "updatedAt": "2026-11-07T13:29:37.886Z",
+ "firstTerminalAt": "2026-08-19T15:56:08.447Z",
+ "backend": "daemon"
+}

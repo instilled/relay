@@ -1,0 +1,27 @@
+{
+ "state": "done",
+ "detail": "the summary of 059a4700",
+ "tempo": "idle",
+ "children": [
+  {
+   "id": "6",
+   "href": "https://github.com/acme/flint-os/pull/6",
+   "kind": "pr"
+  },
+  {
+   "id": "9",
+   "href": "https://github.com/acme/flint-os/pull/9",
+   "kind": "pr"
+  }
+ ],
+ "name": "Finance",
+ "sessionId": "059a4700-6b43-4fb2-9311-f09d35b7e0ac",
+ "resumeSessionId": "130f1071-16f7-404c-afc7-1a0133c43cd4",
+ "daemonShort": "059a4700",
+ "cwd": "/w/flint-os-docs",
+ "createdAt": "2026-11-06T12:24:42.385Z",
+ "updatedAt": "2026-11-06T12:28:50.028Z",
+ "firstTerminalAt": "2026-11-06T12:25:21.449Z",
+ "lastTerminalAt": "2026-11-06T12:25:21.449Z",
+ "backend": "daemon"
+}

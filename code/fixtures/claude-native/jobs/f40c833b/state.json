@@ -1,0 +1,36 @@
+{
+ "state": "working",
+ "detail": "the summary of f40c833b",
+ "tempo": "idle",
+ "children": [
+  {
+   "id": "1323",
+   "href": "https://github.com/acme/flint-platform/pull/1323",
+   "kind": "pr"
+  },
+  {
+   "id": "1343",
+   "href": "https://github.com/acme/flint-platform/pull/1343",
+   "kind": "pr"
+  },
+  {
+   "id": "1347",
+   "href": "https://github.com/acme/flint-platform/pull/1347",
+   "kind": "pr"
+  },
+  {
+   "id": "1350",
+   "href": "https://github.com/acme/flint-platform/pull/1350",
+   "kind": "pr"
+  }
+ ],
+ "name": "pf/infra: upload gcs notify",
+ "sessionId": "f40c833b-fc9e-45b4-b31a-718b23f6c12f",
+ "resumeSessionId": "f40c833b-fc9e-45b4-b31a-718b23f6c12f",
+ "daemonShort": "f40c833b",
+ "cwd": "/w/flint-platform",
+ "createdAt": "2026-10-30T13:48:08.325Z",
+ "updatedAt": "2026-11-07T23:24:41.104Z",
+ "firstTerminalAt": "2026-10-30T14:17:00.469Z",
+ "backend": "daemon"
+}

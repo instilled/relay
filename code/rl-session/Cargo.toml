@@ -1,6 +1,6 @@
 [package]
 name = "rl-session"
-description = "Relay session holder: a detached process that owns one run's PTY (or pipes) and outlives the daemon"
+description = "Relay session holder: a detached process that owns one session's PTY and outlives rl"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

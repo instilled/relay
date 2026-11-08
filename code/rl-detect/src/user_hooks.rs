@@ -10,16 +10,15 @@
 //! agent whose hooks are written another way would need that way here.
 //!
 //! These live in the agent's user-level file, so every session of that
-//! agent calls them, Relay's runs and the rest alike. `rl hook` tells them
-//! apart by `RELAY_RUN`: a run's hook posts the run's signal
-//! (`UserHooks::signal`); any other tells `rld` of the session
-//! (`UserHooks::told`), which keeps it on the list as one of the agent's
-//! own. Where a Relay run of the agent's has hooks of its own beside these
-//! (Claude's, `claude::settings_json`, passed as `--settings`), the marker
-//! tells this copy apart, and it is never a run's signal: under a run of
-//! that agent's, `rld` lets its word go; under any other run (a claude
-//! started in a shell run), or none, it tells of one of the agent's own
-//! sessions.
+//! agent calls them, Relay's held sessions and the rest alike. `rl hook`
+//! tells them apart by `RELAY_SESSION`: under a session Relay holds of that
+//! agent's, the word is that session's; any other is one of the agent's
+//! own (`UserHooks::told`), which keeps it on the list. Where a held
+//! session of the agent's has hooks of its own beside these (Claude's,
+//! `claude::settings_json`, passed as `--settings`), the marker tells this
+//! copy apart: under a held session of that agent's it is let go; under
+//! any other (a claude started in a held shell), or none, it tells of one
+//! of the agent's own sessions.
 //!
 //! Beside the hooks, a profile may name settings of the agent's own that
 //! make it draw well under Relay (`UserHooks::settings`, Gemini's
@@ -32,14 +31,12 @@
 //! but Relay's own (`is_relays`), and a file that does not read is never
 //! rewritten.
 
-use crate::Registry;
 use crate::sessions::UserHooks;
 use anyhow::{Context, Result, bail};
 use serde_json::{Map, Value, json};
 use std::path::{Path, PathBuf};
 
-/// The agent a hook named by its event alone is: Claude's, written before
-/// the agent was named.
+/// Claude.
 pub const CLAUDE: &str = crate::claude::DIALECT;
 /// Codex, whose own `config.toml` may hold hooks too (`inline_hooks`).
 pub const CODEX: &str = "codex";
@@ -48,7 +45,7 @@ pub const CODEX: &str = "codex";
 /// (`claude::settings_json`).
 pub const USER: &str = crate::sessions::MARKER;
 
-/// Set in the environment of the `claude` that `rld` itself runs
+/// Set in the environment of the `claude` that Relay itself runs
 /// (`claude agents`, `claude stop`): should that fire a user-level hook,
 /// `rl hook` says nothing of it. Otherwise each ask could tell of a new
 /// session, which calls for another ask, and so on. Its value is the Unix
@@ -85,29 +82,11 @@ pub fn is_asking(value: Option<&str>, now: u64) -> bool {
         .is_some_and(|set| set <= now + ASKING_SKEW && now.saturating_sub(set) < ASKING_FOR)
 }
 
-/// Whether `agent`'s hook, carrying `run`'s `RELAY_RUN`, is not that run's:
-/// the agent was started inside it. So when the run is a shell or a
-/// command, or another agent whose hooks the `registry` knows (a Claude run
-/// calling `codex exec`). An agent run of a CLI Relay does not know, or
-/// none named, may be this agent by another name (`npx @openai/codex`):
-/// its hooks are its own.
-pub fn foreign(run: &rl_proto::types::Run, agent: &str, registry: &Registry) -> bool {
-    use rl_proto::types::RunKind;
-    match run.kind {
-        RunKind::Shell | RunKind::Command | RunKind::Plugin => true,
-        _ => run
-            .cli
-            .as_deref()
-            .is_some_and(|cli| cli != agent && registry.user_hooks(cli).is_some()),
-    }
-}
-
 /// The command an event's hook runs: with the agent's marker after the
-/// event where it has one (`USER`), a word an older `rl` does not know, and
-/// so leaves be.
+/// event where it has one (`USER`).
 ///
-/// `|| true`: whatever `rl` does — gone (127), an older one that does not
-/// know these words (clap's 2) — the hook succeeds. Gemini takes exit 2 as
+/// `|| true`: whatever `rl` does — gone (127), one that refuses these
+/// words (clap's 2) — the hook succeeds. Gemini takes exit 2 as
 /// "block", Claude too on some events, and codex warns on any failure;
 /// Relay's hook never does any of it.
 pub fn command(rl_bin: &Path, hooks: &UserHooks, event: &str) -> String {
@@ -159,9 +138,8 @@ pub fn inline_hooks(hooks_file: &Path) -> bool {
 /// Whether `command` is one of Relay's hooks for the agent: `rl hook
 /// <agent> <Event>`, by whatever path `rl` was installed at — with the
 /// agent's marker after it where it has one, as a run's own
-/// (`claude::settings_json`) has no place in the user's file. With or
-/// without the `|| true` an older Relay did not write: an install brings
-/// such a one up to date.
+/// (`claude::settings_json`) has no place in the user's file, and the
+/// `|| true` every one of Relay's ends with.
 pub fn is_relays(command: &str, hooks: &UserHooks) -> bool {
     program(command, hooks).is_some()
 }
@@ -171,9 +149,10 @@ pub fn is_relays(command: &str, hooks: &UserHooks) -> bool {
 /// command.
 fn program(command: &str, hooks: &UserHooks) -> Option<String> {
     let mut words: Vec<&str> = command.split_whitespace().collect();
-    if words.ends_with(&["||", "true"]) {
-        words.truncate(words.len() - 2);
+    if !words.ends_with(&["||", "true"]) {
+        return None;
     }
+    words.truncate(words.len() - 2);
     if let Some(marker) = &hooks.marker {
         if words.last() != Some(&marker.as_str()) {
             return None;
@@ -201,7 +180,7 @@ fn runs(program: &str) -> bool {
 
 /// The file as it reads: none when it is not there, an error when it is
 /// there and is not a JSON object.
-fn read(path: &Path) -> Result<Option<Map<String, Value>>> {
+pub fn read(path: &Path) -> Result<Option<Map<String, Value>>> {
     let text = match std::fs::read_to_string(path) {
         Ok(t) => t,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -405,13 +384,17 @@ fn target(path: &Path) -> PathBuf {
 /// followed, so a file kept elsewhere (a dotfiles checkout) is the one
 /// changed. The sibling is made with the file's own permissions from the
 /// start (a new one, the user's alone): settings can hold tokens.
-fn write(path: &Path, doc: &Map<String, Value>) -> Result<()> {
+pub fn write(path: &Path, doc: &Map<String, Value>) -> Result<()> {
+    write_text(path, &(serde_json::to_string_pretty(doc)? + "\n"))
+}
+
+/// `write` for text that is not JSON (Codex's `config.toml`).
+pub fn write_text(path: &Path, text: &str) -> Result<()> {
     use std::io::Write;
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
     let path = target(path);
     let dir = path.parent().context("a file with no folder")?;
     std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-    let text = serde_json::to_string_pretty(doc)? + "\n";
     let name = path.file_name().context("a file with no name")?.to_string_lossy();
     let tmp = dir.join(format!(".{name}.relay-{}", std::process::id()));
     let mode = std::fs::metadata(&path).map_or(0o600, |m| m.permissions().mode() & 0o7777);
@@ -442,6 +425,7 @@ fn write(path: &Path, doc: &Map<String, Value>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Registry;
 
     const RL: &str = "/opt/relay/bin/rl";
 
@@ -539,47 +523,22 @@ mod tests {
             after[1]["hooks"][0]["command"],
             "'/opt/relay/bin/rl' hook gemini AfterAgent || true"
         );
-        // One an older Relay wrote, with no `|| true`: brought up to date, not doubled.
+        // One with no `|| true` is not Relay's: left alone, ours added.
         let mut v = doc(&path);
         v["hooks"]["AfterAgent"][1]["hooks"][0]["command"] = json!("/opt/relay/bin/rl hook gemini AfterAgent");
         std::fs::write(&path, serde_json::to_string(&v).unwrap()).unwrap();
-        assert!(installed(&path, &gemini).unwrap());
+        assert!(!is_relays("/opt/relay/bin/rl hook gemini AfterAgent", &gemini));
         assert!(install(&path, &gemini, Path::new(RL)).unwrap());
         let after = doc(&path)["hooks"]["AfterAgent"].as_array().unwrap().clone();
-        assert_eq!(after.len(), 2);
+        assert_eq!(after.len(), 3);
         assert_eq!(
             after[1]["hooks"][0]["command"],
+            "/opt/relay/bin/rl hook gemini AfterAgent"
+        );
+        assert_eq!(
+            after[2]["hooks"][0]["command"],
             "'/opt/relay/bin/rl' hook gemini AfterAgent || true"
         );
-    }
-
-    #[test]
-    fn a_hook_is_foreign_to_a_shell_a_command_or_another_known_agent_only() {
-        use rl_proto::types::{Run, RunKind};
-        let reg = Registry::builtin();
-        let run = |kind, cli: Option<&str>| {
-            let mut r = Run::new(
-                "r1",
-                kind,
-                "t",
-                vec!["x".into()],
-                "/w",
-                "/w",
-                "2026-10-13T10:00:00Z".parse().unwrap(),
-            );
-            r.cli = cli.map(Into::into);
-            r
-        };
-        assert!(foreign(&run(RunKind::Shell, None), CODEX, &reg));
-        assert!(foreign(&run(RunKind::Command, None), CODEX, &reg));
-        assert!(foreign(&run(RunKind::Agent, Some("claude")), CODEX, &reg));
-        assert!(foreign(&run(RunKind::Agent, Some("gemini")), CODEX, &reg));
-        assert!(!foreign(&run(RunKind::Agent, Some("codex")), CODEX, &reg));
-        // A wrapper Relay does not know (`npx @openai/codex`), or none named:
-        // the hooks are the run's own. So is a known agent with no hooks.
-        assert!(!foreign(&run(RunKind::Agent, Some("npx")), CODEX, &reg));
-        assert!(!foreign(&run(RunKind::Agent, None), "gemini", &reg));
-        assert!(!foreign(&run(RunKind::Agent, Some("cursor")), CODEX, &reg));
     }
 
     #[test]
@@ -628,7 +587,7 @@ mod tests {
         v["hooks"]["Stop"][0]["hooks"]
             .as_array_mut()
             .unwrap()
-            .push(json!({"type": "command", "command": "rl hook codex Stop"}));
+            .push(json!({"type": "command", "command": "rl hook codex Stop || true"}));
         std::fs::write(&path, serde_json::to_string(&v).unwrap()).unwrap();
         assert!(uninstall(&path, &codex).unwrap());
         assert_eq!(
@@ -738,12 +697,12 @@ mod tests {
     #[test]
     fn relays_commands_are_known_by_their_words() {
         let (codex, gemini) = (h(CODEX), h("gemini"));
-        assert!(is_relays("/usr/local/bin/rl hook codex Stop", &codex));
-        assert!(is_relays("'/opt/my tools/rl' hook gemini AfterAgent", &gemini));
+        assert!(!is_relays("/usr/local/bin/rl hook codex Stop", &codex), "no `|| true`");
+        assert!(is_relays("/usr/local/bin/rl hook codex Stop || true", &codex));
         assert!(is_relays("'/opt/my tools/rl' hook gemini AfterAgent || true", &gemini));
         assert!(is_relays("'/usr/local/bin/rl' hook codex Stop ||   true  ", &codex));
         assert!(!is_relays("'/usr/local/bin/rl' hook codex || true", &codex));
-        assert!(is_relays("rl hook codex Whatever", &codex));
+        assert!(is_relays("rl hook codex Whatever || true", &codex));
         assert!(!is_relays("/usr/local/bin/rl hook gemini Stop", &codex));
         assert!(!is_relays("/bin/curl hook codex Stop", &codex));
         assert!(!is_relays("rl hook codex", &codex));
@@ -931,11 +890,14 @@ mod tests {
     fn claudes_user_level_hook_is_known_by_its_user_word() {
         let (claude, codex) = (h(CLAUDE), h(CODEX));
         assert!(is_relays("'/opt/my tools/rl' hook claude Stop --user || true", &claude));
-        assert!(is_relays("/usr/local/bin/rl hook claude Notification --user", &claude));
+        assert!(is_relays(
+            "/usr/local/bin/rl hook claude Notification --user || true",
+            &claude
+        ));
         assert!(!is_relays("/usr/local/bin/rl hook claude Stop", &claude), "a run's own");
         assert!(!is_relays("/usr/local/bin/rl hook claude --user || true", &claude));
-        assert!(!is_relays("/usr/local/bin/rl hook codex Stop --user", &claude));
-        assert!(!is_relays("/usr/local/bin/rl hook claude Stop --user", &codex));
+        assert!(!is_relays("/usr/local/bin/rl hook codex Stop --user || true", &claude));
+        assert!(!is_relays("/usr/local/bin/rl hook claude Stop --user || true", &codex));
         assert_eq!(
             command(Path::new("/x/it's/rl"), &claude, "Stop"),
             "'/x/it'\\''s/rl' hook claude Stop --user || true"

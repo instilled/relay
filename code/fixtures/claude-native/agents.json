@@ -1,0 +1,93 @@
+[
+ {
+  "id": "8af077cd",
+  "cwd": "/w/flint-platform",
+  "kind": "background",
+  "startedAt": 1787153927165,
+  "sessionId": "8af077cd-5fe3-442e-8f19-c93c67918b40",
+  "name": "pf/onb: asset list onboarding",
+  "state": "blocked"
+ },
+ {
+  "pid": 8074,
+  "id": "4a088e61",
+  "cwd": "/w/flint-os-product",
+  "kind": "background",
+  "startedAt": 1794039542131,
+  "sessionId": "2132ce0a-647c-43a1-9c71-fa758bc20c12",
+  "name": "Product Capability Rework",
+  "status": "idle",
+  "state": "blocked"
+ },
+ {
+  "pid": 20762,
+  "id": "51eef448",
+  "cwd": "/w/flint-platform/.claude/worktrees/feat+dev-edge-live-comments",
+  "kind": "background",
+  "startedAt": 1794059642054,
+  "sessionId": "51eef448-aac2-4594-8744-5069c430df1a",
+  "name": "commenting",
+  "status": "busy",
+  "state": "done"
+ },
+ {
+  "pid": 5626,
+  "id": "5286f002",
+  "cwd": "/w/flint-platform/.claude/worktrees/tsk-1820-drop-pgboss",
+  "kind": "background",
+  "startedAt": 1794062231831,
+  "sessionId": "ed8133d0-e8b6-49e2-a7ca-f22ed0b7dd80",
+  "name": "pf/infra: del gpboss",
+  "status": "busy",
+  "state": "working"
+ },
+ {
+  "pid": 77609,
+  "id": "f40c833b",
+  "cwd": "/w/flint-platform/.claude/worktrees/feat-prj-309-landing-promote",
+  "kind": "background",
+  "startedAt": 1794079430043,
+  "sessionId": "f40c833b-fc9e-45b4-b31a-718b23f6c12f",
+  "name": "pf/infra: upload gcs notify",
+  "status": "idle",
+  "state": "working"
+ },
+ {
+  "id": "059a4700",
+  "cwd": "/w/flint-os-docs",
+  "kind": "background",
+  "startedAt": 1793967882385,
+  "sessionId": "059a4700-6b43-4fb2-9311-f09d35b7e0ac",
+  "name": "Finance",
+  "state": "done"
+ },
+ {
+  "id": "a8b1e728",
+  "cwd": "/w/flint-agent-marketplace-internal",
+  "kind": "background",
+  "startedAt": 1787038124205,
+  "sessionId": "a8b1e728-4671-4524-b188-e7da795d7e29",
+  "name": "<<placeholder>>",
+  "state": "done"
+ },
+ {
+  "pid": 6109,
+  "id": "a7dafda6",
+  "cwd": "/w/flint-os-product",
+  "kind": "background",
+  "startedAt": 1794094089598,
+  "sessionId": "a7dafda6-d951-451e-ba3a-b20c53cc4e3d",
+  "name": "product/triage: all pending",
+  "status": "idle",
+  "state": "blocked"
+ },
+ {
+  "pid": 4242,
+  "cwd": "/w/relay",
+  "kind": "interactive",
+  "startedAt": 1794090000000,
+  "sessionId": "0f0f0f0f-0000-4000-8000-000000000000",
+  "name": "in a terminal",
+  "status": "busy"
+ }
+]

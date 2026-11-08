@@ -1,0 +1,47 @@
+#!/bin/sh
+# The stand-in `claude` that `rl setup`'s tests register the MCP server
+# with, never the real one. It works on `.claude.json` in the folder it is
+# run in (setup runs it in the folder of the file it reads), appends each
+# call's words to `argv` there, and answers `mcp add` and `mcp remove` as
+# `claude` 2.x does for a user-scope stdio server: add writes
+# `{type, command, args, env}` and fails when the name is there; remove
+# fails when it is not. It keeps no other keys (the real one does).
+printf '%s\n' "$*" >> argv
+[ "$1" = mcp ] || exit 2
+there() { grep -q '"relay"' .claude.json 2>/dev/null; }
+case "$2" in
+add)
+	shift 2
+	env=""
+	while [ $# -gt 0 ] && [ "$1" != -- ]; do
+		case "$1" in
+		-e)
+			env="$env${env:+,}\"${2%%=*}\":\"${2#*=}\""
+			shift 2
+			;;
+		*) shift ;;
+		esac
+	done
+	shift
+	if there; then
+		echo 'MCP server relay already exists in user config' >&2
+		exit 1
+	fi
+	cmd=$1
+	shift
+	args=""
+	for a in "$@"; do args="$args${args:+,}\"$a\""; done
+	printf '{"mcpServers":{"relay":{"type":"stdio","command":"%s","args":[%s],"env":{%s}}}}\n' \
+		"$cmd" "$args" "$env" > .claude.json
+	echo "Added stdio MCP server relay with command: $cmd $* to user config"
+	;;
+remove)
+	if ! there; then
+		echo 'No MCP server named "relay" in user scope' >&2
+		exit 1
+	fi
+	printf '{"mcpServers":{}}\n' > .claude.json
+	echo 'Removed MCP server relay from user config'
+	;;
+*) exit 2 ;;
+esac

@@ -1,0 +1,21 @@
+{
+ "state": "working",
+ "detail": "the summary of 5286f002",
+ "tempo": "active",
+ "children": [
+  {
+   "id": "1357",
+   "href": "https://github.com/acme/flint-platform/pull/1357",
+   "kind": "pr"
+  }
+ ],
+ "name": "pf/infra: del gpboss",
+ "sessionId": "5286f002-d7b3-423f-be2a-1ddf0912d602",
+ "resumeSessionId": "ed8133d0-e8b6-49e2-a7ca-f22ed0b7dd80",
+ "daemonShort": "5286f002",
+ "cwd": "/w/flint-platform",
+ "createdAt": "2026-11-07T14:46:14.038Z",
+ "updatedAt": "2026-11-07T23:33:49.094Z",
+ "firstTerminalAt": "2026-11-07T19:55:21.781Z",
+ "backend": "daemon"
+}
