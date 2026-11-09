@@ -134,6 +134,18 @@ Keys a profile accepts:
 Unknown keys are an error. Old keys such as `headless`, `model_flag`, `small_model` and `says` no
 longer load; remove them. See `detect/claude.yaml` and `detect/codex.yaml` for worked examples.
 
+## Environment
+
+A session Relay holds gets:
+
+| variable | holds |
+| --- | --- |
+| `RL_SESSION` | the session's name |
+| `RL_SESSION_AGENT` | the harness it runs (`sh` for a shell) |
+| `RELAY_HOME` | the Relay home it belongs to|
+
+To show it in a zsh prompt: `PROMPT='${RL_SESSION:+[$RL_SESSION] }'$PROMPT`.
+
 ## For agents
 
 `rl mcp` is a stdio MCP server with three tools:
@@ -142,8 +154,8 @@ longer load; remove them. See `detect/claude.yaml` and `detect/codex.yaml` for w
 - `send(to, text, from?)`: leave a message for another agent, by address, title or conversation id. An unknown address is an error with close matches.
 - `inbox(as?)`: take your waiting messages, oldest first. They are deleted as they are read.
 
-Your address is found in this order: `RELAY_SESSION`, when the held session runs the harness the
-server was started for (`RELAY_SESSION_AGENT`, so an agent started in a held shell is not the shell),
+Your address is found in this order: `RL_SESSION`, when the held session runs the harness the
+server was started for (`RL_SESSION_AGENT`, so an agent started in a held shell is not the shell),
 else (Claude) `CLAUDE_CODE_SESSION_ID` matched against the list, else you pass `from` or `as`
 yourself. Codex has no automatic address yet, so it passes them.
 

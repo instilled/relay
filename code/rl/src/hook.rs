@@ -5,8 +5,8 @@
 //! from the built-in profiles and yours in `$RELAY_HOME/detect`: a hook of
 //! an agent with none there tells of no session.
 //!
-//! Where the word goes. Under a session Relay holds (`RELAY_SESSION` set) and
-//! the call is of the agent that session runs (`RELAY_SESSION_AGENT`) it is
+//! Where the word goes. Under a session Relay holds (`RL_SESSION` set) and
+//! the call is of the agent that session runs (`RL_SESSION_AGENT`) it is
 //! that session's own: `sessions/<name>/hook.json`. Otherwise (an agent run
 //! inside a held shell, say) it is one of the agent's own sessions:
 //! `state/<agent>/<session_id>.json`. `ended` removes the file.
@@ -110,8 +110,8 @@ fn target(home: &Home, hooks: &UserHooks, words: &Words, held: Option<&str>) -> 
     }
 }
 
-/// The held session this call is the own word of: `RELAY_SESSION`, when the
-/// call is of the agent that session runs (`RELAY_SESSION_AGENT`). An agent
+/// The held session this call is the own word of: `RL_SESSION`, when the
+/// call is of the agent that session runs (`RL_SESSION_AGENT`). An agent
 /// started inside a held shell is not that session's.
 fn held_session(session: Option<String>, session_agent: Option<String>, agent: &str) -> Option<String> {
     session
@@ -133,7 +133,7 @@ pub async fn hook(home: &Home, words: &Words) {
         return;
     };
     let held = held_session(
-        std::env::var("RELAY_SESSION").ok(),
+        std::env::var("RL_SESSION").ok(),
         std::env::var(crate::spawn::AGENT_ENV).ok(),
         &words.agent,
     );

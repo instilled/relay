@@ -98,7 +98,7 @@ Folders are 0700.
   native Claude one is `claude stop <id>`. `rm` removes the folder of one not running. `rl` never
   runs `claude rm`.
 - **Hook.** `rl hook <agent> <Event>` reads the hook JSON on stdin and the profile's
-  `sessions.hooks.events` and writes `hook.json` (under a held session, `RELAY_SESSION` set) or
+  `sessions.hooks.events` and writes `hook.json` (under a held session, `RL_SESSION` set) or
   `state/<agent>/<id>.json`. Claude's user-level hook says `--user` after the event; under a held
   session only the session's own hook is heard, so a call counts once.
 - **Send.** `send` resolves `to` to a session and writes a file under `mail/<key>/`, the key being
@@ -140,8 +140,8 @@ Tools: `who`, `send(to, text, from?)`, `inbox(as?)`. A tool failure is an `isErr
 
 The caller's address, in order:
 
-1. `RELAY_SESSION`, set by `rl new` on sessions Relay holds: the session's name, taken only when
-   `RELAY_SESSION_AGENT` is the harness the server was started for (`rl mcp --harness <h>`).
+1. `RL_SESSION`, set by `rl new` on sessions Relay holds: the session's name, taken only when
+   `RL_SESSION_AGENT` is the harness the server was started for (`rl mcp --harness <h>`).
 2. For Claude, `CLAUDE_CODE_SESSION_ID`, matched against the session ids on the list.
 3. Otherwise `send` needs `from` and `inbox` needs `as`.
 
@@ -153,7 +153,7 @@ or a conversation id. A `send` to a held name asks no harness for its list.
 `rl setup` registers `rl mcp --harness <h>`: Claude through `claude mcp add --scope user` (run
 with a timeout in a process group of its own; `~/.claude.json` is only read, to compare and to
 confirm), Codex as `[mcp_servers.relay]` in `config.toml` with `env_vars` for `RELAY_HOME`,
-`RELAY_SESSION` and `RELAY_SESSION_AGENT`, Gemini as `mcpServers.relay` in `settings.json`. Where
+`RL_SESSION` and `RL_SESSION_AGENT`, Gemini as `mcpServers.relay` in `settings.json`. Where
 the Relay home is not the default, each entry carries `RELAY_HOME`. Hook
 files are edited in place keeping key order, comments (TOML) and file mode. A file that does not
 parse is left alone and reported.

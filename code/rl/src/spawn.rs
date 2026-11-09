@@ -18,7 +18,7 @@ pub const SESSION_BIN_ENV: &str = "RELAY_SESSION_BIN";
 
 /// The harness a session runs, in its holder's environment: so a hook can
 /// tell the session's own agent from one run inside it (`rl hook`).
-pub const AGENT_ENV: &str = "RELAY_SESSION_AGENT";
+pub const AGENT_ENV: &str = "RL_SESSION_AGENT";
 
 pub struct Start {
     /// A registry profile name; its binary leads the argv.
@@ -231,7 +231,7 @@ async fn launch(
         .arg("--rows")
         .arg(start.rows.to_string())
         .arg("--env")
-        .arg(format!("RELAY_SESSION={name}"))
+        .arg(format!("RL_SESSION={name}"))
         .arg("--env")
         .arg(format!("{AGENT_ENV}={}", plan.harness))
         .arg("--env")
