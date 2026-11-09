@@ -18,7 +18,7 @@
 
 use crate::adapter::{Adapter, NativeRow, NativeState};
 use crate::registry::Profile;
-use crate::sessions::ID;
+use crate::sessions::{ID, TEXT};
 use anyhow::{Context, Result, anyhow, bail};
 use jiff::Timestamp;
 use rl_core::state::RunState;
@@ -49,6 +49,9 @@ pub struct Codex {
     list: Vec<String>,
     /// The profile's `sessions.attach`: `{id}` is the thread's id.
     attach: Vec<String>,
+    /// The profile's `sessions.ping`: `{id}` is the thread's id, `{text}`
+    /// what it is told.
+    ping: Vec<String>,
 }
 
 impl Codex {
@@ -61,6 +64,7 @@ impl Codex {
             bin: bin.to_string_lossy().into_owned(),
             list: s.list.as_ref()?.args.clone(),
             attach: s.attach.clone(),
+            ping: s.ping.clone(),
         })
     }
 
@@ -105,6 +109,18 @@ impl Adapter for Codex {
     /// from outside it.
     fn stop_argv(&self, _: &str) -> Option<Vec<String>> {
         None
+    }
+
+    fn ping_argv(&self, id: &str, text: &str) -> Option<Vec<String>> {
+        if self.ping.is_empty() {
+            return None;
+        }
+        let args: Vec<String> = self
+            .ping
+            .iter()
+            .map(|a| a.replace(ID, id).replace(TEXT, text))
+            .collect();
+        Some(self.argv(&args))
     }
 
     fn started_ids(&self, _: &str) -> Vec<String> {
@@ -702,6 +718,18 @@ mod tests {
         assert_eq!(c.carry_on_argv("s"), None);
         assert!(c.started_ids("anything").is_empty());
         assert_eq!(c.stop_argv("t"), None, "nothing stops a thread from outside");
+        assert_eq!(
+            c.ping_argv("01a1", "mail from x").unwrap(),
+            [
+                "codex",
+                "queue",
+                "--thread",
+                "01a1",
+                "--message",
+                "mail from x",
+                "--resume"
+            ]
+        );
     }
 
     fn script(dir: &Path, body: &str) -> PathBuf {

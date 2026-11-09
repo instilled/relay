@@ -1,0 +1,13 @@
+#!/bin/sh
+# The stand-in `codex` that `rl mcp`'s tests ping a recipient through, never
+# the real one. Run from a copy of it in the test's own folder, it writes the
+# words it was run with to `<itself>.argv`, one to a line, and what it had in
+# RELAY_ASKING to `<itself>.asking`. It knows no thread named `gone`, as
+# `codex queue` fails for one it does not know.
+printf '%s\n' "$@" > "$0.argv"
+printf '%s\n' "${RELAY_ASKING:-}" > "$0.asking"
+if [ "$3" = gone ]; then
+	echo "no thread named gone" >&2
+	exit 1
+fi
+echo "queued"

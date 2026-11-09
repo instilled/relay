@@ -91,6 +91,9 @@ pub trait Adapter: Send + Sync {
     fn carry_on_argv(&self, session_id: &str) -> Option<Vec<String>>;
     /// What stops its session `id`. None: nothing here stops one.
     fn stop_argv(&self, id: &str) -> Option<Vec<String>>;
+    /// What tells its session `id` `text` from outside it (codex: queues it
+    /// on the thread). None: nothing outside it can.
+    fn ping_argv(&self, id: &str, text: &str) -> Option<Vec<String>>;
     /// The ids a start or a carry-on may have said it began, in what it
     /// printed, the likeliest first. Only its listing says which it is
     /// (`start`).
@@ -354,6 +357,9 @@ mod tests {
         fn stop_argv(&self, _: &str) -> Option<Vec<String>> {
             None
         }
+        fn ping_argv(&self, _: &str, _: &str) -> Option<Vec<String>> {
+            None
+        }
         fn started_ids(&self, printed: &str) -> Vec<String> {
             printed
                 .split_whitespace()
@@ -444,6 +450,9 @@ mod tests {
                 None
             }
             fn stop_argv(&self, _: &str) -> Option<Vec<String>> {
+                None
+            }
+            fn ping_argv(&self, _: &str, _: &str) -> Option<Vec<String>> {
                 None
             }
             fn started_ids(&self, _: &str) -> Vec<String> {
