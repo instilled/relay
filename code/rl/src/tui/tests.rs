@@ -1,6 +1,6 @@
 //! The list as drawn, on a test terminal, over a temp home.
 
-use super::App;
+use super::{App, help};
 use crate::config::{Config, Grouping};
 use crate::sources::{NativeRow, NativeState};
 use crate::store::sessions::{self, Meta};
@@ -302,24 +302,73 @@ async fn ctrl_c_twice_quits_and_once_only_says_so() {
 }
 
 #[tokio::test]
-async fn ctrl_h_and_f1_show_the_shortcuts_esc_puts_them_away_and_a_question_mark_types() {
+async fn ctrl_h_and_f1_toggle_the_grid_esc_closes_it_and_a_question_mark_types() {
     let f = fixture();
     let mut app = list(&f).await;
-    assert!(shown(&app).contains("^h/F1 shortcuts"));
+    const GRID: &str = "ctrl+t to pin to top";
+    assert!(shown(&app).contains("ctrl+h/f1 for help"), "{}", shown(&app));
+    assert!(!shown(&app).contains(GRID));
     ctrl(&mut app, 'h');
-    assert!(shown(&app).contains("by project/state"));
+    assert!(shown(&app).contains(GRID));
+    ctrl(&mut app, 'h');
+    assert!(!shown(&app).contains(GRID), "ctrl+h again puts it away");
+    ctrl(&mut app, 'h');
     press(&mut app, KeyCode::Esc);
+    assert!(!shown(&app).contains(GRID), "esc closes it");
     run(&mut app, "/help");
-    assert!(shown(&app).contains("by project/state"), "/help opens them");
+    assert!(shown(&app).contains(GRID), "/help opens it");
+    // With a line typed, esc closes the grid first and leaves the line.
+    typed(&mut app, "make");
+    ctrl(&mut app, 'h');
+    assert!(shown(&app).contains(GRID));
     press(&mut app, KeyCode::Esc);
-    assert!(!shown(&app).contains("by project/state"));
+    assert!(!shown(&app).contains(GRID));
+    assert_eq!(app.cmd.line.text(), "make");
+    press(&mut app, KeyCode::Esc);
     press(&mut app, KeyCode::F(1));
-    assert!(shown(&app).contains("by project/state"));
+    assert!(shown(&app).contains(GRID));
     press(&mut app, KeyCode::F(1));
-    assert!(!shown(&app).contains("by project/state"));
+    assert!(!shown(&app).contains(GRID));
     press(&mut app, KeyCode::Char('?'));
     assert_eq!(app.cmd.line.text(), "?", "a ? is typed");
-    assert!(!app.shortcuts);
+    assert!(!app.help);
+}
+
+/// The grid's rows on a screen `w` wide: those under the command line.
+fn grid_rows(app: &App, w: u16) -> Vec<String> {
+    let rows = screen(app, w, 40);
+    let line = rows.iter().rposition(|r| r.contains(" ❯ ")).expect("the command line");
+    rows[line + 2..].iter().map(|r| r.trim_end().to_string()).collect()
+}
+
+#[tokio::test]
+async fn the_grid_stands_under_the_command_line_in_four_columns_wide_and_two_at_80() {
+    let f = fixture();
+    let mut app = list(&f).await;
+    ctrl(&mut app, 'h');
+    for (w, cols) in [(140, 4), (80, 2)] {
+        let rows = grid_rows(&app, w);
+        assert_eq!(
+            rows.len(),
+            help::KEYS.len().div_ceil(cols),
+            "at {w}:\n{}",
+            rows.join("\n")
+        );
+        assert!(rows[0].starts_with("  enter to attach"), "at {w}: {}", rows[0]);
+        // Each entry whole, in its row, and its row's columns where they
+        // should be.
+        for (i, k) in help::KEYS.iter().enumerate() {
+            let text = help::text(k);
+            let row = &rows[i / cols];
+            assert!(row.contains(&text), "at {w}: {text:?} is cut in {row:?}");
+            let at = row[..row.find(&text).unwrap()].chars().count();
+            assert_eq!(at, 2 + (i % cols) * ((w as usize - 2) / cols), "at {w}: {row:?}");
+        }
+        assert!(
+            !rows.iter().any(|r| r.contains("ctrl+h/f1 for help")),
+            "the grid stands in the hints' place"
+        );
+    }
 }
 
 #[tokio::test]
@@ -454,7 +503,10 @@ async fn ctrl_x_twice_stops_a_harnesss_own_session_through_it() {
     let f = fixture();
     let mut app = list(&f).await;
     on(&mut app, NATIVE);
-    assert!(shown(&app).contains("^x stop"), "the hint says what ^x does here");
+    assert!(
+        shown(&app).contains("ctrl+x twice to stop"),
+        "the hint says what ^x does here"
+    );
     ctrl(&mut app, 'x');
     assert!(shown(&app).contains("press ^x again to stop fix the login"));
     assert!(ran_in(&f.repo).is_empty(), "not on the first press");
@@ -478,7 +530,7 @@ async fn ctrl_x_twice_hides_a_harnesss_own_session_and_again_brings_it_back() {
     };
     app.set_native(vec![done]);
     on(&mut app, NATIVE);
-    assert!(shown(&app).contains("^x hide"));
+    assert!(shown(&app).contains("ctrl+x twice to hide"));
     ctrl(&mut app, 'x');
     assert!(shown(&app).contains("press ^x again to hide fix the login"));
     assert!(Config::load(&f.home).unwrap().list.hidden.is_empty(), "not yet");

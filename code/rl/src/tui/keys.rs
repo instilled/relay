@@ -2,7 +2,7 @@
 
 use super::app::{App, Arm, Mode, Search};
 use super::draw::hit_row;
-use super::{line, shortcuts};
+use super::{help, line};
 use crate::query;
 use crate::rows::{self, Names};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
@@ -60,6 +60,18 @@ impl App {
             self.key_search(k, armed);
             return;
         }
+        // The grid of keys takes `^h`, `F1` and, while it is up, `esc` first.
+        match help::take(self.help, &k) {
+            help::Take::Toggle => {
+                self.help = !self.help;
+                return;
+            }
+            help::Take::Close => {
+                self.help = false;
+                return;
+            }
+            help::Take::Pass => {}
+        }
         // The command line, once it has text, has the keys it edits with;
         // the rest are the list's as ever.
         if !self.cmd.is_empty() {
@@ -83,17 +95,6 @@ impl App {
                 line::Act::Nothing => {}
             }
         }
-        match shortcuts::take(self.shortcuts, &k) {
-            shortcuts::Take::Toggle => {
-                self.shortcuts = !self.shortcuts;
-                return;
-            }
-            shortcuts::Take::Close => {
-                self.shortcuts = false;
-                return;
-            }
-            shortcuts::Take::Pass => {}
-        }
         // Any key that types starts the line: `/` a command, anything else
         // a session to start. Searching is `^f`'s.
         if self.cmd.is_empty()
@@ -101,7 +102,7 @@ impl App {
             && !c.is_whitespace()
             && !k.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
         {
-            self.shortcuts = false;
+            self.help = false;
             self.cmd.line.insert(&c.to_string());
             return self.retyped();
         }
@@ -113,9 +114,9 @@ impl App {
 
     /// `^f`: search, starting from the filter already in force.
     pub fn open_search(&mut self) {
-        // What is typed now narrows the list: the shortcuts would only be in
+        // What is typed now narrows the list: the keys would only be in
         // the way.
-        self.shortcuts = false;
+        self.help = false;
         let mut l = line::Line::default();
         l.set_with_cursor(self.filter.clone(), self.filter.len());
         self.search = Some(Search {

@@ -5,7 +5,7 @@
 //! on either theme (see `theme`). Nothing on screen is an id.
 
 use super::app::{App, Mode};
-use super::{mark, shortcuts, theme};
+use super::{help, mark, theme};
 use crate::config::Grouping;
 use crate::git::checkout_words;
 use crate::query;
@@ -485,7 +485,7 @@ impl App {
         }
         if l.is_empty() {
             let hint = if self.filter.is_empty() {
-                " a command, or claude/codex/agy and a prompt · / for commands · ^f finds".to_string()
+                " a command, or claude/codex/agy and a prompt · / for commands · ctrl+f to find".to_string()
             } else {
                 format!(" ⌕ {} · esc clears", self.filter)
             };
@@ -494,21 +494,21 @@ impl App {
         spans
     }
 
-    /// The footer's rows at this width: the shortcuts where they are up,
+    /// The footer's rows at this width: the grid of keys where it is up,
     /// under a flash if there is one, else the one row of hints.
     pub fn foot_lines(&self, width: u16) -> Vec<Line<'static>> {
         let room = width.saturating_sub(TEXT_INDENT).max(1) as usize;
-        if !self.shortcuts || self.search.is_some() {
+        if !self.help || self.search.is_some() {
             return vec![Line::from(self.footer(room)).dim()];
         }
-        let keys = shortcuts::lines(&shortcuts::keys(shortcuts::Place::List), room);
+        let keys = help::grid(room);
         let flash = self.flashing().map(|m| Line::from(m.to_string()).dim());
         flash.into_iter().chain(keys).collect()
     }
 
     /// The footer's one row: a word that stands for a moment, or the search's
-    /// keys while it is typed, or the hints, with a pointer to the shortcuts
-    /// where there is room.
+    /// keys while it is typed, or the hints — entries of the grid's, so they
+    /// say what it does — with a pointer to the grid where there is room.
     fn footer(&self, width: usize) -> String {
         if let Some(m) = self.flashing() {
             return m.to_string();
@@ -531,21 +531,20 @@ impl App {
             return why;
         }
         let by = match self.prefs().grouping {
-            Grouping::Project => "^s by state",
-            Grouping::State => "^s by project",
+            Grouping::Project => "to group by state",
+            Grouping::State => "to group by project",
         };
         let mut hints = vec![
-            "enter attaches",
-            "type to start",
-            self.x_hint(),
-            "^f find",
-            "/ commands",
+            help::hint(help::Id::Enter, None),
+            help::hint(help::Id::Remove, Some(self.x_hint())),
+            help::hint(help::Id::Find, None),
+            help::hint(help::Id::Commands, None),
         ];
         if !self.filter.is_empty() {
-            hints.push("esc clears the search");
+            hints.insert(1, "esc to clear the search".into());
         }
-        hints.push(by);
-        shortcuts::with_hint(hints.join(" · "), width)
+        hints.push(help::hint(help::Id::Group, Some(by)));
+        help::footer(&hints, width)
     }
 
     /// A harness's lister that did not answer, while that is its last word:
@@ -566,12 +565,12 @@ impl App {
     fn x_hint(&self) -> &'static str {
         match self.selected() {
             Some(ListLine::Session(r)) => match r.source {
-                Source::Held if r.state.is_terminal() || r.state == RunState::Stale => "^x remove",
-                Source::Held => "^x stop",
-                Source::Native if r.stop.is_some() => "^x stop",
-                _ => "^x hide",
+                Source::Held if r.state.is_terminal() || r.state == RunState::Stale => "to remove",
+                Source::Held => "to stop",
+                Source::Native if r.stop.is_some() => "to stop",
+                _ => "to hide",
             },
-            _ => "^x hide",
+            _ => "to hide",
         }
     }
 

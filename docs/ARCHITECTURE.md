@@ -3,8 +3,8 @@
 **Status:** as built · **Date:** 2026-11-08 · **Tree:** `slim-step-1`
 
 [PRODUCT.md](PRODUCT.md) says what Relay is for. This file says how the tree under `code/` is
-wired. It names the code to read rather than repeating it; the keys are in `rl/src/tui/shortcuts.rs`
-and `^h`.
+wired. It names the code to read rather than repeating it; the keys are in `rl/src/tui/help.rs`
+(one table: the `^h` grid and the footer's hints) and the commands in `rl/src/tui/slash.rs`.
 
 ---
 

@@ -196,7 +196,7 @@ impl App {
             Verb::Shells => self.toggle_shells(),
             Verb::Hidden => self.toggle_hidden(),
             Verb::Group => self.toggle_grouping(),
-            Verb::Help => self.shortcuts = true,
+            Verb::Help => self.help = true,
             Verb::Quit => self.quit = true,
         }
     }

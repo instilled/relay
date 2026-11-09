@@ -154,8 +154,8 @@ pub struct App {
     pub hit: RefCell<ListHit>,
     /// How tall the list was, for paging.
     pub list_h: Cell<u16>,
-    /// Whether the footer shows the shortcuts (`^h`).
-    pub shortcuts: bool,
+    /// Whether the keys stand as a grid in the footer's place (`^h`).
+    pub help: bool,
     pub flash: Option<(String, Instant)>,
     pub arm: Option<Arm>,
     pub quit: bool,
@@ -189,7 +189,7 @@ impl App {
             scroll: Cell::new(0),
             hit: RefCell::default(),
             list_h: Cell::new(0),
-            shortcuts: false,
+            help: false,
             flash: None,
             arm: None,
             quit: false,

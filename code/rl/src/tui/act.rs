@@ -438,7 +438,7 @@ impl App {
         match self.rename_target("^r") {
             Ok(RenameTarget { key, was, own }) => {
                 self.search = None;
-                self.shortcuts = false;
+                self.help = false;
                 let mut l = line::Line::default();
                 let at = was.len();
                 l.set_with_cursor(was.clone(), at);

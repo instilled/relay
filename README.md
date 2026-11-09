@@ -39,8 +39,11 @@ Codex asks you to trust the hook once (`/hooks` in codex); Claude may ask you to
 ## The list
 
 Rows are agents and shells, under their project folder or under Needs input, Working and Done.
-Claude's and Codex's own background sessions are on it too. `^h` or `F1` shows the keys (`F1` for
-terminals that send `^h` as backspace).
+Claude's and Codex's own background sessions are on it too. `^h` or `F1` (for terminals that
+send `^h` as backspace) shows every key as a grid under the command line, in place of the footer's
+hints, the way `claude agents` does: `ctrl+r to rename`, `ctrl+f to find`, in up to four columns as
+the terminal's width allows. `^h` again, `F1` or `esc` puts it away; `/help` opens it too. The
+footer's hints are entries of the same table.
 
 At the foot of the list is a command line. Type to start a session, in the folder of the row under
 the cursor (else where `rl` was started; the line shows only the prompt `❯`):
@@ -89,6 +92,7 @@ in the footer and changes nothing; an unknown one stays on the line to mend.
 | `^a` `^l` `^o` | show agents, shells, hidden (the header shows which: `✦^a ❯^l │ ◌^o`) |
 | `^s` | group by project or by state (the header says which) |
 | `^c ^c` | quit |
+| `^h` `F1` | the keys, as a grid; again or `esc` closes it |
 
 `ctrl-\` leaves an attached session running and comes back to the list.
 
