@@ -1,32 +1,53 @@
 # Relay Product Roadmap
 
-Goal for v1:
+Goal for v1 (2026-11-07): **`claude agents`, but for every harness, plus shells, plus messaging
+between agents.** One list in the terminal you already use of every agent session — Claude's and
+Codex's own background sessions shown 1:1 as their agents views show them, Relay-held sessions for
+harnesses without a background mode and for shells, agents in other terminals from hooks — attach
+full-screen, ctrl-\ back to the list. No daemon: `rl`, `rl-session` holders and plain files.
+Spec: `docs/specs/2026-11-07-slim-relay.md`.
 
-* UC1: i want to check notion via api (cli client) periodically for new feedback log items, e.g. 1h. if it has output claude should work on it and trigger a skill then surface recommendations to me i can accept or reject.   
-* UC2: i want to check google cloud logs. on error / warn i want to trigger claude to analyse and create a notion task if i approve
+The earlier v1 goals (flows for Notion feedback and GCP logs) and everything open below them — the
+report arc, the briefer, the co-worker layer, notifications, the pane redesign — are dropped.
 
 ## Open — in the order they'd be built
 
-The next milestone is one dependable daily loop: start work → leave → get told when needed → come back to the facts → say yes to the next step. Breadth waits for it.
+One worktree and one PR off `main` per step; `main` stays green throughout. The new `code/rl` is
+built beside the old crates and takes over in step 5.
 
-* [ ] every flow on the list — a flow is a row under the flows lens from its yes on, with its trigger and next time, before it ever fired
-* [ ] a flow's own graph, the global graph dropped — a selected flow's steps drawn in its pane (`if` labels, its last firing's marks; what fires it and what it fires); `^g`, `/graph` and the global layout go
-* [ ] modules split — `tui/mod.rs` (~8,800 lines) into drawing, keys and modes, and the daemon glue, its tests beside them; `main.rs` (~1,900) trimmed; behaviour unchanged
-* [ ] facts collector (J6) — what happened when you get back, as facts: git commits + `diff --stat` per run, commands with exit codes, transcript ingestion (Claude/Codex `*.jsonl`), tokens/cost; facts first in the pane and the catch-up, the narrative below
-* [ ] notifications — Slack / mail when a question is raised, a run is blocked or a flow fails, with a quiet setting
+* [ ] slim · step 1 — the holder knows itself: `rl-session` works out its own state (working /
+  needs input / idle, last line, foreground; moved in from `rl-detect`) and keeps
+  `~/.relay/sessions/<name>/{state.json,exit}` beside its socket; `--no-tty` goes
+* [ ] slim · step 2 — `code/rl`, daemonless: the file store (`sessions/`, `state/`, `config.json`,
+  atomic writes, names claimed by folder), `rl new | ls | attach | stop` on Relay-held agents and
+  shells straight to the holder, `rl hook` writing state files
+* [ ] slim · step 3 — the list: today's grouping by project (manual order, new at the bottom,
+  `! N need you`) and by state (`^s`), filters `a`/`s`/`h`, `^f` search, today's keys, project
+  headers with their git line and badges; live by file watch, polling only while open
+* [ ] slim · step 4 — native sessions 1:1: the Claude adapter (`claude agents --all` rows with
+  their own name, state, `detail`, age and PR label; `claude attach`; an idle outside session
+  carried on with `--resume --bg`), then Codex (`codex agents` rows via the app-server; Relay-held
+  if its sessions can't be attached one by one); other-terminal agents from hooks
+* [ ] slim · step 5 — the switch: the workspace becomes `rl-core`, `rl-session`, `rl-detect`, `rl`;
+  `rl-daemon`, `rl-proto`, `rl-ledger`, `rl-flow`, `rl-cli` and `rld` deleted; README,
+  ARCHITECTURE and PRODUCT rewritten; examples/flows gone
+* [ ] slim · step 6 — messaging: `rl mcp`, a stdio MCP server with `send` / `who` / `inbox` over
+  `~/.relay/mail/<address>/`, pull only; `rl setup` registers it with each harness beside the hooks
 
 Later:
 
-* [ ] a row that needs you shows its question, not the recap — today a waiting Claude/Codex row shows its recap even while it asks for permission (open question from #142)
-* [ ] git workspaces? how to manage these? — needs a brainstorm first: today a worktree registered on its own is its own project and only the main checkout counts its worktrees
-* [ ] decision context — what's/how is the context of a question rendered beyond its summary (what the asking run last printed, the event behind an `ask` step)?
-* [ ] `rl flow run <name> --step s --firing id` — run one step of a firing again (in the flows spec, never built)
-* [ ] retention purge of archived runs — today archive is out-of-list only and `rl prune` lets the journal go; actually delete runs past the retention window
-* [ ] worktrees & ref rules — `--worktree`, branch naming, `.relay/config.yaml` ref derivation
-* [ ] ts plugin subsystem — on hold until the daily loop is dependable
+* [ ] peek and reply from the list without attaching (as `claude agents`' space)
+* [ ] socket paths that can't overflow macOS's ~104 bytes, if short names don't suffice
 
 ## Done — newest first
 
+* [x] the TUI god module split — `impl App` (176 methods, ~5k lines) distributed by pure code motion into sibling child modules of `tui/` (`select`, `act`, `flow_ops`, `catch_ops`, `feed_ops`, `summary_ops`, `join`, `shell_ops`, `keys`), and the row library `rows.rs` (~4.1k lines) split into a `rows/` folder (`model`/`group`/`name`/`word`/`build`/`order`, tests beside them); `tui/mod.rs` went 9,206 → 5,991 lines, behaviour unchanged; the `drawing`/`pane` cluster is held back to fold into the pane redesign, and `main.rs` is still to trim (#178, #179, #180, #182; CI unbroken in #181)
+* [x] reads off the single writer, bytes off the ledger — a 4-connection read-only WAL pool beside the writer carries the display / query surface (digest, events, summaries, scrollback, lookups) while the flow engine and supervisor stay on the writer for ordering; a run's terminal bytes leave SQLite for per-run append-only files under `~/.relay/io/<run>/{out,in,note}.log`, the `session_io` table keeping only `(run, seq, direction, pos, len, ts)` (#176, #177)
+* [x] a flow's own graph, the global graph dropped — a selected flow's pane draws what starts it, its steps by rank with their `if`s and last firing's marks, and the flows it starts (decided by the same `rl_flow::events` the daemon uses); `^g`, `/graph`, `graph.get` and the global layout are gone (#167)
+* [x] agents started outside Relay — Claude's, Codex's and Gemini's own sessions are rows under their folder's project with their state, told by a user-level hook `rl setup` adds on a yes (`claude agents` asked only with a reason); enter attaches to a Claude background session or carries an idle one on as a Relay run; a run sent to `/background` links to the session it became; a new agent is a `sessions:` block in its profile (#164)
+* [x] every flow on the list — a flow is a row from its yes on, with its trigger and next time (`every 30m · next in 12m`) before it ever fired, `paused` or `needs a yes again` when so; its runs stay on its row whatever their age; the headline still counts only what ran (#160)
+* [x] the templates become examples you copy — `--from`, `--set` and `--in` go; `prod-logs` and `morning-brief` live in `examples/flows` with placeholders and a test that holds them to the code (#158)
+* [x] the README says how to install Relay and use it in five minutes (#157)
 * [x] flows, writing it — `rl flow new <name> [words…]` and `/flow new` from words (the interpreter drafts `flow.md`, shown before its yes), a template (`--from prod-logs`, `--from morning-brief`, blanks by `--set`) or the bare one; `rl flow test` / `/flow test` say what would fire and which steps would run, starting nothing; the context pack teaches flows (#156)
 * [x] every lead in the catch-up keeps its title; flows in the graph no longer look joined; the badge test stops flaking (#155)
 * [x] seeing flows — a firing's outcome on the list, `catch_up: top` heads the catch-up, the flow's pane with its firings, `/summary` on a firing, steps as nodes in the graph; a missed schedule catches up once by default (#154)
