@@ -9,6 +9,7 @@ use super::app::{App, Arm, Done, Hand, Mode, Renaming, To};
 use super::cmdline::{self, Detected};
 use super::line;
 use super::remove::{self, Removal};
+use super::slash;
 use super::theme;
 use crate::cmd;
 use crate::config::{Hidden, ListPrefs};
@@ -66,7 +67,9 @@ impl App {
                 match sessions::list(&self.home).into_iter().find(|h| h.meta.name == name) {
                     None => return self.say(format!("{title} is gone")),
                     Some(h) if h.status == sessions::Status::Lost => {
-                        return self.say(format!("{title} is lost: its holder is not answering · ^x removes it"));
+                        return self.say(format!(
+                            "{title} is lost: its holder is not answering · ctrl+x removes it"
+                        ));
                     }
                     Some(h) => To::Held(Box::new(h.meta)),
                 }
@@ -188,9 +191,13 @@ impl App {
     /// harness that is not here keeps it, and says so.
     pub(super) fn run_line(&mut self) {
         let text = self.cmd.line.text().trim().to_string();
+        if slash::is_command(&text) {
+            return self.run_command();
+        }
         let cwd = self.line_folder();
         match self.detected() {
-            None => {}
+            // A `/` line went to `run_command` above.
+            None | Some(Detected::Command(_) | Detected::UnknownCommand) => {}
             Some(Detected::Agent {
                 profile,
                 missing: Some(bin),
@@ -324,7 +331,23 @@ impl App {
     /// `^x`: armed by the first press, which says what the second will do;
     /// done by the second, if the cursor has not moved between.
     pub(super) fn key_x(&mut self, armed: Option<Arm>) {
-        let plan = match self.selected() {
+        let plan = match self.removal() {
+            Ok(p) => p,
+            Err(why) => return self.say(why),
+        };
+        match armed {
+            Some(Arm::Remove(at)) if at == self.sel => self.remove(plan),
+            Some(Arm::Remove(_)) => self.say("the line moved · ctrl+x again"),
+            _ => {
+                self.arm = Some(Arm::Remove(self.sel.clone()));
+                self.say(format!("press ctrl+x again to {}", plan.hint()));
+            }
+        }
+    }
+
+    /// What `^x` would do to the line under the cursor, or why nothing.
+    pub(super) fn removal(&self) -> Result<Removal, String> {
+        match self.selected() {
             Some(line) => {
                 let held = sessions::list(&self.home);
                 remove::plan(&line, &self.config.list, |name| {
@@ -332,29 +355,19 @@ impl App {
                 })
             }
             None => Err("nothing here to remove".into()),
-        };
-        let plan = match plan {
-            Ok(p) => p,
-            Err(why) => return self.say(why),
-        };
-        match armed {
-            Some(Arm::Remove(at)) if at == self.sel => self.remove(plan),
-            Some(Arm::Remove(_)) => self.say("the line moved · ^x again"),
-            _ => {
-                self.arm = Some(Arm::Remove(self.sel.clone()));
-                self.say(format!("press ^x again to {}", plan.hint()));
-            }
         }
     }
 
-    fn remove(&mut self, plan: Removal) {
+    /// Does what was planned for a line: stops, removes, hides or brings it
+    /// back.
+    pub(super) fn remove(&mut self, plan: Removal) {
         match plan {
             Removal::Stop { name, title } => {
                 self.say(format!("stopping {title}…"));
                 let home = self.home.clone();
                 self.work.spawn(async move {
                     match cmd::stop(&home, &name).await {
-                        Ok(()) => Done::said(format!("stopped {title} · ^x again removes it")),
+                        Ok(()) => Done::said(format!("stopped {title} · ctrl+x again removes it")),
                         Err(e) => Done::said(format!("stop {title}: {e:#}")),
                     }
                 });
@@ -398,7 +411,7 @@ impl App {
                     p.hidden.retain(|h| h.key != key);
                     p.hidden.push(Hidden { key: key.clone(), at });
                 });
-                self.say(format!("hid {title} · ^o shows the hidden"));
+                self.say(format!("hid {title} · ctrl+o shows the hidden"));
                 if !self.keys().contains(&key) {
                     self.select(next);
                     self.settle();
@@ -424,32 +437,43 @@ impl App {
     /// `^r`: a name of yours for a Relay session or a project, typed where it
     /// stands. A harness's own sessions keep the names it gives them.
     pub(super) fn rename_here(&mut self) {
-        let names = Names::new(&self.config.list.names);
-        let what = match self.selected() {
-            Some(Line::Group(h)) if h.is_project() => {
-                let own = h
-                    .workspace
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_default();
-                Ok((h.key.clone(), h.name.clone(), own))
-            }
-            Some(Line::Session(r)) if r.source == Source::Held => {
-                Ok((r.key.clone(), names.title(r).to_string(), r.name.clone()))
-            }
-            Some(Line::Session(r)) => Err(format!("{} names its own sessions", r.harness)),
-            _ => Err("^r renames a session of Relay's or a project".to_string()),
-        };
-        match what {
-            Ok((key, was, own)) => {
+        match self.rename_target("ctrl+r") {
+            Ok(RenameTarget { key, was, own }) => {
                 self.search = None;
-                self.shortcuts = false;
+                self.help = false;
                 let mut l = line::Line::default();
                 let at = was.len();
                 l.set_with_cursor(was.clone(), at);
                 self.mode = Mode::Rename(Renaming { key, line: l, was, own });
             }
             Err(why) => self.say(why),
+        }
+    }
+
+    /// What the line under the cursor is called, and its own name, if it
+    /// is one of yours to name; else why not, said as `by` would.
+    pub(super) fn rename_target(&self, by: &str) -> Result<RenameTarget, String> {
+        let names = Names::new(&self.config.list.names);
+        match self.selected() {
+            Some(Line::Group(h)) if h.is_project() => {
+                let own = h
+                    .workspace
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                Ok(RenameTarget {
+                    key: h.key.clone(),
+                    was: h.name.clone(),
+                    own,
+                })
+            }
+            Some(Line::Session(r)) if r.source == Source::Held => Ok(RenameTarget {
+                key: r.key.clone(),
+                was: names.title(r).to_string(),
+                own: r.name.clone(),
+            }),
+            Some(Line::Session(r)) => Err(format!("{} names its own sessions", r.harness)),
+            _ => Err(format!("{by} renames a session of Relay's or a project")),
         }
     }
 
@@ -475,7 +499,20 @@ impl App {
     }
 
     fn rename(&mut self, r: Renaming) {
-        let name = r.line.text().trim().to_string();
+        let name = r.line.text().to_string();
+        self.apply_name(
+            RenameTarget {
+                key: r.key,
+                was: r.was,
+                own: r.own,
+            },
+            &name,
+        );
+    }
+
+    /// The name kept for a line; empty, or its own, goes back to its own.
+    pub(super) fn apply_name(&mut self, r: RenameTarget, name: &str) {
+        let name = name.trim().to_string();
         if name == r.was {
             return;
         }
@@ -497,9 +534,9 @@ impl App {
 
     /// `^t`: the row under the cursor to the band at the top, or back among
     /// the rest. The cursor goes with it.
-    pub(super) fn toggle_pin(&mut self) {
+    pub(super) fn toggle_pin(&mut self, by: &str) {
         let Some(Line::Session(r)) = self.selected() else {
-            return self.say("^t pins a session");
+            return self.say(format!("{by} pins a session"));
         };
         let key = r.key.clone();
         let title = Names::new(&self.config.list.names).title(r).to_string();
@@ -522,25 +559,40 @@ impl App {
     /// the last none. A harness's colour for the row still wins on screen,
     /// and the footer says so.
     pub(super) fn cycle_colour(&mut self) {
-        let Some(Line::Session(r)) = self.selected() else {
-            return self.say("^g colours a session");
+        let (key, harness) = match self.colour_target("ctrl+g") {
+            Ok(t) => t,
+            Err(why) => return self.say(why),
         };
-        let key = r.key.clone();
+        let next = theme::next_colour(self.config.list.colors.get(&key).map(String::as_str));
+        self.set_colour(key, harness, next.map(str::to_string));
+    }
+
+    /// The row under the cursor's key, and the colour its harness picked for
+    /// it, if any; or why there is none to colour, said as `by` would.
+    pub(super) fn colour_target(&self, by: &str) -> Result<(String, Option<String>), String> {
+        let Some(Line::Session(r)) = self.selected() else {
+            return Err(format!("{by} colours a session"));
+        };
         let harness = r
             .color
             .as_deref()
             .filter(|c| theme::picked(c).is_some())
             .map(str::to_string);
-        let next = theme::next_colour(self.config.list.colors.get(&key).map(String::as_str));
-        self.change_prefs(|p| match next {
+        Ok((r.key.clone(), harness))
+    }
+
+    /// Your own colour for the row `key`, or none, kept; the footer says so,
+    /// and that its harness's wins where it picked one.
+    pub(super) fn set_colour(&mut self, key: String, harness: Option<String>, colour: Option<String>) {
+        self.change_prefs(|p| match &colour {
             Some(c) => {
-                p.colors.insert(key.clone(), c.to_string());
+                p.colors.insert(key.clone(), c.clone());
             }
             None => {
                 p.colors.remove(&key);
             }
         });
-        let yours = next.unwrap_or("none");
+        let yours = colour.as_deref().unwrap_or("none");
         self.say(match harness {
             Some(h) => format!("{h}'s colour wins · yours: {yours}"),
             None => format!("colour: {yours}"),
@@ -553,7 +605,7 @@ impl App {
     /// project among the projects. The cursor stays on it.
     pub(super) fn reorder(&mut self, up: bool) {
         if self.config.list.show_hidden {
-            return self.say("with hidden on the list keeps its order · ^o, then move it");
+            return self.say("with hidden on the list keeps its order · ctrl+o, then move it");
         }
         let Some(key) = self.sel.clone() else {
             return self.say("nothing here to move");
@@ -587,6 +639,14 @@ impl App {
             Err(why) => self.say(why),
         }
     }
+}
+
+/// A line you may name: its key, what it is called now, and its own name —
+/// what an empty one goes back to.
+pub struct RenameTarget {
+    pub key: String,
+    pub was: String,
+    pub own: String,
 }
 
 /// What was kept for a row, let go of once the row is.

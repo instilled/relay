@@ -3,8 +3,8 @@
 **Status:** as built · **Date:** 2026-11-08 · **Tree:** `slim-step-1`
 
 [PRODUCT.md](PRODUCT.md) says what Relay is for. This file says how the tree under `code/` is
-wired. It names the code to read rather than repeating it; the keys are in `rl/src/tui/shortcuts.rs`
-and `^h`.
+wired. It names the code to read rather than repeating it; the keys are in `rl/src/tui/help.rs`
+(one table: the `ctrl+h` grid and the footer's hints) and the commands in `rl/src/tui/slash.rs`.
 
 ---
 
@@ -68,7 +68,7 @@ and its socket.
 | `state/<agent>/<session_id>.json` | `rl hook` | a session Relay does not hold; removed on `ended` |
 | `mail/<key>/<ns>-<pid>-<n>-<from>.json` | `rl mcp` | a waiting message; deleted when read |
 | `mail/<key>/.told` | `rl hook` | when the newest mail a Claude `Stop` hook told of was sent |
-| `config.json` | `rl setup`, the list | harnesses, badges, list preferences (grouping, toggles, order, hidden, pins, names, colours by row key; `^g` cycles a row's own colour). Strict. |
+| `config.json` | `rl setup`, the list | harnesses, badges, list preferences (grouping, toggles, order, hidden, pins, names, colours by row key; `ctrl+g` cycles a row's own colour). Strict. |
 | `hooks/` | `rl new` | per-run settings passed to a harness |
 | `detect/*.yaml` | you | profile overrides |
 | `plugins/gh-pr` | `rl` | the badge script |
@@ -85,7 +85,9 @@ Folders are 0700.
   (`words`) starts that agent with the rest as its prompt (placed by the profile's `prompt`;
   Claude through its adapter's `start`, `claude --bg`); any other line runs held as
   `$SHELL -ic '<line>` and `exec $SHELL'`, a session of kind shell. Completion reads `PATH` once
-  per list.
+  per list. A line starting with `/` is a command instead (`tui/slash.rs`): each names a key's
+  action (`/pin` is `ctrl+t`, `/stop` is `ctrl+x` on a live row without the second press) and runs it on
+  the row under the cursor through the same code.
 - **List.** Held sessions come from `sessions/`. Hooked-only ones come from `state/`. Claude's and
   Codex's own come from asking them (`sessions.list` in the profile), each with its own timeout;
   one that fails is skipped. `rows/` merges them and groups them, each under its project: a
@@ -94,7 +96,7 @@ Folders are 0700.
   which has none, is a project of its own). State comes from, in order, the
   agent's hooks, the harness's own listing, then regexes over the screen.
 - **Attach.** A held session: `rl` connects to its socket, gets the screen, then live bytes.
-  `ctrl-\` detaches. A native one: `rl` runs the profile's `attach` (`claude attach <id>`,
+  `ctrl+\` detaches. A native one: `rl` runs the profile's `attach` (`claude attach <id>`,
   `codex resume <id>`) in this terminal.
 - **Stop and remove.** A held session gets a `stopped` mark, then the holder is asked to close. A
   native Claude one is `claude stop <id>`. `rm` removes the folder of one not running. `rl` never
@@ -165,7 +167,7 @@ The caller's address, in order:
 
 A known caller wins over a passed `from`/`as`. Codex sets no id Relay knows, so it takes step 3.
 Addresses: a held session is its name; a hooked-only one its full session id; a native one its
-name, or the harness id when the name is empty or repeats. `send` also takes the row's `^r` title
+name, or the harness id when the name is empty or repeats. `send` also takes the row's `ctrl+r` title
 or a conversation id. A `send` to a held name asks no harness for its list.
 
 `rl setup` registers `rl mcp --harness <h>`: Claude through `claude mcp add --scope user` (run

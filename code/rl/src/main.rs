@@ -35,7 +35,7 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Attach this terminal to a session (ctrl-\ detaches).
+    /// Attach this terminal to a session (ctrl+\ detaches).
     Attach { name: String },
     /// Close a running session.
     Stop { name: String },

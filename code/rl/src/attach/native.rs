@@ -1,5 +1,5 @@
 //! A command run under a pty of the panel's, this terminal passed through to
-//! it: how `claude attach` gets the screen, so `ctrl-\` lets go of it as it
+//! it: how `claude attach` gets the screen, so `ctrl+\` lets go of it as it
 //! does of a joined run. Keys are bytes, never parsed, as for `rl join`; the
 //! command's screen is its own, and only the window title is ours.
 //!
@@ -22,13 +22,13 @@ const GRACE: Duration = Duration::from_secs(2);
 /// How long output still on its way is waited for, once the command ended.
 const LAST_WORDS: Duration = Duration::from_millis(200);
 
-/// How long what was typed just before a `ctrl-\` has to be read.
+/// How long what was typed just before a `ctrl+\` has to be read.
 const TYPED_FIRST: Duration = Duration::from_millis(20);
 
 /// How the terminal came back.
 #[derive(Debug, PartialEq)]
 pub enum Back {
-    /// `ctrl-\`: let go of; what it was attached to goes on.
+    /// `ctrl+\`: let go of; what it was attached to goes on.
     Detached,
     /// It ended by itself, and how.
     Ended(Exit),
@@ -61,7 +61,7 @@ pub async fn hold(argv: &[String], name: &str) -> Result<Back> {
     let mut winch = signal(SignalKind::window_change())?;
     let _raw = RawMode::enable().context("entering raw mode")?;
     let mut out = tokio::io::stdout();
-    let banner = format!("\x1b[2m[relay] {name} · ctrl-\\ to detach\x1b[0m\r\n");
+    let banner = format!("\x1b[2m[relay] {name} · ctrl+\\ to detach\x1b[0m\r\n");
     out.write_all(format!("{banner}{}", title(&format!("relay · {name} · ^\\ lets go"))).as_bytes())
         .await?;
     out.flush().await?;
@@ -115,7 +115,7 @@ enum Went {
 }
 
 /// The passing through: what `sp` writes goes to `out`, watched by `alt`;
-/// `keys` go to it up to a `ctrl-\`, which lets go; `sizes` resize its pty.
+/// `keys` go to it up to a `ctrl+\`, which lets go; `sizes` resize its pty.
 /// However it comes back, it has ended: let go of, or gone wrong here, it
 /// is hung up on.
 pub async fn pass(
