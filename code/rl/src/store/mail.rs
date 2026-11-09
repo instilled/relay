@@ -61,7 +61,9 @@ pub fn send(home: &Home, key: &str, m: &Message) -> io::Result<PathBuf> {
 /// The messages waiting under `key`, oldest first, left where they are:
 /// what a hook tells of. A file that does not read is passed over.
 pub fn waiting(home: &Home, key: &str) -> Vec<Message> {
-    let mut files = mail_files(&home.mail_dir().join(component(key))).unwrap_or_default();
+    let dir = home.mail_dir().join(component(key));
+    release_stale(&dir);
+    let mut files = mail_files(&dir).unwrap_or_default();
     files.sort();
     files
         .iter()
@@ -118,7 +120,9 @@ static CLAIMS: AtomicU64 = AtomicU64::new(0);
 /// once, each message goes to exactly one. One already claimed is passed
 /// over; one that does not read is put back and left.
 pub fn take(home: &Home, key: &str) -> io::Result<Taken> {
-    let mut files = mail_files(&home.mail_dir().join(component(key)))?;
+    let dir = home.mail_dir().join(component(key));
+    release_stale(&dir);
+    let mut files = mail_files(&dir)?;
     files.sort();
     let mut taken = Taken::default();
     for path in files {
@@ -140,6 +144,47 @@ pub fn take(home: &Home, key: &str) -> io::Result<Taken> {
         }
     }
     Ok(taken)
+}
+
+/// Puts back, under its own name, every message in `dir` claimed by a
+/// process that is no longer alive (it died between claiming and removing),
+/// so it is delivered again. One claimed by a live process is its to finish;
+/// one that is gone by the time it is renamed was won by another taker.
+fn release_stale(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Some((original, pid)) = claimed_by(&name) else {
+            continue;
+        };
+        if alive(pid) {
+            continue;
+        }
+        match std::fs::rename(entry.path(), dir.join(original)) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => eprintln!("rl: could not release stale mail {}: {e}", entry.path().display()),
+        }
+    }
+}
+
+/// `.<original>.taken-<pid>-<n>` as (original, pid).
+fn claimed_by(name: &str) -> Option<(&str, i32)> {
+    let rest = name.strip_prefix('.')?;
+    let (original, claim) = rest.rsplit_once(".taken-")?;
+    let (pid, n) = claim.split_once('-')?;
+    n.parse::<u64>().ok()?;
+    let pid = pid.parse::<i32>().ok().filter(|p| *p > 0)?;
+    (!original.is_empty()).then_some((original, pid))
+}
+
+/// Whether process `pid` lives; one we may not signal still does.
+fn alive(pid: i32) -> bool {
+    use nix::errno::Errno;
+    !matches!(
+        nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None),
+        Err(Errno::ESRCH)
+    )
 }
 
 /// `path` renamed to `.<name>.taken-<pid>-<n>` beside it, where no other
@@ -285,5 +330,38 @@ mod tests {
         let unique: BTreeSet<&String> = all.iter().copied().collect();
         assert_eq!(unique.len(), N);
         assert_eq!(std::fs::read_dir(home.mail_dir().join("k")).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn mail_a_dead_taker_left_claimed_is_delivered_again() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = Home::at(tmp.path().to_path_buf());
+        let sent = send(&home, "a", &msg("b", "a", "stuck", 5)).unwrap();
+        let dir = sent.parent().unwrap().to_path_buf();
+        let name = sent.file_name().unwrap().to_string_lossy().into_owned();
+        // A pid past any the kernel hands out: nothing lives there.
+        let stale = dir.join(format!(".{name}.taken-{}-0", i32::MAX));
+        std::fs::rename(&sent, &stale).unwrap();
+        assert_eq!(waiting(&home, "a").len(), 1, "waiting sweeps too");
+        std::fs::rename(&sent, &stale).unwrap();
+        let got = take(&home, "a").unwrap();
+        let texts: Vec<_> = got.messages.iter().map(|m| m.text.as_str()).collect();
+        assert_eq!(texts, ["stuck"]);
+        assert!(take(&home, "a").unwrap().messages.is_empty());
+    }
+
+    #[test]
+    fn mail_a_live_taker_holds_is_left_alone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = Home::at(tmp.path().to_path_buf());
+        let sent = send(&home, "a", &msg("b", "a", "mine", 5)).unwrap();
+        let dir = sent.parent().unwrap().to_path_buf();
+        let name = sent.file_name().unwrap().to_string_lossy().into_owned();
+        let held = dir.join(format!(".{name}.taken-{}-0", std::process::id()));
+        std::fs::rename(&sent, &held).unwrap();
+        assert!(take(&home, "a").unwrap().messages.is_empty());
+        assert!(waiting(&home, "a").is_empty());
+        assert!(held.exists(), "still the taker's");
+        assert!(!sent.exists());
     }
 }

@@ -63,12 +63,12 @@ and its socket.
 | --- | --- | --- |
 | `sessions/<name>/meta.json` | `rl new` | name, harness, kind, cwd, start |
 | `sessions/<name>/state.json` | holder | state read from the screen |
-| `sessions/<name>/hook.json` | `rl hook` | what the agent's own hooks last said |
+| `sessions/<name>/hook.json` | `rl hook` | what the agent's own hooks last said; for a held Codex (hooks run in its daemon, profile `detached_env`) the first hook of a thread claims the session by folder and start, setting `meta.native_id` |
 | `sessions/<name>/exit`, `stopped`, `sock` | holder, `rl stop` | how it ended, that it was stopped, its socket |
 | `state/<agent>/<session_id>.json` | `rl hook` | a session Relay does not hold; removed on `ended` |
 | `mail/<key>/<ns>-<pid>-<n>-<from>.json` | `rl mcp` | a waiting message; deleted when read |
 | `mail/<key>/.told` | `rl hook` | when the newest mail a Claude `Stop` hook told of was sent |
-| `config.json` | `rl setup`, the list | harnesses, badges, list preferences (grouping, toggles, order, hidden, pins, names, colours by row key; `ctrl+g` cycles a row's own colour). Strict. |
+| `config.json` | `rl setup`, the list | harnesses, badges, list preferences (grouping, toggles, order, hidden, pins, names, colours by row key; `ctrl+g` cycles a row's own colour). `names` also holds a Relay-side name for a native or hooked row, which the harness never learns of; the list draws it with the harness's own beside it. Strict. |
 | `hooks/` | `rl new` | per-run settings passed to a harness |
 | `detect/*.yaml` | you | profile overrides |
 | `plugins/gh-pr` | `rl` | the badge script |

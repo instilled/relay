@@ -13,6 +13,7 @@
 //!     timeout: 3s
 //!     unit: s
 //!     async: true
+//!     detached_env: true
 //!     after_install: "codex asks you to trust it once: open codex, /hooks"
 //!     events:
 //!       SessionStart: started
@@ -98,6 +99,7 @@ struct HooksFile {
     unit: Option<String>,
     #[serde(rename = "async")]
     background: Option<bool>,
+    detached_env: Option<bool>,
     marker: Option<String>,
     after_install: Option<String>,
     from_env: Option<FromEnv>,
@@ -133,6 +135,7 @@ impl SessionsFile {
                 timeout,
                 unit,
                 background,
+                detached_env,
                 marker,
                 after_install,
                 from_env,
@@ -216,6 +219,11 @@ pub struct UserHooks {
     /// Whether the agent runs the hooks in its background (codex's
     /// `async`). Never an end's: the agent may not wait for it as it exits.
     pub background: bool,
+    /// Whether the agent runs its hooks (and MCP servers) in a daemon's
+    /// environment, not its terminal's (codex's app-server): they then lack
+    /// `RL_SESSION` and the rest of the held session's variables, and a held
+    /// session is found by its folder and start instead (`rl hook`).
+    pub detached_env: bool,
     /// The word after the event in the command, where a Relay run of the
     /// agent's has hooks of its own beside these (Claude's): it tells this
     /// copy apart, and this copy is then never the run's signal.
@@ -429,6 +437,7 @@ fn compile_hooks(name: &str, h: HooksFile) -> Result<UserHooks> {
         timeout,
         unit,
         background: h.background.unwrap_or(false),
+        detached_env: h.detached_env.unwrap_or(false),
         marker: h.marker,
         after_install: h.after_install,
         from_env: h.from_env.unwrap_or_default(),
@@ -864,6 +873,8 @@ mod tests {
             (crate::claude::HOOK_TIMEOUT_SECS as u64, Unit::Seconds, false)
         );
         assert_eq!(timing("codex"), (3, Unit::Seconds, true));
+        assert!(hooks("codex").detached_env, "codex's daemon runs its hooks");
+        assert!(!hooks("claude").detached_env && !hooks("gemini").detached_env);
         assert_eq!(timing("gemini"), (2000, Unit::Millis, false));
         assert_eq!(hooks("claude").marker.as_deref(), Some(MARKER));
         assert_eq!(hooks("codex").marker, None);
