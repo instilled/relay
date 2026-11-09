@@ -5,7 +5,7 @@
 //! on either theme (see `theme`). Nothing on screen is an id.
 
 use super::app::{App, Mode};
-use super::{mark, shortcuts, theme};
+use super::{help, mark, theme};
 use crate::config::Grouping;
 use crate::git::checkout_words;
 use crate::query;
@@ -30,6 +30,9 @@ const TALL_H: u16 = 24;
 const TALL_W: u16 = 80;
 /// Between the mark and the words beside it.
 const MARK_GAP: u16 = 3;
+/// What the one-line header keeps for its headline before the toggles give
+/// up their keys.
+const HEADLINE_ROOM: usize = 24;
 /// A row of air above the mark, so it does not sit on the screen's top edge.
 const HEAD_AIR: u16 = 1;
 /// The icon slot: a space, a one-column icon, a space. Every row has one, so
@@ -361,14 +364,20 @@ impl App {
     /// rows; otherwise the headline on one line, the toggles at its right
     /// end, and the headline cut to leave them room.
     fn draw_head(&self, f: &mut Frame, head: Rect, title: &str) {
-        let toggles = self.toggle_spans();
-        let tw: usize = toggles.iter().map(Span::width).sum();
+        let width = |t: &[Span]| t.iter().map(Span::width).sum::<usize>();
         if head.height <= 1 {
             let text = Rect {
                 x: head.x + TEXT_INDENT,
                 width: head.width.saturating_sub(TEXT_INDENT + 1),
                 ..head
             };
+            // The keys where the headline still has its room, else the icons
+            // alone: the grid (`ctrl+h`) has the keys.
+            let mut toggles = self.toggle_spans(true);
+            if width(&toggles) + HEADLINE_ROOM > text.width as usize {
+                toggles = self.toggle_spans(false);
+            }
+            let tw = width(&toggles);
             let room = (text.width as usize).saturating_sub(tw + 2);
             let mut spans = cap_spans(headline_spans(title), room);
             let used: usize = spans.iter().map(Span::width).sum();
@@ -386,6 +395,10 @@ impl App {
         f.render_widget(Paragraph::new(mark::lines(&mark::SMALL)), mark);
         let x = mark.x + mark::W + MARK_GAP;
         let text = Rect::new(x, mark.y + 1, head.right().saturating_sub(x), mark.height - 2);
+        let mut toggles = self.toggle_spans(true);
+        if width(&toggles) > text.width as usize {
+            toggles = self.toggle_spans(false);
+        }
         let mut first = vec![
             Span::styled(NAME, theme::accent().add_modifier(Modifier::BOLD)),
             Span::styled(format!(" {}", env!("CARGO_PKG_VERSION")), theme::dim()),
@@ -411,10 +424,11 @@ impl App {
         );
     }
 
-    /// The toggles, for the header: a glyph and its key for each kind, `✦^a`
-    /// agents, `❯^l` shells, then `◌^o` hidden and the grouping, each set
-    /// apart. On is accented and bold, off is quiet.
-    fn toggle_spans(&self) -> Vec<Span<'static>> {
+    /// The toggles, for the header: a glyph and, with `keys`, its key for
+    /// each kind, `✦ ctrl+a` agents, `❯ ctrl+l` shells, then `◌ ctrl+o`
+    /// hidden and the grouping, each set apart. On is accented and bold, off
+    /// is quiet.
+    fn toggle_spans(&self, keys: bool) -> Vec<Span<'static>> {
         let on = theme::accent().add_modifier(Modifier::BOLD);
         let off = theme::dim();
         let lit = |b: bool| if b { on } else { off };
@@ -423,18 +437,28 @@ impl App {
             Grouping::Project => "by project",
             Grouping::State => "by state",
         };
-        vec![
-            Span::styled("✦^a", lit(p.show_agents)),
+        let k = |icon: &str, key: &str| {
+            if keys {
+                format!("{icon} {key}")
+            } else {
+                icon.to_string()
+            }
+        };
+        let mut v = vec![
+            Span::styled(k("✦", "ctrl+a"), lit(p.show_agents)),
             Span::styled("  ", off),
-            Span::styled("❯^l", lit(p.show_shells)),
+            Span::styled(k("❯", "ctrl+l"), lit(p.show_shells)),
             // Hidden is a different axis — what you hid, not a kind — and the
             // grouping another again, so a divider sets each apart.
             Span::styled("  │  ", off),
-            Span::styled("◌^o", lit(p.show_hidden)),
+            Span::styled(k("◌", "ctrl+o"), lit(p.show_hidden)),
             Span::styled("  │  ", off),
             Span::styled(grouping, theme::accent()),
-            Span::styled(" ^s", off),
-        ]
+        ];
+        if keys {
+            v.push(Span::styled(" ctrl+s", off));
+        }
+        v
     }
 
     /// The line over the footer: the command line, with at its right what
@@ -485,7 +509,7 @@ impl App {
         }
         if l.is_empty() {
             let hint = if self.filter.is_empty() {
-                " a command, or claude/codex/agy and a prompt · / searches".to_string()
+                " a command, or claude/codex/agy and a prompt · / for commands · ctrl+f to find".to_string()
             } else {
                 format!(" ⌕ {} · esc clears", self.filter)
             };
@@ -494,21 +518,21 @@ impl App {
         spans
     }
 
-    /// The footer's rows at this width: the shortcuts where they are up,
+    /// The footer's rows at this width: the grid of keys where it is up,
     /// under a flash if there is one, else the one row of hints.
     pub fn foot_lines(&self, width: u16) -> Vec<Line<'static>> {
         let room = width.saturating_sub(TEXT_INDENT).max(1) as usize;
-        if !self.shortcuts || self.search.is_some() {
+        if !self.help || self.search.is_some() {
             return vec![Line::from(self.footer(room)).dim()];
         }
-        let keys = shortcuts::lines(&shortcuts::keys(shortcuts::Place::List), room);
+        let keys = help::grid(room);
         let flash = self.flashing().map(|m| Line::from(m.to_string()).dim());
         flash.into_iter().chain(keys).collect()
     }
 
     /// The footer's one row: a word that stands for a moment, or the search's
-    /// keys while it is typed, or the hints, with a pointer to the shortcuts
-    /// where there is room.
+    /// keys while it is typed, or the hints — entries of the grid's, so they
+    /// say what it does — with a pointer to the grid where there is room.
     fn footer(&self, width: usize) -> String {
         if let Some(m) = self.flashing() {
             return m.to_string();
@@ -521,6 +545,9 @@ impl App {
                     enter keeps · esc puts back"
                 .into();
         }
+        if super::slash::is_command(self.cmd.line.text()) {
+            return "enter runs it on the row · tab completes · ↑↓ picks the row · esc clears".into();
+        }
         if !self.cmd.is_empty() {
             return "enter starts · tab completes · ↑↓ picks the row, and so the folder · esc clears".into();
         }
@@ -528,15 +555,20 @@ impl App {
             return why;
         }
         let by = match self.prefs().grouping {
-            Grouping::Project => "^s by state",
-            Grouping::State => "^s by project",
+            Grouping::Project => "to group by state",
+            Grouping::State => "to group by project",
         };
-        let mut hints = vec!["enter attaches", "type to start", self.x_hint(), "/ search"];
+        let mut hints = vec![
+            help::hint(help::Id::Enter, None),
+            help::hint(help::Id::Remove, Some(self.x_hint())),
+            help::hint(help::Id::Find, None),
+            help::hint(help::Id::Commands, None),
+        ];
         if !self.filter.is_empty() {
-            hints.push("esc clears the search");
+            hints.insert(1, "esc to clear the search".into());
         }
-        hints.push(by);
-        shortcuts::with_hint(hints.join(" · "), width)
+        hints.push(help::hint(help::Id::Group, Some(by)));
+        help::footer(&hints, width)
     }
 
     /// A harness's lister that did not answer, while that is its last word:
@@ -557,12 +589,12 @@ impl App {
     fn x_hint(&self) -> &'static str {
         match self.selected() {
             Some(ListLine::Session(r)) => match r.source {
-                Source::Held if r.state.is_terminal() || r.state == RunState::Stale => "^x remove",
-                Source::Held => "^x stop",
-                Source::Native if r.stop.is_some() => "^x stop",
-                _ => "^x hide",
+                Source::Held if r.state.is_terminal() || r.state == RunState::Stale => "to remove",
+                Source::Held => "to stop",
+                Source::Native if r.stop.is_some() => "to stop",
+                _ => "to hide",
             },
-            _ => "^x hide",
+            _ => "to hide",
         }
     }
 
@@ -576,7 +608,7 @@ impl App {
             let msg: String = if !self.filter.is_empty() {
                 " nothing matches".into()
             } else if !p.show_agents || !p.show_shells {
-                " nothing here · ^a agents · ^l shells · ^o hidden".into()
+                " nothing here · ctrl+a agents · ctrl+l shells · ctrl+o hidden".into()
             } else if p.show_hidden {
                 " nothing hidden".into()
             } else {
