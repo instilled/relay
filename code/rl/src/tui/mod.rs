@@ -13,6 +13,7 @@ mod act;
 mod app;
 mod cmdline;
 mod draw;
+mod help;
 mod input;
 mod keys;
 mod line;
@@ -20,7 +21,7 @@ mod live;
 mod mark;
 mod remove;
 mod select;
-mod shortcuts;
+mod slash;
 mod theme;
 
 #[cfg(test)]

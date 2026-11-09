@@ -3,6 +3,7 @@
 pub mod attach;
 pub mod badges;
 pub mod cmd;
+pub mod colour;
 pub mod config;
 pub mod git;
 pub mod hook;

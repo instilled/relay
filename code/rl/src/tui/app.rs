@@ -154,8 +154,8 @@ pub struct App {
     pub hit: RefCell<ListHit>,
     /// How tall the list was, for paging.
     pub list_h: Cell<u16>,
-    /// Whether the footer shows the shortcuts (`^h`).
-    pub shortcuts: bool,
+    /// Whether the keys stand as a grid in the footer's place (`^h`).
+    pub help: bool,
     pub flash: Option<(String, Instant)>,
     pub arm: Option<Arm>,
     pub quit: bool,
@@ -189,7 +189,7 @@ impl App {
             scroll: Cell::new(0),
             hit: RefCell::default(),
             list_h: Cell::new(0),
-            shortcuts: false,
+            help: false,
             flash: None,
             arm: None,
             quit: false,
@@ -363,9 +363,14 @@ impl App {
 
     /// The line's ghost again, after a key changed it.
     pub fn retyped(&mut self) {
-        let folder = self.line_folder();
+        let (folder, name) = (self.line_folder(), self.name_here());
         let cmds = self.commands.get_or_init(Commands::from_env);
-        self.cmd.typed(&folder, rows::registry(), cmds);
+        self.cmd.typed(&cmdline::Ctx {
+            folder: &folder,
+            reg: rows::registry(),
+            cmds,
+            name: name.as_deref(),
+        });
     }
 
     /// The window's title: how things stand, as the header says it.

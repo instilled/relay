@@ -64,20 +64,35 @@ pub fn pr(state: Option<&str>) -> Style {
     }
 }
 
-/// A colour a session picked in its harness, by Claude's names for them,
-/// as `claude agents` draws it. A name not among them is none.
-pub fn picked(name: &str) -> Option<Color> {
-    Some(match name {
-        "red" => Color::Red,
-        "blue" => Color::Blue,
-        "green" => Color::Green,
-        "yellow" => Color::Yellow,
-        "cyan" => Color::Cyan,
-        "purple" => Color::Magenta,
-        "orange" => Color::Indexed(208),
-        "pink" => Color::Indexed(213),
-        _ => return None,
-    })
+pub use crate::colour::{PALETTE, picked};
+
+/// Where `^g` goes from `own`: none, then each of the palette, then none
+/// again; whatever is not in the palette (a hex) goes to its first.
+pub fn next_colour(own: Option<&str>) -> Option<&'static str> {
+    match own {
+        None => Some(PALETTE[0]),
+        Some(c) => match PALETTE.iter().position(|p| *p == c) {
+            Some(i) => PALETTE.get(i + 1).copied(),
+            None => Some(PALETTE[0]),
+        },
+    }
+}
+
+/// The colour a row is drawn in: the one its harness picked if it picked
+/// one (names only), else your own (a name or `#rrggbb`).
+pub fn effective(harness: Option<&str>, own: Option<&str>) -> Option<Color> {
+    harness.and_then(picked).or_else(|| own.and_then(crate::colour::parse))
+}
+
+/// A coloured name: its swatch behind it, near-black on it — or near-white
+/// on a swatch too dark for that.
+pub fn swatch(c: Color) -> Style {
+    let fg = if crate::colour::dark_text_on(c) {
+        Color::Rgb(0x14, 0x14, 0x14)
+    } else {
+        Color::Rgb(0xF5, 0xF5, 0xF5)
+    };
+    Style::default().bg(c).fg(fg)
 }
 
 /// The selected row: a band of its own — deep teal under near-white, both
@@ -129,14 +144,47 @@ mod tests {
 
     #[test]
     fn claudes_colour_names_map_to_the_terminals() {
-        assert_eq!(picked("red"), Some(Color::Red));
-        assert_eq!(picked("purple"), Some(Color::Magenta));
-        assert_eq!(picked("orange"), Some(Color::Indexed(208)));
-        assert_eq!(picked("pink"), Some(Color::Indexed(213)));
+        assert_eq!(picked("red"), Some(Color::Rgb(0xD9, 0x60, 0x5B)));
+        assert_eq!(picked("pink"), Some(Color::Rgb(0xD5, 0x7F, 0xAE)));
         for c in rl_detect::claude_native::COLORS {
             assert!(picked(c).is_some(), "{c}");
         }
         assert_eq!(picked("chartreuse"), None);
+    }
+
+    #[test]
+    fn the_cycle_walks_the_palette_and_back_to_none() {
+        let mut at = None;
+        let mut seen = vec![];
+        for _ in 0..PALETTE.len() {
+            at = next_colour(at);
+            seen.push(at.unwrap());
+        }
+        assert_eq!(seen, PALETTE);
+        assert_eq!(next_colour(at), None);
+        assert_eq!(next_colour(Some("chartreuse")), Some("red"));
+    }
+
+    #[test]
+    fn a_hex_of_your_own_is_a_swatch_and_a_dark_one_gets_light_text() {
+        assert_eq!(effective(None, Some("#ff8800")), Some(Color::Rgb(0xFF, 0x88, 0x00)));
+        assert_eq!(effective(Some("pink"), Some("#ff8800")), picked("pink"));
+        assert_eq!(
+            swatch(Color::Rgb(0xFF, 0xDD, 0x00)).fg,
+            Some(Color::Rgb(0x14, 0x14, 0x14))
+        );
+        assert_eq!(
+            swatch(Color::Rgb(0x10, 0x20, 0x60)).fg,
+            Some(Color::Rgb(0xF5, 0xF5, 0xF5))
+        );
+    }
+
+    #[test]
+    fn the_harnesss_colour_wins_over_yours() {
+        assert_eq!(effective(Some("pink"), Some("blue")), picked("pink"));
+        assert_eq!(effective(None, Some("blue")), picked("blue"));
+        assert_eq!(effective(Some("chartreuse"), Some("blue")), picked("blue"));
+        assert_eq!(effective(None, None), None);
     }
 
     #[test]

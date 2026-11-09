@@ -592,7 +592,7 @@ fn by_state_the_rows_stand_under_needs_input_working_and_done() {
     for key in ["r:b", "s:working"] {
         assert_eq!(
             reorder(&lines, &lines, &p.order, &p.pins, key, true),
-            Err("by state, rows stand oldest first · ^s groups them by project"),
+            Err("by state, rows stand oldest first · ctrl+s groups them by project"),
             "{key}"
         );
     }

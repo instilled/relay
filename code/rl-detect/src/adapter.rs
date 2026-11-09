@@ -91,6 +91,9 @@ pub trait Adapter: Send + Sync {
     fn carry_on_argv(&self, session_id: &str) -> Option<Vec<String>>;
     /// What stops its session `id`. None: nothing here stops one.
     fn stop_argv(&self, id: &str) -> Option<Vec<String>>;
+    /// What tells its session `id` `text` from outside it (codex: queues it
+    /// on the thread). None: nothing outside it can.
+    fn ping_argv(&self, id: &str, text: &str) -> Option<Vec<String>>;
     /// The ids a start or a carry-on may have said it began, in what it
     /// printed, the likeliest first. Only its listing says which it is
     /// (`start`).
@@ -197,8 +200,8 @@ pub fn run(argv: &[String], cwd: Option<&Path>, asking: bool, wait: Duration) ->
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         // What a Relay session says of itself is not the harness's.
-        .env_remove("RELAY_SESSION")
-        .env_remove("RELAY_SESSION_AGENT");
+        .env_remove("RL_SESSION")
+        .env_remove("RL_SESSION_AGENT");
     if let Some(dir) = cwd {
         cmd.current_dir(dir);
     }
@@ -354,6 +357,9 @@ mod tests {
         fn stop_argv(&self, _: &str) -> Option<Vec<String>> {
             None
         }
+        fn ping_argv(&self, _: &str, _: &str) -> Option<Vec<String>> {
+            None
+        }
         fn started_ids(&self, printed: &str) -> Vec<String> {
             printed
                 .split_whitespace()
@@ -444,6 +450,9 @@ mod tests {
                 None
             }
             fn stop_argv(&self, _: &str) -> Option<Vec<String>> {
+                None
+            }
+            fn ping_argv(&self, _: &str, _: &str) -> Option<Vec<String>> {
                 None
             }
             fn started_ids(&self, _: &str) -> Vec<String> {
