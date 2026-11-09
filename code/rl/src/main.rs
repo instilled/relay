@@ -35,12 +35,17 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Attach this terminal to a session (ctrl-\ detaches).
+    /// Attach this terminal to a session (ctrl+\ detaches).
     Attach { name: String },
     /// Close a running session.
     Stop { name: String },
     /// Remove a session that is not running.
     Rm { name: String },
+    /// Set your own colour for a session in the list: a name (red, blue,
+    /// green, yellow, purple, orange, pink, cyan), `#rrggbb`, or `none`.
+    /// The session is a held one's name, or a row's key as the list shows it
+    /// (`n:claude:<id>`, `o:claude:<session id>`).
+    Color { session: String, colour: String },
     /// Serve send, who and inbox to an agent over stdio (an MCP server).
     Mcp {
         /// The harness that runs it (what `rl setup` registered it with).
@@ -94,6 +99,10 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Attach { name } => cmd::attach(&home, &name).await,
         Command::Stop { name } => cmd::stop(&home, &name).await,
         Command::Rm { name } => cmd::rm(&home, &name).await,
+        Command::Color { session, colour } => {
+            println!("{}", cmd::color(&home, &session, &colour)?);
+            Ok(())
+        }
         Command::Setup { remove, harness } => rl::setup::main(&home, &harness, remove),
         // Blocks on stdin; the adapters it asks block too.
         Command::Mcp { harness } => tokio::task::spawn_blocking(move || rl::mcp::run(&home, &harness)).await?,

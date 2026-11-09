@@ -73,6 +73,9 @@ pub const ID: &str = "{id}";
 /// Where a session's name goes in a profile's `name`.
 pub const NAME: &str = "{name}";
 
+/// Where a ping's words go in a profile's `ping`.
+pub const TEXT: &str = "{text}";
+
 /// The `sessions:` block as written. Everything optional so files can be
 /// merged, field by field, a user's over a built-in.
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -84,6 +87,7 @@ pub(crate) struct SessionsFile {
     start: Option<Vec<String>>,
     name: Option<Vec<String>>,
     stop: Option<Vec<String>>,
+    ping: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -151,6 +155,9 @@ impl SessionsFile {
         if over.stop.is_some() {
             self.stop = over.stop;
         }
+        if over.ping.is_some() {
+            self.ping = over.ping;
+        }
     }
 }
 
@@ -173,6 +180,10 @@ pub struct Sessions {
     /// The arguments that stop one in its own background, after its
     /// binary: `{id}` is its attach id. Empty where it has no way to.
     pub stop: Vec<String>,
+    /// The arguments that tell one of its sessions something from outside
+    /// it, after its binary: `{id}` is the session's (codex: its thread's),
+    /// `{text}` the words. Empty where nothing outside can.
+    pub ping: Vec<String>,
 }
 
 /// How an agent lists its own sessions: its binary with `args`, read by
@@ -310,6 +321,12 @@ pub(crate) fn compile(name: &str, file: SessionsFile) -> Result<Sessions> {
     if !stop.is_empty() && !stop.iter().any(|a| a.contains(ID)) {
         bail!("{name}.yaml: sessions.stop says nowhere where the id goes ({ID})");
     }
+    let ping = file.ping.unwrap_or_default();
+    for (word, what) in [(ID, "id"), (TEXT, "text")] {
+        if !ping.is_empty() && !ping.iter().any(|a| a.contains(word)) {
+            bail!("{name}.yaml: sessions.ping says nowhere where the {what} goes ({word})");
+        }
+    }
     Ok(Sessions {
         hooks,
         list,
@@ -317,6 +334,7 @@ pub(crate) fn compile(name: &str, file: SessionsFile) -> Result<Sessions> {
         start,
         name: named,
         stop,
+        ping,
     })
 }
 
@@ -880,6 +898,12 @@ mod tests {
         assert_eq!(codex.attach, ["resume", ID], "attaching to a thread is resuming it");
         assert!(codex.start.is_empty(), "no background start: Relay holds it");
         assert!(codex.stop.is_empty(), "nothing stops a thread from outside it");
+        assert_eq!(
+            codex.ping,
+            ["queue", "--thread", ID, "--message", TEXT, "--resume"],
+            "mail is queued on the thread"
+        );
+        assert!(claude.ping.is_empty(), "nothing tells a Claude session from outside");
         assert!(r.profile("gemini").unwrap().sessions.as_ref().unwrap().list.is_none());
         assert!(r.profile("cursor").unwrap().sessions.is_none());
     }
@@ -908,6 +932,8 @@ mod tests {
             ),
             (format!("{ok}  attach: [attach]\n"), "{id}"),
             (format!("{ok}  stop: [stop]\n"), "sessions.stop"),
+            (format!("{ok}  ping: [queue, \"{{id}}\"]\n"), "{text}"),
+            (format!("{ok}  ping: [queue, \"{{text}}\"]\n"), "sessions.ping"),
             (format!("{ok}    settings: {{ \"ui..x\": true }}\n"), "ui..x"),
             (format!("{ok}    settings: {{ hooks.Stop: [] }}\n"), "hooks.Stop"),
             (ok.replace("    events:\n      Stop: idle\n", ""), "events"),

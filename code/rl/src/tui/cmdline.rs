@@ -2,7 +2,8 @@
 //! session. A first word a harness claims (its profile's `words`: `claude`,
 //! `codex`, `agy`…) starts that agent with the rest of the line as its first
 //! prompt; any other line is a shell command, run in a shell Relay holds that
-//! stays once the command is done.
+//! stays once the command is done. A line that starts with `/` is a
+//! command instead (`slash`).
 //!
 //! `tab` completes the word under the cursor: the first word to a harness's
 //! word or a program on `PATH`, a later one to a path under the folder the
@@ -12,7 +13,7 @@
 //! Pure but for reading folders: what the line names, and what it completes
 //! to.
 
-use super::line;
+use super::{line, slash};
 use rl_detect::Registry;
 use rl_detect::registry::Profile;
 use std::collections::BTreeSet;
@@ -81,6 +82,10 @@ pub enum Detected<'a> {
     },
     /// A command, run in a shell.
     Shell,
+    /// A `/` command, by its name.
+    Command(&'static str),
+    /// A `/` line that names no command and starts none.
+    UnknownCommand,
 }
 
 impl Detected<'_> {
@@ -93,6 +98,8 @@ impl Detected<'_> {
                 missing: Some(bin),
             } => format!("agent · {} ({bin} not found)", profile.name),
             Detected::Shell => "shell".into(),
+            Detected::Command(name) => format!("command · {name}"),
+            Detected::UnknownCommand => "unknown command".into(),
         }
     }
 }
@@ -106,8 +113,16 @@ pub fn split_first(text: &str) -> (&str, &str) {
     }
 }
 
-/// What `text` starts: nothing, for a blank line.
+/// What `text` starts: nothing, for a blank line, or for one that is the
+/// start of a command's name still being typed.
 pub fn detect<'a>(text: &str, reg: &'a Registry, cmds: &Commands) -> Option<Detected<'a>> {
+    if slash::is_command(text) {
+        return match slash::typed(text) {
+            slash::Typed::Known(name) => Some(Detected::Command(name)),
+            slash::Typed::Partial => None,
+            slash::Typed::Unknown => Some(Detected::UnknownCommand),
+        };
+    }
     let (first, _) = split_first(text);
     if first.is_empty() {
         return None;
@@ -127,11 +142,27 @@ fn word_start(text: &str, cur: usize) -> usize {
     text[..cur].rfind(' ').map_or(0, |i| i + 1)
 }
 
+/// What completing a line looks at: the folder it starts in, the harnesses,
+/// the programs on `PATH`, and the name of the row under the cursor (for
+/// `/rename`).
+#[derive(Clone, Copy)]
+pub struct Ctx<'a> {
+    pub folder: &'a Path,
+    pub reg: &'a Registry,
+    pub cmds: &'a Commands,
+    pub name: Option<&'a str>,
+}
+
 /// What the word under the cursor completes to, best first, and where that
-/// word starts. The first word: the words of the harnesses that are here,
-/// then the programs on `PATH`. A later one: the paths under `folder` (`~`
-/// is home), a folder's with its `/`.
-pub fn candidates(text: &str, cur: usize, folder: &Path, reg: &Registry, cmds: &Commands) -> (usize, Vec<String>) {
+/// word starts. On a `/` line, a command and its argument (`slash`).
+/// Otherwise the first word: the words of the harnesses that are here, then
+/// the programs on `PATH`; a later one: the paths under the folder (`~` is
+/// home), a folder's with its `/`.
+pub fn candidates(text: &str, cur: usize, ctx: &Ctx) -> (usize, Vec<String>) {
+    if slash::is_command(text) {
+        return slash::candidates(text, cur, ctx.name);
+    }
+    let (folder, reg, cmds) = (ctx.folder, ctx.reg, ctx.cmds);
     let start = word_start(text, cur);
     let word = &text[start..cur];
     let first = text[..start].trim().is_empty();
@@ -229,14 +260,15 @@ impl CmdLine {
     }
 
     /// The ghost again, for the line as it now stands: only with the
-    /// cursor at the end of a word being typed.
-    pub fn refresh(&mut self, folder: &Path, reg: &Registry, cmds: &Commands) {
+    /// cursor at the end of a word being typed — or, on a `/` line, of an
+    /// argument not yet begun.
+    pub fn refresh(&mut self, ctx: &Ctx) {
         self.ghost = None;
         let (text, cur) = (self.line.text(), self.line.cursor());
-        if cur != text.len() || text.ends_with(' ') || text.is_empty() {
+        if cur != text.len() || (text.ends_with(' ') && !slash::is_command(text)) || text.is_empty() {
             return;
         }
-        let (start, cands) = candidates(text, cur, folder, reg, cmds);
+        let (start, cands) = candidates(text, cur, ctx);
         let word = &text[start..cur];
         if let Some(best) = cands.first()
             && best.len() > word.len()
@@ -247,7 +279,7 @@ impl CmdLine {
 
     /// `tab`: the one completion taken whole, with a space after a word that
     /// is done; of several, the best, and the next at each `tab` after.
-    pub fn complete(&mut self, folder: &Path, reg: &Registry, cmds: &Commands) {
+    pub fn complete(&mut self, ctx: &Ctx) {
         if let Some(c) = self.cycle.as_mut()
             && c.shown == self.line.text()
         {
@@ -263,7 +295,7 @@ impl CmdLine {
         }
         self.cycle = None;
         let (text, cur) = (self.line.text().to_string(), self.line.cursor());
-        let (start, cands) = candidates(&text, cur, folder, reg, cmds);
+        let (start, cands) = candidates(&text, cur, ctx);
         let (head, tail) = (text[..start].to_string(), text[cur..].to_string());
         let take = match cands.as_slice() {
             [] => return,
@@ -283,14 +315,14 @@ impl CmdLine {
             });
             self.ghost = None;
         } else {
-            self.refresh(folder, reg, cmds);
+            self.refresh(ctx);
         }
     }
 
     /// Any key but `tab` ends a cycle.
-    pub fn typed(&mut self, folder: &Path, reg: &Registry, cmds: &Commands) {
+    pub fn typed(&mut self, ctx: &Ctx) {
         self.cycle = None;
-        self.refresh(folder, reg, cmds);
+        self.refresh(ctx);
     }
 }
 
@@ -338,7 +370,13 @@ mod tests {
         std::fs::create_dir_all(here.join("src/app")).unwrap();
         std::fs::write(here.join("src/main.rs"), "").unwrap();
         std::fs::write(here.join(".env"), "").unwrap();
-        let c = |t: &str| candidates(t, t.len(), &here, &reg, &cmds).1;
+        let ctx = Ctx {
+            folder: &here,
+            reg: &reg,
+            cmds: &cmds,
+            name: None,
+        };
+        let c = |t: &str| candidates(t, t.len(), &ctx).1;
         assert_eq!(c("cl"), ["claude", "clang"]);
         assert_eq!(c("gem"), ["gemini"], "agy is here, so gemini is offered");
         assert!(c("cod").is_empty(), "codex is not installed");
@@ -356,22 +394,28 @@ mod tests {
         let cmds = bin_dir(&tmp.path().join("bin"), &["claude", "clang", "codex"]);
         let reg = Registry::builtin();
         let here = tmp.path().to_path_buf();
+        let ctx = Ctx {
+            folder: &here,
+            reg: &reg,
+            cmds: &cmds,
+            name: None,
+        };
         let mut l = CmdLine::default();
         l.line.insert("cod");
-        l.typed(&here, &reg, &cmds);
+        l.typed(&ctx);
         assert_eq!(l.ghost.as_deref(), Some("ex"));
-        l.complete(&here, &reg, &cmds);
+        l.complete(&ctx);
         assert_eq!(l.line.text(), "codex ");
         assert_eq!(l.ghost, None);
         let mut l = CmdLine::default();
         l.line.insert("cl");
-        l.typed(&here, &reg, &cmds);
+        l.typed(&ctx);
         assert_eq!(l.ghost.as_deref(), Some("aude"), "the harness first");
-        l.complete(&here, &reg, &cmds);
+        l.complete(&ctx);
         assert_eq!(l.line.text(), "claude");
-        l.complete(&here, &reg, &cmds);
+        l.complete(&ctx);
         assert_eq!(l.line.text(), "clang");
-        l.complete(&here, &reg, &cmds);
+        l.complete(&ctx);
         assert_eq!(l.line.text(), "claude", "round again");
     }
 }

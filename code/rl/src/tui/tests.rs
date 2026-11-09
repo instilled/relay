@@ -1,6 +1,6 @@
 //! The list as drawn, on a test terminal, over a temp home.
 
-use super::App;
+use super::{App, help};
 use crate::config::{Config, Grouping};
 use crate::sources::{NativeRow, NativeState};
 use crate::store::sessions::{self, Meta};
@@ -293,7 +293,7 @@ async fn ctrl_c_twice_quits_and_once_only_says_so() {
     let mut app = list(&f).await;
     ctrl(&mut app, 'c');
     assert!(!app.quit);
-    assert!(shown(&app).contains("press ^c again to quit"));
+    assert!(shown(&app).contains("press ctrl+c again to quit"));
     press(&mut app, KeyCode::Down);
     ctrl(&mut app, 'c');
     assert!(!app.quit, "another key between disarms it");
@@ -302,21 +302,73 @@ async fn ctrl_c_twice_quits_and_once_only_says_so() {
 }
 
 #[tokio::test]
-async fn ctrl_h_and_f1_show_the_shortcuts_esc_puts_them_away_and_a_question_mark_types() {
+async fn ctrl_h_and_f1_toggle_the_grid_esc_closes_it_and_a_question_mark_types() {
     let f = fixture();
     let mut app = list(&f).await;
-    assert!(shown(&app).contains("^h/F1 shortcuts"));
+    const GRID: &str = "ctrl+t to pin to top";
+    assert!(shown(&app).contains("ctrl+h/f1 for help"), "{}", shown(&app));
+    assert!(!shown(&app).contains(GRID));
     ctrl(&mut app, 'h');
-    assert!(shown(&app).contains("by project/state"));
+    assert!(shown(&app).contains(GRID));
+    ctrl(&mut app, 'h');
+    assert!(!shown(&app).contains(GRID), "ctrl+h again puts it away");
+    ctrl(&mut app, 'h');
     press(&mut app, KeyCode::Esc);
-    assert!(!shown(&app).contains("by project/state"));
+    assert!(!shown(&app).contains(GRID), "esc closes it");
+    run(&mut app, "/help");
+    assert!(shown(&app).contains(GRID), "/help opens it");
+    // With a line typed, esc closes the grid first and leaves the line.
+    typed(&mut app, "make");
+    ctrl(&mut app, 'h');
+    assert!(shown(&app).contains(GRID));
+    press(&mut app, KeyCode::Esc);
+    assert!(!shown(&app).contains(GRID));
+    assert_eq!(app.cmd.line.text(), "make");
+    press(&mut app, KeyCode::Esc);
     press(&mut app, KeyCode::F(1));
-    assert!(shown(&app).contains("by project/state"));
+    assert!(shown(&app).contains(GRID));
     press(&mut app, KeyCode::F(1));
-    assert!(!shown(&app).contains("by project/state"));
+    assert!(!shown(&app).contains(GRID));
     press(&mut app, KeyCode::Char('?'));
     assert_eq!(app.cmd.line.text(), "?", "a ? is typed");
-    assert!(!app.shortcuts);
+    assert!(!app.help);
+}
+
+/// The grid's rows on a screen `w` wide: those under the command line.
+fn grid_rows(app: &App, w: u16) -> Vec<String> {
+    let rows = screen(app, w, 40);
+    let line = rows.iter().rposition(|r| r.contains(" ❯ ")).expect("the command line");
+    rows[line + 2..].iter().map(|r| r.trim_end().to_string()).collect()
+}
+
+#[tokio::test]
+async fn the_grid_stands_under_the_command_line_in_four_columns_wide_and_two_at_80() {
+    let f = fixture();
+    let mut app = list(&f).await;
+    ctrl(&mut app, 'h');
+    for (w, cols) in [(140, 4), (80, 2)] {
+        let rows = grid_rows(&app, w);
+        assert_eq!(
+            rows.len(),
+            help::KEYS.len().div_ceil(cols),
+            "at {w}:\n{}",
+            rows.join("\n")
+        );
+        assert!(rows[0].starts_with("  enter to attach"), "at {w}: {}", rows[0]);
+        // Each entry whole, in its row, and its row's columns where they
+        // should be.
+        for (i, k) in help::KEYS.iter().enumerate() {
+            let text = help::text(k);
+            let row = &rows[i / cols];
+            assert!(row.contains(&text), "at {w}: {text:?} is cut in {row:?}");
+            let at = row[..row.find(&text).unwrap()].chars().count();
+            assert_eq!(at, 2 + (i % cols) * ((w as usize - 2) / cols), "at {w}: {row:?}");
+        }
+        assert!(
+            !rows.iter().any(|r| r.contains("ctrl+h/f1 for help")),
+            "the grid stands in the hints' place"
+        );
+    }
 }
 
 #[tokio::test]
@@ -451,9 +503,12 @@ async fn ctrl_x_twice_stops_a_harnesss_own_session_through_it() {
     let f = fixture();
     let mut app = list(&f).await;
     on(&mut app, NATIVE);
-    assert!(shown(&app).contains("^x stop"), "the hint says what ^x does here");
+    assert!(
+        shown(&app).contains("ctrl+x twice to stop"),
+        "the hint says what ctrl+x does here"
+    );
     ctrl(&mut app, 'x');
-    assert!(shown(&app).contains("press ^x again to stop fix the login"));
+    assert!(shown(&app).contains("press ctrl+x again to stop fix the login"));
     assert!(ran_in(&f.repo).is_empty(), "not on the first press");
     ctrl(&mut app, 'x');
     app.finish().await;
@@ -475,9 +530,9 @@ async fn ctrl_x_twice_hides_a_harnesss_own_session_and_again_brings_it_back() {
     };
     app.set_native(vec![done]);
     on(&mut app, NATIVE);
-    assert!(shown(&app).contains("^x hide"));
+    assert!(shown(&app).contains("ctrl+x twice to hide"));
     ctrl(&mut app, 'x');
-    assert!(shown(&app).contains("press ^x again to hide fix the login"));
+    assert!(shown(&app).contains("press ctrl+x again to hide fix the login"));
     assert!(Config::load(&f.home).unwrap().list.hidden.is_empty(), "not yet");
     ctrl(&mut app, 'x');
     assert!(app.keys().iter().all(|k| k != NATIVE));
@@ -490,7 +545,7 @@ async fn ctrl_x_twice_hides_a_harnesss_own_session_and_again_brings_it_back() {
     ctrl(&mut app, 'o');
     on(&mut app, NATIVE);
     ctrl(&mut app, 'x');
-    assert!(shown(&app).contains("press ^x again to bring back fix the login"));
+    assert!(shown(&app).contains("press ctrl+x again to bring back fix the login"));
     ctrl(&mut app, 'x');
     assert!(Config::load(&f.home).unwrap().list.hidden.is_empty());
 }
@@ -504,7 +559,7 @@ async fn ctrl_x_is_disarmed_by_any_other_key() {
     press(&mut app, KeyCode::Up);
     press(&mut app, KeyCode::Down);
     ctrl(&mut app, 'x');
-    assert!(shown(&app).contains("press ^x again"), "armed afresh, not fired");
+    assert!(shown(&app).contains("press ctrl+x again"), "armed afresh, not fired");
     assert!(Config::load(&f.home).unwrap().list.hidden.is_empty());
 }
 
@@ -514,8 +569,10 @@ async fn ctrl_x_twice_removes_an_ended_held_session_and_what_was_kept_for_it() {
     let mut app = list(&f).await;
     on(&mut app, HELD);
     ctrl(&mut app, 't');
+    ctrl(&mut app, 'g');
+    assert_eq!(Config::load(&f.home).unwrap().list.colors.len(), 1);
     ctrl(&mut app, 'x');
-    assert!(shown(&app).contains("press ^x again to remove shop-sh"));
+    assert!(shown(&app).contains("press ctrl+x again to remove shop-sh"));
     ctrl(&mut app, 'x');
     app.finish().await;
     assert!(!f.home.session_dir("shop-sh").exists());
@@ -526,6 +583,7 @@ async fn ctrl_x_twice_removes_an_ended_held_session_and_what_was_kept_for_it() {
         Config::load(&f.home).unwrap().list.pins.is_empty(),
         "its pin goes with it"
     );
+    assert!(Config::load(&f.home).unwrap().list.colors.is_empty(), "and its colour");
 }
 
 #[tokio::test]
@@ -562,7 +620,7 @@ async fn the_line_starts_claude_in_its_own_background_and_the_cursor_waits_for_i
     let mut app = list(&f).await;
     on(&mut app, NATIVE);
     typed(&mut app, "claude fix the login");
-    assert!(row_of(&shown(&app), "shop ❯").contains("agent · claude"));
+    assert!(row_of(&shown(&app), "❯ claude fix").contains("agent · claude"));
     press(&mut app, KeyCode::Enter);
     assert!(app.cmd.is_empty(), "the line is cleared once it is on its way");
     app.finish().await;
@@ -757,13 +815,15 @@ async fn the_header_carries_the_filters_and_the_grouping_and_the_foot_does_not()
     let mut app = list(&f).await;
     let rows = screen(&app, 100, 30);
     let at = |rows: &[String], t: &str| rows.iter().position(|r| r.contains(t));
-    let head = at(&rows, "✦^a").expect("the toggles are on screen");
+    let head = at(&rows, "✦ ctrl+a").expect("the toggles are on screen");
     assert!(head < 6, "in the header, beside the mark: {}", rows.join("\n"));
-    assert!(rows[head].contains("❯^l") && rows[head].contains("◌^o") && rows[head].contains("by project ^s"));
+    assert!(
+        rows[head].contains("❯ ctrl+l") && rows[head].contains("◌ ctrl+o") && rows[head].contains("by project ctrl+s")
+    );
     assert!(at(&rows, "relay").unwrap() < head && at(&rows, "1 needs you").unwrap() < head);
     for r in &rows[6..] {
         assert!(
-            !r.contains("✦^a") && !r.contains("by project"),
+            !r.contains("✦ ctrl+a") && !r.contains("by project"),
             "no toggles line at the foot: {r}"
         );
     }
@@ -783,15 +843,24 @@ async fn the_header_carries_the_filters_and_the_grouping_and_the_foot_does_not()
     ctrl(&mut app, 's');
     let rows = screen(&app, 100, 30);
     assert!(
-        rows[..6].iter().any(|r| r.contains("by state ^s")),
+        rows[..6].iter().any(|r| r.contains("by state ctrl+s")),
         "{}",
         rows.join("\n")
     );
-    // On a short screen the header is one line, and keeps them.
+    // On a short screen the header is one line, and keeps them: with their
+    // keys at 80, the icons alone where the headline would lose its room.
     let rows = screen(&app, 80, 20);
-    assert!(rows[0].contains("✦^a") && rows[0].contains("by state"), "{}", rows[0]);
+    assert!(
+        rows[0].contains("✦ ctrl+a") && rows[0].contains("by state ctrl+s"),
+        "{}",
+        rows[0]
+    );
     let rows = screen(&app, 60, 20);
-    assert!(rows[0].contains("✦^a") && rows[0].contains("by state"), "{}", rows[0]);
+    assert!(
+        rows[0].contains("✦  ❯") && rows[0].contains("by state") && !rows[0].contains("ctrl+"),
+        "{}",
+        rows[0]
+    );
 }
 
 #[tokio::test]
@@ -799,7 +868,7 @@ async fn the_search_takes_the_command_lines_place_while_it_is_open() {
     let f = fixture();
     let mut app = list(&f).await;
     assert!(line_row(&app).contains(" ❯ "), "{}", line_row(&app));
-    press(&mut app, KeyCode::Char('/'));
+    ctrl(&mut app, 'f');
     typed(&mut app, "login");
     let row = line_row(&app);
     assert!(row.contains("⌕ login") && !row.contains(" ❯ "), "{row}");
@@ -812,11 +881,12 @@ async fn typing_starts_the_line_in_the_rows_folder() {
     let f = fixture();
     let mut app = list(&f).await;
     on(&mut app, NATIVE);
-    assert!(line_row(&app).contains("shop ❯"), "where it starts: {}", line_row(&app));
+    assert!(line_row(&app).contains(" ❯ "), "{}", line_row(&app));
+    assert!(!line_row(&app).contains("shop ❯"), "no folder before the prompt");
     typed(&mut app, "make test");
     assert_eq!(app.cmd.line.text(), "make test");
     let row = line_row(&app);
-    assert!(row.contains("shop ❯ make test"), "{row}");
+    assert!(row.contains(" ❯ make test") && !row.contains("shop ❯"), "{row}");
     assert!(row.contains("shell"), "{row}");
     assert!(shown(&app).contains("enter starts"), "the footer says how");
     // A letter of the list's types once the line has text.
@@ -878,10 +948,19 @@ async fn the_filters_are_on_ctrl_keys_and_every_letter_types() {
 }
 
 #[tokio::test]
-async fn a_slash_on_an_empty_line_opens_the_search() {
+async fn a_slash_starts_a_command_and_only_ctrl_f_searches() {
     let f = fixture();
     let mut app = list(&f).await;
+    assert!(line_row(&app).contains("/ for commands"), "{}", line_row(&app));
     press(&mut app, KeyCode::Char('/'));
+    assert!(app.search.is_none(), "/ no longer searches");
+    assert_eq!(app.cmd.line.text(), "/");
+    typed(&mut app, "pin");
+    assert!(line_row(&app).contains("command · pin"), "{}", line_row(&app));
+    assert!(shown(&app).contains("enter runs it on the row"), "the footer says how");
+    press(&mut app, KeyCode::Esc);
+    assert!(app.cmd.is_empty());
+    ctrl(&mut app, 'f');
     assert!(app.search.is_some());
     typed(&mut app, "login");
     assert_eq!(app.filter, "login");
@@ -891,6 +970,180 @@ async fn a_slash_on_an_empty_line_opens_the_search() {
     typed(&mut app, "cat src/");
     assert!(app.search.is_none());
     assert_eq!(app.cmd.line.text(), "cat src/");
+}
+
+/// The line typed and run with `enter`.
+fn run(app: &mut App, line: &str) {
+    typed(app, line);
+    press(app, KeyCode::Enter);
+}
+
+#[tokio::test]
+async fn slash_colour_sets_your_colour_and_a_header_has_none_to_set() {
+    let f = fixture();
+    let mut app = list(&f).await;
+    on(&mut app, HELD);
+    run(&mut app, "/colour pink");
+    assert!(app.cmd.is_empty(), "cleared once run");
+    let colors = Config::load(&f.home).unwrap().list.colors;
+    assert_eq!(colors.get(HELD).map(String::as_str), Some("pink"));
+    assert!(shown(&app).contains("colour: pink"), "{}", shown(&app));
+    run(&mut app, "/color #102060");
+    assert_eq!(
+        Config::load(&f.home).unwrap().list.colors.get(HELD).map(String::as_str),
+        Some("#102060"),
+        "the alias, and a hex"
+    );
+    run(&mut app, "/colour none");
+    assert!(Config::load(&f.home).unwrap().list.colors.is_empty());
+    // Not a colour: said, and the line kept to mend.
+    run(&mut app, "/colour chartreuse");
+    assert!(shown(&app).contains("not a colour: chartreuse"), "{}", shown(&app));
+    assert_eq!(app.cmd.line.text(), "/colour chartreuse");
+    press(&mut app, KeyCode::Esc);
+    // Claude's colour wins, as with ^g.
+    app.set_native(vec![{
+        let mut p = waiting(&f.repo);
+        p.color = Some("pink".into());
+        p
+    }]);
+    on(&mut app, NATIVE);
+    run(&mut app, "/colour blue");
+    assert!(
+        shown(&app).contains("pink's colour wins · yours: blue"),
+        "{}",
+        shown(&app)
+    );
+    // A project header has none.
+    let head = format!("g:{}", f.repo.display());
+    on(&mut app, &head);
+    run(&mut app, "/colour red");
+    assert!(shown(&app).contains("/colour colours a session"), "{}", shown(&app));
+    assert!(!Config::load(&f.home).unwrap().list.colors.contains_key(&head));
+}
+
+#[tokio::test]
+async fn slash_rename_names_the_row_and_an_empty_one_goes_back() {
+    let f = fixture();
+    let mut app = list(&f).await;
+    on(&mut app, HELD);
+    run(&mut app, "/rename build box");
+    let names = Config::load(&f.home).unwrap().list.names;
+    assert_eq!(names.get(HELD).map(String::as_str), Some("build box"));
+    assert!(row_of(&shown(&app), "build box").contains("done"));
+    run(&mut app, "/rename");
+    assert!(Config::load(&f.home).unwrap().list.names.is_empty());
+    assert!(shown(&app).contains("back to shop-sh"));
+    on(&mut app, NATIVE);
+    run(&mut app, "/rename x");
+    assert!(shown(&app).contains("claude names its own sessions"));
+}
+
+#[tokio::test]
+async fn slash_pin_hide_agents_and_group_do_what_their_keys_do() {
+    let f = fixture();
+    let mut app = list(&f).await;
+    on(&mut app, NATIVE);
+    run(&mut app, "/pin");
+    assert_eq!(Config::load(&f.home).unwrap().list.pins, [NATIVE]);
+    assert_eq!(app.keys()[0], NATIVE);
+    run(&mut app, "/pin");
+    assert!(Config::load(&f.home).unwrap().list.pins.is_empty());
+    run(&mut app, "/hide");
+    assert_eq!(Config::load(&f.home).unwrap().list.hidden[0].key, NATIVE);
+    assert!(app.keys().iter().all(|k| k != NATIVE));
+    run(&mut app, "/hidden");
+    assert!(Config::load(&f.home).unwrap().list.show_hidden);
+    on(&mut app, NATIVE);
+    run(&mut app, "/hide");
+    assert!(Config::load(&f.home).unwrap().list.hidden.is_empty(), "brought back");
+    run(&mut app, "/agents");
+    assert!(!Config::load(&f.home).unwrap().list.show_agents);
+    assert!(!shown(&app).contains("fix the login"));
+    run(&mut app, "/agents");
+    assert!(Config::load(&f.home).unwrap().list.show_agents);
+    run(&mut app, "/shells");
+    assert!(!Config::load(&f.home).unwrap().list.show_shells);
+    run(&mut app, "/group");
+    assert_eq!(Config::load(&f.home).unwrap().list.grouping, Grouping::State);
+    run(&mut app, "/group");
+    assert_eq!(Config::load(&f.home).unwrap().list.grouping, Grouping::Project);
+    run(&mut app, "/pin now");
+    assert!(shown(&app).contains("/pin takes nothing after it"));
+    press(&mut app, KeyCode::Esc);
+    run(&mut app, "/quit");
+    assert!(app.quit, "at once");
+}
+
+#[tokio::test]
+async fn slash_rm_removes_an_ended_held_session_and_refuses_what_it_cannot() {
+    let f = fixture();
+    let mut app = list(&f).await;
+    on(&mut app, NATIVE);
+    run(&mut app, "/rm");
+    assert!(
+        shown(&app).contains("fix the login is live · /stop it first"),
+        "{}",
+        shown(&app)
+    );
+    assert!(app.work.is_empty(), "nothing done");
+    assert!(ran_in(&f.repo).is_empty(), "claude was not asked to stop it");
+    let head = format!("g:{}", f.repo.display());
+    on(&mut app, &head);
+    run(&mut app, "/rm");
+    assert!(
+        shown(&app).contains("/rm removes an ended session of Relay's"),
+        "{}",
+        shown(&app)
+    );
+    on(&mut app, HELD);
+    run(&mut app, "/stop");
+    assert!(
+        shown(&app).contains("shop-sh has ended · /rm removes it"),
+        "{}",
+        shown(&app)
+    );
+    run(&mut app, "/rm");
+    app.finish().await;
+    assert!(!f.home.session_dir("shop-sh").exists());
+    assert!(shown(&app).contains("removed shop-sh"));
+}
+
+#[tokio::test]
+async fn an_unknown_command_is_said_and_kept_on_the_line() {
+    let f = fixture();
+    let mut app = list(&f).await;
+    typed(&mut app, "/col");
+    assert!(!line_row(&app).contains("unknown command"), "the start of one");
+    press(&mut app, KeyCode::Esc);
+    typed(&mut app, "/nope");
+    assert!(line_row(&app).contains("unknown command"), "{}", line_row(&app));
+    press(&mut app, KeyCode::Enter);
+    assert!(shown(&app).contains("unknown command /nope"), "{}", shown(&app));
+    assert_eq!(app.cmd.line.text(), "/nope");
+    assert!(app.work.is_empty(), "no shell started");
+}
+
+#[tokio::test]
+async fn tab_completes_a_command_then_its_colour_and_ghosts_the_rows_name() {
+    let f = fixture();
+    let mut app = list(&f).await;
+    on(&mut app, HELD);
+    typed(&mut app, "/col");
+    assert_eq!(app.cmd.ghost.as_deref(), Some("our"));
+    press(&mut app, KeyCode::Tab);
+    assert_eq!(app.cmd.line.text(), "/colour ");
+    typed(&mut app, "p");
+    assert_eq!(app.cmd.ghost.as_deref(), Some("ink"));
+    press(&mut app, KeyCode::Tab);
+    assert_eq!(app.cmd.line.text(), "/colour pink");
+    press(&mut app, KeyCode::Tab);
+    assert_eq!(app.cmd.line.text(), "/colour purple", "tab again goes round");
+    press(&mut app, KeyCode::Esc);
+    typed(&mut app, "/rename ");
+    assert_eq!(app.cmd.ghost.as_deref(), Some("shop-sh"), "the name it has");
+    press(&mut app, KeyCode::Tab);
+    assert_eq!(app.cmd.line.text(), "/rename shop-sh ");
 }
 
 #[tokio::test]
@@ -935,7 +1188,11 @@ async fn tab_completes_a_harness_word_and_a_path_and_the_ghost_shows_it() {
     on(&mut app, NATIVE);
     typed(&mut app, "cod");
     assert_eq!(app.cmd.ghost.as_deref(), Some("ex"));
-    assert!(line_row(&app).contains("shop ❯ codex"), "the ghost: {}", line_row(&app));
+    assert!(
+        line_row(&app).contains(" ❯ codex") && !line_row(&app).contains("shop ❯"),
+        "the ghost: {}",
+        line_row(&app)
+    );
     press(&mut app, KeyCode::Tab);
     assert_eq!(app.cmd.line.text(), "codex ");
     typed(&mut app, "look at sr");
@@ -963,6 +1220,7 @@ fn cells_of(app: &App, text: &str) -> (ratatui::buffer::Buffer, u16, u16) {
 #[tokio::test]
 async fn a_claude_session_keeps_its_colour_on_the_list_but_not_under_the_cursor() {
     use ratatui::style::Color;
+    let pink_bg = crate::tui::theme::picked("pink").unwrap();
     let f = fixture();
     let mut app = list(&f).await;
     let mut pink = waiting(&f.repo);
@@ -970,13 +1228,21 @@ async fn a_claude_session_keeps_its_colour_on_the_list_but_not_under_the_cursor(
     app.set_native(vec![pink]);
     on(&mut app, HELD);
     let (buf, x, y) = cells_of(&app, "fix the login");
-    assert_eq!(buf[(x, y)].fg, Color::Indexed(213), "the name, pink");
-    assert_eq!(buf[(1, y)].fg, Color::Indexed(213), "and its icon");
+    assert_eq!(buf[(x, y)].bg, pink_bg, "the name sits on a pink swatch");
+    assert_eq!(
+        buf[(x, y)].fg,
+        crate::tui::theme::swatch(pink_bg).fg.unwrap(),
+        "in dark text"
+    );
+    assert_eq!(buf[(x + 12, y)].bg, pink_bg, "to the name's last letter");
+    assert_ne!(buf[(1, y)].bg, pink_bg, "the icon is not on it");
+    assert_ne!(buf[(1, y)].fg, pink_bg, "and keeps its own colour");
     // Without one, the name is the foreground's, as ever.
     app.set_native(vec![waiting(&f.repo)]);
     on(&mut app, HELD);
     let (buf, x, y) = cells_of(&app, "fix the login");
     assert_eq!(buf[(x, y)].fg, Color::Reset);
+    assert_eq!(buf[(x, y)].bg, Color::Reset);
     app.set_native(vec![{
         let mut p = waiting(&f.repo);
         p.color = Some("pink".into());
@@ -984,10 +1250,11 @@ async fn a_claude_session_keeps_its_colour_on_the_list_but_not_under_the_cursor(
     }]);
     on(&mut app, NATIVE);
     let (buf, x, y) = cells_of(&app, "fix the login");
+    assert_eq!(buf[(x, y)].bg, pink_bg, "under the cursor the swatch stays on the name");
     assert_eq!(
-        buf[(x, y)].fg,
-        crate::tui::theme::selected().fg.unwrap(),
-        "the cursor's band wins"
+        buf[(1, y)].bg,
+        crate::tui::theme::selected().bg.unwrap(),
+        "and the cursor's band is behind the rest"
     );
     on(&mut app, HELD);
     ctrl(&mut app, 'f');
@@ -997,5 +1264,95 @@ async fn a_claude_session_keeps_its_colour_on_the_list_but_not_under_the_cursor(
     assert!(
         buf[(x + 8, y)].modifier.contains(ratatui::style::Modifier::UNDERLINED),
         "the search's mark still shows"
+    );
+    assert_eq!(buf[(x + 8, y)].bg, pink_bg, "over the swatch");
+}
+
+#[tokio::test]
+async fn ctrl_g_cycles_a_rows_own_colour_through_the_palette_and_keeps_it() {
+    use crate::tui::theme;
+    let f = fixture();
+    let mut app = list(&f).await;
+    for key in [HELD, NATIVE] {
+        on(&mut app, key);
+        let mut seen = vec![];
+        for _ in 0..theme::PALETTE.len() {
+            ctrl(&mut app, 'g');
+            let c = Config::load(&f.home).unwrap().list.colors.get(key).cloned();
+            seen.push(c.expect("set"));
+            assert!(shown(&app).contains(&format!("colour: {}", seen.last().unwrap())));
+            assert_eq!(app.sel.as_deref(), Some(key), "the cursor stays");
+        }
+        assert_eq!(seen, theme::PALETTE);
+        ctrl(&mut app, 'g');
+        assert!(!Config::load(&f.home).unwrap().list.colors.contains_key(key));
+        assert!(shown(&app).contains("colour: none"));
+    }
+}
+
+#[tokio::test]
+async fn your_colour_is_the_names_swatch_and_a_harnesss_own_wins_with_a_word_about_it() {
+    let f = fixture();
+    let mut app = list(&f).await;
+    on(&mut app, NATIVE);
+    ctrl(&mut app, 'g');
+    on(&mut app, HELD);
+    let (buf, x, y) = cells_of(&app, "fix the login");
+    assert_eq!(buf[(x, y)].bg, crate::tui::theme::picked("red").unwrap(), "yours");
+    // Claude sets pink: it shows, and ^g still moves yours, saying why.
+    app.set_native(vec![{
+        let mut p = waiting(&f.repo);
+        p.color = Some("pink".into());
+        p
+    }]);
+    on(&mut app, NATIVE);
+    ctrl(&mut app, 'g');
+    assert!(
+        shown(&app).contains("pink's colour wins · yours: blue"),
+        "{}",
+        shown(&app)
+    );
+    assert_eq!(
+        Config::load(&f.home)
+            .unwrap()
+            .list
+            .colors
+            .get(NATIVE)
+            .map(String::as_str),
+        Some("blue")
+    );
+    on(&mut app, HELD);
+    let (buf, x, y) = cells_of(&app, "fix the login");
+    assert_eq!(
+        buf[(x, y)].bg,
+        crate::tui::theme::picked("pink").unwrap(),
+        "the harness's"
+    );
+}
+
+#[tokio::test]
+async fn ctrl_g_on_a_project_header_does_nothing_but_say_so() {
+    let f = fixture();
+    let mut app = list(&f).await;
+    let head = format!("g:{}", f.repo.display());
+    on(&mut app, &head);
+    ctrl(&mut app, 'g');
+    assert!(shown(&app).contains("ctrl+g colours a session"));
+    assert!(Config::load(&f.home).unwrap().list.colors.is_empty());
+}
+
+#[tokio::test]
+async fn a_hex_colour_of_your_own_is_drawn_as_the_names_background() {
+    let f = fixture();
+    let mut cfg = Config::load(&f.home).unwrap();
+    cfg.list.colors.insert(NATIVE.into(), "#102060".into());
+    cfg.save(&f.home).unwrap();
+    let app = list(&f).await;
+    let (buf, x, y) = cells_of(&app, "fix the login");
+    assert_eq!(buf[(x, y)].bg, ratatui::style::Color::Rgb(0x10, 0x20, 0x60));
+    assert_eq!(
+        buf[(x, y)].fg,
+        crate::tui::theme::swatch(buf[(x, y)].bg).fg.unwrap(),
+        "light text on dark"
     );
 }

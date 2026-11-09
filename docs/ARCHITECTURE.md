@@ -3,8 +3,8 @@
 **Status:** as built · **Date:** 2026-11-08 · **Tree:** `slim-step-1`
 
 [PRODUCT.md](PRODUCT.md) says what Relay is for. This file says how the tree under `code/` is
-wired. It names the code to read rather than repeating it; the keys are in `rl/src/tui/shortcuts.rs`
-and `^h`.
+wired. It names the code to read rather than repeating it; the keys are in `rl/src/tui/help.rs`
+(one table: the `ctrl+h` grid and the footer's hints) and the commands in `rl/src/tui/slash.rs`.
 
 ---
 
@@ -16,7 +16,7 @@ There is no daemon. Two kinds of process, one file tree.
 flowchart TB
     subgraph rl["rl — the list and the commands"]
         tui["list (TUI)"]
-        cmds["new · ls · attach · stop · rm · setup"]
+        cmds["new · ls · attach · stop · rm · color · setup"]
         hook["rl hook — called by an agent's hooks"]
         mcp["rl mcp — stdio MCP server, run by an agent"]
     end
@@ -37,7 +37,8 @@ flowchart TB
 - `rl-session` is started by `rl new`, forks away and owns one terminal. It outlives `rl`. It is
   found next to the `rl` binary.
 - `rl hook` and `rl mcp` are `rl` run by someone else: an agent's hook, an agent's MCP client.
-  A hook writes a file and exits 0, always, within a short time, and prints nothing.
+  A hook writes a file and exits 0, always, within a short time, and prints nothing but Claude's
+  news of relay mail (see Ping).
 
 State is files, not a database. Folders are the truth; a session's liveness is read from its files
 and its socket.
@@ -66,7 +67,8 @@ and its socket.
 | `sessions/<name>/exit`, `stopped`, `sock` | holder, `rl stop` | how it ended, that it was stopped, its socket |
 | `state/<agent>/<session_id>.json` | `rl hook` | a session Relay does not hold; removed on `ended` |
 | `mail/<key>/<ns>-<pid>-<n>-<from>.json` | `rl mcp` | a waiting message; deleted when read |
-| `config.json` | `rl setup`, the list | harnesses, badges, list preferences. Strict. |
+| `mail/<key>/.told` | `rl hook` | when the newest mail a Claude `Stop` hook told of was sent |
+| `config.json` | `rl setup`, the list | harnesses, badges, list preferences (grouping, toggles, order, hidden, pins, names, colours by row key; `ctrl+g` cycles a row's own colour). Strict. |
 | `hooks/` | `rl new` | per-run settings passed to a harness |
 | `detect/*.yaml` | you | profile overrides |
 | `plugins/gh-pr` | `rl` | the badge script |
@@ -83,7 +85,9 @@ Folders are 0700.
   (`words`) starts that agent with the rest as its prompt (placed by the profile's `prompt`;
   Claude through its adapter's `start`, `claude --bg`); any other line runs held as
   `$SHELL -ic '<line>` and `exec $SHELL'`, a session of kind shell. Completion reads `PATH` once
-  per list.
+  per list. A line starting with `/` is a command instead (`tui/slash.rs`): each names a key's
+  action (`/pin` is `ctrl+t`, `/stop` is `ctrl+x` on a live row without the second press) and runs it on
+  the row under the cursor through the same code.
 - **List.** Held sessions come from `sessions/`. Hooked-only ones come from `state/`. Claude's and
   Codex's own come from asking them (`sessions.list` in the profile), each with its own timeout;
   one that fails is skipped. `rows/` merges them and groups them, each under its project: a
@@ -92,13 +96,13 @@ Folders are 0700.
   which has none, is a project of its own). State comes from, in order, the
   agent's hooks, the harness's own listing, then regexes over the screen.
 - **Attach.** A held session: `rl` connects to its socket, gets the screen, then live bytes.
-  `ctrl-\` detaches. A native one: `rl` runs the profile's `attach` (`claude attach <id>`,
+  `ctrl+\` detaches. A native one: `rl` runs the profile's `attach` (`claude attach <id>`,
   `codex resume <id>`) in this terminal.
 - **Stop and remove.** A held session gets a `stopped` mark, then the holder is asked to close. A
   native Claude one is `claude stop <id>`. `rm` removes the folder of one not running. `rl` never
   runs `claude rm`.
 - **Hook.** `rl hook <agent> <Event>` reads the hook JSON on stdin and the profile's
-  `sessions.hooks.events` and writes `hook.json` (under a held session, `RELAY_SESSION` set) or
+  `sessions.hooks.events` and writes `hook.json` (under a held session, `RL_SESSION` set) or
   `state/<agent>/<id>.json`. Claude's user-level hook says `--user` after the event; under a held
   session only the session's own hook is heard, so a call counts once.
 - **Send.** `send` resolves `to` to a session and writes a file under `mail/<key>/`, the key being
@@ -107,6 +111,22 @@ Folders are 0700.
   claimed by a rename before it is read, so two inboxes never get the same message, and deleted
   once it parses. Keys are encoded one to one (`[a-z0-9-]` kept, every other byte `%xx`), so none
   escapes `mail/` and none shares a folder with another, whatever the file system's case.
+- **Ping.** After the file is left, `send` tells a recipient whose harness can be told from
+  outside: its adapter's `ping_argv` (the profile's `sessions.ping`; Codex's `codex queue --thread
+  <id> --message <text> --resume`), run through `adapter::run` with `RELAY_ASKING` set so the
+  harness's own hooks let it go, within `PING_WAIT`. The id is a native row's (a Codex thread's),
+  else what a held session's `hook.json` says (its conversation id, which for Codex is the
+  thread's). No id, no ping; a failed ping is reported in `send`'s text, never as a failure.
+  Claude has no such way in, so its hooks carry the news: `rl hook claude UserPromptSubmit` prints
+  `hookSpecificOutput.additionalContext` while mail waits in the session's own folders
+  (`mcp::own_keys`: the held session's name and ids, else the payload's `session_id`, read from the
+  files alone), and `rl hook claude Stop` prints `{"decision":"block","reason":…}` for mail newer
+  than `mail/<key>/.told` (then records it), never when the payload's `stop_hook_active` is true.
+  Only the copy of the hook that is heard (the session's own under a held session, `--user`
+  outside) prints, so an event tells once. These two are the only output `rl hook` ever writes.
+  From a Claude caller to one of Claude's background sessions (a native Claude row), `send`'s text
+  also advises waking it with `SendMessage`, by the row's name: the name `claude agents` shows,
+  which `ListAgents`/`SendMessage` address. Advice only; Relay calls nothing.
 
 ## 5. Adapters
 
@@ -120,7 +140,7 @@ when the profile loads. Keys:
   `color`, `patterns`, `timing`, `sessions`
 - `hooks`: `dialect`, `args`
 - `patterns`: `needs_input`, `idle`; `timing`: `idle_after`, `stale_after`
-- `sessions`: `hooks`, `list`, `attach`, `start`, `name`, `stop`
+- `sessions`: `hooks`, `list`, `attach`, `start`, `name`, `stop`, `ping`
 - `sessions.hooks`: `file`, `timeout`, `unit`, `async`, `marker`, `after_install`, `from_env`,
   `events`, `settings`
 - `sessions.list`: `args`, `reader`
@@ -140,20 +160,20 @@ Tools: `who`, `send(to, text, from?)`, `inbox(as?)`. A tool failure is an `isErr
 
 The caller's address, in order:
 
-1. `RELAY_SESSION`, set by `rl new` on sessions Relay holds: the session's name, taken only when
-   `RELAY_SESSION_AGENT` is the harness the server was started for (`rl mcp --harness <h>`).
+1. `RL_SESSION`, set by `rl new` on sessions Relay holds: the session's name, taken only when
+   `RL_SESSION_AGENT` is the harness the server was started for (`rl mcp --harness <h>`).
 2. For Claude, `CLAUDE_CODE_SESSION_ID`, matched against the session ids on the list.
 3. Otherwise `send` needs `from` and `inbox` needs `as`.
 
 A known caller wins over a passed `from`/`as`. Codex sets no id Relay knows, so it takes step 3.
 Addresses: a held session is its name; a hooked-only one its full session id; a native one its
-name, or the harness id when the name is empty or repeats. `send` also takes the row's `^r` title
+name, or the harness id when the name is empty or repeats. `send` also takes the row's `ctrl+r` title
 or a conversation id. A `send` to a held name asks no harness for its list.
 
 `rl setup` registers `rl mcp --harness <h>`: Claude through `claude mcp add --scope user` (run
 with a timeout in a process group of its own; `~/.claude.json` is only read, to compare and to
 confirm), Codex as `[mcp_servers.relay]` in `config.toml` with `env_vars` for `RELAY_HOME`,
-`RELAY_SESSION` and `RELAY_SESSION_AGENT`, Gemini as `mcpServers.relay` in `settings.json`. Where
+`RL_SESSION` and `RL_SESSION_AGENT`, Gemini as `mcpServers.relay` in `settings.json`. Where
 the Relay home is not the default, each entry carries `RELAY_HOME`. Hook
 files are edited in place keeping key order, comments (TOML) and file mode. A file that does not
 parse is left alone and reported.

@@ -139,6 +139,10 @@ impl Adapter for StandIn {
         self.0.stop_argv(id)
     }
 
+    fn ping_argv(&self, id: &str, text: &str) -> Option<Vec<String>> {
+        self.0.ping_argv(id, text)
+    }
+
     fn started_ids(&self, printed: &str) -> Vec<String> {
         if let Some((_, rest)) = printed.split_once(" in ")
             && let Some((dir, _)) = rest.split_once(" · ")

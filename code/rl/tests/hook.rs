@@ -24,12 +24,37 @@ impl Env {
         self.tmp.path().join("work")
     }
 
+    /// Runs the hook, which says nothing.
     fn hook(&self, args: &[&str], payload: Value, env: &[(&str, &str)]) -> std::process::Output {
+        let out = self.run(args, payload, env);
+        assert!(out.stdout.is_empty(), "a hook never prints");
+        out
+    }
+
+    /// Runs the hook, and what it printed: nothing, or the one JSON object
+    /// Claude reads from it.
+    fn says(&self, args: &[&str], payload: Value, env: &[(&str, &str)]) -> Option<Value> {
+        let out = self.run(args, payload, env);
+        (!out.stdout.is_empty()).then(|| serde_json::from_slice(&out.stdout).unwrap())
+    }
+
+    /// Leaves a message from `from` for the mail key `key`, sent `at` (unix
+    /// seconds), as `rl mcp`'s send does.
+    fn mail(&self, key: &str, from: &str, at: i64) {
+        let dir = self.home().join("mail").join(key);
+        std::fs::create_dir_all(&dir).unwrap();
+        let at_ts = jiff::Timestamp::from_second(at).unwrap();
+        let m = json!({"from": from, "to": key, "text": "hi", "at": at_ts.to_string()});
+        let name = format!("{:020}-1-{at}-{from}.json", at_ts.as_nanosecond());
+        std::fs::write(dir.join(name), m.to_string()).unwrap();
+    }
+
+    fn run(&self, args: &[&str], payload: Value, env: &[(&str, &str)]) -> std::process::Output {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_rl"));
         cmd.arg("hook")
             .args(args)
-            .env_remove("RELAY_SESSION")
-            .env_remove("RELAY_SESSION_AGENT")
+            .env_remove("RL_SESSION")
+            .env_remove("RL_SESSION_AGENT")
             .env_remove("RELAY_ASKING")
             .env("RELAY_HOME", self.home())
             .env("HOME", self.tmp.path())
@@ -46,7 +71,7 @@ impl Env {
             .unwrap();
         let out = child.wait_with_output().unwrap();
         assert!(out.status.success(), "a hook never fails");
-        assert!(out.stdout.is_empty() && out.stderr.is_empty(), "a hook never prints");
+        assert!(out.stderr.is_empty(), "a hook never prints to stderr");
         out
     }
 
@@ -108,7 +133,7 @@ fn under_a_held_session_the_word_goes_to_its_folder() {
     e.hook(
         &["claude", "UserPromptSubmit"],
         e.payload("s1"),
-        &[("RELAY_SESSION", "x"), ("RELAY_SESSION_AGENT", "claude")],
+        &[("RL_SESSION", "x"), ("RL_SESSION_AGENT", "claude")],
     );
     assert_eq!(read(&dir.join("hook.json"))["state"], "busy");
     assert!(!e.home().join("state").exists());
@@ -121,7 +146,7 @@ fn an_agent_inside_a_held_shell_reports_as_its_own_session() {
     std::fs::create_dir_all(&dir).unwrap();
     // The held session runs a shell; the claude started in it is not the
     // session's: its `--user` copy tells, and its own copy says nothing.
-    let held_shell = [("RELAY_SESSION", "x"), ("RELAY_SESSION_AGENT", "sh")];
+    let held_shell = [("RL_SESSION", "x"), ("RL_SESSION_AGENT", "sh")];
     e.hook(&["claude", "UserPromptSubmit", "--user"], e.payload("s1"), &held_shell);
     assert_eq!(read(&e.state("claude", "s1"))["state"], "busy");
     assert!(!dir.join("hook.json").exists());
@@ -135,7 +160,7 @@ fn a_held_session_that_moves_to_another_conversation_starts_afresh() {
     let e = Env::new();
     let dir = e.home().join("sessions/x");
     std::fs::create_dir_all(&dir).unwrap();
-    let held = [("RELAY_SESSION", "x"), ("RELAY_SESSION_AGENT", "claude")];
+    let held = [("RL_SESSION", "x"), ("RL_SESSION_AGENT", "claude")];
     let mut p = e.payload("s1");
     p["transcript_path"] = json!("/t/s1.jsonl");
     e.hook(&["claude", "UserPromptSubmit"], p, &held);
@@ -154,7 +179,7 @@ fn under_a_held_session_the_user_copy_is_ignored() {
     e.hook(
         &["claude", "UserPromptSubmit", "--user"],
         e.payload("s1"),
-        &[("RELAY_SESSION", "x"), ("RELAY_SESSION_AGENT", "claude")],
+        &[("RL_SESSION", "x"), ("RL_SESSION_AGENT", "claude")],
     );
     assert!(!dir.join("hook.json").exists());
     assert!(!e.home().join("state").exists());
@@ -194,6 +219,113 @@ fn a_later_word_changes_the_state_and_keeps_the_rest() {
     let v = read(&e.state("claude", "s1"));
     assert_eq!(v["state"], "idle");
     assert_eq!(v["transcript_path"], "/t/s1.jsonl");
+}
+
+fn prompt_news(n: usize, from: &str) -> Value {
+    json!({"hookSpecificOutput": {
+        "hookEventName": "UserPromptSubmit",
+        "additionalContext": format!("You have {n} relay message(s) waiting (from {from}). Call the relay inbox tool to read them."),
+    }})
+}
+
+fn stop_news(n: usize, from: &str) -> Value {
+    json!({
+        "decision": "block",
+        "reason": format!("You have {n} relay message(s) from {from}. Call the relay inbox tool to read them, then carry on."),
+    })
+}
+
+#[test]
+fn without_mail_claudes_hooks_say_nothing() {
+    let e = Env::new();
+    e.mail("someone-else", "a", 10);
+    assert_eq!(
+        e.says(&["claude", "UserPromptSubmit", "--user"], e.payload("s1"), &[]),
+        None
+    );
+    assert_eq!(e.says(&["claude", "Stop", "--user"], e.payload("s1"), &[]), None);
+}
+
+#[test]
+fn a_prompt_is_told_of_the_mail_waiting() {
+    let e = Env::new();
+    e.mail("s1", "a", 10);
+    e.mail("s1", "b", 20);
+    e.mail("s1", "a", 30);
+    let said = e.says(&["claude", "UserPromptSubmit", "--user"], e.payload("s1"), &[]);
+    assert_eq!(said, Some(prompt_news(3, "a, b")));
+    // Told on every prompt while it waits; its state is kept as ever.
+    let again = e.says(&["claude", "UserPromptSubmit", "--user"], e.payload("s1"), &[]);
+    assert_eq!(again, Some(prompt_news(3, "a, b")));
+    assert_eq!(read(&e.state("claude", "s1"))["state"], "busy");
+}
+
+#[test]
+fn a_stop_blocks_once_for_the_same_mail_and_again_for_new_mail() {
+    let e = Env::new();
+    e.mail("s1", "a", 10);
+    let stop = || e.says(&["claude", "Stop", "--user"], e.payload("s1"), &[]);
+    assert_eq!(stop(), Some(stop_news(1, "a")));
+    assert_eq!(stop(), None, "never twice for the same mail");
+    e.mail("s1", "b", 20);
+    assert_eq!(stop(), Some(stop_news(2, "a, b")), "new mail blocks again");
+    assert_eq!(stop(), None);
+}
+
+#[test]
+fn a_stop_already_kept_going_by_a_hook_does_not_block() {
+    let e = Env::new();
+    e.mail("s1", "a", 10);
+    let mut p = e.payload("s1");
+    p["stop_hook_active"] = json!(true);
+    assert_eq!(e.says(&["claude", "Stop", "--user"], p, &[]), None);
+    assert_eq!(
+        e.says(&["claude", "Stop", "--user"], e.payload("s1"), &[]),
+        Some(stop_news(1, "a")),
+        "it was not told then"
+    );
+}
+
+#[test]
+fn a_held_claude_is_told_once_though_both_its_hooks_run() {
+    let e = Env::new();
+    let dir = e.home().join("sessions/x");
+    std::fs::create_dir_all(&dir).unwrap();
+    let meta = json!({
+        "name": "x", "harness": "claude", "kind": "agent", "cwd": e.work(),
+        "argv": ["claude"], "started": "2026-01-01T00:00:00Z", "socket": dir.join("sock"),
+    });
+    std::fs::write(dir.join("meta.json"), meta.to_string()).unwrap();
+    // For its name, and for the conversation its hooks told of.
+    e.mail("x", "a", 10);
+    let held = [("RL_SESSION", "x"), ("RL_SESSION_AGENT", "claude")];
+    let user = e.says(&["claude", "UserPromptSubmit", "--user"], e.payload("s1"), &held);
+    assert_eq!(user, None, "the user copy is let go under a held session");
+    let own = e.says(&["claude", "UserPromptSubmit"], e.payload("s1"), &held);
+    assert_eq!(own, Some(prompt_news(1, "a")));
+    e.mail("s1", "b", 20);
+    assert_eq!(e.says(&["claude", "Stop", "--user"], e.payload("s1"), &held), None);
+    assert_eq!(
+        e.says(&["claude", "Stop"], e.payload("s1"), &held),
+        Some(stop_news(2, "a, b"))
+    );
+    assert_eq!(e.says(&["claude", "Stop"], e.payload("s1"), &held), None);
+}
+
+#[test]
+fn outside_relay_only_the_user_copy_tells_and_other_agents_never_print() {
+    let e = Env::new();
+    e.mail("s1", "a", 10);
+    e.hook(&["claude", "UserPromptSubmit"], e.payload("s1"), &[]);
+    e.hook(&["claude", "Stop"], e.payload("s1"), &[]);
+    e.hook(&["codex", "UserPromptSubmit"], e.payload("s1"), &[]);
+    e.hook(&["codex", "Stop"], e.payload("s1"), &[]);
+    e.hook(&["claude", "Notification", "--user"], e.payload("s1"), &[]);
+    assert_eq!(
+        e.says(&["claude", "Stop", "--user"], e.payload("s1"), &[]),
+        Some(stop_news(1, "a")),
+        "none of those told it"
+    );
 }
 
 #[test]

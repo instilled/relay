@@ -122,6 +122,46 @@ async fn ctrl_x_twice_stops_a_live_held_shell() {
     assert_eq!(status(&f.home, &name), None);
 }
 
+fn run(app: &mut App, line: &str) {
+    for c in line.chars() {
+        press(app, KeyCode::Char(c));
+    }
+    press(app, KeyCode::Enter);
+}
+
+#[tokio::test]
+async fn slash_rm_is_refused_on_a_live_held_shell_and_slash_stop_stops_it_at_once() {
+    if !holder() {
+        return;
+    }
+    let f = fixture();
+    let name = sh(&f.home, &f.folder).await;
+    let mut app = App::new(f.home.clone()).unwrap();
+    app.select(Some(format!("r:{name}")));
+    run(&mut app, "/rm");
+    assert!(
+        app.flashing().is_some_and(|m| m.contains("is live · /stop it first")),
+        "{:?}",
+        app.flashing()
+    );
+    assert!(app.work.is_empty());
+    assert_eq!(status(&f.home, &name), Some(Status::Live), "left as it was");
+    // Typing the command is the confirmation: no second press.
+    run(&mut app, "/stop");
+    assert!(app.cmd.is_empty());
+    app.finish().await;
+    let ended = || matches!(status(&f.home, &name), Some(Status::Ended(_)));
+    let by = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    while !ended() && std::time::Instant::now() < by {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(ended(), "{:?}", status(&f.home, &name));
+    app.reload();
+    run(&mut app, "/rm");
+    app.finish().await;
+    assert_eq!(status(&f.home, &name), None);
+}
+
 #[tokio::test]
 async fn enter_on_a_shell_line_runs_it_in_a_held_shell_that_stays() {
     if !holder() {

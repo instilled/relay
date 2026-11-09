@@ -47,7 +47,7 @@ fn start_argv(linger: u64, extra: &[&str], program: &Path) -> Holder {
         .arg("--socket-check")
         .arg("1")
         .arg("--env")
-        .arg("RELAY_SESSION=test0001");
+        .arg("RL_SESSION=test0001");
     cmd.args(extra);
     cmd.arg("--").arg(program);
     // The detached holder keeps stderr for its log, so never `output()` here.

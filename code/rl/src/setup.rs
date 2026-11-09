@@ -22,7 +22,7 @@ const SERVER: &str = "relay";
 
 /// What Codex hands the server from its own environment: where Relay is,
 /// and which held session (and harness) it runs under.
-const CODEX_ENV_VARS: [&str; 3] = [rl_core::HOME_ENV, "RELAY_SESSION", crate::spawn::AGENT_ENV];
+const CODEX_ENV_VARS: [&str; 3] = [rl_core::HOME_ENV, "RL_SESSION", crate::spawn::AGENT_ENV];
 
 /// How long a `claude mcp` call may take.
 const CLAUDE_WAIT: Duration = Duration::from_secs(30);
@@ -578,7 +578,7 @@ mod tests {
             json!({
                 "command": RL,
                 "args": args("codex"),
-                "env_vars": ["RELAY_HOME", "RELAY_SESSION", "RELAY_SESSION_AGENT"],
+                "env_vars": ["RELAY_HOME", "RL_SESSION", "RL_SESSION_AGENT"],
             })
         );
     }
