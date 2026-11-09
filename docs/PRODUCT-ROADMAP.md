@@ -14,19 +14,17 @@ report arc, the briefer, the co-worker layer, notifications, the pane redesign �
 
 What the slim build left to check or finish:
 
-* [ ] verify live what no test could: what `claude --bg` prints and the carry-on of an idle
-  Claude (`--resume --bg`), `claude stop`, `codex resume <id>` attaching to the right thread,
-  `codex queue --resume` reaching a Relay-held Codex, `claude --bg` sessions running user hooks,
-  Gemini's MCP format, and Codex's `env_vars`
-* [ ] the list doesn't restore the terminal on SIGTERM — a killed list leaves raw mode and the
-  alternate screen behind
+* [ ] verify live what's left: carrying on an idle Claude from another terminal
+  (`--resume --bg`), a held Codex claiming its thread with the real `codex`, and Gemini's MCP
+  format (checked live 2026-11-09: `claude --bg`'s output, `claude stop`, `--bg` sessions running
+  user hooks, `codex resume <id>` attaching, `codex queue --resume` reaching a held Codex)
+* [ ] `rl mcp` inside a held Codex can't tell its caller (Codex runs MCP servers in its daemon),
+  so `send`/`inbox` there need `from`/`as`
 * [ ] Antigravity hooks — its hook system (`hooks.json`; `SessionStart`, `PreToolUse`,
   `PostToolUse`, `PreInvocation`, `PostInvocation`, `Stop`) differs from the Gemini CLI's and has no
   permission event, so its rows can't read "needs input" yet
 * [ ] a Codex session handed to Codex's own daemon on detach — not today: codex 0.167 unloads a
   thread ~70 s after its TUI exits; revisit when Codex keeps threads loaded
-* [ ] `inbox` leaves a hidden claimed file when a process dies between claim and delete; sweep
-  stale `.taken-<pid>` files whose pid is dead
 
 Later:
 
@@ -34,6 +32,13 @@ Later:
 * [ ] socket paths that can't overflow macOS's ~104 bytes, if short names don't suffice
 
 ## Done — newest first
+
+* [x] a held Codex learns its thread — Codex runs hooks in its daemon, without the held session's
+  environment, so the first hook for a new thread claims the live held Codex in that folder started
+  in the last 120 s (`sessions.hooks.detached_env`); one row, pings and hook states work (#207)
+* [x] a killed list gives the terminal back (SIGTERM, SIGHUP, SIGINT, panics); `inbox` re-delivers
+  mail a dead taker left claimed; `ctrl+r` names a native session in Relay, Claude's name dimmed
+  beside it (#206)
 
 * [x] relay mail pings — `send` to a Codex session also runs `codex queue … --resume`; a Claude
   session hears of waiting mail on its next prompt and is kept going one turn at stop (once per
