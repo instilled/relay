@@ -963,6 +963,7 @@ fn cells_of(app: &App, text: &str) -> (ratatui::buffer::Buffer, u16, u16) {
 #[tokio::test]
 async fn a_claude_session_keeps_its_colour_on_the_list_but_not_under_the_cursor() {
     use ratatui::style::Color;
+    let pink_bg = crate::tui::theme::picked("pink").unwrap();
     let f = fixture();
     let mut app = list(&f).await;
     let mut pink = waiting(&f.repo);
@@ -970,13 +971,21 @@ async fn a_claude_session_keeps_its_colour_on_the_list_but_not_under_the_cursor(
     app.set_native(vec![pink]);
     on(&mut app, HELD);
     let (buf, x, y) = cells_of(&app, "fix the login");
-    assert_eq!(buf[(x, y)].fg, Color::Indexed(213), "the name, pink");
-    assert_eq!(buf[(1, y)].fg, Color::Indexed(213), "and its icon");
+    assert_eq!(buf[(x, y)].bg, pink_bg, "the name sits on a pink swatch");
+    assert_eq!(
+        buf[(x, y)].fg,
+        crate::tui::theme::swatch(pink_bg).fg.unwrap(),
+        "in dark text"
+    );
+    assert_eq!(buf[(x + 12, y)].bg, pink_bg, "to the name's last letter");
+    assert_ne!(buf[(1, y)].bg, pink_bg, "the icon is not on it");
+    assert_ne!(buf[(1, y)].fg, pink_bg, "and keeps its own colour");
     // Without one, the name is the foreground's, as ever.
     app.set_native(vec![waiting(&f.repo)]);
     on(&mut app, HELD);
     let (buf, x, y) = cells_of(&app, "fix the login");
     assert_eq!(buf[(x, y)].fg, Color::Reset);
+    assert_eq!(buf[(x, y)].bg, Color::Reset);
     app.set_native(vec![{
         let mut p = waiting(&f.repo);
         p.color = Some("pink".into());
@@ -984,10 +993,11 @@ async fn a_claude_session_keeps_its_colour_on_the_list_but_not_under_the_cursor(
     }]);
     on(&mut app, NATIVE);
     let (buf, x, y) = cells_of(&app, "fix the login");
+    assert_eq!(buf[(x, y)].bg, pink_bg, "under the cursor the swatch stays on the name");
     assert_eq!(
-        buf[(x, y)].fg,
-        crate::tui::theme::selected().fg.unwrap(),
-        "the cursor's band wins"
+        buf[(1, y)].bg,
+        crate::tui::theme::selected().bg.unwrap(),
+        "and the cursor's band is behind the rest"
     );
     on(&mut app, HELD);
     ctrl(&mut app, 'f');
@@ -998,4 +1008,5 @@ async fn a_claude_session_keeps_its_colour_on_the_list_but_not_under_the_cursor(
         buf[(x + 8, y)].modifier.contains(ratatui::style::Modifier::UNDERLINED),
         "the search's mark still shows"
     );
+    assert_eq!(buf[(x + 8, y)].bg, pink_bg, "over the swatch");
 }

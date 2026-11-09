@@ -64,20 +64,30 @@ pub fn pr(state: Option<&str>) -> Style {
     }
 }
 
-/// A colour a session picked in its harness, by Claude's names for them,
-/// as `claude agents` draws it. A name not among them is none.
+/// A colour a session picked, by Claude's names for them, as swatches to sit
+/// behind a name the way `claude agents` draws them. Stated outright in
+/// truecolor — the terminal's own red, blue and the rest are whatever its
+/// theme made them, and the swatches should look the same everywhere. Soft
+/// mid-tones, so near-black text reads on every one. A name not among them
+/// is none.
 pub fn picked(name: &str) -> Option<Color> {
-    Some(match name {
-        "red" => Color::Red,
-        "blue" => Color::Blue,
-        "green" => Color::Green,
-        "yellow" => Color::Yellow,
-        "cyan" => Color::Cyan,
-        "purple" => Color::Magenta,
-        "orange" => Color::Indexed(208),
-        "pink" => Color::Indexed(213),
+    let (r, g, b) = match name {
+        "red" => (0xD9, 0x60, 0x5B),
+        "blue" => (0x5B, 0x8F, 0xD9),
+        "green" => (0x6B, 0xB0, 0x6E),
+        "yellow" => (0xD9, 0xB9, 0x5B),
+        "cyan" => (0x5B, 0xB8, 0xC4),
+        "purple" => (0xA2, 0x7F, 0xD1),
+        "orange" => (0xD9, 0x91, 0x5B),
+        "pink" => (0xD5, 0x7F, 0xAE),
         _ => return None,
-    })
+    };
+    Some(Color::Rgb(r, g, b))
+}
+
+/// A coloured name: its swatch behind it, near-black on it.
+pub fn swatch(c: Color) -> Style {
+    Style::default().bg(c).fg(Color::Rgb(0x14, 0x14, 0x14))
 }
 
 /// The selected row: a band of its own — deep teal under near-white, both
@@ -129,10 +139,8 @@ mod tests {
 
     #[test]
     fn claudes_colour_names_map_to_the_terminals() {
-        assert_eq!(picked("red"), Some(Color::Red));
-        assert_eq!(picked("purple"), Some(Color::Magenta));
-        assert_eq!(picked("orange"), Some(Color::Indexed(208)));
-        assert_eq!(picked("pink"), Some(Color::Indexed(213)));
+        assert_eq!(picked("red"), Some(Color::Rgb(0xD9, 0x60, 0x5B)));
+        assert_eq!(picked("pink"), Some(Color::Rgb(0xD5, 0x7F, 0xAE)));
         for c in rl_detect::claude_native::COLORS {
             assert!(picked(c).is_some(), "{c}");
         }
