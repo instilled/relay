@@ -157,7 +157,7 @@ To show it in a zsh prompt: `PROMPT='${RL_SESSION:+[$RL_SESSION] }'$PROMPT`.
 How a recipient learns it has mail depends on its harness:
 
 - **Codex**: pushed. `send` also runs `codex queue --thread <id> --message "relay mail from <you>: call the relay inbox tool to read it" --resume` (the profile's `sessions.ping`) on the recipient's thread: a Codex row's id, or what a held Codex session's hooks said. `send` says `· pinged codex`, or why codex didn't take the ping; the message is left either way.
-- **Claude**: told by Relay's hooks. With mail waiting, each prompt gets a line of context saying so (`UserPromptSubmit`), and at the end of a turn the `Stop` hook keeps Claude going one more turn to read it, once for the same mail. Needs the hooks `rl setup` installs (or a session Relay holds).
+- **Claude**: told by Relay's hooks. With mail waiting, each prompt gets a line of context saying so (`UserPromptSubmit`), and at the end of a turn the `Stop` hook keeps Claude going one more turn to read it, once for the same mail. Needs the hooks `rl setup` installs (or a session Relay holds). When one Claude session sends to one of Claude's background sessions, `send` also suggests waking it now with Claude's `SendMessage`, by the name `claude agents` shows for it.
 - **Antigravity, shells and the rest**: they find it when they call `inbox`.
 
 Your address is found in this order: `RL_SESSION`, when the held session runs the harness the

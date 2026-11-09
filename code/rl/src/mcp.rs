@@ -5,7 +5,7 @@
 //! whose harness can be told from outside is told it has mail: `send` runs
 //! its adapter's `ping_argv` (Codex's `codex queue … --resume` on its
 //! thread). A ping that fails never fails the send. A Claude session hears
-//! of its mail from Relay's hooks instead (`rl hook`, `pending`).
+//! of its mail from Relay's hooks instead (`rl hook`'s `news`).
 //!
 //! Only protocol goes to stdout; logs go to stderr.
 //!
@@ -314,6 +314,7 @@ impl Server {
             let recipient = Recipient {
                 harness: h.meta.harness.clone(),
                 ping_id: held_ping_id(h),
+                claude_name: None,
             };
             (to.to_string(), to.to_string(), self.me_cheaply(&held), recipient)
         } else {
@@ -323,6 +324,9 @@ impl Server {
             let recipient = Recipient {
                 harness: e.row.harness.clone(),
                 ping_id: e.ping_id.clone(),
+                // `claude agents` lists Claude's background sessions by the
+                // name their row has.
+                claude_name: (e.row.source == Source::Native && !e.row.name.is_empty()).then(|| e.row.name.clone()),
             };
             (e.key.clone(), e.address.clone(), me, recipient)
         };
@@ -337,7 +341,14 @@ impl Server {
         };
         mail::send(&self.home, &key, &m).map_err(|e| format!("could not leave the message: {e}"))?;
         let pinged = self.ping(&to, &m.from).unwrap_or_default();
-        Ok(format!("sent to {address}{pinged}"))
+        // Advice only: from one Claude session, another can be woken now.
+        let wake = match &to.claude_name {
+            Some(name) if self.caller.harness == CLAUDE && to.harness == CLAUDE => format!(
+                "\n{name} is a Claude session — to wake it now, also SendMessage it (\"relay mail waiting: call inbox\")."
+            ),
+            _ => String::new(),
+        };
+        Ok(format!("sent to {address}{pinged}{wake}"))
     }
 
     /// Tells `to` it has mail from `from`, where its harness can be told from
@@ -431,6 +442,9 @@ pub const CLAUDE: &str = "claude";
 struct Recipient {
     harness: String,
     ping_id: Option<String>,
+    /// The name `claude agents` shows it by, and so Claude's `ListAgents`
+    /// and `SendMessage`, where it is one of Claude's background sessions.
+    claude_name: Option<String>,
 }
 
 /// The id a held session's harness pings it by: its conversation's, as its
@@ -520,7 +534,7 @@ fn tools() -> Value {
         },
         {
             "name": "send",
-            "description": "Leave a message for another session. They read it when they call inbox.",
+            "description": "Leave a message for another session. They read it when they call inbox; a Codex session is also told it has mail, and a Claude one hears of it from its hooks.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1095,18 +1109,29 @@ mod tests {
     }
 
     #[test]
-    fn a_claude_recipient_is_not_pinged() {
+    fn a_claude_recipient_is_not_pinged_and_another_claude_is_told_to_wake_it() {
         let f = fixture();
         let tmp = tempfile::tempdir().unwrap();
         let (adapters, bin) = stand_in_adapters(tmp.path());
         let rows = vec![native("0a1b", "conv-1", "fix login")];
-        let (s, _) = listing(&f, claude_caller("sess-aaaa"), rows);
+        let (s, _) = listing(&f, claude_caller("sess-aaaa"), rows.clone());
         let s = s.with_adapters(adapters);
+        assert_eq!(
+            ok_text(&s, "send", json!({ "to": "conv-1", "text": "x" })),
+            "sent to fix login\nfix login is a Claude session — to wake it now, also SendMessage it (\"relay mail waiting: call inbox\")."
+        );
+        assert_eq!(ran(&bin), None, "nothing is run for a Claude session");
+        // Not from another harness, nor to one only its hooks told of.
+        let (s, _) = listing(&f, caller(Some("sess-aaaa")), rows.clone());
         assert_eq!(
             ok_text(&s, "send", json!({ "to": "conv-1", "text": "x" })),
             "sent to fix login"
         );
-        assert_eq!(ran(&bin), None, "nothing is run for a Claude session");
+        let (s, _) = listing(&f, claude_caller("sess-aaaa"), rows);
+        assert_eq!(
+            ok_text(&s, "send", json!({ "to": "sess-bbbb", "text": "x" })),
+            "sent to sess-bbbb"
+        );
     }
 
     #[test]

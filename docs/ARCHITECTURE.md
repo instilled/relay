@@ -122,6 +122,9 @@ Folders are 0700.
   than `mail/<key>/.told` (then records it), never when the payload's `stop_hook_active` is true.
   Only the copy of the hook that is heard (the session's own under a held session, `--user`
   outside) prints, so an event tells once. These two are the only output `rl hook` ever writes.
+  From a Claude caller to one of Claude's background sessions (a native Claude row), `send`'s text
+  also advises waking it with `SendMessage`, by the row's name: the name `claude agents` shows,
+  which `ListAgents`/`SendMessage` address. Advice only; Relay calls nothing.
 
 ## 5. Adapters
 
