@@ -363,9 +363,14 @@ impl App {
 
     /// The line's ghost again, after a key changed it.
     pub fn retyped(&mut self) {
-        let folder = self.line_folder();
+        let (folder, name) = (self.line_folder(), self.name_here());
         let cmds = self.commands.get_or_init(Commands::from_env);
-        self.cmd.typed(&folder, rows::registry(), cmds);
+        self.cmd.typed(&cmdline::Ctx {
+            folder: &folder,
+            reg: rows::registry(),
+            cmds,
+            name: name.as_deref(),
+        });
     }
 
     /// The window's title: how things stand, as the header says it.

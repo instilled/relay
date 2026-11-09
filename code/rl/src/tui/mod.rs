@@ -21,6 +21,7 @@ mod mark;
 mod remove;
 mod select;
 mod shortcuts;
+mod slash;
 mod theme;
 
 #[cfg(test)]

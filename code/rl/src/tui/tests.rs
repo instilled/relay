@@ -309,6 +309,9 @@ async fn ctrl_h_and_f1_show_the_shortcuts_esc_puts_them_away_and_a_question_mark
     ctrl(&mut app, 'h');
     assert!(shown(&app).contains("by project/state"));
     press(&mut app, KeyCode::Esc);
+    run(&mut app, "/help");
+    assert!(shown(&app).contains("by project/state"), "/help opens them");
+    press(&mut app, KeyCode::Esc);
     assert!(!shown(&app).contains("by project/state"));
     press(&mut app, KeyCode::F(1));
     assert!(shown(&app).contains("by project/state"));
@@ -802,7 +805,7 @@ async fn the_search_takes_the_command_lines_place_while_it_is_open() {
     let f = fixture();
     let mut app = list(&f).await;
     assert!(line_row(&app).contains(" ❯ "), "{}", line_row(&app));
-    press(&mut app, KeyCode::Char('/'));
+    ctrl(&mut app, 'f');
     typed(&mut app, "login");
     let row = line_row(&app);
     assert!(row.contains("⌕ login") && !row.contains(" ❯ "), "{row}");
@@ -882,10 +885,19 @@ async fn the_filters_are_on_ctrl_keys_and_every_letter_types() {
 }
 
 #[tokio::test]
-async fn a_slash_on_an_empty_line_opens_the_search() {
+async fn a_slash_starts_a_command_and_only_ctrl_f_searches() {
     let f = fixture();
     let mut app = list(&f).await;
+    assert!(line_row(&app).contains("/ for commands"), "{}", line_row(&app));
     press(&mut app, KeyCode::Char('/'));
+    assert!(app.search.is_none(), "/ no longer searches");
+    assert_eq!(app.cmd.line.text(), "/");
+    typed(&mut app, "pin");
+    assert!(line_row(&app).contains("command · pin"), "{}", line_row(&app));
+    assert!(shown(&app).contains("enter runs it on the row"), "the footer says how");
+    press(&mut app, KeyCode::Esc);
+    assert!(app.cmd.is_empty());
+    ctrl(&mut app, 'f');
     assert!(app.search.is_some());
     typed(&mut app, "login");
     assert_eq!(app.filter, "login");
@@ -895,6 +907,180 @@ async fn a_slash_on_an_empty_line_opens_the_search() {
     typed(&mut app, "cat src/");
     assert!(app.search.is_none());
     assert_eq!(app.cmd.line.text(), "cat src/");
+}
+
+/// The line typed and run with `enter`.
+fn run(app: &mut App, line: &str) {
+    typed(app, line);
+    press(app, KeyCode::Enter);
+}
+
+#[tokio::test]
+async fn slash_colour_sets_your_colour_and_a_header_has_none_to_set() {
+    let f = fixture();
+    let mut app = list(&f).await;
+    on(&mut app, HELD);
+    run(&mut app, "/colour pink");
+    assert!(app.cmd.is_empty(), "cleared once run");
+    let colors = Config::load(&f.home).unwrap().list.colors;
+    assert_eq!(colors.get(HELD).map(String::as_str), Some("pink"));
+    assert!(shown(&app).contains("colour: pink"), "{}", shown(&app));
+    run(&mut app, "/color #102060");
+    assert_eq!(
+        Config::load(&f.home).unwrap().list.colors.get(HELD).map(String::as_str),
+        Some("#102060"),
+        "the alias, and a hex"
+    );
+    run(&mut app, "/colour none");
+    assert!(Config::load(&f.home).unwrap().list.colors.is_empty());
+    // Not a colour: said, and the line kept to mend.
+    run(&mut app, "/colour chartreuse");
+    assert!(shown(&app).contains("not a colour: chartreuse"), "{}", shown(&app));
+    assert_eq!(app.cmd.line.text(), "/colour chartreuse");
+    press(&mut app, KeyCode::Esc);
+    // Claude's colour wins, as with ^g.
+    app.set_native(vec![{
+        let mut p = waiting(&f.repo);
+        p.color = Some("pink".into());
+        p
+    }]);
+    on(&mut app, NATIVE);
+    run(&mut app, "/colour blue");
+    assert!(
+        shown(&app).contains("pink's colour wins · yours: blue"),
+        "{}",
+        shown(&app)
+    );
+    // A project header has none.
+    let head = format!("g:{}", f.repo.display());
+    on(&mut app, &head);
+    run(&mut app, "/colour red");
+    assert!(shown(&app).contains("/colour colours a session"), "{}", shown(&app));
+    assert!(!Config::load(&f.home).unwrap().list.colors.contains_key(&head));
+}
+
+#[tokio::test]
+async fn slash_rename_names_the_row_and_an_empty_one_goes_back() {
+    let f = fixture();
+    let mut app = list(&f).await;
+    on(&mut app, HELD);
+    run(&mut app, "/rename build box");
+    let names = Config::load(&f.home).unwrap().list.names;
+    assert_eq!(names.get(HELD).map(String::as_str), Some("build box"));
+    assert!(row_of(&shown(&app), "build box").contains("done"));
+    run(&mut app, "/rename");
+    assert!(Config::load(&f.home).unwrap().list.names.is_empty());
+    assert!(shown(&app).contains("back to shop-sh"));
+    on(&mut app, NATIVE);
+    run(&mut app, "/rename x");
+    assert!(shown(&app).contains("claude names its own sessions"));
+}
+
+#[tokio::test]
+async fn slash_pin_hide_agents_and_group_do_what_their_keys_do() {
+    let f = fixture();
+    let mut app = list(&f).await;
+    on(&mut app, NATIVE);
+    run(&mut app, "/pin");
+    assert_eq!(Config::load(&f.home).unwrap().list.pins, [NATIVE]);
+    assert_eq!(app.keys()[0], NATIVE);
+    run(&mut app, "/pin");
+    assert!(Config::load(&f.home).unwrap().list.pins.is_empty());
+    run(&mut app, "/hide");
+    assert_eq!(Config::load(&f.home).unwrap().list.hidden[0].key, NATIVE);
+    assert!(app.keys().iter().all(|k| k != NATIVE));
+    run(&mut app, "/hidden");
+    assert!(Config::load(&f.home).unwrap().list.show_hidden);
+    on(&mut app, NATIVE);
+    run(&mut app, "/hide");
+    assert!(Config::load(&f.home).unwrap().list.hidden.is_empty(), "brought back");
+    run(&mut app, "/agents");
+    assert!(!Config::load(&f.home).unwrap().list.show_agents);
+    assert!(!shown(&app).contains("fix the login"));
+    run(&mut app, "/agents");
+    assert!(Config::load(&f.home).unwrap().list.show_agents);
+    run(&mut app, "/shells");
+    assert!(!Config::load(&f.home).unwrap().list.show_shells);
+    run(&mut app, "/group");
+    assert_eq!(Config::load(&f.home).unwrap().list.grouping, Grouping::State);
+    run(&mut app, "/group");
+    assert_eq!(Config::load(&f.home).unwrap().list.grouping, Grouping::Project);
+    run(&mut app, "/pin now");
+    assert!(shown(&app).contains("/pin takes nothing after it"));
+    press(&mut app, KeyCode::Esc);
+    run(&mut app, "/quit");
+    assert!(app.quit, "at once");
+}
+
+#[tokio::test]
+async fn slash_rm_removes_an_ended_held_session_and_refuses_what_it_cannot() {
+    let f = fixture();
+    let mut app = list(&f).await;
+    on(&mut app, NATIVE);
+    run(&mut app, "/rm");
+    assert!(
+        shown(&app).contains("fix the login is live · /stop it first"),
+        "{}",
+        shown(&app)
+    );
+    assert!(app.work.is_empty(), "nothing done");
+    assert!(ran_in(&f.repo).is_empty(), "claude was not asked to stop it");
+    let head = format!("g:{}", f.repo.display());
+    on(&mut app, &head);
+    run(&mut app, "/rm");
+    assert!(
+        shown(&app).contains("/rm removes an ended session of Relay's"),
+        "{}",
+        shown(&app)
+    );
+    on(&mut app, HELD);
+    run(&mut app, "/stop");
+    assert!(
+        shown(&app).contains("shop-sh has ended · /rm removes it"),
+        "{}",
+        shown(&app)
+    );
+    run(&mut app, "/rm");
+    app.finish().await;
+    assert!(!f.home.session_dir("shop-sh").exists());
+    assert!(shown(&app).contains("removed shop-sh"));
+}
+
+#[tokio::test]
+async fn an_unknown_command_is_said_and_kept_on_the_line() {
+    let f = fixture();
+    let mut app = list(&f).await;
+    typed(&mut app, "/col");
+    assert!(!line_row(&app).contains("unknown command"), "the start of one");
+    press(&mut app, KeyCode::Esc);
+    typed(&mut app, "/nope");
+    assert!(line_row(&app).contains("unknown command"), "{}", line_row(&app));
+    press(&mut app, KeyCode::Enter);
+    assert!(shown(&app).contains("unknown command /nope"), "{}", shown(&app));
+    assert_eq!(app.cmd.line.text(), "/nope");
+    assert!(app.work.is_empty(), "no shell started");
+}
+
+#[tokio::test]
+async fn tab_completes_a_command_then_its_colour_and_ghosts_the_rows_name() {
+    let f = fixture();
+    let mut app = list(&f).await;
+    on(&mut app, HELD);
+    typed(&mut app, "/col");
+    assert_eq!(app.cmd.ghost.as_deref(), Some("our"));
+    press(&mut app, KeyCode::Tab);
+    assert_eq!(app.cmd.line.text(), "/colour ");
+    typed(&mut app, "p");
+    assert_eq!(app.cmd.ghost.as_deref(), Some("ink"));
+    press(&mut app, KeyCode::Tab);
+    assert_eq!(app.cmd.line.text(), "/colour pink");
+    press(&mut app, KeyCode::Tab);
+    assert_eq!(app.cmd.line.text(), "/colour purple", "tab again goes round");
+    press(&mut app, KeyCode::Esc);
+    typed(&mut app, "/rename ");
+    assert_eq!(app.cmd.ghost.as_deref(), Some("shop-sh"), "the name it has");
+    press(&mut app, KeyCode::Tab);
+    assert_eq!(app.cmd.line.text(), "/rename shop-sh ");
 }
 
 #[tokio::test]

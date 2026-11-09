@@ -50,13 +50,12 @@ impl Removal {
 /// by name, from its files; `None` when it is gone. `Err` says why there is
 /// nothing to do.
 pub fn plan(line: &Line, prefs: &ListPrefs, status: impl Fn(&str) -> Option<Status>) -> Result<Removal, String> {
-    let names = Names::new(&prefs.names);
     let hidden = |key: &str| prefs.hidden.iter().any(|h| h.key == key);
-    let (key, title) = match line {
-        Line::Group(h) if h.is_project() => (h.key.clone(), h.name.clone()),
-        Line::Group(_) => return Err("^x stops, removes or hides what the cursor is on".into()),
+    match line {
+        Line::Group(h) if !h.is_project() => return Err("^x stops, removes or hides what the cursor is on".into()),
+        Line::Group(_) => {}
         Line::Session(r) => {
-            let title = names.title(r).to_string();
+            let title = Names::new(&prefs.names).title(r).to_string();
             if r.source == Source::Held
                 && let Attach::Held(name) = &r.attach
             {
@@ -83,6 +82,21 @@ pub fn plan(line: &Line, prefs: &ListPrefs, status: impl Fn(&str) -> Option<Stat
                     title,
                 });
             }
+        }
+    }
+    hide_plan(line, prefs)
+}
+
+/// `line` hidden, or brought back if it is hidden: a session of any kind,
+/// or a project. `Err` says why not.
+pub fn hide_plan(line: &Line, prefs: &ListPrefs) -> Result<Removal, String> {
+    let names = Names::new(&prefs.names);
+    let hidden = |key: &str| prefs.hidden.iter().any(|h| h.key == key);
+    let (key, title) = match line {
+        Line::Group(h) if h.is_project() => (h.key.clone(), h.name.clone()),
+        Line::Group(_) => return Err("a heading has nothing to hide".into()),
+        Line::Session(r) => {
+            let title = names.title(r).to_string();
             if !hidden(&r.key) {
                 let project = rows::project_of(r, &names);
                 if rows::hidden_with(&project, &prefs.hidden).is_some() {

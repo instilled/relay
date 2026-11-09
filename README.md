@@ -48,12 +48,30 @@ the cursor (else where `rl` was started; the line shows only the prompt `❯`):
 - `claude fix the login`, `codex …`, or `agy …` (also `gemini` and `antigravity`, which mean
   Google Antigravity's `agy`): that agent, the rest of the line its first prompt. Claude starts in
   its own background (`claude --bg`); the others in a session Relay holds.
+- `/` and a name: a command, run on the row under the cursor or on the list (below).
 - Anything else is a shell command, run in a shell Relay holds, which stays a shell once it is done.
 
-The right end of the line says which it is (`agent · claude`, `shell`, or `agent · antigravity (agy
-not found)`, which will not start). `tab` completes a harness, a program on `PATH`, or a path; the
-best completion stands dim after the cursor, and `tab` again cycles. Every letter types; the list's
-own keys are ctrl keys, the arrows and `enter`, and `/` on an empty line searches.
+The right end of the line says which it is (`agent · claude`, `shell`, `command · pin`, `unknown
+command`, or `agent · antigravity (agy not found)`, which will not start). `tab` completes a
+harness, a program on `PATH`, or a path, and on a `/` line the command, then its colour or, for
+`/rename`, the row's name; the best completion stands dim after the cursor, and `tab` again cycles.
+Every letter types; the list's own keys are ctrl keys, the arrows and `enter`. `^f` searches.
+
+| command | does |
+| --- | --- |
+| `/colour <name\|#rrggbb\|none>` (`/color`) | your colour for the row, as `^g` and `rl color` set it (a colour the harness set wins on screen) |
+| `/rename <name>` | rename the row or project, as `^r`; with no name, back to its own |
+| `/pin` | pin or unpin, as `^t` |
+| `/hide` | hide the row or project, or bring it back |
+| `/stop` | stop a live session, held or the harness's own, at once (no second press) |
+| `/rm` | remove an ended session Relay holds |
+| `/agents` `/shells` `/hidden` | show agents, shells, hidden, as `^a` `^l` `^o` |
+| `/group` | by project or by state, as `^s` |
+| `/help` | the keys |
+| `/quit` | quit |
+
+A command that does not apply to the row (`/rm` on a live session, `/colour` on a project) says why
+in the footer and changes nothing; an unknown one stays on the line to mend.
 
 | key | does |
 | --- | --- |
@@ -61,7 +79,8 @@ own keys are ctrl keys, the arrows and `enter`, and `/` on an empty line searche
 | typing | the command line; `esc` clears it, `home` `end` go to its ends |
 | `↑↓` `^j` `^k` | move |
 | `pgup` `pgdn` `home` `end` | page (`home` `end` with nothing typed) |
-| `/` `^f` | search |
+| `/` | a command (above) |
+| `^f` | search |
 | `^x ^x` | stop, then remove or hide |
 | `^r` | rename |
 | `^t` | pin |

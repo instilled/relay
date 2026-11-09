@@ -94,11 +94,8 @@ impl App {
             }
             shortcuts::Take::Pass => {}
         }
-        // On an empty line `/` searches; any other key that types starts
-        // the line.
-        if self.cmd.is_empty() && k.modifiers.is_empty() && k.code == KeyCode::Char('/') {
-            return self.open_search();
-        }
+        // Any key that types starts the line: `/` a command, anything else
+        // a session to start. Searching is `^f`'s.
         if self.cmd.is_empty()
             && let KeyCode::Char(c) = k.code
             && !c.is_whitespace()
@@ -231,7 +228,7 @@ impl App {
             (KeyCode::Enter, _) => self.enter(),
             (KeyCode::Char('x'), KeyModifiers::CONTROL) => self.key_x(armed),
             (KeyCode::Char('r'), KeyModifiers::CONTROL) => self.rename_here(),
-            (KeyCode::Char('t'), KeyModifiers::CONTROL) => self.toggle_pin(),
+            (KeyCode::Char('t'), KeyModifiers::CONTROL) => self.toggle_pin("^t"),
             (KeyCode::Char('g'), KeyModifiers::CONTROL) => self.cycle_colour(),
             (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
                 if armed == Some(Arm::Quit) {
@@ -280,9 +277,14 @@ impl App {
 
     /// `tab` on the command line: the word under the cursor completed.
     fn complete_line(&mut self) {
-        let folder = self.line_folder();
+        let (folder, name) = (self.line_folder(), self.name_here());
         let cmds = self.commands.get_or_init(super::cmdline::Commands::from_env);
-        self.cmd.complete(&folder, crate::rows::registry(), cmds);
+        self.cmd.complete(&super::cmdline::Ctx {
+            folder: &folder,
+            reg: crate::rows::registry(),
+            cmds,
+            name: name.as_deref(),
+        });
     }
 
     /// A paste goes into the search or a name being typed, as one line;

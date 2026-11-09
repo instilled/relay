@@ -485,7 +485,7 @@ impl App {
         }
         if l.is_empty() {
             let hint = if self.filter.is_empty() {
-                " a command, or claude/codex/agy and a prompt · / searches".to_string()
+                " a command, or claude/codex/agy and a prompt · / for commands · ^f finds".to_string()
             } else {
                 format!(" ⌕ {} · esc clears", self.filter)
             };
@@ -521,6 +521,9 @@ impl App {
                     enter keeps · esc puts back"
                 .into();
         }
+        if super::slash::is_command(self.cmd.line.text()) {
+            return "enter runs it on the row · tab completes · ↑↓ picks the row · esc clears".into();
+        }
         if !self.cmd.is_empty() {
             return "enter starts · tab completes · ↑↓ picks the row, and so the folder · esc clears".into();
         }
@@ -531,7 +534,13 @@ impl App {
             Grouping::Project => "^s by state",
             Grouping::State => "^s by project",
         };
-        let mut hints = vec!["enter attaches", "type to start", self.x_hint(), "/ search"];
+        let mut hints = vec![
+            "enter attaches",
+            "type to start",
+            self.x_hint(),
+            "^f find",
+            "/ commands",
+        ];
         if !self.filter.is_empty() {
             hints.push("esc clears the search");
         }

@@ -83,7 +83,9 @@ Folders are 0700.
   (`words`) starts that agent with the rest as its prompt (placed by the profile's `prompt`;
   Claude through its adapter's `start`, `claude --bg`); any other line runs held as
   `$SHELL -ic '<line>` and `exec $SHELL'`, a session of kind shell. Completion reads `PATH` once
-  per list.
+  per list. A line starting with `/` is a command instead (`tui/slash.rs`): each names a key's
+  action (`/pin` is `^t`, `/stop` is `^x` on a live row without the second press) and runs it on
+  the row under the cursor through the same code.
 - **List.** Held sessions come from `sessions/`. Hooked-only ones come from `state/`. Claude's and
   Codex's own come from asking them (`sessions.list` in the profile), each with its own timeout;
   one that fails is skipped. `rows/` merges them and groups them, each under its project: a
