@@ -16,7 +16,10 @@ What the slim build left to check or finish:
 
 * [ ] verify live what no test could: what `claude --bg` prints and the carry-on of an idle
   Claude (`--resume --bg`), `claude stop`, `codex resume <id>` attaching to the right thread,
-  Gemini's MCP format, Codex's `env_vars`, and `CLAUDE_CODE_SESSION_ID` reaching an MCP server
+  `codex queue --resume` reaching a Relay-held Codex, `claude --bg` sessions running user hooks,
+  Gemini's MCP format, and Codex's `env_vars`
+* [ ] the list doesn't restore the terminal on SIGTERM — a killed list leaves raw mode and the
+  alternate screen behind
 * [ ] Antigravity hooks — its hook system (`hooks.json`; `SessionStart`, `PreToolUse`,
   `PostToolUse`, `PreInvocation`, `PostInvocation`, `Stop`) differs from the Gemini CLI's and has no
   permission event, so its rows can't read "needs input" yet
@@ -32,11 +35,23 @@ Later:
 
 ## Done — newest first
 
+* [x] relay mail pings — `send` to a Codex session also runs `codex queue … --resume`; a Claude
+  session hears of waiting mail on its next prompt and is kept going one turn at stop (once per
+  batch, never with `stop_hook_active`); Claude→Claude sends suggest `SendMessage`; MCP kept as the
+  transport because it runs outside the agents' sandboxes (#205)
+* [x] `/` runs commands on the list (`/colour`, `/rename`, `/pin`, `/hide`, `/stop`, `/rm`,
+  `/agents`, `/shells`, `/hidden`, `/group`, `/help`, `/quit`); search on `ctrl+f`; help as a grid of
+  keys like `claude agents`; keys written one way, `ctrl+x` (#204)
+* [x] row colours as `claude agents` draws them (a highlighted name); your own colours on any row —
+  `ctrl+g`, `rl color <session> <name|#rrggbb|none>`, `config.json` `list.colors`, the harness's
+  colour first; the line's prompt is just `❯`; held sessions get `RL_SESSION` / `RL_SESSION_AGENT`
+  (#203)
+
 * [x] the list's command line — typing at the bottom starts a session in the selected project's
   folder: `claude …` a Claude background session, `codex …` a Relay-held Codex, `gemini`/`agy`/
   `antigravity …` Antigravity's `agy`, anything else a shell command in a new Relay shell; the
-  right end shows what was detected; Tab completes harness words, commands and paths; `/` searches;
-  filters on `^a`/`^l`/`^o` so every letter types; filters and grouping in the header; worktree
+  right end shows what was detected; Tab completes harness words, commands and paths; search;
+  filters on `ctrl+a`/`ctrl+l`/`ctrl+o` so every letter types; filters and grouping in the header; worktree
   sessions stand under their parent checkout; Claude sessions keep their colour (#201)
 * [x] slim · steps 2–6 — `code/rl`, daemonless (the file store, `rl new | ls | attach | stop | rm`
   straight to the holder, `rl hook` writing state files); the list (three sources, by project and
