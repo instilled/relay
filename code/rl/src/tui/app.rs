@@ -47,6 +47,8 @@ pub struct Renaming {
     pub line: line::Line,
     pub was: String,
     pub own: String,
+    /// The harness whose own session it is, where it still calls it `own`.
+    pub outside: Option<String>,
 }
 
 /// What `enter` hands the terminal to, once the list has let go of it.

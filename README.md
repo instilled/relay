@@ -63,7 +63,7 @@ Every letter types; the list's own keys are ctrl keys, the arrows and `enter`. `
 | command | does |
 | --- | --- |
 | `/colour <name\|#rrggbb\|none>` (`/color`) | your colour for the row, as `ctrl+g` and `rl color` set it (a colour the harness set wins on screen) |
-| `/rename <name>` | rename the row or project, as `ctrl+r`; with no name, back to its own |
+| `/rename <name>` | rename the row or project, as `ctrl+r`; with no name, back to its own. A Claude or Codex session is named in Relay only (the harness has no rename): your name, then the harness's own dim beside it, and the search finds both |
 | `/pin` | pin or unpin, as `ctrl+t` |
 | `/hide` | hide the row or project, or bring it back |
 | `/stop` | stop a live session, held or the harness's own, at once (no second press) |
@@ -173,7 +173,7 @@ To show it in a zsh prompt: `PROMPT='${RL_SESSION:+[$RL_SESSION] }'$PROMPT`.
 
 `rl mcp` is a stdio MCP server with three tools:
 
-- `who`: the list's rows, one line each (`address (title) · harness · state · folder`), you marked. The title is the one you gave the row with `ctrl+r`.
+- `who`: the list's rows, one line each (`address (title) · harness · state · folder`), you marked. The title is the one you gave the row with `ctrl+r`; a native session's address stays the harness's name or id, whatever you named it.
 - `send(to, text, from?)`: leave a message for another agent, by address, title or conversation id. An unknown address is an error with close matches.
 - `inbox(as?)`: take your waiting messages, oldest first. They are deleted as they are read.
 
@@ -202,6 +202,12 @@ Not verified against the live CLIs:
   own daemon. Checked on codex 0.167: the daemon lists a TUI's thread as loaded while the TUI runs
   and for a few seconds after it exits, but not a minute later. A hand-off would leave a row that
   vanishes. `codex resume <id>` still finds the saved conversation.
+- A held Codex's hooks and `rl mcp --harness codex` run in Codex's app-server daemon, not under the
+  holder, so they carry no `RL_SESSION`. The first hook of a thread claims the live held Codex in
+  the same folder that has no thread yet and began under 120 s ago (`meta.native_id`); with two
+  such sessions started together, the earliest-started is taken, which can swap their threads.
+  The MCP server can't know its thread, so a held Codex's `from`/`as` stays as given, not read from
+  its session.
 
 ## Docs
 

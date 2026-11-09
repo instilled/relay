@@ -59,6 +59,7 @@ pub async fn hold(argv: &[String], name: &str) -> Result<Back> {
     use tokio::signal::unix::{SignalKind, signal};
     // Listened for before the size is read, so no resize falls between.
     let mut winch = signal(SignalKind::window_change())?;
+    let mut stop = super::Stop::new()?;
     let _raw = RawMode::enable().context("entering raw mode")?;
     let mut out = tokio::io::stdout();
     let banner = format!("\x1b[2m[relay] {name} · ctrl+\\ to detach\x1b[0m\r\n");
@@ -68,6 +69,7 @@ pub async fn hold(argv: &[String], name: &str) -> Result<Back> {
     let spawned = start(argv, crossterm::terminal::size().unwrap_or((80, 24)))?;
 
     let (keys_tx, keys) = mpsc::channel::<Vec<u8>>(64);
+    let stop_keys = keys_tx.clone();
     // As in `attach()`: aborted on the way out, so it never races the
     // panel's own reader for stdin.
     let _keys = AbortOnDrop(tokio::spawn(async move {
@@ -90,6 +92,15 @@ pub async fn hold(argv: &[String], name: &str) -> Result<Back> {
         }
     }));
 
+    // A kill or a closed terminal lets go as a `ctrl+\` does: the command is
+    // hung up on, and the raw mode and screen below are given back. The list
+    // that called hears the same signal and stops.
+    let _stop = AbortOnDrop(tokio::spawn({
+        async move {
+            stop.recv().await;
+            let _ = stop_keys.send(vec![DETACH]).await;
+        }
+    }));
     let mut alt = AltScreen::default();
     let back = pass(spawned, keys, sizes, &mut out, &mut alt).await;
     // However it went, the terminal is handed back: what it had on when it

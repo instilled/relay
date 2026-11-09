@@ -134,6 +134,41 @@ impl<T> Drop for AbortOnDrop<T> {
     }
 }
 
+/// The signals that mean "stop": a kill (SIGTERM), a closed terminal (SIGHUP)
+/// and a SIGINT from outside (in raw mode ctrl+c is a key, never this).
+/// Listening starts at `new`, and a signal that came since is kept for `recv`.
+pub struct Stop {
+    term: tokio::signal::unix::Signal,
+    hup: tokio::signal::unix::Signal,
+    int: tokio::signal::unix::Signal,
+}
+
+impl Stop {
+    pub fn new() -> std::io::Result<Self> {
+        use tokio::signal::unix::{SignalKind, signal};
+        Ok(Self {
+            term: signal(SignalKind::terminate())?,
+            hup: signal(SignalKind::hangup())?,
+            int: signal(SignalKind::interrupt())?,
+        })
+    }
+
+    /// Resolves when one of them comes; cancel-safe.
+    pub async fn recv(&mut self) {
+        tokio::select! {
+            _ = self.term.recv() => {}
+            _ = self.hup.recv() => {}
+            _ = self.int.recv() => {}
+        }
+    }
+
+    /// Whether one has come since the last `recv`, without waiting.
+    pub fn came(&mut self) -> bool {
+        use futures::FutureExt;
+        self.recv().now_or_never().is_some()
+    }
+}
+
 pub(crate) struct RawMode;
 
 impl RawMode {
