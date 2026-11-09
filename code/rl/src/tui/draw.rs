@@ -467,20 +467,11 @@ impl App {
         Line::from(left)
     }
 
-    /// The command line: the folder it starts in, short, then what is
+    /// The command line: the prompt, then what is
     /// typed, the caret, and the best completion dim after it. Empty, it
     /// says what it is for, or the filter in force.
     fn command_spans(&self) -> Vec<Span<'static>> {
-        let folder = self.line_folder();
-        let place = match folder.file_name() {
-            Some(n) => n.to_string_lossy().into_owned(),
-            None => rows::short_path(&folder),
-        };
-        let mut spans = vec![
-            Span::raw(" "),
-            Span::styled(place, theme::dim()),
-            Span::styled(" ❯ ", theme::accent()),
-        ];
+        let mut spans = vec![Span::raw(" "), Span::styled("❯ ", theme::accent())];
         let l = &self.cmd.line;
         match self.cmd.ghost.as_deref() {
             Some(g) if l.cursor() == l.text().len() && !g.is_empty() => {
@@ -531,7 +522,7 @@ impl App {
                 .into();
         }
         if !self.cmd.is_empty() {
-            return "enter starts · tab completes · ↑↓ picks the folder · esc clears".into();
+            return "enter starts · tab completes · ↑↓ picks the row, and so the folder · esc clears".into();
         }
         if let Some(why) = self.native_failing() {
             return why;

@@ -43,7 +43,7 @@ Claude's and Codex's own background sessions are on it too. `^h` or `F1` shows t
 terminals that send `^h` as backspace).
 
 At the foot of the list is a command line. Type to start a session, in the folder of the row under
-the cursor (else where `rl` was started; the line says which, `relay ❯`):
+the cursor (else where `rl` was started; the line shows only the prompt `❯`):
 
 - `claude fix the login`, `codex …`, or `agy …` (also `gemini` and `antigravity`, which mean
   Google Antigravity's `agy`): that agent, the rest of the line its first prompt. Claude starts in

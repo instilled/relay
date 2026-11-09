@@ -565,7 +565,7 @@ async fn the_line_starts_claude_in_its_own_background_and_the_cursor_waits_for_i
     let mut app = list(&f).await;
     on(&mut app, NATIVE);
     typed(&mut app, "claude fix the login");
-    assert!(row_of(&shown(&app), "shop ❯").contains("agent · claude"));
+    assert!(row_of(&shown(&app), "❯ claude fix").contains("agent · claude"));
     press(&mut app, KeyCode::Enter);
     assert!(app.cmd.is_empty(), "the line is cleared once it is on its way");
     app.finish().await;
@@ -815,11 +815,12 @@ async fn typing_starts_the_line_in_the_rows_folder() {
     let f = fixture();
     let mut app = list(&f).await;
     on(&mut app, NATIVE);
-    assert!(line_row(&app).contains("shop ❯"), "where it starts: {}", line_row(&app));
+    assert!(line_row(&app).contains(" ❯ "), "{}", line_row(&app));
+    assert!(!line_row(&app).contains("shop ❯"), "no folder before the prompt");
     typed(&mut app, "make test");
     assert_eq!(app.cmd.line.text(), "make test");
     let row = line_row(&app);
-    assert!(row.contains("shop ❯ make test"), "{row}");
+    assert!(row.contains(" ❯ make test") && !row.contains("shop ❯"), "{row}");
     assert!(row.contains("shell"), "{row}");
     assert!(shown(&app).contains("enter starts"), "the footer says how");
     // A letter of the list's types once the line has text.
@@ -938,7 +939,11 @@ async fn tab_completes_a_harness_word_and_a_path_and_the_ghost_shows_it() {
     on(&mut app, NATIVE);
     typed(&mut app, "cod");
     assert_eq!(app.cmd.ghost.as_deref(), Some("ex"));
-    assert!(line_row(&app).contains("shop ❯ codex"), "the ghost: {}", line_row(&app));
+    assert!(
+        line_row(&app).contains(" ❯ codex") && !line_row(&app).contains("shop ❯"),
+        "the ghost: {}",
+        line_row(&app)
+    );
     press(&mut app, KeyCode::Tab);
     assert_eq!(app.cmd.line.text(), "codex ");
     typed(&mut app, "look at sr");
