@@ -56,9 +56,17 @@ pub async fn run(home: &Home) -> Result<()> {
         tracing::debug!("badges not seeded: {e:#}");
     }
     let mut app = App::new(home.clone())?;
+    // Listened for before the screen is taken: a signal that comes while the
+    // terminal is being set up waits for the loop, which gives it back.
+    let mut stop = attach::Stop::new()?;
+    guard_panics();
     let mut terminal = enter_screen();
-    let result = app.main_loop(&mut terminal).await;
-    leave_screen();
+    let result = app.main_loop(&mut terminal, &mut stop).await;
+    // A stop during an attach leaves with the screen already given back.
+    if result.as_ref().map_or(true, |on_screen| *on_screen) {
+        leave_screen();
+    }
+    let result = result.map(|_| ());
     // The title back to the terminal's own.
     let _ = write!(std::io::stdout(), "{}", crate::attach::title(""));
     let _ = std::io::stdout().flush();
@@ -66,7 +74,9 @@ pub async fn run(home: &Home) -> Result<()> {
 }
 
 impl App {
-    async fn main_loop(&mut self, terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
+    /// Runs until `^c ^c` or a signal in `stop`; whether the screen is ours
+    /// still (it is not where a stop came during an attach).
+    async fn main_loop(&mut self, terminal: &mut ratatui::DefaultTerminal, stop: &mut attach::Stop) -> Result<bool> {
         let mut input = EventStream::new();
         let mut watch = match live::Watch::start(&self.home) {
             Ok(w) => Some(w),
@@ -100,6 +110,7 @@ impl App {
                     Some(Err(e)) => return Err(e.into()),
                     None => self.quit = true,
                 },
+                () = stop.recv() => self.quit = true,
                 () = changed(&mut watch) => {
                     due.get_or_insert_with(|| tokio::time::Instant::now() + live::DEBOUNCE);
                 }
@@ -130,16 +141,39 @@ impl App {
                 drop(input);
                 leave_screen();
                 native.pause();
-                let words = hand_over(&self.home, &hand).await;
+                let words = tokio::select! {
+                    words = hand_over(&self.home, &hand) => words,
+                    // Dropping the attach lets go: a held session's
+                    // connection closes (it keeps running), raw mode is
+                    // given back.
+                    () = stop.recv() => return Ok(false),
+                };
                 native.resume();
+                // A native attach lets go on a stop by itself, and says
+                // nothing; the list stops with it, screen untouched.
+                if stop.came() {
+                    return Ok(false);
+                }
                 *terminal = enter_screen();
                 input = EventStream::new();
                 title.clear();
                 self.back(&hand.key, words);
             }
         }
-        Ok(())
+        Ok(true)
     }
+}
+
+/// A panic gives the terminal back before it is printed, or the message is
+/// lost in the alternate screen and the shell is left raw. (ratatui's own
+/// hook leaves raw mode and the screen; this adds the mouse, paste and
+/// keyboard modes and the caret.)
+fn guard_panics() {
+    let before = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        leave_screen();
+        before(info);
+    }));
 }
 
 /// The terminal handed to what `enter` asked for, until it is let go of or

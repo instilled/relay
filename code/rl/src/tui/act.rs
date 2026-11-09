@@ -434,17 +434,24 @@ impl App {
             .cloned()
     }
 
-    /// `^r`: a name of yours for a Relay session or a project, typed where it
-    /// stands. A harness's own sessions keep the names it gives them.
+    /// `^r`: a name of yours for a session or a project, typed where it
+    /// stands. A harness's own session keeps its name too, beside yours: the
+    /// harness has no way to rename it.
     pub(super) fn rename_here(&mut self) {
         match self.rename_target("ctrl+r") {
-            Ok(RenameTarget { key, was, own }) => {
+            Ok(RenameTarget { key, was, own, outside }) => {
                 self.search = None;
                 self.help = false;
                 let mut l = line::Line::default();
                 let at = was.len();
                 l.set_with_cursor(was.clone(), at);
-                self.mode = Mode::Rename(Renaming { key, line: l, was, own });
+                self.mode = Mode::Rename(Renaming {
+                    key,
+                    line: l,
+                    was,
+                    own,
+                    outside,
+                });
             }
             Err(why) => self.say(why),
         }
@@ -465,15 +472,24 @@ impl App {
                     key: h.key.clone(),
                     was: h.name.clone(),
                     own,
+                    outside: None,
                 })
             }
             Some(Line::Session(r)) if r.source == Source::Held => Ok(RenameTarget {
                 key: r.key.clone(),
                 was: names.title(r).to_string(),
                 own: r.name.clone(),
+                outside: None,
             }),
-            Some(Line::Session(r)) => Err(format!("{} names its own sessions", r.harness)),
-            _ => Err(format!("{by} renames a session of Relay's or a project")),
+            // The harness's own, or one its hooks told of: a name of Relay's,
+            // beside the harness's.
+            Some(Line::Session(r)) => Ok(RenameTarget {
+                key: r.key.clone(),
+                was: names.title(r).to_string(),
+                own: r.name.clone(),
+                outside: Some(r.harness.clone()),
+            }),
+            _ => Err(format!("{by} renames a session or a project")),
         }
     }
 
@@ -505,6 +521,7 @@ impl App {
                 key: r.key,
                 was: r.was,
                 own: r.own,
+                outside: r.outside,
             },
             &name,
         );
@@ -524,10 +541,10 @@ impl App {
                 p.names.insert(r.key.clone(), name.clone());
             }
         });
-        self.say(if back {
-            format!("back to {}", r.own)
-        } else {
-            format!("renamed to {name}")
+        self.say(match (&r.outside, back) {
+            (_, true) => format!("back to {}", r.own),
+            (Some(harness), false) => format!("named in relay · {harness} still calls it {}", r.own),
+            (None, false) => format!("renamed to {name}"),
         });
         self.select(Some(r.key));
     }
@@ -647,6 +664,8 @@ pub struct RenameTarget {
     pub key: String,
     pub was: String,
     pub own: String,
+    /// The harness that still calls it `own`, for a session that is its own.
+    pub outside: Option<String>,
 }
 
 /// What was kept for a row, let go of once the row is.
