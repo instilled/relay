@@ -63,7 +63,7 @@ and its socket.
 | --- | --- | --- |
 | `sessions/<name>/meta.json` | `rl new` | name, harness, kind, cwd, start |
 | `sessions/<name>/state.json` | holder | state read from the screen |
-| `sessions/<name>/hook.json` | `rl hook` | what the agent's own hooks last said |
+| `sessions/<name>/hook.json` | `rl hook` | what the agent's own hooks last said; for a held Codex (hooks run in its daemon, profile `detached_env`) the first hook of a thread claims the session by folder and start, setting `meta.native_id` |
 | `sessions/<name>/exit`, `stopped`, `sock` | holder, `rl stop` | how it ended, that it was stopped, its socket |
 | `state/<agent>/<session_id>.json` | `rl hook` | a session Relay does not hold; removed on `ended` |
 | `mail/<key>/<ns>-<pid>-<n>-<from>.json` | `rl mcp` | a waiting message; deleted when read |
