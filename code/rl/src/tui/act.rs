@@ -1,11 +1,12 @@
 //! `impl App` — what the list does to what the cursor is on: `enter`
-//! attaches, `n` starts something new, `^x` twice stops, removes or hides,
-//! `^r` renames, `^t` pins, `⇧↑↓` moves. What is yours to keep (names, pins,
-//! hides, order) goes to `config.json`; what takes a moment (stopping,
-//! starting) runs in the background and says how it went in the footer.
+//! attaches, the command line starts something new, `^x` twice stops,
+//! removes or hides, `^r` renames, `^t` pins, `⇧↑↓` moves. What is yours to
+//! keep (names, pins, hides, order) goes to `config.json`; what takes a
+//! moment (stopping, starting) runs in the background and says how it went
+//! in the footer.
 
 use super::app::{App, Arm, Done, Hand, Mode, Renaming, To};
-use super::form::{self, Form};
+use super::cmdline::{self, Detected};
 use super::line;
 use super::remove::{self, Removal};
 use crate::cmd;
@@ -17,6 +18,7 @@ use crate::store::sessions;
 use crossterm::event::{KeyCode, KeyEvent};
 use jiff::Timestamp;
 use rl_detect::adapter;
+use rl_detect::registry::Profile;
 use std::collections::HashSet;
 use std::path::PathBuf;
 
@@ -49,7 +51,7 @@ impl App {
         };
         let r = match line {
             Line::Group(h) if h.is_project() => {
-                return self.say(format!("enter attaches to a session · n starts one in {}", h.name));
+                return self.say(format!("enter attaches to a session · type to start one in {}", h.name));
             }
             Line::Group(_) => return self.say("enter attaches to a session"),
             Line::Session(r) => r,
@@ -132,6 +134,7 @@ impl App {
                 harness: None,
                 cwd,
                 argv,
+                shell: false,
                 cols,
                 rows,
             };
@@ -178,55 +181,43 @@ impl App {
         }
     }
 
-    /// `n`: the new-session form, in the folder of whatever the cursor is in.
-    pub fn open_form(&mut self) {
-        let here = match self.selected() {
-            Some(Line::Group(h)) if h.is_project() => Some(h.workspace.clone()),
-            Some(Line::Session(r)) => Some(rows::project_of(r, &Names::new(&self.config.list.names))),
-            _ => None,
-        }
-        .or_else(|| std::env::current_dir().ok())
-        .unwrap_or_else(|| PathBuf::from("/"));
-        let known = rows::project_folders(&self.rows, &self.config.list);
-        let harnesses = if self.config.harnesses.is_empty() {
-            crate::config::found_harnesses(&self.home)
-        } else {
-            self.config.harnesses.clone()
-        };
-        self.search = None;
-        self.shortcuts = false;
-        self.mode = Mode::Form(Form::new(&harnesses, &here, &known));
-    }
-
-    pub(super) fn key_form(&mut self, k: KeyEvent) {
-        let Mode::Form(f) = &mut self.mode else {
-            return;
-        };
-        match f.key(&k) {
-            form::Act::Typing => {}
-            form::Act::Cancel => self.mode = Mode::List,
-            form::Act::Start => match f.draft() {
-                Ok(d) => {
-                    self.mode = Mode::List;
-                    self.start(d);
+    /// `enter` on the command line: the agent its first word names, with the
+    /// rest as its first prompt, or the line run in a shell — in the folder
+    /// under the cursor. The line is cleared once it is on its way; a
+    /// harness that is not here keeps it, and says so.
+    pub(super) fn run_line(&mut self) {
+        let text = self.cmd.line.text().trim().to_string();
+        let cwd = self.line_folder();
+        match self.detected() {
+            None => {}
+            Some(Detected::Agent {
+                profile,
+                missing: Some(bin),
+            }) => self.say(format!("{bin} is not on PATH · {} can't start", profile.name)),
+            Some(Detected::Agent { profile, missing: None }) => {
+                let (_, prompt) = cmdline::split_first(&text);
+                if prompt.starts_with('-') {
+                    return self.say("a prompt can't start with `-`: the agent would read it as a flag");
                 }
-                Err(why) => self.say(why),
-            },
+                self.cmd.clear();
+                self.start_agent(profile, prompt, cwd);
+            }
+            Some(Detected::Shell) => {
+                self.cmd.clear();
+                self.start_shell(&text, cwd);
+            }
         }
     }
 
-    /// Starts what the form describes, in the background; the cursor goes
+    /// Starts `profile`'s agent in `cwd`, in the background; the cursor goes
     /// to it once it is there. A harness with a background of its own starts
     /// it there, not held by Relay.
-    fn start(&mut self, d: form::Draft) {
-        let what = d.harness.clone().unwrap_or_else(|| form::SHELL.into());
+    fn start_agent(&mut self, profile: &Profile, prompt: &str, cwd: PathBuf) {
+        let what = profile.name.clone();
         self.say(format!("starting {what}…"));
-        let own = d.harness.as_deref().and_then(sources::adapter).and_then(|a| {
-            let prompt = d.argv.first().map(String::as_str);
-            Some((a, a.start_argv(None, prompt)?))
-        });
+        let prompt = (!prompt.is_empty()).then_some(prompt);
+        let own = sources::adapter(&what).and_then(|a| Some((a, a.start_argv(None, prompt)?)));
         if let Some((a, argv)) = own {
-            let cwd = d.cwd.clone();
             let before = self.listed_ids(a);
             self.work.spawn(async move {
                 match in_background(a, argv, cwd, before).await {
@@ -239,16 +230,38 @@ impl App {
             });
             return;
         }
+        let start = Start {
+            harness: Some(what.clone()),
+            cwd,
+            argv: profile.prompt_args(prompt.unwrap_or("")),
+            shell: false,
+            cols: 0,
+            rows: 0,
+        };
+        self.hold(start, what);
+    }
+
+    /// Runs `line` in a shell Relay holds, in `cwd`, which stays a shell
+    /// once the line is done.
+    fn start_shell(&mut self, line: &str, cwd: PathBuf) {
+        self.say("starting a shell…");
+        let start = Start {
+            harness: None,
+            cwd,
+            argv: spawn::shell_line_argv(line),
+            shell: true,
+            cols: 0,
+            rows: 0,
+        };
+        self.hold(start, "a shell".into());
+    }
+
+    /// Starts a session Relay holds, at this terminal's size, in the
+    /// background; the cursor goes to it.
+    fn hold(&mut self, mut start: Start, what: String) {
         let home = self.home.clone();
-        let (cols, rows) = crossterm::terminal::size().unwrap_or(DEFAULT_SIZE);
+        (start.cols, start.rows) = crossterm::terminal::size().unwrap_or(DEFAULT_SIZE);
         self.work.spawn(async move {
-            let start = Start {
-                harness: d.harness,
-                cwd: d.cwd,
-                argv: d.argv,
-                cols,
-                rows,
-            };
             match spawn::start(&home, start).await {
                 Ok(meta) => Done {
                     select: Some(format!("r:{}", meta.name)),
@@ -263,7 +276,7 @@ impl App {
     /// where it said — once that line is there, where it is not yet: a
     /// session in a harness's background is listed when the harness is next
     /// asked, which is now. The terminal goes where it said, if anywhere —
-    /// not while a name or the form is being typed: it is not taken from
+    /// not while a name is being typed: it is not taken from
     /// under the keys, and the footer says how to get there.
     pub fn done(&mut self, d: Done) {
         if let Some(key) = &d.forget {
@@ -384,7 +397,7 @@ impl App {
                     p.hidden.retain(|h| h.key != key);
                     p.hidden.push(Hidden { key: key.clone(), at });
                 });
-                self.say(format!("hid {title} · h shows the hidden"));
+                self.say(format!("hid {title} · ^o shows the hidden"));
                 if !self.keys().contains(&key) {
                     self.select(next);
                     self.settle();
@@ -509,7 +522,7 @@ impl App {
     /// project among the projects. The cursor stays on it.
     pub(super) fn reorder(&mut self, up: bool) {
         if self.config.list.show_hidden {
-            return self.say("with hidden on the list keeps its order · h, then move it");
+            return self.say("with hidden on the list keeps its order · ^o, then move it");
         }
         let Some(key) = self.sel.clone() else {
             return self.say("nothing here to move");

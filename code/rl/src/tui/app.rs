@@ -1,8 +1,8 @@
 //! The list's state: its rows as last read, the prefs they are built with,
 //! and where the cursor, the search and the footer stand.
 
+use super::cmdline::{self, CmdLine, Commands};
 use super::draw::ListHit;
-use super::form::Form;
 use super::line;
 use super::live::Said;
 use crate::badges::{self, Badges};
@@ -15,8 +15,9 @@ use crate::store::state;
 use anyhow::Result;
 use jiff::Timestamp;
 use rl_core::Home;
-use std::cell::{Cell, RefCell};
+use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use tokio::task::JoinSet;
 
@@ -37,8 +38,6 @@ pub enum Mode {
     List,
     /// `^r`: a name typed where it stands.
     Rename(Renaming),
-    /// `n`: a new session.
-    Form(Form),
 }
 
 /// `^r` under way: the line's key, what is typed, the name it had, and its
@@ -135,6 +134,13 @@ pub struct App {
     /// What the list is narrowed to (`query`).
     pub filter: String,
     pub search: Option<Search>,
+    /// The command line at the foot of the list (`cmdline`).
+    pub cmd: CmdLine,
+    /// The programs on `PATH`, read the first time the line wants them.
+    pub commands: OnceCell<Commands>,
+    /// The folder `rl` was started in: where a line starts with nothing
+    /// under the cursor.
+    pub started_in: PathBuf,
     pub mode: Mode,
     /// Set by `enter`: what the terminal goes to next (`main_loop`).
     pub hand: Option<Hand>,
@@ -173,6 +179,9 @@ impl App {
             ask_native: false,
             filter: String::new(),
             search: None,
+            cmd: CmdLine::default(),
+            commands: OnceCell::new(),
+            started_in: std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
             mode: Mode::List,
             hand: None,
             work: JoinSet::new(),
@@ -329,6 +338,34 @@ impl App {
             .as_ref()
             .filter(|(_, at)| at.elapsed() < FLASH)
             .map(|(m, _)| m.as_str())
+    }
+
+    /// The programs on `PATH`, read once.
+    pub fn commands(&self) -> &Commands {
+        self.commands.get_or_init(Commands::from_env)
+    }
+
+    /// Where a line typed now starts: the folder of the session under the
+    /// cursor, else of its project, else where `rl` was started.
+    pub fn line_folder(&self) -> PathBuf {
+        let here = match self.selected() {
+            Some(Line::Session(r)) => Some(r.cwd.clone()),
+            Some(Line::Group(h)) if h.is_project() => Some(h.workspace.clone()),
+            _ => None,
+        };
+        here.filter(|p| p.is_dir()).unwrap_or_else(|| self.started_in.clone())
+    }
+
+    /// What the line typed would start, if anything is typed.
+    pub fn detected(&self) -> Option<cmdline::Detected<'static>> {
+        cmdline::detect(self.cmd.line.text(), rows::registry(), self.commands())
+    }
+
+    /// The line's ghost again, after a key changed it.
+    pub fn retyped(&mut self) {
+        let folder = self.line_folder();
+        let cmds = self.commands.get_or_init(Commands::from_env);
+        self.cmd.typed(&folder, rows::registry(), cmds);
     }
 
     /// The window's title: how things stand, as the header says it.

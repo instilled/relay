@@ -8,6 +8,9 @@ use tokio::io::BufReader;
 use tokio::net::UnixStream;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 
+/// How long `Session::close` waits for the holder to hang up.
+const CLOSE_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
 pub struct Session {
     rd: SessionReader,
     wr: SessionWriter,
@@ -68,8 +71,14 @@ impl Session {
         self.wr.signal(n).await
     }
 
+    /// Asks the holder to close, and waits until it has hung up (for at most
+    /// `CLOSE_WAIT`). Hanging up first could lose the `Close`: a holder still
+    /// writing what follows its hello to a client that has gone gets a broken
+    /// pipe and drops the connection unread.
     pub async fn close(&mut self) -> io::Result<()> {
-        self.wr.close().await
+        self.wr.close().await?;
+        let _ = tokio::time::timeout(CLOSE_WAIT, async { while let Ok(Some(_)) = self.rd.recv().await {} }).await;
+        Ok(())
     }
 
     /// Independent halves for concurrent read and write.
@@ -99,5 +108,50 @@ impl SessionWriter {
     }
     pub async fn close(&mut self) -> io::Result<()> {
         self.send(&Frame::Close).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+    use tokio::net::UnixListener;
+
+    /// A holder that answers the attach, then is slow with what it writes
+    /// after the hello (as one is under load, or with an exit to say): it
+    /// says whether it read the `Close` sent meanwhile, or lost it to the
+    /// client hanging up first.
+    async fn slow_holder(listener: UnixListener) -> bool {
+        let (stream, _) = listener.accept().await.unwrap();
+        let (rd, mut wr) = stream.into_split();
+        let mut rd = FrameReader::new(BufReader::new(rd));
+        assert!(matches!(rd.next().await, Ok(Some(Frame::Attach { .. }))));
+        let hello = Hello {
+            id: "t".into(),
+            pid: 1,
+            holder_pid: 1,
+            cols: 80,
+            rows: 24,
+            started_at: jiff::Timestamp::now(),
+            exit: None,
+        };
+        write_frame(&mut wr, &Frame::Hello(hello)).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        // The holder's own way: a write that fails ends the connection.
+        if write_frame(&mut wr, &Frame::ReplayEnd).await.is_err() {
+            return false;
+        }
+        matches!(rd.next().await, Ok(Some(Frame::Close)))
+    }
+
+    #[tokio::test]
+    async fn a_close_is_not_lost_to_a_holder_still_writing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sock = tmp.path().join("s");
+        let holder = tokio::spawn(slow_holder(UnixListener::bind(&sock).unwrap()));
+        let (_, mut s) = Session::attach(&sock, false).await.unwrap();
+        s.close().await.unwrap();
+        drop(s);
+        assert!(holder.await.unwrap(), "the holder read the close");
     }
 }

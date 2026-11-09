@@ -64,6 +64,22 @@ pub fn pr(state: Option<&str>) -> Style {
     }
 }
 
+/// A colour a session picked in its harness, by Claude's names for them,
+/// as `claude agents` draws it. A name not among them is none.
+pub fn picked(name: &str) -> Option<Color> {
+    Some(match name {
+        "red" => Color::Red,
+        "blue" => Color::Blue,
+        "green" => Color::Green,
+        "yellow" => Color::Yellow,
+        "cyan" => Color::Cyan,
+        "purple" => Color::Magenta,
+        "orange" => Color::Indexed(208),
+        "pink" => Color::Indexed(213),
+        _ => return None,
+    })
+}
+
 /// The selected row: a band of its own — deep teal under near-white, both
 /// stated outright so it reads the same on a light terminal and a dark one.
 /// Reverse video, which this used to use, borrows whatever colours the row
@@ -109,6 +125,18 @@ mod tests {
         assert!(reversed(&spans[1]) && !reversed(&spans[0]) && !reversed(&spans[2]));
         // Nothing moved aside for it: the text takes the cells it always did.
         assert_eq!(spans.iter().map(Span::width).sum::<usize>(), 4);
+    }
+
+    #[test]
+    fn claudes_colour_names_map_to_the_terminals() {
+        assert_eq!(picked("red"), Some(Color::Red));
+        assert_eq!(picked("purple"), Some(Color::Magenta));
+        assert_eq!(picked("orange"), Some(Color::Indexed(208)));
+        assert_eq!(picked("pink"), Some(Color::Indexed(213)));
+        for c in rl_detect::claude_native::COLORS {
+            assert!(picked(c).is_some(), "{c}");
+        }
+        assert_eq!(picked("chartreuse"), None);
     }
 
     #[test]

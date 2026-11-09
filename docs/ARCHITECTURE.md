@@ -79,9 +79,17 @@ Folders are 0700.
 - **New.** `rl new` makes the folder, writes `meta.json`, and runs `rl-session` with the command.
   For a harness with `hooks`, it writes a settings file under `hooks/` and passes it with the
   profile's `hooks.args`. The holder detaches, binds the socket and tells `rl` it is ready.
+  The list's command line (`tui/cmdline.rs`) starts the same way: a first word a profile claims
+  (`words`) starts that agent with the rest as its prompt (placed by the profile's `prompt`;
+  Claude through its adapter's `start`, `claude --bg`); any other line runs held as
+  `$SHELL -ic '<line>` and `exec $SHELL'`, a session of kind shell. Completion reads `PATH` once
+  per list.
 - **List.** Held sessions come from `sessions/`. Hooked-only ones come from `state/`. Claude's and
   Codex's own come from asking them (`sessions.list` in the profile), each with its own timeout;
-  one that fails is skipped. `rows/` merges them and groups them. State comes from, in order, the
+  one that fails is skipped. `rows/` merges them and groups them, each under its project: a
+  folder you named, else its git checkout (`git::project`, read from the files: a linked
+  worktree's `.git` file is followed through its `commondir` to the main checkout; a submodule's,
+  which has none, is a project of its own). State comes from, in order, the
   agent's hooks, the harness's own listing, then regexes over the screen.
 - **Attach.** A held session: `rl` connects to its socket, gets the screen, then live bytes.
   `ctrl-\` detaches. A native one: `rl` runs the profile's `attach` (`claude attach <id>`,
@@ -108,8 +116,8 @@ A harness is `detect/<name>.yaml`. `rl-detect/src/registry.rs` compiles the buil
 The format is strict. Every struct is `deny_unknown_fields`: a key it does not know is an error
 when the profile loads. Keys:
 
-- top level: `kind`, `bins`, `interactive_only`, `hooks`, `resume`, `icon`, `color`, `patterns`,
-  `timing`, `sessions`
+- top level: `kind`, `bins`, `words`, `prompt`, `interactive_only`, `hooks`, `resume`, `icon`,
+  `color`, `patterns`, `timing`, `sessions`
 - `hooks`: `dialect`, `args`
 - `patterns`: `needs_input`, `idle`; `timing`: `idle_after`, `stale_after`
 - `sessions`: `hooks`, `list`, `attach`, `start`, `name`, `stop`
@@ -159,6 +167,11 @@ Taken from the task reports; none is exercised by the tests.
 - That `codex resume <id>` attaches to a thread the app-server has loaded, and when a thread stays loaded.
 - The Gemini MCP entry format.
 - Whether `claude --bg` sessions run user-level hooks (why the list asks `claude agents`).
+- Checked live on codex 0.167, against handing a held Codex session to its daemon on detach: a
+  thread stays loaded in the shared app-server only while a TUI holds it, and is gone within a
+  minute of the TUI's exit. So a held Codex session stays held.
+- Antigravity's screen (`agy`): its profile has no patterns or hooks of its own; only `agy --help`
+  was read (`-i` is `--prompt-interactive`).
 
 Live tests against real CLIs are `#[ignore]`. Tests never touch the real `~/.relay`, `~/.claude`,
 `~/.codex` or `~/.gemini`; they use `RELAY_HOME`, `HOME`, `CLAUDE_CONFIG_DIR`, `CODEX_HOME`.

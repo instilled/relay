@@ -20,6 +20,7 @@ fn row(id: &str, state: RunState, cwd: &str, at: &str) -> Row {
         ended: None,
         state_at: Some(t(at)),
         pr: None,
+        color: None,
         attach: Attach::Held(id.into()),
         stop: None,
         kind: RunKind::Agent,

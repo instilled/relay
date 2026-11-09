@@ -550,6 +550,7 @@ mod tests {
             ended: None,
             at: None,
             pr: None,
+            color: None,
         }
     }
 

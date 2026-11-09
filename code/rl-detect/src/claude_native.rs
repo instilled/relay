@@ -2,7 +2,8 @@
 //! `claude agents --json --all` (the done ones too) says which there are,
 //! and each one's `jobs/<id>/state.json` under Claude's config folder
 //! (`$CLAUDE_CONFIG_DIR`, else `~/.claude`) adds what the listing leaves
-//! out — its one-line summary (`detail`), the pull request it opened, when
+//! out — its one-line summary (`detail`), the pull request it opened, the
+//! colour you picked for it (`color`, one of `COLORS`), when
 //! it was made and when it finished. A field neither says stays empty.
 //!
 //! What the profile's `sessions:` block says is how it is run: `list`,
@@ -11,7 +12,7 @@
 //! --resume <session> --bg`).
 
 use crate::adapter::{self, Adapter, NativeRow, NativeState, Pr};
-use crate::registry::{Profile, SESSION};
+use crate::registry::{PROMPT, Profile, SESSION};
 use crate::sessions::{ID, NAME};
 use anyhow::{Context, Result};
 use jiff::Timestamp;
@@ -38,6 +39,8 @@ pub struct Claude {
     name: Vec<String>,
     resume: Vec<String>,
     stop: Vec<String>,
+    /// Where a first prompt goes, after `start` (the profile's `prompt`).
+    prompt: Vec<String>,
     /// Claude's config folder, where it is not the environment's.
     config: Option<PathBuf>,
 }
@@ -56,6 +59,11 @@ impl Claude {
             name: s.name.clone(),
             resume: profile.resume.clone(),
             stop: s.stop.clone(),
+            prompt: if profile.prompt.is_empty() {
+                vec![PROMPT.to_string()]
+            } else {
+                profile.prompt.clone()
+            },
             config: None,
         })
     }
@@ -116,7 +124,7 @@ impl Adapter for Claude {
             args.extend(self.name.iter().map(|a| a.replace(NAME, n)));
         }
         if let Some(p) = prompt.filter(|p| !p.trim().is_empty()) {
-            args.push(p.to_string());
+            args.extend(self.prompt.iter().map(|a| a.replace(PROMPT, p)));
         }
         Some(self.argv(&args))
     }
@@ -209,7 +217,14 @@ pub struct Job {
     /// When it last ended — finished, failed or stopped.
     #[serde(default)]
     pub last_terminal_at: Option<Timestamp>,
+    /// The colour you picked for it, by name, as Claude writes it: taken
+    /// as any value, so one Relay does not know never spoils the rest.
+    #[serde(default)]
+    pub color: Option<serde_json::Value>,
 }
+
+/// The colours a Claude session can pick, as its `state.json` names them.
+pub const COLORS: [&str; 8] = ["red", "blue", "green", "yellow", "purple", "orange", "pink", "cyan"];
 
 /// Something a session made: a pull request (`kind: pr`, its number as
 /// `id`), a page, ….
@@ -334,7 +349,14 @@ pub fn row(l: Listed, job: Option<Job>, last: Option<Timestamp>) -> NativeRow {
         .or_else(|| l.started_at.and_then(|ms| Timestamp::from_millisecond(ms).ok()));
     // Its age stops when it did, however it ended.
     let ended = j.last_terminal_at.filter(|_| st.state.is_terminal());
+    let color = j
+        .color
+        .as_ref()
+        .and_then(|c| c.as_str())
+        .filter(|c| COLORS.contains(c))
+        .map(String::from);
     NativeRow {
+        color,
         harness: crate::user_hooks::CLAUDE.into(),
         session_id: j.resume_session_id.filter(|s| !s.is_empty()).unwrap_or(l.session_id),
         id: l.id,
@@ -503,6 +525,38 @@ mod tests {
         assert_eq!((r.ended, r.at), (None, Some(at("2026-11-07T00:00:00Z"))));
         let r = row(listed("working", Some(7)), Some(job), None);
         assert_eq!(r.ended, None, "an earlier end is not this run's");
+    }
+
+    #[test]
+    fn a_session_keeps_the_colour_it_picked_and_an_unknown_one_is_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        for (id, state) in [
+            ("c1", r#"{"color":"pink","detail":"x"}"#),
+            ("c2", r#"{"detail":"x"}"#),
+            ("c3", r#"{"color":"chartreuse"}"#),
+            ("c4", r#"{"color":7,"detail":"kept"}"#),
+        ] {
+            std::fs::create_dir_all(tmp.path().join(id)).unwrap();
+            std::fs::write(tmp.path().join(id).join("state.json"), state).unwrap();
+        }
+        let color = |id: &str| {
+            let j = job(tmp.path(), id).expect("it reads");
+            row(listed_one(id), Some(j), None).color
+        };
+        assert_eq!(color("c1").as_deref(), Some("pink"));
+        assert_eq!(color("c2"), None, "most have none");
+        assert_eq!(color("c3"), None, "a name not in the palette is no colour");
+        assert_eq!(color("c4"), None, "nor is one that is not a name");
+        assert_eq!(job(tmp.path(), "c4").unwrap().detail.as_deref(), Some("kept"));
+        for c in ["red", "blue", "green", "yellow", "purple", "orange", "pink", "cyan"] {
+            assert!(COLORS.contains(&c), "{c}");
+        }
+    }
+
+    fn listed_one(id: &str) -> Listed {
+        let text =
+            format!(r#"[{{"id":"{id}","sessionId":"s-{id}","kind":"background","cwd":"/w","state":"working"}}]"#);
+        parse(&text).unwrap().remove(0)
     }
 
     #[test]

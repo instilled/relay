@@ -26,6 +26,9 @@ pub struct Start {
     pub cwd: PathBuf,
     /// The command, or arguments for `harness`. Empty without `harness`: a shell.
     pub argv: Vec<String>,
+    /// `argv` is a shell's, whatever it runs first (the list's command line:
+    /// `$SHELL -ic '<line>…'`): the session reads as a shell, harness `sh`.
+    pub shell: bool,
     pub cols: u16,
     pub rows: u16,
 }
@@ -55,11 +58,16 @@ fn plan<'a>(registry: &'a Registry, start: &Start) -> Result<Plan<'a>> {
             argv,
         });
     }
+    if start.shell && !start.argv.is_empty() {
+        return Ok(Plan {
+            harness: "sh".into(),
+            kind: RunKind::Shell,
+            profile: registry.profile("sh").unwrap_or_else(|| registry.generic()),
+            argv: start.argv.clone(),
+        });
+    }
     if start.argv.is_empty() {
-        let shell = std::env::var("SHELL")
-            .ok()
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| "/bin/sh".into());
+        let shell = login_shell();
         return Ok(Plan {
             harness: "sh".into(),
             kind: RunKind::Shell,
@@ -84,6 +92,23 @@ fn plan<'a>(registry: &'a Registry, start: &Start) -> Result<Plan<'a>> {
             argv,
         },
     })
+}
+
+/// `$SHELL`, else `/bin/sh`.
+pub fn login_shell() -> String {
+    std::env::var("SHELL")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "/bin/sh".into())
+}
+
+/// What runs `line` in a shell that stays once it is done:
+/// `$SHELL -ic '<line>` then `exec $SHELL'`, on a line of its own so a
+/// comment or a trailing `&` in `line` leaves the `exec` be.
+pub fn shell_line_argv(line: &str) -> Vec<String> {
+    let shell = login_shell();
+    let quoted = format!("'{}'", shell.replace('\'', r"'\''"));
+    vec![shell, "-ic".into(), format!("{line}\nexec {quoted}")]
 }
 
 /// Starts a session and returns its record. On failure nothing is left behind.

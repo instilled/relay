@@ -65,6 +65,9 @@ pub struct NativeRow {
     /// When it came to stand as it does.
     pub at: Option<Timestamp>,
     pub pr: Option<Pr>,
+    /// The colour its harness draws it in, by name (Claude's palette:
+    /// `pink`); none, the usual.
+    pub color: Option<String>,
 }
 
 /// What Relay does with a harness's own background sessions. `list` runs
@@ -376,6 +379,7 @@ mod tests {
             ended: None,
             at: None,
             pr: None,
+            color: None,
         }
     }
 

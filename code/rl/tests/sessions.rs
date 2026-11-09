@@ -59,6 +59,23 @@ impl Env {
     }
 }
 
+/// Whether `pid` is still running. A holder is detached, so once it exits it
+/// can sit as a zombie until something reaps it — on a CI runner whose init
+/// doesn't, for good. `kill(pid, 0)` succeeds on a zombie, so on Linux the
+/// state in `/proc` decides.
+fn running(pid: i32) -> bool {
+    if nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None).is_err() {
+        return false;
+    }
+    match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+        // The state follows the parenthesised command name.
+        Ok(stat) => stat
+            .rsplit_once(')')
+            .is_none_or(|(_, rest)| !rest.trim_start().starts_with('Z')),
+        Err(_) => true,
+    }
+}
+
 fn wait_for(what: &str, mut f: impl FnMut() -> bool) {
     let deadline = Instant::now() + Duration::from_secs(10);
     while !f() {
@@ -192,7 +209,7 @@ fn stopping_an_ended_session_lets_its_lingering_holder_go() {
     let pid = env.ls().into_iter().find(|r| r["name"] == name).unwrap()["holder_pid"]
         .as_i64()
         .unwrap() as i32;
-    let alive = || nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None).is_ok();
+    let alive = || running(pid);
     assert!(alive(), "the holder lingers after its session ends");
     let (ok, _, err) = env.rl(&cwd, &["stop", &name]);
     assert!(ok, "{err}");
@@ -210,7 +227,7 @@ fn removing_an_ended_session_closes_its_lingering_holder_first() {
     let pid = env.ls().into_iter().find(|r| r["name"] == name).unwrap()["holder_pid"]
         .as_i64()
         .unwrap() as i32;
-    let alive = || nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None).is_ok();
+    let alive = || running(pid);
     assert!(alive(), "the holder lingers after its session ends");
     let (ok, _, err) = env.rl(&cwd, &["rm", &name]);
     assert!(ok, "{err}");
