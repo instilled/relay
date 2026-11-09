@@ -28,7 +28,7 @@ pub fn subject<'a>(
         kind.push(&r.harness);
     }
     Subject {
-        text: vec![title, &r.harness, r.summary.as_deref().unwrap_or("")],
+        text: vec![title, &r.name, &r.harness, r.summary.as_deref().unwrap_or("")],
         project: vec![project, r.cwd.to_str().unwrap_or("")],
         is,
         kind,
@@ -50,7 +50,8 @@ pub fn named(line: &Line, names: &Names) -> Named {
             title: names.title(r).to_string(),
             project: names.workspace(&project_of(r, names)),
             summary: r.summary.clone().unwrap_or_default(),
-            rest: vec![r.harness.clone(), path(&r.cwd)],
+            // The harness's own name stays searchable under yours.
+            rest: vec![r.harness.clone(), path(&r.cwd), r.name.clone()],
             ..Named::default()
         },
     }

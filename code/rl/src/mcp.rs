@@ -1036,6 +1036,11 @@ mod tests {
             "sent to sess-bbbb"
         );
         assert_eq!(folders(&f.home), ["sess-bbbb"]);
+        // The harness's own address stays good: a Relay name is only a title.
+        assert_eq!(
+            ok_text(&s, "send", json!({ "to": "sess-bbbb", "text": "y" })),
+            "sent to sess-bbbb"
+        );
     }
 
     #[test]

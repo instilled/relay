@@ -441,13 +441,9 @@ async fn ctrl_r_writes_a_name_and_an_empty_one_goes_back() {
 }
 
 #[tokio::test]
-async fn ctrl_r_renames_a_project_but_not_a_harnesss_own_session() {
+async fn ctrl_r_renames_a_project() {
     let f = fixture();
     let mut app = list(&f).await;
-    on(&mut app, NATIVE);
-    ctrl(&mut app, 'r');
-    assert!(matches!(app.mode, super::app::Mode::List));
-    assert!(shown(&app).contains("claude names its own sessions"));
     let head = format!("g:{}", f.repo.display());
     on(&mut app, &head);
     ctrl(&mut app, 'r');
@@ -1034,9 +1030,44 @@ async fn slash_rename_names_the_row_and_an_empty_one_goes_back() {
     run(&mut app, "/rename");
     assert!(Config::load(&f.home).unwrap().list.names.is_empty());
     assert!(shown(&app).contains("back to shop-sh"));
+}
+
+#[tokio::test]
+async fn a_harnesss_session_is_named_in_relay_with_its_own_name_dim_beside_and_both_searched() {
+    let f = fixture();
+    let mut app = list(&f).await;
     on(&mut app, NATIVE);
-    run(&mut app, "/rename x");
-    assert!(shown(&app).contains("claude names its own sessions"));
+    ctrl(&mut app, 'r');
+    assert!(matches!(app.mode, super::app::Mode::Rename(_)));
+    ctrl(&mut app, 'u');
+    typed(&mut app, "login box");
+    press(&mut app, KeyCode::Enter);
+    let names = Config::load(&f.home).unwrap().list.names;
+    assert_eq!(names.get(NATIVE).map(String::as_str), Some("login box"));
+    assert!(
+        shown(&app).contains("named in relay · claude still calls it fix the login"),
+        "{}",
+        shown(&app)
+    );
+    let row = row_of(&shown(&app), "login box").to_string();
+    assert!(row.contains("login box  (fix the login)"), "{row}");
+    // Found by either name.
+    for word in ["box", "fix the"] {
+        ctrl(&mut app, 'f');
+        typed(&mut app, word);
+        assert!(shown(&app).contains("login box"), "{word}");
+        assert_eq!(app.matches(), [NATIVE], "{word}");
+        press(&mut app, KeyCode::Esc);
+        assert!(app.search.is_none());
+    }
+    // A narrow name cell keeps the name and cuts the dim part first.
+    let narrow = screen(&app, 60, 30).join("\n");
+    assert!(row_of(&narrow, "login box").contains("login box"), "{narrow}");
+    // Empty restores the original.
+    run(&mut app, "/rename");
+    assert!(Config::load(&f.home).unwrap().list.names.is_empty());
+    assert!(shown(&app).contains("back to fix the login"));
+    assert!(!shown(&app).contains("(fix the login)"));
 }
 
 #[tokio::test]
