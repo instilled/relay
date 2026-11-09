@@ -11,7 +11,7 @@
 //!
 //! These live in the agent's user-level file, so every session of that
 //! agent calls them, Relay's held sessions and the rest alike. `rl hook`
-//! tells them apart by `RELAY_SESSION`: under a session Relay holds of that
+//! tells them apart by `RL_SESSION`: under a session Relay holds of that
 //! agent's, the word is that session's; any other is one of the agent's
 //! own (`UserHooks::told`), which keeps it on the list. Where a held
 //! session of the agent's has hooks of its own beside these (Claude's,

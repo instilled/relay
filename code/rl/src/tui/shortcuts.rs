@@ -50,6 +50,7 @@ fn place_keys(at: Place) -> Vec<Key> {
             key("^x ^x", "stop/remove/hide"),
             key("^r", "rename"),
             key("^t", "pin"),
+            key("^g", "colour"),
             key("⇧↑↓", "reorder"),
             key("^a", "agents"),
             key("^l", "shells"),
@@ -175,7 +176,7 @@ mod tests {
             one_line(Place::List),
             "enter attach · type start an agent or a shell · tab complete · ↑↓ ^j^k move · \
              pgup/pgdn home/end page · / ^f search · \
-             ^x ^x stop/remove/hide · ^r rename · ^t pin · ⇧↑↓ reorder · ^a agents · ^l shells · \
+             ^x ^x stop/remove/hide · ^r rename · ^t pin · ^g colour · ⇧↑↓ reorder · ^a agents · ^l shells · \
              ^o hidden · ^s by project/state · ^c ^c quit · ^h/F1"
         );
     }

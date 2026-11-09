@@ -223,8 +223,8 @@ pub fn ask(argv: &[String], wait: Duration) -> Result<Vec<Thread>> {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .env_remove("RELAY_SESSION")
-        .env_remove("RELAY_SESSION_AGENT")
+        .env_remove("RL_SESSION")
+        .env_remove("RL_SESSION_AGENT")
         .env(crate::user_hooks::ASKING, crate::user_hooks::asking_since())
         // A group of its own, so what it starts goes with it at the wait.
         .process_group(0);

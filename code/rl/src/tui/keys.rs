@@ -232,6 +232,7 @@ impl App {
             (KeyCode::Char('x'), KeyModifiers::CONTROL) => self.key_x(armed),
             (KeyCode::Char('r'), KeyModifiers::CONTROL) => self.rename_here(),
             (KeyCode::Char('t'), KeyModifiers::CONTROL) => self.toggle_pin(),
+            (KeyCode::Char('g'), KeyModifiers::CONTROL) => self.cycle_colour(),
             (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
                 if armed == Some(Arm::Quit) {
                     self.quit = true;

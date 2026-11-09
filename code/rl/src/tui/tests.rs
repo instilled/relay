@@ -514,6 +514,8 @@ async fn ctrl_x_twice_removes_an_ended_held_session_and_what_was_kept_for_it() {
     let mut app = list(&f).await;
     on(&mut app, HELD);
     ctrl(&mut app, 't');
+    ctrl(&mut app, 'g');
+    assert_eq!(Config::load(&f.home).unwrap().list.colors.len(), 1);
     ctrl(&mut app, 'x');
     assert!(shown(&app).contains("press ^x again to remove shop-sh"));
     ctrl(&mut app, 'x');
@@ -526,6 +528,7 @@ async fn ctrl_x_twice_removes_an_ended_held_session_and_what_was_kept_for_it() {
         Config::load(&f.home).unwrap().list.pins.is_empty(),
         "its pin goes with it"
     );
+    assert!(Config::load(&f.home).unwrap().list.colors.is_empty(), "and its colour");
 }
 
 #[tokio::test]
@@ -562,7 +565,7 @@ async fn the_line_starts_claude_in_its_own_background_and_the_cursor_waits_for_i
     let mut app = list(&f).await;
     on(&mut app, NATIVE);
     typed(&mut app, "claude fix the login");
-    assert!(row_of(&shown(&app), "shop ❯").contains("agent · claude"));
+    assert!(row_of(&shown(&app), "❯ claude fix").contains("agent · claude"));
     press(&mut app, KeyCode::Enter);
     assert!(app.cmd.is_empty(), "the line is cleared once it is on its way");
     app.finish().await;
@@ -812,11 +815,12 @@ async fn typing_starts_the_line_in_the_rows_folder() {
     let f = fixture();
     let mut app = list(&f).await;
     on(&mut app, NATIVE);
-    assert!(line_row(&app).contains("shop ❯"), "where it starts: {}", line_row(&app));
+    assert!(line_row(&app).contains(" ❯ "), "{}", line_row(&app));
+    assert!(!line_row(&app).contains("shop ❯"), "no folder before the prompt");
     typed(&mut app, "make test");
     assert_eq!(app.cmd.line.text(), "make test");
     let row = line_row(&app);
-    assert!(row.contains("shop ❯ make test"), "{row}");
+    assert!(row.contains(" ❯ make test") && !row.contains("shop ❯"), "{row}");
     assert!(row.contains("shell"), "{row}");
     assert!(shown(&app).contains("enter starts"), "the footer says how");
     // A letter of the list's types once the line has text.
@@ -935,7 +939,11 @@ async fn tab_completes_a_harness_word_and_a_path_and_the_ghost_shows_it() {
     on(&mut app, NATIVE);
     typed(&mut app, "cod");
     assert_eq!(app.cmd.ghost.as_deref(), Some("ex"));
-    assert!(line_row(&app).contains("shop ❯ codex"), "the ghost: {}", line_row(&app));
+    assert!(
+        line_row(&app).contains(" ❯ codex") && !line_row(&app).contains("shop ❯"),
+        "the ghost: {}",
+        line_row(&app)
+    );
     press(&mut app, KeyCode::Tab);
     assert_eq!(app.cmd.line.text(), "codex ");
     typed(&mut app, "look at sr");
@@ -963,6 +971,7 @@ fn cells_of(app: &App, text: &str) -> (ratatui::buffer::Buffer, u16, u16) {
 #[tokio::test]
 async fn a_claude_session_keeps_its_colour_on_the_list_but_not_under_the_cursor() {
     use ratatui::style::Color;
+    let pink_bg = crate::tui::theme::picked("pink").unwrap();
     let f = fixture();
     let mut app = list(&f).await;
     let mut pink = waiting(&f.repo);
@@ -970,13 +979,21 @@ async fn a_claude_session_keeps_its_colour_on_the_list_but_not_under_the_cursor(
     app.set_native(vec![pink]);
     on(&mut app, HELD);
     let (buf, x, y) = cells_of(&app, "fix the login");
-    assert_eq!(buf[(x, y)].fg, Color::Indexed(213), "the name, pink");
-    assert_eq!(buf[(1, y)].fg, Color::Indexed(213), "and its icon");
+    assert_eq!(buf[(x, y)].bg, pink_bg, "the name sits on a pink swatch");
+    assert_eq!(
+        buf[(x, y)].fg,
+        crate::tui::theme::swatch(pink_bg).fg.unwrap(),
+        "in dark text"
+    );
+    assert_eq!(buf[(x + 12, y)].bg, pink_bg, "to the name's last letter");
+    assert_ne!(buf[(1, y)].bg, pink_bg, "the icon is not on it");
+    assert_ne!(buf[(1, y)].fg, pink_bg, "and keeps its own colour");
     // Without one, the name is the foreground's, as ever.
     app.set_native(vec![waiting(&f.repo)]);
     on(&mut app, HELD);
     let (buf, x, y) = cells_of(&app, "fix the login");
     assert_eq!(buf[(x, y)].fg, Color::Reset);
+    assert_eq!(buf[(x, y)].bg, Color::Reset);
     app.set_native(vec![{
         let mut p = waiting(&f.repo);
         p.color = Some("pink".into());
@@ -984,10 +1001,11 @@ async fn a_claude_session_keeps_its_colour_on_the_list_but_not_under_the_cursor(
     }]);
     on(&mut app, NATIVE);
     let (buf, x, y) = cells_of(&app, "fix the login");
+    assert_eq!(buf[(x, y)].bg, pink_bg, "under the cursor the swatch stays on the name");
     assert_eq!(
-        buf[(x, y)].fg,
-        crate::tui::theme::selected().fg.unwrap(),
-        "the cursor's band wins"
+        buf[(1, y)].bg,
+        crate::tui::theme::selected().bg.unwrap(),
+        "and the cursor's band is behind the rest"
     );
     on(&mut app, HELD);
     ctrl(&mut app, 'f');
@@ -997,5 +1015,95 @@ async fn a_claude_session_keeps_its_colour_on_the_list_but_not_under_the_cursor(
     assert!(
         buf[(x + 8, y)].modifier.contains(ratatui::style::Modifier::UNDERLINED),
         "the search's mark still shows"
+    );
+    assert_eq!(buf[(x + 8, y)].bg, pink_bg, "over the swatch");
+}
+
+#[tokio::test]
+async fn ctrl_g_cycles_a_rows_own_colour_through_the_palette_and_keeps_it() {
+    use crate::tui::theme;
+    let f = fixture();
+    let mut app = list(&f).await;
+    for key in [HELD, NATIVE] {
+        on(&mut app, key);
+        let mut seen = vec![];
+        for _ in 0..theme::PALETTE.len() {
+            ctrl(&mut app, 'g');
+            let c = Config::load(&f.home).unwrap().list.colors.get(key).cloned();
+            seen.push(c.expect("set"));
+            assert!(shown(&app).contains(&format!("colour: {}", seen.last().unwrap())));
+            assert_eq!(app.sel.as_deref(), Some(key), "the cursor stays");
+        }
+        assert_eq!(seen, theme::PALETTE);
+        ctrl(&mut app, 'g');
+        assert!(!Config::load(&f.home).unwrap().list.colors.contains_key(key));
+        assert!(shown(&app).contains("colour: none"));
+    }
+}
+
+#[tokio::test]
+async fn your_colour_is_the_names_swatch_and_a_harnesss_own_wins_with_a_word_about_it() {
+    let f = fixture();
+    let mut app = list(&f).await;
+    on(&mut app, NATIVE);
+    ctrl(&mut app, 'g');
+    on(&mut app, HELD);
+    let (buf, x, y) = cells_of(&app, "fix the login");
+    assert_eq!(buf[(x, y)].bg, crate::tui::theme::picked("red").unwrap(), "yours");
+    // Claude sets pink: it shows, and ^g still moves yours, saying why.
+    app.set_native(vec![{
+        let mut p = waiting(&f.repo);
+        p.color = Some("pink".into());
+        p
+    }]);
+    on(&mut app, NATIVE);
+    ctrl(&mut app, 'g');
+    assert!(
+        shown(&app).contains("pink's colour wins · yours: blue"),
+        "{}",
+        shown(&app)
+    );
+    assert_eq!(
+        Config::load(&f.home)
+            .unwrap()
+            .list
+            .colors
+            .get(NATIVE)
+            .map(String::as_str),
+        Some("blue")
+    );
+    on(&mut app, HELD);
+    let (buf, x, y) = cells_of(&app, "fix the login");
+    assert_eq!(
+        buf[(x, y)].bg,
+        crate::tui::theme::picked("pink").unwrap(),
+        "the harness's"
+    );
+}
+
+#[tokio::test]
+async fn ctrl_g_on_a_project_header_does_nothing_but_say_so() {
+    let f = fixture();
+    let mut app = list(&f).await;
+    let head = format!("g:{}", f.repo.display());
+    on(&mut app, &head);
+    ctrl(&mut app, 'g');
+    assert!(shown(&app).contains("^g colours a session"));
+    assert!(Config::load(&f.home).unwrap().list.colors.is_empty());
+}
+
+#[tokio::test]
+async fn a_hex_colour_of_your_own_is_drawn_as_the_names_background() {
+    let f = fixture();
+    let mut cfg = Config::load(&f.home).unwrap();
+    cfg.list.colors.insert(NATIVE.into(), "#102060".into());
+    cfg.save(&f.home).unwrap();
+    let app = list(&f).await;
+    let (buf, x, y) = cells_of(&app, "fix the login");
+    assert_eq!(buf[(x, y)].bg, ratatui::style::Color::Rgb(0x10, 0x20, 0x60));
+    assert_eq!(
+        buf[(x, y)].fg,
+        crate::tui::theme::swatch(buf[(x, y)].bg).fg.unwrap(),
+        "light text on dark"
     );
 }
