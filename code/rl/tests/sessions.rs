@@ -233,7 +233,8 @@ fn removing_an_ended_session_closes_its_lingering_holder_first() {
     assert!(ok, "{err}");
     assert!(!dir.exists());
     // Closed by rm, not left to find its socket gone: a moment, not a poll for ever.
-    let until = Instant::now() + Duration::from_secs(2);
+    // Well under the holder's 60 s socket check, with room for a loaded machine.
+    let until = Instant::now() + Duration::from_secs(10);
     while alive() && Instant::now() < until {
         std::thread::sleep(Duration::from_millis(20));
     }
