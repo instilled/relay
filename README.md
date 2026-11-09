@@ -154,6 +154,12 @@ To show it in a zsh prompt: `PROMPT='${RL_SESSION:+[$RL_SESSION] }'$PROMPT`.
 - `send(to, text, from?)`: leave a message for another agent, by address, title or conversation id. An unknown address is an error with close matches.
 - `inbox(as?)`: take your waiting messages, oldest first. They are deleted as they are read.
 
+How a recipient learns it has mail depends on its harness:
+
+- **Codex**: pushed. `send` also runs `codex queue --thread <id> --message "relay mail from <you>: call the relay inbox tool to read it" --resume` (the profile's `sessions.ping`) on the recipient's thread: a Codex row's id, or what a held Codex session's hooks said. `send` says `· pinged codex`, or why codex didn't take the ping; the message is left either way.
+- **Claude**: told by Relay's hooks. With mail waiting, each prompt gets a line of context saying so (`UserPromptSubmit`), and at the end of a turn the `Stop` hook keeps Claude going one more turn to read it, once for the same mail. Needs the hooks `rl setup` installs (or a session Relay holds).
+- **Antigravity, shells and the rest**: they find it when they call `inbox`.
+
 Your address is found in this order: `RL_SESSION`, when the held session runs the harness the
 server was started for (`RL_SESSION_AGENT`, so an agent started in a held shell is not the shell),
 else (Claude) `CLAUDE_CODE_SESSION_ID` matched against the list, else you pass `from` or `as`

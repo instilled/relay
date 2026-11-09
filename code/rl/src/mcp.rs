@@ -357,13 +357,7 @@ impl Server {
     fn inbox(&self, args: &Value) -> Result<String, String> {
         let keys = match &self.caller.relay_session {
             // Held: its name, and the ids it has had; no harness is asked.
-            Some(name) => {
-                let mut keys = vec![name.clone()];
-                if let Some(h) = sessions::list(&self.home).iter().find(|h| &h.meta.name == name) {
-                    keys.extend(held_ids(h));
-                }
-                dedup(keys)
-            }
+            Some(_) => own_keys(&self.home, &self.caller),
             None => {
                 let entries = self.entries(sessions::list(&self.home));
                 match self.me(&entries) {
@@ -396,6 +390,42 @@ impl Server {
             .join("\n\n"))
     }
 }
+
+/// The caller's own mail folders, from what costs no harness a run (a
+/// hook's budget): a held session's name and the conversation ids it has
+/// had; else its conversation id, or, where a held session has had that id,
+/// that session's. None where neither is known. Only the sessions' files
+/// are read: no holder is asked how its session stands.
+pub fn own_keys(home: &Home, caller: &Caller) -> Vec<String> {
+    // A held session's name, and the conversation ids it has had.
+    let ids_of = |dir: &std::path::Path| -> Option<(String, Vec<String>)> {
+        let meta = sessions::read_meta(dir).ok()?;
+        let hook = state::read(&dir.join(sessions::HOOK)).ok().flatten();
+        let ids = hook.map(|k| k.session_id).into_iter().chain(meta.native_id).collect();
+        Some((meta.name, ids))
+    };
+    let keys = |(name, ids): (String, Vec<String>)| dedup(std::iter::once(name).chain(ids).collect());
+    if let Some(name) = &caller.relay_session {
+        return Some(name)
+            .filter(|n| !n.contains('/'))
+            .and_then(|n| ids_of(&home.session_dir(n)))
+            .filter(|(n, _)| n == name)
+            .map_or_else(|| vec![name.clone()], keys);
+    }
+    let Some(id) = &caller.session_id else {
+        return Vec::new();
+    };
+    std::fs::read_dir(home.sessions_dir())
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| ids_of(&e.path()))
+        .find(|(_, ids)| ids.contains(id))
+        .map_or_else(|| vec![id.clone()], keys)
+}
+
+/// The harness Claude Code is, by its profile's name.
+pub const CLAUDE: &str = "claude";
 
 /// Who a message went to, as far as pinging it goes.
 struct Recipient {
@@ -1077,6 +1107,18 @@ mod tests {
             "sent to fix login"
         );
         assert_eq!(ran(&bin), None, "nothing is run for a Claude session");
+    }
+
+    #[test]
+    fn a_callers_own_folders_are_its_held_sessions_or_its_conversations() {
+        let f = fixture();
+        held(&f.home, "api-claude", Some("conv-h"));
+        let both = ["api-claude", "conv-h"];
+        assert_eq!(own_keys(&f.home, &held_caller("api-claude")), both);
+        assert_eq!(own_keys(&f.home, &caller(Some("conv-h"))), both, "a held one's id");
+        assert_eq!(own_keys(&f.home, &caller(Some("sess-aaaa"))), ["sess-aaaa"]);
+        assert_eq!(own_keys(&f.home, &held_caller("gone")), ["gone"]);
+        assert!(own_keys(&f.home, &Caller::default()).is_empty());
     }
 
     #[test]

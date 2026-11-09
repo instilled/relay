@@ -58,6 +58,51 @@ pub fn send(home: &Home, key: &str, m: &Message) -> io::Result<PathBuf> {
     Ok(path)
 }
 
+/// The messages waiting under `key`, oldest first, left where they are:
+/// what a hook tells of. A file that does not read is passed over.
+pub fn waiting(home: &Home, key: &str) -> Vec<Message> {
+    let mut files = mail_files(&home.mail_dir().join(component(key))).unwrap_or_default();
+    files.sort();
+    files
+        .iter()
+        .filter_map(|p| serde_json::from_slice(&std::fs::read(p).ok()?).ok())
+        .collect()
+}
+
+/// Where the newest message a session was told of is kept: hidden in its
+/// mail folder, where `take` never looks.
+const TOLD: &str = ".told";
+
+/// When the newest message a session (its first key, `key`) was last told
+/// of was sent; None where it was told of none.
+pub fn told(home: &Home, key: &str) -> Option<Timestamp> {
+    let path = home.mail_dir().join(component(key)).join(TOLD);
+    std::fs::read_to_string(path).ok()?.trim().parse().ok()
+}
+
+/// Keeps that the session `key` was told of the mail up to `at`.
+pub fn set_told(home: &Home, key: &str, at: Timestamp) -> io::Result<()> {
+    let dir = home.mail_dir().join(component(key));
+    std::fs::create_dir_all(&dir)?;
+    rl_core::atomic::write(&dir.join(TOLD), format!("{at}\n").as_bytes())
+}
+
+/// The message files in `dir`: none where it is not there.
+fn mail_files(dir: &Path) -> io::Result<Vec<PathBuf>> {
+    match std::fs::read_dir(dir) {
+        Ok(entries) => Ok(entries
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| {
+                p.extension().is_some_and(|x| x == "json")
+                    && p.file_name().is_some_and(|n| !n.to_string_lossy().starts_with('.'))
+            })
+            .collect()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(e) => Err(e),
+    }
+}
+
 /// What `take` found: the messages oldest first, and the files it could not
 /// read (left where they are).
 #[derive(Debug, Default)]
@@ -73,19 +118,7 @@ static CLAIMS: AtomicU64 = AtomicU64::new(0);
 /// once, each message goes to exactly one. One already claimed is passed
 /// over; one that does not read is put back and left.
 pub fn take(home: &Home, key: &str) -> io::Result<Taken> {
-    let dir = home.mail_dir().join(component(key));
-    let mut files: Vec<PathBuf> = match std::fs::read_dir(&dir) {
-        Ok(entries) => entries
-            .flatten()
-            .map(|e| e.path())
-            .filter(|p| {
-                p.extension().is_some_and(|x| x == "json")
-                    && p.file_name().is_some_and(|n| !n.to_string_lossy().starts_with('.'))
-            })
-            .collect(),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Taken::default()),
-        Err(e) => return Err(e),
-    };
+    let mut files = mail_files(&home.mail_dir().join(component(key)))?;
     files.sort();
     let mut taken = Taken::default();
     for path in files {
@@ -197,6 +230,26 @@ mod tests {
         send(&home, "api", &msg("x", "api", "lower", 2)).unwrap();
         assert_eq!(take(&home, "API").unwrap().messages[0].text, "upper");
         assert_eq!(take(&home, "api").unwrap().messages[0].text, "lower");
+    }
+
+    #[test]
+    fn waiting_mail_is_read_and_left_and_what_was_told_is_kept_apart() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = Home::at(tmp.path().to_path_buf());
+        assert!(waiting(&home, "a").is_empty());
+        assert_eq!(told(&home, "a"), None);
+        send(&home, "a", &msg("b", "a", "second", 20)).unwrap();
+        send(&home, "a", &msg("c", "a", "first", 10)).unwrap();
+        std::fs::write(home.mail_dir().join("a").join("0-x.json"), "{nope").unwrap();
+        let w: Vec<_> = waiting(&home, "a").into_iter().map(|m| m.text).collect();
+        assert_eq!(w, ["first", "second"], "the bad one passed over");
+        let at = Timestamp::from_second(20).unwrap();
+        set_told(&home, "a", at).unwrap();
+        assert_eq!(told(&home, "a"), Some(at));
+        assert_eq!(waiting(&home, "a").len(), 2, "left where it was");
+        let got = take(&home, "a").unwrap();
+        assert_eq!(got.messages.len(), 2, "what was told is no message");
+        assert_eq!(told(&home, "a"), Some(at));
     }
 
     #[test]
