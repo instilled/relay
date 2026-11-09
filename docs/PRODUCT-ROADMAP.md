@@ -10,29 +10,20 @@ Spec: `docs/specs/2026-11-07-slim-relay.md`.
 The earlier v1 goals (flows for Notion feedback and GCP logs) and everything open below them — the
 report arc, the briefer, the co-worker layer, notifications, the pane redesign — are dropped.
 
-## Open — in the order they'd be built
+## Open
 
-One worktree and one PR off `main` per step; `main` stays green throughout. The new `code/rl` is
-built beside the old crates and takes over in step 5.
+What the slim build left to check or finish:
 
-* [ ] slim · step 1 — the holder knows itself: `rl-session` works out its own state (working /
-  needs input / idle, last line, foreground; moved in from `rl-detect`) and keeps
-  `~/.relay/sessions/<name>/{state.json,exit}` beside its socket; `--no-tty` goes
-* [ ] slim · step 2 — `code/rl`, daemonless: the file store (`sessions/`, `state/`, `config.json`,
-  atomic writes, names claimed by folder), `rl new | ls | attach | stop` on Relay-held agents and
-  shells straight to the holder, `rl hook` writing state files
-* [ ] slim · step 3 — the list: today's grouping by project (manual order, new at the bottom,
-  `! N need you`) and by state (`^s`), filters `a`/`s`/`h`, `^f` search, today's keys, project
-  headers with their git line and badges; live by file watch, polling only while open
-* [ ] slim · step 4 — native sessions 1:1: the Claude adapter (`claude agents --all` rows with
-  their own name, state, `detail`, age and PR label; `claude attach`; an idle outside session
-  carried on with `--resume --bg`), then Codex (`codex agents` rows via the app-server; Relay-held
-  if its sessions can't be attached one by one); other-terminal agents from hooks
-* [ ] slim · step 5 — the switch: the workspace becomes `rl-core`, `rl-session`, `rl-detect`, `rl`;
-  `rl-daemon`, `rl-proto`, `rl-ledger`, `rl-flow`, `rl-cli` and `rld` deleted; README,
-  ARCHITECTURE and PRODUCT rewritten; examples/flows gone
-* [ ] slim · step 6 — messaging: `rl mcp`, a stdio MCP server with `send` / `who` / `inbox` over
-  `~/.relay/mail/<address>/`, pull only; `rl setup` registers it with each harness beside the hooks
+* [ ] verify live what no test could: what `claude --bg` prints and the carry-on of an idle
+  Claude (`--resume --bg`), `claude stop`, `codex resume <id>` attaching to the right thread,
+  Gemini's MCP format, Codex's `env_vars`, and `CLAUDE_CODE_SESSION_ID` reaching an MCP server
+* [ ] Antigravity hooks — its hook system (`hooks.json`; `SessionStart`, `PreToolUse`,
+  `PostToolUse`, `PreInvocation`, `PostInvocation`, `Stop`) differs from the Gemini CLI's and has no
+  permission event, so its rows can't read "needs input" yet
+* [ ] a Codex session handed to Codex's own daemon on detach — not today: codex 0.167 unloads a
+  thread ~70 s after its TUI exits; revisit when Codex keeps threads loaded
+* [ ] `inbox` leaves a hidden claimed file when a process dies between claim and delete; sweep
+  stale `.taken-<pid>` files whose pid is dead
 
 Later:
 
@@ -40,6 +31,22 @@ Later:
 * [ ] socket paths that can't overflow macOS's ~104 bytes, if short names don't suffice
 
 ## Done — newest first
+
+* [x] the list's command line — typing at the bottom starts a session in the selected project's
+  folder: `claude …` a Claude background session, `codex …` a Relay-held Codex, `gemini`/`agy`/
+  `antigravity …` Antigravity's `agy`, anything else a shell command in a new Relay shell; the
+  right end shows what was detected; Tab completes harness words, commands and paths; `/` searches;
+  filters on `^a`/`^l`/`^o` so every letter types; filters and grouping in the header; worktree
+  sessions stand under their parent checkout; Claude sessions keep their colour (#201)
+* [x] slim · steps 2–6 — `code/rl`, daemonless (the file store, `rl new | ls | attach | stop | rm`
+  straight to the holder, `rl hook` writing state files); the list (three sources, by project and
+  by state, filters, search, git line and badges, live by file watch, `config.json` prefs); native
+  sessions 1:1 (Claude via `claude agents --json --all` + `~/.claude/jobs`, Codex via the
+  app-server); the switch (`rl-daemon`, `rl-proto`, `rl-ledger`, `rl-flow`, `rl-cli`, `rld`,
+  `--no-tty` and flows deleted, ~89k lines; README, ARCHITECTURE, PRODUCT rewritten); messaging
+  (`rl mcp` with `who` / `send` / `inbox`, `rl setup` for hooks and MCP) (#200)
+* [x] slim · step 1 — the holder knows itself: `rl-session` works out its own state and writes
+  `state.json` beside its socket, with nobody attached (#199)
 
 * [x] the TUI god module split — `impl App` (176 methods, ~5k lines) distributed by pure code motion into sibling child modules of `tui/` (`select`, `act`, `flow_ops`, `catch_ops`, `feed_ops`, `summary_ops`, `join`, `shell_ops`, `keys`), and the row library `rows.rs` (~4.1k lines) split into a `rows/` folder (`model`/`group`/`name`/`word`/`build`/`order`, tests beside them); `tui/mod.rs` went 9,206 → 5,991 lines, behaviour unchanged; the `drawing`/`pane` cluster is held back to fold into the pane redesign, and `main.rs` is still to trim (#178, #179, #180, #182; CI unbroken in #181)
 * [x] reads off the single writer, bytes off the ledger — a 4-connection read-only WAL pool beside the writer carries the display / query surface (digest, events, summaries, scrollback, lookups) while the flow engine and supervisor stay on the writer for ordering; a run's terminal bytes leave SQLite for per-run append-only files under `~/.relay/io/<run>/{out,in,note}.log`, the `session_io` table keeping only `(run, seq, direction, pos, len, ts)` (#176, #177)
