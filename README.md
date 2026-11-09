@@ -65,7 +65,7 @@ own keys are ctrl keys, the arrows and `enter`, and `/` on an empty line searche
 | `^x ^x` | stop, then remove or hide |
 | `^r` | rename |
 | `^t` | pin |
-| `^g` | your colour for the row: none, red, blue, green, yellow, purple, orange, pink, cyan (a colour the harness set wins on screen) |
+| `^g` | your colour for the row: none, red, blue, green, yellow, purple, orange, pink, cyan (a colour the harness set wins on screen; a `#rrggbb` set in `config.json` or by `rl color` goes to red) |
 | `⇧↑↓` | reorder |
 | `^a` `^l` `^o` | show agents, shells, hidden (the header shows which: `✦^a ❯^l │ ◌^o`) |
 | `^s` | group by project or by state (the header says which) |
@@ -81,6 +81,7 @@ rl ls [--json]                  # the list, once
 rl attach <name>                # ctrl-\ detaches
 rl stop <name>                  # close a running session
 rl rm <name>                    # remove one that is not running
+rl color <session> <name|#rrggbb|none>  # your colour for a row (a held name, or n:claude:<id> / o:claude:<id>)
 rl mcp --harness H              # serve send, who and inbox over stdio (agents call this)
 rl setup [--remove] [--harness H]
 ```

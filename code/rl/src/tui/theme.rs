@@ -64,32 +64,10 @@ pub fn pr(state: Option<&str>) -> Style {
     }
 }
 
-/// A colour a session picked, by Claude's names for them, as swatches to sit
-/// behind a name the way `claude agents` draws them. Stated outright in
-/// truecolor — the terminal's own red, blue and the rest are whatever its
-/// theme made them, and the swatches should look the same everywhere. Soft
-/// mid-tones, so near-black text reads on every one. A name not among them
-/// is none.
-pub fn picked(name: &str) -> Option<Color> {
-    let (r, g, b) = match name {
-        "red" => (0xD9, 0x60, 0x5B),
-        "blue" => (0x5B, 0x8F, 0xD9),
-        "green" => (0x6B, 0xB0, 0x6E),
-        "yellow" => (0xD9, 0xB9, 0x5B),
-        "cyan" => (0x5B, 0xB8, 0xC4),
-        "purple" => (0xA2, 0x7F, 0xD1),
-        "orange" => (0xD9, 0x91, 0x5B),
-        "pink" => (0xD5, 0x7F, 0xAE),
-        _ => return None,
-    };
-    Some(Color::Rgb(r, g, b))
-}
-
-/// The colours `^g` cycles through, in order.
-pub const PALETTE: [&str; 8] = ["red", "blue", "green", "yellow", "purple", "orange", "pink", "cyan"];
+pub use crate::colour::{PALETTE, picked};
 
 /// Where `^g` goes from `own`: none, then each of the palette, then none
-/// again; whatever is not in the palette goes to its first.
+/// again; whatever is not in the palette (a hex) goes to its first.
 pub fn next_colour(own: Option<&str>) -> Option<&'static str> {
     match own {
         None => Some(PALETTE[0]),
@@ -101,14 +79,20 @@ pub fn next_colour(own: Option<&str>) -> Option<&'static str> {
 }
 
 /// The colour a row is drawn in: the one its harness picked if it picked
-/// one, else your own.
+/// one (names only), else your own (a name or `#rrggbb`).
 pub fn effective(harness: Option<&str>, own: Option<&str>) -> Option<Color> {
-    harness.and_then(picked).or_else(|| own.and_then(picked))
+    harness.and_then(picked).or_else(|| own.and_then(crate::colour::parse))
 }
 
-/// A coloured name: its swatch behind it, near-black on it.
+/// A coloured name: its swatch behind it, near-black on it — or near-white
+/// on a swatch too dark for that.
 pub fn swatch(c: Color) -> Style {
-    Style::default().bg(c).fg(Color::Rgb(0x14, 0x14, 0x14))
+    let fg = if crate::colour::dark_text_on(c) {
+        Color::Rgb(0x14, 0x14, 0x14)
+    } else {
+        Color::Rgb(0xF5, 0xF5, 0xF5)
+    };
+    Style::default().bg(c).fg(fg)
 }
 
 /// The selected row: a band of its own — deep teal under near-white, both
@@ -179,6 +163,20 @@ mod tests {
         assert_eq!(seen, PALETTE);
         assert_eq!(next_colour(at), None);
         assert_eq!(next_colour(Some("chartreuse")), Some("red"));
+    }
+
+    #[test]
+    fn a_hex_of_your_own_is_a_swatch_and_a_dark_one_gets_light_text() {
+        assert_eq!(effective(None, Some("#ff8800")), Some(Color::Rgb(0xFF, 0x88, 0x00)));
+        assert_eq!(effective(Some("pink"), Some("#ff8800")), picked("pink"));
+        assert_eq!(
+            swatch(Color::Rgb(0xFF, 0xDD, 0x00)).fg,
+            Some(Color::Rgb(0x14, 0x14, 0x14))
+        );
+        assert_eq!(
+            swatch(Color::Rgb(0x10, 0x20, 0x60)).fg,
+            Some(Color::Rgb(0xF5, 0xF5, 0xF5))
+        );
     }
 
     #[test]

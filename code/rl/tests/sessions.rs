@@ -239,3 +239,38 @@ fn removing_an_ended_session_closes_its_lingering_holder_first() {
     }
     assert!(!alive(), "the holder went with the session");
 }
+
+#[test]
+fn color_sets_clears_and_errors() {
+    let Some(env) = Env::new() else { return };
+    let cwd = env.dir("proj");
+    let (ok, name, err) = env.rl(&cwd, &["new", "--", "sh", "-c", "sleep 30"]);
+    assert!(ok, "{err}");
+    let config = || std::fs::read_to_string(env.home().join("config.json")).unwrap_or_default();
+
+    let (ok, out, err) = env.rl(&cwd, &["color", &name, "pink"]);
+    assert!(ok, "{err}");
+    assert_eq!(out, format!("{name}: pink"));
+    assert!(config().contains(&format!("\"r:{name}\": \"pink\"")), "{}", config());
+    let (ok, _, err) = env.rl(&cwd, &["color", &name, "#ff8800"]);
+    assert!(ok, "{err}");
+    assert!(config().contains("#ff8800"));
+    // A harness's own session by its key; one that is not there is an error.
+    let (ok, _, err) = env.rl(&cwd, &["color", "n:claude:abc", "blue"]);
+    assert!(ok, "{err}");
+    let (ok, _, err) = env.rl(&cwd, &["color", "o:claude:nope", "blue"]);
+    assert!(!ok && err.contains("no such session"), "{err}");
+    let (ok, _, err) = env.rl(&cwd, &["color", "nobody", "blue"]);
+    assert!(!ok && err.contains("no such session"), "{err}");
+    let (ok, _, err) = env.rl(&cwd, &["color", &name, "chartreuse"]);
+    assert!(!ok && err.contains("not a colour"), "{err}");
+    assert!(config().contains("#ff8800"), "a bad colour changes nothing");
+
+    let (ok, out, err) = env.rl(&cwd, &["color", &name, "none"]);
+    assert!(ok, "{err}");
+    assert!(out.contains("no colour"));
+    assert!(!config().contains(&format!("r:{name}")));
+
+    env.rl(&cwd, &["stop", &name]);
+    env.rl(&cwd, &["rm", &name]);
+}

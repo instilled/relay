@@ -1086,3 +1086,19 @@ async fn ctrl_g_on_a_project_header_does_nothing_but_say_so() {
     assert!(shown(&app).contains("^g colours a session"));
     assert!(Config::load(&f.home).unwrap().list.colors.is_empty());
 }
+
+#[tokio::test]
+async fn a_hex_colour_of_your_own_is_drawn_as_the_names_background() {
+    let f = fixture();
+    let mut cfg = Config::load(&f.home).unwrap();
+    cfg.list.colors.insert(NATIVE.into(), "#102060".into());
+    cfg.save(&f.home).unwrap();
+    let app = list(&f).await;
+    let (buf, x, y) = cells_of(&app, "fix the login");
+    assert_eq!(buf[(x, y)].bg, ratatui::style::Color::Rgb(0x10, 0x20, 0x60));
+    assert_eq!(
+        buf[(x, y)].fg,
+        crate::tui::theme::swatch(buf[(x, y)].bg).fg.unwrap(),
+        "light text on dark"
+    );
+}

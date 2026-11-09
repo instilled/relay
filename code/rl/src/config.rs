@@ -133,6 +133,12 @@ impl Config {
             },
             Err(e) => return Err(e).with_context(|| format!("{}", path.display())),
         };
+        if let Some((k, v)) = file.list.colors.iter().find(|(_, v)| crate::colour::parse(v).is_none()) {
+            anyhow::bail!(
+                "{}: colour {v:?} for {k:?} is not a name (red, blue, ...) or #rrggbb",
+                path.display()
+            );
+        }
         Ok(Config {
             harnesses: file.harnesses.unwrap_or_else(|| found_harnesses(home)),
             badges: file.badges,
@@ -209,6 +215,17 @@ mod tests {
         let c = Config::load(&home).unwrap();
         assert!(c.list.colors.is_empty());
         assert_eq!(c.list.pins, ["r:a"]);
+    }
+
+    #[test]
+    fn a_hex_colour_loads_and_a_bad_one_is_an_error_naming_it() {
+        let (_t, home) = home();
+        std::fs::create_dir_all(home.path()).unwrap();
+        std::fs::write(home.config_json(), r##"{"list": {"colors": {"r:a": "#ff8800"}}}"##).unwrap();
+        assert_eq!(Config::load(&home).unwrap().list.colors["r:a"], "#ff8800");
+        std::fs::write(home.config_json(), r##"{"list": {"colors": {"r:a": "#ff88"}}}"##).unwrap();
+        let e = format!("{:#}", Config::load(&home).unwrap_err());
+        assert!(e.contains("r:a") && e.contains("#ff88"), "{e}");
     }
 
     #[test]

@@ -16,7 +16,7 @@ There is no daemon. Two kinds of process, one file tree.
 flowchart TB
     subgraph rl["rl — the list and the commands"]
         tui["list (TUI)"]
-        cmds["new · ls · attach · stop · rm · setup"]
+        cmds["new · ls · attach · stop · rm · color · setup"]
         hook["rl hook — called by an agent's hooks"]
         mcp["rl mcp — stdio MCP server, run by an agent"]
     end

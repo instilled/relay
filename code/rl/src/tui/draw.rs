@@ -697,15 +697,12 @@ impl App {
             name[0].style = theme::swatch(c);
         }
         name.push(Span::raw(" ".repeat(fitted.chars().count() - text.chars().count())));
+        name.push(Span::styled(format!(" {}", fit(&r.harness, harness - 1)), theme::dim()));
         list_line(
             w,
             tw,
             icon,
-            vec![
-                name,
-                vec![Span::styled(format!(" {}", fit(&r.harness, harness - 1)), theme::dim())],
-            ]
-            .concat(),
+            name,
             vec![Span::styled(word, theme::state(r.state))],
             summary,
             if through {
