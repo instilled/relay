@@ -145,6 +145,12 @@ impl Adapter for Claude {
         Some(self.argv(&args))
     }
 
+    /// None: Claude Code has no way to tell one of its sessions anything
+    /// from outside; its hooks carry the news instead (`rl hook`).
+    fn ping_argv(&self, _: &str, _: &str) -> Option<Vec<String>> {
+        None
+    }
+
     fn started_ids(&self, printed: &str) -> Vec<String> {
         started_ids(printed)
     }
@@ -605,6 +611,7 @@ mod tests {
         assert_eq!(c.start_argv(Some(" "), Some("")).unwrap(), ["claude", "--bg"]);
         assert_eq!(c.carry_on_argv("s-1").unwrap(), ["claude", "--resume", "s-1", "--bg"]);
         assert_eq!(c.stop_argv("ab12cd34").unwrap(), ["claude", "stop", "ab12cd34"]);
+        assert_eq!(c.ping_argv("ab12cd34", "x"), None, "nothing tells one from outside");
         // What it says to attach to goes first, then any other likely word.
         assert_eq!(
             started_ids("build deadbeef from cafe0001 · claude attach 9be483ad\n"),

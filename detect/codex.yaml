@@ -62,3 +62,8 @@ sessions:
   # one carried on, Relay holds.
   list: { args: [app-server, proxy], reader: codex-threads }
   attach: [resume, "{id}"]
+  # Mail Relay leaves for one of its sessions (`rl mcp`'s send) is queued on
+  # its thread as well, and the thread resumed on the daemon, so it hears of
+  # it: `{id}` is the thread's id, `{text}` the note. `codex queue --help`,
+  # codex 0.167.
+  ping: [queue, --thread, "{id}", --message, "{text}", --resume]
