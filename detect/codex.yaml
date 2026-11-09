@@ -34,6 +34,10 @@ sessions:
     # the end's, which codex might not wait for as it exits (uncertain). So
     # hooks arrive out of order, several at once.
     async: true
+    # The daemon (`codex app-server`) runs the hooks, not the terminal's codex:
+    # no RL_SESSION in their environment. A held codex is found by its folder
+    # and start time when its first hook arrives.
+    detached_env: true
     # A user-level hook runs only once trusted in codex's /hooks screen.
     # Uncertain: whether the codex installed (0.162) has hooks on by default
     # ([features] hooks), and whether SessionStart fires before the first

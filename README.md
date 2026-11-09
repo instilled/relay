@@ -202,6 +202,12 @@ Not verified against the live CLIs:
   own daemon. Checked on codex 0.167: the daemon lists a TUI's thread as loaded while the TUI runs
   and for a few seconds after it exits, but not a minute later. A hand-off would leave a row that
   vanishes. `codex resume <id>` still finds the saved conversation.
+- A held Codex's hooks and `rl mcp --harness codex` run in Codex's app-server daemon, not under the
+  holder, so they carry no `RL_SESSION`. The first hook of a thread claims the live held Codex in
+  the same folder that has no thread yet and began under 120 s ago (`meta.native_id`); with two
+  such sessions started together, the earliest-started is taken, which can swap their threads.
+  The MCP server can't know its thread, so a held Codex's `from`/`as` stays as given, not read from
+  its session.
 
 ## Docs
 
