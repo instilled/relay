@@ -43,7 +43,7 @@ Claude's and Codex's own background sessions are on it too. `^h` or `F1` shows t
 terminals that send `^h` as backspace).
 
 At the foot of the list is a command line. Type to start a session, in the folder of the row under
-the cursor (else where `rl` was started; the line says which, `relay ❯`):
+the cursor (else where `rl` was started; the line shows only the prompt `❯`):
 
 - `claude fix the login`, `codex …`, or `agy …` (also `gemini` and `antigravity`, which mean
   Google Antigravity's `agy`): that agent, the rest of the line its first prompt. Claude starts in
@@ -65,6 +65,7 @@ own keys are ctrl keys, the arrows and `enter`, and `/` on an empty line searche
 | `^x ^x` | stop, then remove or hide |
 | `^r` | rename |
 | `^t` | pin |
+| `^g` | your colour for the row: none, red, blue, green, yellow, purple, orange, pink, cyan (a colour the harness set wins on screen; a `#rrggbb` set in `config.json` or by `rl color` goes to red) |
 | `⇧↑↓` | reorder |
 | `^a` `^l` `^o` | show agents, shells, hidden (the header shows which: `✦^a ❯^l │ ◌^o`) |
 | `^s` | group by project or by state (the header says which) |
@@ -80,6 +81,7 @@ rl ls [--json]                  # the list, once
 rl attach <name>                # ctrl-\ detaches
 rl stop <name>                  # close a running session
 rl rm <name>                    # remove one that is not running
+rl color <session> <name|#rrggbb|none>  # your colour for a row (a held name, or n:claude:<id> / o:claude:<id>)
 rl mcp --harness H              # serve send, who and inbox over stdio (agents call this)
 rl setup [--remove] [--harness H]
 ```
@@ -98,7 +100,7 @@ terminal or the laptop lid costs nothing. Without a daemon, nothing else is runn
 | `sessions/<name>/` | one held session: `meta.json`, `state.json`, `hook.json`, `exit`, `sock` |
 | `state/<agent>/<session_id>.json` | what an agent's hooks said of a session Relay does not hold |
 | `mail/<key>/` | messages waiting for an agent, one file each (key: a held session's name, else its conversation id) |
-| `config.json` | harnesses offered, badges, how the list stands (grouping, pins, names, order, hidden) |
+| `config.json` | harnesses offered, badges, how the list stands (grouping, pins, names, colours, order, hidden) |
 | `hooks/` | settings files `rl new` passes to a harness (Claude's `--settings`) |
 | `detect/*.yaml` | your harness profiles |
 | `plugins/gh-pr` | the badge script for project headers |
@@ -132,6 +134,18 @@ Keys a profile accepts:
 Unknown keys are an error. Old keys such as `headless`, `model_flag`, `small_model` and `says` no
 longer load; remove them. See `detect/claude.yaml` and `detect/codex.yaml` for worked examples.
 
+## Environment
+
+A session Relay holds gets:
+
+| variable | holds |
+| --- | --- |
+| `RL_SESSION` | the session's name |
+| `RL_SESSION_AGENT` | the harness it runs (`sh` for a shell) |
+| `RELAY_HOME` | the Relay home it belongs to|
+
+To show it in a zsh prompt: `PROMPT='${RL_SESSION:+[$RL_SESSION] }'$PROMPT`.
+
 ## For agents
 
 `rl mcp` is a stdio MCP server with three tools:
@@ -140,8 +154,8 @@ longer load; remove them. See `detect/claude.yaml` and `detect/codex.yaml` for w
 - `send(to, text, from?)`: leave a message for another agent, by address, title or conversation id. An unknown address is an error with close matches.
 - `inbox(as?)`: take your waiting messages, oldest first. They are deleted as they are read.
 
-Your address is found in this order: `RELAY_SESSION`, when the held session runs the harness the
-server was started for (`RELAY_SESSION_AGENT`, so an agent started in a held shell is not the shell),
+Your address is found in this order: `RL_SESSION`, when the held session runs the harness the
+server was started for (`RL_SESSION_AGENT`, so an agent started in a held shell is not the shell),
 else (Claude) `CLAUDE_CODE_SESSION_ID` matched against the list, else you pass `from` or `as`
 yourself. Codex has no automatic address yet, so it passes them.
 

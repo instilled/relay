@@ -29,8 +29,8 @@ const VERSIONS: [&str; 3] = ["2025-06-18", "2025-03-26", "2024-11-05"];
 /// Who the caller is, as far as its environment says.
 #[derive(Debug, Clone, Default)]
 pub struct Caller {
-    /// The held session this server is the agent of: `RELAY_SESSION`, where
-    /// the session runs this harness (`RELAY_SESSION_AGENT`). An agent
+    /// The held session this server is the agent of: `RL_SESSION`, where
+    /// the session runs this harness (`RL_SESSION_AGENT`). An agent
     /// started inside a held shell is not that shell.
     pub relay_session: Option<String>,
     /// `CLAUDE_CODE_SESSION_ID`, for Claude only: Claude Code's conversation
@@ -43,7 +43,7 @@ impl Caller {
     pub fn of(harness: &str, var: impl Fn(&str) -> Option<String>) -> Self {
         let var = |k: &str| var(k).filter(|v| !v.is_empty());
         Self {
-            relay_session: var("RELAY_SESSION").filter(|_| var(crate::spawn::AGENT_ENV).as_deref() == Some(harness)),
+            relay_session: var("RL_SESSION").filter(|_| var(crate::spawn::AGENT_ENV).as_deref() == Some(harness)),
             session_id: var("CLAUDE_CODE_SESSION_ID").filter(|_| harness == "claude"),
         }
     }
@@ -764,8 +764,8 @@ mod tests {
     fn a_held_session_is_the_caller_only_for_the_harness_it_runs() {
         let env = |agent: &'static str| {
             move |k: &str| match k {
-                "RELAY_SESSION" => Some("api-sh".to_string()),
-                "RELAY_SESSION_AGENT" => Some(agent.to_string()),
+                "RL_SESSION" => Some("api-sh".to_string()),
+                "RL_SESSION_AGENT" => Some(agent.to_string()),
                 "CLAUDE_CODE_SESSION_ID" => Some("sess-aaaa".to_string()),
                 _ => None,
             }

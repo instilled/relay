@@ -28,8 +28,8 @@ impl Env {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_rl"));
         cmd.arg("hook")
             .args(args)
-            .env_remove("RELAY_SESSION")
-            .env_remove("RELAY_SESSION_AGENT")
+            .env_remove("RL_SESSION")
+            .env_remove("RL_SESSION_AGENT")
             .env_remove("RELAY_ASKING")
             .env("RELAY_HOME", self.home())
             .env("HOME", self.tmp.path())
@@ -108,7 +108,7 @@ fn under_a_held_session_the_word_goes_to_its_folder() {
     e.hook(
         &["claude", "UserPromptSubmit"],
         e.payload("s1"),
-        &[("RELAY_SESSION", "x"), ("RELAY_SESSION_AGENT", "claude")],
+        &[("RL_SESSION", "x"), ("RL_SESSION_AGENT", "claude")],
     );
     assert_eq!(read(&dir.join("hook.json"))["state"], "busy");
     assert!(!e.home().join("state").exists());
@@ -121,7 +121,7 @@ fn an_agent_inside_a_held_shell_reports_as_its_own_session() {
     std::fs::create_dir_all(&dir).unwrap();
     // The held session runs a shell; the claude started in it is not the
     // session's: its `--user` copy tells, and its own copy says nothing.
-    let held_shell = [("RELAY_SESSION", "x"), ("RELAY_SESSION_AGENT", "sh")];
+    let held_shell = [("RL_SESSION", "x"), ("RL_SESSION_AGENT", "sh")];
     e.hook(&["claude", "UserPromptSubmit", "--user"], e.payload("s1"), &held_shell);
     assert_eq!(read(&e.state("claude", "s1"))["state"], "busy");
     assert!(!dir.join("hook.json").exists());
@@ -135,7 +135,7 @@ fn a_held_session_that_moves_to_another_conversation_starts_afresh() {
     let e = Env::new();
     let dir = e.home().join("sessions/x");
     std::fs::create_dir_all(&dir).unwrap();
-    let held = [("RELAY_SESSION", "x"), ("RELAY_SESSION_AGENT", "claude")];
+    let held = [("RL_SESSION", "x"), ("RL_SESSION_AGENT", "claude")];
     let mut p = e.payload("s1");
     p["transcript_path"] = json!("/t/s1.jsonl");
     e.hook(&["claude", "UserPromptSubmit"], p, &held);
@@ -154,7 +154,7 @@ fn under_a_held_session_the_user_copy_is_ignored() {
     e.hook(
         &["claude", "UserPromptSubmit", "--user"],
         e.payload("s1"),
-        &[("RELAY_SESSION", "x"), ("RELAY_SESSION_AGENT", "claude")],
+        &[("RL_SESSION", "x"), ("RL_SESSION_AGENT", "claude")],
     );
     assert!(!dir.join("hook.json").exists());
     assert!(!e.home().join("state").exists());

@@ -1,7 +1,7 @@
 //! `impl App` — what the list does to what the cursor is on: `enter`
 //! attaches, the command line starts something new, `^x` twice stops,
-//! removes or hides, `^r` renames, `^t` pins, `⇧↑↓` moves. What is yours to
-//! keep (names, pins, hides, order) goes to `config.json`; what takes a
+//! removes or hides, `^r` renames, `^t` pins, `^g` colours, `⇧↑↓` moves. What is yours to
+//! keep (names, pins, colours, hides, order) goes to `config.json`; what takes a
 //! moment (stopping, starting) runs in the background and says how it went
 //! in the footer.
 
@@ -9,6 +9,7 @@ use super::app::{App, Arm, Done, Hand, Mode, Renaming, To};
 use super::cmdline::{self, Detected};
 use super::line;
 use super::remove::{self, Removal};
+use super::theme;
 use crate::cmd;
 use crate::config::{Hidden, ListPrefs};
 use crate::rows::{self, Context, Line, Names};
@@ -517,6 +518,36 @@ impl App {
         self.select(Some(key));
     }
 
+    /// `^g`: the row's own colour on to the next of the palette, and after
+    /// the last none. A harness's colour for the row still wins on screen,
+    /// and the footer says so.
+    pub(super) fn cycle_colour(&mut self) {
+        let Some(Line::Session(r)) = self.selected() else {
+            return self.say("^g colours a session");
+        };
+        let key = r.key.clone();
+        let harness = r
+            .color
+            .as_deref()
+            .filter(|c| theme::picked(c).is_some())
+            .map(str::to_string);
+        let next = theme::next_colour(self.config.list.colors.get(&key).map(String::as_str));
+        self.change_prefs(|p| match next {
+            Some(c) => {
+                p.colors.insert(key.clone(), c.to_string());
+            }
+            None => {
+                p.colors.remove(&key);
+            }
+        });
+        let yours = next.unwrap_or("none");
+        self.say(match harness {
+            Some(h) => format!("{h}'s colour wins · yours: {yours}"),
+            None => format!("colour: {yours}"),
+        });
+        self.select(Some(key));
+    }
+
     /// `⇧↑↓`: the row under the cursor one place up or down inside its
     /// project, which keeps that order from then on — or, on a header, the
     /// project among the projects. The cursor stays on it.
@@ -561,6 +592,7 @@ impl App {
 /// What was kept for a row, let go of once the row is.
 fn forget(p: &mut ListPrefs, key: &str) {
     p.names.remove(key);
+    p.colors.remove(key);
     p.pins.retain(|k| k != key);
     p.hidden.retain(|h| h.key != key);
     for o in &mut p.order {

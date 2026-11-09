@@ -197,3 +197,52 @@ pub async fn rm(home: &Home, name: &str) -> Result<()> {
     }
     sessions::remove(home, name)
 }
+
+/// The list's key for the session `name` names: a held session's name, else
+/// a row's key as the list shows it (`n:<harness>:<id>` for a harness's own,
+/// `o:<agent>:<session id>` for one only its hooks have spoken of). A hooked
+/// row has to exist; a harness's own cannot be told without asking the
+/// harness, so its key is taken as given.
+pub fn row_key(home: &Home, name: &str) -> Result<String> {
+    if sessions::list(home).iter().any(|h| h.meta.name == name) {
+        return Ok(format!("r:{name}"));
+    }
+    let mut parts = name.splitn(3, ':');
+    match (parts.next(), parts.next(), parts.next()) {
+        (Some("n"), Some(h), Some(id)) if !h.is_empty() && !id.is_empty() => Ok(name.to_string()),
+        (Some("o"), Some(agent), Some(id)) => {
+            let hooked = crate::store::state::list(home, Timestamp::now());
+            if hooked.iter().any(|s| s.agent == agent && s.session_id == id) {
+                Ok(name.to_string())
+            } else {
+                bail!("no such session: {name}")
+            }
+        }
+        _ => bail!("no such session: {name}"),
+    }
+}
+
+/// Sets, or with `none` clears, your own colour for a session; says what it
+/// did. Written the way the list writes it: the file re-read first, saved
+/// atomically.
+pub fn color(home: &Home, name: &str, colour: &str) -> Result<String> {
+    let clear = colour == "none";
+    if !clear && crate::colour::parse(colour).is_none() {
+        bail!(
+            "not a colour: {colour} (a name — red, blue, green, yellow, purple, orange, pink, cyan — or #rrggbb, or none)"
+        );
+    }
+    let key = row_key(home, name)?;
+    let mut config = crate::config::Config::load(home)?;
+    if clear {
+        config.list.colors.remove(&key);
+    } else {
+        config.list.colors.insert(key, colour.to_string());
+    }
+    config.save(home)?;
+    Ok(if clear {
+        format!("{name}: no colour of your own")
+    } else {
+        format!("{name}: {colour}")
+    })
+}

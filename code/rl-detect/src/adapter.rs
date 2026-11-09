@@ -197,8 +197,8 @@ pub fn run(argv: &[String], cwd: Option<&Path>, asking: bool, wait: Duration) ->
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         // What a Relay session says of itself is not the harness's.
-        .env_remove("RELAY_SESSION")
-        .env_remove("RELAY_SESSION_AGENT");
+        .env_remove("RL_SESSION")
+        .env_remove("RL_SESSION_AGENT");
     if let Some(dir) = cwd {
         cmd.current_dir(dir);
     }
