@@ -85,6 +85,27 @@ pub fn picked(name: &str) -> Option<Color> {
     Some(Color::Rgb(r, g, b))
 }
 
+/// The colours `^g` cycles through, in order.
+pub const PALETTE: [&str; 8] = ["red", "blue", "green", "yellow", "purple", "orange", "pink", "cyan"];
+
+/// Where `^g` goes from `own`: none, then each of the palette, then none
+/// again; whatever is not in the palette goes to its first.
+pub fn next_colour(own: Option<&str>) -> Option<&'static str> {
+    match own {
+        None => Some(PALETTE[0]),
+        Some(c) => match PALETTE.iter().position(|p| *p == c) {
+            Some(i) => PALETTE.get(i + 1).copied(),
+            None => Some(PALETTE[0]),
+        },
+    }
+}
+
+/// The colour a row is drawn in: the one its harness picked if it picked
+/// one, else your own.
+pub fn effective(harness: Option<&str>, own: Option<&str>) -> Option<Color> {
+    harness.and_then(picked).or_else(|| own.and_then(picked))
+}
+
 /// A coloured name: its swatch behind it, near-black on it.
 pub fn swatch(c: Color) -> Style {
     Style::default().bg(c).fg(Color::Rgb(0x14, 0x14, 0x14))
@@ -145,6 +166,27 @@ mod tests {
             assert!(picked(c).is_some(), "{c}");
         }
         assert_eq!(picked("chartreuse"), None);
+    }
+
+    #[test]
+    fn the_cycle_walks_the_palette_and_back_to_none() {
+        let mut at = None;
+        let mut seen = vec![];
+        for _ in 0..PALETTE.len() {
+            at = next_colour(at);
+            seen.push(at.unwrap());
+        }
+        assert_eq!(seen, PALETTE);
+        assert_eq!(next_colour(at), None);
+        assert_eq!(next_colour(Some("chartreuse")), Some("red"));
+    }
+
+    #[test]
+    fn the_harnesss_colour_wins_over_yours() {
+        assert_eq!(effective(Some("pink"), Some("blue")), picked("pink"));
+        assert_eq!(effective(None, Some("blue")), picked("blue"));
+        assert_eq!(effective(Some("chartreuse"), Some("blue")), picked("blue"));
+        assert_eq!(effective(None, None), None);
     }
 
     #[test]

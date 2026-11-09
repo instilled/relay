@@ -65,6 +65,7 @@ own keys are ctrl keys, the arrows and `enter`, and `/` on an empty line searche
 | `^x ^x` | stop, then remove or hide |
 | `^r` | rename |
 | `^t` | pin |
+| `^g` | your colour for the row: none, red, blue, green, yellow, purple, orange, pink, cyan (a colour the harness set wins on screen) |
 | `⇧↑↓` | reorder |
 | `^a` `^l` `^o` | show agents, shells, hidden (the header shows which: `✦^a ❯^l │ ◌^o`) |
 | `^s` | group by project or by state (the header says which) |
@@ -98,7 +99,7 @@ terminal or the laptop lid costs nothing. Without a daemon, nothing else is runn
 | `sessions/<name>/` | one held session: `meta.json`, `state.json`, `hook.json`, `exit`, `sock` |
 | `state/<agent>/<session_id>.json` | what an agent's hooks said of a session Relay does not hold |
 | `mail/<key>/` | messages waiting for an agent, one file each (key: a held session's name, else its conversation id) |
-| `config.json` | harnesses offered, badges, how the list stands (grouping, pins, names, order, hidden) |
+| `config.json` | harnesses offered, badges, how the list stands (grouping, pins, names, colours, order, hidden) |
 | `hooks/` | settings files `rl new` passes to a harness (Claude's `--settings`) |
 | `detect/*.yaml` | your harness profiles |
 | `plugins/gh-pr` | the badge script for project headers |

@@ -514,6 +514,8 @@ async fn ctrl_x_twice_removes_an_ended_held_session_and_what_was_kept_for_it() {
     let mut app = list(&f).await;
     on(&mut app, HELD);
     ctrl(&mut app, 't');
+    ctrl(&mut app, 'g');
+    assert_eq!(Config::load(&f.home).unwrap().list.colors.len(), 1);
     ctrl(&mut app, 'x');
     assert!(shown(&app).contains("press ^x again to remove shop-sh"));
     ctrl(&mut app, 'x');
@@ -526,6 +528,7 @@ async fn ctrl_x_twice_removes_an_ended_held_session_and_what_was_kept_for_it() {
         Config::load(&f.home).unwrap().list.pins.is_empty(),
         "its pin goes with it"
     );
+    assert!(Config::load(&f.home).unwrap().list.colors.is_empty(), "and its colour");
 }
 
 #[tokio::test]
@@ -1009,4 +1012,77 @@ async fn a_claude_session_keeps_its_colour_on_the_list_but_not_under_the_cursor(
         "the search's mark still shows"
     );
     assert_eq!(buf[(x + 8, y)].bg, pink_bg, "over the swatch");
+}
+
+#[tokio::test]
+async fn ctrl_g_cycles_a_rows_own_colour_through_the_palette_and_keeps_it() {
+    use crate::tui::theme;
+    let f = fixture();
+    let mut app = list(&f).await;
+    for key in [HELD, NATIVE] {
+        on(&mut app, key);
+        let mut seen = vec![];
+        for _ in 0..theme::PALETTE.len() {
+            ctrl(&mut app, 'g');
+            let c = Config::load(&f.home).unwrap().list.colors.get(key).cloned();
+            seen.push(c.expect("set"));
+            assert!(shown(&app).contains(&format!("colour: {}", seen.last().unwrap())));
+            assert_eq!(app.sel.as_deref(), Some(key), "the cursor stays");
+        }
+        assert_eq!(seen, theme::PALETTE);
+        ctrl(&mut app, 'g');
+        assert!(!Config::load(&f.home).unwrap().list.colors.contains_key(key));
+        assert!(shown(&app).contains("colour: none"));
+    }
+}
+
+#[tokio::test]
+async fn your_colour_is_the_names_swatch_and_a_harnesss_own_wins_with_a_word_about_it() {
+    let f = fixture();
+    let mut app = list(&f).await;
+    on(&mut app, NATIVE);
+    ctrl(&mut app, 'g');
+    on(&mut app, HELD);
+    let (buf, x, y) = cells_of(&app, "fix the login");
+    assert_eq!(buf[(x, y)].bg, crate::tui::theme::picked("red").unwrap(), "yours");
+    // Claude sets pink: it shows, and ^g still moves yours, saying why.
+    app.set_native(vec![{
+        let mut p = waiting(&f.repo);
+        p.color = Some("pink".into());
+        p
+    }]);
+    on(&mut app, NATIVE);
+    ctrl(&mut app, 'g');
+    assert!(
+        shown(&app).contains("pink's colour wins · yours: blue"),
+        "{}",
+        shown(&app)
+    );
+    assert_eq!(
+        Config::load(&f.home)
+            .unwrap()
+            .list
+            .colors
+            .get(NATIVE)
+            .map(String::as_str),
+        Some("blue")
+    );
+    on(&mut app, HELD);
+    let (buf, x, y) = cells_of(&app, "fix the login");
+    assert_eq!(
+        buf[(x, y)].bg,
+        crate::tui::theme::picked("pink").unwrap(),
+        "the harness's"
+    );
+}
+
+#[tokio::test]
+async fn ctrl_g_on_a_project_header_does_nothing_but_say_so() {
+    let f = fixture();
+    let mut app = list(&f).await;
+    let head = format!("g:{}", f.repo.display());
+    on(&mut app, &head);
+    ctrl(&mut app, 'g');
+    assert!(shown(&app).contains("^g colours a session"));
+    assert!(Config::load(&f.home).unwrap().list.colors.is_empty());
 }

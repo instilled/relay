@@ -693,7 +693,7 @@ impl App {
         let fitted = fit(&title, tw - harness);
         let text = fitted.trim_end();
         let mut name = vec![Span::raw(text.to_string())];
-        if let Some(c) = r.color.as_deref().and_then(theme::picked) {
+        if let Some(c) = theme::effective(r.color.as_deref(), p.colors.get(&r.key).map(String::as_str)) {
             name[0].style = theme::swatch(c);
         }
         name.push(Span::raw(" ".repeat(fitted.chars().count() - text.chars().count())));

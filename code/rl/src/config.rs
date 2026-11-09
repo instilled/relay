@@ -1,6 +1,6 @@
 //! `config.json` in the Relay home: the harnesses `new` offers, the header
 //! badges, and how the list stands — its grouping, its toggles, and what you
-//! moved, hid, pinned and renamed. Strict: a field this does not know is an
+//! moved, hid, pinned, renamed and coloured. Strict: a field this does not know is an
 //! error, not something to carry along.
 
 use anyhow::{Context as _, Result};
@@ -48,6 +48,9 @@ pub struct ListPrefs {
     pub pins: Vec<String>,
     /// Your names for rows (by key) and projects (`g:<folder>`).
     pub names: BTreeMap<String, String>,
+    /// Your colours for rows (by key), by name; a harness's own colour for
+    /// a row wins over it.
+    pub colors: BTreeMap<String, String>,
 }
 
 impl Default for ListPrefs {
@@ -61,6 +64,7 @@ impl Default for ListPrefs {
             hidden: Vec::new(),
             pins: Vec::new(),
             names: BTreeMap::new(),
+            colors: BTreeMap::new(),
         }
     }
 }
@@ -188,8 +192,23 @@ mod tests {
         });
         c.list.pins.push("r:a".into());
         c.list.names.insert("g:/w/api".into(), "the api".into());
+        c.list.colors.insert("r:a".into(), "pink".into());
         c.save(&home).unwrap();
         assert_eq!(Config::load(&home).unwrap(), c);
+    }
+
+    #[test]
+    fn a_config_from_before_colours_still_loads() {
+        let (_t, home) = home();
+        std::fs::create_dir_all(home.path()).unwrap();
+        std::fs::write(
+            home.config_json(),
+            r#"{"list": {"pins": ["r:a"], "names": {"r:a": "x"}}}"#,
+        )
+        .unwrap();
+        let c = Config::load(&home).unwrap();
+        assert!(c.list.colors.is_empty());
+        assert_eq!(c.list.pins, ["r:a"]);
     }
 
     #[test]
