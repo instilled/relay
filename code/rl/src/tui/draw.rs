@@ -719,7 +719,20 @@ impl App {
         if let Some(c) = theme::effective(r.color.as_deref(), p.colors.get(&r.key).map(String::as_str)) {
             name[0].style = theme::swatch(c);
         }
-        name.push(Span::raw(" ".repeat(fitted.chars().count() - text.chars().count())));
+        let mut room = fitted.chars().count() - text.chars().count();
+        // Your name for one that is not Relay's: the harness's own beside it,
+        // dim, cut before your name is. Where it does not fit, left out.
+        let own = (r.source != Source::Held && !r.name.is_empty() && r.name != names.title(r)).then_some(&r.name);
+        if let Some(own) = own
+            && text.chars().count() == title.chars().count()
+            && room >= 6
+        {
+            let beside = fit(&format!("  ({own})"), room);
+            let beside = beside.trim_end();
+            room -= beside.chars().count();
+            name.push(Span::styled(beside.to_string(), theme::dim()));
+        }
+        name.push(Span::raw(" ".repeat(room)));
         name.push(Span::styled(format!(" {}", fit(&r.harness, harness - 1)), theme::dim()));
         list_line(
             w,
