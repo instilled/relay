@@ -30,7 +30,18 @@
 //! within `WITHIN`, or given up on; nothing is printed (some agents feed a
 //! hook's stdout back to the model, and Gemini parses it); and the caller
 //! always exits 0.
+//!
+//! The one thing printed: Claude's news of relay mail (`news`). Claude Code
+//! has no way to tell one of its sessions anything from outside, so its
+//! hooks carry it. With mail waiting in the session's own folders
+//! (`mcp::own_keys`), its `UserPromptSubmit` prints the JSON that adds a
+//! line to the prompt's context, and its `Stop` the JSON that keeps it going
+//! one more turn to read the mail — once for the same mail (`mail::told`),
+//! never where a stop hook already keeps it going (`stop_hook_active`).
+//! Only the copy that is heard tells (`target`), so one event tells once.
 
+use crate::mcp::{self, Caller};
+use crate::store::mail;
 use crate::store::state::{self, HookState, Said};
 use jiff::Timestamp;
 use rl_core::Home;
@@ -184,7 +195,67 @@ pub async fn hook(home: &Home, words: &Words) {
     {
         eprintln!("rl hook: {e:#}");
     }
+    // A listing of a folder or two: done, unless the time is already gone.
+    if hooks.agent == mcp::CLAUDE
+        && Instant::now() < deadline
+        && let Some(said) = news(home, &words.event, held.as_deref(), &payload)
+    {
+        use std::io::Write;
+        let mut out = std::io::stdout().lock();
+        let _ = writeln!(out, "{said}").and_then(|()| out.flush());
+    }
 }
+
+/// What Claude is told of the relay mail waiting for the session a hook of
+/// `event` is of (the held session `held`, else the payload's
+/// conversation), as the JSON Claude reads from a hook's output; None when
+/// it is told nothing. A `Stop` blocks once for the same mail: the newest
+/// it told of is kept (`mail::set_told`), and only newer mail blocks again.
+fn news(home: &Home, event: &str, held: Option<&str>, payload: &Value) -> Option<Value> {
+    if event != PROMPT && event != STOP {
+        return None;
+    }
+    let caller = Caller {
+        harness: mcp::CLAUDE.into(),
+        relay_session: held.map(str::to_string),
+        session_id: payload
+            .get("session_id")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string),
+    };
+    let keys = mcp::own_keys(home, &caller);
+    let waiting: Vec<mail::Message> = keys.iter().flat_map(|k| mail::waiting(home, k)).collect();
+    let newest = waiting.iter().map(|m| m.at).max()?;
+    let mut from: Vec<&str> = Vec::new();
+    for m in &waiting {
+        if !from.contains(&m.from.as_str()) {
+            from.push(&m.from);
+        }
+    }
+    let (n, from) = (waiting.len(), from.join(", "));
+    if event == PROMPT {
+        return Some(serde_json::json!({ "hookSpecificOutput": {
+            "hookEventName": PROMPT,
+            "additionalContext": format!("You have {n} relay message(s) waiting (from {from}). Call the relay inbox tool to read them."),
+        }}));
+    }
+    let going = payload.get("stop_hook_active").and_then(Value::as_bool) == Some(true);
+    let key = keys.first()?;
+    if going || mail::told(home, key).is_some_and(|t| t >= newest) {
+        return None;
+    }
+    // What cannot be kept does not block: it would at every stop.
+    mail::set_told(home, key, newest).ok()?;
+    Some(serde_json::json!({
+        "decision": "block",
+        "reason": format!("You have {n} relay message(s) from {from}. Call the relay inbox tool to read them, then carry on."),
+    }))
+}
+
+/// Claude's events that tell of mail.
+const PROMPT: &str = "UserPromptSubmit";
+const STOP: &str = "Stop";
 
 /// What a hook's payload says of its session: its id and folder (read from
 /// the variables the agent's profile names, `env`, where the payload lacks

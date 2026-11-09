@@ -37,7 +37,8 @@ flowchart TB
 - `rl-session` is started by `rl new`, forks away and owns one terminal. It outlives `rl`. It is
   found next to the `rl` binary.
 - `rl hook` and `rl mcp` are `rl` run by someone else: an agent's hook, an agent's MCP client.
-  A hook writes a file and exits 0, always, within a short time, and prints nothing.
+  A hook writes a file and exits 0, always, within a short time, and prints nothing but Claude's
+  news of relay mail (see Ping).
 
 State is files, not a database. Folders are the truth; a session's liveness is read from its files
 and its socket.
@@ -66,6 +67,7 @@ and its socket.
 | `sessions/<name>/exit`, `stopped`, `sock` | holder, `rl stop` | how it ended, that it was stopped, its socket |
 | `state/<agent>/<session_id>.json` | `rl hook` | a session Relay does not hold; removed on `ended` |
 | `mail/<key>/<ns>-<pid>-<n>-<from>.json` | `rl mcp` | a waiting message; deleted when read |
+| `mail/<key>/.told` | `rl hook` | when the newest mail a Claude `Stop` hook told of was sent |
 | `config.json` | `rl setup`, the list | harnesses, badges, list preferences (grouping, toggles, order, hidden, pins, names, colours by row key; `ctrl+g` cycles a row's own colour). Strict. |
 | `hooks/` | `rl new` | per-run settings passed to a harness |
 | `detect/*.yaml` | you | profile overrides |
@@ -109,6 +111,22 @@ Folders are 0700.
   claimed by a rename before it is read, so two inboxes never get the same message, and deleted
   once it parses. Keys are encoded one to one (`[a-z0-9-]` kept, every other byte `%xx`), so none
   escapes `mail/` and none shares a folder with another, whatever the file system's case.
+- **Ping.** After the file is left, `send` tells a recipient whose harness can be told from
+  outside: its adapter's `ping_argv` (the profile's `sessions.ping`; Codex's `codex queue --thread
+  <id> --message <text> --resume`), run through `adapter::run` with `RELAY_ASKING` set so the
+  harness's own hooks let it go, within `PING_WAIT`. The id is a native row's (a Codex thread's),
+  else what a held session's `hook.json` says (its conversation id, which for Codex is the
+  thread's). No id, no ping; a failed ping is reported in `send`'s text, never as a failure.
+  Claude has no such way in, so its hooks carry the news: `rl hook claude UserPromptSubmit` prints
+  `hookSpecificOutput.additionalContext` while mail waits in the session's own folders
+  (`mcp::own_keys`: the held session's name and ids, else the payload's `session_id`, read from the
+  files alone), and `rl hook claude Stop` prints `{"decision":"block","reason":…}` for mail newer
+  than `mail/<key>/.told` (then records it), never when the payload's `stop_hook_active` is true.
+  Only the copy of the hook that is heard (the session's own under a held session, `--user`
+  outside) prints, so an event tells once. These two are the only output `rl hook` ever writes.
+  From a Claude caller to one of Claude's background sessions (a native Claude row), `send`'s text
+  also advises waking it with `SendMessage`, by the row's name: the name `claude agents` shows,
+  which `ListAgents`/`SendMessage` address. Advice only; Relay calls nothing.
 
 ## 5. Adapters
 
@@ -122,7 +140,7 @@ when the profile loads. Keys:
   `color`, `patterns`, `timing`, `sessions`
 - `hooks`: `dialect`, `args`
 - `patterns`: `needs_input`, `idle`; `timing`: `idle_after`, `stale_after`
-- `sessions`: `hooks`, `list`, `attach`, `start`, `name`, `stop`
+- `sessions`: `hooks`, `list`, `attach`, `start`, `name`, `stop`, `ping`
 - `sessions.hooks`: `file`, `timeout`, `unit`, `async`, `marker`, `after_install`, `from_env`,
   `events`, `settings`
 - `sessions.list`: `args`, `reader`
