@@ -164,7 +164,7 @@ impl App {
         let text = self.cmd.line.text().trim().to_string();
         let (word, arg) = split(&text);
         let Some(c) = lookup(word) else {
-            return self.say(format!("unknown command /{word} · ^h shows the keys"));
+            return self.say(format!("unknown command /{word} · ctrl+h shows the keys"));
         };
         match c.arg {
             Arg::Nothing if !arg.is_empty() => {
@@ -209,7 +209,7 @@ impl App {
         };
         match plan {
             Ok(p) => self.remove(p),
-            Err(why) => self.say(why.replace("^x", "/hide")),
+            Err(why) => self.say(why.replace("ctrl+x", "/hide")),
         }
     }
 

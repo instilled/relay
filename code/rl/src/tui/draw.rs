@@ -30,6 +30,9 @@ const TALL_H: u16 = 24;
 const TALL_W: u16 = 80;
 /// Between the mark and the words beside it.
 const MARK_GAP: u16 = 3;
+/// What the one-line header keeps for its headline before the toggles give
+/// up their keys.
+const HEADLINE_ROOM: usize = 24;
 /// A row of air above the mark, so it does not sit on the screen's top edge.
 const HEAD_AIR: u16 = 1;
 /// The icon slot: a space, a one-column icon, a space. Every row has one, so
@@ -361,14 +364,20 @@ impl App {
     /// rows; otherwise the headline on one line, the toggles at its right
     /// end, and the headline cut to leave them room.
     fn draw_head(&self, f: &mut Frame, head: Rect, title: &str) {
-        let toggles = self.toggle_spans();
-        let tw: usize = toggles.iter().map(Span::width).sum();
+        let width = |t: &[Span]| t.iter().map(Span::width).sum::<usize>();
         if head.height <= 1 {
             let text = Rect {
                 x: head.x + TEXT_INDENT,
                 width: head.width.saturating_sub(TEXT_INDENT + 1),
                 ..head
             };
+            // The keys where the headline still has its room, else the icons
+            // alone: the grid (`ctrl+h`) has the keys.
+            let mut toggles = self.toggle_spans(true);
+            if width(&toggles) + HEADLINE_ROOM > text.width as usize {
+                toggles = self.toggle_spans(false);
+            }
+            let tw = width(&toggles);
             let room = (text.width as usize).saturating_sub(tw + 2);
             let mut spans = cap_spans(headline_spans(title), room);
             let used: usize = spans.iter().map(Span::width).sum();
@@ -386,6 +395,10 @@ impl App {
         f.render_widget(Paragraph::new(mark::lines(&mark::SMALL)), mark);
         let x = mark.x + mark::W + MARK_GAP;
         let text = Rect::new(x, mark.y + 1, head.right().saturating_sub(x), mark.height - 2);
+        let mut toggles = self.toggle_spans(true);
+        if width(&toggles) > text.width as usize {
+            toggles = self.toggle_spans(false);
+        }
         let mut first = vec![
             Span::styled(NAME, theme::accent().add_modifier(Modifier::BOLD)),
             Span::styled(format!(" {}", env!("CARGO_PKG_VERSION")), theme::dim()),
@@ -411,10 +424,11 @@ impl App {
         );
     }
 
-    /// The toggles, for the header: a glyph and its key for each kind, `✦^a`
-    /// agents, `❯^l` shells, then `◌^o` hidden and the grouping, each set
-    /// apart. On is accented and bold, off is quiet.
-    fn toggle_spans(&self) -> Vec<Span<'static>> {
+    /// The toggles, for the header: a glyph and, with `keys`, its key for
+    /// each kind, `✦ ctrl+a` agents, `❯ ctrl+l` shells, then `◌ ctrl+o`
+    /// hidden and the grouping, each set apart. On is accented and bold, off
+    /// is quiet.
+    fn toggle_spans(&self, keys: bool) -> Vec<Span<'static>> {
         let on = theme::accent().add_modifier(Modifier::BOLD);
         let off = theme::dim();
         let lit = |b: bool| if b { on } else { off };
@@ -423,18 +437,28 @@ impl App {
             Grouping::Project => "by project",
             Grouping::State => "by state",
         };
-        vec![
-            Span::styled("✦^a", lit(p.show_agents)),
+        let k = |icon: &str, key: &str| {
+            if keys {
+                format!("{icon} {key}")
+            } else {
+                icon.to_string()
+            }
+        };
+        let mut v = vec![
+            Span::styled(k("✦", "ctrl+a"), lit(p.show_agents)),
             Span::styled("  ", off),
-            Span::styled("❯^l", lit(p.show_shells)),
+            Span::styled(k("❯", "ctrl+l"), lit(p.show_shells)),
             // Hidden is a different axis — what you hid, not a kind — and the
             // grouping another again, so a divider sets each apart.
             Span::styled("  │  ", off),
-            Span::styled("◌^o", lit(p.show_hidden)),
+            Span::styled(k("◌", "ctrl+o"), lit(p.show_hidden)),
             Span::styled("  │  ", off),
             Span::styled(grouping, theme::accent()),
-            Span::styled(" ^s", off),
-        ]
+        ];
+        if keys {
+            v.push(Span::styled(" ctrl+s", off));
+        }
+        v
     }
 
     /// The line over the footer: the command line, with at its right what
@@ -584,7 +608,7 @@ impl App {
             let msg: String = if !self.filter.is_empty() {
                 " nothing matches".into()
             } else if !p.show_agents || !p.show_shells {
-                " nothing here · ^a agents · ^l shells · ^o hidden".into()
+                " nothing here · ctrl+a agents · ctrl+l shells · ctrl+o hidden".into()
             } else if p.show_hidden {
                 " nothing hidden".into()
             } else {

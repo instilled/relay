@@ -67,7 +67,9 @@ impl App {
                 match sessions::list(&self.home).into_iter().find(|h| h.meta.name == name) {
                     None => return self.say(format!("{title} is gone")),
                     Some(h) if h.status == sessions::Status::Lost => {
-                        return self.say(format!("{title} is lost: its holder is not answering · ^x removes it"));
+                        return self.say(format!(
+                            "{title} is lost: its holder is not answering · ctrl+x removes it"
+                        ));
                     }
                     Some(h) => To::Held(Box::new(h.meta)),
                 }
@@ -335,10 +337,10 @@ impl App {
         };
         match armed {
             Some(Arm::Remove(at)) if at == self.sel => self.remove(plan),
-            Some(Arm::Remove(_)) => self.say("the line moved · ^x again"),
+            Some(Arm::Remove(_)) => self.say("the line moved · ctrl+x again"),
             _ => {
                 self.arm = Some(Arm::Remove(self.sel.clone()));
-                self.say(format!("press ^x again to {}", plan.hint()));
+                self.say(format!("press ctrl+x again to {}", plan.hint()));
             }
         }
     }
@@ -365,7 +367,7 @@ impl App {
                 let home = self.home.clone();
                 self.work.spawn(async move {
                     match cmd::stop(&home, &name).await {
-                        Ok(()) => Done::said(format!("stopped {title} · ^x again removes it")),
+                        Ok(()) => Done::said(format!("stopped {title} · ctrl+x again removes it")),
                         Err(e) => Done::said(format!("stop {title}: {e:#}")),
                     }
                 });
@@ -409,7 +411,7 @@ impl App {
                     p.hidden.retain(|h| h.key != key);
                     p.hidden.push(Hidden { key: key.clone(), at });
                 });
-                self.say(format!("hid {title} · ^o shows the hidden"));
+                self.say(format!("hid {title} · ctrl+o shows the hidden"));
                 if !self.keys().contains(&key) {
                     self.select(next);
                     self.settle();
@@ -435,7 +437,7 @@ impl App {
     /// `^r`: a name of yours for a Relay session or a project, typed where it
     /// stands. A harness's own sessions keep the names it gives them.
     pub(super) fn rename_here(&mut self) {
-        match self.rename_target("^r") {
+        match self.rename_target("ctrl+r") {
             Ok(RenameTarget { key, was, own }) => {
                 self.search = None;
                 self.help = false;
@@ -557,7 +559,7 @@ impl App {
     /// the last none. A harness's colour for the row still wins on screen,
     /// and the footer says so.
     pub(super) fn cycle_colour(&mut self) {
-        let (key, harness) = match self.colour_target("^g") {
+        let (key, harness) = match self.colour_target("ctrl+g") {
             Ok(t) => t,
             Err(why) => return self.say(why),
         };
@@ -603,7 +605,7 @@ impl App {
     /// project among the projects. The cursor stays on it.
     pub(super) fn reorder(&mut self, up: bool) {
         if self.config.list.show_hidden {
-            return self.say("with hidden on the list keeps its order · ^o, then move it");
+            return self.say("with hidden on the list keeps its order · ctrl+o, then move it");
         }
         let Some(key) = self.sel.clone() else {
             return self.say("nothing here to move");

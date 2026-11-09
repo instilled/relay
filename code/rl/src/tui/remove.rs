@@ -52,7 +52,7 @@ impl Removal {
 pub fn plan(line: &Line, prefs: &ListPrefs, status: impl Fn(&str) -> Option<Status>) -> Result<Removal, String> {
     let hidden = |key: &str| prefs.hidden.iter().any(|h| h.key == key);
     match line {
-        Line::Group(h) if !h.is_project() => return Err("^x stops, removes or hides what the cursor is on".into()),
+        Line::Group(h) if !h.is_project() => return Err("ctrl+x stops, removes or hides what the cursor is on".into()),
         Line::Group(_) => {}
         Line::Session(r) => {
             let title = Names::new(&prefs.names).title(r).to_string();
@@ -101,7 +101,7 @@ pub fn hide_plan(line: &Line, prefs: &ListPrefs) -> Result<Removal, String> {
                 let project = rows::project_of(r, &names);
                 if rows::hidden_with(&project, &prefs.hidden).is_some() {
                     return Err(format!(
-                        "{title} is hidden with its project · ^x on its header brings it back"
+                        "{title} is hidden with its project · ctrl+x on its header brings it back"
                     ));
                 }
             }

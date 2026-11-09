@@ -92,11 +92,11 @@ pub fn reorder(
         if h.is_project() {
             return move_project(shown, full, kept, key, up);
         }
-        return Err("by state, rows stand oldest first · ^s groups them by project");
+        return Err("by state, rows stand oldest first · ctrl+s groups them by project");
     }
     let Some(head) = shown[..at].iter().rposition(|l| matches!(l, Line::Group(_))) else {
         return Err(if pins.iter().any(|p| p == key) {
-            "a pinned row keeps the order it was pinned in · ^t lets it go back"
+            "a pinned row keeps the order it was pinned in · ctrl+t lets it go back"
         } else {
             "it needs you, so it stays at the top until it is dealt with"
         });
@@ -105,7 +105,7 @@ pub fn reorder(
         unreachable!("rposition found a group")
     };
     if !h.is_project() {
-        return Err("by state, rows stand oldest first · ^s groups them by project");
+        return Err("by state, rows stand oldest first · ctrl+s groups them by project");
     }
     let next = if up { at.checked_sub(1) } else { Some(at + 1) };
     let other = match next.and_then(|i| shown.get(i)) {

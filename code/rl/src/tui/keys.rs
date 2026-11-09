@@ -229,14 +229,14 @@ impl App {
             (KeyCode::Enter, _) => self.enter(),
             (KeyCode::Char('x'), KeyModifiers::CONTROL) => self.key_x(armed),
             (KeyCode::Char('r'), KeyModifiers::CONTROL) => self.rename_here(),
-            (KeyCode::Char('t'), KeyModifiers::CONTROL) => self.toggle_pin("^t"),
+            (KeyCode::Char('t'), KeyModifiers::CONTROL) => self.toggle_pin("ctrl+t"),
             (KeyCode::Char('g'), KeyModifiers::CONTROL) => self.cycle_colour(),
             (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
                 if armed == Some(Arm::Quit) {
                     self.quit = true;
                 } else {
                     self.arm = Some(Arm::Quit);
-                    self.say("press ^c again to quit");
+                    self.say("press ctrl+c again to quit");
                 }
             }
             (KeyCode::Esc, _) => {

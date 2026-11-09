@@ -293,7 +293,7 @@ async fn ctrl_c_twice_quits_and_once_only_says_so() {
     let mut app = list(&f).await;
     ctrl(&mut app, 'c');
     assert!(!app.quit);
-    assert!(shown(&app).contains("press ^c again to quit"));
+    assert!(shown(&app).contains("press ctrl+c again to quit"));
     press(&mut app, KeyCode::Down);
     ctrl(&mut app, 'c');
     assert!(!app.quit, "another key between disarms it");
@@ -505,10 +505,10 @@ async fn ctrl_x_twice_stops_a_harnesss_own_session_through_it() {
     on(&mut app, NATIVE);
     assert!(
         shown(&app).contains("ctrl+x twice to stop"),
-        "the hint says what ^x does here"
+        "the hint says what ctrl+x does here"
     );
     ctrl(&mut app, 'x');
-    assert!(shown(&app).contains("press ^x again to stop fix the login"));
+    assert!(shown(&app).contains("press ctrl+x again to stop fix the login"));
     assert!(ran_in(&f.repo).is_empty(), "not on the first press");
     ctrl(&mut app, 'x');
     app.finish().await;
@@ -532,7 +532,7 @@ async fn ctrl_x_twice_hides_a_harnesss_own_session_and_again_brings_it_back() {
     on(&mut app, NATIVE);
     assert!(shown(&app).contains("ctrl+x twice to hide"));
     ctrl(&mut app, 'x');
-    assert!(shown(&app).contains("press ^x again to hide fix the login"));
+    assert!(shown(&app).contains("press ctrl+x again to hide fix the login"));
     assert!(Config::load(&f.home).unwrap().list.hidden.is_empty(), "not yet");
     ctrl(&mut app, 'x');
     assert!(app.keys().iter().all(|k| k != NATIVE));
@@ -545,7 +545,7 @@ async fn ctrl_x_twice_hides_a_harnesss_own_session_and_again_brings_it_back() {
     ctrl(&mut app, 'o');
     on(&mut app, NATIVE);
     ctrl(&mut app, 'x');
-    assert!(shown(&app).contains("press ^x again to bring back fix the login"));
+    assert!(shown(&app).contains("press ctrl+x again to bring back fix the login"));
     ctrl(&mut app, 'x');
     assert!(Config::load(&f.home).unwrap().list.hidden.is_empty());
 }
@@ -559,7 +559,7 @@ async fn ctrl_x_is_disarmed_by_any_other_key() {
     press(&mut app, KeyCode::Up);
     press(&mut app, KeyCode::Down);
     ctrl(&mut app, 'x');
-    assert!(shown(&app).contains("press ^x again"), "armed afresh, not fired");
+    assert!(shown(&app).contains("press ctrl+x again"), "armed afresh, not fired");
     assert!(Config::load(&f.home).unwrap().list.hidden.is_empty());
 }
 
@@ -572,7 +572,7 @@ async fn ctrl_x_twice_removes_an_ended_held_session_and_what_was_kept_for_it() {
     ctrl(&mut app, 'g');
     assert_eq!(Config::load(&f.home).unwrap().list.colors.len(), 1);
     ctrl(&mut app, 'x');
-    assert!(shown(&app).contains("press ^x again to remove shop-sh"));
+    assert!(shown(&app).contains("press ctrl+x again to remove shop-sh"));
     ctrl(&mut app, 'x');
     app.finish().await;
     assert!(!f.home.session_dir("shop-sh").exists());
@@ -815,13 +815,15 @@ async fn the_header_carries_the_filters_and_the_grouping_and_the_foot_does_not()
     let mut app = list(&f).await;
     let rows = screen(&app, 100, 30);
     let at = |rows: &[String], t: &str| rows.iter().position(|r| r.contains(t));
-    let head = at(&rows, "✦^a").expect("the toggles are on screen");
+    let head = at(&rows, "✦ ctrl+a").expect("the toggles are on screen");
     assert!(head < 6, "in the header, beside the mark: {}", rows.join("\n"));
-    assert!(rows[head].contains("❯^l") && rows[head].contains("◌^o") && rows[head].contains("by project ^s"));
+    assert!(
+        rows[head].contains("❯ ctrl+l") && rows[head].contains("◌ ctrl+o") && rows[head].contains("by project ctrl+s")
+    );
     assert!(at(&rows, "relay").unwrap() < head && at(&rows, "1 needs you").unwrap() < head);
     for r in &rows[6..] {
         assert!(
-            !r.contains("✦^a") && !r.contains("by project"),
+            !r.contains("✦ ctrl+a") && !r.contains("by project"),
             "no toggles line at the foot: {r}"
         );
     }
@@ -841,15 +843,24 @@ async fn the_header_carries_the_filters_and_the_grouping_and_the_foot_does_not()
     ctrl(&mut app, 's');
     let rows = screen(&app, 100, 30);
     assert!(
-        rows[..6].iter().any(|r| r.contains("by state ^s")),
+        rows[..6].iter().any(|r| r.contains("by state ctrl+s")),
         "{}",
         rows.join("\n")
     );
-    // On a short screen the header is one line, and keeps them.
+    // On a short screen the header is one line, and keeps them: with their
+    // keys at 80, the icons alone where the headline would lose its room.
     let rows = screen(&app, 80, 20);
-    assert!(rows[0].contains("✦^a") && rows[0].contains("by state"), "{}", rows[0]);
+    assert!(
+        rows[0].contains("✦ ctrl+a") && rows[0].contains("by state ctrl+s"),
+        "{}",
+        rows[0]
+    );
     let rows = screen(&app, 60, 20);
-    assert!(rows[0].contains("✦^a") && rows[0].contains("by state"), "{}", rows[0]);
+    assert!(
+        rows[0].contains("✦  ❯") && rows[0].contains("by state") && !rows[0].contains("ctrl+"),
+        "{}",
+        rows[0]
+    );
 }
 
 #[tokio::test]
@@ -1326,7 +1337,7 @@ async fn ctrl_g_on_a_project_header_does_nothing_but_say_so() {
     let head = format!("g:{}", f.repo.display());
     on(&mut app, &head);
     ctrl(&mut app, 'g');
-    assert!(shown(&app).contains("^g colours a session"));
+    assert!(shown(&app).contains("ctrl+g colours a session"));
     assert!(Config::load(&f.home).unwrap().list.colors.is_empty());
 }
 

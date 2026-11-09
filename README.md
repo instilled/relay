@@ -39,10 +39,10 @@ Codex asks you to trust the hook once (`/hooks` in codex); Claude may ask you to
 ## The list
 
 Rows are agents and shells, under their project folder or under Needs input, Working and Done.
-Claude's and Codex's own background sessions are on it too. `^h` or `F1` (for terminals that
-send `^h` as backspace) shows every key as a grid under the command line, in place of the footer's
+Claude's and Codex's own background sessions are on it too. `ctrl+h` or `f1` (for terminals that
+send `ctrl+h` as backspace) shows every key as a grid under the command line, in place of the footer's
 hints, the way `claude agents` does: `ctrl+r to rename`, `ctrl+f to find`, in up to four columns as
-the terminal's width allows. `^h` again, `F1` or `esc` puts it away; `/help` opens it too. The
+the terminal's width allows. `ctrl+h` again, `f1` or `esc` puts it away; `/help` opens it too. The
 footer's hints are entries of the same table.
 
 At the foot of the list is a command line. Type to start a session, in the folder of the row under
@@ -58,18 +58,18 @@ The right end of the line says which it is (`agent · claude`, `shell`, `command
 command`, or `agent · antigravity (agy not found)`, which will not start). `tab` completes a
 harness, a program on `PATH`, or a path, and on a `/` line the command, then its colour or, for
 `/rename`, the row's name; the best completion stands dim after the cursor, and `tab` again cycles.
-Every letter types; the list's own keys are ctrl keys, the arrows and `enter`. `^f` searches.
+Every letter types; the list's own keys are ctrl keys, the arrows and `enter`. `ctrl+f` searches.
 
 | command | does |
 | --- | --- |
-| `/colour <name\|#rrggbb\|none>` (`/color`) | your colour for the row, as `^g` and `rl color` set it (a colour the harness set wins on screen) |
-| `/rename <name>` | rename the row or project, as `^r`; with no name, back to its own |
-| `/pin` | pin or unpin, as `^t` |
+| `/colour <name\|#rrggbb\|none>` (`/color`) | your colour for the row, as `ctrl+g` and `rl color` set it (a colour the harness set wins on screen) |
+| `/rename <name>` | rename the row or project, as `ctrl+r`; with no name, back to its own |
+| `/pin` | pin or unpin, as `ctrl+t` |
 | `/hide` | hide the row or project, or bring it back |
 | `/stop` | stop a live session, held or the harness's own, at once (no second press) |
 | `/rm` | remove an ended session Relay holds |
-| `/agents` `/shells` `/hidden` | show agents, shells, hidden, as `^a` `^l` `^o` |
-| `/group` | by project or by state, as `^s` |
+| `/agents` `/shells` `/hidden` | show agents, shells, hidden, as `ctrl+a` `ctrl+l` `ctrl+o` |
+| `/group` | by project or by state, as `ctrl+s` |
 | `/help` | the keys |
 | `/quit` | quit |
 
@@ -80,28 +80,28 @@ in the footer and changes nothing; an unknown one stays on the line to mend.
 | --- | --- |
 | `enter` | attach (on a line with text: start it) |
 | typing | the command line; `esc` clears it, `home` `end` go to its ends |
-| `↑↓` `^j` `^k` | move |
+| `↑↓` `ctrl+j` `ctrl+k` | move |
 | `pgup` `pgdn` `home` `end` | page (`home` `end` with nothing typed) |
 | `/` | a command (above) |
-| `^f` | search |
-| `^x ^x` | stop, then remove or hide |
-| `^r` | rename |
-| `^t` | pin |
-| `^g` | your colour for the row: none, red, blue, green, yellow, purple, orange, pink, cyan (a colour the harness set wins on screen; a `#rrggbb` set in `config.json` or by `rl color` goes to red) |
-| `⇧↑↓` | reorder |
-| `^a` `^l` `^o` | show agents, shells, hidden (the header shows which: `✦^a ❯^l │ ◌^o`) |
-| `^s` | group by project or by state (the header says which) |
-| `^c ^c` | quit |
-| `^h` `F1` | the keys, as a grid; again or `esc` closes it |
+| `ctrl+f` | search |
+| `ctrl+x ctrl+x` | stop, then remove or hide |
+| `ctrl+r` | rename |
+| `ctrl+t` | pin |
+| `ctrl+g` | your colour for the row: none, red, blue, green, yellow, purple, orange, pink, cyan (a colour the harness set wins on screen; a `#rrggbb` set in `config.json` or by `rl color` goes to red) |
+| `shift+↑↓` | reorder |
+| `ctrl+a` `ctrl+l` `ctrl+o` | show agents, shells, hidden (the header shows which: `✦ ctrl+a  ❯ ctrl+l  │  ◌ ctrl+o`, icons alone on a narrow one-line header) |
+| `ctrl+s` | group by project or by state (the header says which) |
+| `ctrl+c ctrl+c` | quit |
+| `ctrl+h` `f1` | the keys, as a grid; again or `esc` closes it |
 
-`ctrl-\` leaves an attached session running and comes back to the list.
+`ctrl+\` leaves an attached session running and comes back to the list.
 
 ## Commands
 
 ```sh
 rl new [--harness claude] [--cwd DIR] [--name-only] [-- ARGV...]   # a shell, or a harness; prints the name
 rl ls [--json]                  # the list, once
-rl attach <name>                # ctrl-\ detaches
+rl attach <name>                # ctrl+\ detaches
 rl stop <name>                  # close a running session
 rl rm <name>                    # remove one that is not running
 rl color <session> <name|#rrggbb|none>  # your colour for a row (a held name, or n:claude:<id> / o:claude:<id>)
@@ -173,7 +173,7 @@ To show it in a zsh prompt: `PROMPT='${RL_SESSION:+[$RL_SESSION] }'$PROMPT`.
 
 `rl mcp` is a stdio MCP server with three tools:
 
-- `who`: the list's rows, one line each (`address (title) · harness · state · folder`), you marked. The title is the one you gave the row with `^r`.
+- `who`: the list's rows, one line each (`address (title) · harness · state · folder`), you marked. The title is the one you gave the row with `ctrl+r`.
 - `send(to, text, from?)`: leave a message for another agent, by address, title or conversation id. An unknown address is an error with close matches.
 - `inbox(as?)`: take your waiting messages, oldest first. They are deleted as they are read.
 
@@ -187,7 +187,7 @@ yourself. Codex has no automatic address yet, so it passes them.
 Not verified against the live CLIs:
 
 - What `claude --bg` prints. Relay takes the first 8-hex word as the session id; if there is none, the start says so.
-- `claude stop <id>` from `^x`.
+- `claude stop <id>` from `ctrl+x`.
 - That `codex resume <id>` rejoins a thread the Codex app-server has loaded, and when a thread counts as loaded.
 - The Gemini MCP entry (`mcpServers.relay` in its `settings.json`).
 - `claude agents` state mapping against its own screen.
