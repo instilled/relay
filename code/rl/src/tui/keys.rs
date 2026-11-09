@@ -2,7 +2,7 @@
 
 use super::app::{App, Arm, Mode, Search};
 use super::draw::hit_row;
-use super::{line, shortcuts};
+use super::{help, line};
 use crate::query;
 use crate::rows::{self, Names};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
@@ -60,6 +60,18 @@ impl App {
             self.key_search(k, armed);
             return;
         }
+        // The grid of keys takes `^h`, `F1` and, while it is up, `esc` first.
+        match help::take(self.help, &k) {
+            help::Take::Toggle => {
+                self.help = !self.help;
+                return;
+            }
+            help::Take::Close => {
+                self.help = false;
+                return;
+            }
+            help::Take::Pass => {}
+        }
         // The command line, once it has text, has the keys it edits with;
         // the rest are the list's as ever.
         if !self.cmd.is_empty() {
@@ -83,28 +95,14 @@ impl App {
                 line::Act::Nothing => {}
             }
         }
-        match shortcuts::take(self.shortcuts, &k) {
-            shortcuts::Take::Toggle => {
-                self.shortcuts = !self.shortcuts;
-                return;
-            }
-            shortcuts::Take::Close => {
-                self.shortcuts = false;
-                return;
-            }
-            shortcuts::Take::Pass => {}
-        }
-        // On an empty line `/` searches; any other key that types starts
-        // the line.
-        if self.cmd.is_empty() && k.modifiers.is_empty() && k.code == KeyCode::Char('/') {
-            return self.open_search();
-        }
+        // Any key that types starts the line: `/` a command, anything else
+        // a session to start. Searching is `^f`'s.
         if self.cmd.is_empty()
             && let KeyCode::Char(c) = k.code
             && !c.is_whitespace()
             && !k.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
         {
-            self.shortcuts = false;
+            self.help = false;
             self.cmd.line.insert(&c.to_string());
             return self.retyped();
         }
@@ -116,9 +114,9 @@ impl App {
 
     /// `^f`: search, starting from the filter already in force.
     pub fn open_search(&mut self) {
-        // What is typed now narrows the list: the shortcuts would only be in
+        // What is typed now narrows the list: the keys would only be in
         // the way.
-        self.shortcuts = false;
+        self.help = false;
         let mut l = line::Line::default();
         l.set_with_cursor(self.filter.clone(), self.filter.len());
         self.search = Some(Search {
@@ -231,14 +229,14 @@ impl App {
             (KeyCode::Enter, _) => self.enter(),
             (KeyCode::Char('x'), KeyModifiers::CONTROL) => self.key_x(armed),
             (KeyCode::Char('r'), KeyModifiers::CONTROL) => self.rename_here(),
-            (KeyCode::Char('t'), KeyModifiers::CONTROL) => self.toggle_pin(),
+            (KeyCode::Char('t'), KeyModifiers::CONTROL) => self.toggle_pin("ctrl+t"),
             (KeyCode::Char('g'), KeyModifiers::CONTROL) => self.cycle_colour(),
             (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
                 if armed == Some(Arm::Quit) {
                     self.quit = true;
                 } else {
                     self.arm = Some(Arm::Quit);
-                    self.say("press ^c again to quit");
+                    self.say("press ctrl+c again to quit");
                 }
             }
             (KeyCode::Esc, _) => {
@@ -280,9 +278,14 @@ impl App {
 
     /// `tab` on the command line: the word under the cursor completed.
     fn complete_line(&mut self) {
-        let folder = self.line_folder();
+        let (folder, name) = (self.line_folder(), self.name_here());
         let cmds = self.commands.get_or_init(super::cmdline::Commands::from_env);
-        self.cmd.complete(&folder, crate::rows::registry(), cmds);
+        self.cmd.complete(&super::cmdline::Ctx {
+            folder: &folder,
+            reg: crate::rows::registry(),
+            cmds,
+            name: name.as_deref(),
+        });
     }
 
     /// A paste goes into the search or a name being typed, as one line;

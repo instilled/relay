@@ -56,12 +56,12 @@ pub async fn drive(
     let (mut rd, mut wr) = session.split();
     let mut size = view.size;
     if view.interactive {
-        let banner = format!("[relay] {} · ctrl-\\ to detach", view.name);
+        let banner = format!("[relay] {} · ctrl+\\ to detach", view.name);
         let status = title(&format!("relay · {} · ^\\ lets go", view.name));
         out.write_all(format!("\x1b[2m{banner}\x1b[0m\n{status}").as_bytes())
             .await?;
     } else {
-        out.write_all(dim(&format!("[relay] {} · ctrl-\\ to detach", view.name)).as_bytes())
+        out.write_all(dim(&format!("[relay] {} · ctrl+\\ to detach", view.name)).as_bytes())
             .await?;
     }
     out.flush().await?;
@@ -267,7 +267,7 @@ pub async fn open(dir: &Path, meta: &Meta) -> Result<Opened> {
 
 /// Attaches this terminal to the session until detached or it ends. One that
 /// has ended but whose holder lingers is attached to as any other: its last
-/// screen shows, and it is left with ctrl-\.
+/// screen shows, and it is left with ctrl+\.
 pub async fn attach(home: &Home, meta: &Meta) -> Result<Ended> {
     let dir = home.session_dir(&meta.name);
     let mut out = tokio::io::stdout();
