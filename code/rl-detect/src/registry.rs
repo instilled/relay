@@ -19,6 +19,7 @@ pub const GENERIC: &str = "generic";
 
 const BUILTIN: &[(&str, &str)] = &[
     (GENERIC, include_str!("../../../detect/generic.yaml")),
+    ("antigravity", include_str!("../../../detect/antigravity.yaml")),
     ("claude", include_str!("../../../detect/claude.yaml")),
     ("codex", include_str!("../../../detect/codex.yaml")),
     ("cursor", include_str!("../../../detect/cursor.yaml")),
@@ -33,6 +34,8 @@ const BUILTIN: &[(&str, &str)] = &[
 struct ProfileFile {
     kind: Option<RunKind>,
     bins: Option<Vec<String>>,
+    words: Option<Vec<String>>,
+    prompt: Option<Vec<String>>,
     interactive_only: Option<bool>,
     hooks: Option<HooksFile>,
     resume: Option<Vec<String>>,
@@ -72,6 +75,12 @@ impl ProfileFile {
         }
         if over.bins.is_some() {
             self.bins = over.bins;
+        }
+        if over.words.is_some() {
+            self.words = over.words;
+        }
+        if over.prompt.is_some() {
+            self.prompt = over.prompt;
         }
         if over.interactive_only.is_some() {
             self.interactive_only = over.interactive_only;
@@ -127,6 +136,12 @@ pub struct Profile {
     pub name: String,
     pub kind: RunKind,
     pub bins: Vec<String>,
+    /// The first words of the list's command line that start it
+    /// (`claude`; `agy`, `gemini` and `antigravity` for Antigravity).
+    pub words: Vec<String>,
+    /// Where a first prompt goes after its binary, `{prompt}` standing for
+    /// it (`["-i", "{prompt}"]`). Empty: last, on its own.
+    pub prompt: Vec<String>,
     /// Only match when argv looks like an interactive session (no `-c`, no
     /// script). Shells.
     pub interactive_only: bool,
@@ -151,7 +166,22 @@ pub struct Profile {
 /// Where a conversation's id goes in a profile's `resume`.
 pub const SESSION: &str = "{session}";
 
+/// Where a first prompt goes in a profile's `prompt`.
+pub const PROMPT: &str = "{prompt}";
+
 impl Profile {
+    /// The arguments that hand it `prompt` as it starts, as its `prompt`
+    /// says; nothing for an empty one.
+    pub fn prompt_args(&self, prompt: &str) -> Vec<String> {
+        if prompt.trim().is_empty() {
+            return Vec::new();
+        }
+        if self.prompt.is_empty() {
+            return vec![prompt.to_string()];
+        }
+        self.prompt.iter().map(|a| a.replace(PROMPT, prompt)).collect()
+    }
+
     /// What carries `session` on: `bin`, then the profile's `resume` with
     /// the id in place of `{session}`. None when it has no `resume`.
     pub fn resume_argv(&self, bin: String, session: &str) -> Option<Vec<String>> {
@@ -239,6 +269,8 @@ impl Registry {
                 Profile {
                     kind,
                     bins: file.bins.unwrap_or_default(),
+                    words: file.words.unwrap_or_default(),
+                    prompt: file.prompt.unwrap_or_default(),
                     interactive_only: file.interactive_only.unwrap_or(false),
                     hooks: file.hooks.map(|h| Hooks {
                         dialect: h.dialect,
@@ -288,6 +320,28 @@ impl Registry {
         self.profiles
             .values()
             .filter(|p| p.sessions.as_ref().is_some_and(|s| s.list.is_some()))
+    }
+
+    /// The profile a command line's first word names (its `words`), the
+    /// first in name order where several claim it.
+    pub fn by_word(&self, word: &str) -> Option<&Profile> {
+        self.profiles
+            .values()
+            .find(|p| p.name != GENERIC && p.words.iter().any(|w| w == word))
+    }
+
+    /// Every word a profile claims, with the profile it names, in name
+    /// order: the first to claim a word has it.
+    pub fn words(&self) -> Vec<(&str, &Profile)> {
+        let mut out: Vec<(&str, &Profile)> = Vec::new();
+        for p in self.profiles.values().filter(|p| p.name != GENERIC) {
+            for w in &p.words {
+                if !out.iter().any(|(had, _)| had == w) {
+                    out.push((w.as_str(), p));
+                }
+            }
+        }
+        out
     }
 
     /// Which known CLI `argv` starts, if any.
@@ -399,7 +453,16 @@ mod tests {
         let r = Registry::builtin();
         assert_eq!(
             r.names().collect::<Vec<_>>(),
-            ["claude", "codex", "cursor", "gemini", "generic", "opencode", "sh"]
+            [
+                "antigravity",
+                "claude",
+                "codex",
+                "cursor",
+                "gemini",
+                "generic",
+                "opencode",
+                "sh"
+            ]
         );
         let resume = |n: &str| r.profile(n).unwrap().resume_argv(n.into(), "s1");
         assert_eq!(resume("claude").unwrap(), ["claude", "--resume", "s1"]);
@@ -414,6 +477,50 @@ mod tests {
         assert!(r.detect(&argv("make e2e")).is_none());
         assert_eq!(r.generic().timing.idle_after, Duration::from_secs(3));
         assert_eq!(r.profile("sh").unwrap().timing.idle_after, Duration::from_secs(2));
+    }
+
+    #[test]
+    fn a_first_word_names_its_harness_and_the_prompt_goes_where_it_says() {
+        let r = Registry::builtin();
+        let named = |w: &str| r.by_word(w).map(|p| p.name.as_str());
+        assert_eq!(named("claude"), Some("claude"));
+        assert_eq!(named("codex"), Some("codex"));
+        for w in ["gemini", "agy", "antigravity"] {
+            assert_eq!(named(w), Some("antigravity"), "{w}");
+        }
+        assert_eq!(named("make"), None);
+        assert_eq!(named("cursor-agent"), None, "a binary is no word unless it says so");
+        let ag = r.profile("antigravity").unwrap();
+        assert_eq!(ag.kind, RunKind::Agent);
+        assert_eq!(ag.bins, ["agy"]);
+        assert!(ag.hooks.is_none() && ag.sessions.is_none());
+        assert_eq!(ag.prompt_args("fix it"), ["-i", "fix it"]);
+        assert!(ag.prompt_args(" ").is_empty(), "no prompt: just agy");
+        assert_eq!(r.profile("claude").unwrap().prompt_args("fix it"), ["fix it"]);
+        assert_eq!(r.profile("codex").unwrap().prompt_args("fix it"), ["fix it"]);
+        assert_eq!(r.detect(&argv("agy -i hi")).unwrap().name, "antigravity");
+    }
+
+    #[test]
+    fn the_first_profile_to_claim_a_word_has_it() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("zed.yaml"),
+            "kind: agent\nbins: [zed]\nwords: [claude, zed]\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("aaa.yaml"),
+            "kind: agent\nbins: [aaa]\nwords: [codex]\n",
+        )
+        .unwrap();
+        let r = Registry::load_from(dir.path()).unwrap();
+        assert_eq!(r.by_word("claude").unwrap().name, "claude", "claude comes before zed");
+        assert_eq!(r.by_word("zed").unwrap().name, "zed");
+        assert_eq!(r.by_word("codex").unwrap().name, "aaa", "aaa comes before codex");
+        assert_eq!(r.words().iter().filter(|(w, _)| *w == "claude").count(), 1);
+        std::fs::write(dir.path().join("aaa.yaml"), "words: x\n").unwrap();
+        assert!(Registry::load_from(dir.path()).is_err(), "words is a list");
     }
 
     #[test]

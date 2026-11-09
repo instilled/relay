@@ -1,5 +1,6 @@
-//! Drawing the list: the header, the rows under their headers, the toggles
-//! and the search on their line, and the footer. Colour carries meaning — a
+//! Drawing the list: the header with its toggles, the rows under their
+//! headers, the command line (or the search, while one is open), and the
+//! footer. Colour carries meaning — a
 //! saturated accent per state, on the terminal's own foreground so it reads
 //! on either theme (see `theme`). Nothing on screen is an id.
 
@@ -279,18 +280,18 @@ pub fn empty_list(msg: &str, area: Rect, nothing: bool) -> Paragraph<'static> {
     Paragraph::new(lines).centered()
 }
 
-/// Where things go on screen: the header, the list, the toggles and search
-/// line, the footer, and the separators between them.
+/// Where things go on screen: the header, the list, the command line (the
+/// search, while one is open), the footer, and the separators between them.
 pub struct Areas {
     pub head: Rect,
     pub seps: [Rect; 3],
     pub list: Rect,
-    pub toggles: Rect,
+    pub line: Rect,
     pub footer: Rect,
 }
 
 pub fn areas(area: Rect, foot_h: u16) -> Areas {
-    let [head, sep_a, list, sep_b, toggles, sep_c, footer] = Layout::vertical([
+    let [head, sep_a, list, sep_b, line, sep_c, footer] = Layout::vertical([
         Constraint::Length(head_h(area)),
         Constraint::Length(1),
         Constraint::Fill(1),
@@ -304,7 +305,7 @@ pub fn areas(area: Rect, foot_h: u16) -> Areas {
         head,
         seps: [sep_a, sep_b, sep_c],
         list,
-        toggles,
+        line,
         footer,
     }
 }
@@ -346,7 +347,7 @@ impl App {
             f.render_widget(Paragraph::new("─".repeat(sep.width as usize)).dim(), sep);
         }
         self.draw_list(f, a.list, &lines);
-        f.render_widget(Paragraph::new(self.toggles_line(a.toggles.width)), a.toggles);
+        f.render_widget(Paragraph::new(self.bottom_line(a.line.width)), a.line);
         let footer = Rect {
             x: a.footer.x + TEXT_INDENT,
             width: a.footer.width.saturating_sub(TEXT_INDENT),
@@ -356,16 +357,24 @@ impl App {
     }
 
     /// The header: where there is room the mark stands at the left, under a
-    /// row of air, with the name and the tally beside its middle rows;
-    /// otherwise the headline alone, on one line.
+    /// row of air, with the name, the tally and the toggles beside its middle
+    /// rows; otherwise the headline on one line, the toggles at its right
+    /// end, and the headline cut to leave them room.
     fn draw_head(&self, f: &mut Frame, head: Rect, title: &str) {
+        let toggles = self.toggle_spans();
+        let tw: usize = toggles.iter().map(Span::width).sum();
         if head.height <= 1 {
             let text = Rect {
                 x: head.x + TEXT_INDENT,
-                width: head.width.saturating_sub(TEXT_INDENT),
+                width: head.width.saturating_sub(TEXT_INDENT + 1),
                 ..head
             };
-            f.render_widget(Paragraph::new(Line::from(headline_spans(title))), text);
+            let room = (text.width as usize).saturating_sub(tw + 2);
+            let mut spans = cap_spans(headline_spans(title), room);
+            let used: usize = spans.iter().map(Span::width).sum();
+            spans.push(Span::raw(" ".repeat((text.width as usize).saturating_sub(used + tw))));
+            spans.extend(toggles);
+            f.render_widget(Paragraph::new(Line::from(spans)), text);
             return;
         }
         let mark = Rect {
@@ -383,21 +392,29 @@ impl App {
         ];
         let user = std::env::var_os("HOME");
         if let Some(home) = home_note(self.home.path(), user.as_deref().map(Path::new)) {
-            first.push(Span::styled(format!(" · {home}"), theme::dim()));
+            // Where there is no room for it, the home goes first.
+            let note = Span::styled(format!(" · {home}"), theme::dim());
+            let used: usize = first.iter().map(Span::width).sum();
+            if used + note.width() <= text.width as usize {
+                first.push(note);
+            }
         }
         // The headline leads with the name, which the first line says already.
         let tally = title.strip_prefix(NAME).unwrap_or(title).trim_start_matches(" · ");
         f.render_widget(
-            Paragraph::new(vec![Line::from(first), Line::raw(tally.to_string())]),
+            Paragraph::new(vec![
+                Line::from(first),
+                Line::raw(tally.to_string()),
+                Line::from(cap_spans(toggles, text.width as usize)),
+            ]),
             text,
         );
     }
 
-    /// The toggles line: the search being typed, or the filter in force, at
-    /// the left; at the right the toggles — a glyph and its key for each kind,
-    /// `✦a` agents, `❯s` shells, then `◌h` hidden and the grouping, each set
+    /// The toggles, for the header: a glyph and its key for each kind, `✦^a`
+    /// agents, `❯^l` shells, then `◌^o` hidden and the grouping, each set
     /// apart. On is accented and bold, off is quiet.
-    fn toggles_line(&self, width: u16) -> Line<'static> {
+    fn toggle_spans(&self) -> Vec<Span<'static>> {
         let on = theme::accent().add_modifier(Modifier::BOLD);
         let off = theme::dim();
         let lit = |b: bool| if b { on } else { off };
@@ -406,18 +423,29 @@ impl App {
             Grouping::Project => "by project",
             Grouping::State => "by state",
         };
-        let right = vec![
-            Span::styled("✦a", lit(p.show_agents)),
+        vec![
+            Span::styled("✦^a", lit(p.show_agents)),
             Span::styled("  ", off),
-            Span::styled("❯s", lit(p.show_shells)),
+            Span::styled("❯^l", lit(p.show_shells)),
             // Hidden is a different axis — what you hid, not a kind — and the
             // grouping another again, so a divider sets each apart.
             Span::styled("  │  ", off),
-            Span::styled("◌h", lit(p.show_hidden)),
+            Span::styled("◌^o", lit(p.show_hidden)),
             Span::styled("  │  ", off),
             Span::styled(grouping, theme::accent()),
             Span::styled(" ^s", off),
-        ];
+        ]
+    }
+
+    /// The line over the footer: the command line, with at its right what
+    /// it would start; or, while one is open, the search in its place.
+    fn bottom_line(&self, width: u16) -> Line<'static> {
+        let mut right = Vec::new();
+        if self.search.is_none()
+            && let Some(d) = self.detected()
+        {
+            right.push(Span::styled(d.label(), theme::accent()));
+        }
         let mut left = match &self.search {
             Some(s) => {
                 let mut spans = vec![Span::raw(" "), Span::styled("⌕ ", theme::accent())];
@@ -427,12 +455,7 @@ impl App {
                 }
                 spans
             }
-            None if !self.filter.is_empty() => vec![
-                Span::raw(" "),
-                Span::styled("⌕ ", theme::accent()),
-                Span::raw(self.filter.clone()),
-            ],
-            None => vec![],
+            None => self.command_spans(),
         };
         let width = width as usize;
         let rw: usize = right.iter().map(Span::width).sum::<usize>() + 1;
@@ -444,17 +467,46 @@ impl App {
         Line::from(left)
     }
 
+    /// The command line: the folder it starts in, short, then what is
+    /// typed, the caret, and the best completion dim after it. Empty, it
+    /// says what it is for, or the filter in force.
+    fn command_spans(&self) -> Vec<Span<'static>> {
+        let folder = self.line_folder();
+        let place = match folder.file_name() {
+            Some(n) => n.to_string_lossy().into_owned(),
+            None => rows::short_path(&folder),
+        };
+        let mut spans = vec![
+            Span::raw(" "),
+            Span::styled(place, theme::dim()),
+            Span::styled(" ❯ ", theme::accent()),
+        ];
+        let l = &self.cmd.line;
+        match self.cmd.ghost.as_deref() {
+            Some(g) if l.cursor() == l.text().len() && !g.is_empty() => {
+                let mut chars = g.chars();
+                let first = chars.next().map(String::from).unwrap_or_default();
+                spans.push(Span::raw(l.text().to_string()));
+                spans.push(Span::styled(first, theme::dim().add_modifier(Modifier::REVERSED)));
+                spans.push(Span::styled(chars.as_str().to_string(), theme::dim()));
+            }
+            _ => spans.extend(theme::with_caret(l.text(), l.cursor(), Style::default())),
+        }
+        if l.is_empty() {
+            let hint = if self.filter.is_empty() {
+                " a command, or claude/codex/agy and a prompt · / searches".to_string()
+            } else {
+                format!(" ⌕ {} · esc clears", self.filter)
+            };
+            spans.push(Span::styled(hint, theme::dim()));
+        }
+        spans
+    }
+
     /// The footer's rows at this width: the shortcuts where they are up,
     /// under a flash if there is one, else the one row of hints.
     pub fn foot_lines(&self, width: u16) -> Vec<Line<'static>> {
         let room = width.saturating_sub(TEXT_INDENT).max(1) as usize;
-        if let Mode::Form(form) = &self.mode {
-            let mut lines = form.lines();
-            if let Some(m) = self.flashing() {
-                lines[0] = Line::from(m.to_string()).dim();
-            }
-            return lines;
-        }
         if !self.shortcuts || self.search.is_some() {
             return vec![Line::from(self.footer(room)).dim()];
         }
@@ -478,6 +530,9 @@ impl App {
                     enter keeps · esc puts back"
                 .into();
         }
+        if !self.cmd.is_empty() {
+            return "enter starts · tab completes · ↑↓ picks the folder · esc clears".into();
+        }
         if let Some(why) = self.native_failing() {
             return why;
         }
@@ -485,7 +540,7 @@ impl App {
             Grouping::Project => "^s by state",
             Grouping::State => "^s by project",
         };
-        let mut hints = vec!["enter attaches", "n new", self.x_hint(), "^f search"];
+        let mut hints = vec!["enter attaches", "type to start", self.x_hint(), "/ search"];
         if !self.filter.is_empty() {
             hints.push("esc clears the search");
         }
@@ -530,11 +585,11 @@ impl App {
             let msg: String = if !self.filter.is_empty() {
                 " nothing matches".into()
             } else if !p.show_agents || !p.show_shells {
-                " nothing here · a agents · s shells · h hidden".into()
+                " nothing here · ^a agents · ^l shells · ^o hidden".into()
             } else if p.show_hidden {
                 " nothing hidden".into()
             } else {
-                " nothing running · rl new".into()
+                " nothing running · type to start one".into()
             };
             let nothing = self.filter.is_empty() && p.show_agents && p.show_shells && !p.show_hidden;
             f.render_widget(empty_list(&msg, area, nothing), area);
@@ -631,12 +686,25 @@ impl App {
         // The harness at the end of the title's column, quiet: the state
         // column stays where a header's checkout starts.
         let harness = HARNESS_W.min(tw / 3);
+        // The colour it picked in its harness, on its name and its icon —
+        // not under the cursor, whose band wins.
+        let picked = r
+            .color
+            .as_deref()
+            .and_then(theme::picked)
+            .filter(|_| self.sel.as_deref() != Some(r.key.as_str()));
+        let mut icon = icon_span(rows::icon(r), Some(&r.harness), r.state.is_terminal());
+        let mut name = Style::default();
+        if let Some(c) = picked {
+            icon[1].style = icon[1].style.fg(c);
+            name = name.fg(c);
+        }
         list_line(
             w,
             tw,
-            icon_span(rows::icon(r), Some(&r.harness), r.state.is_terminal()),
+            icon,
             vec![
-                Span::raw(fit(&title, tw - harness)),
+                Span::styled(fit(&title, tw - harness), name),
                 Span::styled(format!(" {}", fit(&r.harness, harness - 1)), theme::dim()),
             ],
             vec![Span::styled(word, theme::state(r.state))],
@@ -731,11 +799,11 @@ mod tests {
         assert_eq!(head_h(screen(160, 23)), 1);
         assert_eq!(head_h(screen(79, 45)), 1);
         // The list starts under the header and its separator, whichever it is,
-        // and the toggles stand between it and the footer.
+        // and the command line stands between it and the footer.
         let a = areas(screen(100, 30), 1);
-        assert_eq!((a.list.y, a.toggles.y, a.footer.y), (7, 27, 29));
+        assert_eq!((a.list.y, a.line.y, a.footer.y), (7, 27, 29));
         let a = areas(screen(80, 20), 1);
-        assert_eq!((a.list.y, a.toggles.y, a.footer.y), (2, 17, 19));
+        assert_eq!((a.list.y, a.line.y, a.footer.y), (2, 17, 19));
     }
 
     #[test]

@@ -1,7 +1,7 @@
 //! `^h`: the keys for where you are, in the footer in place of its few hints.
-//! `^h` again or `esc` puts them away; so does `?`, which is never typed
-//! anywhere on the list but in a search, and a search keeps its own keys in
-//! the footer.
+//! `^h` again, `F1` or `esc` puts them away (`F1` is there for terminals
+//! that send `^h` as backspace), and a search keeps its own keys in the
+//! footer.
 //!
 //! One table per place, so what the footer says stays what the keys do.
 
@@ -34,7 +34,7 @@ fn key(keys: impl Into<String>, what: &'static str) -> Key {
 /// that puts them away.
 pub fn keys(at: Place) -> Vec<Key> {
     let mut v = place_keys(at);
-    v.push(key("^h", ""));
+    v.push(key("^h/F1", ""));
     v
 }
 
@@ -42,17 +42,18 @@ fn place_keys(at: Place) -> Vec<Key> {
     match at {
         Place::List => vec![
             key("enter", "attach"),
-            key("n", "new"),
+            key("type", "start an agent or a shell"),
+            key("tab", "complete"),
             key("↑↓ ^j^k", "move"),
             key("pgup/pgdn home/end", "page"),
-            key("^f", "search"),
+            key("/ ^f", "search"),
             key("^x ^x", "stop/remove/hide"),
             key("^r", "rename"),
             key("^t", "pin"),
             key("⇧↑↓", "reorder"),
-            key("a", "agents"),
-            key("s", "shells"),
-            key("h", "hidden"),
+            key("^a", "agents"),
+            key("^l", "shells"),
+            key("^o", "hidden"),
             key("^s", "by project/state"),
             key("^c ^c", "quit"),
         ],
@@ -72,14 +73,14 @@ pub enum Take {
     Pass,
 }
 
-/// `^h` and a plain `?` toggle the shortcuts; `esc` closes them first,
-/// before it does any of its other jobs.
+/// `^h` and `F1` toggle the shortcuts — `F1` for the terminals that send
+/// `^h` as backspace; `esc` closes them first, before it does any of its
+/// other jobs. `?` is a letter like any other: it types.
 pub fn take(open: bool, k: &KeyEvent) -> Take {
-    let plain = !k.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
     let ctrl = k.modifiers.contains(KeyModifiers::CONTROL) && !k.modifiers.contains(KeyModifiers::ALT);
     match k.code {
         KeyCode::Char('h') if ctrl => Take::Toggle,
-        KeyCode::Char('?') if plain => Take::Toggle,
+        KeyCode::F(1) => Take::Toggle,
         KeyCode::Esc if open => Take::Close,
         _ => Take::Pass,
     }
@@ -143,9 +144,9 @@ pub fn lines(keys: &[Key], width: usize) -> Vec<Line<'static>> {
 }
 
 /// The footer's pointer to all this.
-pub const HINT: &str = "^h shortcuts";
+pub const HINT: &str = "^h/F1 shortcuts";
 
-/// A footer hint with `^h shortcuts` at its end, when there is room for it;
+/// A footer hint with `^h/F1 shortcuts` at its end, when there is room for it;
 /// as it was when there is not.
 pub fn with_hint(footer: String, width: usize) -> String {
     let more = if footer.is_empty() {
@@ -172,9 +173,10 @@ mod tests {
     fn the_list_says_its_keys() {
         assert_eq!(
             one_line(Place::List),
-            "enter attach · n new · ↑↓ ^j^k move · pgup/pgdn home/end page · ^f search · \
-             ^x ^x stop/remove/hide · ^r rename · ^t pin · ⇧↑↓ reorder · a agents · s shells · \
-             h hidden · ^s by project/state · ^c ^c quit · ^h"
+            "enter attach · type start an agent or a shell · tab complete · ↑↓ ^j^k move · \
+             pgup/pgdn home/end page · / ^f search · \
+             ^x ^x stop/remove/hide · ^r rename · ^t pin · ⇧↑↓ reorder · ^a agents · ^l shells · \
+             ^o hidden · ^s by project/state · ^c ^c quit · ^h/F1"
         );
     }
 
@@ -209,20 +211,19 @@ mod tests {
     }
 
     #[test]
-    fn a_question_mark_and_ctrl_h_toggle_and_esc_closes_first() {
+    fn ctrl_h_and_f1_toggle_a_question_mark_types_and_esc_closes_first() {
         let q = KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE);
-        assert_eq!(take(false, &q), Take::Toggle);
-        assert_eq!(take(true, &q), Take::Toggle);
-        // A terminal that reports the shift of a `?` still means `?`.
-        let shifted = KeyEvent::new(KeyCode::Char('?'), KeyModifiers::SHIFT);
-        assert_eq!(take(false, &shifted), Take::Toggle);
+        assert_eq!(take(false, &q), Take::Pass, "a ? is typed");
         assert_eq!(
-            take(false, &KeyEvent::new(KeyCode::Char('?'), KeyModifiers::CONTROL)),
+            take(true, &KeyEvent::new(KeyCode::Char('?'), KeyModifiers::SHIFT)),
             Take::Pass
         );
+        let f1 = KeyEvent::from(KeyCode::F(1));
+        assert_eq!(take(false, &f1), Take::Toggle);
+        assert_eq!(take(true, &f1), Take::Toggle);
         let h = |m| KeyEvent::new(KeyCode::Char('h'), m);
         assert_eq!(take(false, &h(KeyModifiers::CONTROL)), Take::Toggle);
-        assert_eq!(take(false, &h(KeyModifiers::NONE)), Take::Pass, "a plain h is hidden's");
+        assert_eq!(take(false, &h(KeyModifiers::NONE)), Take::Pass, "a plain h is typed");
         assert_eq!(take(false, &h(KeyModifiers::CONTROL | KeyModifiers::ALT)), Take::Pass);
         let esc = KeyEvent::from(KeyCode::Esc);
         assert_eq!(take(true, &esc), Take::Close);
@@ -231,8 +232,8 @@ mod tests {
 
     #[test]
     fn the_footer_points_here_only_where_there_is_room() {
-        assert_eq!(with_hint("^f search".into(), 80), "^f search · ^h shortcuts");
+        assert_eq!(with_hint("^f search".into(), 80), "^f search · ^h/F1 shortcuts");
         assert_eq!(with_hint("^f search".into(), 20), "^f search");
-        assert_eq!(with_hint(String::new(), 80), "^h shortcuts");
+        assert_eq!(with_hint(String::new(), 80), "^h/F1 shortcuts");
     }
 }

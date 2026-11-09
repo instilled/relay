@@ -1,0 +1,10 @@
+# Google Antigravity's CLI, `agy`. PTY heuristics only: its hooks are not
+# the others' and are not wired up yet, so the list reads its state from the
+# screen with the generic patterns.
+kind: agent
+bins: [agy]
+# The list's command line starts it on any of these first words; `gemini`
+# means Antigravity there, not the Gemini CLI.
+words: [gemini, agy, antigravity]
+# `agy -i "<prompt>"` (--prompt-interactive) runs the prompt and stays open.
+prompt: ["-i", "{prompt}"]

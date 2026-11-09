@@ -118,6 +118,7 @@ impl Adapter for StandIn {
                 ended: None,
                 at: None,
                 pr: None,
+                color: None,
             })
             .collect())
     }
@@ -184,6 +185,8 @@ pub struct Row {
     /// come to need you since.
     pub state_at: Option<Timestamp>,
     pub pr: Option<Pr>,
+    /// The colour its harness draws it in, by name (`pink`); none for most.
+    pub color: Option<String>,
     pub attach: Attach,
     /// What stops it, where it is a harness's own session still going and
     /// its harness has a way to.
@@ -236,7 +239,7 @@ pub fn rows(held: &[Held], hooked: &[HookState], native: &[NativeRow], answered:
     for r in &mut rows {
         r.repo = repos
             .entry(r.cwd.clone())
-            .or_insert_with(|| crate::git::toplevel(&r.cwd))
+            .or_insert_with(|| crate::git::project(&r.cwd))
             .clone();
     }
     rows
@@ -296,6 +299,7 @@ fn held_row(h: &Held) -> Row {
         },
         state_at: Some(at),
         pr: None,
+        color: None,
         attach: Attach::Held(m.name.clone()),
         stop: None,
         kind: m.kind,
@@ -353,6 +357,7 @@ fn hooked_row(h: &HookState, answered: &BTreeSet<String>) -> Row {
         ended: None,
         state_at: Some(h.at),
         pr: None,
+        color: None,
         attach: carry_on(h, answered),
         stop: None,
         kind: RunKind::Agent,
@@ -374,6 +379,7 @@ fn native_row(n: &NativeRow) -> Row {
         ended: n.ended,
         state_at: n.at,
         pr: n.pr.clone(),
+        color: n.color.clone(),
         attach: adapter(&n.harness).map_or(Attach::None, |a| Attach::Argv(a.attach_argv(&n.id))),
         stop: adapter(&n.harness)
             .filter(|_| !n.state.state.is_terminal())
@@ -453,6 +459,7 @@ mod tests {
                 number: 12,
                 href: "https://x/pull/12".into(),
             }),
+            color: None,
         }
     }
 
@@ -637,6 +644,27 @@ mod tests {
         let r = rows(&[], &[in_repo, plain], &[]);
         assert_eq!(r[0].repo.as_deref(), Some(repo.as_path()));
         assert_eq!(r[1].repo, None);
+    }
+
+    #[test]
+    fn a_row_in_a_worktree_stands_under_its_main_checkout_unless_you_named_the_worktree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().canonicalize().unwrap().join("repo");
+        let entry = repo.join(".git/worktrees/foo");
+        std::fs::create_dir_all(&entry).unwrap();
+        std::fs::write(entry.join("commondir"), "../..\n").unwrap();
+        let wt = repo.join(".claude/worktrees/foo");
+        std::fs::create_dir_all(&wt).unwrap();
+        std::fs::write(wt.join(".git"), format!("gitdir: {}\n", entry.display())).unwrap();
+        let mut in_wt = hook("gemini", "g-1", Said::Busy, None);
+        in_wt.cwd = wt.clone();
+        let r = rows(&[], &[in_wt], &[]);
+        assert_eq!(r[0].repo.as_deref(), Some(repo.as_path()));
+        let none = std::collections::BTreeMap::new();
+        assert_eq!(crate::rows::project_of(&r[0], &crate::rows::Names::new(&none)), repo);
+        // A folder you named still wins.
+        let named = std::collections::BTreeMap::from([(format!("g:{}", wt.display()), "foo".to_string())]);
+        assert_eq!(crate::rows::project_of(&r[0], &crate::rows::Names::new(&named)), wt);
     }
 
     #[test]

@@ -5,13 +5,14 @@
 //! seconds, and asks the harnesses for their own sessions in the background;
 //! all of it only while the list is open.
 //!
-//! Layout: the header, the list, the toggles line (where a search is typed),
-//! and the footer's hints; how things stand rides the window's title too.
+//! Layout: the header (the tally, the filters and the grouping), the list,
+//! the command line (where a search is typed too, while one is open), and
+//! the footer's hints; how things stand rides the window's title too.
 
 mod act;
 mod app;
+mod cmdline;
 mod draw;
-mod form;
 mod input;
 mod keys;
 mod line;

@@ -127,6 +127,7 @@ mod tests {
             ended: None,
             state_at: None,
             pr: None,
+            color: None,
             attach: match source {
                 Source::Held => Attach::Held(name),
                 _ => Attach::None,

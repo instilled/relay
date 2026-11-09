@@ -32,6 +32,7 @@ pub async fn new(
             harness,
             cwd,
             argv,
+            shell: false,
             cols,
             rows,
         },

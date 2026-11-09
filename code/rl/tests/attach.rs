@@ -47,6 +47,7 @@ impl Env {
                 harness: None,
                 cwd: self.cwd.clone(),
                 argv: vec!["sh".into(), "-c".into(), script.into()],
+                shell: false,
                 cols: 80,
                 rows: 24,
             },
@@ -201,9 +202,10 @@ async fn an_ended_session_whose_holder_lingers_is_attached_to_and_the_exit_file_
     assert!(r.1.contains("last-screen"), "{}", r.1);
     assert!(matches!(r.0, Ended::Exit { code: 3, .. }), "{:?}", r.0);
 
-    // Let the holder go; then only the exit file is left to say.
+    // Let the holder go; then only the exit file is left to say. (`close`
+    // waits for the holder to hang up, so the ask is never lost to it.)
     stop(&meta).await;
-    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
     loop {
         match open(&dir, &meta).await.unwrap() {
             Opened::Over(ended, words) => {
