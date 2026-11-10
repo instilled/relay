@@ -292,7 +292,13 @@ impl App {
             self.change_prefs(|p| forget(p, &key));
         }
         self.reload();
-        self.say(d.said);
+        if let Some(c) = d.setup {
+            self.checked(c);
+        }
+        // Work with nothing to say (the start's check) leaves the footer be.
+        if !d.said.is_empty() {
+            self.say(d.said);
+        }
         if d.gave_up {
             self.awaiting = None;
         }
