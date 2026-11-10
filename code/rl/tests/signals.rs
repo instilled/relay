@@ -13,7 +13,12 @@ async fn killed_by(signal: Signal) -> (i32, String) {
     let mut sp = backend::spawn(&Spec {
         argv: vec![env!("CARGO_BIN_EXE_rl").into()],
         cwd: tmp.path().to_path_buf(),
-        env: vec![("RELAY_HOME".into(), tmp.path().join("relay").display().to_string())],
+        // Its own HOME too: the list's setup check reads the harnesses'
+        // files there, never the real ones.
+        env: vec![
+            ("RELAY_HOME".into(), tmp.path().join("relay").display().to_string()),
+            ("HOME".into(), tmp.path().display().to_string()),
+        ],
         inherit_env: true,
         cols: 100,
         rows: 30,

@@ -183,7 +183,16 @@ impl Need {
     /// What a run would touch, file by file: `codex: ~/.codex/hooks.json
     /// (hooks) · ~/.codex/config.toml (mcp relay)`.
     pub fn touches(&self) -> String {
-        let files: Vec<String> = self.items.iter().map(|i| format!("{} ({})", i.file, i.what)).collect();
+        // One entry per file, naming everything that changes in it.
+        let mut files: Vec<(String, Vec<String>)> = Vec::new();
+        for i in &self.items {
+            let what = i.what.to_string();
+            match files.iter_mut().find(|(f, _)| *f == i.file) {
+                Some((_, whats)) => whats.push(what),
+                None => files.push((i.file.clone(), vec![what])),
+            }
+        }
+        let files: Vec<String> = files.iter().map(|(f, w)| format!("{f} ({})", w.join(", "))).collect();
         format!("{}: {}", self.harness, files.join(" · "))
     }
 }
@@ -1109,6 +1118,12 @@ mod tests {
         assert_eq!(
             codex.touches(),
             "codex: ~/.codex/hooks.json (hooks) · ~/.codex/config.toml (mcp relay)"
+        );
+        let gemini = &f.try_check(&["gemini"], RL).unwrap()[0];
+        assert_eq!(
+            gemini.touches(),
+            "gemini: ~/.gemini/settings.json (hooks, mcp relay)",
+            "one file named once"
         );
 
         f.run(&[], false);
