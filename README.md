@@ -30,8 +30,9 @@ rl            # the list
 ```
 
 `rl setup` adds Relay's hook to each harness's user-level settings and registers
-`rl mcp --harness <name>` as an MCP server named `relay` (Claude's through `claude mcp add --scope user`,
-so `claude` must be on PATH). It says what it changed, and `nothing to change` on a second run.
+`rl mcp --harness <name>` as an MCP server named `relay` (Claude's through `claude mcp add --scope user`
+and Antigravity's through `agy mcp add`, so that CLI must be on PATH). Antigravity has no hooks yet, so
+it gets only the server. It says what it changed, and `nothing to change` on a second run.
 `rl setup --remove` takes both out again, also for a harness no longer installed; `--harness <name>`
 (repeatable) limits it to one.
 Codex asks you to trust the hook once (`/hooks` in codex); Claude may ask you to review it in `/hooks`.
@@ -198,6 +199,8 @@ Not verified against the live CLIs:
 - The Gemini MCP entry (`mcpServers.relay` in its `settings.json`).
 - `claude agents` state mapping against its own screen.
 - Antigravity (`agy`): no hooks and no screen patterns of its own yet, so its state is the generic guess.
+  Whether `agy` hands its MCP servers the held session's environment (`RL_SESSION`), so `rl mcp` there
+  knows its caller.
 - A Codex session Relay holds stays Relay's when you detach. Its thread can't be left with Codex's
   own daemon. Checked on codex 0.167: the daemon lists a TUI's thread as loaded while the TUI runs
   and for a few seconds after it exits, but not a minute later. A hand-off would leave a row that
