@@ -7,6 +7,9 @@ use std::time::Duration;
 
 async fn killed_by(signal: Signal) -> (i32, String) {
     let tmp = tempfile::tempdir().unwrap();
+    // Started before: the first start's question is not asked.
+    std::fs::create_dir_all(tmp.path().join("relay")).unwrap();
+    std::fs::write(tmp.path().join("relay/config.json"), "{}").unwrap();
     let mut sp = backend::spawn(&Spec {
         argv: vec![env!("CARGO_BIN_EXE_rl").into()],
         cwd: tmp.path().to_path_buf(),

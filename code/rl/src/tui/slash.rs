@@ -36,6 +36,7 @@ pub enum Verb {
     Shells,
     Hidden,
     Group,
+    Setup,
     Help,
     Quit,
 }
@@ -60,7 +61,7 @@ const fn cmd(name: &'static str, arg: Arg, verb: Verb) -> Cmd {
 }
 
 /// Every command, in the order `tab` offers them.
-pub const CMDS: [Cmd; 12] = [
+pub const CMDS: [Cmd; 13] = [
     Cmd {
         name: "colour",
         alias: Some("color"),
@@ -76,6 +77,7 @@ pub const CMDS: [Cmd; 12] = [
     cmd("shells", Arg::Nothing, Verb::Shells),
     cmd("hidden", Arg::Nothing, Verb::Hidden),
     cmd("group", Arg::Nothing, Verb::Group),
+    cmd("setup", Arg::Nothing, Verb::Setup),
     cmd("help", Arg::Nothing, Verb::Help),
     cmd("quit", Arg::Nothing, Verb::Quit),
 ];
@@ -196,6 +198,7 @@ impl App {
             Verb::Shells => self.toggle_shells(),
             Verb::Hidden => self.toggle_hidden(),
             Verb::Group => self.toggle_grouping(),
+            Verb::Setup => self.setup_now(),
             Verb::Help => self.help = true,
             Verb::Quit => self.quit = true,
         }
@@ -280,6 +283,8 @@ mod tests {
             "the alias is not offered"
         );
         assert_eq!(c("/h", None).1, ["/hide", "/hidden", "/help"]);
+        assert_eq!(c("/se", None).1, ["/setup"]);
+        assert_eq!(typed("/setup"), Typed::Known("setup"));
         assert_eq!(c("/colour p", None), (8, vec!["pink".into(), "purple".into()]));
         assert_eq!(c("/color n", None).1, ["none"]);
         assert_eq!(c("/colour ", None).1.len(), PALETTE.len() + 1);

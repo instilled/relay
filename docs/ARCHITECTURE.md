@@ -178,6 +178,16 @@ the Relay home is not the default, each entry carries `RELAY_HOME`. Hook
 files are edited in place keeping key order, comments (TOML) and file mode. A file that does not
 parse is left alone and reported.
 
+Each part (hooks, `user_hooks::install_needed`; each server entry, `Mcp::need`) first answers
+"would a run change this?" from its files alone, missing or stale; a run writes only what that
+names, and `rl setup --check` (`setup::check`) stops there, so it writes nothing and runs neither
+`claude mcp` nor `agy mcp` (their entries are read from `~/.claude.json` and agy's
+`mcp_config.json`). The list runs the check off its UI thread as it starts and leads the footer's
+hints with `setup needed: … · /setup` while anything does; `/setup` runs `setup::run` in the
+list's background work and checks again. The list's first start, with no `config.json` yet, on a
+terminal and outside a held session, asks once (`setup::first_run`) before taking the screen and
+writes `config.json` whatever the answer.
+
 ## 7. Not verified live
 
 Taken from the task reports; none is exercised by the tests.
