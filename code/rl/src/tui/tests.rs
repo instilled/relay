@@ -1387,3 +1387,70 @@ async fn a_hex_colour_of_your_own_is_drawn_as_the_names_background() {
         "light text on dark"
     );
 }
+
+/// Setup as a process with its HOME at the fixture's root would run it:
+/// `claude` and `agy` the stand-ins, codex and gemini found but never run.
+fn setup_host(f: &Fixture) -> crate::setup::Host {
+    let root = f.home.path().parent().unwrap().to_path_buf();
+    let fixtures = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../fixtures"));
+    crate::setup::Host {
+        rl_bin: PathBuf::from("/opt/relay/bin/rl"),
+        env: std::sync::Arc::new(move |k| (k == "HOME").then(|| root.clone().into())),
+        bin_of: std::sync::Arc::new(move |p| match p.name.as_str() {
+            "claude" => Some(fixtures.join("stand-in-claude-mcp")),
+            "antigravity" => Some(fixtures.join("stand-in-agy-mcp")),
+            "codex" | "gemini" => Some(PathBuf::from("/nowhere").join(&p.name)),
+            _ => None,
+        }),
+    }
+}
+
+#[tokio::test]
+async fn the_list_offers_setup_and_slash_setup_does_it_and_the_notice_goes() {
+    let f = fixture();
+    let mut app = list(&f).await;
+    app.setup_host = Some(setup_host(&f));
+    app.check_setup();
+    app.finish().await;
+    let foot = shown(&app);
+    assert!(
+        foot.contains("setup needed: antigravity, claude, codex, gemini · /setup"),
+        "{foot}"
+    );
+    assert!(app.flashing().is_none(), "the check says nothing of its own");
+
+    run(&mut app, "/setup");
+    assert!(shown(&app).contains("setting up…"));
+    run(&mut app, "/setup");
+    assert!(shown(&app).contains("setting up already"));
+    app.finish().await;
+    let foot = shown(&app);
+    assert!(foot.contains("codex: hooks installed"), "{foot}");
+    assert!(foot.contains("antigravity: mcp relay registered"), "{foot}");
+    assert!(foot.contains("/hooks"), "codex's note: {foot}");
+    assert!(!foot.contains("setup needed"), "{foot}");
+    assert_eq!(app.setup, Some(Ok(vec![])));
+    assert!(!app.setting_up);
+
+    // Again: nothing to change, and it says so.
+    run(&mut app, "/setup");
+    app.finish().await;
+    assert!(shown(&app).contains("nothing to change"));
+}
+
+#[tokio::test]
+async fn a_setup_that_fails_says_why_and_the_list_goes_on() {
+    let f = fixture();
+    let root = f.home.path().parent().unwrap().to_path_buf();
+    std::fs::write(root.join(".claude.json"), "{ not json").unwrap();
+    let mut app = list(&f).await;
+    app.setup_host = Some(setup_host(&f));
+    app.check_setup();
+    app.finish().await;
+    assert!(shown(&app).contains("setup check failed · /setup says why"));
+    run(&mut app, "/setup");
+    app.finish().await;
+    let foot = shown(&app);
+    assert!(foot.contains("setup:") && foot.contains(".claude.json"), "{foot}");
+    assert!(!app.quit);
+}

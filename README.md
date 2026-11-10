@@ -25,9 +25,24 @@ Everything lives under `~/.relay` (`RELAY_HOME` moves it).
 ## First run
 
 ```sh
-rl setup      # hooks and the MCP server, for each harness found on PATH
-rl            # the list
+rl            # the list; the first time, it offers to set Relay up
 ```
+
+The first `rl` (before there is a `~/.relay/config.json`) says what setup would touch, one harness a
+line, and asks `Set up Relay for claude, codex, …? [Y/n]`; either answer is kept, so it asks once
+(never outside a terminal, nor inside a session Relay holds). Later, while a harness found on PATH
+needs setting up — installed after setup, or `rl` moved so the entries point at the old one — the
+list's footer leads with `setup needed: codex · /setup`, and `/setup` on the command line does it.
+The same by hand:
+
+```sh
+rl setup            # hooks and the MCP server, for each harness found on PATH
+rl setup --check    # change nothing: what setup would change, exit 1 if anything
+```
+
+`rl setup --check` prints one line per harness that needs something (`codex: hooks missing · mcp
+relay stale (points at /old/rl)`), or `all set up`; it reads the files only and runs no harness's
+CLI.
 
 `rl setup` adds Relay's hook to each harness's user-level settings and registers
 `rl mcp --harness <name>` as an MCP server named `relay` (Claude's through `claude mcp add --scope user`
@@ -71,6 +86,7 @@ Every letter types; the list's own keys are ctrl keys, the arrows and `enter`. `
 | `/rm` | remove an ended session Relay holds |
 | `/agents` `/shells` `/hidden` | show agents, shells, hidden, as `ctrl+a` `ctrl+l` `ctrl+o` |
 | `/group` | by project or by state, as `ctrl+s` |
+| `/setup` | `rl setup` for the harnesses found, in the background; what it changed (and Codex's `/hooks` note) stands in the footer, and the `setup needed` notice goes |
 | `/help` | the keys |
 | `/quit` | quit |
 
@@ -107,7 +123,7 @@ rl stop <name>                  # close a running session
 rl rm <name>                    # remove one that is not running
 rl color <session> <name|#rrggbb|none>  # your colour for a row (a held name, or n:claude:<id> / o:claude:<id>)
 rl mcp --harness H              # serve send, who and inbox over stdio (agents call this)
-rl setup [--remove] [--harness H]
+rl setup [--remove | --check] [--harness H]
 ```
 
 `rl hook <agent> <Event>` is what an agent's hook calls. It is not for you to run.

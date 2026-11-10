@@ -19,6 +19,7 @@ mod keys;
 mod line;
 mod live;
 mod mark;
+mod onboard;
 mod remove;
 mod select;
 mod slash;
@@ -86,6 +87,7 @@ impl App {
             }
         };
         let mut native = live::Native::start(sources::native_listers(), NATIVE_EVERY);
+        self.check_setup();
         let mut tick = tokio::time::interval(REFRESH);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         tick.tick().await;
