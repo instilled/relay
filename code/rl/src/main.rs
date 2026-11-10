@@ -55,8 +55,12 @@ enum Command {
     /// Install the hooks and register the MCP server with each harness.
     Setup {
         /// Take Relay's hooks and server out again.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "check")]
         remove: bool,
+        /// Change nothing: say what a run would change, one line per
+        /// harness, and exit 1 when anything needs setting up.
+        #[arg(long)]
+        check: bool,
         /// Only this harness (repeatable); default: each one found on PATH.
         #[arg(long = "harness", value_name = "H")]
         harness: Vec<String>,
@@ -86,6 +90,15 @@ async fn run(cli: Cli) -> Result<()> {
         if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
             anyhow::bail!("the list needs a terminal · rl ls lists sessions as text");
         }
+        // The first start asks once to set up; never inside a held session.
+        if rl::setup::should_ask(&home, true, std::env::var_os("RL_SESSION").is_some()) {
+            let asked = rl::setup::Host::real().and_then(|host| {
+                rl::setup::first_run(&home, &host, &mut std::io::stdin().lock(), &mut std::io::stdout())
+            });
+            if let Err(e) = asked {
+                eprintln!("rl setup: {e:#}");
+            }
+        }
         return rl::tui::run(&home).await;
     };
     match command {
@@ -103,7 +116,15 @@ async fn run(cli: Cli) -> Result<()> {
             println!("{}", cmd::color(&home, &session, &colour)?);
             Ok(())
         }
-        Command::Setup { remove, harness } => rl::setup::main(&home, &harness, remove),
+        Command::Setup {
+            check: true, harness, ..
+        } => {
+            if rl::setup::main_check(&home, &harness)? {
+                std::process::exit(1);
+            }
+            Ok(())
+        }
+        Command::Setup { remove, harness, .. } => rl::setup::main(&home, &harness, remove),
         // Blocks on stdin; the adapters it asks block too.
         Command::Mcp { harness } => tokio::task::spawn_blocking(move || rl::mcp::run(&home, &harness)).await?,
     }

@@ -522,12 +522,22 @@ impl App {
     /// under a flash if there is one, else the one row of hints.
     pub fn foot_lines(&self, width: u16) -> Vec<Line<'static>> {
         let room = width.saturating_sub(TEXT_INDENT).max(1) as usize;
+        // A word of several lines (what `/setup` did) stands on as many rows.
+        let flash = || -> Vec<Line<'static>> {
+            self.flashing()
+                .into_iter()
+                .flat_map(str::lines)
+                .map(|l| Line::from(l.to_string()).dim())
+                .collect()
+        };
         if !self.help || self.search.is_some() {
+            let f = flash();
+            if f.len() > 1 {
+                return f;
+            }
             return vec![Line::from(self.footer(room)).dim()];
         }
-        let keys = help::grid(room);
-        let flash = self.flashing().map(|m| Line::from(m.to_string()).dim());
-        flash.into_iter().chain(keys).collect()
+        flash().into_iter().chain(help::grid(room)).collect()
     }
 
     /// The footer's one row: a word that stands for a moment, or the search's
@@ -568,6 +578,9 @@ impl App {
             hints.insert(1, "esc to clear the search".into());
         }
         hints.push(help::hint(help::Id::Group, Some(by)));
+        if let Some(n) = self.setup_notice() {
+            hints.insert(0, n);
+        }
         help::footer(&hints, width)
     }
 
