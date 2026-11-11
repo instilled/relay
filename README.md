@@ -66,7 +66,8 @@ the cursor (else where `rl` was started; the line shows only the prompt `❯`):
 
 - `claude fix the login`, `codex …`, or `agy …` (also `gemini` and `antigravity`, which mean
   Google Antigravity's `agy`): that agent, the rest of the line its first prompt. Claude starts in
-  its own background (`claude --bg`); the others in a session Relay holds.
+  its own background (`claude --bg`), Codex on its own app-server daemon (see Codex below); the
+  others in a session Relay holds.
 - `/` and a name: a command, run on the row under the cursor or on the list (below).
 - Anything else is a shell command, run in a shell Relay holds, which stays a shell once it is done.
 
@@ -82,7 +83,7 @@ Every letter types; the list's own keys are ctrl keys, the arrows and `enter`. `
 | `/rename <name>` | rename the row or project, as `ctrl+r`; with no name, back to its own. A Claude or Codex session is named in Relay only (the harness has no rename): your name, then the harness's own dim beside it, and the search finds both |
 | `/pin` | pin or unpin, as `ctrl+t` |
 | `/hide` | hide the row or project, or bring it back |
-| `/stop` | stop a live session, held or the harness's own, at once (no second press) |
+| `/stop` | stop a live session, held or the harness's own, at once (no second press); a Codex thread has its running turn interrupted and stays |
 | `/rm` | remove an ended session Relay holds |
 | `/agents` `/shells` `/hidden` | show agents, shells, hidden, as `ctrl+a` `ctrl+l` `ctrl+o` |
 | `/group` | by project or by state, as `ctrl+s` |
@@ -113,10 +114,32 @@ in the footer and changes nothing; an unknown one stays on the line to mend.
 
 `ctrl+\` leaves an attached session running and comes back to the list.
 
+### Codex
+
+Relay never holds a Codex session: every thread runs in Codex's own app-server daemon (`codex
+app-server`, started with `codex app-server daemon start` if none runs), and the list shows the
+daemon's threads.
+
+- `codex fix the login` on the command line (or `rl new --harness codex -- fix the login`) starts a
+  thread on the daemon in the row's folder and its first turn on the prompt, then lets go: the daemon
+  runs the turn with no terminal attached. Only the folder is given, so your own `config.toml`
+  (model, approvals, sandbox) holds.
+- `codex` alone (or `rl new --harness codex`) runs Codex's TUI here in the folder, as an attach
+  would; its TUI makes the thread. Quitting it brings the list back.
+- Enter on a Codex row runs `codex resume <id>`. Quitting the TUI, or `ctrl+\`, is the detach: the
+  thread goes on in the daemon. A turn waiting on an approval shows `needs input`, and `codex resume`
+  shows the prompt to answer.
+- The daemon lets go of an idle thread with no client after a couple of minutes. The threads Relay
+  started (Codex records `relay` as their originator) stay on the list as `resting`, the latest 50
+  (`thread/list`). Enter resumes one; mail pings it (`codex queue … --resume` loads it again).
+- `ctrl+x` (or `/stop`) on a working Codex row interrupts its turn (`turn/interrupt`); the thread
+  stays.
+
 ## Commands
 
 ```sh
 rl new [--harness claude] [--cwd DIR] [--name-only] [-- ARGV...]   # a shell, or a harness; prints the name
+                                # (codex: the words are its prompt, it starts on the daemon, the thread id is printed)
 rl ls [--json]                  # the list, once
 rl attach <name>                # ctrl+\ detaches
 rl stop <name>                  # close a running session
@@ -196,7 +219,7 @@ To show it in a zsh prompt: `PROMPT='${RL_SESSION:+[$RL_SESSION] }'$PROMPT`.
 
 How a recipient learns it has mail depends on its harness:
 
-- **Codex**: pushed. `send` also runs `codex queue --thread <id> --message "relay mail from <you>: call the relay inbox tool to read it" --resume` (the profile's `sessions.ping`) on the recipient's thread: a Codex row's id, or what a held Codex session's hooks said. `send` says `· pinged codex`, or why codex didn't take the ping; the message is left either way.
+- **Codex**: pushed. `send` also runs `codex queue --thread <id> --message "relay mail from <you>: call the relay inbox tool to read it" --resume` (the profile's `sessions.ping`) on the recipient's thread: a Codex row's id, which is its thread's. `send` says `· pinged codex`, or why codex didn't take the ping; the message is left either way.
 - **Claude**: told by Relay's hooks. With mail waiting, each prompt gets a line of context saying so (`UserPromptSubmit`), and at the end of a turn the `Stop` hook keeps Claude going one more turn to read it, once for the same mail. Needs the hooks `rl setup` installs (or a session Relay holds). When one Claude session sends to one of Claude's background sessions, `send` also suggests waking it now with Claude's `SendMessage`, by the name `claude agents` shows for it.
 - **Antigravity, shells and the rest**: they find it when they call `inbox`.
 
@@ -211,22 +234,19 @@ Not verified against the live CLIs:
 
 - What `claude --bg` prints. Relay takes the first 8-hex word as the session id; if there is none, the start says so.
 - `claude stop <id>` from `ctrl+x`.
-- That `codex resume <id>` rejoins a thread the Codex app-server has loaded, and when a thread counts as loaded.
+- `turn/interrupt` from `ctrl+x` on a Codex row, and `codex app-server daemon start` when no daemon
+  runs. A started thread's first turn, a pending approval shown by `codex resume`, and an idle
+  thread's unloading were checked on codex 0.167.
 - The Gemini MCP entry (`mcpServers.relay` in its `settings.json`).
 - `claude agents` state mapping against its own screen.
 - Antigravity (`agy`): no hooks and no screen patterns of its own yet, so its state is the generic guess.
   Whether `agy` hands its MCP servers the held session's environment (`RL_SESSION`), so `rl mcp` there
   knows its caller.
-- A Codex session Relay holds stays Relay's when you detach. Its thread can't be left with Codex's
-  own daemon. Checked on codex 0.167: the daemon lists a TUI's thread as loaded while the TUI runs
-  and for a few seconds after it exits, but not a minute later. A hand-off would leave a row that
-  vanishes. `codex resume <id>` still finds the saved conversation.
-- A held Codex's hooks and `rl mcp --harness codex` run in Codex's app-server daemon, not under the
-  holder, so they carry no `RL_SESSION`. The first hook of a thread claims the live held Codex in
-  the same folder that has no thread yet and began under 120 s ago (`meta.native_id`); with two
-  such sessions started together, the earliest-started is taken, which can swap their threads.
-  The MCP server can't know its thread, so a held Codex's `from`/`as` stays as given, not read from
-  its session.
+- A Codex thread started with bare `codex` (its TUI) is listed only while the daemon has it loaded:
+  its originator is the TUI's, not Relay's, so once unloaded it leaves the list (`codex resume`
+  still finds it).
+- `rl mcp --harness codex` runs in Codex's app-server daemon, so it can't tell which thread called
+  it: a Codex caller passes `from`/`as` itself.
 
 ## Docs
 

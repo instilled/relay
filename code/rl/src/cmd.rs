@@ -1,13 +1,16 @@
 //! The `new | ls | stop | rm` commands.
 
+use crate::sources::{self, Adapter};
 use crate::spawn::{self, Start};
 use crate::store::sessions::{self, Held, Status};
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use jiff::Timestamp;
 use rl_core::Home;
+use rl_detect::adapter::Started;
 use rl_session::client::Session;
 use rl_session::exit::read_exit_file;
-use std::path::PathBuf;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 const STOP_WAIT: Duration = Duration::from_secs(6);
@@ -25,6 +28,9 @@ pub async fn new(
         Some(c) => c,
         None => std::env::current_dir()?,
     };
+    if let Some((a, words)) = never_held(harness.as_deref(), &argv) {
+        return new_own(a, &cwd, name_only, words).await;
+    }
     let (cols, rows) = terminal_size();
     let meta = spawn::start(
         home,
@@ -43,6 +49,60 @@ pub async fn new(
         eprintln!("started {} ({})", meta.name, meta.harness);
     }
     Ok(())
+}
+
+/// The adapter of the harness `rl new` was asked for (`--harness`, else
+/// what `argv` runs), where Relay never holds it (Codex), and the words
+/// after its binary.
+fn never_held<'a>(harness: Option<&str>, argv: &'a [String]) -> Option<(&'static dyn Adapter, &'a [String])> {
+    let (name, words) = match harness {
+        Some(h) => (h.to_string(), argv),
+        None => (crate::rows::registry().detect(argv)?.name.clone(), argv.get(1..)?),
+    };
+    Some((sources::adapter(&name).filter(|a| a.never_held())?, words))
+}
+
+/// `rl new` for a harness Relay never holds: started in its own background
+/// with `words` as its prompt (its id printed), or, with none, run here in
+/// the foreground, where it begins a session itself (the process exits as
+/// it did).
+async fn new_own(a: &'static dyn Adapter, cwd: &Path, name_only: bool, words: &[String]) -> Result<()> {
+    let what = a.harness();
+    if let Some(flag) = words.iter().find(|w| w.starts_with('-')) {
+        bail!("{what} starts in its own background, where `{flag}` can't go: give it a prompt only");
+    }
+    let cwd = std::fs::canonicalize(cwd).with_context(|| format!("cwd {}", cwd.display()))?;
+    let prompt = (!words.is_empty()).then(|| words.join(" "));
+    let at = cwd.clone();
+    let started = tokio::task::spawn_blocking(move || a.start(&at, None, prompt.as_deref(), &HashSet::new())).await?;
+    match started {
+        Some(Ok(Started::Id(id))) => {
+            println!("{id}");
+            if !name_only {
+                eprintln!(
+                    "started {what} {id} in its background · `{}` attaches",
+                    a.attach_argv(&id).join(" ")
+                );
+            }
+            Ok(())
+        }
+        Some(Ok(Started::Here(argv))) => {
+            let (bin, args) = argv.split_first().context("nothing to run")?;
+            let status = tokio::process::Command::new(bin)
+                .args(args)
+                .current_dir(&cwd)
+                .status()
+                .await
+                .with_context(|| format!("running {bin}"))?;
+            match status.code() {
+                Some(0) => Ok(()),
+                Some(code) => std::process::exit(code),
+                None => bail!("{what} was killed"),
+            }
+        }
+        Some(Err(e)) => Err(e.context(format!("start {what}"))),
+        None => bail!("{what} has no background to start in"),
+    }
 }
 
 /// The caller's terminal when it is one, else a default.

@@ -29,7 +29,7 @@ flowchart TB
     rl <--> files
     hook --> files
     mcp <--> files
-    rl -- "asks, only reads" --> native
+    rl -- "lists, starts, stops" --> native
 ```
 
 - `rl` is started by you. The list reads the files, asks each harness for its own sessions, and
@@ -63,7 +63,7 @@ and its socket.
 | --- | --- | --- |
 | `sessions/<name>/meta.json` | `rl new` | name, harness, kind, cwd, start |
 | `sessions/<name>/state.json` | holder | state read from the screen |
-| `sessions/<name>/hook.json` | `rl hook` | what the agent's own hooks last said; for a held Codex (hooks run in its daemon, profile `detached_env`) the first hook of a thread claims the session by folder and start, setting `meta.native_id` |
+| `sessions/<name>/hook.json` | `rl hook` | what the agent's own hooks last said |
 | `sessions/<name>/exit`, `stopped`, `sock` | holder, `rl stop` | how it ended, that it was stopped, its socket |
 | `state/<agent>/<session_id>.json` | `rl hook` | a session Relay does not hold; removed on `ended` |
 | `mail/<key>/<ns>-<pid>-<n>-<from>.json` | `rl mcp` | a waiting message; deleted when read |
@@ -83,7 +83,8 @@ Folders are 0700.
   profile's `hooks.args`. The holder detaches, binds the socket and tells `rl` it is ready.
   The list's command line (`tui/cmdline.rs`) starts the same way: a first word a profile claims
   (`words`) starts that agent with the rest as its prompt (placed by the profile's `prompt`;
-  Claude through its adapter's `start`, `claude --bg`); any other line runs held as
+  a harness with an adapter through its `start`: Claude's `claude --bg`, Codex's a thread on its
+  daemon, or bare `codex` run here when there is no prompt); any other line runs held as
   `$SHELL -ic '<line>` and `exec $SHELL'`, a session of kind shell. Completion reads `PATH` once
   per list. A line starting with `/` is a command instead (`tui/slash.rs`): each names a key's
   action (`/pin` is `ctrl+t`, `/stop` is `ctrl+x` on a live row without the second press) and runs it on
@@ -95,11 +96,22 @@ Folders are 0700.
   worktree's `.git` file is followed through its `commondir` to the main checkout; a submodule's,
   which has none, is a project of its own). State comes from, in order, the
   agent's hooks, the harness's own listing, then regexes over the screen.
+- **Codex.** Never held (`Adapter::never_held`). A start opens the daemon through `codex
+  app-server proxy` (or first `codex app-server daemon start`), introduces itself as `relay`, sends
+  `thread/start {cwd}`, `thread/name/set` if named, `turn/start` with the prompt, and lets go; the
+  daemon runs the turn with no client, and an approval it needs leaves the thread `active` with
+  `waitingOnApproval` until `codex resume` answers it. With no prompt, `Started::Here`: the list
+  hands the terminal to `codex` in the folder (`To::Here`), `rl new` runs it in the foreground.
+  `rl new --harness codex` (or `rl new -- codex …`) takes the same path and prints the thread id.
+  The listing adds Relay's own threads the daemon has unloaded (`thread/list`, originator
+  `relay`, status `notLoaded`) as `resting` rows. A hooked Codex conversation at rest attaches with
+  `codex resume`, never held. Stop is `turn/interrupt` on the running turn.
 - **Attach.** A held session: `rl` connects to its socket, gets the screen, then live bytes.
   `ctrl+\` detaches. A native one: `rl` runs the profile's `attach` (`claude attach <id>`,
   `codex resume <id>`) in this terminal.
 - **Stop and remove.** A held session gets a `stopped` mark, then the holder is asked to close. A
-  native Claude one is `claude stop <id>`. `rm` removes the folder of one not running. `rl` never
+  native one through its adapter (`Adapter::stops`, `Adapter::stop`): Claude's is `claude stop
+  <id>`, Codex's interrupts a running turn. `rm` removes the folder of one not running. `rl` never
   runs `claude rm`.
 - **Hook.** `rl hook <agent> <Event>` reads the hook JSON on stdin and the profile's
   `sessions.hooks.events` and writes `hook.json` (under a held session, `RL_SESSION` set) or
@@ -115,8 +127,7 @@ Folders are 0700.
   outside: its adapter's `ping_argv` (the profile's `sessions.ping`; Codex's `codex queue --thread
   <id> --message <text> --resume`), run through `adapter::run` with `RELAY_ASKING` set so the
   harness's own hooks let it go, within `PING_WAIT`. The id is a native row's (a Codex thread's),
-  else what a held session's `hook.json` says (its conversation id, which for Codex is the
-  thread's). No id, no ping; a failed ping is reported in `send`'s text, never as a failure.
+  else what a held session's `hook.json` says (its conversation id). No id, no ping; a failed ping is reported in `send`'s text, never as a failure.
   Claude has no such way in, so its hooks carry the news: `rl hook claude UserPromptSubmit` prints
   `hookSpecificOutput.additionalContext` while mail waits in the session's own folders
   (`mcp::own_keys`: the held session's name and ids, else the payload's `session_id`, read from the
@@ -148,9 +159,15 @@ when the profile loads. Keys:
 `headless`, `model_flag`, `small_model` and `says` are gone and fail to load.
 
 The facts per harness are in its YAML. What is the same for all is code: the hook settings file
-format (`user_hooks`), `rl hook`, and the two readers named by `list.reader`. A reader parses one
-harness's own listing: `claude-agents` runs `claude agents --json --all`; `codex-threads` talks
-JSON-RPC to `codex app-server proxy` and only reads (`thread/loaded/list`, `thread/read`).
+format (`user_hooks`), `rl hook`, and the two readers named by `list.reader`. A reader is an
+adapter (`rl-detect/src/adapter.rs`, trait `Adapter`): it lists, attaches, starts (`start`, which
+says what it began: `Started::Id` in the background, or `Started::Here`, an argv to run in the
+terminal), carries on, stops and pings one harness's own sessions. `claude-agents` runs `claude
+agents --json --all`, and starts by running `claude --bg` and confirming the id it printed in the
+listing (`claude_native::begin`); `codex-threads` talks JSON-RPC to `codex app-server proxy`
+(`codex_native::connect`, one WebSocket client for listing, starting and stopping:
+`thread/loaded/list`, `thread/read`, `thread/list`, `thread/start`, `turn/start`,
+`turn/interrupt`).
 
 ## 6. MCP
 
@@ -194,16 +211,19 @@ Taken from the task reports; none is exercised by the tests.
 
 - What `claude --bg` prints (the first 8-hex word is taken as the id).
 - `claude stop <id>` on a live session.
-- That `codex resume <id>` attaches to a thread the app-server has loaded, and when a thread stays loaded.
+- `turn/interrupt` on a live thread, and `codex app-server daemon start`.
 - The Gemini MCP entry format.
 - Whether `claude --bg` sessions run user-level hooks (why the list asks `claude agents`).
-- Checked live on codex 0.167, against handing a held Codex session to its daemon on detach: a
-  thread stays loaded in the shared app-server only while a TUI holds it, and is gone within a
-  minute of the TUI's exit. So a held Codex session stays held.
+- Checked live on codex 0.167: a thread started over the proxy runs its turn with no client; an
+  idle one with no client is unloaded after about two minutes (hence the `resting` rows); a turn
+  that needs an approval with no client connected waits (`active`, `waitingOnApproval`), and
+  `codex resume <id>` shows the approval prompt; such a thread's `source` is `vscode` and its
+  `originator` the `clientInfo.name` Relay gave (`relay`).
 - Antigravity's screen (`agy`): its profile has no patterns or hooks of its own; only `agy --help`
   was read (`-i` is `--prompt-interactive`).
 
-Live tests against real CLIs are `#[ignore]`. Tests never touch the real `~/.relay`, `~/.claude`,
+Live tests against real CLIs are `#[ignore]`. Codex's daemon in the tests is a stand-in
+(`fixtures/stand-in-codex-daemon`, Python 3) that speaks the WebSocket and the JSON-RPC. Tests never touch the real `~/.relay`, `~/.claude`,
 `~/.codex` or `~/.gemini`; they use `RELAY_HOME`, `HOME`, `CLAUDE_CONFIG_DIR`, `CODEX_HOME`.
 
 ## 8. Gates

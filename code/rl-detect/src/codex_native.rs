@@ -1,8 +1,10 @@
 //! Codex's own sessions, 1:1 as its shared app-server daemon has them: the
 //! threads it has loaded (`thread/loaded/list`), each read as it stands
 //! (`thread/read`) — its name, its folder, whether it waits on you, works
-//! or is ready, and when it last moved. A thread only on disk is not a
-//! session; a sub-agent's thread is its parent's, not one of its own.
+//! or is ready, and when it last moved — and the threads Relay started that
+//! the daemon has since let go of (`thread/list`, by the originator Relay
+//! gives itself, `relay`), at rest on disk. Another thread only on disk is
+//! not a session; a sub-agent's thread is its parent's, not one of its own.
 //!
 //! The daemon speaks JSON-RPC over a WebSocket on its control socket;
 //! `codex app-server proxy` (the profile's `list` args) bridges that
@@ -10,13 +12,21 @@
 //! handshake, and one text frame per message. With no daemon running the
 //! proxy cannot connect, and Codex has no sessions of its own to list.
 //!
+//! Relay starts a Codex session on the daemon, never in a holder: a thread
+//! (`thread/start` with the folder only, so your own approval and sandbox
+//! settings hold) and its first turn (`turn/start` with the prompt); then it
+//! lets go, and the daemon runs the turn with no client. No prompt, no turn
+//! to start: `codex` itself runs in this terminal, and its TUI makes the
+//! thread. With no daemon running, a start runs `codex app-server daemon
+//! start` first.
+//!
 //! Enter on one runs the profile's `sessions.attach` with the thread's id
 //! (`codex resume <id>`), which opens it through the same daemon: the
-//! app-server rejoins a thread that is running, so attaching to one is
-//! resuming it. Codex has no background start, so what Relay starts or
-//! carries on for it, Relay holds.
+//! app-server rejoins a thread that is running (and shows an approval it
+//! waits on), or loads one at rest. Stopping one interrupts its running
+//! turn (`turn/interrupt`); the thread stays.
 
-use crate::adapter::{Adapter, NativeRow, NativeState};
+use crate::adapter::{Adapter, NativeRow, NativeState, Started};
 use crate::registry::Profile;
 use crate::sessions::{ID, TEXT};
 use anyhow::{Context, Result, anyhow, bail};
@@ -24,11 +34,11 @@ use jiff::Timestamp;
 use rl_core::state::RunState;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::process::CommandExt;
-use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::path::{Path, PathBuf};
+use std::process::{ChildStdin, ChildStdout, Command, Stdio};
 use std::time::Duration;
 
 /// The reader a profile's `sessions.list` names for this listing.
@@ -38,8 +48,22 @@ pub const READER: &str = "codex-threads";
 /// answer.
 pub const LIST_WAIT: Duration = Duration::from_secs(5);
 
+/// How long a start, or a stop, may take on the daemon.
+pub const START_WAIT: Duration = Duration::from_secs(30);
+
 /// What the proxy says when there is no daemon to connect to.
 const NO_DAEMON: &str = "failed to connect to socket";
+
+/// What starts the daemon where none runs (`codex app-server daemon --help`,
+/// codex 0.167).
+const DAEMON_START: [&str; 3] = ["app-server", "daemon", "start"];
+
+/// The client name Relay gives the daemon; a thread it starts keeps it as
+/// its `originator`, which is how Relay knows its own threads again.
+pub const CLIENT: &str = "relay";
+
+/// How many of Relay's threads at rest are listed, the latest first.
+const RESTING: u32 = 50;
 
 /// Codex's adapter: its binary and the arguments its profile gives.
 #[derive(Debug, Clone)]
@@ -73,6 +97,20 @@ impl Codex {
             .chain(args.into_iter().cloned())
             .collect()
     }
+
+    /// Does `work` on the daemon, started first where none runs.
+    fn on_daemon<T: Send + 'static>(
+        &self,
+        work: impl FnOnce(&mut Daemon) -> Result<T> + Send + Clone + 'static,
+    ) -> Result<T> {
+        let proxy = self.argv(&self.list);
+        if let Some(done) = connect(&proxy, START_WAIT, work.clone())? {
+            return Ok(done);
+        }
+        let start: Vec<String> = DAEMON_START.iter().map(|a| a.to_string()).collect();
+        crate::adapter::run(&self.argv(&start), None, true, START_WAIT)?;
+        connect(&proxy, START_WAIT, work)?.context("no codex daemon to connect to, even once started")
+    }
 }
 
 impl Adapter for Codex {
@@ -96,19 +134,47 @@ impl Adapter for Codex {
         self.argv(&args)
     }
 
-    fn start_argv(&self, _: Option<&str>, _: Option<&str>) -> Option<Vec<String>> {
-        None
+    /// A prompt: a thread on the daemon, its first turn started. None: the
+    /// TUI, here.
+    fn start(
+        &self,
+        cwd: &Path,
+        name: Option<&str>,
+        prompt: Option<&str>,
+        _: &HashSet<String>,
+    ) -> Option<Result<Started>> {
+        let Some(prompt) = prompt.filter(|p| !p.trim().is_empty()) else {
+            return Some(Ok(Started::Here(vec![self.bin.clone()])));
+        };
+        let (cwd, name, prompt) = (
+            cwd.to_path_buf(),
+            name.filter(|n| !n.trim().is_empty()).map(str::to_string),
+            prompt.to_string(),
+        );
+        Some(
+            self.on_daemon(move |d| begin(d, &cwd, name.as_deref(), &prompt))
+                .map(Started::Id),
+        )
     }
 
+    fn never_held(&self) -> bool {
+        true
+    }
+
+    /// None: a conversation is a thread on the daemon already; enter
+    /// resumes it there (`attach_argv`).
     fn carry_on_argv(&self, _: &str) -> Option<Vec<String>> {
         None
     }
 
-    /// None: the app-server's `turn/interrupt` stops a turn, not a session,
-    /// and `thread/unsubscribe` only lets go of it; nothing stops a thread
-    /// from outside it.
-    fn stop_argv(&self, _: &str) -> Option<Vec<String>> {
-        None
+    /// A thread with a turn running: stop interrupts it.
+    fn stops(&self, row: &NativeRow) -> bool {
+        matches!(row.state.state, RunState::Working | RunState::NeedsInput)
+    }
+
+    fn stop(&self, id: &str, _: &Path) -> Result<()> {
+        let id = id.to_string();
+        self.on_daemon(move |d| interrupt(d, &id))
     }
 
     fn ping_argv(&self, id: &str, text: &str) -> Option<Vec<String>> {
@@ -121,10 +187,6 @@ impl Adapter for Codex {
             .map(|a| a.replace(ID, id).replace(TEXT, text))
             .collect();
         Some(self.argv(&args))
-    }
-
-    fn started_ids(&self, _: &str) -> Vec<String> {
-        Vec::new()
     }
 }
 
@@ -145,6 +207,9 @@ pub struct Thread {
     /// Set on a sub-agent's thread: its parent's.
     #[serde(default)]
     pub parent_thread_id: Option<String>,
+    /// The client that started it: `relay` for Relay's (`CLIENT`).
+    #[serde(default)]
+    pub originator: Option<String>,
     /// Unix seconds.
     #[serde(default)]
     pub created_at: Option<i64>,
@@ -165,8 +230,8 @@ pub struct Status {
 
 /// How Codex says a thread stands: one active and waiting on an approval or
 /// an answer `needs input`, one active `working`, one loaded at rest
-/// `ready`, one the app-server lost to an error `error`. A word it says
-/// that is not known here is kept as said.
+/// `ready`, one the app-server lost to an error `error`, one only on disk
+/// `resting`. A word it says that is not known here is kept as said.
 pub fn state(status: &Status) -> NativeState {
     let waiting = status
         .active_flags
@@ -176,6 +241,7 @@ pub fn state(status: &Status) -> NativeState {
         "active" if waiting => ("needs input", RunState::NeedsInput),
         "active" => ("working", RunState::Working),
         "idle" => ("ready", RunState::Idle),
+        "notLoaded" => ("resting", RunState::Idle),
         "systemError" => ("error", RunState::Failed),
         other => (other, RunState::Idle),
     };
@@ -186,13 +252,19 @@ pub fn state(status: &Status) -> NativeState {
 }
 
 /// The threads as rows: Codex's sessions, not its sub-agents' threads, not
-/// one only on disk, not one without a whole folder.
+/// one only on disk that Relay did not start, not one without a whole
+/// folder. A thread listed twice stands once, as first listed.
 pub fn rows(threads: Vec<Thread>) -> Vec<NativeRow> {
+    let mut seen = HashSet::new();
     threads
         .into_iter()
         .filter(|t| {
-            !t.id.is_empty() && t.parent_thread_id.is_none() && t.status.kind != "notLoaded" && t.cwd.is_absolute()
+            !t.id.is_empty()
+                && t.parent_thread_id.is_none()
+                && (t.status.kind != "notLoaded" || t.originator.as_deref() == Some(CLIENT))
+                && t.cwd.is_absolute()
         })
+        .filter(|t| seen.insert(t.id.clone()))
         .map(row)
         .collect()
 }
@@ -228,10 +300,24 @@ pub fn row(t: Thread) -> NativeRow {
     }
 }
 
-/// Runs `argv` (the proxy) and asks the daemon behind it for its loaded
-/// threads, for no longer than `wait`. No daemon: none. Its hooks know the
-/// run for Relay's own ask.
+/// The daemon, through the proxy's pipes.
+pub type Daemon = Rpc<ChildStdout, ChildStdin>;
+
+/// Runs `argv` (the proxy) and asks the daemon behind it for its threads,
+/// for no longer than `wait`. No daemon: none.
 pub fn ask(argv: &[String], wait: Duration) -> Result<Vec<Thread>> {
+    Ok(connect(argv, wait, listed)?.unwrap_or_default())
+}
+
+/// Runs `argv` (the proxy), opens the daemon behind it (`Rpc::open`) and
+/// does `work` there, for no longer than `wait`; then the proxy goes. None:
+/// there is no daemon to connect to. Its hooks know the run for Relay's own
+/// ask.
+pub fn connect<T: Send + 'static>(
+    argv: &[String],
+    wait: Duration,
+    work: impl FnOnce(&mut Daemon) -> Result<T> + Send + 'static,
+) -> Result<Option<T>> {
     let (bin, args) = argv.split_first().ok_or_else(|| anyhow!("nothing to run"))?;
     let mut child = Command::new(bin);
     child
@@ -258,7 +344,7 @@ pub fn ask(argv: &[String], wait: Duration) -> Result<Vec<Thread>> {
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let said = match (stdout, stdin) {
-            (Some(r), Some(w)) => threads(r, w),
+            (Some(r), Some(w)) => Rpc::open(r, w).and_then(|mut d| work(&mut d)),
             _ => Err(anyhow!("no pipe to `codex app-server proxy`")),
         };
         let _ = tx.send(said);
@@ -270,8 +356,8 @@ pub fn ask(argv: &[String], wait: Duration) -> Result<Vec<Thread>> {
     // reason to wait long.
     let err = err_rx.recv_timeout(Duration::from_millis(200)).unwrap_or_default();
     match said {
-        Ok(Ok(threads)) => Ok(threads),
-        Ok(Err(_)) if err.contains(NO_DAEMON) => Ok(Vec::new()),
+        Ok(Ok(done)) => Ok(Some(done)),
+        Ok(Err(_)) if err.contains(NO_DAEMON) => Ok(None),
         Ok(Err(e)) => match err.lines().find(|l| !l.trim().is_empty()) {
             Some(why) => bail!("`codex app-server proxy` failed: {why}"),
             None => Err(e.context("`codex app-server proxy`")),
@@ -280,28 +366,21 @@ pub fn ask(argv: &[String], wait: Duration) -> Result<Vec<Thread>> {
     }
 }
 
-/// The daemon's loaded threads, asked over the WebSocket that `r` and `w`
-/// carry: `initialize`, then `thread/loaded/list`, then `thread/read` for
-/// each. One gone before it is read is left out.
+/// The daemon's threads over the WebSocket that `r` and `w` carry: its
+/// loaded ones, then Relay's at rest.
 pub fn threads(r: impl Read, w: impl Write) -> Result<Vec<Thread>> {
-    let mut rpc = Rpc {
-        ws: Ws::open(r, w)?,
-        next: 0,
-    };
-    rpc.call_all(vec![(
-        "initialize",
-        json!({"clientInfo": {"name": "relay", "title": "Relay", "version": env!("CARGO_PKG_VERSION")}}),
-    )])?
-    .remove(0)
-    .map_err(|e| anyhow!("initialize: {e}"))?;
-    rpc.ws.send(&json!({"jsonrpc": "2.0", "method": "initialized"}))?;
+    listed(&mut Rpc::open(r, w)?)
+}
+
+/// The daemon's loaded threads (`thread/loaded/list`, then `thread/read`
+/// for each; one gone before it is read is left out), then the threads
+/// Relay started that it has let go of (`thread/list`, the latest
+/// `RESTING`; a daemon that cannot say adds none).
+pub fn listed<R: Read, W: Write>(rpc: &mut Rpc<R, W>) -> Result<Vec<Thread>> {
     let mut ids: Vec<String> = Vec::new();
     let mut cursor: Option<String> = None;
     loop {
-        let page = rpc
-            .call_all(vec![("thread/loaded/list", json!({"cursor": cursor}))])?
-            .remove(0)
-            .map_err(|e| anyhow!("thread/loaded/list: {e}"))?;
+        let page = rpc.call("thread/loaded/list", json!({"cursor": cursor}))?;
         let page: Loaded = serde_json::from_value(page).context("reading `thread/loaded/list`")?;
         ids.extend(page.data);
         match page.next_cursor {
@@ -313,14 +392,63 @@ pub fn threads(r: impl Read, w: impl Write) -> Result<Vec<Thread>> {
         .iter()
         .map(|id| ("thread/read", json!({"threadId": id, "includeTurns": false})))
         .collect();
-    Ok(rpc
+    let mut threads: Vec<Thread> = rpc
         .call_all(reads)?
         .into_iter()
         .filter_map(|said| {
             let read: Read1 = serde_json::from_value(said.ok()?).ok()?;
             Some(read.thread)
         })
-        .collect())
+        .collect();
+    let resting = rpc
+        .call(
+            "thread/list",
+            json!({"limit": RESTING, "sortKey": "updated_at", "sourceKinds": ["vscode", "appServer"]}),
+        )
+        .ok()
+        .and_then(|page| serde_json::from_value::<Listed>(page).ok())
+        .map(|page| page.data)
+        .unwrap_or_default();
+    threads.extend(
+        resting
+            .into_iter()
+            .filter_map(|t| serde_json::from_value::<Thread>(t).ok())
+            .filter(|t| t.originator.as_deref() == Some(CLIENT) && t.status.kind == "notLoaded"),
+    );
+    Ok(threads)
+}
+
+/// Starts a thread in `cwd` on the daemon, named `name` if given, and its
+/// first turn on `prompt`: the thread's id. Only the folder is given, so
+/// the thread takes your own settings (model, approvals, sandbox).
+pub fn begin<R: Read, W: Write>(rpc: &mut Rpc<R, W>, cwd: &Path, name: Option<&str>, prompt: &str) -> Result<String> {
+    let started = rpc.call("thread/start", json!({"cwd": cwd}))?;
+    let id = started["thread"]["id"]
+        .as_str()
+        .filter(|id| !id.is_empty())
+        .context("`thread/start` said no thread id")?
+        .to_string();
+    if let Some(name) = name {
+        rpc.call("thread/name/set", json!({"threadId": id, "name": name}))?;
+    }
+    rpc.call(
+        "turn/start",
+        json!({"threadId": id, "input": [{"type": "text", "text": prompt}]}),
+    )?;
+    Ok(id)
+}
+
+/// Interrupts the turn the thread `id` is running (`turn/interrupt`).
+pub fn interrupt<R: Read, W: Write>(rpc: &mut Rpc<R, W>, id: &str) -> Result<()> {
+    let read = rpc.call("thread/read", json!({"threadId": id, "includeTurns": true}))?;
+    let turn = read["thread"]["turns"]
+        .as_array()
+        .and_then(|turns| turns.iter().rev().find(|t| t["status"] == "inProgress"))
+        .and_then(|t| t["id"].as_str())
+        .context("no turn is running in it")?
+        .to_string();
+    rpc.call("turn/interrupt", json!({"threadId": id, "turnId": turn}))?;
+    Ok(())
 }
 
 #[derive(Deserialize)]
@@ -331,6 +459,13 @@ struct Loaded {
     next_cursor: Option<String>,
 }
 
+/// A page of `thread/list`, each thread read on its own: one that does not
+/// read is left out, not the page.
+#[derive(Deserialize)]
+struct Listed {
+    data: Vec<Value>,
+}
+
 #[derive(Deserialize)]
 struct Read1 {
     thread: Thread,
@@ -338,12 +473,34 @@ struct Read1 {
 
 /// JSON-RPC calls over the WebSocket, answered in any order, among
 /// notifications.
-struct Rpc<R: Read, W: Write> {
+pub struct Rpc<R: Read, W: Write> {
     ws: Ws<R, W>,
     next: u64,
 }
 
 impl<R: Read, W: Write> Rpc<R, W> {
+    /// Takes the WebSocket that `r` and `w` carry, and introduces Relay
+    /// (`initialize`, then `initialized`) as `CLIENT`.
+    pub fn open(r: R, w: W) -> Result<Rpc<R, W>> {
+        let mut rpc = Rpc {
+            ws: Ws::open(r, w)?,
+            next: 0,
+        };
+        rpc.call(
+            "initialize",
+            json!({"clientInfo": {"name": CLIENT, "title": "Relay", "version": env!("CARGO_PKG_VERSION")}}),
+        )?;
+        rpc.ws.send(&json!({"jsonrpc": "2.0", "method": "initialized"}))?;
+        Ok(rpc)
+    }
+
+    /// One call: its result, or its error as `<method>: <message>`.
+    pub fn call(&mut self, method: &str, params: Value) -> Result<Value> {
+        self.call_all(vec![(method, params)])?
+            .remove(0)
+            .map_err(|e| anyhow!("{method}: {e}"))
+    }
+
     /// Sends every call, then reads until each is answered: its result, or
     /// the error's message, in the order called.
     fn call_all(&mut self, calls: Vec<(&str, Value)>) -> Result<Vec<Result<Value, String>>> {
@@ -515,8 +672,8 @@ mod tests {
 
     /// A stand-in app-server: takes the upgrade, then answers each call as
     /// recorded (its id its caller's), the notifications first. Returns
-    /// the methods it was called with.
-    fn serve(s: UnixStream) -> std::thread::JoinHandle<Vec<String>> {
+    /// what it was sent, each message whole.
+    fn serve(s: UnixStream) -> std::thread::JoinHandle<Vec<Value>> {
         std::thread::spawn(move || {
             let answers = answers();
             let mut r = BufReader::new(s.try_clone().unwrap());
@@ -549,12 +706,12 @@ mod tests {
             for n in answers["notifications"].as_array().unwrap() {
                 send(&mut w, n);
             }
-            let mut methods = Vec::new();
+            let mut sent = Vec::new();
             let mut ws = Ws { r, w: std::io::sink() };
             while let Ok(text) = ws.recv() {
                 let m: Value = serde_json::from_str(&text).unwrap();
                 let method = m["method"].as_str().unwrap().to_string();
-                methods.push(method.clone());
+                sent.push(m.clone());
                 let Some(id) = m.get("id") else { continue };
                 let mut answer = match method.as_str() {
                     "thread/read" => answers["thread/read"][m["params"]["threadId"].as_str().unwrap()].clone(),
@@ -563,8 +720,22 @@ mod tests {
                 answer["id"] = id.clone();
                 send(&mut w, &answer);
             }
-            methods
+            sent
         })
+    }
+
+    fn methods(sent: &[Value]) -> Vec<&str> {
+        sent.iter().map(|m| m["method"].as_str().unwrap()).collect()
+    }
+
+    /// What the stand-in app-server was sent while `talk` spoke to it.
+    fn talk<T>(talk: impl FnOnce(&mut Rpc<UnixStream, UnixStream>) -> T) -> (T, Vec<Value>) {
+        let (ours, theirs) = UnixStream::pair().unwrap();
+        let server = serve(theirs);
+        let mut rpc = Rpc::open(ours.try_clone().unwrap(), ours.try_clone().unwrap()).unwrap();
+        let said = talk(&mut rpc);
+        ours.shutdown(std::net::Shutdown::Both).unwrap();
+        (said, server.join().unwrap())
     }
 
     #[test]
@@ -582,16 +753,66 @@ mod tests {
                 "01a0b3af-810e-7c22-a2e1-4f7a99ebbd3a",
                 "019eb0b3-b03b-7393-915f-967456b2082a",
                 "01a1b670-0000-7000-8000-000000000001",
+                "01a1ca12-0000-7000-8000-00000000000a",
             ],
-            "one gone before it was read is left out"
+            "one gone before it was read is left out; Relay's own at rest after"
         );
-        let methods = server.join().unwrap();
+        let sent = server.join().unwrap();
+        let methods = methods(&sent);
         assert_eq!(&methods[..3], ["initialize", "initialized", "thread/loaded/list"]);
+        assert_eq!(
+            sent[0]["params"]["clientInfo"]["name"], CLIENT,
+            "how its threads are known again"
+        );
         assert!(
-            methods[3..].iter().all(|m| m == "thread/read"),
+            methods[3..9].iter().all(|m| *m == "thread/read"),
             "only reads: {methods:?}"
         );
-        assert_eq!(methods.len(), 3 + 6);
+        assert_eq!(methods[9..], ["thread/list"]);
+    }
+
+    #[test]
+    fn a_start_is_a_thread_in_the_folder_and_its_first_turn_on_the_prompt() {
+        let (id, sent) = talk(|rpc| begin(rpc, Path::new("/w/relay"), Some("login"), "fix the login").unwrap());
+        assert_eq!(id, "01a1ca12-27f5-7ca0-a8ef-8593acea7ed9");
+        assert_eq!(
+            methods(&sent),
+            [
+                "initialize",
+                "initialized",
+                "thread/start",
+                "thread/name/set",
+                "turn/start"
+            ]
+        );
+        assert_eq!(
+            sent[2]["params"],
+            json!({"cwd": "/w/relay"}),
+            "the folder only: your own approvals and sandbox hold"
+        );
+        assert_eq!(sent[3]["params"], json!({"threadId": id, "name": "login"}));
+        assert_eq!(
+            sent[4]["params"],
+            json!({"threadId": id, "input": [{"type": "text", "text": "fix the login"}]})
+        );
+        let (_, sent) = talk(|rpc| begin(rpc, Path::new("/w/relay"), None, "x").unwrap());
+        assert!(!methods(&sent).contains(&"thread/name/set"), "no name, none set");
+    }
+
+    #[test]
+    fn a_stop_interrupts_the_turn_running() {
+        let ((), sent) = talk(|rpc| interrupt(rpc, "01a1ca12-27f5-7ca0-a8ef-8593acea7ed9").unwrap());
+        assert_eq!(
+            methods(&sent)[2..],
+            ["thread/read", "turn/interrupt"],
+            "its turns read, the running one interrupted"
+        );
+        assert_eq!(
+            sent[3]["params"],
+            json!({"threadId": "01a1ca12-27f5-7ca0-a8ef-8593acea7ed9", "turnId": "01a1ca12-2800-7260-8442-e7a848675cd1"})
+        );
+        let (e, _) = talk(|rpc| interrupt(rpc, "01a11d20-8cab-7061-885d-f86e8e313f11").unwrap_err());
+        assert_eq!(e.to_string(), "no turn is running in it");
     }
 
     fn listed() -> Vec<NativeRow> {
@@ -636,8 +857,15 @@ mod tests {
                     "error",
                     RunState::Failed
                 ),
+                (
+                    "01a1ca12-0000-7000-8000-00000000000a",
+                    "fix the login",
+                    "resting",
+                    RunState::Idle
+                ),
             ],
-            "unnamed: its first prompt's first line; a sub-agent's thread is not a session"
+            "unnamed: its first prompt's first line; a sub-agent's thread is not a session; \
+             of the threads at rest only Relay's, and one loaded once"
         );
         let r = &rows[1];
         assert_eq!((r.harness.as_str(), r.cwd.as_path()), ("codex", Path::new("/w/relay")));
@@ -674,6 +902,7 @@ mod tests {
                 active_flags: Vec::new(),
             },
             parent_thread_id: None,
+            originator: None,
             created_at: None,
             updated_at: None,
         };
@@ -714,10 +943,34 @@ mod tests {
             c.attach_argv("01a11d20-8cab-7061-885d-f86e8e313f11"),
             ["codex", "resume", "01a11d20-8cab-7061-885d-f86e8e313f11"]
         );
-        assert_eq!(c.start_argv(Some("x"), Some("y")), None, "Relay holds what it starts");
-        assert_eq!(c.carry_on_argv("s"), None);
-        assert!(c.started_ids("anything").is_empty());
-        assert_eq!(c.stop_argv("t"), None, "nothing stops a thread from outside");
+        assert_eq!(
+            c.start(Path::new("/w"), None, None, &HashSet::new()).unwrap().unwrap(),
+            Started::Here(vec!["codex".into()]),
+            "no prompt: its TUI, here"
+        );
+        assert!(c.never_held());
+        assert_eq!(c.carry_on_argv("s"), None, "a thread is on the daemon already");
+        let mut row = row(Thread {
+            id: "t".into(),
+            session_id: None,
+            name: None,
+            preview: None,
+            cwd: "/w".into(),
+            status: Status {
+                kind: "active".into(),
+                active_flags: Vec::new(),
+            },
+            parent_thread_id: None,
+            originator: None,
+            created_at: None,
+            updated_at: None,
+        });
+        assert!(c.stops(&row), "a turn running");
+        row.state = state(&Status {
+            kind: "idle".into(),
+            active_flags: Vec::new(),
+        });
+        assert!(!c.stops(&row), "nothing running to stop");
         assert_eq!(
             c.ping_argv("01a1", "mail from x").unwrap(),
             [

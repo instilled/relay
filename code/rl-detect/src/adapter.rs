@@ -1,8 +1,9 @@
 //! A harness's own background sessions, through its adapter: what lists
 //! them, attaches to one, starts one in the harness's background and
 //! carries one on there. One adapter per harness that has a background of
-//! its own (Claude's: `claude_native`); a harness without one has its
-//! sessions held by Relay.
+//! its own (Claude's `claude --bg`: `claude_native`; Codex's app-server
+//! daemon: `codex_native`); a harness without one has its sessions held by
+//! Relay.
 //!
 //! A native row says only what the harness says of it, in its words: Relay
 //! re-labels nothing, and a field whose source is missing stays empty.
@@ -70,8 +71,19 @@ pub struct NativeRow {
     pub color: Option<String>,
 }
 
-/// What Relay does with a harness's own background sessions. `list` runs
-/// the harness's CLI and may block; it is asked from a background task.
+/// What a start began.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Started {
+    /// A session in its harness's background, by this id.
+    Id(String),
+    /// Nothing there yet: this, run in this terminal in the folder asked,
+    /// begins one itself (Codex with no prompt: its TUI makes the thread).
+    Here(Vec<String>),
+}
+
+/// What Relay does with a harness's own background sessions. `list`,
+/// `start`, `carry_on` and `stop` run the harness and may block; they are
+/// asked from a background task.
 pub trait Adapter: Send + Sync {
     /// The profile it is the adapter of: `claude`.
     fn harness(&self) -> &str;
@@ -83,70 +95,52 @@ pub trait Adapter: Send + Sync {
     fn list_within(&self, wait: Duration) -> Result<Vec<NativeRow>>;
     /// What attaches this terminal to the session `id`.
     fn attach_argv(&self, id: &str) -> Vec<String>;
-    /// What starts a session in its background, named and prompted if
-    /// given. None: it has no background, and Relay holds what it starts.
-    fn start_argv(&self, name: Option<&str>, prompt: Option<&str>) -> Option<Vec<String>>;
+    /// Starts a session in its background in `cwd`, named and prompted if
+    /// given: what it began. `before`: the ids its last listing had, which
+    /// the new one is not. None: it has no background, and Relay holds
+    /// what it starts.
+    fn start(
+        &self,
+        cwd: &Path,
+        name: Option<&str>,
+        prompt: Option<&str>,
+        before: &HashSet<String>,
+    ) -> Option<Result<Started>>;
+    /// Whether Relay never holds a session of it: what starts one starts it
+    /// in its background or in this terminal (Codex: its daemon runs every
+    /// thread).
+    fn never_held(&self) -> bool {
+        false
+    }
     /// What carries the conversation `session_id` on in its background.
     /// None: it has no background to carry it on in.
     fn carry_on_argv(&self, session_id: &str) -> Option<Vec<String>>;
-    /// What stops its session `id`. None: nothing here stops one.
-    fn stop_argv(&self, id: &str) -> Option<Vec<String>>;
+    /// Runs `argv`, what `carry_on_argv` gave, in `cwd`: the id of the
+    /// session it began there.
+    fn carry_on(&self, argv: &[String], cwd: &Path, before: &HashSet<String>) -> Result<String> {
+        let _ = (argv, cwd, before);
+        bail!("{} carries nothing on in its background", self.harness())
+    }
+    /// Whether `stop` would stop `row`, as it stands.
+    fn stops(&self, row: &NativeRow) -> bool;
+    /// Stops its session `id`, in `cwd` (Claude: `claude stop`; Codex:
+    /// interrupts its running turn).
+    fn stop(&self, id: &str, cwd: &Path) -> Result<()> {
+        let _ = (id, cwd);
+        bail!("nothing stops a {} session from here", self.harness())
+    }
     /// What tells its session `id` `text` from outside it (codex: queues it
     /// on the thread). None: nothing outside it can.
     fn ping_argv(&self, id: &str, text: &str) -> Option<Vec<String>>;
-    /// The ids a start or a carry-on may have said it began, in what it
-    /// printed, the likeliest first. Only its listing says which it is
-    /// (`start`).
-    fn started_ids(&self, printed: &str) -> Vec<String>;
 }
 
 /// How long a list may take.
 pub const LIST_WAIT: Duration = Duration::from_secs(10);
 /// How long a start or a carry-on may take to say its id.
 pub const START_WAIT: Duration = Duration::from_secs(30);
-/// How long a session a start began has to come onto its harness's list.
-pub const LISTED_WAIT: Duration = Duration::from_secs(10);
-/// How often the harness is asked meanwhile.
-const LISTED_EVERY: Duration = Duration::from_millis(250);
-
-/// Runs `argv`, which starts or carries on a session in `a`'s harness's own
-/// background, in `cwd`, and says the id of the session it began — once the
-/// harness lists it, never on what it printed alone: a background session
-/// not among `before` (the ids its last listing had), in `cwd`, by an id it
-/// printed. The listing is asked for up to `listed`. Nothing listed so is
-/// an error in the words it printed last.
-pub fn start(
-    a: &dyn Adapter,
-    argv: &[String],
-    cwd: &Path,
-    before: &HashSet<String>,
-    listed: Duration,
-) -> Result<String> {
-    let printed = run(argv, Some(cwd), false, START_WAIT)?;
-    let ids = a.started_ids(&printed);
-    let deadline = Instant::now() + listed;
-    loop {
-        // The whole loop, its listings too, is bounded by `listed`.
-        let left = deadline.saturating_duration_since(Instant::now());
-        if !ids.is_empty()
-            && !left.is_zero()
-            && let Ok(rows) = a.list_within(left.min(LIST_WAIT))
-            && let Some(id) = ids
-                .iter()
-                .find(|id| !before.contains(*id) && rows.iter().any(|r| r.id == **id && same_dir(&r.cwd, cwd)))
-        {
-            return Ok(id.clone());
-        }
-        if ids.is_empty() || Instant::now() >= deadline {
-            let last = printed.lines().rev().find(|l| !l.trim().is_empty());
-            bail!("{}", last.map_or("it printed nothing", str::trim));
-        }
-        std::thread::sleep(LISTED_EVERY);
-    }
-}
 
 /// Whether two paths name one folder, through links.
-fn same_dir(a: &Path, b: &Path) -> bool {
+pub(crate) fn same_dir(a: &Path, b: &Path) -> bool {
     a == b || matches!((a.canonicalize(), b.canonicalize()), (Ok(x), Ok(y)) if x == y)
 }
 
@@ -326,151 +320,6 @@ mod tests {
             nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None).is_err()
         });
         assert!(gone, "its whole group is killed");
-    }
-
-    /// Lists what it is told to, one answer per ask, the last kept; takes
-    /// every word of eight letters for an id it may have started.
-    struct Scripted(std::sync::Mutex<Vec<Result<Vec<NativeRow>, String>>>);
-
-    impl Adapter for Scripted {
-        fn harness(&self) -> &str {
-            "fake"
-        }
-        fn list_within(&self, _: Duration) -> Result<Vec<NativeRow>> {
-            let mut said = self.0.lock().unwrap();
-            let next = if said.len() > 1 {
-                said.remove(0)
-            } else {
-                said[0].clone()
-            };
-            next.map_err(|e| anyhow!(e))
-        }
-        fn attach_argv(&self, id: &str) -> Vec<String> {
-            vec!["fake".into(), id.into()]
-        }
-        fn start_argv(&self, _: Option<&str>, _: Option<&str>) -> Option<Vec<String>> {
-            None
-        }
-        fn carry_on_argv(&self, _: &str) -> Option<Vec<String>> {
-            None
-        }
-        fn stop_argv(&self, _: &str) -> Option<Vec<String>> {
-            None
-        }
-        fn ping_argv(&self, _: &str, _: &str) -> Option<Vec<String>> {
-            None
-        }
-        fn started_ids(&self, printed: &str) -> Vec<String> {
-            printed
-                .split_whitespace()
-                .filter(|w| w.len() == 8)
-                .map(String::from)
-                .collect()
-        }
-    }
-
-    fn listed(id: &str, cwd: &Path) -> NativeRow {
-        NativeRow {
-            harness: "fake".into(),
-            id: id.into(),
-            session_id: format!("s-{id}"),
-            name: id.into(),
-            cwd: cwd.into(),
-            state: NativeState {
-                words: "working".into(),
-                state: RunState::Working,
-            },
-            summary: None,
-            started: None,
-            ended: None,
-            at: None,
-            pr: None,
-            color: None,
-        }
-    }
-
-    #[test]
-    fn a_started_id_is_only_one_the_harness_then_lists_new_in_its_folder() {
-        let tmp = tempfile::tempdir().unwrap();
-        let here = tmp.path();
-        let elsewhere = Path::new("/elsewhere");
-        let echo = |s: &str| vec!["echo".to_string(), s.into()];
-        let before: HashSet<String> = ["old00001".to_string()].into();
-        // What it printed names one already there, one in another folder,
-        // and the new one, which shows on the third ask.
-        let a = Scripted(std::sync::Mutex::new(vec![
-            Ok(vec![listed("old00001", here)]),
-            Err("no answer".into()),
-            Ok(vec![
-                listed("old00001", here),
-                listed("away0001", elsewhere),
-                listed("new00001", here),
-            ]),
-        ]));
-        let id = start(&a, &echo("old00001 away0001 new00001"), here, &before, LISTED_WAIT).unwrap();
-        assert_eq!(id, "new00001");
-        // Nothing listed it: the error is what it printed last.
-        let a = Scripted(std::sync::Mutex::new(vec![Ok(vec![listed("old00001", here)])]));
-        let at = Instant::now();
-        let printed = "echo started old00001; echo 'not logged in'";
-        let e = start(
-            &a,
-            &["sh".into(), "-c".into(), printed.into()],
-            here,
-            &before,
-            Duration::from_millis(600),
-        )
-        .unwrap_err();
-        assert_eq!(e.to_string(), "not logged in");
-        assert!(at.elapsed() < Duration::from_secs(3));
-        // No id in what it printed at all: said at once.
-        let e = start(&a, &echo("no such session"), here, &before, LISTED_WAIT).unwrap_err();
-        assert_eq!(e.to_string(), "no such session");
-    }
-
-    #[test]
-    fn a_start_waits_no_longer_than_its_deadline_for_a_slow_listing() {
-        struct Slow;
-        impl Adapter for Slow {
-            fn harness(&self) -> &str {
-                "fake"
-            }
-            fn list_within(&self, wait: Duration) -> Result<Vec<NativeRow>> {
-                // Takes whatever it is given, as a hung harness would.
-                std::thread::sleep(wait);
-                Err(anyhow!("no answer"))
-            }
-            fn attach_argv(&self, _: &str) -> Vec<String> {
-                Vec::new()
-            }
-            fn start_argv(&self, _: Option<&str>, _: Option<&str>) -> Option<Vec<String>> {
-                None
-            }
-            fn carry_on_argv(&self, _: &str) -> Option<Vec<String>> {
-                None
-            }
-            fn stop_argv(&self, _: &str) -> Option<Vec<String>> {
-                None
-            }
-            fn ping_argv(&self, _: &str, _: &str) -> Option<Vec<String>> {
-                None
-            }
-            fn started_ids(&self, _: &str) -> Vec<String> {
-                vec!["abcd1234".into()]
-            }
-        }
-        let tmp = tempfile::tempdir().unwrap();
-        let at = Instant::now();
-        let e = start(
-            &Slow,
-            &["echo".into(), "abcd1234".into()],
-            tmp.path(),
-            &HashSet::new(),
-            Duration::from_millis(400),
-        )
-        .unwrap_err();
-        assert_eq!(e.to_string(), "abcd1234");
-        assert!(at.elapsed() < Duration::from_secs(2), "{:?}", at.elapsed());
     }
 
     #[test]

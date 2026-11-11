@@ -1,7 +1,8 @@
-# OpenAI Codex CLI. Its sessions outside Relay, and the exact state of
-# the codex sessions Relay holds, come from user-level hooks `rl setup` adds to
-# ~/.codex/hooks.json once you say yes (and you trust them once in codex's
-# /hooks). Without them the patterns below are the fallback.
+# OpenAI Codex CLI. Relay never holds a codex session: every thread runs in
+# codex's own app-server daemon, which Relay lists and starts threads on
+# (`sessions.list`). What codex's user-level hooks say (`rl setup` adds them to
+# ~/.codex/hooks.json once you say yes, and you trust them once in codex's
+# /hooks) fills in a thread the daemon no longer lists.
 kind: agent
 bins: [codex]
 words: [codex]   # the list's command line starts it on this first word
@@ -34,10 +35,6 @@ sessions:
     # the end's, which codex might not wait for as it exits (uncertain). So
     # hooks arrive out of order, several at once.
     async: true
-    # The daemon (`codex app-server`) runs the hooks, not the terminal's codex:
-    # no RL_SESSION in their environment. A held codex is found by its folder
-    # and start time when its first hook arrives.
-    detached_env: true
     # A user-level hook runs only once trusted in codex's /hooks screen.
     # Uncertain: whether the codex installed (0.162) has hooks on by default
     # ([features] hooks), and whether SessionStart fires before the first
@@ -56,14 +53,17 @@ sessions:
       Stop: idle
       SessionEnd: ended
   # Its own sessions are the threads its shared app-server daemon has
-  # loaded. `codex app-server proxy` bridges the daemon's control socket
-  # (a WebSocket, JSON-RPC inside) to stdio; Relay asks it for
-  # `thread/loaded/list`, then `thread/read` of each, and only reads. No
-  # daemon running: no sessions of its own.
+  # loaded, and the threads Relay started there that it has since let go of
+  # (at rest on disk). `codex app-server proxy` bridges the daemon's control
+  # socket (a WebSocket, JSON-RPC inside) to stdio; Relay asks it for
+  # `thread/loaded/list`, `thread/read` of each, and `thread/list`. No daemon
+  # running: no sessions of its own.
+  # A start is on the daemon too: `thread/start` in the folder, `turn/start`
+  # with the prompt, and Relay lets go (no prompt: `codex` runs in the
+  # terminal, and its TUI makes the thread). Stop interrupts a running turn.
   # Enter on one runs `attach` with its id, which opens it here through
   # the same daemon: the daemon rejoins a running thread (its
-  # `thread/resume` says so). Codex has no background start: a new one, or
-  # one carried on, Relay holds.
+  # `thread/resume` says so), with any approval it waits on.
   list: { args: [app-server, proxy], reader: codex-threads }
   attach: [resume, "{id}"]
   # Mail Relay leaves for one of its sessions (`rl mcp`'s send) is queued on

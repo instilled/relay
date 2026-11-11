@@ -193,7 +193,7 @@ fn answers(connect: &io::Result<UnixStream>) -> bool {
     }
 }
 
-pub fn status_of(dir: &Path, meta: &Meta) -> Status {
+fn status_of(dir: &Path, meta: &Meta) -> Status {
     if let Ok(Some(exit)) = read_exit_file(&dir.join(EXIT)) {
         Status::Ended(exit)
     } else if answers(&UnixStream::connect(&meta.socket)) {
