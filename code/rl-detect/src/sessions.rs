@@ -27,7 +27,12 @@
 //!   start: [--bg]
 //!   name: [-n, "{name}"]
 //!   stop: [stop, "{id}"]
+//!   agents_view: ['^❯ describe a task for a new']
 //! ```
+//!
+//! `agents_view`: regexes over the lines of an attached session's screen
+//! that say it shows the harness's own list of its sessions; Relay's list is
+//! that list, so the attach lets go and the list comes back.
 //!
 //! What an event says is a state word, or the same in a map with more:
 //! - `started`: a session begins, and stands idle. One known already is
@@ -89,6 +94,7 @@ pub(crate) struct SessionsFile {
     name: Option<Vec<String>>,
     stop: Option<Vec<String>>,
     ping: Option<Vec<String>>,
+    agents_view: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -159,6 +165,9 @@ impl SessionsFile {
         if over.ping.is_some() {
             self.ping = over.ping;
         }
+        if over.agents_view.is_some() {
+            self.agents_view = over.agents_view;
+        }
     }
 }
 
@@ -185,7 +194,52 @@ pub struct Sessions {
     /// it, after its binary: `{id}` is the session's (codex: its thread's),
     /// `{text}` the words. Empty where nothing outside can.
     pub ping: Vec<String>,
+    /// How an attached session's screen says it shows the harness's own
+    /// list of its sessions (Claude's agents view); none where Relay does
+    /// not know.
+    pub agents_view: Option<ScreenMark>,
 }
+
+/// Regexes over the lines of a screen: it is showing something when a line
+/// matches one of them.
+#[derive(Debug, Clone)]
+pub struct ScreenMark {
+    patterns: Vec<regex::Regex>,
+}
+
+impl ScreenMark {
+    /// `what`, for an error, names where the patterns come from.
+    pub fn new(what: &str, patterns: &[String]) -> Result<ScreenMark> {
+        if patterns.is_empty() {
+            bail!("{what} names no pattern");
+        }
+        let patterns = patterns
+            .iter()
+            .map(|p| regex::Regex::new(p).map_err(|e| anyhow::anyhow!("{what}: `{p}`: {e}")))
+            .collect::<Result<_>>()?;
+        Ok(ScreenMark { patterns })
+    }
+
+    /// Whether the screen, as text a line a row, shows it.
+    pub fn on(&self, screen: &str) -> bool {
+        screen
+            .lines()
+            .any(|l| self.patterns.iter().any(|p| p.is_match(l.trim_end())))
+    }
+}
+
+impl PartialEq for ScreenMark {
+    fn eq(&self, other: &Self) -> bool {
+        self.patterns.len() == other.patterns.len()
+            && self
+                .patterns
+                .iter()
+                .zip(&other.patterns)
+                .all(|(a, b)| a.as_str() == b.as_str())
+    }
+}
+
+impl Eq for ScreenMark {}
 
 /// How an agent lists its own sessions: its binary with `args`, read by
 /// one of the `READERS`.
@@ -328,6 +382,10 @@ pub(crate) fn compile(name: &str, file: SessionsFile) -> Result<Sessions> {
             bail!("{name}.yaml: sessions.ping says nowhere where the {what} goes ({word})");
         }
     }
+    let agents_view = file
+        .agents_view
+        .map(|p| ScreenMark::new(&format!("{name}.yaml: sessions.agents_view"), &p))
+        .transpose()?;
     Ok(Sessions {
         hooks,
         list,
@@ -336,6 +394,7 @@ pub(crate) fn compile(name: &str, file: SessionsFile) -> Result<Sessions> {
         name: named,
         stop,
         ping,
+        agents_view,
     })
 }
 

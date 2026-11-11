@@ -23,7 +23,8 @@
 use crate::Registry;
 use crate::mcp_entry::{How, Place};
 use crate::registry::{Profile, find_bin};
-use crate::sessions::{ID, TEXT, UserHooks};
+use crate::sessions::{ID, ScreenMark, TEXT, UserHooks};
+use crate::settings;
 use anyhow::{Context, Result, anyhow, bail};
 use jiff::Timestamp;
 use nix::sys::signal::{Signal, killpg};
@@ -186,6 +187,13 @@ pub trait Harness: Send + Sync {
         let _ = id;
         None
     }
+    /// How an attached session of it says it shows its own list of
+    /// sessions (Claude's agents view, which `←` opens): the list it shows
+    /// is Relay's, so the attach lets go and Relay's comes back. Its
+    /// profile's `sessions.agents_view`; none where Relay does not know.
+    fn agents_view(&self) -> Option<&ScreenMark> {
+        self.profile().sessions.as_ref()?.agents_view.as_ref()
+    }
     /// How its conversation `session_id`, open in another terminal, carries
     /// on: by default its profile's `resume`, held by Relay. None: no way.
     fn carry_on(&self, session_id: &str) -> Option<CarryOn> {
@@ -247,6 +255,23 @@ pub trait Harness: Send + Sync {
             _ => How::Json,
         };
         mcp_place(self, env, how)
+    }
+
+    /// Where the keys `rl setup` sets in its own global config go, and
+    /// which (its profile's `settings`); None where it has none. An error
+    /// where its file is not known (`HOME` not set).
+    fn settings(&self, env: &dyn Fn(&str) -> Option<OsString>) -> Result<Option<settings::Place>> {
+        let Some(s) = self.profile().settings.as_ref() else {
+            return Ok(None);
+        };
+        let name = self.name();
+        let path = s
+            .file(env)
+            .ok_or_else(|| anyhow!("{name}: HOME is not set, so where its global config is is not known"))?;
+        Ok(Some(settings::Place {
+            path,
+            set: s.set.clone(),
+        }))
     }
 
     // Mail and `rl mcp`.
