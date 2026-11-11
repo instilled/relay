@@ -23,7 +23,7 @@
 use crate::Registry;
 use crate::mcp_entry::{How, Place};
 use crate::registry::{Profile, find_bin};
-use crate::sessions::{ID, TEXT, UserHooks};
+use crate::sessions::{ID, ScreenMark, TEXT, UserHooks};
 use anyhow::{Context, Result, anyhow, bail};
 use jiff::Timestamp;
 use nix::sys::signal::{Signal, killpg};
@@ -185,6 +185,13 @@ pub trait Harness: Send + Sync {
     fn attach_argv(&self, id: &str) -> Option<Vec<String>> {
         let _ = id;
         None
+    }
+    /// How an attached session of it says it shows its own list of
+    /// sessions (Claude's agents view, which `←` opens): the list it shows
+    /// is Relay's, so the attach lets go and Relay's comes back. Its
+    /// profile's `sessions.agents_view`; none where Relay does not know.
+    fn agents_view(&self) -> Option<&ScreenMark> {
+        self.profile().sessions.as_ref()?.agents_view.as_ref()
     }
     /// How its conversation `session_id`, open in another terminal, carries
     /// on: by default its profile's `resume`, held by Relay. None: no way.

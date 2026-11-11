@@ -16,6 +16,7 @@ use crate::store::state;
 use anyhow::Result;
 use jiff::Timestamp;
 use rl_core::Home;
+use rl_detect::sessions::ScreenMark;
 use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -66,8 +67,12 @@ pub struct Hand {
 pub enum To {
     /// A Relay-held session, straight to its holder.
     Held(Box<Meta>),
-    /// A harness's own attach command, run on a pty here.
-    Argv(Vec<String>),
+    /// A harness's own attach command, run on a pty here; let go of when
+    /// its screen shows `back`, the harness's own list of its sessions.
+    Argv {
+        argv: Vec<String>,
+        back: Option<ScreenMark>,
+    },
     /// A harness run on a pty here, in `cwd`, where it begins a session of
     /// its own (Codex with no prompt: its TUI).
     Here { argv: Vec<String>, cwd: PathBuf },

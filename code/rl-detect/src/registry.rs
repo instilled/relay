@@ -640,6 +640,37 @@ mod tests {
     }
 
     #[test]
+    fn claudes_agents_view_is_known_and_a_pattern_that_does_not_compile_is_an_error() {
+        let r = Registry::builtin();
+        let view = |name: &str| r.profile(name).unwrap().sessions.as_ref()?.agents_view.clone();
+        let claude = view("claude").expect("claude's");
+        assert!(claude.on("x\n❯ describe a task for a new session\n"));
+        assert!(claude.on("❯ describe a task for a new\nsession"), "wrapped, narrow");
+        assert!(
+            !claude.on("❯ hello\n  ❯ describe a task for a new session"),
+            "quoted, indented"
+        );
+        assert!(view("codex").is_none());
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("claude.yaml"), "sessions:\n  agents_view: ['(']\n").unwrap();
+        let err = format!("{:#}", Registry::load_from(dir.path()).unwrap_err());
+        assert!(err.contains("claude.yaml: sessions.agents_view"), "{err}");
+        std::fs::write(
+            dir.path().join("claude.yaml"),
+            "sessions:\n  agents_view: ['^Agents$']\n",
+        )
+        .unwrap();
+        let r = Registry::load_from(dir.path()).unwrap();
+        let mine = r.profile("claude").unwrap().sessions.as_ref().unwrap();
+        assert!(
+            mine.agents_view.as_ref().unwrap().on("Agents"),
+            "yours, over the built-in"
+        );
+        assert!(mine.list.is_some(), "the rest of the block stays");
+    }
+
+    #[test]
     fn only_an_agent_has_sessions_of_its_own() {
         let dir = tempfile::tempdir().unwrap();
         let block = "sessions:\n  hooks:\n    file: [/x/hooks.json]\n    timeout: 1s\n    events:\n      Stop: idle\n";

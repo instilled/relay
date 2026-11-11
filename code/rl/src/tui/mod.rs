@@ -222,12 +222,12 @@ async fn hand_over(home: &Home, hand: &Hand) -> String {
             Ok(ended) => back_words(title, &ended),
             Err(e) => format!("attach {title}: {e:#}"),
         },
-        To::Argv(argv) => match attach::native::hold(argv, None, title).await {
+        To::Argv { argv, back } => match attach::native::hold(argv, None, title, back.as_ref()).await {
             Ok(attach::native::Back::Detached) => back_words(title, &attach::Ended::Detached),
             Ok(attach::native::Back::Ended(exit)) => back_words(title, &attach::held::exit_words(title, &exit).0),
             Err(e) => format!("attach {title}: {e:#}"),
         },
-        To::Here { argv, cwd } => match attach::native::hold(argv, Some(cwd), title).await {
+        To::Here { argv, cwd } => match attach::native::hold(argv, Some(cwd), title, None).await {
             Ok(attach::native::Back::Detached) => back_words(title, &attach::Ended::Detached),
             Ok(attach::native::Back::Ended(exit)) => back_words(title, &attach::held::exit_words(title, &exit).0),
             Err(e) => format!("attach {title}: {e:#}"),

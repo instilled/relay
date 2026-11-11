@@ -115,7 +115,9 @@ in the footer and changes nothing; an unknown one stays on the line to mend.
 The wheel moves the cursor a line a tick and a click puts it on a line; a pointer that only moves
 leaves it where it is. The list takes the mouse, so hold shift (option, on macOS) to select text.
 
-`ctrl+\` leaves an attached session running and comes back to the list.
+`ctrl+\` leaves an attached session running and comes back to the list. In an attached Claude
+session, `←` on an empty prompt does the same: it would open Claude's own agents view, which the
+list is, so the list comes back in its place and the session keeps running.
 
 ### Codex
 
@@ -206,6 +208,8 @@ Keys a profile accepts:
   - `list`: `args` and `reader` (`claude-agents` or `codex-threads`)
   - `attach`, `start`, `name`, `stop`: argument lists with `{id}` and `{name}`
   - `ping`: what tells one of its sessions of mail from outside, with `{id}` and `{text}`
+  - `agents_view`: regexes over the lines of an attached session's screen that say it shows the
+    harness's own list of its sessions; seeing one, the attach lets go and the list comes back
 - `mcp`: where `rl setup` registers Relay's MCP server
   - `file`: its servers file, the first whose variables are set (`~` is `$HOME`)
   - `cli`: the harness's own words that add and remove an entry there (`[mcp]`: `agy mcp add`);

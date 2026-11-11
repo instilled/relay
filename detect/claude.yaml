@@ -70,6 +70,13 @@ sessions:
   name: [-n, "{name}"]
   # ^x on one still going stops it (`claude stop <id>`); never `claude rm`.
   stop: [stop, "{id}"]
+  # Its agents view, as an attached session draws it (← on an empty prompt
+  # opens it there, whatever `leftArrowOpensAgents` says): the new-session
+  # prompt's placeholder, at the left edge — a transcript indents what it
+  # quotes. Relay's list is that view, so the attach lets go and the list
+  # comes back. Read off `claude agents` 2.1.322 in a pty, at 34 to 120
+  # columns (it wraps after `new` when narrow).
+  agents_view: ['^❯ describe a task for a new\b']
 # Where Relay's MCP server goes (`rl setup`): Claude's own ~/.claude.json
 # ($CLAUDE_CONFIG_DIR/.claude.json with that set), written only through
 # `claude mcp add|remove --scope user`; Relay reads it to compare.
