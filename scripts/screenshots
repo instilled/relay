@@ -155,9 +155,9 @@ web_done=$(rl_new "$work/web" "done" --harness claude -- "fix the cart total rou
 (cd "$work/web" && rl new --name-only -- sh -c 'printf "\n  VITE v7.0.4  ready in 412 ms\n\n  ➜  Local:   http://localhost:5173/\n"; while :; do sleep 60; done' >/dev/null)
 : "$pag" "$web_done"
 
-# Set up, as a user would (the stand-ins take the MCP registration), so
-# the footer has no setup notice.
-rl setup >/dev/null
+# Set up, as a user would, through the wizard (the stand-ins take the MCP
+# registration), so the footer has no setup notice. Its steps are
+# captured below, with the rest.
 
 # Colours of your own, by the CLI.
 rl color "$api_needs" orange >/dev/null
@@ -170,16 +170,40 @@ sleep 3
 
 mkdir -p "$out"
 tm() { "$tmux_bin" -L "$sock" "$@"; }
-tm -f /dev/null new-session -d -s shots -x 110 -y 30 -c "$work" "rl"
+
+# The setup wizard first, in a window of its own: `rl setup` on a terminal.
+# Its inline viewport is 24 rows, from the top of the fresh pane.
+tm -f /dev/null new-session -d -s setup -x 110 -y 30 -c "$work" "rl setup; sleep 100000"
 tm set -g default-terminal tmux-256color
 tm set -as terminal-features ',*:RGB'
 tm set -g status off
+sleep 3
+
+shot_in() { # shot_in <session> <rows> <name> <title>
+  tm capture-pane -e -p -t "$1" >"$tmp/$3.ansi"
+  "$python" "$root/scripts/ansi2svg.py" --cols 110 --rows "$2" --title "$4" <"$tmp/$3.ansi" >"$out/$3.svg"
+  echo "wrote docs/img/$3.svg" >&2
+}
+skeys() { tm send-keys -t setup "$@"; sleep 1; }
+
+shot_in setup 24 setup-found "rl setup — walk through it, or tab for the quick way"
+skeys Enter
+shot_in setup 24 setup-changes "rl setup — what changes, each one ticked or not"
+skeys Enter
+sleep 2
+skeys Enter   # step 4, codex's /hooks
+skeys Enter
+shot_in setup 24 setup-keys "rl setup — the keys you'll use"
+skeys C-j
+shot_in setup 24 setup-now "rl setup — what you can do now"
+skeys Enter
+tm kill-session -t setup
+
+tm new-session -d -s shots -x 110 -y 30 -c "$work" "rl"
 sleep 4
 
 shot() { # shot <name>
-  tm capture-pane -e -p -t shots >"$tmp/$1.ansi"
-  "$python" "$root/scripts/ansi2svg.py" --cols 110 --rows 30 --title "$2" <"$tmp/$1.ansi" >"$out/$1.svg"
-  echo "wrote docs/img/$1.svg" >&2
+  shot_in shots 30 "$1" "$2"
 }
 keys() { tm send-keys -t shots "$@"; sleep 1; }
 
