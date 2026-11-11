@@ -11,14 +11,6 @@
 //! inside a held shell, say) it is one of the agent's own sessions:
 //! `state/<agent>/<session_id>.json`. `ended` removes the file.
 //!
-//! An agent whose profile says its hooks run outside the session's
-//! environment (`detached_env`; Codex's app-server daemon runs them) has no
-//! `RL_SESSION` to tell the held session by. Its first hook of a conversation
-//! claims the live held session of the agent in the same folder that has no
-//! conversation yet and began under 120s ago (`claim_thread`): the session's
-//! `meta.native_id` is the conversation, and this and every later hook of it
-//! go to that session's `hook.json`.
-//!
 //! Claude's user-level hook says `--user` after the event (its profile's
 //! `marker`): a Claude session of Relay's calls both it and the session's own
 //! hook (`rl hook claude <Event>`, from the settings Relay passes it). Under
@@ -167,13 +159,6 @@ pub async fn hook(home: &Home, words: &Words) {
         let Some(word) = Word::of(hooks, &words.event, &payload, env) else {
             return Ok(());
         };
-        // An agent whose hooks run outside its session's environment: the
-        // held session is found by its folder and start (`claim_thread`).
-        let target = match &target {
-            Target::Own if hooks.detached_env => claim_thread(home, &hooks.agent, &word, Timestamp::now())
-                .map_or(Target::Own, |dir| Target::Held(dir.join(HOOK_FILE))),
-            _ => target,
-        };
         let path = match &target {
             Target::Held(path) => path.clone(),
             Target::Own => {
@@ -219,54 +204,6 @@ pub async fn hook(home: &Home, words: &Words) {
         let mut out = std::io::stdout().lock();
         let _ = writeln!(out, "{said}").and_then(|()| out.flush());
     }
-}
-
-/// How long after a held session starts its agent's first hook may still
-/// claim it.
-const CLAIM_WITHIN: jiff::SignedDuration = jiff::SignedDuration::from_secs(120);
-
-/// The folder of the held session a hook of `word`'s conversation is of, for
-/// an agent whose hooks run outside the session's environment (`detached_env`;
-/// codex's app-server daemon runs them): the one that has claimed the
-/// conversation already, else, by the first hook, the earliest-started live
-/// one of the agent in the same folder, with no conversation yet and started
-/// under `CLAIM_WITHIN` ago, which is then given the conversation
-/// (`meta.native_id`). Several such sessions cannot be told apart by what the
-/// hook says; the earliest is taken, and a wrong guess shows only as two
-/// sessions swapping threads. The conversation's file in `state/`, from
-/// before it was claimed, is removed. None where no session is its.
-fn claim_thread(home: &Home, agent: &str, word: &Word, now: Timestamp) -> Option<PathBuf> {
-    use crate::store::sessions::{self, Status};
-    let mut free: Vec<(sessions::Meta, PathBuf)> = Vec::new();
-    for entry in std::fs::read_dir(home.sessions_dir()).ok()?.flatten() {
-        let dir = entry.path();
-        let Ok(meta) = sessions::read_meta(&dir) else { continue };
-        if meta.harness != agent {
-            continue;
-        }
-        match &meta.native_id {
-            Some(id) if *id == word.session_id => return Some(dir),
-            Some(_) => {}
-            None => free.push((meta, dir)),
-        }
-    }
-    let here = |p: &std::path::Path| {
-        p == word.cwd || matches!((p.canonicalize(), word.cwd.canonicalize()), (Ok(a), Ok(b)) if a == b)
-    };
-    let (mut meta, dir) = free
-        .into_iter()
-        .filter(|(m, _)| {
-            let age = now.duration_since(m.started);
-            age <= CLAIM_WITHIN && age >= jiff::SignedDuration::from_secs(-5) && here(&m.cwd)
-        })
-        .filter(|(m, d)| sessions::status_of(d, m) == Status::Live)
-        .min_by_key(|(m, _)| m.started)?;
-    meta.native_id = Some(word.session_id.clone());
-    sessions::write_meta(&dir, &meta).ok()?;
-    if let Some(old) = state::path(home, agent, &word.session_id) {
-        let _ = std::fs::remove_file(old);
-    }
-    Some(dir)
 }
 
 /// What Claude is told of the relay mail waiting for the session a hook of

@@ -451,10 +451,10 @@ struct Recipient {
 /// hooks said it (a Codex thread's id is its conversation's), else as Relay
 /// carried it on.
 fn held_ping_id(h: &Held) -> Option<String> {
-    h.meta
-        .native_id
-        .clone()
-        .or_else(|| h.hook.as_ref().map(|k| k.session_id.clone()))
+    h.hook
+        .as_ref()
+        .map(|k| k.session_id.clone())
+        .or_else(|| h.meta.native_id.clone())
 }
 
 /// The conversation ids a held session has had: its hooks', its harness's.
@@ -1096,20 +1096,6 @@ mod tests {
         );
         assert_eq!(ran(&bin).unwrap()[2], "t-held");
         assert_eq!(mail::take(&f.home, "api-codex").unwrap().messages.len(), 2);
-    }
-
-    #[test]
-    fn a_held_codex_that_a_hook_claimed_is_pinged_by_that_thread() {
-        let f = fixture();
-        let tmp = tempfile::tempdir().unwrap();
-        let (adapters, bin) = stand_in_adapters(tmp.path());
-        held_as(&f.home, "api-codex", "codex", Some("t-claimed"));
-        let s = server(&f, caller(Some("sess-aaaa"))).with_adapters(adapters);
-        assert_eq!(
-            ok_text(&s, "send", json!({ "to": "api-codex", "text": "one" })),
-            "sent to api-codex · pinged codex"
-        );
-        assert_eq!(ran(&bin).unwrap()[2], "t-claimed");
     }
 
     #[test]
