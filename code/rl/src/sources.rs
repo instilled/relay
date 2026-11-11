@@ -113,13 +113,27 @@ pub fn harnesses() -> &'static [Box<dyn Harness>] {
     })
 }
 
+/// Where the tests' stand-ins are copied, beside the test binary in the
+/// target folder: one folder per test run, by its pid.
+#[cfg(test)]
+const STAND_INS: &str = "stand-ins";
+
 /// The copy of `fixtures/stand-in-codex-daemon` the tests' Codex runs, in a
-/// folder of this test run's own, where it keeps what it was sent.
+/// folder of this test run's own (`<target>/debug/deps/stand-ins/<pid>`),
+/// where it keeps what it was sent. Made fresh by each run, which first
+/// sweeps away the folders of runs that have finished: the target folder
+/// holds at most one per run going on.
 #[cfg(test)]
 pub(crate) fn codex_stand_in() -> PathBuf {
     static BIN: OnceLock<PathBuf> = OnceLock::new();
     BIN.get_or_init(|| {
-        let dir = tempfile::tempdir().unwrap().keep();
+        let exe = std::env::current_exe().unwrap();
+        let base = exe.parent().unwrap().join(STAND_INS);
+        sweep_stand_ins(&base);
+        let dir = base.join(std::process::id().to_string());
+        // A pid used again: what an earlier run left is not this one's.
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
         let bin = dir.join("codex");
         std::fs::copy(
             concat!(env!("CARGO_MANIFEST_DIR"), "/../fixtures/stand-in-codex-daemon"),
@@ -129,6 +143,21 @@ pub(crate) fn codex_stand_in() -> PathBuf {
         bin
     })
     .clone()
+}
+
+/// Takes away the folders under `base` of test runs that have finished: a
+/// folder named by a pid no process has.
+#[cfg(test)]
+fn sweep_stand_ins(base: &std::path::Path) {
+    for e in std::fs::read_dir(base).into_iter().flatten().flatten() {
+        let Some(pid) = e.file_name().to_str().and_then(|n| n.parse::<i32>().ok()) else {
+            continue;
+        };
+        let gone = nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None) == Err(nix::errno::Errno::ESRCH);
+        if gone {
+            let _ = std::fs::remove_dir_all(e.path());
+        }
+    }
 }
 
 /// A harness with a background run on the stand-in: what Claude starts in
@@ -925,5 +954,28 @@ mod tests {
         let mut first = hook("claude", "s", Said::Busy, None);
         first.started = at(120);
         assert_eq!(rows(&[], &[first], &[]).remove(0).started, Some(at(120)));
+    }
+
+    #[test]
+    fn the_codex_stand_in_lives_under_the_target_folder_and_a_finished_runs_is_swept() {
+        let bin = codex_stand_in();
+        let deps = std::env::current_exe().unwrap().parent().unwrap().to_path_buf();
+        let mine = bin.parent().unwrap();
+        assert_eq!(mine, deps.join(STAND_INS).join(std::process::id().to_string()));
+        assert!(bin.is_file());
+        // A run that has finished left its folder: the next run's sweep
+        // takes it, and keeps a live one's.
+        let base = tempfile::tempdir().unwrap();
+        let mut gone = std::process::Command::new("true").spawn().unwrap();
+        let dead = gone.id();
+        gone.wait().unwrap();
+        for pid in [dead, std::process::id()] {
+            std::fs::create_dir_all(base.path().join(pid.to_string())).unwrap();
+        }
+        std::fs::create_dir_all(base.path().join("not-a-run")).unwrap();
+        sweep_stand_ins(base.path());
+        assert!(!base.path().join(dead.to_string()).exists());
+        assert!(base.path().join(std::process::id().to_string()).exists());
+        assert!(base.path().join("not-a-run").exists(), "only a run's");
     }
 }
