@@ -47,9 +47,9 @@ agent, the rest is its prompt. Anything else runs as a shell command.
 | `enter` | attach (with text typed: start it) |
 | `ctrl+\` | detach, back to the list |
 | `ctrl+f` | find |
-| `ctrl+r` `ctrl+t` `ctrl+g` | rename, pin, colour |
+| `ctrl+r` `ctrl+t` `ctrl+g` | rename (the name starts selected: type over it), pin, colour |
 | `ctrl+s` | group by project or by state |
-| `ctrl+x ctrl+x` | stop, then remove or hide |
+| `ctrl+x ctrl+x` | stop, then remove or hide; on a Claude or Codex session, asks: stop, or remove / archive |
 | `/` | a command (`/setup`, `/rename`, `/help`, …) |
 | `ctrl+c ctrl+c` | quit |
 
@@ -170,11 +170,11 @@ Every letter types; the list's own keys are ctrl keys, the arrows and `enter`. `
 | command | does |
 | --- | --- |
 | `/colour <name\|#rrggbb\|none>` (`/color`) | your colour for the row, as `ctrl+g` and `rl color` set it (a colour the harness set wins on screen) |
-| `/rename <name>` | rename the row or project, as `ctrl+r`; with no name, back to its own. A Claude or Codex session is named in Relay only (the harness has no rename): your name, then the harness's own dim beside it, and the search finds both |
+| `/rename <name>` | rename the row or project; with no name, as `ctrl+r`: the name typed where it stands (empty goes back to its own). A Claude or Codex session is named in Relay only (the harness has no rename): your name, then the harness's own dim beside it, and the search finds both |
 | `/pin` | pin or unpin, as `ctrl+t` |
 | `/hide` | hide the row or project, or bring it back |
-| `/stop` | stop a live session, held or the harness's own, at once (no second press); a Codex thread has its running turn interrupted and stays |
-| `/rm` | remove an ended session Relay holds |
+| `/stop` | stop a live session, held or the harness's own, at once (no second press, no question); a Codex thread has its running turn interrupted and stays |
+| `/rm` | remove an ended session Relay holds; on a Claude or Codex session, ask to remove or archive it (`enter` confirms, `esc` cancels) |
 | `/agents` `/shells` `/hidden` | show agents, shells, hidden, as `ctrl+a` `ctrl+l` `ctrl+o` |
 | `/group` | by project or by state, as `ctrl+s` |
 | `/setup` | the setup walk (as `rl setup`), under the list; back on the list, what it did stands in the footer, and the `setup needed` notice goes |
@@ -192,8 +192,8 @@ in the footer and changes nothing; an unknown one stays on the line to mend.
 | `pgup` `pgdn` `home` `end` | page (`home` `end` with nothing typed) |
 | `/` | a command (above) |
 | `ctrl+f` | search |
-| `ctrl+x ctrl+x` | stop, then remove or hide |
-| `ctrl+r` | rename |
+| `ctrl+x ctrl+x` | stop, then remove or hide; on a Claude or Codex session, a choice in the footer (below, and under Codex) |
+| `ctrl+r` | rename: the name stands selected, so what you type or paste replaces it, `backspace` clears it, `←` `→` `home` `end` keep it to edit; `enter` keeps, `esc` cancels |
 | `ctrl+t` | pin |
 | `ctrl+g` | your colour for the row: none, red, blue, green, yellow, purple, orange, pink, cyan (a colour the harness set wins on screen; a `#rrggbb` set in `config.json` or by `rl color` goes to red) |
 | `shift+↑↓` | reorder |
@@ -208,6 +208,13 @@ leaves it where it is. The list takes the mouse, so hold shift (option, on macOS
 `ctrl+\` leaves an attached session running and comes back to the list. In an attached Claude
 session, `←` on an empty prompt does the same: it would open Claude's own agents view, which the
 list is, so the list comes back in its place and the session keeps running.
+
+`ctrl+x` twice on one of Claude's own sessions asks, in the footer, with the row's name and harness:
+`s stop · keeps the conversation   r remove · deletes it and its worktree   esc cancel`. `s` (or
+`enter`, so `ctrl+x ctrl+x enter` stops as it always did) runs `claude stop <id>`: its process
+ends, `claude attach` opens it again. `r` runs `claude rm <id>`, which deletes it and its worktree
+when that is safe, and the row goes. One that has already ended is offered only the remove. A
+session Relay holds (a shell, Antigravity, …) is stopped and removed as ever, without a question.
 
 ### Codex
 
@@ -227,8 +234,10 @@ daemon's threads.
 - The daemon lets go of an idle thread with no client after a couple of minutes. The threads Relay
   started (Codex records `relay` as their originator) stay on the list as `resting`, the latest 50
   (`thread/list`). Enter resumes one; mail pings it (`codex queue … --resume` loads it again).
-- `ctrl+x` (or `/stop`) on a working Codex row interrupts its turn (`turn/interrupt`); the thread
-  stays.
+- `ctrl+x` twice on a Codex row asks, in the footer: `s stop the turn   a archive · off the list,
+  codex unarchive brings it back   esc cancel`. `s` (or `enter`) interrupts a running turn
+  (`turn/interrupt`; the thread stays); `a` runs `codex archive <id>`. A thread with no turn running
+  is offered only the archive. `/stop` interrupts at once. Relay never offers `codex delete`.
 
 ## Commands
 
@@ -351,7 +360,8 @@ yourself. Codex has no automatic address yet, so it passes them.
 Not verified against the live CLIs:
 
 - What `claude --bg` prints. Relay takes the first 8-hex word as the session id; if there is none, the start says so.
-- `claude stop <id>` from `ctrl+x`.
+- `claude stop <id>` and `claude rm <id>` from `ctrl+x`, and `codex archive <id>`: their help was
+  read (claude 2.1.322, codex 0.167), the commands were not run.
 - `turn/interrupt` from `ctrl+x` on a Codex row, and `codex app-server daemon start` when no daemon
   runs. A started thread's first turn, a pending approval shown by `codex resume`, and an idle
   thread's unloading were checked on codex 0.167.

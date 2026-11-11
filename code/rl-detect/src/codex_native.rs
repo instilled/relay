@@ -24,7 +24,8 @@
 //! (`codex resume <id>`), which opens it through the same daemon: the
 //! app-server rejoins a thread that is running (and shows an approval it
 //! waits on), or loads one at rest. Stopping one interrupts its running
-//! turn (`turn/interrupt`); the thread stays.
+//! turn (`turn/interrupt`); the thread stays. Closing one archives it (the
+//! profile's `sessions.close`: `codex archive <id>`), never deletes it.
 
 use crate::harness::{self, CarryOn, Harness, NativeRow, NativeState, Started};
 use crate::mcp_entry::{How, Place};

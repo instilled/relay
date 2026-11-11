@@ -2,8 +2,8 @@
 //! one place. One implementation per kind:
 //!
 //! - [`crate::claude_native::Claude`]: Claude Code, which has a background
-//!   of its own (`claude --bg`, `claude attach`, `claude stop`, `claude
-//!   agents --json`); its MCP server goes through `claude mcp`; a caller of
+//!   of its own (`claude --bg`, `claude attach`, `claude stop`, `claude rm`,
+//!   `claude agents --json`); its MCP server goes through `claude mcp`; a caller of
 //!   `rl mcp` is also known by `CLAUDE_CODE_SESSION_ID`; mail reaches its
 //!   sessions through its hooks.
 //! - [`crate::codex_native::Codex`]: Codex, whose app-server daemon runs
@@ -115,8 +115,8 @@ pub enum CarryOn {
     Attach(Vec<String>),
 }
 
-/// Everything Relay does with one harness. `list`, `start`, `carry_on_there`
-/// and `stop` run the harness and may block; they are asked from a
+/// Everything Relay does with one harness. `list`, `start`, `carry_on_there`,
+/// `stop` and `close` run the harness and may block; they are asked from a
 /// background task. Nothing else runs anything.
 pub trait Harness: Send + Sync {
     /// Its profile.

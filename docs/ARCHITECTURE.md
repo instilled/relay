@@ -87,7 +87,8 @@ Folders are 0700.
   bare `codex` run here when there is no prompt; any other, held by Relay); any other line runs held as
   `$SHELL -ic '<line>` and `exec $SHELL'`, a session of kind shell. Completion reads `PATH` once
   per list. A line starting with `/` is a command instead (`tui/slash.rs`): each names a key's
-  action (`/pin` is `ctrl+t`, `/stop` is `ctrl+x` on a live row without the second press) and runs it on
+  action (`/pin` is `ctrl+t`, `/stop` is `ctrl+x` on a live row without the second press or the
+  question) and runs it on
   the row under the cursor through the same code.
 - **List.** Held sessions come from `sessions/`. Hooked-only ones come from `state/`. Claude's and
   Codex's own come from asking them (`sessions.list` in the profile), each with its own timeout;
@@ -121,9 +122,14 @@ Folders are 0700.
   attached session whatever `leftArrowOpensAgents` says — that screen is not passed on and the
   attach lets go as `ctrl+\` does, back to the list.
 - **Stop and remove.** A held session gets a `stopped` mark, then the holder is asked to close. A
-  native one through its harness (`Harness::stops`, `Harness::stop`): Claude's is `claude stop
-  <id>`, Codex's interrupts a running turn. `rm` removes the folder of one not running. `rl` never
-  runs `claude rm`.
+  native one whose harness can close it (`Harness::close_choice`) is asked about: the second
+  `ctrl+x` puts a choice in the footer (`tui::remove::Ask`, `Mode::Ask`) — `s` the stop
+  (`Harness::stop_choice`, offered only while `Harness::stops`; Claude's `claude stop <id>`,
+  Codex's interrupts a running turn), the close's own key the close (`Harness::close`: Claude's
+  `claude rm <id>`, Codex's `codex archive <id>`), `enter` the first offered, `esc` nothing. A
+  close forgets what was kept for the row and drops it from the native rows at once. `/rm` asks
+  the close alone. `rm` removes the folder of a held one not running. Relay never runs `codex
+  delete`.
 - **Hook.** `rl hook <agent> <Event>` reads the hook JSON on stdin and the profile's
   `sessions.hooks.events` and writes `hook.json` (under a held session, `RL_SESSION` set) or
   `state/<agent>/<id>.json`. Claude's user-level hook says `--user` after the event; under a held
@@ -162,7 +168,11 @@ when the profile loads. Keys:
   `color`, `patterns`, `timing`, `sessions`, `mcp`, `settings`
 - `hooks`: `dialect`, `args`
 - `patterns`: `needs_input`, `idle`; `timing`: `idle_after`, `stale_after`
-- `sessions`: `hooks`, `list`, `attach`, `start`, `name`, `stop`, `ping`, `agents_view`
+- `sessions`: `hooks`, `list`, `attach`, `start`, `name`, `stop`, `ping`, `stop_choice`, `close`,
+  `agents_view`
+- `sessions.stop_choice`: `words`, `says` (how `ctrl+x` offers the stop, on `s`)
+- `sessions.close`: `key` (one lowercase letter, not `s`), `words`, `says`, `done`, `args` (after
+  the binary, `{id}` the attach id): the closing action `ctrl+x` offers beside the stop
 - `sessions.hooks`: `file`, `timeout`, `unit`, `async`, `marker`, `after_install`, `from_env`,
   `events`, `settings`
 - `sessions.list`: `args`, `reader`
@@ -182,7 +192,9 @@ trait covers:
   background, `Started::Here` an argv to run in this terminal, `Started::Held` arguments for Relay
   to hold), `never_held`, `held_argv` (what a held session runs, with the per-run hooks its
   profile's `hooks` names), `attach_argv`, `agents_view`, `carry_on` (`CarryOn::Background`, `Held` or `Attach`)
-  and `carry_on_there`, `stops`/`stop`, `ping_argv`;
+  and `carry_on_there`, `stops`/`stop`, `stop_choice`, `close_choice`/`close` (what `ctrl+x`
+  offers, a `sessions::Choice` each, and the close run by its profile's `sessions.close.args`
+  through the bounded `harness::run`), `ping_argv`;
 - setup: `user_hooks` (its profile's `sessions.hooks`), `has_mcp`, `mcp` (an `mcp_entry::Place`:
   where Relay's server goes and how), `settings` (a `settings::Place`: keys of its own global
   config and their values);
@@ -193,12 +205,13 @@ The kinds:
 - `claude_native::Claude` (reader `claude-agents`): its own background. Lists with `claude agents
   --json --all` plus each session's job file; starts with `claude --bg` and takes the id it printed
   once the listing has it (`claude_native::begin`); carries a conversation on with `claude --resume
-  <id> --bg`; stops with `claude stop`. Its MCP entry goes through `claude mcp --scope user`; its
+  <id> --bg`; stops with `claude stop`, closes with `claude rm`. Its MCP entry goes through `claude mcp --scope user`; its
   callers set `CLAUDE_CODE_SESSION_ID`; mail reaches its sessions through its hooks.
 - `codex_native::Codex` (reader `codex-threads`): its daemon. JSON-RPC to `codex app-server proxy`
   (`codex_native::connect`, one WebSocket client for listing, starting and stopping:
   `thread/loaded/list`, `thread/read`, `thread/list`, `thread/start`, `turn/start`,
-  `turn/interrupt`); never held; a conversation carries on with its own attach (`codex resume`).
+  `turn/interrupt`); never held; a conversation carries on with its own attach (`codex resume`);
+  closes with `codex archive`.
   Its MCP entry is TOML in `config.toml` with `env_vars`.
 - `harness::Held`: every other profile (Gemini, Antigravity, cursor, opencode, the shells,
   `generic`). No background: `start` is `Started::Held` with the profile's `prompt`, `carry_on` the
@@ -208,7 +221,7 @@ The kinds:
 
 Where profile data plugs in, for every kind: `bins` (which binary, `found`), `prompt`, `resume`,
 `hooks` (`held_argv`), `sessions.hooks` (`user_hooks`), `sessions.attach|start|name|stop` (Claude's
-and Codex's argv), `sessions.ping` (`ping_argv`, Codex's `codex queue`), `sessions.agents_view` (`agents_view`), and `mcp.file`, `mcp.cli`,
+and Codex's argv), `sessions.stop_choice|close` (`stop_choice`, `close_choice`, `close`), `sessions.ping` (`ping_argv`, Codex's `codex queue`), `sessions.agents_view` (`agents_view`), and `mcp.file`, `mcp.cli`,
 `mcp.note` (`mcp`). What is the same for all is code: the hook settings file format (`user_hooks`),
 `rl hook`, the MCP entry formats (`mcp_entry`).
 
@@ -274,7 +287,8 @@ session keep `setup::run`'s plain lines. The first start writes `config.json` wh
 Taken from the task reports; none is exercised by the tests.
 
 - What `claude --bg` prints (the first 8-hex word is taken as the id).
-- `claude stop <id>` on a live session.
+- `claude stop <id>` on a live session; `claude rm <id>` and `codex archive <id>` (their `--help`
+  read on claude 2.1.322 and codex 0.167, never run).
 - `turn/interrupt` on a live thread, and `codex app-server daemon start`.
 - The Gemini MCP entry format.
 - Whether `claude --bg` sessions run user-level hooks (why the list asks `claude agents`).
