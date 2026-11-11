@@ -1,8 +1,8 @@
 //! Setup from the list: as it starts it asks `setup::check` (files only,
 //! off the UI thread, never a harness's CLI), and while something needs
-//! setting up the footer's hints lead with a notice of it. `/setup` runs
-//! `rl setup` for the harnesses found, off the UI thread too (`claude mcp`
-//! and `agy mcp` take a moment), says what it changed, and checks again.
+//! setting up the footer's hints lead with a notice of it. `/setup` hands
+//! the terminal to the setup wizard (`wizard`), as an attach would; back on
+//! the list, the footer says what it did and setup is checked again.
 
 use super::app::{App, Checked, Done};
 use crate::setup::{Host, Need};
@@ -35,46 +35,22 @@ impl App {
                 .await
                 .unwrap_or_else(|e| Err(e.to_string()));
             Done {
-                setup: Some(Checked { needs, ran: false }),
+                setup: Some(Checked { needs }),
                 ..Done::said("")
             }
         });
     }
 
-    /// `/setup`: `rl setup` for the harnesses found, in the background; what
-    /// it changed (its notes too) in the footer, then the check again.
+    /// `/setup`: the wizard, once the list has let go of the terminal.
     pub(super) fn setup_now(&mut self) {
-        if self.setting_up {
-            return self.say("setting up already");
-        }
-        let Some(host) = self.setup_host.clone() else {
+        if self.setup_host.is_none() {
             return self.say("setup: where this rl is is not known");
-        };
-        self.setting_up = true;
-        self.say("setting up…");
-        let home = self.home.clone();
-        self.work.spawn(async move {
-            let done = tokio::task::spawn_blocking(move || {
-                let said = match host.run(&home) {
-                    Ok(lines) => crate::guide::with_next(lines).join("\n"),
-                    Err(e) => format!("setup: {e:#}"),
-                };
-                (said, checked(&host, &home))
-            })
-            .await;
-            let (said, needs) = done.unwrap_or_else(|e| (format!("setup: {e}"), Err(e.to_string())));
-            Done {
-                setup: Some(Checked { needs, ran: true }),
-                ..Done::said(said)
-            }
-        });
+        }
+        self.wizard = true;
     }
 
     /// What a check came to: kept for the notice.
     pub(super) fn checked(&mut self, c: Checked) {
-        if c.ran {
-            self.setting_up = false;
-        }
         self.setup = Some(c.needs);
     }
 

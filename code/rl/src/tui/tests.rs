@@ -1640,23 +1640,28 @@ async fn the_list_offers_setup_and_slash_setup_does_it_and_the_notice_goes() {
     );
     assert!(app.flashing().is_none(), "the check says nothing of its own");
 
+    // `/setup` hands the terminal to the wizard (`main_loop`), as an
+    // attach does; nothing is set up from here.
     run(&mut app, "/setup");
-    assert!(shown(&app).contains("setting up…"));
-    run(&mut app, "/setup");
-    assert!(shown(&app).contains("setting up already"));
+    assert!(app.wizard, "the wizard is asked for");
+    assert!(!app.quit);
+    assert_eq!(app.setup.as_ref().map(|n| n.as_ref().map(Vec::len)), Some(Ok(4)));
+}
+
+#[tokio::test]
+async fn what_you_declined_is_not_in_the_notice() {
+    let f = fixture();
+    std::fs::write(
+        f.home.config_json(),
+        r#"{"badges": [], "setup": {"declined": ["antigravity/mcp"]}}"#,
+    )
+    .unwrap();
+    let mut app = list(&f).await;
+    app.setup_host = Some(setup_host(&f));
+    app.check_setup();
     app.finish().await;
     let foot = shown(&app);
-    assert!(foot.contains("codex: hooks installed"), "{foot}");
-    assert!(foot.contains("antigravity: mcp relay registered"), "{foot}");
-    assert!(foot.contains("/hooks"), "codex's note: {foot}");
-    assert!(!foot.contains("setup needed"), "{foot}");
-    assert_eq!(app.setup, Some(Ok(vec![])));
-    assert!(!app.setting_up);
-
-    // Again: nothing to change, and it says so.
-    run(&mut app, "/setup");
-    app.finish().await;
-    assert!(shown(&app).contains("nothing to change"));
+    assert!(foot.contains("setup needed: claude, codex, gemini · /setup"), "{foot}");
 }
 
 #[tokio::test]
@@ -1670,9 +1675,7 @@ async fn a_setup_that_fails_says_why_and_the_list_goes_on() {
     app.finish().await;
     assert!(shown(&app).contains("setup check failed · /setup says why"));
     run(&mut app, "/setup");
-    app.finish().await;
-    let foot = shown(&app);
-    assert!(foot.contains("setup:") && foot.contains(".claude.json"), "{foot}");
+    assert!(app.wizard, "the wizard says why");
     assert!(!app.quit);
 }
 

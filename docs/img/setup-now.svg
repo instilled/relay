@@ -1,0 +1,101 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="952" height="486" viewBox="0 0 952 486" role="img" aria-label="rl setup — what you can do now">
+<rect width="100%" height="100%" rx="10" fill="#14161b"/>
+<circle cx="22" cy="20" r="6" fill="#ff5f57"/><circle cx="42" cy="20" r="6" fill="#febc2e"/><circle cx="62" cy="20" r="6" fill="#28c840"/>
+<text x="476" y="24" fill="#7f8590" font-family="-apple-system, Segoe UI, Helvetica, Arial, sans-serif" font-size="12" text-anchor="middle">rl setup — what you can do now</text>
+<g font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'DejaVu Sans Mono', monospace" font-size="14" fill="#d4d7dd" xml:space="preserve">
+<text x="30.8" y="53" fill="#1d9e75">▄</text>
+<text x="81.2 89.6 98.0 106.4" y="53" fill="#1d9e75">▄██▄</text>
+<text x="156.8" y="53" fill="#1d9e75">▄</text>
+<text x="22.4" y="71" fill="#1d9e75">█</text>
+<text x="47.6" y="71" fill="#1d9e75">█</text>
+<text x="89.6 98.0" y="71" fill="#1d9e75">██</text>
+<text x="140.0" y="71" fill="#1d9e75">█</text>
+<text x="165.2" y="71" fill="#1d9e75">█</text>
+<text x="198.8 207.2 215.6 224.0 232.4" y="71" fill="#1d9e75" font-weight="bold">relay</text>
+<text x="249.2 257.6 266.0 274.4 282.8" y="71" fill="#1d9e75" font-weight="bold">setup</text>
+<text x="308.0 316.4 324.8" y="71" opacity="0.55">6/6</text>
+<text x="30.8" y="89" fill="#1d9e75">▀</text>
+<text x="72.8 81.2 89.6 98.0 106.4 114.8" y="89" fill="#1d9e75">▄█▀▀█▄</text>
+<text x="156.8" y="89" fill="#1d9e75">▀</text>
+<text x="198.8 207.2 215.6" y="89" opacity="0.55">One</text>
+<text x="232.4 240.8 249.2 257.6" y="89" opacity="0.55">list</text>
+<text x="274.4 282.8 291.2" y="89" opacity="0.55">for</text>
+<text x="308.0 316.4 324.8 333.2 341.6" y="89" opacity="0.55">every</text>
+<text x="358.4 366.8 375.2 383.6 392.0 400.4" y="89" opacity="0.55">agent.</text>
+<text x="417.2 425.6 434.0 442.4 450.8" y="89" opacity="0.55">Let's</text>
+<text x="467.6 476.0 484.4 492.8 501.2 509.6 518.0" y="89" opacity="0.55">connect</text>
+<text x="534.8 543.2 551.6 560.0" y="89" opacity="0.55">your</text>
+<text x="576.8 585.2 593.6 602.0 610.4 618.8 627.2 635.6 644.0 652.4" y="89" opacity="0.55">harnesses.</text>
+<text x="47.6 56.0 64.4 72.8 81.2 89.6 98.0 106.4 114.8 123.2 131.6 140.0" y="107" fill="#1d9e75">▄▄██▄▄▄▄██▄▄</text>
+<text x="198.8 207.2 215.6 224.0" y="107" font-weight="bold">What</text>
+<text x="240.8 249.2 257.6" y="107" font-weight="bold">you</text>
+<text x="274.4 282.8 291.2" y="107" font-weight="bold">can</text>
+<text x="308.0 316.4" y="107" font-weight="bold">do</text>
+<text x="333.2 341.6 350.0" y="107" font-weight="bold">now</text>
+<text x="47.6 56.0" y="125" fill="#1d9e75">▀▀</text>
+<text x="81.2 89.6 98.0 106.4" y="125" fill="#1d9e75">▀▀▀▀</text>
+<text x="131.6 140.0" y="125" fill="#1d9e75">▀▀</text>
+<text x="47.6" y="161" fill="#d97757">✻</text>
+<text x="64.4 72.8 81.2" y="161" font-weight="bold">api</text>
+<text x="106.4 114.8 123.2 131.6 140.0 148.4 156.8 165.2 173.6" y="161" fill="#1d9e75">──send──▶</text>
+<text x="190.4" y="161">⬡</text>
+<text x="207.2 215.6 224.0" y="161" font-weight="bold">web</text>
+<text x="106.4 114.8 123.2 131.6 140.0 148.4 156.8 165.2 173.6" y="179" opacity="0.55">◀──inbox─</text>
+<text x="30.8 39.2 47.6 56.0" y="215">Your</text>
+<text x="72.8 81.2 89.6 98.0 106.4 114.8" y="215">agents</text>
+<text x="131.6 140.0 148.4" y="215">can</text>
+<text x="165.2 173.6 182.0 190.4 198.8 207.2 215.6" y="215">message</text>
+<text x="232.4 240.8 249.2 257.6" y="215">each</text>
+<text x="274.4 282.8 291.2 299.6 308.0 316.4" y="215">other.</text>
+<text x="333.2 341.6 350.0" y="215">Ask</text>
+<text x="366.8 375.2 383.6" y="215">one</text>
+<text x="400.4 408.8" y="215">in</text>
+<text x="425.6 434.0 442.4 450.8 459.2" y="215">plain</text>
+<text x="476.0 484.4 492.8 501.2 509.6 518.0" y="215">words:</text>
+<text x="47.6" y="233" fill="#1d9e75">›</text>
+<text x="64.4 72.8 81.2 89.6" y="233" opacity="0.55" font-style="italic">"ask</text>
+<text x="106.4 114.8 123.2" y="233" opacity="0.55" font-style="italic">the</text>
+<text x="140.0 148.4 156.8 165.2 173.6" y="233" opacity="0.55" font-style="italic">codex</text>
+<text x="190.4 198.8 207.2 215.6 224.0 232.4 240.8" y="233" opacity="0.55" font-style="italic">session</text>
+<text x="257.6 266.0" y="233" opacity="0.55" font-style="italic">in</text>
+<text x="282.8 291.2 299.6 308.0 316.4 324.8 333.2 341.6" y="233" opacity="0.55" font-style="italic">shop-api</text>
+<text x="358.4 366.8" y="233" opacity="0.55" font-style="italic">to</text>
+<text x="383.6 392.0 400.4 408.8 417.2 425.6" y="233" opacity="0.55" font-style="italic">review</text>
+<text x="442.4 450.8" y="233" opacity="0.55" font-style="italic">my</text>
+<text x="467.6 476.0 484.4 492.8" y="233" opacity="0.55" font-style="italic">diff</text>
+<text x="509.6 518.0 526.4" y="233" opacity="0.55" font-style="italic">and</text>
+<text x="543.2 551.6 560.0 568.4" y="233" opacity="0.55" font-style="italic">send</text>
+<text x="585.2 593.6" y="233" opacity="0.55" font-style="italic">me</text>
+<text x="610.4 618.8 627.2 635.6" y="233" opacity="0.55" font-style="italic">what</text>
+<text x="652.4 660.8" y="233" opacity="0.55" font-style="italic">it</text>
+<text x="677.6 686.0 694.4 702.8 711.2 719.6" y="233" opacity="0.55" font-style="italic">finds"</text>
+<text x="47.6" y="251" fill="#1d9e75">›</text>
+<text x="64.4 72.8 81.2 89.6 98.0" y="251" opacity="0.55" font-style="italic">"when</text>
+<text x="114.8 123.2 131.6" y="251" opacity="0.55" font-style="italic">the</text>
+<text x="148.4 156.8 165.2 173.6 182.0" y="251" opacity="0.55" font-style="italic">tests</text>
+<text x="198.8 207.2 215.6 224.0 232.4" y="251" opacity="0.55" font-style="italic">pass,</text>
+<text x="249.2 257.6 266.0 274.4" y="251" opacity="0.55" font-style="italic">tell</text>
+<text x="291.2 299.6 308.0" y="251" opacity="0.55" font-style="italic">the</text>
+<text x="324.8 333.2 341.6 350.0 358.4 366.8" y="251" opacity="0.55" font-style="italic">claude</text>
+<text x="383.6 392.0 400.4 408.8 417.2 425.6 434.0" y="251" opacity="0.55" font-style="italic">session</text>
+<text x="450.8 459.2 467.6 476.0 484.4" y="251" opacity="0.55" font-style="italic">'web'</text>
+<text x="501.2 509.6" y="251" opacity="0.55" font-style="italic">to</text>
+<text x="526.4 534.8 543.2 551.6 560.0 568.4" y="251" opacity="0.55" font-style="italic">rebase</text>
+<text x="585.2 593.6" y="251" opacity="0.55" font-style="italic">on</text>
+<text x="610.4 618.8 627.2 635.6 644.0" y="251" opacity="0.55" font-style="italic">main"</text>
+<text x="30.8 39.2 47.6 56.0 64.4" y="287">More:</text>
+<text x="81.2 89.6 98.0 106.4 114.8 123.2 131.6 140.0 148.4 156.8 165.2 173.6 182.0 190.4 198.8 207.2 215.6 224.0 232.4 240.8 249.2 257.6 266.0 274.4 282.8 291.2 299.6 308.0 316.4 324.8 333.2 341.6 350.0 358.4 366.8 375.2 383.6 392.0 400.4 408.8 417.2 425.6 434.0 442.4 450.8 459.2 467.6 476.0 484.4 492.8 501.2 509.6 518.0 526.4 534.8 543.2 551.6 560.0 568.4 576.8 585.2 593.6 602.0 610.4 618.8 627.2 635.6 644.0 652.4 660.8 669.2 677.6 686.0 694.4" y="287" fill="#1d9e75" text-decoration="underline">8;;https://github.com/instilled/relay/blob/main/docs/messaging.mdmessaging</text>
+<text x="711.2 719.6 728.0 736.4 744.8" y="287" fill="#1d9e75" text-decoration="underline">guide</text>
+<text x="761.6" y="287" fill="#1d9e75" text-decoration="underline">↗</text>
+<text x="770.0 778.4 786.8" y="287">8;;</text>
+<text x="30.8 39.2 47.6 56.0 64.4 72.8 81.2 89.6 98.0 106.4 114.8 123.2 131.6 140.0 148.4 156.8 165.2 173.6 182.0 190.4 198.8 207.2 215.6 224.0 232.4 240.8 249.2 257.6 266.0 274.4 282.8 291.2 299.6 308.0 316.4 324.8 333.2 341.6 350.0 358.4 366.8 375.2 383.6 392.0 400.4 408.8 417.2 425.6 434.0 442.4 450.8 459.2 467.6 476.0 484.4 492.8 501.2 509.6 518.0 526.4 534.8 543.2" y="305" opacity="0.55">https://github.com/instilled/relay/blob/main/docs/messaging.md</text>
+<text x="30.8 39.2 47.6 56.0 64.4" y="467" opacity="0.55">enter</text>
+<text x="81.2 89.6" y="467" opacity="0.55">to</text>
+<text x="106.4 114.8 123.2 131.6 140.0 148.4" y="467" opacity="0.55">finish</text>
+<text x="165.2" y="467" opacity="0.55">·</text>
+<text x="182.0 190.4 198.8" y="467" opacity="0.55">esc</text>
+<text x="215.6 224.0" y="467" opacity="0.55">to</text>
+<text x="240.8 249.2" y="467" opacity="0.55">go</text>
+<text x="266.0 274.4 282.8 291.2" y="467" opacity="0.55">back</text>
+</g>
+</svg>

@@ -1,5 +1,5 @@
 //! `config.json` in the Relay home: the harnesses `new` offers, the header
-//! badges, and how the list stands — its grouping, its toggles, and what you
+//! badges, the setup changes you declined, and how the list stands — its grouping, its toggles, and what you
 //! moved, hid, pinned, renamed and coloured. Strict: a field this does not know is an
 //! error, not something to carry along.
 
@@ -19,7 +19,24 @@ pub struct Config {
     pub harnesses: Vec<String>,
     /// The badge plugins a project header runs. Default: `["gh-pr"]`.
     pub badges: Vec<String>,
+    pub setup: SetupPrefs,
     pub list: ListPrefs,
+}
+
+/// What you told setup.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct SetupPrefs {
+    /// The changes you unticked in the wizard, by id (`setup::Part::id`:
+    /// `claude/settings/leftArrowOpensAgents`): never made, and never
+    /// named as needed, until you tick them again.
+    pub declined: Vec<String>,
+}
+
+impl SetupPrefs {
+    fn is_empty(&self) -> bool {
+        self.declined.is_empty()
+    }
 }
 
 /// How the list groups its rows.
@@ -102,6 +119,8 @@ struct File {
     harnesses: Option<Vec<String>>,
     #[serde(default = "default_badges")]
     badges: Vec<String>,
+    #[serde(default, skip_serializing_if = "SetupPrefs::is_empty")]
+    setup: SetupPrefs,
     #[serde(default)]
     list: ListPrefs,
 }
@@ -129,6 +148,7 @@ impl Config {
             Err(e) if e.kind() == io::ErrorKind::NotFound => File {
                 harnesses: None,
                 badges: default_badges(),
+                setup: SetupPrefs::default(),
                 list: ListPrefs::default(),
             },
             Err(e) => return Err(e).with_context(|| format!("{}", path.display())),
@@ -142,6 +162,7 @@ impl Config {
         Ok(Config {
             harnesses: file.harnesses.unwrap_or_else(|| found_harnesses(home)),
             badges: file.badges,
+            setup: file.setup,
             list: file.list,
         })
     }
@@ -153,6 +174,7 @@ impl Config {
         let file = File {
             harnesses,
             badges: self.badges.clone(),
+            setup: self.setup.clone(),
             list: self.list.clone(),
         };
         std::fs::create_dir_all(home.path())?;
@@ -199,6 +221,7 @@ mod tests {
         c.list.pins.push("r:a".into());
         c.list.names.insert("g:/w/api".into(), "the api".into());
         c.list.colors.insert("r:a".into(), "pink".into());
+        c.setup.declined.push("claude/settings/leftArrowOpensAgents".into());
         c.save(&home).unwrap();
         assert_eq!(Config::load(&home).unwrap(), c);
     }
@@ -237,6 +260,7 @@ mod tests {
             r#"{"list": {"grouping": "project", "bogus": true}}"#,
             r#"{"list": {"order": [{"group": "g:/w", "rows": [], "bogus": 1}]}}"#,
             r#"{"list": {"grouping": "folder"}}"#,
+            r#"{"setup": {"declined": [], "bogus": 1}}"#,
         ] {
             std::fs::write(home.config_json(), text).unwrap();
             assert!(Config::load(&home).is_err(), "{text}");

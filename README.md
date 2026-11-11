@@ -17,9 +17,11 @@ scripts/install
 rl
 ```
 
-`scripts/install` builds Relay and links `rl` into `~/.local/bin`. The first `rl` offers to set
-Relay up for the agents it finds (hooks, and the `relay` MCP server for messaging). Say yes. That's
-it.
+`scripts/install` builds Relay and links `rl` into `~/.local/bin`. The first `rl` walks you
+through setting Relay up for the agents it finds (hooks, and the `relay` MCP server for
+messaging): `enter` to walk through it, or `tab` to just set everything up. That's it.
+
+![rl setup: the harnesses found, and the two ways on](docs/img/setup-found.svg)
 
 This is a dev install: `rl` runs from your clone and rebuilds itself when the source changes.
 [More on installing](#install), and what setup changes, below.
@@ -90,24 +92,42 @@ Everything lives under `~/.relay` (`RELAY_HOME` moves it).
 ## Setup
 
 ```sh
-rl            # the list; the first time, it offers to set Relay up
+rl            # the list; the first time, it walks you through setup
+rl setup      # the same walk, any time
 ```
 
-The first `rl` (before there is a `~/.relay/config.json`) says what setup would touch, one harness a
-line, and asks `Set up Relay for claude, codex, …? [Y/n]`; either answer is kept, so it asks once
-(never outside a terminal, nor inside a session Relay holds). Later, while a harness found on PATH
-needs setting up — installed after setup, or `rl` moved so the entries point at the old one — the
-list's footer leads with `setup needed: codex · /setup`, and `/setup` on the command line does it.
-The same by hand:
+On a terminal, setup is a short walk in six steps, drawn under your prompt (not full screen): the
+harnesses found, what setup changes for each, the changes being made, what is left for you (Codex's
+`/hooks`), the keys you'll use, and what you can do now. On the first step `enter` walks through
+it and `tab` (or `y`) just sets everything up and leaves a short summary; `q` quits, changing
+nothing before step 3. What it did stays in your scrollback.
+
+Every change has its own tick box (space, or a click). Untick one you don't want, such as Claude's
+`←` setting, and it is remembered as declined (`setup.declined` in `config.json`): no run makes it,
+and neither `--check` nor the list's notice asks for it again. The next walk shows it unticked;
+tick it to have it made.
+
+![rl setup: what changes, each one ticked or not](docs/img/setup-changes.svg)
+
+The first `rl` (before there is a `~/.relay/config.json`) walks through it once, then opens the
+list; `q` there skips it and `ctrl+c` leaves (either way it is not offered again), never outside a
+terminal nor inside a session Relay holds. Later, while a harness found on PATH needs setting up —
+installed after setup, or `rl` moved so the entries point at the old one — the list's footer leads
+with `setup needed: codex · /setup`, and `/setup` on the command line opens the same walk, then
+comes back to the list.
+
+Plain output, for scripts and CI, and whenever `rl setup` is not on a terminal or runs inside a
+session Relay holds:
 
 ```sh
-rl setup            # hooks and the MCP server, for each harness found on PATH
+rl setup --yes      # set everything up (but what you declined), no questions; plain lines
 rl setup --check    # change nothing: what setup would change, exit 1 if anything
 ```
 
 `rl setup --check` prints one line per harness that needs something (`codex: hooks missing · mcp
-relay stale (points at /old/rl)`, `claude: ← opens agents on`), or `all set up`; it reads the files
-only and runs no harness's CLI.
+relay stale (points at /old/rl)`, `claude: ← opens agents on`), or `all set up`, then `(1 declined,
+rl setup to change)` when you declined any; it reads the files only and runs no harness's CLI.
+`--harness <name>` and `--remove` are plain too.
 
 `rl setup` adds Relay's hook to each harness's user-level settings and registers
 `rl mcp --harness <name>` as an MCP server named `relay` (Claude's through `claude mcp add --scope user`
@@ -157,7 +177,7 @@ Every letter types; the list's own keys are ctrl keys, the arrows and `enter`. `
 | `/rm` | remove an ended session Relay holds |
 | `/agents` `/shells` `/hidden` | show agents, shells, hidden, as `ctrl+a` `ctrl+l` `ctrl+o` |
 | `/group` | by project or by state, as `ctrl+s` |
-| `/setup` | `rl setup` for the harnesses found, in the background; what it changed (and Codex's `/hooks` note) stands in the footer, and the `setup needed` notice goes |
+| `/setup` | the setup walk (as `rl setup`), under the list; back on the list, what it did stands in the footer, and the `setup needed` notice goes |
 | `/help` | the keys |
 | `/quit` | quit |
 
@@ -221,7 +241,7 @@ rl stop <name>                  # close a running session
 rl rm <name>                    # remove one that is not running
 rl color <session> <name|#rrggbb|none>  # your colour for a row (a held name, or n:claude:<id> / o:claude:<id>)
 rl mcp --harness H              # serve send, who and inbox over stdio (agents call this)
-rl setup [--remove | --check] [--harness H]
+rl setup [--yes | --remove | --check] [--harness H]   # a walk on a terminal; plain otherwise
 ```
 
 `rl ls` prints one row per session the list shows, with the same dedupe: the sessions Relay holds
