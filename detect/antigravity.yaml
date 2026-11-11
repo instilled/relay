@@ -8,3 +8,10 @@ bins: [agy]
 words: [gemini, agy, antigravity]
 # `agy -i "<prompt>"` (--prompt-interactive) runs the prompt and stays open.
 prompt: ["-i", "{prompt}"]
+# Where Relay's MCP server goes (`rl setup`): agy keeps its servers in
+# ~/.gemini/config/mcp_config.json and owns it, so Relay goes through `agy
+# mcp add|remove` (agy on 2026-11-10: `mcpServers` entries of `{args,
+# command, disabled, env?}`; `add` replaces) and only reads the file.
+mcp:
+  file: ["~/.gemini/config/mcp_config.json"]
+  cli: [mcp]

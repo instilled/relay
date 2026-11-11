@@ -44,6 +44,16 @@ struct ProfileFile {
     patterns: Option<PatternsFile>,
     timing: Option<TimingFile>,
     sessions: Option<SessionsFile>,
+    mcp: Option<McpFile>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct McpFile {
+    file: Vec<String>,
+    #[serde(default)]
+    cli: Vec<String>,
+    note: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -109,6 +119,9 @@ impl ProfileFile {
         if let Some(s) = over.sessions {
             self.sessions.get_or_insert_with(Default::default).merge(s);
         }
+        if over.mcp.is_some() {
+            self.mcp = over.mcp;
+        }
         if let Some(t) = over.timing {
             let mine = self.timing.get_or_insert_with(Default::default);
             if t.idle_after.is_some() {
@@ -161,6 +174,31 @@ pub struct Profile {
     /// Its own sessions, outside Relay: how its hooks tell of them, how it
     /// lists them, how one is opened. None, and it has none on the list.
     pub sessions: Option<Sessions>,
+    /// Where it keeps the MCP servers of the user, for `rl setup` to
+    /// register Relay's; none, and Relay has no server of its own there.
+    pub mcp: Option<Mcp>,
+}
+
+/// Where a harness keeps its user-level MCP servers (a profile's `mcp`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Mcp {
+    /// Its file: the first of these whose variables are all set; `~` is
+    /// `$HOME`.
+    pub file: Vec<String>,
+    /// The harness's own words, after its binary, that add and remove an
+    /// entry in that file (`[mcp]`: `agy mcp add|remove`), where it owns
+    /// the file; empty, and Relay writes `mcpServers` there itself.
+    pub cli: Vec<String>,
+    /// Said beside what setup did there (`gemini mcp format unverified`).
+    pub note: Option<String>,
+}
+
+impl Mcp {
+    /// Its file, as the harness finds it from this environment (`env` reads
+    /// a variable). None where no `file` has its variables set.
+    pub fn file(&self, env: impl Fn(&str) -> Option<std::ffi::OsString>) -> Option<std::path::PathBuf> {
+        self.file.iter().find_map(|f| crate::sessions::expand(f, &env))
+    }
 }
 
 /// Where a conversation's id goes in a profile's `resume`.
@@ -256,6 +294,9 @@ impl Registry {
             if file.sessions.is_some() && (kind != RunKind::Agent || name == GENERIC) {
                 bail!("{name}.yaml: sessions: only an agent has sessions of its own");
             }
+            if file.mcp.as_ref().is_some_and(|m| m.file.is_empty()) {
+                bail!("{name}.yaml: mcp: `file` names no file");
+            }
             let (patterns, timing) = if name == GENERIC {
                 (base_patterns.clone(), base_timing)
             } else {
@@ -282,6 +323,11 @@ impl Registry {
                     patterns,
                     timing,
                     sessions: file.sessions.map(|s| crate::sessions::compile(&name, s)).transpose()?,
+                    mcp: file.mcp.map(|m| Mcp {
+                        file: m.file,
+                        cli: m.cli,
+                        note: m.note,
+                    }),
                     name,
                 },
             );
@@ -565,6 +611,32 @@ mod tests {
         assert_eq!(r.detect(&argv("zsh -l")).unwrap().kind, RunKind::Shell);
         assert!(r.detect(&argv("sh -c echo")).is_none());
         assert!(r.detect(&argv("bash script.sh")).is_none());
+    }
+
+    #[test]
+    fn an_mcp_block_says_where_the_servers_are_and_a_user_file_moves_it() {
+        let r = Registry::builtin();
+        let env = |k: &str| match k {
+            "HOME" => Some(std::ffi::OsString::from("/h")),
+            "CODEX_HOME" => Some("/c".into()),
+            _ => None,
+        };
+        let file = |name: &str| r.profile(name).unwrap().mcp.as_ref().unwrap().file(env);
+        assert_eq!(file("claude").unwrap(), Path::new("/h/.claude.json"));
+        assert_eq!(file("codex").unwrap(), Path::new("/c/config.toml"));
+        assert_eq!(file("gemini").unwrap(), Path::new("/h/.gemini/settings.json"));
+        let agy = r.profile("antigravity").unwrap().mcp.as_ref().unwrap();
+        assert_eq!(agy.cli, ["mcp"], "through `agy mcp`");
+        assert!(r.profile("cursor").unwrap().mcp.is_none() && r.profile("sh").unwrap().mcp.is_none());
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("cursor.yaml"), "mcp:\n  file: [~/.cursor/mcp.json]\n").unwrap();
+        let r = Registry::load_from(dir.path()).unwrap();
+        let m = r.profile("cursor").unwrap().mcp.as_ref().unwrap();
+        assert_eq!(m.file(env).unwrap(), Path::new("/h/.cursor/mcp.json"));
+        std::fs::write(dir.path().join("cursor.yaml"), "mcp:\n  file: []\n").unwrap();
+        let err = format!("{:#}", Registry::load_from(dir.path()).unwrap_err());
+        assert!(err.contains("cursor.yaml") && err.contains("mcp"), "{err}");
     }
 
     #[test]

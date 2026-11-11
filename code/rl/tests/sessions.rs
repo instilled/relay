@@ -43,6 +43,9 @@ impl Env {
             .env("RELAY_HOME", self.home())
             .env("HOME", self.tmp.path())
             .env("RELAY_SESSION_BIN", &self.session)
+            // `rl ls` asks the harnesses on PATH for their sessions: none of
+            // the real ones here.
+            .env("PATH", "/usr/bin:/bin")
             .output()
             .unwrap();
         (
@@ -99,6 +102,10 @@ fn new_ls_stop_rm() {
     });
     let r = row();
     assert_eq!(r["harness"], "sh");
+    assert_eq!(
+        (r["kind"].as_str(), r["id"].as_str()),
+        (Some("held"), Some(name.as_str()))
+    );
     assert!(r["holder_pid"].as_u64().unwrap() > 0);
 
     // A live session is not removed.

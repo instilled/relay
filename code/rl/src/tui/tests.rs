@@ -52,7 +52,6 @@ fn fixture() -> Fixture {
             started,
             socket: dir.join("sock"),
             holder_pid: None,
-            native_id: None,
         },
     )
     .unwrap();
@@ -637,6 +636,99 @@ async fn the_line_starts_claude_in_its_own_background_and_the_cursor_waits_for_i
     app.set_native(vec![waiting(&f.repo), started]);
     assert_eq!(app.sel.as_deref(), Some(new));
     assert_eq!(app.awaiting, None);
+}
+
+/// What the tests' stand-in Codex daemon was sent, by every test so far.
+fn codex_sent() -> Vec<serde_json::Value> {
+    std::fs::read_to_string(crate::sources::codex_stand_in().with_extension("log"))
+        .unwrap_or_default()
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect()
+}
+
+#[tokio::test]
+async fn the_line_starts_codex_on_its_daemon_and_enter_resumes_the_thread() {
+    let f = fixture();
+    let mut app = list(&f).await;
+    on(&mut app, NATIVE);
+    typed(&mut app, "codex fix the login");
+    assert!(row_of(&shown(&app), "❯ codex fix").contains("agent · codex"));
+    press(&mut app, KeyCode::Enter);
+    app.finish().await;
+    let s = shown(&app);
+    let id = row_of(&s, "started codex")
+        .split_whitespace()
+        .skip_while(|w| *w != "codex")
+        .nth(1)
+        .unwrap()
+        .to_string();
+    assert!(s.contains(&format!("started codex {id} in its background")), "{s}");
+    let sent = codex_sent();
+    let start = sent
+        .iter()
+        .position(|m| m["method"] == "thread/start" && m["params"]["cwd"] == f.repo.to_str().unwrap())
+        .expect("a thread in the row's folder");
+    assert_eq!(
+        sent[start..]
+            .iter()
+            .find(|m| m["method"] == "turn/start" && m["params"]["threadId"] == id.as_str())
+            .map(|m| m["params"]["input"][0]["text"].clone()),
+        Some(serde_json::json!("fix the login")),
+        "its first turn on the prompt"
+    );
+    assert!(
+        sessions::list(&f.home).iter().all(|h| h.meta.harness != "codex"),
+        "not one Relay holds"
+    );
+    let key = format!("n:codex:{id}");
+    assert_eq!(app.awaiting.as_deref(), Some(key.as_str()));
+    // Listed: the cursor goes to it, and enter resumes it.
+    let mut thread = waiting(&f.repo);
+    thread.harness = "codex".into();
+    thread.id = id.clone();
+    thread.session_id = id.clone();
+    app.set_native(vec![waiting(&f.repo), thread]);
+    assert_eq!(app.sel.as_deref(), Some(key.as_str()));
+    press(&mut app, KeyCode::Enter);
+    let hand = app.hand.take().expect("handed over");
+    let super::app::To::Argv(argv) = &hand.to else {
+        panic!("{:?}", hand.to);
+    };
+    assert_eq!(argv[1..], ["resume".to_string(), id.clone()], "codex resume <id>");
+    // ctrl+x twice: its running turn interrupted on the daemon.
+    ctrl(&mut app, 'x');
+    assert!(shown(&app).contains("press ctrl+x again to stop"));
+    ctrl(&mut app, 'x');
+    app.finish().await;
+    assert!(
+        codex_sent()
+            .iter()
+            .any(|m| m["method"] == "turn/interrupt" && m["params"]["threadId"] == id.as_str()),
+        "interrupted"
+    );
+}
+
+#[tokio::test]
+async fn a_bare_codex_runs_here_in_the_folder() {
+    let f = fixture();
+    let mut app = list(&f).await;
+    on(&mut app, NATIVE);
+    typed(&mut app, "codex");
+    press(&mut app, KeyCode::Enter);
+    app.finish().await;
+    let hand = app.hand.take().expect("handed the terminal");
+    assert_eq!(
+        hand.to,
+        super::app::To::Here {
+            argv: vec![crate::sources::codex_stand_in().to_string_lossy().into_owned()],
+            cwd: f.repo.clone(),
+        }
+    );
+    assert!(
+        sessions::list(&f.home).iter().all(|h| h.meta.harness != "codex"),
+        "not one Relay holds"
+    );
 }
 
 /// A Claude session open in another terminal, as its hooks told of it.
@@ -1386,4 +1478,71 @@ async fn a_hex_colour_of_your_own_is_drawn_as_the_names_background() {
         crate::tui::theme::swatch(buf[(x, y)].bg).fg.unwrap(),
         "light text on dark"
     );
+}
+
+/// Setup as a process with its HOME at the fixture's root would run it:
+/// `claude` and `agy` the stand-ins, codex and gemini found but never run.
+fn setup_host(f: &Fixture) -> crate::setup::Host {
+    let root = f.home.path().parent().unwrap().to_path_buf();
+    let fixtures = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../fixtures"));
+    crate::setup::Host {
+        rl_bin: PathBuf::from("/opt/relay/bin/rl"),
+        env: std::sync::Arc::new(move |k| (k == "HOME").then(|| root.clone().into())),
+        bin_of: std::sync::Arc::new(move |p| match p.name.as_str() {
+            "claude" => Some(fixtures.join("stand-in-claude-mcp")),
+            "antigravity" => Some(fixtures.join("stand-in-agy-mcp")),
+            "codex" | "gemini" => Some(PathBuf::from("/nowhere").join(&p.name)),
+            _ => None,
+        }),
+    }
+}
+
+#[tokio::test]
+async fn the_list_offers_setup_and_slash_setup_does_it_and_the_notice_goes() {
+    let f = fixture();
+    let mut app = list(&f).await;
+    app.setup_host = Some(setup_host(&f));
+    app.check_setup();
+    app.finish().await;
+    let foot = shown(&app);
+    assert!(
+        foot.contains("setup needed: antigravity, claude, codex, gemini · /setup"),
+        "{foot}"
+    );
+    assert!(app.flashing().is_none(), "the check says nothing of its own");
+
+    run(&mut app, "/setup");
+    assert!(shown(&app).contains("setting up…"));
+    run(&mut app, "/setup");
+    assert!(shown(&app).contains("setting up already"));
+    app.finish().await;
+    let foot = shown(&app);
+    assert!(foot.contains("codex: hooks installed"), "{foot}");
+    assert!(foot.contains("antigravity: mcp relay registered"), "{foot}");
+    assert!(foot.contains("/hooks"), "codex's note: {foot}");
+    assert!(!foot.contains("setup needed"), "{foot}");
+    assert_eq!(app.setup, Some(Ok(vec![])));
+    assert!(!app.setting_up);
+
+    // Again: nothing to change, and it says so.
+    run(&mut app, "/setup");
+    app.finish().await;
+    assert!(shown(&app).contains("nothing to change"));
+}
+
+#[tokio::test]
+async fn a_setup_that_fails_says_why_and_the_list_goes_on() {
+    let f = fixture();
+    let root = f.home.path().parent().unwrap().to_path_buf();
+    std::fs::write(root.join(".claude.json"), "{ not json").unwrap();
+    let mut app = list(&f).await;
+    app.setup_host = Some(setup_host(&f));
+    app.check_setup();
+    app.finish().await;
+    assert!(shown(&app).contains("setup check failed · /setup says why"));
+    run(&mut app, "/setup");
+    app.finish().await;
+    let foot = shown(&app);
+    assert!(foot.contains("setup:") && foot.contains(".claude.json"), "{foot}");
+    assert!(!app.quit);
 }
