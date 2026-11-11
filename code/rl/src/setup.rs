@@ -15,8 +15,10 @@
 //! Each part answers "would a run change this?" from its files alone
 //! (`Place::need`); a run writes only what that names, and `--check`
 //! (`check`) stops there, so it never writes nor runs a harness's CLI. The
-//! list asks `check` as it starts and offers `/setup`; its first start asks
-//! once (`first_run`).
+//! list asks `check` as it starts and offers `/setup`. On a terminal, `rl
+//! setup`, the list's first start and `/setup` are the wizard
+//! (`tui::wizard`), a view on these: `check` per harness (`Host::need_of`),
+//! then `apply` per part.
 
 use crate::config::Config;
 use anyhow::{Context as _, Result, anyhow, bail};
@@ -28,7 +30,6 @@ use rl_detect::sessions::UserHooks;
 use rl_detect::settings;
 use rl_detect::{Registry, user_hooks};
 use std::ffi::OsString;
-use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -51,9 +52,11 @@ pub fn run(
     let registry = Registry::load(home)?;
     let harnesses = select(&registry, only, remove, bin_of)?;
     let want = want(home, rl_bin, env);
+    // What you declined is never made; taking Relay out takes out all of it.
+    let declined = if remove { Vec::new() } else { declined(home)? };
     let mut lines = Vec::new();
     for h in &harnesses {
-        lines.extend(one(h.as_ref(), remove, &want, env)?);
+        lines.extend(one(h.as_ref(), remove, &want, env, &declined)?);
     }
     if !remove && only.is_empty() {
         let mut config = Config::load(home)?;
@@ -78,14 +81,50 @@ pub fn check(
     env: &impl Fn(&str) -> Option<OsString>,
     bin_of: &impl Fn(&Profile) -> Option<PathBuf>,
 ) -> Result<Vec<Need>> {
+    check_with(home, only, rl_bin, env, bin_of, &declined(home)?)
+}
+
+/// `check`, leaving out the changes `declined` names.
+fn check_with(
+    home: &Home,
+    only: &[String],
+    rl_bin: &Path,
+    env: &impl Fn(&str) -> Option<OsString>,
+    bin_of: &impl Fn(&Profile) -> Option<PathBuf>,
+    declined: &[String],
+) -> Result<Vec<Need>> {
     let registry = Registry::load(home)?;
     let want = want(home, rl_bin, env);
     let mut needs = Vec::new();
     for h in select(&registry, only, false, bin_of)? {
-        let place = Place::of(h.as_ref(), env)?;
+        let place = Place::of(h.as_ref(), env)?.without(declined);
         needs.extend(place.need(&want, env)?);
     }
     Ok(needs)
+}
+
+/// The changes you declined (`config.json`'s `setup.declined`), by id
+/// (`What::id`).
+pub fn declined(home: &Home) -> Result<Vec<String>> {
+    Ok(Config::load(home)?.setup.declined)
+}
+
+/// Keeps what you declined in the wizard, and takes back out what you
+/// ticked again.
+pub fn set_declined(home: &Home, decline: &[String], accept: &[String]) -> Result<()> {
+    let mut config = Config::load(home)?;
+    let before = config.setup.declined.clone();
+    let d = &mut config.setup.declined;
+    d.retain(|id| !accept.contains(id));
+    for id in decline {
+        if !d.contains(id) {
+            d.push(id.clone());
+        }
+    }
+    if config.setup.declined != before || !home.config_json().exists() {
+        config.save(home)?;
+    }
+    Ok(())
 }
 
 /// The harnesses a run handles: those named, or every agent `bin_of` finds
@@ -140,9 +179,12 @@ pub enum What {
     Hooks,
     /// The `relay` MCP server's entry.
     Mcp,
-    /// A key of the harness's own global config not as Relay sets it, by
-    /// what its profile says of that (`← opens agents on`).
-    Setting(String),
+    /// A key of the harness's own global config not as Relay sets it: the
+    /// key, and what its profile says of that (`← opens agents on`).
+    Setting {
+        key: String,
+        says: String,
+    },
 }
 
 impl std::fmt::Display for What {
@@ -150,7 +192,20 @@ impl std::fmt::Display for What {
         match self {
             What::Hooks => f.write_str("hooks"),
             What::Mcp => write!(f, "mcp {SERVER}"),
-            What::Setting(says) => f.write_str(says),
+            What::Setting { says, .. } => f.write_str(says),
+        }
+    }
+}
+
+impl What {
+    /// What it is called in `config.json`'s `setup.declined`, for the
+    /// harness `h`: `codex/hooks`, `codex/mcp`,
+    /// `claude/settings/leftArrowOpensAgents`.
+    pub fn id(&self, h: &str) -> String {
+        match self {
+            What::Hooks => format!("{h}/hooks"),
+            What::Mcp => format!("{h}/mcp"),
+            What::Setting { key, .. } => format!("{h}/settings/{key}"),
         }
     }
 }
@@ -159,7 +214,7 @@ impl std::fmt::Display for What {
 /// on`.
 impl std::fmt::Display for Part {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if let What::Setting(says) = &self.what {
+        if let What::Setting { says, .. } = &self.what {
             return f.write_str(says);
         }
         match &self.state {
@@ -220,6 +275,10 @@ pub fn main_check(home: &Home, only: &[String]) -> Result<bool> {
     for n in &needs {
         println!("{n}");
     }
+    let declined = declined(home)?.len();
+    if declined > 0 {
+        println!("({declined} declined, rl setup to change)");
+    }
     Ok(!needs.is_empty())
 }
 
@@ -252,6 +311,21 @@ impl Host {
         check(home, &[], &self.rl_bin, &|k| (self.env)(k), &|p| (self.bin_of)(p))
     }
 
+    /// `check` for the one harness `name`: what it needs, if anything —
+    /// what you declined too (the wizard shows it, unticked).
+    pub fn need_of(&self, home: &Home, name: &str) -> Result<Option<Need>> {
+        let only = [name.to_string()];
+        Ok(check_with(
+            home,
+            &only,
+            &self.rl_bin,
+            &|k| (self.env)(k),
+            &|p| (self.bin_of)(p),
+            &[],
+        )?
+        .pop())
+    }
+
     /// `rl setup` for every harness found.
     pub fn run(&self, home: &Home) -> Result<Vec<String>> {
         run(home, &[], false, &self.rl_bin, &|k| (self.env)(k), &|p| {
@@ -267,47 +341,60 @@ pub fn should_ask(home: &Home, tty: bool, in_session: bool) -> bool {
     tty && !in_session && !home.config_json().exists()
 }
 
-/// Says what setting up touches, one harness a line, and asks. True on
-/// enter or `y`; anything else, or the end of the input, is a no.
-pub fn ask(needs: &[Need], r: &mut impl BufRead, w: &mut impl Write) -> std::io::Result<bool> {
-    writeln!(w, "Relay is not set up yet. Setting it up changes:")?;
-    for n in needs {
-        writeln!(w, "  {}", n.touches())?;
+/// One part of one harness's setup, as `need` named it: what `run` does
+/// for it, alone, as the files are now (the wizard runs them one by one,
+/// off its screen's thread). What it did, in words: `hooks installed`.
+pub fn apply(home: &Home, name: &str, what: &What, host: &Host) -> Result<String> {
+    let env = |k: &str| (host.env)(k);
+    let registry = Registry::load(home)?;
+    let profile = registry
+        .profile(name)
+        .ok_or_else(|| anyhow!("{name}: no such harness to set up"))?;
+    let h = harness::of(profile, (host.bin_of)(profile));
+    let place = Place::of(h.as_ref(), &env)?;
+    let want = want(home, &host.rl_bin, &env);
+    match (what, &place.hooks, &place.mcp, &place.settings) {
+        (What::Hooks, Some((hooks, file)), _, _) => {
+            user_hooks::install(file, hooks, Path::new(&want.rl)).with_context(|| name.to_string())?;
+            Ok("hooks installed".into())
+        }
+        (What::Mcp, _, Some(mcp), _) => {
+            mcp.register(&want).with_context(|| name.to_string())?;
+            Ok(format!("mcp {SERVER} registered"))
+        }
+        (What::Setting { key, .. }, _, _, Some(settings)) => {
+            let one = settings::Place {
+                path: settings.path.clone(),
+                set: settings.set.iter().filter(|s| &s.key == key).cloned().collect(),
+            };
+            if one.set.is_empty() {
+                bail!("{name}: has no setting {key}");
+            }
+            let set = one.apply().with_context(|| name.to_string())?;
+            let words: Vec<String> = set.iter().map(|s| format!("{} set to {}", s.key, s.value)).collect();
+            Ok(if words.is_empty() {
+                "already set".into()
+            } else {
+                words.join(", ")
+            })
+        }
+        _ => bail!("{name}: has no {what} to set up"),
     }
-    let names: Vec<&str> = needs.iter().map(|n| n.harness.as_str()).collect();
-    write!(w, "Set up Relay for {}? [Y/n] ", names.join(", "))?;
-    w.flush()?;
-    let mut line = String::new();
-    if r.read_line(&mut line)? == 0 {
-        writeln!(w)?;
-        return Ok(false);
-    }
-    Ok(matches!(line.trim().to_lowercase().as_str(), "" | "y" | "yes"))
 }
 
-/// The list's first start (`should_ask`): where a harness found needs
-/// setting up, asks, and on a yes sets up and says what changed — then
-/// waits for enter, so that is read before the list takes the screen.
-/// Either way `config.json` is written, so it is not asked again; the
-/// list's `/setup` is there for later.
-pub fn first_run(home: &Home, host: &Host, r: &mut impl BufRead, w: &mut impl Write) -> Result<()> {
-    let needs = host.check(home)?;
-    if needs.is_empty() {
-        return Ok(());
-    }
-    if ask(&needs, r, w)? {
-        match host.run(home) {
-            Ok(lines) => {
-                for l in crate::guide::with_next(lines) {
-                    writeln!(w, "{l}")?;
-                }
-            }
-            Err(e) => writeln!(w, "rl setup: {e:#}")?,
-        }
-        write!(w, "enter opens the list ")?;
-        w.flush()?;
-        r.read_line(&mut String::new())?;
-    }
+/// Keeps which harnesses are set up in `config.json`, as `run` does: every
+/// agent found that setup has something for. (The wizard's last word.)
+pub fn remember(home: &Home, host: &Host) -> Result<()> {
+    let registry = Registry::load(home)?;
+    let harnesses = select(&registry, &[], false, &|p| (host.bin_of)(p))?;
+    let mut config = Config::load(home)?;
+    config.harnesses = harnesses.iter().map(|h| h.name().to_string()).collect();
+    config.save(home)
+}
+
+/// Writes `config.json` where there is none yet, so the first start's
+/// setup is not offered again.
+pub fn keep_config(home: &Home) -> Result<()> {
     if !home.config_json().exists() {
         Config::load(home)?.save(home)?;
     }
@@ -335,9 +422,15 @@ fn relay_home(home: &Home, env: &impl Fn(&str) -> Option<OsString>) -> Option<St
 /// One harness: its hooks, where it has them, then its MCP entry. A line
 /// naming what changed. Setting up asks `Place::need` first — what
 /// `check` asks — and writes only what it names.
-fn one(h: &dyn Harness, remove: bool, want: &Want, env: &impl Fn(&str) -> Option<OsString>) -> Result<Vec<String>> {
+fn one(
+    h: &dyn Harness,
+    remove: bool,
+    want: &Want,
+    env: &impl Fn(&str) -> Option<OsString>,
+    declined: &[String],
+) -> Result<Vec<String>> {
     let name = h.name();
-    let place = Place::of(h, env)?;
+    let place = Place::of(h, env)?.without(declined);
     let mut parts = Vec::new();
     let mut notes = Vec::new();
     let mcp_line = |mcp: &mcp_entry::Place, word: &str| {
@@ -418,6 +511,30 @@ impl<'a> Place<'a> {
         })
     }
 
+    /// The same, without what `declined` names (`What::id`).
+    fn without(mut self, declined: &[String]) -> Place<'a> {
+        let name = self.name;
+        let out = |w: &What| declined.contains(&w.id(name));
+        if out(&What::Hooks) {
+            self.hooks = None;
+        }
+        if out(&What::Mcp) {
+            self.mcp = None;
+        }
+        if let Some(s) = &mut self.settings {
+            s.set.retain(|x| {
+                !out(&What::Setting {
+                    key: x.key.clone(),
+                    says: String::new(),
+                })
+            });
+            if s.set.is_empty() {
+                self.settings = None;
+            }
+        }
+        self
+    }
+
     /// What setting up would change here, read from the files alone: no
     /// harness CLI is run, nothing is written. An error where a run would
     /// fail before changing anything (a CLI it needs not on PATH, a file
@@ -457,7 +574,10 @@ impl<'a> Place<'a> {
         if let Some(settings) = &self.settings {
             for s in settings.need().with_context(|| name.to_string())? {
                 items.push(Part {
-                    what: What::Setting(s.check.clone()),
+                    what: What::Setting {
+                        key: s.key.clone(),
+                        says: s.check.clone(),
+                    },
                     state: State::Missing,
                     file: tilde(&settings.path, env),
                 });
@@ -781,65 +901,71 @@ mod tests {
     }
 
     #[test]
-    fn ask_says_what_it_touches_and_takes_enter_or_y_as_yes() {
+    fn apply_does_one_part_at_a_time_as_check_named_it() {
         let f = Fixture::new();
-        let needs = f.try_check(&[], RL).unwrap();
-        let answer = |input: &str| {
-            let mut out = Vec::new();
-            let yes = ask(&needs, &mut input.as_bytes(), &mut out).unwrap();
-            (yes, String::from_utf8(out).unwrap())
-        };
-        let (yes, out) = answer("\n");
-        assert!(yes);
-        assert!(
-            out.contains("  codex: ~/.codex/hooks.json (hooks) · ~/.codex/config.toml (mcp relay)\n"),
-            "{out}"
+        let host = f.host();
+        let codex = host.need_of(&f.home, "codex").unwrap().unwrap();
+        assert_eq!(codex.items.len(), 2);
+        assert_eq!(apply(&f.home, "codex", &What::Hooks, &host).unwrap(), "hooks installed");
+        let left = host.need_of(&f.home, "codex").unwrap().unwrap();
+        assert_eq!(
+            left.items.iter().map(|p| p.what.clone()).collect::<Vec<_>>(),
+            [What::Mcp]
         );
-        assert!(
-            out.contains("  antigravity: ~/.gemini/config/mcp_config.json (mcp relay)\n"),
-            "{out}"
+        assert_eq!(
+            apply(&f.home, "codex", &What::Mcp, &host).unwrap(),
+            "mcp relay registered"
         );
-        assert!(
-            out.ends_with("Set up Relay for antigravity, claude, codex, gemini? [Y/n] "),
-            "{out}"
-        );
-        assert!(answer("y\n").0 && answer(" Yes \n").0);
-        assert!(!answer("n\n").0 && !answer("no\n").0 && !answer("later\n").0);
-        assert!(!answer("").0, "the end of the input is a no");
-    }
+        assert_eq!(host.need_of(&f.home, "codex").unwrap(), None);
 
-    #[test]
-    fn a_yes_on_the_first_start_sets_up_and_keeps_a_config() {
-        let f = Fixture::new();
-        let mut out = Vec::new();
-        first_run(&f.home, &f.host(), &mut "\n\n".as_bytes(), &mut out).unwrap();
-        let out = String::from_utf8(out).unwrap();
-        assert!(out.contains("codex: hooks installed"), "{out}");
-        assert!(out.contains("/hooks"), "the profile's note: {out}");
-        assert!(out.ends_with("enter opens the list "), "{out}");
-        assert!(f.check(RL).is_empty());
+        let claude = host.need_of(&f.home, "claude").unwrap().unwrap();
+        let setting = claude.items.last().unwrap().what.clone();
+        assert_eq!(
+            apply(&f.home, "claude", &setting, &host).unwrap(),
+            "leftArrowOpensAgents set to false"
+        );
+        assert!(f.claude_calls().is_empty(), "a setting runs no claude");
+        assert!(
+            apply(
+                &f.home,
+                "codex",
+                &What::Setting {
+                    key: "x".into(),
+                    says: "x".into()
+                },
+                &host
+            )
+            .is_err()
+        );
+
+        assert!(!f.home.config_json().exists());
+        remember(&f.home, &host).unwrap();
         assert!(f.home.config_json().exists());
-        assert!(!should_ask(&f.home, true, false));
     }
 
     #[test]
-    fn a_no_on_the_first_start_changes_nothing_but_is_kept() {
+    fn a_declined_change_is_neither_made_nor_named_until_ticked_again() {
         let f = Fixture::new();
-        let mut out = Vec::new();
-        first_run(&f.home, &f.host(), &mut "n\n".as_bytes(), &mut out).unwrap();
-        assert_eq!(f.check(RL).len(), 4, "not set up");
-        assert!(f.claude_calls().is_empty() && f.agy_calls().is_empty());
-        assert!(f.home.config_json().exists(), "so it is not asked again");
-    }
-
-    #[test]
-    fn a_first_start_with_nothing_to_set_up_asks_nothing() {
-        let f = Fixture::new();
+        let left = "claude/settings/leftArrowOpensAgents".to_string();
+        set_declined(&f.home, std::slice::from_ref(&left), &[]).unwrap();
+        assert_eq!(declined(&f.home).unwrap(), std::slice::from_ref(&left));
+        assert!(
+            f.check(RL)
+                .contains(&"claude: hooks missing · mcp relay missing".to_string()),
+            "{:?}",
+            f.check(RL)
+        );
         f.run(&[], false);
-        std::fs::remove_file(f.home.config_json()).unwrap();
-        let mut out = Vec::new();
-        first_run(&f.home, &f.host(), &mut "".as_bytes(), &mut out).unwrap();
-        assert!(out.is_empty(), "{}", String::from_utf8_lossy(&out));
+        assert!(f.check(RL).is_empty(), "set up, but for what was declined");
+        assert!(f.json(".claude.json").get("leftArrowOpensAgents").is_none());
+        // The wizard still sees it, to show it unticked.
+        let all = f.host().need_of(&f.home, "claude").unwrap().unwrap();
+        assert_eq!(all.items.len(), 1);
+        assert_eq!(all.items[0].what.id("claude"), left);
+
+        set_declined(&f.home, &[], std::slice::from_ref(&left)).unwrap();
+        assert!(declined(&f.home).unwrap().is_empty());
+        assert_eq!(f.check(RL), ["claude: ← opens agents on"]);
     }
 
     #[test]
