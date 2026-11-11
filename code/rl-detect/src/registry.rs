@@ -4,6 +4,7 @@
 //! a new name adds a CLI). `generic` is the floor every profile extends.
 
 use crate::sessions::{Sessions, SessionsFile, UserHooks};
+use crate::settings::{Setting, Settings};
 use anyhow::{Context, Result, bail};
 use regex::Regex;
 use rl_core::Home;
@@ -45,6 +46,22 @@ struct ProfileFile {
     timing: Option<TimingFile>,
     sessions: Option<SessionsFile>,
     mcp: Option<McpFile>,
+    settings: Option<SettingsFile>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SettingsFile {
+    file: Vec<String>,
+    set: Vec<SettingFile>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SettingFile {
+    key: String,
+    value: serde_json::Value,
+    check: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -122,6 +139,9 @@ impl ProfileFile {
         if over.mcp.is_some() {
             self.mcp = over.mcp;
         }
+        if over.settings.is_some() {
+            self.settings = over.settings;
+        }
         if let Some(t) = over.timing {
             let mine = self.timing.get_or_insert_with(Default::default);
             if t.idle_after.is_some() {
@@ -177,6 +197,9 @@ pub struct Profile {
     /// Where it keeps the MCP servers of the user, for `rl setup` to
     /// register Relay's; none, and Relay has no server of its own there.
     pub mcp: Option<Mcp>,
+    /// Keys `rl setup` sets in its own global config (`settings`); none,
+    /// and it sets none.
+    pub settings: Option<Settings>,
 }
 
 /// Where a harness keeps its user-level MCP servers (a profile's `mcp`).
@@ -297,6 +320,14 @@ impl Registry {
             if file.mcp.as_ref().is_some_and(|m| m.file.is_empty()) {
                 bail!("{name}.yaml: mcp: `file` names no file");
             }
+            if let Some(s) = &file.settings {
+                if s.file.is_empty() {
+                    bail!("{name}.yaml: settings: `file` names no file");
+                }
+                if s.set.is_empty() {
+                    bail!("{name}.yaml: settings: `set` names nothing to set");
+                }
+            }
             let (patterns, timing) = if name == GENERIC {
                 (base_patterns.clone(), base_timing)
             } else {
@@ -327,6 +358,18 @@ impl Registry {
                         file: m.file,
                         cli: m.cli,
                         note: m.note,
+                    }),
+                    settings: file.settings.map(|s| Settings {
+                        file: s.file,
+                        set: s
+                            .set
+                            .into_iter()
+                            .map(|s| Setting {
+                                key: s.key,
+                                value: s.value,
+                                check: s.check,
+                            })
+                            .collect(),
                     }),
                     name,
                 },

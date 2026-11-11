@@ -5,8 +5,12 @@
 //! `claude mcp`, which owns `~/.claude.json`, and Antigravity's through `agy
 //! mcp`, which owns `~/.gemini/config/mcp_config.json`; Codex's and
 //! Gemini's are written into their own files (`rl_detect::mcp_entry`).
+//! Last, the keys a harness's profile `settings` names in its own global
+//! config (Claude's `leftArrowOpensAgents: false`), written into the file by
+//! `rl_detect::settings`: Claude has no command that sets them.
 //! Edits keep everything else in them; a file that does not read is left as
-//! it was. `--remove` takes out only Relay's.
+//! it was. `--remove` takes out only Relay's hooks and server; the settings
+//! stay.
 //!
 //! Each part answers "would a run change this?" from its files alone
 //! (`Place::need`); a run writes only what that names, and `--check`
@@ -21,6 +25,7 @@ use rl_detect::harness::{self, Harness};
 use rl_detect::mcp_entry::{self, SERVER, Want};
 use rl_detect::registry::{Profile, find_bin};
 use rl_detect::sessions::UserHooks;
+use rl_detect::settings;
 use rl_detect::{Registry, user_hooks};
 use std::ffi::OsString;
 use std::io::{BufRead, Write};
@@ -107,10 +112,10 @@ fn select(
         .collect()
 }
 
-/// Whether `rl setup` has anything to do for `h`: hooks of its own, or a
-/// place for the server.
+/// Whether `rl setup` has anything to do for `h`: hooks of its own, a
+/// place for the server, or settings of its own to set.
 fn set_up(h: &dyn Harness) -> bool {
-    h.user_hooks().is_some() || h.has_mcp()
+    h.user_hooks().is_some() || h.has_mcp() || h.profile().settings.is_some()
 }
 
 /// What a harness needs from `rl setup`: each of its parts that a run would
@@ -130,11 +135,14 @@ pub struct Part {
     pub file: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum What {
     Hooks,
     /// The `relay` MCP server's entry.
     Mcp,
+    /// A key of the harness's own global config not as Relay sets it, by
+    /// what its profile says of that (`← opens agents on`).
+    Setting(String),
 }
 
 impl std::fmt::Display for What {
@@ -142,13 +150,18 @@ impl std::fmt::Display for What {
         match self {
             What::Hooks => f.write_str("hooks"),
             What::Mcp => write!(f, "mcp {SERVER}"),
+            What::Setting(says) => f.write_str(says),
         }
     }
 }
 
-/// `hooks missing`, `mcp relay stale (points at /old/rl)`.
+/// `hooks missing`, `mcp relay stale (points at /old/rl)`, `← opens agents
+/// on`.
 impl std::fmt::Display for Part {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let What::Setting(says) = &self.what {
+            return f.write_str(says);
+        }
         match &self.state {
             State::Missing => write!(f, "{} missing", self.what),
             State::Stale { was: None } => write!(f, "{} stale", self.what),
@@ -344,7 +357,7 @@ fn one(h: &dyn Harness, remove: bool, want: &Want, env: &impl Fn(&str) -> Option
         }
     } else if let Some(need) = place.need(want, env)? {
         for item in &need.items {
-            match (item.what, &place.hooks, &place.mcp) {
+            match (&item.what, &place.hooks, &place.mcp) {
                 (What::Hooks, Some((hooks, file)), _) => {
                     user_hooks::install(file, hooks, Path::new(&want.rl)).with_context(|| name.to_string())?;
                     parts.push("hooks installed".to_string());
@@ -360,6 +373,13 @@ fn one(h: &dyn Harness, remove: bool, want: &Want, env: &impl Fn(&str) -> Option
             }
         }
     }
+    // Last, and as the file is now: a harness's own CLI may have just
+    // written the same file.
+    if !remove && let Some(settings) = &place.settings {
+        for s in settings.apply().with_context(|| name.to_string())? {
+            parts.push(format!("{} set to {} ({})", s.key, s.value, tilde(&settings.path, env)));
+        }
+    }
     if parts.is_empty() {
         return Ok(Vec::new());
     }
@@ -368,11 +388,12 @@ fn one(h: &dyn Harness, remove: bool, want: &Want, env: &impl Fn(&str) -> Option
     Ok(out)
 }
 
-/// Where a harness's hooks and MCP server are.
+/// Where a harness's hooks, MCP server and settings are.
 struct Place<'a> {
     name: &'a str,
     hooks: Option<(&'a UserHooks, PathBuf)>,
     mcp: Option<mcp_entry::Place>,
+    settings: Option<settings::Place>,
 }
 
 impl<'a> Place<'a> {
@@ -388,7 +409,13 @@ impl<'a> Place<'a> {
             })
             .transpose()?;
         let mcp = h.mcp(env)?;
-        Ok(Place { name, hooks, mcp })
+        let settings = h.settings(env)?;
+        Ok(Place {
+            name,
+            hooks,
+            mcp,
+            settings,
+        })
     }
 
     /// What setting up would change here, read from the files alone: no
@@ -426,6 +453,15 @@ impl<'a> Place<'a> {
                 state,
                 file: tilde(&mcp.path, env),
             });
+        }
+        if let Some(settings) = &self.settings {
+            for s in settings.need().with_context(|| name.to_string())? {
+                items.push(Part {
+                    what: What::Setting(s.check.clone()),
+                    state: State::Missing,
+                    file: tilde(&settings.path, env),
+                });
+            }
         }
         Ok((!items.is_empty()).then(|| Need {
             harness: name.to_string(),
@@ -577,10 +613,14 @@ mod tests {
         );
         assert!(lines.iter().any(|l| l.contains("/hooks") && !l.contains("mcp relay")));
         assert!(
-            lines
-                .iter()
-                .any(|l| l.starts_with("claude: hooks installed · mcp relay registered (~/.claude.json)"))
+            lines.contains(
+                &"claude: hooks installed · mcp relay registered (~/.claude.json) · \
+                  leftArrowOpensAgents set to false (~/.claude.json)"
+                    .to_string()
+            ),
+            "{lines:?}"
         );
+        assert_eq!(f.json(".claude.json")["leftArrowOpensAgents"], json!(false));
         assert!(lines.iter().any(|l| l.starts_with("codex: hooks installed")));
         assert!(lines.iter().any(|l| l.contains(
             "gemini: hooks installed · mcp relay registered (~/.gemini/settings.json) (gemini mcp format unverified)"
@@ -662,12 +702,17 @@ mod tests {
             f.check(RL),
             [
                 "antigravity: mcp relay missing",
-                "claude: hooks missing · mcp relay missing",
+                "claude: hooks missing · mcp relay missing · ← opens agents on",
                 "codex: hooks missing · mcp relay missing",
                 "gemini: hooks missing · mcp relay missing",
             ]
         );
         assert_eq!(f.files(), before, "nothing written");
+        let claude = &f.try_check(&["claude"], RL).unwrap()[0];
+        assert_eq!(
+            claude.touches(),
+            "claude: ~/.claude/settings.json (hooks) · ~/.claude.json (mcp relay, ← opens agents on)"
+        );
         assert!(f.claude_calls().is_empty() && f.agy_calls().is_empty(), "no CLI run");
         let codex = &f.try_check(&["codex"], RL).unwrap()[0];
         assert_eq!(
@@ -1011,6 +1056,43 @@ mod tests {
     }
 
     #[test]
+    fn claudes_left_arrow_is_turned_off_keeping_the_rest_and_left_off_on_remove() {
+        let f = Fixture::new();
+        f.run(&["claude"], false);
+        // As the real `claude` leaves it: its own keys, the shortcut on.
+        let mut doc = f.json(".claude.json");
+        doc["numStartups"] = json!(7);
+        doc["leftArrowOpensAgents"] = json!(true);
+        f.put(".claude.json", &doc.to_string());
+        let check = |f: &Fixture| -> Vec<String> {
+            f.try_check(&["claude"], RL)
+                .unwrap()
+                .iter()
+                .map(Need::to_string)
+                .collect()
+        };
+        assert_eq!(check(&f), ["claude: ← opens agents on"]);
+        assert_eq!(
+            f.run(&["claude"], false),
+            ["claude: leftArrowOpensAgents set to false (~/.claude.json)"]
+        );
+        let doc = f.json(".claude.json");
+        assert_eq!(doc["leftArrowOpensAgents"], json!(false));
+        assert_eq!(doc["numStartups"], json!(7), "the rest kept");
+        assert_eq!(doc["mcpServers"]["relay"]["command"], json!(RL));
+        assert!(check(&f).is_empty());
+        assert_eq!(
+            f.claude_calls().len(),
+            2,
+            "no claude run for it: one remove, one add, the first time"
+        );
+        // Taking Relay out leaves it: it is yours by then. (The stand-in
+        // `claude mcp remove` keeps no other key; the real one does.)
+        let removed = f.run(&["claude"], true);
+        assert_eq!(removed, ["claude: hooks removed · mcp relay removed (~/.claude.json)"]);
+    }
+
+    #[test]
     fn follows_claude_config_dir_and_codex_home() {
         let f = Fixture::new();
         let other = f.dir.join("elsewhere");
@@ -1029,6 +1111,13 @@ mod tests {
         .unwrap();
         assert_eq!(changes(&r), 2, "{r:?}");
         assert!(other.join("c/.claude.json").exists() && other.join("c/settings.json").exists());
+        let global: Value =
+            serde_json::from_str(&std::fs::read_to_string(other.join("c/.claude.json")).unwrap()).unwrap();
+        assert_eq!(
+            global["leftArrowOpensAgents"],
+            json!(false),
+            "its global config there too"
+        );
         assert!(other.join("x/config.toml").exists() && other.join("x/hooks.json").exists());
         assert!(!f.dir.join(".claude.json").exists() && !f.dir.join(".codex").exists());
     }

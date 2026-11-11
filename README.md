@@ -41,15 +41,19 @@ rl setup --check    # change nothing: what setup would change, exit 1 if anythin
 ```
 
 `rl setup --check` prints one line per harness that needs something (`codex: hooks missing · mcp
-relay stale (points at /old/rl)`), or `all set up`; it reads the files only and runs no harness's
-CLI.
+relay stale (points at /old/rl)`, `claude: ← opens agents on`), or `all set up`; it reads the files
+only and runs no harness's CLI.
 
 `rl setup` adds Relay's hook to each harness's user-level settings and registers
 `rl mcp --harness <name>` as an MCP server named `relay` (Claude's through `claude mcp add --scope user`
 and Antigravity's through `agy mcp add`, so that CLI must be on PATH). Antigravity has no hooks yet, so
-it gets only the server. It says what it changed, and `nothing to change` on a second run.
-`rl setup --remove` takes both out again, also for a harness no longer installed; `--harness <name>`
-(repeatable) limits it to one.
+it gets only the server. For Claude it also turns off `←` opening Claude's agents view
+(`leftArrowOpensAgents: false` in `~/.claude.json`, or `$CLAUDE_CONFIG_DIR/.claude.json`): Relay's
+list is that view. Claude has no command that sets it, so Relay writes that one key into the file
+itself and keeps the rest. It says what it changed, and `nothing to change` on a second run.
+`rl setup --remove` takes the hooks and the server out again, also for a harness no longer
+installed, and leaves `leftArrowOpensAgents` as it is; `--harness <name>` (repeatable) limits it to
+one.
 Codex asks you to trust the hook once (`/hooks` in codex); Claude may ask you to review it in `/hooks`.
 
 ## The list
@@ -215,6 +219,10 @@ Keys a profile accepts:
   - `cli`: the harness's own words that add and remove an entry there (`[mcp]`: `agy mcp add`);
     without them Relay writes `mcpServers.relay` into the file itself
   - `note`: said beside what setup did
+- `settings`: keys `rl setup` sets at the top of the harness's own global config (JSON)
+  - `file`: that file, the first whose variables are set
+  - `set`: a list of `{key, value, check}`, `check` being what `--check` says while the key has
+    another value (`← opens agents on`)
 
 Unknown keys are an error. Old keys such as `headless`, `model_flag`, `small_model` and `says` no
 longer load; remove them. See `detect/claude.yaml` and `detect/codex.yaml` for worked examples.
@@ -261,6 +269,9 @@ Not verified against the live CLIs:
   thread's unloading were checked on codex 0.167.
 - The Gemini MCP entry (`mcpServers.relay` in its `settings.json`).
 - `claude agents` state mapping against its own screen.
+- That `←` in an attached session (`claude attach`) draws the agents view as `claude agents` does:
+  the line Relay looks for (`❯ describe a task for a new session`, at the left edge) was read off
+  `claude agents` 2.1.322, not off an attach.
 - Antigravity (`agy`): no hooks and no screen patterns of its own yet, so its state is the generic guess.
   Whether `agy` hands its MCP servers the held session's environment (`RL_SESSION`), so `rl mcp` there
   knows its caller.

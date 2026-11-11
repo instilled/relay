@@ -82,3 +82,12 @@ sessions:
 # `claude mcp add|remove --scope user`; Relay reads it to compare.
 mcp:
   file: ["$CLAUDE_CONFIG_DIR/.claude.json", "~/.claude.json"]
+# What `rl setup` sets in Claude's global config, the same file: `←` on an
+# empty prompt opens Claude's agents view, and Relay's list is that view, so
+# it is turned off. Claude has no command that sets it (`claude config` is
+# gone), so Relay writes the key itself, the rest of the file kept; `--check`
+# says `check` while it is not so. `--remove` leaves it.
+settings:
+  file: ["$CLAUDE_CONFIG_DIR/.claude.json", "~/.claude.json"]
+  set:
+    - { key: leftArrowOpensAgents, value: false, check: "← opens agents on" }

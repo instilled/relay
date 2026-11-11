@@ -159,7 +159,7 @@ The format is strict. Every struct is `deny_unknown_fields`: a key it does not k
 when the profile loads. Keys:
 
 - top level: `kind`, `bins`, `words`, `prompt`, `interactive_only`, `hooks`, `resume`, `icon`,
-  `color`, `patterns`, `timing`, `sessions`, `mcp`
+  `color`, `patterns`, `timing`, `sessions`, `mcp`, `settings`
 - `hooks`: `dialect`, `args`
 - `patterns`: `needs_input`, `idle`; `timing`: `idle_after`, `stale_after`
 - `sessions`: `hooks`, `list`, `attach`, `start`, `name`, `stop`, `ping`, `agents_view`
@@ -167,6 +167,7 @@ when the profile loads. Keys:
   `events`, `settings`
 - `sessions.list`: `args`, `reader`
 - `mcp`: `file`, `cli`, `note`
+- `settings`: `file`, `set` (each `key`, `value`, `check`)
 
 `headless`, `model_flag`, `small_model` and `says` are gone and fail to load.
 
@@ -183,7 +184,8 @@ trait covers:
   profile's `hooks` names), `attach_argv`, `agents_view`, `carry_on` (`CarryOn::Background`, `Held` or `Attach`)
   and `carry_on_there`, `stops`/`stop`, `ping_argv`;
 - setup: `user_hooks` (its profile's `sessions.hooks`), `has_mcp`, `mcp` (an `mcp_entry::Place`:
-  where Relay's server goes and how);
+  where Relay's server goes and how), `settings` (a `settings::Place`: keys of its own global
+  config and their values);
 - `rl mcp` and mail: `caller_id_var`, `mail_by_hooks`, `wake_advice`.
 
 The kinds:
@@ -239,7 +241,14 @@ the Relay home is not the default, each entry carries `RELAY_HOME`. Hook
 files are edited in place keeping key order, comments (TOML) and file mode. A file that does not
 parse is left alone and reported.
 
-Each part (hooks, `user_hooks::install_needed`; each server entry, `mcp_entry::Place::need`) first answers
+Then the keys a profile's `settings` names, in the harness's own global config (Claude's
+`leftArrowOpensAgents: false` in `~/.claude.json`, so `←` does not open its agents view). Claude
+has no command that sets one (`claude config` is gone), so `rl_detect::settings` writes the keys
+into the file itself, last, after `claude mcp` has written it, keeping every other key in its
+order; `--remove` leaves them.
+
+Each part (hooks, `user_hooks::install_needed`; each server entry, `mcp_entry::Place::need`; the
+settings, `settings::Place::need`) first answers
 "would a run change this?" from its files alone, missing or stale; a run writes only what that
 names, and `rl setup --check` (`setup::check`) stops there, so it writes nothing and runs neither
 `claude mcp` nor `agy mcp` (their entries are read from `~/.claude.json` and agy's
@@ -258,6 +267,8 @@ Taken from the task reports; none is exercised by the tests.
 - `turn/interrupt` on a live thread, and `codex app-server daemon start`.
 - The Gemini MCP entry format.
 - Whether `claude --bg` sessions run user-level hooks (why the list asks `claude agents`).
+- Claude's agents view in an attach (`sessions.agents_view`): read off `claude agents` 2.1.322 in
+  a pty at 34 to 120 columns, not off a `claude attach` after `←`.
 - Checked live on codex 0.167: a thread started over the proxy runs its turn with no client; an
   idle one with no client is unloaded after about two minutes (hence the `resting` rows); a turn
   that needs an approval with no client connected waits (`active`, `waitingOnApproval`), and

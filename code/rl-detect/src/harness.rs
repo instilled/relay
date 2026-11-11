@@ -24,6 +24,7 @@ use crate::Registry;
 use crate::mcp_entry::{How, Place};
 use crate::registry::{Profile, find_bin};
 use crate::sessions::{ID, ScreenMark, TEXT, UserHooks};
+use crate::settings;
 use anyhow::{Context, Result, anyhow, bail};
 use jiff::Timestamp;
 use nix::sys::signal::{Signal, killpg};
@@ -254,6 +255,23 @@ pub trait Harness: Send + Sync {
             _ => How::Json,
         };
         mcp_place(self, env, how)
+    }
+
+    /// Where the keys `rl setup` sets in its own global config go, and
+    /// which (its profile's `settings`); None where it has none. An error
+    /// where its file is not known (`HOME` not set).
+    fn settings(&self, env: &dyn Fn(&str) -> Option<OsString>) -> Result<Option<settings::Place>> {
+        let Some(s) = self.profile().settings.as_ref() else {
+            return Ok(None);
+        };
+        let name = self.name();
+        let path = s
+            .file(env)
+            .ok_or_else(|| anyhow!("{name}: HOME is not set, so where its global config is is not known"))?;
+        Ok(Some(settings::Place {
+            path,
+            set: s.set.clone(),
+        }))
     }
 
     // Mail and `rl mcp`.
