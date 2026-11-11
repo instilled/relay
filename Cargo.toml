@@ -59,3 +59,9 @@ unicode-width = "0.2"
 # release carries the fix.
 [patch.crates-io]
 crossterm = { path = "vendor/crossterm" }
+
+# Dependencies are optimised in debug builds too, as the dev shim runs one:
+# drawing the list is mostly ratatui and the unicode tables, several times
+# slower unoptimised. Relay's own crates stay quick to build.
+[profile.dev.package."*"]
+opt-level = 2

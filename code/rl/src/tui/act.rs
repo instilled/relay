@@ -74,7 +74,10 @@ impl App {
                     Some(h) => To::Held(Box::new(h.meta)),
                 }
             }
-            Attach::Argv(argv) => To::Argv(argv.clone()),
+            Attach::Argv(argv) => To::Argv {
+                argv: argv.clone(),
+                back: sources::harness(&harness).and_then(|h| h.agents_view().cloned()),
+            },
             Attach::CarryOn { argv, background } => {
                 let argv = argv.clone();
                 return self.carry_on(argv, *background, &harness, cwd, title);
@@ -119,7 +122,10 @@ impl App {
                             said: format!("{title} carries on in {}'s background", a.name()),
                             select: Some(key.clone()),
                             hand: a.attach_argv(&id).map(|argv| Hand {
-                                to: To::Argv(argv),
+                                to: To::Argv {
+                                    argv,
+                                    back: a.agents_view().cloned(),
+                                },
                                 title,
                                 key,
                             }),

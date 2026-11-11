@@ -19,6 +19,7 @@
 //!   for every other profile, which Relay holds.
 //! - [`mcp_entry`]: Relay's MCP server as an entry in a harness's own list
 //!   of servers, for `rl setup`.
+//! - [`settings`]: keys `rl setup` sets in a harness's own global config.
 
 pub mod claude;
 pub mod claude_native;
@@ -27,6 +28,7 @@ pub mod harness;
 pub mod mcp_entry;
 pub mod registry;
 pub mod sessions;
+pub mod settings;
 pub mod user_hooks;
 
 pub use rl_session::detect::{ansi, heuristics as pty};

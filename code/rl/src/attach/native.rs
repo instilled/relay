@@ -4,14 +4,18 @@
 //! command's screen is its own, and only the window title is ours.
 //!
 //! Letting go hangs up its pty, as closing a terminal window does: the
-//! command ends, and what it was attached to goes on without it.
+//! command ends, and what it was attached to goes on without it. So does a
+//! screen that shows the harness's own list of its sessions (`Back`): that
+//! list is Relay's, which comes back in its place.
 
 use super::{AbortOnDrop, AltScreen, DETACH, RawMode, title};
 use anyhow::{Context, Result};
 use nix::sys::signal::{Signal, killpg};
 use nix::unistd::Pid;
+use rl_detect::sessions::ScreenMark;
 use rl_session::backend::{self, Spawned, Spec};
 use rl_session::exit::Exit;
+use rl_session::screen::Screen;
 use std::path::Path;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -29,7 +33,8 @@ const TYPED_FIRST: Duration = Duration::from_millis(20);
 /// How the terminal came back.
 #[derive(Debug, PartialEq)]
 pub enum Back {
-    /// `ctrl+\`: let go of; what it was attached to goes on.
+    /// `ctrl+\`, or its screen showed its own list of sessions: let go of;
+    /// what it was attached to goes on.
     Detached,
     /// It ended by itself, and how.
     Ended(Exit),
@@ -59,7 +64,11 @@ pub fn start(argv: &[String], cwd: Option<&Path>, size: (u16, u16)) -> Result<Sp
 ///
 /// The terminal is raw before anything starts and until it is handed back,
 /// so a ^C or ^\ typed meanwhile is a key, never a signal to the panel.
-pub async fn hold(argv: &[String], cwd: Option<&Path>, name: &str) -> Result<Back> {
+///
+/// `back`: what on its screen says it shows its harness's own list of
+/// sessions (Claude's agents view); then it is let go of as by `ctrl+\`,
+/// and that screen is never passed on.
+pub async fn hold(argv: &[String], cwd: Option<&Path>, name: &str, back: Option<&ScreenMark>) -> Result<Back> {
     use tokio::signal::unix::{SignalKind, signal};
     // Listened for before the size is read, so no resize falls between.
     let mut winch = signal(SignalKind::window_change())?;
@@ -70,7 +79,9 @@ pub async fn hold(argv: &[String], cwd: Option<&Path>, name: &str) -> Result<Bac
     out.write_all(format!("{banner}{}", title(&format!("relay · {name} · ^\\ lets go"))).as_bytes())
         .await?;
     out.flush().await?;
-    let spawned = start(argv, cwd, crossterm::terminal::size().unwrap_or((80, 24)))?;
+    let size = crossterm::terminal::size().unwrap_or((80, 24));
+    let spawned = start(argv, cwd, size)?;
+    let watch = back.map(|mark| Watch::new(mark.clone(), size));
 
     let (keys_tx, keys) = mpsc::channel::<Vec<u8>>(64);
     let stop_keys = keys_tx.clone();
@@ -106,7 +117,7 @@ pub async fn hold(argv: &[String], cwd: Option<&Path>, name: &str) -> Result<Bac
         }
     }));
     let mut alt = AltScreen::default();
-    let back = pass(spawned, keys, sizes, &mut out, &mut alt).await;
+    let back = pass(spawned, keys, sizes, &mut out, &mut alt, watch).await;
     // However it went, the terminal is handed back: what it had on when it
     // was let go of was never turned off by it, keyboard protocols too.
     let _ = out.write_all(&alt.leave()).await;
@@ -121,6 +132,28 @@ pub async fn hold(argv: &[String], cwd: Option<&Path>, name: &str) -> Result<Bac
 /// modifyOtherKeys, synchronized output. A terminal without them ignores it.
 const KEYBOARD_BACK: &[u8] = b"\x1b[<99u\x1b[>4;0m\x1b[?2026l";
 
+/// What `hold` watches the screen for, on a screen of its own fed what the
+/// command writes.
+pub struct Watch {
+    mark: ScreenMark,
+    screen: Screen,
+}
+
+impl Watch {
+    pub fn new(mark: ScreenMark, (cols, rows): (u16, u16)) -> Watch {
+        Watch {
+            mark,
+            screen: Screen::without_history(cols, rows),
+        }
+    }
+
+    /// `b` drawn: whether the screen shows it now.
+    fn sees(&mut self, b: &[u8]) -> bool {
+        self.screen.feed(b);
+        self.mark.on(&self.screen.text())
+    }
+}
+
 /// How the passing through went, before the hang-up.
 enum Went {
     Ended(Exit),
@@ -131,6 +164,7 @@ enum Went {
 
 /// The passing through: what `sp` writes goes to `out`, watched by `alt`;
 /// `keys` go to it up to a `ctrl+\`, which lets go; `sizes` resize its pty.
+/// A screen `watch` sees lets go too, and is not written to `out`.
 /// However it comes back, it has ended: let go of, or gone wrong here, it
 /// is hung up on.
 pub async fn pass(
@@ -139,8 +173,9 @@ pub async fn pass(
     sizes: mpsc::Receiver<(u16, u16)>,
     out: &mut (impl AsyncWrite + Unpin),
     alt: &mut AltScreen,
+    watch: Option<Watch>,
 ) -> Result<Back> {
-    match through(&mut sp, keys, sizes, out, alt).await {
+    match through(&mut sp, keys, sizes, out, alt, watch).await {
         Went::Ended(exit) => Ok(Back::Ended(exit)),
         Went::Detached => {
             hang_up(sp.pid, &mut sp.exit).await;
@@ -159,6 +194,7 @@ async fn through(
     mut sizes: mpsc::Receiver<(u16, u16)>,
     out: &mut (impl AsyncWrite + Unpin),
     alt: &mut AltScreen,
+    mut watch: Option<Watch>,
 ) -> Went {
     let mut keys_open = true;
     let mut sizes_open = true;
@@ -167,6 +203,9 @@ async fn through(
             chunk = sp.output.recv() => match chunk {
                 Some(b) => {
                     alt.watch(&b);
+                    if watch.as_mut().is_some_and(|w| w.sees(&b)) {
+                        return Went::Detached;
+                    }
                     if let Err(e) = write(out, &b).await {
                         return Went::Failed(e.into());
                     }
@@ -214,6 +253,9 @@ async fn through(
             size = sizes.recv(), if sizes_open => match size {
                 Some((cols, rows)) => {
                     let _ = (sp.resize)(cols, rows);
+                    if let Some(w) = watch.as_mut() {
+                        w.screen.resize(cols, rows);
+                    }
                 }
                 None => sizes_open = false,
             },
@@ -257,6 +299,11 @@ mod tests {
     /// moment so what it runs is ready for them; what it wrote, and how it
     /// came back.
     async fn through(sp: Spawned, keys: &[&[u8]], sizes: &[(u16, u16)]) -> (String, Back) {
+        watched(sp, keys, sizes, None).await
+    }
+
+    /// `through`, watching the screen for `watch`.
+    async fn watched(sp: Spawned, keys: &[&[u8]], sizes: &[(u16, u16)], watch: Option<Watch>) -> (String, Back) {
         let (ktx, krx) = mpsc::channel(8);
         let (stx, srx) = mpsc::channel(8);
         let keys: Vec<Vec<u8>> = keys.iter().map(|k| k.to_vec()).collect();
@@ -278,7 +325,7 @@ mod tests {
         let mut out = Vec::new();
         let back = tokio::time::timeout(
             Duration::from_secs(10),
-            pass(sp, krx, srx, &mut out, &mut AltScreen::default()),
+            pass(sp, krx, srx, &mut out, &mut AltScreen::default(), watch),
         )
         .await
         .expect("came back")
@@ -323,6 +370,52 @@ mod tests {
     async fn a_new_size_reaches_its_pty() {
         let (out, back) = through(sh("read line; stty size"), &[b"\r"], &[(100, 40)]).await;
         assert!(out.contains("40 100"), "{out}");
+        assert!(matches!(back, Back::Ended(Exit { code: 0, .. })), "{back:?}");
+    }
+
+    /// Claude's agents view, as its profile knows it.
+    fn agents_view() -> Watch {
+        let reg = rl_detect::Registry::builtin();
+        let h = rl_detect::harness::of(reg.profile("claude").unwrap(), None);
+        Watch::new(h.agents_view().expect("claude knows its agents view").clone(), (80, 24))
+    }
+
+    /// A stand-in for an attached Claude: its conversation, and on `←` its
+    /// agents view, as Claude 2.1.322 draws it, in one write (`cat`).
+    fn stand_in(dir: &Path) -> Spawned {
+        let view = dir.join("view");
+        std::fs::write(
+            &view,
+            "\x1b[2J\x1b[1;1H~/shop\r\n \u{273b} fix the login   Needs input\r\n\r\n\
+             \u{276f} describe a task for a new session\r\n  enter to open",
+        )
+        .unwrap();
+        sh(&format!(
+            "printf 'a conversation\\r\\n  ❯ describe a task for a new session, quoted\\r\\n'; \
+             stty raw -echo; dd bs=3 count=1 2>/dev/null >/dev/null; cat '{}'; sleep 30",
+            view.display()
+        ))
+    }
+
+    #[tokio::test]
+    async fn its_agents_view_lets_go_and_is_never_passed_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let sp = stand_in(dir.path());
+        let pid = sp.pid;
+        let (out, back) = watched(sp, &[b"\x1b[D"], &[], Some(agents_view())).await;
+        assert_eq!(back, Back::Detached, "{out}");
+        assert!(out.contains("a conversation"), "{out}");
+        assert!(!out.contains("fix the login"), "the view is not drawn: {out}");
+        assert!(gone(pid), "hung up, as ctrl+\\ does");
+    }
+
+    #[tokio::test]
+    async fn the_view_quoted_in_a_conversation_is_not_it() {
+        let sp = sh(
+            "printf '  ❯ describe a task for a new session\\r\\n> ❯ describe a task for a new\\r\\n'; read line; echo \"got $line\"",
+        );
+        let (out, back) = watched(sp, &[b"hi\r"], &[], Some(agents_view())).await;
+        assert!(out.contains("got hi"), "{out}");
         assert!(matches!(back, Back::Ended(Exit { code: 0, .. })), "{back:?}");
     }
 

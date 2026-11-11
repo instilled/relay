@@ -196,6 +196,20 @@ impl Screen {
         }
     }
 
+    /// A screen with no history kept: for reading what is on it now.
+    pub fn without_history(cols: u16, rows: u16) -> Self {
+        Self {
+            parser: vt100::Parser::new(rows.max(1), cols.max(1), 0),
+            graphics: Graphics::new(),
+        }
+    }
+
+    /// What is on the screen now, as text: a line a row, trailing blanks
+    /// left off.
+    pub fn text(&self) -> String {
+        self.parser.screen().contents()
+    }
+
     /// Every byte the run writes goes in, in order; an escape split across
     /// two calls carries over, so reads can be cut anywhere.
     pub fn feed(&mut self, bytes: &[u8]) {
@@ -274,6 +288,13 @@ impl Screen {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_screen_reads_as_the_text_on_it_now() {
+        let mut s = Screen::without_history(20, 4);
+        s.feed("gone\x1b[2J\x1b[3;1H❯ here\x1b[1;5Htop".as_bytes());
+        assert_eq!(s.text().lines().collect::<Vec<_>>(), ["    top", "", "❯ here"]);
+    }
 
     #[test]
     fn a_screen_is_handed_the_box_drawing_rather_than_the_letters() {
