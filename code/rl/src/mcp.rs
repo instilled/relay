@@ -3,9 +3,10 @@
 //! rows), `send` (drop a file in the recipient's mail folder) and `inbox`
 //! (take your own mail). Nothing here types into an agent, but a recipient
 //! whose harness can be told from outside is told it has mail: `send` runs
-//! its adapter's `ping_argv` (Codex's `codex queue … --resume` on its
-//! thread). A ping that fails never fails the send. A Claude session hears
-//! of its mail from Relay's hooks instead (`rl hook`'s `news`).
+//! its harness's `ping_argv` (Codex's `codex queue … --resume` on its
+//! thread). A ping that fails never fails the send. A harness with no way in
+//! from outside (Claude) hears of its mail from Relay's hooks instead (`rl
+//! hook`'s `news`).
 //!
 //! Only protocol goes to stdout; logs go to stderr.
 //!
@@ -23,7 +24,7 @@ use crate::store::state;
 use anyhow::Result;
 use jiff::Timestamp;
 use rl_core::Home;
-use rl_detect::adapter::{self, Adapter};
+use rl_detect::harness::{self, Harness};
 use serde_json::{Value, json};
 use std::collections::{BTreeSet, HashMap};
 use std::io::{BufRead, Write};
@@ -36,9 +37,9 @@ const VERSIONS: [&str; 3] = ["2025-06-18", "2025-03-26", "2024-11-05"];
 /// Codex's daemon.
 pub const PING_WAIT: Duration = Duration::from_secs(10);
 
-/// Finds a harness's adapter, by the harness's name: what pings one of its
-/// sessions.
-pub type Adapters = Box<dyn Fn(&str) -> Option<&'static dyn Adapter> + Send + Sync>;
+/// Finds a harness by its name: what pings one of its sessions, and what
+/// advises waking one.
+pub type Harnesses = Box<dyn Fn(&str) -> Option<&'static dyn Harness> + Send + Sync>;
 
 /// Who the caller is, as far as its environment says.
 #[derive(Debug, Clone, Default)]
@@ -49,19 +50,21 @@ pub struct Caller {
     /// the session runs this harness (`RL_SESSION_AGENT`). An agent
     /// started inside a held shell is not that shell.
     pub relay_session: Option<String>,
-    /// `CLAUDE_CODE_SESSION_ID`, for Claude only: Claude Code's conversation
-    /// id, the same one its hooks report.
+    /// The conversation id the harness sets for its sessions, where it does
+    /// (`Harness::caller_id_var`: Claude's `CLAUDE_CODE_SESSION_ID`), the
+    /// same one its hooks report.
     pub session_id: Option<String>,
 }
 
 impl Caller {
-    /// The caller of a server `harness` runs, its variables read by `var`.
-    pub fn of(harness: &str, var: impl Fn(&str) -> Option<String>) -> Self {
+    /// The caller of a server `harness` runs (`h`, where Relay knows it),
+    /// its variables read by `var`.
+    pub fn of(harness: &str, h: Option<&dyn Harness>, var: impl Fn(&str) -> Option<String>) -> Self {
         let var = |k: &str| var(k).filter(|v| !v.is_empty());
         Self {
             harness: harness.to_string(),
-            relay_session: var("RL_SESSION").filter(|_| var(crate::spawn::AGENT_ENV).as_deref() == Some(harness)),
-            session_id: var("CLAUDE_CODE_SESSION_ID").filter(|_| harness == "claude"),
+            relay_session: var(rl_core::SESSION_ENV).filter(|_| var(rl_core::AGENT_ENV).as_deref() == Some(harness)),
+            session_id: h.and_then(|h| h.caller_id_var()).and_then(var),
         }
     }
 }
@@ -93,7 +96,7 @@ pub struct Server {
     home: Home,
     listers: Vec<Box<dyn NativeLister>>,
     caller: Caller,
-    adapters: Adapters,
+    harnesses: Harnesses,
 }
 
 /// Runs the server for `harness` on this process's stdio until stdin closes.
@@ -101,28 +104,29 @@ pub fn run(home: &Home, harness: &str) -> Result<()> {
     let server = Server::new(
         home.clone(),
         sources::native_listers(),
-        Caller::of(harness, |k| std::env::var(k).ok()),
+        Caller::of(harness, sources::harness(harness), |k| std::env::var(k).ok()),
     )
-    .with_adapters(Box::new(sources::adapter));
+    .with_harnesses(Box::new(sources::harness));
     server.serve(std::io::stdin().lock(), std::io::stdout().lock())?;
     Ok(())
 }
 
 impl Server {
-    /// A server that pings no one until given the adapters (`with_adapters`).
+    /// A server that pings no one until given the harnesses
+    /// (`with_harnesses`).
     pub fn new(home: Home, listers: Vec<Box<dyn NativeLister>>, caller: Caller) -> Self {
         Self {
             home,
             listers,
             caller,
-            adapters: Box::new(|_| None),
+            harnesses: Box::new(|_| None),
         }
     }
 
-    /// The same, pinging a recipient through its harness's adapter as
-    /// `adapters` finds it.
-    pub fn with_adapters(mut self, adapters: Adapters) -> Self {
-        self.adapters = adapters;
+    /// The same, pinging a recipient through its harness as `harnesses`
+    /// finds it.
+    pub fn with_harnesses(mut self, harnesses: Harnesses) -> Self {
+        self.harnesses = harnesses;
         self
     }
 
@@ -183,7 +187,7 @@ impl Server {
         )
     }
 
-    /// Every session on the list, one shot: the adapters are asked once, each
+    /// Every session on the list, one shot: the harnesses are asked once, each
     /// with its own timeout, and one that fails is left out.
     fn entries(&self, held: Vec<Held>) -> Vec<Entry> {
         let hooked = state::list(&self.home, Timestamp::now());
@@ -314,7 +318,7 @@ impl Server {
             let recipient = Recipient {
                 harness: h.meta.harness.clone(),
                 ping_id: held_ping_id(h),
-                claude_name: None,
+                native_name: None,
             };
             (to.to_string(), to.to_string(), self.me_cheaply(&held), recipient)
         } else {
@@ -324,9 +328,9 @@ impl Server {
             let recipient = Recipient {
                 harness: e.row.harness.clone(),
                 ping_id: e.ping_id.clone(),
-                // `claude agents` lists Claude's background sessions by the
-                // name their row has.
-                claude_name: (e.row.source == Source::Native && !e.row.name.is_empty()).then(|| e.row.name.clone()),
+                // A harness lists its background sessions by the name their
+                // row has (`claude agents`).
+                native_name: (e.row.source == Source::Native && !e.row.name.is_empty()).then(|| e.row.name.clone()),
             };
             (e.key.clone(), e.address.clone(), me, recipient)
         };
@@ -341,13 +345,15 @@ impl Server {
         };
         mail::send(&self.home, &key, &m).map_err(|e| format!("could not leave the message: {e}"))?;
         let pinged = self.ping(&to, &m.from).unwrap_or_default();
-        // Advice only: from one Claude session, another can be woken now.
-        let wake = match &to.claude_name {
-            Some(name) if self.caller.harness == CLAUDE && to.harness == CLAUDE => format!(
-                "\n{name} is a Claude session — to wake it now, also SendMessage it (\"relay mail waiting: call inbox\")."
-            ),
-            _ => String::new(),
-        };
+        // Advice only: from a session of one harness, another of its own
+        // background can be woken now, where it has a way (Claude's).
+        let wake = to
+            .native_name
+            .as_deref()
+            .filter(|_| self.caller.harness == to.harness)
+            .and_then(|name| (self.harnesses)(&to.harness)?.wake_advice(name))
+            .map(|w| format!("\n{w}"))
+            .unwrap_or_default();
         Ok(format!("sent to {address}{pinged}{wake}"))
     }
 
@@ -357,9 +363,9 @@ impl Server {
     fn ping(&self, to: &Recipient, from: &str) -> Option<String> {
         let id = to.ping_id.as_deref().filter(|i| !i.is_empty())?;
         let text = format!("relay mail from {from}: call the relay inbox tool to read it");
-        let argv = (self.adapters)(&to.harness)?.ping_argv(id, &text)?;
+        let argv = (self.harnesses)(&to.harness)?.ping_argv(id, &text)?;
         // Asking: the harness's own hooks let a run of Relay's go.
-        Some(match adapter::run(&argv, None, true, PING_WAIT) {
+        Some(match harness::run(&argv, None, true, PING_WAIT) {
             Ok(_) => format!(" · pinged {}", to.harness),
             Err(e) => format!(" · {} didn't take the ping: {e:#}", to.harness),
         })
@@ -408,12 +414,11 @@ impl Server {
 /// that session's. None where neither is known. Only the sessions' files
 /// are read: no holder is asked how its session stands.
 pub fn own_keys(home: &Home, caller: &Caller) -> Vec<String> {
-    // A held session's name, and the conversation ids it has had.
+    // A held session's name, and the conversation id its hooks told of.
     let ids_of = |dir: &std::path::Path| -> Option<(String, Vec<String>)> {
         let meta = sessions::read_meta(dir).ok()?;
         let hook = state::read(&dir.join(sessions::HOOK)).ok().flatten();
-        let ids = hook.map(|k| k.session_id).into_iter().chain(meta.native_id).collect();
-        Some((meta.name, ids))
+        Some((meta.name, hook.map(|k| k.session_id).into_iter().collect()))
     };
     let keys = |(name, ids): (String, Vec<String>)| dedup(std::iter::once(name).chain(ids).collect());
     if let Some(name) = &caller.relay_session {
@@ -435,35 +440,25 @@ pub fn own_keys(home: &Home, caller: &Caller) -> Vec<String> {
         .map_or_else(|| vec![id.clone()], keys)
 }
 
-/// The harness Claude Code is, by its profile's name.
-pub const CLAUDE: &str = "claude";
-
 /// Who a message went to, as far as pinging it goes.
 struct Recipient {
     harness: String,
     ping_id: Option<String>,
-    /// The name `claude agents` shows it by, and so Claude's `ListAgents`
-    /// and `SendMessage`, where it is one of Claude's background sessions.
-    claude_name: Option<String>,
+    /// The name its harness lists it by, where it is one of a harness's
+    /// background sessions (`claude agents`, and so Claude's `ListAgents`
+    /// and `SendMessage`).
+    native_name: Option<String>,
 }
 
 /// The id a held session's harness pings it by: its conversation's, as its
-/// hooks said it (a Codex thread's id is its conversation's), else as Relay
-/// carried it on.
+/// hooks said it.
 fn held_ping_id(h: &Held) -> Option<String> {
-    h.meta
-        .native_id
-        .clone()
-        .or_else(|| h.hook.as_ref().map(|k| k.session_id.clone()))
+    h.hook.as_ref().map(|k| k.session_id.clone())
 }
 
-/// The conversation ids a held session has had: its hooks', its harness's.
+/// The conversation ids a held session has: its hooks'.
 fn held_ids(h: &Held) -> Vec<String> {
-    h.hook
-        .iter()
-        .map(|k| k.session_id.clone())
-        .chain(h.meta.native_id.clone())
-        .collect()
+    h.hook.iter().map(|k| k.session_id.clone()).collect()
 }
 
 /// The entry `to` names: its address, else your title for it, else one of
@@ -638,13 +633,15 @@ mod tests {
         h
     }
 
-    /// A session Relay holds, named `name`, its conversation `native_id`.
-    fn held(home: &Home, name: &str, native_id: Option<&str>) {
-        held_as(home, name, "claude", native_id);
+    /// A session Relay holds, named `name`, its conversation `conversation`
+    /// as its hooks told of it.
+    fn held(home: &Home, name: &str, conversation: Option<&str>) {
+        held_as(home, name, "claude", conversation);
     }
 
-    /// A session Relay holds that runs `harness`.
-    fn held_as(home: &Home, name: &str, harness: &str, native_id: Option<&str>) {
+    /// A session Relay holds that runs `harness`, its conversation
+    /// `conversation` as its hooks told of it.
+    fn held_as(home: &Home, name: &str, harness: &str, conversation: Option<&str>) {
         let dir = home.session_dir(name);
         std::fs::create_dir_all(&dir).unwrap();
         let meta = Meta {
@@ -656,9 +653,14 @@ mod tests {
             started: Timestamp::now(),
             socket: dir.join("sock"),
             holder_pid: None,
-            native_id: native_id.map(Into::into),
         };
         sessions::write_meta(&dir, &meta).unwrap();
+        if let Some(id) = conversation {
+            let mut hook = hooked(home, id);
+            std::fs::remove_file(state::path(home, "claude", id).unwrap()).unwrap();
+            hook.agent = harness.into();
+            state::write(&dir.join(sessions::HOOK), &hook).unwrap();
+        }
     }
 
     fn native(id: &str, session_id: &str, name: &str) -> NativeRow {
@@ -739,20 +741,20 @@ mod tests {
         }
     }
 
-    /// The adapters, Codex's run as a copy of `fixtures/stand-in-codex` in
+    /// The harnesses, each run as a copy of `fixtures/stand-in-codex` in
     /// `dir`; and that copy's path, beside which it writes what it was run
     /// with (`.argv`, `.asking`).
-    fn stand_in_adapters(dir: &std::path::Path) -> (Adapters, std::path::PathBuf) {
+    fn stand_in_harnesses(dir: &std::path::Path) -> (Harnesses, std::path::PathBuf) {
         let bin = dir.join("codex");
         std::fs::copy(concat!(env!("CARGO_MANIFEST_DIR"), "/../fixtures/stand-in-codex"), &bin).unwrap();
         let found = bin.clone();
-        let all: Vec<&'static dyn Adapter> =
-            rl_detect::adapter::adapters(&rl_detect::Registry::builtin(), move |_| Some(found.clone()))
+        let all: Vec<&'static dyn Harness> =
+            rl_detect::harness::harnesses(&rl_detect::Registry::builtin(), move |_| Some(found.clone()))
                 .into_iter()
-                .map(|(a, _)| &*Box::leak(a))
+                .map(|h| &*Box::leak(h))
                 .collect();
-        let adapters: Adapters = Box::new(move |h| all.iter().copied().find(|a| a.harness() == h));
-        (adapters, bin)
+        let harnesses: Harnesses = Box::new(move |n| all.iter().copied().find(|h| h.name() == n));
+        (harnesses, bin)
     }
 
     /// What the stand-in was run with, one word to a line; None if it was not.
@@ -932,18 +934,19 @@ mod tests {
                 _ => None,
             }
         };
+        let of = |h: &str, env| Caller::of(h, sources::harness(h), env);
         // A claude run in a held shell: not the shell; its own id instead.
-        let c = Caller::of("claude", env("sh"));
+        let c = of("claude", env("sh"));
         assert_eq!(c.relay_session, None);
         assert_eq!(c.session_id.as_deref(), Some("sess-aaaa"));
-        let c = Caller::of("claude", env("claude"));
+        let c = of("claude", env("claude"));
         assert_eq!(c.relay_session.as_deref(), Some("api-sh"));
         // Claude's id says nothing of a codex it started.
-        let c = Caller::of("codex", env("sh"));
+        let c = of("codex", env("sh"));
         assert_eq!((c.relay_session, c.session_id), (None, None));
 
         let f = fixture();
-        let s = server(&f, Caller::of("claude", env("sh")));
+        let s = server(&f, of("claude", env("sh")));
         ok_text(&s, "send", json!({ "to": "sess-bbbb", "text": "x" }));
         assert_eq!(mail::take(&f.home, "sess-bbbb").unwrap().messages[0].from, "sess-aaaa");
     }
@@ -1047,10 +1050,10 @@ mod tests {
     fn mail_for_a_codex_thread_is_queued_on_it_too() {
         let f = fixture();
         let tmp = tempfile::tempdir().unwrap();
-        let (adapters, bin) = stand_in_adapters(tmp.path());
+        let (harnesses, bin) = stand_in_harnesses(tmp.path());
         let rows = vec![native_of("codex", "019a-thread", "019a-thread", "codex fix")];
         let (s, _) = listing(&f, claude_caller("sess-aaaa"), rows);
-        let s = s.with_adapters(adapters);
+        let s = s.with_harnesses(harnesses);
         assert_eq!(
             ok_text(&s, "send", json!({ "to": "codex fix", "text": "hello" })),
             "sent to codex fix · pinged codex"
@@ -1078,9 +1081,9 @@ mod tests {
     fn a_held_codex_is_pinged_by_the_thread_its_hooks_told_of() {
         let f = fixture();
         let tmp = tempfile::tempdir().unwrap();
-        let (adapters, bin) = stand_in_adapters(tmp.path());
+        let (harnesses, bin) = stand_in_harnesses(tmp.path());
         held_as(&f.home, "api-codex", "codex", None);
-        let s = server(&f, caller(Some("sess-aaaa"))).with_adapters(adapters);
+        let s = server(&f, caller(Some("sess-aaaa"))).with_harnesses(harnesses);
         // Nothing yet says its thread: delivered, not pinged.
         assert_eq!(
             ok_text(&s, "send", json!({ "to": "api-codex", "text": "one" })),
@@ -1099,27 +1102,13 @@ mod tests {
     }
 
     #[test]
-    fn a_held_codex_that_a_hook_claimed_is_pinged_by_that_thread() {
-        let f = fixture();
-        let tmp = tempfile::tempdir().unwrap();
-        let (adapters, bin) = stand_in_adapters(tmp.path());
-        held_as(&f.home, "api-codex", "codex", Some("t-claimed"));
-        let s = server(&f, caller(Some("sess-aaaa"))).with_adapters(adapters);
-        assert_eq!(
-            ok_text(&s, "send", json!({ "to": "api-codex", "text": "one" })),
-            "sent to api-codex · pinged codex"
-        );
-        assert_eq!(ran(&bin).unwrap()[2], "t-claimed");
-    }
-
-    #[test]
     fn a_ping_codex_refuses_still_delivers_and_says_why() {
         let f = fixture();
         let tmp = tempfile::tempdir().unwrap();
-        let (adapters, _) = stand_in_adapters(tmp.path());
+        let (harnesses, _) = stand_in_harnesses(tmp.path());
         let rows = vec![native_of("codex", "gone", "gone", "old")];
         let (s, _) = listing(&f, caller(Some("sess-aaaa")), rows);
-        let s = s.with_adapters(adapters);
+        let s = s.with_harnesses(harnesses);
         assert_eq!(
             ok_text(&s, "send", json!({ "to": "old", "text": "x" })),
             "sent to old · codex didn't take the ping: `codex queue` failed: no thread named gone"
@@ -1131,10 +1120,10 @@ mod tests {
     fn a_claude_recipient_is_not_pinged_and_another_claude_is_told_to_wake_it() {
         let f = fixture();
         let tmp = tempfile::tempdir().unwrap();
-        let (adapters, bin) = stand_in_adapters(tmp.path());
+        let (harnesses, bin) = stand_in_harnesses(tmp.path());
         let rows = vec![native("0a1b", "conv-1", "fix login")];
         let (s, _) = listing(&f, claude_caller("sess-aaaa"), rows.clone());
-        let s = s.with_adapters(adapters);
+        let s = s.with_harnesses(harnesses);
         assert_eq!(
             ok_text(&s, "send", json!({ "to": "conv-1", "text": "x" })),
             "sent to fix login\nfix login is a Claude session — to wake it now, also SendMessage it (\"relay mail waiting: call inbox\")."

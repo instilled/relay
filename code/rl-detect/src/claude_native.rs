@@ -11,15 +11,18 @@
 //! <name>`), and the profile's `resume` for carrying one on (`claude
 //! --resume <session> --bg`).
 
-use crate::adapter::{self, Adapter, NativeRow, NativeState, Pr};
+use crate::harness::{self, CarryOn, Harness, NativeRow, NativeState, Pr, Started};
+use crate::mcp_entry::{How, Place};
 use crate::registry::{PROMPT, Profile, SESSION};
 use crate::sessions::{ID, NAME};
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use jiff::Timestamp;
 use rl_core::state::RunState;
 use serde::Deserialize;
+use std::collections::HashSet;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// The reader a profile's `sessions.list` names for this listing.
 pub const READER: &str = "claude-agents";
@@ -28,9 +31,11 @@ pub const READER: &str = "claude-agents";
 /// others are open in a terminal, and their hooks tell of them.
 const BACKGROUND: &str = "background";
 
-/// Claude's adapter: its binary and the arguments its profile gives.
+/// Claude Code as a harness: its binary and the arguments its profile gives.
 #[derive(Debug, Clone)]
 pub struct Claude {
+    profile: Profile,
+    found: bool,
     harness: String,
     bin: String,
     list: Vec<String>,
@@ -46,11 +51,14 @@ pub struct Claude {
 }
 
 impl Claude {
-    /// The adapter of `profile`, run as `bin`. None where its profile says
-    /// nothing of how it lists its sessions.
+    /// The harness of `profile`, run as `bin` (taken to be on this machine:
+    /// `found` says otherwise). None where its profile says nothing of how
+    /// it lists its sessions.
     pub fn of(profile: &Profile, bin: PathBuf) -> Option<Claude> {
         let s = profile.sessions.as_ref()?;
         Some(Claude {
+            profile: profile.clone(),
+            found: true,
             harness: profile.name.clone(),
             bin: bin.to_string_lossy().into_owned(),
             list: s.list.as_ref()?.args.clone(),
@@ -66,6 +74,12 @@ impl Claude {
             },
             config: None,
         })
+    }
+
+    /// The same, its binary on this machine or not.
+    pub fn found(mut self, found: bool) -> Claude {
+        self.found = found;
+        self
     }
 
     /// The same, reading Claude's files under `dir` rather than where the
@@ -86,36 +100,10 @@ impl Claude {
         Some(config.join("jobs"))
     }
 
-    fn argv<'a>(&self, args: impl IntoIterator<Item = &'a String>) -> Vec<String> {
-        std::iter::once(self.bin.clone())
-            .chain(args.into_iter().cloned())
-            .collect()
-    }
-}
-
-impl Adapter for Claude {
-    fn harness(&self) -> &str {
-        &self.harness
-    }
-
-    fn list_within(&self, wait: Duration) -> Result<Vec<NativeRow>> {
-        let text = adapter::run(&self.argv(&self.list), None, true, wait)?;
-        let jobs = self.jobs_dir();
-        Ok(rows(&text, jobs.as_deref())?
-            .into_iter()
-            .map(|mut r| {
-                r.harness = self.harness.clone();
-                r
-            })
-            .collect())
-    }
-
-    fn attach_argv(&self, id: &str) -> Vec<String> {
-        let args: Vec<String> = self.attach.iter().map(|a| a.replace(ID, id)).collect();
-        self.argv(&args)
-    }
-
-    fn start_argv(&self, name: Option<&str>, prompt: Option<&str>) -> Option<Vec<String>> {
+    /// What starts a session in its background, named and prompted if
+    /// given (`claude --bg -n <name> <prompt>`). None: its profile says no
+    /// `start`.
+    pub fn start_argv(&self, name: Option<&str>, prompt: Option<&str>) -> Option<Vec<String>> {
         if self.start.is_empty() {
             return None;
         }
@@ -129,7 +117,118 @@ impl Adapter for Claude {
         Some(self.argv(&args))
     }
 
-    fn carry_on_argv(&self, session_id: &str) -> Option<Vec<String>> {
+    fn argv<'a>(&self, args: impl IntoIterator<Item = &'a String>) -> Vec<String> {
+        std::iter::once(self.bin.clone())
+            .chain(args.into_iter().cloned())
+            .collect()
+    }
+}
+
+impl Harness for Claude {
+    fn profile(&self) -> &Profile {
+        &self.profile
+    }
+
+    fn bin(&self) -> &str {
+        &self.bin
+    }
+
+    fn found(&self) -> bool {
+        self.found
+    }
+
+    fn lists(&self) -> bool {
+        true
+    }
+
+    fn list_within(&self, wait: Duration) -> Result<Vec<NativeRow>> {
+        let text = harness::run(&self.argv(&self.list), None, true, wait)?;
+        let jobs = self.jobs_dir();
+        Ok(rows(&text, jobs.as_deref())?
+            .into_iter()
+            .map(|mut r| {
+                r.harness = self.harness.clone();
+                r
+            })
+            .collect())
+    }
+
+    fn attach_argv(&self, id: &str) -> Option<Vec<String>> {
+        let args: Vec<String> = self.attach.iter().map(|a| a.replace(ID, id)).collect();
+        Some(self.argv(&args))
+    }
+
+    /// In its background (`claude --resume <id> --bg`), where its profile
+    /// says how to start one there; else held, as its `resume` says.
+    fn carry_on(&self, session_id: &str) -> Option<CarryOn> {
+        match self.carry_on_argv(session_id) {
+            Some(argv) => Some(CarryOn::Background(argv)),
+            None => self
+                .profile
+                .resume_argv(self.bin.clone(), session_id)
+                .map(CarryOn::Held),
+        }
+    }
+
+    /// In its background (`claude --bg`), where its profile says how; else
+    /// held.
+    fn start(&self, cwd: &Path, name: Option<&str>, prompt: Option<&str>, before: &HashSet<String>) -> Result<Started> {
+        match self.start_argv(name, prompt) {
+            Some(argv) => self.carry_on_there(&argv, cwd, before).map(Started::Id),
+            None => Ok(Started::Held(self.profile.prompt_args(prompt.unwrap_or("")))),
+        }
+    }
+
+    fn carry_on_there(&self, argv: &[String], cwd: &Path, before: &HashSet<String>) -> Result<String> {
+        begin(|wait| self.list_within(wait), argv, cwd, before, LISTED_WAIT)
+    }
+
+    fn stops(&self, row: &NativeRow) -> bool {
+        !self.stop.is_empty() && !row.state.state.is_terminal()
+    }
+
+    fn stop(&self, id: &str, cwd: &Path) -> Result<()> {
+        let argv = self.stop_argv(id).context("its profile says no `stop`")?;
+        harness::run(&argv, Some(cwd), false, harness::LIST_WAIT).map(drop)
+    }
+
+    /// Through `claude mcp add|remove --scope user`, which owns its file.
+    fn mcp(&self, env: &dyn Fn(&str) -> Option<OsString>) -> Result<Option<Place>> {
+        let how = How::ClaudeCli {
+            cli: harness::cli_name(self),
+            bin: self.found.then(|| PathBuf::from(&self.bin)),
+        };
+        harness::mcp_place(self, env, how)
+    }
+
+    /// Claude Code's conversation id, the same one its hooks report.
+    fn caller_id_var(&self) -> Option<&'static str> {
+        Some(SESSION_ID_VAR)
+    }
+
+    /// Claude Code has no way to tell one of its sessions anything from
+    /// outside; its hooks carry the news instead (`rl hook`).
+    fn mail_by_hooks(&self) -> bool {
+        true
+    }
+
+    /// `claude agents` lists its background sessions by the name `name`,
+    /// which Claude's `SendMessage` addresses.
+    fn wake_advice(&self, name: &str) -> Option<String> {
+        Some(format!(
+            "{name} is a Claude session — to wake it now, also SendMessage it (\"relay mail waiting: call inbox\")."
+        ))
+    }
+}
+
+/// The variable Claude Code sets to a session's conversation id.
+pub const SESSION_ID_VAR: &str = "CLAUDE_CODE_SESSION_ID";
+
+impl Claude {
+    /// What carries the conversation `session_id` on in its background
+    /// (`claude --resume <id> --bg`). None: its profile says no `start` or
+    /// no `resume`.
+    pub fn carry_on_argv(&self, session_id: &str) -> Option<Vec<String>> {
         if self.start.is_empty() || self.resume.is_empty() {
             return None;
         }
@@ -137,22 +236,56 @@ impl Adapter for Claude {
         Some(self.argv(resume.iter().chain(&self.start)))
     }
 
-    fn stop_argv(&self, id: &str) -> Option<Vec<String>> {
+    /// What stops its session `id` (`claude stop <id>`). None: its profile
+    /// says no `stop`.
+    pub fn stop_argv(&self, id: &str) -> Option<Vec<String>> {
         if self.stop.is_empty() {
             return None;
         }
         let args: Vec<String> = self.stop.iter().map(|a| a.replace(ID, id)).collect();
         Some(self.argv(&args))
     }
+}
 
-    /// None: Claude Code has no way to tell one of its sessions anything
-    /// from outside; its hooks carry the news instead (`rl hook`).
-    fn ping_argv(&self, _: &str, _: &str) -> Option<Vec<String>> {
-        None
-    }
+/// How long a session a start began has to come onto Claude's list.
+pub const LISTED_WAIT: Duration = Duration::from_secs(10);
+/// How often Claude is asked meanwhile.
+const LISTED_EVERY: Duration = Duration::from_millis(250);
 
-    fn started_ids(&self, printed: &str) -> Vec<String> {
-        started_ids(printed)
+/// Runs `argv`, which starts or carries on a session in Claude's own
+/// background, in `cwd`, and says the id of the session it began — once
+/// `list` (Claude's listing, for no longer than it is given) has it, never
+/// on what it printed alone: a background session not among `before` (the
+/// ids its last listing had), in `cwd`, by an id it printed. The listing is
+/// asked for up to `listed`. Nothing listed so is an error in the words it
+/// printed last.
+pub fn begin(
+    list: impl Fn(Duration) -> Result<Vec<NativeRow>>,
+    argv: &[String],
+    cwd: &Path,
+    before: &HashSet<String>,
+    listed: Duration,
+) -> Result<String> {
+    let printed = harness::run(argv, Some(cwd), false, harness::START_WAIT)?;
+    let ids = started_ids(&printed);
+    let deadline = Instant::now() + listed;
+    loop {
+        // The whole loop, its listings too, is bounded by `listed`.
+        let left = deadline.saturating_duration_since(Instant::now());
+        if !ids.is_empty()
+            && !left.is_zero()
+            && let Ok(rows) = list(left.min(harness::LIST_WAIT))
+            && let Some(id) = ids
+                .iter()
+                .find(|id| !before.contains(*id) && rows.iter().any(|r| r.id == **id && harness::same_dir(&r.cwd, cwd)))
+        {
+            return Ok(id.clone());
+        }
+        if ids.is_empty() || Instant::now() >= deadline {
+            let last = printed.lines().rev().find(|l| !l.trim().is_empty());
+            bail!("{}", last.map_or("it printed nothing", str::trim));
+        }
+        std::thread::sleep(LISTED_EVERY);
     }
 }
 
@@ -599,10 +732,105 @@ mod tests {
         assert_eq!(pr("a8b1e728"), None);
     }
 
+    fn listed_at(id: &str, cwd: &Path) -> NativeRow {
+        NativeRow {
+            harness: "claude".into(),
+            id: id.into(),
+            session_id: format!("s-{id}"),
+            name: id.into(),
+            cwd: cwd.into(),
+            state: NativeState {
+                words: "working".into(),
+                state: RunState::Working,
+            },
+            summary: None,
+            started: None,
+            ended: None,
+            at: None,
+            pr: None,
+            color: None,
+        }
+    }
+
+    /// A listing that says what it is told to, one answer per ask, the last
+    /// kept.
+    fn scripted(said: Vec<Result<Vec<NativeRow>, String>>) -> impl Fn(Duration) -> Result<Vec<NativeRow>> {
+        let said = std::sync::Mutex::new(said);
+        move |_| {
+            let mut said = said.lock().unwrap();
+            let next = if said.len() > 1 {
+                said.remove(0)
+            } else {
+                said[0].clone()
+            };
+            next.map_err(|e| anyhow::anyhow!(e))
+        }
+    }
+
+    #[test]
+    fn a_started_id_is_only_one_claude_then_lists_new_in_its_folder() {
+        let tmp = tempfile::tempdir().unwrap();
+        let here = tmp.path();
+        let elsewhere = Path::new("/elsewhere");
+        let echo = |s: &str| vec!["echo".to_string(), s.into()];
+        let before: HashSet<String> = ["0ld00001".to_string()].into();
+        // What it printed names one already there, one in another folder,
+        // and the new one, which shows on the third ask.
+        let list = scripted(vec![
+            Ok(vec![listed_at("0ld00001", here)]),
+            Err("no answer".into()),
+            Ok(vec![
+                listed_at("0ld00001", here),
+                listed_at("aaaa0001", elsewhere),
+                listed_at("bbbb0001", here),
+            ]),
+        ]);
+        let id = begin(list, &echo("0ld00001 aaaa0001 bbbb0001"), here, &before, LISTED_WAIT).unwrap();
+        assert_eq!(id, "bbbb0001");
+        // Nothing listed it: the error is what it printed last.
+        let list = scripted(vec![Ok(vec![listed_at("0ld00001", here)])]);
+        let at = Instant::now();
+        let printed = "echo started 0ld00001; echo 'not logged in'";
+        let e = begin(
+            &list,
+            &["sh".into(), "-c".into(), printed.into()],
+            here,
+            &before,
+            Duration::from_millis(600),
+        )
+        .unwrap_err();
+        assert_eq!(e.to_string(), "not logged in");
+        assert!(at.elapsed() < Duration::from_secs(3));
+        // No id in what it printed at all: said at once.
+        let e = begin(&list, &echo("no such session"), here, &before, LISTED_WAIT).unwrap_err();
+        assert_eq!(e.to_string(), "no such session");
+    }
+
+    #[test]
+    fn a_start_waits_no_longer_than_its_deadline_for_a_slow_listing() {
+        // Takes whatever it is given, as a hung harness would.
+        let slow = |wait: Duration| -> Result<Vec<NativeRow>> {
+            std::thread::sleep(wait);
+            Err(anyhow::anyhow!("no answer"))
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        let at = Instant::now();
+        let e = begin(
+            slow,
+            &["echo".into(), "abcd1234".into()],
+            tmp.path(),
+            &HashSet::new(),
+            Duration::from_millis(400),
+        )
+        .unwrap_err();
+        assert_eq!(e.to_string(), "abcd1234");
+        assert!(at.elapsed() < Duration::from_secs(2), "{:?}", at.elapsed());
+    }
+
     #[test]
     fn it_runs_what_the_profile_says() {
         let c = claude();
-        assert_eq!(c.attach_argv("ab12cd34"), ["claude", "attach", "ab12cd34"]);
+        assert_eq!(c.attach_argv("ab12cd34").unwrap(), ["claude", "attach", "ab12cd34"]);
         assert_eq!(c.start_argv(None, None).unwrap(), ["claude", "--bg"]);
         assert_eq!(
             c.start_argv(Some("fix it"), Some("fix the login")).unwrap(),
@@ -611,6 +839,14 @@ mod tests {
         assert_eq!(c.start_argv(Some(" "), Some("")).unwrap(), ["claude", "--bg"]);
         assert_eq!(c.carry_on_argv("s-1").unwrap(), ["claude", "--resume", "s-1", "--bg"]);
         assert_eq!(c.stop_argv("ab12cd34").unwrap(), ["claude", "stop", "ab12cd34"]);
+        let mut row = listed_at("ab12cd34", Path::new("/w"));
+        assert!(c.stops(&row), "one still going");
+        row.state.state = RunState::Finished;
+        assert!(!c.stops(&row), "nothing left to stop");
+        assert!(
+            !c.never_held(),
+            "a Claude Relay starts in a terminal of its own is held"
+        );
         assert_eq!(c.ping_argv("ab12cd34", "x"), None, "nothing tells one from outside");
         // What it says to attach to goes first, then any other likely word.
         assert_eq!(

@@ -42,3 +42,9 @@ sessions:
     # its history inline, so a run you watch or join again draws cleanly.
     settings:
       ui.useAlternateBuffer: true
+# Where Relay's MCP server goes (`rl setup`): `mcpServers.relay` in the same
+# settings file as its hooks, written by Relay. Gemini's documented format;
+# not checked against a gemini.
+mcp:
+  file: ["$GEMINI_CLI_HOME/.gemini/settings.json", "~/.gemini/settings.json"]
+  note: gemini mcp format unverified

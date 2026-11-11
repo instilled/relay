@@ -68,6 +68,9 @@ pub enum To {
     Held(Box<Meta>),
     /// A harness's own attach command, run on a pty here.
     Argv(Vec<String>),
+    /// A harness run on a pty here, in `cwd`, where it begins a session of
+    /// its own (Codex with no prompt: its TUI).
+    Here { argv: Vec<String>, cwd: PathBuf },
 }
 
 /// What background work (a stop, a start, a carry-on) came to.

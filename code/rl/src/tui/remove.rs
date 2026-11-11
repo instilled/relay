@@ -1,10 +1,10 @@
 //! `^x` twice, in words: what the second press does to the line under the
 //! cursor, said by the first. A session Relay holds that is still going is
 //! stopped; one that has ended is removed. One of a harness's own still
-//! going is stopped by its harness, where it has a way to (`claude stop`;
-//! nothing here ever removes one). Anything else — a session an agent's
-//! hooks told of, one of a harness's own that has ended or that it cannot
-//! stop, a project — is hidden. One already hidden and shown
+//! going is stopped by its harness, where it has a way to (`claude stop`; a
+//! Codex thread's running turn interrupted; nothing here ever removes one).
+//! Anything else — a session an agent's hooks told of, one of a harness's
+//! own that has ended or that it cannot stop, a project — is hidden. One already hidden and shown
 //! only because hidden is on (or because it came through) is brought back.
 //! Pure, so what you are told can be tested on its own.
 
@@ -19,9 +19,11 @@ use std::path::PathBuf;
 pub enum Removal {
     /// A Relay-held session still going: closed.
     Stop { name: String, title: String },
-    /// One of a harness's own still going: this run, in its folder, stops it.
+    /// One of a harness's own still going: its harness stops it by its id,
+    /// in its folder (`Harness::stop`).
     StopNative {
-        argv: Vec<String>,
+        harness: String,
+        id: String,
         cwd: PathBuf,
         title: String,
     },
@@ -74,10 +76,11 @@ pub fn plan(line: &Line, prefs: &ListPrefs, status: impl Fn(&str) -> Option<Stat
             // One hidden and shown is brought back first.
             if r.source == Source::Native
                 && !hidden(&r.key)
-                && let Some(argv) = &r.stop
+                && let Some(id) = &r.stop
             {
                 return Ok(Removal::StopNative {
-                    argv: argv.clone(),
+                    harness: r.harness.clone(),
+                    id: id.clone(),
                     cwd: r.cwd.clone(),
                     title,
                 });
@@ -236,13 +239,14 @@ mod tests {
     fn a_harnesss_own_session_still_going_is_stopped_by_it_and_one_ended_hidden() {
         let prefs = ListPrefs::default();
         let mut n = row("n:claude:a1", Source::Native);
-        n.stop = Some(vec!["claude".into(), "stop".into(), "a1".into()]);
+        n.stop = Some("a1".into());
         let stop = plan(&Line::Session(&n), &prefs, |_| None).unwrap();
         assert_eq!(stop.hint(), "stop a1");
         assert_eq!(
             stop,
             Removal::StopNative {
-                argv: vec!["claude".into(), "stop".into(), "a1".into()],
+                harness: n.harness.clone(),
+                id: "a1".into(),
                 cwd: "/w/api".into(),
                 title: "a1".into()
             }

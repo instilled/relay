@@ -125,7 +125,7 @@ async fn run(cli: Cli) -> Result<()> {
             Ok(())
         }
         Command::Setup { remove, harness, .. } => rl::setup::main(&home, &harness, remove),
-        // Blocks on stdin; the adapters it asks block too.
+        // Blocks on stdin; the harnesses it asks block too.
         Command::Mcp { harness } => tokio::task::spawn_blocking(move || rl::mcp::run(&home, &harness)).await?,
     }
 }

@@ -10,6 +10,14 @@ use std::path::{Path, PathBuf};
 
 pub const HOME_ENV: &str = "RELAY_HOME";
 
+/// The held session a process runs under: its name, set by `rl new` in the
+/// holder's environment.
+pub const SESSION_ENV: &str = "RL_SESSION";
+
+/// The harness a held session runs, beside `SESSION_ENV`: so a hook or an MCP
+/// server can tell the session's own agent from one run inside it.
+pub const AGENT_ENV: &str = "RL_SESSION_AGENT";
+
 /// Conservative `sun_path` limit (macOS is the smallest at 104).
 #[cfg(test)]
 const SUN_PATH_MAX: usize = 104;
