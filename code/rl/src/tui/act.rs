@@ -1,6 +1,6 @@
 //! `impl App` — what the list does to what the cursor is on: `enter`
 //! attaches, the command line starts something new, `^x` twice stops,
-//! removes or hides, `^r` renames, `^t` pins, `^g` colours, `⇧↑↓` moves. What is yours to
+//! removes or hides (or asks which, for a harness's own), `^r` renames, `^t` pins, `^g` colours, `⇧↑↓` moves. What is yours to
 //! keep (names, pins, colours, hides, order) goes to `config.json`; what takes a
 //! moment (stopping, starting) runs in the background and says how it went
 //! in the footer.
@@ -307,6 +307,9 @@ impl App {
         if let Some(key) = &d.forget {
             let key = key.clone();
             self.change_prefs(|p| forget(p, &key));
+            // Gone from its harness too: off the list now, not at its next
+            // listing.
+            self.native.rows.retain(|r| format!("n:{}:{}", r.harness, r.id) != key);
         }
         self.reload();
         if let Some(c) = d.setup {
@@ -417,6 +420,33 @@ impl App {
                     }
                 });
             }
+            Removal::Ask(ask) => self.ask(ask),
+            Removal::CloseNative {
+                harness,
+                id,
+                cwd,
+                title,
+                done,
+            } => {
+                let Some(a) = sources::harness(&harness) else {
+                    return self.say(format!("{harness} has no way to close {title} here"));
+                };
+                self.say(format!("{title}…"));
+                let (next, key) = (self.next_key(), native_key(a, &id));
+                self.work.spawn(async move {
+                    let run = tokio::task::spawn_blocking(move || a.close(&id, &cwd)).await;
+                    match run {
+                        Ok(Ok(())) => Done {
+                            select: next,
+                            forget: Some(key),
+                            ask_native: true,
+                            ..Done::said(format!("{done} {title}"))
+                        },
+                        Ok(Err(e)) => Done::said(format!("{title}: {e:#}")),
+                        Err(e) => Done::said(format!("{title}: {e}")),
+                    }
+                });
+            }
             Removal::Remove { name, title } => {
                 // Whatever was kept for it goes with it: a session started
                 // later by the same name is a new one.
@@ -450,6 +480,39 @@ impl App {
                 self.change_prefs(|p| p.hidden.retain(|h| h.key != key));
                 self.say(format!("brought back {title}"));
             }
+        }
+    }
+
+    /// What to do with one of a harness's own, asked in the footer: the
+    /// keys are the choice's till one is taken or `esc` (`key_ask`).
+    pub(super) fn ask(&mut self, ask: remove::Ask) {
+        self.search = None;
+        self.help = false;
+        self.mode = Mode::Ask(ask);
+    }
+
+    /// A key while a choice is asked: one of its keys takes that choice,
+    /// `enter` the first offered (the stop, where there is one), `esc`
+    /// nothing. Any other key is not an answer, and the choice stands.
+    pub(super) fn key_ask(&mut self, k: KeyEvent) {
+        let Mode::Ask(ask) = &self.mode else {
+            return;
+        };
+        let plain = !k
+            .modifiers
+            .intersects(crossterm::event::KeyModifiers::CONTROL | crossterm::event::KeyModifiers::ALT);
+        let taken = match k.code {
+            KeyCode::Esc => {
+                self.mode = Mode::List;
+                return;
+            }
+            KeyCode::Enter => Some(ask.first()),
+            KeyCode::Char(c) if plain => ask.take(c),
+            _ => None,
+        };
+        if let Some(plan) = taken {
+            self.mode = Mode::List;
+            self.remove(plan);
         }
     }
 

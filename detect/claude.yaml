@@ -68,8 +68,20 @@ sessions:
   # terminal is `resume` above, then this: `claude --resume <id> --bg`.
   start: [--bg]
   name: [-n, "{name}"]
-  # ^x on one still going stops it (`claude stop <id>`); never `claude rm`.
+  # Stopping one still going (`claude stop <id>`): its process ends, its
+  # conversation is kept, and `claude attach` opens it again.
   stop: [stop, "{id}"]
+  # ^x twice on one asks, in the footer: `s` stops it (enter does too), and
+  # `close` deletes it for good (`claude rm <id>`, which takes its worktree
+  # when that is safe, and works on one that has exited). One that has ended
+  # is offered only the close. Read off `claude rm --help` 2.1.322.
+  stop_choice: { words: stop, says: "keeps the conversation" }
+  close:
+    key: r
+    words: remove
+    says: "deletes it and its worktree"
+    done: removed
+    args: [rm, "{id}"]
   # Its agents view, as an attached session draws it (← on an empty prompt
   # opens it there, whatever `leftArrowOpensAgents` says): the new-session
   # prompt's placeholder, at the left edge — a transcript indents what it

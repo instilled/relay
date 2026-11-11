@@ -39,7 +39,7 @@ pub enum Attach {
     None,
 }
 
-pub use rl_detect::harness::{CarryOn, Harness, NativeRow, NativeState, Pr};
+pub use rl_detect::harness::{CarryOn, Choice, Harness, NativeRow, NativeState, Pr};
 
 /// What lists a harness's own background sessions. Asked from a background
 /// task while the list is open, so `list` may block (it runs the harness's
@@ -283,6 +283,18 @@ impl Harness for StandIn {
         self.inner.stop(id, cwd)
     }
 
+    fn stop_choice(&self) -> Choice {
+        self.inner.stop_choice()
+    }
+
+    fn close_choice(&self, row: &NativeRow) -> Option<Choice> {
+        self.inner.close_choice(row)
+    }
+
+    fn close(&self, id: &str, cwd: &std::path::Path) -> anyhow::Result<()> {
+        self.inner.close(id, cwd)
+    }
+
     fn ping_argv(&self, id: &str, text: &str) -> Option<Vec<String>> {
         self.inner.ping_argv(id, text)
     }
@@ -355,6 +367,12 @@ pub struct Row {
     /// The id its harness stops it by (`Harness::stop`), where it is a
     /// harness's own session its harness can stop as it stands.
     pub stop: Option<String>,
+    /// How `^x` twice offers that stop (`s stop · keeps the conversation`),
+    /// where there is one.
+    pub stop_choice: Option<Choice>,
+    /// What `^x` twice offers to close it for good, or off its harness's
+    /// lists (`Harness::close_choice`): a harness's own session only.
+    pub close: Option<Choice>,
     pub kind: RunKind,
     /// The root of the repository its folder is in, as read when the rows
     /// were (`git::toplevel`).
@@ -460,6 +478,8 @@ fn held_row(h: &Held) -> Row {
         color: None,
         attach: Attach::Held(m.name.clone()),
         stop: None,
+        stop_choice: None,
+        close: None,
         kind: m.kind,
         repo: None,
     }
@@ -510,9 +530,23 @@ fn hooked_row(h: &HookState, answered: &BTreeSet<String>) -> Row {
         color: None,
         attach: carry_on(h, answered),
         stop: None,
+        stop_choice: None,
+        close: None,
         kind: RunKind::Agent,
         repo: None,
     }
+}
+
+/// The id its harness knows a native row by: what its key says after
+/// `n:<harness>:`. None for any other row.
+pub fn native_id(r: &Row) -> Option<&str> {
+    if r.source != Source::Native {
+        return None;
+    }
+    r.key
+        .strip_prefix("n:")?
+        .strip_prefix(r.harness.as_str())?
+        .strip_prefix(':')
 }
 
 fn native_row(n: &NativeRow) -> Row {
@@ -534,6 +568,8 @@ fn native_row(n: &NativeRow) -> Row {
             .and_then(|h| h.attach_argv(&n.id))
             .map_or(Attach::None, Attach::Argv),
         stop: harness(&n.harness).filter(|h| h.stops(n)).map(|_| n.id.clone()),
+        stop_choice: harness(&n.harness).filter(|h| h.stops(n)).map(|h| h.stop_choice()),
+        close: harness(&n.harness).and_then(|h| h.close_choice(n)),
         kind: RunKind::Agent,
         repo: None,
     }
@@ -791,6 +827,48 @@ mod tests {
         assert_eq!(rows(&[], &[], &[codex]).remove(0).stop, None, "nothing running to stop");
         let h = held("a", RunKind::Agent, Status::Live);
         assert_eq!(rows(&[h], &[], &[]).remove(0).stop, None, "Relay's own stop it");
+    }
+
+    #[test]
+    fn a_native_session_offers_its_harnesss_stop_while_it_goes_and_its_close_always() {
+        let offers = |n: NativeRow| {
+            let r = rows(&[], &[], &[n]).remove(0);
+            (r.stop_choice.map(|c| c.offer()), r.close.map(|c| c.offer()))
+        };
+        let live = native("s-1");
+        assert_eq!(
+            offers(live.clone()),
+            (
+                Some("s stop · keeps the conversation".into()),
+                Some("r remove · deletes it and its worktree".into())
+            )
+        );
+        let mut done = live.clone();
+        done.state = NativeState {
+            words: "completed".into(),
+            state: RunState::Finished,
+        };
+        assert_eq!(
+            offers(done),
+            (None, Some("r remove · deletes it and its worktree".into())),
+            "ended: only the close"
+        );
+        let mut codex = live;
+        codex.harness = "codex".into();
+        codex.state = NativeState {
+            words: "resting".into(),
+            state: RunState::Idle,
+        };
+        assert_eq!(
+            offers(codex),
+            (
+                None,
+                Some("a archive · off the list, codex unarchive brings it back".into())
+            )
+        );
+        let h = held("a", RunKind::Agent, Status::Live);
+        let r = rows(&[h], &[], &[]).remove(0);
+        assert_eq!((r.stop_choice, r.close), (None, None), "Relay's own: as ever");
     }
 
     #[test]

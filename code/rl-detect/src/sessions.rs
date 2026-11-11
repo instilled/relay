@@ -27,8 +27,17 @@
 //!   start: [--bg]
 //!   name: [-n, "{name}"]
 //!   stop: [stop, "{id}"]
+//!   stop_choice: { words: stop, says: "keeps the conversation" }
+//!   close: { key: r, words: remove, says: "deletes it and its worktree",
+//!            done: removed, args: [rm, "{id}"] }
 //!   agents_view: ['^❯ describe a task for a new']
 //! ```
+//!
+//! `stop_choice` and `close`: what `^x` twice offers on one of its own
+//! sessions, as a choice in the footer — `s` and the stop's words (the
+//! stop itself is `stop`, or the harness's own way), and the closing
+//! action's key, its words, what it does, the word once done, and the
+//! arguments that do it after its binary (`{id}` its attach id).
 //!
 //! `agents_view`: regexes over the lines of an attached session's screen
 //! that say it shows the harness's own list of its sessions; Relay's list is
@@ -94,7 +103,26 @@ pub(crate) struct SessionsFile {
     name: Option<Vec<String>>,
     stop: Option<Vec<String>>,
     ping: Option<Vec<String>>,
+    stop_choice: Option<StopChoiceFile>,
+    close: Option<CloseFile>,
     agents_view: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StopChoiceFile {
+    words: String,
+    says: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CloseFile {
+    key: String,
+    words: String,
+    says: Option<String>,
+    done: String,
+    args: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -165,6 +193,12 @@ impl SessionsFile {
         if over.ping.is_some() {
             self.ping = over.ping;
         }
+        if over.stop_choice.is_some() {
+            self.stop_choice = over.stop_choice;
+        }
+        if over.close.is_some() {
+            self.close = over.close;
+        }
         if over.agents_view.is_some() {
             self.agents_view = over.agents_view;
         }
@@ -194,10 +228,48 @@ pub struct Sessions {
     /// it, after its binary: `{id}` is the session's (codex: its thread's),
     /// `{text}` the words. Empty where nothing outside can.
     pub ping: Vec<String>,
+    /// How `^x` twice offers to stop one: `s` and these words. None: just
+    /// `stop`.
+    pub stop_choice: Option<Choice>,
+    /// What closes one for good (or off its list), offered beside the stop.
+    /// None where it has no way to.
+    pub close: Option<Close>,
     /// How an attached session's screen says it shows the harness's own
     /// list of its sessions (Claude's agents view); none where Relay does
     /// not know.
     pub agents_view: Option<ScreenMark>,
+}
+
+/// The key that stops one of a harness's own sessions, in `^x`'s choice.
+pub const STOP_KEY: char = 's';
+
+/// One thing `^x` twice offers to do to one of a harness's own sessions: the
+/// key that takes it, its words, what it does, and its word once done
+/// (`r remove · deletes it and its worktree`, `removed`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Choice {
+    pub key: char,
+    pub words: String,
+    pub says: Option<String>,
+    pub done: String,
+}
+
+impl Choice {
+    /// How the footer offers it: `r remove · deletes it and its worktree`.
+    pub fn offer(&self) -> String {
+        match &self.says {
+            Some(says) => format!("{} {} · {says}", self.key, self.words),
+            None => format!("{} {}", self.key, self.words),
+        }
+    }
+}
+
+/// What closes one of a harness's own sessions: the choice offered, and the
+/// arguments that do it after its binary (`{id}`: its attach id).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Close {
+    pub choice: Choice,
+    pub args: Vec<String>,
 }
 
 /// Regexes over the lines of a screen: it is showing something when a line
@@ -382,6 +454,16 @@ pub(crate) fn compile(name: &str, file: SessionsFile) -> Result<Sessions> {
             bail!("{name}.yaml: sessions.ping says nowhere where the {what} goes ({word})");
         }
     }
+    let stop_choice = file.stop_choice.map(|c| Choice {
+        key: STOP_KEY,
+        words: c.words,
+        says: c.says,
+        done: "stopped".into(),
+    });
+    if stop_choice.as_ref().is_some_and(|c| c.words.trim().is_empty()) {
+        bail!("{name}.yaml: sessions.stop_choice.words says nothing");
+    }
+    let close = file.close.map(|c| compile_close(name, c)).transpose()?;
     let agents_view = file
         .agents_view
         .map(|p| ScreenMark::new(&format!("{name}.yaml: sessions.agents_view"), &p))
@@ -394,7 +476,37 @@ pub(crate) fn compile(name: &str, file: SessionsFile) -> Result<Sessions> {
         name: named,
         stop,
         ping,
+        stop_choice,
+        close,
         agents_view,
+    })
+}
+
+/// `sessions.close`, checked: one lowercase letter that is not the stop's,
+/// words and a word once done, and arguments that say where the id goes.
+fn compile_close(name: &str, c: CloseFile) -> Result<Close> {
+    let mut chars = c.key.chars();
+    let key = match (chars.next(), chars.next()) {
+        (Some(k), None) if k.is_ascii_lowercase() && k != STOP_KEY => k,
+        _ => bail!(
+            "{name}.yaml: sessions.close.key `{}` is not one lowercase letter other than `{STOP_KEY}`",
+            c.key
+        ),
+    };
+    if c.words.trim().is_empty() || c.done.trim().is_empty() {
+        bail!("{name}.yaml: sessions.close needs its words and its done word");
+    }
+    if !c.args.iter().any(|a| a.contains(ID)) {
+        bail!("{name}.yaml: sessions.close.args says nowhere where the id goes ({ID})");
+    }
+    Ok(Close {
+        choice: Choice {
+            key,
+            words: c.words,
+            says: c.says,
+            done: c.done,
+        },
+        args: c.args,
     })
 }
 
@@ -964,6 +1076,37 @@ mod tests {
             "mail is queued on the thread"
         );
         assert!(claude.ping.is_empty(), "nothing tells a Claude session from outside");
+        let offers = |s: &Sessions| {
+            (
+                s.stop_choice.as_ref().map(Choice::offer),
+                s.close
+                    .as_ref()
+                    .map(|c| (c.choice.offer(), c.choice.done.clone(), c.args.clone())),
+            )
+        };
+        assert_eq!(
+            offers(claude),
+            (
+                Some("s stop · keeps the conversation".into()),
+                Some((
+                    "r remove · deletes it and its worktree".into(),
+                    "removed".into(),
+                    vec!["rm".into(), ID.into()]
+                ))
+            )
+        );
+        assert_eq!(
+            offers(codex),
+            (
+                Some("s stop the turn".into()),
+                Some((
+                    "a archive · off the list, codex unarchive brings it back".into(),
+                    "archived".into(),
+                    vec!["archive".into(), ID.into()]
+                ))
+            ),
+            "never `codex delete`"
+        );
         assert!(r.profile("gemini").unwrap().sessions.as_ref().unwrap().list.is_none());
         assert!(r.profile("cursor").unwrap().sessions.is_none());
     }
@@ -992,6 +1135,32 @@ mod tests {
             ),
             (format!("{ok}  attach: [attach]\n"), "{id}"),
             (format!("{ok}  stop: [stop]\n"), "sessions.stop"),
+            (
+                format!("{ok}  close: {{ key: r, words: remove, done: removed, args: [rm] }}\n"),
+                "sessions.close.args",
+            ),
+            (
+                format!("{ok}  close: {{ key: s, words: x, done: y, args: [\"{{id}}\"] }}\n"),
+                "sessions.close.key",
+            ),
+            (
+                format!("{ok}  close: {{ key: rm, words: x, done: y, args: [\"{{id}}\"] }}\n"),
+                "sessions.close.key",
+            ),
+            (
+                format!("{ok}  close: {{ key: r, words: \"\", done: y, args: [\"{{id}}\"] }}\n"),
+                "done word",
+            ),
+            (
+                format!("{ok}  close: {{ key: r, words: x, args: [\"{{id}}\"] }}\n"),
+                "done",
+            ),
+            (
+                format!("{ok}  close: {{ key: r, words: x, done: y, args: [\"{{id}}\"], why: z }}\n"),
+                "why",
+            ),
+            (format!("{ok}  stop_choice: {{ words: stop, colour: red }}\n"), "colour"),
+            (format!("{ok}  stop_choice: {{ words: \" \" }}\n"), "stop_choice"),
             (format!("{ok}  ping: [queue, \"{{id}}\"]\n"), "{text}"),
             (format!("{ok}  ping: [queue, \"{{text}}\"]\n"), "sessions.ping"),
             (format!("{ok}    settings: {{ \"ui..x\": true }}\n"), "ui..x"),

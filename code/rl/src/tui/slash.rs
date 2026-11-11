@@ -225,27 +225,41 @@ impl App {
         }
         match self.removal() {
             Ok(p @ (Removal::Stop { .. } | Removal::StopNative { .. })) => self.remove(p),
+            // Its harness's stop, at once: no question asked.
+            Ok(Removal::Ask(a)) if a.stop.is_some() => {
+                let stop = a.first();
+                self.remove(stop)
+            }
+            Ok(Removal::Ask(a)) => self.say(format!(
+                "{} has nothing running to stop · /rm offers to {} it",
+                a.title, a.close.words
+            )),
             Ok(Removal::Remove { title, .. }) => self.say(format!("{title} has ended · /rm removes it")),
-            Ok(Removal::Hide { title, .. } | Removal::Unhide { title, .. }) => {
+            Ok(Removal::Hide { title, .. } | Removal::Unhide { title, .. } | Removal::CloseNative { title, .. }) => {
                 self.say(format!("{title} is not one the list can stop"))
             }
             Err(why) => self.say(why),
         }
     }
 
-    /// `/rm`: an ended session of Relay's removed, and what was kept for it.
+    /// `/rm`: an ended session of Relay's removed, and what was kept for it;
+    /// one of a harness's own that it can close asked about, the close the
+    /// only choice (`enter` takes it).
     fn rm_here(&mut self) {
         if !matches!(self.selected(), Some(Line::Session(_))) {
             return self.say("/rm removes an ended session of Relay's");
         }
         match self.removal() {
             Ok(p @ Removal::Remove { .. }) => self.remove(p),
+            Ok(Removal::Ask(a)) => self.ask(a.close_only()),
             Ok(Removal::Stop { title, .. } | Removal::StopNative { title, .. }) => {
                 self.say(format!("{title} is live · /stop it first"))
             }
-            Ok(Removal::Hide { title, .. } | Removal::Unhide { title, .. }) => self.say(format!(
-                "/rm removes an ended session of Relay's · {title} is not one (/hide hides it)"
-            )),
+            Ok(Removal::Hide { title, .. } | Removal::Unhide { title, .. } | Removal::CloseNative { title, .. }) => {
+                self.say(format!(
+                    "/rm removes an ended session of Relay's · {title} is not one (/hide hides it)"
+                ))
+            }
             Err(why) => self.say(why),
         }
     }

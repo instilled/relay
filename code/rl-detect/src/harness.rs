@@ -23,7 +23,8 @@
 use crate::Registry;
 use crate::mcp_entry::{How, Place};
 use crate::registry::{Profile, find_bin};
-use crate::sessions::{ID, ScreenMark, TEXT, UserHooks};
+pub use crate::sessions::Choice;
+use crate::sessions::{ID, STOP_KEY, ScreenMark, TEXT, UserHooks};
 use crate::settings;
 use anyhow::{Context, Result, anyhow, bail};
 use jiff::Timestamp;
@@ -217,6 +218,40 @@ pub trait Harness: Send + Sync {
     fn stop(&self, id: &str, cwd: &Path) -> Result<()> {
         let _ = (id, cwd);
         bail!("nothing stops a {} session from here", self.name())
+    }
+    /// How `^x` twice offers to stop one of its sessions: `s` and its
+    /// profile's `sessions.stop_choice` words (Claude: `stop · keeps the
+    /// conversation`), else `s stop`.
+    fn stop_choice(&self) -> Choice {
+        self.profile()
+            .sessions
+            .as_ref()
+            .and_then(|s| s.stop_choice.clone())
+            .unwrap_or_else(|| Choice {
+                key: STOP_KEY,
+                words: "stop".into(),
+                says: None,
+                done: "stopped".into(),
+            })
+    }
+    /// What `^x` twice offers beside the stop to close `row` for good, or off
+    /// its lists (Claude: `r remove`; Codex: `a archive`): its profile's
+    /// `sessions.close`. None: it has no way to.
+    fn close_choice(&self, row: &NativeRow) -> Option<Choice> {
+        let _ = row;
+        Some(self.profile().sessions.as_ref()?.close.as_ref()?.choice.clone())
+    }
+    /// Closes its session `id`, in `cwd`: its profile's `sessions.close`
+    /// arguments run with its binary (`claude rm <id>`, `codex archive
+    /// <id>`), for no longer than a list may take.
+    fn close(&self, id: &str, cwd: &Path) -> Result<()> {
+        let Some(close) = self.profile().sessions.as_ref().and_then(|s| s.close.as_ref()) else {
+            bail!("nothing closes a {} session from here", self.name());
+        };
+        let argv: Vec<String> = std::iter::once(self.bin().to_string())
+            .chain(close.args.iter().map(|a| a.replace(ID, id)))
+            .collect();
+        run(&argv, Some(cwd), false, LIST_WAIT).map(drop)
     }
     /// What tells its session `id` `text` from outside it: its profile's
     /// `sessions.ping` (codex: queues it on the thread). None: nothing
@@ -586,5 +621,66 @@ mod tests {
         assert!(gemini.has_mcp() && gemini.user_hooks().is_some());
         let sh = all.iter().find(|h| h.name() == "sh").unwrap();
         assert!(!sh.has_mcp() && sh.carry_on("x").is_none() && sh.ping_argv("x", "y").is_none());
+    }
+
+    #[test]
+    fn claude_and_codex_offer_a_stop_and_a_close_and_the_held_neither() {
+        let all = harnesses(&Registry::builtin(), |_| None);
+        let get = |n: &str| all.iter().find(|h| h.name() == n).unwrap();
+        let row = NativeRow {
+            harness: "claude".into(),
+            id: "ab12cd34".into(),
+            session_id: "s".into(),
+            name: "x".into(),
+            cwd: "/w".into(),
+            state: NativeState {
+                words: "working".into(),
+                state: RunState::Working,
+            },
+            summary: None,
+            started: None,
+            ended: None,
+            at: None,
+            pr: None,
+            color: None,
+        };
+        let offer = |n: &str| {
+            let h = get(n);
+            (h.stop_choice().offer(), h.close_choice(&row).map(|c| c.offer()))
+        };
+        assert_eq!(
+            offer("claude"),
+            (
+                "s stop · keeps the conversation".into(),
+                Some("r remove · deletes it and its worktree".into())
+            )
+        );
+        assert_eq!(
+            offer("codex"),
+            (
+                "s stop the turn".into(),
+                Some("a archive · off the list, codex unarchive brings it back".into())
+            )
+        );
+        assert_eq!(offer("antigravity"), ("s stop".into(), None), "held: nothing to close");
+        let e = get("gemini").close("x", Path::new("/")).unwrap_err();
+        assert_eq!(e.to_string(), "nothing closes a gemini session from here");
+    }
+
+    #[test]
+    fn a_close_runs_its_profiles_args_with_its_binary_in_the_folder() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let bin = tmp.path().join("claude");
+        std::fs::write(&bin, "#!/bin/sh\nprintf '%s\\n' \"$PWD\" \"$@\" > said\n").unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let r = Registry::builtin();
+        for (name, word) in [("claude", "rm"), ("codex", "archive")] {
+            let h = of(r.profile(name).unwrap(), Some(bin.clone()));
+            h.close("ab12cd34", tmp.path()).unwrap();
+            let said = std::fs::read_to_string(tmp.path().join("said")).unwrap();
+            let here = std::fs::canonicalize(tmp.path()).unwrap();
+            assert_eq!(said, format!("{}\n{word}\nab12cd34\n", here.display()), "{name}");
+        }
     }
 }

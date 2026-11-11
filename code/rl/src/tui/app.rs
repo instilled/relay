@@ -40,6 +40,9 @@ pub enum Mode {
     List,
     /// `^r`: a name typed where it stands.
     Rename(Renaming),
+    /// `^x` twice (or `/rm`) on one of a harness's own: what to do with it,
+    /// asked in the footer until a choice is taken or `esc`.
+    Ask(super::remove::Ask),
 }
 
 /// `^r` under way: the line's key, what is typed, the name it had, and its

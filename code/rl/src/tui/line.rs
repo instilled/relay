@@ -62,7 +62,7 @@ impl Line {
     /// takes its place. Nothing typed, nothing selected.
     pub fn select_all(&mut self) {
         self.cursor = self.text.len();
-        self.selected = (!self.text.is_empty()).then(|| 0..self.text.len());
+        self.selected = (!self.text.is_empty()).then_some(0..self.text.len());
     }
 
     /// The selection taken out, the cursor where it was; whether there was one.
