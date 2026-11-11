@@ -1,28 +1,93 @@
 # Relay
 
-Relay is `claude agents` for every harness. One list of your agent sessions (Claude, Codex, Gemini
-and the like) and your shells, in the terminal you already use. Enter attaches. Agents can send
-each other messages.
+Relay is `claude agents` for every harness: one list of your agent sessions (Claude, Codex, Gemini,
+Antigravity and the like) and your shells, in the terminal you already use. Enter attaches. Agents
+can message each other. No daemon, no model calls; macOS and Linux.
 
-Command: `rl`. No daemon.
+![The list: agents and shells under their projects, one waiting on you](docs/img/list.svg)
 
-Early; macOS and Linux. Relay calls no model.
+## Get started
 
-## Install
-
-Needs a recent stable Rust (CI uses 1.96) and `git`.
+You need Rust (1.96 or newer, from [rustup.rs](https://rustup.rs)), `git` and a C linker (on macOS:
+`xcode-select --install`).
 
 ```sh
 git clone https://github.com/instilled/relay && cd relay
-cargo build --release
-export PATH="$PWD/target/release:$PATH"   # rl and rl-session must stay side by side
+scripts/install
+rl
 ```
 
-Or link the dev shim, which rebuilds when the source changes: `ln -sf "$PWD/scripts/rl" ~/.local/bin/`.
+`scripts/install` builds Relay and links `rl` into `~/.local/bin`. The first `rl` offers to set
+Relay up for the agents it finds (hooks, and the `relay` MCP server for messaging). Say yes. That's
+it.
+
+This is a dev install: `rl` runs from your clone and rebuilds itself when the source changes.
+[More on installing](#install), and what setup changes, below.
+
+## What you can do
+
+**See every agent at once.** `rl` opens the list. Rows sit under their project, each saying
+whether it's working, done or needs you. Move with `↑↓`, `enter` attaches, `ctrl+\` detaches and
+leaves it running.
+
+**Start an agent by typing.** The line at the bottom starts things in the folder of the row under
+the cursor. Type `claude fix the login` or `codex fix the flaky test`: the first word picks the
+agent, the rest is its prompt. Anything else runs as a shell command.
+
+![Typing a prompt on the command line: agent · codex](docs/img/command-line.svg)
+
+**Keys at a glance.** `ctrl+h` (or `f1`) shows them all:
+
+![Every key, as a grid under the command line](docs/img/help.svg)
+
+| key | does |
+| --- | --- |
+| `enter` | attach (with text typed: start it) |
+| `ctrl+\` | detach, back to the list |
+| `ctrl+f` | find |
+| `ctrl+r` `ctrl+t` `ctrl+g` | rename, pin, colour |
+| `ctrl+s` | group by project or by state |
+| `ctrl+x ctrl+x` | stop, then remove or hide |
+| `/` | a command (`/setup`, `/rename`, `/help`, …) |
+| `ctrl+c ctrl+c` | quit |
+
+**From the shell.** The same, without the list:
+
+```sh
+rl new --harness claude -- fix the login   # start one (no arguments: a shell)
+rl ls                                       # list once
+rl attach <name>                            # attach; ctrl+\ detaches
+```
+
+**Let agents talk.** After setup, every agent has `who`, `send` and `inbox`. Ask in plain words:
+
+> ask the codex session in shop-api to review my diff and send me what it finds
+
+> when the tests pass, tell the claude session "web" to rebase on main
+
+Codex is pinged when mail arrives, Claude hears of it through its hooks. The
+[messaging guide](docs/messaging.md) has more use cases.
+
+## Install
+
+`scripts/install` checks for Rust, `git` and a C linker, builds once (`cargo build --workspace
+--bins`) and links the dev shim `scripts/rl` as `~/.local/bin/rl`. It's safe to run again.
+
+- `--bin-dir DIR` (or `RELAY_BIN_DIR`) links somewhere else. An `rl` there that isn't a symlink
+  is left alone; a stale link is replaced.
+- It warns when that dir isn't on your `PATH` (and prints the line to add), or when another `rl`
+  comes first on it (an old `cargo install`: `cargo uninstall rl`).
+- `RELAY_DEV_PROFILE=release` builds and runs the release binaries; keep it set where you run `rl`.
+- `rl --version` says the commit it was built from. Put it in bug reports.
+
+**Update:** `git pull`. The next `rl` rebuilds (it prints `building relay…`).
+
+**Uninstall:** `rl setup --remove` takes Relay's hooks and MCP server out of your agents, then
+`scripts/install --uninstall` removes the link. Your sessions and settings are in `~/.relay`.
 
 Everything lives under `~/.relay` (`RELAY_HOME` moves it).
 
-## First run
+## Setup
 
 ```sh
 rl            # the list; the first time, it offers to set Relay up
@@ -47,7 +112,8 @@ CLI.
 `rl setup` adds Relay's hook to each harness's user-level settings and registers
 `rl mcp --harness <name>` as an MCP server named `relay` (Claude's through `claude mcp add --scope user`
 and Antigravity's through `agy mcp add`, so that CLI must be on PATH). Antigravity has no hooks yet, so
-it gets only the server. It says what it changed, and `nothing to change` on a second run.
+it gets only the server. It says what it changed, then a few lines on what you can do now (messaging,
+with a link to the [guide](docs/messaging.md)), and `nothing to change` on a second run.
 `rl setup --remove` takes both out again, also for a harness no longer installed; `--harness <name>`
 (repeatable) limits it to one.
 Codex asks you to trust the hook once (`/hooks` in codex); Claude may ask you to review it in `/hooks`.
@@ -226,6 +292,8 @@ To show it in a zsh prompt: `PROMPT='${RL_SESSION:+[$RL_SESSION] }'$PROMPT`.
 
 ## For agents
 
+How to use it, with examples: [docs/messaging.md](docs/messaging.md).
+
 `rl mcp` is a stdio MCP server with three tools:
 
 - `who`: the list's rows, one line each (`address (title) · harness · state · folder`), you marked. The title is the one you gave the row with `ctrl+r`; a native session's address stays the harness's name or id, whatever you named it.
@@ -266,7 +334,11 @@ Not verified against the live CLIs:
 ## Docs
 
 - [PRODUCT.md](docs/PRODUCT.md): what Relay is for.
+- [messaging.md](docs/messaging.md): agents messaging each other, with examples.
 - [ARCHITECTURE.md](docs/ARCHITECTURE.md): how the tree is wired, as built.
 - [PRODUCT-ROADMAP.md](docs/PRODUCT-ROADMAP.md): done and next.
+
+The screenshots are made by `scripts/screenshots` (a made-up demo home and stand-in agents, in
+tmux; needs tmux and python3).
 
 Relay is a rebuild of [instilled/ax](https://github.com/instilled/ax), kept archived as the legacy reference.
