@@ -11,6 +11,12 @@
 //! `enter` (with or without shift) and `^j` never add a line: the search is
 //! one line, and the list takes them.
 //!
+//! A selection (`select_all`, which a name being renamed starts with) stands
+//! until a key does something to it: what is typed or pasted takes its place,
+//! `backspace` and `delete` take it away, and a move lets it go — `←` to its
+//! start, `→` and `^e` to its end, `home` and `end` as ever. `enter`, `esc`
+//! and `tab` leave it be.
+//!
 //! Pure: what is typed and where the cursor is. No I/O, and nothing about the
 //! rest of the list.
 
@@ -26,12 +32,15 @@ pub enum Act {
     Nothing,
 }
 
-/// What is typed, and where the cursor is.
+/// What is typed, where the cursor is, and what of it is selected.
 #[derive(Debug, Default, Clone)]
 pub struct Line {
     text: String,
     /// A byte index into `text`, always on a char boundary.
     cursor: usize,
+    /// What is selected, by byte indices on char boundaries; none, most of
+    /// the time.
+    selected: Option<std::ops::Range<usize>>,
 }
 
 impl Line {
@@ -44,6 +53,30 @@ impl Line {
         self.cursor
     }
 
+    /// What is selected, if anything.
+    pub fn selection(&self) -> Option<std::ops::Range<usize>> {
+        self.selected.clone()
+    }
+
+    /// All of the text selected, the cursor at its end: what is typed next
+    /// takes its place. Nothing typed, nothing selected.
+    pub fn select_all(&mut self) {
+        self.cursor = self.text.len();
+        self.selected = (!self.text.is_empty()).then(|| 0..self.text.len());
+    }
+
+    /// The selection taken out, the cursor where it was; whether there was one.
+    fn cut_selection(&mut self) -> bool {
+        match self.selected.take() {
+            Some(r) => {
+                self.text.drain(r.clone());
+                self.cursor = r.start;
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Whether nothing at all is typed.
     pub fn is_empty(&self) -> bool {
         self.text.is_empty()
@@ -53,6 +86,7 @@ impl Line {
     /// end, or mid-character, it falls back to the nearest boundary before.
     pub fn set_with_cursor(&mut self, text: impl Into<String>, cursor: usize) {
         self.text = text.into();
+        self.selected = None;
         let mut at = cursor.min(self.text.len());
         while !self.text.is_char_boundary(at) {
             at -= 1;
@@ -62,16 +96,20 @@ impl Line {
 
     /// The cursor to the start.
     pub fn home(&mut self) {
+        self.selected = None;
         self.cursor = 0;
     }
 
     /// The cursor to the end.
     pub fn end(&mut self) {
+        self.selected = None;
         self.cursor = self.text.len();
     }
 
-    /// Text put in at the cursor, which ends up after it.
+    /// Text put in at the cursor, which ends up after it; in place of the
+    /// selection, where there is one.
     pub fn insert(&mut self, s: &str) {
+        self.cut_selection();
         self.text.insert_str(self.cursor, s);
         self.cursor += s.len();
     }
@@ -81,6 +119,11 @@ impl Line {
         let alt = k.modifiers.contains(KeyModifiers::ALT);
         // By word: alt is the Mac habit, ctrl the one everywhere else.
         let by_word = alt || ctrl;
+        if self.selected.is_some()
+            && let Some(act) = self.key_on_selection(k, ctrl, alt)
+        {
+            return act;
+        }
         match k.code {
             KeyCode::Enter => return Act::Submit,
             KeyCode::Esc => return Act::Cancel,
@@ -133,6 +176,44 @@ impl Line {
             _ => return Act::Nothing,
         }
         Act::Typing
+    }
+
+    /// A key while something is selected, where the selection decides what
+    /// it does: typing and pasting replace it, `backspace` and `delete` take
+    /// it, a move lets it go and goes to its edge. `None`: the key acts as
+    /// ever (the selection let go first, unless it is `enter`, `esc`, `tab`
+    /// or a key the line has no use for).
+    fn key_on_selection(&mut self, k: &KeyEvent, ctrl: bool, alt: bool) -> Option<Act> {
+        let r = self.selected.clone()?;
+        match k.code {
+            KeyCode::Enter | KeyCode::Esc | KeyCode::Tab => return None,
+            KeyCode::Backspace | KeyCode::Delete => {
+                self.cut_selection();
+            }
+            KeyCode::Char('b') if alt => self.go(r.start),
+            KeyCode::Char('f') if alt => self.go(r.end),
+            KeyCode::Char('e') if ctrl => self.go(r.end),
+            KeyCode::Left => self.go(r.start),
+            KeyCode::Right => self.go(r.end),
+            // Another edit: on the text as it stands, the selection let go.
+            KeyCode::Char('u' | 'k' | 'w') if ctrl => {
+                self.selected = None;
+                return None;
+            }
+            KeyCode::Char('d') if alt => {
+                self.selected = None;
+                return None;
+            }
+            KeyCode::Char(c) if !ctrl => self.insert(&c.to_string()),
+            _ => return None,
+        }
+        Some(Act::Typing)
+    }
+
+    /// The cursor to `at`, the selection let go.
+    fn go(&mut self, at: usize) {
+        self.selected = None;
+        self.cursor = at;
     }
 
     /// Where the char before the cursor starts, if there is one.
@@ -407,6 +488,91 @@ mod tests {
         let mut l = Line::default();
         assert_eq!(l.key(&key(KeyCode::Char('x'), alt)), Act::Typing);
         assert_eq!(l.text(), "x");
+    }
+
+    fn selected(text: &str) -> Line {
+        let mut l = Line::default();
+        l.set_with_cursor(text, text.len());
+        l.select_all();
+        l
+    }
+
+    #[test]
+    fn select_all_selects_the_text_with_the_cursor_at_its_end() {
+        let l = selected("héllo");
+        assert_eq!((l.selection(), l.cursor()), (Some(0..6), 6));
+        assert_eq!(selected("").selection(), None, "nothing to select");
+    }
+
+    #[test]
+    fn typing_over_a_selection_replaces_it() {
+        let mut l = selected("shop-sh");
+        assert_eq!(press(&mut l, "b"), Act::Typing);
+        assert_eq!((l.text(), l.cursor(), l.selection()), ("b", 1, None));
+        press(&mut l, "ox");
+        assert_eq!(l.text(), "box", "only the first key replaces");
+        // Alt with a letter that is no word key types, and replaces too.
+        let mut l = selected("shop");
+        l.key(&KeyEvent::new(KeyCode::Char('x'), KeyModifiers::ALT));
+        assert_eq!(l.text(), "x");
+    }
+
+    #[test]
+    fn a_paste_over_a_selection_replaces_it() {
+        let mut l = selected("shop-sh");
+        l.insert("build box");
+        assert_eq!((l.text(), l.cursor(), l.selection()), ("build box", 9, None));
+    }
+
+    #[test]
+    fn backspace_or_delete_on_a_selection_clears_it() {
+        for code in [KeyCode::Backspace, KeyCode::Delete] {
+            let mut l = selected("shop-sh");
+            assert_eq!(l.key(&KeyEvent::from(code)), Act::Typing);
+            assert_eq!((l.text(), l.cursor(), l.selection()), ("", 0, None), "{code:?}");
+        }
+        let mut l = selected("make test");
+        l.key(&KeyEvent::new(KeyCode::Backspace, KeyModifiers::ALT));
+        assert_eq!(l.text(), "", "by word, the selection only");
+    }
+
+    #[test]
+    fn a_move_lets_a_selection_go_and_keeps_the_text() {
+        let mut l = selected("shop");
+        assert_eq!(l.key(&KeyEvent::from(KeyCode::Left)), Act::Typing);
+        assert_eq!((l.text(), l.cursor(), l.selection()), ("shop", 0, None), "to its start");
+        press(&mut l, "my ");
+        assert_eq!(l.text(), "my shop", "then typing edits");
+        let mut l = selected("shop");
+        l.key(&KeyEvent::from(KeyCode::Right));
+        assert_eq!((l.cursor(), l.selection()), (4, None), "to its end");
+        press(&mut l, "-sh");
+        assert_eq!(l.text(), "shop-sh");
+        let mut l = selected("shop");
+        l.home();
+        assert_eq!((l.cursor(), l.selection()), (0, None));
+        let mut l = selected("shop");
+        l.end();
+        assert_eq!((l.cursor(), l.selection()), (4, None));
+        let mut l = selected("shop");
+        l.key(&ctrl('e'));
+        assert_eq!((l.text(), l.cursor(), l.selection()), ("shop", 4, None));
+        let mut l = selected("make test");
+        l.key(&ctrl('w'));
+        assert_eq!((l.text(), l.selection()), ("make ", None), "another edit on the text");
+    }
+
+    #[test]
+    fn enter_esc_tab_and_keys_the_line_has_no_use_for_leave_a_selection_be() {
+        let mut l = selected("shop");
+        assert_eq!(l.key(&KeyEvent::from(KeyCode::Enter)), Act::Submit);
+        assert_eq!(l.key(&KeyEvent::from(KeyCode::Esc)), Act::Cancel);
+        assert_eq!(l.key(&KeyEvent::from(KeyCode::Tab)), Act::Complete);
+        assert_eq!(l.key(&KeyEvent::from(KeyCode::Up)), Act::Nothing);
+        assert_eq!(l.key(&ctrl('c')), Act::Nothing);
+        assert_eq!((l.text(), l.selection()), ("shop", Some(0..4)));
+        l.set_with_cursor("other", 5);
+        assert_eq!(l.selection(), None, "new text, no selection");
     }
 
     #[test]

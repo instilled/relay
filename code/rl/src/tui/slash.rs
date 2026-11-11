@@ -20,7 +20,7 @@ pub enum Arg {
     Nothing,
     /// A palette name, `#rrggbb`, or `none`.
     Colour,
-    /// A name; empty goes back to the row's own.
+    /// A name; none, and the name is typed where it stands (`^r`).
     Name,
 }
 
@@ -186,6 +186,8 @@ impl App {
                 Ok((key, harness)) => self.set_colour(key, harness, (arg != "none").then_some(arg)),
                 Err(why) => self.say(why),
             },
+            // No name: typed where it stands, as `^r` does.
+            Verb::Rename if arg.is_empty() => self.rename_here(&by),
             Verb::Rename => match self.rename_target(&by) {
                 Ok(t) => self.apply_name(t, &arg),
                 Err(why) => self.say(why),

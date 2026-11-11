@@ -674,7 +674,7 @@ impl App {
             };
             let room = w.saturating_sub(spans.iter().map(Span::width).sum());
             spans.extend(cap_spans(
-                theme::with_caret(rn.line.text(), rn.line.cursor(), Style::default()),
+                theme::with_selection(rn.line.text(), rn.line.cursor(), rn.line.selection(), Style::default()),
                 room,
             ));
             drawn = Line::from(spans);

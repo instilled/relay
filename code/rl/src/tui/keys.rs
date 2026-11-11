@@ -228,7 +228,7 @@ impl App {
         match (k.code, k.modifiers) {
             (KeyCode::Enter, _) => self.enter(),
             (KeyCode::Char('x'), KeyModifiers::CONTROL) => self.key_x(armed),
-            (KeyCode::Char('r'), KeyModifiers::CONTROL) => self.rename_here(),
+            (KeyCode::Char('r'), KeyModifiers::CONTROL) => self.rename_here("ctrl+r"),
             (KeyCode::Char('t'), KeyModifiers::CONTROL) => self.toggle_pin("ctrl+t"),
             (KeyCode::Char('g'), KeyModifiers::CONTROL) => self.cycle_colour(),
             (KeyCode::Char('c'), KeyModifiers::CONTROL) => {

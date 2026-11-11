@@ -463,17 +463,20 @@ impl App {
             .cloned()
     }
 
-    /// `^r`: a name of yours for a session or a project, typed where it
-    /// stands. A harness's own session keeps its name too, beside yours: the
-    /// harness has no way to rename it.
-    pub(super) fn rename_here(&mut self) {
-        match self.rename_target("ctrl+r") {
+    /// `^r` (or `/rename` with no name, `by`): a name of yours for a session
+    /// or a project, typed where it stands, over the name it has now, which
+    /// stands selected. A harness's own session keeps its name too, beside
+    /// yours: the harness has no way to rename it.
+    pub(super) fn rename_here(&mut self, by: &str) {
+        match self.rename_target(by) {
             Ok(RenameTarget { key, was, own, outside }) => {
                 self.search = None;
                 self.help = false;
                 let mut l = line::Line::default();
                 let at = was.len();
                 l.set_with_cursor(was.clone(), at);
+                // Selected whole: what is typed replaces it.
+                l.select_all();
                 self.mode = Mode::Rename(Renaming {
                     key,
                     line: l,
@@ -526,6 +529,15 @@ impl App {
         let Mode::Rename(r) = &mut self.mode else {
             return;
         };
+        // `home` and `end` go to the name's ends, and `^a` to its start, as a
+        // shell's line does: the filters wait till the name is done.
+        let ctrl = k.modifiers == crossterm::event::KeyModifiers::CONTROL;
+        match k.code {
+            KeyCode::Home => return r.line.home(),
+            KeyCode::Char('a') if ctrl => return r.line.home(),
+            KeyCode::End => return r.line.end(),
+            _ => {}
+        }
         match r.line.key(&k) {
             line::Act::Submit => {
                 let Mode::Rename(r) = std::mem::replace(&mut self.mode, Mode::List) else {

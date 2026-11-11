@@ -1248,9 +1248,117 @@ async fn slash_rename_names_the_row_and_an_empty_one_goes_back() {
     let names = Config::load(&f.home).unwrap().list.names;
     assert_eq!(names.get(HELD).map(String::as_str), Some("build box"));
     assert!(row_of(&shown(&app), "build box").contains("done"));
+    // With no name, it is typed where it stands, as ctrl+r: empty goes back.
     run(&mut app, "/rename");
+    assert!(matches!(app.mode, super::app::Mode::Rename(_)));
+    press(&mut app, KeyCode::Backspace);
+    press(&mut app, KeyCode::Enter);
     assert!(Config::load(&f.home).unwrap().list.names.is_empty());
     assert!(shown(&app).contains("back to shop-sh"));
+}
+
+/// The name being typed, and what of it is selected.
+fn renaming(app: &App) -> (String, Option<std::ops::Range<usize>>) {
+    match &app.mode {
+        super::app::Mode::Rename(r) => (r.line.text().to_string(), r.line.selection()),
+        super::app::Mode::List => panic!("no name being typed"),
+    }
+}
+
+#[tokio::test]
+async fn ctrl_r_starts_with_the_name_selected_and_what_is_typed_replaces_it() {
+    let f = fixture();
+    let mut app = list(&f).await;
+    on(&mut app, HELD);
+    ctrl(&mut app, 'r');
+    assert_eq!(renaming(&app), ("shop-sh".into(), Some(0..7)), "selected whole");
+    let s = shown(&app);
+    assert!(row_of(&s, "shop-sh").contains("shop-sh"), "{s}");
+    // Drawn as a selection, in the theme's colours.
+    let mut t = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+    t.draw(|fr| app.draw(fr)).unwrap();
+    let buf = t.backend().buffer().clone();
+    let y = (0..30)
+        .find(|y| {
+            (0..100)
+                .map(|x| buf[(x, *y)].symbol())
+                .collect::<String>()
+                .contains("shop-sh")
+        })
+        .unwrap();
+    let x = (0..100)
+        .find(|x| buf[(*x, y)].symbol() == "s" && buf[(*x + 1, y)].symbol() == "h")
+        .unwrap();
+    assert_eq!(buf[(x, y)].bg, super::theme::selection().bg.unwrap());
+    // The first key replaces it.
+    typed(&mut app, "box");
+    assert_eq!(renaming(&app), ("box".into(), None));
+    press(&mut app, KeyCode::Enter);
+    let names = Config::load(&f.home).unwrap().list.names;
+    assert_eq!(names.get(HELD).map(String::as_str), Some("box"));
+}
+
+#[tokio::test]
+async fn backspace_on_the_selected_name_clears_it_and_enter_goes_back_to_its_own() {
+    let f = fixture();
+    let mut app = list(&f).await;
+    on(&mut app, HELD);
+    run(&mut app, "/rename box");
+    ctrl(&mut app, 'r');
+    press(&mut app, KeyCode::Backspace);
+    assert_eq!(renaming(&app), (String::new(), None));
+    press(&mut app, KeyCode::Enter);
+    assert!(Config::load(&f.home).unwrap().list.names.is_empty());
+    assert!(shown(&app).contains("back to shop-sh"));
+}
+
+#[tokio::test]
+async fn an_arrow_lets_the_selection_go_and_typing_then_edits_the_name() {
+    let f = fixture();
+    let mut app = list(&f).await;
+    on(&mut app, HELD);
+    ctrl(&mut app, 'r');
+    press(&mut app, KeyCode::Left);
+    assert_eq!(renaming(&app), ("shop-sh".into(), None));
+    typed(&mut app, "my ");
+    press(&mut app, KeyCode::End);
+    typed(&mut app, "!");
+    assert_eq!(renaming(&app).0, "my shop-sh!");
+    ctrl(&mut app, 'a');
+    typed(&mut app, ">");
+    assert_eq!(
+        renaming(&app).0,
+        ">my shop-sh!",
+        "ctrl+a to the start, not the agents' filter"
+    );
+    press(&mut app, KeyCode::Enter);
+    let names = Config::load(&f.home).unwrap().list.names;
+    assert_eq!(names.get(HELD).map(String::as_str), Some(">my shop-sh!"));
+}
+
+#[tokio::test]
+async fn enter_on_the_name_untouched_keeps_it() {
+    let f = fixture();
+    let mut app = list(&f).await;
+    on(&mut app, HELD);
+    ctrl(&mut app, 'r');
+    press(&mut app, KeyCode::Enter);
+    assert!(matches!(app.mode, super::app::Mode::List));
+    assert!(Config::load(&f.home).unwrap().list.names.is_empty(), "nothing changed");
+    assert!(!shown(&app).contains("back to"), "nothing said");
+}
+
+#[tokio::test]
+async fn a_paste_replaces_the_selected_name() {
+    let f = fixture();
+    let mut app = list(&f).await;
+    on(&mut app, HELD);
+    ctrl(&mut app, 'r');
+    app.paste("build\nbox");
+    assert_eq!(renaming(&app), ("build box".into(), None));
+    press(&mut app, KeyCode::Enter);
+    let names = Config::load(&f.home).unwrap().list.names;
+    assert_eq!(names.get(HELD).map(String::as_str), Some("build box"));
 }
 
 #[tokio::test]
@@ -1286,6 +1394,8 @@ async fn a_harnesss_session_is_named_in_relay_with_its_own_name_dim_beside_and_b
     assert!(row_of(&narrow, "login box").contains("login box"), "{narrow}");
     // Empty restores the original.
     run(&mut app, "/rename");
+    press(&mut app, KeyCode::Delete);
+    press(&mut app, KeyCode::Enter);
     assert!(Config::load(&f.home).unwrap().list.names.is_empty());
     assert!(shown(&app).contains("back to fix the login"));
     assert!(!shown(&app).contains("(fix the login)"));
