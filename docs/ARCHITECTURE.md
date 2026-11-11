@@ -1,6 +1,6 @@
 # Relay — architecture
 
-**Status:** as built · **Date:** 2026-11-08 · **Tree:** `slim-step-1`
+**Status:** as built · **Date:** 2026-11-11 · **Tree:** `codex-daemon`
 
 [PRODUCT.md](PRODUCT.md) says what Relay is for. This file says how the tree under `code/` is
 wired. It names the code to read rather than repeating it; the keys are in `rl/src/tui/help.rs`
@@ -49,7 +49,7 @@ and its socket.
 | --- | --- | --- |
 | `rl-core` | | home paths (`Home`), `atomic` writes, state words, time |
 | `rl-session` | `rl-session` | holder, PTY backend, ring and screen, the socket protocol and client, exit sidecar, state detection from the screen (`detect/`) |
-| `rl-detect` | | the registry of harness profiles, hook settings files, own-session adapters (`claude_native`, `codex_native`) |
+| `rl-detect` | | the registry of harness profiles, hook settings files, the `Harness` trait and its implementations (`claude_native`, `codex_native`, `harness::Held`), MCP entries (`mcp_entry`) |
 | `rl` | `rl` | commands, list, rows, hooks, MCP, setup, stores |
 
 `rl` depends on the other three; `rl-detect` on `rl-core` and `rl-session`; `rl-session` on
@@ -83,8 +83,8 @@ Folders are 0700.
   profile's `hooks.args`. The holder detaches, binds the socket and tells `rl` it is ready.
   The list's command line (`tui/cmdline.rs`) starts the same way: a first word a profile claims
   (`words`) starts that agent with the rest as its prompt (placed by the profile's `prompt`;
-  a harness with an adapter through its `start`: Claude's `claude --bg`, Codex's a thread on its
-  daemon, or bare `codex` run here when there is no prompt); any other line runs held as
+  its harness's `start` says where: Claude's `claude --bg`, Codex's a thread on its daemon, or
+  bare `codex` run here when there is no prompt; any other, held by Relay); any other line runs held as
   `$SHELL -ic '<line>` and `exec $SHELL'`, a session of kind shell. Completion reads `PATH` once
   per list. A line starting with `/` is a command instead (`tui/slash.rs`): each names a key's
   action (`/pin` is `ctrl+t`, `/stop` is `ctrl+x` on a live row without the second press) and runs it on
@@ -96,7 +96,9 @@ Folders are 0700.
   worktree's `.git` file is followed through its `commondir` to the main checkout; a submodule's,
   which has none, is a project of its own). State comes from, in order, the
   agent's hooks, the harness's own listing, then regexes over the screen.
-- **Codex.** Never held (`Adapter::never_held`). A start opens the daemon through `codex
+  `rl ls` prints the same rows once (`cmd::listing`), each harness asked on a thread of its own
+  for at most 5s; one that fails or is slow is left out and named on stderr.
+- **Codex.** Never held (`Harness::never_held`). A start opens the daemon through `codex
   app-server proxy` (or first `codex app-server daemon start`), introduces itself as `relay`, sends
   `thread/start {cwd}`, `thread/name/set` if named, `turn/start` with the prompt, and lets go; the
   daemon runs the turn with no client, and an approval it needs leaves the thread `active` with
@@ -110,7 +112,7 @@ Folders are 0700.
   `ctrl+\` detaches. A native one: `rl` runs the profile's `attach` (`claude attach <id>`,
   `codex resume <id>`) in this terminal.
 - **Stop and remove.** A held session gets a `stopped` mark, then the holder is asked to close. A
-  native one through its adapter (`Adapter::stops`, `Adapter::stop`): Claude's is `claude stop
+  native one through its harness (`Harness::stops`, `Harness::stop`): Claude's is `claude stop
   <id>`, Codex's interrupts a running turn. `rm` removes the folder of one not running. `rl` never
   runs `claude rm`.
 - **Hook.** `rl hook <agent> <Event>` reads the hook JSON on stdin and the profile's
@@ -124,11 +126,11 @@ Folders are 0700.
   once it parses. Keys are encoded one to one (`[a-z0-9-]` kept, every other byte `%xx`), so none
   escapes `mail/` and none shares a folder with another, whatever the file system's case.
 - **Ping.** After the file is left, `send` tells a recipient whose harness can be told from
-  outside: its adapter's `ping_argv` (the profile's `sessions.ping`; Codex's `codex queue --thread
-  <id> --message <text> --resume`), run through `adapter::run` with `RELAY_ASKING` set so the
+  outside: its harness's `ping_argv` (the profile's `sessions.ping`; Codex's `codex queue --thread
+  <id> --message <text> --resume`), run through `harness::run` with `RELAY_ASKING` set so the
   harness's own hooks let it go, within `PING_WAIT`. The id is a native row's (a Codex thread's),
   else what a held session's `hook.json` says (its conversation id). No id, no ping; a failed ping is reported in `send`'s text, never as a failure.
-  Claude has no such way in, so its hooks carry the news: `rl hook claude UserPromptSubmit` prints
+  Claude has no such way in (`Harness::mail_by_hooks`), so its hooks carry the news: `rl hook claude UserPromptSubmit` prints
   `hookSpecificOutput.additionalContext` while mail waits in the session's own folders
   (`mcp::own_keys`: the held session's name and ids, else the payload's `session_id`, read from the
   files alone), and `rl hook claude Stop` prints `{"decision":"block","reason":…}` for mail newer
@@ -136,10 +138,10 @@ Folders are 0700.
   Only the copy of the hook that is heard (the session's own under a held session, `--user`
   outside) prints, so an event tells once. These two are the only output `rl hook` ever writes.
   From a Claude caller to one of Claude's background sessions (a native Claude row), `send`'s text
-  also advises waking it with `SendMessage`, by the row's name: the name `claude agents` shows,
-  which `ListAgents`/`SendMessage` address. Advice only; Relay calls nothing.
+  also advises waking it with `SendMessage` (`Harness::wake_advice`), by the row's name: the name
+  `claude agents` shows, which `ListAgents`/`SendMessage` address. Advice only; Relay calls nothing.
 
-## 5. Adapters
+## 5. Harnesses
 
 A harness is `detect/<name>.yaml`. `rl-detect/src/registry.rs` compiles the built-ins in and merges
 `$RELAY_HOME/detect/*.yaml` over them field by field. `generic` is the floor every profile extends.
@@ -148,26 +150,56 @@ The format is strict. Every struct is `deny_unknown_fields`: a key it does not k
 when the profile loads. Keys:
 
 - top level: `kind`, `bins`, `words`, `prompt`, `interactive_only`, `hooks`, `resume`, `icon`,
-  `color`, `patterns`, `timing`, `sessions`
+  `color`, `patterns`, `timing`, `sessions`, `mcp`
 - `hooks`: `dialect`, `args`
 - `patterns`: `needs_input`, `idle`; `timing`: `idle_after`, `stale_after`
 - `sessions`: `hooks`, `list`, `attach`, `start`, `name`, `stop`, `ping`
 - `sessions.hooks`: `file`, `timeout`, `unit`, `async`, `marker`, `after_install`, `from_env`,
   `events`, `settings`
 - `sessions.list`: `args`, `reader`
+- `mcp`: `file`, `cli`, `note`
 
 `headless`, `model_flag`, `small_model` and `says` are gone and fail to load.
 
-The facts per harness are in its YAML. What is the same for all is code: the hook settings file
-format (`user_hooks`), `rl hook`, and the two readers named by `list.reader`. A reader is an
-adapter (`rl-detect/src/adapter.rs`, trait `Adapter`): it lists, attaches, starts (`start`, which
-says what it began: `Started::Id` in the background, or `Started::Here`, an argv to run in the
-terminal), carries on, stops and pings one harness's own sessions. `claude-agents` runs `claude
-agents --json --all`, and starts by running `claude --bg` and confirming the id it printed in the
-listing (`claude_native::begin`); `codex-threads` talks JSON-RPC to `codex app-server proxy`
-(`codex_native::connect`, one WebSocket client for listing, starting and stopping:
-`thread/loaded/list`, `thread/read`, `thread/list`, `thread/start`, `turn/start`,
-`turn/interrupt`).
+Everything Relay does with a harness is one trait, `Harness` (`rl-detect/src/harness.rs`), one
+implementation per kind; `harness::of(profile, found_bin)` picks it by the profile's
+`sessions.list.reader`, and `harness::harnesses(registry, find)` gives every profile's (the list's
+`sources::harnesses`, made once). Nothing outside the implementations asks a harness's name. The
+trait covers:
+
+- identity: `profile`, `name`, `kind`, `bin`, `found`;
+- its own sessions: `lists`, `list`/`list_within`, `start` (what it began: `Started::Id` in its
+  background, `Started::Here` an argv to run in this terminal, `Started::Held` arguments for Relay
+  to hold), `never_held`, `held_argv` (what a held session runs, with the per-run hooks its
+  profile's `hooks` names), `attach_argv`, `carry_on` (`CarryOn::Background`, `Held` or `Attach`)
+  and `carry_on_there`, `stops`/`stop`, `ping_argv`;
+- setup: `user_hooks` (its profile's `sessions.hooks`), `has_mcp`, `mcp` (an `mcp_entry::Place`:
+  where Relay's server goes and how);
+- `rl mcp` and mail: `caller_id_var`, `mail_by_hooks`, `wake_advice`.
+
+The kinds:
+
+- `claude_native::Claude` (reader `claude-agents`): its own background. Lists with `claude agents
+  --json --all` plus each session's job file; starts with `claude --bg` and takes the id it printed
+  once the listing has it (`claude_native::begin`); carries a conversation on with `claude --resume
+  <id> --bg`; stops with `claude stop`. Its MCP entry goes through `claude mcp --scope user`; its
+  callers set `CLAUDE_CODE_SESSION_ID`; mail reaches its sessions through its hooks.
+- `codex_native::Codex` (reader `codex-threads`): its daemon. JSON-RPC to `codex app-server proxy`
+  (`codex_native::connect`, one WebSocket client for listing, starting and stopping:
+  `thread/loaded/list`, `thread/read`, `thread/list`, `thread/start`, `turn/start`,
+  `turn/interrupt`); never held; a conversation carries on with its own attach (`codex resume`).
+  Its MCP entry is TOML in `config.toml` with `env_vars`.
+- `harness::Held`: every other profile (Gemini, Antigravity, cursor, opencode, the shells,
+  `generic`). No background: `start` is `Started::Held` with the profile's `prompt`, `carry_on` the
+  profile's `resume`, held. Its MCP entry is the profile's `mcp`: `mcpServers.relay` written into
+  `mcp.file` (Gemini), or through the harness's own `mcp.cli` words where it owns the file (`agy
+  mcp add|remove`).
+
+Where profile data plugs in, for every kind: `bins` (which binary, `found`), `prompt`, `resume`,
+`hooks` (`held_argv`), `sessions.hooks` (`user_hooks`), `sessions.attach|start|name|stop` (Claude's
+and Codex's argv), `sessions.ping` (`ping_argv`, Codex's `codex queue`), and `mcp.file`, `mcp.cli`,
+`mcp.note` (`mcp`). What is the same for all is code: the hook settings file format (`user_hooks`),
+`rl hook`, the MCP entry formats (`mcp_entry`).
 
 ## 6. MCP
 
@@ -179,7 +211,8 @@ The caller's address, in order:
 
 1. `RL_SESSION`, set by `rl new` on sessions Relay holds: the session's name, taken only when
    `RL_SESSION_AGENT` is the harness the server was started for (`rl mcp --harness <h>`).
-2. For Claude, `CLAUDE_CODE_SESSION_ID`, matched against the session ids on the list.
+2. The harness's own conversation id variable (`Harness::caller_id_var`; Claude's
+   `CLAUDE_CODE_SESSION_ID`), matched against the session ids on the list.
 3. Otherwise `send` needs `from` and `inbox` needs `as`.
 
 A known caller wins over a passed `from`/`as`. Codex sets no id Relay knows, so it takes step 3.
@@ -187,15 +220,17 @@ Addresses: a held session is its name; a hooked-only one its full session id; a 
 name, or the harness id when the name is empty or repeats. `send` also takes the row's `ctrl+r` title
 or a conversation id. A `send` to a held name asks no harness for its list.
 
-`rl setup` registers `rl mcp --harness <h>`: Claude through `claude mcp add --scope user` (run
-with a timeout in a process group of its own; `~/.claude.json` is only read, to compare and to
-confirm), Codex as `[mcp_servers.relay]` in `config.toml` with `env_vars` for `RELAY_HOME`,
-`RL_SESSION` and `RL_SESSION_AGENT`, Gemini as `mcpServers.relay` in `settings.json`. Where
+`rl setup` iterates the harnesses and registers `rl mcp --harness <h>` where each says
+(`Harness::mcp`): Claude through `claude mcp add --scope user` (run with a timeout in a process
+group of its own; `~/.claude.json` is only read, to compare and to confirm), Codex as
+`[mcp_servers.relay]` in `config.toml` with `env_vars` for `RELAY_HOME`, `RL_SESSION` and
+`RL_SESSION_AGENT`, Gemini as `mcpServers.relay` in `settings.json`, Antigravity through `agy mcp
+add`. Where
 the Relay home is not the default, each entry carries `RELAY_HOME`. Hook
 files are edited in place keeping key order, comments (TOML) and file mode. A file that does not
 parse is left alone and reported.
 
-Each part (hooks, `user_hooks::install_needed`; each server entry, `Mcp::need`) first answers
+Each part (hooks, `user_hooks::install_needed`; each server entry, `mcp_entry::Place::need`) first answers
 "would a run change this?" from its files alone, missing or stale; a run writes only what that
 names, and `rl setup --check` (`setup::check`) stops there, so it writes nothing and runs neither
 `claude mcp` nor `agy mcp` (their entries are read from `~/.claude.json` and agy's
@@ -223,7 +258,9 @@ Taken from the task reports; none is exercised by the tests.
   was read (`-i` is `--prompt-interactive`).
 
 Live tests against real CLIs are `#[ignore]`. Codex's daemon in the tests is a stand-in
-(`fixtures/stand-in-codex-daemon`, Python 3) that speaks the WebSocket and the JSON-RPC. Tests never touch the real `~/.relay`, `~/.claude`,
+(`fixtures/stand-in-codex-daemon`, Python 3) that speaks the WebSocket and the JSON-RPC; the
+list's tests copy it to `target/debug/deps/stand-ins/<pid>/`, and each test run sweeps away the
+folders of runs that have finished. Tests never touch the real `~/.relay`, `~/.claude`,
 `~/.codex` or `~/.gemini`; they use `RELAY_HOME`, `HOME`, `CLAUDE_CONFIG_DIR`, `CODEX_HOME`.
 
 ## 8. Gates
