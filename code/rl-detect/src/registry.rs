@@ -62,6 +62,8 @@ struct SettingFile {
     key: String,
     value: serde_json::Value,
     check: String,
+    short: String,
+    why: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -368,6 +370,8 @@ impl Registry {
                                 key: s.key,
                                 value: s.value,
                                 check: s.check,
+                                short: s.short,
+                                why: s.why,
                             })
                             .collect(),
                     }),

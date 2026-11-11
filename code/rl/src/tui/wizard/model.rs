@@ -192,17 +192,9 @@ pub fn does_of(p: &Profile) -> Vec<String> {
         v.push(format!("mcp {}", rl_detect::mcp_entry::SERVER));
     }
     if let Some(s) = &p.settings {
-        v.extend(s.set.iter().map(|s| setting_words(&s.key, &s.value).0));
+        v.extend(s.set.iter().map(|s| s.short.clone()));
     }
     v
-}
-
-/// A setting in short, and why Relay sets it.
-fn setting_words(key: &str, value: &serde_json::Value) -> (String, String) {
-    match key {
-        "leftArrowOpensAgents" => ("← back to list".into(), "← goes back to Relay's list".into()),
-        _ => (format!("{key} {value}"), "as Relay needs it".into()),
-    }
 }
 
 /// Why each part is wanted.
@@ -223,7 +215,7 @@ pub fn changes_of(p: &Profile, need: Option<Need>, declined: &[String]) -> Vec<C
                     .settings
                     .as_ref()
                     .and_then(|s| s.set.iter().find(|s| &s.key == key))
-                    .map(|s| (format!("{} {}", s.key, s.value), setting_words(&s.key, &s.value).1))
+                    .map(|s| (format!("{} {}", s.key, s.value), s.why.clone()))
                     .unwrap_or_else(|| (says.clone(), "as Relay needs it".into())),
             };
             let (sign, why) = match (&part.what, &part.state) {
