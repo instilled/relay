@@ -68,7 +68,7 @@ and its socket.
 | `state/<agent>/<session_id>.json` | `rl hook` | a session Relay does not hold; removed on `ended` |
 | `mail/<key>/<ns>-<pid>-<n>-<from>.json` | `rl mcp` | a waiting message; deleted when read |
 | `mail/<key>/.told` | `rl hook` | when the newest mail a Claude `Stop` hook told of was sent |
-| `config.json` | `rl setup`, the list | harnesses, badges, list preferences (grouping, toggles, order, hidden, pins, names, colours by row key; `ctrl+g` cycles a row's own colour). `names` also holds a Relay-side name for a native or hooked row, which the harness never learns of; the list draws it with the harness's own beside it. Strict. |
+| `config.json` | `rl setup`, the list | harnesses, badges, the setup changes you declined (`setup.declined`), list preferences (grouping, toggles, order, hidden, pins, names, colours by row key; `ctrl+g` cycles a row's own colour). `names` also holds a Relay-side name for a native or hooked row, which the harness never learns of; the list draws it with the harness's own beside it. Strict. |
 | `hooks/` | `rl new` | per-run settings passed to a harness |
 | `detect/*.yaml` | you | profile overrides |
 | `plugins/gh-pr` | `rl` | the badge script |
@@ -253,10 +253,21 @@ settings, `settings::Place::need`) first answers
 names, and `rl setup --check` (`setup::check`) stops there, so it writes nothing and runs neither
 `claude mcp` nor `agy mcp` (their entries are read from `~/.claude.json` and agy's
 `mcp_config.json`). The list runs the check off its UI thread as it starts and leads the footer's
-hints with `setup needed: … · /setup` while anything does; `/setup` runs `setup::run` in the
-list's background work and checks again. The list's first start, with no `config.json` yet, on a
-terminal and outside a held session, asks once (`setup::first_run`) before taking the screen and
-writes `config.json` whatever the answer.
+hints with `setup needed: … · /setup` while anything does. Changes you unticked are kept in
+`config.json`'s `setup.declined` (`What::id`: `claude/settings/leftArrowOpensAgents`); `check` and
+`run` leave them out (`Place::without`).
+
+On a terminal, `rl setup`, the list's first start (no `config.json` yet, outside a held session)
+and `/setup` are the wizard (`tui::wizard`), a view on the same engine: `Host::need_of` per
+harness (declined ones included, shown unticked), then `setup::apply` per ticked part, in order on
+a thread of its own (`wizard::engine`) so the spinner turns while `claude mcp` runs. It draws in a
+ratatui inline viewport under the prompt, raw mode only while it runs (the list's panic guard,
+mouse clicks on), and leaves its summary in the scrollback (`view::summary`, the guide as an OSC 8
+link). Its state machine (`wizard::model`) is pure: keys in, an `Effect::Apply` out. `/setup`
+hands the terminal over as an attach does: the list leaves its screen, the wizard runs in
+`spawn_blocking`, the list comes back and checks again. The key card's keys come from the list's
+help table (`help::ESSENTIAL`). `--yes`, `--check`, `--remove`, `--harness`, no terminal and a held
+session keep `setup::run`'s plain lines. The first start writes `config.json` whatever the answer.
 
 ## 7. Not verified live
 

@@ -24,6 +24,7 @@ mod remove;
 mod select;
 mod slash;
 mod theme;
+pub mod wizard;
 
 #[cfg(test)]
 mod tests;
@@ -154,6 +155,27 @@ impl App {
                 title.clear();
                 self.back(&hand.key, words);
             }
+            // `/setup`: the wizard has the terminal, under the list's
+            // screen, until it is over; then the list again, checked anew.
+            if std::mem::take(&mut self.wizard) {
+                let Some(host) = self.setup_host.clone() else { continue };
+                drop(input);
+                leave_screen();
+                native.pause();
+                let home = self.home.clone();
+                let ran =
+                    tokio::task::spawn_blocking(move || wizard::run(&home, &host, wizard::model::Came::List)).await;
+                native.resume();
+                *terminal = enter_screen();
+                input = EventStream::new();
+                title.clear();
+                match ran {
+                    Ok(Ok(o)) => self.say(o.said),
+                    Ok(Err(e)) => self.say(format!("setup: {e:#}")),
+                    Err(e) => self.say(format!("setup: {e}")),
+                }
+                self.check_setup();
+            }
         }
         Ok(true)
     }
@@ -205,12 +227,15 @@ impl App {
 /// lost in the alternate screen and the shell is left raw. (ratatui's own
 /// hook leaves raw mode and the screen; this adds the mouse, paste and
 /// keyboard modes and the caret.)
-fn guard_panics() {
-    let before = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        leave_screen();
-        before(info);
-    }));
+pub(crate) fn guard_panics() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let before = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            leave_screen();
+            before(info);
+        }));
+    });
 }
 
 /// The terminal handed to what `enter` asked for, until it is let go of or

@@ -7,7 +7,11 @@
 //! settings:
 //!   file: ["$CLAUDE_CONFIG_DIR/.claude.json", "~/.claude.json"]
 //!   set:
-//!     - { key: leftArrowOpensAgents, value: false, check: "← opens agents on" }
+//!     - key: leftArrowOpensAgents
+//!       value: false
+//!       check: "← opens agents on"   # rl setup --check, while it is not so
+//!       short: "← back to list"      # the setup wizard's list of what it does
+//!       why: "← goes back to Relay's list"   # the wizard's reason for it
 //! ```
 //!
 //! The harness owns the file and has no command that sets these (Claude's
@@ -31,12 +35,15 @@ pub struct Settings {
 }
 
 /// One key, the value it is to have, and what `rl setup --check` says
-/// while it has another (`← opens agents on`).
+/// while it has another (`← opens agents on`); for the setup wizard, the
+/// setting in short (`← back to list`) and why Relay sets it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Setting {
     pub key: String,
     pub value: Value,
     pub check: String,
+    pub short: String,
+    pub why: String,
 }
 
 impl Settings {
@@ -95,6 +102,8 @@ mod tests {
                 key: "leftArrowOpensAgents".into(),
                 value: json!(false),
                 check: "← opens agents on".into(),
+                short: "← back to list".into(),
+                why: "← goes back to Relay's list".into(),
             }],
         }
     }

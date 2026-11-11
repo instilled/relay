@@ -56,7 +56,8 @@ enum Command {
         #[arg(long)]
         harness: String,
     },
-    /// Install the hooks and register the MCP server with each harness.
+    /// Install the hooks and register the MCP server with each harness. On
+    /// a terminal, a walk through it; `--yes`, or no terminal, plain output.
     Setup {
         /// Take Relay's hooks and server out again.
         #[arg(long, conflicts_with = "check")]
@@ -68,6 +69,10 @@ enum Command {
         /// Only this harness (repeatable); default: each one found on PATH.
         #[arg(long = "harness", value_name = "H")]
         harness: Vec<String>,
+        /// Set up everything (but what you declined) without asking, and
+        /// say what changed as plain lines.
+        #[arg(long, conflicts_with_all = ["check", "remove"])]
+        yes: bool,
     },
 }
 
@@ -94,13 +99,13 @@ async fn run(cli: Cli) -> Result<()> {
         if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
             anyhow::bail!("the list needs a terminal · rl ls lists sessions as text");
         }
-        // The first start asks once to set up; never inside a held session.
+        // The first start walks through setup once; never inside a held
+        // session. `ctrl+c` there leaves without the list.
         if rl::setup::should_ask(&home, true, std::env::var_os("RL_SESSION").is_some()) {
-            let asked = rl::setup::Host::real().and_then(|host| {
-                rl::setup::first_run(&home, &host, &mut std::io::stdin().lock(), &mut std::io::stdout())
-            });
-            if let Err(e) = asked {
-                eprintln!("rl setup: {e:#}");
+            match rl::tui::wizard::first_run(&home) {
+                Ok(rl::tui::wizard::model::Ended::Interrupted) => return Ok(()),
+                Ok(_) => {}
+                Err(e) => eprintln!("rl setup: {e:#}"),
             }
         }
         return rl::tui::run(&home).await;
@@ -128,7 +133,17 @@ async fn run(cli: Cli) -> Result<()> {
             }
             Ok(())
         }
-        Command::Setup { remove, harness, .. } => rl::setup::main(&home, &harness, remove),
+        Command::Setup {
+            remove, harness, yes, ..
+        } => {
+            use std::io::IsTerminal;
+            let terminal = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
+            let in_session = std::env::var_os("RL_SESSION").is_some();
+            if !remove && !yes && harness.is_empty() && terminal && !in_session {
+                return rl::tui::wizard::command(&home);
+            }
+            rl::setup::main(&home, &harness, remove)
+        }
         // Blocks on stdin; the harnesses it asks block too.
         Command::Mcp { harness } => tokio::task::spawn_blocking(move || rl::mcp::run(&home, &harness)).await?,
     }

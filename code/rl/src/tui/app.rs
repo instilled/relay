@@ -104,8 +104,6 @@ pub struct Done {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Checked {
     pub needs: Result<Vec<setup::Need>, String>,
-    /// After a `/setup`, which is then over.
-    pub ran: bool,
 }
 
 impl Done {
@@ -187,8 +185,9 @@ pub struct App {
     pub setup_host: Option<setup::Host>,
     /// How setup stands, once the start's check has said.
     pub setup: Option<Result<Vec<setup::Need>, String>>,
-    /// A `/setup` is under way.
-    pub setting_up: bool,
+    /// `/setup` asked for the wizard: the terminal goes to it next
+    /// (`main_loop`).
+    pub wizard: bool,
     /// The line under the cursor, by key.
     pub sel: Option<String>,
     /// Where the list's window starts, as last drawn.
@@ -233,7 +232,7 @@ impl App {
             work: JoinSet::new(),
             setup_host: setup::Host::real().ok(),
             setup: None,
-            setting_up: false,
+            wizard: false,
             sel: None,
             scroll: Cell::new(0),
             hit: RefCell::default(),

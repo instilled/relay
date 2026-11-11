@@ -1,19 +1,26 @@
-//! What a newly set-up Relay can do: the few lines `rl setup`, the first
-//! start's setup and the list's `/setup` end with, when they set something
-//! up. Never after `nothing to change`, nor for `--check` or `--remove`.
+//! What a newly set-up Relay can do: the few lines plain `rl setup` ends
+//! with when it set something up (the wizard draws them as its last step,
+//! and its summary keeps the link). Never after `nothing to change`, nor
+//! for `--check` or `--remove`.
 
 /// Where the messaging guide is.
 pub const MESSAGING_GUIDE: &str = "https://github.com/instilled/relay/blob/main/docs/messaging.md";
 
+/// What one agent can be asked, in plain words, to reach another.
+pub const EXAMPLES: [&str; 2] = [
+    "ask the codex session in shop-api to review my diff and send me what it finds",
+    "when the tests pass, tell the claude session 'web' to rebase on main",
+];
+
 /// The block itself, a line each.
 pub fn next() -> Vec<String> {
-    vec![
-        "What you can do now: your agents can message each other (relay's who, send and inbox tools).".into(),
+    let mut v = vec![
+        "What you can do now: your agents can message each other (relay's who, send and inbox tools).".to_string(),
         "Ask one in plain words, for example:".into(),
-        "  \"ask the codex session in shop-api to review my diff and send me what it finds\"".into(),
-        "  \"when the tests pass, tell the claude session 'web' to rebase on main\"".into(),
-        format!("More: {MESSAGING_GUIDE}"),
-    ]
+    ];
+    v.extend(EXAMPLES.iter().map(|e| format!("  \"{e}\"")));
+    v.push(format!("More: {MESSAGING_GUIDE}"));
+    v
 }
 
 /// Whether what `setup::run` said is that it set something up: anything

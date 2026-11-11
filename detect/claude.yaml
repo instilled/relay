@@ -90,4 +90,9 @@ mcp:
 settings:
   file: ["$CLAUDE_CONFIG_DIR/.claude.json", "~/.claude.json"]
   set:
-    - { key: leftArrowOpensAgents, value: false, check: "← opens agents on" }
+    # `short` and `why`: how the setup wizard names it, and its reason.
+    - key: leftArrowOpensAgents
+      value: false
+      check: "← opens agents on"
+      short: "← back to list"
+      why: "← goes back to Relay's list"
