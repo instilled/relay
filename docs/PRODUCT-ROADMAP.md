@@ -15,16 +15,19 @@ report arc, the briefer, the co-worker layer, notifications, the pane redesign �
 What the slim build left to check or finish:
 
 * [ ] verify live what's left: carrying on an idle Claude from another terminal
-  (`--resume --bg`), a held Codex claiming its thread with the real `codex`, and Gemini's MCP
-  format (checked live 2026-11-09: `claude --bg`'s output, `claude stop`, `--bg` sessions running
-  user hooks, `codex resume <id>` attaching, `codex queue --resume` reaching a held Codex)
-* [ ] `rl mcp` inside a held Codex can't tell its caller (Codex runs MCP servers in its daemon),
-  so `send`/`inbox` there need `from`/`as`
+  (`--resume --bg`); `rl setup` on the real home and an `agy` session calling the relay `who` tool
+  (does `agy` pass `RL_SESSION` to its MCP servers?); `/stop` interrupting a Codex turn while
+  Codex has it open elsewhere; Relay starting the Codex daemon when none runs (checked live
+  2026-11-09/11: `claude --bg`'s output, `claude stop`, `--bg` sessions running user hooks;
+  Codex turns run to completion on its daemon without a client, unloaded idle threads wake with
+  `codex queue --resume`, approvals wait for `codex resume`; `agy mcp add|remove`)
+* [ ] `rl mcp` inside Codex can't tell its caller (Codex runs MCP servers in its daemon, without
+  the session's environment), so `send`/`inbox` there need `from`/`as`
 * [ ] Antigravity hooks — its hook system (`hooks.json`; `SessionStart`, `PreToolUse`,
   `PostToolUse`, `PreInvocation`, `PostInvocation`, `Stop`) differs from the Gemini CLI's and has no
   permission event, so its rows can't read "needs input" yet
-* [ ] a Codex session handed to Codex's own daemon on detach — not today: codex 0.167 unloads a
-  thread ~70 s after its TUI exits; revisit when Codex keeps threads loaded
+* [ ] Antigravity in its own background — `agy` has no local background mode; its Remote Control
+  daemon (`agy remote-control start`, a boot/login service) is untested as a home for local sessions
 
 Later:
 
@@ -33,6 +36,14 @@ Later:
 
 ## Done — newest first
 
+* [x] Codex runs in its own daemon — `codex <prompt>` starts the thread and its first turn on
+  Codex's app-server (no holder), enter is `codex resume`, `/stop` interrupts the turn, unloaded
+  idle threads stay as resting rows; one `Harness` trait (Claude, Codex, Held) replaces `Adapter`
+  and every harness-name branch; profiles gain `mcp:`; `rl ls` lists what the list shows;
+  `meta.native_id` and #207's thread claim removed (#210)
+* [x] onboarding — the first `rl` says what setup changes and asks once; the list shows
+  `setup needed … · /setup` when hooks or MCP are missing or stale; `rl setup --check` (#209)
+* [x] `rl setup` registers relay's MCP server with Antigravity through `agy mcp add` (#208)
 * [x] a held Codex learns its thread — Codex runs hooks in its daemon, without the held session's
   environment, so the first hook for a new thread claims the live held Codex in that folder started
   in the last 120 s (`sessions.hooks.detached_env`); one row, pings and hook states work (#207)
