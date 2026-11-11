@@ -6,6 +6,7 @@ pub mod cmd;
 pub mod colour;
 pub mod config;
 pub mod git;
+pub mod guide;
 pub mod hook;
 pub mod mcp;
 pub mod query;

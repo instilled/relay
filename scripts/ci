@@ -50,7 +50,9 @@ case ${1:-all} in
 esac
 
 # The suites read $SHELL (a run inherits the shell's environment), and a
-# container image sets no such thing.
+# container image sets no such thing. $tty and $platform are empty or
+# flags, so they stay unquoted.
+# shellcheck disable=SC2086
 exec docker run --rm $tty $platform \
   -v "$root:/w" -w /w \
   -v relay-ci-target:/target \
