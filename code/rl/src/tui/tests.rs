@@ -397,6 +397,128 @@ async fn a_click_puts_the_cursor_on_its_line() {
     assert_eq!(app.sel.as_deref(), Some("n:claude:ab12cd34"));
 }
 
+fn mouse(app: &mut App, kind: crossterm::event::MouseEventKind, row: u16) {
+    app.mouse(crossterm::event::MouseEvent {
+        kind,
+        column: 10,
+        row,
+        modifiers: KeyModifiers::NONE,
+    });
+}
+
+#[tokio::test]
+async fn a_pointer_that_only_moves_leaves_the_cursor_and_the_wheel_steps_it() {
+    use crossterm::event::MouseEventKind::{Moved, ScrollDown, ScrollUp};
+    let f = fixture();
+    let mut app = list(&f).await;
+    let rows = screen(&app, 100, 30);
+    let at = |text: &str| rows.iter().position(|r| r.contains(text)).unwrap() as u16;
+    let keys = app.keys();
+    on(&mut app, &keys[0]);
+    // Over another line, the cursor stays where the keys or the wheel put it.
+    mouse(&mut app, Moved, at("fix the login"));
+    assert_eq!(app.sel.as_ref(), Some(&keys[0]), "a hover does not select");
+    mouse(&mut app, ScrollDown, at("fix the login"));
+    mouse(&mut app, ScrollDown, at("fix the login"));
+    assert_eq!(app.sel.as_ref(), Some(&keys[2]), "one line a tick");
+    mouse(&mut app, Moved, at("trunk"));
+    assert_eq!(app.sel.as_ref(), Some(&keys[2]));
+    mouse(&mut app, ScrollUp, at("trunk"));
+    assert_eq!(app.sel.as_ref(), Some(&keys[1]));
+}
+
+/// The list as read now is the list built afresh: nothing stale.
+fn fresh(app: &App) {
+    assert_eq!(app.lines(), app.lines_with(&app.filter), "the list is stale");
+    assert_eq!(
+        app.keys(),
+        app.lines_with(&app.filter).iter().map(|l| l.key()).collect::<Vec<_>>()
+    );
+}
+
+#[tokio::test]
+async fn the_list_built_once_is_never_stale() {
+    let f = fixture();
+    let mut app = list(&f).await;
+    fresh(&app);
+    let other = f.repo.parent().unwrap().join("yard");
+    std::fs::create_dir_all(&other).unwrap();
+    app.set_native(vec![
+        waiting(&f.repo),
+        NativeRow {
+            id: "ef56ab78".into(),
+            name: "paint the fence".into(),
+            ..waiting(&other)
+        },
+    ]);
+    fresh(&app);
+    assert!(app.keys().iter().any(|k| k == "n:claude:ef56ab78"));
+    assert!(shown(&app).contains("paint the fence"));
+    // The search, the toggles, the grouping, a name, a pin, a hide.
+    ctrl(&mut app, 'f');
+    typed(&mut app, "fence");
+    fresh(&app);
+    assert!(!shown(&app).contains("fix the login"));
+    press(&mut app, KeyCode::Esc);
+    fresh(&app);
+    assert!(shown(&app).contains("fix the login"));
+    ctrl(&mut app, 'a');
+    fresh(&app);
+    assert!(!shown(&app).contains("fix the login"));
+    ctrl(&mut app, 'a');
+    ctrl(&mut app, 's');
+    fresh(&app);
+    assert!(shown(&app).contains("Needs input"));
+    ctrl(&mut app, 's');
+    on(&mut app, NATIVE);
+    run(&mut app, "/rename the login");
+    fresh(&app);
+    assert!(shown(&app).contains("the login"));
+    ctrl(&mut app, 't');
+    fresh(&app);
+    assert_eq!(app.keys()[0], NATIVE);
+    run(&mut app, "/hide");
+    fresh(&app);
+    assert!(!app.keys().iter().any(|k| k == NATIVE));
+    // The files read again, and the checkouts.
+    sessions::remove(&f.home, "shop-sh").unwrap();
+    app.reload();
+    fresh(&app);
+    assert!(!app.keys().iter().any(|k| k == HELD));
+    git(&other, &["init", "-q", "-b", "yard-main"]);
+    app.regit();
+    fresh(&app);
+    assert!(shown(&app).contains("yard-main"), "{}", shown(&app));
+}
+
+#[tokio::test]
+async fn events_waiting_are_taken_together_up_to_one_that_hands_the_terminal_over() {
+    use crossterm::event::Event;
+    let f = fixture();
+    let mut app = list(&f).await;
+    let keys = app.keys();
+    on(&mut app, &keys[0]);
+    let key = |c| Ok(Event::Key(KeyEvent::from(c)));
+    // Two downs waiting behind the first: all three taken, at the end.
+    let mut more = futures::stream::iter(vec![key(KeyCode::Down), key(KeyCode::Down)]);
+    app.events(Some(key(KeyCode::Down)), &mut more).await.unwrap();
+    assert_eq!(app.sel.as_ref(), Some(&keys[2]));
+    assert!(futures::StreamExt::next(&mut more).await.is_none(), "all taken");
+    // An enter that hands the terminal over: what comes after is not the
+    // list's, and stays where it was.
+    on(&mut app, NATIVE);
+    let mut more = futures::stream::iter(vec![key(KeyCode::Down)]);
+    app.events(Some(key(KeyCode::Enter)), &mut more).await.unwrap();
+    assert!(app.hand.is_some());
+    assert_eq!(app.sel.as_deref(), Some(NATIVE));
+    assert!(futures::StreamExt::next(&mut more).await.is_some(), "left waiting");
+    // The end of the input quits.
+    app.hand = None;
+    let mut more = futures::stream::iter(Vec::<std::io::Result<Event>>::new());
+    app.events(None, &mut more).await.unwrap();
+    assert!(app.quit);
+}
+
 fn shift(app: &mut App, code: KeyCode) {
     app.key(KeyEvent::new(code, KeyModifiers::SHIFT));
 }
@@ -594,10 +716,14 @@ async fn enter_hands_a_held_session_over_and_a_native_one_to_its_harness() {
     press(&mut app, KeyCode::Enter);
     let hand = app.hand.take().expect("handed over");
     assert_eq!(hand.key, NATIVE);
-    let super::app::To::Argv(argv) = &hand.to else {
+    let super::app::To::Argv { argv, back } = &hand.to else {
         panic!("{:?}", hand.to);
     };
     assert_eq!(argv[1..], ["attach", "ab12cd34"], "claude attach <id>");
+    // Its agents view, should it come up in the attach, gives the list back.
+    let back = back.as_ref().expect("claude's agents view is known");
+    assert!(back.on("~/shop\n\n❯ describe a task for a new session\n  enter to open"));
+    assert!(!back.on("❯ fix the login\n  ⎿ ❯ describe a task for a new session"));
 }
 
 /// What the harness's stand-in was last run with in `dir` (`sources`).
@@ -692,7 +818,7 @@ async fn the_line_starts_codex_on_its_daemon_and_enter_resumes_the_thread() {
     assert_eq!(app.sel.as_deref(), Some(key.as_str()));
     press(&mut app, KeyCode::Enter);
     let hand = app.hand.take().expect("handed over");
-    let super::app::To::Argv(argv) = &hand.to else {
+    let super::app::To::Argv { argv, .. } = &hand.to else {
         panic!("{:?}", hand.to);
     };
     assert_eq!(argv[1..], ["resume".to_string(), id.clone()], "codex resume <id>");
@@ -766,7 +892,7 @@ async fn enter_carries_an_idle_claude_on_in_its_background_and_attaches() {
     assert_eq!(ran_in(&f.repo), ["--resume", "c-idle", "--bg"], "in its folder");
     let hand = app.hand.take().expect("handed over");
     assert_eq!(hand.key, "n:claude:0a1b2c3d");
-    let super::app::To::Argv(argv) = &hand.to else {
+    let super::app::To::Argv { argv, .. } = &hand.to else {
         panic!("{:?}", hand.to);
     };
     assert_eq!(argv[1..], ["attach", "0a1b2c3d"], "attached by the new id");
@@ -853,7 +979,10 @@ async fn a_carry_on_done_while_a_name_is_typed_does_not_take_the_terminal() {
     ctrl(&mut app, 'r');
     app.done(super::app::Done {
         hand: Some(super::app::Hand {
-            to: super::app::To::Argv(vec!["claude".into(), "attach".into(), "ab12cd34".into()]),
+            to: super::app::To::Argv {
+                argv: vec!["claude".into(), "attach".into(), "ab12cd34".into()],
+                back: None,
+            },
             title: "fix the login".into(),
             key: NATIVE.into(),
         }),
@@ -1545,4 +1674,54 @@ async fn a_setup_that_fails_says_why_and_the_list_goes_on() {
     let foot = shown(&app);
     assert!(foot.contains("setup:") && foot.contains(".claude.json"), "{foot}");
     assert!(!app.quit);
+}
+
+/// Not a test: how many `↓` a second the list takes, each drawn, on about
+/// forty rows in eight projects. `cargo test -p rl --release scroll_speed --
+/// --ignored --nocapture`.
+#[tokio::test]
+#[ignore]
+async fn scroll_speed() {
+    let f = fixture();
+    let mut app = list(&f).await;
+    let root = f.repo.parent().unwrap().to_path_buf();
+    let rows: Vec<NativeRow> = (0..40)
+        .map(|i| {
+            let cwd = root.join(format!("p{}", i % 8));
+            std::fs::create_dir_all(&cwd).unwrap();
+            NativeRow {
+                id: format!("{i:08x}"),
+                session_id: format!("s-{i}"),
+                name: format!("session number {i}"),
+                ..waiting(&cwd)
+            }
+        })
+        .collect();
+    app.set_native(rows);
+    let mut t = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 40)).unwrap();
+    let n = 1000;
+    let at = std::time::Instant::now();
+    for i in 0..n {
+        press(&mut app, if (i / 50) % 2 == 0 { KeyCode::Down } else { KeyCode::Up });
+        t.draw(|f| app.draw(f)).unwrap();
+    }
+    let took = at.elapsed();
+    let keys_at = std::time::Instant::now();
+    for i in 0..n {
+        press(&mut app, if (i / 50) % 2 == 0 { KeyCode::Down } else { KeyCode::Up });
+    }
+    let draws_at = std::time::Instant::now();
+    for _ in 0..n {
+        t.draw(|f| app.draw(f)).unwrap();
+    }
+    println!(
+        "keys alone {:?} each, draws alone {:?} each",
+        (draws_at - keys_at) / n,
+        draws_at.elapsed() / n
+    );
+    println!(
+        "{n} keys, each drawn: {took:?}, {:.0} a second, {:?} each",
+        n as f64 / took.as_secs_f64(),
+        took / n
+    );
 }

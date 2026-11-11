@@ -96,6 +96,11 @@ Folders are 0700.
   worktree's `.git` file is followed through its `commondir` to the main checkout; a submodule's,
   which has none, is a project of its own). State comes from, in order, the
   agent's hooks, the harness's own listing, then regexes over the screen.
+  The list is built (`rows::build`) once per change — the rows read again, the checkouts, the
+  prefs, the filter — and kept in `App` (`App::lines`, `App::rebuild`); a key or a draw reads
+  that. The loop takes every input event already waiting before it draws again (`App::events`),
+  and draws only the rows its window shows. The mouse is asked for clicks, drags and the wheel,
+  not bare motion.
   `rl ls` prints the same rows once (`cmd::listing`), each harness asked on a thread of its own
   for at most 5s; one that fails or is slow is left out and named on stderr.
 - **Codex.** Never held (`Harness::never_held`). A start opens the daemon through `codex
@@ -110,7 +115,11 @@ Folders are 0700.
   `codex resume`, never held. Stop is `turn/interrupt` on the running turn.
 - **Attach.** A held session: `rl` connects to its socket, gets the screen, then live bytes.
   `ctrl+\` detaches. A native one: `rl` runs the profile's `attach` (`claude attach <id>`,
-  `codex resume <id>`) in this terminal.
+  `codex resume <id>`) in this terminal (`attach::native::hold`), and feeds what it draws to a
+  screen of its own (`rl_session::screen::Screen`) where the harness has an `agents_view`
+  (`Harness::agents_view`): once a line of it matches — Claude's agents view, which `←` opens in an
+  attached session whatever `leftArrowOpensAgents` says — that screen is not passed on and the
+  attach lets go as `ctrl+\` does, back to the list.
 - **Stop and remove.** A held session gets a `stopped` mark, then the holder is asked to close. A
   native one through its harness (`Harness::stops`, `Harness::stop`): Claude's is `claude stop
   <id>`, Codex's interrupts a running turn. `rm` removes the folder of one not running. `rl` never
@@ -150,14 +159,15 @@ The format is strict. Every struct is `deny_unknown_fields`: a key it does not k
 when the profile loads. Keys:
 
 - top level: `kind`, `bins`, `words`, `prompt`, `interactive_only`, `hooks`, `resume`, `icon`,
-  `color`, `patterns`, `timing`, `sessions`, `mcp`
+  `color`, `patterns`, `timing`, `sessions`, `mcp`, `settings`
 - `hooks`: `dialect`, `args`
 - `patterns`: `needs_input`, `idle`; `timing`: `idle_after`, `stale_after`
-- `sessions`: `hooks`, `list`, `attach`, `start`, `name`, `stop`, `ping`
+- `sessions`: `hooks`, `list`, `attach`, `start`, `name`, `stop`, `ping`, `agents_view`
 - `sessions.hooks`: `file`, `timeout`, `unit`, `async`, `marker`, `after_install`, `from_env`,
   `events`, `settings`
 - `sessions.list`: `args`, `reader`
 - `mcp`: `file`, `cli`, `note`
+- `settings`: `file`, `set` (each `key`, `value`, `check`)
 
 `headless`, `model_flag`, `small_model` and `says` are gone and fail to load.
 
@@ -171,10 +181,11 @@ trait covers:
 - its own sessions: `lists`, `list`/`list_within`, `start` (what it began: `Started::Id` in its
   background, `Started::Here` an argv to run in this terminal, `Started::Held` arguments for Relay
   to hold), `never_held`, `held_argv` (what a held session runs, with the per-run hooks its
-  profile's `hooks` names), `attach_argv`, `carry_on` (`CarryOn::Background`, `Held` or `Attach`)
+  profile's `hooks` names), `attach_argv`, `agents_view`, `carry_on` (`CarryOn::Background`, `Held` or `Attach`)
   and `carry_on_there`, `stops`/`stop`, `ping_argv`;
 - setup: `user_hooks` (its profile's `sessions.hooks`), `has_mcp`, `mcp` (an `mcp_entry::Place`:
-  where Relay's server goes and how);
+  where Relay's server goes and how), `settings` (a `settings::Place`: keys of its own global
+  config and their values);
 - `rl mcp` and mail: `caller_id_var`, `mail_by_hooks`, `wake_advice`.
 
 The kinds:
@@ -197,7 +208,7 @@ The kinds:
 
 Where profile data plugs in, for every kind: `bins` (which binary, `found`), `prompt`, `resume`,
 `hooks` (`held_argv`), `sessions.hooks` (`user_hooks`), `sessions.attach|start|name|stop` (Claude's
-and Codex's argv), `sessions.ping` (`ping_argv`, Codex's `codex queue`), and `mcp.file`, `mcp.cli`,
+and Codex's argv), `sessions.ping` (`ping_argv`, Codex's `codex queue`), `sessions.agents_view` (`agents_view`), and `mcp.file`, `mcp.cli`,
 `mcp.note` (`mcp`). What is the same for all is code: the hook settings file format (`user_hooks`),
 `rl hook`, the MCP entry formats (`mcp_entry`).
 
@@ -230,7 +241,14 @@ the Relay home is not the default, each entry carries `RELAY_HOME`. Hook
 files are edited in place keeping key order, comments (TOML) and file mode. A file that does not
 parse is left alone and reported.
 
-Each part (hooks, `user_hooks::install_needed`; each server entry, `mcp_entry::Place::need`) first answers
+Then the keys a profile's `settings` names, in the harness's own global config (Claude's
+`leftArrowOpensAgents: false` in `~/.claude.json`, so `←` does not open its agents view). Claude
+has no command that sets one (`claude config` is gone), so `rl_detect::settings` writes the keys
+into the file itself, last, after `claude mcp` has written it, keeping every other key in its
+order; `--remove` leaves them.
+
+Each part (hooks, `user_hooks::install_needed`; each server entry, `mcp_entry::Place::need`; the
+settings, `settings::Place::need`) first answers
 "would a run change this?" from its files alone, missing or stale; a run writes only what that
 names, and `rl setup --check` (`setup::check`) stops there, so it writes nothing and runs neither
 `claude mcp` nor `agy mcp` (their entries are read from `~/.claude.json` and agy's
@@ -249,6 +267,8 @@ Taken from the task reports; none is exercised by the tests.
 - `turn/interrupt` on a live thread, and `codex app-server daemon start`.
 - The Gemini MCP entry format.
 - Whether `claude --bg` sessions run user-level hooks (why the list asks `claude agents`).
+- Claude's agents view in an attach (`sessions.agents_view`): read off `claude agents` 2.1.322 in
+  a pty at 34 to 120 columns, not off a `claude attach` after `←`.
 - Checked live on codex 0.167: a thread started over the proxy runs its turn with no client; an
   idle one with no client is unloaded after about two minutes (hence the `resting` rows); a turn
   that needs an approval with no client connected waits (`active`, `waitingOnApproval`), and

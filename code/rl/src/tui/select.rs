@@ -6,19 +6,14 @@ use crate::query;
 use crate::rows::{self, Line, Names};
 
 impl App {
-    /// Keys of the list's lines, in order: every header and every row.
-    pub fn keys(&self) -> Vec<String> {
-        self.lines().iter().map(Line::key).collect()
-    }
-
     /// Keeps the cursor on something that is there: the first session, when
     /// it has to move (a header only if there is no session), so `enter`
     /// does something on open.
     pub fn settle(&mut self) {
-        let lines = self.lines();
-        if self.sel.as_ref().is_some_and(|k| lines.iter().any(|l| l.key() == *k)) {
+        if self.selected().is_some() {
             return;
         }
+        let lines = self.lines();
         let first = lines
             .iter()
             .find(|l| l.row().is_some())
@@ -33,8 +28,7 @@ impl App {
 
     /// The line under the cursor.
     pub fn selected(&self) -> Option<Line<'_>> {
-        let key = self.sel.as_ref()?;
-        self.lines().into_iter().find(|l| l.key() == *key)
+        self.line_keyed(self.sel.as_ref()?)
     }
 
     /// The cursor `by` lines on (back, when negative), stopping at the ends.
