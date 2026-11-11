@@ -13,14 +13,18 @@
 //!   is opened.
 //! - [`user_hooks`]: the format of those hooks, set in the user's own files
 //!   on a yes.
-//! - [`adapter`]: a harness's own background sessions — listed, attached,
-//!   started and carried on through it; [`claude_native`] is Claude's,
-//!   [`codex_native`] Codex's.
+//! - [`harness`]: everything Relay does with one harness, one
+//!   implementation per kind: [`claude_native`] Claude's (a background of
+//!   its own), [`codex_native`] Codex's (its daemon), and `harness::Held`
+//!   for every other profile, which Relay holds.
+//! - [`mcp_entry`]: Relay's MCP server as an entry in a harness's own list
+//!   of servers, for `rl setup`.
 
-pub mod adapter;
 pub mod claude;
 pub mod claude_native;
 pub mod codex_native;
+pub mod harness;
+pub mod mcp_entry;
 pub mod registry;
 pub mod sessions;
 pub mod user_hooks;

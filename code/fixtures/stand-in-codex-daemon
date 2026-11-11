@@ -1,0 +1,136 @@
+#!/usr/bin/env python3
+# The stand-in `codex` whose app-server daemon the tests start sessions on,
+# never the real one. Run from a copy of it in the test's own folder, it
+# keeps what it knows beside itself:
+#
+#   <itself>.down     there is no daemon: the proxy cannot connect, as the
+#                     real one says, until `app-server daemon start`
+#   <itself>.log      every message a client sent the daemon, one JSON a line
+#   <itself>.threads  the threads it has, JSON
+#   <itself>.argv     what any other run was given, one word a line, and
+#                     <itself>.cwd the folder it ran in
+#
+# `app-server proxy` speaks the daemon's WebSocket on stdio (the handshake,
+# then one text frame per JSON-RPC message), as `codex_native` does.
+import json, os, struct, sys
+
+me = os.path.abspath(sys.argv[0])
+args = sys.argv[1:]
+
+
+def log(m):
+    with open(me + ".log", "a") as f:
+        f.write(json.dumps(m) + "\n")
+
+
+def threads():
+    try:
+        with open(me + ".threads") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return []
+
+
+def keep(ts):
+    with open(me + ".threads", "w") as f:
+        json.dump(ts, f)
+
+
+if args == ["app-server", "daemon", "start"]:
+    if os.path.exists(me + ".down"):
+        os.remove(me + ".down")
+    log({"run": "daemon start"})
+    sys.exit(0)
+
+if args != ["app-server", "proxy"]:
+    with open(me + ".argv", "w") as f:
+        f.write("".join(a + "\n" for a in args))
+    with open(me + ".cwd", "w") as f:
+        f.write(os.getcwd() + "\n")
+    sys.exit(0)
+
+if os.path.exists(me + ".down"):
+    sys.stderr.write("Error: failed to connect to socket at /h/.codex/app-server-control/app-server-control.sock\n")
+    sys.exit(1)
+
+r, w = sys.stdin.buffer, sys.stdout.buffer
+while r.readline().strip():
+    pass
+w.write(b"HTTP/1.1 101 Switching Protocols\r\nupgrade: websocket\r\nconnection: Upgrade\r\n\r\n")
+w.flush()
+
+
+def recv():
+    h = r.read(2)
+    if len(h) < 2:
+        return None
+    n = h[1] & 0x7F
+    if n == 126:
+        n = struct.unpack(">H", r.read(2))[0]
+    elif n == 127:
+        n = struct.unpack(">Q", r.read(8))[0]
+    mask = r.read(4) if h[1] & 0x80 else b"\0\0\0\0"
+    data = bytes(b ^ mask[i % 4] for i, b in enumerate(r.read(n)))
+    return json.loads(data)
+
+
+def send(m):
+    data = json.dumps(m).encode()
+    n = len(data)
+    head = bytes([0x81]) + (bytes([n]) if n < 126 else bytes([126]) + struct.pack(">H", n))
+    w.write(head + data)
+    w.flush()
+
+
+client = None
+while True:
+    m = recv()
+    if m is None:
+        break
+    log(m)
+    if "id" not in m:
+        continue
+    method, p = m.get("method"), m.get("params") or {}
+    ts = threads()
+    by_id = {t["id"]: t for t in ts}
+    result, error = None, None
+    if method == "initialize":
+        client = p["clientInfo"]["name"]
+        result = {"userAgent": "stand-in"}
+    elif method == "thread/start":
+        t = {"id": "019f0000-0000-7000-8000-%012d" % (len(ts) + 1), "cwd": p["cwd"], "name": None,
+             "preview": None, "originator": client, "createdAt": 1794100000, "updatedAt": 1794100000,
+             "status": {"type": "idle"}, "turns": []}
+        ts.append(t)
+        result = {"thread": t}
+    elif method in ("thread/name/set", "turn/start", "turn/interrupt", "thread/read") and p.get("threadId") not in by_id:
+        error = "thread not found: %s" % p.get("threadId")
+    elif method == "thread/name/set":
+        by_id[p["threadId"]]["name"] = p["name"]
+        result = {}
+    elif method == "turn/start":
+        t = by_id[p["threadId"]]
+        t["preview"] = t["preview"] or p["input"][0]["text"]
+        t["status"] = {"type": "active", "activeFlags": []}
+        t["turns"].append({"id": "turn-%d" % (len(t["turns"]) + 1), "status": "inProgress"})
+        result = {"turn": t["turns"][-1]}
+    elif method == "turn/interrupt":
+        t = by_id[p["threadId"]]
+        t["status"] = {"type": "idle"}
+        for turn in t["turns"]:
+            if turn["id"] == p["turnId"]:
+                turn["status"] = "interrupted"
+        result = {}
+    elif method == "thread/read":
+        result = {"thread": by_id[p["threadId"]]}
+    elif method == "thread/loaded/list":
+        result = {"data": [t["id"] for t in ts], "nextCursor": None}
+    elif method == "thread/list":
+        result = {"data": [], "nextCursor": None}
+    else:
+        error = "unknown method %s" % method
+    keep(ts)
+    if error:
+        send({"jsonrpc": "2.0", "id": m["id"], "error": {"code": -32600, "message": error}})
+    else:
+        send({"jsonrpc": "2.0", "id": m["id"], "result": result})

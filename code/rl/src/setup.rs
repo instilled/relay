@@ -1,10 +1,12 @@
 //! `rl setup`: for each harness, its user hooks (`rl_detect::user_hooks`)
 //! where it has them, and the `rl mcp --harness <h>` server registered at
-//! user level. Claude's server goes through `claude mcp`, which owns
-//! `~/.claude.json`, and Antigravity's through `agy mcp`, which owns
-//! `~/.gemini/config/mcp_config.json`; Codex's and Gemini's are written
-//! into their own files. Edits keep everything else in them; a file that
-//! does not read is left as it was. `--remove` takes out only Relay's.
+//! user level where it has a place for one. Both are the harness's to say
+//! (`Harness::user_hooks`, `Harness::mcp`): Claude's server goes through
+//! `claude mcp`, which owns `~/.claude.json`, and Antigravity's through `agy
+//! mcp`, which owns `~/.gemini/config/mcp_config.json`; Codex's and
+//! Gemini's are written into their own files (`rl_detect::mcp_entry`).
+//! Edits keep everything else in them; a file that does not read is left as
+//! it was. `--remove` takes out only Relay's.
 //!
 //! Each part answers "would a run change this?" from its files alone
 //! (`Place::need`); a run writes only what that names, and `--check`
@@ -15,26 +17,17 @@
 use crate::config::Config;
 use anyhow::{Context as _, Result, anyhow, bail};
 use rl_core::Home;
+use rl_detect::harness::{self, Harness};
+use rl_detect::mcp_entry::{self, SERVER, Want};
 use rl_detect::registry::{Profile, find_bin};
 use rl_detect::sessions::UserHooks;
 use rl_detect::{Registry, user_hooks};
-use serde_json::{Map, Value, json};
 use std::ffi::OsString;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
-use toml_edit::{Array, DocumentMut, InlineTable, Item, Table, value};
 
-/// The name the server goes by in each harness's config.
-const SERVER: &str = "relay";
-
-/// What Codex hands the server from its own environment: where Relay is,
-/// and which held session (and harness) it runs under.
-const CODEX_ENV_VARS: [&str; 3] = [rl_core::HOME_ENV, "RL_SESSION", crate::spawn::AGENT_ENV];
-
-/// How long a `claude mcp` or `agy mcp` call may take.
-const MCP_CLI_WAIT: Duration = Duration::from_secs(30);
+pub use rl_detect::mcp_entry::State;
 
 /// `rl setup` for the harnesses named, or every agent `bin_of` finds (for
 /// `--remove`, every agent with hooks or a server: one whose files hold
@@ -51,15 +44,15 @@ pub fn run(
     bin_of: &impl Fn(&Profile) -> Option<PathBuf>,
 ) -> Result<Vec<String>> {
     let registry = Registry::load(home)?;
-    let profiles = select(&registry, only, remove, bin_of)?;
-    let want = Want::new(home, rl_bin, env);
+    let harnesses = select(&registry, only, remove, bin_of)?;
+    let want = want(home, rl_bin, env);
     let mut lines = Vec::new();
-    for p in &profiles {
-        lines.extend(one(p, registry.user_hooks(&p.name), remove, &want, env, bin_of(p))?);
+    for h in &harnesses {
+        lines.extend(one(h.as_ref(), remove, &want, env)?);
     }
     if !remove && only.is_empty() {
         let mut config = Config::load(home)?;
-        config.harnesses = profiles.iter().map(|p| p.name.clone()).collect();
+        config.harnesses = harnesses.iter().map(|h| h.name().to_string()).collect();
         config.save(home)?;
     }
     if lines.is_empty() {
@@ -81,10 +74,10 @@ pub fn check(
     bin_of: &impl Fn(&Profile) -> Option<PathBuf>,
 ) -> Result<Vec<Need>> {
     let registry = Registry::load(home)?;
-    let want = Want::new(home, rl_bin, env);
+    let want = want(home, rl_bin, env);
     let mut needs = Vec::new();
-    for p in select(&registry, only, false, bin_of)? {
-        let place = Place::of(p, registry.user_hooks(&p.name), env, bin_of(p))?;
+    for h in select(&registry, only, false, bin_of)? {
+        let place = Place::of(h.as_ref(), env)?;
         needs.extend(place.need(&want, env)?);
     }
     Ok(needs)
@@ -92,30 +85,32 @@ pub fn check(
 
 /// The harnesses a run handles: those named, or every agent `bin_of` finds
 /// (for `remove`, every agent with hooks or a server).
-fn select<'r>(
-    registry: &'r Registry,
+fn select(
+    registry: &Registry,
     only: &[String],
     remove: bool,
     bin_of: &impl Fn(&Profile) -> Option<PathBuf>,
-) -> Result<Vec<&'r Profile>> {
+) -> Result<Vec<Box<dyn Harness>>> {
+    let of = |p: &Profile| harness::of(p, bin_of(p));
     if only.is_empty() {
         return Ok(registry
             .agents()
-            .filter(|p| set_up(registry, &p.name) && (remove || bin_of(p).is_some()))
+            .map(of)
+            .filter(|h| set_up(h.as_ref()) && (remove || h.found()))
             .collect());
     }
     only.iter()
-        .map(|n| match registry.profile(n) {
-            Some(p) if set_up(registry, n) => Ok(p),
+        .map(|n| match registry.profile(n).map(of) {
+            Some(h) if set_up(h.as_ref()) => Ok(h),
             _ => bail!("{n}: no such harness to set up"),
         })
         .collect()
 }
 
-/// Whether `rl setup` has anything to do for the harness `name`: hooks in
-/// its profile, or a place for the server.
-fn set_up(registry: &Registry, name: &str) -> bool {
-    registry.user_hooks(name).is_some() || Mcp::KNOWN.contains(&name)
+/// Whether `rl setup` has anything to do for `h`: hooks of its own, or a
+/// place for the server.
+fn set_up(h: &dyn Harness) -> bool {
+    h.user_hooks().is_some() || h.has_mcp()
 }
 
 /// What a harness needs from `rl setup`: each of its parts that a run would
@@ -140,15 +135,6 @@ pub enum What {
     Hooks,
     /// The `relay` MCP server's entry.
     Mcp,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum State {
-    /// None of Relay's there.
-    Missing,
-    /// There, but not what a run would write: `was`, the `rl` it points at
-    /// where that is another one.
-    Stale { was: Option<String> },
 }
 
 impl std::fmt::Display for What {
@@ -317,30 +303,10 @@ pub fn first_run(home: &Home, host: &Host, r: &mut impl BufRead, w: &mut impl Wr
 
 /// What every entry runs: this `rl`, and the Relay home where it is not the
 /// default one.
-struct Want {
-    rl: String,
-    relay_home: Option<String>,
-}
-
-impl Want {
-    fn new(home: &Home, rl_bin: &Path, env: &impl Fn(&str) -> Option<OsString>) -> Want {
-        Want {
-            rl: rl_bin.to_string_lossy().into_owned(),
-            relay_home: relay_home(home, env),
-        }
-    }
-
-    fn args(&self, harness: &str) -> Vec<String> {
-        vec!["mcp".into(), "--harness".into(), harness.into()]
-    }
-
-    /// The environment the server is given: `RELAY_HOME`, where needed.
-    fn env(&self) -> Map<String, Value> {
-        let mut env = Map::new();
-        if let Some(h) = &self.relay_home {
-            env.insert(rl_core::HOME_ENV.into(), json!(h));
-        }
-        env
+fn want(home: &Home, rl_bin: &Path, env: &impl Fn(&str) -> Option<OsString>) -> Want {
+    Want {
+        rl: rl_bin.to_string_lossy().into_owned(),
+        relay_home: relay_home(home, env),
     }
 }
 
@@ -356,33 +322,23 @@ fn relay_home(home: &Home, env: &impl Fn(&str) -> Option<OsString>) -> Option<St
 /// One harness: its hooks, where it has them, then its MCP entry. A line
 /// naming what changed. Setting up asks `Place::need` first — what
 /// `check` asks — and writes only what it names.
-fn one(
-    p: &Profile,
-    hooks: Option<&UserHooks>,
-    remove: bool,
-    want: &Want,
-    env: &impl Fn(&str) -> Option<OsString>,
-    bin: Option<PathBuf>,
-) -> Result<Vec<String>> {
-    let name = &p.name;
-    let place = Place::of(p, hooks, env, bin)?;
+fn one(h: &dyn Harness, remove: bool, want: &Want, env: &impl Fn(&str) -> Option<OsString>) -> Result<Vec<String>> {
+    let name = h.name();
+    let place = Place::of(h, env)?;
     let mut parts = Vec::new();
     let mut notes = Vec::new();
-    let mcp_line = |mcp: &Mcp, word: &str| {
-        let unverified = match mcp {
-            Mcp::Gemini { .. } => " (gemini mcp format unverified)",
-            _ => "",
-        };
-        format!("mcp {SERVER} {word} ({}){unverified}", tilde(mcp.path(), env))
+    let mcp_line = |mcp: &mcp_entry::Place, word: &str| {
+        let note = mcp.note.as_ref().map(|n| format!(" ({n})")).unwrap_or_default();
+        format!("mcp {SERVER} {word} ({}){note}", tilde(&mcp.path, env))
     };
     if remove {
         if let Some((hooks, file)) = &place.hooks
-            && user_hooks::uninstall(file, hooks).with_context(|| name.clone())?
+            && user_hooks::uninstall(file, hooks).with_context(|| name.to_string())?
         {
             parts.push("hooks removed".to_string());
         }
         if let Some(mcp) = &place.mcp
-            && mcp.remove().with_context(|| name.clone())?
+            && mcp.remove().with_context(|| name.to_string())?
         {
             parts.push(mcp_line(mcp, "removed"));
         }
@@ -390,14 +346,14 @@ fn one(
         for item in &need.items {
             match (item.what, &place.hooks, &place.mcp) {
                 (What::Hooks, Some((hooks, file)), _) => {
-                    user_hooks::install(file, hooks, Path::new(&want.rl)).with_context(|| name.clone())?;
+                    user_hooks::install(file, hooks, Path::new(&want.rl)).with_context(|| name.to_string())?;
                     parts.push("hooks installed".to_string());
                     if let Some(note) = &hooks.after_install {
                         notes.push(format!("{name}: {note}"));
                     }
                 }
                 (What::Mcp, _, Some(mcp)) => {
-                    mcp.register(name, want).with_context(|| name.clone())?;
+                    mcp.register(want).with_context(|| name.to_string())?;
                     parts.push(mcp_line(mcp, "registered"));
                 }
                 _ => {}
@@ -416,25 +372,22 @@ fn one(
 struct Place<'a> {
     name: &'a str,
     hooks: Option<(&'a UserHooks, PathBuf)>,
-    mcp: Option<Mcp>,
+    mcp: Option<mcp_entry::Place>,
 }
 
 impl<'a> Place<'a> {
-    fn of(
-        p: &'a Profile,
-        hooks: Option<&'a UserHooks>,
-        env: &impl Fn(&str) -> Option<OsString>,
-        bin: Option<PathBuf>,
-    ) -> Result<Place<'a>> {
-        let name = p.name.as_str();
-        let hooks = hooks
-            .map(|h| {
-                h.file(env)
-                    .map(|f| (h, f))
+    fn of(h: &'a dyn Harness, env: &impl Fn(&str) -> Option<OsString>) -> Result<Place<'a>> {
+        let name = h.name();
+        let hooks = h
+            .user_hooks()
+            .map(|hooks| {
+                hooks
+                    .file(env)
+                    .map(|f| (hooks, f))
                     .ok_or_else(|| anyhow!("{name}: HOME is not set, so where its hooks file is is not known"))
             })
             .transpose()?;
-        let mcp = Mcp::of(name, hooks.as_ref().map(|(_, f)| f.as_path()), env, bin)?;
+        let mcp = h.mcp(env)?;
         Ok(Place { name, hooks, mcp })
     }
 
@@ -444,8 +397,8 @@ impl<'a> Place<'a> {
     /// that does not read).
     fn need(&self, want: &Want, env: &impl Fn(&str) -> Option<OsString>) -> Result<Option<Need>> {
         let name = self.name;
-        if let Some(cli) = self.mcp.as_ref().and_then(Mcp::cli_missing) {
-            bail!("{name}: not on PATH; its MCP server is registered with `{cli} mcp`, so install it first");
+        if let Some(cli) = self.mcp.as_ref().and_then(mcp_entry::Place::cli_missing) {
+            bail!("{name}: not on PATH; its MCP server is registered with `{cli}`, so install it first");
         }
         let mut items = Vec::new();
         if let Some((hooks, file)) = &self.hooks {
@@ -466,12 +419,12 @@ impl<'a> Place<'a> {
             }
         }
         if let Some(mcp) = &self.mcp
-            && let Some(state) = mcp.need(name, want).with_context(|| name.to_string())?
+            && let Some(state) = mcp.need(want).with_context(|| name.to_string())?
         {
             items.push(Part {
                 what: What::Mcp,
                 state,
-                file: tilde(mcp.path(), env),
+                file: tilde(&mcp.path, env),
             });
         }
         Ok((!items.is_empty()).then(|| Need {
@@ -479,406 +432,6 @@ impl<'a> Place<'a> {
             items,
         }))
     }
-}
-
-/// Where a harness keeps the MCP servers of the user, and how they get
-/// there.
-enum Mcp {
-    /// `~/.claude.json` (`$CLAUDE_CONFIG_DIR/.claude.json` with that set),
-    /// read here and written only by `claude mcp add|remove --scope user`.
-    Claude { path: PathBuf, bin: Option<PathBuf> },
-    /// `mcpServers.<name> = {command, args, env?}` in the settings file
-    /// that holds the hooks. Gemini's documented format; not checked
-    /// against a gemini.
-    Gemini { path: PathBuf },
-    /// `[mcp_servers.<name>]` with `command`, `args`, `env_vars` and
-    /// `env?` (Codex's `config.toml`, beside its hooks file).
-    Codex { path: PathBuf },
-    /// Antigravity's `~/.gemini/config/mcp_config.json`, read here and
-    /// written only by `agy mcp add|remove` (agy on 2026-11-10: `mcpServers`
-    /// entries of `{args, command, disabled, env?}`; `add` replaces).
-    Agy { path: PathBuf, bin: Option<PathBuf> },
-}
-
-impl Mcp {
-    /// The harnesses with a place for the server.
-    const KNOWN: [&str; 4] = ["claude", "codex", "gemini", "antigravity"];
-
-    fn of(
-        harness: &str,
-        hooks_file: Option<&Path>,
-        env: &impl Fn(&str) -> Option<OsString>,
-        bin: Option<PathBuf>,
-    ) -> Result<Option<Mcp>> {
-        let var = |k: &str| env(k).filter(|v| !v.is_empty()).map(PathBuf::from);
-        let beside_hooks = |file: &str| {
-            hooks_file
-                .map(|f| f.with_file_name(file))
-                .ok_or_else(|| anyhow!("{harness}: its server goes beside its hooks, and it has none"))
-        };
-        Ok(match harness {
-            "claude" => Some(Mcp::Claude {
-                path: match var("CLAUDE_CONFIG_DIR") {
-                    Some(dir) => dir.join(".claude.json"),
-                    None => var("HOME")
-                        .ok_or_else(|| anyhow!("claude: HOME is not set, so where ~/.claude.json is is not known"))?
-                        .join(".claude.json"),
-                },
-                bin,
-            }),
-            "codex" => Some(Mcp::Codex {
-                path: beside_hooks("config.toml")?,
-            }),
-            "gemini" => Some(Mcp::Gemini {
-                path: beside_hooks("settings.json")?,
-            }),
-            "antigravity" => Some(Mcp::Agy {
-                path: var("HOME")
-                    .ok_or_else(|| {
-                        anyhow!("antigravity: HOME is not set, so where agy keeps its servers is not known")
-                    })?
-                    .join(".gemini/config/mcp_config.json"),
-                bin,
-            }),
-            _ => None,
-        })
-    }
-
-    fn path(&self) -> &Path {
-        match self {
-            Mcp::Claude { path, .. } | Mcp::Gemini { path } | Mcp::Codex { path } | Mcp::Agy { path, .. } => path,
-        }
-    }
-
-    /// The harness's own CLI that registers the server, where one is
-    /// needed and not on PATH.
-    fn cli_missing(&self) -> Option<&'static str> {
-        match self {
-            Mcp::Claude { bin: None, .. } => Some("claude"),
-            Mcp::Agy { bin: None, .. } => Some("agy"),
-            _ => None,
-        }
-    }
-
-    /// How the entry stands against what `register` writes, read from the
-    /// file alone: None when it is that already. An error where `register`
-    /// would refuse the file.
-    fn need(&self, harness: &str, want: &Want) -> Result<Option<State>> {
-        let args = want.args(harness);
-        let stale = |have: &Value| State::Stale {
-            was: have
-                .get("command")
-                .and_then(Value::as_str)
-                .filter(|c| *c != want.rl)
-                .map(String::from),
-        };
-        Ok(match self {
-            Mcp::Claude { path, .. } | Mcp::Agy { path, .. } => {
-                let fits = |h: &Value| match self {
-                    Mcp::Claude { .. } => is_claude_entry(h, want, &args),
-                    _ => is_agy_entry(h, want, &args),
-                };
-                match claude_entry(path)? {
-                    None => Some(State::Missing),
-                    Some(h) if fits(&h) => None,
-                    Some(h) => Some(stale(&h)),
-                }
-            }
-            Mcp::Gemini { path } => {
-                let doc = user_hooks::read(path)?.unwrap_or_default();
-                let have = match doc.get("mcpServers") {
-                    None => None,
-                    Some(Value::Object(servers)) => servers.get(SERVER),
-                    Some(_) => bail!("{}: `mcpServers` is not an object; left as it was", path.display()),
-                };
-                match have {
-                    None => Some(State::Missing),
-                    Some(h) if *h == gemini_entry(want, &args) => None,
-                    Some(h) => Some(stale(h)),
-                }
-            }
-            Mcp::Codex { path } => {
-                let doc = read_toml(path)?;
-                let servers = doc.get("mcp_servers");
-                match servers.and_then(|s| s.get(SERVER)).map(toml_json) {
-                    Some(h) if h == codex_entry(want, &args) => None,
-                    _ if servers.is_some_and(|s| !s.is_table()) => {
-                        bail!("{}: `mcp_servers` is not a table; left as it was", path.display())
-                    }
-                    None => Some(State::Missing),
-                    Some(h) => Some(stale(&h)),
-                }
-            }
-        })
-    }
-
-    /// Writes the entry over whatever is there (`need` says whether to).
-    fn register(&self, harness: &str, want: &Want) -> Result<()> {
-        let args = want.args(harness);
-        match self {
-            Mcp::Claude { path, bin } => {
-                let have = claude_entry(path)?;
-                let bin = bin.as_deref().ok_or_else(|| anyhow!("not on PATH"))?;
-                let removed = mcp_cli(bin, path, &["remove", "--scope", "user", SERVER]);
-                if let Err(e) = removed
-                    && have.is_some()
-                {
-                    return Err(e.context("taking out the relay entry there is"));
-                }
-                let mut add: Vec<String> = ["add", "--scope", "user", SERVER].map(String::from).into();
-                if let Some(h) = &want.relay_home {
-                    add.extend(["-e".into(), format!("{}={h}", rl_core::HOME_ENV)]);
-                }
-                add.extend(["--".into(), want.rl.clone()]);
-                add.extend(args.iter().cloned());
-                mcp_cli(bin, path, &add)?;
-                match claude_entry(path)? {
-                    Some(h) if is_claude_entry(&h, want, &args) => Ok(()),
-                    _ => bail!(
-                        "`claude mcp add` ran, but {} does not hold the relay entry it was asked for",
-                        path.display()
-                    ),
-                }
-            }
-            Mcp::Agy { path, bin } => {
-                let bin = bin.as_deref().ok_or_else(|| anyhow!("not on PATH"))?;
-                // `add` replaces an entry of the name: no `remove` first.
-                let mut add: Vec<String> = vec!["add".into()];
-                if let Some(h) = &want.relay_home {
-                    add.extend(["-e".into(), format!("{}={h}", rl_core::HOME_ENV)]);
-                }
-                add.extend([SERVER.into(), "--".into(), want.rl.clone()]);
-                add.extend(args.iter().cloned());
-                mcp_cli(bin, path, &add)?;
-                match claude_entry(path)? {
-                    Some(h) if is_agy_entry(&h, want, &args) => Ok(()),
-                    _ => bail!(
-                        "`agy mcp add` ran, but {} does not hold the relay entry it was asked for",
-                        path.display()
-                    ),
-                }
-            }
-            Mcp::Gemini { path } => {
-                let entry = gemini_entry(want, &args);
-                edit_json(path, |servers| {
-                    servers.insert(SERVER.into(), entry);
-                    true
-                })
-                .map(drop)
-            }
-            Mcp::Codex { path } => edit_toml(path, |doc| {
-                let servers = match doc.entry("mcp_servers").or_insert_with(|| {
-                    let mut t = Table::new();
-                    t.set_implicit(true);
-                    Item::Table(t)
-                }) {
-                    Item::Table(t) => t,
-                    _ => bail!("`mcp_servers` is not a table; left as it was"),
-                };
-                let mut t = Table::new();
-                t.insert("command", value(want.rl.as_str()));
-                t.insert("args", value(Array::from_iter(args.iter().map(String::as_str))));
-                t.insert("env_vars", value(Array::from_iter(CODEX_ENV_VARS)));
-                if let Some(h) = &want.relay_home {
-                    let mut env = InlineTable::new();
-                    env.insert(rl_core::HOME_ENV, h.as_str().into());
-                    t.insert("env", value(env));
-                }
-                servers.insert(SERVER, Item::Table(t));
-                Ok(true)
-            })
-            .map(drop),
-        }
-    }
-
-    /// True when the entry was there and is gone.
-    fn remove(&self) -> Result<bool> {
-        match self {
-            Mcp::Claude { path, bin } => {
-                if claude_entry(path)?.is_none() {
-                    return Ok(false);
-                }
-                let bin = bin.as_deref().ok_or_else(|| {
-                    anyhow!(
-                        "relay is registered in {}, but claude is not on PATH to take it out \
-                         (`claude mcp remove --scope user relay`)",
-                        path.display()
-                    )
-                })?;
-                mcp_cli(bin, path, &["remove", "--scope", "user", SERVER])?;
-                if claude_entry(path)?.is_some() {
-                    bail!("`claude mcp remove` ran, but {} still holds relay", path.display());
-                }
-                Ok(true)
-            }
-            Mcp::Agy { path, bin } => {
-                if claude_entry(path)?.is_none() {
-                    return Ok(false);
-                }
-                let bin = bin.as_deref().ok_or_else(|| {
-                    anyhow!(
-                        "relay is registered in {}, but agy is not on PATH to take it out (`agy mcp remove relay`)",
-                        path.display()
-                    )
-                })?;
-                mcp_cli(bin, path, &["remove", SERVER])?;
-                if claude_entry(path)?.is_some() {
-                    bail!("`agy mcp remove` ran, but {} still holds relay", path.display());
-                }
-                Ok(true)
-            }
-            Mcp::Gemini { path } => edit_json_existing(path, |servers| servers.remove(SERVER).is_some()),
-            Mcp::Codex { path } => edit_toml(path, |doc| {
-                let Some(servers) = doc.get_mut("mcp_servers").and_then(Item::as_table_mut) else {
-                    return Ok(false);
-                };
-                let had = servers.remove(SERVER).is_some();
-                if had && servers.is_empty() {
-                    doc.remove("mcp_servers");
-                }
-                Ok(had)
-            }),
-        }
-    }
-}
-
-/// What Gemini's `mcpServers.relay` is to be: this `rl` with these `args`,
-/// and `env` where there is one.
-fn gemini_entry(want: &Want, args: &[String]) -> Value {
-    let mut entry = Map::new();
-    entry.insert("command".into(), json!(want.rl));
-    entry.insert("args".into(), json!(args));
-    if want.relay_home.is_some() {
-        entry.insert("env".into(), Value::Object(want.env()));
-    }
-    Value::Object(entry)
-}
-
-/// What Codex's `[mcp_servers.relay]` is to be, as JSON (`toml_json`).
-fn codex_entry(want: &Want, args: &[String]) -> Value {
-    let mut entry = json!({ "command": want.rl, "args": args, "env_vars": CODEX_ENV_VARS });
-    if want.relay_home.is_some() {
-        entry["env"] = Value::Object(want.env());
-    }
-    entry
-}
-
-/// The `relay` entry in Claude's (or agy's) file, as it reads; the file is
-/// never written here.
-fn claude_entry(path: &Path) -> Result<Option<Value>> {
-    Ok(user_hooks::read(path)?.and_then(|doc| doc.get("mcpServers")?.get(SERVER).cloned()))
-}
-
-/// Whether `have` is what `claude mcp add` writes for `want`: a stdio
-/// server of this `rl` with these `args` and environment, nothing else.
-fn is_claude_entry(have: &Value, want: &Want, args: &[String]) -> bool {
-    let Some(o) = have.as_object() else { return false };
-    o.keys()
-        .all(|k| ["type", "command", "args", "env"].contains(&k.as_str()))
-        && o.get("type").is_none_or(|t| t == "stdio")
-        && o.get("command") == Some(&json!(want.rl))
-        && o.get("args") == Some(&json!(args))
-        && o.get("env").cloned().unwrap_or_else(|| json!({})) == Value::Object(want.env())
-}
-
-/// Whether `have` is what `agy mcp add` writes for `want`, and is on: this
-/// `rl` with these `args` and environment.
-fn is_agy_entry(have: &Value, want: &Want, args: &[String]) -> bool {
-    let Some(o) = have.as_object() else { return false };
-    o.keys()
-        .all(|k| ["type", "command", "args", "env", "disabled"].contains(&k.as_str()))
-        && o.get("type").is_none_or(|t| t == "stdio")
-        && o.get("disabled").is_none_or(|d| d == false)
-        && o.get("command") == Some(&json!(want.rl))
-        && o.get("args") == Some(&json!(args))
-        && o.get("env").cloned().unwrap_or_else(|| json!({})) == Value::Object(want.env())
-}
-
-/// `<cli> mcp <words>` (`claude` or `agy`), run in the folder of the file
-/// it keeps (where a stand-in finds it), within `MCP_CLI_WAIT`, in a
-/// process group of its own and without the variables of a held session.
-fn mcp_cli(bin: &Path, file: &Path, words: &[impl AsRef<str>]) -> Result<String> {
-    let dir = file.parent().unwrap_or(Path::new("/"));
-    std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-    let mut argv = vec![bin.to_string_lossy().into_owned(), "mcp".into()];
-    argv.extend(words.iter().map(|w| w.as_ref().to_string()));
-    rl_detect::adapter::run(&argv, Some(dir), false, MCP_CLI_WAIT)
-}
-
-/// A TOML item as JSON, so an entry compares by what it says rather than
-/// how it is laid out.
-fn toml_json(item: &Item) -> Value {
-    fn of(v: &toml_edit::Value) -> Value {
-        match v {
-            toml_edit::Value::String(s) => json!(s.value()),
-            toml_edit::Value::Array(a) => Value::Array(a.iter().map(of).collect()),
-            toml_edit::Value::InlineTable(t) => Value::Object(t.iter().map(|(k, v)| (k.to_string(), of(v))).collect()),
-            other => json!(other.to_string().trim()),
-        }
-    }
-    match item {
-        Item::Value(v) => of(v),
-        Item::Table(t) => Value::Object(t.iter().map(|(k, v)| (k.to_string(), toml_json(v))).collect()),
-        Item::ArrayOfTables(a) => Value::Array(a.iter().map(|t| toml_json(&Item::Table(t.clone()))).collect()),
-        Item::None => Value::Null,
-    }
-}
-
-/// Changes `mcpServers` with `f` (true: it did), creating the file and the
-/// object where they are not there.
-fn edit_json(path: &Path, f: impl FnOnce(&mut Map<String, Value>) -> bool) -> Result<bool> {
-    let mut doc = user_hooks::read(path)?.unwrap_or_default();
-    let servers = match doc.entry("mcpServers").or_insert_with(|| Value::Object(Map::new())) {
-        Value::Object(m) => m,
-        _ => bail!("{}: `mcpServers` is not an object; left as it was", path.display()),
-    };
-    if !f(servers) {
-        return Ok(false);
-    }
-    user_hooks::write(path, &doc)?;
-    Ok(true)
-}
-
-/// `edit_json` for taking out: a file or key that is not there stays not
-/// there, and an `mcpServers` left empty goes.
-fn edit_json_existing(path: &Path, f: impl FnOnce(&mut Map<String, Value>) -> bool) -> Result<bool> {
-    let Some(mut doc) = user_hooks::read(path)? else {
-        return Ok(false);
-    };
-    let Some(servers) = doc.get_mut("mcpServers") else {
-        return Ok(false);
-    };
-    let Value::Object(servers) = servers else {
-        bail!("{}: `mcpServers` is not an object; left as it was", path.display());
-    };
-    if !f(servers) {
-        return Ok(false);
-    }
-    if servers.is_empty() {
-        doc.shift_remove("mcpServers");
-    }
-    user_hooks::write(path, &doc)?;
-    Ok(true)
-}
-
-/// The TOML file as it reads; empty where it is not there.
-fn read_toml(path: &Path) -> Result<DocumentMut> {
-    let text = match std::fs::read_to_string(path) {
-        Ok(t) => t,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
-    };
-    text.parse()
-        .with_context(|| format!("{} does not read as TOML; left as it was", path.display()))
-}
-
-fn edit_toml(path: &Path, f: impl FnOnce(&mut DocumentMut) -> Result<bool>) -> Result<bool> {
-    let mut doc = read_toml(path)?;
-    if !f(&mut doc).with_context(|| path.display().to_string())? {
-        return Ok(false);
-    }
-    user_hooks::write_text(path, &doc.to_string())?;
-    Ok(true)
 }
 
 /// `path` with the home folder as `~`.
@@ -891,8 +444,10 @@ fn tilde(path: &Path, env: &impl Fn(&str) -> Option<OsString>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rl_detect::mcp_entry::toml_json;
     use serde_json::{Value, json};
     use std::path::PathBuf;
+    use toml_edit::DocumentMut;
 
     const RL: &str = "/opt/relay/bin/rl";
 

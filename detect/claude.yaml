@@ -70,3 +70,8 @@ sessions:
   name: [-n, "{name}"]
   # ^x on one still going stops it (`claude stop <id>`); never `claude rm`.
   stop: [stop, "{id}"]
+# Where Relay's MCP server goes (`rl setup`): Claude's own ~/.claude.json
+# ($CLAUDE_CONFIG_DIR/.claude.json with that set), written only through
+# `claude mcp add|remove --scope user`; Relay reads it to compare.
+mcp:
+  file: ["$CLAUDE_CONFIG_DIR/.claude.json", "~/.claude.json"]
