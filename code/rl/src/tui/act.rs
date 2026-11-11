@@ -14,12 +14,12 @@ use super::theme;
 use crate::cmd;
 use crate::config::{Hidden, ListPrefs};
 use crate::rows::{self, Context, Line, Names};
-use crate::sources::{self, Adapter, Attach, Source};
+use crate::sources::{self, Attach, Harness, Source};
 use crate::spawn::{self, Start};
 use crate::store::sessions;
 use crossterm::event::{KeyCode, KeyEvent};
 use jiff::Timestamp;
-use rl_detect::adapter;
+use rl_detect::harness::Started;
 use rl_detect::registry::Profile;
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -27,21 +27,21 @@ use std::path::PathBuf;
 /// The size a session starts at when the list cannot say its own.
 const DEFAULT_SIZE: (u16, u16) = (120, 32);
 
-/// Runs `argv`, which starts or carries on a session in `a`'s harness's own
-/// background, in `cwd`; the id of the session it began, once the harness
-/// lists it new there (`adapter::start`). `before`: the ids it listed last.
+/// Runs `argv`, which carries a conversation on in `a`'s own background, in
+/// `cwd`; the id of the session it began (`Harness::carry_on_there`).
+/// `before`: the ids it listed last.
 async fn in_background(
-    a: &'static dyn Adapter,
+    a: &'static dyn Harness,
     argv: Vec<String>,
     cwd: PathBuf,
     before: HashSet<String>,
 ) -> anyhow::Result<String> {
-    tokio::task::spawn_blocking(move || adapter::start(a, &argv, &cwd, &before, adapter::LISTED_WAIT)).await?
+    tokio::task::spawn_blocking(move || a.carry_on_there(&argv, &cwd, &before)).await?
 }
 
 /// A native row's key.
-fn native_key(a: &dyn Adapter, id: &str) -> String {
-    format!("n:{}:{id}", a.harness())
+fn native_key(a: &dyn Harness, id: &str) -> String {
+    format!("n:{}:{id}", a.name())
 }
 
 impl App {
@@ -107,7 +107,7 @@ impl App {
     fn carry_on(&mut self, argv: Vec<String>, background: bool, harness: &str, cwd: PathBuf, title: String) {
         self.say(format!("carrying {title} on…"));
         if background {
-            let Some(a) = sources::adapter(harness) else {
+            let Some(a) = sources::harness(harness).filter(|a| a.lists()) else {
                 return self.say(format!("{harness} has no background here"));
             };
             let before = self.listed_ids(a);
@@ -116,10 +116,10 @@ impl App {
                     Ok(id) => {
                         let key = native_key(a, &id);
                         Done {
-                            said: format!("{title} carries on in {}'s background", a.harness()),
+                            said: format!("{title} carries on in {}'s background", a.name()),
                             select: Some(key.clone()),
-                            hand: Some(Hand {
-                                to: To::Argv(a.attach_argv(&id)),
+                            hand: a.attach_argv(&id).map(|argv| Hand {
+                                to: To::Argv(argv),
                                 title,
                                 key,
                             }),
@@ -161,12 +161,12 @@ impl App {
         });
     }
 
-    /// The ids `a`'s harness listed last: what a session it starts now is not.
-    fn listed_ids(&self, a: &dyn Adapter) -> HashSet<String> {
+    /// The ids `a` listed last: what a session it starts now is not.
+    fn listed_ids(&self, a: &dyn Harness) -> HashSet<String> {
         self.native
             .rows
             .iter()
-            .filter(|r| r.harness == a.harness())
+            .filter(|r| r.harness == a.name())
             .map(|r| r.id.clone())
             .collect()
     }
@@ -218,35 +218,53 @@ impl App {
     }
 
     /// Starts `profile`'s agent in `cwd`, in the background; the cursor goes
-    /// to it once it is there. A harness with a background of its own starts
-    /// it there, not held by Relay.
+    /// to it once it is there. Its harness says where (`Harness::start`): in
+    /// a background of its own, not held by Relay; where it begins one only
+    /// in a terminal (Codex with no prompt), here, handed the terminal as an
+    /// attach is; else held by Relay.
     fn start_agent(&mut self, profile: &Profile, prompt: &str, cwd: PathBuf) {
         let what = profile.name.clone();
         self.say(format!("starting {what}…"));
-        let prompt = (!prompt.is_empty()).then_some(prompt);
-        let own = sources::adapter(&what).and_then(|a| Some((a, a.start_argv(None, prompt)?)));
-        if let Some((a, argv)) = own {
-            let before = self.listed_ids(a);
-            self.work.spawn(async move {
-                match in_background(a, argv, cwd, before).await {
-                    Ok(id) => Done {
-                        select: Some(native_key(a, &id)),
-                        ..Done::said(format!("started {what} {id} in its background · enter attaches"))
-                    },
-                    Err(e) => Done::gave_up(format!("start {what}: {e:#}")),
-                }
-            });
-            return;
-        }
-        let start = Start {
-            harness: Some(what.clone()),
-            cwd,
-            argv: profile.prompt_args(prompt.unwrap_or("")),
+        let prompt = (!prompt.is_empty()).then(|| prompt.to_string());
+        let held = |argv| Start {
+            harness: Some(profile.name.clone()),
+            cwd: cwd.clone(),
+            argv,
             shell: false,
             cols: 0,
             rows: 0,
         };
-        self.hold(start, what);
+        let Some(a) = sources::harness(&what) else {
+            let start = held(profile.prompt_args(prompt.as_deref().unwrap_or("")));
+            return self.hold(start, what);
+        };
+        let held = held(Vec::new());
+        let before = self.listed_ids(a);
+        let home = self.home.clone();
+        let size = crossterm::terminal::size().unwrap_or(DEFAULT_SIZE);
+        self.work.spawn(async move {
+            let at = cwd.clone();
+            let started = tokio::task::spawn_blocking(move || a.start(&at, None, prompt.as_deref(), &before)).await;
+            match started {
+                Ok(Ok(Started::Id(id))) => Done {
+                    select: Some(native_key(a, &id)),
+                    ..Done::said(format!("started {what} {id} in its background · enter attaches"))
+                },
+                Ok(Ok(Started::Here(argv))) => Done {
+                    hand: Some(Hand {
+                        to: To::Here { argv, cwd },
+                        title: what.clone(),
+                        key: String::new(),
+                    }),
+                    ask_native: true,
+                    ..Done::said(format!("{what} runs here · it keeps its session in its own background"))
+                },
+                Ok(Err(e)) => Done::gave_up(format!("start {what}: {e:#}")),
+                Err(e) => Done::gave_up(format!("start {what}: {e}")),
+                // No background: Relay holds it.
+                Ok(Ok(Started::Held(argv))) => held_start(&home, Start { argv, ..held }, size, &what).await,
+            }
+        });
     }
 
     /// Runs `line` in a shell Relay holds, in `cwd`, which stays a shell
@@ -266,18 +284,11 @@ impl App {
 
     /// Starts a session Relay holds, at this terminal's size, in the
     /// background; the cursor goes to it.
-    fn hold(&mut self, mut start: Start, what: String) {
+    fn hold(&mut self, start: Start, what: String) {
         let home = self.home.clone();
-        (start.cols, start.rows) = crossterm::terminal::size().unwrap_or(DEFAULT_SIZE);
-        self.work.spawn(async move {
-            match spawn::start(&home, start).await {
-                Ok(meta) => Done {
-                    select: Some(format!("r:{}", meta.name)),
-                    ..Done::said(format!("started {} · enter attaches", meta.name))
-                },
-                Err(e) => Done::said(format!("start {what}: {e:#}")),
-            }
-        });
+        let size = crossterm::terminal::size().unwrap_or(DEFAULT_SIZE);
+        self.work
+            .spawn(async move { held_start(&home, start, size, &what).await });
     }
 
     /// What background work came to: the list read again, and the cursor
@@ -292,7 +303,13 @@ impl App {
             self.change_prefs(|p| forget(p, &key));
         }
         self.reload();
-        self.say(d.said);
+        if let Some(c) = d.setup {
+            self.checked(c);
+        }
+        // Work with nothing to say (the start's check) leaves the footer be.
+        if !d.said.is_empty() {
+            self.say(d.said);
+        }
         if d.gave_up {
             self.awaiting = None;
         }
@@ -372,12 +389,18 @@ impl App {
                     }
                 });
             }
-            Removal::StopNative { argv, cwd, title } => {
+            Removal::StopNative {
+                harness,
+                id,
+                cwd,
+                title,
+            } => {
+                let Some(a) = sources::harness(&harness) else {
+                    return self.say(format!("{harness} has no way to stop {title} here"));
+                };
                 self.say(format!("stopping {title}…"));
                 self.work.spawn(async move {
-                    let run =
-                        tokio::task::spawn_blocking(move || adapter::run(&argv, Some(&cwd), false, adapter::LIST_WAIT))
-                            .await;
+                    let run = tokio::task::spawn_blocking(move || a.stop(&id, &cwd)).await;
                     match run {
                         Ok(Ok(_)) => Done {
                             ask_native: true,
@@ -655,6 +678,19 @@ impl App {
             }),
             Err(why) => self.say(why),
         }
+    }
+}
+
+/// Starts a session Relay holds, at `size`, and says how it went; the cursor
+/// goes to it.
+async fn held_start(home: &rl_core::Home, mut start: Start, size: (u16, u16), what: &str) -> Done {
+    (start.cols, start.rows) = size;
+    match spawn::start(home, start).await {
+        Ok(meta) => Done {
+            select: Some(format!("r:{}", meta.name)),
+            ..Done::said(format!("started {} · enter attaches", meta.name))
+        },
+        Err(e) => Done::said(format!("start {what}: {e:#}")),
     }
 }
 

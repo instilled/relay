@@ -1,0 +1,45 @@
+#!/bin/sh
+# The stand-in `agy` that `rl setup`'s tests register the MCP server with,
+# never the real one. It works on `mcp_config.json` in the folder it is run
+# in (setup runs it in the folder of the file it reads), appends each call's
+# words to `argv` there, and answers `mcp add` and `mcp remove` as agy 1.x
+# did on 2026-11-10: add writes `{args, command, disabled, env?}` and
+# replaces an entry of that name; remove fails when there is none. It keeps
+# no other keys (the real one does).
+printf '%s\n' "$*" >> argv
+[ "$1" = mcp ] || exit 2
+there() { grep -q '"relay"' mcp_config.json 2>/dev/null; }
+case "$2" in
+add)
+	shift 2
+	env=""
+	while [ $# -gt 0 ] && [ "$1" != -- ]; do
+		case "$1" in
+		-e)
+			env="$env${env:+,}\"${2%%=*}\":\"${2#*=}\""
+			shift 2
+			;;
+		*) shift ;;
+		esac
+	done
+	shift
+	cmd=$1
+	shift
+	args=""
+	for a in "$@"; do args="$args${args:+,}\"$a\""; done
+	envpart=""
+	[ -n "$env" ] && envpart=",\"env\":{$env}"
+	printf '{"mcpServers":{"relay":{"args":[%s],"command":"%s","disabled":false%s}}}\n' \
+		"$args" "$cmd" "$envpart" > mcp_config.json
+	echo 'Added MCP server "relay" (stdio)'
+	;;
+remove)
+	if ! there; then
+		echo 'Error: MCP server "relay" not found' >&2
+		exit 1
+	fi
+	printf '{"mcpServers":{}}\n' > mcp_config.json
+	echo 'Removed MCP server "relay"'
+	;;
+*) exit 2 ;;
+esac

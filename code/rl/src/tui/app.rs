@@ -9,6 +9,7 @@ use crate::badges::{self, Badges};
 use crate::config::{Config, Grouping, ListPrefs};
 use crate::git::{self, Checkouts};
 use crate::rows::{self, Context, Line};
+use crate::setup;
 use crate::sources::{self, Row};
 use crate::store::sessions::{self, Meta};
 use crate::store::state;
@@ -67,6 +68,9 @@ pub enum To {
     Held(Box<Meta>),
     /// A harness's own attach command, run on a pty here.
     Argv(Vec<String>),
+    /// A harness run on a pty here, in `cwd`, where it begins a session of
+    /// its own (Codex with no prompt: its TUI).
+    Here { argv: Vec<String>, cwd: PathBuf },
 }
 
 /// What background work (a stop, a start, a carry-on) came to.
@@ -86,6 +90,17 @@ pub struct Done {
     /// The harnesses are to be asked for their sessions now: one of them
     /// changed.
     pub ask_native: bool,
+    /// What `setup::check` said, after the start's check or a `/setup`.
+    pub setup: Option<Checked>,
+}
+
+/// How setup stands, as `setup::check` last said: what needs setting up, or
+/// why it could not tell.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Checked {
+    pub needs: Result<Vec<setup::Need>, String>,
+    /// After a `/setup`, which is then over.
+    pub ran: bool,
 }
 
 impl Done {
@@ -97,6 +112,7 @@ impl Done {
             hand: None,
             gave_up: false,
             ask_native: false,
+            setup: None,
         }
     }
 
@@ -148,6 +164,13 @@ pub struct App {
     pub hand: Option<Hand>,
     /// Stops and starts under way.
     pub work: JoinSet<Done>,
+    /// What setup runs with (`/setup`, and the start's check); none where
+    /// this `rl` could not say where it is.
+    pub setup_host: Option<setup::Host>,
+    /// How setup stands, once the start's check has said.
+    pub setup: Option<Result<Vec<setup::Need>, String>>,
+    /// A `/setup` is under way.
+    pub setting_up: bool,
     /// The line under the cursor, by key.
     pub sel: Option<String>,
     /// Where the list's window starts, as last drawn.
@@ -187,6 +210,9 @@ impl App {
             mode: Mode::List,
             hand: None,
             work: JoinSet::new(),
+            setup_host: setup::Host::real().ok(),
+            setup: None,
+            setting_up: false,
             sel: None,
             scroll: Cell::new(0),
             hit: RefCell::default(),
@@ -334,11 +360,12 @@ impl App {
         self.flash = Some((s.into(), Instant::now()));
     }
 
-    /// What the footer says for a moment, while it still does.
+    /// What the footer says for a moment, while it still does: `FLASH` for
+    /// each of its lines.
     pub fn flashing(&self) -> Option<&str> {
         self.flash
             .as_ref()
-            .filter(|(_, at)| at.elapsed() < FLASH)
+            .filter(|(m, at)| at.elapsed() < FLASH * m.lines().count().max(1) as u32)
             .map(|(m, _)| m.as_str())
     }
 

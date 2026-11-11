@@ -19,6 +19,7 @@ mod keys;
 mod line;
 mod live;
 mod mark;
+mod onboard;
 mod remove;
 mod select;
 mod slash;
@@ -86,6 +87,7 @@ impl App {
             }
         };
         let mut native = live::Native::start(sources::native_listers(), NATIVE_EVERY);
+        self.check_setup();
         let mut tick = tokio::time::interval(REFRESH);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         tick.tick().await;
@@ -185,7 +187,12 @@ async fn hand_over(home: &Home, hand: &Hand) -> String {
             Ok(ended) => back_words(title, &ended),
             Err(e) => format!("attach {title}: {e:#}"),
         },
-        To::Argv(argv) => match attach::native::hold(argv, title).await {
+        To::Argv(argv) => match attach::native::hold(argv, None, title).await {
+            Ok(attach::native::Back::Detached) => back_words(title, &attach::Ended::Detached),
+            Ok(attach::native::Back::Ended(exit)) => back_words(title, &attach::held::exit_words(title, &exit).0),
+            Err(e) => format!("attach {title}: {e:#}"),
+        },
+        To::Here { argv, cwd } => match attach::native::hold(argv, Some(cwd), title).await {
             Ok(attach::native::Back::Detached) => back_words(title, &attach::Ended::Detached),
             Ok(attach::native::Back::Ended(exit)) => back_words(title, &attach::held::exit_words(title, &exit).0),
             Err(e) => format!("attach {title}: {e:#}"),

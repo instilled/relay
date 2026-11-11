@@ -43,8 +43,6 @@ pub struct Meta {
     pub socket: PathBuf,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub holder_pid: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub native_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -193,7 +191,7 @@ fn answers(connect: &io::Result<UnixStream>) -> bool {
     }
 }
 
-pub fn status_of(dir: &Path, meta: &Meta) -> Status {
+fn status_of(dir: &Path, meta: &Meta) -> Status {
     if let Ok(Some(exit)) = read_exit_file(&dir.join(EXIT)) {
         Status::Ended(exit)
     } else if answers(&UnixStream::connect(&meta.socket)) {
@@ -344,7 +342,6 @@ mod tests {
             started: Timestamp::UNIX_EPOCH,
             socket,
             holder_pid,
-            native_id: None,
         }
     }
 
@@ -387,6 +384,11 @@ mod tests {
         assert_eq!(read_meta(&dir).unwrap(), m);
         std::fs::write(dir.join(META), r#"{"name":"a","bogus":1}"#).unwrap();
         assert!(read_meta(&dir).is_err());
+        // Nothing holds a harness's own session any more: no id of one.
+        let mut v = serde_json::to_value(&m).unwrap();
+        v["native_id"] = serde_json::json!("t-1");
+        std::fs::write(dir.join(META), v.to_string()).unwrap();
+        assert!(read_meta(&dir).is_err(), "native_id is gone");
     }
 
     #[test]

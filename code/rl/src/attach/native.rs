@@ -12,6 +12,7 @@ use nix::sys::signal::{Signal, killpg};
 use nix::unistd::Pid;
 use rl_session::backend::{self, Spawned, Spec};
 use rl_session::exit::Exit;
+use std::path::Path;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::{mpsc, oneshot};
@@ -34,12 +35,15 @@ pub enum Back {
     Ended(Exit),
 }
 
-/// Starts `argv` on a pty of `size` (columns, rows), here, with the panel's
-/// environment.
-pub fn start(argv: &[String], size: (u16, u16)) -> Result<Spawned> {
+/// Starts `argv` on a pty of `size` (columns, rows), in `cwd` (else here),
+/// with the panel's environment.
+pub fn start(argv: &[String], cwd: Option<&Path>, size: (u16, u16)) -> Result<Spawned> {
     backend::spawn(&Spec {
         argv: argv.to_vec(),
-        cwd: std::env::current_dir().context("this directory")?,
+        cwd: match cwd {
+            Some(dir) => dir.to_path_buf(),
+            None => std::env::current_dir().context("this directory")?,
+        },
         env: Vec::new(),
         inherit_env: true,
         cols: size.0,
@@ -55,7 +59,7 @@ pub fn start(argv: &[String], size: (u16, u16)) -> Result<Spawned> {
 ///
 /// The terminal is raw before anything starts and until it is handed back,
 /// so a ^C or ^\ typed meanwhile is a key, never a signal to the panel.
-pub async fn hold(argv: &[String], name: &str) -> Result<Back> {
+pub async fn hold(argv: &[String], cwd: Option<&Path>, name: &str) -> Result<Back> {
     use tokio::signal::unix::{SignalKind, signal};
     // Listened for before the size is read, so no resize falls between.
     let mut winch = signal(SignalKind::window_change())?;
@@ -66,7 +70,7 @@ pub async fn hold(argv: &[String], name: &str) -> Result<Back> {
     out.write_all(format!("{banner}{}", title(&format!("relay · {name} · ^\\ lets go"))).as_bytes())
         .await?;
     out.flush().await?;
-    let spawned = start(argv, crossterm::terminal::size().unwrap_or((80, 24)))?;
+    let spawned = start(argv, cwd, crossterm::terminal::size().unwrap_or((80, 24)))?;
 
     let (keys_tx, keys) = mpsc::channel::<Vec<u8>>(64);
     let stop_keys = keys_tx.clone();
@@ -246,7 +250,7 @@ mod tests {
     use super::*;
 
     fn sh(script: &str) -> Spawned {
-        start(&["/bin/sh".into(), "-c".into(), script.into()], (80, 24)).unwrap()
+        start(&["/bin/sh".into(), "-c".into(), script.into()], None, (80, 24)).unwrap()
     }
 
     /// Passes `sp` through with `sizes` given, then `keys` typed, each after a
@@ -324,6 +328,6 @@ mod tests {
 
     #[test]
     fn one_not_there_will_not_start() {
-        assert!(start(&["/nowhere/claude".into(), "attach".into()], (80, 24)).is_err());
+        assert!(start(&["/nowhere/claude".into(), "attach".into()], None, (80, 24)).is_err());
     }
 }

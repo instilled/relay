@@ -251,6 +251,28 @@ fn relays_programs(path: &Path, hooks: &UserHooks) -> Result<impl Iterator<Item 
 /// the profile says now. Nothing else is touched. True when the file
 /// changed.
 pub fn install(path: &Path, hooks: &UserHooks, rl_bin: &Path) -> Result<bool> {
+    let Some(doc) = installed_doc(path, hooks, rl_bin)? else {
+        return Ok(false);
+    };
+    write(path, &doc)?;
+    Ok(true)
+}
+
+/// Whether `install` would change the file, without writing it: what
+/// `rl setup --check` asks. An error where `install` would refuse.
+pub fn install_needed(path: &Path, hooks: &UserHooks, rl_bin: &Path) -> Result<bool> {
+    Ok(installed_doc(path, hooks, rl_bin)?.is_some())
+}
+
+/// The `rl` of each of Relay's hooks in the file, as the shell reads it
+/// (`/opt/relay/bin/rl`, or `rl` alone).
+pub fn programs(path: &Path, hooks: &UserHooks) -> Result<Vec<String>> {
+    Ok(relays_programs(path, hooks)?.collect())
+}
+
+/// The file as `install` leaves it, where that is not as it is: None when
+/// nothing would change.
+fn installed_doc(path: &Path, hooks: &UserHooks, rl_bin: &Path) -> Result<Option<Map<String, Value>>> {
     let mut doc = read(path)?.unwrap_or_default();
     let before = doc.clone();
     let events = hooks_of(&mut doc, path)?;
@@ -277,11 +299,7 @@ pub fn install(path: &Path, hooks: &UserHooks, rl_bin: &Path) -> Result<bool> {
     for (key, value) in &hooks.settings {
         settle(&mut doc, key, value);
     }
-    if doc == before {
-        return Ok(false);
-    }
-    write(path, &doc)?;
-    Ok(true)
+    Ok((doc != before).then_some(doc))
 }
 
 /// The profile's settings the file has no value for yet, by their dotted
@@ -478,6 +496,25 @@ mod tests {
             !installed(&path, &h("gemini")).unwrap(),
             "another agent's are not these"
         );
+    }
+
+    #[test]
+    fn install_needed_says_what_install_would_do_and_writes_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("codex-home/hooks.json");
+        let codex = h(CODEX);
+        assert!(install_needed(&path, &codex, Path::new(RL)).unwrap());
+        assert!(!path.exists() && !path.parent().unwrap().exists(), "nothing made");
+        install(&path, &codex, Path::new(RL)).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!install_needed(&path, &codex, Path::new(RL)).unwrap());
+        assert_eq!(programs(&path, &codex).unwrap().first().map(String::as_str), Some(RL));
+        // `rl` moved: an install would point them at the new one.
+        assert!(install_needed(&path, &codex, Path::new("/new/rl")).unwrap());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), text, "still not written");
+        // Where install refuses, so does the question.
+        std::fs::write(&path, "{ nope").unwrap();
+        assert!(install_needed(&path, &codex, Path::new(RL)).is_err());
     }
 
     #[test]
