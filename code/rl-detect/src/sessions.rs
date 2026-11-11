@@ -54,7 +54,8 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 
 /// The list readers Relay has, by the name a profile's `list.reader` gives:
-/// each is an adapter's (`adapter::adapters`), reading one agent's own
+/// each is a harness's with a background of its own (`harness::of`), reading
+/// one agent's own
 /// listing of its sessions.
 pub const READERS: [&str; 2] = [crate::claude_native::READER, crate::codex_native::READER];
 
@@ -611,7 +612,7 @@ impl UserHooks {
 
 /// `path` with `~` and each `$NAME` in it as `env` has them; none where one
 /// is not set, or is empty.
-fn expand(path: &str, env: &impl Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
+pub(crate) fn expand(path: &str, env: &impl Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
     let var = |k: &str| {
         env(k)
             .filter(|v| !v.is_empty())

@@ -6,8 +6,8 @@ use anyhow::{Context, Result, bail};
 use jiff::Timestamp;
 use rl_core::Home;
 use rl_core::state::RunKind;
+use rl_detect::Registry;
 use rl_detect::registry::{Profile, find_bin};
-use rl_detect::{Registry, claude};
 use rl_session::client::Session;
 use rl_session::detect::spec::DetectSpec;
 use std::path::{Path, PathBuf};
@@ -18,7 +18,7 @@ pub const SESSION_BIN_ENV: &str = "RELAY_SESSION_BIN";
 
 /// The harness a session runs, in its holder's environment: so a hook can
 /// tell the session's own agent from one run inside it (`rl hook`).
-pub const AGENT_ENV: &str = "RL_SESSION_AGENT";
+pub use rl_core::AGENT_ENV;
 
 pub struct Start {
     /// A registry profile name; its binary leads the argv.
@@ -118,18 +118,10 @@ pub async fn start(home: &Home, start: Start) -> Result<Meta> {
     let registry = Registry::load(home)?;
     let mut plan = plan(&registry, &start)?;
 
-    // Claude started by Relay reports through hooks of its own.
-    if let Some(hooks) = &plan.profile.hooks
-        && hooks.dialect == claude::DIALECT
-    {
-        let rl = std::env::current_exe().context("locating this executable for hooks")?;
-        let file = claude::write_settings(home, &rl)?;
-        let extra = hooks
-            .args
-            .iter()
-            .map(|a| a.replace("{hooks_file}", &file.to_string_lossy()));
-        plan.argv.splice(1..1, extra);
-    }
+    // A harness that reports through hooks of its own when held (Claude)
+    // is passed them.
+    let rl = || std::env::current_exe().context("locating this executable for hooks");
+    plan.argv = rl_detect::harness::of(plan.profile, None).held_argv(home, std::mem::take(&mut plan.argv), &rl)?;
 
     home.ensure_store()?;
     let folder = cwd

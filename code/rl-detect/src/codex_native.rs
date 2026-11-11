@@ -26,15 +26,17 @@
 //! waits on), or loads one at rest. Stopping one interrupts its running
 //! turn (`turn/interrupt`); the thread stays.
 
-use crate::adapter::{Adapter, NativeRow, NativeState, Started};
+use crate::harness::{self, CarryOn, Harness, NativeRow, NativeState, Started};
+use crate::mcp_entry::{How, Place};
 use crate::registry::Profile;
-use crate::sessions::{ID, TEXT};
+use crate::sessions::ID;
 use anyhow::{Context, Result, anyhow, bail};
 use jiff::Timestamp;
 use rl_core::state::RunState;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
+use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -65,31 +67,38 @@ pub const CLIENT: &str = "relay";
 /// How many of Relay's threads at rest are listed, the latest first.
 const RESTING: u32 = 50;
 
-/// Codex's adapter: its binary and the arguments its profile gives.
+/// Codex as a harness: its binary and the arguments its profile gives.
 #[derive(Debug, Clone)]
 pub struct Codex {
+    profile: Profile,
+    found: bool,
     harness: String,
     bin: String,
     list: Vec<String>,
     /// The profile's `sessions.attach`: `{id}` is the thread's id.
     attach: Vec<String>,
-    /// The profile's `sessions.ping`: `{id}` is the thread's id, `{text}`
-    /// what it is told.
-    ping: Vec<String>,
 }
 
 impl Codex {
-    /// The adapter of `profile`, run as `bin`. None where its profile says
-    /// nothing of how it lists its sessions.
+    /// The harness of `profile`, run as `bin` (taken to be on this machine:
+    /// `found` says otherwise). None where its profile says nothing of how
+    /// it lists its sessions.
     pub fn of(profile: &Profile, bin: PathBuf) -> Option<Codex> {
         let s = profile.sessions.as_ref()?;
         Some(Codex {
+            profile: profile.clone(),
+            found: true,
             harness: profile.name.clone(),
             bin: bin.to_string_lossy().into_owned(),
             list: s.list.as_ref()?.args.clone(),
             attach: s.attach.clone(),
-            ping: s.ping.clone(),
         })
+    }
+
+    /// The same, its binary on this machine or not.
+    pub fn found(mut self, found: bool) -> Codex {
+        self.found = found;
+        self
     }
 
     fn argv<'a>(&self, args: impl IntoIterator<Item = &'a String>) -> Vec<String> {
@@ -108,14 +117,26 @@ impl Codex {
             return Ok(done);
         }
         let start: Vec<String> = DAEMON_START.iter().map(|a| a.to_string()).collect();
-        crate::adapter::run(&self.argv(&start), None, true, START_WAIT)?;
+        harness::run(&self.argv(&start), None, true, START_WAIT)?;
         connect(&proxy, START_WAIT, work)?.context("no codex daemon to connect to, even once started")
     }
 }
 
-impl Adapter for Codex {
-    fn harness(&self) -> &str {
-        &self.harness
+impl Harness for Codex {
+    fn profile(&self) -> &Profile {
+        &self.profile
+    }
+
+    fn bin(&self) -> &str {
+        &self.bin
+    }
+
+    fn found(&self) -> bool {
+        self.found
+    }
+
+    fn lists(&self) -> bool {
+        true
     }
 
     fn list_within(&self, wait: Duration) -> Result<Vec<NativeRow>> {
@@ -129,42 +150,34 @@ impl Adapter for Codex {
             .collect())
     }
 
-    fn attach_argv(&self, id: &str) -> Vec<String> {
+    fn attach_argv(&self, id: &str) -> Option<Vec<String>> {
         let args: Vec<String> = self.attach.iter().map(|a| a.replace(ID, id)).collect();
-        self.argv(&args)
+        Some(self.argv(&args))
     }
 
     /// A prompt: a thread on the daemon, its first turn started. None: the
     /// TUI, here.
-    fn start(
-        &self,
-        cwd: &Path,
-        name: Option<&str>,
-        prompt: Option<&str>,
-        _: &HashSet<String>,
-    ) -> Option<Result<Started>> {
+    fn start(&self, cwd: &Path, name: Option<&str>, prompt: Option<&str>, _: &HashSet<String>) -> Result<Started> {
         let Some(prompt) = prompt.filter(|p| !p.trim().is_empty()) else {
-            return Some(Ok(Started::Here(vec![self.bin.clone()])));
+            return Ok(Started::Here(vec![self.bin.clone()]));
         };
         let (cwd, name, prompt) = (
             cwd.to_path_buf(),
             name.filter(|n| !n.trim().is_empty()).map(str::to_string),
             prompt.to_string(),
         );
-        Some(
-            self.on_daemon(move |d| begin(d, &cwd, name.as_deref(), &prompt))
-                .map(Started::Id),
-        )
+        self.on_daemon(move |d| begin(d, &cwd, name.as_deref(), &prompt))
+            .map(Started::Id)
     }
 
     fn never_held(&self) -> bool {
         true
     }
 
-    /// None: a conversation is a thread on the daemon already; enter
-    /// resumes it there (`attach_argv`).
-    fn carry_on_argv(&self, _: &str) -> Option<Vec<String>> {
-        None
+    /// A conversation is a thread on the daemon already: enter resumes it
+    /// there (`attach_argv`), never held.
+    fn carry_on(&self, session_id: &str) -> Option<CarryOn> {
+        self.attach_argv(session_id).map(CarryOn::Attach)
     }
 
     /// A thread with a turn running: stop interrupts it.
@@ -177,16 +190,9 @@ impl Adapter for Codex {
         self.on_daemon(move |d| interrupt(d, &id))
     }
 
-    fn ping_argv(&self, id: &str, text: &str) -> Option<Vec<String>> {
-        if self.ping.is_empty() {
-            return None;
-        }
-        let args: Vec<String> = self
-            .ping
-            .iter()
-            .map(|a| a.replace(ID, id).replace(TEXT, text))
-            .collect();
-        Some(self.argv(&args))
+    /// `[mcp_servers.relay]` in its `config.toml`, written by Relay.
+    fn mcp(&self, env: &dyn Fn(&str) -> Option<OsString>) -> Result<Option<Place>> {
+        harness::mcp_place(self, env, How::Toml)
     }
 }
 
@@ -351,7 +357,7 @@ pub fn connect<T: Send + 'static>(
     });
     let said = rx.recv_timeout(wait);
     // Done or not, the proxy goes: its input closes, and it is killed.
-    crate::adapter::kill_group(&mut child);
+    harness::kill_group(&mut child);
     // Its stderr has ended with it, or something it left holds the pipe: no
     // reason to wait long.
     let err = err_rx.recv_timeout(Duration::from_millis(200)).unwrap_or_default();
@@ -940,16 +946,20 @@ mod tests {
         let c = codex("codex".into());
         assert_eq!(c.argv(&c.list), ["codex", "app-server", "proxy"]);
         assert_eq!(
-            c.attach_argv("01a11d20-8cab-7061-885d-f86e8e313f11"),
+            c.attach_argv("01a11d20-8cab-7061-885d-f86e8e313f11").unwrap(),
             ["codex", "resume", "01a11d20-8cab-7061-885d-f86e8e313f11"]
         );
         assert_eq!(
-            c.start(Path::new("/w"), None, None, &HashSet::new()).unwrap().unwrap(),
+            c.start(Path::new("/w"), None, None, &HashSet::new()).unwrap(),
             Started::Here(vec!["codex".into()]),
             "no prompt: its TUI, here"
         );
         assert!(c.never_held());
-        assert_eq!(c.carry_on_argv("s"), None, "a thread is on the daemon already");
+        assert_eq!(
+            c.carry_on("s"),
+            Some(CarryOn::Attach(vec!["codex".into(), "resume".into(), "s".into()])),
+            "a thread is on the daemon already: resumed there"
+        );
         let mut row = row(Thread {
             id: "t".into(),
             session_id: None,

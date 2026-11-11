@@ -1,6 +1,6 @@
 //! The list's rows, from its three sources: sessions Relay holds
 //! (`sessions/`), agents' own sessions their hooks told of (`state/`), and
-//! the harnesses' own background sessions (their adapters). One `Row` each;
+//! the harnesses' own background sessions (`Harness::list`). One `Row` each;
 //! the list never asks which source a row came from.
 
 use crate::rows::{registry, state_words};
@@ -8,6 +8,7 @@ use crate::store::sessions::{Held, Status};
 use crate::store::state::{HookState, Said};
 use jiff::Timestamp;
 use rl_core::state::{Confidence, RunKind, RunState};
+#[cfg(not(test))]
 use rl_detect::registry::find_bin;
 use rl_session::exit::Exit;
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -38,49 +39,59 @@ pub enum Attach {
     None,
 }
 
-pub use rl_detect::adapter::{Adapter, NativeRow, NativeState, Pr};
+pub use rl_detect::harness::{CarryOn, Harness, NativeRow, NativeState, Pr};
 
-/// What lists a harness's own background sessions: its adapter. Asked from a
-/// background task while the list is open, so `list` may block (it runs the
-/// harness's CLI); an error keeps what it said last.
+/// What lists a harness's own background sessions. Asked from a background
+/// task while the list is open, so `list` may block (it runs the harness's
+/// CLI); an error keeps what it said last.
 pub trait NativeLister: Send + Sync {
     /// The harness whose sessions it lists: `claude`.
     fn harness(&self) -> &str;
     fn list(&self) -> anyhow::Result<Vec<NativeRow>>;
+    /// The same, for no longer than `wait`.
+    fn list_within(&self, wait: std::time::Duration) -> anyhow::Result<Vec<NativeRow>> {
+        let _ = wait;
+        self.list()
+    }
 }
 
-/// An adapter, as a lister.
-struct Listing(&'static dyn Adapter);
+/// A harness, as a lister.
+struct Listing(&'static dyn Harness);
 
 impl NativeLister for Listing {
     fn harness(&self) -> &str {
-        self.0.harness()
+        self.0.name()
     }
 
     fn list(&self) -> anyhow::Result<Vec<NativeRow>> {
         self.0.list()
     }
+
+    fn list_within(&self, wait: std::time::Duration) -> anyhow::Result<Vec<NativeRow>> {
+        self.0.list_within(wait)
+    }
 }
 
-/// Every adapter the profiles name, and whether its harness is on this
-/// machine. Made once.
+/// Every harness the profiles name, found on this machine or not. Made
+/// once.
 #[cfg(not(test))]
-fn known() -> &'static [(Box<dyn Adapter>, bool)] {
-    static KNOWN: OnceLock<Vec<(Box<dyn Adapter>, bool)>> = OnceLock::new();
-    KNOWN.get_or_init(|| rl_detect::adapter::adapters(registry(), find_bin))
+pub fn harnesses() -> &'static [Box<dyn Harness>] {
+    static ALL: OnceLock<Vec<Box<dyn Harness>>> = OnceLock::new();
+    ALL.get_or_init(|| rl_detect::harness::harnesses(registry(), find_bin))
 }
 
 /// The tests never run a real harness, but a stand-in: Codex's daemon a
 /// copy of `fixtures/stand-in-codex-daemon` (`codex_stand_in`), every other
-/// `fixtures/stand-in-harness`, and the listing is theirs (`StandIn`).
+/// `fixtures/stand-in-harness`, and the listing of each with a background
+/// is theirs (`StandIn`).
 #[cfg(test)]
-fn known() -> &'static [(Box<dyn Adapter>, bool)] {
-    static KNOWN: OnceLock<Vec<(Box<dyn Adapter>, bool)>> = OnceLock::new();
-    KNOWN.get_or_init(|| {
+pub fn harnesses() -> &'static [Box<dyn Harness>] {
+    static ALL: OnceLock<Vec<Box<dyn Harness>>> = OnceLock::new();
+    ALL.get_or_init(|| {
         let bin = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../fixtures/stand-in-harness"));
         let codex = codex_stand_in();
         let registry = registry();
-        rl_detect::adapter::adapters(registry, |bins| {
+        rl_detect::harness::harnesses(registry, |bins| {
             Some(if bins.iter().any(|b| b == "codex") {
                 codex.clone()
             } else {
@@ -88,12 +99,15 @@ fn known() -> &'static [(Box<dyn Adapter>, bool)] {
             })
         })
         .into_iter()
-        .map(|(a, found)| {
+        .map(|h| {
+            if !h.lists() {
+                return h;
+            }
             let claude = registry
-                .profile(a.harness())
+                .profile(h.name())
                 .filter(|p| p.name == "claude")
                 .and_then(|p| rl_detect::claude_native::Claude::of(p, bin.clone()));
-            (Box::new(StandIn { inner: a, claude }) as Box<dyn Adapter>, found)
+            Box::new(StandIn { inner: h, claude }) as Box<dyn Harness>
         })
         .collect()
     })
@@ -117,13 +131,14 @@ pub(crate) fn codex_stand_in() -> PathBuf {
     .clone()
 }
 
-/// A harness's adapter run on the stand-in: what Claude starts in its
-/// background (`0a1b2c3d`, in the folder asked) is listed as working there
-/// from then on, by every harness's listing.
+/// A harness with a background run on the stand-in: what Claude starts in
+/// its background (`0a1b2c3d`, in the folder asked) is listed as working
+/// there from then on, by every such harness's listing. All else is the
+/// harness's own.
 #[cfg(test)]
 struct StandIn {
-    inner: Box<dyn Adapter>,
-    /// Claude's adapter, where it is Claude's: what it starts with.
+    inner: Box<dyn Harness>,
+    /// Claude's harness, where it is Claude's: what it starts with.
     claude: Option<rl_detect::claude_native::Claude>,
 }
 
@@ -132,7 +147,7 @@ static STARTED: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new(
 
 #[cfg(test)]
 impl StandIn {
-    /// Runs `argv` in Claude's background, as Claude's adapter does, its
+    /// Runs `argv` in Claude's background, as Claude's harness does, its
     /// listing this one's.
     fn begin(&self, argv: &[String], cwd: &std::path::Path, before: &HashSet<String>) -> anyhow::Result<String> {
         STARTED.lock().unwrap().push(cwd.to_path_buf());
@@ -147,9 +162,21 @@ impl StandIn {
 }
 
 #[cfg(test)]
-impl Adapter for StandIn {
-    fn harness(&self) -> &str {
-        self.inner.harness()
+impl Harness for StandIn {
+    fn profile(&self) -> &rl_detect::Profile {
+        self.inner.profile()
+    }
+
+    fn bin(&self) -> &str {
+        self.inner.bin()
+    }
+
+    fn found(&self) -> bool {
+        self.inner.found()
+    }
+
+    fn lists(&self) -> bool {
+        self.inner.lists()
     }
 
     fn list_within(&self, _: std::time::Duration) -> anyhow::Result<Vec<NativeRow>> {
@@ -157,7 +184,7 @@ impl Adapter for StandIn {
         Ok(started
             .iter()
             .map(|cwd| NativeRow {
-                harness: self.harness().into(),
+                harness: self.name().into(),
                 id: "0a1b2c3d".into(),
                 session_id: "s-0a1b2c3d".into(),
                 name: "started".into(),
@@ -176,22 +203,15 @@ impl Adapter for StandIn {
             .collect())
     }
 
-    fn attach_argv(&self, id: &str) -> Vec<String> {
-        self.inner.attach_argv(id)
-    }
-
     fn start(
         &self,
         cwd: &std::path::Path,
         name: Option<&str>,
         prompt: Option<&str>,
         before: &HashSet<String>,
-    ) -> Option<anyhow::Result<rl_detect::adapter::Started>> {
-        match &self.claude {
-            Some(c) => {
-                let argv = c.start_argv(name, prompt)?;
-                Some(self.begin(&argv, cwd, before).map(rl_detect::adapter::Started::Id))
-            }
+    ) -> anyhow::Result<rl_detect::harness::Started> {
+        match self.claude.as_ref().and_then(|c| c.start_argv(name, prompt)) {
+            Some(argv) => self.begin(&argv, cwd, before).map(rl_detect::harness::Started::Id),
             None => self.inner.start(cwd, name, prompt, before),
         }
     }
@@ -200,11 +220,29 @@ impl Adapter for StandIn {
         self.inner.never_held()
     }
 
-    fn carry_on_argv(&self, session_id: &str) -> Option<Vec<String>> {
-        self.inner.carry_on_argv(session_id)
+    fn held_argv(
+        &self,
+        home: &rl_core::Home,
+        argv: Vec<String>,
+        rl: &dyn Fn() -> anyhow::Result<PathBuf>,
+    ) -> anyhow::Result<Vec<String>> {
+        self.inner.held_argv(home, argv, rl)
     }
 
-    fn carry_on(&self, argv: &[String], cwd: &std::path::Path, before: &HashSet<String>) -> anyhow::Result<String> {
+    fn attach_argv(&self, id: &str) -> Option<Vec<String>> {
+        self.inner.attach_argv(id)
+    }
+
+    fn carry_on(&self, session_id: &str) -> Option<CarryOn> {
+        self.inner.carry_on(session_id)
+    }
+
+    fn carry_on_there(
+        &self,
+        argv: &[String],
+        cwd: &std::path::Path,
+        before: &HashSet<String>,
+    ) -> anyhow::Result<String> {
         self.begin(argv, cwd, before)
     }
 
@@ -219,22 +257,47 @@ impl Adapter for StandIn {
     fn ping_argv(&self, id: &str, text: &str) -> Option<Vec<String>> {
         self.inner.ping_argv(id, text)
     }
+
+    fn user_hooks(&self) -> Option<&rl_detect::sessions::UserHooks> {
+        self.inner.user_hooks()
+    }
+
+    fn has_mcp(&self) -> bool {
+        self.inner.has_mcp()
+    }
+
+    fn mcp(
+        &self,
+        env: &dyn Fn(&str) -> Option<std::ffi::OsString>,
+    ) -> anyhow::Result<Option<rl_detect::mcp_entry::Place>> {
+        self.inner.mcp(env)
+    }
+
+    fn caller_id_var(&self) -> Option<&'static str> {
+        self.inner.caller_id_var()
+    }
+
+    fn mail_by_hooks(&self) -> bool {
+        self.inner.mail_by_hooks()
+    }
+
+    fn wake_advice(&self, name: &str) -> Option<String> {
+        self.inner.wake_advice(name)
+    }
 }
 
-/// The adapter of `harness`'s own background sessions, if it has one.
-pub fn adapter(harness: &str) -> Option<&'static dyn Adapter> {
-    known()
-        .iter()
-        .find(|(a, _)| a.harness() == harness)
-        .map(|(a, _)| a.as_ref())
+/// The harness of the profile `name`.
+pub fn harness(name: &str) -> Option<&'static dyn Harness> {
+    harnesses().iter().find(|h| h.name() == name).map(|h| h.as_ref())
 }
 
-/// The listers the list asks: the adapters of the harnesses on this machine.
+/// The listers the list asks: the harnesses on this machine with a
+/// background of their own.
 pub fn native_listers() -> Vec<Box<dyn NativeLister>> {
-    known()
+    harnesses()
         .iter()
-        .filter(|(_, found)| *found)
-        .map(|(a, _)| Box::new(Listing(a.as_ref())) as Box<dyn NativeLister>)
+        .filter(|h| h.lists() && h.found())
+        .map(|h| Box::new(Listing(h.as_ref())) as Box<dyn NativeLister>)
         .collect()
 }
 
@@ -260,7 +323,7 @@ pub struct Row {
     /// The colour its harness draws it in, by name (`pink`); none for most.
     pub color: Option<String>,
     pub attach: Attach,
-    /// The id its harness stops it by (`Adapter::stop`), where it is a
+    /// The id its harness stops it by (`Harness::stop`), where it is a
     /// harness's own session its harness can stop as it stands.
     pub stop: Option<String>,
     pub kind: RunKind,
@@ -272,8 +335,8 @@ pub struct Row {
 /// Every row, held first, then hooked, then native. A session never stands
 /// twice: a hooked one that a native row or a Relay-held session already
 /// is, nor a native one Relay holds (a harness's own session a held one
-/// has said is its conversation). `answered`: the harnesses whose adapter
-/// has listed its sessions at least once — until then, a hooked row of one
+/// has said is its conversation). `answered`: the harnesses that
+/// have listed their sessions at least once — until then, a hooked row of one
 /// may be among them, and is not carried on. Each folder's repository is
 /// looked for once.
 pub fn rows(held: &[Held], hooked: &[HookState], native: &[NativeRow], answered: &BTreeSet<String>) -> Vec<Row> {
@@ -379,40 +442,27 @@ fn held_row(h: &Held) -> Row {
     }
 }
 
-/// What carries on a conversation open in another terminal: the harness's
-/// own background where it has one, else a session Relay holds — or, for a
-/// harness Relay never holds (Codex: the conversation is a thread on its
-/// daemon), its own attach. Only one at rest — one busy or waiting there is
-/// still in use — and, where the harness has a background, only once it has
-/// said what runs there (`answered`): carried on while it already runs
-/// there, it would run twice.
+/// What carries on a conversation open in another terminal, as its harness
+/// says (`Harness::carry_on`): in the harness's own background where it has
+/// one, else a session Relay holds — or, for a harness Relay never holds
+/// (Codex: the conversation is a thread on its daemon), its own attach. Only
+/// one at rest — one busy or waiting there is still in use — and, in a
+/// background, only once the harness has said what runs there (`answered`):
+/// carried on while it already runs there, it would run twice.
 fn carry_on(h: &HookState, answered: &BTreeSet<String>) -> Attach {
     if h.state != Said::Idle {
         return Attach::None;
     }
-    if let Some(a) = adapter(&h.agent).filter(|a| a.never_held()) {
-        return Attach::Argv(a.attach_argv(&h.session_id));
-    }
-    if let Some(a) = adapter(&h.agent)
-        && let Some(argv) = a.carry_on_argv(&h.session_id)
-    {
-        if !answered.contains(a.harness()) {
-            return Attach::None;
-        }
-        return Attach::CarryOn { argv, background: true };
-    }
-    registry()
-        .profile(&h.agent)
-        .and_then(|p| {
-            let bin = find_bin(&p.bins)
-                .map(|b| b.to_string_lossy().into_owned())
-                .or_else(|| p.bins.first().cloned())?;
-            p.resume_argv(bin, &h.session_id)
-        })
-        .map_or(Attach::None, |argv| Attach::CarryOn {
+    match harness(&h.agent).and_then(|x| x.carry_on(&h.session_id)) {
+        Some(CarryOn::Attach(argv)) => Attach::Argv(argv),
+        Some(CarryOn::Background(_)) if !answered.contains(&h.agent) => Attach::None,
+        Some(CarryOn::Background(argv)) => Attach::CarryOn { argv, background: true },
+        Some(CarryOn::Held(argv)) => Attach::CarryOn {
             argv,
             background: false,
-        })
+        },
+        None => Attach::None,
+    }
 }
 
 fn hooked_row(h: &HookState, answered: &BTreeSet<String>) -> Row {
@@ -457,8 +507,10 @@ fn native_row(n: &NativeRow) -> Row {
         state_at: n.at,
         pr: n.pr.clone(),
         color: n.color.clone(),
-        attach: adapter(&n.harness).map_or(Attach::None, |a| Attach::Argv(a.attach_argv(&n.id))),
-        stop: adapter(&n.harness).filter(|a| a.stops(n)).map(|_| n.id.clone()),
+        attach: harness(&n.harness)
+            .and_then(|h| h.attach_argv(&n.id))
+            .map_or(Attach::None, Attach::Argv),
+        stop: harness(&n.harness).filter(|h| h.stops(n)).map(|_| n.id.clone()),
         kind: RunKind::Agent,
         repo: None,
     }
@@ -475,9 +527,9 @@ mod tests {
         Timestamp::from_second(s).unwrap()
     }
 
-    /// The rows, every adapter having answered.
+    /// The rows, every harness having answered.
     fn rows(held: &[Held], hooked: &[HookState], native: &[NativeRow]) -> Vec<Row> {
-        let all = known().iter().map(|(a, _)| a.harness().to_string()).collect();
+        let all = harnesses().iter().map(|h| h.name().to_string()).collect();
         super::rows(held, hooked, native, &all)
     }
 
@@ -766,12 +818,12 @@ mod tests {
         codex.harness = "codex".into();
         codex.id = codex.session_id.clone();
         let Attach::Argv(argv) = rows(&[], &[], &[codex]).remove(0).attach else {
-            panic!("codex has an adapter");
+            panic!("codex attaches its own");
         };
         assert_eq!(argv[1..], ["resume", "01a11d20-8cab-7061-885d-f86e8e313f11"]);
         let mut nobody = native("s-3");
         nobody.harness = "nobody".into();
-        assert_eq!(rows(&[], &[], &[nobody]).remove(0).attach, Attach::None, "no adapter");
+        assert_eq!(rows(&[], &[], &[nobody]).remove(0).attach, Attach::None, "no harness");
     }
 
     #[test]

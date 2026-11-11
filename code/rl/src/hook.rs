@@ -31,9 +31,9 @@
 //! hook's stdout back to the model, and Gemini parses it); and the caller
 //! always exits 0.
 //!
-//! The one thing printed: Claude's news of relay mail (`news`). Claude Code
-//! has no way to tell one of its sessions anything from outside, so its
-//! hooks carry it. With mail waiting in the session's own folders
+//! The one thing printed: the news of relay mail (`news`), for a harness
+//! with no way to tell one of its sessions anything from outside, whose
+//! hooks carry it instead (`Harness::mail_by_hooks`: Claude Code). With mail waiting in the session's own folders
 //! (`mcp::own_keys`), its `UserPromptSubmit` prints the JSON that adds a
 //! line to the prompt's context, and its `Stop` the JSON that keeps it going
 //! one more turn to read the mail — once for the same mail (`mail::told`),
@@ -144,8 +144,8 @@ pub async fn hook(home: &Home, words: &Words) {
         return;
     };
     let held = held_session(
-        std::env::var("RL_SESSION").ok(),
-        std::env::var(crate::spawn::AGENT_ENV).ok(),
+        std::env::var(rl_core::SESSION_ENV).ok(),
+        std::env::var(rl_core::AGENT_ENV).ok(),
         &words.agent,
     );
     let Some(target) = target(home, hooks, words, held.as_deref()) else {
@@ -196,9 +196,12 @@ pub async fn hook(home: &Home, words: &Words) {
         eprintln!("rl hook: {e:#}");
     }
     // A listing of a folder or two: done, unless the time is already gone.
-    if hooks.agent == mcp::CLAUDE
+    let by_hooks = registry
+        .profile(&words.agent)
+        .is_some_and(|p| rl_detect::harness::of(p, None).mail_by_hooks());
+    if by_hooks
         && Instant::now() < deadline
-        && let Some(said) = news(home, &words.event, held.as_deref(), &payload)
+        && let Some(said) = news(home, &words.agent, &words.event, held.as_deref(), &payload)
     {
         use std::io::Write;
         let mut out = std::io::stdout().lock();
@@ -206,17 +209,17 @@ pub async fn hook(home: &Home, words: &Words) {
     }
 }
 
-/// What Claude is told of the relay mail waiting for the session a hook of
-/// `event` is of (the held session `held`, else the payload's
+/// What `agent` (Claude) is told of the relay mail waiting for the session
+/// a hook of `event` is of (the held session `held`, else the payload's
 /// conversation), as the JSON Claude reads from a hook's output; None when
 /// it is told nothing. A `Stop` blocks once for the same mail: the newest
 /// it told of is kept (`mail::set_told`), and only newer mail blocks again.
-fn news(home: &Home, event: &str, held: Option<&str>, payload: &Value) -> Option<Value> {
+fn news(home: &Home, agent: &str, event: &str, held: Option<&str>, payload: &Value) -> Option<Value> {
     if event != PROMPT && event != STOP {
         return None;
     }
     let caller = Caller {
-        harness: mcp::CLAUDE.into(),
+        harness: agent.into(),
         relay_session: held.map(str::to_string),
         session_id: payload
             .get("session_id")

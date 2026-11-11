@@ -20,7 +20,7 @@ pub enum Removal {
     /// A Relay-held session still going: closed.
     Stop { name: String, title: String },
     /// One of a harness's own still going: its harness stops it by its id,
-    /// in its folder (`Adapter::stop`).
+    /// in its folder (`Harness::stop`).
     StopNative {
         harness: String,
         id: String,

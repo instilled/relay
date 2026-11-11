@@ -71,3 +71,8 @@ sessions:
   # it: `{id}` is the thread's id, `{text}` the note. `codex queue --help`,
   # codex 0.167.
   ping: [queue, --thread, "{id}", --message, "{text}", --resume]
+# Where Relay's MCP server goes (`rl setup`): `[mcp_servers.relay]` in
+# Codex's config.toml, beside its hooks, with `env_vars` so a held
+# session's variables reach the server.
+mcp:
+  file: ["$CODEX_HOME/config.toml", "~/.codex/config.toml"]
