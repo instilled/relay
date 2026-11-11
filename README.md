@@ -112,6 +112,9 @@ in the footer and changes nothing; an unknown one stays on the line to mend.
 | `ctrl+c ctrl+c` | quit |
 | `ctrl+h` `f1` | the keys, as a grid; again or `esc` closes it |
 
+The wheel moves the cursor a line a tick and a click puts it on a line; a pointer that only moves
+leaves it where it is. The list takes the mouse, so hold shift (option, on macOS) to select text.
+
 `ctrl+\` leaves an attached session running and comes back to the list.
 
 ### Codex

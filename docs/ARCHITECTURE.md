@@ -96,6 +96,11 @@ Folders are 0700.
   worktree's `.git` file is followed through its `commondir` to the main checkout; a submodule's,
   which has none, is a project of its own). State comes from, in order, the
   agent's hooks, the harness's own listing, then regexes over the screen.
+  The list is built (`rows::build`) once per change — the rows read again, the checkouts, the
+  prefs, the filter — and kept in `App` (`App::lines`, `App::rebuild`); a key or a draw reads
+  that. The loop takes every input event already waiting before it draws again (`App::events`),
+  and draws only the rows its window shows. The mouse is asked for clicks, drags and the wheel,
+  not bare motion.
   `rl ls` prints the same rows once (`cmd::listing`), each harness asked on a thread of its own
   for at most 5s; one that fails or is slow is left out and named on stderr.
 - **Codex.** Never held (`Harness::never_held`). A start opens the daemon through `codex
