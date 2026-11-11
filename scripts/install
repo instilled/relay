@@ -1,0 +1,195 @@
+#!/bin/sh
+# Install relay from this clone: a dev install. It builds once and links the
+# dev shim (scripts/rl) onto your PATH as `rl`; the shim rebuilds whenever the
+# source changes, so `git pull` is the update. Safe to run again.
+#
+#   scripts/install                   build, link ~/.local/bin/rl
+#   scripts/install --bin-dir DIR     link DIR/rl instead (or RELAY_BIN_DIR=DIR)
+#   scripts/install --uninstall       remove the link this made
+#
+# RELAY_DEV_PROFILE=release builds and runs target/release (keep it set
+# where you run rl, too).
+set -e
+
+usage() {
+  echo "usage: scripts/install [--bin-dir DIR] [--uninstall]" >&2
+  exit 2
+}
+
+say() { printf '%s\n' "$*"; }
+warn() { printf 'warning: %s\n' "$*" >&2; }
+die() { printf 'scripts/install: %s\n' "$*" >&2; exit 1; }
+
+# This clone, however the script was called.
+self=$0
+while [ -L "$self" ]; do
+  t=$(readlink "$self")
+  case $t in
+    /*) self=$t ;;
+    *) self=$(dirname "$self")/$t ;;
+  esac
+done
+root=$(cd "$(dirname "$self")/.." && pwd -P)
+shim="$root/scripts/rl"
+
+bin_dir=${RELAY_BIN_DIR:-$HOME/.local/bin}
+uninstall=""
+while [ $# -gt 0 ]; do
+  case $1 in
+    --bin-dir) [ $# -ge 2 ] || usage; bin_dir=$2; shift 2 ;;
+    --bin-dir=*) bin_dir=${1#--bin-dir=}; shift ;;
+    --uninstall) uninstall=1; shift ;;
+    -h|--help) usage ;;
+    *) echo "scripts/install: unknown argument: $1" >&2; usage ;;
+  esac
+done
+[ -n "$bin_dir" ] || die "the bin dir is empty"
+link="$bin_dir/rl"
+
+# Whether a symlink points at this clone's shim (however it was spelt).
+ours() {
+  t=$(readlink "$1")
+  case $t in
+    /*) ;;
+    *) t=$(dirname "$1")/$t ;;
+  esac
+  [ "$(basename "$t")" = rl ] || return 1
+  d=$(cd "$(dirname "$t")" 2>/dev/null && pwd -P) || return 1
+  [ "$d" = "$root/scripts" ]
+}
+
+if [ -n "$uninstall" ]; then
+  if [ -L "$link" ] && ours "$link"; then
+    rm "$link"
+    say "removed $link"
+  elif [ -L "$link" ]; then
+    say "$link points at $(readlink "$link"), not this clone; left alone"
+  elif [ -e "$link" ]; then
+    say "$link is not a link this made; left alone"
+  else
+    say "no $link to remove"
+  fi
+  say ""
+  say "Relay's hooks and MCP server stay in your agents' settings until you run"
+  say "  $shim setup --remove"
+  say "Your sessions and settings stay in ~/.relay; remove it and this clone to take out the rest."
+  exit 0
+fi
+
+# --- prerequisites --------------------------------------------------------
+
+missing=""
+command -v cargo >/dev/null 2>&1 || missing="cargo"
+command -v rustc >/dev/null 2>&1 || missing="$missing rustc"
+if [ -n "$missing" ]; then
+  die "Rust is missing ($missing not on PATH). Install it from https://rustup.rs, then open a new shell and run this again."
+fi
+
+# The oldest Rust relay builds with: the workspace's rust-version.
+want=$(sed -n 's/^rust-version *= *"\([0-9.]*\)".*/\1/p' "$root/Cargo.toml" | head -n 1)
+have=$(rustc --version | sed -n 's/^rustc \([0-9][0-9.]*\).*/\1/p')
+older() { # $1 < $2, as major.minor
+  a1=${1%%.*}; r=${1#*.}; a2=${r%%.*}
+  b1=${2%%.*}; r=${2#*.}; b2=${r%%.*}
+  [ "$a1" -lt "$b1" ] || { [ "$a1" -eq "$b1" ] && [ "$a2" -lt "$b2" ]; }
+}
+if [ -n "$want" ] && [ -n "$have" ] && older "$have" "$want"; then
+  if command -v rustup >/dev/null 2>&1; then
+    die "relay needs Rust $want or newer; this is $have. Run: rustup update stable"
+  fi
+  die "relay needs Rust $want or newer; this is $have (not from rustup). Upgrade it, or install Rust from https://rustup.rs."
+fi
+
+# Rust links with the system C toolchain (no crate here compiles C).
+if ! command -v cc >/dev/null 2>&1; then
+  case $(uname -s) in
+    Darwin) die "no C linker (cc). Install Apple's command line tools: xcode-select --install" ;;
+    *) die "no C linker (cc). Install one, e.g. sudo apt install build-essential (Debian/Ubuntu) or sudo dnf install gcc (Fedora)" ;;
+  esac
+fi
+
+command -v git >/dev/null 2>&1 || warn "git is not on PATH: rl --version will say 'unknown' for the commit, and you update with git pull"
+
+# --- build ----------------------------------------------------------------
+
+profile=${RELAY_DEV_PROFILE:-debug}
+case $profile in
+  debug) flag="" ;;
+  release) flag="--release" ;;
+  *) die "RELAY_DEV_PROFILE is debug or release, not $profile" ;;
+esac
+say "building relay ($profile) in ${root}…"
+# shellcheck disable=SC2086 # $flag is empty or one word
+(cd "$root" && cargo build --workspace --bins $flag) || die "the build failed (above)"
+for b in rl rl-session; do
+  [ -x "$root/target/$profile/$b" ] || die "the build made no target/$profile/$b"
+done
+# The shim rebuilds when a source is newer than rl; a build cargo found
+# nothing to do for leaves rl as old as it was.
+touch "$root/target/$profile/rl"
+
+# --- link -----------------------------------------------------------------
+
+mkdir -p "$bin_dir" || die "cannot create $bin_dir"
+bin_dir=$(cd "$bin_dir" && pwd -P)
+link="$bin_dir/rl"
+if [ -L "$link" ] && ours "$link"; then
+  say "$link already links this clone's shim"
+elif [ -L "$link" ]; then
+  say "replacing $link (it pointed at $(readlink "$link"))"
+  rm "$link"
+  ln -s "$shim" "$link"
+elif [ -e "$link" ]; then
+  say "" >&2
+  ls -l "$link" >&2 || true
+  die "$link exists and is not a symlink, so it is left alone. Move it away (an old copy of rl?) or pick another dir: scripts/install --bin-dir DIR"
+else
+  ln -s "$shim" "$link"
+  say "linked $link -> $shim"
+fi
+
+# --- PATH -----------------------------------------------------------------
+
+on_path=""
+shadow=""
+old_ifs=$IFS
+IFS=:
+for d in $PATH; do
+  [ -n "$d" ] || continue
+  real=$(cd "$d" 2>/dev/null && pwd -P) || continue
+  if [ "$real" = "$bin_dir" ]; then
+    on_path=1
+    break
+  fi
+  if [ -z "$shadow" ] && [ -x "$d/rl" ] && [ ! -d "$d/rl" ]; then
+    shadow="$d/rl"
+  fi
+done
+IFS=$old_ifs
+
+case $(basename "${SHELL:-sh}") in
+  zsh) rc="$HOME/.zshrc" ;;
+  bash) if [ "$(uname -s)" = Darwin ]; then rc="$HOME/.bash_profile"; else rc="$HOME/.bashrc"; fi ;;
+  *) rc="your shell's startup file" ;;
+esac
+
+if [ -z "$on_path" ]; then
+  warn "$bin_dir is not on your PATH. Add this line to $rc, then open a new shell:"
+  # shellcheck disable=SC2016 # $PATH is meant literally
+  printf '  export PATH="%s:$PATH"\n' "$bin_dir" >&2
+elif [ -n "$shadow" ]; then
+  warn "another rl comes first on your PATH and runs instead: $shadow"
+  case $shadow in
+    */.cargo/bin/rl) say "  it looks like a cargo install; remove it with: cargo uninstall rl" >&2 ;;
+    *) say "  remove it, or put $bin_dir earlier on your PATH (in $rc)" >&2 ;;
+  esac
+fi
+
+say ""
+say "Relay is installed (a dev install: rl rebuilds itself when the source changes; git pull updates it)."
+if [ "$profile" = release ]; then
+  say "Keep RELAY_DEV_PROFILE=release set in your shell, or rl builds the debug binaries on its first run."
+fi
+say "Next: run rl. The first time, it offers to set Relay up for the agents it finds (or run rl setup)."
+[ -n "$on_path" ] && [ -z "$shadow" ] && say "(If your shell still finds an old rl, run hash -r or open a new shell.)"
+exit 0
