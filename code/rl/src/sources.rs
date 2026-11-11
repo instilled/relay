@@ -334,21 +334,15 @@ pub struct Row {
 
 /// Every row, held first, then hooked, then native. A session never stands
 /// twice: a hooked one that a native row or a Relay-held session already
-/// is, nor a native one Relay holds (a harness's own session a held one
-/// has said is its conversation). `answered`: the harnesses that
+/// is, nor a native one Relay holds (a harness's own session a held one's
+/// hooks have said is its conversation). `answered`: the harnesses that
 /// have listed their sessions at least once — until then, a hooked row of one
 /// may be among them, and is not carried on. Each folder's repository is
 /// looked for once.
 pub fn rows(held: &[Held], hooked: &[HookState], native: &[NativeRow], answered: &BTreeSet<String>) -> Vec<Row> {
     let held_ids: HashSet<&str> = held
         .iter()
-        .flat_map(|h| {
-            [
-                h.hook.as_ref().map(|k| k.session_id.as_str()),
-                h.meta.native_id.as_deref(),
-            ]
-        })
-        .flatten()
+        .filter_map(|h| h.hook.as_ref().map(|k| k.session_id.as_str()))
         .collect();
     let native: Vec<&NativeRow> = native
         .iter()
@@ -544,7 +538,6 @@ mod tests {
                 started: at(100),
                 socket: "/w/sock".into(),
                 holder_pid: None,
-                native_id: None,
             },
             status,
             state: None,
@@ -621,7 +614,7 @@ mod tests {
         let mut h = held("api-gemini", RunKind::Agent, Status::Live);
         h.hook = Some(hook("gemini", "g-1", Said::Waiting, Some("permission prompt")));
         let mut by_id = held("api-claude", RunKind::Agent, Status::Live);
-        by_id.meta.native_id = Some("c-1".into());
+        by_id.hook = Some(hook("claude", "c-1", Said::Busy, None));
         let hooked = [
             hook("gemini", "g-1", Said::Waiting, None),
             hook("claude", "c-1", Said::Busy, None),

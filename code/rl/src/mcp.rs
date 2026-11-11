@@ -414,12 +414,11 @@ impl Server {
 /// that session's. None where neither is known. Only the sessions' files
 /// are read: no holder is asked how its session stands.
 pub fn own_keys(home: &Home, caller: &Caller) -> Vec<String> {
-    // A held session's name, and the conversation ids it has had.
+    // A held session's name, and the conversation id its hooks told of.
     let ids_of = |dir: &std::path::Path| -> Option<(String, Vec<String>)> {
         let meta = sessions::read_meta(dir).ok()?;
         let hook = state::read(&dir.join(sessions::HOOK)).ok().flatten();
-        let ids = hook.map(|k| k.session_id).into_iter().chain(meta.native_id).collect();
-        Some((meta.name, ids))
+        Some((meta.name, hook.map(|k| k.session_id).into_iter().collect()))
     };
     let keys = |(name, ids): (String, Vec<String>)| dedup(std::iter::once(name).chain(ids).collect());
     if let Some(name) = &caller.relay_session {
@@ -452,22 +451,14 @@ struct Recipient {
 }
 
 /// The id a held session's harness pings it by: its conversation's, as its
-/// hooks said it (a Codex thread's id is its conversation's), else as Relay
-/// carried it on.
+/// hooks said it.
 fn held_ping_id(h: &Held) -> Option<String> {
-    h.hook
-        .as_ref()
-        .map(|k| k.session_id.clone())
-        .or_else(|| h.meta.native_id.clone())
+    h.hook.as_ref().map(|k| k.session_id.clone())
 }
 
-/// The conversation ids a held session has had: its hooks', its harness's.
+/// The conversation ids a held session has: its hooks'.
 fn held_ids(h: &Held) -> Vec<String> {
-    h.hook
-        .iter()
-        .map(|k| k.session_id.clone())
-        .chain(h.meta.native_id.clone())
-        .collect()
+    h.hook.iter().map(|k| k.session_id.clone()).collect()
 }
 
 /// The entry `to` names: its address, else your title for it, else one of
@@ -642,13 +633,15 @@ mod tests {
         h
     }
 
-    /// A session Relay holds, named `name`, its conversation `native_id`.
-    fn held(home: &Home, name: &str, native_id: Option<&str>) {
-        held_as(home, name, "claude", native_id);
+    /// A session Relay holds, named `name`, its conversation `conversation`
+    /// as its hooks told of it.
+    fn held(home: &Home, name: &str, conversation: Option<&str>) {
+        held_as(home, name, "claude", conversation);
     }
 
-    /// A session Relay holds that runs `harness`.
-    fn held_as(home: &Home, name: &str, harness: &str, native_id: Option<&str>) {
+    /// A session Relay holds that runs `harness`, its conversation
+    /// `conversation` as its hooks told of it.
+    fn held_as(home: &Home, name: &str, harness: &str, conversation: Option<&str>) {
         let dir = home.session_dir(name);
         std::fs::create_dir_all(&dir).unwrap();
         let meta = Meta {
@@ -660,9 +653,14 @@ mod tests {
             started: Timestamp::now(),
             socket: dir.join("sock"),
             holder_pid: None,
-            native_id: native_id.map(Into::into),
         };
         sessions::write_meta(&dir, &meta).unwrap();
+        if let Some(id) = conversation {
+            let mut hook = hooked(home, id);
+            std::fs::remove_file(state::path(home, "claude", id).unwrap()).unwrap();
+            hook.agent = harness.into();
+            state::write(&dir.join(sessions::HOOK), &hook).unwrap();
+        }
     }
 
     fn native(id: &str, session_id: &str, name: &str) -> NativeRow {

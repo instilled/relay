@@ -52,7 +52,6 @@ fn fixture() -> Fixture {
             started,
             socket: dir.join("sock"),
             holder_pid: None,
-            native_id: None,
         },
     )
     .unwrap();

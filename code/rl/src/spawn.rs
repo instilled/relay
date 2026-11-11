@@ -141,7 +141,6 @@ pub async fn start(home: &Home, start: Start) -> Result<Meta> {
         started: Timestamp::now(),
         socket: socket.clone(),
         holder_pid: None,
-        native_id: None,
     };
     let mut holder_pid = None;
     let launched = match sessions::write_meta(&dir, &meta) {
