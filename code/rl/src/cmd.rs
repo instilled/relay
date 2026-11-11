@@ -1,6 +1,6 @@
 //! The `new | ls | stop | rm` commands.
 
-use crate::sources::{self, Harness};
+use crate::sources::{self, Harness, Source};
 use crate::spawn::{self, Start};
 use crate::store::sessions::{self, Held, Status};
 use anyhow::{Context, Result, bail};
@@ -150,39 +150,130 @@ fn age(since: Timestamp) -> String {
     }
 }
 
+/// How long `rl ls` waits for a harness's own listing.
+const LS_WAIT: Duration = Duration::from_secs(5);
+
+/// `rl ls`: what the list shows, once — the sessions Relay holds, the
+/// harnesses' own background sessions and those in other terminals their
+/// hooks tell of, one row each (`sources::rows`). A harness whose listing
+/// fails or takes over `LS_WAIT` is left out, and stderr says so.
 pub fn ls(home: &Home, json: bool) -> Result<()> {
-    sessions::sweep(home);
-    let held = sessions::list(home);
+    let rows = listing(home, sources::native_listers(), LS_WAIT, &mut |w| {
+        eprintln!("rl ls: {w}")
+    });
     if json {
-        let rows: Vec<_> = held
-            .iter()
-            .map(|h| {
-                serde_json::json!({
-                    "name": h.meta.name,
-                    "harness": h.meta.harness,
-                    "status": status_word(&h.status),
-                    "state": state_word(h),
-                    "folder": h.meta.cwd,
-                    "started": h.meta.started,
-                    "holder_pid": h.meta.holder_pid,
-                })
-            })
-            .collect();
         println!("{}", serde_json::to_string_pretty(&rows)?);
         return Ok(());
     }
-    for h in &held {
-        let state = state_word(h).unwrap_or_else(|| "live".into());
-        println!(
-            "{:<28} {:<9} {:<10} {}  {}",
-            h.meta.name,
-            h.meta.harness,
-            state,
-            rl_core::display_path(&h.meta.cwd),
-            age(h.meta.started)
-        );
+    for l in lines(&rows) {
+        println!("{l}");
     }
     Ok(())
+}
+
+/// Every row of the list, as `rl ls --json` gives it: `kind` (`held`,
+/// `background`, `terminal`), `id` (a held session's name, a background
+/// one's harness id, a hooked one's conversation id), `name`, `harness`,
+/// `state`, `status` (`live`, `ended`, `lost`), `folder`, `started` and
+/// `holder_pid` (null where it is not Relay's). The listers are asked at
+/// once, each on a thread of its own, and only for `wait`: one that fails
+/// or has not answered by then is `warn`ed of and its sessions left out.
+pub fn listing(
+    home: &Home,
+    listers: Vec<Box<dyn sources::NativeLister>>,
+    wait: Duration,
+    warn: &mut dyn FnMut(String),
+) -> Vec<serde_json::Value> {
+    sessions::sweep(home);
+    let held = sessions::list(home);
+    let hooked = crate::store::state::list(home, Timestamp::now());
+    let (tx, rx) = std::sync::mpsc::channel();
+    let mut asked: Vec<String> = Vec::new();
+    for l in listers {
+        asked.push(l.harness().to_string());
+        let tx = tx.clone();
+        std::thread::spawn(move || {
+            let said = l.list_within(wait);
+            let _ = tx.send((l.harness().to_string(), said));
+        });
+    }
+    drop(tx);
+    let deadline = Instant::now() + wait;
+    let mut native = Vec::new();
+    let mut answered = std::collections::BTreeSet::new();
+    let mut heard = HashSet::new();
+    while heard.len() < asked.len() {
+        let left = deadline.saturating_duration_since(Instant::now());
+        let Ok((harness, said)) = rx.recv_timeout(left) else {
+            break;
+        };
+        heard.insert(harness.clone());
+        match said {
+            Ok(rows) => {
+                native.extend(rows);
+                answered.insert(harness);
+            }
+            Err(e) => warn(format!("{harness} did not list its sessions: {e:#}")),
+        }
+    }
+    for h in asked.iter().filter(|h| !heard.contains(*h)) {
+        warn(format!(
+            "{h} did not answer in {}s; its sessions are left out",
+            wait.as_secs_f32()
+        ));
+    }
+    let rows = sources::rows(&held, &hooked, &native, &answered);
+    rows.iter()
+        .map(|r| {
+            let own = r.key.splitn(3, ':').last().unwrap_or_default();
+            let (kind, id) = match r.source {
+                Source::Held => ("held", r.name.as_str()),
+                Source::Native => ("background", own),
+                Source::Hooked => ("terminal", own),
+            };
+            let h = held.iter().find(|h| r.source == Source::Held && h.meta.name == r.name);
+            let (status, state) = match h {
+                Some(h) => (status_word(&h.status), state_word(h)),
+                None if r.state.is_terminal() => ("ended", Some(r.state.to_string())),
+                None => ("live", Some(r.state.to_string())),
+            };
+            serde_json::json!({
+                "kind": kind,
+                "id": id,
+                "name": r.name,
+                "harness": r.harness,
+                "state": state,
+                "status": status,
+                "folder": r.cwd,
+                "started": r.started,
+                "holder_pid": h.and_then(|h| h.meta.holder_pid),
+            })
+        })
+        .collect()
+}
+
+/// `rl ls`'s lines: name, harness, kind, state, folder and age, one row a
+/// line.
+fn lines(rows: &[serde_json::Value]) -> Vec<String> {
+    let s = |r: &serde_json::Value, k: &str| r[k].as_str().unwrap_or_default().to_string();
+    rows.iter()
+        .map(|r| {
+            let state = r["state"].as_str().unwrap_or("live");
+            let age = r["started"]
+                .as_str()
+                .and_then(|t| t.parse::<Timestamp>().ok())
+                .map_or_else(|| "-".to_string(), age);
+            format!(
+                "{:<28} {:<9} {:<10} {:<10} {}  {}",
+                s(r, "name"),
+                s(r, "harness"),
+                s(r, "kind"),
+                state,
+                rl_core::display_path(Path::new(&s(r, "folder"))),
+                age
+            )
+        })
+        .collect()
 }
 
 /// Asks the holder to close its session and waits for the exit record.
@@ -305,4 +396,169 @@ pub fn color(home: &Home, name: &str, colour: &str) -> Result<String> {
     } else {
         format!("{name}: {colour}")
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sources::{NativeLister, NativeRow, NativeState};
+    use crate::store::sessions::Meta;
+    use crate::store::state::{self, HookState, Said};
+    use rl_core::state::{RunKind, RunState};
+
+    /// A harness's lister: what it says, after `delay`.
+    struct Fake {
+        harness: &'static str,
+        said: Result<Vec<NativeRow>, String>,
+        delay: Duration,
+    }
+
+    impl NativeLister for Fake {
+        fn harness(&self) -> &str {
+            self.harness
+        }
+
+        fn list(&self) -> anyhow::Result<Vec<NativeRow>> {
+            std::thread::sleep(self.delay);
+            self.said.clone().map_err(anyhow::Error::msg)
+        }
+    }
+
+    fn native(harness: &str, id: &str, session_id: &str, cwd: &Path) -> NativeRow {
+        NativeRow {
+            harness: harness.into(),
+            id: id.into(),
+            session_id: session_id.into(),
+            name: format!("{harness} fix"),
+            cwd: cwd.to_path_buf(),
+            state: NativeState {
+                words: "ready".into(),
+                state: RunState::Idle,
+            },
+            summary: None,
+            started: Some(Timestamp::from_second(100).unwrap()),
+            ended: None,
+            at: None,
+            pr: None,
+            color: None,
+        }
+    }
+
+    fn hooked(home: &Home, agent: &str, id: &str) {
+        let now = Timestamp::now();
+        let h = HookState {
+            agent: agent.into(),
+            session_id: id.into(),
+            cwd: home.path().to_path_buf(),
+            state: Said::Busy,
+            detail: None,
+            pid: None,
+            transcript_path: None,
+            started: now,
+            at: now,
+        };
+        state::write(&state::path(home, agent, id).unwrap(), &h).unwrap();
+    }
+
+    #[test]
+    fn ls_lists_what_the_list_shows_once_each_and_says_which_harness_did_not_answer() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = Home::at(tmp.path().join("relay"));
+        home.ensure_store().unwrap();
+        let dir = home.session_dir("api-sh");
+        std::fs::create_dir_all(&dir).unwrap();
+        sessions::write_meta(
+            &dir,
+            &Meta {
+                name: "api-sh".into(),
+                harness: "sh".into(),
+                kind: RunKind::Shell,
+                cwd: home.path().to_path_buf(),
+                argv: vec!["sh".into()],
+                started: Timestamp::now(),
+                socket: dir.join("sock"),
+                holder_pid: Some(1),
+            },
+        )
+        .unwrap();
+        // One in another terminal; one its harness lists too, which stands
+        // once, as listed.
+        hooked(&home, "gemini", "g-1");
+        hooked(&home, "codex", "t-1");
+        let listers: Vec<Box<dyn NativeLister>> = vec![
+            Box::new(Fake {
+                harness: "codex",
+                said: Ok(vec![native("codex", "t-1", "t-1", home.path())]),
+                delay: Duration::ZERO,
+            }),
+            Box::new(Fake {
+                harness: "claude",
+                said: Err("no answer".into()),
+                delay: Duration::ZERO,
+            }),
+            Box::new(Fake {
+                harness: "slow",
+                said: Ok(vec![native("slow", "s-1", "s-1", home.path())]),
+                delay: Duration::from_secs(5),
+            }),
+        ];
+        let mut warned = Vec::new();
+        let at = Instant::now();
+        let rows = listing(&home, listers, Duration::from_millis(300), &mut |w| warned.push(w));
+        assert!(at.elapsed() < Duration::from_secs(3), "{:?}", at.elapsed());
+        let keys: Vec<(&str, &str, &str)> = rows
+            .iter()
+            .map(|r| {
+                (
+                    r["kind"].as_str().unwrap(),
+                    r["harness"].as_str().unwrap(),
+                    r["id"].as_str().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            keys,
+            [
+                ("held", "sh", "api-sh"),
+                ("terminal", "gemini", "g-1"),
+                ("background", "codex", "t-1"),
+            ]
+        );
+        let bg = &rows[2];
+        assert_eq!(bg["name"], "codex fix");
+        assert_eq!(bg["state"], "idle");
+        assert_eq!(bg["status"], "live");
+        assert_eq!(bg["folder"], home.path().to_str().unwrap());
+        assert_eq!(rows[0]["status"], "lost");
+        assert_eq!(rows[0]["holder_pid"], 1);
+        assert_eq!(rows[1]["state"], "working");
+        assert!(rows[1]["holder_pid"].is_null());
+        let keys_of = |r: &serde_json::Value| {
+            let mut k: Vec<String> = r.as_object().unwrap().keys().cloned().collect();
+            k.sort();
+            k
+        };
+        assert!(
+            rows.iter().all(|r| keys_of(r) == keys_of(&rows[0])),
+            "the same keys: {rows:?}"
+        );
+        assert_eq!(warned.len(), 2, "{warned:?}");
+        assert!(
+            warned.iter().any(|w| w.contains("claude") && w.contains("no answer")),
+            "{warned:?}"
+        );
+        assert!(
+            warned
+                .iter()
+                .any(|w| w.contains("slow") && w.contains("did not answer")),
+            "{warned:?}"
+        );
+
+        let text = lines(&rows);
+        assert_eq!(text.len(), 3);
+        assert!(
+            text[2].starts_with("codex fix") && text[2].contains(" codex ") && text[2].contains(" background "),
+            "{text:?}"
+        );
+    }
 }

@@ -140,7 +140,7 @@ daemon's threads.
 ```sh
 rl new [--harness claude] [--cwd DIR] [--name-only] [-- ARGV...]   # a shell, or a harness; prints the name
                                 # (codex: the words are its prompt, it starts on the daemon, the thread id is printed)
-rl ls [--json]                  # the list, once
+rl ls [--json]                  # the list, once: held, background and terminal sessions
 rl attach <name>                # ctrl+\ detaches
 rl stop <name>                  # close a running session
 rl rm <name>                    # remove one that is not running
@@ -148,6 +148,15 @@ rl color <session> <name|#rrggbb|none>  # your colour for a row (a held name, or
 rl mcp --harness H              # serve send, who and inbox over stdio (agents call this)
 rl setup [--remove | --check] [--harness H]
 ```
+
+`rl ls` prints one row per session the list shows, with the same dedupe: the sessions Relay holds
+(`held`), the harnesses' own background sessions — Claude's, Codex's threads including `resting`
+ones (`background`) — and the ones their hooks tell of in other terminals (`terminal`): name,
+harness, kind, state, folder and age. `--json` gives each the keys `kind`, `id` (a held session's
+name, a background one's harness id, a terminal one's conversation id), `name`, `harness`,
+`state`, `status` (`live`, `ended`, `lost`), `folder`, `started` and `holder_pid` (null unless
+held). Each harness is asked for at most 5s; one that fails or is slow is left out, and stderr says
+which.
 
 `rl hook <agent> <Event>` is what an agent's hook calls. It is not for you to run.
 
@@ -170,7 +179,7 @@ terminal or the laptop lid costs nothing. Without a daemon, nothing else is runn
 
 A socket too long for the OS limit goes under `$TMPDIR/rl-<uid>-<hash>/`.
 
-## Adapters
+## Harness profiles
 
 A harness is a file, `detect/<name>.yaml`. The built-in ones are compiled in (`antigravity`,
 `claude`, `codex`, `cursor`, `gemini`, `opencode`, `sh`, with `generic` as the floor under all). Yours in
@@ -193,6 +202,12 @@ Keys a profile accepts:
   - `hooks`: `file`, `timeout`, `unit`, `async`, `marker`, `after_install`, `from_env`, `events`, `settings`
   - `list`: `args` and `reader` (`claude-agents` or `codex-threads`)
   - `attach`, `start`, `name`, `stop`: argument lists with `{id}` and `{name}`
+  - `ping`: what tells one of its sessions of mail from outside, with `{id}` and `{text}`
+- `mcp`: where `rl setup` registers Relay's MCP server
+  - `file`: its servers file, the first whose variables are set (`~` is `$HOME`)
+  - `cli`: the harness's own words that add and remove an entry there (`[mcp]`: `agy mcp add`);
+    without them Relay writes `mcpServers.relay` into the file itself
+  - `note`: said beside what setup did
 
 Unknown keys are an error. Old keys such as `headless`, `model_flag`, `small_model` and `says` no
 longer load; remove them. See `detect/claude.yaml` and `detect/codex.yaml` for worked examples.
