@@ -56,7 +56,7 @@ impl App {
         self.work.spawn(async move {
             let done = tokio::task::spawn_blocking(move || {
                 let said = match host.run(&home) {
-                    Ok(lines) => lines.join("\n"),
+                    Ok(lines) => crate::guide::with_next(lines).join("\n"),
                     Err(e) => format!("setup: {e:#}"),
                 };
                 (said, checked(&host, &home))

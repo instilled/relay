@@ -6,8 +6,12 @@ use std::path::PathBuf;
 
 /// Relay: list, attach and run shells for any agent. With no command, the
 /// list.
+/// `rl --version`: the crate's version and the commit it was built from
+/// (`build.rs`), for bug reports.
+const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), " (", env!("RL_GIT_COMMIT"), ")");
+
 #[derive(Parser)]
-#[command(name = "rl", version)]
+#[command(name = "rl", version = VERSION)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,

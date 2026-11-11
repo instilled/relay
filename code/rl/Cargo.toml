@@ -3,6 +3,7 @@ name = "rl"
 description = "Relay: agent-agnostic list, attach and shells"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
