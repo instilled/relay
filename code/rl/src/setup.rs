@@ -190,7 +190,7 @@ pub fn main(home: &Home, only: &[String], remove: bool) -> Result<()> {
     let lines = run(home, only, remove, &host.rl_bin, &|k| (host.env)(k), &|p| {
         (host.bin_of)(p)
     })?;
-    for l in lines {
+    for l in if remove { lines } else { crate::guide::with_next(lines) } {
         println!("{l}");
     }
     Ok(())
@@ -285,7 +285,7 @@ pub fn first_run(home: &Home, host: &Host, r: &mut impl BufRead, w: &mut impl Wr
     if ask(&needs, r, w)? {
         match host.run(home) {
             Ok(lines) => {
-                for l in lines {
+                for l in crate::guide::with_next(lines) {
                     writeln!(w, "{l}")?;
                 }
             }
