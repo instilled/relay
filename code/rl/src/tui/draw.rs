@@ -5,6 +5,7 @@
 //! on either theme (see `theme`). Nothing on screen is an id.
 
 use super::app::{App, Mode};
+use super::remove::{self, Removal};
 use super::{cmdline, help, mark, theme};
 use crate::config::Grouping;
 use crate::git::checkout_words;
@@ -187,11 +188,14 @@ pub fn list_line(
     Line::from(spans)
 }
 
+/// What an empty project's header says at its right edge.
+pub const EMPTY_HEAD: &str = "no sessions · type to start one";
+
 /// A group's header, to the width: a project's place in the title column —
 /// the folder bold, what it is in dim, the name it goes by after — or a
 /// state heading's words; then the project's git checkout from the state
 /// column on, and at the right edge, in amber, how many of its rows need you
-/// but are off the list.
+/// but are off the list — or, dim, that it has nothing in it.
 pub fn header_line(h: &Head, w: usize, tw: usize) -> Line<'static> {
     let mut l = if h.is_project() {
         let (parent, last, own) = rows::place_parts(&h.place, h.own.as_deref(), place_w(tw));
@@ -208,9 +212,11 @@ pub fn header_line(h: &Head, w: usize, tw: usize) -> Line<'static> {
     };
     let col = state_col(tw);
     let width = |l: &[Span]| l.iter().map(Span::width).sum::<usize>();
-    let right: Vec<Span<'static>> = rows::needs_hint(h.attention)
-        .map(|hint| vec![Span::styled(hint, theme::needs())])
-        .unwrap_or_default();
+    let right: Vec<Span<'static>> = match rows::needs_hint(h.attention) {
+        Some(hint) => vec![Span::styled(hint, theme::needs())],
+        None if h.empty => vec![Span::styled(EMPTY_HEAD, theme::dim())],
+        None => vec![],
+    };
     if let Some(c) = &h.checkout {
         let at = col.max(width(&l) + 2);
         l.push(Span::raw(" ".repeat(at - width(&l))));
@@ -667,7 +673,11 @@ impl App {
                 },
                 _ => "to hide".into(),
             },
-            _ => "to hide".into(),
+            Some(line @ ListLine::Group(_)) => match remove::hide_plan(&line, self.prefs()) {
+                Ok(Removal::Forget { .. }) => "to take it off".into(),
+                _ => "to hide".into(),
+            },
+            None => "to hide".into(),
         }
     }
 
@@ -982,6 +992,7 @@ mod tests {
             name: "w".into(),
             own: own.map(Into::into),
             attention: 0,
+            empty: false,
             heading: None,
             checkout: checkout.map(Box::new),
         };
@@ -1016,6 +1027,15 @@ mod tests {
         assert_eq!(line.width(), w);
         let amber = line.spans.iter().find(|s| s.content == "! 2 need you").unwrap();
         assert_eq!(amber.style, theme::needs());
+
+        // A project with nothing in it says so, dim, at the edge.
+        let mut empty = head("~/tmp/notes", None, None);
+        empty.empty = true;
+        let line = header_line(&empty, w, tw);
+        assert!(line.to_string().ends_with(EMPTY_HEAD), "{line}");
+        assert_eq!(line.width(), w);
+        let dim = line.spans.iter().find(|s| s.content == EMPTY_HEAD).unwrap();
+        assert_eq!(dim.style, theme::dim());
 
         // A heading, grouped by state, says its words where a folder goes.
         let heading = header_line(&Head::heading(rows::Heading::NeedsInput, 1), w, tw);

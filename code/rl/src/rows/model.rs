@@ -85,6 +85,9 @@ pub struct Head {
     /// toggle dropped them. The header hints at them so nothing urgent is
     /// silently buried; `0` when everything that needs you is shown.
     pub attention: usize,
+    /// No session stands under it, shown or not: a project you added or
+    /// named with nothing in it yet.
+    pub empty: bool,
     /// The heading it is, grouped by state.
     pub heading: Option<Heading>,
     /// The folder's checkout, when it is in a repo.
@@ -100,6 +103,7 @@ impl Head {
             name: h.words().into(),
             own: None,
             attention,
+            empty: false,
             heading: Some(h),
             checkout: None,
         }
@@ -112,7 +116,7 @@ impl Head {
 }
 
 /// What the list is built from besides its rows: the prefs (grouping,
-/// toggles, order, hidden, pins, names) and the search.
+/// toggles, order, hidden, pins, names, added projects) and the search.
 pub struct Context<'a> {
     pub prefs: &'a ListPrefs,
     pub filter: &'a str,

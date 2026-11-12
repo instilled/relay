@@ -510,6 +510,7 @@ impl App {
                 self.change_prefs(|p| p.hidden.retain(|h| h.key != key));
                 self.say(format!("brought back {title}"));
             }
+            Removal::Forget { key, folder, title } => self.forget_project(key, folder, title),
         }
     }
 
@@ -548,7 +549,7 @@ impl App {
 
     /// The line after the cursor, else the one before: where it goes once
     /// its own line has left.
-    fn next_key(&self) -> Option<String> {
+    pub(super) fn next_key(&self) -> Option<String> {
         let keys = self.keys();
         let at = keys.iter().position(|k| Some(k) == self.sel.as_ref())?;
         keys.get(at + 1)

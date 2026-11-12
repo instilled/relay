@@ -634,6 +634,41 @@ fn a_project_with_only_buried_rows_still_has_its_header_to_say_so() {
 }
 
 #[test]
+fn an_added_project_has_its_header_with_nothing_in_it_and_none_by_state() {
+    let rows = [
+        row("a", RunState::Working, API, "2026-09-10T11:00:00Z"),
+        of_kind(RunKind::Shell, row("s", RunState::Idle, RELAY, "2026-09-10T11:00:00Z")),
+    ];
+    let p = ListPrefs {
+        projects: vec![WEB.into(), API.into(), RELAY.into()],
+        ..ListPrefs::default()
+    };
+    let lines = build_with(&rows, &p, "");
+    assert_eq!(
+        keys(&lines),
+        ["[api]", "r:a", "[relay]", "r:s", "[web]"],
+        "by name, as any"
+    );
+    assert!(head_of(&lines, "web").empty);
+    assert!(!head_of(&lines, "api").empty, "one with sessions is not");
+    // Its sessions toggled off, it is not empty: they are there.
+    let off = toggled(&rows, &p, (true, false, false));
+    assert_eq!(keys(&off), ["[api]", "r:a", "[relay]", "[web]"]);
+    assert!(!head_of(&off, "relay").empty);
+    // The search narrows it away as it does any project.
+    assert_eq!(keys(&build_with(&rows, &p, "web")), ["[web]"]);
+    let by_state = ListPrefs {
+        grouping: Grouping::State,
+        ..p.clone()
+    };
+    assert!(!keys(&build_with(&rows, &by_state, "")).contains(&"[web]".to_string()));
+    assert!(
+        project_folders(&rows, &p).contains(&PathBuf::from(WEB)),
+        "its checkout is read"
+    );
+}
+
+#[test]
 fn agents_off_hints_a_needy_agent_on_its_project() {
     let rows = [row("ask", RunState::NeedsInput, RELAY, "2026-09-10T11:50:00Z")];
     let p = prefs(&[(RELAY, "relay")]);

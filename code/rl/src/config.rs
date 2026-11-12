@@ -1,6 +1,6 @@
 //! `config.json` in the Relay home: the harnesses `new` offers, the header
 //! badges, the setup changes you declined, and how the list stands — its grouping, its toggles, and what you
-//! moved, hid, pinned, renamed and coloured. Strict: a field this does not know is an
+//! moved, hid, pinned, renamed and coloured, and the projects you added. Strict: a field this does not know is an
 //! error, not something to carry along.
 
 use anyhow::{Context as _, Result};
@@ -72,6 +72,9 @@ pub struct ListPrefs {
     /// names no harness: `shell` (`SHELL_DEFAULT`), or an agent harness by
     /// its profile name (`claude`), the whole line its prompt.
     pub default: String,
+    /// Folders you added (`/project`): each a project on the list, with a
+    /// header even with nothing in it. In the order they were added.
+    pub projects: Vec<String>,
 }
 
 /// `list.default` for a typed line run in a shell.
@@ -90,6 +93,7 @@ impl Default for ListPrefs {
             names: BTreeMap::new(),
             colors: BTreeMap::new(),
             default: SHELL_DEFAULT.into(),
+            projects: Vec::new(),
         }
     }
 }
@@ -241,8 +245,29 @@ mod tests {
         c.list.colors.insert("r:a".into(), "pink".into());
         c.setup.declined.push("claude/settings/leftArrowOpensAgents".into());
         c.list.default = "codex".into();
+        c.list.projects = vec!["/w/docs".into(), "/w/api".into()];
         c.save(&home).unwrap();
         assert_eq!(Config::load(&home).unwrap(), c);
+    }
+
+    #[test]
+    fn projects_round_trip_and_default_to_none() {
+        let (_t, home) = home();
+        std::fs::create_dir_all(home.path()).unwrap();
+        std::fs::write(home.config_json(), r#"{"list": {"pins": []}}"#).unwrap();
+        assert!(
+            Config::load(&home).unwrap().list.projects.is_empty(),
+            "none when left out"
+        );
+        std::fs::write(home.config_json(), r#"{"list": {"projects": ["/w/b", "/w/a"]}}"#).unwrap();
+        let c = Config::load(&home).unwrap();
+        assert_eq!(c.list.projects, ["/w/b", "/w/a"], "in the order added");
+        c.save(&home).unwrap();
+        let text = std::fs::read_to_string(home.config_json()).unwrap();
+        assert!(text.contains("\"projects\""), "{text}");
+        assert_eq!(Config::load(&home).unwrap(), c);
+        std::fs::write(home.config_json(), r#"{"list": {"projects": "/w/a"}}"#).unwrap();
+        assert!(Config::load(&home).is_err(), "a list, not one");
     }
 
     #[test]
