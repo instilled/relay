@@ -40,6 +40,11 @@ const STEADY: Duration = Duration::from_millis(400);
 /// How long a hung-up attach has to end before it is killed.
 const GRACE: Duration = Duration::from_secs(2);
 
+/// The longest a typer holds a session's lock: ready, typed, taken, hung
+/// up, and a moment over.
+pub const TYPER_MOST: Duration =
+    Duration::from_secs(READY_WAIT.as_secs() + 2 * TAKE_WAIT.as_secs() + GRACE.as_secs() + 2);
+
 /// How long a lock held by someone else is tried again before it counts.
 const LOCK_GRACE: Duration = Duration::from_millis(300);
 
@@ -87,10 +92,17 @@ pub struct Attached(#[allow(dead_code)] File);
 
 impl Attached {
     /// Holds the session's lock shared. None where it cannot be had now (a
-    /// typer is at it: the attach goes ahead all the same).
+    /// typer is at it).
     pub fn hold(lock: &Path) -> Option<Attached> {
+        Self::hold_within(lock, LOCK_GRACE)
+    }
+
+    /// The same, waiting up to `wait` for a typer at it to be done: an attach
+    /// from the list waits `TYPER_MOST` so it never overlaps a line being
+    /// typed, and does not attach where the lock is still not to be had.
+    pub fn hold_within(lock: &Path, wait: Duration) -> Option<Attached> {
         let f = open(lock).ok()?;
-        let until = Instant::now() + LOCK_GRACE;
+        let until = Instant::now() + wait;
         while f.try_lock_shared().is_err() {
             if Instant::now() >= until {
                 return None;
@@ -376,11 +388,37 @@ mod tests {
         let other = Typer::take(&lock).unwrap();
         let e = type_line(&attach(tmp.path(), "idle"), tmp.path(), &typing(), "hi", &lock).unwrap_err();
         assert_eq!(e.to_string(), "a line is being typed into it already");
-        assert!(Attached::hold(&lock).is_none(), "an attach does not wait on a typer");
+        assert!(Attached::hold(&lock).is_none(), "a typer at it: not to be had now");
         drop(other);
         assert_eq!(typed(tmp.path()), None);
         type_line(&attach(tmp.path(), "idle"), tmp.path(), &typing(), "hi", &lock).unwrap();
         assert_eq!(typed(tmp.path()).as_deref(), Some("hi\n"));
+    }
+
+    #[test]
+    fn an_attach_waits_for_a_typer_to_be_done() {
+        let tmp = tempfile::tempdir().unwrap();
+        let lock = lock_path(tmp.path(), "claude", "ab12cd34");
+        let typer = Typer::take(&lock).unwrap();
+        let let_go = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(500));
+            drop(typer);
+        });
+        let started = Instant::now();
+        let you = Attached::hold_within(&lock, Duration::from_secs(5));
+        assert!(you.is_some(), "had once the typer let go");
+        assert!(
+            started.elapsed() >= Duration::from_millis(400),
+            "it waited for the typer"
+        );
+        let_go.join().unwrap();
+        drop(you);
+
+        let _busy = Typer::take(&lock).unwrap();
+        assert!(
+            Attached::hold_within(&lock, Duration::from_millis(200)).is_none(),
+            "still typing when the wait is over: not had"
+        );
     }
 
     #[test]

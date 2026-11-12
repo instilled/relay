@@ -187,42 +187,8 @@ pub fn listing(
     sessions::sweep(home);
     let held = sessions::list(home);
     let hooked = crate::store::state::list(home, Timestamp::now());
-    let (tx, rx) = std::sync::mpsc::channel();
-    let mut asked: Vec<String> = Vec::new();
-    for l in listers {
-        asked.push(l.harness().to_string());
-        let tx = tx.clone();
-        std::thread::spawn(move || {
-            let said = l.list_within(wait);
-            let _ = tx.send((l.harness().to_string(), said));
-        });
-    }
-    drop(tx);
-    let deadline = Instant::now() + wait;
-    let mut native = Vec::new();
-    let mut answered = std::collections::BTreeSet::new();
-    let mut heard = HashSet::new();
-    while heard.len() < asked.len() {
-        let left = deadline.saturating_duration_since(Instant::now());
-        let Ok((harness, said)) = rx.recv_timeout(left) else {
-            break;
-        };
-        heard.insert(harness.clone());
-        match said {
-            Ok(rows) => {
-                native.extend(rows);
-                answered.insert(harness);
-            }
-            Err(e) => warn(format!("{harness} did not list its sessions: {e:#}")),
-        }
-    }
-    for h in asked.iter().filter(|h| !heard.contains(*h)) {
-        warn(format!(
-            "{h} did not answer in {}s; its sessions are left out",
-            wait.as_secs_f32()
-        ));
-    }
-    let rows = sources::rows(&held, &hooked, &native, &answered);
+    let listed = sources::list_all(listers.into_iter().map(std::sync::Arc::from), wait, warn);
+    let rows = sources::rows(&held, &hooked, &listed.rows, &listed.answered);
     rows.iter()
         .map(|r| {
             let own = r.key.splitn(3, ':').last().unwrap_or_default();

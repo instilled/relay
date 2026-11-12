@@ -34,7 +34,7 @@ use crate::sessions::{ID, Rename};
 use anyhow::{Context, Result, anyhow, bail};
 use jiff::Timestamp;
 use rl_core::state::RunState;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
@@ -124,6 +124,25 @@ impl Codex {
 }
 
 impl Codex {
+    /// How this Codex stands against what Relay uses (`compat`), asked
+    /// once per binary; may run it. None where it is not on this machine.
+    fn compat(&self) -> Option<Compat> {
+        self.found.then(|| compat(Path::new(&self.bin))).flatten()
+    }
+
+    /// The same, only where it is known already: runs nothing.
+    fn compat_known(&self) -> Option<Compat> {
+        self.found.then(|| compat_known(Path::new(&self.bin))).flatten()
+    }
+
+    /// Err, saying why, where `f` is off for this Codex.
+    fn needs(&self, f: Feature) -> Result<()> {
+        match self.compat().and_then(|c| c.why(f)) {
+            Some(why) => bail!("{why}"),
+            None => Ok(()),
+        }
+    }
+
     /// The method its profile renames a thread by, where it is a call.
     fn rename_method(&self) -> Option<String> {
         match self.profile.sessions.as_ref()?.rename.as_ref()? {
@@ -151,7 +170,12 @@ impl Harness for Codex {
     }
 
     fn list_within(&self, wait: Duration) -> Result<Vec<NativeRow>> {
-        let threads = ask(&self.argv(&self.list), wait.min(LIST_WAIT))?;
+        let compat = self.compat().unwrap_or_default();
+        if compat.off(Feature::List).is_some() {
+            return Ok(Vec::new());
+        }
+        let resting = compat.off(Feature::Resting).is_none();
+        let threads = ask_with(&self.argv(&self.list), wait.min(LIST_WAIT), resting)?;
         Ok(rows(threads)
             .into_iter()
             .map(|mut r| {
@@ -172,6 +196,7 @@ impl Harness for Codex {
         let Some(prompt) = prompt.filter(|p| !p.trim().is_empty()) else {
             return Ok(Started::Here(vec![self.bin.clone()]));
         };
+        self.needs(Feature::Start)?;
         let (cwd, name, prompt) = (
             cwd.to_path_buf(),
             name.filter(|n| !n.trim().is_empty()).map(str::to_string),
@@ -194,20 +219,24 @@ impl Harness for Codex {
     /// A thread with a turn running: stop interrupts it.
     fn stops(&self, row: &NativeRow) -> bool {
         matches!(row.state.state, RunState::Working | RunState::NeedsInput)
+            && self.compat_known().is_none_or(|c| c.off(Feature::Stop).is_none())
     }
 
     fn stop(&self, id: &str, _: &Path) -> Result<()> {
+        self.needs(Feature::Stop)?;
         let id = id.to_string();
         self.on_daemon(move |d| interrupt(d, &id))
     }
 
     /// The call its profile's `sessions.rename` names, on its daemon
     /// (`thread/name/set`): any thread, any name, an empty one too.
+    /// Not where this Codex no longer has it: the name stays in Relay.
     fn renames(&self, _: &NativeRow, _: &str) -> bool {
-        self.rename_method().is_some()
+        self.rename_method().is_some() && self.compat_known().is_none_or(|c| c.off(Feature::Rename).is_none())
     }
 
     fn rename(&self, row: &NativeRow, name: &str, _: &Path) -> Result<()> {
+        self.needs(Feature::Rename)?;
         let method = self.rename_method().context("its profile says no `sessions.rename`")?;
         let (id, name) = (row.id.clone(), name.trim().to_string());
         self.on_daemon(move |d| set_name(d, &method, &id, &name))
@@ -217,6 +246,357 @@ impl Harness for Codex {
     fn mcp(&self, env: &dyn Fn(&str) -> Option<OsString>) -> Result<Option<Place>> {
         harness::mcp_place(self, env, How::Toml)
     }
+}
+
+/// What Relay does with Codex's daemon, each turned off on its own where
+/// the daemon no longer has what it needs (`USES`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Feature {
+    /// Its threads on the list.
+    List,
+    /// Relay's threads at rest, on the list too.
+    Resting,
+    /// A session started with a prompt.
+    Start,
+    /// A rename passed on to Codex.
+    Rename,
+    /// `/stop` interrupting a running turn.
+    Stop,
+}
+
+impl Feature {
+    /// What is so while it is off, in words.
+    pub fn off(self) -> &'static str {
+        match self {
+            Feature::List => "its threads are not listed",
+            Feature::Resting => "its threads at rest are not listed",
+            Feature::Start => "Relay cannot start one with a prompt",
+            Feature::Rename => "rename stays in Relay",
+            Feature::Stop => "Relay cannot stop its turns",
+        }
+    }
+}
+
+/// Fields Relay reads of an answer: in `file` of the generated schema, of
+/// its `def`inition (none: the answer itself).
+#[derive(Debug)]
+pub struct Reads {
+    pub file: &'static str,
+    pub def: Option<&'static str>,
+    pub fields: &'static [&'static str],
+}
+
+/// One method Relay calls on the daemon: what needs it, the params Relay
+/// sends, the fields it reads of the answer.
+#[derive(Debug)]
+pub struct Use {
+    pub method: &'static str,
+    pub feature: Feature,
+    pub sends: &'static [&'static str],
+    pub reads: &'static [Reads],
+}
+
+const THREAD_READ: &str = "v2/ThreadReadResponse.json";
+
+/// Everything Relay uses of the app-server's protocol, as the calls below
+/// (`listed`, `begin`, `set_name`, `interrupt`, `Rpc::open`) make them:
+/// checked against `codex app-server generate-json-schema` once per Codex
+/// (`compat`).
+pub const USES: &[Use] = &[
+    Use {
+        method: "initialize",
+        feature: Feature::List,
+        sends: &["clientInfo"],
+        reads: &[],
+    },
+    Use {
+        method: "thread/loaded/list",
+        feature: Feature::List,
+        sends: &["cursor"],
+        reads: &[Reads {
+            file: "v2/ThreadLoadedListResponse.json",
+            def: None,
+            fields: &["data", "nextCursor"],
+        }],
+    },
+    Use {
+        method: "thread/read",
+        feature: Feature::List,
+        sends: &["threadId", "includeTurns"],
+        reads: &[
+            Reads {
+                file: THREAD_READ,
+                def: None,
+                fields: &["thread"],
+            },
+            Reads {
+                file: THREAD_READ,
+                def: Some("Thread"),
+                fields: &[
+                    "id",
+                    "sessionId",
+                    "name",
+                    "preview",
+                    "cwd",
+                    "status",
+                    "parentThreadId",
+                    "originator",
+                    "createdAt",
+                    "updatedAt",
+                ],
+            },
+        ],
+    },
+    Use {
+        method: "thread/list",
+        feature: Feature::Resting,
+        sends: &["limit", "sortKey", "sourceKinds"],
+        reads: &[Reads {
+            file: "v2/ThreadListResponse.json",
+            def: None,
+            fields: &["data"],
+        }],
+    },
+    Use {
+        method: "thread/start",
+        feature: Feature::Start,
+        sends: &["cwd"],
+        reads: &[Reads {
+            file: "v2/ThreadStartResponse.json",
+            def: None,
+            fields: &["thread"],
+        }],
+    },
+    Use {
+        method: "turn/start",
+        feature: Feature::Start,
+        sends: &["threadId", "input"],
+        reads: &[],
+    },
+    Use {
+        method: "thread/name/set",
+        feature: Feature::Rename,
+        sends: &["threadId", "name"],
+        reads: &[],
+    },
+    Use {
+        method: "turn/interrupt",
+        feature: Feature::Stop,
+        sends: &["threadId", "turnId"],
+        reads: &[
+            Reads {
+                file: THREAD_READ,
+                def: Some("Thread"),
+                fields: &["turns"],
+            },
+            Reads {
+                file: THREAD_READ,
+                def: Some("Turn"),
+                fields: &["id", "status"],
+            },
+        ],
+    },
+];
+
+/// A method Relay uses that the schema no longer has as Relay uses it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Gone {
+    pub method: String,
+    pub feature: Feature,
+    /// What of it: `method` for the whole of it, else `params.cwd`,
+    /// `Thread.cwd`, ….
+    pub missing: Vec<String>,
+}
+
+impl Gone {
+    /// The drift check's id: `codex.schema.thread/name/set`.
+    pub fn check(&self) -> String {
+        format!("codex.schema.{}", self.method)
+    }
+
+    /// In a line: `thread/name/set gone, rename stays in Relay`.
+    pub fn words(&self) -> String {
+        let what = if self.missing.iter().any(|m| m == "method") {
+            format!("{} gone", self.method)
+        } else {
+            format!("{} lacks {}", self.method, self.missing.join(", "))
+        };
+        format!("{what}, {}", self.feature.off())
+    }
+}
+
+/// How a Codex stands against `USES`: its version, and what is gone.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Compat {
+    pub version: Option<String>,
+    pub gone: Vec<Gone>,
+}
+
+impl Compat {
+    /// What turns `f` off, where something does.
+    pub fn off(&self, f: Feature) -> Option<&Gone> {
+        self.gone.iter().find(|g| g.feature == f)
+    }
+
+    /// Why `f` is off, in a line with the version: `codex 0.170.0:
+    /// thread/name/set gone, rename stays in Relay`.
+    pub fn why(&self, f: Feature) -> Option<String> {
+        let g = self.off(f)?;
+        Some(match &self.version {
+            Some(v) => format!("codex {v}: {}", g.words()),
+            None => format!("codex: {}", g.words()),
+        })
+    }
+}
+
+/// `USES` checked against the schema `codex app-server generate-json-schema
+/// --out <dir>` wrote in `dir`. Err: there is no schema there to tell by.
+pub fn check_schema(dir: &Path) -> Result<Vec<Gone>> {
+    let read = |f: &str| -> Result<Value> {
+        let bytes = std::fs::read(dir.join(f)).with_context(|| format!("reading {f}"))?;
+        serde_json::from_slice(&bytes).with_context(|| format!("reading {f}"))
+    };
+    let requests = read("ClientRequest.json")?;
+    let entries = requests["oneOf"]
+        .as_array()
+        .context("ClientRequest.json lists no requests")?;
+    let has = |v: &Value, k: &str| v["properties"].as_object().is_some_and(|p| p.contains_key(k));
+    let mut gone = Vec::new();
+    for u in USES {
+        let entry = entries.iter().find(|e| {
+            e["properties"]["method"]["enum"]
+                .as_array()
+                .is_some_and(|m| m.iter().any(|m| m == u.method))
+        });
+        let Some(entry) = entry else {
+            gone.push(Gone {
+                method: u.method.into(),
+                feature: u.feature,
+                missing: vec!["method".into()],
+            });
+            continue;
+        };
+        let mut missing = Vec::new();
+        let params = entry["properties"]["params"]["$ref"]
+            .as_str()
+            .and_then(|r| r.rsplit('/').next())
+            .map(|n| &requests["definitions"][n]);
+        for s in u.sends {
+            if !params.is_some_and(|p| has(p, s)) {
+                missing.push(format!("params.{s}"));
+            }
+        }
+        for r in u.reads {
+            let file = read(r.file).unwrap_or(Value::Null);
+            let at = match r.def {
+                Some(d) => &file["definitions"][d],
+                None => &file,
+            };
+            for f in r.fields {
+                if !has(at, f) {
+                    missing.push(format!("{}.{f}", r.def.unwrap_or("answer")));
+                }
+            }
+        }
+        if !missing.is_empty() {
+            gone.push(Gone {
+                method: u.method.into(),
+                feature: u.feature,
+                missing,
+            });
+        }
+    }
+    Ok(gone)
+}
+
+/// What generates the schema (`codex app-server generate-json-schema
+/// --help`, codex 0.167).
+const SCHEMA: [&str; 2] = ["app-server", "generate-json-schema"];
+
+type Memo = std::sync::Mutex<Option<HashMap<String, Option<Compat>>>>;
+static COMPAT: Memo = std::sync::Mutex::new(None);
+
+/// The file under `drift::dir()` that keeps what each Codex came to.
+const COMPAT_FILE: &str = "codex-schema.json";
+
+fn kept_compat() -> HashMap<String, Option<Compat>> {
+    crate::drift::dir()
+        .and_then(|d| std::fs::read(d.join(COMPAT_FILE)).ok())
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default()
+}
+
+/// How the Codex at `bin` stands, where it is known already — in this
+/// process, or kept from an earlier run — without running anything. None:
+/// not known yet, or it could not tell.
+pub fn compat_known(bin: &Path) -> Option<Compat> {
+    let key = crate::drift::stamp(bin)?;
+    let mut memo = COMPAT.lock().ok()?;
+    let memo = memo.get_or_insert_default();
+    if let Some(c) = memo.get(&key) {
+        return c.clone();
+    }
+    let kept = kept_compat().remove(&key)?;
+    memo.insert(key, kept.clone());
+    kept
+}
+
+/// How the Codex at `bin` stands: known (`compat_known`), else asked once
+/// for this binary — its schema generated in a folder of its own and
+/// checked (`check_schema`), what is gone noticed as drift. None: it could
+/// not tell (no such command, no schema written), and nothing is turned
+/// off.
+pub fn compat(bin: &Path) -> Option<Compat> {
+    let key = crate::drift::stamp(bin)?;
+    if let Some(known) = COMPAT.lock().ok()?.get_or_insert_default().get(&key) {
+        return known.clone();
+    }
+    if let Some(kept) = kept_compat().get(&key) {
+        COMPAT.lock().ok()?.get_or_insert_default().insert(key, kept.clone());
+        return kept.clone();
+    }
+    let out = std::env::temp_dir().join(format!(
+        "rl-codex-schema-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos())
+    ));
+    let mut argv = vec![bin.to_string_lossy().into_owned()];
+    argv.extend(SCHEMA.iter().map(|a| a.to_string()));
+    argv.extend(["--out".to_string(), out.to_string_lossy().into_owned()]);
+    let ran = harness::run_quiet(&argv, START_WAIT);
+    let gone = ran.ok().and_then(|_| check_schema(&out).ok());
+    let _ = std::fs::remove_dir_all(&out);
+    let compat = gone.map(|gone| Compat {
+        version: crate::drift::version(bin),
+        gone,
+    });
+    if let Some(c) = &compat {
+        for g in &c.gone {
+            crate::drift::notice(crate::drift::Noticed::new(
+                crate::user_hooks::CODEX,
+                Some(bin),
+                &g.check(),
+                g.words(),
+            ));
+        }
+    }
+    COMPAT
+        .lock()
+        .ok()?
+        .get_or_insert_default()
+        .insert(key.clone(), compat.clone());
+    if let Some(dir) = crate::drift::dir() {
+        let mut kept = kept_compat();
+        kept.insert(key, compat.clone());
+        if let Ok(text) = serde_json::to_vec_pretty(&kept) {
+            let _ = std::fs::create_dir_all(&dir);
+            let _ = crate::drift::write_atomic(&dir.join(COMPAT_FILE), &text);
+        }
+    }
+    compat
 }
 
 /// A thread as the app-server writes it: what of it the list shows.
@@ -335,6 +715,12 @@ pub type Daemon = Rpc<ChildStdout, ChildStdin>;
 /// Runs `argv` (the proxy) and asks the daemon behind it for its threads,
 /// for no longer than `wait`. No daemon: none.
 pub fn ask(argv: &[String], wait: Duration) -> Result<Vec<Thread>> {
+    ask_with(argv, wait, true)
+}
+
+/// `ask`, Relay's threads at rest asked for too only with `resting`.
+pub fn ask_with(argv: &[String], wait: Duration, resting: bool) -> Result<Vec<Thread>> {
+    let listed = move |d: &mut Daemon| listed_with(d, resting);
     Ok(connect(argv, wait, listed)?.unwrap_or_default())
 }
 
@@ -348,6 +734,7 @@ pub fn connect<T: Send + 'static>(
     work: impl FnOnce(&mut Daemon) -> Result<T> + Send + 'static,
 ) -> Result<Option<T>> {
     let (bin, args) = argv.split_first().ok_or_else(|| anyhow!("nothing to run"))?;
+    let bin_path = bin.clone();
     let mut child = Command::new(bin);
     child
         .args(args)
@@ -373,7 +760,10 @@ pub fn connect<T: Send + 'static>(
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let said = match (stdout, stdin) {
-            (Some(r), Some(w)) => Rpc::open(r, w).and_then(|mut d| work(&mut d)),
+            (Some(r), Some(w)) => Rpc::open(r, w).and_then(|mut d| {
+                d.bin = Some(PathBuf::from(&bin_path));
+                work(&mut d)
+            }),
             _ => Err(anyhow!("no pipe to `codex app-server proxy`")),
         };
         let _ = tx.send(said);
@@ -406,6 +796,11 @@ pub fn threads(r: impl Read, w: impl Write) -> Result<Vec<Thread>> {
 /// Relay started that it has let go of (`thread/list`, the latest
 /// `RESTING`; a daemon that cannot say adds none).
 pub fn listed<R: Read, W: Write>(rpc: &mut Rpc<R, W>) -> Result<Vec<Thread>> {
+    listed_with(rpc, true)
+}
+
+/// `listed`, Relay's threads at rest asked for only with `resting`.
+pub fn listed_with<R: Read, W: Write>(rpc: &mut Rpc<R, W>, resting: bool) -> Result<Vec<Thread>> {
     let mut ids: Vec<String> = Vec::new();
     let mut cursor: Option<String> = None;
     loop {
@@ -429,6 +824,9 @@ pub fn listed<R: Read, W: Write>(rpc: &mut Rpc<R, W>) -> Result<Vec<Thread>> {
             Some(read.thread)
         })
         .collect();
+    if !resting {
+        return Ok(threads);
+    }
     let resting = rpc
         .call(
             "thread/list",
@@ -511,7 +909,14 @@ struct Read1 {
 pub struct Rpc<R: Read, W: Write> {
     ws: Ws<R, W>,
     next: u64,
+    /// The Codex behind it, where known: whose version a drift names.
+    pub bin: Option<PathBuf>,
 }
+
+/// JSON-RPC's codes for a method the server does not have, and for params
+/// it does not take: what a daemon that changed says.
+const NOT_FOUND: i64 = -32601;
+const INVALID_PARAMS: i64 = -32602;
 
 impl<R: Read, W: Write> Rpc<R, W> {
     /// Takes the WebSocket that `r` and `w` carry, and introduces Relay
@@ -520,6 +925,7 @@ impl<R: Read, W: Write> Rpc<R, W> {
         let mut rpc = Rpc {
             ws: Ws::open(r, w)?,
             next: 0,
+            bin: None,
         };
         rpc.call(
             "initialize",
@@ -553,6 +959,26 @@ impl<R: Read, W: Write> Rpc<R, W> {
             };
             if !(first..=self.next).contains(&id) || m.get("method").is_some() {
                 continue;
+            }
+            if let Some(e) = m.get("error")
+                && let Some(code @ (NOT_FOUND | INVALID_PARAMS)) = e.get("code").and_then(Value::as_i64)
+                && let Some((method, _)) = calls.get((id - first) as usize)
+            {
+                let why = if code == NOT_FOUND {
+                    "does not know"
+                } else {
+                    "does not take the params Relay sends to"
+                };
+                let message = e.get("message").and_then(Value::as_str).unwrap_or("");
+                crate::drift::notice(
+                    crate::drift::Noticed::new(
+                        crate::user_hooks::CODEX,
+                        self.bin.as_deref(),
+                        &format!("codex.rpc.{method}"),
+                        format!("its daemon {why} `{method}` ({code})"),
+                    )
+                    .with_evidence(message),
+                );
             }
             let said = match m.get("error") {
                 Some(e) => Err(e
@@ -1107,6 +1533,181 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         }
         assert!(gone(), "its whole group is killed");
+    }
+
+    fn schema_fixture() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../fixtures/codex-schema")
+    }
+
+    /// A copy of the schema fixture in `dir`, as `edit` leaves it.
+    fn schema_with(dir: &Path, edit: impl FnOnce(&mut Value, &mut Value)) -> PathBuf {
+        let out = dir.join("schema");
+        std::fs::create_dir_all(out.join("v2")).unwrap();
+        for f in std::fs::read_dir(schema_fixture().join("v2")).unwrap() {
+            let f = f.unwrap();
+            std::fs::copy(f.path(), out.join("v2").join(f.file_name())).unwrap();
+        }
+        let read =
+            |f: &str| -> Value { serde_json::from_slice(&std::fs::read(schema_fixture().join(f)).unwrap()).unwrap() };
+        let mut req = read("ClientRequest.json");
+        let mut thread = read(THREAD_READ);
+        edit(&mut req, &mut thread);
+        std::fs::write(out.join("ClientRequest.json"), req.to_string()).unwrap();
+        std::fs::write(out.join(THREAD_READ), thread.to_string()).unwrap();
+        out
+    }
+
+    #[test]
+    fn the_schema_codex_writes_has_everything_relay_uses() {
+        assert_eq!(
+            check_schema(&schema_fixture()).unwrap(),
+            vec![],
+            "codex 0.167's, trimmed"
+        );
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(check_schema(tmp.path()).is_err(), "no schema: cannot tell");
+    }
+
+    #[test]
+    fn a_method_or_field_gone_turns_off_only_what_needs_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = schema_with(tmp.path(), |req, thread| {
+            req["oneOf"]
+                .as_array_mut()
+                .unwrap()
+                .retain(|e| e["properties"]["method"]["enum"][0] != "thread/name/set");
+            req["definitions"]["TurnInterruptParams"]["properties"]
+                .as_object_mut()
+                .unwrap()
+                .remove("turnId");
+            thread["definitions"]["Thread"]["properties"]
+                .as_object_mut()
+                .unwrap()
+                .remove("cwd");
+        });
+        let gone = check_schema(&dir).unwrap();
+        let words: Vec<String> = gone.iter().map(Gone::words).collect();
+        assert_eq!(
+            words,
+            [
+                "thread/read lacks Thread.cwd, its threads are not listed",
+                "thread/name/set gone, rename stays in Relay",
+                "turn/interrupt lacks params.turnId, Relay cannot stop its turns",
+            ]
+        );
+        assert_eq!(gone[1].check(), "codex.schema.thread/name/set");
+        let c = Compat {
+            version: Some("0.170.0".into()),
+            gone,
+        };
+        assert_eq!(
+            c.why(Feature::Rename).as_deref(),
+            Some("codex 0.170.0: thread/name/set gone, rename stays in Relay")
+        );
+        assert!(c.off(Feature::Start).is_none() && c.off(Feature::Resting).is_none());
+    }
+
+    #[test]
+    fn a_codex_without_thread_name_set_keeps_renames_in_relay_and_says_so_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bin = tmp.path().join("codex");
+        std::fs::copy(
+            concat!(env!("CARGO_MANIFEST_DIR"), "/../fixtures/stand-in-codex-daemon"),
+            &bin,
+        )
+        .unwrap();
+        std::fs::write(tmp.path().join("codex.schema"), schema_fixture().display().to_string()).unwrap();
+        std::fs::write(tmp.path().join("codex.schema-drop"), "thread/name/set\n").unwrap();
+        let h = crate::harness::of(Registry::builtin().profile("codex").unwrap(), Some(bin.clone()));
+        let row = NativeRow {
+            harness: "codex".into(),
+            id: "t1".into(),
+            session_id: "t1".into(),
+            name: "x".into(),
+            cwd: "/w".into(),
+            state: state(&Status {
+                kind: "active".into(),
+                active_flags: vec![],
+            }),
+            summary: None,
+            started: None,
+            ended: None,
+            at: None,
+            pr: None,
+            color: None,
+        };
+        assert!(h.renames(&row, "y"), "not known yet: as ever");
+        let (e, noticed) = crate::drift::capture(|| h.rename(&row, "y", tmp.path()).unwrap_err());
+        assert_eq!(
+            e.to_string(),
+            "codex 0.167.2: thread/name/set gone, rename stays in Relay"
+        );
+        assert_eq!(noticed.len(), 1);
+        assert_eq!(noticed[0].check, "codex.schema.thread/name/set");
+        assert_eq!(noticed[0].bin.as_deref(), Some(bin.as_path()));
+        assert!(!h.renames(&row, "y"), "known now: the name stays in Relay");
+        assert!(h.stops(&row), "the rest goes on");
+        let ((), again) = crate::drift::capture(|| {
+            let _ = h.rename(&row, "y", tmp.path());
+        });
+        assert!(again.is_empty(), "checked once per binary");
+    }
+
+    #[test]
+    fn a_method_the_daemon_does_not_know_is_drift() {
+        let (ours, theirs) = UnixStream::pair().unwrap();
+        let server = std::thread::spawn(move || {
+            let mut r = BufReader::new(theirs.try_clone().unwrap());
+            let mut w = theirs;
+            loop {
+                let mut line = String::new();
+                r.read_line(&mut line).unwrap();
+                if line == "\r\n" {
+                    break;
+                }
+            }
+            w.write_all(b"HTTP/1.1 101 Switching Protocols\r\n\r\n").unwrap();
+            let mut ws = Ws { r, w: std::io::sink() };
+            while let Ok(text) = ws.recv() {
+                let m: Value = serde_json::from_str(&text).unwrap();
+                let Some(id) = m.get("id") else { continue };
+                let answer = match m["method"].as_str().unwrap() {
+                    "initialize" => json!({"jsonrpc": "2.0", "id": id, "result": {}}),
+                    "thread/start" => {
+                        json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32602, "message": "unknown field `cwd` in /srv/ann/x"}})
+                    }
+                    "thread/read" => {
+                        json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32600, "message": "thread not found"}})
+                    }
+                    m => {
+                        json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32601, "message": format!("method not found: {m}")}})
+                    }
+                };
+                let data = answer.to_string().into_bytes();
+                let mut f = vec![0x81, data.len() as u8];
+                f.extend(data);
+                w.write_all(&f).unwrap();
+            }
+        });
+        let mut rpc = Rpc::open(ours.try_clone().unwrap(), ours.try_clone().unwrap()).unwrap();
+        let ((), noticed) = crate::drift::capture(|| {
+            assert!(set_name(&mut rpc, "thread/name/set", "t1", "x").is_err());
+            assert!(rpc.call("thread/read", json!({"threadId": "t1"})).is_err());
+            assert!(rpc.call("thread/start", json!({"cwd": "/w"})).is_err());
+        });
+        ours.shutdown(std::net::Shutdown::Both).unwrap();
+        server.join().unwrap();
+        let checks: Vec<&str> = noticed.iter().map(|n| n.check.as_str()).collect();
+        assert_eq!(
+            checks,
+            ["codex.rpc.thread/name/set", "codex.rpc.thread/start"],
+            "a thread not found is no drift"
+        );
+        assert_eq!(noticed[0].what, "its daemon does not know `thread/name/set` (-32601)");
+        assert_eq!(
+            noticed[1].evidence.as_deref(),
+            Some("unknown field `cwd` in /<project>")
+        );
     }
 
     /// Against the real daemon: `cargo test -p rl-detect -- --ignored`.

@@ -588,6 +588,11 @@ mod tests {
         assert_eq!(ag.bins, ["agy"]);
         assert!(ag.hooks.is_none() && ag.sessions.is_none());
         assert_eq!(ag.prompt_args("fix it"), ["-i", "fix it"]);
+        assert_eq!(
+            ag.prompt_args("fix it\nthen test"),
+            ["-i", "fix it\nthen test"],
+            "one argument"
+        );
         assert!(ag.prompt_args(" ").is_empty(), "no prompt: just agy");
         assert_eq!(r.profile("claude").unwrap().prompt_args("fix it"), ["fix it"]);
         assert_eq!(r.profile("codex").unwrap().prompt_args("fix it"), ["fix it"]);
