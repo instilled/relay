@@ -657,13 +657,13 @@ impl App {
         match self.selected() {
             Some(ListLine::Session(r)) => match r.source {
                 Source::Held if r.state.is_terminal() || r.state == RunState::Stale => "to remove".into(),
-                Source::Held => "to stop".into(),
+                Source::Held => "to stop or remove".into(),
                 Source::Native if hidden(&r.key) => "to bring back".into(),
-                Source::Native => match (&r.stop, &r.close) {
-                    (Some(_), Some(c)) => format!("to stop or {}", c.words),
-                    (None, Some(c)) => format!("to {}", c.words),
-                    (Some(_), None) => "to stop".into(),
-                    (None, None) => "to hide".into(),
+                Source::Native => match (r.stop.is_some(), r.removes) {
+                    (true, true) => "to stop or remove".into(),
+                    (false, true) => "to remove".into(),
+                    (true, false) => "to stop".into(),
+                    (false, false) => "to hide".into(),
                 },
                 _ => "to hide".into(),
             },

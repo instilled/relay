@@ -5,9 +5,15 @@
 # background, it says `0a1b2c3d`, where, and how to attach. What it lists is
 # the tests' to say (`sources::StandIn`). Its `attach` draws an idle Claude
 # (`stand-in-claude-attach`), keeping what is typed into it in `typed` in the
-# folder it is run in.
+# folder it is run in. Its `rm` refuses, as `claude rm` does a session with
+# unpushed commits, where the folder has a `refuse-rm`: what is in it, said
+# on stderr, and exit 1.
 [ "$1" = attach ] && exec python3 "$(dirname "$0")/stand-in-claude-attach" idle "$PWD"
 printf '%s\n' "$@" > argv
+if [ "$1" = rm ] && [ -f refuse-rm ]; then
+  cat refuse-rm >&2
+  exit 1
+fi
 case " $* " in
 *' --bg '*) echo "started 0a1b2c3d in $PWD · claude attach 0a1b2c3d" ;;
 esac

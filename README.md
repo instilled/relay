@@ -49,7 +49,7 @@ agent, the rest is its prompt. Anything else runs as a shell command.
 | `ctrl+f` | find |
 | `ctrl+r` `ctrl+t` `ctrl+g` | rename (the name starts selected: type over it), pin, colour |
 | `ctrl+s` | group by project or by state |
-| `ctrl+x ctrl+x` | stop, then remove or hide; on a Claude or Codex session, asks: stop, or remove / archive |
+| `ctrl+x ctrl+x` | on a session, asks the same for every harness: `s stop` (while it runs) · `r remove`, which deletes it for good; anything else is hidden |
 | `/` | a command (`/setup`, `/rename`, `/help`, …) |
 | `ctrl+c ctrl+c` | quit |
 
@@ -189,8 +189,8 @@ searches.
 | `/rename <name>` | rename the row or project; with no name, as `ctrl+r`: the name typed where it stands (empty goes back to its own). A Codex thread is renamed on its daemon (`thread/name/set`), so `codex resume` and Codex's lists show it too; an idle Claude session has `/rename <name>` typed into it (see Known limits). Until the harness has it, or where it can't take it (a busy, stopped or attached Claude, a session its hooks told of), the name is Relay's: yours, the harness's own dim beside it, and the search finds both; once the harness calls it so, Relay keeps no name of its own for it. Empty clears a Codex thread's name on the daemon too; a Claude's only in Relay |
 | `/pin` | pin or unpin, as `ctrl+t` |
 | `/hide` | hide the row or project, or bring it back |
-| `/stop` | stop a live session, held or the harness's own, at once (no second press, no question); a Codex thread has its running turn interrupted and stays |
-| `/rm` | remove an ended session Relay holds; on a Claude or Codex session, ask to remove or archive it (`enter` confirms, `esc` cancels) |
+| `/stop` | stop a live session at once (no second press, no question): a held one's holder closed, `claude stop <id>`, a Codex thread's running turn interrupted (the thread stays) |
+| `/rm` | remove the session for good, asked first (`enter` confirms, `esc` cancels): a held one stopped if need be and removed, `claude rm <id>`, a Codex thread deleted (`thread/delete`, its running turn interrupted first) |
 | `/agents` `/shells` `/hidden` | show agents, shells, hidden, as `ctrl+a` `ctrl+l` `ctrl+o` |
 | `/group` | by project or by state, as `ctrl+s` |
 | `/default <harness\|shell>` | what a line that names no harness starts: `shell`, or an agent harness (`claude`, `codex`, `agy`…) that takes the whole line as its prompt; kept in `config.json` as `list.default` |
@@ -211,7 +211,7 @@ in the footer and changes nothing; an unknown one stays on the line to mend.
 | `pgup` `pgdn` `home` `end` | page (`home` `end` with nothing typed) |
 | `/` | a command (above) |
 | `ctrl+f` | search |
-| `ctrl+x ctrl+x` | stop, then remove or hide; on a Claude or Codex session, a choice in the footer (below, and under Codex) |
+| `ctrl+x ctrl+x` | on a session, the same choice in the footer for every harness: `s stop` while it runs, `r remove` (below); anything else is hidden |
 | `ctrl+r` | rename: the name stands selected, so what you type or paste replaces it, `backspace` clears it, `←` `→` `home` `end` keep it to edit; `enter` keeps, `esc` cancels |
 | `ctrl+t` | pin |
 | `ctrl+g` | your colour for the row: none, red, blue, green, yellow, purple, orange, pink, cyan (a colour the harness set wins on screen; a `#rrggbb` set in `config.json` or by `rl color` goes to red) |
@@ -228,12 +228,20 @@ leaves it where it is. The list takes the mouse, so hold shift (option, on macOS
 session, `←` on an empty prompt does the same: it would open Claude's own agents view, which the
 list is, so the list comes back in its place and the session keeps running.
 
-`ctrl+x` twice on one of Claude's own sessions asks, in the footer, with the row's name and harness:
-`s stop · keeps the conversation   r remove · deletes it and its worktree   esc cancel`. `s` (or
-`enter`, so `ctrl+x ctrl+x enter` stops as it always did) runs `claude stop <id>`: its process
-ends, `claude attach` opens it again. `r` runs `claude rm <id>`, which deletes it and its worktree
-when that is safe, and the row goes. One that has already ended is offered only the remove. A
-session Relay holds (a shell, Antigravity, …) is stopped and removed as ever, without a question.
+`ctrl+x` twice on a session asks the same of every harness, in the footer, with the row's name and
+harness: `s stop · keeps the session   r remove · deletes the session for good   esc cancel`. One
+that has already ended is offered only the remove. `s` (or `enter`, so `ctrl+x ctrl+x enter` stops
+as it always did) and `r` do what that harness has for them:
+
+| harness | `s` stop | `r` remove |
+| --- | --- | --- |
+| Claude | `claude stop <id>`: its process ends, `claude attach` opens it again | `claude rm <id>`: it and its worktree, when that is safe |
+| Codex | `turn/interrupt` on the running turn; the thread stays | `thread/delete` on the daemon, the running turn interrupted first |
+| held (a shell, Gemini, Antigravity, …) | its holder closed; the row stays, ended | stopped first if it runs, then its folder removed |
+
+The row goes once it is removed. Where the harness refuses — `claude rm` on a session with unpushed
+commits, or a worktree it couldn't remove — what it said stands in the footer as it said it, and
+the row stays.
 
 ### Codex
 
@@ -253,10 +261,11 @@ daemon's threads.
 - The daemon lets go of an idle thread with no client after a couple of minutes. The threads Relay
   started (Codex records `relay` as their originator) stay on the list as `resting`, the latest 50
   (`thread/list`). Enter resumes one; mail pings it (`codex queue … --resume` loads it again).
-- `ctrl+x` twice on a Codex row asks, in the footer: `s stop the turn   a archive · off the list,
-  codex unarchive brings it back   esc cancel`. `s` (or `enter`) interrupts a running turn
-  (`turn/interrupt`; the thread stays); `a` runs `codex archive <id>`. A thread with no turn running
-  is offered only the archive. `/stop` interrupts at once. Relay never offers `codex delete`.
+- `ctrl+x` twice on a Codex row asks what it asks of any session: `s stop · keeps the session   r
+  remove · deletes the session for good   esc cancel`. `s` (or `enter`) interrupts a running turn
+  (`turn/interrupt`; the thread stays); `r` deletes the thread on the daemon (`thread/delete`), its
+  running turn interrupted first. A thread with no turn running is offered only the remove.
+  `/stop` interrupts at once.
 
 ## Commands
 
@@ -333,7 +342,8 @@ Keys a profile accepts:
 - `sessions`: the harness's own sessions
   - `hooks`: `file`, `timeout`, `unit`, `async`, `marker`, `after_install`, `from_env`, `events`, `settings`
   - `list`: `args` and `reader` (`claude-agents` or `codex-threads`)
-  - `attach`, `start`, `name`, `stop`: argument lists with `{id}` and `{name}`
+  - `attach`, `start`, `name`, `stop`, `remove`: argument lists with `{id}` and `{name}`
+    (`remove` deletes one for good: Claude's `[rm, "{id}"]`)
   - `ping`: what tells one of its sessions of mail from outside, with `{id}` and `{text}`
   - `rename`: how a name you give one reaches the harness: `{ rpc: <method> }` (a call on its
     daemon, Codex's `thread/name/set`) or `{ type: "/rename {name}" }` (a line typed into an idle
@@ -396,7 +406,7 @@ yourself. Codex has no automatic address yet, so it passes them.
 
 Relay depends on details of Claude and Codex that any update can change: the shape of `claude
 agents --json`, the id `claude --bg` prints, the methods and fields of Codex's app-server, the
-subcommands Relay runs (`claude rm`, `claude stop`, `codex archive`, `codex queue`). When one of them
+subcommands Relay runs (`claude rm`, `claude stop`, `codex queue`). When one of them
 stops being what Relay expects, it notices at that moment and says so instead of failing vaguely:
 
 - `claude agents --json` is read tolerantly: fields it adds are let be; an entry without what Relay
@@ -404,7 +414,8 @@ stops being what Relay expects, it notices at that moment and says so instead of
   Sessions in other terminals still show, by their hooks.
 - Codex is checked once per version (`codex app-server generate-json-schema`) against every method
   and field Relay uses. One that is gone turns off only what needs it: without `thread/name/set` a
-  rename stays in Relay, without `turn/interrupt` `/stop` says it can't. A method the daemon answers
+  rename stays in Relay, without `turn/interrupt` `/stop` says it can't, without `thread/delete` a
+  Codex thread is not offered a remove. A method the daemon answers
   with "method not found" or "invalid params" is noticed too.
 - `claude --bg` that prints no session id, and a subcommand Relay runs that the harness rejects as
   a usage error.
@@ -424,9 +435,12 @@ structural line (field names, an error's words with paths as `~/<project>` and q
 Not verified against the live CLIs:
 
 - What `claude --bg` prints. Relay takes the first 8-hex word as the session id; if there is none, the start says so.
-- `claude stop <id>` and `claude rm <id>` from `ctrl+x`, and `codex archive <id>`: their help was
-  read (claude 2.1.322, codex 0.167), the commands were not run.
-- `turn/interrupt` from `ctrl+x` on a Codex row, and `codex app-server daemon start` when no daemon
+- `claude stop <id>` and `claude rm <id>` from `ctrl+x`: their help was read (claude 2.1.322), the
+  commands were not run. Where `claude rm` refuses (unpushed commits, a worktree it couldn't
+  remove), what it said is shown as it said it and the row stays; Relay never passes
+  `--discard-unpushed` or `--force-remove-worktree`.
+- `turn/interrupt` and `thread/delete` from `ctrl+x` on a Codex row (read off codex 0.167's
+  app-server schema), and `codex app-server daemon start` when no daemon
   runs. A started thread's first turn, a pending approval shown by `codex resume`, and an idle
   thread's unloading were checked on codex 0.167.
 - The Gemini MCP entry (`mcpServers.relay` in its `settings.json`).
