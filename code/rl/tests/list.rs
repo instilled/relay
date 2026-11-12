@@ -1,5 +1,5 @@
 //! The list's actions on sessions a real `rl-session` holder runs: stopping
-//! one with `^x ^x`, and starting one from the form.
+//! or removing one with `^x ^x` and its question, and starting one from the form.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use rl::spawn::{self, Start};
@@ -93,12 +93,15 @@ async fn ctrl_x_twice_stops_a_live_held_shell() {
     app.select(Some(format!("r:{name}")));
     ctrl(&mut app, 'x');
     assert!(
-        app.flashing().is_some_and(|m| m.contains(&format!("stop {name}"))),
+        app.flashing()
+            .is_some_and(|m| m.contains(&format!("stop or remove {name}"))),
         "{:?}",
         app.flashing()
     );
     assert_eq!(status(&f.home, &name), Some(Status::Live), "not on the first press");
     ctrl(&mut app, 'x');
+    assert!(app.work.is_empty(), "asked first");
+    press(&mut app, KeyCode::Char('s'));
     app.finish().await;
     // The holder writes its exit once the shell has gone, which under load
     // takes a while.
@@ -114,12 +117,34 @@ async fn ctrl_x_twice_stops_a_live_held_shell() {
         "{:?}",
         app.flashing()
     );
-    // Its row stays, ended, until ^x twice again removes it.
+    // Its row stays, ended, until ^x twice again, then r, removes it.
     assert_eq!(app.sel.as_deref(), Some(format!("r:{name}").as_str()));
     ctrl(&mut app, 'x');
     ctrl(&mut app, 'x');
+    press(&mut app, KeyCode::Char('r'));
     app.finish().await;
     assert_eq!(status(&f.home, &name), None);
+}
+
+#[tokio::test]
+async fn r_removes_a_live_held_shell_stopping_it_first() {
+    if !holder() {
+        return;
+    }
+    let f = fixture();
+    let name = sh(&f.home, &f.folder).await;
+    let mut app = App::new(f.home.clone()).unwrap();
+    app.select(Some(format!("r:{name}")));
+    ctrl(&mut app, 'x');
+    ctrl(&mut app, 'x');
+    press(&mut app, KeyCode::Char('r'));
+    app.finish().await;
+    assert_eq!(status(&f.home, &name), None, "{:?}", app.flashing());
+    assert!(
+        app.flashing().is_some_and(|m| m.starts_with("removed")),
+        "{:?}",
+        app.flashing()
+    );
 }
 
 fn run(app: &mut App, line: &str) {
@@ -130,7 +155,7 @@ fn run(app: &mut App, line: &str) {
 }
 
 #[tokio::test]
-async fn slash_rm_is_refused_on_a_live_held_shell_and_slash_stop_stops_it_at_once() {
+async fn slash_rm_asks_on_a_live_held_shell_and_slash_stop_stops_it_at_once() {
     if !holder() {
         return;
     }
@@ -139,12 +164,8 @@ async fn slash_rm_is_refused_on_a_live_held_shell_and_slash_stop_stops_it_at_onc
     let mut app = App::new(f.home.clone()).unwrap();
     app.select(Some(format!("r:{name}")));
     run(&mut app, "/rm");
-    assert!(
-        app.flashing().is_some_and(|m| m.contains("is live · /stop it first")),
-        "{:?}",
-        app.flashing()
-    );
-    assert!(app.work.is_empty());
+    assert!(app.work.is_empty(), "asked first");
+    press(&mut app, KeyCode::Esc);
     assert_eq!(status(&f.home, &name), Some(Status::Live), "left as it was");
     // Typing the command is the confirmation: no second press.
     run(&mut app, "/stop");
@@ -158,6 +179,7 @@ async fn slash_rm_is_refused_on_a_live_held_shell_and_slash_stop_stops_it_at_onc
     assert!(ended(), "{:?}", status(&f.home, &name));
     app.reload();
     run(&mut app, "/rm");
+    press(&mut app, KeyCode::Enter);
     app.finish().await;
     assert_eq!(status(&f.home, &name), None);
 }

@@ -444,38 +444,45 @@ impl App {
                 });
             }
             Removal::Ask(ask) => self.ask(ask),
-            Removal::CloseNative {
+            Removal::RemoveNative {
                 harness,
                 id,
                 cwd,
                 title,
-                done,
             } => {
                 let Some(a) = sources::harness(&harness) else {
-                    return self.say(format!("{harness} has no way to close {title} here"));
+                    return self.say(format!("{harness} has no way to remove {title} here"));
                 };
-                self.say(format!("{title}…"));
+                self.say(format!("removing {title}…"));
                 let (next, key) = (self.next_key(), native_key(a, &id));
                 self.work.spawn(async move {
-                    let run = tokio::task::spawn_blocking(move || a.close(&id, &cwd)).await;
+                    let run = tokio::task::spawn_blocking(move || a.remove(&id, &cwd)).await;
                     match run {
                         Ok(Ok(())) => Done {
                             select: next,
                             forget: Some(key),
                             ask_native: true,
-                            ..Done::said(format!("{done} {title}"))
+                            ..Done::said(format!("removed {title}"))
                         },
-                        Ok(Err(e)) => Done::said(format!("{title}: {e:#}")),
-                        Err(e) => Done::said(format!("{title}: {e}")),
+                        // What its harness said, as it said it: the row stays.
+                        Ok(Err(e)) => Done::said(format!("remove {title}: {e:#}")),
+                        Err(e) => Done::said(format!("remove {title}: {e}")),
                     }
                 });
             }
-            Removal::Remove { name, title } => {
+            Removal::Remove { name, title, live } => {
                 // Whatever was kept for it goes with it: a session started
-                // later by the same name is a new one.
+                // later by the same name is a new one. One still going is
+                // stopped first.
                 let next = self.next_key();
                 let home = self.home.clone();
+                if live {
+                    self.say(format!("stopping {title}…"));
+                }
                 self.work.spawn(async move {
+                    if live && let Err(e) = cmd::stop(&home, &name).await {
+                        return Done::said(format!("remove {title}: {e:#}"));
+                    }
                     match cmd::rm(&home, &name).await {
                         Ok(()) => Done {
                             select: next,

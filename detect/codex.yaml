@@ -66,18 +66,10 @@ sessions:
   # `thread/resume` says so), with any approval it waits on.
   list: { args: [app-server, proxy], reader: codex-threads }
   attach: [resume, "{id}"]
-  # ^x twice on one asks, in the footer: `s` interrupts its running turn
-  # (enter does too; the thread stays), and `close` archives it (`codex
-  # archive <id>`: off codex's lists, `codex unarchive` brings it back). One
-  # with no turn running is offered only the archive. Never `codex delete`,
-  # which is for good. Read off `codex archive --help`, codex 0.167.
-  stop_choice: { words: "stop the turn" }
-  close:
-    key: a
-    words: archive
-    says: "off the list, codex unarchive brings it back"
-    done: archived
-    args: [archive, "{id}"]
+  # Stopping one interrupts its running turn (`turn/interrupt`; the thread
+  # stays). Removing one (^x twice, then `r`; /rm) deletes it for good:
+  # `thread/delete` on the daemon, its running turn interrupted first. Both
+  # are calls Relay makes itself; codex 0.167's app-server schema.
   # Mail Relay leaves for one of its sessions (`rl mcp`'s send) is queued on
   # its thread as well, and the thread resumed on the daemon, so it hears of
   # it: `{id}` is the thread's id, `{text}` the note. `codex queue --help`,

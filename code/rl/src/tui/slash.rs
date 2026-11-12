@@ -293,41 +293,42 @@ impl App {
         }
         match self.removal() {
             Ok(p @ (Removal::Stop { .. } | Removal::StopNative { .. })) => self.remove(p),
-            // Its harness's stop, at once: no question asked.
-            Ok(Removal::Ask(a)) if a.stop.is_some() => {
+            // The stop, at once: no question asked.
+            Ok(Removal::Ask(a)) if a.stop => {
                 let stop = a.first();
                 self.remove(stop)
             }
-            Ok(Removal::Ask(a)) => self.say(format!(
-                "{} has nothing running to stop · /rm offers to {} it",
-                a.title, a.close.words
-            )),
-            Ok(Removal::Remove { title, .. }) => self.say(format!("{title} has ended · /rm removes it")),
-            Ok(Removal::Hide { title, .. } | Removal::Unhide { title, .. } | Removal::CloseNative { title, .. }) => {
-                self.say(format!("{title} is not one the list can stop"))
-            }
+            Ok(Removal::Ask(a)) => self.say(format!("{} has nothing running to stop · /rm removes it", a.title)),
+            Ok(
+                Removal::Hide { title, .. }
+                | Removal::Unhide { title, .. }
+                | Removal::Remove { title, .. }
+                | Removal::RemoveNative { title, .. },
+            ) => self.say(format!("{title} is not one the list can stop")),
             Err(why) => self.say(why),
         }
     }
 
-    /// `/rm`: an ended session of Relay's removed, and what was kept for it;
-    /// one of a harness's own that it can close asked about, the close the
-    /// only choice (`enter` takes it).
+    /// `/rm`: the session under the cursor deleted for good — `^x` twice's
+    /// remove, asked about with the remove the only choice (`enter` takes
+    /// it).
     fn rm_here(&mut self) {
         if !matches!(self.selected(), Some(Line::Session(_))) {
-            return self.say("/rm removes an ended session of Relay's");
+            return self.say("/rm removes the session under the cursor");
         }
         match self.removal() {
-            Ok(p @ Removal::Remove { .. }) => self.remove(p),
-            Ok(Removal::Ask(a)) => self.ask(a.close_only()),
+            Ok(Removal::Ask(a)) => self.ask(a.remove_only()),
             Ok(Removal::Stop { title, .. } | Removal::StopNative { title, .. }) => {
-                self.say(format!("{title} is live · /stop it first"))
+                self.say(format!("{title} can only be stopped from here · /stop"))
             }
-            Ok(Removal::Hide { title, .. } | Removal::Unhide { title, .. } | Removal::CloseNative { title, .. }) => {
-                self.say(format!(
-                    "/rm removes an ended session of Relay's · {title} is not one (/hide hides it)"
-                ))
-            }
+            Ok(
+                Removal::Hide { title, .. }
+                | Removal::Unhide { title, .. }
+                | Removal::Remove { title, .. }
+                | Removal::RemoveNative { title, .. },
+            ) => self.say(format!(
+                "/rm removes a session Relay or its harness can remove · {title} is not one (/hide hides it)"
+            )),
             Err(why) => self.say(why),
         }
     }
