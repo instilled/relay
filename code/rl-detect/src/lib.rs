@@ -20,6 +20,8 @@
 //! - [`mcp_entry`]: Relay's MCP server as an entry in a harness's own list
 //!   of servers, for `rl setup`.
 //! - [`settings`]: keys `rl setup` sets in a harness's own global config.
+//! - [`typing`]: one line typed into an idle session of a harness's own,
+//!   through its attach on a hidden pty (a rename, a wake for mail).
 
 pub mod claude;
 pub mod claude_native;
@@ -29,6 +31,7 @@ pub mod mcp_entry;
 pub mod registry;
 pub mod sessions;
 pub mod settings;
+pub mod typing;
 pub mod user_hooks;
 
 pub use rl_session::detect::{ansi, heuristics as pty};

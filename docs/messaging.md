@@ -19,15 +19,24 @@ How the recipient learns it has mail depends on its harness:
 
 - **Codex** is pinged. `send` also runs `codex queue … --resume` on the recipient's thread, which
   queues a turn telling it to read its inbox. An idle thread wakes up and reads it.
-- **Claude** hears it from Relay's hooks. While mail waits, each of your prompts carries a line
-  saying so, and when Claude finishes a turn the hook keeps it going one more turn to read it. A
-  Claude session that is idle and that nobody prompts hears of it at its next turn. For one of
-  Claude's background sessions, `send` also tells the sending Claude how to wake it now (Claude's
-  own `SendMessage`).
+- **Claude** depends on how the session stands:
+
+  | the Claude session | how it learns | `send` says |
+  | --- | --- | --- |
+  | one of Claude's background sessions, idle | woken: Relay types `relay mail from <you>: call the relay inbox tool to read it` into it (through `claude attach` on a hidden terminal) | `· woke claude` |
+  | one of Claude's background sessions that has stopped or ended | carried on in the background with that line as its prompt (`claude --resume … --bg`) | `· resumed claude` |
+  | working, or waiting on you | Relay's hooks: when it finishes its turn, the hook keeps it going one more turn to read the mail | `· claude is busy; it will see it at the end of its turn` |
+  | open in your terminal, or held by Relay | Relay's hooks: each of your prompts carries a line saying mail waits, and the end of a turn keeps it going to read it | nothing more |
+
+  Relay types into an idle session only when its screen shows an empty prompt and nothing
+  running, and never while you are attached to it from the list. Where it could not (you are
+  attached, its screen was in doubt), `send` says why and, from another Claude, how to wake it
+  with Claude's own `SendMessage`.
 - **Gemini, Antigravity and the rest** find it when they call `inbox`; ask them to.
 
 Replies are messages too: an agent that wants an answer asks for one, and the other agent `send`s
-it back. Nothing is typed into an agent's terminal.
+it back. Nothing is typed into a terminal you are using: the one line Relay types into an idle
+Claude goes through an attach of its own, which it lets go of at once.
 
 The sender is known automatically in a session Relay holds and in Claude. A Codex agent passes its
 own address (`from`, `as`) itself: tell it which row it is if it asks.
@@ -44,7 +53,8 @@ calls `who` to find the address.
 > findings back to you. Then fix what it found.
 
 The Claude session sends the request; Codex is pinged, reviews, and sends its findings back; Claude
-reads them from its inbox at its next turn (the hook prompts it).
+reads them from its inbox at the end of its turn (the hook prompts it), or at once if it had gone
+idle in Claude's background (Relay wakes it).
 
 ### Hand-off when something is done
 
@@ -76,8 +86,9 @@ Each agent stays in its own repo and context; the message carries only what the 
 > Use who to list the other agents. Ask each one for a two-line status (what it's doing, what
 > it's blocked on), then read the replies from your inbox and give me a table.
 
-Codex sessions answer right away (they're pinged); Claude ones answer on their next turn; the
-others when they check their inbox.
+Codex sessions answer right away (they're pinged), and so do Claude's idle background sessions
+(they're woken); busy Claude ones at the end of their turn; the others when they check their
+inbox.
 
 ## Good to know
 
