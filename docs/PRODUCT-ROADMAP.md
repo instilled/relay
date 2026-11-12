@@ -6,17 +6,18 @@ daemon: `rl`, `rl-session` holders and plain files. What is done is in git.
 
 ## Now
 
-* Nothing in flight. Last landed (2026-11-12): `ctrl+j` adds a line (#221); `ctrl+x` asks stop /
-  remove the same for every harness, Codex removing by `thread/delete` (#222); empty Codex threads
-  not listed (#223); a close always ends a held run (#224); the docs slimmed (#225).
-
-## Next
-
-* One intent-level `Harness` interface — info, sessions, start, attach, actions, stop, close,
+* One intent-level `Harness` interface — info, sessions, start, attach, actions, stop, remove,
   rename, notify, setup, caller, check — each harness binding its own steps. Stable contracts only
   (documented CLI, JSON, Codex's schema): no screen reading or typing. An idle Claude is woken by
   `claude stop` + `claude --resume <id> --bg`; the ← screen watch goes.
-* `/project <folder>`.
+
+Last landed (2026-11-12): `ctrl+j` adds a line (#221); `ctrl+x` asks stop / remove the same for
+every harness, Codex removing by `thread/delete` (#222); empty Codex threads not listed (#223); a
+close always ends a held run (#224); the docs slimmed (#225); `/project <folder>` (#226).
+
+## Next
+
+* Nothing queued; see Later.
 
 ## Later
 
