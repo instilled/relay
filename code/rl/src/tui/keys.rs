@@ -19,6 +19,16 @@ pub fn vi_step(k: KeyEvent) -> KeyEvent {
     }
 }
 
+/// A key that adds a line to the command line: `shift+enter`, `alt+enter`,
+/// or `^j` (a line feed).
+fn is_newline(k: &KeyEvent) -> bool {
+    match k.code {
+        KeyCode::Enter => k.modifiers.intersects(KeyModifiers::SHIFT | KeyModifiers::ALT),
+        KeyCode::Char('j') => k.modifiers == KeyModifiers::CONTROL,
+        _ => false,
+    }
+}
+
 /// `⇧↑` and `⇧↓` move the line under the cursor: up is `true`.
 pub fn reorder_step(k: &KeyEvent) -> Option<bool> {
     match (k.code, k.modifiers) {
@@ -88,11 +98,13 @@ impl App {
                 }
                 // `shift+enter` adds a line, where the terminal tells it from
                 // `enter` (the keyboard protocol `enter_screen` asks for);
-                // `alt+enter` (`ESC CR`) does everywhere. Not on a `/` line,
-                // which is one command: there it runs, as `enter` does.
-                KeyCode::Enter
-                    if k.modifiers.intersects(KeyModifiers::SHIFT | KeyModifiers::ALT)
-                        && !super::slash::is_command(self.cmd.line.text()) =>
+                // `alt+enter` (`ESC CR`) and `^j` (a line feed: what iTerm2
+                // or a terminal set up for Claude Code sends for
+                // `shift+enter`, and what tmux passes on) do everywhere. Not
+                // on a `/` line, which is one command: there `enter` and its
+                // kin run it, and `^j` is `↓` as on an empty line.
+                KeyCode::Enter | KeyCode::Char('j')
+                    if is_newline(&k) && !super::slash::is_command(self.cmd.line.text()) =>
                 {
                     self.cmd.line.insert("\n");
                     return self.retyped();

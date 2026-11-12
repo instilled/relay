@@ -23,8 +23,7 @@
 use crate::Registry;
 use crate::mcp_entry::{How, Place};
 use crate::registry::{Profile, find_bin};
-pub use crate::sessions::Choice;
-use crate::sessions::{ID, NAME, Rename, STOP_KEY, ScreenMark, TEXT, UserHooks};
+use crate::sessions::{ID, NAME, Rename, ScreenMark, TEXT, UserHooks};
 use crate::settings;
 use anyhow::{Context, Result, anyhow, bail};
 use jiff::Timestamp;
@@ -131,7 +130,7 @@ pub enum Woke {
 }
 
 /// Everything Relay does with one harness. `list`, `start`, `carry_on_there`,
-/// `stop`, `close`, `rename`, `type_into` and `wake` run the harness and may
+/// `stop`, `remove`, `rename`, `type_into` and `wake` run the harness and may
 /// block; they are asked from a background task. Nothing else runs
 /// anything.
 pub trait Harness: Send + Sync {
@@ -235,39 +234,24 @@ pub trait Harness: Send + Sync {
         let _ = (id, cwd);
         bail!("nothing stops a {} session from here", self.name())
     }
-    /// How `^x` twice offers to stop one of its sessions: `s` and its
-    /// profile's `sessions.stop_choice` words (Claude: `stop · keeps the
-    /// conversation`), else `s stop`.
-    fn stop_choice(&self) -> Choice {
-        self.profile()
-            .sessions
-            .as_ref()
-            .and_then(|s| s.stop_choice.clone())
-            .unwrap_or_else(|| Choice {
-                key: STOP_KEY,
-                words: "stop".into(),
-                says: None,
-                done: "stopped".into(),
-            })
-    }
-    /// What `^x` twice offers beside the stop to close `row` for good, or off
-    /// its lists (Claude: `r remove`; Codex: `a archive`): its profile's
-    /// `sessions.close`. None: it has no way to.
-    fn close_choice(&self, row: &NativeRow) -> Option<Choice> {
+    /// Whether `remove` would delete `row` for good: by default, where its
+    /// profile has `sessions.remove`.
+    fn removes(&self, row: &NativeRow) -> bool {
         let _ = row;
-        Some(self.profile().sessions.as_ref()?.close.as_ref()?.choice.clone())
+        self.profile().sessions.as_ref().is_some_and(|s| !s.remove.is_empty())
     }
-    /// Closes its session `id`, in `cwd`: its profile's `sessions.close`
-    /// arguments run with its binary (`claude rm <id>`, `codex archive
-    /// <id>`), for no longer than a list may take.
-    fn close(&self, id: &str, cwd: &Path) -> Result<()> {
-        let Some(close) = self.profile().sessions.as_ref().and_then(|s| s.close.as_ref()) else {
-            bail!("nothing closes a {} session from here", self.name());
+    /// Deletes its session `id` for good, in `cwd`: its profile's
+    /// `sessions.remove` arguments run with its binary (`claude rm <id>`),
+    /// for no longer than a list may take. Where it refuses, the error is
+    /// what it said, as it said it (Claude's unpushed commits).
+    fn remove(&self, id: &str, cwd: &Path) -> Result<()> {
+        let Some(s) = self.profile().sessions.as_ref().filter(|s| !s.remove.is_empty()) else {
+            bail!("nothing removes a {} session from here", self.name());
         };
         let argv: Vec<String> = std::iter::once(self.bin().to_string())
-            .chain(close.args.iter().map(|a| a.replace(ID, id)))
+            .chain(s.remove.iter().map(|a| a.replace(ID, id)))
             .collect();
-        run(&argv, Some(cwd), false, LIST_WAIT).map(drop)
+        run(&argv, Some(cwd), false, LIST_WAIT).map(drop).map_err(said)
     }
     /// What tells its session `id` `text` from outside it: its profile's
     /// `sessions.ping` (codex: queues it on the thread). None: nothing
@@ -697,9 +681,43 @@ fn run_watched(argv: &[String], cwd: Option<&Path>, asking: bool, wait: Duration
                 .with_evidence(err.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim()),
             );
         }
-        bail!("`{what}` failed: {}", err.lines().next().unwrap_or("no reason given"));
+        let said = if err.trim().is_empty() { &out } else { &err };
+        return Err(Failed {
+            what,
+            first: err.lines().next().unwrap_or("no reason given").to_string(),
+            said: said.trim().to_string(),
+        }
+        .into());
     }
     Ok(out)
+}
+
+/// A run that exited unsuccessfully: in a line, `` `<what>` failed: <the
+/// first line of its stderr> ``; `said` keeps all it printed, its stderr
+/// (its stdout where that is empty), trimmed.
+#[derive(Debug)]
+pub struct Failed {
+    pub what: String,
+    first: String,
+    pub said: String,
+}
+
+impl std::fmt::Display for Failed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "`{}` failed: {}", self.what, self.first)
+    }
+}
+
+impl std::error::Error for Failed {}
+
+/// A run's error as the harness said it, every line of it, where it
+/// failed and said something (`Failed::said`); any other error as it is.
+pub fn said(e: anyhow::Error) -> anyhow::Error {
+    match e.downcast::<Failed>() {
+        Ok(f) if !f.said.is_empty() => anyhow!(f.said),
+        Ok(f) => f.into(),
+        Err(e) => e,
+    }
 }
 
 #[cfg(test)]
@@ -730,28 +748,28 @@ mod tests {
     fn a_subcommand_the_harness_no_longer_takes_is_drift_and_a_failure_at_its_work_is_not() {
         use std::os::unix::fs::PermissionsExt;
         let tmp = tempfile::tempdir().unwrap();
-        let bin = tmp.path().join("codex");
+        let bin = tmp.path().join("claude");
         std::fs::write(
             &bin,
-            "#!/bin/sh\n[ \"$1\" = archive ] && { echo \"error: unrecognized subcommand 'archive'\" >&2; echo 'Usage: codex [OPTIONS]' >&2; exit 2; }\necho 'no thread named x' >&2; exit 1\n",
+            "#!/bin/sh\n[ \"$1\" = rm ] && { echo \"error: unrecognized subcommand 'rm'\" >&2; echo 'Usage: claude [OPTIONS]' >&2; exit 2; }\necho 'no session named x' >&2; exit 1\n",
         )
         .unwrap();
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
         let argv = |w: &str| vec![bin.display().to_string(), w.into(), "x".into()];
-        let (said, noticed) = crate::drift::capture(|| run(&argv("archive"), None, false, LIST_WAIT));
+        let (said, noticed) = crate::drift::capture(|| run(&argv("rm"), None, false, LIST_WAIT));
         assert!(said.is_err());
         assert_eq!(noticed.len(), 1);
-        assert_eq!(noticed[0].check, "codex.cli.archive");
-        assert_eq!(
-            noticed[0].what,
-            "`codex archive` is not taken as Relay runs it (exit 2)"
-        );
+        assert_eq!(noticed[0].check, "claude.cli.rm");
+        assert_eq!(noticed[0].what, "`claude rm` is not taken as Relay runs it (exit 2)");
         assert_eq!(
             noticed[0].evidence.as_deref(),
-            Some("error: unrecognized subcommand 'archive'")
+            Some("error: unrecognized subcommand 'rm'")
         );
-        let (said, noticed) = crate::drift::capture(|| run(&argv("queue"), None, false, LIST_WAIT));
-        assert_eq!(said.unwrap_err().to_string(), "`codex queue` failed: no thread named x");
+        let (said, noticed) = crate::drift::capture(|| run(&argv("stop"), None, false, LIST_WAIT));
+        assert_eq!(
+            said.unwrap_err().to_string(),
+            "`claude stop` failed: no session named x"
+        );
         assert!(noticed.is_empty(), "an ordinary failure");
         assert!(usage_error(Some(1), "error: unknown command 'rm'"), "commander's");
         assert!(!usage_error(Some(2), "no such file"));
@@ -808,7 +826,7 @@ mod tests {
     }
 
     #[test]
-    fn claude_and_codex_offer_a_stop_and_a_close_and_the_held_neither() {
+    fn claude_and_codex_remove_for_good_and_the_held_have_no_remove_of_their_own() {
         let all = harnesses(&Registry::builtin(), |_| None);
         let get = |n: &str| all.iter().find(|h| h.name() == n).unwrap();
         let row = NativeRow {
@@ -828,44 +846,38 @@ mod tests {
             pr: None,
             color: None,
         };
-        let offer = |n: &str| {
-            let h = get(n);
-            (h.stop_choice().offer(), h.close_choice(&row).map(|c| c.offer()))
-        };
-        assert_eq!(
-            offer("claude"),
-            (
-                "s stop · keeps the conversation".into(),
-                Some("r remove · deletes it and its worktree".into())
-            )
-        );
-        assert_eq!(
-            offer("codex"),
-            (
-                "s stop the turn".into(),
-                Some("a archive · off the list, codex unarchive brings it back".into())
-            )
-        );
-        assert_eq!(offer("antigravity"), ("s stop".into(), None), "held: nothing to close");
-        let e = get("gemini").close("x", Path::new("/")).unwrap_err();
-        assert_eq!(e.to_string(), "nothing closes a gemini session from here");
+        assert!(get("claude").removes(&row));
+        assert!(get("codex").removes(&row), "thread/delete");
+        assert!(!get("antigravity").removes(&row), "held: Relay removes its own");
+        let e = get("gemini").remove("x", Path::new("/")).unwrap_err();
+        assert_eq!(e.to_string(), "nothing removes a gemini session from here");
     }
 
     #[test]
-    fn a_close_runs_its_profiles_args_with_its_binary_in_the_folder() {
+    fn claudes_remove_is_claude_rm_in_the_folder_and_a_refusal_is_said_as_it_said_it() {
         use std::os::unix::fs::PermissionsExt;
         let tmp = tempfile::tempdir().unwrap();
         let bin = tmp.path().join("claude");
-        std::fs::write(&bin, "#!/bin/sh\nprintf '%s\\n' \"$PWD\" \"$@\" > said\n").unwrap();
+        std::fs::write(
+            &bin,
+            "#!/bin/sh\nprintf '%s\\n' \"$PWD\" \"$@\" > said\n[ -f refuse ] && { cat refuse >&2; exit 1; }\nexit 0\n",
+        )
+        .unwrap();
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let r = Registry::builtin();
-        for (name, word) in [("claude", "rm"), ("codex", "archive")] {
-            let h = of(r.profile(name).unwrap(), Some(bin.clone()));
-            h.close("ab12cd34", tmp.path()).unwrap();
-            let said = std::fs::read_to_string(tmp.path().join("said")).unwrap();
-            let here = std::fs::canonicalize(tmp.path()).unwrap();
-            assert_eq!(said, format!("{}\n{word}\nab12cd34\n", here.display()), "{name}");
-        }
+        let h = of(Registry::builtin().profile("claude").unwrap(), Some(bin));
+        h.remove("ab12cd34", tmp.path()).unwrap();
+        let said = std::fs::read_to_string(tmp.path().join("said")).unwrap();
+        let here = std::fs::canonicalize(tmp.path()).unwrap();
+        assert_eq!(
+            said,
+            format!("{}\nrm\nab12cd34\n", here.display()),
+            "claude rm <id>, no flags"
+        );
+        let refusal =
+            "ab12cd34 has 2 unpushed commits in worktree w-1\nrerun with --discard-unpushed 9f1e@w-1 to discard them";
+        std::fs::write(tmp.path().join("refuse"), format!("{refusal}\n")).unwrap();
+        let e = h.remove("ab12cd34", tmp.path()).unwrap_err();
+        assert_eq!(e.to_string(), refusal, "every line, as said");
     }
 
     /// A Claude whose binary is a stand-in in `dir`: its `attach` draws an

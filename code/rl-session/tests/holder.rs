@@ -123,6 +123,27 @@ async fn wait_gone(path: &Path, pid: u32) {
     panic!("holder {pid} / socket {} still around", path.display());
 }
 
+/// A close ends even a run that ignores the hangup and the terminate: it is
+/// killed, its exit written before the holder leaves, well within the 10s
+/// `rl stop` waits.
+#[tokio::test]
+async fn a_close_kills_a_run_that_will_not_hang_up() {
+    let stubborn = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../fixtures/stubborn");
+    let h = start_argv(60, &[], &stubborn);
+    let (hello, mut s) = attach(&h, true).await;
+    read_until(&mut s, "stubborn ready").await;
+    let asked = Instant::now();
+    s.close().await.unwrap();
+    while alive(hello.holder_pid) && asked.elapsed() < Duration::from_secs(15) {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(!alive(hello.holder_pid), "the holder left");
+    assert!(!alive(hello.pid), "and the run with it");
+    let exit = read_exit_file(&h.exit_file).unwrap().expect("its exit is written");
+    assert_eq!(exit.signal.as_deref(), Some("SIGKILL"), "{exit:?}");
+    assert!(asked.elapsed() < Duration::from_secs(10), "{:?}", asked.elapsed());
+}
+
 #[tokio::test]
 async fn pty_lifecycle() {
     let h = start(60);

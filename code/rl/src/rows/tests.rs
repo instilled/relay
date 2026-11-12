@@ -23,8 +23,7 @@ fn row(id: &str, state: RunState, cwd: &str, at: &str) -> Row {
         color: None,
         attach: Attach::Held(id.into()),
         stop: None,
-        stop_choice: None,
-        close: None,
+        removes: false,
         kind: RunKind::Agent,
         repo: crate::git::toplevel(Path::new(cwd)),
     }

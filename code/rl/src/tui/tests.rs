@@ -620,8 +620,13 @@ fn asking(app: &App) -> bool {
     matches!(app.mode, super::app::Mode::Ask(_))
 }
 
+/// What `^x` twice asks of any session still going, whoever's it is.
+const ASKS: &str = "s stop · keeps the session   r remove · deletes the session for good   esc cancel";
+/// And of one that has ended.
+const ASKS_ENDED: &str = "r remove · deletes the session for good   esc cancel";
+
 const CLAUDE_ASKS: &str =
-    "s stop · keeps the conversation   r remove · deletes it and its worktree   esc cancel   — fix the login · claude";
+    "s stop · keeps the session   r remove · deletes the session for good   esc cancel   — fix the login · claude";
 
 /// The screen wide enough for a whole choice in the footer.
 fn wide(app: &App) -> String {
@@ -714,10 +719,7 @@ async fn an_ended_claude_session_is_offered_only_its_remove() {
     assert!(shown(&app).contains("press ctrl+x again to remove fix the login"));
     ctrl(&mut app, 'x');
     let s = wide(&app);
-    assert!(
-        s.contains("r remove · deletes it and its worktree   esc cancel   — fix the login · claude"),
-        "{s}"
-    );
+    assert!(s.contains(&format!("{ASKS_ENDED}   — fix the login · claude")), "{s}");
     assert!(!s.contains("s stop"), "nothing to stop");
     press(&mut app, KeyCode::Char('s'));
     assert!(asking(&app) && app.work.is_empty(), "s is no answer here");
@@ -725,6 +727,28 @@ async fn an_ended_claude_session_is_offered_only_its_remove() {
     app.finish().await;
     assert_eq!(ran_in(&f.repo), ["rm", "ab12cd34"], "enter: the remove");
     assert!(app.keys().iter().all(|k| k != NATIVE));
+}
+
+#[tokio::test]
+async fn a_claude_rm_that_refuses_keeps_the_row_and_says_what_claude_said() {
+    let f = fixture();
+    let mut app = list(&f).await;
+    let refusal =
+        "ab12cd34 has 2 unpushed commits in worktree w-1\nrerun with --discard-unpushed 9f1e@w-1 to discard them";
+    std::fs::write(f.repo.join("refuse-rm"), format!("{refusal}\n")).unwrap();
+    on(&mut app, NATIVE);
+    ctrl(&mut app, 'x');
+    ctrl(&mut app, 'x');
+    press(&mut app, KeyCode::Char('r'));
+    app.finish().await;
+    assert_eq!(ran_in(&f.repo), ["rm", "ab12cd34"], "no --discard-unpushed, no --force");
+    assert_eq!(
+        app.flashing(),
+        Some(format!("remove fix the login: {refusal}").as_str()),
+        "as claude said it"
+    );
+    assert!(app.keys().iter().any(|k| k == NATIVE), "the row stays");
+    assert_eq!(app.sel.as_deref(), Some(NATIVE));
 }
 
 #[tokio::test]
@@ -764,7 +788,7 @@ async fn ctrl_x_is_disarmed_by_any_other_key() {
 }
 
 #[tokio::test]
-async fn ctrl_x_twice_removes_an_ended_held_session_and_what_was_kept_for_it() {
+async fn ctrl_x_twice_then_r_removes_an_ended_held_session_and_what_was_kept_for_it() {
     let f = fixture();
     let mut app = list(&f).await;
     on(&mut app, HELD);
@@ -774,7 +798,11 @@ async fn ctrl_x_twice_removes_an_ended_held_session_and_what_was_kept_for_it() {
     ctrl(&mut app, 'x');
     assert!(shown(&app).contains("press ctrl+x again to remove shop-sh"));
     ctrl(&mut app, 'x');
-    assert!(!asking(&app), "one Relay holds is never asked about");
+    assert!(asking(&app), "asked, as any other");
+    let s = wide(&app);
+    assert!(s.contains(&format!("{ASKS_ENDED}   — shop-sh · sh")), "{s}");
+    assert!(f.home.session_dir("shop-sh").exists(), "nothing done yet");
+    press(&mut app, KeyCode::Char('r'));
     app.finish().await;
     assert!(!f.home.session_dir("shop-sh").exists());
     let s = shown(&app);
@@ -923,15 +951,13 @@ async fn the_line_starts_codex_on_its_daemon_and_enter_resumes_the_thread() {
         panic!("{:?}", hand.to);
     };
     assert_eq!(argv[1..], ["resume".to_string(), id.clone()], "codex resume <id>");
-    // ctrl+x twice asks; s: its running turn interrupted on the daemon.
+    // ctrl+x twice asks as for any other; s: its running turn interrupted on
+    // the daemon.
     ctrl(&mut app, 'x');
-    assert!(shown(&app).contains("press ctrl+x again to stop or archive"));
+    assert!(shown(&app).contains("press ctrl+x again to stop or remove"));
     ctrl(&mut app, 'x');
     let s = wide(&app);
-    assert!(
-        s.contains("s stop the turn   a archive · off the list, codex unarchive brings it back   esc cancel"),
-        "{s}"
-    );
+    assert!(s.contains(&format!("{ASKS}   — fix the login · codex")), "{s}");
     press(&mut app, KeyCode::Char('s'));
     app.finish().await;
     assert!(
@@ -942,20 +968,30 @@ async fn the_line_starts_codex_on_its_daemon_and_enter_resumes_the_thread() {
     );
 }
 
-/// The ids the tests' stand-in Codex was asked to archive, by every test so
-/// far.
-fn codex_archived() -> Vec<String> {
-    std::fs::read_to_string(crate::sources::codex_stand_in().with_extension("archived"))
-        .unwrap_or_default()
-        .lines()
-        .map(String::from)
-        .collect()
+/// Where in what the stand-in Codex was sent the first `method` call on the
+/// thread `id` is.
+fn codex_call(method: &str, id: &str) -> Option<usize> {
+    codex_sent()
+        .iter()
+        .position(|m| m["method"] == method && m["params"]["threadId"] == id)
 }
 
 #[tokio::test]
-async fn a_codex_thread_is_archived_by_a_and_one_at_rest_is_offered_only_that() {
+async fn a_codex_thread_is_deleted_by_r_its_turn_interrupted_first_and_one_at_rest_as_it_is() {
     let f = fixture();
     let mut app = list(&f).await;
+    // A thread on the daemon with its first turn running.
+    on(&mut app, NATIVE);
+    typed(&mut app, "codex fix the login");
+    press(&mut app, KeyCode::Enter);
+    app.finish().await;
+    let live = row_of(&shown(&app), "started codex")
+        .split_whitespace()
+        .skip_while(|w| *w != "codex")
+        .nth(1)
+        .unwrap()
+        .to_string();
+    let live = live.as_str();
     let thread = |id: &str, words: &str, state| {
         let mut t = waiting(&f.repo);
         t.harness = "codex".into();
@@ -968,10 +1004,7 @@ async fn a_codex_thread_is_archived_by_a_and_one_at_rest_is_offered_only_that() 
         };
         t
     };
-    let (live, resting) = (
-        "019f0000-aaaa-7000-8000-000000000001",
-        "019f0000-aaaa-7000-8000-000000000002",
-    );
+    let resting = "019f0000-aaaa-7000-8000-000000000002";
     app.set_native(vec![
         thread(live, "working", RunState::Working),
         thread(resting, "resting", RunState::Idle),
@@ -979,11 +1012,16 @@ async fn a_codex_thread_is_archived_by_a_and_one_at_rest_is_offered_only_that() 
     on(&mut app, &format!("n:codex:{live}"));
     ctrl(&mut app, 'x');
     ctrl(&mut app, 'x');
-    press(&mut app, KeyCode::Char('a'));
+    assert!(wide(&app).contains(&format!("{ASKS}   — thread {live} · codex")));
+    press(&mut app, KeyCode::Char('r'));
     app.finish().await;
-    assert!(codex_archived().contains(&live.to_string()), "codex archive <id>");
+    let (interrupted, deleted) = (codex_call("turn/interrupt", live), codex_call("thread/delete", live));
     assert!(
-        shown(&app).contains(&format!("archived thread {live}")),
+        interrupted.is_some() && interrupted < deleted,
+        "turn/interrupt, then thread/delete: {interrupted:?} {deleted:?}"
+    );
+    assert!(
+        shown(&app).contains(&format!("removed thread {live}")),
         "{}",
         shown(&app)
     );
@@ -991,26 +1029,17 @@ async fn a_codex_thread_is_archived_by_a_and_one_at_rest_is_offered_only_that() 
         app.keys().iter().all(|k| *k != format!("n:codex:{live}")),
         "off the list"
     );
-    // At rest: nothing to stop, the archive the one choice, and enter takes it.
+    // At rest: nothing to stop, the remove the one choice, and enter takes it.
     on(&mut app, &format!("n:codex:{resting}"));
     ctrl(&mut app, 'x');
-    assert!(shown(&app).contains(&format!("press ctrl+x again to archive thread {resting}")));
+    assert!(shown(&app).contains(&format!("press ctrl+x again to remove thread {resting}")));
     ctrl(&mut app, 'x');
     let s = wide(&app);
-    assert!(
-        s.contains(&format!(
-            "a archive · off the list, codex unarchive brings it back   esc cancel   — thread {resting} · codex"
-        )),
-        "{s}"
-    );
+    assert!(s.contains(&format!("{ASKS_ENDED}   — thread {resting} · codex")), "{s}");
     press(&mut app, KeyCode::Enter);
     app.finish().await;
-    assert!(codex_archived().contains(&resting.to_string()));
-    assert!(
-        !codex_sent().iter().any(|m| m["method"] == "turn/interrupt"
-            && (m["params"]["threadId"] == live || m["params"]["threadId"] == resting)),
-        "neither interrupted"
-    );
+    assert!(codex_call("thread/delete", resting).is_some(), "thread/delete");
+    assert_eq!(codex_call("turn/interrupt", resting), None, "nothing to interrupt");
 }
 
 #[tokio::test]
@@ -1726,17 +1755,14 @@ async fn slash_pin_hide_agents_and_group_do_what_their_keys_do() {
 }
 
 #[tokio::test]
-async fn slash_rm_removes_an_ended_held_session_and_refuses_what_it_cannot() {
+async fn slash_rm_asks_to_remove_any_session_and_refuses_what_it_cannot() {
     let f = fixture();
     let mut app = list(&f).await;
     // One of Claude's own: asked, the remove the only choice, live or not.
     on(&mut app, NATIVE);
     run(&mut app, "/rm");
     let s = wide(&app);
-    assert!(
-        s.contains("r remove · deletes it and its worktree   esc cancel   — fix the login · claude"),
-        "{s}"
-    );
+    assert!(s.contains(&format!("{ASKS_ENDED}   — fix the login · claude")), "{s}");
     assert!(!s.contains("s stop"), "{s}");
     assert!(app.work.is_empty(), "nothing done");
     press(&mut app, KeyCode::Esc);
@@ -1745,18 +1771,21 @@ async fn slash_rm_removes_an_ended_held_session_and_refuses_what_it_cannot() {
     on(&mut app, &head);
     run(&mut app, "/rm");
     assert!(
-        shown(&app).contains("/rm removes an ended session of Relay's"),
+        shown(&app).contains("/rm removes the session under the cursor"),
         "{}",
         shown(&app)
     );
     on(&mut app, HELD);
     run(&mut app, "/stop");
     assert!(
-        shown(&app).contains("shop-sh has ended · /rm removes it"),
+        shown(&app).contains("shop-sh has nothing running to stop · /rm removes it"),
         "{}",
         shown(&app)
     );
+    // One Relay holds: the same question.
     run(&mut app, "/rm");
+    assert!(wide(&app).contains(&format!("{ASKS_ENDED}   — shop-sh · sh")));
+    press(&mut app, KeyCode::Enter);
     app.finish().await;
     assert!(!f.home.session_dir("shop-sh").exists());
     assert!(shown(&app).contains("removed shop-sh"));
@@ -1787,7 +1816,7 @@ async fn slash_stop_stops_claudes_own_at_once_and_says_when_nothing_runs() {
     on(&mut app, NATIVE);
     run(&mut app, "/stop");
     assert!(
-        shown(&app).contains("fix the login has nothing running to stop · /rm offers to remove it"),
+        shown(&app).contains("fix the login has nothing running to stop · /rm removes it"),
         "{}",
         shown(&app)
     );
@@ -2208,6 +2237,19 @@ async fn shift_or_alt_enter_adds_a_line_and_enter_starts_it_whole() {
     // Alt+enter, as `ESC CR` reads where shift+enter is not told apart.
     key_with(&mut app, KeyCode::Enter, KeyModifiers::ALT);
     typed(&mut app, "then test");
+    // `^j`, a line feed: what iTerm2 set up for Claude Code sends for
+    // shift+enter, through tmux too.
+    ctrl(&mut app, 'j');
+    typed(&mut app, "now");
+    assert_eq!(
+        app.cmd.line.text(),
+        "claude fix the login\nand the logout\nthen test\nnow"
+    );
+    assert_eq!(app.sel.as_deref(), Some(NATIVE), "^j added a line, it did not move");
+    press(&mut app, KeyCode::Backspace);
+    press(&mut app, KeyCode::Backspace);
+    press(&mut app, KeyCode::Backspace);
+    press(&mut app, KeyCode::Backspace);
     assert_eq!(app.cmd.line.text(), "claude fix the login\nand the logout\nthen test");
     assert!(app.work.is_empty(), "nothing started yet");
     // Three rows, the prompt and what it starts on the first.

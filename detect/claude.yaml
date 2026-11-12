@@ -25,8 +25,7 @@ patterns:
     - '^\s*[│┃]\s*>\s*$'
     - '(?i)^\s*\? for shortcuts'
 # Its own sessions, outside Relay (rl-detect/src/sessions.rs says how this
-# block reads). What Claude's docs said on 2026-10-13 is beside each value
-# (docs/plans/2026-10-13-agent-hooks-notes.md).
+# block reads). What Claude's docs said on 2026-10-13 is beside each value.
 sessions:
   hooks:
     # $CLAUDE_CONFIG_DIR, else ~/.claude. The first whose variables are all
@@ -71,17 +70,13 @@ sessions:
   # Stopping one still going (`claude stop <id>`): its process ends, its
   # conversation is kept, and `claude attach` opens it again.
   stop: [stop, "{id}"]
-  # ^x twice on one asks, in the footer: `s` stops it (enter does too), and
-  # `close` deletes it for good (`claude rm <id>`, which takes its worktree
-  # when that is safe, and works on one that has exited). One that has ended
-  # is offered only the close. Read off `claude rm --help` 2.1.322.
-  stop_choice: { words: stop, says: "keeps the conversation" }
-  close:
-    key: r
-    words: remove
-    says: "deletes it and its worktree"
-    done: removed
-    args: [rm, "{id}"]
+  # Removing one (^x twice, then `r`; /rm) deletes it for good: `claude rm
+  # <id>`, which takes its worktree when that is safe and works on one that
+  # has exited. Where it refuses (unpushed commits, a worktree it could not
+  # remove) what it said is shown as said and the row stays: Relay never
+  # passes --discard-unpushed or --force-remove-worktree. Read off `claude rm
+  # --help` 2.1.322.
+  remove: [rm, "{id}"]
   # Its agents view, as an attached session draws it (← on an empty prompt
   # opens it there, whatever `leftArrowOpensAgents` says): the new-session
   # prompt's placeholder, at the left edge — a transcript indents what it

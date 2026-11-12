@@ -13,7 +13,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-const STOP_WAIT: Duration = Duration::from_secs(6);
+const STOP_WAIT: Duration = Duration::from_secs(10);
 const DEFAULT_COLS: u16 = 120;
 const DEFAULT_ROWS: u16 = 32;
 
