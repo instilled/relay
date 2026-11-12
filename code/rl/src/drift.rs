@@ -657,8 +657,9 @@ entries without sessionId, state
 Reported from `rl report`.
 "
         );
-        assert!(expected("codex.cli.archive", "codex").contains("`codex archive`"));
+        assert!(expected("claude.cli.rm", "claude").contains("`claude rm`"));
         assert!(expected("codex.rpc.turn/start", "codex").contains("`turn/start`"));
+        assert!(expected("codex.rpc.thread/delete", "codex").contains("`thread/delete`"));
     }
 
     #[test]

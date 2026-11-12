@@ -10,6 +10,17 @@
    ],
    "type": "object"
   },
+  "ThreadDeleteParams": {
+   "properties": {
+    "threadId": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "threadId"
+   ],
+   "type": "object"
+  },
   "ThreadListParams": {
    "properties": {
     "archived": {},
@@ -308,6 +319,30 @@
     "params"
    ],
    "title": "Turn/interruptRequest",
+   "type": "object"
+  },
+  {
+   "properties": {
+    "id": {
+     "$ref": "#/definitions/RequestId"
+    },
+    "method": {
+     "enum": [
+      "thread/delete"
+     ],
+     "title": "Thread/deleteRequestMethod",
+     "type": "string"
+    },
+    "params": {
+     "$ref": "#/definitions/ThreadDeleteParams"
+    }
+   },
+   "required": [
+    "id",
+    "method",
+    "params"
+   ],
+   "title": "Thread/deleteRequest",
    "type": "object"
   }
  ],

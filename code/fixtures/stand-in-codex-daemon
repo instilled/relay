@@ -6,15 +6,18 @@
 #   <itself>.down     there is no daemon: the proxy cannot connect, as the
 #                     real one says, until `app-server daemon start`
 #   <itself>.log      every message a client sent the daemon, one JSON a line
-#   <itself>.threads  the threads it has, JSON
+#   <itself>.threads  the threads it has, JSON (<itself>.started: how many
+#                     it has started, so no id comes round again)
 #   <itself>.argv     what any other run was given, one word a line, and
 #                     <itself>.cwd the folder it ran in
-#   <itself>.archived every `archive <id>` it was run with, the id a line:
-#                     the tests share the one stand-in, so these add up
+#
+# The tests share the one stand-in, so what it keeps adds up. A
+# `thread/delete` takes the thread away where it has it, and is answered
+# either way.
 #
 # `app-server proxy` speaks the daemon's WebSocket on stdio (the handshake,
 # then one text frame per JSON-RPC message), as `codex_native` does.
-import json, os, struct, sys
+import fcntl, json, os, struct, sys
 
 me = os.path.abspath(sys.argv[0])
 args = sys.argv[1:]
@@ -34,8 +37,11 @@ def threads():
 
 
 def keep(ts):
-    with open(me + ".threads", "w") as f:
+    # Whole or not at all: another test's stand-in may be reading it.
+    tmp = "%s.threads.%d" % (me, os.getpid())
+    with open(tmp, "w") as f:
         json.dump(ts, f)
+    os.replace(tmp, me + ".threads")
 
 
 if args == ["--version"]:
@@ -68,10 +74,6 @@ if args == ["app-server", "daemon", "start"]:
         os.remove(me + ".down")
     log({"run": "daemon start"})
     sys.exit(0)
-
-if args[:1] == ["archive"]:
-    with open(me + ".archived", "a") as f:
-        f.write(" ".join(args[1:]) + "\n")
 
 if args != ["app-server", "proxy"]:
     with open(me + ".argv", "w") as f:
@@ -122,6 +124,10 @@ while True:
     if "id" not in m:
         continue
     method, p = m.get("method"), m.get("params") or {}
+    # One message at a time across every proxy the tests run at once: what
+    # it keeps is read, changed and written whole.
+    lock = open(me + ".lock", "a")
+    fcntl.flock(lock, fcntl.LOCK_EX)
     ts = threads()
     by_id = {t["id"]: t for t in ts}
     result, error = None, None
@@ -129,7 +135,14 @@ while True:
         client = p["clientInfo"]["name"]
         result = {"userAgent": "stand-in"}
     elif method == "thread/start":
-        t = {"id": "019f0000-0000-7000-8000-%012d" % (len(ts) + 1), "cwd": p["cwd"], "name": None,
+        # Never one an earlier thread had, deleted since or not.
+        try:
+            n = int(open(me + ".started").read()) + 1
+        except (FileNotFoundError, ValueError):
+            n = len(ts) + 1
+        with open(me + ".started", "w") as f:
+            f.write(str(n))
+        t = {"id": "019f0000-0000-7000-8000-%012d" % n, "cwd": p["cwd"], "name": None,
              "preview": None, "originator": client, "createdAt": 1794100000, "updatedAt": 1794100000,
              "status": {"type": "idle"}, "turns": []}
         ts.append(t)
@@ -152,6 +165,9 @@ while True:
             if turn["id"] == p["turnId"]:
                 turn["status"] = "interrupted"
         result = {}
+    elif method == "thread/delete":
+        ts = [t for t in ts if t["id"] != p["threadId"]]
+        result = {}
     elif method == "thread/read":
         result = {"thread": by_id[p["threadId"]]}
     elif method == "thread/loaded/list":
@@ -161,6 +177,7 @@ while True:
     else:
         error = "unknown method %s" % method
     keep(ts)
+    lock.close()
     if error:
         send({"jsonrpc": "2.0", "id": m["id"], "error": {"code": -32600, "message": error}})
     else:

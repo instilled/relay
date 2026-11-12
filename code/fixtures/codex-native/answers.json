@@ -23,5 +23,6 @@
   "thread/start": {"id": 0, "result": {"thread": {"id": "01a1ca12-27f5-7ca0-a8ef-8593acea7ed9", "sessionId": "01a1ca12-27f5-7ca0-a8ef-8593acea7ed9", "parentThreadId": null, "preview": null, "name": null, "createdAt": 1794090000, "updatedAt": 1794100000, "status": {"type": "idle"}, "cwd": "/w/relay", "originator": "relay", "source": "vscode", "threadSource": null, "turns": []}, "approvalPolicy": "on-request", "sandbox": {"type": "readOnly", "networkAccess": false}}},
   "thread/name/set": {"id": 0, "result": {}},
   "turn/start": {"id": 0, "result": {"turn": {"id": "01a1ca12-2800-7260-8442-e7a848675cd1", "items": [], "status": "inProgress", "error": null}}},
-  "turn/interrupt": {"id": 0, "result": {}}
+  "turn/interrupt": {"id": 0, "result": {}},
+  "thread/delete": {"id": 0, "result": {}}
 }
