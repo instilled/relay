@@ -837,6 +837,11 @@ mod tests {
             ["claude", "--bg", "-n", "fix it", "fix the login"]
         );
         assert_eq!(c.start_argv(Some(" "), Some("")).unwrap(), ["claude", "--bg"]);
+        assert_eq!(
+            c.start_argv(None, Some("fix the login\nthen test")).unwrap(),
+            ["claude", "--bg", "fix the login\nthen test"],
+            "a prompt of several lines is one argument"
+        );
         assert_eq!(c.carry_on_argv("s-1").unwrap(), ["claude", "--resume", "s-1", "--bg"]);
         assert_eq!(c.stop_argv("ab12cd34").unwrap(), ["claude", "stop", "ab12cd34"]);
         let mut row = listed_at("ab12cd34", Path::new("/w"));

@@ -192,33 +192,42 @@ impl App {
     }
 
     /// `enter` on the command line: the agent its first word names, with the
-    /// rest as its first prompt, or the line run in a shell — in the folder
-    /// under the cursor. The line is cleared once it is on its way; a
-    /// harness that is not here keeps it, and says so.
+    /// rest as its first prompt; else the default (`list.default`) — an
+    /// agent, the whole line its prompt, or the line run in a shell (as a
+    /// `!` line always is) — in the folder under the cursor. A line of
+    /// several lines goes whole: an agent's prompt keeps its newlines, a
+    /// shell runs them in order. The line is cleared once it is on its way;
+    /// a harness that is not here keeps it, and says so.
     pub(super) fn run_line(&mut self) {
         let text = self.cmd.line.text().trim().to_string();
         if slash::is_command(&text) {
             return self.run_command();
         }
         let cwd = self.line_folder();
-        match self.detected() {
+        let Some(d) = self.detected() else {
+            return;
+        };
+        let payload = cmdline::payload(&text, &d).to_string();
+        match d {
             // A `/` line went to `run_command` above.
-            None | Some(Detected::Command(_) | Detected::UnknownCommand) => {}
-            Some(Detected::Agent {
+            Detected::Command(_) | Detected::UnknownCommand => {}
+            Detected::Agent {
                 profile,
                 missing: Some(bin),
-            }) => self.say(format!("{bin} is not on PATH · {} can't start", profile.name)),
-            Some(Detected::Agent { profile, missing: None }) => {
-                let (_, prompt) = cmdline::split_first(&text);
-                if prompt.starts_with('-') {
+                ..
+            } => self.say(format!("{bin} is not on PATH · {} can't start", profile.name)),
+            Detected::Agent {
+                profile, missing: None, ..
+            } => {
+                if payload.starts_with('-') {
                     return self.say("a prompt can't start with `-`: the agent would read it as a flag");
                 }
                 self.cmd.clear();
-                self.start_agent(profile, prompt, cwd);
+                self.start_agent(profile, &payload, cwd);
             }
-            Some(Detected::Shell) => {
+            Detected::Shell => {
                 self.cmd.clear();
-                self.start_shell(&text, cwd);
+                self.start_shell(&payload, cwd);
             }
         }
     }

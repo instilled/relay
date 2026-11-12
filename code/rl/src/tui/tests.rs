@@ -2145,3 +2145,127 @@ async fn scroll_speed() {
         took / n
     );
 }
+
+fn key_with(app: &mut App, code: KeyCode, m: KeyModifiers) {
+    app.key(KeyEvent::new(code, m));
+}
+
+#[tokio::test]
+async fn shift_or_alt_enter_adds_a_line_and_enter_starts_it_whole() {
+    let f = fixture();
+    let mut app = list(&f).await;
+    on(&mut app, NATIVE);
+    typed(&mut app, "claude fix the login");
+    key_with(&mut app, KeyCode::Enter, KeyModifiers::SHIFT);
+    typed(&mut app, "and the logout");
+    // Alt+enter, as `ESC CR` reads where shift+enter is not told apart.
+    key_with(&mut app, KeyCode::Enter, KeyModifiers::ALT);
+    typed(&mut app, "then test");
+    assert_eq!(app.cmd.line.text(), "claude fix the login\nand the logout\nthen test");
+    assert!(app.work.is_empty(), "nothing started yet");
+    // Three rows, the prompt and what it starts on the first.
+    let rows = screen(&app, 100, 30);
+    assert!(
+        rows[25].contains(" ❯ claude fix the login") && rows[25].contains("agent · claude"),
+        "{}",
+        rows.join("\n")
+    );
+    assert!(rows[26].starts_with("   and the logout"), "{}", rows[26]);
+    assert!(rows[27].starts_with("   then test"), "{}", rows[27]);
+    assert!(rows[28].starts_with("───"), "the separator under it: {}", rows[28]);
+    assert!(rows[29].contains("shift+enter adds a line"), "{}", rows[29]);
+    // ↑ walks the lines, then on the first moves on the list.
+    press(&mut app, KeyCode::Up);
+    assert_eq!(app.cmd.line.cursor(), 30, "column 9 of the second line");
+    press(&mut app, KeyCode::Up);
+    assert_eq!(app.cmd.line.cursor(), 9);
+    assert_eq!(app.sel.as_deref(), Some(NATIVE));
+    press(&mut app, KeyCode::Up);
+    assert_eq!(app.sel.as_deref(), Some(HELD), "the list's, from the first line");
+    assert_eq!(app.cmd.line.text(), "claude fix the login\nand the logout\nthen test");
+    press(&mut app, KeyCode::Enter);
+    assert!(app.cmd.is_empty());
+    app.finish().await;
+    assert_eq!(
+        std::fs::read_to_string(f.repo.join("argv")).unwrap(),
+        "--bg\nfix the login\nand the logout\nthen test\n",
+        "the prompt whole, its newlines kept"
+    );
+}
+
+#[tokio::test]
+async fn a_paste_keeps_its_newlines_on_the_command_line_and_not_in_the_search() {
+    let f = fixture();
+    let mut app = list(&f).await;
+    app.paste("make build\r\nmake test\n");
+    assert_eq!(app.cmd.line.text(), "make build\nmake test\n");
+    assert!(app.work.is_empty(), "a paste starts nothing");
+    assert!(row_of(&shown(&app), "❯ make build").contains("shell"));
+    press(&mut app, KeyCode::Esc);
+    ctrl(&mut app, 'f');
+    app.paste("fix\nlogin");
+    assert_eq!(app.filter, "fix login", "the search is one line");
+}
+
+#[tokio::test]
+async fn with_claude_for_default_a_line_is_its_prompt_a_word_still_picks_and_a_bang_is_a_shell() {
+    let f = fixture();
+    std::fs::write(f.home.config_json(), r#"{"badges": [], "list": {"default": "claude"}}"#).unwrap();
+    let mut app = list(&f).await;
+    on(&mut app, NATIVE);
+    assert!(
+        line_row(&app)
+            .contains("a prompt for claude, or claude/codex/agy and a prompt, ! for a shell · / for commands"),
+        "{}",
+        line_row(&app)
+    );
+    typed(&mut app, "make");
+    assert_eq!(app.cmd.ghost, None, "a program would be the prompt: none offered");
+    assert!(line_row(&app).contains("agent · claude"), "{}", line_row(&app));
+    press(&mut app, KeyCode::Esc);
+    typed(&mut app, "! ls");
+    let row = line_row(&app);
+    assert!(row.contains("shell") && !row.contains("agent"), "{row}");
+    press(&mut app, KeyCode::Esc);
+    typed(&mut app, "fix the login");
+    assert!(line_row(&app).contains("agent · claude"));
+    press(&mut app, KeyCode::Enter);
+    app.finish().await;
+    assert_eq!(ran_in(&f.repo), ["--bg", "fix the login"], "the whole line its prompt");
+    typed(&mut app, "codex fix the default");
+    assert!(line_row(&app).contains("agent · codex"));
+    press(&mut app, KeyCode::Enter);
+    app.finish().await;
+    assert!(
+        codex_sent()
+            .iter()
+            .any(|m| m["method"] == "turn/start" && m["params"]["input"][0]["text"] == "fix the default"),
+        "codex, on the rest"
+    );
+}
+
+#[tokio::test]
+async fn slash_default_sets_what_a_line_starts_and_refuses_what_is_not_an_agent() {
+    let f = fixture();
+    let mut app = list(&f).await;
+    run(&mut app, "/default codex");
+    assert!(app.cmd.is_empty(), "cleared once run");
+    assert_eq!(Config::load(&f.home).unwrap().list.default, "codex", "kept");
+    assert!(
+        shown(&app).contains("a typed line is a prompt for codex"),
+        "{}",
+        shown(&app)
+    );
+    typed(&mut app, "fix it");
+    assert!(line_row(&app).contains("agent · codex"), "{}", line_row(&app));
+    press(&mut app, KeyCode::Esc);
+    run(&mut app, "/default make");
+    assert_eq!(app.cmd.line.text(), "/default make", "kept to mend");
+    assert!(shown(&app).contains("not an agent harness: make"), "{}", shown(&app));
+    assert_eq!(Config::load(&f.home).unwrap().list.default, "codex");
+    press(&mut app, KeyCode::Esc);
+    run(&mut app, "/default shell");
+    assert_eq!(Config::load(&f.home).unwrap().list.default, "shell");
+    typed(&mut app, "fix it");
+    assert!(line_row(&app).contains("shell"), "{}", line_row(&app));
+}

@@ -86,6 +86,24 @@ impl App {
                     }
                     return self.retyped();
                 }
+                // `shift+enter` adds a line, where the terminal tells it from
+                // `enter` (the keyboard protocol `enter_screen` asks for);
+                // `alt+enter` (`ESC CR`) does everywhere. Not on a `/` line,
+                // which is one command: there it runs, as `enter` does.
+                KeyCode::Enter
+                    if k.modifiers.intersects(KeyModifiers::SHIFT | KeyModifiers::ALT)
+                        && !super::slash::is_command(self.cmd.line.text()) =>
+                {
+                    self.cmd.line.insert("\n");
+                    return self.retyped();
+                }
+                // `↑↓` walk a line of several, and past its first or last
+                // line move on the list as ever.
+                KeyCode::Up | KeyCode::Down
+                    if k.modifiers.is_empty() && self.cmd.line.vertical(k.code == KeyCode::Up) =>
+                {
+                    return self.retyped();
+                }
                 _ => {}
             }
             match self.cmd.line.key(&k) {
@@ -287,16 +305,24 @@ impl App {
             reg: crate::rows::registry(),
             cmds,
             name: name.as_deref(),
+            default: &self.config.list.default,
         });
     }
 
     /// A paste goes into the search or a name being typed, as one line;
-    /// elsewhere into the command line.
+    /// elsewhere into the command line, its newlines kept (`\r\n` and `\r`
+    /// as `\n`): a prompt or a script of several lines, which `enter` starts.
     pub fn paste(&mut self, s: &str) {
+        let to_line = matches!(self.mode, Mode::List) && self.search.is_none();
         let s: String = s
+            .replace("\r\n", "\n")
             .chars()
-            .map(|c| if matches!(c, '\n' | '\r' | '\t') { ' ' } else { c })
-            .filter(|c| !c.is_control())
+            .map(|c| match c {
+                '\n' | '\r' if to_line => '\n',
+                '\n' | '\r' | '\t' => ' ',
+                c => c,
+            })
+            .filter(|c| *c == '\n' || !c.is_control())
             .collect();
         // A name being typed takes it first.
         match &mut self.mode {

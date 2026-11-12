@@ -159,13 +159,27 @@ the cursor (else where `rl` was started; the line shows only the prompt `❯`):
   its own background (`claude --bg`), Codex on its own app-server daemon (see Codex below); the
   others in a session Relay holds.
 - `/` and a name: a command, run on the row under the cursor or on the list (below).
-- Anything else is a shell command, run in a shell Relay holds, which stays a shell once it is done.
+- `!` and a command (`! make test`): a shell command, whatever the default.
+- Anything else starts the default, `list.default` in `config.json`: `shell` (as it comes) runs it
+  as a shell command, in a shell Relay holds, which stays a shell once it is done; an agent harness
+  (`/default claude`) starts that agent with the whole line as its first prompt, so `fix the login`
+  is a prompt for Claude while `codex fix the login` still starts Codex.
+
+`shift+enter` adds a line to what is typed: a prompt of several lines goes to the agent whole, its
+newlines kept, and a shell runs the lines in order, as a script. `alt+enter` (option+enter) does
+the same, for terminals that send `shift+enter` as a plain `enter` (Relay asks the terminal to tell
+them apart with the kitty keyboard protocol, where the terminal speaks it — kitty, WezTerm,
+Ghostty and others; not Terminal.app or an older tmux). A paste keeps its newlines too, and starts nothing until
+`enter`. The line grows to five rows, then scrolls; `↑` `↓` move between its lines, and from its
+first or last line move on the list as ever.
 
 The right end of the line says which it is (`agent · claude`, `shell`, `command · pin`, `unknown
 command`, or `agent · antigravity (agy not found)`, which will not start). `tab` completes a
-harness, a program on `PATH`, or a path, and on a `/` line the command, then its colour or, for
-`/rename`, the row's name; the best completion stands dim after the cursor, and `tab` again cycles.
-Every letter types; the list's own keys are ctrl keys, the arrows and `enter`. `ctrl+f` searches.
+harness, a program on `PATH` (only after a `!` where the default is an agent), or a path, and on a
+`/` line the command, then its colour or, for `/rename`, the row's name, or for `/default` a
+harness that is here or `shell`; the best completion stands dim after the cursor, and `tab` again
+cycles. Every letter types; the list's own keys are ctrl keys, the arrows and `enter`. `ctrl+f`
+searches.
 
 | command | does |
 | --- | --- |
@@ -177,6 +191,7 @@ Every letter types; the list's own keys are ctrl keys, the arrows and `enter`. `
 | `/rm` | remove an ended session Relay holds; on a Claude or Codex session, ask to remove or archive it (`enter` confirms, `esc` cancels) |
 | `/agents` `/shells` `/hidden` | show agents, shells, hidden, as `ctrl+a` `ctrl+l` `ctrl+o` |
 | `/group` | by project or by state, as `ctrl+s` |
+| `/default <harness\|shell>` | what a line that names no harness starts: `shell`, or an agent harness (`claude`, `codex`, `agy`…) that takes the whole line as its prompt; kept in `config.json` as `list.default` |
 | `/setup` | the setup walk (as `rl setup`), under the list; back on the list, what it did stands in the footer, and the `setup needed` notice goes |
 | `/help` | the keys |
 | `/quit` | quit |
@@ -187,6 +202,7 @@ in the footer and changes nothing; an unknown one stays on the line to mend.
 | key | does |
 | --- | --- |
 | `enter` | attach (on a line with text: start it) |
+| `shift+enter` `alt+enter` | a new line in what is typed |
 | typing | the command line; `esc` clears it, `home` `end` go to its ends |
 | `↑↓` `ctrl+j` `ctrl+k` | move |
 | `pgup` `pgdn` `home` `end` | page (`home` `end` with nothing typed) |
@@ -276,7 +292,7 @@ terminal or the laptop lid costs nothing. Without a daemon, nothing else is runn
 | `sessions/<name>/` | one held session: `meta.json`, `state.json`, `hook.json`, `exit`, `sock` |
 | `state/<agent>/<session_id>.json` | what an agent's hooks said of a session Relay does not hold |
 | `mail/<key>/` | messages waiting for an agent, one file each (key: a held session's name, else its conversation id) |
-| `config.json` | harnesses offered, badges, how the list stands (grouping, pins, names, colours, order, hidden) |
+| `config.json` | harnesses offered, badges, how the list stands (grouping, pins, names, colours, order, hidden, `default`: what a typed line starts) |
 | `hooks/` | settings files `rl new` passes to a harness (Claude's `--settings`) |
 | `detect/*.yaml` | your harness profiles |
 | `plugins/gh-pr` | the badge script for project headers |
