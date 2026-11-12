@@ -850,11 +850,28 @@ async fn the_line_starts_claude_in_its_own_background_and_the_cursor_waits_for_i
 
 /// What the tests' stand-in Codex daemon was sent, by every test so far.
 fn codex_sent() -> Vec<serde_json::Value> {
+    // Shared by the tests running at once: a line another test's stand-in is
+    // still writing is not read yet.
     std::fs::read_to_string(crate::sources::codex_stand_in().with_extension("log"))
         .unwrap_or_default()
         .lines()
-        .map(|l| serde_json::from_str(l).unwrap())
+        .filter_map(|l| serde_json::from_str(l).ok())
         .collect()
+}
+
+/// Whether the stand-in Codex was sent a message `pred` matches, within a
+/// few seconds: its log is written as it answers, not before a start returns.
+async fn codex_was_sent(pred: impl Fn(&serde_json::Value) -> bool) -> bool {
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        if codex_sent().iter().any(&pred) {
+            return true;
+        }
+        if std::time::Instant::now() >= until {
+            return false;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
 }
 
 #[tokio::test]
@@ -1193,15 +1210,17 @@ async fn the_header_carries_the_filters_and_the_grouping_and_the_foot_does_not()
     let mut app = list(&f).await;
     let rows = screen(&app, 100, 30);
     let at = |rows: &[String], t: &str| rows.iter().position(|r| r.contains(t));
-    let head = at(&rows, "✦ ctrl+a").expect("the toggles are on screen");
+    let head = at(&rows, "✦ agents").expect("the toggles are on screen, by name");
     assert!(head < 6, "in the header, beside the mark: {}", rows.join("\n"));
+    assert!(rows[head].contains("❯ shells") && rows[head].contains("◌ hidden") && rows[head].contains("by project"));
     assert!(
-        rows[head].contains("❯ ctrl+l") && rows[head].contains("◌ ctrl+o") && rows[head].contains("by project ctrl+s")
+        !rows[head].contains("ctrl+"),
+        "the keys are in the help grid, not the header"
     );
     assert!(at(&rows, "relay").unwrap() < head && at(&rows, "1 needs you").unwrap() < head);
     for r in &rows[6..] {
         assert!(
-            !r.contains("✦ ctrl+a") && !r.contains("by project"),
+            !r.contains("✦ agents") && !r.contains("by project"),
             "no toggles line at the foot: {r}"
         );
     }
@@ -1220,22 +1239,18 @@ async fn the_header_carries_the_filters_and_the_grouping_and_the_foot_does_not()
     // `^s`: by state, said in the header.
     ctrl(&mut app, 's');
     let rows = screen(&app, 100, 30);
-    assert!(
-        rows[..6].iter().any(|r| r.contains("by state ctrl+s")),
-        "{}",
-        rows.join("\n")
-    );
+    assert!(rows[..6].iter().any(|r| r.contains("by state")), "{}", rows.join("\n"));
     // On a short screen the header is one line, and keeps them: with their
-    // keys at 80, the icons alone where the headline would lose its room.
+    // names at 80, the icons alone where the headline would lose its room.
     let rows = screen(&app, 80, 20);
     assert!(
-        rows[0].contains("✦ ctrl+a") && rows[0].contains("by state ctrl+s"),
+        rows[0].contains("✦ agents") && rows[0].contains("by state"),
         "{}",
         rows[0]
     );
     let rows = screen(&app, 60, 20);
     assert!(
-        rows[0].contains("✦  ❯") && rows[0].contains("by state") && !rows[0].contains("ctrl+"),
+        rows[0].contains("✦  ❯") && rows[0].contains("by state") && !rows[0].contains("agents"),
         "{}",
         rows[0]
     );
@@ -2237,9 +2252,7 @@ async fn with_claude_for_default_a_line_is_its_prompt_a_word_still_picks_and_a_b
     press(&mut app, KeyCode::Enter);
     app.finish().await;
     assert!(
-        codex_sent()
-            .iter()
-            .any(|m| m["method"] == "turn/start" && m["params"]["input"][0]["text"] == "fix the default"),
+        codex_was_sent(|m| m["method"] == "turn/start" && m["params"]["input"][0]["text"] == "fix the default").await,
         "codex, on the rest"
     );
 }

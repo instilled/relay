@@ -213,7 +213,7 @@ in the footer and changes nothing; an unknown one stays on the line to mend.
 | `ctrl+t` | pin |
 | `ctrl+g` | your colour for the row: none, red, blue, green, yellow, purple, orange, pink, cyan (a colour the harness set wins on screen; a `#rrggbb` set in `config.json` or by `rl color` goes to red) |
 | `shift+↑↓` | reorder |
-| `ctrl+a` `ctrl+l` `ctrl+o` | show agents, shells, hidden (the header shows which: `✦ ctrl+a  ❯ ctrl+l  │  ◌ ctrl+o`, icons alone on a narrow one-line header) |
+| `ctrl+a` `ctrl+l` `ctrl+o` | show agents, shells, hidden (the header shows which, by name: `✦ agents  ❯ shells  │  ◌ hidden  │  by project`, icons alone on a narrow one-line header) |
 | `ctrl+s` | group by project or by state (the header says which) |
 | `ctrl+c ctrl+c` | quit |
 | `ctrl+h` `f1` | the keys, as a grid; again or `esc` closes it |

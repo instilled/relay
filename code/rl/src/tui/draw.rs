@@ -442,10 +442,10 @@ impl App {
         );
     }
 
-    /// The toggles, for the header: a glyph and, with `keys`, its key for
-    /// each kind, `✦ ctrl+a` agents, `❯ ctrl+l` shells, then `◌ ctrl+o`
-    /// hidden and the grouping, each set apart. On is accented and bold, off
-    /// is quiet.
+    /// The toggles, for the header: a glyph and, with room (`keys`), what it
+    /// is — `✦ agents`, `❯ shells`, then `◌ hidden` and the grouping, each set
+    /// apart. The keys (ctrl+a, ctrl+l, ctrl+o, ctrl+s) are in the help grid.
+    /// On is accented and bold, off is quiet.
     fn toggle_spans(&self, keys: bool) -> Vec<Span<'static>> {
         let on = theme::accent().add_modifier(Modifier::BOLD);
         let off = theme::dim();
@@ -462,21 +462,17 @@ impl App {
                 icon.to_string()
             }
         };
-        let mut v = vec![
-            Span::styled(k("✦", "ctrl+a"), lit(p.show_agents)),
+        vec![
+            Span::styled(k("✦", "agents"), lit(p.show_agents)),
             Span::styled("  ", off),
-            Span::styled(k("❯", "ctrl+l"), lit(p.show_shells)),
+            Span::styled(k("❯", "shells"), lit(p.show_shells)),
             // Hidden is a different axis — what you hid, not a kind — and the
             // grouping another again, so a divider sets each apart.
             Span::styled("  │  ", off),
-            Span::styled(k("◌", "ctrl+o"), lit(p.show_hidden)),
+            Span::styled(k("◌", "hidden"), lit(p.show_hidden)),
             Span::styled("  │  ", off),
             Span::styled(grouping, theme::accent()),
-        ];
-        if keys {
-            v.push(Span::styled(" ctrl+s", off));
-        }
-        v
+        ]
     }
 
     /// How many rows the command line stands on: one for each line typed
