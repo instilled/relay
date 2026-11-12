@@ -14,13 +14,14 @@ report arc, the briefer, the co-worker layer, notifications, the pane redesign �
 
 From a Codex review of the repo (2026-11-12, `docs/what-to-improve.md`):
 
-* [ ] prove live compatibility — a repeatable check against the real Claude and Codex (screen
-  markers for typing, listing formats, attach/stop/rm/archive/queue), and a supported-version
-  matrix
-* [ ] mail delivery recoverable — messages kept after `inbox` until the reply is written, a
-  `recent` re-read (in progress)
-* [ ] a slow harness doesn't hold up the others — listers run and publish independently, in the
-  list and in `rl mcp` (in progress)
+* [ ] live compatibility without a test suite — next: one intent-level `Harness` interface
+  (info, sessions, start, attach, actions, stop, close, rename, notify, setup, caller, check),
+  each harness binding its own steps; Relay on stable contracts only (documented CLI, JSON,
+  Codex's schema): no screen typing (an idle Claude woken by `claude stop` + `--resume --bg`,
+  Claude renames via `-n` at its next start), the ← screen watch dropped. Drift noticed at use
+  and reported on your yes is done (#219)
+* [x] mail delivery recoverable — `delivered/` after the reply is written, `inbox {recent}` (#217)
+* [x] a slow harness doesn't hold up the others — listers run independently (#217)
 * [x] attach and typing never overlap — an attach waits for a line being typed in (#215)
 
 What the slim build left to check or finish:
@@ -47,6 +48,14 @@ Later:
 
 ## Done — newest first
 
+* [x] drift — Relay notices when a harness changes under it (Claude's listing shape, `--bg` id,
+  Codex schema methods/fields, rejected calls, CLI usage errors), says so in the footer,
+  `rl setup --check` and `rl doctor`; `rl report` / `/report` posts a GitHub issue only on your
+  yes; Codex checks its schema and turns off only what's gone; Claude's listing read tolerantly
+  (#219)
+* [x] the command line — shift+enter (alt+enter) for multi-line prompts; a default harness for
+  typed lines (`/default`, `!` for a shell); the header names its filters (#218)
+* [x] mail can't be lost (`delivered/`, `inbox {recent}`); each harness listed on its own (#217)
 * [x] rename reaches the harness — Codex by `thread/name/set`, an idle Claude by `/rename` typed
   in; Relay mail wakes an idle Claude (a line typed in) or carries on a stopped one
   (`--resume --bg`); attaches wait for typing (#215)
