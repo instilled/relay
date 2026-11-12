@@ -167,7 +167,13 @@ pub trait Steps: Send + Sync {
     /// began. `before`: the ids its last listing had, which the new one is
     /// not. Without a background of its own: `Started::Held`, its profile's
     /// prompt arguments, for Relay to hold.
-    fn start(&self, cwd: &Path, name: Option<&str>, prompt: Option<&str>, before: &HashSet<String>) -> Result<Started> {
+    fn start_in(
+        &self,
+        cwd: &Path,
+        name: Option<&str>,
+        prompt: Option<&str>,
+        before: &HashSet<String>,
+    ) -> Result<Started> {
         let _ = (cwd, name, before);
         Ok(Started::Held(self.profile().prompt_args(prompt.unwrap_or(""))))
     }
@@ -181,19 +187,8 @@ pub trait Steps: Send + Sync {
     /// arguments): with the hooks its profile's `hooks` says it reports
     /// through (`claude --settings <file>`), the file written under `home`
     /// for `rl` (asked only then).
-    fn held_argv(&self, home: &Home, mut argv: Vec<String>, rl: &dyn Fn() -> Result<PathBuf>) -> Result<Vec<String>> {
-        if let Some(hooks) = &self.profile().hooks
-            && hooks.dialect == crate::claude::DIALECT
-        {
-            let file = crate::claude::write_settings(home, &rl()?)?;
-            let extra = hooks
-                .args
-                .iter()
-                .map(|a| a.replace("{hooks_file}", &file.to_string_lossy()));
-            let at = argv.len().min(1);
-            argv.splice(at..at, extra);
-        }
-        Ok(argv)
+    fn held_argv(&self, home: &Home, argv: Vec<String>, rl: &dyn Fn() -> Result<PathBuf>) -> Result<Vec<String>> {
+        held_argv(self.profile(), home, argv, rl)
     }
     /// What attaches this terminal to its session `id`. None: it has none
     /// of its own.
@@ -228,7 +223,7 @@ pub trait Steps: Send + Sync {
     }
     /// Stops its session `id`, in `cwd` (Claude: `claude stop`; Codex:
     /// interrupts its running turn).
-    fn stop(&self, id: &str, cwd: &Path) -> Result<()> {
+    fn stop_id(&self, id: &str, cwd: &Path) -> Result<()> {
         let _ = (id, cwd);
         bail!("nothing stops a {} session from here", self.name())
     }
@@ -242,7 +237,7 @@ pub trait Steps: Send + Sync {
     /// `sessions.remove` arguments run with its binary (`claude rm <id>`),
     /// for no longer than a list may take. Where it refuses, the error is
     /// what it said, as it said it (Claude's unpushed commits).
-    fn remove(&self, id: &str, cwd: &Path) -> Result<()> {
+    fn remove_id(&self, id: &str, cwd: &Path) -> Result<()> {
         let Some(s) = self.profile().sessions.as_ref().filter(|s| !s.remove.is_empty()) else {
             bail!("nothing removes a {} session from here", self.name());
         };
@@ -278,7 +273,7 @@ pub trait Steps: Send + Sync {
     /// profile's `sessions.rename` says; `locks` is where typing keeps its
     /// lock files. A harness whose rename is a call on its daemon makes the
     /// call itself (Codex).
-    fn rename(&self, row: &NativeRow, name: &str, locks: &Path) -> Result<()> {
+    fn rename_row(&self, row: &NativeRow, name: &str, locks: &Path) -> Result<()> {
         let who = self.name();
         match self.profile().sessions.as_ref().and_then(|s| s.rename.as_ref()) {
             Some(Rename::Type(line)) if !name.trim().is_empty() => {
@@ -415,6 +410,31 @@ pub trait Steps: Send + Sync {
     }
 }
 
+/// What a session of `profile` that Relay holds runs, from `argv` (its
+/// binary and arguments, `Started::Held`'s after the binary): with the hooks
+/// its profile's `hooks` says it reports through (`claude --settings
+/// <file>`), the file written under `home` for `rl` (asked only then). The
+/// held side of every harness's start: profile data, the same for all.
+pub fn held_argv(
+    profile: &Profile,
+    home: &Home,
+    mut argv: Vec<String>,
+    rl: &dyn Fn() -> Result<PathBuf>,
+) -> Result<Vec<String>> {
+    if let Some(hooks) = &profile.hooks
+        && hooks.dialect == crate::claude::DIALECT
+    {
+        let file = crate::claude::write_settings(home, &rl()?)?;
+        let extra = hooks
+            .args
+            .iter()
+            .map(|a| a.replace("{hooks_file}", &file.to_string_lossy()));
+        let at = argv.len().min(1);
+        argv.splice(at..at, extra);
+    }
+    Ok(argv)
+}
+
 /// The name its own CLI goes by: its profile's first binary.
 pub(crate) fn cli_name(h: &(impl Steps + ?Sized)) -> String {
     h.profile()
@@ -493,9 +513,9 @@ impl Info {
 /// Whose a session is, and so what does what with it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Owner {
-    /// Relay holds it (its `id` is its name); `live` while it is still
-    /// going.
-    Relay { live: bool },
+    /// Relay holds it (its `id` is its name), its folder `dir`; `live`
+    /// while it is still going.
+    Relay { live: bool, dir: PathBuf },
     /// Its harness's own, in its background or on its daemon (its `id` is
     /// its harness's).
     Own,
@@ -530,6 +550,23 @@ pub struct Session {
 
 impl Session {
     /// One of a harness's own, as it listed it.
+    /// One of `harness`'s own that a start just began, by its id, in `cwd`:
+    /// not listed yet.
+    pub fn started(harness: &str, id: &str, cwd: &Path) -> Session {
+        Session {
+            harness: harness.into(),
+            owner: Owner::Own,
+            id: id.into(),
+            session_id: String::new(),
+            cwd: cwd.into(),
+            state: RunState::Starting,
+            words: String::new(),
+            name: String::new(),
+            relay_name: None,
+            attached: false,
+        }
+    }
+
     pub fn own(n: &NativeRow) -> Session {
         Session {
             harness: n.harness.clone(),
@@ -702,10 +739,12 @@ pub struct Compat {
 /// sessions `rl` installs (`set_holder`). With none, a held session is
 /// neither.
 pub trait Holder: Send + Sync {
-    /// Closes the held session `name`, and waits for it to end.
-    fn stop(&self, name: &str) -> Result<()>;
-    /// Removes the held session `name`, ended, and all Relay kept of it.
-    fn remove(&self, name: &str) -> Result<()>;
+    /// Closes the held session `name`, kept in `dir`, and waits for it to
+    /// end.
+    fn stop(&self, dir: &Path, name: &str) -> Result<()>;
+    /// Removes the held session `name`, kept in `dir`, ended, and all Relay
+    /// kept of it.
+    fn remove(&self, dir: &Path, name: &str) -> Result<()>;
 }
 
 static HOLDER: std::sync::RwLock<Option<std::sync::Arc<dyn Holder>>> = std::sync::RwLock::new(None);
@@ -799,7 +838,7 @@ pub(crate) mod held {
 
     pub fn actions(s: &Session) -> Actions {
         match s.owner {
-            Owner::Relay { live } => Actions {
+            Owner::Relay { live, .. } => Actions {
                 stop: live,
                 remove: true,
                 rename: RenameHow::RelayOnly,
@@ -810,19 +849,19 @@ pub(crate) mod held {
 
     pub fn stop(s: &Session) -> Result<()> {
         match s.owner {
-            Owner::Relay { .. } => holder()?.stop(&s.id),
+            Owner::Relay { ref dir, .. } => holder()?.stop(dir, &s.id),
             _ => bail!("nothing stops a {} session from here", s.harness),
         }
     }
 
     pub fn remove(s: &Session) -> Result<()> {
         match s.owner {
-            Owner::Relay { live } => {
+            Owner::Relay { live, ref dir } => {
                 let h = holder()?;
                 if live {
-                    h.stop(&s.id)?;
+                    h.stop(dir, &s.id)?;
                 }
-                h.remove(&s.id)
+                h.remove(dir, &s.id)
             }
             _ => bail!("nothing removes a {} session from here", s.harness),
         }
@@ -1339,7 +1378,7 @@ mod tests {
         assert!(get("claude").removes(&row));
         assert!(get("codex").removes(&row), "thread/delete");
         assert!(!get("antigravity").removes(&row), "held: Relay removes its own");
-        let e = Steps::remove(get("gemini").as_ref(), "x", Path::new("/")).unwrap_err();
+        let e = Steps::remove_id(get("gemini").as_ref(), "x", Path::new("/")).unwrap_err();
         assert_eq!(e.to_string(), "nothing removes a gemini session from here");
     }
 
@@ -1355,7 +1394,7 @@ mod tests {
         .unwrap();
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
         let h = of(Registry::builtin().profile("claude").unwrap(), Some(bin));
-        Steps::remove(h.as_ref(), "ab12cd34", tmp.path()).unwrap();
+        Steps::remove_id(h.as_ref(), "ab12cd34", tmp.path()).unwrap();
         let said = std::fs::read_to_string(tmp.path().join("said")).unwrap();
         let here = std::fs::canonicalize(tmp.path()).unwrap();
         assert_eq!(
@@ -1366,7 +1405,7 @@ mod tests {
         let refusal =
             "ab12cd34 has 2 unpushed commits in worktree w-1\nrerun with --discard-unpushed 9f1e@w-1 to discard them";
         std::fs::write(tmp.path().join("refuse"), format!("{refusal}\n")).unwrap();
-        let e = Steps::remove(h.as_ref(), "ab12cd34", tmp.path()).unwrap_err();
+        let e = Steps::remove_id(h.as_ref(), "ab12cd34", tmp.path()).unwrap_err();
         assert_eq!(e.to_string(), refusal, "every line, as said");
     }
 
@@ -1470,9 +1509,9 @@ mod tests {
         assert!(c.renames(&idle, "the fix"));
         assert!(!c.renames(&busy, "the fix"), "busy: the name stays Relay's");
         assert!(!c.renames(&idle, " "), "a name is not cleared in Claude");
-        Steps::rename(c.as_ref(), &idle, " the fix ", &locks).unwrap();
+        Steps::rename_row(c.as_ref(), &idle, " the fix ", &locks).unwrap();
         assert_eq!(std::fs::read_to_string(dir.join("typed")).unwrap(), "/rename the fix\n");
-        let e = Steps::rename(c.as_ref(), &busy, "x", &locks).unwrap_err();
+        let e = Steps::rename_row(c.as_ref(), &busy, "x", &locks).unwrap_err();
         assert_eq!(e.to_string(), "it is working, not idle");
         // The held have no rename and no wake.
         let all = harnesses(&Registry::builtin(), |_| None);
@@ -1509,11 +1548,11 @@ mod tests {
     struct Kept(std::sync::Mutex<Vec<String>>);
 
     impl Holder for Kept {
-        fn stop(&self, name: &str) -> Result<()> {
+        fn stop(&self, _: &Path, name: &str) -> Result<()> {
             self.0.lock().unwrap().push(format!("stop {name}"));
             Ok(())
         }
-        fn remove(&self, name: &str) -> Result<()> {
+        fn remove(&self, _: &Path, name: &str) -> Result<()> {
             self.0.lock().unwrap().push(format!("remove {name}"));
             Ok(())
         }
@@ -1541,7 +1580,15 @@ mod tests {
             Started::Held(vec!["--resume".into(), "g-1".into()]),
             "carried on as its profile's resume says"
         );
-        let held = session("gemini", Owner::Relay { live: true }, RunState::Working, at);
+        let held = session(
+            "gemini",
+            Owner::Relay {
+                live: true,
+                dir: "/h/sessions/x".into(),
+            },
+            RunState::Working,
+            at,
+        );
         assert_eq!(gemini.attach(&held), Attach::Held);
         let elsewhere = session("gemini", Owner::Elsewhere { listed: false }, RunState::Idle, at);
         let Attach::CarryOn(s) = gemini.attach(&elsewhere) else {
@@ -1571,7 +1618,10 @@ mod tests {
         Harness::stop(gemini.as_ref(), &held).unwrap();
         Harness::remove(gemini.as_ref(), &held).unwrap();
         let ended = Session {
-            owner: Owner::Relay { live: false },
+            owner: Owner::Relay {
+                live: false,
+                dir: "/h/sessions/x".into(),
+            },
             ..held.clone()
         };
         Harness::remove(gemini.as_ref(), &ended).unwrap();
@@ -1687,7 +1737,13 @@ mod tests {
                 "you are attached to it; it will see it at your next prompt".into()
             ))
         );
-        for owner in [Owner::Relay { live: true }, Owner::Elsewhere { listed: true }] {
+        for owner in [
+            Owner::Relay {
+                live: true,
+                dir: "/h/sessions/x".into(),
+            },
+            Owner::Elsewhere { listed: true },
+        ] {
             assert_eq!(
                 c.notify(&session("claude", owner, RunState::Idle, &dir), &mail),
                 Notified::ByHooks(None)

@@ -192,7 +192,13 @@ impl Steps for Claude {
 
     /// In its background (`claude --bg`), where its profile says how; else
     /// held.
-    fn start(&self, cwd: &Path, name: Option<&str>, prompt: Option<&str>, before: &HashSet<String>) -> Result<Started> {
+    fn start_in(
+        &self,
+        cwd: &Path,
+        name: Option<&str>,
+        prompt: Option<&str>,
+        before: &HashSet<String>,
+    ) -> Result<Started> {
         match self.start_argv(name, prompt) {
             Some(argv) => self.carry_on_there(&argv, cwd, before).map(Started::Background),
             None => Ok(Started::Held(self.profile.prompt_args(prompt.unwrap_or("")))),
@@ -207,7 +213,7 @@ impl Steps for Claude {
         !self.stop.is_empty() && !row.state.state.is_terminal()
     }
 
-    fn stop(&self, id: &str, cwd: &Path) -> Result<()> {
+    fn stop_id(&self, id: &str, cwd: &Path) -> Result<()> {
         let argv = self.stop_argv(id).context("its profile says no `stop`")?;
         harness::run(&argv, Some(cwd), false, harness::LIST_WAIT).map(drop)
     }
@@ -311,14 +317,14 @@ impl Harness for Claude {
 
     fn stop(&self, s: &Session) -> Result<()> {
         match s.owner {
-            Owner::Own => Steps::stop(self, &s.id, &s.cwd),
+            Owner::Own => Steps::stop_id(self, &s.id, &s.cwd),
             _ => held::stop(s),
         }
     }
 
     fn remove(&self, s: &Session) -> Result<()> {
         match s.owner {
-            Owner::Own => Steps::remove(self, &s.id, &s.cwd),
+            Owner::Own => Steps::remove_id(self, &s.id, &s.cwd),
             _ => held::remove(s),
         }
     }
@@ -343,7 +349,7 @@ impl Harness for Claude {
             RunState::Working | RunState::Starting => return Notified::ByHooks(Some(BUSY.into())),
             RunState::NeedsInput => return Notified::ByHooks(Some(WAITS.into())),
             RunState::Idle if s.attached => return Notified::ByHooks(Some(ATTACHED.into())),
-            RunState::Idle => Steps::stop(self, &s.id, &s.cwd)
+            RunState::Idle => Steps::stop_id(self, &s.id, &s.cwd)
                 .and_then(|()| self.wake(s, mail))
                 .map_err(|e| format!("claude wasn't woken: {e:#}")),
             st if st.is_terminal() => self

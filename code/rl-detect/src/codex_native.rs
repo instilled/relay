@@ -198,7 +198,7 @@ impl Steps for Codex {
 
     /// A prompt: a thread on the daemon, its first turn started. None: the
     /// TUI, here.
-    fn start(&self, cwd: &Path, name: Option<&str>, prompt: Option<&str>, _: &HashSet<String>) -> Result<Started> {
+    fn start_in(&self, cwd: &Path, name: Option<&str>, prompt: Option<&str>, _: &HashSet<String>) -> Result<Started> {
         let Some(prompt) = prompt.filter(|p| !p.trim().is_empty()) else {
             return Ok(Started::Here(vec![self.bin.clone()]));
         };
@@ -228,7 +228,7 @@ impl Steps for Codex {
             && self.compat_known().is_none_or(|c| c.off(Feature::Stop).is_none())
     }
 
-    fn stop(&self, id: &str, _: &Path) -> Result<()> {
+    fn stop_id(&self, id: &str, _: &Path) -> Result<()> {
         self.needs(Feature::Stop)?;
         let id = id.to_string();
         self.on_daemon(move |d| interrupt(d, &id))
@@ -240,7 +240,7 @@ impl Steps for Codex {
         self.compat_known().is_none_or(|c| c.off(Feature::Remove).is_none())
     }
 
-    fn remove(&self, id: &str, _: &Path) -> Result<()> {
+    fn remove_id(&self, id: &str, _: &Path) -> Result<()> {
         self.needs(Feature::Remove)?;
         let stops = self.compat_known().is_none_or(|c| c.off(Feature::Stop).is_none());
         let id = id.to_string();
@@ -254,7 +254,7 @@ impl Steps for Codex {
         self.rename_method().is_some() && self.compat_known().is_none_or(|c| c.off(Feature::Rename).is_none())
     }
 
-    fn rename(&self, row: &NativeRow, name: &str, _: &Path) -> Result<()> {
+    fn rename_row(&self, row: &NativeRow, name: &str, _: &Path) -> Result<()> {
         self.needs(Feature::Rename)?;
         let method = self.rename_method().context("its profile says no `sessions.rename`")?;
         let (id, name) = (row.id.clone(), name.trim().to_string());
@@ -349,14 +349,14 @@ impl Harness for Codex {
 
     fn stop(&self, s: &Session) -> Result<()> {
         match s.owner {
-            Owner::Own => Steps::stop(self, &s.id, &s.cwd),
+            Owner::Own => Steps::stop_id(self, &s.id, &s.cwd),
             _ => held::stop(s),
         }
     }
 
     fn remove(&self, s: &Session) -> Result<()> {
         match s.owner {
-            Owner::Own => Steps::remove(self, &s.id, &s.cwd),
+            Owner::Own => Steps::remove_id(self, &s.id, &s.cwd),
             _ => held::remove(s),
         }
     }
@@ -1642,7 +1642,7 @@ mod tests {
             ["codex", "resume", "01a11d20-8cab-7061-885d-f86e8e313f11"]
         );
         assert_eq!(
-            Steps::start(&c, Path::new("/w"), None, None, &HashSet::new()).unwrap(),
+            Steps::start_in(&c, Path::new("/w"), None, None, &HashSet::new()).unwrap(),
             Started::Here(vec!["codex".into()]),
             "no prompt: its TUI, here"
         );
@@ -1866,7 +1866,7 @@ mod tests {
             color: None,
         };
         assert!(h.renames(&row, "y"), "not known yet: as ever");
-        let (e, noticed) = crate::drift::capture(|| Steps::rename(h.as_ref(), &row, "y", tmp.path()).unwrap_err());
+        let (e, noticed) = crate::drift::capture(|| Steps::rename_row(h.as_ref(), &row, "y", tmp.path()).unwrap_err());
         assert_eq!(
             e.to_string(),
             "codex 0.167.2: thread/name/set gone, rename stays in Relay"
@@ -1877,7 +1877,7 @@ mod tests {
         assert!(!h.renames(&row, "y"), "known now: the name stays in Relay");
         assert!(h.stops(&row), "the rest goes on");
         let ((), again) = crate::drift::capture(|| {
-            let _ = Steps::rename(h.as_ref(), &row, "y", tmp.path());
+            let _ = Steps::rename_row(h.as_ref(), &row, "y", tmp.path());
         });
         assert!(again.is_empty(), "checked once per binary");
     }

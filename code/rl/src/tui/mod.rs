@@ -273,6 +273,9 @@ async fn hand_over(home: &Home, hand: &Hand) -> String {
                 Lock::Held(you) => Some(you),
                 Lock::None => None,
             };
+            // Mail for it meanwhile is left to its hooks: it is not stopped
+            // under you.
+            let _here = mark(home, &hand.key);
             match attach::native::hold(argv, None, title, back.as_ref()).await {
                 Ok(attach::native::Back::Detached) => back_words(title, &attach::Ended::Detached),
                 Ok(attach::native::Back::Ended(exit)) => back_words(title, &attach::held::exit_words(title, &exit).0),
@@ -295,6 +298,16 @@ enum Lock {
     Busy,
     /// Not a native row, or its lock file is not to be had: no lock.
     None,
+}
+
+/// The mark that says you are attached to the native row `key`
+/// (`n:<harness>:<id>`); none for any other row.
+fn mark(home: &Home, key: &str) -> Option<crate::store::attached::Mark> {
+    let mut parts = key.splitn(3, ':');
+    let (Some("n"), Some(harness), Some(id)) = (parts.next(), parts.next(), parts.next()) else {
+        return None;
+    };
+    crate::store::attached::mark(home, harness, id)
 }
 
 /// The lock of the native row `key` (`n:<harness>:<id>`), waited for while

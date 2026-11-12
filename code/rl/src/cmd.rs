@@ -9,7 +9,6 @@ use rl_core::Home;
 use rl_detect::harness::Started;
 use rl_session::client::Session;
 use rl_session::exit::read_exit_file;
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -28,8 +27,10 @@ pub async fn new(
         Some(c) => c,
         None => std::env::current_dir()?,
     };
-    if let Some((a, words)) = never_held(harness.as_deref(), &argv) {
-        return new_own(a, &cwd, name_only, words).await;
+    if let Some((a, words)) = asked(harness.as_deref(), &argv)
+        && new_own(a, &cwd, name_only, words).await?
+    {
+        return Ok(());
     }
     let (cols, rows) = terminal_size();
     let meta = spawn::start(
@@ -52,42 +53,42 @@ pub async fn new(
 }
 
 /// The harness `rl new` was asked for (`--harness`, else what `argv`
-/// runs), where Relay never holds it (Codex), and the words after its
-/// binary.
-fn never_held<'a>(harness: Option<&str>, argv: &'a [String]) -> Option<(&'static dyn Harness, &'a [String])> {
+/// runs), and the words after its binary.
+fn asked<'a>(harness: Option<&str>, argv: &'a [String]) -> Option<(&'static dyn Harness, &'a [String])> {
     let (name, words) = match harness {
         Some(h) => (h.to_string(), argv),
         None => (crate::rows::registry().detect(argv)?.name.clone(), argv.get(1..)?),
     };
-    Some((sources::harness(&name).filter(|h| h.never_held())?, words))
+    Some((sources::harness(&name)?, words))
 }
 
-/// `rl new` for a harness Relay never holds: started in its own background
-/// with `words` as its prompt (its id printed), or, with none, run here in
-/// the foreground, where it begins a session itself (the process exits as
-/// it did).
-async fn new_own(a: &'static dyn Harness, cwd: &Path, name_only: bool, words: &[String]) -> Result<()> {
-    let what = a.name();
-    if let Some(flag) = words.iter().find(|w| w.starts_with('-')) {
-        bail!("{what} starts in its own background, where `{flag}` can't go: give it a prompt only");
-    }
+/// `rl new` as its harness starts it, `words` after its binary
+/// (`Harness::start`): in its own background (its id printed), or run here
+/// in the foreground, where it begins a session itself (the process exits
+/// as it did). False: Relay is to hold it, as asked.
+async fn new_own(a: &'static dyn Harness, cwd: &Path, name_only: bool, words: &[String]) -> Result<bool> {
+    let what = a.info().name.clone();
     let cwd = std::fs::canonicalize(cwd).with_context(|| format!("cwd {}", cwd.display()))?;
-    let prompt = (!words.is_empty()).then(|| words.join(" "));
-    let at = cwd.clone();
-    let started = tokio::task::spawn_blocking(move || {
-        rl_detect::harness::Steps::start(a, &at, None, prompt.as_deref(), &HashSet::new())
-    })
-    .await?;
+    let start = rl_detect::harness::Start {
+        cwd: cwd.clone(),
+        words: Some(words.to_vec()),
+        ..Default::default()
+    };
+    let started = tokio::task::spawn_blocking(move || a.start(&start)).await?;
     match started {
+        Ok(Started::Held(_)) => Ok(false),
         Ok(Started::Background(id)) => {
             println!("{id}");
             if !name_only {
-                match a.attach_argv(&id) {
-                    Some(argv) => eprintln!("started {what} {id} in its background · `{}` attaches", argv.join(" ")),
-                    None => eprintln!("started {what} {id} in its background"),
+                let s = rl_detect::harness::Session::started(&what, &id, &cwd);
+                match a.attach(&s) {
+                    rl_detect::harness::Attach::Argv(argv) => {
+                        eprintln!("started {what} {id} in its background · `{}` attaches", argv.join(" "))
+                    }
+                    _ => eprintln!("started {what} {id} in its background"),
                 }
             }
-            Ok(())
+            Ok(true)
         }
         Ok(Started::Here(argv)) => {
             let (bin, args) = argv.split_first().context("nothing to run")?;
@@ -98,13 +99,50 @@ async fn new_own(a: &'static dyn Harness, cwd: &Path, name_only: bool, words: &[
                 .await
                 .with_context(|| format!("running {bin}"))?;
             match status.code() {
-                Some(0) => Ok(()),
+                Some(0) => Ok(true),
                 Some(code) => std::process::exit(code),
                 None => bail!("{what} was killed"),
             }
         }
         Err(e) => Err(e.context(format!("start {what}"))),
-        Ok(Started::Held(_)) => bail!("{what} has no background to start in"),
+    }
+}
+
+/// What stops and removes the sessions Relay holds, for their harnesses
+/// (`Harness::stop`, `Harness::remove`): this store, from a session's
+/// folder (`<home>/sessions/<name>`). Asked off the list's loop, from a
+/// blocking task.
+pub struct Store;
+
+impl rl_detect::harness::Holder for Store {
+    fn stop(&self, dir: &Path, name: &str) -> Result<()> {
+        let home = home_of(dir)?;
+        block(async move { stop(&home, name).await })
+    }
+
+    fn remove(&self, dir: &Path, name: &str) -> Result<()> {
+        let home = home_of(dir)?;
+        block(async move { rm(&home, name).await })
+    }
+}
+
+/// The Relay home a session's folder is in.
+fn home_of(dir: &Path) -> Result<Home> {
+    dir.parent()
+        .and_then(Path::parent)
+        .map(Home::at)
+        .with_context(|| format!("{} is not a session's folder", dir.display()))
+}
+
+/// `f` run to its end from a blocking task: on its runtime, else one of its
+/// own.
+fn block<T>(f: impl std::future::Future<Output = Result<T>>) -> Result<T> {
+    match tokio::runtime::Handle::try_current() {
+        Ok(h) => h.block_on(f),
+        Err(_) => tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?
+            .block_on(f),
     }
 }
 

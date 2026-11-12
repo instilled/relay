@@ -95,6 +95,11 @@ impl Home {
     pub fn typing_dir(&self) -> PathBuf {
         self.0.join("typing")
     }
+    /// Which of the harnesses' own sessions you are attached to from the
+    /// list now: a file each, there while the attach lasts.
+    pub fn attached_dir(&self) -> PathBuf {
+        self.0.join("attached")
+    }
     pub fn config_json(&self) -> PathBuf {
         self.0.join("config.json")
     }

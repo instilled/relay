@@ -121,7 +121,7 @@ pub async fn start(home: &Home, start: Start) -> Result<Meta> {
     // A harness that reports through hooks of its own when held (Claude)
     // is passed them.
     let rl = || std::env::current_exe().context("locating this executable for hooks");
-    plan.argv = rl_detect::harness::of(plan.profile, None).held_argv(home, std::mem::take(&mut plan.argv), &rl)?;
+    plan.argv = rl_detect::harness::held_argv(plan.profile, home, std::mem::take(&mut plan.argv), &rl)?;
 
     home.ensure_store()?;
     let folder = cwd

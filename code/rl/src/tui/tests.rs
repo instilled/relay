@@ -1579,7 +1579,7 @@ async fn a_harnesss_session_is_named_in_relay_with_its_own_name_dim_beside_and_b
     let names = Config::load(&f.home).unwrap().list.names;
     assert_eq!(names.get(NATIVE).map(String::as_str), Some("login box"));
     assert!(
-        shown(&app).contains("named in relay · claude still calls it fix the login"),
+        shown(&app).contains("named in relay · claude takes it at its next start"),
         "{}",
         shown(&app)
     );
@@ -1607,7 +1607,7 @@ async fn a_harnesss_session_is_named_in_relay_with_its_own_name_dim_beside_and_b
 }
 
 #[tokio::test]
-async fn an_idle_claude_is_renamed_in_claude_too_and_a_busy_one_only_in_relay() {
+async fn a_claude_name_stays_in_relay_till_claude_takes_it_at_its_next_start() {
     let f = fixture();
     let mut app = list(&f).await;
     let mut idle = waiting(&f.repo);
@@ -1618,42 +1618,23 @@ async fn an_idle_claude_is_renamed_in_claude_too_and_a_busy_one_only_in_relay() 
     app.set_native(vec![idle.clone()]);
     on(&mut app, NATIVE);
     run(&mut app, "/rename login box");
+    app.finish().await;
+    assert!(app.work.is_empty(), "nothing run: Claude has no rename from outside");
     assert!(
-        shown(&app).contains("renaming it login box in claude…"),
+        shown(&app).contains("named in relay · claude takes it at its next start"),
         "{}",
         shown(&app)
     );
-    app.finish().await;
-    assert_eq!(
-        std::fs::read_to_string(f.repo.join("typed")).unwrap(),
-        "/rename login box\n",
-        "typed into it, through its attach"
-    );
-    assert!(
-        shown(&app).contains("renamed to login box · in claude too"),
-        "{}",
-        shown(&app)
-    );
-    assert!(
-        Config::load(&f.home).unwrap().list.names.is_empty(),
-        "the name is claude's own now"
-    );
-    let row = row_of(&shown(&app), "login box").to_string();
-    assert!(!row.contains("(fix the login)"), "{row}");
-    // Busy: the name is Relay's, and nothing is typed; once claude calls it
-    // so too (renamed there by you), Relay's goes.
-    std::fs::remove_file(f.repo.join("typed")).unwrap();
-    app.set_native(vec![waiting(&f.repo)]);
-    run(&mut app, "/rename the box");
-    app.finish().await;
-    assert!(!f.repo.join("typed").exists(), "nothing typed into a busy one");
-    assert!(shown(&app).contains("named in relay · claude still calls it fix the login"));
+    assert!(!f.repo.join("typed").exists(), "nothing typed into it");
     let names = Config::load(&f.home).unwrap().list.names;
-    assert_eq!(names.get(NATIVE).map(String::as_str), Some("the box"));
-    let mut renamed = waiting(&f.repo);
-    renamed.name = "the box".into();
+    assert_eq!(names.get(NATIVE).map(String::as_str), Some("login box"));
+    // Carried on with it (`-n`), Claude calls it so: Relay's goes.
+    let mut renamed = idle;
+    renamed.name = "login box".into();
     app.set_native(vec![renamed]);
     assert!(Config::load(&f.home).unwrap().list.names.is_empty());
+    let row = row_of(&shown(&app), "login box").to_string();
+    assert!(!row.contains("(fix the login)"), "{row}");
 }
 
 #[tokio::test]
@@ -1661,7 +1642,8 @@ async fn a_codex_thread_is_renamed_on_its_daemon_and_keeps_no_relay_name() {
     let f = fixture();
     let mut app = list(&f).await;
     let codex = crate::sources::harness("codex").unwrap();
-    let started = rl_detect::harness::Steps::start(codex, &f.repo, None, Some("fix it"), &Default::default()).unwrap();
+    let started =
+        rl_detect::harness::Steps::start_in(codex, &f.repo, None, Some("fix it"), &Default::default()).unwrap();
     let rl_detect::harness::Started::Background(id) = started else {
         panic!("{started:?}");
     };
