@@ -8,7 +8,7 @@ use super::live::Said;
 use crate::badges::{self, Badges};
 use crate::config::{Config, Grouping, ListPrefs};
 use crate::git::{self, Checkouts};
-use crate::rows::{self, Context, Line};
+use crate::rows::{self, Context, Head, Line};
 use crate::setup;
 use crate::sources::{self, Row};
 use crate::store::sessions::{self, Meta};
@@ -16,6 +16,7 @@ use crate::store::state;
 use anyhow::Result;
 use jiff::Timestamp;
 use rl_core::Home;
+use rl_detect::sessions::ScreenMark;
 use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -39,6 +40,9 @@ pub enum Mode {
     List,
     /// `^r`: a name typed where it stands.
     Rename(Renaming),
+    /// `^x` twice (or `/rm`) on one of a harness's own: what to do with it,
+    /// asked in the footer until a choice is taken or `esc`.
+    Ask(super::remove::Ask),
 }
 
 /// `^r` under way: the line's key, what is typed, the name it had, and its
@@ -66,8 +70,12 @@ pub struct Hand {
 pub enum To {
     /// A Relay-held session, straight to its holder.
     Held(Box<Meta>),
-    /// A harness's own attach command, run on a pty here.
-    Argv(Vec<String>),
+    /// A harness's own attach command, run on a pty here; let go of when
+    /// its screen shows `back`, the harness's own list of its sessions.
+    Argv {
+        argv: Vec<String>,
+        back: Option<ScreenMark>,
+    },
     /// A harness run on a pty here, in `cwd`, where it begins a session of
     /// its own (Codex with no prompt: its TUI).
     Here { argv: Vec<String>, cwd: PathBuf },
@@ -92,6 +100,9 @@ pub struct Done {
     pub ask_native: bool,
     /// What `setup::check` said, after the start's check or a `/setup`.
     pub setup: Option<Checked>,
+    /// A row its harness has renamed (its key, and the name): the name is
+    /// the harness's own now, and Relay keeps none of its own for it.
+    pub renamed: Option<(String, String)>,
 }
 
 /// How setup stands, as `setup::check` last said: what needs setting up, or
@@ -99,8 +110,6 @@ pub struct Done {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Checked {
     pub needs: Result<Vec<setup::Need>, String>,
-    /// After a `/setup`, which is then over.
-    pub ran: bool,
 }
 
 impl Done {
@@ -113,6 +122,7 @@ impl Done {
             gave_up: false,
             ask_native: false,
             setup: None,
+            renamed: None,
         }
     }
 
@@ -130,6 +140,19 @@ impl Done {
 pub struct Search {
     pub line: line::Line,
     pub before: String,
+}
+
+/// The list as last built, by what it was built with: `build` is the costly
+/// part of a key or a draw, so it is done once per change rather than once
+/// per question asked of the list. Rows by their place in `App::rows`.
+struct Built {
+    filter: String,
+    slots: Vec<Slot>,
+}
+
+enum Slot {
+    Group(Head),
+    Row(usize),
 }
 
 pub struct App {
@@ -169,8 +192,9 @@ pub struct App {
     pub setup_host: Option<setup::Host>,
     /// How setup stands, once the start's check has said.
     pub setup: Option<Result<Vec<setup::Need>, String>>,
-    /// A `/setup` is under way.
-    pub setting_up: bool,
+    /// `/setup` asked for the wizard: the terminal goes to it next
+    /// (`main_loop`).
+    pub wizard: bool,
     /// The line under the cursor, by key.
     pub sel: Option<String>,
     /// Where the list's window starts, as last drawn.
@@ -184,6 +208,9 @@ pub struct App {
     pub flash: Option<(String, Instant)>,
     pub arm: Option<Arm>,
     pub quit: bool,
+    /// The list as last built (`lines`); none once what it is built from
+    /// changed (`rebuild`).
+    built: RefCell<Option<Built>>,
 }
 
 impl App {
@@ -212,7 +239,7 @@ impl App {
             work: JoinSet::new(),
             setup_host: setup::Host::real().ok(),
             setup: None,
-            setting_up: false,
+            wizard: false,
             sel: None,
             scroll: Cell::new(0),
             hit: RefCell::default(),
@@ -221,6 +248,7 @@ impl App {
             flash: None,
             arm: None,
             quit: false,
+            built: RefCell::new(None),
         };
         app.reload();
         Ok(app)
@@ -237,6 +265,7 @@ impl App {
         let held = sessions::list(&self.home);
         let hooked = state::list(&self.home, Timestamp::now());
         self.rows = sources::rows(&held, &hooked, &self.native.rows, &self.native.answered);
+        self.rebuild();
         let folders = rows::project_folders(&self.rows, &self.config.list);
         if folders
             .iter()
@@ -258,6 +287,7 @@ impl App {
     pub fn regit(&mut self) {
         let folders = rows::project_folders(&self.rows, &self.config.list);
         self.checkouts = git::checkouts(&folders, &self.badges, &self.config.badges);
+        self.rebuild();
         // The pull requests' states, the badges' way: none asked with the
         // badges off.
         if self.config.badges.is_empty() {
@@ -275,9 +305,26 @@ impl App {
             .collect();
     }
 
-    /// What the harnesses' listers now say.
+    /// What the harnesses' listers now say. A name you gave one of their
+    /// rows that its harness now calls it too is Relay's no longer: the
+    /// harness's own stands alone (a rename that reached it).
     pub fn heard(&mut self, said: Said) {
         self.native = said;
+        let same: Vec<String> = self
+            .native
+            .rows
+            .iter()
+            .map(|n| (format!("n:{}:{}", n.harness, n.id), &n.name))
+            .filter(|(k, name)| self.config.list.names.get(k) == Some(*name))
+            .map(|(k, _)| k)
+            .collect();
+        if !same.is_empty() {
+            self.change_prefs(|p| {
+                for k in &same {
+                    p.names.remove(k);
+                }
+            });
+        }
         self.reload();
     }
 
@@ -295,9 +342,78 @@ impl App {
         });
     }
 
-    /// The list as it stands: its lines, narrowed by the filter.
+    /// The list as it stands: its lines, narrowed by the filter. Built
+    /// once per change (`rebuild`, or another filter), then read from that.
     pub fn lines(&self) -> Vec<Line<'_>> {
-        self.lines_with(&self.filter)
+        self.with_built(|slots| slots.iter().map(|s| self.line_of(s)).collect())
+    }
+
+    /// The line under the cursor's key, and only that one made.
+    pub fn line_keyed(&self, key: &str) -> Option<Line<'_>> {
+        self.with_built(|slots| {
+            slots
+                .iter()
+                .find(|s| match s {
+                    Slot::Group(h) => h.key == key,
+                    Slot::Row(i) => self.rows[*i].key == key,
+                })
+                .map(|s| self.line_of(s))
+        })
+    }
+
+    /// Keys of the list's lines, in order: every header and every row.
+    pub fn keys(&self) -> Vec<String> {
+        self.with_built(|slots| {
+            slots
+                .iter()
+                .map(|s| match s {
+                    Slot::Group(h) => h.key.clone(),
+                    Slot::Row(i) => self.rows[*i].key.clone(),
+                })
+                .collect()
+        })
+    }
+
+    /// What the list was built from changed: the rows, the checkouts or the
+    /// prefs. Every change to them comes through here; the filter is
+    /// compared as the list is read.
+    pub fn rebuild(&mut self) {
+        *self.built.get_mut() = None;
+    }
+
+    fn line_of(&self, s: &Slot) -> Line<'_> {
+        match s {
+            Slot::Group(h) => Line::Group(h.clone()),
+            Slot::Row(i) => Line::Session(&self.rows[*i]),
+        }
+    }
+
+    /// `f` over the list as built for the filter in force, built first
+    /// where it is not.
+    fn with_built<T>(&self, f: impl FnOnce(&[Slot]) -> T) -> T {
+        let mut built = self.built.borrow_mut();
+        if built.as_ref().is_none_or(|b| b.filter != self.filter) {
+            // Every row a line holds is one of `self.rows`: found by where it is.
+            let at: HashMap<*const Row, usize> = self
+                .rows
+                .iter()
+                .enumerate()
+                .map(|(i, r)| (r as *const Row, i))
+                .collect();
+            let slots = self
+                .lines_with(&self.filter)
+                .into_iter()
+                .map(|l| match l {
+                    Line::Group(h) => Slot::Group(h),
+                    Line::Session(r) => Slot::Row(at[&(r as *const Row)]),
+                })
+                .collect();
+            *built = Some(Built {
+                filter: self.filter.clone(),
+                slots,
+            });
+        }
+        f(&built.as_ref().expect("built just now").slots)
     }
 
     /// The list as it would stand with this filter.
@@ -322,12 +438,14 @@ impl App {
             Ok(now) => {
                 self.config = now;
                 change(&mut self.config.list);
+                self.rebuild();
                 if let Err(e) = self.config.save(&self.home) {
                     self.say(format!("config.json: {e:#}"));
                 }
             }
             Err(e) => {
                 change(&mut self.config.list);
+                self.rebuild();
                 self.say(format!("not kept: config.json does not read ({e:#})"));
             }
         }

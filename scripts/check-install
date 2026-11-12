@@ -1,0 +1,103 @@
+#!/bin/sh
+# Checks scripts/install end to end, in a temp dir with a temp HOME and
+# RELAY_HOME, so it never touches your own ~/.local/bin or ~/.relay. CI runs
+# it on Linux and macOS.
+#
+#   scripts/check-install
+#
+# RELAY_DEV_PROFILE=release checks the release build instead.
+set -e
+
+self=$0
+while [ -L "$self" ]; do
+  t=$(readlink "$self")
+  case $t in
+    /*) self=$t ;;
+    *) self=$(dirname "$self")/$t ;;
+  esac
+done
+root=$(cd "$(dirname "$self")/.." && pwd -P)
+install="$root/scripts/install"
+
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+tmp=$(cd "$tmp" && pwd -P)
+
+# Cargo and rustup find their homes through HOME unless told; keep the real
+# ones before HOME moves.
+CARGO_HOME=${CARGO_HOME:-$HOME/.cargo}
+RUSTUP_HOME=${RUSTUP_HOME:-$HOME/.rustup}
+export CARGO_HOME RUSTUP_HOME
+export HOME="$tmp/home"
+export RELAY_HOME="$tmp/home/.relay"
+mkdir -p "$HOME"
+unset RELAY_BIN_DIR
+
+fail() { printf 'check-install: FAIL: %s\n' "$*" >&2; exit 1; }
+step() { printf '\n== %s\n' "$*"; }
+has() { grep -q -- "$2" "$1" || { cat "$1" >&2; fail "expected '$2'"; }; }
+
+bin="$tmp/bin"
+
+step "install into a dir not on PATH"
+"$install" --bin-dir "$bin" >"$tmp/out" 2>&1 || { cat "$tmp/out" >&2; fail "install failed"; }
+cat "$tmp/out"
+[ -L "$bin/rl" ] || fail "no link at $bin/rl"
+has "$tmp/out" "is not on your PATH"
+has "$tmp/out" "Next: run rl"
+
+step "rl --version through the link"
+v=$("$bin/rl" --version)
+echo "$v"
+echo "$v" | grep -Eq '^rl [0-9]+\.[0-9]+\.[0-9]+ \(([0-9a-f]{4,}|unknown)\)$' || fail "version: $v"
+
+step "rl setup --check, with no harness on PATH (and no cargo: no build either)"
+PATH="$bin:/usr/bin:/bin" "$bin/rl" setup --check >"$tmp/out" 2>&1 || { cat "$tmp/out" >&2; fail "setup --check"; }
+cat "$tmp/out"
+has "$tmp/out" "all set up"
+if [ -e "$HOME/.claude" ] || [ -e "$HOME/.codex" ]; then fail "setup --check wrote into HOME"; fi
+
+step "install again: idempotent"
+PATH="$bin:$PATH" "$install" --bin-dir "$bin" >"$tmp/out" 2>&1 || { cat "$tmp/out" >&2; fail "second install"; }
+has "$tmp/out" "already links this clone"
+if grep -q "warning" "$tmp/out"; then
+  # Another rl ahead of the temp dir on this machine's PATH is the only
+  # warning there can be: the dir is first.
+  cat "$tmp/out" >&2
+  fail "a warning with the bin dir first on PATH"
+fi
+
+step "another rl earlier on PATH is called out"
+mkdir -p "$tmp/early"
+printf '#!/bin/sh\n' >"$tmp/early/rl"
+chmod +x "$tmp/early/rl"
+PATH="$tmp/early:$bin:$PATH" "$install" --bin-dir "$bin" >"$tmp/out" 2>&1 || { cat "$tmp/out" >&2; fail "shadowed install"; }
+has "$tmp/out" "another rl comes first on your PATH and runs instead: $tmp/early/rl"
+
+step "a file that is not a symlink is refused and kept"
+mkdir -p "$tmp/other"
+echo "mine" >"$tmp/other/rl"
+if "$install" --bin-dir "$tmp/other" >"$tmp/out" 2>&1; then
+  cat "$tmp/out" >&2
+  fail "install overwrote a regular file"
+fi
+has "$tmp/out" "is not a symlink"
+[ "$(cat "$tmp/other/rl")" = mine ] || fail "the file was changed"
+
+step "a stale symlink is replaced (RELAY_BIN_DIR)"
+mkdir -p "$tmp/stale"
+ln -s /nonexistent/rl "$tmp/stale/rl"
+RELAY_BIN_DIR="$tmp/stale" "$install" >"$tmp/out" 2>&1 || { cat "$tmp/out" >&2; fail "stale install"; }
+has "$tmp/out" "replacing"
+"$tmp/stale/rl" --version >/dev/null || fail "the replaced link does not run"
+
+step "uninstall removes only our link"
+"$install" --bin-dir "$bin" --uninstall >"$tmp/out" 2>&1 || fail "uninstall"
+has "$tmp/out" "removed $bin/rl"
+has "$tmp/out" "setup --remove"
+if [ -e "$bin/rl" ] || [ -L "$bin/rl" ]; then fail "the link is still there"; fi
+"$install" --bin-dir "$tmp/other" --uninstall >"$tmp/out" 2>&1 || fail "uninstall of a foreign file"
+has "$tmp/out" "left alone"
+[ "$(cat "$tmp/other/rl")" = mine ] || fail "uninstall changed a foreign file"
+
+printf '\ncheck-install: ok\n'

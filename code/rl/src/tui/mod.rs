@@ -24,6 +24,7 @@ mod remove;
 mod select;
 mod slash;
 mod theme;
+pub mod wizard;
 
 #[cfg(test)]
 mod tests;
@@ -35,8 +36,8 @@ use crate::store::sessions;
 use crate::{attach, badges, sources};
 use anyhow::Result;
 use crossterm::event::{
-    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event, EventStream,
-    KeyEventKind, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, Event, EventStream, KeyEventKind,
+    KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::terminal::supports_keyboard_enhancement;
 use futures::StreamExt;
@@ -104,14 +105,7 @@ impl App {
                 title = now;
             }
             tokio::select! {
-                ev = input.next() => match ev {
-                    Some(Ok(Event::Key(k))) if k.kind != KeyEventKind::Release => self.key(input::typed(k)),
-                    Some(Ok(Event::Mouse(m))) => self.mouse(m),
-                    Some(Ok(Event::Paste(s))) => self.paste(&s),
-                    Some(Ok(_)) => {}
-                    Some(Err(e)) => return Err(e.into()),
-                    None => self.quit = true,
-                },
+                ev = input.next() => self.events(ev, &mut input).await?,
                 () = stop.recv() => self.quit = true,
                 () = changed(&mut watch) => {
                     due.get_or_insert_with(|| tokio::time::Instant::now() + live::DEBOUNCE);
@@ -161,8 +155,71 @@ impl App {
                 title.clear();
                 self.back(&hand.key, words);
             }
+            // `/setup`: the wizard has the terminal, under the list's
+            // screen, until it is over; then the list again, checked anew.
+            if std::mem::take(&mut self.wizard) {
+                let Some(host) = self.setup_host.clone() else { continue };
+                drop(input);
+                leave_screen();
+                native.pause();
+                let home = self.home.clone();
+                let ran =
+                    tokio::task::spawn_blocking(move || wizard::run(&home, &host, wizard::model::Came::List)).await;
+                native.resume();
+                *terminal = enter_screen();
+                input = EventStream::new();
+                title.clear();
+                match ran {
+                    Ok(Ok(o)) => self.say(o.said),
+                    Ok(Err(e)) => self.say(format!("setup: {e:#}")),
+                    Err(e) => self.say(format!("setup: {e}")),
+                }
+                self.check_setup();
+            }
         }
         Ok(true)
+    }
+}
+
+/// The most events taken in one go before the list is drawn again.
+const BURST: usize = 256;
+
+impl App {
+    /// `first`, and every event already waiting after it, before the list
+    /// is drawn again: a swipe's wheel ticks, or keys typed ahead, cost one
+    /// draw rather than one each. Stops at one that hands the terminal over
+    /// or quits: what follows is not the list's.
+    async fn events<S>(&mut self, first: Option<std::io::Result<Event>>, more: &mut S) -> Result<()>
+    where
+        S: futures::Stream<Item = std::io::Result<Event>> + Unpin,
+    {
+        let mut ev = first;
+        for taken in 1.. {
+            match ev {
+                Some(Ok(e)) => self.event(e),
+                Some(Err(e)) => return Err(e.into()),
+                None => self.quit = true,
+            }
+            if self.quit || self.hand.is_some() || taken == BURST {
+                break;
+            }
+            // Polled with this task's own waker: what is not there yet wakes
+            // the loop as it would have.
+            match futures::poll!(more.next()) {
+                std::task::Poll::Ready(next) => ev = next,
+                std::task::Poll::Pending => break,
+            }
+        }
+        Ok(())
+    }
+
+    fn event(&mut self, e: Event) {
+        match e {
+            Event::Key(k) if k.kind != KeyEventKind::Release => self.key(input::typed(k)),
+            Event::Mouse(m) => self.mouse(m),
+            Event::Paste(s) => self.paste(&s),
+            _ => {}
+        }
     }
 }
 
@@ -170,12 +227,15 @@ impl App {
 /// lost in the alternate screen and the shell is left raw. (ratatui's own
 /// hook leaves raw mode and the screen; this adds the mouse, paste and
 /// keyboard modes and the caret.)
-fn guard_panics() {
-    let before = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        leave_screen();
-        before(info);
-    }));
+pub(crate) fn guard_panics() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let before = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            leave_screen();
+            before(info);
+        }));
+    });
 }
 
 /// The terminal handed to what `enter` asked for, until it is let go of or
@@ -187,17 +247,31 @@ async fn hand_over(home: &Home, hand: &Hand) -> String {
             Ok(ended) => back_words(title, &ended),
             Err(e) => format!("attach {title}: {e:#}"),
         },
-        To::Argv(argv) => match attach::native::hold(argv, None, title).await {
-            Ok(attach::native::Back::Detached) => back_words(title, &attach::Ended::Detached),
-            Ok(attach::native::Back::Ended(exit)) => back_words(title, &attach::held::exit_words(title, &exit).0),
-            Err(e) => format!("attach {title}: {e:#}"),
-        },
-        To::Here { argv, cwd } => match attach::native::hold(argv, Some(cwd), title).await {
+        To::Argv { argv, back } => {
+            // While you are attached, nothing is typed into it.
+            let _you = attached(home, &hand.key);
+            match attach::native::hold(argv, None, title, back.as_ref()).await {
+                Ok(attach::native::Back::Detached) => back_words(title, &attach::Ended::Detached),
+                Ok(attach::native::Back::Ended(exit)) => back_words(title, &attach::held::exit_words(title, &exit).0),
+                Err(e) => format!("attach {title}: {e:#}"),
+            }
+        }
+        To::Here { argv, cwd } => match attach::native::hold(argv, Some(cwd), title, None).await {
             Ok(attach::native::Back::Detached) => back_words(title, &attach::Ended::Detached),
             Ok(attach::native::Back::Ended(exit)) => back_words(title, &attach::held::exit_words(title, &exit).0),
             Err(e) => format!("attach {title}: {e:#}"),
         },
     }
+}
+
+/// The lock that says you are attached to the native row `key`
+/// (`n:<harness>:<id>`), held shared while it is; none for another row.
+fn attached(home: &Home, key: &str) -> Option<rl_detect::typing::Attached> {
+    let mut parts = key.splitn(3, ':');
+    let (Some("n"), Some(harness), Some(id)) = (parts.next(), parts.next(), parts.next()) else {
+        return None;
+    };
+    rl_detect::typing::Attached::hold(&rl_detect::typing::lock_path(&home.typing_dir(), harness, id))
 }
 
 /// What the footer says once an attach is over.
@@ -277,9 +351,20 @@ fn enter_screen() -> ratatui::DefaultTerminal {
     // The wheel and a click reach the list. This also takes the terminal's own
     // drag-to-select, so hold shift (option, on macOS) to copy text as before.
     // A paste comes whole.
-    let _ = crossterm::execute!(std::io::stdout(), EnableMouseCapture, EnableBracketedPaste);
+    let _ = crossterm::execute!(
+        std::io::stdout(),
+        crossterm::style::Print(MOUSE_ON),
+        EnableBracketedPaste
+    );
     term
 }
+
+/// Clicks, drags and the wheel, in SGR (and RXVT) coordinates: crossterm's
+/// `EnableMouseCapture` without any-event tracking (`?1003`), so a pointer
+/// that merely moves sends nothing. A hover does nothing on the list, and a
+/// swipe of the wheel would otherwise come with a stream of moves.
+/// `DisableMouseCapture` turns all of it off again.
+const MOUSE_ON: &str = "\x1b[?1000h\x1b[?1002h\x1b[?1015h\x1b[?1006h";
 
 /// Hand the screen back, popping any enhancement flags we pushed and giving
 /// the mouse back to whoever has the terminal next.

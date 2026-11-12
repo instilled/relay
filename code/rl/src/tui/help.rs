@@ -13,6 +13,8 @@ use ratatui::text::{Line, Span};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Id {
     Enter,
+    Detach,
+    Start,
     Find,
     Commands,
     Complete,
@@ -46,11 +48,13 @@ const fn key(id: Id, keys: &'static str, does: &'static str) -> Key {
 
 /// Every key the list has, the ones used most first; the grid fills its
 /// rows in this order.
-pub const KEYS: [Key; 18] = [
+pub const KEYS: [Key; 20] = [
     key(Id::Enter, "enter", "to attach"),
+    key(Id::Detach, "ctrl+\\", "to detach"),
     key(Id::Find, "ctrl+f", "to find"),
     key(Id::Commands, "/", "for commands"),
     key(Id::Complete, "tab", "to complete"),
+    key(Id::Start, "type", "to start an agent"),
     key(Id::Move, "↑↓ ctrl+j/k", "to move"),
     key(Id::Page, "pgup/pgdn/home/end", "to page"),
     key(Id::Reorder, "shift+↑↓", "to reorder"),
@@ -65,6 +69,27 @@ pub const KEYS: [Key; 18] = [
     key(Id::Setup, "/setup", "to set up relay"),
     key(Id::Quit, "ctrl+c twice", "to quit"),
     key(Id::Help, "ctrl+h/f1", "to close"),
+];
+
+/// The few keys `rl setup` teaches (its "keys you'll use" card), each
+/// with the words the card says beside it, in the card's order: two
+/// columns, row by row. The keys themselves are the table's, so the card
+/// cannot say a key the list does not have.
+pub const ESSENTIAL: [(Id, &str); 6] = [
+    (Id::Move, "move"),
+    (Id::Enter, "attach"),
+    (Id::Reorder, "reorder"),
+    (Id::Detach, "detach, back to the list"),
+    (Id::Start, "start an agent"),
+    (Id::Help, "all keys"),
+];
+
+/// The keys `rl setup`'s quick way names in one line, with its words.
+pub const ESSENTIAL_LINE: [(Id, &str); 4] = [
+    (Id::Enter, "attach"),
+    (Id::Detach, "detach"),
+    (Id::Move, "move"),
+    (Id::Help, "all keys"),
 ];
 
 pub fn get(id: Id) -> &'static Key {
@@ -225,6 +250,15 @@ mod tests {
             .map(|k| first[..first.find(&text(k)).unwrap()].chars().count())
             .collect();
         assert_eq!(at, [0, 34, 68, 102]);
+    }
+
+    #[test]
+    fn every_essential_key_is_in_the_table() {
+        for (id, _) in ESSENTIAL.iter().chain(ESSENTIAL_LINE.iter()) {
+            assert!(KEYS.iter().any(|k| k.id == *id), "{id:?}");
+        }
+        assert_eq!(get(Id::Detach).keys, "ctrl+\\");
+        assert_eq!(get(Id::Move).keys, "↑↓ ctrl+j/k");
     }
 
     #[test]

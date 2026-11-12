@@ -106,6 +106,36 @@ pub fn selected() -> Style {
         .fg(Color::Rgb(0xE8, 0xF0, 0xED))
 }
 
+/// Selected text in a line being typed (a name being renamed): the accent
+/// behind it, near-white on it, stated outright like the selected row's band.
+pub fn selection() -> Style {
+    Style::default().bg(ACCENT).fg(Color::Rgb(0xF5, 0xF5, 0xF5))
+}
+
+/// Text with a block caret at byte `at`, as `with_caret`, and what of it is
+/// `selected` (byte indices on char boundaries) drawn as a selection.
+pub fn with_selection(
+    text: &str,
+    at: usize,
+    selected: Option<std::ops::Range<usize>>,
+    rest: Style,
+) -> Vec<Span<'static>> {
+    let Some(sel) = selected.filter(|s| !s.is_empty()) else {
+        return with_caret(text, at, rest);
+    };
+    let mut spans = vec![
+        Span::styled(text[..sel.start].to_string(), rest),
+        Span::styled(text[sel.clone()].to_string(), selection()),
+    ];
+    if at >= sel.end {
+        spans.extend(with_caret(&text[sel.end..], at - sel.end, rest));
+    } else {
+        spans.push(Span::styled(text[sel.end..].to_string(), rest));
+    }
+    spans.retain(|s| !s.content.is_empty());
+    spans
+}
+
 /// Text with a block caret at byte `at` (a char boundary): the character
 /// there in reverse video, or a reversed space past the end — a whole cell,
 /// the way a terminal draws its own block cursor, so nothing moves aside to
@@ -140,6 +170,21 @@ mod tests {
         assert!(reversed(&spans[1]) && !reversed(&spans[0]) && !reversed(&spans[2]));
         // Nothing moved aside for it: the text takes the cells it always did.
         assert_eq!(spans.iter().map(Span::width).sum::<usize>(), 4);
+    }
+
+    #[test]
+    fn a_selection_stands_out_and_the_caret_stays_after_it() {
+        let spans = with_selection("shop-sh", 7, Some(0..7), Style::default());
+        assert_eq!(shown(&spans), ["shop-sh", " "]);
+        assert_eq!(spans[0].style, selection());
+        assert!(reversed(&spans[1]), "the caret at the end");
+        let spans = with_selection("my shop", 7, Some(3..7), Style::default());
+        assert_eq!(shown(&spans), ["my ", "shop", " "]);
+        assert_eq!(
+            shown(&with_selection("ab", 1, None, Style::default())),
+            shown(&with_caret("ab", 1, Style::default())),
+            "nothing selected: the caret alone"
+        );
     }
 
     #[test]

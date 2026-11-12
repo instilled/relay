@@ -44,3 +44,37 @@ fn check_and_remove_do_not_go_together() {
     let o = rl(tmp.path(), &["setup", "--check", "--remove"]);
     assert_eq!(o.status.code(), Some(2), "{o:?}");
 }
+
+#[test]
+fn yes_sets_up_without_asking_in_plain_lines() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path();
+    let run = rl(home, &["setup", "--yes", "--harness", "codex"]);
+    assert!(run.status.success(), "{run:?}");
+    assert!(stdout(&run).starts_with("codex: hooks installed · mcp relay registered"));
+    let o = rl(home, &["setup", "--yes", "--check"]);
+    assert_eq!(o.status.code(), Some(2), "{o:?}");
+}
+
+#[test]
+fn a_declined_change_is_not_made_and_check_says_how_many() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path();
+    std::fs::create_dir_all(home.join(".relay")).unwrap();
+    std::fs::write(
+        home.join(".relay/config.json"),
+        r#"{"setup": {"declined": ["codex/mcp"]}}"#,
+    )
+    .unwrap();
+    let check = rl(home, &["setup", "--check", "--harness", "codex"]);
+    assert_eq!(
+        stdout(&check),
+        "codex: hooks missing\n(1 declined, rl setup to change)\n"
+    );
+    let run = rl(home, &["setup", "--yes", "--harness", "codex"]);
+    assert!(stdout(&run).starts_with("codex: hooks installed\n"), "{run:?}");
+    assert!(!home.join(".codex/config.toml").exists(), "declined: not made");
+    let check = rl(home, &["setup", "--check", "--harness", "codex"]);
+    assert_eq!(check.status.code(), Some(0));
+    assert_eq!(stdout(&check), "all set up\n(1 declined, rl setup to change)\n");
+}

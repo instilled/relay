@@ -9,6 +9,8 @@
 #   <itself>.threads  the threads it has, JSON
 #   <itself>.argv     what any other run was given, one word a line, and
 #                     <itself>.cwd the folder it ran in
+#   <itself>.archived every `archive <id>` it was run with, the id a line:
+#                     the tests share the one stand-in, so these add up
 #
 # `app-server proxy` speaks the daemon's WebSocket on stdio (the handshake,
 # then one text frame per JSON-RPC message), as `codex_native` does.
@@ -41,6 +43,10 @@ if args == ["app-server", "daemon", "start"]:
         os.remove(me + ".down")
     log({"run": "daemon start"})
     sys.exit(0)
+
+if args[:1] == ["archive"]:
+    with open(me + ".archived", "a") as f:
+        f.write(" ".join(args[1:]) + "\n")
 
 if args != ["app-server", "proxy"]:
     with open(me + ".argv", "w") as f:

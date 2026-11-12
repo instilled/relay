@@ -3,6 +3,7 @@ name = "rl-core"
 description = "Relay home directory, paths and other bits every binary needs"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
