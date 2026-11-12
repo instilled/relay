@@ -12,7 +12,8 @@
 //! header): then in yours, and what you have not placed after it by name.
 //! Inside a group, rows stand in the order they came — by when each started,
 //! the newest at the bottom; nothing that happens to a row moves it. A folder
-//! you named is on the list even with nothing in it.
+//! you named, or added (`/project`, `list.projects`), is on the list even
+//! with nothing in it.
 //!
 //! By state (`^s`), the groups are Needs input · Working · Done, as
 //! `claude agents` has them, and inside each the oldest first.
@@ -36,7 +37,7 @@ use crate::rank;
 use crate::sources::Row;
 use jiff::Timestamp;
 use rl_core::state::{Confidence, RunKind, RunState};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 

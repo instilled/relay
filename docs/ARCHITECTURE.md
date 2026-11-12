@@ -51,7 +51,7 @@ Folders are the truth: liveness is read from files and sockets; every write is `
 | `mail/<key>/delivered/` | `rl mcp` | messages read, kept 7 days (`mail::KEPT`) |
 | `mail/<key>/.told` | `rl hook`, `rl mcp` | the newest mail a Claude was told of |
 | `typing/<harness>-<id>.lock` | `rl mcp`, the list | typing into a session takes it whole; an attach shares it |
-| `config.json` | `rl setup`, the list | harnesses, badges, `setup.declined`, list prefs (grouping, filters, order, hidden, pins, names, colours, `default`). Strict |
+| `config.json` | `rl setup`, the list | harnesses, badges, `setup.declined`, list prefs (grouping, filters, order, hidden, pins, names, colours, `default`, `projects`). Strict |
 | `hooks/` | `rl new` | per-run settings passed to a harness (Claude's `--settings`) |
 | `detect/*.yaml` | you | profile overrides |
 | `plugins/gh-pr` | `rl` | the project header's badge script |
@@ -69,7 +69,9 @@ A socket path over the OS limit (about 100 bytes) goes under `$TMPDIR/rl-<uid>-<
   (`sources::list_all`); a slow or failing one is left out and named.
 - **Rows.** `rows/` merges and dedupes them (a native row hides the hooked row of the same session)
   and groups them under a project: a folder you named, else its git checkout (`git::project`: a
-  linked worktree's `.git` followed through `commondir`; a submodule is its own). State comes from
+  linked worktree's `.git` followed through `commondir`; a submodule is its own). A folder you named
+  or added (`/project`, `list.projects`: canonical, its checkout's project if in one) has a header
+  even with no rows (`Head::empty`); by state it has none. State comes from
   the hooks, then the harness's listing, then regexes over the screen. `rows::build` runs once per
   change and is kept in `App`; the loop drains waiting input before drawing and draws only visible
   rows. The mouse is asked for clicks, drags and the wheel, not motion.

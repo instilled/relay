@@ -2356,3 +2356,133 @@ async fn slash_default_sets_what_a_line_starts_and_refuses_what_is_not_an_agent(
     typed(&mut app, "fix it");
     assert!(line_row(&app).contains("shell"), "{}", line_row(&app));
 }
+
+/// A folder beside the fixture's repo, with nothing running in it.
+fn beside(f: &Fixture, name: &str) -> PathBuf {
+    let p = f.repo.parent().unwrap().join(name);
+    std::fs::create_dir_all(&p).unwrap();
+    p
+}
+
+#[tokio::test]
+async fn slash_project_adds_an_empty_project_the_cursor_on_it_and_a_line_starts_there() {
+    let f = fixture();
+    let notes = beside(&f, "notes");
+    let mut app = list(&f).await;
+    on(&mut app, HELD);
+    // Relative to the row's folder.
+    run(&mut app, "/project ../notes");
+    assert!(app.cmd.is_empty(), "cleared once run");
+    let key = format!("g:{}", notes.display());
+    assert_eq!(Config::load(&f.home).unwrap().list.projects, [notes.to_str().unwrap()]);
+    assert_eq!(app.sel.as_deref(), Some(key.as_str()), "the cursor on its header");
+    let s = shown(&app);
+    assert!(s.contains("added notes · type to start"), "{s}");
+    let head = row_of(&s, super::draw::EMPTY_HEAD);
+    assert!(head.contains("notes"), "{head}");
+    // Its header is where a line starts: claude, in the folder.
+    assert_eq!(app.line_folder(), notes);
+    typed(&mut app, "claude write it down");
+    press(&mut app, KeyCode::Enter);
+    app.finish().await;
+    assert_eq!(ran_in(&notes), ["--bg", "write it down"], "run in the project's folder");
+    // Kept: a list opened again has it.
+    let again = list(&f).await;
+    assert!(again.keys().contains(&key), "{:?}", again.keys());
+}
+
+#[tokio::test]
+async fn slash_project_in_a_checkout_adds_its_project_and_one_already_there_is_only_gone_to() {
+    let f = fixture();
+    std::fs::create_dir_all(f.repo.join("app/src")).unwrap();
+    let notes = beside(&f, "notes");
+    let mut app = list(&f).await;
+    let shop = format!("g:{}", f.repo.display());
+    on(&mut app, NATIVE);
+    // A folder inside the repo is the repo's project — one there already.
+    run(&mut app, "/project app/src");
+    assert_eq!(app.sel.as_deref(), Some(shop.as_str()));
+    assert!(shown(&app).contains("shop is a project already"), "{}", shown(&app));
+    assert!(Config::load(&f.home).unwrap().list.projects.is_empty(), "nothing added");
+    // An added one, added again: no second one.
+    run(&mut app, &format!("/project {}", notes.display()));
+    on(&mut app, HELD);
+    run(&mut app, &format!("/project {}/", notes.display()));
+    let key = format!("g:{}", notes.display());
+    assert_eq!(app.sel.as_deref(), Some(key.as_str()));
+    assert!(shown(&app).contains("notes is a project already"), "{}", shown(&app));
+    assert_eq!(Config::load(&f.home).unwrap().list.projects.len(), 1);
+    assert_eq!(app.keys().iter().filter(|k| **k == key).count(), 1);
+    // Grouped by state, an empty project has no place.
+    ctrl(&mut app, 's');
+    assert!(!app.keys().contains(&key), "{:?}", app.keys());
+    assert!(!shown(&app).contains(super::draw::EMPTY_HEAD));
+}
+
+#[tokio::test]
+async fn slash_project_refuses_what_is_not_a_folder_and_says_how_with_nothing() {
+    let f = fixture();
+    std::fs::write(f.repo.join("README"), "").unwrap();
+    let mut app = list(&f).await;
+    on(&mut app, HELD);
+    run(&mut app, "/project nowhere");
+    assert!(shown(&app).contains("no such folder: nowhere"), "{}", shown(&app));
+    assert_eq!(app.cmd.line.text(), "/project nowhere", "kept to mend");
+    press(&mut app, KeyCode::Esc);
+    run(&mut app, "/project README");
+    assert!(shown(&app).contains("not a folder: README"), "{}", shown(&app));
+    press(&mut app, KeyCode::Esc);
+    run(&mut app, "/project");
+    assert!(shown(&app).contains("/project takes a folder"), "{}", shown(&app));
+    assert!(Config::load(&f.home).unwrap().list.projects.is_empty());
+}
+
+#[tokio::test]
+async fn slash_hide_on_an_empty_added_project_takes_it_off_and_out_of_config() {
+    let f = fixture();
+    let notes = beside(&f, "notes");
+    let mut app = list(&f).await;
+    run(&mut app, &format!("/project {}", notes.display()));
+    let key = format!("g:{}", notes.display());
+    // Renamed, and moved among the projects, as any header.
+    run(&mut app, "/rename my notes");
+    assert_eq!(
+        Config::load(&f.home).unwrap().list.names.get(&key).map(String::as_str),
+        Some("my notes")
+    );
+    assert!(row_of(&shown(&app), super::draw::EMPTY_HEAD).contains("my notes"));
+    shift(&mut app, KeyCode::Down);
+    let order = Config::load(&f.home).unwrap().list.order;
+    assert!(order[0].rows.contains(&key), "{order:?}");
+    on(&mut app, &key);
+    app.flash = None;
+    assert!(shown(&app).contains("ctrl+x twice to take it off"), "{}", shown(&app));
+    run(&mut app, "/hide");
+    let p = Config::load(&f.home).unwrap().list;
+    assert!(p.projects.is_empty() && p.hidden.is_empty(), "{p:?}");
+    assert!(!p.names.contains_key(&key), "its name goes with it");
+    assert!(p.order.iter().all(|o| !o.rows.contains(&key)), "{:?}", p.order);
+    assert!(!app.keys().contains(&key));
+    assert!(shown(&app).contains("took my notes off the list"), "{}", shown(&app));
+    // A project with sessions is hidden, as ever.
+    let shop = format!("g:{}", f.repo.display());
+    on(&mut app, &shop);
+    run(&mut app, "/hide");
+    assert_eq!(Config::load(&f.home).unwrap().list.hidden[0].key, shop);
+}
+
+#[tokio::test]
+async fn tab_completes_the_folder_of_slash_project_under_the_rows_folder() {
+    let f = fixture();
+    std::fs::create_dir_all(f.repo.join("src")).unwrap();
+    std::fs::write(f.repo.join("setup.sh"), "").unwrap();
+    let mut app = list(&f).await;
+    on(&mut app, HELD);
+    typed(&mut app, "/proj");
+    press(&mut app, KeyCode::Tab);
+    assert_eq!(app.cmd.line.text(), "/project ");
+    typed(&mut app, "s");
+    assert_eq!(app.cmd.ghost.as_deref(), Some("rc/"), "folders only");
+    press(&mut app, KeyCode::Tab);
+    assert_eq!(app.cmd.line.text(), "/project src/");
+}
