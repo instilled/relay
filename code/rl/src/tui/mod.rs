@@ -247,17 +247,31 @@ async fn hand_over(home: &Home, hand: &Hand) -> String {
             Ok(ended) => back_words(title, &ended),
             Err(e) => format!("attach {title}: {e:#}"),
         },
-        To::Argv { argv, back } => match attach::native::hold(argv, None, title, back.as_ref()).await {
-            Ok(attach::native::Back::Detached) => back_words(title, &attach::Ended::Detached),
-            Ok(attach::native::Back::Ended(exit)) => back_words(title, &attach::held::exit_words(title, &exit).0),
-            Err(e) => format!("attach {title}: {e:#}"),
-        },
+        To::Argv { argv, back } => {
+            // While you are attached, nothing is typed into it.
+            let _you = attached(home, &hand.key);
+            match attach::native::hold(argv, None, title, back.as_ref()).await {
+                Ok(attach::native::Back::Detached) => back_words(title, &attach::Ended::Detached),
+                Ok(attach::native::Back::Ended(exit)) => back_words(title, &attach::held::exit_words(title, &exit).0),
+                Err(e) => format!("attach {title}: {e:#}"),
+            }
+        }
         To::Here { argv, cwd } => match attach::native::hold(argv, Some(cwd), title, None).await {
             Ok(attach::native::Back::Detached) => back_words(title, &attach::Ended::Detached),
             Ok(attach::native::Back::Ended(exit)) => back_words(title, &attach::held::exit_words(title, &exit).0),
             Err(e) => format!("attach {title}: {e:#}"),
         },
     }
+}
+
+/// The lock that says you are attached to the native row `key`
+/// (`n:<harness>:<id>`), held shared while it is; none for another row.
+fn attached(home: &Home, key: &str) -> Option<rl_detect::typing::Attached> {
+    let mut parts = key.splitn(3, ':');
+    let (Some("n"), Some(harness), Some(id)) = (parts.next(), parts.next(), parts.next()) else {
+        return None;
+    };
+    rl_detect::typing::Attached::hold(&rl_detect::typing::lock_path(&home.typing_dir(), harness, id))
 }
 
 /// What the footer says once an attach is over.

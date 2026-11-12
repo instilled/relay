@@ -3,7 +3,10 @@
 # (`sources::adapter_bin`), never the real one. It writes what it was run
 # with to `argv` in the folder it is run in; asked to start one in the
 # background, it says `0a1b2c3d`, where, and how to attach. What it lists is
-# the tests' to say (`sources::StandIn`).
+# the tests' to say (`sources::StandIn`). Its `attach` draws an idle Claude
+# (`stand-in-claude-attach`), keeping what is typed into it in `typed` in the
+# folder it is run in.
+[ "$1" = attach ] && exec python3 "$(dirname "$0")/stand-in-claude-attach" idle "$PWD"
 printf '%s\n' "$@" > argv
 case " $* " in
 *' --bg '*) echo "started 0a1b2c3d in $PWD · claude attach 0a1b2c3d" ;;
