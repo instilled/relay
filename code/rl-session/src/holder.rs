@@ -183,23 +183,45 @@ pub async fn serve(cfg: Config, ready: oneshot::Sender<()>) -> Result<()> {
         }
     }
 
-    // Closing with a live child: hang it up, give it a moment.
+    // Closing with a live child: hang it up, give it a moment; one that
+    // will not go (a shell still starting, or one that ignores the hangup)
+    // is terminated, then killed — a close always ends it, and its exit is
+    // written before the holder leaves.
     if ctx.exit.borrow().is_none() {
         let pid = ctx.shared.lock().unwrap().pid as i32;
-        signal_tree(pid, Signal::SIGHUP);
-        let mut rx = ctx.exit.subscribe();
-        let _ = tokio::time::timeout(Duration::from_secs(5), async {
-            while rx.borrow().is_none() {
-                if rx.changed().await.is_err() {
-                    break;
-                }
+        for (sig, wait) in CLOSE_SIGNALS {
+            signal_tree(pid, sig);
+            if exited_within(&ctx, wait).await {
+                break;
             }
-        })
-        .await;
+        }
     }
     let _ = std::fs::remove_file(&cfg.socket);
     info!(id = %cfg.id, "session holder exiting");
     Ok(())
+}
+
+/// What a close sends a live child, in turn, and how long each has to end
+/// it: well within the 10s `rl stop` waits.
+const CLOSE_SIGNALS: [(Signal, Duration); 3] = [
+    (Signal::SIGHUP, Duration::from_secs(3)),
+    (Signal::SIGTERM, Duration::from_secs(2)),
+    (Signal::SIGKILL, Duration::from_secs(2)),
+];
+
+/// Whether the child's exit is recorded within `wait`.
+async fn exited_within(ctx: &Ctx, wait: Duration) -> bool {
+    let mut rx = ctx.exit.subscribe();
+    tokio::time::timeout(wait, async {
+        while rx.borrow().is_none() {
+            if rx.changed().await.is_err() {
+                break;
+            }
+        }
+    })
+    .await
+    .is_ok()
+        && rx.borrow().is_some()
 }
 
 /// Signal a run's child and its whole process group (the pty setsid'd it), so
