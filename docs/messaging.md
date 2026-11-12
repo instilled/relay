@@ -12,7 +12,7 @@ Gemini, Antigravity, …). It gives every agent three tools:
 | --- | --- |
 | `who` | lists the sessions it can message, one line each: address (and your name for the row), harness, state, folder. Its own is marked. |
 | `send(to, text)` | leaves a message for one of them, by address or by the name you gave the row (`ctrl+r` in the list). A wrong address is an error that suggests close matches. |
-| `inbox` | reads its waiting messages, oldest first, and clears them. |
+| `inbox` | reads its waiting messages, oldest first, and clears them. `inbox(recent: true)` shows again the messages it was given in the last 7 days, marked already read, and changes nothing: for an agent that lost them (its context compacted, its client crashed). |
 
 A message is a file under `~/.relay/mail/`. It waits there until the recipient calls `inbox`.
 How the recipient learns it has mail depends on its harness:
@@ -92,7 +92,11 @@ inbox.
 
 ## Good to know
 
-- Messages are plain text, and only the recipient reads them. `inbox` deletes them as it reads.
+- Messages are plain text, and only the recipient reads them. A message `inbox` read is moved
+  to the recipient's `delivered/` folder only once the reply carrying it is written; if the
+  reply can't be written, it waits again for the next `inbox`, and if `rl mcp` dies in between,
+  the next `inbox` gets it again. Delivered messages are kept 7 days (`inbox(recent: true)`),
+  then deleted. The hooks' "you have N messages" counts only those not yet delivered.
 - `who` lists the sessions the list shows: the ones Relay holds, Claude's and Codex's own
   background sessions, and agents in other terminals that Relay's hooks told it of.
 - An agent that isn't set up (`rl setup --check`) has no `relay` tools; run `rl setup` or `/setup`
