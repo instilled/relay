@@ -850,11 +850,28 @@ async fn the_line_starts_claude_in_its_own_background_and_the_cursor_waits_for_i
 
 /// What the tests' stand-in Codex daemon was sent, by every test so far.
 fn codex_sent() -> Vec<serde_json::Value> {
+    // Shared by the tests running at once: a line another test's stand-in is
+    // still writing is not read yet.
     std::fs::read_to_string(crate::sources::codex_stand_in().with_extension("log"))
         .unwrap_or_default()
         .lines()
-        .map(|l| serde_json::from_str(l).unwrap())
+        .filter_map(|l| serde_json::from_str(l).ok())
         .collect()
+}
+
+/// Whether the stand-in Codex was sent a message `pred` matches, within a
+/// few seconds: its log is written as it answers, not before a start returns.
+async fn codex_was_sent(pred: impl Fn(&serde_json::Value) -> bool) -> bool {
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        if codex_sent().iter().any(&pred) {
+            return true;
+        }
+        if std::time::Instant::now() >= until {
+            return false;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
 }
 
 #[tokio::test]
@@ -1193,15 +1210,17 @@ async fn the_header_carries_the_filters_and_the_grouping_and_the_foot_does_not()
     let mut app = list(&f).await;
     let rows = screen(&app, 100, 30);
     let at = |rows: &[String], t: &str| rows.iter().position(|r| r.contains(t));
-    let head = at(&rows, "✦ ctrl+a").expect("the toggles are on screen");
+    let head = at(&rows, "✦ agents").expect("the toggles are on screen, by name");
     assert!(head < 6, "in the header, beside the mark: {}", rows.join("\n"));
+    assert!(rows[head].contains("❯ shells") && rows[head].contains("◌ hidden") && rows[head].contains("by project"));
     assert!(
-        rows[head].contains("❯ ctrl+l") && rows[head].contains("◌ ctrl+o") && rows[head].contains("by project ctrl+s")
+        !rows[head].contains("ctrl+"),
+        "the keys are in the help grid, not the header"
     );
     assert!(at(&rows, "relay").unwrap() < head && at(&rows, "1 needs you").unwrap() < head);
     for r in &rows[6..] {
         assert!(
-            !r.contains("✦ ctrl+a") && !r.contains("by project"),
+            !r.contains("✦ agents") && !r.contains("by project"),
             "no toggles line at the foot: {r}"
         );
     }
@@ -1220,22 +1239,18 @@ async fn the_header_carries_the_filters_and_the_grouping_and_the_foot_does_not()
     // `^s`: by state, said in the header.
     ctrl(&mut app, 's');
     let rows = screen(&app, 100, 30);
-    assert!(
-        rows[..6].iter().any(|r| r.contains("by state ctrl+s")),
-        "{}",
-        rows.join("\n")
-    );
+    assert!(rows[..6].iter().any(|r| r.contains("by state")), "{}", rows.join("\n"));
     // On a short screen the header is one line, and keeps them: with their
-    // keys at 80, the icons alone where the headline would lose its room.
+    // names at 80, the icons alone where the headline would lose its room.
     let rows = screen(&app, 80, 20);
     assert!(
-        rows[0].contains("✦ ctrl+a") && rows[0].contains("by state ctrl+s"),
+        rows[0].contains("✦ agents") && rows[0].contains("by state"),
         "{}",
         rows[0]
     );
     let rows = screen(&app, 60, 20);
     assert!(
-        rows[0].contains("✦  ❯") && rows[0].contains("by state") && !rows[0].contains("ctrl+"),
+        rows[0].contains("✦  ❯") && rows[0].contains("by state") && !rows[0].contains("agents"),
         "{}",
         rows[0]
     );
@@ -2144,4 +2159,158 @@ async fn scroll_speed() {
         n as f64 / took.as_secs_f64(),
         took / n
     );
+}
+
+#[tokio::test]
+async fn drift_leads_the_footer_until_reported_or_dismissed_and_slash_report_takes_the_terminal() {
+    let f = fixture();
+    let mut app = list(&f).await;
+    run(&mut app, "/report");
+    assert!(!app.reporting, "nothing to report");
+    let dir = crate::drift::dir(&f.home);
+    let n = rl_detect::drift::Noticed::new(
+        "codex",
+        None,
+        "codex.schema.thread/name/set",
+        "thread/name/set gone, rename stays in Relay",
+    );
+    crate::drift::record_as(&dir, &n, "0.170.0", jiff::Timestamp::now()).unwrap();
+    app.flash = None;
+    let foot = shown(&app);
+    assert!(
+        foot.contains("codex 0.170.0: thread/name/set gone, rename stays in Relay · /report"),
+        "{foot}"
+    );
+    run(&mut app, "/report");
+    assert!(app.reporting, "the report is asked for");
+    app.reporting = false;
+    run(&mut app, "/report nope");
+    assert!(shown(&app).contains("/report takes nothing, or dismiss"));
+    app.cmd.clear();
+    run(&mut app, "/report dismiss");
+    let foot = shown(&app);
+    assert!(foot.contains("dismissed 1"), "{foot}");
+    assert!(!foot.contains("thread/name/set gone"), "{foot}");
+}
+
+fn key_with(app: &mut App, code: KeyCode, m: KeyModifiers) {
+    app.key(KeyEvent::new(code, m));
+}
+
+#[tokio::test]
+async fn shift_or_alt_enter_adds_a_line_and_enter_starts_it_whole() {
+    let f = fixture();
+    let mut app = list(&f).await;
+    on(&mut app, NATIVE);
+    typed(&mut app, "claude fix the login");
+    key_with(&mut app, KeyCode::Enter, KeyModifiers::SHIFT);
+    typed(&mut app, "and the logout");
+    // Alt+enter, as `ESC CR` reads where shift+enter is not told apart.
+    key_with(&mut app, KeyCode::Enter, KeyModifiers::ALT);
+    typed(&mut app, "then test");
+    assert_eq!(app.cmd.line.text(), "claude fix the login\nand the logout\nthen test");
+    assert!(app.work.is_empty(), "nothing started yet");
+    // Three rows, the prompt and what it starts on the first.
+    let rows = screen(&app, 100, 30);
+    assert!(
+        rows[25].contains(" ❯ claude fix the login") && rows[25].contains("agent · claude"),
+        "{}",
+        rows.join("\n")
+    );
+    assert!(rows[26].starts_with("   and the logout"), "{}", rows[26]);
+    assert!(rows[27].starts_with("   then test"), "{}", rows[27]);
+    assert!(rows[28].starts_with("───"), "the separator under it: {}", rows[28]);
+    assert!(rows[29].contains("shift+enter adds a line"), "{}", rows[29]);
+    // ↑ walks the lines, then on the first moves on the list.
+    press(&mut app, KeyCode::Up);
+    assert_eq!(app.cmd.line.cursor(), 30, "column 9 of the second line");
+    press(&mut app, KeyCode::Up);
+    assert_eq!(app.cmd.line.cursor(), 9);
+    assert_eq!(app.sel.as_deref(), Some(NATIVE));
+    press(&mut app, KeyCode::Up);
+    assert_eq!(app.sel.as_deref(), Some(HELD), "the list's, from the first line");
+    assert_eq!(app.cmd.line.text(), "claude fix the login\nand the logout\nthen test");
+    press(&mut app, KeyCode::Enter);
+    assert!(app.cmd.is_empty());
+    app.finish().await;
+    assert_eq!(
+        std::fs::read_to_string(f.repo.join("argv")).unwrap(),
+        "--bg\nfix the login\nand the logout\nthen test\n",
+        "the prompt whole, its newlines kept"
+    );
+}
+
+#[tokio::test]
+async fn a_paste_keeps_its_newlines_on_the_command_line_and_not_in_the_search() {
+    let f = fixture();
+    let mut app = list(&f).await;
+    app.paste("make build\r\nmake test\n");
+    assert_eq!(app.cmd.line.text(), "make build\nmake test\n");
+    assert!(app.work.is_empty(), "a paste starts nothing");
+    assert!(row_of(&shown(&app), "❯ make build").contains("shell"));
+    press(&mut app, KeyCode::Esc);
+    ctrl(&mut app, 'f');
+    app.paste("fix\nlogin");
+    assert_eq!(app.filter, "fix login", "the search is one line");
+}
+
+#[tokio::test]
+async fn with_claude_for_default_a_line_is_its_prompt_a_word_still_picks_and_a_bang_is_a_shell() {
+    let f = fixture();
+    std::fs::write(f.home.config_json(), r#"{"badges": [], "list": {"default": "claude"}}"#).unwrap();
+    let mut app = list(&f).await;
+    on(&mut app, NATIVE);
+    assert!(
+        line_row(&app)
+            .contains("a prompt for claude, or claude/codex/agy and a prompt, ! for a shell · / for commands"),
+        "{}",
+        line_row(&app)
+    );
+    typed(&mut app, "make");
+    assert_eq!(app.cmd.ghost, None, "a program would be the prompt: none offered");
+    assert!(line_row(&app).contains("agent · claude"), "{}", line_row(&app));
+    press(&mut app, KeyCode::Esc);
+    typed(&mut app, "! ls");
+    let row = line_row(&app);
+    assert!(row.contains("shell") && !row.contains("agent"), "{row}");
+    press(&mut app, KeyCode::Esc);
+    typed(&mut app, "fix the login");
+    assert!(line_row(&app).contains("agent · claude"));
+    press(&mut app, KeyCode::Enter);
+    app.finish().await;
+    assert_eq!(ran_in(&f.repo), ["--bg", "fix the login"], "the whole line its prompt");
+    typed(&mut app, "codex fix the default");
+    assert!(line_row(&app).contains("agent · codex"));
+    press(&mut app, KeyCode::Enter);
+    app.finish().await;
+    assert!(
+        codex_was_sent(|m| m["method"] == "turn/start" && m["params"]["input"][0]["text"] == "fix the default").await,
+        "codex, on the rest"
+    );
+}
+
+#[tokio::test]
+async fn slash_default_sets_what_a_line_starts_and_refuses_what_is_not_an_agent() {
+    let f = fixture();
+    let mut app = list(&f).await;
+    run(&mut app, "/default codex");
+    assert!(app.cmd.is_empty(), "cleared once run");
+    assert_eq!(Config::load(&f.home).unwrap().list.default, "codex", "kept");
+    assert!(
+        shown(&app).contains("a typed line is a prompt for codex"),
+        "{}",
+        shown(&app)
+    );
+    typed(&mut app, "fix it");
+    assert!(line_row(&app).contains("agent · codex"), "{}", line_row(&app));
+    press(&mut app, KeyCode::Esc);
+    run(&mut app, "/default make");
+    assert_eq!(app.cmd.line.text(), "/default make", "kept to mend");
+    assert!(shown(&app).contains("not an agent harness: make"), "{}", shown(&app));
+    assert_eq!(Config::load(&f.home).unwrap().list.default, "codex");
+    press(&mut app, KeyCode::Esc);
+    run(&mut app, "/default shell");
+    assert_eq!(Config::load(&f.home).unwrap().list.default, "shell");
+    typed(&mut app, "fix it");
+    assert!(line_row(&app).contains("shell"), "{}", line_row(&app));
 }

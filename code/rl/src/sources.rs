@@ -354,6 +354,61 @@ pub fn native_listers() -> Vec<Box<dyn NativeLister>> {
         .collect()
 }
 
+/// What the listers said when asked all at once (`list_all`): their rows,
+/// in the listers' order, and the harnesses that answered.
+#[derive(Debug, Default)]
+pub struct Listed {
+    pub rows: Vec<NativeRow>,
+    pub answered: BTreeSet<String>,
+}
+
+/// Asks `listers` at once, each on a thread of its own, and only for
+/// `wait`: one that fails or has not answered by then is `warn`ed of and
+/// its sessions left out, the others' kept. A thread still listing is left
+/// to finish on its own (its harness's listing is bounded too).
+pub fn list_all(
+    listers: impl IntoIterator<Item = std::sync::Arc<dyn NativeLister>>,
+    wait: std::time::Duration,
+    warn: &mut dyn FnMut(String),
+) -> Listed {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let mut asked: Vec<String> = Vec::new();
+    for (i, l) in listers.into_iter().enumerate() {
+        asked.push(l.harness().to_string());
+        let tx = tx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send((i, l.list_within(wait)));
+        });
+    }
+    drop(tx);
+    let deadline = std::time::Instant::now() + wait;
+    let mut said: Vec<Option<anyhow::Result<Vec<NativeRow>>>> = asked.iter().map(|_| None).collect();
+    let mut heard = 0;
+    while heard < asked.len() {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        let Ok((i, s)) = rx.recv_timeout(left) else {
+            break;
+        };
+        said[i] = Some(s);
+        heard += 1;
+    }
+    let mut listed = Listed::default();
+    for (harness, s) in asked.into_iter().zip(said) {
+        match s {
+            Some(Ok(rows)) => {
+                listed.rows.extend(rows);
+                listed.answered.insert(harness);
+            }
+            Some(Err(e)) => warn(format!("{harness} did not list its sessions: {e:#}")),
+            None => warn(format!(
+                "{harness} did not answer in {}s; its sessions are left out",
+                wait.as_secs_f32()
+            )),
+        }
+    }
+    listed
+}
+
 /// One row on the list.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Row {
