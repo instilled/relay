@@ -66,7 +66,8 @@ and its socket.
 | `sessions/<name>/hook.json` | `rl hook` | what the agent's own hooks last said |
 | `sessions/<name>/exit`, `stopped`, `sock` | holder, `rl stop` | how it ended, that it was stopped, its socket |
 | `state/<agent>/<session_id>.json` | `rl hook` | a session Relay does not hold; removed on `ended` |
-| `mail/<key>/<ns>-<pid>-<n>-<from>.json` | `rl mcp` | a waiting message; deleted when read |
+| `mail/<key>/<ns>-<pid>-<n>-<from>.json` | `rl mcp` | a waiting message; moved to `delivered/` once read |
+| `mail/<key>/delivered/<same name>` | `rl mcp` | a message read, kept 7 days from delivery (`inbox(recent: true)`) |
 | `mail/<key>/.told` | `rl hook`, `rl mcp` | when the newest mail a Claude `Stop` hook told of (or `send` typed in) was sent |
 | `typing/<harness>-<id>.lock` | `rl mcp`, the list | the lock typing into a harness's own session takes whole, and an attach from the list shared |
 | `config.json` | `rl setup`, the list | harnesses, badges, the setup changes you declined (`setup.declined`), list preferences (grouping, toggles, order, hidden, pins, names, colours by row key; `ctrl+g` cycles a row's own colour). `names` also holds a Relay-side name for a native or hooked row, which the harness never learns of; the list draws it with the harness's own beside it. Strict. |
@@ -138,8 +139,14 @@ Folders are 0700.
 - **Send.** `send` resolves `to` to a session and writes a file under `mail/<key>/`, the key being
   what the session keeps while it lives: a held session's name, else its conversation id. `inbox`
   takes from every key the caller has (its name or ids, and its address), oldest first; each file is
-  claimed by a rename before it is read, so two inboxes never get the same message, and deleted
-  once it parses. Keys are encoded one to one (`[a-z0-9-]` kept, every other byte `%xx`), so none
+  claimed by a rename before it is read, so two inboxes never get the same message. The claims
+  (`mail::Claimed`) go back up to `serve`: once the reply is written and flushed they are renamed
+  into `mail/<key>/delivered/` under their own names (the delivery time is the file's modified
+  time); if the write fails they are renamed back to their pending names. A server that dies
+  between leaves claim files named by its pid, which the next `take` or `waiting` renames back
+  (`release_stale`): delivery is at least once. Delivered files older than `mail::KEPT` (7 days)
+  are swept on every `send` and `inbox`; `inbox(recent: true)` reads them, newest last, and
+  moves nothing. Keys are encoded one to one (`[a-z0-9-]` kept, every other byte `%xx`), so none
   escapes `mail/` and none shares a folder with another, whatever the file system's case.
 - **Ping.** After the file is left, `send` tells a recipient whose harness can be told from
   outside: its harness's `ping_argv` (the profile's `sessions.ping`; Codex's `codex queue --thread
@@ -268,7 +275,7 @@ and Codex's argv), `sessions.stop_choice|close` (`stop_choice`, `close_choice`, 
 
 `rl mcp` is JSON-RPC 2.0, one message per line on stdio, written by hand, no SDK. It answers
 `initialize`, `ping`, `tools/list` and `tools/call`; stdout carries only protocol, logs go to stderr.
-Tools: `who`, `send(to, text, from?)`, `inbox(as?)`. A tool failure is an `isError` result.
+Tools: `who`, `send(to, text, from?)`, `inbox(as?, recent?)`. A tool failure is an `isError` result.
 
 The caller's address, in order:
 

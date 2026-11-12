@@ -141,54 +141,67 @@ impl Server {
             if line.trim().is_empty() {
                 continue;
             }
-            if let Some(reply) = self.handle(&line) {
-                writeln!(out, "{reply}")?;
-                out.flush()?;
+            let Some((reply, claimed)) = self.handle(&line) else {
+                continue;
+            };
+            let sent = writeln!(out, "{reply}").and_then(|()| out.flush());
+            // Mail an inbox claimed is delivered once its reply is out, and
+            // pending again where it is not.
+            match claimed {
+                Some(c) if sent.is_ok() => c.deliver(Timestamp::now()),
+                Some(c) => c.put_back(),
+                None => {}
             }
+            sent?;
         }
         Ok(())
     }
 
-    /// The reply to one message; None for a notification.
-    fn handle(&self, line: &str) -> Option<Value> {
+    /// The reply to one message, and the mail it carries; None for a
+    /// notification.
+    fn handle(&self, line: &str) -> Option<(Value, Option<mail::Claimed>)> {
         let msg: Value = match serde_json::from_str(line) {
             Ok(v) => v,
-            Err(e) => return Some(error(Value::Null, -32700, &format!("parse error: {e}"))),
+            Err(e) => return Some((error(Value::Null, -32700, &format!("parse error: {e}")), None)),
         };
         let Some(method) = msg.get("method").and_then(Value::as_str) else {
             // A response to something we never asked, or not a request.
             return msg
                 .get("id")
                 .filter(|_| msg.get("result").is_none() && msg.get("error").is_none())
-                .map(|id| error(id.clone(), -32600, "invalid request"));
+                .map(|id| (error(id.clone(), -32600, "invalid request"), None));
         };
         let id = msg.get("id").cloned()?;
         let params = msg.get("params").cloned().unwrap_or(Value::Null);
         Some(match method {
-            "initialize" => ok(id, initialize(&params)),
-            "ping" => ok(id, json!({})),
-            "tools/list" => ok(id, json!({ "tools": tools() })),
+            "initialize" => (ok(id, initialize(&params)), None),
+            "ping" => (ok(id, json!({})), None),
+            "tools/list" => (ok(id, json!({ "tools": tools() })), None),
             "tools/call" => self.call(id, &params),
-            _ => error(id, -32601, &format!("method not found: {method}")),
+            _ => (error(id, -32601, &format!("method not found: {method}")), None),
         })
     }
 
-    fn call(&self, id: Value, params: &Value) -> Value {
+    fn call(&self, id: Value, params: &Value) -> (Value, Option<mail::Claimed>) {
         let name = params.get("name").and_then(Value::as_str).unwrap_or_default();
         let args = params.get("arguments").cloned().unwrap_or(Value::Null);
-        let result = match name {
-            "who" => Ok(self.who()),
-            "send" => self.send(&args),
-            "inbox" => self.inbox(&args),
-            _ => return error(id, -32602, &format!("unknown tool: {name}")),
+        let (result, claimed) = match name {
+            "who" => (Ok(self.who()), None),
+            "send" => (self.send(&args), None),
+            "inbox" => match self.inbox(&args) {
+                Ok((text, claimed)) => (Ok(text), claimed),
+                Err(e) => (Err(e), None),
+            },
+            _ => return (error(id, -32602, &format!("unknown tool: {name}")), None),
         };
-        ok(
+        let reply = ok(
             id,
             match result {
                 Ok(text) => json!({ "content": [{ "type": "text", "text": text }] }),
                 Err(text) => json!({ "content": [{ "type": "text", "text": text }], "isError": true }),
             },
-        )
+        );
+        (reply, claimed)
     }
 
     /// Every session on the list, one shot: the harnesses are asked once, each
@@ -403,7 +416,10 @@ impl Server {
         })
     }
 
-    fn inbox(&self, args: &Value) -> Result<String, String> {
+    /// Your mail, claimed: the reply's text and the mail to deliver once it
+    /// is out (`serve`). With `recent`, what was delivered to you within
+    /// `mail::KEPT`, already read, and nothing claimed or moved.
+    fn inbox(&self, args: &Value) -> Result<(String, Option<mail::Claimed>), String> {
         let keys = match &self.caller.relay_session {
             // Held: its name, and the ids it has had; no harness is asked.
             Some(_) => own_keys(&self.home, &self.caller),
@@ -420,23 +436,44 @@ impl Server {
                 }
             }
         };
-        let mut messages = Vec::new();
-        for key in &keys {
-            let taken = mail::take(&self.home, key).map_err(|e| format!("could not read the mail: {e}"))?;
-            for p in &taken.unreadable {
-                eprintln!("rl mcp: left unreadable mail {}", p.display());
+        if args.get("recent").and_then(Value::as_bool) == Some(true) {
+            let now = Timestamp::now();
+            let mut read: Vec<Message> = keys.iter().flat_map(|k| mail::recent(&self.home, k, now)).collect();
+            if read.is_empty() {
+                return Ok(("no messages read in the last 7 days".into(), None));
             }
-            messages.extend(taken.messages);
+            read.sort_by_key(|m| m.at);
+            return Ok((
+                read.iter()
+                    .map(|m| format!("from {} at {} (already read):\n{}", m.from, m.at, m.text))
+                    .collect::<Vec<_>>()
+                    .join("\n\n"),
+                None,
+            ));
         }
-        if messages.is_empty() {
-            return Ok("no messages".into());
+        let mut claimed = mail::Claimed::default();
+        for key in &keys {
+            match mail::claim(&self.home, key) {
+                Ok(c) => claimed.merge(c),
+                Err(e) => {
+                    claimed.put_back();
+                    return Err(format!("could not read the mail: {e}"));
+                }
+            }
         }
-        messages.sort_by_key(|m| m.at);
-        Ok(messages
+        for p in &claimed.unreadable {
+            eprintln!("rl mcp: left unreadable mail {}", p.display());
+        }
+        if claimed.messages.is_empty() {
+            return Ok(("no messages".into(), None));
+        }
+        let text = claimed
+            .messages
             .iter()
             .map(|m| format!("from {} at {}:\n{}", m.from, m.at, m.text))
             .collect::<Vec<_>>()
-            .join("\n\n"))
+            .join("\n\n");
+        Ok((text, Some(claimed)))
     }
 }
 
@@ -578,10 +615,14 @@ fn tools() -> Value {
         },
         {
             "name": "inbox",
-            "description": "Read and clear the messages left for you, oldest first.",
+            "description": "Read and clear the messages left for you, oldest first. With recent: true, instead show again the messages you were given in the last 7 days (marked already read), changing nothing: for when you lost them.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
+                    "recent": {
+                        "type": "boolean",
+                        "description": "Show the messages already delivered to you in the last 7 days, newest last, instead of new ones.",
+                    },
                     "as": {
                         "type": "string",
                         "description": "Your own address. Only needed where this session's address is not known (see who).",
@@ -822,12 +863,15 @@ mod tests {
         text(&r[0]).to_string()
     }
 
-    /// The mail folders there are, as their names on disk.
+    /// The mail folders with mail pending, as their names on disk.
     fn folders(home: &Home) -> Vec<String> {
         let mut v: Vec<String> = std::fs::read_dir(home.mail_dir())
             .map(|rd| {
                 rd.flatten()
-                    .filter(|e| std::fs::read_dir(e.path()).is_ok_and(|mut d| d.next().is_some()))
+                    .filter(|e| {
+                        std::fs::read_dir(e.path())
+                            .is_ok_and(|d| d.flatten().any(|f| f.path().extension().is_some_and(|x| x == "json")))
+                    })
                     .map(|e| e.file_name().to_string_lossy().into_owned())
                     .collect()
             })
@@ -914,7 +958,120 @@ mod tests {
         assert!(text(&r[0]).contains("from sess-aaaa"), "{}", text(&r[0]));
         assert!(text(&r[0]).ends_with("hello"));
         assert_eq!(text(&r[1]), "no messages");
-        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
+        assert!(mail::waiting(&f.home, "sess-bbbb").is_empty());
+    }
+
+    /// Takes the replies; fails every write once `fail` is set.
+    struct Out<'a> {
+        bytes: Vec<u8>,
+        fail: bool,
+        /// Called at each write, before it is taken.
+        at_write: Box<dyn FnMut() + 'a>,
+    }
+
+    impl Write for Out<'_> {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            (self.at_write)();
+            if self.fail {
+                return Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "gone"));
+            }
+            self.bytes.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            if self.fail {
+                return Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "gone"));
+            }
+            Ok(())
+        }
+    }
+
+    fn delivered(home: &Home, key: &str) -> usize {
+        std::fs::read_dir(home.mail_dir().join(mail::component(key)).join(mail::DELIVERED)).map_or(0, |d| d.count())
+    }
+
+    #[test]
+    fn mail_whose_reply_could_not_be_written_is_put_back_for_the_next_inbox() {
+        let f = fixture();
+        ok_text(
+            &server(&f, caller(Some("sess-aaaa"))),
+            "send",
+            json!({ "to": "sess-bbbb", "text": "keep me" }),
+        );
+        let receiver = server(&f, caller(Some("sess-bbbb")));
+        let mut out = Out {
+            bytes: Vec::new(),
+            fail: true,
+            at_write: Box::new(|| {}),
+        };
+        let input = format!("{}\n", call(1, "inbox", json!({})));
+        assert!(receiver.serve(Cursor::new(input), &mut out).is_err());
+        assert_eq!(delivered(&f.home, "sess-bbbb"), 0);
+        assert_eq!(mail::waiting(&f.home, "sess-bbbb").len(), 1, "pending again");
+        let got = ok_text(&receiver, "inbox", json!({}));
+        assert!(got.ends_with("keep me"), "{got}");
+    }
+
+    #[test]
+    fn mail_is_moved_to_delivered_only_after_its_reply_is_written() {
+        let f = fixture();
+        ok_text(
+            &server(&f, caller(Some("sess-aaaa"))),
+            "send",
+            json!({ "to": "sess-bbbb", "text": "x" }),
+        );
+        let receiver = server(&f, caller(Some("sess-bbbb")));
+        let seen = std::cell::RefCell::new(Vec::new());
+        let home = f.home.clone();
+        let mut out = Out {
+            bytes: Vec::new(),
+            fail: false,
+            at_write: Box::new(|| seen.borrow_mut().push(delivered(&home, "sess-bbbb"))),
+        };
+        let input = format!("{}\n", call(1, "inbox", json!({})));
+        receiver.serve(Cursor::new(input), &mut out).unwrap();
+        assert!(String::from_utf8_lossy(&out.bytes).contains("from sess-aaaa"));
+        assert!(
+            !seen.borrow().is_empty() && seen.borrow().iter().all(|n| *n == 0),
+            "{seen:?}"
+        );
+        assert_eq!(delivered(&f.home, "sess-bbbb"), 1);
+    }
+
+    #[test]
+    fn the_hooks_count_only_mail_not_yet_delivered() {
+        let f = fixture();
+        let sender = server(&f, caller(Some("sess-aaaa")));
+        let receiver = server(&f, caller(Some("sess-bbbb")));
+        let prompt = json!({ "session_id": "sess-bbbb" });
+        let news = || crate::hook::news(&f.home, "claude", "UserPromptSubmit", None, &prompt);
+        ok_text(&sender, "send", json!({ "to": "sess-bbbb", "text": "one" }));
+        ok_text(&receiver, "inbox", json!({}));
+        assert_eq!(news(), None, "delivered mail is not waiting");
+        ok_text(&sender, "send", json!({ "to": "sess-bbbb", "text": "two" }));
+        let said = news().unwrap().to_string();
+        assert!(said.contains("You have 1 relay message"), "{said}");
+    }
+
+    #[test]
+    fn inbox_recent_shows_what_was_delivered_as_already_read_and_changes_nothing() {
+        let f = fixture();
+        let sender = server(&f, caller(Some("sess-aaaa")));
+        let receiver = server(&f, caller(Some("sess-bbbb")));
+        assert_eq!(
+            ok_text(&receiver, "inbox", json!({ "recent": true })),
+            "no messages read in the last 7 days"
+        );
+        ok_text(&sender, "send", json!({ "to": "sess-bbbb", "text": "first" }));
+        ok_text(&receiver, "inbox", json!({}));
+        ok_text(&sender, "send", json!({ "to": "sess-bbbb", "text": "unread" }));
+        let again = ok_text(&receiver, "inbox", json!({ "recent": true }));
+        assert!(again.contains("(already read)") && again.ends_with("first"), "{again}");
+        assert!(!again.contains("unread"), "{again}");
+        assert_eq!(mail::waiting(&f.home, "sess-bbbb").len(), 1, "left pending");
+        assert_eq!(ok_text(&receiver, "inbox", json!({ "recent": true })), again);
+        assert!(ok_text(&receiver, "inbox", json!({})).ends_with("unread"));
     }
 
     #[test]
