@@ -304,6 +304,20 @@ impl App {
     /// not while a name is being typed: it is not taken from
     /// under the keys, and the footer says how to get there.
     pub fn done(&mut self, d: Done) {
+        if let Some((key, name)) = &d.renamed {
+            // The harness's name now, at once, not at its next listing; and
+            // Relay keeps none beside it.
+            for n in self.native.rows.iter_mut() {
+                if !name.is_empty() && format!("n:{}:{}", n.harness, n.id) == *key {
+                    n.name = name.clone();
+                }
+            }
+            if self.config.list.names.get(key) == Some(name) {
+                self.change_prefs(|p| {
+                    p.names.remove(key);
+                });
+            }
+        }
         if let Some(key) = &d.forget {
             let key = key.clone();
             self.change_prefs(|p| forget(p, &key));
@@ -632,6 +646,11 @@ impl App {
     }
 
     /// The name kept for a line; empty, or its own, goes back to its own.
+    /// One of a harness's own sessions is renamed in its harness too, where
+    /// its harness can as it stands (`Harness::renames`: Codex's thread on
+    /// its daemon; an idle Claude, `/rename` typed into it): the name is
+    /// Relay's until the harness has taken it, and the harness's own after.
+    /// Cleared, it is cleared there too where the harness can.
     pub(super) fn apply_name(&mut self, r: RenameTarget, name: &str) {
         let name = name.trim().to_string();
         if name == r.was {
@@ -645,12 +664,50 @@ impl App {
                 p.names.insert(r.key.clone(), name.clone());
             }
         });
-        self.say(match (&r.outside, back) {
-            (_, true) => format!("back to {}", r.own),
-            (Some(harness), false) => format!("named in relay · {harness} still calls it {}", r.own),
-            (None, false) => format!("renamed to {name}"),
+        self.select(Some(r.key.clone()));
+        let native = self
+            .native
+            .rows
+            .iter()
+            .find(|n| format!("n:{}:{}", n.harness, n.id) == r.key);
+        let forward = native
+            .filter(|_| !back || name.is_empty())
+            .and_then(|n| Some((n.clone(), sources::harness(&n.harness)?)))
+            .filter(|(n, a)| a.renames(n, &name));
+        let Some((row, a)) = forward else {
+            return self.say(match (&r.outside, back) {
+                (_, true) => format!("back to {}", r.own),
+                (Some(harness), false) => format!("named in relay · {harness} still calls it {}", r.own),
+                (None, false) => format!("renamed to {name}"),
+            });
+        };
+        let who = a.name().to_string();
+        self.say(if name.is_empty() {
+            format!("back to {} · clearing its name in {who}…", r.own)
+        } else {
+            format!("renaming it {name} in {who}…")
         });
-        self.select(Some(r.key));
+        let (locks, key) = (self.home.typing_dir(), r.key);
+        self.work.spawn(async move {
+            let to = name.clone();
+            let run = tokio::task::spawn_blocking(move || a.rename(&row, &to, &locks)).await;
+            match run {
+                Ok(Ok(())) => Done {
+                    renamed: Some((key, name.clone())),
+                    ask_native: true,
+                    ..Done::said(if name.is_empty() {
+                        format!("cleared its name in {who}")
+                    } else {
+                        format!("renamed to {name} · in {who} too")
+                    })
+                },
+                Ok(Err(e)) if name.is_empty() => {
+                    Done::said(format!("back to its name in relay · {who} kept its own: {e:#}"))
+                }
+                Ok(Err(e)) => Done::said(format!("named in relay · {who} didn't take it: {e:#}")),
+                Err(e) => Done::said(format!("rename: {e}")),
+            }
+        });
     }
 
     /// `^t`: the row under the cursor to the band at the top, or back among

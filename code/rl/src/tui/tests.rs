@@ -1563,6 +1563,118 @@ async fn a_harnesss_session_is_named_in_relay_with_its_own_name_dim_beside_and_b
 }
 
 #[tokio::test]
+async fn an_idle_claude_is_renamed_in_claude_too_and_a_busy_one_only_in_relay() {
+    let f = fixture();
+    let mut app = list(&f).await;
+    let mut idle = waiting(&f.repo);
+    idle.state = NativeState {
+        words: "idle".into(),
+        state: RunState::Idle,
+    };
+    app.set_native(vec![idle.clone()]);
+    on(&mut app, NATIVE);
+    run(&mut app, "/rename login box");
+    assert!(
+        shown(&app).contains("renaming it login box in claude…"),
+        "{}",
+        shown(&app)
+    );
+    app.finish().await;
+    assert_eq!(
+        std::fs::read_to_string(f.repo.join("typed")).unwrap(),
+        "/rename login box\n",
+        "typed into it, through its attach"
+    );
+    assert!(
+        shown(&app).contains("renamed to login box · in claude too"),
+        "{}",
+        shown(&app)
+    );
+    assert!(
+        Config::load(&f.home).unwrap().list.names.is_empty(),
+        "the name is claude's own now"
+    );
+    let row = row_of(&shown(&app), "login box").to_string();
+    assert!(!row.contains("(fix the login)"), "{row}");
+    // Busy: the name is Relay's, and nothing is typed; once claude calls it
+    // so too (renamed there by you), Relay's goes.
+    std::fs::remove_file(f.repo.join("typed")).unwrap();
+    app.set_native(vec![waiting(&f.repo)]);
+    run(&mut app, "/rename the box");
+    app.finish().await;
+    assert!(!f.repo.join("typed").exists(), "nothing typed into a busy one");
+    assert!(shown(&app).contains("named in relay · claude still calls it fix the login"));
+    let names = Config::load(&f.home).unwrap().list.names;
+    assert_eq!(names.get(NATIVE).map(String::as_str), Some("the box"));
+    let mut renamed = waiting(&f.repo);
+    renamed.name = "the box".into();
+    app.set_native(vec![renamed]);
+    assert!(Config::load(&f.home).unwrap().list.names.is_empty());
+}
+
+#[tokio::test]
+async fn a_codex_thread_is_renamed_on_its_daemon_and_keeps_no_relay_name() {
+    let f = fixture();
+    let mut app = list(&f).await;
+    let codex = crate::sources::harness("codex").unwrap();
+    let started = codex.start(&f.repo, None, Some("fix it"), &Default::default()).unwrap();
+    let rl_detect::harness::Started::Id(id) = started else {
+        panic!("{started:?}");
+    };
+    let mut thread = waiting(&f.repo);
+    thread.harness = "codex".into();
+    thread.id = id.clone();
+    thread.session_id = id.clone();
+    thread.name = "fix it".into();
+    app.set_native(vec![thread.clone()]);
+    let key = format!("n:codex:{id}");
+    on(&mut app, &key);
+    run(&mut app, "/rename shop api");
+    app.finish().await;
+    let set = |name: &str| {
+        codex_sent().iter().any(|m| {
+            m["method"] == "thread/name/set" && m["params"] == serde_json::json!({"threadId": id, "name": name})
+        })
+    };
+    assert!(set("shop api"), "thread/name/set on the daemon");
+    assert!(
+        shown(&app).contains("renamed to shop api · in codex too"),
+        "{}",
+        shown(&app)
+    );
+    assert!(
+        Config::load(&f.home).unwrap().list.names.is_empty(),
+        "codex's name is the name"
+    );
+    assert!(row_of(&shown(&app), "shop api").contains("shop api"));
+    // Cleared: cleared on the daemon too.
+    thread.name = "shop api".into();
+    app.set_native(vec![thread.clone()]);
+    on(&mut app, &key);
+    ctrl(&mut app, 'r');
+    press(&mut app, KeyCode::Backspace);
+    press(&mut app, KeyCode::Enter);
+    app.finish().await;
+    assert!(set(""), "its name set back to none");
+    assert!(shown(&app).contains("cleared its name in codex"), "{}", shown(&app));
+    // One the daemon does not know: the name stays Relay's, and why.
+    thread.id = "019f0000-gone".into();
+    app.set_native(vec![thread]);
+    on(&mut app, "n:codex:019f0000-gone");
+    run(&mut app, "/rename gone box");
+    app.finish().await;
+    assert!(
+        shown(&app).contains(
+            "named in relay · codex didn't take it: `codex app-server proxy`: thread/name/set: thread not found"
+        ),
+        "{}",
+        shown(&app)
+    );
+    let names = Config::load(&f.home).unwrap().list.names;
+    assert_eq!(names.get("n:codex:019f0000-gone").map(String::as_str), Some("gone box"));
+}
+
+#[tokio::test]
 async fn slash_pin_hide_agents_and_group_do_what_their_keys_do() {
     let f = fixture();
     let mut app = list(&f).await;

@@ -67,7 +67,8 @@ and its socket.
 | `sessions/<name>/exit`, `stopped`, `sock` | holder, `rl stop` | how it ended, that it was stopped, its socket |
 | `state/<agent>/<session_id>.json` | `rl hook` | a session Relay does not hold; removed on `ended` |
 | `mail/<key>/<ns>-<pid>-<n>-<from>.json` | `rl mcp` | a waiting message; deleted when read |
-| `mail/<key>/.told` | `rl hook` | when the newest mail a Claude `Stop` hook told of was sent |
+| `mail/<key>/.told` | `rl hook`, `rl mcp` | when the newest mail a Claude `Stop` hook told of (or `send` typed in) was sent |
+| `typing/<harness>-<id>.lock` | `rl mcp`, the list | the lock typing into a harness's own session takes whole, and an attach from the list shared |
 | `config.json` | `rl setup`, the list | harnesses, badges, the setup changes you declined (`setup.declined`), list preferences (grouping, toggles, order, hidden, pins, names, colours by row key; `ctrl+g` cycles a row's own colour). `names` also holds a Relay-side name for a native or hooked row, which the harness never learns of; the list draws it with the harness's own beside it. Strict. |
 | `hooks/` | `rl new` | per-run settings passed to a harness |
 | `detect/*.yaml` | you | profile overrides |
@@ -154,7 +155,33 @@ Folders are 0700.
   outside) prints, so an event tells once. These two are the only output `rl hook` ever writes.
   From a Claude caller to one of Claude's background sessions (a native Claude row), `send`'s text
   also advises waking it with `SendMessage` (`Harness::wake_advice`), by the row's name: the name
-  `claude agents` shows, which `ListAgents`/`SendMessage` address. Advice only; Relay calls nothing.
+  `claude agents` shows, which `ListAgents`/`SendMessage` address — only where Relay could not wake
+  it itself (below). Advice only.
+- **Wake.** For a recipient that is one of a harness's own sessions, `send` asks
+  `Harness::wake` (the profile's `sessions.wake`; Claude's): an idle one has the mail's line typed
+  into it (`Woke::Typed`, `· woke claude`), one that has stopped or ended is carried on with
+  `claude --resume <session> --bg "<line>"` (`Woke::Resumed`), one working or waiting on you is
+  left to the hooks (`Woke::Left`, said in `send`'s text). Typed or resumed, `send` records the mail
+  as told (`mail::set_told`), so the `Stop` hook does not tell of it again.
+- **Typing** (`rl-detect/src/typing.rs`). One line into an idle session of a harness's own, for a
+  wake or a rename: its `attach` argv (`claude attach <id>`) on a hidden pty (`rl_session::backend`)
+  at 120x40, in the session's folder, its output fed to a `Screen`. It waits up to 8 s for the
+  input line (`sessions.typing.input`) to stand empty with nothing `busy`, steadily for 400 ms;
+  types the line; waits up to 5 s to see it on the input line (else `^u` takes it back); sends
+  `enter`; waits up to 5 s for the input line empty again and the line in the transcript; then hangs
+  up (SIGHUP to the attach's group, SIGKILL after 2 s): the session goes on. Guards: a lock file per
+  session under `typing/` (`typing::lock_path`), taken whole by the typer and shared by an attach
+  from the list (`typing::Attached`, held in `tui::hand_over` for a native row), so nothing is
+  typed while you are attached and two typers never meet; a busy screen, something already on the
+  input line, an attach that ends, or any wait that runs out: nothing typed, and the error says
+  why. Only the row's own state from the harness's listing (idle) lets it start.
+- **Rename.** `^r` / `/rename` keeps the name in `config.json`'s `names` as before; for a native row
+  whose harness `renames` it, the list then runs `Harness::rename` in the background: Codex's
+  `thread/name/set` on the daemon, Claude's `/rename <name>` typed in. Done, the native row takes
+  the name at once and the `names` entry goes (`Done::renamed`); refused, the name stays Relay's
+  and the footer says why. Whenever a listing names a row as its `names` entry does, the entry
+  goes (`App::heard`). An empty name clears a Codex thread's name on the daemon; a Claude's only in
+  Relay.
 
 ## 5. Harnesses
 
@@ -169,7 +196,15 @@ when the profile loads. Keys:
 - `hooks`: `dialect`, `args`
 - `patterns`: `needs_input`, `idle`; `timing`: `idle_after`, `stale_after`
 - `sessions`: `hooks`, `list`, `attach`, `start`, `name`, `stop`, `ping`, `stop_choice`, `close`,
-  `agents_view`
+  `agents_view`, `rename`, `wake`, `typing`
+- `sessions.rename`: exactly one of `rpc` (a method on the harness's daemon: Codex's
+  `thread/name/set`) or `type` (a line typed into an idle session, with `{name}`: Claude's
+  `/rename {name}`)
+- `sessions.wake`: `idle` (only `type`: the mail's line typed in), `stopped` (only `resume_bg`:
+  carried on in the background with the line as its prompt; needs `start`)
+- `sessions.typing`: `input` (a regex for the input line, one group for what is typed on it; the
+  last matching line is the one), `busy` (regexes that say a turn runs). Required by `rename.type`
+  and `wake.idle`, with `attach`
 - `sessions.stop_choice`: `words`, `says` (how `ctrl+x` offers the stop, on `s`)
 - `sessions.close`: `key` (one lowercase letter, not `s`), `words`, `says`, `done`, `args` (after
   the binary, `{id}` the attach id): the closing action `ctrl+x` offers beside the stop
@@ -198,6 +233,10 @@ trait covers:
 - setup: `user_hooks` (its profile's `sessions.hooks`), `has_mcp`, `mcp` (an `mcp_entry::Place`:
   where Relay's server goes and how), `settings` (a `settings::Place`: keys of its own global
   config and their values);
+- renaming and waking: `renames` (whether a rename would reach the harness as the row stands:
+  a daemon call always, a typed line only into an idle session and never to clear a name),
+  `rename` (Codex overrides it with the call on its daemon), `type_into` (the typing mechanism,
+  below), `wake` (a `Woke`: `Typed`, `Resumed`, `Left` to the hooks, `Failed`), `resume_with`;
 - `rl mcp` and mail: `caller_id_var`, `mail_by_hooks`, `wake_advice`.
 
 The kinds:
@@ -221,7 +260,7 @@ The kinds:
 
 Where profile data plugs in, for every kind: `bins` (which binary, `found`), `prompt`, `resume`,
 `hooks` (`held_argv`), `sessions.hooks` (`user_hooks`), `sessions.attach|start|name|stop` (Claude's
-and Codex's argv), `sessions.stop_choice|close` (`stop_choice`, `close_choice`, `close`), `sessions.ping` (`ping_argv`, Codex's `codex queue`), `sessions.agents_view` (`agents_view`), and `mcp.file`, `mcp.cli`,
+and Codex's argv), `sessions.stop_choice|close` (`stop_choice`, `close_choice`, `close`), `sessions.ping` (`ping_argv`, Codex's `codex queue`), `sessions.agents_view` (`agents_view`), `sessions.rename` (`renames`, `rename`), `sessions.wake` (`wake`), `sessions.typing` (`type_into`), and `mcp.file`, `mcp.cli`,
 `mcp.note` (`mcp`). What is the same for all is code: the hook settings file format (`user_hooks`),
 `rl hook`, the MCP entry formats (`mcp_entry`).
 
