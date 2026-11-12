@@ -585,6 +585,9 @@ impl App {
         if let Some(n) = self.setup_notice() {
             hints.insert(0, n);
         }
+        if let Some(n) = self.drift_notice() {
+            hints.insert(0, n);
+        }
         help::footer(&hints, width)
     }
 

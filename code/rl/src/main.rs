@@ -74,6 +74,18 @@ enum Command {
         #[arg(long, conflicts_with_all = ["check", "remove"])]
         yes: bool,
     },
+    /// Report a harness that changed under Relay as an issue on its
+    /// GitHub repository: each is shown first, and posted only on your yes.
+    Report {
+        /// Show the issues; post nothing, ask nothing.
+        #[arg(long)]
+        dry_run: bool,
+        /// Dismiss what there is to report, posting nothing.
+        #[arg(long, conflicts_with = "dry_run")]
+        dismiss: bool,
+    },
+    /// The harnesses found, their versions, and what drift Relay noticed.
+    Doctor,
 }
 
 #[tokio::main]
@@ -94,6 +106,7 @@ async fn main() {
 
 async fn run(cli: Cli) -> Result<()> {
     let home = Home::resolve()?;
+    rl::drift::install(&home);
     let Some(command) = cli.command else {
         use std::io::IsTerminal;
         if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
@@ -144,6 +157,21 @@ async fn run(cli: Cli) -> Result<()> {
             }
             rl::setup::main(&home, &harness, remove)
         }
+        Command::Report { dismiss: true, .. } => {
+            let n = rl::drift::dismiss(&rl::drift::dir(&home))?;
+            println!("dismissed {n}");
+            Ok(())
+        }
+        Command::Report { dry_run, .. } => {
+            let stdin = std::io::stdin();
+            rl::drift::report(
+                &rl::drift::dir(&home),
+                dry_run,
+                &mut stdin.lock(),
+                &mut std::io::stdout(),
+            )
+        }
+        Command::Doctor => rl::drift::doctor(&home, &mut std::io::stdout()),
         // Blocks on stdin; the harnesses it asks block too.
         Command::Mcp { harness } => tokio::task::spawn_blocking(move || rl::mcp::run(&home, &harness)).await?,
     }

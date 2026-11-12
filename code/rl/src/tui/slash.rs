@@ -22,6 +22,8 @@ pub enum Arg {
     Colour,
     /// A name; none, and the name is typed where it stands (`^r`).
     Name,
+    /// Nothing, or one of these words.
+    Words(&'static [&'static str]),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,6 +39,7 @@ pub enum Verb {
     Hidden,
     Group,
     Setup,
+    Report,
     Help,
     Quit,
 }
@@ -61,7 +64,7 @@ const fn cmd(name: &'static str, arg: Arg, verb: Verb) -> Cmd {
 }
 
 /// Every command, in the order `tab` offers them.
-pub const CMDS: [Cmd; 13] = [
+pub const CMDS: [Cmd; 14] = [
     Cmd {
         name: "colour",
         alias: Some("color"),
@@ -78,6 +81,7 @@ pub const CMDS: [Cmd; 13] = [
     cmd("hidden", Arg::Nothing, Verb::Hidden),
     cmd("group", Arg::Nothing, Verb::Group),
     cmd("setup", Arg::Nothing, Verb::Setup),
+    cmd("report", Arg::Words(&["dismiss"]), Verb::Report),
     cmd("help", Arg::Nothing, Verb::Help),
     cmd("quit", Arg::Nothing, Verb::Quit),
 ];
@@ -149,6 +153,11 @@ pub fn candidates(text: &str, cur: usize, name: Option<&str>) -> (usize, Vec<Str
             .filter(|n| n.starts_with(arg) && *n != arg)
             .map(|n| vec![n.to_string()])
             .unwrap_or_default(),
+        Some(Arg::Words(words)) => words
+            .iter()
+            .filter(|w| w.starts_with(arg) && **w != arg)
+            .map(|w| w.to_string())
+            .collect(),
         _ => vec![],
     };
     (start, out)
@@ -171,6 +180,9 @@ impl App {
         match c.arg {
             Arg::Nothing if !arg.is_empty() => {
                 return self.say(format!("/{} takes nothing after it", c.name));
+            }
+            Arg::Words(words) if !arg.is_empty() && !words.contains(&arg) => {
+                return self.say(format!("/{} takes nothing, or {}", c.name, words.join(" or ")));
             }
             Arg::Colour if arg.is_empty() => return self.say(format!("/{} takes {COLOURS}", c.name)),
             Arg::Colour if arg != "none" && crate::colour::parse(arg).is_none() => {
@@ -201,6 +213,8 @@ impl App {
             Verb::Hidden => self.toggle_hidden(),
             Verb::Group => self.toggle_grouping(),
             Verb::Setup => self.setup_now(),
+            Verb::Report if arg == "dismiss" => self.dismiss_drift(),
+            Verb::Report => self.report_now(),
             Verb::Help => self.help = true,
             Verb::Quit => self.quit = true,
         }
@@ -300,6 +314,10 @@ mod tests {
         );
         assert_eq!(c("/h", None).1, ["/hide", "/hidden", "/help"]);
         assert_eq!(c("/se", None).1, ["/setup"]);
+        assert_eq!(c("/rep", None).1, ["/report"]);
+        assert_eq!(c("/report ", None), (8, vec!["dismiss".into()]));
+        assert_eq!(c("/report d", None).1, ["dismiss"]);
+        assert_eq!(typed("/report dismiss"), Typed::Known("report"));
         assert_eq!(typed("/setup"), Typed::Known("setup"));
         assert_eq!(c("/colour p", None), (8, vec!["pink".into(), "purple".into()]));
         assert_eq!(c("/color n", None).1, ["none"]);

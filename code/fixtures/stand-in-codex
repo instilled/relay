@@ -4,6 +4,9 @@
 # words it was run with to `<itself>.argv`, one to a line, and what it had in
 # RELAY_ASKING to `<itself>.asking`. It knows no thread named `gone`, as
 # `codex queue` fails for one it does not know.
+# What Relay asks of it to learn about it says nothing of note.
+[ "$1" = --version ] && { echo "codex-cli 0.167.2"; exit 0; }
+[ "$1 $2" = "app-server generate-json-schema" ] && exit 0
 printf '%s\n' "$@" > "$0.argv"
 printf '%s\n' "${RELAY_ASKING:-}" > "$0.asking"
 if [ "$3" = gone ]; then

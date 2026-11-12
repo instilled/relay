@@ -195,6 +195,11 @@ pub struct App {
     /// `/setup` asked for the wizard: the terminal goes to it next
     /// (`main_loop`).
     pub wizard: bool,
+    /// `/report` asked for the report: the terminal goes to it next
+    /// (`main_loop`).
+    pub reporting: bool,
+    /// The drift notice as last read, and when its file was last written.
+    pub drift: RefCell<(Option<std::time::SystemTime>, Option<String>)>,
     /// The line under the cursor, by key.
     pub sel: Option<String>,
     /// Where the list's window starts, as last drawn.
@@ -240,6 +245,8 @@ impl App {
             setup_host: setup::Host::real().ok(),
             setup: None,
             wizard: false,
+            reporting: false,
+            drift: RefCell::default(),
             sel: None,
             scroll: Cell::new(0),
             hit: RefCell::default(),

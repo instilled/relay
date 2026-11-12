@@ -279,6 +279,15 @@ pub fn main_check(home: &Home, only: &[String]) -> Result<bool> {
     if declined > 0 {
         println!("({declined} declined, rl setup to change)");
     }
+    // What changed under Relay, not to set up: said, and the exit status
+    // stays setup's.
+    let drift = crate::drift::lines(&crate::drift::load(&crate::drift::dir(home)));
+    if !drift.is_empty() {
+        println!("drift:");
+        for l in drift {
+            println!("{l}");
+        }
+    }
     Ok(!needs.is_empty())
 }
 

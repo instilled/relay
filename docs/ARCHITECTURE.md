@@ -264,6 +264,33 @@ and Codex's argv), `sessions.stop_choice|close` (`stop_choice`, `close_choice`, 
 `mcp.note` (`mcp`). What is the same for all is code: the hook settings file format (`user_hooks`),
 `rl hook`, the MCP entry formats (`mcp_entry`).
 
+### Drift
+
+An expectation of a harness that fails in real use is drift, noticed where it fails
+(`rl_detect::drift::notice`) with a stable check id, and kept by the sink `rl` installs at start
+(`rl::drift::install`) in `$RELAY_HOME/drift/events.json`: one event per check id and harness
+version, counted, with first and last seen, the harness version (`<bin> --version`, asked once per
+binary path and mtime, `drift/versions.json`), Relay's version and commit, and the OS. Without a
+sink (tests), a notice goes nowhere; `drift::capture` collects them on its thread.
+
+| check id | noticed in |
+| --- | --- |
+| `claude.agents_json` | `claude_native::Claude::list_within`: `shape` finds the listing not a list of objects, or entries without `REQUIRED`/`REQUIRED_BACKGROUND`; what does not read is off the list |
+| `claude.bg_id` | `claude_native::begin`: `claude --bg` (or `--resume … --bg`) printed no id |
+| `codex.schema.<method>` | `codex_native::compat`: once per Codex binary, `codex app-server generate-json-schema` checked against `USES` (each method, its params, the answer's fields); what is gone turns off its `Feature` (`List`, `Resting`, `Start`, `Rename`, `Stop`); kept in `drift/codex-schema.json` |
+| `codex.rpc.<method>` | `codex_native::Rpc::call_all`: an answer with JSON-RPC -32601 or -32602 |
+| `<harness>.cli.<word>` | `harness::run`: a run that fails as a usage error (`usage_error`: clap's or commander's words, or exit 2 with its usage) |
+
+Evidence is a structural line only, redacted (`drift::redact`: the home folder as `~`, a path
+under it or elsewhere as `<project>`, quoted text that is not a plain word as `…`). The list's
+footer leads with the latest pending event (`drift::notice`, read again when its file changes);
+`rl setup --check` lists them under `drift:`; `rl doctor` lists all. `rl report` / `/report`
+renders one issue per event (`drift::title`, `drift::body`; the title carries the check id and
+version, which is how `gh issue list --search` finds an open one for a comment instead), shows it,
+and posts only on a yes through `gh` (`--label drift`, retried without where the label is missing),
+else prints a prefilled new-issue link cut to `MAX_URL`. The repository is Cargo.toml's
+`repository`.
+
 ## 6. MCP
 
 `rl mcp` is JSON-RPC 2.0, one message per line on stdio, written by hand, no SDK. It answers

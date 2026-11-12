@@ -1,0 +1,27 @@
+{
+ "definitions": {},
+ "properties": {
+  "approvalPolicy": {},
+  "approvalsReviewer": {},
+  "cwd": {},
+  "disabledPluginIds": {},
+  "instructionSources": {},
+  "model": {},
+  "modelProvider": {},
+  "reasoningEffort": {},
+  "sandbox": {},
+  "serviceTier": {},
+  "thread": {}
+ },
+ "required": [
+  "approvalPolicy",
+  "approvalsReviewer",
+  "cwd",
+  "model",
+  "modelProvider",
+  "sandbox",
+  "thread"
+ ],
+ "title": "ThreadStartResponse",
+ "type": "object"
+}

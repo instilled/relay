@@ -2145,3 +2145,35 @@ async fn scroll_speed() {
         took / n
     );
 }
+
+#[tokio::test]
+async fn drift_leads_the_footer_until_reported_or_dismissed_and_slash_report_takes_the_terminal() {
+    let f = fixture();
+    let mut app = list(&f).await;
+    run(&mut app, "/report");
+    assert!(!app.reporting, "nothing to report");
+    let dir = crate::drift::dir(&f.home);
+    let n = rl_detect::drift::Noticed::new(
+        "codex",
+        None,
+        "codex.schema.thread/name/set",
+        "thread/name/set gone, rename stays in Relay",
+    );
+    crate::drift::record_as(&dir, &n, "0.170.0", jiff::Timestamp::now()).unwrap();
+    app.flash = None;
+    let foot = shown(&app);
+    assert!(
+        foot.contains("codex 0.170.0: thread/name/set gone, rename stays in Relay · /report"),
+        "{foot}"
+    );
+    run(&mut app, "/report");
+    assert!(app.reporting, "the report is asked for");
+    app.reporting = false;
+    run(&mut app, "/report nope");
+    assert!(shown(&app).contains("/report takes nothing, or dismiss"));
+    app.cmd.clear();
+    run(&mut app, "/report dismiss");
+    let foot = shown(&app);
+    assert!(foot.contains("dismissed 1"), "{foot}");
+    assert!(!foot.contains("thread/name/set gone"), "{foot}");
+}

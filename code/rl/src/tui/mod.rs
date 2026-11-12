@@ -21,6 +21,7 @@ mod live;
 mod mark;
 mod onboard;
 mod remove;
+mod report;
 mod select;
 mod slash;
 mod theme;
@@ -175,6 +176,23 @@ impl App {
                     Err(e) => self.say(format!("setup: {e}")),
                 }
                 self.check_setup();
+            }
+            // `/report`: the report has the terminal, as the wizard does.
+            if std::mem::take(&mut self.reporting) {
+                drop(input);
+                leave_screen();
+                native.pause();
+                let dir = crate::drift::dir(&self.home);
+                let ran = tokio::task::spawn_blocking(move || report::run(&dir)).await;
+                native.resume();
+                *terminal = enter_screen();
+                input = EventStream::new();
+                title.clear();
+                match ran {
+                    Ok(Ok(())) => self.say("back from /report"),
+                    Ok(Err(e)) => self.say(format!("report: {e:#}")),
+                    Err(e) => self.say(format!("report: {e}")),
+                }
             }
         }
         Ok(true)
