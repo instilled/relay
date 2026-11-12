@@ -126,7 +126,9 @@ Folders are 0700.
   (`Harness::agents_view`): once a line of it matches — Claude's agents view, which `←` opens in an
   attached session whatever `leftArrowOpensAgents` says — that screen is not passed on and the
   attach lets go as `ctrl+\` does, back to the list.
-- **Stop and remove.** A held session gets a `stopped` mark, then the holder is asked to close. A
+- **Stop and remove.** A held session gets a `stopped` mark, then the holder is asked to close: it
+  hangs the run up (SIGHUP, 3 s), then terminates (SIGTERM, 2 s) and kills it (SIGKILL), so a run
+  that ignores the hangup still ends, its exit written within the 10 s `rl stop` waits. A
   native one whose harness can close it (`Harness::close_choice`) is asked about: the second
   `ctrl+x` puts a choice in the footer (`tui::remove::Ask`, `Mode::Ask`) — `s` the stop
   (`Harness::stop_choice`, offered only while `Harness::stops`; Claude's `claude stop <id>`,

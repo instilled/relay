@@ -51,7 +51,8 @@ pub enum Frame {
     },
     /// Deliver a signal number to the child process.
     Signal(i32),
-    /// Shut the holder down. A live child gets SIGHUP first.
+    /// Shut the holder down. A live child is hung up first (SIGHUP), then
+    /// terminated (SIGTERM) and killed (SIGKILL) if it will not go.
     Close,
 
     // holder → client
