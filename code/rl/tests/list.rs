@@ -126,6 +126,43 @@ async fn ctrl_x_twice_stops_a_live_held_shell() {
     assert_eq!(status(&f.home, &name), None);
 }
 
+/// `rl`'s own runtime is `#[tokio::main]`'s, multi-threaded: the list's
+/// held stop and remove go through the holder `rl` installs, which must
+/// hold there too, and from one of its workers as well as a blocking task.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn on_rls_own_runtime_the_list_stops_and_removes_a_held_shell_and_so_does_a_worker() {
+    if !holder() {
+        return;
+    }
+    let f = fixture();
+    let name = sh(&f.home, &f.folder).await;
+    let mut app = App::new(f.home.clone()).unwrap();
+    app.select(Some(format!("r:{name}")));
+    ctrl(&mut app, 'x');
+    ctrl(&mut app, 'x');
+    press(&mut app, KeyCode::Char('s'));
+    app.finish().await;
+    assert!(
+        app.flashing().is_some_and(|m| m.starts_with("stopped")),
+        "{:?}",
+        app.flashing()
+    );
+    ctrl(&mut app, 'x');
+    ctrl(&mut app, 'x');
+    press(&mut app, KeyCode::Char('r'));
+    app.finish().await;
+    assert_eq!(status(&f.home, &name), None, "{:?}", app.flashing());
+
+    // Straight from this worker thread, no blocking task between.
+    use rl_detect::harness::Holder;
+    let other = sh(&f.home, &f.folder).await;
+    let dir = f.home.session_dir(&other);
+    rl::cmd::Store.stop(&dir, &other).unwrap();
+    assert!(matches!(status(&f.home, &other), Some(Status::Ended(_))));
+    rl::cmd::Store.remove(&dir, &other).unwrap();
+    assert_eq!(status(&f.home, &other), None);
+}
+
 #[tokio::test]
 async fn r_removes_a_live_held_shell_stopping_it_first() {
     if !holder() {

@@ -11,37 +11,36 @@ use super::line;
 use super::remove::{self, Removal};
 use super::slash;
 use super::theme;
-use crate::cmd;
 use crate::config::{Hidden, ListPrefs};
 use crate::rows::{self, Context, Line, Names};
-use crate::sources::{self, Attach, Harness, Source};
+use crate::sources::{self, Attach, Harness, Session, Source};
 use crate::spawn::{self, Start};
 use crate::store::sessions;
 use crossterm::event::{KeyCode, KeyEvent};
 use jiff::Timestamp;
-use rl_detect::harness::Started;
+use rl_detect::harness::{RenameHow, Renamed, Started};
 use rl_detect::registry::Profile;
-use std::collections::HashSet;
 use std::path::PathBuf;
 
 /// The size a session starts at when the list cannot say its own.
 const DEFAULT_SIZE: (u16, u16) = (120, 32);
 
-/// Runs `argv`, which carries a conversation on in `a`'s own background, in
-/// `cwd`; the id of the session it began (`Harness::carry_on_there`).
-/// `before`: the ids it listed last.
-async fn in_background(
-    a: &'static dyn Harness,
-    argv: Vec<String>,
-    cwd: PathBuf,
-    before: HashSet<String>,
-) -> anyhow::Result<String> {
-    tokio::task::spawn_blocking(move || a.carry_on_there(&argv, &cwd, &before)).await?
+/// A native row's key.
+fn native_key(harness: &str, id: &str) -> String {
+    format!("n:{harness}:{id}")
 }
 
-/// A native row's key.
-fn native_key(a: &dyn Harness, id: &str) -> String {
-    format!("n:{}:{id}", a.name())
+/// What attaches to `id`, one of `a`'s own a start just began in `cwd`.
+fn hand_new(a: &dyn Harness, id: &str, cwd: &std::path::Path, title: String) -> Option<Hand> {
+    let name = &a.info().name;
+    match a.attach(&Session::started(name, id, cwd)) {
+        rl_detect::harness::Attach::Argv(argv) => Some(Hand {
+            to: To::Argv { argv },
+            title,
+            key: native_key(name, id),
+        }),
+        _ => None,
+    }
 }
 
 impl App {
@@ -60,7 +59,7 @@ impl App {
         };
         let names = Names::new(&self.config.list.names);
         let (title, key) = (names.title(r).to_string(), r.key.clone());
-        let (harness, cwd, source, state) = (r.harness.clone(), r.cwd.clone(), r.source, r.state);
+        let (harness, source, state) = (r.harness.clone(), r.source, r.state);
         let to = match &r.attach {
             Attach::Held(name) => {
                 let name = name.clone();
@@ -74,13 +73,10 @@ impl App {
                     Some(h) => To::Held(Box::new(h.meta)),
                 }
             }
-            Attach::Argv(argv) => To::Argv {
-                argv: argv.clone(),
-                back: sources::harness(&harness).and_then(|h| h.agents_view().cloned()),
-            },
-            Attach::CarryOn { argv, background } => {
-                let argv = argv.clone();
-                return self.carry_on(argv, *background, &harness, cwd, title);
+            Attach::Argv(argv) => To::Argv { argv: argv.clone() },
+            Attach::CarryOn(start) => {
+                let start = start.clone();
+                return self.carry_on(start, &harness, title, key);
             }
             Attach::None if source == Source::Hooked && state == rl_core::state::RunState::Idle => {
                 return self.say(format!(
@@ -104,77 +100,66 @@ impl App {
         self.hand = Some(Hand { to, title, key });
     }
 
-    /// Carries a conversation open in another terminal on, in the background,
-    /// then attaches to it: in the harness's own background (`background`),
-    /// else as a session Relay holds.
-    fn carry_on(&mut self, argv: Vec<String>, background: bool, harness: &str, cwd: PathBuf, title: String) {
+    /// Carries a conversation open in another terminal on, as its harness
+    /// starts it (`Harness::start`), then attaches to it: in the harness's
+    /// own background, else as a session Relay holds.
+    fn carry_on(&mut self, start: rl_detect::harness::Start, harness: &str, title: String, from: String) {
         self.say(format!("carrying {title} on…"));
-        if background {
-            let Some(a) = sources::harness(harness).filter(|a| a.lists()) else {
-                return self.say(format!("{harness} has no background here"));
-            };
-            let before = self.listed_ids(a);
-            self.work.spawn(async move {
-                match in_background(a, argv, cwd, before).await {
-                    Ok(id) => {
-                        let key = native_key(a, &id);
-                        Done {
-                            said: format!("{title} carries on in {}'s background", a.name()),
-                            select: Some(key.clone()),
-                            hand: a.attach_argv(&id).map(|argv| Hand {
-                                to: To::Argv {
-                                    argv,
-                                    back: a.agents_view().cloned(),
-                                },
-                                title,
-                                key,
-                            }),
-                            ..Done::said("")
-                        }
-                    }
-                    Err(e) => Done::gave_up(format!("carry {title} on: {e:#}")),
-                }
-            });
-            return;
-        }
+        let a = sources::harness_of(harness);
         let home = self.home.clone();
         let (cols, rows) = crossterm::terminal::size().unwrap_or(DEFAULT_SIZE);
         self.work.spawn(async move {
-            let start = Start {
-                harness: None,
-                cwd,
-                argv,
-                shell: false,
-                cols,
-                rows,
-            };
-            match spawn::start(&home, start).await {
-                Ok(meta) => {
-                    let key = format!("r:{}", meta.name);
-                    Done {
-                        said: format!("{title} carries on as {}", meta.name),
-                        select: Some(key.clone()),
-                        hand: Some(Hand {
-                            title: meta.name.clone(),
-                            to: To::Held(Box::new(meta)),
-                            key,
-                        }),
-                        ..Done::said("")
+            let (name, cwd) = (a.info().name.clone(), start.cwd.clone());
+            let run = tokio::task::spawn_blocking(move || a.start(&start)).await;
+            match run {
+                Ok(Ok(Started::Background(id))) => Done {
+                    said: format!("{title} carries on in {name}'s background"),
+                    select: Some(native_key(&name, &id)),
+                    // A new session on its conversation: the old row's
+                    // name, pin, colour and place are the new one's.
+                    carried: Some((from, native_key(&name, &id))),
+                    hand: hand_new(a, &id, &cwd, title),
+                    ..Done::said("")
+                },
+                Ok(Ok(Started::Here(argv))) => Done {
+                    hand: Some(Hand {
+                        to: To::Here { argv, cwd },
+                        title: title.clone(),
+                        key: String::new(),
+                    }),
+                    ask_native: true,
+                    ..Done::said(format!("{title} carries on here"))
+                },
+                Ok(Ok(Started::Held(argv))) => {
+                    let start = Start {
+                        harness: Some(name),
+                        cwd,
+                        argv,
+                        shell: false,
+                        cols,
+                        rows,
+                    };
+                    match spawn::start(&home, start).await {
+                        Ok(meta) => {
+                            let key = format!("r:{}", meta.name);
+                            Done {
+                                said: format!("{title} carries on as {}", meta.name),
+                                select: Some(key.clone()),
+                                hand: Some(Hand {
+                                    title: meta.name.clone(),
+                                    to: To::Held(Box::new(meta)),
+                                    key,
+                                }),
+                                ..Done::said("")
+                            }
+                        }
+                        Err(e) => Done::said(format!("carry {title} on: {e:#}")),
                     }
                 }
-                Err(e) => Done::said(format!("carry {title} on: {e:#}")),
+                Ok(Err(e)) => Done::gave_up(format!("carry {title} on: {e:#}")),
+                Err(e) => Done::gave_up(format!("carry {title} on: {e}")),
             }
         });
-    }
-
-    /// The ids `a` listed last: what a session it starts now is not.
-    fn listed_ids(&self, a: &dyn Harness) -> HashSet<String> {
-        self.native
-            .rows
-            .iter()
-            .filter(|r| r.harness == a.name())
-            .map(|r| r.id.clone())
-            .collect()
     }
 
     /// The words once the terminal is back from an attach, and the cursor
@@ -254,15 +239,18 @@ impl App {
             return self.hold(start, what);
         };
         let held = held(Vec::new());
-        let before = self.listed_ids(a);
         let home = self.home.clone();
         let size = crossterm::terminal::size().unwrap_or(DEFAULT_SIZE);
         self.work.spawn(async move {
-            let at = cwd.clone();
-            let started = tokio::task::spawn_blocking(move || a.start(&at, None, prompt.as_deref(), &before)).await;
+            let start = rl_detect::harness::Start {
+                cwd: cwd.clone(),
+                prompt,
+                ..Default::default()
+            };
+            let started = tokio::task::spawn_blocking(move || a.start(&start)).await;
             match started {
-                Ok(Ok(Started::Id(id))) => Done {
-                    select: Some(native_key(a, &id)),
+                Ok(Ok(Started::Background(id))) => Done {
+                    select: Some(native_key(&a.info().name, &id)),
                     ..Done::said(format!("started {what} {id} in its background · enter attaches"))
                 },
                 Ok(Ok(Started::Here(argv))) => Done {
@@ -326,6 +314,10 @@ impl App {
                     p.names.remove(key);
                 });
             }
+        }
+        if let Some((from, to)) = &d.carried {
+            let at = Timestamp::now();
+            self.change_prefs(|p| p.carry(from, to, at));
         }
         if let Some(key) = &d.forget {
             let key = key.clone();
@@ -411,32 +403,20 @@ impl App {
     /// back.
     pub(super) fn remove(&mut self, plan: Removal) {
         match plan {
-            Removal::Stop { name, title } => {
-                self.say(format!("stopping {title}…"));
-                let home = self.home.clone();
-                self.work.spawn(async move {
-                    match cmd::stop(&home, &name).await {
-                        Ok(()) => Done::said(format!("stopped {title} · ctrl+x again removes it")),
-                        Err(e) => Done::said(format!("stop {title}: {e:#}")),
-                    }
-                });
-            }
-            Removal::StopNative {
-                harness,
-                id,
-                cwd,
-                title,
-            } => {
-                let Some(a) = sources::harness(&harness) else {
-                    return self.say(format!("{harness} has no way to stop {title} here"));
+            Removal::Stop { session, title } => {
+                let a = sources::harness_of(&session.harness);
+                let then = if a.actions(&session).remove {
+                    " · ctrl+x again removes it"
+                } else {
+                    ""
                 };
                 self.say(format!("stopping {title}…"));
                 self.work.spawn(async move {
-                    let run = tokio::task::spawn_blocking(move || a.stop(&id, &cwd)).await;
+                    let run = tokio::task::spawn_blocking(move || a.stop(&session)).await;
                     match run {
-                        Ok(Ok(_)) => Done {
+                        Ok(Ok(())) => Done {
                             ask_native: true,
-                            ..Done::said(format!("stopped {title}"))
+                            ..Done::said(format!("stopped {title}{then}"))
                         },
                         Ok(Err(e)) => Done::said(format!("stop {title}: {e:#}")),
                         Err(e) => Done::said(format!("stop {title}: {e}")),
@@ -444,19 +424,15 @@ impl App {
                 });
             }
             Removal::Ask(ask) => self.ask(ask),
-            Removal::RemoveNative {
-                harness,
-                id,
-                cwd,
-                title,
-            } => {
-                let Some(a) = sources::harness(&harness) else {
-                    return self.say(format!("{harness} has no way to remove {title} here"));
-                };
+            Removal::Remove { session, key, title } => {
+                // Whatever was kept for it goes with it: a session started
+                // later by the same name is a new one. One still going is
+                // stopped first, by its harness.
+                let a = sources::harness_of(&session.harness);
+                let next = self.next_key();
                 self.say(format!("removing {title}…"));
-                let (next, key) = (self.next_key(), native_key(a, &id));
                 self.work.spawn(async move {
-                    let run = tokio::task::spawn_blocking(move || a.remove(&id, &cwd)).await;
+                    let run = tokio::task::spawn_blocking(move || a.remove(&session)).await;
                     match run {
                         Ok(Ok(())) => Done {
                             select: next,
@@ -467,29 +443,6 @@ impl App {
                         // What its harness said, as it said it: the row stays.
                         Ok(Err(e)) => Done::said(format!("remove {title}: {e:#}")),
                         Err(e) => Done::said(format!("remove {title}: {e}")),
-                    }
-                });
-            }
-            Removal::Remove { name, title, live } => {
-                // Whatever was kept for it goes with it: a session started
-                // later by the same name is a new one. One still going is
-                // stopped first.
-                let next = self.next_key();
-                let home = self.home.clone();
-                if live {
-                    self.say(format!("stopping {title}…"));
-                }
-                self.work.spawn(async move {
-                    if live && let Err(e) = cmd::stop(&home, &name).await {
-                        return Done::said(format!("remove {title}: {e:#}"));
-                    }
-                    match cmd::rm(&home, &name).await {
-                        Ok(()) => Done {
-                            select: next,
-                            forget: Some(format!("r:{name}")),
-                            ..Done::said(format!("removed {title}"))
-                        },
-                        Err(e) => Done::said(format!("remove {title}: {e:#}")),
                     }
                 });
             }
@@ -663,11 +616,12 @@ impl App {
     }
 
     /// The name kept for a line; empty, or its own, goes back to its own.
-    /// One of a harness's own sessions is renamed in its harness too, where
-    /// its harness can as it stands (`Harness::renames`: Codex's thread on
-    /// its daemon; an idle Claude, `/rename` typed into it): the name is
-    /// Relay's until the harness has taken it, and the harness's own after.
-    /// Cleared, it is cleared there too where the harness can.
+    /// A session's harness says how a name lands (`Harness::actions`): in
+    /// the harness at once (Codex's thread, on its daemon), where the name is
+    /// Relay's until the harness has taken it and the harness's own after;
+    /// at Relay's next start of it (Claude's, `-n`), where Relay keeps it
+    /// till then; or in Relay alone. Cleared, it is cleared there too where
+    /// the harness can.
     pub(super) fn apply_name(&mut self, r: RenameTarget, name: &str) {
         let name = name.trim().to_string();
         if name == r.was {
@@ -682,34 +636,39 @@ impl App {
             }
         });
         self.select(Some(r.key.clone()));
-        let native = self
-            .native
+        let session = self
             .rows
             .iter()
-            .find(|n| format!("n:{}:{}", n.harness, n.id) == r.key);
-        let forward = native
-            .filter(|_| !back || name.is_empty())
-            .and_then(|n| Some((n.clone(), sources::harness(&n.harness)?)))
-            .filter(|(n, a)| a.renames(n, &name));
-        let Some((row, a)) = forward else {
-            return self.say(match (&r.outside, back) {
-                (_, true) => format!("back to {}", r.own),
-                (Some(harness), false) => format!("named in relay · {harness} still calls it {}", r.own),
-                (None, false) => format!("renamed to {name}"),
+            .find(|row| row.key == r.key)
+            .map(|row| row.session.clone())
+            .filter(|_| !back || name.is_empty());
+        let a = session.as_ref().map(|s| sources::harness_of(&s.harness));
+        let how = match (&session, a) {
+            (Some(s), Some(a)) => a.actions(s).rename,
+            _ => RenameHow::RelayOnly,
+        };
+        let (Some(session), Some(a), RenameHow::Now) = (session, a, &how) else {
+            return self.say(match (&r.outside, back, how) {
+                (_, true, _) => format!("back to {}", r.own),
+                (Some(harness), false, RenameHow::AtNextStart) => {
+                    format!("named in relay · {harness} takes it at its next start")
+                }
+                (Some(harness), false, _) => format!("named in relay · {harness} still calls it {}", r.own),
+                (None, false, _) => format!("renamed to {name}"),
             });
         };
-        let who = a.name().to_string();
+        let who = a.info().name.clone();
         self.say(if name.is_empty() {
             format!("back to {} · clearing its name in {who}…", r.own)
         } else {
             format!("renaming it {name} in {who}…")
         });
-        let (locks, key) = (self.home.typing_dir(), r.key);
+        let key = r.key;
         self.work.spawn(async move {
             let to = name.clone();
-            let run = tokio::task::spawn_blocking(move || a.rename(&row, &to, &locks)).await;
+            let run = tokio::task::spawn_blocking(move || a.rename(&session, &to)).await;
             match run {
-                Ok(Ok(())) => Done {
+                Ok(Renamed::Now) => Done {
                     renamed: Some((key, name.clone())),
                     ask_native: true,
                     ..Done::said(if name.is_empty() {
@@ -718,10 +677,11 @@ impl App {
                         format!("renamed to {name} · in {who} too")
                     })
                 },
-                Ok(Err(e)) if name.is_empty() => {
-                    Done::said(format!("back to its name in relay · {who} kept its own: {e:#}"))
+                Ok(Renamed::RelayOnly(Some(e))) if name.is_empty() => {
+                    Done::said(format!("back to its name in relay · {who} kept its own: {e}"))
                 }
-                Ok(Err(e)) => Done::said(format!("named in relay · {who} didn't take it: {e:#}")),
+                Ok(Renamed::RelayOnly(Some(e))) => Done::said(format!("named in relay · {who} didn't take it: {e}")),
+                Ok(_) => Done::said(format!("named in relay · {who} keeps its own for now")),
                 Err(e) => Done::said(format!("rename: {e}")),
             }
         });
