@@ -59,7 +59,8 @@ rl setup --remove   # take the hooks and the server out again (--harness H limit
 `rl` opens the list. Rows are agents and shells under their project (a folder you named, else its
 git checkout, worktrees under their main one), or grouped by state: Needs input, Working, Done.
 Claude's background sessions and Codex's threads are on it as their own tools show them, and
-agents in other terminals are on it through their hooks.
+agents in other terminals are on it through their hooks. `/project <folder>` adds a project with
+nothing running in it yet; the cursor lands on it, so typing starts something there.
 
 `enter` attaches; `ctrl+\` detaches and leaves it running. In an attached Claude, `←` on an empty
 prompt also comes back to the list. A session Relay holds lives in a small process of its own
@@ -131,7 +132,8 @@ nothing.
 | `/colour <name\|#rrggbb\|none>` (`/color`) | your colour for the row, as `ctrl+g` |
 | `/rename [name]` | rename the row or project; with no name, as `ctrl+r` |
 | `/pin` | pin or unpin |
-| `/hide` | hide the row or project, or bring it back |
+| `/hide` | hide the row or project, or bring it back; an empty project you added comes off the list |
+| `/project <folder>` | add a project (`tab` completes the folder; kept in `list.projects`) |
 | `/stop` | stop a live session at once, no question |
 | `/rm` | remove the session for good, asked first |
 | `/agents` `/shells` `/hidden` | show agents, shells, hidden |

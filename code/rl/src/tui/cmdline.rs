@@ -221,7 +221,7 @@ pub fn defaults(reg: &Registry, cmds: &Commands) -> Vec<String> {
 pub fn candidates(text: &str, cur: usize, ctx: &Ctx) -> (usize, Vec<String>) {
     if slash::is_command(text) {
         let found = defaults(ctx.reg, ctx.cmds);
-        return slash::candidates(text, cur, ctx.name, &found);
+        return slash::candidates(text, cur, ctx.name, &found, ctx.folder);
     }
     let (folder, reg, cmds) = (ctx.folder, ctx.reg, ctx.cmds);
     let start = word_start(text, cur);
@@ -249,14 +249,18 @@ pub fn candidates(text: &str, cur: usize, ctx: &Ctx) -> (usize, Vec<String>) {
             }
         }
     } else {
-        out = paths(word, folder);
+        out = paths(word, folder, false);
     }
     (start, out)
 }
 
-/// The paths `word` may be the start of, under `folder`: hidden ones only
-/// once a `.` is typed.
-fn paths(word: &str, folder: &Path) -> Vec<String> {
+/// The paths `word` may be the start of, under `folder` (`~` is home): hidden
+/// ones only once a `.` is typed; only folders where `dirs_only`, and a lone
+/// `~` to home's own.
+pub fn paths(word: &str, folder: &Path, dirs_only: bool) -> Vec<String> {
+    if dirs_only && word == "~" {
+        return vec!["~/".into()];
+    }
     let (typed, base) = match word.rfind('/') {
         Some(i) => (&word[..=i], &word[i + 1..]),
         None => ("", word),
@@ -277,7 +281,11 @@ fn paths(word: &str, folder: &Path) -> Vec<String> {
             if !name.starts_with(base) || (name.starts_with('.') && !base.starts_with('.')) {
                 return None;
             }
-            let slash = if e.path().is_dir() { "/" } else { "" };
+            let dir = e.path().is_dir();
+            if dirs_only && !dir {
+                return None;
+            }
+            let slash = if dir { "/" } else { "" };
             Some(format!("{typed}{name}{slash}"))
         })
         .collect();
