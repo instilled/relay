@@ -38,6 +38,31 @@ def keep(ts):
         json.dump(ts, f)
 
 
+if args == ["--version"]:
+    print("codex-cli 0.167.2")
+    sys.exit(0)
+
+# The schema Relay checks itself against: none written unless the test
+# put a schema folder's path in <itself>.schema; the methods named in
+# <itself>.schema-drop (one a line) are left out of it, as a Codex that
+# dropped them would.
+if args[:2] == ["app-server", "generate-json-schema"]:
+    out = args[args.index("--out") + 1]
+    if os.path.exists(me + ".schema"):
+        import shutil
+        src = open(me + ".schema").read().strip()
+        shutil.copytree(src, out, dirs_exist_ok=True)
+        drop = []
+        if os.path.exists(me + ".schema-drop"):
+            drop = open(me + ".schema-drop").read().split()
+        path = os.path.join(out, "ClientRequest.json")
+        with open(path) as f:
+            req = json.load(f)
+        req["oneOf"] = [e for e in req["oneOf"] if e["properties"]["method"]["enum"][0] not in drop]
+        with open(path, "w") as f:
+            json.dump(req, f)
+    sys.exit(0)
+
 if args == ["app-server", "daemon", "start"]:
     if os.path.exists(me + ".down"):
         os.remove(me + ".down")

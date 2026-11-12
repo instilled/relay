@@ -21,6 +21,7 @@ mod live;
 mod mark;
 mod onboard;
 mod remove;
+mod report;
 mod select;
 mod slash;
 mod theme;
@@ -176,6 +177,23 @@ impl App {
                 }
                 self.check_setup();
             }
+            // `/report`: the report has the terminal, as the wizard does.
+            if std::mem::take(&mut self.reporting) {
+                drop(input);
+                leave_screen();
+                native.pause();
+                let dir = crate::drift::dir(&self.home);
+                let ran = tokio::task::spawn_blocking(move || report::run(&dir)).await;
+                native.resume();
+                *terminal = enter_screen();
+                input = EventStream::new();
+                title.clear();
+                match ran {
+                    Ok(Ok(())) => self.say("back from /report"),
+                    Ok(Err(e)) => self.say(format!("report: {e:#}")),
+                    Err(e) => self.say(format!("report: {e}")),
+                }
+            }
         }
         Ok(true)
     }
@@ -248,8 +266,13 @@ async fn hand_over(home: &Home, hand: &Hand) -> String {
             Err(e) => format!("attach {title}: {e:#}"),
         },
         To::Argv { argv, back } => {
-            // While you are attached, nothing is typed into it.
-            let _you = attached(home, &hand.key);
+            // While you are attached, nothing is typed into it; one being
+            // typed into is waited for, and not attached to while it is.
+            let _you = match attached(home, &hand.key).await {
+                Lock::Busy => return format!("relay is typing into {title} · try again in a moment"),
+                Lock::Held(you) => Some(you),
+                Lock::None => None,
+            };
             match attach::native::hold(argv, None, title, back.as_ref()).await {
                 Ok(attach::native::Back::Detached) => back_words(title, &attach::Ended::Detached),
                 Ok(attach::native::Back::Ended(exit)) => back_words(title, &attach::held::exit_words(title, &exit).0),
@@ -264,14 +287,33 @@ async fn hand_over(home: &Home, hand: &Hand) -> String {
     }
 }
 
-/// The lock that says you are attached to the native row `key`
-/// (`n:<harness>:<id>`), held shared while it is; none for another row.
-fn attached(home: &Home, key: &str) -> Option<rl_detect::typing::Attached> {
+/// The lock that says you are attached to a native row.
+enum Lock {
+    /// Held shared while you are attached: nothing is typed into it.
+    Held(rl_detect::typing::Attached),
+    /// A line is being typed into it still, after the longest a typer takes.
+    Busy,
+    /// Not a native row, or its lock file is not to be had: no lock.
+    None,
+}
+
+/// The lock of the native row `key` (`n:<harness>:<id>`), waited for while
+/// a typer is at it (`TYPER_MOST`, off the loop's thread).
+async fn attached(home: &Home, key: &str) -> Lock {
     let mut parts = key.splitn(3, ':');
     let (Some("n"), Some(harness), Some(id)) = (parts.next(), parts.next(), parts.next()) else {
-        return None;
+        return Lock::None;
     };
-    rl_detect::typing::Attached::hold(&rl_detect::typing::lock_path(&home.typing_dir(), harness, id))
+    let lock = rl_detect::typing::lock_path(&home.typing_dir(), harness, id);
+    let held = tokio::task::spawn_blocking(move || {
+        rl_detect::typing::Attached::hold_within(&lock, rl_detect::typing::TYPER_MOST)
+    })
+    .await;
+    match held {
+        Ok(Some(you)) => Lock::Held(you),
+        Ok(None) => Lock::Busy,
+        Err(_) => Lock::None,
+    }
 }
 
 /// What the footer says once an attach is over.

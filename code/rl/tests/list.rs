@@ -204,3 +204,41 @@ async fn enter_on_a_shell_line_runs_it_in_a_held_shell_that_stays() {
     rl::cmd::stop(&f.home, &name).await.unwrap();
     rl::cmd::rm(&f.home, &name).await.unwrap();
 }
+
+#[tokio::test]
+async fn a_bang_line_of_several_lines_runs_them_in_order_in_a_shell_whatever_the_default() {
+    if !holder() {
+        return;
+    }
+    let f = fixture();
+    std::fs::write(f.home.config_json(), r#"{"badges": [], "list": {"default": "claude"}}"#).unwrap();
+    let mut app = App::new(f.home.clone()).unwrap();
+    app.started_in = f.folder.clone();
+    for c in "! echo one > made.txt".chars() {
+        press(&mut app, KeyCode::Char(c));
+    }
+    app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT));
+    for c in "echo two >> made.txt".chars() {
+        press(&mut app, KeyCode::Char(c));
+    }
+    press(&mut app, KeyCode::Enter);
+    app.finish().await;
+    let held = sessions::list(&f.home);
+    assert_eq!(held.len(), 1, "{:?}", app.flashing());
+    let meta = &held[0].meta;
+    assert_eq!(meta.harness, "sh", "a shell, not the default claude");
+    assert!(
+        meta.argv[2].starts_with("echo one > made.txt\necho two >> made.txt\nexec "),
+        "{:?}",
+        meta.argv
+    );
+    let made = f.folder.join("made.txt");
+    let by = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    while std::fs::read_to_string(&made).unwrap_or_default() != "one\ntwo\n" && std::time::Instant::now() < by {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert_eq!(std::fs::read_to_string(&made).unwrap_or_default(), "one\ntwo\n");
+    let name = meta.name.clone();
+    rl::cmd::stop(&f.home, &name).await.unwrap();
+    rl::cmd::rm(&f.home, &name).await.unwrap();
+}

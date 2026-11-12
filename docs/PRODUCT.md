@@ -23,7 +23,10 @@ terminal, with its own holder only where a harness has no background of its own.
 - **Keeps running.** A held session lives in its own small process, so closing the terminal or the
   laptop costs nothing.
 - **Messages.** `rl mcp` gives any agent three tools: `who`, `send`, `inbox`.
-- **Any harness.** A harness is a YAML profile. Adding one is a file, not code.
+- **Any harness.** A harness is a YAML profile. Adding one that uses the integration Relay
+  already has (held sessions, hooks, MCP registration, Claude- or Codex-style listings, typed
+  rename and wake) is a file, not code; one with a session protocol of its own (like Codex's
+  app-server) needs an adapter in `rl-detect`.
 
 ## What it is not
 

@@ -12,6 +12,7 @@
 use super::app::{App, Mode};
 use super::remove::{self, Removal};
 use crate::colour::PALETTE;
+use crate::config::SHELL_DEFAULT;
 use crate::rows::Line;
 
 /// What a command takes after its name.
@@ -22,6 +23,10 @@ pub enum Arg {
     Colour,
     /// A name; none, and the name is typed where it stands (`^r`).
     Name,
+    /// Nothing, or one of these words.
+    Words(&'static [&'static str]),
+    /// `shell`, or an agent harness: by its name or a word that starts it.
+    Harness,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,7 +41,9 @@ pub enum Verb {
     Shells,
     Hidden,
     Group,
+    Default,
     Setup,
+    Report,
     Help,
     Quit,
 }
@@ -61,7 +68,7 @@ const fn cmd(name: &'static str, arg: Arg, verb: Verb) -> Cmd {
 }
 
 /// Every command, in the order `tab` offers them.
-pub const CMDS: [Cmd; 13] = [
+pub const CMDS: [Cmd; 15] = [
     Cmd {
         name: "colour",
         alias: Some("color"),
@@ -77,7 +84,9 @@ pub const CMDS: [Cmd; 13] = [
     cmd("shells", Arg::Nothing, Verb::Shells),
     cmd("hidden", Arg::Nothing, Verb::Hidden),
     cmd("group", Arg::Nothing, Verb::Group),
+    cmd("default", Arg::Harness, Verb::Default),
     cmd("setup", Arg::Nothing, Verb::Setup),
+    cmd("report", Arg::Words(&["dismiss"]), Verb::Report),
     cmd("help", Arg::Nothing, Verb::Help),
     cmd("quit", Arg::Nothing, Verb::Quit),
 ];
@@ -122,9 +131,10 @@ pub fn typed(text: &str) -> Typed {
 
 /// What the word being typed completes to, best first, and where it starts.
 /// The name: the commands' names it starts. The argument — all of what
-/// follows the name — a colour (by name, or `none`) or, for `/rename`,
-/// `name`: what the row is called now.
-pub fn candidates(text: &str, cur: usize, name: Option<&str>) -> (usize, Vec<String>) {
+/// follows the name — a colour (by name, or `none`), for `/rename`
+/// `name`: what the row is called now, or for `/default` one of `defaults`
+/// (the agent harnesses that are here, and `shell`).
+pub fn candidates(text: &str, cur: usize, name: Option<&str>, defaults: &[String]) -> (usize, Vec<String>) {
     let head = &text[..cur];
     let Some(sp) = head.find(char::is_whitespace) else {
         let out = CMDS
@@ -149,9 +159,41 @@ pub fn candidates(text: &str, cur: usize, name: Option<&str>) -> (usize, Vec<Str
             .filter(|n| n.starts_with(arg) && *n != arg)
             .map(|n| vec![n.to_string()])
             .unwrap_or_default(),
+        Some(Arg::Words(words)) => words
+            .iter()
+            .filter(|w| w.starts_with(arg) && **w != arg)
+            .map(|w| w.to_string())
+            .collect(),
+        Some(Arg::Harness) => defaults.iter().filter(|d| d.starts_with(arg)).cloned().collect(),
         _ => vec![],
     };
     (start, out)
+}
+
+/// What `/default <arg>` sets `list.default` to: `shell`, or the agent
+/// harness `arg` names — by a word that starts it on the line (`agy`), else
+/// by its name (`cursor`). Anything else, and why not.
+pub fn default_of(arg: &str, reg: &rl_detect::Registry) -> Result<String, String> {
+    if arg == SHELL_DEFAULT {
+        return Ok(arg.to_string());
+    }
+    let agents = || reg.agents().map(|p| p.name.as_str()).collect::<Vec<_>>().join(", ");
+    if arg.is_empty() {
+        return Err(format!(
+            "/default takes {SHELL_DEFAULT} or an agent harness: {}",
+            agents()
+        ));
+    }
+    reg.by_word(arg)
+        .or_else(|| reg.profile(arg))
+        .filter(|p| p.kind == rl_core::state::RunKind::Agent && p.name != "generic")
+        .map(|p| p.name.clone())
+        .ok_or_else(|| {
+            format!(
+                "not an agent harness: {arg} · /default takes {SHELL_DEFAULT} or {}",
+                agents()
+            )
+        })
 }
 
 /// What `/colour` takes, in words.
@@ -172,12 +214,22 @@ impl App {
             Arg::Nothing if !arg.is_empty() => {
                 return self.say(format!("/{} takes nothing after it", c.name));
             }
+            Arg::Words(words) if !arg.is_empty() && !words.contains(&arg) => {
+                return self.say(format!("/{} takes nothing, or {}", c.name, words.join(" or ")));
+            }
             Arg::Colour if arg.is_empty() => return self.say(format!("/{} takes {COLOURS}", c.name)),
             Arg::Colour if arg != "none" && crate::colour::parse(arg).is_none() => {
                 return self.say(format!("not a colour: {arg} ({COLOURS})"));
             }
             _ => {}
         }
+        let default = match c.arg {
+            Arg::Harness => match default_of(arg, crate::rows::registry()) {
+                Ok(d) => Some(d),
+                Err(why) => return self.say(why),
+            },
+            _ => None,
+        };
         let arg = arg.to_string();
         self.cmd.clear();
         let by = format!("/{}", c.name);
@@ -200,10 +252,26 @@ impl App {
             Verb::Shells => self.toggle_shells(),
             Verb::Hidden => self.toggle_hidden(),
             Verb::Group => self.toggle_grouping(),
+            Verb::Default => self.set_default(default.unwrap_or_default()),
             Verb::Setup => self.setup_now(),
+            Verb::Report if arg == "dismiss" => self.dismiss_drift(),
+            Verb::Report => self.report_now(),
             Verb::Help => self.help = true,
             Verb::Quit => self.quit = true,
         }
+    }
+
+    /// `/default`: what a line naming no harness starts from now on, kept
+    /// in `config.json`.
+    fn set_default(&mut self, to: String) {
+        let said = if to == SHELL_DEFAULT {
+            "a typed line runs in a shell · claude/codex/agy and a prompt start an agent".to_string()
+        } else {
+            format!("a typed line is a prompt for {to} · ! runs it in a shell")
+        };
+        // Said first: a config.json that does not take it says so after.
+        self.say(said);
+        self.change_prefs(|p| p.default = to);
     }
 
     /// `/hide`: the row or project under the cursor hidden, or brought back.
@@ -292,7 +360,7 @@ mod tests {
 
     #[test]
     fn the_name_completes_then_a_colour_or_the_rows_name() {
-        let c = |t: &str, name| candidates(t, t.len(), name);
+        let c = |t: &str, name| candidates(t, t.len(), name, &[]);
         assert_eq!(
             c("/col", None),
             (0, vec!["/colour".to_string()]),
@@ -300,6 +368,10 @@ mod tests {
         );
         assert_eq!(c("/h", None).1, ["/hide", "/hidden", "/help"]);
         assert_eq!(c("/se", None).1, ["/setup"]);
+        assert_eq!(c("/rep", None).1, ["/report"]);
+        assert_eq!(c("/report ", None), (8, vec!["dismiss".into()]));
+        assert_eq!(c("/report d", None).1, ["dismiss"]);
+        assert_eq!(typed("/report dismiss"), Typed::Known("report"));
         assert_eq!(typed("/setup"), Typed::Known("setup"));
         assert_eq!(c("/colour p", None), (8, vec!["pink".into(), "purple".into()]));
         assert_eq!(c("/color n", None).1, ["none"]);
@@ -310,5 +382,27 @@ mod tests {
         assert!(c("/rename shop-sh", Some("shop-sh")).1.is_empty(), "done");
         assert!(c("/pin ", None).1.is_empty());
         assert!(c("/nope ", None).1.is_empty());
+    }
+
+    #[test]
+    fn default_takes_shell_or_an_agent_harness_by_name_or_word() {
+        let reg = rl_detect::Registry::builtin();
+        assert_eq!(default_of("shell", &reg).as_deref(), Ok("shell"));
+        assert_eq!(default_of("claude", &reg).as_deref(), Ok("claude"));
+        assert_eq!(default_of("agy", &reg).as_deref(), Ok("antigravity"), "by its word");
+        assert_eq!(default_of("cursor", &reg).as_deref(), Ok("cursor"), "by its name");
+        for bad in ["sh", "generic", "nope", ""] {
+            let e = default_of(bad, &reg).unwrap_err();
+            assert!(
+                e.contains("/default takes shell or") && e.contains("claude"),
+                "{bad}: {e}"
+            );
+        }
+        let found = ["claude".to_string(), "codex".into(), "shell".into()];
+        assert_eq!(
+            candidates("/default c", 10, None, &found),
+            (9, vec!["claude".into(), "codex".into()])
+        );
+        assert_eq!(typed("/default codex"), Typed::Known("default"));
     }
 }

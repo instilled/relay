@@ -1,0 +1,12 @@
+{
+ "definitions": {},
+ "properties": {
+  "data": {},
+  "nextCursor": {}
+ },
+ "required": [
+  "data"
+ ],
+ "title": "ThreadLoadedListResponse",
+ "type": "object"
+}

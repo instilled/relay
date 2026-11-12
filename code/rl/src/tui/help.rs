@@ -18,6 +18,7 @@ pub enum Id {
     Find,
     Commands,
     Complete,
+    Newline,
     Move,
     Page,
     Reorder,
@@ -30,6 +31,7 @@ pub enum Id {
     Shells,
     Hidden,
     Setup,
+    Report,
     Quit,
     Help,
 }
@@ -48,13 +50,14 @@ const fn key(id: Id, keys: &'static str, does: &'static str) -> Key {
 
 /// Every key the list has, the ones used most first; the grid fills its
 /// rows in this order.
-pub const KEYS: [Key; 20] = [
+pub const KEYS: [Key; 22] = [
     key(Id::Enter, "enter", "to attach"),
     key(Id::Detach, "ctrl+\\", "to detach"),
     key(Id::Find, "ctrl+f", "to find"),
     key(Id::Commands, "/", "for commands"),
     key(Id::Complete, "tab", "to complete"),
     key(Id::Start, "type", "to start an agent"),
+    key(Id::Newline, "shift+enter", "for a new line"),
     key(Id::Move, "↑↓ ctrl+j/k", "to move"),
     key(Id::Page, "pgup/pgdn/home/end", "to page"),
     key(Id::Reorder, "shift+↑↓", "to reorder"),
@@ -67,6 +70,7 @@ pub const KEYS: [Key; 20] = [
     key(Id::Shells, "ctrl+l", "to show shells"),
     key(Id::Hidden, "ctrl+o", "to show hidden"),
     key(Id::Setup, "/setup", "to set up relay"),
+    key(Id::Report, "/report", "to report drift"),
     key(Id::Quit, "ctrl+c twice", "to quit"),
     key(Id::Help, "ctrl+h/f1", "to close"),
 ];
