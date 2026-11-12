@@ -131,7 +131,9 @@ Folders are 0700.
   footer (`tui::remove::Ask`, `Mode::Ask`, its words `remove::STOP` and `remove::REMOVE`, the same
   for every harness) — `s stop` while it runs, `r remove` always, `enter` the first offered, `esc`
   nothing. What each does is bound per harness (`remove::Target`): a held session's stop gives it
-  a `stopped` mark, then the holder is asked to close; its remove stops it first if it runs, then
+  a `stopped` mark, then the holder is asked to close — it hangs the run up (SIGHUP, 3 s), then
+  terminates (SIGTERM, 2 s) and kills it (SIGKILL), so a run that ignores the hangup still ends,
+  its exit written within the 10 s `rl stop` waits; its remove stops it first if it runs, then
   removes its folder (`cmd::rm`). A native one's stop is `Harness::stop` (Claude's `claude stop
   <id>`, Codex's `turn/interrupt` on the running turn), its remove `Harness::remove` (Claude's
   `claude rm <id>` by its profile's `sessions.remove`, never with `--discard-unpushed` or
