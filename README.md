@@ -166,10 +166,12 @@ the cursor (else where `rl` was started; the line shows only the prompt `❯`):
   is a prompt for Claude while `codex fix the login` still starts Codex.
 
 `shift+enter` adds a line to what is typed: a prompt of several lines goes to the agent whole, its
-newlines kept, and a shell runs the lines in order, as a script. `alt+enter` (option+enter) does
-the same, for terminals that send `shift+enter` as a plain `enter` (Relay asks the terminal to tell
-them apart with the kitty keyboard protocol, where the terminal speaks it — kitty, WezTerm,
-Ghostty and others; not Terminal.app or an older tmux). A paste keeps its newlines too, and starts nothing until
+newlines kept, and a shell runs the lines in order, as a script. `alt+enter` (option+enter) and
+`ctrl+j` do the same, for terminals that send `shift+enter` as a plain `enter` (Relay asks the
+terminal to tell them apart with the kitty keyboard protocol, where the terminal speaks it — kitty,
+WezTerm, Ghostty and others; not Terminal.app, or tmux without `extended-keys`). A terminal set up
+for Claude Code's `shift+enter` (iTerm2 mapping it to send `\n`) sends `ctrl+j`, so it works in
+Relay as it is, tmux or not. On an empty line `ctrl+j` is `↓`, as ever. A paste keeps its newlines too, and starts nothing until
 `enter`. The line grows to five rows, then scrolls; `↑` `↓` move between its lines, and from its
 first or last line move on the list as ever.
 
@@ -203,7 +205,7 @@ in the footer and changes nothing; an unknown one stays on the line to mend.
 | key | does |
 | --- | --- |
 | `enter` | attach (on a line with text: start it) |
-| `shift+enter` `alt+enter` | a new line in what is typed |
+| `shift+enter` `alt+enter` `ctrl+j` | a new line in what is typed |
 | typing | the command line; `esc` clears it, `home` `end` go to its ends |
 | `↑↓` `ctrl+j` `ctrl+k` | move |
 | `pgup` `pgdn` `home` `end` | page (`home` `end` with nothing typed) |

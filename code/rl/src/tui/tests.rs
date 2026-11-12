@@ -2208,6 +2208,19 @@ async fn shift_or_alt_enter_adds_a_line_and_enter_starts_it_whole() {
     // Alt+enter, as `ESC CR` reads where shift+enter is not told apart.
     key_with(&mut app, KeyCode::Enter, KeyModifiers::ALT);
     typed(&mut app, "then test");
+    // `^j`, a line feed: what iTerm2 set up for Claude Code sends for
+    // shift+enter, through tmux too.
+    ctrl(&mut app, 'j');
+    typed(&mut app, "now");
+    assert_eq!(
+        app.cmd.line.text(),
+        "claude fix the login\nand the logout\nthen test\nnow"
+    );
+    assert_eq!(app.sel.as_deref(), Some(NATIVE), "^j added a line, it did not move");
+    press(&mut app, KeyCode::Backspace);
+    press(&mut app, KeyCode::Backspace);
+    press(&mut app, KeyCode::Backspace);
+    press(&mut app, KeyCode::Backspace);
     assert_eq!(app.cmd.line.text(), "claude fix the login\nand the logout\nthen test");
     assert!(app.work.is_empty(), "nothing started yet");
     // Three rows, the prompt and what it starts on the first.
