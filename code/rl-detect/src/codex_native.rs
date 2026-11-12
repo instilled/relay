@@ -24,8 +24,8 @@
 //! (`codex resume <id>`), which opens it through the same daemon: the
 //! app-server rejoins a thread that is running (and shows an approval it
 //! waits on), or loads one at rest. Stopping one interrupts its running
-//! turn (`turn/interrupt`); the thread stays. Closing one archives it (the
-//! profile's `sessions.close`: `codex archive <id>`), never deletes it.
+//! turn (`turn/interrupt`); the thread stays. Removing one deletes it for
+//! good (`thread/delete`), its running turn interrupted first.
 
 use crate::harness::{self, CarryOn, Harness, NativeRow, NativeState, Started};
 use crate::mcp_entry::{How, Place};
@@ -228,6 +228,19 @@ impl Harness for Codex {
         self.on_daemon(move |d| interrupt(d, &id))
     }
 
+    /// Any thread, running or at rest: `thread/delete` on its daemon. Not
+    /// where this Codex no longer has it.
+    fn removes(&self, _: &NativeRow) -> bool {
+        self.compat_known().is_none_or(|c| c.off(Feature::Remove).is_none())
+    }
+
+    fn remove(&self, id: &str, _: &Path) -> Result<()> {
+        self.needs(Feature::Remove)?;
+        let stops = self.compat_known().is_none_or(|c| c.off(Feature::Stop).is_none());
+        let id = id.to_string();
+        self.on_daemon(move |d| delete(d, &id, stops))
+    }
+
     /// The call its profile's `sessions.rename` names, on its daemon
     /// (`thread/name/set`): any thread, any name, an empty one too.
     /// Not where this Codex no longer has it: the name stays in Relay.
@@ -263,6 +276,8 @@ pub enum Feature {
     Rename,
     /// `/stop` interrupting a running turn.
     Stop,
+    /// A thread deleted for good (`^x` twice's remove, `/rm`).
+    Remove,
 }
 
 impl Feature {
@@ -274,6 +289,7 @@ impl Feature {
             Feature::Start => "Relay cannot start one with a prompt",
             Feature::Rename => "rename stays in Relay",
             Feature::Stop => "Relay cannot stop its turns",
+            Feature::Remove => "Relay cannot remove its threads",
         }
     }
 }
@@ -300,7 +316,7 @@ pub struct Use {
 const THREAD_READ: &str = "v2/ThreadReadResponse.json";
 
 /// Everything Relay uses of the app-server's protocol, as the calls below
-/// (`listed`, `begin`, `set_name`, `interrupt`, `Rpc::open`) make them:
+/// (`listed`, `begin`, `set_name`, `interrupt`, `delete`, `Rpc::open`) make them:
 /// checked against `codex app-server generate-json-schema` once per Codex
 /// (`compat`).
 pub const USES: &[Use] = &[
@@ -396,6 +412,12 @@ pub const USES: &[Use] = &[
                 fields: &["id", "status"],
             },
         ],
+    },
+    Use {
+        method: "thread/delete",
+        feature: Feature::Remove,
+        sends: &["threadId"],
+        reads: &[],
     },
 ];
 
@@ -662,8 +684,13 @@ pub fn state(status: &Status) -> NativeState {
 
 /// The threads as rows: Codex's sessions, not its sub-agents' threads, not
 /// one only on disk that Relay did not start, not one without a whole
-/// folder. A thread listed twice stands once, as first listed.
+/// folder, and not an empty one — no name and no prompt yet. Codex's TUI
+/// makes those as it opens and again after a turn, and the daemon lists
+/// them until it unloads them; as rows they were a second session named
+/// after the folder, with nothing in it. A thread listed twice stands
+/// once, as first listed.
 pub fn rows(threads: Vec<Thread>) -> Vec<NativeRow> {
+    let blank = |s: &Option<String>| s.as_deref().is_none_or(|s| s.trim().is_empty());
     let mut seen = HashSet::new();
     threads
         .into_iter()
@@ -672,6 +699,7 @@ pub fn rows(threads: Vec<Thread>) -> Vec<NativeRow> {
                 && t.parent_thread_id.is_none()
                 && (t.status.kind != "notLoaded" || t.originator.as_deref() == Some(CLIENT))
                 && t.cwd.is_absolute()
+                && !(blank(&t.name) && blank(&t.preview))
         })
         .filter(|t| seen.insert(t.id.clone()))
         .map(row)
@@ -881,6 +909,23 @@ pub fn interrupt<R: Read, W: Write>(rpc: &mut Rpc<R, W>, id: &str) -> Result<()>
         .context("no turn is running in it")?
         .to_string();
     rpc.call("turn/interrupt", json!({"threadId": id, "turnId": turn}))?;
+    Ok(())
+}
+
+/// Deletes the thread `id` for good (`thread/delete`); with `stops`, the
+/// turn it is running interrupted first. One that cannot be read (at rest,
+/// gone) has no turn running.
+pub fn delete<R: Read, W: Write>(rpc: &mut Rpc<R, W>, id: &str, stops: bool) -> Result<()> {
+    if stops
+        && let Ok(read) = rpc.call("thread/read", json!({"threadId": id, "includeTurns": true}))
+        && let Some(turn) = read["thread"]["turns"]
+            .as_array()
+            .and_then(|turns| turns.iter().rev().find(|t| t["status"] == "inProgress"))
+            .and_then(|t| t["id"].as_str())
+    {
+        rpc.call("turn/interrupt", json!({"threadId": id, "turnId": turn}))?;
+    }
+    rpc.call("thread/delete", json!({"threadId": id}))?;
     Ok(())
 }
 
@@ -1288,6 +1333,23 @@ mod tests {
         assert_eq!(e.to_string(), "no turn is running in it");
     }
 
+    #[test]
+    fn a_remove_deletes_the_thread_its_running_turn_interrupted_first() {
+        let busy = "01a1ca12-27f5-7ca0-a8ef-8593acea7ed9";
+        let ((), sent) = talk(|rpc| delete(rpc, busy, true).unwrap());
+        assert_eq!(methods(&sent)[2..], ["thread/read", "turn/interrupt", "thread/delete"]);
+        assert_eq!(sent[4]["params"], json!({"threadId": busy}));
+        let resting = "01a11d20-8cab-7061-885d-f86e8e313f11";
+        let ((), sent) = talk(|rpc| delete(rpc, resting, true).unwrap());
+        assert_eq!(
+            methods(&sent)[2..],
+            ["thread/read", "thread/delete"],
+            "nothing running: deleted as it is"
+        );
+        let ((), sent) = talk(|rpc| delete(rpc, busy, false).unwrap());
+        assert_eq!(methods(&sent)[2..], ["thread/delete"], "no stop on this codex");
+    }
+
     fn listed() -> Vec<NativeRow> {
         let (ours, theirs) = UnixStream::pair().unwrap();
         let _server = serve(theirs);
@@ -1395,12 +1457,31 @@ mod tests {
             cwd: "/w/x".into(),
             ..relative
         };
-        let r = &rows(vec![bare])[0];
+        assert!(
+            rows(vec![bare.clone()]).is_empty(),
+            "no name, no prompt: an empty thread Codex's TUI made, no session"
+        );
+        let blank = Thread {
+            preview: Some("  \n".into()),
+            name: Some(String::new()),
+            ..bare.clone()
+        };
+        assert!(rows(vec![blank]).is_empty(), "blank is empty too");
+        let prompted = Thread {
+            preview: Some("\nfix the login\nand more".into()),
+            ..bare.clone()
+        };
+        let r = &rows(vec![prompted])[0];
         assert_eq!(
             (r.name.as_str(), r.session_id.as_str(), r.at),
-            ("x", "t", None),
-            "its folder's name"
+            ("fix the login", "t", None),
+            "its first prompt's first line"
         );
+        let named = Thread {
+            name: Some("login".into()),
+            ..bare
+        };
+        assert_eq!(rows(vec![named])[0].name, "login", "named, though nothing asked yet");
     }
 
     fn codex(bin: PathBuf) -> Codex {
@@ -1572,10 +1653,12 @@ mod tests {
     fn a_method_or_field_gone_turns_off_only_what_needs_it() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = schema_with(tmp.path(), |req, thread| {
-            req["oneOf"]
-                .as_array_mut()
-                .unwrap()
-                .retain(|e| e["properties"]["method"]["enum"][0] != "thread/name/set");
+            req["oneOf"].as_array_mut().unwrap().retain(|e| {
+                !matches!(
+                    e["properties"]["method"]["enum"][0].as_str(),
+                    Some("thread/name/set" | "thread/delete")
+                )
+            });
             req["definitions"]["TurnInterruptParams"]["properties"]
                 .as_object_mut()
                 .unwrap()
@@ -1593,9 +1676,11 @@ mod tests {
                 "thread/read lacks Thread.cwd, its threads are not listed",
                 "thread/name/set gone, rename stays in Relay",
                 "turn/interrupt lacks params.turnId, Relay cannot stop its turns",
+                "thread/delete gone, Relay cannot remove its threads",
             ]
         );
         assert_eq!(gone[1].check(), "codex.schema.thread/name/set");
+        assert_eq!(gone[3].check(), "codex.schema.thread/delete");
         let c = Compat {
             version: Some("0.170.0".into()),
             gone,
@@ -1694,13 +1779,18 @@ mod tests {
             assert!(set_name(&mut rpc, "thread/name/set", "t1", "x").is_err());
             assert!(rpc.call("thread/read", json!({"threadId": "t1"})).is_err());
             assert!(rpc.call("thread/start", json!({"cwd": "/w"})).is_err());
+            assert!(delete(&mut rpc, "t1", true).is_err());
         });
         ours.shutdown(std::net::Shutdown::Both).unwrap();
         server.join().unwrap();
         let checks: Vec<&str> = noticed.iter().map(|n| n.check.as_str()).collect();
         assert_eq!(
             checks,
-            ["codex.rpc.thread/name/set", "codex.rpc.thread/start"],
+            [
+                "codex.rpc.thread/name/set",
+                "codex.rpc.thread/start",
+                "codex.rpc.thread/delete"
+            ],
             "a thread not found is no drift"
         );
         assert_eq!(noticed[0].what, "its daemon does not know `thread/name/set` (-32601)");

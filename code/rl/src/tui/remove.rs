@@ -1,21 +1,28 @@
 //! `^x` twice, in words: what the second press does to the line under the
-//! cursor, said by the first. A session Relay holds that is still going is
-//! stopped; one that has ended is removed. One of a harness's own that its
-//! harness can close (`claude rm`, `codex archive`) is asked about: the
-//! second press puts a choice in the footer — stop it, where it is still
-//! going (`claude stop`; a Codex thread's running turn interrupted), or close
-//! it — and `enter` takes the first. One of a harness's own it cannot close
-//! but can stop is stopped. Anything else — a session an agent's hooks told
-//! of, one of a harness's own it can do nothing with, a project — is hidden.
-//! One already hidden and shown only because hidden is on (or because it
-//! came through) is brought back. Pure, so what you are told can be tested
-//! on its own.
+//! cursor, said by the first. A session — one Relay holds, or one of a
+//! harness's own that its harness can remove — is asked about, the same
+//! question for every harness: the second press puts a choice in the
+//! footer, `s stop` where it is still going and `r remove`, which deletes it
+//! for good, and `enter` takes the first. What each does is its harness's:
+//! `stop` is `claude stop`, a Codex turn interrupted, a held session's
+//! holder closed; `remove` is `claude rm`, Codex's `thread/delete`, a held
+//! session stopped if need be and its folder removed. One of a harness's own
+//! it cannot remove but can stop is stopped. Anything else — a session an
+//! agent's hooks told of, one of a harness's own it can do nothing with, a
+//! project — is hidden. One already hidden and shown only because hidden is
+//! on (or because it came through) is brought back. Pure, so what you are
+//! told can be tested on its own.
 
 use crate::config::ListPrefs;
 use crate::rows::{self, Line, Names};
-use crate::sources::{self, Attach, Choice, Source};
+use crate::sources::{self, Attach, Source};
 use crate::store::sessions::Status;
 use std::path::PathBuf;
+
+/// How the footer offers the stop, for every harness.
+pub const STOP: &str = "s stop · keeps the session";
+/// How the footer offers the remove, for every harness.
+pub const REMOVE: &str = "r remove · deletes the session for good";
 
 /// What a second `^x` will do.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30,21 +37,19 @@ pub enum Removal {
         cwd: PathBuf,
         title: String,
     },
-    /// One of a harness's own it can close: what to do is asked, in the
-    /// footer.
+    /// A session: what to do is asked, in the footer.
     Ask(Ask),
-    /// One of a harness's own closed by its harness, by its id, in its folder
-    /// (`Harness::close`); `done` says so after.
-    CloseNative {
+    /// One of a harness's own deleted for good by its harness, by its id, in
+    /// its folder (`Harness::remove`).
+    RemoveNative {
         harness: String,
         id: String,
         cwd: PathBuf,
         title: String,
-        done: String,
     },
-    /// A Relay-held session that has ended (or whose holder is lost): its
-    /// folder removed.
-    Remove { name: String, title: String },
+    /// A Relay-held session: stopped first where it is still going (`live`),
+    /// then its folder removed.
+    Remove { name: String, title: String, live: bool },
     /// Off the list, by key, until hidden is on.
     Hide { key: String, title: String },
     /// Back on the list.
@@ -56,77 +61,87 @@ impl Removal {
     pub fn hint(&self) -> String {
         match self {
             Removal::Stop { title, .. } | Removal::StopNative { title, .. } => format!("stop {title}"),
-            Removal::Ask(a) => match &a.stop {
-                Some(_) => format!("stop or {} {}", a.close.words, a.title),
-                None => format!("{} {}", a.close.words, a.title),
-            },
-            Removal::CloseNative { title, .. } => format!("close {title}"),
-            Removal::Remove { title, .. } => format!("remove {title}"),
+            Removal::Ask(a) if a.stop => format!("stop or remove {}", a.title),
+            Removal::Ask(a) => format!("remove {}", a.title),
+            Removal::RemoveNative { title, .. } | Removal::Remove { title, .. } => format!("remove {title}"),
             Removal::Hide { title, .. } => format!("hide {title}"),
             Removal::Unhide { title, .. } => format!("bring back {title}"),
         }
     }
 }
 
-/// What the second `^x` asks of one of a harness's own sessions: stop it,
-/// where it is still going, or close it.
+/// Whose a session asked about is, and so what stops and removes it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Target {
+    /// One Relay holds, by its name; `live` while it is still going.
+    Held { name: String, live: bool },
+    /// One of a harness's own, by its id, in its folder.
+    Native { id: String, cwd: PathBuf },
+}
+
+/// What the second `^x` asks of a session: stop it, where it is still
+/// going, or remove it. The same words for every harness.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ask {
     pub harness: String,
-    pub id: String,
-    pub cwd: PathBuf,
     pub title: String,
-    /// Offered first, where its harness can stop it as it stands.
-    pub stop: Option<Choice>,
-    pub close: Choice,
+    pub target: Target,
+    /// Whether the stop is offered (first): it is still going.
+    pub stop: bool,
 }
 
 impl Ask {
     /// The footer's words while it asks: each choice and how to cancel, then
     /// its name and harness — last, so a narrow footer keeps the keys.
     pub fn offer(&self) -> String {
-        let choices: Vec<String> = self
+        let choices: Vec<&str> = self
             .stop
-            .iter()
-            .chain([&self.close])
-            .map(Choice::offer)
-            .chain(["esc cancel".to_string()])
+            .then_some(STOP)
+            .into_iter()
+            .chain([REMOVE, "esc cancel"])
             .collect();
         format!("{}   — {} · {}", choices.join("   "), self.title, self.harness)
     }
 
-    /// The same, the stop left out: only the close is offered (`/rm`).
-    pub fn close_only(self) -> Ask {
-        Ask { stop: None, ..self }
+    /// The same, the stop left out: only the remove is offered (`/rm`).
+    pub fn remove_only(self) -> Ask {
+        Ask { stop: false, ..self }
     }
 
-    /// What `key` takes: `s` the stop, the close's own key the close, and
-    /// `enter` the first offered. `None`: not one of the choices.
+    /// What `key` takes: `s` the stop, where it is offered, `r` the remove.
+    /// `None`: not one of the choices.
     pub fn take(&self, key: char) -> Option<Removal> {
-        let stop = self
-            .stop
-            .as_ref()
-            .filter(|s| s.key == key)
-            .map(|_| Removal::StopNative {
+        let title = self.title.clone();
+        match (key, &self.target) {
+            ('s', _) if !self.stop => None,
+            ('s', Target::Held { name, .. }) => Some(Removal::Stop {
+                name: name.clone(),
+                title,
+            }),
+            ('s', Target::Native { id, cwd }) => Some(Removal::StopNative {
                 harness: self.harness.clone(),
-                id: self.id.clone(),
-                cwd: self.cwd.clone(),
-                title: self.title.clone(),
-            });
-        stop.or_else(|| {
-            (self.close.key == key).then(|| Removal::CloseNative {
+                id: id.clone(),
+                cwd: cwd.clone(),
+                title,
+            }),
+            ('r', Target::Held { name, live }) => Some(Removal::Remove {
+                name: name.clone(),
+                title,
+                live: *live,
+            }),
+            ('r', Target::Native { id, cwd }) => Some(Removal::RemoveNative {
                 harness: self.harness.clone(),
-                id: self.id.clone(),
-                cwd: self.cwd.clone(),
-                title: self.title.clone(),
-                done: self.close.done.clone(),
-            })
-        })
+                id: id.clone(),
+                cwd: cwd.clone(),
+                title,
+            }),
+            _ => None,
+        }
     }
 
     /// What `enter` takes: the first offered, the stop where there is one.
     pub fn first(&self) -> Removal {
-        let key = self.stop.as_ref().map_or(self.close.key, |s| s.key);
+        let key = if self.stop { 's' } else { 'r' };
         self.take(key).expect("the first is one of its choices")
     }
 }
@@ -144,31 +159,35 @@ pub fn plan(line: &Line, prefs: &ListPrefs, status: impl Fn(&str) -> Option<Stat
             if r.source == Source::Held
                 && let Attach::Held(name) = &r.attach
             {
-                return match status(name) {
-                    Some(Status::Live) => Ok(Removal::Stop {
-                        name: name.clone(),
-                        title,
-                    }),
-                    Some(_) => Ok(Removal::Remove {
-                        name: name.clone(),
-                        title,
-                    }),
-                    None => Err(format!("{title} is gone already")),
+                let live = match status(name) {
+                    Some(Status::Live) => true,
+                    Some(_) => false,
+                    None => return Err(format!("{title} is gone already")),
                 };
+                return Ok(Removal::Ask(Ask {
+                    harness: r.harness.clone(),
+                    title,
+                    target: Target::Held {
+                        name: name.clone(),
+                        live,
+                    },
+                    stop: live,
+                }));
             }
             // One hidden and shown is brought back first.
             if r.source == Source::Native
                 && !hidden(&r.key)
-                && let Some(close) = &r.close
+                && r.removes
                 && let Some(id) = sources::native_id(r)
             {
                 return Ok(Removal::Ask(Ask {
                     harness: r.harness.clone(),
-                    id: id.to_string(),
-                    cwd: r.cwd.clone(),
                     title,
-                    stop: r.stop.as_ref().and(r.stop_choice.clone()),
-                    close: close.clone(),
+                    target: Target::Native {
+                        id: id.to_string(),
+                        cwd: r.cwd.clone(),
+                    },
+                    stop: r.stop.is_some(),
                 }));
             }
             if r.source == Source::Native
@@ -247,8 +266,7 @@ mod tests {
                 _ => Attach::None,
             },
             stop: None,
-            stop_choice: None,
-            close: None,
+            removes: false,
             kind: RunKind::Agent,
             repo: None,
         }
@@ -275,21 +293,129 @@ mod tests {
         })
     }
 
+    /// One of `harness`'s own, as its harness offers it: a stop while it
+    /// goes, and its remove always.
+    fn natives(harness: &str, live: bool) -> Row {
+        let mut n = row(&format!("n:{harness}:a1"), Source::Native);
+        n.harness = harness.into();
+        if live {
+            n.stop = Some("a1".into());
+        }
+        n.removes = true;
+        n
+    }
+
+    /// The question `^x` twice asks of `r`.
+    fn asked(r: &Row, status: Option<Status>) -> Ask {
+        match plan(&Line::Session(r), &ListPrefs::default(), |_| status.clone()).unwrap() {
+            Removal::Ask(a) => a,
+            other => panic!("asked, not {other:?}"),
+        }
+    }
+
     #[test]
-    fn a_held_session_is_stopped_while_it_goes_and_removed_once_it_has_ended() {
-        let prefs = ListPrefs::default();
+    fn every_harness_is_asked_the_same_question() {
+        // Running, then at rest: Claude's, Codex's, and one Relay holds.
+        for live in [true, false] {
+            let status = Some(if live { Status::Live } else { ended() });
+            let mut held = row("r:a1", Source::Held);
+            held.harness = "gemini".into();
+            let asks: Vec<(String, String, String)> = [natives("claude", live), natives("codex", live), held]
+                .iter()
+                .map(|r| {
+                    let a = asked(r, status.clone());
+                    let offer = a.offer();
+                    let (choices, whose) = offer.split_once("   — ").unwrap();
+                    (Removal::Ask(a).hint(), choices.to_string(), whose.to_string())
+                })
+                .collect();
+            let (hint, choices) = if live {
+                (
+                    "stop or remove a1",
+                    "s stop · keeps the session   r remove · deletes the session for good   esc cancel",
+                )
+            } else {
+                ("remove a1", "r remove · deletes the session for good   esc cancel")
+            };
+            for (h, c, _) in &asks {
+                assert_eq!((h.as_str(), c.as_str()), (hint, choices), "live: {live}");
+            }
+            let whose: Vec<&str> = asks.iter().map(|(_, _, w)| w.as_str()).collect();
+            assert_eq!(
+                whose,
+                ["a1 · claude", "a1 · codex", "a1 · gemini"],
+                "only who it is differs"
+            );
+        }
+    }
+
+    #[test]
+    fn a_held_session_is_asked_about_stopped_by_s_and_removed_by_r() {
         let r = row("r:api-sh", Source::Held);
-        let live = plan(&Line::Session(&r), &prefs, |_| Some(Status::Live)).unwrap();
-        assert_eq!(live.hint(), "stop api-sh");
-        assert!(matches!(live, Removal::Stop { ref name, .. } if name == "api-sh"));
-        let over = plan(&Line::Session(&r), &prefs, |_| Some(ended())).unwrap();
-        assert_eq!(over.hint(), "remove api-sh");
-        let lost = plan(&Line::Session(&r), &prefs, |_| Some(Status::Lost)).unwrap();
-        assert!(matches!(lost, Removal::Remove { .. }));
+        let live = asked(&r, Some(Status::Live));
         assert_eq!(
-            plan(&Line::Session(&r), &prefs, |_| None).unwrap_err(),
+            live.take('s'),
+            Some(Removal::Stop {
+                name: "api-sh".into(),
+                title: "api-sh".into()
+            })
+        );
+        assert_eq!(
+            live.take('r'),
+            Some(Removal::Remove {
+                name: "api-sh".into(),
+                title: "api-sh".into(),
+                live: true
+            }),
+            "stopped first, then removed"
+        );
+        assert!(matches!(live.first(), Removal::Stop { .. }), "enter: the safe one");
+        let over = asked(&r, Some(ended()));
+        assert_eq!(over.take('s'), None, "nothing to stop");
+        assert!(matches!(over.first(), Removal::Remove { live: false, .. }));
+        let lost = asked(&r, Some(Status::Lost));
+        assert!(matches!(lost.first(), Removal::Remove { live: false, .. }));
+        assert_eq!(
+            plan(&Line::Session(&r), &ListPrefs::default(), |_| None).unwrap_err(),
             "api-sh is gone already"
         );
+        assert_eq!(
+            live.clone().remove_only(),
+            Ask { stop: false, ..live },
+            "/rm: the remove alone"
+        );
+    }
+
+    #[test]
+    fn a_harnesss_own_session_is_stopped_or_removed_by_its_harness() {
+        let ask = asked(&natives("claude", true), None);
+        assert!(matches!(ask.take('s'), Some(Removal::StopNative { ref id, .. }) if id == "a1"));
+        assert_eq!(
+            ask.take('r'),
+            Some(Removal::RemoveNative {
+                harness: "claude".into(),
+                id: "a1".into(),
+                cwd: "/w/api".into(),
+                title: "a1".into(),
+            })
+        );
+        assert_eq!(ask.take('x'), None);
+        assert_eq!(ask.take('a'), None, "no archive");
+        assert!(matches!(ask.first(), Removal::StopNative { .. }), "enter: the safe one");
+        let ended = asked(&natives("claude", false), None);
+        assert_eq!(ended.take('s'), None, "nothing to stop");
+        assert!(matches!(ended.first(), Removal::RemoveNative { .. }));
+        assert_eq!(ask.remove_only(), ended, "/rm: the remove alone");
+        // Hidden and shown: brought back first.
+        let mut prefs = ListPrefs::default();
+        prefs.hidden.push(Hidden {
+            key: "n:claude:a1".into(),
+            at: Timestamp::UNIX_EPOCH,
+        });
+        assert!(matches!(
+            plan(&Line::Session(&natives("claude", true)), &prefs, |_| None).unwrap(),
+            Removal::Unhide { .. }
+        ));
     }
 
     #[test]
@@ -335,7 +461,7 @@ mod tests {
     }
 
     #[test]
-    fn a_harnesss_own_session_still_going_is_stopped_by_it_and_one_ended_hidden() {
+    fn a_harnesss_own_session_it_cannot_remove_is_stopped_while_it_goes_and_hidden_once_ended() {
         let prefs = ListPrefs::default();
         let mut n = row("n:claude:a1", Source::Native);
         n.stop = Some("a1".into());
@@ -354,76 +480,6 @@ mod tests {
         assert!(matches!(
             plan(&Line::Session(&n), &prefs, |_| None).unwrap(),
             Removal::Hide { .. }
-        ));
-    }
-
-    fn choice(key: char, words: &str, says: Option<&str>, done: &str) -> Choice {
-        Choice {
-            key,
-            words: words.into(),
-            says: says.map(String::from),
-            done: done.into(),
-        }
-    }
-
-    /// One of Claude's own, as its harness offers it: a stop while it goes,
-    /// and its remove always.
-    fn claudes(live: bool) -> Row {
-        let mut n = row("n:claude:a1", Source::Native);
-        if live {
-            n.stop = Some("a1".into());
-            n.stop_choice = Some(choice('s', "stop", Some("keeps the conversation"), "stopped"));
-        }
-        n.close = Some(choice('r', "remove", Some("deletes it and its worktree"), "removed"));
-        n
-    }
-
-    #[test]
-    fn a_harnesss_own_session_it_can_close_is_asked_about() {
-        let prefs = ListPrefs::default();
-        let n = claudes(true);
-        let Removal::Ask(ask) = plan(&Line::Session(&n), &prefs, |_| None).unwrap() else {
-            panic!("asked");
-        };
-        assert_eq!(Removal::Ask(ask.clone()).hint(), "stop or remove a1");
-        assert_eq!(
-            ask.offer(),
-            "s stop · keeps the conversation   r remove · deletes it and its worktree   esc cancel   — a1 · claude"
-        );
-        assert!(matches!(ask.take('s'), Some(Removal::StopNative { ref id, .. }) if id == "a1"));
-        assert_eq!(
-            ask.take('r'),
-            Some(Removal::CloseNative {
-                harness: "claude".into(),
-                id: "a1".into(),
-                cwd: "/w/api".into(),
-                title: "a1".into(),
-                done: "removed".into()
-            })
-        );
-        assert_eq!(ask.take('x'), None);
-        assert!(matches!(ask.first(), Removal::StopNative { .. }), "enter: the safe one");
-        // Ended: only the close, and enter takes it.
-        let Removal::Ask(ended) = plan(&Line::Session(&claudes(false)), &prefs, |_| None).unwrap() else {
-            panic!("asked");
-        };
-        assert_eq!(Removal::Ask(ended.clone()).hint(), "remove a1");
-        assert_eq!(
-            ended.offer(),
-            "r remove · deletes it and its worktree   esc cancel   — a1 · claude"
-        );
-        assert_eq!(ended.take('s'), None, "nothing to stop");
-        assert!(matches!(ended.first(), Removal::CloseNative { .. }));
-        assert_eq!(ask.close_only(), ended, "/rm: the close alone");
-        // Hidden and shown: brought back first.
-        let mut prefs = ListPrefs::default();
-        prefs.hidden.push(Hidden {
-            key: "n:claude:a1".into(),
-            at: Timestamp::UNIX_EPOCH,
-        });
-        assert!(matches!(
-            plan(&Line::Session(&claudes(true)), &prefs, |_| None).unwrap(),
-            Removal::Unhide { .. }
         ));
     }
 
