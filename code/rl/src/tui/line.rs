@@ -114,6 +114,33 @@ impl Line {
         self.cursor += s.len();
     }
 
+    /// The cursor a line up (`up`) or down, in text of several lines (the
+    /// command line's, where `shift+enter` adds one): to the same column, or
+    /// the end of a shorter line. Whether there was a line to go to — on the
+    /// first line up, or the last down, it stays where it is.
+    pub fn vertical(&mut self, up: bool) -> bool {
+        let start = self.text[..self.cursor].rfind('\n').map_or(0, |i| i + 1);
+        let col = self.text[start..self.cursor].chars().count();
+        let (from, to) = if up {
+            if start == 0 {
+                return false;
+            }
+            let to = start - 1;
+            (self.text[..to].rfind('\n').map_or(0, |i| i + 1), to)
+        } else {
+            let Some(nl) = self.text[self.cursor..].find('\n') else {
+                return false;
+            };
+            let from = self.cursor + nl + 1;
+            let to = self.text[from..].find('\n').map_or(self.text.len(), |i| from + i);
+            (from, to)
+        };
+        let line = &self.text[from..to];
+        self.selected = None;
+        self.cursor = from + line.char_indices().nth(col).map_or(line.len(), |(i, _)| i);
+        true
+    }
+
     pub fn key(&mut self, k: &KeyEvent) -> Act {
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         let alt = k.modifiers.contains(KeyModifiers::ALT);
@@ -583,6 +610,24 @@ mod tests {
         assert_eq!(l.key(&KeyEvent::from(KeyCode::Esc)), Act::Cancel);
         assert_eq!(l.key(&KeyEvent::from(KeyCode::Tab)), Act::Complete);
         assert_eq!(l.text(), "make test", "none of them touch the text");
+    }
+
+    #[test]
+    fn up_and_down_walk_the_lines_of_a_text_of_several() {
+        let mut l = Line::default();
+        l.set_with_cursor("fix the login\nok\nand the logout", 9);
+        assert!(!l.vertical(true), "the first line: nowhere up");
+        assert!(l.vertical(false));
+        assert_eq!(l.cursor(), 16, "the end of the shorter line");
+        assert!(l.vertical(false));
+        assert_eq!(l.cursor(), 19, "column 2 of the third");
+        assert!(!l.vertical(false), "the last line: nowhere down");
+        assert!(l.vertical(true) && l.vertical(true));
+        assert_eq!(l.cursor(), 2);
+        let mut one = Line::default();
+        press(&mut one, "make");
+        assert!(!one.vertical(true) && !one.vertical(false), "one line: the list's");
+        assert_eq!(one.cursor(), 4);
     }
 
     #[test]

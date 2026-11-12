@@ -1,6 +1,6 @@
 //! What keeps the list live while it is open, and nothing once it is closed:
 //! a watch on the session and hook folders, and a background task asking the
-//! harnesses for their own sessions. Both stop when they are dropped.
+//! harnesses for their own sessions, a task each. Both stop when they are dropped.
 
 use crate::attach::AbortOnDrop;
 use crate::sources::{NativeLister, NativeRow};
@@ -8,8 +8,8 @@ use jiff::Timestamp;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use rl_core::Home;
 use std::collections::BTreeSet;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::{Notify, mpsc, watch};
 
@@ -73,6 +73,30 @@ pub struct Failing {
     pub since: Option<Timestamp>,
 }
 
+/// What the listers, of `harnesses`, last said, all told.
+fn all_said(harnesses: &[String], kept: &[Kept]) -> Said {
+    Said {
+        rows: kept.iter().flat_map(|k| k.rows.clone()).collect(),
+        answered: harnesses
+            .iter()
+            .zip(kept)
+            .filter(|(_, k)| k.answered.is_some())
+            .map(|(h, _)| h.clone())
+            .collect(),
+        failing: harnesses
+            .iter()
+            .zip(kept)
+            .filter_map(|(h, k)| {
+                Some(Failing {
+                    harness: h.clone(),
+                    error: k.error.clone()?,
+                    since: k.answered,
+                })
+            })
+            .collect(),
+    }
+}
+
 /// One lister's last word.
 #[derive(Clone, Default)]
 struct Kept {
@@ -81,110 +105,90 @@ struct Kept {
     error: Option<String>,
 }
 
-/// The harnesses' own sessions, asked for every `every` in the background,
-/// for as long as this is kept — and at once when `ask_now` says; not while
-/// it is paused.
+/// The harnesses' own sessions, each harness asked every `every` in the
+/// background on its own, for as long as this is kept — and at once when
+/// `ask_now` says; not while it is paused.
 pub struct Native {
     rx: watch::Receiver<Said>,
-    ask: Arc<Notify>,
+    /// One per lister: what wakes its task now.
+    ask: Vec<Arc<Notify>>,
     paused: Arc<AtomicBool>,
-    _task: Option<AbortOnDrop<()>>,
+    _tasks: Vec<AbortOnDrop<()>>,
 }
 
 impl Native {
-    /// Asks each lister now and then every `every`, one after the other, off
-    /// the async threads. A lister that fails keeps what it said last, and
-    /// says why until it answers again. With none, nothing runs.
+    /// Asks each lister now and then every `every`, each on a task of its
+    /// own, off the async threads: one slow to answer holds up no other.
+    /// Each answer is published as it comes, replacing only that lister's
+    /// rows. A lister that fails keeps what it said last, and says why
+    /// until it answers again. With none, nothing runs.
     pub fn start(listers: Vec<Box<dyn NativeLister>>, every: Duration) -> Native {
         let (tx, rx) = watch::channel(Said::default());
-        let ask = Arc::new(Notify::new());
+        let tx = Arc::new(tx);
         let paused = Arc::new(AtomicBool::new(false));
-        if listers.is_empty() {
-            return Native {
-                rx,
-                ask,
-                paused,
-                _task: None,
-            };
-        }
-        let listers: Arc<Vec<Box<dyn NativeLister>>> = Arc::new(listers);
-        let asked_now = ask.clone();
-        let held = paused.clone();
-        let task = tokio::spawn(async move {
-            let mut kept: Vec<Kept> = vec![Kept::default(); listers.len()];
-            let mut tick = tokio::time::interval(every);
-            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            loop {
-                tokio::select! {
-                    _ = tick.tick() => {}
-                    () = asked_now.notified() => {}
-                }
-                if held.load(Ordering::SeqCst) {
-                    continue;
-                }
-                let asked = listers.clone();
-                let Ok(said) = tokio::task::spawn_blocking(move || {
-                    asked
-                        .iter()
-                        .map(|l| l.list().map_err(|e| format!("{e:#}")))
-                        .collect::<Vec<_>>()
-                })
-                .await
-                else {
-                    continue;
-                };
-                let now = Timestamp::now();
-                for (k, s) in kept.iter_mut().zip(said) {
-                    match s {
-                        Ok(rows) => {
-                            k.rows = rows;
-                            k.answered = Some(now);
-                            k.error = None;
+        let harnesses: Arc<Vec<String>> = Arc::new(listers.iter().map(|l| l.harness().to_string()).collect());
+        let kept = Arc::new(Mutex::new(vec![Kept::default(); listers.len()]));
+        let mut ask = Vec::new();
+        let mut tasks = Vec::new();
+        for (i, lister) in listers.into_iter().enumerate() {
+            let lister: Arc<dyn NativeLister> = Arc::from(lister);
+            let asked_now = Arc::new(Notify::new());
+            ask.push(asked_now.clone());
+            let (tx, held, kept, harnesses) = (tx.clone(), paused.clone(), kept.clone(), harnesses.clone());
+            tasks.push(AbortOnDrop(tokio::spawn(async move {
+                let mut tick = tokio::time::interval(every);
+                tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                loop {
+                    tokio::select! {
+                        _ = tick.tick() => {}
+                        () = asked_now.notified() => {}
+                    }
+                    if held.load(Ordering::SeqCst) {
+                        continue;
+                    }
+                    let asked = lister.clone();
+                    let Ok(said) =
+                        tokio::task::spawn_blocking(move || asked.list().map_err(|e| format!("{e:#}"))).await
+                    else {
+                        continue;
+                    };
+                    let all = {
+                        let mut kept = kept.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                        let k = &mut kept[i];
+                        match said {
+                            Ok(rows) => {
+                                k.rows = rows;
+                                k.answered = Some(Timestamp::now());
+                                k.error = None;
+                            }
+                            Err(e) => k.error = Some(e),
                         }
-                        Err(e) => k.error = Some(e),
-                    }
+                        all_said(&harnesses, &kept)
+                    };
+                    tx.send_if_modified(|now| {
+                        let changed = *now != all;
+                        if changed {
+                            *now = all;
+                        }
+                        changed
+                    });
                 }
-                let all = Said {
-                    rows: kept.iter().flat_map(|k| k.rows.clone()).collect(),
-                    answered: listers
-                        .iter()
-                        .zip(&kept)
-                        .filter(|(_, k)| k.answered.is_some())
-                        .map(|(l, _)| l.harness().to_string())
-                        .collect(),
-                    failing: listers
-                        .iter()
-                        .zip(&kept)
-                        .filter_map(|(l, k)| {
-                            Some(Failing {
-                                harness: l.harness().to_string(),
-                                error: k.error.clone()?,
-                                since: k.answered,
-                            })
-                        })
-                        .collect(),
-                };
-                tx.send_if_modified(|now| {
-                    let changed = *now != all;
-                    if changed {
-                        *now = all;
-                    }
-                    changed
-                });
-            }
-        });
+            })));
+        }
         Native {
             rx,
             ask,
             paused,
-            _task: Some(AbortOnDrop(task)),
+            _tasks: tasks,
         }
     }
 
     /// Asks the listers now, not at the next tick: a session was just
     /// started in a harness's background.
     pub fn ask_now(&self) {
-        self.ask.notify_one();
+        for a in &self.ask {
+            a.notify_one();
+        }
     }
 
     /// No asking while the terminal is a session's: what the harness's CLI
@@ -305,6 +309,79 @@ mod tests {
             then,
             "nothing runs once the list is closed"
         );
+    }
+
+    /// Takes `slow` for every ask, then says one row of its harness; counts
+    /// its asks.
+    struct Sleepy {
+        harness: &'static str,
+        slow: Duration,
+        asked: Arc<AtomicUsize>,
+    }
+
+    impl NativeLister for Sleepy {
+        fn harness(&self) -> &str {
+            self.harness
+        }
+
+        fn list(&self) -> anyhow::Result<Vec<NativeRow>> {
+            let n = self.asked.fetch_add(1, Ordering::SeqCst);
+            std::thread::sleep(self.slow);
+            Ok(vec![NativeRow {
+                harness: self.harness.into(),
+                ..row(&format!("{}-{n}", self.harness))
+            }])
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_slow_lister_does_not_hold_up_another_ones_rows() {
+        let slow = Arc::new(AtomicUsize::new(0));
+        let fast = Arc::new(AtomicUsize::new(0));
+        let mut native = Native::start(
+            vec![
+                Box::new(Sleepy {
+                    harness: "codex",
+                    slow: Duration::from_millis(1500),
+                    asked: slow.clone(),
+                }),
+                Box::new(Sleepy {
+                    harness: "claude",
+                    slow: Duration::ZERO,
+                    asked: fast.clone(),
+                }),
+            ],
+            Duration::from_millis(20),
+        );
+        // Well inside the slow one's first ask, the fast one has answered,
+        // and again, each answer reaching the list as it comes.
+        let mut seen = BTreeSet::new();
+        tokio::time::timeout(Duration::from_millis(800), async {
+            while seen.len() < 3 {
+                native.changed().await;
+                let said = native.said();
+                assert!(said.rows.iter().all(|r| r.harness == "claude"), "{:?}", said.rows);
+                assert_eq!(said.answered, BTreeSet::from(["claude".to_string()]));
+                seen.extend(said.rows.into_iter().map(|r| r.id));
+            }
+        })
+        .await
+        .expect("the fast lister's rows came while the slow one was still listing");
+        assert_eq!(slow.load(Ordering::SeqCst), 1, "asked once, still answering");
+        // Its answer joins the fast one's rows; neither replaces the other's.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                native.changed().await;
+                let said = native.said();
+                if said.answered.contains("codex") {
+                    assert!(said.rows.iter().any(|r| r.harness == "codex"));
+                    assert!(said.rows.iter().any(|r| r.harness == "claude"));
+                    return;
+                }
+            }
+        })
+        .await
+        .expect("the slow one answers in its own time");
     }
 
     #[tokio::test]
