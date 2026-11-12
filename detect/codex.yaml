@@ -20,7 +20,7 @@ patterns:
     - '^\s*[│┃]?\s*›\s*$'
 # Its own sessions, outside Relay (rl-detect/src/sessions.rs says how this
 # block reads). What codex's docs and source said on 2026-10-13 is beside
-# each value (docs/plans/2026-10-13-agent-hooks-notes.md).
+# each value.
 sessions:
   hooks:
     # $CODEX_HOME, else ~/.codex. The first whose variables are all set wins;
