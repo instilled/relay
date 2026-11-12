@@ -1,9 +1,14 @@
 //! The list's command line: what is typed at the foot of the list starts a
 //! session. A first word a harness claims (its profile's `words`: `claude`,
 //! `codex`, `agy`…) starts that agent with the rest of the line as its first
-//! prompt; any other line is a shell command, run in a shell Relay holds that
-//! stays once the command is done. A line that starts with `/` is a
-//! command instead (`slash`).
+//! prompt; any other line starts the default (`list.default`): a shell
+//! command, run in a shell Relay holds that stays once the command is done,
+//! or — where the default is an agent harness — that agent, the whole line its
+//! prompt. A line that starts with `!` is a shell command whatever the
+//! default; one that starts with `/` is a command instead (`slash`).
+//!
+//! A line may have several lines (`shift+enter`, or a paste): an agent gets
+//! all of it as its prompt, a shell runs them in order.
 //!
 //! `tab` completes the word under the cursor: the first word to a harness's
 //! word or a program on `PATH`, a later one to a path under the folder the
@@ -14,6 +19,7 @@
 //! to.
 
 use super::{line, slash};
+use rl_core::state::RunKind;
 use rl_detect::Registry;
 use rl_detect::registry::Profile;
 use std::collections::BTreeSet;
@@ -74,11 +80,13 @@ impl Commands {
 /// What a line starts.
 #[derive(Debug, Clone, Copy)]
 pub enum Detected<'a> {
-    /// The harness its first word names, and the binary it lacks when none
-    /// of its own is on `PATH`.
+    /// The harness its first word names — or, where it names none, the
+    /// default (`named` false: the whole line is the prompt) — and the binary
+    /// it lacks when none of its own is on `PATH`.
     Agent {
         profile: &'a Profile,
         missing: Option<&'a str>,
+        named: bool,
     },
     /// A command, run in a shell.
     Shell,
@@ -92,10 +100,13 @@ impl Detected<'_> {
     /// What the right end of the line says.
     pub fn label(&self) -> String {
         match self {
-            Detected::Agent { profile, missing: None } => format!("agent · {}", profile.name),
+            Detected::Agent {
+                profile, missing: None, ..
+            } => format!("agent · {}", profile.name),
             Detected::Agent {
                 profile,
                 missing: Some(bin),
+                ..
             } => format!("agent · {} ({bin} not found)", profile.name),
             Detected::Shell => "shell".into(),
             Detected::Command(name) => format!("command · {name}"),
@@ -113,9 +124,21 @@ pub fn split_first(text: &str) -> (&str, &str) {
     }
 }
 
+/// The agent harness `default` (`list.default`) names; none for `shell`.
+pub fn default_agent<'a>(reg: &'a Registry, default: &str) -> Option<&'a Profile> {
+    reg.profile(default).filter(|p| p.kind == RunKind::Agent)
+}
+
+/// A line that starts with `!`: a shell command, whatever the default.
+fn is_bang(text: &str) -> bool {
+    text.trim_start().starts_with('!')
+}
+
 /// What `text` starts: nothing, for a blank line, or for one that is the
-/// start of a command's name still being typed.
-pub fn detect<'a>(text: &str, reg: &'a Registry, cmds: &Commands) -> Option<Detected<'a>> {
+/// start of a command's name still being typed. A line whose first word
+/// names no harness starts `default` (`list.default`): an agent harness, or
+/// a shell.
+pub fn detect<'a>(text: &str, reg: &'a Registry, cmds: &Commands, default: &str) -> Option<Detected<'a>> {
     if slash::is_command(text) {
         return match slash::typed(text) {
             slash::Typed::Known(name) => Some(Detected::Command(name)),
@@ -127,58 +150,102 @@ pub fn detect<'a>(text: &str, reg: &'a Registry, cmds: &Commands) -> Option<Dete
     if first.is_empty() {
         return None;
     }
-    Some(match reg.by_word(first) {
-        Some(profile) => Detected::Agent {
-            profile,
-            missing: (!profile.bins.iter().any(|b| cmds.has(b)))
-                .then(|| profile.bins.first().map_or(profile.name.as_str(), String::as_str)),
-        },
-        None => Detected::Shell,
+    if is_bang(text) {
+        return Some(Detected::Shell);
+    }
+    let agent = |profile: &'a Profile, named| Detected::Agent {
+        profile,
+        missing: (!profile.bins.iter().any(|b| cmds.has(b)))
+            .then(|| profile.bins.first().map_or(profile.name.as_str(), String::as_str)),
+        named,
+    };
+    Some(match (reg.by_word(first), default_agent(reg, default)) {
+        (Some(profile), _) => agent(profile, true),
+        (None, Some(profile)) => agent(profile, false),
+        (None, None) => Detected::Shell,
     })
 }
 
-/// Where the word under the cursor starts: after the last space before it.
+/// What `text`, as `d` reads it, hands on: an agent's prompt (the rest after
+/// the harness's word, or all of it for the default's), or a shell's command
+/// (without its `!`). Newlines inside are kept.
+pub fn payload<'t>(text: &'t str, d: &Detected) -> &'t str {
+    match d {
+        Detected::Agent { named: true, .. } => split_first(text).1,
+        Detected::Agent { named: false, .. } => text.trim(),
+        Detected::Shell => {
+            let t = text.trim();
+            t.strip_prefix('!').map_or(t, str::trim)
+        }
+        Detected::Command(_) | Detected::UnknownCommand => text,
+    }
+}
+
+/// Where the word under the cursor starts: after the last space or newline
+/// before it.
 fn word_start(text: &str, cur: usize) -> usize {
-    text[..cur].rfind(' ').map_or(0, |i| i + 1)
+    text[..cur].rfind([' ', '\n']).map_or(0, |i| i + 1)
 }
 
 /// What completing a line looks at: the folder it starts in, the harnesses,
-/// the programs on `PATH`, and the name of the row under the cursor (for
-/// `/rename`).
+/// the programs on `PATH`, the name of the row under the cursor (for
+/// `/rename`), and what a line starts by default (`list.default`).
 #[derive(Clone, Copy)]
 pub struct Ctx<'a> {
     pub folder: &'a Path,
     pub reg: &'a Registry,
     pub cmds: &'a Commands,
     pub name: Option<&'a str>,
+    pub default: &'a str,
+}
+
+/// The agent harnesses that are here, and `shell`, by name: what `/default`
+/// takes.
+pub fn defaults(reg: &Registry, cmds: &Commands) -> Vec<String> {
+    let mut out: Vec<String> = reg
+        .agents()
+        .filter(|p| p.bins.iter().any(|b| cmds.has(b)))
+        .map(|p| p.name.clone())
+        .chain([crate::config::SHELL_DEFAULT.to_string()])
+        .collect();
+    out.sort();
+    out
 }
 
 /// What the word under the cursor completes to, best first, and where that
 /// word starts. On a `/` line, a command and its argument (`slash`).
 /// Otherwise the first word: the words of the harnesses that are here, then
-/// the programs on `PATH`; a later one: the paths under the folder (`~` is
-/// home), a folder's with its `/`.
+/// the programs on `PATH` — only the harnesses where the default is an agent
+/// (a program would be its prompt), only the programs after a `!`; a later
+/// one: the paths under the folder (`~` is home), a folder's with its `/`.
 pub fn candidates(text: &str, cur: usize, ctx: &Ctx) -> (usize, Vec<String>) {
     if slash::is_command(text) {
-        return slash::candidates(text, cur, ctx.name);
+        let found = defaults(ctx.reg, ctx.cmds);
+        return slash::candidates(text, cur, ctx.name, &found);
     }
     let (folder, reg, cmds) = (ctx.folder, ctx.reg, ctx.cmds);
     let start = word_start(text, cur);
     let word = &text[start..cur];
-    let first = text[..start].trim().is_empty();
+    let before = text[..start].trim();
+    let bang = before == "!";
+    let first = before.is_empty() || bang;
     let mut out: Vec<String> = Vec::new();
     if first {
         if word.is_empty() {
             return (start, out);
         }
-        for (w, p) in reg.words() {
-            if w.starts_with(word) && p.bins.iter().any(|b| cmds.has(b)) {
-                out.push(w.to_string());
+        if !bang {
+            for (w, p) in reg.words() {
+                if w.starts_with(word) && p.bins.iter().any(|b| cmds.has(b)) {
+                    out.push(w.to_string());
+                }
             }
         }
-        for n in cmds.starting(word) {
-            if !out.iter().any(|o| o == n) {
-                out.push(n.to_string());
+        if bang || default_agent(reg, ctx.default).is_none() {
+            for n in cmds.starting(word) {
+                if !out.iter().any(|o| o == n) {
+                    out.push(n.to_string());
+                }
             }
         }
     } else {
@@ -265,7 +332,7 @@ impl CmdLine {
     pub fn refresh(&mut self, ctx: &Ctx) {
         self.ghost = None;
         let (text, cur) = (self.line.text(), self.line.cursor());
-        if cur != text.len() || (text.ends_with(' ') && !slash::is_command(text)) || text.is_empty() {
+        if cur != text.len() || (text.ends_with([' ', '\n']) && !slash::is_command(text)) || text.is_empty() {
             return;
         }
         let (start, cands) = candidates(text, cur, ctx);
@@ -348,7 +415,7 @@ mod tests {
         let cmds = bin_dir(&tmp.path().join("bin"), &["claude", "codex", "make"]);
         std::fs::write(tmp.path().join("bin/notrun"), "").unwrap();
         let reg = Registry::builtin();
-        let label = |t: &str| detect(t, &reg, &cmds).map(|d| d.label());
+        let label = |t: &str| detect(t, &reg, &cmds, "shell").map(|d| d.label());
         assert_eq!(label("claude fix the login").as_deref(), Some("agent · claude"));
         assert_eq!(label("codex").as_deref(), Some("agent · codex"));
         assert_eq!(
@@ -359,6 +426,67 @@ mod tests {
         assert_eq!(label("  "), None);
         assert_eq!(split_first("  claude  fix it "), ("claude", "fix it"));
         assert!(cmds.has("make") && !cmds.has("notrun"), "only what runs");
+        assert_eq!(label("! make test").as_deref(), Some("shell"), "a ! changes nothing");
+    }
+
+    #[test]
+    fn with_an_agent_for_default_a_line_naming_no_harness_is_its_prompt() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cmds = bin_dir(&tmp.path().join("bin"), &["claude", "codex", "make"]);
+        let reg = Registry::builtin();
+        let read = |t: &'static str| {
+            let d = detect(t, &reg, &cmds, "claude").unwrap();
+            (d.label(), payload(t, &d).to_string())
+        };
+        assert_eq!(read("fix the login"), ("agent · claude".into(), "fix the login".into()));
+        assert_eq!(
+            read("codex fix"),
+            ("agent · codex".into(), "fix".into()),
+            "a word still picks"
+        );
+        assert_eq!(read("! make test"), ("shell".into(), "make test".into()));
+        assert_eq!(read("!ls"), ("shell".into(), "ls".into()));
+        assert_eq!(
+            read("fix the login\nand the logout\n"),
+            ("agent · claude".into(), "fix the login\nand the logout".into()),
+            "the newlines kept"
+        );
+        assert_eq!(
+            read("claude fix\n- the login"),
+            ("agent · claude".into(), "fix\n- the login".into())
+        );
+        assert!(matches!(
+            detect("/pin", &reg, &cmds, "claude"),
+            Some(Detected::Command("pin"))
+        ));
+        // Not an agent: the default reads as a shell.
+        for d in ["shell", "sh", "nope"] {
+            assert_eq!(
+                detect("make", &reg, &cmds, d).map(|d| d.label()).as_deref(),
+                Some("shell")
+            );
+        }
+        assert_eq!(defaults(&reg, &cmds), ["claude", "codex", "shell"]);
+    }
+
+    #[test]
+    fn with_an_agent_for_default_the_first_word_completes_to_harnesses_only_but_after_a_bang() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cmds = bin_dir(&tmp.path().join("bin"), &["claude", "clang", "codex"]);
+        let reg = Registry::builtin();
+        let here = tmp.path().to_path_buf();
+        let ctx = Ctx {
+            folder: &here,
+            reg: &reg,
+            cmds: &cmds,
+            name: None,
+            default: "claude",
+        };
+        let c = |t: &str| candidates(t, t.len(), &ctx).1;
+        assert_eq!(c("cl"), ["claude"], "clang would be the prompt");
+        assert_eq!(c("! cl"), ["clang", "claude"], "after a !, the programs");
+        assert_eq!(c("/default c"), ["claude", "codex"]);
+        assert_eq!(c("/default s"), ["shell"]);
     }
 
     #[test]
@@ -375,6 +503,7 @@ mod tests {
             reg: &reg,
             cmds: &cmds,
             name: None,
+            default: "shell",
         };
         let c = |t: &str| candidates(t, t.len(), &ctx).1;
         assert_eq!(c("cl"), ["claude", "clang"]);
@@ -399,6 +528,7 @@ mod tests {
             reg: &reg,
             cmds: &cmds,
             name: None,
+            default: "shell",
         };
         let mut l = CmdLine::default();
         l.line.insert("cod");

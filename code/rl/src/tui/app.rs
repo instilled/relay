@@ -512,7 +512,12 @@ impl App {
 
     /// What the line typed would start, if anything is typed.
     pub fn detected(&self) -> Option<cmdline::Detected<'static>> {
-        cmdline::detect(self.cmd.line.text(), rows::registry(), self.commands())
+        cmdline::detect(
+            self.cmd.line.text(),
+            rows::registry(),
+            self.commands(),
+            &self.config.list.default,
+        )
     }
 
     /// The line's ghost again, after a key changed it.
@@ -524,6 +529,7 @@ impl App {
             reg: rows::registry(),
             cmds,
             name: name.as_deref(),
+            default: &self.config.list.default,
         });
     }
 

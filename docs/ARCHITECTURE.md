@@ -66,7 +66,8 @@ and its socket.
 | `sessions/<name>/hook.json` | `rl hook` | what the agent's own hooks last said |
 | `sessions/<name>/exit`, `stopped`, `sock` | holder, `rl stop` | how it ended, that it was stopped, its socket |
 | `state/<agent>/<session_id>.json` | `rl hook` | a session Relay does not hold; removed on `ended` |
-| `mail/<key>/<ns>-<pid>-<n>-<from>.json` | `rl mcp` | a waiting message; deleted when read |
+| `mail/<key>/<ns>-<pid>-<n>-<from>.json` | `rl mcp` | a waiting message; moved to `delivered/` once read |
+| `mail/<key>/delivered/<same name>` | `rl mcp` | a message read, kept 7 days from delivery (`inbox(recent: true)`) |
 | `mail/<key>/.told` | `rl hook`, `rl mcp` | when the newest mail a Claude `Stop` hook told of (or `send` typed in) was sent |
 | `typing/<harness>-<id>.lock` | `rl mcp`, the list | the lock typing into a harness's own session takes whole, and an attach from the list shared |
 | `config.json` | `rl setup`, the list | harnesses, badges, the setup changes you declined (`setup.declined`), list preferences (grouping, toggles, order, hidden, pins, names, colours by row key; `ctrl+g` cycles a row's own colour). `names` also holds a Relay-side name for a native or hooked row, which the harness never learns of; the list draws it with the harness's own beside it. Strict. |
@@ -92,8 +93,11 @@ Folders are 0700.
   question) and runs it on
   the row under the cursor through the same code.
 - **List.** Held sessions come from `sessions/`. Hooked-only ones come from `state/`. Claude's and
-  Codex's own come from asking them (`sessions.list` in the profile), each with its own timeout;
-  one that fails is skipped. `rows/` merges them and groups them, each under its project: a
+  Codex's own come from asking them (`sessions.list` in the profile), each with its own timeout.
+  While the list is open each harness is asked on a task of its own, at its own interval
+  (`tui::live::Native`): its answer is published as it comes and replaces only its own rows, so a
+  slow one holds up no other; one that fails keeps its last rows, marked stale. Attaching pauses
+  them all, and `ask_now` wakes them all. `rows/` merges them and groups them, each under its project: a
   folder you named, else its git checkout (`git::project`, read from the files: a linked
   worktree's `.git` file is followed through its `commondir` to the main checkout; a submodule's,
   which has none, is a project of its own). State comes from, in order, the
@@ -138,8 +142,14 @@ Folders are 0700.
 - **Send.** `send` resolves `to` to a session and writes a file under `mail/<key>/`, the key being
   what the session keeps while it lives: a held session's name, else its conversation id. `inbox`
   takes from every key the caller has (its name or ids, and its address), oldest first; each file is
-  claimed by a rename before it is read, so two inboxes never get the same message, and deleted
-  once it parses. Keys are encoded one to one (`[a-z0-9-]` kept, every other byte `%xx`), so none
+  claimed by a rename before it is read, so two inboxes never get the same message. The claims
+  (`mail::Claimed`) go back up to `serve`: once the reply is written and flushed they are renamed
+  into `mail/<key>/delivered/` under their own names (the delivery time is the file's modified
+  time); if the write fails they are renamed back to their pending names. A server that dies
+  between leaves claim files named by its pid, which the next `take` or `waiting` renames back
+  (`release_stale`): delivery is at least once. Delivered files older than `mail::KEPT` (7 days)
+  are swept on every `send` and `inbox`; `inbox(recent: true)` reads them, newest last, and
+  moves nothing. Keys are encoded one to one (`[a-z0-9-]` kept, every other byte `%xx`), so none
   escapes `mail/` and none shares a folder with another, whatever the file system's case.
 - **Ping.** After the file is left, `send` tells a recipient whose harness can be told from
   outside: its harness's `ping_argv` (the profile's `sessions.ping`; Codex's `codex queue --thread
@@ -187,6 +197,12 @@ Folders are 0700.
 
 A harness is `detect/<name>.yaml`. `rl-detect/src/registry.rs` compiles the built-ins in and merges
 `$RELAY_HOME/detect/*.yaml` over them field by field. `generic` is the floor every profile extends.
+
+A profile alone adds a harness that uses the integration Relay already has: sessions Relay holds,
+hooks in a dialect it reads, MCP registration in a style it writes (`mcp.file`, `mcp.cli`, Claude's
+and Codex's), a listing one of the readers parses (`claude-agents`, `codex-threads`), and rename
+and wake by a typed line or a resumed run. A harness with a session protocol of its own (as Codex's
+app-server is) needs an adapter, an implementation of `Harness` in `rl-detect`.
 
 The format is strict. Every struct is `deny_unknown_fields`: a key it does not know is an error
 when the profile loads. Keys:
@@ -295,7 +311,7 @@ else prints a prefilled new-issue link cut to `MAX_URL`. The repository is Cargo
 
 `rl mcp` is JSON-RPC 2.0, one message per line on stdio, written by hand, no SDK. It answers
 `initialize`, `ping`, `tools/list` and `tools/call`; stdout carries only protocol, logs go to stderr.
-Tools: `who`, `send(to, text, from?)`, `inbox(as?)`. A tool failure is an `isError` result.
+Tools: `who`, `send(to, text, from?)`, `inbox(as?, recent?)`. A tool failure is an `isError` result.
 
 The caller's address, in order:
 
@@ -308,7 +324,10 @@ The caller's address, in order:
 A known caller wins over a passed `from`/`as`. Codex sets no id Relay knows, so it takes step 3.
 Addresses: a held session is its name; a hooked-only one its full session id; a native one its
 name, or the harness id when the name is empty or repeats. `send` also takes the row's `ctrl+r` title
-or a conversation id. A `send` to a held name asks no harness for its list.
+or a conversation id. A `send` to a held name asks no harness for its list. Where the harnesses
+are asked (`who`, finding an address), they are asked at once, each on a thread, for
+`mcp::LIST_WAIT` (5s) (`sources::list_all`, as `rl ls` does): one that fails or is slower is left
+out, with a note in `who`'s answer and in an address not found, and the others answer.
 
 `rl setup` iterates the harnesses and registers `rl mcp --harness <h>` where each says
 (`Harness::mcp`): Claude through `claude mcp add --scope user` (run with a timeout in a process

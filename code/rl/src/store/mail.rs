@@ -1,6 +1,8 @@
 //! Mail between agents: `mail/<key>/<ts>-<pid>-<n>-<from>.json`, one message
 //! per file. Sent by dropping a file, read by taking the files: sender and
-//! receiver needn't overlap. A key is what a session keeps for as long as
+//! receiver needn't overlap. A message read is moved to the folder's
+//! `delivered/` only once the reply carrying it is out (`Claimed`), and kept
+//! there for `KEPT` (`recent`). A key is what a session keeps for as long as
 //! it lives (its name, or its conversation id), never an address that can
 //! change when names clash.
 
@@ -55,6 +57,7 @@ pub fn send(home: &Home, key: &str, m: &Message) -> io::Result<PathBuf> {
     );
     let path = dir.join(file);
     rl_core::atomic::write_json(&path, m)?;
+    sweep_dir(&dir, Timestamp::now());
     Ok(path)
 }
 
@@ -105,6 +108,14 @@ fn mail_files(dir: &Path) -> io::Result<Vec<PathBuf>> {
     }
 }
 
+/// Where a folder keeps the mail it delivered, under each message's own
+/// name, for `KEPT` (`recent`). A folder, so no `.json` of a pending
+/// message: `waiting` (the hooks) and `claim` never look in it.
+pub const DELIVERED: &str = "delivered";
+
+/// How long delivered mail is kept, from when it was delivered.
+pub const KEPT: jiff::SignedDuration = jiff::SignedDuration::from_hours(7 * 24);
+
 /// What `take` found: the messages oldest first, and the files it could not
 /// read (left where they are).
 #[derive(Debug, Default)]
@@ -113,37 +124,136 @@ pub struct Taken {
     pub unreadable: Vec<PathBuf>,
 }
 
+/// Mail claimed by this process and not yet delivered: its messages, oldest
+/// first, while their files are under names only this process knows. It is
+/// `deliver`ed once the reply carrying it is out, else `put_back`. Dropped
+/// without either (the process died), its claims are released by the next
+/// `take` or `waiting` that finds this process gone (`release_stale`).
+#[derive(Debug, Default)]
+#[must_use = "deliver it once its reply is out, else put it back"]
+pub struct Claimed {
+    pub messages: Vec<Message>,
+    /// The files that did not read, left pending.
+    pub unreadable: Vec<PathBuf>,
+    /// Each claimed file, and its pending name.
+    files: Vec<(PathBuf, PathBuf)>,
+}
+
+impl Claimed {
+    /// Adds what `other` claimed: the messages stay oldest first.
+    pub fn merge(&mut self, other: Claimed) {
+        self.messages.extend(other.messages);
+        self.messages.sort_by_key(|m| m.at);
+        self.unreadable.extend(other.unreadable);
+        self.files.extend(other.files);
+    }
+
+    /// The reply is out: each file goes to its folder's `delivered/`, under
+    /// its own name, kept from `now` (its modified time) for `KEPT`.
+    pub fn deliver(self, now: Timestamp) {
+        let when = std::time::SystemTime::from(now);
+        for (claimed, pending) in self.files {
+            let (Some(dir), Some(name)) = (pending.parent(), pending.file_name()) else {
+                continue;
+            };
+            let to = dir.join(DELIVERED).join(name);
+            let moved = std::fs::create_dir_all(to.parent().unwrap_or(dir))
+                .and_then(|()| std::fs::File::options().write(true).open(&claimed))
+                .and_then(|f| f.set_modified(when))
+                .and_then(|()| std::fs::rename(&claimed, &to));
+            if let Err(e) = moved {
+                // Delivered all the same: it is not to come again.
+                eprintln!("rl mcp: could not keep delivered mail {}: {e}", claimed.display());
+                let _ = std::fs::remove_file(&claimed);
+            }
+        }
+    }
+
+    /// The reply did not go out: each file is pending again, for the next
+    /// inbox.
+    pub fn put_back(self) {
+        for (claimed, pending) in self.files {
+            if let Err(e) = std::fs::rename(&claimed, &pending) {
+                eprintln!("rl mcp: could not put back mail {}: {e}", claimed.display());
+            }
+        }
+    }
+}
+
 static CLAIMS: AtomicU64 = AtomicU64::new(0);
 
-/// Reads and removes the mail of `key`. Each file is claimed first, by
-/// renaming it to a name only this call knows: of two inboxes taking at
-/// once, each message goes to exactly one. One already claimed is passed
-/// over; one that does not read is put back and left.
-pub fn take(home: &Home, key: &str) -> io::Result<Taken> {
+/// Claims the mail of `key`, renaming each file to a name only this call
+/// knows: of two inboxes at once, each message goes to exactly one. One
+/// already claimed is passed over; one that does not read is put back and
+/// left. Delivered mail past `KEPT` is swept first.
+pub fn claim(home: &Home, key: &str) -> io::Result<Claimed> {
     let dir = home.mail_dir().join(component(key));
     release_stale(&dir);
+    sweep_dir(&dir, Timestamp::now());
     let mut files = mail_files(&dir)?;
     files.sort();
-    let mut taken = Taken::default();
+    let mut claimed = Claimed::default();
     for path in files {
-        let Some(claimed) = claim(&path) else { continue };
-        match std::fs::read(&claimed)
+        let Some(c) = claim_file(&path) else { continue };
+        match std::fs::read(&c)
             .ok()
             .and_then(|b| serde_json::from_slice::<Message>(&b).ok())
         {
             Some(m) => {
-                if let Err(e) = std::fs::remove_file(&claimed) {
-                    eprintln!("rl mcp: could not remove taken mail {}: {e}", claimed.display());
-                }
-                taken.messages.push(m);
+                claimed.messages.push(m);
+                claimed.files.push((c, path));
             }
             None => {
-                let back = std::fs::rename(&claimed, &path).map_or(claimed, |()| path);
-                taken.unreadable.push(back);
+                let back = std::fs::rename(&c, &path).map_or(c, |()| path);
+                claimed.unreadable.push(back);
             }
         }
     }
+    Ok(claimed)
+}
+
+/// Claims the mail of `key` and delivers it at once.
+pub fn take(home: &Home, key: &str) -> io::Result<Taken> {
+    let mut c = claim(home, key)?;
+    let taken = Taken {
+        messages: std::mem::take(&mut c.messages),
+        unreadable: std::mem::take(&mut c.unreadable),
+    };
+    c.deliver(Timestamp::now());
     Ok(taken)
+}
+
+/// The mail of `key` delivered within `KEPT` of `now`, newest last; nothing
+/// is moved.
+pub fn recent(home: &Home, key: &str, now: Timestamp) -> Vec<Message> {
+    let dir = home.mail_dir().join(component(key)).join(DELIVERED);
+    let mut got: Vec<Message> = mail_files(&dir)
+        .unwrap_or_default()
+        .iter()
+        .filter(|p| delivered_at(p).is_some_and(|at| now.duration_since(at) <= KEPT))
+        .filter_map(|p| serde_json::from_slice(&std::fs::read(p).ok()?).ok())
+        .collect();
+    got.sort_by_key(|m: &Message| m.at);
+    got
+}
+
+/// Takes away the mail of `key` delivered more than `KEPT` before `now`.
+pub fn sweep(home: &Home, key: &str, now: Timestamp) {
+    sweep_dir(&home.mail_dir().join(component(key)), now);
+}
+
+fn sweep_dir(dir: &Path, now: Timestamp) {
+    for p in mail_files(&dir.join(DELIVERED)).unwrap_or_default() {
+        if delivered_at(&p).is_some_and(|at| now.duration_since(at) > KEPT) {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+}
+
+/// When a delivered file was delivered: its modified time.
+fn delivered_at(p: &Path) -> Option<Timestamp> {
+    let t = std::fs::metadata(p).ok()?.modified().ok()?;
+    Timestamp::try_from(t).ok()
 }
 
 /// Puts back, under its own name, every message in `dir` claimed by a
@@ -189,7 +299,7 @@ fn alive(pid: i32) -> bool {
 
 /// `path` renamed to `.<name>.taken-<pid>-<n>` beside it, where no other
 /// take looks; None when another took it first (or it cannot be renamed).
-fn claim(path: &Path) -> Option<PathBuf> {
+fn claim_file(path: &Path) -> Option<PathBuf> {
     let name = path.file_name()?.to_string_lossy();
     let claimed = path.with_file_name(format!(
         ".{name}.taken-{}-{}",
@@ -232,7 +342,7 @@ mod tests {
         assert_eq!(texts, ["first", "second"]);
         assert!(take(&home, "a").unwrap().messages.is_empty());
         assert_eq!(take(&home, "z").unwrap().messages.len(), 1);
-        assert_eq!(std::fs::read_dir(home.mail_dir().join("a")).unwrap().count(), 0);
+        assert!(pending(&home, "a").is_empty());
     }
 
     #[test]
@@ -329,7 +439,8 @@ mod tests {
         assert_eq!(all.len(), N, "no message twice, none lost");
         let unique: BTreeSet<&String> = all.iter().copied().collect();
         assert_eq!(unique.len(), N);
-        assert_eq!(std::fs::read_dir(home.mail_dir().join("k")).unwrap().count(), 0);
+        assert!(pending(&home, "k").is_empty());
+        assert_eq!(recent(&home, "k", Timestamp::now()).len(), N, "each delivered once");
     }
 
     #[test]
@@ -348,6 +459,87 @@ mod tests {
         let texts: Vec<_> = got.messages.iter().map(|m| m.text.as_str()).collect();
         assert_eq!(texts, ["stuck"]);
         assert!(take(&home, "a").unwrap().messages.is_empty());
+    }
+
+    /// The pending message files in the folder of `key`, by name.
+    fn pending(home: &Home, key: &str) -> Vec<String> {
+        let mut v: Vec<String> = mail_files(&home.mail_dir().join(component(key)))
+            .unwrap()
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        v.sort();
+        v
+    }
+
+    fn texts(ms: &[Message]) -> Vec<&str> {
+        ms.iter().map(|m| m.text.as_str()).collect()
+    }
+
+    #[test]
+    fn claimed_mail_is_moved_to_delivered_only_when_delivered() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = Home::at(tmp.path().to_path_buf());
+        let sent = send(&home, "a", &msg("b", "a", "hi", 5)).unwrap();
+        let name = sent.file_name().unwrap().to_owned();
+        let c = claim(&home, "a").unwrap();
+        assert_eq!(texts(&c.messages), ["hi"]);
+        assert!(pending(&home, "a").is_empty(), "claimed: no other inbox gets it");
+        let delivered = home.mail_dir().join("a").join(DELIVERED);
+        assert!(!delivered.join(&name).exists(), "not delivered before the reply is out");
+        c.deliver(Timestamp::now());
+        assert!(delivered.join(&name).exists(), "kept under its own name");
+        assert!(claim(&home, "a").unwrap().messages.is_empty());
+        assert_eq!(texts(&recent(&home, "a", Timestamp::now())), ["hi"]);
+    }
+
+    #[test]
+    fn claimed_mail_put_back_is_delivered_by_the_next_take() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = Home::at(tmp.path().to_path_buf());
+        let sent = send(&home, "a", &msg("b", "a", "again", 5)).unwrap();
+        let c = claim(&home, "a").unwrap();
+        c.put_back();
+        assert!(sent.exists(), "under its pending name");
+        assert!(recent(&home, "a", Timestamp::now()).is_empty());
+        assert_eq!(texts(&take(&home, "a").unwrap().messages), ["again"]);
+    }
+
+    #[test]
+    fn recent_is_the_delivered_mail_of_the_last_seven_days_newest_last_and_changes_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = Home::at(tmp.path().to_path_buf());
+        let day = jiff::SignedDuration::from_hours(24);
+        // Two days ago: the sweeps of the claims, at the real now, keep all.
+        let t0 = Timestamp::now() - day * 2;
+        send(&home, "a", &msg("b", "a", "old", 1)).unwrap();
+        claim(&home, "a").unwrap().deliver(t0);
+        send(&home, "a", &msg("b", "a", "late", 3)).unwrap();
+        send(&home, "a", &msg("b", "a", "early", 2)).unwrap();
+        claim(&home, "a").unwrap().deliver(t0 + day * 3);
+        send(&home, "a", &msg("b", "a", "waiting", 4)).unwrap();
+        let now = t0 + day * 8;
+        assert_eq!(texts(&recent(&home, "a", now)), ["early", "late"], "old is past 7 days");
+        assert_eq!(texts(&waiting(&home, "a")), ["waiting"], "left pending");
+        assert_eq!(recent(&home, "a", now).len(), 2, "recent moves nothing");
+        // The sweep takes what is past 7 days away; the rest stays.
+        sweep(&home, "a", now);
+        let dir = home.mail_dir().join("a").join(DELIVERED);
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 2);
+        sweep(&home, "a", t0 + day * 11);
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
+        assert_eq!(texts(&waiting(&home, "a")), ["waiting"], "pending mail is never swept");
+    }
+
+    #[test]
+    fn delivered_mail_is_not_waiting() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = Home::at(tmp.path().to_path_buf());
+        send(&home, "a", &msg("b", "a", "read", 5)).unwrap();
+        take(&home, "a").unwrap();
+        assert!(waiting(&home, "a").is_empty(), "the hooks count only pending mail");
+        send(&home, "a", &msg("b", "a", "new", 6)).unwrap();
+        assert_eq!(texts(&waiting(&home, "a")), ["new"]);
     }
 
     #[test]
