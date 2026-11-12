@@ -400,7 +400,7 @@ impl App {
             return self.say("/stop stops a live session");
         }
         match self.removal() {
-            Ok(p @ (Removal::Stop { .. } | Removal::StopNative { .. })) => self.remove(p),
+            Ok(p @ Removal::Stop { .. }) => self.remove(p),
             // The stop, at once: no question asked.
             Ok(Removal::Ask(a)) if a.stop => {
                 let stop = a.first();
@@ -411,7 +411,6 @@ impl App {
                 Removal::Hide { title, .. }
                 | Removal::Unhide { title, .. }
                 | Removal::Remove { title, .. }
-                | Removal::RemoveNative { title, .. }
                 | Removal::Forget { title, .. },
             ) => self.say(format!("{title} is not one the list can stop")),
             Err(why) => self.say(why),
@@ -427,14 +426,11 @@ impl App {
         }
         match self.removal() {
             Ok(Removal::Ask(a)) => self.ask(a.remove_only()),
-            Ok(Removal::Stop { title, .. } | Removal::StopNative { title, .. }) => {
-                self.say(format!("{title} can only be stopped from here · /stop"))
-            }
+            Ok(Removal::Stop { title, .. }) => self.say(format!("{title} can only be stopped from here · /stop")),
             Ok(
                 Removal::Hide { title, .. }
                 | Removal::Unhide { title, .. }
                 | Removal::Remove { title, .. }
-                | Removal::RemoveNative { title, .. }
                 | Removal::Forget { title, .. },
             ) => self.say(format!(
                 "/rm removes a session Relay or its harness can remove · {title} is not one (/hide hides it)"

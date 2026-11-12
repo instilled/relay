@@ -265,21 +265,17 @@ async fn hand_over(home: &Home, hand: &Hand) -> String {
             Ok(ended) => back_words(title, &ended),
             Err(e) => format!("attach {title}: {e:#}"),
         },
-        To::Argv { argv, back } => {
-            // While you are attached, nothing is typed into it; one being
-            // typed into is waited for, and not attached to while it is.
-            let _you = match attached(home, &hand.key).await {
-                Lock::Busy => return format!("relay is typing into {title} · try again in a moment"),
-                Lock::Held(you) => Some(you),
-                Lock::None => None,
-            };
-            match attach::native::hold(argv, None, title, back.as_ref()).await {
+        To::Argv { argv } => {
+            // Mail for it meanwhile is left to its hooks: it is not stopped
+            // under you.
+            let _here = mark(home, &hand.key);
+            match attach::native::hold(argv, None, title).await {
                 Ok(attach::native::Back::Detached) => back_words(title, &attach::Ended::Detached),
                 Ok(attach::native::Back::Ended(exit)) => back_words(title, &attach::held::exit_words(title, &exit).0),
                 Err(e) => format!("attach {title}: {e:#}"),
             }
         }
-        To::Here { argv, cwd } => match attach::native::hold(argv, Some(cwd), title, None).await {
+        To::Here { argv, cwd } => match attach::native::hold(argv, Some(cwd), title).await {
             Ok(attach::native::Back::Detached) => back_words(title, &attach::Ended::Detached),
             Ok(attach::native::Back::Ended(exit)) => back_words(title, &attach::held::exit_words(title, &exit).0),
             Err(e) => format!("attach {title}: {e:#}"),
@@ -287,33 +283,14 @@ async fn hand_over(home: &Home, hand: &Hand) -> String {
     }
 }
 
-/// The lock that says you are attached to a native row.
-enum Lock {
-    /// Held shared while you are attached: nothing is typed into it.
-    Held(rl_detect::typing::Attached),
-    /// A line is being typed into it still, after the longest a typer takes.
-    Busy,
-    /// Not a native row, or its lock file is not to be had: no lock.
-    None,
-}
-
-/// The lock of the native row `key` (`n:<harness>:<id>`), waited for while
-/// a typer is at it (`TYPER_MOST`, off the loop's thread).
-async fn attached(home: &Home, key: &str) -> Lock {
+/// The mark that says you are attached to the native row `key`
+/// (`n:<harness>:<id>`); none for any other row.
+fn mark(home: &Home, key: &str) -> Option<crate::store::attached::Mark> {
     let mut parts = key.splitn(3, ':');
     let (Some("n"), Some(harness), Some(id)) = (parts.next(), parts.next(), parts.next()) else {
-        return Lock::None;
+        return None;
     };
-    let lock = rl_detect::typing::lock_path(&home.typing_dir(), harness, id);
-    let held = tokio::task::spawn_blocking(move || {
-        rl_detect::typing::Attached::hold_within(&lock, rl_detect::typing::TYPER_MOST)
-    })
-    .await;
-    match held {
-        Ok(Some(you)) => Lock::Held(you),
-        Ok(None) => Lock::Busy,
-        Err(_) => Lock::None,
-    }
+    crate::store::attached::mark(home, harness, id)
 }
 
 /// What the footer says once an attach is over.

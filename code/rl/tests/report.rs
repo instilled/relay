@@ -141,8 +141,13 @@ fn a_harness_that_changed_is_kept_and_said_by_setup_check_and_doctor() {
     assert!(doctor.status.success(), "{doctor:?}");
     let said = out(&doctor);
     assert!(said.contains("claude 2.1.999 · "), "{said}");
+    // Its self-check runs again, says what is off, and counts it.
     assert!(
-        said.contains("[claude.agents_json] ×2 · not reported · rl report"),
+        said.contains("  off: `claude agents --json` changed shape: not a list [claude.agents_json]"),
+        "{said}"
+    );
+    assert!(
+        said.contains("[claude.agents_json] ×3 · not reported · rl report"),
         "{said}"
     );
 }

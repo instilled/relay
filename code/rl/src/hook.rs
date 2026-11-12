@@ -33,7 +33,7 @@
 //!
 //! The one thing printed: the news of relay mail (`news`), for a harness
 //! with no way to tell one of its sessions anything from outside, whose
-//! hooks carry it instead (`Harness::mail_by_hooks`: Claude Code). With mail waiting in the session's own folders
+//! hooks carry it instead (`Info::mail_by_hooks`: Claude Code). With mail waiting in the session's own folders
 //! (`mcp::own_keys`), its `UserPromptSubmit` prints the JSON that adds a
 //! line to the prompt's context, and its `Stop` the JSON that keeps it going
 //! one more turn to read the mail — once for the same mail (`mail::told`),
@@ -198,7 +198,7 @@ pub async fn hook(home: &Home, words: &Words) {
     // A listing of a folder or two: done, unless the time is already gone.
     let by_hooks = registry
         .profile(&words.agent)
-        .is_some_and(|p| rl_detect::harness::of(p, None).mail_by_hooks());
+        .is_some_and(|p| rl_detect::harness::of(p, None).info().mail_by_hooks);
     if by_hooks
         && Instant::now() < deadline
         && let Some(said) = news(home, &words.agent, &words.event, held.as_deref(), &payload)

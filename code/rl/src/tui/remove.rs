@@ -6,7 +6,9 @@
 //! for good, and `enter` takes the first. What each does is its harness's:
 //! `stop` is `claude stop`, a Codex turn interrupted, a held session's
 //! holder closed; `remove` is `claude rm`, Codex's `thread/delete`, a held
-//! session stopped if need be and its folder removed. One of a harness's own
+//! session stopped if need be and its folder removed (`Harness::stop`,
+//! `Harness::remove`: the list asks the session's harness, whoever runs
+//! it). One of a harness's own
 //! it cannot remove but can stop is stopped. Anything else — a session an
 //! agent's hooks told of, one of a harness's own it can do nothing with, a
 //! project — is hidden, but a project you added (`/project`) with nothing in
@@ -16,7 +18,7 @@
 
 use crate::config::ListPrefs;
 use crate::rows::{self, Line, Names};
-use crate::sources::{self, Attach, Source};
+use crate::sources::{Owner, Session, Source};
 use crate::store::sessions::Status;
 use std::path::PathBuf;
 
@@ -28,29 +30,18 @@ pub const REMOVE: &str = "r remove · deletes the session for good";
 /// What a second `^x` will do.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Removal {
-    /// A Relay-held session still going: closed.
-    Stop { name: String, title: String },
-    /// One of a harness's own still going: its harness stops it by its id,
-    /// in its folder (`Harness::stop`).
-    StopNative {
-        harness: String,
-        id: String,
-        cwd: PathBuf,
-        title: String,
-    },
+    /// A session still going: stopped by its harness (`Harness::stop`).
+    Stop { session: Session, title: String },
     /// A session: what to do is asked, in the footer.
     Ask(Ask),
-    /// One of a harness's own deleted for good by its harness, by its id, in
-    /// its folder (`Harness::remove`).
-    RemoveNative {
-        harness: String,
-        id: String,
-        cwd: PathBuf,
+    /// A session deleted for good by its harness (`Harness::remove`; one
+    /// Relay holds is stopped first where it still goes), and what was kept
+    /// for its row (`key`) with it.
+    Remove {
+        session: Session,
+        key: String,
         title: String,
     },
-    /// A Relay-held session: stopped first where it is still going (`live`),
-    /// then its folder removed.
-    Remove { name: String, title: String, live: bool },
     /// Off the list, by key, until hidden is on.
     Hide { key: String, title: String },
     /// Back on the list.
@@ -68,24 +59,15 @@ impl Removal {
     /// The armed hint's words, after "press ^x again to".
     pub fn hint(&self) -> String {
         match self {
-            Removal::Stop { title, .. } | Removal::StopNative { title, .. } => format!("stop {title}"),
+            Removal::Stop { title, .. } => format!("stop {title}"),
             Removal::Ask(a) if a.stop => format!("stop or remove {}", a.title),
             Removal::Ask(a) => format!("remove {}", a.title),
-            Removal::RemoveNative { title, .. } | Removal::Remove { title, .. } => format!("remove {title}"),
+            Removal::Remove { title, .. } => format!("remove {title}"),
             Removal::Hide { title, .. } => format!("hide {title}"),
             Removal::Unhide { title, .. } => format!("bring back {title}"),
             Removal::Forget { title, .. } => format!("take {title} off the list"),
         }
     }
-}
-
-/// Whose a session asked about is, and so what stops and removes it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Target {
-    /// One Relay holds, by its name; `live` while it is still going.
-    Held { name: String, live: bool },
-    /// One of a harness's own, by its id, in its folder.
-    Native { id: String, cwd: PathBuf },
 }
 
 /// What the second `^x` asks of a session: stop it, where it is still
@@ -94,7 +76,10 @@ pub enum Target {
 pub struct Ask {
     pub harness: String,
     pub title: String,
-    pub target: Target,
+    /// What its harness stops and removes.
+    pub session: Session,
+    /// Its row's key: what was kept for it goes with a remove.
+    pub key: String,
     /// Whether the stop is offered (first): it is still going.
     pub stop: bool,
 }
@@ -120,28 +105,12 @@ impl Ask {
     /// What `key` takes: `s` the stop, where it is offered, `r` the remove.
     /// `None`: not one of the choices.
     pub fn take(&self, key: char) -> Option<Removal> {
-        let title = self.title.clone();
-        match (key, &self.target) {
-            ('s', _) if !self.stop => None,
-            ('s', Target::Held { name, .. }) => Some(Removal::Stop {
-                name: name.clone(),
-                title,
-            }),
-            ('s', Target::Native { id, cwd }) => Some(Removal::StopNative {
-                harness: self.harness.clone(),
-                id: id.clone(),
-                cwd: cwd.clone(),
-                title,
-            }),
-            ('r', Target::Held { name, live }) => Some(Removal::Remove {
-                name: name.clone(),
-                title,
-                live: *live,
-            }),
-            ('r', Target::Native { id, cwd }) => Some(Removal::RemoveNative {
-                harness: self.harness.clone(),
-                id: id.clone(),
-                cwd: cwd.clone(),
+        let (session, title) = (self.session.clone(), self.title.clone());
+        match key {
+            's' if self.stop => Some(Removal::Stop { session, title }),
+            'r' => Some(Removal::Remove {
+                session,
+                key: self.key.clone(),
                 title,
             }),
             _ => None,
@@ -165,48 +134,38 @@ pub fn plan(line: &Line, prefs: &ListPrefs, status: impl Fn(&str) -> Option<Stat
         Line::Group(_) => {}
         Line::Session(r) => {
             let title = Names::new(&prefs.names).title(r).to_string();
-            if r.source == Source::Held
-                && let Attach::Held(name) = &r.attach
-            {
-                let live = match status(name) {
+            if let Owner::Relay { dir, .. } = &r.session.owner {
+                // As it stands now, not as last read.
+                let live = match status(&r.session.id) {
                     Some(Status::Live) => true,
                     Some(_) => false,
                     None => return Err(format!("{title} is gone already")),
                 };
+                let session = Session {
+                    owner: Owner::Relay { live, dir: dir.clone() },
+                    ..r.session.clone()
+                };
                 return Ok(Removal::Ask(Ask {
                     harness: r.harness.clone(),
                     title,
-                    target: Target::Held {
-                        name: name.clone(),
-                        live,
-                    },
+                    session,
+                    key: r.key.clone(),
                     stop: live,
                 }));
             }
             // One hidden and shown is brought back first.
-            if r.source == Source::Native
-                && !hidden(&r.key)
-                && r.removes
-                && let Some(id) = sources::native_id(r)
-            {
+            if r.source == Source::Native && !hidden(&r.key) && r.removes {
                 return Ok(Removal::Ask(Ask {
                     harness: r.harness.clone(),
                     title,
-                    target: Target::Native {
-                        id: id.to_string(),
-                        cwd: r.cwd.clone(),
-                    },
+                    session: r.session.clone(),
+                    key: r.key.clone(),
                     stop: r.stop.is_some(),
                 }));
             }
-            if r.source == Source::Native
-                && !hidden(&r.key)
-                && let Some(id) = &r.stop
-            {
-                return Ok(Removal::StopNative {
-                    harness: r.harness.clone(),
-                    id: id.clone(),
-                    cwd: r.cwd.clone(),
+            if r.source == Source::Native && !hidden(&r.key) && r.stop.is_some() {
+                return Ok(Removal::Stop {
+                    session: r.session.clone(),
                     title,
                 });
             }
@@ -258,7 +217,7 @@ mod tests {
     use super::*;
     use crate::config::Hidden;
     use crate::rows::Head;
-    use crate::sources::Row;
+    use crate::sources::{Attach, Row};
     use jiff::Timestamp;
     use rl_core::state::{RunKind, RunState};
     use rl_session::exit::Exit;
@@ -266,6 +225,14 @@ mod tests {
 
     fn row(key: &str, source: Source) -> Row {
         let name = key.rsplit(':').next().unwrap().to_string();
+        let owner = match source {
+            Source::Held => Owner::Relay {
+                live: true,
+                dir: format!("/h/sessions/{name}").into(),
+            },
+            Source::Native => Owner::Own,
+            Source::Hooked => Owner::Elsewhere { listed: true },
+        };
         Row {
             key: key.into(),
             source,
@@ -281,13 +248,25 @@ mod tests {
             pr: None,
             color: None,
             attach: match source {
-                Source::Held => Attach::Held(name),
+                Source::Held => Attach::Held(name.clone()),
                 _ => Attach::None,
             },
             stop: None,
             removes: false,
             kind: RunKind::Agent,
             repo: None,
+            session: Session {
+                harness: "claude".into(),
+                owner,
+                id: name.clone(),
+                session_id: String::new(),
+                cwd: "/w/api".into(),
+                state: RunState::Working,
+                words: "working".into(),
+                name,
+                relay_name: None,
+                attached: false,
+            },
         }
     }
 
@@ -318,6 +297,7 @@ mod tests {
     fn natives(harness: &str, live: bool) -> Row {
         let mut n = row(&format!("n:{harness}:a1"), Source::Native);
         n.harness = harness.into();
+        n.session.harness = harness.into();
         if live {
             n.stop = Some("a1".into());
         }
@@ -373,28 +353,42 @@ mod tests {
     fn a_held_session_is_asked_about_stopped_by_s_and_removed_by_r() {
         let r = row("r:api-sh", Source::Held);
         let live = asked(&r, Some(Status::Live));
-        assert_eq!(
-            live.take('s'),
-            Some(Removal::Stop {
-                name: "api-sh".into(),
-                title: "api-sh".into()
-            })
-        );
-        assert_eq!(
-            live.take('r'),
-            Some(Removal::Remove {
-                name: "api-sh".into(),
-                title: "api-sh".into(),
-                live: true
-            }),
-            "stopped first, then removed"
+        let Some(Removal::Stop { session, title }) = live.take('s') else {
+            panic!("s stops it");
+        };
+        assert_eq!((session.id.as_str(), title.as_str()), ("api-sh", "api-sh"));
+        let Some(Removal::Remove { session, key, .. }) = live.take('r') else {
+            panic!("r removes it");
+        };
+        assert_eq!(key, "r:api-sh");
+        assert!(
+            matches!(session.owner, Owner::Relay { live: true, .. }),
+            "its harness stops it first, then removes it"
         );
         assert!(matches!(live.first(), Removal::Stop { .. }), "enter: the safe one");
         let over = asked(&r, Some(ended()));
         assert_eq!(over.take('s'), None, "nothing to stop");
-        assert!(matches!(over.first(), Removal::Remove { live: false, .. }));
+        assert!(matches!(
+            over.first(),
+            Removal::Remove {
+                session: Session {
+                    owner: Owner::Relay { live: false, .. },
+                    ..
+                },
+                ..
+            }
+        ));
         let lost = asked(&r, Some(Status::Lost));
-        assert!(matches!(lost.first(), Removal::Remove { live: false, .. }));
+        assert!(matches!(
+            lost.first(),
+            Removal::Remove {
+                session: Session {
+                    owner: Owner::Relay { live: false, .. },
+                    ..
+                },
+                ..
+            }
+        ));
         assert_eq!(
             plan(&Line::Session(&r), &ListPrefs::default(), |_| None).unwrap_err(),
             "api-sh is gone already"
@@ -408,23 +402,23 @@ mod tests {
 
     #[test]
     fn a_harnesss_own_session_is_stopped_or_removed_by_its_harness() {
-        let ask = asked(&natives("claude", true), None);
-        assert!(matches!(ask.take('s'), Some(Removal::StopNative { ref id, .. }) if id == "a1"));
+        let n = natives("claude", true);
+        let ask = asked(&n, None);
+        assert!(matches!(ask.take('s'), Some(Removal::Stop { ref session, .. }) if *session == n.session));
         assert_eq!(
             ask.take('r'),
-            Some(Removal::RemoveNative {
-                harness: "claude".into(),
-                id: "a1".into(),
-                cwd: "/w/api".into(),
+            Some(Removal::Remove {
+                session: n.session.clone(),
+                key: "n:claude:a1".into(),
                 title: "a1".into(),
             })
         );
         assert_eq!(ask.take('x'), None);
         assert_eq!(ask.take('a'), None, "no archive");
-        assert!(matches!(ask.first(), Removal::StopNative { .. }), "enter: the safe one");
+        assert!(matches!(ask.first(), Removal::Stop { .. }), "enter: the safe one");
         let ended = asked(&natives("claude", false), None);
         assert_eq!(ended.take('s'), None, "nothing to stop");
-        assert!(matches!(ended.first(), Removal::RemoveNative { .. }));
+        assert!(matches!(ended.first(), Removal::Remove { .. }));
         assert_eq!(ask.remove_only(), ended, "/rm: the remove alone");
         // Hidden and shown: brought back first.
         let mut prefs = ListPrefs::default();
@@ -489,10 +483,8 @@ mod tests {
         assert_eq!(stop.hint(), "stop a1");
         assert_eq!(
             stop,
-            Removal::StopNative {
-                harness: n.harness.clone(),
-                id: "a1".into(),
-                cwd: "/w/api".into(),
+            Removal::Stop {
+                session: n.session.clone(),
                 title: "a1".into()
             }
         );

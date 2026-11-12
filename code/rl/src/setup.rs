@@ -1,7 +1,7 @@
 //! `rl setup`: for each harness, its user hooks (`rl_detect::user_hooks`)
 //! where it has them, and the `rl mcp --harness <h>` server registered at
-//! user level where it has a place for one. Both are the harness's to say
-//! (`Harness::user_hooks`, `Harness::mcp`): Claude's server goes through
+//! user level where it has a place for one. Each is a part the harness names
+//! (`Harness::setup`, `rl_detect::setup::Part`): Claude's server goes through
 //! `claude mcp`, which owns `~/.claude.json`, and Antigravity's through `agy
 //! mcp`, which owns `~/.gemini/config/mcp_config.json`; Codex's and
 //! Gemini's are written into their own files (`rl_detect::mcp_entry`).
@@ -23,17 +23,17 @@
 use crate::config::Config;
 use anyhow::{Context as _, Result, anyhow, bail};
 use rl_core::Home;
+use rl_detect::Registry;
 use rl_detect::harness::{self, Harness};
-use rl_detect::mcp_entry::{self, SERVER, Want};
+use rl_detect::mcp_entry::{SERVER, Want};
 use rl_detect::registry::{Profile, find_bin};
-use rl_detect::sessions::UserHooks;
-use rl_detect::settings;
-use rl_detect::{Registry, user_hooks};
+use rl_detect::setup::Part as Piece;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 pub use rl_detect::mcp_entry::State;
+pub use rl_detect::setup::What;
 
 /// `rl setup` for the harnesses named, or every agent `bin_of` finds (for
 /// `--remove`, every agent with hooks or a server: one whose files hold
@@ -60,7 +60,7 @@ pub fn run(
     }
     if !remove && only.is_empty() {
         let mut config = Config::load(home)?;
-        config.harnesses = harnesses.iter().map(|h| h.name().to_string()).collect();
+        config.harnesses = harnesses.iter().map(|h| h.info().name.clone()).collect();
         config.save(home)?;
     }
     if lines.is_empty() {
@@ -140,7 +140,7 @@ fn select(
         return Ok(registry
             .agents()
             .map(of)
-            .filter(|h| set_up(h.as_ref()) && (remove || h.found()))
+            .filter(|h| set_up(h.as_ref()) && (remove || h.info().found))
             .collect());
     }
     only.iter()
@@ -152,9 +152,11 @@ fn select(
 }
 
 /// Whether `rl setup` has anything to do for `h`: hooks of its own, a
-/// place for the server, or settings of its own to set.
+/// place for the server, or settings of its own to set — wherever its files
+/// are.
 fn set_up(h: &dyn Harness) -> bool {
-    h.user_hooks().is_some() || h.has_mcp() || h.profile().settings.is_some()
+    h.setup(&|_| Some(OsString::from("/")))
+        .is_ok_and(|parts| !parts.is_empty())
 }
 
 /// What a harness needs from `rl setup`: each of its parts that a run would
@@ -172,42 +174,6 @@ pub struct Part {
     pub state: State,
     /// The file it is in, with the home folder as `~`.
     pub file: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum What {
-    Hooks,
-    /// The `relay` MCP server's entry.
-    Mcp,
-    /// A key of the harness's own global config not as Relay sets it: the
-    /// key, and what its profile says of that (`← opens agents on`).
-    Setting {
-        key: String,
-        says: String,
-    },
-}
-
-impl std::fmt::Display for What {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            What::Hooks => f.write_str("hooks"),
-            What::Mcp => write!(f, "mcp {SERVER}"),
-            What::Setting { says, .. } => f.write_str(says),
-        }
-    }
-}
-
-impl What {
-    /// What it is called in `config.json`'s `setup.declined`, for the
-    /// harness `h`: `codex/hooks`, `codex/mcp`,
-    /// `claude/settings/leftArrowOpensAgents`.
-    pub fn id(&self, h: &str) -> String {
-        match self {
-            What::Hooks => format!("{h}/hooks"),
-            What::Mcp => format!("{h}/mcp"),
-            What::Setting { key, .. } => format!("{h}/settings/{key}"),
-        }
-    }
 }
 
 /// `hooks missing`, `mcp relay stale (points at /old/rl)`, `← opens agents
@@ -362,33 +328,20 @@ pub fn apply(home: &Home, name: &str, what: &What, host: &Host) -> Result<String
     let h = harness::of(profile, (host.bin_of)(profile));
     let place = Place::of(h.as_ref(), &env)?;
     let want = want(home, &host.rl_bin, &env);
-    match (what, &place.hooks, &place.mcp, &place.settings) {
-        (What::Hooks, Some((hooks, file)), _, _) => {
-            user_hooks::install(file, hooks, Path::new(&want.rl)).with_context(|| name.to_string())?;
-            Ok("hooks installed".into())
-        }
-        (What::Mcp, _, Some(mcp), _) => {
-            mcp.register(&want).with_context(|| name.to_string())?;
-            Ok(format!("mcp {SERVER} registered"))
-        }
-        (What::Setting { key, .. }, _, _, Some(settings)) => {
-            let one = settings::Place {
-                path: settings.path.clone(),
-                set: settings.set.iter().filter(|s| &s.key == key).cloned().collect(),
-            };
-            if one.set.is_empty() {
-                bail!("{name}: has no setting {key}");
-            }
-            let set = one.apply().with_context(|| name.to_string())?;
-            let words: Vec<String> = set.iter().map(|s| format!("{} set to {}", s.key, s.value)).collect();
-            Ok(if words.is_empty() {
-                "already set".into()
-            } else {
-                words.join(", ")
-            })
-        }
-        _ => bail!("{name}: has no {what} to set up"),
-    }
+    let same = |p: &&Piece| match (p.what(), what) {
+        (What::Setting { key: a, .. }, What::Setting { key: b, .. }) => a == *b,
+        (a, b) => a == *b,
+    };
+    let Some(p) = place.parts.iter().find(same) else {
+        bail!("{name}: has no {what} to set up");
+    };
+    let changed = p.apply(&want).with_context(|| name.to_string())?;
+    Ok(match p.what() {
+        What::Hooks => "hooks installed".into(),
+        What::Mcp => format!("mcp {SERVER} registered"),
+        What::Setting { key, .. } if changed => format!("{key} set to {}", p.value().unwrap_or_default()),
+        What::Setting { .. } => "already set".into(),
+    })
 }
 
 /// Keeps which harnesses are set up in `config.json`, as `run` does: every
@@ -397,7 +350,7 @@ pub fn remember(home: &Home, host: &Host) -> Result<()> {
     let registry = Registry::load(home)?;
     let harnesses = select(&registry, &[], false, &|p| (host.bin_of)(p))?;
     let mut config = Config::load(home)?;
-    config.harnesses = harnesses.iter().map(|h| h.name().to_string()).collect();
+    config.harnesses = harnesses.iter().map(|h| h.info().name.clone()).collect();
     config.save(home)
 }
 
@@ -428,9 +381,9 @@ fn relay_home(home: &Home, env: &impl Fn(&str) -> Option<OsString>) -> Option<St
     (default.as_deref() != Some(home.path())).then(|| home.path().to_string_lossy().into_owned())
 }
 
-/// One harness: its hooks, where it has them, then its MCP entry. A line
-/// naming what changed. Setting up asks `Place::need` first — what
-/// `check` asks — and writes only what it names.
+/// One harness: what it needs, part by part, as `Place::need` names it —
+/// what `check` asks — its hooks and MCP entry written, then its settings.
+/// A line naming what changed.
 fn one(
     h: &dyn Harness,
     remove: bool,
@@ -438,48 +391,55 @@ fn one(
     env: &impl Fn(&str) -> Option<OsString>,
     declined: &[String],
 ) -> Result<Vec<String>> {
-    let name = h.name();
     let place = Place::of(h, env)?.without(declined);
+    let name = place.name;
     let mut parts = Vec::new();
     let mut notes = Vec::new();
-    let mcp_line = |mcp: &mcp_entry::Place, word: &str| {
-        let note = mcp.note.as_ref().map(|n| format!(" ({n})")).unwrap_or_default();
-        format!("mcp {SERVER} {word} ({}){note}", tilde(&mcp.path, env))
+    let mcp_line = |p: &Piece, word: &str| {
+        let note = p.note().map(|n| format!(" ({n})")).unwrap_or_default();
+        format!("mcp {SERVER} {word} ({}){note}", tilde(p.file(), env))
     };
     if remove {
-        if let Some((hooks, file)) = &place.hooks
-            && user_hooks::uninstall(file, hooks).with_context(|| name.to_string())?
-        {
-            parts.push("hooks removed".to_string());
-        }
-        if let Some(mcp) = &place.mcp
-            && mcp.remove().with_context(|| name.to_string())?
-        {
-            parts.push(mcp_line(mcp, "removed"));
+        for p in &place.parts {
+            if p.remove().with_context(|| name.to_string())? {
+                match p.what() {
+                    What::Hooks => parts.push("hooks removed".to_string()),
+                    What::Mcp => parts.push(mcp_line(p, "removed")),
+                    What::Setting { .. } => {}
+                }
+            }
         }
     } else if let Some(need) = place.need(want, env)? {
         for item in &need.items {
-            match (&item.what, &place.hooks, &place.mcp) {
-                (What::Hooks, Some((hooks, file)), _) => {
-                    user_hooks::install(file, hooks, Path::new(&want.rl)).with_context(|| name.to_string())?;
+            let Some(p) = place.parts.iter().find(|p| p.what() == item.what) else {
+                continue;
+            };
+            match item.what {
+                What::Hooks => {
+                    p.apply(want).with_context(|| name.to_string())?;
                     parts.push("hooks installed".to_string());
-                    if let Some(note) = &hooks.after_install {
+                    if let Some(note) = p.after_install() {
                         notes.push(format!("{name}: {note}"));
                     }
                 }
-                (What::Mcp, _, Some(mcp)) => {
-                    mcp.register(want).with_context(|| name.to_string())?;
-                    parts.push(mcp_line(mcp, "registered"));
+                What::Mcp => {
+                    p.apply(want).with_context(|| name.to_string())?;
+                    parts.push(mcp_line(p, "registered"));
                 }
-                _ => {}
+                What::Setting { .. } => {}
             }
         }
     }
     // Last, and as the file is now: a harness's own CLI may have just
     // written the same file.
-    if !remove && let Some(settings) = &place.settings {
-        for s in settings.apply().with_context(|| name.to_string())? {
-            parts.push(format!("{} set to {} ({})", s.key, s.value, tilde(&settings.path, env)));
+    if !remove {
+        for p in place.parts.iter().filter(|p| matches!(p.what(), What::Setting { .. })) {
+            if p.apply(want).with_context(|| name.to_string())?
+                && let What::Setting { key, .. } = p.what()
+            {
+                let value = p.value().unwrap_or_default();
+                parts.push(format!("{key} set to {value} ({})", tilde(p.file(), env)));
+            }
         }
     }
     if parts.is_empty() {
@@ -490,57 +450,24 @@ fn one(
     Ok(out)
 }
 
-/// Where a harness's hooks, MCP server and settings are.
+/// A harness's parts (`Harness::setup`), each in its file.
 struct Place<'a> {
     name: &'a str,
-    hooks: Option<(&'a UserHooks, PathBuf)>,
-    mcp: Option<mcp_entry::Place>,
-    settings: Option<settings::Place>,
+    parts: Vec<Piece>,
 }
 
 impl<'a> Place<'a> {
     fn of(h: &'a dyn Harness, env: &impl Fn(&str) -> Option<OsString>) -> Result<Place<'a>> {
-        let name = h.name();
-        let hooks = h
-            .user_hooks()
-            .map(|hooks| {
-                hooks
-                    .file(env)
-                    .map(|f| (hooks, f))
-                    .ok_or_else(|| anyhow!("{name}: HOME is not set, so where its hooks file is is not known"))
-            })
-            .transpose()?;
-        let mcp = h.mcp(env)?;
-        let settings = h.settings(env)?;
         Ok(Place {
-            name,
-            hooks,
-            mcp,
-            settings,
+            name: &h.info().name,
+            parts: h.setup(env)?,
         })
     }
 
     /// The same, without what `declined` names (`What::id`).
     fn without(mut self, declined: &[String]) -> Place<'a> {
         let name = self.name;
-        let out = |w: &What| declined.contains(&w.id(name));
-        if out(&What::Hooks) {
-            self.hooks = None;
-        }
-        if out(&What::Mcp) {
-            self.mcp = None;
-        }
-        if let Some(s) = &mut self.settings {
-            s.set.retain(|x| {
-                !out(&What::Setting {
-                    key: x.key.clone(),
-                    says: String::new(),
-                })
-            });
-            if s.set.is_empty() {
-                self.settings = None;
-            }
-        }
+        self.parts.retain(|p| !declined.contains(&p.what().id(name)));
         self
     }
 
@@ -550,45 +477,16 @@ impl<'a> Place<'a> {
     /// that does not read).
     fn need(&self, want: &Want, env: &impl Fn(&str) -> Option<OsString>) -> Result<Option<Need>> {
         let name = self.name;
-        if let Some(cli) = self.mcp.as_ref().and_then(mcp_entry::Place::cli_missing) {
+        if let Some(cli) = self.parts.iter().find_map(Piece::cli_missing) {
             bail!("{name}: not on PATH; its MCP server is registered with `{cli}`, so install it first");
         }
         let mut items = Vec::new();
-        if let Some((hooks, file)) = &self.hooks {
-            let rl = Path::new(&want.rl);
-            if user_hooks::install_needed(file, hooks, rl).with_context(|| name.to_string())? {
-                let state = if user_hooks::installed(file, hooks)? {
-                    State::Stale {
-                        was: user_hooks::programs(file, hooks)?.into_iter().find(|p| *p != want.rl),
-                    }
-                } else {
-                    State::Missing
-                };
+        for p in &self.parts {
+            if let Some(state) = p.need(want).with_context(|| name.to_string())? {
                 items.push(Part {
-                    what: What::Hooks,
+                    what: p.what(),
                     state,
-                    file: tilde(file, env),
-                });
-            }
-        }
-        if let Some(mcp) = &self.mcp
-            && let Some(state) = mcp.need(want).with_context(|| name.to_string())?
-        {
-            items.push(Part {
-                what: What::Mcp,
-                state,
-                file: tilde(&mcp.path, env),
-            });
-        }
-        if let Some(settings) = &self.settings {
-            for s in settings.need().with_context(|| name.to_string())? {
-                items.push(Part {
-                    what: What::Setting {
-                        key: s.key.clone(),
-                        says: s.check.clone(),
-                    },
-                    state: State::Missing,
-                    file: tilde(&settings.path, env),
+                    file: tilde(p.file(), env),
                 });
             }
         }

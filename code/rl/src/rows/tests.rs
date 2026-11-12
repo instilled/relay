@@ -26,6 +26,21 @@ fn row(id: &str, state: RunState, cwd: &str, at: &str) -> Row {
         removes: false,
         kind: RunKind::Agent,
         repo: crate::git::toplevel(Path::new(cwd)),
+        session: crate::sources::Session {
+            harness: "gemini".into(),
+            owner: crate::sources::Owner::Relay {
+                live: true,
+                dir: format!("/h/sessions/{id}").into(),
+            },
+            id: id.into(),
+            session_id: String::new(),
+            cwd: cwd.into(),
+            state,
+            words: state_words(state, Confidence::Exact),
+            name: id.into(),
+            relay_name: None,
+            attached: false,
+        },
     }
 }
 
