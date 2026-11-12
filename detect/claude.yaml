@@ -68,10 +68,62 @@ sessions:
   # terminal is `resume` above, then this: `claude --resume <id> --bg`.
   start: [--bg]
   name: [-n, "{name}"]
-  # ^x on one still going stops it (`claude stop <id>`); never `claude rm`.
+  # Stopping one still going (`claude stop <id>`): its process ends, its
+  # conversation is kept, and `claude attach` opens it again.
   stop: [stop, "{id}"]
+  # ^x twice on one asks, in the footer: `s` stops it (enter does too), and
+  # `close` deletes it for good (`claude rm <id>`, which takes its worktree
+  # when that is safe, and works on one that has exited). One that has ended
+  # is offered only the close. Read off `claude rm --help` 2.1.322.
+  stop_choice: { words: stop, says: "keeps the conversation" }
+  close:
+    key: r
+    words: remove
+    says: "deletes it and its worktree"
+    done: removed
+    args: [rm, "{id}"]
+  # Its agents view, as an attached session draws it (← on an empty prompt
+  # opens it there, whatever `leftArrowOpensAgents` says): the new-session
+  # prompt's placeholder, at the left edge — a transcript indents what it
+  # quotes. Relay's list is that view, so the attach lets go and the list
+  # comes back. Read off `claude agents` 2.1.322 in a pty, at 34 to 120
+  # columns (it wraps after `new` when narrow).
+  agents_view: ['^❯ describe a task for a new\b']
+  # A name you give one in Relay's list goes to Claude too, typed into it
+  # (Claude has no command that renames one from outside): only into one
+  # that is idle, that you are not attached to; else the name stays Relay's.
+  rename: { type: "/rename {name}" }
+  # Relay mail wakes one: an idle one has the mail's line typed into it; one
+  # that has stopped or ended is carried on in the background with that line
+  # as its prompt (`resume` above, then `start`); one working or waiting on
+  # you hears of it from its hooks, as before.
+  wake: { idle: type, stopped: resume_bg }
+  # What an attached session's screen shows of its input, for typing into it
+  # (at 120x40, through `attach`): its input line is `❯` and a no-break
+  # space at the left edge (a bare `❯` where the space is not kept), between
+  # two rules — the transcript quotes your prompts with a plain space — and
+  # a turn running has its spinner line (`✻ Puttering… (1s · ↓ 9 tokens)`;
+  # a turn done says `✻ Worked for 2s`, no ellipsis). Read off `claude
+  # attach` 2.1.322 in a pty.
+  typing:
+    input: '^❯(?:\x{a0}(.*))?$'
+    busy: ['^[·✢✳✶✻✽*] \S+…', '(?i)esc to interrupt']
 # Where Relay's MCP server goes (`rl setup`): Claude's own ~/.claude.json
 # ($CLAUDE_CONFIG_DIR/.claude.json with that set), written only through
 # `claude mcp add|remove --scope user`; Relay reads it to compare.
 mcp:
   file: ["$CLAUDE_CONFIG_DIR/.claude.json", "~/.claude.json"]
+# What `rl setup` sets in Claude's global config, the same file: `←` on an
+# empty prompt opens Claude's agents view, and Relay's list is that view, so
+# it is turned off. Claude has no command that sets it (`claude config` is
+# gone), so Relay writes the key itself, the rest of the file kept; `--check`
+# says `check` while it is not so. `--remove` leaves it.
+settings:
+  file: ["$CLAUDE_CONFIG_DIR/.claude.json", "~/.claude.json"]
+  set:
+    # `short` and `why`: how the setup wizard names it, and its reason.
+    - key: leftArrowOpensAgents
+      value: false
+      check: "← opens agents on"
+      short: "← back to list"
+      why: "← goes back to Relay's list"

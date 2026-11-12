@@ -397,6 +397,128 @@ async fn a_click_puts_the_cursor_on_its_line() {
     assert_eq!(app.sel.as_deref(), Some("n:claude:ab12cd34"));
 }
 
+fn mouse(app: &mut App, kind: crossterm::event::MouseEventKind, row: u16) {
+    app.mouse(crossterm::event::MouseEvent {
+        kind,
+        column: 10,
+        row,
+        modifiers: KeyModifiers::NONE,
+    });
+}
+
+#[tokio::test]
+async fn a_pointer_that_only_moves_leaves_the_cursor_and_the_wheel_steps_it() {
+    use crossterm::event::MouseEventKind::{Moved, ScrollDown, ScrollUp};
+    let f = fixture();
+    let mut app = list(&f).await;
+    let rows = screen(&app, 100, 30);
+    let at = |text: &str| rows.iter().position(|r| r.contains(text)).unwrap() as u16;
+    let keys = app.keys();
+    on(&mut app, &keys[0]);
+    // Over another line, the cursor stays where the keys or the wheel put it.
+    mouse(&mut app, Moved, at("fix the login"));
+    assert_eq!(app.sel.as_ref(), Some(&keys[0]), "a hover does not select");
+    mouse(&mut app, ScrollDown, at("fix the login"));
+    mouse(&mut app, ScrollDown, at("fix the login"));
+    assert_eq!(app.sel.as_ref(), Some(&keys[2]), "one line a tick");
+    mouse(&mut app, Moved, at("trunk"));
+    assert_eq!(app.sel.as_ref(), Some(&keys[2]));
+    mouse(&mut app, ScrollUp, at("trunk"));
+    assert_eq!(app.sel.as_ref(), Some(&keys[1]));
+}
+
+/// The list as read now is the list built afresh: nothing stale.
+fn fresh(app: &App) {
+    assert_eq!(app.lines(), app.lines_with(&app.filter), "the list is stale");
+    assert_eq!(
+        app.keys(),
+        app.lines_with(&app.filter).iter().map(|l| l.key()).collect::<Vec<_>>()
+    );
+}
+
+#[tokio::test]
+async fn the_list_built_once_is_never_stale() {
+    let f = fixture();
+    let mut app = list(&f).await;
+    fresh(&app);
+    let other = f.repo.parent().unwrap().join("yard");
+    std::fs::create_dir_all(&other).unwrap();
+    app.set_native(vec![
+        waiting(&f.repo),
+        NativeRow {
+            id: "ef56ab78".into(),
+            name: "paint the fence".into(),
+            ..waiting(&other)
+        },
+    ]);
+    fresh(&app);
+    assert!(app.keys().iter().any(|k| k == "n:claude:ef56ab78"));
+    assert!(shown(&app).contains("paint the fence"));
+    // The search, the toggles, the grouping, a name, a pin, a hide.
+    ctrl(&mut app, 'f');
+    typed(&mut app, "fence");
+    fresh(&app);
+    assert!(!shown(&app).contains("fix the login"));
+    press(&mut app, KeyCode::Esc);
+    fresh(&app);
+    assert!(shown(&app).contains("fix the login"));
+    ctrl(&mut app, 'a');
+    fresh(&app);
+    assert!(!shown(&app).contains("fix the login"));
+    ctrl(&mut app, 'a');
+    ctrl(&mut app, 's');
+    fresh(&app);
+    assert!(shown(&app).contains("Needs input"));
+    ctrl(&mut app, 's');
+    on(&mut app, NATIVE);
+    run(&mut app, "/rename the login");
+    fresh(&app);
+    assert!(shown(&app).contains("the login"));
+    ctrl(&mut app, 't');
+    fresh(&app);
+    assert_eq!(app.keys()[0], NATIVE);
+    run(&mut app, "/hide");
+    fresh(&app);
+    assert!(!app.keys().iter().any(|k| k == NATIVE));
+    // The files read again, and the checkouts.
+    sessions::remove(&f.home, "shop-sh").unwrap();
+    app.reload();
+    fresh(&app);
+    assert!(!app.keys().iter().any(|k| k == HELD));
+    git(&other, &["init", "-q", "-b", "yard-main"]);
+    app.regit();
+    fresh(&app);
+    assert!(shown(&app).contains("yard-main"), "{}", shown(&app));
+}
+
+#[tokio::test]
+async fn events_waiting_are_taken_together_up_to_one_that_hands_the_terminal_over() {
+    use crossterm::event::Event;
+    let f = fixture();
+    let mut app = list(&f).await;
+    let keys = app.keys();
+    on(&mut app, &keys[0]);
+    let key = |c| Ok(Event::Key(KeyEvent::from(c)));
+    // Two downs waiting behind the first: all three taken, at the end.
+    let mut more = futures::stream::iter(vec![key(KeyCode::Down), key(KeyCode::Down)]);
+    app.events(Some(key(KeyCode::Down)), &mut more).await.unwrap();
+    assert_eq!(app.sel.as_ref(), Some(&keys[2]));
+    assert!(futures::StreamExt::next(&mut more).await.is_none(), "all taken");
+    // An enter that hands the terminal over: what comes after is not the
+    // list's, and stays where it was.
+    on(&mut app, NATIVE);
+    let mut more = futures::stream::iter(vec![key(KeyCode::Down)]);
+    app.events(Some(key(KeyCode::Enter)), &mut more).await.unwrap();
+    assert!(app.hand.is_some());
+    assert_eq!(app.sel.as_deref(), Some(NATIVE));
+    assert!(futures::StreamExt::next(&mut more).await.is_some(), "left waiting");
+    // The end of the input quits.
+    app.hand = None;
+    let mut more = futures::stream::iter(Vec::<std::io::Result<Event>>::new());
+    app.events(None, &mut more).await.unwrap();
+    assert!(app.quit);
+}
+
 fn shift(app: &mut App, code: KeyCode) {
     app.key(KeyEvent::new(code, KeyModifiers::SHIFT));
 }
@@ -493,31 +615,93 @@ async fn shift_down_swaps_two_rows_and_keeps_it() {
     assert_eq!(app.keys(), [head.as_str(), HELD, NATIVE]);
 }
 
+/// Whether a choice is being asked in the footer.
+fn asking(app: &App) -> bool {
+    matches!(app.mode, super::app::Mode::Ask(_))
+}
+
+const CLAUDE_ASKS: &str =
+    "s stop · keeps the conversation   r remove · deletes it and its worktree   esc cancel   — fix the login · claude";
+
+/// The screen wide enough for a whole choice in the footer.
+fn wide(app: &App) -> String {
+    screen(app, 160, 30).join("\n")
+}
+
 #[tokio::test]
-async fn ctrl_x_twice_stops_a_harnesss_own_session_through_it() {
+async fn ctrl_x_twice_asks_how_to_close_a_claude_session_and_s_stops_it() {
     let f = fixture();
     let mut app = list(&f).await;
     on(&mut app, NATIVE);
     assert!(
-        shown(&app).contains("ctrl+x twice to stop"),
-        "the hint says what ctrl+x does here"
+        shown(&app).contains("ctrl+x twice to stop or remove"),
+        "the hint says what ctrl+x does here: {}",
+        shown(&app)
     );
     ctrl(&mut app, 'x');
-    assert!(shown(&app).contains("press ctrl+x again to stop fix the login"));
-    assert!(ran_in(&f.repo).is_empty(), "not on the first press");
+    assert!(shown(&app).contains("press ctrl+x again to stop or remove fix the login"));
     ctrl(&mut app, 'x');
+    assert!(asking(&app));
+    assert!(wide(&app).contains(CLAUDE_ASKS), "{}", wide(&app));
+    assert!(shown(&app).contains("esc cancel"), "at 100 columns the keys still fit");
+    assert!(app.work.is_empty() && ran_in(&f.repo).is_empty(), "nothing done yet");
+    // A key that is no answer leaves the choice standing.
+    press(&mut app, KeyCode::Char('q'));
+    ctrl(&mut app, 'r');
+    assert!(asking(&app) && app.work.is_empty());
+    press(&mut app, KeyCode::Char('s'));
+    assert!(!asking(&app));
     app.finish().await;
     assert_eq!(ran_in(&f.repo), ["stop", "ab12cd34"], "claude stop <id>, in its folder");
     assert!(shown(&app).contains("stopped fix the login"));
     assert!(app.ask_native, "the list asks claude again at once");
+    assert!(app.keys().iter().any(|k| k == NATIVE), "still on the list");
     assert!(Config::load(&f.home).unwrap().list.hidden.is_empty(), "not hidden");
 }
 
 #[tokio::test]
-async fn ctrl_x_twice_hides_a_harnesss_own_session_and_again_brings_it_back() {
+async fn ctrl_x_twice_then_enter_stops_as_ever_and_esc_does_nothing() {
     let f = fixture();
     let mut app = list(&f).await;
-    // Done: nothing to stop.
+    on(&mut app, NATIVE);
+    ctrl(&mut app, 'x');
+    ctrl(&mut app, 'x');
+    press(&mut app, KeyCode::Esc);
+    assert!(!asking(&app));
+    assert!(app.work.is_empty() && ran_in(&f.repo).is_empty(), "esc: nothing");
+    assert!(!shown(&app).contains("esc cancel"));
+    ctrl(&mut app, 'x');
+    ctrl(&mut app, 'x');
+    press(&mut app, KeyCode::Enter);
+    app.finish().await;
+    assert_eq!(ran_in(&f.repo), ["stop", "ab12cd34"], "enter: the first, the stop");
+}
+
+#[tokio::test]
+async fn r_removes_a_claude_session_and_its_row_goes_with_what_was_kept_for_it() {
+    let f = fixture();
+    let mut app = list(&f).await;
+    on(&mut app, NATIVE);
+    ctrl(&mut app, 't');
+    ctrl(&mut app, 'x');
+    ctrl(&mut app, 'x');
+    press(&mut app, KeyCode::Char('r'));
+    app.finish().await;
+    assert_eq!(ran_in(&f.repo), ["rm", "ab12cd34"], "claude rm <id>, in its folder");
+    let s = shown(&app);
+    assert!(s.contains("removed fix the login"), "{s}");
+    assert!(app.keys().iter().all(|k| k != NATIVE), "off the list at once: {s}");
+    assert!(app.ask_native, "and claude asked again");
+    assert!(
+        Config::load(&f.home).unwrap().list.pins.is_empty(),
+        "its pin goes with it"
+    );
+}
+
+#[tokio::test]
+async fn an_ended_claude_session_is_offered_only_its_remove() {
+    let f = fixture();
+    let mut app = list(&f).await;
     let mut done = waiting(&f.repo);
     done.state = NativeState {
         words: "completed".into(),
@@ -525,23 +709,44 @@ async fn ctrl_x_twice_hides_a_harnesss_own_session_and_again_brings_it_back() {
     };
     app.set_native(vec![done]);
     on(&mut app, NATIVE);
-    assert!(shown(&app).contains("ctrl+x twice to hide"));
+    assert!(shown(&app).contains("ctrl+x twice to remove"), "{}", shown(&app));
     ctrl(&mut app, 'x');
-    assert!(shown(&app).contains("press ctrl+x again to hide fix the login"));
-    assert!(Config::load(&f.home).unwrap().list.hidden.is_empty(), "not yet");
+    assert!(shown(&app).contains("press ctrl+x again to remove fix the login"));
     ctrl(&mut app, 'x');
+    let s = wide(&app);
+    assert!(
+        s.contains("r remove · deletes it and its worktree   esc cancel   — fix the login · claude"),
+        "{s}"
+    );
+    assert!(!s.contains("s stop"), "nothing to stop");
+    press(&mut app, KeyCode::Char('s'));
+    assert!(asking(&app) && app.work.is_empty(), "s is no answer here");
+    press(&mut app, KeyCode::Enter);
+    app.finish().await;
+    assert_eq!(ran_in(&f.repo), ["rm", "ab12cd34"], "enter: the remove");
+    assert!(app.keys().iter().all(|k| k != NATIVE));
+}
+
+#[tokio::test]
+async fn a_harnesss_own_session_is_hidden_by_slash_hide_and_ctrl_x_twice_brings_it_back() {
+    let f = fixture();
+    let mut app = list(&f).await;
+    on(&mut app, NATIVE);
+    run(&mut app, "/hide");
     assert!(app.keys().iter().all(|k| k != NATIVE));
     assert!(shown(&app).contains("hid fix the login"));
     let hidden = Config::load(&f.home).unwrap().list.hidden;
     assert_eq!(hidden.len(), 1);
     assert_eq!(hidden[0].key, NATIVE);
     assert_eq!(app.sel.as_deref(), Some(HELD), "the cursor on the line before");
-    // With hidden on it is there, and ^x twice brings it back.
+    // With hidden on it is there, and ^x twice brings it back, asking nothing.
     ctrl(&mut app, 'o');
     on(&mut app, NATIVE);
+    assert!(shown(&app).contains("ctrl+x twice to bring back"), "{}", shown(&app));
     ctrl(&mut app, 'x');
     assert!(shown(&app).contains("press ctrl+x again to bring back fix the login"));
     ctrl(&mut app, 'x');
+    assert!(!asking(&app));
     assert!(Config::load(&f.home).unwrap().list.hidden.is_empty());
 }
 
@@ -569,6 +774,7 @@ async fn ctrl_x_twice_removes_an_ended_held_session_and_what_was_kept_for_it() {
     ctrl(&mut app, 'x');
     assert!(shown(&app).contains("press ctrl+x again to remove shop-sh"));
     ctrl(&mut app, 'x');
+    assert!(!asking(&app), "one Relay holds is never asked about");
     app.finish().await;
     assert!(!f.home.session_dir("shop-sh").exists());
     let s = shown(&app);
@@ -594,10 +800,14 @@ async fn enter_hands_a_held_session_over_and_a_native_one_to_its_harness() {
     press(&mut app, KeyCode::Enter);
     let hand = app.hand.take().expect("handed over");
     assert_eq!(hand.key, NATIVE);
-    let super::app::To::Argv(argv) = &hand.to else {
+    let super::app::To::Argv { argv, back } = &hand.to else {
         panic!("{:?}", hand.to);
     };
     assert_eq!(argv[1..], ["attach", "ab12cd34"], "claude attach <id>");
+    // Its agents view, should it come up in the attach, gives the list back.
+    let back = back.as_ref().expect("claude's agents view is known");
+    assert!(back.on("~/shop\n\n❯ describe a task for a new session\n  enter to open"));
+    assert!(!back.on("❯ fix the login\n  ⎿ ❯ describe a task for a new session"));
 }
 
 /// What the harness's stand-in was last run with in `dir` (`sources`).
@@ -692,20 +902,97 @@ async fn the_line_starts_codex_on_its_daemon_and_enter_resumes_the_thread() {
     assert_eq!(app.sel.as_deref(), Some(key.as_str()));
     press(&mut app, KeyCode::Enter);
     let hand = app.hand.take().expect("handed over");
-    let super::app::To::Argv(argv) = &hand.to else {
+    let super::app::To::Argv { argv, .. } = &hand.to else {
         panic!("{:?}", hand.to);
     };
     assert_eq!(argv[1..], ["resume".to_string(), id.clone()], "codex resume <id>");
-    // ctrl+x twice: its running turn interrupted on the daemon.
+    // ctrl+x twice asks; s: its running turn interrupted on the daemon.
     ctrl(&mut app, 'x');
-    assert!(shown(&app).contains("press ctrl+x again to stop"));
+    assert!(shown(&app).contains("press ctrl+x again to stop or archive"));
     ctrl(&mut app, 'x');
+    let s = wide(&app);
+    assert!(
+        s.contains("s stop the turn   a archive · off the list, codex unarchive brings it back   esc cancel"),
+        "{s}"
+    );
+    press(&mut app, KeyCode::Char('s'));
     app.finish().await;
     assert!(
         codex_sent()
             .iter()
             .any(|m| m["method"] == "turn/interrupt" && m["params"]["threadId"] == id.as_str()),
         "interrupted"
+    );
+}
+
+/// The ids the tests' stand-in Codex was asked to archive, by every test so
+/// far.
+fn codex_archived() -> Vec<String> {
+    std::fs::read_to_string(crate::sources::codex_stand_in().with_extension("archived"))
+        .unwrap_or_default()
+        .lines()
+        .map(String::from)
+        .collect()
+}
+
+#[tokio::test]
+async fn a_codex_thread_is_archived_by_a_and_one_at_rest_is_offered_only_that() {
+    let f = fixture();
+    let mut app = list(&f).await;
+    let thread = |id: &str, words: &str, state| {
+        let mut t = waiting(&f.repo);
+        t.harness = "codex".into();
+        t.id = id.into();
+        t.session_id = id.into();
+        t.name = format!("thread {id}");
+        t.state = NativeState {
+            words: words.into(),
+            state,
+        };
+        t
+    };
+    let (live, resting) = (
+        "019f0000-aaaa-7000-8000-000000000001",
+        "019f0000-aaaa-7000-8000-000000000002",
+    );
+    app.set_native(vec![
+        thread(live, "working", RunState::Working),
+        thread(resting, "resting", RunState::Idle),
+    ]);
+    on(&mut app, &format!("n:codex:{live}"));
+    ctrl(&mut app, 'x');
+    ctrl(&mut app, 'x');
+    press(&mut app, KeyCode::Char('a'));
+    app.finish().await;
+    assert!(codex_archived().contains(&live.to_string()), "codex archive <id>");
+    assert!(
+        shown(&app).contains(&format!("archived thread {live}")),
+        "{}",
+        shown(&app)
+    );
+    assert!(
+        app.keys().iter().all(|k| *k != format!("n:codex:{live}")),
+        "off the list"
+    );
+    // At rest: nothing to stop, the archive the one choice, and enter takes it.
+    on(&mut app, &format!("n:codex:{resting}"));
+    ctrl(&mut app, 'x');
+    assert!(shown(&app).contains(&format!("press ctrl+x again to archive thread {resting}")));
+    ctrl(&mut app, 'x');
+    let s = wide(&app);
+    assert!(
+        s.contains(&format!(
+            "a archive · off the list, codex unarchive brings it back   esc cancel   — thread {resting} · codex"
+        )),
+        "{s}"
+    );
+    press(&mut app, KeyCode::Enter);
+    app.finish().await;
+    assert!(codex_archived().contains(&resting.to_string()));
+    assert!(
+        !codex_sent().iter().any(|m| m["method"] == "turn/interrupt"
+            && (m["params"]["threadId"] == live || m["params"]["threadId"] == resting)),
+        "neither interrupted"
     );
 }
 
@@ -766,7 +1053,7 @@ async fn enter_carries_an_idle_claude_on_in_its_background_and_attaches() {
     assert_eq!(ran_in(&f.repo), ["--resume", "c-idle", "--bg"], "in its folder");
     let hand = app.hand.take().expect("handed over");
     assert_eq!(hand.key, "n:claude:0a1b2c3d");
-    let super::app::To::Argv(argv) = &hand.to else {
+    let super::app::To::Argv { argv, .. } = &hand.to else {
         panic!("{:?}", hand.to);
     };
     assert_eq!(argv[1..], ["attach", "0a1b2c3d"], "attached by the new id");
@@ -853,7 +1140,10 @@ async fn a_carry_on_done_while_a_name_is_typed_does_not_take_the_terminal() {
     ctrl(&mut app, 'r');
     app.done(super::app::Done {
         hand: Some(super::app::Hand {
-            to: super::app::To::Argv(vec!["claude".into(), "attach".into(), "ab12cd34".into()]),
+            to: super::app::To::Argv {
+                argv: vec!["claude".into(), "attach".into(), "ab12cd34".into()],
+                back: None,
+            },
             title: "fix the login".into(),
             key: NATIVE.into(),
         }),
@@ -1119,9 +1409,117 @@ async fn slash_rename_names_the_row_and_an_empty_one_goes_back() {
     let names = Config::load(&f.home).unwrap().list.names;
     assert_eq!(names.get(HELD).map(String::as_str), Some("build box"));
     assert!(row_of(&shown(&app), "build box").contains("done"));
+    // With no name, it is typed where it stands, as ctrl+r: empty goes back.
     run(&mut app, "/rename");
+    assert!(matches!(app.mode, super::app::Mode::Rename(_)));
+    press(&mut app, KeyCode::Backspace);
+    press(&mut app, KeyCode::Enter);
     assert!(Config::load(&f.home).unwrap().list.names.is_empty());
     assert!(shown(&app).contains("back to shop-sh"));
+}
+
+/// The name being typed, and what of it is selected.
+fn renaming(app: &App) -> (String, Option<std::ops::Range<usize>>) {
+    match &app.mode {
+        super::app::Mode::Rename(r) => (r.line.text().to_string(), r.line.selection()),
+        _ => panic!("no name being typed"),
+    }
+}
+
+#[tokio::test]
+async fn ctrl_r_starts_with_the_name_selected_and_what_is_typed_replaces_it() {
+    let f = fixture();
+    let mut app = list(&f).await;
+    on(&mut app, HELD);
+    ctrl(&mut app, 'r');
+    assert_eq!(renaming(&app), ("shop-sh".into(), Some(0..7)), "selected whole");
+    let s = shown(&app);
+    assert!(row_of(&s, "shop-sh").contains("shop-sh"), "{s}");
+    // Drawn as a selection, in the theme's colours.
+    let mut t = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+    t.draw(|fr| app.draw(fr)).unwrap();
+    let buf = t.backend().buffer().clone();
+    let y = (0..30)
+        .find(|y| {
+            (0..100)
+                .map(|x| buf[(x, *y)].symbol())
+                .collect::<String>()
+                .contains("shop-sh")
+        })
+        .unwrap();
+    let x = (0..100)
+        .find(|x| buf[(*x, y)].symbol() == "s" && buf[(*x + 1, y)].symbol() == "h")
+        .unwrap();
+    assert_eq!(buf[(x, y)].bg, super::theme::selection().bg.unwrap());
+    // The first key replaces it.
+    typed(&mut app, "box");
+    assert_eq!(renaming(&app), ("box".into(), None));
+    press(&mut app, KeyCode::Enter);
+    let names = Config::load(&f.home).unwrap().list.names;
+    assert_eq!(names.get(HELD).map(String::as_str), Some("box"));
+}
+
+#[tokio::test]
+async fn backspace_on_the_selected_name_clears_it_and_enter_goes_back_to_its_own() {
+    let f = fixture();
+    let mut app = list(&f).await;
+    on(&mut app, HELD);
+    run(&mut app, "/rename box");
+    ctrl(&mut app, 'r');
+    press(&mut app, KeyCode::Backspace);
+    assert_eq!(renaming(&app), (String::new(), None));
+    press(&mut app, KeyCode::Enter);
+    assert!(Config::load(&f.home).unwrap().list.names.is_empty());
+    assert!(shown(&app).contains("back to shop-sh"));
+}
+
+#[tokio::test]
+async fn an_arrow_lets_the_selection_go_and_typing_then_edits_the_name() {
+    let f = fixture();
+    let mut app = list(&f).await;
+    on(&mut app, HELD);
+    ctrl(&mut app, 'r');
+    press(&mut app, KeyCode::Left);
+    assert_eq!(renaming(&app), ("shop-sh".into(), None));
+    typed(&mut app, "my ");
+    press(&mut app, KeyCode::End);
+    typed(&mut app, "!");
+    assert_eq!(renaming(&app).0, "my shop-sh!");
+    ctrl(&mut app, 'a');
+    typed(&mut app, ">");
+    assert_eq!(
+        renaming(&app).0,
+        ">my shop-sh!",
+        "ctrl+a to the start, not the agents' filter"
+    );
+    press(&mut app, KeyCode::Enter);
+    let names = Config::load(&f.home).unwrap().list.names;
+    assert_eq!(names.get(HELD).map(String::as_str), Some(">my shop-sh!"));
+}
+
+#[tokio::test]
+async fn enter_on_the_name_untouched_keeps_it() {
+    let f = fixture();
+    let mut app = list(&f).await;
+    on(&mut app, HELD);
+    ctrl(&mut app, 'r');
+    press(&mut app, KeyCode::Enter);
+    assert!(matches!(app.mode, super::app::Mode::List));
+    assert!(Config::load(&f.home).unwrap().list.names.is_empty(), "nothing changed");
+    assert!(!shown(&app).contains("back to"), "nothing said");
+}
+
+#[tokio::test]
+async fn a_paste_replaces_the_selected_name() {
+    let f = fixture();
+    let mut app = list(&f).await;
+    on(&mut app, HELD);
+    ctrl(&mut app, 'r');
+    app.paste("build\nbox");
+    assert_eq!(renaming(&app), ("build box".into(), None));
+    press(&mut app, KeyCode::Enter);
+    let names = Config::load(&f.home).unwrap().list.names;
+    assert_eq!(names.get(HELD).map(String::as_str), Some("build box"));
 }
 
 #[tokio::test]
@@ -1157,9 +1555,123 @@ async fn a_harnesss_session_is_named_in_relay_with_its_own_name_dim_beside_and_b
     assert!(row_of(&narrow, "login box").contains("login box"), "{narrow}");
     // Empty restores the original.
     run(&mut app, "/rename");
+    press(&mut app, KeyCode::Delete);
+    press(&mut app, KeyCode::Enter);
     assert!(Config::load(&f.home).unwrap().list.names.is_empty());
     assert!(shown(&app).contains("back to fix the login"));
     assert!(!shown(&app).contains("(fix the login)"));
+}
+
+#[tokio::test]
+async fn an_idle_claude_is_renamed_in_claude_too_and_a_busy_one_only_in_relay() {
+    let f = fixture();
+    let mut app = list(&f).await;
+    let mut idle = waiting(&f.repo);
+    idle.state = NativeState {
+        words: "idle".into(),
+        state: RunState::Idle,
+    };
+    app.set_native(vec![idle.clone()]);
+    on(&mut app, NATIVE);
+    run(&mut app, "/rename login box");
+    assert!(
+        shown(&app).contains("renaming it login box in claude…"),
+        "{}",
+        shown(&app)
+    );
+    app.finish().await;
+    assert_eq!(
+        std::fs::read_to_string(f.repo.join("typed")).unwrap(),
+        "/rename login box\n",
+        "typed into it, through its attach"
+    );
+    assert!(
+        shown(&app).contains("renamed to login box · in claude too"),
+        "{}",
+        shown(&app)
+    );
+    assert!(
+        Config::load(&f.home).unwrap().list.names.is_empty(),
+        "the name is claude's own now"
+    );
+    let row = row_of(&shown(&app), "login box").to_string();
+    assert!(!row.contains("(fix the login)"), "{row}");
+    // Busy: the name is Relay's, and nothing is typed; once claude calls it
+    // so too (renamed there by you), Relay's goes.
+    std::fs::remove_file(f.repo.join("typed")).unwrap();
+    app.set_native(vec![waiting(&f.repo)]);
+    run(&mut app, "/rename the box");
+    app.finish().await;
+    assert!(!f.repo.join("typed").exists(), "nothing typed into a busy one");
+    assert!(shown(&app).contains("named in relay · claude still calls it fix the login"));
+    let names = Config::load(&f.home).unwrap().list.names;
+    assert_eq!(names.get(NATIVE).map(String::as_str), Some("the box"));
+    let mut renamed = waiting(&f.repo);
+    renamed.name = "the box".into();
+    app.set_native(vec![renamed]);
+    assert!(Config::load(&f.home).unwrap().list.names.is_empty());
+}
+
+#[tokio::test]
+async fn a_codex_thread_is_renamed_on_its_daemon_and_keeps_no_relay_name() {
+    let f = fixture();
+    let mut app = list(&f).await;
+    let codex = crate::sources::harness("codex").unwrap();
+    let started = codex.start(&f.repo, None, Some("fix it"), &Default::default()).unwrap();
+    let rl_detect::harness::Started::Id(id) = started else {
+        panic!("{started:?}");
+    };
+    let mut thread = waiting(&f.repo);
+    thread.harness = "codex".into();
+    thread.id = id.clone();
+    thread.session_id = id.clone();
+    thread.name = "fix it".into();
+    app.set_native(vec![thread.clone()]);
+    let key = format!("n:codex:{id}");
+    on(&mut app, &key);
+    run(&mut app, "/rename shop api");
+    app.finish().await;
+    let set = |name: &str| {
+        codex_sent().iter().any(|m| {
+            m["method"] == "thread/name/set" && m["params"] == serde_json::json!({"threadId": id, "name": name})
+        })
+    };
+    assert!(set("shop api"), "thread/name/set on the daemon");
+    assert!(
+        shown(&app).contains("renamed to shop api · in codex too"),
+        "{}",
+        shown(&app)
+    );
+    assert!(
+        Config::load(&f.home).unwrap().list.names.is_empty(),
+        "codex's name is the name"
+    );
+    assert!(row_of(&shown(&app), "shop api").contains("shop api"));
+    // Cleared: cleared on the daemon too.
+    thread.name = "shop api".into();
+    app.set_native(vec![thread.clone()]);
+    on(&mut app, &key);
+    ctrl(&mut app, 'r');
+    press(&mut app, KeyCode::Backspace);
+    press(&mut app, KeyCode::Enter);
+    app.finish().await;
+    assert!(set(""), "its name set back to none");
+    assert!(shown(&app).contains("cleared its name in codex"), "{}", shown(&app));
+    // One the daemon does not know: the name stays Relay's, and why.
+    thread.id = "019f0000-gone".into();
+    app.set_native(vec![thread]);
+    on(&mut app, "n:codex:019f0000-gone");
+    run(&mut app, "/rename gone box");
+    app.finish().await;
+    assert!(
+        shown(&app).contains(
+            "named in relay · codex didn't take it: `codex app-server proxy`: thread/name/set: thread not found"
+        ),
+        "{}",
+        shown(&app)
+    );
+    let names = Config::load(&f.home).unwrap().list.names;
+    assert_eq!(names.get("n:codex:019f0000-gone").map(String::as_str), Some("gone box"));
 }
 
 #[tokio::test]
@@ -1202,15 +1714,18 @@ async fn slash_pin_hide_agents_and_group_do_what_their_keys_do() {
 async fn slash_rm_removes_an_ended_held_session_and_refuses_what_it_cannot() {
     let f = fixture();
     let mut app = list(&f).await;
+    // One of Claude's own: asked, the remove the only choice, live or not.
     on(&mut app, NATIVE);
     run(&mut app, "/rm");
+    let s = wide(&app);
     assert!(
-        shown(&app).contains("fix the login is live · /stop it first"),
-        "{}",
-        shown(&app)
+        s.contains("r remove · deletes it and its worktree   esc cancel   — fix the login · claude"),
+        "{s}"
     );
+    assert!(!s.contains("s stop"), "{s}");
     assert!(app.work.is_empty(), "nothing done");
-    assert!(ran_in(&f.repo).is_empty(), "claude was not asked to stop it");
+    press(&mut app, KeyCode::Esc);
+    assert!(ran_in(&f.repo).is_empty(), "claude was not asked anything");
     let head = format!("g:{}", f.repo.display());
     on(&mut app, &head);
     run(&mut app, "/rm");
@@ -1230,6 +1745,37 @@ async fn slash_rm_removes_an_ended_held_session_and_refuses_what_it_cannot() {
     app.finish().await;
     assert!(!f.home.session_dir("shop-sh").exists());
     assert!(shown(&app).contains("removed shop-sh"));
+    // And enter confirms the remove of Claude's own.
+    on(&mut app, NATIVE);
+    run(&mut app, "/rm");
+    press(&mut app, KeyCode::Enter);
+    app.finish().await;
+    assert_eq!(ran_in(&f.repo), ["rm", "ab12cd34"]);
+    assert!(app.keys().iter().all(|k| k != NATIVE));
+}
+
+#[tokio::test]
+async fn slash_stop_stops_claudes_own_at_once_and_says_when_nothing_runs() {
+    let f = fixture();
+    let mut app = list(&f).await;
+    on(&mut app, NATIVE);
+    run(&mut app, "/stop");
+    assert!(!asking(&app), "no question");
+    app.finish().await;
+    assert_eq!(ran_in(&f.repo), ["stop", "ab12cd34"]);
+    let mut done = waiting(&f.repo);
+    done.state = NativeState {
+        words: "completed".into(),
+        state: RunState::Finished,
+    };
+    app.set_native(vec![done]);
+    on(&mut app, NATIVE);
+    run(&mut app, "/stop");
+    assert!(
+        shown(&app).contains("fix the login has nothing running to stop · /rm offers to remove it"),
+        "{}",
+        shown(&app)
+    );
 }
 
 #[tokio::test]
@@ -1511,23 +2057,28 @@ async fn the_list_offers_setup_and_slash_setup_does_it_and_the_notice_goes() {
     );
     assert!(app.flashing().is_none(), "the check says nothing of its own");
 
+    // `/setup` hands the terminal to the wizard (`main_loop`), as an
+    // attach does; nothing is set up from here.
     run(&mut app, "/setup");
-    assert!(shown(&app).contains("setting up…"));
-    run(&mut app, "/setup");
-    assert!(shown(&app).contains("setting up already"));
+    assert!(app.wizard, "the wizard is asked for");
+    assert!(!app.quit);
+    assert_eq!(app.setup.as_ref().map(|n| n.as_ref().map(Vec::len)), Some(Ok(4)));
+}
+
+#[tokio::test]
+async fn what_you_declined_is_not_in_the_notice() {
+    let f = fixture();
+    std::fs::write(
+        f.home.config_json(),
+        r#"{"badges": [], "setup": {"declined": ["antigravity/mcp"]}}"#,
+    )
+    .unwrap();
+    let mut app = list(&f).await;
+    app.setup_host = Some(setup_host(&f));
+    app.check_setup();
     app.finish().await;
     let foot = shown(&app);
-    assert!(foot.contains("codex: hooks installed"), "{foot}");
-    assert!(foot.contains("antigravity: mcp relay registered"), "{foot}");
-    assert!(foot.contains("/hooks"), "codex's note: {foot}");
-    assert!(!foot.contains("setup needed"), "{foot}");
-    assert_eq!(app.setup, Some(Ok(vec![])));
-    assert!(!app.setting_up);
-
-    // Again: nothing to change, and it says so.
-    run(&mut app, "/setup");
-    app.finish().await;
-    assert!(shown(&app).contains("nothing to change"));
+    assert!(foot.contains("setup needed: claude, codex, gemini · /setup"), "{foot}");
 }
 
 #[tokio::test]
@@ -1541,8 +2092,56 @@ async fn a_setup_that_fails_says_why_and_the_list_goes_on() {
     app.finish().await;
     assert!(shown(&app).contains("setup check failed · /setup says why"));
     run(&mut app, "/setup");
-    app.finish().await;
-    let foot = shown(&app);
-    assert!(foot.contains("setup:") && foot.contains(".claude.json"), "{foot}");
+    assert!(app.wizard, "the wizard says why");
     assert!(!app.quit);
+}
+
+/// Not a test: how many `↓` a second the list takes, each drawn, on about
+/// forty rows in eight projects. `cargo test -p rl --release scroll_speed --
+/// --ignored --nocapture`.
+#[tokio::test]
+#[ignore]
+async fn scroll_speed() {
+    let f = fixture();
+    let mut app = list(&f).await;
+    let root = f.repo.parent().unwrap().to_path_buf();
+    let rows: Vec<NativeRow> = (0..40)
+        .map(|i| {
+            let cwd = root.join(format!("p{}", i % 8));
+            std::fs::create_dir_all(&cwd).unwrap();
+            NativeRow {
+                id: format!("{i:08x}"),
+                session_id: format!("s-{i}"),
+                name: format!("session number {i}"),
+                ..waiting(&cwd)
+            }
+        })
+        .collect();
+    app.set_native(rows);
+    let mut t = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 40)).unwrap();
+    let n = 1000;
+    let at = std::time::Instant::now();
+    for i in 0..n {
+        press(&mut app, if (i / 50) % 2 == 0 { KeyCode::Down } else { KeyCode::Up });
+        t.draw(|f| app.draw(f)).unwrap();
+    }
+    let took = at.elapsed();
+    let keys_at = std::time::Instant::now();
+    for i in 0..n {
+        press(&mut app, if (i / 50) % 2 == 0 { KeyCode::Down } else { KeyCode::Up });
+    }
+    let draws_at = std::time::Instant::now();
+    for _ in 0..n {
+        t.draw(|f| app.draw(f)).unwrap();
+    }
+    println!(
+        "keys alone {:?} each, draws alone {:?} each",
+        (draws_at - keys_at) / n,
+        draws_at.elapsed() / n
+    );
+    println!(
+        "{n} keys, each drawn: {took:?}, {:.0} a second, {:?} each",
+        n as f64 / took.as_secs_f64(),
+        took / n
+    );
 }

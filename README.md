@@ -1,55 +1,145 @@
 # Relay
 
-Relay is `claude agents` for every harness. One list of your agent sessions (Claude, Codex, Gemini
-and the like) and your shells, in the terminal you already use. Enter attaches. Agents can send
-each other messages.
+Relay is `claude agents` for every harness: one list of your agent sessions (Claude, Codex, Gemini,
+Antigravity and the like) and your shells, in the terminal you already use. Enter attaches. Agents
+can message each other. No daemon, no model calls; macOS and Linux.
 
-Command: `rl`. No daemon.
+![The list: agents and shells under their projects, one waiting on you](docs/img/list.svg)
 
-Early; macOS and Linux. Relay calls no model.
+## Get started
 
-## Install
-
-Needs a recent stable Rust (CI uses 1.96) and `git`.
+You need Rust (1.96 or newer, from [rustup.rs](https://rustup.rs)), `git` and a C linker (on macOS:
+`xcode-select --install`).
 
 ```sh
 git clone https://github.com/instilled/relay && cd relay
-cargo build --release
-export PATH="$PWD/target/release:$PATH"   # rl and rl-session must stay side by side
+scripts/install
+rl
 ```
 
-Or link the dev shim, which rebuilds when the source changes: `ln -sf "$PWD/scripts/rl" ~/.local/bin/`.
+`scripts/install` builds Relay and links `rl` into `~/.local/bin`. The first `rl` walks you
+through setting Relay up for the agents it finds (hooks, and the `relay` MCP server for
+messaging): `enter` to walk through it, or `tab` to just set everything up. That's it.
+
+![rl setup: the harnesses found, and the two ways on](docs/img/setup-found.svg)
+
+This is a dev install: `rl` runs from your clone and rebuilds itself when the source changes.
+[More on installing](#install), and what setup changes, below.
+
+## What you can do
+
+**See every agent at once.** `rl` opens the list. Rows sit under their project, each saying
+whether it's working, done or needs you. Move with `↑↓`, `enter` attaches, `ctrl+\` detaches and
+leaves it running.
+
+**Start an agent by typing.** The line at the bottom starts things in the folder of the row under
+the cursor. Type `claude fix the login` or `codex fix the flaky test`: the first word picks the
+agent, the rest is its prompt. Anything else runs as a shell command.
+
+![Typing a prompt on the command line: agent · codex](docs/img/command-line.svg)
+
+**Keys at a glance.** `ctrl+h` (or `f1`) shows them all:
+
+![Every key, as a grid under the command line](docs/img/help.svg)
+
+| key | does |
+| --- | --- |
+| `enter` | attach (with text typed: start it) |
+| `ctrl+\` | detach, back to the list |
+| `ctrl+f` | find |
+| `ctrl+r` `ctrl+t` `ctrl+g` | rename (the name starts selected: type over it), pin, colour |
+| `ctrl+s` | group by project or by state |
+| `ctrl+x ctrl+x` | stop, then remove or hide; on a Claude or Codex session, asks: stop, or remove / archive |
+| `/` | a command (`/setup`, `/rename`, `/help`, …) |
+| `ctrl+c ctrl+c` | quit |
+
+**From the shell.** The same, without the list:
+
+```sh
+rl new --harness claude -- fix the login   # start one (no arguments: a shell)
+rl ls                                       # list once
+rl attach <name>                            # attach; ctrl+\ detaches
+```
+
+**Let agents talk.** After setup, every agent has `who`, `send` and `inbox`. Ask in plain words:
+
+> ask the codex session in shop-api to review my diff and send me what it finds
+
+> when the tests pass, tell the claude session "web" to rebase on main
+
+Codex is pinged when mail arrives; an idle Claude is woken to read it, a busy one hears of it
+through its hooks. The [messaging guide](docs/messaging.md) has more use cases.
+
+## Install
+
+`scripts/install` checks for Rust, `git` and a C linker, builds once (`cargo build --workspace
+--bins`) and links the dev shim `scripts/rl` as `~/.local/bin/rl`. It's safe to run again.
+
+- `--bin-dir DIR` (or `RELAY_BIN_DIR`) links somewhere else. An `rl` there that isn't a symlink
+  is left alone; a stale link is replaced.
+- It warns when that dir isn't on your `PATH` (and prints the line to add), or when another `rl`
+  comes first on it (an old `cargo install`: `cargo uninstall rl`).
+- `RELAY_DEV_PROFILE=release` builds and runs the release binaries; keep it set where you run `rl`.
+- `rl --version` says the commit it was built from. Put it in bug reports.
+
+**Update:** `git pull`. The next `rl` rebuilds (it prints `building relay…`).
+
+**Uninstall:** `rl setup --remove` takes Relay's hooks and MCP server out of your agents, then
+`scripts/install --uninstall` removes the link. Your sessions and settings are in `~/.relay`.
 
 Everything lives under `~/.relay` (`RELAY_HOME` moves it).
 
-## First run
+## Setup
 
 ```sh
-rl            # the list; the first time, it offers to set Relay up
+rl            # the list; the first time, it walks you through setup
+rl setup      # the same walk, any time
 ```
 
-The first `rl` (before there is a `~/.relay/config.json`) says what setup would touch, one harness a
-line, and asks `Set up Relay for claude, codex, …? [Y/n]`; either answer is kept, so it asks once
-(never outside a terminal, nor inside a session Relay holds). Later, while a harness found on PATH
-needs setting up — installed after setup, or `rl` moved so the entries point at the old one — the
-list's footer leads with `setup needed: codex · /setup`, and `/setup` on the command line does it.
-The same by hand:
+On a terminal, setup is a short walk in six steps, drawn under your prompt (not full screen): the
+harnesses found, what setup changes for each, the changes being made, what is left for you (Codex's
+`/hooks`), the keys you'll use, and what you can do now. On the first step `enter` walks through
+it and `tab` (or `y`) just sets everything up and leaves a short summary; `q` quits, changing
+nothing before step 3. What it did stays in your scrollback.
+
+Every change has its own tick box (space, or a click). Untick one you don't want, such as Claude's
+`←` setting, and it is remembered as declined (`setup.declined` in `config.json`): no run makes it,
+and neither `--check` nor the list's notice asks for it again. The next walk shows it unticked;
+tick it to have it made.
+
+![rl setup: what changes, each one ticked or not](docs/img/setup-changes.svg)
+
+The first `rl` (before there is a `~/.relay/config.json`) walks through it once, then opens the
+list; `q` there skips it and `ctrl+c` leaves (either way it is not offered again), never outside a
+terminal nor inside a session Relay holds. Later, while a harness found on PATH needs setting up —
+installed after setup, or `rl` moved so the entries point at the old one — the list's footer leads
+with `setup needed: codex · /setup`, and `/setup` on the command line opens the same walk, then
+comes back to the list.
+
+Plain output, for scripts and CI, and whenever `rl setup` is not on a terminal or runs inside a
+session Relay holds:
 
 ```sh
-rl setup            # hooks and the MCP server, for each harness found on PATH
+rl setup --yes      # set everything up (but what you declined), no questions; plain lines
 rl setup --check    # change nothing: what setup would change, exit 1 if anything
 ```
 
 `rl setup --check` prints one line per harness that needs something (`codex: hooks missing · mcp
-relay stale (points at /old/rl)`), or `all set up`; it reads the files only and runs no harness's
-CLI.
+relay stale (points at /old/rl)`, `claude: ← opens agents on`), or `all set up`, then `(1 declined,
+rl setup to change)` when you declined any; it reads the files only and runs no harness's CLI.
+`--harness <name>` and `--remove` are plain too.
 
 `rl setup` adds Relay's hook to each harness's user-level settings and registers
 `rl mcp --harness <name>` as an MCP server named `relay` (Claude's through `claude mcp add --scope user`
 and Antigravity's through `agy mcp add`, so that CLI must be on PATH). Antigravity has no hooks yet, so
-it gets only the server. It says what it changed, and `nothing to change` on a second run.
-`rl setup --remove` takes both out again, also for a harness no longer installed; `--harness <name>`
-(repeatable) limits it to one.
+it gets only the server. For Claude it also turns off `←` opening Claude's agents view
+(`leftArrowOpensAgents: false` in `~/.claude.json`, or `$CLAUDE_CONFIG_DIR/.claude.json`): Relay's
+list is that view. Claude has no command that sets it, so Relay writes that one key into the file
+itself and keeps the rest. It says what it changed, then a few lines on what you can do now
+(messaging, with a link to the [guide](docs/messaging.md)), and `nothing to change` on a second run.
+`rl setup --remove` takes the hooks and the server out again, also for a harness no longer
+installed, and leaves `leftArrowOpensAgents` as it is; `--harness <name>` (repeatable) limits it to
+one.
 Codex asks you to trust the hook once (`/hooks` in codex); Claude may ask you to review it in `/hooks`.
 
 ## The list
@@ -80,14 +170,14 @@ Every letter types; the list's own keys are ctrl keys, the arrows and `enter`. `
 | command | does |
 | --- | --- |
 | `/colour <name\|#rrggbb\|none>` (`/color`) | your colour for the row, as `ctrl+g` and `rl color` set it (a colour the harness set wins on screen) |
-| `/rename <name>` | rename the row or project, as `ctrl+r`; with no name, back to its own. A Claude or Codex session is named in Relay only (the harness has no rename): your name, then the harness's own dim beside it, and the search finds both |
+| `/rename <name>` | rename the row or project; with no name, as `ctrl+r`: the name typed where it stands (empty goes back to its own). A Codex thread is renamed on its daemon (`thread/name/set`), so `codex resume` and Codex's lists show it too; an idle Claude session has `/rename <name>` typed into it (see Known limits). Until the harness has it, or where it can't take it (a busy, stopped or attached Claude, a session its hooks told of), the name is Relay's: yours, the harness's own dim beside it, and the search finds both; once the harness calls it so, Relay keeps no name of its own for it. Empty clears a Codex thread's name on the daemon too; a Claude's only in Relay |
 | `/pin` | pin or unpin, as `ctrl+t` |
 | `/hide` | hide the row or project, or bring it back |
-| `/stop` | stop a live session, held or the harness's own, at once (no second press); a Codex thread has its running turn interrupted and stays |
-| `/rm` | remove an ended session Relay holds |
+| `/stop` | stop a live session, held or the harness's own, at once (no second press, no question); a Codex thread has its running turn interrupted and stays |
+| `/rm` | remove an ended session Relay holds; on a Claude or Codex session, ask to remove or archive it (`enter` confirms, `esc` cancels) |
 | `/agents` `/shells` `/hidden` | show agents, shells, hidden, as `ctrl+a` `ctrl+l` `ctrl+o` |
 | `/group` | by project or by state, as `ctrl+s` |
-| `/setup` | `rl setup` for the harnesses found, in the background; what it changed (and Codex's `/hooks` note) stands in the footer, and the `setup needed` notice goes |
+| `/setup` | the setup walk (as `rl setup`), under the list; back on the list, what it did stands in the footer, and the `setup needed` notice goes |
 | `/help` | the keys |
 | `/quit` | quit |
 
@@ -102,8 +192,8 @@ in the footer and changes nothing; an unknown one stays on the line to mend.
 | `pgup` `pgdn` `home` `end` | page (`home` `end` with nothing typed) |
 | `/` | a command (above) |
 | `ctrl+f` | search |
-| `ctrl+x ctrl+x` | stop, then remove or hide |
-| `ctrl+r` | rename |
+| `ctrl+x ctrl+x` | stop, then remove or hide; on a Claude or Codex session, a choice in the footer (below, and under Codex) |
+| `ctrl+r` | rename: the name stands selected, so what you type or paste replaces it, `backspace` clears it, `←` `→` `home` `end` keep it to edit; `enter` keeps, `esc` cancels |
 | `ctrl+t` | pin |
 | `ctrl+g` | your colour for the row: none, red, blue, green, yellow, purple, orange, pink, cyan (a colour the harness set wins on screen; a `#rrggbb` set in `config.json` or by `rl color` goes to red) |
 | `shift+↑↓` | reorder |
@@ -112,7 +202,19 @@ in the footer and changes nothing; an unknown one stays on the line to mend.
 | `ctrl+c ctrl+c` | quit |
 | `ctrl+h` `f1` | the keys, as a grid; again or `esc` closes it |
 
-`ctrl+\` leaves an attached session running and comes back to the list.
+The wheel moves the cursor a line a tick and a click puts it on a line; a pointer that only moves
+leaves it where it is. The list takes the mouse, so hold shift (option, on macOS) to select text.
+
+`ctrl+\` leaves an attached session running and comes back to the list. In an attached Claude
+session, `←` on an empty prompt does the same: it would open Claude's own agents view, which the
+list is, so the list comes back in its place and the session keeps running.
+
+`ctrl+x` twice on one of Claude's own sessions asks, in the footer, with the row's name and harness:
+`s stop · keeps the conversation   r remove · deletes it and its worktree   esc cancel`. `s` (or
+`enter`, so `ctrl+x ctrl+x enter` stops as it always did) runs `claude stop <id>`: its process
+ends, `claude attach` opens it again. `r` runs `claude rm <id>`, which deletes it and its worktree
+when that is safe, and the row goes. One that has already ended is offered only the remove. A
+session Relay holds (a shell, Antigravity, …) is stopped and removed as ever, without a question.
 
 ### Codex
 
@@ -132,8 +234,10 @@ daemon's threads.
 - The daemon lets go of an idle thread with no client after a couple of minutes. The threads Relay
   started (Codex records `relay` as their originator) stay on the list as `resting`, the latest 50
   (`thread/list`). Enter resumes one; mail pings it (`codex queue … --resume` loads it again).
-- `ctrl+x` (or `/stop`) on a working Codex row interrupts its turn (`turn/interrupt`); the thread
-  stays.
+- `ctrl+x` twice on a Codex row asks, in the footer: `s stop the turn   a archive · off the list,
+  codex unarchive brings it back   esc cancel`. `s` (or `enter`) interrupts a running turn
+  (`turn/interrupt`; the thread stays); `a` runs `codex archive <id>`. A thread with no turn running
+  is offered only the archive. `/stop` interrupts at once. Relay never offers `codex delete`.
 
 ## Commands
 
@@ -146,7 +250,7 @@ rl stop <name>                  # close a running session
 rl rm <name>                    # remove one that is not running
 rl color <session> <name|#rrggbb|none>  # your colour for a row (a held name, or n:claude:<id> / o:claude:<id>)
 rl mcp --harness H              # serve send, who and inbox over stdio (agents call this)
-rl setup [--remove | --check] [--harness H]
+rl setup [--yes | --remove | --check] [--harness H]   # a walk on a terminal; plain otherwise
 ```
 
 `rl ls` prints one row per session the list shows, with the same dedupe: the sessions Relay holds
@@ -203,11 +307,26 @@ Keys a profile accepts:
   - `list`: `args` and `reader` (`claude-agents` or `codex-threads`)
   - `attach`, `start`, `name`, `stop`: argument lists with `{id}` and `{name}`
   - `ping`: what tells one of its sessions of mail from outside, with `{id}` and `{text}`
+  - `rename`: how a name you give one reaches the harness: `{ rpc: <method> }` (a call on its
+    daemon, Codex's `thread/name/set`) or `{ type: "/rename {name}" }` (a line typed into an idle
+    one through its attach, Claude's)
+  - `wake`: how relay mail wakes one: `idle: type` (the mail's line typed into an idle one) and
+    `stopped: resume_bg` (one that has stopped carried on in the background with that line as its
+    prompt)
+  - `typing`: what an attached session's screen shows of its input, for typing into it: `input`
+    (a regex for the input line, its first group what is typed there; the last matching line is
+    it) and `busy` (regexes that say a turn is running)
+  - `agents_view`: regexes over the lines of an attached session's screen that say it shows the
+    harness's own list of its sessions; seeing one, the attach lets go and the list comes back
 - `mcp`: where `rl setup` registers Relay's MCP server
   - `file`: its servers file, the first whose variables are set (`~` is `$HOME`)
   - `cli`: the harness's own words that add and remove an entry there (`[mcp]`: `agy mcp add`);
     without them Relay writes `mcpServers.relay` into the file itself
   - `note`: said beside what setup did
+- `settings`: keys `rl setup` sets at the top of the harness's own global config (JSON)
+  - `file`: that file, the first whose variables are set
+  - `set`: a list of `{key, value, check}`, `check` being what `--check` says while the key has
+    another value (`← opens agents on`)
 
 Unknown keys are an error. Old keys such as `headless`, `model_flag`, `small_model` and `says` no
 longer load; remove them. See `detect/claude.yaml` and `detect/codex.yaml` for worked examples.
@@ -226,6 +345,8 @@ To show it in a zsh prompt: `PROMPT='${RL_SESSION:+[$RL_SESSION] }'$PROMPT`.
 
 ## For agents
 
+How to use it, with examples: [docs/messaging.md](docs/messaging.md).
+
 `rl mcp` is a stdio MCP server with three tools:
 
 - `who`: the list's rows, one line each (`address (title) · harness · state · folder`), you marked. The title is the one you gave the row with `ctrl+r`; a native session's address stays the harness's name or id, whatever you named it.
@@ -235,7 +356,7 @@ To show it in a zsh prompt: `PROMPT='${RL_SESSION:+[$RL_SESSION] }'$PROMPT`.
 How a recipient learns it has mail depends on its harness:
 
 - **Codex**: pushed. `send` also runs `codex queue --thread <id> --message "relay mail from <you>: call the relay inbox tool to read it" --resume` (the profile's `sessions.ping`) on the recipient's thread: a Codex row's id, which is its thread's. `send` says `· pinged codex`, or why codex didn't take the ping; the message is left either way.
-- **Claude**: told by Relay's hooks. With mail waiting, each prompt gets a line of context saying so (`UserPromptSubmit`), and at the end of a turn the `Stop` hook keeps Claude going one more turn to read it, once for the same mail. Needs the hooks `rl setup` installs (or a session Relay holds). When one Claude session sends to one of Claude's background sessions, `send` also suggests waking it now with Claude's `SendMessage`, by the name `claude agents` shows for it.
+- **Claude**: one of Claude's background sessions that is idle is woken: `send` types `relay mail from <you>: call the relay inbox tool to read it` into it through `claude attach` on a hidden terminal (only when its screen shows an empty prompt and nothing running, and never while you are attached to it from the list), and says `· woke claude`. One that has stopped or ended is carried on with that line as its prompt (`claude --resume <session> --bg "<line>"`), `· resumed claude`. One that is working or waiting on you is told by Relay's hooks, and `send` says so: with mail waiting, each prompt gets a line of context saying so (`UserPromptSubmit`), and at the end of a turn the `Stop` hook keeps Claude going one more turn to read it, once for the same mail (mail Relay typed in counts as told). Needs the hooks `rl setup` installs (or a session Relay holds). Where Relay could not wake one (you are attached, its screen was in doubt), and the sender is a Claude, `send` also suggests waking it with Claude's `SendMessage`, by the name `claude agents` shows for it.
 - **Antigravity, shells and the rest**: they find it when they call `inbox`.
 
 Your address is found in this order: `RL_SESSION`, when the held session runs the harness the
@@ -248,12 +369,20 @@ yourself. Codex has no automatic address yet, so it passes them.
 Not verified against the live CLIs:
 
 - What `claude --bg` prints. Relay takes the first 8-hex word as the session id; if there is none, the start says so.
-- `claude stop <id>` from `ctrl+x`.
+- `claude stop <id>` and `claude rm <id>` from `ctrl+x`, and `codex archive <id>`: their help was
+  read (claude 2.1.322, codex 0.167), the commands were not run.
 - `turn/interrupt` from `ctrl+x` on a Codex row, and `codex app-server daemon start` when no daemon
   runs. A started thread's first turn, a pending approval shown by `codex resume`, and an idle
   thread's unloading were checked on codex 0.167.
 - The Gemini MCP entry (`mcpServers.relay` in its `settings.json`).
+- Typing into an idle Claude (a rename, a wake for mail) reads Claude's screen through `claude
+  attach` at 120x40: the input line Relay looks for (`❯` and a no-break space, between two rules)
+  and the spinner line of a running turn (`✻ Puttering… (1s · …)`) were read off Claude 2.1.322. A Claude that draws them
+  otherwise is left alone, and `send` or the footer says why.
 - `claude agents` state mapping against its own screen.
+- That `←` in an attached session (`claude attach`) draws the agents view as `claude agents` does:
+  the line Relay looks for (`❯ describe a task for a new session`, at the left edge) was read off
+  `claude agents` 2.1.322, not off an attach.
 - Antigravity (`agy`): no hooks and no screen patterns of its own yet, so its state is the generic guess.
   Whether `agy` hands its MCP servers the held session's environment (`RL_SESSION`), so `rl mcp` there
   knows its caller.
@@ -266,7 +395,11 @@ Not verified against the live CLIs:
 ## Docs
 
 - [PRODUCT.md](docs/PRODUCT.md): what Relay is for.
+- [messaging.md](docs/messaging.md): agents messaging each other, with examples.
 - [ARCHITECTURE.md](docs/ARCHITECTURE.md): how the tree is wired, as built.
 - [PRODUCT-ROADMAP.md](docs/PRODUCT-ROADMAP.md): done and next.
+
+The screenshots are made by `scripts/screenshots` (a made-up demo home and stand-in agents, in
+tmux; needs tmux and python3).
 
 Relay is a rebuild of [instilled/ax](https://github.com/instilled/ax), kept archived as the legacy reference.

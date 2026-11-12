@@ -24,3 +24,8 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
+      # The install others run: scripts/install into a temp bin dir, then
+      # rl --version and rl setup --check under a temp HOME and RELAY_HOME.
+      - run: scripts/check-install
+      - if: runner.os == 'Linux'
+        run: shellcheck scripts/install scripts/check-install scripts/relay-dev scripts/ci scripts/screenshots

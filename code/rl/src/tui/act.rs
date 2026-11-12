@@ -1,6 +1,6 @@
 //! `impl App` — what the list does to what the cursor is on: `enter`
 //! attaches, the command line starts something new, `^x` twice stops,
-//! removes or hides, `^r` renames, `^t` pins, `^g` colours, `⇧↑↓` moves. What is yours to
+//! removes or hides (or asks which, for a harness's own), `^r` renames, `^t` pins, `^g` colours, `⇧↑↓` moves. What is yours to
 //! keep (names, pins, colours, hides, order) goes to `config.json`; what takes a
 //! moment (stopping, starting) runs in the background and says how it went
 //! in the footer.
@@ -74,7 +74,10 @@ impl App {
                     Some(h) => To::Held(Box::new(h.meta)),
                 }
             }
-            Attach::Argv(argv) => To::Argv(argv.clone()),
+            Attach::Argv(argv) => To::Argv {
+                argv: argv.clone(),
+                back: sources::harness(&harness).and_then(|h| h.agents_view().cloned()),
+            },
             Attach::CarryOn { argv, background } => {
                 let argv = argv.clone();
                 return self.carry_on(argv, *background, &harness, cwd, title);
@@ -119,7 +122,10 @@ impl App {
                             said: format!("{title} carries on in {}'s background", a.name()),
                             select: Some(key.clone()),
                             hand: a.attach_argv(&id).map(|argv| Hand {
-                                to: To::Argv(argv),
+                                to: To::Argv {
+                                    argv,
+                                    back: a.agents_view().cloned(),
+                                },
                                 title,
                                 key,
                             }),
@@ -298,9 +304,26 @@ impl App {
     /// not while a name is being typed: it is not taken from
     /// under the keys, and the footer says how to get there.
     pub fn done(&mut self, d: Done) {
+        if let Some((key, name)) = &d.renamed {
+            // The harness's name now, at once, not at its next listing; and
+            // Relay keeps none beside it.
+            for n in self.native.rows.iter_mut() {
+                if !name.is_empty() && format!("n:{}:{}", n.harness, n.id) == *key {
+                    n.name = name.clone();
+                }
+            }
+            if self.config.list.names.get(key) == Some(name) {
+                self.change_prefs(|p| {
+                    p.names.remove(key);
+                });
+            }
+        }
         if let Some(key) = &d.forget {
             let key = key.clone();
             self.change_prefs(|p| forget(p, &key));
+            // Gone from its harness too: off the list now, not at its next
+            // listing.
+            self.native.rows.retain(|r| format!("n:{}:{}", r.harness, r.id) != key);
         }
         self.reload();
         if let Some(c) = d.setup {
@@ -411,6 +434,33 @@ impl App {
                     }
                 });
             }
+            Removal::Ask(ask) => self.ask(ask),
+            Removal::CloseNative {
+                harness,
+                id,
+                cwd,
+                title,
+                done,
+            } => {
+                let Some(a) = sources::harness(&harness) else {
+                    return self.say(format!("{harness} has no way to close {title} here"));
+                };
+                self.say(format!("{title}…"));
+                let (next, key) = (self.next_key(), native_key(a, &id));
+                self.work.spawn(async move {
+                    let run = tokio::task::spawn_blocking(move || a.close(&id, &cwd)).await;
+                    match run {
+                        Ok(Ok(())) => Done {
+                            select: next,
+                            forget: Some(key),
+                            ask_native: true,
+                            ..Done::said(format!("{done} {title}"))
+                        },
+                        Ok(Err(e)) => Done::said(format!("{title}: {e:#}")),
+                        Err(e) => Done::said(format!("{title}: {e}")),
+                    }
+                });
+            }
             Removal::Remove { name, title } => {
                 // Whatever was kept for it goes with it: a session started
                 // later by the same name is a new one.
@@ -447,6 +497,39 @@ impl App {
         }
     }
 
+    /// What to do with one of a harness's own, asked in the footer: the
+    /// keys are the choice's till one is taken or `esc` (`key_ask`).
+    pub(super) fn ask(&mut self, ask: remove::Ask) {
+        self.search = None;
+        self.help = false;
+        self.mode = Mode::Ask(ask);
+    }
+
+    /// A key while a choice is asked: one of its keys takes that choice,
+    /// `enter` the first offered (the stop, where there is one), `esc`
+    /// nothing. Any other key is not an answer, and the choice stands.
+    pub(super) fn key_ask(&mut self, k: KeyEvent) {
+        let Mode::Ask(ask) = &self.mode else {
+            return;
+        };
+        let plain = !k
+            .modifiers
+            .intersects(crossterm::event::KeyModifiers::CONTROL | crossterm::event::KeyModifiers::ALT);
+        let taken = match k.code {
+            KeyCode::Esc => {
+                self.mode = Mode::List;
+                return;
+            }
+            KeyCode::Enter => Some(ask.first()),
+            KeyCode::Char(c) if plain => ask.take(c),
+            _ => None,
+        };
+        if let Some(plan) = taken {
+            self.mode = Mode::List;
+            self.remove(plan);
+        }
+    }
+
     /// The line after the cursor, else the one before: where it goes once
     /// its own line has left.
     fn next_key(&self) -> Option<String> {
@@ -457,17 +540,20 @@ impl App {
             .cloned()
     }
 
-    /// `^r`: a name of yours for a session or a project, typed where it
-    /// stands. A harness's own session keeps its name too, beside yours: the
-    /// harness has no way to rename it.
-    pub(super) fn rename_here(&mut self) {
-        match self.rename_target("ctrl+r") {
+    /// `^r` (or `/rename` with no name, `by`): a name of yours for a session
+    /// or a project, typed where it stands, over the name it has now, which
+    /// stands selected. A harness's own session keeps its name too, beside
+    /// yours: the harness has no way to rename it.
+    pub(super) fn rename_here(&mut self, by: &str) {
+        match self.rename_target(by) {
             Ok(RenameTarget { key, was, own, outside }) => {
                 self.search = None;
                 self.help = false;
                 let mut l = line::Line::default();
                 let at = was.len();
                 l.set_with_cursor(was.clone(), at);
+                // Selected whole: what is typed replaces it.
+                l.select_all();
                 self.mode = Mode::Rename(Renaming {
                     key,
                     line: l,
@@ -520,6 +606,15 @@ impl App {
         let Mode::Rename(r) = &mut self.mode else {
             return;
         };
+        // `home` and `end` go to the name's ends, and `^a` to its start, as a
+        // shell's line does: the filters wait till the name is done.
+        let ctrl = k.modifiers == crossterm::event::KeyModifiers::CONTROL;
+        match k.code {
+            KeyCode::Home => return r.line.home(),
+            KeyCode::Char('a') if ctrl => return r.line.home(),
+            KeyCode::End => return r.line.end(),
+            _ => {}
+        }
         match r.line.key(&k) {
             line::Act::Submit => {
                 let Mode::Rename(r) = std::mem::replace(&mut self.mode, Mode::List) else {
@@ -551,6 +646,11 @@ impl App {
     }
 
     /// The name kept for a line; empty, or its own, goes back to its own.
+    /// One of a harness's own sessions is renamed in its harness too, where
+    /// its harness can as it stands (`Harness::renames`: Codex's thread on
+    /// its daemon; an idle Claude, `/rename` typed into it): the name is
+    /// Relay's until the harness has taken it, and the harness's own after.
+    /// Cleared, it is cleared there too where the harness can.
     pub(super) fn apply_name(&mut self, r: RenameTarget, name: &str) {
         let name = name.trim().to_string();
         if name == r.was {
@@ -564,12 +664,50 @@ impl App {
                 p.names.insert(r.key.clone(), name.clone());
             }
         });
-        self.say(match (&r.outside, back) {
-            (_, true) => format!("back to {}", r.own),
-            (Some(harness), false) => format!("named in relay · {harness} still calls it {}", r.own),
-            (None, false) => format!("renamed to {name}"),
+        self.select(Some(r.key.clone()));
+        let native = self
+            .native
+            .rows
+            .iter()
+            .find(|n| format!("n:{}:{}", n.harness, n.id) == r.key);
+        let forward = native
+            .filter(|_| !back || name.is_empty())
+            .and_then(|n| Some((n.clone(), sources::harness(&n.harness)?)))
+            .filter(|(n, a)| a.renames(n, &name));
+        let Some((row, a)) = forward else {
+            return self.say(match (&r.outside, back) {
+                (_, true) => format!("back to {}", r.own),
+                (Some(harness), false) => format!("named in relay · {harness} still calls it {}", r.own),
+                (None, false) => format!("renamed to {name}"),
+            });
+        };
+        let who = a.name().to_string();
+        self.say(if name.is_empty() {
+            format!("back to {} · clearing its name in {who}…", r.own)
+        } else {
+            format!("renaming it {name} in {who}…")
         });
-        self.select(Some(r.key));
+        let (locks, key) = (self.home.typing_dir(), r.key);
+        self.work.spawn(async move {
+            let to = name.clone();
+            let run = tokio::task::spawn_blocking(move || a.rename(&row, &to, &locks)).await;
+            match run {
+                Ok(Ok(())) => Done {
+                    renamed: Some((key, name.clone())),
+                    ask_native: true,
+                    ..Done::said(if name.is_empty() {
+                        format!("cleared its name in {who}")
+                    } else {
+                        format!("renamed to {name} · in {who} too")
+                    })
+                },
+                Ok(Err(e)) if name.is_empty() => {
+                    Done::said(format!("back to its name in relay · {who} kept its own: {e:#}"))
+                }
+                Ok(Err(e)) => Done::said(format!("named in relay · {who} didn't take it: {e:#}")),
+                Err(e) => Done::said(format!("rename: {e}")),
+            }
+        });
     }
 
     /// `^t`: the row under the cursor to the band at the top, or back among

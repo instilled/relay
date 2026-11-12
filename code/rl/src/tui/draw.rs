@@ -544,6 +544,10 @@ impl App {
     /// keys while it is typed, or the hints — entries of the grid's, so they
     /// say what it does — with a pointer to the grid where there is room.
     fn footer(&self, width: usize) -> String {
+        // A choice asked stands over any word of the moment: it has the keys.
+        if let Mode::Ask(a) = &self.mode {
+            return a.offer();
+        }
         if let Some(m) = self.flashing() {
             return m.to_string();
         }
@@ -570,7 +574,7 @@ impl App {
         };
         let mut hints = vec![
             help::hint(help::Id::Enter, None),
-            help::hint(help::Id::Remove, Some(self.x_hint())),
+            help::hint(help::Id::Remove, Some(&self.x_hint())),
             help::hint(help::Id::Find, None),
             help::hint(help::Id::Commands, None),
         ];
@@ -599,15 +603,22 @@ impl App {
     }
 
     /// What `^x` does to the line under the cursor, in the hints' words.
-    fn x_hint(&self) -> &'static str {
+    fn x_hint(&self) -> String {
+        let hidden = |key: &str| self.prefs().hidden.iter().any(|h| h.key == key);
         match self.selected() {
             Some(ListLine::Session(r)) => match r.source {
-                Source::Held if r.state.is_terminal() || r.state == RunState::Stale => "to remove",
-                Source::Held => "to stop",
-                Source::Native if r.stop.is_some() => "to stop",
-                _ => "to hide",
+                Source::Held if r.state.is_terminal() || r.state == RunState::Stale => "to remove".into(),
+                Source::Held => "to stop".into(),
+                Source::Native if hidden(&r.key) => "to bring back".into(),
+                Source::Native => match (&r.stop, &r.close) {
+                    (Some(_), Some(c)) => format!("to stop or {}", c.words),
+                    (None, Some(c)) => format!("to {}", c.words),
+                    (Some(_), None) => "to stop".into(),
+                    (None, None) => "to hide".into(),
+                },
+                _ => "to hide".into(),
             },
-            _ => "to hide",
+            _ => "to hide".into(),
         }
     }
 
@@ -631,68 +642,66 @@ impl App {
             f.render_widget(empty_list(&msg, area, nothing), area);
             return;
         }
-        let (shown, keys, sel_line) = self.row_lines(lines, area.width as usize);
-        self.draw_window(f, area, shown, keys, sel_line);
+        self.draw_window(f, area, lines);
     }
 
     /// The list's lines `w` wide, with a blank line above every group but the
-    /// first: the lines, the key each line belongs to (for the mouse), and
-    /// the selected line's place.
-    fn row_lines(&self, lines: &[ListLine], w: usize) -> (Vec<Line<'static>>, Vec<Option<String>>, usize) {
-        let now = Timestamp::now();
-        // Columns: icon, title, state, the summary to the edge, the pull
-        // request and age at the right — the title column is the screen's
-        // share, bounded.
-        let tw = (w * 35 / 100).clamp(14, 44);
-        let mut out: Vec<Line> = Vec::with_capacity(lines.len());
-        let mut keys: Vec<Option<String>> = Vec::with_capacity(lines.len());
+    /// first: which line each place shows (`None`, a blank), the key each
+    /// carries (for the mouse), and the selected line's place.
+    fn places(&self, lines: &[ListLine]) -> (Vec<Option<usize>>, Vec<Option<String>>, usize) {
+        let mut places = Vec::with_capacity(lines.len());
+        let mut keys = Vec::with_capacity(lines.len());
         let mut sel_line = 0usize;
-        // What the search's words hit is lit up where it shows.
-        let words = query::Query::parse(&self.filter).words;
-        let names = Names::new(&self.prefs().names);
         for (n, line) in lines.iter().enumerate() {
+            if n > 0 && matches!(line, ListLine::Group(_)) {
+                places.push(None);
+                keys.push(None);
+            }
             let key = line.key();
-            let mut drawn = match line {
-                ListLine::Group(h) => {
-                    if n > 0 {
-                        out.push(Line::raw(""));
-                        keys.push(None);
-                    }
-                    header_line(h, w, tw)
-                }
-                ListLine::Session(r) => self.session_line(r, &names, w, tw, now),
-            };
-            // A name being typed stands where the name goes, the caret in it.
-            if let Mode::Rename(rn) = &self.mode
-                && rn.key == key
-            {
-                let mut spans = match line {
-                    ListLine::Session(r) => icon_span(rows::icon(r), Some(&r.harness), r.state.is_terminal()),
-                    ListLine::Group(_) => vec![],
-                };
-                let room = w.saturating_sub(spans.iter().map(Span::width).sum());
-                spans.extend(cap_spans(
-                    theme::with_caret(rn.line.text(), rn.line.cursor(), Style::default()),
-                    room,
-                ));
-                drawn = Line::from(spans);
-            }
-            if !words.is_empty() {
-                drawn = light(drawn, &words);
-            }
             if self.sel.as_deref() == Some(key.as_str()) {
-                // The highlight runs to the edge, however little the row says.
-                let short = w.saturating_sub(drawn.width());
-                if short > 0 {
-                    drawn.spans.push(Span::raw(" ".repeat(short)));
-                }
-                drawn = drawn.style(theme::selected());
-                sel_line = out.len();
+                sel_line = places.len();
             }
-            out.push(drawn);
+            places.push(Some(n));
             keys.push(Some(key));
         }
-        (out, keys, sel_line)
+        (places, keys, sel_line)
+    }
+
+    /// One line of the list, drawn `w` wide.
+    fn row_line(&self, line: &ListLine, w: usize, cx: &RowCx) -> Line<'static> {
+        let tw = cx.tw;
+        let key = line.key();
+        let mut drawn = match line {
+            ListLine::Group(h) => header_line(h, w, tw),
+            ListLine::Session(r) => self.session_line(r, &cx.names, w, tw, cx.now),
+        };
+        // A name being typed stands where the name goes, the caret in it.
+        if let Mode::Rename(rn) = &self.mode
+            && rn.key == key
+        {
+            let mut spans = match line {
+                ListLine::Session(r) => icon_span(rows::icon(r), Some(&r.harness), r.state.is_terminal()),
+                ListLine::Group(_) => vec![],
+            };
+            let room = w.saturating_sub(spans.iter().map(Span::width).sum());
+            spans.extend(cap_spans(
+                theme::with_selection(rn.line.text(), rn.line.cursor(), rn.line.selection(), Style::default()),
+                room,
+            ));
+            drawn = Line::from(spans);
+        }
+        if !cx.words.is_empty() {
+            drawn = light(drawn, &cx.words);
+        }
+        if self.sel.as_deref() == Some(key.as_str()) {
+            // The highlight runs to the edge, however little the row says.
+            let short = w.saturating_sub(drawn.width());
+            if short > 0 {
+                drawn.spans.push(Span::raw(" ".repeat(short)));
+            }
+            drawn = drawn.style(theme::selected());
+        }
+        drawn
     }
 
     /// A session's row. One standing outside its project — pinned, come
@@ -768,25 +777,36 @@ impl App {
     }
 
     /// Lines in the list's place, a window of them following the selection;
-    /// when there is more either side, the edge line says how much. `keys` is
-    /// in step with `lines`: the key each belongs to, for the mouse.
-    fn draw_window(
-        &self,
-        f: &mut Frame,
-        area: Rect,
-        lines: Vec<Line<'static>>,
-        mut keys: Vec<Option<String>>,
-        sel_line: usize,
-    ) {
+    /// when there is more either side, the edge line says how much. Only
+    /// what the window shows is drawn.
+    fn draw_window(&self, f: &mut Frame, area: Rect, lines: &[ListLine]) {
         let h = area.height as usize;
-        let n = lines.len();
         if h == 0 {
             return;
         }
+        let (places, mut keys, sel_line) = self.places(lines);
+        let n = places.len();
         let top = viewport(n, h, sel_line, self.scroll.get());
         self.scroll.set(top);
         let more_below = top + h < n;
-        let mut shown: Vec<Line> = lines[top..(top + h).min(n)].to_vec();
+        let w = area.width as usize;
+        let cx = RowCx {
+            // Columns: icon, title, state, the summary to the edge, the pull
+            // request and age at the right — the title column is the
+            // screen's share, bounded.
+            tw: (w * 35 / 100).clamp(14, 44),
+            now: Timestamp::now(),
+            // What the search's words hit is lit up where it shows.
+            words: query::Query::parse(&self.filter).words,
+            names: Names::new(&self.prefs().names),
+        };
+        let mut shown: Vec<Line> = places[top..(top + h).min(n)]
+            .iter()
+            .map(|p| match p {
+                Some(i) => self.row_line(&lines[*i], w, &cx),
+                None => Line::raw(""),
+            })
+            .collect();
         if top > 0 {
             shown[0] = Line::from(Span::raw(format!(" ▲ {top} more")).dim());
             // An edge line gave its place to a count, so it carries no line.
@@ -805,6 +825,14 @@ impl App {
             keys,
         };
     }
+}
+
+/// What every row drawn at once shares.
+struct RowCx<'a> {
+    tw: usize,
+    now: Timestamp,
+    words: Vec<String>,
+    names: Names<'a>,
 }
 
 #[cfg(test)]

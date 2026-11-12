@@ -37,6 +37,7 @@ impl App {
         // A name being typed has every key until it is done.
         match self.mode {
             Mode::Rename(_) => return self.key_rename(k),
+            Mode::Ask(_) => return self.key_ask(k),
             Mode::List => {}
         }
         // The filters are on ctrl keys, so every letter types: `^a` agents,
@@ -228,7 +229,7 @@ impl App {
         match (k.code, k.modifiers) {
             (KeyCode::Enter, _) => self.enter(),
             (KeyCode::Char('x'), KeyModifiers::CONTROL) => self.key_x(armed),
-            (KeyCode::Char('r'), KeyModifiers::CONTROL) => self.rename_here(),
+            (KeyCode::Char('r'), KeyModifiers::CONTROL) => self.rename_here("ctrl+r"),
             (KeyCode::Char('t'), KeyModifiers::CONTROL) => self.toggle_pin("ctrl+t"),
             (KeyCode::Char('g'), KeyModifiers::CONTROL) => self.cycle_colour(),
             (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
@@ -255,9 +256,10 @@ impl App {
         }
     }
 
-    /// The wheel steps the cursor — the list scrolls to follow it — and the
-    /// cursor travels with the pointer: moving over a line puts it there, and
-    /// so does a click. All only over the list itself.
+    /// The wheel steps the cursor a line a tick — the list scrolls to follow
+    /// it — and a click puts it on the line clicked. A pointer that only
+    /// moves leaves it be: the wheel's cursor is never pulled back to
+    /// wherever the pointer rests. All only over the list itself.
     pub fn mouse(&mut self, m: MouseEvent) {
         if !self.hit.borrow().has(m.column, m.row) {
             return;
@@ -265,7 +267,7 @@ impl App {
         match m.kind {
             MouseEventKind::ScrollDown => self.step(1),
             MouseEventKind::ScrollUp => self.step(-1),
-            MouseEventKind::Moved | MouseEventKind::Down(MouseButton::Left) => {
+            MouseEventKind::Down(MouseButton::Left) => {
                 // Bound first: the borrow has to be done with before `select`.
                 let key = hit_row(&self.hit.borrow(), m.column, m.row);
                 if key.is_some() {
@@ -299,6 +301,8 @@ impl App {
         // A name being typed takes it first.
         match &mut self.mode {
             Mode::Rename(r) => return r.line.insert(&s),
+            // A choice is a key, never a paste.
+            Mode::Ask(_) => return,
             Mode::List => {}
         }
         let Some(search) = self.search.as_mut() else {

@@ -66,11 +66,27 @@ sessions:
   # `thread/resume` says so), with any approval it waits on.
   list: { args: [app-server, proxy], reader: codex-threads }
   attach: [resume, "{id}"]
+  # ^x twice on one asks, in the footer: `s` interrupts its running turn
+  # (enter does too; the thread stays), and `close` archives it (`codex
+  # archive <id>`: off codex's lists, `codex unarchive` brings it back). One
+  # with no turn running is offered only the archive. Never `codex delete`,
+  # which is for good. Read off `codex archive --help`, codex 0.167.
+  stop_choice: { words: "stop the turn" }
+  close:
+    key: a
+    words: archive
+    says: "off the list, codex unarchive brings it back"
+    done: archived
+    args: [archive, "{id}"]
   # Mail Relay leaves for one of its sessions (`rl mcp`'s send) is queued on
   # its thread as well, and the thread resumed on the daemon, so it hears of
   # it: `{id}` is the thread's id, `{text}` the note. `codex queue --help`,
   # codex 0.167.
   ping: [queue, --thread, "{id}", --message, "{text}", --resume]
+  # A name you give one in Relay's list goes to Codex too: `thread/name/set`
+  # on its daemon (what `codex resume` and its lists show). Codex 0.167's
+  # app-server schema.
+  rename: { rpc: thread/name/set }
 # Where Relay's MCP server goes (`rl setup`): `[mcp_servers.relay]` in
 # Codex's config.toml, beside its hooks, with `env_vars` so a held
 # session's variables reach the server.
